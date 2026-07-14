@@ -42,6 +42,8 @@ export class DelayedRuntimeSession implements RuntimeSession {
   private readonly steeringQueue: string[] = [];
   private readonly followUpQueue: string[] = [];
   private currentRun: Deferred<void> | undefined;
+  private disposeBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
+  private modelMutationBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
   private activeTools = new Set(["read"]);
   private readonly settingValues: SettingValueMap = {
     autoCompaction: true, autoRetry: true, enableSkillCommands: true, hideThinking: false,
@@ -132,9 +134,21 @@ export class DelayedRuntimeSession implements RuntimeSession {
     return [{ name: "fixture", description: "fixture command", source: { kind: "extension", path: "/fixture/ext.ts" }, argumentCompletions: false }];
   }
 
+  blockNextModelMutation(): { entered: Promise<void>; release: () => void } {
+    const block = { entered: new Deferred<void>(), release: new Deferred<void>() };
+    this.modelMutationBlock = block;
+    return { entered: block.entered.promise, release: () => block.release.resolve() };
+  }
+
   async selectModel(provider: string, modelId: string): Promise<RuntimeModelState> {
     this.modelMutationCalls += 1;
     this.modelState = { ...this.modelState, model: { provider, id: modelId } };
+    const block = this.modelMutationBlock;
+    this.modelMutationBlock = undefined;
+    if (block) {
+      block.entered.resolve();
+      await block.release.promise;
+    }
     this.throwSettingsFailure("model");
     return this.getModelState();
   }
@@ -174,8 +188,19 @@ export class DelayedRuntimeSession implements RuntimeSession {
     await this.currentRun?.promise;
   }
 
+  blockDispose(): { entered: Promise<void>; release: () => void } {
+    const block = { entered: new Deferred<void>(), release: new Deferred<void>() };
+    this.disposeBlock = block;
+    return { entered: block.entered.promise, release: () => block.release.resolve() };
+  }
+
   async dispose(): Promise<void> {
     this.disposeCalls += 1;
+    const block = this.disposeBlock;
+    if (block) {
+      block.entered.resolve();
+      await block.release.promise;
+    }
   }
 
   settle(text = "done", stopReason = "stop"): void {

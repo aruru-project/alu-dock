@@ -98,22 +98,36 @@ async function serve(socketPath: string, args: string[]): Promise<void> {
   await host.start();
   writeJson({ kind: "host.ready", pid: process.pid, socketPath: host.socketPath });
 
-  const signal = await waitForSignal();
+  const outcome = await Promise.race([
+    waitForSignal().then((signal) => ({ kind: "signal" as const, signal })),
+    host.waitForFatalCompletion().then((fatal) => ({ kind: "fatal" as const, fatal })),
+  ]);
+  const signal = outcome.kind === "signal" ? outcome.signal : "catalog_fault";
+  if (outcome.kind === "fatal") {
+    process.stderr.write(`${JSON.stringify({ kind: "error", error: outcome.fatal })}\n`);
+    process.exitCode = outcome.fatal.exitCode;
+  }
   writeJson({ kind: "host.stopping", signal });
+  const shutdownTimeoutMs = outcome.kind === "fatal" ? 5_000 : HOST_SHUTDOWN_TIMEOUT_MS;
   const shutdownTimer = setTimeout(() => {
     process.stderr.write(`${JSON.stringify({
       kind: "error",
       error: {
         code: "shutdown_timeout",
-        message: `Host did not stop within ${HOST_SHUTDOWN_TIMEOUT_MS}ms`,
+        message: `Host did not stop within ${shutdownTimeoutMs}ms`,
       },
     })}\n`);
     process.exit(1);
-  }, HOST_SHUTDOWN_TIMEOUT_MS);
+  }, shutdownTimeoutMs);
   try {
     await host.stop();
   } finally {
     clearTimeout(shutdownTimer);
+  }
+  const lateFatal = host.fatalCompletion();
+  if (outcome.kind === "signal" && lateFatal) {
+    process.stderr.write(`${JSON.stringify({ kind: "error", error: lateFatal })}\n`);
+    process.exitCode = lateFatal.exitCode;
   }
   writeJson({ kind: "host.stopped", signal });
 }

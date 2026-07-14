@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
 
+import {
+  type CatalogInstanceRecord,
+  type CatalogMutationContext,
+  type InstanceCatalogMutationPort,
+  validateInstanceStateInvariant,
+} from "./catalog.js";
 import { RuntimeSettingsWriteError } from "./runtime-session.js";
 import type {
   CommandDto,
@@ -14,6 +20,7 @@ import type {
 } from "./config-projection.js";
 export type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingKey, SettingUpdate, SettingValueMap, SourceDto, ToolDto } from "./config-projection.js";
 import type {
+  ClearedRuntimeQueue,
   RuntimeEvent,
   RuntimeModelInfo,
   RuntimeModelState,
@@ -213,6 +220,21 @@ interface MutableState {
   updatedAt: string;
 }
 
+interface WorkingCheckpoint {
+  state: MutableState;
+  cwd: string;
+  executor: ExecutorIdentity;
+  runtimeGeneration: number;
+  agentStartCount: number;
+  agentSettledCount: number;
+  lastAssistantOutcome: AssistantOutcome | undefined;
+  stopRequestedWhileRunning: boolean;
+  catalogAdmissionOperationId: string | undefined;
+  replacementIntent: CatalogInstanceRecord["replacement"];
+  recoverySessionFile: string | undefined;
+  stopRequestedAt: string | undefined;
+}
+
 export class InstanceNotActiveError extends Error {
   constructor(instanceId: string, lifecycle: InstanceLifecycle) {
     super(`Instance ${instanceId} is ${lifecycle} and cannot accept commands`);
@@ -261,6 +283,23 @@ export class ManagedInstance {
   private readonly subscribers = new Set<(event: DockEvent) => void>();
   private readonly backgroundTasks = new Set<Promise<void>>();
   private state: MutableState;
+  private catalogPort: InstanceCatalogMutationPort | undefined;
+  private committedSnapshotValue: InstanceSnapshot | undefined;
+  private catalogAdmissionOperationId: string | undefined;
+  private readonly admissionBufferedEvents: RuntimeEvent[] = [];
+  private admissionBufferOverflow = false;
+  private receiptBoundaryOperationId: string | undefined;
+  private readonly receiptBoundaryTasks: Promise<void>[] = [];
+  private replacementIntent: CatalogInstanceRecord["replacement"];
+  private recoverySessionFile: string | undefined;
+  private stopRequestedAt: string | undefined;
+  private transitionTail: Promise<void> = Promise.resolve();
+  private hostDrainActive = false;
+  private hostDrainPromise: Promise<void> | undefined;
+  private runtimeQueueClearAttempted = false;
+  private runtimeClearedQueue: ClearedRuntimeQueue = { steering: [], followUp: [] };
+  private runtimeAbortPromise: Promise<void> | undefined;
+  private runtimeDisposePromise: Promise<void> | undefined;
   private runtimeGenerationValue = 1;
   private nextEventSequence = 1;
   private agentStartCount = 0;
@@ -269,6 +308,10 @@ export class ManagedInstance {
   private pendingAdmission: PendingAdmission | undefined;
   private stopRequestedWhileRunning = false;
   private configurationPending = false;
+  private configurationBoundary: Promise<void> | undefined;
+  private resolveConfigurationBoundary: (() => void) | undefined;
+  private projectionGateTail: Promise<void> = Promise.resolve();
+  private releaseConfigurationGate: (() => void) | undefined;
   private stopPromise: Promise<StopReceipt> | undefined;
 
   get runtimeGeneration(): number { return this.runtimeGenerationValue; }
@@ -307,16 +350,7 @@ export class ManagedInstance {
       sessionFile: truncate(this.session.sessionFile, 16_384),
     };
 
-    this.session.subscribe((event) => {
-      try {
-        this.handleRuntimeEvent(event);
-      } catch (error) {
-        this.appendEvent("instance.error", { source: "event_projection",
-          error: safeWireText(errorMessage(error), 2_048, "Sensitive projection error omitted"),
-          runtimeEventType: truncate(event.type, 128),
-        });
-      }
-    });
+    this.session.subscribe((event) => this.dispatchRuntimeEvent(event));
 
     this.appendEvent("instance.created", {
       cwd: this.cwd,
@@ -326,6 +360,79 @@ export class ManagedInstance {
   }
 
   snapshot(): InstanceSnapshot {
+    const snapshot = this.committedSnapshotValue ?? this.workingSnapshot();
+    validateInstanceStateInvariant({
+      lifecycle: snapshot.lifecycle,
+      execution: snapshot.execution,
+      ownerHostEpoch: snapshot.ownerHostEpoch,
+      pendingCount: snapshot.pending.total,
+      activeCommandId: snapshot.activeCommandId,
+    });
+    return cloneJson(snapshot);
+  }
+
+  catalogRecord(): CatalogInstanceRecord {
+    const snapshot = this.workingSnapshot();
+    const record: CatalogInstanceRecord = {
+      id: snapshot.id,
+      creationOperationId: snapshot.creationOperationId,
+      ...(snapshot.name === undefined ? {} : { name: snapshot.name }),
+      cwd: snapshot.cwd,
+      lifecycle: snapshot.lifecycle,
+      execution: snapshot.execution,
+      lastRun: snapshot.lastRun,
+      runtimeGeneration: snapshot.runtimeGeneration,
+      ...(snapshot.ownerHostEpoch === undefined ? {} : { ownerHostEpoch: snapshot.ownerHostEpoch }),
+      piSessionId: snapshot.executor.piSessionId,
+      ...(snapshot.executor.sessionFile === undefined ? {} : { sessionFile: snapshot.executor.sessionFile }),
+      ...(snapshot.executor.model === undefined ? {} : { model: { provider: snapshot.executor.model.provider, id: snapshot.executor.model.id } }),
+      ...(snapshot.executor.thinkingLevel === undefined ? {} : { thinkingLevel: snapshot.executor.thinkingLevel }),
+      ...(snapshot.activeCommandId === undefined ? {} : { activeCommandId: snapshot.activeCommandId }),
+      admissionPending: this.catalogAdmissionOperationId !== undefined,
+      ...(this.catalogAdmissionOperationId === undefined ? {} : { admissionOperationId: this.catalogAdmissionOperationId }),
+      pendingCount: snapshot.pending.total,
+      ...(this.replacementIntent === undefined ? {} : { replacement: cloneJson(this.replacementIntent) }),
+      ...(this.recoverySessionFile === undefined ? {} : { recoverySessionFile: this.recoverySessionFile }),
+      ...(this.stopRequestedAt === undefined ? {} : { stopRequestedAt: this.stopRequestedAt }),
+      ...(snapshot.lastError === undefined ? {} : { lastError: snapshot.lastError }),
+      createdAt: snapshot.createdAt,
+      updatedAt: snapshot.updatedAt,
+    };
+    validateInstanceStateInvariant(record);
+    return record;
+  }
+
+  bindCatalogPort(port: InstanceCatalogMutationPort): void {
+    if (this.catalogPort) throw new Error("Instance catalog port is already bound");
+    this.catalogPort = port;
+  }
+
+  markCatalogCommitted(): void {
+    this.committedSnapshotValue = this.workingSnapshot();
+  }
+
+  async disposeUnpublished(): Promise<void> {
+    this.hostDrainActive = true;
+    await this.transitionTail;
+    await this.disposeRuntimeOnce();
+  }
+
+  disposeForHostDrain(): Promise<void> {
+    if (this.hostDrainPromise) return this.hostDrainPromise;
+    this.hostDrainActive = true;
+    this.hostDrainPromise = (async () => {
+      await this.transitionTail;
+      const admission = this.pendingAdmission;
+      this.pendingAdmission = undefined;
+      admission?.release();
+      try { this.clearRuntimeQueueOnce(); } catch { /* Best-effort non-catalog drain. */ }
+      try { await this.abortRuntimeOnce(); } catch { /* Best-effort non-catalog drain. */ }
+      try { await this.disposeRuntimeOnce(); } catch { /* Host reports the fatal catalog fault. */ }
+    })();
+    return this.hostDrainPromise;
+  }
+
+  private workingSnapshot(): InstanceSnapshot {
     return {
       id: this.id,
       creationOperationId: this.creationOperationId,
@@ -384,82 +491,101 @@ export class ManagedInstance {
   }
 
   async listModels(): Promise<{ models: RuntimeModelInfo[]; state: RuntimeModelState }> {
-    this.assertActive();
-    const models = (await this.session.listModels()).slice(0, 2_000).map((model) => ({
-      ...model,
-      provider: truncate(model.provider, 256) ?? "unknown",
-      id: truncate(model.id, 512) ?? "unknown",
-      name: truncate(model.name, 256) ?? "unknown",
-    }));
-    return { models, state: this.session.getModelState() };
+    return this.withProjectionRead(async () => {
+      const models = (await this.session.listModels()).slice(0, 2_000).map((model) => ({
+        ...model,
+        provider: truncate(model.provider, 256) ?? "unknown",
+        id: truncate(model.id, 512) ?? "unknown",
+        name: truncate(model.name, 256) ?? "unknown",
+      }));
+      return { models, state: this.session.getModelState() };
+    });
   }
 
   async listSessions(scope: "cwd" | "all"): Promise<SessionDto[]> {
-    this.assertActive();
-    const sessions = await this.session.listSessions(scope);
-    return sessions.slice(0, 2_000).map((session) => ({
-      sessionId: truncate(session.sessionId, 128) ?? "unknown",
-      sessionFile: truncate(session.sessionFile, 16_384) ?? "",
-      ...(session.name === undefined ? {} : { name: truncate(session.name, 256) ?? "" }),
-      cwd: truncate(session.cwd, 16_384) ?? "",
-      ...(isIsoTimestamp(session.updatedAt) ? { updatedAt: session.updatedAt } : {}),
-    }));
+    return this.withProjectionRead(async () => {
+      const sessions = await this.session.listSessions(scope);
+      return sessions.slice(0, 2_000).map((session) => ({
+        sessionId: truncate(session.sessionId, 128) ?? "unknown",
+        sessionFile: truncate(session.sessionFile, 16_384) ?? "",
+        ...(session.name === undefined ? {} : { name: truncate(session.name, 256) ?? "" }),
+        cwd: truncate(session.cwd, 16_384) ?? "",
+        ...(isIsoTimestamp(session.updatedAt) ? { updatedAt: session.updatedAt } : {}),
+      }));
+    });
   }
 
   async listTools(): Promise<ToolDto[]> {
-    this.assertActive();
-    return cloneJson(await this.session.listTools()).slice(0, 2_000);
+    return this.withProjectionRead(async () => cloneJson(await this.session.listTools()).slice(0, 2_000));
   }
 
-  async setActiveTools(names: string[]): Promise<ToolDto[]> {
-    this.beginConfiguration("changing active tools");
+  async setActiveTools(names: string[], operationId = this.createCommandId()): Promise<ToolDto[]> {
+    await this.beginConfiguration("changing active tools");
     try {
-      return cloneJson(await this.session.setActiveTools([...names])).slice(0, 2_000);
+      const tools = cloneJson(await this.session.setActiveTools([...names])).slice(0, 2_000);
+      await this.enqueueTransition(() => this.commitCatalogTransition(
+        { kind: "tool.set_active", effect: "post_effect", operationId, instanceId: this.id },
+        () => this.touch(),
+      ));
+      return tools;
     } finally {
-      this.configurationPending = false;
+      this.endConfiguration();
     }
   }
 
   async getSettings(): Promise<SettingDto[]> {
-    this.assertActive();
-    return cloneJson(await this.session.getSettings());
+    return this.withProjectionRead(async () => cloneJson(await this.session.getSettings()));
   }
 
-  async updateSetting(update: SettingUpdate): Promise<SettingDto> {
-    this.beginConfiguration("changing settings");
+  async updateSetting(update: SettingUpdate, operationId = this.createCommandId()): Promise<SettingDto> {
+    await this.beginConfiguration("changing settings");
     try {
       const setting = cloneJson(await this.session.updateSetting(cloneJson(update)));
-      this.appendSettingChanged(setting);
+      await this.enqueueTransition(() => this.commitCatalogTransition(
+        { kind: "settings.update", effect: "post_effect", operationId, instanceId: this.id },
+        () => this.touch(),
+        () => this.appendSettingChanged(setting, false),
+      ));
       return setting;
     } catch (error) {
       if (error instanceof RuntimeSettingsWriteError) {
         if (error.mutationApplied && error.setting !== "model" && error.setting !== "thinking") {
           const current = await this.session.getSettings().catch(() => undefined);
           const setting = current?.find((candidate) => candidate.key === error.setting);
-          if (setting) this.appendSettingChanged(cloneJson(setting));
+          await this.enqueueTransition(() => this.commitCatalogTransition(
+            { kind: "settings.update", effect: "post_effect", operationId, instanceId: this.id },
+            () => this.touch(),
+            () => {
+              if (setting) this.appendSettingChanged(cloneJson(setting), false);
+              this.appendSettingsWriteFailed(error);
+            },
+          ));
+        } else {
+          await this.enqueueTransition(async () => { this.appendSettingsWriteFailed(error); });
         }
-        this.appendSettingsWriteFailed(error);
       }
       throw error;
     } finally {
-      this.configurationPending = false;
+      this.endConfiguration();
     }
   }
 
   async getResources(): Promise<{ resources: ResourceDto[]; diagnostics: DiagnosticDto[] }> {
-    this.assertActive();
-    const result = cloneJson(await this.session.getResources());
-    return { resources: result.resources.slice(0, 2_000), diagnostics: result.diagnostics.slice(0, 2_000) };
+    return this.withProjectionRead(async () => {
+      const result = cloneJson(await this.session.getResources());
+      return { resources: result.resources.slice(0, 2_000), diagnostics: result.diagnostics.slice(0, 2_000) };
+    });
   }
 
   async getCommands(prefix?: string): Promise<CommandDto[]> {
-    this.assertActive();
-    const commands = cloneJson(await this.session.getCommands());
-    return commands.filter((command) => prefix === undefined || command.name.startsWith(prefix)).slice(0, 2_000);
+    return this.withProjectionRead(async () => {
+      const commands = cloneJson(await this.session.getCommands());
+      return commands.filter((command) => prefix === undefined || command.name.startsWith(prefix)).slice(0, 2_000);
+    });
   }
 
   async newSession(operationId: string): Promise<RuntimeReplacementResult> {
-    return this.replaceRuntime("creating a new session", async () => {
+    return this.replaceRuntime("creating a new session", operationId, "new", undefined, async () => {
       if (!this.session.newSession) throw new Error("Runtime does not support session replacement");
       return this.session.newSession(operationId);
     });
@@ -470,64 +596,74 @@ export class ManagedInstance {
     sessionFile: string,
     trust: RuntimeProjectTrust,
   ): Promise<RuntimeReplacementResult> {
-    return this.replaceRuntime("switching session", async () => {
+    return this.replaceRuntime("switching session", operationId, "switch", sessionFile, async () => {
       if (!this.session.switchSession) throw new Error("Runtime does not support session replacement");
       return this.session.switchSession(operationId, sessionFile, trust);
     });
   }
 
   async reloadSession(operationId: string): Promise<RuntimeReplacementResult> {
-    return this.replaceRuntime("reloading resources", async () => {
+    return this.replaceRuntime("reloading resources", operationId, "reload", undefined, async () => {
       if (!this.session.reload) throw new Error("Runtime does not support reload");
       return this.session.reload(operationId);
     });
   }
 
-  async selectModel(provider: string, modelId: string): Promise<RuntimeModelState> {
-    this.beginConfiguration("switching model");
+  async selectModel(provider: string, modelId: string, operationId = this.createCommandId()): Promise<RuntimeModelState> {
+    await this.beginConfiguration("switching model");
     try {
       const state = await this.session.selectModel(provider, modelId);
-      this.applyModelState(state);
-      this.touch();
-      this.appendModelChanged(state);
+      await this.enqueueTransition(() => this.commitCatalogTransition(
+        { kind: "model.set", effect: "post_effect", operationId, instanceId: this.id },
+        () => { this.applyModelState(state); this.touch(); },
+        () => this.appendModelChanged(state),
+      ));
       return state;
     } catch (error) {
       if (error instanceof RuntimeSettingsWriteError) {
         if (error.mutationApplied) {
           const state = this.session.getModelState();
-          this.applyModelState(state);
-          this.touch();
-          this.appendModelChanged(state);
+          await this.enqueueTransition(() => this.commitCatalogTransition(
+            { kind: "model.set", effect: "post_effect", operationId, instanceId: this.id },
+            () => { this.applyModelState(state); this.touch(); },
+            () => { this.appendModelChanged(state); this.appendSettingsWriteFailed(error); },
+          ));
+        } else {
+          await this.enqueueTransition(async () => { this.appendSettingsWriteFailed(error); });
         }
-        this.appendSettingsWriteFailed(error);
       }
       throw error;
     } finally {
-      this.configurationPending = false;
+      this.endConfiguration();
     }
   }
 
-  async setThinkingLevel(level: RuntimeThinkingLevel): Promise<RuntimeModelState> {
-    this.beginConfiguration("changing thinking level");
+  async setThinkingLevel(level: RuntimeThinkingLevel, operationId = this.createCommandId()): Promise<RuntimeModelState> {
+    await this.beginConfiguration("changing thinking level");
     try {
       const state = await this.session.setThinkingLevel(level);
-      this.applyModelState(state);
-      this.touch();
-      this.appendThinkingChanged(level, state);
+      await this.enqueueTransition(() => this.commitCatalogTransition(
+        { kind: "thinking.set", effect: "post_effect", operationId, instanceId: this.id },
+        () => { this.applyModelState(state); this.touch(); },
+        () => this.appendThinkingChanged(level, state),
+      ));
       return state;
     } catch (error) {
       if (error instanceof RuntimeSettingsWriteError) {
         if (error.mutationApplied) {
           const state = this.session.getModelState();
-          this.applyModelState(state);
-          this.touch();
-          this.appendThinkingChanged(level, state);
+          await this.enqueueTransition(() => this.commitCatalogTransition(
+            { kind: "thinking.set", effect: "post_effect", operationId, instanceId: this.id },
+            () => { this.applyModelState(state); this.touch(); },
+            () => { this.appendThinkingChanged(level, state); this.appendSettingsWriteFailed(error); },
+          ));
+        } else {
+          await this.enqueueTransition(async () => { this.appendSettingsWriteFailed(error); });
         }
-        this.appendSettingsWriteFailed(error);
       }
       throw error;
     } finally {
-      this.configurationPending = false;
+      this.endConfiguration();
     }
   }
 
@@ -560,6 +696,19 @@ export class ManagedInstance {
       boundary: admissionBoundary,
       release: releaseAdmission,
     };
+    this.catalogAdmissionOperationId = commandId;
+    try {
+      const admissionCommit = this.enqueueTransition(() => this.commitCatalogTransition(
+        { kind: "command.admission", effect: "pre_effect", operationId: commandId, instanceId: this.id },
+        () => {},
+      ));
+      if (this.catalogPort) await admissionCommit;
+    } catch (error) {
+      this.catalogAdmissionOperationId = undefined;
+      this.pendingAdmission = undefined;
+      releaseAdmission();
+      throw error;
+    }
 
     let preflightStatus: "pending" | "accepted" | "rejected" = "pending";
     let receiptSettled = false;
@@ -577,18 +726,35 @@ export class ManagedInstance {
       admission.release();
     };
 
-    const rejectBeforeRun = (error: unknown, reason: string): void => {
+    let preflightTransition: Promise<void> | undefined;
+    const rejectBeforeRun = async (error: unknown, reason: string): Promise<void> => {
       if (preflightStatus === "accepted" || (preflightStatus === "rejected" && receiptSettled)) return;
       preflightStatus = "rejected";
       const messageText = safeWireText(errorMessage(error), 2_048, "Sensitive command error omitted");
-      this.state.lastError = messageText;
-      this.touch();
-      this.appendEvent("command.rejected", { operationId: commandId, reason, error: messageText });
-      this.appendStateEvent("command_rejected");
+      try {
+        const transition = this.enqueueTransition(() => this.commitCatalogTransition(
+          { kind: "command.rejected", effect: "post_effect", operationId: commandId, instanceId: this.id },
+          () => {
+            this.catalogAdmissionOperationId = undefined;
+            this.state.lastError = messageText;
+            this.touch();
+          },
+          () => {
+            this.appendEvent("command.rejected", { operationId: commandId, reason, error: messageText });
+            this.appendStateEvent("command_rejected");
+          },
+        ));
+        this.catalogAdmissionOperationId = undefined;
+        const bufferedEvents = this.flushAdmissionRuntimeEvents();
+        await Promise.all([transition, bufferedEvents]);
+      } catch (commitError) {
+        error = commitError;
+      }
       if (!receiptSettled) {
         receiptSettled = true;
         rejectReceipt(error);
       }
+      release();
     };
 
     const onPreflight = (success: boolean): void => {
@@ -599,54 +765,85 @@ export class ManagedInstance {
       }
       if (this.state.lifecycle !== "active") {
         const error = new InstanceNotActiveError(this.id, this.state.lifecycle);
-        rejectBeforeRun(error, "instance_not_active_after_preflight");
-        release();
+        preflightTransition = rejectBeforeRun(error, "instance_not_active_after_preflight");
         return;
       }
 
       preflightStatus = "accepted";
       // Pi re-checks isStreaming only after asynchronous extension input hooks.
-      // A requested steer/followUp can therefore become a fresh prompt if the
-      // original run settles during preflight. At the callback boundary, a
-      // queued delivery still has an active session; a fresh prompt has not yet
-      // entered _runAgentPrompt and is idle.
+      // Queue and fresh-prompt events are serialized behind this accepted commit.
       if (streamingBehavior !== undefined && !this.session.isStreaming) {
         actualDelivery = "prompt";
         actuallyQueued = false;
       }
 
       const acceptedAt = this.timestamp();
-      this.state.lastError = undefined;
-      if (!actuallyQueued) {
-        this.state.execution = "running";
-        this.state.activeCommandId = commandId;
-      }
-      this.touch(acceptedAt);
-      this.appendEvent("message.submitted", {
-        operationId: commandId,
-        messageId: `user-${commandId}`,
-        role: "user",
-        text: message,
-      }, acceptedAt);
-      this.appendEvent("command.accepted", {
-        operationId: commandId,
-        delivery: actualDelivery,
-        queued: actuallyQueued,
-        acceptedAt,
-      }, acceptedAt);
-      this.appendStateEvent("command_accepted", acceptedAt);
-      if (!receiptSettled) {
-        receiptSettled = true;
-        resolveReceipt({
-          accepted: true,
-          instanceId: this.id,
-          operationId: commandId,
-          delivery: actualDelivery,
-          queued: actuallyQueued,
-          acceptedAt,
-        });
-      }
-      release();
+      preflightTransition = this.enqueueTransition(() => this.commitCatalogTransition(
+        { kind: "command.accepted", effect: "post_effect", operationId: commandId, instanceId: this.id },
+        () => {
+          this.catalogAdmissionOperationId = undefined;
+          this.state.lastError = undefined;
+          if (!actuallyQueued) {
+            this.state.execution = "running";
+            this.state.activeCommandId = commandId;
+          }
+          this.touch(acceptedAt);
+        },
+        () => {
+          this.appendEvent("message.submitted", {
+            operationId: commandId,
+            messageId: `user-${commandId}`,
+            role: "user",
+            text: message,
+          }, acceptedAt);
+          this.appendEvent("command.accepted", {
+            operationId: commandId,
+            delivery: actualDelivery,
+            queued: actuallyQueued,
+            acceptedAt,
+          }, acceptedAt);
+          this.appendStateEvent("command_accepted", acceptedAt);
+        },
+      ));
+      this.catalogAdmissionOperationId = undefined;
+      this.receiptBoundaryOperationId = commandId;
+      const bufferedEvents = this.flushAdmissionRuntimeEvents();
+      preflightTransition = Promise.all([preflightTransition, bufferedEvents]).then(async () => {
+        // Pi may emit queue/agent_start synchronously immediately after the
+        // callback returns. Include those ordered transitions in the receipt boundary.
+        await Promise.resolve();
+        const followupTasks = this.receiptBoundaryTasks.splice(0);
+        this.receiptBoundaryOperationId = undefined;
+        try { await Promise.all(followupTasks); }
+        catch (error) {
+          if (!receiptSettled) {
+            receiptSettled = true;
+            rejectReceipt(error);
+          }
+          release();
+          return;
+        }
+        if (!receiptSettled) {
+          receiptSettled = true;
+          resolveReceipt({
+            accepted: true,
+            instanceId: this.id,
+            operationId: commandId,
+            delivery: actualDelivery,
+            queued: actuallyQueued,
+            acceptedAt,
+          });
+        }
+        release();
+      }, (error: unknown) => {
+        this.receiptBoundaryOperationId = undefined;
+        this.receiptBoundaryTasks.length = 0;
+        if (!receiptSettled) {
+          receiptSettled = true;
+          rejectReceipt(error);
+        }
+        release();
+      });
     };
 
     let runtimePromise: Promise<void>;
@@ -657,15 +854,15 @@ export class ManagedInstance {
         preflightResult: onPreflight,
       });
     } catch (error) {
-      rejectBeforeRun(error, "prompt_threw_before_preflight");
-      release();
+      await rejectBeforeRun(error, "prompt_threw_before_preflight");
       return receiptPromise;
     }
 
-    const observedPromise = runtimePromise.then(() => {
+    const observedPromise = runtimePromise.then(async () => {
       // Defensive fallback for adapters that resolve without invoking the typed
       // preflight callback. The official Pi adapter always invokes it.
       if (preflightStatus === "pending") onPreflight(true);
+      await preflightTransition;
       if (
         preflightStatus === "accepted"
         && !actuallyQueued
@@ -674,21 +871,32 @@ export class ManagedInstance {
         && this.agentStartCount === agentStartsBeforeCommand
         && !this.session.isStreaming
       ) {
-        this.state.execution = "idle";
-        this.state.activeCommandId = undefined;
-        this.touch();
-        this.appendEvent("command.handled", { operationId: commandId, kind: "no_run" });
-        this.appendStateEvent("command_handled_without_run");
+        await this.enqueueTransition(() => this.commitCatalogTransition(
+          { kind: "command.no_run", effect: "post_effect", operationId: commandId, instanceId: this.id },
+          () => {
+            this.state.execution = "idle";
+            this.state.activeCommandId = undefined;
+            this.touch();
+          },
+          () => {
+            this.appendEvent("command.handled", { operationId: commandId, kind: "no_run" });
+            this.appendStateEvent("command_handled_without_run");
+          },
+        ));
       }
-    }).catch((error: unknown) => {
-      release();
+    }).catch(async (error: unknown) => {
       const messageText = safeWireText(errorMessage(error), 2_048, "Sensitive command error omitted");
       if (preflightStatus !== "accepted") {
-        rejectBeforeRun(error, "preflight_failed");
+        await rejectBeforeRun(error, "preflight_failed");
         return;
       }
-
-      this.appendEvent("instance.error", { operationId: commandId, source: "command_background", error: messageText });
+      await preflightTransition?.catch(() => {});
+      if (this.catalogPort) {
+        try { this.catalogPort.assertWritable(); } catch { return; }
+      }
+      await this.enqueueTransition(async () => {
+        this.appendEvent("instance.error", { operationId: commandId, source: "command_background", error: messageText });
+      });
       // Pi 0.80.6 emits agent_settled from _runAgentPrompt.finally before the
       // prompt Promise rejects. Only project a fallback failure if that public
       // lifecycle guarantee was not observed at all.
@@ -697,14 +905,22 @@ export class ManagedInstance {
         && this.agentStartCount > agentStartsBeforeCommand
         && this.agentSettledCount === agentSettlesBeforeCommand
       ) {
-        this.state.execution = "failed";
-        this.state.lastRun = "failed";
-        this.state.activeCommandId = undefined;
-        this.state.lastError = messageText;
-        this.touch();
-        this.appendEvent("run.settled", { operationId: commandId, result: "failed", error: messageText });
-        this.appendStateEvent("prompt_rejected_without_agent_settled");
+        await this.enqueueTransition(() => this.commitCatalogTransition(
+          { kind: "command.background_failure", effect: "post_effect", operationId: commandId, instanceId: this.id },
+          () => {
+            this.state.execution = "failed";
+            this.state.lastRun = "failed";
+            this.state.activeCommandId = undefined;
+            this.state.lastError = messageText;
+            this.touch();
+          },
+          () => {
+            this.appendEvent("run.settled", { operationId: commandId, result: "failed", error: messageText });
+            this.appendStateEvent("prompt_rejected_without_agent_settled");
+          },
+        ));
       }
+      release();
     });
 
     let trackedPromise!: Promise<void>;
@@ -722,9 +938,11 @@ export class ManagedInstance {
     if (this.backgroundTasks.size > 0) {
       await Promise.allSettled([...this.backgroundTasks]);
     }
+    await this.transitionTail;
   }
 
   async stop(operationId = this.createCommandId()): Promise<StopReceipt> {
+    this.catalogPort?.assertWritable();
     if (this.state.lifecycle === "stopped") {
       return { operationId, instanceId: this.id, stopped: true, alreadyStopped: true };
     }
@@ -739,79 +957,99 @@ export class ManagedInstance {
       };
     }
 
-    this.stopRequestedWhileRunning = this.state.execution === "running" || this.session.isStreaming;
-    const admissionBoundary = this.pendingAdmission?.boundary;
-    this.state.lifecycle = "stopping";
-    this.touch();
-    this.appendStateEvent("stop_requested");
+    const task = this.beginStop(operationId);
+    this.stopPromise = task;
+    return task;
+  }
 
-    this.stopPromise = this.performStop(operationId, admissionBoundary);
-    return this.stopPromise;
+  private async beginStop(operationId: string): Promise<StopReceipt> {
+    const configurationBoundary = this.configurationBoundary;
+    if (configurationBoundary) await configurationBoundary;
+    const admissionBoundary = this.pendingAdmission?.boundary;
+    const requestedAt = this.timestamp();
+    try {
+      await this.enqueueTransition(() => this.commitCatalogTransition(
+        { kind: "instance.stop.intent", effect: "pre_effect", operationId, instanceId: this.id },
+        () => {
+          this.stopRequestedWhileRunning = this.state.execution === "running" || this.session.isStreaming;
+          this.stopRequestedAt = requestedAt;
+          this.state.lifecycle = "stopping";
+          this.touch(requestedAt);
+        },
+        () => this.appendStateEvent("stop_requested", requestedAt),
+      ));
+    } catch (error) {
+      this.stopPromise = undefined;
+      throw error;
+    }
+    return this.performStop(operationId, admissionBoundary);
   }
 
   recordExtensionError(error: unknown): void {
+    if (this.hostDrainActive) return;
     this.appendEvent("extension.error", { error: safeWireText(errorMessage(error), 2_048, "Sensitive error payload omitted") });
   }
 
   private async performStop(operationId: string, admissionBoundary?: Promise<void>): Promise<StopReceipt> {
     const cleanupErrors: string[] = [];
+    let clearedCounts: { steering: number; followUp: number } | undefined;
     const captureCleanupError = (stage: string, error: unknown): void => {
       const message = safeWireText(`${stage}: ${errorMessage(error)}`, 2_048, `${stage}: sensitive cleanup error omitted`);
       cleanupErrors.push(message);
     };
 
-    try {
-      if (admissionBoundary) {
-        try {
-          await admissionBoundary;
-        } catch (error) {
-          captureCleanupError("preflight", error);
-        }
-      }
+    if (admissionBoundary) {
+      try { await admissionBoundary; }
+      catch (error) { captureCleanupError("preflight", error); }
+    }
 
-      try {
-        const cleared = this.session.clearQueue();
+    try {
+      const cleared = this.clearRuntimeQueueOnce();
+      clearedCounts = { steering: cleared.steering.length, followUp: cleared.followUp.length };
+    } catch (error) {
+      captureCleanupError("clearQueue", error);
+    }
+
+    let abortSucceeded = false;
+    try {
+      await this.abortRuntimeOnce();
+      abortSucceeded = true;
+    } catch (error) {
+      captureCleanupError("abort", error);
+    }
+
+    if (abortSucceeded && this.backgroundTasks.size > 0) {
+      await Promise.allSettled([...this.backgroundTasks]);
+    }
+    await this.transitionTail;
+
+    try { await this.disposeRuntimeOnce(); }
+    catch (error) { captureCleanupError("dispose", error); }
+
+    await this.enqueueTransition(() => this.commitCatalogTransition(
+      { kind: "instance.stop.complete", effect: "post_effect", operationId, instanceId: this.id },
+      () => {
+        this.catalogAdmissionOperationId = undefined;
+        this.state.lifecycle = "stopped";
+        this.state.execution = "unavailable";
+        this.state.activeCommandId = undefined;
         this.state.pendingSteering = 0;
         this.state.pendingFollowUp = 0;
-        if (cleared.steering.length > 0 || cleared.followUp.length > 0) {
+        if (cleanupErrors.length > 0) this.state.lastError = cleanupErrors.join("; ");
+        this.touch();
+      },
+      () => {
+        if (clearedCounts && (clearedCounts.steering > 0 || clearedCounts.followUp > 0)) {
           this.appendEvent("queue.cleared", {
-            steering: cleared.steering.length,
-            followUp: cleared.followUp.length,
-            total: cleared.steering.length + cleared.followUp.length,
+            steering: clearedCounts.steering,
+            followUp: clearedCounts.followUp,
+            total: clearedCounts.steering + clearedCounts.followUp,
           });
         }
-      } catch (error) {
-        captureCleanupError("clearQueue", error);
-      }
-
-      let abortSucceeded = false;
-      try {
-        await this.session.abort();
-        abortSucceeded = true;
-      } catch (error) {
-        captureCleanupError("abort", error);
-      }
-
-      if (abortSucceeded && this.backgroundTasks.size > 0) {
-        await Promise.allSettled([...this.backgroundTasks]);
-      }
-
-      try {
-        await this.session.dispose();
-      } catch (error) {
-        captureCleanupError("dispose", error);
-      }
-    } finally {
-      this.state.lifecycle = "stopped";
-      this.state.execution = "unavailable";
-      this.state.activeCommandId = undefined;
-      this.state.pendingSteering = 0;
-      this.state.pendingFollowUp = 0;
-      if (cleanupErrors.length > 0) this.state.lastError = cleanupErrors.join("; ");
-      this.touch();
-      this.appendEvent("instance.stopped", { cleanupErrors });
-      this.appendStateEvent("stopped");
-    }
+        this.appendEvent("instance.stopped", { cleanupErrors });
+        this.appendStateEvent("stopped");
+      },
+    ));
 
     const receipt: StopReceipt = {
       operationId,
@@ -823,13 +1061,130 @@ export class ManagedInstance {
     return receipt;
   }
 
+  private clearRuntimeQueueOnce(): ClearedRuntimeQueue {
+    if (this.runtimeQueueClearAttempted) return this.runtimeClearedQueue;
+    this.runtimeQueueClearAttempted = true;
+    this.runtimeClearedQueue = this.session.clearQueue();
+    return this.runtimeClearedQueue;
+  }
+
+  private abortRuntimeOnce(): Promise<void> {
+    if (!this.runtimeAbortPromise) {
+      try { this.runtimeAbortPromise = Promise.resolve(this.session.abort()); }
+      catch (error) { this.runtimeAbortPromise = Promise.reject(error); }
+    }
+    return this.runtimeAbortPromise;
+  }
+
+  private disposeRuntimeOnce(): Promise<void> {
+    if (!this.runtimeDisposePromise) {
+      try { this.runtimeDisposePromise = Promise.resolve(this.session.dispose()); }
+      catch (error) { this.runtimeDisposePromise = Promise.reject(error); }
+    }
+    return this.runtimeDisposePromise;
+  }
+
   private assertActive(): void {
-    if (this.state.lifecycle !== "active") {
-      throw new InstanceNotActiveError(this.id, this.state.lifecycle);
+    if (this.state.lifecycle !== "active" || this.stopPromise) {
+      throw new InstanceNotActiveError(this.id, this.stopPromise ? "stopping" : this.state.lifecycle);
     }
   }
 
-  private beginConfiguration(action: string): void {
+  private enqueueTransition<T>(work: () => Promise<T>): Promise<T> {
+    if (!this.catalogPort) return work();
+    const task = this.transitionTail.then(work);
+    this.transitionTail = task.then(() => {}, () => {});
+    return task;
+  }
+
+  private async commitCatalogTransition(
+    context: CatalogMutationContext,
+    mutate: () => void,
+    publish: () => void = () => {},
+  ): Promise<void> {
+    if (this.hostDrainActive) {
+      this.catalogPort?.assertWritable();
+      return;
+    }
+    const checkpoint = this.captureWorkingCheckpoint();
+    try {
+      this.catalogPort?.assertWritable();
+      mutate();
+      if (this.catalogPort) await this.catalogPort.commit(this.catalogRecord(), context);
+    } catch (error) {
+      if (context.effect !== "post_effect") this.restoreWorkingCheckpoint(checkpoint);
+      throw error;
+    }
+    if (this.catalogPort) this.committedSnapshotValue = this.workingSnapshot();
+    publish();
+    if (this.catalogPort) this.committedSnapshotValue = this.workingSnapshot();
+  }
+
+  private captureWorkingCheckpoint(): WorkingCheckpoint {
+    return {
+      state: cloneJson(this.state),
+      cwd: this.cwdValue,
+      executor: cloneJson(this.executorIdentity),
+      runtimeGeneration: this.runtimeGenerationValue,
+      agentStartCount: this.agentStartCount,
+      agentSettledCount: this.agentSettledCount,
+      lastAssistantOutcome: this.lastAssistantOutcome ? { ...this.lastAssistantOutcome } : undefined,
+      stopRequestedWhileRunning: this.stopRequestedWhileRunning,
+      catalogAdmissionOperationId: this.catalogAdmissionOperationId,
+      replacementIntent: this.replacementIntent ? cloneJson(this.replacementIntent) : undefined,
+      recoverySessionFile: this.recoverySessionFile,
+      stopRequestedAt: this.stopRequestedAt,
+    };
+  }
+
+  private restoreWorkingCheckpoint(checkpoint: WorkingCheckpoint): void {
+    this.state = checkpoint.state;
+    this.cwdValue = checkpoint.cwd;
+    Object.assign(this.executorIdentity, checkpoint.executor);
+    for (const key of Object.keys(this.executorIdentity) as Array<keyof ExecutorIdentity>) {
+      if (!(key in checkpoint.executor)) delete this.executorIdentity[key];
+    }
+    this.runtimeGenerationValue = checkpoint.runtimeGeneration;
+    this.agentStartCount = checkpoint.agentStartCount;
+    this.agentSettledCount = checkpoint.agentSettledCount;
+    this.lastAssistantOutcome = checkpoint.lastAssistantOutcome;
+    this.stopRequestedWhileRunning = checkpoint.stopRequestedWhileRunning;
+    this.catalogAdmissionOperationId = checkpoint.catalogAdmissionOperationId;
+    this.replacementIntent = checkpoint.replacementIntent;
+    this.recoverySessionFile = checkpoint.recoverySessionFile;
+    this.stopRequestedAt = checkpoint.stopRequestedAt;
+  }
+
+  private reserveProjectionGate(): { entered: Promise<void>; release: () => void } {
+    const entered = this.projectionGateTail;
+    let releaseGate!: () => void;
+    const held = new Promise<void>((resolve) => { releaseGate = resolve; });
+    this.projectionGateTail = entered.then(() => held, () => held);
+    let released = false;
+    return {
+      entered,
+      release: () => {
+        if (released) return;
+        released = true;
+        releaseGate();
+      },
+    };
+  }
+
+  private async withProjectionRead<T>(read: () => Promise<T>): Promise<T> {
+    const reservation = this.reserveProjectionGate();
+    try {
+      await reservation.entered;
+      await this.transitionTail;
+      this.assertActive();
+      return await read();
+    } finally {
+      reservation.release();
+    }
+  }
+
+  private async beginConfiguration(action: string): Promise<void> {
+    this.catalogPort?.assertWritable();
     this.assertActive();
     if (
       this.configurationPending
@@ -840,18 +1195,86 @@ export class ManagedInstance {
       throw new InstanceBusyError(this.id, action);
     }
     this.configurationPending = true;
+    this.configurationBoundary = new Promise<void>((resolve) => { this.resolveConfigurationBoundary = resolve; });
+    const reservation = this.reserveProjectionGate();
+    this.releaseConfigurationGate = reservation.release;
+    try {
+      await reservation.entered;
+      this.catalogPort?.assertWritable();
+      this.assertActive();
+    } catch (error) {
+      this.endConfiguration();
+      throw error;
+    }
+  }
+
+  private endConfiguration(): void {
+    this.configurationPending = false;
+    this.releaseConfigurationGate?.();
+    this.releaseConfigurationGate = undefined;
+    this.resolveConfigurationBoundary?.();
+    this.resolveConfigurationBoundary = undefined;
+    this.configurationBoundary = undefined;
   }
 
   private async replaceRuntime(
     action: string,
+    operationId: string,
+    kind: "new" | "switch" | "reload",
+    requestedSessionFile: string | undefined,
     replace: () => Promise<RuntimeReplacementResult>,
   ): Promise<RuntimeReplacementResult> {
-    this.beginConfiguration(action);
+    await this.beginConfiguration(action);
     try {
-      return await replace();
+      const startedAt = this.timestamp();
+      await this.enqueueTransition(() => this.commitCatalogTransition(
+        { kind: `session.${kind}.intent`, effect: "pre_effect", operationId, instanceId: this.id },
+        () => {
+          this.replacementIntent = {
+            operationId,
+            kind,
+            ...(this.executorIdentity.sessionFile === undefined ? {} : { previousSessionFile: this.executorIdentity.sessionFile }),
+            ...(requestedSessionFile === undefined ? {} : { requestedSessionFile }),
+            startedAt,
+          };
+          this.touch(startedAt);
+        },
+      ));
+      let result: RuntimeReplacementResult;
+      this.receiptBoundaryOperationId = operationId;
+      try { result = await replace(); }
+      catch (error) {
+        await this.closeRuntimeOperationBoundary(operationId);
+        if (this.replacementIntent) {
+          await this.enqueueTransition(() => this.commitCatalogTransition(
+            { kind: `session.${kind}.failed`, effect: "post_effect", operationId, instanceId: this.id },
+            () => { this.replacementIntent = undefined; this.touch(); },
+          ));
+        }
+        throw error;
+      }
+      await this.closeRuntimeOperationBoundary(operationId);
+      if (result.cancelled && this.replacementIntent) {
+        await this.enqueueTransition(() => this.commitCatalogTransition(
+          { kind: `session.${kind}.cancelled`, effect: "post_effect", operationId, instanceId: this.id },
+          () => { this.replacementIntent = undefined; this.touch(); },
+        ));
+      }
+      if (!result.cancelled && this.replacementIntent) {
+        throw new Error(`Runtime completed ${kind} without publishing a replacement event`);
+      }
+      return result;
     } finally {
-      this.configurationPending = false;
+      this.endConfiguration();
     }
+  }
+
+  private async closeRuntimeOperationBoundary(operationId: string): Promise<void> {
+    await Promise.resolve();
+    if (this.receiptBoundaryOperationId !== operationId) return;
+    const tasks = this.receiptBoundaryTasks.splice(0);
+    this.receiptBoundaryOperationId = undefined;
+    await Promise.all(tasks);
   }
 
   private applyModelState(state: RuntimeModelState): void {
@@ -876,8 +1299,8 @@ export class ManagedInstance {
     });
   }
 
-  private appendSettingChanged(setting: SettingDto): void {
-    this.touch();
+  private appendSettingChanged(setting: SettingDto, touch = true): void {
+    if (touch) this.touch();
     this.appendEvent("settings.changed", {
       key: setting.key,
       value: setting.value,
@@ -893,6 +1316,203 @@ export class ManagedInstance {
     });
   }
 
+  private dispatchRuntimeEvent(event: RuntimeEvent): void {
+    if (this.hostDrainActive) return;
+    if (!this.catalogPort) {
+      try { this.handleRuntimeEvent(event); }
+      catch (error) { this.appendProjectionError(event, error); }
+      return;
+    }
+    if (this.catalogAdmissionOperationId !== undefined) {
+      if (this.admissionBufferedEvents.length >= 1_000) this.admissionBufferOverflow = true;
+      else this.admissionBufferedEvents.push(event);
+      return;
+    }
+    const task = this.enqueueCatalogRuntimeEvent(event);
+    void task.catch(() => {});
+    if (this.receiptBoundaryOperationId !== undefined) this.receiptBoundaryTasks.push(task);
+  }
+
+  private enqueueCatalogRuntimeEvent(event: RuntimeEvent): Promise<void> {
+    return this.enqueueTransition(async () => {
+      try { await this.handleCatalogRuntimeEvent(event); }
+      catch (error) {
+        try {
+          this.catalogPort?.assertWritable();
+          this.appendProjectionError(event, error);
+        } catch {
+          throw error;
+        }
+      }
+    });
+  }
+
+  private flushAdmissionRuntimeEvents(): Promise<void> {
+    const events = this.admissionBufferedEvents.splice(0);
+    const overflow = this.admissionBufferOverflow;
+    this.admissionBufferOverflow = false;
+    const tasks = events.map((event) => this.enqueueCatalogRuntimeEvent(event));
+    if (overflow) tasks.push(this.enqueueCatalogRuntimeEvent({ type: "dock_extension_error", error: "Admission runtime event buffer exceeded 1000 events" }));
+    return Promise.all(tasks).then(() => {});
+  }
+
+  private appendProjectionError(event: RuntimeEvent, error: unknown): void {
+    this.appendEvent("instance.error", { source: "event_projection",
+      error: safeWireText(errorMessage(error), 2_048, "Sensitive projection error omitted"),
+      runtimeEventType: truncate(event.type, 128),
+    });
+  }
+
+  private async handleCatalogRuntimeEvent(event: RuntimeEvent): Promise<void> {
+    this.catalogPort?.assertWritable();
+    const operationId = this.catalogAdmissionOperationId
+      ?? this.receiptBoundaryOperationId
+      ?? this.replacementIntent?.operationId
+      ?? this.state.activeCommandId;
+    const context = (kind: string): CatalogMutationContext => ({
+      kind,
+      effect: "post_effect",
+      ...(operationId === undefined ? {} : { operationId }),
+      instanceId: this.id,
+    });
+    if (event.type === "dock_session_replaced") {
+      const previousSessionFile = optionalRuntimeString(event.previousSessionFile, 16_384);
+      const sessionFile = optionalRuntimeString(event.sessionFile, 16_384);
+      const cwd = optionalRuntimeString(event.cwd, 16_384);
+      const reason = event.reason === "resume" || event.reason === "reload" ? event.reason : "new";
+      await this.commitCatalogTransition(context("session.replaced"), () => {
+        this.runtimeGenerationValue += 1;
+        this.replacementIntent = undefined;
+        this.recoverySessionFile = undefined;
+        this.agentStartCount = 0;
+        this.agentSettledCount = 0;
+        this.lastAssistantOutcome = undefined;
+        this.state.pendingSteering = 0;
+        this.state.pendingFollowUp = 0;
+        if (cwd !== undefined) this.cwdValue = cwd;
+        this.executorIdentity.piSessionId = truncate(this.session.sessionId, 128) ?? "unknown";
+        this.executorIdentity.sessionFile = truncate(this.session.sessionFile, 16_384);
+        this.applyModelState(this.session.getModelState());
+        this.touch();
+      }, () => {
+        this.nextEventSequence = 1;
+        this.eventLog.length = 0;
+        this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue });
+      });
+      return;
+    }
+    if (event.type === "dock_runtime_error") {
+      const error = boundedRuntimeString(event.error, 2_048, "Runtime replacement failed");
+      const recoverySessionFile = optionalRuntimeString(event.recoverySessionFile, 16_384)
+        ?? this.replacementIntent?.previousSessionFile;
+      await this.commitCatalogTransition(context("session.runtime_error"), () => {
+        this.replacementIntent = undefined;
+        this.recoverySessionFile = recoverySessionFile;
+        this.state.lifecycle = "runtime_error";
+        this.state.execution = "unavailable";
+        this.state.activeCommandId = undefined;
+        this.state.pendingSteering = 0;
+        this.state.pendingFollowUp = 0;
+        this.state.lastError = error;
+        this.touch();
+      }, () => {
+        this.appendEvent("instance.runtime_error", {
+          operationId: boundedRuntimeString(event.operationId, 128, "runtime-internal"),
+          kind: event.kind === "reload" || event.kind === "switch" ? event.kind : "new",
+          error,
+          recoverySessionFile,
+        });
+        this.appendStateEvent("runtime_replacement_failed");
+      });
+      return;
+    }
+    switch (event.type) {
+      case "agent_start":
+        await this.commitCatalogTransition(context("run.started"), () => {
+          this.agentStartCount += 1;
+          this.lastAssistantOutcome = undefined;
+          this.state.execution = "running";
+          this.state.lastError = undefined;
+          this.touch();
+        }, () => {
+          this.appendEvent("run.started", { operationId: this.state.activeCommandId ?? "runtime-initiated" });
+          this.appendStateEvent("agent_start");
+        });
+        return;
+      case "agent_settled":
+        await this.commitAgentSettled(context("run.settled"));
+        return;
+      case "queue_update": {
+        const steering = stringArray(event.steering);
+        const followUp = stringArray(event.followUp);
+        await this.commitCatalogTransition(context("queue.changed"), () => {
+          this.state.pendingSteering = steering.length;
+          this.state.pendingFollowUp = followUp.length;
+          this.touch();
+        }, () => this.appendEvent("queue.changed", {
+          steering: steering.length,
+          followUp: followUp.length,
+          total: steering.length + followUp.length,
+        }));
+        return;
+      }
+      case "auto_retry_start":
+        await this.commitCatalogTransition(context("run.retry_started"), () => {
+          this.state.execution = "running";
+          this.touch();
+        }, () => this.appendEvent("run.retry_started", {
+          attempt: nonNegativeNumber(event.attempt),
+          maxAttempts: nonNegativeNumber(event.maxAttempts),
+          delayMs: nonNegativeNumber(event.delayMs),
+          error: boundedRuntimeString(event.errorMessage, 2_048, "Unknown retry error"),
+        }));
+        return;
+      case "compaction_start":
+        await this.commitCatalogTransition(context("compaction.started"), () => {
+          this.state.execution = "running";
+          this.touch();
+        }, () => this.appendEvent("compaction.started", { reason: compactionReason(event.reason) }));
+        return;
+      default:
+        this.handleRuntimeEvent(event);
+    }
+  }
+
+  private async commitAgentSettled(context: CatalogMutationContext): Promise<void> {
+    const outcome = this.lastAssistantOutcome;
+    let result: Exclude<LastRunResult, "never"> = "failed";
+    await this.commitCatalogTransition(context, () => {
+      this.agentSettledCount += 1;
+      if (outcome?.stopReason === "error") {
+        result = "failed";
+        this.state.execution = "failed";
+        this.state.lastError = outcome.errorMessage ?? "Pi run failed";
+      } else if (outcome?.stopReason === "aborted" || this.stopRequestedWhileRunning) {
+        result = "aborted";
+        this.state.execution = "idle";
+        this.state.lastError = undefined;
+      } else if (!outcome) {
+        result = "failed";
+        this.state.execution = "failed";
+        this.state.lastError = "Pi run settled without an assistant outcome";
+      } else {
+        result = "succeeded";
+        this.state.execution = "idle";
+        this.state.lastError = undefined;
+      }
+      this.state.lastRun = result;
+      this.state.activeCommandId = undefined;
+      this.touch();
+    }, () => {
+      this.appendEvent("run.settled", {
+        result,
+        stopReason: outcome?.stopReason,
+        error: outcome?.errorMessage,
+      });
+      this.appendStateEvent("agent_settled");
+    });
+  }
+
   private handleRuntimeEvent(event: RuntimeEvent): void {
     if (this.state.lifecycle === "stopped") return;
     if (event.type === "dock_session_replaced") {
@@ -901,6 +1521,8 @@ export class ManagedInstance {
       const cwd = optionalRuntimeString(event.cwd, 16_384);
       const reason = event.reason === "resume" || event.reason === "reload" ? event.reason : "new";
       this.runtimeGenerationValue += 1;
+      this.replacementIntent = undefined;
+      this.recoverySessionFile = undefined;
       this.nextEventSequence = 1;
       this.eventLog.length = 0;
       this.agentStartCount = 0;
@@ -917,6 +1539,9 @@ export class ManagedInstance {
       return;
     }
     if (event.type === "dock_runtime_error") {
+      this.recoverySessionFile = optionalRuntimeString(event.recoverySessionFile, 16_384)
+        ?? this.replacementIntent?.previousSessionFile;
+      this.replacementIntent = undefined;
       this.state.lifecycle = "runtime_error";
       this.state.execution = "unavailable";
       this.state.activeCommandId = undefined;
@@ -928,7 +1553,7 @@ export class ManagedInstance {
         operationId: boundedRuntimeString(event.operationId, 128, "runtime-internal"),
         kind: event.kind === "reload" || event.kind === "switch" ? event.kind : "new",
         error: this.state.lastError,
-        recoverySessionFile: optionalRuntimeString(event.recoverySessionFile, 16_384),
+        recoverySessionFile: this.recoverySessionFile,
       });
       this.appendStateEvent("runtime_replacement_failed");
       return;
@@ -1139,6 +1764,9 @@ export class ManagedInstance {
     } as DockEvent;
     this.eventLog.push(event);
     if (this.eventLog.length > this.eventCapacity) this.eventLog.shift();
+    if (this.catalogPort && this.committedSnapshotValue) {
+      this.committedSnapshotValue = { ...this.committedSnapshotValue, eventCursor: this.cursor(this.nextEventSequence - 1) };
+    }
 
     // The event is durable in the in-memory ring before any client callback.
     // A broken observer must never break Pi's synchronous listener chain.

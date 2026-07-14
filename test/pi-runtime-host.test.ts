@@ -7,6 +7,8 @@ import {
   type AgentSessionServices,
 } from "@earendil-works/pi-coding-agent";
 
+import { CatalogTransactionCoordinator } from "../src/control/catalog-transactions.js";
+import { CatalogEffectUnknownError } from "../src/core/catalog.js";
 import { ManagedInstance } from "../src/core/managed-instance.js";
 import { RuntimeInvalidSettingValueError, RuntimeSettingsWriteError } from "../src/core/runtime-session.js";
 import {
@@ -14,6 +16,7 @@ import {
   type PiRuntimeHostOptions,
   type PiSessionCatalog,
 } from "../src/pi/pi-runtime-host.js";
+import { ScriptedCatalogCommitPort } from "./support/scripted-catalog-port.js";
 
 interface FakeModel {
   provider: string;
@@ -301,6 +304,113 @@ test("successful replacement invalidates old binding and publishes new generatio
   assert.ok(trace.indexOf("new-session:bind") < trace.indexOf("catalog:commit"));
   assert.equal(owner.candidate?.bindCalls, 1);
   await instance.stop("stop-1");
+});
+
+test("replacement catalog failure keeps the committed generation and reports the caller operation", async () => {
+  const trace: string[] = [];
+  const { host, owner } = await runtimeHost(trace);
+  const instance = new ManagedInstance({
+    id: "dock-catalog-fault",
+    creationOperationId: "create-catalog-fault",
+    hostEpoch: "epoch-catalog-fault",
+    cwd: "/project",
+    session: host,
+  });
+  host.activateInitial();
+  const port = new ScriptedCatalogCommitPort();
+  const catalog = new CatalogTransactionCoordinator(port);
+  instance.bindCatalogPort(catalog.forInstance(instance.id));
+  await catalog.create(instance.catalogRecord(), {
+    kind: "instance.create",
+    effect: "rollback_contained",
+    operationId: instance.creationOperationId,
+    instanceId: instance.id,
+  });
+  instance.markCatalogCommitted();
+  port.failAt(3);
+
+  await assert.rejects(
+    instance.newSession("replace-catalog-failed"),
+    (error: unknown) => error instanceof CatalogEffectUnknownError && error.context.operationId === "replace-catalog-failed",
+  );
+  assert.equal(catalog.health, "mutation_faulted");
+  assert.equal(owner.candidate?.disposeCalls, 0);
+  assert.equal(instance.runtimeGeneration, 2);
+  assert.equal(instance.snapshot().runtimeGeneration, 1);
+  assert.equal(instance.snapshot().executor.piSessionId, "initial");
+  await instance.disposeForHostDrain();
+  assert.equal(owner.disposeCalls, 1);
+});
+
+test("replacement teardown failure commits runtime_error with the previous recovery session", async () => {
+  const trace: string[] = [];
+  const { host, owner } = await runtimeHost(trace, (runtimeOwner) => { runtimeOwner.mode = "factory-fail"; });
+  const instance = new ManagedInstance({
+    id: "dock-runtime-error",
+    creationOperationId: "create-runtime-error",
+    hostEpoch: "epoch-runtime-error",
+    cwd: "/project",
+    session: host,
+  });
+  host.activateInitial();
+  const port = new ScriptedCatalogCommitPort();
+  const catalog = new CatalogTransactionCoordinator(port);
+  instance.bindCatalogPort(catalog.forInstance(instance.id));
+  await catalog.create(instance.catalogRecord(), {
+    kind: "instance.create",
+    effect: "rollback_contained",
+    operationId: instance.creationOperationId,
+    instanceId: instance.id,
+  });
+  instance.markCatalogCommitted();
+
+  await assert.rejects(instance.newSession("replace-runtime-error"), /factory failed/);
+  const committed = port.calls[2]?.candidate.instances[0];
+  assert.equal(committed?.lifecycle, "runtime_error");
+  assert.equal(committed?.execution, "unavailable");
+  assert.equal(committed?.recoverySessionFile, "/sessions/initial.jsonl");
+  assert.equal(committed?.replacement, undefined);
+  assert.equal(instance.snapshot().lifecycle, "runtime_error");
+  await instance.disposeForHostDrain();
+  assert.equal(owner.initial.disposeCalls, 1);
+});
+
+test("runtime-error catalog failure retains the committed replacement intent", async () => {
+  const trace: string[] = [];
+  const { host, owner } = await runtimeHost(trace, (runtimeOwner) => { runtimeOwner.mode = "factory-fail"; });
+  const instance = new ManagedInstance({
+    id: "dock-runtime-error-fault",
+    creationOperationId: "create-runtime-error-fault",
+    hostEpoch: "epoch-runtime-error-fault",
+    cwd: "/project",
+    session: host,
+  });
+  host.activateInitial();
+  const port = new ScriptedCatalogCommitPort();
+  const catalog = new CatalogTransactionCoordinator(port);
+  instance.bindCatalogPort(catalog.forInstance(instance.id));
+  await catalog.create(instance.catalogRecord(), {
+    kind: "instance.create",
+    effect: "rollback_contained",
+    operationId: instance.creationOperationId,
+    instanceId: instance.id,
+  });
+  instance.markCatalogCommitted();
+  port.failAt(3);
+
+  await assert.rejects(
+    instance.newSession("runtime-error-commit-failed"),
+    (error: unknown) => error instanceof CatalogEffectUnknownError && error.context.operationId === "runtime-error-commit-failed",
+  );
+  const conservative = catalog.current().instances[0];
+  assert.equal(catalog.health, "mutation_faulted");
+  assert.equal(conservative?.lifecycle, "active");
+  assert.equal(conservative?.replacement?.operationId, "runtime-error-commit-failed");
+  assert.equal(conservative?.replacement?.previousSessionFile, "/sessions/initial.jsonl");
+  assert.equal(conservative?.recoverySessionFile, undefined);
+  assert.equal(instance.snapshot().lifecycle, "active");
+  assert.equal(owner.initial.disposeCalls, 1);
+  await instance.disposeForHostDrain();
 });
 
 test("switch applies pre-resolved target trust before SDK hooks", async () => {

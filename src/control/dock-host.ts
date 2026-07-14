@@ -9,6 +9,11 @@ import {
 import { dirname, resolve } from "node:path";
 
 import {
+  CatalogEffectUnknownError,
+  CatalogWriteError,
+  MutationFaultedError,
+} from "../core/catalog.js";
+import {
   InstanceAdmissionPendingError,
   InstanceBusyError,
   InstanceNotActiveError,
@@ -46,7 +51,7 @@ const MAX_SOCKET_WRITE_BUFFER = MAX_CONTROL_LINE_BYTES;
 const MAX_INITIAL_EVENT_QUEUE = 1_000;
 const BACKPRESSURE_CLOSE_TIMEOUT_MS = 1_000;
 
-type HostState = "new" | "starting" | "running" | "stopping" | "stopped";
+type HostState = "new" | "starting" | "running" | "mutation_faulted" | "draining" | "stopping" | "stopped";
 type WriteOutcome = "written" | "backpressured" | "failed" | "too_large";
 type SocketProbe = "active" | "stale" | "indeterminate";
 
@@ -55,10 +60,18 @@ interface SocketIdentity {
   ino: number;
 }
 
+export interface HostFatalCompletion {
+  exitCode: 1;
+  code: "mutation_faulted";
+  message: string;
+  drainTimedOut: boolean;
+}
+
 export interface DockHostOptions {
   socketPath: string;
   registry: DockRegistry;
   statePath?: string;
+  faultDrainTimeoutMs?: number;
 }
 
 export class DockHost {
@@ -76,6 +89,14 @@ export class DockHost {
   private readonly connections = new Set<Socket>();
   private readonly inFlightDispatches = new Set<Promise<void>>();
   private readonly operationLedger = new OperationLedger();
+  private readonly faultDrainTimeoutMs: number;
+  private faultDrainPromise: Promise<void> | undefined;
+  private unsubscribeMutationFault: (() => void) | undefined;
+  private readonly faultStartedPromise: Promise<void>;
+  private resolveFaultStarted!: () => void;
+  private readonly fatalPromise: Promise<HostFatalCompletion>;
+  private fatalCompletionValue: HostFatalCompletion | undefined;
+  private resolveFatal!: (completion: HostFatalCompletion) => void;
 
   constructor(options: DockHostOptions) {
     this.socketPath = resolve(options.socketPath);
@@ -83,12 +104,18 @@ export class DockHost {
     this.registry = options.registry;
     this.hostEpoch = options.registry.hostEpoch;
     this.startedAt = options.registry.startedAt;
+    this.faultDrainTimeoutMs = Math.max(1, options.faultDrainTimeoutMs ?? 5_000);
+    this.faultStartedPromise = new Promise((resolveFaultStarted) => { this.resolveFaultStarted = resolveFaultStarted; });
+    this.fatalPromise = new Promise((resolveFatal) => { this.resolveFatal = resolveFatal; });
   }
+
+  waitForFatalCompletion(): Promise<HostFatalCompletion> { return this.fatalPromise; }
+  fatalCompletion(): HostFatalCompletion | undefined { return this.fatalCompletionValue; }
 
   start(): Promise<void> {
     if (this.state === "running") return Promise.resolve();
     if (this.state === "starting") return this.startPromise as Promise<void>;
-    if (this.state === "stopping" || this.state === "stopped") {
+    if (this.state === "mutation_faulted" || this.state === "draining" || this.state === "stopping" || this.state === "stopped") {
       return Promise.reject(new Error(`Cannot start a host that is ${this.state}`));
     }
 
@@ -124,7 +151,10 @@ export class DockHost {
       this.socketIdentity = boundIdentity;
       await chmod(this.socketPath, 0o600);
       await assertPrivateSocket(this.socketPath, boundIdentity);
-      if (this.state === "starting") this.state = "running";
+      if (this.state === "starting") {
+        this.state = "running";
+        this.unsubscribeMutationFault = this.registry.onMutationFault((fault) => this.enterMutationFault(fault.error));
+      }
     } catch (error) {
       if (server) await closeServer(server);
       if (boundIdentity) await removeSocketIfOwned(this.socketPath, boundIdentity);
@@ -146,19 +176,71 @@ export class DockHost {
       this.connections.clear();
       await closePromise;
 
-      // A client disconnect does not cancel an admitted create. Shutdown waits
-      // for it to finish, then stops the resulting instance with the registry.
-      if (this.inFlightDispatches.size > 0) {
-        await Promise.allSettled([...this.inFlightDispatches]);
+      // A client disconnect does not cancel admitted work. Shutdown waits for
+      // it, then performs non-catalog runtime disposal without inventing an
+      // explicit instance.stop transaction.
+      if (this.inFlightDispatches.size > 0 && !this.faultDrainPromise) {
+        await Promise.race([
+          Promise.allSettled([...this.inFlightDispatches]).then(() => {}),
+          this.faultStartedPromise,
+        ]);
       }
-      await this.registry.stopAll();
+      if (this.faultDrainPromise) await this.faultDrainPromise;
+      else {
+        const disposal = this.registry.disposeAllForHostDrain();
+        await Promise.race([disposal, this.faultStartedPromise]);
+        if (this.faultDrainPromise) await this.faultDrainPromise;
+        else await disposal;
+      }
       if (this.socketIdentity) {
         await removeSocketIfOwned(this.socketPath, this.socketIdentity);
       }
     } finally {
+      this.unsubscribeMutationFault?.();
+      this.unsubscribeMutationFault = undefined;
       this.socketIdentity = undefined;
       this.state = "stopped";
     }
+  }
+
+  private enterMutationFault(error: CatalogEffectUnknownError): void {
+    if ((this.state !== "running" && this.state !== "mutation_faulted" && this.state !== "stopping") || this.faultDrainPromise) return;
+    if (this.state === "running") this.state = "mutation_faulted";
+    this.registry.beginMutationDrain();
+    this.resolveFaultStarted();
+    const admitted = [...this.inFlightDispatches];
+    this.faultDrainPromise = (async () => {
+      let deadlineReached = false;
+      let timer: NodeJS.Timeout | undefined;
+      const deadline = new Promise<void>((resolveDeadline) => {
+        timer = setTimeout(() => { deadlineReached = true; resolveDeadline(); }, this.faultDrainTimeoutMs);
+      });
+      const waitWithinDeadline = async (work: Promise<unknown>): Promise<boolean> => {
+        let completed = false;
+        await Promise.race([
+          work.then(() => { completed = true; }, () => { completed = true; }),
+          deadline,
+        ]);
+        return completed;
+      };
+
+      const admittedSettled = await waitWithinDeadline(Promise.allSettled(admitted));
+      let cleanupSettled = false;
+      if (admittedSettled) cleanupSettled = await waitWithinDeadline(this.registry.disposeAllForHostDrain());
+      else void this.registry.disposeAllForHostDrain();
+      const drainTimedOut = deadlineReached || !admittedSettled || !cleanupSettled;
+      if (timer) clearTimeout(timer);
+      if (this.state === "mutation_faulted") this.state = "draining";
+      const completion: HostFatalCompletion = {
+        exitCode: 1,
+        code: "mutation_faulted",
+        message: error.message,
+        drainTimedOut,
+      };
+      this.fatalCompletionValue = completion;
+      this.resolveFatal(completion);
+    })();
+    void this.faultDrainPromise.catch(() => {});
   }
 
   private handleConnection(socket: Socket): void {
@@ -188,9 +270,9 @@ export class DockHost {
         try { hello = parseClientHello(raw); }
         catch (error) { const mapped = mapControlError(error); terminal = true; this.sendHelloError(socket, extractRequestId(line), "invalid_hello", mapped.message); return; }
         helloSeen = true;
-        if (this.state !== "running") {
+        if (this.state !== "running" && this.state !== "mutation_faulted") {
           terminal = true;
-          this.sendHelloError(socket, hello.requestId, this.state === "stopping" || this.state === "stopped" ? "host_draining" : "host_starting", "Alu Dock host is not ready");
+          this.sendHelloError(socket, hello.requestId, this.state === "draining" || this.state === "stopping" || this.state === "stopped" ? "host_draining" : "host_starting", "Alu Dock host is not ready");
           return;
         }
         if (!hello.versions.includes(CONTROL_PROTOCOL_VERSION)) {
@@ -215,13 +297,23 @@ export class DockHost {
       let request: ControlRequest;
       try { request = parseControlRequest(raw); }
       catch (error) { const mapped = mapControlError(error); terminal = true; this.sendErrorAndEnd(socket, mapped.code, mapped.message, extractRequestId(line)); return; }
-      if (this.state !== "running") { terminal = true; this.sendErrorAndEnd(socket, "host_draining", "Alu Dock host is not accepting requests", request.requestId); return; }
+      if (this.state !== "running" && this.state !== "mutation_faulted") { terminal = true; this.sendErrorAndEnd(socket, "host_draining", "Alu Dock host is not accepting requests", request.requestId); return; }
+      if (this.state === "mutation_faulted" && isMutationRequest(request.type)) { terminal = true; this.sendErrorAndEnd(socket, "mutation_faulted", "Alu Dock catalog is mutation-faulted; query state and wait for Host restart", request.requestId); return; }
       if (!implementedCapabilities().includes(capabilityForRequest(request.type))) {
         terminal = true; this.sendErrorAndEnd(socket, "capability_missing", `Capability ${capabilityForRequest(request.type)} is unavailable`, request.requestId); return;
       }
       let task!: Promise<void>;
       task = this.dispatch(request, socket, (unsubscribe) => { eventUnsubscribe = unsubscribe; })
-        .catch((error: unknown) => { const mapped = mapControlError(error); this.sendErrorAndEnd(socket, mapped.code, mapped.message, request.requestId, mapped.details, mapped.retryable); })
+        .catch((error: unknown) => {
+          const operationId = mutationOperationId(request);
+          const normalized = operationId !== undefined
+            && this.registry.catalogHealth() !== "healthy"
+            && !(error instanceof CatalogEffectUnknownError)
+            ? new CatalogEffectUnknownError({ kind: request.type, effect: "post_effect", operationId }, error)
+            : error;
+          const mapped = mapControlError(normalized);
+          this.sendErrorAndEnd(socket, mapped.code, mapped.message, request.requestId, mapped.details, mapped.retryable);
+        })
         .finally(() => this.inFlightDispatches.delete(task));
       this.inFlightDispatches.add(task);
     };
@@ -231,13 +323,18 @@ export class DockHost {
 
   private async dispatch(request: ControlRequest, socket: Socket, setEventUnsubscribe: (unsubscribe: () => void) => void): Promise<void> {
     switch (request.type) {
-      case "host.info":
+      case "host.info": {
+        const health = this.registry.catalogHealth();
         this.sendSuccessAndEnd(socket, request.requestId, {
-          state: "ready", host: defaultHostIdentity(this.hostEpoch, this.startedAt),
+          state: health === "healthy" ? "ready" : health,
+          host: defaultHostIdentity(this.hostEpoch, this.startedAt),
           catalog: { schemaVersion: 1, revision: this.registry.catalogRevision(), lastReconciledAt: this.startedAt },
           paths: { socket: this.socketPath, state: this.statePath },
-          diagnostics: [{ severity: "info", message: "Development registry is in-memory and non-durable", source: "registry" }],
+          diagnostics: health === "healthy"
+            ? [{ severity: "info", message: "Development registry is in-memory and non-durable", source: "registry" }]
+            : [{ severity: "error", message: "Catalog mutation failed after a runtime effect; Host is draining read-only", source: "registry" }],
         }); return;
+      }
       case "instance.create": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=await this.registry.create({operationId:request.params.operationId,cwd:request.params.cwd,name:request.params.name,trustChallengeId:request.params.trustChallengeId,projectTrustDecision:request.params.projectTrustDecision});return {instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
@@ -255,21 +352,21 @@ export class DockHost {
       }
       case "model.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listModels(); this.sendSuccessAndEnd(socket,request.requestId,{models:result.models,availableThinkingLevels:result.state.availableThinkingLevels,instance:instance.snapshot()}); return; }
       case "model.set": {
-        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);await instance.selectModel(request.params.provider,request.params.modelId);return {instance:instance.snapshot(),settingsWrite:{persisted:true as const}};});
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);await instance.selectModel(request.params.provider,request.params.modelId,request.params.operationId);return {instance:instance.snapshot(),settingsWrite:{persisted:true as const}};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
       case "thinking.set": {
-        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const state=await instance.setThinkingLevel(request.params.level);return {actualLevel:state.thinkingLevel,availableThinkingLevels:state.availableThinkingLevels,instance:instance.snapshot(),settingsWrite:{persisted:true as const}};});
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const state=await instance.setThinkingLevel(request.params.level,request.params.operationId);return {actualLevel:state.thinkingLevel,availableThinkingLevels:state.availableThinkingLevels,instance:instance.snapshot(),settingsWrite:{persisted:true as const}};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
       case "tool.list": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{tools:await instance.listTools(),instance:instance.snapshot()}); return; }
       case "tool.set_active": {
-        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const tools=await instance.setActiveTools(request.params.names);return {tools,instance:instance.snapshot()};});
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const tools=await instance.setActiveTools(request.params.names,request.params.operationId);return {tools,instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
       case "settings.get": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{settings:await instance.getSettings()}); return; }
       case "settings.update": {
-        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const setting=await instance.updateSetting(request.params.update);return {setting,instance:instance.snapshot(),reloadRequired:setting.reloadRequired,hostRestartRequired:setting.hostRestartRequired};});
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const setting=await instance.updateSetting(request.params.update,request.params.operationId);return {setting,instance:instance.snapshot(),reloadRequired:setting.reloadRequired,hostRestartRequired:setting.hostRestartRequired};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
       case "resource.get": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getResources()); return; }
@@ -299,6 +396,24 @@ export class DockHost {
   private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,result));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
   private sendErrorAndEnd(socket:Socket,code:string,message:string,requestId:string,details?:JsonObject,retryable=false):void { if(socket.destroyed||socket.writableEnded)return;const response:ControlResponse={kind:"response",version:2,requestId,hostEpoch:this.hostEpoch,ok:false,error:{code,message:truncateMessage(message),retryable,...(details===undefined?{}:{details})}};if(endEnvelope(socket,response)==="too_large")socket.destroy(); }
   private sendHelloError(socket:Socket,requestId:string,code:HelloError["error"]["code"],message:string,details:{hostVersions?:number[];missing?:string[];retryAfterMs?:number}={}):void { if(socket.destroyed||socket.writableEnded)return;const envelope:HelloError={kind:"hello_error",requestId,error:{code,message:truncateMessage(message),...details}};try{socket.end(encodeJsonLine(envelope));}catch{socket.destroy();} }
+}
+
+function mutationOperationId(request: ControlRequest): string | undefined {
+  if (!isMutationRequest(request.type)) return undefined;
+  return (request.params as { operationId: string }).operationId;
+}
+
+function isMutationRequest(type: ControlRequest["type"]): boolean {
+  return type !== "host.info"
+    && type !== "instance.list"
+    && type !== "instance.get"
+    && type !== "instance.attach"
+    && type !== "model.list"
+    && type !== "tool.list"
+    && type !== "settings.get"
+    && type !== "resource.get"
+    && type !== "command.catalog"
+    && type !== "session.list";
 }
 
 function successResponse(requestId:string,hostEpoch:string,result:unknown):ControlResponse { return {kind:"response",version:2,requestId,hostEpoch,ok:true,result}; }
@@ -375,6 +490,11 @@ function encodedSize(value: unknown): number {
 }
 
 function mapControlError(error: unknown): { code: string; message: string; retryable?: boolean; details?: JsonObject } {
+  if (error instanceof CatalogEffectUnknownError) {
+    return { code: "effect_unknown", message: error.message, details: { operationId: error.context.operationId ?? "runtime-internal", queryHint: error.queryHint } };
+  }
+  if (error instanceof CatalogWriteError) return { code: "catalog_write_failed", message: error.message };
+  if (error instanceof MutationFaultedError) return { code: "mutation_faulted", message: error.message };
   if (error instanceof ProjectTrustRequiredError) {
     return { code: error.code, message: error.message, retryable: error.retryable, details: error.details };
   }

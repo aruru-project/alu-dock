@@ -264,7 +264,7 @@ interface HistoryEntryDto {
 
 | Request type | Capability | Closed params | Success result |
 |---|---|---|---|
-| `host.info` | `host.info` | `{}` | `{state:"ready", host, catalog:{schemaVersion,revision,lastReconciledAt}, paths:{socket,state}, diagnostics:DiagnosticDto[]}` |
+| `host.info` | `host.info` | `{}` | `{state:"ready"|"mutation_faulted"|"draining", host, catalog:{schemaVersion,revision,lastReconciledAt}, paths:{socket,state}, diagnostics:DiagnosticDto[]}` |
 | `instance.create` | `instance.catalog` | `{operationId,cwd,name?,trustChallengeId?,projectTrustDecision?}` | `{instance:InstanceSnapshotV2}` |
 | `instance.list` | `instance.catalog` | `{includeTerminal?:boolean}` | `{instances:InstanceSnapshotV2[]}` |
 | `instance.get` | `instance.catalog` | `{instanceId}` | `{instance:InstanceSnapshotV2}` |
@@ -437,24 +437,26 @@ interface DurableInstanceRecord {
 }
 ```
 
-所有 mutation 经过 Host 单写队列；以下“commit”均指 fsync file + atomic rename + fsync directory：
+所有 mutation 经过 Host 单写队列。阶段 1D 先以 registry-owned transaction coordinator 和 injected `CatalogCommitPort` 固定同一线性化/失败合同；默认 port 只维护 live in-memory projection。阶段 5 的 managed `catalog.v1` port 才把下表“commit”实现为 fsync file + atomic rename + fsync directory，不在阶段 1伪称 durable：
 
 | Boundary | 顺序与失败语义 |
 |---|---|
 | create | 创建 candidate runtime；计算 generation=1；commit active record；成功后才 publish/response。Commit 失败必须 dispose candidate，catalog 保持原 revision。 |
-| prompt/steer/followUp | 先 commit `admissionPending=true + activeCommandId`，再调用 Pi。Preflight reject 时 commit 恢复先前 quiescent state；accept 时 commit running/pending count 后才 receipt。 |
+| prompt/steer/followUp | 先 commit `admissionPending=true + admissionOperationId`，再调用 Pi。Preflight reject 时 commit 恢复先前 quiescent state；accept 时 commit running/pending count 后才 receipt。 |
 | run settled | commit lastRun + quiescent execution + clear command/pending 后再发布 settled snapshot/event。失败时保留 conservative busy intent。 |
 | queue update | commit pending count；失败时旧 busy/admission fact不得被清掉。 |
 | stop | 先 commit `stopRequestedAt` 再 cleanup；commit stopped 后才 success response。Startup 遇 stop intent 归一为 stopped/non-reopenable，不重开 runtime。 |
 | replacement | trust/validation 后先 commit replacement intent（recovery 固定 previous file），再调用 runtime method。Cancel 清 intent；factory/bind 失败时若 catalog仍可写则 commit runtime_error；成功时计算 next generation并在一个 commit 中写目标 session/active state/clear intent，随后 publish。目标/error commit 自身失败则适用 mutation_faulted 规则。 |
 | reopen | 创建并 bind candidate；预先计算 next generation；一个 commit 写 active/idle/new generation；随后 swap/publish。任一 pre-commit/commit failure dispose candidate并保留原 unavailable record。 |
-| graceful Host shutdown | 先 commit `shutdownRequestedAt`，再 bounded abort/dispose；最终 commit host_lost。Crash 看到 shutdown intent 仍归一 host_lost，不当作 explicit instance stop。 |
+| graceful Host shutdown（阶段 5） | 先 commit `shutdownRequestedAt`，再 bounded abort/dispose；最终 commit host_lost。Crash 看到 shutdown intent 仍归一 host_lost，不当作 explicit instance stop。阶段 1D 的 in-memory Host shutdown只做 non-catalog runtime drain，绝不伪造 explicit `instance.stop`。 |
 
 任何 catalog write failure：
 
 - 在调用 Pi/cleanup等 side effect 前：不执行 side effect，返回 `catalog_write_failed`；
 - 在 side effect 后：现有 conservative intent 必须仍在旧 catalog；Host 进入 `mutation_faulted`，拒绝所有新 mutation，只允许 reads并立即走有界 nonzero drain；response 使用 `effect_unknown`（若连接仍在）；
 - 不静默继续一个无法诚实恢复的 writable Host。
+
+第一个 post-effect write fault单调触发一次 fatal drain。故障 Host在 drain窗口内只接受 read-only请求，`host.info.state` 报 `mutation_faulted|draining`；新 mutation返回 `mutation_faulted`。首个 fault前已 admitted 的 mutation在同一个有界 deadline内先收敛到自己的 catalog boundary；已完成 side effect、但排在失败 commit 后的 mutation仍以自己的 operation ID 返回 `effect_unknown`。随后才执行 clear queue/abort/dispose的 exactly-once best effort；deadline后不再无界等待同一批 dispatch，serve进程以非零状态退出。故障路径绝不追加 catalog write。
 
 Managed mode 固定默认 socket/state pair并拒绝 override。Dev custom socket 使用 in-memory/独立 injected store，因此不存在两个 socket 指向 managed catalog；加入负向参数测试。
 
@@ -663,7 +665,7 @@ Numeric counters必须是 non-negative safe integer；timestamp使用 ISO-8601 U
 
 ### 可自动 retry（新连接、新 requestId）
 
-仅 read-only：hello、host.info、instance.list/get、command.catalog、model.list、tool.list、settings.get、resource.get、session.list/history/tree。
+仅 read-only：hello、host.info、instance.list/get/attach、command.catalog、model.list、tool.list、settings.get、resource.get、session.list/history/tree。
 
 ### 不可自动 retry
 

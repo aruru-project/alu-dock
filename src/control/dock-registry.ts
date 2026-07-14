@@ -2,7 +2,9 @@ import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
+import type { CatalogCommitPort } from "../core/catalog.js";
 import type { ManagedInstance, InstanceSnapshot } from "../core/managed-instance.js";
+import { CatalogTransactionCoordinator, type CatalogFault, type CatalogHealth } from "./catalog-transactions.js";
 import type {
   ProjectTrustChoice,
   ProjectTrustRequest,
@@ -43,21 +45,23 @@ export class DockRegistry {
   readonly hostEpoch: string;
   readonly startedAt: string;
   private readonly instances = new Map<string, ManagedInstance>();
-  private revision = 0;
+  private readonly catalog: CatalogTransactionCoordinator;
 
   constructor(
     private readonly factory: InstanceFactory,
     private readonly createId: () => string = randomUUID,
-    options: { hostEpoch?: string; startedAt?: string; trustPreflight?: CreateTrustPreflight } = {},
+    options: { hostEpoch?: string; startedAt?: string; trustPreflight?: CreateTrustPreflight; catalogCommitPort?: CatalogCommitPort } = {},
   ) {
     this.hostEpoch = options.hostEpoch ?? randomUUID();
     this.startedAt = options.startedAt ?? new Date().toISOString();
     this.trustPreflight = options.trustPreflight;
+    this.catalog = new CatalogTransactionCoordinator(options.catalogCommitPort);
   }
 
   private readonly trustPreflight: CreateTrustPreflight | undefined;
 
   async create(input: CreateRegistryInstanceInput): Promise<ManagedInstance> {
+    this.catalog.assertWritable();
     const resolution = this.trustPreflight
       ? await this.trustPreflight.resolve({
           operationType: "instance.create",
@@ -78,11 +82,23 @@ export class DockRegistry {
       || instance.creationOperationId !== input.operationId
       || instance.hostEpoch !== this.hostEpoch
     ) {
-      await instance.stop();
+      await instance.disposeUnpublished().catch(() => {});
       throw new Error("Instance factory returned an identity outside the registry Host domain");
     }
+    instance.bindCatalogPort(this.catalog.forInstance(id));
+    try {
+      await this.catalog.create(instance.catalogRecord(), {
+        kind: "instance.create",
+        effect: "rollback_contained",
+        operationId: input.operationId,
+        instanceId: id,
+      });
+    } catch (error) {
+      await instance.disposeUnpublished().catch(() => {});
+      throw error;
+    }
+    instance.markCatalogCommitted();
     this.instances.set(id, instance);
-    this.revision += 1;
     return instance;
   }
 
@@ -99,11 +115,23 @@ export class DockRegistry {
   }
 
   catalogRevision(): number {
-    return this.revision;
+    return this.catalog.revision;
   }
+
+  catalogHealth(): CatalogHealth { return this.catalog.health; }
+  catalogFault(): CatalogFault | undefined { return this.catalog.fault; }
+  assertMutationAllowed(): void { this.catalog.assertWritable(); }
+  onMutationFault(listener: (fault: CatalogFault) => void): () => void { return this.catalog.onFault(listener); }
 
   async stopAll(): Promise<void> {
     await Promise.allSettled([...this.instances.values()].map((instance) => instance.stop()));
+  }
+
+  beginMutationDrain(): void { this.catalog.beginDraining(); }
+
+  async disposeAllForHostDrain(): Promise<void> {
+    this.beginMutationDrain();
+    await Promise.allSettled([...this.instances.values()].map((instance) => instance.disposeForHostDrain()));
   }
 }
 

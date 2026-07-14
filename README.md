@@ -2,7 +2,7 @@
 
 Alu Dock 是 #136「受管运行时宿主」的独立实现；V0 执行卡为 #137，V0.1 工程入口为 #142。
 
-V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 正在实施，当前已落地 V2 foundation、Host-owned `AgentSessionRuntime` replacement seam 与 create project-trust gate。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与 Alubot 不在本仓库的修改范围内。
+V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座已完成 V2 foundation、Host-owned `AgentSessionRuntime`、project trust、tools/settings/resources closed projection，以及 catalog transaction/mutation-faulted seam。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与 Alubot 不在本仓库的修改范围内。
 
 ## 当前进度
 
@@ -28,6 +28,8 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-v0.1-stage-0.md`](docs/validation-v0.1-stage-0.md)
 - [`docs/validation-v0.1-stage-1a.md`](docs/validation-v0.1-stage-1a.md)
 - [`docs/validation-v0.1-stage-1b-runtime-trust.md`](docs/validation-v0.1-stage-1b-runtime-trust.md)
+- [`docs/validation-v0.1-stage-1c-projections.md`](docs/validation-v0.1-stage-1c-projections.md)
+- [`docs/validation-v0.1-stage-1d-transactions.md`](docs/validation-v0.1-stage-1d-transactions.md)
 
 ## V0.1 工程入口
 
@@ -35,7 +37,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 
 **绿地规则：** Alu Dock 是全新项目。到 1.0 落地前，除非用户特意说明，不考虑任何旧协议、旧 Host、旧数据、旧 CLI 行为的兼容或迁移；原型合同直接替换。版本号仅标识当前合同，不表示存在历史包袱。
 
-阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1A 已将当前控制面切为 V2-only，但 Runtime replacement、project trust、systemd/catalog/reopen 等仍未完成；特别是当前入口仍会按需 detached 启动 Host，之后将由 `systemd --user` 唯一常驻 Host 替换。
+阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1 已将当前控制面切为 V2-only，并完成 Runtime replacement、project trust、closed projections及 registry transaction/fault seam。Durable atomic catalog、startup reconcile、explicit reopen与 `systemd --user` 唯一常驻 Host仍属于阶段 5；当前入口仍会按需 detached 启动 Host。
 
 ## 当前过渡期真人入口
 

@@ -114,7 +114,7 @@ export type ControlResponse =
 export interface ControlEventEnvelope { kind: "event"; version: 2; requestId: string; hostEpoch: string; event: DockEvent }
 
 export interface HostInfoResult {
-  state: "ready";
+  state: "ready" | "mutation_faulted" | "draining";
   host: HostIdentity;
   catalog: { schemaVersion: number; revision: number; lastReconciledAt: string };
   paths: { socket: string; state: string };
@@ -336,7 +336,7 @@ export function parseHostInfoResult(input: unknown): HostInfoResult {
     const diagnostic = object(item, `diagnostics[${index}]`); exact(diagnostic, ["severity", "message", "source"]);
     return { severity: enumeration(diagnostic.severity, "severity", ["info", "warning", "error"]), message: string(diagnostic.message, "message", MAX_MESSAGE), source: optionalString(diagnostic.source, "source", 256) };
   });
-  return { state: enumeration(value.state, "state", ["ready"]), host: parseHost(value.host, "host"), catalog: { schemaVersion: unsigned(catalog.schemaVersion, "catalog.schemaVersion"), revision: unsigned(catalog.revision, "catalog.revision"), lastReconciledAt: timestamp(catalog.lastReconciledAt, "catalog.lastReconciledAt") }, paths: { socket: string(paths.socket, "paths.socket", MAX_CONTROL_CWD_CHARS), state: string(paths.state, "paths.state", MAX_CONTROL_CWD_CHARS) }, diagnostics };
+  return { state: enumeration(value.state, "state", ["ready", "mutation_faulted", "draining"]), host: parseHost(value.host, "host"), catalog: { schemaVersion: unsigned(catalog.schemaVersion, "catalog.schemaVersion"), revision: unsigned(catalog.revision, "catalog.revision"), lastReconciledAt: timestamp(catalog.lastReconciledAt, "catalog.lastReconciledAt") }, paths: { socket: string(paths.socket, "paths.socket", MAX_CONTROL_CWD_CHARS), state: string(paths.state, "paths.state", MAX_CONTROL_CWD_CHARS) }, diagnostics };
 }
 export function parseCreateResult(input: unknown): CreateResult { const value = object(input, "create result"); exact(value, ["instance"]); return { instance: parseInstance(value.instance, "instance") }; }
 export function parseListResult(input: unknown): ListResult { const value = object(input, "list result"); exact(value, ["instances"]); return { instances: array(value.instances, "instances", MAX_COLLECTION).map((item, index) => parseInstance(item, `instances[${index}]`)) }; }

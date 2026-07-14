@@ -8,6 +8,7 @@ import {
   parseControlRequest,
   parseControlResponse,
   parseEventsResult,
+  parseHostInfoResult,
   parseModelConfigurationResult,
   parseSessionsResult,
   parseStatusResult,
@@ -162,6 +163,19 @@ function settingDto(key: SettingKey, values: SettingValueMap): Record<string, un
     ...(definition.min === undefined ? {} : { min: definition.min }), ...(definition.max === undefined ? {} : { max: definition.max }),
     reloadRequired: definition.reloadRequired, hostRestartRequired: definition.hostRestartRequired };
 }
+
+test("host info accepts only the closed healthy and mutation-drain states", () => {
+  const base = {
+    host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
+    catalog: { schemaVersion: 1, revision: 2, lastReconciledAt: "2026-07-14T00:00:00.000Z" },
+    paths: { socket: "/tmp/dock.sock", state: "memory:/tmp/dock.sock" },
+    diagnostics: [],
+  };
+  assert.equal(parseHostInfoResult({ ...base, state: "ready" }).state, "ready");
+  assert.equal(parseHostInfoResult({ ...base, state: "mutation_faulted" }).state, "mutation_faulted");
+  assert.equal(parseHostInfoResult({ ...base, state: "draining" }).state, "draining");
+  assert.throws(() => parseHostInfoResult({ ...base, state: "writable" }), /state/);
+});
 
 test("model persistence and session list results are closed", () => {
   assert.deepEqual(parseModelConfigurationResult({ instance: validSnapshot(), settingsWrite: { persisted: true } }).settingsWrite, { persisted: true });

@@ -1,3 +1,4 @@
+export * from "./control/catalog-transactions.js";
 export * from "./control/dock-client.js";
 export * from "./control/dock-host.js";
 export * from "./control/dock-registry.js";
@@ -5,6 +6,7 @@ export * from "./control/json-lines.js";
 export * from "./control/protocol.js";
 export * from "./control/project-trust.js";
 export * from "./control/socket-path.js";
+export * from "./core/catalog.js";
 export {
   SETTING_DEFINITIONS,
   SETTING_KEYS,

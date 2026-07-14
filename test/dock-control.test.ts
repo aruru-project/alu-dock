@@ -11,8 +11,9 @@ import { DockRegistry } from "../src/control/dock-registry.js";
 import { encodeJsonLine, JsonLineDecoder } from "../src/control/json-lines.js";
 import { ProjectTrustCoordinator } from "../src/control/project-trust.js";
 import { ManagedInstance } from "../src/core/managed-instance.js";
-import { RuntimeInvalidSettingValueError } from "../src/core/runtime-session.js";
+import { RuntimeInvalidSettingValueError, RuntimeSettingsWriteError } from "../src/core/runtime-session.js";
 import { DelayedRuntimeSession } from "./support/delayed-runtime-session.js";
+import { ScriptedCatalogCommitPort } from "./support/scripted-catalog-port.js";
 
 interface Harness {
   directory: string;
@@ -42,6 +43,26 @@ async function createHarness(): Promise<Harness> {
 async function cleanupHarness(harness: Harness): Promise<void> {
   await harness.host.stop().catch(() => {});
   await rm(harness.directory, { recursive: true, force: true });
+}
+
+async function createTransactionHarness(port: ScriptedCatalogCommitPort, faultDrainTimeoutMs = 2_000): Promise<Harness> {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-transaction-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const sessions = new Map<string, DelayedRuntimeSession>();
+  let sequence = 0;
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, name }) => {
+    const session = new DelayedRuntimeSession(`pi-${id}`);
+    sessions.set(id, session);
+    const modelState = session.getModelState();
+    return new ManagedInstance({
+      id, creationOperationId, hostEpoch, cwd, name, session, eventCapacity: 500,
+      executor: { kind: "fixture", model: modelState.model, thinkingLevel: modelState.thinkingLevel },
+    });
+  }, () => `transaction-${++sequence}`, { catalogCommitPort: port });
+  const host = new DockHost({ socketPath, registry, faultDrainTimeoutMs });
+  await host.start();
+  return { directory, socketPath, host, registry, sessions };
 }
 
 test("V2 hello rejects version and capability mismatch before side effects", async (context) => {
@@ -254,8 +275,16 @@ test("two clients observe and replay one host-owned running instance", async (co
   assert.ok(boundedReplay.page.events.length <= 500);
   assert.equal(boundedReplay.page.latest.sequence, harness.registry.get(created.id).snapshot().eventCursor.sequence);
 
+  const beforeHostDrain = harness.registry.get(created.id).snapshot();
+  assert.equal(beforeHostDrain.execution, "idle");
   await harness.host.stop();
-  assert.equal(harness.registry.get(created.id).snapshot().lifecycle, "stopped");
+  assert.equal(harness.sessions.get(created.id)?.disposeCalls, 1);
+  const afterHostDrain = harness.registry.get(created.id).snapshot();
+  assert.equal(afterHostDrain.lifecycle, "active");
+  assert.equal(afterHostDrain.execution, beforeHostDrain.execution);
+  assert.equal(afterHostDrain.lastRun, beforeHostDrain.lastRun);
+  assert.equal(afterHostDrain.activeCommandId, beforeHostDrain.activeCommandId);
+  assert.deepEqual(afterHostDrain.eventCursor, beforeHostDrain.eventCursor);
   await assert.rejects(lstat(harness.socketPath), { code: "ENOENT" });
   await assert.rejects(harness.host.start(), /Cannot start a host that is stopped/);
 });
@@ -281,7 +310,7 @@ test("attach applies the 1000-event replay cap before response byte trimming", a
   assert.equal(replay.page.latest.sequence - replay.page.earliest.sequence, 999);
 });
 
-test("shutdown waits for an admitted asynchronous create and then stops it", async (context) => {
+test("shutdown waits for an admitted asynchronous create and drains its runtime without explicit stop semantics", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-create-race-"));
   await chmod(directory, 0o700);
   context.after(() => rm(directory, { recursive: true, force: true }));
@@ -292,10 +321,12 @@ test("shutdown waits for an admitted asynchronous create and then stops it", asy
   const entered = new Promise<void>((resolveEntered) => { factoryEntered = resolveEntered; });
   const release = new Promise<void>((resolveRelease) => { releaseFactory = resolveRelease; });
   let created: ManagedInstance | undefined;
+  let runtime: DelayedRuntimeSession | undefined;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
     factoryEntered();
     await release;
-    created = new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedRuntimeSession(`pi-${id}`) });
+    runtime = new DelayedRuntimeSession(`pi-${id}`);
+    created = new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
     return created;
   }, () => "slow-instance");
   const host = new DockHost({ socketPath, registry });
@@ -310,8 +341,9 @@ test("shutdown waits for an admitted asynchronous create and then stops it", asy
   await stopping;
 
   await assert.rejects(createRequest, ControlClientError);
-  assert.equal(created?.snapshot().lifecycle, "stopped");
-  assert.equal(registry.list()[0]?.lifecycle, "stopped");
+  assert.equal(runtime?.disposeCalls, 1);
+  assert.equal(created?.snapshot().lifecycle, "active");
+  assert.equal(registry.list()[0]?.lifecycle, "active");
 });
 
 test("a second client can steer, queue follow-up, and stop idempotently", async (context) => {
@@ -833,6 +865,453 @@ test("tools, settings, resources, and commands integrate with capability gates a
   assert.equal((await client.resources(instance.id)).resources[0]?.name, "AGENTS.md");
   assert.equal((await client.commands(instance.id, "fix")).commands[0]?.name, "fixture");
   assert.deepEqual((await client.commands(instance.id, "missing")).commands, []);
+});
+
+test("catalog create commit gates publication and rollback disposes an unpublished candidate", async (context) => {
+  const gatedPort = new ScriptedCatalogCommitPort();
+  const createGate = gatedPort.gateAt(1);
+  const gated = await createTransactionHarness(gatedPort);
+  context.after(() => cleanupHarness(gated));
+  const gatedClient = new DockClient({ socketPath: gated.socketPath });
+  const creating = gatedClient.create(gated.directory, undefined, "create-gated");
+  await createGate.entered;
+  assert.equal(gated.registry.catalogRevision(), 0);
+  assert.deepEqual(gated.registry.list(), []);
+  createGate.release();
+  const created = await creating;
+  assert.equal(gated.registry.catalogRevision(), 1);
+  assert.equal(gated.registry.list()[0]?.id, created.id);
+
+  const failedPort = new ScriptedCatalogCommitPort();
+  failedPort.failAt(1, "AUTH_TOKEN_very_secret data:image/png;base64,AAAA");
+  const failed = await createTransactionHarness(failedPort);
+  context.after(() => cleanupHarness(failed));
+  const failedClient = new DockClient({ socketPath: failed.socketPath });
+  await assert.rejects(
+    failedClient.create(failed.directory, undefined, "create-failed"),
+    (error: unknown) => error instanceof ControlClientError
+      && error.code === "catalog_write_failed"
+      && error.message.includes("candidate was not published")
+      && !error.message.includes("AUTH_TOKEN")
+      && !error.message.includes("base64"),
+  );
+  assert.equal(failed.registry.catalogRevision(), 0);
+  assert.deepEqual(failed.registry.list(), []);
+  assert.equal(failed.sessions.get("transaction-1")?.disposeCalls, 1);
+  const recovered = await failedClient.create(failed.directory, undefined, "create-recovered");
+  assert.equal(recovered.id, "transaction-2");
+  assert.equal(failed.registry.catalogRevision(), 1);
+});
+
+test("prompt pre-intent commit precedes Pi and accepted events follow their commits", async (context) => {
+  const port = new ScriptedCatalogCommitPort();
+  const admissionGate = port.gateAt(2);
+  const harness = await createTransactionHarness(port);
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, undefined, "create-prompt-gate");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const prompting = client.prompt(created.id, "hello", "prompt", "prompt-gated");
+  await admissionGate.entered;
+  assert.equal(runtime.promptCalls, 0);
+  assert.equal((await client.status(created.id)).execution, "idle");
+  assert.equal((await client.events(created.id)).page.events.some((event) => event.type === "command.accepted"), false);
+  admissionGate.release();
+  const result = await prompting;
+  assert.equal(result.instance.execution, "running");
+  assert.deepEqual(port.calls.slice(1, 4).map((call) => call.context.kind), ["command.admission", "command.accepted", "run.started"]);
+  const events = (await client.events(created.id)).page.events;
+  assert.ok(events.findIndex((event) => event.type === "command.accepted") < events.findIndex((event) => event.type === "run.started"));
+});
+
+test("pre-effect catalog failure calls Pi zero times and leaves the Host writable", async (context) => {
+  const port = new ScriptedCatalogCommitPort();
+  port.failAt(2);
+  const harness = await createTransactionHarness(port);
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, undefined, "create-pre-failure");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  await assert.rejects(
+    client.prompt(created.id, "blocked", "prompt", "prompt-pre-failed"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "catalog_write_failed",
+  );
+  assert.equal(runtime.promptCalls, 0);
+  assert.equal(harness.registry.catalogHealth(), "healthy");
+  const recovered = await client.prompt(created.id, "allowed", "prompt", "prompt-after-pre-failure");
+  assert.equal(recovered.receipt.accepted, true);
+  assert.equal(runtime.promptCalls, 1);
+});
+
+test("post-effect catalog failure returns effect_unknown and drives one read-only fatal drain", async (context) => {
+  const port = new ScriptedCatalogCommitPort();
+  port.failAt(3);
+  const harness = await createTransactionHarness(port);
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, undefined, "create-post-failure");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const disposeBlock = runtime.blockDispose();
+
+  await assert.rejects(
+    client.prompt(created.id, "ambiguous", "prompt", "prompt-post-failed"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown" && error.operationId === "prompt-post-failed",
+  );
+  await disposeBlock.entered;
+  assert.equal(runtime.promptCalls, 1);
+  assert.equal(harness.registry.catalogHealth(), "draining");
+  const info = await client.hostInfo();
+  assert.equal(info.state, "draining");
+  assert.equal((await client.status(created.id)).execution, "idle");
+  await assert.rejects(
+    client.setActiveTools(created.id, ["write"], "mutation-after-fault"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "mutation_faulted",
+  );
+  assert.equal(runtime.toolMutationCalls, 0);
+
+  let fatalResolved = false;
+  void harness.host.waitForFatalCompletion().then(() => { fatalResolved = true; });
+  await new Promise((resolveTurn) => setImmediate(resolveTurn));
+  assert.equal(fatalResolved, false);
+  disposeBlock.release();
+  const fatal = await harness.host.waitForFatalCompletion();
+  assert.equal(fatal.exitCode, 1);
+  assert.equal(fatal.drainTimedOut, false);
+  assert.equal(runtime.disposeCalls, 1);
+});
+
+test("fatal drain lets already-admitted Pi mutations reach operation-scoped ambiguity before disposal", async (context) => {
+  const port = new ScriptedCatalogCommitPort();
+  port.failAt(3);
+  const harness = await createTransactionHarness(port, 500);
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const first = await client.create(harness.directory, undefined, "create-concurrent-first");
+  const second = await client.create(harness.directory, undefined, "create-concurrent-second");
+  const firstRuntime = harness.sessions.get(first.id) as DelayedRuntimeSession;
+  const secondRuntime = harness.sessions.get(second.id) as DelayedRuntimeSession;
+  const modelBlock = firstRuntime.blockNextModelMutation();
+  const firstMutation = client.setModel(first.id, "fixture", "local", "model-already-admitted");
+  await modelBlock.entered;
+  const faultingMutation = client.setModel(second.id, "fixture", "local", "model-causes-fault");
+
+  await assert.rejects(
+    faultingMutation,
+    (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown" && error.operationId === "model-causes-fault",
+  );
+  assert.equal(firstRuntime.disposeCalls, 0);
+  assert.equal(secondRuntime.disposeCalls, 0);
+  modelBlock.release();
+  await assert.rejects(
+    firstMutation,
+    (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown" && error.operationId === "model-already-admitted",
+  );
+  const fatal = await harness.host.waitForFatalCompletion();
+  assert.equal(fatal.drainTimedOut, false);
+  assert.equal(firstRuntime.disposeCalls, 1);
+  assert.equal(secondRuntime.disposeCalls, 1);
+});
+
+test("mutation-fault drain has a bounded nonzero fatal deadline", async (context) => {
+  const port = new ScriptedCatalogCommitPort();
+  port.failAt(3);
+  const harness = await createTransactionHarness(port, 25);
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, undefined, "create-drain-timeout");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const disposeBlock = runtime.blockDispose();
+  await assert.rejects(
+    client.prompt(created.id, "ambiguous", "prompt", "prompt-drain-timeout"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown",
+  );
+  await disposeBlock.entered;
+  const fatal = await harness.host.waitForFatalCompletion();
+  assert.equal(fatal.exitCode, 1);
+  assert.equal(fatal.drainTimedOut, true);
+  assert.equal(runtime.disposeCalls, 1);
+  disposeBlock.release();
+  await new Promise((resolveTurn) => setImmediate(resolveTurn));
+});
+
+test("fatal deadline includes a hung admitted create and Host stop does not await it again", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-hung-create-fault-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const port = new ScriptedCatalogCommitPort();
+  port.failAt(2);
+  const sessions = new Map<string, DelayedRuntimeSession>();
+  let factoryCalls = 0;
+  let enteredSecond!: () => void;
+  let releaseSecond!: () => void;
+  let finishedSecond!: () => void;
+  let secondDisposeEntered!: () => void;
+  let releaseSecondDispose = (): void => {};
+  const secondEntered = new Promise<void>((resolve) => { enteredSecond = resolve; });
+  const secondRelease = new Promise<void>((resolve) => { releaseSecond = resolve; });
+  const secondFinished = new Promise<void>((resolve) => { finishedSecond = resolve; });
+  const secondDisposing = new Promise<void>((resolve) => { secondDisposeEntered = resolve; });
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
+    factoryCalls += 1;
+    if (factoryCalls === 2) {
+      enteredSecond();
+      await secondRelease;
+    }
+    const runtime = new DelayedRuntimeSession(`pi-${id}`);
+    sessions.set(id, runtime);
+    if (factoryCalls === 2) {
+      const disposeBlock = runtime.blockDispose();
+      releaseSecondDispose = disposeBlock.release;
+      void disposeBlock.entered.then(secondDisposeEntered);
+      finishedSecond();
+    }
+    const modelState = runtime.getModelState();
+    return new ManagedInstance({
+      id, creationOperationId, hostEpoch, cwd, session: runtime,
+      executor: { kind: "fixture", model: modelState.model, thinkingLevel: modelState.thinkingLevel },
+    });
+  }, (() => { let id = 0; return () => `hung-create-${++id}`; })(), { catalogCommitPort: port });
+  const host = new DockHost({ socketPath, registry, faultDrainTimeoutMs: 25 });
+  context.after(async () => { releaseSecond(); releaseSecondDispose(); await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+  const first = await client.create(directory, undefined, "create-before-hung");
+  const hangingCreate = client.create(directory, undefined, "create-hung").catch((error: unknown) => error);
+  await secondEntered;
+  await assert.rejects(
+    client.setModel(first.id, "fixture", "local", "model-fault-with-hung-create"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown",
+  );
+  const fatal = await host.waitForFatalCompletion();
+  assert.equal(fatal.drainTimedOut, true);
+  const stopOutcome = await Promise.race([
+    host.stop().then(() => "stopped" as const),
+    new Promise<"timed_out">((resolveTimeout) => setTimeout(() => resolveTimeout("timed_out"), 100)),
+  ]);
+  assert.equal(stopOutcome, "stopped");
+  await assert.rejects(lstat(socketPath), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+  releaseSecond();
+  await secondFinished;
+  await secondDisposing;
+  assert.equal(sessions.get("hung-create-2")?.disposeCalls, 1);
+  releaseSecondDispose();
+  await hangingCreate;
+  assert.equal(sessions.get(first.id)?.disposeCalls, 1);
+});
+
+test("queue and settled commit faults retain the last conservative committed state", async (context) => {
+  const queuePort = new ScriptedCatalogCommitPort();
+  const queuedHarness = await createTransactionHarness(queuePort);
+  context.after(() => cleanupHarness(queuedHarness));
+  const queueClient = new DockClient({ socketPath: queuedHarness.socketPath });
+  const queuedInstance = await queueClient.create(queuedHarness.directory, undefined, "create-queue-fault");
+  await queueClient.prompt(queuedInstance.id, "running", "prompt", "run-before-queue-fault");
+  queuePort.failAt(7);
+  await assert.rejects(
+    queueClient.prompt(queuedInstance.id, "queued", "steer", "queue-failed"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown" && error.operationId === "queue-failed",
+  );
+  const queuedSnapshot = queuedHarness.registry.get(queuedInstance.id).snapshot();
+  assert.equal(queuedSnapshot.execution, "running");
+  assert.equal(queuedSnapshot.pending.total, 0);
+  assert.equal(queuedHarness.registry.get(queuedInstance.id).eventsSince().events.some((event) => event.type === "queue.changed" && event.data.total === 1), false);
+  await queuedHarness.host.waitForFatalCompletion();
+
+  const settledPort = new ScriptedCatalogCommitPort();
+  const settledHarness = await createTransactionHarness(settledPort);
+  context.after(() => cleanupHarness(settledHarness));
+  const settledClient = new DockClient({ socketPath: settledHarness.socketPath });
+  const settledInstance = await settledClient.create(settledHarness.directory, undefined, "create-settle-fault");
+  await settledClient.prompt(settledInstance.id, "running", "prompt", "run-before-settle-fault");
+  settledPort.failAt(5);
+  settledHarness.sessions.get(settledInstance.id)?.settle("done");
+  await settledHarness.host.waitForFatalCompletion();
+  const settledSnapshot = settledHarness.registry.get(settledInstance.id).snapshot();
+  assert.equal(settledSnapshot.execution, "running");
+  assert.equal(settledSnapshot.activeCommandId, "run-before-settle-fault");
+  assert.equal(settledSnapshot.lastRun, "never");
+  assert.equal(settledHarness.registry.get(settledInstance.id).eventsSince().events.some((event) => event.type === "run.settled"), false);
+});
+
+test("model success and changed events wait for the post-setter catalog commit", async (context) => {
+  const port = new ScriptedCatalogCommitPort();
+  const modelGate = port.gateAt(2);
+  const harness = await createTransactionHarness(port);
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, undefined, "create-model-gate");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const changing = client.setModel(created.id, "fixture", "local", "model-gated");
+  await modelGate.entered;
+  assert.equal(runtime.modelMutationCalls, 1);
+  assert.equal((await client.status(created.id)).executor.model?.id, "default");
+  assert.equal(harness.registry.get(created.id).eventsSince().events.some((event) => event.type === "model.changed"), false);
+  modelGate.release();
+  const changed = await changing;
+  assert.equal(changed.instance.executor.model?.id, "local");
+  assert.equal(harness.registry.get(created.id).eventsSince().events.some((event) => event.type === "model.changed"), true);
+});
+
+test("a read-first projection reservation cannot observe a later uncommitted configuration", async (context) => {
+  const port = new ScriptedCatalogCommitPort();
+  const thinkingGate = port.gateAt(2);
+  const harness = await createTransactionHarness(port);
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, undefined, "create-read-first-race");
+  const instance = harness.registry.get(created.id);
+  const reading = instance.listModels();
+  const changing = instance.setThinkingLevel("high", "thinking-after-read");
+  await thinkingGate.entered;
+  assert.equal((await reading).state.thinkingLevel, "off");
+  assert.equal(instance.snapshot().executor.thinkingLevel, "off");
+  thinkingGate.release();
+  assert.equal((await changing).thinkingLevel, "high");
+});
+
+test("tool thinking and settings projections wait for their catalog commits", async (context) => {
+  const port = new ScriptedCatalogCommitPort();
+  const toolGate = port.gateAt(2);
+  const thinkingGate = port.gateAt(3);
+  const settingGate = port.gateAt(4);
+  const harness = await createTransactionHarness(port);
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, undefined, "create-config-gates");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+
+  let toolSettled = false;
+  const changingTools = client.setActiveTools(created.id, ["write"], "tools-gated").finally(() => { toolSettled = true; });
+  await toolGate.entered;
+  let toolReadSettled = false;
+  const readingTools = client.tools(created.id).finally(() => { toolReadSettled = true; });
+  await new Promise((resolveTurn) => setImmediate(resolveTurn));
+  assert.equal(runtime.toolMutationCalls, 1);
+  assert.equal(toolSettled, false);
+  assert.equal(toolReadSettled, false);
+  toolGate.release();
+  await changingTools;
+  assert.deepEqual((await readingTools).tools.filter((tool) => tool.active).map((tool) => tool.name), ["write"]);
+
+  let thinkingSettled = false;
+  const changingThinking = client.setThinking(created.id, "high", "thinking-gated").finally(() => { thinkingSettled = true; });
+  await thinkingGate.entered;
+  assert.equal(runtime.thinkingMutationCalls, 1);
+  assert.equal((await client.status(created.id)).executor.thinkingLevel, "off");
+  assert.equal(thinkingSettled, false);
+  assert.equal(harness.registry.get(created.id).eventsSince().events.some((event) => event.type === "thinking.changed"), false);
+  thinkingGate.release();
+  assert.equal((await changingThinking).instance.executor.thinkingLevel, "high");
+  assert.equal(harness.registry.get(created.id).eventsSince().events.some((event) => event.type === "thinking.changed"), true);
+
+  let settingSettled = false;
+  const changingSetting = client.updateSetting(created.id, { key: "autoCompaction", value: false }, "setting-gated").finally(() => { settingSettled = true; });
+  await settingGate.entered;
+  let settingReadSettled = false;
+  const readingSettings = client.settings(created.id).finally(() => { settingReadSettled = true; });
+  await new Promise((resolveTurn) => setImmediate(resolveTurn));
+  assert.equal(runtime.settingMutationCalls, 1);
+  assert.equal(settingSettled, false);
+  assert.equal(settingReadSettled, false);
+  assert.equal(harness.registry.get(created.id).eventsSince().events.some((event) => event.type === "settings.changed"), false);
+  settingGate.release();
+  await changingSetting;
+  assert.equal((await readingSettings).settings.find((setting) => setting.key === "autoCompaction")?.value, false);
+  assert.equal(harness.registry.get(created.id).eventsSince().events.some((event) => event.type === "settings.changed"), true);
+});
+
+test("post-effect config failures retain operation IDs and suppress uncommitted events", async () => {
+  const scenarios = ["tool", "thinking", "setting"] as const;
+  for (const scenario of scenarios) {
+    const port = new ScriptedCatalogCommitPort();
+    port.failAt(2);
+    const harness = await createTransactionHarness(port);
+    const client = new DockClient({ socketPath: harness.socketPath });
+    const created = await client.create(harness.directory, undefined, `create-${scenario}-fault`);
+    const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+    const operationId = `${scenario}-catalog-failed`;
+    if (scenario === "setting") {
+      runtime.settingsFailure = new RuntimeSettingsWriteError("autoCompaction", "write", true, [{ scope: "global", message: "disk failed" }]);
+    }
+    const mutation = scenario === "tool"
+      ? client.setActiveTools(created.id, ["write"], operationId)
+      : scenario === "thinking"
+        ? client.setThinking(created.id, "high", operationId)
+        : client.updateSetting(created.id, { key: "autoCompaction", value: false }, operationId);
+    await assert.rejects(
+      mutation,
+      (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown" && error.operationId === operationId,
+    );
+    await harness.host.waitForFatalCompletion();
+    const events = harness.registry.get(created.id).eventsSince().events;
+    if (scenario === "thinking") assert.equal(events.some((event) => event.type === "thinking.changed"), false);
+    if (scenario === "setting") {
+      assert.equal(events.some((event) => event.type === "settings.changed" || event.type === "settings.write_failed"), false);
+      assert.equal((await runtime.getSettings()).find((setting) => setting.key === "autoCompaction")?.value, false);
+    }
+    await cleanupHarness(harness);
+  }
+});
+
+test("explicit stop commits intent before cleanup and stopped state before response", async (context) => {
+  const port = new ScriptedCatalogCommitPort();
+  const intentGate = port.gateAt(2);
+  const finalGate = port.gateAt(4);
+  const harness = await createTransactionHarness(port);
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, undefined, "create-stop-gate");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const stopping = client.stop(created.id, "stop-gated");
+  await intentGate.entered;
+  assert.equal(runtime.abortCalls, 0);
+  assert.equal(runtime.disposeCalls, 0);
+  assert.equal(harness.registry.get(created.id).snapshot().lifecycle, "active");
+  intentGate.release();
+  await finalGate.entered;
+  assert.equal(runtime.abortCalls, 1);
+  assert.equal(runtime.disposeCalls, 1);
+  assert.equal(harness.registry.get(created.id).snapshot().lifecycle, "stopping");
+  assert.equal(harness.registry.get(created.id).eventsSince().events.some((event) => event.type === "instance.stopped"), false);
+  finalGate.release();
+  const stopped = await stopping;
+  assert.equal(stopped.instance.lifecycle, "stopped");
+  assert.equal(harness.registry.get(created.id).eventsSince().events.some((event) => event.type === "instance.stopped"), true);
+});
+
+test("stop commit failures distinguish pre-cleanup rollback from post-cleanup ambiguity", async (context) => {
+  const prePort = new ScriptedCatalogCommitPort();
+  prePort.failAt(2);
+  const preHarness = await createTransactionHarness(prePort);
+  context.after(() => cleanupHarness(preHarness));
+  const preClient = new DockClient({ socketPath: preHarness.socketPath });
+  const preCreated = await preClient.create(preHarness.directory, undefined, "create-stop-pre-fault");
+  const preRuntime = preHarness.sessions.get(preCreated.id) as DelayedRuntimeSession;
+  await assert.rejects(
+    preClient.stop(preCreated.id, "stop-pre-failed"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "catalog_write_failed",
+  );
+  assert.equal(preRuntime.abortCalls, 0);
+  assert.equal(preRuntime.disposeCalls, 0);
+  assert.equal(preHarness.registry.get(preCreated.id).snapshot().lifecycle, "active");
+  assert.equal(preHarness.registry.catalogHealth(), "healthy");
+
+  const postPort = new ScriptedCatalogCommitPort();
+  postPort.failAt(4);
+  const postHarness = await createTransactionHarness(postPort);
+  context.after(() => cleanupHarness(postHarness));
+  const postClient = new DockClient({ socketPath: postHarness.socketPath });
+  const postCreated = await postClient.create(postHarness.directory, undefined, "create-stop-post-fault");
+  const postRuntime = postHarness.sessions.get(postCreated.id) as DelayedRuntimeSession;
+  await assert.rejects(
+    postClient.stop(postCreated.id, "stop-post-failed"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown" && error.operationId === "stop-post-failed",
+  );
+  await postHarness.host.waitForFatalCompletion();
+  assert.equal(postRuntime.abortCalls, 1);
+  assert.equal(postRuntime.disposeCalls, 1);
+  assert.equal(postHarness.registry.get(postCreated.id).snapshot().lifecycle, "stopping");
+  assert.equal(postHarness.registry.get(postCreated.id).eventsSince().events.some((event) => event.type === "instance.stopped"), false);
 });
 
 function objectValue(value: unknown): Record<string, unknown> {
