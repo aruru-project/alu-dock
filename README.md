@@ -1,8 +1,8 @@
 # Alu Dock
 
-Alu Dock 是 #136「受管运行时宿主」的独立、可废弃 V0 可行性实现，执行卡为 #137。
+Alu Dock 是 #136「受管运行时宿主」的独立实现；V0 执行卡为 #137，V0.1 工程入口为 #142。
 
-V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**；当前停止向 V0 追加需求，下一步单独规划 V0.1。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与生产部署不在本仓库的修改范围内。
+V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 实现尚未开始。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与 Alubot 不在本仓库的修改范围内。
 
 ## 当前进度
 
@@ -22,8 +22,18 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-stage-3.md`](docs/validation-stage-3.md)
 - [`docs/validation-stage-3-5.md`](docs/validation-stage-3-5.md)
 - [`docs/v0-evaluation.md`](docs/v0-evaluation.md)
+- [`docs/v0.1-capability-matrix.md`](docs/v0.1-capability-matrix.md)
+- [`docs/control-protocol-v2.md`](docs/control-protocol-v2.md)
+- [`docs/v0.1-plan.md`](docs/v0.1-plan.md)
+- [`docs/validation-v0.1-stage-0.md`](docs/validation-v0.1-stage-0.md)
 
-## 真人入口
+## V0.1 工程入口
+
+#142 是 V0.1 唯一工程状态入口。阶段 0 已确认没有新增产品阻塞；实现按 Runtime/协议、SSH TUI、日常控制、Extension UI、systemd/catalog/reopen、tree/fork/clone 和最终真人验收推进。
+
+阶段 0 文档描述的是 V0.1 **目标合同**。在对应实现阶段完成前，下方命令和行为仍是当前 V0 基线；特别是当前入口仍会按需 detached 启动 Host，之后将由 `systemd --user` 唯一常驻 Host 替换。
+
+## 当前 V0 真人入口
 
 直接运行：
 
@@ -109,7 +119,9 @@ npm run smoke:sdk -- \
 
 输出是结构化 JSONL（snapshot、receipt、事件、settled/final），不是终端屏幕转发。
 
-## V0 非目标
+## V0 历史非目标
+
+以下是已经 PASS 并冻结的 V0 边界；其中 Host lifecycle、systemd 和显式 session reopen 已由 V0.1 #142 正式纳入，不能继续把本节当作 V0.1 非目标：
 
 - 面向用户的 Host status/stop/restart 生命周期管理
 - Host 重启后发现或重开旧 Pi session

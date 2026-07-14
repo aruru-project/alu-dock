@@ -1,5 +1,7 @@
 # Alu Dock V0 分阶段计划
 
+> 本文是已经 PASS 并冻结的 V0 历史计划。V0.1 #142 的冻结矩阵、协议和实施阶段见 [`v0.1-capability-matrix.md`](v0.1-capability-matrix.md)、[`control-protocol-v2.md`](control-protocol-v2.md) 与 [`v0.1-plan.md`](v0.1-plan.md)。
+
 ## 原则
 
 - 每阶段单独实现、验证和提交；上一阶段通过门禁后才进入下一阶段。
