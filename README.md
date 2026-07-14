@@ -49,7 +49,7 @@ npm run cli -- new --cwd "$PWD" --name demo
 npm run cli -- attach INSTANCE_ID
 ```
 
-再次执行 `npm run cli` 会重放 Host 的近期消息并继续观察 live events。模型/thinking 切换沿用 Pi 的 session 与 settings 语义，只允许实例 idle 时执行；当前运行不会被中途换模。默认 socket 为 `$XDG_RUNTIME_DIR/alu-dock/dock.sock`，未设置 XDG 时为 `~/.alu-dock/run/dock.sock`；后台日志位于 socket 同目录的 `host.log`。
+再次执行 `npm run cli` 会重放 Host 的近期消息并继续观察 live events。模型/thinking 切换沿用 Pi 的 session 与 settings 语义，只允许实例 idle 时执行；当前运行不会被中途换模。Host 在创建 Pi SDK session 前安装与 Pi CLI 相同的 Undici `EnvHttpProxyAgent`：优先保留进程已有 `HTTP_PROXY` / `HTTPS_PROXY`，缺失时采用 Pi 全局 `httpProxy` 设置。默认 socket 为 `$XDG_RUNTIME_DIR/alu-dock/dock.sock`，未设置 XDG 时为 `~/.alu-dock/run/dock.sock`；后台日志位于 socket 同目录的 `host.log`。
 
 ## 机器与诊断接口
 

@@ -16,6 +16,7 @@ Pi SDK / pi-tui：0.80.6
 - `alu-dock new` / `alu-dock attach`：明确创建或接入。
 - `/model` 使用选择器列出 Pi `ModelRegistry.getAvailable()`（含已配置认证的本地 `models.json` 模型）；也支持 `/model PROVIDER/MODEL`。
 - `/thinking [LEVEL]` 查看或设置当前模型可用 thinking level；模型/thinking 只在 idle 时切换并写回结构化 snapshot/event。
+- Pi SDK session 创建前执行与 Pi CLI 等价的 Undici `EnvHttpProxyAgent` bootstrap，同时支持 Pi 全局 `httpProxy` 与既有 `HTTP_PROXY` / `HTTPS_PROXY`。
 - 近期事件 replay + live follow。
 - 用户消息、assistant text delta/完成消息、tool 摘要、错误和状态行。
 - Enter 自动 prompt/steer；`/follow`、`/steer`、`/status`、`/detach`、`/stop`。
@@ -40,7 +41,8 @@ git diff --check   PASS
 - tool lifecycle 投影；
 - event truncation 提示；
 - terminal control character 过滤与严格行宽；
-- idle 模型列表/切换、thinking 切换，以及 running 时明确 `instance_busy`。
+- idle 模型列表/切换、thinking 切换，以及 running 时明确 `instance_busy`；
+- 隔离子进程中的本地假代理同时捕获 SDK bootstrap 后 fetch 与 WebSocket 的 `CONNECT`，不调用真实模型。
 
 ## 无模型人工式 PTY smoke
 

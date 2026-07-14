@@ -5,11 +5,13 @@ import {
   createAgentSession,
   ModelRegistry,
   SessionManager,
+  SettingsManager,
   VERSION,
   type CreateAgentSessionOptions,
 } from "@earendil-works/pi-coding-agent";
 
 import { ManagedInstance } from "../core/managed-instance.js";
+import { configurePiNetwork } from "./configure-pi-network.js";
 import { PiRuntimeSession } from "./pi-runtime-session.js";
 
 export interface CreatePiInstanceOptions {
@@ -33,6 +35,8 @@ export interface CreatePiInstanceOptions {
 export async function createPiInstance(options: CreatePiInstanceOptions): Promise<ManagedInstance> {
   const cwd = resolve(options.cwd);
   const agentDir = options.agentDir ? resolve(options.agentDir) : undefined;
+  const settingsManager = SettingsManager.create(cwd, agentDir);
+  configurePiNetwork(settingsManager);
   const sessionManager = options.sessionDir
     ? SessionManager.create(cwd, resolve(options.sessionDir))
     : SessionManager.create(cwd);
@@ -45,6 +49,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
     authStorage,
     modelRegistry,
     sessionManager,
+    settingsManager,
     tools: options.tools,
     excludeTools: options.excludeTools,
   };
