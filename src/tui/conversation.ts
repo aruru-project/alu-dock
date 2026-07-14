@@ -49,15 +49,20 @@ export class DockConversation implements Component {
         const role = stringData(event, "role");
         const text = stringData(event, "text");
         if (role === "assistant") {
-          const entry = this.currentAssistant ?? this.add("assistant", "", false);
-          if (text !== undefined) entry.text = safeTerminalText(text);
-          entry.complete = true;
+          // Failed transport attempts can complete without any assistant text.
+          // Do not render an empty assistant bubble or per-attempt error: retry
+          // events describe intermediate attempts and run.settled owns the final error.
+          const entry = this.currentAssistant
+            ?? (text ? this.add("assistant", "", false) : undefined);
+          if (entry) {
+            if (text !== undefined) entry.text = safeTerminalText(text);
+            entry.complete = true;
+          }
           this.currentAssistant = undefined;
-          const error = stringData(event, "error");
-          if (error) this.add("error", error);
-        } else if (role === "user" && text) {
-          this.add("user", text);
         }
+        // User input is projected from Dock's canonical message.submitted event.
+        // Pi also emits message_end for that same message; rendering both would
+        // duplicate one logical prompt during live viewing and replay.
         break;
       }
 
