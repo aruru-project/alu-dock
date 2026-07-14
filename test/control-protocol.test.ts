@@ -3,12 +3,14 @@ import test from "node:test";
 
 import { JsonLineDecoder, JsonLineError } from "../src/control/json-lines.js";
 import {
+  parseAbortResult,
   parseClientHello,
   parseControlEventEnvelope,
   parseControlRequest,
   parseControlResponse,
   parseEventsResult,
   parseHostInfoResult,
+  parseHistoryResult,
   parseModelConfigurationResult,
   parseSessionsResult,
   parseStatusResult,
@@ -95,10 +97,14 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
     type: "model.set",
     params: { operationId: "op1", instanceId: "i1", provider: "local", modelId: "qwen/test" },
   });
+  assert.deepEqual(parseControlRequest({ ...base, type: "session.history", params: { instanceId: "i1", beforeEntryId: "entry-2", limit: 200 } }).params, { instanceId: "i1", beforeEntryId: "entry-2", limit: 200 });
+  assert.throws(() => parseControlRequest({ ...base, type: "session.history", params: { instanceId: "i1", limit: 201 } }), /between 1 and 200/);
   assert.deepEqual(parseControlRequest({ ...base, type: "session.list", params: { instanceId: "i1", scope: "all" } }), {
     ...base, type: "session.list", params: { instanceId: "i1", scope: "all" },
   });
   assert.throws(() => parseControlRequest({ ...base, type: "session.list", params: { instanceId: "i1", scope: "project" } }), /unsupported value/);
+  assert.deepEqual(parseControlRequest({ ...base, type: "command.abort", params: { operationId: "abort-op", instanceId: "i1" } }).params, { operationId: "abort-op", instanceId: "i1" });
+  assert.throws(() => parseControlRequest({ ...base, type: "command.abort", params: { operationId: "abort-op", instanceId: "i1", force: true } }), /Unexpected field/);
 
   const trustedCreate = parseControlRequest({
     ...base,
@@ -163,6 +169,34 @@ function settingDto(key: SettingKey, values: SettingValueMap): Record<string, un
     ...(definition.min === undefined ? {} : { min: definition.min }), ...(definition.max === undefined ? {} : { max: definition.max }),
     reloadRequired: definition.reloadRequired, hostRestartRequired: definition.hostRestartRequired };
 }
+
+test("history results are closed and pagination-consistent", () => {
+  const entry = { entryId: "h2", parentId: "h1", role: "assistant", timestamp: "2026-07-14T00:00:00.000Z", content: [{ type: "text", text: "answer" }], stopReason: "stop" };
+  const result = parseHistoryResult({ entries: [entry], hasEarlier: true, nextBeforeEntryId: "h2", instance: validSnapshot() });
+  assert.deepEqual(result.entries[0], { ...entry, error: undefined });
+  assert.throws(() => parseHistoryResult({ entries: [entry], hasEarlier: false, nextBeforeEntryId: "h2", instance: validSnapshot() }), /cursor is inconsistent/);
+  assert.throws(() => parseHistoryResult({ entries: [{ ...entry, content: [{ type: "text", text: "x", raw: true }] }], hasEarlier: false, instance: validSnapshot() }), /Unexpected field/);
+});
+
+test("session metrics are closed, finite, non-negative, and percentage-bounded", () => {
+  const metrics = {
+    messages: { user: 1, assistant: 2, toolCalls: 3, toolResults: 3, total: 9 },
+    tokens: { input: 100, output: 50, cacheRead: 25, cacheWrite: 5, total: 180 },
+    cost: 0.01,
+    context: { tokens: 900, contextWindow: 2_000, percent: 45 },
+  };
+  assert.deepEqual(parseStatusResult({ instance: { ...validSnapshot(), metrics } }).instance.metrics, metrics);
+  assert.throws(() => parseStatusResult({ instance: { ...validSnapshot(), metrics: { ...metrics, cost: -1 } } }), /non-negative/);
+  assert.throws(() => parseStatusResult({ instance: { ...validSnapshot(), metrics: { ...metrics, context: { ...metrics.context, percent: 101 } } } }), /between 0 and 100/);
+  assert.throws(() => parseStatusResult({ instance: { ...validSnapshot(), metrics: { ...metrics, raw: true } } }), /Unexpected field/);
+});
+
+test("abort result is closed and cannot claim a still-running instance", () => {
+  const idle = validSnapshot();
+  assert.equal(parseAbortResult({ instance: idle }).instance.execution, "idle");
+  assert.throws(() => parseAbortResult({ instance: { ...idle, execution: "running", activeCommandId: "run-1" } }), /must not still be running/);
+  assert.throws(() => parseAbortResult({ instance: idle, extra: true }), /Unexpected field/);
+});
 
 test("host info accepts only the closed healthy and mutation-drain states", () => {
   const base = {

@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  CatalogEffectUnknownError,
+  CatalogWriteError,
+  MutationFaultedError,
   type CatalogInstanceRecord,
   type CatalogMutationContext,
   type InstanceCatalogMutationPort,
@@ -22,11 +25,13 @@ export type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingKey, Se
 import type {
   ClearedRuntimeQueue,
   RuntimeEvent,
+  RuntimeHistoryEntry,
   RuntimeModelInfo,
   RuntimeModelState,
   RuntimeProjectTrust,
   RuntimeReplacementResult,
   RuntimeSession,
+  RuntimeSessionMetrics,
   RuntimeThinkingLevel,
 } from "./runtime-session.js";
 
@@ -60,12 +65,21 @@ export type ContentBlockDto =
   | { type: "omitted"; kind: "image" | "binary"; description: string };
 
 export interface PendingDto { steering: number; followUp: number; total: number }
-export interface SessionMetricsDto {
-  messages: { user: number; assistant: number; toolCalls: number; toolResults: number; total: number };
-  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
-  cost: number;
-  context?: { tokens: number | null; contextWindow: number; percent: number | null };
+export interface HistoryEntryDto {
+  entryId: string;
+  parentId?: string;
+  role: "user" | "assistant" | "tool" | "system";
+  timestamp?: string;
+  content: ContentBlockDto[];
+  stopReason?: string;
+  error?: string;
 }
+export interface HistoryPageDto {
+  entries: HistoryEntryDto[];
+  hasEarlier: boolean;
+  nextBeforeEntryId?: string;
+}
+export type SessionMetricsDto = RuntimeSessionMetrics;
 export interface SessionDto { sessionId: string; sessionFile: string; name?: string; cwd: string; updatedAt?: string }
 export type SettingsChangedData = { [K in keyof SettingValueMap]: { key: K; value: SettingValueMap[K]; reloadRequired: boolean; hostRestartRequired: boolean } }[keyof SettingValueMap];
 export interface EventDataMap {
@@ -93,7 +107,7 @@ export interface EventDataMap {
   "queue.cleared": PendingDto;
   "compaction.started": { reason: "manual" | "threshold" | "overflow" };
   "compaction.completed": { reason: "manual" | "threshold" | "overflow"; aborted: boolean; willRetry: boolean; error?: string };
-  "session.replaced": { reason: "new" | "resume" | "fork" | "reload"; previousSessionFile?: string; sessionFile?: string; runtimeGeneration: number };
+  "session.replaced": { reason: "new" | "resume" | "fork" | "reload"; previousSessionFile?: string; sessionFile?: string; runtimeGeneration: number; cwd: string; piSessionId: string };
   "session.info_changed": { name?: string };
   "session.metrics_changed": { metrics: SessionMetricsDto };
   "model.changed": { provider: string; id: string; thinkingLevel: RuntimeThinkingLevel; availableThinkingLevels: RuntimeThinkingLevel[] };
@@ -168,6 +182,16 @@ export interface EventPage {
   truncated: boolean;
 }
 
+export interface AttachProjection {
+  instance: InstanceSnapshot;
+  page: EventPage;
+  recentHistory: HistoryEntryDto[];
+  historyTruncated: boolean;
+  replaySince: number;
+  epochChanged: boolean;
+  generationChanged: boolean;
+}
+
 export interface CommandReceipt {
   accepted: true;
   instanceId: string;
@@ -227,6 +251,9 @@ interface WorkingCheckpoint {
   runtimeGeneration: number;
   agentStartCount: number;
   agentSettledCount: number;
+  assistantMessageSequence: number;
+  currentAssistantMessageId: string | undefined;
+  announcedToolCalls: string[];
   lastAssistantOutcome: AssistantOutcome | undefined;
   stopRequestedWhileRunning: boolean;
   catalogAdmissionOperationId: string | undefined;
@@ -266,6 +293,23 @@ export class InstanceBusyError extends Error {
   }
 }
 
+export class InvalidHistoryCursorError extends Error {
+  constructor(readonly beforeEntryId: string) {
+    super(`History entry ${beforeEntryId} does not belong to the current session branch`);
+    this.name = "InvalidHistoryCursorError";
+  }
+}
+
+export class RuntimeEffectUnknownError extends Error {
+  readonly queryHint = "Query the instance snapshot before any retry";
+
+  constructor(readonly operationId: string, cause?: unknown) {
+    super(`Runtime abort may have taken effect for operation ${operationId}`);
+    this.name = "RuntimeEffectUnknownError";
+    this.cause = cause;
+  }
+}
+
 export class ManagedInstance {
   readonly id: string;
   readonly creationOperationId: string;
@@ -276,6 +320,8 @@ export class ManagedInstance {
   private readonly session: RuntimeSession;
   private cwdValue: string;
   private readonly executorIdentity: ExecutorIdentity;
+  private historyValue: HistoryEntryDto[];
+  private metricsValue: SessionMetricsDto;
   private readonly eventCapacity: number;
   private readonly now: () => Date;
   private readonly createCommandId: () => string;
@@ -294,6 +340,7 @@ export class ManagedInstance {
   private recoverySessionFile: string | undefined;
   private stopRequestedAt: string | undefined;
   private transitionTail: Promise<void> = Promise.resolve();
+  private historyRefreshTail: Promise<void> = Promise.resolve();
   private hostDrainActive = false;
   private hostDrainPromise: Promise<void> | undefined;
   private runtimeQueueClearAttempted = false;
@@ -301,15 +348,25 @@ export class ManagedInstance {
   private runtimeAbortPromise: Promise<void> | undefined;
   private runtimeDisposePromise: Promise<void> | undefined;
   private runtimeGenerationValue = 1;
+  private publishedRuntimeGenerationValue = 1;
   private nextEventSequence = 1;
   private agentStartCount = 0;
   private agentSettledCount = 0;
+  private assistantMessageSequence = 0;
+  private currentAssistantMessageId: string | undefined;
+  private readonly announcedToolCalls = new Set<string>();
   private lastAssistantOutcome: AssistantOutcome | undefined;
   private pendingAdmission: PendingAdmission | undefined;
   private stopRequestedWhileRunning = false;
+  private compactionActive = false;
+  private compactionBoundary: Promise<void> | undefined;
+  private resolveCompactionBoundary: (() => void) | undefined;
   private configurationPending = false;
   private configurationBoundary: Promise<void> | undefined;
   private resolveConfigurationBoundary: (() => void) | undefined;
+  private commandAbortPending = false;
+  private commandAbortBoundary: Promise<void> | undefined;
+  private resolveCommandAbortBoundary: (() => void) | undefined;
   private projectionGateTail: Promise<void> = Promise.resolve();
   private releaseConfigurationGate: (() => void) | undefined;
   private stopPromise: Promise<StopReceipt> | undefined;
@@ -349,6 +406,8 @@ export class ManagedInstance {
       piSessionId: truncate(this.session.sessionId, 128) ?? "unknown",
       sessionFile: truncate(this.session.sessionFile, 16_384),
     };
+    this.historyValue = this.session.getHistory().map(projectRuntimeHistoryEntry);
+    this.metricsValue = projectRuntimeMetrics(this.session.getMetrics());
 
     this.session.subscribe((event) => this.dispatchRuntimeEvent(event));
 
@@ -453,6 +512,7 @@ export class ManagedInstance {
         ...this.executorIdentity,
         model: this.executorIdentity.model ? { ...this.executorIdentity.model } : undefined,
       },
+      metrics: cloneJson(this.metricsValue),
       extensionStatus: {},
       activeCommandId: this.state.activeCommandId,
       lastError: this.state.lastError,
@@ -466,7 +526,7 @@ export class ManagedInstance {
     const domainChanged = typeof since !== "number" && (
       since.hostEpoch !== this.hostEpoch
       || since.instanceId !== this.id
-      || since.runtimeGeneration !== this.runtimeGeneration
+      || since.runtimeGeneration !== this.publishedRuntimeGenerationValue
     );
     const sequence = domainChanged ? 0 : typeof since === "number" ? since : since.sequence;
     const earliestSequence = this.eventLog[0]?.sequence ?? this.nextEventSequence;
@@ -512,6 +572,31 @@ export class ManagedInstance {
         cwd: truncate(session.cwd, 16_384) ?? "",
         ...(isIsoTimestamp(session.updatedAt) ? { updatedAt: session.updatedAt } : {}),
       }));
+    });
+  }
+
+  async getHistoryPage(beforeEntryId: string | undefined, limit: number): Promise<HistoryPageDto & { instance: InstanceSnapshot }> {
+    return this.withCommittedProjectionRead(() => ({ ...this.buildHistoryPage(beforeEntryId, limit), instance: this.snapshot() }));
+  }
+
+  async getAttachProjection(cursor: EventCursor | undefined, historyLimit = 200): Promise<AttachProjection> {
+    return this.withCommittedProjectionRead(() => {
+      const instance = this.snapshot();
+      const epochChanged = cursor !== undefined && cursor.hostEpoch !== this.hostEpoch;
+      const generationChanged = cursor !== undefined && cursor.runtimeGeneration !== instance.runtimeGeneration;
+      const replaySince = epochChanged || generationChanged ? 0 : cursor?.sequence ?? 0;
+      const sourcePage = this.eventsSince(replaySince);
+      const history = this.buildHistoryPage(undefined, historyLimit);
+      const page = { ...sourcePage, events: eventsNotCoveredByHistory(sourcePage.events, this.historyValue) };
+      return {
+        instance,
+        page,
+        recentHistory: history.entries,
+        historyTruncated: history.hasEarlier,
+        replaySince,
+        epochChanged,
+        generationChanged,
+      };
     });
   }
 
@@ -670,7 +755,7 @@ export class ManagedInstance {
   async submit(message: string, delivery: DeliveryMode = "auto", operationId = this.createCommandId()): Promise<CommandReceipt> {
     this.assertActive();
     if (this.pendingAdmission) throw new InstanceAdmissionPendingError(this.id);
-    if (this.configurationPending) throw new InstanceBusyError(this.id, "submitting a prompt");
+    if (this.configurationPending || this.commandAbortPending) throw new InstanceBusyError(this.id, "submitting a prompt");
     if (message.trim().length === 0) {
       throw new Error("Prompt message must not be empty");
     }
@@ -933,6 +1018,62 @@ export class ManagedInstance {
     return receiptPromise;
   }
 
+  async abort(operationId = this.createCommandId()): Promise<void> {
+    this.catalogPort?.assertWritable();
+    this.assertActive();
+    if (this.commandAbortPending) throw new InstanceBusyError(this.id, "aborting the current run");
+    this.commandAbortPending = true;
+    this.commandAbortBoundary = new Promise<void>((resolve) => { this.resolveCommandAbortBoundary = resolve; });
+    const reservation = this.reserveProjectionGate();
+    try {
+      await reservation.entered;
+      await this.transitionTail;
+      this.catalogPort?.assertWritable();
+      this.assertActive();
+      if (this.pendingAdmission) throw new InstanceAdmissionPendingError(this.id);
+      if (this.configurationPending) throw new InstanceBusyError(this.id, "aborting the current run");
+      if (this.state.execution !== "running" && !this.session.isStreaming) return;
+
+      this.receiptBoundaryOperationId = operationId;
+      try {
+        await this.session.abort();
+        await this.session.waitForIdle();
+        const compactionBoundary = this.compactionBoundary;
+        if (compactionBoundary) await compactionBoundary;
+        await this.closeRuntimeOperationBoundary(operationId);
+        if (this.state.execution === "running" && !this.session.isStreaming) {
+          await this.enqueueTransition(() => this.commitCatalogTransition(
+            { kind: "command.abort.completed", effect: "post_effect", operationId, instanceId: this.id },
+            () => {
+              this.state.execution = "idle";
+              this.state.lastRun = "aborted";
+              this.state.activeCommandId = undefined;
+              this.state.lastError = undefined;
+              this.touch();
+            },
+            () => {
+              this.appendEvent("run.settled", { operationId, result: "aborted", stopReason: "aborted" });
+              this.appendStateEvent("abort_completed_without_agent_settled");
+            },
+          ));
+        }
+      } catch (error) {
+        try { await this.closeRuntimeOperationBoundary(operationId); }
+        catch (transitionError) { throw transitionError; }
+        if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError) throw error;
+        throw new RuntimeEffectUnknownError(operationId, error);
+      } finally {
+        if (this.receiptBoundaryOperationId === operationId) this.receiptBoundaryOperationId = undefined;
+      }
+    } finally {
+      reservation.release();
+      this.commandAbortPending = false;
+      this.resolveCommandAbortBoundary?.();
+      this.resolveCommandAbortBoundary = undefined;
+      this.commandAbortBoundary = undefined;
+    }
+  }
+
   async waitForIdle(): Promise<void> {
     await this.session.waitForIdle();
     if (this.backgroundTasks.size > 0) {
@@ -965,6 +1106,8 @@ export class ManagedInstance {
   private async beginStop(operationId: string): Promise<StopReceipt> {
     const configurationBoundary = this.configurationBoundary;
     if (configurationBoundary) await configurationBoundary;
+    const commandAbortBoundary = this.commandAbortBoundary;
+    if (commandAbortBoundary) await commandAbortBoundary;
     const admissionBoundary = this.pendingAdmission?.boundary;
     const requestedAt = this.timestamp();
     try {
@@ -1128,6 +1271,9 @@ export class ManagedInstance {
       runtimeGeneration: this.runtimeGenerationValue,
       agentStartCount: this.agentStartCount,
       agentSettledCount: this.agentSettledCount,
+      assistantMessageSequence: this.assistantMessageSequence,
+      currentAssistantMessageId: this.currentAssistantMessageId,
+      announcedToolCalls: [...this.announcedToolCalls],
       lastAssistantOutcome: this.lastAssistantOutcome ? { ...this.lastAssistantOutcome } : undefined,
       stopRequestedWhileRunning: this.stopRequestedWhileRunning,
       catalogAdmissionOperationId: this.catalogAdmissionOperationId,
@@ -1147,12 +1293,36 @@ export class ManagedInstance {
     this.runtimeGenerationValue = checkpoint.runtimeGeneration;
     this.agentStartCount = checkpoint.agentStartCount;
     this.agentSettledCount = checkpoint.agentSettledCount;
+    this.assistantMessageSequence = checkpoint.assistantMessageSequence;
+    this.currentAssistantMessageId = checkpoint.currentAssistantMessageId;
+    this.announcedToolCalls.clear();
+    for (const toolCallId of checkpoint.announcedToolCalls) this.announcedToolCalls.add(toolCallId);
     this.lastAssistantOutcome = checkpoint.lastAssistantOutcome;
     this.stopRequestedWhileRunning = checkpoint.stopRequestedWhileRunning;
     this.catalogAdmissionOperationId = checkpoint.catalogAdmissionOperationId;
     this.replacementIntent = checkpoint.replacementIntent;
     this.recoverySessionFile = checkpoint.recoverySessionFile;
     this.stopRequestedAt = checkpoint.stopRequestedAt;
+  }
+
+  private buildHistoryPage(beforeEntryId: string | undefined, limit: number, beforeTimestamp?: string): HistoryPageDto {
+    let source = this.historyValue;
+    if (beforeTimestamp !== undefined) {
+      source = source.filter((entry) => entry.timestamp === undefined || entry.timestamp < beforeTimestamp);
+    }
+    let end = source.length;
+    if (beforeEntryId !== undefined) {
+      end = source.findIndex((entry) => entry.entryId === beforeEntryId);
+      if (end < 0) throw new InvalidHistoryCursorError(beforeEntryId);
+    }
+    const boundedLimit = Math.max(1, Math.min(200, Math.floor(limit)));
+    const start = Math.max(0, end - boundedLimit);
+    const entries = cloneJson(source.slice(start, end));
+    return {
+      entries,
+      hasEarlier: start > 0,
+      ...(start > 0 && entries[0] ? { nextBeforeEntryId: entries[0].entryId } : {}),
+    };
   }
 
   private reserveProjectionGate(): { entered: Promise<void>; release: () => void } {
@@ -1169,6 +1339,20 @@ export class ManagedInstance {
         releaseGate();
       },
     };
+  }
+
+  private async withCommittedProjectionRead<T>(read: () => T): Promise<T> {
+    const historyBoundary = this.historyRefreshTail;
+    const reservation = this.reserveProjectionGate();
+    try {
+      await reservation.entered;
+      await historyBoundary;
+      const lifecycle = this.snapshot().lifecycle;
+      if (lifecycle !== "active") throw new InstanceNotActiveError(this.id, lifecycle);
+      return read();
+    } finally {
+      reservation.release();
+    }
   }
 
   private async withProjectionRead<T>(read: () => Promise<T>): Promise<T> {
@@ -1188,6 +1372,7 @@ export class ManagedInstance {
     this.assertActive();
     if (
       this.configurationPending
+      || this.commandAbortPending
       || this.pendingAdmission !== undefined
       || this.state.execution === "running"
       || this.session.isStreaming
@@ -1319,7 +1504,7 @@ export class ManagedInstance {
   private dispatchRuntimeEvent(event: RuntimeEvent): void {
     if (this.hostDrainActive) return;
     if (!this.catalogPort) {
-      try { this.handleRuntimeEvent(event); }
+      try { this.handleRuntimeEvent(event); if (refreshesHistory(event)) this.refreshHistory(); if (refreshesMetrics(event)) this.refreshMetrics(); }
       catch (error) { this.appendProjectionError(event, error); }
       return;
     }
@@ -1329,13 +1514,14 @@ export class ManagedInstance {
       return;
     }
     const task = this.enqueueCatalogRuntimeEvent(event);
+    if (refreshesHistory(event)) this.trackHistoryRefresh(task);
     void task.catch(() => {});
     if (this.receiptBoundaryOperationId !== undefined) this.receiptBoundaryTasks.push(task);
   }
 
   private enqueueCatalogRuntimeEvent(event: RuntimeEvent): Promise<void> {
     return this.enqueueTransition(async () => {
-      try { await this.handleCatalogRuntimeEvent(event); }
+      try { await this.handleCatalogRuntimeEvent(event); if (refreshesHistory(event)) this.refreshHistory(); if (refreshesMetrics(event)) this.refreshMetrics(); }
       catch (error) {
         try {
           this.catalogPort?.assertWritable();
@@ -1351,9 +1537,36 @@ export class ManagedInstance {
     const events = this.admissionBufferedEvents.splice(0);
     const overflow = this.admissionBufferOverflow;
     this.admissionBufferOverflow = false;
-    const tasks = events.map((event) => this.enqueueCatalogRuntimeEvent(event));
-    if (overflow) tasks.push(this.enqueueCatalogRuntimeEvent({ type: "dock_extension_error", error: "Admission runtime event buffer exceeded 1000 events" }));
+    const tasks = events.map((event) => {
+      const task = this.enqueueCatalogRuntimeEvent(event);
+      if (refreshesHistory(event)) this.trackHistoryRefresh(task);
+      return task;
+    });
+    if (overflow) {
+      tasks.push(this.enqueueCatalogRuntimeEvent({ type: "dock_extension_error", error: "Admission runtime event buffer exceeded 1000 events" }));
+      const refresh = this.enqueueTransition(async () => { this.refreshHistory(); this.refreshMetrics(); });
+      this.trackHistoryRefresh(refresh);
+      tasks.push(refresh);
+    }
     return Promise.all(tasks).then(() => {});
+  }
+
+  private trackHistoryRefresh(task: Promise<void>): void {
+    this.historyRefreshTail = task.then(() => {}, () => {});
+  }
+
+  private refreshHistory(): void {
+    this.historyValue = this.session.getHistory().map(projectRuntimeHistoryEntry);
+  }
+
+  private refreshMetrics(): void {
+    const metrics = projectRuntimeMetrics(this.session.getMetrics());
+    if (JSON.stringify(metrics) === JSON.stringify(this.metricsValue)) return;
+    this.metricsValue = metrics;
+    if (this.catalogPort && this.committedSnapshotValue) {
+      this.committedSnapshotValue = { ...this.committedSnapshotValue, metrics: cloneJson(metrics) };
+    }
+    this.appendEvent("session.metrics_changed", { metrics: cloneJson(metrics) });
   }
 
   private appendProjectionError(event: RuntimeEvent, error: unknown): void {
@@ -1386,6 +1599,9 @@ export class ManagedInstance {
         this.recoverySessionFile = undefined;
         this.agentStartCount = 0;
         this.agentSettledCount = 0;
+        this.assistantMessageSequence = 0;
+        this.currentAssistantMessageId = undefined;
+        this.announcedToolCalls.clear();
         this.lastAssistantOutcome = undefined;
         this.state.pendingSteering = 0;
         this.state.pendingFollowUp = 0;
@@ -1395,9 +1611,10 @@ export class ManagedInstance {
         this.applyModelState(this.session.getModelState());
         this.touch();
       }, () => {
+        this.publishedRuntimeGenerationValue = this.runtimeGenerationValue;
         this.nextEventSequence = 1;
         this.eventLog.length = 0;
-        this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue });
+        this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId });
       });
       return;
     }
@@ -1430,6 +1647,8 @@ export class ManagedInstance {
       case "agent_start":
         await this.commitCatalogTransition(context("run.started"), () => {
           this.agentStartCount += 1;
+          this.currentAssistantMessageId = undefined;
+          this.announcedToolCalls.clear();
           this.lastAssistantOutcome = undefined;
           this.state.execution = "running";
           this.state.lastError = undefined;
@@ -1469,10 +1688,30 @@ export class ManagedInstance {
         return;
       case "compaction_start":
         await this.commitCatalogTransition(context("compaction.started"), () => {
+          this.startCompactionBoundary();
           this.state.execution = "running";
           this.touch();
         }, () => this.appendEvent("compaction.started", { reason: compactionReason(event.reason) }));
         return;
+      case "compaction_end": {
+        try {
+          await this.commitCatalogTransition(context("compaction.completed"), () => {
+            if (this.state.activeCommandId === undefined && event.willRetry !== true) this.state.execution = "idle";
+            this.touch();
+          }, () => {
+            this.appendEvent("compaction.completed", {
+              reason: compactionReason(event.reason),
+              aborted: event.aborted === true,
+              willRetry: event.willRetry === true,
+              error: optionalRuntimeString(event.errorMessage, 2_048),
+            });
+            this.appendStateEvent("compaction_completed");
+          });
+        } finally {
+          this.finishCompactionBoundary();
+        }
+        return;
+      }
       default:
         this.handleRuntimeEvent(event);
     }
@@ -1505,6 +1744,7 @@ export class ManagedInstance {
       this.touch();
     }, () => {
       this.appendEvent("run.settled", {
+        operationId: context.operationId,
         result,
         stopReason: outcome?.stopReason,
         error: outcome?.errorMessage,
@@ -1521,12 +1761,16 @@ export class ManagedInstance {
       const cwd = optionalRuntimeString(event.cwd, 16_384);
       const reason = event.reason === "resume" || event.reason === "reload" ? event.reason : "new";
       this.runtimeGenerationValue += 1;
+      this.publishedRuntimeGenerationValue = this.runtimeGenerationValue;
       this.replacementIntent = undefined;
       this.recoverySessionFile = undefined;
       this.nextEventSequence = 1;
       this.eventLog.length = 0;
       this.agentStartCount = 0;
       this.agentSettledCount = 0;
+      this.assistantMessageSequence = 0;
+      this.currentAssistantMessageId = undefined;
+      this.announcedToolCalls.clear();
       this.lastAssistantOutcome = undefined;
       this.state.pendingSteering = 0;
       this.state.pendingFollowUp = 0;
@@ -1535,7 +1779,7 @@ export class ManagedInstance {
       this.executorIdentity.sessionFile = truncate(this.session.sessionFile, 16_384);
       this.applyModelState(this.session.getModelState());
       this.touch();
-      this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue });
+      this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId });
       return;
     }
     if (event.type === "dock_runtime_error") {
@@ -1565,6 +1809,8 @@ export class ManagedInstance {
     switch (event.type) {
       case "agent_start":
         this.agentStartCount += 1;
+        this.currentAssistantMessageId = undefined;
+        this.announcedToolCalls.clear();
         this.lastAssistantOutcome = undefined;
         this.state.execution = "running";
         this.state.lastError = undefined;
@@ -1602,32 +1848,54 @@ export class ManagedInstance {
         break;
 
       case "tool_execution_start": {
+        const toolCallId = boundedRuntimeString(event.toolCallId, 128, "unknown");
         const projected = projectJsonObject(event.args);
-        this.appendEvent("tool.started", {
-          toolCallId: boundedRuntimeString(event.toolCallId, 128, "unknown"),
-          toolName: boundedRuntimeString(event.toolName, 256, "unknown"),
-          args: projected.value,
-          ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
+        if (this.announcedToolCalls.has(toolCallId)) {
+          this.appendEvent("tool.args_updated", {
+            toolCallId,
+            args: projected.value,
+            ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
+          });
+        } else {
+          this.announcedToolCalls.add(toolCallId);
+          this.appendEvent("tool.started", {
+            toolCallId,
+            toolName: boundedRuntimeString(event.toolName, 256, "unknown"),
+            args: projected.value,
+            ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
+          });
+        }
+        break;
+      }
+
+      case "tool_execution_update": {
+        const toolCallId = boundedRuntimeString(event.toolCallId, 128, "unknown");
+        if (!this.announcedToolCalls.has(toolCallId)) {
+          this.announcedToolCalls.add(toolCallId);
+          this.appendEvent("tool.started", {
+            toolCallId,
+            toolName: boundedRuntimeString(event.toolName, 256, "unknown"),
+            args: {},
+          });
+        }
+        this.appendEvent("tool.output_updated", {
+          toolCallId,
+          text: projectToolText(recordValue(event.partialResult)?.content),
         });
         break;
       }
 
-      case "tool_execution_update":
-        this.appendEvent("tool.output_updated", {
-          toolCallId: boundedRuntimeString(event.toolCallId, 128, "unknown"),
-          text: projectToolText(recordValue(event.partialResult)?.content),
-        });
-        break;
-
       case "tool_execution_end": {
+        const toolCallId = boundedRuntimeString(event.toolCallId, 128, "unknown");
         const projected = projectJsonObject(event.result);
         this.appendEvent("tool.completed", {
-          toolCallId: boundedRuntimeString(event.toolCallId, 128, "unknown"),
+          toolCallId,
           toolName: boundedRuntimeString(event.toolName, 256, "unknown"),
           isError: event.isError === true,
           text: projectToolText(recordValue(event.result)?.content),
           ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
         });
+        this.announcedToolCalls.delete(toolCallId);
         break;
       }
 
@@ -1651,18 +1919,23 @@ export class ManagedInstance {
         break;
 
       case "compaction_start":
+        this.startCompactionBoundary();
         this.state.execution = "running";
         this.touch();
         this.appendEvent("compaction.started", { reason: compactionReason(event.reason) });
         break;
 
       case "compaction_end":
+        if (this.state.activeCommandId === undefined && event.willRetry !== true) this.state.execution = "idle";
+        this.touch();
         this.appendEvent("compaction.completed", {
           reason: compactionReason(event.reason),
           aborted: event.aborted === true,
           willRetry: event.willRetry === true,
           error: optionalRuntimeString(event.errorMessage, 2_048),
         });
+        this.appendStateEvent("compaction_completed");
+        this.finishCompactionBoundary();
         break;
 
       default:
@@ -1673,6 +1946,7 @@ export class ManagedInstance {
   private handleAgentSettled(): void {
     this.agentSettledCount += 1;
     const outcome = this.lastAssistantOutcome;
+    const operationId = this.receiptBoundaryOperationId ?? this.state.activeCommandId;
     let result: Exclude<LastRunResult, "never">;
 
     if (outcome?.stopReason === "error") {
@@ -1697,6 +1971,7 @@ export class ManagedInstance {
     this.state.activeCommandId = undefined;
     this.touch();
     this.appendEvent("run.settled", {
+      operationId,
       result,
       stopReason: outcome?.stopReason,
       error: outcome?.errorMessage,
@@ -1704,15 +1979,60 @@ export class ManagedInstance {
     this.appendStateEvent("agent_settled");
   }
 
+  private startCompactionBoundary(): void {
+    if (this.compactionActive) return;
+    this.compactionActive = true;
+    this.compactionBoundary = new Promise<void>((resolve) => { this.resolveCompactionBoundary = resolve; });
+  }
+
+  private finishCompactionBoundary(): void {
+    this.compactionActive = false;
+    this.resolveCompactionBoundary?.();
+    this.resolveCompactionBoundary = undefined;
+    this.compactionBoundary = undefined;
+  }
+
   private handleMessageUpdate(event: RuntimeEvent): void {
     const update = recordValue(event.assistantMessageEvent);
     if (!update) return;
     const updateType = stringValue(update.type);
+    if (updateType === "start") {
+      this.ensureAssistantMessageId();
+      return;
+    }
     if (updateType === "text_delta" || updateType === "thinking_delta") {
       this.appendEvent("message.delta", {
-        messageId: boundedRuntimeString(update.messageId, 128, "assistant-current"),
+        messageId: this.ensureAssistantMessageId(),
         block: updateType === "text_delta" ? "text" : "thinking",
         delta: boundedRuntimeString(update.delta, 8_000, ""),
+      });
+      return;
+    }
+    if (updateType !== "toolcall_start" && updateType !== "toolcall_delta" && updateType !== "toolcall_end") return;
+    this.ensureAssistantMessageId();
+    const index = nonNegativeNumber(update.contentIndex);
+    const partial = recordValue(update.partial);
+    const content = Array.isArray(partial?.content) ? partial.content : [];
+    const partialToolCall = recordValue(content[index]);
+    const finalToolCall = recordValue(update.toolCall);
+    const toolCall = finalToolCall ?? partialToolCall;
+    const rawId = stringValue(toolCall?.id);
+    if (!rawId) return;
+    const toolCallId = boundedRuntimeString(rawId, 128, "unknown");
+    const projected = projectJsonObject(toolCall?.arguments ?? {});
+    if (!this.announcedToolCalls.has(toolCallId)) {
+      this.announcedToolCalls.add(toolCallId);
+      this.appendEvent("tool.started", {
+        toolCallId,
+        toolName: boundedRuntimeString(toolCall?.name, 256, "tool"),
+        args: projected.value,
+        ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
+      });
+    } else {
+      this.appendEvent("tool.args_updated", {
+        toolCallId,
+        args: projected.value,
+        ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
       });
     }
   }
@@ -1721,19 +2041,33 @@ export class ManagedInstance {
     const message = recordValue(event.message);
     if (!message) return;
     const role = stringValue(message.role);
+    let messageId: string;
     if (role === "assistant") {
+      messageId = this.ensureAssistantMessageId();
       this.lastAssistantOutcome = {
         stopReason: optionalRuntimeString(message.stopReason, 128),
         errorMessage: optionalRuntimeString(message.errorMessage, 2_048),
       };
+    } else if (role === "user" && this.state.activeCommandId) {
+      messageId = `user-${this.state.activeCommandId}`;
+    } else if (role === "toolResult") {
+      messageId = `tool-result-${boundedRuntimeString(message.toolCallId, 128, "unknown")}`;
+    } else {
+      messageId = `message-${this.runtimeGenerationValue}-${++this.assistantMessageSequence}`;
     }
     this.appendEvent("message.completed", {
-      messageId: boundedRuntimeString(message.id, 128, `${role || "message"}-current`),
+      messageId,
       role: messageRole(role),
       content: projectContentBlocks(message.content),
       stopReason: optionalRuntimeString(message.stopReason, 128),
       error: optionalRuntimeString(message.errorMessage, 2_048),
     });
+    if (role === "assistant") this.currentAssistantMessageId = undefined;
+  }
+
+  private ensureAssistantMessageId(): string {
+    this.currentAssistantMessageId ??= `assistant-${this.runtimeGenerationValue}-${++this.assistantMessageSequence}`;
+    return this.currentAssistantMessageId;
   }
 
   private appendStateEvent(reason: string, occurredAt?: string): void {
@@ -1757,7 +2091,7 @@ export class ManagedInstance {
       scope: "instance" as const,
       sequence: this.nextEventSequence++,
       instanceId: this.id,
-      runtimeGeneration: this.runtimeGeneration,
+      runtimeGeneration: this.publishedRuntimeGenerationValue,
       occurredAt,
       type,
       data,
@@ -1786,7 +2120,7 @@ export class ManagedInstance {
   }
 
   private cursor(sequence: number): EventCursor {
-    return { hostEpoch: this.hostEpoch, instanceId: this.id, runtimeGeneration: this.runtimeGeneration, sequence };
+    return { hostEpoch: this.hostEpoch, instanceId: this.id, runtimeGeneration: this.publishedRuntimeGenerationValue, sequence };
   }
 
   private timestamp(): string {
@@ -1821,6 +2155,134 @@ function optionalRuntimeString(value: unknown, limit: number): string | undefine
   return typeof value === "string" ? safeWireText(value, limit, "Sensitive payload omitted") : undefined;
 }
 
+function eventsNotCoveredByHistory(events: DockEvent[], history: HistoryEntryDto[]): DockEvent[] {
+  const counts = new Map<string, number>();
+  for (const entry of history) {
+    const fingerprint = historyFingerprint(entry.role, entry.content);
+    counts.set(fingerprint, (counts.get(fingerprint) ?? 0) + 1);
+  }
+  const coveredMessages = new Set<string>();
+  const coveredTools = new Set<string>();
+  const consume = (fingerprint: string): boolean => {
+    const count = counts.get(fingerprint) ?? 0;
+    if (count < 1) return false;
+    if (count === 1) counts.delete(fingerprint); else counts.set(fingerprint, count - 1);
+    return true;
+  };
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.type === "message.completed") {
+      if (event.data.role === "user" || coveredMessages.has(event.data.messageId)) continue;
+      if (consume(historyFingerprint(event.data.role, event.data.content))) coveredMessages.add(event.data.messageId);
+    } else if (event.type === "message.submitted") {
+      if (coveredMessages.has(event.data.messageId)) continue;
+      if (consume(historyFingerprint("user", [{ type: "text", text: event.data.text }]))) coveredMessages.add(event.data.messageId);
+    } else if (event.type === "tool.completed") {
+      const content: ContentBlockDto[] = [{
+        type: "tool_result",
+        toolCallId: event.data.toolCallId,
+        toolName: event.data.toolName,
+        text: event.data.text,
+        isError: event.data.isError,
+      }];
+      if (consume(historyFingerprint("tool", content))) coveredTools.add(event.data.toolCallId);
+    }
+  }
+  return events.filter((event) => {
+    if (event.type === "message.submitted" || event.type === "message.delta" || event.type === "message.completed") {
+      return !coveredMessages.has(event.data.messageId);
+    }
+    if (event.type === "tool.started" || event.type === "tool.args_updated" || event.type === "tool.output_updated" || event.type === "tool.completed") {
+      return !coveredTools.has(event.data.toolCallId);
+    }
+    return true;
+  });
+}
+
+function historyFingerprint(role: HistoryEntryDto["role"], content: ContentBlockDto[]): string {
+  const normalized = content.map((block) => {
+    if (block.type === "tool_call") return { type: block.type, toolCallId: block.toolCallId, toolName: block.toolName, args: block.args };
+    if (block.type === "tool_result") return { type: block.type, toolCallId: block.toolCallId, toolName: block.toolName, text: block.text, isError: block.isError };
+    return block;
+  });
+  return JSON.stringify({ role, content: normalized });
+}
+
+function refreshesHistory(event: RuntimeEvent): boolean {
+  return event.type === "entry_appended" || event.type === "message_end" || event.type === "dock_session_replaced";
+}
+
+function refreshesMetrics(event: RuntimeEvent): boolean {
+  return event.type === "entry_appended"
+    || event.type === "message_end"
+    || event.type === "tool_execution_end"
+    || event.type === "agent_settled"
+    || event.type === "compaction_end"
+    || event.type === "dock_session_replaced";
+}
+
+function projectRuntimeHistoryEntry(entry: RuntimeHistoryEntry): HistoryEntryDto {
+  const role = historyRole(entry.role);
+  const entryId = boundedRuntimeString(entry.entryId, 128, "unknown-entry");
+  const content: ContentBlockDto[] = role === "tool"
+    ? [{
+      type: "tool_result",
+      toolCallId: boundedRuntimeString(entry.toolCallId, 128, `tool-${entryId}`),
+      toolName: boundedRuntimeString(entry.toolName, 256, "tool"),
+      text: projectToolText(entry.content),
+      isError: entry.isError === true,
+    }]
+    : projectContentBlocks(entry.content);
+  return {
+    entryId,
+    ...(entry.parentId === undefined ? {} : { parentId: boundedRuntimeString(entry.parentId, 128, "unknown-parent") }),
+    role,
+    ...(isIsoTimestamp(entry.timestamp) ? { timestamp: entry.timestamp } : {}),
+    content,
+    ...(entry.stopReason === undefined ? {} : { stopReason: boundedRuntimeString(entry.stopReason, 128, "unknown") }),
+    ...(entry.error === undefined ? {} : { error: safeWireText(entry.error, 2_048, "History error omitted") }),
+  };
+}
+
+function historyRole(value: string): HistoryEntryDto["role"] {
+  if (value === "user") return "user";
+  if (value === "tool" || value === "toolResult") return "tool";
+  if (value === "system" || value === "bashExecution" || value === "custom" || value === "branchSummary" || value === "compactionSummary") return "system";
+  return "assistant";
+}
+
+function projectRuntimeMetrics(value: RuntimeSessionMetrics): SessionMetricsDto {
+  const context = value.context;
+  return {
+    messages: {
+      user: nonNegativeNumber(value.messages.user),
+      assistant: nonNegativeNumber(value.messages.assistant),
+      toolCalls: nonNegativeNumber(value.messages.toolCalls),
+      toolResults: nonNegativeNumber(value.messages.toolResults),
+      total: nonNegativeNumber(value.messages.total),
+    },
+    tokens: {
+      input: nonNegativeNumber(value.tokens.input),
+      output: nonNegativeNumber(value.tokens.output),
+      cacheRead: nonNegativeNumber(value.tokens.cacheRead),
+      cacheWrite: nonNegativeNumber(value.tokens.cacheWrite),
+      total: nonNegativeNumber(value.tokens.total),
+    },
+    cost: typeof value.cost === "number" && Number.isFinite(value.cost) && value.cost >= 0 ? value.cost : 0,
+    ...(context === undefined ? {} : {
+      context: {
+        tokens: context.tokens === null ? null : nonNegativeNumber(context.tokens),
+        contextWindow: Math.max(1, nonNegativeNumber(context.contextWindow)),
+        percent: context.percent === null
+          ? null
+          : typeof context.percent === "number" && Number.isFinite(context.percent)
+            ? Math.max(0, Math.min(100, context.percent))
+            : null,
+      },
+    }),
+  };
+}
+
 function nonNegativeNumber(value: unknown): number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 }
@@ -1830,7 +2292,10 @@ function compactionReason(value: unknown): "manual" | "threshold" | "overflow" {
 }
 
 function messageRole(value: unknown): "user" | "assistant" | "tool" | "system" {
-  return value === "user" || value === "tool" || value === "system" ? value : "assistant";
+  if (value === "user" || value === "system") return value;
+  if (value === "tool" || value === "toolResult") return "tool";
+  if (value === "bashExecution" || value === "custom" || value === "branchSummary" || value === "compactionSummary") return "system";
+  return "assistant";
 }
 
 function stringArray(value: unknown): string[] {

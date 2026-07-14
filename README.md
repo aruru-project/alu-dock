@@ -2,9 +2,9 @@
 
 Alu Dock 是 #136「受管运行时宿主」的独立实现；V0 执行卡为 #137，V0.1 工程入口为 #142。
 
-V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座已完成 V2 foundation、Host-owned `AgentSessionRuntime`、project trust、tools/settings/resources closed projection，以及 catalog transaction/mutation-faulted seam。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与 Alubot 不在本仓库的修改范围内。
+V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座和阶段 2 SSH TUI/Footer 均已完成。当前 Host 提供 V2 transaction/fault seam、持久 branch history projection、稳定 message/tool event、session metrics 与可复用实例 abort；薄 TUI 提供 Markdown/thinking/tool/diff、动态 autocomplete、完整 Footer、PTY resize/detach/transport-loss 行为。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与 Alubot 不在本仓库的修改范围内。
 
-## 当前进度
+## V0 冻结进度
 
 - [x] 阶段 0：实施前可行性门禁（ADJUST → GO）
 - [x] 阶段 1：SDK 单实例生命周期探针
@@ -12,6 +12,17 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [x] 阶段 3：第二客户端继续交互与显式停止
 - [x] 阶段 3.5：自动宿主启动与真人可用薄 TUI
 - [x] 阶段 4：默认资源兼容与体验评估；V0 PASS
+
+## V0.1 进度
+
+- [x] 阶段 0：合同冻结（GO）
+- [x] 阶段 1：Runtime 与 Protocol V2 底座
+- [x] 阶段 2：SSH TUI 核心与 Footer
+- [ ] 阶段 3：日常控制与核心 Session
+- [ ] 阶段 4：Extension UI
+- [ ] 阶段 5：`systemd --user`、durable catalog 与 reopen
+- [ ] 阶段 6：tree/fork/clone
+- [ ] 最终真人默认入口验收
 
 详细文档：
 
@@ -30,6 +41,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-v0.1-stage-1b-runtime-trust.md`](docs/validation-v0.1-stage-1b-runtime-trust.md)
 - [`docs/validation-v0.1-stage-1c-projections.md`](docs/validation-v0.1-stage-1c-projections.md)
 - [`docs/validation-v0.1-stage-1d-transactions.md`](docs/validation-v0.1-stage-1d-transactions.md)
+- [`docs/validation-v0.1-stage-2-ssh-tui.md`](docs/validation-v0.1-stage-2-ssh-tui.md)
 
 ## V0.1 工程入口
 
@@ -37,7 +49,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 
 **绿地规则：** Alu Dock 是全新项目。到 1.0 落地前，除非用户特意说明，不考虑任何旧协议、旧 Host、旧数据、旧 CLI 行为的兼容或迁移；原型合同直接替换。版本号仅标识当前合同，不表示存在历史包袱。
 
-阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1 已将当前控制面切为 V2-only，并完成 Runtime replacement、project trust、closed projections及 registry transaction/fault seam。Durable atomic catalog、startup reconcile、explicit reopen与 `systemd --user` 唯一常驻 Host仍属于阶段 5；当前入口仍会按需 detached 启动 Host。
+阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1 已将当前控制面切为 V2-only，并完成 Runtime replacement、project trust、closed projections及 registry transaction/fault seam；阶段 2 已 advertised `tui.projection.v1` 与独立的 `run.abort.v1`。Durable atomic catalog、startup reconcile、explicit reopen与 `systemd --user` 唯一常驻 Host仍属于阶段 5；当前入口仍会按需 detached 启动 Host。
 
 ## 当前过渡期真人入口
 
@@ -51,8 +63,10 @@ npm run cli
 
 常用操作：
 
-- `Enter`：发送；运行中默认作为 steer
-- `/follow MESSAGE`：排队为 follow-up
+- `Enter`：发送；运行中默认作为 steer；Editor 支持 multiline paste 与 history
+- `Alt+Enter` 或 `/follow MESSAGE`：排队为 follow-up
+- `Esc`、空编辑器 `Ctrl+C` 或 `/abort`：取消当前 run/retry/compaction，实例保持可复用
+- `Ctrl+O`：折叠或展开 generic tool output
 - `/model`：打开 Pi 可用模型选择器（包含已配置认证的本地自定义模型）
 - `/model PROVIDER/MODEL`：直接切换模型
 - `/thinking LEVEL`：设置 Pi thinking level；`/thinking` 查看当前可选值
@@ -67,7 +81,7 @@ npm run cli -- new --cwd "$PWD" --name demo
 npm run cli -- attach INSTANCE_ID
 ```
 
-再次执行 `npm run cli` 会重放 Host 的近期消息并继续观察 live events。模型/thinking 切换沿用 Pi 的 session 与 settings 语义，只允许实例 idle 时执行；当前运行不会被中途换模。Host 在创建 Pi SDK session 前安装与 Pi CLI 相同的 Undici `EnvHttpProxyAgent`：优先保留进程已有 `HTTP_PROXY` / `HTTPS_PROXY`，缺失时采用 Pi 全局 `httpProxy` 设置。默认 socket 为 `$XDG_RUNTIME_DIR/alu-dock/dock.sock`，未设置 XDG 时为 `~/.alu-dock/run/dock.sock`；后台日志位于 socket 同目录的 `host.log`。
+再次执行 `npm run cli` 会先投影 Pi SessionManager 当前 branch 的持久 history baseline，再重放 Host 近期 events 并继续观察 live events。TUI Footer 展示 cwd、Dock/Pi ID、model/thinking、state/queue、tokens/context/cache/cost、extension status 和 connection/lease；extension/skill/prompt commands 与路径进入 autocomplete。模型/thinking 切换沿用 Pi 的 session 与 settings 语义，只允许实例 idle 时执行；当前运行不会被中途换模。Host 在创建 Pi SDK session 前安装与 Pi CLI 相同的 Undici `EnvHttpProxyAgent`：优先保留进程已有 `HTTP_PROXY` / `HTTPS_PROXY`，缺失时采用 Pi 全局 `httpProxy` 设置。默认 socket 为 `$XDG_RUNTIME_DIR/alu-dock/dock.sock`，未设置 XDG 时为 `~/.alu-dock/run/dock.sock`；后台日志位于 socket 同目录的 `host.log`。
 
 ## 机器与诊断接口
 
@@ -92,9 +106,9 @@ npm run cli -- stop INSTANCE_ID
 
 状态不是一个含糊枚举，而是三个维度：
 
-- `lifecycle`: `active | stopping | stopped`
-- `execution`: `idle | running | failed`
-- `lastRun`: `never | succeeded | failed | aborted`
+- `lifecycle`: `active | stopping | stopped | host_lost | runtime_error`
+- `execution`: `idle | running | failed | unavailable`
+- `lastRun`: `never | succeeded | failed | aborted | interrupted`
 
 Alu Dock 的 `instanceId` 与 Pi 的 `piSessionId/sessionFile` 分离。`prompt()` 在 SDK preflight 接受后返回 receipt，完整 Promise 留在宿主后台；最终稳定以 `agent_settled` 为准，不使用 `agent_end` 猜测。
 

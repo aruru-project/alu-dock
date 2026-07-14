@@ -1,6 +1,6 @@
 # Alu Dock 本机控制协议 V2
 
-状态：阶段 0 冻结设计；阶段 1 起按 capability 逐步实施
+状态：阶段 0 冻结设计；阶段 1–2 已按 capability 实施
 
 传输：当前 Unix 用户私有 AF_UNIX socket + UTF-8 JSONL
 
@@ -33,7 +33,7 @@ Capability 只在实现和对应 gate 都通过后才 advertised：
 | 阶段 | 新增 capability |
 |---|---|
 | 1 | `core.v2`、`host.info`、`instance.catalog`、`events.follow`、`models.v1`、`tools.v1`、`settings.v1`、`resources.v1`、`session.core` |
-| 2 | `tui.projection.v1`（表示完整 history/message/tool/metrics projection） |
+| 2 | `tui.projection.v1`（完整 history/message/tool/metrics projection）、`run.abort.v1` |
 | 3 | `session.commands.v1`（new/resume/name/compact/reload） |
 | 4 | `extension_ui.v1` |
 | 5 | `service.managed.v1`、`catalog.v1`、`session.reopen` |
@@ -70,13 +70,13 @@ Capability 只在实现和对应 gate 都通过后才 advertised：
 Client hello：
 
 ```json
-{"kind":"hello","requestId":"h1","versions":[2],"client":{"name":"alu-dock-tui","version":"0.1.0","clientId":"uuid"},"requiredCapabilities":["core.v2","events.follow"]}
+{"kind":"hello","requestId":"h1","versions":[2],"client":{"name":"alu-dock-tui","version":"0.1.0","clientId":"uuid"},"requiredCapabilities":["core.v2","events.follow","run.abort.v1","tui.projection.v1"]}
 ```
 
 Ready success（capability 列表只是当前实现集合）：
 
 ```json
-{"kind":"hello_ack","requestId":"h1","version":2,"host":{"pid":123,"dockVersion":"0.1.0","piSdkVersion":"0.80.6","hostEpoch":"uuid","startedAt":"2026-07-14T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["core.v2","events.follow","host.info","instance.catalog"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200}}
+{"kind":"hello_ack","requestId":"h1","version":2,"host":{"pid":123,"dockVersion":"0.1.0","piSdkVersion":"0.80.6","hostEpoch":"uuid","startedAt":"2026-07-14T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["core.v2","events.follow","host.info","instance.catalog","models.v1","resources.v1","run.abort.v1","session.core","settings.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200}}
 ```
 
 任何 hello 失败都使用 closed `hello_error`，随后关闭：
@@ -164,6 +164,8 @@ interface SessionMetricsDto {
   cost: number;
   context?: { tokens: number | null; contextWindow: number; percent: number | null };
 }
+
+Metrics count/token 字段必须是非负 safe integer，`cost` 必须是非负 finite number；`contextWindow>=1`，`percent` 仅允许 `null` 或 `0..100`。Footer cache hit 固定按 `cacheRead/(input+cacheRead+cacheWrite)` 计算。
 
 interface ExecutorDto {
   kind: string;
@@ -272,6 +274,7 @@ interface HistoryEntryDto {
 | `instance.stop` | `instance.catalog` | `{operationId,instanceId}` | `{receipt:{operationId,alreadyStopped,cleanupErrors?:string[]},instance}` |
 | `instance.reopen` | `session.reopen` | `{operationId,instanceId,sessionFile?,trustChallengeId?,projectTrustDecision?}` | `{instance}` |
 | `command.submit` | `session.core` | `{operationId,instanceId,message,delivery:Delivery}` | `{receipt:CommandReceiptDto,instance}` |
+| `command.abort` | `run.abort.v1` | `{operationId,instanceId}` | `{instance}`；取消当前 agent/retry/compaction，实例保持可复用 |
 | `command.catalog` | `resources.v1` | `{instanceId,prefix?:string}` | `{commands:CommandDto[]}` |
 | `model.list` | `models.v1` | `{instanceId}` | `{models:ModelDto[],availableThinkingLevels:string[],instance}` |
 | `model.set` | `models.v1` | `{operationId,instanceId,provider,modelId}` | `{instance,settingsWrite:{persisted:boolean}}` |
@@ -408,6 +411,7 @@ Parser、catalog loader 和 registry mutation 共用同一个 invariant validato
 | steer/followUp | `active + running` |
 | model/thinking/tools/settings/session replacement | `active + quiescent` |
 | compact | active；具体 abort/compact 语义交给 Pi，Dock 阻止并发 config/replacement |
+| abort | `active + running` 或幂等 idle；Pi 正在 compaction 时调用 `abortCompaction()` 并等待 idle，不伪造 `run.settled`/`lastRun=aborted` |
 | stop | active；stopping/stopped 同 operation 走幂等结果；host_lost/runtime_error 不当作 live stop |
 | reopen | `host_lost|runtime_error + reopenable` |
 | interaction response | active、同 generation、当前 lease、pending interaction |
@@ -534,9 +538,9 @@ Trust challenge 是 operation ID 的**未完成 pre-side-effect 状态**，不�
 
 `earliest/latest` 都是完整 `EventCursor`。Ring 为空时 sequence 为 0。Replay truncation只在相同四维域内计算。
 
-Attach response 生成期间，Host 先注册 listener并暂存 live events，再取 snapshot/history/ring，发送 response 后按 sequence flush暂存事件，沿用 V0 已验证的 response-before-event pattern。
+Attach response 生成期间，Host 先注册 listener并暂存 live events，再从同一 committed projection gate取 snapshot/history/ring，发送 response 后按 `(runtimeGeneration, sequence)` flush暂存事件，沿用 V0 已验证的 response-before-event pattern。Generation rollover 只接受下一 generation 的 sequence 1 `session.replaced`，绝不能把新 generation 的低 sequence当成旧 event丢弃。`recentHistory`提供当前 branch 的持久 baseline；Host 按 stable message/tool ID与 closed content fingerprint，以完整 current branch（包括 recentHistory 页之前的 truncated entries）从 replay中删除已被持久 history覆盖的 message/tool frames，避免旧 replay 在 recent history 之后倒序出现，且不依赖 wall-clock timestamp；response 超过 1 MiB 时优先裁可分页恢复的旧 history，再裁旧 event，并设置对应 truncation flag。
 
-长 history 用 `session.history` 反向分页；`beforeEntryId` 必须属于当前 branch，否则 `invalid_cursor`。Runtime replacement/reload 成功会增加 generation并发 `session.replaced` 作为新 generation 首批 event，client 清旧 projection并重新读取 history。
+长 history 用 `session.history` 反向分页；返回项保持 branch 顺序，`hasEarlier=true` 时 `nextBeforeEntryId` 必须等于本页第一项。`beforeEntryId` 必须属于当前 branch，否则 `invalid_cursor`。Runtime replacement/reload 成功会增加 generation并发 `session.replaced` 作为新 generation 首批 event，client 清旧 projection并重新读取 history。
 
 Host_lost/runtime_error record 没有 live session history surface；TUI 只显示 catalog metadata并提供 explicit reopen。
 
@@ -641,6 +645,8 @@ interface EventDataMap {
     previousSessionFile?: string;
     sessionFile?: string;
     runtimeGeneration: number;
+    cwd: string;
+    piSessionId: string;
   };
   "session.info_changed": { name?: string };
   "session.metrics_changed": { metrics: SessionMetricsDto };
@@ -669,12 +675,13 @@ Numeric counters必须是 non-negative safe integer；timestamp使用 ISO-8601 U
 
 ### 不可自动 retry
 
-所有 mutation：instance create/stop/reopen、command submit、model/thinking/tool/settings mutation、session switch/new/name/compact/reload/navigate/fork/clone、trust remember decision。Transport close 后 client 显示 `effect_unknown`，用户先查询再决定。
+所有 mutation：instance create/stop/reopen、command submit/abort、model/thinking/tool/settings mutation、session switch/new/name/compact/reload/navigate/fork/clone、trust remember decision。Transport close 后 client 显示 `effect_unknown`，用户先查询再决定。
 
 | Mutation | 收敛查询 |
 |---|---|
 | create | `instance.list` 按 `creationOperationId` 查找；找不到也不能假设 extension startup无副作用。 |
 | prompt/steer/follow | instance snapshot + activeCommandId、history/events；新 epoch同 operation ID只返回 interrupted/unknown，不重新 submit。 |
+| abort | instance execution/lastRun + run/compaction events；不自动重复 abort。 |
 | model/thinking/tools/settings | 对应 get/list + instance snapshot。 |
 | session mutation | instance Pi IDs/runtime generation + history/session list。 |
 | compact | instance execution/compaction events + history。 |

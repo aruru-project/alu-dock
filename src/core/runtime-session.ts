@@ -34,6 +34,26 @@ export interface RuntimeModelState {
   availableThinkingLevels: RuntimeThinkingLevel[];
 }
 
+export interface RuntimeSessionMetrics {
+  messages: { user: number; assistant: number; toolCalls: number; toolResults: number; total: number };
+  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+  cost: number;
+  context?: { tokens: number | null; contextWindow: number; percent: number | null };
+}
+
+export interface RuntimeHistoryEntry {
+  entryId: string;
+  parentId?: string;
+  timestamp?: string;
+  role: string;
+  content: unknown;
+  stopReason?: string;
+  error?: string;
+  toolCallId?: string;
+  toolName?: string;
+  isError?: boolean;
+}
+
 export interface RuntimeSessionInfo {
   sessionId: string;
   sessionFile: string;
@@ -125,6 +145,7 @@ export interface RuntimeSession {
   prompt(text: string, options?: RuntimePromptOptions): Promise<void>;
   listModels(): Promise<RuntimeModelInfo[]>;
   listSessions(scope: "cwd" | "all"): Promise<RuntimeSessionInfo[]>;
+  getHistory(): RuntimeHistoryEntry[];
   listTools(): Promise<ToolDto[]>;
   setActiveTools(names: string[]): Promise<ToolDto[]>;
   getSettings(): Promise<SettingDto[]>;
@@ -137,6 +158,7 @@ export interface RuntimeSession {
   selectModel(provider: string, modelId: string): Promise<RuntimeModelState>;
   setThinkingLevel(level: RuntimeThinkingLevel): Promise<RuntimeModelState>;
   getModelState(): RuntimeModelState;
+  getMetrics(): RuntimeSessionMetrics;
   clearQueue(): ClearedRuntimeQueue;
   abort(): Promise<void>;
   waitForIdle(): Promise<void>;

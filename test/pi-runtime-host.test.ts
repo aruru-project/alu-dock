@@ -5,6 +5,7 @@ import {
   SettingsManager,
   type AgentSession,
   type AgentSessionServices,
+  type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 
 import { CatalogTransactionCoordinator } from "../src/control/catalog-transactions.js";
@@ -26,14 +27,17 @@ interface FakeModel {
 }
 
 class FakeSession {
+  historyEntries: SessionEntry[] = [];
   readonly listeners = new Set<(event: { type: string; [key: string]: unknown }) => void>();
   readonly sessionManager = {
     getCwd: () => "/project",
     getSessionDir: () => "/sessions",
     usesDefaultSessionDir: () => this.usesDefaultSessionDir,
+    getBranch: () => structuredClone(this.historyEntries),
   };
   usesDefaultSessionDir = true;
   isStreaming = false;
+  isCompacting = false;
   model: FakeModel | undefined;
   thinkingLevel: "off" | "high" = "off";
   steeringMode: "all" | "one-at-a-time" = "all";
@@ -44,10 +48,19 @@ class FakeSession {
   reloadError: Error | undefined;
   reloadEvent: { type: string; [key: string]: unknown } | undefined;
   bindCalls = 0;
+  abortCalls = 0;
+  abortCompactionCalls = 0;
   disposeCalls = 0;
   unsubscribeCalls = 0;
   toolSetCalls = 0;
   activeToolNames: string[] = [];
+  stats = {
+    sessionFile: "", sessionId: "", userMessages: 0, assistantMessages: 0,
+    toolCalls: 0, toolResults: 0, totalMessages: 0,
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    cost: 0,
+    contextUsage: undefined as { tokens: number | null; contextWindow: number; percent: number | null } | undefined,
+  };
   allTools: Array<{
     name: string;
     description: string;
@@ -60,7 +73,10 @@ class FakeSession {
     readonly sessionId: string,
     readonly sessionFile: string,
     private readonly trace: string[],
-  ) {}
+  ) {
+    this.stats.sessionFile = sessionFile;
+    this.stats.sessionId = sessionId;
+  }
 
   subscribe(listener: (event: { type: string; [key: string]: unknown }) => void): () => void {
     this.trace.push(`${this.sessionId}:subscribe`);
@@ -104,6 +120,7 @@ class FakeSession {
     this.settingsManager?.setFollowUpMode(mode);
   }
   getAvailableThinkingLevels(): Array<"off" | "high"> { return ["off", "high"]; }
+  getSessionStats(): typeof this.stats { return structuredClone(this.stats); }
   getActiveToolNames(): string[] { return [...this.activeToolNames]; }
   getAllTools(): typeof this.allTools { return [...this.allTools]; }
   setActiveToolsByName(names: string[]): void {
@@ -111,7 +128,12 @@ class FakeSession {
     this.activeToolNames = [...names];
   }
   clearQueue(): { steering: string[]; followUp: string[] } { return { steering: [], followUp: [] }; }
-  abort(): Promise<void> { return Promise.resolve(); }
+  abort(): Promise<void> { this.abortCalls += 1; return Promise.resolve(); }
+  abortCompaction(): void { this.abortCompactionCalls += 1; }
+  finishCompaction(): void {
+    this.isCompacting = false;
+    this.emit({ type: "compaction_end", reason: "manual", result: undefined, aborted: true, willRetry: false });
+  }
   waitForIdle(): Promise<void> { return Promise.resolve(); }
   setSessionName(): void {}
   async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
@@ -265,6 +287,70 @@ test("Pi runtime host binds initial listener before extensions and delays startu
   assert.equal(initial.disposeCalls, 1);
 });
 
+test("Pi runtime host projects public session stats for the SSH footer", async () => {
+  const trace: string[] = [];
+  const { host } = await runtimeHost(trace, (_owner, session) => {
+    session.stats = {
+      ...session.stats,
+      userMessages: 2,
+      assistantMessages: 3,
+      toolCalls: 4,
+      toolResults: 4,
+      totalMessages: 13,
+      tokens: { input: 100, output: 50, cacheRead: 25, cacheWrite: 5, total: 180 },
+      cost: 0.012,
+      contextUsage: { tokens: 900, contextWindow: 2_000, percent: 45 },
+    };
+  });
+
+  assert.deepEqual(host.getMetrics(), {
+    messages: { user: 2, assistant: 3, toolCalls: 4, toolResults: 4, total: 13 },
+    tokens: { input: 100, output: 50, cacheRead: 25, cacheWrite: 5, total: 180 },
+    cost: 0.012,
+    context: { tokens: 900, contextWindow: 2_000, percent: 45 },
+  });
+  await host.dispose();
+});
+
+test("Pi runtime history uses public SessionManager branch entries", async () => {
+  const trace: string[] = [];
+  const { host, initial } = await runtimeHost(trace, (_owner, session) => {
+    session.historyEntries = [
+      { type: "message", id: "h1", parentId: null, timestamp: "2026-07-14T00:00:00.000Z", message: { role: "user", content: "question", timestamp: 1 } },
+      { type: "custom_message", id: "h2", parentId: "h1", timestamp: "2026-07-14T00:00:01.000Z", customType: "visible", content: "notice", display: true },
+      { type: "compaction", id: "h3", parentId: "h2", timestamp: "2026-07-14T00:00:02.000Z", summary: "summary", firstKeptEntryId: "h1", tokensBefore: 10 },
+    ];
+  });
+
+  assert.deepEqual(host.getHistory().map((entry) => [entry.entryId, entry.role, entry.content]), [
+    ["h1", "user", "question"],
+    ["h2", "system", "notice"],
+    ["h3", "system", "summary"],
+  ]);
+  initial.historyEntries.push({ type: "custom_message", id: "hidden", parentId: "h3", timestamp: "2026-07-14T00:00:03.000Z", customType: "hidden", content: "secret", display: false });
+  assert.equal(host.getHistory().some((entry) => entry.entryId === "hidden"), false);
+  await host.dispose();
+});
+
+test("Pi runtime abort selects the public compaction cancellation path", async () => {
+  const trace: string[] = [];
+  const { host, initial } = await runtimeHost(trace);
+  initial.isCompacting = true;
+
+  let abortResolved = false;
+  const aborting = host.abort().then(() => { abortResolved = true; });
+  await new Promise((resolveTurn) => setImmediate(resolveTurn));
+  assert.equal(initial.abortCompactionCalls, 1);
+  assert.equal(initial.abortCalls, 0);
+  assert.equal(abortResolved, false);
+  initial.finishCompaction();
+  await aborting;
+
+  await host.abort();
+  assert.equal(initial.abortCalls, 1);
+  await host.dispose();
+});
+
 test("successful replacement invalidates old binding and publishes new generation first", async () => {
   const trace: string[] = [];
   const commits: string[] = [];
@@ -338,6 +424,9 @@ test("replacement catalog failure keeps the committed generation and reports the
   assert.equal(instance.runtimeGeneration, 2);
   assert.equal(instance.snapshot().runtimeGeneration, 1);
   assert.equal(instance.snapshot().executor.piSessionId, "initial");
+  const conservativeAttach = await instance.getAttachProjection(undefined);
+  assert.equal(conservativeAttach.instance.runtimeGeneration, 1);
+  assert.equal(conservativeAttach.page.latest.runtimeGeneration, 1);
   await instance.disposeForHostDrain();
   assert.equal(owner.disposeCalls, 1);
 });
@@ -670,7 +759,7 @@ test("Pi runtime host projects executable resource and command metadata without 
     getExtensions: () => ({
       extensions: [
         { path: sourceInfo.path, resolvedPath: sourceInfo.path, sourceInfo, commands: new Map([["safe", command("safe")]]) },
-        { path: secondSource.path, resolvedPath: secondSource.path, sourceInfo: secondSource, commands: new Map([["safe", command("safe", secondSource)], ["safe:1", command("safe:1", secondSource)]]) },
+        { path: secondSource.path, resolvedPath: secondSource.path, sourceInfo: secondSource, commands: new Map([["safe", command("safe", secondSource)], ["safe:1", command("safe:1", secondSource)], ["unsafe", command("unsafe\u001b[2J", secondSource)]]) },
       ],
       errors: [{ path: "/agent/extensions/broken.ts", error: "data:image/png;base64,c2VjcmV0" }],
       runtime: {},
@@ -711,7 +800,7 @@ test("Pi runtime host projects executable resource and command metadata without 
     "skill:skill:skill-a",
   ]);
   assert.equal(commands.find((item) => item.name === "safe:1")?.argumentCompletions, true);
-  assert.doesNotMatch(JSON.stringify(commands), /handler|TOP SECRET/);
+  assert.doesNotMatch(JSON.stringify(commands), /handler|TOP SECRET|\u001b/);
   settings.setEnableSkillCommands(false);
   assert.equal((await host.getCommands()).some((item) => item.source.kind === "skill"), false);
   await host.dispose();

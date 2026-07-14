@@ -7,6 +7,7 @@ import type {
   EventDataMap,
   EventPage,
   ExecutorIdentity,
+  HistoryEntryDto,
   InstanceSnapshot,
   JsonObject,
   JsonValue,
@@ -46,9 +47,11 @@ export const IMPLEMENTED_CAPABILITIES = [
   "instance.catalog",
   "models.v1",
   "resources.v1",
+  "run.abort.v1",
   "session.core",
   "settings.v1",
   "tools.v1",
+  "tui.projection.v1",
 ] as const;
 export type Capability = typeof IMPLEMENTED_CAPABILITIES[number];
 
@@ -96,6 +99,7 @@ export type ControlRequest =
   | Request<"instance.attach", { instanceId: string; since?: EventCursor; follow: boolean; controller: "claim" | "observe" }>
   | Request<"instance.stop", { operationId: string; instanceId: string }>
   | Request<"command.submit", { operationId: string; instanceId: string; message: string; delivery: DeliveryMode }>
+  | Request<"command.abort", { operationId: string; instanceId: string }>
   | Request<"model.list", { instanceId: string }>
   | Request<"model.set", { operationId: string; instanceId: string; provider: string; modelId: string }>
   | Request<"thinking.set", { operationId: string; instanceId: string; level: RuntimeThinkingLevel }>
@@ -105,6 +109,7 @@ export type ControlRequest =
   | Request<"settings.update", { operationId: string; instanceId: string; update: SettingUpdate }>
   | Request<"resource.get", { instanceId: string }>
   | Request<"command.catalog", { instanceId: string; prefix?: string }>
+  | Request<"session.history", { instanceId: string; beforeEntryId?: string; limit: number }>
   | Request<"session.list", { instanceId: string; scope: "cwd" | "all" }>;
 
 export interface ControlError { code: string; message: string; retryable: boolean; details?: JsonObject }
@@ -127,18 +132,20 @@ export interface StatusResult { instance: InstanceSnapshot }
 export interface AttachInitialDto {
   instance: InstanceSnapshot;
   page: EventPage & { epochChanged: boolean; generationChanged: boolean };
-  recentHistory: [];
+  recentHistory: HistoryEntryDto[];
   historyTruncated: boolean;
   controller: { status: "observing" | "unavailable" };
   following: boolean;
 }
 export type EventsResult = AttachInitialDto;
 export interface PromptResult { receipt: CommandReceipt; instance: InstanceSnapshot }
+export interface AbortResult { instance: InstanceSnapshot }
 export interface StopResult { receipt: { operationId: string; alreadyStopped: boolean; cleanupErrors?: string[] }; instance: InstanceSnapshot }
 export interface ModelsResult { models: RuntimeModelInfo[]; availableThinkingLevels: RuntimeThinkingLevel[]; instance: InstanceSnapshot }
 export interface ModelConfigurationResult { instance: InstanceSnapshot; settingsWrite: { persisted: true } }
 export interface ThinkingConfigurationResult { actualLevel: RuntimeThinkingLevel; availableThinkingLevels: RuntimeThinkingLevel[]; instance: InstanceSnapshot; settingsWrite: { persisted: true } }
 export interface SessionsResult { sessions: SessionDto[] }
+export interface HistoryResult { entries: HistoryEntryDto[]; hasEarlier: boolean; nextBeforeEntryId?: string; instance: InstanceSnapshot }
 export interface ToolsResult { tools: ToolDto[]; instance: InstanceSnapshot }
 export interface SettingsResult { settings: SettingDto[] }
 export interface SettingUpdateResult { setting: SettingDto; instance: InstanceSnapshot; reloadRequired: boolean; hostRestartRequired: boolean }
@@ -150,6 +157,8 @@ export function implementedCapabilities(): string[] { return [...IMPLEMENTED_CAP
 export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "host.info") return "host.info";
   if (type.startsWith("instance.")) return type === "instance.attach" ? "events.follow" : "instance.catalog";
+  if (type === "command.abort") return "run.abort.v1";
+  if (type === "session.history") return "tui.projection.v1";
   if (type === "command.submit" || type === "session.list") return "session.core";
   if (type.startsWith("tool.")) return "tools.v1";
   if (type.startsWith("settings.")) return "settings.v1";
@@ -259,6 +268,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
     case "instance.attach": exact(params, ["instanceId", "since", "follow", "controller"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId(), since: params.since === undefined ? undefined : parseCursor(params.since, "params.since", "invalid_request"), follow: boolean(params.follow, "params.follow", "invalid_request"), controller: enumeration(params.controller, "params.controller", ["claim", "observe"], "invalid_request") } };
     case "instance.stop": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "command.submit": exact(params, ["operationId", "instanceId", "message", "delivery"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), message: string(params.message, "params.message", MAX_PROMPT_CHARS, "invalid_request"), delivery: enumeration(params.delivery, "params.delivery", ["auto", "prompt", "steer", "followUp"], "invalid_request") } };
+    case "command.abort": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "model.list": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "model.set": exact(params, ["operationId", "instanceId", "provider", "modelId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), provider: string(params.provider, "params.provider", MAX_MODEL_PROVIDER_CHARS, "invalid_request"), modelId: string(params.modelId, "params.modelId", MAX_MODEL_ID_CHARS, "invalid_request") } };
     case "thinking.set": exact(params, ["operationId", "instanceId", "level"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), level: enumeration(params.level, "params.level", THINKING_LEVELS, "invalid_request") } };
@@ -268,6 +278,11 @@ export function parseControlRequest(input: unknown): ControlRequest {
     case "settings.update": exact(params, ["operationId", "instanceId", "update"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), update: parseSettingUpdate(params.update, "params.update", "invalid_request") } };
     case "resource.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "command.catalog": exact(params, ["instanceId", "prefix"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId(), prefix: optionalString(params.prefix, "params.prefix", 256, "invalid_request") } };
+    case "session.history": {
+      exact(params, ["instanceId", "beforeEntryId", "limit"], "invalid_request");
+      if (!Number.isSafeInteger(params.limit) || (params.limit as number) < 1 || (params.limit as number) > MAX_HISTORY_ITEMS) throw validation("invalid_request", `params.limit must be between 1 and ${MAX_HISTORY_ITEMS}`);
+      return { ...base, type, params: { instanceId: instanceId(), beforeEntryId: optionalString(params.beforeEntryId, "params.beforeEntryId", 128, "invalid_request"), limit: params.limit as number } };
+    }
     case "session.list": exact(params, ["instanceId", "scope"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId(), scope: enumeration(params.scope, "params.scope", ["cwd", "all"], "invalid_request") } };
     default: throw validation("unknown_request", `Unknown request type: ${type}`);
   }
@@ -355,16 +370,22 @@ export function parseEventsResult(input: unknown): EventsResult {
     if (event.instanceId !== instance.id || event.runtimeGeneration !== instance.runtimeGeneration || event.sequence <= previous || event.sequence > latest.sequence) throw validation("invalid_response", "Replay event cursor domain/order is invalid");
     previous = event.sequence;
   }
-  const history = array(value.recentHistory, "recentHistory", MAX_HISTORY_ITEMS);
-  if (history.length !== 0) throw validation("invalid_response", "recentHistory is not implemented in this capability stage");
+  const history = array(value.recentHistory, "recentHistory", MAX_HISTORY_ITEMS).map((item, index) => parseHistoryEntry(item, `recentHistory[${index}]`));
+  if (new Set(history.map((entry) => entry.entryId)).size !== history.length) throw validation("invalid_response", "recentHistory entry IDs must be unique");
   const controller = object(value.controller, "controller"); exact(controller, ["status"]);
-  return { instance, page: { events, earliest, latest, truncated: boolean(page.truncated, "page.truncated"), epochChanged: boolean(page.epochChanged, "page.epochChanged"), generationChanged: boolean(page.generationChanged, "page.generationChanged") }, recentHistory: [], historyTruncated: boolean(value.historyTruncated, "historyTruncated"), controller: { status: enumeration(controller.status, "controller.status", ["observing", "unavailable"]) }, following: boolean(value.following, "following") };
+  return { instance, page: { events, earliest, latest, truncated: boolean(page.truncated, "page.truncated"), epochChanged: boolean(page.epochChanged, "page.epochChanged"), generationChanged: boolean(page.generationChanged, "page.generationChanged") }, recentHistory: history, historyTruncated: boolean(value.historyTruncated, "historyTruncated"), controller: { status: enumeration(controller.status, "controller.status", ["observing", "unavailable"]) }, following: boolean(value.following, "following") };
 }
 export function parsePromptResult(input: unknown): PromptResult {
   const value = object(input, "prompt result"); exact(value, ["receipt", "instance"]);
   const instance = parseInstance(value.instance, "instance"); const receipt = parseReceipt(value.receipt);
   if (receipt.instanceId !== instance.id || instance.activeCommandId !== undefined && !receipt.queued && instance.activeCommandId !== receipt.operationId) throw validation("invalid_response", "Command receipt does not match instance state");
   return { receipt, instance };
+}
+export function parseAbortResult(input: unknown): AbortResult {
+  const value = object(input, "abort result"); exact(value, ["instance"]);
+  const instance = parseInstance(value.instance, "instance");
+  if (instance.execution === "running") throw validation("invalid_response", "Abort result instance must not still be running");
+  return { instance };
 }
 export function parseStopResult(input: unknown): StopResult {
   const value = object(input, "stop result"); exact(value, ["receipt", "instance"]);
@@ -399,6 +420,18 @@ export function parseSessionsResult(input: unknown): SessionsResult {
       updatedAt: session.updatedAt === undefined ? undefined : timestamp(session.updatedAt, `sessions[${index}].updatedAt`),
     };
   }) };
+}
+
+export function parseHistoryResult(input: unknown): HistoryResult {
+  const value = object(input, "history result"); exact(value, ["entries", "hasEarlier", "nextBeforeEntryId", "instance"]);
+  const entries = array(value.entries, "entries", MAX_HISTORY_ITEMS).map((item, index) => parseHistoryEntry(item, `entries[${index}]`));
+  const ids = entries.map((entry) => entry.entryId);
+  if (new Set(ids).size !== ids.length) throw validation("invalid_response", "history entry IDs must be unique");
+  const hasEarlier = boolean(value.hasEarlier, "hasEarlier");
+  const nextBeforeEntryId = optionalString(value.nextBeforeEntryId, "nextBeforeEntryId", 128);
+  if (hasEarlier !== (nextBeforeEntryId !== undefined)) throw validation("invalid_response", "history pagination cursor is inconsistent");
+  if (nextBeforeEntryId !== undefined && entries[0]?.entryId !== nextBeforeEntryId) throw validation("invalid_response", "history cursor must identify the first returned entry");
+  return { entries, hasEarlier, nextBeforeEntryId, instance: parseInstance(value.instance, "instance") };
 }
 
 export function parseToolsResult(input: unknown): ToolsResult {
@@ -465,8 +498,15 @@ function parseMetrics(input: unknown, field: string): NonNullable<InstanceSnapsh
   const metrics = object(input, field); exact(metrics, ["messages", "tokens", "cost", "context"]);
   const messages = object(metrics.messages, `${field}.messages`); exact(messages, ["user", "assistant", "toolCalls", "toolResults", "total"]);
   const tokens = object(metrics.tokens, `${field}.tokens`); exact(tokens, ["input", "output", "cacheRead", "cacheWrite", "total"]);
-  const result: NonNullable<InstanceSnapshot["metrics"]> = { messages: { user: unsigned(messages.user, "messages.user"), assistant: unsigned(messages.assistant, "messages.assistant"), toolCalls: unsigned(messages.toolCalls, "messages.toolCalls"), toolResults: unsigned(messages.toolResults, "messages.toolResults"), total: unsigned(messages.total, "messages.total") }, tokens: { input: unsigned(tokens.input, "tokens.input"), output: unsigned(tokens.output, "tokens.output"), cacheRead: unsigned(tokens.cacheRead, "tokens.cacheRead"), cacheWrite: unsigned(tokens.cacheWrite, "tokens.cacheWrite"), total: unsigned(tokens.total, "tokens.total") }, cost: finiteNumber(metrics.cost, `${field}.cost`) };
-  if (metrics.context !== undefined) { const context = object(metrics.context, `${field}.context`); exact(context, ["tokens", "contextWindow", "percent"]); result.context = { tokens: nullableUnsigned(context.tokens, "context.tokens"), contextWindow: positive(context.contextWindow, "context.contextWindow"), percent: nullableNumber(context.percent, "context.percent") }; }
+  const cost = finiteNumber(metrics.cost, `${field}.cost`);
+  if (cost < 0) throw validation("invalid_response", `${field}.cost must be non-negative`);
+  const result: NonNullable<InstanceSnapshot["metrics"]> = { messages: { user: unsigned(messages.user, "messages.user"), assistant: unsigned(messages.assistant, "messages.assistant"), toolCalls: unsigned(messages.toolCalls, "messages.toolCalls"), toolResults: unsigned(messages.toolResults, "messages.toolResults"), total: unsigned(messages.total, "messages.total") }, tokens: { input: unsigned(tokens.input, "tokens.input"), output: unsigned(tokens.output, "tokens.output"), cacheRead: unsigned(tokens.cacheRead, "tokens.cacheRead"), cacheWrite: unsigned(tokens.cacheWrite, "tokens.cacheWrite"), total: unsigned(tokens.total, "tokens.total") }, cost };
+  if (metrics.context !== undefined) {
+    const context = object(metrics.context, `${field}.context`); exact(context, ["tokens", "contextWindow", "percent"]);
+    const percent = nullableNumber(context.percent, "context.percent");
+    if (percent !== null && (percent < 0 || percent > 100)) throw validation("invalid_response", "context.percent must be between 0 and 100");
+    result.context = { tokens: nullableUnsigned(context.tokens, "context.tokens"), contextWindow: positive(context.contextWindow, "context.contextWindow"), percent };
+  }
   return result;
 }
 function parseInstance(input: unknown, field: string): InstanceSnapshot {
@@ -529,7 +569,7 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "queue.changed": case "queue.cleared": exact(data, ["steering", "followUp", "total"]); return parsePending(data, field);
     case "compaction.started": exact(data, ["reason"]); return { reason: enumeration(data.reason, "reason", ["manual", "threshold", "overflow"]) };
     case "compaction.completed": exact(data, ["reason", "aborted", "willRetry", "error"]); return { reason: enumeration(data.reason, "reason", ["manual", "threshold", "overflow"]), aborted: boolean(data.aborted, "aborted"), willRetry: boolean(data.willRetry, "willRetry"), error: optionalText("error", MAX_MESSAGE) };
-    case "session.replaced": exact(data, ["reason", "previousSessionFile", "sessionFile", "runtimeGeneration"]); return { reason: enumeration(data.reason, "reason", ["new", "resume", "fork", "reload"]), previousSessionFile: optionalText("previousSessionFile", MAX_CONTROL_CWD_CHARS), sessionFile: optionalText("sessionFile", MAX_CONTROL_CWD_CHARS), runtimeGeneration: positive(data.runtimeGeneration, "runtimeGeneration") };
+    case "session.replaced": exact(data, ["reason", "previousSessionFile", "sessionFile", "runtimeGeneration", "cwd", "piSessionId"]); return { reason: enumeration(data.reason, "reason", ["new", "resume", "fork", "reload"]), previousSessionFile: optionalText("previousSessionFile", MAX_CONTROL_CWD_CHARS), sessionFile: optionalText("sessionFile", MAX_CONTROL_CWD_CHARS), runtimeGeneration: positive(data.runtimeGeneration, "runtimeGeneration"), cwd: text("cwd", MAX_CONTROL_CWD_CHARS), piSessionId: text("piSessionId", 128) };
     case "session.info_changed": exact(data, ["name"]); return { name: optionalText("name", MAX_INSTANCE_NAME_CHARS) };
     case "session.metrics_changed": exact(data, ["metrics"]); return { metrics: parseMetrics(data.metrics, `${field}.metrics`) };
     case "model.changed": exact(data, ["provider", "id", "thinkingLevel", "availableThinkingLevels"]); return { provider: text("provider", MAX_MODEL_PROVIDER_CHARS), id: text("id", MAX_MODEL_ID_CHARS), thinkingLevel: enumeration(data.thinkingLevel, "thinkingLevel", THINKING_LEVELS), availableThinkingLevels: levels("availableThinkingLevels") };
@@ -560,6 +600,19 @@ function parseContent(input: unknown, field: string): ContentBlockDto[] {
     exact(block, ["type", "kind", "description"]); return { type, kind: enumeration(block.kind, "kind", ["image", "binary"]), description: string(block.description, "description", MAX_MESSAGE) };
   });
 }
+function parseHistoryEntry(input: unknown, field: string): HistoryEntryDto {
+  const entry = object(input, field); exact(entry, ["entryId", "parentId", "role", "timestamp", "content", "stopReason", "error"]);
+  return {
+    entryId: id(entry.entryId, `${field}.entryId`),
+    parentId: optionalString(entry.parentId, `${field}.parentId`, 128),
+    role: enumeration(entry.role, `${field}.role`, ["user", "assistant", "tool", "system"]),
+    timestamp: entry.timestamp === undefined ? undefined : timestamp(entry.timestamp, `${field}.timestamp`),
+    content: parseContent(entry.content, `${field}.content`),
+    stopReason: optionalString(entry.stopReason, `${field}.stopReason`, 128),
+    error: optionalString(entry.error, `${field}.error`, MAX_MESSAGE),
+  };
+}
+
 function parseDialogRequest(data: Record<string, unknown>, field: string): EventDataMap["interaction.requested"] {
   const method = enumeration(data.method, `${field}.method`, ["select", "confirm", "input", "editor"]);
   const interactionId = id(data.interactionId, `${field}.interactionId`);

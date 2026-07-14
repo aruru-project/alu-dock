@@ -3,19 +3,23 @@ import test from "node:test";
 
 import {
   InstanceAdmissionPendingError,
+  InstanceBusyError,
   InstanceNotActiveError,
   InvalidDeliveryModeError,
   ManagedInstance,
+  RuntimeEffectUnknownError,
 } from "../src/core/managed-instance.js";
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, ToolDto } from "../src/core/config-projection.js";
 import type {
   ClearedRuntimeQueue,
   RuntimeEvent,
+  RuntimeHistoryEntry,
   RuntimeModelInfo,
   RuntimeModelState,
   RuntimePromptOptions,
   RuntimeSession,
   RuntimeSessionInfo,
+  RuntimeSessionMetrics,
   RuntimeThinkingLevel,
 } from "../src/core/runtime-session.js";
 
@@ -36,6 +40,7 @@ class FakeRuntimeSession implements RuntimeSession {
   readonly sessionId = "pi-session-1";
   readonly sessionFile = "/tmp/pi-session-1.jsonl";
   isStreaming = false;
+  isCompacting = false;
   promptDeferred = new Deferred<void>();
   promptCalls: Array<{ text: string; options?: RuntimePromptOptions }> = [];
   abortCalls = 0;
@@ -45,6 +50,14 @@ class FakeRuntimeSession implements RuntimeSession {
   delayPreflight = false;
   disposeError: Error | undefined;
   abortError: Error | undefined;
+  abortBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
+  compactionAbortBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
+  history: RuntimeHistoryEntry[] = [];
+  metrics: RuntimeSessionMetrics = {
+    messages: { user: 0, assistant: 0, toolCalls: 0, toolResults: 0, total: 0 },
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    cost: 0,
+  };
 
   private pendingPreflight: ((success: boolean) => void) | undefined;
   private readonly listeners = new Set<(event: RuntimeEvent) => void>();
@@ -85,6 +98,8 @@ class FakeRuntimeSession implements RuntimeSession {
     return [];
   }
 
+  getHistory(): RuntimeHistoryEntry[] { return structuredClone(this.history); }
+
   async listTools(): Promise<ToolDto[]> { return []; }
   async setActiveTools(_names: string[]): Promise<ToolDto[]> { return []; }
   async getSettings(): Promise<SettingDto[]> { return []; }
@@ -115,6 +130,8 @@ class FakeRuntimeSession implements RuntimeSession {
     };
   }
 
+  getMetrics(): RuntimeSessionMetrics { return structuredClone(this.metrics); }
+
   clearQueue(): ClearedRuntimeQueue {
     this.emit({ type: "queue_update", steering: [], followUp: [] });
     return this.clearQueueResult;
@@ -122,7 +139,20 @@ class FakeRuntimeSession implements RuntimeSession {
 
   async abort(): Promise<void> {
     this.abortCalls += 1;
+    if (this.abortBlock) {
+      this.abortBlock.entered.resolve();
+      await this.abortBlock.release.promise;
+    }
     if (this.abortError) throw this.abortError;
+    if (this.isCompacting) {
+      if (this.compactionAbortBlock) {
+        this.compactionAbortBlock.entered.resolve();
+        await this.compactionAbortBlock.release.promise;
+      }
+      this.isCompacting = false;
+      this.emit({ type: "compaction_end", reason: "manual", result: undefined, aborted: true, willRetry: false });
+      return;
+    }
     if (this.isStreaming) {
       this.emitAssistantEnd("aborted");
       this.isStreaming = false;
@@ -139,6 +169,20 @@ class FakeRuntimeSession implements RuntimeSession {
   async dispose(): Promise<void> {
     this.disposeCalls += 1;
     if (this.disposeError) throw this.disposeError;
+  }
+
+  blockAbort(): { entered: Promise<void>; release: () => void } {
+    const entered = new Deferred<void>();
+    const release = new Deferred<void>();
+    this.abortBlock = { entered, release };
+    return { entered: entered.promise, release: () => release.resolve() };
+  }
+
+  blockCompactionAbort(): { entered: Promise<void>; release: () => void } {
+    const entered = new Deferred<void>();
+    const release = new Deferred<void>();
+    this.compactionAbortBlock = { entered, release };
+    return { entered: entered.promise, release: () => release.resolve() };
   }
 
   triggerPreflight(success: boolean): void {
@@ -236,6 +280,100 @@ test("submit returns after preflight while the runtime promise remains host-owne
   assert.equal(snapshot.execution, "idle");
   assert.equal(snapshot.lastRun, "succeeded");
   assert.ok(instance.eventsSince().events.some((event) => event.type === "run.settled"));
+});
+
+test("runtime metrics are present initially and refresh through a closed event", () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  assert.equal(instance.snapshot().metrics?.tokens.total, 0);
+
+  session.metrics = {
+    messages: { user: 2, assistant: 1, toolCalls: 3, toolResults: 3, total: 9 },
+    tokens: { input: 100, output: 50, cacheRead: 25, cacheWrite: 5, total: 180 },
+    cost: 0.0123,
+    context: { tokens: 900, contextWindow: 2_000, percent: 45 },
+  };
+  session.emit({ type: "entry_appended", entry: { id: "metrics-entry" } });
+
+  assert.deepEqual(instance.snapshot().metrics, session.metrics);
+  const event = instance.eventsSince().events.find((candidate) => candidate.type === "session.metrics_changed");
+  assert.equal(event?.data.metrics.context?.percent, 45);
+});
+
+test("abort ends the run without disposing the reusable instance", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  await instance.submit("keep running");
+  session.startRun();
+
+  await instance.abort("abort-operation");
+
+  assert.equal(session.abortCalls, 1);
+  assert.equal(session.disposeCalls, 0);
+  assert.equal(instance.snapshot().lifecycle, "active");
+  assert.equal(instance.snapshot().execution, "idle");
+  assert.equal(instance.snapshot().lastRun, "aborted");
+  assert.ok(instance.eventsSince().events.some((event) => event.type === "run.settled" && event.data.result === "aborted"));
+});
+
+test("abort cancels compaction without fabricating an aborted model run", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  session.isCompacting = true;
+  session.emit({ type: "compaction_start", reason: "manual" });
+  assert.equal(instance.snapshot().execution, "running");
+  const block = session.blockCompactionAbort();
+  const aborting = instance.abort("abort-compaction");
+  await block.entered;
+  assert.equal(instance.snapshot().execution, "running");
+  assert.equal(instance.snapshot().lastRun, "never");
+  assert.equal(instance.eventsSince().events.some((event) => event.type === "run.settled"), false);
+
+  block.release();
+  await aborting;
+
+  assert.equal(session.abortCalls, 1);
+  assert.equal(instance.snapshot().execution, "idle");
+  assert.equal(instance.snapshot().lastRun, "never");
+  assert.ok(instance.eventsSince().events.some((event) => event.type === "compaction.completed" && event.data.aborted));
+  assert.equal(instance.eventsSince().events.some((event) => event.type === "run.settled"), false);
+});
+
+test("abort serializes competing mutations and projection reads until its committed boundary", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  await instance.submit("keep running");
+  session.startRun();
+  const block = session.blockAbort();
+  const aborting = instance.abort("abort-serialized");
+  await block.entered;
+
+  await assert.rejects(instance.abort("abort-competing"), InstanceBusyError);
+  await assert.rejects(instance.selectModel("fixture", "model-b", "model-during-abort"), InstanceBusyError);
+  let readFinished = false;
+  const read = instance.listModels().then((models) => { readFinished = true; return models; });
+  await new Promise((resolveTurn) => setImmediate(resolveTurn));
+  assert.equal(readFinished, false);
+
+  block.release();
+  await aborting;
+  assert.equal((await read).models.length, 2);
+  assert.equal(instance.snapshot().lastRun, "aborted");
+});
+
+test("an abort runtime error reports operation-scoped ambiguity without leaking its cause", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  await instance.submit("keep running");
+  session.startRun();
+  session.abortError = new Error("AUTH_TOKEN_very_secret");
+
+  await assert.rejects(
+    instance.abort("abort-ambiguous"),
+    (error: unknown) => error instanceof RuntimeEffectUnknownError
+      && error.operationId === "abort-ambiguous"
+      && !error.message.includes("AUTH_TOKEN"),
+  );
 });
 
 test("failed and aborted runs project to distinct structured state", async () => {
@@ -522,6 +660,33 @@ test("runtime event data is sanitized into JSON-serializable values", () => {
   assert.ok(!JSON.stringify(page).includes(rawBase64));
 });
 
+test("assistant and tool-call streaming use stable distinct IDs with argument updates", () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  session.startRun();
+  session.emit({ type: "message_update", assistantMessageEvent: { type: "start", partial: { role: "assistant", content: [] } } });
+  session.emit({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "plan", partial: { role: "assistant", content: [] } } });
+  session.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "answer", partial: { role: "assistant", content: [] } } });
+  session.emit({ type: "message_update", assistantMessageEvent: { type: "toolcall_start", contentIndex: 2, partial: { role: "assistant", content: [{}, {}, { type: "toolCall", id: "call-1", name: "read", arguments: { path: "a" } }] } } });
+  session.emit({ type: "message_update", assistantMessageEvent: { type: "toolcall_delta", contentIndex: 2, delta: "b", partial: { role: "assistant", content: [{}, {}, { type: "toolCall", id: "call-1", name: "read", arguments: { path: "ab" } }] } } });
+  session.emit({ type: "tool_execution_start", toolCallId: "call-1", toolName: "read", args: { path: "abc" } });
+  session.emitAssistantEnd("toolUse");
+
+  session.emit({ type: "message_update", assistantMessageEvent: { type: "start", partial: { role: "assistant", content: [] } } });
+  session.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "second", partial: { role: "assistant", content: [] } } });
+  session.emitAssistantEnd("stop");
+
+  const events = instance.eventsSince().events;
+  const deltas = events.filter((candidate) => candidate.type === "message.delta");
+  const completed = events.filter((candidate) => candidate.type === "message.completed" && candidate.data.role === "assistant");
+  assert.equal(dataRecord(deltas[0]?.data).messageId, dataRecord(deltas[1]?.data).messageId);
+  assert.equal(dataRecord(completed[0]?.data).messageId, dataRecord(deltas[0]?.data).messageId);
+  assert.notEqual(dataRecord(completed[1]?.data).messageId, dataRecord(completed[0]?.data).messageId);
+  assert.equal(events.filter((candidate) => candidate.type === "tool.started" && candidate.data.toolCallId === "call-1").length, 1);
+  const updates = events.filter((candidate) => candidate.type === "tool.args_updated" && candidate.data.toolCallId === "call-1");
+  assert.deepEqual(updates.map((candidate) => dataRecord(candidate.data).args), [{ path: "ab" }, { path: "abc" }]);
+});
+
 test("completed message content omits data URIs and raw base64", () => {
   const session = new FakeRuntimeSession();
   const instance = createInstance(session);
@@ -549,6 +714,41 @@ test("completed message content omits data URIs and raw base64", () => {
     { type: "text", text: "ordinary answer" },
   ]);
   assert.ok(!JSON.stringify(completed).includes(rawBase64));
+});
+
+test("attach history coverage removes replay frames for the same stable assistant message", async () => {
+  const session = new FakeRuntimeSession();
+  session.history = [{ entryId: "history-assistant", role: "assistant", content: [{ type: "text", text: "final" }] }];
+  const instance = createInstance(session);
+  session.emit({ type: "message_update", assistantMessageEvent: { type: "start", partial: { role: "assistant", content: [] } } });
+  session.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "final", partial: { role: "assistant", content: [] } } });
+  session.emitAssistantEnd("stop");
+
+  const projection = await instance.getAttachProjection(undefined);
+  assert.deepEqual(projection.recentHistory.map((entry) => entry.entryId), ["history-assistant"]);
+  assert.equal(projection.page.events.some((event) => event.type === "message.delta" || event.type === "message.completed" && event.data.role === "assistant"), false);
+});
+
+test("truncated attach history removes older covered replay instead of reversing chronology", async () => {
+  const session = new FakeRuntimeSession();
+  session.history = Array.from({ length: 201 }, (_, index) => ({
+    entryId: `h${index}`,
+    role: "assistant",
+    content: [{ type: "text", text: `m${index}` }],
+  }));
+  const instance = createInstance(session, 500);
+  for (let index = 0; index < 201; index += 1) {
+    session.emit({
+      type: "message_end",
+      message: { role: "assistant", content: [{ type: "text", text: `m${index}` }], stopReason: "stop" },
+    });
+  }
+
+  const projection = await instance.getAttachProjection(undefined, 200);
+  assert.equal(projection.historyTruncated, true);
+  assert.equal(projection.recentHistory[0]?.entryId, "h1");
+  assert.equal(projection.recentHistory.at(-1)?.entryId, "h200");
+  assert.equal(projection.page.events.some((event) => event.type === "message.completed" || event.type === "message.delta"), false);
 });
 
 test("bounded events expose a monotonic cursor and truncation signal", () => {

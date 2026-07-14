@@ -17,12 +17,12 @@ import {
   InstanceAdmissionPendingError,
   InstanceBusyError,
   InstanceNotActiveError,
+  InvalidHistoryCursorError,
   InvalidDeliveryModeError,
+  RuntimeEffectUnknownError,
+  type AttachProjection,
   type DockEvent,
-  type EventCursor,
-  type EventPage,
   type JsonObject,
-  type ManagedInstance,
 } from "../core/managed-instance.js";
 import { RuntimeInvalidSettingValueError, RuntimeModelNotFoundError, RuntimeSettingsWriteError, RuntimeUnknownToolError } from "../core/runtime-session.js";
 import { DockRegistry, InstanceNotFoundError } from "./dock-registry.js";
@@ -36,6 +36,7 @@ import {
   defaultHostIdentity,
   implementedCapabilities,
   MAX_CONTROL_LINE_BYTES,
+  MAX_HISTORY_ITEMS,
   MAX_REPLAY_EVENTS,
   type ControlEventEnvelope,
   type ControlRequest,
@@ -341,13 +342,17 @@ export class DockHost {
       }
       case "instance.list": this.sendSuccessAndEnd(socket,request.requestId,{instances:this.registry.list().filter(i=>request.params.includeTerminal!==false||i.lifecycle==="active"||i.lifecycle==="stopping")}); return;
       case "instance.get": this.sendSuccessAndEnd(socket,request.requestId,{instance:this.registry.get(request.params.instanceId).snapshot()}); return;
-      case "instance.attach": this.attachEventStream(request,socket,setEventUnsubscribe); return;
+      case "instance.attach": await this.attachEventStream(request,socket,setEventUnsubscribe); return;
       case "instance.stop": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const receipt=await instance.stop(request.params.operationId);return {receipt:{operationId:receipt.operationId,alreadyStopped:receipt.alreadyStopped,cleanupErrors:receipt.cleanupErrors},instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
       case "command.submit": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const receipt=await instance.submit(request.params.message,request.params.delivery,request.params.operationId);return {receipt,instance:instance.snapshot()};});
+        this.sendSuccessAndEnd(socket,request.requestId,result); return;
+      }
+      case "command.abort": {
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);await instance.abort(request.params.operationId);return {instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
       case "model.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listModels(); this.sendSuccessAndEnd(socket,request.requestId,{models:result.models,availableThinkingLevels:result.state.availableThinkingLevels,instance:instance.snapshot()}); return; }
@@ -371,26 +376,34 @@ export class DockHost {
       }
       case "resource.get": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getResources()); return; }
       case "command.catalog": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{commands:await instance.getCommands(request.params.prefix)}); return; }
+      case "session.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getHistoryPage(request.params.beforeEntryId,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
       case "session.list": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{sessions:await instance.listSessions(request.params.scope)}); return; }
     }
   }
 
-  private attachEventStream(request: Extract<ControlRequest,{type:"instance.attach"}>,socket:Socket,setEventUnsubscribe:(unsubscribe:()=>void)=>void):void {
+  private async attachEventStream(request: Extract<ControlRequest,{type:"instance.attach"}>,socket:Socket,setEventUnsubscribe:(unsubscribe:()=>void)=>void):Promise<void> {
     const instance=this.registry.get(request.params.instanceId);
     const cursor=request.params.since;
     if(cursor && cursor.instanceId!==instance.id) throw new ProtocolValidationError("invalid_cursor","Cursor belongs to another instance");
-    const epochChanged=cursor!==undefined&&cursor.hostEpoch!==this.hostEpoch;
-    const generationChanged=cursor!==undefined&&cursor.runtimeGeneration!==instance.runtimeGeneration;
-    const replaySince=epochChanged||generationChanged?0:(cursor?.sequence??0);
     const follow=request.params.follow;
-    let initializing=true,pending:DockEvent[]=[]; let lastSent=replaySince; let unsubscribe=()=>{};
+    let initializing=true,pending:DockEvent[]=[]; let lastGeneration=instance.runtimeGeneration,lastSent=0; let unsubscribe=()=>{};
     const closeAfterBackpressure=():void=>{unsubscribe();if(!socket.writableNeedDrain){socket.end();return;}const timeout=setTimeout(()=>socket.destroy(),BACKPRESSURE_CLOSE_TIMEOUT_MS);socket.once("drain",()=>{clearTimeout(timeout);if(!socket.destroyed)socket.end();});socket.once("close",()=>clearTimeout(timeout));};
-    const sendLiveEvent=(event:DockEvent):boolean=>{if(event.sequence<=lastSent)return true;const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event);if(outcome==="written"||outcome==="backpressured")lastSent=event.sequence;if(outcome==="written")return true;if(outcome==="backpressured")closeAfterBackpressure();else{unsubscribe();socket.destroy();}return false;};
+    const sendLiveEvent=(event:DockEvent):boolean=>{
+      if(event.runtimeGeneration<lastGeneration)return true;
+      if(event.runtimeGeneration>lastGeneration){
+        if(event.runtimeGeneration!==lastGeneration+1||event.type!=="session.replaced"||event.sequence!==1){unsubscribe();socket.destroy();return false;}
+        lastGeneration=event.runtimeGeneration;lastSent=0;
+      }
+      if(event.sequence<=lastSent)return true;
+      const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event);if(outcome==="written"||outcome==="backpressured")lastSent=event.sequence;if(outcome==="written")return true;if(outcome==="backpressured")closeAfterBackpressure();else{unsubscribe();socket.destroy();}return false;
+    };
     unsubscribe=instance.subscribe(event=>{if(initializing){pending.push(event);if(pending.length>MAX_INITIAL_EVENT_QUEUE){pending=[];unsubscribe();socket.destroy();}return;}sendLiveEvent(event);});setEventUnsubscribe(unsubscribe);
-    const result=createBoundedEventsResult(instance,replaySince,follow,request.requestId,epochChanged,generationChanged,request.params.controller === "claim" ? "unavailable" : "observing");
+    let projection:AttachProjection;
+    try{projection=await instance.getAttachProjection(cursor,MAX_HISTORY_ITEMS);}catch(error){initializing=false;pending=[];unsubscribe();throw error;}
+    const result=createBoundedEventsResult(projection,follow,request.requestId,request.params.controller === "claim" ? "unavailable" : "observing");
     const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,result));
     if(responseOutcome!=="written"){initializing=false;pending=[];if(responseOutcome==="backpressured")closeAfterBackpressure();else if(responseOutcome==="too_large"){unsubscribe();this.sendErrorAndEnd(socket,"response_too_large","Attach response exceeds the JSONL record limit",request.requestId);}else unsubscribe();return;}
-    lastSent=Math.max(replaySince,result.page.latest.sequence);initializing=false;pending.sort((a,b)=>a.sequence-b.sequence);for(const event of pending){if(!sendLiveEvent(event))return;}pending=[];if(!follow){unsubscribe();socket.end();}
+    lastGeneration=result.instance.runtimeGeneration;lastSent=Math.max(projection.replaySince,result.page.latest.sequence);initializing=false;pending.sort((a,b)=>a.runtimeGeneration-b.runtimeGeneration||a.sequence-b.sequence);for(const event of pending){if(!sendLiveEvent(event))return;}pending=[];if(!follow){unsubscribe();socket.end();}
   }
 
   private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,result));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
@@ -413,23 +426,31 @@ function isMutationRequest(type: ControlRequest["type"]): boolean {
     && type !== "settings.get"
     && type !== "resource.get"
     && type !== "command.catalog"
+    && type !== "session.history"
     && type !== "session.list";
 }
 
 function successResponse(requestId:string,hostEpoch:string,result:unknown):ControlResponse { return {kind:"response",version:2,requestId,hostEpoch,ok:true,result}; }
-function createBoundedEventsResult(instance:ManagedInstance,since:number,following:boolean,requestId:string,epochChanged:boolean,generationChanged:boolean,controllerStatus:"observing"|"unavailable"):EventsResult {
-  const source=instance.eventsSince(since);
+function createBoundedEventsResult(projection:AttachProjection,following:boolean,requestId:string,controllerStatus:"observing"|"unavailable"):EventsResult {
+  const source=projection.page;
   let events=source.events;
   let truncated=source.truncated;
+  let history=projection.recentHistory;
+  let historyTruncated=projection.historyTruncated;
   if(events.length>MAX_REPLAY_EVENTS){events=events.slice(-MAX_REPLAY_EVENTS);truncated=true;}
   let earliest=events.length>0&&truncated?{...source.earliest,sequence:events[0]!.sequence}:source.earliest;
   while(true){
-    const page={events,earliest,latest:source.latest,truncated,epochChanged,generationChanged};
-    const result:EventsResult={instance:instance.snapshot(),page,recentHistory:[],historyTruncated:true,controller:{status:controllerStatus},following};
-    if(encodedSize(successResponse(requestId,instance.hostEpoch,result))<=MAX_CONTROL_LINE_BYTES||events.length===0)return result;
-    events=events.slice(1);
-    truncated=true;
-    earliest={...source.latest,sequence:events[0]?.sequence??source.latest.sequence};
+    const page={events,earliest,latest:source.latest,truncated,epochChanged:projection.epochChanged,generationChanged:projection.generationChanged};
+    const result:EventsResult={instance:projection.instance,page,recentHistory:history,historyTruncated,controller:{status:controllerStatus},following};
+    const hostEpoch=projection.instance.ownerHostEpoch??source.latest.hostEpoch;
+    if(encodedSize(successResponse(requestId,hostEpoch,result))<=MAX_CONTROL_LINE_BYTES)return result;
+    if(history.length>0){history=history.slice(1);historyTruncated=true;continue;}
+    if(events.length>0){
+      events=events.slice(1);truncated=true;
+      earliest={...source.latest,sequence:events[0]?.sequence??source.latest.sequence};
+      continue;
+    }
+    return result;
   }
 }
 function writeEvent(socket:Socket,requestId:string,hostEpoch:string,event:DockEvent):WriteOutcome { const envelope:ControlEventEnvelope={kind:"event",version:2,requestId,hostEpoch,event};return writeEnvelope(socket,envelope); }
@@ -493,6 +514,9 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof CatalogEffectUnknownError) {
     return { code: "effect_unknown", message: error.message, details: { operationId: error.context.operationId ?? "runtime-internal", queryHint: error.queryHint } };
   }
+  if (error instanceof RuntimeEffectUnknownError) {
+    return { code: "effect_unknown", message: error.message, details: { operationId: error.operationId, queryHint: error.queryHint } };
+  }
   if (error instanceof CatalogWriteError) return { code: "catalog_write_failed", message: error.message };
   if (error instanceof MutationFaultedError) return { code: "mutation_faulted", message: error.message };
   if (error instanceof ProjectTrustRequiredError) {
@@ -503,6 +527,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   }
   if (error instanceof ProtocolValidationError) return { code: error.code, message: error.message };
   if (error instanceof InstanceNotFoundError) return { code: "not_found", message: error.message };
+  if (error instanceof InvalidHistoryCursorError) return { code: "invalid_cursor", message: error.message };
   if (error instanceof InstanceNotActiveError) return { code: "instance_not_active", message: error.message };
   if (error instanceof InvalidDeliveryModeError) return { code: "invalid_delivery", message: error.message };
   if (error instanceof InstanceAdmissionPendingError) return { code: "admission_pending", message: error.message };

@@ -1,11 +1,13 @@
 import type {
   ClearedRuntimeQueue,
   RuntimeEvent,
+  RuntimeHistoryEntry,
   RuntimeModelInfo,
   RuntimeModelState,
   RuntimePromptOptions,
   RuntimeSession,
   RuntimeSessionInfo,
+  RuntimeSessionMetrics,
   RuntimeThinkingLevel,
 } from "../../src/core/runtime-session.js";
 import { RuntimeSettingsWriteError } from "../../src/core/runtime-session.js";
@@ -28,8 +30,10 @@ export class DelayedRuntimeSession implements RuntimeSession {
   readonly sessionFile: string;
   isStreaming = false;
   abortCalls = 0;
+  abortError: Error | undefined;
   disposeCalls = 0;
   promptCalls = 0;
+  promptMessages: string[] = [];
   modelMutationCalls = 0;
   thinkingMutationCalls = 0;
   toolMutationCalls = 0;
@@ -37,6 +41,12 @@ export class DelayedRuntimeSession implements RuntimeSession {
   settingsFailure: Error | undefined;
   settingsReadFailure: Error | undefined;
   sessionCatalog: RuntimeSessionInfo[] = [];
+  history: RuntimeHistoryEntry[] = [];
+  metrics: RuntimeSessionMetrics = {
+    messages: { user: 0, assistant: 0, toolCalls: 0, toolResults: 0, total: 0 },
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    cost: 0,
+  };
 
   private readonly listeners = new Set<(event: RuntimeEvent) => void>();
   private readonly steeringQueue: string[] = [];
@@ -69,6 +79,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
 
   prompt(text: string, options?: RuntimePromptOptions): Promise<void> {
     this.promptCalls += 1;
+    this.promptMessages.push(text);
     options?.preflightResult?.(true);
     if (this.isStreaming && options?.streamingBehavior) {
       if (options.streamingBehavior === "steer") this.steeringQueue.push(text);
@@ -96,6 +107,8 @@ export class DelayedRuntimeSession implements RuntimeSession {
       .filter((session) => scope === "all" || session.cwd === "/fixture/cwd")
       .map((session) => ({ ...session }));
   }
+
+  getHistory(): RuntimeHistoryEntry[] { return structuredClone(this.history); }
 
   async listTools(): Promise<ToolDto[]> {
     return ["read", "write"].map((name) => ({ name, description: `${name} fixture`, active: this.activeTools.has(name), source: { kind: "built-in" as const }, parameterSchema: { type: "object" } }));
@@ -168,6 +181,8 @@ export class DelayedRuntimeSession implements RuntimeSession {
     };
   }
 
+  getMetrics(): RuntimeSessionMetrics { return structuredClone(this.metrics); }
+
   clearQueue(): ClearedRuntimeQueue {
     const cleared = {
       steering: [...this.steeringQueue],
@@ -181,6 +196,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
 
   async abort(): Promise<void> {
     this.abortCalls += 1;
+    if (this.abortError) throw this.abortError;
     if (this.isStreaming) this.settle("aborted", "aborted");
   }
 

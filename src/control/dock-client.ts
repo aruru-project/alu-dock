@@ -12,6 +12,7 @@ import {
   type Capability,
   type ClientHello,
   type ControlRequest,
+  parseAbortResult,
   parseModelConfigurationResult,
   parseThinkingConfigurationResult,
   parseControlEventEnvelope,
@@ -20,6 +21,7 @@ import {
   parseEventsResult,
   parseHelloReply,
   parseHostInfoResult,
+  parseHistoryResult,
   requiredCapabilities,
   parseListResult,
   parseModelsResult,
@@ -33,11 +35,13 @@ import {
   parseResourcesResult,
   parseCommandsResult,
   ProtocolValidationError,
+  type AbortResult,
   type ModelConfigurationResult,
   type ThinkingConfigurationResult,
   type EventsResult,
   type HelloAck,
   type HostInfoResult,
+  type HistoryResult,
   type ModelsResult,
   type PingResult,
   type PromptResult,
@@ -74,6 +78,7 @@ export class DockClient {
   async status(instanceId:string):Promise<InstanceSnapshot>{return (await this.request("instance.get",{instanceId},"instance.catalog",parseStatusResult)).instance;}
   async events(instanceId:string,since?:EventCursor):Promise<{instance:InstanceSnapshot;page:EventPage&{epochChanged:boolean;generationChanged:boolean}}>{const result=await this.request("instance.attach",{instanceId,since,follow:false,controller:"observe"},"events.follow",parseEventsResult);return {instance:result.instance,page:result.page};}
   prompt(instanceId:string,message:string,delivery:DeliveryMode="auto",operationId=this.createRequestId()):Promise<PromptResult>{return this.request("command.submit",{operationId,instanceId,message,delivery},"session.core",parsePromptResult);}
+  abort(instanceId:string,operationId=this.createRequestId()):Promise<AbortResult>{return this.request("command.abort",{operationId,instanceId},"run.abort.v1",parseAbortResult);}
   models(instanceId:string):Promise<ModelsResult>{return this.request("model.list",{instanceId},"models.v1",parseModelsResult);}
   setModel(instanceId:string,provider:string,modelId:string,operationId=this.createRequestId()):Promise<ModelConfigurationResult>{return this.request("model.set",{operationId,instanceId,provider,modelId},"models.v1",parseModelConfigurationResult);}
   setThinking(instanceId:string,level:RuntimeThinkingLevel,operationId=this.createRequestId()):Promise<ThinkingConfigurationResult>{return this.request("thinking.set",{operationId,instanceId,level},"models.v1",parseThinkingConfigurationResult);}
@@ -83,11 +88,13 @@ export class DockClient {
   updateSetting(instanceId:string,update:SettingUpdate,operationId=this.createRequestId()):Promise<SettingUpdateResult>{return this.request("settings.update",{operationId,instanceId,update},"settings.v1",parseSettingUpdateResult);}
   resources(instanceId:string):Promise<ResourcesResult>{return this.request("resource.get",{instanceId},"resources.v1",parseResourcesResult);}
   commands(instanceId:string,prefix?:string):Promise<CommandsResult>{return this.request("command.catalog",{instanceId,prefix},"resources.v1",parseCommandsResult);}
+  history(instanceId:string,beforeEntryId?:string,limit=200):Promise<HistoryResult>{return this.request("session.history",{instanceId,beforeEntryId,limit},"tui.projection.v1",parseHistoryResult);}
   sessions(instanceId:string,scope:"cwd"|"all"):Promise<SessionsResult>{return this.request("session.list",{instanceId,scope},"session.core",parseSessionsResult);}
   stop(instanceId:string,operationId=this.createRequestId()):Promise<StopResult>{return this.request("instance.stop",{operationId,instanceId},"instance.catalog",parseStopResult);}
 
-  async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void}):Promise<EventSubscription>{
+  async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean}):Promise<EventSubscription>{
     const since=options.since;const helloId=this.createRequestId(),requestId=this.createRequestId();
+    const streamCapabilities:string[]=options.requireTuiProjection?["core.v2","events.follow","run.abort.v1","tui.projection.v1"]:requiredCapabilities("events.follow");
     const request:ControlRequest={kind:"request",version:2,requestId,type:"instance.attach",params:{instanceId,since,follow:true,controller:"observe"}};
     const socket=createConnection(this.socketPath),decoder=new JsonLineDecoder();let phase:"hello"|"response"|"events"="hello",hostEpoch="",initialSettled=false,doneSettled=false,closeRequested=false,callbacksReady=false,pending:DockEvent[]=[],runtimeGeneration:number|undefined,lastSequence=-1;
     let resolveInitial!:(x:EventSubscription)=>void,rejectInitial!:(e:unknown)=>void,resolveDone!:()=>void,rejectDone!:(e:unknown)=>void;
@@ -96,14 +103,20 @@ export class DockClient {
     const fail=(e:unknown)=>{clearTimeout(timeout);const error=normalizeClientError(e);if(!initialSettled){initialSettled=true;rejectInitial(error);}pending=[];settleDone(error);socket.destroy();};
     const timeout=setTimeout(()=>fail(new ControlClientError("timeout",`Control request timed out after ${this.timeoutMs}ms`)),this.timeoutMs);
     const consume=(line:string)=>{if(!line)return;let raw:unknown;try{raw=JSON.parse(line);}catch{fail(new ControlClientError("invalid_response","Host returned invalid JSON"));return;}try{
-      if(phase==="hello"){const ack=parseHelloReply(raw,helloId);hostEpoch=ack.host.hostEpoch;for(const required of requiredCapabilities("events.follow")){if(!ack.capabilities.includes(required))throw new ProtocolValidationError("protocol_incompatible",`Host lacks ${required}`);}phase="response";socket.write(encodeJsonLine(request));return;}
+      if(phase==="hello"){const ack=parseHelloReply(raw,helloId);hostEpoch=ack.host.hostEpoch;for(const required of streamCapabilities){if(!ack.capabilities.includes(required))throw new ProtocolValidationError("protocol_incompatible",`Host lacks ${required}`);}phase="response";socket.write(encodeJsonLine(request));return;}
       if(phase==="response"){const response=parseControlResponse(raw,requestId,hostEpoch);if(!response.ok){fail(new ControlClientError(response.error.code,response.error.message));return;}const result=parseEventsResult(response.result);if(result.instance.id!==instanceId||result.page.earliest.hostEpoch!==hostEpoch||result.page.latest.hostEpoch!==hostEpoch||(result.instance.ownerHostEpoch!==undefined&&result.instance.ownerHostEpoch!==hostEpoch))throw new ProtocolValidationError("invalid_response","Attach result does not match negotiated cursor domain");runtimeGeneration=result.instance.runtimeGeneration;lastSequence=result.page.latest.sequence;phase="events";clearTimeout(timeout);initialSettled=true;resolveInitial({initial:result,close:()=>{closeRequested=true;pending=[];socket.destroy();},done});setImmediate(()=>{if(closeRequested||doneSettled)return;callbacksReady=true;const queued=pending;pending=[];for(const event of queued){try{options.onEvent(event);}catch(e){fail(e);return;}}});return;}
       const event=parseControlEventEnvelope(raw,requestId,hostEpoch).event;
-      if(event.instanceId!==instanceId||event.runtimeGeneration!==runtimeGeneration||event.sequence<=lastSequence)throw new ProtocolValidationError("invalid_response","Live event cursor domain/order is invalid");
+      if(event.instanceId!==instanceId)throw new ProtocolValidationError("invalid_response","Live event cursor domain/order is invalid");
+      if(event.runtimeGeneration!==runtimeGeneration){
+        const nextGeneration=runtimeGeneration===undefined?undefined:runtimeGeneration+1;
+        if(event.type!=="session.replaced"||event.runtimeGeneration!==nextGeneration||event.sequence!==1||event.data.runtimeGeneration!==event.runtimeGeneration)throw new ProtocolValidationError("invalid_response","Live event generation rollover is invalid");
+        runtimeGeneration=event.runtimeGeneration;lastSequence=0;
+      }
+      if(event.sequence<=lastSequence)throw new ProtocolValidationError("invalid_response","Live event cursor domain/order is invalid");
       lastSequence=event.sequence;
       if(!callbacksReady){if(pending.length>=MAX_PENDING_STREAM_EVENTS)throw new ProtocolValidationError("invalid_response","Too many pending events");pending.push(event);}else options.onEvent(event);
     }catch(e){fail(e);}};
-    socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,requiredCapabilities("events.follow")))));socket.on("data",(chunk:Buffer)=>{try{for(const line of decoder.push(chunk))consume(line);}catch(e){fail(e);}});socket.once("end",()=>{try{decoder.finish();}catch(e){fail(e);}});socket.once("error",e=>fail(transportError(e)));socket.once("close",hadError=>{clearTimeout(timeout);if(!initialSettled){const e=new ControlClientError("connection_closed","Host closed before responding");initialSettled=true;rejectInitial(e);settleDone(e);}else if(!doneSettled){closeRequested?settleDone():settleDone(new ControlClientError("connection_closed",hadError?"Event stream closed after a transport error":"Host closed the event stream unexpectedly"));}});
+    socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,streamCapabilities))));socket.on("data",(chunk:Buffer)=>{try{for(const line of decoder.push(chunk))consume(line);}catch(e){fail(e);}});socket.once("end",()=>{try{decoder.finish();}catch(e){fail(e);}});socket.once("error",e=>fail(transportError(e)));socket.once("close",hadError=>{clearTimeout(timeout);if(!initialSettled){const e=new ControlClientError("connection_closed","Host closed before responding");initialSettled=true;rejectInitial(e);settleDone(e);}else if(!doneSettled){closeRequested?settleDone():settleDone(new ControlClientError("connection_closed",hadError?"Event stream closed after a transport error":"Host closed the event stream unexpectedly"));}});
     return initial;
   }
 

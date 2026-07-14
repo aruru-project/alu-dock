@@ -14,17 +14,20 @@ import {
   createAgentSessionServices,
   SettingsManager,
   type ResourceDiagnostic,
+  type SessionEntry,
   type SourceInfo,
 } from "@earendil-works/pi-coding-agent";
 
 import type {
   ClearedRuntimeQueue,
   RuntimeEvent,
+  RuntimeHistoryEntry,
   RuntimeModelInfo,
   RuntimeModelState,
   RuntimePromptOptions,
   RuntimeSession,
   RuntimeSessionInfo,
+  RuntimeSessionMetrics,
   RuntimeThinkingLevel,
 } from "../core/runtime-session.js";
 import type {
@@ -304,6 +307,12 @@ export class PiRuntimeHost implements RuntimeSession {
     }));
   }
 
+  getHistory(): RuntimeHistoryEntry[] {
+    return this.requireActive().session.sessionManager.getBranch()
+      .map(projectHistoryEntry)
+      .filter((entry): entry is RuntimeHistoryEntry => entry !== undefined);
+  }
+
   async selectModel(provider: string, modelId: string): Promise<RuntimeModelState> {
     const binding = this.requireActive();
     const model = binding.services.modelRegistry.find(provider, modelId);
@@ -331,8 +340,43 @@ export class PiRuntimeHost implements RuntimeSession {
     };
   }
 
+  getMetrics(): RuntimeSessionMetrics {
+    const stats = this.requireActive().session.getSessionStats();
+    return {
+      messages: {
+        user: stats.userMessages,
+        assistant: stats.assistantMessages,
+        toolCalls: stats.toolCalls,
+        toolResults: stats.toolResults,
+        total: stats.totalMessages,
+      },
+      tokens: { ...stats.tokens },
+      cost: stats.cost,
+      ...(stats.contextUsage === undefined ? {} : { context: { ...stats.contextUsage } }),
+    };
+  }
+
   clearQueue(): ClearedRuntimeQueue { return this.requireActive().session.clearQueue(); }
-  abort(): Promise<void> { return this.active?.session.abort() ?? Promise.resolve(); }
+  async abort(): Promise<void> {
+    const session = this.active?.session;
+    if (!session) return;
+    if (session.isCompacting) {
+      let resolveCompaction!: () => void;
+      const compactionEnded = new Promise<void>((resolve) => { resolveCompaction = resolve; });
+      const unsubscribe = session.subscribe((event) => {
+        if (event.type === "compaction_end") resolveCompaction();
+      });
+      try {
+        session.abortCompaction();
+        await compactionEnded;
+      } finally {
+        unsubscribe();
+      }
+    } else {
+      await session.abort();
+    }
+    await session.waitForIdle();
+  }
   waitForIdle(): Promise<void> { return this.active?.session.waitForIdle() ?? Promise.resolve(); }
 
   newSession(operationId: string): Promise<{ cancelled: boolean }> {
@@ -556,8 +600,49 @@ function safeRequiredText(value: unknown, limit: number, fallback: string): stri
   return safeOptionalText(value, limit) ?? fallback;
 }
 
+function projectHistoryEntry(entry: SessionEntry): RuntimeHistoryEntry | undefined {
+  const base = {
+    entryId: entry.id,
+    ...(entry.parentId === null ? {} : { parentId: entry.parentId }),
+    timestamp: entry.timestamp,
+  };
+  if (entry.type === "message") {
+    const message = entry.message as unknown as Record<string, unknown>;
+    const role = typeof message.role === "string" ? message.role : "system";
+    if (role === "custom" && message.display === false) return undefined;
+    let content: unknown = message.content;
+    if (role === "bashExecution") {
+      const command = typeof message.command === "string" ? message.command : "";
+      const output = typeof message.output === "string" ? message.output : "";
+      content = `! ${command}${output ? `\n${output}` : ""}`;
+    } else if (role === "branchSummary" || role === "compactionSummary") {
+      content = typeof message.summary === "string" ? message.summary : "";
+    }
+    return {
+      ...base,
+      role,
+      content,
+      ...(typeof message.stopReason === "string" ? { stopReason: message.stopReason } : {}),
+      ...(typeof message.errorMessage === "string" ? { error: message.errorMessage } : {}),
+      ...(typeof message.toolCallId === "string" ? { toolCallId: message.toolCallId } : {}),
+      ...(typeof message.toolName === "string" ? { toolName: message.toolName } : {}),
+      ...(typeof message.isError === "boolean" ? { isError: message.isError } : {}),
+    };
+  }
+  if (entry.type === "custom_message") {
+    if (!entry.display) return undefined;
+    return { ...base, role: "system", content: entry.content };
+  }
+  if (entry.type === "thinking_level_change") return { ...base, role: "system", content: `Thinking level changed to ${entry.thinkingLevel}` };
+  if (entry.type === "model_change") return { ...base, role: "system", content: `Model changed to ${entry.provider}/${entry.modelId}` };
+  if (entry.type === "compaction") return { ...base, role: "system", content: entry.summary };
+  if (entry.type === "branch_summary") return { ...base, role: "system", content: entry.summary };
+  if (entry.type === "session_info" && entry.name) return { ...base, role: "system", content: `Session named ${entry.name}` };
+  return undefined;
+}
+
 function validCatalogName(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 && value.length <= 256 ? value : undefined;
+  return typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\u0000-\u001f\u007f-\u009f]/u.test(value) ? value : undefined;
 }
 
 function projectVisibleTools(session: AgentSession): ToolDto[] {

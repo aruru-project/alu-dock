@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { chmod, lstat, mkdtemp, rm } from "node:fs/promises";
 import { createConnection, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
@@ -10,7 +11,7 @@ import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
 import { encodeJsonLine, JsonLineDecoder } from "../src/control/json-lines.js";
 import { ProjectTrustCoordinator } from "../src/control/project-trust.js";
-import { ManagedInstance } from "../src/core/managed-instance.js";
+import { ManagedInstance, type DockEvent } from "../src/core/managed-instance.js";
 import { RuntimeInvalidSettingValueError, RuntimeSettingsWriteError } from "../src/core/runtime-session.js";
 import { DelayedRuntimeSession } from "./support/delayed-runtime-session.js";
 import { ScriptedCatalogCommitPort } from "./support/scripted-catalog-port.js";
@@ -98,7 +99,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["core.v2", "events.follow", "host.info", "instance.catalog", "models.v1", "resources.v1", "session.core", "settings.v1", "tools.v1"]);
+  assert.deepEqual(ack.capabilities, ["core.v2", "events.follow", "host.info", "instance.catalog", "models.v1", "resources.v1", "run.abort.v1", "session.core", "settings.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -346,6 +347,120 @@ test("shutdown waits for an admitted asynchronous create and drains its runtime 
   assert.equal(registry.list()[0]?.lifecycle, "active");
 });
 
+test("SSH TUI replays, resizes, handles input, and detaches without stopping", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "pty-demo");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+
+  const pty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", harness.socketPath,
+    "attach", created.id,
+  ]);
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-2_000));
+  assert.equal(pty.status, 0, output.slice(-2_000));
+  assert.ok(pty.resizedBytes > 0, "SIGWINCH must produce a resized TUI frame");
+  assert.match(output, /Alu Dock/);
+  assert.match(output, /deterministic delayed task/);
+  assert.match(output, /Detached from pty-demo/);
+  assert.doesNotMatch(output, /data:image|;base64,/i);
+
+  const afterDetach = await client.status(created.id);
+  assert.equal(afterDetach.lifecycle, "active");
+  assert.equal(afterDetach.execution, "running");
+  assert.equal(runtime.abortCalls, 0);
+  assert.equal(runtime.disposeCalls, 0);
+});
+
+test("SSH TUI editor preserves multiline paste and submitted history", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "pty-editor");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+
+  const pty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", harness.socketPath,
+    "attach", created.id,
+  ], "editor");
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-2_000));
+  assert.equal(pty.status, 0, output.slice(-2_000));
+  assert.deepEqual(runtime.promptMessages, [
+    "deterministic delayed task",
+    "first line\nsecond line",
+    "first line\nsecond line",
+  ]);
+  assert.equal(runtime.disposeCalls, 0);
+});
+
+test("SSH TUI Ctrl+C aborts a run while preserving the reusable instance", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "pty-abort");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+
+  const pty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", harness.socketPath,
+    "attach", created.id,
+  ], "abort");
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-2_000));
+  assert.equal(pty.status, 0, output.slice(-2_000));
+  assert.match(output, /Run aborted/);
+
+  const afterDetach = await client.status(created.id);
+  assert.equal(afterDetach.lifecycle, "active");
+  assert.equal(afterDetach.execution, "idle");
+  assert.equal(afterDetach.lastRun, "aborted");
+  assert.equal(runtime.abortCalls, 1);
+  assert.equal(runtime.disposeCalls, 0);
+});
+
+test("SSH TUI reports transport loss read-only and never replays the running command", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "pty-host-loss");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const readyFile = join(harness.directory, "pty.ready");
+
+  const ptyRun = runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", harness.socketPath,
+    "attach", created.id,
+  ], "transport-close", readyFile);
+  await waitForPath(readyFile);
+  await harness.host.stop();
+  const pty = await ptyRun;
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-2_000));
+  assert.equal(pty.status, 0, output.slice(-2_000));
+  assert.match(output, /Host connection lost/);
+  assert.match(output, /replayed; this TUI is now read-only/);
+  assert.match(output, /Detached from pty-host-loss/);
+
+  const conservative = harness.registry.get(created.id).snapshot();
+  assert.equal(conservative.lifecycle, "active");
+  assert.equal(conservative.execution, "running");
+  assert.equal(runtime.promptCalls, 1);
+  assert.equal(runtime.disposeCalls, 1);
+});
+
 test("a second client can steer, queue follow-up, and stop idempotently", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
@@ -381,6 +496,46 @@ test("a second client can steer, queue follow-up, and stop idempotently", async 
     controller.prompt(created.id, "too late"),
     (error: unknown) => error instanceof ControlClientError && error.code === "instance_not_active",
   );
+});
+
+test("abort is operation-deduplicated and keeps the instance reusable", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "abortable");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+
+  const aborted = await client.abort(created.id, "abort-once");
+  const duplicate = await client.abort(created.id, "abort-once");
+  assert.deepEqual(duplicate, aborted);
+  assert.equal(runtime.abortCalls, 1);
+  assert.equal(runtime.disposeCalls, 0);
+  assert.equal(aborted.instance.lifecycle, "active");
+  assert.equal(aborted.instance.execution, "idle");
+  assert.equal(aborted.instance.lastRun, "aborted");
+
+  const restarted = await client.prompt(created.id, "new work", "prompt", "after-abort");
+  assert.equal(restarted.instance.execution, "running");
+});
+
+test("abort runtime ambiguity stays operation-scoped without faulting the catalog", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "abort-error");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  runtime.abortError = new Error("AUTH_TOKEN_very_secret");
+
+  await assert.rejects(
+    client.abort(created.id, "abort-runtime-unknown"),
+    (error: unknown) => error instanceof ControlClientError
+      && error.code === "effect_unknown"
+      && error.operationId === "abort-runtime-unknown"
+      && !error.message.includes("AUTH_TOKEN"),
+  );
+  assert.equal((await client.hostInfo()).state, "ready");
 });
 
 test("a reconnected client can start a fresh prompt on an idle instance", async (context) => {
@@ -567,6 +722,57 @@ test("models settings failures are typed, evented, and leave the in-memory state
   assert.equal((session as DelayedRuntimeSession).thinkingMutationCalls, 2);
 });
 
+test("tui projection exposes stable paged history and attach history without binary payloads", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "history");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  runtime.history = [
+    { entryId: "h1", timestamp: "2020-01-01T00:00:00.000Z", role: "user", content: "older question" },
+    { entryId: "h2", parentId: "h1", timestamp: "2020-01-01T00:00:01.000Z", role: "assistant", content: [{ type: "thinking", text: "plan" }, { type: "text", text: "older answer" }], stopReason: "stop" },
+    { entryId: "h3", parentId: "h2", timestamp: "2020-01-01T00:00:02.000Z", role: "toolResult", toolCallId: "tool-h3", toolName: "show_image", isError: false, content: [{ type: "text", text: "data:image/png;base64,AAAA" }] },
+  ];
+  runtime.emit({ type: "entry_appended", entry: { id: "h3" } });
+  const immediate = await harness.registry.get(created.id).getHistoryPage(undefined, 2);
+  assert.deepEqual(immediate.entries.map((entry) => entry.entryId), ["h2", "h3"]);
+
+  const latest = await client.history(created.id, undefined, 2);
+  assert.deepEqual(latest.entries.map((entry) => entry.entryId), ["h2", "h3"]);
+  assert.equal(latest.hasEarlier, true);
+  assert.equal(latest.nextBeforeEntryId, "h2");
+  assert.equal(JSON.stringify(latest).includes("data:image"), false);
+  const earlier = await client.history(created.id, latest.nextBeforeEntryId, 2);
+  assert.deepEqual(earlier.entries.map((entry) => entry.entryId), ["h1"]);
+  assert.equal(earlier.hasEarlier, false);
+  await assert.rejects(
+    client.history(created.id, "not-on-branch", 2),
+    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_cursor",
+  );
+
+  const attached = await client.events(created.id);
+  assert.deepEqual(attached.page.events.length > 0, true);
+  const attachResult = await client.streamEvents(created.id, { onEvent: () => {}, requireTuiProjection: true });
+  assert.deepEqual(attachResult.initial.recentHistory.map((entry) => entry.entryId), ["h1", "h2", "h3"]);
+  attachResult.close();
+  await attachResult.done;
+
+  runtime.history = Array.from({ length: 200 }, (_, index) => ({
+    entryId: `large-${index}`,
+    timestamp: `2020-01-01T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
+    role: "user",
+    content: "x".repeat(8_000),
+  }));
+  runtime.emit({ type: "entry_appended", entry: { id: "large-199" } });
+  const bounded = await client.streamEvents(created.id, { onEvent: () => {}, requireTuiProjection: true });
+  assert.equal(bounded.initial.historyTruncated, true);
+  assert.ok(bounded.initial.recentHistory.length > 0 && bounded.initial.recentHistory.length < 200);
+  assert.ok(bounded.initial.page.events.length > 0, "paged history must be trimmed before recent events");
+  bounded.close();
+  await bounded.done;
+});
+
 test("session.core lists bounded safe cwd and all-session metadata", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-session-list-"));
   await chmod(directory, 0o700);
@@ -750,7 +956,37 @@ test("post-send mutation timeout is effect_unknown and is not retried", async (c
   assert.equal(requests, 2);
 });
 
-test("stream callbacks follow the initial result even when frames share one chunk", async (context) => {
+test("real Host streams reset sequence ordering at a replacement generation", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "rollover");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const seen: DockEvent[] = [];
+  let resolveSeen!: () => void;
+  const twoEvents = new Promise<void>((resolve) => { resolveSeen = resolve; });
+  const subscription = await client.streamEvents(created.id, {
+    since: created.eventCursor,
+    onEvent: (liveEvent) => {
+      seen.push(liveEvent);
+      if (seen.length === 2) resolveSeen();
+    },
+  });
+
+  runtime.emit({ type: "dock_session_replaced", reason: "reload", previousSessionFile: runtime.sessionFile, sessionFile: runtime.sessionFile, cwd: harness.directory });
+  runtime.emit({ type: "dock_extension_error", error: "after replacement" });
+  await twoEvents;
+
+  assert.deepEqual(seen.map((liveEvent) => [liveEvent.type, liveEvent.runtimeGeneration, liveEvent.sequence]), [
+    ["session.replaced", 2, 1],
+    ["extension.error", 2, 2],
+  ]);
+  subscription.close();
+  await subscription.done;
+});
+
+test("stream callbacks follow initial response order and accept one-step replacement generations", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-frame-order-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
@@ -777,11 +1013,16 @@ test("stream callbacks follow the initial result even when frames share one chun
           executor: { kind: "fake", piSessionId: "pi-1" }, extensionStatus: {}, activeCommandId: "command-1",
           createdAt: "2026-07-14T00:00:00.000Z", updatedAt: "2026-07-14T00:00:00.000Z", eventCursor: cursor,
         };
-        const event = { scope: "instance", sequence: 2, instanceId: "instance-1", runtimeGeneration: 1, occurredAt: "2026-07-14T00:00:01.000Z", type: "extension.error", data: { error: "live" } };
+        const live = { scope: "instance", sequence: 2, instanceId: "instance-1", runtimeGeneration: 1, occurredAt: "2026-07-14T00:00:01.000Z", type: "extension.error", data: { error: "live" } };
+        const replaced = { scope: "instance", sequence: 1, instanceId: "instance-1", runtimeGeneration: 2, occurredAt: "2026-07-14T00:00:02.000Z", type: "session.replaced", data: { reason: "reload", runtimeGeneration: 2, sessionFile: "/tmp/pi-2.jsonl", cwd: "/tmp/reloaded", piSessionId: "pi-2" } };
+        const afterReplacement = { scope: "instance", sequence: 2, instanceId: "instance-1", runtimeGeneration: 2, occurredAt: "2026-07-14T00:00:03.000Z", type: "extension.error", data: { error: "after replacement" } };
         socket.write(encodeJsonLine({
           kind: "response", version: 2, requestId: "fixed", hostEpoch: "epoch-1", ok: true,
           result: { instance: snapshot, page: { events: [], earliest: cursor, latest: cursor, truncated: false, epochChanged: false, generationChanged: false }, recentHistory: [], historyTruncated: true, controller: { status: "observing" }, following: true },
-        }) + encodeJsonLine({ kind: "event", version: 2, requestId: "fixed", hostEpoch: "epoch-1", event }));
+        })
+          + encodeJsonLine({ kind: "event", version: 2, requestId: "fixed", hostEpoch: "epoch-1", event: live })
+          + encodeJsonLine({ kind: "event", version: 2, requestId: "fixed", hostEpoch: "epoch-1", event: replaced })
+          + encodeJsonLine({ kind: "event", version: 2, requestId: "fixed", hostEpoch: "epoch-1", event: afterReplacement }));
       }
     });
   });
@@ -794,13 +1035,45 @@ test("stream callbacks follow the initial result even when frames share one chun
   const order: string[] = [];
   const client = new DockClient({ socketPath, requestId: () => "fixed" });
   const subscription = await client.streamEvents("instance-1", {
-    onEvent: () => order.push("event"),
+    onEvent: (liveEvent) => order.push(liveEvent.type),
   });
   order.push("initial");
   await new Promise((resolveTurn) => setImmediate(resolveTurn));
-  assert.deepEqual(order, ["initial", "event"]);
+  assert.deepEqual(order, ["initial", "extension.error", "session.replaced", "extension.error"]);
   subscription.close();
   await subscription.done;
+});
+
+test("TUI projection capability is required before the attach request", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-tui-capability-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  let businessRequests = 0;
+  const server = createServer((socket) => {
+    const decoder = new JsonLineDecoder();
+    socket.on("data", (chunk: Buffer) => {
+      for (const line of decoder.push(chunk)) {
+        const frame = JSON.parse(line) as Record<string, unknown>;
+        if (frame.kind !== "hello") { businessRequests += 1; continue; }
+        socket.write(encodeJsonLine({
+          kind: "hello_ack", requestId: "fixed", version: 2,
+          host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
+          catalogSchemaVersion: 1,
+          capabilities: ["core.v2", "events.follow", "run.abort.v1"],
+          limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200 },
+        }));
+      }
+    });
+  });
+  await listen(server, socketPath);
+  context.after(async () => { await close(server); await rm(directory, { recursive: true, force: true }); });
+
+  const client = new DockClient({ socketPath, requestId: () => "fixed" });
+  await assert.rejects(
+    client.streamEvents("instance-1", { onEvent: () => {}, requireTuiProjection: true }),
+    (error: unknown) => error instanceof ControlClientError && error.code === "protocol_incompatible",
+  );
+  assert.equal(businessRequests, 0);
 });
 
 test("client rejects a non-handshake frame before operations", async (context) => {
@@ -1099,6 +1372,25 @@ test("fatal deadline includes a hung admitted create and Host stop does not awai
   assert.equal(sessions.get(first.id)?.disposeCalls, 1);
 });
 
+test("abort settled commit failure is operation-scoped and keeps conservative running state", async (context) => {
+  const port = new ScriptedCatalogCommitPort();
+  const harness = await createTransactionHarness(port);
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, undefined, "create-abort-fault");
+  await client.prompt(created.id, "running", "prompt", "run-before-abort-fault");
+  port.failAt(5);
+
+  await assert.rejects(
+    client.abort(created.id, "abort-catalog-failed"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown" && error.operationId === "abort-catalog-failed",
+  );
+  const conservative = harness.registry.get(created.id).snapshot();
+  assert.equal(conservative.execution, "running");
+  assert.equal(conservative.activeCommandId, "run-before-abort-fault");
+  await harness.host.waitForFatalCompletion();
+});
+
 test("queue and settled commit faults retain the last conservative committed state", async (context) => {
   const queuePort = new ScriptedCatalogCommitPort();
   const queuedHarness = await createTransactionHarness(queuePort);
@@ -1253,6 +1545,25 @@ test("post-effect config failures retain operation IDs and suppress uncommitted 
   }
 });
 
+test("attach and history expose committed active facts during a gated stop intent", async (context) => {
+  const port = new ScriptedCatalogCommitPort();
+  const stopIntentGate = port.gateAt(2);
+  const harness = await createTransactionHarness(port);
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, undefined, "create-stop-read-gate");
+  const stopping = client.stop(created.id, "stop-read-gated");
+  await stopIntentGate.entered;
+
+  const managed = harness.registry.get(created.id);
+  assert.equal(managed.snapshot().lifecycle, "active");
+  assert.equal((await managed.getAttachProjection(undefined)).instance.lifecycle, "active");
+  assert.equal((await managed.getHistoryPage(undefined, 20)).instance.lifecycle, "active");
+
+  stopIntentGate.release();
+  assert.equal((await stopping).instance.lifecycle, "stopped");
+});
+
 test("explicit stop commits intent before cleanup and stopped state before response", async (context) => {
   const port = new ScriptedCatalogCommitPort();
   const intentGate = port.gateAt(2);
@@ -1313,6 +1624,58 @@ test("stop commit failures distinguish pre-cleanup rollback from post-cleanup am
   assert.equal(postHarness.registry.get(postCreated.id).snapshot().lifecycle, "stopping");
   assert.equal(postHarness.registry.get(postCreated.id).eventsSince().events.some((event) => event.type === "instance.stopped"), false);
 });
+
+interface PtyTuiResult {
+  status: number;
+  timedOut: boolean;
+  resizedBytes: number;
+  output: string;
+}
+
+async function runPtyTui(
+  command: string[],
+  action: "detach" | "editor" | "abort" | "transport-close" = "detach",
+  readyFile?: string,
+): Promise<PtyTuiResult> {
+  return new Promise((resolveRun, rejectRun) => {
+    const driver = join(process.cwd(), "test/fixtures/pty-tui-driver.py");
+    const child = spawn("python3", [driver, ...command], {
+      cwd: process.cwd(),
+      env: { ...process.env, ALU_DOCK_PTY_ACTION: action, ...(readyFile ? { ALU_DOCK_PTY_READY_FILE: readyFile } : {}) },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+    child.once("error", rejectRun);
+    child.once("close", (code) => {
+      if (code !== 0) {
+        rejectRun(new Error(`PTY driver failed (${code ?? "signal"}): ${Buffer.concat(stderr).toString("utf8")}`));
+        return;
+      }
+      try {
+        const parsed = JSON.parse(Buffer.concat(stdout).toString("utf8")) as Partial<PtyTuiResult>;
+        assert.equal(typeof parsed.status, "number");
+        assert.equal(typeof parsed.timedOut, "boolean");
+        assert.equal(typeof parsed.resizedBytes, "number");
+        assert.equal(typeof parsed.output, "string");
+        resolveRun(parsed as PtyTuiResult);
+      } catch (error) {
+        rejectRun(new Error(`Invalid PTY driver result: ${Buffer.concat(stdout).toString("utf8")}\n${Buffer.concat(stderr).toString("utf8")}`, { cause: error }));
+      }
+    });
+  });
+}
+
+async function waitForPath(path: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try { await lstat(path); return; }
+    catch { await new Promise((resolveDelay) => setTimeout(resolveDelay, 20)); }
+  }
+  throw new Error(`Timed out waiting for ${path}`);
+}
 
 function objectValue(value: unknown): Record<string, unknown> {
   assert.ok(value !== null && typeof value === "object" && !Array.isArray(value));
