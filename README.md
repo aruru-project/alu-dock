@@ -2,7 +2,7 @@
 
 Alu Dock 是 #136「受管运行时宿主」的独立、可废弃 V0 可行性实现，执行卡为 #137。
 
-当前 V0 验证官方 Pi SDK session 能否由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与生产部署不在本仓库的修改范围内。
+V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**；当前停止向 V0 追加需求，下一步单独规划 V0.1。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与生产部署不在本仓库的修改范围内。
 
 ## 当前进度
 
@@ -11,7 +11,7 @@ Alu Dock 是 #136「受管运行时宿主」的独立、可废弃 V0 可行性�
 - [x] 阶段 2：Unix socket 宿主与跨客户端观察
 - [x] 阶段 3：第二客户端继续交互与显式停止
 - [x] 阶段 3.5：自动宿主启动与真人可用薄 TUI
-- [ ] 阶段 4：默认资源兼容与体验评估
+- [x] 阶段 4：默认资源兼容与体验评估；V0 PASS
 
 详细文档：
 
@@ -20,6 +20,8 @@ Alu Dock 是 #136「受管运行时宿主」的独立、可废弃 V0 可行性�
 - [`docs/validation-stage-1.md`](docs/validation-stage-1.md)
 - [`docs/validation-stage-2.md`](docs/validation-stage-2.md)
 - [`docs/validation-stage-3.md`](docs/validation-stage-3.md)
+- [`docs/validation-stage-3-5.md`](docs/validation-stage-3-5.md)
+- [`docs/v0-evaluation.md`](docs/v0-evaluation.md)
 
 ## 真人入口
 
@@ -109,6 +111,8 @@ npm run smoke:sdk -- \
 
 ## V0 非目标
 
+- 面向用户的 Host status/stop/restart 生命周期管理
+- Host 重启后发现或重开旧 Pi session
 - 宿主故障后继续、恢复或自动重放正在执行的任务
 - 跨机器、广域网、账号体系
 - 工作目录互斥与通用调度
