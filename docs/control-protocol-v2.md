@@ -692,7 +692,7 @@ Host 对 same-host重复 operation ID 保留 bounded receipt cache；同 mutatio
 - service/client：`service_unavailable`、`service_start_failed`、`service_start_timeout`、`protocol_incompatible`；
 - catalog：`catalog_corrupt`、`catalog_write_failed`、`effect_unknown`、`mutation_faulted`；
 - instance：`not_found`、`instance_busy`、`instance_not_active`、`instance_host_lost`、`instance_runtime_error`、`instance_not_reopenable`、`operation_conflict`；
-- session/config：`session_not_found`、`session_replacement_failed`、`model_not_found`、`invalid_thinking`、`unknown_tool`、`settings_write_failed`、`project_trust_required`；
+- session/config：`session_not_found`、`session_replacement_failed`、`model_not_found`、`invalid_thinking`、`unknown_tool`、`settings_invalid`、`settings_write_failed`、`project_trust_required`；
 - interaction：`interaction_lease_unavailable`、`interaction_not_found`、`interaction_expired`、`interaction_wrong_lease`、`interaction_invalid_response`。
 
 Error envelope固定 `{code,message,retryable,details?}`。`details` 仅按 code：

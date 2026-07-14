@@ -2,6 +2,18 @@ import { randomUUID } from "node:crypto";
 
 import { RuntimeSettingsWriteError } from "./runtime-session.js";
 import type {
+  CommandDto,
+  DiagnosticDto,
+  ResourceDto,
+  SettingDto,
+  SettingKey,
+  SettingUpdate,
+  SettingValueMap,
+  SourceDto,
+  ToolDto,
+} from "./config-projection.js";
+export type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingKey, SettingUpdate, SettingValueMap, SourceDto, ToolDto } from "./config-projection.js";
+import type {
   RuntimeEvent,
   RuntimeModelInfo,
   RuntimeModelState,
@@ -47,19 +59,7 @@ export interface SessionMetricsDto {
   cost: number;
   context?: { tokens: number | null; contextWindow: number; percent: number | null };
 }
-export interface SourceDto { kind: "built-in" | "extension" | "skill" | "prompt"; path?: string; package?: string }
-export interface ResourceDto { kind: "extension" | "skill" | "prompt" | "context"; name: string; path?: string; source?: SourceDto }
-export interface DiagnosticDto { severity: "info" | "warning" | "error"; message: string; source?: string }
 export interface SessionDto { sessionId: string; sessionFile: string; name?: string; cwd: string; updatedAt?: string }
-export interface SettingValueMap {
-  autoCompaction: boolean; autoRetry: boolean; enableSkillCommands: boolean; hideThinking: boolean; showCacheMissNotices: boolean;
-  showHardwareCursor: boolean; clearOnShrink: boolean; showTerminalProgress: boolean; quietStartup: boolean;
-  steeringMode: "all" | "one-at-a-time"; followUpMode: "all" | "one-at-a-time";
-  transport: "auto" | "sse" | "websocket" | "websocket-cached"; doubleEscapeAction: "fork" | "tree" | "none";
-  treeFilterMode: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; defaultProjectTrust: "ask" | "always" | "never";
-  httpIdleTimeoutMs: number; editorPaddingX: number; outputPad: 0 | 1; autocompleteMaxVisible: number;
-  warnings: { anthropicExtraUsage?: boolean };
-}
 export type SettingsChangedData = { [K in keyof SettingValueMap]: { key: K; value: SettingValueMap[K]; reloadRequired: boolean; hostRestartRequired: boolean } }[keyof SettingValueMap];
 export interface EventDataMap {
   "instance.created": { cwd: string; name?: string; executor: ExecutorIdentity };
@@ -404,6 +404,58 @@ export class ManagedInstance {
       cwd: truncate(session.cwd, 16_384) ?? "",
       ...(isIsoTimestamp(session.updatedAt) ? { updatedAt: session.updatedAt } : {}),
     }));
+  }
+
+  async listTools(): Promise<ToolDto[]> {
+    this.assertActive();
+    return cloneJson(await this.session.listTools()).slice(0, 2_000);
+  }
+
+  async setActiveTools(names: string[]): Promise<ToolDto[]> {
+    this.beginConfiguration("changing active tools");
+    try {
+      return cloneJson(await this.session.setActiveTools([...names])).slice(0, 2_000);
+    } finally {
+      this.configurationPending = false;
+    }
+  }
+
+  async getSettings(): Promise<SettingDto[]> {
+    this.assertActive();
+    return cloneJson(await this.session.getSettings());
+  }
+
+  async updateSetting(update: SettingUpdate): Promise<SettingDto> {
+    this.beginConfiguration("changing settings");
+    try {
+      const setting = cloneJson(await this.session.updateSetting(cloneJson(update)));
+      this.appendSettingChanged(setting);
+      return setting;
+    } catch (error) {
+      if (error instanceof RuntimeSettingsWriteError) {
+        if (error.mutationApplied && error.setting !== "model" && error.setting !== "thinking") {
+          const current = await this.session.getSettings().catch(() => undefined);
+          const setting = current?.find((candidate) => candidate.key === error.setting);
+          if (setting) this.appendSettingChanged(cloneJson(setting));
+        }
+        this.appendSettingsWriteFailed(error);
+      }
+      throw error;
+    } finally {
+      this.configurationPending = false;
+    }
+  }
+
+  async getResources(): Promise<{ resources: ResourceDto[]; diagnostics: DiagnosticDto[] }> {
+    this.assertActive();
+    const result = cloneJson(await this.session.getResources());
+    return { resources: result.resources.slice(0, 2_000), diagnostics: result.diagnostics.slice(0, 2_000) };
+  }
+
+  async getCommands(prefix?: string): Promise<CommandDto[]> {
+    this.assertActive();
+    const commands = cloneJson(await this.session.getCommands());
+    return commands.filter((command) => prefix === undefined || command.name.startsWith(prefix)).slice(0, 2_000);
   }
 
   async newSession(operationId: string): Promise<RuntimeReplacementResult> {
@@ -824,6 +876,16 @@ export class ManagedInstance {
     });
   }
 
+  private appendSettingChanged(setting: SettingDto): void {
+    this.touch();
+    this.appendEvent("settings.changed", {
+      key: setting.key,
+      value: setting.value,
+      reloadRequired: setting.reloadRequired,
+      hostRestartRequired: setting.hostRestartRequired,
+    } as SettingsChangedData);
+  }
+
   private appendSettingsWriteFailed(error: RuntimeSettingsWriteError): void {
     this.appendEvent("settings.write_failed", {
       key: error.setting,
@@ -1233,7 +1295,11 @@ function errorMessage(error: unknown): string {
 }
 
 function cloneDockEvent(event: DockEvent): DockEvent {
-  return JSON.parse(JSON.stringify(event)) as DockEvent;
+  return cloneJson(event);
+}
+
+function cloneJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
 }
 
 const MAX_JSON_DEPTH = 8;

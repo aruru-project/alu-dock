@@ -9,6 +9,8 @@ import type {
   RuntimeThinkingLevel,
 } from "../../src/core/runtime-session.js";
 import { RuntimeSettingsWriteError } from "../../src/core/runtime-session.js";
+import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, SettingValueMap, ToolDto } from "../../src/core/config-projection.js";
+import { SETTING_DEFINITIONS, SETTING_KEYS } from "../../src/core/config-projection.js";
 
 class Deferred<T> {
   readonly promise: Promise<T>;
@@ -30,13 +32,24 @@ export class DelayedRuntimeSession implements RuntimeSession {
   promptCalls = 0;
   modelMutationCalls = 0;
   thinkingMutationCalls = 0;
+  toolMutationCalls = 0;
+  settingMutationCalls = 0;
   settingsFailure: Error | undefined;
+  settingsReadFailure: Error | undefined;
   sessionCatalog: RuntimeSessionInfo[] = [];
 
   private readonly listeners = new Set<(event: RuntimeEvent) => void>();
   private readonly steeringQueue: string[] = [];
   private readonly followUpQueue: string[] = [];
   private currentRun: Deferred<void> | undefined;
+  private activeTools = new Set(["read"]);
+  private readonly settingValues: SettingValueMap = {
+    autoCompaction: true, autoRetry: true, enableSkillCommands: true, hideThinking: false,
+    showCacheMissNotices: false, showHardwareCursor: false, clearOnShrink: true, showTerminalProgress: true,
+    quietStartup: false, steeringMode: "all", followUpMode: "all", transport: "auto",
+    doubleEscapeAction: "tree", treeFilterMode: "default", defaultProjectTrust: "ask",
+    httpIdleTimeoutMs: 0, editorPaddingX: 0, outputPad: 0, autocompleteMaxVisible: 10, warnings: {},
+  };
   private modelState: RuntimeModelState = {
     model: { provider: "fixture", id: "default" },
     thinkingLevel: "off",
@@ -80,6 +93,43 @@ export class DelayedRuntimeSession implements RuntimeSession {
     return this.sessionCatalog
       .filter((session) => scope === "all" || session.cwd === "/fixture/cwd")
       .map((session) => ({ ...session }));
+  }
+
+  async listTools(): Promise<ToolDto[]> {
+    return ["read", "write"].map((name) => ({ name, description: `${name} fixture`, active: this.activeTools.has(name), source: { kind: "built-in" as const }, parameterSchema: { type: "object" } }));
+  }
+
+  async setActiveTools(names: string[]): Promise<ToolDto[]> {
+    this.toolMutationCalls += 1;
+    if (names.some((name) => name !== "read" && name !== "write")) throw new Error("Unknown tool");
+    this.activeTools = new Set(names);
+    return this.listTools();
+  }
+
+  async getSettings(): Promise<SettingDto[]> {
+    if (this.settingsReadFailure) throw this.settingsReadFailure;
+    return SETTING_KEYS.map((key) => ({ key, value: structuredClone(this.settingValues[key]), source: "effective", writable: true,
+      valueType: SETTING_DEFINITIONS[key].valueType,
+      ...(SETTING_DEFINITIONS[key].allowedValues ? { allowedValues: [...(SETTING_DEFINITIONS[key].allowedValues as readonly (string | number | boolean)[])] } : {}),
+      ...(SETTING_DEFINITIONS[key].min === undefined ? {} : { min: SETTING_DEFINITIONS[key].min }),
+      ...(SETTING_DEFINITIONS[key].max === undefined ? {} : { max: SETTING_DEFINITIONS[key].max }),
+      reloadRequired: SETTING_DEFINITIONS[key].reloadRequired, hostRestartRequired: SETTING_DEFINITIONS[key].hostRestartRequired,
+    } as SettingDto));
+  }
+
+  async updateSetting(update: SettingUpdate): Promise<SettingDto> {
+    this.settingMutationCalls += 1;
+    (this.settingValues as unknown as Record<string, unknown>)[update.key] = structuredClone(update.value);
+    this.throwSettingsFailure(update.key);
+    return (await this.getSettings()).find((setting) => setting.key === update.key) as SettingDto;
+  }
+
+  async getResources(): Promise<{ resources: ResourceDto[]; diagnostics: DiagnosticDto[] }> {
+    return { resources: [{ kind: "context", name: "AGENTS.md", path: "/fixture/AGENTS.md" }], diagnostics: [{ severity: "warning", message: "fixture diagnostic" }] };
+  }
+
+  async getCommands(): Promise<CommandDto[]> {
+    return [{ name: "fixture", description: "fixture command", source: { kind: "extension", path: "/fixture/ext.ts" }, argumentCompletions: false }];
   }
 
   async selectModel(provider: string, modelId: string): Promise<RuntimeModelState> {
@@ -157,7 +207,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
     });
   }
 
-  private throwSettingsFailure(setting: "model" | "thinking"): void {
+  private throwSettingsFailure(setting: import("../../src/core/config-projection.js").SettingKey | "model" | "thinking"): void {
     if (!this.settingsFailure) return;
     throw new RuntimeSettingsWriteError(
       setting,

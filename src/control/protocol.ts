@@ -12,6 +12,8 @@ import type {
   JsonValue,
   SessionDto,
 } from "../core/managed-instance.js";
+import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingKey, SettingUpdate, ToolDto } from "../core/config-projection.js";
+import { SETTING_DEFINITIONS, SETTING_KEYS } from "../core/config-projection.js";
 import type { RuntimeModelInfo, RuntimeThinkingLevel } from "../core/runtime-session.js";
 import type { ProjectTrustChoice } from "./project-trust.js";
 import { CATALOG_SCHEMA_VERSION, DOCK_VERSION, PI_SDK_VERSION } from "../version.js";
@@ -43,7 +45,10 @@ export const IMPLEMENTED_CAPABILITIES = [
   "host.info",
   "instance.catalog",
   "models.v1",
+  "resources.v1",
   "session.core",
+  "settings.v1",
+  "tools.v1",
 ] as const;
 export type Capability = typeof IMPLEMENTED_CAPABILITIES[number];
 
@@ -94,6 +99,12 @@ export type ControlRequest =
   | Request<"model.list", { instanceId: string }>
   | Request<"model.set", { operationId: string; instanceId: string; provider: string; modelId: string }>
   | Request<"thinking.set", { operationId: string; instanceId: string; level: RuntimeThinkingLevel }>
+  | Request<"tool.list", { instanceId: string }>
+  | Request<"tool.set_active", { operationId: string; instanceId: string; names: string[] }>
+  | Request<"settings.get", { instanceId: string }>
+  | Request<"settings.update", { operationId: string; instanceId: string; update: SettingUpdate }>
+  | Request<"resource.get", { instanceId: string }>
+  | Request<"command.catalog", { instanceId: string; prefix?: string }>
   | Request<"session.list", { instanceId: string; scope: "cwd" | "all" }>;
 
 export interface ControlError { code: string; message: string; retryable: boolean; details?: JsonObject }
@@ -128,13 +139,21 @@ export interface ModelsResult { models: RuntimeModelInfo[]; availableThinkingLev
 export interface ModelConfigurationResult { instance: InstanceSnapshot; settingsWrite: { persisted: true } }
 export interface ThinkingConfigurationResult { actualLevel: RuntimeThinkingLevel; availableThinkingLevels: RuntimeThinkingLevel[]; instance: InstanceSnapshot; settingsWrite: { persisted: true } }
 export interface SessionsResult { sessions: SessionDto[] }
-export type ConfigurationResult = ModelConfigurationResult | ThinkingConfigurationResult;
+export interface ToolsResult { tools: ToolDto[]; instance: InstanceSnapshot }
+export interface SettingsResult { settings: SettingDto[] }
+export interface SettingUpdateResult { setting: SettingDto; instance: InstanceSnapshot; reloadRequired: boolean; hostRestartRequired: boolean }
+export interface ResourcesResult { resources: ResourceDto[]; diagnostics: DiagnosticDto[] }
+export interface CommandsResult { commands: CommandDto[] }
+export type ConfigurationResult = ModelConfigurationResult | ThinkingConfigurationResult | SettingUpdateResult;
 
 export function implementedCapabilities(): string[] { return [...IMPLEMENTED_CAPABILITIES].sort(); }
 export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "host.info") return "host.info";
   if (type.startsWith("instance.")) return type === "instance.attach" ? "events.follow" : "instance.catalog";
   if (type === "command.submit" || type === "session.list") return "session.core";
+  if (type.startsWith("tool.")) return "tools.v1";
+  if (type.startsWith("settings.")) return "settings.v1";
+  if (type === "resource.get" || type === "command.catalog") return "resources.v1";
   return "models.v1";
 }
 export function requiredCapabilities(capability: Capability): string[] {
@@ -243,6 +262,12 @@ export function parseControlRequest(input: unknown): ControlRequest {
     case "model.list": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "model.set": exact(params, ["operationId", "instanceId", "provider", "modelId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), provider: string(params.provider, "params.provider", MAX_MODEL_PROVIDER_CHARS, "invalid_request"), modelId: string(params.modelId, "params.modelId", MAX_MODEL_ID_CHARS, "invalid_request") } };
     case "thinking.set": exact(params, ["operationId", "instanceId", "level"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), level: enumeration(params.level, "params.level", THINKING_LEVELS, "invalid_request") } };
+    case "tool.list": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
+    case "tool.set_active": { exact(params, ["operationId", "instanceId", "names"], "invalid_request"); const names = strings(params.names, "params.names", MAX_COLLECTION, 256, "invalid_request"); if (new Set(names).size !== names.length) throw validation("invalid_request", "params.names must be unique"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), names } }; }
+    case "settings.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
+    case "settings.update": exact(params, ["operationId", "instanceId", "update"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), update: parseSettingUpdate(params.update, "params.update", "invalid_request") } };
+    case "resource.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
+    case "command.catalog": exact(params, ["instanceId", "prefix"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId(), prefix: optionalString(params.prefix, "params.prefix", 256, "invalid_request") } };
     case "session.list": exact(params, ["instanceId", "scope"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId(), scope: enumeration(params.scope, "params.scope", ["cwd", "all"], "invalid_request") } };
     default: throw validation("unknown_request", `Unknown request type: ${type}`);
   }
@@ -376,6 +401,41 @@ export function parseSessionsResult(input: unknown): SessionsResult {
   }) };
 }
 
+export function parseToolsResult(input: unknown): ToolsResult {
+  const value = object(input, "tools result"); exact(value, ["tools", "instance"]);
+  const tools = array(value.tools, "tools", MAX_COLLECTION).map((item, index) => parseTool(item, `tools[${index}]`));
+  assertSorted(tools.map((tool) => `${tool.name}\0${tool.source?.kind ?? ""}\0${tool.source?.package ?? ""}\0${tool.source?.path ?? ""}`), "tools");
+  return { tools, instance: parseInstance(value.instance, "instance") };
+}
+export function parseSettingsResult(input: unknown): SettingsResult {
+  const value = object(input, "settings result"); exact(value, ["settings"]);
+  const settings = array(value.settings, "settings", SETTING_KEYS.length).map((item, index) => parseSettingDto(item, `settings[${index}]`));
+  if (settings.length !== SETTING_KEYS.length || settings.some((setting, index) => setting.key !== SETTING_KEYS[index])) throw validation("invalid_response", "settings must contain all 20 keys in canonical order");
+  return { settings };
+}
+export function parseSettingUpdateResult(input: unknown): SettingUpdateResult {
+  const value = object(input, "setting update result"); exact(value, ["setting", "instance", "reloadRequired", "hostRestartRequired"]);
+  const setting = parseSettingDto(value.setting, "setting");
+  const reloadRequired = boolean(value.reloadRequired, "reloadRequired");
+  const hostRestartRequired = boolean(value.hostRestartRequired, "hostRestartRequired");
+  if (reloadRequired !== setting.reloadRequired || hostRestartRequired !== setting.hostRestartRequired) throw validation("invalid_response", "setting update metadata is inconsistent");
+  return { setting, instance: parseInstance(value.instance, "instance"), reloadRequired, hostRestartRequired };
+}
+export function parseResourcesResult(input: unknown): ResourcesResult {
+  const value = object(input, "resources result"); exact(value, ["resources", "diagnostics"]);
+  const resources = array(value.resources, "resources", MAX_COLLECTION).map((item, index) => parseResource(item, `resources[${index}]`));
+  const diagnostics = array(value.diagnostics, "diagnostics", MAX_COLLECTION).map((item, index) => parseDiagnostic(item, `diagnostics[${index}]`));
+  assertSorted(resources.map((resource) => `${resource.kind}\0${resource.name}\0${resource.path ?? ""}`), "resources");
+  assertSorted(diagnostics.map((diagnostic) => `${diagnostic.severity}\0${diagnostic.message}\0${diagnostic.source ?? ""}`), "diagnostics");
+  return { resources, diagnostics };
+}
+export function parseCommandsResult(input: unknown): CommandsResult {
+  const value = object(input, "commands result"); exact(value, ["commands"]);
+  const commands = array(value.commands, "commands", MAX_COLLECTION).map((item, index) => parseCommand(item, `commands[${index}]`));
+  assertSorted(commands.map((command) => `${command.name}\0${command.source.kind}\0${command.source.package ?? ""}\0${command.source.path ?? ""}`), "commands");
+  return { commands };
+}
+
 function parseReceipt(input: unknown): CommandReceipt {
   const receipt = object(input, "receipt"); exact(receipt, ["operationId", "instanceId", "accepted", "delivery", "queued", "acceptedAt"]);
   if (receipt.accepted !== true) throw validation("invalid_response", "receipt.accepted must be true");
@@ -475,7 +535,7 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "model.changed": exact(data, ["provider", "id", "thinkingLevel", "availableThinkingLevels"]); return { provider: text("provider", MAX_MODEL_PROVIDER_CHARS), id: text("id", MAX_MODEL_ID_CHARS), thinkingLevel: enumeration(data.thinkingLevel, "thinkingLevel", THINKING_LEVELS), availableThinkingLevels: levels("availableThinkingLevels") };
     case "thinking.changed": exact(data, ["requested", "thinkingLevel", "availableThinkingLevels"]); return { requested: enumeration(data.requested, "requested", THINKING_LEVELS), thinkingLevel: enumeration(data.thinkingLevel, "thinkingLevel", THINKING_LEVELS), availableThinkingLevels: levels("availableThinkingLevels") };
     case "resources.reloaded": exact(data, ["resources", "diagnostics"]); return { resources: array(data.resources, "resources", MAX_COLLECTION).map((item, index) => parseResource(item, `resources[${index}]`)), diagnostics: array(data.diagnostics, "diagnostics", MAX_COLLECTION).map((item, index) => parseDiagnostic(item, `diagnostics[${index}]`)) };
-    case "settings.changed": { exact(data, ["key", "value", "reloadRequired", "hostRestartRequired"]); const key=text("key", 128); return { key, value: parseSettingValue(key, data.value), reloadRequired: boolean(data.reloadRequired, "reloadRequired"), hostRestartRequired: boolean(data.hostRestartRequired, "hostRestartRequired") }; }
+    case "settings.changed": { exact(data, ["key", "value", "reloadRequired", "hostRestartRequired"]); const key=settingKey(data.key); return { key, value: parseSettingValue(key, data.value), reloadRequired: boolean(data.reloadRequired, "reloadRequired"), hostRestartRequired: boolean(data.hostRestartRequired, "hostRestartRequired") }; }
     case "settings.write_failed": exact(data, ["key", "error"]); return { key: settingsWriteKey(data.key), error: text("error", MAX_MESSAGE) };
     case "interaction.requested": return parseDialogRequest(data, field);
     case "interaction.resolved": exact(data, ["interactionId", "method"]); return { interactionId: text("interactionId", 128), method: enumeration(data.method, "method", ["select", "confirm", "input", "editor"]) };
@@ -511,35 +571,52 @@ function parseDialogRequest(data: Record<string, unknown>, field: string): Event
   if (method === "input") { exact(data, ["interactionId", "method", "title", "placeholder", "issuedAt", "expiresAt"]); return { interactionId, method, title, ...(data.placeholder === undefined ? {} : { placeholder: string(data.placeholder, "placeholder", MAX_TEXT) }), issuedAt, expiresAt }; }
   exact(data, ["interactionId", "method", "title", "prefill", "issuedAt", "expiresAt"]); return { interactionId, method, title, ...(data.prefill === undefined ? {} : { prefill: string(data.prefill, "prefill", MAX_PROMPT_CHARS) }), issuedAt, expiresAt };
 }
-function settingKey(input: unknown): string {
-  const key=string(input,"setting key",128);
-  const keys=["autoCompaction","autoRetry","enableSkillCommands","hideThinking","showCacheMissNotices","showHardwareCursor","clearOnShrink","showTerminalProgress","quietStartup","steeringMode","followUpMode","transport","doubleEscapeAction","treeFilterMode","defaultProjectTrust","httpIdleTimeoutMs","editorPaddingX","outputPad","autocompleteMaxVisible","warnings"];
-  if(!keys.includes(key))throw validation("invalid_response",`Unsupported setting key: ${key}`);
-  return key;
+function parseSettingUpdate(input: unknown, field: string, code = "invalid_response"): SettingUpdate {
+  const update = object(input, field, code); exact(update, ["key", "value"], code);
+  const key = settingKey(update.key, code);
+  return { key, value: parseSettingValue(key, update.value, code) } as SettingUpdate;
+}
+function settingKey(input: unknown, code = "invalid_response"): SettingKey {
+  const key=string(input,"setting key",128,code);
+  if(!SETTING_KEYS.includes(key as SettingKey))throw validation(code,`Unsupported setting key: ${key}`);
+  return key as SettingKey;
 }
 function settingsWriteKey(input: unknown): string {
   const key = string(input, "settings write key", 128);
   return key === "model" || key === "thinking" ? key : settingKey(key);
 }
-function parseSettingValue(key: string, input: unknown): JsonValue {
-  const booleanKeys = ["autoCompaction", "autoRetry", "enableSkillCommands", "hideThinking", "showCacheMissNotices", "showHardwareCursor", "clearOnShrink", "showTerminalProgress", "quietStartup"];
-  if (booleanKeys.includes(key)) return boolean(input, `settings.${key}`);
-  const enums: Record<string, readonly string[]> = {
-    steeringMode: ["all", "one-at-a-time"], followUpMode: ["all", "one-at-a-time"],
-    transport: ["auto", "sse", "websocket", "websocket-cached"], doubleEscapeAction: ["fork", "tree", "none"],
-    treeFilterMode: ["default", "no-tools", "user-only", "labeled-only", "all"], defaultProjectTrust: ["ask", "always", "never"],
-  };
-  if (enums[key]) return enumeration(input, `settings.${key}`, enums[key]);
-  const integerBounds: Record<string, readonly [number, number]> = { httpIdleTimeoutMs: [0, 2_147_483_647], editorPaddingX: [0, 3], outputPad: [0, 1], autocompleteMaxVisible: [3, 20] };
-  const bounds=integerBounds[key];
-  if (bounds) { const value=unsigned(input, `settings.${key}`); if(value<bounds[0]||value>bounds[1])throw validation("invalid_response",`settings.${key} is out of range`); return value; }
-  if (key === "warnings") { const value=object(input, "settings.warnings"); exact(value, ["anthropicExtraUsage"]); const result:JsonObject={}; if(value.anthropicExtraUsage!==undefined)result.anthropicExtraUsage=boolean(value.anthropicExtraUsage,"settings.warnings.anthropicExtraUsage"); return result; }
-  throw validation("invalid_response", `Unsupported setting key: ${key}`);
+function parseSettingValue(key: SettingKey, input: unknown, code = "invalid_response"): JsonValue {
+  const definition = SETTING_DEFINITIONS[key];
+  if (definition.valueType === "boolean") return boolean(input, `settings.${key}`, code);
+  if (definition.valueType === "enum") return enumeration(input, `settings.${key}`, definition.allowedValues as readonly string[], code);
+  if (definition.valueType === "integer") {
+    const value=unsigned(input, `settings.${key}`, code);
+    if(value<(definition.min as number)||value>(definition.max as number))throw validation(code,`settings.${key} is out of range`);
+    return value;
+  }
+  const value=object(input, "settings.warnings", code);
+  exact(value, ["anthropicExtraUsage"], code);
+  const result:JsonObject={};
+  if(value.anthropicExtraUsage!==undefined)result.anthropicExtraUsage=boolean(value.anthropicExtraUsage,"settings.warnings.anthropicExtraUsage",code);
+  return result;
 }
 
-function parseResource(input: unknown, field: string): JsonObject { const value = object(input, field); exact(value, ["kind", "name", "path", "source"]); const result: JsonObject = { kind: enumeration(value.kind, "kind", ["extension", "skill", "prompt", "context"]), name: string(value.name, "name", 256) }; if (value.path !== undefined) result.path = string(value.path, "path", MAX_CONTROL_CWD_CHARS); if (value.source !== undefined) result.source = parseSource(value.source, "source"); return result; }
-function parseSource(input: unknown, field: string): JsonObject { const value = object(input, field); exact(value, ["kind", "path", "package"]); const result: JsonObject = { kind: enumeration(value.kind, "kind", ["built-in", "extension", "skill", "prompt"]) }; if (value.path !== undefined) result.path = string(value.path, `${field}.path`, MAX_CONTROL_CWD_CHARS); if (value.package !== undefined) result.package = string(value.package, `${field}.package`, 256); return result; }
-function parseDiagnostic(input: unknown, field: string): JsonObject { const value = object(input, field); exact(value, ["severity", "message", "source"]); const result: JsonObject = { severity: enumeration(value.severity, "severity", ["info", "warning", "error"]), message: string(value.message, "message", MAX_MESSAGE) }; if (value.source !== undefined) result.source = string(value.source, "source", 256); return result; }
+function parseTool(input: unknown, field: string): ToolDto { const value = object(input, field); exact(value, ["name", "description", "active", "source", "parameterSchema"]); return { name: string(value.name, `${field}.name`, 256), description: boundedString(value.description, `${field}.description`, MAX_MESSAGE), active: boolean(value.active, `${field}.active`), ...(value.source === undefined ? {} : { source: parseSource(value.source, `${field}.source`) }), ...(value.parameterSchema === undefined ? {} : { parameterSchema: parseJsonObject(value.parameterSchema, `${field}.parameterSchema`) }) }; }
+function parseResource(input: unknown, field: string): ResourceDto { const value = object(input, field); exact(value, ["kind", "name", "path", "source"]); return { kind: enumeration(value.kind, `${field}.kind`, ["extension", "skill", "prompt", "context"]), name: string(value.name, `${field}.name`, 256), ...(value.path === undefined ? {} : { path: string(value.path, `${field}.path`, MAX_CONTROL_CWD_CHARS) }), ...(value.source === undefined ? {} : { source: parseSource(value.source, `${field}.source`) }) }; }
+function parseSource(input: unknown, field: string): import("../core/config-projection.js").SourceDto { const value = object(input, field); exact(value, ["kind", "path", "package"]); const kind=enumeration(value.kind, `${field}.kind`, ["built-in", "extension", "skill", "prompt"]); if(kind==="built-in"&&(value.path!==undefined||value.package!==undefined))throw validation("invalid_response",`${field} built-in source cannot carry path or package`); return { kind, ...(value.path === undefined ? {} : { path: string(value.path, `${field}.path`, MAX_CONTROL_CWD_CHARS) }), ...(value.package === undefined ? {} : { package: string(value.package, `${field}.package`, 256) }) }; }
+function parseDiagnostic(input: unknown, field: string): DiagnosticDto { const value = object(input, field); exact(value, ["severity", "message", "source"]); return { severity: enumeration(value.severity, `${field}.severity`, ["info", "warning", "error"]), message: string(value.message, `${field}.message`, MAX_MESSAGE), ...(value.source === undefined ? {} : { source: string(value.source, `${field}.source`, 256) }) }; }
+function parseCommand(input: unknown, field: string): CommandDto { const value = object(input, field); exact(value, ["name", "description", "source", "argumentCompletions"]); return { name: string(value.name, `${field}.name`, 256), ...(value.description === undefined ? {} : { description: boundedString(value.description, `${field}.description`, MAX_MESSAGE) }), source: parseSource(value.source, `${field}.source`), argumentCompletions: boolean(value.argumentCompletions, `${field}.argumentCompletions`) }; }
+function parseSettingDto(input: unknown, field: string): SettingDto {
+  const value = object(input, field); exact(value, ["key", "value", "source", "writable", "valueType", "allowedValues", "min", "max", "reloadRequired", "hostRestartRequired"]);
+  const key = settingKey(value.key); const definition = SETTING_DEFINITIONS[key];
+  const source = enumeration(value.source, `${field}.source`, ["global", "project", "effective"]);
+  if (value.writable !== true) throw validation("invalid_response", `${field}.writable must be true`);
+  if (value.valueType !== definition.valueType || value.reloadRequired !== definition.reloadRequired || value.hostRestartRequired !== definition.hostRestartRequired) throw validation("invalid_response", `${field} metadata does not match the frozen setting table`);
+  const allowedValues = value.allowedValues === undefined ? undefined : array(value.allowedValues, `${field}.allowedValues`, 20).map((item, index) => { if (typeof item !== "string" && typeof item !== "number" && typeof item !== "boolean") throw validation("invalid_response", `${field}.allowedValues[${index}] is invalid`); return item; });
+  if (JSON.stringify(allowedValues) !== JSON.stringify(definition.allowedValues) || value.min !== definition.min || value.max !== definition.max) throw validation("invalid_response", `${field} bounds or allowed values do not match the frozen setting table`);
+  return { key, value: parseSettingValue(key, value.value) as never, source, writable: true, valueType: definition.valueType, ...(allowedValues ? { allowedValues } : {}), ...(definition.min === undefined ? {} : { min: definition.min }), ...(definition.max === undefined ? {} : { max: definition.max }), reloadRequired: definition.reloadRequired, hostRestartRequired: definition.hostRestartRequired } as SettingDto;
+}
+function assertSorted(values: string[], field: string): void { for (let index = 1; index < values.length; index += 1) if ((values[index - 1] as string).localeCompare(values[index] as string) > 0) throw validation("invalid_response", `${field} is not deterministically sorted`); }
 function omitted(input: unknown, field: string): string[] | undefined { if (input === undefined) return undefined; const result = strings(input, field, MAX_JSON_ARRAY, MAX_CONTROL_CWD_CHARS); if (result.some((item) => !item.startsWith("/"))) throw validation("invalid_response", `${field} must contain relative JSON pointers`); return result; }
 function thinkingLevels(input: unknown): RuntimeThinkingLevel[] { return array(input, "availableThinkingLevels", THINKING_LEVELS.length).map((item) => enumeration(item, "thinking level", THINKING_LEVELS)); }
 
@@ -564,5 +641,5 @@ function strings(input: unknown, field: string, maxItems: number, maxChars: numb
 function unsignedArray(input: unknown, field: string, max: number): number[] { return array(input, field, max).map((item, index) => unsigned(item, `${field}[${index}]`)); }
 function timestamp(input: unknown, field: string): string { const value = string(input, field, 64); let normalized: string; try { normalized = new Date(value).toISOString(); } catch { throw validation("invalid_response", `${field} must be an ISO-8601 UTC timestamp`); } if (normalized !== value) throw validation("invalid_response", `${field} must be an ISO-8601 UTC timestamp`); return value; }
 function parseJsonObject(input: unknown, field: string): JsonObject { const value = parseJsonValue(input, field, 0); if (value === null || typeof value !== "object" || Array.isArray(value)) throw validation("invalid_response", `${field} must be a JSON object`); return value; }
-function parseJsonValue(input: unknown, field: string, depth: number): JsonValue { if (depth > MAX_JSON_DEPTH) throw validation("invalid_response", `${field} exceeds JSON depth`); if (input === null || typeof input === "boolean") return input; if (typeof input === "string") return boundedString(input, field, MAX_TEXT); if (typeof input === "number" && Number.isFinite(input)) return input; if (Array.isArray(input)) return array(input, field, MAX_JSON_ARRAY).map((item, index) => parseJsonValue(item, `${field}[${index}]`, depth + 1)); const value = object(input, field); if (Object.keys(value).length > MAX_JSON_KEYS) throw validation("invalid_response", `${field} has too many keys`); return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, parseJsonValue(item, `${field}.${key}`, depth + 1)])); }
+function parseJsonValue(input: unknown, field: string, depth: number): JsonValue { if (depth > MAX_JSON_DEPTH) throw validation("invalid_response", `${field} exceeds JSON depth`); if (input === null || typeof input === "boolean") return input; if (typeof input === "string") return boundedString(input, field, MAX_TEXT); if (typeof input === "number" && Number.isFinite(input)) return input; if (Array.isArray(input)) return array(input, field, MAX_JSON_ARRAY).map((item, index) => parseJsonValue(item, `${field}[${index}]`, depth + 1)); const value = object(input, field); if (Object.keys(value).length > MAX_JSON_KEYS) throw validation("invalid_response", `${field} has too many keys`); return Object.fromEntries(Object.entries(value).map(([key, item]) => [string(key, `${field} key`, 256), parseJsonValue(item, `${field}.${key}`, depth + 1)])); }
 function valueOr(input: unknown): unknown { return input; }

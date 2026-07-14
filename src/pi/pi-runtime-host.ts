@@ -1,5 +1,5 @@
 import { realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 
 import {
   type AgentSession,
@@ -13,6 +13,8 @@ import {
   createAgentSessionRuntime,
   createAgentSessionServices,
   SettingsManager,
+  type ResourceDiagnostic,
+  type SourceInfo,
 } from "@earendil-works/pi-coding-agent";
 
 import type {
@@ -25,7 +27,20 @@ import type {
   RuntimeSessionInfo,
   RuntimeThinkingLevel,
 } from "../core/runtime-session.js";
-import { RuntimeModelNotFoundError, RuntimeSettingsWriteError } from "../core/runtime-session.js";
+import type {
+  CommandDto,
+  DiagnosticDto,
+  ResourceDto,
+  SettingDto,
+  SettingKey,
+  SettingUpdate,
+  SettingValueMap,
+  SourceDto,
+  ToolDto,
+} from "../core/config-projection.js";
+import { SETTING_DEFINITIONS, SETTING_KEYS } from "../core/config-projection.js";
+import { projectJsonObject } from "../core/managed-instance.js";
+import { RuntimeInvalidSettingValueError, RuntimeModelNotFoundError, RuntimeSettingsWriteError, RuntimeUnknownToolError } from "../core/runtime-session.js";
 import { configurePiNetwork } from "./configure-pi-network.js";
 
 export interface PiSessionCatalogInfo {
@@ -150,6 +165,130 @@ export class PiRuntimeHost implements RuntimeSession {
     return this.requireActive().services.modelRegistry.getAvailable().map((model) => ({
       provider: model.provider, id: model.id, name: model.name, reasoning: model.reasoning,
     })).sort((left, right) => left.provider.localeCompare(right.provider) || left.name.localeCompare(right.name));
+  }
+
+  async listTools(): Promise<ToolDto[]> {
+    const session = this.requireActive().session;
+    return projectVisibleTools(session);
+  }
+
+  async setActiveTools(names: string[]): Promise<ToolDto[]> {
+    const session = this.requireActive().session;
+    if (!Array.isArray(names) || names.length > MAX_PROJECTION_ITEMS) throw new Error("Active tool names must be a bounded array");
+    const registry = new Set(projectVisibleTools(session).map((tool) => tool.name));
+    const seen = new Set<string>();
+    for (const name of names) {
+      if (typeof name !== "string" || name.length < 1 || name.length > 256) throw new Error("Active tool names must be bounded non-empty strings");
+      if (seen.has(name)) throw new Error(`Duplicate tool name: ${name}`);
+      seen.add(name);
+      if (!registry.has(name)) throw new RuntimeUnknownToolError(name);
+    }
+    session.setActiveToolsByName([...names]);
+    return this.listTools();
+  }
+
+  async getSettings(): Promise<SettingDto[]> {
+    const settings = this.requireActive().services.settingsManager;
+    return SETTING_KEYS.map((key) => projectSetting(settings, key));
+  }
+
+  async updateSetting(update: SettingUpdate): Promise<SettingDto> {
+    assertSettingUpdate(update);
+    const binding = this.requireActive();
+    const key = update.key;
+    this.assertCleanSettingsBaseline(binding, key);
+    validatedSettingValue(binding.services.settingsManager, key);
+    applySetting(binding.session, binding.services.settingsManager, update);
+    await this.persistSettings(binding, key);
+    return projectSetting(binding.services.settingsManager, key);
+  }
+
+  async getResources(): Promise<{ resources: ResourceDto[]; diagnostics: DiagnosticDto[] }> {
+    const loader = this.requireActive().services.resourceLoader;
+    const extensions = loader.getExtensions();
+    const skills = loader.getSkills();
+    const prompts = loader.getPrompts();
+    const contexts = loader.getAgentsFiles();
+    const resources: ResourceDto[] = [];
+    for (const extension of extensions.extensions) {
+      const path = boundedString(extension.resolvedPath || extension.path, 16_384, "");
+      resources.push({
+        kind: "extension", name: boundedString(basename(extension.path || extension.resolvedPath), 256, "extension"),
+        ...(path ? { path } : {}), source: projectSource(extension.sourceInfo, "extension"),
+      });
+    }
+    for (const skill of skills.skills) {
+      const path = boundedString(skill.filePath, 16_384, "");
+      resources.push({
+        kind: "skill", name: boundedString(skill.name, 256, "skill"), ...(path ? { path } : {}),
+        source: projectSource(skill.sourceInfo, "skill"),
+      });
+    }
+    for (const prompt of prompts.prompts) {
+      const path = boundedString(prompt.filePath, 16_384, "");
+      resources.push({
+        kind: "prompt", name: boundedString(prompt.name, 256, "prompt"), ...(path ? { path } : {}),
+        source: projectSource(prompt.sourceInfo, "prompt"),
+      });
+    }
+    for (const context of contexts.agentsFiles) {
+      const path = boundedString(context.path, 16_384, "");
+      resources.push({
+        kind: "context", name: boundedString(basename(context.path), 256, "context"), ...(path ? { path } : {}),
+      });
+    }
+    const diagnostics: DiagnosticDto[] = [
+      ...extensions.errors.map((failure) => ({ severity: "error" as const, message: safeRequiredText(failure.error, 2_048, "Extension load failure omitted"), source: boundedString(failure.path, 256, "extension") })),
+      ...skills.diagnostics.map(projectDiagnostic),
+      ...prompts.diagnostics.map(projectDiagnostic),
+    ];
+    return {
+      resources: resources.sort(compareResources).slice(0, MAX_PROJECTION_ITEMS),
+      diagnostics: diagnostics.sort(compareDiagnostics).slice(0, MAX_PROJECTION_ITEMS),
+    };
+  }
+
+  async getCommands(): Promise<CommandDto[]> {
+    const binding = this.requireActive();
+    const loader = binding.services.resourceLoader;
+    const commands: CommandDto[] = [];
+    const extensionCommands = resolveExtensionCommands(loader.getExtensions().extensions);
+    for (const command of extensionCommands) {
+      const name = validCatalogName(command.invocationName);
+      if (name === undefined) continue;
+      const description = safeOptionalText(command.description, 2_048);
+      commands.push({
+        name,
+        ...(description === undefined ? {} : { description }),
+        source: projectSource(command.sourceInfo, "extension"),
+        argumentCompletions: command.argumentCompletions,
+      });
+    }
+    for (const prompt of loader.getPrompts().prompts) {
+      const name = validCatalogName(prompt.name);
+      if (name === undefined) continue;
+      const description = safeOptionalText(prompt.description, 2_048);
+      commands.push({
+        name,
+        ...(description === undefined ? {} : { description }),
+        source: projectSource(prompt.sourceInfo, "prompt"),
+        argumentCompletions: false,
+      });
+    }
+    if (validatedSettingValue(binding.services.settingsManager, "enableSkillCommands")) {
+      for (const skill of loader.getSkills().skills) {
+        const name = validCatalogName(`skill:${skill.name}`);
+        if (name === undefined) continue;
+        const description = safeOptionalText(skill.description, 2_048);
+        commands.push({
+          name,
+          ...(description === undefined ? {} : { description }),
+          source: projectSource(skill.sourceInfo, "skill"),
+          argumentCompletions: false,
+        });
+      }
+    }
+    return commands.sort(compareCommands).slice(0, MAX_PROJECTION_ITEMS);
   }
 
   async listSessions(scope: "cwd" | "all"): Promise<RuntimeSessionInfo[]> {
@@ -385,17 +524,236 @@ export class PiRuntimeHost implements RuntimeSession {
     return this.active;
   }
 
-  private assertCleanSettingsBaseline(binding: Binding, setting: "model" | "thinking"): void {
+  private assertCleanSettingsBaseline(binding: Binding, setting: SettingKey | "model" | "thinking"): void {
     const failures = projectSettingsErrors(binding.services.settingsManager.drainErrors());
     if (failures.length > 0) throw new RuntimeSettingsWriteError(setting, "baseline", false, failures);
   }
 
-  private async persistSettings(binding: Binding, setting: "model" | "thinking"): Promise<void> {
+  private async persistSettings(binding: Binding, setting: SettingKey | "model" | "thinking"): Promise<void> {
     const failures: Array<{ scope: "global" | "project" | "unknown"; message: string }> = [];
     try { await binding.services.settingsManager.flush(); }
     catch (error) { failures.push({ scope: "unknown", message: boundedErrorMessage(error) }); }
     failures.push(...projectSettingsErrors(binding.services.settingsManager.drainErrors()));
     if (failures.length > 0) throw new RuntimeSettingsWriteError(setting, "write", true, failures);
+  }
+}
+
+const MAX_PROJECTION_ITEMS = 2_000;
+const DATA_URI = /data:[^,]*;base64,/i;
+const RAW_BASE64 = /^(?:[A-Za-z0-9+/]{4}){32,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+function boundedString(value: unknown, limit: number, fallback: string): string {
+  if (typeof value !== "string" || value.length === 0) return fallback;
+  return value.length <= limit ? value : `${value.slice(0, Math.max(0, limit - 1))}…`;
+}
+
+function safeOptionalText(value: unknown, limit: number): string | undefined {
+  if (typeof value !== "string" || value.length === 0 || DATA_URI.test(value) || RAW_BASE64.test(value.replace(/\s+/g, ""))) return undefined;
+  return boundedString(value, limit, "");
+}
+
+function safeRequiredText(value: unknown, limit: number, fallback: string): string {
+  return safeOptionalText(value, limit) ?? fallback;
+}
+
+function validCatalogName(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 && value.length <= 256 ? value : undefined;
+}
+
+function projectVisibleTools(session: AgentSession): ToolDto[] {
+  const active = new Set(session.getActiveToolNames());
+  const tools: ToolDto[] = [];
+  for (const tool of session.getAllTools()) {
+    const name = validCatalogName(tool.name);
+    if (name === undefined) continue;
+    const schema = projectJsonObject(tool.parameters).value;
+    tools.push({
+      name,
+      description: safeRequiredText(tool.description, 2_048, "Tool description omitted"),
+      active: active.has(tool.name),
+      source: projectSource(tool.sourceInfo, tool.sourceInfo.source === "builtin" ? "built-in" : "extension"),
+      ...(Object.keys(schema).length > 0 ? { parameterSchema: schema } : {}),
+    });
+  }
+  return tools.sort(compareTools).slice(0, MAX_PROJECTION_ITEMS);
+}
+
+function resolveExtensionCommands(extensions: ReturnType<AgentSessionServices["resourceLoader"]["getExtensions"]>["extensions"]): Array<{
+  invocationName: string;
+  name: string;
+  description?: string;
+  sourceInfo: SourceInfo;
+  argumentCompletions: boolean;
+}> {
+  const commands = extensions.flatMap((extension) => [...extension.commands.values()]);
+  const counts = new Map<string, number>();
+  for (const command of commands) counts.set(command.name, (counts.get(command.name) ?? 0) + 1);
+  const seen = new Map<string, number>();
+  const taken = new Set<string>();
+  return commands.map((command) => {
+    const occurrence = (seen.get(command.name) ?? 0) + 1;
+    seen.set(command.name, occurrence);
+    let invocationName = (counts.get(command.name) ?? 0) > 1 ? `${command.name}:${occurrence}` : command.name;
+    if (taken.has(invocationName)) {
+      let suffix = occurrence;
+      do { suffix += 1; invocationName = `${command.name}:${suffix}`; } while (taken.has(invocationName));
+    }
+    taken.add(invocationName);
+    return {
+      invocationName,
+      name: command.name,
+      ...(command.description === undefined ? {} : { description: command.description }),
+      sourceInfo: command.sourceInfo,
+      argumentCompletions: typeof command.getArgumentCompletions === "function",
+    };
+  });
+}
+
+function projectSource(source: SourceInfo, kind: SourceDto["kind"]): SourceDto {
+  if (kind === "built-in") return { kind };
+  const path = boundedString(source.path, 16_384, "");
+  const packageName = source.origin === "package" ? boundedString(source.source, 256, "") : "";
+  return {
+    kind,
+    ...(path ? { path } : {}),
+    ...(packageName ? { package: packageName } : {}),
+  };
+}
+
+function compareSource(left: SourceDto, right: SourceDto): number {
+  return left.kind.localeCompare(right.kind) || (left.package ?? "").localeCompare(right.package ?? "") || (left.path ?? "").localeCompare(right.path ?? "");
+}
+function compareTools(left: ToolDto, right: ToolDto): number {
+  return left.name.localeCompare(right.name)
+    || compareSource(left.source ?? { kind: "built-in" }, right.source ?? { kind: "built-in" })
+    || left.description.localeCompare(right.description)
+    || Number(left.active) - Number(right.active)
+    || JSON.stringify(left.parameterSchema ?? {}).localeCompare(JSON.stringify(right.parameterSchema ?? {}));
+}
+function compareResources(left: ResourceDto, right: ResourceDto): number {
+  return left.kind.localeCompare(right.kind)
+    || left.name.localeCompare(right.name)
+    || (left.path ?? "").localeCompare(right.path ?? "")
+    || compareSource(left.source ?? { kind: "built-in" }, right.source ?? { kind: "built-in" });
+}
+function compareCommands(left: CommandDto, right: CommandDto): number {
+  return left.name.localeCompare(right.name)
+    || compareSource(left.source, right.source)
+    || (left.description ?? "").localeCompare(right.description ?? "")
+    || Number(left.argumentCompletions) - Number(right.argumentCompletions);
+}
+function compareDiagnostics(left: DiagnosticDto, right: DiagnosticDto): number { return left.severity.localeCompare(right.severity) || left.message.localeCompare(right.message) || (left.source ?? "").localeCompare(right.source ?? ""); }
+
+function projectDiagnostic(diagnostic: ResourceDiagnostic): DiagnosticDto {
+  return {
+    severity: diagnostic.type === "error" ? "error" : "warning",
+    message: safeRequiredText(diagnostic.message, 2_048, "Resource diagnostic omitted"),
+    ...(diagnostic.path ? { source: boundedString(diagnostic.path, 256, "resource") } : {}),
+  };
+}
+
+function hasOwnPath(settings: unknown, path: readonly string[]): boolean {
+  let current: unknown = settings;
+  for (const part of path) {
+    if (current === null || typeof current !== "object" || Array.isArray(current) || !Object.prototype.hasOwnProperty.call(current, part)) return false;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return true;
+}
+
+function settingSource(manager: SettingsManager, key: SettingKey): "global" | "project" | "effective" {
+  const path = SETTING_DEFINITIONS[key].sourcePath;
+  if (key !== "defaultProjectTrust" && manager.isProjectTrusted() && hasOwnPath(manager.getProjectSettings(), path)) return "project";
+  if (hasOwnPath(manager.getGlobalSettings(), path)) return "global";
+  return "effective";
+}
+
+function settingValue(manager: SettingsManager, key: SettingKey): SettingValueMap[SettingKey] {
+  switch (key) {
+    case "autoCompaction": return manager.getCompactionEnabled();
+    case "autoRetry": return manager.getRetryEnabled();
+    case "enableSkillCommands": return manager.getEnableSkillCommands();
+    case "hideThinking": return manager.getHideThinkingBlock();
+    case "showCacheMissNotices": return manager.getShowCacheMissNotices();
+    case "showHardwareCursor": return manager.getShowHardwareCursor();
+    case "clearOnShrink": return manager.getClearOnShrink();
+    case "showTerminalProgress": return manager.getShowTerminalProgress();
+    case "quietStartup": return manager.getQuietStartup();
+    case "steeringMode": return manager.getSteeringMode();
+    case "followUpMode": return manager.getFollowUpMode();
+    case "transport": return manager.getTransport();
+    case "doubleEscapeAction": return manager.getDoubleEscapeAction();
+    case "treeFilterMode": return manager.getTreeFilterMode();
+    case "defaultProjectTrust": return manager.getDefaultProjectTrust();
+    case "httpIdleTimeoutMs": return manager.getHttpIdleTimeoutMs();
+    case "editorPaddingX": return manager.getEditorPaddingX();
+    case "outputPad": return manager.getOutputPad();
+    case "autocompleteMaxVisible": return manager.getAutocompleteMaxVisible();
+    case "warnings": return manager.getWarnings();
+  }
+}
+
+function validatedSettingValue<K extends SettingKey>(manager: SettingsManager, key: K): SettingValueMap[K] {
+  const value = settingValue(manager, key) as SettingValueMap[K];
+  try { assertSettingUpdate({ key, value } as SettingUpdate); }
+  catch { throw new RuntimeInvalidSettingValueError(key); }
+  return value;
+}
+
+function projectSetting(manager: SettingsManager, key: SettingKey): SettingDto {
+  const definition = SETTING_DEFINITIONS[key];
+  const value = validatedSettingValue(manager, key);
+  return {
+    key,
+    value,
+    source: settingSource(manager, key),
+    writable: true,
+    valueType: definition.valueType,
+    ...(definition.allowedValues ? { allowedValues: [...definition.allowedValues] } : {}),
+    ...(definition.min === undefined ? {} : { min: definition.min }),
+    ...(definition.max === undefined ? {} : { max: definition.max }),
+    reloadRequired: definition.reloadRequired,
+    hostRestartRequired: definition.hostRestartRequired,
+  } as SettingDto;
+}
+
+function assertSettingUpdate(update: SettingUpdate): void {
+  if (update === null || typeof update !== "object" || Array.isArray(update) || Object.keys(update).length !== 2 || !("key" in update) || !("value" in update)) throw new Error("Setting update must be a closed key/value object");
+  const key = (update as { key: unknown }).key;
+  if (typeof key !== "string" || !SETTING_KEYS.includes(key as SettingKey)) throw new Error(`Unsupported setting key: ${String(key)}`);
+  const definition = SETTING_DEFINITIONS[key as SettingKey];
+  const value = (update as { value: unknown }).value;
+  if (definition.valueType === "boolean" && typeof value !== "boolean") throw new Error(`${key} must be boolean`);
+  if (definition.valueType === "enum" && (typeof value !== "string" || !definition.allowedValues?.includes(value))) throw new Error(`${key} has an unsupported value`);
+  if (definition.valueType === "integer" && (!Number.isSafeInteger(value) || (value as number) < (definition.min ?? 0) || (value as number) > (definition.max ?? Number.MAX_SAFE_INTEGER))) throw new Error(`${key} is out of range`);
+  if (definition.valueType === "object") {
+    if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${key} must be an object`);
+    if (Object.keys(value).some((field) => field !== "anthropicExtraUsage") || ((value as { anthropicExtraUsage?: unknown }).anthropicExtraUsage !== undefined && typeof (value as { anthropicExtraUsage?: unknown }).anthropicExtraUsage !== "boolean")) throw new Error("warnings must be a closed warning object");
+  }
+}
+
+function applySetting(session: AgentSession, manager: SettingsManager, update: SettingUpdate): void {
+  switch (update.key) {
+    case "autoCompaction": manager.setCompactionEnabled(update.value); break;
+    case "autoRetry": manager.setRetryEnabled(update.value); break;
+    case "enableSkillCommands": manager.setEnableSkillCommands(update.value); break;
+    case "hideThinking": manager.setHideThinkingBlock(update.value); break;
+    case "showCacheMissNotices": manager.setShowCacheMissNotices(update.value); break;
+    case "showHardwareCursor": manager.setShowHardwareCursor(update.value); break;
+    case "clearOnShrink": manager.setClearOnShrink(update.value); break;
+    case "showTerminalProgress": manager.setShowTerminalProgress(update.value); break;
+    case "quietStartup": manager.setQuietStartup(update.value); break;
+    case "steeringMode": session.setSteeringMode(update.value); break;
+    case "followUpMode": session.setFollowUpMode(update.value); break;
+    case "transport": manager.setTransport(update.value); break;
+    case "doubleEscapeAction": manager.setDoubleEscapeAction(update.value); break;
+    case "treeFilterMode": manager.setTreeFilterMode(update.value); break;
+    case "defaultProjectTrust": manager.setDefaultProjectTrust(update.value); break;
+    case "httpIdleTimeoutMs": manager.setHttpIdleTimeoutMs(update.value); break;
+    case "editorPaddingX": manager.setEditorPaddingX(update.value); break;
+    case "outputPad": manager.setOutputPad(update.value); break;
+    case "autocompleteMaxVisible": manager.setAutocompleteMaxVisible(update.value); break;
+    case "warnings": manager.setWarnings({ ...update.value }); break;
   }
 }
 
@@ -431,5 +789,5 @@ function projectSettingsErrors(errors: Array<{ scope: "global" | "project"; erro
 function validDate(value: Date): boolean { return value instanceof Date && Number.isFinite(value.getTime()); }
 function boundedErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  return message.length <= 2_048 ? message : `${message.slice(0, 2_047)}…`;
+  return safeRequiredText(message, 2_048, "Settings error details omitted");
 }

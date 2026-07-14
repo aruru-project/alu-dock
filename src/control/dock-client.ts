@@ -3,6 +3,7 @@ import { createConnection, type Socket } from "node:net";
 import { resolve } from "node:path";
 import type { DeliveryMode, DockEvent, EventCursor, EventPage, InstanceSnapshot } from "../core/managed-instance.js";
 import type { RuntimeThinkingLevel } from "../core/runtime-session.js";
+import type { SettingUpdate } from "../core/config-projection.js";
 import type { ProjectTrustChoice } from "./project-trust.js";
 import { DOCK_VERSION } from "../version.js";
 import { encodeJsonLine, JsonLineDecoder } from "./json-lines.js";
@@ -26,6 +27,11 @@ import {
   parseSessionsResult,
   parseStatusResult,
   parseStopResult,
+  parseToolsResult,
+  parseSettingsResult,
+  parseSettingUpdateResult,
+  parseResourcesResult,
+  parseCommandsResult,
   ProtocolValidationError,
   type ModelConfigurationResult,
   type ThinkingConfigurationResult,
@@ -37,6 +43,11 @@ import {
   type PromptResult,
   type SessionsResult,
   type StopResult,
+  type ToolsResult,
+  type SettingsResult,
+  type SettingUpdateResult,
+  type ResourcesResult,
+  type CommandsResult,
 } from "./protocol.js";
 
 type Params<T extends ControlRequest["type"]> = Extract<ControlRequest,{type:T}>["params"];
@@ -66,6 +77,12 @@ export class DockClient {
   models(instanceId:string):Promise<ModelsResult>{return this.request("model.list",{instanceId},"models.v1",parseModelsResult);}
   setModel(instanceId:string,provider:string,modelId:string,operationId=this.createRequestId()):Promise<ModelConfigurationResult>{return this.request("model.set",{operationId,instanceId,provider,modelId},"models.v1",parseModelConfigurationResult);}
   setThinking(instanceId:string,level:RuntimeThinkingLevel,operationId=this.createRequestId()):Promise<ThinkingConfigurationResult>{return this.request("thinking.set",{operationId,instanceId,level},"models.v1",parseThinkingConfigurationResult);}
+  tools(instanceId:string):Promise<ToolsResult>{return this.request("tool.list",{instanceId},"tools.v1",parseToolsResult);}
+  setActiveTools(instanceId:string,names:string[],operationId=this.createRequestId()):Promise<ToolsResult>{return this.request("tool.set_active",{operationId,instanceId,names},"tools.v1",parseToolsResult);}
+  settings(instanceId:string):Promise<SettingsResult>{return this.request("settings.get",{instanceId},"settings.v1",parseSettingsResult);}
+  updateSetting(instanceId:string,update:SettingUpdate,operationId=this.createRequestId()):Promise<SettingUpdateResult>{return this.request("settings.update",{operationId,instanceId,update},"settings.v1",parseSettingUpdateResult);}
+  resources(instanceId:string):Promise<ResourcesResult>{return this.request("resource.get",{instanceId},"resources.v1",parseResourcesResult);}
+  commands(instanceId:string,prefix?:string):Promise<CommandsResult>{return this.request("command.catalog",{instanceId,prefix},"resources.v1",parseCommandsResult);}
   sessions(instanceId:string,scope:"cwd"|"all"):Promise<SessionsResult>{return this.request("session.list",{instanceId,scope},"session.core",parseSessionsResult);}
   stop(instanceId:string,operationId=this.createRequestId()):Promise<StopResult>{return this.request("instance.stop",{operationId,instanceId},"instance.catalog",parseStopResult);}
 
@@ -169,6 +186,21 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
   if(type==="instance.attach"){
     const page=record.page as {earliest?:EventCursor;latest?:EventCursor}|undefined;
     if(!page||page.earliest?.hostEpoch!==hostEpoch||page.latest?.hostEpoch!==hostEpoch)throw new ProtocolValidationError("invalid_response","Attach cursors do not match negotiated Host epoch");
+  }
+  if(type==="tool.set_active"){
+    const requested=new Set((params as Extract<ControlRequest,{type:"tool.set_active"}>["params"]).names);
+    const tools=(record.tools??[]) as Array<{name:string;active:boolean}>;
+    const actual=new Set(tools.filter((tool)=>tool.active).map((tool)=>tool.name));
+    if(actual.size!==requested.size||[...requested].some((name)=>!actual.has(name)))throw new ProtocolValidationError("invalid_response","Active tool result does not match requested exact set");
+  }
+  if(type==="settings.update"){
+    const requested=(params as Extract<ControlRequest,{type:"settings.update"}>["params"]).update;
+    const setting=record.setting as {key?:unknown}|undefined;
+    if(setting?.key!==requested.key)throw new ProtocolValidationError("invalid_response","Setting result does not match requested key");
+  }
+  if(type==="command.catalog"&&typeof (params as Extract<ControlRequest,{type:"command.catalog"}>["params"]).prefix==="string"){
+    const prefix=(params as Extract<ControlRequest,{type:"command.catalog"}>["params"]).prefix as string;
+    if(((record.commands??[]) as Array<{name:string}>).some((command)=>!command.name.startsWith(prefix)))throw new ProtocolValidationError("invalid_response","Command catalog does not match requested prefix");
   }
   if("operationId" in params&&typeof params.operationId==="string"){
     const receipt=record.receipt as {operationId?:unknown}|undefined;

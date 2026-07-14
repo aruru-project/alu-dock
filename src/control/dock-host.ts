@@ -19,7 +19,7 @@ import {
   type JsonObject,
   type ManagedInstance,
 } from "../core/managed-instance.js";
-import { RuntimeModelNotFoundError, RuntimeSettingsWriteError } from "../core/runtime-session.js";
+import { RuntimeInvalidSettingValueError, RuntimeModelNotFoundError, RuntimeSettingsWriteError, RuntimeUnknownToolError } from "../core/runtime-session.js";
 import { DockRegistry, InstanceNotFoundError } from "./dock-registry.js";
 import { OperationConflictError, OperationLedger } from "./operation-ledger.js";
 import { ProjectTrustChallengeError, ProjectTrustRequiredError } from "./project-trust.js";
@@ -262,6 +262,18 @@ export class DockHost {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const state=await instance.setThinkingLevel(request.params.level);return {actualLevel:state.thinkingLevel,availableThinkingLevels:state.availableThinkingLevels,instance:instance.snapshot(),settingsWrite:{persisted:true as const}};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
+      case "tool.list": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{tools:await instance.listTools(),instance:instance.snapshot()}); return; }
+      case "tool.set_active": {
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const tools=await instance.setActiveTools(request.params.names);return {tools,instance:instance.snapshot()};});
+        this.sendSuccessAndEnd(socket,request.requestId,result); return;
+      }
+      case "settings.get": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{settings:await instance.getSettings()}); return; }
+      case "settings.update": {
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const setting=await instance.updateSetting(request.params.update);return {setting,instance:instance.snapshot(),reloadRequired:setting.reloadRequired,hostRestartRequired:setting.hostRestartRequired};});
+        this.sendSuccessAndEnd(socket,request.requestId,result); return;
+      }
+      case "resource.get": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getResources()); return; }
+      case "command.catalog": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{commands:await instance.getCommands(request.params.prefix)}); return; }
       case "session.list": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{sessions:await instance.listSessions(request.params.scope)}); return; }
     }
   }
@@ -376,6 +388,8 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof InstanceAdmissionPendingError) return { code: "admission_pending", message: error.message };
   if (error instanceof InstanceBusyError) return { code: "instance_busy", message: error.message };
   if (error instanceof RuntimeModelNotFoundError) return { code: "model_not_found", message: error.message };
+  if (error instanceof RuntimeUnknownToolError) return { code: "unknown_tool", message: error.message };
+  if (error instanceof RuntimeInvalidSettingValueError) return { code: "settings_invalid", message: error.message };
   if (error instanceof RuntimeSettingsWriteError) return { code: "settings_write_failed", message: error.message };
   if (error instanceof OperationConflictError) return { code: "operation_conflict", message: error.message };
   if (error instanceof SyntaxError) return { code: "invalid_json", message: "Request is not valid JSON" };

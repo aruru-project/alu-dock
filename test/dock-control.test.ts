@@ -11,6 +11,7 @@ import { DockRegistry } from "../src/control/dock-registry.js";
 import { encodeJsonLine, JsonLineDecoder } from "../src/control/json-lines.js";
 import { ProjectTrustCoordinator } from "../src/control/project-trust.js";
 import { ManagedInstance } from "../src/core/managed-instance.js";
+import { RuntimeInvalidSettingValueError } from "../src/core/runtime-session.js";
 import { DelayedRuntimeSession } from "./support/delayed-runtime-session.js";
 
 interface Harness {
@@ -76,7 +77,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["core.v2", "events.follow", "host.info", "instance.catalog", "models.v1", "session.core"]);
+  assert.deepEqual(ack.capabilities, ["core.v2", "events.follow", "host.info", "instance.catalog", "models.v1", "resources.v1", "session.core", "settings.v1", "tools.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -790,6 +791,48 @@ test("client rejects a non-handshake frame before operations", async (context) =
     client.ping(),
     (error: unknown) => error instanceof ControlClientError && error.code === "protocol_incompatible",
   );
+});
+
+test("tools, settings, resources, and commands integrate with capability gates and mutation dedup", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-projections-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  let runtime: DelayedRuntimeSession | undefined;
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
+    runtime = new DelayedRuntimeSession(`pi-${id}`);
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
+  }, () => "projection-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+  const instance = await client.create(directory, undefined, "projection-create");
+
+  assert.deepEqual((await client.tools(instance.id)).tools.filter((tool) => tool.active).map((tool) => tool.name), ["read"]);
+  const first = await client.setActiveTools(instance.id, ["write"], "tools-op");
+  const duplicate = await client.setActiveTools(instance.id, ["write"], "tools-op");
+  assert.deepEqual(first, duplicate);
+  assert.equal(runtime?.toolMutationCalls, 1);
+
+  const settings = await client.settings(instance.id);
+  assert.equal(settings.settings.length, 20);
+  if (!runtime) throw new Error("fixture runtime was not created");
+  runtime.settingsReadFailure = new RuntimeInvalidSettingValueError("editorPaddingX");
+  await assert.rejects(
+    client.settings(instance.id),
+    (error: unknown) => error instanceof ControlClientError && error.code === "settings_invalid" && !error.message.includes("99"),
+  );
+  runtime.settingsReadFailure = undefined;
+  const updated = await client.updateSetting(instance.id, { key: "enableSkillCommands", value: false }, "setting-op");
+  const repeated = await client.updateSetting(instance.id, { key: "enableSkillCommands", value: false }, "setting-op");
+  assert.equal(updated.setting.value, false);
+  assert.equal(updated.reloadRequired, true);
+  assert.deepEqual(updated, repeated);
+  assert.equal(runtime?.settingMutationCalls, 1);
+
+  assert.equal((await client.resources(instance.id)).resources[0]?.name, "AGENTS.md");
+  assert.equal((await client.commands(instance.id, "fix")).commands[0]?.name, "fixture");
+  assert.deepEqual((await client.commands(instance.id, "missing")).commands, []);
 });
 
 function objectValue(value: unknown): Record<string, unknown> {

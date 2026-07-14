@@ -7,6 +7,7 @@ import {
   InvalidDeliveryModeError,
   ManagedInstance,
 } from "../src/core/managed-instance.js";
+import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, ToolDto } from "../src/core/config-projection.js";
 import type {
   ClearedRuntimeQueue,
   RuntimeEvent,
@@ -83,6 +84,13 @@ class FakeRuntimeSession implements RuntimeSession {
   async listSessions(_scope: "cwd" | "all"): Promise<RuntimeSessionInfo[]> {
     return [];
   }
+
+  async listTools(): Promise<ToolDto[]> { return []; }
+  async setActiveTools(_names: string[]): Promise<ToolDto[]> { return []; }
+  async getSettings(): Promise<SettingDto[]> { return []; }
+  async updateSetting(_update: SettingUpdate): Promise<SettingDto> { throw new Error("not configured"); }
+  async getResources(): Promise<{ resources: ResourceDto[]; diagnostics: DiagnosticDto[] }> { return { resources: [], diagnostics: [] }; }
+  async getCommands(): Promise<CommandDto[]> { return []; }
 
   async selectModel(provider: string, modelId: string): Promise<RuntimeModelState> {
     this.modelState = {
