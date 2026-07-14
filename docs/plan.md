@@ -4,7 +4,8 @@
 
 - 每阶段单独实现、验证和提交；上一阶段通过门禁后才进入下一阶段。
 - 只有一个写入线程；旧 daemon、Rails WebConsole、Redis bridge 和生产部署保持只读。
-- V0 是可废弃探针，不提前建设通用调度、账号、跨机、PTY/TUI 或完整恢复平台。
+- V0 是可废弃探针，不提前建设通用调度、账号、跨机、PTY/stock TUI 或完整恢复平台；但必须提供可供真人直接使用的薄 TUI。
+- 核心生命周期由 deterministic regression 保护；可用性边界优先通过真人短周期使用发现，不以高频假设性 reviewer 门禁替代。
 
 ## 阶段 0：实施前门禁（已通过）
 
@@ -82,6 +83,27 @@
 - `agent_end` 后的 retry/compaction/queue 不会产生假 idle。
 
 停止门禁：控制结果只能从终端字符猜测，或状态存在不可消除竞态。
+
+## 阶段 3.5：真人可用入口（已实现，等待真人反馈）
+
+目标：把已经可行的控制面变成无需理解 JSONL 的最小日常交互路径。
+
+范围：
+
+- `alu-dock` 无参数即为主入口，按需自动启动 detached Host。
+- 按当前 cwd 自动创建、重连或选择活动实例。
+- 薄 TUI 展示近期用户/助手消息、流式文本、tool 摘要和结构化状态。
+- Enter 发送、`/follow`、`/status`、`/detach`、`/stop`。
+- `/model` 选择 Pi 当前可用模型（含 `models.json` 本地模型），`/thinking` 查看或设置当前模型支持的 thinking level；只在 idle 时切换。
+- detach 只关闭客户端；重开主入口补取近期事件并继续 live follow。
+- 保留原 JSONL 命令作为机器和诊断接口。
+
+验收合同：
+
+- 真人不需要先运行 `serve`，也不需要复制 instance ID 才能开始对话。
+- 创建后立即进入输入界面；退出再打开能接入同一活动实例。
+- TUI 不持有 SDK session，Host 仍是唯一生命周期 owner。
+- 不把完整 Pi TUI、Extension UI broker 或 session 管理套件纳入本阶段。
 
 ## 阶段 4：兼容性与体验评估
 

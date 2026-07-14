@@ -10,6 +10,7 @@ Alu Dock 是 #136「受管运行时宿主」的独立、可废弃 V0 可行性�
 - [x] 阶段 1：SDK 单实例生命周期探针
 - [x] 阶段 2：Unix socket 宿主与跨客户端观察
 - [x] 阶段 3：第二客户端继续交互与显式停止
+- [x] 阶段 3.5：自动宿主启动与真人可用薄 TUI
 - [ ] 阶段 4：默认资源兼容与体验评估
 
 详细文档：
@@ -20,31 +21,52 @@ Alu Dock 是 #136「受管运行时宿主」的独立、可废弃 V0 可行性�
 - [`docs/validation-stage-2.md`](docs/validation-stage-2.md)
 - [`docs/validation-stage-3.md`](docs/validation-stage-3.md)
 
-## 本地宿主与薄 CLI
+## 真人入口
 
-宿主以前台常驻进程运行；客户端命令是一次性进程。默认 socket 为 `$XDG_RUNTIME_DIR/alu-dock/dock.sock`，未设置 XDG 时为 `~/.alu-dock/run/dock.sock`。socket 的直接父目录必须属于当前用户且不能授权 group/other，socket mode 固定为 `0600`。
+直接运行：
 
-终端 A：
+```bash
+npm run cli
+```
+
+该入口会自动检查并按需在后台启动 Host，无需先开一个终端执行 `serve`。它按当前 cwd 查找活动实例：没有则创建，一个则直接重连，多个则显示选择器。进入 TUI 后可直接输入消息并查看流式回复和近期活动。
+
+常用操作：
+
+- `Enter`：发送；运行中默认作为 steer
+- `/follow MESSAGE`：排队为 follow-up
+- `/model`：打开 Pi 可用模型选择器（包含已配置认证的本地自定义模型）
+- `/model PROVIDER/MODEL`：直接切换模型
+- `/thinking LEVEL`：设置 Pi thinking level；`/thinking` 查看当前可选值
+- `/status`：刷新状态
+- `/detach` 或空编辑器时 `Ctrl+D`：只离开 TUI，实例继续由 Host 持有
+- `/stop`：显式停止实例
+
+也可以明确新建或接入：
+
+```bash
+npm run cli -- new --cwd "$PWD" --name demo
+npm run cli -- attach INSTANCE_ID
+```
+
+再次执行 `npm run cli` 会重放 Host 的近期消息并继续观察 live events。模型/thinking 切换沿用 Pi 的 session 与 settings 语义，只允许实例 idle 时执行；当前运行不会被中途换模。默认 socket 为 `$XDG_RUNTIME_DIR/alu-dock/dock.sock`，未设置 XDG 时为 `~/.alu-dock/run/dock.sock`；后台日志位于 socket 同目录的 `host.log`。
+
+## 机器与诊断接口
+
+以下命令保留结构化 JSONL 输出，供测试、脚本和排障使用：
 
 ```bash
 npm run cli -- serve
-```
-
-终端 B（每条命令都可以是新的客户端进程）：
-
-```bash
 npm run cli -- create --cwd "$PWD" --name demo
 npm run cli -- list
 npm run cli -- status INSTANCE_ID
-npm run cli -- events INSTANCE_ID --since 0
-npm run cli -- events INSTANCE_ID --since SEQUENCE --follow
+npm run cli -- events INSTANCE_ID --since 0 --follow
 npm run cli -- prompt INSTANCE_ID "start a new run"
-npm run cli -- prompt INSTANCE_ID --delivery steer "change direction"
 npm run cli -- prompt INSTANCE_ID --delivery followUp "then summarize"
 npm run cli -- stop INSTANCE_ID
 ```
 
-也可用 `--socket PATH` 或 `ALU_DOCK_SOCKET` 指定 socket。所有输出均为一行一个 JSON 对象，不转发终端屏幕。`prompt` 的 receipt 只表示 preflight 已接受；`queued=true` 表示 steer/follow-up 已排队，不表示任务完成。`stop` 可重复调用，receipt 会区分首次停止与 `alreadyStopped`。
+也可用 `--socket PATH` 或 `ALU_DOCK_SOCKET` 指定 socket。`prompt` receipt 只表示 preflight 已接受；`queued=true` 不表示任务完成。socket 父目录必须为当前用户私有目录，socket mode 固定为 `0600`。
 
 ## 状态模型
 
@@ -90,5 +112,5 @@ npm run smoke:sdk -- \
 - 宿主故障后继续、恢复或自动重放正在执行的任务
 - 跨机器、广域网、账号体系
 - 工作目录互斥与通用调度
-- stock Pi TUI / PTY / screen 转发
+- 完整复刻 stock Pi TUI、PTY 或 screen 转发
 - 完整 Extension UI broker

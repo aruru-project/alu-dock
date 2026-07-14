@@ -10,12 +10,14 @@ import { dirname, resolve } from "node:path";
 
 import {
   InstanceAdmissionPendingError,
+  InstanceBusyError,
   InstanceNotActiveError,
   InvalidDeliveryModeError,
   type DockEvent,
   type EventPage,
   type ManagedInstance,
 } from "../core/managed-instance.js";
+import { RuntimeModelNotFoundError } from "../core/runtime-session.js";
 import { DockRegistry, InstanceNotFoundError } from "./dock-registry.js";
 import { encodeJsonLine, JsonLineDecoder, JsonLineError } from "./json-lines.js";
 import {
@@ -251,6 +253,37 @@ export class DockHost {
         return;
       }
 
+      case "models": {
+        const instance = this.registry.get(request.instanceId);
+        const result = await instance.listModels();
+        this.sendSuccessAndEnd(socket, request.requestId, {
+          models: result.models,
+          availableThinkingLevels: result.state.availableThinkingLevels,
+          instance: instance.snapshot(),
+        });
+        return;
+      }
+
+      case "set_model": {
+        const instance = this.registry.get(request.instanceId);
+        const state = await instance.selectModel(request.provider, request.modelId);
+        this.sendSuccessAndEnd(socket, request.requestId, {
+          availableThinkingLevels: state.availableThinkingLevels,
+          instance: instance.snapshot(),
+        });
+        return;
+      }
+
+      case "set_thinking": {
+        const instance = this.registry.get(request.instanceId);
+        const state = instance.setThinkingLevel(request.level);
+        this.sendSuccessAndEnd(socket, request.requestId, {
+          availableThinkingLevels: state.availableThinkingLevels,
+          instance: instance.snapshot(),
+        });
+        return;
+      }
+
       case "stop": {
         const instance = this.registry.get(request.instanceId);
         const receipt = await instance.stop();
@@ -479,6 +512,8 @@ function mapControlError(error: unknown): { code: string; message: string } {
   if (error instanceof InstanceNotActiveError) return { code: "instance_not_active", message: error.message };
   if (error instanceof InvalidDeliveryModeError) return { code: "invalid_delivery", message: error.message };
   if (error instanceof InstanceAdmissionPendingError) return { code: "admission_pending", message: error.message };
+  if (error instanceof InstanceBusyError) return { code: "instance_busy", message: error.message };
+  if (error instanceof RuntimeModelNotFoundError) return { code: "model_not_found", message: error.message };
   if (error instanceof SyntaxError) return { code: "invalid_json", message: "Request is not valid JSON" };
   if (error instanceof JsonLineError) {
     return {

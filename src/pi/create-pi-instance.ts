@@ -1,7 +1,9 @@
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import {
+  AuthStorage,
   createAgentSession,
+  ModelRegistry,
   SessionManager,
   VERSION,
   type CreateAgentSessionOptions,
@@ -30,19 +32,24 @@ export interface CreatePiInstanceOptions {
  */
 export async function createPiInstance(options: CreatePiInstanceOptions): Promise<ManagedInstance> {
   const cwd = resolve(options.cwd);
+  const agentDir = options.agentDir ? resolve(options.agentDir) : undefined;
   const sessionManager = options.sessionDir
     ? SessionManager.create(cwd, resolve(options.sessionDir))
     : SessionManager.create(cwd);
 
+  const authStorage = AuthStorage.create(agentDir ? join(agentDir, "auth.json") : undefined);
+  const modelRegistry = ModelRegistry.create(authStorage, agentDir ? join(agentDir, "models.json") : undefined);
   const sdkOptions: CreateAgentSessionOptions = {
     cwd,
-    agentDir: options.agentDir,
+    agentDir,
+    authStorage,
+    modelRegistry,
     sessionManager,
     tools: options.tools,
     excludeTools: options.excludeTools,
   };
   const result = await createAgentSession(sdkOptions);
-  const runtime = new PiRuntimeSession(result.session);
+  const runtime = new PiRuntimeSession(result.session, modelRegistry);
   const model = result.session.model
     ? { provider: result.session.model.provider, id: result.session.model.id }
     : undefined;
@@ -55,6 +62,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
       kind: "pi-sdk",
       version: VERSION,
       model,
+      thinkingLevel: result.session.thinkingLevel,
     },
     eventCapacity: options.eventCapacity,
   });
@@ -69,6 +77,9 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
     await instance.stop();
     throw error;
   }
+
+  // session_start extensions may select a model or thinking level.
+  instance.synchronizeModelState();
 
   for (const extensionError of result.extensionsResult.errors) {
     instance.recordExtensionError(extensionError);

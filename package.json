@@ -19,7 +19,8 @@
     "smoke:sdk": "npm run build && node dist/scripts/sdk-smoke.js"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.80.6"
+    "@earendil-works/pi-coding-agent": "0.80.6",
+    "@earendil-works/pi-tui": "0.80.6"
   },
   "devDependencies": {
     "@types/node": "22.19.1",

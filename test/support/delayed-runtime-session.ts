@@ -1,8 +1,11 @@
 import type {
   ClearedRuntimeQueue,
   RuntimeEvent,
+  RuntimeModelInfo,
+  RuntimeModelState,
   RuntimePromptOptions,
   RuntimeSession,
+  RuntimeThinkingLevel,
 } from "../../src/core/runtime-session.js";
 
 class Deferred<T> {
@@ -27,6 +30,11 @@ export class DelayedRuntimeSession implements RuntimeSession {
   private readonly steeringQueue: string[] = [];
   private readonly followUpQueue: string[] = [];
   private currentRun: Deferred<void> | undefined;
+  private modelState: RuntimeModelState = {
+    model: { provider: "fixture", id: "default" },
+    thinkingLevel: "off",
+    availableThinkingLevels: ["off", "low", "high"],
+  };
 
   constructor(readonly sessionId: string) {
     this.sessionFile = `/tmp/${sessionId}.jsonl`;
@@ -51,6 +59,31 @@ export class DelayedRuntimeSession implements RuntimeSession {
     this.isStreaming = true;
     this.emit({ type: "agent_start" });
     return this.currentRun.promise;
+  }
+
+  async listModels(): Promise<RuntimeModelInfo[]> {
+    return [
+      { provider: "fixture", id: "default", name: "Fixture Default", reasoning: true },
+      { provider: "fixture", id: "local", name: "Fixture Local", reasoning: true },
+    ];
+  }
+
+  async selectModel(provider: string, modelId: string): Promise<RuntimeModelState> {
+    this.modelState = { ...this.modelState, model: { provider, id: modelId } };
+    return this.getModelState();
+  }
+
+  setThinkingLevel(level: RuntimeThinkingLevel): RuntimeModelState {
+    this.modelState = { ...this.modelState, thinkingLevel: level };
+    return this.getModelState();
+  }
+
+  getModelState(): RuntimeModelState {
+    return {
+      ...this.modelState,
+      model: this.modelState.model ? { ...this.modelState.model } : undefined,
+      availableThinkingLevels: [...this.modelState.availableThinkingLevels],
+    };
   }
 
   clearQueue(): ClearedRuntimeQueue {

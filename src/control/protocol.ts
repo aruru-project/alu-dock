@@ -7,6 +7,10 @@ import type {
   InstanceSnapshot,
   StopReceipt,
 } from "../core/managed-instance.js";
+import type {
+  RuntimeModelInfo,
+  RuntimeThinkingLevel,
+} from "../core/runtime-session.js";
 
 export const CONTROL_PROTOCOL_VERSION = 1;
 export const MAX_CONTROL_LINE_BYTES = 1024 * 1024;
@@ -15,6 +19,8 @@ export const MAX_INSTANCE_ID_CHARS = 128;
 export const MAX_INSTANCE_NAME_CHARS = 256;
 export const MAX_CONTROL_CWD_CHARS = 16_384;
 export const MAX_PROMPT_CHARS = 256_000;
+export const MAX_MODEL_PROVIDER_CHARS = 256;
+export const MAX_MODEL_ID_CHARS = 512;
 
 export type ControlRequest =
   | { version: 1; requestId: string; type: "ping" }
@@ -36,6 +42,22 @@ export type ControlRequest =
       instanceId: string;
       message: string;
       delivery?: DeliveryMode;
+    }
+  | { version: 1; requestId: string; type: "models"; instanceId: string }
+  | {
+      version: 1;
+      requestId: string;
+      type: "set_model";
+      instanceId: string;
+      provider: string;
+      modelId: string;
+    }
+  | {
+      version: 1;
+      requestId: string;
+      type: "set_thinking";
+      instanceId: string;
+      level: RuntimeThinkingLevel;
     }
   | { version: 1; requestId: string; type: "stop"; instanceId: string };
 
@@ -97,6 +119,17 @@ export interface PromptResult {
 
 export interface StopResult {
   receipt: StopReceipt;
+  instance: InstanceSnapshot;
+}
+
+export interface ModelsResult {
+  models: RuntimeModelInfo[];
+  availableThinkingLevels: RuntimeThinkingLevel[];
+  instance: InstanceSnapshot;
+}
+
+export interface ConfigurationResult {
+  availableThinkingLevels: RuntimeThinkingLevel[];
   instance: InstanceSnapshot;
 }
 
@@ -164,6 +197,37 @@ export function parseControlRequest(input: unknown): ControlRequest {
         delivery,
       };
     }
+    case "models":
+      assertOnlyKeys(value, ["version", "requestId", "type", "instanceId"]);
+      return {
+        version: 1,
+        requestId,
+        type,
+        instanceId: requiredString(value.instanceId, "instanceId", MAX_INSTANCE_ID_CHARS),
+      };
+    case "set_model":
+      assertOnlyKeys(value, ["version", "requestId", "type", "instanceId", "provider", "modelId"]);
+      return {
+        version: 1,
+        requestId,
+        type,
+        instanceId: requiredString(value.instanceId, "instanceId", MAX_INSTANCE_ID_CHARS),
+        provider: requiredString(value.provider, "provider", MAX_MODEL_PROVIDER_CHARS),
+        modelId: requiredString(value.modelId, "modelId", MAX_MODEL_ID_CHARS),
+      };
+    case "set_thinking":
+      assertOnlyKeys(value, ["version", "requestId", "type", "instanceId", "level"]);
+      return {
+        version: 1,
+        requestId,
+        type,
+        instanceId: requiredString(value.instanceId, "instanceId", MAX_INSTANCE_ID_CHARS),
+        level: requestEnumString(
+          value.level,
+          "level",
+          ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+        ),
+      };
     case "stop":
       assertOnlyKeys(value, ["version", "requestId", "type", "instanceId"]);
       return {
@@ -277,6 +341,32 @@ export function parseStopResult(input: unknown): StopResult {
   return { receipt, instance };
 }
 
+export function parseModelsResult(input: unknown): ModelsResult {
+  const value = objectValue(input, "models result");
+  if (!Array.isArray(value.models)) {
+    throw new ProtocolValidationError("invalid_response", "models result.models must be an array");
+  }
+  return {
+    models: value.models.map((model, index) => parseModelInfo(model, `models result.models[${index}]`)),
+    availableThinkingLevels: parseThinkingLevels(
+      value.availableThinkingLevels,
+      "models result.availableThinkingLevels",
+    ),
+    instance: parseInstanceSnapshot(value.instance, "models result.instance"),
+  };
+}
+
+export function parseConfigurationResult(input: unknown): ConfigurationResult {
+  const value = objectValue(input, "configuration result");
+  return {
+    availableThinkingLevels: parseThinkingLevels(
+      value.availableThinkingLevels,
+      "configuration result.availableThinkingLevels",
+    ),
+    instance: parseInstanceSnapshot(value.instance, "configuration result.instance"),
+  };
+}
+
 export class ProtocolValidationError extends Error {
   constructor(readonly code: string, message: string) {
     super(message);
@@ -364,6 +454,13 @@ function parseExecutor(input: unknown, field: string): ExecutorIdentity {
   const value = objectValue(input, field);
   const version = optionalString(value.version, `${field}.version`);
   const sessionFile = optionalString(value.sessionFile, `${field}.sessionFile`);
+  const thinkingLevel = value.thinkingLevel === undefined
+    ? undefined
+    : enumString(
+      value.thinkingLevel,
+      `${field}.thinkingLevel`,
+      ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+    );
   let model: ExecutorIdentity["model"];
   if (value.model !== undefined) {
     const modelValue = objectValue(value.model, `${field}.model`);
@@ -378,7 +475,29 @@ function parseExecutor(input: unknown, field: string): ExecutorIdentity {
     piSessionId: requiredString(value.piSessionId, `${field}.piSessionId`),
     sessionFile,
     model,
+    thinkingLevel,
   };
+}
+
+function parseModelInfo(input: unknown, field: string): RuntimeModelInfo {
+  const value = objectValue(input, field);
+  return {
+    provider: requiredString(value.provider, `${field}.provider`),
+    id: requiredString(value.id, `${field}.id`),
+    name: requiredString(value.name, `${field}.name`),
+    reasoning: requiredBoolean(value.reasoning, `${field}.reasoning`),
+  };
+}
+
+function parseThinkingLevels(input: unknown, field: string): RuntimeThinkingLevel[] {
+  if (!Array.isArray(input)) {
+    throw new ProtocolValidationError("invalid_response", `${field} must be an array`);
+  }
+  return input.map((level, index) => enumString(
+    level,
+    `${field}[${index}]`,
+    ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+  ));
 }
 
 function parseEventPage(input: unknown, field: string): EventPage {
@@ -444,6 +563,17 @@ function optionalBoolean(value: unknown, field: string): boolean | undefined {
     throw new ProtocolValidationError("invalid_request", `${field} must be a boolean`);
   }
   return value;
+}
+
+function requestEnumString<T extends string>(
+  value: unknown,
+  field: string,
+  allowed: readonly T[],
+): T {
+  if (typeof value !== "string" || !allowed.includes(value as T)) {
+    throw new ProtocolValidationError("invalid_request", `${field} has an unsupported value`);
+  }
+  return value as T;
 }
 
 function optionalEnumString<T extends string>(

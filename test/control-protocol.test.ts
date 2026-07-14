@@ -66,4 +66,30 @@ test("control requests reject unknown fields and invalid cursors", () => {
     }),
     /delivery has an unsupported value/,
   );
+  assert.throws(
+    () => parseControlRequest({
+      version: 1,
+      requestId: "r5",
+      type: "set_thinking",
+      instanceId: "i1",
+      level: "extreme",
+    }),
+    (error: unknown) => error instanceof ProtocolValidationError && error.code === "invalid_request",
+  );
+
+  assert.deepEqual(parseControlRequest({
+    version: 1,
+    requestId: "r6",
+    type: "set_model",
+    instanceId: "i1",
+    provider: "local",
+    modelId: "qwen/test",
+  }), {
+    version: 1,
+    requestId: "r6",
+    type: "set_model",
+    instanceId: "i1",
+    provider: "local",
+    modelId: "qwen/test",
+  });
 });

@@ -10,8 +10,11 @@ import {
 import type {
   ClearedRuntimeQueue,
   RuntimeEvent,
+  RuntimeModelInfo,
+  RuntimeModelState,
   RuntimePromptOptions,
   RuntimeSession,
+  RuntimeThinkingLevel,
 } from "../src/core/runtime-session.js";
 
 class Deferred<T> {
@@ -43,6 +46,11 @@ class FakeRuntimeSession implements RuntimeSession {
 
   private pendingPreflight: ((success: boolean) => void) | undefined;
   private readonly listeners = new Set<(event: RuntimeEvent) => void>();
+  private modelState: RuntimeModelState = {
+    model: { provider: "fixture", id: "model-a" },
+    thinkingLevel: "off",
+    availableThinkingLevels: ["off", "low", "high"],
+  };
 
   subscribe(listener: (event: RuntimeEvent) => void): () => void {
     this.listeners.add(listener);
@@ -62,6 +70,36 @@ class FakeRuntimeSession implements RuntimeSession {
     options?.preflightResult?.(true);
     if (this.isStreaming && options?.streamingBehavior) return Promise.resolve();
     return this.promptDeferred.promise;
+  }
+
+  async listModels(): Promise<RuntimeModelInfo[]> {
+    return [
+      { provider: "fixture", id: "model-a", name: "Model A", reasoning: true },
+      { provider: "fixture", id: "model-b", name: "Model B", reasoning: false },
+    ];
+  }
+
+  async selectModel(provider: string, modelId: string): Promise<RuntimeModelState> {
+    this.modelState = {
+      model: { provider, id: modelId },
+      thinkingLevel: modelId === "model-b" ? "off" : this.modelState.thinkingLevel,
+      availableThinkingLevels: modelId === "model-b" ? ["off"] : ["off", "low", "high"],
+    };
+    return this.getModelState();
+  }
+
+  setThinkingLevel(level: RuntimeThinkingLevel): RuntimeModelState {
+    const effective = this.modelState.availableThinkingLevels.includes(level) ? level : "off";
+    this.modelState = { ...this.modelState, thinkingLevel: effective };
+    return this.getModelState();
+  }
+
+  getModelState(): RuntimeModelState {
+    return {
+      ...this.modelState,
+      model: this.modelState.model ? { ...this.modelState.model } : undefined,
+      availableThinkingLevels: [...this.modelState.availableThinkingLevels],
+    };
   }
 
   clearQueue(): ClearedRuntimeQueue {
@@ -159,6 +197,10 @@ test("submit returns after preflight while the runtime promise remains host-owne
   assert.equal(instance.snapshot().executor.piSessionId, "pi-session-1");
   assert.notEqual(instance.snapshot().id, instance.snapshot().executor.piSessionId);
   assert.equal(session.promptCalls.length, 1);
+  const submitted = instance.eventsSince().events.find((event) => event.type === "message.submitted");
+  assert.equal(submitted?.data.role, "user");
+  assert.equal(submitted?.data.text, "do a long task");
+  assert.equal(submitted?.data.commandId, "command-1");
 
   session.startRun();
   session.emitAssistantEnd("stop");

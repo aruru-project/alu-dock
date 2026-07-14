@@ -26,6 +26,13 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (parsed.command === "open" || parsed.command === "new" || parsed.command === "attach") {
+    const options = parseOpenArgs(parsed.command, parsed.commandArgs);
+    const { openDock } = await import("./interactive.js");
+    await openDock({ socketPath: parsed.socketPath, ...options });
+    return;
+  }
+
   const client = new DockClient({ socketPath: parsed.socketPath });
   switch (parsed.command) {
     case "ping":
@@ -172,10 +179,44 @@ function parseGlobalArgs(args: string[]): ParsedArgs {
   }
 
   const command = remaining.shift();
-  if (!command || command === "--help" || command === "-h" || command === "help") {
+  if (!command) return { socketPath, command: "open", commandArgs: [] };
+  if (command === "--help" || command === "-h" || command === "help") {
     return { socketPath, command: "help", commandArgs: [] };
   }
   return { socketPath, command, commandArgs: remaining };
+}
+
+function parseOpenArgs(
+  command: "open" | "new" | "attach",
+  args: string[],
+): { cwd: string; name?: string; instanceId?: string; forceNew: boolean } {
+  let cwd = process.cwd();
+  let name: string | undefined;
+  let instanceId: string | undefined;
+  let forceNew = command === "new";
+  const mutable = [...args];
+  while (mutable.length > 0) {
+    const arg = mutable.shift();
+    if (arg === "--cwd") {
+      const value = mutable.shift();
+      if (!value) throw new Error("--cwd requires a path");
+      cwd = value;
+    } else if (arg === "--name") {
+      const value = mutable.shift();
+      if (!value) throw new Error("--name requires a non-empty value");
+      name = value;
+    } else if (arg === "--new") {
+      forceNew = true;
+    } else if (arg?.startsWith("--")) {
+      throw new Error(`Unknown ${command} argument: ${arg}`);
+    } else if (!instanceId) {
+      instanceId = arg;
+    } else {
+      throw new Error(`${command} accepts at most one INSTANCE_ID`);
+    }
+  }
+  if (forceNew && instanceId) throw new Error(`${command} cannot combine INSTANCE_ID with --new`);
+  return { cwd, name, instanceId, forceNew };
 }
 
 function parseCreateArgs(args: string[]): { cwd: string; name?: string } {
@@ -266,7 +307,7 @@ function writeJson(value: unknown): void {
 }
 
 function usage(): string {
-  return `Alu Dock V0 local control client\n\nUsage:\n  alu-dock [--socket PATH] serve\n  alu-dock [--socket PATH] ping\n  alu-dock [--socket PATH] create [--cwd PATH] [--name NAME]\n  alu-dock [--socket PATH] list\n  alu-dock [--socket PATH] status INSTANCE_ID\n  alu-dock [--socket PATH] events INSTANCE_ID [--since SEQUENCE] [--follow]\n  alu-dock [--socket PATH] prompt INSTANCE_ID [--delivery MODE] MESSAGE\n  alu-dock [--socket PATH] stop INSTANCE_ID\n`;
+  return `Alu Dock V0 managed Pi client\n\nHuman workflow:\n  alu-dock [--socket PATH]\n  alu-dock [--socket PATH] open [INSTANCE_ID] [--cwd PATH] [--name NAME] [--new]\n  alu-dock [--socket PATH] new [--cwd PATH] [--name NAME]\n  alu-dock [--socket PATH] attach [INSTANCE_ID] [--cwd PATH]\n\nMachine and diagnostic commands:\n  alu-dock [--socket PATH] serve\n  alu-dock [--socket PATH] ping\n  alu-dock [--socket PATH] create [--cwd PATH] [--name NAME]\n  alu-dock [--socket PATH] list\n  alu-dock [--socket PATH] status INSTANCE_ID\n  alu-dock [--socket PATH] events INSTANCE_ID [--since SEQUENCE] [--follow]\n  alu-dock [--socket PATH] prompt INSTANCE_ID [--delivery MODE] MESSAGE\n  alu-dock [--socket PATH] stop INSTANCE_ID\n`;
 }
 
 function errorMessage(error: unknown): string {

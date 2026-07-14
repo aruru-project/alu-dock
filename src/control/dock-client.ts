@@ -8,6 +8,7 @@ import type {
   EventPage,
   InstanceSnapshot,
 } from "../core/managed-instance.js";
+import type { RuntimeThinkingLevel } from "../core/runtime-session.js";
 import { encodeJsonLine, JsonLineDecoder } from "./json-lines.js";
 import {
   CONTROL_PROTOCOL_VERSION,
@@ -17,12 +18,16 @@ import {
   parseCreateResult,
   parseEventsResult,
   parseListResult,
+  parseModelsResult,
+  parseConfigurationResult,
   parsePingResult,
   parsePromptResult,
   parseStatusResult,
   parseStopResult,
   ProtocolValidationError,
+  type ConfigurationResult,
   type EventsResult,
+  type ModelsResult,
   type PingResult,
   type PromptResult,
   type StopResult,
@@ -103,6 +108,18 @@ export class DockClient {
     delivery: DeliveryMode = "auto",
   ): Promise<PromptResult> {
     return this.request({ type: "prompt", instanceId, message, delivery }, parsePromptResult);
+  }
+
+  models(instanceId: string): Promise<ModelsResult> {
+    return this.request({ type: "models", instanceId }, parseModelsResult);
+  }
+
+  setModel(instanceId: string, provider: string, modelId: string): Promise<ConfigurationResult> {
+    return this.request({ type: "set_model", instanceId, provider, modelId }, parseConfigurationResult);
+  }
+
+  setThinking(instanceId: string, level: RuntimeThinkingLevel): Promise<ConfigurationResult> {
+    return this.request({ type: "set_thinking", instanceId, level }, parseConfigurationResult);
   }
 
   stop(instanceId: string): Promise<StopResult> {

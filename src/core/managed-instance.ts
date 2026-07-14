@@ -1,6 +1,12 @@
 import { randomUUID } from "node:crypto";
 
-import type { RuntimeEvent, RuntimeSession } from "./runtime-session.js";
+import type {
+  RuntimeEvent,
+  RuntimeModelInfo,
+  RuntimeModelState,
+  RuntimeSession,
+  RuntimeThinkingLevel,
+} from "./runtime-session.js";
 
 export type InstanceLifecycle = "active" | "stopping" | "stopped";
 export type InstanceExecution = "idle" | "running" | "failed";
@@ -16,6 +22,7 @@ export interface ExecutorIdentity {
     provider: string;
     id: string;
   };
+  thinkingLevel?: RuntimeThinkingLevel;
 }
 
 export interface InstanceSnapshot {
@@ -126,14 +133,21 @@ export class InstanceAdmissionPendingError extends Error {
   }
 }
 
+export class InstanceBusyError extends Error {
+  constructor(instanceId: string, action: string) {
+    super(`Instance ${instanceId} must be idle before ${action}`);
+    this.name = "InstanceBusyError";
+  }
+}
+
 export class ManagedInstance {
   readonly id: string;
   readonly name: string | undefined;
   readonly cwd: string;
-  readonly executor: ExecutorIdentity;
   readonly createdAt: string;
 
   private readonly session: RuntimeSession;
+  private readonly executorIdentity: ExecutorIdentity;
   private readonly eventCapacity: number;
   private readonly now: () => Date;
   private readonly createCommandId: () => string;
@@ -149,6 +163,7 @@ export class ManagedInstance {
   private lastAssistantOutcome: AssistantOutcome | undefined;
   private pendingAdmission: PendingAdmission | undefined;
   private stopRequestedWhileRunning = false;
+  private configurationPending = false;
   private stopPromise: Promise<StopReceipt> | undefined;
 
   constructor(options: ManagedInstanceOptions) {
@@ -173,10 +188,11 @@ export class ManagedInstance {
       pendingFollowUp: 0,
       updatedAt: createdAt,
     };
-    this.executor = {
+    this.executorIdentity = {
       kind: options.executor?.kind ?? "pi-sdk",
       version: options.executor?.version,
       model: options.executor?.model ? { ...options.executor.model } : undefined,
+      thinkingLevel: options.executor?.thinkingLevel,
       piSessionId: this.session.sessionId,
       sessionFile: this.session.sessionFile,
     };
@@ -195,7 +211,7 @@ export class ManagedInstance {
     this.appendEvent("instance.created", {
       cwd: this.cwd,
       name: this.name,
-      executor: this.executor,
+      executor: this.executorIdentity,
     });
   }
 
@@ -213,8 +229,8 @@ export class ManagedInstance {
         total: this.state.pendingSteering + this.state.pendingFollowUp,
       },
       executor: {
-        ...this.executor,
-        model: this.executor.model ? { ...this.executor.model } : undefined,
+        ...this.executorIdentity,
+        model: this.executorIdentity.model ? { ...this.executorIdentity.model } : undefined,
       },
       activeCommandId: this.state.activeCommandId,
       lastError: this.state.lastError,
@@ -242,9 +258,55 @@ export class ManagedInstance {
     return () => this.subscribers.delete(listener);
   }
 
+  synchronizeModelState(): void {
+    this.applyModelState(this.session.getModelState());
+  }
+
+  async listModels(): Promise<{ models: RuntimeModelInfo[]; state: RuntimeModelState }> {
+    this.assertActive();
+    const models = await this.session.listModels();
+    return { models, state: this.session.getModelState() };
+  }
+
+  async selectModel(provider: string, modelId: string): Promise<RuntimeModelState> {
+    this.beginConfiguration("switching model");
+    try {
+      const state = await this.session.selectModel(provider, modelId);
+      this.applyModelState(state);
+      this.touch();
+      this.appendEvent("model.changed", {
+        provider: state.model?.provider,
+        id: state.model?.id,
+        thinkingLevel: state.thinkingLevel,
+        availableThinkingLevels: state.availableThinkingLevels,
+      });
+      return state;
+    } finally {
+      this.configurationPending = false;
+    }
+  }
+
+  setThinkingLevel(level: RuntimeThinkingLevel): RuntimeModelState {
+    this.beginConfiguration("changing thinking level");
+    try {
+      const state = this.session.setThinkingLevel(level);
+      this.applyModelState(state);
+      this.touch();
+      this.appendEvent("thinking.changed", {
+        requested: level,
+        thinkingLevel: state.thinkingLevel,
+        availableThinkingLevels: state.availableThinkingLevels,
+      });
+      return state;
+    } finally {
+      this.configurationPending = false;
+    }
+  }
+
   async submit(message: string, delivery: DeliveryMode = "auto"): Promise<CommandReceipt> {
     this.assertActive();
     if (this.pendingAdmission) throw new InstanceAdmissionPendingError(this.id);
+    if (this.configurationPending) throw new InstanceBusyError(this.id, "submitting a prompt");
     if (message.trim().length === 0) {
       throw new Error("Prompt message must not be empty");
     }
@@ -332,6 +394,13 @@ export class ManagedInstance {
         this.state.activeCommandId = commandId;
       }
       this.touch(acceptedAt);
+      this.appendEvent("message.submitted", {
+        role: "user",
+        text: message,
+        commandId,
+        delivery: actualDelivery,
+        queued: actuallyQueued,
+      }, acceptedAt);
       this.appendEvent("command.accepted", {
         commandId,
         delivery: actualDelivery,
@@ -531,6 +600,24 @@ export class ManagedInstance {
     if (this.state.lifecycle !== "active") {
       throw new InstanceNotActiveError(this.id, this.state.lifecycle);
     }
+  }
+
+  private beginConfiguration(action: string): void {
+    this.assertActive();
+    if (
+      this.configurationPending
+      || this.pendingAdmission !== undefined
+      || this.state.execution === "running"
+      || this.session.isStreaming
+    ) {
+      throw new InstanceBusyError(this.id, action);
+    }
+    this.configurationPending = true;
+  }
+
+  private applyModelState(state: RuntimeModelState): void {
+    this.executorIdentity.model = state.model ? { ...state.model } : undefined;
+    this.executorIdentity.thinkingLevel = state.thinkingLevel;
   }
 
   private handleRuntimeEvent(event: RuntimeEvent): void {

@@ -233,6 +233,47 @@ test("a reconnected client can start a fresh prompt on an idle instance", async 
   assert.equal(replay.instance.lastRun, "succeeded");
 });
 
+test("an idle instance lists and switches Pi models and thinking through the control plane", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-model-control-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const registry = new DockRegistry(async ({ id, cwd }) => (
+    new ManagedInstance({ id, cwd, session: new DelayedRuntimeSession(`pi-${id}`) })
+  ), () => "model-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => {
+    await host.stop().catch(() => {});
+    await rm(directory, { recursive: true, force: true });
+  });
+  await host.start();
+
+  const client = new DockClient({ socketPath });
+  const created = await client.create(directory);
+  const catalog = await client.models(created.id);
+  assert.deepEqual(catalog.models.map((model) => `${model.provider}/${model.id}`), [
+    "fixture/default",
+    "fixture/local",
+  ]);
+  assert.deepEqual(catalog.availableThinkingLevels, ["off", "low", "high"]);
+
+  const thinking = await client.setThinking(created.id, "high");
+  assert.equal(thinking.instance.executor.thinkingLevel, "high");
+  const selected = await client.setModel(created.id, "fixture", "local");
+  assert.deepEqual(selected.instance.executor.model, { provider: "fixture", id: "local" });
+  assert.equal(selected.instance.executor.thinkingLevel, "high");
+
+  const accepted = await client.prompt(created.id, "start");
+  assert.equal(accepted.instance.execution, "running");
+  await assert.rejects(
+    client.setModel(created.id, "fixture", "default"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "instance_busy",
+  );
+
+  const events = await client.events(created.id, 0);
+  assert.ok(events.page.events.some((event) => event.type === "model.changed"));
+  assert.ok(events.page.events.some((event) => event.type === "thinking.changed"));
+});
+
 test("unexpected host closure rejects a live follow subscription", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));

@@ -5,8 +5,9 @@ import { DockRegistry } from "../../src/control/dock-registry.js";
 import { ManagedInstance } from "../../src/core/managed-instance.js";
 import { DelayedRuntimeSession } from "../support/delayed-runtime-session.js";
 
-const [socketPath, allowedCwd] = process.argv.slice(2);
-if (!socketPath || !allowedCwd) throw new Error("delayed-host fixture requires SOCKET_PATH CWD");
+const [socketPath, allowedCwd, mode] = process.argv.slice(2);
+if (!socketPath || !allowedCwd) throw new Error("delayed-host fixture requires SOCKET_PATH CWD [--idle]");
+const startWithDelayedRun = mode !== "--idle";
 
 const sessions = new Map<string, DelayedRuntimeSession>();
 const instances = new Map<string, ManagedInstance>();
@@ -17,7 +18,7 @@ const registry = new DockRegistry(async ({ id, cwd, name }) => {
   const instance = new ManagedInstance({ id, cwd, name, session, eventCapacity: 100 });
   sessions.set(id, session);
   instances.set(id, instance);
-  await instance.submit("deterministic delayed task");
+  if (startWithDelayedRun) await instance.submit("deterministic delayed task");
   return instance;
 }, () => `fixture-instance-${++sequence}`);
 const host = new DockHost({ socketPath, registry });
