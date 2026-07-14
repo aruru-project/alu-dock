@@ -5,6 +5,8 @@ import type {
   RuntimeEvent,
   RuntimeModelInfo,
   RuntimeModelState,
+  RuntimeProjectTrust,
+  RuntimeReplacementResult,
   RuntimeSession,
   RuntimeThinkingLevel,
 } from "./runtime-session.js";
@@ -246,12 +248,11 @@ export class ManagedInstance {
   readonly id: string;
   readonly creationOperationId: string;
   readonly hostEpoch: string;
-  readonly runtimeGeneration = 1;
   readonly name: string | undefined;
-  readonly cwd: string;
   readonly createdAt: string;
 
   private readonly session: RuntimeSession;
+  private cwdValue: string;
   private readonly executorIdentity: ExecutorIdentity;
   private readonly eventCapacity: number;
   private readonly now: () => Date;
@@ -259,9 +260,8 @@ export class ManagedInstance {
   private readonly eventLog: DockEvent[] = [];
   private readonly subscribers = new Set<(event: DockEvent) => void>();
   private readonly backgroundTasks = new Set<Promise<void>>();
-  private readonly unsubscribeRuntime: () => void;
-
   private state: MutableState;
+  private runtimeGenerationValue = 1;
   private nextEventSequence = 1;
   private agentStartCount = 0;
   private agentSettledCount = 0;
@@ -271,12 +271,15 @@ export class ManagedInstance {
   private configurationPending = false;
   private stopPromise: Promise<StopReceipt> | undefined;
 
+  get runtimeGeneration(): number { return this.runtimeGenerationValue; }
+  get cwd(): string { return this.cwdValue; }
+
   constructor(options: ManagedInstanceOptions) {
     this.id = options.id ?? randomUUID();
     this.creationOperationId = options.creationOperationId ?? randomUUID();
     this.hostEpoch = options.hostEpoch ?? randomUUID();
     this.name = options.name;
-    this.cwd = options.cwd;
+    this.cwdValue = options.cwd;
     this.session = options.session;
     const requestedCapacity = options.eventCapacity ?? 500;
     this.eventCapacity = Number.isFinite(requestedCapacity) && requestedCapacity >= 1
@@ -304,7 +307,7 @@ export class ManagedInstance {
       sessionFile: truncate(this.session.sessionFile, 16_384),
     };
 
-    this.unsubscribeRuntime = this.session.subscribe((event) => {
+    this.session.subscribe((event) => {
       try {
         this.handleRuntimeEvent(event);
       } catch (error) {
@@ -353,7 +356,12 @@ export class ManagedInstance {
   }
 
   eventsSince(since: EventCursor | number = 0): EventPage {
-    const sequence = typeof since === "number" ? since : since.sequence;
+    const domainChanged = typeof since !== "number" && (
+      since.hostEpoch !== this.hostEpoch
+      || since.instanceId !== this.id
+      || since.runtimeGeneration !== this.runtimeGeneration
+    );
+    const sequence = domainChanged ? 0 : typeof since === "number" ? since : since.sequence;
     const earliestSequence = this.eventLog[0]?.sequence ?? this.nextEventSequence;
     const latestSequence = this.nextEventSequence - 1;
     return {
@@ -362,7 +370,7 @@ export class ManagedInstance {
         .map((event) => cloneDockEvent(event)),
       earliest: this.cursor(earliestSequence),
       latest: this.cursor(latestSequence),
-      truncated: sequence < earliestSequence - 1,
+      truncated: domainChanged || sequence < earliestSequence - 1,
     };
   }
 
@@ -396,6 +404,31 @@ export class ManagedInstance {
       cwd: truncate(session.cwd, 16_384) ?? "",
       ...(isIsoTimestamp(session.updatedAt) ? { updatedAt: session.updatedAt } : {}),
     }));
+  }
+
+  async newSession(operationId: string): Promise<RuntimeReplacementResult> {
+    return this.replaceRuntime("creating a new session", async () => {
+      if (!this.session.newSession) throw new Error("Runtime does not support session replacement");
+      return this.session.newSession(operationId);
+    });
+  }
+
+  async switchSession(
+    operationId: string,
+    sessionFile: string,
+    trust: RuntimeProjectTrust,
+  ): Promise<RuntimeReplacementResult> {
+    return this.replaceRuntime("switching session", async () => {
+      if (!this.session.switchSession) throw new Error("Runtime does not support session replacement");
+      return this.session.switchSession(operationId, sessionFile, trust);
+    });
+  }
+
+  async reloadSession(operationId: string): Promise<RuntimeReplacementResult> {
+    return this.replaceRuntime("reloading resources", async () => {
+      if (!this.session.reload) throw new Error("Runtime does not support reload");
+      return this.session.reload(operationId);
+    });
   }
 
   async selectModel(provider: string, modelId: string): Promise<RuntimeModelState> {
@@ -712,15 +745,9 @@ export class ManagedInstance {
       }
 
       try {
-        this.session.dispose();
+        await this.session.dispose();
       } catch (error) {
         captureCleanupError("dispose", error);
-      }
-
-      try {
-        this.unsubscribeRuntime();
-      } catch (error) {
-        captureCleanupError("unsubscribe", error);
       }
     } finally {
       this.state.lifecycle = "stopped";
@@ -763,6 +790,18 @@ export class ManagedInstance {
     this.configurationPending = true;
   }
 
+  private async replaceRuntime(
+    action: string,
+    replace: () => Promise<RuntimeReplacementResult>,
+  ): Promise<RuntimeReplacementResult> {
+    this.beginConfiguration(action);
+    try {
+      return await replace();
+    } finally {
+      this.configurationPending = false;
+    }
+  }
+
   private applyModelState(state: RuntimeModelState): void {
     this.executorIdentity.model = state.model ? { provider: truncate(state.model.provider, 256) ?? "unknown", id: truncate(state.model.id, 512) ?? "unknown" } : undefined;
     this.executorIdentity.thinkingLevel = state.thinkingLevel;
@@ -794,6 +833,48 @@ export class ManagedInstance {
 
   private handleRuntimeEvent(event: RuntimeEvent): void {
     if (this.state.lifecycle === "stopped") return;
+    if (event.type === "dock_session_replaced") {
+      const previousSessionFile = optionalRuntimeString(event.previousSessionFile, 16_384);
+      const sessionFile = optionalRuntimeString(event.sessionFile, 16_384);
+      const cwd = optionalRuntimeString(event.cwd, 16_384);
+      const reason = event.reason === "resume" || event.reason === "reload" ? event.reason : "new";
+      this.runtimeGenerationValue += 1;
+      this.nextEventSequence = 1;
+      this.eventLog.length = 0;
+      this.agentStartCount = 0;
+      this.agentSettledCount = 0;
+      this.lastAssistantOutcome = undefined;
+      this.state.pendingSteering = 0;
+      this.state.pendingFollowUp = 0;
+      if (cwd !== undefined) this.cwdValue = cwd;
+      this.executorIdentity.piSessionId = truncate(this.session.sessionId, 128) ?? "unknown";
+      this.executorIdentity.sessionFile = truncate(this.session.sessionFile, 16_384);
+      this.applyModelState(this.session.getModelState());
+      this.touch();
+      this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue });
+      return;
+    }
+    if (event.type === "dock_runtime_error") {
+      this.state.lifecycle = "runtime_error";
+      this.state.execution = "unavailable";
+      this.state.activeCommandId = undefined;
+      this.state.pendingSteering = 0;
+      this.state.pendingFollowUp = 0;
+      this.state.lastError = boundedRuntimeString(event.error, 2_048, "Runtime replacement failed");
+      this.touch();
+      this.appendEvent("instance.runtime_error", {
+        operationId: boundedRuntimeString(event.operationId, 128, "runtime-internal"),
+        kind: event.kind === "reload" || event.kind === "switch" ? event.kind : "new",
+        error: this.state.lastError,
+        recoverySessionFile: optionalRuntimeString(event.recoverySessionFile, 16_384),
+      });
+      this.appendStateEvent("runtime_replacement_failed");
+      return;
+    }
+    if (event.type === "dock_extension_error") {
+      this.recordExtensionError(event.error);
+      return;
+    }
     switch (event.type) {
       case "agent_start":
         this.agentStartCount += 1;

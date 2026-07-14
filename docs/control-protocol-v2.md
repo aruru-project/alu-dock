@@ -517,7 +517,8 @@ Trust challenge 是 operation ID 的**未完成 pre-side-effect 状态**，不�
 - 只有匹配 challenge ID/target/canonical cwd 的一次 decision 可以 consume challenge并继续原 operation；
 - challenge consume 与开始 mutation在同一 Host串行队列中线性化；
 - decision response 丢失后不得再次执行 operation，按第 16 节 mutation ambiguity 查询；
-- operation 完成/失败后才写普通 receipt cache；已 consume/过期 challenge 的 duplicate 返回稳定错误，不重新进入 side effect。
+- operation 完成/失败后才写普通 receipt cache；已 consume/过期 challenge 的 duplicate 返回稳定错误，不重新进入 side effect；
+- challenge operation binding 使用 Host-epoch 内有界且不驱逐的 tombstone 集合；容量耗尽时拒绝新的 ask challenge，不能通过淘汰旧 binding 让 operation ID 改绑 target/type。Host 重启后 epoch 改变，旧 challenge 本来就无效。
 
 第一次 switch 仍有当前 runtime，但由于 trust gate 在线性化序列最前面，它尚未触发 hook/teardown/catalog mutation；因此用户明确回答 challenge 后重发才安全。当前七扩展无 project-trust handler；未知 handler 不进入 V0.1 兼容承诺。
 

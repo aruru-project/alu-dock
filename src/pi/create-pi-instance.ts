@@ -1,18 +1,16 @@
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 
 import {
-  AuthStorage,
-  createAgentSession,
-  ModelRegistry,
-  SessionManager,
+  getAgentDir,
+  hasTrustRequiringProjectResources,
+  ProjectTrustStore,
   SettingsManager,
   VERSION,
-  type CreateAgentSessionOptions,
 } from "@earendil-works/pi-coding-agent";
 
 import { ManagedInstance } from "../core/managed-instance.js";
-import { configurePiNetwork } from "./configure-pi-network.js";
-import { PiRuntimeSession } from "./pi-runtime-session.js";
+import { ProjectTrustCoordinator } from "../control/project-trust.js";
+import { createPiRuntimeHost } from "./pi-runtime-host.js";
 
 export interface CreatePiInstanceOptions {
   id?: string;
@@ -20,6 +18,7 @@ export interface CreatePiInstanceOptions {
   hostEpoch?: string;
   name?: string;
   cwd: string;
+  projectTrusted: boolean;
   agentDir?: string;
   sessionDir?: string;
   tools?: string[];
@@ -27,76 +26,57 @@ export interface CreatePiInstanceOptions {
   eventCapacity?: number;
 }
 
-/**
- * Create one fixed Pi AgentSession owned by one Alu Dock instance.
- *
- * The instance identity is intentionally separate from Pi's session ID. V0
- * binds extensions in print/headless mode so session lifecycle hooks run while
- * interactive UI calls fail closed instead of waiting for a client.
- */
+/** Create the single Host-owned Pi runtime facade after project trust has been resolved. */
 export async function createPiInstance(options: CreatePiInstanceOptions): Promise<ManagedInstance> {
   const cwd = resolve(options.cwd);
-  const agentDir = options.agentDir ? resolve(options.agentDir) : undefined;
-  const settingsManager = SettingsManager.create(cwd, agentDir);
-  configurePiNetwork(settingsManager);
-  const sessionManager = options.sessionDir
-    ? SessionManager.create(cwd, resolve(options.sessionDir))
-    : SessionManager.create(cwd);
-
-  const authStorage = AuthStorage.create(agentDir ? join(agentDir, "auth.json") : undefined);
-  const modelRegistry = ModelRegistry.create(authStorage, agentDir ? join(agentDir, "models.json") : undefined);
-  const sdkOptions: CreateAgentSessionOptions = {
+  const agentDir = resolve(options.agentDir ?? getAgentDir());
+  const runtime = await createPiRuntimeHost({
     cwd,
     agentDir,
-    authStorage,
-    modelRegistry,
-    sessionManager,
-    settingsManager,
+    sessionDir: options.sessionDir ? resolve(options.sessionDir) : undefined,
     tools: options.tools,
     excludeTools: options.excludeTools,
-  };
-  const result = await createAgentSession(sdkOptions);
-  const runtime = new PiRuntimeSession(result.session, modelRegistry, settingsManager, sessionManager);
-  const model = result.session.model
-    ? { provider: result.session.model.provider, id: result.session.model.id }
-    : undefined;
-  const instance = new ManagedInstance({
-    id: options.id,
-    creationOperationId: options.creationOperationId,
-    hostEpoch: options.hostEpoch,
-    name: options.name,
-    cwd,
-    session: runtime,
-    executor: {
-      kind: "pi-sdk",
-      version: VERSION,
-      model,
-      thinkingLevel: result.session.thinkingLevel,
-    },
-    eventCapacity: options.eventCapacity,
+    projectTrusted: options.projectTrusted,
   });
-
   try {
-    await result.session.bindExtensions({
-      mode: "print",
-      onError: (error) => instance.recordExtensionError(error),
+    const modelState = runtime.getModelState();
+    const instance = new ManagedInstance({
+      id: options.id,
+      creationOperationId: options.creationOperationId,
+      hostEpoch: options.hostEpoch,
+      name: options.name,
+      cwd,
+      session: runtime,
+      executor: {
+        kind: "pi-sdk",
+        version: VERSION,
+        model: modelState.model,
+        thinkingLevel: modelState.thinkingLevel,
+      },
+      eventCapacity: options.eventCapacity,
     });
+    runtime.activateInitial();
+    instance.synchronizeModelState();
+    for (const diagnostic of runtime.diagnostics) {
+      const value = diagnostic as { message?: unknown };
+      instance.recordExtensionError(typeof value.message === "string" ? value.message : diagnostic);
+    }
+    if (runtime.modelFallbackMessage) instance.recordExtensionError(runtime.modelFallbackMessage);
+    if (options.name) runtime.currentSession().setSessionName(options.name);
+    return instance;
   } catch (error) {
-    instance.recordExtensionError(error);
-    await instance.stop();
+    await runtime.dispose().catch(() => {});
     throw error;
   }
+}
 
-  // session_start extensions may select a model or thinking level.
-  instance.synchronizeModelState();
-
-  for (const extensionError of result.extensionsResult.errors) {
-    instance.recordExtensionError(extensionError);
-  }
-  if (result.modelFallbackMessage) {
-    instance.recordExtensionError(result.modelFallbackMessage);
-  }
-  if (options.name) result.session.setSessionName(options.name);
-
-  return instance;
+/** Production trust coordinator. Importing this module remains confined to the long-lived server path. */
+export function createPiProjectTrustCoordinator(agentDir = resolve(getAgentDir())): ProjectTrustCoordinator {
+  const trustStore = new ProjectTrustStore(agentDir);
+  return new ProjectTrustCoordinator({
+    requiresTrust: (cwd) => hasTrustRequiringProjectResources(cwd),
+    savedDecision: (cwd) => trustStore.get(cwd),
+    defaultDecision: (cwd) => SettingsManager.create(cwd, agentDir, { projectTrusted: false }).getDefaultProjectTrust(),
+    remember: (cwd, trusted) => trustStore.set(cwd, trusted),
+  });
 }

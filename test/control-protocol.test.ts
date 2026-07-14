@@ -92,6 +92,29 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
     ...base, type: "session.list", params: { instanceId: "i1", scope: "all" },
   });
   assert.throws(() => parseControlRequest({ ...base, type: "session.list", params: { instanceId: "i1", scope: "project" } }), /unsupported value/);
+
+  const trustedCreate = parseControlRequest({
+    ...base,
+    type: "instance.create",
+    params: {
+      operationId: "create-1",
+      cwd: "/tmp/project",
+      trustChallengeId: "challenge-1",
+      projectTrustDecision: "deny_once",
+    },
+  });
+  assert.equal(trustedCreate.type, "instance.create");
+  assert.equal(trustedCreate.params.projectTrustDecision, "deny_once");
+  assert.throws(() => parseControlRequest({
+    ...base,
+    type: "instance.create",
+    params: { operationId: "create-1", cwd: "/tmp/project", trustChallengeId: "challenge-1" },
+  }), /must be supplied together/);
+  assert.throws(() => parseControlRequest({
+    ...base,
+    type: "instance.create",
+    params: { operationId: "create-1", cwd: "/tmp/project", trustChallengeId: "challenge-1", projectTrustDecision: "allow" },
+  }), /unsupported value/);
 });
 
 test("model persistence and session list results are closed", () => {
@@ -104,6 +127,31 @@ test("model persistence and session list results are closed", () => {
 });
 
 test("response, snapshot, replay, and event parsers reject open or inconsistent DTOs", () => {
+  const trustResponse = parseControlResponse({
+    kind: "response", version: 2, requestId: "r1", hostEpoch: "epoch-1", ok: false,
+    error: {
+      code: "project_trust_required", message: "Project trust decision required", retryable: false,
+      details: {
+        challengeId: "challenge-1", operationId: "operation-1", cwd: "/tmp/project",
+        choices: ["trust_once", "trust_and_remember", "deny_once", "deny_and_remember"],
+        expiresAt: "2026-07-14T00:01:00.000Z",
+      },
+    },
+  }, "r1", "epoch-1");
+  assert.equal(trustResponse.ok, false);
+  if (trustResponse.ok) assert.fail("Expected trust error response");
+  assert.equal(trustResponse.error.details?.challengeId, "challenge-1");
+  assert.throws(() => parseControlResponse({
+    kind: "response", version: 2, requestId: "r1", hostEpoch: "epoch-1", ok: false,
+    error: {
+      code: "project_trust_required", message: "missing", retryable: false,
+      details: {
+        challengeId: "challenge-1", operationId: "operation-1", cwd: "/tmp/project",
+        choices: ["trust_once", "trust_once"], expiresAt: "2026-07-14T00:01:00.000Z",
+      },
+    },
+  }, "r1", "epoch-1"), /incomplete or duplicated/);
+  assert.throws(() => parseControlResponse({ kind: "response", version: 2, requestId: "r1", hostEpoch: "epoch-1", ok: false, error: { code: "project_trust_required", message: "missing", retryable: false, details: { arbitrary: true } } }, "r1", "epoch-1"), /Unexpected field/);
   assert.throws(() => parseControlResponse({ kind: "response", version: 2, requestId: "r1", hostEpoch: "epoch-1", ok: false, error: { code: "not_found", message: "missing", retryable: false, details: { arbitrary: true } } }, "r1", "epoch-1"), /does not allow details/);
   assert.throws(() => parseStatusResult({ instance: { ...validSnapshot(), extra: true } }), /Unexpected field/);
   assert.throws(() => parseStatusResult({ instance: { ...validSnapshot(), pending: { steering: 1, followUp: 1, total: 1 } } }), /total is inconsistent/);

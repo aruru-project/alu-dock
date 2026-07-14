@@ -2,7 +2,7 @@
 
 Alu Dock 是 #136「受管运行时宿主」的独立实现；V0 执行卡为 #137，V0.1 工程入口为 #142。
 
-V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 正在实施，当前已落地 V2 hello/capability/envelope 与四维 event cursor foundation。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与 Alubot 不在本仓库的修改范围内。
+V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 正在实施，当前已落地 V2 foundation、Host-owned `AgentSessionRuntime` replacement seam 与 create project-trust gate。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与 Alubot 不在本仓库的修改范围内。
 
 ## 当前进度
 
@@ -27,6 +27,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/v0.1-plan.md`](docs/v0.1-plan.md)
 - [`docs/validation-v0.1-stage-0.md`](docs/validation-v0.1-stage-0.md)
 - [`docs/validation-v0.1-stage-1a.md`](docs/validation-v0.1-stage-1a.md)
+- [`docs/validation-v0.1-stage-1b-runtime-trust.md`](docs/validation-v0.1-stage-1b-runtime-trust.md)
 
 ## V0.1 工程入口
 

@@ -124,7 +124,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
     await this.currentRun?.promise;
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     this.disposeCalls += 1;
   }
 

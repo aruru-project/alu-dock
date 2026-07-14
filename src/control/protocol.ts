@@ -13,6 +13,7 @@ import type {
   SessionDto,
 } from "../core/managed-instance.js";
 import type { RuntimeModelInfo, RuntimeThinkingLevel } from "../core/runtime-session.js";
+import type { ProjectTrustChoice } from "./project-trust.js";
 import { CATALOG_SCHEMA_VERSION, DOCK_VERSION, PI_SDK_VERSION } from "../version.js";
 
 export const CONTROL_PROTOCOL_VERSION = 2 as const;
@@ -84,7 +85,7 @@ export type HelloError = {
 type Request<T extends string, P> = { kind: "request"; version: 2; requestId: string; type: T; params: P };
 export type ControlRequest =
   | Request<"host.info", Record<string, never>>
-  | Request<"instance.create", { operationId: string; cwd: string; name?: string }>
+  | Request<"instance.create", { operationId: string; cwd: string; name?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.list", { includeTerminal?: boolean }>
   | Request<"instance.get", { instanceId: string }>
   | Request<"instance.attach", { instanceId: string; since?: EventCursor; follow: boolean; controller: "claim" | "observe" }>
@@ -227,7 +228,13 @@ export function parseControlRequest(input: unknown): ControlRequest {
   const operationId = (): string => string(params.operationId, "params.operationId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
   switch (type) {
     case "host.info": exact(params, [], "invalid_request"); return { ...base, type, params: {} };
-    case "instance.create": exact(params, ["operationId", "cwd", "name"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"), name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request") } };
+    case "instance.create": {
+      exact(params, ["operationId", "cwd", "name", "trustChallengeId", "projectTrustDecision"], "invalid_request");
+      const trustChallengeId = optionalString(params.trustChallengeId, "params.trustChallengeId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
+      const projectTrustDecision = params.projectTrustDecision === undefined ? undefined : enumeration(params.projectTrustDecision, "params.projectTrustDecision", ["trust_once", "trust_and_remember", "deny_once", "deny_and_remember"], "invalid_request");
+      if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
+      return { ...base, type, params: { operationId: operationId(), cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"), name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), trustChallengeId, projectTrustDecision } };
+    }
     case "instance.list": exact(params, ["includeTerminal"], "invalid_request"); return { ...base, type, params: { includeTerminal: optionalBoolean(params.includeTerminal, "params.includeTerminal", "invalid_request") } };
     case "instance.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "instance.attach": exact(params, ["instanceId", "since", "follow", "controller"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId(), since: params.since === undefined ? undefined : parseCursor(params.since, "params.since", "invalid_request"), follow: boolean(params.follow, "params.follow", "invalid_request"), controller: enumeration(params.controller, "params.controller", ["claim", "observe"], "invalid_request") } };
@@ -269,7 +276,10 @@ function parseErrorDetails(code:string,input:unknown):JsonObject {
   if(code==="instance_busy") { exact(details,["lifecycle","execution"]); return {lifecycle:enumeration(details.lifecycle,"error.details.lifecycle",["active","stopping","stopped","host_lost","runtime_error"]),execution:enumeration(details.execution,"error.details.execution",["idle","running","failed","unavailable"])}; }
   if(code==="project_trust_required") {
     exact(details,["challengeId","operationId","cwd","choices","expiresAt"]);
-    return {challengeId:id(details.challengeId,"error.details.challengeId"),operationId:id(details.operationId,"error.details.operationId"),cwd:string(details.cwd,"error.details.cwd",MAX_CONTROL_CWD_CHARS),choices:strings(details.choices,"error.details.choices",4,64).map((choice)=>enumeration(choice,"error.details.choice",["trust_once","trust_and_remember","deny_once","deny_and_remember"])),expiresAt:timestamp(details.expiresAt,"error.details.expiresAt")};
+    const expected=["trust_once","trust_and_remember","deny_once","deny_and_remember"] as const;
+    const choices=strings(details.choices,"error.details.choices",4,64).map((choice)=>enumeration(choice,"error.details.choice",expected));
+    if(choices.length!==expected.length||new Set(choices).size!==expected.length||expected.some((choice)=>!choices.includes(choice)))throw validation("invalid_response","Project trust choices are incomplete or duplicated");
+    return {challengeId:id(details.challengeId,"error.details.challengeId"),operationId:id(details.operationId,"error.details.operationId"),cwd:string(details.cwd,"error.details.cwd",MAX_CONTROL_CWD_CHARS),choices,expiresAt:timestamp(details.expiresAt,"error.details.expiresAt")};
   }
   if(code==="unsupported_protocol"||code==="protocol_incompatible"||code==="capability_missing") {
     exact(details,["hostVersions","versions","missing","capabilities"]); const result:JsonObject={};

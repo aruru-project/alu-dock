@@ -1,8 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { stat } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import type { ManagedInstance, InstanceSnapshot } from "../core/managed-instance.js";
+import type {
+  ProjectTrustChoice,
+  ProjectTrustRequest,
+  ProjectTrustResolution,
+} from "./project-trust.js";
 
 export interface InstanceFactoryInput {
   id: string;
@@ -10,6 +15,7 @@ export interface InstanceFactoryInput {
   hostEpoch: string;
   cwd: string;
   name?: string;
+  projectTrusted: boolean;
 }
 
 export type InstanceFactory = (input: InstanceFactoryInput) => Promise<ManagedInstance>;
@@ -18,6 +24,12 @@ export interface CreateRegistryInstanceInput {
   operationId: string;
   cwd: string;
   name?: string;
+  trustChallengeId?: string;
+  projectTrustDecision?: ProjectTrustChoice;
+}
+
+export interface CreateTrustPreflight {
+  resolve(input: ProjectTrustRequest): Promise<ProjectTrustResolution>;
 }
 
 export class InstanceNotFoundError extends Error {
@@ -36,20 +48,31 @@ export class DockRegistry {
   constructor(
     private readonly factory: InstanceFactory,
     private readonly createId: () => string = randomUUID,
-    options: { hostEpoch?: string; startedAt?: string } = {},
+    options: { hostEpoch?: string; startedAt?: string; trustPreflight?: CreateTrustPreflight } = {},
   ) {
     this.hostEpoch = options.hostEpoch ?? randomUUID();
     this.startedAt = options.startedAt ?? new Date().toISOString();
+    this.trustPreflight = options.trustPreflight;
   }
 
+  private readonly trustPreflight: CreateTrustPreflight | undefined;
+
   async create(input: CreateRegistryInstanceInput): Promise<ManagedInstance> {
-    const cwd = resolve(input.cwd);
-    const cwdStat = await stat(cwd).catch(() => undefined);
-    if (!cwdStat?.isDirectory()) throw new Error(`Working directory does not exist: ${cwd}`);
+    const resolution = this.trustPreflight
+      ? await this.trustPreflight.resolve({
+          operationType: "instance.create",
+          operationId: input.operationId,
+          cwd: input.cwd,
+          name: input.name,
+          trustChallengeId: input.trustChallengeId,
+          projectTrustDecision: input.projectTrustDecision,
+        })
+      : { canonicalCwd: await canonicalDirectory(input.cwd), projectTrusted: true };
+    const cwd = resolution.canonicalCwd;
 
     const id = this.createId();
     if (this.instances.has(id)) throw new Error(`Generated duplicate instance identity: ${id}`);
-    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, name: input.name });
+    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, name: input.name, projectTrusted: resolution.projectTrusted });
     if (
       instance.id !== id
       || instance.creationOperationId !== input.operationId
@@ -82,4 +105,11 @@ export class DockRegistry {
   async stopAll(): Promise<void> {
     await Promise.allSettled([...this.instances.values()].map((instance) => instance.stop()));
   }
+}
+
+async function canonicalDirectory(path: string): Promise<string> {
+  const lexical = resolve(path);
+  const info = await stat(lexical).catch(() => undefined);
+  if (!info?.isDirectory()) throw new Error(`Working directory does not exist: ${lexical}`);
+  return realpath(lexical);
 }

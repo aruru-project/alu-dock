@@ -11,7 +11,7 @@ let installedConfiguration: string | undefined;
 /**
  * Apply the same process-wide proxy and Undici bootstrap as Pi 0.80.6 CLI.
  *
- * createAgentSession() intentionally does not initialize network globals; Pi's
+ * SDK runtime factories intentionally do not initialize network globals; Pi's
  * CLI does that in main() before creating a runtime. Dock is the SDK process,
  * so it must own the equivalent bootstrap before any managed session starts.
  */

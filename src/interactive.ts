@@ -1,10 +1,13 @@
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 
-import { DockClient } from "./control/dock-client.js";
+import { ControlClientError, DockClient } from "./control/dock-client.js";
 import { ensureHost } from "./control/ensure-host.js";
 import type { InstanceSnapshot } from "./core/managed-instance.js";
 import { runDockTui } from "./tui/dock-tui.js";
 import { selectInstance } from "./tui/select-instance.js";
+import type { ProjectTrustChoice } from "./control/project-trust.js";
 
 export interface OpenDockOptions {
   socketPath: string;
@@ -88,7 +91,60 @@ async function createWithNotice(
   name?: string,
 ): Promise<InstanceSnapshot> {
   process.stdout.write(`Creating a Pi session for ${cwd}…\n`);
-  return client.create(cwd, name);
+  const operationId = randomUUID();
+  try {
+    return await client.create(cwd, name, operationId);
+  } catch (error) {
+    const challenge = projectTrustChallenge(error, operationId);
+    if (!challenge) throw error;
+    const decision = await askProjectTrust(challenge.cwd);
+    return client.create(cwd, name, operationId, {
+      challengeId: challenge.challengeId,
+      decision,
+    });
+  }
+}
+
+function projectTrustChallenge(
+  error: unknown,
+  operationId: string,
+): { challengeId: string; cwd: string } | undefined {
+  if (!(error instanceof ControlClientError) || error.code !== "project_trust_required") return undefined;
+  const details = error.details;
+  const challengeId = details?.challengeId;
+  const challengeOperationId = details?.operationId;
+  const cwd = details?.cwd;
+  if (
+    typeof challengeId !== "string"
+    || challengeOperationId !== operationId
+    || typeof cwd !== "string"
+  ) {
+    throw new Error("Host returned an invalid project trust challenge");
+  }
+  return { challengeId, cwd };
+}
+
+async function askProjectTrust(cwd: string): Promise<ProjectTrustChoice> {
+  process.stdout.write(
+    `Project-local Pi resources were found in ${cwd}.\n`
+      + "  1) Trust once\n"
+      + "  2) Trust and remember\n"
+      + "  3) Do not trust once (continue without project resources)\n"
+      + "  4) Do not trust and remember\n",
+  );
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    while (true) {
+      const answer = (await prompt.question("Project trust choice [1-4]: ")).trim();
+      if (answer === "1") return "trust_once";
+      if (answer === "2") return "trust_and_remember";
+      if (answer === "3") return "deny_once";
+      if (answer === "4") return "deny_and_remember";
+      process.stdout.write("Enter 1, 2, 3, or 4.\n");
+    }
+  } finally {
+    prompt.close();
+  }
 }
 
 function displayName(instance: InstanceSnapshot): string {

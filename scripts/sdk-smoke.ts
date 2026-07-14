@@ -15,6 +15,7 @@ async function main(): Promise<void> {
   const instance = await createPiInstance({
     cwd: options.cwd,
     name: "alu-dock-sdk-smoke",
+    projectTrusted: true,
   });
   const unsubscribe = instance.subscribe((event) => {
     process.stdout.write(`${JSON.stringify({ kind: "event", ...event })}\n`);

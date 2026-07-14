@@ -128,7 +128,7 @@ class FakeRuntimeSession implements RuntimeSession {
     if (this.isStreaming) await this.promptDeferred.promise;
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     this.disposeCalls += 1;
     if (this.disposeError) throw this.disposeError;
   }

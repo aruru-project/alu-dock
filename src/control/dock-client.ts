@@ -3,6 +3,7 @@ import { createConnection, type Socket } from "node:net";
 import { resolve } from "node:path";
 import type { DeliveryMode, DockEvent, EventCursor, EventPage, InstanceSnapshot } from "../core/managed-instance.js";
 import type { RuntimeThinkingLevel } from "../core/runtime-session.js";
+import type { ProjectTrustChoice } from "./project-trust.js";
 import { DOCK_VERSION } from "../version.js";
 import { encodeJsonLine, JsonLineDecoder } from "./json-lines.js";
 import {
@@ -45,7 +46,7 @@ const MAX_PENDING_STREAM_EVENTS=1_000;
 export interface EventSubscription { initial:EventsResult; close:()=>void; done:Promise<void> }
 export interface DockClientOptions { socketPath:string; timeoutMs?:number; requestId?:()=>string; clientId?:string }
 export class ControlClientError extends Error {
-  constructor(readonly code:string,message:string,readonly operationId?:string){super(message);this.name="ControlClientError";}
+  constructor(readonly code:string,message:string,readonly operationId?:string,readonly details?:import("../core/managed-instance.js").JsonObject){super(message);this.name="ControlClientError";}
 }
 
 export class DockClient {
@@ -57,7 +58,7 @@ export class DockClient {
 
   async hostInfo():Promise<HostInfoResult>{return this.request("host.info",{},"host.info",parseHostInfoResult);}
   async ping():Promise<PingResult>{let negotiated:string[]=[];const info=await this.request("host.info",{},"host.info",parseHostInfoResult,(ack)=>{negotiated=[...ack.capabilities];});return {pid:info.host.pid,protocolVersion:2,hostEpoch:info.host.hostEpoch,capabilities:negotiated};}
-  async create(cwd:string,name?:string,operationId=this.createRequestId()):Promise<InstanceSnapshot>{const result=await this.request("instance.create",{operationId,cwd,name},"instance.catalog",parseCreateResult);return result.instance;}
+  async create(cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<InstanceSnapshot>{const result=await this.request("instance.create",{operationId,cwd,name,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"instance.catalog",parseCreateResult);return result.instance;}
   async list():Promise<InstanceSnapshot[]>{return (await this.request("instance.list",{includeTerminal:true},"instance.catalog",parseListResult)).instances;}
   async status(instanceId:string):Promise<InstanceSnapshot>{return (await this.request("instance.get",{instanceId},"instance.catalog",parseStatusResult)).instance;}
   async events(instanceId:string,since?:EventCursor):Promise<{instance:InstanceSnapshot;page:EventPage&{epochChanged:boolean;generationChanged:boolean}}>{const result=await this.request("instance.attach",{instanceId,since,follow:false,controller:"observe"},"events.follow",parseEventsResult);return {instance:result.instance,page:result.page};}
@@ -137,7 +138,7 @@ export class DockClient {
             return;
           }
           const response=parseControlResponse(raw,requestId,hostEpoch);
-          if(!response.ok)finish(new ControlClientError(response.error.code,response.error.message,operationId));
+          if(!response.ok)finish(new ControlClientError(response.error.code,response.error.message,operationId,response.error.details));
           else {
             const result=parse(response.result);
             validateRequestResult(type,params,result,hostEpoch);

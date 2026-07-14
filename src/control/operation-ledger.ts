@@ -45,7 +45,11 @@ export class OperationLedger {
     this.entries.set(operationId, entry);
     void promise.then(
       () => this.markSettled(operationId, entry),
-      () => this.markSettled(operationId, entry),
+      (error: unknown) => {
+        // Trust preflight failures are pre-effect state, not mutation receipts.
+        if (isTrustPreflightError(error) && this.entries.get(operationId) === entry) this.entries.delete(operationId);
+        else this.markSettled(operationId, entry);
+      },
     );
     return promise;
   }
@@ -61,6 +65,12 @@ export class OperationLedger {
       if (candidate?.settled) this.entries.delete(oldest);
     }
   }
+}
+
+function isTrustPreflightError(error: unknown): boolean {
+  if (error === null || typeof error !== "object") return false;
+  const code = (error as { code?: unknown }).code;
+  return code === "project_trust_required" || code === "invalid_project_trust_challenge";
 }
 
 function stableFingerprint(mutationType: string, params: unknown): string {

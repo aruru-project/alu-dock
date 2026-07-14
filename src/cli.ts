@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 
+import { randomUUID } from "node:crypto";
+
 import type { DeliveryMode, DockEvent, EventCursor } from "./core/managed-instance.js";
 import { DockClient, ControlClientError } from "./control/dock-client.js";
 import { DockHost } from "./control/dock-host.js";
 import { DockRegistry } from "./control/dock-registry.js";
 import { defaultSocketPath } from "./control/socket-path.js";
+import type { ProjectTrustChoice } from "./control/project-trust.js";
 
 const HOST_SHUTDOWN_TIMEOUT_MS = 10_000;
 
@@ -42,7 +45,8 @@ async function main(): Promise<void> {
 
     case "create": {
       const options = parseCreateArgs(parsed.commandArgs);
-      const instance = await client.create(options.cwd, options.name);
+      const operationId = options.operationId ?? randomUUID();
+      const instance = await client.create(options.cwd, options.name, operationId, options.trust);
       writeJson({ kind: "instance", instance });
       return;
     }
@@ -84,8 +88,12 @@ async function main(): Promise<void> {
 async function serve(socketPath: string, args: string[]): Promise<void> {
   requireNoArgs(args, "serve");
   // Keep client commands thin: only the long-lived host process loads Pi SDK.
-  const { createPiInstance } = await import("./pi/create-pi-instance.js");
-  const registry = new DockRegistry(({ id, creationOperationId, hostEpoch, cwd, name }) => createPiInstance({ id, creationOperationId, hostEpoch, cwd, name }));
+  const { createPiInstance, createPiProjectTrustCoordinator } = await import("./pi/create-pi-instance.js");
+  const registry = new DockRegistry(
+    ({ id, creationOperationId, hostEpoch, cwd, name, projectTrusted }) => createPiInstance({ id, creationOperationId, hostEpoch, cwd, name, projectTrusted }),
+    undefined,
+    { trustPreflight: createPiProjectTrustCoordinator() },
+  );
   const host = new DockHost({ socketPath, registry });
   await host.start();
   writeJson({ kind: "host.ready", pid: process.pid, socketPath: host.socketPath });
@@ -228,9 +236,17 @@ function parseOpenArgs(
   return { cwd, name, instanceId, forceNew };
 }
 
-function parseCreateArgs(args: string[]): { cwd: string; name?: string } {
+function parseCreateArgs(args: string[]): {
+  cwd: string;
+  name?: string;
+  operationId?: string;
+  trust?: { challengeId: string; decision: ProjectTrustChoice };
+} {
   let cwd = process.cwd();
   let name: string | undefined;
+  let operationId: string | undefined;
+  let challengeId: string | undefined;
+  let decision: ProjectTrustChoice | undefined;
   const mutable = [...args];
   while (mutable.length > 0) {
     const arg = mutable.shift();
@@ -242,11 +258,36 @@ function parseCreateArgs(args: string[]): { cwd: string; name?: string } {
       const value = mutable.shift();
       if (!value) throw new Error("--name requires a non-empty value");
       name = value;
+    } else if (arg === "--operation-id") {
+      const value = mutable.shift();
+      if (!value) throw new Error("--operation-id requires a non-empty value");
+      operationId = value;
+    } else if (arg === "--trust-challenge") {
+      const value = mutable.shift();
+      if (!value) throw new Error("--trust-challenge requires a non-empty value");
+      challengeId = value;
+    } else if (arg === "--project-trust") {
+      const value = mutable.shift();
+      if (!isProjectTrustChoice(value)) {
+        throw new Error("--project-trust must be trust_once, trust_and_remember, deny_once, or deny_and_remember");
+      }
+      decision = value;
     } else {
       throw new Error(`Unknown create argument: ${String(arg)}`);
     }
   }
-  return { cwd, name };
+  if ((challengeId === undefined) !== (decision === undefined)) {
+    throw new Error("--trust-challenge and --project-trust must be supplied together");
+  }
+  if (challengeId !== undefined && operationId === undefined) {
+    throw new Error("A trust challenge retry must include the original --operation-id");
+  }
+  return {
+    cwd,
+    name,
+    operationId,
+    ...(challengeId === undefined || decision === undefined ? {} : { trust: { challengeId, decision } }),
+  };
 }
 
 function parsePromptArgs(args: string[]): {
@@ -284,6 +325,13 @@ function isDeliveryMode(value: unknown): value is DeliveryMode {
   return value === "auto" || value === "prompt" || value === "steer" || value === "followUp";
 }
 
+function isProjectTrustChoice(value: unknown): value is ProjectTrustChoice {
+  return value === "trust_once"
+    || value === "trust_and_remember"
+    || value === "deny_once"
+    || value === "deny_and_remember";
+}
+
 function requiredPositional(args: string[], message: string): string {
   const [value, ...extra] = args;
   if (!value || extra.length > 0) throw new Error(message);
@@ -316,7 +364,7 @@ function writeJson(value: unknown): void {
 }
 
 function usage(): string {
-  return `Alu Dock V0.1 managed Pi client\n\nHuman workflow:\n  alu-dock [--socket PATH]\n  alu-dock [--socket PATH] open [INSTANCE_ID] [--cwd PATH] [--name NAME] [--new]\n  alu-dock [--socket PATH] new [--cwd PATH] [--name NAME]\n  alu-dock [--socket PATH] attach [INSTANCE_ID] [--cwd PATH]\n\nMachine and diagnostic commands:\n  alu-dock [--socket PATH] serve\n  alu-dock [--socket PATH] ping\n  alu-dock [--socket PATH] create [--cwd PATH] [--name NAME]\n  alu-dock [--socket PATH] list\n  alu-dock [--socket PATH] status INSTANCE_ID\n  alu-dock [--socket PATH] events INSTANCE_ID [--cursor HOST_EPOCH:RUNTIME_GENERATION:SEQUENCE] [--follow]\n  alu-dock [--socket PATH] prompt INSTANCE_ID [--delivery MODE] MESSAGE\n  alu-dock [--socket PATH] stop INSTANCE_ID\n`;
+  return `Alu Dock V0.1 managed Pi client\n\nHuman workflow:\n  alu-dock [--socket PATH]\n  alu-dock [--socket PATH] open [INSTANCE_ID] [--cwd PATH] [--name NAME] [--new]\n  alu-dock [--socket PATH] new [--cwd PATH] [--name NAME]\n  alu-dock [--socket PATH] attach [INSTANCE_ID] [--cwd PATH]\n\nMachine and diagnostic commands:\n  alu-dock [--socket PATH] serve\n  alu-dock [--socket PATH] ping\n  alu-dock [--socket PATH] create [--cwd PATH] [--name NAME] [--operation-id ID]\n    [--trust-challenge ID --project-trust CHOICE]\n  alu-dock [--socket PATH] list\n  alu-dock [--socket PATH] status INSTANCE_ID\n  alu-dock [--socket PATH] events INSTANCE_ID [--cursor HOST_EPOCH:RUNTIME_GENERATION:SEQUENCE] [--follow]\n  alu-dock [--socket PATH] prompt INSTANCE_ID [--delivery MODE] MESSAGE\n  alu-dock [--socket PATH] stop INSTANCE_ID\n`;
 }
 
 function errorMessage(error: unknown): string {
@@ -325,6 +373,16 @@ function errorMessage(error: unknown): string {
 
 main().catch((error: unknown) => {
   const code = error instanceof ControlClientError ? error.code : "cli_error";
-  process.stderr.write(`${JSON.stringify({ kind: "error", error: { code, message: errorMessage(error) } })}\n`);
+  const details = error instanceof ControlClientError ? error.details : undefined;
+  const operationId = error instanceof ControlClientError ? error.operationId : undefined;
+  process.stderr.write(`${JSON.stringify({
+    kind: "error",
+    error: {
+      code,
+      message: errorMessage(error),
+      ...(operationId === undefined ? {} : { operationId }),
+      ...(details === undefined ? {} : { details }),
+    },
+  })}\n`);
   process.exitCode = 1;
 });

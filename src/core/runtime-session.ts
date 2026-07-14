@@ -32,6 +32,15 @@ export interface RuntimeSessionInfo {
   updatedAt?: string;
 }
 
+export interface RuntimeProjectTrust {
+  canonicalCwd: string;
+  projectTrusted: boolean;
+}
+
+export interface RuntimeReplacementResult {
+  cancelled: boolean;
+}
+
 export interface ClearedRuntimeQueue {
   steering: string[];
   followUp: string[];
@@ -92,11 +101,14 @@ export interface RuntimeSession {
   prompt(text: string, options?: RuntimePromptOptions): Promise<void>;
   listModels(): Promise<RuntimeModelInfo[]>;
   listSessions(scope: "cwd" | "all"): Promise<RuntimeSessionInfo[]>;
+  newSession?(operationId: string): Promise<RuntimeReplacementResult>;
+  switchSession?(operationId: string, sessionFile: string, trust: RuntimeProjectTrust): Promise<RuntimeReplacementResult>;
+  reload?(operationId: string): Promise<RuntimeReplacementResult>;
   selectModel(provider: string, modelId: string): Promise<RuntimeModelState>;
   setThinkingLevel(level: RuntimeThinkingLevel): Promise<RuntimeModelState>;
   getModelState(): RuntimeModelState;
   clearQueue(): ClearedRuntimeQueue;
   abort(): Promise<void>;
   waitForIdle(): Promise<void>;
-  dispose(): void;
+  dispose(): Promise<void>;
 }

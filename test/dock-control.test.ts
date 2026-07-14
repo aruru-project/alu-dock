@@ -9,6 +9,7 @@ import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
 import { encodeJsonLine, JsonLineDecoder } from "../src/control/json-lines.js";
+import { ProjectTrustCoordinator } from "../src/control/project-trust.js";
 import { ManagedInstance } from "../src/core/managed-instance.js";
 import { DelayedRuntimeSession } from "./support/delayed-runtime-session.js";
 
@@ -56,7 +57,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
   await host.start();
 
   const base = { kind: "hello", requestId: "hello-1", client: { name: "test", version: "0.1.0", clientId: "client-1" } };
-  const versionError = await exchangeOne(socketPath, { ...base, versions: [1], requiredCapabilities: [] });
+  const versionError = await exchangeOne(socketPath, { ...base, versions: [999], requiredCapabilities: [] });
   assert.equal(versionError.kind, "hello_error");
   assert.equal(objectValue(versionError.error).code, "unsupported_protocol");
   assert.equal(factoryCalls, 0);
@@ -67,7 +68,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
   assert.equal(factoryCalls, 0);
 
   const createFrame = { kind: "request", version: 2, requestId: "create-after-reject", type: "instance.create", params: { operationId: "op-after-reject", cwd: directory } };
-  const pipelinedVersionError = await exchangePipelined(socketPath, [{ ...base, requestId: "pipeline-version", versions: [1], requiredCapabilities: [] }, createFrame]);
+  const pipelinedVersionError = await exchangePipelined(socketPath, [{ ...base, requestId: "pipeline-version", versions: [999], requiredCapabilities: [] }, createFrame]);
   assert.equal(pipelinedVersionError.kind, "hello_error");
   const pipelinedCapabilityError = await exchangePipelined(socketPath, [{ ...base, requestId: "pipeline-capability", versions: [2], requiredCapabilities: ["missing.v1"] }, createFrame]);
   assert.equal(pipelinedCapabilityError.kind, "hello_error");
@@ -94,6 +95,67 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
   assert.deepEqual((await client.hostInfo()).diagnostics[0], {
     severity: "info", message: "Development registry is in-memory and non-durable", source: "registry",
   });
+});
+
+test("project trust challenge precedes factory effects and denial continues untrusted", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-trust-host-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const trustedValues: boolean[] = [];
+  let factoryCalls = 0;
+  const trust = new ProjectTrustCoordinator({
+    requiresTrust: () => true,
+    savedDecision: () => null,
+    defaultDecision: () => "ask",
+    remember: () => assert.fail("deny_once must not write trust store"),
+  }, { createId: () => "challenge-1", now: () => 1_000 });
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, projectTrusted }) => {
+    factoryCalls += 1;
+    trustedValues.push(projectTrusted);
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedRuntimeSession(`pi-${id}`) });
+  }, () => "trusted-instance", { trustPreflight: trust });
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+
+  let challenge: ControlClientError | undefined;
+  try {
+    await client.create(directory, "project", "trust-operation");
+  } catch (error) {
+    assert.ok(error instanceof ControlClientError);
+    challenge = error;
+  }
+  assert.equal(challenge?.code, "project_trust_required");
+  assert.equal(challenge?.operationId, "trust-operation");
+  assert.equal(challenge?.details?.challengeId, "challenge-1");
+  assert.equal(challenge?.details?.operationId, "trust-operation");
+  assert.equal(factoryCalls, 0);
+  assert.deepEqual(registry.list(), []);
+
+  await assert.rejects(
+    client.create(directory, "changed-target", "trust-operation", {
+      challengeId: "challenge-1",
+      decision: "deny_once",
+    }),
+    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_project_trust_challenge",
+  );
+  assert.equal(factoryCalls, 0);
+
+  const created = await client.create(directory, "project", "trust-operation", {
+    challengeId: "challenge-1",
+    decision: "deny_once",
+  });
+  assert.equal(created.id, "trusted-instance");
+  assert.deepEqual(trustedValues, [false]);
+  assert.equal(factoryCalls, 1);
+
+  const duplicate = await client.create(directory, "project", "trust-operation", {
+    challengeId: "challenge-1",
+    decision: "deny_once",
+  });
+  assert.equal(duplicate.id, created.id);
+  assert.equal(factoryCalls, 1);
 });
 
 test("two clients observe and replay one host-owned running instance", async (context) => {

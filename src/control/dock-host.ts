@@ -16,11 +16,13 @@ import {
   type DockEvent,
   type EventCursor,
   type EventPage,
+  type JsonObject,
   type ManagedInstance,
 } from "../core/managed-instance.js";
 import { RuntimeModelNotFoundError, RuntimeSettingsWriteError } from "../core/runtime-session.js";
 import { DockRegistry, InstanceNotFoundError } from "./dock-registry.js";
 import { OperationConflictError, OperationLedger } from "./operation-ledger.js";
+import { ProjectTrustChallengeError, ProjectTrustRequiredError } from "./project-trust.js";
 import { encodeJsonLine, JsonLineDecoder, JsonLineError } from "./json-lines.js";
 import {
   capabilityForRequest,
@@ -219,7 +221,7 @@ export class DockHost {
       }
       let task!: Promise<void>;
       task = this.dispatch(request, socket, (unsubscribe) => { eventUnsubscribe = unsubscribe; })
-        .catch((error: unknown) => { const mapped = mapControlError(error); this.sendErrorAndEnd(socket, mapped.code, mapped.message, request.requestId); })
+        .catch((error: unknown) => { const mapped = mapControlError(error); this.sendErrorAndEnd(socket, mapped.code, mapped.message, request.requestId, mapped.details, mapped.retryable); })
         .finally(() => this.inFlightDispatches.delete(task));
       this.inFlightDispatches.add(task);
     };
@@ -237,7 +239,7 @@ export class DockHost {
           diagnostics: [{ severity: "info", message: "Development registry is in-memory and non-durable", source: "registry" }],
         }); return;
       case "instance.create": {
-        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=await this.registry.create({operationId:request.params.operationId,cwd:request.params.cwd,name:request.params.name});return {instance:instance.snapshot()};});
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=await this.registry.create({operationId:request.params.operationId,cwd:request.params.cwd,name:request.params.name,trustChallengeId:request.params.trustChallengeId,projectTrustDecision:request.params.projectTrustDecision});return {instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
       case "instance.list": this.sendSuccessAndEnd(socket,request.requestId,{instances:this.registry.list().filter(i=>request.params.includeTerminal!==false||i.lifecycle==="active"||i.lifecycle==="stopping")}); return;
@@ -283,7 +285,7 @@ export class DockHost {
   }
 
   private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,result));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
-  private sendErrorAndEnd(socket:Socket,code:string,message:string,requestId:string):void { if(socket.destroyed||socket.writableEnded)return;const response:ControlResponse={kind:"response",version:2,requestId,hostEpoch:this.hostEpoch,ok:false,error:{code,message:truncateMessage(message),retryable:false}};if(endEnvelope(socket,response)==="too_large")socket.destroy(); }
+  private sendErrorAndEnd(socket:Socket,code:string,message:string,requestId:string,details?:JsonObject,retryable=false):void { if(socket.destroyed||socket.writableEnded)return;const response:ControlResponse={kind:"response",version:2,requestId,hostEpoch:this.hostEpoch,ok:false,error:{code,message:truncateMessage(message),retryable,...(details===undefined?{}:{details})}};if(endEnvelope(socket,response)==="too_large")socket.destroy(); }
   private sendHelloError(socket:Socket,requestId:string,code:HelloError["error"]["code"],message:string,details:{hostVersions?:number[];missing?:string[];retryAfterMs?:number}={}):void { if(socket.destroyed||socket.writableEnded)return;const envelope:HelloError={kind:"hello_error",requestId,error:{code,message:truncateMessage(message),...details}};try{socket.end(encodeJsonLine(envelope));}catch{socket.destroy();} }
 }
 
@@ -360,7 +362,13 @@ function encodedSize(value: unknown): number {
   }
 }
 
-function mapControlError(error: unknown): { code: string; message: string } {
+function mapControlError(error: unknown): { code: string; message: string; retryable?: boolean; details?: JsonObject } {
+  if (error instanceof ProjectTrustRequiredError) {
+    return { code: error.code, message: error.message, retryable: error.retryable, details: error.details };
+  }
+  if (error instanceof ProjectTrustChallengeError) {
+    return { code: error.code, message: error.message };
+  }
   if (error instanceof ProtocolValidationError) return { code: error.code, message: error.message };
   if (error instanceof InstanceNotFoundError) return { code: "not_found", message: error.message };
   if (error instanceof InstanceNotActiveError) return { code: "instance_not_active", message: error.message };
