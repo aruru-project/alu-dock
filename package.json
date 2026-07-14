@@ -1,0 +1,23 @@
+{
+  "name": "alu-dock",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Disposable V0 feasibility host for managed Pi SDK runtimes",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist/test/**/*.test.js",
+    "smoke:sdk": "npm run build && node dist/scripts/sdk-smoke.js"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "0.80.6"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.1",
+    "typescript": "5.9.3"
+  }
+}
