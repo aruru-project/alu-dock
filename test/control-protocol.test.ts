@@ -56,9 +56,9 @@ function validEvent(type = "message.delta", data: Record<string, unknown> = { me
   return { scope: "instance", sequence: 1, instanceId: "i1", runtimeGeneration: 1, occurredAt: "2026-07-14T00:00:00.000Z", type, data };
 }
 
-test("V2 requests reject V1, unknown fields, invalid cursors, and invalid enums", () => {
+test("V2 requests reject unsupported versions, unknown fields, invalid cursors, and invalid enums", () => {
   assert.throws(
-    () => parseControlRequest({ version: 1, requestId: "r1", type: "ping" }),
+    () => parseControlRequest({ version: 3, requestId: "r1", type: "ping" }),
     (error: unknown) => error instanceof ProtocolValidationError && error.code === "unsupported_protocol",
   );
   const base = { kind: "request", version: 2, requestId: "r2" };

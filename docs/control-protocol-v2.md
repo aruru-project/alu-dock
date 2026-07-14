@@ -20,7 +20,7 @@
 
 ## 2. 版本与 staged capability
 
-V0.1 只实现 wire major `2`，不双栈服务 V1。版本维度必须分开：
+wire major `2` 是当前项目的初始协议合同。1.0 前不建设旧协议兼容、迁移或双栈；非 V2 输入按当前合同统一拒绝。capability 名称中的 `.v1` 只是该 capability 自身的首版 schema，不代表存在旧 Host 包袱。版本维度必须分开：
 
 - `protocolVersion`: wire major，初始为 `2`；
 - `dockVersion`: Alu Dock package/build version，V0.1 改为 `0.1.0`；
@@ -714,14 +714,14 @@ Host drain 总预算 12 秒，给 unit `TimeoutStopSec=15` 留 3 秒 kill margin
 
 Host `start/stop/restart/logs/install/uninstall` 是 CLI 对 `systemctl --user` 的显式管理，不走 Host RPC。`/stop`/`instance.stop` 永远只表示一个 instance。
 
-## 19. V1 → V2 migration
+## 19. 1.0 前绿地开发规则
 
-V0 registry/event ring不持久，因此没有 V1 Dock catalog需迁移。V0.1 install：
+Alu Dock 到 1.0 落地前默认是纯绿地开发。除非用户特意说明：
 
-1. 停止旧 detached Host；
-2. 只删除 probe证明 stale且 inode未变化的旧 socket；
-3. build/install V0.1；
-4. 生成并启用 user unit；
-5. V2 hello验证版本/capability/epoch/PID。
+1. 不保留原型协议、Host、catalog、socket、CLI flag 或 DTO 的兼容路径；
+2. 不建设迁移、upgrade、双读、双写、双栈或历史数据修复；
+3. 合同变更直接同步 Host、client、CLI/TUI、tests 与文档；
+4. unsupported version/shape 只是普通非法输入，统一 fail closed，不写版本专用提示或处理分支；
+5. 本文的 protocol/capability/catalog schema 版本用于当前合同演进，不隐含任何已发布旧版本支持义务。
 
-V2 Host 不执行 V1 mutation。V2 client 连接 V1 Host 时提示停止/升级旧 Host，不能误判“缺失”并另起第二个 Host。
+达到 1.0 或用户明确冻结兼容边界后，再单独设计版本支持与迁移政策。

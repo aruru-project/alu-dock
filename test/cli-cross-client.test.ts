@@ -50,8 +50,6 @@ test("independent CLI processes reconnect to one delayed host-owned instance", {
       `fixture-pi-${instanceId}`,
     );
 
-    const legacyCursorError = await runCliFailure(socketPath, ["events", instanceId, "--since", "1"]);
-    assert.match(legacyCursorError, /Unknown events argument: --since/);
     const malformedCursorError = await runCliFailure(socketPath, ["events", instanceId, "--cursor", "1"]);
     assert.match(malformedCursorError, /HOST_EPOCH:RUNTIME_GENERATION:SEQUENCE/);
 

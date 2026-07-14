@@ -708,13 +708,13 @@ test("stream callbacks follow the initial result even when frames share one chun
   await subscription.done;
 });
 
-test("client rejects a V1 host response as protocol incompatible", async (context) => {
+test("client rejects a non-handshake frame before operations", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-malformed-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
   const server = createServer((socket) => {
     socket.once("data", () => {
-      socket.end('{"kind":"response","version":1,"requestId":"fixed","ok":false}\n');
+      socket.end('{"kind":"response","version":999,"requestId":"fixed","ok":false}\n');
     });
   });
   await listen(server, socketPath);

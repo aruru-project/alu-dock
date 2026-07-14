@@ -180,7 +180,9 @@ export function parseClientHello(input: unknown): ClientHello {
 
 export function parseHelloReply(input: unknown, requestId: string): HelloAck {
   const value = object(input, "hello reply");
-  if (value.kind === "response" && value.version === 1) throw validation("protocol_incompatible", "A Protocol V1 Host is running; stop or upgrade it before using V0.1");
+  if (value.kind !== "hello_ack" && value.kind !== "hello_error") {
+    throw validation("protocol_incompatible", "Peer did not complete the required Protocol V2 hello");
+  }
   if (value.kind === "hello_error") {
     exact(value, ["kind", "requestId", "error"]);
     if (value.requestId !== requestId) throw validation("invalid_response", "Hello error requestId does not match");
@@ -194,7 +196,7 @@ export function parseHelloReply(input: unknown, requestId: string): HelloAck {
     throw validation(code, error.message as string);
   }
   exact(value, ["kind", "requestId", "version", "host", "catalogSchemaVersion", "capabilities", "limits"]);
-  if (value.kind !== "hello_ack" || value.requestId !== requestId || value.version !== 2) throw validation("protocol_incompatible", "Host did not complete Protocol V2 hello");
+  if (value.requestId !== requestId || value.version !== 2) throw validation("protocol_incompatible", "Peer did not complete the required Protocol V2 hello");
   const limits = object(value.limits, "hello_ack.limits");
   exact(limits, ["maxLineBytes", "maxPromptChars", "maxReplayEvents", "maxHistoryItems"]);
   const capabilities = strings(value.capabilities, "hello_ack.capabilities", MAX_CAPABILITIES, MAX_CAPABILITY_CHARS);

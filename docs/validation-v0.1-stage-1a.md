@@ -47,7 +47,7 @@
 ## 3. 关键故障门禁
 
 - rejected hello 与 pipelined mutation 同包到达时，连接先 terminalize，factory 调用计数保持 0；
-- V1 Host 不 fallback，客户端返回 protocol incompatible；
+- 非 hello frame 在任何 operation 前按非法协议输入 fail closed；
 - 裸 sequence 不再被盖上当前 epoch/generation；CLI 使用完整 `--cursor HOST_EPOCH:RUNTIME_GENERATION:SEQUENCE`；
 - exact duplicate operation 不重复 create/prompt/model/thinking/stop；ID 与不同 params/type 冲突时拒绝；
 - mutation request 发出后的 close/error/timeout 返回 `effect_unknown + operationId`；

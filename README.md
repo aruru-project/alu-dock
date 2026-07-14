@@ -32,6 +32,8 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 
 #142 是 V0.1 唯一工程状态入口。阶段 0 已确认没有新增产品阻塞；实现按 Runtime/协议、SSH TUI、日常控制、Extension UI、systemd/catalog/reopen、tree/fork/clone 和最终真人验收推进。
 
+**绿地规则：** Alu Dock 是全新项目。到 1.0 落地前，除非用户特意说明，不考虑任何旧协议、旧 Host、旧数据、旧 CLI 行为的兼容或迁移；原型合同直接替换。版本号仅标识当前合同，不表示存在历史包袱。
+
 阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1A 已将当前控制面切为 V2-only，但 Runtime replacement、project trust、systemd/catalog/reopen 等仍未完成；特别是当前入口仍会按需 detached 启动 Host，之后将由 `systemd --user` 唯一常驻 Host 替换。
 
 ## 当前过渡期真人入口
