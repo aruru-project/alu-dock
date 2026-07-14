@@ -67,6 +67,27 @@ test("independent CLI processes reconnect to one delayed host-owned instance", {
         .some((event) => objectValue(event).type === "run.settled"),
     );
 
+    const freshPrompt = await runCli(socketPath, ["prompt", instanceId, "start", "again"]);
+    assert.equal(objectValue(freshPrompt.receipt).delivery, "prompt");
+    assert.equal(objectValue(freshPrompt.receipt).queued, false);
+    assert.equal(objectValue(freshPrompt.instance).execution, "running");
+
+    const steer = await runCli(socketPath, [
+      "prompt",
+      instanceId,
+      "--delivery",
+      "steer",
+      "change direction",
+    ]);
+    assert.equal(objectValue(steer.receipt).delivery, "steer");
+    assert.equal(objectValue(steer.receipt).queued, true);
+
+    const firstStop = await runCli(socketPath, ["stop", instanceId]);
+    assert.equal(objectValue(firstStop.receipt).alreadyStopped, false);
+    assert.equal(objectValue(firstStop.instance).lastRun, "aborted");
+    const secondStop = await runCli(socketPath, ["stop", instanceId]);
+    assert.equal(objectValue(secondStop.receipt).alreadyStopped, true);
+
     const stoppedMessage = waitForMessage(child, (message) => message.type === "stopped");
     const exited = waitForExit(child);
     child.send({ type: "shutdown" });

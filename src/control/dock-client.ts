@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import { createConnection } from "node:net";
 import { resolve } from "node:path";
 
-import type { DockEvent, EventPage, InstanceSnapshot } from "../core/managed-instance.js";
+import type {
+  DeliveryMode,
+  DockEvent,
+  EventPage,
+  InstanceSnapshot,
+} from "../core/managed-instance.js";
 import { encodeJsonLine, JsonLineDecoder } from "./json-lines.js";
 import {
   CONTROL_PROTOCOL_VERSION,
@@ -13,10 +18,14 @@ import {
   parseEventsResult,
   parseListResult,
   parsePingResult,
+  parsePromptResult,
   parseStatusResult,
+  parseStopResult,
   ProtocolValidationError,
   type EventsResult,
   type PingResult,
+  type PromptResult,
+  type StopResult,
 } from "./protocol.js";
 
 type ControlRequestBody<T> = T extends ControlRequest
@@ -86,6 +95,18 @@ export class DockClient {
       parseEventsResult,
     );
     return { instance: result.instance, page: result.page };
+  }
+
+  prompt(
+    instanceId: string,
+    message: string,
+    delivery: DeliveryMode = "auto",
+  ): Promise<PromptResult> {
+    return this.request({ type: "prompt", instanceId, message, delivery }, parsePromptResult);
+  }
+
+  stop(instanceId: string): Promise<StopResult> {
+    return this.request({ type: "stop", instanceId }, parseStopResult);
   }
 
   streamEvents(

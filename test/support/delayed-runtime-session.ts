@@ -24,6 +24,8 @@ export class DelayedRuntimeSession implements RuntimeSession {
   disposeCalls = 0;
 
   private readonly listeners = new Set<(event: RuntimeEvent) => void>();
+  private readonly steeringQueue: string[] = [];
+  private readonly followUpQueue: string[] = [];
   private currentRun: Deferred<void> | undefined;
 
   constructor(readonly sessionId: string) {
@@ -35,9 +37,14 @@ export class DelayedRuntimeSession implements RuntimeSession {
     return () => this.listeners.delete(listener);
   }
 
-  prompt(_text: string, options?: RuntimePromptOptions): Promise<void> {
+  prompt(text: string, options?: RuntimePromptOptions): Promise<void> {
     options?.preflightResult?.(true);
-    if (this.isStreaming && options?.streamingBehavior) return Promise.resolve();
+    if (this.isStreaming && options?.streamingBehavior) {
+      if (options.streamingBehavior === "steer") this.steeringQueue.push(text);
+      else this.followUpQueue.push(text);
+      this.emitQueue();
+      return Promise.resolve();
+    }
     if (this.isStreaming) return Promise.reject(new Error("fake runtime already streaming"));
 
     this.currentRun = new Deferred<void>();
@@ -47,8 +54,14 @@ export class DelayedRuntimeSession implements RuntimeSession {
   }
 
   clearQueue(): ClearedRuntimeQueue {
-    this.emit({ type: "queue_update", steering: [], followUp: [] });
-    return { steering: [], followUp: [] };
+    const cleared = {
+      steering: [...this.steeringQueue],
+      followUp: [...this.followUpQueue],
+    };
+    this.steeringQueue.length = 0;
+    this.followUpQueue.length = 0;
+    this.emitQueue();
+    return cleared;
   }
 
   async abort(): Promise<void> {
@@ -83,5 +96,13 @@ export class DelayedRuntimeSession implements RuntimeSession {
 
   emit(event: RuntimeEvent): void {
     for (const listener of this.listeners) listener(event);
+  }
+
+  private emitQueue(): void {
+    this.emit({
+      type: "queue_update",
+      steering: [...this.steeringQueue],
+      followUp: [...this.followUpQueue],
+    });
   }
 }

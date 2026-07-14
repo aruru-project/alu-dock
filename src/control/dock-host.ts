@@ -8,7 +8,14 @@ import {
 } from "node:net";
 import { dirname, resolve } from "node:path";
 
-import type { DockEvent, EventPage, ManagedInstance } from "../core/managed-instance.js";
+import {
+  InstanceAdmissionPendingError,
+  InstanceNotActiveError,
+  InvalidDeliveryModeError,
+  type DockEvent,
+  type EventPage,
+  type ManagedInstance,
+} from "../core/managed-instance.js";
 import { DockRegistry, InstanceNotFoundError } from "./dock-registry.js";
 import { encodeJsonLine, JsonLineDecoder, JsonLineError } from "./json-lines.js";
 import {
@@ -233,6 +240,26 @@ export class DockHost {
       case "events":
         this.attachEventStream(request, socket, setEventUnsubscribe);
         return;
+
+      case "prompt": {
+        const instance = this.registry.get(request.instanceId);
+        const receipt = await instance.submit(request.message, request.delivery ?? "auto");
+        this.sendSuccessAndEnd(socket, request.requestId, {
+          receipt,
+          instance: instance.snapshot(),
+        });
+        return;
+      }
+
+      case "stop": {
+        const instance = this.registry.get(request.instanceId);
+        const receipt = await instance.stop();
+        this.sendSuccessAndEnd(socket, request.requestId, {
+          receipt,
+          instance: instance.snapshot(),
+        });
+        return;
+      }
     }
   }
 
@@ -449,6 +476,9 @@ function encodedSize(value: unknown): number {
 function mapControlError(error: unknown): { code: string; message: string } {
   if (error instanceof ProtocolValidationError) return { code: error.code, message: error.message };
   if (error instanceof InstanceNotFoundError) return { code: "not_found", message: error.message };
+  if (error instanceof InstanceNotActiveError) return { code: "instance_not_active", message: error.message };
+  if (error instanceof InvalidDeliveryModeError) return { code: "invalid_delivery", message: error.message };
+  if (error instanceof InstanceAdmissionPendingError) return { code: "admission_pending", message: error.message };
   if (error instanceof SyntaxError) return { code: "invalid_json", message: "Request is not valid JSON" };
   if (error instanceof JsonLineError) {
     return {

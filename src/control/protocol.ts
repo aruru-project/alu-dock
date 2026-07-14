@@ -1,8 +1,11 @@
 import type {
+  CommandReceipt,
+  DeliveryMode,
   DockEvent,
   EventPage,
   ExecutorIdentity,
   InstanceSnapshot,
+  StopReceipt,
 } from "../core/managed-instance.js";
 
 export const CONTROL_PROTOCOL_VERSION = 1;
@@ -11,6 +14,7 @@ export const MAX_CONTROL_REQUEST_ID_CHARS = 128;
 export const MAX_INSTANCE_ID_CHARS = 128;
 export const MAX_INSTANCE_NAME_CHARS = 256;
 export const MAX_CONTROL_CWD_CHARS = 16_384;
+export const MAX_PROMPT_CHARS = 256_000;
 
 export type ControlRequest =
   | { version: 1; requestId: string; type: "ping" }
@@ -24,7 +28,16 @@ export type ControlRequest =
       instanceId: string;
       since?: number;
       follow?: boolean;
-    };
+    }
+  | {
+      version: 1;
+      requestId: string;
+      type: "prompt";
+      instanceId: string;
+      message: string;
+      delivery?: DeliveryMode;
+    }
+  | { version: 1; requestId: string; type: "stop"; instanceId: string };
 
 export interface ControlError {
   code: string;
@@ -77,6 +90,16 @@ export interface EventsResult {
   following: boolean;
 }
 
+export interface PromptResult {
+  receipt: CommandReceipt;
+  instance: InstanceSnapshot;
+}
+
+export interface StopResult {
+  receipt: StopReceipt;
+  instance: InstanceSnapshot;
+}
+
 export function parseControlRequest(input: unknown): ControlRequest {
   const value = objectValue(input, "request", "invalid_request");
   const version = value.version;
@@ -125,6 +148,30 @@ export function parseControlRequest(input: unknown): ControlRequest {
         follow,
       };
     }
+    case "prompt": {
+      assertOnlyKeys(value, ["version", "requestId", "type", "instanceId", "message", "delivery"]);
+      const delivery = optionalEnumString(
+        value.delivery,
+        "delivery",
+        ["auto", "prompt", "steer", "followUp"] as const,
+      );
+      return {
+        version: 1,
+        requestId,
+        type,
+        instanceId: requiredString(value.instanceId, "instanceId", MAX_INSTANCE_ID_CHARS),
+        message: requiredString(value.message, "message", MAX_PROMPT_CHARS),
+        delivery,
+      };
+    }
+    case "stop":
+      assertOnlyKeys(value, ["version", "requestId", "type", "instanceId"]);
+      return {
+        version: 1,
+        requestId,
+        type,
+        instanceId: requiredString(value.instanceId, "instanceId", MAX_INSTANCE_ID_CHARS),
+      };
     default:
       throw new ProtocolValidationError("unknown_request", `Unknown request type: ${type}`);
   }
@@ -210,6 +257,26 @@ export function parseEventsResult(input: unknown): EventsResult {
   };
 }
 
+export function parsePromptResult(input: unknown): PromptResult {
+  const value = objectValue(input, "prompt result");
+  const receipt = parseCommandReceipt(value.receipt, "prompt result.receipt");
+  const instance = parseInstanceSnapshot(value.instance, "prompt result.instance");
+  if (receipt.instanceId !== instance.id) {
+    throw new ProtocolValidationError("invalid_response", "prompt receipt and snapshot instance IDs differ");
+  }
+  return { receipt, instance };
+}
+
+export function parseStopResult(input: unknown): StopResult {
+  const value = objectValue(input, "stop result");
+  const receipt = parseStopReceipt(value.receipt, "stop result.receipt");
+  const instance = parseInstanceSnapshot(value.instance, "stop result.instance");
+  if (receipt.instanceId !== instance.id) {
+    throw new ProtocolValidationError("invalid_response", "stop receipt and snapshot instance IDs differ");
+  }
+  return { receipt, instance };
+}
+
 export class ProtocolValidationError extends Error {
   constructor(readonly code: string, message: string) {
     super(message);
@@ -232,6 +299,36 @@ function requireEnvelopeHeader(
   if (requestId !== expectedRequestId) {
     throw new ProtocolValidationError("invalid_response", `Unexpected response requestId: ${requestId}`);
   }
+}
+
+function parseCommandReceipt(input: unknown, field: string): CommandReceipt {
+  const value = objectValue(input, field);
+  if (value.accepted !== true) {
+    throw new ProtocolValidationError("invalid_response", `${field}.accepted must be true`);
+  }
+  return {
+    accepted: true,
+    instanceId: requiredString(value.instanceId, `${field}.instanceId`),
+    commandId: requiredString(value.commandId, `${field}.commandId`),
+    delivery: enumString(value.delivery, `${field}.delivery`, ["prompt", "steer", "followUp"]),
+    queued: requiredBoolean(value.queued, `${field}.queued`),
+    acceptedAt: requiredString(value.acceptedAt, `${field}.acceptedAt`),
+  };
+}
+
+function parseStopReceipt(input: unknown, field: string): StopReceipt {
+  const value = objectValue(input, field);
+  if (value.stopped !== true) {
+    throw new ProtocolValidationError("invalid_response", `${field}.stopped must be true`);
+  }
+  const cleanupErrors = optionalStringArray(value.cleanupErrors, `${field}.cleanupErrors`);
+  const receipt: StopReceipt = {
+    instanceId: requiredString(value.instanceId, `${field}.instanceId`),
+    stopped: true,
+    alreadyStopped: requiredBoolean(value.alreadyStopped, `${field}.alreadyStopped`),
+  };
+  if (cleanupErrors) receipt.cleanupErrors = cleanupErrors;
+  return receipt;
 }
 
 function parseInstanceSnapshot(input: unknown, field: string): InstanceSnapshot {
@@ -347,6 +444,26 @@ function optionalBoolean(value: unknown, field: string): boolean | undefined {
     throw new ProtocolValidationError("invalid_request", `${field} must be a boolean`);
   }
   return value;
+}
+
+function optionalEnumString<T extends string>(
+  value: unknown,
+  field: string,
+  allowed: readonly T[],
+): T | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !allowed.includes(value as T)) {
+    throw new ProtocolValidationError("invalid_request", `${field} has an unsupported value`);
+  }
+  return value as T;
+}
+
+function optionalStringArray(value: unknown, field: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+    throw new ProtocolValidationError("invalid_response", `${field} must be an array of strings`);
+  }
+  return [...value];
 }
 
 function requiredNonNegativeInteger(value: unknown, field: string): number {

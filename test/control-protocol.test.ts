@@ -55,4 +55,15 @@ test("control requests reject unknown fields and invalid cursors", () => {
     }),
     /name must be at most 256 characters/,
   );
+  assert.throws(
+    () => parseControlRequest({
+      version: 1,
+      requestId: "r4",
+      type: "prompt",
+      instanceId: "i1",
+      message: "hello",
+      delivery: "parallel",
+    }),
+    /delivery has an unsupported value/,
+  );
 });

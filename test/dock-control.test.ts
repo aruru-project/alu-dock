@@ -163,6 +163,76 @@ test("shutdown waits for an admitted asynchronous create and then stops it", asy
   assert.equal(registry.list()[0]?.lifecycle, "stopped");
 });
 
+test("a second client can steer, queue follow-up, and stop idempotently", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const creator = new DockClient({ socketPath: harness.socketPath });
+  const created = await creator.create(harness.directory);
+  const controller = new DockClient({ socketPath: harness.socketPath });
+
+  const steer = await controller.prompt(created.id, "change direction");
+  assert.equal(steer.receipt.delivery, "steer");
+  assert.equal(steer.receipt.queued, true);
+  assert.equal(steer.instance.pending.steering, 1);
+
+  const followUp = await controller.prompt(created.id, "then summarize", "followUp");
+  assert.equal(followUp.receipt.delivery, "followUp");
+  assert.equal(followUp.receipt.queued, true);
+  assert.equal(followUp.instance.pending.followUp, 1);
+
+  await assert.rejects(
+    controller.prompt(created.id, "parallel", "prompt"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_delivery",
+  );
+
+  const firstStop = await controller.stop(created.id);
+  assert.equal(firstStop.receipt.alreadyStopped, false);
+  assert.equal(firstStop.instance.lifecycle, "stopped");
+  assert.equal(firstStop.instance.lastRun, "aborted");
+  assert.equal(firstStop.instance.pending.total, 0);
+
+  const secondStop = await controller.stop(created.id);
+  assert.equal(secondStop.receipt.alreadyStopped, true);
+  await assert.rejects(
+    controller.prompt(created.id, "too late"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "instance_not_active",
+  );
+});
+
+test("a reconnected client can start a fresh prompt on an idle instance", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-idle-prompt-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const sessions = new Map<string, DelayedRuntimeSession>();
+  const registry = new DockRegistry(async ({ id, cwd }) => {
+    const session = new DelayedRuntimeSession(`pi-${id}`);
+    sessions.set(id, session);
+    return new ManagedInstance({ id, cwd, session });
+  }, () => "idle-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => {
+    await host.stop().catch(() => {});
+    await rm(directory, { recursive: true, force: true });
+  });
+  await host.start();
+
+  const created = await new DockClient({ socketPath }).create(directory);
+  assert.equal(created.execution, "idle");
+  const accepted = await new DockClient({ socketPath }).prompt(created.id, "start now");
+  assert.equal(accepted.receipt.delivery, "prompt");
+  assert.equal(accepted.receipt.queued, false);
+  assert.equal(accepted.instance.execution, "running");
+  assert.equal((await new DockClient({ socketPath }).status(created.id)).execution, "running");
+
+  const cursor = accepted.instance.latestEventSequence;
+  sessions.get(created.id)?.settle("finished");
+  await registry.get(created.id).waitForIdle();
+  const replay = await new DockClient({ socketPath }).events(created.id, cursor);
+  assert.ok(replay.page.events.some((event) => event.type === "run.settled"));
+  assert.equal(replay.instance.lastRun, "succeeded");
+});
+
 test("unexpected host closure rejects a live follow subscription", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));

@@ -9,13 +9,16 @@ Alu Dock 是 #136「受管运行时宿主」的独立、可废弃 V0 可行性�
 - [x] 阶段 0：实施前可行性门禁（ADJUST → GO）
 - [x] 阶段 1：SDK 单实例生命周期探针
 - [x] 阶段 2：Unix socket 宿主与跨客户端观察
-- [ ] 阶段 3：第二客户端继续交互与显式停止
+- [x] 阶段 3：第二客户端继续交互与显式停止
 - [ ] 阶段 4：默认资源兼容与体验评估
 
 详细文档：
 
 - [`docs/feasibility.md`](docs/feasibility.md)
 - [`docs/plan.md`](docs/plan.md)
+- [`docs/validation-stage-1.md`](docs/validation-stage-1.md)
+- [`docs/validation-stage-2.md`](docs/validation-stage-2.md)
+- [`docs/validation-stage-3.md`](docs/validation-stage-3.md)
 
 ## 本地宿主与薄 CLI
 
@@ -35,9 +38,13 @@ npm run cli -- list
 npm run cli -- status INSTANCE_ID
 npm run cli -- events INSTANCE_ID --since 0
 npm run cli -- events INSTANCE_ID --since SEQUENCE --follow
+npm run cli -- prompt INSTANCE_ID "start a new run"
+npm run cli -- prompt INSTANCE_ID --delivery steer "change direction"
+npm run cli -- prompt INSTANCE_ID --delivery followUp "then summarize"
+npm run cli -- stop INSTANCE_ID
 ```
 
-也可用 `--socket PATH` 或 `ALU_DOCK_SOCKET` 指定 socket。所有输出均为一行一个 JSON 对象，不转发终端屏幕。阶段 2 只提供 create/list/status/events；继续交互和 stop 属于阶段 3。
+也可用 `--socket PATH` 或 `ALU_DOCK_SOCKET` 指定 socket。所有输出均为一行一个 JSON 对象，不转发终端屏幕。`prompt` 的 receipt 只表示 preflight 已接受；`queued=true` 表示 steer/follow-up 已排队，不表示任务完成。`stop` 可重复调用，receipt 会区分首次停止与 `alreadyStopped`。
 
 ## 状态模型
 

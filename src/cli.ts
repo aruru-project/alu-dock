@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 
-import type { DockEvent } from "./core/managed-instance.js";
+import type { DeliveryMode, DockEvent } from "./core/managed-instance.js";
 import { DockClient, ControlClientError } from "./control/dock-client.js";
 import { DockHost } from "./control/dock-host.js";
 import { DockRegistry } from "./control/dock-registry.js";
 import { defaultSocketPath } from "./control/socket-path.js";
+
+const HOST_SHUTDOWN_TIMEOUT_MS = 10_000;
 
 interface ParsedArgs {
   socketPath: string;
@@ -53,6 +55,20 @@ async function main(): Promise<void> {
       await showEvents(client, parsed.commandArgs);
       return;
 
+    case "prompt": {
+      const options = parsePromptArgs(parsed.commandArgs);
+      const result = await client.prompt(options.instanceId, options.message, options.delivery);
+      writeJson({ kind: "receipt", action: "prompt", ...result });
+      return;
+    }
+
+    case "stop": {
+      const instanceId = requiredPositional(parsed.commandArgs, "stop requires INSTANCE_ID");
+      const result = await client.stop(instanceId);
+      writeJson({ kind: "receipt", action: "stop", ...result });
+      return;
+    }
+
     default:
       throw new Error(`Unknown command: ${parsed.command}\n\n${usage()}`);
   }
@@ -69,7 +85,21 @@ async function serve(socketPath: string, args: string[]): Promise<void> {
 
   const signal = await waitForSignal();
   writeJson({ kind: "host.stopping", signal });
-  await host.stop();
+  const shutdownTimer = setTimeout(() => {
+    process.stderr.write(`${JSON.stringify({
+      kind: "error",
+      error: {
+        code: "shutdown_timeout",
+        message: `Host did not stop within ${HOST_SHUTDOWN_TIMEOUT_MS}ms`,
+      },
+    })}\n`);
+    process.exit(1);
+  }, HOST_SHUTDOWN_TIMEOUT_MS);
+  try {
+    await host.stop();
+  } finally {
+    clearTimeout(shutdownTimer);
+  }
   writeJson({ kind: "host.stopped", signal });
 }
 
@@ -169,6 +199,41 @@ function parseCreateArgs(args: string[]): { cwd: string; name?: string } {
   return { cwd, name };
 }
 
+function parsePromptArgs(args: string[]): {
+  instanceId: string;
+  message: string;
+  delivery: DeliveryMode;
+} {
+  const [instanceId, ...mutable] = args;
+  if (!instanceId || instanceId.startsWith("--")) throw new Error("prompt requires INSTANCE_ID and MESSAGE");
+  let delivery: DeliveryMode = "auto";
+  let deliverySeen = false;
+  const messageParts: string[] = [];
+
+  while (mutable.length > 0) {
+    const arg = mutable.shift();
+    if (arg === "--delivery") {
+      if (deliverySeen) throw new Error("--delivery may only be specified once");
+      const value = mutable.shift();
+      if (!isDeliveryMode(value)) {
+        throw new Error("--delivery must be auto, prompt, steer, or followUp");
+      }
+      delivery = value;
+      deliverySeen = true;
+    } else {
+      messageParts.push(arg as string);
+    }
+  }
+
+  const message = messageParts.join(" ");
+  if (message.trim().length === 0) throw new Error("prompt requires a non-empty MESSAGE");
+  return { instanceId, message, delivery };
+}
+
+function isDeliveryMode(value: unknown): value is DeliveryMode {
+  return value === "auto" || value === "prompt" || value === "steer" || value === "followUp";
+}
+
 function requiredPositional(args: string[], message: string): string {
   const [value, ...extra] = args;
   if (!value || extra.length > 0) throw new Error(message);
@@ -201,7 +266,7 @@ function writeJson(value: unknown): void {
 }
 
 function usage(): string {
-  return `Alu Dock V0 local control client\n\nUsage:\n  alu-dock [--socket PATH] serve\n  alu-dock [--socket PATH] ping\n  alu-dock [--socket PATH] create [--cwd PATH] [--name NAME]\n  alu-dock [--socket PATH] list\n  alu-dock [--socket PATH] status INSTANCE_ID\n  alu-dock [--socket PATH] events INSTANCE_ID [--since SEQUENCE] [--follow]\n`;
+  return `Alu Dock V0 local control client\n\nUsage:\n  alu-dock [--socket PATH] serve\n  alu-dock [--socket PATH] ping\n  alu-dock [--socket PATH] create [--cwd PATH] [--name NAME]\n  alu-dock [--socket PATH] list\n  alu-dock [--socket PATH] status INSTANCE_ID\n  alu-dock [--socket PATH] events INSTANCE_ID [--since SEQUENCE] [--follow]\n  alu-dock [--socket PATH] prompt INSTANCE_ID [--delivery MODE] MESSAGE\n  alu-dock [--socket PATH] stop INSTANCE_ID\n`;
 }
 
 function errorMessage(error: unknown): string {
