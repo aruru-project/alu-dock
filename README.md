@@ -2,13 +2,13 @@
 
 Alu Dock 是 #136「受管运行时宿主」的独立、可废弃 V0 可行性实现，执行卡为 #137。
 
-当前阶段只验证官方 Pi SDK 能否被宿主对象持有，并投影为可解释的实例状态。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与生产部署不在本仓库的修改范围内。
+当前 V0 验证官方 Pi SDK session 能否由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与生产部署不在本仓库的修改范围内。
 
 ## 当前进度
 
 - [x] 阶段 0：实施前可行性门禁（ADJUST → GO）
 - [x] 阶段 1：SDK 单实例生命周期探针
-- [ ] 阶段 2：Unix socket 宿主与跨客户端观察
+- [x] 阶段 2：Unix socket 宿主与跨客户端观察
 - [ ] 阶段 3：第二客户端继续交互与显式停止
 - [ ] 阶段 4：默认资源兼容与体验评估
 
@@ -17,7 +17,29 @@ Alu Dock 是 #136「受管运行时宿主」的独立、可废弃 V0 可行性�
 - [`docs/feasibility.md`](docs/feasibility.md)
 - [`docs/plan.md`](docs/plan.md)
 
-## 阶段 1 状态模型
+## 本地宿主与薄 CLI
+
+宿主以前台常驻进程运行；客户端命令是一次性进程。默认 socket 为 `$XDG_RUNTIME_DIR/alu-dock/dock.sock`，未设置 XDG 时为 `~/.alu-dock/run/dock.sock`。socket 的直接父目录必须属于当前用户且不能授权 group/other，socket mode 固定为 `0600`。
+
+终端 A：
+
+```bash
+npm run cli -- serve
+```
+
+终端 B（每条命令都可以是新的客户端进程）：
+
+```bash
+npm run cli -- create --cwd "$PWD" --name demo
+npm run cli -- list
+npm run cli -- status INSTANCE_ID
+npm run cli -- events INSTANCE_ID --since 0
+npm run cli -- events INSTANCE_ID --since SEQUENCE --follow
+```
+
+也可用 `--socket PATH` 或 `ALU_DOCK_SOCKET` 指定 socket。所有输出均为一行一个 JSON 对象，不转发终端屏幕。阶段 2 只提供 create/list/status/events；继续交互和 stop 属于阶段 3。
+
+## 状态模型
 
 状态不是一个含糊枚举，而是三个维度：
 
@@ -58,7 +80,7 @@ npm run smoke:sdk -- \
 
 ## V0 非目标
 
-- 宿主重启后恢复正在执行的任务
+- 宿主故障后继续、恢复或自动重放正在执行的任务
 - 跨机器、广域网、账号体系
 - 工作目录互斥与通用调度
 - stock Pi TUI / PTY / screen 转发

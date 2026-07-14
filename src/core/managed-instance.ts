@@ -825,6 +825,8 @@ function sanitizeEventRecord(data: Record<string, unknown>): Record<string, unkn
 
 function sanitizeEventValue(value: unknown, depth: number, seen: WeakSet<object>): unknown {
   if (typeof value === "string") return truncate(value, 8_000);
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "symbol" || typeof value === "function") return String(value);
   if (value === null || typeof value !== "object") return value;
   if (depth >= 6) return "[depth limit]";
   if (seen.has(value)) return "[circular]";

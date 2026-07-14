@@ -426,6 +426,26 @@ test("observer exceptions and mutations cannot escape into the runtime listener 
   assert.equal(instance.eventsSince().events.at(-1)?.data.steering, 1);
 });
 
+test("runtime event data is sanitized into JSON-serializable values", () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+
+  session.emit({
+    type: "tool_execution_start",
+    toolCallId: "tool-1",
+    toolName: "test",
+    args: { count: 1n, callback: () => undefined, marker: Symbol("marker") },
+  });
+
+  const page = instance.eventsSince();
+  assert.doesNotThrow(() => JSON.stringify(page));
+  const event = page.events.find((item) => item.type === "tool.started");
+  const args = event?.data.args as Record<string, unknown>;
+  assert.equal(args.count, "1");
+  assert.equal(typeof args.callback, "string");
+  assert.equal(args.marker, "Symbol(marker)");
+});
+
 test("bounded events expose a monotonic cursor and truncation signal", () => {
   const instance = createInstance(new FakeRuntimeSession(), 3);
 

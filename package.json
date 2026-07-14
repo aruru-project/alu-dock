@@ -4,6 +4,9 @@
   "private": true,
   "description": "Disposable V0 feasibility host for managed Pi SDK runtimes",
   "type": "module",
+  "bin": {
+    "alu-dock": "dist/src/cli.js"
+  },
   "engines": {
     "node": ">=22.19.0"
   },
@@ -11,6 +14,8 @@
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/**/*.test.js",
+    "cli": "npm run build && node dist/src/cli.js",
+    "serve": "npm run build && node dist/src/cli.js serve",
     "smoke:sdk": "npm run build && node dist/scripts/sdk-smoke.js"
   },
   "dependencies": {
