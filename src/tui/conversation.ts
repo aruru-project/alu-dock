@@ -35,8 +35,9 @@ export class DockConversation implements Component {
         this.add("user", stringData(event, "text") ?? "");
         break;
 
-      case "assistant.text_delta": {
-        const delta = stringData(event, "delta");
+      case "message.delta": {
+        if (event.data.block === "thinking") break;
+        const delta = event.data.delta;
         if (!delta) break;
         if (!this.currentAssistant) {
           this.currentAssistant = this.add("assistant", "", false);
@@ -47,7 +48,7 @@ export class DockConversation implements Component {
 
       case "message.completed": {
         const role = stringData(event, "role");
-        const text = stringData(event, "text");
+        const text = contentText(event.data.content);
         if (role === "assistant") {
           // Failed transport attempts can complete without any assistant text.
           // Do not render an empty assistant bubble or per-attempt error: retry
@@ -78,7 +79,7 @@ export class DockConversation implements Component {
         const name = stringData(event, "toolName") ?? "tool";
         const callId = stringData(event, "toolCallId") ?? `${event.sequence}`;
         const isError = event.data.isError === true;
-        const output = stringData(event, "output");
+        const output = stringData(event, "text");
         const suffix = output ? `\n${truncate(output, MAX_TOOL_OUTPUT)}` : "";
         const entry = this.tools.get(callId) ?? this.add("tool", "", false);
         entry.kind = isError ? "error" : "tool";
@@ -112,7 +113,7 @@ export class DockConversation implements Component {
       }
 
       case "command.rejected":
-      case "command.background_failed":
+      case "instance.error":
       case "extension.error":
         this.add("error", stringData(event, "error") ?? event.type);
         break;
@@ -217,13 +218,23 @@ function label(kind: EntryKind, complete: boolean): string {
   }
 }
 
+function contentText(value: unknown): string | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const text = value.flatMap((item) => {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return [];
+    const block = item as Record<string, unknown>;
+    return block.type === "text" && typeof block.text === "string" ? [block.text] : [];
+  }).join("");
+  return text || undefined;
+}
+
 function stringData(event: DockEvent, key: string): string | undefined {
-  const value = event.data[key];
+  const value = (event.data as unknown as Record<string, unknown>)[key];
   return typeof value === "string" ? safeTerminalText(value) : undefined;
 }
 
 function numberData(event: DockEvent, key: string): number | undefined {
-  const value = event.data[key];
+  const value = (event.data as unknown as Record<string, unknown>)[key];
   return typeof value === "number" ? value : undefined;
 }
 

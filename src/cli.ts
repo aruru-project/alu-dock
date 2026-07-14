@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import type { DeliveryMode, DockEvent } from "./core/managed-instance.js";
+import type { DeliveryMode, DockEvent, EventCursor } from "./core/managed-instance.js";
 import { DockClient, ControlClientError } from "./control/dock-client.js";
 import { DockHost } from "./control/dock-host.js";
 import { DockRegistry } from "./control/dock-registry.js";
@@ -85,7 +85,7 @@ async function serve(socketPath: string, args: string[]): Promise<void> {
   requireNoArgs(args, "serve");
   // Keep client commands thin: only the long-lived host process loads Pi SDK.
   const { createPiInstance } = await import("./pi/create-pi-instance.js");
-  const registry = new DockRegistry(({ id, cwd, name }) => createPiInstance({ id, cwd, name }));
+  const registry = new DockRegistry(({ id, creationOperationId, hostEpoch, cwd, name }) => createPiInstance({ id, creationOperationId, hostEpoch, cwd, name }));
   const host = new DockHost({ socketPath, registry });
   await host.start();
   writeJson({ kind: "host.ready", pid: process.pid, socketPath: host.socketPath });
@@ -114,19 +114,15 @@ async function showEvents(client: DockClient, args: string[]): Promise<void> {
   const mutable = [...args];
   const instanceId = mutable.shift();
   if (!instanceId || instanceId.startsWith("--")) throw new Error("events requires INSTANCE_ID");
-  let since = 0;
+  let cursor: EventCursor | undefined;
   let follow = false;
 
   while (mutable.length > 0) {
     const arg = mutable.shift();
-    if (arg === "--since") {
+    if (arg === "--cursor") {
       const raw = mutable.shift();
-      if (raw === undefined) throw new Error("--since requires a value");
-      const parsed = Number(raw);
-      if (!Number.isSafeInteger(parsed) || parsed < 0) {
-        throw new Error("--since must be a non-negative safe integer");
-      }
-      since = parsed;
+      if (raw === undefined) throw new Error("--cursor requires HOST_EPOCH:RUNTIME_GENERATION:SEQUENCE");
+      cursor = parseEventCursor(raw, instanceId);
     } else if (arg === "--follow") {
       follow = true;
     } else {
@@ -135,7 +131,7 @@ async function showEvents(client: DockClient, args: string[]): Promise<void> {
   }
 
   if (!follow) {
-    const result = await client.events(instanceId, since);
+    const result = await client.events(instanceId, cursor);
     writeJson({ kind: "events", ...result, following: false });
     return;
   }
@@ -143,7 +139,7 @@ async function showEvents(client: DockClient, args: string[]): Promise<void> {
   let initialWritten = false;
   const pendingEvents: DockEvent[] = [];
   const subscription = await client.streamEvents(instanceId, {
-    since,
+    since: cursor,
     onEvent: (event) => {
       if (initialWritten) writeJson({ kind: "event", event });
       else pendingEvents.push(event);
@@ -162,6 +158,19 @@ async function showEvents(client: DockClient, args: string[]): Promise<void> {
     process.off("SIGINT", close);
     process.off("SIGTERM", close);
   }
+}
+
+function parseEventCursor(value: string, instanceId: string): EventCursor {
+  const parts = value.split(":");
+  if (parts.length !== 3 || !parts[0]) {
+    throw new Error("--cursor must use HOST_EPOCH:RUNTIME_GENERATION:SEQUENCE");
+  }
+  const runtimeGeneration = Number(parts[1]);
+  const sequence = Number(parts[2]);
+  if (!Number.isSafeInteger(runtimeGeneration) || runtimeGeneration < 1 || !Number.isSafeInteger(sequence) || sequence < 0) {
+    throw new Error("--cursor must use HOST_EPOCH:RUNTIME_GENERATION:SEQUENCE with positive generation and non-negative sequence");
+  }
+  return { hostEpoch: parts[0], instanceId, runtimeGeneration, sequence };
 }
 
 function parseGlobalArgs(args: string[]): ParsedArgs {
@@ -307,7 +316,7 @@ function writeJson(value: unknown): void {
 }
 
 function usage(): string {
-  return `Alu Dock V0 managed Pi client\n\nHuman workflow:\n  alu-dock [--socket PATH]\n  alu-dock [--socket PATH] open [INSTANCE_ID] [--cwd PATH] [--name NAME] [--new]\n  alu-dock [--socket PATH] new [--cwd PATH] [--name NAME]\n  alu-dock [--socket PATH] attach [INSTANCE_ID] [--cwd PATH]\n\nMachine and diagnostic commands:\n  alu-dock [--socket PATH] serve\n  alu-dock [--socket PATH] ping\n  alu-dock [--socket PATH] create [--cwd PATH] [--name NAME]\n  alu-dock [--socket PATH] list\n  alu-dock [--socket PATH] status INSTANCE_ID\n  alu-dock [--socket PATH] events INSTANCE_ID [--since SEQUENCE] [--follow]\n  alu-dock [--socket PATH] prompt INSTANCE_ID [--delivery MODE] MESSAGE\n  alu-dock [--socket PATH] stop INSTANCE_ID\n`;
+  return `Alu Dock V0.1 managed Pi client\n\nHuman workflow:\n  alu-dock [--socket PATH]\n  alu-dock [--socket PATH] open [INSTANCE_ID] [--cwd PATH] [--name NAME] [--new]\n  alu-dock [--socket PATH] new [--cwd PATH] [--name NAME]\n  alu-dock [--socket PATH] attach [INSTANCE_ID] [--cwd PATH]\n\nMachine and diagnostic commands:\n  alu-dock [--socket PATH] serve\n  alu-dock [--socket PATH] ping\n  alu-dock [--socket PATH] create [--cwd PATH] [--name NAME]\n  alu-dock [--socket PATH] list\n  alu-dock [--socket PATH] status INSTANCE_ID\n  alu-dock [--socket PATH] events INSTANCE_ID [--cursor HOST_EPOCH:RUNTIME_GENERATION:SEQUENCE] [--follow]\n  alu-dock [--socket PATH] prompt INSTANCE_ID [--delivery MODE] MESSAGE\n  alu-dock [--socket PATH] stop INSTANCE_ID\n`;
 }
 
 function errorMessage(error: unknown): string {

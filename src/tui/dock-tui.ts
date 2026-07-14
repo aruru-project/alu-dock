@@ -61,7 +61,7 @@ export async function runDockTui(
     tui.requestRender();
   };
 
-  subscription = await client.streamEvents(instance.id, { since: 0, onEvent });
+  subscription = await client.streamEvents(instance.id, { onEvent });
   instance = subscription.initial.instance;
   conversation.applyReplay(
     subscription.initial.page.events,
@@ -404,7 +404,7 @@ function commandMessage(input: string, command: string): string | undefined {
 function activityForEvent(event: DockEvent): string {
   switch (event.type) {
     case "run.started": return "running";
-    case "assistant.text_delta": return "streaming";
+    case "message.delta": return "streaming";
     case "tool.started": return `tool ${stringData(event, "toolName") ?? "running"}`;
     case "run.retry_started": return "retrying";
     case "run.settled": return stringData(event, "result") ?? "settled";
@@ -429,7 +429,7 @@ function projectSnapshot(snapshot: InstanceSnapshot, event: DockEvent): Instance
         thinkingLevel,
       },
       updatedAt: event.occurredAt,
-      latestEventSequence: Math.max(snapshot.latestEventSequence, event.sequence),
+      eventCursor: { ...snapshot.eventCursor, sequence: Math.max(snapshot.eventCursor.sequence, event.sequence) },
     };
   }
   if (event.type === "thinking.changed") {
@@ -440,36 +440,33 @@ function projectSnapshot(snapshot: InstanceSnapshot, event: DockEvent): Instance
         thinkingLevel: thinkingData(event, "thinkingLevel") ?? snapshot.executor.thinkingLevel,
       },
       updatedAt: event.occurredAt,
-      latestEventSequence: Math.max(snapshot.latestEventSequence, event.sequence),
+      eventCursor: { ...snapshot.eventCursor, sequence: Math.max(snapshot.eventCursor.sequence, event.sequence) },
     };
   }
   if (event.type !== "instance.state_changed") {
     if (event.type === "instance.stopped") {
-      return { ...snapshot, lifecycle: "stopped", execution: "idle", updatedAt: event.occurredAt };
+      return { ...snapshot, lifecycle: "stopped", execution: "unavailable", ownerHostEpoch: undefined, updatedAt: event.occurredAt };
     }
-    return { ...snapshot, latestEventSequence: Math.max(snapshot.latestEventSequence, event.sequence) };
+    return { ...snapshot, eventCursor: { ...snapshot.eventCursor, sequence: Math.max(snapshot.eventCursor.sequence, event.sequence) } };
   }
 
   const lifecycle = enumData(event, "lifecycle", ["active", "stopping", "stopped"] as const)
     ?? snapshot.lifecycle;
-  const execution = enumData(event, "execution", ["idle", "running", "failed"] as const)
+  const execution = enumData(event, "execution", ["idle", "running", "failed", "unavailable"] as const)
     ?? snapshot.execution;
-  const lastRun = enumData(event, "lastRun", ["never", "succeeded", "failed", "aborted"] as const)
+  const lastRun = enumData(event, "lastRun", ["never", "succeeded", "failed", "aborted", "interrupted"] as const)
     ?? snapshot.lastRun;
-  const pending = numberData(event, "pending") ?? snapshot.pending.total;
+  const pending = pendingData(event) ?? snapshot.pending;
   const lastError = stringData(event, "lastError");
   return {
     ...snapshot,
     lifecycle,
     execution,
     lastRun,
-    pending: {
-      ...snapshot.pending,
-      total: pending,
-    },
+    pending,
     lastError,
     updatedAt: event.occurredAt,
-    latestEventSequence: Math.max(snapshot.latestEventSequence, event.sequence),
+    eventCursor: { ...snapshot.eventCursor, sequence: Math.max(snapshot.eventCursor.sequence, event.sequence) },
   };
 }
 
@@ -478,17 +475,26 @@ function enumData<const T extends readonly string[]>(
   key: string,
   values: T,
 ): T[number] | undefined {
-  const value = event.data[key];
+  const value = (event.data as unknown as Record<string, unknown>)[key];
   return typeof value === "string" && values.includes(value) ? value as T[number] : undefined;
 }
 
 function stringData(event: DockEvent, key: string): string | undefined {
-  const value = event.data[key];
+  const value = (event.data as unknown as Record<string, unknown>)[key];
   return typeof value === "string" ? value : undefined;
 }
 
+function pendingData(event: DockEvent): InstanceSnapshot["pending"] | undefined {
+  const value = (event.data as unknown as Record<string, unknown>).pending;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const pending = value as Record<string, unknown>;
+  return typeof pending.steering === "number" && typeof pending.followUp === "number" && typeof pending.total === "number"
+    ? { steering: pending.steering, followUp: pending.followUp, total: pending.total }
+    : undefined;
+}
+
 function numberData(event: DockEvent, key: string): number | undefined {
-  const value = event.data[key];
+  const value = (event.data as unknown as Record<string, unknown>)[key];
   return typeof value === "number" ? value : undefined;
 }
 
@@ -509,7 +515,7 @@ function isThinkingLevel(value: string): value is RuntimeThinkingLevel {
 }
 
 function thinkingData(event: DockEvent, key: string): RuntimeThinkingLevel | undefined {
-  const value = event.data[key];
+  const value = (event.data as unknown as Record<string, unknown>)[key];
   return typeof value === "string" && isThinkingLevel(value) ? value : undefined;
 }
 

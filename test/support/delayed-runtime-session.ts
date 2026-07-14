@@ -5,8 +5,10 @@ import type {
   RuntimeModelState,
   RuntimePromptOptions,
   RuntimeSession,
+  RuntimeSessionInfo,
   RuntimeThinkingLevel,
 } from "../../src/core/runtime-session.js";
+import { RuntimeSettingsWriteError } from "../../src/core/runtime-session.js";
 
 class Deferred<T> {
   readonly promise: Promise<T>;
@@ -25,6 +27,11 @@ export class DelayedRuntimeSession implements RuntimeSession {
   isStreaming = false;
   abortCalls = 0;
   disposeCalls = 0;
+  promptCalls = 0;
+  modelMutationCalls = 0;
+  thinkingMutationCalls = 0;
+  settingsFailure: Error | undefined;
+  sessionCatalog: RuntimeSessionInfo[] = [];
 
   private readonly listeners = new Set<(event: RuntimeEvent) => void>();
   private readonly steeringQueue: string[] = [];
@@ -46,6 +53,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
   }
 
   prompt(text: string, options?: RuntimePromptOptions): Promise<void> {
+    this.promptCalls += 1;
     options?.preflightResult?.(true);
     if (this.isStreaming && options?.streamingBehavior) {
       if (options.streamingBehavior === "steer") this.steeringQueue.push(text);
@@ -68,13 +76,23 @@ export class DelayedRuntimeSession implements RuntimeSession {
     ];
   }
 
+  async listSessions(scope: "cwd" | "all"): Promise<RuntimeSessionInfo[]> {
+    return this.sessionCatalog
+      .filter((session) => scope === "all" || session.cwd === "/fixture/cwd")
+      .map((session) => ({ ...session }));
+  }
+
   async selectModel(provider: string, modelId: string): Promise<RuntimeModelState> {
+    this.modelMutationCalls += 1;
     this.modelState = { ...this.modelState, model: { provider, id: modelId } };
+    this.throwSettingsFailure("model");
     return this.getModelState();
   }
 
-  setThinkingLevel(level: RuntimeThinkingLevel): RuntimeModelState {
+  async setThinkingLevel(level: RuntimeThinkingLevel): Promise<RuntimeModelState> {
+    this.thinkingMutationCalls += 1;
     this.modelState = { ...this.modelState, thinkingLevel: level };
+    this.throwSettingsFailure("thinking");
     return this.getModelState();
   }
 
@@ -137,5 +155,15 @@ export class DelayedRuntimeSession implements RuntimeSession {
       steering: [...this.steeringQueue],
       followUp: [...this.followUpQueue],
     });
+  }
+
+  private throwSettingsFailure(setting: "model" | "thinking"): void {
+    if (!this.settingsFailure) return;
+    throw new RuntimeSettingsWriteError(
+      setting,
+      "write",
+      true,
+      [{ scope: "global", message: this.settingsFailure.message }],
+    );
   }
 }

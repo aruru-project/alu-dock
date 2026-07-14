@@ -50,9 +50,15 @@ test("independent CLI processes reconnect to one delayed host-owned instance", {
       `fixture-pi-${instanceId}`,
     );
 
-    const initialEvents = await runCli(socketPath, ["events", instanceId, "--since", "0"]);
+    const legacyCursorError = await runCliFailure(socketPath, ["events", instanceId, "--since", "1"]);
+    assert.match(legacyCursorError, /Unknown events argument: --since/);
+    const malformedCursorError = await runCliFailure(socketPath, ["events", instanceId, "--cursor", "1"]);
+    assert.match(malformedCursorError, /HOST_EPOCH:RUNTIME_GENERATION:SEQUENCE/);
+
+    const initialEvents = await runCli(socketPath, ["events", instanceId]);
     const initialPage = objectValue(initialEvents.page);
-    const cursor = numberValue(initialPage.latestSequence);
+    const latest = objectValue(initialPage.latest);
+    const cursor = `${stringValue(latest.hostEpoch)}:${numberValue(latest.runtimeGeneration)}:${numberValue(latest.sequence)}`;
     assert.ok((initialPage.events as unknown[]).some((event) => objectValue(event).type === "command.accepted"));
 
     const settledMessage = waitForMessage(child, (message) => message.type === "settled");
@@ -61,7 +67,7 @@ test("independent CLI processes reconnect to one delayed host-owned instance", {
 
     const settledStatus = await runCli(socketPath, ["status", instanceId]);
     assert.equal(objectValue(settledStatus.instance).lastRun, "succeeded");
-    const replay = await runCli(socketPath, ["events", instanceId, "--since", String(cursor)]);
+    const replay = await runCli(socketPath, ["events", instanceId, "--cursor", cursor]);
     assert.ok(
       (objectValue(replay.page).events as unknown[])
         .some((event) => objectValue(event).type === "run.settled"),
@@ -124,6 +130,15 @@ async function runCli(socketPath: string, args: string[]): Promise<Record<string
   const lines = stdout.trim().split("\n").filter(Boolean);
   assert.equal(lines.length, 1, `unexpected CLI output: ${stdout}`);
   return objectValue(JSON.parse(lines[0] as string) as unknown);
+}
+
+async function runCliFailure(socketPath: string, args: string[]): Promise<string> {
+  return new Promise<string>((resolveRun, rejectRun) => {
+    execFile(process.execPath, [cliPath, "--socket", socketPath, ...args], { encoding: "utf8", timeout: 5_000 }, (error, _stdout, stderr) => {
+      if (!error) rejectRun(new Error("CLI unexpectedly succeeded"));
+      else resolveRun(stderr);
+    });
+  });
 }
 
 function waitForMessage(

@@ -1,8 +1,8 @@
 {
   "name": "alu-dock",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
-  "description": "Disposable V0 feasibility host for managed Pi SDK runtimes",
+  "description": "Host-owned Pi SDK runtime dock for SSH workflows",
   "type": "module",
   "bin": {
     "alu-dock": "dist/src/cli.js"

@@ -608,6 +608,7 @@ interface EventDataMap {
     error: string;
     recoverySessionFile?: string;
   };
+  "instance.error": { operationId?: string; source: "event_projection" | "command_background"; error: string; runtimeEventType?: string };
   "command.accepted": { operationId: string; delivery: "prompt" | "steer" | "followUp"; queued: boolean; acceptedAt: string };
   "command.rejected": { operationId: string; reason: string; error: string };
   "command.handled": { operationId: string; kind: "extension_command" | "no_run" };
@@ -640,9 +641,11 @@ interface EventDataMap {
   };
   "session.info_changed": { name?: string };
   "session.metrics_changed": { metrics: SessionMetricsDto };
+  "model.changed": { provider: string; id: string; thinkingLevel: ThinkingLevel; availableThinkingLevels: ThinkingLevel[] };
+  "thinking.changed": { requested: ThinkingLevel; thinkingLevel: ThinkingLevel; availableThinkingLevels: ThinkingLevel[] };
   "resources.reloaded": { resources: ResourceDto[]; diagnostics: DiagnosticDto[] };
   "settings.changed": { key: SettingKey; value: SettingValueMap[SettingKey]; reloadRequired: boolean; hostRestartRequired: boolean };
-  "settings.write_failed": { key: SettingKey; error: string };
+  "settings.write_failed": { key: SettingKey | "model" | "thinking"; error: string };
   "interaction.requested": DialogRequestDto;
   "interaction.resolved": { interactionId: string; method: DialogMethod };
   "interaction.cancelled": { interactionId: string; method: DialogMethod; reason: InteractionCancelReason };
@@ -677,7 +680,7 @@ Numeric counters必须是 non-negative safe integer；timestamp使用 ISO-8601 U
 
 `interaction.respond` 是唯一受限 mutation retry：在**同 hostEpoch、instanceId、runtimeGeneration、leaseToken、interactionId、相同 response**内，可根据短期 tombstone返回 `already_resolved` 而不再次 resolve；跨 epoch/generation禁止 retry。
 
-Host 对 same-host重复 operation ID 保留 bounded receipt cache；catalog记录 creation/active/replacement/stop IDs用于重启后拒绝危险 duplicate，但不承诺保存所有 mutation结果或 exactly-once。
+Host 对 same-host重复 operation ID 保留 bounded receipt cache；同 mutation type/params 的并发或已完成 duplicate 共享原 Promise/result/error且不重复 side effect，type/params 冲突的复用返回 `operation_conflict`。只淘汰最旧 settled receipt，不淘汰 live operation。`instance.catalog` 在阶段 1 仍明确表示当前 Host 的 live registry capability；catalog记录 creation/active/replacement/stop IDs用于重启后拒绝危险 duplicate，但不承诺保存所有 mutation结果或 exactly-once，也不表示阶段 5 的 durable `catalog.v1` 已实现。
 
 ## 17. Error codes 与 code-specific details
 
@@ -687,7 +690,7 @@ Host 对 same-host重复 operation ID 保留 bounded receipt cache；catalog记�
 - framing：`invalid_envelope`、`request_too_large`、`response_too_large`；
 - service/client：`service_unavailable`、`service_start_failed`、`service_start_timeout`、`protocol_incompatible`；
 - catalog：`catalog_corrupt`、`catalog_write_failed`、`effect_unknown`、`mutation_faulted`；
-- instance：`not_found`、`instance_busy`、`instance_not_active`、`instance_host_lost`、`instance_runtime_error`、`instance_not_reopenable`；
+- instance：`not_found`、`instance_busy`、`instance_not_active`、`instance_host_lost`、`instance_runtime_error`、`instance_not_reopenable`、`operation_conflict`；
 - session/config：`session_not_found`、`session_replacement_failed`、`model_not_found`、`invalid_thinking`、`unknown_tool`、`settings_write_failed`、`project_trust_required`；
 - interaction：`interaction_lease_unavailable`、`interaction_not_found`、`interaction_expired`、`interaction_wrong_lease`、`interaction_invalid_response`。
 

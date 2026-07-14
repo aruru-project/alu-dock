@@ -1,395 +1,179 @@
 import { randomUUID } from "node:crypto";
-import { createConnection } from "node:net";
+import { createConnection, type Socket } from "node:net";
 import { resolve } from "node:path";
-
-import type {
-  DeliveryMode,
-  DockEvent,
-  EventPage,
-  InstanceSnapshot,
-} from "../core/managed-instance.js";
+import type { DeliveryMode, DockEvent, EventCursor, EventPage, InstanceSnapshot } from "../core/managed-instance.js";
 import type { RuntimeThinkingLevel } from "../core/runtime-session.js";
+import { DOCK_VERSION } from "../version.js";
 import { encodeJsonLine, JsonLineDecoder } from "./json-lines.js";
 import {
   CONTROL_PROTOCOL_VERSION,
+  type Capability,
+  type ClientHello,
   type ControlRequest,
+  parseModelConfigurationResult,
+  parseThinkingConfigurationResult,
   parseControlEventEnvelope,
   parseControlResponse,
   parseCreateResult,
   parseEventsResult,
+  parseHelloReply,
+  parseHostInfoResult,
+  requiredCapabilities,
   parseListResult,
   parseModelsResult,
-  parseConfigurationResult,
-  parsePingResult,
   parsePromptResult,
+  parseSessionsResult,
   parseStatusResult,
   parseStopResult,
   ProtocolValidationError,
-  type ConfigurationResult,
+  type ModelConfigurationResult,
+  type ThinkingConfigurationResult,
   type EventsResult,
+  type HelloAck,
+  type HostInfoResult,
   type ModelsResult,
   type PingResult,
   type PromptResult,
+  type SessionsResult,
   type StopResult,
 } from "./protocol.js";
 
-type ControlRequestBody<T> = T extends ControlRequest
-  ? Omit<T, "version" | "requestId">
-  : never;
-type AnyControlRequestBody = ControlRequestBody<ControlRequest>;
-type ResultParser<T> = (input: unknown) => T;
+type Params<T extends ControlRequest["type"]> = Extract<ControlRequest,{type:T}>["params"];
+type Parser<T>=(input:unknown)=>T;
+const MAX_PENDING_STREAM_EVENTS=1_000;
 
-const MAX_PENDING_STREAM_EVENTS = 1_000;
-
-export interface EventSubscription {
-  initial: EventsResult;
-  close: () => void;
-  done: Promise<void>;
-}
-
-export interface DockClientOptions {
-  socketPath: string;
-  timeoutMs?: number;
-  requestId?: () => string;
-}
-
+export interface EventSubscription { initial:EventsResult; close:()=>void; done:Promise<void> }
+export interface DockClientOptions { socketPath:string; timeoutMs?:number; requestId?:()=>string; clientId?:string }
 export class ControlClientError extends Error {
-  constructor(readonly code: string, message: string) {
-    super(message);
-    this.name = "ControlClientError";
-  }
+  constructor(readonly code:string,message:string,readonly operationId?:string){super(message);this.name="ControlClientError";}
 }
 
 export class DockClient {
-  readonly socketPath: string;
-  private readonly timeoutMs: number;
-  private readonly createRequestId: () => string;
+  readonly socketPath:string;
+  private readonly timeoutMs:number;
+  private readonly createRequestId:()=>string;
+  private readonly clientId:string;
+  constructor(options:DockClientOptions){this.socketPath=resolve(options.socketPath);this.timeoutMs=options.timeoutMs??30_000;this.createRequestId=options.requestId??randomUUID;this.clientId=options.clientId??randomUUID();}
 
-  constructor(options: DockClientOptions) {
-    this.socketPath = resolve(options.socketPath);
-    this.timeoutMs = options.timeoutMs ?? 30_000;
-    this.createRequestId = options.requestId ?? randomUUID;
-  }
+  async hostInfo():Promise<HostInfoResult>{return this.request("host.info",{},"host.info",parseHostInfoResult);}
+  async ping():Promise<PingResult>{let negotiated:string[]=[];const info=await this.request("host.info",{},"host.info",parseHostInfoResult,(ack)=>{negotiated=[...ack.capabilities];});return {pid:info.host.pid,protocolVersion:2,hostEpoch:info.host.hostEpoch,capabilities:negotiated};}
+  async create(cwd:string,name?:string,operationId=this.createRequestId()):Promise<InstanceSnapshot>{const result=await this.request("instance.create",{operationId,cwd,name},"instance.catalog",parseCreateResult);return result.instance;}
+  async list():Promise<InstanceSnapshot[]>{return (await this.request("instance.list",{includeTerminal:true},"instance.catalog",parseListResult)).instances;}
+  async status(instanceId:string):Promise<InstanceSnapshot>{return (await this.request("instance.get",{instanceId},"instance.catalog",parseStatusResult)).instance;}
+  async events(instanceId:string,since?:EventCursor):Promise<{instance:InstanceSnapshot;page:EventPage&{epochChanged:boolean;generationChanged:boolean}}>{const result=await this.request("instance.attach",{instanceId,since,follow:false,controller:"observe"},"events.follow",parseEventsResult);return {instance:result.instance,page:result.page};}
+  prompt(instanceId:string,message:string,delivery:DeliveryMode="auto",operationId=this.createRequestId()):Promise<PromptResult>{return this.request("command.submit",{operationId,instanceId,message,delivery},"session.core",parsePromptResult);}
+  models(instanceId:string):Promise<ModelsResult>{return this.request("model.list",{instanceId},"models.v1",parseModelsResult);}
+  setModel(instanceId:string,provider:string,modelId:string,operationId=this.createRequestId()):Promise<ModelConfigurationResult>{return this.request("model.set",{operationId,instanceId,provider,modelId},"models.v1",parseModelConfigurationResult);}
+  setThinking(instanceId:string,level:RuntimeThinkingLevel,operationId=this.createRequestId()):Promise<ThinkingConfigurationResult>{return this.request("thinking.set",{operationId,instanceId,level},"models.v1",parseThinkingConfigurationResult);}
+  sessions(instanceId:string,scope:"cwd"|"all"):Promise<SessionsResult>{return this.request("session.list",{instanceId,scope},"session.core",parseSessionsResult);}
+  stop(instanceId:string,operationId=this.createRequestId()):Promise<StopResult>{return this.request("instance.stop",{operationId,instanceId},"instance.catalog",parseStopResult);}
 
-  async ping(): Promise<PingResult> {
-    const result = await this.request({ type: "ping" }, parsePingResult);
-    if (result.protocolVersion !== CONTROL_PROTOCOL_VERSION) {
-      throw new ControlClientError("invalid_response", `Host reported unsupported protocol ${result.protocolVersion}`);
-    }
-    return result;
-  }
-
-  async create(cwd: string, name?: string): Promise<InstanceSnapshot> {
-    const result = await this.request({ type: "create", cwd, name }, parseCreateResult);
-    return result.instance;
-  }
-
-  async list(): Promise<InstanceSnapshot[]> {
-    const result = await this.request({ type: "list" }, parseListResult);
-    return result.instances;
-  }
-
-  async status(instanceId: string): Promise<InstanceSnapshot> {
-    const result = await this.request({ type: "status", instanceId }, parseStatusResult);
-    return result.instance;
-  }
-
-  async events(instanceId: string, since = 0): Promise<{ instance: InstanceSnapshot; page: EventPage }> {
-    const result = await this.request(
-      { type: "events", instanceId, since, follow: false },
-      parseEventsResult,
-    );
-    return { instance: result.instance, page: result.page };
-  }
-
-  prompt(
-    instanceId: string,
-    message: string,
-    delivery: DeliveryMode = "auto",
-  ): Promise<PromptResult> {
-    return this.request({ type: "prompt", instanceId, message, delivery }, parsePromptResult);
-  }
-
-  models(instanceId: string): Promise<ModelsResult> {
-    return this.request({ type: "models", instanceId }, parseModelsResult);
-  }
-
-  setModel(instanceId: string, provider: string, modelId: string): Promise<ConfigurationResult> {
-    return this.request({ type: "set_model", instanceId, provider, modelId }, parseConfigurationResult);
-  }
-
-  setThinking(instanceId: string, level: RuntimeThinkingLevel): Promise<ConfigurationResult> {
-    return this.request({ type: "set_thinking", instanceId, level }, parseConfigurationResult);
-  }
-
-  stop(instanceId: string): Promise<StopResult> {
-    return this.request({ type: "stop", instanceId }, parseStopResult);
-  }
-
-  streamEvents(
-    instanceId: string,
-    options: { since?: number; onEvent: (event: DockEvent) => void },
-  ): Promise<EventSubscription> {
-    const requestId = this.createRequestId();
-    const request: ControlRequest = {
-      version: 1,
-      requestId,
-      type: "events",
-      instanceId,
-      since: options.since,
-      follow: true,
-    };
-    const socket = createConnection(this.socketPath);
-    const decoder = new JsonLineDecoder();
-    let responseReceived = false;
-    let initialSettled = false;
-    let doneSettled = false;
-    let closeRequested = false;
-    let eventCallbacksReady = false;
-    let pendingEvents: DockEvent[] = [];
-    let resolveInitial!: (subscription: EventSubscription) => void;
-    let rejectInitial!: (error: unknown) => void;
-    let resolveDone!: () => void;
-    let rejectDone!: (error: unknown) => void;
-
-    const done = new Promise<void>((resolveDonePromise, rejectDonePromise) => {
-      resolveDone = resolveDonePromise;
-      rejectDone = rejectDonePromise;
-    });
-    // Consumers often only await the initial response. Mark done as observed so
-    // a later transport error does not become an unhandled rejection.
-    void done.catch(() => {});
-    const initial = new Promise<EventSubscription>((resolvePromise, rejectPromise) => {
-      resolveInitial = resolvePromise;
-      rejectInitial = rejectPromise;
-    });
-
-    const settleDone = (error?: unknown): void => {
-      if (doneSettled) return;
-      doneSettled = true;
-      if (error === undefined) resolveDone();
-      else rejectDone(error);
-    };
-    const fail = (error: unknown): void => {
-      clearTimeout(timeout);
-      const normalized = normalizeClientError(error);
-      if (!initialSettled) {
-        initialSettled = true;
-        rejectInitial(normalized);
-      }
-      pendingEvents = [];
-      settleDone(normalized);
-      socket.destroy();
-    };
-    const timeout = setTimeout(() => {
-      fail(new ControlClientError("timeout", `Control request timed out after ${this.timeoutMs}ms`));
-    }, this.timeoutMs);
-
-    const consume = (line: string): void => {
-      if (line.length === 0) return;
-      let raw: unknown;
-      try {
-        raw = JSON.parse(line) as unknown;
-      } catch {
-        fail(new ControlClientError("invalid_response", "Host returned invalid JSON"));
-        return;
-      }
-      const kind = envelopeKind(raw);
-
-      try {
-        if (kind === "response") {
-          if (responseReceived) throw new ProtocolValidationError("invalid_response", "Host returned duplicate responses");
-          const response = parseControlResponse(raw, requestId);
-          if (!response.ok) {
-            fail(new ControlClientError(response.error.code, response.error.message));
-            return;
-          }
-          const result = parseEventsResult(response.result);
-          responseReceived = true;
-          clearTimeout(timeout);
-          if (!initialSettled) {
-            initialSettled = true;
-            resolveInitial({
-              initial: result,
-              close: () => {
-                closeRequested = true;
-                pendingEvents = [];
-                socket.destroy();
-              },
-              done,
-            });
-            // Promise reactions queued by resolveInitial run before this flush,
-            // so consumers can publish the initial snapshot before live events.
-            queueMicrotask(() => {
-              if (closeRequested || doneSettled) return;
-              eventCallbacksReady = true;
-              const events = pendingEvents;
-              pendingEvents = [];
-              for (const event of events) {
-                try {
-                  options.onEvent(event);
-                } catch (error) {
-                  fail(error);
-                  return;
-                }
-              }
-            });
-          }
-          return;
-        }
-
-        if (kind === "event") {
-          if (!responseReceived) {
-            throw new ProtocolValidationError("invalid_response", "Host sent an event before the initial response");
-          }
-          const eventEnvelope = parseControlEventEnvelope(raw, requestId);
-          if (!eventCallbacksReady) {
-            if (pendingEvents.length >= MAX_PENDING_STREAM_EVENTS) {
-              throw new ProtocolValidationError("invalid_response", "Too many events arrived before initial delivery");
-            }
-            pendingEvents.push(eventEnvelope.event);
-          } else {
-            options.onEvent(eventEnvelope.event);
-          }
-          return;
-        }
-
-        throw new ProtocolValidationError("invalid_response", "Host returned an unknown envelope kind");
-      } catch (error) {
-        fail(error);
-      }
-    };
-
-    socket.once("connect", () => socket.write(encodeJsonLine(request)));
-    socket.on("data", (chunk: Buffer) => {
-      try {
-        for (const line of decoder.push(chunk)) consume(line);
-      } catch (error) {
-        fail(error);
-      }
-    });
-    socket.once("end", () => {
-      try {
-        decoder.finish();
-      } catch (error) {
-        fail(error);
-      }
-    });
-    socket.once("error", (error) => fail(transportError(error)));
-    socket.once("close", (hadError) => {
-      clearTimeout(timeout);
-      if (!initialSettled) {
-        initialSettled = true;
-        const error = new ControlClientError("connection_closed", "Host closed before responding");
-        rejectInitial(error);
-        settleDone(error);
-        return;
-      }
-      if (!doneSettled) {
-        if (closeRequested) {
-          settleDone();
-        } else {
-          const message = hadError
-            ? "Event stream closed after a transport error"
-            : "Host closed the event stream unexpectedly";
-          settleDone(new ControlClientError("connection_closed", message));
-        }
-      }
-    });
-
+  async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void}):Promise<EventSubscription>{
+    const since=options.since;const helloId=this.createRequestId(),requestId=this.createRequestId();
+    const request:ControlRequest={kind:"request",version:2,requestId,type:"instance.attach",params:{instanceId,since,follow:true,controller:"observe"}};
+    const socket=createConnection(this.socketPath),decoder=new JsonLineDecoder();let phase:"hello"|"response"|"events"="hello",hostEpoch="",initialSettled=false,doneSettled=false,closeRequested=false,callbacksReady=false,pending:DockEvent[]=[],runtimeGeneration:number|undefined,lastSequence=-1;
+    let resolveInitial!:(x:EventSubscription)=>void,rejectInitial!:(e:unknown)=>void,resolveDone!:()=>void,rejectDone!:(e:unknown)=>void;
+    const done=new Promise<void>((r,j)=>{resolveDone=r;rejectDone=j;});void done.catch(()=>{});const initial=new Promise<EventSubscription>((r,j)=>{resolveInitial=r;rejectInitial=j;});
+    const settleDone=(e?:unknown)=>{if(doneSettled)return;doneSettled=true;e===undefined?resolveDone():rejectDone(e);};
+    const fail=(e:unknown)=>{clearTimeout(timeout);const error=normalizeClientError(e);if(!initialSettled){initialSettled=true;rejectInitial(error);}pending=[];settleDone(error);socket.destroy();};
+    const timeout=setTimeout(()=>fail(new ControlClientError("timeout",`Control request timed out after ${this.timeoutMs}ms`)),this.timeoutMs);
+    const consume=(line:string)=>{if(!line)return;let raw:unknown;try{raw=JSON.parse(line);}catch{fail(new ControlClientError("invalid_response","Host returned invalid JSON"));return;}try{
+      if(phase==="hello"){const ack=parseHelloReply(raw,helloId);hostEpoch=ack.host.hostEpoch;for(const required of requiredCapabilities("events.follow")){if(!ack.capabilities.includes(required))throw new ProtocolValidationError("protocol_incompatible",`Host lacks ${required}`);}phase="response";socket.write(encodeJsonLine(request));return;}
+      if(phase==="response"){const response=parseControlResponse(raw,requestId,hostEpoch);if(!response.ok){fail(new ControlClientError(response.error.code,response.error.message));return;}const result=parseEventsResult(response.result);if(result.instance.id!==instanceId||result.page.earliest.hostEpoch!==hostEpoch||result.page.latest.hostEpoch!==hostEpoch||(result.instance.ownerHostEpoch!==undefined&&result.instance.ownerHostEpoch!==hostEpoch))throw new ProtocolValidationError("invalid_response","Attach result does not match negotiated cursor domain");runtimeGeneration=result.instance.runtimeGeneration;lastSequence=result.page.latest.sequence;phase="events";clearTimeout(timeout);initialSettled=true;resolveInitial({initial:result,close:()=>{closeRequested=true;pending=[];socket.destroy();},done});setImmediate(()=>{if(closeRequested||doneSettled)return;callbacksReady=true;const queued=pending;pending=[];for(const event of queued){try{options.onEvent(event);}catch(e){fail(e);return;}}});return;}
+      const event=parseControlEventEnvelope(raw,requestId,hostEpoch).event;
+      if(event.instanceId!==instanceId||event.runtimeGeneration!==runtimeGeneration||event.sequence<=lastSequence)throw new ProtocolValidationError("invalid_response","Live event cursor domain/order is invalid");
+      lastSequence=event.sequence;
+      if(!callbacksReady){if(pending.length>=MAX_PENDING_STREAM_EVENTS)throw new ProtocolValidationError("invalid_response","Too many pending events");pending.push(event);}else options.onEvent(event);
+    }catch(e){fail(e);}};
+    socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,requiredCapabilities("events.follow")))));socket.on("data",(chunk:Buffer)=>{try{for(const line of decoder.push(chunk))consume(line);}catch(e){fail(e);}});socket.once("end",()=>{try{decoder.finish();}catch(e){fail(e);}});socket.once("error",e=>fail(transportError(e)));socket.once("close",hadError=>{clearTimeout(timeout);if(!initialSettled){const e=new ControlClientError("connection_closed","Host closed before responding");initialSettled=true;rejectInitial(e);settleDone(e);}else if(!doneSettled){closeRequested?settleDone():settleDone(new ControlClientError("connection_closed",hadError?"Event stream closed after a transport error":"Host closed the event stream unexpectedly"));}});
     return initial;
   }
 
-  private request<T>(body: AnyControlRequestBody, parseResult: ResultParser<T>): Promise<T> {
-    const requestId = this.createRequestId();
-    const request = {
-      ...body,
-      version: 1,
-      requestId,
-    } as ControlRequest;
-
-    return new Promise<T>((resolveRequest, rejectRequest) => {
-      const socket = createConnection(this.socketPath);
-      const decoder = new JsonLineDecoder();
-      let settled = false;
-      const timeout = setTimeout(() => {
-        finish(new ControlClientError("timeout", `Control request timed out after ${this.timeoutMs}ms`));
-      }, this.timeoutMs);
-
-      const finish = (error?: unknown, result?: T): void => {
-        if (settled) return;
-        settled = true;
+  private hello(requestId:string,capabilities:string[]):ClientHello{return {kind:"hello",requestId,versions:[2],client:{name:"alu-dock-client",version:DOCK_VERSION,clientId:this.clientId},requiredCapabilities:capabilities};}
+  private request<TType extends ControlRequest["type"],T>(type:TType,params:Params<TType>,capability:Capability,parse:Parser<T>,onHello?:(ack:HelloAck)=>void):Promise<T>{
+    const helloId=this.createRequestId();
+    const requestId=this.createRequestId();
+    const request={kind:"request",version:2,requestId,type,params} as Extract<ControlRequest,{type:TType}>;
+    const operationId = "operationId" in params && typeof params.operationId === "string" ? params.operationId : undefined;
+    return new Promise<T>((resolveRequest,rejectRequest)=>{
+      const socket=createConnection(this.socketPath);
+      const decoder=new JsonLineDecoder();
+      let phase:"hello"|"response"="hello";
+      let hostEpoch="";
+      let settled=false;
+      let requestSent=false;
+      const timeout=setTimeout(()=>{
+        if(requestSent&&operationId) finish(new ControlClientError("effect_unknown",`Operation ${operationId} timed out after it was sent; query current state before retrying`,operationId));
+        else finish(new ControlClientError("timeout",`Control request timed out after ${this.timeoutMs}ms`));
+      },this.timeoutMs);
+      const finish=(error?:unknown,result?:T):void=>{
+        if(settled)return;
+        settled=true;
         clearTimeout(timeout);
         socket.destroy();
-        if (error !== undefined) rejectRequest(normalizeClientError(error));
-        else resolveRequest(result as T);
+        if(error===undefined)resolveRequest(result as T);
+        else rejectRequest(normalizeClientError(error));
       };
-
-      const consume = (line: string): void => {
-        if (line.length === 0) return;
-        let raw: unknown;
-        try {
-          raw = JSON.parse(line) as unknown;
-        } catch {
-          finish(new ControlClientError("invalid_response", "Host returned invalid JSON"));
-          return;
-        }
-        if (envelopeKind(raw) !== "response") {
-          finish(new ControlClientError("invalid_response", "Host returned an unexpected envelope"));
-          return;
-        }
-        try {
-          const response = parseControlResponse(raw, requestId);
-          if (!response.ok) {
-            finish(new ControlClientError(response.error.code, response.error.message));
-          } else {
-            finish(undefined, parseResult(response.result));
+      const finishTransport=(error:ControlClientError):void=>{
+        if(requestSent&&operationId){
+          finish(new ControlClientError("effect_unknown",`Transport failed after operation ${operationId} was sent; query current state before retrying`,operationId));
+        }else finish(error);
+      };
+      const consume=(line:string):void=>{
+        if(!line)return;
+        let raw:unknown;
+        try{raw=JSON.parse(line);}catch{finish(new ControlClientError("invalid_response","Host returned invalid JSON"));return;}
+        try{
+          if(phase==="hello"){
+            const ack=parseHelloReply(raw,helloId);
+            hostEpoch=ack.host.hostEpoch;
+            for(const required of requiredCapabilities(capability)){
+              if(!ack.capabilities.includes(required))throw new ProtocolValidationError("protocol_incompatible",`Host lacks ${required}`);
+            }
+            onHello?.(ack);
+            phase="response";
+            socket.write(encodeJsonLine(request));
+            requestSent=true;
+            return;
           }
-        } catch (error) {
-          finish(error);
-        }
+          const response=parseControlResponse(raw,requestId,hostEpoch);
+          if(!response.ok)finish(new ControlClientError(response.error.code,response.error.message,operationId));
+          else {
+            const result=parse(response.result);
+            validateRequestResult(type,params,result,hostEpoch);
+            finish(undefined,result);
+          }
+        }catch(error){finish(error);}
       };
-
-      socket.once("connect", () => socket.write(encodeJsonLine(request)));
-      socket.on("data", (chunk: Buffer) => {
-        try {
-          for (const line of decoder.push(chunk)) consume(line);
-        } catch (error) {
-          finish(error);
-        }
-      });
-      socket.once("end", () => {
-        try {
-          decoder.finish();
-        } catch (error) {
-          finish(error);
-        }
-      });
-      socket.once("error", (error) => finish(transportError(error)));
-      socket.once("close", () => {
-        if (!settled) finish(new ControlClientError("connection_closed", "Host closed before responding"));
-      });
+      socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,requiredCapabilities(capability)))));
+      socket.on("data",(chunk:Buffer)=>{try{for(const line of decoder.push(chunk))consume(line);}catch(error){finish(error);}});
+      socket.once("end",()=>{try{decoder.finish();}catch(error){finish(error);}});
+      socket.once("error",error=>finishTransport(transportError(error)));
+      socket.once("close",()=>{if(!settled)finishTransport(new ControlClientError("connection_closed","Host closed before responding"));});
     });
   }
 }
-
-function envelopeKind(value: unknown): unknown {
-  return value !== null && typeof value === "object" && !Array.isArray(value)
-    ? (value as Record<string, unknown>).kind
-    : undefined;
-}
-
-function normalizeClientError(error: unknown): ControlClientError {
-  if (error instanceof ControlClientError) return error;
-  if (error instanceof ProtocolValidationError) {
-    return new ControlClientError("invalid_response", error.message);
+function validateRequestResult(type:ControlRequest["type"],params:ControlRequest["params"],result:unknown,hostEpoch:string):void{
+  if(result===null||typeof result!=="object")return;
+  const record=result as Record<string,unknown>;
+  if(type==="host.info"){
+    const host=(record.host??null) as Record<string,unknown>|null;
+    if(!host||host.hostEpoch!==hostEpoch)throw new ProtocolValidationError("invalid_response","host.info identity does not match negotiated Host epoch");
   }
-  if (error instanceof Error) return new ControlClientError("invalid_response", error.message);
-  return new ControlClientError("invalid_response", String(error));
+  const snapshots:InstanceSnapshot[]=[];
+  if(record.instance&&typeof record.instance==="object")snapshots.push(record.instance as InstanceSnapshot);
+  if(Array.isArray(record.instances))snapshots.push(...record.instances as InstanceSnapshot[]);
+  for(const snapshot of snapshots){if((snapshot.lifecycle==="active"||snapshot.lifecycle==="stopping")&&snapshot.ownerHostEpoch!==hostEpoch)throw new ProtocolValidationError("invalid_response","Instance owner does not match negotiated Host epoch");}
+  if("instanceId" in params&&typeof params.instanceId==="string"&&snapshots[0]&&snapshots[0].id!==params.instanceId)throw new ProtocolValidationError("invalid_response","Result instance does not match request instanceId");
+  if(type==="instance.attach"){
+    const page=record.page as {earliest?:EventCursor;latest?:EventCursor}|undefined;
+    if(!page||page.earliest?.hostEpoch!==hostEpoch||page.latest?.hostEpoch!==hostEpoch)throw new ProtocolValidationError("invalid_response","Attach cursors do not match negotiated Host epoch");
+  }
+  if("operationId" in params&&typeof params.operationId==="string"){
+    const receipt=record.receipt as {operationId?:unknown}|undefined;
+    if(receipt&&receipt.operationId!==params.operationId)throw new ProtocolValidationError("invalid_response","Receipt operationId does not match request operationId");
+    if(type==="instance.create"&&snapshots[0]?.creationOperationId!==params.operationId)throw new ProtocolValidationError("invalid_response","Created instance operationId does not match request operationId");
+  }
 }
-
-function transportError(error: Error): ControlClientError {
-  const code = (error as NodeJS.ErrnoException).code;
-  const prefix = code ? `${code}: ` : "";
-  return new ControlClientError("connection_error", `${prefix}${error.message}`);
-}
+function normalizeClientError(e:unknown):ControlClientError{if(e instanceof ControlClientError)return e;if(e instanceof ProtocolValidationError)return new ControlClientError(e.code==="unsupported_protocol"?"protocol_incompatible":e.code,e.message);if(e instanceof Error)return new ControlClientError("invalid_response",e.message);return new ControlClientError("invalid_response",String(e));}
+function transportError(e:Error):ControlClientError{const code=(e as NodeJS.ErrnoException).code;return new ControlClientError("connection_error",`${code?`${code}: `:""}${e.message}`);}

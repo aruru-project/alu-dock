@@ -12,10 +12,10 @@ const startWithDelayedRun = mode !== "--idle";
 const sessions = new Map<string, DelayedRuntimeSession>();
 const instances = new Map<string, ManagedInstance>();
 let sequence = 0;
-const registry = new DockRegistry(async ({ id, cwd, name }) => {
+const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, name }) => {
   if (cwd !== allowedCwd) throw new Error(`unexpected fixture cwd: ${cwd}`);
   const session = new DelayedRuntimeSession(`fixture-pi-${id}`);
-  const instance = new ManagedInstance({ id, cwd, name, session, eventCapacity: 100 });
+  const instance = new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, name, session, eventCapacity: 100 });
   sessions.set(id, session);
   instances.set(id, instance);
   if (startWithDelayedRun) await instance.submit("deterministic delayed task");

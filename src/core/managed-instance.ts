@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { RuntimeSettingsWriteError } from "./runtime-session.js";
 import type {
   RuntimeEvent,
   RuntimeModelInfo,
@@ -8,9 +9,9 @@ import type {
   RuntimeThinkingLevel,
 } from "./runtime-session.js";
 
-export type InstanceLifecycle = "active" | "stopping" | "stopped";
-export type InstanceExecution = "idle" | "running" | "failed";
-export type LastRunResult = "never" | "succeeded" | "failed" | "aborted";
+export type InstanceLifecycle = "active" | "stopping" | "stopped" | "host_lost" | "runtime_error";
+export type InstanceExecution = "idle" | "running" | "failed" | "unavailable";
+export type LastRunResult = "never" | "succeeded" | "failed" | "aborted" | "interrupted";
 export type DeliveryMode = "auto" | "prompt" | "steer" | "followUp";
 
 export interface ExecutorIdentity {
@@ -21,55 +22,154 @@ export interface ExecutorIdentity {
   model?: {
     provider: string;
     id: string;
+    name?: string;
   };
   thinkingLevel?: RuntimeThinkingLevel;
 }
 
+export type JsonScalar = string | number | boolean | null;
+export type JsonValue = JsonScalar | JsonValue[] | { [key: string]: JsonValue };
+export type JsonObject = { [key: string]: JsonValue };
+
+export type ContentBlockDto =
+  | { type: "text"; text: string }
+  | { type: "thinking"; text: string }
+  | { type: "tool_call"; toolCallId: string; toolName: string; args: JsonObject; omittedFields?: string[] }
+  | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; omittedFields?: string[] }
+  | { type: "omitted"; kind: "image" | "binary"; description: string };
+
+export interface PendingDto { steering: number; followUp: number; total: number }
+export interface SessionMetricsDto {
+  messages: { user: number; assistant: number; toolCalls: number; toolResults: number; total: number };
+  tokens: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+  cost: number;
+  context?: { tokens: number | null; contextWindow: number; percent: number | null };
+}
+export interface SourceDto { kind: "built-in" | "extension" | "skill" | "prompt"; path?: string; package?: string }
+export interface ResourceDto { kind: "extension" | "skill" | "prompt" | "context"; name: string; path?: string; source?: SourceDto }
+export interface DiagnosticDto { severity: "info" | "warning" | "error"; message: string; source?: string }
+export interface SessionDto { sessionId: string; sessionFile: string; name?: string; cwd: string; updatedAt?: string }
+export interface SettingValueMap {
+  autoCompaction: boolean; autoRetry: boolean; enableSkillCommands: boolean; hideThinking: boolean; showCacheMissNotices: boolean;
+  showHardwareCursor: boolean; clearOnShrink: boolean; showTerminalProgress: boolean; quietStartup: boolean;
+  steeringMode: "all" | "one-at-a-time"; followUpMode: "all" | "one-at-a-time";
+  transport: "auto" | "sse" | "websocket" | "websocket-cached"; doubleEscapeAction: "fork" | "tree" | "none";
+  treeFilterMode: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; defaultProjectTrust: "ask" | "always" | "never";
+  httpIdleTimeoutMs: number; editorPaddingX: number; outputPad: 0 | 1; autocompleteMaxVisible: number;
+  warnings: { anthropicExtraUsage?: boolean };
+}
+export type SettingsChangedData = { [K in keyof SettingValueMap]: { key: K; value: SettingValueMap[K]; reloadRequired: boolean; hostRestartRequired: boolean } }[keyof SettingValueMap];
+export interface EventDataMap {
+  "instance.created": { cwd: string; name?: string; executor: ExecutorIdentity };
+  "instance.state_changed": { reason: string; lifecycle: InstanceLifecycle; execution: InstanceExecution; lastRun: LastRunResult; pending: PendingDto; activeCommandId?: string; lastError?: string };
+  "instance.reopened": { previousLifecycle: "host_lost" | "runtime_error"; sessionFile: string; runtimeGeneration: number };
+  "instance.stopped": { cleanupErrors: string[] };
+  "instance.runtime_error": { operationId: string; kind: "create" | "new" | "switch" | "fork" | "clone" | "reload" | "reopen"; error: string; recoverySessionFile?: string };
+  "instance.error": { operationId?: string; source: "event_projection" | "command_background"; error: string; runtimeEventType?: string };
+  "command.accepted": { operationId: string; delivery: "prompt" | "steer" | "followUp"; queued: boolean; acceptedAt: string };
+  "command.rejected": { operationId: string; reason: string; error: string };
+  "command.handled": { operationId: string; kind: "extension_command" | "no_run" };
+  "run.started": { operationId: string };
+  "run.retry_started": { attempt: number; maxAttempts: number; delayMs: number; error: string };
+  "run.retry_completed": { success: boolean; attempt: number; error?: string };
+  "run.settled": { operationId?: string; result: LastRunResult; stopReason?: string; error?: string };
+  "message.submitted": { operationId: string; messageId: string; role: "user"; text: string };
+  "message.delta": { messageId: string; block: "text" | "thinking"; delta: string };
+  "message.completed": { messageId: string; role: "user" | "assistant" | "tool" | "system"; content: ContentBlockDto[]; stopReason?: string; error?: string };
+  "tool.started": { toolCallId: string; toolName: string; args: JsonObject; omittedFields?: string[] };
+  "tool.args_updated": { toolCallId: string; args: JsonObject; omittedFields?: string[] };
+  "tool.output_updated": { toolCallId: string; text: string };
+  "tool.completed": { toolCallId: string; toolName: string; text: string; isError: boolean; omittedFields?: string[] };
+  "queue.changed": PendingDto;
+  "queue.cleared": PendingDto;
+  "compaction.started": { reason: "manual" | "threshold" | "overflow" };
+  "compaction.completed": { reason: "manual" | "threshold" | "overflow"; aborted: boolean; willRetry: boolean; error?: string };
+  "session.replaced": { reason: "new" | "resume" | "fork" | "reload"; previousSessionFile?: string; sessionFile?: string; runtimeGeneration: number };
+  "session.info_changed": { name?: string };
+  "session.metrics_changed": { metrics: SessionMetricsDto };
+  "model.changed": { provider: string; id: string; thinkingLevel: RuntimeThinkingLevel; availableThinkingLevels: RuntimeThinkingLevel[] };
+  "thinking.changed": { requested: RuntimeThinkingLevel; thinkingLevel: RuntimeThinkingLevel; availableThinkingLevels: RuntimeThinkingLevel[] };
+  "resources.reloaded": { resources: ResourceDto[]; diagnostics: DiagnosticDto[] };
+  "settings.changed": SettingsChangedData;
+  "settings.write_failed": { key: keyof SettingValueMap | "model" | "thinking"; error: string };
+  "interaction.requested":
+    | { interactionId: string; method: "select"; title: string; options: string[]; issuedAt: string; expiresAt: string }
+    | { interactionId: string; method: "confirm"; title: string; message: string; issuedAt: string; expiresAt: string }
+    | { interactionId: string; method: "input"; title: string; placeholder?: string; issuedAt: string; expiresAt: string }
+    | { interactionId: string; method: "editor"; title: string; prefill?: string; issuedAt: string; expiresAt: string };
+  "interaction.resolved": { interactionId: string; method: "select" | "confirm" | "input" | "editor" };
+  "interaction.cancelled": { interactionId: string; method: "select" | "confirm" | "input" | "editor"; reason: "user" | "timeout" | "signal" | "detach" | "replacement" | "host_draining" | "overflow" };
+  "extension.notification": { message: string; level: "info" | "warning" | "error" };
+  "extension.status_changed": { key: string; text?: string };
+  "extension.widget_changed": { key: string; lines?: string[]; placement?: "aboveEditor" | "belowEditor" };
+  "extension.error": { source?: string; event?: string; error: string };
+}
+
+export interface EventCursor {
+  hostEpoch: string;
+  instanceId: string;
+  runtimeGeneration: number;
+  sequence: number;
+}
+
 export interface InstanceSnapshot {
   id: string;
+  creationOperationId: string;
   name?: string;
   cwd: string;
   lifecycle: InstanceLifecycle;
   execution: InstanceExecution;
   lastRun: LastRunResult;
+  reopenable: boolean;
+  runtimeGeneration: number;
+  ownerHostEpoch?: string;
+  interruption?: { reason: "host_crash" | "host_shutdown" | "replacement_failed"; at: string };
   pending: {
     steering: number;
     followUp: number;
     total: number;
   };
   executor: ExecutorIdentity;
+  metrics?: SessionMetricsDto;
+  extensionStatus: Record<string, string>;
+  activeInteraction?: { id: string; method: "select" | "confirm" | "input" | "editor"; expiresAt: string };
   activeCommandId?: string;
   lastError?: string;
   createdAt: string;
   updatedAt: string;
-  latestEventSequence: number;
+  eventCursor: EventCursor;
 }
 
-export interface DockEvent {
-  sequence: number;
-  instanceId: string;
-  occurredAt: string;
-  type: string;
-  data: Record<string, unknown>;
-}
+export type DockEvent = {
+  [K in keyof EventDataMap]: {
+    scope: "instance";
+    sequence: number;
+    instanceId: string;
+    runtimeGeneration: number;
+    occurredAt: string;
+    type: K;
+    data: EventDataMap[K];
+  }
+}[keyof EventDataMap];
 
 export interface EventPage {
   events: DockEvent[];
-  earliestSequence: number;
-  latestSequence: number;
+  earliest: EventCursor;
+  latest: EventCursor;
   truncated: boolean;
 }
 
 export interface CommandReceipt {
   accepted: true;
   instanceId: string;
-  commandId: string;
+  operationId: string;
   delivery: Exclude<DeliveryMode, "auto">;
   queued: boolean;
   acceptedAt: string;
 }
 
 export interface StopReceipt {
+  operationId: string;
   instanceId: string;
   stopped: true;
   alreadyStopped: boolean;
@@ -85,6 +185,8 @@ export interface ManagedInstanceOptions {
   eventCapacity?: number;
   now?: () => Date;
   commandId?: () => string;
+  creationOperationId?: string;
+  hostEpoch?: string;
 }
 
 interface AssistantOutcome {
@@ -142,6 +244,9 @@ export class InstanceBusyError extends Error {
 
 export class ManagedInstance {
   readonly id: string;
+  readonly creationOperationId: string;
+  readonly hostEpoch: string;
+  readonly runtimeGeneration = 1;
   readonly name: string | undefined;
   readonly cwd: string;
   readonly createdAt: string;
@@ -168,6 +273,8 @@ export class ManagedInstance {
 
   constructor(options: ManagedInstanceOptions) {
     this.id = options.id ?? randomUUID();
+    this.creationOperationId = options.creationOperationId ?? randomUUID();
+    this.hostEpoch = options.hostEpoch ?? randomUUID();
     this.name = options.name;
     this.cwd = options.cwd;
     this.session = options.session;
@@ -189,21 +296,21 @@ export class ManagedInstance {
       updatedAt: createdAt,
     };
     this.executorIdentity = {
-      kind: options.executor?.kind ?? "pi-sdk",
-      version: options.executor?.version,
-      model: options.executor?.model ? { ...options.executor.model } : undefined,
+      kind: truncate(options.executor?.kind ?? "pi-sdk", 128) ?? "pi-sdk",
+      version: truncate(options.executor?.version, 128),
+      model: options.executor?.model ? { provider: truncate(options.executor.model.provider, 256) ?? "unknown", id: truncate(options.executor.model.id, 512) ?? "unknown", name: truncate(options.executor.model.name, 256) } : undefined,
       thinkingLevel: options.executor?.thinkingLevel,
-      piSessionId: this.session.sessionId,
-      sessionFile: this.session.sessionFile,
+      piSessionId: truncate(this.session.sessionId, 128) ?? "unknown",
+      sessionFile: truncate(this.session.sessionFile, 16_384),
     };
 
     this.unsubscribeRuntime = this.session.subscribe((event) => {
       try {
         this.handleRuntimeEvent(event);
       } catch (error) {
-        this.appendEvent("host.event_mapping_failed", {
-          error: errorMessage(error),
-          runtimeEventType: event.type,
+        this.appendEvent("instance.error", { source: "event_projection",
+          error: safeWireText(errorMessage(error), 2_048, "Sensitive projection error omitted"),
+          runtimeEventType: truncate(event.type, 128),
         });
       }
     });
@@ -218,11 +325,15 @@ export class ManagedInstance {
   snapshot(): InstanceSnapshot {
     return {
       id: this.id,
+      creationOperationId: this.creationOperationId,
       name: this.name,
       cwd: this.cwd,
       lifecycle: this.state.lifecycle,
       execution: this.state.execution,
       lastRun: this.state.lastRun,
+      reopenable: false,
+      runtimeGeneration: this.runtimeGeneration,
+      ownerHostEpoch: this.state.lifecycle === "active" || this.state.lifecycle === "stopping" ? this.hostEpoch : undefined,
       pending: {
         steering: this.state.pendingSteering,
         followUp: this.state.pendingFollowUp,
@@ -232,23 +343,25 @@ export class ManagedInstance {
         ...this.executorIdentity,
         model: this.executorIdentity.model ? { ...this.executorIdentity.model } : undefined,
       },
+      extensionStatus: {},
       activeCommandId: this.state.activeCommandId,
       lastError: this.state.lastError,
       createdAt: this.createdAt,
       updatedAt: this.state.updatedAt,
-      latestEventSequence: this.nextEventSequence - 1,
+      eventCursor: this.cursor(this.nextEventSequence - 1),
     };
   }
 
-  eventsSince(sequence = 0): EventPage {
+  eventsSince(since: EventCursor | number = 0): EventPage {
+    const sequence = typeof since === "number" ? since : since.sequence;
     const earliestSequence = this.eventLog[0]?.sequence ?? this.nextEventSequence;
     const latestSequence = this.nextEventSequence - 1;
     return {
       events: this.eventLog
         .filter((event) => event.sequence > sequence)
-        .map((event) => ({ ...event, data: sanitizeEventRecord(event.data) })),
-      earliestSequence,
-      latestSequence,
+        .map((event) => cloneDockEvent(event)),
+      earliest: this.cursor(earliestSequence),
+      latest: this.cursor(latestSequence),
       truncated: sequence < earliestSequence - 1,
     };
   }
@@ -264,8 +377,25 @@ export class ManagedInstance {
 
   async listModels(): Promise<{ models: RuntimeModelInfo[]; state: RuntimeModelState }> {
     this.assertActive();
-    const models = await this.session.listModels();
+    const models = (await this.session.listModels()).slice(0, 2_000).map((model) => ({
+      ...model,
+      provider: truncate(model.provider, 256) ?? "unknown",
+      id: truncate(model.id, 512) ?? "unknown",
+      name: truncate(model.name, 256) ?? "unknown",
+    }));
     return { models, state: this.session.getModelState() };
+  }
+
+  async listSessions(scope: "cwd" | "all"): Promise<SessionDto[]> {
+    this.assertActive();
+    const sessions = await this.session.listSessions(scope);
+    return sessions.slice(0, 2_000).map((session) => ({
+      sessionId: truncate(session.sessionId, 128) ?? "unknown",
+      sessionFile: truncate(session.sessionFile, 16_384) ?? "",
+      ...(session.name === undefined ? {} : { name: truncate(session.name, 256) ?? "" }),
+      cwd: truncate(session.cwd, 16_384) ?? "",
+      ...(isIsoTimestamp(session.updatedAt) ? { updatedAt: session.updatedAt } : {}),
+    }));
   }
 
   async selectModel(provider: string, modelId: string): Promise<RuntimeModelState> {
@@ -274,36 +404,49 @@ export class ManagedInstance {
       const state = await this.session.selectModel(provider, modelId);
       this.applyModelState(state);
       this.touch();
-      this.appendEvent("model.changed", {
-        provider: state.model?.provider,
-        id: state.model?.id,
-        thinkingLevel: state.thinkingLevel,
-        availableThinkingLevels: state.availableThinkingLevels,
-      });
+      this.appendModelChanged(state);
       return state;
+    } catch (error) {
+      if (error instanceof RuntimeSettingsWriteError) {
+        if (error.mutationApplied) {
+          const state = this.session.getModelState();
+          this.applyModelState(state);
+          this.touch();
+          this.appendModelChanged(state);
+        }
+        this.appendSettingsWriteFailed(error);
+      }
+      throw error;
     } finally {
       this.configurationPending = false;
     }
   }
 
-  setThinkingLevel(level: RuntimeThinkingLevel): RuntimeModelState {
+  async setThinkingLevel(level: RuntimeThinkingLevel): Promise<RuntimeModelState> {
     this.beginConfiguration("changing thinking level");
     try {
-      const state = this.session.setThinkingLevel(level);
+      const state = await this.session.setThinkingLevel(level);
       this.applyModelState(state);
       this.touch();
-      this.appendEvent("thinking.changed", {
-        requested: level,
-        thinkingLevel: state.thinkingLevel,
-        availableThinkingLevels: state.availableThinkingLevels,
-      });
+      this.appendThinkingChanged(level, state);
       return state;
+    } catch (error) {
+      if (error instanceof RuntimeSettingsWriteError) {
+        if (error.mutationApplied) {
+          const state = this.session.getModelState();
+          this.applyModelState(state);
+          this.touch();
+          this.appendThinkingChanged(level, state);
+        }
+        this.appendSettingsWriteFailed(error);
+      }
+      throw error;
     } finally {
       this.configurationPending = false;
     }
   }
 
-  async submit(message: string, delivery: DeliveryMode = "auto"): Promise<CommandReceipt> {
+  async submit(message: string, delivery: DeliveryMode = "auto", operationId = this.createCommandId()): Promise<CommandReceipt> {
     this.assertActive();
     if (this.pendingAdmission) throw new InstanceAdmissionPendingError(this.id);
     if (this.configurationPending) throw new InstanceBusyError(this.id, "submitting a prompt");
@@ -318,7 +461,7 @@ export class ManagedInstance {
       : undefined;
     let actualDelivery = resolvedDelivery;
     let actuallyQueued = streamingBehavior !== undefined;
-    const commandId = this.createCommandId();
+    const commandId = operationId;
     const agentStartsBeforeCommand = this.agentStartCount;
     const agentSettlesBeforeCommand = this.agentSettledCount;
     const admissionToken = {};
@@ -352,10 +495,10 @@ export class ManagedInstance {
     const rejectBeforeRun = (error: unknown, reason: string): void => {
       if (preflightStatus === "accepted" || (preflightStatus === "rejected" && receiptSettled)) return;
       preflightStatus = "rejected";
-      const messageText = errorMessage(error);
+      const messageText = safeWireText(errorMessage(error), 2_048, "Sensitive command error omitted");
       this.state.lastError = messageText;
       this.touch();
-      this.appendEvent("command.rejected", { commandId, reason, error: messageText });
+      this.appendEvent("command.rejected", { operationId: commandId, reason, error: messageText });
       this.appendStateEvent("command_rejected");
       if (!receiptSettled) {
         receiptSettled = true;
@@ -395,17 +538,16 @@ export class ManagedInstance {
       }
       this.touch(acceptedAt);
       this.appendEvent("message.submitted", {
+        operationId: commandId,
+        messageId: `user-${commandId}`,
         role: "user",
         text: message,
-        commandId,
-        delivery: actualDelivery,
-        queued: actuallyQueued,
       }, acceptedAt);
       this.appendEvent("command.accepted", {
-        commandId,
+        operationId: commandId,
         delivery: actualDelivery,
         queued: actuallyQueued,
-        requestedDelivery: resolvedDelivery,
+        acceptedAt,
       }, acceptedAt);
       this.appendStateEvent("command_accepted", acceptedAt);
       if (!receiptSettled) {
@@ -413,7 +555,7 @@ export class ManagedInstance {
         resolveReceipt({
           accepted: true,
           instanceId: this.id,
-          commandId,
+          operationId: commandId,
           delivery: actualDelivery,
           queued: actuallyQueued,
           acceptedAt,
@@ -450,18 +592,18 @@ export class ManagedInstance {
         this.state.execution = "idle";
         this.state.activeCommandId = undefined;
         this.touch();
-        this.appendEvent("command.handled_without_run", { commandId });
+        this.appendEvent("command.handled", { operationId: commandId, kind: "no_run" });
         this.appendStateEvent("command_handled_without_run");
       }
     }).catch((error: unknown) => {
       release();
-      const messageText = errorMessage(error);
+      const messageText = safeWireText(errorMessage(error), 2_048, "Sensitive command error omitted");
       if (preflightStatus !== "accepted") {
         rejectBeforeRun(error, "preflight_failed");
         return;
       }
 
-      this.appendEvent("command.background_failed", { commandId, error: messageText });
+      this.appendEvent("instance.error", { operationId: commandId, source: "command_background", error: messageText });
       // Pi 0.80.6 emits agent_settled from _runAgentPrompt.finally before the
       // prompt Promise rejects. Only project a fallback failure if that public
       // lifecycle guarantee was not observed at all.
@@ -475,7 +617,7 @@ export class ManagedInstance {
         this.state.activeCommandId = undefined;
         this.state.lastError = messageText;
         this.touch();
-        this.appendEvent("run.settled_missing", { commandId, error: messageText });
+        this.appendEvent("run.settled", { operationId: commandId, result: "failed", error: messageText });
         this.appendStateEvent("prompt_rejected_without_agent_settled");
       }
     });
@@ -497,36 +639,40 @@ export class ManagedInstance {
     }
   }
 
-  async stop(): Promise<StopReceipt> {
+  async stop(operationId = this.createCommandId()): Promise<StopReceipt> {
     if (this.state.lifecycle === "stopped") {
-      return { instanceId: this.id, stopped: true, alreadyStopped: true };
+      return { operationId, instanceId: this.id, stopped: true, alreadyStopped: true };
     }
-    if (this.stopPromise) return this.stopPromise;
+    if (this.stopPromise) {
+      const first = await this.stopPromise;
+      return {
+        operationId,
+        instanceId: this.id,
+        stopped: true,
+        alreadyStopped: true,
+        ...(first.cleanupErrors === undefined ? {} : { cleanupErrors: [...first.cleanupErrors] }),
+      };
+    }
 
     this.stopRequestedWhileRunning = this.state.execution === "running" || this.session.isStreaming;
     const admissionBoundary = this.pendingAdmission?.boundary;
     this.state.lifecycle = "stopping";
     this.touch();
-    this.appendEvent("control.stop_requested", {
-      wasRunning: this.stopRequestedWhileRunning,
-      awaitingPreflight: admissionBoundary !== undefined,
-    });
     this.appendStateEvent("stop_requested");
 
-    this.stopPromise = this.performStop(admissionBoundary);
+    this.stopPromise = this.performStop(operationId, admissionBoundary);
     return this.stopPromise;
   }
 
   recordExtensionError(error: unknown): void {
-    this.appendEvent("extension.error", { error: errorMessage(error) });
+    this.appendEvent("extension.error", { error: safeWireText(errorMessage(error), 2_048, "Sensitive error payload omitted") });
   }
 
-  private async performStop(admissionBoundary?: Promise<void>): Promise<StopReceipt> {
+  private async performStop(operationId: string, admissionBoundary?: Promise<void>): Promise<StopReceipt> {
     const cleanupErrors: string[] = [];
     const captureCleanupError = (stage: string, error: unknown): void => {
-      const message = `${stage}: ${errorMessage(error)}`;
+      const message = safeWireText(`${stage}: ${errorMessage(error)}`, 2_048, `${stage}: sensitive cleanup error omitted`);
       cleanupErrors.push(message);
-      this.appendEvent("control.stop_cleanup_failed", { stage, error: errorMessage(error) });
     };
 
     try {
@@ -546,6 +692,7 @@ export class ManagedInstance {
           this.appendEvent("queue.cleared", {
             steering: cleared.steering.length,
             followUp: cleared.followUp.length,
+            total: cleared.steering.length + cleared.followUp.length,
           });
         }
       } catch (error) {
@@ -577,7 +724,7 @@ export class ManagedInstance {
       }
     } finally {
       this.state.lifecycle = "stopped";
-      this.state.execution = "idle";
+      this.state.execution = "unavailable";
       this.state.activeCommandId = undefined;
       this.state.pendingSteering = 0;
       this.state.pendingFollowUp = 0;
@@ -588,6 +735,7 @@ export class ManagedInstance {
     }
 
     const receipt: StopReceipt = {
+      operationId,
       instanceId: this.id,
       stopped: true,
       alreadyStopped: false,
@@ -616,8 +764,32 @@ export class ManagedInstance {
   }
 
   private applyModelState(state: RuntimeModelState): void {
-    this.executorIdentity.model = state.model ? { ...state.model } : undefined;
+    this.executorIdentity.model = state.model ? { provider: truncate(state.model.provider, 256) ?? "unknown", id: truncate(state.model.id, 512) ?? "unknown" } : undefined;
     this.executorIdentity.thinkingLevel = state.thinkingLevel;
+  }
+
+  private appendModelChanged(state: RuntimeModelState): void {
+    this.appendEvent("model.changed", {
+      provider: state.model?.provider ?? "unknown",
+      id: state.model?.id ?? "unknown",
+      thinkingLevel: state.thinkingLevel,
+      availableThinkingLevels: state.availableThinkingLevels,
+    });
+  }
+
+  private appendThinkingChanged(requested: RuntimeThinkingLevel, state: RuntimeModelState): void {
+    this.appendEvent("thinking.changed", {
+      requested,
+      thinkingLevel: state.thinkingLevel,
+      availableThinkingLevels: state.availableThinkingLevels,
+    });
+  }
+
+  private appendSettingsWriteFailed(error: RuntimeSettingsWriteError): void {
+    this.appendEvent("settings.write_failed", {
+      key: error.setting,
+      error: safeWireText(error.message, 2_048, "Sensitive settings write error omitted"),
+    });
   }
 
   private handleRuntimeEvent(event: RuntimeEvent): void {
@@ -630,15 +802,9 @@ export class ManagedInstance {
         this.state.lastError = undefined;
         this.touch();
         this.appendEvent("run.started", {
-          commandId: this.state.activeCommandId,
+          operationId: this.state.activeCommandId ?? "runtime-initiated",
         });
         this.appendStateEvent("agent_start");
-        break;
-
-      case "agent_end":
-        this.appendEvent("run.agent_end", {
-          willRetry: event.willRetry === true,
-        });
         break;
 
       case "agent_settled":
@@ -654,6 +820,7 @@ export class ManagedInstance {
         this.appendEvent("queue.changed", {
           steering: steering.length,
           followUp: followUp.length,
+          total: steering.length + followUp.length,
         });
         break;
       }
@@ -666,62 +833,67 @@ export class ManagedInstance {
         this.handleMessageEnd(event);
         break;
 
-      case "tool_execution_start":
+      case "tool_execution_start": {
+        const projected = projectJsonObject(event.args);
         this.appendEvent("tool.started", {
-          toolCallId: stringValue(event.toolCallId),
-          toolName: stringValue(event.toolName),
-          args: event.args,
+          toolCallId: boundedRuntimeString(event.toolCallId, 128, "unknown"),
+          toolName: boundedRuntimeString(event.toolName, 256, "unknown"),
+          args: projected.value,
+          ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
         });
         break;
+      }
 
       case "tool_execution_update":
-        this.appendEvent("tool.updated", {
-          toolCallId: stringValue(event.toolCallId),
-          toolName: stringValue(event.toolName),
-          output: truncate(extractText(recordValue(event.partialResult)?.content), 4_000),
+        this.appendEvent("tool.output_updated", {
+          toolCallId: boundedRuntimeString(event.toolCallId, 128, "unknown"),
+          text: projectToolText(recordValue(event.partialResult)?.content),
         });
         break;
 
-      case "tool_execution_end":
+      case "tool_execution_end": {
+        const projected = projectJsonObject(event.result);
         this.appendEvent("tool.completed", {
-          toolCallId: stringValue(event.toolCallId),
-          toolName: stringValue(event.toolName),
+          toolCallId: boundedRuntimeString(event.toolCallId, 128, "unknown"),
+          toolName: boundedRuntimeString(event.toolName, 256, "unknown"),
           isError: event.isError === true,
-          output: truncate(extractText(recordValue(event.result)?.content), 8_000),
+          text: projectToolText(recordValue(event.result)?.content),
+          ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
         });
         break;
+      }
 
       case "auto_retry_start":
         this.state.execution = "running";
         this.touch();
         this.appendEvent("run.retry_started", {
-          attempt: numberValue(event.attempt),
-          maxAttempts: numberValue(event.maxAttempts),
-          delayMs: numberValue(event.delayMs),
-          error: stringValue(event.errorMessage),
+          attempt: nonNegativeNumber(event.attempt),
+          maxAttempts: nonNegativeNumber(event.maxAttempts),
+          delayMs: nonNegativeNumber(event.delayMs),
+          error: boundedRuntimeString(event.errorMessage, 2_048, "Unknown retry error"),
         });
         break;
 
       case "auto_retry_end":
         this.appendEvent("run.retry_completed", {
           success: event.success === true,
-          attempt: numberValue(event.attempt),
-          error: stringValue(event.finalError),
+          attempt: nonNegativeNumber(event.attempt),
+          error: optionalRuntimeString(event.finalError, 2_048),
         });
         break;
 
       case "compaction_start":
         this.state.execution = "running";
         this.touch();
-        this.appendEvent("run.compaction_started", { reason: stringValue(event.reason) });
+        this.appendEvent("compaction.started", { reason: compactionReason(event.reason) });
         break;
 
       case "compaction_end":
-        this.appendEvent("run.compaction_completed", {
-          reason: stringValue(event.reason),
+        this.appendEvent("compaction.completed", {
+          reason: compactionReason(event.reason),
           aborted: event.aborted === true,
           willRetry: event.willRetry === true,
-          error: stringValue(event.errorMessage),
+          error: optionalRuntimeString(event.errorMessage, 2_048),
         });
         break;
 
@@ -768,10 +940,12 @@ export class ManagedInstance {
     const update = recordValue(event.assistantMessageEvent);
     if (!update) return;
     const updateType = stringValue(update.type);
-    if (updateType === "text_delta") {
-      this.appendEvent("assistant.text_delta", { delta: truncate(stringValue(update.delta), 8_000) });
-    } else if (updateType === "thinking_delta") {
-      this.appendEvent("assistant.thinking_delta", { delta: truncate(stringValue(update.delta), 8_000) });
+    if (updateType === "text_delta" || updateType === "thinking_delta") {
+      this.appendEvent("message.delta", {
+        messageId: boundedRuntimeString(update.messageId, 128, "assistant-current"),
+        block: updateType === "text_delta" ? "text" : "thinking",
+        delta: boundedRuntimeString(update.delta, 8_000, ""),
+      });
     }
   }
 
@@ -781,15 +955,16 @@ export class ManagedInstance {
     const role = stringValue(message.role);
     if (role === "assistant") {
       this.lastAssistantOutcome = {
-        stopReason: stringValue(message.stopReason),
-        errorMessage: stringValue(message.errorMessage),
+        stopReason: optionalRuntimeString(message.stopReason, 128),
+        errorMessage: optionalRuntimeString(message.errorMessage, 2_048),
       };
     }
     this.appendEvent("message.completed", {
-      role,
-      stopReason: stringValue(message.stopReason),
-      error: stringValue(message.errorMessage),
-      text: truncate(extractText(message.content), 8_000),
+      messageId: boundedRuntimeString(message.id, 128, `${role || "message"}-current`),
+      role: messageRole(role),
+      content: projectContentBlocks(message.content),
+      stopReason: optionalRuntimeString(message.stopReason, 128),
+      error: optionalRuntimeString(message.errorMessage, 2_048),
     });
   }
 
@@ -799,20 +974,26 @@ export class ManagedInstance {
       lifecycle: this.state.lifecycle,
       execution: this.state.execution,
       lastRun: this.state.lastRun,
-      pending: this.state.pendingSteering + this.state.pendingFollowUp,
+      pending: {
+        steering: this.state.pendingSteering,
+        followUp: this.state.pendingFollowUp,
+        total: this.state.pendingSteering + this.state.pendingFollowUp,
+      },
       activeCommandId: this.state.activeCommandId,
       lastError: this.state.lastError,
     }, occurredAt);
   }
 
-  private appendEvent(type: string, data: Record<string, unknown>, occurredAt = this.timestamp()): DockEvent {
-    const event: DockEvent = {
+  private appendEvent<K extends keyof EventDataMap>(type: K, data: EventDataMap[K], occurredAt = this.timestamp()): DockEvent {
+    const event = {
+      scope: "instance" as const,
       sequence: this.nextEventSequence++,
       instanceId: this.id,
+      runtimeGeneration: this.runtimeGeneration,
       occurredAt,
       type,
-      data: sanitizeEventRecord(data),
-    };
+      data,
+    } as DockEvent;
     this.eventLog.push(event);
     if (this.eventLog.length > this.eventCapacity) this.eventLog.shift();
 
@@ -831,6 +1012,10 @@ export class ManagedInstance {
 
   private touch(timestamp = this.timestamp()): void {
     this.state.updatedAt = timestamp;
+  }
+
+  private cursor(sequence: number): EventCursor {
+    return { hostEpoch: this.hostEpoch, instanceId: this.id, runtimeGeneration: this.runtimeGeneration, sequence };
   }
 
   private timestamp(): string {
@@ -857,8 +1042,24 @@ function stringValue(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
-function numberValue(value: unknown): number | undefined {
-  return typeof value === "number" ? value : undefined;
+function boundedRuntimeString(value: unknown, limit: number, fallback: string): string {
+  return typeof value === "string" ? safeWireText(value, limit, fallback) : fallback;
+}
+
+function optionalRuntimeString(value: unknown, limit: number): string | undefined {
+  return typeof value === "string" ? safeWireText(value, limit, "Sensitive payload omitted") : undefined;
+}
+
+function nonNegativeNumber(value: unknown): number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function compactionReason(value: unknown): "manual" | "threshold" | "overflow" {
+  return value === "threshold" || value === "overflow" ? value : "manual";
+}
+
+function messageRole(value: unknown): "user" | "assistant" | "tool" | "system" {
+  return value === "user" || value === "tool" || value === "system" ? value : "assistant";
 }
 
 function stringArray(value: unknown): string[] {
@@ -877,9 +1078,62 @@ function extractText(content: unknown): string | undefined {
   return text.length > 0 ? text : undefined;
 }
 
+function projectContentBlocks(content: unknown): ContentBlockDto[] {
+  if (typeof content === "string") {
+    return isBinaryText(content)
+      ? [{ type: "omitted", kind: "binary", description: "Binary data omitted" }]
+      : [{ type: "text", text: truncate(content, 8_000) ?? "" }];
+  }
+  if (!Array.isArray(content)) return [];
+  const blocks: ContentBlockDto[] = [];
+  for (const item of content.slice(0, 200)) {
+    const block = recordValue(item);
+    if (!block) continue;
+    if (block.type === "text" && typeof block.text === "string") {
+      if (isBinaryText(block.text)) {
+        blocks.push({ type: "omitted", kind: "binary", description: "Binary data omitted" });
+      } else {
+        blocks.push({ type: "text", text: truncate(block.text, 8_000) ?? "" });
+      }
+    } else if (block.type === "thinking" && typeof block.thinking === "string") {
+      if (isBinaryText(block.thinking)) {
+        blocks.push({ type: "omitted", kind: "binary", description: "Binary data omitted" });
+      } else {
+        blocks.push({ type: "thinking", text: truncate(block.thinking, 8_000) ?? "" });
+      }
+    } else if ((block.type === "toolCall" || block.type === "tool_call") && typeof block.name === "string") {
+      const projected = projectJsonObject(block.arguments);
+      blocks.push({
+        type: "tool_call",
+        toolCallId: boundedRuntimeString(block.id, 128, "unknown"),
+        toolName: boundedRuntimeString(block.name, 256, "unknown"),
+        args: projected.value,
+        ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
+      });
+    } else if (block.type === "toolResult" || block.type === "tool_result") {
+      const projected = projectJsonObject(block);
+      blocks.push({
+        type: "tool_result",
+        toolCallId: boundedRuntimeString(block.toolCallId ?? block.id, 128, "unknown"),
+        toolName: boundedRuntimeString(block.toolName ?? block.name, 256, "unknown"),
+        text: projectToolText(block.content),
+        isError: block.isError === true,
+        ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
+      });
+    } else if (block.type === "image") {
+      blocks.push({ type: "omitted", kind: "image", description: "Image bytes omitted; local path remains in tool text when provided" });
+    }
+  }
+  return blocks;
+}
+
 function truncate(value: string | undefined, limit: number): string | undefined {
   if (value === undefined || value.length <= limit) return value;
-  return `${value.slice(0, limit)}…`;
+  return limit < 1 ? "" : `${value.slice(0, limit - 1)}…`;
+}
+
+function safeWireText(value: string, limit: number, omission: string): string {
+  return isBinaryText(value) ? omission : truncate(value, limit) ?? omission;
 }
 
 function errorMessage(error: unknown): string {
@@ -898,44 +1152,78 @@ function errorMessage(error: unknown): string {
 }
 
 function cloneDockEvent(event: DockEvent): DockEvent {
-  return {
-    ...event,
-    data: sanitizeEventRecord(event.data),
-  };
+  return JSON.parse(JSON.stringify(event)) as DockEvent;
 }
 
-function sanitizeEventRecord(data: Record<string, unknown>): Record<string, unknown> {
+const MAX_JSON_DEPTH = 8;
+const MAX_JSON_KEYS = 100;
+const MAX_JSON_ARRAY = 200;
+const MAX_JSON_STRING = 8_000;
+const SENSITIVE_KEY = /base64|binary|imageData/i;
+const DATA_URI = /data:[^,]*;base64,/i;
+const BASE64_PAYLOAD = /^(?=.{128,}$)(?=.*(?:[0-9+/]|={1,2}$))(?:[A-Za-z0-9+/]{4})+(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+
+function isBinaryText(value: string): boolean {
+  return DATA_URI.test(value) || BASE64_PAYLOAD.test(value);
+}
+
+export function projectJsonObject(input: unknown): { value: JsonObject; omittedFields: string[] } {
+  const omittedFields: string[] = [];
   const seen = new WeakSet<object>();
-  const sanitized = sanitizeEventValue(data, 0, seen);
-  return recordValue(sanitized) ?? { value: sanitized };
+  const project = (value: unknown, path: string, depth: number): JsonValue | undefined => {
+    if (typeof value === "string") {
+      if (isBinaryText(value)) { omittedFields.push(path || "/"); return undefined; }
+      return truncate(value, MAX_JSON_STRING) ?? "";
+    }
+    if (value === null || typeof value === "boolean") return value;
+    if (typeof value === "number") {
+      if (Number.isFinite(value)) return value;
+      omittedFields.push(path || "/");
+      return undefined;
+    }
+    if (typeof value !== "object" || value === null || typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
+      omittedFields.push(path || "/");
+      return undefined;
+    }
+    if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
+      omittedFields.push(path || "/");
+      return undefined;
+    }
+    if (depth >= MAX_JSON_DEPTH || seen.has(value)) {
+      omittedFields.push(path || "/");
+      return undefined;
+    }
+    seen.add(value);
+    if (Array.isArray(value)) {
+      const result: JsonValue[] = [];
+      for (let index = 0; index < value.length; index += 1) {
+        const itemPath = `${path}/${index}`;
+        if (index >= MAX_JSON_ARRAY) { omittedFields.push(itemPath); continue; }
+        const item = project(value[index], itemPath, depth + 1);
+        if (item !== undefined) result.push(item);
+      }
+      return result;
+    }
+    const result: JsonObject = {};
+    const entries = Object.entries(value as Record<string, unknown>);
+    for (let index = 0; index < entries.length; index += 1) {
+      const [key, item] = entries[index] as [string, unknown];
+      const itemPath = `${path}/${escapeJsonPointer(key)}`;
+      if (index >= MAX_JSON_KEYS || SENSITIVE_KEY.test(key)) { omittedFields.push(itemPath); continue; }
+      const projected = project(item, itemPath, depth + 1);
+      if (projected !== undefined) result[key] = projected;
+    }
+    return result;
+  };
+  const value = project(input, "", 0);
+  return { value: isJsonObject(value) ? value : {}, omittedFields: [...new Set(omittedFields)] };
 }
 
-function sanitizeEventValue(value: unknown, depth: number, seen: WeakSet<object>): unknown {
-  if (typeof value === "string") return truncate(value, 8_000);
-  if (typeof value === "bigint") return value.toString();
-  if (typeof value === "symbol" || typeof value === "function") return String(value);
-  if (value === null || typeof value !== "object") return value;
-  if (depth >= 6) return "[depth limit]";
-  if (seen.has(value)) return "[circular]";
-  seen.add(value);
-
-  if (Array.isArray(value)) {
-    const result = value.slice(0, 50).map((item) => sanitizeEventValue(item, depth + 1, seen));
-    if (value.length > 50) result.push(`[${value.length - 50} more items]`);
-    return result;
-  }
-
-  const result: Record<string, unknown> = {};
-  const entries = Object.entries(value).slice(0, 50);
-  for (const [key, item] of entries) {
-    if (key.toLowerCase().includes("base64") && typeof item === "string") {
-      result[key] = "[base64 omitted]";
-    } else {
-      result[key] = sanitizeEventValue(item, depth + 1, seen);
-    }
-  }
-  if (Object.keys(value).length > entries.length) {
-    result.__truncatedKeys = Object.keys(value).length - entries.length;
-  }
-  return result;
+function escapeJsonPointer(value: string): string { return value.replace(/~/g, "~0").replace(/\//g, "~1"); }
+function isIsoTimestamp(value: string | undefined): value is string { return value !== undefined && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value; }
+function isJsonObject(value: JsonValue | undefined): value is JsonObject { return value !== undefined && value !== null && typeof value === "object" && !Array.isArray(value); }
+function projectToolText(content: unknown): string {
+  const text = extractText(content);
+  if (!text || isBinaryText(text)) return "";
+  return truncate(text, 8_000) ?? "";
 }

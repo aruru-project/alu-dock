@@ -14,6 +14,7 @@ import type {
   RuntimeModelState,
   RuntimePromptOptions,
   RuntimeSession,
+  RuntimeSessionInfo,
   RuntimeThinkingLevel,
 } from "../src/core/runtime-session.js";
 
@@ -79,6 +80,10 @@ class FakeRuntimeSession implements RuntimeSession {
     ];
   }
 
+  async listSessions(_scope: "cwd" | "all"): Promise<RuntimeSessionInfo[]> {
+    return [];
+  }
+
   async selectModel(provider: string, modelId: string): Promise<RuntimeModelState> {
     this.modelState = {
       model: { provider, id: modelId },
@@ -88,7 +93,7 @@ class FakeRuntimeSession implements RuntimeSession {
     return this.getModelState();
   }
 
-  setThinkingLevel(level: RuntimeThinkingLevel): RuntimeModelState {
+  async setThinkingLevel(level: RuntimeThinkingLevel): Promise<RuntimeModelState> {
     const effective = this.modelState.availableThinkingLevels.includes(level) ? level : "off";
     this.modelState = { ...this.modelState, thinkingLevel: effective };
     return this.getModelState();
@@ -166,6 +171,10 @@ class FakeRuntimeSession implements RuntimeSession {
   }
 }
 
+function dataRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
 function createClock(): () => Date {
   let tick = 0;
   return () => new Date(Date.UTC(2026, 6, 14, 0, 0, tick++));
@@ -190,7 +199,7 @@ test("submit returns after preflight while the runtime promise remains host-owne
   const receipt = await instance.submit("do a long task");
 
   assert.equal(receipt.accepted, true);
-  assert.equal(receipt.commandId, "command-1");
+  assert.equal(receipt.operationId, "command-1");
   assert.equal(receipt.queued, false);
   assert.equal(instance.snapshot().execution, "running");
   assert.equal(instance.snapshot().id, "dock-instance-1");
@@ -200,7 +209,7 @@ test("submit returns after preflight while the runtime promise remains host-owne
   const submitted = instance.eventsSince().events.find((event) => event.type === "message.submitted");
   assert.equal(submitted?.data.role, "user");
   assert.equal(submitted?.data.text, "do a long task");
-  assert.equal(submitted?.data.commandId, "command-1");
+  assert.equal(submitted?.data.operationId, "command-1");
 
   session.startRun();
   session.emitAssistantEnd("stop");
@@ -241,10 +250,12 @@ test("failed and aborted runs project to distinct structured state", async () =>
   const secondStop = await aborted.stop();
 
   assert.deepEqual(firstStop, {
+    operationId: "command-2",
     instanceId: "dock-instance-1",
     stopped: true,
     alreadyStopped: false,
   });
+  assert.equal(secondStop.operationId, "command-3");
   assert.equal(secondStop.alreadyStopped, true);
   assert.equal(aborted.snapshot().lifecycle, "stopped");
   assert.equal(aborted.snapshot().lastRun, "aborted");
@@ -323,7 +334,7 @@ test("a queued request becomes a tracked prompt when the original run settles du
   const accepted = instance.eventsSince().events
     .filter((event) => event.type === "command.accepted")
     .at(-1);
-  assert.equal(accepted?.data.requestedDelivery, "steer");
+  assert.equal(accepted?.data.delivery, "prompt");
   assert.equal(accepted?.data.delivery, "prompt");
 
   session.settle();
@@ -344,7 +355,7 @@ test("an unresolved preflight reserves admission and rejects a concurrent normal
 
   session.triggerPreflight(true);
   const receipt = await firstSubmit;
-  assert.equal(receipt.commandId, "command-1");
+  assert.equal(receipt.operationId, "command-1");
   assert.equal(instance.snapshot().activeCommandId, "command-1");
 
   session.settle();
@@ -373,7 +384,7 @@ test("stop waits for a pending preflight and a late acceptance cannot revive the
 
   assert.equal(stopReceipt.stopped, true);
   assert.equal(instance.snapshot().lifecycle, "stopped");
-  assert.equal(instance.snapshot().execution, "idle");
+  assert.equal(instance.snapshot().execution, "unavailable");
   assert.equal(instance.snapshot().activeCommandId, undefined);
   assert.equal(instance.snapshot().lastRun, "aborted");
   assert.equal(
@@ -398,9 +409,9 @@ test("a Promise rejection after agent_settled cannot overwrite the settled outco
   assert.equal(instance.snapshot().execution, "idle");
   assert.equal(instance.snapshot().lastRun, "succeeded");
   assert.equal(instance.snapshot().lastError, undefined);
-  assert.ok(instance.eventsSince().events.some((event) => event.type === "command.background_failed"));
+  assert.ok(instance.eventsSince().events.some((event) => event.type === "instance.error"));
   assert.equal(
-    instance.eventsSince().events.some((event) => event.type === "run.settled_missing"),
+    instance.eventsSince().events.some((event) => event.type === "run.settled" && event.data.operationId === "command-1" && event.data.error === "late Promise rejection"),
     false,
   );
 });
@@ -429,10 +440,13 @@ test("concurrent stop is idempotent and cleanup errors still reach stopped", asy
   session.disposeError = new Error("dispose exploded");
   const instance = createInstance(session);
 
-  const [first, second] = await Promise.all([instance.stop(), instance.stop()]);
+  const [first, second] = await Promise.all([instance.stop("stop-a"), instance.stop("stop-b")]);
 
   assert.equal(first.stopped, true);
-  assert.deepEqual(first, second);
+  assert.equal(first.operationId, "stop-a");
+  assert.equal(first.alreadyStopped, false);
+  assert.equal(second.operationId, "stop-b");
+  assert.equal(second.alreadyStopped, true);
   assert.deepEqual(first.cleanupErrors, [
     "abort: abort exploded",
     "dispose: dispose exploded",
@@ -451,11 +465,12 @@ test("observer exceptions and mutations cannot escape into the runtime listener 
   const seen: string[] = [];
 
   instance.subscribe((event) => {
-    event.type = "corrupted";
-    event.data.steering = 999;
+    const mutable = event as unknown as { type: string; data: Record<string, unknown> };
+    mutable.type = "corrupted";
+    mutable.data.steering = 999;
     throw new Error("broken client socket");
   });
-  instance.subscribe((event) => seen.push(`${event.type}:${String(event.data.steering)}`));
+  instance.subscribe((event) => seen.push(`${event.type}:${String(dataRecord(event.data).steering)}`));
 
   assert.doesNotThrow(() => session.emit({
     type: "queue_update",
@@ -465,27 +480,67 @@ test("observer exceptions and mutations cannot escape into the runtime listener 
   assert.deepEqual(seen, ["queue.changed:1"]);
   assert.equal(instance.snapshot().pending.steering, 1);
   assert.equal(instance.eventsSince().events.at(-1)?.type, "queue.changed");
-  assert.equal(instance.eventsSince().events.at(-1)?.data.steering, 1);
+  assert.equal(dataRecord(instance.eventsSince().events.at(-1)?.data).steering, 1);
 });
 
 test("runtime event data is sanitized into JSON-serializable values", () => {
   const session = new FakeRuntimeSession();
   const instance = createInstance(session);
+  const rawBase64 = Buffer.from("secret".repeat(100)).toString("base64");
 
   session.emit({
     type: "tool_execution_start",
     toolCallId: "tool-1",
     toolName: "test",
-    args: { count: 1n, callback: () => undefined, marker: Symbol("marker") },
+    args: {
+      count: 1n,
+      callback: () => undefined,
+      marker: Symbol("marker"),
+      bytes: Buffer.from("secret"),
+      imageData: "data:image/png;base64,c2VjcmV0",
+      payload: rawBase64,
+      ordinary: "abcdefghijklmnopabcdefghijklmnop",
+    },
   });
 
   const page = instance.eventsSince();
   assert.doesNotThrow(() => JSON.stringify(page));
   const event = page.events.find((item) => item.type === "tool.started");
-  const args = event?.data.args as Record<string, unknown>;
-  assert.equal(args.count, "1");
-  assert.equal(typeof args.callback, "string");
-  assert.equal(args.marker, "Symbol(marker)");
+  const eventData = dataRecord(event?.data);
+  const args = eventData.args as Record<string, unknown>;
+  assert.deepEqual(args, { ordinary: "abcdefghijklmnopabcdefghijklmnop" });
+  assert.deepEqual(eventData.omittedFields, ["/count", "/callback", "/marker", "/bytes", "/imageData", "/payload"]);
+  assert.doesNotMatch(JSON.stringify(page), /data:image|secret/);
+  assert.ok(!JSON.stringify(page).includes(rawBase64));
+});
+
+test("completed message content omits data URIs and raw base64", () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  const rawBase64 = Buffer.from("binary-message".repeat(100)).toString("base64");
+
+  session.emit({
+    type: "message_end",
+    message: {
+      id: "assistant-binary",
+      role: "assistant",
+      content: [
+        { type: "text", text: rawBase64 },
+        { type: "thinking", thinking: `data:image/png;base64,${rawBase64}` },
+        { type: "text", text: "ordinary answer" },
+      ],
+      stopReason: "stop",
+    },
+  });
+
+  const completed = instance.eventsSince().events.find((event) => event.type === "message.completed");
+  assert.ok(completed?.type === "message.completed");
+  assert.deepEqual(completed.data.content, [
+    { type: "omitted", kind: "binary", description: "Binary data omitted" },
+    { type: "omitted", kind: "binary", description: "Binary data omitted" },
+    { type: "text", text: "ordinary answer" },
+  ]);
+  assert.ok(!JSON.stringify(completed).includes(rawBase64));
 });
 
 test("bounded events expose a monotonic cursor and truncation signal", () => {
@@ -499,7 +554,7 @@ test("bounded events expose a monotonic cursor and truncation signal", () => {
   assert.equal(page.events.length, 3);
   assert.equal(page.truncated, true);
   assert.deepEqual(page.events.map((event) => event.sequence), [2, 3, 4]);
-  assert.equal(page.latestSequence, 4);
+  assert.equal(page.latest.sequence, 4);
 });
 
 test("non-finite event capacity falls back to a bounded default", () => {
@@ -512,6 +567,6 @@ test("non-finite event capacity falls back to a bounded default", () => {
     const page = instance.eventsSince(0);
     assert.equal(page.events.length, 500);
     assert.equal(page.truncated, true);
-    assert.equal(page.latestSequence, 511);
+    assert.equal(page.latest.sequence, 511);
   }
 });

@@ -6,6 +6,8 @@ import type { ManagedInstance, InstanceSnapshot } from "../core/managed-instance
 
 export interface InstanceFactoryInput {
   id: string;
+  creationOperationId: string;
+  hostEpoch: string;
   cwd: string;
   name?: string;
 }
@@ -13,6 +15,7 @@ export interface InstanceFactoryInput {
 export type InstanceFactory = (input: InstanceFactoryInput) => Promise<ManagedInstance>;
 
 export interface CreateRegistryInstanceInput {
+  operationId: string;
   cwd: string;
   name?: string;
 }
@@ -25,12 +28,19 @@ export class InstanceNotFoundError extends Error {
 }
 
 export class DockRegistry {
+  readonly hostEpoch: string;
+  readonly startedAt: string;
   private readonly instances = new Map<string, ManagedInstance>();
+  private revision = 0;
 
   constructor(
     private readonly factory: InstanceFactory,
     private readonly createId: () => string = randomUUID,
-  ) {}
+    options: { hostEpoch?: string; startedAt?: string } = {},
+  ) {
+    this.hostEpoch = options.hostEpoch ?? randomUUID();
+    this.startedAt = options.startedAt ?? new Date().toISOString();
+  }
 
   async create(input: CreateRegistryInstanceInput): Promise<ManagedInstance> {
     const cwd = resolve(input.cwd);
@@ -39,12 +49,17 @@ export class DockRegistry {
 
     const id = this.createId();
     if (this.instances.has(id)) throw new Error(`Generated duplicate instance identity: ${id}`);
-    const instance = await this.factory({ id, cwd, name: input.name });
-    if (instance.id !== id) {
+    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, name: input.name });
+    if (
+      instance.id !== id
+      || instance.creationOperationId !== input.operationId
+      || instance.hostEpoch !== this.hostEpoch
+    ) {
       await instance.stop();
-      throw new Error(`Instance factory returned unexpected identity: expected ${id}, got ${instance.id}`);
+      throw new Error("Instance factory returned an identity outside the registry Host domain");
     }
     this.instances.set(id, instance);
+    this.revision += 1;
     return instance;
   }
 
@@ -58,6 +73,10 @@ export class DockRegistry {
     return [...this.instances.values()]
       .map((instance) => instance.snapshot())
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+  }
+
+  catalogRevision(): number {
+    return this.revision;
   }
 
   async stopAll(): Promise<void> {

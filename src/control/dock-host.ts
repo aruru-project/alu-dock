@@ -14,19 +14,28 @@ import {
   InstanceNotActiveError,
   InvalidDeliveryModeError,
   type DockEvent,
+  type EventCursor,
   type EventPage,
   type ManagedInstance,
 } from "../core/managed-instance.js";
-import { RuntimeModelNotFoundError } from "../core/runtime-session.js";
+import { RuntimeModelNotFoundError, RuntimeSettingsWriteError } from "../core/runtime-session.js";
 import { DockRegistry, InstanceNotFoundError } from "./dock-registry.js";
+import { OperationConflictError, OperationLedger } from "./operation-ledger.js";
 import { encodeJsonLine, JsonLineDecoder, JsonLineError } from "./json-lines.js";
 import {
+  capabilityForRequest,
   CONTROL_PROTOCOL_VERSION,
+  createHelloAck,
+  defaultHostIdentity,
+  implementedCapabilities,
   MAX_CONTROL_LINE_BYTES,
+  MAX_REPLAY_EVENTS,
   type ControlEventEnvelope,
   type ControlRequest,
   type ControlResponse,
   type EventsResult,
+  type HelloError,
+  parseClientHello,
   parseControlRequest,
   ProtocolValidationError,
 } from "./protocol.js";
@@ -47,11 +56,15 @@ interface SocketIdentity {
 export interface DockHostOptions {
   socketPath: string;
   registry: DockRegistry;
+  statePath?: string;
 }
 
 export class DockHost {
   readonly socketPath: string;
+  readonly statePath: string;
   readonly registry: DockRegistry;
+  readonly hostEpoch: string;
+  readonly startedAt: string;
 
   private state: HostState = "new";
   private server: Server | undefined;
@@ -60,10 +73,14 @@ export class DockHost {
   private stopPromise: Promise<void> | undefined;
   private readonly connections = new Set<Socket>();
   private readonly inFlightDispatches = new Set<Promise<void>>();
+  private readonly operationLedger = new OperationLedger();
 
   constructor(options: DockHostOptions) {
     this.socketPath = resolve(options.socketPath);
+    this.statePath = options.statePath ?? `memory:${this.socketPath}`;
     this.registry = options.registry;
+    this.hostEpoch = options.registry.hostEpoch;
+    this.startedAt = options.registry.startedAt;
   }
 
   start(): Promise<void> {
@@ -145,313 +162,150 @@ export class DockHost {
   private handleConnection(socket: Socket): void {
     this.connections.add(socket);
     const decoder = new JsonLineDecoder();
+    let helloSeen = false;
     let requestSeen = false;
+    let terminal = false;
     let eventUnsubscribe: (() => void) | undefined;
-
-    const cleanup = (): void => {
-      eventUnsubscribe?.();
-      eventUnsubscribe = undefined;
-      this.connections.delete(socket);
-    };
+    const cleanup = (): void => { eventUnsubscribe?.(); eventUnsubscribe = undefined; this.connections.delete(socket); };
     socket.once("close", cleanup);
-    socket.once("error", () => {
-      // close performs cleanup; transport errors never affect managed instances.
-    });
+    socket.once("error", () => {});
 
     const consumeLine = (line: string): void => {
-      if (line.length === 0) return;
-      if (requestSeen) {
-        this.sendErrorAndEnd(socket, "multiple_requests", "Only one request is allowed per connection", "unknown");
+      if (terminal || line.length === 0) return;
+      let raw: unknown;
+      try { raw = JSON.parse(line) as unknown; }
+      catch {
+        terminal = true;
+        if (helloSeen) this.sendErrorAndEnd(socket, "invalid_envelope", "Request is not valid JSON", "unknown");
+        else this.sendHelloError(socket, "unknown", "invalid_hello", "Hello is not valid JSON");
         return;
       }
+
+      if (!helloSeen) {
+        let hello;
+        try { hello = parseClientHello(raw); }
+        catch (error) { const mapped = mapControlError(error); terminal = true; this.sendHelloError(socket, extractRequestId(line), "invalid_hello", mapped.message); return; }
+        helloSeen = true;
+        if (this.state !== "running") {
+          terminal = true;
+          this.sendHelloError(socket, hello.requestId, this.state === "stopping" || this.state === "stopped" ? "host_draining" : "host_starting", "Alu Dock host is not ready");
+          return;
+        }
+        if (!hello.versions.includes(CONTROL_PROTOCOL_VERSION)) {
+          terminal = true;
+          this.sendHelloError(socket, hello.requestId, "unsupported_protocol", "No supported protocol version overlap", { hostVersions: [2] });
+          return;
+        }
+        const available = new Set(implementedCapabilities());
+        const missing = hello.requiredCapabilities.filter((capability) => !available.has(capability));
+        if (missing.length > 0) {
+          terminal = true;
+          this.sendHelloError(socket, hello.requestId, "capability_missing", "Required capabilities are unavailable", { missing: [...missing].sort() });
+          return;
+        }
+        const outcome = writeEnvelope(socket, createHelloAck(hello.requestId, defaultHostIdentity(this.hostEpoch, this.startedAt)));
+        if (outcome !== "written") socket.destroy();
+        return;
+      }
+
+      if (requestSeen) { terminal = true; this.sendErrorAndEnd(socket, "multiple_requests", "Only one request is allowed after hello", "unknown"); return; }
       requestSeen = true;
-
       let request: ControlRequest;
-      try {
-        request = parseControlRequest(JSON.parse(line) as unknown);
-      } catch (error) {
-        const mapped = mapControlError(error);
-        this.sendErrorAndEnd(socket, mapped.code, mapped.message, extractRequestId(line));
-        return;
+      try { request = parseControlRequest(raw); }
+      catch (error) { const mapped = mapControlError(error); terminal = true; this.sendErrorAndEnd(socket, mapped.code, mapped.message, extractRequestId(line)); return; }
+      if (this.state !== "running") { terminal = true; this.sendErrorAndEnd(socket, "host_draining", "Alu Dock host is not accepting requests", request.requestId); return; }
+      if (!implementedCapabilities().includes(capabilityForRequest(request.type))) {
+        terminal = true; this.sendErrorAndEnd(socket, "capability_missing", `Capability ${capabilityForRequest(request.type)} is unavailable`, request.requestId); return;
       }
-
-      if (this.state !== "running") {
-        this.sendErrorAndEnd(socket, "host_stopping", "Alu Dock host is not accepting requests", request.requestId);
-        return;
-      }
-
       let task!: Promise<void>;
-      task = this.dispatch(request, socket, (unsubscribe) => {
-        eventUnsubscribe = unsubscribe;
-      }).catch((error: unknown) => {
-        const mapped = mapControlError(error);
-        this.sendErrorAndEnd(socket, mapped.code, mapped.message, request.requestId);
-      }).finally(() => {
-        this.inFlightDispatches.delete(task);
-      });
+      task = this.dispatch(request, socket, (unsubscribe) => { eventUnsubscribe = unsubscribe; })
+        .catch((error: unknown) => { const mapped = mapControlError(error); this.sendErrorAndEnd(socket, mapped.code, mapped.message, request.requestId); })
+        .finally(() => this.inFlightDispatches.delete(task));
       this.inFlightDispatches.add(task);
     };
-
-    socket.on("data", (chunk: Buffer) => {
-      try {
-        for (const line of decoder.push(chunk)) consumeLine(line);
-      } catch (error) {
-        const mapped = mapControlError(error);
-        this.sendErrorAndEnd(socket, mapped.code, mapped.message, "unknown");
-      }
-    });
-    socket.on("end", () => {
-      try {
-        decoder.finish();
-      } catch (error) {
-        const mapped = mapControlError(error);
-        this.sendErrorAndEnd(socket, mapped.code, mapped.message, "unknown");
-      }
-    });
+    socket.on("data", (chunk: Buffer) => { try { for (const line of decoder.push(chunk)) { consumeLine(line); if (terminal) break; } } catch (error) { const mapped=mapControlError(error); terminal=true; if(helloSeen)this.sendErrorAndEnd(socket,mapped.code,mapped.message,"unknown");else this.sendHelloError(socket,"unknown","invalid_hello",mapped.message); } });
+    socket.on("end", () => { try { decoder.finish(); } catch (error) { const mapped=mapControlError(error); this.sendErrorAndEnd(socket,mapped.code,mapped.message,"unknown"); } });
   }
 
-  private async dispatch(
-    request: ControlRequest,
-    socket: Socket,
-    setEventUnsubscribe: (unsubscribe: () => void) => void,
-  ): Promise<void> {
+  private async dispatch(request: ControlRequest, socket: Socket, setEventUnsubscribe: (unsubscribe: () => void) => void): Promise<void> {
     switch (request.type) {
-      case "ping":
+      case "host.info":
         this.sendSuccessAndEnd(socket, request.requestId, {
-          pid: process.pid,
-          protocolVersion: CONTROL_PROTOCOL_VERSION,
-        });
-        return;
-
-      case "create": {
-        const instance = await this.registry.create({ cwd: request.cwd, name: request.name });
-        this.sendSuccessAndEnd(socket, request.requestId, { instance: instance.snapshot() });
-        return;
+          state: "ready", host: defaultHostIdentity(this.hostEpoch, this.startedAt),
+          catalog: { schemaVersion: 1, revision: this.registry.catalogRevision(), lastReconciledAt: this.startedAt },
+          paths: { socket: this.socketPath, state: this.statePath },
+          diagnostics: [{ severity: "info", message: "Development registry is in-memory and non-durable", source: "registry" }],
+        }); return;
+      case "instance.create": {
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=await this.registry.create({operationId:request.params.operationId,cwd:request.params.cwd,name:request.params.name});return {instance:instance.snapshot()};});
+        this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
-
-      case "list":
-        this.sendSuccessAndEnd(socket, request.requestId, { instances: this.registry.list() });
-        return;
-
-      case "status":
-        this.sendSuccessAndEnd(socket, request.requestId, {
-          instance: this.registry.get(request.instanceId).snapshot(),
-        });
-        return;
-
-      case "events":
-        this.attachEventStream(request, socket, setEventUnsubscribe);
-        return;
-
-      case "prompt": {
-        const instance = this.registry.get(request.instanceId);
-        const receipt = await instance.submit(request.message, request.delivery ?? "auto");
-        this.sendSuccessAndEnd(socket, request.requestId, {
-          receipt,
-          instance: instance.snapshot(),
-        });
-        return;
+      case "instance.list": this.sendSuccessAndEnd(socket,request.requestId,{instances:this.registry.list().filter(i=>request.params.includeTerminal!==false||i.lifecycle==="active"||i.lifecycle==="stopping")}); return;
+      case "instance.get": this.sendSuccessAndEnd(socket,request.requestId,{instance:this.registry.get(request.params.instanceId).snapshot()}); return;
+      case "instance.attach": this.attachEventStream(request,socket,setEventUnsubscribe); return;
+      case "instance.stop": {
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const receipt=await instance.stop(request.params.operationId);return {receipt:{operationId:receipt.operationId,alreadyStopped:receipt.alreadyStopped,cleanupErrors:receipt.cleanupErrors},instance:instance.snapshot()};});
+        this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
-
-      case "models": {
-        const instance = this.registry.get(request.instanceId);
-        const result = await instance.listModels();
-        this.sendSuccessAndEnd(socket, request.requestId, {
-          models: result.models,
-          availableThinkingLevels: result.state.availableThinkingLevels,
-          instance: instance.snapshot(),
-        });
-        return;
+      case "command.submit": {
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const receipt=await instance.submit(request.params.message,request.params.delivery,request.params.operationId);return {receipt,instance:instance.snapshot()};});
+        this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
-
-      case "set_model": {
-        const instance = this.registry.get(request.instanceId);
-        const state = await instance.selectModel(request.provider, request.modelId);
-        this.sendSuccessAndEnd(socket, request.requestId, {
-          availableThinkingLevels: state.availableThinkingLevels,
-          instance: instance.snapshot(),
-        });
-        return;
+      case "model.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listModels(); this.sendSuccessAndEnd(socket,request.requestId,{models:result.models,availableThinkingLevels:result.state.availableThinkingLevels,instance:instance.snapshot()}); return; }
+      case "model.set": {
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);await instance.selectModel(request.params.provider,request.params.modelId);return {instance:instance.snapshot(),settingsWrite:{persisted:true as const}};});
+        this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
-
-      case "set_thinking": {
-        const instance = this.registry.get(request.instanceId);
-        const state = instance.setThinkingLevel(request.level);
-        this.sendSuccessAndEnd(socket, request.requestId, {
-          availableThinkingLevels: state.availableThinkingLevels,
-          instance: instance.snapshot(),
-        });
-        return;
+      case "thinking.set": {
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const state=await instance.setThinkingLevel(request.params.level);return {actualLevel:state.thinkingLevel,availableThinkingLevels:state.availableThinkingLevels,instance:instance.snapshot(),settingsWrite:{persisted:true as const}};});
+        this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
-
-      case "stop": {
-        const instance = this.registry.get(request.instanceId);
-        const receipt = await instance.stop();
-        this.sendSuccessAndEnd(socket, request.requestId, {
-          receipt,
-          instance: instance.snapshot(),
-        });
-        return;
-      }
+      case "session.list": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{sessions:await instance.listSessions(request.params.scope)}); return; }
     }
   }
 
-  private attachEventStream(
-    request: Extract<ControlRequest, { type: "events" }>,
-    socket: Socket,
-    setEventUnsubscribe: (unsubscribe: () => void) => void,
-  ): void {
-    const instance = this.registry.get(request.instanceId);
-    const since = request.since ?? 0;
-    const follow = request.follow ?? false;
-    let initializing = true;
-    let pending: DockEvent[] = [];
-    let lastSent = since;
-    let unsubscribe = (): void => {};
-
-    const closeAfterBackpressure = (): void => {
-      unsubscribe();
-      if (!socket.writableNeedDrain) {
-        socket.end();
-        return;
-      }
-      const timeout = setTimeout(() => socket.destroy(), BACKPRESSURE_CLOSE_TIMEOUT_MS);
-      socket.once("drain", () => {
-        clearTimeout(timeout);
-        if (!socket.destroyed) socket.end();
-      });
-      socket.once("close", () => clearTimeout(timeout));
-    };
-
-    const sendLiveEvent = (event: DockEvent): boolean => {
-      if (event.sequence <= lastSent) return true;
-      const outcome = writeEvent(socket, request.requestId, event);
-      if (outcome === "written" || outcome === "backpressured") {
-        lastSent = event.sequence;
-      }
-      if (outcome === "written") return true;
-      if (outcome === "backpressured") closeAfterBackpressure();
-      else {
-        unsubscribe();
-        socket.destroy();
-      }
-      return false;
-    };
-
-    unsubscribe = instance.subscribe((event) => {
-      if (initializing) {
-        pending.push(event);
-        if (pending.length > MAX_INITIAL_EVENT_QUEUE) {
-          pending = [];
-          unsubscribe();
-          socket.destroy();
-        }
-        return;
-      }
-      sendLiveEvent(event);
-    });
-    setEventUnsubscribe(unsubscribe);
-
-    const result = createBoundedEventsResult(instance, since, follow, request.requestId);
-    const responseOutcome = writeEnvelope(socket, successResponse(request.requestId, result));
-    if (responseOutcome !== "written") {
-      initializing = false;
-      pending = [];
-      if (responseOutcome === "backpressured") {
-        closeAfterBackpressure();
-      } else if (responseOutcome === "too_large") {
-        unsubscribe();
-        this.sendErrorAndEnd(socket, "response_too_large", "Events response exceeds the JSONL record limit", request.requestId);
-      } else {
-        unsubscribe();
-      }
-      return;
-    }
-    lastSent = Math.max(since, result.page.latestSequence);
-    initializing = false;
-
-    pending.sort((left, right) => left.sequence - right.sequence);
-    for (const event of pending) {
-      if (!sendLiveEvent(event)) return;
-    }
-    pending = [];
-
-    if (!follow) {
-      unsubscribe();
-      socket.end();
-    }
+  private attachEventStream(request: Extract<ControlRequest,{type:"instance.attach"}>,socket:Socket,setEventUnsubscribe:(unsubscribe:()=>void)=>void):void {
+    const instance=this.registry.get(request.params.instanceId);
+    const cursor=request.params.since;
+    if(cursor && cursor.instanceId!==instance.id) throw new ProtocolValidationError("invalid_cursor","Cursor belongs to another instance");
+    const epochChanged=cursor!==undefined&&cursor.hostEpoch!==this.hostEpoch;
+    const generationChanged=cursor!==undefined&&cursor.runtimeGeneration!==instance.runtimeGeneration;
+    const replaySince=epochChanged||generationChanged?0:(cursor?.sequence??0);
+    const follow=request.params.follow;
+    let initializing=true,pending:DockEvent[]=[]; let lastSent=replaySince; let unsubscribe=()=>{};
+    const closeAfterBackpressure=():void=>{unsubscribe();if(!socket.writableNeedDrain){socket.end();return;}const timeout=setTimeout(()=>socket.destroy(),BACKPRESSURE_CLOSE_TIMEOUT_MS);socket.once("drain",()=>{clearTimeout(timeout);if(!socket.destroyed)socket.end();});socket.once("close",()=>clearTimeout(timeout));};
+    const sendLiveEvent=(event:DockEvent):boolean=>{if(event.sequence<=lastSent)return true;const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event);if(outcome==="written"||outcome==="backpressured")lastSent=event.sequence;if(outcome==="written")return true;if(outcome==="backpressured")closeAfterBackpressure();else{unsubscribe();socket.destroy();}return false;};
+    unsubscribe=instance.subscribe(event=>{if(initializing){pending.push(event);if(pending.length>MAX_INITIAL_EVENT_QUEUE){pending=[];unsubscribe();socket.destroy();}return;}sendLiveEvent(event);});setEventUnsubscribe(unsubscribe);
+    const result=createBoundedEventsResult(instance,replaySince,follow,request.requestId,epochChanged,generationChanged,request.params.controller === "claim" ? "unavailable" : "observing");
+    const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,result));
+    if(responseOutcome!=="written"){initializing=false;pending=[];if(responseOutcome==="backpressured")closeAfterBackpressure();else if(responseOutcome==="too_large"){unsubscribe();this.sendErrorAndEnd(socket,"response_too_large","Attach response exceeds the JSONL record limit",request.requestId);}else unsubscribe();return;}
+    lastSent=Math.max(replaySince,result.page.latest.sequence);initializing=false;pending.sort((a,b)=>a.sequence-b.sequence);for(const event of pending){if(!sendLiveEvent(event))return;}pending=[];if(!follow){unsubscribe();socket.end();}
   }
 
-  private sendSuccessAndEnd(socket: Socket, requestId: string, result: unknown): void {
-    if (socket.destroyed || socket.writableEnded) return;
-    const outcome = endEnvelope(socket, successResponse(requestId, result));
-    if (outcome === "too_large") {
-      this.sendErrorAndEnd(socket, "response_too_large", "Control response exceeds the JSONL record limit", requestId);
-    }
-  }
-
-  private sendErrorAndEnd(socket: Socket, code: string, message: string, requestId: string): void {
-    if (socket.destroyed || socket.writableEnded) return;
-    const response: ControlResponse = {
-      kind: "response",
-      version: 1,
-      requestId,
-      ok: false,
-      error: { code, message: truncateMessage(message) },
-    };
-    const outcome = endEnvelope(socket, response);
-    if (outcome === "too_large") socket.destroy();
-  }
+  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,result));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
+  private sendErrorAndEnd(socket:Socket,code:string,message:string,requestId:string):void { if(socket.destroyed||socket.writableEnded)return;const response:ControlResponse={kind:"response",version:2,requestId,hostEpoch:this.hostEpoch,ok:false,error:{code,message:truncateMessage(message),retryable:false}};if(endEnvelope(socket,response)==="too_large")socket.destroy(); }
+  private sendHelloError(socket:Socket,requestId:string,code:HelloError["error"]["code"],message:string,details:{hostVersions?:number[];missing?:string[];retryAfterMs?:number}={}):void { if(socket.destroyed||socket.writableEnded)return;const envelope:HelloError={kind:"hello_error",requestId,error:{code,message:truncateMessage(message),...details}};try{socket.end(encodeJsonLine(envelope));}catch{socket.destroy();} }
 }
 
-function successResponse(requestId: string, result: unknown): ControlResponse {
-  return {
-    kind: "response",
-    version: 1,
-    requestId,
-    ok: true,
-    result,
-  };
-}
-
-function createBoundedEventsResult(
-  instance: ManagedInstance,
-  since: number,
-  following: boolean,
-  requestId: string,
-): EventsResult {
-  const source = instance.eventsSince(since);
-  let events = source.events;
-  let truncated = source.truncated;
-  let earliestSequence = source.earliestSequence;
-
-  while (true) {
-    const page: EventPage = {
-      events,
-      earliestSequence,
-      latestSequence: source.latestSequence,
-      truncated,
-    };
-    const result: EventsResult = { instance: instance.snapshot(), page, following };
-    if (encodedSize(successResponse(requestId, result)) <= MAX_CONTROL_LINE_BYTES) return result;
-    if (events.length === 0) return result;
-    events = events.slice(1);
-    truncated = true;
-    earliestSequence = events[0]?.sequence ?? source.latestSequence + 1;
+function successResponse(requestId:string,hostEpoch:string,result:unknown):ControlResponse { return {kind:"response",version:2,requestId,hostEpoch,ok:true,result}; }
+function createBoundedEventsResult(instance:ManagedInstance,since:number,following:boolean,requestId:string,epochChanged:boolean,generationChanged:boolean,controllerStatus:"observing"|"unavailable"):EventsResult {
+  const source=instance.eventsSince(since);
+  let events=source.events;
+  let truncated=source.truncated;
+  if(events.length>MAX_REPLAY_EVENTS){events=events.slice(-MAX_REPLAY_EVENTS);truncated=true;}
+  let earliest=events.length>0&&truncated?{...source.earliest,sequence:events[0]!.sequence}:source.earliest;
+  while(true){
+    const page={events,earliest,latest:source.latest,truncated,epochChanged,generationChanged};
+    const result:EventsResult={instance:instance.snapshot(),page,recentHistory:[],historyTruncated:true,controller:{status:controllerStatus},following};
+    if(encodedSize(successResponse(requestId,instance.hostEpoch,result))<=MAX_CONTROL_LINE_BYTES||events.length===0)return result;
+    events=events.slice(1);
+    truncated=true;
+    earliest={...source.latest,sequence:events[0]?.sequence??source.latest.sequence};
   }
 }
+function writeEvent(socket:Socket,requestId:string,hostEpoch:string,event:DockEvent):WriteOutcome { const envelope:ControlEventEnvelope={kind:"event",version:2,requestId,hostEpoch,event};return writeEnvelope(socket,envelope); }
 
-function writeEvent(socket: Socket, requestId: string, event: DockEvent): WriteOutcome {
-  const envelope: ControlEventEnvelope = {
-    kind: "event",
-    version: 1,
-    requestId,
-    event,
-  };
-  return writeEnvelope(socket, envelope);
-}
-
-function writeEnvelope(socket: Socket, envelope: ControlResponse | ControlEventEnvelope): WriteOutcome {
+function writeEnvelope(socket: Socket, envelope: unknown): WriteOutcome {
   if (socket.destroyed || socket.writableEnded) return "failed";
   let encoded: string;
   try {
@@ -514,6 +368,8 @@ function mapControlError(error: unknown): { code: string; message: string } {
   if (error instanceof InstanceAdmissionPendingError) return { code: "admission_pending", message: error.message };
   if (error instanceof InstanceBusyError) return { code: "instance_busy", message: error.message };
   if (error instanceof RuntimeModelNotFoundError) return { code: "model_not_found", message: error.message };
+  if (error instanceof RuntimeSettingsWriteError) return { code: "settings_write_failed", message: error.message };
+  if (error instanceof OperationConflictError) return { code: "operation_conflict", message: error.message };
   if (error instanceof SyntaxError) return { code: "invalid_json", message: "Request is not valid JSON" };
   if (error instanceof JsonLineError) {
     return {

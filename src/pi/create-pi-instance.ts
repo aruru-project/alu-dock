@@ -16,6 +16,8 @@ import { PiRuntimeSession } from "./pi-runtime-session.js";
 
 export interface CreatePiInstanceOptions {
   id?: string;
+  creationOperationId?: string;
+  hostEpoch?: string;
   name?: string;
   cwd: string;
   agentDir?: string;
@@ -54,12 +56,14 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
     excludeTools: options.excludeTools,
   };
   const result = await createAgentSession(sdkOptions);
-  const runtime = new PiRuntimeSession(result.session, modelRegistry);
+  const runtime = new PiRuntimeSession(result.session, modelRegistry, settingsManager, sessionManager);
   const model = result.session.model
     ? { provider: result.session.model.provider, id: result.session.model.id }
     : undefined;
   const instance = new ManagedInstance({
     id: options.id,
+    creationOperationId: options.creationOperationId,
+    hostEpoch: options.hostEpoch,
     name: options.name,
     cwd,
     session: runtime,
