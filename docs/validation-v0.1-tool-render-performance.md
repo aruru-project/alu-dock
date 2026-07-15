@@ -61,9 +61,18 @@ TUI runtime/InteractiveMode import gate: PASS
 
 The full suite includes real PTY fixed-screen resize, scroll lock and collapsed/expanded tool behavior. No model/provider call was needed for this performance slice.
 
-## Remaining real-world gate
+## Managed rollout and real PTY evidence
 
-A managed candidate release must still be exercised through SSH with single- and multi-tool output while observing the CLI process. The acceptance criterion is the absence of the previous repeated-history render storm, not a fixed CPU ceiling. Normal sustained CPU use under heavy Pi work remains acceptable.
+Immutable release `20260715T175052Z-9c94b51a5369` was deployed from clean commit `9c94b51a5369739f508cf4b820174cf56d25ad67` without `--allow-active`. The managed Host changed to `MainPID=2942842` and `hostEpoch=414e6c04-849d-4326-872d-fdc4de366299`; the release smoke passed with 40 commands, 21 resources, 18 tools, 24 settings and a 3-node session tree.
+
+A full PTY comparison used the previous and new immutable releases with identical input: 220 columns, 200 persisted history entries, one tool, 120 cumulative output updates at 5 ms intervals. CPU percentages are for the TUI process over 100 ms samples and are evidence for the eliminated storm, not a permanent product threshold.
+
+| Release | Average CPU | 100 ms P95 / max |
+|---|---:|---:|
+| previous `4fefab9e2ba4` | 69.6% | 119.4% / 119.4% |
+| optimized `9c94b51a5369` | 13.5% | 30.0% / 30.0% |
+
+Both PTYs rendered the final `bash done` state and exited cleanly. This directly reproduces the user's single-tool trigger and shows that the N+1-like history re-render was removed. Normal sustained CPU use under heavy Pi work remains acceptable; final human htop observation can occur during #142 dogfood without keeping #157 open.
 
 ## Risks and deferrals
 
