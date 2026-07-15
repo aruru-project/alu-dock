@@ -194,6 +194,45 @@ test("conversation renders Markdown, code, thinking policy, and diff tools at bo
   assert.equal(hidden.snapshot().some((entry) => entry.kind === "thinking"), false);
 });
 
+test("duplicate tool projections do not invalidate cached conversation output", () => {
+  const conversation = new DockConversation();
+  conversation.apply(event(1, "tool.started", {
+    toolCallId: "tool-cache",
+    toolName: "edit",
+    args: { path: "src/a.ts" },
+  }));
+  const startedRevision = conversation.revision;
+  const startedLines = conversation.render(80);
+
+  conversation.apply(event(2, "tool.args_updated", {
+    toolCallId: "tool-cache",
+    args: { path: "src/a.ts" },
+  }));
+  assert.equal(conversation.revision, startedRevision);
+  assert.strictEqual(conversation.render(80), startedLines);
+
+  conversation.apply(event(3, "tool.output_updated", {
+    toolCallId: "tool-cache",
+    text: "partial output",
+  }));
+  const outputRevision = conversation.revision;
+  const outputLines = conversation.render(80);
+  assert.ok(outputRevision > startedRevision);
+
+  conversation.apply(event(4, "tool.output_updated", {
+    toolCallId: "tool-cache",
+    text: "partial output",
+  }));
+  assert.equal(conversation.revision, outputRevision);
+  assert.strictEqual(conversation.render(80), outputLines);
+
+  conversation.apply(event(5, "tool.output_updated", {
+    toolCallId: "tool-cache",
+    text: "changed output",
+  }));
+  assert.ok(conversation.revision > outputRevision);
+});
+
 test("tool failures stay collapsed by default and preserve expandable error detail", () => {
   const conversation = new DockConversation();
   conversation.apply(event(1, "tool.started", { toolCallId: "failed-tool", toolName: "bash", args: { command: "false" } }));

@@ -21,6 +21,8 @@ interface ConversationEntry {
   toolCallId?: string;
   toolName?: string;
   toolState?: ToolState;
+  renderRevision: number;
+  renderCache?: { width: number; revision: number; expanded: boolean; lines: string[] };
 }
 
 interface ToolProjection {
@@ -125,9 +127,11 @@ export class DockConversation implements Component {
           if (this.hideThinking) break;
           this.currentThinking ??= this.add("thinking", "", false);
           this.currentThinking.text += safeTerminalText(delta);
+          this.touchEntry(this.currentThinking);
         } else {
           this.currentAssistant ??= this.add("assistant", "", false);
           this.currentAssistant.text += safeTerminalText(delta);
+          this.touchEntry(this.currentAssistant);
         }
         this.markOutputChanged();
         break;
@@ -143,6 +147,7 @@ export class DockConversation implements Component {
           const entry = this.currentThinking ?? this.add("thinking", "", false);
           if (thinking !== undefined) entry.text = safeTerminalText(thinking);
           entry.complete = true;
+          this.touchEntry(entry);
           changed = true;
         }
         this.currentThinking = undefined;
@@ -153,6 +158,7 @@ export class DockConversation implements Component {
         if (entry) {
           if (text !== undefined) entry.text = safeTerminalText(text);
           entry.complete = true;
+          this.touchEntry(entry);
           changed = true;
         }
         this.currentAssistant = undefined;
@@ -183,8 +189,11 @@ export class DockConversation implements Component {
         const callId = stringData(event, "toolCallId") ?? `${event.sequence}`;
         const tool = this.tools.get(callId);
         if (!tool) break;
-        tool.args = formatJson(event.data.args, MAX_TOOL_ARGS);
-        tool.omitted = [...(event.data.omittedFields ?? [])];
+        const args = formatJson(event.data.args, MAX_TOOL_ARGS);
+        const omitted = [...(event.data.omittedFields ?? [])];
+        if (tool.args === args && stringArraysEqual(tool.omitted, omitted)) break;
+        tool.args = args;
+        tool.omitted = omitted;
         this.updateTool(tool, "running");
         break;
       }
@@ -193,7 +202,9 @@ export class DockConversation implements Component {
         const callId = stringData(event, "toolCallId") ?? `${event.sequence}`;
         const tool = this.tools.get(callId);
         if (!tool) break;
-        tool.output = truncate(stringData(event, "text") ?? "", MAX_TOOL_OUTPUT);
+        const output = truncate(stringData(event, "text") ?? "", MAX_TOOL_OUTPUT);
+        if (tool.output === output) break;
+        tool.output = output;
         this.updateTool(tool, "running");
         break;
       }
@@ -225,6 +236,7 @@ export class DockConversation implements Component {
           : "Queue drained.";
         if (this.queueEntry) {
           this.queueEntry.text = text;
+          this.touchEntry(this.queueEntry);
           this.markOutputChanged();
         } else this.queueEntry = this.add("system", text);
         if (total === 0) this.queueEntry = undefined;
@@ -378,7 +390,10 @@ export class DockConversation implements Component {
   get revision(): number { return this.revisionValue; }
   get outputRevision(): number { return this.outputRevisionValue; }
 
-  invalidate(): void { this.renderCache = undefined; }
+  invalidate(): void {
+    this.renderCache = undefined;
+    for (const entry of this.entries) entry.renderCache = undefined;
+  }
 
   render(width: number): string[] {
     if (this.renderCache?.width === width && this.renderCache.revision === this.revisionValue) {
@@ -411,17 +426,22 @@ export class DockConversation implements Component {
   }
 
   private renderEntry(entry: ConversationEntry, width: number): string[] {
-    if (entry.toolCallId && !this.isToolExpanded(entry)) {
-      const [title = "Tool"] = entry.text.split("\n");
-      return [truncateToWidth(`${title} ${paint.muted("· Alt+O detail")}`, width)];
+    const expanded = entry.toolCallId === undefined || this.isToolExpanded(entry);
+    const cached = entry.renderCache;
+    if (cached?.width === width && cached.revision === entry.renderRevision && cached.expanded === expanded) {
+      return cached.lines;
     }
-    if (entry.diffText) {
+
+    let lines: string[];
+    if (entry.toolCallId && !expanded) {
+      const title = `${entry.toolName ?? "tool"} ${entry.toolState ?? (entry.complete ? "done" : "running")}`;
+      lines = [truncateToWidth(`${title} ${paint.muted("· Alt+O detail")}`, width)];
+    } else if (entry.diffText) {
       const marker = "\nresult\n";
       const markerIndex = entry.text.indexOf(marker);
       const details = (markerIndex >= 0 ? entry.text.slice(0, markerIndex) : entry.text.split("\n")[0] ?? "tool done").split("\n");
-      return [...details, ...renderDockDiff(entry.diffText)].map((line) => truncateToWidth(line, width));
-    }
-    if (entry.kind === "assistant" || entry.kind === "thinking") {
+      lines = [...details, ...renderDockDiff(entry.diffText)].map((line) => truncateToWidth(line, width));
+    } else if (entry.kind === "assistant" || entry.kind === "thinking") {
       const text = entry.text.length > 0 ? entry.text : "…";
       const markdown = new Markdown(
         text,
@@ -430,10 +450,14 @@ export class DockConversation implements Component {
         markdownTheme,
         entry.kind === "thinking" ? { color: paint.muted, italic: true } : undefined,
       );
-      return markdown.render(width);
+      lines = markdown.render(width);
+    } else {
+      const text = entry.text.length > 0 ? entry.text : "…";
+      lines = text.split("\n").flatMap((line) => wrapTextWithAnsi(line || " ", width));
     }
-    const text = entry.text.length > 0 ? entry.text : "…";
-    return text.split("\n").flatMap((line) => wrapTextWithAnsi(line || " ", width));
+
+    entry.renderCache = { width, revision: entry.renderRevision, expanded, lines };
+    return lines;
   }
 
   private updateTool(tool: ToolProjection, state: ToolState): void {
@@ -441,9 +465,12 @@ export class DockConversation implements Component {
     if (tool.args) parts.push(`args\n${tool.args}`);
     if (tool.omitted.length > 0) parts.push(`omitted: ${tool.omitted.join(", ")}`);
     if (tool.output) parts.push(`result\n${tool.output}`);
-    tool.entry.text = safeTerminalText(parts.join("\n"));
+    const text = safeTerminalText(parts.join("\n"));
+    if (tool.entry.text === text && tool.entry.toolName === tool.name && tool.entry.toolState === state) return;
+    tool.entry.text = text;
     tool.entry.toolName = tool.name;
     tool.entry.toolState = state;
+    this.touchEntry(tool.entry);
     this.markOutputChanged();
   }
 
@@ -459,7 +486,7 @@ export class DockConversation implements Component {
   }
 
   private add(kind: EntryKind, text: string, complete = true): ConversationEntry {
-    const entry: ConversationEntry = { kind, text: safeTerminalText(text), complete };
+    const entry: ConversationEntry = { kind, text: safeTerminalText(text), complete, renderRevision: 0 };
     this.entries.push(entry);
     this.markOutputChanged();
     while (this.entries.length > MAX_ENTRIES) {
@@ -474,6 +501,11 @@ export class DockConversation implements Component {
       ) this.toolExpansionOverrides.delete(removed.toolCallId);
     }
     return entry;
+  }
+
+  private touchEntry(entry: ConversationEntry): void {
+    entry.renderRevision += 1;
+    entry.renderCache = undefined;
   }
 
   private markLayoutChanged(): void { this.revisionValue += 1; }
@@ -612,6 +644,10 @@ function safeTerminalLine(text: string): string {
 
 function truncate(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, limit)}…`;
+}
+
+function stringArraysEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function looksLikeDiff(text: string | undefined): text is string {

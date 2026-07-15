@@ -17,6 +17,7 @@
     "cli": "npm run build && node dist/src/cli.js",
     "serve": "npm run build && ALU_DOCK_SOCKET=${ALU_DOCK_SOCKET:-${XDG_RUNTIME_DIR:-$HOME/.alu-dock/run}/alu-dock-dev.sock} node dist/src/cli.js serve --dev",
     "smoke:sdk": "npm run build && node dist/scripts/sdk-smoke.js",
+    "bench:tui": "npm run build && node --expose-gc dist/scripts/tui-render-benchmark.js",
     "deploy:dogfood": "npm run build && node dist/scripts/deploy-dogfood.js"
   },
   "dependencies": {
