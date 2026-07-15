@@ -19,11 +19,15 @@ alu-dock
 ├── releases/
 │   └── <UTC timestamp>-<12-char git SHA>/
 │       ├── dist/src/
+│       ├── dist/scripts/
 │       ├── node_modules/
 │       ├── package.json
 │       ├── package-lock.json
 │       └── RELEASE.json
 ├── current -> releases/<release-id>
+├── receipts/
+│   ├── <release-id>.json
+│   └── <failed-release-id>.failed.json
 └── bin/alu-dock
 
 ~/.local/bin/alu-dock -> /home/luziyi/release/alu-dock/bin/alu-dock

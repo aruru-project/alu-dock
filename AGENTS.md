@@ -133,8 +133,7 @@ Follow `docs/dogfood-deployment.md` for managed releases. Stage completion and d
 
 ## Current staged boundary
 
-While card #142 Stage 3.6 is active, work may fix the command-catalog startup regression and establish the bounded release/managed-service baseline in `docs/dogfood-deployment.md`. It must not implement:
+Stage 3.6 is deployed; the next implementation boundary is card #142 Stage 4. Stage 4 may add the frozen declarative extension interaction lease/UI broker and current-extension compatibility only. It must not implement:
 
-- Stage 4 extension interaction lease/UI broker;
 - Stage 5 durable catalog, startup reconcile, host-loss reopen or the complete service management CLI;
 - Stage 6 tree/fork/clone.

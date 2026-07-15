@@ -20,7 +20,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [x] 阶段 2：SSH TUI 核心与 Footer
 - [x] 阶段 3：日常控制与核心 Session
 - [x] 阶段 3.5：轻度结构重构与项目 `AGENTS.md`
-- [ ] 阶段 3.6：Dogfood release 与 `systemd --user` managed service基线
+- [x] 阶段 3.6：Dogfood release 与 `systemd --user` managed service基线
 - [ ] 阶段 4：Extension UI
 - [ ] 阶段 5：`systemd --user`、durable catalog 与 reopen
 - [ ] 阶段 6：tree/fork/clone
@@ -48,6 +48,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-v0.1-stage-3.5-structure.md`](docs/validation-v0.1-stage-3.5-structure.md)
 - [`docs/validation-v0.1-command-catalog-startup-hotfix.md`](docs/validation-v0.1-command-catalog-startup-hotfix.md)
 - [`docs/dogfood-deployment.md`](docs/dogfood-deployment.md)
+- [`docs/validation-v0.1-stage-3.6-dogfood-release.md`](docs/validation-v0.1-stage-3.6-dogfood-release.md)
 
 ## V0.1 工程入口
 
@@ -55,17 +56,17 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 
 **绿地规则：** Alu Dock 是全新项目。到 1.0 落地前，除非用户特意说明，不考虑任何旧协议、旧 Host、旧数据、旧 CLI 行为的兼容或迁移；原型合同直接替换。版本号仅标识当前合同，不表示存在历史包袱。
 
-阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1 已将当前控制面切为 V2-only，并完成 Runtime replacement、project trust、closed projections及 registry transaction/fault seam；阶段 2 已 advertised `tui.projection.v1` 与独立的 `run.abort.v1`；阶段 3 已 advertised `session.commands.v1` 并完成日常 settings/session workflows。阶段 3.5 已按职责完成轻度拆分并新增根 `AGENTS.md`。下一入口调整为阶段 3.6：先把阶段产物发布到 `/home/luziyi/release/alu-dock` 并由 baseline `systemd --user` Host承载 dogfood；durable atomic catalog、startup reconcile、explicit reopen与完整 service CLI仍属于阶段 5。
+阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1 已将当前控制面切为 V2-only，并完成 Runtime replacement、project trust、closed projections及 registry transaction/fault seam；阶段 2 已 advertised `tui.projection.v1` 与独立的 `run.abort.v1`；阶段 3 已 advertised `session.commands.v1` 并完成日常 settings/session workflows；阶段 3.5 完成轻度拆分；阶段 3.6 已把不可变 release、稳定 launcher、真实资源 smoke 和 baseline user service 投入 dogfood。下一工程入口为阶段 4；durable atomic catalog、startup reconcile、explicit reopen与完整 service CLI仍属于阶段 5。
 
-## 当前过渡期真人入口
+## 当前默认真人入口
 
-阶段 3.6 完成前直接运行：
+直接运行：
 
 ```bash
-npm run cli
+alu-dock
 ```
 
-该入口会自动检查并按需在后台启动 Host，无需先开一个终端执行 `serve`。它按当前 cwd 查找活动实例：没有则创建，一个则直接重连，多个则显示选择器。进入 TUI 后可直接输入消息并查看流式回复和近期活动。
+该入口连接已启用的 `alu-dock.service`，不会静默 fork 无法追踪的 detached Host。它按当前 cwd 查找活动实例：没有则创建，一个则直接重连，多个则显示选择器。进入 TUI 后可直接输入消息并查看流式回复和近期活动。
 
 常用操作：
 
@@ -88,27 +89,27 @@ npm run cli
 也可以明确新建或接入：
 
 ```bash
-npm run cli -- new --cwd "$PWD" --name demo
-npm run cli -- attach INSTANCE_ID
+alu-dock new --cwd "$PWD" --name demo
+alu-dock attach INSTANCE_ID
 ```
 
-再次执行 `npm run cli` 会先投影 Pi SessionManager 当前 branch 的持久 history baseline，再重放 Host 近期 events 并继续观察 live events。TUI Footer 展示 cwd、Dock/Pi ID、model/thinking、state/queue、tokens/context/cache/cost、extension status 和 connection/lease；extension/skill/prompt commands 与路径进入 autocomplete。模型/thinking 切换沿用 Pi 的 session 与 settings 语义，只允许实例 idle 时执行；当前运行不会被中途换模。Host 在创建 Pi SDK session 前安装与 Pi CLI 相同的 Undici `EnvHttpProxyAgent`：优先保留进程已有 `HTTP_PROXY` / `HTTPS_PROXY`，缺失时采用 Pi 全局 `httpProxy` 设置。默认 socket 为 `$XDG_RUNTIME_DIR/alu-dock/dock.sock`，未设置 XDG 时为 `~/.alu-dock/run/dock.sock`；后台日志位于 socket 同目录的 `host.log`。
+再次执行 `alu-dock` 会先投影 Pi SessionManager 当前 branch 的持久 history baseline，再重放 Host 近期 events 并继续观察 live events。TUI Footer 展示 cwd、Dock/Pi ID、model/thinking、state/queue、tokens/context/cache/cost、extension status 和 connection/lease；extension/skill/prompt commands 与路径进入 autocomplete。模型/thinking 切换沿用 Pi 的 session 与 settings 语义，只允许实例 idle 时执行；当前运行不会被中途换模。Host 在创建 Pi SDK session 前安装与 Pi CLI 相同的 Undici `EnvHttpProxyAgent`：优先保留进程已有 `HTTP_PROXY` / `HTTPS_PROXY`，缺失时采用 Pi 全局 `httpProxy` 设置。默认 socket 为 `$XDG_RUNTIME_DIR/alu-dock/dock.sock`；managed 日志使用 `journalctl --user -u alu-dock.service`。
 
 ## 机器与诊断接口
 
 以下命令保留结构化 JSONL 输出，供测试、脚本和排障使用：
 
 ```bash
-npm run cli -- serve
-npm run cli -- create --cwd "$PWD" --name demo
-npm run cli -- list
-npm run cli -- status INSTANCE_ID
-npm run cli -- events INSTANCE_ID --follow
+alu-dock ping
+alu-dock create --cwd "$PWD" --name demo
+alu-dock list
+alu-dock status INSTANCE_ID
+alu-dock events INSTANCE_ID --follow
 # resume only with the complete cursor returned by the prior response:
-npm run cli -- events INSTANCE_ID --cursor HOST_EPOCH:RUNTIME_GENERATION:SEQUENCE --follow
-npm run cli -- prompt INSTANCE_ID "start a new run"
-npm run cli -- prompt INSTANCE_ID --delivery followUp "then summarize"
-npm run cli -- stop INSTANCE_ID
+alu-dock events INSTANCE_ID --cursor HOST_EPOCH:RUNTIME_GENERATION:SEQUENCE --follow
+alu-dock prompt INSTANCE_ID "start a new run"
+alu-dock prompt INSTANCE_ID --delivery followUp "then summarize"
+alu-dock stop INSTANCE_ID
 ```
 
 也可用 `--socket PATH` 或 `ALU_DOCK_SOCKET` 指定 socket。`prompt` receipt 只表示 preflight 已接受；`queued=true` 不表示任务完成。socket 父目录必须为当前用户私有目录，socket mode 固定为 `0600`。
@@ -131,6 +132,10 @@ Alu Dock 的 `instanceId` 与 Pi 的 `piSessionId/sessionFile` 分离。`prompt(
 npm install
 npm run check
 npm test
+# checkout-only development entry; not the dogfood release:
+npm run cli
+# after a clean committed stage gate:
+npm run deploy:dogfood
 ```
 
 ## 可选真实 SDK smoke
