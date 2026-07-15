@@ -11,6 +11,7 @@ import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
 import { encodeJsonLine, JsonLineDecoder } from "../src/control/json-lines.js";
 import { ProjectTrustCoordinator } from "../src/control/project-trust.js";
+import { ExtensionUiBroker } from "../src/core/extension-ui-broker.js";
 import { ManagedInstance, type DockEvent } from "../src/core/managed-instance.js";
 import { SETTING_KEYS } from "../src/core/config-projection.js";
 import { RuntimeInvalidSettingValueError, RuntimeSettingsWriteError } from "../src/core/runtime-session.js";
@@ -100,7 +101,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["core.v2", "events.follow", "host.info", "instance.catalog", "models.v1", "resources.v1", "run.abort.v1", "session.commands.v1", "session.core", "settings.v1", "tools.v1", "tui.projection.v1"]);
+  assert.deepEqual(ack.capabilities, ["core.v2", "events.follow", "extension_ui.v1", "host.info", "instance.catalog", "models.v1", "resources.v1", "run.abort.v1", "session.commands.v1", "session.core", "settings.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -218,6 +219,165 @@ test("session switch resolves target project trust before replacement effects", 
   assert.equal(switched.instance.cwd, targetCwd);
   assert.equal(switched.instance.runtimeGeneration, 2);
   assert.equal(runtime?.sessionMutationCalls.switch, 1);
+});
+
+test("extension UI lease round-trips dialogs and detach cancels fail closed", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-extension-ui-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const broker = new ExtensionUiBroker();
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
+    const session = new DelayedRuntimeSession(`pi-${id}`);
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session, extensionUiBroker: broker });
+  }, () => "extension-ui-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+  const instance = await client.create(directory, "extension-ui");
+  const liveEvents: DockEvent[] = [];
+  let resolveRequested!: (event: Extract<DockEvent, { type: "interaction.requested" }>) => void;
+  let requestedPromise = new Promise<Extract<DockEvent, { type: "interaction.requested" }>>((resolve) => { resolveRequested = resolve; });
+  const controller = await client.streamEvents(instance.id, {
+    claimController: true,
+    requireTuiProjection: true,
+    onEvent: (event) => {
+      liveEvents.push(event);
+      if (event.type === "interaction.requested") resolveRequested(event);
+    },
+  });
+  assert.equal(controller.initial.controller.status, "acquired");
+  if (controller.initial.controller.status !== "acquired") return;
+  const leaseToken = controller.initial.controller.leaseToken;
+  await assert.rejects(
+    client.respondInteraction(instance.id, leaseToken, "not-sent", { method: "input", value: "A0+/".repeat(32) }, "binary-response"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_request",
+  );
+  await assert.rejects(
+    client.respondInteraction(instance.id, leaseToken, "not-sent", { method: "editor", value: "x".repeat(256_001) }, "oversized-response"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_request",
+  );
+
+  const observer = await new DockClient({ socketPath }).streamEvents(instance.id, {
+    claimController: true,
+    onEvent: () => {},
+  });
+  assert.equal(observer.initial.controller.status, "unavailable");
+  observer.close();
+  await observer.done;
+
+  const confirmed = broker.confirm("Delete?", "This cannot be undone");
+  const requested = await requestedPromise;
+  assert.equal(requested.data.method, "confirm");
+  await assert.rejects(
+    client.respondInteraction(instance.id, "wrong-lease", requested.data.interactionId, { method: "confirm", confirmed: true }),
+    (error: unknown) => error instanceof ControlClientError && error.code === "interaction_wrong_lease",
+  );
+  assert.deepEqual(
+    await client.respondInteraction(instance.id, leaseToken, requested.data.interactionId, { method: "confirm", confirmed: true }, "respond-1"),
+    { interactionId: requested.data.interactionId, state: "resolved" },
+  );
+  assert.equal(await confirmed, true);
+  assert.deepEqual(
+    await client.respondInteraction(instance.id, leaseToken, requested.data.interactionId, { method: "confirm", confirmed: true }, "respond-2"),
+    { interactionId: requested.data.interactionId, state: "already_resolved" },
+  );
+
+  requestedPromise = new Promise((resolve) => { resolveRequested = resolve; });
+  const input = broker.input("Name", "optional");
+  const inputRequest = await requestedPromise;
+  assert.equal(inputRequest.data.method, "input");
+  controller.close();
+  await controller.done;
+  assert.equal(await input, undefined);
+  const replay = await client.events(instance.id);
+  assert.equal(replay.page.events.some((event) => event.type === "interaction.cancelled" && event.data.interactionId === inputRequest.data.interactionId && event.data.reason === "detach"), true);
+  assert.equal(await broker.confirm("No controller", "fail closed"), false);
+  assert.ok(liveEvents.some((event) => event.type === "interaction.resolved"));
+});
+
+test("SSH TUI controller completes select confirm input and editor extension dialogs", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-extension-pty-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const readyFile = join(directory, "dialog.ready");
+  const broker = new ExtensionUiBroker();
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
+    const session = new DelayedRuntimeSession(`pi-${id}`);
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session, extensionUiBroker: broker });
+  }, () => "extension-pty-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+  const instance = await client.create(directory, "extension-pty");
+  const ptyRun = runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+    "attach", instance.id,
+  ], "extension-dialogs", readyFile);
+  await waitForPath(readyFile);
+
+  assert.equal(await broker.select("Pick fixture", ["Alpha", "Beta"]), "Beta");
+  assert.equal(await broker.confirm("Confirm fixture", "Proceed?"), true);
+  assert.equal(await broker.input("Input fixture", "value"), "typed value");
+  assert.equal(await broker.editor("Edit fixture", "prefilled editor value"), "prefilled editor value");
+
+  const pty = await ptyRun;
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-4_000));
+  assert.equal(pty.status, 0, output.slice(-4_000));
+  for (const marker of ["Pick fixture", "Confirm fixture", "Input fixture", "Edit fixture"]) assert.match(output, new RegExp(marker));
+  assert.match(output, /connected\/acquired/);
+});
+
+test("SSH TUI reacquires its controller after runtime replacement", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-extension-replacement-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const readyFile = join(directory, "replacement.ready");
+  const broker = new ExtensionUiBroker();
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
+    const session = new DelayedRuntimeSession(`pi-${id}`);
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session, extensionUiBroker: broker });
+  }, () => "extension-replacement-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+  const instance = await client.create(directory, "extension-replacement");
+  const ptyRun = runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+    "attach", instance.id,
+  ], "extension-replacement", readyFile);
+  await waitForPath(readyFile);
+
+  const replacement = await client.newSession(instance.id);
+  assert.equal(replacement.instance.runtimeGeneration, 2);
+  let confirmed = false;
+  const confirmationDeadline = Date.now() + 3_000;
+  while (!confirmed && Date.now() < confirmationDeadline) {
+    const attempt = broker.confirm("Post replacement confirm", "Controller lease was reacquired.");
+    const outcome = await Promise.race([
+      attempt.then((value) => ({ settled: true as const, value })),
+      new Promise<{ settled: false }>((resolveDelay) => setTimeout(() => resolveDelay({ settled: false }), 30)),
+    ]);
+    if (!outcome.settled) confirmed = await attempt;
+    else confirmed = outcome.value;
+    if (!confirmed) await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+  }
+  assert.equal(confirmed, true);
+
+  const pty = await ptyRun;
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-4_000));
+  assert.equal(pty.status, 0, output.slice(-4_000));
+  assert.match(output, /Post replacement confirm/);
+  assert.match(output, /connected\/acquired/);
+  assert.doesNotMatch(output, /Host event stream closed|connection lost/);
 });
 
 test("two clients observe and replay one host-owned running instance", async (context) => {
@@ -1874,7 +2034,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "editor" | "abort" | "transport-close" | "stage3" | "model-search" | "scroll" | "tool-fold" = "detach",
+  action: "detach" | "editor" | "abort" | "transport-close" | "stage3" | "model-search" | "scroll" | "tool-fold" | "extension-dialogs" | "extension-replacement" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {

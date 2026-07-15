@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { ExtensionUiBroker } from "../src/core/extension-ui-broker.js";
 import {
   InstanceAdmissionPendingError,
   InstanceBusyError,
@@ -243,6 +244,24 @@ function createInstance(session = new FakeRuntimeSession(), eventCapacity = 50):
     commandId: () => `command-${++commandSequence}`,
   });
 }
+
+test("suspended replacement UI cannot leak candidate status into the committed generation", async () => {
+  const broker = new ExtensionUiBroker();
+  const instance = new ManagedInstance({
+    id: "dock-instance-ui-generation",
+    cwd: "/tmp/project",
+    session: new FakeRuntimeSession(),
+    extensionUiBroker: broker,
+  });
+  instance.markCatalogCommitted();
+  broker.setStatus("fixture", "old generation");
+  assert.deepEqual(instance.snapshot().extensionStatus, { fixture: "old generation" });
+
+  broker.beginGenerationChange();
+  broker.setStatus("fixture", "candidate generation");
+  assert.deepEqual(instance.snapshot().extensionStatus, { fixture: "old generation" });
+  await broker.failGenerationChange();
+});
 
 test("submit returns after preflight while the runtime promise remains host-owned", async () => {
   const session = new FakeRuntimeSession();

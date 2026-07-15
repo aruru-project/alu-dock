@@ -8,6 +8,7 @@ import {
   VERSION,
 } from "@earendil-works/pi-coding-agent";
 
+import { ExtensionUiBroker } from "../core/extension-ui-broker.js";
 import { ManagedInstance } from "../core/managed-instance.js";
 import { ProjectTrustCoordinator } from "../control/project-trust.js";
 import { createPiRuntimeHost } from "./pi-runtime-host.js";
@@ -30,6 +31,7 @@ export interface CreatePiInstanceOptions {
 export async function createPiInstance(options: CreatePiInstanceOptions): Promise<ManagedInstance> {
   const cwd = resolve(options.cwd);
   const agentDir = resolve(options.agentDir ?? getAgentDir());
+  const extensionUiBroker = new ExtensionUiBroker();
   const runtime = await createPiRuntimeHost({
     cwd,
     agentDir,
@@ -37,6 +39,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
     tools: options.tools,
     excludeTools: options.excludeTools,
     projectTrusted: options.projectTrusted,
+    extensionUiBroker,
   });
   try {
     const modelState = runtime.getModelState();
@@ -54,6 +57,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
         thinkingLevel: modelState.thinkingLevel,
       },
       eventCapacity: options.eventCapacity,
+      extensionUiBroker,
     });
     runtime.activateInitial();
     instance.synchronizeModelState();

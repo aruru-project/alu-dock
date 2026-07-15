@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import { resolve } from "node:path";
+import { containsBinaryPayload, type InteractionResponse } from "../core/extension-ui-broker.js";
 import type { DeliveryMode, DockEvent, EventCursor, EventPage, InstanceSnapshot } from "../core/managed-instance.js";
 import type { RuntimeThinkingLevel } from "../core/runtime-session.js";
 import type { SettingUpdate } from "../core/config-projection.js";
@@ -22,6 +23,7 @@ import {
   parseHelloReply,
   parseHostInfoResult,
   parseHistoryResult,
+  parseInteractionRespondResult,
   requiredCapabilities,
   parseListResult,
   parseModelsResult,
@@ -46,6 +48,7 @@ import {
   type HelloAck,
   type HostInfoResult,
   type HistoryResult,
+  type InteractionRespondResult,
   type ModelsResult,
   type PingResult,
   type PromptResult,
@@ -86,6 +89,7 @@ export class DockClient {
   async status(instanceId:string):Promise<InstanceSnapshot>{return (await this.request("instance.get",{instanceId},"instance.catalog",parseStatusResult)).instance;}
   async events(instanceId:string,since?:EventCursor):Promise<{instance:InstanceSnapshot;page:EventPage&{epochChanged:boolean;generationChanged:boolean}}>{const result=await this.request("instance.attach",{instanceId,since,follow:false,controller:"observe"},"events.follow",parseEventsResult);return {instance:result.instance,page:result.page};}
   prompt(instanceId:string,message:string,delivery:DeliveryMode="auto",operationId=this.createRequestId()):Promise<PromptResult>{return this.request("command.submit",{operationId,instanceId,message,delivery},"session.core",parsePromptResult);}
+  respondInteraction(instanceId:string,leaseToken:string,interactionId:string,response:InteractionResponse,operationId=this.createRequestId()):Promise<InteractionRespondResult>{if("value" in response){const limit=response.method==="select"?8_000:256_000;if(response.value.length>limit)return Promise.reject(new ControlClientError("invalid_request",`Interaction ${response.method} response exceeds ${limit} characters`,operationId));if(containsBinaryPayload(response.value))return Promise.reject(new ControlClientError("invalid_request","Interaction responses cannot contain binary, image, data URI, or raw base64 payloads",operationId));}return this.request("interaction.respond",{operationId,instanceId,leaseToken,interactionId,response},"extension_ui.v1",parseInteractionRespondResult);}
   abort(instanceId:string,operationId=this.createRequestId()):Promise<AbortResult>{return this.request("command.abort",{operationId,instanceId},"run.abort.v1",parseAbortResult);}
   models(instanceId:string):Promise<ModelsResult>{return this.request("model.list",{instanceId},"models.v1",parseModelsResult);}
   setModel(instanceId:string,provider:string,modelId:string,operationId=this.createRequestId()):Promise<ModelConfigurationResult>{return this.request("model.set",{operationId,instanceId,provider,modelId},"models.v1",parseModelConfigurationResult);}
@@ -105,10 +109,11 @@ export class DockClient {
   reloadSession(instanceId:string,operationId=this.createRequestId()):Promise<SessionReloadResult>{return this.request("session.reload",{operationId,instanceId},"session.commands.v1",parseSessionReloadResult);}
   stop(instanceId:string,operationId=this.createRequestId()):Promise<StopResult>{return this.request("instance.stop",{operationId,instanceId},"instance.catalog",parseStopResult);}
 
-  async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean}):Promise<EventSubscription>{
+  async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;claimController?:boolean}):Promise<EventSubscription>{
     const since=options.since;const helloId=this.createRequestId(),requestId=this.createRequestId();
     const streamCapabilities:string[]=options.requireTuiProjection?["core.v2","events.follow","run.abort.v1","tui.projection.v1"]:requiredCapabilities("events.follow");
-    const request:ControlRequest={kind:"request",version:2,requestId,type:"instance.attach",params:{instanceId,since,follow:true,controller:"observe"}};
+    if(options.claimController&&!streamCapabilities.includes("extension_ui.v1"))streamCapabilities.push("extension_ui.v1");
+    const request:ControlRequest={kind:"request",version:2,requestId,type:"instance.attach",params:{instanceId,since,follow:true,controller:options.claimController?"claim":"observe"}};
     const socket=createConnection(this.socketPath),decoder=new JsonLineDecoder();let phase:"hello"|"response"|"events"="hello",hostEpoch="",initialSettled=false,doneSettled=false,closeRequested=false,callbacksReady=false,pending:DockEvent[]=[],runtimeGeneration:number|undefined,lastSequence=-1;
     let resolveInitial!:(x:EventSubscription)=>void,rejectInitial!:(e:unknown)=>void,resolveDone!:()=>void,rejectDone!:(e:unknown)=>void;
     const done=new Promise<void>((r,j)=>{resolveDone=r;rejectDone=j;});void done.catch(()=>{});const initial=new Promise<EventSubscription>((r,j)=>{resolveInitial=r;rejectInitial=j;});
@@ -215,6 +220,10 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
   if(type==="instance.attach"){
     const page=record.page as {earliest?:EventCursor;latest?:EventCursor}|undefined;
     if(!page||page.earliest?.hostEpoch!==hostEpoch||page.latest?.hostEpoch!==hostEpoch)throw new ProtocolValidationError("invalid_response","Attach cursors do not match negotiated Host epoch");
+  }
+  if(type==="interaction.respond"){
+    const requested=(params as Extract<ControlRequest,{type:"interaction.respond"}>["params"]);
+    if(record.interactionId!==requested.interactionId)throw new ProtocolValidationError("invalid_response","Interaction result does not match requested interactionId");
   }
   if(type==="tool.set_active"){
     const requested=new Set((params as Extract<ControlRequest,{type:"tool.set_active"}>["params"]).names);

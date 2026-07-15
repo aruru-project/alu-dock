@@ -5,6 +5,7 @@ import {
   matchesKey,
   truncateToWidth,
   visibleWidth,
+  wrapTextWithAnsi,
   type Focusable,
 } from "@earendil-works/pi-tui";
 
@@ -14,6 +15,7 @@ import { paint } from "./theme.js";
 export interface SearchablePickerOptions {
   title: string;
   footer?: string;
+  body?: string;
   maxVisible?: number;
   initialValue?: string;
   requestRender: () => void;
@@ -28,6 +30,7 @@ export class SearchablePicker extends Container implements Focusable {
   private readonly maxVisible: number;
   private readonly title: string;
   private readonly footer: string;
+  private readonly body: string | undefined;
   private readonly requestRender: () => void;
   private focusedValue = false;
 
@@ -45,6 +48,7 @@ export class SearchablePicker extends Container implements Focusable {
     this.maxVisible = Math.max(1, Math.floor(options.maxVisible ?? 12));
     this.title = safeDisplayText(options.title);
     this.footer = safeDisplayText(options.footer ?? "type to filter · ↑↓ choose · Enter select · Esc cancel");
+    this.body = options.body === undefined ? undefined : safeBodyText(options.body);
     this.requestRender = options.requestRender;
     const initialIndex = options.initialValue === undefined
       ? -1
@@ -90,11 +94,11 @@ export class SearchablePicker extends Container implements Focusable {
     const searchPrefix = "  Search: ";
     const inputWidth = Math.max(1, safeWidth - visibleWidth(searchPrefix) - 1);
     const inputLine = this.searchInput.render(inputWidth)[0] ?? "";
-    const lines = [
-      truncateToWidth(`  ${paint.bold(paint.accent(this.title))}`, safeWidth),
-      truncateToWidth(`${paint.muted(searchPrefix)}${inputLine}`, safeWidth),
-      "",
-    ];
+    const lines = [truncateToWidth(`  ${paint.bold(paint.accent(this.title))}`, safeWidth)];
+    if (this.body) {
+      lines.push(...wrapTextWithAnsi(`  ${this.body}`, safeWidth).map((line) => truncateToWidth(line, safeWidth)), "");
+    }
+    lines.push(truncateToWidth(`${paint.muted(searchPrefix)}${inputLine}`, safeWidth), "");
 
     if (this.filteredItems.length === 0) {
       lines.push(truncateToWidth(paint.muted("  No matching items"), safeWidth));
@@ -145,4 +149,8 @@ export class SearchablePicker extends Container implements Focusable {
 
 function safeDisplayText(value: string): string {
   return value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, "");
+}
+
+function safeBodyText(value: string): string {
+  return value.replace(/[\t\r\n]+/gu, " ").replace(/[\u0000-\u001f\u007f-\u009f]/gu, "");
 }

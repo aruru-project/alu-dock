@@ -93,6 +93,29 @@ def main() -> int:
                 while b"replayed; this TUI" not in output and time.monotonic() < close_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
+            elif action == "extension-dialogs":
+                dialog_steps = [
+                    (b"Pick fixture", b"beta\r"),
+                    (b"Confirm fixture", b"\x1b[A\r"),
+                    (b"Input fixture", b"typed value\r"),
+                    (b"Edit fixture", b"\r"),
+                ]
+                for marker, response in dialog_steps:
+                    dialog_deadline = time.monotonic() + 5
+                    while marker not in output and time.monotonic() < dialog_deadline:
+                        if read_available(fd, output, 0.05) < 0:
+                            break
+                    os.write(fd, response)
+                    time.sleep(0.1)
+                    read_available(fd, output, 0.05)
+            elif action == "extension-replacement":
+                dialog_deadline = time.monotonic() + 5
+                while b"Post replacement confirm" not in output and time.monotonic() < dialog_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\x1b[A\r")  # Confirm defaults to No; move to explicit Yes.
+                time.sleep(0.1)
+                read_available(fd, output, 0.05)
             elif action == "model-search":
                 os.write(fd, b"/model\r")
                 picker_deadline = time.monotonic() + 4

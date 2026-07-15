@@ -9,6 +9,13 @@ import {
   type InstanceCatalogMutationPort,
   validateInstanceStateInvariant,
 } from "./catalog.js";
+import {
+  ExtensionUiBroker,
+  type ControllerClaim,
+  type ExtensionUiEventType,
+  type InteractionResponse,
+  type InteractionResult,
+} from "./extension-ui-broker.js";
 import { RuntimeSettingsWriteError } from "./runtime-session.js";
 import type {
   CommandDto,
@@ -99,6 +106,7 @@ export interface ManagedInstanceOptions {
   commandId?: () => string;
   creationOperationId?: string;
   hostEpoch?: string;
+  extensionUiBroker?: ExtensionUiBroker;
 }
 
 interface AssistantOutcome {
@@ -197,6 +205,7 @@ export class ManagedInstance {
   readonly createdAt: string;
 
   private readonly session: RuntimeSession;
+  private readonly extensionUi: ExtensionUiBroker;
   private nameValue: string | undefined;
   private cwdValue: string;
   private readonly executorIdentity: ExecutorIdentity;
@@ -268,6 +277,7 @@ export class ManagedInstance {
       : 500;
     this.now = options.now ?? (() => new Date());
     this.createCommandId = options.commandId ?? randomUUID;
+    this.extensionUi = options.extensionUiBroker ?? new ExtensionUiBroker(this.now, this.createCommandId);
 
     const createdAt = this.timestamp();
     this.createdAt = createdAt;
@@ -296,6 +306,11 @@ export class ManagedInstance {
       cwd: this.cwd,
       name: this.name,
       executor: this.executorIdentity,
+    });
+    this.extensionUi.bind({
+      generation: () => this.runtimeGenerationValue,
+      emit: (type, data) => this.enqueueExtensionUiEvent(type, data),
+      projectionChanged: () => this.syncExtensionUiProjection(),
     });
   }
 
@@ -359,8 +374,9 @@ export class ManagedInstance {
 
   disposeForHostDrain(): Promise<void> {
     if (this.hostDrainPromise) return this.hostDrainPromise;
-    this.hostDrainActive = true;
     this.hostDrainPromise = (async () => {
+      await this.extensionUi.cancelForHostDrain();
+      this.hostDrainActive = true;
       await this.transitionTail;
       const admission = this.pendingAdmission;
       this.pendingAdmission = undefined;
@@ -394,7 +410,7 @@ export class ManagedInstance {
         model: this.executorIdentity.model ? { ...this.executorIdentity.model } : undefined,
       },
       metrics: cloneJson(this.metricsValue),
-      extensionStatus: {},
+      ...this.extensionUi.projection(),
       activeCommandId: this.state.activeCommandId,
       lastError: this.state.lastError,
       createdAt: this.createdAt,
@@ -425,6 +441,24 @@ export class ManagedInstance {
   subscribe(listener: (event: DockEvent) => void): () => void {
     this.subscribers.add(listener);
     return () => this.subscribers.delete(listener);
+  }
+
+  claimInteractionController(): Promise<ControllerClaim> {
+    this.assertActive();
+    return this.extensionUi.claimController();
+  }
+
+  releaseInteractionController(leaseToken: string, reason: "detach" | "host_draining" = "detach"): Promise<void> {
+    return this.extensionUi.releaseController(leaseToken, reason);
+  }
+
+  respondInteraction(leaseToken: string, interactionId: string, response: InteractionResponse): Promise<InteractionResult> {
+    this.assertActive();
+    return this.extensionUi.respond(leaseToken, interactionId, response);
+  }
+
+  cancelInteractionsForHostDrain(): Promise<void> {
+    return this.extensionUi.cancelForHostDrain();
   }
 
   synchronizeModelState(): void {
@@ -1066,8 +1100,30 @@ export class ManagedInstance {
     this.appendEvent("extension.error", { error: safeWireText(errorMessage(error), 2_048, "Sensitive error payload omitted") });
   }
 
+  private enqueueExtensionUiEvent<T extends ExtensionUiEventType>(type: T, data: EventDataMap[T]): Promise<void> {
+    if (this.hostDrainActive) return Promise.resolve();
+    return this.enqueueTransition(async () => {
+      if (this.hostDrainActive) return;
+      this.syncExtensionUiProjection();
+      this.appendEvent(type, cloneJson(data));
+    });
+  }
+
+  private syncExtensionUiProjection(): void {
+    if (!this.committedSnapshotValue || this.extensionUi.isSuspended()) return;
+    const projection = this.extensionUi.projection();
+    this.committedSnapshotValue = {
+      ...this.committedSnapshotValue,
+      extensionStatus: cloneJson(projection.extensionStatus),
+      ...(projection.activeInteraction === undefined
+        ? { activeInteraction: undefined }
+        : { activeInteraction: cloneJson(projection.activeInteraction) }),
+    };
+  }
+
   private async performStop(operationId: string, admissionBoundary?: Promise<void>): Promise<StopReceipt> {
     const cleanupErrors: string[] = [];
+    await this.extensionUi.cancelForHostDrain();
     let clearedCounts: { steering: number; followUp: number } | undefined;
     const captureCleanupError = (stage: string, error: unknown): void => {
       const message = safeWireText(`${stage}: ${errorMessage(error)}`, 2_048, `${stage}: sensitive cleanup error omitted`);
@@ -1525,6 +1581,7 @@ export class ManagedInstance {
       instanceId: this.id,
     });
     if (event.type === "dock_session_replaced") {
+      this.extensionUi.beginGenerationChange();
       const previousSessionFile = optionalRuntimeString(event.previousSessionFile, 16_384);
       const sessionFile = optionalRuntimeString(event.sessionFile, 16_384);
       const cwd = optionalRuntimeString(event.cwd, 16_384);
@@ -1558,6 +1615,7 @@ export class ManagedInstance {
         this.eventLog.length = 0;
         this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue });
       });
+      void this.extensionUi.completeGenerationChange();
       return;
     }
     if (event.type === "session_info_changed") {
@@ -1569,6 +1627,7 @@ export class ManagedInstance {
       return;
     }
     if (event.type === "dock_runtime_error") {
+      void this.extensionUi.failGenerationChange();
       const error = boundedRuntimeString(event.error, 2_048, "Runtime replacement failed");
       const recoverySessionFile = optionalRuntimeString(event.recoverySessionFile, 16_384)
         ?? this.replacementIntent?.previousSessionFile;
@@ -1706,6 +1765,7 @@ export class ManagedInstance {
   private handleRuntimeEvent(event: RuntimeEvent): void {
     if (this.state.lifecycle === "stopped") return;
     if (event.type === "dock_session_replaced") {
+      this.extensionUi.beginGenerationChange();
       const previousSessionFile = optionalRuntimeString(event.previousSessionFile, 16_384);
       const sessionFile = optionalRuntimeString(event.sessionFile, 16_384);
       const cwd = optionalRuntimeString(event.cwd, 16_384);
@@ -1736,6 +1796,7 @@ export class ManagedInstance {
       this.applyModelState(this.session.getModelState());
       this.touch();
       this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue });
+      void this.extensionUi.completeGenerationChange();
       return;
     }
     if (event.type === "session_info_changed") {
@@ -1746,6 +1807,7 @@ export class ManagedInstance {
       return;
     }
     if (event.type === "dock_runtime_error") {
+      void this.extensionUi.failGenerationChange();
       this.recoverySessionFile = optionalRuntimeString(event.recoverySessionFile, 16_384)
         ?? this.replacementIntent?.previousSessionFile;
       this.replacementIntent = undefined;

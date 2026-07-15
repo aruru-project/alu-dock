@@ -70,13 +70,13 @@ Capability 只在实现和对应 gate 都通过后才 advertised：
 Client hello：
 
 ```json
-{"kind":"hello","requestId":"h1","versions":[2],"client":{"name":"alu-dock-tui","version":"0.1.0","clientId":"uuid"},"requiredCapabilities":["core.v2","events.follow","run.abort.v1","tui.projection.v1"]}
+{"kind":"hello","requestId":"h1","versions":[2],"client":{"name":"alu-dock-tui","version":"0.1.0","clientId":"uuid"},"requiredCapabilities":["core.v2","events.follow","run.abort.v1","tui.projection.v1","extension_ui.v1"]}
 ```
 
 Ready success（capability 列表只是当前实现集合）：
 
 ```json
-{"kind":"hello_ack","requestId":"h1","version":2,"host":{"pid":123,"dockVersion":"0.1.0","piSdkVersion":"0.80.6","hostEpoch":"uuid","startedAt":"2026-07-14T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["core.v2","events.follow","host.info","instance.catalog","models.v1","resources.v1","run.abort.v1","session.commands.v1","session.core","settings.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200}}
+{"kind":"hello_ack","requestId":"h1","version":2,"host":{"pid":123,"dockVersion":"0.1.0","piSdkVersion":"0.80.6","hostEpoch":"uuid","startedAt":"2026-07-14T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["core.v2","events.follow","extension_ui.v1","host.info","instance.catalog","models.v1","resources.v1","run.abort.v1","session.commands.v1","session.core","settings.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200}}
 ```
 
 任何 hello 失败都使用 closed `hello_error`，随后关闭：
@@ -554,7 +554,7 @@ Host_lost/runtime_error record 没有 live session history surface；TUI 只显�
 
 ### Lease scope
 
-- lease 与一个 follow attach socket绑定并返回不可猜测 token；
+- lease 与一个 `follow=true` attach socket绑定并返回不可猜测 token；`controller="claim"` 与 non-follow attach的组合在 side effect 前拒绝；
 - 同 instance 同时一个 lease；第二 claim 可降级 observer或返回 unavailable；
 - lease **只**仲裁 extension dialogs/editor-directed fire-and-forget，不阻止其他客户端发普通 command/config；
 - detach/socket close/Host drain/runtime generation变化立即 release；
@@ -576,9 +576,10 @@ Fail-closed completion：
 
 - `notify` → `extension.notification`；
 - `setStatus` → generation-local status map + event；
-- string widget → optional bounded lines；
-- setTitle/setEditorText只发 controller；
-- Component/factory/custom footer/header/editor/raw terminal input/`ctx.ui.custom()` 不上 wire。
+- string widget → optional bounded lines/event；当前 TUI不承诺持久 widget layout；
+- setTitle/setEditorText是可选面，当前 adapter显式 unsupported/no-op而不是伪装成功；若后续实现只能发 controller；
+- Component/factory/custom footer/header/editor/raw terminal input/`ctx.ui.custom()` 不上 wire；
+- 所有 extension terminal projection过滤 C0/C1，并把 data URI/raw base64替换为 omission；官方 client在发送 dialog response前也拒绝这类 payload。
 
 ## 14. Settings semantics
 

@@ -134,6 +134,10 @@ export class DockRegistry {
 
   beginMutationDrain(): void { this.catalog.beginDraining(); }
 
+  async cancelInteractionsForHostDrain(): Promise<void> {
+    await Promise.allSettled([...this.instances.values()].map((instance) => instance.cancelInteractionsForHostDrain()));
+  }
+
   async disposeAllForHostDrain(): Promise<void> {
     this.beginMutationDrain();
     await Promise.allSettled([...this.instances.values()].map((instance) => instance.disposeForHostDrain()));

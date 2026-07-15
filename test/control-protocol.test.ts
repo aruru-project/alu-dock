@@ -11,6 +11,7 @@ import {
   parseEventsResult,
   parseHostInfoResult,
   parseHistoryResult,
+  parseInteractionRespondResult,
   parseModelConfigurationResult,
   parseSessionsResult,
   parseSessionCompactionResult,
@@ -88,6 +89,11 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   }), (error: unknown) => error instanceof ProtocolValidationError && error.code === "invalid_request");
   assert.throws(() => parseControlRequest({
     ...base,
+    type: "instance.attach",
+    params: { instanceId: "i1", follow: false, controller: "claim" },
+  }), /requires a follow attach stream/);
+  assert.throws(() => parseControlRequest({
+    ...base,
     type: "command.submit",
     params: { operationId: "op1", instanceId: "i1", message: "hello", delivery: "parallel" },
   }), /unsupported value/);
@@ -132,6 +138,76 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
     type: "instance.create",
     params: { operationId: "create-1", cwd: "/tmp/project", trustChallengeId: "challenge-1", projectTrustDecision: "allow" },
   }), /unsupported value/);
+});
+
+test("Stage 4 interaction requests, responses, and controller leases are closed", () => {
+  const base = { kind: "request", version: 2, requestId: "interaction-request" };
+  assert.deepEqual(parseControlRequest({
+    ...base,
+    type: "interaction.respond",
+    params: {
+      operationId: "respond-1", instanceId: "i1", leaseToken: "lease-1", interactionId: "dialog-1",
+      response: { method: "confirm", confirmed: true },
+    },
+  }).params, {
+    operationId: "respond-1", instanceId: "i1", leaseToken: "lease-1", interactionId: "dialog-1",
+    response: { method: "confirm", confirmed: true },
+  });
+  assert.throws(() => parseControlRequest({
+    ...base,
+    type: "interaction.respond",
+    params: {
+      operationId: "respond-1", instanceId: "i1", leaseToken: "lease-1", interactionId: "dialog-1",
+      response: { method: "confirm", value: "yes" },
+    },
+  }), /Unexpected field|confirmed/);
+  assert.throws(() => parseControlRequest({
+    ...base,
+    type: "interaction.respond",
+    params: {
+      operationId: "respond-1", instanceId: "i1", leaseToken: "lease-1", interactionId: "dialog-1",
+      response: { method: "select", cancelled: false },
+    },
+  }), /must be true/);
+  assert.throws(() => parseControlRequest({
+    ...base,
+    type: "interaction.respond",
+    params: {
+      operationId: "respond-1", instanceId: "i1", leaseToken: "lease-1", interactionId: "dialog-1",
+      response: { method: "editor", value: "data:image/png;base64,A0+/A0+/A0+/" },
+    },
+  }), /cannot contain binary/);
+  assert.throws(() => parseControlRequest({
+    ...base,
+    type: "interaction.respond",
+    params: {
+      operationId: "respond-1", instanceId: "i1", leaseToken: "lease-1", interactionId: "dialog-1",
+      response: { method: "input", value: "A0+/".repeat(32) },
+    },
+  }), /cannot contain binary/);
+  assert.deepEqual(parseInteractionRespondResult({ interactionId: "dialog-1", state: "already_resolved" }), {
+    interactionId: "dialog-1", state: "already_resolved",
+  });
+  assert.throws(() => parseInteractionRespondResult({ interactionId: "dialog-1", state: "resolved", extra: true }), /Unexpected field/);
+
+  const attach = parseEventsResult({
+    instance: validSnapshot(),
+    page: { events: [], earliest: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, latest: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, truncated: false, epochChanged: false, generationChanged: false },
+    recentHistory: [], historyTruncated: false, controller: { status: "acquired", leaseToken: "lease-1" }, following: true,
+  });
+  assert.deepEqual(attach.controller, { status: "acquired", leaseToken: "lease-1" });
+  assert.throws(() => parseEventsResult({
+    ...attach,
+    controller: { status: "acquired" },
+  }), /leaseToken/);
+  assert.throws(() => parseControlEventEnvelope({
+    kind: "event", version: 2, requestId: "stream-1", hostEpoch: "epoch-1",
+    event: validEvent("extension.notification", { message: "data:image/png;base64,A0+/", level: "info" }),
+  }, "stream-1", "epoch-1"), /cannot contain binary/);
+  assert.throws(() => parseControlEventEnvelope({
+    kind: "event", version: 2, requestId: "stream-1", hostEpoch: "epoch-1",
+    event: validEvent("extension.status_changed", { key: "__proto__", text: "unsafe" }),
+  }, "stream-1", "epoch-1"), /unsafe/);
 });
 
 test("Stage 3 session command requests and results are closed", () => {

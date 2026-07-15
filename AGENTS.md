@@ -134,9 +134,6 @@ Follow `docs/dogfood-deployment.md` for managed releases. Stage completion and d
 
 ## Current staged boundary
 
-Stage 3.6 is deployed. Card #147 has completed the client-only dogfood closure: fixed composer/history viewport, tool folding, activity feedback and searchable selectors. Those behaviors remain Dock-owned pure state behind thin public-`pi-tui` adapters and add no Host interaction ownership or wire fields.
+Stage 3.6 remains the deployed managed baseline. Card #147 completed the client-only dogfood closure, and Stage 4 now adds the separately owned `ExtensionUiBroker`, Pi adapter, attach-bound controller lease and structured extension overlays. Client viewport/search/tool-fold state remains independent from Host interaction state; both use only public package-root APIs. Their managed rollout waits for the current Host to have no active instance and must not force a restart.
 
-The current boundary is card #142 Stage 4. Stage 4 reuses #147's overlay/focus/search/layout primitives while adding the frozen declarative extension interaction lease/UI broker and current-extension compatibility. Keep client view state and Stage 4 Host interaction state in separate modules and commits. Stage 4 must not implement:
-
-- Stage 5 durable catalog, startup reconcile, host-loss reopen or the complete service management CLI;
-- Stage 6 tree/fork/clone.
+The current boundary is card #142 Stage 5. Stage 5 may add durable catalog, startup reconcile, explicit host-loss reopen and the complete service management CLI, but must preserve the Stage 4 interaction/generation/lease lifecycle and must not implement Stage 6 tree/fork/clone. Extension component factories, `ctx.ui.custom()`, binary/image transport and renderer replacement remain out of scope.

@@ -1,3 +1,4 @@
+import { containsBinaryPayload, type InteractionResponse } from "../core/extension-ui-broker.js";
 import type {
   CommandReceipt,
   ContentBlockDto,
@@ -50,6 +51,7 @@ const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "ma
 export const IMPLEMENTED_CAPABILITIES = [
   "core.v2",
   "events.follow",
+  "extension_ui.v1",
   "host.info",
   "instance.catalog",
   "models.v1",
@@ -106,6 +108,7 @@ export type ControlRequest =
   | Request<"instance.get", { instanceId: string }>
   | Request<"instance.attach", { instanceId: string; since?: EventCursor; follow: boolean; controller: "claim" | "observe" }>
   | Request<"instance.stop", { operationId: string; instanceId: string }>
+  | Request<"interaction.respond", { operationId: string; instanceId: string; leaseToken: string; interactionId: string; response: InteractionResponse }>
   | Request<"command.submit", { operationId: string; instanceId: string; message: string; delivery: DeliveryMode }>
   | Request<"command.abort", { operationId: string; instanceId: string }>
   | Request<"model.list", { instanceId: string }>
@@ -147,10 +150,11 @@ export interface AttachInitialDto {
   page: EventPage & { epochChanged: boolean; generationChanged: boolean };
   recentHistory: HistoryEntryDto[];
   historyTruncated: boolean;
-  controller: { status: "observing" | "unavailable" };
+  controller: { status: "acquired"; leaseToken: string } | { status: "observing" | "unavailable" };
   following: boolean;
 }
 export type EventsResult = AttachInitialDto;
+export interface InteractionRespondResult { interactionId: string; state: "resolved" | "already_resolved" }
 export interface PromptResult { receipt: CommandReceipt; instance: InstanceSnapshot }
 export interface AbortResult { instance: InstanceSnapshot }
 export interface StopResult { receipt: { operationId: string; alreadyStopped: boolean; cleanupErrors?: string[] }; instance: InstanceSnapshot }
@@ -173,6 +177,7 @@ export type ConfigurationResult = ModelConfigurationResult | ThinkingConfigurati
 export function implementedCapabilities(): string[] { return [...IMPLEMENTED_CAPABILITIES].sort(); }
 export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "host.info") return "host.info";
+  if (type === "interaction.respond") return "extension_ui.v1";
   if (type.startsWith("instance.")) return type === "instance.attach" ? "events.follow" : "instance.catalog";
   if (type === "command.abort") return "run.abort.v1";
   if (type === "session.history") return "tui.projection.v1";
@@ -283,8 +288,24 @@ export function parseControlRequest(input: unknown): ControlRequest {
     }
     case "instance.list": exact(params, ["includeTerminal"], "invalid_request"); return { ...base, type, params: { includeTerminal: optionalBoolean(params.includeTerminal, "params.includeTerminal", "invalid_request") } };
     case "instance.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
-    case "instance.attach": exact(params, ["instanceId", "since", "follow", "controller"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId(), since: params.since === undefined ? undefined : parseCursor(params.since, "params.since", "invalid_request"), follow: boolean(params.follow, "params.follow", "invalid_request"), controller: enumeration(params.controller, "params.controller", ["claim", "observe"], "invalid_request") } };
+    case "instance.attach": {
+      exact(params, ["instanceId", "since", "follow", "controller"], "invalid_request");
+      const follow = boolean(params.follow, "params.follow", "invalid_request");
+      const controller = enumeration(params.controller, "params.controller", ["claim", "observe"], "invalid_request");
+      if (controller === "claim" && !follow) throw validation("invalid_request", "controller claim requires a follow attach stream");
+      return { ...base, type, params: { instanceId: instanceId(), since: params.since === undefined ? undefined : parseCursor(params.since, "params.since", "invalid_request"), follow, controller } };
+    }
     case "instance.stop": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
+    case "interaction.respond": {
+      exact(params, ["operationId", "instanceId", "leaseToken", "interactionId", "response"], "invalid_request");
+      return { ...base, type, params: {
+        operationId: operationId(),
+        instanceId: instanceId(),
+        leaseToken: string(params.leaseToken, "params.leaseToken", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request"),
+        interactionId: string(params.interactionId, "params.interactionId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request"),
+        response: parseInteractionResponse(params.response, "params.response", "invalid_request"),
+      } };
+    }
     case "command.submit": exact(params, ["operationId", "instanceId", "message", "delivery"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), message: string(params.message, "params.message", MAX_PROMPT_CHARS, "invalid_request"), delivery: enumeration(params.delivery, "params.delivery", ["auto", "prompt", "steer", "followUp"], "invalid_request") } };
     case "command.abort": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "model.list": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
@@ -401,8 +422,19 @@ export function parseEventsResult(input: unknown): EventsResult {
   }
   const history = array(value.recentHistory, "recentHistory", MAX_HISTORY_ITEMS).map((item, index) => parseHistoryEntry(item, `recentHistory[${index}]`));
   if (new Set(history.map((entry) => entry.entryId)).size !== history.length) throw validation("invalid_response", "recentHistory entry IDs must be unique");
-  const controller = object(value.controller, "controller"); exact(controller, ["status"]);
-  return { instance, page: { events, earliest, latest, truncated: boolean(page.truncated, "page.truncated"), epochChanged: boolean(page.epochChanged, "page.epochChanged"), generationChanged: boolean(page.generationChanged, "page.generationChanged") }, recentHistory: history, historyTruncated: boolean(value.historyTruncated, "historyTruncated"), controller: { status: enumeration(controller.status, "controller.status", ["observing", "unavailable"]) }, following: boolean(value.following, "following") };
+  const controller = object(value.controller, "controller");
+  const controllerStatus = enumeration(controller.status, "controller.status", ["acquired", "observing", "unavailable"]);
+  if (controllerStatus === "acquired") {
+    exact(controller, ["status", "leaseToken"]);
+    return { instance, page: { events, earliest, latest, truncated: boolean(page.truncated, "page.truncated"), epochChanged: boolean(page.epochChanged, "page.epochChanged"), generationChanged: boolean(page.generationChanged, "page.generationChanged") }, recentHistory: history, historyTruncated: boolean(value.historyTruncated, "historyTruncated"), controller: { status: controllerStatus, leaseToken: id(controller.leaseToken, "controller.leaseToken") }, following: boolean(value.following, "following") };
+  }
+  exact(controller, ["status"]);
+  return { instance, page: { events, earliest, latest, truncated: boolean(page.truncated, "page.truncated"), epochChanged: boolean(page.epochChanged, "page.epochChanged"), generationChanged: boolean(page.generationChanged, "page.generationChanged") }, recentHistory: history, historyTruncated: boolean(value.historyTruncated, "historyTruncated"), controller: { status: controllerStatus }, following: boolean(value.following, "following") };
+}
+export function parseInteractionRespondResult(input: unknown): InteractionRespondResult {
+  const value = object(input, "interaction response result");
+  exact(value, ["interactionId", "state"]);
+  return { interactionId: id(value.interactionId, "interactionId"), state: enumeration(value.state, "state", ["resolved", "already_resolved"]) };
 }
 export function parsePromptResult(input: unknown): PromptResult {
   const value = object(input, "prompt result"); exact(value, ["receipt", "instance"]);
@@ -581,7 +613,7 @@ function parseInstance(input: unknown, field: string): InstanceSnapshot {
     lifecycle: enumeration(value.lifecycle, `${field}.lifecycle`, ["active", "stopping", "stopped", "host_lost", "runtime_error"]), execution: enumeration(value.execution, `${field}.execution`, ["idle", "running", "failed", "unavailable"]), lastRun: enumeration(value.lastRun, `${field}.lastRun`, ["never", "succeeded", "failed", "aborted", "interrupted"]), reopenable: boolean(value.reopenable, `${field}.reopenable`), runtimeGeneration: positive(value.runtimeGeneration, `${field}.runtimeGeneration`), ownerHostEpoch: optionalString(value.ownerHostEpoch, `${field}.ownerHostEpoch`, 128), pending: parsePending(value.pending, `${field}.pending`), executor: parseExecutor(value.executor, `${field}.executor`), metrics: value.metrics === undefined ? undefined : parseMetrics(value.metrics, `${field}.metrics`), extensionStatus: {}, activeCommandId: optionalString(value.activeCommandId, `${field}.activeCommandId`, 128), lastError: optionalString(value.lastError, `${field}.lastError`, MAX_MESSAGE), createdAt: timestamp(value.createdAt, `${field}.createdAt`), updatedAt: timestamp(value.updatedAt, `${field}.updatedAt`), eventCursor: parseCursor(value.eventCursor, `${field}.eventCursor`),
   };
   if (value.interruption !== undefined) { const interruption = object(value.interruption, `${field}.interruption`); exact(interruption, ["reason", "at"]); snapshot.interruption = { reason: enumeration(interruption.reason, "interruption.reason", ["host_crash", "host_shutdown", "replacement_failed"]), at: timestamp(interruption.at, "interruption.at") }; }
-  const status = object(value.extensionStatus, `${field}.extensionStatus`); if (Object.keys(status).length > 64) throw validation("invalid_response", "extensionStatus has too many keys"); for (const [key, item] of Object.entries(status)) snapshot.extensionStatus[string(key, "extensionStatus key", 128)] = string(item, `extensionStatus.${key}`, MAX_TEXT);
+  const status = object(value.extensionStatus, `${field}.extensionStatus`); if (Object.keys(status).length > 64) throw validation("invalid_response", "extensionStatus has too many keys"); for (const [key, item] of Object.entries(status)) snapshot.extensionStatus[extensionKey(key, "extensionStatus key")] = payloadFreeString(item, `extensionStatus.${key}`, MAX_MESSAGE);
   if (value.activeInteraction !== undefined) { const interaction = object(value.activeInteraction, `${field}.activeInteraction`); exact(interaction, ["id", "method", "expiresAt"]); snapshot.activeInteraction = { id: id(interaction.id, "activeInteraction.id"), method: enumeration(interaction.method, "activeInteraction.method", ["select", "confirm", "input", "editor"]), expiresAt: timestamp(interaction.expiresAt, "activeInteraction.expiresAt") }; }
   assertCursorDomain(snapshot.eventCursor, snapshot, `${field}.eventCursor`);
   const terminal = snapshot.lifecycle === "stopped" || snapshot.lifecycle === "host_lost" || snapshot.lifecycle === "runtime_error";
@@ -645,10 +677,10 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "interaction.requested": return parseDialogRequest(data, field);
     case "interaction.resolved": exact(data, ["interactionId", "method"]); return { interactionId: text("interactionId", 128), method: enumeration(data.method, "method", ["select", "confirm", "input", "editor"]) };
     case "interaction.cancelled": exact(data, ["interactionId", "method", "reason"]); return { interactionId: text("interactionId", 128), method: enumeration(data.method, "method", ["select", "confirm", "input", "editor"]), reason: enumeration(data.reason, "reason", ["user", "timeout", "signal", "detach", "replacement", "host_draining", "overflow"]) };
-    case "extension.notification": exact(data, ["message", "level"]); return { message: text("message"), level: enumeration(data.level, "level", ["info", "warning", "error"]) };
-    case "extension.status_changed": exact(data, ["key", "text"]); return { key: text("key", 128), text: data.text === undefined ? undefined : boundedString(data.text, `${field}.text`, MAX_TEXT) };
-    case "extension.widget_changed": exact(data, ["key", "lines", "placement"]); return { key: text("key", 128), lines: data.lines === undefined ? undefined : strings(data.lines, "lines", MAX_JSON_ARRAY, MAX_TEXT), placement: data.placement === undefined ? undefined : enumeration(data.placement, "placement", ["aboveEditor", "belowEditor"]) };
-    case "extension.error": exact(data, ["source", "event", "error"]); return { source: optionalText("source", 256), event: optionalText("event", 128), error: text("error", MAX_MESSAGE) };
+    case "extension.notification": exact(data, ["message", "level"]); return { message: payloadFreeString(data.message, `${field}.message`, MAX_TEXT), level: enumeration(data.level, "level", ["info", "warning", "error"]) };
+    case "extension.status_changed": exact(data, ["key", "text"]); return { key: extensionKey(data.key, `${field}.key`), text: data.text === undefined ? undefined : payloadFreeString(data.text, `${field}.text`, MAX_MESSAGE) };
+    case "extension.widget_changed": exact(data, ["key", "lines", "placement"]); return { key: extensionKey(data.key, `${field}.key`), lines: data.lines === undefined ? undefined : payloadFreeStrings(data.lines, `${field}.lines`, MAX_JSON_ARRAY, MAX_TEXT), placement: data.placement === undefined ? undefined : enumeration(data.placement, "placement", ["aboveEditor", "belowEditor"]) };
+    case "extension.error": exact(data, ["source", "event", "error"]); return { source: data.source === undefined ? undefined : payloadFreeString(data.source, `${field}.source`, 256), event: data.event === undefined ? undefined : payloadFreeString(data.event, `${field}.event`, 128), error: payloadFreeString(data.error, `${field}.error`, MAX_MESSAGE) };
     default: throw validation("invalid_response", `Unsupported event type: ${type}`);
   }
 }
@@ -678,16 +710,54 @@ function parseHistoryEntry(input: unknown, field: string): HistoryEntryDto {
   };
 }
 
+function parseInteractionResponse(input: unknown, field: string, code = "invalid_response"): InteractionResponse {
+  const value = object(input, field, code);
+  const method = enumeration(value.method, `${field}.method`, ["select", "confirm", "input", "editor"], code);
+  if (value.cancelled !== undefined) {
+    exact(value, ["method", "cancelled"], code);
+    if (boolean(value.cancelled, `${field}.cancelled`, code) !== true) throw validation(code, `${field}.cancelled must be true`);
+    return { method, cancelled: true };
+  }
+  if (method === "confirm") {
+    exact(value, ["method", "confirmed"], code);
+    return { method, confirmed: boolean(value.confirmed, `${field}.confirmed`, code) };
+  }
+  exact(value, ["method", "value"], code);
+  const responseValue = string(value.value, `${field}.value`, method === "select" ? MAX_TEXT : MAX_PROMPT_CHARS, code);
+  if (containsBinaryPayload(responseValue)) throw validation(code, `${field}.value cannot contain binary, image, data URI, or raw base64 payloads`);
+  return { method, value: responseValue };
+}
+
 function parseDialogRequest(data: Record<string, unknown>, field: string): EventDataMap["interaction.requested"] {
   const method = enumeration(data.method, `${field}.method`, ["select", "confirm", "input", "editor"]);
   const interactionId = id(data.interactionId, `${field}.interactionId`);
-  const title = string(data.title, `${field}.title`, MAX_MESSAGE);
+  const title = payloadFreeString(data.title, `${field}.title`, MAX_MESSAGE);
   const issuedAt = timestamp(data.issuedAt, `${field}.issuedAt`);
   const expiresAt = timestamp(data.expiresAt, `${field}.expiresAt`);
-  if (method === "select") { exact(data, ["interactionId", "method", "title", "options", "issuedAt", "expiresAt"]); return { interactionId, method, title, options: strings(data.options, "options", 200, MAX_TEXT), issuedAt, expiresAt }; }
-  if (method === "confirm") { exact(data, ["interactionId", "method", "title", "message", "issuedAt", "expiresAt"]); return { interactionId, method, title, message: string(data.message, "message", MAX_TEXT), issuedAt, expiresAt }; }
-  if (method === "input") { exact(data, ["interactionId", "method", "title", "placeholder", "issuedAt", "expiresAt"]); return { interactionId, method, title, ...(data.placeholder === undefined ? {} : { placeholder: string(data.placeholder, "placeholder", MAX_TEXT) }), issuedAt, expiresAt }; }
-  exact(data, ["interactionId", "method", "title", "prefill", "issuedAt", "expiresAt"]); return { interactionId, method, title, ...(data.prefill === undefined ? {} : { prefill: string(data.prefill, "prefill", MAX_PROMPT_CHARS) }), issuedAt, expiresAt };
+  if (method === "select") { exact(data, ["interactionId", "method", "title", "options", "issuedAt", "expiresAt"]); return { interactionId, method, title, options: payloadFreeStrings(data.options, `${field}.options`, 200, MAX_TEXT), issuedAt, expiresAt }; }
+  if (method === "confirm") { exact(data, ["interactionId", "method", "title", "message", "issuedAt", "expiresAt"]); return { interactionId, method, title, message: payloadFreeString(data.message, `${field}.message`, MAX_TEXT), issuedAt, expiresAt }; }
+  if (method === "input") { exact(data, ["interactionId", "method", "title", "placeholder", "issuedAt", "expiresAt"]); return { interactionId, method, title, ...(data.placeholder === undefined ? {} : { placeholder: payloadFreeString(data.placeholder, `${field}.placeholder`, MAX_TEXT) }), issuedAt, expiresAt }; }
+  exact(data, ["interactionId", "method", "title", "prefill", "issuedAt", "expiresAt"]); return { interactionId, method, title, ...(data.prefill === undefined ? {} : { prefill: payloadFreeString(data.prefill, `${field}.prefill`, MAX_PROMPT_CHARS) }), issuedAt, expiresAt };
+}
+
+function payloadFreeString(input: unknown, field: string, max: number, code = "invalid_response"): string {
+  const value = string(input, field, max, code);
+  if (containsBinaryPayload(value)) throw validation(code, `${field} cannot contain binary, image, data URI, or raw base64 payloads`);
+  return value;
+}
+
+function payloadFreeStrings(input: unknown, field: string, maxItems: number, maxChars: number, code = "invalid_response"): string[] {
+  const values = strings(input, field, maxItems, maxChars, code);
+  for (const [index, value] of values.entries()) {
+    if (containsBinaryPayload(value)) throw validation(code, `${field}[${index}] cannot contain binary, image, data URI, or raw base64 payloads`);
+  }
+  return values;
+}
+
+function extensionKey(input: unknown, field: string): string {
+  const key = payloadFreeString(input, field, 128);
+  if (key === "__proto__" || key === "prototype" || key === "constructor") throw validation("invalid_response", `${field} is unsafe`);
+  return key;
 }
 function parseSettingUpdate(input: unknown, field: string, code = "invalid_response"): SettingUpdate {
   const update = object(input, field, code); exact(update, ["key", "value"], code);

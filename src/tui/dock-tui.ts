@@ -14,14 +14,16 @@ import {
 } from "@earendil-works/pi-tui";
 
 import { ControlClientError, DockClient, type EventSubscription } from "../control/dock-client.js";
+import type { InteractionResponse } from "../core/extension-ui-broker.js";
 import type { CommandDto, SettingDto, SettingUpdate } from "../core/config-projection.js";
-import type { DeliveryMode, DockEvent, InstanceSnapshot } from "../core/managed-instance.js";
+import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot } from "../core/managed-instance.js";
 import type {
   RuntimeModelInfo,
   RuntimeThinkingLevel,
 } from "../core/runtime-session.js";
 import type { ProjectTrustChoice } from "../control/project-trust.js";
 import { DockConversation, DockStatusLine } from "./conversation.js";
+import { ExtensionTextDialog } from "./extension-text-dialog.js";
 import { FixedDockScreen } from "./pi-tui-screen.js";
 import {
   abortingActivity,
@@ -67,6 +69,11 @@ export async function runDockTui(
   let runActivity = activityFromSnapshot(instance);
   status.setActivity(runActivity);
   let subscription: EventSubscription | undefined;
+  let controllerLeaseToken: string | undefined;
+  let activeExtensionDialog: { interactionId: string; closeFromHost: () => void } | undefined;
+  let lastEventGeneration = instance.runtimeGeneration;
+  let lastEventSequence = instance.eventCursor.sequence;
+  let controllerReattach: Promise<void> | undefined;
   let cleanupErrors: string[] | undefined;
   let editor!: Editor;
   let screen: FixedDockScreen | undefined;
@@ -88,11 +95,19 @@ export async function runDockTui(
   };
 
   const onEvent = (event: DockEvent): void => {
+    if (event.runtimeGeneration < lastEventGeneration) return;
+    if (event.runtimeGeneration === lastEventGeneration && event.sequence <= lastEventSequence) return;
+    lastEventGeneration = event.runtimeGeneration;
+    lastEventSequence = event.sequence;
     instance = projectSnapshot(instance, event);
     status.update(instance);
     runActivity = reduceRunActivity(runActivity, event, instance);
     status.setActivity(runActivity);
     if (event.type === "session.replaced") {
+      activeExtensionDialog?.closeFromHost();
+      controllerLeaseToken = undefined;
+      status.setController("unavailable");
+      void reacquireController({ ...instance.eventCursor });
       replacementHistoryGeneration = event.runtimeGeneration;
       replacementBufferedEvents = [event];
       conversation.reset();
@@ -105,6 +120,10 @@ export async function runDockTui(
     } else {
       conversation.apply(event);
     }
+    if (event.type === "interaction.requested") void handleExtensionInteraction(event);
+    if ((event.type === "interaction.cancelled" || event.type === "interaction.resolved") && activeExtensionDialog?.interactionId === event.data.interactionId) {
+      activeExtensionDialog.closeFromHost();
+    }
     if (event.type === "settings.changed") applyLiveSetting(event.data.key, event.data.value);
     if (event.type === "session.info_changed") terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
     if (event.type === "instance.stopped" && editor) editor.disableSubmit = true;
@@ -112,8 +131,10 @@ export async function runDockTui(
     tui.requestRender();
   };
 
-  subscription = await client.streamEvents(instance.id, { onEvent, requireTuiProjection: true });
+  subscription = await client.streamEvents(instance.id, { onEvent, requireTuiProjection: true, claimController: true });
   instance = subscription.initial.instance;
+  lastEventGeneration = subscription.initial.page.latest.runtimeGeneration;
+  lastEventSequence = subscription.initial.page.latest.sequence;
   conversation.applyHistory(subscription.initial.recentHistory, subscription.initial.historyTruncated);
   conversation.applyReplay(
     subscription.initial.page.events,
@@ -122,7 +143,51 @@ export async function runDockTui(
   status.update(instance);
   runActivity = activityFromReplay(instance, subscription.initial.page.events);
   status.setActivity(runActivity);
+  controllerLeaseToken = subscription.initial.controller.status === "acquired"
+    ? subscription.initial.controller.leaseToken
+    : undefined;
   status.setController(subscription.initial.controller.status);
+
+  function reacquireController(since: EventCursor): Promise<void> {
+    if (controllerReattach) return controllerReattach;
+    const previous = subscription;
+    if (!previous) return Promise.resolve();
+    const task = (async () => {
+      try {
+        const next = await client.streamEvents(instance.id, {
+          since,
+          onEvent,
+          requireTuiProjection: true,
+          claimController: true,
+        });
+        if (exiting || subscription !== previous) {
+          next.close();
+          await next.done.catch(() => {});
+          return;
+        }
+        subscription = next;
+        controllerLeaseToken = next.initial.controller.status === "acquired"
+          ? next.initial.controller.leaseToken
+          : undefined;
+        status.setController(next.initial.controller.status);
+        watchEventSubscription(next);
+        for (const event of next.initial.page.events) onEvent(event);
+        previous.close();
+        tui.requestRender();
+      } catch (error) {
+        if (exiting) return;
+        controllerLeaseToken = undefined;
+        status.setController("unavailable");
+        conversation.addNotice(`Controller reattach failed: ${errorText(error)}`, true);
+        tui.requestRender();
+      }
+    })();
+    const tracked = task.finally(() => {
+      if (controllerReattach === tracked) controllerReattach = undefined;
+    });
+    controllerReattach = tracked;
+    return tracked;
+  }
 
   const [settingsLoad, commandsLoad] = await Promise.allSettled([
     client.settings(instance.id),
@@ -419,6 +484,103 @@ export async function runDockTui(
     const overlay = tui.showOverlay(picker, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
     try { return await selection; }
     finally { overlay.hide(); }
+  }
+
+  async function handleExtensionInteraction(event: Extract<DockEvent, { type: "interaction.requested" }>): Promise<void> {
+    const leaseToken = controllerLeaseToken;
+    if (!leaseToken) {
+      conversation.addNotice("Extension interaction is awaiting its controller; this client is observing.");
+      tui.requestRender();
+      return;
+    }
+    if (activeExtensionDialog) {
+      conversation.addNotice("A second extension interaction arrived while a dialog is active; it will remain Host-queued.", true);
+      tui.requestRender();
+      return;
+    }
+
+    const outcome = await presentExtensionDialog(event.data);
+    if (outcome.fromHost || outcome.response === undefined) return;
+    try {
+      await client.respondInteraction(instance.id, leaseToken, event.data.interactionId, outcome.response);
+    } catch (error) {
+      if (error instanceof ControlClientError && (error.code === "interaction_expired" || error.code === "interaction_not_found")) return;
+      if (error instanceof ControlClientError && error.code === "interaction_wrong_lease") {
+        controllerLeaseToken = undefined;
+        status.setController("unavailable");
+      }
+      showError(error);
+    }
+  }
+
+  async function presentExtensionDialog(
+    request: Extract<DockEvent, { type: "interaction.requested" }>["data"],
+  ): Promise<{ response?: InteractionResponse; fromHost: boolean }> {
+    let settled = false;
+    let resolveDialog!: (outcome: { response?: InteractionResponse; fromHost: boolean }) => void;
+    const result = new Promise<{ response?: InteractionResponse; fromHost: boolean }>((resolve) => { resolveDialog = resolve; });
+    const finish = (outcome: { response?: InteractionResponse; fromHost: boolean }): void => {
+      if (settled) return;
+      settled = true;
+      resolveDialog(outcome);
+    };
+
+    let component: SearchablePicker | ExtensionTextDialog;
+    if (request.method === "select") {
+      const picker = new SearchablePicker(
+        request.options.map((option) => ({ value: option, label: option })),
+        {
+          title: request.title,
+          footer: "type to filter · ↑↓ choose · Enter select · Esc cancel",
+          maxVisible: Math.min(request.options.length, 14),
+          requestRender: () => tui.requestRender(),
+        },
+      );
+      picker.onSelect = (item) => finish({ response: { method: "select", value: item.value }, fromHost: false });
+      picker.onCancel = () => finish({ response: { method: "select", cancelled: true }, fromHost: false });
+      component = picker;
+    } else if (request.method === "confirm") {
+      const picker = new SearchablePicker([
+        { value: "yes", label: "Yes" },
+        { value: "no", label: "No" },
+      ], {
+        title: request.title,
+        body: request.message,
+        footer: "↑↓ choose · Enter confirm · Esc cancel",
+        maxVisible: 2,
+        initialValue: "no",
+        requestRender: () => tui.requestRender(),
+      });
+      picker.onSelect = (item) => finish({ response: { method: "confirm", confirmed: item.value === "yes" }, fromHost: false });
+      picker.onCancel = () => finish({ response: { method: "confirm", cancelled: true }, fromHost: false });
+      component = picker;
+    } else {
+      const dialog = new ExtensionTextDialog({
+        mode: request.method,
+        title: request.title,
+        ...(request.method === "input" && request.placeholder !== undefined ? { placeholder: request.placeholder } : {}),
+        ...(request.method === "editor" && request.prefill !== undefined ? { prefill: request.prefill } : {}),
+        requestRender: () => tui.requestRender(),
+        tui,
+      });
+      dialog.onSubmit = (value) => finish({ response: { method: request.method, value }, fromHost: false });
+      dialog.onCancel = () => finish({ response: { method: request.method, cancelled: true }, fromHost: false });
+      component = dialog;
+    }
+
+    activeExtensionDialog = {
+      interactionId: request.interactionId,
+      closeFromHost: () => finish({ fromHost: true }),
+    };
+    const overlay = tui.showOverlay(component, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
+    try {
+      return await result;
+    } finally {
+      overlay.hide();
+      if (activeExtensionDialog?.interactionId === request.interactionId) activeExtensionDialog = undefined;
+      tui.setFocus(editor);
+      tui.requestRender();
+    }
   }
 
   async function chooseSetting(): Promise<void> {
@@ -768,6 +930,11 @@ export async function runDockTui(
     screen?.scrollToBottom();
     if (projectionLoad.status === "fulfilled") {
       instance = projectionLoad.value.instance;
+      for (const event of buffered) {
+        if (event.runtimeGeneration === generation && event.sequence > instance.eventCursor.sequence) {
+          instance = projectSnapshot(instance, event);
+        }
+      }
       status.update(instance);
       terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
       conversation.applyHistory(projectionLoad.value.recentHistory, projectionLoad.value.historyTruncated);
@@ -966,26 +1133,31 @@ export async function runDockTui(
   process.once("SIGINT", onSigint);
   process.once("SIGTERM", onSigterm);
 
-  void subscription.done.then(() => {
-    if (exiting) return;
-    editor.disableSubmit = true;
-    terminal.setProgress(false);
-    status.setConnection("disconnected");
-    runActivity = disconnectedActivity("host stream closed · Ctrl+D detach");
-    status.setActivity(runActivity);
-    conversation.addNotice("Host event stream closed. No command was replayed; this TUI is now read-only.", true);
-    tui.requestRender();
-  }).catch((error: unknown) => {
-    if (exiting) return;
-    editor.disableSubmit = true;
-    terminal.setProgress(false);
-    status.setConnection("lost");
-    runActivity = disconnectedActivity("connection lost · Ctrl+D detach");
-    status.setActivity(runActivity);
-    conversation.addNotice("Host connection lost. No command was replayed; this TUI is now read-only.", true);
-    conversation.addNotice(errorText(error), true);
-    tui.requestRender();
-  });
+  function watchEventSubscription(watched: EventSubscription): void {
+    void watched.done.then(() => {
+      if (exiting || subscription !== watched) return;
+      activeExtensionDialog?.closeFromHost();
+      editor.disableSubmit = true;
+      terminal.setProgress(false);
+      status.setConnection("disconnected");
+      runActivity = disconnectedActivity("host stream closed · Ctrl+D detach");
+      status.setActivity(runActivity);
+      conversation.addNotice("Host event stream closed. No command was replayed; this TUI is now read-only.", true);
+      tui.requestRender();
+    }).catch((error: unknown) => {
+      if (exiting || subscription !== watched) return;
+      activeExtensionDialog?.closeFromHost();
+      editor.disableSubmit = true;
+      terminal.setProgress(false);
+      status.setConnection("lost");
+      runActivity = disconnectedActivity("connection lost · Ctrl+D detach");
+      status.setActivity(runActivity);
+      conversation.addNotice("Host connection lost. No command was replayed; this TUI is now read-only.", true);
+      conversation.addNotice(errorText(error), true);
+      tui.requestRender();
+    });
+  }
+  watchEventSubscription(subscription);
 
   const activityTimer = setInterval(() => {
     if (status.tickActivity()) tui.requestRender();
@@ -996,9 +1168,11 @@ export async function runDockTui(
   const reason = await exit;
 
   clearInterval(activityTimer);
+  activeExtensionDialog?.closeFromHost();
   removeInputListener();
   process.off("SIGINT", onSigint);
   process.off("SIGTERM", onSigterm);
+  await controllerReattach?.catch(() => {});
   subscription.close();
   await subscription.done.catch(() => {});
   terminal.setProgress(false);

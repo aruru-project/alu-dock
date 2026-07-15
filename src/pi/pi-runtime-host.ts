@@ -7,6 +7,7 @@ import {
   type AgentSessionRuntime,
   type AgentSessionServices,
   type CreateAgentSessionRuntimeFactory,
+  type ExtensionUIContext,
   type PromptOptions,
   SessionManager,
   createAgentSessionFromServices,
@@ -18,6 +19,7 @@ import {
   type SourceInfo,
 } from "@earendil-works/pi-coding-agent";
 
+import type { ExtensionUiBroker } from "../core/extension-ui-broker.js";
 import type {
   ClearedRuntimeQueue,
   RuntimeCompactionResult,
@@ -51,6 +53,7 @@ import {
 import { projectJsonObject } from "../core/managed-instance.js";
 import { RuntimeModelNotFoundError, RuntimeSettingsWriteError, RuntimeUnknownToolError } from "../core/runtime-session.js";
 import { configurePiNetwork } from "./configure-pi-network.js";
+import { createPiExtensionUiContext } from "./pi-extension-ui-adapter.js";
 import {
   applyPiSetting,
   assertPiSettingUpdate,
@@ -91,6 +94,8 @@ export interface PiRuntimeHostOptions {
   setProjectTrust?: (cwd: string, trusted: boolean) => void;
   commitReplacement?: (change: { operationId: string; kind: ReplacementKind; previousSessionFile?: string; sessionFile?: string }) => Promise<void>;
   commitRuntimeError?: (failure: { operationId: string; kind: ReplacementKind; error: unknown; recoverySessionFile?: string }) => Promise<void>;
+  extensionUiBroker?: ExtensionUiBroker;
+  uiContext?: ExtensionUIContext;
 }
 
 export interface CreatePiRuntimeHostOptions {
@@ -100,6 +105,7 @@ export interface CreatePiRuntimeHostOptions {
   tools?: string[];
   excludeTools?: string[];
   projectTrusted: boolean;
+  extensionUiBroker?: ExtensionUiBroker;
 }
 
 interface BindingToken { active: boolean }
@@ -130,6 +136,7 @@ export class PiRuntimeHost implements RuntimeSession {
   private constructor(private readonly options: PiRuntimeHostOptions) {
     options.runtime.setBeforeSessionInvalidate(() => {
       if (this.replacementRunning) this.replacementInvalidated = true;
+      options.extensionUiBroker?.beginGenerationChange();
       this.invalidateBindingsSynchronously();
     });
     options.runtime.setRebindSession(async (session) => {
@@ -442,6 +449,7 @@ export class PiRuntimeHost implements RuntimeSession {
       const originalBuffer = binding.buffered;
       binding.buffered = buffered;
       binding.bufferEvents = true;
+      this.options.extensionUiBroker?.beginGenerationChange();
       try {
         let seamCalls = 0;
         await binding.session.reload({ beforeSessionStart: () => { seamCalls += 1; } });
@@ -456,6 +464,7 @@ export class PiRuntimeHost implements RuntimeSession {
         this.active = undefined;
         await this.disposeRuntimeOnce().catch(() => {});
         this.unavailable = true;
+        await this.options.extensionUiBroker?.failGenerationChange();
         await this.commitRuntimeError(operationId, "reload", error, previousSessionFile);
         throw error;
       } finally {
@@ -504,6 +513,7 @@ export class PiRuntimeHost implements RuntimeSession {
       else this.runtimeDisposed = true; // SDK already disposed the old session before factory failure.
       this.invalidateBindingsSynchronously();
       this.unavailable = true;
+      await this.options.extensionUiBroker?.failGenerationChange();
       await this.commitRuntimeError(operationId, kind, error, previousSessionFile);
       throw error;
     } finally {
@@ -543,7 +553,7 @@ export class PiRuntimeHost implements RuntimeSession {
     });
     this.staged = binding;
     try {
-      await session.bindExtensions({ mode: "print", onError: (error) => {
+      await session.bindExtensions({ uiContext: this.options.uiContext, mode: this.options.uiContext ? "rpc" : "print", onError: (error) => {
         if (!token.active) return;
         const event = { type: "dock_extension_error", error: boundedErrorMessage(error) };
         if (this.active === binding && !binding.bufferEvents) this.publish(event); else binding.buffered.push(event);
@@ -767,6 +777,7 @@ function projectDiagnostic(diagnostic: ResourceDiagnostic): DiagnosticDto {
 }
 
 export async function createPiRuntimeHost(options: CreatePiRuntimeHostOptions): Promise<PiRuntimeHost> {
+  const uiContext = options.extensionUiBroker ? createPiExtensionUiContext(options.extensionUiBroker) : undefined;
   const trustByCwd = new Map<string, boolean>([[options.cwd, options.projectTrusted]]);
   const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
     const canonicalCwd = await realpath(resolve(cwd));
@@ -788,6 +799,8 @@ export async function createPiRuntimeHost(options: CreatePiRuntimeHostOptions): 
   });
   return PiRuntimeHost.create({
     runtime,
+    extensionUiBroker: options.extensionUiBroker,
+    uiContext,
     setProjectTrust: (cwd, trusted) => trustByCwd.set(cwd, trusted),
   });
 }

@@ -14,6 +14,13 @@ import {
   MutationFaultedError,
 } from "../core/catalog.js";
 import {
+  InteractionExpiredError,
+  InteractionInvalidResponseError,
+  InteractionNotFoundError,
+  InteractionWrongLeaseError,
+  type ControllerClaim,
+} from "../core/extension-ui-broker.js";
+import {
   InstanceAdmissionPendingError,
   InstanceBusyError,
   InstanceNotActiveError,
@@ -174,6 +181,7 @@ export class DockHost {
       const server = this.server;
       this.server = undefined;
       const closePromise = server ? closeServer(server) : Promise.resolve();
+      await this.registry.cancelInteractionsForHostDrain();
       for (const socket of this.connections) socket.destroy();
       this.connections.clear();
       await closePromise;
@@ -209,6 +217,7 @@ export class DockHost {
     if ((this.state !== "running" && this.state !== "mutation_faulted" && this.state !== "stopping") || this.faultDrainPromise) return;
     if (this.state === "running") this.state = "mutation_faulted";
     this.registry.beginMutationDrain();
+    void this.registry.cancelInteractionsForHostDrain();
     this.resolveFaultStarted();
     const admitted = [...this.inFlightDispatches];
     this.faultDrainPromise = (async () => {
@@ -309,6 +318,7 @@ export class DockHost {
         .catch((error: unknown) => {
           const operationId = mutationOperationId(request);
           const normalized = operationId !== undefined
+            && request.type !== "interaction.respond"
             && this.registry.catalogHealth() !== "healthy"
             && !(error instanceof CatalogEffectUnknownError)
             ? new CatalogEffectUnknownError({ kind: request.type, effect: "post_effect", operationId }, error)
@@ -348,6 +358,13 @@ export class DockHost {
       case "instance.list": this.sendSuccessAndEnd(socket,request.requestId,{instances:this.registry.list().filter(i=>request.params.includeTerminal!==false||i.lifecycle==="active"||i.lifecycle==="stopping")}); return;
       case "instance.get": this.sendSuccessAndEnd(socket,request.requestId,{instance:this.registry.get(request.params.instanceId).snapshot()}); return;
       case "instance.attach": await this.attachEventStream(request,socket,setEventUnsubscribe); return;
+      case "interaction.respond": {
+        const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, async () => {
+          const instance = this.registry.get(request.params.instanceId);
+          return instance.respondInteraction(request.params.leaseToken, request.params.interactionId, request.params.response);
+        });
+        this.sendSuccessAndEnd(socket, request.requestId, result); return;
+      }
       case "instance.stop": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const receipt=await instance.stop(request.params.operationId);return {receipt:{operationId:receipt.operationId,alreadyStopped:receipt.alreadyStopped,cleanupErrors:receipt.cleanupErrors},instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
@@ -392,23 +409,34 @@ export class DockHost {
     if(cursor && cursor.instanceId!==instance.id) throw new ProtocolValidationError("invalid_cursor","Cursor belongs to another instance");
     const follow=request.params.follow;
     let initializing=true,pending:DockEvent[]=[]; let lastGeneration=instance.runtimeGeneration,lastSent=0; let unsubscribe=()=>{};
-    const closeAfterBackpressure=():void=>{unsubscribe();if(!socket.writableNeedDrain){socket.end();return;}const timeout=setTimeout(()=>socket.destroy(),BACKPRESSURE_CLOSE_TIMEOUT_MS);socket.once("drain",()=>{clearTimeout(timeout);if(!socket.destroyed)socket.end();});socket.once("close",()=>clearTimeout(timeout));};
+    let controller:ControllerClaim|{status:"observing"}=request.params.controller==="observe"?{status:"observing"}:{status:"unavailable"};
+    let controllerReleased=false;
+    const releaseController=():void=>{
+      if(controllerReleased||controller.status!=="acquired")return;
+      controllerReleased=true;
+      void instance.releaseInteractionController(controller.leaseToken,"detach");
+    };
+    const closeSubscription=():void=>{unsubscribe();releaseController();};
+    const closeAfterBackpressure=():void=>{closeSubscription();if(!socket.writableNeedDrain){socket.end();return;}const timeout=setTimeout(()=>socket.destroy(),BACKPRESSURE_CLOSE_TIMEOUT_MS);socket.once("drain",()=>{clearTimeout(timeout);if(!socket.destroyed)socket.end();});socket.once("close",()=>clearTimeout(timeout));};
     const sendLiveEvent=(event:DockEvent):boolean=>{
       if(event.runtimeGeneration<lastGeneration)return true;
       if(event.runtimeGeneration>lastGeneration){
-        if(event.runtimeGeneration!==lastGeneration+1||event.type!=="session.replaced"||event.sequence!==1){unsubscribe();socket.destroy();return false;}
+        if(event.runtimeGeneration!==lastGeneration+1||event.type!=="session.replaced"||event.sequence!==1){closeSubscription();socket.destroy();return false;}
         lastGeneration=event.runtimeGeneration;lastSent=0;
       }
       if(event.sequence<=lastSent)return true;
-      const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event);if(outcome==="written"||outcome==="backpressured")lastSent=event.sequence;if(outcome==="written")return true;if(outcome==="backpressured")closeAfterBackpressure();else{unsubscribe();socket.destroy();}return false;
+      const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event);if(outcome==="written"||outcome==="backpressured")lastSent=event.sequence;if(outcome==="written")return true;if(outcome==="backpressured")closeAfterBackpressure();else{closeSubscription();socket.destroy();}return false;
     };
-    unsubscribe=instance.subscribe(event=>{if(initializing){pending.push(event);if(pending.length>MAX_INITIAL_EVENT_QUEUE){pending=[];unsubscribe();socket.destroy();}return;}sendLiveEvent(event);});setEventUnsubscribe(unsubscribe);
+    unsubscribe=instance.subscribe(event=>{if(initializing){pending.push(event);if(pending.length>MAX_INITIAL_EVENT_QUEUE){pending=[];closeSubscription();socket.destroy();}return;}sendLiveEvent(event);});
+    if(follow&&request.params.controller==="claim")controller=await instance.claimInteractionController();
+    setEventUnsubscribe(closeSubscription);
+    if(socket.destroyed){closeSubscription();return;}
     let projection:AttachProjection;
-    try{projection=await instance.getAttachProjection(cursor,MAX_HISTORY_ITEMS);}catch(error){initializing=false;pending=[];unsubscribe();throw error;}
-    const result=createBoundedEventsResult(projection,follow,request.requestId,request.params.controller === "claim" ? "unavailable" : "observing");
+    try{projection=await instance.getAttachProjection(cursor,MAX_HISTORY_ITEMS);}catch(error){initializing=false;pending=[];closeSubscription();throw error;}
+    const result=createBoundedEventsResult(projection,follow,request.requestId,controller);
     const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,result));
-    if(responseOutcome!=="written"){initializing=false;pending=[];if(responseOutcome==="backpressured")closeAfterBackpressure();else if(responseOutcome==="too_large"){unsubscribe();this.sendErrorAndEnd(socket,"response_too_large","Attach response exceeds the JSONL record limit",request.requestId);}else unsubscribe();return;}
-    lastGeneration=result.instance.runtimeGeneration;lastSent=Math.max(projection.replaySince,result.page.latest.sequence);initializing=false;pending.sort((a,b)=>a.runtimeGeneration-b.runtimeGeneration||a.sequence-b.sequence);for(const event of pending){if(!sendLiveEvent(event))return;}pending=[];if(!follow){unsubscribe();socket.end();}
+    if(responseOutcome!=="written"){initializing=false;pending=[];if(responseOutcome==="backpressured")closeAfterBackpressure();else if(responseOutcome==="too_large"){closeSubscription();this.sendErrorAndEnd(socket,"response_too_large","Attach response exceeds the JSONL record limit",request.requestId);}else closeSubscription();return;}
+    lastGeneration=result.instance.runtimeGeneration;lastSent=Math.max(projection.replaySince,result.page.latest.sequence);initializing=false;pending.sort((a,b)=>a.runtimeGeneration-b.runtimeGeneration||a.sequence-b.sequence);for(const event of pending){if(!sendLiveEvent(event))return;}pending=[];if(!follow){closeSubscription();socket.end();}
   }
 
   private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,result));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
@@ -436,7 +464,7 @@ function isMutationRequest(type: ControlRequest["type"]): boolean {
 }
 
 function successResponse(requestId:string,hostEpoch:string,result:unknown):ControlResponse { return {kind:"response",version:2,requestId,hostEpoch,ok:true,result}; }
-function createBoundedEventsResult(projection:AttachProjection,following:boolean,requestId:string,controllerStatus:"observing"|"unavailable"):EventsResult {
+function createBoundedEventsResult(projection:AttachProjection,following:boolean,requestId:string,controller:ControllerClaim|{status:"observing"}):EventsResult {
   const source=projection.page;
   let events=source.events;
   let truncated=source.truncated;
@@ -446,7 +474,7 @@ function createBoundedEventsResult(projection:AttachProjection,following:boolean
   let earliest=events.length>0&&truncated?{...source.earliest,sequence:events[0]!.sequence}:source.earliest;
   while(true){
     const page={events,earliest,latest:source.latest,truncated,epochChanged:projection.epochChanged,generationChanged:projection.generationChanged};
-    const result:EventsResult={instance:projection.instance,page,recentHistory:history,historyTruncated,controller:{status:controllerStatus},following};
+    const result:EventsResult={instance:projection.instance,page,recentHistory:history,historyTruncated,controller,following};
     const hostEpoch=projection.instance.ownerHostEpoch??source.latest.hostEpoch;
     if(encodedSize(successResponse(requestId,hostEpoch,result))<=MAX_CONTROL_LINE_BYTES)return result;
     if(history.length>0){history=history.slice(1);historyTruncated=true;continue;}
@@ -533,6 +561,10 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof ProtocolValidationError) return { code: error.code, message: error.message };
   if (error instanceof InstanceNotFoundError) return { code: "not_found", message: error.message };
   if (error instanceof InvalidHistoryCursorError) return { code: "invalid_cursor", message: error.message };
+  if (error instanceof InteractionNotFoundError) return { code: error.code, message: error.message };
+  if (error instanceof InteractionExpiredError) return { code: error.code, message: error.message };
+  if (error instanceof InteractionWrongLeaseError) return { code: error.code, message: error.message };
+  if (error instanceof InteractionInvalidResponseError) return { code: error.code, message: error.message };
   if (error instanceof InstanceNotActiveError) return { code: "instance_not_active", message: error.message };
   if (error instanceof InvalidDeliveryModeError) return { code: "invalid_delivery", message: error.message };
   if (error instanceof InstanceAdmissionPendingError) return { code: "admission_pending", message: error.message };
