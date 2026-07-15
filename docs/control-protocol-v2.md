@@ -1,6 +1,6 @@
 # Alu Dock 本机控制协议 V2
 
-状态：阶段 0 冻结设计；阶段 1–2 已按 capability 实施
+状态：阶段 0 冻结设计；阶段 1–3 已按 capability 实施
 
 传输：当前 Unix 用户私有 AF_UNIX socket + UTF-8 JSONL
 
@@ -76,7 +76,7 @@ Client hello：
 Ready success（capability 列表只是当前实现集合）：
 
 ```json
-{"kind":"hello_ack","requestId":"h1","version":2,"host":{"pid":123,"dockVersion":"0.1.0","piSdkVersion":"0.80.6","hostEpoch":"uuid","startedAt":"2026-07-14T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["core.v2","events.follow","host.info","instance.catalog","models.v1","resources.v1","run.abort.v1","session.core","settings.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200}}
+{"kind":"hello_ack","requestId":"h1","version":2,"host":{"pid":123,"dockVersion":"0.1.0","piSdkVersion":"0.80.6","hostEpoch":"uuid","startedAt":"2026-07-14T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["core.v2","events.follow","host.info","instance.catalog","models.v1","resources.v1","run.abort.v1","session.commands.v1","session.core","settings.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200}}
 ```
 
 任何 hello 失败都使用 closed `hello_error`，随后关闭：
@@ -332,6 +332,8 @@ Receipt 仍表示 Pi preflight 已接受，不表示 run 完成；实现可继�
 ```ts
 interface SettingValueMap {
   autoCompaction: boolean;
+  compactionReserveTokens: number;    // read-only, integer 0..2_147_483_647
+  compactionKeepRecentTokens: number; // read-only, integer 0..2_147_483_647
   autoRetry: boolean;
   enableSkillCommands: boolean;
   hideThinking: boolean;
@@ -340,6 +342,8 @@ interface SettingValueMap {
   clearOnShrink: boolean;
   showTerminalProgress: boolean;
   quietStartup: boolean;
+  collapseChangelog: boolean;
+  enableInstallTelemetry: boolean;
   steeringMode: "all" | "one-at-a-time";
   followUpMode: "all" | "one-at-a-time";
   transport: "auto" | "sse" | "websocket" | "websocket-cached";
@@ -354,9 +358,11 @@ interface SettingValueMap {
 }
 
 type SettingKey = keyof SettingValueMap;
+type ReadOnlySettingKey = "compactionReserveTokens" | "compactionKeepRecentTokens";
+type WritableSettingKey = Exclude<SettingKey, ReadOnlySettingKey>;
 type SettingUpdate = {
-  [K in SettingKey]: { key: K; value: SettingValueMap[K] }
-}[SettingKey];
+  [K in WritableSettingKey]: { key: K; value: SettingValueMap[K] }
+}[WritableSettingKey];
 
 type SettingDto = {
   [K in SettingKey]: {
@@ -374,7 +380,7 @@ type SettingDto = {
 }[SettingKey];
 ```
 
-Integer bounds、enum 和 warning object 的 unknown key 全部在 setter 前拒绝。Model/thinking 使用独立 request。
+Integer bounds、enum、warning object 的 unknown key以及 read-only key update 全部在 setter 前拒绝。`compactionReserveTokens`、`compactionKeepRecentTokens` 必须以 `writable:false` 投影；其余键为 `writable:true`。Model/thinking 使用独立 request。
 
 ### Interaction response union
 

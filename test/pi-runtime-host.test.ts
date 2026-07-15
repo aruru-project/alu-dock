@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -10,6 +13,7 @@ import {
 
 import { CatalogTransactionCoordinator } from "../src/control/catalog-transactions.js";
 import { CatalogEffectUnknownError } from "../src/core/catalog.js";
+import { SETTING_KEYS } from "../src/core/config-projection.js";
 import { ManagedInstance } from "../src/core/managed-instance.js";
 import { RuntimeInvalidSettingValueError, RuntimeSettingsWriteError } from "../src/core/runtime-session.js";
 import {
@@ -34,7 +38,9 @@ class FakeSession {
     getSessionDir: () => "/sessions",
     usesDefaultSessionDir: () => this.usesDefaultSessionDir,
     getBranch: () => structuredClone(this.historyEntries),
+    getSessionName: () => this.sessionName,
   };
+  sessionName: string | undefined;
   usesDefaultSessionDir = true;
   isStreaming = false;
   isCompacting = false;
@@ -135,7 +141,16 @@ class FakeSession {
     this.emit({ type: "compaction_end", reason: "manual", result: undefined, aborted: true, willRetry: false });
   }
   waitForIdle(): Promise<void> { return Promise.resolve(); }
-  setSessionName(): void {}
+  setSessionName(name: string): void {
+    this.sessionName = name.trim() || undefined;
+    this.emit({ type: "session_info_changed", name: this.sessionName });
+  }
+  async compact(): Promise<{ summary: string; firstKeptEntryId: string; tokensBefore: number }> {
+    const result = { summary: "summary", firstKeptEntryId: "kept", tokensBefore: 321 };
+    this.emit({ type: "compaction_start", reason: "manual" });
+    this.emit({ type: "compaction_end", reason: "manual", result, aborted: false, willRetry: false });
+    return result;
+  }
   async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
     this.trace.push(`${this.sessionId}:reload`);
     if (this.reloadError) throw this.reloadError;
@@ -193,7 +208,12 @@ function services(options: { settings?: unknown; model?: FakeModel; cwd?: string
       find: (provider: string, id: string) => model?.provider === provider && model.id === id ? model : undefined,
       hasConfiguredAuth: (candidate: FakeModel) => candidate === model,
     } as unknown as AgentSessionServices["modelRegistry"],
-    resourceLoader: (options.resourceLoader ?? {}) as AgentSessionServices["resourceLoader"],
+    resourceLoader: (options.resourceLoader ?? {
+      getExtensions: () => ({ extensions: [], errors: [] }),
+      getSkills: () => ({ skills: [], diagnostics: [] }),
+      getPrompts: () => ({ prompts: [], diagnostics: [] }),
+      getAgentsFiles: () => ({ agentsFiles: [] }),
+    }) as AgentSessionServices["resourceLoader"],
     diagnostics: [],
   };
 }
@@ -211,6 +231,7 @@ class FakeRuntimeOwner {
   rebind: ((session: AgentSession) => Promise<void>) | undefined;
   disposeCalls = 0;
   disposeErrorBeforeInvalidate: Error | undefined;
+  lastParentSession: string | undefined;
 
   constructor(readonly initial: FakeSession, private readonly trace: string[]) {
     this.session = initial as unknown as AgentSession;
@@ -221,7 +242,7 @@ class FakeRuntimeOwner {
   setBeforeSessionInvalidate(callback?: () => void): void { this.beforeInvalidate = callback; }
   setRebindSession(callback?: (session: AgentSession) => Promise<void>): void { this.rebind = callback; }
 
-  newSession(): Promise<{ cancelled: boolean }> { return this.replace("new"); }
+  newSession(options?: { parentSession?: string }): Promise<{ cancelled: boolean }> { this.lastParentSession = options?.parentSession; return this.replace("new"); }
   switchSession(): Promise<{ cancelled: boolean }> { return this.replace("switch"); }
 
   async dispose(): Promise<void> {
@@ -329,6 +350,44 @@ test("Pi runtime history uses public SessionManager branch entries", async () =>
   ]);
   initial.historyEntries.push({ type: "custom_message", id: "hidden", parentId: "h3", timestamp: "2026-07-14T00:00:03.000Z", customType: "hidden", content: "secret", display: false });
   assert.equal(host.getHistory().some((entry) => entry.entryId === "hidden"), false);
+  await host.dispose();
+});
+
+test("Pi runtime host resolves public session targets and forwards new-session parent metadata", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-session-target-"));
+  const cwd = join(directory, "cwd");
+  const sessionDir = join(directory, "sessions");
+  await Promise.all([mkdir(cwd), mkdir(sessionDir)]);
+  const sessionFile = join(sessionDir, "target.jsonl");
+  await writeFile(sessionFile, `${JSON.stringify({ type: "session", version: 3, id: "target-session", timestamp: "2026-07-14T00:00:00.000Z", cwd })}\n`);
+
+  const trace: string[] = [];
+  const { host, owner } = await runtimeHost(trace);
+  try {
+    assert.deepEqual(await host.resolveSessionTarget(sessionFile), { canonicalCwd: cwd });
+    await host.newSession("new-parent-op", "/sessions/parent.jsonl");
+    assert.equal(owner.lastParentSession, "/sessions/parent.jsonl");
+  } finally {
+    await host.dispose();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Pi runtime host names and manually compacts through public AgentSession methods", async () => {
+  const trace: string[] = [];
+  const { host, initial } = await runtimeHost(trace);
+  host.activateInitial();
+  const events: string[] = [];
+  const unsubscribe = host.subscribe((event) => events.push(event.type));
+
+  assert.equal(host.setSessionName("  Daily work  "), "Daily work");
+  assert.equal(initial.sessionName, "Daily work");
+  assert.deepEqual(await host.compact("keep decisions"), { summary: "summary", firstKeptEntryId: "kept", tokensBefore: 321 });
+  assert.ok(events.includes("session_info_changed"));
+  assert.ok(events.includes("compaction_start"));
+  assert.ok(events.includes("compaction_end"));
+
+  unsubscribe();
   await host.dispose();
 });
 
@@ -809,9 +868,10 @@ test("Pi runtime host projects executable resource and command metadata without 
 test("Pi runtime host exposes and persists the exact general-settings allowlist", async () => {
   const trace: string[] = [];
   const manager = SettingsManager.inMemory({
-    compaction: { enabled: true }, retry: { enabled: true }, enableSkillCommands: true,
+    compaction: { enabled: true, reserveTokens: 165_536, keepRecentTokens: 20_000 }, retry: { enabled: true }, enableSkillCommands: true,
     hideThinkingBlock: false, showCacheMissNotices: false, showHardwareCursor: false,
     terminal: { clearOnShrink: true, showTerminalProgress: true }, quietStartup: false,
+    collapseChangelog: false, enableInstallTelemetry: true,
     steeringMode: "all", followUpMode: "all", transport: "auto", doubleEscapeAction: "tree",
     treeFilterMode: "default", defaultProjectTrust: "ask", httpIdleTimeoutMs: 300_000,
     editorPaddingX: 1, outputPad: 0, autocompleteMaxVisible: 10,
@@ -824,14 +884,18 @@ test("Pi runtime host exposes and persists the exact general-settings allowlist"
   host.activateInitial();
 
   const settings = await host.getSettings();
-  assert.equal(settings.length, 20);
+  assert.equal(settings.length, SETTING_KEYS.length);
   assert.deepEqual(settings.map((setting) => setting.key), [
-    "autoCompaction", "autoRetry", "enableSkillCommands", "hideThinking", "showCacheMissNotices",
-    "showHardwareCursor", "clearOnShrink", "showTerminalProgress", "quietStartup", "steeringMode",
+    "autoCompaction", "compactionReserveTokens", "compactionKeepRecentTokens", "autoRetry", "enableSkillCommands", "hideThinking", "showCacheMissNotices",
+    "showHardwareCursor", "clearOnShrink", "showTerminalProgress", "quietStartup", "collapseChangelog", "enableInstallTelemetry", "steeringMode",
     "followUpMode", "transport", "doubleEscapeAction", "treeFilterMode", "defaultProjectTrust",
     "httpIdleTimeoutMs", "editorPaddingX", "outputPad", "autocompleteMaxVisible", "warnings",
   ]);
   assert.ok(settings.every((setting) => setting.source === "global"));
+  assert.deepEqual(settings.filter((setting) => !setting.writable).map((setting) => [setting.key, setting.value]), [
+    ["compactionReserveTokens", 165_536],
+    ["compactionKeepRecentTokens", 20_000],
+  ]);
   assert.equal(settings.find((setting) => setting.key === "enableSkillCommands")?.reloadRequired, true);
   assert.equal(settings.find((setting) => setting.key === "httpIdleTimeoutMs")?.hostRestartRequired, true);
 
@@ -840,7 +904,8 @@ test("Pi runtime host exposes and persists the exact general-settings allowlist"
     { key: "enableSkillCommands", value: false }, { key: "hideThinking", value: true },
     { key: "showCacheMissNotices", value: true }, { key: "showHardwareCursor", value: true },
     { key: "clearOnShrink", value: false }, { key: "showTerminalProgress", value: false },
-    { key: "quietStartup", value: true }, { key: "steeringMode", value: "one-at-a-time" },
+    { key: "quietStartup", value: true }, { key: "collapseChangelog", value: true },
+    { key: "enableInstallTelemetry", value: false }, { key: "steeringMode", value: "one-at-a-time" },
     { key: "followUpMode", value: "one-at-a-time" }, { key: "transport", value: "websocket" },
     { key: "doubleEscapeAction", value: "fork" }, { key: "treeFilterMode", value: "all" },
     { key: "defaultProjectTrust", value: "never" }, { key: "httpIdleTimeoutMs", value: 1234 },

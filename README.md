@@ -2,7 +2,7 @@
 
 Alu Dock 是 #136「受管运行时宿主」的独立实现；V0 执行卡为 #137，V0.1 工程入口为 #142。
 
-V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座和阶段 2 SSH TUI/Footer 均已完成。当前 Host 提供 V2 transaction/fault seam、持久 branch history projection、稳定 message/tool event、session metrics 与可复用实例 abort；薄 TUI 提供 Markdown/thinking/tool/diff、动态 autocomplete、完整 Footer、PTY resize/detach/transport-loss 行为。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与 Alubot 不在本仓库的修改范围内。
+V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座、阶段 2 SSH TUI/Footer 和阶段 3 日常控制均已完成。当前 Host 提供 V2 transaction/fault seam、持久 branch history projection、稳定 message/tool event、session metrics、可复用实例 abort和 `session.commands.v1`；薄 TUI 提供 Markdown/thinking/tool/diff、动态 autocomplete、完整 Footer、settings/model/thinking/tools selectors，以及 new/resume/name/compact/reload workflow。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与 Alubot 不在本仓库的修改范围内。
 
 ## V0 冻结进度
 
@@ -18,7 +18,8 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [x] 阶段 0：合同冻结（GO）
 - [x] 阶段 1：Runtime 与 Protocol V2 底座
 - [x] 阶段 2：SSH TUI 核心与 Footer
-- [ ] 阶段 3：日常控制与核心 Session
+- [x] 阶段 3：日常控制与核心 Session
+- [ ] 阶段 3.5：轻度结构重构与项目 `AGENTS.md`
 - [ ] 阶段 4：Extension UI
 - [ ] 阶段 5：`systemd --user`、durable catalog 与 reopen
 - [ ] 阶段 6：tree/fork/clone
@@ -42,6 +43,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-v0.1-stage-1c-projections.md`](docs/validation-v0.1-stage-1c-projections.md)
 - [`docs/validation-v0.1-stage-1d-transactions.md`](docs/validation-v0.1-stage-1d-transactions.md)
 - [`docs/validation-v0.1-stage-2-ssh-tui.md`](docs/validation-v0.1-stage-2-ssh-tui.md)
+- [`docs/validation-v0.1-stage-3-daily-control.md`](docs/validation-v0.1-stage-3-daily-control.md)
 
 ## V0.1 工程入口
 
@@ -49,7 +51,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 
 **绿地规则：** Alu Dock 是全新项目。到 1.0 落地前，除非用户特意说明，不考虑任何旧协议、旧 Host、旧数据、旧 CLI 行为的兼容或迁移；原型合同直接替换。版本号仅标识当前合同，不表示存在历史包袱。
 
-阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1 已将当前控制面切为 V2-only，并完成 Runtime replacement、project trust、closed projections及 registry transaction/fault seam；阶段 2 已 advertised `tui.projection.v1` 与独立的 `run.abort.v1`。Durable atomic catalog、startup reconcile、explicit reopen与 `systemd --user` 唯一常驻 Host仍属于阶段 5；当前入口仍会按需 detached 启动 Host。
+阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1 已将当前控制面切为 V2-only，并完成 Runtime replacement、project trust、closed projections及 registry transaction/fault seam；阶段 2 已 advertised `tui.projection.v1` 与独立的 `run.abort.v1`；阶段 3 已 advertised `session.commands.v1` 并完成日常 settings/session workflows。阶段 4 前先执行不扩大功能面的阶段 3.5 轻度重构与 `AGENTS.md` 工程规范。Durable atomic catalog、startup reconcile、explicit reopen与 `systemd --user` 唯一常驻 Host仍属于阶段 5；当前入口仍会按需 detached 启动 Host。
 
 ## 当前过渡期真人入口
 
@@ -67,9 +69,14 @@ npm run cli
 - `Alt+Enter` 或 `/follow MESSAGE`：排队为 follow-up
 - `Esc`、空编辑器 `Ctrl+C` 或 `/abort`：取消当前 run/retry/compaction，实例保持可复用
 - `Ctrl+O`：折叠或展开 generic tool output
-- `/model`：打开 Pi 可用模型选择器（包含已配置认证的本地自定义模型）
-- `/model PROVIDER/MODEL`：直接切换模型
-- `/thinking LEVEL`：设置 Pi thinking level；`/thinking` 查看当前可选值
+- `/settings`：查看全部 24 项投影并选择修改；也可用 `/settings KEY VALUE`。其中 compaction reserve/keep tokens 因 Pi 无公开 setter而只读
+- `/model`：打开 Pi 可用模型选择器；`/model PROVIDER/MODEL` 直接切换
+- `/thinking`：打开 thinking selector；`/thinking LEVEL` 直接设置
+- `/tools`：逐项切换 active tools；`/tools NAME…` 设置完整 active set，`/tools none` 清空
+- `/new [PARENT_SESSION]`、`/resume [SESSION_FILE]`：新建或在当前 Host 内切换 Pi session
+- `/name NAME`（`/name -` 清除）、`/compact [INSTRUCTIONS]`、`/reload`
+- `/resources`：查看 resource metadata 与 diagnostics
+- `/install`、`/config`、`/login`：提示在独立 shell 使用原 Pi CLI
 - `/status`：刷新状态
 - `/detach` 或空编辑器时 `Ctrl+D`：只离开 TUI，实例继续由 Host 持有
 - `/stop`：显式停止实例

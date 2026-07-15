@@ -40,6 +40,14 @@ export class DockConversation implements Component {
   private toolsExpanded = true;
   private outputPadding = 1;
 
+  reset(): void {
+    this.entries.length = 0;
+    this.tools.clear();
+    this.currentAssistant = undefined;
+    this.currentThinking = undefined;
+    this.queueEntry = undefined;
+  }
+
   applyHistory(entries: HistoryEntryDto[], truncated: boolean): void {
     if (truncated) this.add("system", "Earlier session history is available through paged history.");
     for (const entry of entries) {

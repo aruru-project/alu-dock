@@ -20,6 +20,7 @@ import {
 
 import type {
   ClearedRuntimeQueue,
+  RuntimeCompactionResult,
   RuntimeEvent,
   RuntimeHistoryEntry,
   RuntimeModelInfo,
@@ -28,6 +29,7 @@ import type {
   RuntimeSession,
   RuntimeSessionInfo,
   RuntimeSessionMetrics,
+  RuntimeSessionTarget,
   RuntimeThinkingLevel,
 } from "../core/runtime-session.js";
 import type {
@@ -246,8 +248,8 @@ export class PiRuntimeHost implements RuntimeSession {
       ...prompts.diagnostics.map(projectDiagnostic),
     ];
     return {
-      resources: resources.sort(compareResources).slice(0, MAX_PROJECTION_ITEMS),
-      diagnostics: diagnostics.sort(compareDiagnostics).slice(0, MAX_PROJECTION_ITEMS),
+      resources: capJsonItems(resources.sort(compareResources), 350_000),
+      diagnostics: capJsonItems(diagnostics.sort(compareDiagnostics), 250_000),
     };
   }
 
@@ -379,8 +381,17 @@ export class PiRuntimeHost implements RuntimeSession {
   }
   waitForIdle(): Promise<void> { return this.active?.session.waitForIdle() ?? Promise.resolve(); }
 
-  newSession(operationId: string): Promise<{ cancelled: boolean }> {
-    return this.serialize(() => this.replace(operationId, "new", () => this.options.runtime.newSession()));
+  async resolveSessionTarget(path: string): Promise<RuntimeSessionTarget> {
+    const manager = SessionManager.open(path);
+    return { canonicalCwd: await realpath(resolve(manager.getCwd())) };
+  }
+
+  newSession(operationId: string, parentSession?: string): Promise<{ cancelled: boolean }> {
+    return this.serialize(() => this.replace(
+      operationId,
+      "new",
+      () => this.options.runtime.newSession(parentSession === undefined ? undefined : { parentSession }),
+    ));
   }
 
   switchSession(
@@ -391,6 +402,23 @@ export class PiRuntimeHost implements RuntimeSession {
     return this.serialize(() => {
       this.options.setProjectTrust?.(trust.canonicalCwd, trust.projectTrusted);
       return this.replace(operationId, "switch", () => this.options.runtime.switchSession(path));
+    });
+  }
+
+  setSessionName(name: string): string | undefined {
+    const session = this.requireActive().session;
+    session.setSessionName(name);
+    return session.sessionManager.getSessionName();
+  }
+
+  compact(customInstructions?: string): Promise<RuntimeCompactionResult> {
+    return this.serialize(async () => {
+      const result = await this.requireActive().session.compact(customInstructions);
+      return {
+        summary: result.summary,
+        firstKeptEntryId: result.firstKeptEntryId,
+        tokensBefore: result.tokensBefore,
+      };
     });
   }
 
@@ -544,6 +572,7 @@ export class PiRuntimeHost implements RuntimeSession {
       previousSessionFile,
       sessionFile,
       cwd: this.active?.services.cwd,
+      name: this.active?.session.sessionManager.getSessionName(),
     });
   }
 
@@ -729,6 +758,18 @@ function compareCommands(left: CommandDto, right: CommandDto): number {
 }
 function compareDiagnostics(left: DiagnosticDto, right: DiagnosticDto): number { return left.severity.localeCompare(right.severity) || left.message.localeCompare(right.message) || (left.source ?? "").localeCompare(right.source ?? ""); }
 
+function capJsonItems<T>(items: T[], maxBytes: number): T[] {
+  const result: T[] = [];
+  let bytes = 2;
+  for (const item of items.slice(0, MAX_PROJECTION_ITEMS)) {
+    const itemBytes = Buffer.byteLength(JSON.stringify(item), "utf8") + (result.length === 0 ? 0 : 1);
+    if (bytes + itemBytes > maxBytes) break;
+    result.push(item);
+    bytes += itemBytes;
+  }
+  return result;
+}
+
 function projectDiagnostic(diagnostic: ResourceDiagnostic): DiagnosticDto {
   return {
     severity: diagnostic.type === "error" ? "error" : "warning",
@@ -756,6 +797,8 @@ function settingSource(manager: SettingsManager, key: SettingKey): "global" | "p
 function settingValue(manager: SettingsManager, key: SettingKey): SettingValueMap[SettingKey] {
   switch (key) {
     case "autoCompaction": return manager.getCompactionEnabled();
+    case "compactionReserveTokens": return manager.getCompactionReserveTokens();
+    case "compactionKeepRecentTokens": return manager.getCompactionKeepRecentTokens();
     case "autoRetry": return manager.getRetryEnabled();
     case "enableSkillCommands": return manager.getEnableSkillCommands();
     case "hideThinking": return manager.getHideThinkingBlock();
@@ -764,6 +807,8 @@ function settingValue(manager: SettingsManager, key: SettingKey): SettingValueMa
     case "clearOnShrink": return manager.getClearOnShrink();
     case "showTerminalProgress": return manager.getShowTerminalProgress();
     case "quietStartup": return manager.getQuietStartup();
+    case "collapseChangelog": return manager.getCollapseChangelog();
+    case "enableInstallTelemetry": return manager.getEnableInstallTelemetry();
     case "steeringMode": return manager.getSteeringMode();
     case "followUpMode": return manager.getFollowUpMode();
     case "transport": return manager.getTransport();
@@ -780,7 +825,7 @@ function settingValue(manager: SettingsManager, key: SettingKey): SettingValueMa
 
 function validatedSettingValue<K extends SettingKey>(manager: SettingsManager, key: K): SettingValueMap[K] {
   const value = settingValue(manager, key) as SettingValueMap[K];
-  try { assertSettingUpdate({ key, value } as SettingUpdate); }
+  try { assertSettingValue(key, value); }
   catch { throw new RuntimeInvalidSettingValueError(key); }
   return value;
 }
@@ -792,7 +837,7 @@ function projectSetting(manager: SettingsManager, key: SettingKey): SettingDto {
     key,
     value,
     source: settingSource(manager, key),
-    writable: true,
+    writable: definition.writable,
     valueType: definition.valueType,
     ...(definition.allowedValues ? { allowedValues: [...definition.allowedValues] } : {}),
     ...(definition.min === undefined ? {} : { min: definition.min }),
@@ -807,7 +852,12 @@ function assertSettingUpdate(update: SettingUpdate): void {
   const key = (update as { key: unknown }).key;
   if (typeof key !== "string" || !SETTING_KEYS.includes(key as SettingKey)) throw new Error(`Unsupported setting key: ${String(key)}`);
   const definition = SETTING_DEFINITIONS[key as SettingKey];
-  const value = (update as { value: unknown }).value;
+  if (!definition.writable) throw new Error(`Pi setting ${key} is read-only`);
+  assertSettingValue(key as SettingKey, (update as { value: unknown }).value);
+}
+
+function assertSettingValue(key: SettingKey, value: unknown): void {
+  const definition = SETTING_DEFINITIONS[key];
   if (definition.valueType === "boolean" && typeof value !== "boolean") throw new Error(`${key} must be boolean`);
   if (definition.valueType === "enum" && (typeof value !== "string" || !definition.allowedValues?.includes(value))) throw new Error(`${key} has an unsupported value`);
   if (definition.valueType === "integer" && (!Number.isSafeInteger(value) || (value as number) < (definition.min ?? 0) || (value as number) > (definition.max ?? Number.MAX_SAFE_INTEGER))) throw new Error(`${key} is out of range`);
@@ -828,6 +878,8 @@ function applySetting(session: AgentSession, manager: SettingsManager, update: S
     case "clearOnShrink": manager.setClearOnShrink(update.value); break;
     case "showTerminalProgress": manager.setShowTerminalProgress(update.value); break;
     case "quietStartup": manager.setQuietStartup(update.value); break;
+    case "collapseChangelog": manager.setCollapseChangelog(update.value); break;
+    case "enableInstallTelemetry": manager.setEnableInstallTelemetry(update.value); break;
     case "steeringMode": session.setSteeringMode(update.value); break;
     case "followUpMode": session.setFollowUpMode(update.value); break;
     case "transport": manager.setTransport(update.value); break;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, lstat, mkdtemp, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { createConnection, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +12,7 @@ import { DockRegistry } from "../src/control/dock-registry.js";
 import { encodeJsonLine, JsonLineDecoder } from "../src/control/json-lines.js";
 import { ProjectTrustCoordinator } from "../src/control/project-trust.js";
 import { ManagedInstance, type DockEvent } from "../src/core/managed-instance.js";
+import { SETTING_KEYS } from "../src/core/config-projection.js";
 import { RuntimeInvalidSettingValueError, RuntimeSettingsWriteError } from "../src/core/runtime-session.js";
 import { DelayedRuntimeSession } from "./support/delayed-runtime-session.js";
 import { ScriptedCatalogCommitPort } from "./support/scripted-catalog-port.js";
@@ -99,7 +100,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["core.v2", "events.follow", "host.info", "instance.catalog", "models.v1", "resources.v1", "run.abort.v1", "session.core", "settings.v1", "tools.v1", "tui.projection.v1"]);
+  assert.deepEqual(ack.capabilities, ["core.v2", "events.follow", "host.info", "instance.catalog", "models.v1", "resources.v1", "run.abort.v1", "session.commands.v1", "session.core", "settings.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -179,6 +180,44 @@ test("project trust challenge precedes factory effects and denial continues untr
   });
   assert.equal(duplicate.id, created.id);
   assert.equal(factoryCalls, 1);
+});
+
+test("session switch resolves target project trust before replacement effects", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-switch-trust-"));
+  const targetCwd = join(directory, "target");
+  await mkdir(targetCwd);
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  let runtime: DelayedRuntimeSession | undefined;
+  const trust = new ProjectTrustCoordinator({
+    requiresTrust: (cwd) => cwd === targetCwd,
+    savedDecision: () => null,
+    defaultDecision: () => "ask",
+    remember: () => assert.fail("trust_once must not write the trust store"),
+  }, { createId: () => "switch-challenge", now: () => 1_000 });
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
+    runtime = new DelayedRuntimeSession(`pi-${id}`);
+    runtime.sessionCatalog = [{ sessionId: "target-session", sessionFile: "/tmp/target-session.jsonl", cwd: targetCwd }];
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
+  }, () => "switch-trust-instance", { trustPreflight: trust });
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+  const created = await client.create(directory, undefined, "create-op");
+
+  let challenge: ControlClientError | undefined;
+  try { await client.switchSession(created.id, "/tmp/target-session.jsonl", "switch-trust-op"); }
+  catch (error) { assert.ok(error instanceof ControlClientError); challenge = error; }
+  assert.equal(challenge?.code, "project_trust_required");
+  assert.equal(challenge?.details?.challengeId, "switch-challenge");
+  assert.equal(runtime?.sessionMutationCalls.switch, 0);
+  assert.equal(registry.get(created.id).snapshot().runtimeGeneration, 1);
+
+  const switched = await client.switchSession(created.id, "/tmp/target-session.jsonl", "switch-trust-op", { challengeId: "switch-challenge", decision: "trust_once" });
+  assert.equal(switched.instance.cwd, targetCwd);
+  assert.equal(switched.instance.runtimeGeneration, 2);
+  assert.equal(runtime?.sessionMutationCalls.switch, 1);
 });
 
 test("two clients observe and replay one host-owned running instance", async (context) => {
@@ -402,6 +441,41 @@ test("SSH TUI editor preserves multiline paste and submitted history", async (co
   assert.equal(runtime.disposeCalls, 0);
 });
 
+test("SSH TUI Stage 3 commands mutate Host-owned settings tools and sessions", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-pty-stage3-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  let runtime: DelayedRuntimeSession | undefined;
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
+    runtime = new DelayedRuntimeSession(`pi-${id}`);
+    runtime.sessionCatalog = [{ sessionId: "pty-resume", sessionFile: "/tmp/pty-resume.jsonl", name: "PTY resumed", cwd: directory }];
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
+  }, () => "pty-stage3-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+  const created = await client.create(directory, "pty-stage3");
+
+  const pty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+    "attach", created.id,
+  ], "stage3");
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-4_000));
+  assert.equal(pty.status, 0, output.slice(-4_000));
+  for (const marker of ["autoRetry = false", "Active tools: read, write", "Session name: PTY Stage 3", "Compacted 123 tokens", "Resources reloaded", "Session new", "Session resume"]) assert.match(output, new RegExp(marker));
+  assert.equal(runtime?.settingMutationCalls, 1);
+  assert.equal(runtime?.toolMutationCalls, 1);
+  assert.deepEqual(runtime?.sessionMutationCalls, { new: 1, switch: 1, name: 1, compact: 1, reload: 1 });
+  const final = await client.status(created.id);
+  assert.equal(final.runtimeGeneration, 4);
+  assert.equal(final.name, "PTY resumed");
+  assert.equal(runtime?.disposeCalls, 0);
+});
+
 test("SSH TUI Ctrl+C aborts a run while preserving the reusable instance", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
@@ -496,6 +570,24 @@ test("a second client can steer, queue follow-up, and stop idempotently", async 
     controller.prompt(created.id, "too late"),
     (error: unknown) => error instanceof ControlClientError && error.code === "instance_not_active",
   );
+});
+
+test("manual compaction aborts a running model command without stealing its run operation ID", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "compact-running");
+  const originalCommandId = created.activeCommandId;
+  assert.ok(originalCommandId);
+
+  const compacted = await client.compactSession(created.id, undefined, "manual-compact-op");
+  assert.equal(compacted.instance.execution, "idle");
+  assert.equal(compacted.instance.lastRun, "aborted");
+  const events = (await client.events(created.id)).page.events;
+  const settled = events.find((event) => event.type === "run.settled");
+  assert.equal(settled?.type === "run.settled" ? settled.data.operationId : undefined, originalCommandId);
+  assert.ok(events.some((event) => event.type === "compaction.completed"));
 });
 
 test("abort is operation-deduplicated and keeps the instance reusable", async (context) => {
@@ -799,6 +891,71 @@ test("session.core lists bounded safe cwd and all-session metadata", async (cont
     { sessionId: "cwd-session", sessionFile: "/sessions/cwd.jsonl", name: "Current", cwd: "/fixture/cwd", updatedAt: "2026-07-14T01:02:03.000Z" },
     { sessionId: "other-session", sessionFile: "/sessions/other.jsonl", name: undefined, cwd: "/other", updatedAt: undefined },
   ]);
+});
+
+test("session.commands.v1 names, compacts, replaces, reloads, and deduplicates mutations", async (context) => {
+  const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, undefined, "session-create");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  runtime.sessionCatalog = [{ sessionId: "resume-target", sessionFile: "/tmp/resume-target.jsonl", name: "Resumed", cwd: harness.directory }];
+  await client.prompt(created.id, "finish old session", "prompt", "old-session-run");
+  runtime.settle("finished");
+  await harness.registry.get(created.id).waitForIdle();
+  assert.equal((await client.status(created.id)).lastRun, "succeeded");
+
+  const named = await client.nameSession(created.id, "Daily work", "name-op");
+  assert.equal(named.instance.name, "Daily work");
+  const duplicateName = await client.nameSession(created.id, "Daily work", "name-op");
+  assert.equal(duplicateName.instance.name, "Daily work");
+  assert.equal(runtime.sessionMutationCalls.name, 1);
+
+  const compacted = await client.compactSession(created.id, "keep decisions", "compact-op");
+  assert.deepEqual(compacted.result, { summary: "fixture summary", firstKeptEntryId: "kept-1", tokensBefore: 123 });
+  assert.equal(compacted.instance.execution, "idle");
+
+  const fresh = await client.newSession(created.id, undefined, "new-op");
+  assert.equal(fresh.cancelled, false);
+  assert.equal(fresh.instance.runtimeGeneration, 2);
+  assert.equal(fresh.instance.name, undefined);
+  assert.equal(fresh.instance.lastRun, "never");
+
+  const resumed = await client.switchSession(created.id, "/tmp/resume-target.jsonl", "switch-op");
+  assert.equal(resumed.cancelled, false);
+  assert.equal(resumed.instance.runtimeGeneration, 3);
+  assert.equal(resumed.instance.cwd, harness.directory);
+  assert.equal(resumed.instance.name, "Resumed");
+
+  const reloaded = await client.reloadSession(created.id, "reload-op");
+  assert.equal(reloaded.instance.runtimeGeneration, 4);
+  assert.equal(reloaded.resources[0]?.name, "AGENTS.md");
+  assert.equal(reloaded.diagnostics[0]?.message, "fixture diagnostic");
+  assert.deepEqual(runtime.sessionMutationCalls, { new: 1, switch: 1, name: 1, compact: 1, reload: 1 });
+
+  await assert.rejects(
+    client.reloadSession(created.id, "name-op"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "operation_conflict",
+  );
+});
+
+test("session command runtime ambiguity is operation-scoped and queryable", async (context) => {
+  const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, undefined, "ambiguous-session-create");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  runtime.sessionMutationError = new Error("SECRET_compaction_failure");
+
+  await assert.rejects(
+    client.compactSession(created.id, undefined, "ambiguous-compact"),
+    (error: unknown) => error instanceof ControlClientError
+      && error.code === "effect_unknown"
+      && error.operationId === "ambiguous-compact"
+      && !error.message.includes("SECRET"),
+  );
+  assert.equal((await client.status(created.id)).execution, "idle");
+  assert.equal((await client.hostInfo()).state, "ready");
 });
 
 test("unexpected host closure rejects a live follow subscription", async (context) => {
@@ -1120,7 +1277,7 @@ test("tools, settings, resources, and commands integrate with capability gates a
   assert.equal(runtime?.toolMutationCalls, 1);
 
   const settings = await client.settings(instance.id);
-  assert.equal(settings.settings.length, 20);
+  assert.equal(settings.settings.length, SETTING_KEYS.length);
   if (!runtime) throw new Error("fixture runtime was not created");
   runtime.settingsReadFailure = new RuntimeInvalidSettingValueError("editorPaddingX");
   await assert.rejects(
@@ -1634,7 +1791,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "editor" | "abort" | "transport-close" = "detach",
+  action: "detach" | "editor" | "abort" | "transport-close" | "stage3" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {

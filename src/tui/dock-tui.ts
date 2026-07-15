@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
   CombinedAutocompleteProvider,
   Container,
@@ -14,12 +16,13 @@ import {
 } from "@earendil-works/pi-tui";
 
 import { ControlClientError, DockClient, type EventSubscription } from "../control/dock-client.js";
-import type { CommandDto, SettingDto } from "../core/config-projection.js";
+import type { CommandDto, SettingDto, SettingUpdate } from "../core/config-projection.js";
 import type { DeliveryMode, DockEvent, InstanceSnapshot } from "../core/managed-instance.js";
 import type {
   RuntimeModelInfo,
   RuntimeThinkingLevel,
 } from "../core/runtime-session.js";
+import type { ProjectTrustChoice } from "../control/project-trust.js";
 import { DockConversation, DockStatusLine } from "./conversation.js";
 import { editorTheme, paint, selectListTheme } from "./theme.js";
 
@@ -50,6 +53,8 @@ export async function runDockTui(
   let settings: SettingDto[] = [];
   let commands: CommandDto[] = [];
   let terminalProgressEnabled = false;
+  let replacementHistoryGeneration: number | undefined;
+  let replacementBufferedEvents: DockEvent[] = [];
   let resolveExit!: (reason: DockTuiExitReason) => void;
   let exiting = false;
   const exit = new Promise<DockTuiExitReason>((resolve) => {
@@ -63,12 +68,24 @@ export async function runDockTui(
   };
 
   const onEvent = (event: DockEvent): void => {
-    conversation.apply(event);
     instance = projectSnapshot(instance, event);
     status.update(instance);
+    if (event.type === "session.replaced") {
+      replacementHistoryGeneration = event.runtimeGeneration;
+      replacementBufferedEvents = [event];
+      conversation.reset();
+      conversation.addNotice("Loading replacement session history…");
+      terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
+      void refreshReplacementProjection(event.runtimeGeneration, { ...instance.eventCursor });
+    } else if (replacementHistoryGeneration === event.runtimeGeneration) {
+      replacementBufferedEvents.push(event);
+    } else {
+      conversation.apply(event);
+    }
     const activity = activityForEvent(event);
     if (activity) status.setActivity(activity);
     if (event.type === "settings.changed") applyLiveSetting(event.data.key, event.data.value);
+    if (event.type === "session.info_changed") terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
     if (event.type === "instance.stopped" && editor) editor.disableSubmit = true;
     updateTerminalProgress();
     tui.requestRender();
@@ -113,37 +130,7 @@ export async function runDockTui(
   conversation.setHideThinking(booleanSetting(settings, "hideThinking", false));
   conversation.setOutputPadding(numericSetting(settings, "outputPad", 1));
   status.setAutoCompaction(booleanSetting(settings, "autoCompaction", true));
-  const autocompleteCommands = commandCatalog(commands).map((command) => {
-    if (command.name === "thinking") {
-      return {
-        ...command,
-        getArgumentCompletions: (prefix: string) => THINKING_LEVELS
-          .filter((level) => level.startsWith(prefix))
-          .map((level) => ({ value: level, label: level })),
-      };
-    }
-    if (command.name === "model") {
-      return {
-        ...command,
-        getArgumentCompletions: async (prefix: string) => {
-          try {
-            const result = await client.models(instance.id);
-            return result.models
-              .map((model) => ({
-                value: `${terminalSafe(model.provider)}/${terminalSafe(model.id)}`,
-                label: terminalSafe(model.name),
-                description: `${terminalSafe(model.provider)}/${terminalSafe(model.id)}`,
-              }))
-              .filter((model) => model.value.toLowerCase().includes(prefix.toLowerCase()));
-          } catch {
-            return null;
-          }
-        },
-      };
-    }
-    return command;
-  });
-  editor.setAutocompleteProvider(new TerminalSafeAutocompleteProvider(new CombinedAutocompleteProvider(autocompleteCommands, instance.cwd)));
+  rebuildAutocomplete();
   editor.onSubmit = (text) => {
     if (!text) return;
     editor.addToHistory(text);
@@ -157,9 +144,32 @@ export async function runDockTui(
     }
     if (text === "/help") {
       conversation.addNotice(
-        "Commands: /model [PROVIDER/MODEL], /thinking [LEVEL], /follow MESSAGE, /steer MESSAGE, /abort, /status, /stop, /detach",
+        "Commands: /settings [KEY VALUE], /model [PROVIDER/MODEL], /thinking [LEVEL], /tools [NAME…], /new [PARENT], /resume [SESSION_FILE], /name NAME, /compact [INSTRUCTIONS], /reload, /resources, /follow MESSAGE, /steer MESSAGE, /abort, /status, /stop, /detach",
       );
       tui.requestRender();
+      return;
+    }
+    if (text === "/settings") {
+      await chooseSetting();
+      return;
+    }
+    const settingTarget = commandMessage(text, "/settings");
+    if (settingTarget !== undefined) {
+      await updateSettingFromCommand(settingTarget);
+      return;
+    }
+    if (text.startsWith("/settings")) {
+      conversation.addNotice("Usage: /settings KEY VALUE", true);
+      tui.requestRender();
+      return;
+    }
+    if (text === "/tools") {
+      await chooseTools();
+      return;
+    }
+    const toolsTarget = commandMessage(text, "/tools");
+    if (toolsTarget !== undefined) {
+      await setToolsFromCommand(toolsTarget);
       return;
     }
     if (text === "/model") {
@@ -178,7 +188,7 @@ export async function runDockTui(
       return;
     }
     if (text === "/thinking") {
-      await showThinkingLevels();
+      await chooseThinking();
       return;
     }
     const thinkingTarget = commandMessage(text, "/thinking");
@@ -189,6 +199,46 @@ export async function runDockTui(
         return;
       }
       await switchThinking(thinkingTarget);
+      return;
+    }
+    if (text === "/new" || text.startsWith("/new ")) {
+      await createNewSession(commandMessage(text, "/new"));
+      return;
+    }
+    if (text === "/resume") {
+      await chooseSession();
+      return;
+    }
+    const resumeTarget = commandMessage(text, "/resume");
+    if (resumeTarget !== undefined) {
+      await resumeSession(resumeTarget);
+      return;
+    }
+    if (text === "/name") {
+      conversation.addNotice(`Current session name: ${terminalSafe(instance.name ?? "(none)")}. Usage: /name NAME; use /name - to clear.`);
+      tui.requestRender();
+      return;
+    }
+    const nameTarget = commandMessage(text, "/name");
+    if (nameTarget !== undefined) {
+      await nameSession(nameTarget === "-" ? "" : nameTarget);
+      return;
+    }
+    if (text === "/compact" || text.startsWith("/compact ")) {
+      await compactSession(commandMessage(text, "/compact"));
+      return;
+    }
+    if (text === "/reload") {
+      await reloadSession();
+      return;
+    }
+    if (text === "/resources") {
+      await showResources();
+      return;
+    }
+    if (["/install", "/config", "/login"].some((command) => text === command || text.startsWith(`${command} `))) {
+      conversation.addNotice(`Run \`pi ${text.slice(1)}\` in a separate shell; package/config/login ownership remains with the Pi CLI.`);
+      tui.requestRender();
       return;
     }
     if (text === "/status") {
@@ -344,6 +394,322 @@ export async function runDockTui(
     }
   }
 
+  async function showChoicePicker(
+    titleText: string,
+    items: Array<{ value: string; label: string; description?: string }>,
+    currentValue?: string,
+    footerText = "↑↓ choose · Enter select · Esc cancel",
+  ): Promise<string | undefined> {
+    if (items.length === 0) return undefined;
+    const list = new SelectList(
+      items.map((item) => ({
+        value: item.value,
+        label: terminalSafe(item.label),
+        ...(item.description === undefined ? {} : { description: terminalSafe(item.description) }),
+      })),
+      Math.min(items.length, 14),
+      selectListTheme,
+    );
+    const currentIndex = currentValue === undefined ? -1 : items.findIndex((item) => item.value === currentValue);
+    if (currentIndex >= 0) list.setSelectedIndex(currentIndex);
+    const panel = new Container();
+    panel.addChild(new Text(paint.bold(paint.accent(terminalSafe(titleText))), 1, 1));
+    panel.addChild(list);
+    panel.addChild(new Text(paint.muted(terminalSafe(footerText)), 1, 1));
+    const component: Component = {
+      render: (width) => panel.render(width),
+      invalidate: () => panel.invalidate(),
+      handleInput: (data) => { list.handleInput(data); tui.requestRender(); },
+    };
+    let resolveChoice!: (value: string | undefined) => void;
+    const selection = new Promise<string | undefined>((resolve) => { resolveChoice = resolve; });
+    list.onSelect = (item) => resolveChoice(item.value);
+    list.onCancel = () => resolveChoice(undefined);
+    const overlay = tui.showOverlay(component, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
+    try { return await selection; }
+    finally { overlay.hide(); }
+  }
+
+  async function chooseSetting(): Promise<void> {
+    editor.disableSubmit = true;
+    status.setActivity("loading settings");
+    tui.requestRender();
+    try {
+      settings = (await client.settings(instance.id)).settings;
+      const key = await showChoicePicker(
+        "Pi settings",
+        settings.map((setting) => ({
+          value: setting.key,
+          label: setting.key,
+          description: `${formatSettingValue(setting.value)} · ${setting.source}${setting.writable ? "" : " · read-only"}${setting.reloadRequired ? " · reload" : ""}${setting.hostRestartRequired ? " · host restart" : ""}`,
+        })),
+      );
+      if (!key) { status.setActivity("settings unchanged"); return; }
+      const setting = settings.find((candidate) => candidate.key === key);
+      if (!setting || !setting.writable) {
+        conversation.addNotice(`${key} is read-only.`, true);
+        return;
+      }
+      if (setting.valueType === "integer") {
+        editor.setText(`/settings ${setting.key} ${String(setting.value)}`);
+        conversation.addNotice(`Edit the integer value for ${setting.key}, then press Enter.`);
+        status.setActivity("setting ready to edit");
+        return;
+      }
+      const choices = settingValueChoices(setting);
+      const selected = await showChoicePicker(`Set ${setting.key}`, choices, settingChoiceValue(setting));
+      if (selected === undefined) { status.setActivity("setting unchanged"); return; }
+      const update = parseSettingCommandValue(setting, selected);
+      if (!update) {
+        conversation.addNotice(`Invalid value for ${setting.key}.`, true);
+        return;
+      }
+      await applySettingUpdate(update);
+    } catch (error) {
+      showError(error);
+    } finally {
+      if (instance.lifecycle === "active") editor.disableSubmit = false;
+      tui.setFocus(editor);
+      tui.requestRender();
+    }
+  }
+
+  async function updateSettingFromCommand(target: string): Promise<void> {
+    const separator = target.indexOf(" ");
+    if (separator < 1) {
+      conversation.addNotice("Usage: /settings KEY VALUE", true);
+      tui.requestRender();
+      return;
+    }
+    const key = target.slice(0, separator);
+    const rawValue = target.slice(separator + 1).trim();
+    try {
+      settings = (await client.settings(instance.id)).settings;
+      const setting = settings.find((candidate) => candidate.key === key);
+      const update = setting && setting.writable ? parseSettingCommandValue(setting, rawValue) : undefined;
+      if (!setting) conversation.addNotice(`Unknown setting: ${key}`, true);
+      else if (!setting.writable) conversation.addNotice(`${key} is read-only.`, true);
+      else if (!update) conversation.addNotice(`Invalid value for ${key}.`, true);
+      else await applySettingUpdate(update);
+    } catch (error) {
+      showError(error);
+    }
+    tui.requestRender();
+  }
+
+  async function applySettingUpdate(update: SettingUpdate): Promise<void> {
+    editor.disableSubmit = true;
+    status.setActivity(`setting ${update.key}`);
+    tui.requestRender();
+    try {
+      const result = await client.updateSetting(instance.id, update);
+      instance = result.instance;
+      status.update(instance);
+      settings = settings.map((setting) => setting.key === result.setting.key ? result.setting : setting);
+      applyLiveSetting(result.setting.key, result.setting.value);
+      const boundary = result.hostRestartRequired ? " · Host restart required" : result.reloadRequired ? " · run /reload" : "";
+      conversation.addNotice(`${result.setting.key} = ${formatSettingValue(result.setting.value)}${boundary}`);
+      status.setActivity(`setting ${result.setting.key} saved`);
+      rebuildAutocomplete();
+    } finally {
+      if (instance.lifecycle === "active") editor.disableSubmit = false;
+    }
+  }
+
+  async function chooseTools(): Promise<void> {
+    editor.disableSubmit = true;
+    status.setActivity("loading tools");
+    tui.requestRender();
+    try {
+      let tools = (await client.tools(instance.id)).tools;
+      while (true) {
+        const selected = await showChoicePicker(
+          "Active tools",
+          tools.map((tool) => ({ value: tool.name, label: `${tool.active ? "[x]" : "[ ]"} ${tool.name}`, description: tool.description })),
+          undefined,
+          "Enter toggles · Esc done",
+        );
+        if (selected === undefined) break;
+        const active = new Set(tools.filter((tool) => tool.active).map((tool) => tool.name));
+        if (active.has(selected)) active.delete(selected); else active.add(selected);
+        const result = await client.setActiveTools(instance.id, [...active].sort());
+        instance = result.instance;
+        status.update(instance);
+        tools = result.tools;
+        status.setActivity(`tool ${selected} toggled`);
+      }
+      status.setActivity("tools updated");
+    } catch (error) {
+      showError(error);
+    } finally {
+      if (instance.lifecycle === "active") editor.disableSubmit = false;
+      tui.setFocus(editor);
+      tui.requestRender();
+    }
+  }
+
+  async function setToolsFromCommand(target: string): Promise<void> {
+    const names = target === "none" ? [] : [...new Set(target.split(/[\s,]+/u).filter(Boolean))].sort();
+    editor.disableSubmit = true;
+    status.setActivity("updating tools");
+    tui.requestRender();
+    try {
+      const result = await client.setActiveTools(instance.id, names);
+      instance = result.instance;
+      status.update(instance);
+      conversation.addNotice(`Active tools: ${result.tools.filter((tool) => tool.active).map((tool) => tool.name).join(", ") || "none"}.`);
+      status.setActivity("tools updated");
+    } catch (error) { showError(error); }
+    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.requestRender(); }
+  }
+
+  async function chooseThinking(): Promise<void> {
+    editor.disableSubmit = true;
+    status.setActivity("loading thinking levels");
+    tui.requestRender();
+    try {
+      const result = await client.models(instance.id);
+      instance = result.instance;
+      status.update(instance);
+      const selected = await showChoicePicker(
+        "Thinking level",
+        result.availableThinkingLevels.map((level) => ({ value: level, label: level })),
+        instance.executor.thinkingLevel,
+      );
+      if (selected && isThinkingLevel(selected)) await switchThinking(selected);
+      else status.setActivity("thinking unchanged");
+    } catch (error) { showError(error); }
+    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
+  }
+
+  async function chooseSession(): Promise<void> {
+    editor.disableSubmit = true;
+    status.setActivity("loading sessions");
+    tui.requestRender();
+    try {
+      const sessions = (await client.sessions(instance.id, "all")).sessions
+        .sort((left, right) => (right.updatedAt ?? "").localeCompare(left.updatedAt ?? ""));
+      const indexed = sessions.map((session, index) => ({ session, value: String(index) }));
+      const selected = await showChoicePicker(
+        "Resume Pi session",
+        indexed.map(({ session, value }) => ({
+          value,
+          label: session.name ?? session.sessionId,
+          description: `${session.cwd}${session.sessionFile === instance.executor.sessionFile ? " · current" : ""}${session.updatedAt ? ` · ${session.updatedAt}` : ""}`,
+        })),
+      );
+      if (selected === undefined) { status.setActivity("session unchanged"); return; }
+      const target = indexed.find((candidate) => candidate.value === selected)?.session;
+      if (target) await resumeSession(target.sessionFile);
+    } catch (error) { showError(error); }
+    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
+  }
+
+  async function resumeSession(sessionFile: string): Promise<void> {
+    editor.disableSubmit = true;
+    status.setActivity("resuming session");
+    tui.requestRender();
+    const operationId = randomUUID();
+    try {
+      let result;
+      try {
+        result = await client.switchSession(instance.id, sessionFile, operationId);
+      } catch (error) {
+        const challenge = projectTrustChallenge(error, operationId);
+        if (!challenge) throw error;
+        const decision = await chooseProjectTrust(challenge.cwd);
+        if (!decision) { status.setActivity("resume cancelled"); return; }
+        result = await client.switchSession(instance.id, sessionFile, operationId, { challengeId: challenge.challengeId, decision });
+      }
+      instance = result.instance;
+      status.update(instance);
+      status.setActivity(result.cancelled ? "resume cancelled by extension" : "session resumed");
+    } catch (error) { showError(error); }
+    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
+  }
+
+  async function chooseProjectTrust(cwd: string): Promise<ProjectTrustChoice | undefined> {
+    const selected = await showChoicePicker("Project-local Pi resources", [
+      { value: "trust_once", label: "Trust once", description: cwd },
+      { value: "trust_and_remember", label: "Trust and remember", description: cwd },
+      { value: "deny_once", label: "Do not trust once", description: "continue without project resources" },
+      { value: "deny_and_remember", label: "Do not trust and remember", description: "continue without project resources" },
+    ]);
+    return isProjectTrustChoice(selected) ? selected : undefined;
+  }
+
+  async function createNewSession(parentSession?: string): Promise<void> {
+    editor.disableSubmit = true;
+    status.setActivity("creating session");
+    tui.requestRender();
+    try {
+      const result = await client.newSession(instance.id, parentSession);
+      instance = result.instance;
+      status.update(instance);
+      status.setActivity(result.cancelled ? "new session cancelled by extension" : "new session ready");
+    } catch (error) { showError(error); }
+    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.requestRender(); }
+  }
+
+  async function nameSession(name: string): Promise<void> {
+    editor.disableSubmit = true;
+    status.setActivity("naming session");
+    tui.requestRender();
+    try {
+      const result = await client.nameSession(instance.id, name);
+      instance = result.instance;
+      status.update(instance);
+      terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
+      conversation.addNotice(instance.name ? `Session name: ${terminalSafe(instance.name)}.` : "Session name cleared.");
+      status.setActivity(instance.name ? `named ${terminalSafe(instance.name)}` : "session name cleared");
+    } catch (error) { showError(error); }
+    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.requestRender(); }
+  }
+
+  async function compactSession(customInstructions?: string): Promise<void> {
+    editor.disableSubmit = true;
+    status.setActivity("compacting");
+    tui.requestRender();
+    try {
+      const result = await client.compactSession(instance.id, customInstructions);
+      instance = result.instance;
+      status.update(instance);
+      conversation.addNotice(`Compacted ${result.result.tokensBefore.toLocaleString()} tokens · kept from ${result.result.firstKeptEntryId}.`);
+      status.setActivity("compacted");
+    } catch (error) { showError(error); }
+    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.requestRender(); }
+  }
+
+  async function reloadSession(): Promise<void> {
+    editor.disableSubmit = true;
+    status.setActivity("reloading resources");
+    tui.requestRender();
+    try {
+      const result = await client.reloadSession(instance.id);
+      instance = result.instance;
+      status.update(instance);
+      for (const diagnostic of result.diagnostics) conversation.addNotice(`${diagnostic.severity}: ${diagnostic.message}`, diagnostic.severity === "error");
+      status.setActivity(`reloaded ${result.resources.length} resources`);
+    } catch (error) { showError(error); }
+    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.requestRender(); }
+  }
+
+  async function showResources(): Promise<void> {
+    editor.disableSubmit = true;
+    status.setActivity("loading resources");
+    tui.requestRender();
+    try {
+      const result = await client.resources(instance.id);
+      for (const diagnostic of result.diagnostics) conversation.addNotice(`${diagnostic.severity}: ${diagnostic.message}${diagnostic.source ? ` · ${diagnostic.source}` : ""}`, diagnostic.severity === "error");
+      const indexed = result.resources.map((resource, index) => ({ resource, value: String(index) }));
+      const selected = await showChoicePicker("Pi resources", indexed.map(({ resource, value }) => ({ value, label: `${resource.kind}: ${resource.name}`, description: resource.path ?? resource.source?.package ?? resource.source?.kind })));
+      const resource = indexed.find((candidate) => candidate.value === selected)?.resource;
+      if (resource) conversation.addNotice(`${resource.kind} ${resource.name}${resource.path ? ` · ${resource.path}` : ""}`);
+      status.setActivity(`${result.resources.length} resources · ${result.diagnostics.length} diagnostics`);
+    } catch (error) { showError(error); }
+    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
+  }
+
   async function switchModel(provider: string, modelId: string): Promise<void> {
     editor.disableSubmit = true;
     status.setActivity(`switching to ${provider}/${modelId}`);
@@ -359,23 +725,6 @@ export async function runDockTui(
       if (instance.lifecycle === "active") editor.disableSubmit = false;
       tui.requestRender();
     }
-  }
-
-  async function showThinkingLevels(): Promise<void> {
-    status.setActivity("loading thinking levels");
-    tui.requestRender();
-    try {
-      const result = await client.models(instance.id);
-      instance = result.instance;
-      status.update(instance);
-      conversation.addNotice(
-        `Thinking: ${instance.executor.thinkingLevel ?? "unknown"}. Available: ${result.availableThinkingLevels.join(", ")}`,
-      );
-      status.setActivity("thinking shown");
-    } catch (error) {
-      showError(error);
-    }
-    tui.requestRender();
   }
 
   async function switchThinking(level: RuntimeThinkingLevel): Promise<void> {
@@ -406,6 +755,105 @@ export async function runDockTui(
       showError(error);
     }
     tui.requestRender();
+  }
+
+  async function refreshReplacementProjection(generation: number, cursor: InstanceSnapshot["eventCursor"]): Promise<void> {
+    const [projectionLoad, settingsLoad, commandsLoad] = await Promise.allSettled([
+      (async () => {
+        const projection = await client.streamEvents(instance.id, { since: cursor, onEvent: () => {}, requireTuiProjection: true });
+        projection.close();
+        await projection.done.catch(() => {});
+        return projection.initial;
+      })(),
+      client.settings(instance.id),
+      client.commands(instance.id),
+    ]);
+    if (replacementHistoryGeneration !== generation) return;
+
+    const buffered = replacementBufferedEvents;
+    replacementBufferedEvents = [];
+    replacementHistoryGeneration = undefined;
+    conversation.reset();
+    if (projectionLoad.status === "fulfilled") {
+      instance = projectionLoad.value.instance;
+      status.update(instance);
+      terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
+      conversation.applyHistory(projectionLoad.value.recentHistory, projectionLoad.value.historyTruncated);
+      const replacement = buffered.find((event) => event.type === "session.replaced");
+      if (replacement) conversation.apply(replacement);
+      conversation.applyReplay(projectionLoad.value.page.events, projectionLoad.value.page.truncated);
+      for (const event of buffered) {
+        if (event.type !== "session.replaced" && event.sequence > projectionLoad.value.page.latest.sequence) conversation.apply(event);
+      }
+    } else {
+      conversation.addNotice(`Replacement history unavailable: ${errorText(projectionLoad.reason)}`, true);
+      conversation.applyReplay(buffered, false);
+    }
+
+    if (settingsLoad.status === "fulfilled") {
+      settings = settingsLoad.value.settings;
+      for (const setting of settings) applyLiveSetting(setting.key, setting.value);
+    } else {
+      conversation.addNotice(`Replacement settings unavailable: ${errorText(settingsLoad.reason)}`, true);
+    }
+    if (commandsLoad.status === "fulfilled") commands = commandsLoad.value.commands;
+    else conversation.addNotice(`Replacement command catalog unavailable: ${errorText(commandsLoad.reason)}`, true);
+    rebuildAutocomplete();
+    status.setActivity("session history loaded");
+    tui.requestRender();
+  }
+
+  function rebuildAutocomplete(): void {
+    if (!editor) return;
+    const autocompleteCommands = commandCatalog(commands).map((command) => {
+      if (command.name === "thinking") {
+        return {
+          ...command,
+          getArgumentCompletions: (prefix: string) => THINKING_LEVELS
+            .filter((level) => level.startsWith(prefix))
+            .map((level) => ({ value: level, label: level })),
+        };
+      }
+      if (command.name === "model") {
+        return {
+          ...command,
+          getArgumentCompletions: async (prefix: string) => {
+            try {
+              const result = await client.models(instance.id);
+              return result.models
+                .map((model) => ({
+                  value: `${terminalSafe(model.provider)}/${terminalSafe(model.id)}`,
+                  label: terminalSafe(model.name),
+                  description: `${terminalSafe(model.provider)}/${terminalSafe(model.id)}`,
+                }))
+                .filter((model) => model.value.toLowerCase().includes(prefix.toLowerCase()));
+            } catch {
+              return null;
+            }
+          },
+        };
+      }
+      if (command.name === "settings") {
+        return {
+          ...command,
+          getArgumentCompletions: (prefix: string) => settingCompletions(settings, prefix),
+        };
+      }
+      if (command.name === "tools") {
+        return {
+          ...command,
+          getArgumentCompletions: async (prefix: string) => {
+            try {
+              return (await client.tools(instance.id)).tools
+                .filter((tool) => tool.name.toLowerCase().includes(prefix.toLowerCase()))
+                .map((tool) => ({ value: terminalSafe(tool.name), label: terminalSafe(tool.name), description: tool.active ? "active" : "inactive" }));
+            } catch { return null; }
+          },
+        };
+      }
+      return command;
+    });
+    editor.setAutocompleteProvider(new TerminalSafeAutocompleteProvider(new CombinedAutocompleteProvider(autocompleteCommands, instance.cwd)));
   }
 
   function showError(error: unknown): void {
@@ -591,6 +1039,13 @@ export function projectSnapshot(snapshot: InstanceSnapshot, event: DockEvent): I
     return {
       ...snapshot,
       cwd: event.data.cwd,
+      name: event.data.name,
+      execution: "idle",
+      lastRun: "never",
+      pending: { steering: 0, followUp: 0, total: 0 },
+      activeCommandId: undefined,
+      lastError: undefined,
+      extensionStatus: {},
       runtimeGeneration: event.data.runtimeGeneration,
       executor: { ...snapshot.executor, piSessionId: event.data.piSessionId, sessionFile: event.data.sessionFile },
       updatedAt: event.occurredAt,
@@ -743,6 +1198,95 @@ class TerminalSafeAutocompleteProvider implements AutocompleteProvider {
   }
 }
 
+function formatSettingValue(value: SettingDto["value"]): string {
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+function settingChoiceValue(setting: SettingDto): string | undefined {
+  if (setting.valueType === "object") {
+    const enabled = (setting.value as { anthropicExtraUsage?: boolean }).anthropicExtraUsage;
+    return enabled !== false ? "true" : "false";
+  }
+  return typeof setting.value === "string" || typeof setting.value === "boolean"
+    ? String(setting.value)
+    : undefined;
+}
+
+function settingValueChoices(setting: SettingDto): Array<{ value: string; label: string; description?: string }> {
+  if (setting.valueType === "boolean") return [
+    { value: "true", label: "true" },
+    { value: "false", label: "false" },
+  ];
+  if (setting.valueType === "enum") return (setting.allowedValues ?? []).map((value) => ({ value: String(value), label: String(value) }));
+  if (setting.valueType === "object") return [
+    { value: "true", label: "anthropicExtraUsage: true" },
+    { value: "false", label: "anthropicExtraUsage: false" },
+  ];
+  return [{ value: String(setting.value), label: String(setting.value), description: `${setting.min ?? 0}..${setting.max ?? "∞"}` }];
+}
+
+export function parseSettingCommandValue(setting: SettingDto, rawValue: string): SettingUpdate | undefined {
+  if (!setting.writable) return undefined;
+  let value: unknown;
+  if (setting.valueType === "boolean") {
+    if (rawValue === "true" || rawValue === "on") value = true;
+    else if (rawValue === "false" || rawValue === "off") value = false;
+    else return undefined;
+  } else if (setting.valueType === "enum") {
+    if (!setting.allowedValues?.includes(rawValue)) return undefined;
+    value = rawValue;
+  } else if (setting.valueType === "integer") {
+    if (!/^\d+$/u.test(rawValue)) return undefined;
+    const parsed = Number(rawValue);
+    if (!Number.isSafeInteger(parsed) || parsed < (setting.min ?? 0) || parsed > (setting.max ?? Number.MAX_SAFE_INTEGER)) return undefined;
+    value = parsed;
+  } else {
+    if (rawValue === "true" || rawValue === "on") value = { anthropicExtraUsage: true };
+    else if (rawValue === "false" || rawValue === "off") value = { anthropicExtraUsage: false };
+    else {
+      try {
+        const parsed = JSON.parse(rawValue) as unknown;
+        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+        const record = parsed as Record<string, unknown>;
+        if (Object.keys(record).some((key) => key !== "anthropicExtraUsage") || (record.anthropicExtraUsage !== undefined && typeof record.anthropicExtraUsage !== "boolean")) return undefined;
+        value = { ...(record.anthropicExtraUsage === undefined ? {} : { anthropicExtraUsage: record.anthropicExtraUsage }) };
+      } catch { return undefined; }
+    }
+  }
+  return { key: setting.key, value } as SettingUpdate;
+}
+
+function settingCompletions(settings: SettingDto[], prefix: string): AutocompleteItem[] {
+  const separator = prefix.indexOf(" ");
+  if (separator < 0) {
+    return settings
+      .filter((setting) => setting.key.startsWith(prefix))
+      .map((setting) => ({ value: setting.key, label: setting.key, description: `${formatSettingValue(setting.value)}${setting.writable ? "" : " · read-only"}` }));
+  }
+  const key = prefix.slice(0, separator);
+  const valuePrefix = prefix.slice(separator + 1);
+  const setting = settings.find((candidate) => candidate.key === key);
+  if (!setting?.writable) return [];
+  return settingValueChoices(setting)
+    .filter((choice) => choice.value.startsWith(valuePrefix))
+    .map((choice) => ({ value: `${key} ${choice.value}`, label: choice.label, description: choice.description }));
+}
+
+function projectTrustChallenge(error: unknown, operationId: string): { challengeId: string; cwd: string } | undefined {
+  if (!(error instanceof ControlClientError) || error.code !== "project_trust_required") return undefined;
+  const challengeId = error.details?.challengeId;
+  const challengeOperationId = error.details?.operationId;
+  const cwd = error.details?.cwd;
+  if (typeof challengeId !== "string" || challengeOperationId !== operationId || typeof cwd !== "string") {
+    throw new Error("Host returned an invalid project trust challenge");
+  }
+  return { challengeId, cwd };
+}
+
+function isProjectTrustChoice(value: string | undefined): value is ProjectTrustChoice {
+  return value === "trust_once" || value === "trust_and_remember" || value === "deny_once" || value === "deny_and_remember";
+}
+
 function booleanSetting(settings: SettingDto[], key: SettingDto["key"], fallback: boolean): boolean {
   const value = settings.find((setting) => setting.key === key)?.value;
   return typeof value === "boolean" ? value : fallback;
@@ -766,14 +1310,25 @@ export function commandCatalog(commands: CommandDto[]): Array<{ name: string; de
   }
   const dockCommands = [
     { name: "abort", description: "abort the current run; keep the instance reusable" },
+    { name: "compact", description: "manually compact session context", argumentHint: "INSTRUCTIONS" },
+    { name: "config", description: "show Pi CLI config ownership guidance" },
     { name: "detach", description: "leave the TUI without stopping the instance" },
     { name: "follow", description: "queue a follow-up message", argumentHint: "MESSAGE" },
     { name: "help", description: "show Dock commands" },
+    { name: "install", description: "show Pi CLI package ownership guidance" },
+    { name: "login", description: "show Pi CLI login ownership guidance" },
     { name: "model", description: "choose or set provider/model", argumentHint: "PROVIDER/MODEL" },
+    { name: "name", description: "set or clear the Pi session name", argumentHint: "NAME" },
+    { name: "new", description: "create a new Pi session", argumentHint: "PARENT_SESSION" },
+    { name: "reload", description: "coherently reload Pi resources" },
+    { name: "resources", description: "inspect loaded resources and diagnostics" },
+    { name: "resume", description: "select or open a Pi session", argumentHint: "SESSION_FILE" },
+    { name: "settings", description: "inspect or update Pi settings", argumentHint: "KEY VALUE" },
     { name: "status", description: "refresh instance status" },
     { name: "steer", description: "steer the current run", argumentHint: "MESSAGE" },
     { name: "stop", description: "stop and dispose the instance" },
-    { name: "thinking", description: "show or set thinking level", argumentHint: "LEVEL" },
+    { name: "thinking", description: "choose or set thinking level", argumentHint: "LEVEL" },
+    { name: "tools", description: "toggle or set active tools", argumentHint: "NAME…" },
   ];
   for (const command of dockCommands) catalog.set(command.name, command);
   return [...catalog.values()].sort((left, right) => left.name.localeCompare(right.name));

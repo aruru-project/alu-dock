@@ -62,16 +62,14 @@ export class DockRegistry {
 
   async create(input: CreateRegistryInstanceInput): Promise<ManagedInstance> {
     this.catalog.assertWritable();
-    const resolution = this.trustPreflight
-      ? await this.trustPreflight.resolve({
-          operationType: "instance.create",
-          operationId: input.operationId,
-          cwd: input.cwd,
-          name: input.name,
-          trustChallengeId: input.trustChallengeId,
-          projectTrustDecision: input.projectTrustDecision,
-        })
-      : { canonicalCwd: await canonicalDirectory(input.cwd), projectTrusted: true };
+    const resolution = await this.resolveProjectTrust({
+      operationType: "instance.create",
+      operationId: input.operationId,
+      cwd: input.cwd,
+      name: input.name,
+      trustChallengeId: input.trustChallengeId,
+      projectTrustDecision: input.projectTrustDecision,
+    });
     const cwd = resolution.canonicalCwd;
 
     const id = this.createId();
@@ -116,6 +114,13 @@ export class DockRegistry {
 
   catalogRevision(): number {
     return this.catalog.revision;
+  }
+
+  async resolveProjectTrust(input: ProjectTrustRequest): Promise<ProjectTrustResolution> {
+    this.catalog.assertWritable();
+    return this.trustPreflight
+      ? this.trustPreflight.resolve(input)
+      : { canonicalCwd: await canonicalDirectory(input.cwd), projectTrusted: true };
   }
 
   catalogHealth(): CatalogHealth { return this.catalog.health; }

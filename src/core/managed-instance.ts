@@ -24,6 +24,7 @@ import type {
 export type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingKey, SettingUpdate, SettingValueMap, SourceDto, ToolDto } from "./config-projection.js";
 import type {
   ClearedRuntimeQueue,
+  RuntimeCompactionResult,
   RuntimeEvent,
   RuntimeHistoryEntry,
   RuntimeModelInfo,
@@ -32,6 +33,7 @@ import type {
   RuntimeReplacementResult,
   RuntimeSession,
   RuntimeSessionMetrics,
+  RuntimeSessionTarget,
   RuntimeThinkingLevel,
 } from "./runtime-session.js";
 
@@ -81,6 +83,7 @@ export interface HistoryPageDto {
 }
 export type SessionMetricsDto = RuntimeSessionMetrics;
 export interface SessionDto { sessionId: string; sessionFile: string; name?: string; cwd: string; updatedAt?: string }
+export interface SessionCompactionDto { summary: string; firstKeptEntryId: string; tokensBefore: number }
 export type SettingsChangedData = { [K in keyof SettingValueMap]: { key: K; value: SettingValueMap[K]; reloadRequired: boolean; hostRestartRequired: boolean } }[keyof SettingValueMap];
 export interface EventDataMap {
   "instance.created": { cwd: string; name?: string; executor: ExecutorIdentity };
@@ -107,7 +110,7 @@ export interface EventDataMap {
   "queue.cleared": PendingDto;
   "compaction.started": { reason: "manual" | "threshold" | "overflow" };
   "compaction.completed": { reason: "manual" | "threshold" | "overflow"; aborted: boolean; willRetry: boolean; error?: string };
-  "session.replaced": { reason: "new" | "resume" | "fork" | "reload"; previousSessionFile?: string; sessionFile?: string; runtimeGeneration: number; cwd: string; piSessionId: string };
+  "session.replaced": { reason: "new" | "resume" | "fork" | "reload"; previousSessionFile?: string; sessionFile?: string; runtimeGeneration: number; cwd: string; piSessionId: string; name?: string };
   "session.info_changed": { name?: string };
   "session.metrics_changed": { metrics: SessionMetricsDto };
   "model.changed": { provider: string; id: string; thinkingLevel: RuntimeThinkingLevel; availableThinkingLevels: RuntimeThinkingLevel[] };
@@ -246,6 +249,7 @@ interface MutableState {
 
 interface WorkingCheckpoint {
   state: MutableState;
+  name: string | undefined;
   cwd: string;
   executor: ExecutorIdentity;
   runtimeGeneration: number;
@@ -304,7 +308,7 @@ export class RuntimeEffectUnknownError extends Error {
   readonly queryHint = "Query the instance snapshot before any retry";
 
   constructor(readonly operationId: string, cause?: unknown) {
-    super(`Runtime abort may have taken effect for operation ${operationId}`);
+    super(`Runtime mutation may have taken effect for operation ${operationId}`);
     this.name = "RuntimeEffectUnknownError";
     this.cause = cause;
   }
@@ -314,10 +318,10 @@ export class ManagedInstance {
   readonly id: string;
   readonly creationOperationId: string;
   readonly hostEpoch: string;
-  readonly name: string | undefined;
   readonly createdAt: string;
 
   private readonly session: RuntimeSession;
+  private nameValue: string | undefined;
   private cwdValue: string;
   private readonly executorIdentity: ExecutorIdentity;
   private historyValue: HistoryEntryDto[];
@@ -372,13 +376,14 @@ export class ManagedInstance {
   private stopPromise: Promise<StopReceipt> | undefined;
 
   get runtimeGeneration(): number { return this.runtimeGenerationValue; }
+  get name(): string | undefined { return this.nameValue; }
   get cwd(): string { return this.cwdValue; }
 
   constructor(options: ManagedInstanceOptions) {
     this.id = options.id ?? randomUUID();
     this.creationOperationId = options.creationOperationId ?? randomUUID();
     this.hostEpoch = options.hostEpoch ?? randomUUID();
-    this.name = options.name;
+    this.nameValue = options.name;
     this.cwdValue = options.cwd;
     this.session = options.session;
     const requestedCapacity = options.eventCapacity ?? 500;
@@ -669,10 +674,17 @@ export class ManagedInstance {
     });
   }
 
-  async newSession(operationId: string): Promise<RuntimeReplacementResult> {
+  async resolveSessionTarget(sessionFile: string): Promise<RuntimeSessionTarget> {
+    return this.withProjectionRead(async () => {
+      if (!this.session.resolveSessionTarget) throw new Error("Runtime does not support session target resolution");
+      return cloneJson(await this.session.resolveSessionTarget(sessionFile));
+    });
+  }
+
+  async newSession(operationId: string, parentSession?: string): Promise<RuntimeReplacementResult> {
     return this.replaceRuntime("creating a new session", operationId, "new", undefined, async () => {
       if (!this.session.newSession) throw new Error("Runtime does not support session replacement");
-      return this.session.newSession(operationId);
+      return this.session.newSession(operationId, parentSession);
     });
   }
 
@@ -687,11 +699,56 @@ export class ManagedInstance {
     });
   }
 
+  async setSessionName(operationId: string, name: string): Promise<void> {
+    await this.beginConfiguration("naming the session");
+    let runtimeCalled = false;
+    try {
+      if (!this.session.setSessionName) throw new Error("Runtime does not support session naming");
+      this.receiptBoundaryOperationId = operationId;
+      runtimeCalled = true;
+      const actualName = this.session.setSessionName(name);
+      await this.closeRuntimeOperationBoundary(operationId);
+      if (this.nameValue !== actualName) throw new Error("Runtime completed session naming without publishing session_info_changed");
+    } catch (error) {
+      await this.closeRuntimeOperationBoundary(operationId).catch(() => {});
+      if (runtimeCalled && !isKnownMutationBoundaryError(error)) throw new RuntimeEffectUnknownError(operationId, error);
+      throw error;
+    } finally {
+      this.endConfiguration();
+    }
+  }
+
+  async compactSession(operationId: string, customInstructions?: string): Promise<SessionCompactionDto> {
+    await this.beginConfiguration("compacting the session", true);
+    let runtimeCalled = false;
+    try {
+      if (!this.session.compact) throw new Error("Runtime does not support compaction");
+      this.receiptBoundaryOperationId = operationId;
+      runtimeCalled = true;
+      const result = projectCompactionResult(await this.session.compact(customInstructions));
+      await this.closeRuntimeOperationBoundary(operationId);
+      return result;
+    } catch (error) {
+      await this.closeRuntimeOperationBoundary(operationId).catch(() => {});
+      if (runtimeCalled && !isKnownMutationBoundaryError(error)) throw new RuntimeEffectUnknownError(operationId, error);
+      throw error;
+    } finally {
+      this.endConfiguration();
+    }
+  }
+
   async reloadSession(operationId: string): Promise<RuntimeReplacementResult> {
-    return this.replaceRuntime("reloading resources", operationId, "reload", undefined, async () => {
+    const result = await this.replaceRuntime("reloading resources", operationId, "reload", undefined, async () => {
       if (!this.session.reload) throw new Error("Runtime does not support reload");
       return this.session.reload(operationId);
     });
+    if (!result.cancelled) {
+      const projected = await this.getResources();
+      await this.enqueueTransition(async () => {
+        this.appendEvent("resources.reloaded", projected);
+      });
+    }
+    return result;
   }
 
   async selectModel(provider: string, modelId: string, operationId = this.createCommandId()): Promise<RuntimeModelState> {
@@ -1266,6 +1323,7 @@ export class ManagedInstance {
   private captureWorkingCheckpoint(): WorkingCheckpoint {
     return {
       state: cloneJson(this.state),
+      name: this.nameValue,
       cwd: this.cwdValue,
       executor: cloneJson(this.executorIdentity),
       runtimeGeneration: this.runtimeGenerationValue,
@@ -1285,6 +1343,7 @@ export class ManagedInstance {
 
   private restoreWorkingCheckpoint(checkpoint: WorkingCheckpoint): void {
     this.state = checkpoint.state;
+    this.nameValue = checkpoint.name;
     this.cwdValue = checkpoint.cwd;
     Object.assign(this.executorIdentity, checkpoint.executor);
     for (const key of Object.keys(this.executorIdentity) as Array<keyof ExecutorIdentity>) {
@@ -1367,15 +1426,15 @@ export class ManagedInstance {
     }
   }
 
-  private async beginConfiguration(action: string): Promise<void> {
+  private async beginConfiguration(action: string, allowRunning = false): Promise<void> {
     this.catalogPort?.assertWritable();
     this.assertActive();
     if (
       this.configurationPending
       || this.commandAbortPending
       || this.pendingAdmission !== undefined
-      || this.state.execution === "running"
-      || this.session.isStreaming
+      || this.compactionActive
+      || (!allowRunning && (this.state.execution === "running" || this.session.isStreaming))
     ) {
       throw new InstanceBusyError(this.id, action);
     }
@@ -1579,6 +1638,7 @@ export class ManagedInstance {
   private async handleCatalogRuntimeEvent(event: RuntimeEvent): Promise<void> {
     this.catalogPort?.assertWritable();
     const operationId = this.catalogAdmissionOperationId
+      ?? (event.type === "agent_settled" ? this.state.activeCommandId : undefined)
       ?? this.receiptBoundaryOperationId
       ?? this.replacementIntent?.operationId
       ?? this.state.activeCommandId;
@@ -1592,6 +1652,7 @@ export class ManagedInstance {
       const previousSessionFile = optionalRuntimeString(event.previousSessionFile, 16_384);
       const sessionFile = optionalRuntimeString(event.sessionFile, 16_384);
       const cwd = optionalRuntimeString(event.cwd, 16_384);
+      const name = optionalRuntimeString(event.name, 256);
       const reason = event.reason === "resume" || event.reason === "reload" ? event.reason : "new";
       await this.commitCatalogTransition(context("session.replaced"), () => {
         this.runtimeGenerationValue += 1;
@@ -1603,9 +1664,14 @@ export class ManagedInstance {
         this.currentAssistantMessageId = undefined;
         this.announcedToolCalls.clear();
         this.lastAssistantOutcome = undefined;
+        this.state.execution = "idle";
+        this.state.lastRun = "never";
+        this.state.activeCommandId = undefined;
+        this.state.lastError = undefined;
         this.state.pendingSteering = 0;
         this.state.pendingFollowUp = 0;
         if (cwd !== undefined) this.cwdValue = cwd;
+        this.nameValue = name;
         this.executorIdentity.piSessionId = truncate(this.session.sessionId, 128) ?? "unknown";
         this.executorIdentity.sessionFile = truncate(this.session.sessionFile, 16_384);
         this.applyModelState(this.session.getModelState());
@@ -1614,8 +1680,16 @@ export class ManagedInstance {
         this.publishedRuntimeGenerationValue = this.runtimeGenerationValue;
         this.nextEventSequence = 1;
         this.eventLog.length = 0;
-        this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId });
+        this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue });
       });
+      return;
+    }
+    if (event.type === "session_info_changed") {
+      const name = optionalRuntimeString(event.name, 256);
+      await this.commitCatalogTransition(context("session.name"), () => {
+        this.nameValue = name;
+        this.touch();
+      }, () => this.appendEvent("session.info_changed", { name }));
       return;
     }
     if (event.type === "dock_runtime_error") {
@@ -1759,6 +1833,7 @@ export class ManagedInstance {
       const previousSessionFile = optionalRuntimeString(event.previousSessionFile, 16_384);
       const sessionFile = optionalRuntimeString(event.sessionFile, 16_384);
       const cwd = optionalRuntimeString(event.cwd, 16_384);
+      const name = optionalRuntimeString(event.name, 256);
       const reason = event.reason === "resume" || event.reason === "reload" ? event.reason : "new";
       this.runtimeGenerationValue += 1;
       this.publishedRuntimeGenerationValue = this.runtimeGenerationValue;
@@ -1772,14 +1847,26 @@ export class ManagedInstance {
       this.currentAssistantMessageId = undefined;
       this.announcedToolCalls.clear();
       this.lastAssistantOutcome = undefined;
+      this.state.execution = "idle";
+      this.state.lastRun = "never";
+      this.state.activeCommandId = undefined;
+      this.state.lastError = undefined;
       this.state.pendingSteering = 0;
       this.state.pendingFollowUp = 0;
       if (cwd !== undefined) this.cwdValue = cwd;
+      this.nameValue = name;
       this.executorIdentity.piSessionId = truncate(this.session.sessionId, 128) ?? "unknown";
       this.executorIdentity.sessionFile = truncate(this.session.sessionFile, 16_384);
       this.applyModelState(this.session.getModelState());
       this.touch();
-      this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId });
+      this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue });
+      return;
+    }
+    if (event.type === "session_info_changed") {
+      const name = optionalRuntimeString(event.name, 256);
+      this.nameValue = name;
+      this.touch();
+      this.appendEvent("session.info_changed", { name });
       return;
     }
     if (event.type === "dock_runtime_error") {
@@ -1946,7 +2033,7 @@ export class ManagedInstance {
   private handleAgentSettled(): void {
     this.agentSettledCount += 1;
     const outcome = this.lastAssistantOutcome;
-    const operationId = this.receiptBoundaryOperationId ?? this.state.activeCommandId;
+    const operationId = this.state.activeCommandId ?? this.receiptBoundaryOperationId;
     let result: Exclude<LastRunResult, "never">;
 
     if (outcome?.stopReason === "error") {
@@ -2209,7 +2296,11 @@ function historyFingerprint(role: HistoryEntryDto["role"], content: ContentBlock
 }
 
 function refreshesHistory(event: RuntimeEvent): boolean {
-  return event.type === "entry_appended" || event.type === "message_end" || event.type === "dock_session_replaced";
+  return event.type === "entry_appended"
+    || event.type === "message_end"
+    || event.type === "session_info_changed"
+    || event.type === "compaction_end"
+    || event.type === "dock_session_replaced";
 }
 
 function refreshesMetrics(event: RuntimeEvent): boolean {
@@ -2281,6 +2372,24 @@ function projectRuntimeMetrics(value: RuntimeSessionMetrics): SessionMetricsDto 
       },
     }),
   };
+}
+
+function projectCompactionResult(result: RuntimeCompactionResult): SessionCompactionDto {
+  if (typeof result.summary !== "string" || typeof result.firstKeptEntryId !== "string" || result.firstKeptEntryId.length === 0 || result.firstKeptEntryId.length > 128 || !Number.isSafeInteger(result.tokensBefore) || result.tokensBefore < 0) {
+    throw new Error("Pi returned an invalid compaction result");
+  }
+  return {
+    summary: safeWireText(result.summary, 8_000, "Compaction summary omitted"),
+    firstKeptEntryId: result.firstKeptEntryId,
+    tokensBefore: result.tokensBefore,
+  };
+}
+
+function isKnownMutationBoundaryError(error: unknown): boolean {
+  return error instanceof CatalogEffectUnknownError
+    || error instanceof CatalogWriteError
+    || error instanceof MutationFaultedError
+    || error instanceof RuntimeEffectUnknownError;
 }
 
 function nonNegativeNumber(value: unknown): number {

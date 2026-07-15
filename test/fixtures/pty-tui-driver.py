@@ -93,6 +93,22 @@ def main() -> int:
                 while b"replayed; this TUI" not in output and time.monotonic() < close_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
+            elif action == "stage3":
+                steps = [
+                    (b"/settings autoRetry false\r", b"autoRetry = false"),
+                    (b"/tools read write\r", b"Active tools: read, write"),
+                    (b"/name PTY Stage 3\r", b"Session name: PTY Stage 3"),
+                    (b"/compact\r", b"Compacted 123 tokens"),
+                    (b"/reload\r", b"Resources reloaded"),
+                    (b"/new\r", b"Session new"),
+                    (b"/resume /tmp/pty-resume.jsonl\r", b"Session resume"),
+                ]
+                for command, marker in steps:
+                    os.write(fd, command)
+                    command_deadline = time.monotonic() + 5
+                    while marker not in output and time.monotonic() < command_deadline:
+                        if read_available(fd, output, 0.05) < 0:
+                            break
             else:
                 os.write(fd, b"\x0f")  # Ctrl+O: collapse/expand tool output.
                 time.sleep(0.1)

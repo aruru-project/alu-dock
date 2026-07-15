@@ -14,6 +14,8 @@ export interface DiagnosticDto { severity: "info" | "warning" | "error"; message
 
 export interface SettingValueMap {
   autoCompaction: boolean;
+  compactionReserveTokens: number;
+  compactionKeepRecentTokens: number;
   autoRetry: boolean;
   enableSkillCommands: boolean;
   hideThinking: boolean;
@@ -22,6 +24,8 @@ export interface SettingValueMap {
   clearOnShrink: boolean;
   showTerminalProgress: boolean;
   quietStartup: boolean;
+  collapseChangelog: boolean;
+  enableInstallTelemetry: boolean;
   steeringMode: "all" | "one-at-a-time";
   followUpMode: "all" | "one-at-a-time";
   transport: "auto" | "sse" | "websocket" | "websocket-cached";
@@ -35,7 +39,9 @@ export interface SettingValueMap {
   warnings: { anthropicExtraUsage?: boolean };
 }
 export type SettingKey = keyof SettingValueMap;
-export type SettingUpdate = { [K in SettingKey]: { key: K; value: SettingValueMap[K] } }[SettingKey];
+export type ReadOnlySettingKey = "compactionReserveTokens" | "compactionKeepRecentTokens";
+export type WritableSettingKey = Exclude<SettingKey, ReadOnlySettingKey>;
+export type SettingUpdate = { [K in WritableSettingKey]: { key: K; value: SettingValueMap[K] } }[WritableSettingKey];
 export type SettingSource = "global" | "project" | "effective";
 export type SettingDto = { [K in SettingKey]: {
   key: K;
@@ -57,23 +63,26 @@ export interface SettingDefinition {
   max?: number;
   reloadRequired: boolean;
   hostRestartRequired: boolean;
+  writable: boolean;
   /** Public Settings shape path used only to report the source of the effective value. */
   sourcePath: readonly string[];
 }
 
 const booleanDefinition = (sourcePath: readonly string[], reloadRequired = false): SettingDefinition => Object.freeze({
-  valueType: "boolean", reloadRequired, hostRestartRequired: false, sourcePath: Object.freeze([...sourcePath]),
+  valueType: "boolean", reloadRequired, hostRestartRequired: false, writable: true, sourcePath: Object.freeze([...sourcePath]),
 });
 const enumDefinition = (sourcePath: readonly string[], allowedValues: readonly string[]): SettingDefinition => Object.freeze({
-  valueType: "enum", allowedValues: Object.freeze([...allowedValues]), reloadRequired: false, hostRestartRequired: false, sourcePath: Object.freeze([...sourcePath]),
+  valueType: "enum", allowedValues: Object.freeze([...allowedValues]), reloadRequired: false, hostRestartRequired: false, writable: true, sourcePath: Object.freeze([...sourcePath]),
 });
 const integerDefinition = (sourcePath: readonly string[], min: number, max: number, hostRestartRequired = false): SettingDefinition => Object.freeze({
-  valueType: "integer", min, max, reloadRequired: false, hostRestartRequired, sourcePath: Object.freeze([...sourcePath]),
+  valueType: "integer", min, max, reloadRequired: false, hostRestartRequired, writable: true, sourcePath: Object.freeze([...sourcePath]),
 });
 
-/** Exhaustive frozen metadata for the Stage 1C general-settings allowlist. */
+/** Exhaustive frozen metadata for the Stage 3 general-settings projection. */
 export const SETTING_DEFINITIONS: { readonly [K in SettingKey]: SettingDefinition } = Object.freeze({
   autoCompaction: booleanDefinition(["compaction", "enabled"]),
+  compactionReserveTokens: Object.freeze({ valueType: "integer", min: 0, max: 2_147_483_647, reloadRequired: false, hostRestartRequired: false, writable: false, sourcePath: Object.freeze(["compaction", "reserveTokens"]) }),
+  compactionKeepRecentTokens: Object.freeze({ valueType: "integer", min: 0, max: 2_147_483_647, reloadRequired: false, hostRestartRequired: false, writable: false, sourcePath: Object.freeze(["compaction", "keepRecentTokens"]) }),
   autoRetry: booleanDefinition(["retry", "enabled"]),
   enableSkillCommands: booleanDefinition(["enableSkillCommands"], true),
   hideThinking: booleanDefinition(["hideThinkingBlock"]),
@@ -82,6 +91,8 @@ export const SETTING_DEFINITIONS: { readonly [K in SettingKey]: SettingDefinitio
   clearOnShrink: booleanDefinition(["terminal", "clearOnShrink"]),
   showTerminalProgress: booleanDefinition(["terminal", "showTerminalProgress"]),
   quietStartup: booleanDefinition(["quietStartup"]),
+  collapseChangelog: booleanDefinition(["collapseChangelog"]),
+  enableInstallTelemetry: booleanDefinition(["enableInstallTelemetry"]),
   steeringMode: enumDefinition(["steeringMode"], ["all", "one-at-a-time"]),
   followUpMode: enumDefinition(["followUpMode"], ["all", "one-at-a-time"]),
   transport: enumDefinition(["transport"], ["auto", "sse", "websocket", "websocket-cached"]),
@@ -92,7 +103,7 @@ export const SETTING_DEFINITIONS: { readonly [K in SettingKey]: SettingDefinitio
   editorPaddingX: integerDefinition(["editorPaddingX"], 0, 3),
   outputPad: integerDefinition(["outputPad"], 0, 1),
   autocompleteMaxVisible: integerDefinition(["autocompleteMaxVisible"], 3, 20),
-  warnings: Object.freeze({ valueType: "object", reloadRequired: false, hostRestartRequired: false, sourcePath: Object.freeze(["warnings", "anthropicExtraUsage"]) }),
+  warnings: Object.freeze({ valueType: "object", reloadRequired: false, hostRestartRequired: false, writable: true, sourcePath: Object.freeze(["warnings", "anthropicExtraUsage"]) }),
 });
 
 export const SETTING_KEYS = Object.freeze(Object.keys(SETTING_DEFINITIONS) as SettingKey[]);

@@ -71,6 +71,16 @@ export interface RuntimeReplacementResult {
   cancelled: boolean;
 }
 
+export interface RuntimeSessionTarget {
+  canonicalCwd: string;
+}
+
+export interface RuntimeCompactionResult {
+  summary: string;
+  firstKeptEntryId: string;
+  tokensBefore: number;
+}
+
 export interface ClearedRuntimeQueue {
   steering: string[];
   followUp: string[];
@@ -152,8 +162,11 @@ export interface RuntimeSession {
   updateSetting(update: SettingUpdate): Promise<SettingDto>;
   getResources(): Promise<{ resources: ResourceDto[]; diagnostics: DiagnosticDto[] }>;
   getCommands(): Promise<CommandDto[]>;
-  newSession?(operationId: string): Promise<RuntimeReplacementResult>;
+  resolveSessionTarget?(sessionFile: string): Promise<RuntimeSessionTarget>;
+  newSession?(operationId: string, parentSession?: string): Promise<RuntimeReplacementResult>;
   switchSession?(operationId: string, sessionFile: string, trust: RuntimeProjectTrust): Promise<RuntimeReplacementResult>;
+  setSessionName?(name: string): string | undefined;
+  compact?(customInstructions?: string): Promise<RuntimeCompactionResult>;
   reload?(operationId: string): Promise<RuntimeReplacementResult>;
   selectModel(provider: string, modelId: string): Promise<RuntimeModelState>;
   setThinkingLevel(level: RuntimeThinkingLevel): Promise<RuntimeModelState>;

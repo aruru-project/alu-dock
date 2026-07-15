@@ -27,6 +27,10 @@ import {
   parseModelsResult,
   parsePromptResult,
   parseSessionsResult,
+  parseSessionCompactionResult,
+  parseSessionNameResult,
+  parseSessionReloadResult,
+  parseSessionReplacementResult,
   parseStatusResult,
   parseStopResult,
   parseToolsResult,
@@ -46,6 +50,10 @@ import {
   type PingResult,
   type PromptResult,
   type SessionsResult,
+  type SessionCompactionResult,
+  type SessionNameResult,
+  type SessionReloadResult,
+  type SessionReplacementResult,
   type StopResult,
   type ToolsResult,
   type SettingsResult,
@@ -90,6 +98,11 @@ export class DockClient {
   commands(instanceId:string,prefix?:string):Promise<CommandsResult>{return this.request("command.catalog",{instanceId,prefix},"resources.v1",parseCommandsResult);}
   history(instanceId:string,beforeEntryId?:string,limit=200):Promise<HistoryResult>{return this.request("session.history",{instanceId,beforeEntryId,limit},"tui.projection.v1",parseHistoryResult);}
   sessions(instanceId:string,scope:"cwd"|"all"):Promise<SessionsResult>{return this.request("session.list",{instanceId,scope},"session.core",parseSessionsResult);}
+  switchSession(instanceId:string,sessionFile:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<SessionReplacementResult>{return this.request("session.switch",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.commands.v1",parseSessionReplacementResult);}
+  newSession(instanceId:string,parentSession?:string,operationId=this.createRequestId()):Promise<SessionReplacementResult>{return this.request("session.new",{operationId,instanceId,parentSession},"session.commands.v1",parseSessionReplacementResult);}
+  nameSession(instanceId:string,name:string,operationId=this.createRequestId()):Promise<SessionNameResult>{return this.request("session.name",{operationId,instanceId,name},"session.commands.v1",parseSessionNameResult);}
+  compactSession(instanceId:string,customInstructions?:string,operationId=this.createRequestId()):Promise<SessionCompactionResult>{return this.request("session.compact",{operationId,instanceId,customInstructions},"session.commands.v1",parseSessionCompactionResult);}
+  reloadSession(instanceId:string,operationId=this.createRequestId()):Promise<SessionReloadResult>{return this.request("session.reload",{operationId,instanceId},"session.commands.v1",parseSessionReloadResult);}
   stop(instanceId:string,operationId=this.createRequestId()):Promise<StopResult>{return this.request("instance.stop",{operationId,instanceId},"instance.catalog",parseStopResult);}
 
   async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean}):Promise<EventSubscription>{
@@ -174,7 +187,10 @@ export class DockClient {
             validateRequestResult(type,params,result,hostEpoch);
             finish(undefined,result);
           }
-        }catch(error){finish(error);}
+        }catch(error){
+          if(requestSent&&operationId)finish(new ControlClientError("effect_unknown",`Host returned an invalid response after operation ${operationId} was sent; query current state before retrying`,operationId));
+          else finish(error);
+        }
       };
       socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,requiredCapabilities(capability)))));
       socket.on("data",(chunk:Buffer)=>{try{for(const line of decoder.push(chunk))consume(line);}catch(error){finish(error);}});
@@ -210,6 +226,10 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
     const requested=(params as Extract<ControlRequest,{type:"settings.update"}>["params"]).update;
     const setting=record.setting as {key?:unknown}|undefined;
     if(setting?.key!==requested.key)throw new ProtocolValidationError("invalid_response","Setting result does not match requested key");
+  }
+  if(type==="session.name"){
+    const requested=(params as Extract<ControlRequest,{type:"session.name"}>["params"]).name.replace(/[\r\n]+/gu," ").trim()||undefined;
+    if(snapshots[0]?.name!==requested)throw new ProtocolValidationError("invalid_response","Session name result does not match the requested normalized name");
   }
   if(type==="command.catalog"&&typeof (params as Extract<ControlRequest,{type:"command.catalog"}>["params"]).prefix==="string"){
     const prefix=(params as Extract<ControlRequest,{type:"command.catalog"}>["params"]).prefix as string;

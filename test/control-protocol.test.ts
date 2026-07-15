@@ -13,6 +13,10 @@ import {
   parseHistoryResult,
   parseModelConfigurationResult,
   parseSessionsResult,
+  parseSessionCompactionResult,
+  parseSessionNameResult,
+  parseSessionReloadResult,
+  parseSessionReplacementResult,
   parseStatusResult,
   parseToolsResult,
   parseSettingsResult,
@@ -130,6 +134,25 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   }), /unsupported value/);
 });
 
+test("Stage 3 session command requests and results are closed", () => {
+  const base = { kind: "request", version: 2, requestId: "session-r" };
+  assert.deepEqual(parseControlRequest({ ...base, type: "session.new", params: { operationId: "op-new", instanceId: "i1", parentSession: "/tmp/parent.jsonl" } }).params, { operationId: "op-new", instanceId: "i1", parentSession: "/tmp/parent.jsonl" });
+  assert.deepEqual(parseControlRequest({ ...base, type: "session.name", params: { operationId: "op-name", instanceId: "i1", name: "" } }).params, { operationId: "op-name", instanceId: "i1", name: "" });
+  assert.deepEqual(parseControlRequest({ ...base, type: "session.compact", params: { operationId: "op-compact", instanceId: "i1", customInstructions: "keep decisions" } }).params, { operationId: "op-compact", instanceId: "i1", customInstructions: "keep decisions" });
+  assert.deepEqual(parseControlRequest({ ...base, type: "session.reload", params: { operationId: "op-reload", instanceId: "i1" } }).params, { operationId: "op-reload", instanceId: "i1" });
+  assert.equal(parseControlRequest({ ...base, type: "session.switch", params: { operationId: "op-switch", instanceId: "i1", sessionFile: "/tmp/s.jsonl", trustChallengeId: "challenge", projectTrustDecision: "trust_once" } }).type, "session.switch");
+  assert.throws(() => parseControlRequest({ ...base, type: "session.switch", params: { operationId: "op-switch", instanceId: "i1", sessionFile: "/tmp/s.jsonl", trustChallengeId: "challenge" } }), /must be supplied together/);
+  assert.throws(() => parseControlRequest({ ...base, type: "session.compact", params: { operationId: "op", instanceId: "i1", customInstructions: "" } }), /non-empty/);
+  assert.throws(() => parseControlRequest({ ...base, type: "session.reload", params: { operationId: "op", instanceId: "i1", force: true } }), /Unexpected field/);
+
+  assert.equal(parseSessionReplacementResult({ cancelled: false, instance: validSnapshot() }).cancelled, false);
+  assert.equal(parseSessionNameResult({ instance: { ...validSnapshot(), name: "renamed" } }).instance.name, "renamed");
+  assert.deepEqual(parseSessionCompactionResult({ result: { summary: "summary", firstKeptEntryId: "kept", tokensBefore: 123 }, instance: validSnapshot() }).result, { summary: "summary", firstKeptEntryId: "kept", tokensBefore: 123 });
+  assert.equal(parseSessionReloadResult({ instance: validSnapshot(), resources: [], diagnostics: [] }).resources.length, 0);
+  assert.throws(() => parseSessionCompactionResult({ result: { summary: "summary", firstKeptEntryId: "kept", tokensBefore: -1 }, instance: validSnapshot() }), /non-negative/);
+  assert.throws(() => parseSessionReloadResult({ instance: validSnapshot(), resources: [], diagnostics: [], raw: true }), /Unexpected field/);
+});
+
 test("Stage 1C projection requests are closed and setting updates are discriminated", () => {
   const base = { kind: "request", version: 2, requestId: "projection-r" };
   assert.deepEqual(parseControlRequest({ ...base, type: "tool.set_active", params: { operationId: "op", instanceId: "i1", names: ["read", "write"] } }).params, { operationId: "op", instanceId: "i1", names: ["read", "write"] });
@@ -137,6 +160,7 @@ test("Stage 1C projection requests are closed and setting updates are discrimina
   assert.throws(() => parseControlRequest({ ...base, type: "settings.update", params: { operationId: "op", instanceId: "i1", update: { key: "editorPaddingX", value: 4 } } }), /out of range/);
   assert.throws(() => parseControlRequest({ ...base, type: "settings.update", params: { operationId: "op", instanceId: "i1", update: { key: "warnings", value: { token: true } } } }), /Unexpected field/);
   assert.throws(() => parseControlRequest({ ...base, type: "settings.update", params: { operationId: "op", instanceId: "i1", update: { key: "proxy", value: true } } }), /Unsupported setting key/);
+  assert.throws(() => parseControlRequest({ ...base, type: "settings.update", params: { operationId: "op", instanceId: "i1", update: { key: "compactionReserveTokens", value: 16_384 } } }), /read-only/);
   assert.throws(() => parseControlRequest({ ...base, type: "resource.get", params: { instanceId: "i1", includeContent: true } }), /Unexpected field/);
   assert.throws(() => parseControlRequest({ ...base, type: "command.catalog", params: { instanceId: "i1", prefix: "x", extra: true } }), /Unexpected field/);
 });
@@ -153,10 +177,10 @@ test("Stage 1C projection result parsers omit open shapes and enforce frozen met
   assert.deepEqual(parseCommandsResult({ commands: [{ name: "x", source: { kind: "extension" }, argumentCompletions: true }] }).commands[0]?.argumentCompletions, true);
   assert.throws(() => parseCommandsResult({ commands: [{ name: "x", source: { kind: "extension" }, argumentCompletions: true, handler: "secret" }] }), /Unexpected field/);
 
-  const values: SettingValueMap = { autoCompaction: true, autoRetry: true, enableSkillCommands: true, hideThinking: false, showCacheMissNotices: false, showHardwareCursor: false, clearOnShrink: true, showTerminalProgress: true, quietStartup: false, steeringMode: "all", followUpMode: "all", transport: "auto", doubleEscapeAction: "tree", treeFilterMode: "default", defaultProjectTrust: "ask", httpIdleTimeoutMs: 0, editorPaddingX: 0, outputPad: 0, autocompleteMaxVisible: 10, warnings: {} };
+  const values: SettingValueMap = { autoCompaction: true, compactionReserveTokens: 16_384, compactionKeepRecentTokens: 20_000, autoRetry: true, enableSkillCommands: true, hideThinking: false, showCacheMissNotices: false, showHardwareCursor: false, clearOnShrink: true, showTerminalProgress: true, quietStartup: false, collapseChangelog: false, enableInstallTelemetry: true, steeringMode: "all", followUpMode: "all", transport: "auto", doubleEscapeAction: "tree", treeFilterMode: "default", defaultProjectTrust: "ask", httpIdleTimeoutMs: 0, editorPaddingX: 0, outputPad: 0, autocompleteMaxVisible: 10, warnings: {} };
   const settingDtos = SETTING_KEYS.map((key) => settingDto(key, values));
-  assert.equal(parseSettingsResult({ settings: settingDtos }).settings.length, 20);
-  assert.throws(() => parseSettingsResult({ settings: settingDtos.slice(1) }), /all 20 keys/);
+  assert.equal(parseSettingsResult({ settings: settingDtos }).settings.length, SETTING_KEYS.length);
+  assert.throws(() => parseSettingsResult({ settings: settingDtos.slice(1) }), new RegExp(`all ${SETTING_KEYS.length} keys`));
   const enabled = settingDtos.find((setting) => setting.key === "enableSkillCommands");
   assert.throws(() => parseSettingsResult({ settings: settingDtos.map((setting) => setting === enabled ? { ...setting, reloadRequired: false } : setting) }), /metadata/);
   assert.throws(() => parseSettingUpdateResult({ setting: enabled, instance: validSnapshot(), reloadRequired: false, hostRestartRequired: false }), /inconsistent/);
@@ -164,7 +188,7 @@ test("Stage 1C projection result parsers omit open shapes and enforce frozen met
 
 function settingDto(key: SettingKey, values: SettingValueMap): Record<string, unknown> {
   const definition = SETTING_DEFINITIONS[key];
-  return { key, value: values[key], source: "effective", writable: true, valueType: definition.valueType,
+  return { key, value: values[key], source: "effective", writable: definition.writable, valueType: definition.valueType,
     ...(definition.allowedValues ? { allowedValues: [...definition.allowedValues] } : {}),
     ...(definition.min === undefined ? {} : { min: definition.min }), ...(definition.max === undefined ? {} : { max: definition.max }),
     reloadRequired: definition.reloadRequired, hostRestartRequired: definition.hostRestartRequired };

@@ -3,9 +3,10 @@ import test from "node:test";
 
 import { CombinedAutocompleteProvider, visibleWidth } from "@earendil-works/pi-tui";
 
+import type { SettingDto } from "../src/core/config-projection.js";
 import type { DockEvent, InstanceSnapshot } from "../src/core/managed-instance.js";
 import { DockConversation, DockStatusLine } from "../src/tui/conversation.js";
-import { commandCatalog, projectSnapshot } from "../src/tui/dock-tui.js";
+import { commandCatalog, parseSettingCommandValue, projectSnapshot } from "../src/tui/dock-tui.js";
 
 function event(sequence: number, type: DockEvent["type"], data: Record<string, unknown>): DockEvent {
   return {
@@ -63,10 +64,37 @@ test("autocomplete combines Dock and projected extension skill and prompt comman
   assert.ok(catalog.some((command) => command.name === "unsafe[2J"));
   assert.equal(catalog.some((command) => command.name.includes("\u001b")), false);
   assert.equal(catalog.find((command) => command.name === "prompt-review")?.argumentHint, "arguments");
+  for (const name of ["settings", "tools", "new", "resume", "name", "compact", "reload", "resources"]) assert.ok(catalog.some((command) => command.name === name));
 
   const provider = new CombinedAutocompleteProvider(catalog, "/tmp");
   const suggestions = await provider.getSuggestions(["/skill-c"], 0, 8, { signal: new AbortController().signal });
   assert.ok(suggestions?.items.some((item) => item.value === "skill-check"));
+});
+
+test("Stage 3 setting command values are typed and bounded", () => {
+  const boolSetting = { key: "autoRetry", value: true, source: "effective", writable: true, valueType: "boolean", reloadRequired: false, hostRestartRequired: false } as SettingDto;
+  const enumSetting = { key: "transport", value: "auto", source: "effective", writable: true, valueType: "enum", allowedValues: ["auto", "sse", "websocket", "websocket-cached"], reloadRequired: false, hostRestartRequired: false } as SettingDto;
+  const intSetting = { key: "editorPaddingX", value: 1, source: "effective", writable: true, valueType: "integer", min: 0, max: 3, reloadRequired: false, hostRestartRequired: false } as SettingDto;
+  const warnings = { key: "warnings", value: {}, source: "effective", writable: true, valueType: "object", reloadRequired: false, hostRestartRequired: false } as SettingDto;
+  const readOnly = { key: "compactionReserveTokens", value: 165_536, source: "project", writable: false, valueType: "integer", min: 0, max: 2_147_483_647, reloadRequired: false, hostRestartRequired: false } as SettingDto;
+
+  assert.deepEqual(parseSettingCommandValue(boolSetting, "off"), { key: "autoRetry", value: false });
+  assert.deepEqual(parseSettingCommandValue(enumSetting, "websocket"), { key: "transport", value: "websocket" });
+  assert.deepEqual(parseSettingCommandValue(intSetting, "3"), { key: "editorPaddingX", value: 3 });
+  assert.deepEqual(parseSettingCommandValue(warnings, "true"), { key: "warnings", value: { anthropicExtraUsage: true } });
+  assert.equal(parseSettingCommandValue(boolSetting, "yes"), undefined);
+  assert.equal(parseSettingCommandValue(enumSetting, "udp"), undefined);
+  assert.equal(parseSettingCommandValue(intSetting, "4"), undefined);
+  assert.equal(parseSettingCommandValue(warnings, "{\"other\":true}"), undefined);
+  assert.equal(parseSettingCommandValue(readOnly, "200000"), undefined);
+});
+
+test("conversation reset replaces old session history", () => {
+  const conversation = new DockConversation();
+  conversation.addNotice("old session");
+  conversation.reset();
+  conversation.applyHistory([{ entryId: "new", role: "assistant", content: [{ type: "text", text: "new session" }] }], false);
+  assert.deepEqual(conversation.snapshot(), [{ kind: "assistant", text: "new session", complete: true }]);
 });
 
 test("conversation projects persisted history before live replay", () => {
@@ -197,11 +225,13 @@ test("live snapshot projection updates metrics, extension status, state, and rep
   });
 
   assert.equal(projected.metrics?.context?.percent, 20);
-  assert.equal(projected.extensionStatus.build, "green");
+  assert.deepEqual(projected.extensionStatus, {});
   assert.equal(projected.execution, "idle");
+  assert.equal(projected.lastRun, "never");
   assert.equal(projected.activeCommandId, undefined);
   assert.equal(projected.runtimeGeneration, 2);
   assert.equal(projected.cwd, "/tmp/reloaded");
+  assert.equal(projected.name, undefined);
   assert.equal(projected.executor.piSessionId, "pi-2");
   assert.equal(projected.eventCursor.runtimeGeneration, 2);
   assert.equal(projected.eventCursor.sequence, 1);

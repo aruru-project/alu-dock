@@ -48,6 +48,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "models.v1",
   "resources.v1",
   "run.abort.v1",
+  "session.commands.v1",
   "session.core",
   "settings.v1",
   "tools.v1",
@@ -110,7 +111,12 @@ export type ControlRequest =
   | Request<"resource.get", { instanceId: string }>
   | Request<"command.catalog", { instanceId: string; prefix?: string }>
   | Request<"session.history", { instanceId: string; beforeEntryId?: string; limit: number }>
-  | Request<"session.list", { instanceId: string; scope: "cwd" | "all" }>;
+  | Request<"session.list", { instanceId: string; scope: "cwd" | "all" }>
+  | Request<"session.switch", { operationId: string; instanceId: string; sessionFile: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
+  | Request<"session.new", { operationId: string; instanceId: string; parentSession?: string }>
+  | Request<"session.name", { operationId: string; instanceId: string; name: string }>
+  | Request<"session.compact", { operationId: string; instanceId: string; customInstructions?: string }>
+  | Request<"session.reload", { operationId: string; instanceId: string }>;
 
 export interface ControlError { code: string; message: string; retryable: boolean; details?: JsonObject }
 export type ControlResponse =
@@ -146,6 +152,10 @@ export interface ModelConfigurationResult { instance: InstanceSnapshot; settings
 export interface ThinkingConfigurationResult { actualLevel: RuntimeThinkingLevel; availableThinkingLevels: RuntimeThinkingLevel[]; instance: InstanceSnapshot; settingsWrite: { persisted: true } }
 export interface SessionsResult { sessions: SessionDto[] }
 export interface HistoryResult { entries: HistoryEntryDto[]; hasEarlier: boolean; nextBeforeEntryId?: string; instance: InstanceSnapshot }
+export interface SessionReplacementResult { cancelled: boolean; instance: InstanceSnapshot }
+export interface SessionNameResult { instance: InstanceSnapshot }
+export interface SessionCompactionResult { result: { summary: string; firstKeptEntryId: string; tokensBefore: number }; instance: InstanceSnapshot }
+export interface SessionReloadResult { instance: InstanceSnapshot; resources: ResourceDto[]; diagnostics: DiagnosticDto[] }
 export interface ToolsResult { tools: ToolDto[]; instance: InstanceSnapshot }
 export interface SettingsResult { settings: SettingDto[] }
 export interface SettingUpdateResult { setting: SettingDto; instance: InstanceSnapshot; reloadRequired: boolean; hostRestartRequired: boolean }
@@ -160,6 +170,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "command.abort") return "run.abort.v1";
   if (type === "session.history") return "tui.projection.v1";
   if (type === "command.submit" || type === "session.list") return "session.core";
+  if (type.startsWith("session.")) return "session.commands.v1";
   if (type.startsWith("tool.")) return "tools.v1";
   if (type.startsWith("settings.")) return "settings.v1";
   if (type === "resource.get" || type === "command.catalog") return "resources.v1";
@@ -284,6 +295,17 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { instanceId: instanceId(), beforeEntryId: optionalString(params.beforeEntryId, "params.beforeEntryId", 128, "invalid_request"), limit: params.limit as number } };
     }
     case "session.list": exact(params, ["instanceId", "scope"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId(), scope: enumeration(params.scope, "params.scope", ["cwd", "all"], "invalid_request") } };
+    case "session.switch": {
+      exact(params, ["operationId", "instanceId", "sessionFile", "trustChallengeId", "projectTrustDecision"], "invalid_request");
+      const trustChallengeId = optionalString(params.trustChallengeId, "params.trustChallengeId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
+      const projectTrustDecision = params.projectTrustDecision === undefined ? undefined : enumeration(params.projectTrustDecision, "params.projectTrustDecision", ["trust_once", "trust_and_remember", "deny_once", "deny_and_remember"], "invalid_request");
+      if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
+      return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), sessionFile: string(params.sessionFile, "params.sessionFile", MAX_CONTROL_CWD_CHARS, "invalid_request"), trustChallengeId, projectTrustDecision } };
+    }
+    case "session.new": exact(params, ["operationId", "instanceId", "parentSession"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), parentSession: optionalString(params.parentSession, "params.parentSession", MAX_CONTROL_CWD_CHARS, "invalid_request") } };
+    case "session.name": exact(params, ["operationId", "instanceId", "name"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), name: boundedString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request") } };
+    case "session.compact": exact(params, ["operationId", "instanceId", "customInstructions"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), customInstructions: optionalString(params.customInstructions, "params.customInstructions", MAX_PROMPT_CHARS, "invalid_request") } };
+    case "session.reload": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     default: throw validation("unknown_request", `Unknown request type: ${type}`);
   }
 }
@@ -434,6 +456,42 @@ export function parseHistoryResult(input: unknown): HistoryResult {
   return { entries, hasEarlier, nextBeforeEntryId, instance: parseInstance(value.instance, "instance") };
 }
 
+export function parseSessionReplacementResult(input: unknown): SessionReplacementResult {
+  const value = object(input, "session replacement result"); exact(value, ["cancelled", "instance"]);
+  const instance = parseInstance(value.instance, "instance");
+  if (instance.lifecycle !== "active") throw validation("invalid_response", "Session replacement success requires an active instance");
+  return { cancelled: boolean(value.cancelled, "cancelled"), instance };
+}
+export function parseSessionNameResult(input: unknown): SessionNameResult {
+  const value = object(input, "session name result"); exact(value, ["instance"]);
+  const instance = parseInstance(value.instance, "instance");
+  if (instance.lifecycle !== "active") throw validation("invalid_response", "Session name success requires an active instance");
+  return { instance };
+}
+export function parseSessionCompactionResult(input: unknown): SessionCompactionResult {
+  const value = object(input, "session compaction result"); exact(value, ["result", "instance"]);
+  const result = object(value.result, "result"); exact(result, ["summary", "firstKeptEntryId", "tokensBefore"]);
+  return {
+    result: {
+      summary: boundedString(result.summary, "result.summary", MAX_TEXT),
+      firstKeptEntryId: id(result.firstKeptEntryId, "result.firstKeptEntryId"),
+      tokensBefore: unsigned(result.tokensBefore, "result.tokensBefore"),
+    },
+    instance: parseActiveSessionInstance(value.instance, "Session compaction"),
+  };
+}
+export function parseSessionReloadResult(input: unknown): SessionReloadResult {
+  const value = object(input, "session reload result"); exact(value, ["instance", "resources", "diagnostics"]);
+  const projected = parseResourcesResult({ resources: value.resources, diagnostics: value.diagnostics });
+  return { instance: parseActiveSessionInstance(value.instance, "Session reload"), ...projected };
+}
+
+function parseActiveSessionInstance(input: unknown, operation: string): InstanceSnapshot {
+  const instance = parseInstance(input, "instance");
+  if (instance.lifecycle !== "active") throw validation("invalid_response", `${operation} success requires an active instance`);
+  return instance;
+}
+
 export function parseToolsResult(input: unknown): ToolsResult {
   const value = object(input, "tools result"); exact(value, ["tools", "instance"]);
   const tools = array(value.tools, "tools", MAX_COLLECTION).map((item, index) => parseTool(item, `tools[${index}]`));
@@ -443,7 +501,7 @@ export function parseToolsResult(input: unknown): ToolsResult {
 export function parseSettingsResult(input: unknown): SettingsResult {
   const value = object(input, "settings result"); exact(value, ["settings"]);
   const settings = array(value.settings, "settings", SETTING_KEYS.length).map((item, index) => parseSettingDto(item, `settings[${index}]`));
-  if (settings.length !== SETTING_KEYS.length || settings.some((setting, index) => setting.key !== SETTING_KEYS[index])) throw validation("invalid_response", "settings must contain all 20 keys in canonical order");
+  if (settings.length !== SETTING_KEYS.length || settings.some((setting, index) => setting.key !== SETTING_KEYS[index])) throw validation("invalid_response", `settings must contain all ${SETTING_KEYS.length} keys in canonical order`);
   return { settings };
 }
 export function parseSettingUpdateResult(input: unknown): SettingUpdateResult {
@@ -569,7 +627,7 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "queue.changed": case "queue.cleared": exact(data, ["steering", "followUp", "total"]); return parsePending(data, field);
     case "compaction.started": exact(data, ["reason"]); return { reason: enumeration(data.reason, "reason", ["manual", "threshold", "overflow"]) };
     case "compaction.completed": exact(data, ["reason", "aborted", "willRetry", "error"]); return { reason: enumeration(data.reason, "reason", ["manual", "threshold", "overflow"]), aborted: boolean(data.aborted, "aborted"), willRetry: boolean(data.willRetry, "willRetry"), error: optionalText("error", MAX_MESSAGE) };
-    case "session.replaced": exact(data, ["reason", "previousSessionFile", "sessionFile", "runtimeGeneration", "cwd", "piSessionId"]); return { reason: enumeration(data.reason, "reason", ["new", "resume", "fork", "reload"]), previousSessionFile: optionalText("previousSessionFile", MAX_CONTROL_CWD_CHARS), sessionFile: optionalText("sessionFile", MAX_CONTROL_CWD_CHARS), runtimeGeneration: positive(data.runtimeGeneration, "runtimeGeneration"), cwd: text("cwd", MAX_CONTROL_CWD_CHARS), piSessionId: text("piSessionId", 128) };
+    case "session.replaced": exact(data, ["reason", "previousSessionFile", "sessionFile", "runtimeGeneration", "cwd", "piSessionId", "name"]); return { reason: enumeration(data.reason, "reason", ["new", "resume", "fork", "reload"]), previousSessionFile: optionalText("previousSessionFile", MAX_CONTROL_CWD_CHARS), sessionFile: optionalText("sessionFile", MAX_CONTROL_CWD_CHARS), runtimeGeneration: positive(data.runtimeGeneration, "runtimeGeneration"), cwd: text("cwd", MAX_CONTROL_CWD_CHARS), piSessionId: text("piSessionId", 128), name: optionalText("name", MAX_INSTANCE_NAME_CHARS) };
     case "session.info_changed": exact(data, ["name"]); return { name: optionalText("name", MAX_INSTANCE_NAME_CHARS) };
     case "session.metrics_changed": exact(data, ["metrics"]); return { metrics: parseMetrics(data.metrics, `${field}.metrics`) };
     case "model.changed": exact(data, ["provider", "id", "thinkingLevel", "availableThinkingLevels"]); return { provider: text("provider", MAX_MODEL_PROVIDER_CHARS), id: text("id", MAX_MODEL_ID_CHARS), thinkingLevel: enumeration(data.thinkingLevel, "thinkingLevel", THINKING_LEVELS), availableThinkingLevels: levels("availableThinkingLevels") };
@@ -627,6 +685,7 @@ function parseDialogRequest(data: Record<string, unknown>, field: string): Event
 function parseSettingUpdate(input: unknown, field: string, code = "invalid_response"): SettingUpdate {
   const update = object(input, field, code); exact(update, ["key", "value"], code);
   const key = settingKey(update.key, code);
+  if (!SETTING_DEFINITIONS[key].writable) throw validation(code, `Pi setting ${key} is read-only`);
   return { key, value: parseSettingValue(key, update.value, code) } as SettingUpdate;
 }
 function settingKey(input: unknown, code = "invalid_response"): SettingKey {
@@ -663,11 +722,11 @@ function parseSettingDto(input: unknown, field: string): SettingDto {
   const value = object(input, field); exact(value, ["key", "value", "source", "writable", "valueType", "allowedValues", "min", "max", "reloadRequired", "hostRestartRequired"]);
   const key = settingKey(value.key); const definition = SETTING_DEFINITIONS[key];
   const source = enumeration(value.source, `${field}.source`, ["global", "project", "effective"]);
-  if (value.writable !== true) throw validation("invalid_response", `${field}.writable must be true`);
+  if (value.writable !== definition.writable) throw validation("invalid_response", `${field}.writable does not match the frozen setting table`);
   if (value.valueType !== definition.valueType || value.reloadRequired !== definition.reloadRequired || value.hostRestartRequired !== definition.hostRestartRequired) throw validation("invalid_response", `${field} metadata does not match the frozen setting table`);
   const allowedValues = value.allowedValues === undefined ? undefined : array(value.allowedValues, `${field}.allowedValues`, 20).map((item, index) => { if (typeof item !== "string" && typeof item !== "number" && typeof item !== "boolean") throw validation("invalid_response", `${field}.allowedValues[${index}] is invalid`); return item; });
   if (JSON.stringify(allowedValues) !== JSON.stringify(definition.allowedValues) || value.min !== definition.min || value.max !== definition.max) throw validation("invalid_response", `${field} bounds or allowed values do not match the frozen setting table`);
-  return { key, value: parseSettingValue(key, value.value) as never, source, writable: true, valueType: definition.valueType, ...(allowedValues ? { allowedValues } : {}), ...(definition.min === undefined ? {} : { min: definition.min }), ...(definition.max === undefined ? {} : { max: definition.max }), reloadRequired: definition.reloadRequired, hostRestartRequired: definition.hostRestartRequired } as SettingDto;
+  return { key, value: parseSettingValue(key, value.value) as never, source, writable: definition.writable, valueType: definition.valueType, ...(allowedValues ? { allowedValues } : {}), ...(definition.min === undefined ? {} : { min: definition.min }), ...(definition.max === undefined ? {} : { max: definition.max }), reloadRequired: definition.reloadRequired, hostRestartRequired: definition.hostRestartRequired } as SettingDto;
 }
 function assertSorted(values: string[], field: string): void { for (let index = 1; index < values.length; index += 1) if ((values[index - 1] as string).localeCompare(values[index] as string) > 0) throw validation("invalid_response", `${field} is not deterministically sorted`); }
 function omitted(input: unknown, field: string): string[] | undefined { if (input === undefined) return undefined; const result = strings(input, field, MAX_JSON_ARRAY, MAX_CONTROL_CWD_CHARS); if (result.some((item) => !item.startsWith("/"))) throw validation("invalid_response", `${field} must contain relative JSON pointers`); return result; }

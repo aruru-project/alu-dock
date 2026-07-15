@@ -20,7 +20,7 @@ export async function selectInstance(
   const items: SelectItem[] = [
     ...instances.map((instance) => ({
       value: instance.id,
-      label: instance.name || instance.id.slice(0, 8),
+      label: terminalSafe(instance.name || instance.id.slice(0, 8)),
       description: `${instance.execution} · ${instance.executor.model?.id ?? "no model"}`,
     })),
     { value: NEW_INSTANCE, label: "+ New instance", description: "create in this directory" },
@@ -49,4 +49,12 @@ export async function selectInstance(
   await terminal.drainInput(200, 30).catch(() => {});
   tui.stop();
   return result;
+}
+
+function terminalSafe(value: string): string {
+  return value
+    .replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ")
+    .replace(/[\u2028\u2029]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
 }
