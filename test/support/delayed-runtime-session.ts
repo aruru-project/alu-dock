@@ -38,6 +38,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
   sessionMutationCalls = { new: 0, switch: 0, name: 0, compact: 0, reload: 0, navigate: 0, fork: 0, clone: 0 };
   sessionName: string | undefined;
   abortCalls = 0;
+  clearQueueCalls = 0;
   abortError: Error | undefined;
   disposeCalls = 0;
   promptCalls = 0;
@@ -97,18 +98,20 @@ export class DelayedRuntimeSession implements RuntimeSession {
   prompt(text: string, options?: RuntimePromptOptions): Promise<void> {
     this.promptCalls += 1;
     this.promptMessages.push(text);
-    options?.preflightResult?.(true);
     if (this.isStreaming && options?.streamingBehavior) {
       if (options.streamingBehavior === "steer") this.steeringQueue.push(text);
       else this.followUpQueue.push(text);
       this.emitQueue();
+      options.preflightResult?.(true);
       return Promise.resolve();
     }
     if (this.isStreaming) return Promise.reject(new Error("fake runtime already streaming"));
 
+    options?.preflightResult?.(true);
     this.currentRun = new Deferred<void>();
     this.isStreaming = true;
     this.emit({ type: "agent_start" });
+    this.emitUserMessage(text);
     return this.currentRun.promise;
   }
 
@@ -306,6 +309,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
   getMetrics(): RuntimeSessionMetrics { return structuredClone(this.metrics); }
 
   clearQueue(): ClearedRuntimeQueue {
+    this.clearQueueCalls += 1;
     const cleared = {
       steering: [...this.steeringQueue],
       followUp: [...this.followUpQueue],
@@ -345,6 +349,14 @@ export class DelayedRuntimeSession implements RuntimeSession {
     }
   }
 
+  consumeNextQueued(): string | undefined {
+    const text = this.steeringQueue.shift() ?? this.followUpQueue.shift();
+    if (text === undefined) return undefined;
+    this.emitQueue();
+    this.emitUserMessage(text);
+    return text;
+  }
+
   settle(text = "done", stopReason = "stop"): void {
     if (!this.currentRun || !this.isStreaming) return;
     const run = this.currentRun;
@@ -372,6 +384,12 @@ export class DelayedRuntimeSession implements RuntimeSession {
       steering: [...this.steeringQueue],
       followUp: [...this.followUpQueue],
     });
+  }
+
+  private emitUserMessage(text: string): void {
+    const message = { role: "user", content: [{ type: "text", text }] };
+    this.emit({ type: "message_start", message });
+    this.emit({ type: "message_end", message });
   }
 
   private throwSettingsFailure(setting: import("../../src/core/config-projection.js").SettingKey | "model" | "thinking"): void {

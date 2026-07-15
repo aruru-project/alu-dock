@@ -143,6 +143,26 @@ def main() -> int:
                 os.write(fd, b"\x1b[6~")  # PageDown returns one PageUp to the bottom.
                 time.sleep(0.1)
                 read_available(fd, output, 0.05)
+            elif action == "queue-restore" or action == "queue-abort":
+                queue_deadline = time.monotonic() + 4
+                while b"steer next" not in output and time.monotonic() < queue_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                if action == "queue-restore":
+                    os.write(fd, b"\x1b[1;3A")  # Alt+Up: restore all without aborting.
+                    restore_deadline = time.monotonic() + 4
+                    while b"restored 2 queued messages" not in output and time.monotonic() < restore_deadline:
+                        if read_available(fd, output, 0.05) < 0:
+                            break
+                else:
+                    os.write(fd, b"\x1b")  # Escape: restore queue, then abort the run.
+                    abort_deadline = time.monotonic() + 5
+                    while b"Run aborted" not in output and time.monotonic() < abort_deadline:
+                        if read_available(fd, output, 0.05) < 0:
+                            break
+                os.write(fd, b"\x03")  # Clear restored editor text before Ctrl+D detach.
+                time.sleep(0.1)
+                read_available(fd, output, 0.05)
             elif action == "tool-fold":
                 fold_deadline = time.monotonic() + 3
                 while b"Alt+O detail" not in output and time.monotonic() < fold_deadline:

@@ -177,18 +177,22 @@ test("run activity covers compaction queue interaction abort failure and host lo
   const pending = snapshot({ execution: "idle", pending: { steering: 0, followUp: 2, total: 2 } });
   activity = reduceRunActivity(activity, event(3, "queue.changed", { steering: 0, followUp: 2, total: 2 }), pending);
   assert.deepEqual({ phase: activity.phase, label: activity.label }, { phase: "queued", label: "queued 2" });
+  activity = reduceRunActivity(activity, event(4, "message.submitted", {
+    operationId: "queued-op", messageId: "user-queued-op", role: "user", text: "consumed", delivery: "followUp", queueItemId: "queue-1",
+  }), running);
+  assert.equal(activity.phase, "waiting");
 
-  activity = reduceRunActivity(activity, event(4, "interaction.requested", {
+  activity = reduceRunActivity(activity, event(5, "interaction.requested", {
     interactionId: "interaction-1", method: "confirm", title: "Proceed?", timeoutAt: "2026-07-15T00:01:00.000Z",
   }), running);
   assert.deepEqual({ phase: activity.phase, label: activity.label }, { phase: "interaction", label: "waiting for confirm" });
   assert.equal(abortingActivity().phase, "aborting");
 
-  activity = reduceRunActivity(activity, event(5, "run.retry_completed", {
+  activity = reduceRunActivity(activity, event(6, "run.retry_completed", {
     attempt: 3, success: false, error: "offline",
   }), running);
   assert.equal(activity.phase, "error");
-  activity = reduceRunActivity(activity, event(6, "run.settled", {
+  activity = reduceRunActivity(activity, event(7, "run.settled", {
     operationId: "op-1", result: "failed", error: "offline",
   }), snapshot({ execution: "failed", lastRun: "failed" }));
   assert.equal(activity.phase, "idle");

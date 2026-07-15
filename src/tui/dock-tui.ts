@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   CombinedAutocompleteProvider,
+  Container,
   Editor,
   Key,
   matchesKey,
@@ -16,7 +17,7 @@ import {
 import { ControlClientError, DockClient, type EventSubscription } from "../control/dock-client.js";
 import type { InteractionResponse } from "../core/extension-ui-broker.js";
 import type { CommandDto, SettingDto, SettingUpdate } from "../core/config-projection.js";
-import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot, TreeNodeDto } from "../core/managed-instance.js";
+import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot, PendingMessageDto, TreeNodeDto } from "../core/managed-instance.js";
 import type {
   RuntimeModelInfo,
   RuntimeThinkingLevel,
@@ -24,6 +25,7 @@ import type {
 import type { ProjectTrustChoice } from "../control/project-trust.js";
 import { DockConversation, DockStatusLine } from "./conversation.js";
 import { ExtensionTextDialog } from "./extension-text-dialog.js";
+import { PendingQueueTray } from "./pending-queue.js";
 import { FixedDockScreen } from "./pi-tui-screen.js";
 import {
   abortingActivity,
@@ -72,6 +74,7 @@ export async function runDockTui(
   const terminal = new ProcessTerminal();
   const tui = new TUI(terminal, process.env.PI_HARDWARE_CURSOR === "1");
   const conversation = new DockConversation();
+  const pendingQueue = new PendingQueueTray();
   let instance = initialInstance;
   const status = new DockStatusLine(instance);
   let runActivity = activityFromSnapshot(instance);
@@ -115,6 +118,7 @@ export async function runDockTui(
     lastEventSequence = event.sequence;
     instance = projectSnapshot(instance, event);
     status.update(instance);
+    pendingQueue.apply(event);
     runActivity = reduceRunActivity(runActivity, event, instance);
     status.setActivity(runActivity);
     if (event.type === "session.replaced") {
@@ -160,6 +164,7 @@ export async function runDockTui(
   lastEventGeneration = subscription.initial.page.latest.runtimeGeneration;
   lastEventSequence = subscription.initial.page.latest.sequence;
   conversation.applyHistory(subscription.initial.recentHistory, subscription.initial.historyTruncated);
+  pendingQueue.reset(subscription.initial.pendingMessages);
   conversation.applyReplay(
     subscription.initial.page.events,
     subscription.initial.page.truncated,
@@ -196,6 +201,7 @@ export async function runDockTui(
         status.setController(next.initial.controller.status);
         watchEventSubscription(next);
         for (const event of next.initial.page.events) onEvent(event);
+        pendingQueue.reset(next.initial.pendingMessages);
         previous.close();
         tui.requestRender();
       } catch (error) {
@@ -228,7 +234,7 @@ export async function runDockTui(
     0,
   );
   const help = new Text(
-    paint.muted("  Enter send/steer · Alt+Enter follow-up · PgUp/PgDn history · Ctrl+O all tools · Alt+O latest · Ctrl+D detach"),
+    paint.muted("  Enter send/steer · Alt+Enter follow-up · Alt+Up restore queue · PgUp/PgDn history · Ctrl+O tools · Ctrl+D detach"),
     0,
     0,
   );
@@ -451,6 +457,40 @@ export async function runDockTui(
     }
   }
 
+  function restoreMessagesToEditor(messages: readonly PendingMessageDto[]): void {
+    if (messages.length === 0) return;
+    const restored = messages.map((message) => message.text).join("\n\n");
+    const current = editor.getText();
+    editor.setText(current.length > 0 ? `${restored}\n\n${current}` : restored);
+  }
+
+  async function restoreQueue(): Promise<boolean> {
+    editor.disableSubmit = true;
+    status.setActivity("restoring queued messages");
+    tui.requestRender();
+    try {
+      const result = await client.dequeue(instance.id);
+      instance = result.instance;
+      status.update(instance);
+      pendingQueue.remove(result.receipt.restored.map((message) => message.queueItemId));
+      restoreMessagesToEditor(result.receipt.restored);
+      if (result.receipt.inFlight.length > 0) {
+        status.setActivity(`${result.receipt.inFlight.length} message${result.receipt.inFlight.length === 1 ? " is" : "s are"} entering consumption · retry after it appears`);
+        return false;
+      }
+      status.setActivity(result.receipt.restored.length > 0
+        ? `restored ${result.receipt.restored.length} queued message${result.receipt.restored.length === 1 ? "" : "s"}`
+        : "queue empty");
+      return true;
+    } catch (error) {
+      showError(error);
+      return false;
+    } finally {
+      if (instance.lifecycle === "active") editor.disableSubmit = false;
+      tui.requestRender();
+    }
+  }
+
   async function abortRun(): Promise<void> {
     if (instance.execution !== "running") {
       status.setActivity("nothing to abort");
@@ -462,6 +502,8 @@ export async function runDockTui(
     status.setActivity(runActivity);
     tui.requestRender();
     try {
+      if ((instance.pending.total > 0 || pendingQueue.count > 0) && !await restoreQueue()) return;
+      editor.disableSubmit = true;
       const result = await client.abort(instance.id);
       instance = result.instance;
       status.update(instance);
@@ -1320,12 +1362,15 @@ export async function runDockTui(
     terminal.setProgress(terminalProgressEnabled && instance.lifecycle === "active" && instance.execution === "running");
   }
 
+  const composerDock = new Container();
+  composerDock.addChild(pendingQueue);
+  composerDock.addChild(editor);
   screen = new FixedDockScreen(terminal, {
     header: title,
     history: conversation,
     status,
     help,
-    editor,
+    editor: composerDock,
     historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
   });
   tui.addChild(screen);
@@ -1369,6 +1414,10 @@ export async function runDockTui(
       else screen?.scrollToBottom();
       if (instance.execution !== "running") status.setActivity(expanded ? "all tools expanded" : "tools collapsed");
       tui.requestRender();
+      return { consume: true };
+    }
+    if (matchesKey(data, Key.alt("up"))) {
+      if (!editor.disableSubmit) void restoreQueue();
       return { consume: true };
     }
     if (matchesKey(data, "alt+enter")) {

@@ -83,6 +83,7 @@ export function reduceRunActivity(
       return { phase: "error", label: "command rejected", animated: false };
 
     case "run.started":
+    case "message.submitted":
       return { phase: "waiting", label: "waiting for model", animated: true };
 
     case "message.delta":

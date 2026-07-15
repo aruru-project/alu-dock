@@ -1,6 +1,6 @@
 # Alu Dock 本机控制协议 V2
 
-状态：阶段 0 冻结设计；阶段 1–6 已按 capability 实施
+状态：阶段 0 冻结设计；阶段 1–6及V0.1 dogfood queue control已按 capability 实施
 
 传输：当前 Unix 用户私有 AF_UNIX socket + UTF-8 JSONL
 
@@ -38,6 +38,7 @@ Capability 只在实现和对应 gate 都通过后才 advertised：
 | 4 | `extension_ui.v1` |
 | 5 | `service.managed.v1`、`catalog.v1`、`session.reopen` |
 | 6 | `session.tree.v1` |
+| V0.1 dogfood #154 | `queue.control.v1`（ephemeral pending projection与显式dequeue/restore） |
 
 默认 TUI hello 只 required `core.v2` 与其马上要调用的最小 capability；不能在阶段 1 要求阶段 5 的 `session.reopen`。每个 command 在调用前再次检查自己的 capability。
 
@@ -61,6 +62,7 @@ Capability 只在实现和对应 gate 都通过后才 advertised：
 | models/tools/resources/commands per result | 2,000 |
 | extension status keys | 64 per runtime generation |
 | queued dialogs | 16 per instance |
+| pending user queue | 64 items / 256,000 aggregate chars |
 | generic JSON depth/keys/array | 8 / 100 / 200 |
 
 分页/裁剪后的 response 仍必须小于 1 MiB。Protocol projection 不包含 Buffer、TypedArray、function、symbol、Component 或 binary/image bytes。
@@ -70,13 +72,13 @@ Capability 只在实现和对应 gate 都通过后才 advertised：
 Client hello：
 
 ```json
-{"kind":"hello","requestId":"h1","versions":[2],"client":{"name":"alu-dock-tui","version":"0.1.0","clientId":"uuid"},"requiredCapabilities":["core.v2","events.follow","run.abort.v1","tui.projection.v1","extension_ui.v1"]}
+{"kind":"hello","requestId":"h1","versions":[2],"client":{"name":"alu-dock-tui","version":"0.1.0","clientId":"uuid"},"requiredCapabilities":["core.v2","events.follow","queue.control.v1","run.abort.v1","tui.projection.v1","extension_ui.v1"]}
 ```
 
 Ready success（capability 列表只是当前实现集合）：
 
 ```json
-{"kind":"hello_ack","requestId":"h1","version":2,"host":{"pid":123,"dockVersion":"0.1.0","piSdkVersion":"0.80.6","hostEpoch":"uuid","startedAt":"2026-07-14T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["catalog.v1","core.v2","events.follow","extension_ui.v1","host.info","instance.catalog","models.v1","resources.v1","run.abort.v1","service.managed.v1","session.commands.v1","session.core","session.reopen","session.tree.v1","settings.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200}}
+{"kind":"hello_ack","requestId":"h1","version":2,"host":{"pid":123,"dockVersion":"0.1.0","piSdkVersion":"0.80.6","hostEpoch":"uuid","startedAt":"2026-07-14T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["catalog.v1","core.v2","events.follow","extension_ui.v1","host.info","instance.catalog","models.v1","queue.control.v1","resources.v1","run.abort.v1","service.managed.v1","session.commands.v1","session.core","session.reopen","session.tree.v1","settings.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200}}
 ```
 
 任何 hello 失败都使用 closed `hello_error`，随后关闭：
@@ -177,6 +179,13 @@ interface ExecutorDto {
 }
 
 interface PendingDto { steering: number; followUp: number; total: number; }
+interface PendingMessageDto {
+  queueItemId: string;
+  operationId: string;
+  delivery: "steer" | "followUp";
+  text: string;       // original client text, not template-expanded runtime text
+  acceptedAt: string;
+}
 
 interface InstanceSnapshotV2 {
   id: string;
@@ -275,6 +284,7 @@ interface HistoryEntryDto {
 | `instance.reopen` | `session.reopen` | `{operationId,instanceId,sessionFile?,trustChallengeId?,projectTrustDecision?}` | `{operationId,previousLifecycle:"host_lost"|"runtime_error",instance}` |
 | `command.submit` | `session.core` | `{operationId,instanceId,message,delivery:Delivery}` | `{receipt:CommandReceiptDto,instance}` |
 | `command.abort` | `run.abort.v1` | `{operationId,instanceId}` | `{instance}`；取消当前 agent/retry/compaction，实例保持可复用 |
+| `queue.dequeue` | `queue.control.v1` | `{operationId,instanceId}` | `{receipt:{operationId,instanceId,restored:PendingMessageDto[],inFlight:PendingMessageDto[]},instance}`；steering-first恢复，绝不隐式abort |
 | `command.catalog` | `resources.v1` | `{instanceId,prefix?:string}` | `{commands:CommandDto[]}` |
 | `model.list` | `models.v1` | `{instanceId}` | `{models:ModelDto[],availableThinkingLevels:string[],instance}` |
 | `model.set` | `models.v1` | `{operationId,instanceId,provider,modelId}` | `{instance,settingsWrite:{persisted:boolean}}` |
@@ -307,6 +317,7 @@ interface AttachInitialDto {
   page: { events: InstanceEvent[]; earliest: EventCursor; latest: EventCursor; truncated: boolean; epochChanged: boolean; generationChanged: boolean };
   recentHistory: HistoryEntryDto[];
   historyTruncated: boolean;
+  pendingMessages: PendingMessageDto[]; // authoritative Same-Host ephemeral projection
   controller: { status: "acquired"; leaseToken: string } | { status: "observing" | "unavailable" };
   following: boolean;
 }
@@ -326,6 +337,15 @@ interface CommandReceiptDto {
 ```
 
 Receipt 仍表示 Pi preflight 已接受，不表示 run 完成；实现可继续使用封装在 pinned Pi adapter 内的 `preflightResult`。Catalog accepted state commit 后才发送 receipt。Extension command handled-without-run 另发 `command.handled`。
+
+### Queue消费与恢复合同
+
+- `command.accepted{queued:true}`只表示Pi接受了排队请求；Host随后发布`message.queued`，该文本只存在于Same-Host内存、attach projection和wire，绝不进入durable catalog。
+- `queue.changed`投影Pi当前steering/follow-up计数，但不是用户消息进入正式transcript的边界。
+- 只有Pi公开user `message_start`到达时，Host才发布`message.submitted`。该event带原queue item的`operationId/queueItemId/delivery`，`text`是Pi实际消费的template/skill-expanded文本；pending tray此时移除对应item。
+- `pendingMessages`与`queue.dequeue.restored`固定按Pi消费顺序：全部steering FIFO在前，全部follow-up FIFO在后。重复文本通过不可猜`queueItemId`和runtime-text hash按FIFO关联。
+- `queue.dequeue`是正式mutation、受operation ledger与`effect_unknown`规则约束。它调用公开`clearQueue()`并返回原始client文本，不abort当前run；Alt+Up使用该操作。Pi在公开`message_start`前会先从内部queue移除消息并可能等待异步extension hook；该极窄窗口内`clearQueue()`已无法撤回的item进入`inFlight`而绝不复制到editor，tray保留至随后`message_start`。Esc/`/abort`仅在`inFlight=[]`时继续调用`command.abort`，任一步都不自动retry。
+- detach/reconnect可从同一Host的`pendingMessages`恢复tray；Host loss/reopen清空queue，catalog不保存也不重放任何queue正文。
 
 ### Settings closed update union
 
@@ -634,7 +654,8 @@ interface EventDataMap {
   "run.retry_started": { attempt: number; maxAttempts: number; delayMs: number; error: string };
   "run.retry_completed": { success: boolean; attempt: number; error?: string };
   "run.settled": { operationId?: string; result: LastRun; stopReason?: string; error?: string };
-  "message.submitted": { operationId: string; messageId: string; role: "user"; text: string };
+  "message.queued": PendingMessageDto;
+  "message.submitted": { operationId: string; messageId: string; role: "user"; text: string; delivery: "prompt" | "steer" | "followUp"; queueItemId?: string };
   "message.delta": { messageId: string; block: "text" | "thinking"; delta: string };
   "message.completed": {
     messageId: string;
@@ -648,7 +669,7 @@ interface EventDataMap {
   "tool.output_updated": { toolCallId: string; text: string };
   "tool.completed": { toolCallId: string; toolName: string; text: string; isError: boolean; omittedFields?: string[] };
   "queue.changed": PendingDto;
-  "queue.cleared": PendingDto;
+  "queue.cleared": PendingDto & { queueItemIds: string[]; reason: "dequeued" | "abort" | "stop" | "replacement" | "host_draining" };
   "compaction.started": { reason: CompactionReason };
   "compaction.completed": { reason: CompactionReason; aborted: boolean; willRetry: boolean; error?: string };
   "session.replaced": {
@@ -686,13 +707,14 @@ Numeric counters必须是 non-negative safe integer；timestamp使用 ISO-8601 U
 
 ### 不可自动 retry
 
-所有 mutation：instance create/stop/reopen、command submit/abort、model/thinking/tool/settings mutation、session switch/new/name/compact/reload/navigate/fork/clone、trust remember decision。Transport close 后 client 显示 `effect_unknown`，用户先查询再决定。
+所有 mutation：instance create/stop/reopen、command submit/abort、queue dequeue、model/thinking/tool/settings mutation、session switch/new/name/compact/reload/navigate/fork/clone、trust remember decision。Transport close 后 client 显示 `effect_unknown`，用户先查询再决定。
 
 | Mutation | 收敛查询 |
 |---|---|
 | create | `instance.list` 按 `creationOperationId` 查找；找不到也不能假设 extension startup无副作用。 |
 | prompt/steer/follow | instance snapshot + activeCommandId、history/events；新 epoch同 operation ID只返回 interrupted/unknown，不重新 submit。 |
 | abort | instance execution/lastRun + run/compaction events；不自动重复 abort。 |
+| queue dequeue | instance pending + attach `pendingMessages` + `queue.changed/queue.cleared`；未知效果时不猜测或自动重复clear。 |
 | model/thinking/tools/settings | 对应 get/list + instance snapshot。 |
 | session mutation | instance Pi IDs/runtime generation + history/session list。 |
 | compact | instance execution/compaction events + history。 |
@@ -712,7 +734,7 @@ Host 对same-host重复operation ID保留bounded receipt cache；同mutation typ
 - service/client：`service_unavailable`、`service_start_failed`、`service_start_timeout`、`protocol_incompatible`；
 - catalog：`catalog_corrupt`、`catalog_write_failed`、`effect_unknown`、`mutation_faulted`；
 - instance：`not_found`、`instance_busy`、`instance_not_active`、`instance_host_lost`、`instance_runtime_error`、`instance_not_reopenable`、`operation_conflict`；
-- session/config：`session_not_found`、`session_replacement_failed`、`model_not_found`、`invalid_thinking`、`unknown_tool`、`settings_invalid`、`settings_write_failed`、`project_trust_required`；
+- session/config：`session_not_found`、`session_replacement_failed`、`model_not_found`、`invalid_thinking`、`unknown_tool`、`settings_invalid`、`settings_write_failed`、`project_trust_required`、`queue_capacity`；
 - interaction：`interaction_lease_unavailable`、`interaction_not_found`、`interaction_expired`、`interaction_wrong_lease`、`interaction_invalid_response`。
 
 Error envelope固定 `{code,message,retryable,details?}`。`details` 仅按 code：

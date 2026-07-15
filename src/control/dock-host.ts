@@ -28,6 +28,7 @@ import {
   InvalidHistoryCursorError,
   InvalidTreeCursorError,
   InvalidDeliveryModeError,
+  QueueCapacityError,
   RuntimeEffectUnknownError,
   type AttachProjection,
   type DockEvent,
@@ -414,6 +415,10 @@ export class DockHost {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);await instance.abort(request.params.operationId);return {instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
+      case "queue.dequeue": {
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const receipt=await instance.dequeue(request.params.operationId);return {receipt,instance:instance.snapshot()};});
+        this.sendSuccessAndEnd(socket,request.requestId,result); return;
+      }
       case "model.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listModels(); this.sendSuccessAndEnd(socket,request.requestId,{models:result.models,availableThinkingLevels:result.state.availableThinkingLevels,instance:instance.snapshot()}); return; }
       case "model.set": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);await instance.selectModel(request.params.provider,request.params.modelId,request.params.operationId);return {instance:instance.snapshot(),settingsWrite:{persisted:true as const}};});
@@ -531,7 +536,7 @@ function createBoundedEventsResult(projection:AttachProjection,following:boolean
   let earliest=events.length>0&&truncated?{...source.earliest,sequence:events[0]!.sequence}:source.earliest;
   while(true){
     const page={events,earliest,latest:source.latest,truncated,epochChanged:projection.epochChanged,generationChanged:projection.generationChanged};
-    const result:EventsResult={instance:projection.instance,page,recentHistory:history,historyTruncated,controller,following};
+    const result:EventsResult={instance:projection.instance,page,recentHistory:history,historyTruncated,pendingMessages:projection.pendingMessages,controller,following};
     const hostEpoch=projection.instance.ownerHostEpoch??source.latest.hostEpoch;
     if(encodedSize(successResponse(requestId,hostEpoch,result))<=MAX_CONTROL_LINE_BYTES)return result;
     if(history.length>0){history=history.slice(1);historyTruncated=true;continue;}
@@ -634,6 +639,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof InteractionInvalidResponseError) return { code: error.code, message: error.message };
   if (error instanceof InstanceNotActiveError) return { code: "instance_not_active", message: error.message };
   if (error instanceof InvalidDeliveryModeError) return { code: "invalid_delivery", message: error.message };
+  if (error instanceof QueueCapacityError) return { code: "queue_capacity", message: error.message };
   if (error instanceof InstanceAdmissionPendingError) return { code: "admission_pending", message: error.message };
   if (error instanceof InstanceBusyError) return { code: "instance_busy", message: error.message };
   if (error instanceof RuntimeModelNotFoundError) return { code: "model_not_found", message: error.message };

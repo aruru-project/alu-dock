@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import {
   CatalogEffectUnknownError,
@@ -46,6 +46,7 @@ import type {
   RuntimeSessionTarget,
   RuntimeThinkingLevel,
 } from "./runtime-session.js";
+import { MAX_PENDING_QUEUE_ITEMS, MAX_PENDING_QUEUE_TEXT_CHARS } from "./instance-dto.js";
 import type {
   AttachProjection,
   CommandReceipt,
@@ -65,6 +66,8 @@ import type {
   JsonValue,
   LastRunResult,
   PendingDto,
+  PendingMessageDto,
+  QueueDequeueReceipt,
   SessionCompactionDto,
   SessionDto,
   SessionMetricsDto,
@@ -93,6 +96,8 @@ export type {
   JsonValue,
   LastRunResult,
   PendingDto,
+  PendingMessageDto,
+  QueueDequeueReceipt,
   SessionCompactionDto,
   SessionDto,
   SessionMetricsDto,
@@ -101,6 +106,7 @@ export type {
   TreeNodeDto,
   TreePageDto,
 } from "./instance-dto.js";
+export { MAX_PENDING_QUEUE_ITEMS, MAX_PENDING_QUEUE_TEXT_CHARS } from "./instance-dto.js";
 import { projectRuntimeNavigateResult, projectRuntimeTree } from "./session-tree.js";
 
 export interface ManagedInstanceOptions {
@@ -129,6 +135,15 @@ interface PendingAdmission {
   token: object;
   boundary: Promise<void>;
   release: () => void;
+}
+
+interface AcceptedPromptMessage {
+  operationId: string;
+  text: string;
+}
+
+interface PendingQueueMessage extends PendingMessageDto {
+  runtimeTextHash?: string;
 }
 
 interface MutableState {
@@ -186,6 +201,13 @@ export class InstanceAdmissionPendingError extends Error {
   constructor(instanceId: string) {
     super(`Instance ${instanceId} is still deciding a previous command preflight`);
     this.name = "InstanceAdmissionPendingError";
+  }
+}
+
+export class QueueCapacityError extends Error {
+  constructor() {
+    super(`Pending queue is limited to ${MAX_PENDING_QUEUE_ITEMS} items and ${MAX_PENDING_QUEUE_TEXT_CHARS} characters`);
+    this.name = "QueueCapacityError";
   }
 }
 
@@ -269,7 +291,12 @@ export class ManagedInstance {
   private agentSettledCount = 0;
   private assistantMessageSequence = 0;
   private currentAssistantMessageId: string | undefined;
+  private currentUserMessageId: string | undefined;
   private readonly announcedToolCalls = new Set<string>();
+  private readonly acceptedPromptMessages: AcceptedPromptMessage[] = [];
+  private readonly pendingQueueMessages: PendingQueueMessage[] = [];
+  private runtimeSteeringHashes: string[] = [];
+  private runtimeFollowUpHashes: string[] = [];
   private lastAssistantOutcome: AssistantOutcome | undefined;
   private pendingAdmission: PendingAdmission | undefined;
   private stopRequestedWhileRunning = false;
@@ -285,6 +312,9 @@ export class ManagedInstance {
   private commandAbortPending = false;
   private commandAbortBoundary: Promise<void> | undefined;
   private resolveCommandAbortBoundary: (() => void) | undefined;
+  private queueMutationPending = false;
+  private queueMutationBoundary: Promise<void> | undefined;
+  private resolveQueueMutationBoundary: (() => void) | undefined;
   private projectionGateTail: Promise<void> = Promise.resolve();
   private releaseConfigurationGate: (() => void) | undefined;
   private stopPromise: Promise<StopReceipt> | undefined;
@@ -696,6 +726,7 @@ export class ManagedInstance {
         page,
         recentHistory: history.entries,
         historyTruncated: history.hasEarlier,
+        pendingMessages: this.pendingMessagesProjection(),
         replaySince,
         epochChanged,
         generationChanged,
@@ -933,7 +964,7 @@ export class ManagedInstance {
   async submit(message: string, delivery: DeliveryMode = "auto", operationId = this.createCommandId()): Promise<CommandReceipt> {
     this.assertActive();
     if (this.pendingAdmission) throw new InstanceAdmissionPendingError(this.id);
-    if (this.configurationPending || this.commandAbortPending) throw new InstanceBusyError(this.id, "submitting a prompt");
+    if (this.configurationPending || this.commandAbortPending || this.queueMutationPending) throw new InstanceBusyError(this.id, "submitting a prompt");
     if (message.trim().length === 0) {
       throw new Error("Prompt message must not be empty");
     }
@@ -943,6 +974,7 @@ export class ManagedInstance {
     const streamingBehavior = resolvedDelivery === "steer" || resolvedDelivery === "followUp"
       ? resolvedDelivery
       : undefined;
+    if (streamingBehavior !== undefined && !this.canQueueMessage(message)) throw new QueueCapacityError();
     let actualDelivery = resolvedDelivery;
     let actuallyQueued = streamingBehavior !== undefined;
     const commandId = operationId;
@@ -1035,13 +1067,32 @@ export class ManagedInstance {
       preflightStatus = "accepted";
       // Pi re-checks isStreaming only after asynchronous extension input hooks.
       // Queue and fresh-prompt events are serialized behind this accepted commit.
+      let precedingRuntimeEvents = Promise.resolve();
       if (streamingBehavior !== undefined && !this.session.isStreaming) {
         actualDelivery = "prompt";
         actuallyQueued = false;
+        // Events buffered while asynchronous input hooks were running belong
+        // to the run that just settled. Commit them before assigning the fresh
+        // prompt's operation ID so the old settlement cannot clear the new run.
+        this.catalogAdmissionOperationId = undefined;
+        precedingRuntimeEvents = this.flushAdmissionRuntimeEvents();
       }
 
       const acceptedAt = this.timestamp();
-      preflightTransition = this.enqueueTransition(() => this.commitCatalogTransition(
+      const pendingMessage: PendingQueueMessage | undefined = actuallyQueued
+        ? {
+          queueItemId: randomUUID(),
+          operationId: commandId,
+          delivery: actualDelivery === "followUp" ? "followUp" : "steer",
+          text: safeWireText(message, MAX_PENDING_QUEUE_TEXT_CHARS, "Queued message omitted"),
+          acceptedAt,
+        }
+        : undefined;
+      if (pendingMessage) {
+        this.pendingQueueMessages.push(pendingMessage);
+        this.assignPendingRuntimeHashes(pendingMessage.delivery, pendingMessage.delivery === "steer" ? this.runtimeSteeringHashes : this.runtimeFollowUpHashes);
+      } else this.acceptedPromptMessages.push({ operationId: commandId, text: message });
+      const acceptedTransition = this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "command.accepted", effect: "post_effect", operationId: commandId, instanceId: this.id },
         () => {
           this.catalogAdmissionOperationId = undefined;
@@ -1053,21 +1104,17 @@ export class ManagedInstance {
           this.touch(acceptedAt);
         },
         () => {
-          this.appendEvent("message.submitted", {
-            operationId: commandId,
-            messageId: `user-${commandId}`,
-            role: "user",
-            text: message,
-          }, acceptedAt);
           this.appendEvent("command.accepted", {
             operationId: commandId,
             delivery: actualDelivery,
             queued: actuallyQueued,
             acceptedAt,
           }, acceptedAt);
+          if (pendingMessage) this.appendEvent("message.queued", pendingMessageProjection([pendingMessage])[0]!, acceptedAt);
           this.appendStateEvent("command_accepted", acceptedAt);
         },
       ));
+      preflightTransition = Promise.all([precedingRuntimeEvents, acceptedTransition]).then(() => {});
       this.catalogAdmissionOperationId = undefined;
       this.receiptBoundaryOperationId = commandId;
       const bufferedEvents = this.flushAdmissionRuntimeEvents();
@@ -1142,6 +1189,7 @@ export class ManagedInstance {
             this.touch();
           },
           () => {
+            this.discardAcceptedPrompt(commandId);
             this.appendEvent("command.handled", { operationId: commandId, kind: "no_run" });
             this.appendStateEvent("command_handled_without_run");
           },
@@ -1158,6 +1206,7 @@ export class ManagedInstance {
         try { this.catalogPort.assertWritable(); } catch { return; }
       }
       await this.enqueueTransition(async () => {
+        this.discardAcceptedPrompt(commandId);
         this.appendEvent("instance.error", { operationId: commandId, source: "command_background", error: messageText });
       });
       // Pi 0.80.6 emits agent_settled from _runAgentPrompt.finally before the
@@ -1196,10 +1245,77 @@ export class ManagedInstance {
     return receiptPromise;
   }
 
+  async dequeue(operationId = this.createCommandId()): Promise<QueueDequeueReceipt> {
+    this.catalogPort?.assertWritable();
+    this.assertActive();
+    if (this.queueMutationPending || this.commandAbortPending || this.configurationPending) {
+      throw new InstanceBusyError(this.id, "restoring queued messages");
+    }
+    if (this.pendingAdmission) throw new InstanceAdmissionPendingError(this.id);
+    this.queueMutationPending = true;
+    this.queueMutationBoundary = new Promise<void>((resolve) => { this.resolveQueueMutationBoundary = resolve; });
+    const reservation = this.reserveProjectionGate();
+    try {
+      await reservation.entered;
+      await this.transitionTail;
+      this.catalogPort?.assertWritable();
+      this.assertActive();
+      const pendingBefore = [...this.pendingQueueMessages];
+      if (pendingBefore.length === 0 && this.state.pendingSteering === 0 && this.state.pendingFollowUp === 0) {
+        return { operationId, instanceId: this.id, restored: [], inFlight: [] };
+      }
+
+      this.receiptBoundaryOperationId = operationId;
+      try {
+        const cleared = this.session.clearQueue();
+        await this.closeRuntimeOperationBoundary(operationId);
+        const selection = selectClearedQueueMessages(pendingBefore, cleared, this.timestamp());
+        const restoredIds = new Set(selection.restoredQueueItemIds);
+        const retainedIds = new Set(pendingBefore.filter((item) => !restoredIds.has(item.queueItemId)).map((item) => item.queueItemId));
+        const restored = selection.restored;
+        let inFlight: PendingMessageDto[] = [];
+        await this.enqueueTransition(() => this.commitCatalogTransition(
+          { kind: "queue.dequeue", effect: "post_effect", operationId, instanceId: this.id },
+          () => {
+            const retained = this.pendingQueueMessages.filter((item) => retainedIds.has(item.queueItemId));
+            this.pendingQueueMessages.splice(0, this.pendingQueueMessages.length, ...retained);
+            inFlight = pendingMessageProjection(retained);
+            this.runtimeSteeringHashes = [];
+            this.runtimeFollowUpHashes = [];
+            this.state.pendingSteering = 0;
+            this.state.pendingFollowUp = 0;
+            this.touch();
+          },
+          () => this.appendEvent("queue.cleared", {
+            steering: restored.filter((item) => item.delivery === "steer").length,
+            followUp: restored.filter((item) => item.delivery === "followUp").length,
+            total: restored.length,
+            queueItemIds: selection.restoredQueueItemIds,
+            reason: "dequeued",
+          }),
+        ));
+        return { operationId, instanceId: this.id, restored, inFlight };
+      } catch (error) {
+        try { await this.closeRuntimeOperationBoundary(operationId); }
+        catch (transitionError) { throw transitionError; }
+        if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError) throw error;
+        throw new RuntimeEffectUnknownError(operationId, error);
+      } finally {
+        if (this.receiptBoundaryOperationId === operationId) this.receiptBoundaryOperationId = undefined;
+      }
+    } finally {
+      reservation.release();
+      this.queueMutationPending = false;
+      this.resolveQueueMutationBoundary?.();
+      this.resolveQueueMutationBoundary = undefined;
+      this.queueMutationBoundary = undefined;
+    }
+  }
+
   async abort(operationId = this.createCommandId()): Promise<void> {
     this.catalogPort?.assertWritable();
     this.assertActive();
-    if (this.commandAbortPending) throw new InstanceBusyError(this.id, "aborting the current run");
+    if (this.commandAbortPending || this.queueMutationPending) throw new InstanceBusyError(this.id, "aborting the current run");
     if (this.configurationKind === "navigation") return this.abortTreeNavigation(operationId);
     this.commandAbortPending = true;
     this.commandAbortBoundary = new Promise<void>((resolve) => { this.resolveCommandAbortBoundary = resolve; });
@@ -1305,6 +1421,8 @@ export class ManagedInstance {
     if (configurationBoundary) await configurationBoundary;
     const commandAbortBoundary = this.commandAbortBoundary;
     if (commandAbortBoundary) await commandAbortBoundary;
+    const queueMutationBoundary = this.queueMutationBoundary;
+    if (queueMutationBoundary) await queueMutationBoundary;
     const admissionBoundary = this.pendingAdmission?.boundary;
     const requestedAt = this.timestamp();
     try {
@@ -1353,6 +1471,7 @@ export class ManagedInstance {
 
   private async performStop(operationId: string, admissionBoundary?: Promise<void>): Promise<StopReceipt> {
     const cleanupErrors: string[] = [];
+    const pendingQueueItemIds = this.pendingQueueMessages.map((item) => item.queueItemId);
     await this.extensionUi.cancelForHostDrain();
     let clearedCounts: { steering: number; followUp: number } | undefined;
     const captureCleanupError = (stage: string, error: unknown): void => {
@@ -1397,6 +1516,10 @@ export class ManagedInstance {
         this.state.activeCommandId = undefined;
         this.state.pendingSteering = 0;
         this.state.pendingFollowUp = 0;
+        this.acceptedPromptMessages.length = 0;
+        this.pendingQueueMessages.length = 0;
+        this.runtimeSteeringHashes = [];
+        this.runtimeFollowUpHashes = [];
         this.recoverySessionFile = undefined;
         this.lastKnownValue = undefined;
         this.interruptionValue = undefined;
@@ -1410,6 +1533,8 @@ export class ManagedInstance {
             steering: clearedCounts.steering,
             followUp: clearedCounts.followUp,
             total: clearedCounts.steering + clearedCounts.followUp,
+            queueItemIds: pendingQueueItemIds,
+            reason: "stop",
           });
         }
         this.appendEvent("instance.stopped", { cleanupErrors });
@@ -1642,7 +1767,10 @@ export class ManagedInstance {
     if (
       this.configurationPending
       || this.commandAbortPending
+      || this.queueMutationPending
       || this.pendingAdmission !== undefined
+      || this.pendingQueueMessages.length > 0
+      || this.state.pendingSteering + this.state.pendingFollowUp > 0
       || this.compactionActive
       || (!allowRunning && (this.state.execution === "running" || this.session.isStreaming))
     ) {
@@ -1796,14 +1924,14 @@ export class ManagedInstance {
 
   private dispatchRuntimeEvent(event: RuntimeEvent): void {
     if (this.hostDrainActive) return;
-    if (!this.catalogPort) {
-      try { this.handleRuntimeEvent(event); if (refreshesHistory(event)) this.refreshHistory(); if (refreshesMetrics(event)) this.refreshMetrics(); }
-      catch (error) { this.appendProjectionError(event, error); }
-      return;
-    }
     if (this.catalogAdmissionOperationId !== undefined) {
       if (this.admissionBufferedEvents.length >= 1_000) this.admissionBufferOverflow = true;
       else this.admissionBufferedEvents.push(event);
+      return;
+    }
+    if (!this.catalogPort) {
+      try { this.handleRuntimeEvent(event); if (refreshesHistory(event)) this.refreshHistory(); if (refreshesMetrics(event)) this.refreshMetrics(); }
+      catch (error) { this.appendProjectionError(event, error); }
       return;
     }
     const task = this.enqueueCatalogRuntimeEvent(event);
@@ -1884,6 +2012,7 @@ export class ManagedInstance {
     });
     if (event.type === "dock_session_replaced") {
       this.extensionUi.beginGenerationChange();
+      const replacedQueue = removedQueueProjection(this.pendingQueueMessages, this.state);
       const previousSessionFile = optionalRuntimeString(event.previousSessionFile, 16_384);
       const sessionFile = optionalRuntimeString(event.sessionFile, 16_384);
       const cwd = optionalRuntimeString(event.cwd, 16_384);
@@ -1901,7 +2030,12 @@ export class ManagedInstance {
         this.agentSettledCount = 0;
         this.assistantMessageSequence = 0;
         this.currentAssistantMessageId = undefined;
+        this.currentUserMessageId = undefined;
         this.announcedToolCalls.clear();
+        this.acceptedPromptMessages.length = 0;
+        this.pendingQueueMessages.length = 0;
+        this.runtimeSteeringHashes = [];
+        this.runtimeFollowUpHashes = [];
         this.lastAssistantOutcome = undefined;
         this.state.execution = "idle";
         this.state.lastRun = "never";
@@ -1922,6 +2056,7 @@ export class ManagedInstance {
         this.nextEventSequence = 1;
         this.eventLog.length = 0;
         this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue });
+        if (replacedQueue.total > 0) this.appendEvent("queue.cleared", { ...replacedQueue, reason: "replacement" });
       });
       void this.extensionUi.completeGenerationChange();
       return;
@@ -1984,6 +2119,7 @@ export class ManagedInstance {
       case "queue_update": {
         const steering = stringArray(event.steering);
         const followUp = stringArray(event.followUp);
+        this.synchronizePendingRuntimeQueue(steering, followUp);
         await this.commitCatalogTransition(context("queue.changed"), () => {
           this.state.pendingSteering = steering.length;
           this.state.pendingFollowUp = followUp.length;
@@ -2077,6 +2213,7 @@ export class ManagedInstance {
     if (this.state.lifecycle === "stopped") return;
     if (event.type === "dock_session_replaced") {
       this.extensionUi.beginGenerationChange();
+      const replacedQueue = removedQueueProjection(this.pendingQueueMessages, this.state);
       const previousSessionFile = optionalRuntimeString(event.previousSessionFile, 16_384);
       const sessionFile = optionalRuntimeString(event.sessionFile, 16_384);
       const cwd = optionalRuntimeString(event.cwd, 16_384);
@@ -2096,7 +2233,12 @@ export class ManagedInstance {
       this.agentSettledCount = 0;
       this.assistantMessageSequence = 0;
       this.currentAssistantMessageId = undefined;
+      this.currentUserMessageId = undefined;
       this.announcedToolCalls.clear();
+      this.acceptedPromptMessages.length = 0;
+      this.pendingQueueMessages.length = 0;
+      this.runtimeSteeringHashes = [];
+      this.runtimeFollowUpHashes = [];
       this.lastAssistantOutcome = undefined;
       this.state.execution = "idle";
       this.state.lastRun = "never";
@@ -2113,6 +2255,7 @@ export class ManagedInstance {
       this.applyModelState(this.session.getModelState());
       this.touch();
       this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue });
+      if (replacedQueue.total > 0) this.appendEvent("queue.cleared", { ...replacedQueue, reason: "replacement" });
       void this.extensionUi.completeGenerationChange();
       return;
     }
@@ -2172,6 +2315,7 @@ export class ManagedInstance {
       case "queue_update": {
         const steering = stringArray(event.steering);
         const followUp = stringArray(event.followUp);
+        this.synchronizePendingRuntimeQueue(steering, followUp);
         this.state.pendingSteering = steering.length;
         this.state.pendingFollowUp = followUp.length;
         this.touch();
@@ -2182,6 +2326,10 @@ export class ManagedInstance {
         });
         break;
       }
+
+      case "message_start":
+        this.handleMessageStart(event);
+        break;
 
       case "message_update":
         this.handleMessageUpdate(event);
@@ -2336,6 +2484,86 @@ export class ManagedInstance {
     this.compactionBoundary = undefined;
   }
 
+  private pendingMessagesProjection(): PendingMessageDto[] {
+    return pendingMessageProjection(this.pendingQueueMessages);
+  }
+
+  private canQueueMessage(message: string): boolean {
+    const projectedCount = Math.max(
+      this.pendingQueueMessages.length,
+      this.state.pendingSteering + this.state.pendingFollowUp,
+    ) + 1;
+    const projectedCharacters = this.pendingQueueMessages.reduce((total, item) => total + item.text.length, 0) + message.length;
+    return projectedCount <= MAX_PENDING_QUEUE_ITEMS && projectedCharacters <= MAX_PENDING_QUEUE_TEXT_CHARS;
+  }
+
+  private discardAcceptedPrompt(operationId: string): void {
+    const index = this.acceptedPromptMessages.findIndex((message) => message.operationId === operationId);
+    if (index >= 0) this.acceptedPromptMessages.splice(index, 1);
+  }
+
+  private synchronizePendingRuntimeQueue(steering: string[], followUp: string[]): void {
+    this.runtimeSteeringHashes = steering.slice(0, MAX_PENDING_QUEUE_ITEMS).map(runtimeMessageHash);
+    this.runtimeFollowUpHashes = followUp.slice(0, MAX_PENDING_QUEUE_ITEMS).map(runtimeMessageHash);
+    this.assignPendingRuntimeHashes("steer", this.runtimeSteeringHashes);
+    this.assignPendingRuntimeHashes("followUp", this.runtimeFollowUpHashes);
+  }
+
+  private assignPendingRuntimeHashes(delivery: "steer" | "followUp", runtimeHashes: string[]): void {
+    const available = [...runtimeHashes];
+    for (const item of this.pendingQueueMessages) {
+      if (item.delivery !== delivery || item.runtimeTextHash === undefined) continue;
+      const index = available.indexOf(item.runtimeTextHash);
+      if (index >= 0) available.splice(index, 1);
+    }
+    const unassigned = this.pendingQueueMessages.filter((item) => item.delivery === delivery && item.runtimeTextHash === undefined);
+    for (let index = 0; index < Math.min(unassigned.length, available.length); index += 1) {
+      unassigned[index]!.runtimeTextHash = available[index]!;
+    }
+  }
+
+  private handleMessageStart(event: RuntimeEvent): void {
+    const message = recordValue(event.message);
+    if (!message || stringValue(message.role) !== "user") return;
+    const consumedText = runtimeUserMessageText(message.content);
+    const consumedHash = runtimeMessageHash(consumedText);
+    const queueCandidates = [
+      ...this.pendingQueueMessages.filter((item) => item.delivery === "steer"),
+      ...this.pendingQueueMessages.filter((item) => item.delivery === "followUp"),
+    ];
+    const queued = queueCandidates.find((item) => item.runtimeTextHash === consumedHash)
+      ?? queueCandidates.find((item) => item.text === consumedText);
+    if (queued) {
+      const index = this.pendingQueueMessages.indexOf(queued);
+      if (index >= 0) this.pendingQueueMessages.splice(index, 1);
+      this.currentUserMessageId = `user-${queued.operationId}`;
+      this.appendEvent("message.submitted", {
+        operationId: queued.operationId,
+        messageId: this.currentUserMessageId,
+        role: "user",
+        text: safeWireText(consumedText || queued.text, MAX_PENDING_QUEUE_TEXT_CHARS, "User message omitted"),
+        delivery: queued.delivery,
+        queueItemId: queued.queueItemId,
+      });
+      return;
+    }
+
+    const activeOperationId = this.state.activeCommandId;
+    const promptIndex = activeOperationId === undefined
+      ? 0
+      : this.acceptedPromptMessages.findIndex((candidate) => candidate.operationId === activeOperationId);
+    const accepted = promptIndex >= 0 ? this.acceptedPromptMessages.splice(promptIndex, 1)[0] : undefined;
+    const operationId = accepted?.operationId ?? activeOperationId ?? "runtime-initiated";
+    this.currentUserMessageId = `user-${operationId}`;
+    this.appendEvent("message.submitted", {
+      operationId,
+      messageId: this.currentUserMessageId,
+      role: "user",
+      text: safeWireText(consumedText || accepted?.text || "", MAX_PENDING_QUEUE_TEXT_CHARS, "User message omitted"),
+      delivery: "prompt",
+    });
+  }
+
   private handleMessageUpdate(event: RuntimeEvent): void {
     const update = recordValue(event.assistantMessageEvent);
     if (!update) return;
@@ -2392,8 +2620,8 @@ export class ManagedInstance {
         stopReason: optionalRuntimeString(message.stopReason, 128),
         errorMessage: optionalRuntimeString(message.errorMessage, 2_048),
       };
-    } else if (role === "user" && this.state.activeCommandId) {
-      messageId = `user-${this.state.activeCommandId}`;
+    } else if (role === "user" && this.currentUserMessageId) {
+      messageId = this.currentUserMessageId;
     } else if (role === "toolResult") {
       messageId = `tool-result-${boundedRuntimeString(message.toolCallId, 128, "unknown")}`;
     } else {
@@ -2407,6 +2635,7 @@ export class ManagedInstance {
       error: optionalRuntimeString(message.errorMessage, 2_048),
     });
     if (role === "assistant") this.currentAssistantMessageId = undefined;
+    if (role === "user") this.currentUserMessageId = undefined;
   }
 
   private ensureAssistantMessageId(): string {
@@ -2497,6 +2726,71 @@ function boundedRuntimeString(value: unknown, limit: number, fallback: string): 
 
 function optionalRuntimeString(value: unknown, limit: number): string | undefined {
   return typeof value === "string" ? safeWireText(value, limit, "Sensitive payload omitted") : undefined;
+}
+
+function runtimeMessageHash(text: string): string {
+  return createHash("sha256").update(text).digest("hex");
+}
+
+function runtimeUserMessageText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((block) => {
+      const value = recordValue(block);
+      return value?.type === "text" && typeof value.text === "string" ? value.text : "";
+    })
+    .filter((text) => text.length > 0)
+    .join("\n");
+}
+
+function removedQueueProjection(
+  pending: readonly PendingQueueMessage[],
+  state: MutableState,
+): PendingDto & { queueItemIds: string[] } {
+  const steering = Math.max(state.pendingSteering, pending.filter((item) => item.delivery === "steer").length);
+  const followUp = Math.max(state.pendingFollowUp, pending.filter((item) => item.delivery === "followUp").length);
+  return { steering, followUp, total: steering + followUp, queueItemIds: pending.map((item) => item.queueItemId) };
+}
+
+function pendingMessageProjection(pending: readonly PendingQueueMessage[]): PendingMessageDto[] {
+  const steering = pending.filter((item) => item.delivery === "steer");
+  const followUp = pending.filter((item) => item.delivery === "followUp");
+  return cloneJson([...steering, ...followUp].map(({ runtimeTextHash: _runtimeTextHash, ...item }) => item));
+}
+
+function selectClearedQueueMessages(
+  pending: readonly PendingQueueMessage[],
+  cleared: ClearedRuntimeQueue,
+  acceptedAt: string,
+): { restored: PendingMessageDto[]; restoredQueueItemIds: string[] } {
+  const selected = new Set<string>();
+  const restored: PendingMessageDto[] = [];
+  const select = (delivery: "steer" | "followUp", runtimeMessages: string[]): void => {
+    const candidates = pending.filter((item) => item.delivery === delivery);
+    for (const text of runtimeMessages) {
+      const hash = runtimeMessageHash(text);
+      const matched = candidates.find((item) => !selected.has(item.queueItemId) && item.runtimeTextHash === hash)
+        ?? candidates.find((item) => !selected.has(item.queueItemId) && item.text === text);
+      if (matched) {
+        selected.add(matched.queueItemId);
+        restored.push(pendingMessageProjection([matched])[0]!);
+      } else {
+        const queueItemId = randomUUID();
+        selected.add(queueItemId);
+        restored.push({
+          queueItemId,
+          operationId: `runtime-queue-${randomUUID()}`,
+          delivery,
+          text: safeWireText(text, MAX_PENDING_QUEUE_TEXT_CHARS, "Queued message omitted"),
+          acceptedAt,
+        });
+      }
+    }
+  };
+  select("steer", cleared.steering);
+  select("followUp", cleared.followUp);
+  return { restored, restoredQueueItemIds: [...selected] };
 }
 
 function eventsNotCoveredByHistory(events: DockEvent[], history: HistoryEntryDto[]): DockEvent[] {

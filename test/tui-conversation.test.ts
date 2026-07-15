@@ -7,6 +7,7 @@ import type { SettingDto } from "../src/core/config-projection.js";
 import type { DockEvent, InstanceSnapshot } from "../src/core/managed-instance.js";
 import { DockConversation, DockStatusLine } from "../src/tui/conversation.js";
 import { commandCatalog } from "../src/tui/dock-tui.js";
+import { PendingQueueTray } from "../src/tui/pending-queue.js";
 import { projectSnapshot } from "../src/tui/snapshot-projection.js";
 import { parseSettingCommandValue } from "../src/tui/settings-controls.js";
 
@@ -249,7 +250,7 @@ test("tool failures stay collapsed by default and preserve expandable error deta
   assert.match(conversation.render(60).join("\n"), /expanded failure detail/);
 });
 
-test("queue, compaction, replacement, and host-loss notices remain deterministic", () => {
+test("compaction, replacement, and host-loss notices remain deterministic without queue transcript noise", () => {
   const conversation = new DockConversation();
   conversation.apply(event(1, "queue.changed", { steering: 1, followUp: 2, total: 3 }));
   conversation.apply(event(2, "queue.changed", { steering: 0, followUp: 1, total: 1 }));
@@ -259,11 +260,38 @@ test("queue, compaction, replacement, and host-loss notices remain deterministic
   conversation.addNotice("Host event stream closed. No command was replayed; this TUI is now read-only.", true);
 
   const projected = conversation.snapshot();
-  assert.equal(projected.filter((entry) => entry.text.startsWith("Queue ·")).length, 1);
-  assert.match(projected.find((entry) => entry.text.startsWith("Queue ·"))?.text ?? "", /1 follow-up/);
+  assert.equal(projected.filter((entry) => entry.text.startsWith("Queue ·")).length, 0);
   assert.ok(projected.some((entry) => /Compaction completed/.test(entry.text)));
   assert.ok(projected.some((entry) => /generation 2/.test(entry.text)));
   assert.match(projected.at(-1)?.text ?? "", /No command was replayed/);
+});
+
+test("pending queue tray follows Pi consumption order and leaves the transcript at message_start", () => {
+  const tray = new PendingQueueTray();
+  tray.reset([
+    { queueItemId: "follow-1", operationId: "op-follow", delivery: "followUp", text: "afterward", acceptedAt: "2026-07-14T00:00:02.000Z" },
+    { queueItemId: "steer-1", operationId: "op-steer", delivery: "steer", text: "change direction", acceptedAt: "2026-07-14T00:00:01.000Z" },
+  ]);
+  assert.deepEqual(tray.render(80).map((line) => line.trim()), [
+    "1. steer next · change direction",
+    "2. follow-up · afterward",
+  ]);
+
+  tray.apply(event(1, "queue.changed", { steering: 0, followUp: 1, total: 1 }));
+  assert.equal(tray.count, 2, "queue_update is not the user-message consumption boundary");
+  tray.apply(event(2, "message.submitted", {
+    operationId: "op-steer", messageId: "user-op-steer", role: "user", text: "change direction", delivery: "steer", queueItemId: "steer-1",
+  }));
+  assert.equal(tray.count, 1);
+  assert.match(tray.render(80).join("\n"), /afterward/);
+  tray.apply(event(3, "queue.cleared", {
+    steering: 0, followUp: 0, total: 0, queueItemIds: [], reason: "dequeued",
+  }));
+  assert.equal(tray.count, 1, "an in-flight item remains until message_start");
+  tray.apply(event(4, "queue.cleared", {
+    steering: 0, followUp: 1, total: 1, queueItemIds: ["follow-1"], reason: "dequeued",
+  }));
+  assert.equal(tray.count, 0);
 });
 
 test("live snapshot projection updates metrics, extension status, state, and replacement cursor", () => {

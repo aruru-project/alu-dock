@@ -55,6 +55,8 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-v0.1-stage-4-extension-ui.md`](docs/validation-v0.1-stage-4-extension-ui.md)
 - [`docs/validation-v0.1-stage-5-durable-host.md`](docs/validation-v0.1-stage-5-durable-host.md)
 - [`docs/validation-v0.1-stage-6-tree-fork-clone.md`](docs/validation-v0.1-stage-6-tree-fork-clone.md)
+- [`docs/validation-v0.1-tool-render-performance.md`](docs/validation-v0.1-tool-render-performance.md)
+- [`docs/validation-v0.1-queue-consumption.md`](docs/validation-v0.1-queue-consumption.md)
 - [`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)
 
 ## V0.1 工程入口
@@ -78,8 +80,9 @@ alu-dock
 常用操作：
 
 - `Enter`：发送；运行中默认作为 steer；Editor 支持 multiline paste 与 history
-- `Alt+Enter` 或 `/follow MESSAGE`：排队为 follow-up
-- `Esc`、空编辑器 `Ctrl+C` 或 `/abort`：取消当前 run/retry/compaction；tree branch summary进行中时调用公开 `abortBranchSummary()` 路径，实例保持可复用
+- `Alt+Enter` 或 `/follow MESSAGE`：排队为 follow-up；未消费文本只显示在composer上方的pending tray，不提前写入正式transcript
+- `Alt+Up`：按steering-first、follow-up-later顺序撤回全部仍可撤回的未消费queue到editor，不中止当前run；已离开Pi内部queue、正等待公开`message_start`的极窄in-flight窗口不会被复制
+- `Esc`、空编辑器 `Ctrl+C` 或 `/abort`：先清除queue并恢复未消费文本，再取消当前run/retry/compaction；tree branch summary进行中时调用公开`abortBranchSummary()`路径，实例保持可复用
 - `PageUp` / `PageDown`：回看独立 history viewport；回看时暂停追尾并提示新输出，`Ctrl+End` 回到底部
 - `Ctrl+O`：展开/折叠全部 generic tool output；`Alt+O` 只切换最近一项详情；工具默认折叠
 - `/settings`：查看全部 24 项投影并选择修改；也可用 `/settings KEY VALUE`。其中 compaction reserve/keep tokens 因 Pi 无公开 setter而只读
@@ -107,7 +110,7 @@ alu-dock new --cwd "$PWD" --name demo
 alu-dock attach INSTANCE_ID
 ```
 
-再次执行 `alu-dock` 会先投影 Pi SessionManager 当前 branch 的持久 history baseline，再重放 Host 近期 events 并继续观察 live events。Composer 固定在终端底部并向上增长，history 在上方独立滚动；活动行明确区分 waiting/thinking/responding/tool/retry/compaction/queue/host-loss。TUI Footer 展示 cwd、Dock/Pi ID、model/thinking、state/queue、tokens/context/cache/cost、extension status 和 connection/lease；extension/skill/prompt commands 与路径进入 autocomplete。模型/thinking 切换沿用 Pi 的 session 与 settings 语义，只允许实例 idle 时执行；当前运行不会被中途换模。Host 在创建 Pi SDK session 前安装与 Pi CLI 相同的 Undici `EnvHttpProxyAgent`：优先保留进程已有 `HTTP_PROXY` / `HTTPS_PROXY`，缺失时采用 Pi 全局 `httpProxy` 设置。默认 socket 为 `$XDG_RUNTIME_DIR/alu-dock/dock.sock`；managed 日志使用 `journalctl --user -u alu-dock.service`。
+再次执行 `alu-dock` 会先投影 Pi SessionManager 当前 branch 的持久 history baseline，再重放 Host 近期 events并从同一Host的ephemeral `pendingMessages`恢复queue tray，然后继续观察live events。只有Pi公开user `message_start`到达时，queued消息才进入正式transcript；accepted/queued receipt不冒充consumed。Host loss/reopen仍不恢复queue。Composer固定在终端底部并向上增长，history在上方独立滚动；活动行明确区分 waiting/thinking/responding/tool/retry/compaction/queue/host-loss。TUI Footer 展示 cwd、Dock/Pi ID、model/thinking、state/queue、tokens/context/cache/cost、extension status 和 connection/lease；extension/skill/prompt commands 与路径进入 autocomplete。模型/thinking切换沿用Pi的session与settings语义，只允许实例idle时执行；当前运行不会被中途换模。Host在创建Pi SDK session前安装与Pi CLI相同的Undici `EnvHttpProxyAgent`：优先保留进程已有`HTTP_PROXY`/`HTTPS_PROXY`，缺失时采用Pi全局`httpProxy`设置。默认socket为`$XDG_RUNTIME_DIR/alu-dock/dock.sock`；managed日志使用`journalctl --user -u alu-dock.service`。
 
 ## 机器与诊断接口
 

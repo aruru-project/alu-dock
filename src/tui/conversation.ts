@@ -44,7 +44,6 @@ export class DockConversation implements Component {
   private readonly tools = new Map<string, ToolProjection>();
   private currentAssistant: ConversationEntry | undefined;
   private currentThinking: ConversationEntry | undefined;
-  private queueEntry: ConversationEntry | undefined;
   private hideThinking = false;
   private toolsExpanded = false;
   private readonly toolExpansionOverrides = new Map<string, boolean>();
@@ -58,7 +57,6 @@ export class DockConversation implements Component {
     this.tools.clear();
     this.currentAssistant = undefined;
     this.currentThinking = undefined;
-    this.queueEntry = undefined;
     this.toolExpansionOverrides.clear();
     this.markLayoutChanged();
   }
@@ -228,25 +226,6 @@ export class DockConversation implements Component {
         this.tools.delete(callId);
         break;
       }
-
-      case "queue.changed": {
-        const total = event.data.total;
-        const text = total > 0
-          ? `Queue · ${event.data.steering} steering · ${event.data.followUp} follow-up`
-          : "Queue drained.";
-        if (this.queueEntry) {
-          this.queueEntry.text = text;
-          this.touchEntry(this.queueEntry);
-          this.markOutputChanged();
-        } else this.queueEntry = this.add("system", text);
-        if (total === 0) this.queueEntry = undefined;
-        break;
-      }
-
-      case "queue.cleared":
-        this.add("system", `Queue cleared · ${event.data.total} removed.`);
-        this.queueEntry = undefined;
-        break;
 
       case "model.changed": {
         const provider = stringData(event, "provider") ?? "unknown";
@@ -493,7 +472,6 @@ export class DockConversation implements Component {
       const removed = this.entries.shift();
       if (removed === this.currentAssistant) this.currentAssistant = undefined;
       if (removed === this.currentThinking) this.currentThinking = undefined;
-      if (removed === this.queueEntry) this.queueEntry = undefined;
       for (const [key, value] of this.tools) if (value.entry === removed) this.tools.delete(key);
       if (
         removed?.toolCallId

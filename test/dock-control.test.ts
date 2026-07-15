@@ -101,7 +101,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["catalog.v1", "core.v2", "events.follow", "extension_ui.v1", "host.info", "instance.catalog", "models.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.commands.v1", "session.core", "session.reopen", "session.tree.v1", "settings.v1", "tools.v1", "tui.projection.v1"]);
+  assert.deepEqual(ack.capabilities, ["catalog.v1", "core.v2", "events.follow", "extension_ui.v1", "host.info", "instance.catalog", "models.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.commands.v1", "session.core", "session.reopen", "session.tree.v1", "settings.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -605,6 +605,52 @@ test("SSH TUI editor preserves multiline paste and submitted history", async (co
   assert.equal(runtime.disposeCalls, 0);
 });
 
+test("SSH TUI Alt+Up restores all pending text while Escape restores then aborts", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "pty-queue");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+
+  await client.prompt(created.id, "later follow-up", "followUp", "pty-follow-1");
+  await client.prompt(created.id, "urgent steer", "steer", "pty-steer-1");
+  const restoredPty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", harness.socketPath,
+    "attach", created.id,
+  ], "queue-restore");
+  const restoredOutput = Buffer.from(restoredPty.output, "base64").toString("utf8");
+  assert.equal(restoredPty.timedOut, false, restoredOutput.slice(-4_000));
+  assert.equal(restoredPty.status, 0, restoredOutput.slice(-4_000));
+  assert.match(restoredOutput, /1\. steer next · urgent steer/);
+  assert.match(restoredOutput, /2\. follow-up · later follow-up/);
+  assert.match(restoredOutput, /restored 2 queued messages/);
+  assert.equal(runtime.abortCalls, 0);
+  assert.equal(runtime.clearQueueCalls, 1);
+  assert.equal((await client.status(created.id)).execution, "running");
+
+  await client.prompt(created.id, "second follow-up", "followUp", "pty-follow-2");
+  await client.prompt(created.id, "second steer", "steer", "pty-steer-2");
+  const abortedPty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", harness.socketPath,
+    "attach", created.id,
+  ], "queue-abort");
+  const abortedOutput = Buffer.from(abortedPty.output, "base64").toString("utf8");
+  assert.equal(abortedPty.timedOut, false, abortedOutput.slice(-4_000));
+  assert.equal(abortedPty.status, 0, abortedOutput.slice(-4_000));
+  assert.match(abortedOutput, /Run aborted/);
+  assert.equal(runtime.abortCalls, 1);
+  assert.equal(runtime.clearQueueCalls, 2);
+  const final = await client.status(created.id);
+  assert.equal(final.execution, "idle");
+  assert.equal(final.lastRun, "aborted");
+  assert.equal(final.pending.total, 0);
+});
+
 test("SSH TUI model picker filters typed input and history viewport scroll-locks", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-pty-ux-"));
   await chmod(directory, 0o700);
@@ -828,12 +874,12 @@ test("a second client can steer, queue follow-up, and stop idempotently", async 
   const created = await creator.create(harness.directory);
   const controller = new DockClient({ socketPath: harness.socketPath });
 
-  const steer = await controller.prompt(created.id, "change direction");
+  const steer = await controller.prompt(created.id, "change direction", "auto", "steer-op");
   assert.equal(steer.receipt.delivery, "steer");
   assert.equal(steer.receipt.queued, true);
   assert.equal(steer.instance.pending.steering, 1);
 
-  const followUp = await controller.prompt(created.id, "then summarize", "followUp");
+  const followUp = await controller.prompt(created.id, "then summarize", "followUp", "follow-op");
   assert.equal(followUp.receipt.delivery, "followUp");
   assert.equal(followUp.receipt.queued, true);
   assert.equal(followUp.instance.pending.followUp, 1);
@@ -842,6 +888,31 @@ test("a second client can steer, queue follow-up, and stop idempotently", async 
     controller.prompt(created.id, "parallel", "prompt"),
     (error: unknown) => error instanceof ControlClientError && error.code === "invalid_delivery",
   );
+
+  const pendingAttach = await controller.streamEvents(created.id, { onEvent: () => {} });
+  assert.deepEqual(pendingAttach.initial.pendingMessages.map((item) => ({ operationId: item.operationId, delivery: item.delivery, text: item.text })), [
+    { operationId: "steer-op", delivery: "steer", text: "change direction" },
+    { operationId: "follow-op", delivery: "followUp", text: "then summarize" },
+  ]);
+  pendingAttach.close();
+  await pendingAttach.done;
+
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  assert.equal(runtime.consumeNextQueued(), "change direction");
+  const afterConsume = await controller.streamEvents(created.id, { onEvent: () => {} });
+  assert.deepEqual(afterConsume.initial.pendingMessages.map((item) => item.operationId), ["follow-op"]);
+  assert.ok(afterConsume.initial.page.events.some((event) => event.type === "message.submitted" && event.data.operationId === "steer-op"));
+  afterConsume.close();
+  await afterConsume.done;
+
+  const dequeued = await controller.dequeue(created.id, "dequeue-op");
+  const duplicateDequeue = await controller.dequeue(created.id, "dequeue-op");
+  assert.deepEqual(duplicateDequeue, dequeued);
+  assert.deepEqual(dequeued.receipt.restored.map((item) => ({ operationId: item.operationId, delivery: item.delivery, text: item.text })), [
+    { operationId: "follow-op", delivery: "followUp", text: "then summarize" },
+  ]);
+  assert.equal(dequeued.instance.execution, "running");
+  assert.equal(runtime.abortCalls, 0);
 
   const firstStop = await controller.stop(created.id);
   assert.equal(firstStop.receipt.alreadyStopped, false);
@@ -1055,6 +1126,15 @@ test("same-host operation receipts deduplicate every implemented mutation and re
   ]);
   assert.deepEqual(duplicateCommand, firstCommand);
   assert.equal(session.promptCalls, 1);
+
+  await firstClient.prompt(firstInstance.id, "queued once", "steer", "queued-command");
+  const [firstDequeue, duplicateDequeue] = await Promise.all([
+    firstClient.dequeue(firstInstance.id, "shared-dequeue"),
+    secondClient.dequeue(firstInstance.id, "shared-dequeue"),
+  ]);
+  assert.deepEqual(duplicateDequeue, firstDequeue);
+  assert.equal(firstDequeue.receipt.restored[0]?.text, "queued once");
+  assert.equal(session.clearQueueCalls, 1);
 
   const [firstStop, duplicateStop] = await Promise.all([
     firstClient.stop(firstInstance.id, "shared-stop"),
@@ -1549,7 +1629,7 @@ test("stream callbacks follow initial response order and accept one-step replace
         const afterReplacement = { scope: "instance", sequence: 2, instanceId: "instance-1", runtimeGeneration: 2, occurredAt: "2026-07-14T00:00:03.000Z", type: "extension.error", data: { error: "after replacement" } };
         socket.write(encodeJsonLine({
           kind: "response", version: 2, requestId: "fixed", hostEpoch: "epoch-1", ok: true,
-          result: { instance: snapshot, page: { events: [], earliest: cursor, latest: cursor, truncated: false, epochChanged: false, generationChanged: false }, recentHistory: [], historyTruncated: true, controller: { status: "observing" }, following: true },
+          result: { instance: snapshot, page: { events: [], earliest: cursor, latest: cursor, truncated: false, epochChanged: false, generationChanged: false }, recentHistory: [], historyTruncated: true, pendingMessages: [], controller: { status: "observing" }, following: true },
         })
           + encodeJsonLine({ kind: "event", version: 2, requestId: "fixed", hostEpoch: "epoch-1", event: live })
           + encodeJsonLine({ kind: "event", version: 2, requestId: "fixed", hostEpoch: "epoch-1", event: replaced })
@@ -1923,6 +2003,24 @@ test("abort settled commit failure is operation-scoped and keeps conservative ru
 });
 
 test("queue and settled commit faults retain the last conservative committed state", async (context) => {
+  const dequeuePort = new ScriptedCatalogCommitPort();
+  const dequeueHarness = await createTransactionHarness(dequeuePort);
+  context.after(() => cleanupHarness(dequeueHarness));
+  const dequeueClient = new DockClient({ socketPath: dequeueHarness.socketPath });
+  const dequeueInstance = await dequeueClient.create(dequeueHarness.directory, undefined, "create-dequeue-fault");
+  await dequeueClient.prompt(dequeueInstance.id, "running", "prompt", "run-before-dequeue-fault");
+  await dequeueClient.prompt(dequeueInstance.id, "queued", "steer", "queue-before-dequeue-fault");
+  dequeuePort.failAt(8);
+  await assert.rejects(
+    dequeueClient.dequeue(dequeueInstance.id, "dequeue-failed"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown" && error.operationId === "dequeue-failed",
+  );
+  const dequeueSnapshot = dequeueHarness.registry.get(dequeueInstance.id).snapshot();
+  assert.equal(dequeueSnapshot.execution, "running");
+  assert.equal(dequeueSnapshot.pending.total, 1);
+  assert.equal(dequeueHarness.registry.get(dequeueInstance.id).eventsSince().events.some((event) => event.type === "queue.cleared" && event.data.reason === "dequeued"), false);
+  await dequeueHarness.host.waitForFatalCompletion();
+
   const queuePort = new ScriptedCatalogCommitPort();
   const queuedHarness = await createTransactionHarness(queuePort);
   context.after(() => cleanupHarness(queuedHarness));
@@ -2165,7 +2263,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "editor" | "abort" | "transport-close" | "stage3" | "stage6" | "model-search" | "scroll" | "tool-fold" | "extension-dialogs" | "extension-replacement" = "detach",
+  action: "detach" | "editor" | "abort" | "queue-restore" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "model-search" | "scroll" | "tool-fold" | "extension-dialogs" | "extension-replacement" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {

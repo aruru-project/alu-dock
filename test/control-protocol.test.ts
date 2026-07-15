@@ -13,6 +13,7 @@ import {
   parseHistoryResult,
   parseInteractionRespondResult,
   parseModelConfigurationResult,
+  parseQueueDequeueResult,
   parseReopenResult,
   parseSessionsResult,
   parseSessionCompactionResult,
@@ -120,6 +121,8 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   assert.throws(() => parseControlRequest({ ...base, type: "session.list", params: { instanceId: "i1", scope: "project" } }), /unsupported value/);
   assert.deepEqual(parseControlRequest({ ...base, type: "command.abort", params: { operationId: "abort-op", instanceId: "i1" } }).params, { operationId: "abort-op", instanceId: "i1" });
   assert.throws(() => parseControlRequest({ ...base, type: "command.abort", params: { operationId: "abort-op", instanceId: "i1", force: true } }), /Unexpected field/);
+  assert.deepEqual(parseControlRequest({ ...base, type: "queue.dequeue", params: { operationId: "dequeue-op", instanceId: "i1" } }).params, { operationId: "dequeue-op", instanceId: "i1" });
+  assert.throws(() => parseControlRequest({ ...base, type: "queue.dequeue", params: { operationId: "dequeue-op", instanceId: "i1", abort: true } }), /Unexpected field/);
 
   const trustedCreate = parseControlRequest({
     ...base,
@@ -245,7 +248,7 @@ test("Stage 4 interaction requests, responses, and controller leases are closed"
   const attach = parseEventsResult({
     instance: validSnapshot(),
     page: { events: [], earliest: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, latest: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, truncated: false, epochChanged: false, generationChanged: false },
-    recentHistory: [], historyTruncated: false, controller: { status: "acquired", leaseToken: "lease-1" }, following: true,
+    recentHistory: [], historyTruncated: false, pendingMessages: [], controller: { status: "acquired", leaseToken: "lease-1" }, following: true,
   });
   assert.deepEqual(attach.controller, { status: "acquired", leaseToken: "lease-1" });
   assert.throws(() => parseEventsResult({
@@ -421,6 +424,47 @@ test("abort result is closed and cannot claim a still-running instance", () => {
   assert.throws(() => parseAbortResult({ instance: idle, extra: true }), /Unexpected field/);
 });
 
+test("queue pending and dequeue DTOs are closed, bounded, and count-consistent", () => {
+  const pending = {
+    queueItemId: "queue-1",
+    operationId: "queue-op",
+    delivery: "steer",
+    text: "change direction",
+    acceptedAt: "2026-07-14T00:00:00.000Z",
+  };
+  const parsed = parseQueueDequeueResult({
+    receipt: { operationId: "dequeue-op", instanceId: "i1", restored: [pending], inFlight: [] },
+    instance: validSnapshot(),
+  });
+  assert.deepEqual(parsed.receipt.restored, [pending]);
+  assert.throws(() => parseQueueDequeueResult({
+    receipt: { operationId: "dequeue-op", instanceId: "other", restored: [pending], inFlight: [] },
+    instance: validSnapshot(),
+  }), /does not match instance/);
+  assert.throws(() => parseQueueDequeueResult({
+    receipt: { operationId: "dequeue-op", instanceId: "i1", restored: [{ ...pending, payload: true }], inFlight: [] },
+    instance: validSnapshot(),
+  }), /Unexpected field/);
+  assert.throws(() => parseQueueDequeueResult({
+    receipt: { operationId: "dequeue-op", instanceId: "i1", restored: [{ ...pending, text: "unsafe\u001b[2J" }], inFlight: [] },
+    instance: validSnapshot(),
+  }), /terminal control/);
+
+  const queued = parseControlEventEnvelope({
+    kind: "event", version: 2, requestId: "stream-1", hostEpoch: "epoch-1",
+    event: validEvent("message.queued", pending),
+  }, "stream-1", "epoch-1");
+  assert.equal(queued.event.type, "message.queued");
+  assert.throws(() => parseControlEventEnvelope({
+    kind: "event", version: 2, requestId: "stream-1", hostEpoch: "epoch-1",
+    event: validEvent("message.submitted", { operationId: "queue-op", messageId: "user-queue-op", role: "user", text: "consumed", delivery: "steer" }),
+  }, "stream-1", "epoch-1"), /queueItemId/);
+  assert.throws(() => parseControlEventEnvelope({
+    kind: "event", version: 2, requestId: "stream-1", hostEpoch: "epoch-1",
+    event: validEvent("queue.cleared", { steering: 1, followUp: 0, total: 1, queueItemIds: ["queue-1"], reason: "unknown" }),
+  }, "stream-1", "epoch-1"), /unsupported value/);
+});
+
 test("host info accepts only the closed healthy and mutation-drain states", () => {
   const base = {
     host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
@@ -484,12 +528,12 @@ test("response, snapshot, replay, and event parsers reject open or inconsistent 
   assert.throws(() => parseEventsResult({
     instance: validSnapshot(),
     page: { events: [validEvent()], earliest: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, latest: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, truncated: false, epochChanged: false, generationChanged: false },
-    recentHistory: [], historyTruncated: true, controller: { status: "observing" }, following: false, extra: true,
+    recentHistory: [], historyTruncated: true, pendingMessages: [], controller: { status: "observing" }, following: false, extra: true,
   }), /Unexpected field/);
   assert.throws(() => parseEventsResult({
     instance: validSnapshot(),
     page: { events: [{ ...validEvent(), instanceId: "other" }], earliest: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, latest: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, truncated: false, epochChanged: false, generationChanged: false },
-    recentHistory: [], historyTruncated: true, controller: { status: "observing" }, following: false,
+    recentHistory: [], historyTruncated: true, pendingMessages: [], controller: { status: "observing" }, following: false,
   }), /cursor domain\/order/);
   assert.throws(() => parseControlEventEnvelope(envelope(validEvent("settings.changed", { key: "unknown", value: true, reloadRequired: false, hostRestartRequired: false })), "attach-1", "epoch-1"), /Unsupported setting key/);
 });

@@ -26,7 +26,17 @@ export type ContentBlockDto =
   | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; omittedFields?: string[] }
   | { type: "omitted"; kind: "image" | "binary"; description: string };
 
+export const MAX_PENDING_QUEUE_ITEMS = 64;
+export const MAX_PENDING_QUEUE_TEXT_CHARS = 256_000;
+
 export interface PendingDto { steering: number; followUp: number; total: number }
+export interface PendingMessageDto {
+  queueItemId: string;
+  operationId: string;
+  delivery: "steer" | "followUp";
+  text: string;
+  acceptedAt: string;
+}
 export interface HistoryEntryDto {
   entryId: string;
   parentId?: string;
@@ -96,7 +106,8 @@ export interface EventDataMap {
   "run.retry_started": { attempt: number; maxAttempts: number; delayMs: number; error: string };
   "run.retry_completed": { success: boolean; attempt: number; error?: string };
   "run.settled": { operationId?: string; result: LastRunResult; stopReason?: string; error?: string };
-  "message.submitted": { operationId: string; messageId: string; role: "user"; text: string };
+  "message.queued": PendingMessageDto;
+  "message.submitted": { operationId: string; messageId: string; role: "user"; text: string; delivery: "prompt" | "steer" | "followUp"; queueItemId?: string };
   "message.delta": { messageId: string; block: "text" | "thinking"; delta: string };
   "message.completed": { messageId: string; role: "user" | "assistant" | "tool" | "system"; content: ContentBlockDto[]; stopReason?: string; error?: string };
   "tool.started": { toolCallId: string; toolName: string; args: JsonObject; omittedFields?: string[] };
@@ -104,7 +115,7 @@ export interface EventDataMap {
   "tool.output_updated": { toolCallId: string; text: string };
   "tool.completed": { toolCallId: string; toolName: string; text: string; isError: boolean; omittedFields?: string[] };
   "queue.changed": PendingDto;
-  "queue.cleared": PendingDto;
+  "queue.cleared": PendingDto & { queueItemIds: string[]; reason: "dequeued" | "abort" | "stop" | "replacement" | "host_draining" };
   "compaction.started": { reason: "manual" | "threshold" | "overflow" };
   "compaction.completed": { reason: "manual" | "threshold" | "overflow"; aborted: boolean; willRetry: boolean; error?: string };
   "session.replaced": { reason: "new" | "resume" | "fork" | "reload"; previousSessionFile?: string; sessionFile?: string; runtimeGeneration: number; cwd: string; piSessionId: string; name?: string };
@@ -184,9 +195,17 @@ export interface AttachProjection {
   page: EventPage;
   recentHistory: HistoryEntryDto[];
   historyTruncated: boolean;
+  pendingMessages: PendingMessageDto[];
   replaySince: number;
   epochChanged: boolean;
   generationChanged: boolean;
+}
+
+export interface QueueDequeueReceipt {
+  operationId: string;
+  instanceId: string;
+  restored: PendingMessageDto[];
+  inFlight: PendingMessageDto[];
 }
 
 export interface CommandReceipt {

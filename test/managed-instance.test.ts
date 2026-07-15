@@ -8,6 +8,8 @@ import {
   InstanceNotActiveError,
   InvalidDeliveryModeError,
   ManagedInstance,
+  MAX_PENDING_QUEUE_ITEMS,
+  QueueCapacityError,
   RuntimeEffectUnknownError,
 } from "../src/core/managed-instance.js";
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, ToolDto } from "../src/core/config-projection.js";
@@ -43,12 +45,14 @@ class FakeRuntimeSession implements RuntimeSession {
   isStreaming = false;
   isCompacting = false;
   promptDeferred = new Deferred<void>();
+  preflightEntered = new Deferred<void>();
   promptCalls: Array<{ text: string; options?: RuntimePromptOptions }> = [];
   abortCalls = 0;
   disposeCalls = 0;
-  clearQueueResult: ClearedRuntimeQueue = { steering: [], followUp: [] };
+  clearQueueResult: ClearedRuntimeQueue | undefined;
   rejectPreflightWith: Error | undefined;
   delayPreflight = false;
+  queueProjection: (text: string) => string = (text) => text;
   disposeError: Error | undefined;
   abortError: Error | undefined;
   abortBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
@@ -62,6 +66,8 @@ class FakeRuntimeSession implements RuntimeSession {
 
   private pendingPreflight: ((success: boolean) => void) | undefined;
   private readonly listeners = new Set<(event: RuntimeEvent) => void>();
+  private readonly steeringQueue: string[] = [];
+  private readonly followUpQueue: string[] = [];
   private modelState: RuntimeModelState = {
     model: { provider: "fixture", id: "model-a" },
     thinkingLevel: "off",
@@ -81,10 +87,17 @@ class FakeRuntimeSession implements RuntimeSession {
     }
     if (this.delayPreflight) {
       this.pendingPreflight = options?.preflightResult;
+      this.preflightEntered.resolve();
       return this.promptDeferred.promise;
     }
+    if (this.isStreaming && options?.streamingBehavior) {
+      if (options.streamingBehavior === "steer") this.steeringQueue.push(this.queueProjection(text));
+      else this.followUpQueue.push(this.queueProjection(text));
+      this.emitQueue();
+      options.preflightResult?.(true);
+      return Promise.resolve();
+    }
     options?.preflightResult?.(true);
-    if (this.isStreaming && options?.streamingBehavior) return Promise.resolve();
     return this.promptDeferred.promise;
   }
 
@@ -134,8 +147,14 @@ class FakeRuntimeSession implements RuntimeSession {
   getMetrics(): RuntimeSessionMetrics { return structuredClone(this.metrics); }
 
   clearQueue(): ClearedRuntimeQueue {
-    this.emit({ type: "queue_update", steering: [], followUp: [] });
-    return this.clearQueueResult;
+    const cleared = this.clearQueueResult ?? {
+      steering: [...this.steeringQueue],
+      followUp: [...this.followUpQueue],
+    };
+    this.steeringQueue.length = 0;
+    this.followUpQueue.length = 0;
+    this.emitQueue();
+    return cleared;
   }
 
   async abort(): Promise<void> {
@@ -197,6 +216,22 @@ class FakeRuntimeSession implements RuntimeSession {
   startRun(): void {
     this.isStreaming = true;
     this.emit({ type: "agent_start" });
+    const text = this.promptCalls.at(-1)?.text;
+    if (text !== undefined) this.emitUserMessage(text);
+  }
+
+  beginConsumeNextQueued(): string | undefined {
+    const text = this.steeringQueue.shift() ?? this.followUpQueue.shift();
+    if (text !== undefined) this.emitQueue();
+    return text;
+  }
+
+  finishConsumeQueued(text: string): void { this.emitUserMessage(text); }
+
+  consumeNextQueued(): string | undefined {
+    const text = this.beginConsumeNextQueued();
+    if (text !== undefined) this.finishConsumeQueued(text);
+    return text;
   }
 
   emitAssistantEnd(stopReason: string, errorMessage?: string): void {
@@ -221,6 +256,16 @@ class FakeRuntimeSession implements RuntimeSession {
 
   emit(event: RuntimeEvent): void {
     for (const listener of this.listeners) listener(event);
+  }
+
+  private emitQueue(): void {
+    this.emit({ type: "queue_update", steering: [...this.steeringQueue], followUp: [...this.followUpQueue] });
+  }
+
+  private emitUserMessage(text: string): void {
+    const message = { role: "user", content: [{ type: "text", text }] };
+    this.emit({ type: "message_start", message });
+    this.emit({ type: "message_end", message });
   }
 }
 
@@ -277,12 +322,15 @@ test("submit returns after preflight while the runtime promise remains host-owne
   assert.equal(instance.snapshot().executor.piSessionId, "pi-session-1");
   assert.notEqual(instance.snapshot().id, instance.snapshot().executor.piSessionId);
   assert.equal(session.promptCalls.length, 1);
-  const submitted = instance.eventsSince().events.find((event) => event.type === "message.submitted");
-  assert.equal(submitted?.data.role, "user");
-  assert.equal(submitted?.data.text, "do a long task");
-  assert.equal(submitted?.data.operationId, "command-1");
+  assert.equal(instance.eventsSince().events.some((event) => event.type === "message.submitted"), false);
 
   session.startRun();
+  const submitted = instance.eventsSince().events.find((event) => event.type === "message.submitted");
+  assert.equal(submitted?.type, "message.submitted");
+  if (submitted?.type !== "message.submitted") assert.fail("user message was not consumed");
+  assert.equal(submitted.data.role, "user");
+  assert.equal(submitted.data.text, "do a long task");
+  assert.equal(submitted.data.operationId, "command-1");
   session.emitAssistantEnd("stop");
   session.emit({ type: "agent_end", messages: [] });
 
@@ -459,6 +507,7 @@ test("delivery modes make queue acceptance explicit", async () => {
   assert.equal(followUp.delivery, "followUp");
   assert.equal(followUp.queued, true);
   assert.equal(session.promptCalls.at(-1)?.options?.streamingBehavior, "followUp");
+  await assert.rejects(instance.selectModel("fixture", "model-b", "model-while-queued"), InstanceBusyError);
 
   await assert.rejects(
     instance.submit("parallel prompt", "prompt"),
@@ -468,9 +517,149 @@ test("delivery modes make queue acceptance explicit", async () => {
   session.settle();
 });
 
+test("queued text stays pending until user message_start and template expansion keeps its operation identity", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  await instance.submit("original");
+  session.startRun();
+  session.queueProjection = (text) => `expanded:${text}`;
+
+  const queued = await instance.submit("change direction", "steer", "queue-op");
+  assert.equal(queued.queued, true);
+  assert.equal(instance.eventsSince().events.some((event) => event.type === "message.submitted" && event.data.operationId === "queue-op"), false);
+  const acceptedEvents = instance.eventsSince().events;
+  const acceptedIndex = acceptedEvents.findIndex((event) => event.type === "command.accepted" && event.data.operationId === "queue-op");
+  const queuedIndex = acceptedEvents.findIndex((event) => event.type === "message.queued" && event.data.operationId === "queue-op");
+  const queueChangedIndex = acceptedEvents.findIndex((event) => event.type === "queue.changed" && event.data.total === 1);
+  assert.ok(acceptedIndex >= 0 && acceptedIndex < queuedIndex && queuedIndex < queueChangedIndex);
+  const attach = await instance.getAttachProjection(undefined);
+  assert.deepEqual(attach.pendingMessages.map((item) => ({ operationId: item.operationId, delivery: item.delivery, text: item.text })), [
+    { operationId: "queue-op", delivery: "steer", text: "change direction" },
+  ]);
+
+  assert.equal(session.consumeNextQueued(), "expanded:change direction");
+  const consumed = instance.eventsSince().events.find((event) => event.type === "message.submitted" && event.data.operationId === "queue-op");
+  assert.equal(consumed?.type, "message.submitted");
+  if (consumed?.type !== "message.submitted") assert.fail("queued message was not consumed");
+  assert.equal(consumed.data.text, "expanded:change direction");
+  assert.equal(consumed.data.delivery, "steer");
+  assert.ok(consumed.data.queueItemId);
+  assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages, []);
+  session.settle();
+});
+
+test("duplicate expanded queue messages consume against their accepted FIFO identities", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  await instance.submit("original");
+  session.startRun();
+  session.queueProjection = () => "same expanded text";
+  await instance.submit("template one", "steer", "duplicate-one");
+  await instance.submit("template two", "steer", "duplicate-two");
+
+  session.consumeNextQueued();
+  session.consumeNextQueued();
+  const consumed = instance.eventsSince().events
+    .filter((event) => event.type === "message.submitted" && event.data.queueItemId !== undefined)
+    .map((event) => event.type === "message.submitted" ? event.data.operationId : "");
+  assert.deepEqual(consumed, ["duplicate-one", "duplicate-two"]);
+  assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages, []);
+  session.settle();
+});
+
+test("runtime-driven replacement explicitly clears any surviving ephemeral queue projection", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  await instance.submit("original");
+  session.startRun();
+  await instance.submit("queued before replacement", "steer", "replace-queue-op");
+
+  session.emit({
+    type: "dock_session_replaced",
+    operationId: "runtime-replace",
+    reason: "new",
+    previousSessionFile: "/tmp/pi-session-1.jsonl",
+    sessionFile: "/tmp/pi-session-2.jsonl",
+    cwd: "/tmp/project",
+  });
+  const replacementEvents = instance.eventsSince().events;
+  assert.equal(replacementEvents[0]?.type, "session.replaced");
+  const cleared = replacementEvents[1];
+  assert.equal(cleared?.type, "queue.cleared");
+  if (cleared?.type !== "queue.cleared") assert.fail("replacement did not publish queue removal");
+  assert.equal(cleared.data.reason, "replacement");
+  assert.equal(cleared.data.total, 1);
+  assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages, []);
+  await instance.stop("stop-after-runtime-replacement");
+});
+
+test("dequeue never restores a message Pi already removed for an in-flight message_start", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  await instance.submit("original");
+  session.startRun();
+  await instance.submit("about to consume", "steer", "in-flight-op");
+
+  const inFlightText = session.beginConsumeNextQueued();
+  assert.equal(inFlightText, "about to consume");
+  const receipt = await instance.dequeue("dequeue-in-flight");
+  assert.deepEqual(receipt.restored, []);
+  assert.deepEqual(receipt.inFlight.map((item) => item.operationId), ["in-flight-op"]);
+  assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages.map((item) => item.operationId), ["in-flight-op"]);
+
+  session.finishConsumeQueued(inFlightText!);
+  const consumed = instance.eventsSince().events.find((event) => event.type === "message.submitted" && event.data.operationId === "in-flight-op");
+  assert.equal(consumed?.type, "message.submitted");
+  assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages, []);
+  session.settle();
+});
+
+test("dequeue restores every pending message in steering-first order without aborting the run", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  await instance.submit("original");
+  session.startRun();
+  await instance.submit("later follow-up", "followUp", "follow-op");
+  await instance.submit("urgent steer", "steer", "steer-op");
+
+  const receipt = await instance.dequeue("dequeue-op");
+  assert.equal(session.abortCalls, 0);
+  assert.deepEqual(receipt.inFlight, []);
+  assert.deepEqual(receipt.restored.map((item) => ({ operationId: item.operationId, delivery: item.delivery, text: item.text })), [
+    { operationId: "steer-op", delivery: "steer", text: "urgent steer" },
+    { operationId: "follow-op", delivery: "followUp", text: "later follow-up" },
+  ]);
+  assert.equal(instance.snapshot().execution, "running");
+  assert.deepEqual(instance.snapshot().pending, { steering: 0, followUp: 0, total: 0 });
+  assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages, []);
+  const cleared = instance.eventsSince().events.find((event) => event.type === "queue.cleared" && event.data.reason === "dequeued");
+  assert.equal(cleared?.type, "queue.cleared");
+  if (cleared?.type !== "queue.cleared") assert.fail("queue clear event was not published");
+  assert.equal(cleared.data.total, 2);
+  session.settle();
+});
+
+test("pending queue admission is bounded before another Pi effect", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  await instance.submit("original");
+  session.startRun();
+  for (let index = 0; index < MAX_PENDING_QUEUE_ITEMS; index += 1) {
+    await instance.submit(`queued-${index}`, "steer", `queue-${index}`);
+  }
+  assert.equal(instance.snapshot().pending.total, MAX_PENDING_QUEUE_ITEMS);
+  const promptCallsAtCapacity = session.promptCalls.length;
+  await assert.rejects(instance.submit("one too many", "steer", "queue-overflow"), QueueCapacityError);
+  assert.equal(session.promptCalls.length, promptCallsAtCapacity);
+  await instance.dequeue("clear-capacity-test");
+  session.settle();
+});
+
 test("a queued request becomes a tracked prompt when the original run settles during preflight", async () => {
   const session = new FakeRuntimeSession();
   const instance = createInstance(session);
+  instance.bindCatalogPort({ assertWritable: () => {}, commit: async () => {} });
+  instance.markCatalogCommitted();
 
   const originalDeferred = session.promptDeferred;
   await instance.submit("original");
@@ -479,6 +668,7 @@ test("a queued request becomes a tracked prompt when the original run settles du
   session.delayPreflight = true;
   session.promptDeferred = new Deferred<void>();
   const nextSubmit = instance.submit("next", "auto");
+  await session.preflightEntered.promise;
 
   // Finish the original run while the second command is inside an async input
   // hook. Pi will re-check isStreaming and execute the second command as a new

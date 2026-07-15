@@ -1,4 +1,5 @@
 import { containsBinaryPayload, type InteractionResponse } from "../core/extension-ui-broker.js";
+import { MAX_PENDING_QUEUE_ITEMS, MAX_PENDING_QUEUE_TEXT_CHARS } from "../core/managed-instance.js";
 import type {
   CommandReceipt,
   ContentBlockDto,
@@ -12,6 +13,8 @@ import type {
   InstanceSnapshot,
   JsonObject,
   JsonValue,
+  PendingMessageDto,
+  QueueDequeueReceipt,
   SessionDto,
   TreeNodeDto,
 } from "../core/managed-instance.js";
@@ -57,6 +60,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "host.info",
   "instance.catalog",
   "models.v1",
+  "queue.control.v1",
   "resources.v1",
   "run.abort.v1",
   "service.managed.v1",
@@ -117,6 +121,7 @@ export type ControlRequest =
   | Request<"interaction.respond", { operationId: string; instanceId: string; leaseToken: string; interactionId: string; response: InteractionResponse }>
   | Request<"command.submit", { operationId: string; instanceId: string; message: string; delivery: DeliveryMode }>
   | Request<"command.abort", { operationId: string; instanceId: string }>
+  | Request<"queue.dequeue", { operationId: string; instanceId: string }>
   | Request<"model.list", { instanceId: string }>
   | Request<"model.set", { operationId: string; instanceId: string; provider: string; modelId: string }>
   | Request<"thinking.set", { operationId: string; instanceId: string; level: RuntimeThinkingLevel }>
@@ -160,6 +165,7 @@ export interface AttachInitialDto {
   page: EventPage & { epochChanged: boolean; generationChanged: boolean };
   recentHistory: HistoryEntryDto[];
   historyTruncated: boolean;
+  pendingMessages: PendingMessageDto[];
   controller: { status: "acquired"; leaseToken: string } | { status: "observing" | "unavailable" };
   following: boolean;
 }
@@ -167,6 +173,7 @@ export type EventsResult = AttachInitialDto;
 export interface InteractionRespondResult { interactionId: string; state: "resolved" | "already_resolved" }
 export interface PromptResult { receipt: CommandReceipt; instance: InstanceSnapshot }
 export interface AbortResult { instance: InstanceSnapshot }
+export interface QueueDequeueResult { receipt: QueueDequeueReceipt; instance: InstanceSnapshot }
 export interface StopResult { receipt: { operationId: string; alreadyStopped: boolean; cleanupErrors?: string[] }; instance: InstanceSnapshot }
 export interface ReopenResult { operationId: string; previousLifecycle: "host_lost" | "runtime_error"; instance: InstanceSnapshot }
 export interface ModelsResult { models: RuntimeModelInfo[]; availableThinkingLevels: RuntimeThinkingLevel[]; instance: InstanceSnapshot }
@@ -196,6 +203,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "instance.reopen") return "session.reopen";
   if (type.startsWith("instance.")) return type === "instance.attach" ? "events.follow" : "instance.catalog";
   if (type === "command.abort") return "run.abort.v1";
+  if (type === "queue.dequeue") return "queue.control.v1";
   if (type === "session.history") return "tui.projection.v1";
   if (type === "session.tree" || type === "session.navigate" || type === "session.fork" || type === "session.clone") return "session.tree.v1";
   if (type === "command.submit" || type === "session.list") return "session.core";
@@ -336,6 +344,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
     }
     case "command.submit": exact(params, ["operationId", "instanceId", "message", "delivery"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), message: string(params.message, "params.message", MAX_PROMPT_CHARS, "invalid_request"), delivery: enumeration(params.delivery, "params.delivery", ["auto", "prompt", "steer", "followUp"], "invalid_request") } };
     case "command.abort": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
+    case "queue.dequeue": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "model.list": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "model.set": exact(params, ["operationId", "instanceId", "provider", "modelId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), provider: string(params.provider, "params.provider", MAX_MODEL_PROVIDER_CHARS, "invalid_request"), modelId: string(params.modelId, "params.modelId", MAX_MODEL_ID_CHARS, "invalid_request") } };
     case "thinking.set": exact(params, ["operationId", "instanceId", "level"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), level: enumeration(params.level, "params.level", THINKING_LEVELS, "invalid_request") } };
@@ -463,7 +472,7 @@ export function parseCreateResult(input: unknown): CreateResult { const value = 
 export function parseListResult(input: unknown): ListResult { const value = object(input, "list result"); exact(value, ["instances"]); return { instances: array(value.instances, "instances", MAX_COLLECTION).map((item, index) => parseInstance(item, `instances[${index}]`)) }; }
 export function parseStatusResult(input: unknown): StatusResult { const value = object(input, "get result"); exact(value, ["instance"]); return { instance: parseInstance(value.instance, "instance") }; }
 export function parseEventsResult(input: unknown): EventsResult {
-  const value = object(input, "attach result"); exact(value, ["instance", "page", "recentHistory", "historyTruncated", "controller", "following"]);
+  const value = object(input, "attach result"); exact(value, ["instance", "page", "recentHistory", "historyTruncated", "pendingMessages", "controller", "following"]);
   const instance = parseInstance(value.instance, "instance");
   const page = object(value.page, "page"); exact(page, ["events", "earliest", "latest", "truncated", "epochChanged", "generationChanged"]);
   const earliest = parseCursor(page.earliest, "page.earliest");
@@ -478,14 +487,19 @@ export function parseEventsResult(input: unknown): EventsResult {
   }
   const history = array(value.recentHistory, "recentHistory", MAX_HISTORY_ITEMS).map((item, index) => parseHistoryEntry(item, `recentHistory[${index}]`));
   if (new Set(history.map((entry) => entry.entryId)).size !== history.length) throw validation("invalid_response", "recentHistory entry IDs must be unique");
+  const pendingMessages = array(value.pendingMessages, "pendingMessages", MAX_PENDING_QUEUE_ITEMS).map((item, index) => parsePendingMessage(item, `pendingMessages[${index}]`));
+  if (new Set(pendingMessages.map((item) => item.queueItemId)).size !== pendingMessages.length) throw validation("invalid_response", "pendingMessages queue item IDs must be unique");
+  if (pendingMessages.reduce((total, item) => total + item.text.length, 0) > MAX_PENDING_QUEUE_TEXT_CHARS) throw validation("invalid_response", "pendingMessages text exceeds the aggregate queue limit");
+  const firstFollowUp = pendingMessages.findIndex((item) => item.delivery === "followUp");
+  if (firstFollowUp >= 0 && pendingMessages.slice(firstFollowUp).some((item) => item.delivery === "steer")) throw validation("invalid_response", "pendingMessages are not in consumption order");
   const controller = object(value.controller, "controller");
   const controllerStatus = enumeration(controller.status, "controller.status", ["acquired", "observing", "unavailable"]);
   if (controllerStatus === "acquired") {
     exact(controller, ["status", "leaseToken"]);
-    return { instance, page: { events, earliest, latest, truncated: boolean(page.truncated, "page.truncated"), epochChanged: boolean(page.epochChanged, "page.epochChanged"), generationChanged: boolean(page.generationChanged, "page.generationChanged") }, recentHistory: history, historyTruncated: boolean(value.historyTruncated, "historyTruncated"), controller: { status: controllerStatus, leaseToken: id(controller.leaseToken, "controller.leaseToken") }, following: boolean(value.following, "following") };
+    return { instance, page: { events, earliest, latest, truncated: boolean(page.truncated, "page.truncated"), epochChanged: boolean(page.epochChanged, "page.epochChanged"), generationChanged: boolean(page.generationChanged, "page.generationChanged") }, recentHistory: history, historyTruncated: boolean(value.historyTruncated, "historyTruncated"), pendingMessages, controller: { status: controllerStatus, leaseToken: id(controller.leaseToken, "controller.leaseToken") }, following: boolean(value.following, "following") };
   }
   exact(controller, ["status"]);
-  return { instance, page: { events, earliest, latest, truncated: boolean(page.truncated, "page.truncated"), epochChanged: boolean(page.epochChanged, "page.epochChanged"), generationChanged: boolean(page.generationChanged, "page.generationChanged") }, recentHistory: history, historyTruncated: boolean(value.historyTruncated, "historyTruncated"), controller: { status: controllerStatus }, following: boolean(value.following, "following") };
+  return { instance, page: { events, earliest, latest, truncated: boolean(page.truncated, "page.truncated"), epochChanged: boolean(page.epochChanged, "page.epochChanged"), generationChanged: boolean(page.generationChanged, "page.generationChanged") }, recentHistory: history, historyTruncated: boolean(value.historyTruncated, "historyTruncated"), pendingMessages, controller: { status: controllerStatus }, following: boolean(value.following, "following") };
 }
 export function parseInteractionRespondResult(input: unknown): InteractionRespondResult {
   const value = object(input, "interaction response result");
@@ -514,6 +528,25 @@ export function parseAbortResult(input: unknown): AbortResult {
   const instance = parseInstance(value.instance, "instance");
   if (instance.execution === "running") throw validation("invalid_response", "Abort result instance must not still be running");
   return { instance };
+}
+export function parseQueueDequeueResult(input: unknown): QueueDequeueResult {
+  const value = object(input, "queue dequeue result"); exact(value, ["receipt", "instance"]);
+  const receipt = object(value.receipt, "receipt"); exact(receipt, ["operationId", "instanceId", "restored", "inFlight"]);
+  const instance = parseInstance(value.instance, "instance");
+  const operationId = id(receipt.operationId, "receipt.operationId");
+  const instanceId = id(receipt.instanceId, "receipt.instanceId");
+  if (instanceId !== instance.id) throw validation("invalid_response", "Queue dequeue receipt does not match instance");
+  if (instance.pending.total !== 0) throw validation("invalid_response", "Queue dequeue result must expose an empty queue");
+  const restored = array(receipt.restored, "receipt.restored", MAX_PENDING_QUEUE_ITEMS).map((item, index) => parsePendingMessage(item, `receipt.restored[${index}]`));
+  const inFlight = array(receipt.inFlight, "receipt.inFlight", MAX_PENDING_QUEUE_ITEMS).map((item, index) => parsePendingMessage(item, `receipt.inFlight[${index}]`));
+  const all = [...restored, ...inFlight];
+  if (all.length > MAX_PENDING_QUEUE_ITEMS || new Set(all.map((item) => item.queueItemId)).size !== all.length) throw validation("invalid_response", "Queue dequeue item IDs must be unique and bounded");
+  if (all.reduce((total, item) => total + item.text.length, 0) > MAX_PENDING_QUEUE_TEXT_CHARS) throw validation("invalid_response", "Queue dequeue text exceeds the aggregate queue limit");
+  for (const [field, items] of [["restored", restored], ["inFlight", inFlight]] as const) {
+    const firstFollowUp = items.findIndex((item) => item.delivery === "followUp");
+    if (firstFollowUp >= 0 && items.slice(firstFollowUp).some((item) => item.delivery === "steer")) throw validation("invalid_response", `Queue dequeue ${field} items are not in consumption order`);
+  }
+  return { receipt: { operationId, instanceId, restored, inFlight }, instance };
 }
 export function parseStopResult(input: unknown): StopResult {
   const value = object(input, "stop result"); exact(value, ["receipt", "instance"]);
@@ -718,6 +751,18 @@ function parseExecutor(input: unknown, field: string): ExecutorIdentity {
   if (executor.model !== undefined) { const value = object(executor.model, `${field}.model`); exact(value, ["provider", "id", "name"]); const name=optionalString(value.name, `${field}.model.name`, 256); model = { provider: string(value.provider, `${field}.model.provider`, MAX_MODEL_PROVIDER_CHARS), id: string(value.id, `${field}.model.id`, MAX_MODEL_ID_CHARS), ...(name === undefined ? {} : { name }) }; }
   return { kind: string(executor.kind, `${field}.kind`, 128), version: optionalString(executor.version, `${field}.version`, 128), piSessionId: id(executor.piSessionId, `${field}.piSessionId`), sessionFile: optionalString(executor.sessionFile, `${field}.sessionFile`, MAX_CONTROL_CWD_CHARS), model, thinkingLevel: executor.thinkingLevel === undefined ? undefined : enumeration(executor.thinkingLevel, `${field}.thinkingLevel`, THINKING_LEVELS) };
 }
+function parsePendingMessage(input: unknown, field: string): PendingMessageDto {
+  const item = object(input, field); exact(item, ["queueItemId", "operationId", "delivery", "text", "acceptedAt"]);
+  const text = string(item.text, `${field}.text`, MAX_PROMPT_CHARS);
+  if (/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u.test(text)) throw validation("invalid_response", `${field}.text contains terminal control characters`);
+  return {
+    queueItemId: id(item.queueItemId, `${field}.queueItemId`),
+    operationId: id(item.operationId, `${field}.operationId`),
+    delivery: enumeration(item.delivery, `${field}.delivery`, ["steer", "followUp"]),
+    text,
+    acceptedAt: timestamp(item.acceptedAt, `${field}.acceptedAt`),
+  };
+}
 function parsePending(input: unknown, field: string): InstanceSnapshot["pending"] {
   const pending = object(input, field); exact(pending, ["steering", "followUp", "total"]);
   const result = { steering: unsigned(pending.steering, `${field}.steering`), followUp: unsigned(pending.followUp, `${field}.followUp`), total: unsigned(pending.total, `${field}.total`) };
@@ -789,14 +834,22 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "run.retry_started": exact(data, ["attempt", "maxAttempts", "delayMs", "error"]); return { attempt: unsigned(data.attempt, "attempt"), maxAttempts: unsigned(data.maxAttempts, "maxAttempts"), delayMs: unsigned(data.delayMs, "delayMs"), error: text("error", MAX_MESSAGE) };
     case "run.retry_completed": exact(data, ["success", "attempt", "error"]); return { success: boolean(data.success, "success"), attempt: unsigned(data.attempt, "attempt"), error: optionalText("error", MAX_MESSAGE) };
     case "run.settled": exact(data, ["operationId", "result", "stopReason", "error"]); return { operationId: optionalText("operationId", 128), result: enumeration(data.result, "result", ["never", "succeeded", "failed", "aborted", "interrupted"]), stopReason: optionalText("stopReason", 128), error: optionalText("error", MAX_MESSAGE) };
-    case "message.submitted": exact(data, ["operationId", "messageId", "role", "text"]); return { operationId: text("operationId", 128), messageId: text("messageId", 128), role: enumeration(data.role, "role", ["user"]), text: text("text", MAX_PROMPT_CHARS) };
+    case "message.queued": return parsePendingMessage(data, field);
+    case "message.submitted": {
+      exact(data, ["operationId", "messageId", "role", "text", "delivery", "queueItemId"]);
+      const delivery = enumeration(data.delivery, "delivery", ["prompt", "steer", "followUp"]);
+      const queueItemId = optionalText("queueItemId", 128);
+      if ((delivery === "prompt") === (queueItemId !== undefined)) throw validation("invalid_response", "message.submitted queueItemId does not match delivery");
+      return { operationId: text("operationId", 128), messageId: text("messageId", 128), role: enumeration(data.role, "role", ["user"]), text: text("text", MAX_PROMPT_CHARS), delivery, queueItemId };
+    }
     case "message.delta": exact(data, ["messageId", "block", "delta"]); return { messageId: text("messageId", 128), block: enumeration(data.block, "block", ["text", "thinking"]), delta: boundedString(data.delta, `${field}.delta`, MAX_TEXT) };
     case "message.completed": exact(data, ["messageId", "role", "content", "stopReason", "error"]); return { messageId: text("messageId", 128), role: enumeration(data.role, "role", ["user", "assistant", "tool", "system"]), content: parseContent(data.content, `${field}.content`), stopReason: optionalText("stopReason", 128), error: optionalText("error", MAX_MESSAGE) };
     case "tool.started": exact(data, ["toolCallId", "toolName", "args", "omittedFields"]); return toolArgs(data, field, true);
     case "tool.args_updated": exact(data, ["toolCallId", "args", "omittedFields"]); return toolArgs(data, field, false);
     case "tool.output_updated": exact(data, ["toolCallId", "text"]); return { toolCallId: text("toolCallId", 128), text: boundedString(data.text, `${field}.text`, MAX_TEXT) };
     case "tool.completed": exact(data, ["toolCallId", "toolName", "text", "isError", "omittedFields"]); return { toolCallId: text("toolCallId", 128), toolName: text("toolName", 256), text: boundedString(data.text, `${field}.text`, MAX_TEXT), isError: boolean(data.isError, "isError"), omittedFields: omitted(data.omittedFields, "omittedFields") };
-    case "queue.changed": case "queue.cleared": exact(data, ["steering", "followUp", "total"]); return parsePending(data, field);
+    case "queue.changed": exact(data, ["steering", "followUp", "total"]); return parsePending(data, field);
+    case "queue.cleared": exact(data, ["steering", "followUp", "total", "queueItemIds", "reason"]); return { ...parsePending({ steering: data.steering, followUp: data.followUp, total: data.total }, field), queueItemIds: strings(data.queueItemIds, `${field}.queueItemIds`, MAX_PENDING_QUEUE_ITEMS, 128), reason: enumeration(data.reason, `${field}.reason`, ["dequeued", "abort", "stop", "replacement", "host_draining"]) };
     case "compaction.started": exact(data, ["reason"]); return { reason: enumeration(data.reason, "reason", ["manual", "threshold", "overflow"]) };
     case "compaction.completed": exact(data, ["reason", "aborted", "willRetry", "error"]); return { reason: enumeration(data.reason, "reason", ["manual", "threshold", "overflow"]), aborted: boolean(data.aborted, "aborted"), willRetry: boolean(data.willRetry, "willRetry"), error: optionalText("error", MAX_MESSAGE) };
     case "session.replaced": exact(data, ["reason", "previousSessionFile", "sessionFile", "runtimeGeneration", "cwd", "piSessionId", "name"]); return { reason: enumeration(data.reason, "reason", ["new", "resume", "fork", "reload"]), previousSessionFile: optionalText("previousSessionFile", MAX_CONTROL_CWD_CHARS), sessionFile: optionalText("sessionFile", MAX_CONTROL_CWD_CHARS), runtimeGeneration: positive(data.runtimeGeneration, "runtimeGeneration"), cwd: text("cwd", MAX_CONTROL_CWD_CHARS), piSessionId: text("piSessionId", 128), name: optionalText("name", MAX_INSTANCE_NAME_CHARS) };

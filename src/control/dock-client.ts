@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import { resolve } from "node:path";
 import { containsBinaryPayload, type InteractionResponse } from "../core/extension-ui-broker.js";
-import type { DeliveryMode, DockEvent, EventCursor, EventPage, InstanceSnapshot } from "../core/managed-instance.js";
+import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot } from "../core/managed-instance.js";
 import type { RuntimeThinkingLevel } from "../core/runtime-session.js";
 import type { SettingUpdate } from "../core/config-projection.js";
 import type { ProjectTrustChoice } from "./project-trust.js";
@@ -28,6 +28,7 @@ import {
   parseListResult,
   parseModelsResult,
   parsePromptResult,
+  parseQueueDequeueResult,
   parseReopenResult,
   parseSessionsResult,
   parseSessionCompactionResult,
@@ -57,6 +58,7 @@ import {
   type ModelsResult,
   type PingResult,
   type PromptResult,
+  type QueueDequeueResult,
   type ReopenResult,
   type SessionsResult,
   type SessionCompactionResult,
@@ -98,10 +100,11 @@ export class DockClient {
   async list():Promise<InstanceSnapshot[]>{return (await this.request("instance.list",{includeTerminal:true},"instance.catalog",parseListResult)).instances;}
   async status(instanceId:string):Promise<InstanceSnapshot>{return (await this.request("instance.get",{instanceId},"instance.catalog",parseStatusResult)).instance;}
   reopen(instanceId:string,operationId=this.createRequestId(),sessionFile?:string,trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<ReopenResult>{return this.request("instance.reopen",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.reopen",parseReopenResult);}
-  async events(instanceId:string,since?:EventCursor):Promise<{instance:InstanceSnapshot;page:EventPage&{epochChanged:boolean;generationChanged:boolean}}>{const result=await this.request("instance.attach",{instanceId,since,follow:false,controller:"observe"},"events.follow",parseEventsResult);return {instance:result.instance,page:result.page};}
+  events(instanceId:string,since?:EventCursor):Promise<EventsResult>{return this.request("instance.attach",{instanceId,since,follow:false,controller:"observe"},"events.follow",parseEventsResult);}
   prompt(instanceId:string,message:string,delivery:DeliveryMode="auto",operationId=this.createRequestId()):Promise<PromptResult>{return this.request("command.submit",{operationId,instanceId,message,delivery},"session.core",parsePromptResult);}
   respondInteraction(instanceId:string,leaseToken:string,interactionId:string,response:InteractionResponse,operationId=this.createRequestId()):Promise<InteractionRespondResult>{if("value" in response){const limit=response.method==="select"?8_000:256_000;if(response.value.length>limit)return Promise.reject(new ControlClientError("invalid_request",`Interaction ${response.method} response exceeds ${limit} characters`,operationId));if(containsBinaryPayload(response.value))return Promise.reject(new ControlClientError("invalid_request","Interaction responses cannot contain binary, image, data URI, or raw base64 payloads",operationId));}return this.request("interaction.respond",{operationId,instanceId,leaseToken,interactionId,response},"extension_ui.v1",parseInteractionRespondResult);}
   abort(instanceId:string,operationId=this.createRequestId()):Promise<AbortResult>{return this.request("command.abort",{operationId,instanceId},"run.abort.v1",parseAbortResult);}
+  dequeue(instanceId:string,operationId=this.createRequestId()):Promise<QueueDequeueResult>{return this.request("queue.dequeue",{operationId,instanceId},"queue.control.v1",parseQueueDequeueResult);}
   models(instanceId:string):Promise<ModelsResult>{return this.request("model.list",{instanceId},"models.v1",parseModelsResult);}
   setModel(instanceId:string,provider:string,modelId:string,operationId=this.createRequestId()):Promise<ModelConfigurationResult>{return this.request("model.set",{operationId,instanceId,provider,modelId},"models.v1",parseModelConfigurationResult);}
   setThinking(instanceId:string,level:RuntimeThinkingLevel,operationId=this.createRequestId()):Promise<ThinkingConfigurationResult>{return this.request("thinking.set",{operationId,instanceId,level},"models.v1",parseThinkingConfigurationResult);}
@@ -126,7 +129,7 @@ export class DockClient {
 
   async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;claimController?:boolean}):Promise<EventSubscription>{
     const since=options.since;const helloId=this.createRequestId(),requestId=this.createRequestId();
-    const streamCapabilities:string[]=options.requireTuiProjection?["core.v2","events.follow","run.abort.v1","tui.projection.v1"]:requiredCapabilities("events.follow");
+    const streamCapabilities:string[]=options.requireTuiProjection?["core.v2","events.follow","queue.control.v1","run.abort.v1","tui.projection.v1"]:requiredCapabilities("events.follow");
     if(options.claimController&&!streamCapabilities.includes("extension_ui.v1"))streamCapabilities.push("extension_ui.v1");
     const request:ControlRequest={kind:"request",version:2,requestId,type:"instance.attach",params:{instanceId,since,follow:true,controller:options.claimController?"claim":"observe"}};
     const socket=createConnection(this.socketPath),decoder=new JsonLineDecoder();let phase:"hello"|"response"|"events"="hello",hostEpoch="",initialSettled=false,doneSettled=false,closeRequested=false,callbacksReady=false,pending:DockEvent[]=[],runtimeGeneration:number|undefined,lastSequence=-1;
