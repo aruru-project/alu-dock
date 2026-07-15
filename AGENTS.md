@@ -139,6 +139,6 @@ Follow `docs/dogfood-deployment.md` for managed releases. Stage completion and d
 
 ## Current staged boundary
 
-Stage 5 completes the durable managed Host boundary: `catalog.v1`, `service.managed.v1`, `session.reopen`, socket-first reconcile, no-replay Host loss, explicit reopen and the generated-unit service CLI. Client viewport/search/tool-fold state remains independent from Host interaction state; both use only public package-root APIs.
+Stage 5 is the deployed managed baseline: `catalog.v1`, `service.managed.v1`, `session.reopen`, socket-first reconcile, no-replay Host loss, explicit reopen and the generated-unit service CLI. Client viewport/search/tool-fold state remains independent from Host interaction state; both use only public package-root APIs.
 
 The current boundary is card #142 Stage 6: tree/fork/clone and final default-entry validation. Preserve Stage 5 catalog/reopen/service invariants and Stage 4 interaction/generation/lease lifecycle. Extension component factories, `ctx.ui.custom()`, binary/image transport and renderer replacement remain out of scope; renderer work stays on V0.2 card #148.

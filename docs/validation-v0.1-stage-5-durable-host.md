@@ -4,7 +4,7 @@
 
 卡片：#142
 
-结论：**PASS（源码、真实 Pi reopen、真实临时 systemd user unit）**
+结论：**PASS（源码、真实 Pi reopen、真实 systemd/rollback、managed immutable rollout）**
 
 ## 范围
 
@@ -40,7 +40,7 @@ package-root public export/load guard                   PASS
 关键测试层：
 
 - `durable-catalog-store.test.ts`：round-trip、closed schema/corrupt/future/symlink evidence、四个atomic write fault phase；
-- `durable-registry.test.ts`：socket-first startup、catalog-only projection、explicit reopen、candidate commit rollback、corrupt startup socket cleanup；
+- `durable-registry.test.ts`：socket-first startup、catalog-only projection、single-candidate concurrent reopen、stale attach closure、candidate commit rollback、corrupt startup socket cleanup；
 - `durable-host-process.test.ts`：SIGKILL/restart不replay queue、SIGTERM持久化host loss、admitted create/SIGTERM race；
 - `managed-mode.test.ts`：managed marker/runtime/state、socket override、dev explicit socket fail-closed；
 - `user-service.test.ts`：generated-unit ownership、完整lifecycle、MainPID/hello/new epoch、linger、uninstall保留catalog；
@@ -104,9 +104,46 @@ package-root public export/load guard                   PASS
 - 普通client不会调用systemctl；service不可用返回`service_unavailable`与明确status/start/journal指引。
 - Unit manager只覆写/删除带Alu Dock marker的regular user unit；uninstall不删catalog/session。
 
-## 发布边界
+## Immutable rollout 与真实 service CLI
 
-源码PASS与managed rollout是两个事实。Stage 5实现必须先从clean committed HEAD创建immutable release，再核对真实`alu-dock.service` MainPID/hello/new epoch、真实本机resource smoke与rollback。发布结果追加到本文件和#142；发布器仍默认拒绝active instance，只有用户明确授权时才使用`--allow-active`。
+发布源码commit：`70b524dd0548b50234fa256bccb966901ba4faa2`。
+
+发布前旧managed Host为PID `2852075`、epoch `c53e7690-7923-47f8-880c-c021a96f0a9b`，含2个idle/non-dogfood active records。用户明确说明当前研发使用独立Pi实例并授权本次一次性`--allow-active`切换；未触碰当前Pi会话。后续发布仍恢复默认active-instance拒绝策略。
+
+### 故障回滚门禁
+
+先使用不存在的smoke cwd故意让post-switch gate失败：
+
+- failed release：`20260715T132308Z-70b524dd0548`；
+- failed receipt：`/home/luziyi/release/alu-dock/receipts/20260715T132308Z-70b524dd0548.failed.json`；
+- failure只来自预期的`Working directory does not exist`；该release此前check/tests 193/193/audit/npm-ci/hello均已通过；
+- `current`精确回到`20260715T054328Z-90dd434d7981`；
+- 旧unit SHA-256恢复为`3ee62e888471e513dc77fb42077a41eeecd083a3dd16a577bb4b17a47c20f7ae`；
+- 旧launcher SHA-256恢复为`505020da5af7ef42257da4c57e7dc996bf1642c48e852338d21745907a0f15c7`；
+- rollback Host PID `2914222`等于unit MainPID，epoch `eb899805-4287-4e5c-b941-2d5002a6c744`。
+
+这验证了Stage 5 `serve --managed` unit合同改变后，rollback不仅切`current`，也原子恢复上一版generated unit/launcher；旧CLI不会被错误地以新flag启动。
+
+### 成功发布
+
+- release：`20260715T132357Z-70b524dd0548`；
+- path：`/home/luziyi/release/alu-dock/releases/20260715T132357Z-70b524dd0548`；
+- receipt：`/home/luziyi/release/alu-dock/receipts/20260715T132357Z-70b524dd0548.json`；
+- deploy Host PID `2914969`、epoch `efdf636b-b9cb-4239-a91d-09f6409fc232`，均不同于rollback Host；
+- published resource smoke：commands 40、resources 21、tools 18、settings 24、diagnostics 0；`chain/chain-prompts`和`run/run-chain`排序通过；
+- no model/tool/extension command side effect；smoke instance最终`stopped/non-reopenable`。
+
+随后使用**已发布launcher**验证service commands：
+
+- `service status`：active/running、enabled、ready、linger=yes、PID/hello一致；
+- `service install`：只重写同marker unit，不重启active Host；
+- `service restart`：PID `2914969 → 2915068`，epoch变化；
+- `service logs --lines 5`：journal path正常；
+- `service stop`：inactive/dead、MainPID 0，同时catalog保留；
+- `service start`：PID `2915133`、新epoch `e10b7b53-d856-4e71-915c-54949d0ca646`、ready；
+- 回执：`/tmp/alu-dock-stage5-service-cli-receipt.json`。
+
+最终Host `host.info`为ready、schema 1、revision 7、durable state path；unit ExecStart含`serve --managed`；state/catalog/socket mode分别为`0700/0600/0600`。最终无active instance，真实`alu-dock.service`保持active。#147与Stage 4 managed rollout随本release一并完成。
 
 ## Remaining risks / deferrals
 

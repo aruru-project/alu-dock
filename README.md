@@ -22,7 +22,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [x] 阶段 3.5：轻度结构重构与项目 `AGENTS.md`
 - [x] 阶段 3.6：Dogfood release 与 `systemd --user` managed service基线
 - [x] Dogfood TUI UX 源码与验证门禁（#147）
-- [ ] #147 与阶段 4 managed rollout（随阶段 5 immutable release 一并验证）
+- [x] #147 与阶段 4 managed rollout（随阶段 5 immutable release完成）
 - [x] 阶段 4：Extension UI 源码、真实 Pi/PTY 与七扩展兼容门禁
 - [x] 阶段 5：`systemd --user`、durable catalog 与 explicit reopen
 - [ ] 阶段 6：tree/fork/clone
