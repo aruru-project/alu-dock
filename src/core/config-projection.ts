@@ -12,6 +12,45 @@ export interface CommandDto { name: string; description?: string; source: Source
 export interface ResourceDto { kind: "extension" | "skill" | "prompt" | "context"; name: string; path?: string; source?: SourceDto }
 export interface DiagnosticDto { severity: "info" | "warning" | "error"; message: string; source?: string }
 
+/** Locale-independent canonical ordering shared by projection producers and wire validators. */
+export function compareCanonicalText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+export function compareSourceDtos(left: SourceDto, right: SourceDto): number {
+  return compareCanonicalText(left.kind, right.kind)
+    || compareCanonicalText(left.package ?? "", right.package ?? "")
+    || compareCanonicalText(left.path ?? "", right.path ?? "");
+}
+
+export function compareToolDtos(left: ToolDto, right: ToolDto): number {
+  return compareCanonicalText(left.name, right.name)
+    || compareSourceDtos(left.source ?? { kind: "built-in" }, right.source ?? { kind: "built-in" })
+    || compareCanonicalText(left.description, right.description)
+    || Number(left.active) - Number(right.active)
+    || compareCanonicalText(JSON.stringify(left.parameterSchema ?? {}), JSON.stringify(right.parameterSchema ?? {}));
+}
+
+export function compareCommandDtos(left: CommandDto, right: CommandDto): number {
+  return compareCanonicalText(left.name, right.name)
+    || compareSourceDtos(left.source, right.source)
+    || compareCanonicalText(left.description ?? "", right.description ?? "")
+    || Number(left.argumentCompletions) - Number(right.argumentCompletions);
+}
+
+export function compareResourceDtos(left: ResourceDto, right: ResourceDto): number {
+  return compareCanonicalText(left.kind, right.kind)
+    || compareCanonicalText(left.name, right.name)
+    || compareCanonicalText(left.path ?? "", right.path ?? "")
+    || compareSourceDtos(left.source ?? { kind: "built-in" }, right.source ?? { kind: "built-in" });
+}
+
+export function compareDiagnosticDtos(left: DiagnosticDto, right: DiagnosticDto): number {
+  return compareCanonicalText(left.severity, right.severity)
+    || compareCanonicalText(left.message, right.message)
+    || compareCanonicalText(left.source ?? "", right.source ?? "");
+}
+
 export interface SettingValueMap {
   autoCompaction: boolean;
   compactionReserveTokens: number;

@@ -186,6 +186,34 @@ test("Stage 1C projection result parsers omit open shapes and enforce frozen met
   assert.throws(() => parseSettingUpdateResult({ setting: enabled, instance: validSnapshot(), reloadRequired: false, hostRestartRequired: false }), /inconsistent/);
 });
 
+test("canonical projection ordering handles names that are prefixes of hyphenated names", () => {
+  const source = { kind: "extension" as const, package: "npm:fixture", path: "/fixture/index.ts" };
+  const commands = [
+    { name: "chain", description: "Chain", source, argumentCompletions: true },
+    { name: "chain-prompts", description: "Chain prompts", source, argumentCompletions: false },
+    { name: "run", description: "Run", source, argumentCompletions: true },
+    { name: "run-chain", description: "Run chain", source, argumentCompletions: true },
+  ];
+  assert.deepEqual(parseCommandsResult({ commands }).commands.map((command) => command.name), ["chain", "chain-prompts", "run", "run-chain"]);
+  assert.throws(() => parseCommandsResult({ commands: [commands[1], commands[0]] }), /deterministically sorted/);
+
+  const tools = [
+    { name: "run", description: "Run", active: true, source },
+    { name: "run-chain", description: "Run chain", active: true, source },
+  ];
+  assert.deepEqual(parseToolsResult({ tools, instance: validSnapshot() }).tools.map((tool) => tool.name), ["run", "run-chain"]);
+
+  const resources = [
+    { kind: "prompt", name: "chain", path: "/fixture/chain.md", source: { kind: "prompt" } },
+    { kind: "prompt", name: "chain-prompts", path: "/fixture/chain-prompts.md", source: { kind: "prompt" } },
+  ];
+  const diagnostics = [
+    { severity: "warning", message: "run", source: "fixture" },
+    { severity: "warning", message: "run-chain", source: "fixture" },
+  ];
+  assert.deepEqual(parseResourcesResult({ resources, diagnostics }), { resources, diagnostics });
+});
+
 function settingDto(key: SettingKey, values: SettingValueMap): Record<string, unknown> {
   const definition = SETTING_DEFINITIONS[key];
   return { key, value: values[key], source: "effective", writable: definition.writable, valueType: definition.valueType,

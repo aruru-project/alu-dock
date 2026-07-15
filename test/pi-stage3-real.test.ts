@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
+import { parseCommandsResult } from "../src/control/protocol.js";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
 
 const EXTENSION_SOURCE = (logPath: string): string => `
@@ -27,6 +28,10 @@ export default function stage3Fixture(pi) {
     };
   });
   pi.on("session_compact", (event) => record("compact:" + event.reason + ":" + event.fromExtension));
+  pi.registerCommand("chain", { description: "Chain fixture", handler: async () => {} });
+  pi.registerCommand("chain-prompts", { description: "Chain prompts fixture", handler: async () => {} });
+  pi.registerCommand("run", { description: "Run fixture", handler: async () => {} });
+  pi.registerCommand("run-chain", { description: "Run chain fixture", handler: async () => {} });
 }
 `;
 
@@ -122,6 +127,8 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
     assert.deepEqual(persistedSettings.compaction, { enabled: true, reserveTokens: 100, keepRecentTokens: 100 });
     const resources = await instance.getResources();
     assert.ok(resources.resources.some((resource) => resource.kind === "extension" && resource.name.includes("stage3-fixture")));
+    const commands = parseCommandsResult({ commands: await instance.getCommands() }).commands;
+    assert.deepEqual(commands.map((command) => command.name), ["chain", "chain-prompts", "run", "run-chain"]);
 
     await instance.stop("real-stop");
     const lifecycle = (await readFile(lifecycleLog, "utf8")).trim().split("\n");

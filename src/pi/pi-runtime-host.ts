@@ -42,6 +42,12 @@ import type {
   SourceDto,
   ToolDto,
 } from "../core/config-projection.js";
+import {
+  compareCommandDtos,
+  compareDiagnosticDtos,
+  compareResourceDtos,
+  compareToolDtos,
+} from "../core/config-projection.js";
 import { projectJsonObject } from "../core/managed-instance.js";
 import { RuntimeModelNotFoundError, RuntimeSettingsWriteError, RuntimeUnknownToolError } from "../core/runtime-session.js";
 import { configurePiNetwork } from "./configure-pi-network.js";
@@ -254,8 +260,8 @@ export class PiRuntimeHost implements RuntimeSession {
       ...prompts.diagnostics.map(projectDiagnostic),
     ];
     return {
-      resources: capJsonItems(resources.sort(compareResources), 350_000),
-      diagnostics: capJsonItems(diagnostics.sort(compareDiagnostics), 250_000),
+      resources: capJsonItems(resources.sort(compareResourceDtos), 350_000),
+      diagnostics: capJsonItems(diagnostics.sort(compareDiagnosticDtos), 250_000),
     };
   }
 
@@ -299,7 +305,7 @@ export class PiRuntimeHost implements RuntimeSession {
         });
       }
     }
-    return commands.sort(compareCommands).slice(0, MAX_PROJECTION_ITEMS);
+    return commands.sort(compareCommandDtos).slice(0, MAX_PROJECTION_ITEMS);
   }
 
   async listSessions(scope: "cwd" | "all"): Promise<RuntimeSessionInfo[]> {
@@ -695,7 +701,7 @@ function projectVisibleTools(session: AgentSession): ToolDto[] {
       ...(Object.keys(schema).length > 0 ? { parameterSchema: schema } : {}),
     });
   }
-  return tools.sort(compareTools).slice(0, MAX_PROJECTION_ITEMS);
+  return tools.sort(compareToolDtos).slice(0, MAX_PROJECTION_ITEMS);
 }
 
 function resolveExtensionCommands(extensions: ReturnType<AgentSessionServices["resourceLoader"]["getExtensions"]>["extensions"]): Array<{
@@ -739,30 +745,6 @@ function projectSource(source: SourceInfo, kind: SourceDto["kind"]): SourceDto {
     ...(packageName ? { package: packageName } : {}),
   };
 }
-
-function compareSource(left: SourceDto, right: SourceDto): number {
-  return left.kind.localeCompare(right.kind) || (left.package ?? "").localeCompare(right.package ?? "") || (left.path ?? "").localeCompare(right.path ?? "");
-}
-function compareTools(left: ToolDto, right: ToolDto): number {
-  return left.name.localeCompare(right.name)
-    || compareSource(left.source ?? { kind: "built-in" }, right.source ?? { kind: "built-in" })
-    || left.description.localeCompare(right.description)
-    || Number(left.active) - Number(right.active)
-    || JSON.stringify(left.parameterSchema ?? {}).localeCompare(JSON.stringify(right.parameterSchema ?? {}));
-}
-function compareResources(left: ResourceDto, right: ResourceDto): number {
-  return left.kind.localeCompare(right.kind)
-    || left.name.localeCompare(right.name)
-    || (left.path ?? "").localeCompare(right.path ?? "")
-    || compareSource(left.source ?? { kind: "built-in" }, right.source ?? { kind: "built-in" });
-}
-function compareCommands(left: CommandDto, right: CommandDto): number {
-  return left.name.localeCompare(right.name)
-    || compareSource(left.source, right.source)
-    || (left.description ?? "").localeCompare(right.description ?? "")
-    || Number(left.argumentCompletions) - Number(right.argumentCompletions);
-}
-function compareDiagnostics(left: DiagnosticDto, right: DiagnosticDto): number { return left.severity.localeCompare(right.severity) || left.message.localeCompare(right.message) || (left.source ?? "").localeCompare(right.source ?? ""); }
 
 function capJsonItems<T>(items: T[], maxBytes: number): T[] {
   const result: T[] = [];

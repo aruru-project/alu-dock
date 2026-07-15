@@ -20,6 +20,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [x] 阶段 2：SSH TUI 核心与 Footer
 - [x] 阶段 3：日常控制与核心 Session
 - [x] 阶段 3.5：轻度结构重构与项目 `AGENTS.md`
+- [ ] 阶段 3.6：Dogfood release 与 `systemd --user` managed service基线
 - [ ] 阶段 4：Extension UI
 - [ ] 阶段 5：`systemd --user`、durable catalog 与 reopen
 - [ ] 阶段 6：tree/fork/clone
@@ -45,18 +46,20 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-v0.1-stage-2-ssh-tui.md`](docs/validation-v0.1-stage-2-ssh-tui.md)
 - [`docs/validation-v0.1-stage-3-daily-control.md`](docs/validation-v0.1-stage-3-daily-control.md)
 - [`docs/validation-v0.1-stage-3.5-structure.md`](docs/validation-v0.1-stage-3.5-structure.md)
+- [`docs/validation-v0.1-command-catalog-startup-hotfix.md`](docs/validation-v0.1-command-catalog-startup-hotfix.md)
+- [`docs/dogfood-deployment.md`](docs/dogfood-deployment.md)
 
 ## V0.1 工程入口
 
-#142 是 V0.1 唯一工程状态入口。阶段 0 已确认没有新增产品阻塞；实现按 Runtime/协议、SSH TUI、日常控制、Extension UI、systemd/catalog/reopen、tree/fork/clone 和最终真人验收推进。
+#142 是 V0.1 唯一工程状态入口。阶段 0 已确认没有新增产品阻塞；实现按 Runtime/协议、SSH TUI、日常控制、结构重构、dogfood release基线、Extension UI、durable catalog/reopen、tree/fork/clone 和最终真人验收推进。
 
 **绿地规则：** Alu Dock 是全新项目。到 1.0 落地前，除非用户特意说明，不考虑任何旧协议、旧 Host、旧数据、旧 CLI 行为的兼容或迁移；原型合同直接替换。版本号仅标识当前合同，不表示存在历史包袱。
 
-阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1 已将当前控制面切为 V2-only，并完成 Runtime replacement、project trust、closed projections及 registry transaction/fault seam；阶段 2 已 advertised `tui.projection.v1` 与独立的 `run.abort.v1`；阶段 3 已 advertised `session.commands.v1` 并完成日常 settings/session workflows。阶段 3.5 已按职责提取 closed instance DTO、session command service、Pi settings adapter和 TUI纯 projection/settings模块，并新增根 `AGENTS.md` 工程规范；下一入口为阶段 4。Durable atomic catalog、startup reconcile、explicit reopen与 `systemd --user` 唯一常驻 Host仍属于阶段 5；当前入口仍会按需 detached 启动 Host。
+阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1 已将当前控制面切为 V2-only，并完成 Runtime replacement、project trust、closed projections及 registry transaction/fault seam；阶段 2 已 advertised `tui.projection.v1` 与独立的 `run.abort.v1`；阶段 3 已 advertised `session.commands.v1` 并完成日常 settings/session workflows。阶段 3.5 已按职责完成轻度拆分并新增根 `AGENTS.md`。下一入口调整为阶段 3.6：先把阶段产物发布到 `/home/luziyi/release/alu-dock` 并由 baseline `systemd --user` Host承载 dogfood；durable atomic catalog、startup reconcile、explicit reopen与完整 service CLI仍属于阶段 5。
 
 ## 当前过渡期真人入口
 
-直接运行：
+阶段 3.6 完成前直接运行：
 
 ```bash
 npm run cli

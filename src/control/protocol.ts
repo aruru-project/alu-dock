@@ -14,7 +14,14 @@ import type {
   SessionDto,
 } from "../core/managed-instance.js";
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingKey, SettingUpdate, ToolDto } from "../core/config-projection.js";
-import { SETTING_DEFINITIONS, SETTING_KEYS } from "../core/config-projection.js";
+import {
+  SETTING_DEFINITIONS,
+  SETTING_KEYS,
+  compareCommandDtos,
+  compareDiagnosticDtos,
+  compareResourceDtos,
+  compareToolDtos,
+} from "../core/config-projection.js";
 import type { RuntimeModelInfo, RuntimeThinkingLevel } from "../core/runtime-session.js";
 import type { ProjectTrustChoice } from "./project-trust.js";
 import { CATALOG_SCHEMA_VERSION, DOCK_VERSION, PI_SDK_VERSION } from "../version.js";
@@ -495,7 +502,7 @@ function parseActiveSessionInstance(input: unknown, operation: string): Instance
 export function parseToolsResult(input: unknown): ToolsResult {
   const value = object(input, "tools result"); exact(value, ["tools", "instance"]);
   const tools = array(value.tools, "tools", MAX_COLLECTION).map((item, index) => parseTool(item, `tools[${index}]`));
-  assertSorted(tools.map((tool) => `${tool.name}\0${tool.source?.kind ?? ""}\0${tool.source?.package ?? ""}\0${tool.source?.path ?? ""}`), "tools");
+  assertSorted(tools, "tools", compareToolDtos);
   return { tools, instance: parseInstance(value.instance, "instance") };
 }
 export function parseSettingsResult(input: unknown): SettingsResult {
@@ -516,14 +523,14 @@ export function parseResourcesResult(input: unknown): ResourcesResult {
   const value = object(input, "resources result"); exact(value, ["resources", "diagnostics"]);
   const resources = array(value.resources, "resources", MAX_COLLECTION).map((item, index) => parseResource(item, `resources[${index}]`));
   const diagnostics = array(value.diagnostics, "diagnostics", MAX_COLLECTION).map((item, index) => parseDiagnostic(item, `diagnostics[${index}]`));
-  assertSorted(resources.map((resource) => `${resource.kind}\0${resource.name}\0${resource.path ?? ""}`), "resources");
-  assertSorted(diagnostics.map((diagnostic) => `${diagnostic.severity}\0${diagnostic.message}\0${diagnostic.source ?? ""}`), "diagnostics");
+  assertSorted(resources, "resources", compareResourceDtos);
+  assertSorted(diagnostics, "diagnostics", compareDiagnosticDtos);
   return { resources, diagnostics };
 }
 export function parseCommandsResult(input: unknown): CommandsResult {
   const value = object(input, "commands result"); exact(value, ["commands"]);
   const commands = array(value.commands, "commands", MAX_COLLECTION).map((item, index) => parseCommand(item, `commands[${index}]`));
-  assertSorted(commands.map((command) => `${command.name}\0${command.source.kind}\0${command.source.package ?? ""}\0${command.source.path ?? ""}`), "commands");
+  assertSorted(commands, "commands", compareCommandDtos);
   return { commands };
 }
 
@@ -728,7 +735,11 @@ function parseSettingDto(input: unknown, field: string): SettingDto {
   if (JSON.stringify(allowedValues) !== JSON.stringify(definition.allowedValues) || value.min !== definition.min || value.max !== definition.max) throw validation("invalid_response", `${field} bounds or allowed values do not match the frozen setting table`);
   return { key, value: parseSettingValue(key, value.value) as never, source, writable: definition.writable, valueType: definition.valueType, ...(allowedValues ? { allowedValues } : {}), ...(definition.min === undefined ? {} : { min: definition.min }), ...(definition.max === undefined ? {} : { max: definition.max }), reloadRequired: definition.reloadRequired, hostRestartRequired: definition.hostRestartRequired } as SettingDto;
 }
-function assertSorted(values: string[], field: string): void { for (let index = 1; index < values.length; index += 1) if ((values[index - 1] as string).localeCompare(values[index] as string) > 0) throw validation("invalid_response", `${field} is not deterministically sorted`); }
+function assertSorted<T>(values: T[], field: string, compare: (left: T, right: T) => number): void {
+  for (let index = 1; index < values.length; index += 1) {
+    if (compare(values[index - 1] as T, values[index] as T) > 0) throw validation("invalid_response", `${field} is not deterministically sorted`);
+  }
+}
 function omitted(input: unknown, field: string): string[] | undefined { if (input === undefined) return undefined; const result = strings(input, field, MAX_JSON_ARRAY, MAX_CONTROL_CWD_CHARS); if (result.some((item) => !item.startsWith("/"))) throw validation("invalid_response", `${field} must contain relative JSON pointers`); return result; }
 function thinkingLevels(input: unknown): RuntimeThinkingLevel[] { return array(input, "availableThinkingLevels", THINKING_LEVELS.length).map((item) => enumeration(item, "thinking level", THINKING_LEVELS)); }
 

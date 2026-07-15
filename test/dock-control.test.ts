@@ -1293,7 +1293,7 @@ test("tools, settings, resources, and commands integrate with capability gates a
   assert.equal(runtime?.settingMutationCalls, 1);
 
   assert.equal((await client.resources(instance.id)).resources[0]?.name, "AGENTS.md");
-  assert.equal((await client.commands(instance.id, "fix")).commands[0]?.name, "fixture");
+  assert.deepEqual((await client.commands(instance.id, "chain")).commands.map((command) => command.name), ["chain", "chain-prompts"]);
   assert.deepEqual((await client.commands(instance.id, "missing")).commands, []);
 });
 

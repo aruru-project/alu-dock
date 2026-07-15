@@ -89,6 +89,7 @@ Keep one writer for a working tree. Reviewers and analysis agents should be read
 - Pi adapter changes: public-API fixture plus a no-model-call real Pi smoke where possible.
 - TUI changes: deterministic projection tests plus real PTY for command/focus/resize/detach behavior.
 - Replacement changes: generation rollover, history replacement and extension lifecycle/rebind assertions.
+- Startup/resource changes: synthetic fixtures plus a full DockClient command/resources/tools/settings read against the actual installed global/project resource set. A direct runtime call is not sufficient evidence for client startup.
 
 Consolidated gate:
 
@@ -117,10 +118,23 @@ Also verify:
 - Keep V0 history frozen; do not rewrite old validation to make current work appear retroactive.
 - Use focused commits with an honest message after the relevant gate passes.
 
+## Dogfood release discipline
+
+Follow `docs/dogfood-deployment.md` for managed releases. Stage completion and deployment are separate facts:
+
+- commit and pass the complete gate before creating a release;
+- publish only a clean committed HEAD to an immutable directory under `/home/luziyi/release/alu-dock/releases`;
+- atomically switch `current`; never patch the live release;
+- default to refusing a service restart while an active instance exists;
+- verify systemd `MainPID`, V2 hello/hostEpoch, journal and a real installed-resource startup smoke after switching;
+- rollback the complete release on failure and record both code-gate and deploy-gate evidence on #142.
+
+`npm run cli` is a development entry. Once Stage 3.6 is installed, `alu-dock` is the only human dogfood entry and must never silently fall back to an untracked detached Host.
+
 ## Current staged boundary
 
-While card #142 item 763 (Stage 3.5) is active, work may only improve structure and this engineering contract. Once the card explicitly advances, `docs/v0.1-plan.md` defines the next boundary. Stage 3.5 must not implement:
+While card #142 Stage 3.6 is active, work may fix the command-catalog startup regression and establish the bounded release/managed-service baseline in `docs/dogfood-deployment.md`. It must not implement:
 
 - Stage 4 extension interaction lease/UI broker;
-- Stage 5 systemd service, durable catalog or host-loss reopen;
+- Stage 5 durable catalog, startup reconcile, host-loss reopen or the complete service management CLI;
 - Stage 6 tree/fork/clone.
