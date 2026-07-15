@@ -29,6 +29,7 @@ import { DockRegistry, InstanceNotFoundError } from "./dock-registry.js";
 import { OperationConflictError, OperationLedger } from "./operation-ledger.js";
 import { ProjectTrustChallengeError, ProjectTrustRequiredError } from "./project-trust.js";
 import { encodeJsonLine, JsonLineDecoder, JsonLineError } from "./json-lines.js";
+import { executeSessionCommand, isSessionCommandRequest } from "./session-command-service.js";
 import {
   capabilityForRequest,
   CONTROL_PROTOCOL_VERSION,
@@ -323,6 +324,10 @@ export class DockHost {
   }
 
   private async dispatch(request: ControlRequest, socket: Socket, setEventUnsubscribe: (unsubscribe: () => void) => void): Promise<void> {
+    if (isSessionCommandRequest(request)) {
+      this.sendSuccessAndEnd(socket, request.requestId, await executeSessionCommand(request, this.registry, this.operationLedger));
+      return;
+    }
     switch (request.type) {
       case "host.info": {
         const health = this.registry.catalogHealth();
@@ -378,32 +383,6 @@ export class DockHost {
       case "command.catalog": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{commands:await instance.getCommands(request.params.prefix)}); return; }
       case "session.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getHistoryPage(request.params.beforeEntryId,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
       case "session.list": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{sessions:await instance.listSessions(request.params.scope)}); return; }
-      case "session.switch": {
-        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{
-          const instance=this.registry.get(request.params.instanceId);
-          const target=await instance.resolveSessionTarget(request.params.sessionFile);
-          const trust=await this.registry.resolveProjectTrust({operationType:"session.switch",operationId:request.params.operationId,cwd:target.canonicalCwd,trustChallengeId:request.params.trustChallengeId,projectTrustDecision:request.params.projectTrustDecision});
-          const replacement=await sessionMutation(request.params.operationId,()=>instance.switchSession(request.params.operationId,request.params.sessionFile,trust));
-          return {cancelled:replacement.cancelled,instance:instance.snapshot()};
-        });
-        this.sendSuccessAndEnd(socket,request.requestId,result); return;
-      }
-      case "session.new": {
-        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const replacement=await sessionMutation(request.params.operationId,()=>instance.newSession(request.params.operationId,request.params.parentSession));return {cancelled:replacement.cancelled,instance:instance.snapshot()};});
-        this.sendSuccessAndEnd(socket,request.requestId,result); return;
-      }
-      case "session.name": {
-        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);await sessionMutation(request.params.operationId,()=>instance.setSessionName(request.params.operationId,request.params.name));return {instance:instance.snapshot()};});
-        this.sendSuccessAndEnd(socket,request.requestId,result); return;
-      }
-      case "session.compact": {
-        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const compacted=await sessionMutation(request.params.operationId,()=>instance.compactSession(request.params.operationId,request.params.customInstructions));return {result:compacted,instance:instance.snapshot()};});
-        this.sendSuccessAndEnd(socket,request.requestId,result); return;
-      }
-      case "session.reload": {
-        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const projected=await sessionMutation(request.params.operationId,async()=>{await instance.reloadSession(request.params.operationId);return instance.getResources();});return {instance:instance.snapshot(),...projected};});
-        this.sendSuccessAndEnd(socket,request.requestId,result); return;
-      }
     }
   }
 
@@ -435,22 +414,6 @@ export class DockHost {
   private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,result));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
   private sendErrorAndEnd(socket:Socket,code:string,message:string,requestId:string,details?:JsonObject,retryable=false):void { if(socket.destroyed||socket.writableEnded)return;const response:ControlResponse={kind:"response",version:2,requestId,hostEpoch:this.hostEpoch,ok:false,error:{code,message:truncateMessage(message),retryable,...(details===undefined?{}:{details})}};if(endEnvelope(socket,response)==="too_large")socket.destroy(); }
   private sendHelloError(socket:Socket,requestId:string,code:HelloError["error"]["code"],message:string,details:{hostVersions?:number[];missing?:string[];retryAfterMs?:number}={}):void { if(socket.destroyed||socket.writableEnded)return;const envelope:HelloError={kind:"hello_error",requestId,error:{code,message:truncateMessage(message),...details}};try{socket.end(encodeJsonLine(envelope));}catch{socket.destroy();} }
-}
-
-async function sessionMutation<T>(operationId: string, mutate: () => Promise<T>): Promise<T> {
-  try { return await mutate(); }
-  catch (error) {
-    if (
-      error instanceof CatalogEffectUnknownError
-      || error instanceof CatalogWriteError
-      || error instanceof MutationFaultedError
-      || error instanceof RuntimeEffectUnknownError
-      || error instanceof InstanceNotActiveError
-      || error instanceof InstanceBusyError
-      || error instanceof InstanceAdmissionPendingError
-    ) throw error;
-    throw new RuntimeEffectUnknownError(operationId, error);
-  }
 }
 
 function mutationOperationId(request: ControlRequest): string | undefined {

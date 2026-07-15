@@ -6,7 +6,9 @@ import { CombinedAutocompleteProvider, visibleWidth } from "@earendil-works/pi-t
 import type { SettingDto } from "../src/core/config-projection.js";
 import type { DockEvent, InstanceSnapshot } from "../src/core/managed-instance.js";
 import { DockConversation, DockStatusLine } from "../src/tui/conversation.js";
-import { commandCatalog, parseSettingCommandValue, projectSnapshot } from "../src/tui/dock-tui.js";
+import { commandCatalog } from "../src/tui/dock-tui.js";
+import { projectSnapshot } from "../src/tui/snapshot-projection.js";
+import { parseSettingCommandValue } from "../src/tui/settings-controls.js";
 
 function event(sequence: number, type: DockEvent["type"], data: Record<string, unknown>): DockEvent {
   return {

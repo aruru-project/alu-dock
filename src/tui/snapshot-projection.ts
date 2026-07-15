@@ -1,0 +1,114 @@
+import type { DockEvent, InstanceSnapshot } from "../core/instance-dto.js";
+import type { RuntimeThinkingLevel } from "../core/runtime-session.js";
+
+const THINKING_LEVELS: readonly RuntimeThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+export function projectSnapshot(snapshot: InstanceSnapshot, event: DockEvent): InstanceSnapshot {
+  if (event.type === "session.metrics_changed") {
+    return {
+      ...snapshot,
+      metrics: structuredClone(event.data.metrics),
+      updatedAt: event.occurredAt,
+      eventCursor: advanceCursor(snapshot, event),
+    };
+  }
+  if (event.type === "extension.status_changed") {
+    const extensionStatus = { ...snapshot.extensionStatus };
+    if (event.data.text === undefined) delete extensionStatus[event.data.key];
+    else extensionStatus[event.data.key] = event.data.text;
+    return { ...snapshot, extensionStatus, updatedAt: event.occurredAt, eventCursor: advanceCursor(snapshot, event) };
+  }
+  if (event.type === "session.info_changed") {
+    return { ...snapshot, name: event.data.name, updatedAt: event.occurredAt, eventCursor: advanceCursor(snapshot, event) };
+  }
+  if (event.type === "session.replaced") {
+    return {
+      ...snapshot,
+      cwd: event.data.cwd,
+      name: event.data.name,
+      execution: "idle",
+      lastRun: "never",
+      pending: { steering: 0, followUp: 0, total: 0 },
+      activeCommandId: undefined,
+      lastError: undefined,
+      extensionStatus: {},
+      runtimeGeneration: event.data.runtimeGeneration,
+      executor: { ...snapshot.executor, piSessionId: event.data.piSessionId, sessionFile: event.data.sessionFile },
+      updatedAt: event.occurredAt,
+      eventCursor: {
+        ...snapshot.eventCursor,
+        runtimeGeneration: event.data.runtimeGeneration,
+        sequence: event.sequence,
+      },
+    };
+  }
+  if (event.type === "model.changed") {
+    const provider = eventString(event, "provider");
+    const id = eventString(event, "id");
+    const thinkingLevel = thinkingData(event, "thinkingLevel") ?? snapshot.executor.thinkingLevel;
+    return {
+      ...snapshot,
+      executor: {
+        ...snapshot.executor,
+        model: provider && id ? { provider, id } : snapshot.executor.model,
+        thinkingLevel,
+      },
+      updatedAt: event.occurredAt,
+      eventCursor: advanceCursor(snapshot, event),
+    };
+  }
+  if (event.type === "thinking.changed") {
+    return {
+      ...snapshot,
+      executor: { ...snapshot.executor, thinkingLevel: thinkingData(event, "thinkingLevel") ?? snapshot.executor.thinkingLevel },
+      updatedAt: event.occurredAt,
+      eventCursor: advanceCursor(snapshot, event),
+    };
+  }
+  if (event.type !== "instance.state_changed") {
+    if (event.type === "instance.stopped") {
+      return { ...snapshot, lifecycle: "stopped", execution: "unavailable", ownerHostEpoch: undefined, updatedAt: event.occurredAt };
+    }
+    return { ...snapshot, eventCursor: advanceCursor(snapshot, event) };
+  }
+
+  return {
+    ...snapshot,
+    lifecycle: enumData(event, "lifecycle", ["active", "stopping", "stopped"] as const) ?? snapshot.lifecycle,
+    execution: enumData(event, "execution", ["idle", "running", "failed", "unavailable"] as const) ?? snapshot.execution,
+    lastRun: enumData(event, "lastRun", ["never", "succeeded", "failed", "aborted", "interrupted"] as const) ?? snapshot.lastRun,
+    pending: pendingData(event) ?? snapshot.pending,
+    activeCommandId: eventString(event, "activeCommandId"),
+    lastError: eventString(event, "lastError"),
+    updatedAt: event.occurredAt,
+    eventCursor: advanceCursor(snapshot, event),
+  };
+}
+
+export function eventString(event: DockEvent, key: string): string | undefined {
+  const value = (event.data as unknown as Record<string, unknown>)[key];
+  return typeof value === "string" ? value : undefined;
+}
+
+function advanceCursor(snapshot: InstanceSnapshot, event: DockEvent): InstanceSnapshot["eventCursor"] {
+  return { ...snapshot.eventCursor, sequence: Math.max(snapshot.eventCursor.sequence, event.sequence) };
+}
+
+function enumData<const T extends readonly string[]>(event: DockEvent, key: string, values: T): T[number] | undefined {
+  const value = (event.data as unknown as Record<string, unknown>)[key];
+  return typeof value === "string" && values.includes(value) ? value as T[number] : undefined;
+}
+
+function pendingData(event: DockEvent): InstanceSnapshot["pending"] | undefined {
+  const value = (event.data as unknown as Record<string, unknown>).pending;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const pending = value as Record<string, unknown>;
+  return typeof pending.steering === "number" && typeof pending.followUp === "number" && typeof pending.total === "number"
+    ? { steering: pending.steering, followUp: pending.followUp, total: pending.total }
+    : undefined;
+}
+
+function thinkingData(event: DockEvent, key: string): RuntimeThinkingLevel | undefined {
+  const value = (event.data as unknown as Record<string, unknown>)[key];
+  return typeof value === "string" && THINKING_LEVELS.includes(value as RuntimeThinkingLevel) ? value as RuntimeThinkingLevel : undefined;
+}

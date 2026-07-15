@@ -24,6 +24,14 @@ import type {
 } from "../core/runtime-session.js";
 import type { ProjectTrustChoice } from "../control/project-trust.js";
 import { DockConversation, DockStatusLine } from "./conversation.js";
+import { eventString, projectSnapshot } from "./snapshot-projection.js";
+import {
+  formatSettingValue,
+  parseSettingCommandValue,
+  settingChoiceValue,
+  settingCompletions,
+  settingValueChoices,
+} from "./settings-controls.js";
 import { editorTheme, paint, selectListTheme } from "./theme.js";
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly RuntimeThinkingLevel[];
@@ -991,11 +999,11 @@ function activityForEvent(event: DockEvent): string | undefined {
   switch (event.type) {
     case "run.started": return "running";
     case "message.delta": return "streaming";
-    case "tool.started": return `tool ${stringData(event, "toolName") ?? "running"}`;
+    case "tool.started": return `tool ${eventString(event, "toolName") ?? "running"}`;
     case "run.retry_started": return "retrying";
-    case "run.settled": return stringData(event, "result") ?? "settled";
-    case "model.changed": return `model ${stringData(event, "id") ?? "changed"}`;
-    case "thinking.changed": return `thinking ${stringData(event, "thinkingLevel") ?? "changed"}`;
+    case "run.settled": return eventString(event, "result") ?? "settled";
+    case "model.changed": return `model ${eventString(event, "id") ?? "changed"}`;
+    case "thinking.changed": return `thinking ${eventString(event, "thinkingLevel") ?? "changed"}`;
     case "queue.changed": return "queue updated";
     case "compaction.started": return "compacting";
     case "compaction.completed": return event.data.error ? "compaction failed" : "compacted";
@@ -1007,138 +1015,6 @@ function activityForEvent(event: DockEvent): string | undefined {
   }
 }
 
-export function projectSnapshot(snapshot: InstanceSnapshot, event: DockEvent): InstanceSnapshot {
-  if (event.type === "session.metrics_changed") {
-    return {
-      ...snapshot,
-      metrics: structuredClone(event.data.metrics),
-      updatedAt: event.occurredAt,
-      eventCursor: { ...snapshot.eventCursor, sequence: Math.max(snapshot.eventCursor.sequence, event.sequence) },
-    };
-  }
-  if (event.type === "extension.status_changed") {
-    const extensionStatus = { ...snapshot.extensionStatus };
-    if (event.data.text === undefined) delete extensionStatus[event.data.key];
-    else extensionStatus[event.data.key] = event.data.text;
-    return {
-      ...snapshot,
-      extensionStatus,
-      updatedAt: event.occurredAt,
-      eventCursor: { ...snapshot.eventCursor, sequence: Math.max(snapshot.eventCursor.sequence, event.sequence) },
-    };
-  }
-  if (event.type === "session.info_changed") {
-    return {
-      ...snapshot,
-      name: event.data.name,
-      updatedAt: event.occurredAt,
-      eventCursor: { ...snapshot.eventCursor, sequence: Math.max(snapshot.eventCursor.sequence, event.sequence) },
-    };
-  }
-  if (event.type === "session.replaced") {
-    return {
-      ...snapshot,
-      cwd: event.data.cwd,
-      name: event.data.name,
-      execution: "idle",
-      lastRun: "never",
-      pending: { steering: 0, followUp: 0, total: 0 },
-      activeCommandId: undefined,
-      lastError: undefined,
-      extensionStatus: {},
-      runtimeGeneration: event.data.runtimeGeneration,
-      executor: { ...snapshot.executor, piSessionId: event.data.piSessionId, sessionFile: event.data.sessionFile },
-      updatedAt: event.occurredAt,
-      eventCursor: {
-        ...snapshot.eventCursor,
-        runtimeGeneration: event.data.runtimeGeneration,
-        sequence: event.sequence,
-      },
-    };
-  }
-  if (event.type === "model.changed") {
-    const provider = stringData(event, "provider");
-    const id = stringData(event, "id");
-    const thinkingLevel = thinkingData(event, "thinkingLevel") ?? snapshot.executor.thinkingLevel;
-    return {
-      ...snapshot,
-      executor: {
-        ...snapshot.executor,
-        model: provider && id ? { provider, id } : snapshot.executor.model,
-        thinkingLevel,
-      },
-      updatedAt: event.occurredAt,
-      eventCursor: { ...snapshot.eventCursor, sequence: Math.max(snapshot.eventCursor.sequence, event.sequence) },
-    };
-  }
-  if (event.type === "thinking.changed") {
-    return {
-      ...snapshot,
-      executor: {
-        ...snapshot.executor,
-        thinkingLevel: thinkingData(event, "thinkingLevel") ?? snapshot.executor.thinkingLevel,
-      },
-      updatedAt: event.occurredAt,
-      eventCursor: { ...snapshot.eventCursor, sequence: Math.max(snapshot.eventCursor.sequence, event.sequence) },
-    };
-  }
-  if (event.type !== "instance.state_changed") {
-    if (event.type === "instance.stopped") {
-      return { ...snapshot, lifecycle: "stopped", execution: "unavailable", ownerHostEpoch: undefined, updatedAt: event.occurredAt };
-    }
-    return { ...snapshot, eventCursor: { ...snapshot.eventCursor, sequence: Math.max(snapshot.eventCursor.sequence, event.sequence) } };
-  }
-
-  const lifecycle = enumData(event, "lifecycle", ["active", "stopping", "stopped"] as const)
-    ?? snapshot.lifecycle;
-  const execution = enumData(event, "execution", ["idle", "running", "failed", "unavailable"] as const)
-    ?? snapshot.execution;
-  const lastRun = enumData(event, "lastRun", ["never", "succeeded", "failed", "aborted", "interrupted"] as const)
-    ?? snapshot.lastRun;
-  const pending = pendingData(event) ?? snapshot.pending;
-  const lastError = stringData(event, "lastError");
-  const activeCommandId = stringData(event, "activeCommandId");
-  return {
-    ...snapshot,
-    lifecycle,
-    execution,
-    lastRun,
-    pending,
-    activeCommandId,
-    lastError,
-    updatedAt: event.occurredAt,
-    eventCursor: { ...snapshot.eventCursor, sequence: Math.max(snapshot.eventCursor.sequence, event.sequence) },
-  };
-}
-
-function enumData<const T extends readonly string[]>(
-  event: DockEvent,
-  key: string,
-  values: T,
-): T[number] | undefined {
-  const value = (event.data as unknown as Record<string, unknown>)[key];
-  return typeof value === "string" && values.includes(value) ? value as T[number] : undefined;
-}
-
-function stringData(event: DockEvent, key: string): string | undefined {
-  const value = (event.data as unknown as Record<string, unknown>)[key];
-  return typeof value === "string" ? value : undefined;
-}
-
-function pendingData(event: DockEvent): InstanceSnapshot["pending"] | undefined {
-  const value = (event.data as unknown as Record<string, unknown>).pending;
-  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
-  const pending = value as Record<string, unknown>;
-  return typeof pending.steering === "number" && typeof pending.followUp === "number" && typeof pending.total === "number"
-    ? { steering: pending.steering, followUp: pending.followUp, total: pending.total }
-    : undefined;
-}
-
-function numberData(event: DockEvent, key: string): number | undefined {
-  const value = (event.data as unknown as Record<string, unknown>)[key];
-  return typeof value === "number" ? value : undefined;
-}
-
 function parseModelTarget(value: string): { provider: string; id: string } | undefined {
   const separator = value.indexOf("/");
   if (separator <= 0 || separator === value.length - 1) return undefined;
@@ -1147,11 +1023,6 @@ function parseModelTarget(value: string): { provider: string; id: string } | und
 
 function isThinkingLevel(value: string): value is RuntimeThinkingLevel {
   return (THINKING_LEVELS as readonly string[]).includes(value);
-}
-
-function thinkingData(event: DockEvent, key: string): RuntimeThinkingLevel | undefined {
-  const value = (event.data as unknown as Record<string, unknown>)[key];
-  return typeof value === "string" && isThinkingLevel(value) ? value : undefined;
 }
 
 function terminalSafe(value: string): string {
@@ -1196,80 +1067,6 @@ class TerminalSafeAutocompleteProvider implements AutocompleteProvider {
   shouldTriggerFileCompletion(lines: string[], cursorLine: number, cursorCol: number): boolean {
     return this.inner.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? false;
   }
-}
-
-function formatSettingValue(value: SettingDto["value"]): string {
-  return typeof value === "object" ? JSON.stringify(value) : String(value);
-}
-
-function settingChoiceValue(setting: SettingDto): string | undefined {
-  if (setting.valueType === "object") {
-    const enabled = (setting.value as { anthropicExtraUsage?: boolean }).anthropicExtraUsage;
-    return enabled !== false ? "true" : "false";
-  }
-  return typeof setting.value === "string" || typeof setting.value === "boolean"
-    ? String(setting.value)
-    : undefined;
-}
-
-function settingValueChoices(setting: SettingDto): Array<{ value: string; label: string; description?: string }> {
-  if (setting.valueType === "boolean") return [
-    { value: "true", label: "true" },
-    { value: "false", label: "false" },
-  ];
-  if (setting.valueType === "enum") return (setting.allowedValues ?? []).map((value) => ({ value: String(value), label: String(value) }));
-  if (setting.valueType === "object") return [
-    { value: "true", label: "anthropicExtraUsage: true" },
-    { value: "false", label: "anthropicExtraUsage: false" },
-  ];
-  return [{ value: String(setting.value), label: String(setting.value), description: `${setting.min ?? 0}..${setting.max ?? "∞"}` }];
-}
-
-export function parseSettingCommandValue(setting: SettingDto, rawValue: string): SettingUpdate | undefined {
-  if (!setting.writable) return undefined;
-  let value: unknown;
-  if (setting.valueType === "boolean") {
-    if (rawValue === "true" || rawValue === "on") value = true;
-    else if (rawValue === "false" || rawValue === "off") value = false;
-    else return undefined;
-  } else if (setting.valueType === "enum") {
-    if (!setting.allowedValues?.includes(rawValue)) return undefined;
-    value = rawValue;
-  } else if (setting.valueType === "integer") {
-    if (!/^\d+$/u.test(rawValue)) return undefined;
-    const parsed = Number(rawValue);
-    if (!Number.isSafeInteger(parsed) || parsed < (setting.min ?? 0) || parsed > (setting.max ?? Number.MAX_SAFE_INTEGER)) return undefined;
-    value = parsed;
-  } else {
-    if (rawValue === "true" || rawValue === "on") value = { anthropicExtraUsage: true };
-    else if (rawValue === "false" || rawValue === "off") value = { anthropicExtraUsage: false };
-    else {
-      try {
-        const parsed = JSON.parse(rawValue) as unknown;
-        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
-        const record = parsed as Record<string, unknown>;
-        if (Object.keys(record).some((key) => key !== "anthropicExtraUsage") || (record.anthropicExtraUsage !== undefined && typeof record.anthropicExtraUsage !== "boolean")) return undefined;
-        value = { ...(record.anthropicExtraUsage === undefined ? {} : { anthropicExtraUsage: record.anthropicExtraUsage }) };
-      } catch { return undefined; }
-    }
-  }
-  return { key: setting.key, value } as SettingUpdate;
-}
-
-function settingCompletions(settings: SettingDto[], prefix: string): AutocompleteItem[] {
-  const separator = prefix.indexOf(" ");
-  if (separator < 0) {
-    return settings
-      .filter((setting) => setting.key.startsWith(prefix))
-      .map((setting) => ({ value: setting.key, label: setting.key, description: `${formatSettingValue(setting.value)}${setting.writable ? "" : " · read-only"}` }));
-  }
-  const key = prefix.slice(0, separator);
-  const valuePrefix = prefix.slice(separator + 1);
-  const setting = settings.find((candidate) => candidate.key === key);
-  if (!setting?.writable) return [];
-  return settingValueChoices(setting)
-    .filter((choice) => choice.value.startsWith(valuePrefix))
-    .map((choice) => ({ value: `${key} ${choice.value}`, label: choice.label, description: choice.description }));
 }
 
 function projectTrustChallenge(error: unknown, operationId: string): { challengeId: string; cwd: string } | undefined {
