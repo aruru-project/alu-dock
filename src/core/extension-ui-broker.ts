@@ -608,7 +608,8 @@ function canonicalResponse(response: InteractionResponse): string {
 }
 
 export function containsBinaryPayload(value: string): boolean {
-  return DATA_URI.test(value) || RAW_BASE64.test(value);
+  if (DATA_URI.test(value) || RAW_BASE64.test(value.replace(/\s+/gu, ""))) return true;
+  return value.split(/[^A-Za-z0-9+/=]+/gu).some((part) => RAW_BASE64.test(part));
 }
 
 function isUnsafeRecordKey(value: string): boolean {

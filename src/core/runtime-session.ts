@@ -71,6 +71,54 @@ export interface RuntimeReplacementResult {
   cancelled: boolean;
 }
 
+export interface RuntimeForkResult extends RuntimeReplacementResult {
+  selectedText?: string;
+}
+
+export type RuntimeTreeNodeKind =
+  | "message"
+  | "thinking_level_change"
+  | "model_change"
+  | "compaction"
+  | "branch_summary"
+  | "custom"
+  | "custom_message"
+  | "label"
+  | "session_info";
+
+export interface RuntimeTreeNode {
+  entryId: string;
+  parentId?: string;
+  depth: number;
+  kind: RuntimeTreeNodeKind;
+  role?: "user" | "assistant" | "tool" | "system";
+  label?: string;
+  /** Included only in Host-side revision material; never projected to clients. */
+  labelTimestamp?: string;
+  timestamp?: string;
+  summary: string;
+  hasChildren: boolean;
+}
+
+export interface RuntimeTreeSnapshot {
+  nodes: RuntimeTreeNode[];
+  leafId?: string;
+}
+
+export interface RuntimeNavigateOptions {
+  summarize?: boolean;
+  customInstructions?: string;
+  replaceInstructions?: boolean;
+  label?: string;
+}
+
+export interface RuntimeNavigateResult {
+  cancelled: boolean;
+  aborted?: boolean;
+  editorText?: string;
+  summaryCreated: boolean;
+}
+
 export interface RuntimeSessionTarget {
   canonicalCwd: string;
 }
@@ -151,11 +199,15 @@ export interface RuntimeSession {
   readonly sessionFile: string | undefined;
   readonly isStreaming: boolean;
 
+  /** Current session path only when it has actually been materialized durably. */
+  getDurableSessionFile?(): string | undefined;
   subscribe(listener: (event: RuntimeEvent) => void): () => void;
   prompt(text: string, options?: RuntimePromptOptions): Promise<void>;
   listModels(): Promise<RuntimeModelInfo[]>;
   listSessions(scope: "cwd" | "all"): Promise<RuntimeSessionInfo[]>;
   getHistory(): RuntimeHistoryEntry[];
+  getTree?(): RuntimeTreeSnapshot;
+  navigateTree?(targetId: string, options?: RuntimeNavigateOptions): Promise<RuntimeNavigateResult>;
   listTools(): Promise<ToolDto[]>;
   setActiveTools(names: string[]): Promise<ToolDto[]>;
   getSettings(): Promise<SettingDto[]>;
@@ -165,6 +217,7 @@ export interface RuntimeSession {
   resolveSessionTarget?(sessionFile: string): Promise<RuntimeSessionTarget>;
   newSession?(operationId: string, parentSession?: string): Promise<RuntimeReplacementResult>;
   switchSession?(operationId: string, sessionFile: string, trust: RuntimeProjectTrust): Promise<RuntimeReplacementResult>;
+  fork?(operationId: string, entryId: string, position: "before" | "at", kind: "fork" | "clone"): Promise<RuntimeForkResult>;
   setSessionName?(name: string): string | undefined;
   compact?(customInstructions?: string): Promise<RuntimeCompactionResult>;
   reload?(operationId: string): Promise<RuntimeReplacementResult>;

@@ -120,5 +120,15 @@ test("catalog and wire facts share lifecycle invariants including active failed 
   assert.throws(() => validateCatalogRecord(record("bad-admission", { admissionPending: true })), /Admission intent/);
   assert.throws(() => validateCatalogRecord(record("bad-terminal", { lifecycle: "stopped", execution: "unavailable", ownerHostEpoch: undefined, pendingCount: 1 })), /retains active/);
   assert.doesNotThrow(() => validateCatalogRecord(record("recoverable", { lifecycle: "runtime_error", execution: "unavailable", ownerHostEpoch: undefined, recoverySessionFile: "/tmp/recover.jsonl" })));
-  assert.throws(() => validateCatalogRecord(record("bad-recovery", { recoverySessionFile: "/tmp/recover.jsonl" })), /Recovery session/);
+  assert.doesNotThrow(() => validateCatalogRecord(record("deferred-live", { recoverySessionFile: "/tmp/previous.jsonl" })));
+  assert.throws(() => validateCatalogRecord(record("bad-recovery", { sessionFile: "/tmp/current.jsonl", recoverySessionFile: "/tmp/recover.jsonl" })), /Recovery session/);
+  assert.doesNotThrow(() => validateCatalogRecord(record("fork-intent", {
+    replacement: { operationId: "fork-op", kind: "fork", previousSessionFile: "/tmp/previous.jsonl", requestedEntryId: "entry-1", startedAt: "2026-07-14T00:00:00.000Z" },
+  })));
+  assert.doesNotThrow(() => validateCatalogRecord(record("clone-intent", {
+    replacement: { operationId: "clone-op", kind: "clone", previousSessionFile: "/tmp/previous.jsonl", requestedEntryId: "entry-1", startedAt: "2026-07-14T00:00:00.000Z" },
+  })));
+  assert.throws(() => validateCatalogRecord(record("bad-fork-intent", {
+    replacement: { operationId: "fork-op", kind: "fork", previousSessionFile: "/tmp/previous.jsonl", startedAt: "2026-07-14T00:00:00.000Z" },
+  })), /requested entry ID/);
 });

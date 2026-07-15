@@ -9,6 +9,7 @@ import {
   type AgentSession,
   type AgentSessionServices,
   type SessionEntry,
+  type SessionTreeNode,
 } from "@earendil-works/pi-coding-agent";
 
 import { CatalogTransactionCoordinator } from "../src/control/catalog-transactions.js";
@@ -32,12 +33,17 @@ interface FakeModel {
 
 class FakeSession {
   historyEntries: SessionEntry[] = [];
+  treeRoots: SessionTreeNode[] = [];
+  treeLeafId: string | null = null;
   readonly listeners = new Set<(event: { type: string; [key: string]: unknown }) => void>();
   readonly sessionManager = {
     getCwd: () => "/project",
     getSessionDir: () => "/sessions",
     usesDefaultSessionDir: () => this.usesDefaultSessionDir,
     getBranch: () => structuredClone(this.historyEntries),
+    getTree: () => structuredClone(this.treeRoots),
+    getLeafId: () => this.treeLeafId,
+    getEntry: (entryId: string) => findTreeEntry(this.treeRoots, entryId),
     getSessionName: () => this.sessionName,
   };
   sessionName: string | undefined;
@@ -56,6 +62,8 @@ class FakeSession {
   bindCalls = 0;
   abortCalls = 0;
   abortCompactionCalls = 0;
+  abortBranchSummaryCalls = 0;
+  navigateCalls = 0;
   disposeCalls = 0;
   unsubscribeCalls = 0;
   toolSetCalls = 0;
@@ -136,6 +144,7 @@ class FakeSession {
   clearQueue(): { steering: string[]; followUp: string[] } { return { steering: [], followUp: [] }; }
   abort(): Promise<void> { this.abortCalls += 1; return Promise.resolve(); }
   abortCompaction(): void { this.abortCompactionCalls += 1; }
+  abortBranchSummary(): void { this.abortBranchSummaryCalls += 1; }
   finishCompaction(): void {
     this.isCompacting = false;
     this.emit({ type: "compaction_end", reason: "manual", result: undefined, aborted: true, willRetry: false });
@@ -157,11 +166,44 @@ class FakeSession {
     await options?.beforeSessionStart?.();
     if (this.reloadEvent) this.emit(this.reloadEvent);
   }
+  async navigateTree(targetId: string): Promise<{ cancelled: boolean; editorText?: string; summaryEntry?: unknown }> {
+    this.navigateCalls += 1;
+    const entry = findTreeEntry(this.treeRoots, targetId);
+    if (!entry) throw new Error(`Entry ${targetId} not found`);
+    if (entry.type === "message" && entry.message.role === "user") {
+      this.treeLeafId = entry.parentId;
+      return { cancelled: false, editorText: typeof entry.message.content === "string" ? entry.message.content : "" };
+    }
+    this.treeLeafId = entry.id;
+    return { cancelled: false };
+  }
+  getUserMessagesForForking(): Array<{ entryId: string; text: string }> {
+    return flattenTree(this.treeRoots)
+      .filter((entry): entry is Extract<SessionEntry, { type: "message" }> => entry.type === "message" && entry.message.role === "user")
+      .map((entry) => {
+        const message = entry.message as unknown as Record<string, unknown>;
+        return { entryId: entry.id, text: typeof message.content === "string" ? message.content : "" };
+      });
+  }
 
   markDisposed(): void {
     this.disposeCalls += 1;
     this.trace.push(`${this.sessionId}:dispose`);
   }
+}
+
+function flattenTree(roots: SessionTreeNode[]): SessionEntry[] {
+  const entries: SessionEntry[] = [];
+  const visit = (node: SessionTreeNode): void => {
+    entries.push(node.entry);
+    for (const child of node.children) visit(child);
+  };
+  for (const root of roots) visit(root);
+  return entries;
+}
+
+function findTreeEntry(roots: SessionTreeNode[], entryId: string): SessionEntry | undefined {
+  return flattenTree(roots).find((entry) => entry.id === entryId);
 }
 
 class FakeSettingsManager {
@@ -232,6 +274,7 @@ class FakeRuntimeOwner {
   disposeCalls = 0;
   disposeErrorBeforeInvalidate: Error | undefined;
   lastParentSession: string | undefined;
+  omitForkSelectedText = false;
 
   constructor(readonly initial: FakeSession, private readonly trace: string[]) {
     this.session = initial as unknown as AgentSession;
@@ -244,6 +287,13 @@ class FakeRuntimeOwner {
 
   newSession(options?: { parentSession?: string }): Promise<{ cancelled: boolean }> { this.lastParentSession = options?.parentSession; return this.replace("new"); }
   switchSession(): Promise<{ cancelled: boolean }> { return this.replace("switch"); }
+  async fork(entryId: string, options?: { position?: "before" | "at" }): Promise<{ cancelled: boolean; selectedText?: string }> {
+    const selectedText = options?.position === "before"
+      ? this.initial.getUserMessagesForForking().find((entry) => entry.entryId === entryId)?.text
+      : undefined;
+    const result = await this.replace("fork");
+    return { ...result, ...(result.cancelled || selectedText === undefined || this.omitForkSelectedText ? {} : { selectedText }) };
+  }
 
   async dispose(): Promise<void> {
     this.disposeCalls += 1;
@@ -253,7 +303,7 @@ class FakeRuntimeOwner {
     (this.session as unknown as FakeSession).markDisposed();
   }
 
-  private async replace(kind: "new" | "switch"): Promise<{ cancelled: boolean }> {
+  private async replace(kind: "new" | "switch" | "fork"): Promise<{ cancelled: boolean }> {
     this.trace.push(`${kind}:before`);
     if (this.mode === "cancel") return { cancelled: true };
     if (this.mode === "hook-fail") throw new Error("before hook failed");
@@ -281,6 +331,7 @@ async function runtimeHost(
   const owner = new FakeRuntimeOwner(initial, trace);
   configure(owner, initial);
   const host = await PiRuntimeHost.create({
+    isSessionFileDurable: () => true,
     ...options,
     runtime: owner as unknown as PiRuntimeHostOptions["runtime"],
   });
@@ -408,6 +459,108 @@ test("Pi runtime abort selects the public compaction cancellation path", async (
   await host.abort();
   assert.equal(initial.abortCalls, 1);
   await host.dispose();
+});
+
+test("Pi runtime host projects the public tree and routes navigate, fork, and clone through public APIs", async () => {
+  const timestamp = "2026-07-14T00:00:00.000Z";
+  const user: SessionEntry = { type: "message", id: "tree-user", parentId: null, timestamp, message: { role: "user", content: "edit this prompt", timestamp: 1 } };
+  const assistant: SessionEntry = { type: "message", id: "tree-assistant", parentId: "tree-user", timestamp: "2026-07-14T00:00:01.000Z", message: { role: "assistant", content: [{ type: "text", text: "answer" }], timestamp: 2, stopReason: "stop", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, api: "fixture", provider: "fixture", model: "fixture" } };
+  const tree: SessionTreeNode[] = [{
+    entry: user,
+    label: "start",
+    labelTimestamp: timestamp,
+    children: [{ entry: assistant, children: [] }],
+  }];
+
+  const trace: string[] = [];
+  const commits: string[] = [];
+  const { host, initial } = await runtimeHost(trace, (_owner, session) => {
+    session.treeRoots = tree;
+    session.treeLeafId = "tree-assistant";
+  }, {
+    commitReplacement: async (change) => { commits.push(`${change.kind}:${change.sessionFile}`); },
+  });
+  host.activateInitial();
+
+  assert.deepEqual(host.getTree(), {
+    leafId: "tree-assistant",
+    nodes: [
+      { entryId: "tree-user", depth: 0, kind: "message", role: "user", label: "start", labelTimestamp: timestamp, timestamp, summary: "edit this prompt", hasChildren: true },
+      { entryId: "tree-assistant", parentId: "tree-user", depth: 1, kind: "message", role: "assistant", timestamp: "2026-07-14T00:00:01.000Z", summary: "answer", hasChildren: false },
+    ],
+  });
+  assert.deepEqual(await host.navigateTree("tree-user"), { cancelled: false, editorText: "edit this prompt", summaryCreated: false });
+  assert.equal(initial.navigateCalls, 1);
+  assert.equal(host.sessionFile, "/sessions/initial.jsonl");
+  await host.dispose();
+
+  const forkTrace: string[] = [];
+  const forkRuntime = await runtimeHost(forkTrace, (_owner, session) => {
+    session.treeRoots = tree;
+    session.treeLeafId = "tree-assistant";
+  }, {
+    commitReplacement: async (change) => { commits.push(`${change.kind}:${change.sessionFile}`); },
+  });
+  forkRuntime.host.activateInitial();
+  assert.deepEqual(await forkRuntime.host.fork("fork-op", "tree-user", "before", "fork"), { cancelled: false, selectedText: "edit this prompt" });
+  assert.equal(forkRuntime.host.sessionId, "fork-session");
+  await forkRuntime.host.dispose();
+
+  const missingTextTrace: string[] = [];
+  const missingTextRuntime = await runtimeHost(missingTextTrace, (owner, session) => {
+    owner.omitForkSelectedText = true;
+    session.treeRoots = tree;
+    session.treeLeafId = "tree-assistant";
+  });
+  missingTextRuntime.host.activateInitial();
+  await assert.rejects(
+    missingTextRuntime.host.fork("fork-without-text", "tree-user", "before", "fork"),
+    /without selected editor text/,
+  );
+  assert.equal(missingTextRuntime.owner.candidate?.disposeCalls, 1);
+  await missingTextRuntime.host.dispose();
+
+  const cloneTrace: string[] = [];
+  const cloneRuntime = await runtimeHost(cloneTrace, (_owner, session) => {
+    session.treeRoots = tree;
+    session.treeLeafId = "tree-assistant";
+  }, {
+    commitReplacement: async (change) => { commits.push(`${change.kind}:${change.sessionFile}`); },
+  });
+  cloneRuntime.host.activateInitial();
+  await assert.rejects(cloneRuntime.host.fork("clone-wrong", "tree-user", "at", "clone"), /current session leaf/);
+  assert.deepEqual(await cloneRuntime.host.fork("clone-op", "tree-assistant", "at", "clone"), { cancelled: false });
+  assert.equal(cloneRuntime.host.sessionId, "fork-session");
+  assert.ok(commits.some((commit) => commit.startsWith("fork:")));
+  assert.ok(commits.some((commit) => commit.startsWith("clone:")));
+  await cloneRuntime.host.dispose();
+});
+
+test("navigation post-effect catalog failure exposes effect_unknown without publishing session.navigated", async () => {
+  const trace: string[] = [];
+  const timestamp = "2026-07-14T00:00:00.000Z";
+  const assistantEntry: SessionEntry = { type: "message", id: "navigate-target", parentId: null, timestamp, message: { role: "assistant", content: [{ type: "text", text: "answer" }], timestamp: 1, stopReason: "stop", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, api: "fixture", provider: "fixture", model: "fixture" } };
+  const { host } = await runtimeHost(trace, (_owner, session) => {
+    session.treeRoots = [{ entry: assistantEntry, children: [] }];
+    session.treeLeafId = null;
+  });
+  const instance = new ManagedInstance({ id: "navigate-fault", creationOperationId: "create-navigate-fault", hostEpoch: "epoch-navigate-fault", cwd: "/project", session: host });
+  host.activateInitial();
+  const port = new ScriptedCatalogCommitPort();
+  const catalog = new CatalogTransactionCoordinator(port, instance.hostEpoch);
+  instance.bindCatalogPort(catalog.forInstance(instance.id));
+  await catalog.create(instance.catalogRecord(), { kind: "instance.create", effect: "rollback_contained", operationId: instance.creationOperationId, instanceId: instance.id });
+  instance.markCatalogCommitted();
+  port.failAt(2);
+
+  await assert.rejects(
+    instance.navigateSession("navigate-catalog-fault", "navigate-target"),
+    (error: unknown) => error instanceof CatalogEffectUnknownError && error.context.operationId === "navigate-catalog-fault",
+  );
+  assert.equal(catalog.health, "mutation_faulted");
+  assert.equal((await instance.getTreePage(undefined, undefined, 10)).leafId, "navigate-target");
+  assert.equal(instance.eventsSince().events.some((event) => event.type === "session.navigated"), false);
+  await instance.disposeForHostDrain();
 });
 
 test("successful replacement invalidates old binding and publishes new generation first", async () => {
@@ -598,6 +751,86 @@ test("cancelled replacement leaves binding and generation untouched", async () =
   assert.equal(initial.disposeCalls, 0);
   assert.equal(owner.candidate, undefined);
   await instance.stop("stop-1");
+});
+
+test("fork cancellation clears durable intent while fork factory failure preserves previous-session recovery", async () => {
+  const timestamp = "2026-07-14T00:00:00.000Z";
+  const user: SessionEntry = { type: "message", id: "fork-user", parentId: null, timestamp, message: { role: "user", content: "fork me", timestamp: 1 } };
+  const tree: SessionTreeNode[] = [{ entry: user, children: [] }];
+
+  const cancelTrace: string[] = [];
+  const cancelledRuntime = await runtimeHost(cancelTrace, (owner, session) => {
+    owner.mode = "cancel";
+    session.treeRoots = tree;
+    session.treeLeafId = "fork-user";
+  });
+  const cancelled = new ManagedInstance({ id: "fork-cancel", creationOperationId: "create-fork-cancel", hostEpoch: "epoch-fork-cancel", cwd: "/project", session: cancelledRuntime.host });
+  cancelledRuntime.host.activateInitial();
+  const cancelPort = new ScriptedCatalogCommitPort();
+  const cancelCatalog = new CatalogTransactionCoordinator(cancelPort, cancelled.hostEpoch);
+  cancelled.bindCatalogPort(cancelCatalog.forInstance(cancelled.id));
+  await cancelCatalog.create(cancelled.catalogRecord(), { kind: "instance.create", effect: "rollback_contained", operationId: cancelled.creationOperationId, instanceId: cancelled.id });
+  cancelled.markCatalogCommitted();
+  assert.deepEqual(await cancelled.forkSession("fork-cancel-op", "fork-user"), { cancelled: true });
+  assert.equal(cancelCatalog.current().instances[0]?.replacement, undefined);
+  assert.equal(cancelled.snapshot().runtimeGeneration, 1);
+  assert.deepEqual(cancelPort.calls.slice(-2).map((call) => call.context.kind), ["session.fork.intent", "session.fork.cancelled"]);
+  await cancelled.disposeForHostDrain();
+
+  const failureTrace: string[] = [];
+  const failedRuntime = await runtimeHost(failureTrace, (owner, session) => {
+    owner.mode = "factory-fail";
+    session.treeRoots = tree;
+    session.treeLeafId = "fork-user";
+  });
+  const failed = new ManagedInstance({ id: "fork-failed", creationOperationId: "create-fork-failed", hostEpoch: "epoch-fork-failed", cwd: "/project", session: failedRuntime.host });
+  failedRuntime.host.activateInitial();
+  const failurePort = new ScriptedCatalogCommitPort();
+  const failureCatalog = new CatalogTransactionCoordinator(failurePort, failed.hostEpoch);
+  failed.bindCatalogPort(failureCatalog.forInstance(failed.id));
+  await failureCatalog.create(failed.catalogRecord(), { kind: "instance.create", effect: "rollback_contained", operationId: failed.creationOperationId, instanceId: failed.id });
+  failed.markCatalogCommitted();
+  await assert.rejects(failed.forkSession("fork-failure-op", "fork-user"), /factory failed/);
+  const failureRecord = failureCatalog.current().instances[0];
+  assert.equal(failureRecord?.lifecycle, "runtime_error");
+  assert.equal(failureRecord?.recoverySessionFile, "/sessions/initial.jsonl");
+  assert.equal(failureRecord?.replacement, undefined);
+  const runtimeError = failed.eventsSince().events.find((event) => event.type === "instance.runtime_error");
+  assert.ok(runtimeError?.type === "instance.runtime_error");
+  assert.equal(runtimeError.data.kind, "fork");
+  await failed.disposeForHostDrain();
+});
+
+test("a replacement whose Pi file is deferred keeps only the previous durable recovery until materialization", async () => {
+  const timestamp = "2026-07-14T00:00:00.000Z";
+  const user: SessionEntry = { type: "message", id: "deferred-user", parentId: null, timestamp, message: { role: "user", content: "defer me", timestamp: 1 } };
+  const durable = new Set(["/sessions/initial.jsonl"]);
+  const trace: string[] = [];
+  const runtime = await runtimeHost(trace, (_owner, session) => {
+    session.treeRoots = [{ entry: user, children: [] }];
+    session.treeLeafId = "deferred-user";
+  }, { isSessionFileDurable: (path) => durable.has(path) });
+  const instance = new ManagedInstance({ id: "deferred-fork", creationOperationId: "create-deferred-fork", hostEpoch: "epoch-deferred-fork", cwd: "/project", session: runtime.host });
+  runtime.host.activateInitial();
+  const port = new ScriptedCatalogCommitPort();
+  const catalog = new CatalogTransactionCoordinator(port, instance.hostEpoch);
+  instance.bindCatalogPort(catalog.forInstance(instance.id));
+  await catalog.create(instance.catalogRecord(), { kind: "instance.create", effect: "rollback_contained", operationId: instance.creationOperationId, instanceId: instance.id });
+  instance.markCatalogCommitted();
+
+  assert.deepEqual(await instance.forkSession("deferred-fork-op", "deferred-user"), { cancelled: false, selectedText: "defer me" });
+  const deferred = catalog.current().instances[0];
+  assert.equal(instance.snapshot().executor.sessionFile, "/sessions/fork.jsonl");
+  assert.equal(deferred?.sessionFile, undefined);
+  assert.equal(deferred?.recoverySessionFile, "/sessions/initial.jsonl");
+  assert.equal(deferred?.lifecycle, "active");
+
+  durable.add("/sessions/fork.jsonl");
+  await instance.setSessionName("materialized", "materialized-name");
+  const materialized = catalog.current().instances[0];
+  assert.equal(materialized?.sessionFile, "/sessions/fork.jsonl");
+  assert.equal(materialized?.recoverySessionFile, undefined);
+  await instance.disposeForHostDrain();
 });
 
 test("replacement commit failure disposes the candidate before runtime_error publication", async () => {

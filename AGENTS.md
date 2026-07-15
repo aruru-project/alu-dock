@@ -31,13 +31,14 @@ Pi public-API adapters
 - `src/core/instance-dto.ts`: closed instance snapshots, events, cursors, history and receipts. No Pi runtime objects.
 - `src/core/config-projection.ts`: the exhaustive settings/tools/resources metadata contract.
 - `src/core/runtime-session.ts`: runtime port and typed runtime errors. It must not import concrete Pi internals.
+- `src/core/session-tree.ts`: closed tree validation/projection, terminal/binary safety and generation-bound revision/pagination. It must not own runtime transitions.
 - `src/core/managed-instance.ts`: lifecycle/admission/transaction facade and serialized state ownership. Keep protocol parsing and visual UI out.
 - `src/pi/*`: the only production layer allowed to hold Pi SDK objects. Use only exports from the `@earendil-works/pi-coding-agent` package root.
 - `src/control/protocol.ts`: wire schemas and fail-closed parsers. Capability-specific execution belongs in a service such as `session-command-service.ts`, not in the socket loop.
 - `src/control/durable-catalog-store.ts` and `catalog-reconcile.ts`: strict schema-1 persistence, atomic file replacement and no-runtime startup normalization. They never construct Pi objects.
 - `src/control/dock-host.ts`: socket-first connection lifecycle, hello, dispatch composition and streaming. Do not grow capability business logic inline.
 - `src/control/dock-client.ts`: typed request transport and response validation; it never owns runtime state or retries mutations.
-- `src/tui/*`: thin closed-DTO client. Pure projection and setting logic belongs in focused modules; `dock-tui.ts` should compose workflows rather than become a second runtime.
+- `src/tui/*`: thin closed-DTO client. Pure projection and setting logic belongs in focused modules; tree pagination/filter/command parsing belongs in `session-tree.ts`, while `dock-tui.ts` only composes workflows rather than becoming a second runtime.
 - `src/deployment/user-service.ts`: explicit generated-unit lifecycle/readiness. Ordinary open/new/attach paths must never import it to auto-start a Host.
 - `src/cli.ts` and `src/interactive.ts`: process/command composition only.
 
@@ -59,6 +60,7 @@ A feature should have one clear owning module. Do not create one file per settin
 12. Managed startup binds and validates its private socket before loading/reconciling catalog; corrupt evidence is preserved and no prior runtime is constructed.
 13. Do not send runtime objects, functions, handlers, component instances, binary data, image bytes, data URIs or raw base64 over the control protocol.
 14. Terminal-facing values must be sanitized for C0/C1 control characters.
+15. Tree navigation keeps the Pi session file; fork/clone are replacement transactions. Branch-summary cancellation must use the public `abortBranchSummary()` path rather than assuming agent abort covers it.
 
 ## Pi and settings rules
 
@@ -139,6 +141,6 @@ Follow `docs/dogfood-deployment.md` for managed releases. Stage completion and d
 
 ## Current staged boundary
 
-Stage 5 is the deployed managed baseline: `catalog.v1`, `service.managed.v1`, `session.reopen`, socket-first reconcile, no-replay Host loss, explicit reopen and the generated-unit service CLI. Client viewport/search/tool-fold state remains independent from Host interaction state; both use only public package-root APIs.
+Stage 5 remains the currently deployed managed baseline until the next release transaction: `catalog.v1`, `service.managed.v1`, `session.reopen`, socket-first reconcile, no-replay Host loss, explicit reopen and the generated-unit service CLI. Client viewport/search/tool-fold/tree state remains independent from Host interaction state; both use only public package-root APIs.
 
-The current boundary is card #142 Stage 6: tree/fork/clone and final default-entry validation. Preserve Stage 5 catalog/reopen/service invariants and Stage 4 interaction/generation/lease lifecycle. Extension component factories, `ctx.ui.custom()`, binary/image transport and renderer replacement remain out of scope; renderer work stays on V0.2 card #148.
+Card #142 Stage 6 tree/fork/clone is implemented behind `session.tree.v1`; its current boundary is clean-HEAD immutable managed rollout followed by final default-entry validation. Preserve Stage 5 catalog/reopen/service invariants and Stage 4 interaction/generation/lease lifecycle. Extension component factories, `ctx.ui.custom()`, binary/image transport and renderer replacement remain out of scope; renderer work stays on V0.2 card #148.

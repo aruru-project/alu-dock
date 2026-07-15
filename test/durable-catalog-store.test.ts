@@ -61,6 +61,38 @@ test("durable catalog round-trips closed records with private atomic files", asy
   assert.deepEqual((await readdir(join(root, "state"))).sort(), ["catalog.json"]);
 });
 
+test("durable catalog closes fork/clone intents and deferred-file recovery facts", async () => {
+  const { path } = await temporaryCatalog();
+  const store = new FileCatalogStore(path);
+  const fork = record("fork", {
+    replacement: {
+      operationId: "fork-op",
+      kind: "fork",
+      previousSessionFile: "/tmp/fork.jsonl",
+      requestedEntryId: "user-1",
+      startedAt: "2026-07-15T00:01:00.000Z",
+    },
+  });
+  const clone = record("clone", {
+    replacement: {
+      operationId: "clone-op",
+      kind: "clone",
+      previousSessionFile: "/tmp/clone.jsonl",
+      requestedEntryId: "assistant-1",
+      startedAt: "2026-07-15T00:01:00.000Z",
+    },
+  });
+  const deferred = record("deferred", { sessionFile: undefined, recoverySessionFile: "/tmp/previous.jsonl" });
+  const value = projection(1, [fork, clone, deferred]);
+  await store.commit(value, { kind: "test", effect: "pre_effect" });
+  assert.deepEqual(await store.load(), JSON.parse(JSON.stringify(value)) as CatalogProjection);
+
+  const invalid = structuredClone(value);
+  delete invalid.instances[0]?.replacement?.requestedEntryId;
+  await writeFile(path, `${JSON.stringify(invalid)}\n`, { mode: 0o600 });
+  await assert.rejects(store.load(), /requested entry ID/);
+});
+
 test("catalog corruption, future schema, and symlinks preserve original evidence", async () => {
   const { root, path } = await temporaryCatalog();
   const state = join(root, "state");

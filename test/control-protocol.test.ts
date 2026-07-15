@@ -19,6 +19,10 @@ import {
   parseSessionNameResult,
   parseSessionReloadResult,
   parseSessionReplacementResult,
+  parseSessionTreeResult,
+  parseSessionNavigateResult,
+  parseSessionForkResult,
+  parseSessionCloneResult,
   parseStatusResult,
   parseToolsResult,
   parseSettingsResult,
@@ -275,6 +279,49 @@ test("Stage 3 session command requests and results are closed", () => {
   assert.equal(parseSessionReloadResult({ instance: validSnapshot(), resources: [], diagnostics: [] }).resources.length, 0);
   assert.throws(() => parseSessionCompactionResult({ result: { summary: "summary", firstKeptEntryId: "kept", tokensBefore: -1 }, instance: validSnapshot() }), /non-negative/);
   assert.throws(() => parseSessionReloadResult({ instance: validSnapshot(), resources: [], diagnostics: [], raw: true }), /Unexpected field/);
+});
+
+test("Stage 6 tree, navigate, fork, and clone DTOs are closed and cursor-bounded", () => {
+  const base = { kind: "request", version: 2, requestId: "tree-r" };
+  assert.deepEqual(parseControlRequest({ ...base, type: "session.tree", params: { instanceId: "i1", limit: 2 } }).params, {
+    instanceId: "i1", treeRevision: undefined, afterEntryId: undefined, limit: 2,
+  });
+  assert.deepEqual(parseControlRequest({ ...base, type: "session.tree", params: { instanceId: "i1", treeRevision: "g1-revision", afterEntryId: "e2", limit: 2 } }).params, {
+    instanceId: "i1", treeRevision: "g1-revision", afterEntryId: "e2", limit: 2,
+  });
+  assert.throws(() => parseControlRequest({ ...base, type: "session.tree", params: { instanceId: "i1", treeRevision: "g1-revision", limit: 2 } }), /requires both/);
+  assert.throws(() => parseControlRequest({ ...base, type: "session.tree", params: { instanceId: "i1", limit: 201 } }), /between 1 and 200/);
+
+  assert.deepEqual(parseControlRequest({
+    ...base,
+    type: "session.navigate",
+    params: { operationId: "navigate-1", instanceId: "i1", targetId: "e1", summarize: true, customInstructions: "keep decisions", replaceInstructions: true, label: "branch" },
+  }).params, {
+    operationId: "navigate-1", instanceId: "i1", targetId: "e1", summarize: true, customInstructions: "keep decisions", replaceInstructions: true, label: "branch",
+  });
+  assert.throws(() => parseControlRequest({ ...base, type: "session.navigate", params: { operationId: "navigate-1", instanceId: "i1", targetId: "e1", customInstructions: "orphan" } }), /require summarize=true/);
+  assert.throws(() => parseControlRequest({ ...base, type: "session.navigate", params: { operationId: "navigate-1", instanceId: "i1", targetId: "e1", summarize: true, replaceInstructions: true } }), /requires customInstructions/);
+  assert.equal(parseControlRequest({ ...base, type: "session.fork", params: { operationId: "fork-1", instanceId: "i1", entryId: "e1" } }).type, "session.fork");
+  assert.equal(parseControlRequest({ ...base, type: "session.clone", params: { operationId: "clone-1", instanceId: "i1", entryId: "e2" } }).type, "session.clone");
+  assert.throws(() => parseControlRequest({ ...base, type: "session.fork", params: { operationId: "fork-1", instanceId: "i1", entryId: "e1", position: "at" } }), /Unexpected field/);
+
+  const node = { entryId: "e1", depth: 0, kind: "message", role: "user", timestamp: "2026-07-14T00:00:00.000Z", summary: "hello", hasChildren: true };
+  assert.deepEqual(parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [node], leafId: "e1", total: 2, truncated: true, nextAfterEntryId: "e1" }), {
+    treeRevision: "g1-revision", nodes: [node], leafId: "e1", total: 2, truncated: true, nextAfterEntryId: "e1",
+  });
+  assert.throws(() => parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [{ ...node, raw: true }], total: 1, truncated: false }), /Unexpected field/);
+  assert.throws(() => parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [{ ...node, role: undefined, kind: "message" }], total: 1, truncated: false }), /role invariant/);
+  assert.throws(() => parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [node], total: 2, truncated: true, nextAfterEntryId: "other" }), /last returned entry/);
+  assert.throws(() => parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [{ ...node, summary: `tool: ${"A0+/".repeat(32)}` }], total: 1, truncated: false }), /cannot contain binary/);
+  assert.throws(() => parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [{ ...node, depth: 100_001 }], total: 1, truncated: false }), /depth exceeds 100000/);
+  assert.throws(() => parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [], total: 100_001, truncated: false }), /total exceeds 100000/);
+
+  assert.equal(parseSessionNavigateResult({ cancelled: false, editorText: "re-edit me", instance: validSnapshot() }).editorText, "re-edit me");
+  assert.throws(() => parseSessionNavigateResult({ cancelled: false, aborted: true, instance: validSnapshot() }), /must be cancelled/);
+  assert.equal(parseSessionForkResult({ cancelled: false, selectedText: "fork prompt", instance: validSnapshot() }).selectedText, "fork prompt");
+  assert.throws(() => parseSessionForkResult({ cancelled: false, instance: validSnapshot() }), /must return selected text/);
+  assert.throws(() => parseSessionForkResult({ cancelled: false, selectedText: `attachment: ${"A0+/".repeat(32)}`, instance: validSnapshot() }), /cannot contain binary/);
+  assert.equal(parseSessionCloneResult({ cancelled: false, instance: validSnapshot() }).cancelled, false);
 });
 
 test("Stage 1C projection requests are closed and setting updates are discriminated", () => {

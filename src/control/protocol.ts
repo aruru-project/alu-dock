@@ -13,6 +13,7 @@ import type {
   JsonObject,
   JsonValue,
   SessionDto,
+  TreeNodeDto,
 } from "../core/managed-instance.js";
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingKey, SettingUpdate, ToolDto } from "../core/config-projection.js";
 import {
@@ -62,6 +63,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "session.commands.v1",
   "session.core",
   "session.reopen",
+  "session.tree.v1",
   "settings.v1",
   "tools.v1",
   "tui.projection.v1",
@@ -130,7 +132,11 @@ export type ControlRequest =
   | Request<"session.new", { operationId: string; instanceId: string; parentSession?: string }>
   | Request<"session.name", { operationId: string; instanceId: string; name: string }>
   | Request<"session.compact", { operationId: string; instanceId: string; customInstructions?: string }>
-  | Request<"session.reload", { operationId: string; instanceId: string }>;
+  | Request<"session.reload", { operationId: string; instanceId: string }>
+  | Request<"session.tree", { instanceId: string; treeRevision?: string; afterEntryId?: string; limit: number }>
+  | Request<"session.navigate", { operationId: string; instanceId: string; targetId: string; summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }>
+  | Request<"session.fork", { operationId: string; instanceId: string; entryId: string }>
+  | Request<"session.clone", { operationId: string; instanceId: string; entryId: string }>;
 
 export interface ControlError { code: string; message: string; retryable: boolean; details?: JsonObject }
 export type ControlResponse =
@@ -172,6 +178,10 @@ export interface SessionReplacementResult { cancelled: boolean; instance: Instan
 export interface SessionNameResult { instance: InstanceSnapshot }
 export interface SessionCompactionResult { result: { summary: string; firstKeptEntryId: string; tokensBefore: number }; instance: InstanceSnapshot }
 export interface SessionReloadResult { instance: InstanceSnapshot; resources: ResourceDto[]; diagnostics: DiagnosticDto[] }
+export interface SessionTreeResult { treeRevision: string; nodes: TreeNodeDto[]; leafId?: string; total: number; truncated: boolean; nextAfterEntryId?: string }
+export interface SessionNavigateResult { cancelled: boolean; aborted?: boolean; editorText?: string; instance: InstanceSnapshot }
+export interface SessionForkResult { cancelled: boolean; selectedText?: string; instance: InstanceSnapshot }
+export interface SessionCloneResult { cancelled: boolean; instance: InstanceSnapshot }
 export interface ToolsResult { tools: ToolDto[]; instance: InstanceSnapshot }
 export interface SettingsResult { settings: SettingDto[] }
 export interface SettingUpdateResult { setting: SettingDto; instance: InstanceSnapshot; reloadRequired: boolean; hostRestartRequired: boolean }
@@ -187,6 +197,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type.startsWith("instance.")) return type === "instance.attach" ? "events.follow" : "instance.catalog";
   if (type === "command.abort") return "run.abort.v1";
   if (type === "session.history") return "tui.projection.v1";
+  if (type === "session.tree" || type === "session.navigate" || type === "session.fork" || type === "session.clone") return "session.tree.v1";
   if (type === "command.submit" || type === "session.list") return "session.core";
   if (type.startsWith("session.")) return "session.commands.v1";
   if (type.startsWith("tool.")) return "tools.v1";
@@ -351,6 +362,32 @@ export function parseControlRequest(input: unknown): ControlRequest {
     case "session.name": exact(params, ["operationId", "instanceId", "name"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), name: boundedString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request") } };
     case "session.compact": exact(params, ["operationId", "instanceId", "customInstructions"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), customInstructions: optionalString(params.customInstructions, "params.customInstructions", MAX_PROMPT_CHARS, "invalid_request") } };
     case "session.reload": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
+    case "session.tree": {
+      exact(params, ["instanceId", "treeRevision", "afterEntryId", "limit"], "invalid_request");
+      if (!Number.isSafeInteger(params.limit) || (params.limit as number) < 1 || (params.limit as number) > MAX_HISTORY_ITEMS) throw validation("invalid_request", `params.limit must be between 1 and ${MAX_HISTORY_ITEMS}`);
+      const treeRevision = optionalString(params.treeRevision, "params.treeRevision", 128, "invalid_request");
+      const afterEntryId = optionalString(params.afterEntryId, "params.afterEntryId", 128, "invalid_request");
+      if ((treeRevision === undefined) !== (afterEntryId === undefined)) throw validation("invalid_request", "Tree continuation requires both treeRevision and afterEntryId");
+      return { ...base, type, params: { instanceId: instanceId(), treeRevision, afterEntryId, limit: params.limit as number } };
+    }
+    case "session.navigate": {
+      exact(params, ["operationId", "instanceId", "targetId", "summarize", "customInstructions", "replaceInstructions", "label"], "invalid_request");
+      const summarize = optionalBoolean(params.summarize, "params.summarize", "invalid_request");
+      const customInstructions = optionalString(params.customInstructions, "params.customInstructions", MAX_PROMPT_CHARS, "invalid_request");
+      const replaceInstructions = optionalBoolean(params.replaceInstructions, "params.replaceInstructions", "invalid_request");
+      const label = optionalString(params.label, "params.label", MAX_INSTANCE_NAME_CHARS, "invalid_request");
+      if (summarize !== true && (customInstructions !== undefined || replaceInstructions !== undefined || label !== undefined)) throw validation("invalid_request", "Navigation summary options require summarize=true");
+      if (replaceInstructions === true && customInstructions === undefined) throw validation("invalid_request", "replaceInstructions=true requires customInstructions");
+      return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), targetId: id(params.targetId, "params.targetId", "invalid_request"), summarize, customInstructions, replaceInstructions, label } };
+    }
+    case "session.fork": {
+      exact(params, ["operationId", "instanceId", "entryId"], "invalid_request");
+      return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), entryId: id(params.entryId, "params.entryId", "invalid_request") } };
+    }
+    case "session.clone": {
+      exact(params, ["operationId", "instanceId", "entryId"], "invalid_request");
+      return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), entryId: id(params.entryId, "params.entryId", "invalid_request") } };
+    }
     default: throw validation("unknown_request", `Unknown request type: ${type}`);
   }
 }
@@ -555,6 +592,72 @@ export function parseSessionReloadResult(input: unknown): SessionReloadResult {
   return { instance: parseActiveSessionInstance(value.instance, "Session reload"), ...projected };
 }
 
+export function parseSessionTreeResult(input: unknown): SessionTreeResult {
+  const value = object(input, "session tree result");
+  exact(value, ["treeRevision", "nodes", "leafId", "total", "truncated", "nextAfterEntryId"]);
+  const treeRevision = id(value.treeRevision, "treeRevision");
+  const nodes = array(value.nodes, "nodes", MAX_HISTORY_ITEMS).map((item, index) => parseTreeNode(item, `nodes[${index}]`));
+  if (new Set(nodes.map((node) => node.entryId)).size !== nodes.length) throw validation("invalid_response", "Tree page entry IDs must be unique");
+  const leafId = optionalString(value.leafId, "leafId", 128);
+  const total = unsigned(value.total, "total");
+  if (total > 100_000) throw validation("invalid_response", "Tree total exceeds 100000 entries");
+  if (total < nodes.length) throw validation("invalid_response", "Tree total cannot be smaller than the returned page");
+  const truncated = boolean(value.truncated, "truncated");
+  const nextAfterEntryId = optionalString(value.nextAfterEntryId, "nextAfterEntryId", 128);
+  if (truncated !== (nextAfterEntryId !== undefined)) throw validation("invalid_response", "Tree pagination cursor is inconsistent");
+  if (nextAfterEntryId !== undefined && nodes.at(-1)?.entryId !== nextAfterEntryId) throw validation("invalid_response", "Tree cursor must identify the last returned entry");
+  if (truncated && nodes.length === 0) throw validation("invalid_response", "A truncated tree page cannot be empty");
+  return { treeRevision, nodes, ...(leafId === undefined ? {} : { leafId }), total, truncated, ...(nextAfterEntryId === undefined ? {} : { nextAfterEntryId }) };
+}
+
+export function parseSessionNavigateResult(input: unknown): SessionNavigateResult {
+  const value = object(input, "session navigate result");
+  exact(value, ["cancelled", "aborted", "editorText", "instance"]);
+  const cancelled = boolean(value.cancelled, "cancelled");
+  const aborted = value.aborted === undefined ? undefined : boolean(value.aborted, "aborted");
+  const editorText = value.editorText === undefined ? undefined : payloadFreeBoundedString(value.editorText, "editorText", MAX_PROMPT_CHARS);
+  if (aborted === true && !cancelled) throw validation("invalid_response", "Aborted navigation must be cancelled");
+  if (cancelled && editorText !== undefined) throw validation("invalid_response", "Cancelled navigation cannot return editor text");
+  return { cancelled, ...(aborted === undefined ? {} : { aborted }), ...(editorText === undefined ? {} : { editorText }), instance: parseActiveSessionInstance(value.instance, "Session navigation") };
+}
+
+export function parseSessionForkResult(input: unknown): SessionForkResult {
+  const value = object(input, "session fork result");
+  exact(value, ["cancelled", "selectedText", "instance"]);
+  const cancelled = boolean(value.cancelled, "cancelled");
+  const selectedText = value.selectedText === undefined ? undefined : payloadFreeBoundedString(value.selectedText, "selectedText", MAX_PROMPT_CHARS);
+  if (cancelled && selectedText !== undefined) throw validation("invalid_response", "Cancelled fork cannot return selected text");
+  if (!cancelled && selectedText === undefined) throw validation("invalid_response", "Completed fork must return selected text");
+  return { cancelled, ...(selectedText === undefined ? {} : { selectedText }), instance: parseActiveSessionInstance(value.instance, "Session fork") };
+}
+
+export function parseSessionCloneResult(input: unknown): SessionCloneResult {
+  const value = object(input, "session clone result");
+  exact(value, ["cancelled", "instance"]);
+  return { cancelled: boolean(value.cancelled, "cancelled"), instance: parseActiveSessionInstance(value.instance, "Session clone") };
+}
+
+function parseTreeNode(input: unknown, field: string): TreeNodeDto {
+  const node = object(input, field);
+  exact(node, ["entryId", "parentId", "depth", "kind", "role", "label", "timestamp", "summary", "hasChildren"]);
+  const kind = enumeration(node.kind, `${field}.kind`, ["message", "thinking_level_change", "model_change", "compaction", "branch_summary", "custom", "custom_message", "label", "session_info"]);
+  const role = node.role === undefined ? undefined : enumeration(node.role, `${field}.role`, ["user", "assistant", "tool", "system"]);
+  if ((kind === "message") !== (role !== undefined)) throw validation("invalid_response", `${field} message role invariant failed`);
+  const depth = unsigned(node.depth, `${field}.depth`);
+  if (depth > 100_000) throw validation("invalid_response", `${field}.depth exceeds 100000`);
+  return {
+    entryId: id(node.entryId, `${field}.entryId`),
+    ...(node.parentId === undefined ? {} : { parentId: id(node.parentId, `${field}.parentId`) }),
+    depth,
+    kind,
+    ...(role === undefined ? {} : { role }),
+    ...(node.label === undefined ? {} : { label: payloadFreeString(node.label, `${field}.label`, MAX_INSTANCE_NAME_CHARS) }),
+    ...(node.timestamp === undefined ? {} : { timestamp: timestamp(node.timestamp, `${field}.timestamp`) }),
+    summary: payloadFreeString(node.summary, `${field}.summary`, MAX_MESSAGE),
+    hasChildren: boolean(node.hasChildren, `${field}.hasChildren`),
+  };
+}
+
 function parseActiveSessionInstance(input: unknown, operation: string): InstanceSnapshot {
   const instance = parseInstance(input, "instance");
   if (instance.lifecycle !== "active") throw validation("invalid_response", `${operation} success requires an active instance`);
@@ -697,6 +800,7 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "compaction.started": exact(data, ["reason"]); return { reason: enumeration(data.reason, "reason", ["manual", "threshold", "overflow"]) };
     case "compaction.completed": exact(data, ["reason", "aborted", "willRetry", "error"]); return { reason: enumeration(data.reason, "reason", ["manual", "threshold", "overflow"]), aborted: boolean(data.aborted, "aborted"), willRetry: boolean(data.willRetry, "willRetry"), error: optionalText("error", MAX_MESSAGE) };
     case "session.replaced": exact(data, ["reason", "previousSessionFile", "sessionFile", "runtimeGeneration", "cwd", "piSessionId", "name"]); return { reason: enumeration(data.reason, "reason", ["new", "resume", "fork", "reload"]), previousSessionFile: optionalText("previousSessionFile", MAX_CONTROL_CWD_CHARS), sessionFile: optionalText("sessionFile", MAX_CONTROL_CWD_CHARS), runtimeGeneration: positive(data.runtimeGeneration, "runtimeGeneration"), cwd: text("cwd", MAX_CONTROL_CWD_CHARS), piSessionId: text("piSessionId", 128), name: optionalText("name", MAX_INSTANCE_NAME_CHARS) };
+    case "session.navigated": exact(data, ["targetId", "leafId", "treeRevision", "summaryCreated"]); return { targetId: text("targetId", 128), leafId: optionalText("leafId", 128), treeRevision: text("treeRevision", 128), summaryCreated: boolean(data.summaryCreated, "summaryCreated") };
     case "session.info_changed": exact(data, ["name"]); return { name: optionalText("name", MAX_INSTANCE_NAME_CHARS) };
     case "session.metrics_changed": exact(data, ["metrics"]); return { metrics: parseMetrics(data.metrics, `${field}.metrics`) };
     case "model.changed": exact(data, ["provider", "id", "thinkingLevel", "availableThinkingLevels"]); return { provider: text("provider", MAX_MODEL_PROVIDER_CHARS), id: text("id", MAX_MODEL_ID_CHARS), thinkingLevel: enumeration(data.thinkingLevel, "thinkingLevel", THINKING_LEVELS), availableThinkingLevels: levels("availableThinkingLevels") };
@@ -772,6 +876,12 @@ function parseDialogRequest(data: Record<string, unknown>, field: string): Event
 
 function payloadFreeString(input: unknown, field: string, max: number, code = "invalid_response"): string {
   const value = string(input, field, max, code);
+  if (containsBinaryPayload(value)) throw validation(code, `${field} cannot contain binary, image, data URI, or raw base64 payloads`);
+  return value;
+}
+
+function payloadFreeBoundedString(input: unknown, field: string, max: number, code = "invalid_response"): string {
+  const value = boundedString(input, field, max, code);
   if (containsBinaryPayload(value)) throw validation(code, `${field} cannot contain binary, image, data URI, or raw base64 payloads`);
   return value;
 }

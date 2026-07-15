@@ -34,6 +34,10 @@ import {
   parseSessionNameResult,
   parseSessionReloadResult,
   parseSessionReplacementResult,
+  parseSessionTreeResult,
+  parseSessionNavigateResult,
+  parseSessionForkResult,
+  parseSessionCloneResult,
   parseStatusResult,
   parseStopResult,
   parseToolsResult,
@@ -59,6 +63,10 @@ import {
   type SessionNameResult,
   type SessionReloadResult,
   type SessionReplacementResult,
+  type SessionTreeResult,
+  type SessionNavigateResult,
+  type SessionForkResult,
+  type SessionCloneResult,
   type StopResult,
   type ToolsResult,
   type SettingsResult,
@@ -110,6 +118,10 @@ export class DockClient {
   nameSession(instanceId:string,name:string,operationId=this.createRequestId()):Promise<SessionNameResult>{return this.request("session.name",{operationId,instanceId,name},"session.commands.v1",parseSessionNameResult);}
   compactSession(instanceId:string,customInstructions?:string,operationId=this.createRequestId()):Promise<SessionCompactionResult>{return this.request("session.compact",{operationId,instanceId,customInstructions},"session.commands.v1",parseSessionCompactionResult);}
   reloadSession(instanceId:string,operationId=this.createRequestId()):Promise<SessionReloadResult>{return this.request("session.reload",{operationId,instanceId},"session.commands.v1",parseSessionReloadResult);}
+  tree(instanceId:string,treeRevision?:string,afterEntryId?:string,limit=200):Promise<SessionTreeResult>{return this.request("session.tree",{instanceId,treeRevision,afterEntryId,limit},"session.tree.v1",parseSessionTreeResult);}
+  navigateSession(instanceId:string,targetId:string,options:{summarize?:boolean;customInstructions?:string;replaceInstructions?:boolean;label?:string}={},operationId=this.createRequestId()):Promise<SessionNavigateResult>{return this.request("session.navigate",{operationId,instanceId,targetId,...options},"session.tree.v1",parseSessionNavigateResult);}
+  forkSession(instanceId:string,entryId:string,operationId=this.createRequestId()):Promise<SessionForkResult>{return this.request("session.fork",{operationId,instanceId,entryId},"session.tree.v1",parseSessionForkResult);}
+  cloneSession(instanceId:string,entryId:string,operationId=this.createRequestId()):Promise<SessionCloneResult>{return this.request("session.clone",{operationId,instanceId,entryId},"session.tree.v1",parseSessionCloneResult);}
   stop(instanceId:string,operationId=this.createRequestId()):Promise<StopResult>{return this.request("instance.stop",{operationId,instanceId},"instance.catalog",parseStopResult);}
 
   async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;claimController?:boolean}):Promise<EventSubscription>{
@@ -242,6 +254,10 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
   if(type==="session.name"){
     const requested=(params as Extract<ControlRequest,{type:"session.name"}>["params"]).name.replace(/[\r\n]+/gu," ").trim()||undefined;
     if(snapshots[0]?.name!==requested)throw new ProtocolValidationError("invalid_response","Session name result does not match the requested normalized name");
+  }
+  if(type==="session.tree"){
+    const requested=(params as Extract<ControlRequest,{type:"session.tree"}>["params"]);
+    if(requested.treeRevision!==undefined&&record.treeRevision!==requested.treeRevision)throw new ProtocolValidationError("invalid_response","Tree continuation revision does not match the request");
   }
   if(type==="command.catalog"&&typeof (params as Extract<ControlRequest,{type:"command.catalog"}>["params"]).prefix==="string"){
     const prefix=(params as Extract<ControlRequest,{type:"command.catalog"}>["params"]).prefix as string;

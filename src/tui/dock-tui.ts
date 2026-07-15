@@ -16,7 +16,7 @@ import {
 import { ControlClientError, DockClient, type EventSubscription } from "../control/dock-client.js";
 import type { InteractionResponse } from "../core/extension-ui-broker.js";
 import type { CommandDto, SettingDto, SettingUpdate } from "../core/config-projection.js";
-import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot } from "../core/managed-instance.js";
+import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot, TreeNodeDto } from "../core/managed-instance.js";
 import type {
   RuntimeModelInfo,
   RuntimeThinkingLevel,
@@ -36,6 +36,14 @@ import {
 } from "./run-activity.js";
 import { SearchablePicker } from "./searchable-picker.js";
 import { projectSnapshot } from "./snapshot-projection.js";
+import {
+  collectSessionTree,
+  filterSessionTree,
+  isTreeFilterMode,
+  parseTreeNavigationCommand,
+  treePickerItems,
+  type TreeFilterMode,
+} from "./session-tree.js";
 import {
   formatSettingValue,
   parseSettingCommandValue,
@@ -82,7 +90,13 @@ export async function runDockTui(
   let terminalProgressEnabled = false;
   let replacementHistoryGeneration: number | undefined;
   let replacementBufferedEvents: DockEvent[] = [];
+  let navigationHistoryToken: string | undefined;
+  let navigationBufferedEvents: DockEvent[] = [];
+  let treeNavigationPending = false;
+  let treeNavigationAbortPending = false;
+  let treeNavigationAbortRequested = false;
   let resolveExit!: (reason: DockTuiExitReason) => void;
+  let lastIdleEscapeAt = 0;
   let exiting = false;
   const exit = new Promise<DockTuiExitReason>((resolve) => {
     resolveExit = resolve;
@@ -108,6 +122,8 @@ export async function runDockTui(
       controllerLeaseToken = undefined;
       status.setController("unavailable");
       void reacquireController({ ...instance.eventCursor });
+      navigationHistoryToken = undefined;
+      navigationBufferedEvents = [];
       replacementHistoryGeneration = event.runtimeGeneration;
       replacementBufferedEvents = [event];
       conversation.reset();
@@ -117,6 +133,14 @@ export async function runDockTui(
       void refreshReplacementProjection(event.runtimeGeneration, { ...instance.eventCursor });
     } else if (replacementHistoryGeneration === event.runtimeGeneration) {
       replacementBufferedEvents.push(event);
+    } else if (event.type === "session.navigated") {
+      const token = `${event.runtimeGeneration}:${event.sequence}`;
+      navigationHistoryToken = token;
+      navigationBufferedEvents = [event];
+      conversation.addNotice("Loading navigated branch history…");
+      void refreshNavigationProjection(token, event.runtimeGeneration);
+    } else if (navigationHistoryToken !== undefined && event.runtimeGeneration === instance.runtimeGeneration) {
+      navigationBufferedEvents.push(event);
     } else {
       conversation.apply(event);
     }
@@ -232,7 +256,7 @@ export async function runDockTui(
     }
     if (text === "/help") {
       conversation.addNotice(
-        "Commands: /settings [KEY VALUE], /model [PROVIDER/MODEL], /thinking [LEVEL], /tools [NAME…], /new [PARENT], /resume [SESSION_FILE], /name NAME, /compact [INSTRUCTIONS], /reload, /resources, /follow MESSAGE, /steer MESSAGE, /abort, /status, /stop, /detach",
+        "Commands: /settings [KEY VALUE], /model [PROVIDER/MODEL], /thinking [LEVEL], /tools [NAME…], /tree [ENTRY], /fork [USER_ENTRY], /clone, /new [PARENT], /resume [SESSION_FILE], /name NAME, /compact [INSTRUCTIONS], /reload, /resources, /follow MESSAGE, /steer MESSAGE, /abort, /status, /stop, /detach",
       );
       tui.requestRender();
       return;
@@ -287,6 +311,43 @@ export async function runDockTui(
         return;
       }
       await switchThinking(thinkingTarget);
+      return;
+    }
+    if (text === "/tree") {
+      await chooseTreeNavigation();
+      return;
+    }
+    const treeTarget = commandMessage(text, "/tree");
+    if (treeTarget !== undefined) {
+      await navigateTreeFromCommand(treeTarget);
+      return;
+    }
+    if (text.startsWith("/tree")) {
+      conversation.addNotice("Usage: /tree [ENTRY_ID [--summary [INSTRUCTIONS] | --replace INSTRUCTIONS]]", true);
+      tui.requestRender();
+      return;
+    }
+    if (text === "/fork") {
+      await chooseForkTarget();
+      return;
+    }
+    const forkTarget = commandMessage(text, "/fork");
+    if (forkTarget !== undefined) {
+      await forkSession(forkTarget);
+      return;
+    }
+    if (text.startsWith("/fork")) {
+      conversation.addNotice("Usage: /fork [USER_ENTRY_ID]", true);
+      tui.requestRender();
+      return;
+    }
+    if (text === "/clone") {
+      await cloneSession();
+      return;
+    }
+    if (text.startsWith("/clone")) {
+      conversation.addNotice("Usage: /clone", true);
+      tui.requestRender();
       return;
     }
     if (text === "/new" || text.startsWith("/new ")) {
@@ -735,6 +796,187 @@ export async function runDockTui(
     finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
   }
 
+  async function loadSessionTree(): Promise<{ nodes: TreeNodeDto[]; leafId?: string; total: number; revision: string }> {
+    const tree = await collectSessionTree((revision, cursor, limit) => client.tree(instance.id, revision, cursor, limit));
+    if (tree.capped) conversation.addNotice(`Tree selector is showing the first ${tree.nodes.length.toLocaleString()} of ${tree.total.toLocaleString()} entries.`, true);
+    return tree;
+  }
+
+  async function chooseTreeNode(
+    titleText: string,
+    predicate: (node: TreeNodeDto) => boolean = () => true,
+    filterMode?: TreeFilterMode,
+  ): Promise<TreeNodeDto | undefined> {
+    const tree = await loadSessionTree();
+    const candidates = (filterMode === undefined ? tree.nodes : filterSessionTree(tree.nodes, filterMode)).filter(predicate);
+    if (candidates.length === 0) {
+      conversation.addNotice("The current Pi session tree has no matching entries.", true);
+      return undefined;
+    }
+    const byId = new Map(candidates.map((node) => [node.entryId, node]));
+    const selected = await showChoicePicker(
+      titleText,
+      treePickerItems(candidates, tree.leafId),
+      tree.leafId,
+      "type text/id/label · ↑↓ choose · Enter select · Esc cancel",
+    );
+    return selected === undefined ? undefined : byId.get(selected);
+  }
+
+  async function chooseTreeNavigation(): Promise<void> {
+    editor.disableSubmit = true;
+    status.setActivity("loading session tree");
+    tui.requestRender();
+    try {
+      const configuredFilter = settings.find((setting) => setting.key === "treeFilterMode")?.value;
+      const target = await chooseTreeNode("Navigate session tree", () => true, isTreeFilterMode(configuredFilter) ? configuredFilter : "default");
+      if (!target) { status.setActivity("tree unchanged"); return; }
+      const action = await showChoicePicker("Navigation mode", [
+        { value: "navigate", label: "Navigate", description: "switch branch without model summarization" },
+        { value: "summary", label: "Navigate with summary", description: "use Pi branch summarization" },
+        { value: "custom", label: "Summary with additional instructions" },
+        { value: "replace", label: "Summary with replacement instructions" },
+      ], "navigate");
+      if (!action) { status.setActivity("tree unchanged"); return; }
+      const options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {};
+      if (action !== "navigate") options.summarize = true;
+      if (action === "custom" || action === "replace") {
+        const instructions = await showLocalTextDialog("Branch summary instructions", "editor", "Describe what the summary must preserve");
+        if (instructions === undefined || instructions.trim().length === 0) { status.setActivity("tree unchanged"); return; }
+        options.customInstructions = instructions;
+        if (action === "replace") options.replaceInstructions = true;
+      }
+      if (options.summarize) {
+        const labelMode = await showChoicePicker("Optional branch label", [
+          { value: "none", label: "No label" },
+          { value: "label", label: "Add label" },
+        ], "none");
+        if (labelMode === undefined) { status.setActivity("tree unchanged"); return; }
+        if (labelMode === "label") {
+          const label = await showLocalTextDialog("Branch label", "input", "Short label for the navigation target");
+          if (label === undefined) { status.setActivity("tree unchanged"); return; }
+          if (label.trim()) options.label = label.trim();
+        }
+      }
+      await navigateTree(target.entryId, options);
+    } catch (error) { showError(error); }
+    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
+  }
+
+  async function navigateTreeFromCommand(target: string): Promise<void> {
+    const parsed = parseTreeNavigationCommand(target);
+    if (!parsed) {
+      conversation.addNotice("Usage: /tree ENTRY_ID [--summary [INSTRUCTIONS] | --replace INSTRUCTIONS]", true);
+      tui.requestRender();
+      return;
+    }
+    await navigateTree(parsed.entryId, parsed.options);
+  }
+
+  async function navigateTree(
+    targetId: string,
+    options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
+  ): Promise<void> {
+    editor.disableSubmit = true;
+    treeNavigationPending = true;
+    treeNavigationAbortRequested = false;
+    status.setActivity(options.summarize ? "summarizing branch · Esc/Ctrl+C abort" : "navigating tree");
+    tui.requestRender();
+    try {
+      const result = await client.navigateSession(instance.id, targetId, options);
+      instance = result.instance;
+      status.update(instance);
+      if (result.editorText !== undefined) editor.setText(result.editorText);
+      status.setActivity(result.cancelled ? result.aborted || treeNavigationAbortRequested ? "navigation aborted" : "navigation cancelled by extension" : "branch selected");
+    } catch (error) { showError(error); }
+    finally {
+      treeNavigationPending = false;
+      treeNavigationAbortRequested = false;
+      if (instance.lifecycle === "active") editor.disableSubmit = false;
+      tui.setFocus(editor);
+      tui.requestRender();
+    }
+  }
+
+  async function abortTreeNavigation(): Promise<void> {
+    if (!treeNavigationPending || treeNavigationAbortPending) return;
+    treeNavigationAbortPending = true;
+    treeNavigationAbortRequested = true;
+    status.setActivity("aborting branch navigation");
+    tui.requestRender();
+    try { await client.abort(instance.id); }
+    catch (error) { showError(error); }
+    finally { treeNavigationAbortPending = false; }
+  }
+
+  async function chooseForkTarget(): Promise<void> {
+    editor.disableSubmit = true;
+    status.setActivity("loading fork targets");
+    tui.requestRender();
+    try {
+      const target = await chooseTreeNode("Fork before user message", (node) => node.kind === "message" && node.role === "user");
+      if (target) await forkSession(target.entryId);
+      else status.setActivity("fork cancelled");
+    } catch (error) { showError(error); }
+    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
+  }
+
+  async function forkSession(entryId: string): Promise<void> {
+    editor.disableSubmit = true;
+    status.setActivity("forking session");
+    tui.requestRender();
+    try {
+      const result = await client.forkSession(instance.id, entryId);
+      instance = result.instance;
+      status.update(instance);
+      if (result.selectedText !== undefined) editor.setText(result.selectedText);
+      status.setActivity(result.cancelled ? "fork cancelled by extension" : "fork ready · edit and submit selected prompt");
+    } catch (error) { showError(error); }
+    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
+  }
+
+  async function cloneSession(): Promise<void> {
+    editor.disableSubmit = true;
+    status.setActivity("finding current leaf");
+    tui.requestRender();
+    try {
+      const tree = await client.tree(instance.id, undefined, undefined, 1);
+      if (!tree.leafId) {
+        conversation.addNotice("The current session has no leaf to clone.", true);
+        status.setActivity("clone unavailable");
+        return;
+      }
+      const result = await client.cloneSession(instance.id, tree.leafId);
+      instance = result.instance;
+      status.update(instance);
+      if (!result.cancelled) editor.setText("");
+      status.setActivity(result.cancelled ? "clone cancelled by extension" : "session cloned");
+    } catch (error) { showError(error); }
+    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
+  }
+
+  async function showLocalTextDialog(
+    titleText: string,
+    mode: "input" | "editor",
+    placeholder?: string,
+  ): Promise<string | undefined> {
+    const dialog = new ExtensionTextDialog({
+      mode,
+      title: titleText,
+      ...(placeholder === undefined ? {} : { placeholder }),
+      requestRender: () => tui.requestRender(),
+      tui,
+    });
+    let resolveText!: (value: string | undefined) => void;
+    const result = new Promise<string | undefined>((resolve) => { resolveText = resolve; });
+    dialog.onSubmit = (value) => resolveText(value);
+    dialog.onCancel = () => resolveText(undefined);
+    const overlay = tui.showOverlay(dialog, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
+    tui.setFocus(dialog);
+    try { return await result; }
+    finally { overlay.hide(); tui.setFocus(editor); }
+  }
+
   async function chooseSession(): Promise<void> {
     editor.disableSubmit = true;
     status.setActivity("loading sessions");
@@ -962,6 +1204,39 @@ export async function runDockTui(
     tui.requestRender();
   }
 
+  async function refreshNavigationProjection(token: string, generation: number): Promise<void> {
+    const loaded = await client.history(instance.id, undefined, 200).then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+    if (navigationHistoryToken !== token || instance.runtimeGeneration !== generation) return;
+    const buffered = navigationBufferedEvents;
+    navigationBufferedEvents = [];
+    navigationHistoryToken = undefined;
+    conversation.reset();
+    screen?.scrollToBottom();
+    if (!loaded.ok) {
+      conversation.addNotice(`Navigated branch history unavailable: ${errorText(loaded.error)}`, true);
+      conversation.applyReplay(buffered, false);
+      tui.requestRender();
+      return;
+    }
+    instance = loaded.value.instance;
+    status.update(instance);
+    conversation.applyHistory(loaded.value.entries, loaded.value.hasEarlier);
+    const navigated = buffered.find((event) => event.type === "session.navigated");
+    if (navigated) conversation.apply(navigated);
+    for (const event of buffered) {
+      if (event.type !== "session.navigated" && event.sequence > loaded.value.instance.eventCursor.sequence) {
+        instance = projectSnapshot(instance, event);
+        conversation.apply(event);
+      }
+    }
+    status.update(instance);
+    status.setActivity("branch history loaded");
+    tui.requestRender();
+  }
+
   function rebuildAutocomplete(): void {
     if (!editor) return;
     const autocompleteCommands = commandCatalog(commands).map((command) => {
@@ -1107,14 +1382,34 @@ export async function runDockTui(
     }
     if (matchesKey(data, "escape")) {
       if (editor.isShowingAutocomplete()) return undefined;
+      if (treeNavigationPending) {
+        void abortTreeNavigation();
+        return { consume: true };
+      }
       if (instance.execution === "running") {
         void abortRun();
+        return { consume: true };
+      }
+      if (editor.getText().length === 0 && !editor.disableSubmit) {
+        const action = settings.find((setting) => setting.key === "doubleEscapeAction")?.value;
+        const now = Date.now();
+        if (action !== "none" && now - lastIdleEscapeAt <= 600) {
+          lastIdleEscapeAt = 0;
+          if (action === "fork") void chooseForkTarget();
+          else void chooseTreeNavigation();
+        } else {
+          lastIdleEscapeAt = now;
+          if (action !== "none") status.setActivity(`Esc again to open ${action === "fork" ? "fork" : "tree"}`);
+        }
+        tui.requestRender();
         return { consume: true };
       }
       return undefined;
     }
     if (matchesKey(data, "ctrl+c")) {
-      if (editor.getText().length > 0) {
+      if (treeNavigationPending) {
+        void abortTreeNavigation();
+      } else if (editor.getText().length > 0) {
         editor.setText("");
         status.setActivity("input cleared");
       } else if (instance.execution === "running") {
@@ -1286,10 +1581,12 @@ export function commandCatalog(commands: CommandDto[]): Array<{ name: string; de
   }
   const dockCommands = [
     { name: "abort", description: "abort the current run; keep the instance reusable" },
+    { name: "clone", description: "clone the current session leaf into a new Pi session" },
     { name: "compact", description: "manually compact session context", argumentHint: "INSTRUCTIONS" },
     { name: "config", description: "show Pi CLI config ownership guidance" },
     { name: "detach", description: "leave the TUI without stopping the instance" },
     { name: "follow", description: "queue a follow-up message", argumentHint: "MESSAGE" },
+    { name: "fork", description: "fork before a user message and return it to the editor", argumentHint: "USER_ENTRY_ID" },
     { name: "help", description: "show Dock commands" },
     { name: "install", description: "show Pi CLI package ownership guidance" },
     { name: "login", description: "show Pi CLI login ownership guidance" },
@@ -1305,6 +1602,7 @@ export function commandCatalog(commands: CommandDto[]): Array<{ name: string; de
     { name: "stop", description: "stop and dispose the instance" },
     { name: "thinking", description: "choose or set thinking level", argumentHint: "LEVEL" },
     { name: "tools", description: "toggle or set active tools", argumentHint: "NAME…" },
+    { name: "tree", description: "browse and navigate the current Pi session tree", argumentHint: "ENTRY_ID" },
   ];
   for (const command of dockCommands) catalog.set(command.name, command);
   return [...catalog.values()].sort((left, right) => left.name.localeCompare(right.name));

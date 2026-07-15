@@ -5,11 +5,15 @@ import type {
   RuntimeHistoryEntry,
   RuntimeModelInfo,
   RuntimeModelState,
+  RuntimeNavigateOptions,
+  RuntimeNavigateResult,
   RuntimePromptOptions,
   RuntimeSession,
   RuntimeSessionInfo,
   RuntimeSessionMetrics,
   RuntimeThinkingLevel,
+  RuntimeTreeNode,
+  RuntimeTreeSnapshot,
 } from "../../src/core/runtime-session.js";
 import { RuntimeSettingsWriteError } from "../../src/core/runtime-session.js";
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, SettingValueMap, ToolDto } from "../../src/core/config-projection.js";
@@ -31,7 +35,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
   sessionId: string;
   sessionFile: string;
   isStreaming = false;
-  sessionMutationCalls = { new: 0, switch: 0, name: 0, compact: 0, reload: 0 };
+  sessionMutationCalls = { new: 0, switch: 0, name: 0, compact: 0, reload: 0, navigate: 0, fork: 0, clone: 0 };
   sessionName: string | undefined;
   abortCalls = 0;
   abortError: Error | undefined;
@@ -47,6 +51,9 @@ export class DelayedRuntimeSession implements RuntimeSession {
   sessionMutationError: Error | undefined;
   sessionCatalog: RuntimeSessionInfo[] = [];
   history: RuntimeHistoryEntry[] = [];
+  treeNodes: RuntimeTreeNode[] = [];
+  treeLeafId: string | undefined;
+  navigationResult: RuntimeNavigateResult | undefined;
   metrics: RuntimeSessionMetrics = {
     messages: { user: 0, assistant: 0, toolCalls: 0, toolResults: 0, total: 0 },
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
@@ -59,6 +66,8 @@ export class DelayedRuntimeSession implements RuntimeSession {
   private currentRun: Deferred<void> | undefined;
   private disposeBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
   private modelMutationBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
+  private nextNavigationBlock: { entered: Deferred<void>; result: Deferred<RuntimeNavigateResult> } | undefined;
+  private activeNavigationBlock: { entered: Deferred<void>; result: Deferred<RuntimeNavigateResult> } | undefined;
   private activeTools = new Set(["read"]);
   private readonly settingValues: SettingValueMap = {
     autoCompaction: true, compactionReserveTokens: 165_536, compactionKeepRecentTokens: 20_000,
@@ -117,6 +126,34 @@ export class DelayedRuntimeSession implements RuntimeSession {
   }
 
   getHistory(): RuntimeHistoryEntry[] { return structuredClone(this.history); }
+
+  getTree(): RuntimeTreeSnapshot {
+    return {
+      nodes: structuredClone(this.treeNodes),
+      ...(this.treeLeafId === undefined ? {} : { leafId: this.treeLeafId }),
+    };
+  }
+
+  async navigateTree(targetId: string, _options: RuntimeNavigateOptions = {}): Promise<RuntimeNavigateResult> {
+    this.sessionMutationCalls.navigate += 1;
+    const target = this.treeNodes.find((node) => node.entryId === targetId);
+    if (!target) throw new Error(`Unknown tree entry: ${targetId}`);
+    if (this.navigationResult) return structuredClone(this.navigationResult);
+    const block = this.nextNavigationBlock;
+    this.nextNavigationBlock = undefined;
+    if (block) {
+      this.activeNavigationBlock = block;
+      block.entered.resolve();
+      try { return structuredClone(await block.result.promise); }
+      finally { if (this.activeNavigationBlock === block) this.activeNavigationBlock = undefined; }
+    }
+    this.treeLeafId = target.role === "user" ? target.parentId : target.entryId;
+    return {
+      cancelled: false,
+      ...(target.role === "user" ? { editorText: target.summary } : {}),
+      summaryCreated: false,
+    };
+  }
 
   async listTools(): Promise<ToolDto[]> {
     return ["read", "write"].map((name) => ({ name, description: `${name} fixture`, active: this.activeTools.has(name), source: { kind: "built-in" as const }, parameterSchema: { type: "object" } }));
@@ -185,6 +222,19 @@ export class DelayedRuntimeSession implements RuntimeSession {
     return { cancelled: false };
   }
 
+  async fork(_operationId: string, entryId: string, position: "before" | "at", kind: "fork" | "clone"): Promise<{ cancelled: boolean; selectedText?: string }> {
+    this.sessionMutationCalls[kind] += 1;
+    const target = this.treeNodes.find((node) => node.entryId === entryId);
+    if (!target || (position === "before" && target.role !== "user")) throw new Error("Invalid fixture fork entry");
+    if (kind === "clone" && this.treeLeafId !== entryId) throw new Error("Clone entry must be the current session leaf");
+    const previousSessionFile = this.sessionFile;
+    this.sessionId = `fixture-${kind}-${this.sessionMutationCalls[kind]}`;
+    this.sessionFile = `/tmp/${this.sessionId}.jsonl`;
+    this.treeLeafId = position === "before" ? target.parentId : entryId;
+    this.emit({ type: "dock_session_replaced", reason: "fork", previousSessionFile, sessionFile: this.sessionFile, cwd: "/fixture/cwd", name: this.sessionName });
+    return { cancelled: false, ...(position === "before" ? { selectedText: target.summary } : {}) };
+  }
+
   setSessionName(name: string): string | undefined {
     this.sessionMutationCalls.name += 1;
     const actual = name.trim() || undefined;
@@ -207,6 +257,16 @@ export class DelayedRuntimeSession implements RuntimeSession {
     this.sessionMutationCalls.reload += 1;
     this.emit({ type: "dock_session_replaced", reason: "reload", previousSessionFile: this.sessionFile, sessionFile: this.sessionFile, cwd: "/fixture/cwd", name: this.sessionName });
     return { cancelled: false };
+  }
+
+  blockNextNavigation(): { entered: Promise<void>; finish: (result?: RuntimeNavigateResult) => void } {
+    if (this.nextNavigationBlock || this.activeNavigationBlock) throw new Error("Fixture navigation is already blocked");
+    const block = { entered: new Deferred<void>(), result: new Deferred<RuntimeNavigateResult>() };
+    this.nextNavigationBlock = block;
+    return {
+      entered: block.entered.promise,
+      finish: (result = { cancelled: false, summaryCreated: false }) => block.result.resolve(result),
+    };
   }
 
   blockNextModelMutation(): { entered: Promise<void>; release: () => void } {
@@ -259,6 +319,10 @@ export class DelayedRuntimeSession implements RuntimeSession {
   async abort(): Promise<void> {
     this.abortCalls += 1;
     if (this.abortError) throw this.abortError;
+    if (this.activeNavigationBlock) {
+      this.activeNavigationBlock.result.resolve({ cancelled: true, aborted: true, summaryCreated: false });
+      return;
+    }
     if (this.isStreaming) this.settle("aborted", "aborted");
   }
 

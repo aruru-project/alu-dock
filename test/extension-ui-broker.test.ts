@@ -148,7 +148,7 @@ test("notifications, statuses, widgets, and overflow remain closed and bounded",
   broker.setWidget("jobs", ["one\nline"], "belowEditor");
   const rawBase64 = "A0+/".repeat(32);
   broker.notify("data:image/png;base64,A0+/A0+/", "info");
-  broker.setStatus("binary", rawBase64);
+  broker.setStatus("binary", `attachment: ${rawBase64}`);
   broker.setWidget("binary", [rawBase64]);
   assert.deepEqual(broker.projection().extensionStatus, {
     binary: "[binary/image payload omitted]",

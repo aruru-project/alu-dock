@@ -33,9 +33,12 @@ import type {
   ClearedRuntimeQueue,
   RuntimeCompactionResult,
   RuntimeEvent,
+  RuntimeForkResult,
   RuntimeHistoryEntry,
   RuntimeModelInfo,
   RuntimeModelState,
+  RuntimeNavigateOptions,
+  RuntimeNavigateResult,
   RuntimeProjectTrust,
   RuntimeReplacementResult,
   RuntimeSession,
@@ -67,6 +70,8 @@ import type {
   SessionMetricsDto,
   SettingsChangedData,
   StopReceipt,
+  TreeNodeDto,
+  TreePageDto,
 } from "./instance-dto.js";
 export type {
   AttachProjection,
@@ -93,7 +98,10 @@ export type {
   SessionMetricsDto,
   SettingsChangedData,
   StopReceipt,
+  TreeNodeDto,
+  TreePageDto,
 } from "./instance-dto.js";
+import { projectRuntimeNavigateResult, projectRuntimeTree } from "./session-tree.js";
 
 export interface ManagedInstanceOptions {
   id?: string;
@@ -149,6 +157,7 @@ interface WorkingCheckpoint {
   stopRequestedWhileRunning: boolean;
   catalogAdmissionOperationId: string | undefined;
   replacementIntent: CatalogInstanceRecord["replacement"];
+  durableSessionFile: string | undefined;
   recoverySessionFile: string | undefined;
   lastKnown: CatalogInstanceRecord["lastKnown"];
   interruption: CatalogInstanceRecord["interruption"];
@@ -194,6 +203,13 @@ export class InvalidHistoryCursorError extends Error {
   }
 }
 
+export class InvalidTreeCursorError extends Error {
+  constructor(message = "Session tree changed; restart pagination from the first page") {
+    super(message);
+    this.name = "InvalidTreeCursorError";
+  }
+}
+
 export class RuntimeEffectUnknownError extends Error {
   readonly queryHint = "Query the instance snapshot before any retry";
 
@@ -232,6 +248,7 @@ export class ManagedInstance {
   private receiptBoundaryOperationId: string | undefined;
   private readonly receiptBoundaryTasks: Promise<void>[] = [];
   private replacementIntent: CatalogInstanceRecord["replacement"];
+  private durableSessionFileValue: string | undefined;
   private recoverySessionFile: string | undefined;
   private lastKnownValue: CatalogInstanceRecord["lastKnown"];
   private interruptionValue: CatalogInstanceRecord["interruption"];
@@ -260,8 +277,11 @@ export class ManagedInstance {
   private compactionBoundary: Promise<void> | undefined;
   private resolveCompactionBoundary: (() => void) | undefined;
   private configurationPending = false;
+  private configurationKind: "general" | "navigation" | undefined;
   private configurationBoundary: Promise<void> | undefined;
   private resolveConfigurationBoundary: (() => void) | undefined;
+  private navigationStartedBoundary: Promise<void> | undefined;
+  private resolveNavigationStarted: (() => void) | undefined;
   private commandAbortPending = false;
   private commandAbortBoundary: Promise<void> | undefined;
   private resolveCommandAbortBoundary: (() => void) | undefined;
@@ -311,6 +331,7 @@ export class ManagedInstance {
       piSessionId: truncate(this.session.sessionId, 128) ?? "unknown",
       sessionFile: truncate(this.session.sessionFile, 16_384),
     };
+    this.durableSessionFileValue = this.runtimeDurableSessionFile();
     this.historyValue = this.session.getHistory().map(projectRuntimeHistoryEntry);
     this.metricsValue = projectRuntimeMetrics(this.session.getMetrics());
 
@@ -363,7 +384,7 @@ export class ManagedInstance {
       runtimeGeneration: snapshot.runtimeGeneration,
       ...(snapshot.ownerHostEpoch === undefined ? {} : { ownerHostEpoch: snapshot.ownerHostEpoch }),
       piSessionId: snapshot.executor.piSessionId,
-      ...(snapshot.executor.sessionFile === undefined ? {} : { sessionFile: snapshot.executor.sessionFile }),
+      ...(this.durableSessionFileValue === undefined ? {} : { sessionFile: this.durableSessionFileValue }),
       ...(snapshot.executor.model === undefined ? {} : { model: { provider: snapshot.executor.model.provider, id: snapshot.executor.model.id } }),
       ...(snapshot.executor.thinkingLevel === undefined ? {} : { thinkingLevel: snapshot.executor.thinkingLevel }),
       ...(snapshot.activeCommandId === undefined ? {} : { activeCommandId: snapshot.activeCommandId }),
@@ -431,7 +452,7 @@ export class ManagedInstance {
         || this.replacementIntent !== undefined;
       const recoverySessionFile = this.replacementIntent?.previousSessionFile
         ?? this.recoverySessionFile
-        ?? this.executorIdentity.sessionFile;
+        ?? this.durableSessionFileValue;
       await this.drainRuntimeWithoutCatalog();
       this.catalogAdmissionOperationId = undefined;
       this.replacementIntent = undefined;
@@ -486,7 +507,7 @@ export class ManagedInstance {
       execution: this.state.execution,
       lastRun: this.state.lastRun,
       reopenable: (this.state.lifecycle === "host_lost" || this.state.lifecycle === "runtime_error")
-        && (this.recoverySessionFile !== undefined || this.executorIdentity.sessionFile !== undefined),
+        && (this.recoverySessionFile !== undefined || this.durableSessionFileValue !== undefined),
       runtimeGeneration: this.runtimeGeneration,
       ownerHostEpoch: this.state.lifecycle === "active" || this.state.lifecycle === "stopping" ? this.hostEpoch : undefined,
       ...(this.interruptionValue === undefined ? {} : { interruption: cloneJson(this.interruptionValue) }),
@@ -582,6 +603,83 @@ export class ManagedInstance {
 
   async getHistoryPage(beforeEntryId: string | undefined, limit: number): Promise<HistoryPageDto & { instance: InstanceSnapshot }> {
     return this.withCommittedProjectionRead(() => ({ ...this.buildHistoryPage(beforeEntryId, limit), instance: this.snapshot() }));
+  }
+
+  async getTreePage(
+    treeRevision: string | undefined,
+    afterEntryId: string | undefined,
+    limit: number,
+  ): Promise<TreePageDto> {
+    return this.withProjectionRead(async () => {
+      const tree = this.currentTreeProjection();
+      if ((treeRevision === undefined) !== (afterEntryId === undefined)) {
+        throw new InvalidTreeCursorError("Tree continuation requires both treeRevision and afterEntryId");
+      }
+      if (treeRevision !== undefined && treeRevision !== tree.treeRevision) throw new InvalidTreeCursorError();
+      let start = 0;
+      if (afterEntryId !== undefined) {
+        const index = tree.nodes.findIndex((node) => node.entryId === afterEntryId);
+        if (index < 0) throw new InvalidTreeCursorError("Tree continuation entry does not belong to this revision");
+        start = index + 1;
+      }
+      const boundedLimit = Math.max(1, Math.min(200, Math.floor(limit)));
+      const nodes = cloneJson(tree.nodes.slice(start, start + boundedLimit));
+      const truncated = start + nodes.length < tree.nodes.length;
+      return {
+        treeRevision: tree.treeRevision,
+        nodes,
+        ...(tree.leafId === undefined ? {} : { leafId: tree.leafId }),
+        total: tree.nodes.length,
+        truncated,
+        ...(truncated && nodes.length > 0 ? { nextAfterEntryId: nodes[nodes.length - 1]?.entryId } : {}),
+      };
+    });
+  }
+
+  async navigateSession(
+    operationId: string,
+    targetId: string,
+    options: RuntimeNavigateOptions = {},
+  ): Promise<RuntimeNavigateResult> {
+    let configurationStarted = false;
+    let runtimeCalled = false;
+    try {
+      await this.beginConfiguration("navigating the session tree", false, "navigation");
+      configurationStarted = true;
+      if (!this.session.navigateTree) throw new Error("Runtime does not support session tree navigation");
+      if (!this.currentTreeProjection().nodes.some((node) => node.entryId === targetId)) {
+        throw new InvalidTreeCursorError("Navigation target does not belong to the current session tree");
+      }
+      this.receiptBoundaryOperationId = operationId;
+      runtimeCalled = true;
+      const pending = this.session.navigateTree(targetId, cloneJson(options));
+      this.resolveNavigationStarted?.();
+      const result = projectRuntimeNavigateResult(await pending);
+      await this.closeRuntimeOperationBoundary(operationId);
+      if (result.cancelled) return result;
+      const tree = this.currentTreeProjection();
+      await this.enqueueTransition(() => this.commitCatalogTransition(
+        { kind: "session.navigate", effect: "post_effect", operationId, instanceId: this.id },
+        () => this.touch(),
+        () => {
+          this.refreshHistory();
+          this.refreshMetrics();
+          this.appendEvent("session.navigated", {
+            targetId,
+            ...(tree.leafId === undefined ? {} : { leafId: tree.leafId }),
+            treeRevision: tree.treeRevision,
+            summaryCreated: result.summaryCreated,
+          });
+        },
+      ));
+      return result;
+    } catch (error) {
+      await this.closeRuntimeOperationBoundary(operationId).catch(() => {});
+      if (runtimeCalled && !isKnownMutationBoundaryError(error)) throw new RuntimeEffectUnknownError(operationId, error);
+      throw error;
+    } finally {
+      if (configurationStarted) this.endConfiguration();
+    }
   }
 
   async getAttachProjection(cursor: EventCursor | undefined, historyLimit = 200): Promise<AttachProjection> {
@@ -682,7 +780,7 @@ export class ManagedInstance {
   }
 
   async newSession(operationId: string, parentSession?: string): Promise<RuntimeReplacementResult> {
-    return this.replaceRuntime("creating a new session", operationId, "new", undefined, async () => {
+    return this.replaceRuntime("creating a new session", operationId, "new", {}, async () => {
       if (!this.session.newSession) throw new Error("Runtime does not support session replacement");
       return this.session.newSession(operationId, parentSession);
     });
@@ -693,9 +791,32 @@ export class ManagedInstance {
     sessionFile: string,
     trust: RuntimeProjectTrust,
   ): Promise<RuntimeReplacementResult> {
-    return this.replaceRuntime("switching session", operationId, "switch", sessionFile, async () => {
+    return this.replaceRuntime("switching session", operationId, "switch", { requestedSessionFile: sessionFile }, async () => {
       if (!this.session.switchSession) throw new Error("Runtime does not support session replacement");
       return this.session.switchSession(operationId, sessionFile, trust);
+    });
+  }
+
+  async forkSession(operationId: string, entryId: string): Promise<RuntimeForkResult> {
+    if (!this.session.fork) throw new Error("Runtime does not support session forking");
+    return this.replaceRuntime("forking session", operationId, "fork", { requestedEntryId: entryId }, async () => (
+      this.session.fork!(operationId, entryId, "before", "fork")
+    ), () => {
+      const target = this.currentTreeProjection().nodes.find((node) => node.entryId === entryId);
+      if (target?.kind !== "message" || target.role !== "user") {
+        throw new InvalidTreeCursorError("Fork target must be a user message in the current session tree");
+      }
+    });
+  }
+
+  async cloneSession(operationId: string, entryId: string): Promise<RuntimeReplacementResult> {
+    if (!this.session.fork) throw new Error("Runtime does not support session cloning");
+    return this.replaceRuntime("cloning session", operationId, "clone", { requestedEntryId: entryId }, async () => {
+      const result = await this.session.fork!(operationId, entryId, "at", "clone");
+      return { cancelled: result.cancelled };
+    }, () => {
+      const tree = this.currentTreeProjection();
+      if (tree.leafId !== entryId) throw new InvalidTreeCursorError("Clone entry must be the current session leaf");
     });
   }
 
@@ -738,7 +859,7 @@ export class ManagedInstance {
   }
 
   async reloadSession(operationId: string): Promise<RuntimeReplacementResult> {
-    const result = await this.replaceRuntime("reloading resources", operationId, "reload", undefined, async () => {
+    const result = await this.replaceRuntime("reloading resources", operationId, "reload", {}, async () => {
       if (!this.session.reload) throw new Error("Runtime does not support reload");
       return this.session.reload(operationId);
     });
@@ -1079,6 +1200,7 @@ export class ManagedInstance {
     this.catalogPort?.assertWritable();
     this.assertActive();
     if (this.commandAbortPending) throw new InstanceBusyError(this.id, "aborting the current run");
+    if (this.configurationKind === "navigation") return this.abortTreeNavigation(operationId);
     this.commandAbortPending = true;
     this.commandAbortBoundary = new Promise<void>((resolve) => { this.resolveCommandAbortBoundary = resolve; });
     const reservation = this.reserveProjectionGate();
@@ -1124,6 +1246,24 @@ export class ManagedInstance {
       }
     } finally {
       reservation.release();
+      this.commandAbortPending = false;
+      this.resolveCommandAbortBoundary?.();
+      this.resolveCommandAbortBoundary = undefined;
+      this.commandAbortBoundary = undefined;
+    }
+  }
+
+  private async abortTreeNavigation(operationId: string): Promise<void> {
+    this.commandAbortPending = true;
+    this.commandAbortBoundary = new Promise<void>((resolve) => { this.resolveCommandAbortBoundary = resolve; });
+    try {
+      await this.navigationStartedBoundary;
+      await this.session.abort();
+      await this.configurationBoundary;
+    } catch (error) {
+      if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError) throw error;
+      throw new RuntimeEffectUnknownError(operationId, error);
+    } finally {
       this.commandAbortPending = false;
       this.resolveCommandAbortBoundary?.();
       this.resolveCommandAbortBoundary = undefined;
@@ -1336,6 +1476,7 @@ export class ManagedInstance {
     try {
       this.catalogPort?.assertWritable();
       mutate();
+      this.refreshDurableSessionFile();
       if (this.catalogPort) await this.catalogPort.commit(this.catalogRecord(), context);
     } catch (error) {
       if (context.effect !== "post_effect") this.restoreWorkingCheckpoint(checkpoint);
@@ -1374,6 +1515,7 @@ export class ManagedInstance {
       stopRequestedWhileRunning: this.stopRequestedWhileRunning,
       catalogAdmissionOperationId: this.catalogAdmissionOperationId,
       replacementIntent: this.replacementIntent ? cloneJson(this.replacementIntent) : undefined,
+      durableSessionFile: this.durableSessionFileValue,
       recoverySessionFile: this.recoverySessionFile,
       lastKnown: this.lastKnownValue ? cloneJson(this.lastKnownValue) : undefined,
       interruption: this.interruptionValue ? cloneJson(this.interruptionValue) : undefined,
@@ -1401,11 +1543,31 @@ export class ManagedInstance {
     this.stopRequestedWhileRunning = checkpoint.stopRequestedWhileRunning;
     this.catalogAdmissionOperationId = checkpoint.catalogAdmissionOperationId;
     this.replacementIntent = checkpoint.replacementIntent;
+    this.durableSessionFileValue = checkpoint.durableSessionFile;
     this.recoverySessionFile = checkpoint.recoverySessionFile;
     this.lastKnownValue = checkpoint.lastKnown;
     this.interruptionValue = checkpoint.interruption;
     this.stopRequestedAt = checkpoint.stopRequestedAt;
     this.shutdownRequestedAt = checkpoint.shutdownRequestedAt;
+  }
+
+  private runtimeDurableSessionFile(): string | undefined {
+    const value = this.session.getDurableSessionFile ? this.session.getDurableSessionFile() : this.session.sessionFile;
+    const projected = truncate(value, 16_384);
+    return projected !== undefined && projected === this.executorIdentity.sessionFile ? projected : undefined;
+  }
+
+  private refreshDurableSessionFile(): void {
+    if (this.state.lifecycle !== "active" && this.state.lifecycle !== "stopping") return;
+    const durable = this.runtimeDurableSessionFile();
+    if (durable === undefined) return;
+    this.durableSessionFileValue = durable;
+    if (this.replacementIntent === undefined) this.recoverySessionFile = undefined;
+  }
+
+  private currentTreeProjection(): { treeRevision: string; nodes: TreeNodeDto[]; leafId?: string } {
+    if (!this.session.getTree) throw new Error("Runtime does not support session tree projection");
+    return projectRuntimeTree(this.session.getTree(), this.runtimeGenerationValue);
   }
 
   private buildHistoryPage(beforeEntryId: string | undefined, limit: number, beforeTimestamp?: string): HistoryPageDto {
@@ -1470,7 +1632,11 @@ export class ManagedInstance {
     }
   }
 
-  private async beginConfiguration(action: string, allowRunning = false): Promise<void> {
+  private async beginConfiguration(
+    action: string,
+    allowRunning = false,
+    kind: "general" | "navigation" = "general",
+  ): Promise<void> {
     this.catalogPort?.assertWritable();
     this.assertActive();
     if (
@@ -1483,7 +1649,11 @@ export class ManagedInstance {
       throw new InstanceBusyError(this.id, action);
     }
     this.configurationPending = true;
+    this.configurationKind = kind;
     this.configurationBoundary = new Promise<void>((resolve) => { this.resolveConfigurationBoundary = resolve; });
+    if (kind === "navigation") {
+      this.navigationStartedBoundary = new Promise<void>((resolve) => { this.resolveNavigationStarted = resolve; });
+    }
     const reservation = this.reserveProjectionGate();
     this.releaseConfigurationGate = reservation.release;
     try {
@@ -1498,6 +1668,12 @@ export class ManagedInstance {
 
   private endConfiguration(): void {
     this.configurationPending = false;
+    if (this.configurationKind === "navigation") {
+      this.resolveNavigationStarted?.();
+      this.resolveNavigationStarted = undefined;
+      this.navigationStartedBoundary = undefined;
+    }
+    this.configurationKind = undefined;
     this.releaseConfigurationGate?.();
     this.releaseConfigurationGate = undefined;
     this.resolveConfigurationBoundary?.();
@@ -1505,30 +1681,44 @@ export class ManagedInstance {
     this.configurationBoundary = undefined;
   }
 
-  private async replaceRuntime(
+  private async replaceRuntime<T extends RuntimeReplacementResult>(
     action: string,
     operationId: string,
-    kind: "new" | "switch" | "reload",
-    requestedSessionFile: string | undefined,
-    replace: () => Promise<RuntimeReplacementResult>,
-  ): Promise<RuntimeReplacementResult> {
+    kind: "new" | "switch" | "fork" | "clone" | "reload",
+    target: { requestedSessionFile?: string; requestedEntryId?: string },
+    replace: () => Promise<T>,
+    validateTarget?: () => void,
+  ): Promise<T> {
     await this.beginConfiguration(action);
     try {
+      validateTarget?.();
       const startedAt = this.timestamp();
+      const currentDurableSessionFile = this.runtimeDurableSessionFile();
+      const previousRecoverySessionFile = currentDurableSessionFile
+        ?? this.recoverySessionFile
+        ?? this.durableSessionFileValue;
+      const restoreCurrentSessionRecovery = (): void => {
+        const durable = this.runtimeDurableSessionFile();
+        this.durableSessionFileValue = durable;
+        this.recoverySessionFile = durable === undefined ? previousRecoverySessionFile : undefined;
+      };
       await this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: `session.${kind}.intent`, effect: "pre_effect", operationId, instanceId: this.id },
         () => {
+          if (currentDurableSessionFile !== undefined) this.durableSessionFileValue = currentDurableSessionFile;
+          this.recoverySessionFile = undefined;
           this.replacementIntent = {
             operationId,
             kind,
-            ...(this.executorIdentity.sessionFile === undefined ? {} : { previousSessionFile: this.executorIdentity.sessionFile }),
-            ...(requestedSessionFile === undefined ? {} : { requestedSessionFile }),
+            ...(previousRecoverySessionFile === undefined ? {} : { previousSessionFile: previousRecoverySessionFile }),
+            ...(target.requestedSessionFile === undefined ? {} : { requestedSessionFile: target.requestedSessionFile }),
+            ...(target.requestedEntryId === undefined ? {} : { requestedEntryId: target.requestedEntryId }),
             startedAt,
           };
           this.touch(startedAt);
         },
       ));
-      let result: RuntimeReplacementResult;
+      let result: T;
       this.receiptBoundaryOperationId = operationId;
       try { result = await replace(); }
       catch (error) {
@@ -1536,7 +1726,7 @@ export class ManagedInstance {
         if (this.replacementIntent) {
           await this.enqueueTransition(() => this.commitCatalogTransition(
             { kind: `session.${kind}.failed`, effect: "post_effect", operationId, instanceId: this.id },
-            () => { this.replacementIntent = undefined; this.touch(); },
+            () => { this.replacementIntent = undefined; restoreCurrentSessionRecovery(); this.touch(); },
           ));
         }
         throw error;
@@ -1545,7 +1735,7 @@ export class ManagedInstance {
       if (result.cancelled && this.replacementIntent) {
         await this.enqueueTransition(() => this.commitCatalogTransition(
           { kind: `session.${kind}.cancelled`, effect: "post_effect", operationId, instanceId: this.id },
-          () => { this.replacementIntent = undefined; this.touch(); },
+          () => { this.replacementIntent = undefined; restoreCurrentSessionRecovery(); this.touch(); },
         ));
       }
       if (!result.cancelled && this.replacementIntent) {
@@ -1698,7 +1888,8 @@ export class ManagedInstance {
       const sessionFile = optionalRuntimeString(event.sessionFile, 16_384);
       const cwd = optionalRuntimeString(event.cwd, 16_384);
       const name = optionalRuntimeString(event.name, 256);
-      const reason = event.reason === "resume" || event.reason === "reload" ? event.reason : "new";
+      const reason = event.reason === "resume" || event.reason === "reload" || event.reason === "fork" ? event.reason : "new";
+      const previousDurableSessionFile = this.replacementIntent?.previousSessionFile ?? previousSessionFile;
       await this.commitCatalogTransition(context("session.replaced"), () => {
         this.runtimeGenerationValue += 1;
         this.replacementIntent = undefined;
@@ -1722,6 +1913,8 @@ export class ManagedInstance {
         this.nameValue = name;
         this.executorIdentity.piSessionId = truncate(this.session.sessionId, 128) ?? "unknown";
         this.executorIdentity.sessionFile = truncate(this.session.sessionFile, 16_384);
+        this.durableSessionFileValue = this.runtimeDurableSessionFile();
+        this.recoverySessionFile = this.durableSessionFileValue === undefined ? previousDurableSessionFile : undefined;
         this.applyModelState(this.session.getModelState());
         this.touch();
       }, () => {
@@ -1762,7 +1955,7 @@ export class ManagedInstance {
       }, () => {
         this.appendEvent("instance.runtime_error", {
           operationId: boundedRuntimeString(event.operationId, 128, "runtime-internal"),
-          kind: event.kind === "reload" || event.kind === "switch" ? event.kind : "new",
+          kind: event.kind === "reload" || event.kind === "switch" || event.kind === "fork" || event.kind === "clone" ? event.kind : "new",
           error,
           recoverySessionFile,
         });
@@ -1888,7 +2081,8 @@ export class ManagedInstance {
       const sessionFile = optionalRuntimeString(event.sessionFile, 16_384);
       const cwd = optionalRuntimeString(event.cwd, 16_384);
       const name = optionalRuntimeString(event.name, 256);
-      const reason = event.reason === "resume" || event.reason === "reload" ? event.reason : "new";
+      const reason = event.reason === "resume" || event.reason === "reload" || event.reason === "fork" ? event.reason : "new";
+      const previousDurableSessionFile = this.replacementIntent?.previousSessionFile ?? previousSessionFile;
       this.runtimeGenerationValue += 1;
       this.publishedRuntimeGenerationValue = this.runtimeGenerationValue;
       this.replacementIntent = undefined;
@@ -1914,6 +2108,8 @@ export class ManagedInstance {
       this.nameValue = name;
       this.executorIdentity.piSessionId = truncate(this.session.sessionId, 128) ?? "unknown";
       this.executorIdentity.sessionFile = truncate(this.session.sessionFile, 16_384);
+      this.durableSessionFileValue = this.runtimeDurableSessionFile();
+      this.recoverySessionFile = this.durableSessionFileValue === undefined ? previousDurableSessionFile : undefined;
       this.applyModelState(this.session.getModelState());
       this.touch();
       this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue });
@@ -1943,7 +2139,7 @@ export class ManagedInstance {
       this.touch();
       this.appendEvent("instance.runtime_error", {
         operationId: boundedRuntimeString(event.operationId, 128, "runtime-internal"),
-        kind: event.kind === "reload" || event.kind === "switch" ? event.kind : "new",
+        kind: event.kind === "reload" || event.kind === "switch" || event.kind === "fork" || event.kind === "clone" ? event.kind : "new",
         error: this.state.lastError,
         recoverySessionFile: this.recoverySessionFile,
       });
@@ -2574,7 +2770,8 @@ const DATA_URI = /data:[^,]*;base64,/i;
 const BASE64_PAYLOAD = /^(?=.{128,}$)(?=.*(?:[0-9+/]|={1,2}$))(?:[A-Za-z0-9+/]{4})+(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 function isBinaryText(value: string): boolean {
-  return DATA_URI.test(value) || BASE64_PAYLOAD.test(value);
+  if (DATA_URI.test(value) || BASE64_PAYLOAD.test(value.replace(/\s+/gu, ""))) return true;
+  return value.split(/[^A-Za-z0-9+/=]+/gu).some((part) => BASE64_PAYLOAD.test(part));
 }
 
 export function projectJsonObject(input: unknown): { value: JsonObject; omittedFields: string[] } {

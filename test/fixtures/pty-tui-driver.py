@@ -153,6 +153,24 @@ def main() -> int:
                 while b"expanded tool detail" not in output and time.monotonic() < expand_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
+            elif action == "stage6":
+                os.write(fd, b"/tree tree-u2\r")
+                tree_deadline = time.monotonic() + 5
+                while b"Session branch selected" not in output and time.monotonic() < tree_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\x03")  # Clear selected editor text.
+                os.write(fd, b"/fork tree-u2\r")
+                fork_deadline = time.monotonic() + 5
+                while b"generation 2" not in output and time.monotonic() < fork_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\x03")  # Clear fork-selected editor text.
+                os.write(fd, b"/clone\r")
+                clone_deadline = time.monotonic() + 5
+                while b"generation 3" not in output and time.monotonic() < clone_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
             elif action == "stage3":
                 steps = [
                     (b"/settings autoRetry false\r", b"autoRetry = false"),

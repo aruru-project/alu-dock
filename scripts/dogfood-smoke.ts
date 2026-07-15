@@ -14,15 +14,20 @@ async function main(): Promise<void> {
   const instance = await client.create(args.cwd, `release-smoke-${args.releaseId.slice(-12)}`);
   let stopped = false;
   try {
-    const [catalog, resources, tools, settings, snapshot] = await Promise.all([
+    const [catalog, resources, tools, settings, snapshot, tree] = await Promise.all([
       client.commands(instance.id),
       client.resources(instance.id),
       client.tools(instance.id),
       client.settings(instance.id),
       client.status(instance.id),
+      client.tree(instance.id),
     ]);
+    assert.ok(ping.capabilities.includes("session.tree.v1"), "managed Host must advertise session.tree.v1");
     assert.equal(settings.settings.length, 24, "settings projection must remain exhaustive");
     assert.equal(snapshot.lifecycle, "active");
+    assert.match(tree.treeRevision, new RegExp(`^g${snapshot.runtimeGeneration}-[0-9a-f]{64}$`, "u"));
+    assert.ok(tree.nodes.length <= tree.total);
+    assert.equal(tree.truncated, tree.nodes.length < tree.total);
     const names = catalog.commands.map((command) => command.name);
     const checkedPairs: string[] = [];
     for (const [first, second] of [["chain", "chain-prompts"], ["run", "run-chain"]] as const) {
@@ -47,6 +52,8 @@ async function main(): Promise<void> {
       diagnostics: resources.diagnostics.length,
       tools: tools.tools.length,
       settings: settings.settings.length,
+      treeNodes: tree.nodes.length,
+      treeRevision: tree.treeRevision,
       checkedPairs,
       passed: true,
     })}\n`);

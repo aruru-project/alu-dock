@@ -306,7 +306,7 @@ async function waitForReadyHost(socketPath: string, previousEpoch?: string): Pro
       const ping = await new DockClient({ socketPath, timeoutMs: 500 }).ping();
       const mainPid = unitMainPid();
       const capabilities = new Set(ping.capabilities);
-      const missing = ["catalog.v1", "service.managed.v1", "session.reopen"].filter((capability) => !capabilities.has(capability));
+      const missing = ["catalog.v1", "service.managed.v1", "session.reopen", "session.tree.v1"].filter((capability) => !capabilities.has(capability));
       if (mainPid !== ping.pid) lastError = `hello PID ${ping.pid} does not match MainPID ${mainPid}`;
       else if (missing.length > 0) lastError = `Host lacks managed capabilities: ${missing.join(", ")}`;
       else if (previousEpoch !== undefined && ping.hostEpoch === previousEpoch) lastError = "hostEpoch did not change";

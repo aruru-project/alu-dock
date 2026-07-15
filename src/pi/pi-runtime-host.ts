@@ -1,3 +1,4 @@
+import { lstatSync, realpathSync } from "node:fs";
 import { realpath } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
@@ -16,6 +17,7 @@ import {
   SettingsManager,
   type ResourceDiagnostic,
   type SessionEntry,
+  type SessionTreeNode,
   type SourceInfo,
 } from "@earendil-works/pi-coding-agent";
 
@@ -24,15 +26,20 @@ import type {
   ClearedRuntimeQueue,
   RuntimeCompactionResult,
   RuntimeEvent,
+  RuntimeForkResult,
   RuntimeHistoryEntry,
   RuntimeModelInfo,
   RuntimeModelState,
+  RuntimeNavigateOptions,
+  RuntimeNavigateResult,
   RuntimePromptOptions,
   RuntimeSession,
   RuntimeSessionInfo,
   RuntimeSessionMetrics,
   RuntimeSessionTarget,
   RuntimeThinkingLevel,
+  RuntimeTreeNode,
+  RuntimeTreeSnapshot,
 } from "../core/runtime-session.js";
 import type {
   CommandDto,
@@ -83,10 +90,10 @@ const DEFAULT_SESSION_CATALOG: PiSessionCatalog = {
 
 type RuntimeOwner = Pick<AgentSessionRuntime,
   "session" | "services" | "cwd" | "diagnostics" | "modelFallbackMessage" |
-  "setBeforeSessionInvalidate" | "setRebindSession" | "newSession" | "switchSession" | "dispose"
+  "setBeforeSessionInvalidate" | "setRebindSession" | "newSession" | "switchSession" | "fork" | "dispose"
 >;
 
-type ReplacementKind = "new" | "switch" | "reload";
+type ReplacementKind = "new" | "switch" | "fork" | "clone" | "reload";
 
 export interface PiRuntimeHostOptions {
   runtime: RuntimeOwner;
@@ -94,6 +101,7 @@ export interface PiRuntimeHostOptions {
   setProjectTrust?: (cwd: string, trusted: boolean) => void;
   commitReplacement?: (change: { operationId: string; kind: ReplacementKind; previousSessionFile?: string; sessionFile?: string }) => Promise<void>;
   commitRuntimeError?: (failure: { operationId: string; kind: ReplacementKind; error: unknown; recoverySessionFile?: string }) => Promise<void>;
+  isSessionFileDurable?: (path: string) => boolean;
   extensionUiBroker?: ExtensionUiBroker;
   uiContext?: ExtensionUIContext;
 }
@@ -132,6 +140,7 @@ export class PiRuntimeHost implements RuntimeSession {
   private rebindEntered = false;
   private replacementInvalidated = false;
   private replacementRunning = false;
+  private treeNavigation: Promise<RuntimeNavigateResult> | undefined;
   private initialActivated = false;
 
   private constructor(private readonly options: PiRuntimeHostOptions) {
@@ -162,6 +171,24 @@ export class PiRuntimeHost implements RuntimeSession {
   get sessionId(): string { return this.requireActive().session.sessionId; }
   get sessionFile(): string | undefined { return this.requireActive().session.sessionFile; }
   get isStreaming(): boolean { return this.active?.session.isStreaming ?? false; }
+  getDurableSessionFile(): string | undefined {
+    const path = this.active?.session.sessionFile;
+    if (path === undefined) return undefined;
+    try {
+      if (this.options.isSessionFileDurable) return this.options.isSessionFileDurable(path) ? path : undefined;
+      const info = lstatSync(path);
+      const getuid = process.getuid;
+      return info.isFile()
+        && !info.isSymbolicLink()
+        && realpathSync(path) === resolve(path)
+        && typeof getuid === "function"
+        && info.uid === getuid()
+        ? path
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
   get diagnostics(): readonly unknown[] { return this.options.runtime.diagnostics; }
   get modelFallbackMessage(): string | undefined { return this.options.runtime.modelFallbackMessage; }
   currentSession(): AgentSession { return this.requireActive().session; }
@@ -335,6 +362,41 @@ export class PiRuntimeHost implements RuntimeSession {
       .filter((entry): entry is RuntimeHistoryEntry => entry !== undefined);
   }
 
+  getTree(): RuntimeTreeSnapshot {
+    const manager = this.requireActive().session.sessionManager;
+    const nodes: RuntimeTreeNode[] = [];
+    const roots = manager.getTree();
+    const stack: Array<{ node: SessionTreeNode; parentId?: string; depth: number }> = [];
+    for (let index = roots.length - 1; index >= 0; index -= 1) stack.push({ node: roots[index] as SessionTreeNode, depth: 0 });
+    while (stack.length > 0) {
+      const current = stack.pop() as { node: SessionTreeNode; parentId?: string; depth: number };
+      projectTreeNode(current.node, current.parentId, current.depth, nodes);
+      for (let index = current.node.children.length - 1; index >= 0; index -= 1) {
+        stack.push({ node: current.node.children[index] as SessionTreeNode, parentId: current.node.entry.id, depth: current.depth + 1 });
+      }
+    }
+    const leafId = manager.getLeafId() ?? undefined;
+    return { nodes, ...(leafId === undefined ? {} : { leafId }) };
+  }
+
+  navigateTree(targetId: string, options: RuntimeNavigateOptions = {}): Promise<RuntimeNavigateResult> {
+    if (this.treeNavigation) return Promise.reject(new Error("A session tree navigation is already active"));
+    const navigation = this.serialize(async () => {
+      const result = await this.requireActive().session.navigateTree(targetId, options);
+      return {
+        cancelled: result.cancelled,
+        ...(result.aborted === undefined ? {} : { aborted: result.aborted }),
+        ...(result.editorText === undefined ? {} : { editorText: safeSelectedText(result.editorText) }),
+        summaryCreated: result.summaryEntry !== undefined,
+      };
+    });
+    const tracked = navigation.finally(() => {
+      if (this.treeNavigation === tracked) this.treeNavigation = undefined;
+    });
+    this.treeNavigation = tracked;
+    return tracked;
+  }
+
   async selectModel(provider: string, modelId: string): Promise<RuntimeModelState> {
     const binding = this.requireActive();
     const model = binding.services.modelRegistry.find(provider, modelId);
@@ -382,6 +444,12 @@ export class PiRuntimeHost implements RuntimeSession {
   async abort(): Promise<void> {
     const session = this.active?.session;
     if (!session) return;
+    const navigation = this.treeNavigation;
+    if (navigation) {
+      session.abortBranchSummary();
+      await navigation.then(() => {}, (error) => { throw error; });
+      return;
+    }
     if (session.isCompacting) {
       let resolveCompaction!: () => void;
       const compactionEnded = new Promise<void>((resolve) => { resolveCompaction = resolve; });
@@ -422,6 +490,34 @@ export class PiRuntimeHost implements RuntimeSession {
     return this.serialize(() => {
       this.options.setProjectTrust?.(trust.canonicalCwd, trust.projectTrusted);
       return this.replace(operationId, "switch", () => this.options.runtime.switchSession(path));
+    });
+  }
+
+  fork(
+    operationId: string,
+    entryId: string,
+    position: "before" | "at",
+    kind: "fork" | "clone",
+  ): Promise<RuntimeForkResult> {
+    return this.serialize(() => {
+      const binding = this.requireActive();
+      if (kind === "clone" && binding.session.sessionManager.getLeafId() !== entryId) {
+        throw new Error("Clone entry must be the current session leaf");
+      }
+      if (position === "before") {
+        const selected = binding.session.getUserMessagesForForking().find((entry) => entry.entryId === entryId);
+        if (!selected) throw new Error("Fork-before requires a user message entry");
+        safeSelectedText(selected.text);
+      } else if (!binding.session.sessionManager.getEntry(entryId)) {
+        throw new Error("Fork entry does not belong to the current session tree");
+      }
+      return this.replace(operationId, kind, async () => {
+        const result = await this.options.runtime.fork(entryId, { position });
+        if (result.cancelled) return { cancelled: true };
+        const selectedText = result.selectedText === undefined ? undefined : safeSelectedText(result.selectedText);
+        if (kind === "fork" && selectedText === undefined) throw new Error("Pi completed fork-before without selected editor text");
+        return { cancelled: false, ...(selectedText === undefined ? {} : { selectedText }) };
+      });
     });
   }
 
@@ -491,7 +587,7 @@ export class PiRuntimeHost implements RuntimeSession {
     return this.disposePromise;
   }
 
-  private async replace(operationId: string, kind: "new" | "switch", operation: () => Promise<{ cancelled: boolean }>): Promise<{ cancelled: boolean }> {
+  private async replace<T extends { cancelled: boolean }>(operationId: string, kind: "new" | "switch" | "fork" | "clone", operation: () => Promise<T>): Promise<T> {
     const previousSessionFile = this.sessionFile;
     this.rebindEntered = false;
     this.replacementInvalidated = false;
@@ -576,7 +672,7 @@ export class PiRuntimeHost implements RuntimeSession {
     // and explicitly activates the initial binding.
   }
 
-  private promoteStaged(kind: "new" | "switch", previousSessionFile?: string): void {
+  private promoteStaged(kind: "new" | "switch" | "fork" | "clone", previousSessionFile?: string): void {
     const binding = this.staged;
     if (!binding) throw new Error("Replacement runtime binding was not staged");
     this.staged = undefined;
@@ -591,7 +687,7 @@ export class PiRuntimeHost implements RuntimeSession {
   private publishReplacement(kind: ReplacementKind, previousSessionFile?: string, sessionFile?: string): void {
     this.publish({
       type: "dock_session_replaced",
-      reason: kind === "switch" ? "resume" : kind,
+      reason: kind === "switch" ? "resume" : kind === "clone" ? "fork" : kind,
       previousSessionFile,
       sessionFile,
       cwd: this.active?.services.cwd,
@@ -644,8 +740,13 @@ function boundedString(value: unknown, limit: number, fallback: string): string 
 }
 
 function safeOptionalText(value: unknown, limit: number): string | undefined {
-  if (typeof value !== "string" || value.length === 0 || DATA_URI.test(value) || RAW_BASE64.test(value.replace(/\s+/g, ""))) return undefined;
+  if (typeof value !== "string" || value.length === 0 || containsBinaryText(value)) return undefined;
   return boundedString(value, limit, "");
+}
+
+function containsBinaryText(value: string): boolean {
+  if (DATA_URI.test(value) || RAW_BASE64.test(value.replace(/\s+/gu, ""))) return true;
+  return value.split(/[^A-Za-z0-9+/=]+/gu).some((part) => RAW_BASE64.test(part));
 }
 
 function safeRequiredText(value: unknown, limit: number, fallback: string): string {
@@ -691,6 +792,100 @@ function projectHistoryEntry(entry: SessionEntry): RuntimeHistoryEntry | undefin
   if (entry.type === "branch_summary") return { ...base, role: "system", content: entry.summary };
   if (entry.type === "session_info" && entry.name) return { ...base, role: "system", content: `Session named ${entry.name}` };
   return undefined;
+}
+
+function projectTreeNode(
+  node: SessionTreeNode,
+  parentId: string | undefined,
+  depth: number,
+  output: RuntimeTreeNode[],
+): void {
+  if (output.length >= 100_000) throw new Error("Pi session tree exceeds 100000 entries");
+  const entry = node.entry;
+  const kind = entry.type;
+  if (!["message", "thinking_level_change", "model_change", "compaction", "branch_summary", "custom", "custom_message", "label", "session_info"].includes(kind)) {
+    throw new Error(`Unsupported Pi session tree entry kind: ${kind}`);
+  }
+  const role = entry.type === "message" ? treeMessageRole((entry.message as unknown as Record<string, unknown>).role) : undefined;
+  output.push({
+    entryId: entry.id,
+    ...(parentId === undefined ? {} : { parentId }),
+    depth,
+    kind: kind as RuntimeTreeNode["kind"],
+    ...(role === undefined ? {} : { role }),
+    ...(node.label === undefined ? {} : { label: treeLine(node.label, 256, "Session label omitted") }),
+    ...(node.labelTimestamp === undefined ? {} : { labelTimestamp: node.labelTimestamp }),
+    timestamp: entry.timestamp,
+    summary: projectTreeSummary(entry),
+    hasChildren: node.children.length > 0,
+  });
+}
+
+function projectTreeSummary(entry: SessionEntry): string {
+  switch (entry.type) {
+    case "message": {
+      const message = entry.message as unknown as Record<string, unknown>;
+      if (message.role === "bashExecution") {
+        return treeLine(message.command, 2_048, "Shell execution");
+      }
+      if (message.role === "toolResult") {
+        const name = treeLine(message.toolName, 256, "tool");
+        const detail = contentText(message.content);
+        return detail ? treeLine(`${name}: ${detail}`, 2_048, `Tool result: ${name}`) : `Tool result: ${name}`;
+      }
+      return treeLine(contentText(message.content), 2_048, `${treeMessageRole(message.role)} message`);
+    }
+    case "thinking_level_change": return treeLine(`Thinking level: ${entry.thinkingLevel}`, 2_048, "Thinking level change");
+    case "model_change": return treeLine(`Model: ${entry.provider}/${entry.modelId}`, 2_048, "Model change");
+    case "compaction": return treeLine(entry.summary, 2_048, "Compaction summary");
+    case "branch_summary": return treeLine(entry.summary, 2_048, "Branch summary");
+    case "custom": return treeLine(`Custom entry: ${entry.customType}`, 2_048, "Custom entry");
+    case "custom_message": return treeLine(contentText(entry.content), 2_048, `Custom message: ${entry.customType}`);
+    case "label": return treeLine(entry.label ? `Label ${entry.targetId}: ${entry.label}` : `Label cleared: ${entry.targetId}`, 2_048, "Label change");
+    case "session_info": return treeLine(entry.name ? `Session name: ${entry.name}` : "Session name cleared", 2_048, "Session info");
+  }
+}
+
+function treeMessageRole(value: unknown): "user" | "assistant" | "tool" | "system" {
+  if (value === "user" || value === "assistant") return value;
+  if (value === "tool" || value === "toolResult") return "tool";
+  return "system";
+}
+
+function contentText(value: unknown): string | undefined {
+  if (typeof value === "string") return value.slice(0, 8_192);
+  if (!Array.isArray(value)) return undefined;
+  const parts: string[] = [];
+  let length = 0;
+  for (let index = 0; index < Math.min(value.length, 200) && length < 8_192; index += 1) {
+    const item = value[index];
+    if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
+    const block = item as Record<string, unknown>;
+    const part = block.type === "text" && typeof block.text === "string"
+      ? block.text
+      : (block.type === "toolCall" || block.type === "tool_call") && typeof block.name === "string"
+        ? `Tool call: ${block.name}`
+        : undefined;
+    if (part === undefined) continue;
+    const bounded = part.slice(0, 8_192 - length);
+    parts.push(bounded);
+    length += bounded.length + 1;
+  }
+  return parts.length > 0 ? parts.join(" ") : undefined;
+}
+
+function treeLine(value: unknown, limit: number, fallback: string): string {
+  if (typeof value !== "string" || value.length === 0) return fallback;
+  const boundedInput = value.slice(0, Math.max(8_192, limit * 2));
+  const line = boundedInput.replace(/[\u0000-\u001f\u007f-\u009f]+/gu, " ").replace(/\s+/gu, " ").trim();
+  return safeRequiredText(line, limit, fallback);
+}
+
+function safeSelectedText(value: unknown): string {
+  if (typeof value !== "string") throw new Error("Pi returned invalid selected editor text");
+  if (value.length > 256_000) throw new Error("Selected editor text exceeds 256000 characters");
+  if (containsBinaryText(value)) throw new Error("Selected editor text cannot contain binary or image payloads");
+  return value.replace(/\r\n?/gu, "\n").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/gu, " ");
 }
 
 function validCatalogName(value: unknown): string | undefined {

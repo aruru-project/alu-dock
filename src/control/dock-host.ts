@@ -26,6 +26,7 @@ import {
   InstanceBusyError,
   InstanceNotActiveError,
   InvalidHistoryCursorError,
+  InvalidTreeCursorError,
   InvalidDeliveryModeError,
   RuntimeEffectUnknownError,
   type AttachProjection,
@@ -436,6 +437,7 @@ export class DockHost {
       case "command.catalog": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{commands:await instance.getCommands(request.params.prefix)}); return; }
       case "session.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getHistoryPage(request.params.beforeEntryId,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
       case "session.list": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{sessions:await instance.listSessions(request.params.scope)}); return; }
+      case "session.tree": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getTreePage(request.params.treeRevision,request.params.afterEntryId,request.params.limit)); return; }
     }
   }
 
@@ -514,7 +516,8 @@ function isMutationRequest(type: ControlRequest["type"]): boolean {
     && type !== "resource.get"
     && type !== "command.catalog"
     && type !== "session.history"
-    && type !== "session.list";
+    && type !== "session.list"
+    && type !== "session.tree";
 }
 
 function successResponse(requestId:string,hostEpoch:string,result:unknown):ControlResponse { return {kind:"response",version:2,requestId,hostEpoch,ok:true,result}; }
@@ -624,6 +627,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   }
   if (error instanceof CatalogOperationRecordedError) return { code: "operation_conflict", message: error.message };
   if (error instanceof InvalidHistoryCursorError) return { code: "invalid_cursor", message: error.message };
+  if (error instanceof InvalidTreeCursorError) return { code: "invalid_cursor", message: error.message };
   if (error instanceof InteractionNotFoundError) return { code: error.code, message: error.message };
   if (error instanceof InteractionExpiredError) return { code: error.code, message: error.message };
   if (error instanceof InteractionWrongLeaseError) return { code: error.code, message: error.message };

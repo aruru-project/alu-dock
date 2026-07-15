@@ -1,6 +1,6 @@
 # Dogfood 发布与部署合同
 
-状态：阶段 3.6 冻结发布合同；阶段 5 durable catalog/reopen/service lifecycle 已实现并继承全部可追溯发布要求。
+状态：阶段 3.6 冻结发布合同；阶段 5 durable catalog/reopen/service lifecycle与阶段 6 `session.tree.v1`均继承全部可追溯发布要求。
 
 ## 目标
 
@@ -65,7 +65,7 @@ journalctl --user -u alu-dock.service -n 200 --no-pager
 journalctl --user -u alu-dock.service -f
 ```
 
-User manager整体为 degraded不构成失败；只判定 `alu-dock.service` 本身。Installer检查 linger但不修改机器 policy。应用ready必须同时满足V2 hello、完整managed capability集合和hello PID=`MainPID`；restart还要求新`hostEpoch`。
+User manager整体为 degraded不构成失败；只判定 `alu-dock.service` 本身。Installer检查 linger但不修改机器 policy。应用ready必须同时满足V2 hello、完整managed capability集合（Stage 6 release包括`session.tree.v1`）和hello PID=`MainPID`；restart还要求新`hostEpoch`。
 
 显式管理命令：
 
@@ -116,7 +116,8 @@ Smoke不能只做 `ping`，也不能只加载合成 extension。它至少要：
 
 - 通过 release `DockClient` 连接 service；
 - 在仓库 cwd创建临时实例，走正常 project trust；
-- 读取并解析 commands、resources、tools、settings和 snapshot；
+- 读取并解析 commands、resources、tools、settings、snapshot和revision-bound session tree；
+- hello必须advertise `session.tree.v1`，tree revision中的generation必须与snapshot一致；
 - command catalog必须覆盖真实 global packages/extensions/skills/prompts；
 - 校验 prefix/hyphen命令组合，例如已安装时的 `chain`/`chain-prompts`、`run`/`run-chain`；
 - 确认 closed projection不含 handler、function、binary或 base64；

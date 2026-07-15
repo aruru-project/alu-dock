@@ -45,7 +45,7 @@ function fakeManager(home: string): {
     run,
     probe: async () => {
       if (!state.active) throw new ControlClientError("connection_error", "inactive");
-      return { pid: state.pid, protocolVersion: 2, hostEpoch: state.epoch, capabilities: ["catalog.v1", "core.v2", "service.managed.v1", "session.reopen"] };
+      return { pid: state.pid, protocolVersion: 2, hostEpoch: state.epoch, capabilities: ["catalog.v1", "core.v2", "service.managed.v1", "session.reopen", "session.tree.v1"] };
     },
     sleep: async () => {},
   });

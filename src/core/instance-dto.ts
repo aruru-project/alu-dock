@@ -41,6 +41,35 @@ export interface HistoryPageDto {
   hasEarlier: boolean;
   nextBeforeEntryId?: string;
 }
+export type TreeNodeKind =
+  | "message"
+  | "thinking_level_change"
+  | "model_change"
+  | "compaction"
+  | "branch_summary"
+  | "custom"
+  | "custom_message"
+  | "label"
+  | "session_info";
+export interface TreeNodeDto {
+  entryId: string;
+  parentId?: string;
+  depth: number;
+  kind: TreeNodeKind;
+  role?: "user" | "assistant" | "tool" | "system";
+  label?: string;
+  timestamp?: string;
+  summary: string;
+  hasChildren: boolean;
+}
+export interface TreePageDto {
+  treeRevision: string;
+  nodes: TreeNodeDto[];
+  leafId?: string;
+  total: number;
+  truncated: boolean;
+  nextAfterEntryId?: string;
+}
 export type SessionMetricsDto = RuntimeSessionMetrics;
 export interface SessionDto { sessionId: string; sessionFile: string; name?: string; cwd: string; updatedAt?: string }
 export interface SessionCompactionDto { summary: string; firstKeptEntryId: string; tokensBefore: number }
@@ -79,6 +108,7 @@ export interface EventDataMap {
   "compaction.started": { reason: "manual" | "threshold" | "overflow" };
   "compaction.completed": { reason: "manual" | "threshold" | "overflow"; aborted: boolean; willRetry: boolean; error?: string };
   "session.replaced": { reason: "new" | "resume" | "fork" | "reload"; previousSessionFile?: string; sessionFile?: string; runtimeGeneration: number; cwd: string; piSessionId: string; name?: string };
+  "session.navigated": { targetId: string; leafId?: string; treeRevision: string; summaryCreated: boolean };
   "session.info_changed": { name?: string };
   "session.metrics_changed": { metrics: SessionMetricsDto };
   "model.changed": { provider: string; id: string; thinkingLevel: RuntimeThinkingLevel; availableThinkingLevels: RuntimeThinkingLevel[] };

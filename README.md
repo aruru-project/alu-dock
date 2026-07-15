@@ -2,7 +2,7 @@
 
 Alu Dock 是 #136「受管运行时宿主」的独立实现；V0 执行卡为 #137，V0.1 工程入口为 #142。
 
-V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座、阶段 2 SSH TUI/Footer、阶段 3 日常控制、阶段 4 Extension UI 和阶段 5 durable Host lifecycle 均已完成源码与门禁。当前 Host 提供 V2 transaction/fault seam、private atomic catalog、startup reconcile、explicit reopen、持久 branch history projection、稳定 message/tool event、session metrics、可复用实例 abort、`session.commands.v1` 与 `extension_ui.v1`；薄 TUI 提供 fixed composer/history viewport、明确 run activity、默认折叠工具、Markdown/thinking/diff、动态 autocomplete、可检索 selector、完整 Footer、new/resume/name/compact/reload workflow，以及 attach-bound extension select/confirm/input/editor overlay。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与 Alubot 不在本仓库的修改范围内。
+V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座、阶段 2 SSH TUI/Footer、阶段 3 日常控制、阶段 4 Extension UI、阶段 5 durable Host lifecycle 与阶段 6 tree/fork/clone 均已完成源码与自动化门禁。当前 Host 提供 V2 transaction/fault seam、private atomic catalog、startup reconcile、explicit reopen、持久 branch/tree projection、稳定 message/tool event、session metrics、可复用实例 abort、`session.commands.v1`、`session.tree.v1` 与 `extension_ui.v1`；薄 TUI 提供 fixed composer/history viewport、明确 run activity、默认折叠工具、Markdown/thinking/diff、动态 autocomplete、可检索 selector、完整 Footer、new/resume/name/compact/reload/tree/fork/clone workflow，以及 attach-bound extension select/confirm/input/editor overlay。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与 Alubot 不在本仓库的修改范围内。
 
 ## V0 冻结进度
 
@@ -25,7 +25,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [x] #147 与阶段 4 managed rollout（随阶段 5 immutable release完成）
 - [x] 阶段 4：Extension UI 源码、真实 Pi/PTY 与七扩展兼容门禁
 - [x] 阶段 5：`systemd --user`、durable catalog 与 explicit reopen
-- [ ] 阶段 6：tree/fork/clone
+- [x] 阶段 6：tree/fork/clone（源码与自动化门禁；managed rollout另行记录）
 - [ ] 最终真人默认入口验收
 
 详细文档：
@@ -54,15 +54,16 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-v0.1-dogfood-tui-ux.md`](docs/validation-v0.1-dogfood-tui-ux.md)
 - [`docs/validation-v0.1-stage-4-extension-ui.md`](docs/validation-v0.1-stage-4-extension-ui.md)
 - [`docs/validation-v0.1-stage-5-durable-host.md`](docs/validation-v0.1-stage-5-durable-host.md)
+- [`docs/validation-v0.1-stage-6-tree-fork-clone.md`](docs/validation-v0.1-stage-6-tree-fork-clone.md)
 - [`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)
 
 ## V0.1 工程入口
 
-#142 是 V0.1 唯一工程状态入口。阶段 0–5、dogfood UX 与 Extension UI 源码/门禁均已完成；当前下一入口为阶段 6 tree/fork/clone，随后进行最终真人默认入口验收。
+#142 是 V0.1 唯一工程状态入口。阶段 0–6、dogfood UX 与 Extension UI 源码/自动化门禁均已完成；当前下一入口是 Stage 6 immutable managed rollout 与最终真人默认入口验收。当前在线 managed release仍是已验证的 Stage 5 baseline，未因源码完成而被静默替换。
 
 **绿地规则：** Alu Dock 是全新项目。到 1.0 落地前，除非用户特意说明，不考虑任何旧协议、旧 Host、旧数据、旧 CLI 行为的兼容或迁移；原型合同直接替换。版本号仅标识当前合同，不表示存在历史包袱。
 
-阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1 已将当前控制面切为 V2-only，并完成 Runtime replacement、project trust、closed projections及 registry transaction/fault seam；阶段 2 advertised `tui.projection.v1` 与独立的 `run.abort.v1`；阶段 3 advertised `session.commands.v1` 并完成日常 settings/session workflows；阶段 3.5 完成轻度拆分；阶段 3.6 建立不可变 release、稳定 launcher、真实资源 smoke 和 baseline user service。#147 已完成 fixed composer、viewport、活动状态、工具折叠和可检索 selector；阶段 4 advertised `extension_ui.v1`，加入单 controller lease、Host-owned dialog queue、结构化 notify/status 和当前扩展兼容。阶段 5 advertised `catalog.v1`、`service.managed.v1` 与 `session.reopen`，实现 socket-first startup、0700/0600 atomic catalog、prior-epoch reconcile、no-replay Host loss、explicit reopen和完整 service CLI；普通入口不再启动 detached Host。V0.2 #148 的 direct `pi-tui` dependency inventory、Terminal Core API、provenance政策、OpenClaw固定commit审计和一次性切换计划已冻结在 [`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)；renderer实施不属于V0.1。
+阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1 已将当前控制面切为 V2-only，并完成 Runtime replacement、project trust、closed projections及 registry transaction/fault seam；阶段 2 advertised `tui.projection.v1` 与独立的 `run.abort.v1`；阶段 3 advertised `session.commands.v1` 并完成日常 settings/session workflows；阶段 3.5 完成轻度拆分；阶段 3.6 建立不可变 release、稳定 launcher、真实资源 smoke 和 baseline user service。#147 已完成 fixed composer、viewport、活动状态、工具折叠和可检索 selector；阶段 4 advertised `extension_ui.v1`，加入单 controller lease、Host-owned dialog queue、结构化 notify/status 和当前扩展兼容。阶段 5 advertised `catalog.v1`、`service.managed.v1` 与 `session.reopen`，实现 socket-first startup、0700/0600 atomic catalog、prior-epoch reconcile、no-replay Host loss、explicit reopen和完整 service CLI；普通入口不再启动 detached Host。阶段 6 advertised `session.tree.v1`，通过公开 `navigateTree()` 与 `AgentSessionRuntime.fork()` 实现 revision-bound tree、fork-before、clone-at-leaf、selected editor text、extension hook/abort 与 deferred session-file recovery。V0.2 #148 的 direct `pi-tui` dependency inventory、Terminal Core API、provenance政策、OpenClaw固定commit审计和一次性切换计划已冻结在 [`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)；renderer实施不属于V0.1。
 
 ## 当前默认真人入口
 
@@ -78,13 +79,16 @@ alu-dock
 
 - `Enter`：发送；运行中默认作为 steer；Editor 支持 multiline paste 与 history
 - `Alt+Enter` 或 `/follow MESSAGE`：排队为 follow-up
-- `Esc`、空编辑器 `Ctrl+C` 或 `/abort`：取消当前 run/retry/compaction，实例保持可复用
+- `Esc`、空编辑器 `Ctrl+C` 或 `/abort`：取消当前 run/retry/compaction；tree branch summary进行中时调用公开 `abortBranchSummary()` 路径，实例保持可复用
 - `PageUp` / `PageDown`：回看独立 history viewport；回看时暂停追尾并提示新输出，`Ctrl+End` 回到底部
 - `Ctrl+O`：展开/折叠全部 generic tool output；`Alt+O` 只切换最近一项详情；工具默认折叠
 - `/settings`：查看全部 24 项投影并选择修改；也可用 `/settings KEY VALUE`。其中 compaction reserve/keep tokens 因 Pi 无公开 setter而只读
 - `/model`：打开可输入检索的 Pi 模型选择器（name/provider/id）；`/model PROVIDER/MODEL` 直接切换
 - `/thinking`：打开 thinking selector；`/thinking LEVEL` 直接设置
 - `/tools`：逐项切换 active tools；`/tools NAME…` 设置完整 active set，`/tools none` 清空
+- `/tree`：打开 searchable tree selector并选择普通 navigate或 branch summary；也可用 `/tree ENTRY_ID [--summary [INSTRUCTIONS] | --replace INSTRUCTIONS]`
+- `/fork [USER_ENTRY_ID]`：固定在 user message前 fork，并把 Pi 返回的 `selectedText` 放回当前客户端 editor
+- `/clone`：使用当前 leaf执行公开 fork-at组合；fork/clone均创建新 Pi session generation
 - `/new [PARENT_SESSION]`、`/resume [SESSION_FILE]`：新建或在当前 Host 内切换 Pi session
 - `/name NAME`（`/name -` 清除）、`/compact [INSTRUCTIONS]`、`/reload`
 - `/resources`：查看 resource metadata 与 diagnostics

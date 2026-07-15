@@ -295,6 +295,10 @@ export class DockConversation implements Component {
         this.tools.clear();
         break;
 
+      case "session.navigated":
+        this.add("system", `Session branch selected${event.data.summaryCreated ? " with summary" : ""} · ${event.data.targetId}.`);
+        break;
+
       case "command.handled":
         this.add("system", "Command handled without starting a model run.");
         break;

@@ -101,7 +101,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["catalog.v1", "core.v2", "events.follow", "extension_ui.v1", "host.info", "instance.catalog", "models.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.commands.v1", "session.core", "session.reopen", "settings.v1", "tools.v1", "tui.projection.v1"]);
+  assert.deepEqual(ack.capabilities, ["catalog.v1", "core.v2", "events.follow", "extension_ui.v1", "host.info", "instance.catalog", "models.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.commands.v1", "session.core", "session.reopen", "session.tree.v1", "settings.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -712,10 +712,52 @@ test("SSH TUI Stage 3 commands mutate Host-owned settings tools and sessions", a
   for (const marker of ["autoRetry = false", "Active tools: read, write", "Session name: PTY Stage 3", "Compacted 123 tokens", "Resources reloaded", "Session new", "Session resume"]) assert.match(output, new RegExp(marker));
   assert.equal(runtime?.settingMutationCalls, 1);
   assert.equal(runtime?.toolMutationCalls, 1);
-  assert.deepEqual(runtime?.sessionMutationCalls, { new: 1, switch: 1, name: 1, compact: 1, reload: 1 });
+  assert.deepEqual(runtime?.sessionMutationCalls, { new: 1, switch: 1, name: 1, compact: 1, reload: 1, navigate: 0, fork: 0, clone: 0 });
   const final = await client.status(created.id);
   assert.equal(final.runtimeGeneration, 4);
   assert.equal(final.name, "PTY resumed");
+  assert.equal(runtime?.disposeCalls, 0);
+});
+
+test("SSH TUI Stage 6 navigates, returns fork text to the editor, and clones the current leaf", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-pty-stage6-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  let runtime: DelayedRuntimeSession | undefined;
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
+    runtime = new DelayedRuntimeSession(`pi-${id}`);
+    runtime.treeNodes = [
+      { entryId: "tree-u1", depth: 0, kind: "message", role: "user", summary: "first prompt", hasChildren: true },
+      { entryId: "tree-a1", parentId: "tree-u1", depth: 1, kind: "message", role: "assistant", summary: "first answer", hasChildren: true },
+      { entryId: "tree-u2", parentId: "tree-a1", depth: 2, kind: "message", role: "user", summary: "second prompt", hasChildren: true },
+      { entryId: "tree-a2", parentId: "tree-u2", depth: 3, kind: "message", role: "assistant", summary: "second answer", hasChildren: false },
+    ];
+    runtime.treeLeafId = "tree-a2";
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
+  }, () => "pty-stage6-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+  const created = await client.create(directory, "pty-stage6");
+
+  const pty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+    "attach", created.id,
+  ], "stage6");
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-4_000));
+  assert.equal(pty.status, 0, output.slice(-4_000));
+  for (const marker of ["Session branch selected", "generation 2", "generation 3"]) assert.match(output, new RegExp(marker));
+  assert.equal(runtime?.sessionMutationCalls.navigate, 1);
+  assert.equal(runtime?.sessionMutationCalls.fork, 1);
+  assert.equal(runtime?.sessionMutationCalls.clone, 1);
+  const final = await client.status(created.id);
+  assert.equal(final.runtimeGeneration, 3);
+  assert.equal(final.lastRun, "never");
+  assert.equal(runtime?.promptCalls, 0);
   assert.equal(runtime?.disposeCalls, 0);
 });
 
@@ -1136,6 +1178,95 @@ test("session.core lists bounded safe cwd and all-session metadata", async (cont
   ]);
 });
 
+test("session.tree.v1 paginates revisions, navigates in-file, and replaces on fork/clone", async (context) => {
+  const port = new ScriptedCatalogCommitPort();
+  const harness = await createTransactionHarness(port);
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, undefined, "tree-create");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  runtime.treeNodes = [
+    { entryId: "tree-u1", depth: 0, kind: "message", role: "user", timestamp: "2026-07-14T00:00:00.000Z", summary: "first prompt", hasChildren: true },
+    { entryId: "tree-a1", parentId: "tree-u1", depth: 1, kind: "message", role: "assistant", timestamp: "2026-07-14T00:00:01.000Z", summary: "first answer", hasChildren: true },
+    { entryId: "tree-u2", parentId: "tree-a1", depth: 2, kind: "message", role: "user", timestamp: "2026-07-14T00:00:02.000Z", summary: "second prompt", hasChildren: true },
+    { entryId: "tree-a2", parentId: "tree-u2", depth: 3, kind: "message", role: "assistant", timestamp: "2026-07-14T00:00:03.000Z", summary: "second answer", hasChildren: false },
+  ];
+  runtime.treeLeafId = "tree-a2";
+
+  const first = await client.tree(created.id, undefined, undefined, 2);
+  assert.deepEqual(first.nodes.map((node) => node.entryId), ["tree-u1", "tree-a1"]);
+  assert.equal(first.total, 4);
+  assert.equal(first.truncated, true);
+  assert.equal(first.nextAfterEntryId, "tree-a1");
+  const second = await client.tree(created.id, first.treeRevision, first.nextAfterEntryId, 2);
+  assert.deepEqual(second.nodes.map((node) => node.entryId), ["tree-u2", "tree-a2"]);
+  assert.equal(second.truncated, false);
+
+  const commitsBeforeInvalidTargets = port.calls.length;
+  await assert.rejects(
+    client.navigateSession(created.id, "missing-entry", {}, "navigate-missing"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_cursor",
+  );
+  await assert.rejects(
+    client.forkSession(created.id, "tree-a1", "fork-assistant"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_cursor",
+  );
+  assert.equal(runtime.sessionMutationCalls.navigate, 0);
+  assert.equal(runtime.sessionMutationCalls.fork, 0);
+  assert.equal(port.calls.length, commitsBeforeInvalidTargets);
+
+  const blockedNavigation = runtime.blockNextNavigation();
+  const pendingNavigation = client.navigateSession(created.id, "tree-a2", { summarize: true }, "navigate-aborted");
+  await blockedNavigation.entered;
+  await assert.rejects(
+    client.navigateSession(created.id, "tree-u1", {}, "navigate-concurrent"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "instance_busy",
+  );
+  const abortNavigation = client.abort(created.id, "abort-navigation");
+  const [abortedNavigation, abortReceipt] = await Promise.all([pendingNavigation, abortNavigation]);
+  assert.equal(abortedNavigation.cancelled, true);
+  assert.equal(abortedNavigation.aborted, true);
+  assert.equal(abortReceipt.instance.execution, "idle");
+  assert.equal(runtime.treeLeafId, "tree-a2");
+  assert.equal(port.calls.length, commitsBeforeInvalidTargets);
+  assert.equal((await client.events(created.id)).page.events.some((event) => event.type === "session.navigated"), false);
+
+  const beforeFile = created.executor.sessionFile;
+  const navigated = await client.navigateSession(created.id, "tree-u2", {}, "navigate-tree");
+  assert.equal(navigated.cancelled, false);
+  assert.equal(navigated.editorText, "second prompt");
+  assert.equal(navigated.instance.runtimeGeneration, 1);
+  assert.equal(navigated.instance.executor.sessionFile, beforeFile);
+  assert.equal(runtime.treeLeafId, "tree-a1");
+  await assert.rejects(
+    client.tree(created.id, first.treeRevision, first.nextAfterEntryId, 2),
+    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_cursor",
+  );
+  assert.equal((await client.events(created.id)).page.events.some((event) => event.type === "session.navigated" && event.data.targetId === "tree-u2"), true);
+
+  const forked = await client.forkSession(created.id, "tree-u2", "fork-tree");
+  assert.equal(forked.cancelled, false);
+  assert.equal(forked.selectedText, "second prompt");
+  assert.equal(forked.instance.runtimeGeneration, 2);
+  assert.notEqual(forked.instance.executor.sessionFile, beforeFile);
+  assert.equal(runtime.sessionMutationCalls.fork, 1);
+  assert.equal(port.calls.some((call) => call.context.kind === "session.fork.intent" && call.candidate.instances[0]?.replacement?.requestedEntryId === "tree-u2"), true);
+
+  const cloned = await client.cloneSession(created.id, "tree-a1", "clone-tree");
+  assert.equal(cloned.cancelled, false);
+  assert.equal(cloned.instance.runtimeGeneration, 3);
+  assert.equal(runtime.sessionMutationCalls.clone, 1);
+  assert.equal(port.calls.some((call) => call.context.kind === "session.clone.intent" && call.candidate.instances[0]?.replacement?.requestedEntryId === "tree-a1"), true);
+  await assert.rejects(
+    client.cloneSession(created.id, "tree-u1", "clone-wrong-leaf"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_cursor",
+  );
+
+  const duplicate = await client.cloneSession(created.id, "tree-a1", "clone-tree");
+  assert.equal(duplicate.instance.runtimeGeneration, 3);
+  assert.equal(runtime.sessionMutationCalls.clone, 1);
+});
+
 test("session.commands.v1 names, compacts, replaces, reloads, and deduplicates mutations", async (context) => {
   const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
   context.after(() => cleanupHarness(harness));
@@ -1174,7 +1305,7 @@ test("session.commands.v1 names, compacts, replaces, reloads, and deduplicates m
   assert.equal(reloaded.instance.runtimeGeneration, 4);
   assert.equal(reloaded.resources[0]?.name, "AGENTS.md");
   assert.equal(reloaded.diagnostics[0]?.message, "fixture diagnostic");
-  assert.deepEqual(runtime.sessionMutationCalls, { new: 1, switch: 1, name: 1, compact: 1, reload: 1 });
+  assert.deepEqual(runtime.sessionMutationCalls, { new: 1, switch: 1, name: 1, compact: 1, reload: 1, navigate: 0, fork: 0, clone: 0 });
 
   await assert.rejects(
     client.reloadSession(created.id, "name-op"),
@@ -2034,7 +2165,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "editor" | "abort" | "transport-close" | "stage3" | "model-search" | "scroll" | "tool-fold" | "extension-dialogs" | "extension-replacement" = "detach",
+  action: "detach" | "editor" | "abort" | "transport-close" | "stage3" | "stage6" | "model-search" | "scroll" | "tool-fold" | "extension-dialogs" | "extension-replacement" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {

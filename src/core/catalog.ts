@@ -12,9 +12,10 @@ export interface CatalogMutationContext {
 
 export interface CatalogReplacementIntent {
   operationId: string;
-  kind: "new" | "switch" | "reload";
+  kind: "new" | "switch" | "fork" | "clone" | "reload";
   previousSessionFile?: string;
   requestedSessionFile?: string;
+  requestedEntryId?: string;
   startedAt: string;
 }
 
@@ -165,15 +166,23 @@ export function validateCatalogRecord(record: CatalogInstanceRecord): void {
   if (record.replacement) {
     if (record.lifecycle !== "active") throw new Error("Replacement intent requires an active instance");
     requiredBoundedText(record.replacement.operationId, 128, "Replacement operation ID");
-    if (!["new", "switch", "reload"].includes(record.replacement.kind)) throw new Error("Replacement intent kind is invalid");
+    if (!["new", "switch", "fork", "clone", "reload"].includes(record.replacement.kind)) throw new Error("Replacement intent kind is invalid");
     timestamp(record.replacement.startedAt, "Replacement startedAt");
     if (record.replacement.previousSessionFile !== undefined) absolutePath(record.replacement.previousSessionFile, "Replacement previous session file");
     if (record.replacement.requestedSessionFile !== undefined) absolutePath(record.replacement.requestedSessionFile, "Replacement requested session file");
+    if (record.replacement.requestedEntryId !== undefined) requiredBoundedText(record.replacement.requestedEntryId, 128, "Replacement requested entry ID");
+    if (record.replacement.kind === "switch" && record.replacement.requestedSessionFile === undefined) throw new Error("Switch replacement requires a requested session file");
+    if ((record.replacement.kind === "fork" || record.replacement.kind === "clone") && record.replacement.requestedEntryId === undefined) throw new Error("Fork/clone replacement requires a requested entry ID");
+    if (record.replacement.kind !== "switch" && record.replacement.requestedSessionFile !== undefined) throw new Error("Only switch replacement may request a session file");
+    if (record.replacement.kind !== "fork" && record.replacement.kind !== "clone" && record.replacement.requestedEntryId !== undefined) throw new Error("Only fork/clone replacement may request an entry ID");
   }
   if (record.replacement && record.recoverySessionFile) throw new Error("Replacement intent cannot also expose a recovery session");
   if (record.recoverySessionFile !== undefined) {
     absolutePath(record.recoverySessionFile, "Catalog recovery session file");
-    if (record.lifecycle !== "runtime_error" && record.lifecycle !== "host_lost") throw new Error("Recovery session requires an unavailable recoverable lifecycle");
+    const liveWithDeferredFile = (record.lifecycle === "active" || record.lifecycle === "stopping") && record.sessionFile === undefined;
+    if (!liveWithDeferredFile && record.lifecycle !== "runtime_error" && record.lifecycle !== "host_lost") {
+      throw new Error("Recovery session requires a deferred live session file or unavailable recoverable lifecycle");
+    }
   }
   if (record.lastKnown) {
     if (record.lifecycle !== "host_lost" && record.lifecycle !== "runtime_error") throw new Error("Last-known state requires an unavailable recoverable lifecycle");

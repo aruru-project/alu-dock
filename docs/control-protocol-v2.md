@@ -1,6 +1,6 @@
 # Alu Dock 本机控制协议 V2
 
-状态：阶段 0 冻结设计；阶段 1–5 已按 capability 实施
+状态：阶段 0 冻结设计；阶段 1–6 已按 capability 实施
 
 传输：当前 Unix 用户私有 AF_UNIX socket + UTF-8 JSONL
 
@@ -76,7 +76,7 @@ Client hello：
 Ready success（capability 列表只是当前实现集合）：
 
 ```json
-{"kind":"hello_ack","requestId":"h1","version":2,"host":{"pid":123,"dockVersion":"0.1.0","piSdkVersion":"0.80.6","hostEpoch":"uuid","startedAt":"2026-07-14T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["catalog.v1","core.v2","events.follow","extension_ui.v1","host.info","instance.catalog","models.v1","resources.v1","run.abort.v1","service.managed.v1","session.commands.v1","session.core","session.reopen","settings.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200}}
+{"kind":"hello_ack","requestId":"h1","version":2,"host":{"pid":123,"dockVersion":"0.1.0","piSdkVersion":"0.80.6","hostEpoch":"uuid","startedAt":"2026-07-14T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["catalog.v1","core.v2","events.follow","extension_ui.v1","host.info","instance.catalog","models.v1","resources.v1","run.abort.v1","service.managed.v1","session.commands.v1","session.core","session.reopen","session.tree.v1","settings.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200}}
 ```
 
 任何 hello 失败都使用 closed `hello_error`，随后关闭：
@@ -293,7 +293,7 @@ interface HistoryEntryDto {
 | `session.history` | `tui.projection.v1` | `{instanceId,beforeEntryId?,limit:1..200}` | `{entries:HistoryEntryDto[],hasEarlier:boolean,nextBeforeEntryId?:string,instance}` |
 | `session.tree` | `session.tree.v1` | `{instanceId,treeRevision?,afterEntryId?,limit:1..200}` | `{treeRevision:string,nodes:TreeNodeDto[],leafId?:string,total:number,truncated:boolean,nextAfterEntryId?:string}` |
 | `session.navigate` | `session.tree.v1` | `{operationId,instanceId,targetId,summarize?,customInstructions?,replaceInstructions?,label?}` | `{cancelled,aborted?,editorText?,instance}` |
-| `session.fork` | `session.tree.v1` | `{operationId,instanceId,entryId,position:"before"|"at"}` | `{cancelled,selectedText?,instance}` |
+| `session.fork` | `session.tree.v1` | `{operationId,instanceId,entryId}` | `{cancelled:true,instance}`或`{cancelled:false,selectedText:string,instance}`；固定 fork-before user message |
 | `session.clone` | `session.tree.v1` | `{operationId,instanceId,entryId}` | `{cancelled,instance}`；实现为 fork-at |
 | `interaction.respond` | `extension_ui.v1` | `{operationId,instanceId,leaseToken,interactionId,response:InteractionResponse}` | `{interactionId,state:"resolved"|"already_resolved"}` |
 
@@ -412,12 +412,12 @@ Parser、catalog loader 和 registry mutation 共用同一个 invariant validato
 
 | 操作 | 允许状态 |
 |---|---|
-| list/get/history metadata | 任意已知 record；host_lost history 需先 reopen 才读取 runtime branch |
+| list/get/history/tree metadata | 任意已知 record；host_lost history/tree需先 reopen才读取runtime branch |
 | fresh prompt | `active + quiescent`；failed 在 admission 后转 running并清 lastError |
 | steer/followUp | `active + running` |
-| model/thinking/tools/settings/session replacement | `active + quiescent` |
+| model/thinking/tools/settings/session navigate/replacement | `active + quiescent` |
 | compact | active；具体 abort/compact 语义交给 Pi，Dock 阻止并发 config/replacement |
-| abort | `active + running` 或幂等 idle；Pi 正在 compaction 时调用 `abortCompaction()` 并等待 idle，不伪造 `run.settled`/`lastRun=aborted` |
+| abort | active；run/retry走`abort()`，compaction走`abortCompaction()`，tree branch summary走`abortBranchSummary()`；均等待对应稳定边界，不伪造无关`run.settled` |
 | stop | active；stopping/stopped 同 operation 走幂等结果；host_lost/runtime_error 不当作 live stop |
 | reopen | `host_lost|runtime_error + reopenable` |
 | interaction response | active、同 generation、当前 lease、pending interaction |
@@ -437,9 +437,10 @@ interface DurableInstanceRecord {
   pendingCount: number;          // count only, no queued text
   replacement?: {
     operationId: string;
-    kind: "new" | "switch" | "reload";
+    kind: "new" | "switch" | "fork" | "clone" | "reload";
     previousSessionFile?: string;
-    requestedSessionFile?: string;
+    requestedSessionFile?: string; // switch only
+    requestedEntryId?: string;     // fork/clone only
     startedAt: string;
   };
   recoverySessionFile?: string;
@@ -457,7 +458,7 @@ interface DurableInstanceRecord {
 | run settled | commit lastRun + quiescent execution + clear command/pending 后再发布 settled snapshot/event。失败时保留 conservative busy intent。 |
 | queue update | commit pending count；失败时旧 busy/admission fact不得被清掉。 |
 | stop | 先 commit `stopRequestedAt` 再 cleanup；commit stopped 后才 success response。Startup 遇 stop intent 归一为 stopped/non-reopenable，不重开 runtime。 |
-| replacement | trust/validation 后先 commit replacement intent（recovery 固定 previous file），再调用 runtime method。Cancel 清 intent；factory/bind 失败时若 catalog仍可写则 commit runtime_error；成功时计算 next generation并在一个 commit 中写目标 session/active state/clear intent，随后 publish。目标/error commit 自身失败则适用 mutation_faulted 规则。 |
+| replacement | trust/target validation后先commit replacement intent（recovery固定previous durable file），再调用runtime method。Cancel清intent；factory/bind失败时若catalog仍可写则commit runtime_error；成功时计算next generation并在一个commit中写目标durable session facts/active state/clear intent，随后publish。Pi尚未物化candidate JSONL时省略active record的`sessionFile`并暂存previous file为`recoverySessionFile`；首次确认candidate为current-user-owned real file的后续commit再切换durable path。目标/error commit自身失败适用mutation_faulted规则。 |
 | reopen | 创建并 bind candidate；预先计算 next generation；一个 commit 写 active/idle/new generation；随后 swap/publish。任一 pre-commit/commit failure dispose candidate并保留原 unavailable record。 |
 | graceful Host shutdown（阶段 5） | 先 commit `shutdownRequestedAt`，再 bounded abort/dispose；最终 commit host_lost。Crash 看到 shutdown intent 仍归一 host_lost，不当作 explicit instance stop。阶段 1D 的 in-memory Host shutdown只做 non-catalog runtime drain，绝不伪造 explicit `instance.stop`。 |
 
@@ -489,6 +490,8 @@ Managed mode 固定默认 socket/state pair并拒绝 override。Dev custom socke
 ### Replacement recovery policy
 
 所有 `new/switch/fork/clone/reload` 的自动 recovery candidate 固定为 replacement 前的 `previousSessionFile`。Requested target/entry只用于诊断，不在失败后自动打开。目标可能已产生 partial/orphan session file；它只能以后由 session selector 作为显式用户选择出现。
+
+Pi 0.80.6 的 `createBranchedSession()` 在branch尚无assistant message时会返回未来path但延迟创建JSONL。Dock把runtime `executor.sessionFile`与durable catalog path分开：snapshot可展示candidate identity，但在真实current-user-owned、non-symlink file出现前，active catalog省略`sessionFile`并允许`recoverySessionFile=previous durable file`。因此这段idle窗口发生Host loss时只能显式reopen previous durable context，不会尝试打开不存在的candidate，也不会构造或重放selected prompt。
 
 `AgentSessionRuntime` 若在 teardown 后 factory/bind 失败，Dock dispose任何可见 candidate；若 catalog仍健康则 commit `runtime_error/unavailable` 与 `recoverySessionFile=previousSessionFile`。若写该错误状态或目标状态的 catalog commit 本身失败，则不能宣称 runtime_error 已持久化：旧 replacement intent 保留，Host 进入 mutation_faulted/nonzero drain，下一 epoch据 intent 归一。不得声称旧 session 仍 live。
 
@@ -724,7 +727,7 @@ Error envelope固定 `{code,message,retryable,details?}`。`details` 仅按 code
 
 ## 18. systemd service 与 Host protocol 边界
 
-`alu-dock service start|restart|install --now`都必须等待V2 hello、`catalog.v1 + service.managed.v1 + session.reopen` capability集合，并验证hello PID等于unit `MainPID`；对已可probe的restart还必须观察到不同`hostEpoch`。Timeout只报告失败和unit journal诊断，不自动删除catalog或反复stop/start unit。
+`alu-dock service start|restart|install --now`都必须等待V2 hello、`catalog.v1 + service.managed.v1 + session.reopen + session.tree.v1` capability集合，并验证hello PID等于unit `MainPID`；对已可probe的restart还必须观察到不同`hostEpoch`。Timeout只报告失败和unit journal诊断，不自动删除catalog或反复stop/start unit。
 
 Host drain 总预算 12 秒，给 unit `TimeoutStopSec=15` 留 3 秒 kill margin：停止 admission/cancel dialogs → commit shutdown intents → bounded abort/dispose → commit host_lost → inode-safe socket cleanup。超时非零退出；下一 epoch按 shutdown/busy intent保守 normalization。
 

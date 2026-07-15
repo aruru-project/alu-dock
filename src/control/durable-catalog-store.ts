@@ -147,7 +147,7 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
   const modelValue = value.model === undefined ? undefined : object(value.model, `${field}.model`);
   if (modelValue) exact(modelValue, ["provider", "id"], `${field}.model`);
   const replacementValue = value.replacement === undefined ? undefined : object(value.replacement, `${field}.replacement`);
-  if (replacementValue) exact(replacementValue, ["operationId", "kind", "previousSessionFile", "requestedSessionFile", "startedAt"], `${field}.replacement`);
+  if (replacementValue) exact(replacementValue, ["operationId", "kind", "previousSessionFile", "requestedSessionFile", "requestedEntryId", "startedAt"], `${field}.replacement`);
   const lastKnownValue = value.lastKnown === undefined ? undefined : object(value.lastKnown, `${field}.lastKnown`);
   if (lastKnownValue) exact(lastKnownValue, ["lifecycle", "execution", "activeCommandId", "pendingCount"], `${field}.lastKnown`);
   const interruptionValue = value.interruption === undefined ? undefined : object(value.interruption, `${field}.interruption`);
@@ -173,9 +173,10 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
     pendingCount: unsigned(value.pendingCount, `${field}.pendingCount`),
     ...(replacementValue === undefined ? {} : { replacement: {
       operationId: text(replacementValue.operationId, `${field}.replacement.operationId`, 128),
-      kind: enumeration(replacementValue.kind, `${field}.replacement.kind`, ["new", "switch", "reload"]),
+      kind: enumeration(replacementValue.kind, `${field}.replacement.kind`, ["new", "switch", "fork", "clone", "reload"]),
       ...(replacementValue.previousSessionFile === undefined ? {} : { previousSessionFile: text(replacementValue.previousSessionFile, `${field}.replacement.previousSessionFile`, 16_384) }),
       ...(replacementValue.requestedSessionFile === undefined ? {} : { requestedSessionFile: text(replacementValue.requestedSessionFile, `${field}.replacement.requestedSessionFile`, 16_384) }),
+      ...(replacementValue.requestedEntryId === undefined ? {} : { requestedEntryId: text(replacementValue.requestedEntryId, `${field}.replacement.requestedEntryId`, 128) }),
       startedAt: timestamp(replacementValue.startedAt, `${field}.replacement.startedAt`),
     } }),
     ...(value.recoverySessionFile === undefined ? {} : { recoverySessionFile: text(value.recoverySessionFile, `${field}.recoverySessionFile`, 16_384) }),
