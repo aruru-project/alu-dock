@@ -34,9 +34,11 @@ Pi public-API adapters
 - `src/core/managed-instance.ts`: lifecycle/admission/transaction facade and serialized state ownership. Keep protocol parsing and visual UI out.
 - `src/pi/*`: the only production layer allowed to hold Pi SDK objects. Use only exports from the `@earendil-works/pi-coding-agent` package root.
 - `src/control/protocol.ts`: wire schemas and fail-closed parsers. Capability-specific execution belongs in a service such as `session-command-service.ts`, not in the socket loop.
-- `src/control/dock-host.ts`: connection lifecycle, hello, dispatch composition and streaming. Do not grow capability business logic inline.
+- `src/control/durable-catalog-store.ts` and `catalog-reconcile.ts`: strict schema-1 persistence, atomic file replacement and no-runtime startup normalization. They never construct Pi objects.
+- `src/control/dock-host.ts`: socket-first connection lifecycle, hello, dispatch composition and streaming. Do not grow capability business logic inline.
 - `src/control/dock-client.ts`: typed request transport and response validation; it never owns runtime state or retries mutations.
 - `src/tui/*`: thin closed-DTO client. Pure projection and setting logic belongs in focused modules; `dock-tui.ts` should compose workflows rather than become a second runtime.
+- `src/deployment/user-service.ts`: explicit generated-unit lifecycle/readiness. Ordinary open/new/attach paths must never import it to auto-start a Host.
 - `src/cli.ts` and `src/interactive.ts`: process/command composition only.
 
 A feature should have one clear owning module. Do not create one file per setting or per trivial command; group behavior by cohesive capability. Conversely, when an entry/composition file starts owning validation, state transitions, persistence and rendering at once, extract those responsibilities before adding another feature.
@@ -52,9 +54,11 @@ A feature should have one clear owning module. Do not create one file per settin
 7. Same-Host dedup uses the operation ledger; do not claim cross-Host exactly-once behavior.
 8. Catalog commit is an observable boundary. Do not publish success, state or events before the required commit.
 9. Project trust must resolve before runtime/network/project resources, extension hooks, teardown or catalog mutation for the target.
-10. Host loss never resumes or replays prompts, queues, Promises or tool effects.
-11. Do not send runtime objects, functions, handlers, component instances, binary data, image bytes, data URIs or raw base64 over the control protocol.
-12. Terminal-facing values must be sanitized for C0/C1 control characters.
+10. Host loss never resumes or replays prompts, queues, Promises or tool effects. Explicit reopen is a fresh runtime transaction with generation +1.
+11. Durable catalog stores identity/session metadata and conservative intents only—never prompt/tool payload, queue text, interaction content, event logs or Promises.
+12. Managed startup binds and validates its private socket before loading/reconciling catalog; corrupt evidence is preserved and no prior runtime is constructed.
+13. Do not send runtime objects, functions, handlers, component instances, binary data, image bytes, data URIs or raw base64 over the control protocol.
+14. Terminal-facing values must be sanitized for C0/C1 control characters.
 
 ## Pi and settings rules
 
@@ -91,6 +95,7 @@ Keep one writer for a working tree. Reviewers and analysis agents should be read
 - TUI changes: deterministic projection tests plus real PTY for command/focus/resize/detach behavior.
 - Replacement changes: generation rollover, history replacement and extension lifecycle/rebind assertions.
 - Startup/resource changes: synthetic fixtures plus a full DockClient command/resources/tools/settings read against the actual installed global/project resource set. A direct runtime call is not sufficient evidence for client startup.
+- Durable lifecycle changes: subprocess SIGKILL/SIGTERM/create-race, atomic write-phase faults, corrupt evidence retention, real Pi no-model reopen and a uniquely named temporary `systemd --user` unit.
 
 Consolidated gate:
 
@@ -134,6 +139,6 @@ Follow `docs/dogfood-deployment.md` for managed releases. Stage completion and d
 
 ## Current staged boundary
 
-Stage 3.6 remains the deployed managed baseline. Card #147 completed the client-only dogfood closure, and Stage 4 now adds the separately owned `ExtensionUiBroker`, Pi adapter, attach-bound controller lease and structured extension overlays. Client viewport/search/tool-fold state remains independent from Host interaction state; both use only public package-root APIs. Their managed rollout waits for the current Host to have no active instance and must not force a restart.
+Stage 5 completes the durable managed Host boundary: `catalog.v1`, `service.managed.v1`, `session.reopen`, socket-first reconcile, no-replay Host loss, explicit reopen and the generated-unit service CLI. Client viewport/search/tool-fold state remains independent from Host interaction state; both use only public package-root APIs.
 
-The current boundary is card #142 Stage 5. Stage 5 may add durable catalog, startup reconcile, explicit host-loss reopen and the complete service management CLI, but must preserve the Stage 4 interaction/generation/lease lifecycle and must not implement Stage 6 tree/fork/clone. Extension component factories, `ctx.ui.custom()`, binary/image transport and renderer replacement remain out of scope.
+The current boundary is card #142 Stage 6: tree/fork/clone and final default-entry validation. Preserve Stage 5 catalog/reopen/service invariants and Stage 4 interaction/generation/lease lifecycle. Extension component factories, `ctx.ui.custom()`, binary/image transport and renderer replacement remain out of scope; renderer work stays on V0.2 card #148.

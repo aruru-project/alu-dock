@@ -106,6 +106,7 @@ export interface CreatePiRuntimeHostOptions {
   excludeTools?: string[];
   projectTrusted: boolean;
   extensionUiBroker?: ExtensionUiBroker;
+  sessionManager?: SessionManager;
 }
 
 interface BindingToken { active: boolean }
@@ -791,9 +792,10 @@ export async function createPiRuntimeHost(options: CreatePiRuntimeHostOptions): 
     });
     return { ...result, services, diagnostics: services.diagnostics };
   };
-  const sessionManager = options.sessionDir
-    ? SessionManager.create(options.cwd, options.sessionDir)
-    : SessionManager.create(options.cwd);
+  const sessionManager = options.sessionManager
+    ?? (options.sessionDir
+      ? SessionManager.create(options.cwd, options.sessionDir)
+      : SessionManager.create(options.cwd));
   const runtime = await createAgentSessionRuntime(createRuntime, {
     cwd: options.cwd, agentDir: options.agentDir, sessionManager,
   });

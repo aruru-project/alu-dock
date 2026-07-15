@@ -50,17 +50,21 @@ StartLimitBurst=5
 
 [Service]
 Type=exec
-ExecStart=${systemdQuote(options.nodePath)} ${systemdQuote(options.cliPath)} serve
+ExecStart=${systemdQuote(options.nodePath)} ${systemdQuote(options.cliPath)} serve --managed
 Environment=${DOGFOOD_MANAGED_ENV}=1
+Environment=ALU_DOCK_SOCKET=
 Environment=NODE_ENV=production
 Restart=on-failure
-RestartSec=1s
+RestartSec=2s
+TimeoutStartSec=15s
 TimeoutStopSec=15s
 KillSignal=SIGTERM
+KillMode=mixed
 RuntimeDirectory=alu-dock
 RuntimeDirectoryMode=0700
 StateDirectory=alu-dock
 StateDirectoryMode=0700
+WorkingDirectory=%h
 UMask=0077
 StandardOutput=journal
 StandardError=journal
@@ -86,5 +90,5 @@ function shellQuote(value: string): string {
 }
 
 function systemdQuote(value: string): string {
-  return `"${value.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
+  return `"${value.replaceAll("%", "%%").replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;
 }

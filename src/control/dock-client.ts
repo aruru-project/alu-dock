@@ -28,6 +28,7 @@ import {
   parseListResult,
   parseModelsResult,
   parsePromptResult,
+  parseReopenResult,
   parseSessionsResult,
   parseSessionCompactionResult,
   parseSessionNameResult,
@@ -52,6 +53,7 @@ import {
   type ModelsResult,
   type PingResult,
   type PromptResult,
+  type ReopenResult,
   type SessionsResult,
   type SessionCompactionResult,
   type SessionNameResult,
@@ -87,6 +89,7 @@ export class DockClient {
   async create(cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<InstanceSnapshot>{const result=await this.request("instance.create",{operationId,cwd,name,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"instance.catalog",parseCreateResult);return result.instance;}
   async list():Promise<InstanceSnapshot[]>{return (await this.request("instance.list",{includeTerminal:true},"instance.catalog",parseListResult)).instances;}
   async status(instanceId:string):Promise<InstanceSnapshot>{return (await this.request("instance.get",{instanceId},"instance.catalog",parseStatusResult)).instance;}
+  reopen(instanceId:string,operationId=this.createRequestId(),sessionFile?:string,trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<ReopenResult>{return this.request("instance.reopen",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.reopen",parseReopenResult);}
   async events(instanceId:string,since?:EventCursor):Promise<{instance:InstanceSnapshot;page:EventPage&{epochChanged:boolean;generationChanged:boolean}}>{const result=await this.request("instance.attach",{instanceId,since,follow:false,controller:"observe"},"events.follow",parseEventsResult);return {instance:result.instance,page:result.page};}
   prompt(instanceId:string,message:string,delivery:DeliveryMode="auto",operationId=this.createRequestId()):Promise<PromptResult>{return this.request("command.submit",{operationId,instanceId,message,delivery},"session.core",parsePromptResult);}
   respondInteraction(instanceId:string,leaseToken:string,interactionId:string,response:InteractionResponse,operationId=this.createRequestId()):Promise<InteractionRespondResult>{if("value" in response){const limit=response.method==="select"?8_000:256_000;if(response.value.length>limit)return Promise.reject(new ControlClientError("invalid_request",`Interaction ${response.method} response exceeds ${limit} characters`,operationId));if(containsBinaryPayload(response.value))return Promise.reject(new ControlClientError("invalid_request","Interaction responses cannot contain binary, image, data URI, or raw base64 payloads",operationId));}return this.request("interaction.respond",{operationId,instanceId,leaseToken,interactionId,response},"extension_ui.v1",parseInteractionRespondResult);}
@@ -248,6 +251,7 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
     const receipt=record.receipt as {operationId?:unknown}|undefined;
     if(receipt&&receipt.operationId!==params.operationId)throw new ProtocolValidationError("invalid_response","Receipt operationId does not match request operationId");
     if(type==="instance.create"&&snapshots[0]?.creationOperationId!==params.operationId)throw new ProtocolValidationError("invalid_response","Created instance operationId does not match request operationId");
+    if(type==="instance.reopen"&&record.operationId!==params.operationId)throw new ProtocolValidationError("invalid_response","Reopen operationId does not match request operationId");
   }
 }
 function normalizeClientError(e:unknown):ControlClientError{if(e instanceof ControlClientError)return e;if(e instanceof ProtocolValidationError)return new ControlClientError(e.code==="unsupported_protocol"?"protocol_incompatible":e.code,e.message);if(e instanceof Error)return new ControlClientError("invalid_response",e.message);return new ControlClientError("invalid_response",String(e));}

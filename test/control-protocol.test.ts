@@ -13,6 +13,7 @@ import {
   parseHistoryResult,
   parseInteractionRespondResult,
   parseModelConfigurationResult,
+  parseReopenResult,
   parseSessionsResult,
   parseSessionCompactionResult,
   parseSessionNameResult,
@@ -138,6 +139,53 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
     type: "instance.create",
     params: { operationId: "create-1", cwd: "/tmp/project", trustChallengeId: "challenge-1", projectTrustDecision: "allow" },
   }), /unsupported value/);
+});
+
+test("Stage 5 reopen requests and results are closed and generation-bounded", () => {
+  const base = { kind: "request", version: 2, requestId: "reopen-request" };
+  assert.deepEqual(parseControlRequest({
+    ...base,
+    type: "instance.reopen",
+    params: {
+      operationId: "reopen-1",
+      instanceId: "i1",
+      sessionFile: "/tmp/session.jsonl",
+      trustChallengeId: "challenge-1",
+      projectTrustDecision: "trust_once",
+    },
+  }).params, {
+    operationId: "reopen-1",
+    instanceId: "i1",
+    sessionFile: "/tmp/session.jsonl",
+    trustChallengeId: "challenge-1",
+    projectTrustDecision: "trust_once",
+  });
+  assert.throws(() => parseControlRequest({
+    ...base,
+    type: "instance.reopen",
+    params: { operationId: "reopen-1", instanceId: "i1", sessionFile: "relative.jsonl" },
+  }), /must be absolute/);
+  assert.throws(() => parseControlRequest({
+    ...base,
+    type: "instance.reopen",
+    params: { operationId: "reopen-1", instanceId: "i1", trustChallengeId: "challenge-1" },
+  }), /must be supplied together/);
+  assert.throws(() => parseControlRequest({
+    ...base,
+    type: "instance.reopen",
+    params: { operationId: "reopen-1", instanceId: "i1", replay: true },
+  }), /Unexpected field/);
+
+  const instance = {
+    ...validSnapshot(),
+    runtimeGeneration: 2,
+    eventCursor: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 2, sequence: 1 },
+  };
+  assert.deepEqual(parseReopenResult({ operationId: "reopen-1", previousLifecycle: "host_lost", instance }), {
+    operationId: "reopen-1", previousLifecycle: "host_lost", instance: parseStatusResult({ instance }).instance,
+  });
+  assert.throws(() => parseReopenResult({ operationId: "reopen-1", previousLifecycle: "host_lost", instance, replayed: true }), /Unexpected field/);
+  assert.throws(() => parseReopenResult({ operationId: "reopen-1", previousLifecycle: "stopped", instance }), /unsupported value/);
 });
 
 test("Stage 4 interaction requests, responses, and controller leases are closed", () => {
@@ -337,6 +385,7 @@ test("host info accepts only the closed healthy and mutation-drain states", () =
   assert.equal(parseHostInfoResult({ ...base, state: "mutation_faulted" }).state, "mutation_faulted");
   assert.equal(parseHostInfoResult({ ...base, state: "draining" }).state, "draining");
   assert.throws(() => parseHostInfoResult({ ...base, state: "writable" }), /state/);
+  assert.throws(() => parseHostInfoResult({ ...base, state: "ready", catalog: { ...base.catalog, schemaVersion: 2 } }), /schema is incompatible/);
 });
 
 test("model persistence and session list results are closed", () => {

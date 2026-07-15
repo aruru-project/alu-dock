@@ -463,7 +463,7 @@ test("replacement catalog failure keeps the committed generation and reports the
   });
   host.activateInitial();
   const port = new ScriptedCatalogCommitPort();
-  const catalog = new CatalogTransactionCoordinator(port);
+  const catalog = new CatalogTransactionCoordinator(port, instance.hostEpoch);
   instance.bindCatalogPort(catalog.forInstance(instance.id));
   await catalog.create(instance.catalogRecord(), {
     kind: "instance.create",
@@ -502,7 +502,7 @@ test("replacement teardown failure commits runtime_error with the previous recov
   });
   host.activateInitial();
   const port = new ScriptedCatalogCommitPort();
-  const catalog = new CatalogTransactionCoordinator(port);
+  const catalog = new CatalogTransactionCoordinator(port, instance.hostEpoch);
   instance.bindCatalogPort(catalog.forInstance(instance.id));
   await catalog.create(instance.catalogRecord(), {
     kind: "instance.create",
@@ -535,7 +535,7 @@ test("runtime-error catalog failure retains the committed replacement intent", a
   });
   host.activateInitial();
   const port = new ScriptedCatalogCommitPort();
-  const catalog = new CatalogTransactionCoordinator(port);
+  const catalog = new CatalogTransactionCoordinator(port, instance.hostEpoch);
   instance.bindCatalogPort(catalog.forInstance(instance.id));
   await catalog.create(instance.catalogRecord(), {
     kind: "instance.create",

@@ -45,6 +45,7 @@ interface HostBeforeDeploy {
 }
 
 interface ReadyHost { pid: number; hostEpoch: string }
+interface GeneratedFileSnapshot { path: string; content?: string; mode?: number }
 interface CommandOptions { cwd?: string; capture?: boolean; allowFailure?: boolean }
 interface CommandResult { status: number; stdout: string; stderr: string }
 
@@ -80,11 +81,18 @@ async function main(): Promise<void> {
 
   let previousRelease: string | undefined;
   let switched = false;
+  let generatedFilesTouched = false;
+  let previousGeneratedFiles: GeneratedFileSnapshot[] = [];
   let ready: ReadyHost | undefined;
   try {
     await buildRelease({ repository, staging, id, commit });
     await rename(staging, finalRelease);
     previousRelease = await currentRelease(layout);
+    previousGeneratedFiles = await Promise.all([
+      captureGeneratedFile(layout.launcher),
+      captureGeneratedFile(layout.unitFile),
+    ]);
+    generatedFilesTouched = true;
     await installGeneratedFiles(layout);
     await switchCurrent(layout, finalRelease);
     switched = true;
@@ -130,7 +138,7 @@ async function main(): Promise<void> {
       attemptedRelease: finalRelease,
       message,
     }).catch(() => {});
-    if (switched) await rollback(layout, previousRelease).catch((rollbackError: unknown) => {
+    if (switched || generatedFilesTouched) await rollback(layout, previousRelease, previousGeneratedFiles, switched).catch((rollbackError: unknown) => {
       process.stderr.write(`${JSON.stringify({ kind: "dogfood.rollback_failed", message: boundedMessage(rollbackError) })}\n`);
     });
     throw error;
@@ -185,14 +193,45 @@ async function installGeneratedFiles(layout: DogfoodReleaseLayout): Promise<void
 }
 
 async function writeGeneratedFile(path: string, content: string, mode: number): Promise<void> {
-  if (await pathExists(path)) {
+  if (await pathExists(path, false)) {
+    const info = await lstat(path);
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error(`Refusing to overwrite non-regular generated file: ${path}`);
     const existing = await readFile(path, "utf8").catch(() => "");
-    if (!existing.includes(DOGFOOD_GENERATED_MARKER)) throw new Error(`Refusing to overwrite non-generated file: ${path}`);
+    if (!isGeneratedFileContent(existing)) throw new Error(`Refusing to overwrite non-generated file: ${path}`);
   }
+  await writeFileAtomically(path, content, mode);
+}
+
+async function captureGeneratedFile(path: string): Promise<GeneratedFileSnapshot> {
+  if (!await pathExists(path, false)) return { path };
+  const info = await lstat(path);
+  if (!info.isFile() || info.isSymbolicLink()) throw new Error(`Refusing to snapshot non-regular generated file: ${path}`);
+  const content = await readFile(path, "utf8");
+  if (!isGeneratedFileContent(content)) throw new Error(`Refusing to snapshot non-generated file: ${path}`);
+  return { path, content, mode: info.mode & 0o777 };
+}
+
+function isGeneratedFileContent(content: string): boolean {
+  return content.startsWith(`${DOGFOOD_GENERATED_MARKER}\n`)
+    || content.startsWith(`#!/bin/sh\n${DOGFOOD_GENERATED_MARKER}\n`);
+}
+
+async function restoreGeneratedFiles(snapshots: GeneratedFileSnapshot[]): Promise<void> {
+  for (const snapshot of snapshots) {
+    if (snapshot.content === undefined) await rm(snapshot.path, { force: true });
+    else await writeFileAtomically(snapshot.path, snapshot.content, snapshot.mode ?? 0o600);
+  }
+}
+
+async function writeFileAtomically(path: string, content: string, mode: number): Promise<void> {
   const temporary = `${path}.tmp-${process.pid}-${randomUUID()}`;
-  await writeFile(temporary, content, { mode, flag: "wx" });
-  await chmod(temporary, mode);
-  await rename(temporary, path);
+  try {
+    await writeFile(temporary, content, { mode, flag: "wx" });
+    await chmod(temporary, mode);
+    await rename(temporary, path);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => {});
+  }
 }
 
 async function ensureLauncherSymlink(path: string, target: string): Promise<void> {
@@ -239,7 +278,7 @@ async function inspectCurrentHost(socketPath: string): Promise<HostBeforeDeploy 
     return {
       pid: ping.pid,
       hostEpoch: ping.hostEpoch,
-      activeInstances: instances.filter((instance) => instance.lifecycle === "active").length,
+      activeInstances: instances.filter((instance) => instance.lifecycle === "active" || instance.lifecycle === "stopping").length,
       managed: isUnitActive() && mainPid === ping.pid,
     };
   } catch (error) {
@@ -266,7 +305,10 @@ async function waitForReadyHost(socketPath: string, previousEpoch?: string): Pro
     try {
       const ping = await new DockClient({ socketPath, timeoutMs: 500 }).ping();
       const mainPid = unitMainPid();
+      const capabilities = new Set(ping.capabilities);
+      const missing = ["catalog.v1", "service.managed.v1", "session.reopen"].filter((capability) => !capabilities.has(capability));
       if (mainPid !== ping.pid) lastError = `hello PID ${ping.pid} does not match MainPID ${mainPid}`;
+      else if (missing.length > 0) lastError = `Host lacks managed capabilities: ${missing.join(", ")}`;
       else if (previousEpoch !== undefined && ping.hostEpoch === previousEpoch) lastError = "hostEpoch did not change";
       else return { pid: ping.pid, hostEpoch: ping.hostEpoch };
     } catch (error) { lastError = boundedMessage(error); }
@@ -285,15 +327,20 @@ function runReleasedSmoke(release: string, socketPath: string, cwd: string, id: 
   return parsed as Record<string, unknown>;
 }
 
-async function rollback(layout: DogfoodReleaseLayout, previousRelease?: string): Promise<void> {
-  if (previousRelease) {
-    await switchCurrent(layout, previousRelease);
-    command("systemctl", ["--user", "daemon-reload"], { allowFailure: true });
-    command("systemctl", ["--user", "restart", DOGFOOD_UNIT_NAME], { allowFailure: true });
-  } else {
+async function rollback(
+  layout: DogfoodReleaseLayout,
+  previousRelease: string | undefined,
+  generatedFiles: GeneratedFileSnapshot[],
+  currentWasSwitched: boolean,
+): Promise<void> {
+  if (currentWasSwitched && previousRelease) await switchCurrent(layout, previousRelease);
+  if (currentWasSwitched && !previousRelease) {
     command("systemctl", ["--user", "stop", DOGFOOD_UNIT_NAME], { allowFailure: true });
     await rm(layout.current, { force: true });
   }
+  await restoreGeneratedFiles(generatedFiles);
+  command("systemctl", ["--user", "daemon-reload"], { allowFailure: true });
+  if (currentWasSwitched && previousRelease) command("systemctl", ["--user", "restart", DOGFOOD_UNIT_NAME], { allowFailure: true });
 }
 
 async function writeReceipt(layout: DogfoodReleaseLayout, name: string, value: unknown): Promise<void> {

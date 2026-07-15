@@ -9,6 +9,7 @@ import {
 import { dirname, resolve } from "node:path";
 
 import {
+  CatalogCorruptError,
   CatalogEffectUnknownError,
   CatalogWriteError,
   MutationFaultedError,
@@ -32,7 +33,13 @@ import {
   type JsonObject,
 } from "../core/managed-instance.js";
 import { RuntimeInvalidSettingValueError, RuntimeModelNotFoundError, RuntimeSettingsWriteError, RuntimeUnknownToolError } from "../core/runtime-session.js";
-import { DockRegistry, InstanceNotFoundError } from "./dock-registry.js";
+import {
+  CatalogOperationRecordedError,
+  DockRegistry,
+  InstanceNotFoundError,
+  InstanceNotReopenableError,
+  InstanceUnavailableError,
+} from "./dock-registry.js";
 import { OperationConflictError, OperationLedger } from "./operation-ledger.js";
 import { ProjectTrustChallengeError, ProjectTrustRequiredError } from "./project-trust.js";
 import { encodeJsonLine, JsonLineDecoder, JsonLineError } from "./json-lines.js";
@@ -81,6 +88,7 @@ export interface DockHostOptions {
   registry: DockRegistry;
   statePath?: string;
   faultDrainTimeoutMs?: number;
+  initialize?: () => Promise<void>;
 }
 
 export class DockHost {
@@ -96,11 +104,14 @@ export class DockHost {
   private startPromise: Promise<void> | undefined;
   private stopPromise: Promise<void> | undefined;
   private readonly connections = new Set<Socket>();
+  private readonly attachConnections = new Map<string, Set<Socket>>();
   private readonly inFlightDispatches = new Set<Promise<void>>();
   private readonly operationLedger = new OperationLedger();
   private readonly faultDrainTimeoutMs: number;
+  private readonly initialize: (() => Promise<void>) | undefined;
   private faultDrainPromise: Promise<void> | undefined;
   private unsubscribeMutationFault: (() => void) | undefined;
+  private unsubscribeRuntimeReopened: (() => void) | undefined;
   private readonly faultStartedPromise: Promise<void>;
   private resolveFaultStarted!: () => void;
   private readonly fatalPromise: Promise<HostFatalCompletion>;
@@ -114,6 +125,7 @@ export class DockHost {
     this.hostEpoch = options.registry.hostEpoch;
     this.startedAt = options.registry.startedAt;
     this.faultDrainTimeoutMs = Math.max(1, options.faultDrainTimeoutMs ?? 5_000);
+    this.initialize = options.initialize;
     this.faultStartedPromise = new Promise((resolveFaultStarted) => { this.resolveFaultStarted = resolveFaultStarted; });
     this.fatalPromise = new Promise((resolveFatal) => { this.resolveFatal = resolveFatal; });
   }
@@ -160,9 +172,11 @@ export class DockHost {
       this.socketIdentity = boundIdentity;
       await chmod(this.socketPath, 0o600);
       await assertPrivateSocket(this.socketPath, boundIdentity);
+      await this.initialize?.();
       if (this.state === "starting") {
         this.state = "running";
         this.unsubscribeMutationFault = this.registry.onMutationFault((fault) => this.enterMutationFault(fault.error));
+        this.unsubscribeRuntimeReopened = this.registry.onRuntimeReopened((instanceId) => this.closeStaleAttachStreams(instanceId));
       }
     } catch (error) {
       if (server) await closeServer(server);
@@ -197,17 +211,20 @@ export class DockHost {
       }
       if (this.faultDrainPromise) await this.faultDrainPromise;
       else {
-        const disposal = this.registry.disposeAllForHostDrain();
+        const disposal = this.registry.isDurable()
+          ? this.registry.shutdownAllForHostDrain()
+          : this.registry.disposeAllForHostDrain();
         await Promise.race([disposal, this.faultStartedPromise]);
         if (this.faultDrainPromise) await this.faultDrainPromise;
         else await disposal;
       }
-      if (this.socketIdentity) {
-        await removeSocketIfOwned(this.socketPath, this.socketIdentity);
-      }
     } finally {
+      if (this.socketIdentity) await removeSocketIfOwned(this.socketPath, this.socketIdentity).catch(() => {});
       this.unsubscribeMutationFault?.();
       this.unsubscribeMutationFault = undefined;
+      this.unsubscribeRuntimeReopened?.();
+      this.unsubscribeRuntimeReopened = undefined;
+      this.attachConnections.clear();
       this.socketIdentity = undefined;
       this.state = "stopped";
     }
@@ -344,10 +361,12 @@ export class DockHost {
         this.sendSuccessAndEnd(socket, request.requestId, {
           state: health === "healthy" ? "ready" : health,
           host: defaultHostIdentity(this.hostEpoch, this.startedAt),
-          catalog: { schemaVersion: 1, revision: this.registry.catalogRevision(), lastReconciledAt: this.startedAt },
+          catalog: { schemaVersion: 1, revision: this.registry.catalogRevision(), lastReconciledAt: this.registry.lastReconciledAt() },
           paths: { socket: this.socketPath, state: this.statePath },
           diagnostics: health === "healthy"
-            ? [{ severity: "info", message: "Development registry is in-memory and non-durable", source: "registry" }]
+            ? this.registry.isDurable()
+              ? [{ severity: "info", message: `Durable catalog ready; normalized ${this.registry.startupNormalizedCount()} prior live record(s)`, source: "registry" }]
+              : [{ severity: "info", message: "Development registry is in-memory and non-durable", source: "registry" }]
             : [{ severity: "error", message: "Catalog mutation failed after a runtime effect; Host is draining read-only", source: "registry" }],
         }); return;
       }
@@ -356,8 +375,25 @@ export class DockHost {
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
       case "instance.list": this.sendSuccessAndEnd(socket,request.requestId,{instances:this.registry.list().filter(i=>request.params.includeTerminal!==false||i.lifecycle==="active"||i.lifecycle==="stopping")}); return;
-      case "instance.get": this.sendSuccessAndEnd(socket,request.requestId,{instance:this.registry.get(request.params.instanceId).snapshot()}); return;
+      case "instance.get": this.sendSuccessAndEnd(socket,request.requestId,{instance:this.registry.getSnapshot(request.params.instanceId)}); return;
       case "instance.attach": await this.attachEventStream(request,socket,setEventUnsubscribe); return;
+      case "instance.reopen": {
+        const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, async () => {
+          const reopened = await this.registry.reopen({
+            operationId: request.params.operationId,
+            instanceId: request.params.instanceId,
+            sessionFile: request.params.sessionFile,
+            trustChallengeId: request.params.trustChallengeId,
+            projectTrustDecision: request.params.projectTrustDecision,
+          });
+          return {
+            operationId: request.params.operationId,
+            previousLifecycle: reopened.previousLifecycle,
+            instance: reopened.instance.snapshot(),
+          };
+        });
+        this.sendSuccessAndEnd(socket, request.requestId, result); return;
+      }
       case "interaction.respond": {
         const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, async () => {
           const instance = this.registry.get(request.params.instanceId);
@@ -405,6 +441,7 @@ export class DockHost {
 
   private async attachEventStream(request: Extract<ControlRequest,{type:"instance.attach"}>,socket:Socket,setEventUnsubscribe:(unsubscribe:()=>void)=>void):Promise<void> {
     const instance=this.registry.get(request.params.instanceId);
+    this.trackAttachStream(instance.id, socket);
     const cursor=request.params.since;
     if(cursor && cursor.instanceId!==instance.id) throw new ProtocolValidationError("invalid_cursor","Cursor belongs to another instance");
     const follow=request.params.follow;
@@ -437,6 +474,23 @@ export class DockHost {
     const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,result));
     if(responseOutcome!=="written"){initializing=false;pending=[];if(responseOutcome==="backpressured")closeAfterBackpressure();else if(responseOutcome==="too_large"){closeSubscription();this.sendErrorAndEnd(socket,"response_too_large","Attach response exceeds the JSONL record limit",request.requestId);}else closeSubscription();return;}
     lastGeneration=result.instance.runtimeGeneration;lastSent=Math.max(projection.replaySince,result.page.latest.sequence);initializing=false;pending.sort((a,b)=>a.runtimeGeneration-b.runtimeGeneration||a.sequence-b.sequence);for(const event of pending){if(!sendLiveEvent(event))return;}pending=[];if(!follow){closeSubscription();socket.end();}
+  }
+
+  private trackAttachStream(instanceId: string, socket: Socket): void {
+    const streams = this.attachConnections.get(instanceId) ?? new Set<Socket>();
+    streams.add(socket);
+    this.attachConnections.set(instanceId, streams);
+    socket.once("close", () => {
+      streams.delete(socket);
+      if (streams.size === 0 && this.attachConnections.get(instanceId) === streams) this.attachConnections.delete(instanceId);
+    });
+  }
+
+  private closeStaleAttachStreams(instanceId: string): void {
+    const streams = this.attachConnections.get(instanceId);
+    if (!streams) return;
+    this.attachConnections.delete(instanceId);
+    for (const socket of streams) socket.destroy();
   }
 
   private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,result));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
@@ -551,6 +605,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
     return { code: "effect_unknown", message: error.message, details: { operationId: error.operationId, queryHint: error.queryHint } };
   }
   if (error instanceof CatalogWriteError) return { code: "catalog_write_failed", message: error.message };
+  if (error instanceof CatalogCorruptError) return { code: "catalog_corrupt", message: error.message, details: { scope: "catalog", path: error.path } };
   if (error instanceof MutationFaultedError) return { code: "mutation_faulted", message: error.message };
   if (error instanceof ProjectTrustRequiredError) {
     return { code: error.code, message: error.message, retryable: error.retryable, details: error.details };
@@ -560,6 +615,14 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   }
   if (error instanceof ProtocolValidationError) return { code: error.code, message: error.message };
   if (error instanceof InstanceNotFoundError) return { code: "not_found", message: error.message };
+  if (error instanceof InstanceNotReopenableError) return { code: "instance_not_reopenable", message: error.message };
+  if (error instanceof InstanceUnavailableError) {
+    const code = error.lifecycle === "host_lost" ? "instance_host_lost"
+      : error.lifecycle === "runtime_error" ? "instance_runtime_error"
+        : "instance_not_active";
+    return { code, message: error.message };
+  }
+  if (error instanceof CatalogOperationRecordedError) return { code: "operation_conflict", message: error.message };
   if (error instanceof InvalidHistoryCursorError) return { code: "invalid_cursor", message: error.message };
   if (error instanceof InteractionNotFoundError) return { code: error.code, message: error.message };
   if (error instanceof InteractionExpiredError) return { code: error.code, message: error.message };
@@ -597,7 +660,8 @@ function extractRequestId(line: string): string {
 }
 
 function truncateMessage(message: string): string {
-  return message.length <= 2_000 ? message : `${message.slice(0, 2_000)}…`;
+  const sanitized = message.replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ");
+  return sanitized.length <= 2_000 ? sanitized : `${sanitized.slice(0, 2_000)}…`;
 }
 
 async function ensurePrivateSocketDirectory(socketPath: string): Promise<void> {

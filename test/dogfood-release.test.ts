@@ -38,15 +38,21 @@ test("generated user unit owns private runtime paths and journal lifecycle", () 
   for (const expected of [
     DOGFOOD_GENERATED_MARKER,
     "Type=exec",
-    'ExecStart="/opt/node/bin/node" "/srv/alu dock/current/dist/src/cli.js" serve',
+    'ExecStart="/opt/node/bin/node" "/srv/alu dock/current/dist/src/cli.js" serve --managed',
     "Restart=on-failure",
+    "RestartSec=2s",
+    "TimeoutStartSec=15s",
     "TimeoutStopSec=15s",
+    "KillMode=mixed",
+    "Environment=ALU_DOCK_SOCKET=",
     "RuntimeDirectory=alu-dock",
     "RuntimeDirectoryMode=0700",
     "StateDirectory=alu-dock",
     "StateDirectoryMode=0700",
+    "WorkingDirectory=%h",
     "UMask=0077",
     "StandardOutput=journal",
   ]) assert.match(unit, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
   assert.doesNotMatch(unit, /NoNewPrivileges|PrivateTmp|host\.log/);
+  assert.match(renderDogfoodUnit({ nodePath: "/opt/node%pin/bin/node", cliPath: "/srv/alu%dock/cli.js" }), /node%%pin.*alu%%dock/u);
 });

@@ -2,7 +2,7 @@
 
 Alu Dock 是 #136「受管运行时宿主」的独立实现；V0 执行卡为 #137，V0.1 工程入口为 #142。
 
-V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座、阶段 2 SSH TUI/Footer 和阶段 3 日常控制均已完成。当前 Host 提供 V2 transaction/fault seam、持久 branch history projection、稳定 message/tool event、session metrics、可复用实例 abort、`session.commands.v1` 与 `extension_ui.v1`；薄 TUI 提供 fixed composer/history viewport、明确 run activity、默认折叠工具、Markdown/thinking/diff、动态 autocomplete、可检索 selector、完整 Footer、new/resume/name/compact/reload workflow，以及 attach-bound extension select/confirm/input/editor overlay。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与 Alubot 不在本仓库的修改范围内。
+V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座、阶段 2 SSH TUI/Footer、阶段 3 日常控制、阶段 4 Extension UI 和阶段 5 durable Host lifecycle 均已完成源码与门禁。当前 Host 提供 V2 transaction/fault seam、private atomic catalog、startup reconcile、explicit reopen、持久 branch history projection、稳定 message/tool event、session metrics、可复用实例 abort、`session.commands.v1` 与 `extension_ui.v1`；薄 TUI 提供 fixed composer/history viewport、明确 run activity、默认折叠工具、Markdown/thinking/diff、动态 autocomplete、可检索 selector、完整 Footer、new/resume/name/compact/reload workflow，以及 attach-bound extension select/confirm/input/editor overlay。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与 Alubot 不在本仓库的修改范围内。
 
 ## V0 冻结进度
 
@@ -22,9 +22,9 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [x] 阶段 3.5：轻度结构重构与项目 `AGENTS.md`
 - [x] 阶段 3.6：Dogfood release 与 `systemd --user` managed service基线
 - [x] Dogfood TUI UX 源码与验证门禁（#147）
-- [ ] #147 与阶段 4 managed rollout（等待当前 Host 无 active instance，不强制重启）
+- [ ] #147 与阶段 4 managed rollout（随阶段 5 immutable release 一并验证）
 - [x] 阶段 4：Extension UI 源码、真实 Pi/PTY 与七扩展兼容门禁
-- [ ] 阶段 5：`systemd --user`、durable catalog 与 reopen
+- [x] 阶段 5：`systemd --user`、durable catalog 与 explicit reopen
 - [ ] 阶段 6：tree/fork/clone
 - [ ] 最终真人默认入口验收
 
@@ -53,15 +53,16 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-v0.1-stage-3.6-dogfood-release.md`](docs/validation-v0.1-stage-3.6-dogfood-release.md)
 - [`docs/validation-v0.1-dogfood-tui-ux.md`](docs/validation-v0.1-dogfood-tui-ux.md)
 - [`docs/validation-v0.1-stage-4-extension-ui.md`](docs/validation-v0.1-stage-4-extension-ui.md)
+- [`docs/validation-v0.1-stage-5-durable-host.md`](docs/validation-v0.1-stage-5-durable-host.md)
 - [`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)
 
 ## V0.1 工程入口
 
-#142 是 V0.1 唯一工程状态入口。阶段 0 已确认没有新增产品阻塞；Runtime/协议、SSH TUI、日常控制、结构重构、dogfood release基线、#147 dogfood UX 与阶段 4 Extension UI 源码/门禁均已完成。下一入口为 durable catalog/reopen，随后是 tree/fork/clone 和最终真人验收。
+#142 是 V0.1 唯一工程状态入口。阶段 0–5、dogfood UX 与 Extension UI 源码/门禁均已完成；当前下一入口为阶段 6 tree/fork/clone，随后进行最终真人默认入口验收。
 
 **绿地规则：** Alu Dock 是全新项目。到 1.0 落地前，除非用户特意说明，不考虑任何旧协议、旧 Host、旧数据、旧 CLI 行为的兼容或迁移；原型合同直接替换。版本号仅标识当前合同，不表示存在历史包袱。
 
-阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1 已将当前控制面切为 V2-only，并完成 Runtime replacement、project trust、closed projections及 registry transaction/fault seam；阶段 2 已 advertised `tui.projection.v1` 与独立的 `run.abort.v1`；阶段 3 已 advertised `session.commands.v1` 并完成日常 settings/session workflows；阶段 3.5 完成轻度拆分；阶段 3.6 已把不可变 release、稳定 launcher、真实资源 smoke 和 baseline user service 投入 dogfood。#147 已完成 fixed composer、viewport、活动状态、工具折叠和可检索 selector的源码与门禁；阶段 4 已 advertised `extension_ui.v1`，加入单 controller lease、Host-owned dialog queue、结构化 notify/status 和当前扩展兼容。managed rollout仍等待当前 Host 无 active instance，不为发布强制中断会话。durable atomic catalog、startup reconcile、explicit reopen与完整 service CLI仍属于阶段 5。V0.2 #148 的 direct `pi-tui` dependency inventory、Terminal Core API、provenance政策、OpenClaw固定commit审计和一次性切换计划已冻结在 [`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)；renderer实施仍不属于V0.1 Stage 5。
+阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1 已将当前控制面切为 V2-only，并完成 Runtime replacement、project trust、closed projections及 registry transaction/fault seam；阶段 2 advertised `tui.projection.v1` 与独立的 `run.abort.v1`；阶段 3 advertised `session.commands.v1` 并完成日常 settings/session workflows；阶段 3.5 完成轻度拆分；阶段 3.6 建立不可变 release、稳定 launcher、真实资源 smoke 和 baseline user service。#147 已完成 fixed composer、viewport、活动状态、工具折叠和可检索 selector；阶段 4 advertised `extension_ui.v1`，加入单 controller lease、Host-owned dialog queue、结构化 notify/status 和当前扩展兼容。阶段 5 advertised `catalog.v1`、`service.managed.v1` 与 `session.reopen`，实现 socket-first startup、0700/0600 atomic catalog、prior-epoch reconcile、no-replay Host loss、explicit reopen和完整 service CLI；普通入口不再启动 detached Host。V0.2 #148 的 direct `pi-tui` dependency inventory、Terminal Core API、provenance政策、OpenClaw固定commit审计和一次性切换计划已冻结在 [`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)；renderer实施不属于V0.1。
 
 ## 当前默认真人入口
 
@@ -71,7 +72,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 alu-dock
 ```
 
-该入口连接已启用的 `alu-dock.service`，不会静默 fork 无法追踪的 detached Host。它按当前 cwd 查找活动实例：没有则创建，一个则直接重连，多个则显示选择器。进入 TUI 后可直接输入消息并查看流式回复和近期活动。
+该入口连接已启用的 `alu-dock.service`，不会调用 systemctl或静默 fork detached Host；service不可用时返回 `service_unavailable` 与明确诊断。它按当前 cwd 查找实例：没有则创建，一个 active则直接重连，存在 `host_lost/runtime_error` 时由选择器要求用户显式 reopen。Reopen保持 Dock ID与creation metadata、generation +1，并恢复Pi session context，但不恢复或重放旧 prompt、queue、Promise或tool effect。
 
 常用操作：
 
@@ -96,6 +97,8 @@ alu-dock
 也可以明确新建或接入：
 
 ```bash
+alu-dock service install --now
+alu-dock service status
 alu-dock new --cwd "$PWD" --name demo
 alu-dock attach INSTANCE_ID
 ```
@@ -110,6 +113,7 @@ alu-dock attach INSTANCE_ID
 alu-dock ping
 alu-dock create --cwd "$PWD" --name demo
 alu-dock list
+alu-dock reopen INSTANCE_ID
 alu-dock status INSTANCE_ID
 alu-dock events INSTANCE_ID --follow
 # resume only with the complete cursor returned by the prior response:
@@ -139,8 +143,10 @@ Alu Dock 的 `instanceId` 与 Pi 的 `piSessionId/sessionFile` 分离。`prompt(
 npm install
 npm run check
 npm test
-# checkout-only development entry; not the dogfood release:
+# checkout client against the managed service; not release evidence:
 npm run cli
+# explicit custom-socket in-memory development Host:
+npm run serve
 # after a clean committed stage gate:
 npm run deploy:dogfood
 ```

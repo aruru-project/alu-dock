@@ -36,7 +36,7 @@ test("catalog coordinator serializes complete immutable candidates", async () =>
   const catalog = new CatalogTransactionCoordinator(port);
   const first = catalog.create(record("one"), { kind: "create", effect: "rollback_contained", operationId: "create-one" });
   await gate.entered;
-  const second = catalog.create(record("two", { createdAt: "2026-07-14T00:00:01.000Z" }), { kind: "create", effect: "rollback_contained", operationId: "create-two" });
+  const second = catalog.create(record("two", { createdAt: "2026-07-14T00:00:01.000Z", updatedAt: "2026-07-14T00:00:01.000Z" }), { kind: "create", effect: "rollback_contained", operationId: "create-two" });
 
   assert.equal(catalog.revision, 0);
   assert.equal(port.calls.length, 1);

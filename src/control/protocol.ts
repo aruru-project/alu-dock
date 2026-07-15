@@ -49,6 +49,7 @@ const MAX_JSON_ARRAY = 200;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 export const IMPLEMENTED_CAPABILITIES = [
+  "catalog.v1",
   "core.v2",
   "events.follow",
   "extension_ui.v1",
@@ -57,8 +58,10 @@ export const IMPLEMENTED_CAPABILITIES = [
   "models.v1",
   "resources.v1",
   "run.abort.v1",
+  "service.managed.v1",
   "session.commands.v1",
   "session.core",
+  "session.reopen",
   "settings.v1",
   "tools.v1",
   "tui.projection.v1",
@@ -108,6 +111,7 @@ export type ControlRequest =
   | Request<"instance.get", { instanceId: string }>
   | Request<"instance.attach", { instanceId: string; since?: EventCursor; follow: boolean; controller: "claim" | "observe" }>
   | Request<"instance.stop", { operationId: string; instanceId: string }>
+  | Request<"instance.reopen", { operationId: string; instanceId: string; sessionFile?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"interaction.respond", { operationId: string; instanceId: string; leaseToken: string; interactionId: string; response: InteractionResponse }>
   | Request<"command.submit", { operationId: string; instanceId: string; message: string; delivery: DeliveryMode }>
   | Request<"command.abort", { operationId: string; instanceId: string }>
@@ -158,6 +162,7 @@ export interface InteractionRespondResult { interactionId: string; state: "resol
 export interface PromptResult { receipt: CommandReceipt; instance: InstanceSnapshot }
 export interface AbortResult { instance: InstanceSnapshot }
 export interface StopResult { receipt: { operationId: string; alreadyStopped: boolean; cleanupErrors?: string[] }; instance: InstanceSnapshot }
+export interface ReopenResult { operationId: string; previousLifecycle: "host_lost" | "runtime_error"; instance: InstanceSnapshot }
 export interface ModelsResult { models: RuntimeModelInfo[]; availableThinkingLevels: RuntimeThinkingLevel[]; instance: InstanceSnapshot }
 export interface ModelConfigurationResult { instance: InstanceSnapshot; settingsWrite: { persisted: true } }
 export interface ThinkingConfigurationResult { actualLevel: RuntimeThinkingLevel; availableThinkingLevels: RuntimeThinkingLevel[]; instance: InstanceSnapshot; settingsWrite: { persisted: true } }
@@ -178,6 +183,7 @@ export function implementedCapabilities(): string[] { return [...IMPLEMENTED_CAP
 export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "host.info") return "host.info";
   if (type === "interaction.respond") return "extension_ui.v1";
+  if (type === "instance.reopen") return "session.reopen";
   if (type.startsWith("instance.")) return type === "instance.attach" ? "events.follow" : "instance.catalog";
   if (type === "command.abort") return "run.abort.v1";
   if (type === "session.history") return "tui.projection.v1";
@@ -253,10 +259,12 @@ export function parseHelloReply(input: unknown, requestId: string): HelloAck {
   exact(limits, ["maxLineBytes", "maxPromptChars", "maxReplayEvents", "maxHistoryItems"]);
   const capabilities = strings(value.capabilities, "hello_ack.capabilities", MAX_CAPABILITIES, MAX_CAPABILITY_CHARS);
   if (new Set(capabilities).size !== capabilities.length) throw validation("invalid_response", "hello_ack.capabilities must be unique");
+  const catalogSchemaVersion = unsigned(value.catalogSchemaVersion, "hello_ack.catalogSchemaVersion");
+  if (catalogSchemaVersion !== CATALOG_SCHEMA_VERSION) throw validation("protocol_incompatible", "Peer catalog schema is incompatible");
   return {
     kind: "hello_ack", requestId, version: 2,
     host: parseHost(value.host, "hello_ack.host"),
-    catalogSchemaVersion: unsigned(value.catalogSchemaVersion, "hello_ack.catalogSchemaVersion"),
+    catalogSchemaVersion,
     capabilities,
     limits: {
       maxLineBytes: positive(valueOr(limits.maxLineBytes), "limits.maxLineBytes"),
@@ -296,6 +304,15 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { instanceId: instanceId(), since: params.since === undefined ? undefined : parseCursor(params.since, "params.since", "invalid_request"), follow, controller } };
     }
     case "instance.stop": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
+    case "instance.reopen": {
+      exact(params, ["operationId", "instanceId", "sessionFile", "trustChallengeId", "projectTrustDecision"], "invalid_request");
+      const trustChallengeId = optionalString(params.trustChallengeId, "params.trustChallengeId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
+      const projectTrustDecision = params.projectTrustDecision === undefined ? undefined : enumeration(params.projectTrustDecision, "params.projectTrustDecision", ["trust_once", "trust_and_remember", "deny_once", "deny_and_remember"], "invalid_request");
+      if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
+      const sessionFile = optionalString(params.sessionFile, "params.sessionFile", MAX_CONTROL_CWD_CHARS, "invalid_request");
+      if (sessionFile !== undefined && !sessionFile.startsWith("/")) throw validation("invalid_request", "params.sessionFile must be absolute");
+      return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), sessionFile, trustChallengeId, projectTrustDecision } };
+    }
     case "interaction.respond": {
       exact(params, ["operationId", "instanceId", "leaseToken", "interactionId", "response"], "invalid_request");
       return { ...base, type, params: {
@@ -401,7 +418,9 @@ export function parseHostInfoResult(input: unknown): HostInfoResult {
     const diagnostic = object(item, `diagnostics[${index}]`); exact(diagnostic, ["severity", "message", "source"]);
     return { severity: enumeration(diagnostic.severity, "severity", ["info", "warning", "error"]), message: string(diagnostic.message, "message", MAX_MESSAGE), source: optionalString(diagnostic.source, "source", 256) };
   });
-  return { state: enumeration(value.state, "state", ["ready", "mutation_faulted", "draining"]), host: parseHost(value.host, "host"), catalog: { schemaVersion: unsigned(catalog.schemaVersion, "catalog.schemaVersion"), revision: unsigned(catalog.revision, "catalog.revision"), lastReconciledAt: timestamp(catalog.lastReconciledAt, "catalog.lastReconciledAt") }, paths: { socket: string(paths.socket, "paths.socket", MAX_CONTROL_CWD_CHARS), state: string(paths.state, "paths.state", MAX_CONTROL_CWD_CHARS) }, diagnostics };
+  const schemaVersion = unsigned(catalog.schemaVersion, "catalog.schemaVersion");
+  if (schemaVersion !== CATALOG_SCHEMA_VERSION) throw validation("invalid_response", "Host info catalog schema is incompatible");
+  return { state: enumeration(value.state, "state", ["ready", "mutation_faulted", "draining"]), host: parseHost(value.host, "host"), catalog: { schemaVersion, revision: unsigned(catalog.revision, "catalog.revision"), lastReconciledAt: timestamp(catalog.lastReconciledAt, "catalog.lastReconciledAt") }, paths: { socket: string(paths.socket, "paths.socket", MAX_CONTROL_CWD_CHARS), state: string(paths.state, "paths.state", MAX_CONTROL_CWD_CHARS) }, diagnostics };
 }
 export function parseCreateResult(input: unknown): CreateResult { const value = object(input, "create result"); exact(value, ["instance"]); return { instance: parseInstance(value.instance, "instance") }; }
 export function parseListResult(input: unknown): ListResult { const value = object(input, "list result"); exact(value, ["instances"]); return { instances: array(value.instances, "instances", MAX_COLLECTION).map((item, index) => parseInstance(item, `instances[${index}]`)) }; }
@@ -441,6 +460,17 @@ export function parsePromptResult(input: unknown): PromptResult {
   const instance = parseInstance(value.instance, "instance"); const receipt = parseReceipt(value.receipt);
   if (receipt.instanceId !== instance.id || instance.activeCommandId !== undefined && !receipt.queued && instance.activeCommandId !== receipt.operationId) throw validation("invalid_response", "Command receipt does not match instance state");
   return { receipt, instance };
+}
+export function parseReopenResult(input: unknown): ReopenResult {
+  const value = object(input, "reopen result");
+  exact(value, ["operationId", "previousLifecycle", "instance"]);
+  const instance = parseInstance(value.instance, "instance");
+  const previousLifecycle = enumeration(value.previousLifecycle, "previousLifecycle", ["host_lost", "runtime_error"]);
+  const operationId = id(value.operationId, "operationId");
+  if (instance.lifecycle !== "active" || instance.execution !== "idle" || instance.lastRun !== "never" || instance.runtimeGeneration < 2) {
+    throw validation("invalid_response", "Reopen result must expose a fresh active generation");
+  }
+  return { operationId, previousLifecycle, instance };
 }
 export function parseAbortResult(input: unknown): AbortResult {
   const value = object(input, "abort result"); exact(value, ["instance"]);

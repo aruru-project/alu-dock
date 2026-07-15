@@ -21,7 +21,7 @@ export async function selectInstance(
     ...instances.map((instance) => ({
       value: instance.id,
       label: terminalSafe(instance.name || instance.id.slice(0, 8)),
-      description: `${instance.execution} · ${instance.executor.model?.id ?? "no model"}`,
+      description: `${instance.lifecycle}/${instance.execution}${instance.reopenable ? " · reopen context" : ""} · ${instance.executor.model?.id ?? "no model"}`,
     })),
     { value: NEW_INSTANCE, label: "+ New instance", description: "create in this directory" },
   ];

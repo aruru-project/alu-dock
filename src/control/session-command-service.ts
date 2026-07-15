@@ -34,6 +34,7 @@ export async function executeSessionCommand(
         operationType: "session.switch",
         operationId: request.params.operationId,
         cwd: target.canonicalCwd,
+        name: request.params.sessionFile,
         trustChallengeId: request.params.trustChallengeId,
         projectTrustDecision: request.params.projectTrustDecision,
       });

@@ -106,6 +106,9 @@ export interface ManagedInstanceOptions {
   commandId?: () => string;
   creationOperationId?: string;
   hostEpoch?: string;
+  initialRuntimeGeneration?: number;
+  createdAt?: string;
+  reopenedFrom?: "host_lost" | "runtime_error";
   extensionUiBroker?: ExtensionUiBroker;
 }
 
@@ -147,7 +150,10 @@ interface WorkingCheckpoint {
   catalogAdmissionOperationId: string | undefined;
   replacementIntent: CatalogInstanceRecord["replacement"];
   recoverySessionFile: string | undefined;
+  lastKnown: CatalogInstanceRecord["lastKnown"];
+  interruption: CatalogInstanceRecord["interruption"];
   stopRequestedAt: string | undefined;
+  shutdownRequestedAt: string | undefined;
 }
 
 export class InstanceNotActiveError extends Error {
@@ -227,7 +233,10 @@ export class ManagedInstance {
   private readonly receiptBoundaryTasks: Promise<void>[] = [];
   private replacementIntent: CatalogInstanceRecord["replacement"];
   private recoverySessionFile: string | undefined;
+  private lastKnownValue: CatalogInstanceRecord["lastKnown"];
+  private interruptionValue: CatalogInstanceRecord["interruption"];
   private stopRequestedAt: string | undefined;
+  private shutdownRequestedAt: string | undefined;
   private transitionTail: Promise<void> = Promise.resolve();
   private historyRefreshTail: Promise<void> = Promise.resolve();
   private hostDrainActive = false;
@@ -279,15 +288,20 @@ export class ManagedInstance {
     this.createCommandId = options.commandId ?? randomUUID;
     this.extensionUi = options.extensionUiBroker ?? new ExtensionUiBroker(this.now, this.createCommandId);
 
-    const createdAt = this.timestamp();
-    this.createdAt = createdAt;
+    const initializedAt = this.timestamp();
+    this.createdAt = options.createdAt ?? initializedAt;
+    const initialUpdatedAt = initializedAt < this.createdAt ? this.createdAt : initializedAt;
+    const initialGeneration = options.initialRuntimeGeneration ?? 1;
+    if (!Number.isSafeInteger(initialGeneration) || initialGeneration < 1) throw new Error("Initial runtime generation must be positive");
+    this.runtimeGenerationValue = initialGeneration;
+    this.publishedRuntimeGenerationValue = initialGeneration;
     this.state = {
       lifecycle: "active",
       execution: "idle",
       lastRun: "never",
       pendingSteering: 0,
       pendingFollowUp: 0,
-      updatedAt: createdAt,
+      updatedAt: initialUpdatedAt,
     };
     this.executorIdentity = {
       kind: truncate(options.executor?.kind ?? "pi-sdk", 128) ?? "pi-sdk",
@@ -302,11 +316,21 @@ export class ManagedInstance {
 
     this.session.subscribe((event) => this.dispatchRuntimeEvent(event));
 
-    this.appendEvent("instance.created", {
-      cwd: this.cwd,
-      name: this.name,
-      executor: this.executorIdentity,
-    });
+    if (options.reopenedFrom) {
+      const sessionFile = this.executorIdentity.sessionFile;
+      if (!sessionFile) throw new Error("A reopened instance requires a persisted Pi session file");
+      this.appendEvent("instance.reopened", {
+        previousLifecycle: options.reopenedFrom,
+        sessionFile,
+        runtimeGeneration: this.runtimeGenerationValue,
+      });
+    } else {
+      this.appendEvent("instance.created", {
+        cwd: this.cwd,
+        name: this.name,
+        executor: this.executorIdentity,
+      });
+    }
     this.extensionUi.bind({
       generation: () => this.runtimeGenerationValue,
       emit: (type, data) => this.enqueueExtensionUiEvent(type, data),
@@ -348,7 +372,10 @@ export class ManagedInstance {
       pendingCount: snapshot.pending.total,
       ...(this.replacementIntent === undefined ? {} : { replacement: cloneJson(this.replacementIntent) }),
       ...(this.recoverySessionFile === undefined ? {} : { recoverySessionFile: this.recoverySessionFile }),
+      ...(this.lastKnownValue === undefined ? {} : { lastKnown: cloneJson(this.lastKnownValue) }),
+      ...(this.interruptionValue === undefined ? {} : { interruption: cloneJson(this.interruptionValue) }),
       ...(this.stopRequestedAt === undefined ? {} : { stopRequestedAt: this.stopRequestedAt }),
+      ...(this.shutdownRequestedAt === undefined ? {} : { shutdownRequestedAt: this.shutdownRequestedAt }),
       ...(snapshot.lastError === undefined ? {} : { lastError: snapshot.lastError }),
       createdAt: snapshot.createdAt,
       updatedAt: snapshot.updatedAt,
@@ -372,20 +399,81 @@ export class ManagedInstance {
     await this.disposeRuntimeOnce();
   }
 
-  disposeForHostDrain(): Promise<void> {
+  shutdownForHostDrain(): Promise<void> {
     if (this.hostDrainPromise) return this.hostDrainPromise;
     this.hostDrainPromise = (async () => {
-      await this.extensionUi.cancelForHostDrain();
+      if (!this.catalogPort) {
+        await this.drainRuntimeWithoutCatalog();
+        return;
+      }
+      const shutdownRequestedAt = this.timestamp();
+      try {
+        await this.enqueueTransition(() => this.commitCatalogTransition(
+          { kind: "host.shutdown.intent", effect: "pre_effect", instanceId: this.id },
+          () => {
+            this.shutdownRequestedAt = shutdownRequestedAt;
+            this.touch(shutdownRequestedAt);
+          },
+        ));
+      } catch (error) {
+        await this.drainRuntimeWithoutCatalog();
+        throw error;
+      }
+
       this.hostDrainActive = true;
       await this.transitionTail;
-      const admission = this.pendingAdmission;
-      this.pendingAdmission = undefined;
-      admission?.release();
-      try { this.clearRuntimeQueueOnce(); } catch { /* Best-effort non-catalog drain. */ }
-      try { await this.abortRuntimeOnce(); } catch { /* Best-effort non-catalog drain. */ }
-      try { await this.disposeRuntimeOnce(); } catch { /* Host reports the fatal catalog fault. */ }
+      const lastKnown = this.currentLastKnownState();
+      const busy = lastKnown.lifecycle === "stopping"
+        || lastKnown.execution === "running"
+        || lastKnown.activeCommandId !== undefined
+        || this.catalogAdmissionOperationId !== undefined
+        || lastKnown.pendingCount > 0
+        || this.replacementIntent !== undefined;
+      const recoverySessionFile = this.replacementIntent?.previousSessionFile
+        ?? this.recoverySessionFile
+        ?? this.executorIdentity.sessionFile;
+      await this.drainRuntimeWithoutCatalog();
+      this.catalogAdmissionOperationId = undefined;
+      this.replacementIntent = undefined;
+      this.recoverySessionFile = recoverySessionFile;
+      this.lastKnownValue = lastKnown;
+      this.interruptionValue = { reason: "host_shutdown", at: this.timestamp() };
+      this.stopRequestedAt = undefined;
+      this.shutdownRequestedAt = undefined;
+      this.state.lifecycle = "host_lost";
+      this.state.execution = "unavailable";
+      if (busy) this.state.lastRun = "interrupted";
+      this.state.activeCommandId = undefined;
+      this.state.pendingSteering = 0;
+      this.state.pendingFollowUp = 0;
+      this.state.lastError = "Alu Dock Host shut down; explicitly reopen to continue this session context";
+      this.touch();
+      await this.catalogPort.commit(this.catalogRecord(), {
+        kind: "host.shutdown.complete",
+        effect: "post_effect",
+        instanceId: this.id,
+      });
+      this.committedSnapshotValue = this.workingSnapshot();
     })();
     return this.hostDrainPromise;
+  }
+
+  disposeForHostDrain(): Promise<void> {
+    if (this.hostDrainPromise) return this.hostDrainPromise;
+    this.hostDrainPromise = this.drainRuntimeWithoutCatalog();
+    return this.hostDrainPromise;
+  }
+
+  private async drainRuntimeWithoutCatalog(): Promise<void> {
+    await this.extensionUi.cancelForHostDrain();
+    this.hostDrainActive = true;
+    await this.transitionTail;
+    const admission = this.pendingAdmission;
+    this.pendingAdmission = undefined;
+    admission?.release();
+    try { this.clearRuntimeQueueOnce(); } catch { /* Best-effort non-catalog drain. */ }
+    try { await this.abortRuntimeOnce(); } catch { /* Best-effort non-catalog drain. */ }
+    try { await this.disposeRuntimeOnce(); } catch { /* Host reports the fatal catalog fault. */ }
   }
 
   private workingSnapshot(): InstanceSnapshot {
@@ -397,9 +485,11 @@ export class ManagedInstance {
       lifecycle: this.state.lifecycle,
       execution: this.state.execution,
       lastRun: this.state.lastRun,
-      reopenable: false,
+      reopenable: (this.state.lifecycle === "host_lost" || this.state.lifecycle === "runtime_error")
+        && (this.recoverySessionFile !== undefined || this.executorIdentity.sessionFile !== undefined),
       runtimeGeneration: this.runtimeGeneration,
       ownerHostEpoch: this.state.lifecycle === "active" || this.state.lifecycle === "stopping" ? this.hostEpoch : undefined,
+      ...(this.interruptionValue === undefined ? {} : { interruption: cloneJson(this.interruptionValue) }),
       pending: {
         steering: this.state.pendingSteering,
         followUp: this.state.pendingFollowUp,
@@ -1167,6 +1257,10 @@ export class ManagedInstance {
         this.state.activeCommandId = undefined;
         this.state.pendingSteering = 0;
         this.state.pendingFollowUp = 0;
+        this.recoverySessionFile = undefined;
+        this.lastKnownValue = undefined;
+        this.interruptionValue = undefined;
+        this.shutdownRequestedAt = undefined;
         if (cleanupErrors.length > 0) this.state.lastError = cleanupErrors.join("; ");
         this.touch();
       },
@@ -1252,6 +1346,18 @@ export class ManagedInstance {
     if (this.catalogPort) this.committedSnapshotValue = this.workingSnapshot();
   }
 
+  private currentLastKnownState(): NonNullable<CatalogInstanceRecord["lastKnown"]> {
+    if ((this.state.lifecycle !== "active" && this.state.lifecycle !== "stopping") || this.state.execution === "unavailable") {
+      throw new Error("Cannot capture last-known state without a live lifecycle");
+    }
+    return {
+      lifecycle: this.state.lifecycle,
+      execution: this.state.execution,
+      ...(this.state.activeCommandId === undefined ? {} : { activeCommandId: this.state.activeCommandId }),
+      pendingCount: this.state.pendingSteering + this.state.pendingFollowUp,
+    };
+  }
+
   private captureWorkingCheckpoint(): WorkingCheckpoint {
     return {
       state: cloneJson(this.state),
@@ -1269,7 +1375,10 @@ export class ManagedInstance {
       catalogAdmissionOperationId: this.catalogAdmissionOperationId,
       replacementIntent: this.replacementIntent ? cloneJson(this.replacementIntent) : undefined,
       recoverySessionFile: this.recoverySessionFile,
+      lastKnown: this.lastKnownValue ? cloneJson(this.lastKnownValue) : undefined,
+      interruption: this.interruptionValue ? cloneJson(this.interruptionValue) : undefined,
       stopRequestedAt: this.stopRequestedAt,
+      shutdownRequestedAt: this.shutdownRequestedAt,
     };
   }
 
@@ -1293,7 +1402,10 @@ export class ManagedInstance {
     this.catalogAdmissionOperationId = checkpoint.catalogAdmissionOperationId;
     this.replacementIntent = checkpoint.replacementIntent;
     this.recoverySessionFile = checkpoint.recoverySessionFile;
+    this.lastKnownValue = checkpoint.lastKnown;
+    this.interruptionValue = checkpoint.interruption;
     this.stopRequestedAt = checkpoint.stopRequestedAt;
+    this.shutdownRequestedAt = checkpoint.shutdownRequestedAt;
   }
 
   private buildHistoryPage(beforeEntryId: string | undefined, limit: number, beforeTimestamp?: string): HistoryPageDto {
@@ -1591,6 +1703,9 @@ export class ManagedInstance {
         this.runtimeGenerationValue += 1;
         this.replacementIntent = undefined;
         this.recoverySessionFile = undefined;
+        this.lastKnownValue = undefined;
+        this.interruptionValue = undefined;
+        this.shutdownRequestedAt = undefined;
         this.agentStartCount = 0;
         this.agentSettledCount = 0;
         this.assistantMessageSequence = 0;
@@ -1631,9 +1746,12 @@ export class ManagedInstance {
       const error = boundedRuntimeString(event.error, 2_048, "Runtime replacement failed");
       const recoverySessionFile = optionalRuntimeString(event.recoverySessionFile, 16_384)
         ?? this.replacementIntent?.previousSessionFile;
+      const lastKnown = this.currentLastKnownState();
       await this.commitCatalogTransition(context("session.runtime_error"), () => {
         this.replacementIntent = undefined;
         this.recoverySessionFile = recoverySessionFile;
+        this.lastKnownValue = lastKnown;
+        this.interruptionValue = { reason: "replacement_failed", at: this.timestamp() };
         this.state.lifecycle = "runtime_error";
         this.state.execution = "unavailable";
         this.state.activeCommandId = undefined;
@@ -1775,6 +1893,9 @@ export class ManagedInstance {
       this.publishedRuntimeGenerationValue = this.runtimeGenerationValue;
       this.replacementIntent = undefined;
       this.recoverySessionFile = undefined;
+      this.lastKnownValue = undefined;
+      this.interruptionValue = undefined;
+      this.shutdownRequestedAt = undefined;
       this.nextEventSequence = 1;
       this.eventLog.length = 0;
       this.agentStartCount = 0;
@@ -1808,6 +1929,8 @@ export class ManagedInstance {
     }
     if (event.type === "dock_runtime_error") {
       void this.extensionUi.failGenerationChange();
+      this.lastKnownValue = this.currentLastKnownState();
+      this.interruptionValue = { reason: "replacement_failed", at: this.timestamp() };
       this.recoverySessionFile = optionalRuntimeString(event.recoverySessionFile, 16_384)
         ?? this.replacementIntent?.previousSessionFile;
       this.replacementIntent = undefined;
@@ -2141,7 +2264,7 @@ export class ManagedInstance {
   }
 
   private touch(timestamp = this.timestamp()): void {
-    this.state.updatedAt = timestamp;
+    if (timestamp >= this.state.updatedAt) this.state.updatedAt = timestamp;
   }
 
   private cursor(sequence: number): EventCursor {

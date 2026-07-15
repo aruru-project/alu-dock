@@ -1,6 +1,6 @@
 # Dogfood 发布与部署合同
 
-状态：阶段 3.6 冻结合同。阶段 5 在此基线上增加 durable catalog/reopen 和完整 service CLI，不回退本文件的可追溯发布要求。
+状态：阶段 3.6 冻结发布合同；阶段 5 durable catalog/reopen/service lifecycle 已实现并继承全部可追溯发布要求。
 
 ## 目标
 
@@ -48,12 +48,13 @@ alu-dock
 `alu-dock.service` 使用默认 private Unix socket和 journal：
 
 - `Type=exec`；
-- `ExecStart=<absolute-node> /home/luziyi/release/alu-dock/current/dist/src/cli.js serve`；
-- `RuntimeDirectory=alu-dock`、mode `0700`；
-- `StateDirectory=alu-dock`、mode `0700`（阶段 3.6 暂不声称 catalog durable）；
-- `UMask=0077`；
-- `Restart=on-failure`，manual stop不自动重启；
-- `TimeoutStopSec` 大于 Host有界 drain；
+- `ExecStart=<absolute-node> /home/luziyi/release/alu-dock/current/dist/src/cli.js serve --managed`；
+- unit显式设置 `ALU_DOCK_MANAGED=1`、清空继承的 `ALU_DOCK_SOCKET`；
+- `RuntimeDirectory=alu-dock`、mode `0700`，socket为 `$RUNTIME_DIRECTORY/dock.sock`、mode `0600`；
+- `StateDirectory=alu-dock`、mode `0700`，durable catalog为 `$STATE_DIRECTORY/catalog.json`、mode `0600`；
+- `WorkingDirectory=%h`、`UMask=0077`、`KillMode=mixed`；
+- `Restart=on-failure`、`RestartSec=2s`，manual stop不自动重启；
+- `TimeoutStartSec=15s`、`TimeoutStopSec=15s`，后者大于 Host 12s有界 drain；
 - stdout/stderr进入 user journal，不再写 `host.log`。
 
 常用诊断：
@@ -64,7 +65,21 @@ journalctl --user -u alu-dock.service -n 200 --no-pager
 journalctl --user -u alu-dock.service -f
 ```
 
-User manager整体为 degraded不构成失败；只判定 `alu-dock.service` 本身。Installer检查 linger但不修改机器 policy。
+User manager整体为 degraded不构成失败；只判定 `alu-dock.service` 本身。Installer检查 linger但不修改机器 policy。应用ready必须同时满足V2 hello、完整managed capability集合和hello PID=`MainPID`；restart还要求新`hostEpoch`。
+
+显式管理命令：
+
+```bash
+alu-dock service install [--now]
+alu-dock service start
+alu-dock service restart
+alu-dock service status
+alu-dock service logs [--lines 200] [--follow]
+alu-dock service stop
+alu-dock service uninstall
+```
+
+只有这些命令管理unit。`open/new/attach`只做bounded连接等待，不调用systemctl，也不fork detached Host。`uninstall`只移除Alu Dock生成且带marker的unit，不删除catalog或Pi session。
 
 仓库发布命令：
 
@@ -117,6 +132,10 @@ Smoke不能只做 `ping`，也不能只加载合成 extension。它至少要：
 - 阶段完成：先 commit和gate，再发布；发布失败不把卡片阶段标成“已部署”。
 - 阶段中间：除非修复阻断 dogfood 的 hotfix，不频繁覆盖 release。
 
-## 阶段 3.6 的诚实限制
+## 阶段 5 durable restart语义
 
-阶段 3.6 service仍使用内存 catalog。Deploy/restart会终止当前 Host持有的 runtime并丢失 Dock instance ID；Pi session JSONL仍由 Pi保存，但自动发现、`host_lost`归一和显式 reopen要到阶段 5。发布器因此默认拒绝有 active instance的重启。
+Managed Host只使用严格closed schema-1 catalog。每次startup在ready前先取得私有socket ownership，再load/validate并atomic reconcile；prior-epoch `active|stopping` 只归一为 `host_lost`，已有explicit stop intent归一为`stopped`，绝不构造runtime或重放旧prompt/queue/tool effect。Corrupt/future/wrong-owner/symlink catalog保留原证据并使unit启动失败。
+
+用户可对`host_lost|runtime_error`记录显式reopen：先验证真实current-user session file与canonical cwd/project trust，再通过公开`SessionManager.open()`创建fresh runtime transaction，保持Dock ID/createdAt、generation +1。Pi JSONL仍是conversation context权威；catalog不是queue或event log。
+
+发布器仍默认拒绝有active instance的restart。只有用户明确授权时才使用`--allow-active`；这会中断旧runtime，但下一epoch会保留可显式reopen的catalog identity，不会自动继续工作。

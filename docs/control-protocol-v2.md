@@ -1,6 +1,6 @@
 # Alu Dock 本机控制协议 V2
 
-状态：阶段 0 冻结设计；阶段 1–3 已按 capability 实施
+状态：阶段 0 冻结设计；阶段 1–5 已按 capability 实施
 
 传输：当前 Unix 用户私有 AF_UNIX socket + UTF-8 JSONL
 
@@ -76,7 +76,7 @@ Client hello：
 Ready success（capability 列表只是当前实现集合）：
 
 ```json
-{"kind":"hello_ack","requestId":"h1","version":2,"host":{"pid":123,"dockVersion":"0.1.0","piSdkVersion":"0.80.6","hostEpoch":"uuid","startedAt":"2026-07-14T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["core.v2","events.follow","extension_ui.v1","host.info","instance.catalog","models.v1","resources.v1","run.abort.v1","session.commands.v1","session.core","settings.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200}}
+{"kind":"hello_ack","requestId":"h1","version":2,"host":{"pid":123,"dockVersion":"0.1.0","piSdkVersion":"0.80.6","hostEpoch":"uuid","startedAt":"2026-07-14T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["catalog.v1","core.v2","events.follow","extension_ui.v1","host.info","instance.catalog","models.v1","resources.v1","run.abort.v1","service.managed.v1","session.commands.v1","session.core","session.reopen","settings.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200}}
 ```
 
 任何 hello 失败都使用 closed `hello_error`，随后关闭：
@@ -272,7 +272,7 @@ interface HistoryEntryDto {
 | `instance.get` | `instance.catalog` | `{instanceId}` | `{instance:InstanceSnapshotV2}` |
 | `instance.attach` | `events.follow` | `{instanceId,since?:EventCursor,follow:boolean,controller:"claim"|"observe"}` | `AttachInitialDto`，follow=true 后转 event stream |
 | `instance.stop` | `instance.catalog` | `{operationId,instanceId}` | `{receipt:{operationId,alreadyStopped,cleanupErrors?:string[]},instance}` |
-| `instance.reopen` | `session.reopen` | `{operationId,instanceId,sessionFile?,trustChallengeId?,projectTrustDecision?}` | `{instance}` |
+| `instance.reopen` | `session.reopen` | `{operationId,instanceId,sessionFile?,trustChallengeId?,projectTrustDecision?}` | `{operationId,previousLifecycle:"host_lost"|"runtime_error",instance}` |
 | `command.submit` | `session.core` | `{operationId,instanceId,message,delivery:Delivery}` | `{receipt:CommandReceiptDto,instance}` |
 | `command.abort` | `run.abort.v1` | `{operationId,instanceId}` | `{instance}`；取消当前 agent/retry/compaction，实例保持可复用 |
 | `command.catalog` | `resources.v1` | `{instanceId,prefix?:string}` | `{commands:CommandDto[]}` |
@@ -401,7 +401,7 @@ Response method 必须与 pending request method 相同；select value 必须精
 - `active + idle` 与 `active + failed` 都是 **quiescent**，前提是无 admission/retry/compaction/queue continuation；failed 只表示上一 run 失败。
 - `stopping` 可暂时保留 `execution=idle|running|failed`；不再接受 mutation。
 - `stopped|host_lost|runtime_error` 必须 `execution=unavailable`、pending 全零、无 active command/interaction/current owner。
-- `reopenable=true` 只允许 `host_lost|runtime_error` 且 cwd/sessionFile/recoverySessionFile validation 通过；`stopped` 永远 false。
+- `reopenable=true`只允许`host_lost|runtime_error`且catalog含bounded absolute session/recovery candidate；它不是文件仍存在的保证。Explicit reopen必须再次验证real path、owner、header cwd与project trust；`stopped`永远false。
 - `pending.total === steering + followUp`；任何 pending > 0 都不算 quiescent。
 - `runtimeGeneration` 从 1 开始，只在成功 initial create、session replacement、reload 或 explicit reopen 时单调递增；generation 变化后 sequence 从 1 重新开始并清空旧 interaction/status/event ring。
 - `lastRun=interrupted` 只表示 Host/replacement loss 时存在 conservative busy fact；不能伪装为 failed/aborted。
@@ -424,6 +424,8 @@ Parser、catalog loader 和 registry mutation 共用同一个 invariant validato
 
 ## 9. Durable catalog facts 与 commit boundaries
 
+Managed path固定为`$STATE_DIRECTORY/catalog.json`。State directory必须是真实current-user-owned non-symlink `0700`目录，catalog必须是真实current-user-owned non-symlink regular `0600`文件；catalog上限16 MiB、最多10000 records。Loader按严格closed schema拒绝unknown field、future schema、非canonical UTC timestamp、非法enum/path/invariant。Corrupt evidence不rename、不truncate、不自动重建；startup只移除本次Host绑定且inode仍匹配的socket。Host必须先绑定/chmod/验证private socket，再load/reconcile catalog，完成前不ready。
+
 Catalog 不保存 prompt/tool/queue 内容，但必须保存 crash 后保守判断所需事实：
 
 ```ts
@@ -435,10 +437,9 @@ interface DurableInstanceRecord {
   pendingCount: number;          // count only, no queued text
   replacement?: {
     operationId: string;
-    kind: "new" | "switch" | "fork" | "clone" | "reload";
+    kind: "new" | "switch" | "reload";
     previousSessionFile?: string;
     requestedSessionFile?: string;
-    requestedEntryId?: string;
     startedAt: string;
   };
   recoverySessionFile?: string;
@@ -447,7 +448,7 @@ interface DurableInstanceRecord {
 }
 ```
 
-所有 mutation 经过 Host 单写队列。阶段 1D 先以 registry-owned transaction coordinator 和 injected `CatalogCommitPort` 固定同一线性化/失败合同；默认 port 只维护 live in-memory projection。阶段 5 的 managed `catalog.v1` port 才把下表“commit”实现为 fsync file + atomic rename + fsync directory，不在阶段 1伪称 durable：
+所有 mutation 经过 Host 单写队列。阶段 1D 以registry-owned transaction coordinator和injected `CatalogCommitPort`固定同一线性化/失败合同；显式`serve --dev`仍使用in-memory projection。阶段5 managed `catalog.v1`已把下表“commit”实现为same-directory temp write、file fsync、atomic rename与directory fsync：
 
 | Boundary | 顺序与失败语义 |
 |---|---|
@@ -498,8 +499,8 @@ Managed mode 固定默认 socket/state pair并拒绝 override。Dev custom socke
 3. 使用 `SessionManager.open()` + `createAgentSessionRuntime()` 创建并 bind candidate；
 4. 预计算 `nextGeneration=current+1`；
 5. 原子 commit active/idle/session metadata/next generation/clear recovery error；
-6. commit 成功后才 swap registry、publish `instance.reopened`；
-7. 任一步失败 dispose candidate、保持原 catalog record；
+6. commit成功后才swap registry、publish `instance.reopened`；同Host `runtime_error`若仍有旧attach stream，关闭该stale stream，client必须重新attach新runtime；
+7. 任一步失败dispose candidate、保持原catalog record；
 8. 不 submit 任何旧文本，不恢复 queue，不声称旧 tool 结果。
 
 Dock `instanceId` 保持；Pi ID/file 来自打开的 session header。
@@ -697,7 +698,7 @@ Numeric counters必须是 non-negative safe integer；timestamp使用 ISO-8601 U
 
 `interaction.respond` 是唯一受限 mutation retry：在**同 hostEpoch、instanceId、runtimeGeneration、leaseToken、interactionId、相同 response**内，可根据短期 tombstone返回 `already_resolved` 而不再次 resolve；跨 epoch/generation禁止 retry。
 
-Host 对 same-host重复 operation ID 保留 bounded receipt cache；同 mutation type/params 的并发或已完成 duplicate 共享原 Promise/result/error且不重复 side effect，type/params 冲突的复用返回 `operation_conflict`。只淘汰最旧 settled receipt，不淘汰 live operation。`instance.catalog` 在阶段 1 仍明确表示当前 Host 的 live registry capability；catalog记录 creation/active/replacement/stop IDs用于重启后拒绝危险 duplicate，但不承诺保存所有 mutation结果或 exactly-once，也不表示阶段 5 的 durable `catalog.v1` 已实现。
+Host 对same-host重复operation ID保留bounded receipt cache；同mutation type/params的并发或已完成duplicate共享原Promise/result/error且不重复side effect，type/params冲突的复用返回`operation_conflict`。只淘汰最旧settled receipt，不淘汰live operation。`instance.catalog`表示当前Host registry surface；managed `catalog.v1`持久化identity、live intent和保守状态，但不保存所有mutation receipt，也不承诺cross-Host exactly-once。已持久化creation operation拒绝重新create并要求查询`instance.list`；其他response loss仍按unknown effect处理。
 
 ## 17. Error codes 与 code-specific details
 
@@ -723,13 +724,13 @@ Error envelope固定 `{code,message,retryable,details?}`。`details` 仅按 code
 
 ## 18. systemd service 与 Host protocol 边界
 
-`alu-dock service start|restart|install --now` 都必须等待 hello ready；restart 还必须观察到不同 `hostEpoch`，并验证 hello PID 等于 unit `MainPID`。Timeout 只报告失败、打印 unit status/journal指引，不自动删除 catalog或反复 stop/start unit。
+`alu-dock service start|restart|install --now`都必须等待V2 hello、`catalog.v1 + service.managed.v1 + session.reopen` capability集合，并验证hello PID等于unit `MainPID`；对已可probe的restart还必须观察到不同`hostEpoch`。Timeout只报告失败和unit journal诊断，不自动删除catalog或反复stop/start unit。
 
 Host drain 总预算 12 秒，给 unit `TimeoutStopSec=15` 留 3 秒 kill margin：停止 admission/cancel dialogs → commit shutdown intents → bounded abort/dispose → commit host_lost → inode-safe socket cleanup。超时非零退出；下一 epoch按 shutdown/busy intent保守 normalization。
 
 测试必须覆盖 readiness永不到达、restart期间旧 epoch socket仍响应、hung create/preflight、SIGTERM budget与最终 SIGKILL。
 
-Host `start/stop/restart/logs/install/uninstall` 是 CLI 对 `systemctl --user` 的显式管理，不走 Host RPC。`/stop`/`instance.stop` 永远只表示一个 instance。
+Host `start/stop/restart/status/logs/install/uninstall`是CLI对`systemctl --user`的显式管理，不走Host RPC。只有带生成marker的user unit可被覆写/删除；uninstall不删catalog/session。普通`open/new/attach`只bounded等待socket，绝不调用systemctl或fork detached进程。`/stop`/`instance.stop`永远只表示一个instance。
 
 ## 19. 1.0 前绿地开发规则
 

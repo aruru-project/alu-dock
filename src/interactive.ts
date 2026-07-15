@@ -25,10 +25,7 @@ export async function openDock(options: OpenDockOptions): Promise<void> {
 
   const cwd = resolve(options.cwd);
   process.stdout.write("Connecting to Alu Dock…\n");
-  const ensured = await ensureHost(options.socketPath);
-  if (ensured.started) {
-    process.stdout.write(`Host started in the background (pid ${ensured.ping.pid}, log ${ensured.logPath}).\n`);
-  }
+  await ensureHost(options.socketPath);
 
   const client = new DockClient({ socketPath: options.socketPath });
   const instance = await resolveInstance(client, {
@@ -74,14 +71,16 @@ async function resolveInstance(
 
   if (options.forceNew) return createWithNotice(client, options.cwd, options.name);
 
-  const active = (await client.list())
-    .filter((instance) => instance.lifecycle === "active" && resolve(instance.cwd) === options.cwd)
+  const matching = (await client.list())
+    .filter((instance) => instance.lifecycle !== "stopped" && resolve(instance.cwd) === options.cwd)
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-  if (active.length === 0) return createWithNotice(client, options.cwd, options.name);
+  const active = matching.filter((instance) => instance.lifecycle === "active");
   if (active.length === 1) return active[0];
+  if (active.length === 0 && matching.length === 0) return createWithNotice(client, options.cwd, options.name);
 
-  const selection = await selectInstance(active);
+  const selection = await selectInstance(active.length > 0 ? active : matching);
   if (selection === "new") return createWithNotice(client, options.cwd, options.name);
+  if (selection && selection.lifecycle !== "active") return reopenWithNotice(client, selection);
   return selection;
 }
 
@@ -102,6 +101,26 @@ async function createWithNotice(
       challengeId: challenge.challengeId,
       decision,
     });
+  }
+}
+
+async function reopenWithNotice(
+  client: DockClient,
+  record: InstanceSnapshot,
+): Promise<InstanceSnapshot> {
+  if (!record.reopenable) throw new Error(`Instance ${record.id} is ${record.lifecycle} and has no session context to reopen`);
+  process.stdout.write(`Reopening ${displayName(record)} from its persisted Pi session context…\n`);
+  const operationId = randomUUID();
+  try {
+    return (await client.reopen(record.id, operationId)).instance;
+  } catch (error) {
+    const challenge = projectTrustChallenge(error, operationId);
+    if (!challenge) throw error;
+    const decision = await askProjectTrust(challenge.cwd);
+    return (await client.reopen(record.id, operationId, undefined, {
+      challengeId: challenge.challengeId,
+      decision,
+    })).instance;
   }
 }
 

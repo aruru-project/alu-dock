@@ -87,7 +87,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
   assert.equal(objectValue(versionError.error).code, "unsupported_protocol");
   assert.equal(factoryCalls, 0);
 
-  const capabilityError = await exchangeOne(socketPath, { ...base, requestId: "hello-2", versions: [2], requiredCapabilities: ["catalog.v1"] });
+  const capabilityError = await exchangeOne(socketPath, { ...base, requestId: "hello-2", versions: [2], requiredCapabilities: ["not-implemented.v1"] });
   assert.equal(capabilityError.kind, "hello_error");
   assert.equal(objectValue(capabilityError.error).code, "capability_missing");
   assert.equal(factoryCalls, 0);
@@ -101,7 +101,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["core.v2", "events.follow", "extension_ui.v1", "host.info", "instance.catalog", "models.v1", "resources.v1", "run.abort.v1", "session.commands.v1", "session.core", "settings.v1", "tools.v1", "tui.projection.v1"]);
+  assert.deepEqual(ack.capabilities, ["catalog.v1", "core.v2", "events.follow", "extension_ui.v1", "host.info", "instance.catalog", "models.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.commands.v1", "session.core", "session.reopen", "settings.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);

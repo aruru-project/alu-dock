@@ -7,6 +7,7 @@ import {
   CatalogWriteError,
   type InstanceCatalogMutationPort,
   MutationFaultedError,
+  validateCatalogProjection,
   validateCatalogRecord,
 } from "../core/catalog.js";
 
@@ -20,13 +21,19 @@ export interface CatalogFault {
 const IN_MEMORY_COMMIT_PORT: CatalogCommitPort = { commit: async () => {} };
 
 export class CatalogTransactionCoordinator {
-  private projection: CatalogProjection = { schemaVersion: 1, revision: 0, instances: [] };
+  private projection: CatalogProjection;
   private tail: Promise<void> = Promise.resolve();
   private healthValue: CatalogHealth = "healthy";
   private faultValue: CatalogFault | undefined;
+  private initialized = false;
   private readonly faultListeners = new Set<(fault: CatalogFault) => void>();
 
-  constructor(private readonly port: CatalogCommitPort = IN_MEMORY_COMMIT_PORT) {}
+  constructor(
+    private readonly port: CatalogCommitPort = IN_MEMORY_COMMIT_PORT,
+    lastHostEpoch = "host-epoch",
+  ) {
+    this.projection = { schemaVersion: 1, revision: 0, lastHostEpoch, instances: [] };
+  }
 
   get health(): CatalogHealth { return this.healthValue; }
   get fault(): CatalogFault | undefined { return this.faultValue; }
@@ -34,6 +41,15 @@ export class CatalogTransactionCoordinator {
 
   current(): CatalogProjection {
     return structuredClone(this.projection);
+  }
+
+  initialize(projection: CatalogProjection): void {
+    if (this.initialized || this.projection.revision !== 0 || this.projection.instances.length > 0 || this.healthValue !== "healthy") {
+      throw new Error("Catalog coordinator is already initialized");
+    }
+    validateCatalogProjection(projection);
+    this.projection = structuredClone(projection);
+    this.initialized = true;
   }
 
   assertWritable(): void {
@@ -83,8 +99,10 @@ export class CatalogTransactionCoordinator {
         const candidate: CatalogProjection = {
           schemaVersion: 1,
           revision: this.projection.revision + 1,
+          lastHostEpoch: this.projection.lastHostEpoch,
           instances: [...records.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id)),
         };
+        validateCatalogProjection(candidate);
         const immutableCandidate = deepFreeze(structuredClone(candidate));
         const immutableContext = deepFreeze(structuredClone(context));
         await this.port.commit(immutableCandidate, immutableContext);
