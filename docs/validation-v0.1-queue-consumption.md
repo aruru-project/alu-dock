@@ -4,7 +4,7 @@ Date: 2026-07-16
 
 Card: #154 (blocks #142)
 
-Status: source and automated gate complete; immutable managed rollout pending
+Status: complete and deployed
 
 ## Scope
 
@@ -67,7 +67,25 @@ Deterministic regression coverage includes:
 
 ## Managed rollout evidence
 
-Pending. After a clean committed HEAD is published, this section will record the immutable release, MainPID, hostEpoch, V2 capability hello, resource smoke, and real SSH queue dogfood result.
+Immutable release:
+
+- commit: `3c9ca5e2c487230906d05965a70194a654090eff`;
+- release: `20260715T185801Z-3c9ca5e2c487`;
+- previous release/rollback point: `20260715T175052Z-9c94b51a5369`;
+- systemd `MainPID=2953537`, `ActiveState=active`, `SubState=running`;
+- host epoch: `9e6c66be-a53d-48c7-af31-9125b0440043` (changed from `414e6c04-849d-4326-872d-fdc4de366299`);
+- hello advertises `queue.control.v1` together with the complete Stage 4–6 managed capability set;
+- published-resource smoke: PASS — 40 commands, 21 resources, 0 diagnostics, 18 tools, 24 settings, 3 tree nodes, and canonical `chain/chain-prompts` plus `run/run-chain` ordering;
+- journal shows clean SIGTERM of the prior Host and one `host.ready` for PID 2953537; no rollback was required.
+
+Real installed-release SSH/Pi dogfood:
+
+1. A temporary managed real-Pi instance used `google/gemini-2.5-flash` and entered a real bash `sleep 60` tool run.
+2. With one follow-up and one steering message pending, the published TUI at 80x24 then 43x18 displayed steering first and follow-up second. Alt+Up reported `restored 2 queued messages`; the instance remained `execution=running`, `pending.total=0`.
+3. A second steering/follow-up pair was queued during the same Host-owned run. Escape restored both, then the TUI displayed `Run aborted`; the final instance was `execution=idle`, `lastRun=aborted`, `pending.total=0`.
+4. The temporary instance was explicitly stopped. The pre-smoke global default model/thinking values were restored to `openai-codex/gpt-5.6-sol` and `xhigh`; repository `.pi/settings.json` remained unchanged.
+
+Provider deviations were environmental rather than queue failures: the first OpenAI Codex attempt hit its usage limit and an Anthropic model ID returned `DeploymentNotFound`, both before a stable long run could be observed. The Google provider completed the required real queue/PTY gate.
 
 ## Deviations and remaining risks
 

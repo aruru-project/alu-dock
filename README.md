@@ -2,7 +2,7 @@
 
 Alu Dock 是 #136「受管运行时宿主」的独立实现；V0 执行卡为 #137，V0.1 工程入口为 #142。
 
-V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座、阶段 2 SSH TUI/Footer、阶段 3 日常控制、阶段 4 Extension UI、阶段 5 durable Host lifecycle 与阶段 6 tree/fork/clone 均已完成源码、自动化门禁与managed rollout。当前 Host 提供 V2 transaction/fault seam、private atomic catalog、startup reconcile、explicit reopen、持久 branch/tree projection、稳定 message/tool event、session metrics、可复用实例 abort、`session.commands.v1`、`session.tree.v1` 与 `extension_ui.v1`；薄 TUI 提供 fixed composer/history viewport、明确 run activity、默认折叠工具、Markdown/thinking/diff、动态 autocomplete、可检索 selector、完整 Footer、new/resume/name/compact/reload/tree/fork/clone workflow，以及 attach-bound extension select/confirm/input/editor overlay。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与 Alubot 不在本仓库的修改范围内。
+V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座、阶段 2 SSH TUI/Footer、阶段 3 日常控制、阶段 4 Extension UI、阶段 5 durable Host lifecycle 与阶段 6 tree/fork/clone 均已完成源码、自动化门禁与managed rollout。当前Host提供V2 transaction/fault seam、private atomic catalog、startup reconcile、explicit reopen、持久branch/tree projection、稳定message/tool event、session metrics、可复用实例abort、`session.commands.v1`、`session.tree.v1`、`queue.control.v1`与`extension_ui.v1`；薄TUI提供fixed composer/history viewport、明确run activity、默认折叠工具、Markdown/thinking/diff、动态autocomplete、可检索selector、完整Footer、诚实pending queue tray与Alt+Up/Esc恢复、new/resume/name/compact/reload/tree/fork/clone workflow，以及attach-bound extension select/confirm/input/editor overlay。旧`alu-daemon`、Rails WebConsole、Redis bridge与Alubot不在本仓库的修改范围内。
 
 ## V0 冻结进度
 
@@ -26,7 +26,8 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [x] 阶段 4：Extension UI 源码、真实 Pi/PTY 与七扩展兼容门禁
 - [x] 阶段 5：`systemd --user`、durable catalog 与 explicit reopen
 - [x] 阶段 6：tree/fork/clone（源码、自动化门禁与managed rollout）
-- [ ] 最终真人默认入口验收
+- [x] #157 tool render storm与#154 queue诚实时序/撤回修正
+- [ ] #155长历史/滚轮与#158最终真人默认入口验收
 
 详细文档：
 
@@ -61,11 +62,11 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 
 ## V0.1 工程入口
 
-#142 是 V0.1 唯一工程状态入口。阶段 0–6、dogfood UX 与 Extension UI 主体能力已完成；Stage 6 invariants保持冻结，当前immutable managed release为tool-render性能修正版`20260715T175052Z-9c94b51a5369`。真人dogfood后续修正由#154 queue时序、#155长历史/滚轮和#158集中验收承接；V0.2 renderer仍由#148独立排期。
+#142是V0.1唯一工程状态入口。阶段0–6、dogfood UX与Extension UI主体能力已完成；Stage 6 invariants保持冻结，当前immutable managed release为queue修正版`20260715T185801Z-3c9ca5e2c487`。#154 queue时序已完成，真人dogfood后续修正由#155长历史/滚轮和#158集中验收承接；V0.2 renderer仍由#148独立排期。
 
 **绿地规则：** Alu Dock 是全新项目。到 1.0 落地前，除非用户特意说明，不考虑任何旧协议、旧 Host、旧数据、旧 CLI 行为的兼容或迁移；原型合同直接替换。版本号仅标识当前合同，不表示存在历史包袱。
 
-阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1 已将当前控制面切为 V2-only，并完成 Runtime replacement、project trust、closed projections及 registry transaction/fault seam；阶段 2 advertised `tui.projection.v1` 与独立的 `run.abort.v1`；阶段 3 advertised `session.commands.v1` 并完成日常 settings/session workflows；阶段 3.5 完成轻度拆分；阶段 3.6 建立不可变 release、稳定 launcher、真实资源 smoke 和 baseline user service。#147 已完成 fixed composer、viewport、活动状态、工具折叠和可检索 selector；阶段 4 advertised `extension_ui.v1`，加入单 controller lease、Host-owned dialog queue、结构化 notify/status 和当前扩展兼容。阶段 5 advertised `catalog.v1`、`service.managed.v1` 与 `session.reopen`，实现 socket-first startup、0700/0600 atomic catalog、prior-epoch reconcile、no-replay Host loss、explicit reopen和完整 service CLI；普通入口不再启动 detached Host。阶段 6 advertised `session.tree.v1`，通过公开 `navigateTree()` 与 `AgentSessionRuntime.fork()` 实现 revision-bound tree、fork-before、clone-at-leaf、selected editor text、extension hook/abort 与 deferred session-file recovery。V0.2 #148 的 direct `pi-tui` dependency inventory、Terminal Core API、provenance政策、OpenClaw固定commit审计和一次性切换计划已冻结在 [`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)；renderer实施不属于V0.1。
+阶段0文档描述的是V0.1**目标合同**。阶段1已将当前控制面切为V2-only，并完成Runtime replacement、project trust、closed projections及registry transaction/fault seam；阶段2 advertised `tui.projection.v1`与独立的`run.abort.v1`；阶段3 advertised `session.commands.v1`并完成日常settings/session workflows；阶段3.5完成轻度拆分；阶段3.6建立不可变release、稳定launcher、真实资源smoke和baseline user service。#147已完成fixed composer、viewport、活动状态、工具折叠和可检索selector；阶段4 advertised `extension_ui.v1`，加入单controller lease、Host-owned dialog queue、结构化notify/status和当前扩展兼容。阶段5 advertised `catalog.v1`、`service.managed.v1`与`session.reopen`，实现socket-first startup、0700/0600 atomic catalog、prior-epoch reconcile、no-replay Host loss、explicit reopen和完整service CLI；普通入口不再启动detached Host。阶段6 advertised `session.tree.v1`，通过公开`navigateTree()`与`AgentSessionRuntime.fork()`实现revision-bound tree、fork-before、clone-at-leaf、selected editor text、extension hook/abort与deferred session-file recovery。#154随后advertised `queue.control.v1`，将queued正文保持为Same-Host ephemeral projection，并以公开user `message_start`作为正式conversation边界。V0.2 #148的direct `pi-tui` dependency inventory、Terminal Core API、provenance政策、OpenClaw固定commit审计和一次性切换计划已冻结在[`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)；renderer实施不属于V0.1。
 
 ## 当前默认真人入口
 
