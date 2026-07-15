@@ -2,7 +2,7 @@
 
 Alu Dock 是 #136「受管运行时宿主」的独立实现；V0 执行卡为 #137，V0.1 工程入口为 #142。
 
-V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座、阶段 2 SSH TUI/Footer、阶段 3 日常控制、阶段 4 Extension UI、阶段 5 durable Host lifecycle 与阶段 6 tree/fork/clone 均已完成源码与自动化门禁。当前 Host 提供 V2 transaction/fault seam、private atomic catalog、startup reconcile、explicit reopen、持久 branch/tree projection、稳定 message/tool event、session metrics、可复用实例 abort、`session.commands.v1`、`session.tree.v1` 与 `extension_ui.v1`；薄 TUI 提供 fixed composer/history viewport、明确 run activity、默认折叠工具、Markdown/thinking/diff、动态 autocomplete、可检索 selector、完整 Footer、new/resume/name/compact/reload/tree/fork/clone workflow，以及 attach-bound extension select/confirm/input/editor overlay。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与 Alubot 不在本仓库的修改范围内。
+V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座、阶段 2 SSH TUI/Footer、阶段 3 日常控制、阶段 4 Extension UI、阶段 5 durable Host lifecycle 与阶段 6 tree/fork/clone 均已完成源码、自动化门禁与managed rollout。当前 Host 提供 V2 transaction/fault seam、private atomic catalog、startup reconcile、explicit reopen、持久 branch/tree projection、稳定 message/tool event、session metrics、可复用实例 abort、`session.commands.v1`、`session.tree.v1` 与 `extension_ui.v1`；薄 TUI 提供 fixed composer/history viewport、明确 run activity、默认折叠工具、Markdown/thinking/diff、动态 autocomplete、可检索 selector、完整 Footer、new/resume/name/compact/reload/tree/fork/clone workflow，以及 attach-bound extension select/confirm/input/editor overlay。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与 Alubot 不在本仓库的修改范围内。
 
 ## V0 冻结进度
 
@@ -25,7 +25,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [x] #147 与阶段 4 managed rollout（随阶段 5 immutable release完成）
 - [x] 阶段 4：Extension UI 源码、真实 Pi/PTY 与七扩展兼容门禁
 - [x] 阶段 5：`systemd --user`、durable catalog 与 explicit reopen
-- [x] 阶段 6：tree/fork/clone（源码与自动化门禁；managed rollout另行记录）
+- [x] 阶段 6：tree/fork/clone（源码、自动化门禁与managed rollout）
 - [ ] 最终真人默认入口验收
 
 详细文档：
@@ -59,7 +59,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 
 ## V0.1 工程入口
 
-#142 是 V0.1 唯一工程状态入口。阶段 0–6、dogfood UX 与 Extension UI 源码/自动化门禁均已完成；当前下一入口是 Stage 6 immutable managed rollout 与最终真人默认入口验收。当前在线 managed release仍是已验证的 Stage 5 baseline，未因源码完成而被静默替换。
+#142 是 V0.1 唯一工程状态入口。阶段 0–6、dogfood UX 与 Extension UI 源码/自动化门禁均已完成；Stage 6 immutable managed release `20260715T153911Z-4fefab9e2ba4` 已部署并通过真实资源smoke。当前剩余入口是最终真人默认终端验收。
 
 **绿地规则：** Alu Dock 是全新项目。到 1.0 落地前，除非用户特意说明，不考虑任何旧协议、旧 Host、旧数据、旧 CLI 行为的兼容或迁移；原型合同直接替换。版本号仅标识当前合同，不表示存在历史包袱。
 

@@ -4,7 +4,7 @@
 
 卡片：#142
 
-状态：**源码与自动化门禁 PASS；等待从 clean committed HEAD执行 immutable managed rollout。**
+状态：**PASS — 源码、自动化门禁、immutable managed rollout与真实资源smoke均完成。**
 
 基线：`@earendil-works/pi-coding-agent@0.80.6`、`@earendil-works/pi-tui@0.80.6`、Protocol V2 only。
 
@@ -19,7 +19,7 @@ Stage 6 完成 `session.tree.v1`，同时保持 Stage 4 extension lifecycle、St
 - `/tree`、`/fork`、`/clone`：searchable selector、Dock-owned filter/pagination与editor restoration；
 - summary、replacement、detach、Host drain仍fail closed，不构造第二套slash-command executor。
 
-结论：**PASS**。Tree navigation不换Pi session file；fork/clone生成新Pi session和runtime generation；全路径没有模型调用或旧prompt replay。
+结论：**PASS**。Tree navigation不换Pi session file；fork/clone生成新Pi session和runtime generation；本次自动化与发布smoke没有模型调用或旧prompt replay。
 
 ## 2. 实现边界
 
@@ -142,13 +142,42 @@ git diff --check
 
 以上均为显式安全边界，不是未处理兼容层。
 
-## 5. 剩余验收与部署
+## 5. Managed rollout证据
 
-自动化不能替代：
+用户明确授权覆盖当前尚未正式启用的dogfood状态后，从clean committed HEAD `4fefab9e2ba43451204c41a1ce4dc2dd5917330e`执行：
+
+```bash
+npm run deploy:dogfood -- --allow-active
+```
+
+发布结果：
+
+- release ID：`20260715T153911Z-4fefab9e2ba4`；
+- release path：`/home/luziyi/release/alu-dock/releases/20260715T153911Z-4fefab9e2ba4`；
+- previous release：`20260715T132357Z-70b524dd0548`（保留为完整rollback点）；
+- atomic `current`：已指向Stage 6 release；
+- unit：`alu-dock.service` active/running/enabled，`MainPID=2928822`；
+- host epoch：`e10b7b53-d856-4e71-915c-54949d0ca646` → `d72e05db-a3d5-4800-9977-cf3c0f9ce867`；
+- hello：advertise完整capability集合，包括`session.tree.v1`；
+- host info：`ready`，catalog schema 1；
+- journal：旧Host正常SIGTERM/stopped，新Host单次ready；无error/failure；
+- receipt：`/home/luziyi/release/alu-dock/receipts/20260715T153911Z-4fefab9e2ba4.json`（mode `0600`）。
+
+Released artifact的真实installed-resource smoke结果：
+
+- commands 40；resources 21；diagnostics 0；tools 18；settings 24；
+- tree nodes 3，revision `g1-a274e7766de8c004efb75d5fdb790a3ae4596f3ad1d1841057f53e2cbba0ad5a`；
+- `chain/chain-prompts`与`run/run-chain` canonical ordering通过；
+- 临时smoke instance正常stop；部署后catalog仅有2个stopped records，无active runtime遗留；
+- smoke没有模型、extension command或tool side effect。
+
+## 6. 剩余真人验收
+
+自动化和rollout不能替代：
 
 - 长会话中的真人tree可读性与branch summary质量；
 - 真实provider/network下successful summary；
 - 多小时SSH resize/scroll/composer体验；
-- Stage 6 managed release后的默认`alu-dock`真人验收。
+- 默认`alu-dock`入口的最终真人签收。
 
-Managed rollout必须从clean committed HEAD创建新immutable release，原子切换`current`，验证新`MainPID`/`hostEpoch`、`session.tree.v1` hello、真实installed-resource tree smoke与rollback。部署完成前，当前在线service仍是Stage 5 baseline。
+这些属于#142最终验收，不再是Stage 6实现或部署缺口。
