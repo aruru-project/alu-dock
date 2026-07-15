@@ -45,6 +45,7 @@ export class HistoryViewport {
       }
       if (
         version.width === previous.width
+        && version.outputRevision > previous.outputRevision
         && version.revision !== previous.revision
         && allLines.length > this.previousLineCount
       ) {

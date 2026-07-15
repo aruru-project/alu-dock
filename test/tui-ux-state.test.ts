@@ -104,6 +104,19 @@ test("history viewport auto-follows, locks on page-up, counts unseen output, and
   assert.deepEqual(followed.lines, ["line 7", "line 8", "line 9", "line 10"]);
 });
 
+test("layout-only tool expansion preserves an explicit reveal offset", () => {
+  const viewport = new HistoryViewport();
+  const collapsed = Array.from({ length: 12 }, (_, index) => `line ${index}`);
+  viewport.project(collapsed, 5, { width: 43, revision: 1, outputRevision: 1 });
+  viewport.scrollToOffsetFromBottom(4);
+  viewport.project(collapsed, 5, { width: 43, revision: 1, outputRevision: 1 });
+
+  const expanded = [...collapsed.slice(0, 6), "detail a", "detail b", "detail c", ...collapsed.slice(6)];
+  const projection = viewport.project(expanded, 5, { width: 43, revision: 2, outputRevision: 1 });
+  assert.equal(projection.offsetFromBottom, 4);
+  assert.equal(projection.unseenUpdates, 0);
+});
+
 test("model search ranks name provider and id matches and supports fuzzy subsequences", () => {
   const models = [
     { value: "anthropic/claude-sonnet-4", label: "Claude Sonnet 4", description: "reasoning" },
