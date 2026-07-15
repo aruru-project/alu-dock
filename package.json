@@ -16,7 +16,8 @@
     "test": "npm run build && node --test dist/test/**/*.test.js",
     "cli": "npm run build && node dist/src/cli.js",
     "serve": "npm run build && node dist/src/cli.js serve",
-    "smoke:sdk": "npm run build && node dist/scripts/sdk-smoke.js"
+    "smoke:sdk": "npm run build && node dist/scripts/sdk-smoke.js",
+    "deploy:dogfood": "npm run build && node dist/scripts/deploy-dogfood.js"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.80.6",

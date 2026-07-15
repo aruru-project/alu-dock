@@ -62,6 +62,18 @@ journalctl --user -u alu-dock.service -f
 
 User manager整体为 degraded不构成失败；只判定 `alu-dock.service` 本身。Installer检查 linger但不修改机器 policy。
 
+仓库发布命令：
+
+```bash
+# 首次从过渡期 detached Host迁移；仍会先拒绝任何 active instance
+npm run deploy:dogfood -- --replace-unmanaged
+
+# 后续阶段发布
+npm run deploy:dogfood
+```
+
+`--allow-active` 是明确接受中断当前 runtime的紧急开关，不得作为日常默认参数。发布器不会自动执行模型或扩展 side effect。
+
 ## 发布事务
 
 一次阶段发布必须依次执行：

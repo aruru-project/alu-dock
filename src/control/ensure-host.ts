@@ -6,6 +6,7 @@ import { ControlClientError, DockClient } from "./dock-client.js";
 import type { PingResult } from "./protocol.js";
 
 const HOST_START_TIMEOUT_MS = 10_000;
+const MANAGED_HOST_WAIT_MS = 2_000;
 const HOST_PING_INTERVAL_MS = 100;
 
 export interface EnsuredHost {
@@ -14,10 +15,26 @@ export interface EnsuredHost {
   logPath?: string;
 }
 
-/** Start the local host on demand, leaving it detached from this client TTY. */
-export async function ensureHost(socketPath: string): Promise<EnsuredHost> {
+export interface EnsureHostOptions {
+  managed?: boolean;
+  managedWaitMs?: number;
+}
+
+/** Start a development Host on demand; managed releases never fall back to detached ownership. */
+export async function ensureHost(socketPath: string, options: EnsureHostOptions = {}): Promise<EnsuredHost> {
   const existing = await pingIfRunning(socketPath);
   if (existing) return { ping: existing, started: false };
+
+  const managed = options.managed ?? process.env.ALU_DOCK_MANAGED === "1";
+  if (managed) {
+    const deadline = Date.now() + (options.managedWaitMs ?? MANAGED_HOST_WAIT_MS);
+    while (Date.now() < deadline) {
+      await delay(HOST_PING_INTERVAL_MS);
+      const ping = await pingIfRunning(socketPath);
+      if (ping) return { ping, started: false };
+    }
+    throw new Error("Managed Alu Dock service is unavailable; run `systemctl --user status alu-dock.service` and `journalctl --user -u alu-dock.service -n 200 --no-pager`");
+  }
 
   const entryPath = process.argv[1];
   if (!entryPath) throw new Error("Cannot locate the alu-dock CLI entry point for host startup");
