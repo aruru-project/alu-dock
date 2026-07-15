@@ -6,19 +6,26 @@ import {
 } from "@earendil-works/pi-tui";
 
 import type { DockEvent, HistoryEntryDto, InstanceSnapshot } from "../core/managed-instance.js";
+import type { RunActivityState } from "./run-activity.js";
 import { markdownTheme, paint } from "./theme.js";
 
 type EntryKind = "user" | "assistant" | "thinking" | "tool" | "system" | "error";
+
+type ToolState = "running" | "done" | "failed";
 
 interface ConversationEntry {
   kind: EntryKind;
   text: string;
   complete: boolean;
   diffText?: string;
+  toolCallId?: string;
+  toolName?: string;
+  toolState?: ToolState;
 }
 
 interface ToolProjection {
   entry: ConversationEntry;
+  id: string;
   name: string;
   args?: string;
   output?: string;
@@ -37,8 +44,12 @@ export class DockConversation implements Component {
   private currentThinking: ConversationEntry | undefined;
   private queueEntry: ConversationEntry | undefined;
   private hideThinking = false;
-  private toolsExpanded = true;
+  private toolsExpanded = false;
+  private readonly toolExpansionOverrides = new Map<string, boolean>();
   private outputPadding = 1;
+  private revisionValue = 0;
+  private outputRevisionValue = 0;
+  private renderCache: { width: number; revision: number; lines: string[] } | undefined;
 
   reset(): void {
     this.entries.length = 0;
@@ -46,6 +57,8 @@ export class DockConversation implements Component {
     this.currentAssistant = undefined;
     this.currentThinking = undefined;
     this.queueEntry = undefined;
+    this.toolExpansionOverrides.clear();
+    this.markLayoutChanged();
   }
 
   applyHistory(entries: HistoryEntryDto[], truncated: boolean): void {
@@ -61,25 +74,32 @@ export class DockConversation implements Component {
         for (const block of entry.content) {
           if (block.type !== "tool_call") continue;
           const projected: ToolProjection = {
-            entry: this.add("tool", "", true),
+            entry: this.addTool(block.toolCallId, true),
+            id: block.toolCallId,
             name: block.toolName,
             args: formatJson(block.args, MAX_TOOL_ARGS),
             omitted: [...(block.omittedFields ?? [])],
           };
+          this.tools.set(block.toolCallId, projected);
           this.updateTool(projected, "done");
         }
         if (entry.error) this.add("error", entry.error);
       } else if (entry.role === "tool") {
         for (const block of entry.content) {
           if (block.type !== "tool_result") continue;
-          const projected: ToolProjection = {
-            entry: this.add(block.isError ? "error" : "tool", "", true),
+          const projected = this.tools.get(block.toolCallId) ?? {
+            entry: this.addTool(block.toolCallId, true),
+            id: block.toolCallId,
             name: block.toolName,
-            output: block.text,
-            omitted: [...(block.omittedFields ?? [])],
+            omitted: [],
           };
+          projected.name = block.toolName;
+          projected.output = block.text;
+          projected.omitted = [...new Set([...projected.omitted, ...(block.omittedFields ?? [])])];
+          this.tools.set(block.toolCallId, projected);
           this.updateTool(projected, block.isError ? "failed" : "done");
           projected.entry.diffText = !block.isError && looksLikeDiff(block.text) ? block.text : undefined;
+          this.tools.delete(block.toolCallId);
         }
       } else {
         this.add(entry.error ? "error" : "system", text || historyOmissions(entry) || entry.error || "Session event");
@@ -109,6 +129,7 @@ export class DockConversation implements Component {
           this.currentAssistant ??= this.add("assistant", "", false);
           this.currentAssistant.text += safeTerminalText(delta);
         }
+        this.markOutputChanged();
         break;
       }
 
@@ -117,10 +138,12 @@ export class DockConversation implements Component {
         if (role !== "assistant") break;
         const text = contentText(event.data.content, "text");
         const thinking = contentText(event.data.content, "thinking");
+        let changed = false;
         if (!this.hideThinking && (this.currentThinking || thinking)) {
           const entry = this.currentThinking ?? this.add("thinking", "", false);
           if (thinking !== undefined) entry.text = safeTerminalText(thinking);
           entry.complete = true;
+          changed = true;
         }
         this.currentThinking = undefined;
 
@@ -130,20 +153,27 @@ export class DockConversation implements Component {
         if (entry) {
           if (text !== undefined) entry.text = safeTerminalText(text);
           entry.complete = true;
+          changed = true;
         }
         this.currentAssistant = undefined;
+        if (changed) this.markOutputChanged();
         break;
       }
 
       case "tool.started": {
         const name = stringData(event, "toolName") ?? "tool";
         const callId = stringData(event, "toolCallId") ?? `${event.sequence}`;
-        const projected: ToolProjection = {
-          entry: this.add("tool", "", false),
+        const projected: ToolProjection = this.tools.get(callId) ?? {
+          entry: this.addTool(callId, false),
+          id: callId,
           name,
-          args: formatJson(event.data.args, MAX_TOOL_ARGS),
-          omitted: [...(event.data.omittedFields ?? [])],
+          omitted: [],
         };
+        projected.name = name;
+        projected.args = formatJson(event.data.args, MAX_TOOL_ARGS);
+        projected.omitted = [...new Set([...projected.omitted, ...(event.data.omittedFields ?? [])])];
+        projected.entry.complete = false;
+        projected.entry.diffText = undefined;
         this.tools.set(callId, projected);
         this.updateTool(projected, "running");
         break;
@@ -171,8 +201,9 @@ export class DockConversation implements Component {
       case "tool.completed": {
         const name = stringData(event, "toolName") ?? "tool";
         const callId = stringData(event, "toolCallId") ?? `${event.sequence}`;
-        const tool = this.tools.get(callId) ?? {
-          entry: this.add("tool", "", false),
+        const tool: ToolProjection = this.tools.get(callId) ?? {
+          entry: this.addTool(callId, false),
+          id: callId,
           name,
           omitted: [],
         };
@@ -180,7 +211,6 @@ export class DockConversation implements Component {
         tool.output = truncate(stringData(event, "text") ?? "", MAX_TOOL_OUTPUT);
         tool.omitted = [...new Set([...tool.omitted, ...(event.data.omittedFields ?? [])])];
         const isError = event.data.isError === true;
-        tool.entry.kind = isError ? "error" : "tool";
         tool.entry.complete = true;
         this.updateTool(tool, isError ? "failed" : "done");
         tool.entry.diffText = !isError && looksLikeDiff(tool.output) ? tool.output : undefined;
@@ -193,8 +223,10 @@ export class DockConversation implements Component {
         const text = total > 0
           ? `Queue · ${event.data.steering} steering · ${event.data.followUp} follow-up`
           : "Queue drained.";
-        if (this.queueEntry) this.queueEntry.text = text;
-        else this.queueEntry = this.add("system", text);
+        if (this.queueEntry) {
+          this.queueEntry.text = text;
+          this.markOutputChanged();
+        } else this.queueEntry = this.add("system", text);
         if (total === 0) this.queueEntry = undefined;
         break;
       }
@@ -297,32 +329,75 @@ export class DockConversation implements Component {
   }
 
   setHideThinking(hidden: boolean): void {
+    if (hidden === this.hideThinking) return;
     this.hideThinking = hidden;
     if (hidden && this.currentThinking) {
       this.currentThinking.complete = true;
       this.currentThinking = undefined;
     }
+    this.markLayoutChanged();
   }
-  setOutputPadding(padding: number): void { this.outputPadding = Math.max(0, Math.min(3, Math.floor(padding))); }
-  toggleToolsExpanded(): boolean { this.toolsExpanded = !this.toolsExpanded; return this.toolsExpanded; }
+  setOutputPadding(padding: number): void {
+    const next = Math.max(0, Math.min(3, Math.floor(padding)));
+    if (next !== this.outputPadding) {
+      this.outputPadding = next;
+      this.markLayoutChanged();
+    }
+  }
+  toggleToolsExpanded(): boolean {
+    this.toolsExpanded = !this.toolsExpanded;
+    this.toolExpansionOverrides.clear();
+    this.markLayoutChanged();
+    return this.toolsExpanded;
+  }
+  toggleLatestToolExpanded(): { expanded: boolean; name: string } | undefined {
+    const entry = [...this.entries].reverse().find((candidate) => candidate.toolCallId !== undefined);
+    if (!entry?.toolCallId) return undefined;
+    const expanded = !this.isToolExpanded(entry);
+    this.toolExpansionOverrides.set(entry.toolCallId, expanded);
+    this.markLayoutChanged();
+    return { expanded, name: entry.toolName ?? "tool" };
+  }
   areToolsExpanded(): boolean { return this.toolsExpanded; }
+  latestToolOffsetFromBottom(width: number): number | undefined {
+    const latestIndex = this.entries.findLastIndex((entry) => entry.toolCallId !== undefined);
+    if (latestIndex < 0) return undefined;
+    const contentWidth = Math.max(1, width - this.outputPadding - 1);
+    let rows = 0;
+    for (let index = latestIndex + 1; index < this.entries.length; index += 1) {
+      const entry = this.entries[index];
+      if (!entry || (this.hideThinking && entry.kind === "thinking")) continue;
+      rows += 1 + this.renderEntry(entry, contentWidth).length + 1;
+    }
+    return rows;
+  }
+  get revision(): number { return this.revisionValue; }
+  get outputRevision(): number { return this.outputRevisionValue; }
 
-  invalidate(): void {}
+  invalidate(): void { this.renderCache = undefined; }
 
   render(width: number): string[] {
-    if (this.entries.length === 0) return [paint.muted("  Start a conversation below.")];
+    if (this.renderCache?.width === width && this.renderCache.revision === this.revisionValue) {
+      return this.renderCache.lines;
+    }
+    if (this.entries.length === 0) {
+      const lines = [paint.muted("  Start a conversation below.")];
+      this.renderCache = { width, revision: this.revisionValue, lines };
+      return lines;
+    }
 
     const indent = " ".repeat(this.outputPadding + 1);
     const contentWidth = Math.max(1, width - visibleIndentWidth(indent));
     const lines: string[] = [];
     for (const entry of this.entries) {
       if (this.hideThinking && entry.kind === "thinking") continue;
-      lines.push(truncateToWidth(`${indent}${label(entry.kind, entry.complete)}`, width));
+      lines.push(truncateToWidth(`${indent}${label(entry)}`, width));
       for (const line of this.renderEntry(entry, contentWidth)) {
         lines.push(truncateToWidth(`${indent}${line}`, width));
       }
       lines.push("");
     }
+    this.renderCache = { width, revision: this.revisionValue, lines };
     return lines;
   }
 
@@ -332,9 +407,9 @@ export class DockConversation implements Component {
   }
 
   private renderEntry(entry: ConversationEntry, width: number): string[] {
-    if (entry.kind === "tool" && !this.toolsExpanded) {
+    if (entry.toolCallId && !this.isToolExpanded(entry)) {
       const [title = "Tool"] = entry.text.split("\n");
-      return [truncateToWidth(`${title} ${paint.muted("· Ctrl+O expand")}`, width)];
+      return [truncateToWidth(`${title} ${paint.muted("· Alt+O detail")}`, width)];
     }
     if (entry.diffText) {
       const marker = "\nresult\n";
@@ -357,66 +432,113 @@ export class DockConversation implements Component {
     return text.split("\n").flatMap((line) => wrapTextWithAnsi(line || " ", width));
   }
 
-  private updateTool(tool: ToolProjection, state: "running" | "done" | "failed"): void {
+  private updateTool(tool: ToolProjection, state: ToolState): void {
     const parts = [`${tool.name} ${state}`];
     if (tool.args) parts.push(`args\n${tool.args}`);
     if (tool.omitted.length > 0) parts.push(`omitted: ${tool.omitted.join(", ")}`);
     if (tool.output) parts.push(`result\n${tool.output}`);
     tool.entry.text = safeTerminalText(parts.join("\n"));
+    tool.entry.toolName = tool.name;
+    tool.entry.toolState = state;
+    this.markOutputChanged();
+  }
+
+  private addTool(toolCallId: string, complete: boolean): ConversationEntry {
+    const entry = this.add("tool", "", complete);
+    entry.toolCallId = toolCallId;
+    return entry;
+  }
+
+  private isToolExpanded(entry: ConversationEntry): boolean {
+    if (!entry.toolCallId) return true;
+    return this.toolExpansionOverrides.get(entry.toolCallId) ?? this.toolsExpanded;
   }
 
   private add(kind: EntryKind, text: string, complete = true): ConversationEntry {
     const entry: ConversationEntry = { kind, text: safeTerminalText(text), complete };
     this.entries.push(entry);
+    this.markOutputChanged();
     while (this.entries.length > MAX_ENTRIES) {
       const removed = this.entries.shift();
       if (removed === this.currentAssistant) this.currentAssistant = undefined;
       if (removed === this.currentThinking) this.currentThinking = undefined;
       if (removed === this.queueEntry) this.queueEntry = undefined;
       for (const [key, value] of this.tools) if (value.entry === removed) this.tools.delete(key);
+      if (
+        removed?.toolCallId
+        && !this.entries.some((entry) => entry.toolCallId === removed.toolCallId)
+      ) this.toolExpansionOverrides.delete(removed.toolCallId);
     }
     return entry;
+  }
+
+  private markLayoutChanged(): void { this.revisionValue += 1; }
+  private markOutputChanged(): void {
+    this.revisionValue += 1;
+    this.outputRevisionValue += 1;
   }
 }
 
 export class DockStatusLine implements Component {
   private snapshotValue: InstanceSnapshot;
   private activity = "ready";
+  private activityAnimated = false;
+  private activityFrame = 0;
   private connection = "connected";
   private controller = "observing";
   private autoCompaction: boolean | undefined;
 
   constructor(snapshot: InstanceSnapshot) { this.snapshotValue = snapshot; }
   update(snapshot: InstanceSnapshot): void { this.snapshotValue = snapshot; }
-  setActivity(activity: string): void { this.activity = safeTerminalText(activity); }
-  setConnection(connection: string): void { this.connection = safeTerminalText(connection); }
-  setController(controller: string): void { this.controller = safeTerminalText(controller); }
+  setActivity(activity: string | RunActivityState, animated = false): void {
+    const label = safeTerminalLine(typeof activity === "string" ? activity : activity.label);
+    const nextAnimated = typeof activity === "string" ? animated : activity.animated;
+    if (label !== this.activity || nextAnimated !== this.activityAnimated) this.activityFrame = 0;
+    this.activity = label;
+    this.activityAnimated = nextAnimated;
+  }
+  tickActivity(): boolean {
+    if (!this.activityAnimated) return false;
+    this.activityFrame = (this.activityFrame + 1) % ACTIVITY_FRAMES.length;
+    return true;
+  }
+  setConnection(connection: string): void { this.connection = safeTerminalLine(connection); }
+  setController(controller: string): void { this.controller = safeTerminalLine(controller); }
   setAutoCompaction(enabled: boolean | undefined): void { this.autoCompaction = enabled; }
   invalidate(): void {}
 
   render(width: number): string[] {
     const snapshot = this.snapshotValue;
-    const model = snapshot.executor.model ? `${safeTerminalText(snapshot.executor.model.provider)}/${safeTerminalText(snapshot.executor.model.id)}` : "no model";
-    const name = safeTerminalText(snapshot.name || shortId(snapshot.id));
+    const model = snapshot.executor.model ? `${safeTerminalLine(snapshot.executor.model.provider)}/${safeTerminalLine(snapshot.executor.model.id)}` : "no model";
+    const name = safeTerminalLine(snapshot.name || shortId(snapshot.id));
     const state = snapshot.lifecycle === "active" ? snapshot.execution : snapshot.lifecycle;
     const thinking = snapshot.executor.thinkingLevel ? ` · think ${snapshot.executor.thinkingLevel}` : "";
     const pending = snapshot.pending.total > 0 ? ` · queue ${snapshot.pending.total}` : "";
-    const identity = `─ ${name} · ${safeTerminalText(snapshot.cwd)}`;
-    const runtime = `  dock ${shortId(snapshot.id)} · pi ${shortId(snapshot.executor.piSessionId)} · ${model}${thinking} · ${state}${pending} · ${this.activity} · ${this.connection}/${this.controller}`;
+    const identity = `─ ${name} · ${safeTerminalLine(snapshot.cwd)}`;
+    const activity = this.activityAnimated
+      ? `${paint.accent(ACTIVITY_FRAMES[this.activityFrame] ?? "·")} ${this.activity}`
+      : this.activity;
+    const activityLine = `  ${activity} · ${state}${pending} · ${this.connection}/${this.controller}`;
+    const runtime = `  ${model}${thinking} · dock ${shortId(snapshot.id)} · pi ${shortId(snapshot.executor.piSessionId)}`;
     const metrics = `  ${formatMetrics(snapshot)} · compact ${this.autoCompaction === undefined ? "—" : this.autoCompaction ? "auto" : "manual"}`;
-    const lines = [identity, runtime, metrics].map((line) => truncateToWidth(paint.muted(line), width));
+    const lines = [identity, activityLine, runtime, metrics].map((line) => truncateToWidth(paint.muted(line), width));
     const statuses = Object.entries(snapshot.extensionStatus);
-    if (statuses.length > 0) lines.push(truncateToWidth(paint.muted(`  ext · ${statuses.map(([key, value]) => `${safeTerminalText(key)}: ${safeTerminalText(value)}`).join(" · ")}`), width));
+    if (statuses.length > 0) lines.push(truncateToWidth(paint.muted(`  ext · ${statuses.map(([key, value]) => `${safeTerminalLine(key)}: ${safeTerminalLine(value)}`).join(" · ")}`), width));
     return lines;
   }
 }
 
-function label(kind: EntryKind, complete: boolean): string {
-  switch (kind) {
+const ACTIVITY_FRAMES = ["·", "•", "●", "•"] as const;
+
+function label(entry: ConversationEntry): string {
+  switch (entry.kind) {
     case "user": return paint.user("You");
-    case "assistant": return paint.assistant(complete ? "Assistant" : "Assistant · streaming");
-    case "thinking": return paint.muted(complete ? "Thinking" : "Thinking · streaming");
-    case "tool": return paint.accent(complete ? "Tool" : "Tool · running");
+    case "assistant": return paint.assistant(entry.complete ? "Assistant" : "Assistant · streaming");
+    case "thinking": return paint.muted(entry.complete ? "Thinking" : "Thinking · streaming");
+    case "tool": {
+      if (entry.toolState === "failed") return paint.error("Tool · failed");
+      return paint.accent(entry.complete ? "Tool" : "Tool · running");
+    }
     case "error": return paint.error("Error");
     case "system": return paint.muted("Dock");
   }
@@ -478,6 +600,10 @@ function numberData(event: DockEvent, key: string): number | undefined {
 
 function safeTerminalText(text: string): string {
   return text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
+}
+
+function safeTerminalLine(text: string): string {
+  return safeTerminalText(text).replace(/[\t\n]/gu, " ");
 }
 
 function truncate(text: string, limit: number): string {

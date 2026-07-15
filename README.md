@@ -2,7 +2,7 @@
 
 Alu Dock 是 #136「受管运行时宿主」的独立实现；V0 执行卡为 #137，V0.1 工程入口为 #142。
 
-V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座、阶段 2 SSH TUI/Footer 和阶段 3 日常控制均已完成。当前 Host 提供 V2 transaction/fault seam、持久 branch history projection、稳定 message/tool event、session metrics、可复用实例 abort和 `session.commands.v1`；薄 TUI 提供 Markdown/thinking/tool/diff、动态 autocomplete、完整 Footer、settings/model/thinking/tools selectors，以及 new/resume/name/compact/reload workflow。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与 Alubot 不在本仓库的修改范围内。
+V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座、阶段 2 SSH TUI/Footer 和阶段 3 日常控制均已完成。当前 Host 提供 V2 transaction/fault seam、持久 branch history projection、稳定 message/tool event、session metrics、可复用实例 abort和 `session.commands.v1`；薄 TUI 提供 fixed composer/history viewport、明确 run activity、默认折叠工具、Markdown/thinking/diff、动态 autocomplete、可检索 selector、完整 Footer，以及 new/resume/name/compact/reload workflow。旧 `alu-daemon`、Rails WebConsole、Redis bridge 与 Alubot 不在本仓库的修改范围内。
 
 ## V0 冻结进度
 
@@ -21,6 +21,8 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [x] 阶段 3：日常控制与核心 Session
 - [x] 阶段 3.5：轻度结构重构与项目 `AGENTS.md`
 - [x] 阶段 3.6：Dogfood release 与 `systemd --user` managed service基线
+- [x] Dogfood TUI UX 源码与验证门禁（#147）
+- [ ] #147 managed rollout（等待当前 Host 无 active instance，不强制重启）
 - [ ] 阶段 4：Extension UI
 - [ ] 阶段 5：`systemd --user`、durable catalog 与 reopen
 - [ ] 阶段 6：tree/fork/clone
@@ -49,14 +51,15 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-v0.1-command-catalog-startup-hotfix.md`](docs/validation-v0.1-command-catalog-startup-hotfix.md)
 - [`docs/dogfood-deployment.md`](docs/dogfood-deployment.md)
 - [`docs/validation-v0.1-stage-3.6-dogfood-release.md`](docs/validation-v0.1-stage-3.6-dogfood-release.md)
+- [`docs/validation-v0.1-dogfood-tui-ux.md`](docs/validation-v0.1-dogfood-tui-ux.md)
 
 ## V0.1 工程入口
 
-#142 是 V0.1 唯一工程状态入口。阶段 0 已确认没有新增产品阻塞；实现按 Runtime/协议、SSH TUI、日常控制、结构重构、dogfood release基线、Extension UI、durable catalog/reopen、tree/fork/clone 和最终真人验收推进。
+#142 是 V0.1 唯一工程状态入口。阶段 0 已确认没有新增产品阻塞；Runtime/协议、SSH TUI、日常控制、结构重构、dogfood release基线和 #147 dogfood UX源码/门禁已完成，下一入口为 Extension UI，随后是 durable catalog/reopen、tree/fork/clone 和最终真人验收。
 
 **绿地规则：** Alu Dock 是全新项目。到 1.0 落地前，除非用户特意说明，不考虑任何旧协议、旧 Host、旧数据、旧 CLI 行为的兼容或迁移；原型合同直接替换。版本号仅标识当前合同，不表示存在历史包袱。
 
-阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1 已将当前控制面切为 V2-only，并完成 Runtime replacement、project trust、closed projections及 registry transaction/fault seam；阶段 2 已 advertised `tui.projection.v1` 与独立的 `run.abort.v1`；阶段 3 已 advertised `session.commands.v1` 并完成日常 settings/session workflows；阶段 3.5 完成轻度拆分；阶段 3.6 已把不可变 release、稳定 launcher、真实资源 smoke 和 baseline user service 投入 dogfood。下一工程入口为阶段 4；durable atomic catalog、startup reconcile、explicit reopen与完整 service CLI仍属于阶段 5。
+阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1 已将当前控制面切为 V2-only，并完成 Runtime replacement、project trust、closed projections及 registry transaction/fault seam；阶段 2 已 advertised `tui.projection.v1` 与独立的 `run.abort.v1`；阶段 3 已 advertised `session.commands.v1` 并完成日常 settings/session workflows；阶段 3.5 完成轻度拆分；阶段 3.6 已把不可变 release、稳定 launcher、真实资源 smoke 和 baseline user service 投入 dogfood。#147 已完成 fixed composer、viewport、活动状态、工具折叠和可检索 selector的源码与门禁；managed rollout等待当前 Host 无 active instance。下一工程入口为阶段 4。durable atomic catalog、startup reconcile、explicit reopen与完整 service CLI仍属于阶段 5。
 
 ## 当前默认真人入口
 
@@ -73,9 +76,10 @@ alu-dock
 - `Enter`：发送；运行中默认作为 steer；Editor 支持 multiline paste 与 history
 - `Alt+Enter` 或 `/follow MESSAGE`：排队为 follow-up
 - `Esc`、空编辑器 `Ctrl+C` 或 `/abort`：取消当前 run/retry/compaction，实例保持可复用
-- `Ctrl+O`：折叠或展开 generic tool output
+- `PageUp` / `PageDown`：回看独立 history viewport；回看时暂停追尾并提示新输出，`Ctrl+End` 回到底部
+- `Ctrl+O`：展开/折叠全部 generic tool output；`Alt+O` 只切换最近一项详情；工具默认折叠
 - `/settings`：查看全部 24 项投影并选择修改；也可用 `/settings KEY VALUE`。其中 compaction reserve/keep tokens 因 Pi 无公开 setter而只读
-- `/model`：打开 Pi 可用模型选择器；`/model PROVIDER/MODEL` 直接切换
+- `/model`：打开可输入检索的 Pi 模型选择器（name/provider/id）；`/model PROVIDER/MODEL` 直接切换
 - `/thinking`：打开 thinking selector；`/thinking LEVEL` 直接设置
 - `/tools`：逐项切换 active tools；`/tools NAME…` 设置完整 active set，`/tools none` 清空
 - `/new [PARENT_SESSION]`、`/resume [SESSION_FILE]`：新建或在当前 Host 内切换 Pi session
@@ -93,7 +97,7 @@ alu-dock new --cwd "$PWD" --name demo
 alu-dock attach INSTANCE_ID
 ```
 
-再次执行 `alu-dock` 会先投影 Pi SessionManager 当前 branch 的持久 history baseline，再重放 Host 近期 events 并继续观察 live events。TUI Footer 展示 cwd、Dock/Pi ID、model/thinking、state/queue、tokens/context/cache/cost、extension status 和 connection/lease；extension/skill/prompt commands 与路径进入 autocomplete。模型/thinking 切换沿用 Pi 的 session 与 settings 语义，只允许实例 idle 时执行；当前运行不会被中途换模。Host 在创建 Pi SDK session 前安装与 Pi CLI 相同的 Undici `EnvHttpProxyAgent`：优先保留进程已有 `HTTP_PROXY` / `HTTPS_PROXY`，缺失时采用 Pi 全局 `httpProxy` 设置。默认 socket 为 `$XDG_RUNTIME_DIR/alu-dock/dock.sock`；managed 日志使用 `journalctl --user -u alu-dock.service`。
+再次执行 `alu-dock` 会先投影 Pi SessionManager 当前 branch 的持久 history baseline，再重放 Host 近期 events 并继续观察 live events。Composer 固定在终端底部并向上增长，history 在上方独立滚动；活动行明确区分 waiting/thinking/responding/tool/retry/compaction/queue/host-loss。TUI Footer 展示 cwd、Dock/Pi ID、model/thinking、state/queue、tokens/context/cache/cost、extension status 和 connection/lease；extension/skill/prompt commands 与路径进入 autocomplete。模型/thinking 切换沿用 Pi 的 session 与 settings 语义，只允许实例 idle 时执行；当前运行不会被中途换模。Host 在创建 Pi SDK session 前安装与 Pi CLI 相同的 Undici `EnvHttpProxyAgent`：优先保留进程已有 `HTTP_PROXY` / `HTTPS_PROXY`，缺失时采用 Pi 全局 `httpProxy` 设置。默认 socket 为 `$XDG_RUNTIME_DIR/alu-dock/dock.sock`；managed 日志使用 `journalctl --user -u alu-dock.service`。
 
 ## 机器与诊断接口
 

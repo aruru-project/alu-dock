@@ -103,7 +103,7 @@ test("conversation projects persisted history before live replay", () => {
   const conversation = new DockConversation();
   conversation.applyHistory([
     { entryId: "h1", role: "user", content: [{ type: "text", text: "old question" }] },
-    { entryId: "h2", parentId: "h1", role: "assistant", content: [{ type: "thinking", text: "old plan" }, { type: "text", text: "old answer" }] },
+    { entryId: "h2", parentId: "h1", role: "assistant", content: [{ type: "thinking", text: "old plan" }, { type: "text", text: "old answer" }, { type: "tool_call", toolCallId: "t1", toolName: "read", args: { path: "/tmp/old" } }] },
     { entryId: "h3", parentId: "h2", role: "tool", content: [{ type: "tool_result", toolCallId: "t1", toolName: "read", text: "old result", isError: false }] },
   ], true);
 
@@ -112,7 +112,7 @@ test("conversation projects persisted history before live replay", () => {
     { kind: "user", text: "old question", complete: true },
     { kind: "thinking", text: "old plan", complete: true },
     { kind: "assistant", text: "old answer", complete: true },
-    { kind: "tool", text: "read done\nresult\nold result", complete: true },
+    { kind: "tool", text: "read done\nargs\n{\n  \"path\": \"/tmp/old\"\n}\nresult\nold result", complete: true },
   ]);
 });
 
@@ -177,17 +177,37 @@ test("conversation renders Markdown, code, thinking policy, and diff tools at bo
 
   assert.ok(conversation.snapshot().some((entry) => entry.kind === "thinking" && entry.text === "**plan**"));
   assert.match(conversation.snapshot().at(-1)?.text ?? "", /src\/a\.ts/);
+  const collapsed = conversation.render(60).join("\n");
+  assert.match(collapsed, /Alt\+O detail/);
+  assert.doesNotMatch(collapsed, /\+new/);
+  assert.deepEqual(conversation.toggleLatestToolExpanded(), { expanded: true, name: "edit" });
+  assert.match(conversation.render(60).join("\n"), /\+new/);
+  conversation.toggleToolsExpanded();
   for (const width of [20, 43, 100]) {
     for (const line of conversation.render(width)) assert.ok(visibleWidth(line) <= width, `${visibleWidth(line)} > ${width}`);
   }
-  conversation.toggleToolsExpanded();
-  assert.match(conversation.render(60).join("\n"), /Ctrl\+O expand/);
 
   const hidden = new DockConversation();
   hidden.setHideThinking(true);
   hidden.apply(event(1, "message.delta", { messageId: "a2", block: "thinking", delta: "private" }));
   hidden.apply(event(2, "message.completed", { messageId: "a2", role: "assistant", content: [{ type: "thinking", text: "private" }] }));
   assert.equal(hidden.snapshot().some((entry) => entry.kind === "thinking"), false);
+});
+
+test("tool failures stay collapsed by default and preserve expandable error detail", () => {
+  const conversation = new DockConversation();
+  conversation.apply(event(1, "tool.started", { toolCallId: "failed-tool", toolName: "bash", args: { command: "false" } }));
+  conversation.apply(event(2, "tool.completed", {
+    toolCallId: "failed-tool", toolName: "bash", isError: true, text: "expanded failure detail",
+  }));
+  conversation.addNotice("later assistant-visible output");
+  const collapsed = conversation.render(60).join("\n");
+  assert.match(collapsed, /Tool · failed/);
+  assert.match(collapsed, /bash failed/);
+  assert.doesNotMatch(collapsed, /expanded failure detail/);
+  assert.deepEqual(conversation.toggleLatestToolExpanded(), { expanded: true, name: "bash" });
+  assert.ok((conversation.latestToolOffsetFromBottom(60) ?? 0) > 0);
+  assert.match(conversation.render(60).join("\n"), /expanded failure detail/);
 });
 
 test("queue, compaction, replacement, and host-loss notices remain deterministic", () => {
@@ -260,4 +280,10 @@ test("conversation and status expose replay truncation and current state", () =>
   assert.match(footer, /cache 20%/);
   assert.match(footer, /alu-kanban: ready/);
   for (const line of lines) assert.ok(visibleWidth(line) <= 80);
+
+  status.setActivity({ phase: "waiting", label: "waiting for model", animated: true });
+  status.tickActivity();
+  const narrow = status.render(43);
+  assert.match(narrow[1] ?? "", /waiting for model/);
+  for (const line of narrow) assert.ok(visibleWidth(line) <= 43);
 });

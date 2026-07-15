@@ -58,8 +58,9 @@ A feature should have one clear owning module. Do not create one file per settin
 
 ## Pi and settings rules
 
-- Pin and use `@earendil-works/pi-coding-agent@0.80.6` and `@earendil-works/pi-tui@0.80.6` package-root APIs.
-- Private subpath imports are forbidden in production and tests.
+- Runtime SDK baseline is `@earendil-works/pi-coding-agent@0.80.6`; V0.1 pins `@earendil-works/pi-tui@0.80.6` only as a temporary client rendering toolkit.
+- Product UX state, viewport/search/activity/tool-fold reducers and key actions belong to Alu Dock. Do not expose `pi-tui` types through Host, protocol, DTO or domain ports.
+- Private subpath imports are forbidden in production and tests. V0.2 card #148 removes Alu Dock's direct `pi-tui` dependency in one renderer switch rather than maintaining dual renderers.
 - Settings use Pi's native snapshot, lock, field merge and last-writer-wins semantics.
 - A successful setting mutation is: public setter → `await flush()` → `drainErrors()`.
 - Do not edit Pi settings JSON directly to simulate a missing setter.
@@ -133,7 +134,9 @@ Follow `docs/dogfood-deployment.md` for managed releases. Stage completion and d
 
 ## Current staged boundary
 
-Stage 3.6 is deployed; the next implementation boundary is card #142 Stage 4. Stage 4 may add the frozen declarative extension interaction lease/UI broker and current-extension compatibility only. It must not implement:
+Stage 3.6 is deployed. Card #147 has completed the client-only dogfood closure: fixed composer/history viewport, tool folding, activity feedback and searchable selectors. Those behaviors remain Dock-owned pure state behind thin public-`pi-tui` adapters and add no Host interaction ownership or wire fields.
+
+The current boundary is card #142 Stage 4. Stage 4 reuses #147's overlay/focus/search/layout primitives while adding the frozen declarative extension interaction lease/UI broker and current-extension compatibility. Keep client view state and Stage 4 Host interaction state in separate modules and commits. Stage 4 must not implement:
 
 - Stage 5 durable catalog, startup reconcile, host-loss reopen or the complete service management CLI;
 - Stage 6 tree/fork/clone.

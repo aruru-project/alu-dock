@@ -406,6 +406,10 @@ test("SSH TUI replays, resizes, handles input, and detaches without stopping", a
   assert.ok(pty.resizedBytes > 0, "SIGWINCH must produce a resized TUI frame");
   assert.match(output, /Alu Dock/);
   assert.match(output, /deterministic delayed task/);
+  assert.match(output, /waiting for model/);
+  const resizedFrame = lastFullRedrawFrame(output);
+  assert.equal(resizedFrame.length, 18, `expected one fixed 18-row screen:\n${resizedFrame.join("\n")}`);
+  assert.match(resizedFrame.at(-1) ?? "", /^─+$/u, "the editor bottom border must remain on the terminal's final row");
   assert.match(output, /Detached from pty-demo/);
   assert.doesNotMatch(output, /data:image|;base64,/i);
 
@@ -439,6 +443,85 @@ test("SSH TUI editor preserves multiline paste and submitted history", async (co
     "first line\nsecond line",
   ]);
   assert.equal(runtime.disposeCalls, 0);
+});
+
+test("SSH TUI model picker filters typed input and history viewport scroll-locks", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-pty-ux-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  let runtime: DelayedRuntimeSession | undefined;
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
+    runtime = new DelayedRuntimeSession(`pi-${id}`);
+    runtime.history = Array.from({ length: 36 }, (_, index) => ({
+      entryId: `history-${index}`,
+      role: index % 2 === 0 ? "user" as const : "assistant" as const,
+      content: [{ type: "text" as const, text: `historical line ${index}` }],
+    }));
+    runtime.history.push(
+      {
+        entryId: "history-tool-call",
+        role: "assistant",
+        content: [{ type: "toolCall", id: "history-tool", name: "read", arguments: { path: "/tmp/demo" } }],
+      },
+      {
+        entryId: "history-tool-result",
+        role: "tool",
+        toolCallId: "history-tool",
+        toolName: "read",
+        isError: false,
+        content: "expanded tool detail\nsecond detail line",
+      },
+    );
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
+  }, () => "pty-ux-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+  const created = await client.create(directory, "pty-ux");
+
+  const modelPty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+    "attach", created.id,
+  ], "model-search");
+  const modelOutput = Buffer.from(modelPty.output, "base64").toString("utf8");
+  assert.equal(modelPty.timedOut, false, modelOutput.slice(-4_000));
+  assert.equal(modelPty.status, 0, modelOutput.slice(-4_000));
+  assert.match(modelOutput, /Search:/);
+  assert.equal(runtime?.modelMutationCalls, 1);
+  assert.deepEqual(runtime?.getModelState().model, { provider: "fixture", id: "local" });
+
+  const scrollReady = join(directory, "scroll.ready");
+  const scrollRun = runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+    "attach", created.id,
+  ], "scroll", scrollReady);
+  await waitForPath(`${scrollReady}.locked`);
+  await client.prompt(created.id, "new output while history is locked");
+  const scrollPty = await scrollRun;
+  const scrollOutput = Buffer.from(scrollPty.output, "base64").toString("utf8");
+  assert.equal(scrollPty.timedOut, false, scrollOutput.slice(-4_000));
+  assert.equal(scrollPty.status, 0, scrollOutput.slice(-4_000));
+  assert.match(scrollOutput, /history paused/);
+  assert.match(scrollOutput, /new output/);
+  await client.abort(created.id);
+
+  const toolPty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+    "attach", created.id,
+  ], "tool-fold");
+  const toolOutput = Buffer.from(toolPty.output, "base64").toString("utf8");
+  assert.equal(toolPty.timedOut, false, toolOutput.slice(-4_000));
+  assert.equal(toolPty.status, 0, toolOutput.slice(-4_000));
+  assert.match(toolOutput, /Alt\+O detail/);
+  assert.match(toolOutput, /expanded tool detail/);
+  assert.equal(runtime?.disposeCalls, 0);
 });
 
 test("SSH TUI Stage 3 commands mutate Host-owned settings tools and sessions", async (context) => {
@@ -1791,7 +1874,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "editor" | "abort" | "transport-close" | "stage3" = "detach",
+  action: "detach" | "editor" | "abort" | "transport-close" | "stage3" | "model-search" | "scroll" | "tool-fold" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {
@@ -1823,6 +1906,22 @@ async function runPtyTui(
       }
     });
   });
+}
+
+function lastFullRedrawFrame(output: string): string[] {
+  const marker = "\u001b[2J\u001b[H\u001b[3J";
+  const start = output.lastIndexOf(marker);
+  assert.ok(start >= 0, "expected a full redraw after PTY resize");
+  const bodyStart = start + marker.length;
+  const syncEnd = output.indexOf("\u001b[?2026l", bodyStart);
+  assert.ok(syncEnd >= 0, "expected synchronized redraw terminator");
+  const plain = output.slice(bodyStart, syncEnd)
+    .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/gu, "")
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "")
+    .replace(/\r/gu, "");
+  const lines = plain.split("\n");
+  if (lines.at(-1) === "") lines.pop();
+  return lines;
 }
 
 async function waitForPath(path: string): Promise<void> {

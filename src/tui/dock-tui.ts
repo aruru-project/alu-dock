@@ -2,17 +2,15 @@ import { randomUUID } from "node:crypto";
 
 import {
   CombinedAutocompleteProvider,
-  Container,
   Editor,
+  Key,
   matchesKey,
   ProcessTerminal,
-  SelectList,
   Text,
   TUI,
   type AutocompleteItem,
   type AutocompleteProvider,
   type AutocompleteSuggestions,
-  type Component,
 } from "@earendil-works/pi-tui";
 
 import { ControlClientError, DockClient, type EventSubscription } from "../control/dock-client.js";
@@ -24,7 +22,18 @@ import type {
 } from "../core/runtime-session.js";
 import type { ProjectTrustChoice } from "../control/project-trust.js";
 import { DockConversation, DockStatusLine } from "./conversation.js";
-import { eventString, projectSnapshot } from "./snapshot-projection.js";
+import { FixedDockScreen } from "./pi-tui-screen.js";
+import {
+  abortingActivity,
+  activityFromReplay,
+  activityFromSnapshot,
+  disconnectedActivity,
+  errorActivity,
+  reduceRunActivity,
+  submittingActivity,
+} from "./run-activity.js";
+import { SearchablePicker } from "./searchable-picker.js";
+import { projectSnapshot } from "./snapshot-projection.js";
 import {
   formatSettingValue,
   parseSettingCommandValue,
@@ -32,7 +41,7 @@ import {
   settingCompletions,
   settingValueChoices,
 } from "./settings-controls.js";
-import { editorTheme, paint, selectListTheme } from "./theme.js";
+import { editorTheme, paint } from "./theme.js";
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly RuntimeThinkingLevel[];
 
@@ -55,9 +64,12 @@ export async function runDockTui(
   const conversation = new DockConversation();
   let instance = initialInstance;
   const status = new DockStatusLine(instance);
+  let runActivity = activityFromSnapshot(instance);
+  status.setActivity(runActivity);
   let subscription: EventSubscription | undefined;
   let cleanupErrors: string[] | undefined;
   let editor!: Editor;
+  let screen: FixedDockScreen | undefined;
   let settings: SettingDto[] = [];
   let commands: CommandDto[] = [];
   let terminalProgressEnabled = false;
@@ -78,10 +90,13 @@ export async function runDockTui(
   const onEvent = (event: DockEvent): void => {
     instance = projectSnapshot(instance, event);
     status.update(instance);
+    runActivity = reduceRunActivity(runActivity, event, instance);
+    status.setActivity(runActivity);
     if (event.type === "session.replaced") {
       replacementHistoryGeneration = event.runtimeGeneration;
       replacementBufferedEvents = [event];
       conversation.reset();
+      screen?.scrollToBottom();
       conversation.addNotice("Loading replacement session history…");
       terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
       void refreshReplacementProjection(event.runtimeGeneration, { ...instance.eventCursor });
@@ -90,8 +105,6 @@ export async function runDockTui(
     } else {
       conversation.apply(event);
     }
-    const activity = activityForEvent(event);
-    if (activity) status.setActivity(activity);
     if (event.type === "settings.changed") applyLiveSetting(event.data.key, event.data.value);
     if (event.type === "session.info_changed") terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
     if (event.type === "instance.stopped" && editor) editor.disableSubmit = true;
@@ -107,6 +120,8 @@ export async function runDockTui(
     subscription.initial.page.truncated,
   );
   status.update(instance);
+  runActivity = activityFromReplay(instance, subscription.initial.page.events);
+  status.setActivity(runActivity);
   status.setController(subscription.initial.controller.status);
 
   const [settingsLoad, commandsLoad] = await Promise.allSettled([
@@ -121,10 +136,10 @@ export async function runDockTui(
   const title = new Text(
     `${paint.bold(paint.accent("Alu Dock"))} ${paint.muted("— Host-owned Pi over SSH")}`,
     1,
-    1,
+    0,
   );
   const help = new Text(
-    paint.muted("  Enter send/steer · Alt+Enter follow-up · Esc abort · Ctrl+O tools · Ctrl+D detach"),
+    paint.muted("  Enter send/steer · Alt+Enter follow-up · PgUp/PgDn history · Ctrl+O all tools · Alt+O latest · Ctrl+D detach"),
     0,
     0,
   );
@@ -291,13 +306,17 @@ export async function runDockTui(
 
   async function sendPrompt(message: string, delivery: DeliveryMode): Promise<void> {
     editor.disableSubmit = true;
-    status.setActivity("sending");
+    runActivity = submittingActivity();
+    status.setActivity(runActivity);
     tui.requestRender();
     try {
       const result = await client.prompt(instance.id, message, delivery);
       instance = result.instance;
       status.update(instance);
-      status.setActivity(`${result.receipt.delivery}${result.receipt.queued ? " queued" : " accepted"}`);
+      if (runActivity.phase === "submitting") {
+        runActivity = activityFromSnapshot(instance);
+        status.setActivity(runActivity);
+      }
     } catch (error) {
       showError(error);
     } finally {
@@ -313,13 +332,15 @@ export async function runDockTui(
       return;
     }
     editor.disableSubmit = true;
-    status.setActivity("aborting");
+    runActivity = abortingActivity();
+    status.setActivity(runActivity);
     tui.requestRender();
     try {
       const result = await client.abort(instance.id);
       instance = result.instance;
       status.update(instance);
-      status.setActivity("operation cancelled · instance reusable");
+      runActivity = activityFromSnapshot(instance);
+      status.setActivity(runActivity);
     } catch (error) {
       showError(error);
     } finally {
@@ -354,86 +375,48 @@ export async function runDockTui(
       return undefined;
     }
     const byKey = new Map(models.map((model) => [`${model.provider}/${model.id}`, model]));
-    const list = new SelectList(
+    const currentKey = instance.executor.model
+      ? `${instance.executor.model.provider}/${instance.executor.model.id}`
+      : undefined;
+    const selected = await showChoicePicker(
+      "Select Pi model",
       models.map((model) => ({
         value: `${model.provider}/${model.id}`,
         label: terminalSafe(model.name),
         description: `${terminalSafe(model.provider)}/${terminalSafe(model.id)}${model.reasoning ? " · reasoning" : ""}`,
       })),
-      Math.min(models.length, 12),
-      selectListTheme,
+      currentKey,
+      "type name/provider/id · ↑↓ choose · Enter switch · Esc cancel",
     );
-    const currentKey = instance.executor.model
-      ? `${instance.executor.model.provider}/${instance.executor.model.id}`
-      : undefined;
-    const currentIndex = currentKey ? models.findIndex((model) => `${model.provider}/${model.id}` === currentKey) : -1;
-    if (currentIndex >= 0) list.setSelectedIndex(currentIndex);
-
-    const panel = new Container();
-    panel.addChild(new Text(paint.bold(paint.accent("Select Pi model")), 1, 1));
-    panel.addChild(list);
-    panel.addChild(new Text(paint.muted("↑↓ choose · Enter switch · Esc cancel"), 1, 1));
-    const component: Component = {
-      render: (width) => panel.render(width),
-      invalidate: () => panel.invalidate(),
-      handleInput: (data) => {
-        list.handleInput(data);
-        tui.requestRender();
-      },
-    };
-
-    let resolveModel!: (model: RuntimeModelInfo | undefined) => void;
-    const selection = new Promise<RuntimeModelInfo | undefined>((resolve) => {
-      resolveModel = resolve;
-    });
-    list.onSelect = (item) => resolveModel(byKey.get(item.value));
-    list.onCancel = () => resolveModel(undefined);
-    const overlay = tui.showOverlay(component, {
-      width: "80%",
-      minWidth: 40,
-      maxHeight: "80%",
-      anchor: "center",
-      margin: 1,
-    });
-    try {
-      return await selection;
-    } finally {
-      overlay.hide();
-    }
+    return selected ? byKey.get(selected) : undefined;
   }
 
   async function showChoicePicker(
     titleText: string,
     items: Array<{ value: string; label: string; description?: string }>,
     currentValue?: string,
-    footerText = "↑↓ choose · Enter select · Esc cancel",
+    footerText = "type to filter · ↑↓ choose · Enter select · Esc cancel",
   ): Promise<string | undefined> {
     if (items.length === 0) return undefined;
-    const list = new SelectList(
+    const picker = new SearchablePicker(
       items.map((item) => ({
         value: item.value,
         label: terminalSafe(item.label),
         ...(item.description === undefined ? {} : { description: terminalSafe(item.description) }),
       })),
-      Math.min(items.length, 14),
-      selectListTheme,
+      {
+        title: terminalSafe(titleText),
+        footer: terminalSafe(footerText),
+        maxVisible: Math.min(items.length, 14),
+        ...(currentValue === undefined ? {} : { initialValue: currentValue }),
+        requestRender: () => tui.requestRender(),
+      },
     );
-    const currentIndex = currentValue === undefined ? -1 : items.findIndex((item) => item.value === currentValue);
-    if (currentIndex >= 0) list.setSelectedIndex(currentIndex);
-    const panel = new Container();
-    panel.addChild(new Text(paint.bold(paint.accent(terminalSafe(titleText))), 1, 1));
-    panel.addChild(list);
-    panel.addChild(new Text(paint.muted(terminalSafe(footerText)), 1, 1));
-    const component: Component = {
-      render: (width) => panel.render(width),
-      invalidate: () => panel.invalidate(),
-      handleInput: (data) => { list.handleInput(data); tui.requestRender(); },
-    };
     let resolveChoice!: (value: string | undefined) => void;
     const selection = new Promise<string | undefined>((resolve) => { resolveChoice = resolve; });
-    list.onSelect = (item) => resolveChoice(item.value);
-    list.onCancel = () => resolveChoice(undefined);
-    const overlay = tui.showOverlay(component, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
+    picker.onSelect = (item) => resolveChoice(item.value);
+    picker.onCancel = () => resolveChoice(undefined);
+    const overlay = tui.showOverlay(picker, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
     try { return await selection; }
     finally { overlay.hide(); }
   }
@@ -782,6 +765,7 @@ export async function runDockTui(
     replacementBufferedEvents = [];
     replacementHistoryGeneration = undefined;
     conversation.reset();
+    screen?.scrollToBottom();
     if (projectionLoad.status === "fulfilled") {
       instance = projectionLoad.value.instance;
       status.update(instance);
@@ -869,7 +853,8 @@ export async function runDockTui(
       ? `${error.code}: ${error.message}`
       : errorText(error);
     conversation.addNotice(message, true);
-    status.setActivity("error");
+    runActivity = errorActivity();
+    status.setActivity(runActivity);
     tui.requestRender();
   }
 
@@ -893,23 +878,54 @@ export async function runDockTui(
     terminal.setProgress(terminalProgressEnabled && instance.lifecycle === "active" && instance.execution === "running");
   }
 
-  tui.addChild(title);
-  tui.addChild(conversation);
-  tui.addChild(status);
-  tui.addChild(help);
-  tui.addChild(editor);
+  screen = new FixedDockScreen(terminal, {
+    header: title,
+    history: conversation,
+    status,
+    help,
+    editor,
+    historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
+  });
+  tui.addChild(screen);
   tui.setFocus(editor);
   terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
 
   const removeInputListener = tui.addInputListener((data) => {
     if (tui.hasOverlay()) return undefined;
+    if (matchesKey(data, Key.pageUp) && !editor.isShowingAutocomplete()) {
+      screen?.pageUp();
+      tui.requestRender();
+      return { consume: true };
+    }
+    if (matchesKey(data, Key.pageDown) && !editor.isShowingAutocomplete()) {
+      screen?.pageDown();
+      tui.requestRender();
+      return { consume: true };
+    }
+    if (matchesKey(data, Key.ctrl("end"))) {
+      screen?.scrollToBottom();
+      tui.requestRender();
+      return { consume: true };
+    }
     if (matchesKey(data, "ctrl+d") && editor.getText().length === 0) {
       finish("detached");
       return { consume: true };
     }
+    if (matchesKey(data, Key.alt("o"))) {
+      const toggled = conversation.toggleLatestToolExpanded();
+      if (toggled) {
+        if (toggled.expanded) screen?.revealOffsetFromBottom((width) => conversation.latestToolOffsetFromBottom(width));
+        else screen?.scrollToBottom();
+        if (instance.execution !== "running") status.setActivity(`${toggled.name} ${toggled.expanded ? "expanded" : "collapsed"}`);
+      }
+      tui.requestRender();
+      return { consume: true };
+    }
     if (matchesKey(data, "ctrl+o")) {
       const expanded = conversation.toggleToolsExpanded();
-      status.setActivity(expanded ? "tool output expanded" : "tool output collapsed");
+      if (expanded) screen?.revealOffsetFromBottom((width) => conversation.latestToolOffsetFromBottom(width));
+      else screen?.scrollToBottom();
+      if (instance.execution !== "running") status.setActivity(expanded ? "all tools expanded" : "tools collapsed");
       tui.requestRender();
       return { consume: true };
     }
@@ -955,7 +971,8 @@ export async function runDockTui(
     editor.disableSubmit = true;
     terminal.setProgress(false);
     status.setConnection("disconnected");
-    status.setActivity("host stream closed · Ctrl+D detach");
+    runActivity = disconnectedActivity("host stream closed · Ctrl+D detach");
+    status.setActivity(runActivity);
     conversation.addNotice("Host event stream closed. No command was replayed; this TUI is now read-only.", true);
     tui.requestRender();
   }).catch((error: unknown) => {
@@ -963,14 +980,22 @@ export async function runDockTui(
     editor.disableSubmit = true;
     terminal.setProgress(false);
     status.setConnection("lost");
+    runActivity = disconnectedActivity("connection lost · Ctrl+D detach");
+    status.setActivity(runActivity);
     conversation.addNotice("Host connection lost. No command was replayed; this TUI is now read-only.", true);
-    showError(error);
+    conversation.addNotice(errorText(error), true);
+    tui.requestRender();
   });
 
+  const activityTimer = setInterval(() => {
+    if (status.tickActivity()) tui.requestRender();
+  }, 140);
+  activityTimer.unref();
   tui.start();
   updateTerminalProgress();
   const reason = await exit;
 
+  clearInterval(activityTimer);
   removeInputListener();
   process.off("SIGINT", onSigint);
   process.off("SIGTERM", onSigterm);
@@ -995,26 +1020,6 @@ function commandMessage(input: string, command: string): string | undefined {
   return message.length > 0 ? message : undefined;
 }
 
-function activityForEvent(event: DockEvent): string | undefined {
-  switch (event.type) {
-    case "run.started": return "running";
-    case "message.delta": return "streaming";
-    case "tool.started": return `tool ${eventString(event, "toolName") ?? "running"}`;
-    case "run.retry_started": return "retrying";
-    case "run.settled": return eventString(event, "result") ?? "settled";
-    case "model.changed": return `model ${eventString(event, "id") ?? "changed"}`;
-    case "thinking.changed": return `thinking ${eventString(event, "thinkingLevel") ?? "changed"}`;
-    case "queue.changed": return "queue updated";
-    case "compaction.started": return "compacting";
-    case "compaction.completed": return event.data.error ? "compaction failed" : "compacted";
-    case "session.replaced": return `session ${event.data.reason}`;
-    case "instance.stopped": return "stopped";
-    case "instance.runtime_error":
-    case "instance.error": return "error";
-    default: return undefined;
-  }
-}
-
 function parseModelTarget(value: string): { provider: string; id: string } | undefined {
   const separator = value.indexOf("/");
   if (separator <= 0 || separator === value.length - 1) return undefined;
@@ -1026,7 +1031,7 @@ function isThinkingLevel(value: string): value is RuntimeThinkingLevel {
 }
 
 function terminalSafe(value: string): string {
-  return value.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
 }
 
 class TerminalSafeAutocompleteProvider implements AutocompleteProvider {

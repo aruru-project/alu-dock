@@ -93,6 +93,43 @@ def main() -> int:
                 while b"replayed; this TUI" not in output and time.monotonic() < close_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
+            elif action == "model-search":
+                os.write(fd, b"/model\r")
+                picker_deadline = time.monotonic() + 4
+                while b"Search:" not in output and time.monotonic() < picker_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"local\r")
+                selected_deadline = time.monotonic() + 4
+                while b"Model changed to fixture/local" not in output and time.monotonic() < selected_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+            elif action == "scroll":
+                os.write(fd, b"\x1b[5~")  # PageUp
+                scroll_deadline = time.monotonic() + 3
+                while b"history paused" not in output and time.monotonic() < scroll_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                if ready_file:
+                    with open(ready_file + ".locked", "w", encoding="utf-8") as marker:
+                        marker.write("locked\n")
+                unseen_deadline = time.monotonic() + 4
+                while b"new output" not in output and time.monotonic() < unseen_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\x1b[6~")  # PageDown returns one PageUp to the bottom.
+                time.sleep(0.1)
+                read_available(fd, output, 0.05)
+            elif action == "tool-fold":
+                fold_deadline = time.monotonic() + 3
+                while b"Alt+O detail" not in output and time.monotonic() < fold_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\x1bo")  # Alt+O: expand latest tool only.
+                expand_deadline = time.monotonic() + 3
+                while b"expanded tool detail" not in output and time.monotonic() < expand_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
             elif action == "stage3":
                 steps = [
                     (b"/settings autoRetry false\r", b"autoRetry = false"),
