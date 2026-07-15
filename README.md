@@ -53,6 +53,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-v0.1-stage-3.6-dogfood-release.md`](docs/validation-v0.1-stage-3.6-dogfood-release.md)
 - [`docs/validation-v0.1-dogfood-tui-ux.md`](docs/validation-v0.1-dogfood-tui-ux.md)
 - [`docs/validation-v0.1-stage-4-extension-ui.md`](docs/validation-v0.1-stage-4-extension-ui.md)
+- [`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)
 
 ## V0.1 工程入口
 
@@ -60,7 +61,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 
 **绿地规则：** Alu Dock 是全新项目。到 1.0 落地前，除非用户特意说明，不考虑任何旧协议、旧 Host、旧数据、旧 CLI 行为的兼容或迁移；原型合同直接替换。版本号仅标识当前合同，不表示存在历史包袱。
 
-阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1 已将当前控制面切为 V2-only，并完成 Runtime replacement、project trust、closed projections及 registry transaction/fault seam；阶段 2 已 advertised `tui.projection.v1` 与独立的 `run.abort.v1`；阶段 3 已 advertised `session.commands.v1` 并完成日常 settings/session workflows；阶段 3.5 完成轻度拆分；阶段 3.6 已把不可变 release、稳定 launcher、真实资源 smoke 和 baseline user service 投入 dogfood。#147 已完成 fixed composer、viewport、活动状态、工具折叠和可检索 selector的源码与门禁；阶段 4 已 advertised `extension_ui.v1`，加入单 controller lease、Host-owned dialog queue、结构化 notify/status 和当前扩展兼容。managed rollout仍等待当前 Host 无 active instance，不为发布强制中断会话。durable atomic catalog、startup reconcile、explicit reopen与完整 service CLI仍属于阶段 5。
+阶段 0 文档描述的是 V0.1 **目标合同**。阶段 1 已将当前控制面切为 V2-only，并完成 Runtime replacement、project trust、closed projections及 registry transaction/fault seam；阶段 2 已 advertised `tui.projection.v1` 与独立的 `run.abort.v1`；阶段 3 已 advertised `session.commands.v1` 并完成日常 settings/session workflows；阶段 3.5 完成轻度拆分；阶段 3.6 已把不可变 release、稳定 launcher、真实资源 smoke 和 baseline user service 投入 dogfood。#147 已完成 fixed composer、viewport、活动状态、工具折叠和可检索 selector的源码与门禁；阶段 4 已 advertised `extension_ui.v1`，加入单 controller lease、Host-owned dialog queue、结构化 notify/status 和当前扩展兼容。managed rollout仍等待当前 Host 无 active instance，不为发布强制中断会话。durable atomic catalog、startup reconcile、explicit reopen与完整 service CLI仍属于阶段 5。V0.2 #148 的 direct `pi-tui` dependency inventory、Terminal Core API、provenance政策、OpenClaw固定commit审计和一次性切换计划已冻结在 [`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)；renderer实施仍不属于V0.1 Stage 5。
 
 ## 当前默认真人入口
 
