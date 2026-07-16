@@ -1,0 +1,40 @@
+ALU DOCK / NIGHT CONSOLE · /help commands
+
+  ▎ Review the V0.1 candidate, preserve truthful queue consumption, and keep the fixed composer usable over SSH.
+  ▎ Do not change Host ownership, Protocol V2, or replacement semantics.
+
+  │ The visual pass should remain a client-only projection change.
+  │ I will verify pagination anchors, queue withdrawal, tool folding, resize, and terminal cleanup after styling.
+
+  Release gate
+
+  Night Console uses the terminal's existing dark background. User prompts receive a local navy surface; assistant prose
+  remains on the native background. Persistent role labels are removed because hierarchy now comes from shape and color.
+
+  - Indigo means work is running.
+  - Teal means a tool completed; rose means it failed. Diff lines retain local semantic contrast.
+
+  ✓ bash done · Alt+O detail
+
+  ◆ deploy running · Alt+O fold
+  │ args                                                                                                                
+  │ { "release": "candidate" }                                                                                        
+  │ result                                                                                                              
+  │ publishing immutable files…                                                                                        
+
+  × audit failed · Alt+O detail
+
+  ! The failed tool is collapsed; no raw terminal payload crossed the control protocol.
+
+  · Runtime generation 7 · history cursor remains generation-bound.
+
+  ↑ history paused · new output · wheel/PageDown/Ctrl+End to live tail
+
+  ↳ 1. steer next · Keep the compact footer at two rows
+  ↳ 2. follow-up · Run the real installed-resource and SSH smoke after the gate
+╭─ message ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ Summarize release evidence, then detach without stopping the Host                                                    │
+│                                                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+  ◆ tool deploy · running · queue 2 · openai-codex/gpt-5.6-sol · think xhigh · connected/controller · ext build:ready
+  alu-dock · /home/luziyi/workshop/alu_dock · d:dock-nig p:pi-night · ↑18.5k ↓6.4k · ctx 42.0k/200.0k 21% · cache 33%

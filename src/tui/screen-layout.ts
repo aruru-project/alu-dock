@@ -184,7 +184,7 @@ export function fitFixedScreenChrome(params: {
   };
 }
 
-/** Compose exactly one terminal viewport, with history ending immediately above fixed chrome. */
+/** Compose one viewport: transcript, composer, then the compact bottom status dock. */
 export function composeFixedScreen(params: {
   height: number;
   header: readonly string[];
@@ -203,9 +203,9 @@ export function composeFixedScreen(params: {
     ...params.header,
     ...padding,
     ...history,
+    ...params.editor,
     ...params.status,
     ...params.help,
-    ...params.editor,
   ];
   return lines.length <= height ? lines : lines.slice(-height);
 }

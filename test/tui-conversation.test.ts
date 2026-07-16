@@ -10,6 +10,7 @@ import { commandCatalog } from "../src/tui/dock-tui.js";
 import { PendingQueueTray } from "../src/tui/pending-queue.js";
 import { projectSnapshot } from "../src/tui/snapshot-projection.js";
 import { parseSettingCommandValue } from "../src/tui/settings-controls.js";
+import { createNightConsolePaint, detectTerminalColorLevel } from "../src/tui/theme.js";
 
 function event(sequence: number, type: DockEvent["type"], data: Record<string, unknown>): DockEvent {
   return {
@@ -90,6 +91,24 @@ test("Stage 3 setting command values are typed and bounded", () => {
   assert.equal(parseSettingCommandValue(intSetting, "4"), undefined);
   assert.equal(parseSettingCommandValue(warnings, "{\"other\":true}"), undefined);
   assert.equal(parseSettingCommandValue(readOnly, "200000"), undefined);
+});
+
+test("Night Console uses semantic local surfaces without taking over the terminal background", () => {
+  assert.equal(detectTerminalColorLevel({ TERM: "xterm-256color", NO_COLOR: "" }, true), "none");
+  assert.equal(detectTerminalColorLevel({ TERM: "xterm-256color" }, true), "ansi256");
+  assert.equal(detectTerminalColorLevel({ TERM: "xterm-256color", COLORTERM: "truecolor" }, true), "truecolor");
+
+  const plain = createNightConsolePaint("none");
+  assert.equal(plain.userSurface("question"), "question");
+  assert.equal(plain.running("run"), "run");
+
+  const truecolor = createNightConsolePaint("truecolor");
+  assert.match(truecolor.userSurface("question"), /\u001b\[38;2;214;225;240;48;2;17;28;48mquestion\u001b\[0m/u);
+  assert.notEqual(truecolor.running("state"), truecolor.success("state"));
+  assert.notEqual(truecolor.success("state"), truecolor.error("state"));
+
+  const ansi16 = createNightConsolePaint("ansi16");
+  assert.doesNotMatch(ansi16.userSurface("question"), /\u001b\[4[0-7]m/u, "local surfaces fall back to foreground-only at 16 colors");
 });
 
 test("conversation reset replaces old session history", () => {
@@ -180,7 +199,11 @@ test("conversation projects replay and live deltas into readable messages", () =
     { kind: "assistant", text: "hello", complete: true },
     { kind: "tool", text: "read done\nresult\ndone", complete: true },
   ]);
-  for (const line of conversation.render(24)) assert.ok(visibleWidth(line) <= 24);
+  const rendered = conversation.render(24);
+  for (const line of rendered) assert.ok(visibleWidth(line) <= 24);
+  assert.match(rendered.join("\n"), /▎/);
+  assert.match(rendered.join("\n"), /│ secret reasoning/);
+  assert.doesNotMatch(rendered.join("\n"), /^\s*(You|Assistant|Thinking)\s*$/mu);
 });
 
 test("conversation collapses transport retry noise into retry status and one final error", () => {
@@ -281,7 +304,7 @@ test("tool failures stay collapsed by default and preserve expandable error deta
   }));
   conversation.addNotice("later assistant-visible output");
   const collapsed = conversation.render(60).join("\n");
-  assert.match(collapsed, /Tool · failed/);
+  assert.match(collapsed, /× bash failed/);
   assert.match(collapsed, /bash failed/);
   assert.doesNotMatch(collapsed, /expanded failure detail/);
   assert.deepEqual(conversation.toggleLatestToolExpanded(), { expanded: true, name: "bash" });
@@ -312,8 +335,8 @@ test("pending queue tray follows Pi consumption order and leaves the transcript 
     { queueItemId: "steer-1", operationId: "op-steer", delivery: "steer", text: "change direction", acceptedAt: "2026-07-14T00:00:01.000Z" },
   ]);
   assert.deepEqual(tray.render(80).map((line) => line.trim()), [
-    "1. steer next · change direction",
-    "2. follow-up · afterward",
+    "↳ 1. steer next · change direction",
+    "↳ 2. follow-up · afterward",
   ]);
 
   tray.apply(event(1, "queue.changed", { steering: 0, followUp: 1, total: 1 }));
@@ -376,20 +399,22 @@ test("conversation and status expose replay truncation and current state", () =>
   status.setController("observing");
   status.setConnection("connected");
   status.setAutoCompaction(true);
-  const lines = status.render(80);
+  const lines = status.render(120);
+  assert.equal(lines.length, 2);
   const footer = lines.join("\n");
   assert.match(footer, /demo/);
   assert.match(footer, /gpt-test/);
   assert.match(footer, /running/);
   assert.match(footer, /streaming/);
-  assert.match(footer, /context 1\.0k\/10\.0k 10%/);
+  assert.match(footer, /ctx 1\.0k\/10\.0k 10%/);
   assert.match(footer, /cache 20%/);
-  assert.match(footer, /alu-kanban: ready/);
-  for (const line of lines) assert.ok(visibleWidth(line) <= 80);
+  assert.match(footer, /alu-kanban:ready/);
+  for (const line of lines) assert.ok(visibleWidth(line) <= 120);
 
   status.setActivity({ phase: "waiting", label: "waiting for model", animated: true });
   status.tickActivity();
   const narrow = status.render(43);
-  assert.match(narrow[1] ?? "", /waiting for model/);
+  assert.equal(narrow.length, 2);
+  assert.match(narrow[0] ?? "", /waiting for model/);
   for (const line of narrow) assert.ok(visibleWidth(line) <= 43);
 });

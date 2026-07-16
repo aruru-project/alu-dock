@@ -48,15 +48,15 @@ export class PendingQueueTray implements Component {
     const visible = this.items.slice(0, MAX_VISIBLE_ITEMS);
     const lines = visible.map((item, index) => {
       const mode = item.delivery === "steer" ? "steer next" : "follow-up";
-      const prefix = paint.accent(`  ${index + 1}. ${mode} · `);
+      const prefix = paint.queue(`  ↳ ${index + 1}. ${mode} · `);
       const text = item.text
         .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/gu, "")
         .replace(/\s+/gu, " ")
         .trim() || "(empty)";
-      return truncateToWidth(`${prefix}${paint.muted(text)}`, width);
+      return truncateToWidth(`${prefix}${paint.primary(text)}`, width);
     });
     const hidden = this.items.length - visible.length;
-    if (hidden > 0) lines.push(truncateToWidth(paint.muted(`  +${hidden} more pending`), width));
+    if (hidden > 0) lines.push(truncateToWidth(paint.queue(`  ↳ +${hidden} more pending`), width));
     return lines;
   }
 }

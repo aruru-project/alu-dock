@@ -569,7 +569,9 @@ test("SSH TUI replays, resizes, handles input, and detaches without stopping", a
   assert.match(output, /waiting for model/);
   const resizedFrame = lastFullRedrawFrame(output);
   assert.equal(resizedFrame.length, 18, `expected one fixed 18-row screen:\n${resizedFrame.join("\n")}`);
-  assert.match(resizedFrame.at(-1) ?? "", /^─+$/u, "the editor bottom border must remain on the terminal's final row");
+  assert.match(resizedFrame.at(-3) ?? "", /^─+$/u, "the editor bottom border must remain immediately above the two-row status dock");
+  assert.match(resizedFrame.at(-2) ?? "", /waiting for model|running/u);
+  assert.match(resizedFrame.at(-1) ?? "", /pty-demo/u);
   assert.match(output, /Detached from pty-demo/);
   assert.doesNotMatch(output, /data:image|;base64,/i);
 

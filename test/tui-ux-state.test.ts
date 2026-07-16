@@ -54,7 +54,7 @@ function snapshot(overrides: Partial<InstanceSnapshot> = {}): InstanceSnapshot {
   };
 }
 
-test("fixed screen keeps the composer at the final rows", () => {
+test("fixed screen keeps the composer immediately above the compact footer", () => {
   const chrome = fitFixedScreenChrome({
     height: 12,
     header: ["header"],
@@ -73,8 +73,10 @@ test("fixed screen keeps the composer at the final rows", () => {
     editor: chrome.editor,
   });
   assert.equal(lines.length, 12);
-  assert.deepEqual(lines.slice(-2), ["editor 1", "editor 2"]);
-  assert.ok(lines.indexOf("history 2") < lines.indexOf("status 1"));
+  assert.equal(lines.at(-1), "help");
+  assert.ok(lines.indexOf("history 2") < lines.indexOf("editor 1"));
+  assert.ok(lines.indexOf("editor 2") < lines.indexOf("status 1"));
+  assert.ok(lines.indexOf("status 2") < lines.indexOf("help"));
 });
 
 test("history viewport auto-follows, locks on page-up, counts unseen output, and returns to bottom", () => {

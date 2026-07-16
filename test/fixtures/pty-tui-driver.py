@@ -53,10 +53,10 @@ def main() -> int:
     try:
         set_size(fd, 24, 80)
         deadline = time.monotonic() + 12
-        while b"Enter send/steer" not in output and time.monotonic() < deadline:
+        while b"NIGHT CONSOLE" not in output and time.monotonic() < deadline:
             if read_available(fd, output, 0.1) < 0:
                 break
-        if b"Enter send/steer" not in output:
+        if b"NIGHT CONSOLE" not in output:
             timed_out = True
         else:
             before_resize = len(output)

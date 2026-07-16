@@ -240,13 +240,8 @@ export async function runDockTui(
   else conversation.addNotice(`Command catalog unavailable: ${errorText(commandsLoad.reason)}`, true);
 
   const title = new Text(
-    `${paint.bold(paint.accent("Alu Dock"))} ${paint.muted("— Host-owned Pi over SSH")}`,
+    `${paint.bold(paint.accent("ALU DOCK"))} ${paint.faint("/ NIGHT CONSOLE")} ${paint.muted("· /help commands")}`,
     1,
-    0,
-  );
-  const help = new Text(
-    paint.muted("  Enter send/steer · Alt+Enter follow-up · Alt+Up restore queue · PgUp/PgDn/wheel history · Ctrl+O tools · Ctrl+D detach"),
-    0,
     0,
   );
   editor = new Editor(tui, editorTheme, {
@@ -1482,7 +1477,6 @@ export async function runDockTui(
     header: title,
     history: conversation,
     status,
-    help,
     editor: composerDock,
     historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
   });

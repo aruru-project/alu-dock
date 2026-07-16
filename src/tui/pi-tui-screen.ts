@@ -24,7 +24,7 @@ interface ScreenSections {
   header: Component;
   history: AnchorableHistory;
   status: Component;
-  help: Component;
+  help?: Component;
   editor: Component;
   historyVersion: () => { revision: number; outputRevision: number };
 }
@@ -45,9 +45,9 @@ export class FixedDockScreen extends Container {
     super();
     this.addChild(sections.header);
     this.addChild(sections.history);
-    this.addChild(sections.status);
-    this.addChild(sections.help);
     this.addChild(sections.editor);
+    this.addChild(sections.status);
+    if (sections.help) this.addChild(sections.help);
   }
 
   override render(width: number): string[] {
@@ -64,7 +64,7 @@ export class FixedDockScreen extends Container {
     this.renderHeight = height;
     const header = this.sections.header.render(nextWidth);
     const status = this.sections.status.render(nextWidth);
-    const help = this.sections.help.render(nextWidth);
+    const help = this.sections.help?.render(nextWidth) ?? [];
     const editor = this.sections.editor.render(nextWidth);
     const chrome = fitFixedScreenChrome({ height, header, status, help, editor });
     if (
@@ -98,7 +98,7 @@ export class FixedDockScreen extends Container {
     if (projection.indicatorVisible) {
       const unseen = projection.unseenUpdates > 0 ? " · new output" : "";
       projectedHistory.push(truncateToWidth(
-        paint.accent(`  history paused${unseen} · wheel down/PageDown/Ctrl+End bottom`),
+        paint.queue(`  ↑ history paused${unseen} · wheel/PageDown/Ctrl+End to live tail`),
         nextWidth,
       ));
     }

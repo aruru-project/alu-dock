@@ -1,6 +1,7 @@
 import {
   Markdown,
   truncateToWidth,
+  visibleWidth,
   wrapTextWithAnsi,
   type Component,
 } from "@earendil-works/pi-tui";
@@ -386,7 +387,7 @@ export class DockConversation implements Component {
     for (let index = latestIndex + 1; index < this.entries.length; index += 1) {
       const entry = this.entries[index];
       if (!entry || (this.hideThinking && entry.kind === "thinking")) continue;
-      rows += 1 + this.renderEntry(entry, contentWidth).length + 1;
+      rows += this.renderEntry(entry, contentWidth).length + 1;
     }
     return rows;
   }
@@ -424,9 +425,10 @@ export class DockConversation implements Component {
     for (const entry of this.entries) {
       if (this.hideThinking && entry.kind === "thinking") continue;
       const startRow = lines.length;
-      lines.push(truncateToWidth(`${indent}${label(entry)}`, width));
       for (const line of this.renderEntry(entry, contentWidth)) {
-        lines.push(truncateToWidth(`${indent}${line}`, width));
+        // Every entry renderer is width-bounded. Avoid rescanning all cached
+        // history rows on each live delta merely to truncate them a second time.
+        lines.push(`${indent}${line}`);
       }
       lines.push("");
       spanKeys.push(entry.key);
@@ -481,27 +483,44 @@ export class DockConversation implements Component {
     }
 
     let lines: string[];
-    if (entry.toolCallId && !expanded) {
-      const title = `${entry.toolName ?? "tool"} ${entry.toolState ?? (entry.complete ? "done" : "running")}`;
-      lines = [truncateToWidth(`${title} ${paint.muted("· Alt+O detail")}`, width)];
-    } else if (entry.diffText) {
-      const marker = "\nresult\n";
-      const markerIndex = entry.text.indexOf(marker);
-      const details = (markerIndex >= 0 ? entry.text.slice(0, markerIndex) : entry.text.split("\n")[0] ?? "tool done").split("\n");
-      lines = [...details, ...renderDockDiff(entry.diffText)].map((line) => truncateToWidth(line, width));
+    if (entry.toolCallId) {
+      const header = renderToolHeader(entry, width, expanded);
+      if (!expanded) {
+        lines = [header];
+      } else if (entry.diffText) {
+        const marker = "\nresult\n";
+        const markerIndex = entry.text.indexOf(marker);
+        const detailText = markerIndex >= 0 ? entry.text.slice(0, markerIndex) : entry.text.split("\n")[0] ?? "";
+        const details = detailText.split("\n").slice(1).join("\n");
+        lines = [
+          header,
+          ...renderToolDetails(details, width, entry.toolState),
+          ...renderDockDiff(entry.diffText).map((line) => renderToolDetailLine(line, width, entry.toolState, false)),
+        ];
+      } else {
+        const details = entry.text.split("\n").slice(1).join("\n");
+        lines = [header, ...renderToolDetails(details, width, entry.toolState)];
+      }
+    } else if (entry.kind === "user") {
+      lines = renderUserSurface(entry.text.length > 0 ? entry.text : "…", width);
     } else if (entry.kind === "assistant" || entry.kind === "thinking") {
       const text = entry.text.length > 0 ? entry.text : "…";
+      const innerWidth = entry.kind === "thinking" ? Math.max(1, width - 2) : width;
       const markdown = new Markdown(
         text,
         0,
         0,
         markdownTheme,
-        entry.kind === "thinking" ? { color: paint.muted, italic: true } : undefined,
+        entry.kind === "thinking" ? { color: paint.thinking, italic: true } : undefined,
       );
-      lines = markdown.render(width);
+      const content = markdown.render(innerWidth);
+      lines = entry.kind === "thinking"
+        ? content.map((line) => `${paint.thinking("│")} ${line}`)
+        : content;
+    } else if (entry.kind === "error") {
+      lines = renderNotice(entry.text.length > 0 ? entry.text : "Unknown error", width, true);
     } else {
-      const text = entry.text.length > 0 ? entry.text : "…";
-      lines = text.split("\n").flatMap((line) => wrapTextWithAnsi(line || " ", width));
+      lines = renderNotice(entry.text.length > 0 ? entry.text : "…", width, false);
     }
 
     entry.renderCache = { width, revision: entry.renderRevision, expanded, lines };
@@ -653,6 +672,7 @@ function projectToolState(tool: ToolProjection, state: ToolState): void {
 export class DockStatusLine implements Component {
   private snapshotValue: InstanceSnapshot;
   private activity = "ready";
+  private activityPhase: RunActivityState["phase"] | "status" = "status";
   private activityAnimated = false;
   private activityFrame = 0;
   private connection = "connected";
@@ -663,9 +683,11 @@ export class DockStatusLine implements Component {
   update(snapshot: InstanceSnapshot): void { this.snapshotValue = snapshot; }
   setActivity(activity: string | RunActivityState, animated = false): void {
     const label = safeTerminalLine(typeof activity === "string" ? activity : activity.label);
+    const phase = typeof activity === "string" ? inferActivityPhase(label) : activity.phase;
     const nextAnimated = typeof activity === "string" ? animated : activity.animated;
-    if (label !== this.activity || nextAnimated !== this.activityAnimated) this.activityFrame = 0;
+    if (label !== this.activity || phase !== this.activityPhase || nextAnimated !== this.activityAnimated) this.activityFrame = 0;
     this.activity = label;
+    this.activityPhase = phase;
     this.activityAnimated = nextAnimated;
   }
   tickActivity(): boolean {
@@ -679,51 +701,174 @@ export class DockStatusLine implements Component {
   invalidate(): void {}
 
   render(width: number): string[] {
+    const boundedWidth = Math.max(1, width);
     const snapshot = this.snapshotValue;
-    const model = snapshot.executor.model ? `${safeTerminalLine(snapshot.executor.model.provider)}/${safeTerminalLine(snapshot.executor.model.id)}` : "no model";
+    const model = snapshot.executor.model
+      ? `${safeTerminalLine(snapshot.executor.model.provider)}/${safeTerminalLine(snapshot.executor.model.id)}`
+      : "no model";
     const name = safeTerminalLine(snapshot.name || shortId(snapshot.id));
     const state = snapshot.lifecycle === "active" ? snapshot.execution : snapshot.lifecycle;
-    const thinking = snapshot.executor.thinkingLevel ? ` · think ${snapshot.executor.thinkingLevel}` : "";
-    const pending = snapshot.pending.total > 0 ? ` · queue ${snapshot.pending.total}` : "";
-    const identity = `─ ${name} · ${safeTerminalLine(snapshot.cwd)}`;
-    const activity = this.activityAnimated
-      ? `${paint.accent(ACTIVITY_FRAMES[this.activityFrame] ?? "·")} ${this.activity}`
-      : this.activity;
-    const activityLine = `  ${activity} · ${state}${pending} · ${this.connection}/${this.controller}`;
-    const runtime = `  ${model}${thinking} · dock ${shortId(snapshot.id)} · pi ${shortId(snapshot.executor.piSessionId)}`;
-    const metrics = `  ${formatMetrics(snapshot)} · compact ${this.autoCompaction === undefined ? "—" : this.autoCompaction ? "auto" : "manual"}`;
-    const lines = [identity, activityLine, runtime, metrics].map((line) => truncateToWidth(paint.muted(line), width));
+    const activitySymbol = this.activityAnimated
+      ? ACTIVITY_FRAMES[this.activityFrame] ?? "·"
+      : activitySymbolFor(this.activityPhase);
+    const activity = activityPainter(this.activityPhase)(`${activitySymbol} ${this.activity}`);
     const statuses = Object.entries(snapshot.extensionStatus);
-    if (statuses.length > 0) lines.push(truncateToWidth(paint.muted(`  ext · ${statuses.map(([key, value]) => `${safeTerminalLine(key)}: ${safeTerminalLine(value)}`).join(" · ")}`), width));
-    return lines;
+    const firstLine = fitFooterSegments(boundedWidth, [
+      activity,
+      statePainter(state)(state),
+      ...(snapshot.pending.total > 0 ? [paint.queue(`queue ${snapshot.pending.total}`)] : []),
+      paint.primary(model),
+      ...(snapshot.executor.thinkingLevel ? [paint.thinking(`think ${snapshot.executor.thinkingLevel}`)] : []),
+      paint.muted(`${this.connection}/${this.controller}`),
+      ...(statuses.length > 0
+        ? [paint.faint(`ext ${statuses.map(([key, value]) => `${safeTerminalLine(key)}:${safeTerminalLine(value)}`).join(",")}`)]
+        : []),
+    ]);
+
+    const metricSegments = formatMetricSegments(snapshot);
+    const secondLine = fitFooterSegments(boundedWidth, [
+      paint.bold(paint.primary(name)),
+      paint.muted(safeTerminalLine(snapshot.cwd)),
+      paint.faint(`d:${shortId(snapshot.id)} p:${shortId(snapshot.executor.piSessionId)}`),
+      ...metricSegments.map(paint.muted),
+      paint.faint(`cmp ${this.autoCompaction === undefined ? "—" : this.autoCompaction ? "A" : "M"}`),
+    ]);
+    return [firstLine, secondLine];
   }
 }
 
 const ACTIVITY_FRAMES = ["·", "•", "●", "•"] as const;
 
-function label(entry: ConversationEntry): string {
-  switch (entry.kind) {
-    case "user": return paint.user("You");
-    case "assistant": return paint.assistant(entry.complete ? "Assistant" : "Assistant · streaming");
-    case "thinking": return paint.muted(entry.complete ? "Thinking" : "Thinking · streaming");
-    case "tool": {
-      if (entry.toolState === "failed") return paint.error("Tool · failed");
-      return paint.accent(entry.complete ? "Tool" : "Tool · running");
-    }
-    case "error": return paint.error("Error");
-    case "system": return paint.muted("Dock");
-  }
+function renderUserSurface(text: string, width: number): string[] {
+  if (width < 3) return wrapPlainText(text, width).map(paint.userSurface);
+  const bodyWidth = width - 2;
+  return wrapPlainText(text, bodyWidth).map((line) => {
+    const body = padToVisibleWidth(` ${line}`, width - 1);
+    return `${paint.user("▎")}${paint.userSurface(body)}`;
+  });
 }
 
-function formatMetrics(snapshot: InstanceSnapshot): string {
+function renderToolHeader(entry: ConversationEntry, width: number, expanded: boolean): string {
+  const state = entry.toolState ?? (entry.complete ? "done" : "running");
+  const icon = state === "failed" ? "×" : state === "done" ? "✓" : "◆";
+  const title = `${icon} ${entry.toolName ?? "tool"} ${state}`;
+  const hint = expanded ? "· Alt+O fold" : "· Alt+O detail";
+  return truncateToWidth(`${toolStatePainter(state)(title)} ${paint.faint(hint)}`, width);
+}
+
+function renderToolDetails(text: string, width: number, state: ToolState | undefined): string[] {
+  if (text.length === 0) return [];
+  const bodyWidth = Math.max(1, width - 2);
+  return text
+    .split("\n")
+    .flatMap((line) => wrapTextWithAnsi(line || " ", bodyWidth))
+    .map((line) => renderToolDetailLine(line, width, state, true));
+}
+
+function renderToolDetailLine(
+  line: string,
+  width: number,
+  state: ToolState | undefined,
+  surface: boolean,
+): string {
+  if (width < 3) return truncateToWidth(line, width);
+  const bodyWidth = width - 2;
+  const body = truncateToWidth(line || " ", bodyWidth);
+  const projected = surface ? paint.toolSurface(padToVisibleWidth(body, bodyWidth)) : body;
+  return `${toolStatePainter(state)("│")} ${projected}`;
+}
+
+function renderNotice(text: string, width: number, error: boolean): string[] {
+  if (width < 3) return wrapPlainText(text, width).map(error ? paint.error : paint.muted);
+  const bodyWidth = width - 2;
+  return wrapPlainText(text, bodyWidth).map((line, index) => {
+    const marker = index === 0 ? (error ? "!" : "·") : "│";
+    return `${error ? paint.error(marker) : paint.faint(marker)} ${error ? paint.error(line) : paint.muted(line)}`;
+  });
+}
+
+function wrapPlainText(text: string, width: number): string[] {
+  const boundedWidth = Math.max(1, width);
+  return text.split("\n").flatMap((line) => wrapTextWithAnsi(line || " ", boundedWidth));
+}
+
+function padToVisibleWidth(text: string, width: number): string {
+  const fitted = truncateToWidth(text, Math.max(1, width));
+  return `${fitted}${" ".repeat(Math.max(0, width - visibleWidth(fitted)))}`;
+}
+
+function toolStatePainter(state: ToolState | undefined): (text: string) => string {
+  if (state === "failed") return paint.error;
+  if (state === "done") return paint.success;
+  return paint.running;
+}
+
+function fitFooterSegments(width: number, segments: readonly string[]): string {
+  if (segments.length === 0) return "";
+  let line = `  ${segments[0] ?? ""}`;
+  for (const segment of segments.slice(1)) {
+    const candidate = `${line}${paint.faint(" · ")}${segment}`;
+    if (visibleWidth(candidate) <= width) line = candidate;
+  }
+  return truncateToWidth(line, width);
+}
+
+function formatMetricSegments(snapshot: InstanceSnapshot): string[] {
   const metrics = snapshot.metrics;
-  if (!metrics) return "tokens — · context — · cache — · cost —";
+  if (!metrics) return ["↑— ↓—", "ctx —", "cache —", "$—"];
   const denominator = metrics.tokens.input + metrics.tokens.cacheRead + metrics.tokens.cacheWrite;
   const cache = denominator > 0 ? `${Math.round((metrics.tokens.cacheRead / denominator) * 100)}%` : "—";
   const context = metrics.context
     ? `${formatCount(metrics.context.tokens)}/${formatCount(metrics.context.contextWindow)}${metrics.context.percent === null ? "" : ` ${Math.round(metrics.context.percent)}%`}`
     : "—";
-  return `tokens ↑${formatCount(metrics.tokens.input)} ↓${formatCount(metrics.tokens.output)} Σ${formatCount(metrics.tokens.total)} · context ${context} · cache ${cache} · $${metrics.cost.toFixed(4)}`;
+  return [
+    `↑${formatCount(metrics.tokens.input)} ↓${formatCount(metrics.tokens.output)}`,
+    `ctx ${context}`,
+    `cache ${cache}`,
+    `$${metrics.cost.toFixed(4)}`,
+  ];
+}
+
+function inferActivityPhase(label: string): RunActivityState["phase"] | "status" {
+  const normalized = label.toLowerCase();
+  if (/host|disconnect|closed|stopped/u.test(normalized)) return "disconnected";
+  if (/error|failed|unavailable/u.test(normalized)) return "error";
+  if (/abort|stopping/u.test(normalized)) return "aborting";
+  if (/queue/u.test(normalized)) return "queued";
+  if (/tool/u.test(normalized)) return "tool";
+  if (/think/u.test(normalized)) return "thinking";
+  if (/respond|stream/u.test(normalized)) return "responding";
+  if (/retry/u.test(normalized)) return "retry";
+  if (/compact/u.test(normalized)) return "compaction";
+  if (/submit/u.test(normalized)) return "submitting";
+  if (/wait/u.test(normalized)) return "waiting";
+  if (/ready|idle/u.test(normalized)) return "idle";
+  return "status";
+}
+
+function activitySymbolFor(phase: RunActivityState["phase"] | "status"): string {
+  if (phase === "idle") return "○";
+  if (phase === "queued") return "◇";
+  if (phase === "tool") return "◆";
+  if (phase === "compaction") return "◈";
+  if (phase === "interaction") return "?";
+  if (phase === "error" || phase === "disconnected") return "×";
+  return "●";
+}
+
+function activityPainter(phase: RunActivityState["phase"] | "status"): (text: string) => string {
+  if (phase === "error" || phase === "disconnected") return paint.error;
+  if (phase === "queued" || phase === "interaction") return paint.queue;
+  if (phase === "thinking") return paint.thinking;
+  if (phase === "idle" || phase === "status") return paint.muted;
+  return paint.running;
+}
+
+function statePainter(state: string): (text: string) => string {
+  if (/failed|error|lost|unavailable|stopped/u.test(state)) return paint.error;
+  if (state === "running") return paint.running;
+  if (state === "idle") return paint.success;
+  return paint.muted;
 }
 
 function formatCount(value: number | null): string {
