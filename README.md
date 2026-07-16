@@ -29,7 +29,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [x] #157 tool render storm、#154 queue诚实时序/撤回与#155长历史/滚轮修正
 - [x] #156 Night Console语义配色、single-column transcript与两行status dock
 - [ ] #158最终真人默认入口验收（完成基线1/6后由#164暂停）
-- [ ] #164人工验收阻塞闸门（#161/#165/#160/#162及#163固定activity槽位源码已完成；统一release待CLI子卡完成）
+- [ ] #164人工验收阻塞闸门（#161/#165/#160/#162/#163及#166人类help源码已完成；统一release待#167 list完成）
 
 详细文档：
 
@@ -68,6 +68,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-v0.1-terminal-selection.md`](docs/validation-v0.1-terminal-selection.md)
 - [`docs/validation-v0.1-command-handled-projection.md`](docs/validation-v0.1-command-handled-projection.md)
 - [`docs/validation-v0.1-activity-slot.md`](docs/validation-v0.1-activity-slot.md)
+- [`docs/validation-v0.1-cli-help.md`](docs/validation-v0.1-cli-help.md)
 - [`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)
 
 ## V0.1 工程入口
@@ -85,6 +86,16 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 ```bash
 alu-dock
 ```
+
+外部人类CLI可从本地只读help逐层探索；help不连接daemon、不调用systemd且不生成operation：
+
+```bash
+alu-dock --help
+alu-dock help open
+alu-dock service logs --help
+```
+
+顶层只展示`open/new/attach/list/status/stop/service/help`。内部测试/诊断入口不会与人类workflow等权出现；明确请求其help时只会引导到人类命令和typed DockClient/Protocol V2。
 
 该入口连接已启用的 `alu-dock.service`，不会调用 systemctl或静默 fork detached Host；service不可用时返回 `service_unavailable` 与明确诊断。它按当前 cwd 查找实例：没有则创建，一个 active则直接重连，存在 `host_lost/runtime_error` 时由选择器要求用户显式 reopen。Reopen保持 Dock ID与creation metadata、generation +1，并恢复Pi session context，但不恢复或重放旧 prompt、queue、Promise或tool effect。
 
@@ -126,22 +137,19 @@ alu-dock attach INSTANCE_ID
 
 ## 内部机器与诊断接口
 
-Alu Dock没有Agent通过自身CLI自循环控制Host的设计。下列结构化JSONL命令来自V0/V0.1跨进程测试、release smoke和排障，不是模型tool surface，也不应与人类workflow等权占据顶层help。新测试优先直接使用typed `DockClient`/Protocol V2；#166/#167负责把公开人类CLI与必要内部control入口分离。
+Alu Dock没有Agent通过自身CLI自循环控制Host的设计。下列结构化JSONL命令来自V0/V0.1跨进程测试、release smoke和排障，不是模型tool surface，已从顶层human help移除。新测试优先直接使用typed `DockClient`/Protocol V2；#167继续迁移默认`list`的机器消费者。
 
 当前开发候选仍提供：
 
 ```bash
 alu-dock ping
 alu-dock create --cwd "$PWD" --name demo
-alu-dock list
 alu-dock reopen INSTANCE_ID
-alu-dock status INSTANCE_ID
 alu-dock events INSTANCE_ID --follow
 # resume only with the complete cursor returned by the prior response:
 alu-dock events INSTANCE_ID --cursor HOST_EPOCH:RUNTIME_GENERATION:SEQUENCE --follow
 alu-dock prompt INSTANCE_ID "start a new run"
 alu-dock prompt INSTANCE_ID --delivery followUp "then summarize"
-alu-dock stop INSTANCE_ID
 ```
 
 也可用 `--socket PATH` 或 `ALU_DOCK_SOCKET` 指定 socket。`prompt` receipt 只表示 preflight 已接受；`queued=true` 不表示任务完成。socket 父目录必须为当前用户私有目录，socket mode 固定为 `0600`。
