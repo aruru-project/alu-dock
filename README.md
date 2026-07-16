@@ -2,7 +2,7 @@
 
 Alu Dock 是 #136「受管运行时宿主」的独立实现；V0 执行卡为 #137，V0.1 工程入口为 #142。
 
-V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座、阶段 2 SSH TUI/Footer、阶段 3 日常控制、阶段 4 Extension UI、阶段 5 durable Host lifecycle 与阶段 6 tree/fork/clone 均已完成源码、自动化门禁与managed rollout。当前Host提供V2 transaction/fault seam、private atomic catalog、startup reconcile、explicit reopen、持久branch/tree projection、稳定message/tool event、session metrics、可复用实例abort、`session.commands.v1`、`session.tree.v1`、`queue.control.v1`与`extension_ui.v1`；薄TUI提供Night Console single-column transcript、fixed composer与两行status dock、可反向分页且统一PageUp/PageDown/滚轮的有界history viewport、明确run activity、默认折叠工具、Markdown/thinking/diff、动态autocomplete、可检索selector、完整Footer、诚实pending queue tray与Alt+Up/Esc恢复、new/resume/name/compact/reload/tree/fork/clone workflow，以及attach-bound extension select/confirm/input/editor overlay。旧`alu-daemon`、Rails WebConsole、Redis bridge与Alubot不在本仓库的修改范围内。
+V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座、阶段 2 SSH TUI/Footer、阶段 3 日常控制、阶段 4 Extension UI、阶段 5 durable Host lifecycle 与阶段 6 tree/fork/clone 均已完成源码、自动化门禁与managed rollout。当前Host提供V2 transaction/fault seam、private atomic catalog、startup reconcile、explicit reopen、revision-bound catalog listing/maintenance、持久branch/tree projection、稳定message/tool event、session metrics、可复用实例abort、`session.commands.v1`、`session.tree.v1`、`queue.control.v1`、`catalog.maintenance.v1`与`extension_ui.v1`；薄TUI提供Night Console single-column transcript、fixed composer与两行status dock、可反向分页、键盘canonical且按需启用Dock滚轮的有界history viewport、明确run activity、默认折叠工具、Markdown/thinking/diff、动态autocomplete、可检索selector、完整Footer、诚实pending queue tray与Alt+Up/Esc恢复、new/resume/name/compact/reload/tree/fork/clone workflow，以及attach-bound extension select/confirm/input/editor overlay。旧`alu-daemon`、Rails WebConsole、Redis bridge与Alubot不在本仓库的修改范围内。
 
 ## V0 冻结进度
 
@@ -29,7 +29,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [x] #157 tool render storm、#154 queue诚实时序/撤回与#155长历史/滚轮修正
 - [x] #156 Night Console语义配色、single-column transcript与两行status dock
 - [ ] #158最终真人默认入口验收（完成基线1/6后由#164暂停）
-- [ ] #164人工验收阻塞闸门（#161–#167、245-test gate、immutable release与installed PTY/SSH已完成；等待用户Windows Terminal/PowerShell验收）
+- [ ] #164人工验收阻塞闸门（旧#161–#167候选被真人发现的#160/#169/#170稳定化需求取代；等待新consolidated release与用户Windows Terminal/PowerShell验收）
 
 详细文档：
 
@@ -71,11 +71,12 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-v0.1-cli-help.md`](docs/validation-v0.1-cli-help.md)
 - [`docs/validation-v0.1-human-list.md`](docs/validation-v0.1-human-list.md)
 - [`docs/validation-v0.1-acceptance-blockers-rollout.md`](docs/validation-v0.1-acceptance-blockers-rollout.md)
+- [`docs/validation-v0.1-dogfood-stabilization.md`](docs/validation-v0.1-dogfood-stabilization.md)
 - [`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)
 
 ## V0.1 工程入口
 
-#142是V0.1工程状态入口。阶段0–6、dogfood UX与Extension UI主体能力已完成；Stage 6 invariants保持冻结，当前immutable managed release为#164验收候选`20260716T065650Z-d979cd4aa118`；245-test gate、installed-resource smoke、PTY和loopback SSH已通过，但尚待用户Windows Terminal/PowerShell签收。#158仍暂停于基线1/6；用户关闭#164后再决定是否恢复验收。V0.2 renderer仍由#148独立排期。
+#142是V0.1工程状态入口。阶段0–6、dogfood UX与Extension UI主体能力已完成，Stage 6 invariants保持冻结。已部署的`20260716T065650Z-d979cd4aa118`仅是旧#164候选；真人dogfood随后重新打开#160并加入#169/#170，当前正在以新的consolidated gate与immutable release取代它。#158仍暂停于基线1/6；只有用户完成#164后才能决定是否恢复验收。V0.2 renderer仍由#148独立排期。
 
 **绿地规则：** Alu Dock 是全新项目。到 1.0 落地前，除非用户特意说明，不考虑任何旧协议、旧 Host、旧数据、旧 CLI 行为的兼容或迁移；原型合同直接替换。版本号仅标识当前合同，不表示存在历史包袱。
 
@@ -97,7 +98,7 @@ alu-dock help open
 alu-dock service logs --help
 ```
 
-顶层只展示`open/new/attach/list/status/stop/service/help`。默认`alu-dock list`按终端宽度输出最多100个两行实例摘要（短ID、name、state、generation、model、cwd及条件pending/reopen），不暴露完整DTO；机器消费者直接使用typed DockClient/V2。内部测试/诊断入口不会与人类workflow等权出现；明确请求其help时只会引导到人类命令和typed DockClient/Protocol V2。
+顶层展示`open/new/attach/list/status/stop/forget/prune/service/help`。默认`alu-dock list`只请求revision-bound的actionable页并隐藏stopped历史；`list --all`查看有界历史页。两者都按终端宽度最多输出100个两行摘要（短ID、name、state、generation、model、cwd及条件pending/reopen），并报告完整计数；机器消费者通过typed DockClient/V2逐页读取完整closed catalog。`forget ID`只移除stopped/host-lost/runtime-error Dock record，`prune --stopped`只批量移除stopped record；两者都不删除Pi session文件。内部测试/诊断入口不会与人类workflow等权出现；明确请求其help时只会引导到人类命令和typed DockClient/Protocol V2。
 
 该入口连接已启用的 `alu-dock.service`，不会调用 systemctl或静默 fork detached Host；service不可用时返回 `service_unavailable` 与明确诊断。它按当前 cwd 查找实例：没有则创建，一个 active则直接重连，存在 `host_lost/runtime_error` 时由选择器要求用户显式 reopen。Reopen保持 Dock ID与creation metadata、generation +1，并恢复Pi session context，但不恢复或重放旧 prompt、queue、Promise或tool effect。
 
@@ -106,9 +107,9 @@ alu-dock service logs --help
 - `Enter`：发送；运行中默认作为 steer；Editor 支持 multiline paste 与 history
 - `Alt+Enter` 或 `/follow MESSAGE`：排队为 follow-up；未消费文本只显示在composer上方的pending tray，不提前写入正式transcript
 - `Alt+Up`：按steering-first、follow-up-later顺序撤回全部仍可撤回的未消费queue到editor，不中止当前run；已离开Pi内部queue、正等待公开`message_start`的极窄in-flight窗口不会被复制
-- `Esc`、空编辑器 `Ctrl+C` 或 `/abort`：先清除queue并恢复未消费文本，再取消当前run/retry/compaction；tree branch summary进行中时调用公开`abortBranchSummary()`路径，实例保持可复用
-- `PageUp` / `PageDown` / 鼠标滚轮：操作同一独立 history viewport；到达顶部按200项反向加载，prepend保持entry/row视觉锚点，回看时暂停追尾并提示新输出；`Ctrl+End` 回到保留的最新页/底部
-- `Shift+拖动`：在默认mouse tracking下直接使用终端原生框选；`Alt+M`或`/mouse`关闭tracking进入普通拖选模式，`Esc`/`Alt+M`恢复Dock滚轮。Windows剪贴板复制使用`Ctrl+Shift+C`
+- `Esc`、空编辑器 `Ctrl+C` 或 `/abort`：正常对话中Esc先尝试恢复queue，只有全部可撤回正文成功回到editor后才取消当前run/retry/compaction；存在`inFlight`、失败或`effect_unknown`时不伪称恢复、不中止run。tree branch summary进行中时调用公开`abortBranchSummary()`路径，实例保持可复用
+- `PageUp` / `PageDown`：始终操作同一独立history viewport；到达顶部按200项反向加载，prepend保持entry/row视觉锚点，回看时暂停追尾并提示新输出；`Ctrl+End`回到保留的最新页/底部
+- 普通拖动：默认由终端原生框选，Windows Terminal复制使用`Ctrl+Shift+C`。`Alt+M`或`/mouse`显式启用Dock 1000/1006 mouse tracking后，滚轮操作app-owned history、`Shift+拖动`仍可绕过；Esc或同快捷键恢复默认terminal selection。默认模式的普通wheel不承诺Dock内部history语义
 - `Ctrl+O`：展开/折叠全部 generic tool output；`Alt+O` 只切换最近一项详情；工具默认折叠
 - `/settings`：查看全部 24 项投影并选择修改；也可用 `/settings KEY VALUE`。其中 compaction reserve/keep tokens 因 Pi 无公开 setter而只读
 - `/model`：打开可输入检索的 Pi 模型选择器（name/provider/id）；`/model PROVIDER/MODEL` 直接切换
@@ -135,7 +136,7 @@ alu-dock new --cwd "$PWD" --name demo
 alu-dock attach INSTANCE_ID
 ```
 
-再次执行 `alu-dock` 会先投影 Pi SessionManager 当前 branch 的最新200项持久 history baseline，到达viewport顶部后按需反向取页；客户端最多保留目标1000项/1600万字符，超界时明确标记gap并固定最新200项，再重放 Host 近期 events并从同一Host的ephemeral `pendingMessages`恢复queue tray，然后继续观察live events。只有Pi公开user `message_start`到达时，queued消息才进入正式transcript；accepted/queued receipt不冒充consumed。Host loss/reopen仍不恢复queue。成功的no-model `command.handled`继续驱动activity和Protocol V2完成边界，但不作为通用system正文重复写入conversation；rejection、extension error/notification和命令专用结果仍可见。Composer固定在两行status dock上方并向上增长，history在其上方独立滚动；固定单行activity槽位位于history与pending/composer之间，以Host事件驱动的稳定符号明确区分 waiting/thinking/responding/tool/retry/compaction/queue/host-loss，不运行独立paint timer或改变viewport行数。低频TUI Footer 展示 cwd、Dock/Pi ID、model/configured thinking、state/queue、tokens/context/cache/cost、extension status 和 connection/lease；extension/skill/prompt commands 与路径进入 autocomplete。模型/thinking切换沿用Pi的session与settings语义，只允许实例idle时执行；当前运行不会被中途换模。Host在创建Pi SDK session前安装与Pi CLI相同的Undici `EnvHttpProxyAgent`：优先保留进程已有`HTTP_PROXY`/`HTTPS_PROXY`，缺失时采用Pi全局`httpProxy`设置。默认socket为`$XDG_RUNTIME_DIR/alu-dock/dock.sock`；managed日志使用`journalctl --user -u alu-dock.service`。
+再次执行 `alu-dock` 会先投影 Pi SessionManager 当前 branch 的最新200项持久 history baseline，到达viewport顶部后按需反向取页；客户端最多保留目标1000项/1600万字符，超界时明确标记gap并固定最新200项，再重放 Host 近期 events并从同一Host的ephemeral `pendingMessages`恢复queue tray，然后继续观察live events。只有Pi公开user `message_start`到达时，queued消息才进入正式transcript；accepted/queued receipt不冒充consumed。Host loss/reopen仍不恢复queue。成功的no-model `command.handled`继续驱动activity和Protocol V2完成边界，但不作为通用system正文重复写入conversation；rejection、extension error/notification和命令专用结果仍可见。Composer固定在两行status dock上方并向上增长，history在其上方独立滚动；固定单行activity槽位位于history与pending/composer之间，以Host事件驱动的phase明确区分waiting/thinking/responding/tool/retry/compaction/queue/host-loss；仅活跃phase运行320ms轻量pulse，并用cursor save/restore与synchronized output局部重写该物理行，不触发pi-tui全屏render、不重写composer/边框/光标，idle不运行timer，也不改变viewport行数。低频TUI Footer 展示 cwd、Dock/Pi ID、model/configured thinking、state/queue、tokens/context/cache/cost、extension status 和 connection/lease；extension/skill/prompt commands 与路径进入 autocomplete。模型/thinking切换沿用Pi的session与settings语义，只允许实例idle时执行；当前运行不会被中途换模。Host在创建Pi SDK session前安装与Pi CLI相同的Undici `EnvHttpProxyAgent`：优先保留进程已有`HTTP_PROXY`/`HTTPS_PROXY`，缺失时采用Pi全局`httpProxy`设置。默认socket为`$XDG_RUNTIME_DIR/alu-dock/dock.sock`；managed日志使用`journalctl --user -u alu-dock.service`。
 
 ## 内部机器与诊断接口
 

@@ -80,6 +80,33 @@ export class CatalogTransactionCoordinator {
     return this.enqueue(record, { ...context, instanceId: record.id }, "create");
   }
 
+  remove(
+    instanceId: string,
+    context: CatalogMutationContext,
+    assertEligible: (record: Readonly<CatalogInstanceRecord>) => void,
+  ): Promise<CatalogInstanceRecord | undefined> {
+    return this.enqueueRemoval(context, (records) => {
+      const record = records.find((item) => item.id === instanceId);
+      if (!record) return [];
+      assertEligible(record);
+      return [record];
+    }).then((removed) => removed[0]);
+  }
+
+  removeWhere(
+    context: CatalogMutationContext,
+    predicate: (record: Readonly<CatalogInstanceRecord>) => boolean,
+    limit: number,
+  ): Promise<{ removed: CatalogInstanceRecord[]; hasMore: boolean }> {
+    const boundedLimit = Math.max(1, Math.floor(limit));
+    let hasMore = false;
+    return this.enqueueRemoval(context, (records) => {
+      const eligible = records.filter(predicate);
+      hasMore = eligible.length > boundedLimit;
+      return eligible.slice(0, boundedLimit);
+    }).then((removed) => ({ removed, hasMore }));
+  }
+
   private replace(record: CatalogInstanceRecord, context: CatalogMutationContext): Promise<void> {
     return this.enqueue(record, context, "replace");
   }
@@ -117,6 +144,46 @@ export class CatalogTransactionCoordinator {
       }
     });
     this.tail = task.catch(() => {});
+    return task;
+  }
+
+  private enqueueRemoval(
+    context: CatalogMutationContext,
+    select: (records: ReadonlyArray<CatalogInstanceRecord>) => CatalogInstanceRecord[],
+  ): Promise<CatalogInstanceRecord[]> {
+    const task = this.tail.then(async () => {
+      if (this.healthValue !== "healthy") {
+        if (context.effect === "post_effect") throw new CatalogEffectUnknownError(context, this.faultValue?.error);
+        throw new MutationFaultedError();
+      }
+      const selected = select(this.projection.instances);
+      const ids = new Set(selected.map((record) => record.id));
+      if (ids.size !== selected.length) throw new Error("Catalog removal selected duplicate instance IDs");
+      for (const record of selected) validateCatalogRecord(record);
+      if (selected.length === 0) return [];
+      const candidate: CatalogProjection = {
+        schemaVersion: 1,
+        revision: this.projection.revision + 1,
+        lastHostEpoch: this.projection.lastHostEpoch,
+        instances: this.projection.instances.filter((record) => !ids.has(record.id)).map((record) => structuredClone(record)),
+      };
+      validateCatalogProjection(candidate);
+      const immutableCandidate = deepFreeze(structuredClone(candidate));
+      const immutableContext = deepFreeze(structuredClone(context));
+      try {
+        await this.port.commit(immutableCandidate, immutableContext);
+      } catch (cause) {
+        if (context.effect === "post_effect") {
+          const error = new CatalogEffectUnknownError(context, cause);
+          this.tripFault({ context: structuredClone(context), error });
+          throw error;
+        }
+        throw new CatalogWriteError(context, cause);
+      }
+      this.projection = candidate;
+      return selected.map((record) => structuredClone(record));
+    });
+    this.tail = task.then(() => {}, () => {});
     return task;
   }
 

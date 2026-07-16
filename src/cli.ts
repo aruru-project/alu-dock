@@ -64,9 +64,14 @@ async function main(): Promise<void> {
     }
 
     case "list": {
-      requireNoArgs(parsed.commandArgs, "list");
-      const instances = await client.list();
-      process.stdout.write(renderHumanInstanceList(instances, humanListWidth(process.stdout.columns)));
+      const includeStopped = parseListArgs(parsed.commandArgs);
+      const mode = includeStopped ? "all" : "actionable";
+      const result = await client.listPage(mode);
+      process.stdout.write(renderHumanInstanceList(result.instances, humanListWidth(process.stdout.columns), {
+        mode,
+        hiddenStopped: result.page.hiddenStopped,
+        totalInstances: result.page.total,
+      }));
       return;
     }
 
@@ -99,6 +104,23 @@ async function main(): Promise<void> {
       const instanceId = requiredPositional(parsed.commandArgs, "stop requires INSTANCE_ID");
       const result = await client.stop(instanceId);
       writeJson({ kind: "receipt", action: "stop", ...result });
+      return;
+    }
+
+    case "forget": {
+      const instanceId = requiredPositional(parsed.commandArgs, "forget requires INSTANCE_ID");
+      const result = await client.forget(instanceId);
+      process.stdout.write(`Forgot Dock record ${result.receipt.forgottenId}. Pi session files were not deleted.\n`);
+      return;
+    }
+
+    case "prune": {
+      if (parsed.commandArgs.length !== 1 || parsed.commandArgs[0] !== "--stopped") {
+        throw new Error("prune requires exactly --stopped");
+      }
+      const result = await client.pruneStopped();
+      process.stdout.write(`Pruned ${result.receipt.forgottenCount} stopped Dock record${result.receipt.forgottenCount === 1 ? "" : "s"}. Pi session files were not deleted.\n`);
+      if (result.receipt.hasMore) process.stdout.write("More stopped records remain; run alu-dock prune --stopped again.\n");
       return;
     }
 
@@ -521,6 +543,12 @@ function isProjectTrustChoice(value: unknown): value is ProjectTrustChoice {
     || value === "trust_and_remember"
     || value === "deny_once"
     || value === "deny_and_remember";
+}
+
+function parseListArgs(args: string[]): boolean {
+  if (args.length === 0) return false;
+  if (args.length === 1 && args[0] === "--all") return true;
+  throw new Error("list accepts only --all");
 }
 
 function requiredPositional(args: string[], message: string): string {

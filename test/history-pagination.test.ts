@@ -9,7 +9,7 @@ import {
   MAX_HISTORY_WINDOW_ENTRIES,
   PagedHistoryWindow,
 } from "../src/tui/history-pagination.js";
-import { parseMouseWheel, mouseTrackingSequences, TerminalSelectionMode } from "../src/tui/mouse-input.js";
+import { DockMouseTrackingMode, parseMouseWheel, mouseTrackingSequences } from "../src/tui/mouse-input.js";
 
 function entry(index: number, text = `history ${index}`): HistoryEntryDto {
   return {
@@ -96,14 +96,14 @@ test("paged history exposes retryable cursor errors without advancing or looping
   assert.ok(history.beginEarlier(), "a PageUp retry should be admitted after an error");
 });
 
-test("terminal selection mode is explicit, bounded, and inactive by default", () => {
-  const mode = new TerminalSelectionMode();
+test("Dock mouse tracking is explicit, bounded, and inactive by default", () => {
+  const mode = new DockMouseTrackingMode();
   assert.equal(mode.active, false);
   assert.deepEqual(mode.render(80), []);
   assert.equal(mode.setActive(true), true);
   assert.equal(mode.setActive(true), false);
   const line = mode.render(43)[0] ?? "";
-  assert.match(line, /terminal selection/u);
+  assert.match(line, /Dock mouse tracking/u);
   assert.ok(visibleWidth(line) <= 43);
   assert.equal(mode.setActive(false), true);
   assert.deepEqual(mode.render(80), []);

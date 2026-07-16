@@ -389,6 +389,19 @@ test("tool failures stay collapsed by default and preserve expandable error deta
   assert.match(conversation.render(60).join("\n"), /expanded failure detail/);
 });
 
+test("subagent tool completion mirrors the closed isError lifecycle instead of claiming done", () => {
+  const conversation = new DockConversation();
+  conversation.apply(event(1, "tool.started", {
+    toolCallId: "subagent-failed", toolName: "subagent", args: { agent: "scout" },
+  }));
+  conversation.apply(event(2, "tool.completed", {
+    toolCallId: "subagent-failed", toolName: "subagent", isError: true, text: "spawn pi ENOENT",
+  }));
+  const projected = conversation.render(80).join("\n");
+  assert.match(projected, /× subagent failed/u);
+  assert.doesNotMatch(projected, /✓ subagent done/u);
+});
+
 test("compaction, replacement, and host-loss notices remain deterministic without queue transcript noise", () => {
   const conversation = new DockConversation();
   conversation.apply(event(1, "queue.changed", { steering: 1, followUp: 2, total: 3 }));

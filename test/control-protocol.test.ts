@@ -9,10 +9,13 @@ import {
   parseControlRequest,
   parseControlResponse,
   parseEventsResult,
+  parseForgetResult,
   parseHostInfoResult,
   parseHistoryResult,
   parseInteractionRespondResult,
+  parseListResult,
   parseModelConfigurationResult,
+  parsePruneResult,
   parseQueueDequeueResult,
   parseReopenResult,
   parseSessionsResult,
@@ -123,6 +126,17 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   assert.throws(() => parseControlRequest({ ...base, type: "command.abort", params: { operationId: "abort-op", instanceId: "i1", force: true } }), /Unexpected field/);
   assert.deepEqual(parseControlRequest({ ...base, type: "queue.dequeue", params: { operationId: "dequeue-op", instanceId: "i1" } }).params, { operationId: "dequeue-op", instanceId: "i1" });
   assert.throws(() => parseControlRequest({ ...base, type: "queue.dequeue", params: { operationId: "dequeue-op", instanceId: "i1", abort: true } }), /Unexpected field/);
+  assert.deepEqual(parseControlRequest({
+    ...base,
+    type: "instance.list",
+    params: { selector: "actionable", cursor: { revision: 7, offset: 100, selector: "actionable" }, limit: 100 },
+  }).params, { selector: "actionable", cursor: { revision: 7, offset: 100, selector: "actionable" }, limit: 100 });
+  assert.throws(() => parseControlRequest({
+    ...base,
+    type: "instance.list",
+    params: { selector: "all", cursor: { revision: 7, offset: 100, selector: "actionable" }, limit: 100 },
+  }), /selector does not match/u);
+  assert.throws(() => parseControlRequest({ ...base, type: "instance.list", params: { selector: "all", limit: 101 } }), /must not exceed 100/u);
 
   const trustedCreate = parseControlRequest({
     ...base,
@@ -146,6 +160,86 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
     type: "instance.create",
     params: { operationId: "create-1", cwd: "/tmp/project", trustChallengeId: "challenge-1", projectTrustDecision: "allow" },
   }), /unsupported value/);
+});
+
+test("instance list pages are revision-bound, bounded, and closed", () => {
+  const instance = validSnapshot();
+  const parsed = parseListResult({
+    instances: [instance],
+    page: {
+      revision: 4,
+      total: 2,
+      hiddenStopped: 3,
+      nextCursor: { revision: 4, offset: 1, selector: "actionable" },
+    },
+  });
+  assert.equal(parsed.instances.length, 1);
+  assert.deepEqual(parsed.page.nextCursor, { revision: 4, offset: 1, selector: "actionable" });
+  assert.throws(() => parseListResult({
+    instances: [instance],
+    page: {
+      revision: 4,
+      total: 2,
+      hiddenStopped: 3,
+      nextCursor: { revision: 5, offset: 1, selector: "actionable" },
+    },
+  }), /inconsistent/u);
+  assert.throws(() => parseListResult({
+    instances: [],
+    page: {
+      revision: 4,
+      total: 2,
+      hiddenStopped: 0,
+      nextCursor: { revision: 4, offset: 0, selector: "all" },
+    },
+  }), /inconsistent/u);
+  assert.throws(() => parseListResult({ instances: [], page: { revision: 4, total: 0, hiddenStopped: 0, extra: true } }), /Unexpected field/u);
+});
+
+test("catalog maintenance requests and receipts are closed and never claim Pi session deletion", () => {
+  const base = { kind: "request", version: 2, requestId: "maintenance-request" };
+  assert.deepEqual(parseControlRequest({
+    ...base,
+    type: "instance.forget",
+    params: { operationId: "forget-1", instanceId: "i1" },
+  }).params, { operationId: "forget-1", instanceId: "i1" });
+  assert.deepEqual(parseControlRequest({
+    ...base,
+    type: "catalog.prune",
+    params: { operationId: "prune-1", selector: "stopped" },
+  }).params, { operationId: "prune-1", selector: "stopped" });
+  assert.throws(() => parseControlRequest({
+    ...base,
+    type: "catalog.prune",
+    params: { operationId: "prune-1", selector: "all" },
+  }), /unsupported value/u);
+
+  assert.deepEqual(parseForgetResult({ receipt: {
+    operationId: "forget-1",
+    forgottenId: "i1",
+    previousLifecycle: "host_lost",
+    piSessionFilesDeleted: 0,
+  } }).receipt, {
+    operationId: "forget-1",
+    forgottenId: "i1",
+    previousLifecycle: "host_lost",
+    piSessionFilesDeleted: 0,
+  });
+  assert.throws(() => parseForgetResult({ receipt: {
+    operationId: "forget-1", forgottenId: "i1", previousLifecycle: "stopped", piSessionFilesDeleted: 1,
+  } }), /must not delete/u);
+
+  assert.deepEqual(parsePruneResult({ receipt: {
+    operationId: "prune-1",
+    selector: "stopped",
+    forgottenIds: ["i1", "i2"],
+    forgottenCount: 2,
+    hasMore: false,
+    piSessionFilesDeleted: 0,
+  } }).receipt.forgottenIds, ["i1", "i2"]);
+  assert.throws(() => parsePruneResult({ receipt: {
+    operationId: "prune-1", selector: "stopped", forgottenIds: ["i1"], forgottenCount: 2, hasMore: false, piSessionFilesDeleted: 0,
+  } }), /must match/u);
 });
 
 test("Stage 5 reopen requests and results are closed and generation-bounded", () => {

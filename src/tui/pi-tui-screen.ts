@@ -27,6 +27,10 @@ interface ScreenSections {
   help?: Component;
   editor: Component;
   historyVersion: () => { revision: number; outputRevision: number };
+  activityPlacement?: {
+    editorRow: number;
+    update: (placement: { screenRow: number; width: number; screenRows: number } | undefined) => void;
+  };
 }
 
 /** Thin pi-tui compositor; all viewport behavior lives in screen-layout.ts. */
@@ -67,6 +71,18 @@ export class FixedDockScreen extends Container {
     const help = this.sections.help?.render(nextWidth) ?? [];
     const editor = this.sections.editor.render(nextWidth);
     const chrome = fitFixedScreenChrome({ height, header, status, help, editor });
+    const placement = this.sections.activityPlacement;
+    if (placement) {
+      const clippedEditorRows = editor.length - chrome.editor.length;
+      const visibleEditorRow = placement.editorRow - clippedEditorRows;
+      placement.update(visibleEditorRow >= 0 && visibleEditorRow < chrome.editor.length
+        ? {
+          screenRow: height - chrome.status.length - chrome.help.length - chrome.editor.length + visibleEditorRow,
+          width: nextWidth,
+          screenRows: height,
+        }
+        : undefined);
+    }
     if (
       this.lastHistoryRows !== undefined
       && chrome.historyRows !== this.lastHistoryRows
@@ -98,7 +114,7 @@ export class FixedDockScreen extends Container {
     if (projection.indicatorVisible) {
       const unseen = projection.unseenUpdates > 0 ? " · new output" : "";
       projectedHistory.push(truncateToWidth(
-        paint.queue(`  ↑ history paused${unseen} · wheel/PageDown/Ctrl+End to live tail`),
+        paint.queue(`  ↑ history paused${unseen} · PageDown/Ctrl+End to live tail`),
         nextWidth,
       ));
     }

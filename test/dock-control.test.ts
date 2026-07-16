@@ -111,7 +111,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["catalog.v1", "core.v2", "events.follow", "extension_ui.v1", "host.info", "instance.catalog", "models.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.commands.v1", "session.core", "session.reopen", "session.tree.v1", "settings.v1", "tools.v1", "tui.projection.v1"]);
+  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "core.v2", "events.follow", "extension_ui.v1", "host.info", "instance.catalog", "models.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.commands.v1", "session.core", "session.reopen", "session.tree.v1", "settings.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -595,7 +595,7 @@ test("SSH TUI replays, resizes, handles input, and detaches without stopping", a
   assert.equal(runtime.disposeCalls, 0);
 });
 
-test("SSH TUI leaves a typed composer quiet when a running instance emits no events", async (context) => {
+test("SSH TUI animates only the fixed activity row while a typed composer stays unchanged", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
   await harness.host.start();
@@ -612,8 +612,10 @@ test("SSH TUI leaves a typed composer quiet when a running instance emits no eve
   assert.equal(pty.timedOut, false, output.slice(-2_000));
   assert.equal(pty.status, 0, output.slice(-2_000));
   assert.equal(pty.draftVisible, true, output.slice(-2_000));
-  assert.equal(pty.stableRenderBatches, 0, `unexpected timer-only synchronized renders (${pty.stableOutputBytes} bytes)`);
-  assert.equal(pty.stableOutputBytes, 0, "a quiet Host and stable composer must produce no terminal output");
+  assert.ok(pty.localizedActivityBatches >= 1, "a silent running Host must retain visible liveness");
+  assert.equal(pty.stableRenderBatches, pty.localizedActivityBatches, "timer output must be localized activity-row writes only");
+  assert.equal(pty.stableDraftRewrites, 0, "activity ticks must not rewrite the composer draft");
+  assert.ok(pty.stableOutputBytes > 0 && pty.stableOutputBytes < 2_000, "localized pulse output must remain bounded");
 });
 
 test("SSH TUI preserves concurrent composer input while transcript deltas remain event-driven", async (context) => {
@@ -707,7 +709,7 @@ test("SSH TUI keeps repeated no-run completion facts out of live and replayed co
   assert.equal(events.some((event) => event.type === "run.started"), false);
 });
 
-test("SSH TUI terminal selection mode pairs mouse tracking without aborting the run", async (context) => {
+test("SSH TUI defaults to terminal selection and pairs opt-in Dock mouse tracking without aborting", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
   await harness.host.start();
@@ -724,9 +726,13 @@ test("SSH TUI terminal selection mode pairs mouse tracking without aborting the 
   const output = Buffer.from(pty.output, "base64").toString("utf8");
   assert.equal(pty.timedOut, false, output.slice(-2_000));
   assert.equal(pty.status, 0, output.slice(-2_000));
-  assert.match(output, /terminal selection/u);
+  assert.match(output, /Dock mouse tracking/u);
+  assert.equal(pty.startupMouseEnableCount, 0, "fresh TUI startup must leave native terminal selection enabled");
+  assert.equal(pty.mouseOverlayPriority, true, "autocomplete Esc must take priority over leaving Dock mouse mode");
 
   const { enable, disable } = mouseTrackingSequences();
+  assert.equal(output.split(enable).length - 1, 3, "startup must not capture ordinary terminal drag");
+  assert.equal(output.split(disable).length - 1, 3, "each explicit opt-in, including detach, must be paired with cleanup");
   let offset = 0;
   for (const sequence of [enable, disable, enable, disable, enable, disable]) {
     const index = output.indexOf(sequence, offset);
@@ -783,10 +789,30 @@ test("SSH TUI Alt+Up restores all pending text while Escape restores then aborts
   assert.equal(restoredPty.status, 0, restoredOutput.slice(-4_000));
   assert.match(restoredOutput, /1\. steer next · urgent steer/);
   assert.match(restoredOutput, /2\. follow-up · later follow-up/);
-  assert.match(restoredOutput, /restored 2 queued messages/);
+  assert.match(restoredOutput, /Restored 2 queued messages to editor/);
   assert.equal(runtime.abortCalls, 0);
   assert.equal(runtime.clearQueueCalls, 1);
   assert.equal((await client.status(created.id)).execution, "running");
+
+  await client.prompt(created.id, "in-flight follow-up", "followUp", "pty-follow-inflight");
+  await client.prompt(created.id, "in-flight steer", "steer", "pty-steer-inflight");
+  const drained = runtime.drainNextQueuedWithoutMessageStart();
+  assert.equal(drained, "in-flight steer");
+  const inFlightPty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", harness.socketPath,
+    "attach", created.id,
+  ], "queue-inflight");
+  const inFlightOutput = Buffer.from(inFlightPty.output, "base64").toString("utf8");
+  assert.equal(inFlightPty.timedOut, false, inFlightOutput.slice(-4_000));
+  assert.equal(inFlightPty.status, 0, inFlightOutput.slice(-4_000));
+  assert.match(inFlightOutput, /cannot be restored[\s\S]*safely/u);
+  assert.equal(inFlightPty.draftVisible, true, "restoration must preserve the draft typed before the receipt arrives");
+  assert.doesNotMatch(inFlightOutput, /Run aborted/u);
+  assert.equal(runtime.abortCalls, 0);
+  assert.equal(runtime.clearQueueCalls, 2);
+  runtime.finishDrainedQueued(drained!);
 
   await client.prompt(created.id, "second follow-up", "followUp", "pty-follow-2");
   await client.prompt(created.id, "second steer", "steer", "pty-steer-2");
@@ -801,7 +827,7 @@ test("SSH TUI Alt+Up restores all pending text while Escape restores then aborts
   assert.equal(abortedPty.status, 0, abortedOutput.slice(-4_000));
   assert.match(abortedOutput, /Run aborted/);
   assert.equal(runtime.abortCalls, 1);
-  assert.equal(runtime.clearQueueCalls, 2);
+  assert.equal(runtime.clearQueueCalls, 3);
   const final = await client.status(created.id);
   assert.equal(final.execution, "idle");
   assert.equal(final.lastRun, "aborted");
@@ -883,7 +909,7 @@ test("SSH TUI model picker filters typed input and history viewport scroll-locks
   assert.equal(historyPty.timedOut, false, historyOutput.slice(-4_000));
   assert.equal(historyPty.status, 0, historyOutput.slice(-4_000));
   assert.match(historyOutput, /historical line 0/, "reverse pagination must reach beyond the recent 200-entry tail");
-  assert.ok(historyOutput.includes("\u001b[?1000h\u001b[?1006h"), "TUI must enable paired mouse tracking");
+  assert.ok(historyOutput.includes("\u001b[?1000h\u001b[?1006h"), "explicit Dock wheel mode must enable paired mouse tracking");
   assert.ok(historyOutput.includes("\u001b[?1006l\u001b[?1000l"), "TUI must restore terminal mouse tracking on detach");
 
   const toolPty = await runPtyTui([
@@ -1669,7 +1695,7 @@ test("ping reports negotiated capabilities and normal hellos require core plus o
         const frame = objectValue(JSON.parse(line) as unknown);
         if (frame.kind === "hello") {
           hellos.push(frame);
-          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 7, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "negotiated-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities, limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200 } }));
+          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 7, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "negotiated-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities, limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
         } else {
           socket.end(encodeJsonLine({ kind: "response", version: 2, requestId: frame.requestId, hostEpoch: "negotiated-epoch", ok: true, result: { state: "ready", host: { pid: 7, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "negotiated-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalog: { schemaVersion: 1, revision: 0, lastReconciledAt: "2026-07-14T00:00:00.000Z" }, paths: { socket: socketPath, state: "memory:test" }, diagnostics: [] } }));
         }
@@ -1684,6 +1710,53 @@ test("ping reports negotiated capabilities and normal hellos require core plus o
   assert.deepEqual(hellos[0]?.requiredCapabilities, ["core.v2", "host.info"]);
 });
 
+test("typed list rejects a non-progressing continuation without issuing another request", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-list-progress-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  let listRequests = 0;
+  const server = createServer((socket) => {
+    const decoder = new JsonLineDecoder();
+    socket.on("data", (chunk: Buffer) => {
+      for (const line of decoder.push(chunk)) {
+        const frame = objectValue(JSON.parse(line) as unknown);
+        if (frame.kind === "hello") {
+          socket.write(encodeJsonLine({
+            kind: "hello_ack",
+            requestId: frame.requestId,
+            version: 2,
+            host: { pid: 8, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "list-progress-epoch", startedAt: "2026-07-14T00:00:00.000Z" },
+            catalogSchemaVersion: 1,
+            capabilities: ["core.v2", "instance.catalog"],
+            limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
+          }));
+        } else {
+          listRequests += 1;
+          socket.end(encodeJsonLine({
+            kind: "response",
+            version: 2,
+            requestId: frame.requestId,
+            hostEpoch: "list-progress-epoch",
+            ok: true,
+            result: {
+              instances: [],
+              page: { revision: 1, total: 2, hiddenStopped: 0, nextCursor: { revision: 1, offset: 0, selector: "all" } },
+            },
+          }));
+        }
+      }
+    });
+  });
+  await listen(server, socketPath);
+  context.after(async () => { await close(server); await rm(directory, { recursive: true, force: true }); });
+
+  await assert.rejects(
+    new DockClient({ socketPath }).list(),
+    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_response",
+  );
+  assert.equal(listRequests, 1);
+});
+
 test("post-send mutation transport loss is effect_unknown with caller operation ID, while reads stay transport errors", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-effect-unknown-"));
   await chmod(directory, 0o700);
@@ -1694,7 +1767,7 @@ test("post-send mutation transport loss is effect_unknown with caller operation 
       for (const line of decoder.push(chunk)) {
         const frame = objectValue(JSON.parse(line) as unknown);
         if (frame.kind === "hello") {
-          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 8, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "effect-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "instance.catalog"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200 } }));
+          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 8, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "effect-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "instance.catalog"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
         } else socket.destroy();
       }
     });
@@ -1720,7 +1793,7 @@ test("post-send mutation timeout is effect_unknown and is not retried", async (c
       for (const line of decoder.push(chunk)) {
         const frame = objectValue(JSON.parse(line) as unknown);
         if (frame.kind === "hello") {
-          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 9, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "timeout-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "instance.catalog"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200 } }));
+          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 9, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "timeout-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "instance.catalog"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
         } else requests += 1;
       }
     });
@@ -1782,7 +1855,7 @@ test("stream callbacks follow initial response order and accept one-step replace
             host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
             catalogSchemaVersion: 1,
             capabilities: ["core.v2", "events.follow"],
-            limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200 },
+            limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
           }));
           continue;
         }
@@ -1841,7 +1914,7 @@ test("TUI projection capability is required before the attach request", async (c
           host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
           catalogSchemaVersion: 1,
           capabilities: ["core.v2", "events.follow", "run.abort.v1"],
-          limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200 },
+          limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
         }));
       }
     });
@@ -2430,13 +2503,17 @@ interface PtyTuiResult {
   resizedBytes: number;
   stableRenderBatches: number;
   stableOutputBytes: number;
+  stableDraftRewrites: number;
+  localizedActivityBatches: number;
+  startupMouseEnableCount: number;
+  mouseOverlayPriority: boolean;
   draftVisible: boolean;
   output: string;
 }
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "editor" | "abort" | "queue-restore" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "model-search" | "scroll" | "history-page" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "mouse-selection" | "extension-dialogs" | "extension-replacement" = "detach",
+  action: "detach" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "model-search" | "scroll" | "history-page" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "mouse-selection" | "extension-dialogs" | "extension-replacement" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {
@@ -2463,6 +2540,10 @@ async function runPtyTui(
         assert.equal(typeof parsed.resizedBytes, "number");
         assert.equal(typeof parsed.stableRenderBatches, "number");
         assert.equal(typeof parsed.stableOutputBytes, "number");
+        assert.equal(typeof parsed.stableDraftRewrites, "number");
+        assert.equal(typeof parsed.localizedActivityBatches, "number");
+        assert.equal(typeof parsed.startupMouseEnableCount, "number");
+        assert.equal(typeof parsed.mouseOverlayPriority, "boolean");
         assert.equal(typeof parsed.draftVisible, "boolean");
         assert.equal(typeof parsed.output, "string");
         resolveRun(parsed as PtyTuiResult);

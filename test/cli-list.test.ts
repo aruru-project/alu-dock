@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   MAX_HUMAN_LIST_INSTANCES,
   renderHumanInstanceList,
+  selectHumanInstanceList,
   terminalDisplayWidth,
 } from "../src/cli-list.js";
 import type { InstanceSnapshot } from "../src/core/managed-instance.js";
@@ -13,6 +14,26 @@ test("human list has an actionable empty state", () => {
     renderHumanInstanceList([], 80),
     "No Alu Dock instances.\nStart one: alu-dock new\n",
   );
+});
+
+test("human list default selection hides only stopped history and reports how to reveal it", () => {
+  const active = instance(1);
+  const lost = instance(2, { lifecycle: "host_lost", execution: "unavailable", ownerHostEpoch: undefined, reopenable: true });
+  const failed = instance(3, { lifecycle: "runtime_error", execution: "unavailable", ownerHostEpoch: undefined });
+  const stopped = instance(4, { lifecycle: "stopped", execution: "unavailable", ownerHostEpoch: undefined });
+  const selected = selectHumanInstanceList([stopped, failed, lost, active], false);
+  assert.deepEqual(selected.instances.map((item) => item.id), [failed.id, lost.id, active.id]);
+  assert.equal(selected.hiddenStopped, 1);
+  const output = renderHumanInstanceList(selected.instances, 80, { mode: "actionable", hiddenStopped: selected.hiddenStopped });
+  assert.match(output, /Alu Dock actionable · 3 · 1 stopped hidden/u);
+  assert.match(output, /History: alu-dock list --all/u);
+  assert.doesNotMatch(output, new RegExp(stopped.id.slice(0, 8), "u"));
+
+  const empty = renderHumanInstanceList([], 43, { mode: "actionable", hiddenStopped: 25 });
+  assert.match(empty, /No actionable Alu Dock instances/u);
+  assert.match(empty, /25 stopped hidden/u);
+  assert.match(empty, /list --all/u);
+  assert.equal(selectHumanInstanceList([stopped], true).hiddenStopped, 0);
 });
 
 test("human list orders decision-relevant state and omits machine-only snapshot fields", () => {

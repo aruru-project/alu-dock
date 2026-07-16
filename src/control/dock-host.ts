@@ -36,8 +36,10 @@ import {
 } from "../core/managed-instance.js";
 import { RuntimeInvalidSettingValueError, RuntimeModelNotFoundError, RuntimeSettingsWriteError, RuntimeUnknownToolError } from "../core/runtime-session.js";
 import {
+  CatalogListCursorStaleError,
   CatalogOperationRecordedError,
   DockRegistry,
+  InstanceForgetRejectedError,
   InstanceNotFoundError,
   InstanceNotReopenableError,
   InstanceUnavailableError,
@@ -52,8 +54,10 @@ import {
   createHelloAck,
   defaultHostIdentity,
   implementedCapabilities,
+  MAX_CATALOG_PRUNE_ITEMS,
   MAX_CONTROL_LINE_BYTES,
   MAX_HISTORY_ITEMS,
+  MAX_INSTANCE_LIST_RESULT_BYTES,
   MAX_REPLAY_EVENTS,
   type ControlEventEnvelope,
   type ControlRequest,
@@ -114,6 +118,7 @@ export class DockHost {
   private faultDrainPromise: Promise<void> | undefined;
   private unsubscribeMutationFault: (() => void) | undefined;
   private unsubscribeRuntimeReopened: (() => void) | undefined;
+  private unsubscribeCatalogRemoval: (() => void) | undefined;
   private readonly faultStartedPromise: Promise<void>;
   private resolveFaultStarted!: () => void;
   private readonly fatalPromise: Promise<HostFatalCompletion>;
@@ -179,6 +184,9 @@ export class DockHost {
         this.state = "running";
         this.unsubscribeMutationFault = this.registry.onMutationFault((fault) => this.enterMutationFault(fault.error));
         this.unsubscribeRuntimeReopened = this.registry.onRuntimeReopened((instanceId) => this.closeStaleAttachStreams(instanceId));
+        this.unsubscribeCatalogRemoval = this.registry.onCatalogRecordsRemoved((instanceIds) => {
+          for (const instanceId of instanceIds) this.closeStaleAttachStreams(instanceId);
+        });
       }
     } catch (error) {
       if (server) await closeServer(server);
@@ -226,6 +234,8 @@ export class DockHost {
       this.unsubscribeMutationFault = undefined;
       this.unsubscribeRuntimeReopened?.();
       this.unsubscribeRuntimeReopened = undefined;
+      this.unsubscribeCatalogRemoval?.();
+      this.unsubscribeCatalogRemoval = undefined;
       this.attachConnections.clear();
       this.socketIdentity = undefined;
       this.state = "stopped";
@@ -376,9 +386,33 @@ export class DockHost {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=await this.registry.create({operationId:request.params.operationId,cwd:request.params.cwd,name:request.params.name,trustChallengeId:request.params.trustChallengeId,projectTrustDecision:request.params.projectTrustDecision});return {instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
-      case "instance.list": this.sendSuccessAndEnd(socket,request.requestId,{instances:this.registry.list().filter(i=>request.params.includeTerminal!==false||i.lifecycle==="active"||i.lifecycle==="stopping")}); return;
+      case "instance.list": this.sendSuccessAndEnd(socket, request.requestId, this.registry.listPage({
+        ...request.params,
+        maxBytes: MAX_INSTANCE_LIST_RESULT_BYTES,
+      })); return;
       case "instance.get": this.sendSuccessAndEnd(socket,request.requestId,{instance:this.registry.getSnapshot(request.params.instanceId)}); return;
       case "instance.attach": await this.attachEventStream(request,socket,setEventUnsubscribe); return;
+      case "instance.forget": {
+        const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, async () => {
+          const forgotten = await this.registry.forget(request.params.operationId, request.params.instanceId);
+          return { receipt: { operationId: request.params.operationId, ...forgotten, piSessionFilesDeleted: 0 as const } };
+        });
+        this.sendSuccessAndEnd(socket, request.requestId, result); return;
+      }
+      case "catalog.prune": {
+        const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, async () => {
+          const pruned = await this.registry.pruneStopped(request.params.operationId, MAX_CATALOG_PRUNE_ITEMS);
+          return { receipt: {
+            operationId: request.params.operationId,
+            selector: request.params.selector,
+            forgottenIds: pruned.forgottenIds,
+            forgottenCount: pruned.forgottenIds.length,
+            hasMore: pruned.hasMore,
+            piSessionFilesDeleted: 0 as const,
+          } };
+        });
+        this.sendSuccessAndEnd(socket, request.requestId, result); return;
+      }
       case "instance.reopen": {
         const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, async () => {
           const reopened = await this.registry.reopen({
@@ -622,7 +656,9 @@ function mapControlError(error: unknown): { code: string; message: string; retry
     return { code: error.code, message: error.message };
   }
   if (error instanceof ProtocolValidationError) return { code: error.code, message: error.message };
+  if (error instanceof CatalogListCursorStaleError) return { code: "cursor_stale", message: error.message, retryable: true };
   if (error instanceof InstanceNotFoundError) return { code: "not_found", message: error.message };
+  if (error instanceof InstanceForgetRejectedError) return { code: "instance_not_terminal", message: error.message };
   if (error instanceof InstanceNotReopenableError) return { code: "instance_not_reopenable", message: error.message };
   if (error instanceof InstanceUnavailableError) {
     const code = error.lifecycle === "host_lost" ? "instance_host_lost"

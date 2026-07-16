@@ -50,6 +50,10 @@ def main() -> int:
     resized_bytes = 0
     stable_render_batches = 0
     stable_output_bytes = 0
+    stable_draft_rewrites = 0
+    localized_activity_batches = 0
+    startup_mouse_enable_count = 0
+    mouse_overlay_priority = False
     draft_visible = False
     timed_out = False
     status = 1
@@ -147,7 +151,10 @@ def main() -> int:
                 time.sleep(0.1)
                 read_available(fd, output, 0.05)
             elif action == "history-page":
-                # Exercise both SGR wheel and PageUp against the app-owned viewport.
+                # Opt into Dock mouse tracking before exercising SGR wheel.
+                os.write(fd, b"\x1bm")
+                time.sleep(0.08)
+                read_available(fd, output, 0.02)
                 for _ in range(6):
                     os.write(fd, b"\x1b[<64;10;5M")
                     time.sleep(0.02)
@@ -165,7 +172,7 @@ def main() -> int:
                     os.write(fd, b"\x1b[1;5F")  # Ctrl+End returns to the retained live tail.
                     time.sleep(0.1)
                     read_available(fd, output, 0.05)
-            elif action == "queue-restore" or action == "queue-abort":
+            elif action in ("queue-restore", "queue-inflight", "queue-abort"):
                 queue_deadline = time.monotonic() + 4
                 while b"steer next" not in output and time.monotonic() < queue_deadline:
                     if read_available(fd, output, 0.05) < 0:
@@ -173,9 +180,21 @@ def main() -> int:
                 if action == "queue-restore":
                     os.write(fd, b"\x1b[1;3A")  # Alt+Up: restore all without aborting.
                     restore_deadline = time.monotonic() + 4
-                    while b"restored 2 queued messages" not in output and time.monotonic() < restore_deadline:
+                    while b"Restored 2 queued messages to editor" not in output and time.monotonic() < restore_deadline:
                         if read_available(fd, output, 0.05) < 0:
                             break
+                elif action == "queue-inflight":
+                    os.write(fd, b"current draft")
+                    draft_deadline = time.monotonic() + 2
+                    while b"current draft" not in output and time.monotonic() < draft_deadline:
+                        if read_available(fd, output, 0.02) < 0:
+                            break
+                    os.write(fd, b"\x1b")  # Escape must not abort while Pi owns an in-flight item.
+                    inflight_deadline = time.monotonic() + 4
+                    while b"run was not aborted" not in output and time.monotonic() < inflight_deadline:
+                        if read_available(fd, output, 0.05) < 0:
+                            break
+                    draft_visible = b"current draft" in output
                 else:
                     os.write(fd, b"\x1b")  # Escape: restore queue, then abort the run.
                     abort_deadline = time.monotonic() + 5
@@ -207,6 +226,8 @@ def main() -> int:
                         break
                 stable_output = bytes(output[stable_start:])
                 stable_render_batches = stable_output.count(b"\x1b[?2026h")
+                localized_activity_batches = stable_output.count(b"\x1b[s")
+                stable_draft_rewrites = stable_output.count(draft)
                 stable_output_bytes = len(stable_output)
                 os.write(fd, b"\x03")  # Clear the draft before detach.
                 time.sleep(0.05)
@@ -235,20 +256,37 @@ def main() -> int:
                 time.sleep(0.05)
                 read_available(fd, output, 0.02)
             elif action == "mouse-selection":
-                os.write(fd, b"\x1bm")  # Alt+M enters terminal selection mode.
+                startup_mouse_enable_count = bytes(output).count(b"\x1b[?1000h\x1b[?1006h")
+                os.write(fd, b"\x1bm")  # Alt+M opts into Dock mouse tracking.
                 mode_deadline = time.monotonic() + 2
-                while b"terminal selection" not in output and time.monotonic() < mode_deadline:
+                while b"Dock mouse tracking" not in output and time.monotonic() < mode_deadline:
                     if read_available(fd, output, 0.02) < 0:
                         break
-                os.write(fd, b"\x1b")  # Esc returns to app-owned wheel mode.
+                os.write(fd, b"/m")  # Autocomplete must consume Esc before mouse mode.
                 time.sleep(0.08)
                 while read_available(fd, output, 0.01) > 0:
                     pass
-                os.write(fd, b"/mouse\r")  # Slash command enters the same mode.
+                disable_sequence = b"\x1b[?1006l\x1b[?1000l"
+                disables_before_overlay_escape = bytes(output).count(disable_sequence)
+                os.write(fd, b"\x1b")
+                time.sleep(0.08)
+                while read_available(fd, output, 0.01) > 0:
+                    pass
+                mouse_overlay_priority = bytes(output).count(disable_sequence) == disables_before_overlay_escape
+                os.write(fd, b"\x03")  # Clear the autocomplete query.
+                os.write(fd, b"\x1b")  # Esc now returns to default terminal selection.
+                time.sleep(0.08)
+                while read_available(fd, output, 0.01) > 0:
+                    pass
+                os.write(fd, b"/mouse\r")  # Slash command opts in again.
                 time.sleep(0.12)
                 while read_available(fd, output, 0.01) > 0:
                     pass
                 os.write(fd, b"\x1bm")  # Alt+M returns without aborting the run.
+                time.sleep(0.08)
+                while read_available(fd, output, 0.01) > 0:
+                    pass
+                os.write(fd, b"/mouse\r")  # Leave tracking active so terminal.stop() must clean it up.
                 time.sleep(0.08)
                 while read_available(fd, output, 0.01) > 0:
                     pass
@@ -341,6 +379,10 @@ def main() -> int:
         "resizedBytes": resized_bytes,
         "stableRenderBatches": stable_render_batches,
         "stableOutputBytes": stable_output_bytes,
+        "stableDraftRewrites": stable_draft_rewrites,
+        "localizedActivityBatches": localized_activity_batches,
+        "startupMouseEnableCount": startup_mouse_enable_count,
+        "mouseOverlayPriority": mouse_overlay_priority,
         "draftVisible": draft_visible,
         "output": base64.b64encode(bytes(output)).decode("ascii"),
     }))

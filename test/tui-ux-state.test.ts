@@ -11,6 +11,7 @@ import {
   reduceRunActivity,
   submittingActivity,
 } from "../src/tui/run-activity.js";
+import { ActivityPulseController } from "../src/tui/activity-pulse.js";
 import { DockActivityLine, DockConversation } from "../src/tui/conversation.js";
 import { FixedDockScreen } from "../src/tui/pi-tui-screen.js";
 import {
@@ -122,6 +123,63 @@ test("activity slot stays fixed above composer without moving a locked history a
     assert.equal(lines.length, 1);
     assert.ok(visibleWidth(lines[0] ?? "") <= width);
   }
+});
+
+test("activity pulse writes only the placed row and has no idle timer", () => {
+  const activity = new DockActivityLine();
+  const writes: Array<{ row: number; line: string; width: number; screenRows: number }> = [];
+  let scheduled: (() => void) | undefined;
+  let schedules = 0;
+  let cancels = 0;
+  const controller = new ActivityPulseController(activity, {
+    writeActivityRow: (row, line, width, screenRows) => { writes.push({ row, line, width, screenRows }); return true; },
+  }, {
+    setInterval: (callback) => {
+      scheduled = callback;
+      schedules += 1;
+      return { unref() {} } as NodeJS.Timeout;
+    },
+    clearInterval: () => { cancels += 1; },
+  });
+  activity.setAnimationListener(() => controller.sync());
+  controller.setPlacement({ screenRow: 10, width: 43, screenRows: 24 });
+  controller.setEnabled(true);
+  assert.equal(schedules, 0, "idle must not schedule animation");
+
+  activity.setActivity({ phase: "waiting", label: "waiting for model" });
+  assert.equal(schedules, 1);
+  scheduled?.();
+  scheduled?.();
+  assert.equal(writes.length, 2);
+  assert.deepEqual(writes.map(({ row, width, screenRows }) => ({ row, width, screenRows })), [
+    { row: 10, width: 43, screenRows: 24 },
+    { row: 10, width: 43, screenRows: 24 },
+  ]);
+  assert.notEqual(writes[0]?.line, writes[1]?.line);
+  assert.ok(writes.every(({ line }) => visibleWidth(line) <= 43));
+
+  activity.setActivity({ phase: "idle", label: "ready" });
+  assert.equal(cancels, 1);
+  assert.equal(controller.pulseNow(), false);
+  assert.equal(writes.length, 2);
+  controller.stop();
+});
+
+test("fixed screen reports the activity physical row without changing chrome height", () => {
+  const conversation = new DockConversation();
+  const placements: Array<{ screenRow: number; width: number; screenRows: number } | undefined> = [];
+  const screen = new FixedDockScreen({ rows: 12 }, {
+    header: { render: () => ["header"], invalidate: () => {} },
+    history: conversation,
+    status: { render: () => ["status one", "status two"], invalidate: () => {} },
+    editor: { render: () => ["activity", "composer"], invalidate: () => {} },
+    historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
+    activityPlacement: { editorRow: 0, update: (placement) => placements.push(placement) },
+  });
+  const lines = screen.render(43);
+  assert.deepEqual(placements.at(-1), { screenRow: 8, width: 43, screenRows: 12 });
+  assert.equal(lines[8], "activity");
+  assert.equal(lines[9], "composer");
 });
 
 test("history viewport auto-follows, locks on page-up, counts unseen output, and returns to bottom", () => {

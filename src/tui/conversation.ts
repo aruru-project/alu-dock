@@ -686,15 +686,33 @@ function projectToolState(tool: ToolProjection, state: ToolState): void {
 export class DockActivityLine implements Component {
   private label = "ready";
   private phase: RunActivityState["phase"] | "status" = "idle";
+  private animationFrame = 0;
+  private animationListener: (() => void) | undefined;
+
+  setAnimationListener(listener: (() => void) | undefined): void {
+    this.animationListener = listener;
+    listener?.();
+  }
 
   setActivity(activity: string | RunActivityState): void {
     const label = safeTerminalLine(typeof activity === "string" ? activity : activity.label);
+    const nextPhase = typeof activity === "string" ? inferActivityPhase(label) : activity.phase;
+    if (nextPhase !== this.phase) this.animationFrame = 0;
     this.label = label;
-    this.phase = typeof activity === "string" ? inferActivityPhase(label) : activity.phase;
+    this.phase = nextPhase;
+    this.animationListener?.();
+  }
+
+  isAnimated(): boolean { return isAnimatedActivityPhase(this.phase); }
+
+  advanceAnimationFrame(): boolean {
+    if (!this.isAnimated()) return false;
+    this.animationFrame = (this.animationFrame + 1) % ACTIVITY_FRAMES.length;
+    return true;
   }
 
   render(width: number): string[] {
-    const symbol = activitySymbolFor(this.phase);
+    const symbol = activitySymbolFor(this.phase, this.animationFrame);
     const line = activityPainter(this.phase)(`${symbol} ${this.label}`);
     return [truncateToWidth(`  ${line}`, Math.max(1, width))];
   }
@@ -857,11 +875,23 @@ function inferActivityPhase(label: string): RunActivityState["phase"] | "status"
   return "status";
 }
 
-function activitySymbolFor(phase: RunActivityState["phase"] | "status"): string {
+const ACTIVITY_FRAMES = ["◐", "◓", "◑", "◒"] as const;
+
+function isAnimatedActivityPhase(phase: RunActivityState["phase"] | "status"): boolean {
+  return phase === "submitting"
+    || phase === "waiting"
+    || phase === "thinking"
+    || phase === "responding"
+    || phase === "tool"
+    || phase === "retry"
+    || phase === "compaction"
+    || phase === "aborting";
+}
+
+function activitySymbolFor(phase: RunActivityState["phase"] | "status", frame: number): string {
+  if (isAnimatedActivityPhase(phase)) return ACTIVITY_FRAMES[frame % ACTIVITY_FRAMES.length] ?? ACTIVITY_FRAMES[0];
   if (phase === "idle") return "○";
   if (phase === "queued") return "◇";
-  if (phase === "tool") return "◆";
-  if (phase === "compaction") return "◈";
   if (phase === "interaction") return "?";
   if (phase === "error" || phase === "disconnected") return "×";
   return "●";

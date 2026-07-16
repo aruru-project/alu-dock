@@ -349,11 +349,21 @@ export class DelayedRuntimeSession implements RuntimeSession {
     }
   }
 
-  consumeNextQueued(): string | undefined {
+  drainNextQueuedWithoutMessageStart(): string | undefined {
     const text = this.steeringQueue.shift() ?? this.followUpQueue.shift();
     if (text === undefined) return undefined;
     this.emitQueue();
+    return text;
+  }
+
+  finishDrainedQueued(text: string): void {
     this.emitUserMessage(text);
+  }
+
+  consumeNextQueued(): string | undefined {
+    const text = this.drainNextQueuedWithoutMessageStart();
+    if (text === undefined) return undefined;
+    this.finishDrainedQueued(text);
     return text;
   }
 

@@ -80,11 +80,31 @@ export class InstanceNotReopenableError extends Error {
   }
 }
 
+export class CatalogListCursorStaleError extends Error {
+  readonly retryable = true;
+
+  constructor(readonly expectedRevision: number, readonly actualRevision: number) {
+    super(`Catalog list cursor revision ${expectedRevision} does not match current revision ${actualRevision}`);
+    this.name = "CatalogListCursorStaleError";
+  }
+}
+
+export class InstanceForgetRejectedError extends Error {
+  constructor(readonly instanceId: string, readonly lifecycle: InstanceLifecycle) {
+    super(`Instance ${instanceId} is ${lifecycle}; only stopped, host_lost, or runtime_error records can be forgotten`);
+    this.name = "InstanceForgetRejectedError";
+  }
+}
+
 export class CatalogOperationRecordedError extends Error {
   constructor(readonly operationId: string) {
     super(`Operation ${operationId} is already recorded by the durable catalog; query instance.list instead of retrying`);
     this.name = "CatalogOperationRecordedError";
   }
+}
+
+function newestInstanceFirst(left: InstanceSnapshot, right: InstanceSnapshot): number {
+  return right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id);
 }
 
 export class DockRegistry {
@@ -94,7 +114,9 @@ export class DockRegistry {
   private readonly catalog: CatalogTransactionCoordinator;
   private readonly catalogStore: CatalogStore | undefined;
   private readonly reopenInFlight = new Map<string, string>();
+  private catalogMaintenancePending = false;
   private readonly runtimeReopenListeners = new Set<(instanceId: string) => void>();
+  private readonly catalogRemovalListeners = new Set<(instanceIds: readonly string[]) => void>();
   private catalogReady: boolean;
   private lastReconciledAtValue: string;
   private startupNormalizedCountValue = 0;
@@ -189,7 +211,7 @@ export class DockRegistry {
   async reopen(input: ReopenRegistryInstanceInput): Promise<{ instance: ManagedInstance; previousLifecycle: "host_lost" | "runtime_error" }> {
     this.assertCatalogReady();
     this.catalog.assertWritable();
-    if (this.reopenInFlight.has(input.instanceId)) throw new InstanceBusyError(input.instanceId, "reopen");
+    if (this.catalogMaintenancePending || this.reopenInFlight.has(input.instanceId)) throw new InstanceBusyError(input.instanceId, "reopen");
     this.reopenInFlight.set(input.instanceId, input.operationId);
     try {
       return await this.performReopen(input);
@@ -278,7 +300,116 @@ export class DockRegistry {
     this.assertCatalogReady();
     return this.catalog.current().instances
       .map((record) => this.instances.get(record.id)?.snapshot() ?? catalogSnapshotFromRecord(record, this.hostEpoch))
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
+      .sort(newestInstanceFirst);
+  }
+
+  listPage(input: {
+    selector: "actionable" | "all";
+    cursor?: { revision: number; offset: number; selector: "actionable" | "all" };
+    limit: number;
+    maxBytes: number;
+  }): {
+    instances: InstanceSnapshot[];
+    page: {
+      revision: number;
+      total: number;
+      hiddenStopped: number;
+      nextCursor?: { revision: number; offset: number; selector: "actionable" | "all" };
+    };
+  } {
+    this.assertCatalogReady();
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1) throw new Error("Catalog list limit must be a positive safe integer");
+    if (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 4_096) throw new Error("Catalog list byte limit must be a bounded positive safe integer");
+    const projection = this.catalog.current();
+    if (input.cursor && input.cursor.revision !== projection.revision) {
+      throw new CatalogListCursorStaleError(input.cursor.revision, projection.revision);
+    }
+    if (input.cursor && input.cursor.selector !== input.selector) throw new Error("Catalog list cursor selector mismatch");
+    const all = projection.instances
+      .map((record) => this.instances.get(record.id)?.snapshot() ?? catalogSnapshotFromRecord(record, this.hostEpoch))
+      .sort(newestInstanceFirst);
+    const hiddenStopped = all.filter((instance) => instance.lifecycle === "stopped").length;
+    const selected = input.selector === "all" ? all : all.filter((instance) => instance.lifecycle !== "stopped");
+    const offset = input.cursor?.offset ?? 0;
+    if (offset > selected.length) throw new CatalogListCursorStaleError(projection.revision, projection.revision);
+    const instances: InstanceSnapshot[] = [];
+    // Reserve space for the result keys and page metadata. The Host separately
+    // keeps the complete response envelope below the control line cap.
+    const snapshotBudget = input.maxBytes - 4_096;
+    let snapshotsBytes = 2; // JSON array brackets
+    for (const candidate of selected.slice(offset, offset + input.limit)) {
+      const candidateBytes = Buffer.byteLength(JSON.stringify(candidate), "utf8");
+      const separatorBytes = instances.length === 0 ? 0 : 1;
+      if (snapshotsBytes + separatorBytes + candidateBytes > snapshotBudget) {
+        if (instances.length === 0) throw new Error(`Catalog instance snapshot exceeds the bounded list result: ${candidate.id}`);
+        break;
+      }
+      instances.push(candidate);
+      snapshotsBytes += separatorBytes + candidateBytes;
+    }
+    const nextOffset = offset + instances.length;
+    const result = {
+      instances,
+      page: {
+        revision: projection.revision,
+        total: selected.length,
+        hiddenStopped: input.selector === "all" ? 0 : hiddenStopped,
+        ...(nextOffset < selected.length
+          ? { nextCursor: { revision: projection.revision, offset: nextOffset, selector: input.selector } }
+          : {}),
+      },
+    };
+    if (Buffer.byteLength(JSON.stringify(result), "utf8") > input.maxBytes) throw new Error("Catalog list result exceeded its serialized byte bound");
+    return result;
+  }
+
+  async forget(operationId: string, instanceId: string): Promise<{ forgottenId: string; previousLifecycle: "stopped" | "host_lost" | "runtime_error" }> {
+    this.assertCatalogReady();
+    this.catalog.assertWritable();
+    if (this.catalogMaintenancePending || this.reopenInFlight.has(instanceId)) throw new InstanceBusyError(instanceId, "forget");
+    this.catalogMaintenancePending = true;
+    try {
+      const removed = await this.catalog.remove(instanceId, {
+        kind: "instance.forget",
+        // The atomic rename may have removed the record even if durability
+        // acknowledgement fails; never invite an automatic destructive retry.
+        effect: "post_effect",
+        operationId,
+        instanceId,
+      }, (record) => {
+        if (record.lifecycle !== "stopped" && record.lifecycle !== "host_lost" && record.lifecycle !== "runtime_error") {
+          throw new InstanceForgetRejectedError(instanceId, record.lifecycle);
+        }
+      });
+      if (!removed) throw new InstanceNotFoundError(instanceId);
+      this.instances.delete(instanceId);
+      this.notifyCatalogRemoval([instanceId]);
+      return { forgottenId: removed.id, previousLifecycle: removed.lifecycle as "stopped" | "host_lost" | "runtime_error" };
+    } finally {
+      this.catalogMaintenancePending = false;
+    }
+  }
+
+  async pruneStopped(operationId: string, limit = 1_000): Promise<{ forgottenIds: string[]; hasMore: boolean }> {
+    this.assertCatalogReady();
+    this.catalog.assertWritable();
+    if (this.catalogMaintenancePending || this.reopenInFlight.size > 0) throw new InstanceBusyError("catalog", "prune stopped records");
+    this.catalogMaintenancePending = true;
+    try {
+      const result = await this.catalog.removeWhere({
+        kind: "catalog.prune",
+        // Treat any commit failure conservatively because the catalog removal
+        // may already be visible after rename.
+        effect: "post_effect",
+        operationId,
+      }, (record) => record.lifecycle === "stopped", limit);
+      const forgottenIds = result.removed.map((record) => record.id);
+      for (const instanceId of forgottenIds) this.instances.delete(instanceId);
+      this.notifyCatalogRemoval(forgottenIds);
+      return { forgottenIds, hasMore: result.hasMore };
+    } finally {
+      this.catalogMaintenancePending = false;
+    }
   }
 
   catalogRevision(): number {
@@ -307,6 +438,11 @@ export class DockRegistry {
     return () => this.runtimeReopenListeners.delete(listener);
   }
 
+  onCatalogRecordsRemoved(listener: (instanceIds: readonly string[]) => void): () => void {
+    this.catalogRemovalListeners.add(listener);
+    return () => this.catalogRemovalListeners.delete(listener);
+  }
+
   async stopAll(): Promise<void> {
     await Promise.allSettled([...this.instances.values()].map((instance) => instance.stop()));
   }
@@ -330,6 +466,14 @@ export class DockRegistry {
   async disposeAllForHostDrain(): Promise<void> {
     this.beginMutationDrain();
     await Promise.allSettled([...this.instances.values()].map((instance) => instance.disposeForHostDrain()));
+  }
+
+  private notifyCatalogRemoval(instanceIds: readonly string[]): void {
+    if (instanceIds.length === 0) return;
+    const immutableIds = Object.freeze([...instanceIds]);
+    for (const listener of this.catalogRemovalListeners) {
+      try { listener(immutableIds); } catch { /* Stream cleanup cannot roll back committed catalog removal. */ }
+    }
   }
 
   private catalogRecord(instanceId: string): CatalogInstanceRecord {

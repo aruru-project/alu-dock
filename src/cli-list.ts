@@ -6,24 +6,58 @@ const MIN_WIDTH = 20;
 const MAX_WIDTH = 160;
 const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
+export interface HumanInstanceListSelection {
+  instances: InstanceSnapshot[];
+  hiddenStopped: number;
+}
+
+export interface HumanInstanceListRenderOptions {
+  mode?: "actionable" | "all";
+  hiddenStopped?: number;
+  totalInstances?: number;
+}
+
+/** Keep the typed catalog complete; only the public human default hides history. */
+export function selectHumanInstanceList(
+  instances: readonly InstanceSnapshot[],
+  includeStopped: boolean,
+): HumanInstanceListSelection {
+  const hiddenStopped = includeStopped ? 0 : instances.filter((instance) => instance.lifecycle === "stopped").length;
+  return {
+    instances: includeStopped ? [...instances] : instances.filter((instance) => instance.lifecycle !== "stopped"),
+    hiddenStopped,
+  };
+}
+
 /** Bounded plain-text catalog projection for the public human CLI. */
 export function renderHumanInstanceList(
   instances: readonly InstanceSnapshot[],
   requestedWidth = DEFAULT_WIDTH,
+  options: HumanInstanceListRenderOptions = {},
 ): string {
   const width = normalizeWidth(requestedWidth);
+  const mode = options.mode ?? "all";
+  const hiddenStopped = Math.max(0, Math.floor(options.hiddenStopped ?? 0));
+  const totalInstances = Math.max(instances.length, Math.floor(options.totalInstances ?? instances.length));
   if (instances.length === 0) {
-    return `${fit("No Alu Dock instances.", width)}\n${fit("Start one: alu-dock new", width)}\n`;
+    if (mode === "actionable" && hiddenStopped > 0) {
+      return `${fit("No actionable Alu Dock instances.", width)}\n${fit(`${hiddenStopped} stopped hidden · alu-dock list --all`, width)}\n${fit("Start one: alu-dock new", width)}\n`;
+    }
+    return `${fit(mode === "actionable" ? "No actionable Alu Dock instances." : "No Alu Dock instances.", width)}\n${fit("Start one: alu-dock new", width)}\n`;
   }
 
   const ordered = [...instances].sort(compareInstances);
   const visible = ordered.slice(0, MAX_HUMAN_LIST_INSTANCES);
-  const lines = [fit(`Alu Dock instances · ${instances.length}`, width), ""];
+  const heading = mode === "actionable"
+    ? `Alu Dock actionable · ${totalInstances}${hiddenStopped > 0 ? ` · ${hiddenStopped} stopped hidden` : ""}`
+    : `Alu Dock instances · ${totalInstances} · all records`;
+  const lines = [fit(heading, width), ""];
   for (const instance of visible) lines.push(...renderInstance(instance, width));
-  const omitted = instances.length - visible.length;
+  const omitted = totalInstances - visible.length;
   if (omitted > 0) {
-    lines.push("", fit(`Showing ${visible.length} of ${instances.length} · ${omitted} older records omitted`, width));
+    lines.push("", fit(`Showing ${visible.length} of ${totalInstances} · ${omitted} older records omitted`, width));
   }
+  if (mode === "actionable" && hiddenStopped > 0) lines.push("", fit("History: alu-dock list --all", width));
   lines.push("", fit(
     width >= 60
       ? "Next: alu-dock attach ID · alu-dock status ID · alu-dock stop ID"

@@ -614,6 +614,28 @@ test("dequeue never restores a message Pi already removed for an in-flight messa
   session.settle();
 });
 
+test("dequeue separates a Pi-drained item from the remaining restorable batch without loss", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  await instance.submit("original");
+  session.startRun();
+  await instance.submit("steer one", "steer", "mixed-steer-one");
+  await instance.submit("follow later", "followUp", "mixed-follow");
+  await instance.submit("steer two", "steer", "mixed-steer-two");
+
+  const consuming = session.beginConsumeNextQueued();
+  assert.equal(consuming, "steer one");
+  const receipt = await instance.dequeue("dequeue-mixed");
+  assert.deepEqual(receipt.inFlight.map((item) => item.operationId), ["mixed-steer-one"]);
+  assert.deepEqual(receipt.restored.map((item) => item.operationId), ["mixed-steer-two", "mixed-follow"]);
+  assert.deepEqual(
+    [...receipt.restored, ...receipt.inFlight].map((item) => item.operationId).sort(),
+    ["mixed-follow", "mixed-steer-one", "mixed-steer-two"].sort(),
+  );
+  session.finishConsumeQueued(consuming!);
+  session.settle();
+});
+
 test("dequeue restores every pending message in steering-first order without aborting the run", async () => {
   const session = new FakeRuntimeSession();
   const instance = createInstance(session);

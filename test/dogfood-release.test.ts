@@ -34,7 +34,7 @@ test("generated launcher pins Node and marks interactive startup as managed", ()
 });
 
 test("generated user unit owns private runtime paths and journal lifecycle", () => {
-  const unit = renderDogfoodUnit({ nodePath: "/opt/node/bin/node", cliPath: "/srv/alu dock/current/dist/src/cli.js" });
+  const unit = renderDogfoodUnit({ nodePath: "/opt/node/bin/node", cliPath: "/srv/alu dock/current/dist/src/cli.js", homePath: "/home/tester" });
   for (const expected of [
     DOGFOOD_GENERATED_MARKER,
     "Type=exec",
@@ -45,6 +45,7 @@ test("generated user unit owns private runtime paths and journal lifecycle", () 
     "TimeoutStopSec=15s",
     "KillMode=mixed",
     "Environment=ALU_DOCK_SOCKET=",
+    'Environment="PATH=/opt/node/bin:/home/tester/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"',
     "RuntimeDirectory=alu-dock",
     "RuntimeDirectoryMode=0700",
     "StateDirectory=alu-dock",
@@ -54,5 +55,9 @@ test("generated user unit owns private runtime paths and journal lifecycle", () 
     "StandardOutput=journal",
   ]) assert.match(unit, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
   assert.doesNotMatch(unit, /NoNewPrivileges|PrivateTmp|host\.log/);
-  assert.match(renderDogfoodUnit({ nodePath: "/opt/node%pin/bin/node", cliPath: "/srv/alu%dock/cli.js" }), /node%%pin.*alu%%dock/u);
+  assert.match(renderDogfoodUnit({ nodePath: "/opt/node%pin/bin/node", cliPath: "/srv/alu%dock/cli.js", homePath: "/home/tester" }), /node%%pin.*alu%%dock/u);
+  assert.throws(
+    () => renderDogfoodUnit({ nodePath: "/opt/node:evil/bin/node", cliPath: "/srv/alu/cli.js", homePath: "/home/tester" }),
+    /cannot contain colons/u,
+  );
 });

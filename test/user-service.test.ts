@@ -45,7 +45,7 @@ function fakeManager(home: string): {
     run,
     probe: async () => {
       if (!state.active) throw new ControlClientError("connection_error", "inactive");
-      return { pid: state.pid, protocolVersion: 2, hostEpoch: state.epoch, capabilities: ["catalog.v1", "core.v2", "service.managed.v1", "session.reopen", "session.tree.v1"] };
+      return { pid: state.pid, protocolVersion: 2, hostEpoch: state.epoch, capabilities: ["catalog.maintenance.v1", "catalog.v1", "core.v2", "service.managed.v1", "session.reopen", "session.tree.v1"] };
     },
     sleep: async () => {},
   });
@@ -65,6 +65,7 @@ test("explicit service lifecycle installs a generated unit and preserves catalog
   assert.match(unit, /StateDirectory=alu-dock/);
   assert.match(unit, /KillMode=mixed/);
   assert.match(unit, /WorkingDirectory=%h/);
+  assert.ok(unit.includes(`PATH=/opt/node/bin:${home}/.local/bin:/usr/local/sbin`));
 
   const restarted = await manager.restart();
   assert.equal(restarted.ready, true);

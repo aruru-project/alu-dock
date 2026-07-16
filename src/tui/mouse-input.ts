@@ -17,13 +17,14 @@ export function parseMouseWheel(data: string): MouseWheelDirection | undefined {
   return undefined;
 }
 
-/** ProcessTerminal with explicitly paired mouse-mode lifecycle for the fixed viewport. */
+/** ProcessTerminal with opt-in mouse reporting and localized activity writes. */
 export class DockProcessTerminal extends ProcessTerminal {
   private mouseTracking = false;
+  private active = false;
 
   override start(onInput: (data: string) => void, onResize: () => void): void {
     super.start(onInput, onResize);
-    this.setMouseTracking(true);
+    this.active = true;
   }
 
   setMouseTracking(enabled: boolean): boolean {
@@ -33,14 +34,32 @@ export class DockProcessTerminal extends ProcessTerminal {
     return true;
   }
 
+  writeActivityRow(screenRow: number, line: string, requestedWidth: number, requestedRows: number): boolean {
+    if (
+      !this.active
+      || !Number.isSafeInteger(screenRow)
+      || screenRow < 0
+      || screenRow >= this.rows
+      || requestedWidth !== this.columns
+      || requestedRows !== this.rows
+    ) return false;
+    const width = Math.max(1, Math.floor(requestedWidth));
+    const fitted = truncateToWidth(line, width);
+    // Erasing the complete row avoids terminal-width padding, whose final cell
+    // can trigger autowrap and perturb the composer below the activity slot.
+    this.write(`\u001b[?2026h\u001b[s\u001b[${screenRow + 1};1H\u001b[2K${fitted}\u001b[u\u001b[?2026l`);
+    return true;
+  }
+
   override stop(): void {
+    this.active = false;
     this.setMouseTracking(false);
     super.stop();
   }
 }
 
-/** Client-local mode that gives ordinary drag gestures back to the terminal. */
-export class TerminalSelectionMode implements Component {
+/** Client-local opt-in mode that gives wheel reporting to Dock history. */
+export class DockMouseTrackingMode implements Component {
   private activeValue = false;
 
   get active(): boolean { return this.activeValue; }
@@ -54,7 +73,7 @@ export class TerminalSelectionMode implements Component {
   render(width: number): string[] {
     if (!this.activeValue) return [];
     return [truncateToWidth(
-      `${paint.queue("  ↖ terminal selection")} ${paint.faint("· drag select · Ctrl+Shift+C copy · Esc/Alt+M return")}`,
+      `${paint.queue("  ↕ Dock mouse tracking")} ${paint.faint("· wheel scrolls history · Shift+drag selects · Esc/Alt+M returns")}`,
       Math.max(1, width),
     )];
   }

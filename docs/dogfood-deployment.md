@@ -38,7 +38,7 @@ alu-dock
 
 - release目录创建完成后不可原地修改；新版本创建新目录；
 - `current` 只通过 same-filesystem临时 symlink + atomic rename切换；
-- launcher和 unit写入部署时 `process.execPath` 的绝对路径，不依赖 user manager的 NVM/PATH；
+- launcher和unit的ExecStart写入部署时`process.execPath`绝对路径，不依赖user manager继承PATH；generated unit另显式构造extension subprocess PATH：Node所在bin、`~/.local/bin`和标准系统bin，既不继承任意shell PATH，也保证同一安装的stock `pi`可被`pi-subagents`发现；
 - artifact至少记录 commit、release ID、构建时间、Node、Dock/Pi版本及 gate摘要；
 - 不从未提交或 dirty working tree发布；不把 repository `node_modules` 直接当作 release依赖；
 - 回滚只切回完整旧 release，不把两个 release的 `dist`/dependencies混用。
@@ -49,7 +49,7 @@ alu-dock
 
 - `Type=exec`；
 - `ExecStart=<absolute-node> /home/luziyi/release/alu-dock/current/dist/src/cli.js serve --managed`；
-- unit显式设置 `ALU_DOCK_MANAGED=1`、清空继承的 `ALU_DOCK_SOCKET`；
+- unit显式设置`ALU_DOCK_MANAGED=1`、清空继承的`ALU_DOCK_SOCKET`，并设置不含空项/相对项的deterministic PATH（部署Node bin优先，其后`~/.local/bin`与标准系统目录）；
 - `RuntimeDirectory=alu-dock`、mode `0700`，socket为 `$RUNTIME_DIRECTORY/dock.sock`、mode `0600`；
 - `StateDirectory=alu-dock`、mode `0700`，durable catalog为 `$STATE_DIRECTORY/catalog.json`、mode `0600`；
 - `WorkingDirectory=%h`、`UMask=0077`、`KillMode=mixed`；
@@ -65,7 +65,7 @@ journalctl --user -u alu-dock.service -n 200 --no-pager
 journalctl --user -u alu-dock.service -f
 ```
 
-User manager整体为 degraded不构成失败；只判定 `alu-dock.service` 本身。Installer检查 linger但不修改机器 policy。应用ready必须同时满足V2 hello、完整managed capability集合（Stage 6 release包括`session.tree.v1`）和hello PID=`MainPID`；restart还要求新`hostEpoch`。
+User manager整体为 degraded不构成失败；只判定 `alu-dock.service` 本身。Installer检查 linger但不修改机器 policy。应用ready必须同时满足V2 hello、完整managed capability集合（包括`catalog.maintenance.v1`与`session.tree.v1`）和hello PID=`MainPID`；restart还要求新`hostEpoch`。
 
 显式管理命令：
 

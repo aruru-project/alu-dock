@@ -7,6 +7,8 @@ const PUBLIC_TOPICS = new Set([
   "list",
   "status",
   "stop",
+  "forget",
+  "prune",
   "service",
   "help",
 ]);
@@ -63,13 +65,15 @@ export function renderCliHelp(topics: readonly string[]): string {
     case "list": return listHelp();
     case "status": return statusHelp();
     case "stop": return stopHelp();
+    case "forget": return forgetHelp();
+    case "prune": return pruneHelp();
     case "help": return helpHelp();
     default: return overviewHelp();
   }
 }
 
 function overviewHelp(): string {
-  return `Alu Dock — managed Pi development terminal for SSH\n\nUsage:\n  alu-dock\n  alu-dock COMMAND [OPTIONS]\n  alu-dock help [COMMAND]\n\nStart here:\n  alu-dock                 Smart-open the current project\n  alu-dock new             Always create a new Pi session\n  alu-dock attach ID       Attach to a known active instance\n\nHuman commands:\n  open      Reuse, choose, reopen, or create for a project\n  new       Create a separate instance and Pi session\n  attach    Attach an interactive TUI without taking Host ownership\n  list      Show known instances and their current state\n  status    Show one instance in detail\n  stop      Explicitly stop and dispose one instance\n  service   Manage the systemd --user Host\n  help      Explore command help\n\nThe managed Host must be running. Ctrl+D detaches the client while the instance\nkeeps running; stop is destructive to the live runtime.\n\nExplore:\n  alu-dock help open\n  alu-dock help service\n  alu-dock COMMAND --help\n`;
+  return `Alu Dock — managed Pi development terminal for SSH\n\nUsage:\n  alu-dock\n  alu-dock COMMAND [OPTIONS]\n  alu-dock help [COMMAND]\n\nStart here:\n  alu-dock                 Smart-open the current project\n  alu-dock new             Always create a new Pi session\n  alu-dock attach ID       Attach to a known active instance\n\nHuman commands:\n  open      Reuse, choose, reopen, or create for a project\n  new       Create a separate instance and Pi session\n  attach    Attach an interactive TUI without taking Host ownership\n  list      Show actionable instances (or all catalog history)\n  status    Show one instance in detail\n  stop      Explicitly stop and dispose one instance\n  forget    Remove one terminal record from the Dock catalog\n  prune     Remove stopped records from the Dock catalog\n  service   Manage the systemd --user Host\n  help      Explore command help\n\nThe managed Host must be running. Ctrl+D detaches the client while the instance\nkeeps running; stop is destructive to the live runtime.\n\nExplore:\n  alu-dock help open\n  alu-dock help service\n  alu-dock COMMAND --help\n`;
 }
 
 function openHelp(): string {
@@ -85,7 +89,7 @@ function attachHelp(): string {
 }
 
 function listHelp(): string {
-  return `alu-dock list — scan known instances\n\nUsage:\n  alu-dock list\n\nShows a bounded human-readable catalog summary, including the short instance ID,\nname/project, lifecycle/execution state and whether persisted context can be\nreopened. Use the ID with open, attach, status, or stop.\n\nExamples:\n  alu-dock list\n  alu-dock status INSTANCE_ID\n\nThis is a read-only request. Typed automation should use DockClient/Protocol V2\nrather than parse terminal text.\n`;
+  return `alu-dock list — scan actionable instances\n\nUsage:\n  alu-dock list [--all]\n\nBy default, shows a bounded human-readable summary of active, stopping,\nhost-lost and runtime-error records while reporting how many stopped records are\nhidden.\nUse --all to include stopped catalog history.\n\nOptions:\n  --all   Include stopped Dock records\n\nExamples:\n  alu-dock list\n  alu-dock list --all\n  alu-dock status INSTANCE_ID\n\nThis is a read-only request. Typed automation should use DockClient/Protocol V2\nrather than parse terminal text.\n`;
 }
 
 function statusHelp(): string {
@@ -94,6 +98,14 @@ function statusHelp(): string {
 
 function stopHelp(): string {
   return `alu-dock stop — dispose one instance\n\nUsage:\n  alu-dock stop INSTANCE_ID\n\nExplicitly stops the Host-owned runtime and marks the catalog record stopped. It\nis not detach and can interrupt a run. No prompt, queue, Promise, interaction or\ntool effect is replayed.\n\nExample:\n  alu-dock stop INSTANCE_ID\n\nTo leave work running, attach and press Ctrl+D instead.\n`;
+}
+
+function forgetHelp(): string {
+  return `alu-dock forget — remove one terminal Dock record\n\nUsage:\n  alu-dock forget INSTANCE_ID\n\nRemoves a stopped, host-lost, or runtime-error record from the Host-owned Dock\ncatalog after an atomic commit. Active and stopping instances are rejected. Pi\nsession files, project files and runtime resources are never deleted. Forgetting\na recoverable record removes only Dock's reopen pointer.\n\nExample:\n  alu-dock forget INSTANCE_ID\n\nMutations are not automatically retried after an ambiguous transport outcome.\n`;
+}
+
+function pruneHelp(): string {
+  return `alu-dock prune — remove stopped Dock history\n\nUsage:\n  alu-dock prune --stopped\n\nAtomically removes a bounded batch of stopped records only. Recoverable\nhost-lost/runtime-error records are preserved. Repeat when the receipt reports\nthat more stopped records remain. Pi session files are never deleted.\n\nExample:\n  alu-dock prune --stopped\n`;
 }
 
 function helpHelp(): string {

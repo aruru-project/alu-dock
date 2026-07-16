@@ -33,7 +33,7 @@ test("independent CLI processes reconnect to one delayed host-owned instance", {
     assert.equal((await lstat(socketPath)).mode & 0o777, 0o600);
 
     const emptyList = await runCliText(socketPath, ["list"]);
-    assert.match(emptyList, /No Alu Dock instances/u);
+    assert.match(emptyList, /No actionable Alu Dock instances/u);
     assert.match(emptyList, /alu-dock new/u);
 
     // Client A creates the instance and exits immediately after the response.
@@ -105,6 +105,20 @@ test("independent CLI processes reconnect to one delayed host-owned instance", {
     assert.equal(objectValue(firstStop.instance).lastRun, "aborted");
     const secondStop = await runCli(socketPath, ["stop", instanceId]);
     assert.equal(objectValue(secondStop.receipt).alreadyStopped, true);
+
+    const actionableAfterStop = await runCliText(socketPath, ["list"]);
+    assert.match(actionableAfterStop, /No actionable Alu Dock instances/u);
+    assert.match(actionableAfterStop, /1 stopped hidden/u);
+    assert.doesNotMatch(actionableAfterStop, new RegExp(instanceId.slice(0, 8), "u"));
+    const fullAfterStop = await runCliText(socketPath, ["list", "--all"]);
+    assert.match(fullAfterStop, new RegExp(instanceId.slice(0, 8), "u"));
+    assert.match(fullAfterStop, /stopped\/unavailable/u);
+    assert.match(await runCliFailure(socketPath, ["list", "--stopped"]), /list accepts only --all/u);
+
+    const forgotten = await runCliText(socketPath, ["forget", instanceId]);
+    assert.match(forgotten, /Forgot Dock record/u);
+    assert.match(forgotten, /Pi session files were not deleted/u);
+    assert.deepEqual(await new DockClient({ socketPath }).list(), []);
 
     const stoppedMessage = waitForMessage(child, (message) => message.type === "stopped");
     const exited = waitForExit(child);

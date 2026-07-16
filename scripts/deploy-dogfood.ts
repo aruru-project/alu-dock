@@ -188,7 +188,7 @@ async function installGeneratedFiles(layout: DogfoodReleaseLayout): Promise<void
   ]);
   const cliPath = join(layout.current, "dist", "src", "cli.js");
   await writeGeneratedFile(layout.launcher, renderDogfoodLauncher(process.execPath, cliPath), 0o755);
-  await writeGeneratedFile(layout.unitFile, renderDogfoodUnit({ nodePath: process.execPath, cliPath }), 0o644);
+  await writeGeneratedFile(layout.unitFile, renderDogfoodUnit({ nodePath: process.execPath, cliPath, homePath: homedir() }), 0o644);
   await ensureLauncherSymlink(layout.userLauncher, layout.launcher);
 }
 

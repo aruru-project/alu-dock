@@ -23,7 +23,7 @@ import {
 
 const READY_TIMEOUT_MS = 15_000;
 const READY_POLL_MS = 100;
-const MANAGED_HOST_CAPABILITIES = ["catalog.v1", "service.managed.v1", "session.reopen", "session.tree.v1"] as const;
+const MANAGED_HOST_CAPABILITIES = ["catalog.maintenance.v1", "catalog.v1", "service.managed.v1", "session.reopen", "session.tree.v1"] as const;
 
 export interface ServiceCommandResult {
   status: number;
@@ -182,7 +182,11 @@ export class UserServiceManager {
       const existing = await readFile(this.unitFile, "utf8");
       if (!existing.startsWith(`${DOGFOOD_GENERATED_MARKER}\n`)) throw new Error(`Refusing to overwrite non-generated unit file: ${this.unitFile}`);
     }
-    const content = renderDogfoodUnit({ nodePath: resolve(this.options.nodePath), cliPath: resolve(this.options.cliPath) });
+    const content = renderDogfoodUnit({
+      nodePath: resolve(this.options.nodePath),
+      cliPath: resolve(this.options.cliPath),
+      homePath: resolve(this.options.home ?? homedir()),
+    });
     const temporary = `${this.unitFile}.tmp-${process.pid}-${randomUUID()}`;
     try {
       await writeFile(temporary, content, { mode: 0o644, flag: "wx" });

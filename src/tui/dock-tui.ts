@@ -22,11 +22,13 @@ import type {
   RuntimeThinkingLevel,
 } from "../core/runtime-session.js";
 import type { ProjectTrustChoice } from "../control/project-trust.js";
+import { ActivityPulseController } from "./activity-pulse.js";
 import { DockActivityLine, DockConversation, DockStatusLine } from "./conversation.js";
 import { ExtensionTextDialog } from "./extension-text-dialog.js";
 import { PagedHistoryWindow, HISTORY_PAGE_SIZE } from "./history-pagination.js";
-import { DockProcessTerminal, parseMouseWheel, TerminalSelectionMode } from "./mouse-input.js";
+import { DockMouseTrackingMode, DockProcessTerminal, parseMouseWheel } from "./mouse-input.js";
 import { PendingQueueTray } from "./pending-queue.js";
+import { prependRestoredQueueText } from "./queue-restoration.js";
 import { FixedDockScreen } from "./pi-tui-screen.js";
 import {
   abortingActivity,
@@ -77,7 +79,7 @@ export async function runDockTui(
   const conversation = new DockConversation();
   const historyWindow = new PagedHistoryWindow();
   const pendingQueue = new PendingQueueTray();
-  const terminalSelection = new TerminalSelectionMode();
+  const dockMouseTracking = new DockMouseTrackingMode();
   const activity = new DockActivityLine();
   let instance = initialInstance;
   const status = new DockStatusLine(instance);
@@ -272,12 +274,12 @@ export async function runDockTui(
       conversation.addNotice(
         "Commands: /settings [KEY VALUE], /model [PROVIDER/MODEL], /thinking [LEVEL], /tools [NAME…], /tree [ENTRY], /fork [USER_ENTRY], /clone, /new [PARENT], /resume [SESSION_FILE], /name NAME, /compact [INSTRUCTIONS], /reload, /resources, /mouse, /follow MESSAGE, /steer MESSAGE, /abort, /status, /stop, /detach",
       );
-      conversation.addNotice("Mouse: wheel scrolls Dock history · Shift+drag selects immediately · Alt+M or /mouse enters ordinary terminal selection · Esc/Alt+M returns.");
+      conversation.addNotice("Mouse: ordinary drag selects in the terminal by default · Alt+M or /mouse enables Dock-owned history wheel · Esc/Alt+M returns to terminal selection.");
       tui.requestRender();
       return;
     }
     if (text === "/mouse") {
-      setTerminalSelectionMode(!terminalSelection.active);
+      setDockMouseTracking(!dockMouseTracking.active);
       return;
     }
     if (text.startsWith("/mouse")) {
@@ -477,9 +479,7 @@ export async function runDockTui(
 
   function restoreMessagesToEditor(messages: readonly PendingMessageDto[]): void {
     if (messages.length === 0) return;
-    const restored = messages.map((message) => message.text).join("\n\n");
-    const current = editor.getText();
-    editor.setText(current.length > 0 ? `${restored}\n\n${current}` : restored);
+    editor.setText(prependRestoredQueueText(editor.getText(), messages));
   }
 
   async function restoreQueue(): Promise<boolean> {
@@ -493,11 +493,13 @@ export async function runDockTui(
       pendingQueue.remove(result.receipt.restored.map((message) => message.queueItemId));
       restoreMessagesToEditor(result.receipt.restored);
       if (result.receipt.inFlight.length > 0) {
-        activity.setActivity(`${result.receipt.inFlight.length} message${result.receipt.inFlight.length === 1 ? " is" : "s are"} entering consumption · retry after it appears`);
+        const count = result.receipt.inFlight.length;
+        conversation.addNotice(`${count} queued message${count === 1 ? " is" : "s are"} already entering Pi consumption and cannot be restored safely; the run was not aborted.`, true);
+        activity.setActivity(`${count} message${count === 1 ? " is" : "s are"} entering consumption · not restored`);
         return false;
       }
       activity.setActivity(result.receipt.restored.length > 0
-        ? `restored ${result.receipt.restored.length} queued message${result.receipt.restored.length === 1 ? "" : "s"}`
+        ? `Restored ${result.receipt.restored.length} queued message${result.receipt.restored.length === 1 ? "" : "s"} to editor`
         : "queue empty");
       return true;
     } catch (error) {
@@ -1482,15 +1484,20 @@ export async function runDockTui(
     terminal.setProgress(terminalProgressEnabled && instance.lifecycle === "active" && instance.execution === "running");
   }
 
-  function setTerminalSelectionMode(active: boolean): void {
-    const modeChanged = terminalSelection.setActive(active);
-    const trackingChanged = terminal.setMouseTracking(!active);
+  function setDockMouseTracking(active: boolean): void {
+    const modeChanged = dockMouseTracking.setActive(active);
+    const trackingChanged = terminal.setMouseTracking(active);
     if (modeChanged || trackingChanged) tui.requestRender();
   }
 
+  const activityPulse = new ActivityPulseController(activity, terminal, {
+    canWrite: () => !exiting && !tui.hasOverlay(),
+  });
+  activity.setAnimationListener(() => activityPulse.sync());
+
   const composerDock = new Container();
   composerDock.addChild(activity);
-  composerDock.addChild(terminalSelection);
+  composerDock.addChild(dockMouseTracking);
   composerDock.addChild(pendingQueue);
   composerDock.addChild(editor);
   screen = new FixedDockScreen(terminal, {
@@ -1499,6 +1506,7 @@ export async function runDockTui(
     status,
     editor: composerDock,
     historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
+    activityPlacement: { editorRow: 0, update: (placement) => activityPulse.setPlacement(placement) },
   });
   tui.addChild(screen);
   tui.setFocus(editor);
@@ -1507,14 +1515,14 @@ export async function runDockTui(
   const removeInputListener = tui.addInputListener((data) => {
     if (tui.hasOverlay()) return undefined;
     if (matchesKey(data, Key.alt("m"))) {
-      setTerminalSelectionMode(!terminalSelection.active);
+      setDockMouseTracking(!dockMouseTracking.active);
       return { consume: true };
     }
-    if (terminalSelection.active && matchesKey(data, "escape")) {
-      setTerminalSelectionMode(false);
+    if (dockMouseTracking.active && matchesKey(data, "escape") && !editor.isShowingAutocomplete()) {
+      setDockMouseTracking(false);
       return { consume: true };
     }
-    const wheel = parseMouseWheel(data);
+    const wheel = dockMouseTracking.active ? parseMouseWheel(data) : undefined;
     if (wheel) {
       const reachedBoundary = wheel === "up" ? screen?.scrollUp(3) : screen?.scrollDown(3);
       if (wheel === "up" && reachedBoundary) void loadEarlierHistory();
@@ -1651,9 +1659,11 @@ export async function runDockTui(
   watchEventSubscription(subscription);
 
   tui.start();
+  activityPulse.setEnabled(true);
   updateTerminalProgress();
   const reason = await exit;
 
+  activityPulse.stop();
   activeExtensionDialog?.closeFromHost();
   removeInputListener();
   process.off("SIGINT", onSigint);
@@ -1786,7 +1796,7 @@ export function commandCatalog(commands: CommandDto[]): Array<{ name: string; de
     { name: "install", description: "show Pi CLI package ownership guidance" },
     { name: "login", description: "show Pi CLI login ownership guidance" },
     { name: "model", description: "choose or set provider/model", argumentHint: "PROVIDER/MODEL" },
-    { name: "mouse", description: "toggle ordinary terminal drag-selection mode" },
+    { name: "mouse", description: "toggle Dock mouse tracking and app-owned history wheel" },
     { name: "name", description: "set or clear the Pi session name", argumentHint: "NAME" },
     { name: "new", description: "create a new Pi session", argumentHint: "PARENT_SESSION" },
     { name: "reload", description: "coherently reload Pi resources" },

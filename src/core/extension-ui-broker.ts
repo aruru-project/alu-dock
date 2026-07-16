@@ -106,7 +106,7 @@ export class ExtensionUiBroker {
   private active: PendingDialog | undefined;
   private controller: ControllerLease | undefined;
   private readonly tombstones = new Map<string, InteractionTombstone>();
-  private readonly unsupportedFeatures = new Set<string>();
+  private unsupportedWarningEmitted = false;
   private mutationTail: Promise<void> = Promise.resolve();
   private suspended = false;
 
@@ -320,10 +320,13 @@ export class ExtensionUiBroker {
   }
 
   unsupported(feature: string): void {
-    const safeFeature = safeLine(feature, 256);
-    if (this.unsupportedFeatures.has(safeFeature)) return;
-    this.unsupportedFeatures.add(safeFeature);
-    this.recordError(`Extension UI ${safeFeature} is unsupported by Alu Dock`);
+    if (this.unsupportedWarningEmitted) return;
+    this.unsupportedWarningEmitted = true;
+    const safeFeature = safeLine(feature, 256) || "visual customization";
+    void this.emit("extension.notification", {
+      level: "warning",
+      message: `Extension visual UI (${safeFeature}) is unavailable in Alu Dock; the visual request was ignored and any tool failure is reported separately`,
+    });
   }
 
   respond(leaseToken: string, interactionId: string, response: InteractionResponse): Promise<InteractionResult> {

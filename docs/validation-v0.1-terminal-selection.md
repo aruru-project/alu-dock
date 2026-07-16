@@ -4,7 +4,9 @@ Date: 2026-07-16
 
 Cards: #160 under the #164 human-acceptance blocker gate
 
-Status: source slice complete; real Windows Terminal selection and consolidated immutable rollout remain deferred to #164
+Status: historical first #160 slice; superseded before acceptance by the final #160 contract in [`validation-v0.1-dogfood-stabilization.md`](validation-v0.1-dogfood-stabilization.md)
+
+> **Superseded contract:** the behavior below records the rejected historical candidate and is not current product guidance. Current startup leaves 1000/1006 disabled for ordinary terminal-native drag selection; only `Alt+M` or `/mouse` enables Dock mouse tracking, and Esc/the same toggle disables it again.
 
 ## Problem
 

@@ -1,4 +1,4 @@
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 export const DOGFOOD_UNIT_NAME = "alu-dock.service";
 export const DOGFOOD_MANAGED_ENV = "ALU_DOCK_MANAGED";
@@ -17,6 +17,7 @@ export interface DogfoodReleaseLayout {
 export interface DogfoodUnitOptions {
   nodePath: string;
   cliPath: string;
+  homePath: string;
 }
 
 export function dogfoodReleaseLayout(home: string, releaseRoot = join(home, "release", "alu-dock")): DogfoodReleaseLayout {
@@ -41,6 +42,8 @@ export function renderDogfoodLauncher(nodePath: string, cliPath: string): string
 export function renderDogfoodUnit(options: DogfoodUnitOptions): string {
   assertSafeAbsolutePath(options.nodePath, "Node");
   assertSafeAbsolutePath(options.cliPath, "CLI");
+  assertSafeAbsolutePath(options.homePath, "Home");
+  const executablePath = managedExecutablePath(options.nodePath, options.homePath);
   return `${DOGFOOD_GENERATED_MARKER}
 [Unit]
 Description=Alu Dock managed Pi SDK host
@@ -54,6 +57,7 @@ ExecStart=${systemdQuote(options.nodePath)} ${systemdQuote(options.cliPath)} ser
 Environment=${DOGFOOD_MANAGED_ENV}=1
 Environment=ALU_DOCK_SOCKET=
 Environment=NODE_ENV=production
+Environment=${systemdQuote(`PATH=${executablePath}`)}
 Restart=on-failure
 RestartSec=2s
 TimeoutStartSec=15s
@@ -79,6 +83,25 @@ export function releaseId(timestamp: Date, commit: string): string {
   if (!Number.isFinite(timestamp.getTime())) throw new Error("Release timestamp must be valid");
   const compactTime = timestamp.toISOString().replace(/[-:]/gu, "").replace(/\.\d{3}Z$/u, "Z");
   return `${compactTime}-${commit.slice(0, 12)}`;
+}
+
+function managedExecutablePath(nodePath: string, homePath: string): string {
+  const entries = [
+    dirname(resolve(nodePath)),
+    join(resolve(homePath), ".local", "bin"),
+    "/usr/local/sbin",
+    "/usr/local/bin",
+    "/usr/sbin",
+    "/usr/bin",
+    "/sbin",
+    "/bin",
+  ];
+  const unique = [...new Set(entries)];
+  for (const entry of unique) {
+    assertSafeAbsolutePath(entry, "Executable PATH entry");
+    if (entry.includes(":")) throw new Error("Executable PATH entries cannot contain colons");
+  }
+  return unique.join(":");
 }
 
 function assertSafeAbsolutePath(path: string, label: string): void {

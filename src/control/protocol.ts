@@ -44,6 +44,10 @@ export const MAX_CAPABILITIES = 128;
 export const MAX_CAPABILITY_CHARS = 128;
 export const MAX_REPLAY_EVENTS = 1_000;
 export const MAX_HISTORY_ITEMS = 200;
+export const MAX_INSTANCE_LIST_ITEMS = 100;
+// Leave ample room for the response envelope under MAX_CONTROL_LINE_BYTES.
+export const MAX_INSTANCE_LIST_RESULT_BYTES = 768 * 1_024;
+export const MAX_CATALOG_PRUNE_ITEMS = 1_000;
 const MAX_TEXT = 8_000;
 const MAX_MESSAGE = 2_048;
 const MAX_COLLECTION = 2_000;
@@ -53,6 +57,7 @@ const MAX_JSON_ARRAY = 200;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 export const IMPLEMENTED_CAPABILITIES = [
+  "catalog.maintenance.v1",
   "catalog.v1",
   "core.v2",
   "events.follow",
@@ -95,7 +100,7 @@ export interface HelloAck {
   host: HostIdentity;
   catalogSchemaVersion: number;
   capabilities: string[];
-  limits: { maxLineBytes: number; maxPromptChars: number; maxReplayEvents: number; maxHistoryItems: number };
+  limits: { maxLineBytes: number; maxPromptChars: number; maxReplayEvents: number; maxHistoryItems: number; maxInstanceListItems: number; maxInstanceListBytes: number };
 }
 export type HelloError = {
   kind: "hello_error";
@@ -113,10 +118,12 @@ type Request<T extends string, P> = { kind: "request"; version: 2; requestId: st
 export type ControlRequest =
   | Request<"host.info", Record<string, never>>
   | Request<"instance.create", { operationId: string; cwd: string; name?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
-  | Request<"instance.list", { includeTerminal?: boolean }>
+  | Request<"instance.list", { selector: "actionable" | "all"; cursor?: InstanceListCursor; limit: number }>
   | Request<"instance.get", { instanceId: string }>
   | Request<"instance.attach", { instanceId: string; since?: EventCursor; follow: boolean; controller: "claim" | "observe" }>
   | Request<"instance.stop", { operationId: string; instanceId: string }>
+  | Request<"instance.forget", { operationId: string; instanceId: string }>
+  | Request<"catalog.prune", { operationId: string; selector: "stopped" }>
   | Request<"instance.reopen", { operationId: string; instanceId: string; sessionFile?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"interaction.respond", { operationId: string; instanceId: string; leaseToken: string; interactionId: string; response: InteractionResponse }>
   | Request<"command.submit", { operationId: string; instanceId: string; message: string; delivery: DeliveryMode }>
@@ -158,7 +165,11 @@ export interface HostInfoResult {
 }
 export interface PingResult { pid: number; protocolVersion: 2; hostEpoch: string; capabilities: string[] }
 export interface CreateResult { instance: InstanceSnapshot }
-export interface ListResult { instances: InstanceSnapshot[] }
+export interface InstanceListCursor { revision: number; offset: number; selector: "actionable" | "all" }
+export interface ListResult {
+  instances: InstanceSnapshot[];
+  page: { revision: number; total: number; hiddenStopped: number; nextCursor?: InstanceListCursor };
+}
 export interface StatusResult { instance: InstanceSnapshot }
 export interface AttachInitialDto {
   instance: InstanceSnapshot;
@@ -175,6 +186,8 @@ export interface PromptResult { receipt: CommandReceipt; instance: InstanceSnaps
 export interface AbortResult { instance: InstanceSnapshot }
 export interface QueueDequeueResult { receipt: QueueDequeueReceipt; instance: InstanceSnapshot }
 export interface StopResult { receipt: { operationId: string; alreadyStopped: boolean; cleanupErrors?: string[] }; instance: InstanceSnapshot }
+export interface ForgetResult { receipt: { operationId: string; forgottenId: string; previousLifecycle: "stopped" | "host_lost" | "runtime_error"; piSessionFilesDeleted: 0 } }
+export interface PruneResult { receipt: { operationId: string; selector: "stopped"; forgottenIds: string[]; forgottenCount: number; hasMore: boolean; piSessionFilesDeleted: 0 } }
 export interface ReopenResult { operationId: string; previousLifecycle: "host_lost" | "runtime_error"; instance: InstanceSnapshot }
 export interface ModelsResult { models: RuntimeModelInfo[]; availableThinkingLevels: RuntimeThinkingLevel[]; instance: InstanceSnapshot }
 export interface ModelConfigurationResult { instance: InstanceSnapshot; settingsWrite: { persisted: true } }
@@ -199,6 +212,7 @@ export type ConfigurationResult = ModelConfigurationResult | ThinkingConfigurati
 export function implementedCapabilities(): string[] { return [...IMPLEMENTED_CAPABILITIES].sort(); }
 export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "host.info") return "host.info";
+  if (type === "instance.forget" || type === "catalog.prune") return "catalog.maintenance.v1";
   if (type === "interaction.respond") return "extension_ui.v1";
   if (type === "instance.reopen") return "session.reopen";
   if (type.startsWith("instance.")) return type === "instance.attach" ? "events.follow" : "instance.catalog";
@@ -224,7 +238,7 @@ export function createHelloAck(requestId: string, host: HostIdentity): HelloAck 
     host,
     catalogSchemaVersion: CATALOG_SCHEMA_VERSION,
     capabilities: implementedCapabilities(),
-    limits: { maxLineBytes: MAX_CONTROL_LINE_BYTES, maxPromptChars: MAX_PROMPT_CHARS, maxReplayEvents: MAX_REPLAY_EVENTS, maxHistoryItems: MAX_HISTORY_ITEMS },
+    limits: { maxLineBytes: MAX_CONTROL_LINE_BYTES, maxPromptChars: MAX_PROMPT_CHARS, maxReplayEvents: MAX_REPLAY_EVENTS, maxHistoryItems: MAX_HISTORY_ITEMS, maxInstanceListItems: MAX_INSTANCE_LIST_ITEMS, maxInstanceListBytes: MAX_INSTANCE_LIST_RESULT_BYTES },
   };
 }
 export function defaultHostIdentity(hostEpoch: string, startedAt: string): HostIdentity {
@@ -275,7 +289,7 @@ export function parseHelloReply(input: unknown, requestId: string): HelloAck {
   exact(value, ["kind", "requestId", "version", "host", "catalogSchemaVersion", "capabilities", "limits"]);
   if (value.requestId !== requestId || value.version !== 2) throw validation("protocol_incompatible", "Peer did not complete the required Protocol V2 hello");
   const limits = object(value.limits, "hello_ack.limits");
-  exact(limits, ["maxLineBytes", "maxPromptChars", "maxReplayEvents", "maxHistoryItems"]);
+  exact(limits, ["maxLineBytes", "maxPromptChars", "maxReplayEvents", "maxHistoryItems", "maxInstanceListItems", "maxInstanceListBytes"]);
   const capabilities = strings(value.capabilities, "hello_ack.capabilities", MAX_CAPABILITIES, MAX_CAPABILITY_CHARS);
   if (new Set(capabilities).size !== capabilities.length) throw validation("invalid_response", "hello_ack.capabilities must be unique");
   const catalogSchemaVersion = unsigned(value.catalogSchemaVersion, "hello_ack.catalogSchemaVersion");
@@ -290,6 +304,8 @@ export function parseHelloReply(input: unknown, requestId: string): HelloAck {
       maxPromptChars: positive(valueOr(limits.maxPromptChars), "limits.maxPromptChars"),
       maxReplayEvents: positive(valueOr(limits.maxReplayEvents), "limits.maxReplayEvents"),
       maxHistoryItems: positive(valueOr(limits.maxHistoryItems), "limits.maxHistoryItems"),
+      maxInstanceListItems: positive(valueOr(limits.maxInstanceListItems), "limits.maxInstanceListItems"),
+      maxInstanceListBytes: positive(valueOr(limits.maxInstanceListBytes), "limits.maxInstanceListBytes"),
     },
   };
 }
@@ -313,7 +329,15 @@ export function parseControlRequest(input: unknown): ControlRequest {
       if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
       return { ...base, type, params: { operationId: operationId(), cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"), name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), trustChallengeId, projectTrustDecision } };
     }
-    case "instance.list": exact(params, ["includeTerminal"], "invalid_request"); return { ...base, type, params: { includeTerminal: optionalBoolean(params.includeTerminal, "params.includeTerminal", "invalid_request") } };
+    case "instance.list": {
+      exact(params, ["selector", "cursor", "limit"], "invalid_request");
+      const selector = enumeration(params.selector, "params.selector", ["actionable", "all"], "invalid_request");
+      const limit = positive(params.limit, "params.limit", "invalid_request");
+      if (limit > MAX_INSTANCE_LIST_ITEMS) throw validation("invalid_request", `params.limit must not exceed ${MAX_INSTANCE_LIST_ITEMS}`);
+      const cursor = params.cursor === undefined ? undefined : parseInstanceListCursor(params.cursor, "params.cursor", "invalid_request");
+      if (cursor && cursor.selector !== selector) throw validation("invalid_request", "params.cursor selector does not match params.selector");
+      return { ...base, type, params: { selector, cursor, limit } };
+    };
     case "instance.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "instance.attach": {
       exact(params, ["instanceId", "since", "follow", "controller"], "invalid_request");
@@ -323,6 +347,8 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { instanceId: instanceId(), since: params.since === undefined ? undefined : parseCursor(params.since, "params.since", "invalid_request"), follow, controller } };
     }
     case "instance.stop": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
+    case "instance.forget": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
+    case "catalog.prune": exact(params, ["operationId", "selector"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), selector: enumeration(params.selector, "params.selector", ["stopped"], "invalid_request") } };
     case "instance.reopen": {
       exact(params, ["operationId", "instanceId", "sessionFile", "trustChallengeId", "projectTrustDecision"], "invalid_request");
       const trustChallengeId = optionalString(params.trustChallengeId, "params.trustChallengeId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
@@ -469,7 +495,20 @@ export function parseHostInfoResult(input: unknown): HostInfoResult {
   return { state: enumeration(value.state, "state", ["ready", "mutation_faulted", "draining"]), host: parseHost(value.host, "host"), catalog: { schemaVersion, revision: unsigned(catalog.revision, "catalog.revision"), lastReconciledAt: timestamp(catalog.lastReconciledAt, "catalog.lastReconciledAt") }, paths: { socket: string(paths.socket, "paths.socket", MAX_CONTROL_CWD_CHARS), state: string(paths.state, "paths.state", MAX_CONTROL_CWD_CHARS) }, diagnostics };
 }
 export function parseCreateResult(input: unknown): CreateResult { const value = object(input, "create result"); exact(value, ["instance"]); return { instance: parseInstance(value.instance, "instance") }; }
-export function parseListResult(input: unknown): ListResult { const value = object(input, "list result"); exact(value, ["instances"]); return { instances: array(value.instances, "instances", MAX_COLLECTION).map((item, index) => parseInstance(item, `instances[${index}]`)) }; }
+export function parseListResult(input: unknown): ListResult {
+  const value = object(input, "list result"); exact(value, ["instances", "page"]);
+  const instances = array(value.instances, "instances", MAX_INSTANCE_LIST_ITEMS).map((item, index) => parseInstance(item, `instances[${index}]`));
+  const page = object(value.page, "page"); exact(page, ["revision", "total", "hiddenStopped", "nextCursor"]);
+  const revision = unsigned(page.revision, "page.revision");
+  const total = unsigned(page.total, "page.total");
+  const hiddenStopped = unsigned(page.hiddenStopped, "page.hiddenStopped");
+  const nextCursor = page.nextCursor === undefined ? undefined : parseInstanceListCursor(page.nextCursor, "page.nextCursor");
+  if (instances.length > total) throw validation("invalid_response", "List page cannot contain more instances than total");
+  if (nextCursor && (instances.length === 0 || nextCursor.revision !== revision || nextCursor.offset < instances.length || nextCursor.offset > total)) {
+    throw validation("invalid_response", "List next cursor is inconsistent with its page");
+  }
+  return { instances, page: { revision, total, hiddenStopped, nextCursor } };
+}
 export function parseStatusResult(input: unknown): StatusResult { const value = object(input, "get result"); exact(value, ["instance"]); return { instance: parseInstance(value.instance, "instance") }; }
 export function parseEventsResult(input: unknown): EventsResult {
   const value = object(input, "attach result"); exact(value, ["instance", "page", "recentHistory", "historyTruncated", "pendingMessages", "controller", "following"]);
@@ -554,6 +593,38 @@ export function parseStopResult(input: unknown): StopResult {
   const instance = parseInstance(value.instance, "instance");
   if (instance.lifecycle !== "stopped") throw validation("invalid_response", "Stop result instance must be stopped");
   return { receipt: { operationId: id(receipt.operationId, "receipt.operationId"), alreadyStopped: boolean(receipt.alreadyStopped, "receipt.alreadyStopped"), cleanupErrors: receipt.cleanupErrors === undefined ? undefined : strings(receipt.cleanupErrors, "receipt.cleanupErrors", 100, MAX_MESSAGE) }, instance };
+}
+export function parseForgetResult(input: unknown): ForgetResult {
+  const value = object(input, "forget result"); exact(value, ["receipt"]);
+  const receipt = object(value.receipt, "receipt");
+  exact(receipt, ["operationId", "forgottenId", "previousLifecycle", "piSessionFilesDeleted"]);
+  const piSessionFilesDeleted = unsigned(receipt.piSessionFilesDeleted, "receipt.piSessionFilesDeleted");
+  if (piSessionFilesDeleted !== 0) throw validation("invalid_response", "Forget must not delete Pi session files");
+  return { receipt: {
+    operationId: id(receipt.operationId, "receipt.operationId"),
+    forgottenId: id(receipt.forgottenId, "receipt.forgottenId"),
+    previousLifecycle: enumeration(receipt.previousLifecycle, "receipt.previousLifecycle", ["stopped", "host_lost", "runtime_error"]),
+    piSessionFilesDeleted: 0,
+  } };
+}
+export function parsePruneResult(input: unknown): PruneResult {
+  const value = object(input, "prune result"); exact(value, ["receipt"]);
+  const receipt = object(value.receipt, "receipt");
+  exact(receipt, ["operationId", "selector", "forgottenIds", "forgottenCount", "hasMore", "piSessionFilesDeleted"]);
+  const forgottenIds = strings(receipt.forgottenIds, "receipt.forgottenIds", MAX_CATALOG_PRUNE_ITEMS, MAX_INSTANCE_ID_CHARS);
+  if (new Set(forgottenIds).size !== forgottenIds.length) throw validation("invalid_response", "Prune forgotten IDs must be unique");
+  const forgottenCount = unsigned(receipt.forgottenCount, "receipt.forgottenCount");
+  if (forgottenCount !== forgottenIds.length) throw validation("invalid_response", "Prune forgottenCount must match forgottenIds");
+  const piSessionFilesDeleted = unsigned(receipt.piSessionFilesDeleted, "receipt.piSessionFilesDeleted");
+  if (piSessionFilesDeleted !== 0) throw validation("invalid_response", "Prune must not delete Pi session files");
+  return { receipt: {
+    operationId: id(receipt.operationId, "receipt.operationId"),
+    selector: enumeration(receipt.selector, "receipt.selector", ["stopped"]),
+    forgottenIds,
+    forgottenCount,
+    hasMore: boolean(receipt.hasMore, "receipt.hasMore"),
+    piSessionFilesDeleted: 0,
+  } };
 }
 export function parseModelsResult(input: unknown): ModelsResult {
   const value = object(input, "models result"); exact(value, ["models", "availableThinkingLevels", "instance"]);
@@ -744,6 +815,14 @@ function parseHost(input: unknown, field: string): HostIdentity {
 function parseCursor(input: unknown, field: string, code = "invalid_response"): EventCursor {
   const cursor = object(input, field, code); exact(cursor, ["hostEpoch", "instanceId", "runtimeGeneration", "sequence"], code);
   return { hostEpoch: id(cursor.hostEpoch, `${field}.hostEpoch`, code), instanceId: id(cursor.instanceId, `${field}.instanceId`, code), runtimeGeneration: positive(cursor.runtimeGeneration, `${field}.runtimeGeneration`, code), sequence: unsigned(cursor.sequence, `${field}.sequence`, code) };
+}
+function parseInstanceListCursor(input: unknown, field: string, code = "invalid_response"): InstanceListCursor {
+  const cursor = object(input, field, code); exact(cursor, ["revision", "offset", "selector"], code);
+  return {
+    revision: unsigned(cursor.revision, `${field}.revision`, code),
+    offset: unsigned(cursor.offset, `${field}.offset`, code),
+    selector: enumeration(cursor.selector, `${field}.selector`, ["actionable", "all"], code),
+  };
 }
 function parseExecutor(input: unknown, field: string): ExecutorIdentity {
   const executor = object(input, field); exact(executor, ["kind", "version", "piSessionId", "sessionFile", "model", "thinkingLevel"]);

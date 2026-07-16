@@ -10,6 +10,7 @@ import { DOCK_VERSION } from "../version.js";
 import { encodeJsonLine, JsonLineDecoder } from "./json-lines.js";
 import {
   CONTROL_PROTOCOL_VERSION,
+  MAX_INSTANCE_LIST_ITEMS,
   type Capability,
   type ClientHello,
   type ControlRequest,
@@ -20,6 +21,7 @@ import {
   parseControlResponse,
   parseCreateResult,
   parseEventsResult,
+  parseForgetResult,
   parseHelloReply,
   parseHostInfoResult,
   parseHistoryResult,
@@ -28,6 +30,7 @@ import {
   parseListResult,
   parseModelsResult,
   parsePromptResult,
+  parsePruneResult,
   parseQueueDequeueResult,
   parseReopenResult,
   parseSessionsResult,
@@ -51,13 +54,17 @@ import {
   type ModelConfigurationResult,
   type ThinkingConfigurationResult,
   type EventsResult,
+  type ForgetResult,
   type HelloAck,
   type HostInfoResult,
   type HistoryResult,
   type InteractionRespondResult,
+  type InstanceListCursor,
+  type ListResult,
   type ModelsResult,
   type PingResult,
   type PromptResult,
+  type PruneResult,
   type QueueDequeueResult,
   type ReopenResult,
   type SessionsResult,
@@ -97,8 +104,37 @@ export class DockClient {
   async hostInfo():Promise<HostInfoResult>{return this.request("host.info",{},"host.info",parseHostInfoResult);}
   async ping():Promise<PingResult>{let negotiated:string[]=[];const info=await this.request("host.info",{},"host.info",parseHostInfoResult,(ack)=>{negotiated=[...ack.capabilities];});return {pid:info.host.pid,protocolVersion:2,hostEpoch:info.host.hostEpoch,capabilities:negotiated};}
   async create(cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<InstanceSnapshot>{const result=await this.request("instance.create",{operationId,cwd,name,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"instance.catalog",parseCreateResult);return result.instance;}
-  async list():Promise<InstanceSnapshot[]>{return (await this.request("instance.list",{includeTerminal:true},"instance.catalog",parseListResult)).instances;}
+  async list(selector: "actionable" | "all" = "all"): Promise<InstanceSnapshot[]> {
+    const instances: InstanceSnapshot[] = [];
+    let cursor: InstanceListCursor | undefined;
+    let pageIdentity: { revision: number; total: number; hiddenStopped: number } | undefined;
+    do {
+      const result = await this.listPage(selector, cursor);
+      const identity = {
+        revision: result.page.revision,
+        total: result.page.total,
+        hiddenStopped: result.page.hiddenStopped,
+      };
+      if (pageIdentity && (
+        identity.revision !== pageIdentity.revision
+        || identity.total !== pageIdentity.total
+        || identity.hiddenStopped !== pageIdentity.hiddenStopped
+      )) throw new ControlClientError("invalid_response", "Instance list page identity changed within one revision-bound scan");
+      pageIdentity ??= identity;
+      instances.push(...result.instances);
+      cursor = result.page.nextCursor;
+    } while (cursor);
+    if (pageIdentity && instances.length !== pageIdentity.total) {
+      throw new ControlClientError("invalid_response", "Instance list scan does not match the declared total");
+    }
+    return instances;
+  }
+  listPage(selector: "actionable" | "all", cursor?: InstanceListCursor, limit = MAX_INSTANCE_LIST_ITEMS): Promise<ListResult> {
+    return this.request("instance.list", { selector, cursor, limit }, "instance.catalog", parseListResult);
+  }
   async status(instanceId:string):Promise<InstanceSnapshot>{return (await this.request("instance.get",{instanceId},"instance.catalog",parseStatusResult)).instance;}
+  forget(instanceId:string,operationId=this.createRequestId()):Promise<ForgetResult>{return this.request("instance.forget",{operationId,instanceId},"catalog.maintenance.v1",parseForgetResult);}
+  pruneStopped(operationId=this.createRequestId()):Promise<PruneResult>{return this.request("catalog.prune",{operationId,selector:"stopped"},"catalog.maintenance.v1",parsePruneResult);}
   reopen(instanceId:string,operationId=this.createRequestId(),sessionFile?:string,trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<ReopenResult>{return this.request("instance.reopen",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.reopen",parseReopenResult);}
   events(instanceId:string,since?:EventCursor):Promise<EventsResult>{return this.request("instance.attach",{instanceId,since,follow:false,controller:"observe"},"events.follow",parseEventsResult);}
   prompt(instanceId:string,message:string,delivery:DeliveryMode="auto",operationId=this.createRequestId()):Promise<PromptResult>{return this.request("command.submit",{operationId,instanceId,message,delivery},"session.core",parsePromptResult);}
@@ -238,6 +274,25 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
   if(type==="instance.attach"){
     const page=record.page as {earliest?:EventCursor;latest?:EventCursor}|undefined;
     if(!page||page.earliest?.hostEpoch!==hostEpoch||page.latest?.hostEpoch!==hostEpoch)throw new ProtocolValidationError("invalid_response","Attach cursors do not match negotiated Host epoch");
+  }
+  if(type==="instance.list"){
+    const requested=params as Extract<ControlRequest,{type:"instance.list"}>["params"];
+    const page=record.page as ListResult["page"];
+    const offset=requested.cursor?.offset??0;
+    const expectedNext=offset+snapshots.length;
+    if(requested.cursor&&page.revision!==requested.cursor.revision)throw new ProtocolValidationError("invalid_response","List page revision does not match its request cursor");
+    if(snapshots.length>requested.limit)throw new ProtocolValidationError("invalid_response","List page exceeds the requested limit");
+    if(page.nextCursor){
+      if(snapshots.length===0||expectedNext<=offset||page.nextCursor.selector!==requested.selector||page.nextCursor.revision!==page.revision||page.nextCursor.offset!==expectedNext||expectedNext>=page.total)throw new ProtocolValidationError("invalid_response","List continuation cursor is inconsistent with the request");
+    }else if(expectedNext!==page.total){
+      throw new ProtocolValidationError("invalid_response","Final list page does not cover the declared total");
+    }
+    if(requested.selector==="all"&&page.hiddenStopped!==0)throw new ProtocolValidationError("invalid_response","All-record list must not report hidden stopped records");
+  }
+  if(type==="instance.forget"){
+    const requested=(params as Extract<ControlRequest,{type:"instance.forget"}>["params"]);
+    const receipt=record.receipt as {forgottenId?:unknown}|undefined;
+    if(receipt?.forgottenId!==requested.instanceId)throw new ProtocolValidationError("invalid_response","Forget result does not match requested instanceId");
   }
   if(type==="interaction.respond"){
     const requested=(params as Extract<ControlRequest,{type:"interaction.respond"}>["params"]);

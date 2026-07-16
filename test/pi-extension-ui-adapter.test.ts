@@ -43,9 +43,15 @@ test("Pi extension UI adapter exposes bounded dialogs and fail-closed unsupporte
   });
   assert.equal(customResult, undefined);
   assert.equal(factoryCalled, false);
-  assert.equal(events.some((event) => event.type === "extension.error" && /custom components/.test(String((event.data as { error?: string }).error))), true);
+  const degradationWarnings = events.filter((event) => event.type === "extension.notification"
+    && (event.data as { level?: string }).level === "warning"
+    && /visual request was ignored/u.test(String((event.data as { message?: string }).message)));
+  assert.equal(degradationWarnings.length, 1);
+  assert.match(String((degradationWarnings[0]?.data as { message?: string }).message), /custom components/u);
 
   generation = 2;
   assert.equal(ui.getEditorText(), "");
+  assert.equal(events.filter((event) => event.type === "extension.notification"
+    && /visual request was ignored/u.test(String((event.data as { message?: string }).message))).length, 1);
   assert.deepEqual(ui.setTheme("dark"), { success: false, error: "Theme switching is unsupported by Alu Dock" });
 });

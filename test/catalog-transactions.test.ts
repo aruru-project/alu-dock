@@ -113,6 +113,82 @@ test("post-effect invariant failure faults before an invalid candidate reaches t
   assert.equal(port.calls.length, 1);
 });
 
+test("catalog removal publishes only after commit and pre-effect failure keeps records and Host writable", async () => {
+  const port = new ScriptedCatalogCommitPort();
+  const catalog = new CatalogTransactionCoordinator(port);
+  const stopped = (id: string, createdAt: string): CatalogInstanceRecord => record(id, {
+    lifecycle: "stopped",
+    execution: "unavailable",
+    ownerHostEpoch: undefined,
+    createdAt,
+    updatedAt: createdAt,
+  });
+  await catalog.create(stopped("one", "2026-07-14T00:00:00.000Z"), { kind: "create", effect: "rollback_contained" });
+  await catalog.create(stopped("two", "2026-07-14T00:00:01.000Z"), { kind: "create", effect: "rollback_contained" });
+
+  const gate = port.gateAt(3);
+  const removing = catalog.remove("one", { kind: "instance.forget", effect: "pre_effect", operationId: "forget-one" }, () => {});
+  await gate.entered;
+  assert.deepEqual(catalog.current().instances.map((item) => item.id), ["one", "two"], "removal must not publish before commit");
+  gate.release();
+  assert.equal((await removing)?.id, "one");
+  assert.deepEqual(catalog.current().instances.map((item) => item.id), ["two"]);
+
+  port.failAt(4);
+  await assert.rejects(
+    catalog.remove("two", { kind: "instance.forget", effect: "pre_effect", operationId: "forget-two" }, () => {}),
+    CatalogWriteError,
+  );
+  assert.equal(catalog.health, "healthy");
+  assert.deepEqual(catalog.current().instances.map((item) => item.id), ["two"]);
+
+  const missing = await catalog.remove("missing", { kind: "instance.forget", effect: "pre_effect" }, () => {});
+  assert.equal(missing, undefined);
+  assert.equal(catalog.revision, 3, "missing removal must not invent a catalog commit");
+  await catalog.create(stopped("three", "2026-07-14T00:00:02.000Z"), { kind: "create", effect: "rollback_contained" });
+  const pruned = await catalog.removeWhere(
+    { kind: "catalog.prune", effect: "pre_effect", operationId: "prune-one" },
+    (item) => item.lifecycle === "stopped",
+    1,
+  );
+  assert.deepEqual(pruned.removed.map((item) => item.id), ["two"]);
+  assert.equal(pruned.hasMore, true);
+  assert.deepEqual(catalog.current().instances.map((item) => item.id), ["three"]);
+});
+
+test("catalog removal commit ambiguity faults mutations with the caller operation ID", async () => {
+  const port = new ScriptedCatalogCommitPort();
+  const catalog = new CatalogTransactionCoordinator(port);
+  await catalog.create(record("terminal", {
+    lifecycle: "stopped",
+    execution: "unavailable",
+    ownerHostEpoch: undefined,
+  }), { kind: "create", effect: "rollback_contained" });
+  port.failAt(2);
+
+  await assert.rejects(
+    catalog.remove("terminal", {
+      kind: "instance.forget",
+      effect: "post_effect",
+      operationId: "forget-ambiguous",
+    }, () => {}),
+    (error: unknown) => error instanceof CatalogEffectUnknownError
+      && error.context.operationId === "forget-ambiguous",
+  );
+  assert.equal(catalog.health, "mutation_faulted");
+  assert.deepEqual(catalog.current().instances.map((item) => item.id), ["terminal"]);
+
+  await assert.rejects(
+    catalog.removeWhere({
+      kind: "catalog.prune",
+      effect: "post_effect",
+      operationId: "prune-after-fault",
+    }, (item) => item.lifecycle === "stopped", 1),
+    (error: unknown) => error instanceof CatalogEffectUnknownError
+      && error.context.operationId === "prune-after-fault",
+  );
+});
+
 test("catalog and wire facts share lifecycle invariants including active failed quiescence", () => {
   assert.doesNotThrow(() => validateCatalogRecord(record("failed", { execution: "failed", lastRun: "failed" })));
   assert.throws(() => validateCatalogRecord(record("bad-owner", { ownerHostEpoch: undefined })), /owner Host epoch/);

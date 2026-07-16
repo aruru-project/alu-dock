@@ -1,6 +1,6 @@
 # Alu Dock 本机控制协议 V2
 
-状态：阶段 0 冻结设计；阶段 1–6及V0.1 dogfood queue control已按 capability 实施
+状态：阶段0冻结设计；阶段1–6及V0.1 dogfood queue/catalog maintenance已按capability实施
 
 传输：当前 Unix 用户私有 AF_UNIX socket + UTF-8 JSONL
 
@@ -39,6 +39,7 @@ Capability 只在实现和对应 gate 都通过后才 advertised：
 | 5 | `service.managed.v1`、`catalog.v1`、`session.reopen` |
 | 6 | `session.tree.v1` |
 | V0.1 dogfood #154 | `queue.control.v1`（ephemeral pending projection与显式dequeue/restore） |
+| V0.1 dogfood #169 | `catalog.maintenance.v1`（显式forget/prune；revision-bound list继续属于`instance.catalog`） |
 
 默认 TUI hello 只 required `core.v2` 与其马上要调用的最小 capability；不能在阶段 1 要求阶段 5 的 `session.reopen`。每个 command 在调用前再次检查自己的 capability。
 
@@ -59,6 +60,8 @@ Capability 只在实现和对应 gate 都通过后才 advertised：
 | select options / option text | 200 / 8,000 chars |
 | replay events | 1,000 |
 | history/tree page items | 200 |
+| instance catalog page items | 100 |
+| catalog prune receipt IDs | 1,000 |
 | models/tools/resources/commands per result | 2,000 |
 | extension status keys | 64 per runtime generation |
 | queued dialogs | 16 per instance |
@@ -78,7 +81,7 @@ Client hello：
 Ready success（capability 列表只是当前实现集合）：
 
 ```json
-{"kind":"hello_ack","requestId":"h1","version":2,"host":{"pid":123,"dockVersion":"0.1.0","piSdkVersion":"0.80.6","hostEpoch":"uuid","startedAt":"2026-07-14T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["catalog.v1","core.v2","events.follow","extension_ui.v1","host.info","instance.catalog","models.v1","queue.control.v1","resources.v1","run.abort.v1","service.managed.v1","session.commands.v1","session.core","session.reopen","session.tree.v1","settings.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200}}
+{"kind":"hello_ack","requestId":"h1","version":2,"host":{"pid":123,"dockVersion":"0.1.0","piSdkVersion":"0.80.6","hostEpoch":"uuid","startedAt":"2026-07-14T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["catalog.maintenance.v1","catalog.v1","core.v2","events.follow","extension_ui.v1","host.info","instance.catalog","models.v1","queue.control.v1","resources.v1","run.abort.v1","service.managed.v1","session.commands.v1","session.core","session.reopen","session.tree.v1","settings.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200,"maxInstanceListItems":100,"maxInstanceListBytes":786432}}
 ```
 
 任何 hello 失败都使用 closed `hello_error`，随后关闭：
@@ -100,7 +103,7 @@ Capabilities 是行为门禁，不是装饰 metadata。Host 返回排序、去�
 Request：
 
 ```json
-{"kind":"request","version":2,"requestId":"r1","type":"instance.list","params":{"includeTerminal":true}}
+{"kind":"request","version":2,"requestId":"r1","type":"instance.list","params":{"selector":"actionable","limit":100}}
 ```
 
 Response：
@@ -271,16 +274,18 @@ interface HistoryEntryDto {
 
 ## 7. Closed request/result surface
 
-每个 mutation params 都含 client 生成的 `operationId`。它用于关联、same-host dedup 和事后查询，不代表跨 Host exactly-once。下表是 closed schema 的规范简写：未另标注的 ID/path/name/message/text 字段均为受第 3 节 bounds 的 `string`；`?` 表示 optional；`instance` 表示 `InstanceSnapshotV2`；`host` 表示 `HostDto`；`projectTrustDecision` 表示上文 enum。Bare `cancelled/summarize/replaceInstructions/includeTerminal/follow` 为 boolean，数值字段必须是 safe integer。除表中字段外一律拒绝。
+每个 mutation params 都含 client 生成的 `operationId`。它用于关联、same-host dedup 和事后查询，不代表跨 Host exactly-once。下表是 closed schema 的规范简写：未另标注的 ID/path/name/message/text 字段均为受第 3 节 bounds 的 `string`；`?` 表示 optional；`instance` 表示 `InstanceSnapshotV2`；`host` 表示 `HostDto`；`projectTrustDecision` 表示上文 enum。Bare `cancelled/summarize/replaceInstructions/follow/hasMore`为boolean，数值字段必须是safe integer。除表中字段外一律拒绝。
 
 | Request type | Capability | Closed params | Success result |
 |---|---|---|---|
 | `host.info` | `host.info` | `{}` | `{state:"ready"|"mutation_faulted"|"draining", host, catalog:{schemaVersion,revision,lastReconciledAt}, paths:{socket,state}, diagnostics:DiagnosticDto[]}` |
 | `instance.create` | `instance.catalog` | `{operationId,cwd,name?,trustChallengeId?,projectTrustDecision?}` | `{instance:InstanceSnapshotV2}` |
-| `instance.list` | `instance.catalog` | `{includeTerminal?:boolean}` | `{instances:InstanceSnapshotV2[]}` |
+| `instance.list` | `instance.catalog` | `{selector:"actionable"|"all",cursor?:{revision,offset,selector},limit:1..100}` | `{instances:InstanceSnapshotV2[],page:{revision,total,hiddenStopped,nextCursor?}}` |
 | `instance.get` | `instance.catalog` | `{instanceId}` | `{instance:InstanceSnapshotV2}` |
 | `instance.attach` | `events.follow` | `{instanceId,since?:EventCursor,follow:boolean,controller:"claim"|"observe"}` | `AttachInitialDto`，follow=true 后转 event stream |
 | `instance.stop` | `instance.catalog` | `{operationId,instanceId}` | `{receipt:{operationId,alreadyStopped,cleanupErrors?:string[]},instance}` |
+| `instance.forget` | `catalog.maintenance.v1` | `{operationId,instanceId}` | `{receipt:{operationId,forgottenId,previousLifecycle:"stopped"|"host_lost"|"runtime_error",piSessionFilesDeleted:0}}` |
+| `catalog.prune` | `catalog.maintenance.v1` | `{operationId,selector:"stopped"}` | `{receipt:{operationId,selector,forgottenIds,forgottenCount,hasMore,piSessionFilesDeleted:0}}` |
 | `instance.reopen` | `session.reopen` | `{operationId,instanceId,sessionFile?,trustChallengeId?,projectTrustDecision?}` | `{operationId,previousLifecycle:"host_lost"|"runtime_error",instance}` |
 | `command.submit` | `session.core` | `{operationId,instanceId,message,delivery:Delivery}` | `{receipt:CommandReceiptDto,instance}` |
 | `command.abort` | `run.abort.v1` | `{operationId,instanceId}` | `{instance}`；取消当前 agent/retry/compaction，实例保持可复用 |
@@ -306,6 +311,8 @@ interface HistoryEntryDto {
 | `session.fork` | `session.tree.v1` | `{operationId,instanceId,entryId}` | `{cancelled:true,instance}`或`{cancelled:false,selectedText:string,instance}`；固定 fork-before user message |
 | `session.clone` | `session.tree.v1` | `{operationId,instanceId,entryId}` | `{cancelled,instance}`；实现为 fork-at |
 | `interaction.respond` | `extension_ui.v1` | `{operationId,instanceId,leaseToken,interactionId,response:InteractionResponse}` | `{interactionId,state:"resolved"|"already_resolved"}` |
+
+`instance.list`以catalog revision绑定分页并按`createdAt,id` newest-first排序；`actionable`只选择`active|stopping|host_lost|runtime_error`并报告`hiddenStopped`，`all`返回全部记录且该计数为0。每页同时受100项与786432-byte result上限约束；continuation的revision/selector/offset必须与请求和上一页一致，catalog mutation后旧cursor返回retryable `cursor_stale`。Typed `DockClient.list()`逐页汇总完整closed catalog；人类默认CLI只取最新actionable首屏，`list --all`只取最新all首屏并根据`total`报告更早记录的省略数，因此10,000-record或长路径catalog不产生单个无界response。
 
 `session.tree` 把当前 SessionManager tree按稳定 depth-first pre-order展平；`limit` 计算所有返回 node，不是只算 roots。Host 为有序结构计算稳定 `treeRevision`（至少覆盖 entryId、parentId、label timestamp/结构）；第一页 request 同时省略 `treeRevision/afterEntryId`。后续页必须回传上一页的 exact revision 与 `afterEntryId`，下一页从它之后开始。每项携带 `parentId/depth/hasChildren`，客户端可渐进重建层级。`truncated=true` 时必须给 `nextAfterEntryId=本页最后 entryId`。Revision 不匹配、entry 不属于该 revision或 runtime generation变化都返回 `invalid_cursor`；因此即使旧 entry仍存在，tree新增/改标后旧 continuation也不会被误用。
 
@@ -344,7 +351,7 @@ Receipt 仍表示 Pi preflight 已接受，不表示 run 完成；实现可继�
 - `queue.changed`投影Pi当前steering/follow-up计数，但不是用户消息进入正式transcript的边界。
 - 只有Pi公开user `message_start`到达时，Host才发布`message.submitted`。该event带原queue item的`operationId/queueItemId/delivery`，`text`是Pi实际消费的template/skill-expanded文本；pending tray此时移除对应item。
 - `pendingMessages`与`queue.dequeue.restored`固定按Pi消费顺序：全部steering FIFO在前，全部follow-up FIFO在后。重复文本通过不可猜`queueItemId`和runtime-text hash按FIFO关联。
-- `queue.dequeue`是正式mutation、受operation ledger与`effect_unknown`规则约束。它调用公开`clearQueue()`并返回原始client文本，不abort当前run；Alt+Up使用该操作。Pi在公开`message_start`前会先从内部queue移除消息并可能等待异步extension hook；该极窄窗口内`clearQueue()`已无法撤回的item进入`inFlight`而绝不复制到editor，tray保留至随后`message_start`。Esc/`/abort`仅在`inFlight=[]`时继续调用`command.abort`，任一步都不自动retry。
+- `queue.dequeue`是正式mutation、受operation ledger与`effect_unknown`规则约束。它调用公开`clearQueue()`并返回原始client文本，不abort当前run；Alt+Up使用该操作。Client把`restored`按receipt顺序以空行连接为一个block，再整体prepend到请求完成时的当前editor草稿；不得用请求开始时的旧草稿覆盖并发输入。Pi在公开`message_start`前会先从内部queue移除消息并可能等待异步extension hook；该极窄窗口内`clearQueue()`已无法撤回的item进入`inFlight`而绝不复制到editor，tray保留至随后`message_start`。Esc仅在`inFlight=[]`且dequeue成功时继续调用`command.abort`；失败/`effect_unknown`不清editor、不伪称恢复，任一步都不自动retry。
 - detach/reconnect可从同一Host的`pendingMessages`恢复tray；Host loss/reopen清空queue，catalog不保存也不重放任何queue正文。
 
 ### Settings closed update union
@@ -480,6 +487,7 @@ interface DurableInstanceRecord {
 | stop | 先 commit `stopRequestedAt` 再 cleanup；commit stopped 后才 success response。Startup 遇 stop intent 归一为 stopped/non-reopenable，不重开 runtime。 |
 | replacement | trust/target validation后先commit replacement intent（recovery固定previous durable file），再调用runtime method。Cancel清intent；factory/bind失败时若catalog仍可写则commit runtime_error；成功时计算next generation并在一个commit中写目标durable session facts/active state/clear intent，随后publish。Pi尚未物化candidate JSONL时省略active record的`sessionFile`并暂存previous file为`recoverySessionFile`；首次确认candidate为current-user-owned real file的后续commit再切换durable path。目标/error commit自身失败适用mutation_faulted规则。 |
 | reopen | 创建并 bind candidate；预先计算 next generation；一个 commit 写 active/idle/new generation；随后 swap/publish。任一 pre-commit/commit failure dispose candidate并保留原 unavailable record。 |
+| forget/prune | 只选择terminal/recoverable record并提交移除后的完整schema-1 projection；commit成功后才从registry发布删除、关闭该ID的attach stream并返回receipt。不得删除Pi session文件。由于rename后directory-sync失败可能已使删除可见，任何commit错误都保守返回调用者operation ID对应的`effect_unknown`并fault Host，禁止自动retry。 |
 | graceful Host shutdown（阶段 5） | 先 commit `shutdownRequestedAt`，再 bounded abort/dispose；最终 commit host_lost。Crash 看到 shutdown intent 仍归一 host_lost，不当作 explicit instance stop。阶段 1D 的 in-memory Host shutdown只做 non-catalog runtime drain，绝不伪造 explicit `instance.stop`。 |
 
 任何 catalog write failure：
@@ -707,7 +715,7 @@ Numeric counters必须是 non-negative safe integer；timestamp使用 ISO-8601 U
 
 ### 不可自动 retry
 
-所有 mutation：instance create/stop/reopen、command submit/abort、queue dequeue、model/thinking/tool/settings mutation、session switch/new/name/compact/reload/navigate/fork/clone、trust remember decision。Transport close 后 client 显示 `effect_unknown`，用户先查询再决定。
+所有 mutation：instance create/stop/forget、catalog prune、instance reopen、command submit/abort、queue dequeue、model/thinking/tool/settings mutation、session switch/new/name/compact/reload/navigate/fork/clone、trust remember decision。Transport close 后 client 显示 `effect_unknown`，用户先查询再决定。
 
 | Mutation | 收敛查询 |
 |---|---|
@@ -719,6 +727,7 @@ Numeric counters必须是 non-negative safe integer；timestamp使用 ISO-8601 U
 | session mutation | instance Pi IDs/runtime generation + history/session list。 |
 | compact | instance execution/compaction events + history。 |
 | stop/reopen | instance.get lifecycle/generation。 |
+| forget/prune | revision-bound `instance.list`与catalog文件事实；模糊完成不得自动重发，且Pi session文件始终不在mutation删除面内。 |
 | trust remember | 下一次 trust resolution/store结果；不自动重写。 |
 
 `interaction.respond` 是唯一受限 mutation retry：在**同 hostEpoch、instanceId、runtimeGeneration、leaseToken、interactionId、相同 response**内，可根据短期 tombstone返回 `already_resolved` 而不再次 resolve；跨 epoch/generation禁止 retry。
@@ -732,8 +741,8 @@ Host 对same-host重复operation ID保留bounded receipt cache；同mutation typ
 - hello：`invalid_hello`、`unsupported_protocol`、`capability_missing`、`host_starting`、`host_draining`；
 - framing：`invalid_envelope`、`request_too_large`、`response_too_large`；
 - service/client：`service_unavailable`、`service_start_failed`、`service_start_timeout`、`protocol_incompatible`；
-- catalog：`catalog_corrupt`、`catalog_write_failed`、`effect_unknown`、`mutation_faulted`；
-- instance：`not_found`、`instance_busy`、`instance_not_active`、`instance_host_lost`、`instance_runtime_error`、`instance_not_reopenable`、`operation_conflict`；
+- catalog：`catalog_corrupt`、`catalog_write_failed`、`effect_unknown`、`mutation_faulted`、`cursor_stale`；
+- instance：`not_found`、`instance_not_terminal`、`instance_busy`、`instance_not_active`、`instance_host_lost`、`instance_runtime_error`、`instance_not_reopenable`、`operation_conflict`；
 - session/config：`session_not_found`、`session_replacement_failed`、`model_not_found`、`invalid_thinking`、`unknown_tool`、`settings_invalid`、`settings_write_failed`、`project_trust_required`、`queue_capacity`；
 - interaction：`interaction_lease_unavailable`、`interaction_not_found`、`interaction_expired`、`interaction_wrong_lease`、`interaction_invalid_response`。
 
@@ -749,7 +758,7 @@ Error envelope固定 `{code,message,retryable,details?}`。`details` 仅按 code
 
 ## 18. systemd service 与 Host protocol 边界
 
-`alu-dock service start|restart|install --now`都必须等待V2 hello、`catalog.v1 + service.managed.v1 + session.reopen + session.tree.v1` capability集合，并验证hello PID等于unit `MainPID`；对已可probe的restart还必须观察到不同`hostEpoch`。Timeout只报告失败和unit journal诊断，不自动删除catalog或反复stop/start unit。
+`alu-dock service start|restart|install --now`都必须等待V2 hello、`catalog.maintenance.v1 + catalog.v1 + service.managed.v1 + session.reopen + session.tree.v1` capability集合，并验证hello PID等于unit `MainPID`；对已可probe的restart还必须观察到不同`hostEpoch`。Timeout只报告失败和unit journal诊断，不自动删除catalog或反复stop/start unit。
 
 Host drain 总预算 12 秒，给 unit `TimeoutStopSec=15` 留 3 秒 kill margin：停止 admission/cancel dialogs → commit shutdown intents → bounded abort/dispose → commit host_lost → inode-safe socket cleanup。超时非零退出；下一 epoch按 shutdown/busy intent保守 normalization。
 

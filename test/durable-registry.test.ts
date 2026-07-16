@@ -6,6 +6,7 @@ import test from "node:test";
 
 import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
+import { MAX_INSTANCE_LIST_RESULT_BYTES } from "../src/control/protocol.js";
 import { FileCatalogStore } from "../src/control/durable-catalog-store.js";
 import {
   CatalogOperationRecordedError,
@@ -13,7 +14,7 @@ import {
   InstanceUnavailableError,
   type InstanceFactoryInput,
 } from "../src/control/dock-registry.js";
-import { CatalogWriteError } from "../src/core/catalog.js";
+import { type CatalogInstanceRecord, CatalogWriteError } from "../src/core/catalog.js";
 import { InstanceBusyError, ManagedInstance } from "../src/core/managed-instance.js";
 import { DelayedRuntimeSession } from "./support/delayed-runtime-session.js";
 
@@ -304,6 +305,203 @@ test("same-Host runtime_error reopen closes stale attach streams after commit", 
   assert.equal(reopened.instance.runtimeGeneration, 2);
   await streamClosed;
   assert.ok(seen.includes("instance.runtime_error"));
+});
+
+test("revision-bound instance.list pages keep large stopped catalogs bounded", async (context) => {
+  const { cwd, catalogPath } = await fixturePath();
+  const stoppedRecords: CatalogInstanceRecord[] = Array.from({ length: 10_000 }, (_, index) => {
+    const id = `stopped-${String(index).padStart(5, "0")}`;
+    return {
+      id,
+      creationOperationId: `create-${id}`,
+      cwd,
+      lifecycle: "stopped",
+      execution: "unavailable",
+      lastRun: "never",
+      runtimeGeneration: 1,
+      piSessionId: `pi-${id}`,
+      admissionPending: false,
+      pendingCount: 0,
+      createdAt: "2026-07-15T00:00:00.000Z",
+      updatedAt: "2026-07-15T00:00:00.000Z",
+    };
+  });
+  const store = new FileCatalogStore(catalogPath);
+  await store.commit({ schemaVersion: 1, revision: 1, lastHostEpoch: "large-seed", instances: stoppedRecords }, {
+    kind: "test.seed",
+    effect: "pre_effect",
+  });
+  const socketPath = join(cwd, "large-list.sock");
+  const registry = new DockRegistry(
+    async () => assert.fail("stopped catalog listing must not construct runtimes"),
+    undefined,
+    { hostEpoch: "large-list-host", catalogStore: store },
+  );
+  const host = new DockHost({ socketPath, statePath: catalogPath, registry, initialize: () => registry.initializeCatalog() });
+  context.after(async () => host.stop().catch(() => {}));
+  await host.start();
+  const client = new DockClient({ socketPath });
+
+  const actionable = await client.listPage("actionable");
+  assert.deepEqual(actionable.instances, []);
+  assert.equal(actionable.page.total, 0);
+  assert.equal(actionable.page.hiddenStopped, 10_000);
+  const firstPage = await client.listPage("all");
+  assert.equal(firstPage.instances.length, 100);
+  assert.equal(firstPage.instances[0]?.id, "stopped-09999", "the human first page must contain the newest records");
+  assert.equal(firstPage.page.total, 10_000);
+  assert.equal(firstPage.page.nextCursor?.offset, 100);
+  assert.equal((await client.list()).length, 10_000, "typed client must traverse every bounded page");
+  const pruned = await client.pruneStopped("prune-large-page");
+  assert.equal(pruned.receipt.forgottenCount, 1_000);
+  assert.equal(pruned.receipt.hasMore, true);
+  await assert.rejects(
+    client.listPage("all", firstPage.page.nextCursor),
+    (error: unknown) => error instanceof ControlClientError && error.code === "cursor_stale",
+  );
+  assert.equal((await client.listPage("all")).page.total, 9_000);
+});
+
+test("instance.list byte-bounds pages containing valid long catalog paths", async (context) => {
+  const { cwd, catalogPath } = await fixturePath();
+  const longCwd = `/${"c".repeat(16_000)}`;
+  const longSessionFile = `/${"s".repeat(16_000)}`;
+  const records: CatalogInstanceRecord[] = Array.from({ length: 120 }, (_, index) => {
+    const id = `heavy-${String(index).padStart(4, "0")}`;
+    return {
+      id,
+      creationOperationId: `create-${id}`,
+      cwd: longCwd,
+      lifecycle: "stopped",
+      execution: "unavailable",
+      lastRun: "never",
+      runtimeGeneration: 1,
+      piSessionId: `pi-${id}`,
+      sessionFile: longSessionFile,
+      admissionPending: false,
+      pendingCount: 0,
+      createdAt: "2026-07-15T00:00:00.000Z",
+      updatedAt: "2026-07-15T00:00:00.000Z",
+    };
+  });
+  const store = new FileCatalogStore(catalogPath);
+  await store.commit({ schemaVersion: 1, revision: 1, lastHostEpoch: "heavy-seed", instances: records }, {
+    kind: "test.seed",
+    effect: "pre_effect",
+  });
+  const socketPath = join(cwd, "heavy-list.sock");
+  const registry = new DockRegistry(
+    async () => assert.fail("stopped catalog listing must not construct runtimes"),
+    undefined,
+    { hostEpoch: "heavy-list-host", catalogStore: store },
+  );
+  const host = new DockHost({ socketPath, statePath: catalogPath, registry, initialize: () => registry.initializeCatalog() });
+  context.after(async () => host.stop().catch(() => {}));
+  await host.start();
+  const client = new DockClient({ socketPath });
+
+  const firstPage = await client.listPage("all");
+  assert.ok(firstPage.instances.length > 0 && firstPage.instances.length < 100);
+  assert.equal(firstPage.instances[0]?.id, "heavy-0119");
+  assert.ok(Buffer.byteLength(JSON.stringify(firstPage), "utf8") <= MAX_INSTANCE_LIST_RESULT_BYTES);
+  assert.equal(firstPage.page.nextCursor?.offset, firstPage.instances.length);
+  assert.equal((await client.list()).length, 120);
+});
+
+test("durable catalog removal ambiguity returns effect_unknown and preserves query evidence", async (context) => {
+  const { cwd, catalogPath } = await fixturePath();
+  let failDirectorySync = false;
+  const store = new FileCatalogStore(catalogPath, {
+    fault: (phase) => {
+      if (failDirectorySync && phase === "directory_sync") throw new Error("maintenance directory sync fault");
+    },
+  });
+  const registry = new DockRegistry(
+    async (input) => createFixtureInstance(input, []),
+    () => "ambiguous-maintenance",
+    { hostEpoch: "ambiguous-maintenance-host", catalogStore: store },
+  );
+  const socketPath = join(cwd, "ambiguous-maintenance.sock");
+  const host = new DockHost({ socketPath, statePath: catalogPath, registry, initialize: () => registry.initializeCatalog() });
+  context.after(async () => host.stop().catch(() => {}));
+  await host.start();
+  const client = new DockClient({ socketPath });
+  const created = await client.create(cwd, undefined, "create-ambiguous-maintenance");
+  await client.stop(created.id, "stop-ambiguous-maintenance");
+
+  failDirectorySync = true;
+  await assert.rejects(
+    client.forget(created.id, "forget-ambiguous-maintenance"),
+    (error: unknown) => error instanceof ControlClientError
+      && error.code === "effect_unknown"
+      && error.operationId === "forget-ambiguous-maintenance",
+  );
+  const persisted = await new FileCatalogStore(catalogPath).load();
+  assert.deepEqual(persisted?.instances, [], "post-rename evidence must remain queryable rather than invite retry");
+  assert.equal(registry.catalogHealth(), "draining");
+});
+
+test("Protocol V2 forget and prune remove only terminal Dock records after commit", async (context) => {
+  const { cwd, catalogPath } = await fixturePath();
+  const socketPath = join(cwd, "maintenance.sock");
+  const runtimes = new Map<string, DelayedRuntimeSession>();
+  let id = 0;
+  const registry = new DockRegistry(
+    async (input) => {
+      const runtime = new DelayedRuntimeSession(`pi-${input.id}`);
+      runtime.sessionFile = join(cwd, `${input.id}.jsonl`);
+      runtimes.set(input.id, runtime);
+      return new ManagedInstance({
+        id: input.id,
+        creationOperationId: input.creationOperationId,
+        hostEpoch: input.hostEpoch,
+        cwd: input.cwd,
+        session: runtime,
+      });
+    },
+    () => `maintenance-${++id}`,
+    { hostEpoch: "maintenance-host", catalogStore: new FileCatalogStore(catalogPath) },
+  );
+  const host = new DockHost({ socketPath, statePath: catalogPath, registry, initialize: () => registry.initializeCatalog() });
+  context.after(async () => host.stop().catch(() => {}));
+  await host.start();
+  const client = new DockClient({ socketPath });
+  assert.ok((await client.ping()).capabilities.includes("catalog.maintenance.v1"));
+
+  const first = await client.create(cwd, "first", "create-maintenance-one");
+  const forgottenStream = await client.streamEvents(first.id, { onEvent: () => {} });
+  await assert.rejects(
+    client.forget(first.id, "forget-live"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "instance_not_terminal",
+  );
+  await client.stop(first.id, "stop-maintenance-one");
+  const sessionEvidence = runtimes.get(first.id)?.sessionFile as string;
+  await writeFile(sessionEvidence, "Pi session evidence\n");
+  const streamClosed = assert.rejects(
+    forgottenStream.done,
+    (error: unknown) => error instanceof ControlClientError && error.code === "connection_closed",
+  );
+  const forgotten = await client.forget(first.id, "forget-maintenance-one");
+  await streamClosed;
+  assert.deepEqual(forgotten.receipt, {
+    operationId: "forget-maintenance-one",
+    forgottenId: first.id,
+    previousLifecycle: "stopped",
+    piSessionFilesDeleted: 0,
+  });
+  assert.equal(await readFile(sessionEvidence, "utf8"), "Pi session evidence\n");
+  assert.deepEqual(await client.forget(first.id, "forget-maintenance-one"), forgotten, "same-Host ledger must replay the committed receipt");
+  await assert.rejects(client.status(first.id), (error: unknown) => error instanceof ControlClientError && error.code === "not_found");
+
+  const second = await client.create(cwd, "second", "create-maintenance-two");
+  const third = await client.create(cwd, "third", "create-maintenance-three");
+  await client.stop(second.id, "stop-maintenance-two");
+  const pruned = await client.pruneStopped("prune-maintenance-one");
+  assert.deepEqual(pruned.receipt.forgottenIds, [second.id]);
+  assert.equal(pruned.receipt.forgottenCount, 1);
+  assert.equal(pruned.receipt.hasMore, false);
+  assert.equal(pruned.receipt.piSessionFilesDeleted, 0);
+  assert.deepEqual((await client.list()).map((instance) => instance.id), [third.id]);
 });
 
 test("catalog startup failure preserves evidence and removes only the Host-owned socket", async () => {
