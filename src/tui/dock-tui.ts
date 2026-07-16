@@ -1622,15 +1622,10 @@ export async function runDockTui(
   }
   watchEventSubscription(subscription);
 
-  const activityTimer = setInterval(() => {
-    if (status.tickActivity()) tui.requestRender();
-  }, 140);
-  activityTimer.unref();
   tui.start();
   updateTerminalProgress();
   const reason = await exit;
 
-  clearInterval(activityTimer);
   activeExtensionDialog?.closeFromHost();
   removeInputListener();
   process.off("SIGINT", onSigint);

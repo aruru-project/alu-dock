@@ -48,6 +48,9 @@ def main() -> int:
 
     output = bytearray()
     resized_bytes = 0
+    stable_render_batches = 0
+    stable_output_bytes = 0
+    draft_visible = False
     timed_out = False
     status = 1
     try:
@@ -182,6 +185,55 @@ def main() -> int:
                 os.write(fd, b"\x03")  # Clear restored editor text before Ctrl+D detach.
                 time.sleep(0.1)
                 read_available(fd, output, 0.05)
+            elif action == "activity-stability":
+                draft = b"draft while agent runs"
+                os.write(fd, draft)
+                draft_deadline = time.monotonic() + 3
+                while draft not in output and time.monotonic() < draft_deadline:
+                    if read_available(fd, output, 0.02) < 0:
+                        break
+                draft_visible = draft in output
+                # Drain the input-triggered render, then observe a quiet period.
+                # A waiting runtime emits no events, so any synchronized batches
+                # here are timer-only repaints of otherwise stable composer state.
+                drain_deadline = time.monotonic() + 0.08
+                while time.monotonic() < drain_deadline:
+                    if read_available(fd, output, 0.01) < 0:
+                        break
+                stable_start = len(output)
+                sample_deadline = time.monotonic() + 0.65
+                while time.monotonic() < sample_deadline:
+                    if read_available(fd, output, 0.02) < 0:
+                        break
+                stable_output = bytes(output[stable_start:])
+                stable_render_batches = stable_output.count(b"\x1b[?2026h")
+                stable_output_bytes = len(stable_output)
+                os.write(fd, b"\x03")  # Clear the draft before detach.
+                time.sleep(0.05)
+                read_available(fd, output, 0.02)
+            elif action == "activity-streaming":
+                draft = b"draft survives concurrent streaming"
+                for byte in draft:
+                    os.write(fd, bytes([byte]))
+                    time.sleep(0.012)
+                    read_available(fd, output, 0.005)
+                time.sleep(0.12)
+                while read_available(fd, output, 0.01) > 0:
+                    pass
+                frame_start = len(output)
+                set_size(fd, 18, 44)
+                os.kill(pid, signal.SIGWINCH)
+                frame_deadline = time.monotonic() + 2
+                while time.monotonic() < frame_deadline:
+                    if read_available(fd, output, 0.02) < 0:
+                        break
+                    frame_output = bytes(output[frame_start:])
+                    if b"\x1b[2J\x1b[H\x1b[3J" in frame_output and draft in frame_output:
+                        break
+                draft_visible = draft in bytes(output[frame_start:])
+                os.write(fd, b"\x03")
+                time.sleep(0.05)
+                read_available(fd, output, 0.02)
             elif action == "tool-fold":
                 fold_deadline = time.monotonic() + 3
                 while b"Alt+O detail" not in output and time.monotonic() < fold_deadline:
@@ -263,6 +315,9 @@ def main() -> int:
         "status": status,
         "timedOut": timed_out,
         "resizedBytes": resized_bytes,
+        "stableRenderBatches": stable_render_batches,
+        "stableOutputBytes": stable_output_bytes,
+        "draftVisible": draft_visible,
         "output": base64.b64encode(bytes(output)).decode("ascii"),
     }))
     return 0

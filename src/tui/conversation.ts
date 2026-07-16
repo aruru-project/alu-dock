@@ -687,27 +687,16 @@ export class DockStatusLine implements Component {
   private snapshotValue: InstanceSnapshot;
   private activity = "ready";
   private activityPhase: RunActivityState["phase"] | "status" = "status";
-  private activityAnimated = false;
-  private activityFrame = 0;
   private connection = "connected";
   private controller = "observing";
   private autoCompaction: boolean | undefined;
 
   constructor(snapshot: InstanceSnapshot) { this.snapshotValue = snapshot; }
   update(snapshot: InstanceSnapshot): void { this.snapshotValue = snapshot; }
-  setActivity(activity: string | RunActivityState, animated = false): void {
+  setActivity(activity: string | RunActivityState): void {
     const label = safeTerminalLine(typeof activity === "string" ? activity : activity.label);
-    const phase = typeof activity === "string" ? inferActivityPhase(label) : activity.phase;
-    const nextAnimated = typeof activity === "string" ? animated : activity.animated;
-    if (label !== this.activity || phase !== this.activityPhase || nextAnimated !== this.activityAnimated) this.activityFrame = 0;
     this.activity = label;
-    this.activityPhase = phase;
-    this.activityAnimated = nextAnimated;
-  }
-  tickActivity(): boolean {
-    if (!this.activityAnimated) return false;
-    this.activityFrame = (this.activityFrame + 1) % ACTIVITY_FRAMES.length;
-    return true;
+    this.activityPhase = typeof activity === "string" ? inferActivityPhase(label) : activity.phase;
   }
   setConnection(connection: string): void { this.connection = safeTerminalLine(connection); }
   setController(controller: string): void { this.controller = safeTerminalLine(controller); }
@@ -722,9 +711,7 @@ export class DockStatusLine implements Component {
       : "no model";
     const name = safeTerminalLine(snapshot.name || shortId(snapshot.id));
     const state = snapshot.lifecycle === "active" ? snapshot.execution : snapshot.lifecycle;
-    const activitySymbol = this.activityAnimated
-      ? ACTIVITY_FRAMES[this.activityFrame] ?? "·"
-      : activitySymbolFor(this.activityPhase);
+    const activitySymbol = activitySymbolFor(this.activityPhase);
     const activity = activityPainter(this.activityPhase)(`${activitySymbol} ${this.activity}`);
     const statuses = Object.entries(snapshot.extensionStatus);
     const firstLine = fitFooterSegments(boundedWidth, [
@@ -750,8 +737,6 @@ export class DockStatusLine implements Component {
     return [firstLine, secondLine];
   }
 }
-
-const ACTIVITY_FRAMES = ["·", "•", "●", "•"] as const;
 
 function renderUserSurface(text: string, width: number): string[] {
   if (width < 3) return wrapPlainText(text, width).map(paint.userSurface);

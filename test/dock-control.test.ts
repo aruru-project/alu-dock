@@ -582,6 +582,64 @@ test("SSH TUI replays, resizes, handles input, and detaches without stopping", a
   assert.equal(runtime.disposeCalls, 0);
 });
 
+test("SSH TUI leaves a typed composer quiet when a running instance emits no events", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "pty-stable-composer");
+
+  const pty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", harness.socketPath,
+    "attach", created.id,
+  ], "activity-stability");
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-2_000));
+  assert.equal(pty.status, 0, output.slice(-2_000));
+  assert.equal(pty.draftVisible, true, output.slice(-2_000));
+  assert.equal(pty.stableRenderBatches, 0, `unexpected timer-only synchronized renders (${pty.stableOutputBytes} bytes)`);
+  assert.equal(pty.stableOutputBytes, 0, "a quiet Host and stable composer must produce no terminal output");
+});
+
+test("SSH TUI preserves concurrent composer input while transcript deltas remain event-driven", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "pty-streaming-composer");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const readyFile = join(harness.directory, "streaming-composer.ready");
+
+  const ptyRun = runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", harness.socketPath,
+    "attach", created.id,
+  ], "activity-streaming", readyFile);
+  await waitForPath(readyFile);
+  for (let index = 0; index < 50; index += 1) {
+    runtime.emit({
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "text_delta",
+        contentIndex: 0,
+        delta: String(index % 10),
+        partial: { role: "assistant", content: [] },
+      },
+    });
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+  }
+
+  const pty = await ptyRun;
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-2_000));
+  assert.equal(pty.status, 0, output.slice(-2_000));
+  assert.equal(pty.draftVisible, true, "the forced final frame must retain every typed character");
+  assert.match(output, /responding/u);
+});
+
 test("SSH TUI editor preserves multiline paste and submitted history", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
@@ -2273,12 +2331,15 @@ interface PtyTuiResult {
   status: number;
   timedOut: boolean;
   resizedBytes: number;
+  stableRenderBatches: number;
+  stableOutputBytes: number;
+  draftVisible: boolean;
   output: string;
 }
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "editor" | "abort" | "queue-restore" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "model-search" | "scroll" | "history-page" | "tool-fold" | "extension-dialogs" | "extension-replacement" = "detach",
+  action: "detach" | "editor" | "abort" | "queue-restore" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "model-search" | "scroll" | "history-page" | "tool-fold" | "activity-stability" | "activity-streaming" | "extension-dialogs" | "extension-replacement" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {
@@ -2303,6 +2364,9 @@ async function runPtyTui(
         assert.equal(typeof parsed.status, "number");
         assert.equal(typeof parsed.timedOut, "boolean");
         assert.equal(typeof parsed.resizedBytes, "number");
+        assert.equal(typeof parsed.stableRenderBatches, "number");
+        assert.equal(typeof parsed.stableOutputBytes, "number");
+        assert.equal(typeof parsed.draftVisible, "boolean");
         assert.equal(typeof parsed.output, "string");
         resolveRun(parsed as PtyTuiResult);
       } catch (error) {

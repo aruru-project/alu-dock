@@ -470,8 +470,7 @@ test("conversation and status expose replay truncation and current state", () =>
   assert.match(footer, /alu-kanban:ready/);
   for (const line of lines) assert.ok(visibleWidth(line) <= 120);
 
-  status.setActivity({ phase: "waiting", label: "waiting for model", animated: true });
-  status.tickActivity();
+  status.setActivity({ phase: "waiting", label: "waiting for model" });
   const narrow = status.render(43);
   assert.equal(narrow.length, 2);
   assert.match(narrow[0] ?? "", /waiting for model/);

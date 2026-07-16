@@ -18,34 +18,33 @@ export type RunActivityPhase =
 export interface RunActivityState {
   phase: RunActivityPhase;
   label: string;
-  animated: boolean;
 }
 
-const READY: RunActivityState = { phase: "idle", label: "ready", animated: false };
+const READY: RunActivityState = { phase: "idle", label: "ready" };
 
 export function activityFromSnapshot(snapshot: InstanceSnapshot): RunActivityState {
-  if (snapshot.lifecycle === "stopped") return { phase: "disconnected", label: "stopped", animated: false };
-  if (snapshot.lifecycle === "host_lost") return { phase: "disconnected", label: "host lost", animated: false };
-  if (snapshot.lifecycle === "runtime_error") return { phase: "error", label: "runtime error", animated: false };
-  if (snapshot.execution === "running") return { phase: "waiting", label: "waiting for model", animated: true };
+  if (snapshot.lifecycle === "stopped") return { phase: "disconnected", label: "stopped" };
+  if (snapshot.lifecycle === "host_lost") return { phase: "disconnected", label: "host lost" };
+  if (snapshot.lifecycle === "runtime_error") return { phase: "error", label: "runtime error" };
+  if (snapshot.execution === "running") return { phase: "waiting", label: "waiting for model" };
   if (snapshot.pending.total > 0) return queued(snapshot.pending.total);
   return READY;
 }
 
 export function submittingActivity(): RunActivityState {
-  return { phase: "submitting", label: "submitting", animated: true };
+  return { phase: "submitting", label: "submitting" };
 }
 
 export function abortingActivity(): RunActivityState {
-  return { phase: "aborting", label: "aborting", animated: true };
+  return { phase: "aborting", label: "aborting" };
 }
 
 export function disconnectedActivity(label = "host stream closed"): RunActivityState {
-  return { phase: "disconnected", label, animated: false };
+  return { phase: "disconnected", label };
 }
 
 export function errorActivity(label = "error"): RunActivityState {
-  return { phase: "error", label, animated: false };
+  return { phase: "error", label };
 }
 
 /** Recover the most specific current phase when attaching to an already-running instance. */
@@ -74,27 +73,27 @@ export function reduceRunActivity(
     case "command.accepted":
       return event.data.queued
         ? queued(snapshot.pending.total || 1)
-        : { phase: "waiting", label: "waiting for model", animated: true };
+        : { phase: "waiting", label: "waiting for model" };
 
     case "command.handled":
       return snapshot.pending.total > 0 ? queued(snapshot.pending.total) : READY;
 
     case "command.rejected":
-      return { phase: "error", label: "command rejected", animated: false };
+      return { phase: "error", label: "command rejected" };
 
     case "run.started":
     case "message.submitted":
-      return { phase: "waiting", label: "waiting for model", animated: true };
+      return { phase: "waiting", label: "waiting for model" };
 
     case "message.delta":
       return event.data.block === "thinking"
-        ? { phase: "thinking", label: "thinking", animated: true }
-        : { phase: "responding", label: "responding", animated: true };
+        ? { phase: "thinking", label: "thinking" }
+        : { phase: "responding", label: "responding" };
 
     case "message.completed":
       if (current.phase === "tool") return current;
       return event.data.role === "assistant" && snapshot.execution === "running"
-        ? { phase: "waiting", label: "waiting for model", animated: true }
+        ? { phase: "waiting", label: "waiting for model" }
         : current;
 
     case "tool.started":
@@ -104,34 +103,32 @@ export function reduceRunActivity(
       return {
         phase: "tool",
         label: toolName ? `tool ${toolName}` : current.phase === "tool" ? current.label : "tool running",
-        animated: true,
       };
     }
 
     case "tool.completed":
       return snapshot.execution === "running"
-        ? { phase: "waiting", label: "waiting for model", animated: true }
+        ? { phase: "waiting", label: "waiting for model" }
         : activityFromSnapshot(snapshot);
 
     case "run.retry_started":
       return {
         phase: "retry",
         label: `retry ${event.data.attempt}/${event.data.maxAttempts}`,
-        animated: true,
       };
 
     case "run.retry_completed":
       return event.data.success
-        ? { phase: "waiting", label: "waiting for model", animated: true }
-        : { phase: "error", label: "retry failed", animated: false };
+        ? { phase: "waiting", label: "waiting for model" }
+        : { phase: "error", label: "retry failed" };
 
     case "compaction.started":
-      return { phase: "compaction", label: "compacting context", animated: true };
+      return { phase: "compaction", label: "compacting context" };
 
     case "compaction.completed":
-      if (event.data.error) return { phase: "error", label: "compaction failed", animated: false };
+      if (event.data.error) return { phase: "error", label: "compaction failed" };
       if (event.data.willRetry || snapshot.execution === "running") {
-        return { phase: "waiting", label: "waiting for model", animated: true };
+        return { phase: "waiting", label: "waiting for model" };
       }
       return activityFromSnapshot(snapshot);
 
@@ -143,7 +140,7 @@ export function reduceRunActivity(
       return snapshot.execution === "running" ? current : READY;
 
     case "interaction.requested":
-      return { phase: "interaction", label: `waiting for ${event.data.method}`, animated: true };
+      return { phase: "interaction", label: `waiting for ${event.data.method}` };
 
     case "interaction.resolved":
     case "interaction.cancelled":
@@ -157,18 +154,18 @@ export function reduceRunActivity(
 
     case "instance.state_changed":
       if (event.data.execution === "running" && current.phase === "idle") {
-        return { phase: "waiting", label: "waiting for model", animated: true };
+        return { phase: "waiting", label: "waiting for model" };
       }
       if (event.data.execution !== "running" && event.data.pending.total === 0) return READY;
       return current;
 
     case "instance.stopped":
-      return { phase: "disconnected", label: "stopped", animated: false };
+      return { phase: "disconnected", label: "stopped" };
 
     case "instance.runtime_error":
     case "instance.error":
     case "settings.write_failed":
-      return { phase: "error", label: "error", animated: false };
+      return { phase: "error", label: "error" };
 
     case "extension.error":
       return current;
@@ -179,5 +176,5 @@ export function reduceRunActivity(
 }
 
 function queued(total: number): RunActivityState {
-  return { phase: "queued", label: `queued ${Math.max(1, total)}`, animated: true };
+  return { phase: "queued", label: `queued ${Math.max(1, total)}` };
 }

@@ -285,7 +285,7 @@ test("run activity covers compaction queue interaction abort failure and host lo
   assert.equal(activity.phase, "idle");
   assert.deepEqual(
     activityFromSnapshot(snapshot({ lifecycle: "host_lost", execution: "unavailable" })),
-    { phase: "disconnected", label: "host lost", animated: false },
+    { phase: "disconnected", label: "host lost" },
   );
 });
 
@@ -296,7 +296,6 @@ test("run activity distinguishes waiting thinking response tool retry and clears
     operationId: "op-1", delivery: "prompt", queued: false, acceptedAt: "2026-07-15T00:00:00.000Z",
   }), running);
   assert.equal(activity.phase, "waiting");
-  assert.equal(activity.animated, true);
 
   activity = reduceRunActivity(activity, event(2, "message.delta", {
     messageId: "a-1", block: "thinking", delta: "plan",
@@ -333,5 +332,4 @@ test("run activity distinguishes waiting thinking response tool retry and clears
   }), idle);
   assert.deepEqual(activity, activityFromSnapshot(idle));
   assert.equal(activity.phase, "idle");
-  assert.equal(activity.animated, false);
 });
