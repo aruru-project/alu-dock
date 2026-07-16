@@ -134,6 +134,7 @@ test("conversation projects persisted history before live replay", () => {
     { kind: "assistant", text: "old answer", complete: true },
     { kind: "tool", text: "read done\nargs\n{\n  \"path\": \"/tmp/old\"\n}\nresult\nold result", complete: true },
   ]);
+  assert.match(conversation.render(100).join("\n"), /read done.*\/tmp\/old/u);
 });
 
 test("paged history rebuild keeps the bounded gap ordered before live events", () => {
@@ -257,6 +258,64 @@ test("conversation renders Markdown, code, thinking policy, and diff tools at bo
   assert.equal(hidden.snapshot().some((entry) => entry.kind === "thinking"), false);
 });
 
+test("collapsed tool rows identify common operations without exposing arbitrary payload fields", () => {
+  const conversation = new DockConversation();
+  const calls = [
+    { name: "read", args: { path: "/home/luziyi/workshop/alu_dock/src/tui/conversation.ts", offset: 10, limit: 5 }, result: "source" },
+    { name: "bash", args: { command: "npm run check\nnpm test" }, result: "ok" },
+    { name: "edit", args: { path: "src/tui/theme.ts", edits: [{ oldText: "a", newText: "b" }, { oldText: "c", newText: "d" }] }, result: "updated" },
+    { name: "write", args: { path: "README.md", content: "one\ntwo\nthree" }, result: "written" },
+    { name: "alu_kanban", args: { action: "get_card", card_id: 164, content: "ARBITRARY PAYLOAD MUST STAY FOLDED" }, result: "done" },
+  ] as const;
+  let sequence = 0;
+  for (const call of calls) {
+    const toolCallId = `summary-${++sequence}`;
+    conversation.apply(event(sequence * 2, "tool.started", { toolCallId, toolName: call.name, args: call.args }));
+    conversation.apply(event(sequence * 2 + 1, "tool.completed", {
+      toolCallId, toolName: call.name, isError: false, text: call.result,
+    }));
+  }
+
+  const rendered = conversation.render(120).join("\n");
+  assert.match(rendered, /read done.*…\/src\/tui\/conversation\.ts.*lines 10–14/u);
+  assert.match(rendered, /bash done.*npm run check.*↵ \+1 line/u);
+  assert.match(rendered, /edit done.*src\/tui\/theme\.ts.*2 edits/u);
+  assert.match(rendered, /write done.*README\.md.*3 lines/u);
+  assert.match(rendered, /alu_kanban done.*get_card.*card #164/u);
+  assert.doesNotMatch(rendered, /ARBITRARY PAYLOAD MUST STAY FOLDED/u);
+  for (const width of [20, 43, 80]) {
+    for (const line of conversation.render(width)) assert.ok(visibleWidth(line) <= width, `${visibleWidth(line)} > ${width}`);
+  }
+});
+
+test("live tool argument updates refresh the collapsed operation summary", () => {
+  const conversation = new DockConversation();
+  conversation.apply(event(1, "tool.started", {
+    toolCallId: "summary-update", toolName: "read", args: { path: "src/old.ts" },
+  }));
+  const initialRevision = conversation.revision;
+  assert.match(conversation.render(80).join("\n"), /src\/old\.ts/u);
+
+  conversation.apply(event(2, "tool.args_updated", {
+    toolCallId: "summary-update", args: { path: "src/new\u001b[2J.ts", offset: 20, limit: 2 },
+  }));
+  assert.ok(conversation.revision > initialRevision);
+  const updated = conversation.render(80).join("\n");
+  assert.match(updated, /src\/new\[2J\.ts.*lines 20–21/u);
+  assert.doesNotMatch(updated, /src\/old\.ts/u);
+
+  const longPrefix = "x".repeat(5_000);
+  conversation.apply(event(3, "tool.args_updated", {
+    toolCallId: "summary-update", args: { content: longPrefix, path: "src/first.ts" },
+  }));
+  const truncatedArgsRevision = conversation.revision;
+  conversation.apply(event(4, "tool.args_updated", {
+    toolCallId: "summary-update", args: { content: longPrefix, path: "src/second.ts" },
+  }));
+  assert.ok(conversation.revision > truncatedArgsRevision, "summary changes beyond truncated detail JSON remain visible");
+  assert.match(conversation.render(80).join("\n"), /src\/second\.ts/u);
+});
+
 test("duplicate tool projections do not invalidate cached conversation output", () => {
   const conversation = new DockConversation();
   conversation.apply(event(1, "tool.started", {
@@ -305,7 +364,7 @@ test("tool failures stay collapsed by default and preserve expandable error deta
   conversation.addNotice("later assistant-visible output");
   const collapsed = conversation.render(60).join("\n");
   assert.match(collapsed, /× bash failed/);
-  assert.match(collapsed, /bash failed/);
+  assert.match(collapsed, /bash failed.*false/u);
   assert.doesNotMatch(collapsed, /expanded failure detail/);
   assert.deepEqual(conversation.toggleLatestToolExpanded(), { expanded: true, name: "bash" });
   assert.ok((conversation.latestToolOffsetFromBottom(60) ?? 0) > 0);

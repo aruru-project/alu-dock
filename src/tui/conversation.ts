@@ -6,7 +6,7 @@ import {
   type Component,
 } from "@earendil-works/pi-tui";
 
-import type { DockEvent, HistoryEntryDto, InstanceSnapshot } from "../core/managed-instance.js";
+import type { DockEvent, HistoryEntryDto, InstanceSnapshot, JsonObject, JsonValue } from "../core/managed-instance.js";
 import type { HistoryWindowSnapshot } from "./history-pagination.js";
 import type { RunActivityState } from "./run-activity.js";
 import { markdownTheme, paint } from "./theme.js";
@@ -23,6 +23,7 @@ interface ConversationEntry {
   toolCallId?: string;
   toolName?: string;
   toolState?: ToolState;
+  toolSummary?: string;
   renderRevision: number;
   renderCache?: { width: number; revision: number; expanded: boolean; lines: string[] };
 }
@@ -46,6 +47,7 @@ interface ToolProjection {
   id: string;
   name: string;
   args?: string;
+  summary?: string;
   output?: string;
   omitted: string[];
 }
@@ -53,6 +55,7 @@ interface ToolProjection {
 const MAX_LIVE_ENTRIES = 200;
 const MAX_TOOL_OUTPUT = 8_000;
 const MAX_TOOL_ARGS = 4_000;
+const MAX_TOOL_SUMMARY = 512;
 
 /** Event-to-chat projection shared by replay, live TUI updates, and deterministic tests. */
 export class DockConversation implements Component {
@@ -200,6 +203,7 @@ export class DockConversation implements Component {
         };
         projected.name = name;
         projected.args = formatJson(event.data.args, MAX_TOOL_ARGS);
+        projected.summary = summarizeToolArgs(name, event.data.args);
         projected.omitted = [...new Set([...projected.omitted, ...(event.data.omittedFields ?? [])])];
         projected.entry.complete = false;
         projected.entry.diffText = undefined;
@@ -213,9 +217,11 @@ export class DockConversation implements Component {
         const tool = this.tools.get(callId);
         if (!tool) break;
         const args = formatJson(event.data.args, MAX_TOOL_ARGS);
+        const summary = summarizeToolArgs(tool.name, event.data.args);
         const omitted = [...(event.data.omittedFields ?? [])];
-        if (tool.args === args && stringArraysEqual(tool.omitted, omitted)) break;
+        if (tool.args === args && tool.summary === summary && stringArraysEqual(tool.omitted, omitted)) break;
         tool.args = args;
+        tool.summary = summary;
         tool.omitted = omitted;
         this.updateTool(tool, "running");
         break;
@@ -561,6 +567,7 @@ export class DockConversation implements Component {
             id: block.toolCallId,
             name: block.toolName,
             args: formatJson(block.args, MAX_TOOL_ARGS),
+            summary: summarizeToolArgs(block.toolName, block.args),
             omitted: [...(block.omittedFields ?? [])],
           };
           projectedTools.set(block.toolCallId, tool);
@@ -600,10 +607,16 @@ export class DockConversation implements Component {
     if (tool.omitted.length > 0) parts.push(`omitted: ${tool.omitted.join(", ")}`);
     if (tool.output) parts.push(`result\n${tool.output}`);
     const text = safeTerminalText(parts.join("\n"));
-    if (tool.entry.text === text && tool.entry.toolName === tool.name && tool.entry.toolState === state) return;
+    if (
+      tool.entry.text === text
+      && tool.entry.toolName === tool.name
+      && tool.entry.toolState === state
+      && tool.entry.toolSummary === tool.summary
+    ) return;
     tool.entry.text = text;
     tool.entry.toolName = tool.name;
     tool.entry.toolState = state;
+    tool.entry.toolSummary = tool.summary;
     this.touchEntry(tool.entry);
     this.markOutputChanged();
   }
@@ -665,6 +678,7 @@ function projectToolState(tool: ToolProjection, state: ToolState): void {
   tool.entry.text = safeTerminalText(parts.join("\n"));
   tool.entry.toolName = tool.name;
   tool.entry.toolState = state;
+  tool.entry.toolSummary = tool.summary;
   tool.entry.renderRevision += 1;
   tool.entry.renderCache = undefined;
 }
@@ -751,9 +765,12 @@ function renderUserSurface(text: string, width: number): string[] {
 function renderToolHeader(entry: ConversationEntry, width: number, expanded: boolean): string {
   const state = entry.toolState ?? (entry.complete ? "done" : "running");
   const icon = state === "failed" ? "×" : state === "done" ? "✓" : "◆";
-  const title = `${icon} ${entry.toolName ?? "tool"} ${state}`;
-  const hint = expanded ? "· Alt+O fold" : "· Alt+O detail";
-  return truncateToWidth(`${toolStatePainter(state)(title)} ${paint.faint(hint)}`, width);
+  const title = toolStatePainter(state)(`${icon} ${entry.toolName ?? "tool"} ${state}`);
+  const hint = expanded ? "Alt+O fold" : "Alt+O detail";
+  const segments = [title];
+  if (entry.toolSummary) segments.push(paint.muted(entry.toolSummary));
+  segments.push(paint.faint(hint));
+  return truncateToWidth(segments.join(paint.faint(" · ")), width);
 }
 
 function renderToolDetails(text: string, width: number, state: ToolState | undefined): string[] {
@@ -893,6 +910,131 @@ function historyOmissions(entry: HistoryEntryDto): string {
     .filter((block): block is Extract<HistoryEntryDto["content"][number], { type: "omitted" }> => block.type === "omitted")
     .map((block) => block.description)
     .join("\n");
+}
+
+function summarizeToolArgs(toolName: string, args: JsonObject): string | undefined {
+  const name = toolName.toLowerCase().split(/[.:/]/u).at(-1) ?? toolName.toLowerCase();
+  const pathArgument = firstStringArgument(args, ["path", "file_path"]);
+  const path = pathArgument === undefined ? undefined : pathPreview(pathArgument);
+
+  if (name === "read") {
+    return joinToolSummary([path, readRangeSummary(args)]);
+  }
+
+  if (name === "bash") {
+    return joinToolSummary([commandPreview(firstStringArgument(args, ["command"]))]);
+  }
+
+  if (name === "edit") {
+    const editCount = Array.isArray(args.edits)
+      ? args.edits.length
+      : (typeof args.oldText === "string" || typeof args.newText === "string" ? 1 : undefined);
+    return joinToolSummary([
+      path,
+      editCount === undefined ? undefined : `${editCount} ${editCount === 1 ? "edit" : "edits"}`,
+    ]);
+  }
+
+  if (name === "write") {
+    const content = typeof args.content === "string" ? args.content : undefined;
+    const lineCount = content === undefined ? undefined : content.length === 0 ? 0 : content.split("\n").length;
+    return joinToolSummary([
+      path,
+      lineCount === undefined ? undefined : `${lineCount} ${lineCount === 1 ? "line" : "lines"}`,
+    ]);
+  }
+
+  return joinToolSummary(genericToolSummaryParts(args));
+}
+
+function readRangeSummary(args: JsonObject): string | undefined {
+  const offset = integerArgument(args.offset);
+  const limit = integerArgument(args.limit);
+  if (offset !== undefined && limit !== undefined && limit > 0) {
+    const end = offset <= Number.MAX_SAFE_INTEGER - limit + 1 ? offset + limit - 1 : undefined;
+    return end === undefined ? `from line ${offset} · ${limit} lines` : `lines ${offset}–${end}`;
+  }
+  if (offset !== undefined) return `from line ${offset}`;
+  if (limit !== undefined) return `first ${limit} lines`;
+  return undefined;
+}
+
+function commandPreview(command: string | undefined): string | undefined {
+  if (!command) return undefined;
+  const lines = safeTerminalText(command)
+    .split("\n")
+    .map(normalizeToolSummaryPart)
+    .filter((line) => line.length > 0);
+  const first = lines[0];
+  if (!first) return undefined;
+  const remaining = lines.length - 1;
+  return remaining > 0 ? `${first} ↵ +${remaining} ${remaining === 1 ? "line" : "lines"}` : first;
+}
+
+function genericToolSummaryParts(args: JsonObject): Array<string | undefined> {
+  const parts: Array<string | undefined> = [];
+  const path = firstStringArgument(args, ["path", "file_path", "output_path"]);
+  if (path) parts.push(pathPreview(path));
+  else {
+    const url = firstStringArgument(args, ["url"]);
+    if (url) parts.push(url);
+  }
+
+  const command = commandPreview(firstStringArgument(args, ["command"]));
+  if (command) parts.push(command);
+  const action = firstStringArgument(args, ["action"]);
+  if (action) parts.push(action);
+  const cardId = scalarArgument(args.card_id ?? args.cardId);
+  if (cardId) parts.push(`card #${cardId}`);
+  const query = firstStringArgument(args, ["query", "pattern"]);
+  if (query) parts.push(`${args.query === query ? "query" : "pattern"}: ${query}`);
+  const target = firstStringArgument(args, ["target_id", "instanceId", "instance_id"]);
+  if (target) parts.push(`target ${target}`);
+  const agent = firstStringArgument(args, ["agent", "name"]);
+  if (agent) parts.push(agent);
+
+  if (parts.length === 0) {
+    for (const [key, singular] of [["urls", "url"], ["file_paths", "file"], ["paths", "path"]] as const) {
+      const value = args[key];
+      if (Array.isArray(value)) parts.push(`${value.length} ${value.length === 1 ? singular : `${singular}s`}`);
+    }
+  }
+  return parts.slice(0, 3);
+}
+
+function pathPreview(value: string): string {
+  const normalized = normalizeToolSummaryPart(value);
+  const segments = normalized.split(/[\\/]/u).filter((segment) => segment.length > 0);
+  return segments.length > 4 ? `…/${segments.slice(-3).join("/")}` : normalized;
+}
+
+function firstStringArgument(args: JsonObject, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const value = args[key];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+function scalarArgument(value: JsonValue | undefined): string | undefined {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
+  return undefined;
+}
+
+function integerArgument(value: JsonValue | undefined): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function joinToolSummary(parts: Array<string | undefined>): string | undefined {
+  const normalized = parts
+    .map((part) => part === undefined ? "" : normalizeToolSummaryPart(part))
+    .filter((part) => part.length > 0);
+  if (normalized.length === 0) return undefined;
+  return truncateToWidth(normalized.join(" · "), MAX_TOOL_SUMMARY);
+}
+
+function normalizeToolSummaryPart(value: string): string {
+  return safeTerminalLine(value).replace(/\s+/gu, " ").trim();
 }
 
 function formatJson(value: unknown, limit: number): string | undefined {
