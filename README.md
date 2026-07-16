@@ -29,7 +29,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [x] #157 tool render storm、#154 queue诚实时序/撤回与#155长历史/滚轮修正
 - [x] #156 Night Console语义配色、single-column transcript与两行status dock
 - [ ] #158最终真人默认入口验收（完成基线1/6后由#164暂停）
-- [ ] #164人工验收阻塞闸门（#161/#165/#160/#162/#163及#166人类help源码已完成；统一release待#167 list完成）
+- [ ] #164人工验收阻塞闸门（#161–#167全部源码切片已完成；下一步统一gate、immutable release与真人Windows Terminal/SSH回归）
 
 详细文档：
 
@@ -69,6 +69,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-v0.1-command-handled-projection.md`](docs/validation-v0.1-command-handled-projection.md)
 - [`docs/validation-v0.1-activity-slot.md`](docs/validation-v0.1-activity-slot.md)
 - [`docs/validation-v0.1-cli-help.md`](docs/validation-v0.1-cli-help.md)
+- [`docs/validation-v0.1-human-list.md`](docs/validation-v0.1-human-list.md)
 - [`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)
 
 ## V0.1 工程入口
@@ -95,7 +96,7 @@ alu-dock help open
 alu-dock service logs --help
 ```
 
-顶层只展示`open/new/attach/list/status/stop/service/help`。内部测试/诊断入口不会与人类workflow等权出现；明确请求其help时只会引导到人类命令和typed DockClient/Protocol V2。
+顶层只展示`open/new/attach/list/status/stop/service/help`。默认`alu-dock list`按终端宽度输出最多100个两行实例摘要（短ID、name、state、generation、model、cwd及条件pending/reopen），不暴露完整DTO；机器消费者直接使用typed DockClient/V2。内部测试/诊断入口不会与人类workflow等权出现；明确请求其help时只会引导到人类命令和typed DockClient/Protocol V2。
 
 该入口连接已启用的 `alu-dock.service`，不会调用 systemctl或静默 fork detached Host；service不可用时返回 `service_unavailable` 与明确诊断。它按当前 cwd 查找实例：没有则创建，一个 active则直接重连，存在 `host_lost/runtime_error` 时由选择器要求用户显式 reopen。Reopen保持 Dock ID与creation metadata、generation +1，并恢复Pi session context，但不恢复或重放旧 prompt、queue、Promise或tool effect。
 
@@ -137,7 +138,7 @@ alu-dock attach INSTANCE_ID
 
 ## 内部机器与诊断接口
 
-Alu Dock没有Agent通过自身CLI自循环控制Host的设计。下列结构化JSONL命令来自V0/V0.1跨进程测试、release smoke和排障，不是模型tool surface，已从顶层human help移除。新测试优先直接使用typed `DockClient`/Protocol V2；#167继续迁移默认`list`的机器消费者。
+Alu Dock没有Agent通过自身CLI自循环控制Host的设计。下列结构化JSONL命令来自V0/V0.1跨进程测试、release smoke和排障，不是模型tool surface，已从顶层human help移除。新测试优先直接使用typed `DockClient`/Protocol V2；默认`list`已不再提供机器JSON，仓库机器消费者已迁移。
 
 当前开发候选仍提供：
 
