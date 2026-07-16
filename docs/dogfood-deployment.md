@@ -101,7 +101,7 @@ npm run deploy:dogfood
 2. 执行 TypeScript、clean build、全量 tests、audit、diff/import/package-root门禁；
 3. 创建 staging release并安装 lockfile固定的 production dependencies；
 4. 对 staging entry执行离线加载检查；
-5. 查询当前 Host；存在 active instance/run时默认停止发布，要求用户先正常收口或明确授权 disruptive restart；
+5. 使用`current` immutable release自带的typed DockClient查询当前Host（避免让新绿地wire parser承担旧contract兼容）；存在active instance/run时默认停止发布，要求用户先正常收口或明确授权disruptive restart；
 6. 完成 release目录后原子切换 `current`；
 7. `daemon-reload`，enable/restart unit；首次迁移若存在 unmanaged Host必须显式授权并先 SIGTERM等待退出，绝不直接 unlink其 live socket；
 8. bounded等待 V2 hello，验证 hello PID等于 unit `MainPID`，restart时验证 `hostEpoch` 已变化；

@@ -90,12 +90,12 @@ PASS on the coordinated source tree:
 
 ```text
 npm run check -- --pretty false  PASS
-npm test                         PASS (261/261)
+npm test                         PASS (262/262)
 npm audit --audit-level=high     PASS (0 vulnerabilities)
 git diff --check                PASS
 ```
 
-The deterministic Night Console benchmark remained bounded at 1.002 / 0.597 / 0.502 CPU ms per update for text delta / tool args / tool output. Package-root export probes passed; no private Pi subpath imports or Pi session objects exist in `src/tui`; the intentionally retired repository `.pi/settings.json` remains absent.
+The deterministic Night Console benchmark remained bounded at 1.002 / 0.597 / 0.502 CPU ms per update for text delta / tool args / tool output. Package-root export probes passed; no private Pi subpath imports or Pi session objects exist in `src/tui`; the intentionally retired repository `.pi/settings.json` remains absent. The first pre-switch deploy probe correctly refused to guess across the replaced hello-limits contract; deployment now inspects an existing Host with the immutable `current` release's own typed client, covered by the 262nd regression test, rather than adding compatibility to the new runtime client.
 
 ## Managed and terminal evidence
 

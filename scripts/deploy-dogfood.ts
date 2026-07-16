@@ -26,6 +26,7 @@ import {
   releaseId,
   renderDogfoodLauncher,
   renderDogfoodUnit,
+  renderReleasedHostInspectionScript,
   type DogfoodReleaseLayout,
 } from "../src/deployment/dogfood-release.js";
 import { DOCK_VERSION, PI_SDK_VERSION } from "../src/version.js";
@@ -61,7 +62,7 @@ async function main(): Promise<void> {
 
   const commit = command("git", ["rev-parse", "HEAD"], { cwd: repository, capture: true }).stdout.trim();
   assertCleanRepository(repository);
-  const before = await inspectCurrentHost(socketPath);
+  const before = await inspectCurrentHost(socketPath, layout);
   if (before?.activeInstances && !options.allowActive) {
     throw new Error(`Deployment refused: current Host has ${before.activeInstances} active instance(s); stop them first or pass --allow-active explicitly`);
   }
@@ -269,7 +270,16 @@ async function switchCurrent(layout: DogfoodReleaseLayout, target: string): Prom
   await rename(temporary, layout.current);
 }
 
-async function inspectCurrentHost(socketPath: string): Promise<HostBeforeDeploy | undefined> {
+async function inspectCurrentHost(socketPath: string, layout: DogfoodReleaseLayout): Promise<HostBeforeDeploy | undefined> {
+  const released = await currentRelease(layout);
+  if (released) {
+    const projection = inspectWithReleasedClient(released, socketPath);
+    if (projection) {
+      const mainPid = unitMainPid();
+      return { ...projection, managed: isUnitActive() && mainPid === projection.pid };
+    }
+  }
+
   const client = new DockClient({ socketPath, timeoutMs: 500 });
   try {
     const ping = await client.ping();
@@ -285,6 +295,24 @@ async function inspectCurrentHost(socketPath: string): Promise<HostBeforeDeploy 
     if (error instanceof ControlClientError && ["connection_error", "connection_closed", "timeout"].includes(error.code)) return undefined;
     throw error;
   }
+}
+
+function inspectWithReleasedClient(release: string, socketPath: string): Omit<HostBeforeDeploy, "managed"> | undefined {
+  const clientModule = join(release, "dist", "src", "control", "dock-client.js");
+  const result = command(process.execPath, ["--input-type=module", "-e", renderReleasedHostInspectionScript(), clientModule, socketPath], {
+    cwd: release,
+    capture: true,
+    allowFailure: true,
+  });
+  if (result.status !== 0) return undefined;
+  let parsed: unknown;
+  try { parsed = JSON.parse(result.stdout); } catch { throw new Error("Current release client returned invalid Host inspection JSON"); }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Current release client returned an invalid Host inspection");
+  const value = parsed as Record<string, unknown>;
+  if (!Number.isSafeInteger(value.pid) || (value.pid as number) <= 1 || typeof value.hostEpoch !== "string" || !Number.isSafeInteger(value.activeInstances) || (value.activeInstances as number) < 0) {
+    throw new Error("Current release client returned an invalid Host inspection");
+  }
+  return { pid: value.pid as number, hostEpoch: value.hostEpoch, activeInstances: value.activeInstances as number };
 }
 
 async function stopUnmanagedHost(pid: number, socketPath: string): Promise<void> {
@@ -306,7 +334,7 @@ async function waitForReadyHost(socketPath: string, previousEpoch?: string): Pro
       const ping = await new DockClient({ socketPath, timeoutMs: 500 }).ping();
       const mainPid = unitMainPid();
       const capabilities = new Set(ping.capabilities);
-      const missing = ["catalog.v1", "service.managed.v1", "session.reopen", "session.tree.v1"].filter((capability) => !capabilities.has(capability));
+      const missing = ["catalog.maintenance.v1", "catalog.v1", "service.managed.v1", "session.reopen", "session.tree.v1"].filter((capability) => !capabilities.has(capability));
       if (mainPid !== ping.pid) lastError = `hello PID ${ping.pid} does not match MainPID ${mainPid}`;
       else if (missing.length > 0) lastError = `Host lacks managed capabilities: ${missing.join(", ")}`;
       else if (previousEpoch !== undefined && ping.hostEpoch === previousEpoch) lastError = "hostEpoch did not change";

@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -7,6 +11,7 @@ import {
   releaseId,
   renderDogfoodLauncher,
   renderDogfoodUnit,
+  renderReleasedHostInspectionScript,
 } from "../src/deployment/dogfood-release.js";
 
 test("dogfood release layout keeps immutable releases behind one stable launcher", () => {
@@ -31,6 +36,28 @@ test("generated launcher pins Node and marks interactive startup as managed", ()
   assert.match(launcher, /export ALU_DOCK_MANAGED=1/);
   assert.match(launcher, /exec '\/opt\/node'"'"'s\/bin\/node' '\/srv\/alu dock\/current\/dist\/src\/cli\.js' "\$@"/);
   assert.throws(() => renderDogfoodLauncher("node", "/absolute/cli.js"), /safe absolute/);
+});
+
+test("deployment inspects an existing Host with that immutable release's own client contract", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-release-client-"));
+  context.after(() => rm(directory, { recursive: true, force: true }));
+  const clientModule = join(directory, "dock-client.mjs");
+  await writeFile(clientModule, `
+    export class DockClient {
+      constructor(options) { if (options.socketPath !== "/old.sock") throw new Error("socket"); }
+      async ping() { return { pid: 42, hostEpoch: "old-epoch" }; }
+      async list() { return [{ lifecycle: "active" }, { lifecycle: "stopping" }, { lifecycle: "stopped" }]; }
+    }
+  `);
+  const result = spawnSync(process.execPath, [
+    "--input-type=module",
+    "-e",
+    renderReleasedHostInspectionScript(),
+    clientModule,
+    "/old.sock",
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), { pid: 42, hostEpoch: "old-epoch", activeInstances: 2 });
 });
 
 test("generated user unit owns private runtime paths and journal lifecycle", () => {

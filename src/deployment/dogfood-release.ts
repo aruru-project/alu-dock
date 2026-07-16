@@ -39,6 +39,18 @@ export function renderDogfoodLauncher(nodePath: string, cliPath: string): string
   return `#!/bin/sh\n${DOGFOOD_GENERATED_MARKER}\nexport ${DOGFOOD_MANAGED_ENV}=1\nexec ${shellQuote(nodePath)} ${shellQuote(cliPath)} "$@"\n`;
 }
 
+export function renderReleasedHostInspectionScript(): string {
+  return [
+    "import { pathToFileURL } from 'node:url';",
+    "const { DockClient } = await import(pathToFileURL(process.argv[1]).href);",
+    "const client = new DockClient({ socketPath: process.argv[2], timeoutMs: 500 });",
+    "const ping = await client.ping();",
+    "const instances = await client.list();",
+    "const activeInstances = instances.filter((item) => item.lifecycle === 'active' || item.lifecycle === 'stopping').length;",
+    "process.stdout.write(JSON.stringify({ pid: ping.pid, hostEpoch: ping.hostEpoch, activeInstances }));",
+  ].join("");
+}
+
 export function renderDogfoodUnit(options: DogfoodUnitOptions): string {
   assertSafeAbsolutePath(options.nodePath, "Node");
   assertSafeAbsolutePath(options.cliPath, "CLI");
