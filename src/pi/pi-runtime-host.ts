@@ -61,6 +61,7 @@ import { projectJsonObject } from "../core/managed-instance.js";
 import { RuntimeModelNotFoundError, RuntimeSettingsWriteError, RuntimeUnknownToolError } from "../core/runtime-session.js";
 import { configurePiNetwork } from "./configure-pi-network.js";
 import { createPiExtensionUiContext } from "./pi-extension-ui-adapter.js";
+import { piToolResultNormalizerExtension } from "./pi-tool-result-normalizer.js";
 import {
   applyPiSetting,
   assertPiSettingUpdate,
@@ -981,7 +982,14 @@ export async function createPiRuntimeHost(options: CreatePiRuntimeHostOptions): 
       projectTrusted: trustByCwd.get(canonicalCwd) ?? false,
     });
     configurePiNetwork(settingsManager);
-    const services = await createAgentSessionServices({ cwd: canonicalCwd, agentDir, settingsManager });
+    const services = await createAgentSessionServices({
+      cwd: canonicalCwd,
+      agentDir,
+      settingsManager,
+      resourceLoaderOptions: {
+        extensionFactories: [{ name: "alu-dock-tool-result-normalizer", factory: piToolResultNormalizerExtension }],
+      },
+    });
     const result = await createAgentSessionFromServices({
       services, sessionManager, sessionStartEvent, tools: options.tools, excludeTools: options.excludeTools,
     });

@@ -4,7 +4,7 @@ Date: 2026-07-16
 
 Cards: #160, #169, #170; aggregate gate #164
 
-Status: source implementation and focused deterministic validation complete; consolidated gate, immutable rollout, managed live-subagent smoke and user Windows Terminal acceptance remain pending
+Status: source implementation and consolidated gate complete; immutable rollout, managed live-subagent smoke and user Windows Terminal acceptance remain pending
 
 ## Scope
 
@@ -22,7 +22,7 @@ This slice replaces the historical `20260716T065650Z-d979cd4aa118` #164 candidat
 
 - The generated user unit keeps an absolute pinned Node `ExecStart` and now supplies a deterministic subprocess `PATH`: the deployed Node executable directory first, then `~/.local/bin` and standard system directories. It does not inherit an arbitrary login-shell PATH.
 - On this installation the pinned Node directory is also the installed stock `pi` binary directory used by `pi-subagents`; Runtime never spawns or parses `alu-dock` itself.
-- Closed `tool.completed.isError` remains authoritative for the human tool row. A failed subagent is rendered with the failed icon/state rather than `done`.
+- Pi 0.80.6 marks a returned extension-tool payload successful unless the tool throws, even when `pi-subagents` returns `isError:true`. An Alu Dock inline extension uses Pi's public `tool_result` hook to promote authoritative bounded `details.results[*].exitCode != 0` or timeout evidence into the actual result `isError` before the model, session history and Dock projection consume it. A failed subagent is therefore rendered with the failed icon/state rather than `done`; unrelated tools and successful/async subagent receipts are unchanged.
 - Unsupported component/custom/tool-expansion visual requests do not create an extension error storm. One bounded warning explains that the visual request was ignored; actual tool failure remains a separate lifecycle fact. Arbitrary `ctx.ui.custom()` and extension-owned renderers remain unsupported.
 
 ### Localized activity pulse
@@ -66,9 +66,10 @@ node --test \
   dist/test/dogfood-release.test.js \
   dist/test/user-service.test.js \
   dist/test/queue-restoration.test.js \
-  dist/test/managed-instance.test.js
+  dist/test/managed-instance.test.js \
+  dist/test/pi-tool-result-normalizer.test.js
 
-159 tests, 159 pass, 0 fail
+164 tests, 164 pass, 0 fail
 ```
 
 The focused set includes:
@@ -79,7 +80,7 @@ The focused set includes:
 - startup-zero, overlay/autocomplete priority, and paired opt-in/detach-cleanup mouse sequences;
 - closed maintenance DTOs, same-Host dedup, post-rename ambiguity, 10,000-record count pagination, long-path byte pagination, 1,000-record prune and stale cursor rejection;
 - Pi-session evidence surviving forget;
-- honest failed tool projection and one unsupported-visual warning;
+- bounded child-exit normalization, honest failed tool projection and one unsupported-visual warning;
 - deterministic generated unit PATH.
 
 Two rounds of independent read-only review found and the implementation corrected: missing advertised/readiness capability assertions, count- and byte-unbounded catalog listing, oldest-first human pages, a hostile non-progressing list cursor, stale activity placement across resize, backwards `/mouse` description, startup mouse-count masking, autocomplete/mouse Esc priority, missing active-mode detach cleanup coverage and stale attach streams after catalog removal.
@@ -90,12 +91,12 @@ PASS on the coordinated source tree:
 
 ```text
 npm run check -- --pretty false  PASS
-npm test                         PASS (262/262)
+npm test                         PASS (264/264)
 npm audit --audit-level=high     PASS (0 vulnerabilities)
 git diff --check                PASS
 ```
 
-The deterministic Night Console benchmark remained bounded at 1.002 / 0.597 / 0.502 CPU ms per update for text delta / tool args / tool output. Package-root export probes passed; no private Pi subpath imports or Pi session objects exist in `src/tui`; the intentionally retired repository `.pi/settings.json` remains absent. The first pre-switch deploy probe correctly refused to guess across the replaced hello-limits contract; deployment now inspects an existing Host with the immutable `current` release's own typed client, covered by the 262nd regression test, rather than adding compatibility to the new runtime client.
+The deterministic Night Console benchmark remained bounded at 0.941 / 0.699 / 0.527 CPU ms per update for text delta / tool args / tool output. Package-root export probes passed; no private Pi subpath imports or Pi session objects exist in `src/tui`; the intentionally retired repository `.pi/settings.json` remains absent. The first pre-switch deploy probe correctly refused to guess across the replaced hello-limits contract; deployment now inspects an existing Host with the immutable `current` release's own typed client, covered by a dedicated regression test, rather than adding compatibility to the new runtime client.
 
 ## Managed and terminal evidence
 
