@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { visibleWidth, type Component } from "@earendil-works/pi-tui";
 
-import type { DockEvent, InstanceSnapshot } from "../src/core/managed-instance.js";
+import type { DockEvent, HistoryEntryDto, InstanceSnapshot } from "../src/core/managed-instance.js";
 import {
   abortingActivity,
   activityFromReplay,
@@ -11,6 +11,8 @@ import {
   reduceRunActivity,
   submittingActivity,
 } from "../src/tui/run-activity.js";
+import { DockConversation } from "../src/tui/conversation.js";
+import { FixedDockScreen } from "../src/tui/pi-tui-screen.js";
 import {
   HistoryViewport,
   composeFixedScreen,
@@ -102,6 +104,89 @@ test("history viewport auto-follows, locks on page-up, counts unseen output, and
   assert.equal(followed.locked, false);
   assert.equal(followed.unseenUpdates, 0);
   assert.deepEqual(followed.lines, ["line 7", "line 8", "line 9", "line 10"]);
+});
+
+test("fixed screen preserves an entry-and-row anchor across prepend eviction and resize", () => {
+  const conversation = new DockConversation();
+  const initial = Array.from({ length: 12 }, (_, index): HistoryEntryDto => ({
+    entryId: `entry-${index + 20}`,
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: [{ type: "text", text: `anchor history ${index + 20} with enough words to wrap at narrow widths` }],
+  }));
+  conversation.replacePagedHistory({
+    entries: initial,
+    hasEarlier: true,
+    hasNewer: false,
+    nextBeforeEntryId: initial[0]!.entryId,
+    loadState: "idle",
+    generation: 1,
+    revision: 1,
+  });
+  const empty: Component = { render: () => [], invalidate: () => {} };
+  const terminal = { rows: 12 };
+  const screen = new FixedDockScreen(terminal, {
+    header: empty,
+    history: conversation,
+    status: empty,
+    help: empty,
+    editor: empty,
+    historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
+  });
+
+  screen.render(42);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const atTop = screen.pageUp();
+    screen.render(42);
+    if (atTop) break;
+  }
+  const anchor = screen.captureHistoryAnchor();
+  assert.ok(anchor);
+  assert.match(anchor.row.entryKey, /^history:entry-/);
+  const beforePrepend = screen.render(42);
+  const anchoredText = "anchor history 20";
+  const anchoredScreenRow = beforePrepend.findIndex((line) => line.includes(anchoredText));
+  assert.ok(anchoredScreenRow >= 0);
+
+  conversation.apply(event(90, "message.submitted", {
+    operationId: "live-during-page",
+    messageId: "live-during-page",
+    role: "user",
+    text: "live output while the earlier page is loading",
+    delivery: "prompt",
+  }));
+  const older = Array.from({ length: 8 }, (_, index): HistoryEntryDto => ({
+    entryId: `entry-${index + 12}`,
+    role: "assistant",
+    content: [{ type: "text", text: `older history ${index + 12}` }],
+  }));
+  conversation.replacePagedHistory({
+    entries: [...older, ...initial.slice(0, 6), ...initial.slice(-2)],
+    hasEarlier: true,
+    hasNewer: true,
+    nextBeforeEntryId: older[0]!.entryId,
+    newerBoundaryEntryId: initial.at(-2)!.entryId,
+    loadState: "idle",
+    generation: 1,
+    revision: 2,
+  });
+  screen.restoreHistoryAnchor(anchor);
+  const afterPrependRows = screen.render(42);
+  assert.equal(afterPrependRows.findIndex((line) => line.includes(anchoredText)), anchoredScreenRow);
+
+  const resizeAnchor = screen.captureHistoryAnchor();
+  assert.ok(resizeAnchor);
+  screen.render(28);
+  const afterResize = screen.captureHistoryAnchor();
+  assert.equal(afterResize?.row.entryKey, resizeAnchor.row.entryKey);
+  assert.equal(afterResize?.screenRow, resizeAnchor.screenRow);
+
+  terminal.rows = 8;
+  const heightAnchor = screen.captureHistoryAnchor();
+  assert.ok(heightAnchor);
+  screen.render(28);
+  const afterHeightResize = screen.captureHistoryAnchor();
+  assert.equal(afterHeightResize?.row.entryKey, heightAnchor.row.entryKey);
+  assert.ok((afterHeightResize?.screenRow ?? 99) <= heightAnchor.screenRow);
 });
 
 test("layout-only tool expansion preserves an explicit reveal offset", () => {

@@ -658,7 +658,7 @@ test("SSH TUI model picker filters typed input and history viewport scroll-locks
   let runtime: DelayedRuntimeSession | undefined;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
     runtime = new DelayedRuntimeSession(`pi-${id}`);
-    runtime.history = Array.from({ length: 36 }, (_, index) => ({
+    runtime.history = Array.from({ length: 450 }, (_, index) => ({
       entryId: `history-${index}`,
       role: index % 2 === 0 ? "user" as const : "assistant" as const,
       content: [{ type: "text" as const, text: `historical line ${index}` }],
@@ -715,6 +715,19 @@ test("SSH TUI model picker filters typed input and history viewport scroll-locks
   assert.match(scrollOutput, /history paused/);
   assert.match(scrollOutput, /new output/);
   await client.abort(created.id);
+
+  const historyPty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+    "attach", created.id,
+  ], "history-page");
+  const historyOutput = Buffer.from(historyPty.output, "base64").toString("utf8");
+  assert.equal(historyPty.timedOut, false, historyOutput.slice(-4_000));
+  assert.equal(historyPty.status, 0, historyOutput.slice(-4_000));
+  assert.match(historyOutput, /historical line 0/, "reverse pagination must reach beyond the recent 200-entry tail");
+  assert.ok(historyOutput.includes("\u001b[?1000h\u001b[?1006h"), "TUI must enable paired mouse tracking");
+  assert.ok(historyOutput.includes("\u001b[?1006l\u001b[?1000l"), "TUI must restore terminal mouse tracking on detach");
 
   const toolPty = await runPtyTui([
     process.execPath,
@@ -2263,7 +2276,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "editor" | "abort" | "queue-restore" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "model-search" | "scroll" | "tool-fold" | "extension-dialogs" | "extension-replacement" = "detach",
+  action: "detach" | "editor" | "abort" | "queue-restore" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "model-search" | "scroll" | "history-page" | "tool-fold" | "extension-dialogs" | "extension-replacement" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {

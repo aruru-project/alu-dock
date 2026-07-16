@@ -143,6 +143,25 @@ def main() -> int:
                 os.write(fd, b"\x1b[6~")  # PageDown returns one PageUp to the bottom.
                 time.sleep(0.1)
                 read_available(fd, output, 0.05)
+            elif action == "history-page":
+                # Exercise both SGR wheel and PageUp against the app-owned viewport.
+                for _ in range(6):
+                    os.write(fd, b"\x1b[<64;10;5M")
+                    time.sleep(0.02)
+                    read_available(fd, output, 0.01)
+                history_deadline = time.monotonic() + 12
+                attempts = 0
+                while b"historical line 0" not in output and time.monotonic() < history_deadline and attempts < 280:
+                    os.write(fd, b"\x1b[5~")
+                    attempts += 1
+                    time.sleep(0.025)
+                    read_available(fd, output, 0.01)
+                if b"historical line 0" in output:
+                    os.write(fd, b"\x1b[<65;10;5M")
+                    os.write(fd, b"\x1b[6~")
+                    os.write(fd, b"\x1b[1;5F")  # Ctrl+End returns to the retained live tail.
+                    time.sleep(0.1)
+                    read_available(fd, output, 0.05)
             elif action == "queue-restore" or action == "queue-abort":
                 queue_deadline = time.monotonic() + 4
                 while b"steer next" not in output and time.monotonic() < queue_deadline:
@@ -169,10 +188,16 @@ def main() -> int:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\x1bo")  # Alt+O: expand latest tool only.
-                expand_deadline = time.monotonic() + 3
+                expand_deadline = time.monotonic() + 1
                 while b"expanded tool detail" not in output and time.monotonic() < expand_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
+                if b"expanded tool detail" not in output:
+                    os.write(fd, b"\x1b[6~")  # PageDown through detail when narrow chrome leaves fewer rows.
+                    expand_deadline = time.monotonic() + 2
+                    while b"expanded tool detail" not in output and time.monotonic() < expand_deadline:
+                        if read_available(fd, output, 0.05) < 0:
+                            break
             elif action == "stage6":
                 os.write(fd, b"/tree tree-u2\r")
                 tree_deadline = time.monotonic() + 5

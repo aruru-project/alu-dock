@@ -6,14 +6,15 @@ import {
 } from "@earendil-works/pi-tui";
 
 import type { DockEvent, HistoryEntryDto, InstanceSnapshot } from "../core/managed-instance.js";
+import type { HistoryWindowSnapshot } from "./history-pagination.js";
 import type { RunActivityState } from "./run-activity.js";
 import { markdownTheme, paint } from "./theme.js";
 
 type EntryKind = "user" | "assistant" | "thinking" | "tool" | "system" | "error";
-
 type ToolState = "running" | "done" | "failed";
 
 interface ConversationEntry {
+  key: string;
   kind: EntryKind;
   text: string;
   complete: boolean;
@@ -25,6 +26,20 @@ interface ConversationEntry {
   renderCache?: { width: number; revision: number; expanded: boolean; lines: string[] };
 }
 
+export interface ConversationRowAnchor {
+  entryKey: string;
+  rowWithinEntry: number;
+}
+
+interface ConversationRenderCache {
+  width: number;
+  revision: number;
+  lines: string[];
+  spanKeys: string[];
+  spanStarts: number[];
+  spanCounts: number[];
+}
+
 interface ToolProjection {
   entry: ConversationEntry;
   id: string;
@@ -34,7 +49,7 @@ interface ToolProjection {
   omitted: string[];
 }
 
-const MAX_ENTRIES = 200;
+const MAX_LIVE_ENTRIES = 200;
 const MAX_TOOL_OUTPUT = 8_000;
 const MAX_TOOL_ARGS = 4_000;
 
@@ -50,61 +65,70 @@ export class DockConversation implements Component {
   private outputPadding = 1;
   private revisionValue = 0;
   private outputRevisionValue = 0;
-  private renderCache: { width: number; revision: number; lines: string[] } | undefined;
+  private historyDisplayCount = 0;
+  private liveEntrySequence = 0;
+  private renderCache: ConversationRenderCache | undefined;
 
   reset(): void {
     this.entries.length = 0;
     this.tools.clear();
     this.currentAssistant = undefined;
     this.currentThinking = undefined;
+    this.historyDisplayCount = 0;
+    this.liveEntrySequence = 0;
     this.toolExpansionOverrides.clear();
     this.markLayoutChanged();
   }
 
   applyHistory(entries: HistoryEntryDto[], truncated: boolean): void {
-    if (truncated) this.add("system", "Earlier session history is available through paged history.");
-    for (const entry of entries) {
-      const thinking = contentText(entry.content, "thinking");
-      const text = contentText(entry.content, "text");
-      if (entry.role === "user") {
-        this.add("user", text ?? historyOmissions(entry));
-      } else if (entry.role === "assistant") {
-        if (!this.hideThinking && thinking) this.add("thinking", thinking);
-        if (text) this.add("assistant", text);
-        for (const block of entry.content) {
-          if (block.type !== "tool_call") continue;
-          const projected: ToolProjection = {
-            entry: this.addTool(block.toolCallId, true),
-            id: block.toolCallId,
-            name: block.toolName,
-            args: formatJson(block.args, MAX_TOOL_ARGS),
-            omitted: [...(block.omittedFields ?? [])],
-          };
-          this.tools.set(block.toolCallId, projected);
-          this.updateTool(projected, "done");
-        }
-        if (entry.error) this.add("error", entry.error);
-      } else if (entry.role === "tool") {
-        for (const block of entry.content) {
-          if (block.type !== "tool_result") continue;
-          const projected = this.tools.get(block.toolCallId) ?? {
-            entry: this.addTool(block.toolCallId, true),
-            id: block.toolCallId,
-            name: block.toolName,
-            omitted: [],
-          };
-          projected.name = block.toolName;
-          projected.output = block.text;
-          projected.omitted = [...new Set([...projected.omitted, ...(block.omittedFields ?? [])])];
-          this.tools.set(block.toolCallId, projected);
-          this.updateTool(projected, block.isError ? "failed" : "done");
-          projected.entry.diffText = !block.isError && looksLikeDiff(block.text) ? block.text : undefined;
-          this.tools.delete(block.toolCallId);
-        }
-      } else {
-        this.add(entry.error ? "error" : "system", text || historyOmissions(entry) || entry.error || "Session event");
-      }
+    this.replacePagedHistory({
+      entries,
+      hasEarlier: truncated,
+      hasNewer: false,
+      ...(truncated && entries[0] ? { nextBeforeEntryId: entries[0].entryId } : {}),
+      loadState: "idle",
+      generation: 0,
+      revision: 0,
+    });
+  }
+
+  replacePagedHistory(window: HistoryWindowSnapshot): void {
+    const liveEntries = this.entries.slice(this.historyDisplayCount);
+    const newerBoundaryIndex = window.newerBoundaryEntryId === undefined
+      ? -1
+      : window.entries.findIndex((entry) => entry.entryId === window.newerBoundaryEntryId);
+    const historyEntries = newerBoundaryIndex > 0
+      ? [
+          ...this.projectHistory(window.entries.slice(0, newerBoundaryIndex)),
+          this.createEntry(
+            "history:newer-boundary",
+            "system",
+            "Newer session history crossed a bounded-memory gap · PageDown continues at the retained live tail.",
+          ),
+          ...this.projectHistory(window.entries.slice(newerBoundaryIndex)),
+        ]
+      : this.projectHistory(window.entries);
+    if (window.hasEarlier) {
+      const text = window.loadState === "loading"
+        ? "Loading earlier session history…"
+        : window.loadState === "error"
+          ? `Earlier session history unavailable: ${window.error ?? "unknown error"}. PageUp retries · Ctrl+End reloads latest.`
+          : "Earlier session history is available through paged history.";
+      historyEntries.unshift(this.createEntry("history:earlier-boundary", "system", text));
     }
+    if (window.hasNewer && newerBoundaryIndex <= 0) {
+      historyEntries.push(this.createEntry(
+        "history:newer-boundary",
+        "system",
+        "Newer session history is outside this bounded memory window · Ctrl+End returns to the live tail.",
+      ));
+    }
+    this.entries.splice(0, this.entries.length, ...historyEntries, ...liveEntries);
+    this.historyDisplayCount = historyEntries.length;
+    for (const toolCallId of this.toolExpansionOverrides.keys()) {
+      if (!this.entries.some((entry) => entry.toolCallId === toolCallId)) this.toolExpansionOverrides.delete(toolCallId);
+    }
+    this.markLayoutChanged();
   }
 
   applyReplay(events: DockEvent[], truncated: boolean): void {
@@ -380,23 +404,68 @@ export class DockConversation implements Component {
     }
     if (this.entries.length === 0) {
       const lines = [paint.muted("  Start a conversation below.")];
-      this.renderCache = { width, revision: this.revisionValue, lines };
+      this.renderCache = {
+        width,
+        revision: this.revisionValue,
+        lines,
+        spanKeys: ["conversation:empty"],
+        spanStarts: [0],
+        spanCounts: [1],
+      };
       return lines;
     }
 
     const indent = " ".repeat(this.outputPadding + 1);
     const contentWidth = Math.max(1, width - visibleIndentWidth(indent));
     const lines: string[] = [];
+    const spanKeys: string[] = [];
+    const spanStarts: number[] = [];
+    const spanCounts: number[] = [];
     for (const entry of this.entries) {
       if (this.hideThinking && entry.kind === "thinking") continue;
+      const startRow = lines.length;
       lines.push(truncateToWidth(`${indent}${label(entry)}`, width));
       for (const line of this.renderEntry(entry, contentWidth)) {
         lines.push(truncateToWidth(`${indent}${line}`, width));
       }
       lines.push("");
+      spanKeys.push(entry.key);
+      spanStarts.push(startRow);
+      spanCounts.push(lines.length - startRow);
     }
-    this.renderCache = { width, revision: this.revisionValue, lines };
+    this.renderCache = {
+      width,
+      revision: this.revisionValue,
+      lines,
+      spanKeys,
+      spanStarts,
+      spanCounts,
+    };
     return lines;
+  }
+
+  rowAnchor(width: number, rowIndex: number): ConversationRowAnchor | undefined {
+    this.render(width);
+    const target = Math.max(0, Math.floor(rowIndex));
+    const cache = this.renderCache;
+    if (!cache) return undefined;
+    for (let index = 0; index < cache.spanKeys.length; index += 1) {
+      const startRow = cache.spanStarts[index] ?? 0;
+      if (target >= startRow && target < startRow + (cache.spanCounts[index] ?? 0)) {
+        return { entryKey: cache.spanKeys[index]!, rowWithinEntry: target - startRow };
+      }
+    }
+    return undefined;
+  }
+
+  rowIndexForAnchor(width: number, anchor: ConversationRowAnchor): number | undefined {
+    this.render(width);
+    const cache = this.renderCache;
+    const index = cache?.spanKeys.indexOf(anchor.entryKey) ?? -1;
+    if (!cache || index < 0) return undefined;
+    const startRow = cache.spanStarts[index] ?? 0;
+    const rowCount = cache.spanCounts[index] ?? 1;
+    return startRow + Math.min(Math.max(0, anchor.rowWithinEntry), rowCount - 1);
   }
 
   /** Plain projection used by deterministic tests and non-TTY validation. */
@@ -439,6 +508,73 @@ export class DockConversation implements Component {
     return lines;
   }
 
+  private projectHistory(entries: readonly HistoryEntryDto[]): ConversationEntry[] {
+    const projectedEntries: ConversationEntry[] = [];
+    const projectedTools = new Map<string, ToolProjection>();
+    const pieceCounts = new Map<string, number>();
+    const addProjected = (
+      source: HistoryEntryDto,
+      kind: EntryKind,
+      text: string,
+      complete = true,
+    ): ConversationEntry => {
+      const piece = pieceCounts.get(source.entryId) ?? 0;
+      pieceCounts.set(source.entryId, piece + 1);
+      const entry = this.createEntry(`history:${source.entryId}:${piece}`, kind, text, complete);
+      projectedEntries.push(entry);
+      return entry;
+    };
+
+    for (const source of entries) {
+      const thinking = contentText(source.content, "thinking");
+      const text = contentText(source.content, "text");
+      if (source.role === "user") {
+        addProjected(source, "user", text ?? historyOmissions(source));
+      } else if (source.role === "assistant") {
+        if (thinking) addProjected(source, "thinking", thinking);
+        if (text) addProjected(source, "assistant", text);
+        for (const block of source.content) {
+          if (block.type !== "tool_call") continue;
+          const toolEntry = addProjected(source, "tool", "");
+          toolEntry.toolCallId = block.toolCallId;
+          const tool: ToolProjection = {
+            entry: toolEntry,
+            id: block.toolCallId,
+            name: block.toolName,
+            args: formatJson(block.args, MAX_TOOL_ARGS),
+            omitted: [...(block.omittedFields ?? [])],
+          };
+          projectedTools.set(block.toolCallId, tool);
+          projectToolState(tool, "done");
+        }
+        if (source.error) addProjected(source, "error", source.error);
+      } else if (source.role === "tool") {
+        for (const block of source.content) {
+          if (block.type !== "tool_result") continue;
+          const tool: ToolProjection = projectedTools.get(block.toolCallId) ?? (() => {
+            const toolEntry = addProjected(source, "tool", "");
+            toolEntry.toolCallId = block.toolCallId;
+            return {
+              entry: toolEntry,
+              id: block.toolCallId,
+              name: block.toolName,
+              omitted: [],
+            };
+          })();
+          tool.name = block.toolName;
+          tool.output = block.text;
+          tool.omitted = [...new Set([...tool.omitted, ...(block.omittedFields ?? [])])];
+          projectToolState(tool, block.isError ? "failed" : "done");
+          tool.entry.diffText = !block.isError && looksLikeDiff(block.text) ? block.text : undefined;
+          projectedTools.delete(block.toolCallId);
+        }
+      } else {
+        addProjected(source, source.error ? "error" : "system", text || historyOmissions(source) || source.error || "Session event");
+      }
+    }
+    return projectedEntries;
+  }
+
   private updateTool(tool: ToolProjection, state: ToolState): void {
     const parts = [`${tool.name} ${state}`];
     if (tool.args) parts.push(`args\n${tool.args}`);
@@ -465,20 +601,29 @@ export class DockConversation implements Component {
   }
 
   private add(kind: EntryKind, text: string, complete = true): ConversationEntry {
-    const entry: ConversationEntry = { kind, text: safeTerminalText(text), complete, renderRevision: 0 };
+    const entry = this.createEntry(`live:${++this.liveEntrySequence}`, kind, text, complete);
     this.entries.push(entry);
     this.markOutputChanged();
-    while (this.entries.length > MAX_ENTRIES) {
-      const removed = this.entries.shift();
+    while (this.entries.length - this.historyDisplayCount > MAX_LIVE_ENTRIES) {
+      const [removed] = this.entries.splice(this.historyDisplayCount, 1);
       if (removed === this.currentAssistant) this.currentAssistant = undefined;
       if (removed === this.currentThinking) this.currentThinking = undefined;
       for (const [key, value] of this.tools) if (value.entry === removed) this.tools.delete(key);
       if (
         removed?.toolCallId
-        && !this.entries.some((entry) => entry.toolCallId === removed.toolCallId)
+        && !this.entries.some((candidate) => candidate.toolCallId === removed.toolCallId)
       ) this.toolExpansionOverrides.delete(removed.toolCallId);
     }
     return entry;
+  }
+
+  private createEntry(
+    key: string,
+    kind: EntryKind,
+    text: string,
+    complete = true,
+  ): ConversationEntry {
+    return { key, kind, text: safeTerminalText(text), complete, renderRevision: 0 };
   }
 
   private touchEntry(entry: ConversationEntry): void {
@@ -491,6 +636,18 @@ export class DockConversation implements Component {
     this.revisionValue += 1;
     this.outputRevisionValue += 1;
   }
+}
+
+function projectToolState(tool: ToolProjection, state: ToolState): void {
+  const parts = [`${tool.name} ${state}`];
+  if (tool.args) parts.push(`args\n${tool.args}`);
+  if (tool.omitted.length > 0) parts.push(`omitted: ${tool.omitted.join(", ")}`);
+  if (tool.output) parts.push(`result\n${tool.output}`);
+  tool.entry.text = safeTerminalText(parts.join("\n"));
+  tool.entry.toolName = tool.name;
+  tool.entry.toolState = state;
+  tool.entry.renderRevision += 1;
+  tool.entry.renderCache = undefined;
 }
 
 export class DockStatusLine implements Component {

@@ -9,6 +9,8 @@ export interface HistoryViewportSnapshot {
 export interface HistoryViewportProjection extends HistoryViewportSnapshot {
   lines: string[];
   indicatorVisible: boolean;
+  startRow: number;
+  endRow: number;
 }
 
 interface HistoryRenderVersion {
@@ -24,6 +26,8 @@ export class HistoryViewport {
   private visibleRows = 1;
   private pageRows = 1;
   private canScrollUp = false;
+  private maximumLockedOffset = 0;
+  private anchorRestorePending = false;
   private previousLineCount = 0;
   private previousVersion: HistoryRenderVersion | undefined;
 
@@ -44,7 +48,8 @@ export class HistoryViewport {
         );
       }
       if (
-        version.width === previous.width
+        !this.anchorRestorePending
+        && version.width === previous.width
         && version.outputRevision > previous.outputRevision
         && version.revision !== previous.revision
         && allLines.length > this.previousLineCount
@@ -55,8 +60,11 @@ export class HistoryViewport {
     }
 
     const baseScrollable = rows > 0 && allLines.length > rows;
-    if (!baseScrollable) this.unlock();
+    if (!baseScrollable && this.offsetFromBottom > 0) this.unlock();
 
+    this.maximumLockedOffset = rows > 0
+      ? Math.max(0, allLines.length - Math.max(0, rows - 1))
+      : 0;
     const indicatorRows = this.offsetFromBottom > 0 && rows > 1 ? 1 : 0;
     const contentRows = Math.max(0, rows - indicatorRows);
     const maxOffset = Math.max(0, allLines.length - contentRows);
@@ -71,6 +79,7 @@ export class HistoryViewport {
     this.canScrollUp = start > 0;
     this.previousLineCount = allLines.length;
     this.previousVersion = { ...version };
+    this.anchorRestorePending = false;
 
     return {
       lines,
@@ -80,21 +89,41 @@ export class HistoryViewport {
       visibleRows: contentRows,
       canScrollUp: this.canScrollUp,
       indicatorVisible: indicatorRows === 1,
+      startRow: start,
+      endRow: end,
     };
   }
 
-  pageUp(): void {
-    this.offsetFromBottom += Math.max(1, this.pageRows - 1);
+  pageUp(): boolean {
+    return this.scrollUp(Math.max(1, this.pageRows - 1));
   }
 
-  pageDown(): void {
-    this.offsetFromBottom = Math.max(0, this.offsetFromBottom - Math.max(1, this.pageRows - 1));
+  pageDown(): boolean {
+    return this.scrollDown(Math.max(1, this.pageRows - 1));
+  }
+
+  scrollUp(rows: number): boolean {
+    const amount = Math.max(1, Math.floor(rows));
+    if (this.maximumLockedOffset === 0) return true;
+    this.offsetFromBottom = Math.min(this.maximumLockedOffset, this.offsetFromBottom + amount);
+    return this.offsetFromBottom >= this.maximumLockedOffset;
+  }
+
+  scrollDown(rows: number): boolean {
+    const amount = Math.max(1, Math.floor(rows));
+    this.offsetFromBottom = Math.max(0, this.offsetFromBottom - amount);
     if (this.offsetFromBottom === 0) this.unseenUpdates = 0;
+    return this.offsetFromBottom === 0;
   }
 
   scrollToOffsetFromBottom(offset: number): void {
     this.offsetFromBottom = Math.max(0, Math.floor(offset));
     this.unseenUpdates = 0;
+  }
+
+  restoreOffsetFromBottom(offset: number): void {
+    this.offsetFromBottom = Math.max(0, Math.floor(offset));
+    this.anchorRestorePending = true;
   }
 
   scrollToBottom(): void {

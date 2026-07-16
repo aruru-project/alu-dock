@@ -117,6 +117,45 @@ test("conversation projects persisted history before live replay", () => {
   ]);
 });
 
+test("paged history rebuild keeps the bounded gap ordered before live events", () => {
+  const conversation = new DockConversation();
+  conversation.applyHistory([
+    { entryId: "h8", role: "user", content: [{ type: "text", text: "recent eight" }] },
+    { entryId: "h9", role: "assistant", content: [{ type: "text", text: "recent nine" }] },
+  ], true);
+  conversation.apply(event(1, "message.submitted", {
+    operationId: "live-op",
+    messageId: "live-user",
+    role: "user",
+    text: "live tail",
+    delivery: "prompt",
+  }));
+
+  conversation.replacePagedHistory({
+    entries: [
+      { entryId: "h0", role: "user", content: [{ type: "text", text: "old zero" }] },
+      { entryId: "h1", role: "assistant", content: [{ type: "text", text: "old one" }] },
+      { entryId: "h8", role: "user", content: [{ type: "text", text: "recent eight" }] },
+      { entryId: "h9", role: "assistant", content: [{ type: "text", text: "recent nine" }] },
+    ],
+    hasEarlier: false,
+    hasNewer: true,
+    newerBoundaryEntryId: "h8",
+    loadState: "idle",
+    generation: 1,
+    revision: 2,
+  });
+
+  assert.deepEqual(conversation.snapshot().map((item) => item.text), [
+    "old zero",
+    "old one",
+    "Newer session history crossed a bounded-memory gap · PageDown continues at the retained live tail.",
+    "recent eight",
+    "recent nine",
+    "live tail",
+  ]);
+});
+
 test("conversation projects replay and live deltas into readable messages", () => {
   const conversation = new DockConversation();
   conversation.applyReplay([
