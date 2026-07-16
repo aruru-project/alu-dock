@@ -248,6 +248,24 @@ test("run activity recovers the current phase from replay only while the snapsho
   assert.equal(activityFromReplay(snapshot({ execution: "idle", lastRun: "succeeded" }), events).phase, "idle");
 });
 
+test("command handled clears waiting activity without requiring transcript output", () => {
+  let activity = submittingActivity();
+  activity = reduceRunActivity(activity, event(1, "command.accepted", {
+    operationId: "no-run-1", delivery: "prompt", queued: false, acceptedAt: "2026-07-15T00:00:00.000Z",
+  }), snapshot());
+  assert.equal(activity.phase, "waiting");
+
+  activity = reduceRunActivity(activity, event(2, "command.handled", {
+    operationId: "no-run-1", kind: "extension_command",
+  }), snapshot({ execution: "idle" }));
+  assert.deepEqual(activity, { phase: "idle", label: "ready" });
+
+  activity = reduceRunActivity(activity, event(3, "command.handled", {
+    operationId: "no-run-2", kind: "no_run",
+  }), snapshot({ execution: "idle", pending: { steering: 0, followUp: 2, total: 2 } }));
+  assert.deepEqual(activity, { phase: "queued", label: "queued 2" });
+});
+
 test("run activity covers compaction queue interaction abort failure and host loss", () => {
   const running = snapshot();
   let activity = reduceRunActivity(activityFromSnapshot(running), event(1, "compaction.started", {

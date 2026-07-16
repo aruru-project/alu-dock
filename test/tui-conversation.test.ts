@@ -119,6 +119,24 @@ test("conversation reset replaces old session history", () => {
   assert.deepEqual(conversation.snapshot(), [{ kind: "assistant", text: "new session", complete: true }]);
 });
 
+test("no-run completion stays out of conversation while failures and notifications remain visible", () => {
+  const conversation = new DockConversation();
+  conversation.applyReplay([
+    event(1, "command.handled", { operationId: "no-run-1", kind: "extension_command" }),
+    event(2, "command.handled", { operationId: "no-run-2", kind: "no_run" }),
+  ], false);
+  assert.deepEqual(conversation.snapshot(), []);
+
+  conversation.apply(event(3, "command.rejected", { operationId: "rejected-1", reason: "preflight_failed", error: "Command rejected visibly" }));
+  conversation.apply(event(4, "extension.notification", { level: "info", message: "Extension result remains visible" }));
+  conversation.apply(event(5, "extension.error", { error: "Extension failed visibly" }));
+  assert.deepEqual(conversation.snapshot().map((entry) => [entry.kind, entry.text]), [
+    ["error", "Command rejected visibly"],
+    ["system", "Extension result remains visible"],
+    ["error", "Extension failed visibly"],
+  ]);
+});
+
 test("conversation projects persisted history before live replay", () => {
   const conversation = new DockConversation();
   conversation.applyHistory([

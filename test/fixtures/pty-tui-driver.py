@@ -252,6 +252,12 @@ def main() -> int:
                 time.sleep(0.08)
                 while read_available(fd, output, 0.01) > 0:
                     pass
+            elif action == "command-handled":
+                for command in (b"/chain\r", b"/chain-prompts\r"):
+                    os.write(fd, command)
+                    time.sleep(0.15)
+                    while read_available(fd, output, 0.01) > 0:
+                        pass
             elif action == "tool-fold":
                 fold_deadline = time.monotonic() + 3
                 while b"Alt+O detail" not in output and time.monotonic() < fold_deadline:

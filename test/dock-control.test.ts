@@ -14,7 +14,7 @@ import { ProjectTrustCoordinator } from "../src/control/project-trust.js";
 import { ExtensionUiBroker } from "../src/core/extension-ui-broker.js";
 import { ManagedInstance, type DockEvent } from "../src/core/managed-instance.js";
 import { SETTING_KEYS } from "../src/core/config-projection.js";
-import { RuntimeInvalidSettingValueError, RuntimeSettingsWriteError } from "../src/core/runtime-session.js";
+import { RuntimeInvalidSettingValueError, RuntimeSettingsWriteError, type RuntimePromptOptions } from "../src/core/runtime-session.js";
 import { mouseTrackingSequences } from "../src/tui/mouse-input.js";
 import { DelayedRuntimeSession } from "./support/delayed-runtime-session.js";
 import { ScriptedCatalogCommitPort } from "./support/scripted-catalog-port.js";
@@ -25,6 +25,15 @@ interface Harness {
   host: DockHost;
   registry: DockRegistry;
   sessions: Map<string, DelayedRuntimeSession>;
+}
+
+class NoRunRuntimeSession extends DelayedRuntimeSession {
+  override prompt(text: string, options?: RuntimePromptOptions): Promise<void> {
+    this.promptCalls += 1;
+    this.promptMessages.push(text);
+    options?.preflightResult?.(true);
+    return Promise.resolve();
+  }
 }
 
 async function createHarness(): Promise<Harness> {
@@ -639,6 +648,54 @@ test("SSH TUI preserves concurrent composer input while transcript deltas remain
   assert.equal(pty.status, 0, output.slice(-2_000));
   assert.equal(pty.draftVisible, true, "the forced final frame must retain every typed character");
   assert.match(output, /responding/u);
+});
+
+test("SSH TUI keeps repeated no-run completion facts out of live and replayed conversation", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-no-run-pty-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  let runtime: NoRunRuntimeSession | undefined;
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, name }) => {
+    runtime = new NoRunRuntimeSession(`pi-${id}`);
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, name, session: runtime, eventCapacity: 500 });
+  }, () => "no-run-pty-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+  const created = await client.create(directory, "no-run-pty");
+
+  const livePty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+    "attach", created.id,
+  ], "command-handled");
+  const liveOutput = Buffer.from(livePty.output, "base64").toString("utf8");
+  assert.equal(livePty.timedOut, false, liveOutput.slice(-2_000));
+  assert.equal(livePty.status, 0, liveOutput.slice(-2_000));
+  assert.doesNotMatch(liveOutput, /Command handled without starting a model run/u);
+
+  const replayPty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+    "attach", created.id,
+  ]);
+  const replayOutput = Buffer.from(replayPty.output, "base64").toString("utf8");
+  assert.equal(replayPty.timedOut, false, replayOutput.slice(-2_000));
+  assert.equal(replayPty.status, 0, replayOutput.slice(-2_000));
+  assert.doesNotMatch(replayOutput, /Command handled without starting a model run/u);
+
+  assert.ok(runtime);
+  assert.equal(runtime.promptCalls, 2);
+  assert.deepEqual(runtime.promptMessages, ["/chain", "/chain-prompts"]);
+  const status = await client.status(created.id);
+  assert.equal(status.execution, "idle");
+  assert.equal(status.lastRun, "never");
+  const events = (await client.events(created.id)).page.events;
+  assert.equal(events.filter((event) => event.type === "command.handled").length, 2);
+  assert.equal(events.some((event) => event.type === "run.started"), false);
 });
 
 test("SSH TUI terminal selection mode pairs mouse tracking without aborting the run", async (context) => {
@@ -2370,7 +2427,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "editor" | "abort" | "queue-restore" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "model-search" | "scroll" | "history-page" | "tool-fold" | "activity-stability" | "activity-streaming" | "mouse-selection" | "extension-dialogs" | "extension-replacement" = "detach",
+  action: "detach" | "editor" | "abort" | "queue-restore" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "model-search" | "scroll" | "history-page" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "mouse-selection" | "extension-dialogs" | "extension-replacement" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {

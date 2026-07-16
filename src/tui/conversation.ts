@@ -322,7 +322,7 @@ export class DockConversation implements Component {
         break;
 
       case "command.handled":
-        this.add("system", "Command handled without starting a model run.");
+        // Completion remains visible through RunActivity; it is not conversation content.
         break;
 
       case "command.rejected":
