@@ -28,7 +28,8 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [x] 阶段 6：tree/fork/clone（源码、自动化门禁与managed rollout）
 - [x] #157 tool render storm、#154 queue诚实时序/撤回与#155长历史/滚轮修正
 - [x] #156 Night Console语义配色、single-column transcript与两行status dock
-- [ ] #158最终真人默认入口验收
+- [ ] #158最终真人默认入口验收（完成基线1/6后由#164暂停）
+- [ ] #164人工验收阻塞闸门（#161 collapsed tool摘要源码已完成；统一release待#160–#167完成）
 
 详细文档：
 
@@ -62,11 +63,12 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-v0.1-history-pagination.md`](docs/validation-v0.1-history-pagination.md)
 - [`docs/v0.1-night-console-design.md`](docs/v0.1-night-console-design.md)
 - [`docs/validation-v0.1-night-console.md`](docs/validation-v0.1-night-console.md)
+- [`docs/validation-v0.1-tool-summaries.md`](docs/validation-v0.1-tool-summaries.md)
 - [`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)
 
 ## V0.1 工程入口
 
-#142是V0.1唯一工程状态入口。阶段0–6、dogfood UX与Extension UI主体能力已完成；Stage 6 invariants保持冻结，当前immutable managed release为Night Console候选`20260716T024459Z-389eaf02697e`。#154 queue时序、#155长历史/滚轮与#156 Night Console均已完成，V0.1只余#158集中真人验收与最终收口；V0.2 renderer仍由#148独立排期。
+#142是V0.1工程状态入口。阶段0–6、dogfood UX与Extension UI主体能力已完成；Stage 6 invariants保持冻结，当前immutable managed release为Night Console开发候选`20260716T024459Z-389eaf02697e`，尚未通过实用签收。#158在基线1/6后暂停；#164按#161→#165→#160→#162→#163→#166→#167修复真人阻断，再统一发布和恢复验收。V0.2 renderer仍由#148独立排期。
 
 **绿地规则：** Alu Dock 是全新项目。到 1.0 落地前，除非用户特意说明，不考虑任何旧协议、旧 Host、旧数据、旧 CLI 行为的兼容或迁移；原型合同直接替换。版本号仅标识当前合同，不表示存在历史包袱。
 
@@ -117,9 +119,11 @@ alu-dock attach INSTANCE_ID
 
 再次执行 `alu-dock` 会先投影 Pi SessionManager 当前 branch 的最新200项持久 history baseline，到达viewport顶部后按需反向取页；客户端最多保留目标1000项/1600万字符，超界时明确标记gap并固定最新200项，再重放 Host 近期 events并从同一Host的ephemeral `pendingMessages`恢复queue tray，然后继续观察live events。只有Pi公开user `message_start`到达时，queued消息才进入正式transcript；accepted/queued receipt不冒充consumed。Host loss/reopen仍不恢复queue。Composer固定在两行status dock上方并向上增长，history在其上方独立滚动；活动行明确区分 waiting/thinking/responding/tool/retry/compaction/queue/host-loss。TUI Footer 展示 cwd、Dock/Pi ID、model/thinking、state/queue、tokens/context/cache/cost、extension status 和 connection/lease；extension/skill/prompt commands 与路径进入 autocomplete。模型/thinking切换沿用Pi的session与settings语义，只允许实例idle时执行；当前运行不会被中途换模。Host在创建Pi SDK session前安装与Pi CLI相同的Undici `EnvHttpProxyAgent`：优先保留进程已有`HTTP_PROXY`/`HTTPS_PROXY`，缺失时采用Pi全局`httpProxy`设置。默认socket为`$XDG_RUNTIME_DIR/alu-dock/dock.sock`；managed日志使用`journalctl --user -u alu-dock.service`。
 
-## 机器与诊断接口
+## 内部机器与诊断接口
 
-以下命令保留结构化 JSONL 输出，供测试、脚本和排障使用：
+Alu Dock没有Agent通过自身CLI自循环控制Host的设计。下列结构化JSONL命令来自V0/V0.1跨进程测试、release smoke和排障，不是模型tool surface，也不应与人类workflow等权占据顶层help。新测试优先直接使用typed `DockClient`/Protocol V2；#166/#167负责把公开人类CLI与必要内部control入口分离。
+
+当前开发候选仍提供：
 
 ```bash
 alu-dock ping
