@@ -2,7 +2,7 @@
 
 Alu Dock 是 #136「受管运行时宿主」的独立实现；V0 执行卡为 #137，V0.1 工程入口为 #142。
 
-V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座、阶段 2 SSH TUI/Footer、阶段 3 日常控制、阶段 4 Extension UI、阶段 5 durable Host lifecycle 与阶段 6 tree/fork/clone 均已完成源码、自动化门禁与managed rollout。当前Host提供V2 transaction/fault seam、private atomic catalog、startup reconcile、explicit reopen、持久branch/tree projection、稳定message/tool event、session metrics、可复用实例abort、`session.commands.v1`、`session.tree.v1`、`queue.control.v1`与`extension_ui.v1`；薄TUI提供fixed composer、可反向分页且统一PageUp/PageDown/滚轮的有界history viewport、明确run activity、默认折叠工具、Markdown/thinking/diff、动态autocomplete、可检索selector、完整Footer、诚实pending queue tray与Alt+Up/Esc恢复、new/resume/name/compact/reload/tree/fork/clone workflow，以及attach-bound extension select/confirm/input/editor overlay。旧`alu-daemon`、Rails WebConsole、Redis bridge与Alubot不在本仓库的修改范围内。
+V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结构化 Unix-socket 控制面跨客户端观察和继续交互。真人连续性验收结论为 **PASS**，不再向 V0 回填需求。V0.1 阶段 0 已冻结 SSH 默认 Pi 研发终端、`systemd --user` 常驻 Host、协议 V2、显式 session reopen、当前扩展兼容和故障边界，结论为 **GO**；阶段 1 Runtime/协议底座、阶段 2 SSH TUI/Footer、阶段 3 日常控制、阶段 4 Extension UI、阶段 5 durable Host lifecycle 与阶段 6 tree/fork/clone 均已完成源码、自动化门禁与managed rollout。当前Host提供V2 transaction/fault seam、private atomic catalog、startup reconcile、explicit reopen、持久branch/tree projection、稳定message/tool event、session metrics、可复用实例abort、`session.commands.v1`、`session.tree.v1`、`queue.control.v1`与`extension_ui.v1`；薄TUI提供Night Console single-column transcript、fixed composer与两行status dock、可反向分页且统一PageUp/PageDown/滚轮的有界history viewport、明确run activity、默认折叠工具、Markdown/thinking/diff、动态autocomplete、可检索selector、完整Footer、诚实pending queue tray与Alt+Up/Esc恢复、new/resume/name/compact/reload/tree/fork/clone workflow，以及attach-bound extension select/confirm/input/editor overlay。旧`alu-daemon`、Rails WebConsole、Redis bridge与Alubot不在本仓库的修改范围内。
 
 ## V0 冻结进度
 
@@ -27,6 +27,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [x] 阶段 5：`systemd --user`、durable catalog 与 explicit reopen
 - [x] 阶段 6：tree/fork/clone（源码、自动化门禁与managed rollout）
 - [x] #157 tool render storm、#154 queue诚实时序/撤回与#155长历史/滚轮修正
+- [x] #156 Night Console语义配色、single-column transcript与两行status dock
 - [ ] #158最终真人默认入口验收
 
 详细文档：
@@ -59,15 +60,17 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-v0.1-tool-render-performance.md`](docs/validation-v0.1-tool-render-performance.md)
 - [`docs/validation-v0.1-queue-consumption.md`](docs/validation-v0.1-queue-consumption.md)
 - [`docs/validation-v0.1-history-pagination.md`](docs/validation-v0.1-history-pagination.md)
+- [`docs/v0.1-night-console-design.md`](docs/v0.1-night-console-design.md)
+- [`docs/validation-v0.1-night-console.md`](docs/validation-v0.1-night-console.md)
 - [`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)
 
 ## V0.1 工程入口
 
-#142是V0.1唯一工程状态入口。阶段0–6、dogfood UX与Extension UI主体能力已完成；Stage 6 invariants保持冻结，当前immutable managed release为长历史修正版`20260716T014143Z-4a39989812be`。#154 queue时序与#155长历史/滚轮均已完成，V0.1只余#158集中真人验收与最终收口；V0.2 renderer仍由#148独立排期。
+#142是V0.1唯一工程状态入口。阶段0–6、dogfood UX与Extension UI主体能力已完成；Stage 6 invariants保持冻结，当前immutable managed release为Night Console候选`20260716T024459Z-389eaf02697e`。#154 queue时序、#155长历史/滚轮与#156 Night Console均已完成，V0.1只余#158集中真人验收与最终收口；V0.2 renderer仍由#148独立排期。
 
 **绿地规则：** Alu Dock 是全新项目。到 1.0 落地前，除非用户特意说明，不考虑任何旧协议、旧 Host、旧数据、旧 CLI 行为的兼容或迁移；原型合同直接替换。版本号仅标识当前合同，不表示存在历史包袱。
 
-阶段0文档描述的是V0.1**目标合同**。阶段1已将当前控制面切为V2-only，并完成Runtime replacement、project trust、closed projections及registry transaction/fault seam；阶段2 advertised `tui.projection.v1`与独立的`run.abort.v1`；阶段3 advertised `session.commands.v1`并完成日常settings/session workflows；阶段3.5完成轻度拆分；阶段3.6建立不可变release、稳定launcher、真实资源smoke和baseline user service。#147已完成fixed composer、viewport、活动状态、工具折叠和可检索selector；阶段4 advertised `extension_ui.v1`，加入单controller lease、Host-owned dialog queue、结构化notify/status和当前扩展兼容。阶段5 advertised `catalog.v1`、`service.managed.v1`与`session.reopen`，实现socket-first startup、0700/0600 atomic catalog、prior-epoch reconcile、no-replay Host loss、explicit reopen和完整service CLI；普通入口不再启动detached Host。阶段6 advertised `session.tree.v1`，通过公开`navigateTree()`与`AgentSessionRuntime.fork()`实现revision-bound tree、fork-before、clone-at-leaf、selected editor text、extension hook/abort与deferred session-file recovery。#154随后advertised `queue.control.v1`，将queued正文保持为Same-Host ephemeral projection，并以公开user `message_start`作为正式conversation边界。#155在不增加capability的前提下复用`session.history`反向页，加入有界历史窗口、entry/row锚点、统一PageUp/PageDown/滚轮和成对terminal mouse mode。V0.2 #148的direct `pi-tui` dependency inventory、Terminal Core API、provenance政策、OpenClaw固定commit审计和一次性切换计划已冻结在[`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)；renderer实施不属于V0.1。
+阶段0文档描述的是V0.1**目标合同**。阶段1已将当前控制面切为V2-only，并完成Runtime replacement、project trust、closed projections及registry transaction/fault seam；阶段2 advertised `tui.projection.v1`与独立的`run.abort.v1`；阶段3 advertised `session.commands.v1`并完成日常settings/session workflows；阶段3.5完成轻度拆分；阶段3.6建立不可变release、稳定launcher、真实资源smoke和baseline user service。#147已完成fixed composer、viewport、活动状态、工具折叠和可检索selector；阶段4 advertised `extension_ui.v1`，加入单controller lease、Host-owned dialog queue、结构化notify/status和当前扩展兼容。阶段5 advertised `catalog.v1`、`service.managed.v1`与`session.reopen`，实现socket-first startup、0700/0600 atomic catalog、prior-epoch reconcile、no-replay Host loss、explicit reopen和完整service CLI；普通入口不再启动detached Host。阶段6 advertised `session.tree.v1`，通过公开`navigateTree()`与`AgentSessionRuntime.fork()`实现revision-bound tree、fork-before、clone-at-leaf、selected editor text、extension hook/abort与deferred session-file recovery。#154随后advertised `queue.control.v1`，将queued正文保持为Same-Host ephemeral projection，并以公开user `message_start`作为正式conversation边界。#155在不增加capability的前提下复用`session.history`反向页，加入有界历史窗口、entry/row锚点、统一PageUp/PageDown/滚轮和成对terminal mouse mode。#156落地Night Console：无常驻role标签、user局部surface、thinking rail、tool生命周期语义色、composer后两行width-aware status dock；不设置全屏背景且不改变queue/runtime语义。V0.2 #148的direct `pi-tui` dependency inventory、Terminal Core API、provenance政策、OpenClaw固定commit审计和一次性切换计划已冻结在[`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)；renderer实施不属于V0.1。
 
 ## 当前默认真人入口
 
@@ -112,7 +115,7 @@ alu-dock new --cwd "$PWD" --name demo
 alu-dock attach INSTANCE_ID
 ```
 
-再次执行 `alu-dock` 会先投影 Pi SessionManager 当前 branch 的最新200项持久 history baseline，到达viewport顶部后按需反向取页；客户端最多保留目标1000项/1600万字符，超界时明确标记gap并固定最新200项，再重放 Host 近期 events并从同一Host的ephemeral `pendingMessages`恢复queue tray，然后继续观察live events。只有Pi公开user `message_start`到达时，queued消息才进入正式transcript；accepted/queued receipt不冒充consumed。Host loss/reopen仍不恢复queue。Composer固定在终端底部并向上增长，history在上方独立滚动；活动行明确区分 waiting/thinking/responding/tool/retry/compaction/queue/host-loss。TUI Footer 展示 cwd、Dock/Pi ID、model/thinking、state/queue、tokens/context/cache/cost、extension status 和 connection/lease；extension/skill/prompt commands 与路径进入 autocomplete。模型/thinking切换沿用Pi的session与settings语义，只允许实例idle时执行；当前运行不会被中途换模。Host在创建Pi SDK session前安装与Pi CLI相同的Undici `EnvHttpProxyAgent`：优先保留进程已有`HTTP_PROXY`/`HTTPS_PROXY`，缺失时采用Pi全局`httpProxy`设置。默认socket为`$XDG_RUNTIME_DIR/alu-dock/dock.sock`；managed日志使用`journalctl --user -u alu-dock.service`。
+再次执行 `alu-dock` 会先投影 Pi SessionManager 当前 branch 的最新200项持久 history baseline，到达viewport顶部后按需反向取页；客户端最多保留目标1000项/1600万字符，超界时明确标记gap并固定最新200项，再重放 Host 近期 events并从同一Host的ephemeral `pendingMessages`恢复queue tray，然后继续观察live events。只有Pi公开user `message_start`到达时，queued消息才进入正式transcript；accepted/queued receipt不冒充consumed。Host loss/reopen仍不恢复queue。Composer固定在两行status dock上方并向上增长，history在其上方独立滚动；活动行明确区分 waiting/thinking/responding/tool/retry/compaction/queue/host-loss。TUI Footer 展示 cwd、Dock/Pi ID、model/thinking、state/queue、tokens/context/cache/cost、extension status 和 connection/lease；extension/skill/prompt commands 与路径进入 autocomplete。模型/thinking切换沿用Pi的session与settings语义，只允许实例idle时执行；当前运行不会被中途换模。Host在创建Pi SDK session前安装与Pi CLI相同的Undici `EnvHttpProxyAgent`：优先保留进程已有`HTTP_PROXY`/`HTTPS_PROXY`，缺失时采用Pi全局`httpProxy`设置。默认socket为`$XDG_RUNTIME_DIR/alu-dock/dock.sock`；managed日志使用`journalctl --user -u alu-dock.service`。
 
 ## 机器与诊断接口
 
