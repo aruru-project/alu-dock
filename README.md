@@ -29,7 +29,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [x] #157 tool render storm、#154 queue诚实时序/撤回与#155长历史/滚轮修正
 - [x] #156 Night Console语义配色、single-column transcript与两行status dock
 - [ ] #158最终真人默认入口验收（完成基线1/6后由#164暂停）
-- [ ] #164人工验收阻塞闸门（#161–#167全部源码切片已完成；下一步统一gate、immutable release与真人Windows Terminal/SSH回归）
+- [ ] #164人工验收阻塞闸门（#161–#167、245-test gate、immutable release与installed PTY/SSH已完成；等待用户Windows Terminal/PowerShell验收）
 
 详细文档：
 
@@ -70,11 +70,12 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-v0.1-activity-slot.md`](docs/validation-v0.1-activity-slot.md)
 - [`docs/validation-v0.1-cli-help.md`](docs/validation-v0.1-cli-help.md)
 - [`docs/validation-v0.1-human-list.md`](docs/validation-v0.1-human-list.md)
+- [`docs/validation-v0.1-acceptance-blockers-rollout.md`](docs/validation-v0.1-acceptance-blockers-rollout.md)
 - [`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)
 
 ## V0.1 工程入口
 
-#142是V0.1工程状态入口。阶段0–6、dogfood UX与Extension UI主体能力已完成；Stage 6 invariants保持冻结，当前immutable managed release为Night Console开发候选`20260716T024459Z-389eaf02697e`，尚未通过实用签收。#158在基线1/6后暂停；#164按#161→#165→#160→#162→#163→#166→#167修复真人阻断，再统一发布和恢复验收。V0.2 renderer仍由#148独立排期。
+#142是V0.1工程状态入口。阶段0–6、dogfood UX与Extension UI主体能力已完成；Stage 6 invariants保持冻结，当前immutable managed release为#164验收候选`20260716T065650Z-d979cd4aa118`；245-test gate、installed-resource smoke、PTY和loopback SSH已通过，但尚待用户Windows Terminal/PowerShell签收。#158仍暂停于基线1/6；用户关闭#164后再决定是否恢复验收。V0.2 renderer仍由#148独立排期。
 
 **绿地规则：** Alu Dock 是全新项目。到 1.0 落地前，除非用户特意说明，不考虑任何旧协议、旧 Host、旧数据、旧 CLI 行为的兼容或迁移；原型合同直接替换。版本号仅标识当前合同，不表示存在历史包袱。
 
