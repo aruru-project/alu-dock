@@ -343,10 +343,11 @@ interface CommandReceiptDto {
 }
 ```
 
-Receipt 仍表示 Pi preflight 已接受，不表示 run 完成；实现可继续使用封装在 pinned Pi adapter 内的 `preflightResult`。Catalog accepted state commit 后才发送 receipt。Extension command handled-without-run 另发 `command.handled`。该event是operation/activity和replay所需的机器事实，不是默认conversation正文；客户端成功路径静默投影它，但不得静默`command.rejected`、extension error/notification或命令专用结果。
+普通 prompt/steer/followUp 的 receipt 仍表示 Pi preflight 已接受，不表示 run 完成；实现可继续使用封装在 pinned Pi adapter 内的 `preflightResult`。Exact registered extension command 是明确例外：Host 通过当前 generation 的 public `AgentSession.extensionRunner.getCommand()`重检并完成 pre-effect catalog accepted commit 后，以无 `streamingBehavior` 的 prompt立即执行；receipt 固定 `delivery:"prompt",queued:false`，表示命令路由已接受而不是 handler 已完成。若 handler 未启动 model run则另发 `command.handled{kind:"extension_command"}`。该event是operation/activity和replay所需的机器事实，不是默认conversation正文；客户端成功路径静默投影它，但不得静默`command.rejected`、extension error/notification或命令专用结果。
 
 ### Queue消费与恢复合同
 
+- Host 必须在 Queue admission 前用当前 runtime runner 识别 exact registered extension command。即使 parent 正在 running 或调用者显式请求 steer/followUp，该命令也立即执行、receipt 固定 `queued:false`，不进入 pending tray、不生成命令正文的模型 user message，Alt+Up/Esc 不得恢复它。Unknown slash、skill command和prompt template不属于该分类，继续走Pi原生input/展开/Queue语义。
 - `command.accepted{queued:true}`只表示Pi接受了排队请求；Host随后发布`message.queued`，该文本只存在于Same-Host内存、attach projection和wire，绝不进入durable catalog。
 - `queue.changed`投影Pi当前steering/follow-up计数，但不是用户消息进入正式transcript的边界。
 - 只有Pi公开user `message_start`到达时，Host才发布`message.submitted`。该event带原queue item的`operationId/queueItemId/delivery`，`text`是Pi实际消费的template/skill-expanded文本；pending tray此时移除对应item。
@@ -441,6 +442,7 @@ Parser、catalog loader 和 registry mutation 共用同一个 invariant validato
 |---|---|
 | list/get/history/tree metadata | 任意已知 record；host_lost history/tree需先 reopen才读取runtime branch |
 | fresh prompt | `active + quiescent`；failed 在 admission 后转 running并清 lastError |
+| registered extension command | `active`；当前generation runner exact match优先于delivery/Queue admission，串行执行但不得替换或清除running parent的active operation |
 | steer/followUp | `active + running` |
 | model/thinking/tools/settings/session navigate/replacement | `active + quiescent` |
 | compact | active；具体 abort/compact 语义交给 Pi，Dock 阻止并发 config/replacement |
@@ -482,6 +484,7 @@ interface DurableInstanceRecord {
 |---|---|
 | create | 创建 candidate runtime；计算 generation=1；commit active record；成功后才 publish/response。Commit 失败必须 dispose candidate，catalog 保持原 revision。 |
 | prompt/steer/followUp | 先 commit `admissionPending=true + admissionOperationId`，再调用 Pi。Preflight reject 时 commit 恢复先前 quiescent state；accept 时 commit running/pending count 后才 receipt。 |
+| registered extension command | 先 commit admission intent；清除admission attribution并按原parent operation顺序flush期间runtime events；以当前runner重检exact command；再 commit `command.accepted`与`admissionPending=false`，随后无Queue参数调用Pi。Running parent的execution/activeCommandId始终不变；idle command若通过`pi.sendMessage`启动run才把该新run归属command operation。No-run完成另commit/publish `command.handled`；handler wrapper failure保留可见error；generation变化后旧completion不得发布到新generation。 |
 | run settled | commit lastRun + quiescent execution + clear command/pending 后再发布 settled snapshot/event。失败时保留 conservative busy intent。 |
 | queue update | commit pending count；失败时旧 busy/admission fact不得被清掉。 |
 | stop | 先 commit `stopRequestedAt` 再 cleanup；commit stopped 后才 success response。Startup 遇 stop intent 归一为 stopped/non-reopenable，不重开 runtime。 |

@@ -28,6 +28,7 @@ import type {
   RuntimeEvent,
   RuntimeForkResult,
   RuntimeHistoryEntry,
+  RuntimeInputKind,
   RuntimeModelInfo,
   RuntimeModelState,
   RuntimeNavigateOptions,
@@ -210,6 +211,14 @@ export class PiRuntimeHost implements RuntimeSession {
     return () => this.subscribers.delete(listener);
   }
 
+  classifyInput(text: string): RuntimeInputKind {
+    const commandName = extensionCommandName(text);
+    if (commandName === undefined) return "prompt";
+    return this.requireActive().session.extensionRunner.getCommand(commandName) === undefined
+      ? "prompt"
+      : "extension_command";
+  }
+
   prompt(text: string, options?: RuntimePromptOptions): Promise<void> {
     return this.requireActive().session.prompt(text, options as PromptOptions | undefined);
   }
@@ -305,7 +314,7 @@ export class PiRuntimeHost implements RuntimeSession {
     const binding = this.requireActive();
     const loader = binding.services.resourceLoader;
     const commands: CommandDto[] = [];
-    const extensionCommands = resolveExtensionCommands(loader.getExtensions().extensions);
+    const extensionCommands = binding.session.extensionRunner.getRegisteredCommands();
     for (const command of extensionCommands) {
       const name = validCatalogName(command.invocationName);
       if (name === undefined) continue;
@@ -314,7 +323,7 @@ export class PiRuntimeHost implements RuntimeSession {
         name,
         ...(description === undefined ? {} : { description }),
         source: projectSource(command.sourceInfo, "extension"),
-        argumentCompletions: command.argumentCompletions,
+        argumentCompletions: typeof command.getArgumentCompletions === "function",
       });
     }
     for (const prompt of loader.getPrompts().prompts) {
@@ -893,6 +902,13 @@ function validCatalogName(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\u0000-\u001f\u007f-\u009f]/u.test(value) ? value : undefined;
 }
 
+function extensionCommandName(text: string): string | undefined {
+  if (!text.startsWith("/")) return undefined;
+  const spaceIndex = text.indexOf(" ");
+  const name = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
+  return name.length > 0 ? name : undefined;
+}
+
 function projectVisibleTools(session: AgentSession): ToolDto[] {
   const active = new Set(session.getActiveToolNames());
   const tools: ToolDto[] = [];
@@ -909,37 +925,6 @@ function projectVisibleTools(session: AgentSession): ToolDto[] {
     });
   }
   return tools.sort(compareToolDtos).slice(0, MAX_PROJECTION_ITEMS);
-}
-
-function resolveExtensionCommands(extensions: ReturnType<AgentSessionServices["resourceLoader"]["getExtensions"]>["extensions"]): Array<{
-  invocationName: string;
-  name: string;
-  description?: string;
-  sourceInfo: SourceInfo;
-  argumentCompletions: boolean;
-}> {
-  const commands = extensions.flatMap((extension) => [...extension.commands.values()]);
-  const counts = new Map<string, number>();
-  for (const command of commands) counts.set(command.name, (counts.get(command.name) ?? 0) + 1);
-  const seen = new Map<string, number>();
-  const taken = new Set<string>();
-  return commands.map((command) => {
-    const occurrence = (seen.get(command.name) ?? 0) + 1;
-    seen.set(command.name, occurrence);
-    let invocationName = (counts.get(command.name) ?? 0) > 1 ? `${command.name}:${occurrence}` : command.name;
-    if (taken.has(invocationName)) {
-      let suffix = occurrence;
-      do { suffix += 1; invocationName = `${command.name}:${suffix}`; } while (taken.has(invocationName));
-    }
-    taken.add(invocationName);
-    return {
-      invocationName,
-      name: command.name,
-      ...(command.description === undefined ? {} : { description: command.description }),
-      sourceInfo: command.sourceInfo,
-      argumentCompletions: typeof command.getArgumentCompletions === "function",
-    };
-  });
 }
 
 function projectSource(source: SourceInfo, kind: SourceDto["kind"]): SourceDto {

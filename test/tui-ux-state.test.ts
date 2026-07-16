@@ -367,6 +367,17 @@ test("command handled clears waiting activity without requiring transcript outpu
     operationId: "no-run-2", kind: "no_run",
   }), snapshot({ execution: "idle", pending: { steering: 0, followUp: 2, total: 2 } }));
   assert.deepEqual(activity, { phase: "queued", label: "queued 2" });
+
+  const parent = snapshot({ activeCommandId: "parent-op" });
+  activity = { phase: "tool", label: "tool bash" };
+  activity = reduceRunActivity(activity, event(4, "command.accepted", {
+    operationId: "extension-op", delivery: "prompt", queued: false, acceptedAt: "2026-07-15T00:00:00.000Z",
+  }), parent);
+  assert.deepEqual(activity, { phase: "tool", label: "tool bash" });
+  activity = reduceRunActivity(activity, event(5, "command.handled", {
+    operationId: "extension-op", kind: "extension_command",
+  }), parent);
+  assert.deepEqual(activity, { phase: "tool", label: "tool bash" });
 });
 
 test("run activity covers compaction queue interaction abort failure and host loss", () => {

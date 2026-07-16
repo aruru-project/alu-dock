@@ -82,6 +82,17 @@ class FakeSession {
     promptGuidelines?: unknown;
     sourceInfo: { path: string; source: string; scope: "user" | "project" | "temporary"; origin: "package" | "top-level"; baseDir?: string };
   }> = [];
+  registeredCommands: Array<{
+    invocationName: string;
+    name: string;
+    description?: string;
+    sourceInfo: { path: string; source: string; scope: "user" | "project" | "temporary"; origin: "package" | "top-level"; baseDir?: string };
+    getArgumentCompletions?: (...args: unknown[]) => unknown;
+  }> = [];
+  readonly extensionRunner = {
+    getRegisteredCommands: () => [...this.registeredCommands],
+    getCommand: (name: string) => this.registeredCommands.find((command) => command.invocationName === name),
+  };
 
   constructor(
     readonly sessionId: string,
@@ -1067,8 +1078,14 @@ test("Pi runtime host projects executable resource and command metadata without 
     getAgentsFiles: () => ({ agentsFiles: [{ path: "/project/AGENTS.md", content: "TOP SECRET CONTEXT" }] }),
   };
   const settings = SettingsManager.inMemory({ enableSkillCommands: true });
-  const { host } = await runtimeHost(trace, (owner) => {
+  const { host } = await runtimeHost(trace, (owner, session) => {
     owner.services = services({ resourceLoader, settings });
+    session.registeredCommands = [
+      { ...command("safe"), invocationName: "safe:1" },
+      { ...command("safe", secondSource), invocationName: "safe:2" },
+      { ...command("safe:1", secondSource), invocationName: "safe:1:2" },
+      { ...command("unsafe\u001b[2J", secondSource), invocationName: "unsafe\u001b[2J" },
+    ];
   });
   host.activateInitial();
 
@@ -1092,6 +1109,10 @@ test("Pi runtime host projects executable resource and command metadata without 
     "skill:skill:skill-a",
   ]);
   assert.equal(commands.find((item) => item.name === "safe:1")?.argumentCompletions, true);
+  assert.equal(host.classifyInput("/safe:1 value"), "extension_command");
+  assert.equal(host.classifyInput("/safe value"), "prompt");
+  assert.equal(host.classifyInput("/prompt-a"), "prompt");
+  assert.equal(host.classifyInput("/skill:skill-a"), "prompt");
   assert.doesNotMatch(JSON.stringify(commands), /handler|TOP SECRET|\u001b/);
   settings.setEnableSkillCommands(false);
   assert.equal((await host.getCommands()).some((item) => item.source.kind === "skill"), false);

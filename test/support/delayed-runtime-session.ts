@@ -95,6 +95,8 @@ export class DelayedRuntimeSession implements RuntimeSession {
     return () => this.listeners.delete(listener);
   }
 
+  classifyInput(_text: string): "prompt" { return "prompt"; }
+
   prompt(text: string, options?: RuntimePromptOptions): Promise<void> {
     this.promptCalls += 1;
     this.promptMessages.push(text);

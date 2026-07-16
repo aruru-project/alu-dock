@@ -19,6 +19,8 @@ export interface RuntimePromptOptions {
   preflightResult?: (success: boolean) => void;
 }
 
+export type RuntimeInputKind = "extension_command" | "prompt";
+
 export type RuntimeThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface RuntimeModelInfo {
@@ -202,6 +204,8 @@ export interface RuntimeSession {
   /** Current session path only when it has actually been materialized durably. */
   getDurableSessionFile?(): string | undefined;
   subscribe(listener: (event: RuntimeEvent) => void): () => void;
+  /** Exact current-generation registered extension command routing; all other input remains a prompt. */
+  classifyInput(text: string): RuntimeInputKind;
   prompt(text: string, options?: RuntimePromptOptions): Promise<void>;
   listModels(): Promise<RuntimeModelInfo[]>;
   listSessions(scope: "cwd" | "all"): Promise<RuntimeSessionInfo[]>;

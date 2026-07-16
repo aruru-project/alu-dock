@@ -72,6 +72,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-v0.1-human-list.md`](docs/validation-v0.1-human-list.md)
 - [`docs/validation-v0.1-acceptance-blockers-rollout.md`](docs/validation-v0.1-acceptance-blockers-rollout.md)
 - [`docs/validation-v0.1-dogfood-stabilization.md`](docs/validation-v0.1-dogfood-stabilization.md)
+- [`docs/validation-v0.1-extension-command-admission.md`](docs/validation-v0.1-extension-command-admission.md)
 - [`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)
 
 ## V0.1 工程入口
@@ -136,7 +137,7 @@ alu-dock new --cwd "$PWD" --name demo
 alu-dock attach INSTANCE_ID
 ```
 
-再次执行 `alu-dock` 会先投影 Pi SessionManager 当前 branch 的最新200项持久 history baseline，到达viewport顶部后按需反向取页；客户端最多保留目标1000项/1600万字符，超界时明确标记gap并固定最新200项，再重放 Host 近期 events并从同一Host的ephemeral `pendingMessages`恢复queue tray，然后继续观察live events。只有Pi公开user `message_start`到达时，queued消息才进入正式transcript；accepted/queued receipt不冒充consumed。Host loss/reopen仍不恢复queue。成功的no-model `command.handled`继续驱动activity和Protocol V2完成边界，但不作为通用system正文重复写入conversation；rejection、extension error/notification和命令专用结果仍可见。Composer固定在两行status dock上方并向上增长，history在其上方独立滚动；固定单行activity槽位位于history与pending/composer之间，以Host事件驱动的phase明确区分waiting/thinking/responding/tool/retry/compaction/queue/host-loss；仅活跃phase运行320ms轻量pulse，并用cursor save/restore与synchronized output局部重写该物理行，不触发pi-tui全屏render、不重写composer/边框/光标，idle不运行timer，也不改变viewport行数。低频TUI Footer 展示 cwd、Dock/Pi ID、model/configured thinking、state/queue、tokens/context/cache/cost、extension status 和 connection/lease；extension/skill/prompt commands 与路径进入 autocomplete。模型/thinking切换沿用Pi的session与settings语义，只允许实例idle时执行；当前运行不会被中途换模。Host在创建Pi SDK session前安装与Pi CLI相同的Undici `EnvHttpProxyAgent`：优先保留进程已有`HTTP_PROXY`/`HTTPS_PROXY`，缺失时采用Pi全局`httpProxy`设置。默认socket为`$XDG_RUNTIME_DIR/alu-dock/dock.sock`；managed日志使用`journalctl --user -u alu-dock.service`。
+再次执行 `alu-dock` 会先投影 Pi SessionManager 当前 branch 的最新200项持久 history baseline，到达viewport顶部后按需反向取页；客户端最多保留目标1000项/1600万字符，超界时明确标记gap并固定最新200项，再重放 Host 近期 events并从同一Host的ephemeral `pendingMessages`恢复queue tray，然后继续观察live events。只有Pi公开user `message_start`到达时，queued消息才进入正式transcript；accepted/queued receipt不冒充consumed。Host loss/reopen仍不恢复queue。当前generation runner的exact registered extension command在Queue admission前立即执行，固定`queued:false`且不进入pending/恢复路径；unknown slash、skill和prompt template仍保留Pi原生语义。成功的no-model `command.handled`继续驱动activity和Protocol V2完成边界，但不作为通用system正文重复写入conversation；rejection、extension error/notification和命令专用结果仍可见。Composer固定在两行status dock上方并向上增长，history在其上方独立滚动；固定单行activity槽位位于history与pending/composer之间，以Host事件驱动的phase明确区分waiting/thinking/responding/tool/retry/compaction/queue/host-loss；仅活跃phase运行320ms轻量pulse，并用cursor save/restore与synchronized output局部重写该物理行，不触发pi-tui全屏render、不重写composer/边框/光标，idle不运行timer，也不改变viewport行数。低频TUI Footer 展示 cwd、Dock/Pi ID、model/configured thinking、state/queue、tokens/context/cache/cost、extension status 和 connection/lease；extension/skill/prompt commands 与路径进入 autocomplete。模型/thinking切换沿用Pi的session与settings语义，只允许实例idle时执行；当前运行不会被中途换模。Host在创建Pi SDK session前安装与Pi CLI相同的Undici `EnvHttpProxyAgent`：优先保留进程已有`HTTP_PROXY`/`HTTPS_PROXY`，缺失时采用Pi全局`httpProxy`设置。默认socket为`$XDG_RUNTIME_DIR/alu-dock/dock.sock`；managed日志使用`journalctl --user -u alu-dock.service`。
 
 ## 内部机器与诊断接口
 

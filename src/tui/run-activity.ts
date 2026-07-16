@@ -71,11 +71,14 @@ export function reduceRunActivity(
 
   switch (event.type) {
     case "command.accepted":
-      return event.data.queued
-        ? queued(snapshot.pending.total || 1)
-        : { phase: "waiting", label: "waiting for model" };
+      if (event.data.queued) return queued(snapshot.pending.total || 1);
+      if (snapshot.execution === "running" && snapshot.activeCommandId !== undefined && snapshot.activeCommandId !== event.data.operationId) {
+        return current.phase === "idle" ? activityFromSnapshot(snapshot) : current;
+      }
+      return { phase: "waiting", label: "waiting for model" };
 
     case "command.handled":
+      if (snapshot.execution === "running") return current.phase === "idle" ? activityFromSnapshot(snapshot) : current;
       return snapshot.pending.total > 0 ? queued(snapshot.pending.total) : READY;
 
     case "command.rejected":

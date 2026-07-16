@@ -49,7 +49,9 @@ export default function (pi) {
   });
 
   try {
-    await instance.submit("/ui-fixture", "prompt", "real-extension-command");
+    const receipt = await instance.submit("/ui-fixture", "followUp", "real-extension-command");
+    assert.deepEqual({ delivery: receipt.delivery, queued: receipt.queued }, { delivery: "prompt", queued: false });
+    assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages, []);
     await responseTask;
     await instance.waitForIdle();
     const snapshot = instance.snapshot();
@@ -58,7 +60,11 @@ export default function (pi) {
     assert.equal(snapshot.lastRun, "never");
     assert.deepEqual(snapshot.metrics?.messages, { user: 0, assistant: 0, toolCalls: 0, toolResults: 0, total: 0 });
     assert.deepEqual(snapshot.extensionStatus, { fixture: "ready[2J" });
-    assert.equal(events.some((event) => event.type === "command.handled"), true);
+    const handled = events.find((event) => event.type === "command.handled" && event.data.operationId === "real-extension-command");
+    assert.equal(handled?.type, "command.handled");
+    if (handled?.type !== "command.handled") assert.fail("extension command was not projected as handled");
+    assert.equal(handled.data.kind, "extension_command");
+    assert.equal(events.some((event) => event.type === "message.queued" || event.type === "message.submitted"), false);
     assert.equal(events.some((event) => event.type === "run.started"), false);
     assert.equal(events.some((event) => event.type === "interaction.resolved"), true);
     const notifications = events

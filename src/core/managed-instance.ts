@@ -171,6 +171,7 @@ interface WorkingCheckpoint {
   lastAssistantOutcome: AssistantOutcome | undefined;
   stopRequestedWhileRunning: boolean;
   catalogAdmissionOperationId: string | undefined;
+  extensionCommandInitiator: { operationId: string; runtimeGeneration: number; agentStartCount: number } | undefined;
   replacementIntent: CatalogInstanceRecord["replacement"];
   durableSessionFile: string | undefined;
   recoverySessionFile: string | undefined;
@@ -299,6 +300,7 @@ export class ManagedInstance {
   private runtimeFollowUpHashes: string[] = [];
   private lastAssistantOutcome: AssistantOutcome | undefined;
   private pendingAdmission: PendingAdmission | undefined;
+  private extensionCommandInitiator: { operationId: string; runtimeGeneration: number; agentStartCount: number } | undefined;
   private stopRequestedWhileRunning = false;
   private compactionActive = false;
   private compactionBoundary: Promise<void> | undefined;
@@ -969,6 +971,10 @@ export class ManagedInstance {
       throw new Error("Prompt message must not be empty");
     }
 
+    if (this.session.classifyInput(message) === "extension_command") {
+      return this.submitExtensionCommand(message, operationId);
+    }
+
     const running = this.state.execution === "running" || this.session.isStreaming;
     const resolvedDelivery = resolveDelivery(delivery, running);
     const streamingBehavior = resolvedDelivery === "steer" || resolvedDelivery === "followUp"
@@ -1243,6 +1249,125 @@ export class ManagedInstance {
     this.backgroundTasks.add(trackedPromise);
 
     return receiptPromise;
+  }
+
+  private async submitExtensionCommand(message: string, operationId: string): Promise<CommandReceipt> {
+    const commandId = operationId;
+    const admissionToken = {};
+    let releaseAdmission!: () => void;
+    const admissionBoundary = new Promise<void>((resolve) => { releaseAdmission = resolve; });
+    const release = (): void => {
+      if (this.pendingAdmission?.token !== admissionToken) return;
+      const admission = this.pendingAdmission;
+      this.pendingAdmission = undefined;
+      admission.release();
+    };
+    this.pendingAdmission = { token: admissionToken, boundary: admissionBoundary, release: releaseAdmission };
+    this.catalogAdmissionOperationId = commandId;
+
+    try {
+      await this.enqueueTransition(() => this.commitCatalogTransition(
+        { kind: "command.admission", effect: "pre_effect", operationId: commandId, instanceId: this.id },
+        () => {},
+      ));
+      this.catalogAdmissionOperationId = undefined;
+      await this.flushAdmissionRuntimeEvents();
+      if (this.session.classifyInput(message) !== "extension_command") {
+        const error = new Error("Registered extension command changed during admission");
+        const rejectedAt = this.timestamp();
+        await this.enqueueTransition(() => this.commitCatalogTransition(
+          { kind: "command.rejected", effect: "post_effect", operationId: commandId, instanceId: this.id },
+          () => {
+            this.state.lastError = error.message;
+            this.touch(rejectedAt);
+          },
+          () => {
+            this.appendEvent("command.rejected", { operationId: commandId, reason: "command_catalog_changed", error: error.message }, rejectedAt);
+            this.appendStateEvent("command_rejected", rejectedAt);
+          },
+        ));
+        throw error;
+      }
+
+      const acceptedAt = this.timestamp();
+      await this.enqueueTransition(() => this.commitCatalogTransition(
+        { kind: "command.accepted", effect: "pre_effect", operationId: commandId, instanceId: this.id },
+        () => {
+          this.state.lastError = undefined;
+          this.touch(acceptedAt);
+        },
+        () => {
+          this.appendEvent("command.accepted", {
+            operationId: commandId,
+            delivery: "prompt",
+            queued: false,
+            acceptedAt,
+          }, acceptedAt);
+          this.appendStateEvent("extension_command_accepted", acceptedAt);
+        },
+      ));
+
+      const runtimeGeneration = this.runtimeGenerationValue;
+      const agentStartsBeforeCommand = this.agentStartCount;
+      const parentRunning = this.state.execution === "running" || this.session.isStreaming;
+      if (!parentRunning) {
+        this.extensionCommandInitiator = { operationId: commandId, runtimeGeneration, agentStartCount: agentStartsBeforeCommand };
+      }
+
+      let runtimePromise: Promise<void>;
+      try {
+        runtimePromise = this.session.prompt(message, { source: "rpc" });
+      } catch (error) {
+        runtimePromise = Promise.reject(error);
+      }
+      const observedPromise = runtimePromise.then(async () => {
+        await Promise.resolve();
+        await this.transitionTail;
+        if (this.runtimeGenerationValue !== runtimeGeneration || this.state.lifecycle !== "active") return;
+        const commandStartedRun = this.agentStartCount > agentStartsBeforeCommand
+          || (!parentRunning && this.session.isStreaming);
+        if (this.extensionCommandInitiator?.operationId === commandId) this.extensionCommandInitiator = undefined;
+        if (commandStartedRun) return;
+        await this.enqueueTransition(() => this.commitCatalogTransition(
+          { kind: "command.handled", effect: "post_effect", operationId: commandId, instanceId: this.id },
+          () => { this.touch(); },
+          () => {
+            this.appendEvent("command.handled", { operationId: commandId, kind: "extension_command" });
+            this.appendStateEvent("extension_command_handled");
+          },
+        ));
+      }).catch(async (error: unknown) => {
+        if (this.runtimeGenerationValue !== runtimeGeneration || this.state.lifecycle !== "active") return;
+        if (this.extensionCommandInitiator?.operationId === commandId) this.extensionCommandInitiator = undefined;
+        if (this.catalogPort) {
+          try { this.catalogPort.assertWritable(); } catch { return; }
+        }
+        const messageText = safeWireText(errorMessage(error), 2_048, "Sensitive command error omitted");
+        await this.enqueueTransition(async () => {
+          this.appendEvent("instance.error", { operationId: commandId, source: "command_background", error: messageText });
+        });
+      });
+
+      let trackedPromise!: Promise<void>;
+      trackedPromise = observedPromise.finally(() => {
+        release();
+        this.backgroundTasks.delete(trackedPromise);
+      });
+      this.backgroundTasks.add(trackedPromise);
+      return {
+        accepted: true,
+        instanceId: this.id,
+        operationId: commandId,
+        delivery: "prompt",
+        queued: false,
+        acceptedAt,
+      };
+    } catch (error) {
+      this.catalogAdmissionOperationId = undefined;
+      void this.flushAdmissionRuntimeEvents().catch(() => {});
+      release();
+      throw error;
+    }
   }
 
   async dequeue(operationId = this.createCommandId()): Promise<QueueDequeueReceipt> {
@@ -1639,6 +1764,7 @@ export class ManagedInstance {
       lastAssistantOutcome: this.lastAssistantOutcome ? { ...this.lastAssistantOutcome } : undefined,
       stopRequestedWhileRunning: this.stopRequestedWhileRunning,
       catalogAdmissionOperationId: this.catalogAdmissionOperationId,
+      extensionCommandInitiator: this.extensionCommandInitiator ? { ...this.extensionCommandInitiator } : undefined,
       replacementIntent: this.replacementIntent ? cloneJson(this.replacementIntent) : undefined,
       durableSessionFile: this.durableSessionFileValue,
       recoverySessionFile: this.recoverySessionFile,
@@ -1667,6 +1793,7 @@ export class ManagedInstance {
     this.lastAssistantOutcome = checkpoint.lastAssistantOutcome;
     this.stopRequestedWhileRunning = checkpoint.stopRequestedWhileRunning;
     this.catalogAdmissionOperationId = checkpoint.catalogAdmissionOperationId;
+    this.extensionCommandInitiator = checkpoint.extensionCommandInitiator;
     this.replacementIntent = checkpoint.replacementIntent;
     this.durableSessionFileValue = checkpoint.durableSessionFile;
     this.recoverySessionFile = checkpoint.recoverySessionFile;
@@ -1999,8 +2126,14 @@ export class ManagedInstance {
 
   private async handleCatalogRuntimeEvent(event: RuntimeEvent): Promise<void> {
     this.catalogPort?.assertWritable();
+    const extensionInitiatorOperationId = event.type === "agent_start"
+      && this.extensionCommandInitiator?.runtimeGeneration === this.runtimeGenerationValue
+      && this.extensionCommandInitiator.agentStartCount === this.agentStartCount
+      ? this.extensionCommandInitiator.operationId
+      : undefined;
     const operationId = this.catalogAdmissionOperationId
       ?? (event.type === "agent_settled" ? this.state.activeCommandId : undefined)
+      ?? extensionInitiatorOperationId
       ?? this.receiptBoundaryOperationId
       ?? this.replacementIntent?.operationId
       ?? this.state.activeCommandId;
@@ -2037,6 +2170,7 @@ export class ManagedInstance {
         this.runtimeSteeringHashes = [];
         this.runtimeFollowUpHashes = [];
         this.lastAssistantOutcome = undefined;
+        this.extensionCommandInitiator = undefined;
         this.state.execution = "idle";
         this.state.lastRun = "never";
         this.state.activeCommandId = undefined;
@@ -2101,6 +2235,10 @@ export class ManagedInstance {
     switch (event.type) {
       case "agent_start":
         await this.commitCatalogTransition(context("run.started"), () => {
+          if (extensionInitiatorOperationId !== undefined) {
+            this.state.activeCommandId = extensionInitiatorOperationId;
+            this.extensionCommandInitiator = undefined;
+          }
           this.agentStartCount += 1;
           this.currentAssistantMessageId = undefined;
           this.announcedToolCalls.clear();
@@ -2240,6 +2378,7 @@ export class ManagedInstance {
       this.runtimeSteeringHashes = [];
       this.runtimeFollowUpHashes = [];
       this.lastAssistantOutcome = undefined;
+      this.extensionCommandInitiator = undefined;
       this.state.execution = "idle";
       this.state.lastRun = "never";
       this.state.activeCommandId = undefined;
@@ -2294,7 +2433,15 @@ export class ManagedInstance {
       return;
     }
     switch (event.type) {
-      case "agent_start":
+      case "agent_start": {
+        const extensionInitiatorOperationId = this.extensionCommandInitiator?.runtimeGeneration === this.runtimeGenerationValue
+          && this.extensionCommandInitiator.agentStartCount === this.agentStartCount
+          ? this.extensionCommandInitiator.operationId
+          : undefined;
+        if (extensionInitiatorOperationId !== undefined) {
+          this.state.activeCommandId = extensionInitiatorOperationId;
+          this.extensionCommandInitiator = undefined;
+        }
         this.agentStartCount += 1;
         this.currentAssistantMessageId = undefined;
         this.announcedToolCalls.clear();
@@ -2307,6 +2454,7 @@ export class ManagedInstance {
         });
         this.appendStateEvent("agent_start");
         break;
+      }
 
       case "agent_settled":
         this.handleAgentSettled();

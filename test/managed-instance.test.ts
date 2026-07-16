@@ -53,6 +53,8 @@ class FakeRuntimeSession implements RuntimeSession {
   rejectPreflightWith: Error | undefined;
   delayPreflight = false;
   queueProjection: (text: string) => string = (text) => text;
+  readonly extensionCommands = new Set<string>();
+  extensionCommandBlock: Deferred<void> | undefined;
   disposeError: Error | undefined;
   abortError: Error | undefined;
   abortBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
@@ -79,11 +81,22 @@ class FakeRuntimeSession implements RuntimeSession {
     return () => this.listeners.delete(listener);
   }
 
+  classifyInput(text: string): "extension_command" | "prompt" {
+    if (!text.startsWith("/")) return "prompt";
+    const spaceIndex = text.indexOf(" ");
+    const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
+    return this.extensionCommands.has(commandName) ? "extension_command" : "prompt";
+  }
+
   prompt(text: string, options?: RuntimePromptOptions): Promise<void> {
     this.promptCalls.push({ text, options });
     if (this.rejectPreflightWith) {
       options?.preflightResult?.(false);
       return Promise.reject(this.rejectPreflightWith);
+    }
+    if (this.classifyInput(text) === "extension_command") {
+      const execution = this.extensionCommandBlock?.promise ?? Promise.resolve();
+      return execution.then(() => { options?.preflightResult?.(true); });
     }
     if (this.delayPreflight) {
       this.pendingPreflight = options?.preflightResult;
@@ -288,6 +301,12 @@ function createInstance(session = new FakeRuntimeSession(), eventCapacity = 50):
     now: createClock(),
     commandId: () => `command-${++commandSequence}`,
   });
+}
+
+async function flushBackground(): Promise<void> {
+  await Promise.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await Promise.resolve();
 }
 
 test("suspended replacement UI cannot leak candidate status into the committed generation", async () => {
@@ -515,6 +534,195 @@ test("delivery modes make queue acceptance explicit", async () => {
   );
 
   session.settle();
+});
+
+test("registered extension commands bypass running Queue admission without corrupting the parent operation", async () => {
+  const session = new FakeRuntimeSession();
+  session.extensionCommands.add("rm-confirm");
+  const instance = createInstance(session);
+  await instance.submit("parent run", "prompt", "parent-op");
+  session.startRun();
+  assert.equal(instance.snapshot().activeCommandId, "parent-op");
+
+  const commandBlock = new Deferred<void>();
+  session.extensionCommandBlock = commandBlock;
+  const receipt = await instance.submit("/rm-confirm off", "followUp", "extension-op");
+  assert.deepEqual({ delivery: receipt.delivery, queued: receipt.queued }, { delivery: "prompt", queued: false });
+  assert.equal(session.promptCalls.at(-1)?.options?.streamingBehavior, undefined);
+  assert.equal(instance.snapshot().execution, "running");
+  assert.equal(instance.snapshot().activeCommandId, "parent-op");
+  assert.deepEqual(instance.snapshot().pending, { steering: 0, followUp: 0, total: 0 });
+  assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages, []);
+
+  commandBlock.resolve();
+  await flushBackground();
+  const handled = instance.eventsSince().events.find((event) => event.type === "command.handled" && event.data.operationId === "extension-op");
+  assert.equal(handled?.type, "command.handled");
+  if (handled?.type !== "command.handled") assert.fail("extension command was not projected as handled");
+  assert.equal(handled.data.kind, "extension_command");
+  assert.equal(instance.eventsSince().events.some((event) => event.type === "message.queued" && event.data.operationId === "extension-op"), false);
+  assert.equal(instance.eventsSince().events.some((event) => event.type === "message.submitted" && event.data.operationId === "extension-op"), false);
+  assert.deepEqual(await instance.dequeue("restore-after-extension"), {
+    operationId: "restore-after-extension", instanceId: "dock-instance-1", restored: [], inFlight: [],
+  });
+
+  const unknown = await instance.submit("/unknown value", "auto", "unknown-op");
+  const skill = await instance.submit("/skill:fixture value", "auto", "skill-op");
+  const template = await instance.submit("/template-fixture value", "auto", "template-op");
+  assert.deepEqual([unknown.queued, skill.queued, template.queued], [true, true, true]);
+  assert.deepEqual((await instance.dequeue("restore-native-slash")).restored.map((item) => item.operationId), [
+    "unknown-op", "skill-op", "template-op",
+  ]);
+
+  session.settle();
+  await instance.waitForIdle();
+});
+
+test("extension command catalog admission commits conservative intent before its immediate effect", async () => {
+  const session = new FakeRuntimeSession();
+  session.extensionCommands.add("catalog-command");
+  const instance = createInstance(session);
+  const commits: Array<{ kind: string; effect: string; admissionPending: boolean; admissionOperationId?: string }> = [];
+  instance.bindCatalogPort({
+    assertWritable: () => {},
+    commit: async (record, context) => {
+      commits.push({
+        kind: context.kind,
+        effect: context.effect,
+        admissionPending: record.admissionPending,
+        ...(record.admissionOperationId === undefined ? {} : { admissionOperationId: record.admissionOperationId }),
+      });
+    },
+  });
+  instance.markCatalogCommitted();
+
+  const receipt = await instance.submit("/catalog-command", "auto", "catalog-extension-op");
+  assert.equal(receipt.queued, false);
+  await flushBackground();
+  assert.deepEqual(commits.filter((commit) => commit.kind.startsWith("command.")), [
+    { kind: "command.admission", effect: "pre_effect", admissionPending: true, admissionOperationId: "catalog-extension-op" },
+    { kind: "command.accepted", effect: "pre_effect", admissionPending: false },
+    { kind: "command.handled", effect: "post_effect", admissionPending: false },
+  ]);
+  assert.equal(instance.snapshot().execution, "idle");
+  await instance.stop("stop-catalog-extension");
+});
+
+test("parent settlement buffered by extension admission retains the parent catalog operation", async () => {
+  const session = new FakeRuntimeSession();
+  session.extensionCommands.add("admission-command");
+  const instance = createInstance(session);
+  const admissionEntered = new Deferred<void>();
+  const releaseAdmissionCommit = new Deferred<void>();
+  instance.bindCatalogPort({
+    assertWritable: () => {},
+    commit: async (_record, context) => {
+      if (context.kind === "command.admission" && context.operationId === "extension-admission-op") {
+        admissionEntered.resolve();
+        await releaseAdmissionCommit.promise;
+      }
+    },
+  });
+  instance.markCatalogCommitted();
+  await instance.submit("parent run", "prompt", "parent-op");
+  session.startRun();
+  await flushBackground();
+  assert.equal(instance.snapshot().activeCommandId, "parent-op");
+
+  const submitting = instance.submit("/admission-command", "auto", "extension-admission-op");
+  await admissionEntered.promise;
+  session.settle();
+  releaseAdmissionCommit.resolve();
+  const receipt = await submitting;
+  assert.equal(receipt.queued, false);
+  await flushBackground();
+
+  assert.equal(instance.snapshot().execution, "idle");
+  assert.equal(instance.snapshot().lastRun, "succeeded");
+  assert.equal(instance.eventsSince().events.find((event) => event.type === "run.settled")?.data.operationId, "parent-op");
+  assert.ok(instance.eventsSince().events.some((event) => event.type === "command.handled" && event.data.operationId === "extension-admission-op"));
+  await instance.waitForIdle();
+});
+
+test("an async extension command cannot revive or clear a parent that settles during its handler", async () => {
+  const session = new FakeRuntimeSession();
+  session.extensionCommands.add("slow-command");
+  const instance = createInstance(session);
+  await instance.submit("parent run", "prompt", "parent-op");
+  session.startRun();
+
+  const commandBlock = new Deferred<void>();
+  session.extensionCommandBlock = commandBlock;
+  await instance.submit("/slow-command", "auto", "slow-extension-op");
+  session.settle();
+  assert.equal(instance.snapshot().execution, "idle");
+  assert.equal(instance.snapshot().activeCommandId, undefined);
+  assert.equal(instance.snapshot().lastRun, "succeeded");
+
+  commandBlock.resolve();
+  await flushBackground();
+  assert.equal(instance.snapshot().execution, "idle");
+  assert.equal(instance.snapshot().activeCommandId, undefined);
+  const settled = instance.eventsSince().events.find((event) => event.type === "run.settled");
+  assert.equal(settled?.data.operationId, "parent-op");
+  assert.ok(instance.eventsSince().events.some((event) => event.type === "command.handled" && event.data.operationId === "slow-extension-op"));
+  await instance.waitForIdle();
+});
+
+test("an idle extension command that starts a run transfers only the new run to its operation", async () => {
+  const session = new FakeRuntimeSession();
+  session.extensionCommands.add("start-turn");
+  const instance = createInstance(session);
+  const commandBlock = new Deferred<void>();
+  session.extensionCommandBlock = commandBlock;
+
+  const receipt = await instance.submit("/start-turn", "auto", "extension-turn-op");
+  assert.equal(receipt.queued, false);
+  assert.equal(instance.snapshot().execution, "idle");
+  session.isStreaming = true;
+  session.emit({ type: "agent_start" });
+  assert.equal(instance.snapshot().activeCommandId, "extension-turn-op");
+  assert.equal(instance.eventsSince().events.find((event) => event.type === "run.started")?.data.operationId, "extension-turn-op");
+
+  commandBlock.resolve();
+  await flushBackground();
+  assert.equal(instance.eventsSince().events.some((event) => event.type === "command.handled" && event.data.operationId === "extension-turn-op"), false);
+  session.settle();
+  await instance.waitForIdle();
+});
+
+test("extension command failures preserve parent state and old-generation completions are fenced", async () => {
+  const session = new FakeRuntimeSession();
+  session.extensionCommands.add("fail-command");
+  const instance = createInstance(session);
+  await instance.submit("parent run", "prompt", "parent-op");
+  session.startRun();
+
+  const failedBlock = new Deferred<void>();
+  session.extensionCommandBlock = failedBlock;
+  await instance.submit("/fail-command", "auto", "failed-extension-op");
+  failedBlock.reject(new Error("extension handler failed"));
+  await flushBackground();
+  assert.equal(instance.snapshot().execution, "running");
+  assert.equal(instance.snapshot().activeCommandId, "parent-op");
+  assert.ok(instance.eventsSince().events.some((event) => event.type === "instance.error" && event.data.operationId === "failed-extension-op"));
+  assert.equal(instance.eventsSince().events.some((event) => event.type === "command.handled" && event.data.operationId === "failed-extension-op"), false);
+  session.settle();
+  await instance.waitForIdle();
+
+  const oldGenerationBlock = new Deferred<void>();
+  session.extensionCommandBlock = oldGenerationBlock;
+  await instance.submit("/fail-command", "auto", "old-generation-op");
+  session.emit({
+    type: "dock_session_replaced", operationId: "runtime-reload", reason: "reload",
+    previousSessionFile: "/tmp/pi-session-1.jsonl", sessionFile: "/tmp/pi-session-2.jsonl", cwd: "/tmp/project",
+  });
+  oldGenerationBlock.resolve();
+  await flushBackground();
+  assert.equal(instance.runtimeGeneration, 2);
+  assert.equal(instance.eventsSince().events.some((event) => event.type === "command.handled" && event.data.operationId === "old-generation-op"), false);
+  assert.equal(instance.eventsSince().events[0]?.type, "session.replaced");
+  await instance.waitForIdle();
 });
 
 test("queued text stays pending until user message_start and template expansion keeps its operation identity", async () => {
