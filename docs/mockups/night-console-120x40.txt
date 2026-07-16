@@ -29,12 +29,12 @@ ALU DOCK / NIGHT CONSOLE · /help commands
   · Runtime generation 7 · history cursor remains generation-bound.
 
   ↑ history paused · new output · wheel/PageDown/Ctrl+End to live tail
-
+  ◆ tool deploy
   ↳ 1. steer next · Keep the compact footer at two rows
   ↳ 2. follow-up · Run the real installed-resource and SSH smoke after the gate
 ╭─ message ────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
 │ Summarize release evidence, then detach without stopping the Host                                                    │
 │                                                                                                                      │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
-  ◆ tool deploy · running · queue 2 · openai-codex/gpt-5.6-sol · think xhigh · connected/controller · ext build:ready
+  running · queue 2 · openai-codex/gpt-5.6-sol · think xhigh · connected/controller · ext build:ready
   alu-dock · /home/luziyi/workshop/alu_dock · d:dock-nig p:pi-night · ↑18.5k ↓6.4k · ctx 42.0k/200.0k 21% · cache 33%

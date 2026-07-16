@@ -14,11 +14,11 @@ ALU DOCK / NIGHT CONSOLE · /help commands
   ◆ deploy running · Alt+O detail
 
   · Candidate release is ready for the final SSH gate.
-
+  ◆ tool deploy
   ↳ 1. steer next · Keep the footer within two rows
   ↳ 2. follow-up · Run the SSH smoke after the gate
 ╭─ message ────────────────────────────────────────────────────────────────────╮
 │ Send a follow-up…                                                            │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-  ◆ tool deploy · running · queue 2 · openai-codex/gpt-5.6-sol · think xhigh
+  running · queue 2 · openai-codex/gpt-5.6-sol · think xhigh
   alu-dock · /home/luziyi/workshop/alu_dock · ctx 42.0k/200.0k 21% · cache 33%
