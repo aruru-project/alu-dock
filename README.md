@@ -29,7 +29,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [x] #157 tool render storm、#154 queue诚实时序/撤回与#155长历史/滚轮修正
 - [x] #156 Night Console语义配色、single-column transcript与两行status dock
 - [ ] #158最终真人默认入口验收（完成基线1/6后由#164暂停）
-- [ ] #164人工验收阻塞闸门（#161 tool摘要与#165 composer稳定性源码已完成；统一release待其余子卡完成）
+- [ ] #164人工验收阻塞闸门（#161 tool摘要、#165 composer稳定性与#160 terminal selection源码已完成；统一release待其余子卡完成）
 
 详细文档：
 
@@ -65,6 +65,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [`docs/validation-v0.1-night-console.md`](docs/validation-v0.1-night-console.md)
 - [`docs/validation-v0.1-tool-summaries.md`](docs/validation-v0.1-tool-summaries.md)
 - [`docs/validation-v0.1-composer-stability.md`](docs/validation-v0.1-composer-stability.md)
+- [`docs/validation-v0.1-terminal-selection.md`](docs/validation-v0.1-terminal-selection.md)
 - [`docs/v0.2-terminal-core-design.md`](docs/v0.2-terminal-core-design.md)
 
 ## V0.1 工程入口
@@ -92,6 +93,7 @@ alu-dock
 - `Alt+Up`：按steering-first、follow-up-later顺序撤回全部仍可撤回的未消费queue到editor，不中止当前run；已离开Pi内部queue、正等待公开`message_start`的极窄in-flight窗口不会被复制
 - `Esc`、空编辑器 `Ctrl+C` 或 `/abort`：先清除queue并恢复未消费文本，再取消当前run/retry/compaction；tree branch summary进行中时调用公开`abortBranchSummary()`路径，实例保持可复用
 - `PageUp` / `PageDown` / 鼠标滚轮：操作同一独立 history viewport；到达顶部按200项反向加载，prepend保持entry/row视觉锚点，回看时暂停追尾并提示新输出；`Ctrl+End` 回到保留的最新页/底部
+- `Shift+拖动`：在默认mouse tracking下直接使用终端原生框选；`Alt+M`或`/mouse`关闭tracking进入普通拖选模式，`Esc`/`Alt+M`恢复Dock滚轮。Windows剪贴板复制使用`Ctrl+Shift+C`
 - `Ctrl+O`：展开/折叠全部 generic tool output；`Alt+O` 只切换最近一项详情；工具默认折叠
 - `/settings`：查看全部 24 项投影并选择修改；也可用 `/settings KEY VALUE`。其中 compaction reserve/keep tokens 因 Pi 无公开 setter而只读
 - `/model`：打开可输入检索的 Pi 模型选择器（name/provider/id）；`/model PROVIDER/MODEL` 直接切换
