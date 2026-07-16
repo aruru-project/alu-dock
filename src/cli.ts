@@ -3,14 +3,15 @@
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 
-import type { DeliveryMode, DockEvent, EventCursor } from "./core/managed-instance.js";
-import { DockClient, ControlClientError } from "./control/dock-client.js";
+import { renderCliHelp, requestedCliHelp } from "./cli-help.js";
+import { ControlClientError, DockClient } from "./control/dock-client.js";
 import { DockHost } from "./control/dock-host.js";
 import { DockRegistry } from "./control/dock-registry.js";
-import { defaultSocketPath, managedSocketPath } from "./control/socket-path.js";
 import { FileCatalogStore, defaultCatalogPath } from "./control/durable-catalog-store.js";
-import { UserServiceManager } from "./deployment/user-service.js";
 import type { ProjectTrustChoice } from "./control/project-trust.js";
+import { defaultSocketPath, managedSocketPath } from "./control/socket-path.js";
+import type { DeliveryMode, DockEvent, EventCursor } from "./core/managed-instance.js";
+import { UserServiceManager } from "./deployment/user-service.js";
 
 const HOST_SHUTDOWN_TIMEOUT_MS = 12_000;
 
@@ -23,8 +24,9 @@ interface ParsedArgs {
 
 async function main(): Promise<void> {
   const parsed = parseGlobalArgs(process.argv.slice(2));
-  if (parsed.command === "help") {
-    process.stdout.write(usage());
+  const helpTopics = requestedCliHelp(parsed.command, parsed.commandArgs);
+  if (helpTopics) {
+    process.stdout.write(renderCliHelp(helpTopics));
     return;
   }
 
@@ -98,7 +100,7 @@ async function main(): Promise<void> {
     }
 
     default:
-      throw new Error(`Unknown command: ${parsed.command}\n\n${usage()}`);
+      throw new Error(`Unknown command: ${parsed.command}\n\n${renderCliHelp([])}`);
   }
 }
 
@@ -330,9 +332,10 @@ function parseGlobalArgs(args: string[]): ParsedArgs {
 
   const command = remaining.shift();
   if (!command) return { socketPath, socketExplicit, command: "open", commandArgs: [] };
-  if (command === "--help" || command === "-h" || command === "help") {
+  if (command === "--help" || command === "-h") {
     return { socketPath, socketExplicit, command: "help", commandArgs: [] };
   }
+  if (command === "help") return { socketPath, socketExplicit, command, commandArgs: remaining };
   return { socketPath, socketExplicit, command, commandArgs: remaining };
 }
 
@@ -546,10 +549,6 @@ function waitForSignal(): Promise<NodeJS.Signals> {
 
 function writeJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value)}\n`);
-}
-
-function usage(): string {
-  return `Alu Dock V0.1 managed Pi client\n\nHuman workflow:\n  alu-dock\n  alu-dock open [INSTANCE_ID] [--cwd PATH] [--name NAME] [--new]\n  alu-dock new [--cwd PATH] [--name NAME]\n  alu-dock attach [INSTANCE_ID] [--cwd PATH]\n\nManaged service lifecycle:\n  alu-dock service install [--now]\n  alu-dock service start|stop|restart|status\n  alu-dock service logs [--lines N] [--follow]\n  alu-dock service uninstall\n\nMachine and diagnostic commands:\n  alu-dock serve --managed\n  alu-dock --socket PATH serve --dev\n  alu-dock [--socket PATH] ping\n  alu-dock [--socket PATH] create [--cwd PATH] [--name NAME] [--operation-id ID]\n    [--trust-challenge ID --project-trust CHOICE]\n  alu-dock [--socket PATH] reopen INSTANCE_ID [--session-file PATH] [--operation-id ID]\n    [--trust-challenge ID --project-trust CHOICE]\n  alu-dock [--socket PATH] list\n  alu-dock [--socket PATH] status INSTANCE_ID\n  alu-dock [--socket PATH] events INSTANCE_ID [--cursor HOST_EPOCH:RUNTIME_GENERATION:SEQUENCE] [--follow]\n  alu-dock [--socket PATH] prompt INSTANCE_ID [--delivery MODE] MESSAGE\n  alu-dock [--socket PATH] stop INSTANCE_ID\n`;
 }
 
 function errorMessage(error: unknown): string {

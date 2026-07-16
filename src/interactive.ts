@@ -20,7 +20,7 @@ export interface OpenDockOptions {
 /** Human entry point: ensure a host, choose/create an instance, then attach a thin TUI. */
 export async function openDock(options: OpenDockOptions): Promise<void> {
   if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
-    throw new Error("The Alu Dock interactive client requires a TTY; use --help for JSON commands");
+    throw new Error("The Alu Dock interactive client requires a TTY; run `alu-dock --help` for non-interactive guidance");
   }
 
   const cwd = resolve(options.cwd);
