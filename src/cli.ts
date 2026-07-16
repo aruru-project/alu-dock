@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 
 import { renderCliHelp, requestedCliHelp } from "./cli-help.js";
+import { humanListWidth, renderHumanInstanceList } from "./cli-list.js";
 import { ControlClientError, DockClient } from "./control/dock-client.js";
 import { DockHost } from "./control/dock-host.js";
 import { DockRegistry } from "./control/dock-registry.js";
@@ -62,10 +63,12 @@ async function main(): Promise<void> {
       return;
     }
 
-    case "list":
+    case "list": {
       requireNoArgs(parsed.commandArgs, "list");
-      writeJson({ kind: "instances", instances: await client.list() });
+      const instances = await client.list();
+      process.stdout.write(renderHumanInstanceList(instances, humanListWidth(process.stdout.columns)));
       return;
+    }
 
     case "status": {
       const instanceId = requiredPositional(parsed.commandArgs, "status requires INSTANCE_ID");

@@ -6,6 +6,8 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { DockClient } from "../src/control/dock-client.js";
+
 interface ChildMessage {
   type?: string;
   [key: string]: unknown;
@@ -30,6 +32,10 @@ test("independent CLI processes reconnect to one delayed host-owned instance", {
     assert.equal(ready.socketPath, socketPath);
     assert.equal((await lstat(socketPath)).mode & 0o777, 0o600);
 
+    const emptyList = await runCliText(socketPath, ["list"]);
+    assert.match(emptyList, /No Alu Dock instances/u);
+    assert.match(emptyList, /alu-dock new/u);
+
     // Client A creates the instance and exits immediately after the response.
     const createdOutput = await runCli(socketPath, ["create", "--cwd", directory, "--name", "cross-client"]);
     const created = objectValue(createdOutput.instance);
@@ -37,12 +43,20 @@ test("independent CLI processes reconnect to one delayed host-owned instance", {
     assert.equal(instanceId, "fixture-instance-1");
     assert.equal(created.execution, "running");
 
-    // Each command below is a fresh process, proving no client process owns it.
-    const listOutput = await runCli(socketPath, ["list"]);
-    const instances = listOutput.instances as unknown[];
+    // Machine assertions use the typed port; the public list remains a human projection.
+    const instances = await new DockClient({ socketPath }).list();
     assert.equal(instances.length, 1);
-    assert.equal(objectValue(instances[0]).id, instanceId);
+    assert.equal(instances[0]?.id, instanceId);
+    const humanList = await runCliText(socketPath, ["list"]);
+    assert.match(humanList, new RegExp(instanceId.slice(0, 8), "u"));
+    assert.match(humanList, /cross-client/u);
+    assert.match(humanList, /active\/running/u);
+    assert.match(humanList, /g1/u);
+    assert.match(humanList, /no model/u);
+    assert.match(humanList, new RegExp(escapeRegExp(directory), "u"));
+    assert.doesNotMatch(humanList, /creationOperationId|eventCursor|sessionFile|metrics/u);
 
+    // Each command below is a fresh process, proving no client process owns it.
     const statusOutput = await runCli(socketPath, ["status", instanceId]);
     assert.equal(objectValue(statusOutput.instance).execution, "running");
     assert.equal(
@@ -130,6 +144,22 @@ async function runCli(socketPath: string, args: string[]): Promise<Record<string
   return objectValue(JSON.parse(lines[0] as string) as unknown);
 }
 
+async function runCliText(socketPath: string, args: string[]): Promise<string> {
+  const { stdout, stderr } = await new Promise<{ stdout: string; stderr: string }>((resolveRun, rejectRun) => {
+    execFile(
+      process.execPath,
+      [cliPath, "--socket", socketPath, ...args],
+      { encoding: "utf8", timeout: 5_000 },
+      (error, stdout, stderr) => {
+        if (error) rejectRun(new Error(`CLI failed: ${error.message}\nstdout: ${stdout}\nstderr: ${stderr}`));
+        else resolveRun({ stdout, stderr });
+      },
+    );
+  });
+  assert.equal(stderr, "");
+  return stdout;
+}
+
 async function runCliFailure(socketPath: string, args: string[]): Promise<string> {
   return new Promise<string>((resolveRun, rejectRun) => {
     execFile(process.execPath, [cliPath, "--socket", socketPath, ...args], { encoding: "utf8", timeout: 5_000 }, (error, _stdout, stderr) => {
@@ -186,4 +216,8 @@ function stringValue(value: unknown): string {
 function numberValue(value: unknown): number {
   assert.equal(typeof value, "number");
   return value as number;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }

@@ -1,0 +1,172 @@
+import type { InstanceSnapshot } from "./core/managed-instance.js";
+
+export const MAX_HUMAN_LIST_INSTANCES = 100;
+const DEFAULT_WIDTH = 80;
+const MIN_WIDTH = 20;
+const MAX_WIDTH = 160;
+const graphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+
+/** Bounded plain-text catalog projection for the public human CLI. */
+export function renderHumanInstanceList(
+  instances: readonly InstanceSnapshot[],
+  requestedWidth = DEFAULT_WIDTH,
+): string {
+  const width = normalizeWidth(requestedWidth);
+  if (instances.length === 0) {
+    return `${fit("No Alu Dock instances.", width)}\n${fit("Start one: alu-dock new", width)}\n`;
+  }
+
+  const ordered = [...instances].sort(compareInstances);
+  const visible = ordered.slice(0, MAX_HUMAN_LIST_INSTANCES);
+  const lines = [fit(`Alu Dock instances · ${instances.length}`, width), ""];
+  for (const instance of visible) lines.push(...renderInstance(instance, width));
+  const omitted = instances.length - visible.length;
+  if (omitted > 0) {
+    lines.push("", fit(`Showing ${visible.length} of ${instances.length} · ${omitted} older records omitted`, width));
+  }
+  lines.push("", fit(
+    width >= 60
+      ? "Next: alu-dock attach ID · alu-dock status ID · alu-dock stop ID"
+      : "Next: alu-dock attach ID",
+    width,
+  ));
+  return `${lines.join("\n")}\n`;
+}
+
+export function humanListWidth(columns: number | undefined): number {
+  return normalizeWidth(columns ?? DEFAULT_WIDTH);
+}
+
+export function terminalDisplayWidth(value: string): number {
+  let width = 0;
+  for (const { segment } of graphemes.segment(value)) width += graphemeWidth(segment);
+  return width;
+}
+
+function renderInstance(instance: InstanceSnapshot, width: number): [string, string] {
+  const compact = width < 40;
+  const idWidth = compact ? 6 : 8;
+  const id = terminalSafe(instance.id).slice(0, idWidth);
+  const state = terminalSafe(`${instance.lifecycle}/${instance.execution}`);
+  const generation = `g${Math.max(1, Math.floor(instance.runtimeGeneration))}`;
+  const base = `${stateIcon(instance)} ${id} ${state} ${generation}`;
+  const tags = decisionTags(instance);
+  const safeName = terminalSafe(instance.name || "(unnamed)");
+  const available = Math.max(1, width - terminalDisplayWidth(base) - 1);
+  const tagText = tags.length > 0 ? ` · ${tags.join(" · ")}` : "";
+  const includeTags = terminalDisplayWidth(tagText) + 8 <= available;
+  const nameBudget = Math.max(1, available - (includeTags ? terminalDisplayWidth(tagText) : 0));
+  const first = fit(`${base} ${truncateDisplay(safeName, nameBudget)}${includeTags ? tagText : ""}`, width);
+
+  const model = terminalSafe(instance.executor.model
+    ? `${instance.executor.model.provider}/${instance.executor.model.id}`
+    : "no model");
+  const cwd = terminalSafe(instance.cwd || "(no cwd)");
+  const bodyWidth = Math.max(1, width - 2);
+  const separator = " · ";
+  if (bodyWidth <= terminalDisplayWidth(separator) + 2) {
+    return [first, fit(`  ${truncateDisplay(model, bodyWidth)}`, width)];
+  }
+  const availableBody = bodyWidth - terminalDisplayWidth(separator);
+  const modelBudget = Math.max(1, Math.min(Math.floor(availableBody * 0.42), availableBody - 1));
+  const cwdBudget = Math.max(1, availableBody - modelBudget);
+  const second = fit(`  ${truncateDisplay(model, modelBudget)}${separator}${truncateDisplay(cwd, cwdBudget)}`, width);
+  return [first, second];
+}
+
+function decisionTags(instance: InstanceSnapshot): string[] {
+  const tags: string[] = [];
+  if (instance.pending.total > 0) tags.push(`pending ${instance.pending.total}`);
+  if (instance.reopenable && (instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error")) tags.push("reopenable");
+  return tags;
+}
+
+function stateIcon(instance: InstanceSnapshot): string {
+  if (instance.lifecycle === "active" && instance.execution === "running") return "◆";
+  if (instance.lifecycle === "active" && instance.execution === "idle") return "●";
+  if (instance.lifecycle === "runtime_error") return "!";
+  if (instance.lifecycle === "host_lost") return "×";
+  if (instance.lifecycle === "stopping") return "◇";
+  return "○";
+}
+
+function compareInstances(left: InstanceSnapshot, right: InstanceSnapshot): number {
+  const priority = instancePriority(left) - instancePriority(right);
+  if (priority !== 0) return priority;
+  const updated = right.updatedAt.localeCompare(left.updatedAt);
+  return updated !== 0 ? updated : left.id.localeCompare(right.id);
+}
+
+function instancePriority(instance: InstanceSnapshot): number {
+  if (instance.lifecycle === "active" && instance.execution === "running") return 0;
+  if (instance.lifecycle === "active") return 1;
+  if (instance.lifecycle === "stopping") return 2;
+  if (instance.lifecycle === "runtime_error") return instance.reopenable ? 3 : 4;
+  if (instance.lifecycle === "host_lost") return instance.reopenable ? 3 : 4;
+  return 5;
+}
+
+function terminalSafe(value: string): string {
+  return value
+    .replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ")
+    .replace(/[\u202a-\u202e\u2066-\u2069\ufeff]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim() || "—";
+}
+
+function fit(value: string, width: number): string {
+  const safeLine = value
+    .replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ")
+    .replace(/[\u202a-\u202e\u2066-\u2069\ufeff]/gu, " ");
+  return truncateDisplay(safeLine, width);
+}
+
+function truncateDisplay(value: string, width: number): string {
+  const bounded = Math.max(0, Math.floor(width));
+  if (bounded === 0) return "";
+  if (terminalDisplayWidth(value) <= bounded) return value;
+  if (bounded === 1) return "…";
+  const target = bounded - 1;
+  let output = "";
+  let used = 0;
+  for (const { segment } of graphemes.segment(value)) {
+    const segmentWidth = graphemeWidth(segment);
+    if (used + segmentWidth > target) break;
+    output += segment;
+    used += segmentWidth;
+  }
+  return `${output}…`;
+}
+
+function graphemeWidth(value: string): number {
+  let width = 0;
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) as number;
+    if (/\p{Mark}/u.test(character) || codePoint === 0x200d || (codePoint >= 0xfe00 && codePoint <= 0xfe0f)) continue;
+    width = Math.max(width, isWide(codePoint, character) ? 2 : 1);
+  }
+  return width;
+}
+
+function isWide(codePoint: number, character: string): boolean {
+  if (/\p{Extended_Pictographic}/u.test(character)) return true;
+  return codePoint >= 0x1100 && (
+    codePoint <= 0x115f
+    || codePoint === 0x2329
+    || codePoint === 0x232a
+    || (codePoint >= 0x2e80 && codePoint <= 0xa4cf && codePoint !== 0x303f)
+    || (codePoint >= 0xac00 && codePoint <= 0xd7a3)
+    || (codePoint >= 0xf900 && codePoint <= 0xfaff)
+    || (codePoint >= 0xfe10 && codePoint <= 0xfe19)
+    || (codePoint >= 0xfe30 && codePoint <= 0xfe6f)
+    || (codePoint >= 0xff00 && codePoint <= 0xff60)
+    || (codePoint >= 0xffe0 && codePoint <= 0xffe6)
+    || (codePoint >= 0x1f1e6 && codePoint <= 0x1f1ff)
+    || (codePoint >= 0x20000 && codePoint <= 0x3fffd)
+  );
+}
+
+function normalizeWidth(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_WIDTH;
+  return Math.min(MAX_WIDTH, Math.max(MIN_WIDTH, Math.floor(value)));
+}
