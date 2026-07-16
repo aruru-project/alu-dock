@@ -15,6 +15,7 @@ import { ExtensionUiBroker } from "../src/core/extension-ui-broker.js";
 import { ManagedInstance, type DockEvent } from "../src/core/managed-instance.js";
 import { SETTING_KEYS } from "../src/core/config-projection.js";
 import { RuntimeInvalidSettingValueError, RuntimeSettingsWriteError } from "../src/core/runtime-session.js";
+import { mouseTrackingSequences } from "../src/tui/mouse-input.js";
 import { DelayedRuntimeSession } from "./support/delayed-runtime-session.js";
 import { ScriptedCatalogCommitPort } from "./support/scripted-catalog-port.js";
 
@@ -638,6 +639,36 @@ test("SSH TUI preserves concurrent composer input while transcript deltas remain
   assert.equal(pty.status, 0, output.slice(-2_000));
   assert.equal(pty.draftVisible, true, "the forced final frame must retain every typed character");
   assert.match(output, /responding/u);
+});
+
+test("SSH TUI terminal selection mode pairs mouse tracking without aborting the run", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "pty-mouse-selection");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+
+  const pty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", harness.socketPath,
+    "attach", created.id,
+  ], "mouse-selection");
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-2_000));
+  assert.equal(pty.status, 0, output.slice(-2_000));
+  assert.match(output, /terminal selection/u);
+
+  const { enable, disable } = mouseTrackingSequences();
+  let offset = 0;
+  for (const sequence of [enable, disable, enable, disable, enable, disable]) {
+    const index = output.indexOf(sequence, offset);
+    assert.ok(index >= offset, `missing ordered mouse sequence ${JSON.stringify(sequence)}`);
+    offset = index + sequence.length;
+  }
+  assert.equal(runtime.abortCalls, 0);
+  assert.equal((await client.status(created.id)).execution, "running");
 });
 
 test("SSH TUI editor preserves multiline paste and submitted history", async (context) => {
@@ -2339,7 +2370,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "editor" | "abort" | "queue-restore" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "model-search" | "scroll" | "history-page" | "tool-fold" | "activity-stability" | "activity-streaming" | "extension-dialogs" | "extension-replacement" = "detach",
+  action: "detach" | "editor" | "abort" | "queue-restore" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "model-search" | "scroll" | "history-page" | "tool-fold" | "activity-stability" | "activity-streaming" | "mouse-selection" | "extension-dialogs" | "extension-replacement" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {

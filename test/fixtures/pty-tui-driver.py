@@ -234,6 +234,24 @@ def main() -> int:
                 os.write(fd, b"\x03")
                 time.sleep(0.05)
                 read_available(fd, output, 0.02)
+            elif action == "mouse-selection":
+                os.write(fd, b"\x1bm")  # Alt+M enters terminal selection mode.
+                mode_deadline = time.monotonic() + 2
+                while b"terminal selection" not in output and time.monotonic() < mode_deadline:
+                    if read_available(fd, output, 0.02) < 0:
+                        break
+                os.write(fd, b"\x1b")  # Esc returns to app-owned wheel mode.
+                time.sleep(0.08)
+                while read_available(fd, output, 0.01) > 0:
+                    pass
+                os.write(fd, b"/mouse\r")  # Slash command enters the same mode.
+                time.sleep(0.12)
+                while read_available(fd, output, 0.01) > 0:
+                    pass
+                os.write(fd, b"\x1bm")  # Alt+M returns without aborting the run.
+                time.sleep(0.08)
+                while read_available(fd, output, 0.01) > 0:
+                    pass
             elif action == "tool-fold":
                 fold_deadline = time.monotonic() + 3
                 while b"Alt+O detail" not in output and time.monotonic() < fold_deadline:

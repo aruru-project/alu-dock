@@ -1,4 +1,6 @@
-import { ProcessTerminal } from "@earendil-works/pi-tui";
+import { ProcessTerminal, truncateToWidth, type Component } from "@earendil-works/pi-tui";
+
+import { paint } from "./theme.js";
 
 const ENABLE_MOUSE_TRACKING = "\u001b[?1000h\u001b[?1006h";
 const DISABLE_MOUSE_TRACKING = "\u001b[?1006l\u001b[?1000l";
@@ -21,17 +23,43 @@ export class DockProcessTerminal extends ProcessTerminal {
 
   override start(onInput: (data: string) => void, onResize: () => void): void {
     super.start(onInput, onResize);
-    this.write(ENABLE_MOUSE_TRACKING);
-    this.mouseTracking = true;
+    this.setMouseTracking(true);
+  }
+
+  setMouseTracking(enabled: boolean): boolean {
+    if (enabled === this.mouseTracking) return false;
+    this.write(enabled ? ENABLE_MOUSE_TRACKING : DISABLE_MOUSE_TRACKING);
+    this.mouseTracking = enabled;
+    return true;
   }
 
   override stop(): void {
-    if (this.mouseTracking) {
-      this.write(DISABLE_MOUSE_TRACKING);
-      this.mouseTracking = false;
-    }
+    this.setMouseTracking(false);
     super.stop();
   }
+}
+
+/** Client-local mode that gives ordinary drag gestures back to the terminal. */
+export class TerminalSelectionMode implements Component {
+  private activeValue = false;
+
+  get active(): boolean { return this.activeValue; }
+
+  setActive(active: boolean): boolean {
+    if (active === this.activeValue) return false;
+    this.activeValue = active;
+    return true;
+  }
+
+  render(width: number): string[] {
+    if (!this.activeValue) return [];
+    return [truncateToWidth(
+      `${paint.queue("  ↖ terminal selection")} ${paint.faint("· drag select · Ctrl+Shift+C copy · Esc/Alt+M return")}`,
+      Math.max(1, width),
+    )];
+  }
+
+  invalidate(): void {}
 }
 
 export function mouseTrackingSequences(): { enable: string; disable: string } {

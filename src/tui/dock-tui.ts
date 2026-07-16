@@ -25,7 +25,7 @@ import type { ProjectTrustChoice } from "../control/project-trust.js";
 import { DockConversation, DockStatusLine } from "./conversation.js";
 import { ExtensionTextDialog } from "./extension-text-dialog.js";
 import { PagedHistoryWindow, HISTORY_PAGE_SIZE } from "./history-pagination.js";
-import { DockProcessTerminal, parseMouseWheel } from "./mouse-input.js";
+import { DockProcessTerminal, parseMouseWheel, TerminalSelectionMode } from "./mouse-input.js";
 import { PendingQueueTray } from "./pending-queue.js";
 import { FixedDockScreen } from "./pi-tui-screen.js";
 import {
@@ -77,6 +77,7 @@ export async function runDockTui(
   const conversation = new DockConversation();
   const historyWindow = new PagedHistoryWindow();
   const pendingQueue = new PendingQueueTray();
+  const terminalSelection = new TerminalSelectionMode();
   let instance = initialInstance;
   const status = new DockStatusLine(instance);
   let runActivity = activityFromSnapshot(instance);
@@ -268,8 +269,18 @@ export async function runDockTui(
     }
     if (text === "/help") {
       conversation.addNotice(
-        "Commands: /settings [KEY VALUE], /model [PROVIDER/MODEL], /thinking [LEVEL], /tools [NAME…], /tree [ENTRY], /fork [USER_ENTRY], /clone, /new [PARENT], /resume [SESSION_FILE], /name NAME, /compact [INSTRUCTIONS], /reload, /resources, /follow MESSAGE, /steer MESSAGE, /abort, /status, /stop, /detach",
+        "Commands: /settings [KEY VALUE], /model [PROVIDER/MODEL], /thinking [LEVEL], /tools [NAME…], /tree [ENTRY], /fork [USER_ENTRY], /clone, /new [PARENT], /resume [SESSION_FILE], /name NAME, /compact [INSTRUCTIONS], /reload, /resources, /mouse, /follow MESSAGE, /steer MESSAGE, /abort, /status, /stop, /detach",
       );
+      conversation.addNotice("Mouse: wheel scrolls Dock history · Shift+drag selects immediately · Alt+M or /mouse enters ordinary terminal selection · Esc/Alt+M returns.");
+      tui.requestRender();
+      return;
+    }
+    if (text === "/mouse") {
+      setTerminalSelectionMode(!terminalSelection.active);
+      return;
+    }
+    if (text.startsWith("/mouse")) {
+      conversation.addNotice("Usage: /mouse", true);
       tui.requestRender();
       return;
     }
@@ -1470,7 +1481,14 @@ export async function runDockTui(
     terminal.setProgress(terminalProgressEnabled && instance.lifecycle === "active" && instance.execution === "running");
   }
 
+  function setTerminalSelectionMode(active: boolean): void {
+    const modeChanged = terminalSelection.setActive(active);
+    const trackingChanged = terminal.setMouseTracking(!active);
+    if (modeChanged || trackingChanged) tui.requestRender();
+  }
+
   const composerDock = new Container();
+  composerDock.addChild(terminalSelection);
   composerDock.addChild(pendingQueue);
   composerDock.addChild(editor);
   screen = new FixedDockScreen(terminal, {
@@ -1486,6 +1504,14 @@ export async function runDockTui(
 
   const removeInputListener = tui.addInputListener((data) => {
     if (tui.hasOverlay()) return undefined;
+    if (matchesKey(data, Key.alt("m"))) {
+      setTerminalSelectionMode(!terminalSelection.active);
+      return { consume: true };
+    }
+    if (terminalSelection.active && matchesKey(data, "escape")) {
+      setTerminalSelectionMode(false);
+      return { consume: true };
+    }
     const wheel = parseMouseWheel(data);
     if (wheel) {
       const reachedBoundary = wheel === "up" ? screen?.scrollUp(3) : screen?.scrollDown(3);
@@ -1758,6 +1784,7 @@ export function commandCatalog(commands: CommandDto[]): Array<{ name: string; de
     { name: "install", description: "show Pi CLI package ownership guidance" },
     { name: "login", description: "show Pi CLI login ownership guidance" },
     { name: "model", description: "choose or set provider/model", argumentHint: "PROVIDER/MODEL" },
+    { name: "mouse", description: "toggle ordinary terminal drag-selection mode" },
     { name: "name", description: "set or clear the Pi session name", argumentHint: "NAME" },
     { name: "new", description: "create a new Pi session", argumentHint: "PARENT_SESSION" },
     { name: "reload", description: "coherently reload Pi resources" },

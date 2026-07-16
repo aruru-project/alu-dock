@@ -68,7 +68,7 @@ test("autocomplete combines Dock and projected extension skill and prompt comman
   assert.ok(catalog.some((command) => command.name === "unsafe[2J"));
   assert.equal(catalog.some((command) => command.name.includes("\u001b")), false);
   assert.equal(catalog.find((command) => command.name === "prompt-review")?.argumentHint, "arguments");
-  for (const name of ["settings", "tools", "tree", "fork", "clone", "new", "resume", "name", "compact", "reload", "resources"]) assert.ok(catalog.some((command) => command.name === name));
+  for (const name of ["settings", "tools", "tree", "fork", "clone", "new", "resume", "name", "compact", "reload", "resources", "mouse"]) assert.ok(catalog.some((command) => command.name === name));
 
   const provider = new CombinedAutocompleteProvider(catalog, "/tmp");
   const suggestions = await provider.getSuggestions(["/skill-c"], 0, 8, { signal: new AbortController().signal });

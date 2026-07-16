@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { visibleWidth } from "@earendil-works/pi-tui";
+
 import type { HistoryEntryDto } from "../src/core/instance-dto.js";
 import {
   HISTORY_PAGE_SIZE,
   MAX_HISTORY_WINDOW_ENTRIES,
   PagedHistoryWindow,
 } from "../src/tui/history-pagination.js";
-import { parseMouseWheel, mouseTrackingSequences } from "../src/tui/mouse-input.js";
+import { parseMouseWheel, mouseTrackingSequences, TerminalSelectionMode } from "../src/tui/mouse-input.js";
 
 function entry(index: number, text = `history ${index}`): HistoryEntryDto {
   return {
@@ -92,6 +94,19 @@ test("paged history exposes retryable cursor errors without advancing or looping
   assert.equal(history.snapshot().loadState, "error");
   assert.match(history.snapshot().error ?? "", /did not advance/);
   assert.ok(history.beginEarlier(), "a PageUp retry should be admitted after an error");
+});
+
+test("terminal selection mode is explicit, bounded, and inactive by default", () => {
+  const mode = new TerminalSelectionMode();
+  assert.equal(mode.active, false);
+  assert.deepEqual(mode.render(80), []);
+  assert.equal(mode.setActive(true), true);
+  assert.equal(mode.setActive(true), false);
+  const line = mode.render(43)[0] ?? "";
+  assert.match(line, /terminal selection/u);
+  assert.ok(visibleWidth(line) <= 43);
+  assert.equal(mode.setActive(false), true);
+  assert.deepEqual(mode.render(80), []);
 });
 
 test("mouse wheel parser accepts SGR and legacy xterm presses and ignores non-wheel input", () => {
