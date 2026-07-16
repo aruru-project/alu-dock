@@ -336,7 +336,7 @@ interface CommandReceiptDto {
 }
 ```
 
-Receipt 仍表示 Pi preflight 已接受，不表示 run 完成；实现可继续使用封装在 pinned Pi adapter 内的 `preflightResult`。Catalog accepted state commit 后才发送 receipt。Extension command handled-without-run 另发 `command.handled`。
+Receipt 仍表示 Pi preflight 已接受，不表示 run 完成；实现可继续使用封装在 pinned Pi adapter 内的 `preflightResult`。Catalog accepted state commit 后才发送 receipt。Extension command handled-without-run 另发 `command.handled`。该event是operation/activity和replay所需的机器事实，不是默认conversation正文；客户端成功路径静默投影它，但不得静默`command.rejected`、extension error/notification或命令专用结果。
 
 ### Queue消费与恢复合同
 
