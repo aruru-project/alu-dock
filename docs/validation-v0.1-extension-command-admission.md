@@ -2,7 +2,7 @@
 
 Date: 2026-07-16  
 Card: #177  
-Status: source gate passed; immutable rollout pending
+Status: source gate and immutable rollout passed
 
 ## Scope
 
@@ -73,10 +73,31 @@ Logs:
 
 A fresh read-only architecture review initially found parent-operation, event-attribution, command-authority, activity, and generation-fencing risks in the in-progress draft. The implementation was reworked around a separate immediate-command admission path, the public current runner, explicit parent-event flushing, operation initiation, and generation fencing. Final review found no remaining source correctness defect; its only requested change was a stale capability-matrix sentence that still described ResourceLoader command reconstruction. That documentation conflict was corrected.
 
+## Immutable rollout
+
+- Source commit: `745f056c0fa396f9a0f287ae4abbceb63715df1f`.
+- Release: `20260716T164215Z-745f056c0fa3` at `/home/luziyi/release/alu-dock/releases/20260716T164215Z-745f056c0fa3`.
+- Previous/rollback release: `20260716T111829Z-d19aa7e4b9d6`.
+- The deployer reran the complete 270-test gate, installed lockfile-pinned production dependencies, atomically switched `current`, and restarted the generated user unit.
+- Initial deployed service evidence: PID `3237641`, host epoch `77a3134c-a2bb-41b1-bd49-10a2f03582d4`.
+- Release smoke passed with 41 commands, 23 resources, 0 diagnostics, 18 tools, 24 settings, 3 tree nodes, and the installed `chain/chain-prompts` plus `run/run-chain` command pairs.
+- Managed typed-DockClient `/rm-confirm off` smoke passed: `delivery:"prompt",queued:false`, snapshot/attach/dequeue all empty, metrics all zero, `lastRun:"never"`, `command.handled:"extension_command"`, and no queued/submitted command body. The temporary stopped record was explicitly forgotten; no Pi session file was deleted.
+- Rollback-forward passed without an active runtime: rollback PID/epoch `3237835` / `722cec95-b4c7-4cf2-8ef7-0378fed50458`; final forward PID/epoch `3237932` / `56a14919-4d19-4eed-90e9-6a4b4888985f`.
+- A second post-forward managed command smoke passed against PID `3237932`; `current` resolves to the new immutable release and the service is active/ready with no actionable instance.
+- Journal shows the expected stop/start/ready boundaries and no new-release startup error.
+
+Deployment evidence:
+
+- `/tmp/alu-dock-177-deploy.log`
+- `/home/luziyi/release/alu-dock/receipts/20260716T164215Z-745f056c0fa3.json`
+- `/tmp/alu-dock-177-managed-extension-smoke.log`
+- `/tmp/alu-dock-177-rollback-forward.log`
+- `/tmp/alu-dock-177-post-forward-command-smoke.log`
+
 ## Deviations and residual risk
 
 - No compatibility layer, private Pi import, plugin-private protocol, second Queue, or TUI-only routing rule was added.
 - Handler execution remains asynchronous after the accepted receipt, matching prompt admission semantics. A second command is rejected while that handler still owns the instance admission slot.
 - Pi catches registered command handler exceptions and emits the existing extension error event; an unexpected adapter-level Promise rejection is projected as `instance.error` without altering a running parent.
 - This document does not validate #176 multi-runtime `pi-subagents` isolation. That work remains independently owned and must not be inferred from this gate.
-- Immutable rollout, MainPID/hello/resource verification, managed installed-command smoke, and rollback-forward evidence will be appended after deployment.
+- The managed smoke exercises the installed command in an idle no-model runtime. Running-parent, settlement-during-admission/handler, failure, Queue restoration, model-run initiation, activity preservation, and generation fencing are deterministic regression gates; no provider call was added merely to duplicate those invariants in production.

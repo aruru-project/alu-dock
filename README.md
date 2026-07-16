@@ -28,8 +28,10 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 - [x] 阶段 6：tree/fork/clone（源码、自动化门禁与managed rollout）
 - [x] #157 tool render storm、#154 queue诚实时序/撤回与#155长历史/滚轮修正
 - [x] #156 Night Console语义配色、single-column transcript与两行status dock
-- [ ] #158最终真人默认入口验收（完成基线1/6后由#164暂停）
-- [ ] #164人工验收阻塞闸门（旧#161–#167候选被真人发现的#160/#169/#170稳定化需求取代；等待新consolidated release与用户Windows Terminal/PowerShell验收）
+- [ ] #158最终真人默认入口验收（基线1/6后暂停；是否恢复仍由用户决定）
+- [x] #164人工验收阻塞闸门（用户已于2026-07-16完成签收）
+- [x] #177 registered extension command 先于Queue admission（270-test gate、immutable rollout、managed smoke与rollback-forward完成）
+- [ ] #176 `pi-subagents`同进程多runtime completion隔离（独立fork工作目录推进，尚未纳入本release）
 
 详细文档：
 
@@ -77,7 +79,7 @@ V0 已验证官方 Pi SDK session 可由独立本机宿主持有，并通过结�
 
 ## V0.1 工程入口
 
-#142是V0.1工程状态入口。阶段0–6、dogfood UX与Extension UI主体能力已完成，Stage 6 invariants保持冻结。#160/#169/#170的264-test consolidated gate、immutable rollout、managed/loopback回归已部署于`20260716T111829Z-d19aa7e4b9d6`；它仍只是#164验收候选，等待用户亲自在Windows Terminal → PowerShell → SSH签收。#158暂停于基线1/6；只有用户完成#164后才能决定是否恢复验收。V0.2 renderer仍由#148独立排期。
+#142是V0.1工程状态入口。阶段0–6、dogfood UX与Extension UI主体能力已完成，Stage 6 invariants保持冻结；用户已完成#164签收。#177将current-generation registered extension command移到Queue admission之前，270-test consolidated gate、installed/managed command smoke、immutable rollout与rollback-forward已部署于`20260716T164215Z-745f056c0fa3`。#176仍在独立fork工作目录修复`pi-subagents`多runtime completion隔离，未纳入本release；#158是否恢复仍由用户决定。V0.2 renderer继续由#148独立排期。
 
 **绿地规则：** Alu Dock 是全新项目。到 1.0 落地前，除非用户特意说明，不考虑任何旧协议、旧 Host、旧数据、旧 CLI 行为的兼容或迁移；原型合同直接替换。版本号仅标识当前合同，不表示存在历史包袱。
 
