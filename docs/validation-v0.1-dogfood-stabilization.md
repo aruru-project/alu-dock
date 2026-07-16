@@ -4,7 +4,7 @@ Date: 2026-07-16
 
 Cards: #160, #169, #170; aggregate gate #164
 
-Status: source implementation and consolidated gate complete; immutable rollout, managed live-subagent smoke and user Windows Terminal acceptance remain pending
+Status: source, consolidated gate, immutable managed rollout and automated managed/loopback-SSH evidence complete; only user Windows Terminal acceptance remains pending
 
 ## Scope
 
@@ -100,15 +100,21 @@ The deterministic Night Console benchmark remained bounded at 0.941 / 0.699 / 0.
 
 ## Managed and terminal evidence
 
-Pending immutable rollout evidence:
+Immutable release `20260716T111829Z-d19aa7e4b9d6` contains code commit `d19aa7e4b9d61c083bf5aa0e1a02f34949fb5811`; its rollback target is `20260716T104416Z-7caba9a3704c`. The deployment receipt passed its clean-tree/check/test/audit/import gates and initial installed-resource smoke. The generated unit exposed the exact PATH `/home/luziyi/.nvm/versions/node/v22.21.0/bin:/home/luziyi/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`.
 
-- release ID/commit and rollback target;
-- generated service PATH and `MainPID`/hello/hostEpoch match;
-- installed-resource startup projection;
-- real managed `pi-subagents` child spawn and successful transcript;
-- deliberate child failure rendered as failed rather than done;
-- source/local PTY and loopback SSH queue, activity, mouse, list/cleanup and detach checks;
-- service journal and zero unintended active/pending instances.
+A real rollback switched atomically to the complete prior release and reached ready as PID `3163954`, epoch `9e626a64-39c1-4039-8c73-872b6073ccfe`; switching atomically forward restored the new immutable release as PID `3164013`, epoch `7d809399-5a1d-4c6d-b310-ebbe46a0e85e`. Final hello PID equalled systemd `MainPID`. A post-rollback installed-resource smoke reported 41 commands, 23 resources, 0 diagnostics, 18 tools, 24 settings and 3 tree nodes, including canonical `chain`/`chain-prompts` and `run`/`run-chain` ordering. The final-PID journal contains only `host.ready` and no `spawn pi ENOENT`, missing-npm, fatal or uncaught error.
+
+Real managed `pi-subagents` evidence used Dock instance `897d9a82-d1e9-46f7-b1b9-27985fd1899a` before cleanup:
+
+- generation 1 spawned stock `pi`, returned exact child text `ALU_SUBAGENT_OK`, wrote `.pi-subagents/artifacts/outputs/72969de2/context.md`, and persisted a `subagent` history result with `isError:false`;
+- `session.new` replaced the runtime at generation 2, proving the inline extension was re-registered rather than retained accidentally from generation 1;
+- an intentionally invalid child model then produced live `tool.completed.isError:true` and persisted `tool_result.isError:true` with `Model "invalid/definitely-missing:low" not found`; the outer parent run completed normally after observing the child failure instead of presenting the child as done.
+
+A second real managed run accepted two ordered follow-ups, then `queue.dequeue` returned both exact operation IDs/texts in `restored`, no `inFlight`, and pending count zero. The run was aborted only after the successful dequeue; stop/forget returned `piSessionFilesDeleted:0`.
+
+Installed loopback SSH started with zero `1000h`/`1006h`, emitted exactly two opt-in enable pairs for Alt+M and `/mouse`, emitted two matching disables including active-mode detach cleanup, retained the typed draft, and produced zero idle timer bytes over 650 ms. Source PTY coverage in the 264-test gate separately exercises localized active-row pulses, concurrent typing, autocomplete/Esc priority, queue completion-time prepend and the in-flight no-abort path.
+
+Catalog dogfood stopped and forgot the managed evidence instance while both generation session files remained present, then pruned 23 old stopped Dock records with no Pi-session deletion. Final `alu-dock list --all` reports no records; the managed service remains ready with no active or pending instance.
 
 ## Remaining manual gate
 
