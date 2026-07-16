@@ -5,7 +5,7 @@ import { CombinedAutocompleteProvider, visibleWidth } from "@earendil-works/pi-t
 
 import type { SettingDto } from "../src/core/config-projection.js";
 import type { DockEvent, InstanceSnapshot } from "../src/core/managed-instance.js";
-import { DockConversation, DockStatusLine } from "../src/tui/conversation.js";
+import { DockActivityLine, DockConversation, DockStatusLine } from "../src/tui/conversation.js";
 import { commandCatalog } from "../src/tui/dock-tui.js";
 import { PendingQueueTray } from "../src/tui/pending-queue.js";
 import { projectSnapshot } from "../src/tui/snapshot-projection.js";
@@ -466,13 +466,14 @@ test("live snapshot projection updates metrics, extension status, state, and rep
   assert.equal(projected.executor.sessionFile, "/tmp/pi-2.jsonl");
 });
 
-test("conversation and status expose replay truncation and current state", () => {
+test("conversation, activity slot, and low-frequency status expose distinct state", () => {
   const conversation = new DockConversation();
   conversation.applyReplay([], true);
   assert.match(conversation.snapshot()[0]?.text ?? "", /outside the host/);
 
+  const activity = new DockActivityLine();
   const status = new DockStatusLine(snapshot());
-  status.setActivity("streaming");
+  activity.setActivity("streaming");
   status.setController("observing");
   status.setConnection("connected");
   status.setAutoCompaction(true);
@@ -482,15 +483,18 @@ test("conversation and status expose replay truncation and current state", () =>
   assert.match(footer, /demo/);
   assert.match(footer, /gpt-test/);
   assert.match(footer, /running/);
-  assert.match(footer, /streaming/);
+  assert.doesNotMatch(footer, /streaming/);
   assert.match(footer, /ctx 1\.0k\/10\.0k 10%/);
   assert.match(footer, /cache 20%/);
   assert.match(footer, /alu-kanban:ready/);
   for (const line of lines) assert.ok(visibleWidth(line) <= 120);
 
-  status.setActivity({ phase: "waiting", label: "waiting for model" });
-  const narrow = status.render(43);
-  assert.equal(narrow.length, 2);
-  assert.match(narrow[0] ?? "", /waiting for model/);
-  for (const line of narrow) assert.ok(visibleWidth(line) <= 43);
+  activity.setActivity({ phase: "waiting", label: "waiting for model" });
+  const narrowActivity = activity.render(43);
+  const narrowStatus = status.render(43);
+  assert.equal(narrowActivity.length, 1);
+  assert.match(narrowActivity[0] ?? "", /waiting for model/);
+  assert.equal(narrowStatus.length, 2);
+  assert.doesNotMatch(narrowStatus.join("\n"), /waiting for model/);
+  for (const line of [...narrowActivity, ...narrowStatus]) assert.ok(visibleWidth(line) <= 43);
 });

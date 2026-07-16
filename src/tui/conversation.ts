@@ -683,21 +683,33 @@ function projectToolState(tool: ToolProjection, state: ToolState): void {
   tool.entry.renderCache = undefined;
 }
 
+export class DockActivityLine implements Component {
+  private label = "ready";
+  private phase: RunActivityState["phase"] | "status" = "idle";
+
+  setActivity(activity: string | RunActivityState): void {
+    const label = safeTerminalLine(typeof activity === "string" ? activity : activity.label);
+    this.label = label;
+    this.phase = typeof activity === "string" ? inferActivityPhase(label) : activity.phase;
+  }
+
+  render(width: number): string[] {
+    const symbol = activitySymbolFor(this.phase);
+    const line = activityPainter(this.phase)(`${symbol} ${this.label}`);
+    return [truncateToWidth(`  ${line}`, Math.max(1, width))];
+  }
+
+  invalidate(): void {}
+}
+
 export class DockStatusLine implements Component {
   private snapshotValue: InstanceSnapshot;
-  private activity = "ready";
-  private activityPhase: RunActivityState["phase"] | "status" = "status";
   private connection = "connected";
   private controller = "observing";
   private autoCompaction: boolean | undefined;
 
   constructor(snapshot: InstanceSnapshot) { this.snapshotValue = snapshot; }
   update(snapshot: InstanceSnapshot): void { this.snapshotValue = snapshot; }
-  setActivity(activity: string | RunActivityState): void {
-    const label = safeTerminalLine(typeof activity === "string" ? activity : activity.label);
-    this.activity = label;
-    this.activityPhase = typeof activity === "string" ? inferActivityPhase(label) : activity.phase;
-  }
   setConnection(connection: string): void { this.connection = safeTerminalLine(connection); }
   setController(controller: string): void { this.controller = safeTerminalLine(controller); }
   setAutoCompaction(enabled: boolean | undefined): void { this.autoCompaction = enabled; }
@@ -711,11 +723,8 @@ export class DockStatusLine implements Component {
       : "no model";
     const name = safeTerminalLine(snapshot.name || shortId(snapshot.id));
     const state = snapshot.lifecycle === "active" ? snapshot.execution : snapshot.lifecycle;
-    const activitySymbol = activitySymbolFor(this.activityPhase);
-    const activity = activityPainter(this.activityPhase)(`${activitySymbol} ${this.activity}`);
     const statuses = Object.entries(snapshot.extensionStatus);
     const firstLine = fitFooterSegments(boundedWidth, [
-      activity,
       statePainter(state)(state),
       ...(snapshot.pending.total > 0 ? [paint.queue(`queue ${snapshot.pending.total}`)] : []),
       paint.primary(model),

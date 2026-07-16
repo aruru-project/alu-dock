@@ -11,7 +11,7 @@ import {
   reduceRunActivity,
   submittingActivity,
 } from "../src/tui/run-activity.js";
-import { DockConversation } from "../src/tui/conversation.js";
+import { DockActivityLine, DockConversation } from "../src/tui/conversation.js";
 import { FixedDockScreen } from "../src/tui/pi-tui-screen.js";
 import {
   HistoryViewport,
@@ -77,6 +77,51 @@ test("fixed screen keeps the composer immediately above the compact footer", () 
   assert.ok(lines.indexOf("history 2") < lines.indexOf("editor 1"));
   assert.ok(lines.indexOf("editor 2") < lines.indexOf("status 1"));
   assert.ok(lines.indexOf("status 2") < lines.indexOf("help"));
+});
+
+test("activity slot stays fixed above composer without moving a locked history anchor", () => {
+  const conversation = new DockConversation();
+  conversation.applyHistory(Array.from({ length: 30 }, (_, index): HistoryEntryDto => ({
+    entryId: `activity-history-${index}`,
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: [{ type: "text", text: `activity history row ${index}` }],
+  })), false);
+  const activity = new DockActivityLine();
+  const header: Component = { render: () => ["header"], invalidate: () => {} };
+  const status: Component = { render: () => ["status one", "status two"], invalidate: () => {} };
+  const editor: Component = { render: (width) => [...activity.render(width), "composer"], invalidate: () => {} };
+  const screen = new FixedDockScreen({ rows: 18 }, {
+    header,
+    history: conversation,
+    status,
+    editor,
+    historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
+  });
+
+  screen.render(43);
+  screen.pageUp();
+  screen.render(43);
+  const beforeAnchor = screen.captureHistoryAnchor();
+  const beforeViewport = screen.viewportSnapshot();
+  assert.ok(beforeAnchor);
+
+  activity.setActivity({ phase: "responding", label: "responding" });
+  const changed = screen.render(43);
+  assert.deepEqual(screen.captureHistoryAnchor(), beforeAnchor);
+  assert.deepEqual(screen.viewportSnapshot(), beforeViewport);
+  const historyRow = changed.findIndex((line) => line.includes("activity history row"));
+  const activityRow = changed.findIndex((line) => line.includes("responding"));
+  const composerRow = changed.indexOf("composer");
+  const statusRow = changed.indexOf("status one");
+  assert.ok(historyRow >= 0 && historyRow < activityRow);
+  assert.ok(activityRow < composerRow && composerRow < statusRow);
+
+  for (const width of [43, 80, 120]) {
+    activity.setActivity({ phase: "tool", label: `tool ${"read ".repeat(40)}` });
+    const lines = activity.render(width);
+    assert.equal(lines.length, 1);
+    assert.ok(visibleWidth(lines[0] ?? "") <= width);
+  }
 });
 
 test("history viewport auto-follows, locks on page-up, counts unseen output, and returns to bottom", () => {

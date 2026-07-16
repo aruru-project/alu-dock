@@ -579,8 +579,11 @@ test("SSH TUI replays, resizes, handles input, and detaches without stopping", a
   assert.match(output, /waiting for model/);
   const resizedFrame = lastFullRedrawFrame(output);
   assert.equal(resizedFrame.length, 18, `expected one fixed 18-row screen:\n${resizedFrame.join("\n")}`);
+  const activityRow = resizedFrame.findIndex((line) => /waiting for model/u.test(line));
+  assert.ok(activityRow >= 0 && activityRow < resizedFrame.length - 3, "live activity must sit above the composer rather than inside the footer");
   assert.match(resizedFrame.at(-3) ?? "", /^─+$/u, "the editor bottom border must remain immediately above the two-row status dock");
-  assert.match(resizedFrame.at(-2) ?? "", /waiting for model|running/u);
+  assert.match(resizedFrame.at(-2) ?? "", /running/u);
+  assert.doesNotMatch(resizedFrame.at(-2) ?? "", /waiting for model/u);
   assert.match(resizedFrame.at(-1) ?? "", /pty-demo/u);
   assert.match(output, /Detached from pty-demo/);
   assert.doesNotMatch(output, /data:image|;base64,/i);
@@ -648,6 +651,12 @@ test("SSH TUI preserves concurrent composer input while transcript deltas remain
   assert.equal(pty.status, 0, output.slice(-2_000));
   assert.equal(pty.draftVisible, true, "the forced final frame must retain every typed character");
   assert.match(output, /responding/u);
+  const streamingFrame = lastFullRedrawFrame(output);
+  const activityRow = streamingFrame.findIndex((line) => /responding/u.test(line));
+  assert.ok(activityRow >= 0 && activityRow < streamingFrame.length - 3);
+  assert.match(streamingFrame.at(-3) ?? "", /^─+$/u);
+  assert.match(streamingFrame.at(-2) ?? "", /running/u);
+  assert.doesNotMatch(streamingFrame.at(-2) ?? "", /responding/u);
 });
 
 test("SSH TUI keeps repeated no-run completion facts out of live and replayed conversation", async (context) => {
