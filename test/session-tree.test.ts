@@ -66,6 +66,37 @@ test("tree collection holds one revision and reports a bounded selector cap", as
   await assert.rejects(collectSessionTree(async (_revision, cursor) => cursor === undefined ? pages[0] as typeof pages[number] : { ...pages[1], treeRevision: "changed" } as typeof pages[number]), /changed during pagination/);
 });
 
+test("tree picker compresses linear depth and exposes branch points, active path, and sibling leaves", () => {
+  const branched: TreeNodeDto[] = [
+    { entryId: "root", depth: 0, kind: "message", role: "user", summary: "start task", hasChildren: true },
+    ...Array.from({ length: 12 }, (_, index): TreeNodeDto => ({
+      entryId: `linear-${index}`,
+      parentId: index === 0 ? "root" : `linear-${index - 1}`,
+      depth: index + 1,
+      kind: "message",
+      role: index % 2 === 0 ? "assistant" : "user",
+      summary: `linear turn ${index}`,
+      hasChildren: true,
+    })),
+    { entryId: "leaf-a", parentId: "linear-11", depth: 13, kind: "message", role: "assistant", summary: "original branch answer", hasChildren: false },
+    { entryId: "branch-b-user", parentId: "linear-5", depth: 7, kind: "message", role: "user", summary: "new branch prompt", hasChildren: true },
+    { entryId: "leaf-b", parentId: "branch-b-user", depth: 8, kind: "message", role: "assistant", summary: "new branch answer", hasChildren: false },
+  ];
+  // Correct the depth-first topology around the branch: branch B is a sibling
+  // after branch A's leaf in the flattened projection.
+  const items = treePickerItems(branched, "leaf-b", branched);
+  const longLinear = items.find((item) => item.value === "linear-5")!;
+  const branchA = items.find((item) => item.value === "leaf-a")!;
+  const branchB = items.find((item) => item.value === "leaf-b")!;
+  assert.ok((longLinear.label.match(/│/gu) ?? []).length <= 1, "raw depth must not drive indentation");
+  assert.match(longLinear.description, /branch point · 2 paths/u);
+  assert.match(branchA.label, /○ Alu · original branch answer/u);
+  assert.match(branchA.description, /sibling branch leaf/u);
+  assert.match(branchB.label, /● Alu · new branch answer/u);
+  assert.match(branchB.description, /current leaf/u);
+  assert.doesNotMatch(items.map((item) => `${item.label} ${item.description}`).join("\n"), /leaf-a|leaf-b/u, "internal IDs stay searchable values, not primary copy");
+});
+
 test("tree view filtering, picker projection, and direct command parsing remain Dock-owned", () => {
   assert.deepEqual(filterSessionTree(nodes, "default").map((node) => node.entryId), ["u1", "tool", "u2"]);
   assert.deepEqual(filterSessionTree(nodes, "no-tools").map((node) => node.entryId), ["u1", "u2"]);

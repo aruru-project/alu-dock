@@ -1155,6 +1155,47 @@ test("SSH TUI Stage 3 commands mutate Host-owned settings tools and sessions", a
   assert.equal(runtime?.disposeCalls, 0);
 });
 
+test("SSH TUI tree identifies sibling branches and round-trips from B to A without a model run", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-pty-tree-branches-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  let runtime: DelayedRuntimeSession | undefined;
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
+    runtime = new DelayedRuntimeSession(`pi-${id}`);
+    runtime.treeNodes = [
+      { entryId: "branch-root", depth: 0, kind: "message", role: "user", summary: "initial task", hasChildren: true },
+      { entryId: "branch-point", parentId: "branch-root", depth: 1, kind: "message", role: "assistant", summary: "shared answer", hasChildren: true },
+      { entryId: "branch-a-user", parentId: "branch-point", depth: 2, kind: "message", role: "user", summary: "original branch prompt", hasChildren: true },
+      { entryId: "branch-a-leaf", parentId: "branch-a-user", depth: 3, kind: "message", role: "assistant", summary: "original branch answer", hasChildren: false },
+      { entryId: "branch-b-user", parentId: "branch-point", depth: 2, kind: "message", role: "user", summary: "new branch prompt", hasChildren: true },
+      { entryId: "branch-b-leaf", parentId: "branch-b-user", depth: 3, kind: "message", role: "assistant", summary: "new branch answer", hasChildren: false },
+    ];
+    runtime.treeLeafId = "branch-b-leaf";
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
+  }, () => "pty-tree-branches-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+  const created = await client.create(directory, "pty-tree-branches");
+
+  const pty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+    "attach", created.id,
+  ], "tree-branch-roundtrip");
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-4_000));
+  assert.equal(pty.status, 0, output.slice(-4_000));
+  for (const marker of ["╋ Alu · shared answer", "│ ○ Alu · original branch answer", "│ ● Alu · new branch answer", "Session branch selected"]) {
+    assert.ok(output.includes(marker), marker);
+  }
+  assert.equal(runtime?.treeLeafId, "branch-a-leaf");
+  assert.equal(runtime?.sessionMutationCalls.navigate, 1);
+  assert.equal(runtime?.promptCalls, 0);
+});
+
 test("SSH TUI Stage 6 navigates, returns fork text to the editor, and clones the current leaf", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-pty-stage6-"));
   await chmod(directory, 0o700);
@@ -3046,7 +3087,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "hub-exit" | "hub-signal" | "hub-new" | "hub-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "model-search" | "scroll" | "history-page" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "mouse-selection" | "extension-dialogs" | "extension-replacement" = "detach",
+  action: "detach" | "hub-exit" | "hub-signal" | "hub-new" | "hub-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "scroll" | "history-page" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "mouse-selection" | "extension-dialogs" | "extension-replacement" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {

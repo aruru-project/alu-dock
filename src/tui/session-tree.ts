@@ -73,12 +73,72 @@ export function filterSessionTree(nodes: TreeNodeDto[], mode: TreeFilterMode): T
 export function treePickerItems(
   nodes: TreeNodeDto[],
   leafId?: string,
+  topology: readonly TreeNodeDto[] = nodes,
 ): Array<{ value: string; label: string; description: string }> {
-  return nodes.map((node) => ({
-    value: node.entryId,
-    label: `${"  ".repeat(Math.min(node.depth, 20))}${node.entryId === leafId ? "●" : node.hasChildren ? "◆" : "•"} ${node.summary}`,
-    description: `${node.kind}${node.role ? `/${node.role}` : ""}${node.label ? ` · ${node.label}` : ""} · ${node.entryId}`,
-  }));
+  const byId = new Map(topology.map((node) => [node.entryId, node]));
+  const childCount = new Map<string, number>();
+  for (const node of topology) {
+    if (node.parentId) childCount.set(node.parentId, (childCount.get(node.parentId) ?? 0) + 1);
+  }
+  const activePath = new Set<string>();
+  let cursor = leafId === undefined ? undefined : byId.get(leafId);
+  while (cursor && !activePath.has(cursor.entryId)) {
+    activePath.add(cursor.entryId);
+    cursor = cursor.parentId === undefined ? undefined : byId.get(cursor.parentId);
+  }
+
+  return nodes.map((node) => {
+    const branchDepth = branchAncestorCount(node, byId, childCount);
+    const isBranchPoint = (childCount.get(node.entryId) ?? 0) > 1;
+    const isLeaf = !node.hasChildren || (childCount.get(node.entryId) ?? 0) === 0;
+    const onActivePath = activePath.has(node.entryId);
+    const marker = node.entryId === leafId
+      ? "●"
+      : isBranchPoint ? (onActivePath ? "╋" : "┼")
+        : isLeaf ? (onActivePath ? "◆" : "○")
+          : onActivePath ? "┃" : "·";
+    const role = semanticTreeRole(node);
+    const flags = [
+      ...(node.entryId === leafId ? ["current leaf"] : []),
+      ...(onActivePath && node.entryId !== leafId ? ["active path"] : []),
+      ...(isBranchPoint ? [`branch point · ${childCount.get(node.entryId)} paths`] : []),
+      ...(isLeaf && !onActivePath ? ["sibling branch leaf"] : []),
+      ...(node.label ? [`label: ${node.label}`] : []),
+    ];
+    return {
+      value: node.entryId,
+      label: `${"│ ".repeat(Math.min(branchDepth, 8))}${marker} ${role} · ${node.summary}`,
+      description: flags.join(" · ") || role.toLowerCase(),
+    };
+  });
+}
+
+function branchAncestorCount(
+  node: TreeNodeDto,
+  byId: ReadonlyMap<string, TreeNodeDto>,
+  childCount: ReadonlyMap<string, number>,
+): number {
+  let count = 0;
+  let parent = node.parentId === undefined ? undefined : byId.get(node.parentId);
+  const seen = new Set<string>();
+  while (parent && !seen.has(parent.entryId)) {
+    seen.add(parent.entryId);
+    if ((childCount.get(parent.entryId) ?? 0) > 1) count += 1;
+    parent = parent.parentId === undefined ? undefined : byId.get(parent.parentId);
+  }
+  return count;
+}
+
+function semanticTreeRole(node: TreeNodeDto): string {
+  if (node.kind === "message") {
+    if (node.role === "user") return "You";
+    if (node.role === "assistant") return "Alu";
+    if (node.role === "tool") return "Tool";
+    if (node.role === "system") return "System";
+  }
+  if (node.kind === "compaction") return "Context summary";
+  if (node.kind === "branch_summary") return "Branch summary";
+  return node.kind.replaceAll("_", " ");
 }
 
 export function parseTreeNavigationCommand(target: string): TreeNavigationCommand | undefined {

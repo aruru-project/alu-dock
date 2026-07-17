@@ -387,6 +387,26 @@ def main() -> int:
                     while b"expanded tool detail" not in output and time.monotonic() < expand_deadline:
                         if read_available(fd, output, 0.05) < 0:
                             break
+            elif action == "tree-branch-roundtrip":
+                os.write(fd, b"/tree\r")
+                picker_deadline = time.monotonic() + 5
+                while b"Navigate session tree" not in output and time.monotonic() < picker_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"original branch answer")
+                time.sleep(0.12)
+                while read_available(fd, output, 0.01) > 0:
+                    pass
+                os.write(fd, b"\r")
+                mode_deadline = time.monotonic() + 5
+                while b"Navigation mode" not in output and time.monotonic() < mode_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\r")
+                navigation_deadline = time.monotonic() + 5
+                while b"Session branch selected" not in output and time.monotonic() < navigation_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
             elif action == "stage6":
                 os.write(fd, b"/tree tree-u2\r")
                 tree_deadline = time.monotonic() + 5

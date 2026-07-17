@@ -875,7 +875,7 @@ export async function runDockTui(
     const byId = new Map(candidates.map((node) => [node.entryId, node]));
     const selected = await showChoicePicker(
       titleText,
-      treePickerItems(candidates, tree.leafId),
+      treePickerItems(candidates, tree.leafId, tree.nodes),
       tree.leafId,
       "type text/id/label · ↑↓ choose · Enter select · Esc cancel",
     );
