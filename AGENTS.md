@@ -61,6 +61,7 @@ A feature should have one clear owning module. Do not create one file per settin
 13. Do not send runtime objects, functions, handlers, component instances, binary data, image bytes, data URIs or raw base64 over the control protocol.
 14. Terminal-facing values must be sanitized for C0/C1 control characters.
 15. Tree navigation keeps the Pi session file; fork/clone are replacement transactions. Branch-summary cancellation must use the public `abortBranchSummary()` path rather than assuming agent abort covers it.
+16. A closed Host/protocol projection is not authorization to render a conversation message. Classify every human-facing fact by lifetime and actionability as durable conversation, transient status/activity, interaction, or explicit diagnostics. Expected internal bounds, replay/cursor state and operation bookkeeping stay quiet unless they cause concrete user impact; a user-facing warning must state that impact and an available action.
 
 ## Pi and settings rules
 
@@ -86,6 +87,8 @@ Work in cohesive slices rather than one test cycle per field:
 6. Enter SSH dogfooding early. Add regression tests for observed failures instead of indefinitely expanding speculative simulation.
 
 Automated tests protect deterministic invariants; they do not replace long-session, real-provider/network, multi-hour terminal and human workflow testing.
+
+Before asking the user to judge a human-facing CLI/TUI surface, the implementation owner must inspect the actual output at representative 80×24 and 120×40 sizes. Self-review information hierarchy, scanability, syntax-preserving wrapping and emphasis: group related actions, keep low-frequency modes subordinate, and do not hand obviously crowded or mechanically wrapped output to the user as a clarification question.
 
 Keep one writer for a working tree. Reviewers and analysis agents should be read-only unless an isolated worktree was intentionally created.
 
