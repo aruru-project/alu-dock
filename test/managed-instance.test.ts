@@ -13,8 +13,10 @@ import {
   RuntimeEffectUnknownError,
 } from "../src/core/managed-instance.js";
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, ToolDto } from "../src/core/config-projection.js";
+import { RuntimeCompactionKnownFailureError } from "../src/core/runtime-session.js";
 import type {
   ClearedRuntimeQueue,
+  RuntimeCompactionResult,
   RuntimeEvent,
   RuntimeHistoryEntry,
   RuntimeModelInfo,
@@ -291,6 +293,19 @@ function createClock(): () => Date {
   return () => new Date(Date.UTC(2026, 6, 14, 0, 0, tick++));
 }
 
+class KnownCompactionFailureSession extends FakeRuntimeSession {
+  async compact(): Promise<RuntimeCompactionResult> {
+    this.isCompacting = true;
+    this.emit({ type: "compaction_start", reason: "manual" });
+    this.isCompacting = false;
+    this.emit({
+      type: "compaction_end", reason: "manual", result: undefined, aborted: false, willRetry: false,
+      errorMessage: "Compaction failed: Nothing to compact (session too small)",
+    });
+    throw new RuntimeCompactionKnownFailureError("nothing_to_compact", "Nothing to compact (session too small)");
+  }
+}
+
 function createInstance(session = new FakeRuntimeSession(), eventCapacity = 50): ManagedInstance {
   let commandSequence = 0;
   return new ManagedInstance({
@@ -400,6 +415,21 @@ test("abort ends the run without disposing the reusable instance", async () => {
   assert.equal(instance.snapshot().execution, "idle");
   assert.equal(instance.snapshot().lastRun, "aborted");
   assert.ok(instance.eventsSince().events.some((event) => event.type === "run.settled" && event.data.result === "aborted"));
+});
+
+test("known compaction failure remains definitive instead of becoming effect_unknown", async () => {
+  const session = new KnownCompactionFailureSession();
+  const instance = createInstance(session);
+
+  await assert.rejects(
+    instance.compactSession("compact-known-noop"),
+    (error: unknown) => error instanceof RuntimeCompactionKnownFailureError
+      && error.reason === "nothing_to_compact",
+  );
+
+  assert.equal(instance.snapshot().execution, "idle");
+  assert.ok(instance.eventsSince().events.some((event) => event.type === "compaction.completed" && event.data.error?.includes("Nothing to compact")));
+  assert.equal((await instance.listModels()).models.length, 2, "configuration gate must be released after a known no-op");
 });
 
 test("abort cancels compaction without fabricating an aborted model run", async () => {

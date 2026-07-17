@@ -22,6 +22,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import type { ExtensionUiBroker } from "../core/extension-ui-broker.js";
+import { RuntimeCompactionKnownFailureError } from "../core/runtime-session.js";
 import type {
   ClearedRuntimeQueue,
   RuntimeCompactionResult,
@@ -539,12 +540,27 @@ export class PiRuntimeHost implements RuntimeSession {
 
   compact(customInstructions?: string): Promise<RuntimeCompactionResult> {
     return this.serialize(async () => {
-      const result = await this.requireActive().session.compact(customInstructions);
-      return {
-        summary: result.summary,
-        firstKeptEntryId: result.firstKeptEntryId,
-        tokensBefore: result.tokensBefore,
-      };
+      const session = this.requireActive().session;
+      const previousCompactionIds = new Set(
+        session.sessionManager.getEntries()
+          .filter((entry) => entry.type === "compaction")
+          .map((entry) => entry.id),
+      );
+      try {
+        const result = await session.compact(customInstructions);
+        return {
+          summary: result.summary,
+          firstKeptEntryId: result.firstKeptEntryId,
+          tokensBefore: result.tokensBefore,
+        };
+      } catch (error) {
+        const appended = session.sessionManager.getEntries()
+          .some((entry) => entry.type === "compaction" && !previousCompactionIds.has(entry.id));
+        if (appended) throw error;
+        const message = error instanceof Error ? error.message : String(error);
+        const reason = error instanceof Error && error.name === "AbortError" ? "cancelled" : compactionFailureReason(message);
+        throw new RuntimeCompactionKnownFailureError(reason, message);
+      }
     });
   }
 
@@ -993,6 +1009,13 @@ export async function createPiRuntimeHost(options: CreatePiRuntimeHostOptions): 
     uiContext,
     setProjectTrust: (cwd, trusted) => trustByCwd.set(cwd, trusted),
   });
+}
+
+function compactionFailureReason(message: string): "nothing_to_compact" | "already_compacted" | "cancelled" | "failed" {
+  if (message === "Nothing to compact (session too small)") return "nothing_to_compact";
+  if (message === "Already compacted") return "already_compacted";
+  if (message === "Compaction cancelled") return "cancelled";
+  return "failed";
 }
 
 function validDate(value: Date): boolean { return value instanceof Date && Number.isFinite(value.getTime()); }

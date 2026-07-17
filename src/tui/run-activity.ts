@@ -129,6 +129,10 @@ export function reduceRunActivity(
       return { phase: "compaction", label: "compacting context" };
 
     case "compaction.completed":
+      if (event.data.aborted) return activityFromSnapshot(snapshot);
+      if (event.data.error && /(?:nothing to compact|already compacted|compaction (?:was )?cancelled|compaction (?:was )?canceled)/iu.test(event.data.error)) {
+        return { phase: "idle", label: /already compacted/iu.test(event.data.error) ? "already compacted" : "nothing to compact" };
+      }
       if (event.data.error) return { phase: "error", label: "compaction failed" };
       if (event.data.willRetry || snapshot.execution === "running") {
         return { phase: "waiting", label: "waiting for model" };

@@ -16,7 +16,7 @@ import { CatalogTransactionCoordinator } from "../src/control/catalog-transactio
 import { CatalogEffectUnknownError } from "../src/core/catalog.js";
 import { SETTING_KEYS } from "../src/core/config-projection.js";
 import { ManagedInstance } from "../src/core/managed-instance.js";
-import { RuntimeInvalidSettingValueError, RuntimeSettingsWriteError } from "../src/core/runtime-session.js";
+import { RuntimeCompactionKnownFailureError, RuntimeInvalidSettingValueError, RuntimeSettingsWriteError } from "../src/core/runtime-session.js";
 import {
   PiRuntimeHost,
   type PiRuntimeHostOptions,
@@ -41,6 +41,7 @@ class FakeSession {
     getSessionDir: () => "/sessions",
     usesDefaultSessionDir: () => this.usesDefaultSessionDir,
     getBranch: () => structuredClone(this.historyEntries),
+    getEntries: () => structuredClone(this.historyEntries),
     getTree: () => structuredClone(this.treeRoots),
     getLeafId: () => this.treeLeafId,
     getEntry: (entryId: string) => findTreeEntry(this.treeRoots, entryId),
@@ -59,6 +60,8 @@ class FakeSession {
   bindEvent: { type: string; [key: string]: unknown } | undefined;
   reloadError: Error | undefined;
   reloadEvent: { type: string; [key: string]: unknown } | undefined;
+  compactError: Error | undefined;
+  appendCompactionBeforeError = false;
   bindCalls = 0;
   abortCalls = 0;
   abortCompactionCalls = 0;
@@ -168,6 +171,16 @@ class FakeSession {
   async compact(): Promise<{ summary: string; firstKeptEntryId: string; tokensBefore: number }> {
     const result = { summary: "summary", firstKeptEntryId: "kept", tokensBefore: 321 };
     this.emit({ type: "compaction_start", reason: "manual" });
+    if (this.compactError) {
+      if (this.appendCompactionBeforeError) {
+        this.historyEntries.push({
+          type: "compaction", id: "compaction-after-effect", parentId: null, timestamp: new Date().toISOString(),
+          summary: "written", firstKeptEntryId: "kept", tokensBefore: 321,
+        } as SessionEntry);
+      }
+      this.emit({ type: "compaction_end", reason: "manual", result: undefined, aborted: false, willRetry: false, errorMessage: `Compaction failed: ${this.compactError.message}` });
+      throw this.compactError;
+    }
     this.emit({ type: "compaction_end", reason: "manual", result, aborted: false, willRetry: false });
     return result;
   }
@@ -451,6 +464,32 @@ test("Pi runtime host names and manually compacts through public AgentSession me
 
   unsubscribe();
   await host.dispose();
+});
+
+test("Pi runtime host distinguishes known no-effect compaction failures from post-effect ambiguity", async () => {
+  const knownRuntime = await runtimeHost([], (_owner, session) => {
+    session.compactError = new Error("Nothing to compact (session too small)");
+  });
+  knownRuntime.host.activateInitial();
+  await assert.rejects(
+    knownRuntime.host.compact(),
+    (error: unknown) => error instanceof RuntimeCompactionKnownFailureError
+      && error.reason === "nothing_to_compact",
+  );
+  await knownRuntime.host.dispose();
+
+  const ambiguousRuntime = await runtimeHost([], (_owner, session) => {
+    session.compactError = new Error("post-append hook failed");
+    session.appendCompactionBeforeError = true;
+  });
+  ambiguousRuntime.host.activateInitial();
+  await assert.rejects(
+    ambiguousRuntime.host.compact(),
+    (error: unknown) => error instanceof Error
+      && !(error instanceof RuntimeCompactionKnownFailureError)
+      && error.message === "post-append hook failed",
+  );
+  await ambiguousRuntime.host.dispose();
 });
 
 test("Pi runtime abort selects the public compaction cancellation path", async () => {

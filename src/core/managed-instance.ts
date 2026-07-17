@@ -16,7 +16,7 @@ import {
   type InteractionResponse,
   type InteractionResult,
 } from "./extension-ui-broker.js";
-import { RuntimeSettingsWriteError } from "./runtime-session.js";
+import { RuntimeCompactionKnownFailureError, RuntimeSettingsWriteError } from "./runtime-session.js";
 import type {
   CommandDto,
   DiagnosticDto,
@@ -3150,7 +3150,8 @@ function isKnownMutationBoundaryError(error: unknown): boolean {
   return error instanceof CatalogEffectUnknownError
     || error instanceof CatalogWriteError
     || error instanceof MutationFaultedError
-    || error instanceof RuntimeEffectUnknownError;
+    || error instanceof RuntimeEffectUnknownError
+    || error instanceof RuntimeCompactionKnownFailureError;
 }
 
 function nonNegativeNumber(value: unknown): number {

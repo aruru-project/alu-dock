@@ -1133,7 +1133,15 @@ export async function runDockTui(
       status.update(instance);
       conversation.addNotice(`Compacted ${result.result.tokensBefore.toLocaleString()} tokens · kept from ${result.result.firstKeptEntryId}.`);
       activity.setActivity("compacted");
-    } catch (error) { showError(error); }
+    } catch (error) {
+      if (error instanceof ControlClientError && error.code === "compaction_not_needed") {
+        activity.setActivity("nothing to compact");
+      } else if (error instanceof ControlClientError && error.code === "compaction_cancelled") {
+        activity.setActivity("compaction cancelled");
+      } else {
+        showError(error);
+      }
+    }
     finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.requestRender(); }
   }
 

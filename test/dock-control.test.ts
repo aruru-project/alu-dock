@@ -14,7 +14,7 @@ import { ProjectTrustCoordinator } from "../src/control/project-trust.js";
 import { ExtensionUiBroker } from "../src/core/extension-ui-broker.js";
 import { ManagedInstance, type DockEvent, type SessionDto } from "../src/core/managed-instance.js";
 import { SETTING_KEYS } from "../src/core/config-projection.js";
-import { RuntimeInvalidSettingValueError, RuntimeSettingsWriteError, type RuntimePromptOptions } from "../src/core/runtime-session.js";
+import { RuntimeCompactionKnownFailureError, RuntimeInvalidSettingValueError, RuntimeSettingsWriteError, type RuntimePromptOptions } from "../src/core/runtime-session.js";
 import { mouseTrackingSequences } from "../src/tui/mouse-input.js";
 import { DelayedRuntimeSession } from "./support/delayed-runtime-session.js";
 import { ScriptedCatalogCommitPort } from "./support/scripted-catalog-port.js";
@@ -2069,6 +2069,25 @@ test("session.commands.v1 names, compacts, replaces, reloads, and deduplicates m
     client.reloadSession(created.id, "name-op"),
     (error: unknown) => error instanceof ControlClientError && error.code === "operation_conflict",
   );
+});
+
+test("known compaction no-op is typed across Host and client without effect_unknown", async (context) => {
+  const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, undefined, "known-compact-create");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  runtime.sessionMutationError = new RuntimeCompactionKnownFailureError("nothing_to_compact", "Nothing to compact (session too small)");
+
+  await assert.rejects(
+    client.compactSession(created.id, undefined, "known-compact-noop"),
+    (error: unknown) => error instanceof ControlClientError
+      && error.code === "compaction_not_needed"
+      && error.operationId === "known-compact-noop"
+      && error.message === "Nothing to compact (session too small)",
+  );
+  assert.equal((await client.status(created.id)).execution, "idle");
+  assert.equal((await client.hostInfo()).state, "ready");
 });
 
 test("session command runtime ambiguity is operation-scoped and queryable", async (context) => {

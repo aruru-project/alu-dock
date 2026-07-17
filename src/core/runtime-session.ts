@@ -131,6 +131,19 @@ export interface RuntimeCompactionResult {
   tokensBefore: number;
 }
 
+export type RuntimeCompactionFailureReason = "nothing_to_compact" | "already_compacted" | "cancelled" | "failed";
+
+/** Definitive runtime evidence that a failed compaction appended no session entry. */
+export class RuntimeCompactionKnownFailureError extends Error {
+  constructor(
+    readonly reason: RuntimeCompactionFailureReason,
+    message: string,
+  ) {
+    super(message);
+    this.name = "RuntimeCompactionKnownFailureError";
+  }
+}
+
 export interface ClearedRuntimeQueue {
   steering: string[];
   followUp: string[];

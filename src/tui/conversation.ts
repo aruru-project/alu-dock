@@ -283,7 +283,10 @@ export class DockConversation implements Component {
         break;
 
       case "compaction.completed":
-        this.add(event.data.error ? "error" : "system", event.data.error ?? `Compaction ${event.data.aborted ? "aborted" : "completed"}${event.data.willRetry ? " · retrying" : ""}.`);
+        // Definitive no-op/cancel outcomes belong to the replaceable activity
+        // surface, not the durable session conversation.
+        if (event.data.aborted || isKnownCompactionNoop(event.data.error)) break;
+        this.add(event.data.error ? "error" : "system", event.data.error ?? `Compaction completed${event.data.willRetry ? " · retrying" : ""}.`);
         break;
 
       case "run.settled": {
@@ -1094,6 +1097,11 @@ function truncate(text: string, limit: number): string {
 
 function stringArraysEqual(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function isKnownCompactionNoop(error: string | undefined): boolean {
+  if (!error) return false;
+  return /(?:nothing to compact|already compacted|compaction (?:was )?cancelled|compaction (?:was )?canceled)/iu.test(error);
 }
 
 function looksLikeDiff(text: string | undefined): text is string {

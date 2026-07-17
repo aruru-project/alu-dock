@@ -402,6 +402,19 @@ test("subagent tool completion mirrors the closed isError lifecycle instead of c
   assert.doesNotMatch(projected, /✓ subagent done/u);
 });
 
+test("compaction keeps successful and real failures durable while no-op/cancel stay transient", () => {
+  const conversation = new DockConversation();
+  conversation.apply(event(1, "compaction.started", { reason: "manual" }));
+  conversation.apply(event(2, "compaction.completed", { reason: "manual", aborted: false, willRetry: false, error: "Compaction failed: Nothing to compact (session too small)" }));
+  conversation.apply(event(3, "compaction.completed", { reason: "manual", aborted: true, willRetry: false }));
+  conversation.apply(event(4, "compaction.completed", { reason: "manual", aborted: false, willRetry: false, error: "Provider compaction failed" }));
+
+  assert.deepEqual(conversation.snapshot().map((entry) => [entry.kind, entry.text]), [
+    ["system", "Compacting context · manual."],
+    ["error", "Provider compaction failed"],
+  ]);
+});
+
 test("compaction, replacement, and host-loss notices remain deterministic without queue transcript noise", () => {
   const conversation = new DockConversation();
   conversation.apply(event(1, "queue.changed", { steering: 1, followUp: 2, total: 3 }));
