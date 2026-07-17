@@ -6,7 +6,7 @@ import { CombinedAutocompleteProvider, visibleWidth } from "@earendil-works/pi-t
 import type { SettingDto } from "../src/core/config-projection.js";
 import type { DockEvent, InstanceSnapshot } from "../src/core/managed-instance.js";
 import { DockActivityLine, DockConversation, DockStatusLine } from "../src/tui/conversation.js";
-import { commandCatalog } from "../src/tui/dock-tui.js";
+import { commandCatalog, workHelpText } from "../src/tui/dock-tui.js";
 import { PendingQueueTray } from "../src/tui/pending-queue.js";
 import { projectSnapshot } from "../src/tui/snapshot-projection.js";
 import { parseSettingCommandValue } from "../src/tui/settings-controls.js";
@@ -75,6 +75,18 @@ test("autocomplete combines Dock and projected extension skill and prompt comman
   assert.ok(suggestions?.items.some((item) => item.value === "skill-check"));
 });
 
+test("Work help is scope-grouped and keeps every command syntax on one source line", () => {
+  const help = workHelpText();
+  assert.match(help, /^SESSION$/mu);
+  assert.match(help, /^RUNTIME$/mu);
+  assert.match(help, /^CLIENT$/mu);
+  assert.match(help, /^EXTENSION$/mu);
+  for (const line of help.split("\n")) assert.ok(visibleWidth(line) <= 72, line);
+  assert.ok(help.indexOf("SESSION") < help.indexOf("RUNTIME"));
+  assert.ok(help.indexOf("RUNTIME") < help.indexOf("CLIENT"));
+  assert.ok(help.indexOf("CLIENT") < help.indexOf("EXTENSION"));
+});
+
 test("Stage 3 setting command values are typed and bounded", () => {
   const boolSetting = { key: "autoRetry", value: true, source: "effective", writable: true, valueType: "boolean", reloadRequired: false, hostRestartRequired: false } as SettingDto;
   const enumSetting = { key: "transport", value: "auto", source: "effective", writable: true, valueType: "enum", allowedValues: ["auto", "sse", "websocket", "websocket-cached"], reloadRequired: false, hostRestartRequired: false } as SettingDto;
@@ -119,7 +131,7 @@ test("conversation reset replaces old session history", () => {
   assert.deepEqual(conversation.snapshot(), [{ kind: "assistant", text: "new session", complete: true }]);
 });
 
-test("no-run completion stays out of conversation while failures and notifications remain visible", () => {
+test("no-run completion and informational extension status stay out while durable failures remain visible", () => {
   const conversation = new DockConversation();
   conversation.applyReplay([
     event(1, "command.handled", { operationId: "no-run-1", kind: "extension_command" }),
@@ -128,11 +140,12 @@ test("no-run completion stays out of conversation while failures and notificatio
   assert.deepEqual(conversation.snapshot(), []);
 
   conversation.apply(event(3, "command.rejected", { operationId: "rejected-1", reason: "preflight_failed", error: "Command rejected visibly" }));
-  conversation.apply(event(4, "extension.notification", { level: "info", message: "Extension result remains visible" }));
-  conversation.apply(event(5, "extension.error", { error: "Extension failed visibly" }));
+  conversation.apply(event(4, "extension.notification", { level: "info", message: "Replaceable extension status" }));
+  conversation.apply(event(5, "extension.notification", { level: "warning", message: "Durable extension warning" }));
+  conversation.apply(event(6, "extension.error", { error: "Extension failed visibly" }));
   assert.deepEqual(conversation.snapshot().map((entry) => [entry.kind, entry.text]), [
     ["error", "Command rejected visibly"],
-    ["system", "Extension result remains visible"],
+    ["system", "Durable extension warning"],
     ["error", "Extension failed visibly"],
   ]);
 });
@@ -241,6 +254,26 @@ test("conversation collapses transport retry noise into retry status and one fin
     { kind: "system", text: "Retrying (1/3) in 0ms…", complete: true },
     { kind: "error", text: "fetch failed", complete: true },
   ]);
+});
+
+test("bash tool details preserve hard newlines and indentation without JSON escapes", () => {
+  const conversation = new DockConversation();
+  conversation.apply(event(1, "tool.started", {
+    toolCallId: "bash-lines", toolName: "bash", args: { command: "printf one\n  printf two\n\tprintf three" },
+  }));
+  conversation.apply(event(2, "tool.completed", {
+    toolCallId: "bash-lines", toolName: "bash", isError: false, text: "first\n  second\nthird",
+  }));
+  conversation.toggleLatestToolExpanded();
+  const rendered = conversation.render(80).join("\n");
+  assert.match(rendered, /│   printf one/u);
+  assert.match(rendered, /│     printf two/u);
+  assert.match(rendered, /│       printf three/u);
+  assert.match(rendered, /│   second/u);
+  assert.doesNotMatch(rendered, /\\n/u);
+
+  const narrow = conversation.render(18).join("\n");
+  assert.match(narrow, /┆ /u, "soft wraps use a continuation marker distinct from source newlines");
 });
 
 test("conversation renders Markdown, code, thinking policy, and diff tools at bounded widths", () => {
@@ -495,7 +528,7 @@ test("live snapshot projection updates metrics, extension status, state, and rep
 test("conversation, activity slot, and low-frequency status expose distinct state", () => {
   const conversation = new DockConversation();
   conversation.applyReplay([], true);
-  assert.match(conversation.snapshot()[0]?.text ?? "", /outside the host/);
+  assert.deepEqual(conversation.snapshot(), []);
 
   const activity = new DockActivityLine();
   const status = new DockStatusLine(snapshot());

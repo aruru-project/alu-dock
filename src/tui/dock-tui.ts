@@ -271,10 +271,7 @@ export async function runDockTui(
       return;
     }
     if (text === "/help") {
-      conversation.addNotice(
-        "Commands: /settings [KEY VALUE], /model [PROVIDER/MODEL], /thinking [LEVEL], /tools [NAME…], /tree [ENTRY], /fork [USER_ENTRY], /clone, /new [PARENT], /resume [SESSION_FILE], /name NAME, /compact [INSTRUCTIONS], /reload, /resources, /mouse, /follow MESSAGE, /steer MESSAGE, /abort, /status, /stop, /detach",
-      );
-      conversation.addNotice("Mouse: ordinary drag selects in the terminal by default · Alt+M or /mouse enables Dock-owned history wheel · Esc/Alt+M returns to terminal selection.");
+      conversation.addNotice(workHelpText());
       tui.requestRender();
       return;
     }
@@ -1779,6 +1776,36 @@ function booleanSetting(settings: SettingDto[], key: SettingDto["key"], fallback
 function numericSetting(settings: SettingDto[], key: SettingDto["key"], fallback: number): number {
   const value = settings.find((setting) => setting.key === key)?.value;
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+export function workHelpText(): string {
+  return [
+    "SESSION",
+    "  /tree [ENTRY]             browse or navigate branches",
+    "  /fork [USER_ENTRY]        fork before a user prompt",
+    "  /clone                    clone the current leaf",
+    "  /new [PARENT]             start a new Pi session",
+    "  /resume [SESSION_FILE]    resume a saved Pi session",
+    "  /name NAME                set or clear the session name",
+    "  /compact [INSTRUCTIONS]   compact context",
+    "RUNTIME",
+    "  /model [PROVIDER/MODEL]   choose a model",
+    "  /thinking [LEVEL]         set reasoning effort",
+    "  /tools [NAME…]            choose active tools",
+    "  /settings [KEY VALUE]     inspect or update settings",
+    "  /reload                   reload resources",
+    "  /resources                inspect resources/diagnostics",
+    "CLIENT",
+    "  /steer MESSAGE            steer the current run",
+    "  /follow MESSAGE           queue a follow-up",
+    "  /abort                    abort; keep the instance",
+    "  /status                   refresh status",
+    "  /stop                     stop and dispose",
+    "  /detach                   leave Work; keep runtime",
+    "EXTENSION",
+    "  Type / to discover extension, skill, and prompt commands.",
+    "  /mouse toggles the optional Dock-owned history wheel.",
+  ].join("\n");
 }
 
 export function commandCatalog(commands: CommandDto[]): Array<{ name: string; description: string; argumentHint?: string }> {

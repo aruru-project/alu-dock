@@ -380,6 +380,22 @@ test("command handled clears waiting activity without requiring transcript outpu
   assert.deepEqual(activity, { phase: "tool", label: "tool bash" });
 });
 
+test("informational extension feedback replaces activity and survives no-run completion", () => {
+  const idle = snapshot({ execution: "idle", lastRun: "succeeded" });
+  let activity = reduceRunActivity(activityFromSnapshot(idle), event(1, "extension.notification", {
+    level: "info", message: "Guard is enabled",
+  }), idle);
+  assert.deepEqual(activity, { phase: "idle", label: "Guard is enabled" });
+  activity = reduceRunActivity(activity, event(2, "command.handled", {
+    operationId: "extension-status", kind: "extension_command",
+  }), idle);
+  assert.deepEqual(activity, { phase: "idle", label: "Guard is enabled" });
+  activity = reduceRunActivity(activity, event(3, "extension.notification", {
+    level: "info", message: "Guard is disabled",
+  }), idle);
+  assert.deepEqual(activity, { phase: "idle", label: "Guard is disabled" });
+});
+
 test("run activity covers compaction queue interaction abort failure and host loss", () => {
   const running = snapshot();
   let activity = reduceRunActivity(activityFromSnapshot(running), event(1, "compaction.started", {

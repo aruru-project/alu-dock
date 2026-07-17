@@ -135,8 +135,9 @@ export class DockConversation implements Component {
     this.markLayoutChanged();
   }
 
-  applyReplay(events: DockEvent[], truncated: boolean): void {
-    if (truncated) this.add("system", "Earlier activity is outside the host's recent-event window.");
+  applyReplay(events: DockEvent[], _truncated: boolean): void {
+    // Persisted Pi history is the conversation truth. A bounded Host event-ring
+    // gap only limits transient reconstruction and must not look like data loss.
     for (const event of events) this.apply(event);
   }
 
@@ -202,7 +203,7 @@ export class DockConversation implements Component {
           omitted: [],
         };
         projected.name = name;
-        projected.args = formatJson(event.data.args, MAX_TOOL_ARGS);
+        projected.args = formatToolArgs(name, event.data.args, MAX_TOOL_ARGS);
         projected.summary = summarizeToolArgs(name, event.data.args);
         projected.omitted = [...new Set([...projected.omitted, ...(event.data.omittedFields ?? [])])];
         projected.entry.complete = false;
@@ -216,7 +217,7 @@ export class DockConversation implements Component {
         const callId = stringData(event, "toolCallId") ?? `${event.sequence}`;
         const tool = this.tools.get(callId);
         if (!tool) break;
-        const args = formatJson(event.data.args, MAX_TOOL_ARGS);
+        const args = formatToolArgs(tool.name, event.data.args, MAX_TOOL_ARGS);
         const summary = summarizeToolArgs(tool.name, event.data.args);
         const omitted = [...(event.data.omittedFields ?? [])];
         if (tool.args === args && tool.summary === summary && stringArraysEqual(tool.omitted, omitted)) break;
@@ -337,7 +338,9 @@ export class DockConversation implements Component {
         break;
 
       case "extension.notification":
-        this.add(event.data.level === "error" ? "error" : "system", event.data.message);
+        // Informational extension feedback is replaceable activity, projected
+        // by the Work shell. Warnings and errors remain durable and honest.
+        if (event.data.level !== "info") this.add(event.data.level === "error" ? "error" : "system", event.data.message);
         break;
 
       case "resources.reloaded":
@@ -569,7 +572,7 @@ export class DockConversation implements Component {
             entry: toolEntry,
             id: block.toolCallId,
             name: block.toolName,
-            args: formatJson(block.args, MAX_TOOL_ARGS),
+            args: formatToolArgs(block.toolName, block.args, MAX_TOOL_ARGS),
             summary: summarizeToolArgs(block.toolName, block.args),
             omitted: [...(block.omittedFields ?? [])],
           };
@@ -791,10 +794,10 @@ function renderToolHeader(entry: ConversationEntry, width: number, expanded: boo
 function renderToolDetails(text: string, width: number, state: ToolState | undefined): string[] {
   if (text.length === 0) return [];
   const bodyWidth = Math.max(1, width - 2);
-  return text
-    .split("\n")
-    .flatMap((line) => wrapTextWithAnsi(line || " ", bodyWidth))
-    .map((line) => renderToolDetailLine(line, width, state, true));
+  return text.split("\n").flatMap((sourceLine) => {
+    const wrapped = wrapTextWithAnsi(sourceLine || " ", bodyWidth);
+    return wrapped.map((line, index) => renderToolDetailLine(line, width, state, true, index > 0));
+  });
 }
 
 function renderToolDetailLine(
@@ -802,12 +805,13 @@ function renderToolDetailLine(
   width: number,
   state: ToolState | undefined,
   surface: boolean,
+  softContinuation = false,
 ): string {
   if (width < 3) return truncateToWidth(line, width);
   const bodyWidth = width - 2;
   const body = truncateToWidth(line || " ", bodyWidth);
   const projected = surface ? paint.toolSurface(padToVisibleWidth(body, bodyWidth)) : body;
-  return `${toolStatePainter(state)("│")} ${projected}`;
+  return `${toolStatePainter(state)(softContinuation ? "┆" : "│")} ${projected}`;
 }
 
 function renderNotice(text: string, width: number, error: boolean): string[] {
@@ -1062,6 +1066,16 @@ function joinToolSummary(parts: Array<string | undefined>): string | undefined {
 
 function normalizeToolSummaryPart(value: string): string {
   return safeTerminalLine(value).replace(/\s+/gu, " ").trim();
+}
+
+function formatToolArgs(toolName: string, args: JsonObject, limit: number): string | undefined {
+  const name = toolName.toLowerCase().split(/[.:/]/u).at(-1) ?? toolName.toLowerCase();
+  if (name !== "bash" || typeof args.command !== "string") return formatJson(args, limit);
+
+  const command = safeTerminalText(args.command).replace(/\t/gu, "    ");
+  const remaining = Object.fromEntries(Object.entries(args).filter(([key]) => key !== "command"));
+  const suffix = Object.keys(remaining).length === 0 ? undefined : formatJson(remaining, limit);
+  return truncate(["command", ...command.split("\n").map((line) => `  ${line}`), ...(suffix ? ["options", suffix] : [])].join("\n"), limit);
 }
 
 function formatJson(value: unknown, limit: number): string | undefined {

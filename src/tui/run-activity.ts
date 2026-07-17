@@ -79,7 +79,8 @@ export function reduceRunActivity(
 
     case "command.handled":
       if (snapshot.execution === "running") return current.phase === "idle" ? activityFromSnapshot(snapshot) : current;
-      return snapshot.pending.total > 0 ? queued(snapshot.pending.total) : READY;
+      if (snapshot.pending.total > 0) return queued(snapshot.pending.total);
+      return current.phase === "idle" && current.label !== READY.label ? current : READY;
 
     case "command.rejected":
       return { phase: "error", label: "command rejected" };
@@ -173,6 +174,11 @@ export function reduceRunActivity(
     case "instance.error":
     case "settings.write_failed":
       return { phase: "error", label: "error" };
+
+    case "extension.notification":
+      return event.data.level === "info"
+        ? { phase: "idle", label: event.data.message }
+        : current;
 
     case "extension.error":
       return current;
