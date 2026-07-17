@@ -2,7 +2,7 @@
 
 日期：2026-07-17  
 Cards：#178、#180  
-状态：代码与 consolidated gate 已通过；managed rollout 等待与 user-level `sol-mid-turn-guard` 更新同步
+状态：**PASS（代码、real Pi、managed A/B、immutable rollout 与 rollback-forward）**
 
 ## Scope
 
@@ -79,12 +79,47 @@ git diff --check
 - #180 初审发现 compact admission 与 `compaction_start` 投影之间的 preemption race。
 - 增加 compaction start boundary与确定性 pre-start fixture后复审：PASS，无 blocker/high finding。
 
+### Immutable managed rollout
+
+- Code commit：`b235be25a932684315ac3ea987d0e7701e2abff0`。
+- Release：`20260717T021624Z-b235be25a932`。
+- Previous/rollback release：`20260716T164215Z-745f056c0fa3`。
+- 发布前`alu-dock list --all`确认8个record全部`stopped/unavailable`，无active/stopping runtime；未使用`--allow-active`。
+- Initial deploy Host：PID `3307985`，epoch `a72dd8a5-59a3-406e-913d-5a8751877fff`；前一Host PID/epoch为`3241837` / `c9fdc022-8cfd-4a36-8e71-f11761bbe12d`。
+- Release receipt：`/home/luziyi/release/alu-dock/receipts/20260717T021624Z-b235be25a932.json`。
+- Initial installed-resource smoke：43 commands、23 resources、0 diagnostics、18 tools、24 settings、3 tree nodes；`chain/chain-prompts`与`run/run-chain` canonical pairs通过。
+- Real rollback Host：PID `3308126`，epoch `72930bc3-0b49-4dbf-afc3-8c0962aba9a4`。
+- Final forward Host：PID `3308214`，epoch `f1c4048e-10be-46a8-92ce-ec7acd66f177`；hello PID等于systemd `MainPID`。
+- Final forward installed-resource smoke再次报告43/23/0/18/24/3并通过。
+- Current-PID journal只有`host.ready`；fatal、uncaught、module/resource discovery与catalog severe scan为0。
+
+### Synchronized guard and managed behavioral smoke
+
+用户先完成user-level `sol-mid-turn-guard` v2 runtime-keyed controller更新并reload全部session；Dock没有加入guard专用adapter。随后在final Host上验证：
+
+- 同时创建managed runtime A/B；A generation 1保持active，B reload到generation 2。
+- A/B在B reload前后共执行四次`/sol-guard-status`，receipt均为`extension_command`，notification均报告`active, phase=idle, threshold=250,000`。
+- A真实provider run进入`bash sleep` tool时执行`/rm-confirm off`：typed client返回`kind:"extension_command",delivery:"prompt",queued:false`，parent `activeCommandId`保持`parent-A-mrobe2ge`，pending为0，`command.handled`与notification存在，无`effect_unknown`或Queue event。
+- 随后abort parent；A恢复`active/idle`。A/B均正常stop+forget，Pi session文件不在删除面内。
+- 独立managed real-Pi compaction probe从synthetic Pi session启动manual compact，在`compaction.started`后调用abort：compact只以caller operation `managed-compact-mrobgygg`返回保守`effect_unknown`，completed event同operation且`aborted:true,willRetry:false`；instance保持同generation、同session file、`active/idle`、pending 0，随后正常stop+forget。
+- 最终`alu-dock list`无actionable instance；Host保持ready。
+
+部署日志：
+
+- `/tmp/alu-dock-178-180-deploy.log`
+- `/tmp/alu-dock-178-180-rollback-forward.log`
+- `/tmp/alu-dock-178-180-managed-ab-smoke.log`
+- `/tmp/alu-dock-179-managed-guard-ab-smoke.log`
+- `/tmp/alu-dock-180-managed-compaction-smoke.log`
+- `/tmp/alu-dock-178-180-current-pid-journal.txt`
+
 ## Deviations and remaining risks
 
 - 未增加通用 configuration job DTO或 durable progress system。对本次已观察的 manual compaction，closed query由 instance snapshot加带 operation ID 的 compaction events组成。
 - `reload` 使用long-mutation timeout，但 Pi 0.80.6没有公开的 reload cancellation hook；本切片不在 reload 中途 dispose runtime，也不引入 Worker/子进程。真人事故中的 active long operation是 reload之后启动的manual compact，已覆盖其恢复路径。
 - 进程级 hard hang仍只能由 managed service lifecycle处理；mutation completion未知时仍只查询，不重发。
-- Managed rollout与安装态smoke尚未计入本文件；将与用户级 `sol-mid-turn-guard` 更新同步执行并在发布后补充 immutable release、rollback-forward、MainPID/hello/resources/journal evidence。
+- 第一次rollback-forward辅助脚本只检查`service status`进程退出码，把短暂的`ready:false`误当ready并在立即`list`时退出。Rollback Host随后正常发布`host.ready`且无active runtime；修正为同时校验`ready:true`与hello `mainPid`后完成forward与第二次resource smoke。该偏差未修改release/catalog，也未使用强制restart。
+- 第一次A/B smoke在extension receipt之后、`command.handled`之前立即请求B reload，正确得到`instance_busy`；harness改为等待handled boundary。另一次仅因notification文本断言使用了错误前缀而退出；两次均在finally正常stop+forget，无ambiguous operation。最终完整A/B smoke通过。
 
 ## Deferrals
 
