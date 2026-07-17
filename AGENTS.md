@@ -69,7 +69,7 @@ A feature should have one clear owning module. Do not create one file per settin
 
 - Runtime SDK baseline is `@earendil-works/pi-coding-agent@0.80.6`; V0.1 pins `@earendil-works/pi-tui@0.80.6` only as a temporary client rendering toolkit.
 - Product UX state, viewport/search/activity/tool-fold reducers and key actions belong to Alu Dock. Do not expose `pi-tui` types through Host, protocol, DTO or domain ports.
-- Private subpath imports are forbidden in production and tests. V0.2 card #148 removes Alu Dock's direct `pi-tui` dependency in one renderer switch rather than maintaining dual renderers; its frozen API, provenance and cutover contract is `docs/v0.2-terminal-core-design.md`.
+- Private subpath imports are forbidden in production and tests. Any renderer replacement must be one deliberate switch rather than a dual-renderer transition; the frozen API, provenance and cutover contract is `docs/v0.2-terminal-core-design.md`.
 - Settings use Pi's native snapshot, lock, field merge and last-writer-wins semantics.
 - A successful setting mutation is: public setter → `await flush()` → `drainErrors()`.
 - Do not edit Pi settings JSON directly to simulate a missing setter.
@@ -81,7 +81,7 @@ A feature should have one clear owning module. Do not create one file per settin
 
 Work in cohesive slices rather than one test cycle per field:
 
-1. Confirm the card, frozen stage scope and capability boundary.
+1. Confirm the authorized task, frozen scope and capability boundary.
 2. Define or update the closed DTO/port first.
 3. Implement the complete capability slice in its owning modules.
 4. During implementation use cheap TypeScript or narrow tests only when they materially shorten feedback.
@@ -122,13 +122,12 @@ Also verify:
 
 `npm run build` must remain a clean build that removes `dist` first.
 
-## Task and documentation discipline
+## Documentation discipline
 
-- Card #142 is the V0.1 engineering state entry until it closes.
-- Update the card when a stage starts/completes, a blocker appears, or a gate deviates from plan. Record discovered separate work as a separately scheduled card; assignment is not authorization to start it.
-- Stable architecture belongs in docs/code, not only comments on the board.
-- Each completed stage gets a validation document containing scope, real evidence, deviations, remaining risks and explicit deferrals.
-- Keep V0 history frozen; do not rewrite old validation to make current work appear retroactive.
+- This file contains durable engineering contracts only. Do not copy workflow status, ownership, release IDs, transient rollout facts or current scheduling into it.
+- Stable architecture belongs in docs and code, not only ephemeral discussion.
+- Each completed capability slice gets a validation document containing scope, real evidence, deviations, remaining risks and explicit deferrals.
+- Keep historical validation frozen; do not rewrite old evidence to make current work appear retroactive.
 - Use focused commits with an honest message after the relevant gate passes.
 
 ## Dogfood release discipline
@@ -140,14 +139,17 @@ Follow `docs/dogfood-deployment.md` for managed releases. Stage completion and d
 - atomically switch `current`; never patch the live release;
 - default to refusing a service restart while an active instance exists;
 - verify systemd `MainPID`, V2 hello/hostEpoch, journal and a real installed-resource startup smoke after switching;
-- rollback the complete release on failure and record both code-gate and deploy-gate evidence on #142.
+- rollback the complete release on failure and record both code-gate and deploy-gate evidence in the release validation document and immutable receipt.
 
 `npm run cli` is a development entry. Once Stage 3.6 is installed, `alu-dock` is the only human dogfood entry and must never silently fall back to an untracked detached Host.
 
-## Current staged boundary
+## Stable interaction and surface rules
 
-Stage 6 remains the functional managed baseline: `session.tree.v1` plus Stage 5 `catalog.v1`, `service.managed.v1`, `session.reopen`, socket-first reconcile, no-replay Host loss, explicit reopen and generated-unit service CLI. The currently deployed release is `20260717T021624Z-b235be25a932`: it preserves the user-accepted #164 and #177 baselines, adds #178 closed `CommandReceipt.kind` semantics for running-parent extension commands, and adds #180 operation-attributed/preemptible manual compaction control with long-mutation client waits. Its 275-test consolidated gate, immutable rollout, real Pi compact/reload fixture, rollback-forward, MainPID/hello/resource checks, managed A/B + B-reload + running-parent `/rm-confirm` smoke, managed real-Pi compaction-abort smoke and journal gate passed. The rollout was synchronized after the user-level `sol-mid-turn-guard` v2 runtime-keyed controller update and session reload; four managed A/B `/sol-guard-status` commands remained active across B reload. Exact registered commands use the public `AgentSession.extensionRunner` authority, return `kind=extension_command,delivery=prompt,queued=false`, never enter pending/restoration, preserve a running parent operation/activity, and fence old-generation completion. Client viewport/search/tool-fold/tree/queue-tray/history-window/theme state remains independent from Host interaction state; both use only public package-root APIs.
-
-Card #164 was completed by the user on 2026-07-16. Card #158 has resumed the final human gate, and only the user may decide when it or #142 closes. #176 independently owns the installed `pi-subagents` multi-runtime completion-isolation fork and does not enter Dock source; #174 owns the outer `list`/`attach` human workflow and bash-multiline findings, while #185 owns the rejected tree projection and #186 owns the missing Dock Hub plus Dock/Session scope split. Preserve these final contracts: ordinary drag belongs to the terminal by default; Alt+M or `/mouse` alone enables 1000/1006 and app-owned wheel; queued text is prepended without overwriting a concurrent draft and `inFlight`/failure/`effect_unknown` never claims restoration or proceeds to abort; registered extension commands are classified before Queue while unknown slash/skill/template input keeps Pi-native semantics; forget/prune remove only Dock records after atomic Host commits and never Pi session files; unsupported extension visual UI is bounded/de-duplicated while the public `tool_result` hook promotes nonzero subagent child exits to a real `isError` for model/history/TUI; Work activity animation writes only its fixed surface and idle has no timer; #175 may use one client-local low-frequency mascot blink timer only while the Dock Hub is visible, and that mascot never encodes or aggregates Host/instance state. The #178/#180 restart was explicitly authorized after `alu-dock list` proved no active instance existed; do not generalize that authorization to a future release. Preserve Stage 6 closed tree/public-Pi/lifecycle safety evidence and its attached-session replacement safety, but do not treat the generic tree picker or the absence of an explicit Dock Hub scope as accepted: #185/#186 supersede those human contracts without weakening Stage 5 catalog/reopen/service, Stage 4 interaction/generation/lease, #154 `message_start`/no-durable-queue, #155 entry/row-anchor/paired-mouse-mode or #156 no-full-screen-background/local-surface invariants.
-
-Alu Dock has no Agent self-loop through its own CLI. Human `alu-dock` workflow, typed DockClient/Protocol V2 machine control, and Pi-registered model tools are separate surfaces. V0 test probes must not occupy the public human help merely because release tests need them; scripts prefer DockClient, and any future model-facing Dock diagnostic must be an explicitly registered closed/read-only tool guided by skill/docs. Extension component factories, `ctx.ui.custom()`, binary/image transport and renderer replacement remain out of scope; renderer work stays on the independent #148 P2 line and is not part of this V0.1 closeout or #182.
+- Registered extension commands are classified before Queue admission. Exact immediate commands never enter pending/restoration, preserve a running parent operation and activity, and fence old-generation completion. Unknown slash input, skills and prompt templates keep Pi-native semantics.
+- Queued text is Same-Host memory only. Restoration prepends without overwriting a concurrent draft; in-flight, failed or ambiguous mutations never claim restoration or proceed to abort automatically.
+- Ordinary drag belongs to the terminal. Only explicit Alt+M or `/mouse` enables Dock-owned 1000/1006 mouse tracking and history wheel; normal exit restores terminal modes.
+- Forget and prune remove only Dock catalog records after atomic Host commits. They never delete Pi session files.
+- Extension visual UI is limited to bounded closed text interactions. Component factories, `ctx.ui.custom()`, binary/image transport, data URIs and renderer objects are not control-protocol surfaces. A nonzero subagent child exit is normalized to a real tool error for model, history and TUI consumers.
+- Work activity animation writes only its fixed surface and idle has no timer. The Dock Hub may use one client-local low-frequency mascot blink timer only while visible; the mascot never encodes or aggregates Host/instance state.
+- Human CLI workflows, typed Protocol V2 machine control and Pi-registered model tools are separate surfaces. Alu Dock has no Agent self-loop through its own CLI. Test probes do not occupy public human help; scripts use DockClient, and any model-visible diagnostic is explicitly registered, closed and read-only.
+- Renderer replacement, if undertaken, is a single cutover governed by `docs/v0.2-terminal-core-design.md`; do not maintain dual renderers.
