@@ -59,7 +59,7 @@ def main() -> int:
     status = 1
     try:
         action = os.environ.get("ALU_DOCK_PTY_ACTION", "detach")
-        hub_actions = ("hub-exit", "hub-signal", "hub-new", "hub-continue", "hub-history", "hub-history-forget", "hub-adopt")
+        hub_actions = ("hub-exit", "hub-narrow", "hub-signal", "hub-new", "hub-continue", "hub-history", "hub-history-forget", "hub-adopt")
         startup_marker = b"Alu Dock Hub" if action in hub_actions else b"NIGHT CONSOLE"
         set_size(fd, 24, 80)
         deadline = time.monotonic() + 12
@@ -71,7 +71,7 @@ def main() -> int:
         else:
             before_resize = len(output)
             if action in hub_actions:
-                set_size(fd, 40, 120)
+                set_size(fd, 18 if action == "hub-narrow" else 40, 43 if action == "hub-narrow" else 120)
             else:
                 set_size(fd, 18, 43)
             os.kill(pid, signal.SIGWINCH)
@@ -84,8 +84,12 @@ def main() -> int:
             if ready_file:
                 with open(ready_file, "w", encoding="utf-8") as marker:
                     marker.write("ready\n")
-            if action == "hub-exit":
-                os.write(fd, b"\x1b")  # Escape leaves the Hub without choosing a mutation.
+            if action in ("hub-exit", "hub-narrow"):
+                if action == "hub-narrow":
+                    time.sleep(0.12)
+                    while read_available(fd, output, 0.01) > 0:
+                        pass
+                os.write(fd, b"\x03" if action == "hub-narrow" else b"\x1b")  # Leave without choosing a mutation.
             elif action == "hub-signal":
                 os.kill(pid, signal.SIGTERM)
             elif action == "hub-new":

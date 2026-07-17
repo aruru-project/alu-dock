@@ -3,6 +3,9 @@ import {
   SelectList,
   Text,
   TUI,
+  truncateToWidth,
+  visibleWidth,
+  type Component,
   type SelectItem,
 } from "@earendil-works/pi-tui";
 import { resolve } from "node:path";
@@ -10,6 +13,7 @@ import { resolve } from "node:path";
 import type { DockClient } from "../control/dock-client.js";
 import type { InstanceSnapshot, SessionDto } from "../core/managed-instance.js";
 import { uniqueInstanceIdPrefix } from "../human-target.js";
+import { AluHubBrand } from "./alu-mascot.js";
 import { paint, selectListTheme } from "./theme.js";
 
 const NEW_INSTANCE = "hub:new";
@@ -366,6 +370,8 @@ async function selectMenu(
   const list = new SelectList(items, Math.min(Math.max(items.length, 1), 12), selectListTheme);
   const heading = new Text(`${paint.bold(paint.accent(terminalSafe(title)))}\n${paint.muted(terminalSafe(subtitle))}`, 1, 1);
   const footer = new Text(paint.muted(`  ${terminalSafe(hint)}`), 0, 1);
+  const brand = new AluHubBrand();
+  const layout = new HubMenuLayout(brand, heading, list, footer);
   let settled = false;
   let resolveSelection!: (selection: string | undefined) => void;
   const selection = new Promise<string | undefined>((resolveSelectionPromise) => { resolveSelection = resolveSelectionPromise; });
@@ -379,18 +385,114 @@ async function selectMenu(
   list.onCancel = () => finish(undefined);
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
-  tui.addChild(heading);
-  tui.addChild(list);
-  tui.addChild(footer);
+  tui.addChild(layout);
   tui.setFocus(list);
   tui.start();
+  const blink = new HubBlinkController(brand, () => tui.requestRender());
+  blink.start();
   try {
     return await selection;
   } finally {
+    blink.stop();
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
     await terminal.drainInput(200, 30).catch(() => {});
     tui.stop();
+  }
+}
+
+class HubMenuLayout implements Component {
+  constructor(
+    private readonly brand: AluHubBrand,
+    private readonly heading: Component,
+    private readonly list: Component,
+    private readonly footer: Component,
+  ) {}
+
+  render(width: number): string[] {
+    const boundedWidth = Math.max(1, width);
+    if (boundedWidth < 64) {
+      return [
+        ...this.brand.render(boundedWidth),
+        ...this.heading.render(boundedWidth),
+        ...this.list.render(boundedWidth),
+        ...this.footer.render(boundedWidth),
+      ];
+    }
+
+    const mascotWidth = 22;
+    const gutter = 2;
+    const panelWidth = Math.max(1, boundedWidth - mascotWidth - gutter);
+    const mascot = this.brand.renderLarge(mascotWidth);
+    const panel = [
+      ...this.heading.render(panelWidth),
+      ...this.list.render(panelWidth),
+      ...this.footer.render(panelWidth),
+    ];
+    const rows = Math.max(mascot.length, panel.length);
+    return Array.from({ length: rows }, (_, index) => {
+      const left = truncateToWidth(mascot[index] ?? "", mascotWidth);
+      const padded = `${left}${" ".repeat(Math.max(0, mascotWidth - visibleWidth(left)))}`;
+      return truncateToWidth(`${padded}${" ".repeat(gutter)}${panel[index] ?? ""}`, boundedWidth);
+    });
+  }
+
+  invalidate(): void {
+    this.brand.invalidate();
+    this.heading.invalidate();
+    this.list.invalidate();
+    this.footer.invalidate();
+  }
+}
+
+interface HubBlinkScheduler {
+  setTimeout(callback: () => void, delayMs: number): NodeJS.Timeout;
+  clearTimeout(timer: NodeJS.Timeout): void;
+}
+
+/** Exactly one client-local timer, owned only while a Hub menu is visible. */
+export class HubBlinkController {
+  private timer: NodeJS.Timeout | undefined;
+  private running = false;
+  private closed = false;
+
+  constructor(
+    private readonly brand: AluHubBrand,
+    private readonly requestRender: () => void,
+    private readonly scheduler: HubBlinkScheduler = {
+      setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+      clearTimeout: (timer) => clearTimeout(timer),
+    },
+  ) {}
+
+  get active(): boolean { return this.timer !== undefined; }
+
+  start(): void {
+    if (this.running) return;
+    this.running = true;
+    this.closed = false;
+    this.schedule(3_600);
+  }
+
+  stop(): void {
+    this.running = false;
+    this.closed = false;
+    this.brand.setBlink(false);
+    if (this.timer) this.scheduler.clearTimeout(this.timer);
+    this.timer = undefined;
+  }
+
+  private schedule(delayMs: number): void {
+    if (!this.running) return;
+    this.timer = this.scheduler.setTimeout(() => {
+      this.timer = undefined;
+      if (!this.running) return;
+      this.closed = !this.closed;
+      this.brand.setBlink(this.closed);
+      this.requestRender();
+      this.schedule(this.closed ? 160 : 4_200);
+    }, delayMs);
+    this.timer.unref?.();
   }
 }
 

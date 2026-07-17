@@ -585,9 +585,20 @@ test("bare SSH TTY opens and leaves the Hub with zero runtime or catalog side ef
   assert.equal(pty.status, 0, output.slice(-2_000));
   assert.ok(pty.resizedBytes > 0, "120x40 Hub resize must redraw");
   assert.match(output, /Alu Dock Hub/u);
+  assert.match(output, /◆   ◆/u, "standard Hub shows the large Alu mascot");
   assert.match(output, /Project ·/u);
   assert.doesNotMatch(output, /does not create or resume a runtime/u);
   assert.match(output, /Left Alu Dock Hub/u);
+
+  const narrow = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+  ], "hub-narrow");
+  const narrowOutput = Buffer.from(narrow.output, "base64").toString("utf8");
+  assert.equal(narrow.timedOut, false, narrowOutput.slice(-2_000));
+  assert.equal(narrow.status, 0, narrowOutput.slice(-2_000));
+  assert.match(narrowOutput, /✿\(◆ᴗ◆\) ALU/u);
 
   const signalled = await runPtyTui([
     process.execPath,
@@ -618,6 +629,7 @@ test("Hub New and persisted-session Adopt explicitly enter Session Work", async 
   assert.equal(newPty.status, 0, newOutput.slice(-2_000));
   assert.match(newOutput, /Creating a Pi session/u);
   assert.match(newOutput, /NIGHT CONSOLE/u);
+  assert.match(newOutput, /✿\([•◆]_?[ᴗ_]?[•◆]\)/u, "Work keeps the current-session Alu in its fixed activity surface");
   assert.equal(newHarness.registry.list().length, 1);
 
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-hub-adopt-"));
@@ -3087,7 +3099,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "hub-exit" | "hub-signal" | "hub-new" | "hub-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "scroll" | "history-page" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "mouse-selection" | "extension-dialogs" | "extension-replacement" = "detach",
+  action: "detach" | "hub-exit" | "hub-narrow" | "hub-signal" | "hub-new" | "hub-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "scroll" | "history-page" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "mouse-selection" | "extension-dialogs" | "extension-replacement" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {

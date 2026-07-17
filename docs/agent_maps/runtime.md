@@ -77,7 +77,7 @@ validate/admit
   → publish event/result
 ```
 
-若post-effect commit未知，使用原operation ID返回`effect_unknown`；若同operation已有明确完成证据，不得再把known failure伪装成ambiguity。
+若post-effect commit未知，使用原operation ID返回`effect_unknown`；若同operation已有明确完成证据，不得再把known failure伪装成ambiguity。Manual compaction 在调用前后比较 public SessionManager compaction entries：未新增entry的 `nothing_to_compact`、already-compacted、cancel 与明确provider failure映射为 closed typed failure；调用后出现新compaction entry再异常仍保持 `effect_unknown`。
 
 ## Session replacement
 

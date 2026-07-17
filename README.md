@@ -10,14 +10,14 @@ Alu Dock 的 V0.1 仍在开发中。当前候选已经具备：
 
 - 私有 Unix socket 上的长期 Host 与 durable managed catalog；
 - instance 的创建、列出、接入、停止、显式 reopen、adopt、forget 与 prune；
-- 默认 Dock Hub：固定提供 New、Continue、History、Pi Sessions 与 Leave；进入时不创建或恢复 runtime；
-- attached Session Work TUI，包括 conversation、history、tree、queue、settings/resources、extension 文本交互与运行状态；
+- 默认 Dock Hub：固定提供 New、Continue、History、Pi Sessions 与 Leave；进入时不创建或恢复 runtime，并以响应式阿露品牌帧呈现；
+- attached Session Work TUI，包括分层 conversation/activity、保留换行的 tool output、可辨认分支的 tree、queue、settings/resources 与 extension 文本交互；
 - 同一 Dock instance 内的 Pi session new/resume/fork/clone/reload；
 - 显式的 `systemd --user` service 管理。
 
 当前裸 `alu-dock` 进入 Dock Hub；`pwd` 只作为 Continue、History、Pi Sessions 的排序上下文和 New 默认目录，进入或退出 Hub 本身不产生 runtime/catalog mutation。Continue 只展示 active/reopenable Dock 工作，History 管理 stopped/不可恢复记录，并可从 stopped 记录的 Pi session 继续；完整磁盘 Pi sessions 仍通过独立 Resume/Adopt inventory 进入。显式 `new` 与 `attach TARGET` 直达 Session Work；`-c`/`--continue` 复用改版前的 current-project smart-entry：进入最近的可继续实例，没有则 New。完整 ID、列表展示的唯一 prefix 与唯一精确 name 共用 fail-closed TARGET 解析。
 
-V0.1 候选仍未通过全部真实 Pi、视觉、SSH 与用户签收门禁，不得视为已发布。显式 `alu-dock open` 当前仍保留旧的 project smart-entry，可能创建或 reopen runtime；默认安全入口是裸命令 Hub。
+V0.1 候选仍待统一真实 Pi、SSH 与用户签收门禁，不得视为已发布。显式 `alu-dock open` 当前仍保留旧的 project smart-entry，可能创建或 reopen runtime；默认安全入口是裸命令 Hub。
 
 ## 当前快速开始
 

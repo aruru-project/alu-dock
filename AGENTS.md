@@ -6,7 +6,7 @@ Alu Dock V0.1 正在开发中。它是本机单用户的受管 Pi 运行时工�
 
 能力真相以当前代码、类型和测试为准。当前裸 `alu-dock` 进入无 runtime 副作用、按 cwd 提供上下文的 Dock Hub；固定根菜单将 New、Continue、History、Pi Sessions 与 Leave 分层。`-c`/`--continue` 显式执行 current-project smart-entry，选择最近的 active/reopenable 实例，没有则 New；显式 `new` 与 `attach TARGET` 直达 Session Work。磁盘 Pi sessions 通过独立 Resume/Adopt inventory 进入；显式 `open` 暂时保留旧 smart-entry。
 
-V0.1 候选仍未完成最终真人验收、视觉资产与正式版本签收；当前 dogfood rollout 不得写成 V0.1 已发布或已签收。
+V0.1 候选已具备响应式 Hub/Work 阿露资产、branch-aware `/tree` 与分层 Work activity，但仍未完成最终统一真人验收和正式版本签收；当前 dogfood rollout 不得写成 V0.1 已发布或已签收。
 
 ## 技术与结构
 

@@ -8,6 +8,7 @@ import {
 
 import type { DockEvent, HistoryEntryDto, InstanceSnapshot, JsonObject, JsonValue } from "../core/managed-instance.js";
 import type { HistoryWindowSnapshot } from "./history-pagination.js";
+import { renderWorkAlu } from "./alu-mascot.js";
 import type { RunActivityState } from "./run-activity.js";
 import { markdownTheme, paint } from "./theme.js";
 
@@ -718,9 +719,11 @@ export class DockActivityLine implements Component {
   }
 
   render(width: number): string[] {
+    const compact = width <= 43;
     const symbol = activitySymbolFor(this.phase, this.animationFrame);
-    const line = activityPainter(this.phase)(`${symbol} ${this.label}`);
-    return [truncateToWidth(`  ${line}`, Math.max(1, width))];
+    const alu = renderWorkAlu(this.phase, this.animationFrame, undefined, compact);
+    const line = activityPainter(this.phase)(compact ? this.label : `${symbol} ${this.label}`);
+    return [truncateToWidth(` ${alu} ${line}`, Math.max(1, width))];
   }
 
   invalidate(): void {}

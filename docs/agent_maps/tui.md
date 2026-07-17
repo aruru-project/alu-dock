@@ -26,7 +26,7 @@ runDockTui()
   └── editor/slash/key input ──> DockClient mutations
 ```
 
-当前独立 Hub 由 `src/tui/dock-hub.ts` 负责，固定根菜单顺序是 New、Continue、History、Pi Sessions、Leave。首屏只读取 Dock catalog；Continue 再展示 active/reopenable 工作，History 再展示 stopped 与不可恢复的 terminal records，Resume/Adopt inventory 在用户进入 Pi Sessions 后延迟加载。History Continue 从原 Pi session 创建新 Dock identity，Forget 只删 History record。managed-instance 列表与 Resume/Adopt inventory 不进入 attached `dock-tui.ts`。`-c`/`--continue` 是显式 current-project smart-entry。#175 的大阿露视觉资产与低频眨眼仍是后续独立 slice。
+当前独立 Hub 由 `src/tui/dock-hub.ts` 负责，固定根菜单顺序是 New、Continue、History、Pi Sessions、Leave。首屏只读取 Dock catalog；Continue 再展示 active/reopenable 工作，History 再展示 stopped 与不可恢复的 terminal records，Resume/Adopt inventory 在用户进入 Pi Sessions 后延迟加载。History Continue 从原 Pi session 创建新 Dock identity，Forget 只删 History record。managed-instance 列表与 Resume/Adopt inventory 不进入 attached `dock-tui.ts`。`-c`/`--continue` 是显式 current-project smart-entry。Hub 以响应式大阿露/窄印章呈现品牌，唯一低频眨眼 timer 只在 menu 可见时存在；Work 小阿露复用 current-session activity pulse，idle 不启动 timer。
 
 ## Scope边界
 
@@ -50,9 +50,9 @@ Session Work TUI
 | 文件 | 唯一职责 | 主要测试 |
 |---|---|---|
 | `src/interactive.ts` | TTY entry composition、Hub action/Work routing、human target lifecycle、trust prompt | CLI/managed/PTY tests |
-| `src/tui/dock-hub.ts` | Dock instances主列表、lifecycle actions、独立Pi session Resume/Adopt inventory | `human-target`, `dock-control` PTY |
+| `src/tui/dock-hub.ts` | Dock instances主列表、lifecycle actions、独立Pi session Resume/Adopt inventory、visible-only Hub blink ownership | `human-target`, `dock-control` PTY |
 | `src/tui/dock-tui.ts` | attached Work workflow composition、commands、focus/key actions | `tui-ux-state`, PTY fixture |
-| `src/tui/conversation.ts` | durable conversation rows、tool folding/rendering、status/activity line投影 | `tui-conversation` |
+| `src/tui/conversation.ts` | durable conversation rows、hard/soft multiline tool rendering、status/activity line投影 | `tui-conversation` |
 | `src/tui/snapshot-projection.ts` | DockEvent → local InstanceSnapshot reducer | `tui-ux-state` |
 | `src/tui/run-activity.ts` | current-session transient activity reducer | `tui-ux-state` |
 | `src/tui/activity-pulse.ts` | fixed localized animation writer；idle无timer | `tui-ux-state` |
@@ -61,13 +61,14 @@ Session Work TUI
 | `src/tui/history-pagination.ts` | bounded history window、earlier-page cursor、anchor preservation | `history-pagination` |
 | `src/tui/pending-queue.ts` | pending queue tray projection | `tui-ux-state` |
 | `src/tui/queue-restoration.ts` | dequeue text prepend且不覆盖concurrent draft | `queue-restoration` |
-| `src/tui/session-tree.ts` | tree pagination/filter/picker command parsing | `session-tree` |
+| `src/tui/session-tree.ts` | tree pagination/filter、branch topology/active path picker、command parsing | `session-tree` |
 | `src/tui/settings-controls.ts` | setting choices、command values、completion | `tui-ux-state` |
 | `src/tui/extension-text-dialog.ts` | bounded extension select/confirm/input/editor UI | extension UI/TUI tests |
 | `src/tui/searchable-picker.ts`, `search-filter.ts` | reusable picker与deterministic filtering | `tui-ux-state` |
 | `src/tui/mouse-input.ts` | explicit Dock mouse mode、wheel decoding、terminal mode cleanup | `tui-ux-state`, PTY |
 | `src/tui/select-instance.ts` | 仅供显式旧 `open` smart-entry 的legacy chooser | managed/PTY tests |
 | `src/tui/theme.ts` | terminal color capability与Night Console palette | render/PTY checks |
+| `src/tui/alu-mascot.ts` | 大/小阿露静态帧、TrueColor/ANSI/NO_COLOR安全投影 | `alu-mascot`, PTY |
 
 ## 人类事实分类
 
@@ -93,7 +94,7 @@ Warning必须说明用户影响和可执行动作；closed Host projection本身
 | `/tree` picker与返回branch | `tui/session-tree.ts`, `dock-tui.ts` | Core/runtime tree map、real Pi tree tests |
 | queue tray/restoration | `pending-queue.ts`, `queue-restoration.ts` | command admission、draft concurrency |
 | mouse mode | `mouse-input.ts` | detach/signal/error cleanup、normal terminal selection |
-| Logo/mascot | 新focused visual component + `theme.ts` | Hub blink无语义；Work只由current session activity驱动 |
+| Logo/mascot | `alu-mascot.ts` + `dock-hub.ts` | Hub blink无语义；Work只由current session activity驱动 |
 | command completion/settings | `dock-tui.ts`, `settings-controls.ts` | command catalog、terminal sanitization |
 
 ## 交互硬约束
