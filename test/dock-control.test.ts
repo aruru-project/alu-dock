@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { visibleWidth } from "@earendil-works/pi-tui";
+
 import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
@@ -45,7 +47,11 @@ async function createHarness(): Promise<Harness> {
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, name }) => {
     const session = new DelayedRuntimeSession(`pi-${id}`);
     sessions.set(id, session);
-    const instance = new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, name, session, eventCapacity: 500 });
+    const modelState = session.getModelState();
+    const instance = new ManagedInstance({
+      id, creationOperationId, hostEpoch, cwd, name, session, eventCapacity: 500,
+      executor: { kind: "fixture", model: modelState.model, thinkingLevel: modelState.thinkingLevel },
+    });
     await instance.submit("deterministic delayed task");
     return instance;
   }, () => `instance-${++sequence}`);
@@ -339,7 +345,7 @@ test("SSH TUI controller completes select confirm input and editor extension dia
   assert.equal(pty.timedOut, false, output.slice(-4_000));
   assert.equal(pty.status, 0, output.slice(-4_000));
   for (const marker of ["Pick fixture", "Confirm fixture", "Input fixture", "Edit fixture"]) assert.match(output, new RegExp(marker));
-  assert.match(output, /connected\/acquired/);
+  assert.doesNotMatch(output, /connected\/acquired/);
 });
 
 test("SSH TUI reacquires its controller after runtime replacement", async (context) => {
@@ -386,7 +392,7 @@ test("SSH TUI reacquires its controller after runtime replacement", async (conte
   assert.equal(pty.timedOut, false, output.slice(-4_000));
   assert.equal(pty.status, 0, output.slice(-4_000));
   assert.match(output, /Post replacement confirm/);
-  assert.match(output, /connected\/acquired/);
+  assert.doesNotMatch(output, /connected\/acquired/);
   assert.doesNotMatch(output, /Host event stream closed|connection lost/);
 });
 
@@ -628,7 +634,8 @@ test("Hub New and persisted-session Adopt explicitly enter Session Work", async 
   assert.equal(newPty.timedOut, false, newOutput.slice(-2_000));
   assert.equal(newPty.status, 0, newOutput.slice(-2_000));
   assert.match(newOutput, /Creating a Pi session/u);
-  assert.match(newOutput, /NIGHT CONSOLE/u);
+  assert.match(newOutput, /cache /u);
+  assert.doesNotMatch(newOutput, /NIGHT CONSOLE/u);
   assert.match(newOutput, /✿\([•◆]_?[ᴗ_]?[•◆]\)/u, "Work keeps the current-session Alu in its fixed activity surface");
   assert.equal(newHarness.registry.list().length, 1);
 
@@ -658,7 +665,8 @@ test("Hub New and persisted-session Adopt explicitly enter Session Work", async 
   assert.equal(adoptPty.status, 0, adoptOutput.slice(-2_000));
   assert.match(adoptOutput, /Choose a saved session/u);
   assert.match(adoptOutput, /Adopting persisted Pi session/u);
-  assert.match(adoptOutput, /NIGHT CONSOLE/u);
+  assert.match(adoptOutput, /cache /u);
+  assert.doesNotMatch(adoptOutput, /NIGHT CONSOLE/u);
   assert.equal(registry.list()[0]?.executor.sessionFile, sessionFile);
 });
 
@@ -714,7 +722,8 @@ test("Hub Continue opens current work and History continues a stopped saved sess
   assert.equal(continuePty.status, 0, continueOutput.slice(-2_000));
   assert.match(continueOutput, /Current Dock work/u);
   assert.match(continueOutput, /Attach Session Work/u);
-  assert.match(continueOutput, /NIGHT CONSOLE/u);
+  assert.match(continueOutput, /cache /u);
+  assert.doesNotMatch(continueOutput, /NIGHT CONSOLE/u);
   assert.equal((await continueClient.status(current.id)).lifecycle, "active");
 
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-hub-history-"));
@@ -746,7 +755,8 @@ test("Hub Continue opens current work and History continues a stopped saved sess
   assert.match(historyOutput, /Forget history record/u);
   assert.match(historyOutput, /keep the Pi session file/u);
   assert.match(historyOutput, /Adopting persisted Pi session/u);
-  assert.match(historyOutput, /NIGHT CONSOLE/u);
+  assert.match(historyOutput, /cache /u);
+  assert.doesNotMatch(historyOutput, /NIGHT CONSOLE/u);
   assert.deepEqual(registry.list().map((instance) => instance.lifecycle).sort(), ["active", "stopped"]);
 
   const forgetPty = await runPtyTui([
@@ -775,7 +785,7 @@ test("SSH TUI replays, resizes, handles input, and detaches without stopping", a
     join(process.cwd(), "dist/src/cli.js"),
     "--socket", harness.socketPath,
     "attach", created.id,
-  ]);
+  ], "work-responsive");
   const output = Buffer.from(pty.output, "base64").toString("utf8");
   assert.equal(pty.timedOut, false, output.slice(-2_000));
   assert.equal(pty.status, 0, output.slice(-2_000));
@@ -783,14 +793,21 @@ test("SSH TUI replays, resizes, handles input, and detaches without stopping", a
   assert.match(output, /Alu Dock/);
   assert.match(output, /deterministic delayed task/);
   assert.match(output, /waiting for model/);
+  const redrawFrames = fullRedrawFrames(output);
+  const narrowFrame = redrawFrames.find((frame) => frame.length === 18 && frame.every((line) => visibleWidth(line) <= 43));
+  assert.ok(narrowFrame, "43-column Work chrome must produce a bounded full redraw");
+  assert.match(narrowFrame[0] ?? "", /pty-demo.*default.*off/u);
+  const initial80 = plainTerminalOutput(output.slice(0, output.indexOf("\u001b[2J\u001b[H\u001b[3J")));
+  assert.match(initial80, /pty-demo.*fixture\/default.*think off/u);
   const resizedFrame = lastFullRedrawFrame(output);
   assert.equal(resizedFrame.length, 18, `expected one fixed 18-row screen:\n${resizedFrame.join("\n")}`);
   const activityRow = resizedFrame.findIndex((line) => /waiting for model/u.test(line));
   assert.ok(activityRow >= 0 && activityRow < resizedFrame.length - 3, "live activity must sit above the composer rather than inside the footer");
   assert.match(resizedFrame.at(-3) ?? "", /^─+$/u, "the editor bottom border must remain immediately above the two-row status dock");
-  assert.match(resizedFrame.at(-2) ?? "", /running/u);
-  assert.doesNotMatch(resizedFrame.at(-2) ?? "", /waiting for model/u);
-  assert.match(resizedFrame.at(-1) ?? "", /pty-demo/u);
+  assert.match(resizedFrame[0] ?? "", /pty-demo.*default.*off/u);
+  assert.match(resizedFrame.at(-2) ?? "", /cache .*ctx .*↑.*↓.*\$/u);
+  assert.doesNotMatch(resizedFrame.at(-2) ?? "", /waiting for model|running|connected|acquired|d:|p:/u);
+  assert.equal(resizedFrame.at(-1), "", "the reserved extension row stays blank when no extension owns it");
   assert.match(output, /Detached from pty-demo/);
   assert.doesNotMatch(output, /data:image|;base64,/i);
 
@@ -863,8 +880,9 @@ test("SSH TUI preserves concurrent composer input while transcript deltas remain
   const activityRow = streamingFrame.findIndex((line) => /responding/u.test(line));
   assert.ok(activityRow >= 0 && activityRow < streamingFrame.length - 3);
   assert.match(streamingFrame.at(-3) ?? "", /^─+$/u);
-  assert.match(streamingFrame.at(-2) ?? "", /running/u);
-  assert.doesNotMatch(streamingFrame.at(-2) ?? "", /responding/u);
+  assert.match(streamingFrame.at(-2) ?? "", /cache .*ctx .*↑.*↓.*\$/u);
+  assert.doesNotMatch(streamingFrame.at(-2) ?? "", /responding|running|connected|acquired|d:|p:/u);
+  assert.equal(streamingFrame.at(-1), "");
 });
 
 test("SSH TUI keeps repeated no-run completion facts out of live and replayed conversation", async (context) => {
@@ -3099,7 +3117,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "hub-exit" | "hub-narrow" | "hub-signal" | "hub-new" | "hub-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "scroll" | "history-page" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "mouse-selection" | "extension-dialogs" | "extension-replacement" = "detach",
+  action: "detach" | "work-responsive" | "hub-exit" | "hub-narrow" | "hub-signal" | "hub-new" | "hub-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "scroll" | "history-page" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "mouse-selection" | "extension-dialogs" | "extension-replacement" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {
@@ -3141,19 +3159,32 @@ async function runPtyTui(
 }
 
 function lastFullRedrawFrame(output: string): string[] {
+  const frames = fullRedrawFrames(output);
+  const frame = frames.at(-1);
+  assert.ok(frame, "expected a full redraw after PTY resize");
+  return frame;
+}
+
+function fullRedrawFrames(output: string): string[][] {
   const marker = "\u001b[2J\u001b[H\u001b[3J";
-  const start = output.lastIndexOf(marker);
-  assert.ok(start >= 0, "expected a full redraw after PTY resize");
-  const bodyStart = start + marker.length;
-  const syncEnd = output.indexOf("\u001b[?2026l", bodyStart);
-  assert.ok(syncEnd >= 0, "expected synchronized redraw terminator");
-  const plain = output.slice(bodyStart, syncEnd)
+  const frames: string[][] = [];
+  let start = output.indexOf(marker);
+  while (start >= 0) {
+    const bodyStart = start + marker.length;
+    const syncEnd = output.indexOf("\u001b[?2026l", bodyStart);
+    if (syncEnd < 0) break;
+    const lines = plainTerminalOutput(output.slice(bodyStart, syncEnd)).split("\n");
+    frames.push(lines);
+    start = output.indexOf(marker, syncEnd);
+  }
+  return frames;
+}
+
+function plainTerminalOutput(output: string): string {
+  return output
     .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/gu, "")
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/gu, "")
     .replace(/\r/gu, "");
-  const lines = plain.split("\n");
-  if (lines.at(-1) === "") lines.pop();
-  return lines;
 }
 
 async function waitForPath(path: string): Promise<void> {

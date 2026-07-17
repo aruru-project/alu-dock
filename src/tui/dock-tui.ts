@@ -6,7 +6,6 @@ import {
   Editor,
   Key,
   matchesKey,
-  Text,
   TUI,
   type AutocompleteItem,
   type AutocompleteProvider,
@@ -23,7 +22,7 @@ import type {
 } from "../core/runtime-session.js";
 import type { ProjectTrustChoice } from "../control/project-trust.js";
 import { ActivityPulseController } from "./activity-pulse.js";
-import { DockActivityLine, DockConversation, DockStatusLine } from "./conversation.js";
+import { DockActivityLine, DockConversation, DockStatusLine, DockWorkHeader } from "./conversation.js";
 import { ExtensionTextDialog } from "./extension-text-dialog.js";
 import { PagedHistoryWindow, HISTORY_PAGE_SIZE } from "./history-pagination.js";
 import { DockMouseTrackingMode, DockProcessTerminal, parseMouseWheel } from "./mouse-input.js";
@@ -82,6 +81,7 @@ export async function runDockTui(
   const dockMouseTracking = new DockMouseTrackingMode();
   const activity = new DockActivityLine();
   let instance = initialInstance;
+  const header = new DockWorkHeader(() => instance);
   const status = new DockStatusLine(instance);
   let runActivity = activityFromSnapshot(instance);
   activity.setActivity(runActivity);
@@ -243,11 +243,6 @@ export async function runDockTui(
   if (commandsLoad.status === "fulfilled") commands = commandsLoad.value.commands;
   else conversation.addNotice(`Command catalog unavailable: ${errorText(commandsLoad.reason)}`, true);
 
-  const title = new Text(
-    `${paint.bold(paint.accent("ALU DOCK"))} ${paint.faint("/ NIGHT CONSOLE")} ${paint.muted("· /help commands")}`,
-    1,
-    0,
-  );
   editor = new Editor(tui, editorTheme, {
     paddingX: numericSetting(settings, "editorPaddingX", 1),
     autocompleteMaxVisible: numericSetting(settings, "autocompleteMaxVisible", 10),
@@ -1283,6 +1278,7 @@ export async function runDockTui(
     try {
       instance = await client.status(instance.id);
       status.update(instance);
+      conversation.addNotice(formatWorkStatus(instance));
       activity.setActivity("status refreshed");
     } catch (error) {
       showError(error);
@@ -1577,7 +1573,7 @@ export async function runDockTui(
   composerDock.addChild(pendingQueue);
   composerDock.addChild(editor);
   screen = new FixedDockScreen(terminal, {
-    header: title,
+    header,
     history: conversation,
     status,
     editor: composerDock,
@@ -1782,6 +1778,21 @@ function isThinkingLevel(value: string): value is RuntimeThinkingLevel {
 
 function terminalSafe(value: string): string {
   return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+}
+
+export function formatWorkStatus(snapshot: InstanceSnapshot): string {
+  const model = snapshot.executor.model
+    ? `${terminalSafe(snapshot.executor.model.provider)}/${terminalSafe(snapshot.executor.model.id)}`
+    : "none";
+  return [
+    `Status: ${snapshot.lifecycle === "active" ? snapshot.execution : snapshot.lifecycle}`,
+    `Session: ${terminalSafe(snapshot.name || "(unnamed)")}`,
+    `Work cwd: ${terminalSafe(snapshot.cwd)}`,
+    `Model: ${model} · thinking ${terminalSafe(snapshot.executor.thinkingLevel ?? "off")}`,
+    `Dock ID: ${terminalSafe(snapshot.id)}`,
+    `Pi session ID: ${terminalSafe(snapshot.executor.piSessionId)}`,
+    `Runtime generation: ${snapshot.runtimeGeneration}`,
+  ].join("\n");
 }
 
 class TerminalSafeAutocompleteProvider implements AutocompleteProvider {

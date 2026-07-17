@@ -60,7 +60,7 @@ def main() -> int:
     try:
         action = os.environ.get("ALU_DOCK_PTY_ACTION", "detach")
         hub_actions = ("hub-exit", "hub-narrow", "hub-signal", "hub-new", "hub-continue", "hub-history", "hub-history-forget", "hub-adopt")
-        startup_marker = b"Alu Dock Hub" if action in hub_actions else b"NIGHT CONSOLE"
+        startup_marker = b"Alu Dock Hub" if action in hub_actions else b"cache "
         set_size(fd, 24, 80)
         deadline = time.monotonic() + 12
         while startup_marker not in output and time.monotonic() < deadline:
@@ -95,7 +95,7 @@ def main() -> int:
             elif action == "hub-new":
                 os.write(fd, b"\r")  # Hub defaults to New.
                 work_deadline = time.monotonic() + 8
-                while b"NIGHT CONSOLE" not in output and time.monotonic() < work_deadline:
+                while b"cache " not in output and time.monotonic() < work_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
             elif action == "hub-continue":
@@ -111,7 +111,7 @@ def main() -> int:
                         break
                 os.write(fd, b"\r")
                 work_deadline = time.monotonic() + 8
-                while b"NIGHT CONSOLE" not in output and time.monotonic() < work_deadline:
+                while b"cache " not in output and time.monotonic() < work_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
             elif action in ("hub-history", "hub-history-forget"):
@@ -128,7 +128,7 @@ def main() -> int:
                 if action == "hub-history":
                     os.write(fd, b"\r")
                     work_deadline = time.monotonic() + 8
-                    while b"NIGHT CONSOLE" not in output and time.monotonic() < work_deadline:
+                    while b"cache " not in output and time.monotonic() < work_deadline:
                         if read_available(fd, output, 0.05) < 0:
                             break
                 else:
@@ -155,8 +155,18 @@ def main() -> int:
                         break
                 os.write(fd, b"\r")
                 work_deadline = time.monotonic() + 8
-                while b"NIGHT CONSOLE" not in output and time.monotonic() < work_deadline:
+                while b"cache " not in output and time.monotonic() < work_deadline:
                     if read_available(fd, output, 0.05) < 0:
+                        break
+            elif action == "work-responsive":
+                time.sleep(0.08)
+                while read_available(fd, output, 0.01) > 0:
+                    pass
+                set_size(fd, 18, 120)
+                os.kill(pid, signal.SIGWINCH)
+                wide_deadline = time.monotonic() + 2
+                while time.monotonic() < wide_deadline:
+                    if read_available(fd, output, 0.05) > 0 and b"fixture/default" in output:
                         break
             elif action == "abort":
                 os.write(fd, b"\x03")  # Ctrl+C with empty editor: abort current run.
@@ -397,8 +407,13 @@ def main() -> int:
                 while b"Navigate session tree" not in output and time.monotonic() < picker_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
+                loaded_marker = "╋ Alu · shared answer".encode("utf-8")
+                loaded_deadline = time.monotonic() + 5
+                while loaded_marker not in output and time.monotonic() < loaded_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
                 os.write(fd, b"original branch answer")
-                time.sleep(0.12)
+                time.sleep(0.04)
                 while read_available(fd, output, 0.01) > 0:
                     pass
                 os.write(fd, b"\r")

@@ -5,8 +5,8 @@ import { CombinedAutocompleteProvider, visibleWidth } from "@earendil-works/pi-t
 
 import type { SettingDto } from "../src/core/config-projection.js";
 import type { DockEvent, InstanceSnapshot } from "../src/core/managed-instance.js";
-import { DockActivityLine, DockConversation, DockStatusLine } from "../src/tui/conversation.js";
-import { commandCatalog, workHelpText } from "../src/tui/dock-tui.js";
+import { DockActivityLine, DockConversation, DockStatusLine, DockWorkHeader } from "../src/tui/conversation.js";
+import { commandCatalog, formatWorkStatus, workHelpText } from "../src/tui/dock-tui.js";
 import { PendingQueueTray } from "../src/tui/pending-queue.js";
 import { projectSnapshot } from "../src/tui/snapshot-projection.js";
 import { parseSettingCommandValue } from "../src/tui/settings-controls.js";
@@ -563,35 +563,57 @@ test("live snapshot projection updates metrics, extension status, state, and rep
   assert.equal(projected.executor.sessionFile, "/tmp/pi-2.jsonl");
 });
 
-test("conversation, activity slot, and low-frequency status expose distinct state", () => {
+test("Work chrome separates semantic header metrics extensions and activity", () => {
   const conversation = new DockConversation();
   conversation.applyReplay([], true);
   assert.deepEqual(conversation.snapshot(), []);
 
+  let current = snapshot();
+  const header = new DockWorkHeader(() => current);
   const activity = new DockActivityLine();
-  const status = new DockStatusLine(snapshot());
+  const status = new DockStatusLine(current);
   activity.setActivity("streaming");
-  status.setController("observing");
-  status.setConnection("connected");
-  status.setAutoCompaction(true);
+  const headerLine = header.render(120).join("\n");
   const lines = status.render(120);
   assert.equal(lines.length, 2);
   const footer = lines.join("\n");
-  assert.match(footer, /demo/);
-  assert.match(footer, /gpt-test/);
-  assert.match(footer, /running/);
-  assert.doesNotMatch(footer, /streaming/);
+  assert.match(headerLine, /demo/);
+  assert.match(headerLine, /\/tmp\/demo/);
+  assert.match(headerLine, /openai-codex\/gpt-test/);
+  assert.match(headerLine, /think off/);
   assert.match(footer, /ctx 1\.0k\/10\.0k 10%/);
   assert.match(footer, /cache 20%/);
-  assert.match(footer, /alu-kanban:ready/);
-  for (const line of lines) assert.ok(visibleWidth(line) <= 120);
+  assert.match(footer, /↑800 ↓200/);
+  assert.match(footer, /\$0\.0042/);
+  assert.match(footer, /alu-kanban: ready/);
+  assert.doesNotMatch(`${headerLine}\n${footer}`, /ALU DOCK|NIGHT CONSOLE|connected|acquired|observing|d:dock|p:pi-|running|cmp/u);
+  assert.doesNotMatch(footer, /demo|gpt-test|streaming/);
+  for (const line of [headerLine, ...lines]) assert.ok(visibleWidth(line) <= 120);
 
+  current = {
+    ...current,
+    name: "A very long customer migration session name",
+    cwd: "/work/customer/project",
+    executor: { ...current.executor, thinkingLevel: "high" },
+  };
+  const responsiveHeader = header.render(80).join("\n");
+  assert.match(responsiveHeader, /A very.*\/work\/customer\/project.*gpt-test.*think high/u);
   activity.setActivity({ phase: "waiting", label: "waiting for model" });
   const narrowActivity = activity.render(43);
+  const narrowHeader = header.render(43);
   const narrowStatus = status.render(43);
+  assert.match(narrowHeader.join("\n"), /A ve.*\/work.*gpt-test.*high/u);
   assert.equal(narrowActivity.length, 1);
   assert.match(narrowActivity[0] ?? "", /waiting for model/);
   assert.equal(narrowStatus.length, 2);
   assert.doesNotMatch(narrowStatus.join("\n"), /waiting for model/);
-  for (const line of [...narrowActivity, ...narrowStatus]) assert.ok(visibleWidth(line) <= 43);
+  for (const line of [...narrowHeader, ...narrowActivity, ...narrowStatus]) assert.ok(visibleWidth(line) <= 43);
+
+  const emptyExtensions = new DockStatusLine({ ...current, extensionStatus: {} }).render(80);
+  assert.equal(emptyExtensions[1], "");
+
+  const diagnostics = formatWorkStatus(current);
+  assert.match(diagnostics, /Dock ID: dock-1/u);
+  assert.match(diagnostics, /Pi session ID: pi-1/u);
+  assert.match(diagnostics, /Runtime generation: 1/u);
 });

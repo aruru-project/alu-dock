@@ -787,48 +787,55 @@ export class DockActivityLine implements Component {
   invalidate(): void {}
 }
 
+export class DockWorkHeader implements Component {
+  constructor(private readonly snapshot: () => InstanceSnapshot) {}
+  invalidate(): void {}
+
+  render(width: number): string[] {
+    const boundedWidth = Math.max(1, width);
+    const snapshot = this.snapshot();
+    const name = safeTerminalLine(snapshot.name || "Unnamed session");
+    const cwd = safeTerminalLine(snapshot.cwd);
+    const provider = safeTerminalLine(snapshot.executor.model?.provider ?? "");
+    const modelId = safeTerminalLine(snapshot.executor.model?.id ?? "no model");
+    const model = provider.length > 0 ? `${provider}/${modelId}` : modelId;
+    const thinking = safeTerminalLine(snapshot.executor.thinkingLevel ?? "off");
+    const right = boundedWidth <= 60
+      ? `${paint.primary(modelId)}${paint.faint(" · ")}${paint.thinking(thinking)}`
+      : `${paint.primary(model)}${paint.faint(" · ")}${paint.thinking(`think ${thinking}`)}`;
+    return [fitOpposedLine(
+      boundedWidth,
+      paint.bold(paint.primary(name)),
+      paint.muted(cwd),
+      right,
+    )];
+  }
+}
+
 export class DockStatusLine implements Component {
   private snapshotValue: InstanceSnapshot;
-  private connection = "connected";
-  private controller = "observing";
-  private autoCompaction: boolean | undefined;
 
   constructor(snapshot: InstanceSnapshot) { this.snapshotValue = snapshot; }
   update(snapshot: InstanceSnapshot): void { this.snapshotValue = snapshot; }
-  setConnection(connection: string): void { this.connection = safeTerminalLine(connection); }
-  setController(controller: string): void { this.controller = safeTerminalLine(controller); }
-  setAutoCompaction(enabled: boolean | undefined): void { this.autoCompaction = enabled; }
+  // Connection loss remains actionable in the activity row; controller and settings
+  // state intentionally have no default-chrome representation.
+  setConnection(_connection: string): void {}
+  setController(_controller: string): void {}
+  setAutoCompaction(_enabled: boolean | undefined): void {}
   invalidate(): void {}
 
   render(width: number): string[] {
     const boundedWidth = Math.max(1, width);
     const snapshot = this.snapshotValue;
-    const model = snapshot.executor.model
-      ? `${safeTerminalLine(snapshot.executor.model.provider)}/${safeTerminalLine(snapshot.executor.model.id)}`
-      : "no model";
-    const name = safeTerminalLine(snapshot.name || shortId(snapshot.id));
-    const state = snapshot.lifecycle === "active" ? snapshot.execution : snapshot.lifecycle;
+    const metrics = fitFooterSegments(boundedWidth, formatMetricSegments(snapshot).map(paint.muted));
     const statuses = Object.entries(snapshot.extensionStatus);
-    const firstLine = fitFooterSegments(boundedWidth, [
-      statePainter(state)(state),
-      ...(snapshot.pending.total > 0 ? [paint.queue(`queue ${snapshot.pending.total}`)] : []),
-      paint.primary(model),
-      ...(snapshot.executor.thinkingLevel ? [paint.thinking(`think ${snapshot.executor.thinkingLevel}`)] : []),
-      paint.muted(`${this.connection}/${this.controller}`),
-      ...(statuses.length > 0
-        ? [paint.faint(`ext ${statuses.map(([key, value]) => `${safeTerminalLine(key)}:${safeTerminalLine(value)}`).join(",")}`)]
-        : []),
-    ]);
-
-    const metricSegments = formatMetricSegments(snapshot);
-    const secondLine = fitFooterSegments(boundedWidth, [
-      paint.bold(paint.primary(name)),
-      paint.muted(safeTerminalLine(snapshot.cwd)),
-      paint.faint(`d:${shortId(snapshot.id)} p:${shortId(snapshot.executor.piSessionId)}`),
-      ...metricSegments.map(paint.muted),
-      paint.faint(`cmp ${this.autoCompaction === undefined ? "—" : this.autoCompaction ? "A" : "M"}`),
-    ]);
-    return [firstLine, secondLine];
+    const extensions = statuses.length === 0
+      ? ""
+      : fitFooterSegments(boundedWidth, statuses.map(([key, value]) => (
+          paint.faint(`${safeTerminalLine(key)}: ${safeTerminalLine(value)}`)
+        )));
+    // Keep the extension-owned row reserved so activity and editor rows never jump.
+    return [metrics, extensions];
   }
 }
 
@@ -912,6 +919,24 @@ function toolStatePainter(state: ToolState | undefined): (text: string) => strin
   return paint.running;
 }
 
+function fitOpposedLine(width: number, name: string, cwd: string, right: string): string {
+  const boundedWidth = Math.max(1, width);
+  if (boundedWidth <= 4) return truncateToWidth(name, boundedWidth);
+  const innerWidth = boundedWidth - 2;
+  const gap = 3;
+  const rightWidth = Math.min(visibleWidth(right), Math.max(10, Math.floor(innerWidth * 0.48)));
+  const leftWidth = Math.max(1, innerWidth - gap - rightWidth);
+  const separator = paint.faint(" · ");
+  const leftContentWidth = Math.max(1, leftWidth - visibleWidth(separator));
+  const minimumNameWidth = Math.min(12, Math.max(4, Math.floor(leftContentWidth * 0.4)));
+  const cwdWidth = Math.min(visibleWidth(cwd), Math.max(1, leftContentWidth - minimumNameWidth));
+  const nameWidth = Math.max(1, leftContentWidth - cwdWidth);
+  const fittedLeft = `${truncateToWidth(name, nameWidth)}${separator}${truncateToWidth(cwd, cwdWidth)}`;
+  const fittedRight = truncateToWidth(right, rightWidth);
+  const spacing = Math.max(1, innerWidth - visibleWidth(fittedLeft) - visibleWidth(fittedRight));
+  return truncateToWidth(` ${fittedLeft}${" ".repeat(spacing)}${fittedRight}`, boundedWidth);
+}
+
 function fitFooterSegments(width: number, segments: readonly string[]): string {
   if (segments.length === 0) return "";
   let line = `  ${segments[0] ?? ""}`;
@@ -924,16 +949,16 @@ function fitFooterSegments(width: number, segments: readonly string[]): string {
 
 function formatMetricSegments(snapshot: InstanceSnapshot): string[] {
   const metrics = snapshot.metrics;
-  if (!metrics) return ["↑— ↓—", "ctx —", "cache —", "$—"];
+  if (!metrics) return ["cache —", "ctx —", "↑— ↓—", "$—"];
   const denominator = metrics.tokens.input + metrics.tokens.cacheRead + metrics.tokens.cacheWrite;
   const cache = denominator > 0 ? `${Math.round((metrics.tokens.cacheRead / denominator) * 100)}%` : "—";
   const context = metrics.context
     ? `${formatCount(metrics.context.tokens)}/${formatCount(metrics.context.contextWindow)}${metrics.context.percent === null ? "" : ` ${Math.round(metrics.context.percent)}%`}`
     : "—";
   return [
-    `↑${formatCount(metrics.tokens.input)} ↓${formatCount(metrics.tokens.output)}`,
-    `ctx ${context}`,
     `cache ${cache}`,
+    `ctx ${context}`,
+    `↑${formatCount(metrics.tokens.input)} ↓${formatCount(metrics.tokens.output)}`,
     `$${metrics.cost.toFixed(4)}`,
   ];
 }
