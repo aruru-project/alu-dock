@@ -561,11 +561,16 @@ test("bare SSH TTY opens and leaves the Hub with zero runtime or catalog side ef
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
   let factoryCalls = 0;
+  let inventoryCalls = 0;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
     factoryCalls += 1;
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedRuntimeSession(`pi-${id}`) });
   });
-  const host = new DockHost({ socketPath, registry });
+  const host = new DockHost({
+    socketPath,
+    registry,
+    sessionInventory: { list: async () => { inventoryCalls += 1; return []; } },
+  });
   context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
   await host.start();
   const revision = registry.catalogRevision();
@@ -594,6 +599,7 @@ test("bare SSH TTY opens and leaves the Hub with zero runtime or catalog side ef
   assert.equal(signalled.status, 0, signalOutput.slice(-2_000));
   assert.match(signalOutput, /Left Alu Dock Hub/u);
   assert.equal(factoryCalls, 0);
+  assert.equal(inventoryCalls, 0, "Hub first paint must not scan persisted Pi sessions");
   assert.equal(registry.catalogRevision(), revision);
   assert.deepEqual(registry.list(), []);
 });

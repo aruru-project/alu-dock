@@ -26,7 +26,7 @@ runDockTui()
   └── editor/slash/key input ──> DockClient mutations
 ```
 
-当前独立 Hub 由 `src/tui/dock-hub.ts` 负责，进入/退出只执行 closed read；New、Resume、Adopt、Attach、Stop、Forget 都要求明确选择。managed-instance 列表与 Resume/Adopt inventory 不进入 attached `dock-tui.ts`。#175 的大阿露视觉资产与低频眨眼仍是后续独立 slice。
+当前独立 Hub 由 `src/tui/dock-hub.ts` 负责，首屏只读取 Dock catalog，Resume/Adopt inventory 在用户进入 Pi Sessions 后延迟加载；New、Resume、Adopt、Attach、Stop、Forget 都要求明确选择。managed-instance 列表与 Resume/Adopt inventory 不进入 attached `dock-tui.ts`。#175 的大阿露视觉资产与低频眨眼仍是后续独立 slice。
 
 ## Scope边界
 

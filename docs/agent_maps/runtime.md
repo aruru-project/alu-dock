@@ -40,6 +40,7 @@ Pi runtime event
 | `src/core/session-tree.ts` | runtime tree validation/projection、binary safety、generation-bound revision/pagination | `session-tree`, Pi tree tests |
 | `src/core/extension-ui-broker.ts` | bounded text interaction、controller lease、timeout/cancel/tombstone | `extension-ui-broker` |
 | `src/pi/create-pi-instance.ts` | trust之后的runtime composition、安全reopen、ManagedInstance构造 | Pi reopen/stage tests |
+| `src/pi/session-inventory.ts` | runtime-free session metadata index；header/name增量扫描与可重建cache | `pi-session-inventory`, `dock-control` |
 | `src/pi/pi-runtime-host.ts` | 唯一生产Pi runtime adapter、session binding与replacement | `pi-runtime-host`, Pi real tests |
 | `src/pi/pi-settings-adapter.ts` | Pi native setting projection、validation、setter/flush errors | `pi-runtime-host` |
 | `src/pi/pi-extension-ui-adapter.ts` | Pi ExtensionUIContext → ExtensionUiBroker text surface | extension UI tests |

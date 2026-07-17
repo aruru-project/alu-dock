@@ -23,7 +23,7 @@ DockClient
                     └── ManagedInstance: runtime transaction/state
 ```
 
-当前空 argv 由 `src/cli.ts:parseGlobalArgs()` 映射为 `hub`；`src/interactive.ts` 先执行只读 catalog/session inventory 查询，只有明确选择 New、Resume、Adopt 或 Attach 后才进入 mutation/Work。显式 `open` 暂时保留旧 smart-entry，`new` 与 `attach TARGET` 直达 Work。
+当前空 argv 由 `src/cli.ts:parseGlobalArgs()` 映射为 `hub`；`src/interactive.ts` 首屏只查询只读 catalog，Pi session inventory 在用户选择对应入口后才延迟加载；只有明确选择 New、Resume、Adopt 或 Attach 后才进入 mutation/Work。显式 `open` 暂时保留旧 smart-entry，`new` 与 `attach TARGET` 直达 Work。
 
 ## 文件owner
 
@@ -51,6 +51,7 @@ DockClient
 | `src/core/catalog.ts` | durable catalog DTO、invariants、typed commit errors | catalog测试组 |
 | `src/core/instance-dto.ts` | snapshots、events、cursors、history、receipts的closed DTO | protocol/runtime/TUI测试组 |
 | `src/core/session-inventory.ts` | 无runtime构造的Host-owned persisted-session inventory port | `dock-control` |
+| `src/pi/session-inventory.ts` | Pi JSONL header/name metadata增量索引；cache可重建且不成为session真相源 | `pi-session-inventory`, `dock-control` |
 
 ## 请求修改顺序
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
-import { resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { renderCliHelp, requestedCliHelp } from "./cli-help.js";
 import { humanListWidth, renderHumanInstanceList, selectHumanInstanceList } from "./cli-list.js";
@@ -162,7 +162,9 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   } = await import("./pi/create-pi-instance.js");
   const { createPiSessionInventory } = await import("./pi/session-inventory.js");
   const trustPreflight = createPiProjectTrustCoordinator();
-  const sessionInventory = createPiSessionInventory();
+  const sessionInventory = createPiSessionInventory({
+    ...(catalogPath === undefined ? {} : { cachePath: join(dirname(catalogPath), "session-inventory-v1.json") }),
+  });
   let registry: DockRegistry;
   let host: DockHost;
   if (mode === "managed") {

@@ -36,22 +36,22 @@ export interface DockHubEntry {
 /** Read-only construction: entering the Hub lists state but never creates a runtime. */
 export async function runDockHub(client: DockClient, cwd: string): Promise<DockHubAction> {
   const contextCwd = resolve(cwd);
+  let sessions: SessionDto[] = [];
+  let sessionTotal = 0;
+  let inventoryTruncated = false;
+  let inventoryLoaded = false;
+  let inventoryWarning: string | undefined;
   while (true) {
     const instances = await client.list("all");
-    let sessions: SessionDto[] = [];
-    let sessionTotal = 0;
-    let inventoryTruncated = false;
-    let inventoryWarning: string | undefined;
-    try {
-      const inventory = await client.sessionInventory(contextCwd, "all");
-      sessions = inventory.sessions;
-      sessionTotal = inventory.total;
-      inventoryTruncated = inventory.truncated;
-    } catch (error) {
-      inventoryWarning = `Pi session inventory unavailable: ${errorMessage(error)}`;
-    }
-
-    const entries = buildDockHubEntries(instances, sessions, contextCwd, inventoryWarning, sessionTotal, inventoryTruncated);
+    const entries = buildDockHubEntries(
+      instances,
+      sessions,
+      contextCwd,
+      inventoryWarning,
+      sessionTotal,
+      inventoryTruncated,
+      inventoryLoaded,
+    );
     const selected = await selectMenu(
       "Alu Dock Hub",
       `Project · ${terminalSafe(contextCwd)}`,
@@ -61,6 +61,18 @@ export async function runDockHub(client: DockClient, cwd: string): Promise<DockH
     if (!selected || selected === EXIT_HUB) return { kind: "exit" };
     if (selected === NEW_INSTANCE) return { kind: "new" };
     if (selected === SESSION_INVENTORY) {
+      if (!inventoryLoaded && inventoryWarning === undefined) {
+        process.stdout.write("Loading Pi Sessions…\n");
+        try {
+          const inventory = await client.sessionInventory(contextCwd, "all");
+          sessions = inventory.sessions;
+          sessionTotal = inventory.total;
+          inventoryTruncated = inventory.truncated;
+          inventoryLoaded = true;
+        } catch (error) {
+          inventoryWarning = `Pi session inventory unavailable: ${errorMessage(error)}`;
+        }
+      }
       const sessionAction = await chooseSessionAction(instances, sessions, contextCwd, sessionTotal, inventoryTruncated);
       if (sessionAction) return sessionAction;
       continue;
@@ -81,6 +93,7 @@ export function buildDockHubEntries(
   inventoryWarning?: string,
   sessionTotal = sessions.length,
   inventoryTruncated = false,
+  inventoryLoaded = true,
 ): DockHubEntry[] {
   const ordered = [...instances].sort((left, right) => compareHubInstances(left, right, cwd));
   const visible = ordered.slice(0, MAX_HUB_INSTANCES);
@@ -99,7 +112,9 @@ export function buildDockHubEntries(
   entries.push({ value: NEW_INSTANCE, label: "+ New Dock instance", description: `Create in ${terminalSafe(cwd)}` });
   entries.push({
     value: SESSION_INVENTORY,
-    label: `Pi Sessions · ${inventoryTruncated ? `${sessions.length} of ${sessionTotal}` : sessions.length}`,
+    label: inventoryLoaded
+      ? `Pi Sessions · ${inventoryTruncated ? `${sessions.length} of ${sessionTotal}` : sessions.length}`
+      : "Pi Sessions",
     description: inventoryWarning ?? `Browse saved sessions · Resume or Adopt${inventoryTruncated ? " · more available" : ""}`,
   });
   entries.push({ value: EXIT_HUB, label: "Leave Hub", description: "Return to the shell" });
