@@ -89,14 +89,22 @@ test("human list is terminal-safe and display-width bounded at narrow and wide s
     const output = renderHumanInstanceList([unsafe], width);
     assert.doesNotMatch(output, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u);
     for (const line of output.trimEnd().split("\n")) assert.ok(terminalDisplayWidth(line) <= width, `${width}: ${line}`);
-    assert.match(output, new RegExp(unsafe.id.slice(0, width < 40 ? 6 : 8), "u"));
+    assert.match(output, new RegExp(unsafe.id.slice(0, 8), "u"));
     assert.match(output, /active\/idle/u);
     assert.match(output, /g123/u);
-    assert.match(output, /中文/u);
+    assert.match(output, width < 40 ? /中/u : /中文/u);
   }
   assert.equal(terminalDisplayWidth("中文"), 4);
   assert.equal(terminalDisplayWidth("e\u0301"), 1);
   assert.equal(terminalDisplayWidth("😀"), 2);
+});
+
+test("human list displays a unique resolvable prefix when the first eight characters collide", () => {
+  const first = instance(6, { id: "019f7005-aaaa-4000-8000-000000000001" });
+  const second = instance(7, { id: "019f7005-bbbb-4000-8000-000000000002" });
+  const output = renderHumanInstanceList([first, second], 80, { identityUniverse: [first, second] });
+  assert.match(output, /019f7005-a/u);
+  assert.match(output, /019f7005-b/u);
 });
 
 test("human list caps large catalogs and reports omitted records", () => {

@@ -1,4 +1,5 @@
 import type { InstanceSnapshot } from "./core/managed-instance.js";
+import { uniqueInstanceIdPrefix } from "./human-target.js";
 
 export const MAX_HUMAN_LIST_INSTANCES = 100;
 const DEFAULT_WIDTH = 80;
@@ -15,6 +16,7 @@ export interface HumanInstanceListRenderOptions {
   mode?: "actionable" | "all";
   hiddenStopped?: number;
   totalInstances?: number;
+  identityUniverse?: readonly InstanceSnapshot[];
 }
 
 /** Keep the typed catalog complete; only the public human default hides history. */
@@ -47,12 +49,13 @@ export function renderHumanInstanceList(
   }
 
   const ordered = [...instances].sort(compareInstances);
+  const identityUniverse = options.identityUniverse ?? instances;
   const visible = ordered.slice(0, MAX_HUMAN_LIST_INSTANCES);
   const heading = mode === "actionable"
     ? `Alu Dock actionable · ${totalInstances}${hiddenStopped > 0 ? ` · ${hiddenStopped} stopped hidden` : ""}`
     : `Alu Dock instances · ${totalInstances} · all records`;
   const lines = [fit(heading, width), ""];
-  for (const instance of visible) lines.push(...renderInstance(instance, width));
+  for (const instance of visible) lines.push(...renderInstance(instance, identityUniverse, width));
   const omitted = totalInstances - visible.length;
   if (omitted > 0) {
     lines.push("", fit(`Showing ${visible.length} of ${totalInstances} · ${omitted} older records omitted`, width));
@@ -60,8 +63,8 @@ export function renderHumanInstanceList(
   if (mode === "actionable" && hiddenStopped > 0) lines.push("", fit("History: alu-dock list --all", width));
   lines.push("", fit(
     width >= 60
-      ? "Next: alu-dock attach ID · alu-dock status ID · alu-dock stop ID"
-      : "Next: alu-dock attach ID",
+      ? "Next: alu-dock attach TARGET · alu-dock status TARGET · alu-dock stop TARGET"
+      : "Next: alu-dock attach TARGET",
     width,
   ));
   return `${lines.join("\n")}\n`;
@@ -77,10 +80,12 @@ export function terminalDisplayWidth(value: string): number {
   return width;
 }
 
-function renderInstance(instance: InstanceSnapshot, width: number): [string, string] {
-  const compact = width < 40;
-  const idWidth = compact ? 6 : 8;
-  const id = terminalSafe(instance.id).slice(0, idWidth);
+function renderInstance(
+  instance: InstanceSnapshot,
+  identityUniverse: readonly InstanceSnapshot[],
+  width: number,
+): [string, string] {
+  const id = terminalSafe(uniqueInstanceIdPrefix(instance, identityUniverse));
   const state = terminalSafe(`${instance.lifecycle}/${instance.execution}`);
   const generation = `g${Math.max(1, Math.floor(instance.runtimeGeneration))}`;
   const base = `${stateIcon(instance)} ${id} ${state} ${generation}`;

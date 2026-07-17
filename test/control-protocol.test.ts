@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { JsonLineDecoder, JsonLineError } from "../src/control/json-lines.js";
 import {
+  capabilityForRequest,
   parseAbortResult,
   parseClientHello,
   parseControlEventEnvelope,
@@ -21,6 +22,7 @@ import {
   parseReopenResult,
   parseSessionsResult,
   parseSessionCompactionResult,
+  parseSessionInventoryResult,
   parseSessionNameResult,
   parseSessionReloadResult,
   parseSessionReplacementResult,
@@ -119,6 +121,10 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   });
   assert.deepEqual(parseControlRequest({ ...base, type: "session.history", params: { instanceId: "i1", beforeEntryId: "entry-2", limit: 200 } }).params, { instanceId: "i1", beforeEntryId: "entry-2", limit: 200 });
   assert.throws(() => parseControlRequest({ ...base, type: "session.history", params: { instanceId: "i1", limit: 201 } }), /between 1 and 200/);
+  assert.deepEqual(parseControlRequest({ ...base, type: "session.inventory", params: { cwd: "/tmp/project", scope: "cwd" } }), {
+    ...base, type: "session.inventory", params: { cwd: "/tmp/project", scope: "cwd" },
+  });
+  assert.throws(() => parseControlRequest({ ...base, type: "session.inventory", params: { cwd: "relative", scope: "all" } }), /must be absolute/);
   assert.deepEqual(parseControlRequest({ ...base, type: "session.list", params: { instanceId: "i1", scope: "all" } }), {
     ...base, type: "session.list", params: { instanceId: "i1", scope: "all" },
   });
@@ -138,6 +144,23 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
     params: { selector: "all", cursor: { revision: 7, offset: 100, selector: "actionable" }, limit: 100 },
   }), /selector does not match/u);
   assert.throws(() => parseControlRequest({ ...base, type: "instance.list", params: { selector: "all", limit: 101 } }), /must not exceed 100/u);
+  assert.equal(capabilityForRequest("instance.adopt"), "session.adopt.v1");
+  assert.equal(capabilityForRequest("session.inventory"), "session.inventory.v1");
+
+  const adopted = parseControlRequest({
+    ...base,
+    type: "instance.adopt",
+    params: { operationId: "adopt-1", sessionFile: "/tmp/session.jsonl", name: "adopted" },
+  });
+  assert.deepEqual(adopted.params, {
+    operationId: "adopt-1", sessionFile: "/tmp/session.jsonl", name: "adopted",
+    trustChallengeId: undefined, projectTrustDecision: undefined,
+  });
+  assert.throws(() => parseControlRequest({
+    ...base,
+    type: "instance.adopt",
+    params: { operationId: "adopt-2", sessionFile: "relative.jsonl" },
+  }), /must be absolute/);
 
   const trustedCreate = parseControlRequest({
     ...base,
@@ -600,6 +623,22 @@ test("model persistence and session list results are closed", () => {
     sessionId: "s1", sessionFile: "/tmp/s1.jsonl", name: undefined, cwd: "/tmp", updatedAt: "2026-07-14T00:00:00.000Z",
   });
   assert.throws(() => parseSessionsResult({ sessions: [{ sessionId: "s1", sessionFile: "/tmp/s1.jsonl", cwd: "/tmp", raw: true }] }), /Unexpected field/);
+  assert.throws(() => parseSessionsResult({ sessions: [
+    { sessionId: "s1", sessionFile: "/tmp/s1.jsonl", cwd: "/tmp" },
+    { sessionId: "s1", sessionFile: "/tmp/s2.jsonl", cwd: "/tmp" },
+  ] }), /Session IDs must be unique/);
+  assert.throws(() => parseSessionsResult({ sessions: [
+    { sessionId: "s1", sessionFile: "/tmp/s1.jsonl", cwd: "/tmp" },
+    { sessionId: "s2", sessionFile: "/tmp/s1.jsonl", cwd: "/tmp" },
+  ] }), /Session files must be unique/);
+  assert.deepEqual(parseSessionInventoryResult({
+    sessions: [{ sessionId: "s1", sessionFile: "/tmp/s1.jsonl", cwd: "/tmp" }],
+    query: { cwd: "/tmp", scope: "all" }, total: 2, truncated: true,
+  }), {
+    sessions: [{ sessionId: "s1", sessionFile: "/tmp/s1.jsonl", name: undefined, cwd: "/tmp", updatedAt: undefined }],
+    query: { cwd: "/tmp", scope: "all" }, total: 2, truncated: true,
+  });
+  assert.throws(() => parseSessionInventoryResult({ sessions: [], query: { cwd: "/tmp", scope: "all" }, total: 2, truncated: false }), /truncation metadata/);
 });
 
 test("response, snapshot, replay, and event parsers reject open or inconsistent DTOs", () => {

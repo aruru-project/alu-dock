@@ -55,9 +55,8 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
   });
   try {
     const modelState = runtime.getModelState();
-    const initialName = options.reopenedFrom
-      ? runtime.currentSession().sessionManager.getSessionName()
-      : options.name;
+    const persistedName = reopened ? runtime.currentSession().sessionManager.getSessionName() : undefined;
+    const initialName = options.reopenedFrom ? persistedName : options.name ?? persistedName;
     const instance = new ManagedInstance({
       id: options.id,
       creationOperationId: options.creationOperationId,
@@ -84,7 +83,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
       instance.recordExtensionError(typeof value.message === "string" ? value.message : diagnostic);
     }
     if (runtime.modelFallbackMessage) instance.recordExtensionError(runtime.modelFallbackMessage);
-    if (options.name && !options.reopenedFrom) runtime.currentSession().setSessionName(options.name);
+    if (options.name && !reopened) runtime.currentSession().setSessionName(options.name);
     return instance;
   } catch (error) {
     await runtime.dispose().catch(() => {});

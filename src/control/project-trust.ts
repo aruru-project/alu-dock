@@ -9,7 +9,7 @@ export const PROJECT_TRUST_CHOICES = [
   "deny_and_remember",
 ] as const;
 export type ProjectTrustChoice = typeof PROJECT_TRUST_CHOICES[number];
-export type ProjectTrustOperationType = "instance.create" | "instance.reopen" | "session.switch";
+export type ProjectTrustOperationType = "instance.create" | "instance.adopt" | "instance.reopen" | "session.switch";
 
 export interface ProjectTrustRequest {
   operationType: ProjectTrustOperationType;

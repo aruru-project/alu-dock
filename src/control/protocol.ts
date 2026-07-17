@@ -69,8 +69,10 @@ export const IMPLEMENTED_CAPABILITIES = [
   "resources.v1",
   "run.abort.v1",
   "service.managed.v1",
+  "session.adopt.v1",
   "session.commands.v1",
   "session.core",
+  "session.inventory.v1",
   "session.reopen",
   "session.tree.v1",
   "settings.v1",
@@ -118,6 +120,7 @@ type Request<T extends string, P> = { kind: "request"; version: 2; requestId: st
 export type ControlRequest =
   | Request<"host.info", Record<string, never>>
   | Request<"instance.create", { operationId: string; cwd: string; name?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
+  | Request<"instance.adopt", { operationId: string; sessionFile: string; name?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.list", { selector: "actionable" | "all"; cursor?: InstanceListCursor; limit: number }>
   | Request<"instance.get", { instanceId: string }>
   | Request<"instance.attach", { instanceId: string; since?: EventCursor; follow: boolean; controller: "claim" | "observe" }>
@@ -139,6 +142,7 @@ export type ControlRequest =
   | Request<"resource.get", { instanceId: string }>
   | Request<"command.catalog", { instanceId: string; prefix?: string }>
   | Request<"session.history", { instanceId: string; beforeEntryId?: string; limit: number }>
+  | Request<"session.inventory", { cwd: string; scope: "cwd" | "all" }>
   | Request<"session.list", { instanceId: string; scope: "cwd" | "all" }>
   | Request<"session.switch", { operationId: string; instanceId: string; sessionFile: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"session.new", { operationId: string; instanceId: string; parentSession?: string }>
@@ -165,6 +169,7 @@ export interface HostInfoResult {
 }
 export interface PingResult { pid: number; protocolVersion: 2; hostEpoch: string; capabilities: string[] }
 export interface CreateResult { instance: InstanceSnapshot }
+export type AdoptResult = CreateResult;
 export interface InstanceListCursor { revision: number; offset: number; selector: "actionable" | "all" }
 export interface ListResult {
   instances: InstanceSnapshot[];
@@ -193,6 +198,12 @@ export interface ModelsResult { models: RuntimeModelInfo[]; availableThinkingLev
 export interface ModelConfigurationResult { instance: InstanceSnapshot; settingsWrite: { persisted: true } }
 export interface ThinkingConfigurationResult { actualLevel: RuntimeThinkingLevel; availableThinkingLevels: RuntimeThinkingLevel[]; instance: InstanceSnapshot; settingsWrite: { persisted: true } }
 export interface SessionsResult { sessions: SessionDto[] }
+export interface SessionInventoryResult {
+  sessions: SessionDto[];
+  query: { cwd: string; scope: "cwd" | "all" };
+  total: number;
+  truncated: boolean;
+}
 export interface HistoryResult { entries: HistoryEntryDto[]; hasEarlier: boolean; nextBeforeEntryId?: string; instance: InstanceSnapshot }
 export interface SessionReplacementResult { cancelled: boolean; instance: InstanceSnapshot }
 export interface SessionNameResult { instance: InstanceSnapshot }
@@ -215,10 +226,12 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "instance.forget" || type === "catalog.prune") return "catalog.maintenance.v1";
   if (type === "interaction.respond") return "extension_ui.v1";
   if (type === "instance.reopen") return "session.reopen";
+  if (type === "instance.adopt") return "session.adopt.v1";
   if (type.startsWith("instance.")) return type === "instance.attach" ? "events.follow" : "instance.catalog";
   if (type === "command.abort") return "run.abort.v1";
   if (type === "queue.dequeue") return "queue.control.v1";
   if (type === "session.history") return "tui.projection.v1";
+  if (type === "session.inventory") return "session.inventory.v1";
   if (type === "session.tree" || type === "session.navigate" || type === "session.fork" || type === "session.clone") return "session.tree.v1";
   if (type === "command.submit" || type === "session.list") return "session.core";
   if (type.startsWith("session.")) return "session.commands.v1";
@@ -329,6 +342,15 @@ export function parseControlRequest(input: unknown): ControlRequest {
       if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
       return { ...base, type, params: { operationId: operationId(), cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"), name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), trustChallengeId, projectTrustDecision } };
     }
+    case "instance.adopt": {
+      exact(params, ["operationId", "sessionFile", "name", "trustChallengeId", "projectTrustDecision"], "invalid_request");
+      const trustChallengeId = optionalString(params.trustChallengeId, "params.trustChallengeId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
+      const projectTrustDecision = params.projectTrustDecision === undefined ? undefined : enumeration(params.projectTrustDecision, "params.projectTrustDecision", ["trust_once", "trust_and_remember", "deny_once", "deny_and_remember"], "invalid_request");
+      if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
+      const sessionFile = string(params.sessionFile, "params.sessionFile", MAX_CONTROL_CWD_CHARS, "invalid_request");
+      if (!sessionFile.startsWith("/")) throw validation("invalid_request", "params.sessionFile must be absolute");
+      return { ...base, type, params: { operationId: operationId(), sessionFile, name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), trustChallengeId, projectTrustDecision } };
+    }
     case "instance.list": {
       exact(params, ["selector", "cursor", "limit"], "invalid_request");
       const selector = enumeration(params.selector, "params.selector", ["actionable", "all"], "invalid_request");
@@ -384,6 +406,12 @@ export function parseControlRequest(input: unknown): ControlRequest {
       exact(params, ["instanceId", "beforeEntryId", "limit"], "invalid_request");
       if (!Number.isSafeInteger(params.limit) || (params.limit as number) < 1 || (params.limit as number) > MAX_HISTORY_ITEMS) throw validation("invalid_request", `params.limit must be between 1 and ${MAX_HISTORY_ITEMS}`);
       return { ...base, type, params: { instanceId: instanceId(), beforeEntryId: optionalString(params.beforeEntryId, "params.beforeEntryId", 128, "invalid_request"), limit: params.limit as number } };
+    }
+    case "session.inventory": {
+      exact(params, ["cwd", "scope"], "invalid_request");
+      const cwd = string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request");
+      if (!cwd.startsWith("/")) throw validation("invalid_request", "params.cwd must be absolute");
+      return { ...base, type, params: { cwd, scope: enumeration(params.scope, "params.scope", ["cwd", "all"], "invalid_request") } };
     }
     case "session.list": exact(params, ["instanceId", "scope"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId(), scope: enumeration(params.scope, "params.scope", ["cwd", "all"], "invalid_request") } };
     case "session.switch": {
@@ -646,7 +674,29 @@ export function parseThinkingConfigurationResult(input: unknown): ThinkingConfig
 function parseSettingsWrite(input: unknown): { persisted: true } { const write = object(input, "settingsWrite"); exact(write, ["persisted"]); if (write.persisted !== true) throw validation("invalid_response", "settingsWrite.persisted must be true"); return { persisted: true }; }
 export function parseSessionsResult(input: unknown): SessionsResult {
   const value = object(input, "sessions result"); exact(value, ["sessions"]);
-  return { sessions: array(value.sessions, "sessions", MAX_COLLECTION).map((item, index) => {
+  return { sessions: parseSessionDtos(value.sessions) };
+}
+
+export function parseSessionInventoryResult(input: unknown): SessionInventoryResult {
+  const value = object(input, "session inventory result"); exact(value, ["sessions", "query", "total", "truncated"]);
+  const query = object(value.query, "query"); exact(query, ["cwd", "scope"]);
+  const sessions = parseSessionDtos(value.sessions);
+  const total = unsigned(value.total, "total");
+  const truncated = boolean(value.truncated, "truncated");
+  if (total < sessions.length || truncated !== (sessions.length < total)) throw validation("invalid_response", "Session inventory truncation metadata is inconsistent");
+  return {
+    sessions,
+    query: {
+      cwd: string(query.cwd, "query.cwd", MAX_CONTROL_CWD_CHARS),
+      scope: enumeration(query.scope, "query.scope", ["cwd", "all"]),
+    },
+    total,
+    truncated,
+  };
+}
+
+function parseSessionDtos(input: unknown): SessionDto[] {
+  const sessions = array(input, "sessions", MAX_COLLECTION).map((item, index) => {
     const session = object(item, `sessions[${index}]`); exact(session, ["sessionId", "sessionFile", "name", "cwd", "updatedAt"]);
     return {
       sessionId: id(session.sessionId, `sessions[${index}].sessionId`),
@@ -655,7 +705,10 @@ export function parseSessionsResult(input: unknown): SessionsResult {
       cwd: string(session.cwd, `sessions[${index}].cwd`, MAX_CONTROL_CWD_CHARS),
       updatedAt: session.updatedAt === undefined ? undefined : timestamp(session.updatedAt, `sessions[${index}].updatedAt`),
     };
-  }) };
+  });
+  if (new Set(sessions.map((session) => session.sessionId)).size !== sessions.length) throw validation("invalid_response", "Session IDs must be unique");
+  if (new Set(sessions.map((session) => session.sessionFile)).size !== sessions.length) throw validation("invalid_response", "Session files must be unique");
+  return sessions;
 }
 
 export function parseHistoryResult(input: unknown): HistoryResult {

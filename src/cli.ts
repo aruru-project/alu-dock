@@ -4,14 +4,15 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 
 import { renderCliHelp, requestedCliHelp } from "./cli-help.js";
-import { humanListWidth, renderHumanInstanceList } from "./cli-list.js";
+import { humanListWidth, renderHumanInstanceList, selectHumanInstanceList } from "./cli-list.js";
 import { ControlClientError, DockClient } from "./control/dock-client.js";
 import { DockHost } from "./control/dock-host.js";
 import { DockRegistry } from "./control/dock-registry.js";
 import { FileCatalogStore, defaultCatalogPath } from "./control/durable-catalog-store.js";
 import type { ProjectTrustChoice } from "./control/project-trust.js";
 import { defaultSocketPath, managedSocketPath } from "./control/socket-path.js";
-import type { DeliveryMode, DockEvent, EventCursor } from "./core/managed-instance.js";
+import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot } from "./core/managed-instance.js";
+import { requireHumanTarget } from "./human-target.js";
 import { UserServiceManager } from "./deployment/user-service.js";
 
 const HOST_SHUTDOWN_TIMEOUT_MS = 12_000;
@@ -41,8 +42,8 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (parsed.command === "open" || parsed.command === "new" || parsed.command === "attach") {
-    const options = parseOpenArgs(parsed.command, parsed.commandArgs);
+  if (parsed.command === "hub" || parsed.command === "open" || parsed.command === "new" || parsed.command === "attach") {
+    const options = parseInteractiveArgs(parsed.command, parsed.commandArgs);
     const { openDock } = await import("./interactive.js");
     await openDock({ socketPath: parsed.socketPath, ...options });
     return;
@@ -65,19 +66,26 @@ async function main(): Promise<void> {
 
     case "list": {
       const includeStopped = parseListArgs(parsed.commandArgs);
-      const mode = includeStopped ? "all" : "actionable";
-      const result = await client.listPage(mode);
-      process.stdout.write(renderHumanInstanceList(result.instances, humanListWidth(process.stdout.columns), {
-        mode,
-        hiddenStopped: result.page.hiddenStopped,
-        totalInstances: result.page.total,
+      const all = await client.list("all");
+      const selection = selectHumanInstanceList(all, includeStopped);
+      process.stdout.write(renderHumanInstanceList(selection.instances, humanListWidth(process.stdout.columns), {
+        mode: includeStopped ? "all" : "actionable",
+        hiddenStopped: selection.hiddenStopped,
+        totalInstances: selection.instances.length,
+        identityUniverse: all,
       }));
       return;
     }
 
     case "status": {
-      const instanceId = requiredPositional(parsed.commandArgs, "status requires INSTANCE_ID");
-      writeJson({ kind: "instance", instance: await client.status(instanceId) });
+      const target = requiredPositional(parsed.commandArgs, "status requires TARGET");
+      const all = await client.list("all");
+      const instance = requireHumanTarget(all, target);
+      process.stdout.write(renderHumanInstanceList([instance], humanListWidth(process.stdout.columns), {
+        mode: "all",
+        totalInstances: 1,
+        identityUniverse: all,
+      }));
       return;
     }
 
@@ -101,15 +109,17 @@ async function main(): Promise<void> {
     }
 
     case "stop": {
-      const instanceId = requiredPositional(parsed.commandArgs, "stop requires INSTANCE_ID");
-      const result = await client.stop(instanceId);
-      writeJson({ kind: "receipt", action: "stop", ...result });
+      const target = requiredPositional(parsed.commandArgs, "stop requires TARGET");
+      const instance = requireHumanTarget(await client.list("all"), target);
+      const result = await client.stop(instance.id);
+      process.stdout.write(`${result.receipt.alreadyStopped ? "Already stopped" : "Stopped"} ${displayInstance(result.instance)}.\n`);
       return;
     }
 
     case "forget": {
-      const instanceId = requiredPositional(parsed.commandArgs, "forget requires INSTANCE_ID");
-      const result = await client.forget(instanceId);
+      const target = requiredPositional(parsed.commandArgs, "forget requires TARGET");
+      const instance = requireHumanTarget(await client.list("all"), target);
+      const result = await client.forget(instance.id);
       process.stdout.write(`Forgot Dock record ${result.receipt.forgottenId}. Pi session files were not deleted.\n`);
       return;
     }
@@ -150,7 +160,9 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     createPiProjectTrustCoordinator,
     resolvePiReopenTarget,
   } = await import("./pi/create-pi-instance.js");
+  const { createPiSessionInventory } = await import("./pi/session-inventory.js");
   const trustPreflight = createPiProjectTrustCoordinator();
+  const sessionInventory = createPiSessionInventory();
   let registry: DockRegistry;
   let host: DockHost;
   if (mode === "managed") {
@@ -169,6 +181,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       statePath: catalogPath as string,
       registry,
       initialize: () => registry.initializeCatalog(),
+      sessionInventory,
     });
   } else {
     registry = new DockRegistry(
@@ -176,7 +189,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       undefined,
       { trustPreflight, reopenTargetResolver: { resolve: resolvePiReopenTarget } },
     );
-    host = new DockHost({ socketPath, registry });
+    host = new DockHost({ socketPath, registry, sessionInventory });
   }
   await host.start();
   writeJson({ kind: "host.ready", pid: process.pid, socketPath: host.socketPath });
@@ -356,7 +369,7 @@ function parseGlobalArgs(args: string[]): ParsedArgs {
   }
 
   const command = remaining.shift();
-  if (!command) return { socketPath, socketExplicit, command: "open", commandArgs: [] };
+  if (!command) return { socketPath, socketExplicit, command: "hub", commandArgs: [] };
   if (command === "--help" || command === "-h") {
     return { socketPath, socketExplicit, command: "help", commandArgs: [] };
   }
@@ -371,37 +384,44 @@ function parseServeMode(args: string[]): "managed" | "dev" {
   return args[0] === "--managed" ? "managed" : "dev";
 }
 
-function parseOpenArgs(
-  command: "open" | "new" | "attach",
+function parseInteractiveArgs(
+  command: "hub" | "open" | "new" | "attach",
   args: string[],
-): { cwd: string; name?: string; instanceId?: string; forceNew: boolean } {
+): { mode: "hub" | "open" | "new" | "attach"; cwd: string; name?: string; target?: string; forceNew?: boolean } {
   let cwd = process.cwd();
   let name: string | undefined;
-  let instanceId: string | undefined;
+  let target: string | undefined;
   let forceNew = command === "new";
   const mutable = [...args];
   while (mutable.length > 0) {
     const arg = mutable.shift();
     if (arg === "--cwd") {
+      if (command === "attach" || command === "hub") throw new Error(`${command} does not accept --cwd`);
       const value = mutable.shift();
       if (!value) throw new Error("--cwd requires a path");
       cwd = value;
     } else if (arg === "--name") {
+      if (command === "attach" || command === "hub") throw new Error(`${command} does not accept --name`);
       const value = mutable.shift();
       if (!value) throw new Error("--name requires a non-empty value");
       name = value;
     } else if (arg === "--new") {
+      if (command !== "open") throw new Error(`${command} does not accept --new`);
       forceNew = true;
     } else if (arg?.startsWith("--")) {
       throw new Error(`Unknown ${command} argument: ${arg}`);
-    } else if (!instanceId) {
-      instanceId = arg;
+    } else if (command === "open" || command === "attach") {
+      if (target !== undefined) throw new Error(`${command} accepts exactly one TARGET`);
+      if (arg === undefined || arg.trim().length === 0) throw new Error(`${command} TARGET must be non-empty`);
+      target = arg;
     } else {
-      throw new Error(`${command} accepts at most one INSTANCE_ID`);
+      throw new Error(`${command} does not accept TARGET`);
     }
   }
-  if (forceNew && instanceId) throw new Error(`${command} cannot combine INSTANCE_ID with --new`);
-  return { cwd, name, instanceId, forceNew };
+  if (command === "hub" && args.length > 0) throw new Error("The bare Dock Hub does not accept arguments");
+  if (command === "attach" && target === undefined) throw new Error("attach requires TARGET; use a full ID, displayed unique prefix, or unique exact name");
+  if (forceNew && target !== undefined) throw new Error(`${command} cannot combine TARGET with --new`);
+  return { mode: command, cwd, name, target, forceNew };
 }
 
 function parseCreateArgs(args: string[]): {
@@ -582,11 +602,43 @@ function writeJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
+function displayInstance(instance: InstanceSnapshot): string {
+  const name = instance.name
+    ?.replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ")
+    .replace(/[\u202a-\u202e\u2066-\u2069\ufeff]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return name ? `${name} (${instance.id})` : instance.id;
+}
+
+function isMachineInvocation(args: readonly string[]): boolean {
+  let command: string | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    if (args[index] === "--socket") {
+      index += 1;
+      continue;
+    }
+    command = args[index];
+    break;
+  }
+  return command === "serve"
+    || command === "ping"
+    || command === "create"
+    || command === "reopen"
+    || command === "events"
+    || command === "prompt";
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
 main().catch((error: unknown) => {
+  if (!isMachineInvocation(process.argv.slice(2))) {
+    process.stderr.write(`Alu Dock: ${errorMessage(error)}\n`);
+    process.exitCode = 1;
+    return;
+  }
   const code = error instanceof ControlClientError
     ? error.code
     : typeof (error as { code?: unknown })?.code === "string"

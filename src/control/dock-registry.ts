@@ -43,6 +43,14 @@ export interface CreateRegistryInstanceInput {
   projectTrustDecision?: ProjectTrustChoice;
 }
 
+export interface AdoptRegistryInstanceInput {
+  operationId: string;
+  sessionFile: string;
+  name?: string;
+  trustChallengeId?: string;
+  projectTrustDecision?: ProjectTrustChoice;
+}
+
 export interface ReopenRegistryInstanceInput {
   operationId: string;
   instanceId: string;
@@ -114,6 +122,7 @@ export class DockRegistry {
   private readonly catalog: CatalogTransactionCoordinator;
   private readonly catalogStore: CatalogStore | undefined;
   private readonly reopenInFlight = new Map<string, string>();
+  private readonly sessionFileClaims = new Map<string, { ownerId: string; operationId: string }>();
   private catalogMaintenancePending = false;
   private readonly runtimeReopenListeners = new Set<(instanceId: string) => void>();
   private readonly catalogRemovalListeners = new Set<(instanceIds: readonly string[]) => void>();
@@ -208,6 +217,91 @@ export class DockRegistry {
     return instance;
   }
 
+  async adopt(input: AdoptRegistryInstanceInput): Promise<ManagedInstance> {
+    this.assertCatalogReady();
+    this.catalog.assertWritable();
+    if (this.catalog.current().instances.some((record) => record.creationOperationId === input.operationId)) {
+      throw new CatalogOperationRecordedError(input.operationId);
+    }
+    if (!this.reopenTargetResolver) throw new Error("Persisted Pi session adoption is unavailable");
+    const sessionFile = resolve(input.sessionFile);
+    const releaseClaim = this.claimSessionFile(`adopt:${input.operationId}`, input.operationId, sessionFile);
+    try {
+      return await this.performAdopt(input, sessionFile);
+    } finally {
+      releaseClaim();
+    }
+  }
+
+  private async performAdopt(input: AdoptRegistryInstanceInput, sessionFile: string): Promise<ManagedInstance> {
+    const target = await this.reopenTargetResolver!.resolve(sessionFile);
+    const trust = await this.resolveProjectTrust({
+      operationType: "instance.adopt",
+      operationId: input.operationId,
+      cwd: target.cwd,
+      name: sessionFile,
+      trustChallengeId: input.trustChallengeId,
+      projectTrustDecision: input.projectTrustDecision,
+    });
+    const id = this.createId();
+    if (this.instances.has(id) || this.catalog.current().instances.some((record) => record.id === id)) {
+      throw new Error(`Generated duplicate instance identity: ${id}`);
+    }
+    const instance = await this.factory({
+      id,
+      creationOperationId: input.operationId,
+      hostEpoch: this.hostEpoch,
+      cwd: trust.canonicalCwd,
+      name: input.name,
+      projectTrusted: trust.projectTrusted,
+      sessionFile,
+    });
+    if (
+      instance.id !== id
+      || instance.creationOperationId !== input.operationId
+      || instance.hostEpoch !== this.hostEpoch
+      || instance.snapshot().executor.sessionFile !== sessionFile
+    ) {
+      await instance.disposeUnpublished().catch(() => {});
+      throw new Error("Adopt factory returned an identity or session outside the registry Host domain");
+    }
+    instance.bindCatalogPort(this.catalog.forInstance(id));
+    try {
+      await this.catalog.create(instance.catalogRecord(), {
+        kind: "instance.adopt",
+        effect: "rollback_contained",
+        operationId: input.operationId,
+        instanceId: id,
+      });
+    } catch (error) {
+      await instance.disposeUnpublished().catch(() => {});
+      throw error;
+    }
+    instance.markCatalogCommitted();
+    this.instances.set(id, instance);
+    return instance;
+  }
+
+  claimSessionFile(ownerId: string, operationId: string, rawSessionFile: string): () => void {
+    const sessionFile = resolve(rawSessionFile);
+    const liveOwner = [...this.instances.values()].find((instance) => {
+      const snapshot = instance.snapshot();
+      return instance.id !== ownerId
+        && (snapshot.lifecycle === "active" || snapshot.lifecycle === "stopping")
+        && snapshot.executor.sessionFile === sessionFile;
+    });
+    if (liveOwner) throw new InstanceBusyError(liveOwner.id, "use persisted session");
+    const pending = this.sessionFileClaims.get(sessionFile);
+    if (pending && (pending.ownerId !== ownerId || pending.operationId !== operationId)) {
+      throw new InstanceBusyError(pending.ownerId, "use persisted session");
+    }
+    this.sessionFileClaims.set(sessionFile, { ownerId, operationId });
+    return () => {
+      const current = this.sessionFileClaims.get(sessionFile);
+      if (current?.ownerId === ownerId && current.operationId === operationId) this.sessionFileClaims.delete(sessionFile);
+    };
+  }
+
   async reopen(input: ReopenRegistryInstanceInput): Promise<{ instance: ManagedInstance; previousLifecycle: "host_lost" | "runtime_error" }> {
     this.assertCatalogReady();
     this.catalog.assertWritable();
@@ -226,7 +320,21 @@ export class DockRegistry {
     const previousLifecycle = record.lifecycle;
     const sessionFile = input.sessionFile ?? catalogReopenSessionFile(record);
     if (!sessionFile || !this.reopenTargetResolver) throw new InstanceNotReopenableError(input.instanceId);
-    const target = await this.reopenTargetResolver.resolve(sessionFile);
+    const releaseClaim = this.claimSessionFile(record.id, input.operationId, sessionFile);
+    try {
+      return await this.performClaimedReopen(input, record, previousLifecycle, sessionFile);
+    } finally {
+      releaseClaim();
+    }
+  }
+
+  private async performClaimedReopen(
+    input: ReopenRegistryInstanceInput,
+    record: CatalogInstanceRecord,
+    previousLifecycle: "host_lost" | "runtime_error",
+    sessionFile: string,
+  ): Promise<{ instance: ManagedInstance; previousLifecycle: "host_lost" | "runtime_error" }> {
+    const target = await this.reopenTargetResolver!.resolve(sessionFile);
     const trust = await this.resolveProjectTrust({
       operationType: "instance.reopen",
       operationId: input.operationId,

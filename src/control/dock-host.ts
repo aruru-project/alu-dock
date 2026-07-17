@@ -35,6 +35,7 @@ import {
   type JsonObject,
 } from "../core/managed-instance.js";
 import { RuntimeInvalidSettingValueError, RuntimeModelNotFoundError, RuntimeSettingsWriteError, RuntimeUnknownToolError } from "../core/runtime-session.js";
+import type { SessionInventory } from "../core/session-inventory.js";
 import {
   CatalogListCursorStaleError,
   CatalogOperationRecordedError,
@@ -70,6 +71,8 @@ import {
 } from "./protocol.js";
 
 const MAX_SOCKET_WRITE_BUFFER = MAX_CONTROL_LINE_BYTES;
+const MAX_SESSION_INVENTORY_RESULT_BYTES = 512 * 1_024;
+const MAX_SESSION_INVENTORY_ITEMS = 2_000;
 const MAX_INITIAL_EVENT_QUEUE = 1_000;
 const BACKPRESSURE_CLOSE_TIMEOUT_MS = 1_000;
 
@@ -95,6 +98,7 @@ export interface DockHostOptions {
   statePath?: string;
   faultDrainTimeoutMs?: number;
   initialize?: () => Promise<void>;
+  sessionInventory?: SessionInventory;
 }
 
 export class DockHost {
@@ -115,6 +119,7 @@ export class DockHost {
   private readonly operationLedger = new OperationLedger();
   private readonly faultDrainTimeoutMs: number;
   private readonly initialize: (() => Promise<void>) | undefined;
+  private readonly sessionInventory: SessionInventory;
   private faultDrainPromise: Promise<void> | undefined;
   private unsubscribeMutationFault: (() => void) | undefined;
   private unsubscribeRuntimeReopened: (() => void) | undefined;
@@ -133,6 +138,7 @@ export class DockHost {
     this.startedAt = options.registry.startedAt;
     this.faultDrainTimeoutMs = Math.max(1, options.faultDrainTimeoutMs ?? 5_000);
     this.initialize = options.initialize;
+    this.sessionInventory = options.sessionInventory ?? { list: async () => [] };
     this.faultStartedPromise = new Promise((resolveFaultStarted) => { this.resolveFaultStarted = resolveFaultStarted; });
     this.fatalPromise = new Promise((resolveFatal) => { this.resolveFatal = resolveFatal; });
   }
@@ -386,6 +392,10 @@ export class DockHost {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=await this.registry.create({operationId:request.params.operationId,cwd:request.params.cwd,name:request.params.name,trustChallengeId:request.params.trustChallengeId,projectTrustDecision:request.params.projectTrustDecision});return {instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
+      case "instance.adopt": {
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=await this.registry.adopt({operationId:request.params.operationId,sessionFile:request.params.sessionFile,name:request.params.name,trustChallengeId:request.params.trustChallengeId,projectTrustDecision:request.params.projectTrustDecision});return {instance:instance.snapshot()};});
+        this.sendSuccessAndEnd(socket,request.requestId,result); return;
+      }
       case "instance.list": this.sendSuccessAndEnd(socket, request.requestId, this.registry.listPage({
         ...request.params,
         maxBytes: MAX_INSTANCE_LIST_RESULT_BYTES,
@@ -475,6 +485,11 @@ export class DockHost {
       case "resource.get": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getResources()); return; }
       case "command.catalog": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{commands:await instance.getCommands(request.params.prefix)}); return; }
       case "session.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getHistoryPage(request.params.beforeEntryId,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
+      case "session.inventory": {
+        const sessions = await this.sessionInventory.list(request.params.cwd, request.params.scope);
+        this.sendSuccessAndEnd(socket, request.requestId, boundedSessionInventory(sessions, request.params));
+        return;
+      }
       case "session.list": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{sessions:await instance.listSessions(request.params.scope)}); return; }
       case "session.tree": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getTreePage(request.params.treeRevision,request.params.afterEntryId,request.params.limit)); return; }
     }
@@ -555,8 +570,24 @@ function isMutationRequest(type: ControlRequest["type"]): boolean {
     && type !== "resource.get"
     && type !== "command.catalog"
     && type !== "session.history"
+    && type !== "session.inventory"
     && type !== "session.list"
     && type !== "session.tree";
+}
+
+function boundedSessionInventory(
+  source: Awaited<ReturnType<SessionInventory["list"]>>,
+  query: { cwd: string; scope: "cwd" | "all" },
+): { sessions: Awaited<ReturnType<SessionInventory["list"]>>; query: { cwd: string; scope: "cwd" | "all" }; total: number; truncated: boolean } {
+  const sessions: Awaited<ReturnType<SessionInventory["list"]>> = [];
+  let bytes = 256;
+  for (const session of source.slice(0, MAX_SESSION_INVENTORY_ITEMS)) {
+    const itemBytes = Buffer.byteLength(JSON.stringify(session), "utf8") + 1;
+    if (bytes + itemBytes > MAX_SESSION_INVENTORY_RESULT_BYTES) break;
+    sessions.push(session);
+    bytes += itemBytes;
+  }
+  return { sessions, query: { ...query }, total: source.length, truncated: sessions.length < source.length };
 }
 
 function successResponse(requestId:string,hostEpoch:string,result:unknown):ControlResponse { return {kind:"response",version:2,requestId,hostEpoch,ok:true,result}; }

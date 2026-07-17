@@ -39,6 +39,9 @@ test("top-level help is human-only, bounded, and locally rendered", async () => 
   for (const internalSignature of ["alu-dock serve", "alu-dock ping", "alu-dock create", "alu-dock reopen", "alu-dock events", "alu-dock prompt", "--socket"]) {
     assert.doesNotMatch(flag.stdout, new RegExp(escapeRegExp(internalSignature), "u"));
   }
+  assert.match(flag.stdout, /Open the Dock Hub/u);
+  assert.doesNotMatch(flag.stdout, /side-effect-free/u);
+  assert.match(flag.stdout, /attach TARGET/u);
   assert.ok(Math.max(...flag.stdout.trimEnd().split("\n").map((line) => line.length)) <= 80);
 });
 
@@ -60,7 +63,29 @@ test("every public human command supports equivalent local help forms", async ()
 
   const missingBusinessArgument = await runCli(["status", "--help"]);
   assertHelpSuccess(missingBusinessArgument);
-  assert.match(missingBusinessArgument.stdout, /INSTANCE_ID/u);
+  assert.match(missingBusinessArgument.stdout, /TARGET/u);
+});
+
+test("interactive command grammar keeps bare Hub, new, and attach intents distinct", async () => {
+  const missingTarget = await runCli(["attach"]);
+  assert.equal(missingTarget.code, 1);
+  assert.match(missingTarget.stderr, /^Alu Dock: attach requires TARGET/u);
+  assert.doesNotMatch(missingTarget.stderr, /^\s*\{/u);
+
+  for (const [command, target] of [["open", ""], ["attach", "   "]] as const) {
+    const blankTarget = await runCli([command, target]);
+    assert.equal(blankTarget.code, 1);
+    assert.equal(blankTarget.stdout, "");
+    assert.match(blankTarget.stderr, new RegExp(`^Alu Dock: ${command} TARGET must be non-empty`, "u"));
+  }
+
+  const attachNew = await runCli(["attach", "target", "--new"]);
+  assert.equal(attachNew.code, 1);
+  assert.match(attachNew.stderr, /attach does not accept --new/u);
+
+  const newTarget = await runCli(["new", "target"]);
+  assert.equal(newTarget.code, 1);
+  assert.match(newTarget.stderr, /new does not accept TARGET/u);
 });
 
 test("service help is explorable without constructing a service manager", async () => {

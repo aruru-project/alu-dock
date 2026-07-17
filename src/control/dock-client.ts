@@ -35,6 +35,7 @@ import {
   parseReopenResult,
   parseSessionsResult,
   parseSessionCompactionResult,
+  parseSessionInventoryResult,
   parseSessionNameResult,
   parseSessionReloadResult,
   parseSessionReplacementResult,
@@ -51,6 +52,7 @@ import {
   parseCommandsResult,
   ProtocolValidationError,
   type AbortResult,
+  type AdoptResult,
   type ModelConfigurationResult,
   type ThinkingConfigurationResult,
   type EventsResult,
@@ -69,6 +71,7 @@ import {
   type ReopenResult,
   type SessionsResult,
   type SessionCompactionResult,
+  type SessionInventoryResult,
   type SessionNameResult,
   type SessionReloadResult,
   type SessionReplacementResult,
@@ -105,6 +108,7 @@ export class DockClient {
   async hostInfo():Promise<HostInfoResult>{return this.request("host.info",{},"host.info",parseHostInfoResult);}
   async ping():Promise<PingResult>{let negotiated:string[]=[];const info=await this.request("host.info",{},"host.info",parseHostInfoResult,(ack)=>{negotiated=[...ack.capabilities];});return {pid:info.host.pid,protocolVersion:2,hostEpoch:info.host.hostEpoch,capabilities:negotiated};}
   async create(cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<InstanceSnapshot>{const result=await this.request("instance.create",{operationId,cwd,name,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"instance.catalog",parseCreateResult);return result.instance;}
+  adopt(sessionFile:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<AdoptResult>{return this.request("instance.adopt",{operationId,sessionFile,name,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.adopt.v1",parseCreateResult);}
   async list(selector: "actionable" | "all" = "all"): Promise<InstanceSnapshot[]> {
     const instances: InstanceSnapshot[] = [];
     let cursor: InstanceListCursor | undefined;
@@ -152,6 +156,7 @@ export class DockClient {
   resources(instanceId:string):Promise<ResourcesResult>{return this.request("resource.get",{instanceId},"resources.v1",parseResourcesResult);}
   commands(instanceId:string,prefix?:string):Promise<CommandsResult>{return this.request("command.catalog",{instanceId,prefix},"resources.v1",parseCommandsResult);}
   history(instanceId:string,beforeEntryId?:string,limit=200):Promise<HistoryResult>{return this.request("session.history",{instanceId,beforeEntryId,limit},"tui.projection.v1",parseHistoryResult);}
+  sessionInventory(cwd:string,scope:"cwd"|"all"="cwd"):Promise<SessionInventoryResult>{return this.request("session.inventory",{cwd,scope},"session.inventory.v1",parseSessionInventoryResult);}
   sessions(instanceId:string,scope:"cwd"|"all"):Promise<SessionsResult>{return this.request("session.list",{instanceId,scope},"session.core",parseSessionsResult);}
   switchSession(instanceId:string,sessionFile:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<SessionReplacementResult>{return this.request("session.switch",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.commands.v1",parseSessionReplacementResult);}
   newSession(instanceId:string,parentSession?:string,operationId=this.createRequestId()):Promise<SessionReplacementResult>{return this.request("session.new",{operationId,instanceId,parentSession},"session.commands.v1",parseSessionReplacementResult);}
@@ -314,6 +319,11 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
     const requested=(params as Extract<ControlRequest,{type:"session.name"}>["params"]).name.replace(/[\r\n]+/gu," ").trim()||undefined;
     if(snapshots[0]?.name!==requested)throw new ProtocolValidationError("invalid_response","Session name result does not match the requested normalized name");
   }
+  if(type==="session.inventory"){
+    const requested=(params as Extract<ControlRequest,{type:"session.inventory"}>["params"]);
+    const inventory=record as unknown as SessionInventoryResult;
+    if(inventory.query.cwd!==requested.cwd||inventory.query.scope!==requested.scope)throw new ProtocolValidationError("invalid_response","Session inventory query does not match the request");
+  }
   if(type==="session.tree"){
     const requested=(params as Extract<ControlRequest,{type:"session.tree"}>["params"]);
     if(requested.treeRevision!==undefined&&record.treeRevision!==requested.treeRevision)throw new ProtocolValidationError("invalid_response","Tree continuation revision does not match the request");
@@ -325,7 +335,8 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
   if("operationId" in params&&typeof params.operationId==="string"){
     const receipt=record.receipt as {operationId?:unknown}|undefined;
     if(receipt&&receipt.operationId!==params.operationId)throw new ProtocolValidationError("invalid_response","Receipt operationId does not match request operationId");
-    if(type==="instance.create"&&snapshots[0]?.creationOperationId!==params.operationId)throw new ProtocolValidationError("invalid_response","Created instance operationId does not match request operationId");
+    if((type==="instance.create"||type==="instance.adopt")&&snapshots[0]?.creationOperationId!==params.operationId)throw new ProtocolValidationError("invalid_response","Created instance operationId does not match request operationId");
+    if(type==="instance.adopt"&&snapshots[0]?.executor.sessionFile!==resolve((params as Extract<ControlRequest,{type:"instance.adopt"}>["params"]).sessionFile))throw new ProtocolValidationError("invalid_response","Adopted instance session file does not match the request");
     if(type==="instance.reopen"&&record.operationId!==params.operationId)throw new ProtocolValidationError("invalid_response","Reopen operationId does not match request operationId");
   }
 }

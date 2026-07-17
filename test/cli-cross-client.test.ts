@@ -57,12 +57,11 @@ test("independent CLI processes reconnect to one delayed host-owned instance", {
     assert.doesNotMatch(humanList, /creationOperationId|eventCursor|sessionFile|metrics/u);
 
     // Each command below is a fresh process, proving no client process owns it.
-    const statusOutput = await runCli(socketPath, ["status", instanceId]);
-    assert.equal(objectValue(statusOutput.instance).execution, "running");
-    assert.equal(
-      objectValue(objectValue(statusOutput.instance).executor).piSessionId,
-      `fixture-pi-${instanceId}`,
-    );
+    const statusOutput = await runCliText(socketPath, ["status", "cross-client"]);
+    assert.match(statusOutput, /cross-client/u);
+    assert.match(statusOutput, /active\/running/u);
+    assert.doesNotMatch(statusOutput, /^\s*\{/u);
+    assert.equal((await new DockClient({ socketPath }).status(instanceId)).executor.piSessionId, `fixture-pi-${instanceId}`);
 
     const malformedCursorError = await runCliFailure(socketPath, ["events", instanceId, "--cursor", "1"]);
     assert.match(malformedCursorError, /HOST_EPOCH:RUNTIME_GENERATION:SEQUENCE/);
@@ -77,8 +76,9 @@ test("independent CLI processes reconnect to one delayed host-owned instance", {
     child.send({ type: "settle", instanceId });
     await settledMessage;
 
-    const settledStatus = await runCli(socketPath, ["status", instanceId]);
-    assert.equal(objectValue(settledStatus.instance).lastRun, "succeeded");
+    const settledStatus = await runCliText(socketPath, ["status", instanceId.slice(0, 8)]);
+    assert.match(settledStatus, /active\/idle/u);
+    assert.equal((await new DockClient({ socketPath }).status(instanceId)).lastRun, "succeeded");
     const replay = await runCli(socketPath, ["events", instanceId, "--cursor", cursor]);
     assert.ok(
       (objectValue(replay.page).events as unknown[])
@@ -100,11 +100,11 @@ test("independent CLI processes reconnect to one delayed host-owned instance", {
     assert.equal(objectValue(steer.receipt).delivery, "steer");
     assert.equal(objectValue(steer.receipt).queued, true);
 
-    const firstStop = await runCli(socketPath, ["stop", instanceId]);
-    assert.equal(objectValue(firstStop.receipt).alreadyStopped, false);
-    assert.equal(objectValue(firstStop.instance).lastRun, "aborted");
-    const secondStop = await runCli(socketPath, ["stop", instanceId]);
-    assert.equal(objectValue(secondStop.receipt).alreadyStopped, true);
+    const firstStop = await runCliText(socketPath, ["stop", "cross-client"]);
+    assert.match(firstStop, /^Stopped /u);
+    assert.equal((await new DockClient({ socketPath }).status(instanceId)).lastRun, "aborted");
+    const secondStop = await runCliText(socketPath, ["stop", instanceId]);
+    assert.match(secondStop, /^Already stopped /u);
 
     const actionableAfterStop = await runCliText(socketPath, ["list"]);
     assert.match(actionableAfterStop, /No actionable Alu Dock instances/u);
@@ -119,6 +119,14 @@ test("independent CLI processes reconnect to one delayed host-owned instance", {
     assert.match(forgotten, /Forgot Dock record/u);
     assert.match(forgotten, /Pi session files were not deleted/u);
     assert.deepEqual(await new DockClient({ socketPath }).list(), []);
+
+    await runCli(socketPath, ["create", "--cwd", directory, "--name", "duplicate"]);
+    await runCli(socketPath, ["create", "--cwd", directory, "--name", "duplicate"]);
+    const ambiguousName = await runCliFailure(socketPath, ["status", "duplicate"]);
+    assert.match(ambiguousName, /^Alu Dock: TARGET .* is ambiguous/u);
+    assert.doesNotMatch(ambiguousName, /^\s*\{/u);
+    const ambiguousPrefix = await runCliFailure(socketPath, ["status", "fixture-instance-"]);
+    assert.match(ambiguousPrefix, /longer ID prefix or the full ID/u);
 
     const stoppedMessage = waitForMessage(child, (message) => message.type === "stopped");
     const exited = waitForExit(child);

@@ -7,12 +7,14 @@ Interactive入口、Dock Hub、attached Session Work、conversation、history、
 ## 当前入口与数据流
 
 ```text
-src/cli.ts open/new/attach
+src/cli.ts bare Hub / open / new / attach
   └── src/interactive.ts: openDock()
         ├── ensureHost()
-        ├── DockClient list/status/create/reopen
-        ├── selectInstance()
-        └── runDockTui(client, instance)
+        ├── bare → runDockHub(client, cwd)
+        │          ├── instance catalog
+        │          └── persisted Pi session inventory
+        ├── explicit open/new/attach → target/create/reopen
+        └── selected action → runDockTui(client, instance)
 
 runDockTui()
   ├── initial closed queries: attach/history/settings/tools/resources/commands
@@ -24,7 +26,7 @@ runDockTui()
   └── editor/slash/key input ──> DockClient mutations
 ```
 
-当前没有独立Hub组件；`openDock()`仍会选择或创建runtime。实现bare-command Hub时，在`interactive.ts`旁建立focused Hub composition，不要把managed-instance列表和Resume/Adopt inventory塞进attached `dock-tui.ts`。
+当前独立 Hub 由 `src/tui/dock-hub.ts` 负责，进入/退出只执行 closed read；New、Resume、Adopt、Attach、Stop、Forget 都要求明确选择。managed-instance 列表与 Resume/Adopt inventory 不进入 attached `dock-tui.ts`。#175 的大阿露视觉资产与低频眨眼仍是后续独立 slice。
 
 ## Scope边界
 
@@ -45,7 +47,8 @@ Session Work TUI
 
 | 文件 | 唯一职责 | 主要测试 |
 |---|---|---|
-| `src/interactive.ts` | TTY entry composition、当前instance resolution/Work routing、trust prompt；也是Hub routing入口 | CLI/managed/PTY tests |
+| `src/interactive.ts` | TTY entry composition、Hub action/Work routing、human target lifecycle、trust prompt | CLI/managed/PTY tests |
+| `src/tui/dock-hub.ts` | Dock instances主列表、lifecycle actions、独立Pi session Resume/Adopt inventory | `human-target`, `dock-control` PTY |
 | `src/tui/dock-tui.ts` | attached Work workflow composition、commands、focus/key actions | `tui-ux-state`, PTY fixture |
 | `src/tui/conversation.ts` | durable conversation rows、tool folding/rendering、status/activity line投影 | `tui-conversation` |
 | `src/tui/snapshot-projection.ts` | DockEvent → local InstanceSnapshot reducer | `tui-ux-state` |
@@ -61,7 +64,7 @@ Session Work TUI
 | `src/tui/extension-text-dialog.ts` | bounded extension select/confirm/input/editor UI | extension UI/TUI tests |
 | `src/tui/searchable-picker.ts`, `search-filter.ts` | reusable picker与deterministic filtering | `tui-ux-state` |
 | `src/tui/mouse-input.ts` | explicit Dock mouse mode、wheel decoding、terminal mode cleanup | `tui-ux-state`, PTY |
-| `src/tui/select-instance.ts` | legacy/pre-Hub instance chooser | managed/PTY tests |
+| `src/tui/select-instance.ts` | 仅供显式旧 `open` smart-entry 的legacy chooser | managed/PTY tests |
 | `src/tui/theme.ts` | terminal color capability与Night Console palette | render/PTY checks |
 
 ## 人类事实分类

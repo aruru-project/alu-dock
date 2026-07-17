@@ -12,7 +12,7 @@ import { DockRegistry } from "../src/control/dock-registry.js";
 import { encodeJsonLine, JsonLineDecoder } from "../src/control/json-lines.js";
 import { ProjectTrustCoordinator } from "../src/control/project-trust.js";
 import { ExtensionUiBroker } from "../src/core/extension-ui-broker.js";
-import { ManagedInstance, type DockEvent } from "../src/core/managed-instance.js";
+import { ManagedInstance, type DockEvent, type SessionDto } from "../src/core/managed-instance.js";
 import { SETTING_KEYS } from "../src/core/config-projection.js";
 import { RuntimeInvalidSettingValueError, RuntimeSettingsWriteError, type RuntimePromptOptions } from "../src/core/runtime-session.js";
 import { mouseTrackingSequences } from "../src/tui/mouse-input.js";
@@ -111,7 +111,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "core.v2", "events.follow", "extension_ui.v1", "host.info", "instance.catalog", "models.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.commands.v1", "session.core", "session.reopen", "session.tree.v1", "settings.v1", "tools.v1", "tui.projection.v1"]);
+  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "core.v2", "events.follow", "extension_ui.v1", "host.info", "instance.catalog", "models.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -554,6 +554,94 @@ test("shutdown waits for an admitted asynchronous create and drains its runtime 
   assert.equal(runtime?.disposeCalls, 1);
   assert.equal(created?.snapshot().lifecycle, "active");
   assert.equal(registry.list()[0]?.lifecycle, "active");
+});
+
+test("bare SSH TTY opens and leaves the Hub with zero runtime or catalog side effects", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-hub-pty-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  let factoryCalls = 0;
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
+    factoryCalls += 1;
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedRuntimeSession(`pi-${id}`) });
+  });
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const revision = registry.catalogRevision();
+
+  const pty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+  ], "hub-exit");
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-2_000));
+  assert.equal(pty.status, 0, output.slice(-2_000));
+  assert.ok(pty.resizedBytes > 0, "120x40 Hub resize must redraw");
+  assert.match(output, /Alu Dock Hub/u);
+  assert.match(output, /Project ·/u);
+  assert.doesNotMatch(output, /does not create or resume a runtime/u);
+  assert.match(output, /Left Alu Dock Hub/u);
+
+  const signalled = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+  ], "hub-signal");
+  const signalOutput = Buffer.from(signalled.output, "base64").toString("utf8");
+  assert.equal(signalled.timedOut, false, signalOutput.slice(-2_000));
+  assert.equal(signalled.status, 0, signalOutput.slice(-2_000));
+  assert.match(signalOutput, /Left Alu Dock Hub/u);
+  assert.equal(factoryCalls, 0);
+  assert.equal(registry.catalogRevision(), revision);
+  assert.deepEqual(registry.list(), []);
+});
+
+test("Hub New and persisted-session Adopt explicitly enter Session Work", async (context) => {
+  const newHarness = await createHarness();
+  context.after(() => cleanupHarness(newHarness));
+  await newHarness.host.start();
+  const newPty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", newHarness.socketPath,
+  ], "hub-new");
+  const newOutput = Buffer.from(newPty.output, "base64").toString("utf8");
+  assert.equal(newPty.timedOut, false, newOutput.slice(-2_000));
+  assert.equal(newPty.status, 0, newOutput.slice(-2_000));
+  assert.match(newOutput, /Creating a Pi session/u);
+  assert.match(newOutput, /NIGHT CONSOLE/u);
+  assert.equal(newHarness.registry.list().length, 1);
+
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-hub-adopt-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const sessionFile = "/sessions/hub-adopt.jsonl";
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, name, sessionFile: adoptedFile }) => {
+    const runtime = new DelayedRuntimeSession(`pi-${id}`);
+    if (adoptedFile) runtime.sessionFile = adoptedFile;
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, name, session: runtime });
+  }, () => "hub-adopted", { reopenTargetResolver: { resolve: async () => ({ cwd: directory }) } });
+  const host = new DockHost({
+    socketPath,
+    registry,
+    sessionInventory: { list: async () => [{ sessionId: "hub-session", sessionFile, name: "Hub session", cwd: directory }] },
+  });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const adoptPty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+  ], "hub-adopt");
+  const adoptOutput = Buffer.from(adoptPty.output, "base64").toString("utf8");
+  assert.equal(adoptPty.timedOut, false, adoptOutput.slice(-2_000));
+  assert.equal(adoptPty.status, 0, adoptOutput.slice(-2_000));
+  assert.match(adoptOutput, /Choose a saved session/u);
+  assert.match(adoptOutput, /Adopting persisted Pi session/u);
+  assert.match(adoptOutput, /NIGHT CONSOLE/u);
+  assert.equal(registry.list()[0]?.executor.sessionFile, sessionFile);
 });
 
 test("SSH TUI replays, resizes, handles input, and detaches without stopping", async (context) => {
@@ -1539,6 +1627,181 @@ test("tui projection exposes stable paged history and attach history without bin
   await bounded.done;
 });
 
+test("Hub session inventory is runtime-free and adoption publishes one managed instance", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-session-inventory-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const sessionFile = "/sessions/orphan.jsonl";
+  let factoryCalls = 0;
+  let inventoryCalls = 0;
+  let inventorySessions: SessionDto[] = [{ sessionId: "orphan", sessionFile, name: "Orphan", cwd: directory, updatedAt: "2026-07-14T01:02:03.000Z" }];
+  const trust = new ProjectTrustCoordinator({
+    requiresTrust: () => true,
+    savedDecision: () => null,
+    defaultDecision: () => "ask",
+    remember: () => {},
+  });
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, name, sessionFile: adoptedFile }) => {
+    factoryCalls += 1;
+    const runtime = new DelayedRuntimeSession(`pi-${id}`);
+    if (adoptedFile) runtime.sessionFile = adoptedFile;
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, name, session: runtime });
+  }, () => "adopted-instance", {
+    trustPreflight: trust,
+    reopenTargetResolver: { resolve: async (target) => {
+      assert.equal(target, sessionFile);
+      return { cwd: directory };
+    } },
+  });
+  const host = new DockHost({
+    socketPath,
+    registry,
+    sessionInventory: {
+      list: async (cwd, scope) => {
+        inventoryCalls += 1;
+        assert.equal(cwd, directory);
+        assert.equal(scope, "all");
+        return inventorySessions;
+      },
+    },
+  });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+
+  assert.deepEqual((await client.sessionInventory(directory, "all")).sessions, [{
+    sessionId: "orphan", sessionFile, name: "Orphan", cwd: directory, updatedAt: "2026-07-14T01:02:03.000Z",
+  }]);
+  assert.equal(inventoryCalls, 1);
+  assert.equal(factoryCalls, 0, "inventory must not construct a runtime");
+  assert.deepEqual(await client.list("all"), []);
+
+  let challengeId = "";
+  await assert.rejects(client.adopt(sessionFile, "Orphan", "adopt-op"), (error: unknown) => {
+    assert.ok(error instanceof ControlClientError);
+    assert.equal(error.code, "project_trust_required");
+    challengeId = String(error.details?.challengeId ?? "");
+    return challengeId.length > 0;
+  });
+  assert.equal(factoryCalls, 0, "project trust must precede adopted runtime construction");
+  const adopted = await client.adopt(sessionFile, "Orphan", "adopt-op", { challengeId, decision: "deny_once" });
+  assert.equal(factoryCalls, 1);
+  assert.equal(adopted.instance.id, "adopted-instance");
+  assert.equal(adopted.instance.creationOperationId, "adopt-op");
+  assert.equal(adopted.instance.executor.sessionFile, sessionFile);
+  assert.equal((await client.status(adopted.instance.id)).runtimeGeneration, 1);
+  const duplicate = await client.adopt(sessionFile, "Orphan", "adopt-op", { challengeId, decision: "deny_once" });
+  assert.equal(duplicate.instance.id, adopted.instance.id);
+  assert.equal(factoryCalls, 1, "same-host adoption retry must use the operation ledger receipt");
+  await assert.rejects(
+    client.adopt(sessionFile, "Different", "adopt-op", { challengeId, decision: "deny_once" }),
+    (error: unknown) => error instanceof ControlClientError && error.code === "operation_conflict",
+  );
+  await assert.rejects(
+    client.adopt(sessionFile, "Sibling", "adopt-sibling"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "instance_busy",
+  );
+  assert.equal(factoryCalls, 1, "one persisted session file cannot back two live Dock runtimes");
+
+  inventorySessions = Array.from({ length: 100 }, (_, index) => ({
+    sessionId: `bounded-${index}`,
+    sessionFile: `/sessions/${index}-${"x".repeat(16_000)}.jsonl`,
+    cwd: `${directory}/${"y".repeat(16_000)}`,
+  }));
+  const bounded = await client.sessionInventory(directory, "all");
+  assert.equal(bounded.total, 100);
+  assert.equal(bounded.truncated, true);
+  assert.ok(bounded.sessions.length > 0 && bounded.sessions.length < bounded.total);
+  assert.deepEqual(bounded.query, { cwd: directory, scope: "all" });
+});
+
+test("concurrent adoption of one persisted session file admits only one runtime", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-adopt-race-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const sessionFile = "/sessions/race.jsonl";
+  let factoryCalls = 0;
+  let releaseResolver!: () => void;
+  let markResolverEntered!: () => void;
+  const resolverEntered = new Promise<void>((resolveEntered) => { markResolverEntered = resolveEntered; });
+  const resolverGate = new Promise<void>((resolveGate) => { releaseResolver = resolveGate; });
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, sessionFile: target }) => {
+    factoryCalls += 1;
+    const runtime = new DelayedRuntimeSession(`pi-${id}`);
+    if (target) runtime.sessionFile = target;
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
+  }, undefined, {
+    reopenTargetResolver: { resolve: async () => {
+      markResolverEntered();
+      await resolverGate;
+      return { cwd: directory };
+    } },
+  });
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+  const first = client.adopt(sessionFile, undefined, "race-one");
+  await resolverEntered;
+  await assert.rejects(
+    client.adopt(sessionFile, undefined, "race-two"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "instance_busy",
+  );
+  releaseResolver();
+  await first;
+  assert.equal(factoryCalls, 1);
+  assert.equal(registry.list().length, 1);
+  const other = await client.create(directory, "other", "race-create-other");
+  await assert.rejects(
+    client.switchSession(other.id, sessionFile, "race-switch-other"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "instance_busy",
+  );
+  assert.equal(factoryCalls, 2);
+  assert.equal(registry.list().length, 2);
+});
+
+test("adopt rejects a mismatched runtime binding and never publishes after catalog failure", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-adopt-boundary-"));
+  await chmod(directory, 0o700);
+  const mismatchedSocket = join(directory, "mismatched.sock");
+  let mismatchedRuntime: DelayedRuntimeSession | undefined;
+  const mismatchedRegistry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
+    mismatchedRuntime = new DelayedRuntimeSession(`wrong-${id}`);
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: mismatchedRuntime });
+  }, () => "mismatched-adopt", { reopenTargetResolver: { resolve: async () => ({ cwd: directory }) } });
+  const mismatchedHost = new DockHost({ socketPath: mismatchedSocket, registry: mismatchedRegistry });
+  context.after(async () => { await mismatchedHost.stop().catch(() => {}); });
+  await mismatchedHost.start();
+  await assert.rejects(
+    new DockClient({ socketPath: mismatchedSocket }).adopt("/sessions/requested.jsonl", undefined, "mismatched-op"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "request_failed",
+  );
+  assert.equal(mismatchedRuntime?.disposeCalls, 1);
+  assert.deepEqual(mismatchedRegistry.list(), []);
+
+  const failedSocket = join(directory, "commit-failed.sock");
+  const port = new ScriptedCatalogCommitPort();
+  port.failAt(1);
+  let failedRuntime: DelayedRuntimeSession | undefined;
+  const failedRegistry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, sessionFile }) => {
+    failedRuntime = new DelayedRuntimeSession(`failed-${id}`);
+    failedRuntime.sessionFile = sessionFile as string;
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: failedRuntime });
+  }, () => "failed-adopt", {
+    catalogCommitPort: port,
+    reopenTargetResolver: { resolve: async () => ({ cwd: directory }) },
+  });
+  const failedHost = new DockHost({ socketPath: failedSocket, registry: failedRegistry });
+  context.after(async () => { await failedHost.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await failedHost.start();
+  await assert.rejects(
+    new DockClient({ socketPath: failedSocket }).adopt("/sessions/commit-failed.jsonl", undefined, "failed-op"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "catalog_write_failed",
+  );
+  assert.equal(failedRuntime?.disposeCalls, 1);
+  assert.deepEqual(failedRegistry.list(), []);
+});
+
 test("session.core lists bounded safe cwd and all-session metadata", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-session-list-"));
   await chmod(directory, 0o700);
@@ -1821,6 +2084,38 @@ test("ping reports negotiated capabilities and normal hellos require core plus o
   const ping = await new DockClient({ socketPath }).ping();
   assert.deepEqual(ping.capabilities, capabilities);
   assert.deepEqual(hellos[0]?.requiredCapabilities, ["core.v2", "host.info"]);
+});
+
+test("adopt negotiates its dedicated capability before sending a mutation", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-adopt-capability-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  let mutationRequests = 0;
+  const server = createServer((socket) => {
+    const decoder = new JsonLineDecoder();
+    socket.on("data", (chunk: Buffer) => {
+      for (const line of decoder.push(chunk)) {
+        const frame = objectValue(JSON.parse(line) as unknown);
+        if (frame.kind === "hello") {
+          socket.end(encodeJsonLine({
+            kind: "hello_ack", requestId: frame.requestId, version: 2,
+            host: { pid: 7, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "old-host", startedAt: "2026-07-14T00:00:00.000Z" },
+            catalogSchemaVersion: 1,
+            capabilities: ["core.v2", "instance.catalog"],
+            limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
+          }));
+        } else mutationRequests += 1;
+      }
+    });
+  });
+  await listen(server, socketPath);
+  context.after(async () => { await close(server); await rm(directory, { recursive: true, force: true }); });
+
+  await assert.rejects(
+    new DockClient({ socketPath }).adopt("/tmp/session.jsonl", undefined, "adopt-old-host"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "protocol_incompatible",
+  );
+  assert.equal(mutationRequests, 0);
 });
 
 test("typed list rejects a non-progressing continuation without issuing another request", async (context) => {
@@ -2626,7 +2921,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "model-search" | "scroll" | "history-page" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "mouse-selection" | "extension-dialogs" | "extension-replacement" = "detach",
+  action: "detach" | "hub-exit" | "hub-signal" | "hub-new" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "model-search" | "scroll" | "history-page" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "mouse-selection" | "extension-dialogs" | "extension-replacement" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {

@@ -4,9 +4,9 @@
 
 Alu Dock V0.1 正在开发中。它是本机单用户的受管 Pi 运行时工程底座：长期 Host 持有 runtime、任务实例和副作用，SSH TUI 等客户端通过结构化控制面观察与控制。
 
-能力真相以当前代码、类型和测试为准。当前裸 `alu-dock` 会按 cwd smart-open/reopen/create 并直接进入 attached Session Work，源码中尚无独立 Dock Hub。
+能力真相以当前代码、类型和测试为准。当前裸 `alu-dock` 进入无 runtime 副作用、按 cwd 提供上下文的 Dock Hub；显式 `new` 与 `attach TARGET` 直达 Session Work；磁盘 Pi sessions 通过独立 Resume/Adopt inventory 进入。显式 `open` 暂时保留旧的 project smart-entry。
 
-V0.1 冻结目标与当前实现要明确区分：裸命令最终应进入无 runtime 副作用、按 cwd 提供上下文的 Dock Hub；显式 `new` 与 `attach` 直达 Session Work；磁盘 Pi sessions 进入独立 Resume/Adopt inventory。不得把该目标写成已经实现的事实。
+V0.1 候选仍未完成最终真人验收、视觉资产与 immutable rollout；不得把 Hub slice 已实现写成 V0.1 已发布或已签收。
 
 ## 技术与结构
 
@@ -16,7 +16,7 @@ V0.1 冻结目标与当前实现要明确区分：裸命令最终应进入无 ru
 - Managed Host 面向 `systemd --user`；开发模式使用独立 dev socket。
 
 ```text
-cli / interactive / tui
+cli / Hub / Session Work tui
            │
            ▼
    DockClient / Protocol V2
@@ -54,7 +54,8 @@ Managed 发布或运维另读 [`docs/dogfood-deployment.md`](docs/dogfood-deploy
 5. **Catalog commit 是可观察边界。** Required commit 完成前不得发布对应 success、snapshot 或 event；durable catalog 只保存身份、session metadata 与保守 intent，不保存正文、interaction、event log、queue 或 Promise。
 6. **Host loss 不触发隐式恢复。** 不自动恢复或重放 prompt、queue、interaction、Promise 或 tool effect；显式 reopen 是新 generation 的 fresh transaction。
 7. **不把不确定副作用当成失败重试。** Mutation 不自动 retry；传输丢失或 post-effect 不确定必须保留原 operation identity，并以不确定结果呈现。
-8. **普通客户端入口不拥有 service 生命周期。** `open`、`new`、`attach` 只连接既有 Host，不得隐式 install、start、restart 或 fork detached Host。
+8. **普通客户端入口不拥有 service 生命周期。** Hub、`open`、`new`、`attach` 只连接既有 Host，不得隐式 install、start、restart 或 fork detached Host。
+9. **Hub inventory 不等于 runtime。** `session.inventory` 只读取 bounded Pi session metadata；只有用户选择 New、Resume、Adopt 或 Attach 后才允许进入对应 mutation/Work 路径。
 
 模块内的状态机、UI、settings、deployment 与测试细节以对应 agent map、代码和测试为准，不在顶层重复定义。
 

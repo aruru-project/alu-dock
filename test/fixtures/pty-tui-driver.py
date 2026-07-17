@@ -58,28 +58,59 @@ def main() -> int:
     timed_out = False
     status = 1
     try:
+        action = os.environ.get("ALU_DOCK_PTY_ACTION", "detach")
+        hub_actions = ("hub-exit", "hub-signal", "hub-new", "hub-adopt")
+        startup_marker = b"Alu Dock Hub" if action in hub_actions else b"NIGHT CONSOLE"
         set_size(fd, 24, 80)
         deadline = time.monotonic() + 12
-        while b"NIGHT CONSOLE" not in output and time.monotonic() < deadline:
+        while startup_marker not in output and time.monotonic() < deadline:
             if read_available(fd, output, 0.1) < 0:
                 break
-        if b"NIGHT CONSOLE" not in output:
+        if startup_marker not in output:
             timed_out = True
         else:
             before_resize = len(output)
-            set_size(fd, 18, 43)
+            if action in hub_actions:
+                set_size(fd, 40, 120)
+            else:
+                set_size(fd, 18, 43)
             os.kill(pid, signal.SIGWINCH)
             resize_deadline = time.monotonic() + 2
             while len(output) == before_resize and time.monotonic() < resize_deadline:
                 if read_available(fd, output, 0.05) < 0:
                     break
             resized_bytes = len(output) - before_resize
-            action = os.environ.get("ALU_DOCK_PTY_ACTION", "detach")
             ready_file = os.environ.get("ALU_DOCK_PTY_READY_FILE")
             if ready_file:
                 with open(ready_file, "w", encoding="utf-8") as marker:
                     marker.write("ready\n")
-            if action == "abort":
+            if action == "hub-exit":
+                os.write(fd, b"\x1b")  # Escape leaves the Hub without choosing a mutation.
+            elif action == "hub-signal":
+                os.kill(pid, signal.SIGTERM)
+            elif action == "hub-new":
+                os.write(fd, b"\r")  # Empty Hub defaults to New.
+                work_deadline = time.monotonic() + 8
+                while b"NIGHT CONSOLE" not in output and time.monotonic() < work_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+            elif action == "hub-adopt":
+                os.write(fd, b"\x1b[B\r")  # Pi Sessions is below New in an empty Hub.
+                inventory_deadline = time.monotonic() + 5
+                while b"Choose a saved session" not in output and time.monotonic() < inventory_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\r")  # Select the only persisted session.
+                adopt_deadline = time.monotonic() + 5
+                while b"Adopt as a new Dock instance" not in output and time.monotonic() < adopt_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\r")
+                work_deadline = time.monotonic() + 8
+                while b"NIGHT CONSOLE" not in output and time.monotonic() < work_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+            elif action == "abort":
                 os.write(fd, b"\x03")  # Ctrl+C with empty editor: abort current run.
                 abort_deadline = time.monotonic() + 4
                 while b"Run aborted" not in output and time.monotonic() < abort_deadline:
@@ -350,7 +381,8 @@ def main() -> int:
                 os.write(fd, b"\x0f")  # Ctrl+O: collapse/expand tool output.
                 time.sleep(0.1)
                 read_available(fd, output, 0.05)
-            os.write(fd, b"\x04")  # Ctrl+D: detach without stopping.
+            if action not in ("hub-exit", "hub-signal"):
+                os.write(fd, b"\x04")  # Ctrl+D: detach without stopping.
 
         exit_deadline = time.monotonic() + 8
         while time.monotonic() < exit_deadline:

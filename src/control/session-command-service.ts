@@ -33,21 +33,26 @@ export async function executeSessionCommand(
   switch (request.type) {
     case "session.switch": return operationLedger.run(request.params.operationId, request.type, request.params, async () => {
       const instance = registry.get(request.params.instanceId);
-      const target = await instance.resolveSessionTarget(request.params.sessionFile);
-      const trust = await registry.resolveProjectTrust({
-        operationType: "session.switch",
-        operationId: request.params.operationId,
-        cwd: target.canonicalCwd,
-        name: request.params.sessionFile,
-        trustChallengeId: request.params.trustChallengeId,
-        projectTrustDecision: request.params.projectTrustDecision,
-      });
-      const replacement = await runtimeMutation(request.params.operationId, () => instance.switchSession(
-        request.params.operationId,
-        request.params.sessionFile,
-        trust,
-      ));
-      return { cancelled: replacement.cancelled, instance: instance.snapshot() };
+      const releaseClaim = registry.claimSessionFile(instance.id, request.params.operationId, request.params.sessionFile);
+      try {
+        const target = await instance.resolveSessionTarget(request.params.sessionFile);
+        const trust = await registry.resolveProjectTrust({
+          operationType: "session.switch",
+          operationId: request.params.operationId,
+          cwd: target.canonicalCwd,
+          name: request.params.sessionFile,
+          trustChallengeId: request.params.trustChallengeId,
+          projectTrustDecision: request.params.projectTrustDecision,
+        });
+        const replacement = await runtimeMutation(request.params.operationId, () => instance.switchSession(
+          request.params.operationId,
+          request.params.sessionFile,
+          trust,
+        ));
+        return { cancelled: replacement.cancelled, instance: instance.snapshot() };
+      } finally {
+        releaseClaim();
+      }
     });
     case "session.new": return operationLedger.run(request.params.operationId, request.type, request.params, async () => {
       const instance = registry.get(request.params.instanceId);

@@ -14,5 +14,7 @@ export {
 } from "./core/config-projection.js";
 export * from "./core/managed-instance.js";
 export * from "./core/runtime-session.js";
+export * from "./core/session-inventory.js";
 export * from "./pi/create-pi-instance.js";
+export * from "./pi/session-inventory.js";
 export * from "./pi/pi-runtime-host.js";

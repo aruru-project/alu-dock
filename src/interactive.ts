@@ -4,20 +4,23 @@ import { createInterface } from "node:readline/promises";
 
 import { ControlClientError, DockClient } from "./control/dock-client.js";
 import { ensureHost } from "./control/ensure-host.js";
-import type { InstanceSnapshot } from "./core/managed-instance.js";
+import type { ProjectTrustChoice } from "./control/project-trust.js";
+import type { InstanceSnapshot, SessionDto } from "./core/managed-instance.js";
+import { requireHumanTarget } from "./human-target.js";
+import { runDockHub, type DockHubAction } from "./tui/dock-hub.js";
 import { runDockTui } from "./tui/dock-tui.js";
 import { selectInstance } from "./tui/select-instance.js";
-import type { ProjectTrustChoice } from "./control/project-trust.js";
 
 export interface OpenDockOptions {
   socketPath: string;
   cwd: string;
+  mode: "hub" | "open" | "new" | "attach";
   name?: string;
-  instanceId?: string;
+  target?: string;
   forceNew?: boolean;
 }
 
-/** Human entry point: ensure a host, choose/create an instance, then attach a thin TUI. */
+/** Human entry point. Only an explicit Hub action or direct Work command may construct a runtime. */
 export async function openDock(options: OpenDockOptions): Promise<void> {
   if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
     throw new Error("The Alu Dock interactive client requires a TTY; run `alu-dock --help` for non-interactive guidance");
@@ -26,16 +29,23 @@ export async function openDock(options: OpenDockOptions): Promise<void> {
   const cwd = resolve(options.cwd);
   process.stdout.write("Connecting to Alu Dock…\n");
   await ensureHost(options.socketPath);
-
   const client = new DockClient({ socketPath: options.socketPath });
-  const instance = await resolveInstance(client, {
-    cwd,
-    name: options.name,
-    instanceId: options.instanceId,
-    forceNew: options.forceNew === true,
-  });
+
+  let instance: InstanceSnapshot | undefined;
+  if (options.mode === "hub") {
+    const action = await runDockHub(client, cwd);
+    instance = await executeHubAction(client, action, cwd);
+  } else {
+    instance = await resolveWorkInstance(client, {
+      mode: options.mode,
+      cwd,
+      name: options.name,
+      target: options.target,
+      forceNew: options.forceNew === true,
+    });
+  }
   if (!instance) {
-    process.stdout.write("No instance opened.\n");
+    process.stdout.write(options.mode === "hub" ? "Left Alu Dock Hub.\n" : "No instance opened.\n");
     return;
   }
 
@@ -47,31 +57,50 @@ export async function openDock(options: OpenDockOptions): Promise<void> {
     process.stdout.write(`Stopped ${displayName(result.instance)}.${cleanup}\n`);
   } else {
     process.stdout.write(
-      `Detached from ${displayName(result.instance)}; the instance remains host-owned. Run alu-dock again to reconnect.\n`,
+      `Detached from ${displayName(result.instance)}; the instance remains host-owned. Run alu-dock to return to the Hub.\n`,
     );
   }
 }
 
-async function resolveInstance(
+async function executeHubAction(
+  client: DockClient,
+  action: DockHubAction,
+  cwd: string,
+): Promise<InstanceSnapshot | undefined> {
+  if (action.kind === "exit") return undefined;
+  if (action.kind === "attach") return assertAttachable(action.instance);
+  if (action.kind === "new") return createWithNotice(client, cwd);
+  if (action.kind === "reopen") return reopenWithNotice(client, action.instance);
+  return adoptWithNotice(client, action.session);
+}
+
+async function resolveWorkInstance(
   client: DockClient,
   options: {
+    mode: "open" | "new" | "attach";
     cwd: string;
     name?: string;
-    instanceId?: string;
+    target?: string;
     forceNew: boolean;
   },
 ): Promise<InstanceSnapshot | undefined> {
-  if (options.instanceId) {
-    const instance = await client.status(options.instanceId);
-    if (instance.lifecycle !== "active") {
-      throw new Error(`Instance ${options.instanceId} is ${instance.lifecycle}`);
+  if (options.mode === "new" || options.forceNew) return createWithNotice(client, options.cwd, options.name);
+
+  if (options.target !== undefined) {
+    const instance = requireHumanTarget(await client.list("all"), options.target);
+    if (options.mode === "attach") return assertAttachable(instance);
+    if (instance.lifecycle === "active") return instance;
+    if ((instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error") && instance.reopenable) {
+      return reopenWithNotice(client, instance);
     }
-    return instance;
+    throw new Error(lifecycleActionError(instance, "open"));
   }
 
-  if (options.forceNew) return createWithNotice(client, options.cwd, options.name);
+  if (options.mode === "attach") throw new Error("attach requires TARGET; use a full ID, displayed unique prefix, or unique exact name");
 
-  const matching = (await client.list())
+  // Explicit `alu-dock open` keeps the legacy project smart-entry. Bare
+  // `alu-dock` never reaches this path and therefore cannot create/reopen.
+  const matching = (await client.list("all"))
     .filter((instance) => instance.lifecycle !== "stopped" && resolve(instance.cwd) === options.cwd)
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
   const active = matching.filter((instance) => instance.lifecycle === "active");
@@ -82,6 +111,24 @@ async function resolveInstance(
   if (selection === "new") return createWithNotice(client, options.cwd, options.name);
   if (selection && selection.lifecycle !== "active") return reopenWithNotice(client, selection);
   return selection;
+}
+
+function assertAttachable(instance: InstanceSnapshot): InstanceSnapshot {
+  if (instance.lifecycle === "active") return instance;
+  throw new Error(lifecycleActionError(instance, "attach"));
+}
+
+function lifecycleActionError(
+  instance: InstanceSnapshot,
+  action: "attach" | "open",
+): string {
+  const identity = displayName(instance);
+  if ((instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error") && instance.reopenable) {
+    return `${identity} is ${instance.lifecycle} and cannot be attached without a runtime. Use \`alu-dock open ${instance.id}\` to reopen it, or choose Resume in the Hub.`;
+  }
+  if (instance.lifecycle === "stopping") return `${identity} is stopping; wait for a terminal state before choosing another action.`;
+  if (instance.lifecycle === "stopped") return `${identity} is stopped history and cannot be ${action === "attach" ? "attached" : "opened"}. Adopt its Pi session from the Hub or create a new instance.`;
+  return `${identity} is ${instance.lifecycle} and has no reopenable runtime context.`;
 }
 
 async function createWithNotice(
@@ -101,6 +148,25 @@ async function createWithNotice(
       challengeId: challenge.challengeId,
       decision,
     });
+  }
+}
+
+async function adoptWithNotice(
+  client: DockClient,
+  session: SessionDto,
+): Promise<InstanceSnapshot> {
+  process.stdout.write(`Adopting persisted Pi session ${session.sessionFile}…\n`);
+  const operationId = randomUUID();
+  try {
+    return (await client.adopt(session.sessionFile, session.name, operationId)).instance;
+  } catch (error) {
+    const challenge = projectTrustChallenge(error, operationId);
+    if (!challenge) throw error;
+    const decision = await askProjectTrust(challenge.cwd);
+    return (await client.adopt(session.sessionFile, session.name, operationId, {
+      challengeId: challenge.challengeId,
+      decision,
+    })).instance;
   }
 }
 
@@ -167,5 +233,13 @@ async function askProjectTrust(cwd: string): Promise<ProjectTrustChoice> {
 }
 
 function displayName(instance: InstanceSnapshot): string {
-  return instance.name ? `${instance.name} (${instance.id.slice(0, 8)})` : instance.id.slice(0, 8);
+  return instance.name ? `${terminalSafe(instance.name)} (${instance.id.slice(0, 8)})` : instance.id.slice(0, 8);
+}
+
+function terminalSafe(value: string): string {
+  return value
+    .replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ")
+    .replace(/[\u202a-\u202e\u2066-\u2069\ufeff]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim() || "—";
 }

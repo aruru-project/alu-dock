@@ -9,14 +9,15 @@ Alu Dock 是面向本机单用户、SSH/headless 研发工作流的受管 Pi 运
 Alu Dock 的 V0.1 仍在开发中。当前候选已经具备：
 
 - 私有 Unix socket 上的长期 Host 与 durable managed catalog；
-- instance 的创建、列出、接入、停止、显式 reopen、forget 与 prune；
+- instance 的创建、列出、接入、停止、显式 reopen、adopt、forget 与 prune；
+- 默认 Dock Hub：按 cwd 提供上下文且进入时不创建或恢复 runtime，Dock instances 与磁盘 Pi sessions 分层展示；
 - attached Session Work TUI，包括 conversation、history、tree、queue、settings/resources、extension 文本交互与运行状态；
 - 同一 Dock instance 内的 Pi session new/resume/fork/clone/reload；
 - 显式的 `systemd --user` service 管理。
 
-**当前还没有独立 Dock Hub。** 裸 `alu-dock` 会按当前目录 smart-open：复用、选择、reopen 或创建 instance，然后直接进入 Session Work。
+当前裸 `alu-dock` 进入 Dock Hub；`pwd` 只用于筛选、排序和 New 默认目录，进入或退出 Hub 本身不产生 runtime/catalog mutation。显式 `new` 与 `attach TARGET` 直达 Session Work；Hub 中磁盘 Pi sessions 通过独立 Resume/Adopt inventory 进入。完整 ID、列表展示的唯一 prefix 与唯一精确 name 共用 fail-closed TARGET 解析。
 
-V0.1 的冻结目标是将入口分层：裸命令进入按当前目录提供上下文、且不产生 runtime 副作用的 Dock Hub；显式 `new` 和 `attach` 直达 Session Work；磁盘上的 Pi sessions 从独立 Resume/Adopt inventory 进入。上述 Hub 行为尚未实现。
+V0.1 候选仍未通过全部真实 Pi、视觉、SSH 与用户签收门禁，不得视为已发布。显式 `alu-dock open` 当前仍保留旧的 project smart-entry，可能创建或 reopen runtime；默认安全入口是裸命令 Hub。
 
 ## 当前快速开始
 
@@ -26,16 +27,16 @@ V0.1 的冻结目标是将入口分层：裸命令进入按当前目录提供上
 alu-dock service install --now
 alu-dock service status
 
-alu-dock                       # 当前：按 cwd smart-open 后进入 Session Work
+alu-dock                       # 进入无 runtime 副作用的 Dock Hub
 alu-dock new --cwd "$PWD" --name demo
-alu-dock attach INSTANCE_ID
+alu-dock attach TARGET          # 完整 ID、唯一 prefix 或唯一精确 name
 alu-dock list
 ```
 
 在 Session Work 中按 `Ctrl+D` 会 detach，Host 中的 instance 继续运行。需要结束 runtime 时再显式执行：
 
 ```bash
-alu-dock stop INSTANCE_ID
+alu-dock stop TARGET
 ```
 
 Service 只由显式命令管理；普通 `open`、`new`、`attach` 不会自动启动或重启它。
@@ -55,13 +56,13 @@ alu-dock service uninstall
 ## 心智模型
 
 ```text
-CLI / Session Work TUI
-          │
-      DockClient
-          │ private control socket
-          ▼
+CLI / Dock Hub / Session Work TUI
+                │
+            DockClient
+                │ private control socket
+                ▼
        DockHost ── instances + durable catalog
-          │
+          │       └─ read-only Pi session inventory
           ▼
    Host-owned Pi runtimes
 ```
