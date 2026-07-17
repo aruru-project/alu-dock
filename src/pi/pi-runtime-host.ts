@@ -902,9 +902,54 @@ function contentText(value: unknown): string | undefined {
 
 function treeLine(value: unknown, limit: number, fallback: string): string {
   if (typeof value !== "string" || value.length === 0) return fallback;
-  const boundedInput = value.slice(0, Math.max(8_192, limit * 2));
-  const line = boundedInput.replace(/[\u0000-\u001f\u007f-\u009f]+/gu, " ").replace(/\s+/gu, " ").trim();
-  return safeRequiredText(line, limit, fallback);
+  const parts: string[] = [];
+  let outputLength = 0;
+  let tokenStart = -1;
+  let pendingSpace = false;
+  const flushToken = (end: number): boolean => {
+    if (tokenStart < 0) return false;
+    if (pendingSpace && outputLength > 0 && outputLength < limit) {
+      parts.push(" ");
+      outputLength += 1;
+    }
+    const remaining = limit - outputLength;
+    if (remaining > 0) {
+      const token = value.slice(tokenStart, Math.min(end, tokenStart + remaining));
+      parts.push(token);
+      outputLength += token.length;
+    }
+    tokenStart = -1;
+    pendingSpace = false;
+    return outputLength >= limit;
+  };
+  for (let index = 0; index < value.length && outputLength < limit; index += 1) {
+    const code = value.charCodeAt(index);
+    if (isTreeLineSeparator(code)) {
+      if (flushToken(index)) break;
+      pendingSpace = outputLength > 0;
+    } else {
+      if (tokenStart < 0) tokenStart = index;
+      if (index - tokenStart + outputLength >= limit) {
+        flushToken(index + 1);
+        break;
+      }
+    }
+  }
+  if (outputLength < limit && tokenStart >= 0) flushToken(value.length);
+  return safeRequiredText(parts.join(""), limit, fallback);
+}
+
+function isTreeLineSeparator(code: number): boolean {
+  return code <= 0x20
+    || (code >= 0x7f && code <= 0xa0)
+    || code === 0x1680
+    || (code >= 0x2000 && code <= 0x200a)
+    || code === 0x2028
+    || code === 0x2029
+    || code === 0x202f
+    || code === 0x205f
+    || code === 0x3000
+    || code === 0xfeff;
 }
 
 function safeSelectedText(value: unknown): string {

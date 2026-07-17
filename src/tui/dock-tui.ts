@@ -857,7 +857,7 @@ export async function runDockTui(
     finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
   }
 
-  async function loadSessionTree(): Promise<{ nodes: TreeNodeDto[]; leafId?: string; total: number; revision: string }> {
+  async function loadSessionTree(): Promise<{ nodes: TreeNodeDto[]; leafId?: string; total: number; revision: string; capped: boolean }> {
     return collectSessionTree((revision, cursor, limit) => client.tree(instance.id, revision, cursor, limit));
   }
 
@@ -866,21 +866,48 @@ export async function runDockTui(
     predicate: (node: TreeNodeDto) => boolean = () => true,
     filterMode?: TreeFilterMode,
   ): Promise<TreeNodeDto | undefined> {
-    const tree = await loadSessionTree();
-    const candidates = (filterMode === undefined ? tree.nodes : filterSessionTree(tree.nodes, filterMode)).filter(predicate);
-    if (candidates.length === 0) {
-      conversation.addNotice("The current Pi session tree has no matching entries.", true);
-      return undefined;
+    const byId = new Map<string, TreeNodeDto>();
+    const picker = new SearchablePicker([], {
+      title: terminalSafe(titleText),
+      body: "Loading the complete session tree…",
+      footer: "type text/id/label · ↑↓ move · ←→/PgUp/PgDn page · Enter select · Esc cancel",
+      maxVisible: 14,
+      pageNavigation: true,
+      requestRender: () => tui.requestRender(),
+    });
+    picker.setEmptyText("Loading…");
+    let active = true;
+    let resolveChoice!: (value: string | undefined) => void;
+    const selection = new Promise<string | undefined>((resolve) => { resolveChoice = resolve; });
+    picker.onSelect = (item) => resolveChoice(item.value);
+    picker.onCancel = () => resolveChoice(undefined);
+    const overlay = tui.showOverlay(picker, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
+    tui.setFocus(picker);
+
+    void loadSessionTree().then((tree) => {
+      if (!active) return;
+      const candidates = (filterMode === undefined ? tree.nodes : filterSessionTree(tree.nodes, filterMode)).filter(predicate);
+      for (const node of candidates) byId.set(node.entryId, node);
+      picker.replaceItems(treePickerItems(candidates, tree.leafId, tree.nodes));
+      picker.setSelectedValue(tree.leafId);
+      picker.setEmptyText("The current Pi session tree has no matching entries");
+      picker.setBody(tree.capped
+        ? `Loaded ${tree.nodes.length.toLocaleString()} of ${tree.total.toLocaleString()} bounded entries`
+        : undefined);
+    }).catch(() => {
+      if (!active) return;
+      picker.setEmptyText("Session tree unavailable");
+      picker.setBody("Could not load the session tree. Press Esc to return.");
+    });
+
+    try {
+      const selected = await selection;
+      return selected === undefined ? undefined : byId.get(selected);
+    } finally {
+      active = false;
+      overlay.hide();
+      tui.setFocus(editor);
     }
-    const byId = new Map(candidates.map((node) => [node.entryId, node]));
-    const selected = await showChoicePicker(
-      titleText,
-      treePickerItems(candidates, tree.leafId, tree.nodes),
-      tree.leafId,
-      "type text/id/label · ↑↓ move · ←→/PgUp/PgDn page · Enter select · Esc cancel",
-      { pageNavigation: true },
-    );
-    return selected === undefined ? undefined : byId.get(selected);
   }
 
   async function chooseTreeNavigation(): Promise<void> {

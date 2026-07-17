@@ -25,13 +25,14 @@ export interface SearchablePickerOptions {
 /** Public-pi-tui adapter around Dock-owned deterministic search behavior. */
 export class SearchablePicker extends Container implements Focusable {
   private readonly searchInput = new Input();
-  private readonly allItems: SearchableItem[];
+  private allItems: SearchableItem[];
   private filteredItems: SearchableItem[];
   private selectedIndex = 0;
   private readonly maxVisible: number;
   private readonly title: string;
   private readonly footer: string;
-  private readonly body: string | undefined;
+  private body: string | undefined;
+  private emptyText = "No matching items";
   private readonly requestRender: () => void;
   private readonly pageNavigation: boolean;
   private focusedValue = false;
@@ -104,7 +105,7 @@ export class SearchablePicker extends Container implements Focusable {
     lines.push(truncateToWidth(`${paint.muted(searchPrefix)}${inputLine}`, safeWidth), "");
 
     if (this.filteredItems.length === 0) {
-      lines.push(truncateToWidth(paint.muted("  No matching items"), safeWidth));
+      lines.push(truncateToWidth(paint.muted(`  ${this.emptyText}`), safeWidth));
     } else {
       const start = Math.max(
         0,
@@ -142,6 +143,39 @@ export class SearchablePicker extends Container implements Focusable {
   getQuery(): string { return this.searchInput.getValue(); }
   getSelectedItem(): SearchableItem | undefined { return this.filteredItems[this.selectedIndex]; }
   getFilteredItems(): readonly SearchableItem[] { return this.filteredItems; }
+
+  replaceItems(items: readonly SearchableItem[]): void {
+    const selectedValue = this.filteredItems[this.selectedIndex]?.value;
+    this.allItems = items.map((item) => ({
+      value: item.value,
+      label: safeDisplayText(item.label),
+      ...(item.description === undefined ? {} : { description: safeDisplayText(item.description) }),
+    }));
+    this.filteredItems = filterSearchableItems(this.allItems, this.searchInput.getValue());
+    const retainedIndex = selectedValue === undefined
+      ? -1
+      : this.filteredItems.findIndex((item) => item.value === selectedValue);
+    this.selectedIndex = retainedIndex >= 0 ? retainedIndex : 0;
+    this.requestRender();
+  }
+
+  setBody(body: string | undefined): void {
+    this.body = body === undefined ? undefined : safeBodyText(body);
+    this.requestRender();
+  }
+
+  setEmptyText(text: string): void {
+    this.emptyText = safeDisplayText(text) || "No matching items";
+    this.requestRender();
+  }
+
+  setSelectedValue(value: string | undefined): void {
+    if (value === undefined) return;
+    const index = this.filteredItems.findIndex((item) => item.value === value);
+    if (index < 0) return;
+    this.selectedIndex = index;
+    this.requestRender();
+  }
 
   private move(delta: number): void {
     if (this.filteredItems.length === 0) return;
