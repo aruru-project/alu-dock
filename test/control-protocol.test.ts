@@ -517,7 +517,9 @@ function settingDto(key: SettingKey, values: SettingValueMap): Record<string, un
 test("history results are closed and pagination-consistent", () => {
   const entry = { entryId: "h2", parentId: "h1", role: "assistant", timestamp: "2026-07-14T00:00:00.000Z", content: [{ type: "text", text: "answer" }], stopReason: "stop" };
   const result = parseHistoryResult({ entries: [entry], hasEarlier: true, nextBeforeEntryId: "h2", instance: validSnapshot() });
-  assert.deepEqual(result.entries[0], { ...entry, error: undefined });
+  assert.deepEqual(result.entries[0], { ...entry, summaryKind: undefined, error: undefined });
+  assert.equal(parseHistoryResult({ entries: [{ ...entry, role: "system", summaryKind: "compaction" }], hasEarlier: false, instance: validSnapshot() }).entries[0]?.summaryKind, "compaction");
+  assert.throws(() => parseHistoryResult({ entries: [{ ...entry, summaryKind: "unknown" }], hasEarlier: false, instance: validSnapshot() }), /unsupported value/);
   assert.throws(() => parseHistoryResult({ entries: [entry], hasEarlier: false, nextBeforeEntryId: "h2", instance: validSnapshot() }), /cursor is inconsistent/);
   assert.throws(() => parseHistoryResult({ entries: [{ ...entry, content: [{ type: "text", text: "x", raw: true }] }], hasEarlier: false, instance: validSnapshot() }), /Unexpected field/);
 });

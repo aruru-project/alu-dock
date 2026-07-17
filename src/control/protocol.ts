@@ -1023,11 +1023,12 @@ function parseContent(input: unknown, field: string): ContentBlockDto[] {
   });
 }
 function parseHistoryEntry(input: unknown, field: string): HistoryEntryDto {
-  const entry = object(input, field); exact(entry, ["entryId", "parentId", "role", "timestamp", "content", "stopReason", "error"]);
+  const entry = object(input, field); exact(entry, ["entryId", "parentId", "role", "summaryKind", "timestamp", "content", "stopReason", "error"]);
   return {
     entryId: id(entry.entryId, `${field}.entryId`),
     parentId: optionalString(entry.parentId, `${field}.parentId`, 128),
     role: enumeration(entry.role, `${field}.role`, ["user", "assistant", "tool", "system"]),
+    summaryKind: entry.summaryKind === undefined ? undefined : enumeration(entry.summaryKind, `${field}.summaryKind`, ["compaction", "branch"] as const),
     timestamp: entry.timestamp === undefined ? undefined : timestamp(entry.timestamp, `${field}.timestamp`),
     content: parseContent(entry.content, `${field}.content`),
     stopReason: optionalString(entry.stopReason, `${field}.stopReason`, 128),

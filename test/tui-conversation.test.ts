@@ -169,6 +169,42 @@ test("conversation projects persisted history before live replay", () => {
   assert.match(conversation.render(100).join("\n"), /read done.*\/tmp\/old/u);
 });
 
+test("compaction summaries default to one line and expand explicitly", () => {
+  const conversation = new DockConversation();
+  conversation.applyHistory([
+    {
+      entryId: "compact-1",
+      role: "system",
+      summaryKind: "compaction",
+      content: [{ type: "text", text: "## Goal\n\nKeep the release safe.\n\n## Constraints\n\nDo not replay mutations.\n\nEND OF SUMMARY" }],
+    },
+    {
+      entryId: "assistant-after-summary",
+      role: "assistant",
+      content: [{ type: "tool_call", toolCallId: "later-tool", toolName: "read", args: { path: "/tmp/later" } }],
+    },
+    {
+      entryId: "tool-after-summary",
+      role: "tool",
+      content: [{ type: "tool_result", toolCallId: "later-tool", toolName: "read", text: "later result", isError: false }],
+    },
+  ], false);
+
+  const folded = conversation.render(43).filter((line) => line.trim().length > 0);
+  const summaryLine = folded.find((line) => /Context summary/u.test(line));
+  assert.ok(summaryLine, "the folded context summary remains visible");
+  assert.doesNotMatch(summaryLine, /END OF SUMMARY/u);
+  assert.deepEqual(conversation.toggleLatestDetailExpanded(), { expanded: true, name: "context summary" });
+  const expanded = conversation.render(80).join("\n");
+  assert.match(expanded, /Goal/u);
+  assert.match(expanded, /END OF SUMMARY/u);
+  assert.deepEqual(conversation.toggleLatestDetailExpanded(), { expanded: false, name: "context summary" });
+
+  const ordinary = new DockConversation();
+  ordinary.applyHistory([{ entryId: "system-1", role: "system", content: [{ type: "text", text: "ordinary system text" }] }], false);
+  assert.equal(ordinary.toggleLatestDetailExpanded(), undefined);
+});
+
 test("paged history rebuild keeps the bounded gap ordered before live events", () => {
   const conversation = new DockConversation();
   conversation.applyHistory([

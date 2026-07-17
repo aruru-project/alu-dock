@@ -418,10 +418,10 @@ test("Pi runtime history uses public SessionManager branch entries", async () =>
     ];
   });
 
-  assert.deepEqual(host.getHistory().map((entry) => [entry.entryId, entry.role, entry.content]), [
-    ["h1", "user", "question"],
-    ["h2", "system", "notice"],
-    ["h3", "system", "summary"],
+  assert.deepEqual(host.getHistory().map((entry) => [entry.entryId, entry.role, entry.summaryKind, entry.content]), [
+    ["h1", "user", undefined, "question"],
+    ["h2", "system", undefined, "notice"],
+    ["h3", "system", "compaction", "summary"],
   ]);
   initial.historyEntries.push({ type: "custom_message", id: "hidden", parentId: "h3", timestamp: "2026-07-14T00:00:03.000Z", customType: "hidden", content: "secret", display: false });
   assert.equal(host.getHistory().some((entry) => entry.entryId === "hidden"), false);

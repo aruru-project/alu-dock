@@ -41,6 +41,7 @@ export interface HistoryEntryDto {
   entryId: string;
   parentId?: string;
   role: "user" | "assistant" | "tool" | "system";
+  summaryKind?: "compaction" | "branch";
   timestamp?: string;
   content: ContentBlockDto[];
   stopReason?: string;

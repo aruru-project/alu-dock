@@ -26,6 +26,7 @@ interface ConversationEntry {
   toolName?: string;
   toolState?: ToolState;
   toolSummary?: string;
+  summaryKind?: "compaction" | "branch";
   renderRevision: number;
   renderCache?: { width: number; revision: number; expanded: boolean; lines: string[] };
 }
@@ -68,6 +69,8 @@ export class DockConversation implements Component {
   private hideThinking = false;
   private toolsExpanded = false;
   private readonly toolExpansionOverrides = new Map<string, boolean>();
+  private readonly expandedCompactionSummaries = new Set<string>();
+  private lastToggledDetailKey: string | undefined;
   private outputPadding = 1;
   private revisionValue = 0;
   private outputRevisionValue = 0;
@@ -83,6 +86,8 @@ export class DockConversation implements Component {
     this.historyDisplayCount = 0;
     this.liveEntrySequence = 0;
     this.toolExpansionOverrides.clear();
+    this.expandedCompactionSummaries.clear();
+    this.lastToggledDetailKey = undefined;
     this.markLayoutChanged();
   }
 
@@ -133,6 +138,12 @@ export class DockConversation implements Component {
     this.historyDisplayCount = historyEntries.length;
     for (const toolCallId of this.toolExpansionOverrides.keys()) {
       if (!this.entries.some((entry) => entry.toolCallId === toolCallId)) this.toolExpansionOverrides.delete(toolCallId);
+    }
+    for (const entryKey of this.expandedCompactionSummaries) {
+      if (!this.entries.some((entry) => entry.key === entryKey)) this.expandedCompactionSummaries.delete(entryKey);
+    }
+    if (this.lastToggledDetailKey && !this.entries.some((entry) => entry.key === this.lastToggledDetailKey)) {
+      this.lastToggledDetailKey = undefined;
     }
     this.markLayoutChanged();
   }
@@ -392,9 +403,42 @@ export class DockConversation implements Component {
     this.markLayoutChanged();
     return { expanded, name: entry.toolName ?? "tool" };
   }
+  toggleLatestDetailExpanded(): { expanded: boolean; name: string } | undefined {
+    const reversed = [...this.entries].reverse();
+    // A persisted context summary must remain reachable even after later tool use.
+    const entry = reversed.find((candidate) => candidate.summaryKind === "compaction")
+      ?? reversed.find((candidate) => candidate.toolCallId !== undefined);
+    if (!entry) return undefined;
+    this.lastToggledDetailKey = entry.key;
+    if (entry.toolCallId) {
+      const expanded = !this.isToolExpanded(entry);
+      this.toolExpansionOverrides.set(entry.toolCallId, expanded);
+      this.markLayoutChanged();
+      return { expanded, name: entry.toolName ?? "tool" };
+    }
+    const expanded = !this.expandedCompactionSummaries.has(entry.key);
+    if (expanded) this.expandedCompactionSummaries.add(entry.key);
+    else this.expandedCompactionSummaries.delete(entry.key);
+    this.markLayoutChanged();
+    return { expanded, name: "context summary" };
+  }
   areToolsExpanded(): boolean { return this.toolsExpanded; }
   latestToolOffsetFromBottom(width: number): number | undefined {
     const latestIndex = this.entries.findLastIndex((entry) => entry.toolCallId !== undefined);
+    if (latestIndex < 0) return undefined;
+    const contentWidth = Math.max(1, width - this.outputPadding - 1);
+    let rows = 0;
+    for (let index = latestIndex + 1; index < this.entries.length; index += 1) {
+      const entry = this.entries[index];
+      if (!entry || (this.hideThinking && entry.kind === "thinking")) continue;
+      rows += this.renderEntry(entry, contentWidth).length + 1;
+    }
+    return rows;
+  }
+  latestDetailOffsetFromBottom(width: number): number | undefined {
+    const latestIndex = this.lastToggledDetailKey === undefined
+      ? -1
+      : this.entries.findIndex((entry) => entry.key === this.lastToggledDetailKey);
     if (latestIndex < 0) return undefined;
     const contentWidth = Math.max(1, width - this.outputPadding - 1);
     let rows = 0;
@@ -490,7 +534,11 @@ export class DockConversation implements Component {
   }
 
   private renderEntry(entry: ConversationEntry, width: number): string[] {
-    const expanded = entry.toolCallId === undefined || this.isToolExpanded(entry);
+    const expanded = entry.toolCallId !== undefined
+      ? this.isToolExpanded(entry)
+      : entry.summaryKind === "compaction"
+        ? this.expandedCompactionSummaries.has(entry.key)
+        : true;
     const cached = entry.renderCache;
     if (cached?.width === width && cached.revision === entry.renderRevision && cached.expanded === expanded) {
       return cached.lines;
@@ -514,6 +562,14 @@ export class DockConversation implements Component {
       } else {
         const details = entry.text.split("\n").slice(1).join("\n");
         lines = [header, ...renderToolDetails(details, width, entry.toolState)];
+      }
+    } else if (entry.summaryKind === "compaction") {
+      const header = renderCompactionSummaryHeader(entry.text, width, expanded);
+      if (!expanded) {
+        lines = [header];
+      } else {
+        const markdown = new Markdown(entry.text.length > 0 ? entry.text : "…", 0, 0, markdownTheme);
+        lines = [header, ...markdown.render(width)];
       }
     } else if (entry.kind === "user") {
       lines = renderUserSurface(entry.text.length > 0 ? entry.text : "…", width);
@@ -603,7 +659,8 @@ export class DockConversation implements Component {
           projectedTools.delete(block.toolCallId);
         }
       } else {
-        addProjected(source, source.error ? "error" : "system", text || historyOmissions(source) || source.error || "Session event");
+        const entry = addProjected(source, source.error ? "error" : "system", text || historyOmissions(source) || source.error || "Session event");
+        entry.summaryKind = source.summaryKind;
       }
     }
     return projectedEntries;
@@ -782,6 +839,18 @@ function renderUserSurface(text: string, width: number): string[] {
     const body = padToVisibleWidth(` ${line}`, width - 1);
     return `${paint.user("▎")}${paint.userSurface(body)}`;
   });
+}
+
+function renderCompactionSummaryHeader(text: string, width: number, expanded: boolean): string {
+  const preview = text.replace(/[\r\n\t]+/gu, " ").replace(/\s+/gu, " ").trim();
+  const title = paint.thinking("◆ Context summary");
+  const hint = paint.faint(expanded ? "Alt+O fold" : "Alt+O detail");
+  return truncateToWidth(
+    expanded || preview.length === 0
+      ? `${title}${paint.faint(" · ")}${hint}`
+      : `${title}${paint.faint(" · ")}${preview}${paint.faint(" · ")}${hint}`,
+    width,
+  );
 }
 
 function renderToolHeader(entry: ConversationEntry, width: number, expanded: boolean): string {

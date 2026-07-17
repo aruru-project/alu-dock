@@ -800,6 +800,8 @@ function projectHistoryEntry(entry: SessionEntry): RuntimeHistoryEntry | undefin
     return {
       ...base,
       role,
+      ...(role === "compactionSummary" ? { summaryKind: "compaction" as const } : {}),
+      ...(role === "branchSummary" ? { summaryKind: "branch" as const } : {}),
       content,
       ...(typeof message.stopReason === "string" ? { stopReason: message.stopReason } : {}),
       ...(typeof message.errorMessage === "string" ? { error: message.errorMessage } : {}),
@@ -814,8 +816,8 @@ function projectHistoryEntry(entry: SessionEntry): RuntimeHistoryEntry | undefin
   }
   if (entry.type === "thinking_level_change") return { ...base, role: "system", content: `Thinking level changed to ${entry.thinkingLevel}` };
   if (entry.type === "model_change") return { ...base, role: "system", content: `Model changed to ${entry.provider}/${entry.modelId}` };
-  if (entry.type === "compaction") return { ...base, role: "system", content: entry.summary };
-  if (entry.type === "branch_summary") return { ...base, role: "system", content: entry.summary };
+  if (entry.type === "compaction") return { ...base, role: "system", summaryKind: "compaction", content: entry.summary };
+  if (entry.type === "branch_summary") return { ...base, role: "system", summaryKind: "branch", content: entry.summary };
   if (entry.type === "session_info" && entry.name) return { ...base, role: "system", content: `Session named ${entry.name}` };
   return undefined;
 }

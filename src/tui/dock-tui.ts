@@ -16,7 +16,7 @@ import {
 import { ControlClientError, DockClient, type EventSubscription } from "../control/dock-client.js";
 import type { InteractionResponse } from "../core/extension-ui-broker.js";
 import type { CommandDto, SettingDto, SettingUpdate } from "../core/config-projection.js";
-import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot, PendingMessageDto, TreeNodeDto } from "../core/managed-instance.js";
+import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot, PendingMessageDto, SessionDto, TreeNodeDto } from "../core/managed-instance.js";
 import type {
   RuntimeModelInfo,
   RuntimeThinkingLevel,
@@ -1069,22 +1069,62 @@ export async function runDockTui(
     activity.setActivity("loading sessions");
     tui.requestRender();
     try {
-      const sessions = (await client.sessions(instance.id, "all")).sessions
+      const target = await showSessionInventoryPicker();
+      if (!target) { activity.setActivity("session unchanged"); return; }
+      await resumeSession(target.sessionFile);
+    } catch (error) { showError(error); }
+    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
+  }
+
+  async function showSessionInventoryPicker(): Promise<SessionDto | undefined> {
+    const sessionsByValue = new Map<string, SessionDto>();
+    const picker = new SearchablePicker([], {
+      title: "Resume Pi session",
+      body: "Loading persisted Pi sessions…",
+      maxVisible: 14,
+      requestRender: () => tui.requestRender(),
+    });
+    picker.setEmptyText("Loading…");
+    let active = true;
+    let resolveChoice!: (value: string | undefined) => void;
+    const selection = new Promise<string | undefined>((resolve) => { resolveChoice = resolve; });
+    picker.onSelect = (item) => resolveChoice(item.value);
+    picker.onCancel = () => resolveChoice(undefined);
+    const overlay = tui.showOverlay(picker, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
+    tui.setFocus(picker);
+
+    void client.sessionInventory(instance.cwd, "all").then((inventory) => {
+      if (!active) return;
+      const sessions = [...inventory.sessions]
         .sort((left, right) => (right.updatedAt ?? "").localeCompare(left.updatedAt ?? ""));
-      const indexed = sessions.map((session, index) => ({ session, value: String(index) }));
-      const selected = await showChoicePicker(
-        "Resume Pi session",
-        indexed.map(({ session, value }) => ({
+      const items = sessions.map((session, index) => {
+        const value = String(index);
+        sessionsByValue.set(value, session);
+        return {
           value,
           label: session.name ?? session.sessionId,
           description: `${session.cwd}${session.sessionFile === instance.executor.sessionFile ? " · current" : ""}${session.updatedAt ? ` · ${session.updatedAt}` : ""}`,
-        })),
-      );
-      if (selected === undefined) { activity.setActivity("session unchanged"); return; }
-      const target = indexed.find((candidate) => candidate.value === selected)?.session;
-      if (target) await resumeSession(target.sessionFile);
-    } catch (error) { showError(error); }
-    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
+        };
+      });
+      picker.replaceItems(items);
+      picker.setEmptyText("No persisted Pi sessions found");
+      picker.setBody(inventory.truncated
+        ? `Showing ${sessions.length.toLocaleString()} of ${inventory.total.toLocaleString()} persisted sessions`
+        : undefined);
+    }).catch(() => {
+      if (!active) return;
+      picker.setEmptyText("Session inventory unavailable");
+      picker.setBody("Could not load persisted Pi sessions. Press Esc to return.");
+    });
+
+    try {
+      const selected = await selection;
+      return selected === undefined ? undefined : sessionsByValue.get(selected);
+    } finally {
+      active = false;
+      overlay.hide();
+      tui.setFocus(editor);
+    }
   }
 
   async function resumeSession(sessionFile: string): Promise<void> {
@@ -1157,12 +1197,15 @@ export async function runDockTui(
       instance = result.instance;
       status.update(instance);
       conversation.addNotice(`Compacted ${result.result.tokensBefore.toLocaleString()} tokens · kept from ${result.result.firstKeptEntryId}.`);
-      activity.setActivity("compacted");
+      runActivity = { phase: "idle", label: "compacted" };
+      activity.setActivity(runActivity);
     } catch (error) {
       if (error instanceof ControlClientError && error.code === "compaction_not_needed") {
-        activity.setActivity("nothing to compact");
+        runActivity = { phase: "idle", label: "nothing to compact" };
+        activity.setActivity(runActivity);
       } else if (error instanceof ControlClientError && error.code === "compaction_cancelled") {
-        activity.setActivity("compaction cancelled");
+        runActivity = { phase: "idle", label: "compaction cancelled" };
+        activity.setActivity(runActivity);
       } else {
         showError(error);
       }
@@ -1587,9 +1630,9 @@ export async function runDockTui(
       return { consume: true };
     }
     if (matchesKey(data, Key.alt("o"))) {
-      const toggled = conversation.toggleLatestToolExpanded();
+      const toggled = conversation.toggleLatestDetailExpanded();
       if (toggled) {
-        if (toggled.expanded) screen?.revealOffsetFromBottom((width) => conversation.latestToolOffsetFromBottom(width));
+        if (toggled.expanded) screen?.revealOffsetFromBottom((width) => conversation.latestDetailOffsetFromBottom(width));
         else screen?.scrollToBottom();
         if (instance.execution !== "running") activity.setActivity(`${toggled.name} ${toggled.expanded ? "expanded" : "collapsed"}`);
       }

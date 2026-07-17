@@ -336,6 +336,12 @@ test("searchable picker accepts typed filtering while preserving IME focus propa
   picker.handleInput("missing");
   assert.equal(picker.getFilteredItems().length, 0);
   assert.match(picker.render(40).join("\n"), /No matching items/);
+  picker.setBody("Inventory loaded");
+  picker.setEmptyText("No persisted sessions");
+  picker.replaceItems([{ value: "late", label: "Missing session arrived" }]);
+  assert.equal(picker.getQuery(), "localmissing");
+  assert.equal(picker.getFilteredItems().length, 0);
+  assert.match(picker.render(40).join("\n"), /Inventory loaded|No persisted sessions/);
   let cancelled = false;
   picker.onCancel = () => { cancelled = true; };
   picker.handleInput("\u001b");
@@ -412,6 +418,31 @@ test("informational extension feedback replaces activity and survives no-run com
   assert.deepEqual(activity, { phase: "idle", label: "Guard is disabled" });
 });
 
+test("the second extension command result survives its committed idle state event", () => {
+  const idle = snapshot({ execution: "idle", lastRun: "succeeded" });
+  const idleState = {
+    reason: "extension_command_handled", lifecycle: "active", execution: "idle", lastRun: "succeeded",
+    pending: { steering: 0, followUp: 0, total: 0 }, activeCommandId: undefined, lastError: undefined,
+  };
+  let activity = activityFromSnapshot(idle);
+  activity = reduceRunActivity(activity, event(1, "command.accepted", {
+    operationId: "rm-off", delivery: "prompt", queued: false, acceptedAt: "2026-07-15T00:00:00.000Z",
+  }), idle);
+  activity = reduceRunActivity(activity, event(2, "instance.state_changed", idleState), idle);
+  activity = reduceRunActivity(activity, event(3, "command.handled", { operationId: "rm-off", kind: "extension_command" }), idle);
+  activity = reduceRunActivity(activity, event(4, "instance.state_changed", idleState), idle);
+
+  activity = reduceRunActivity(activity, event(5, "command.accepted", {
+    operationId: "rm-on", delivery: "prompt", queued: false, acceptedAt: "2026-07-15T00:00:01.000Z",
+  }), idle);
+  activity = reduceRunActivity(activity, event(6, "extension.notification", {
+    level: "info", message: "rm confirmation enabled",
+  }), idle);
+  activity = reduceRunActivity(activity, event(7, "command.handled", { operationId: "rm-on", kind: "extension_command" }), idle);
+  activity = reduceRunActivity(activity, event(8, "instance.state_changed", idleState), idle);
+  assert.deepEqual(activity, { phase: "idle", label: "rm confirmation enabled" });
+});
+
 test("run activity covers compaction queue interaction abort failure and host loss", () => {
   const running = snapshot();
   let activity = reduceRunActivity(activityFromSnapshot(running), event(1, "compaction.started", {
@@ -423,7 +454,16 @@ test("run activity covers compaction queue interaction abort failure and host lo
   activity = reduceRunActivity(activity, event(2, "compaction.completed", {
     operationId: "compact-1", automatic: true, willRetry: false,
   }), idle);
-  assert.equal(activity.phase, "idle");
+  assert.deepEqual(activity, { phase: "idle", label: "compacted" });
+  activity = reduceRunActivity(activity, event(2, "instance.state_changed", {
+    reason: "compaction_completed", lifecycle: "active", execution: "running", lastRun: "never",
+    pending: { steering: 0, followUp: 0, total: 0 }, activeCommandId: "run-1", lastError: undefined,
+  }), running);
+  assert.deepEqual(activity, { phase: "idle", label: "compacted" });
+  activity = reduceRunActivity(activity, event(2, "compaction.completed", {
+    operationId: "compact-cancelled", automatic: false, willRetry: false, aborted: true,
+  }), idle);
+  assert.deepEqual(activity, { phase: "idle", label: "compaction cancelled" });
 
   const pending = snapshot({ execution: "idle", pending: { steering: 0, followUp: 2, total: 2 } });
   activity = reduceRunActivity(activity, event(3, "compaction.completed", {

@@ -48,6 +48,7 @@ export interface RuntimeHistoryEntry {
   parentId?: string;
   timestamp?: string;
   role: string;
+  summaryKind?: "compaction" | "branch";
   content: unknown;
   stopReason?: string;
   error?: string;

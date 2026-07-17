@@ -3083,6 +3083,8 @@ function refreshesMetrics(event: RuntimeEvent): boolean {
 
 function projectRuntimeHistoryEntry(entry: RuntimeHistoryEntry): HistoryEntryDto {
   const role = historyRole(entry.role);
+  const summaryKind = entry.summaryKind
+    ?? (entry.role === "compactionSummary" ? "compaction" : entry.role === "branchSummary" ? "branch" : undefined);
   const entryId = boundedRuntimeString(entry.entryId, 128, "unknown-entry");
   const content: ContentBlockDto[] = role === "tool"
     ? [{
@@ -3097,6 +3099,7 @@ function projectRuntimeHistoryEntry(entry: RuntimeHistoryEntry): HistoryEntryDto
     entryId,
     ...(entry.parentId === undefined ? {} : { parentId: boundedRuntimeString(entry.parentId, 128, "unknown-parent") }),
     role,
+    ...(summaryKind === undefined ? {} : { summaryKind }),
     ...(isIsoTimestamp(entry.timestamp) ? { timestamp: entry.timestamp } : {}),
     content,
     ...(entry.stopReason === undefined ? {} : { stopReason: boundedRuntimeString(entry.stopReason, 128, "unknown") }),
