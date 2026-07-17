@@ -62,6 +62,7 @@ A feature should have one clear owning module. Do not create one file per settin
 14. Terminal-facing values must be sanitized for C0/C1 control characters.
 15. Tree navigation keeps the Pi session file; fork/clone are replacement transactions. Branch-summary cancellation must use the public `abortBranchSummary()` path rather than assuming agent abort covers it.
 16. A closed Host/protocol projection is not authorization to render a conversation message. Classify every human-facing fact by lifetime and actionability as durable conversation, transient status/activity, interaction, or explicit diagnostics. Expected internal bounds, replay/cursor state and operation bookkeeping stay quiet unless they cause concrete user impact; a user-facing warning must state that impact and an available action.
+17. Human CLI output must form a closed workflow: every recommended command must accept an identifier visibly available in the same output, ambiguous names/prefixes fail closed through a chooser or actionable human error, and lifecycle-inapplicable actions are not advertised. Raw machine JSON errors belong only to an explicit machine surface.
 
 ## Pi and settings rules
 
