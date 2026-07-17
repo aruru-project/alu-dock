@@ -303,10 +303,14 @@ export class ManagedInstance {
   private extensionCommandInitiator: { operationId: string; runtimeGeneration: number; agentStartCount: number } | undefined;
   private stopRequestedWhileRunning = false;
   private compactionActive = false;
+  private compactionRequestOperationId: string | undefined;
+  private compactionOperationId: string | undefined;
   private compactionBoundary: Promise<void> | undefined;
   private resolveCompactionBoundary: (() => void) | undefined;
+  private compactionStartedBoundary: Promise<boolean> | undefined;
+  private resolveCompactionStarted: ((started: boolean) => void) | undefined;
   private configurationPending = false;
-  private configurationKind: "general" | "navigation" | undefined;
+  private configurationKind: "general" | "navigation" | "compaction" | undefined;
   private configurationBoundary: Promise<void> | undefined;
   private resolveConfigurationBoundary: (() => void) | undefined;
   private navigationStartedBoundary: Promise<void> | undefined;
@@ -873,10 +877,11 @@ export class ManagedInstance {
   }
 
   async compactSession(operationId: string, customInstructions?: string): Promise<SessionCompactionDto> {
-    await this.beginConfiguration("compacting the session", true);
+    await this.beginConfiguration("compacting the session", true, "compaction");
     let runtimeCalled = false;
     try {
       if (!this.session.compact) throw new Error("Runtime does not support compaction");
+      this.compactionRequestOperationId = operationId;
       this.receiptBoundaryOperationId = operationId;
       runtimeCalled = true;
       const result = projectCompactionResult(await this.session.compact(customInstructions));
@@ -887,6 +892,7 @@ export class ManagedInstance {
       if (runtimeCalled && !isKnownMutationBoundaryError(error)) throw new RuntimeEffectUnknownError(operationId, error);
       throw error;
     } finally {
+      if (this.compactionRequestOperationId === operationId) this.compactionRequestOperationId = undefined;
       this.endConfiguration();
     }
   }
@@ -1145,6 +1151,7 @@ export class ManagedInstance {
             accepted: true,
             instanceId: this.id,
             operationId: commandId,
+            kind: "prompt",
             delivery: actualDelivery,
             queued: actuallyQueued,
             acceptedAt,
@@ -1358,6 +1365,7 @@ export class ManagedInstance {
         accepted: true,
         instanceId: this.id,
         operationId: commandId,
+        kind: "extension_command",
         delivery: "prompt",
         queued: false,
         acceptedAt,
@@ -1442,6 +1450,7 @@ export class ManagedInstance {
     this.assertActive();
     if (this.commandAbortPending || this.queueMutationPending) throw new InstanceBusyError(this.id, "aborting the current run");
     if (this.configurationKind === "navigation") return this.abortTreeNavigation(operationId);
+    if (this.configurationKind === "compaction") return this.abortCompactionConfiguration(operationId);
     this.commandAbortPending = true;
     this.commandAbortBoundary = new Promise<void>((resolve) => { this.resolveCommandAbortBoundary = resolve; });
     const reservation = this.reserveProjectionGate();
@@ -1487,6 +1496,27 @@ export class ManagedInstance {
       }
     } finally {
       reservation.release();
+      this.commandAbortPending = false;
+      this.resolveCommandAbortBoundary?.();
+      this.resolveCommandAbortBoundary = undefined;
+      this.commandAbortBoundary = undefined;
+    }
+  }
+
+  private async abortCompactionConfiguration(operationId: string): Promise<void> {
+    this.commandAbortPending = true;
+    this.commandAbortBoundary = new Promise<void>((resolve) => { this.resolveCommandAbortBoundary = resolve; });
+    const configurationBoundary = this.configurationBoundary;
+    const compactionStartedBoundary = this.compactionStartedBoundary;
+    try {
+      const started = compactionStartedBoundary ? await compactionStartedBoundary : this.compactionActive;
+      if (started && this.compactionActive) await this.session.abort();
+      if (configurationBoundary) await configurationBoundary;
+      await this.transitionTail;
+    } catch (error) {
+      if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError) throw error;
+      throw new RuntimeEffectUnknownError(operationId, error);
+    } finally {
       this.commandAbortPending = false;
       this.resolveCommandAbortBoundary?.();
       this.resolveCommandAbortBoundary = undefined;
@@ -1543,7 +1573,9 @@ export class ManagedInstance {
 
   private async beginStop(operationId: string): Promise<StopReceipt> {
     const configurationBoundary = this.configurationBoundary;
-    if (configurationBoundary) await configurationBoundary;
+    const preemptingCompaction = configurationBoundary !== undefined && this.configurationKind === "compaction";
+    const compactionStartedBoundary = preemptingCompaction ? this.compactionStartedBoundary : undefined;
+    if (configurationBoundary && !preemptingCompaction) await configurationBoundary;
     const commandAbortBoundary = this.commandAbortBoundary;
     if (commandAbortBoundary) await commandAbortBoundary;
     const queueMutationBoundary = this.queueMutationBoundary;
@@ -1565,7 +1597,7 @@ export class ManagedInstance {
       this.stopPromise = undefined;
       throw error;
     }
-    return this.performStop(operationId, admissionBoundary);
+    return this.performStop(operationId, admissionBoundary, preemptingCompaction ? configurationBoundary : undefined, compactionStartedBoundary);
   }
 
   recordExtensionError(error: unknown): void {
@@ -1594,7 +1626,7 @@ export class ManagedInstance {
     };
   }
 
-  private async performStop(operationId: string, admissionBoundary?: Promise<void>): Promise<StopReceipt> {
+  private async performStop(operationId: string, admissionBoundary?: Promise<void>, configurationBoundary?: Promise<void>, compactionStartedBoundary?: Promise<boolean>): Promise<StopReceipt> {
     const cleanupErrors: string[] = [];
     const pendingQueueItemIds = this.pendingQueueMessages.map((item) => item.queueItemId);
     await this.extensionUi.cancelForHostDrain();
@@ -1616,12 +1648,22 @@ export class ManagedInstance {
       captureCleanupError("clearQueue", error);
     }
 
+    if (compactionStartedBoundary) {
+      try { await compactionStartedBoundary; }
+      catch (error) { captureCleanupError("compactionStart", error); }
+    }
+
     let abortSucceeded = false;
     try {
       await this.abortRuntimeOnce();
       abortSucceeded = true;
     } catch (error) {
       captureCleanupError("abort", error);
+    }
+
+    if (configurationBoundary) {
+      try { await configurationBoundary; }
+      catch (error) { captureCleanupError("configuration", error); }
     }
 
     if (abortSucceeded && this.backgroundTasks.size > 0) {
@@ -1887,7 +1929,7 @@ export class ManagedInstance {
   private async beginConfiguration(
     action: string,
     allowRunning = false,
-    kind: "general" | "navigation" = "general",
+    kind: "general" | "navigation" | "compaction" = "general",
   ): Promise<void> {
     this.catalogPort?.assertWritable();
     this.assertActive();
@@ -1908,6 +1950,8 @@ export class ManagedInstance {
     this.configurationBoundary = new Promise<void>((resolve) => { this.resolveConfigurationBoundary = resolve; });
     if (kind === "navigation") {
       this.navigationStartedBoundary = new Promise<void>((resolve) => { this.resolveNavigationStarted = resolve; });
+    } else if (kind === "compaction") {
+      this.compactionStartedBoundary = new Promise<boolean>((resolve) => { this.resolveCompactionStarted = resolve; });
     }
     const reservation = this.reserveProjectionGate();
     this.releaseConfigurationGate = reservation.release;
@@ -1927,6 +1971,10 @@ export class ManagedInstance {
       this.resolveNavigationStarted?.();
       this.resolveNavigationStarted = undefined;
       this.navigationStartedBoundary = undefined;
+    } else if (this.configurationKind === "compaction") {
+      this.resolveCompactionStarted?.(false);
+      this.resolveCompactionStarted = undefined;
+      this.compactionStartedBoundary = undefined;
     }
     this.configurationKind = undefined;
     this.releaseConfigurationGate?.();
@@ -2134,6 +2182,8 @@ export class ManagedInstance {
     const operationId = this.catalogAdmissionOperationId
       ?? (event.type === "agent_settled" ? this.state.activeCommandId : undefined)
       ?? extensionInitiatorOperationId
+      ?? this.compactionOperationId
+      ?? this.compactionRequestOperationId
       ?? this.receiptBoundaryOperationId
       ?? this.replacementIntent?.operationId
       ?? this.state.activeCommandId;
@@ -2282,10 +2332,13 @@ export class ManagedInstance {
         return;
       case "compaction_start":
         await this.commitCatalogTransition(context("compaction.started"), () => {
-          this.startCompactionBoundary();
+          this.startCompactionBoundary(operationId);
           this.state.execution = "running";
           this.touch();
-        }, () => this.appendEvent("compaction.started", { reason: compactionReason(event.reason) }));
+        }, () => this.appendEvent("compaction.started", {
+          reason: compactionReason(event.reason),
+          ...(operationId === undefined ? {} : { operationId }),
+        }));
         return;
       case "compaction_end": {
         try {
@@ -2295,6 +2348,7 @@ export class ManagedInstance {
           }, () => {
             this.appendEvent("compaction.completed", {
               reason: compactionReason(event.reason),
+              ...(operationId === undefined ? {} : { operationId }),
               aborted: event.aborted === true,
               willRetry: event.willRetry === true,
               error: optionalRuntimeString(event.errorMessage, 2_048),
@@ -2559,10 +2613,13 @@ export class ManagedInstance {
         break;
 
       case "compaction_start":
-        this.startCompactionBoundary();
+        this.startCompactionBoundary(this.receiptBoundaryOperationId);
         this.state.execution = "running";
         this.touch();
-        this.appendEvent("compaction.started", { reason: compactionReason(event.reason) });
+        this.appendEvent("compaction.started", {
+          reason: compactionReason(event.reason),
+          ...(this.receiptBoundaryOperationId === undefined ? {} : { operationId: this.receiptBoundaryOperationId }),
+        });
         break;
 
       case "compaction_end":
@@ -2570,6 +2627,7 @@ export class ManagedInstance {
         this.touch();
         this.appendEvent("compaction.completed", {
           reason: compactionReason(event.reason),
+          ...(this.receiptBoundaryOperationId === undefined ? {} : { operationId: this.receiptBoundaryOperationId }),
           aborted: event.aborted === true,
           willRetry: event.willRetry === true,
           error: optionalRuntimeString(event.errorMessage, 2_048),
@@ -2619,7 +2677,10 @@ export class ManagedInstance {
     this.appendStateEvent("agent_settled");
   }
 
-  private startCompactionBoundary(): void {
+  private startCompactionBoundary(operationId?: string): void {
+    if (operationId !== undefined) this.compactionOperationId = operationId;
+    this.resolveCompactionStarted?.(true);
+    this.resolveCompactionStarted = undefined;
     if (this.compactionActive) return;
     this.compactionActive = true;
     this.compactionBoundary = new Promise<void>((resolve) => { this.resolveCompactionBoundary = resolve; });
@@ -2627,6 +2688,7 @@ export class ManagedInstance {
 
   private finishCompactionBoundary(): void {
     this.compactionActive = false;
+    this.compactionOperationId = undefined;
     this.resolveCompactionBoundary?.();
     this.resolveCompactionBoundary = undefined;
     this.compactionBoundary = undefined;

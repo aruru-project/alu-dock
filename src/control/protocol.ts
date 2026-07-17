@@ -548,7 +548,11 @@ export function parseInteractionRespondResult(input: unknown): InteractionRespon
 export function parsePromptResult(input: unknown): PromptResult {
   const value = object(input, "prompt result"); exact(value, ["receipt", "instance"]);
   const instance = parseInstance(value.instance, "instance"); const receipt = parseReceipt(value.receipt);
-  if (receipt.instanceId !== instance.id || instance.activeCommandId !== undefined && !receipt.queued && instance.activeCommandId !== receipt.operationId) throw validation("invalid_response", "Command receipt does not match instance state");
+  const promptOperationMismatch = receipt.kind === "prompt"
+    && instance.activeCommandId !== undefined
+    && !receipt.queued
+    && instance.activeCommandId !== receipt.operationId;
+  if (receipt.instanceId !== instance.id || promptOperationMismatch) throw validation("invalid_response", "Command receipt does not match instance state");
   return { receipt, instance };
 }
 export function parseReopenResult(input: unknown): ReopenResult {
@@ -804,9 +808,11 @@ export function parseCommandsResult(input: unknown): CommandsResult {
 }
 
 function parseReceipt(input: unknown): CommandReceipt {
-  const receipt = object(input, "receipt"); exact(receipt, ["operationId", "instanceId", "accepted", "delivery", "queued", "acceptedAt"]);
+  const receipt = object(input, "receipt"); exact(receipt, ["operationId", "instanceId", "accepted", "kind", "delivery", "queued", "acceptedAt"]);
   if (receipt.accepted !== true) throw validation("invalid_response", "receipt.accepted must be true");
-  return { accepted: true, operationId: id(receipt.operationId, "receipt.operationId"), instanceId: id(receipt.instanceId, "receipt.instanceId"), delivery: enumeration(receipt.delivery, "receipt.delivery", ["prompt", "steer", "followUp"]), queued: boolean(receipt.queued, "receipt.queued"), acceptedAt: timestamp(receipt.acceptedAt, "receipt.acceptedAt") };
+  const parsed: CommandReceipt = { accepted: true, operationId: id(receipt.operationId, "receipt.operationId"), instanceId: id(receipt.instanceId, "receipt.instanceId"), kind: enumeration(receipt.kind, "receipt.kind", ["prompt", "extension_command"]), delivery: enumeration(receipt.delivery, "receipt.delivery", ["prompt", "steer", "followUp"]), queued: boolean(receipt.queued, "receipt.queued"), acceptedAt: timestamp(receipt.acceptedAt, "receipt.acceptedAt") };
+  if (parsed.kind === "extension_command" && (parsed.delivery !== "prompt" || parsed.queued)) throw validation("invalid_response", "Extension command receipts must be immediate prompt delivery");
+  return parsed;
 }
 function parseHost(input: unknown, field: string): HostIdentity {
   const host = object(input, field); exact(host, ["pid", "dockVersion", "piSdkVersion", "hostEpoch", "startedAt"]);
@@ -929,8 +935,8 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "tool.completed": exact(data, ["toolCallId", "toolName", "text", "isError", "omittedFields"]); return { toolCallId: text("toolCallId", 128), toolName: text("toolName", 256), text: boundedString(data.text, `${field}.text`, MAX_TEXT), isError: boolean(data.isError, "isError"), omittedFields: omitted(data.omittedFields, "omittedFields") };
     case "queue.changed": exact(data, ["steering", "followUp", "total"]); return parsePending(data, field);
     case "queue.cleared": exact(data, ["steering", "followUp", "total", "queueItemIds", "reason"]); return { ...parsePending({ steering: data.steering, followUp: data.followUp, total: data.total }, field), queueItemIds: strings(data.queueItemIds, `${field}.queueItemIds`, MAX_PENDING_QUEUE_ITEMS, 128), reason: enumeration(data.reason, `${field}.reason`, ["dequeued", "abort", "stop", "replacement", "host_draining"]) };
-    case "compaction.started": exact(data, ["reason"]); return { reason: enumeration(data.reason, "reason", ["manual", "threshold", "overflow"]) };
-    case "compaction.completed": exact(data, ["reason", "aborted", "willRetry", "error"]); return { reason: enumeration(data.reason, "reason", ["manual", "threshold", "overflow"]), aborted: boolean(data.aborted, "aborted"), willRetry: boolean(data.willRetry, "willRetry"), error: optionalText("error", MAX_MESSAGE) };
+    case "compaction.started": exact(data, ["reason", "operationId"]); return { reason: enumeration(data.reason, "reason", ["manual", "threshold", "overflow"]), operationId: optionalText("operationId", 128) };
+    case "compaction.completed": exact(data, ["reason", "operationId", "aborted", "willRetry", "error"]); return { reason: enumeration(data.reason, "reason", ["manual", "threshold", "overflow"]), operationId: optionalText("operationId", 128), aborted: boolean(data.aborted, "aborted"), willRetry: boolean(data.willRetry, "willRetry"), error: optionalText("error", MAX_MESSAGE) };
     case "session.replaced": exact(data, ["reason", "previousSessionFile", "sessionFile", "runtimeGeneration", "cwd", "piSessionId", "name"]); return { reason: enumeration(data.reason, "reason", ["new", "resume", "fork", "reload"]), previousSessionFile: optionalText("previousSessionFile", MAX_CONTROL_CWD_CHARS), sessionFile: optionalText("sessionFile", MAX_CONTROL_CWD_CHARS), runtimeGeneration: positive(data.runtimeGeneration, "runtimeGeneration"), cwd: text("cwd", MAX_CONTROL_CWD_CHARS), piSessionId: text("piSessionId", 128), name: optionalText("name", MAX_INSTANCE_NAME_CHARS) };
     case "session.navigated": exact(data, ["targetId", "leafId", "treeRevision", "summaryCreated"]); return { targetId: text("targetId", 128), leafId: optionalText("leafId", 128), treeRevision: text("treeRevision", 128), summaryCreated: boolean(data.summaryCreated, "summaryCreated") };
     case "session.info_changed": exact(data, ["name"]); return { name: optionalText("name", MAX_INSTANCE_NAME_CHARS) };

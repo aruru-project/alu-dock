@@ -16,6 +16,7 @@ import {
   parseListResult,
   parseModelConfigurationResult,
   parsePruneResult,
+  parsePromptResult,
   parseQueueDequeueResult,
   parseReopenResult,
   parseSessionsResult,
@@ -516,6 +517,25 @@ test("abort result is closed and cannot claim a still-running instance", () => {
   assert.equal(parseAbortResult({ instance: idle }).instance.execution, "idle");
   assert.throws(() => parseAbortResult({ instance: { ...idle, execution: "running", activeCommandId: "run-1" } }), /must not still be running/);
   assert.throws(() => parseAbortResult({ instance: idle, extra: true }), /Unexpected field/);
+});
+
+test("prompt receipts distinguish immediate extension commands from the running parent", () => {
+  const instance = { ...validSnapshot(), execution: "running", activeCommandId: "parent-op" };
+  const extensionReceipt = {
+    accepted: true,
+    instanceId: "i1",
+    operationId: "extension-op",
+    kind: "extension_command",
+    delivery: "prompt",
+    queued: false,
+    acceptedAt: "2026-07-14T00:00:01.000Z",
+  };
+  assert.equal(parsePromptResult({ receipt: extensionReceipt, instance }).receipt.kind, "extension_command");
+  assert.throws(() => parsePromptResult({ receipt: { ...extensionReceipt, kind: "prompt" }, instance }), /does not match instance state/);
+  assert.throws(() => parsePromptResult({ receipt: { ...extensionReceipt, delivery: "steer" }, instance }), /must be immediate prompt delivery/);
+  assert.throws(() => parsePromptResult({ receipt: { ...extensionReceipt, queued: true }, instance }), /must be immediate prompt delivery/);
+  const { kind: _kind, ...missingKind } = extensionReceipt;
+  assert.throws(() => parsePromptResult({ receipt: missingKind, instance }), /unsupported value/);
 });
 
 test("queue pending and dequeue DTOs are closed, bounded, and count-consistent", () => {

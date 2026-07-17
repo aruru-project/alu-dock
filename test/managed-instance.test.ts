@@ -547,7 +547,7 @@ test("registered extension commands bypass running Queue admission without corru
   const commandBlock = new Deferred<void>();
   session.extensionCommandBlock = commandBlock;
   const receipt = await instance.submit("/rm-confirm off", "followUp", "extension-op");
-  assert.deepEqual({ delivery: receipt.delivery, queued: receipt.queued }, { delivery: "prompt", queued: false });
+  assert.deepEqual({ kind: receipt.kind, delivery: receipt.delivery, queued: receipt.queued }, { kind: "extension_command", delivery: "prompt", queued: false });
   assert.equal(session.promptCalls.at(-1)?.options?.streamingBehavior, undefined);
   assert.equal(instance.snapshot().execution, "running");
   assert.equal(instance.snapshot().activeCommandId, "parent-op");

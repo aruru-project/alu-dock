@@ -89,7 +89,7 @@ type Parser<T>=(input:unknown)=>T;
 const MAX_PENDING_STREAM_EVENTS=1_000;
 
 export interface EventSubscription { initial:EventsResult; close:()=>void; done:Promise<void> }
-export interface DockClientOptions { socketPath:string; timeoutMs?:number; requestId?:()=>string; clientId?:string }
+export interface DockClientOptions { socketPath:string; timeoutMs?:number; longMutationTimeoutMs?:number; requestId?:()=>string; clientId?:string }
 export class ControlClientError extends Error {
   constructor(readonly code:string,message:string,readonly operationId?:string,readonly details?:import("../core/managed-instance.js").JsonObject){super(message);this.name="ControlClientError";}
 }
@@ -97,9 +97,10 @@ export class ControlClientError extends Error {
 export class DockClient {
   readonly socketPath:string;
   private readonly timeoutMs:number;
+  private readonly longMutationTimeoutMs:number;
   private readonly createRequestId:()=>string;
   private readonly clientId:string;
-  constructor(options:DockClientOptions){this.socketPath=resolve(options.socketPath);this.timeoutMs=options.timeoutMs??30_000;this.createRequestId=options.requestId??randomUUID;this.clientId=options.clientId??randomUUID();}
+  constructor(options:DockClientOptions){this.socketPath=resolve(options.socketPath);this.timeoutMs=options.timeoutMs??30_000;this.longMutationTimeoutMs=options.longMutationTimeoutMs??options.timeoutMs??600_000;this.createRequestId=options.requestId??randomUUID;this.clientId=options.clientId??randomUUID();}
 
   async hostInfo():Promise<HostInfoResult>{return this.request("host.info",{},"host.info",parseHostInfoResult);}
   async ping():Promise<PingResult>{let negotiated:string[]=[];const info=await this.request("host.info",{},"host.info",parseHostInfoResult,(ack)=>{negotiated=[...ack.capabilities];});return {pid:info.host.pid,protocolVersion:2,hostEpoch:info.host.hostEpoch,capabilities:negotiated};}
@@ -139,7 +140,7 @@ export class DockClient {
   events(instanceId:string,since?:EventCursor):Promise<EventsResult>{return this.request("instance.attach",{instanceId,since,follow:false,controller:"observe"},"events.follow",parseEventsResult);}
   prompt(instanceId:string,message:string,delivery:DeliveryMode="auto",operationId=this.createRequestId()):Promise<PromptResult>{return this.request("command.submit",{operationId,instanceId,message,delivery},"session.core",parsePromptResult);}
   respondInteraction(instanceId:string,leaseToken:string,interactionId:string,response:InteractionResponse,operationId=this.createRequestId()):Promise<InteractionRespondResult>{if("value" in response){const limit=response.method==="select"?8_000:256_000;if(response.value.length>limit)return Promise.reject(new ControlClientError("invalid_request",`Interaction ${response.method} response exceeds ${limit} characters`,operationId));if(containsBinaryPayload(response.value))return Promise.reject(new ControlClientError("invalid_request","Interaction responses cannot contain binary, image, data URI, or raw base64 payloads",operationId));}return this.request("interaction.respond",{operationId,instanceId,leaseToken,interactionId,response},"extension_ui.v1",parseInteractionRespondResult);}
-  abort(instanceId:string,operationId=this.createRequestId()):Promise<AbortResult>{return this.request("command.abort",{operationId,instanceId},"run.abort.v1",parseAbortResult);}
+  abort(instanceId:string,operationId=this.createRequestId()):Promise<AbortResult>{return this.request("command.abort",{operationId,instanceId},"run.abort.v1",parseAbortResult,undefined,this.longMutationTimeoutMs);}
   dequeue(instanceId:string,operationId=this.createRequestId()):Promise<QueueDequeueResult>{return this.request("queue.dequeue",{operationId,instanceId},"queue.control.v1",parseQueueDequeueResult);}
   models(instanceId:string):Promise<ModelsResult>{return this.request("model.list",{instanceId},"models.v1",parseModelsResult);}
   setModel(instanceId:string,provider:string,modelId:string,operationId=this.createRequestId()):Promise<ModelConfigurationResult>{return this.request("model.set",{operationId,instanceId,provider,modelId},"models.v1",parseModelConfigurationResult);}
@@ -155,13 +156,13 @@ export class DockClient {
   switchSession(instanceId:string,sessionFile:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<SessionReplacementResult>{return this.request("session.switch",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.commands.v1",parseSessionReplacementResult);}
   newSession(instanceId:string,parentSession?:string,operationId=this.createRequestId()):Promise<SessionReplacementResult>{return this.request("session.new",{operationId,instanceId,parentSession},"session.commands.v1",parseSessionReplacementResult);}
   nameSession(instanceId:string,name:string,operationId=this.createRequestId()):Promise<SessionNameResult>{return this.request("session.name",{operationId,instanceId,name},"session.commands.v1",parseSessionNameResult);}
-  compactSession(instanceId:string,customInstructions?:string,operationId=this.createRequestId()):Promise<SessionCompactionResult>{return this.request("session.compact",{operationId,instanceId,customInstructions},"session.commands.v1",parseSessionCompactionResult);}
-  reloadSession(instanceId:string,operationId=this.createRequestId()):Promise<SessionReloadResult>{return this.request("session.reload",{operationId,instanceId},"session.commands.v1",parseSessionReloadResult);}
+  compactSession(instanceId:string,customInstructions?:string,operationId=this.createRequestId()):Promise<SessionCompactionResult>{return this.request("session.compact",{operationId,instanceId,customInstructions},"session.commands.v1",parseSessionCompactionResult,undefined,this.longMutationTimeoutMs);}
+  reloadSession(instanceId:string,operationId=this.createRequestId()):Promise<SessionReloadResult>{return this.request("session.reload",{operationId,instanceId},"session.commands.v1",parseSessionReloadResult,undefined,this.longMutationTimeoutMs);}
   tree(instanceId:string,treeRevision?:string,afterEntryId?:string,limit=200):Promise<SessionTreeResult>{return this.request("session.tree",{instanceId,treeRevision,afterEntryId,limit},"session.tree.v1",parseSessionTreeResult);}
   navigateSession(instanceId:string,targetId:string,options:{summarize?:boolean;customInstructions?:string;replaceInstructions?:boolean;label?:string}={},operationId=this.createRequestId()):Promise<SessionNavigateResult>{return this.request("session.navigate",{operationId,instanceId,targetId,...options},"session.tree.v1",parseSessionNavigateResult);}
   forkSession(instanceId:string,entryId:string,operationId=this.createRequestId()):Promise<SessionForkResult>{return this.request("session.fork",{operationId,instanceId,entryId},"session.tree.v1",parseSessionForkResult);}
   cloneSession(instanceId:string,entryId:string,operationId=this.createRequestId()):Promise<SessionCloneResult>{return this.request("session.clone",{operationId,instanceId,entryId},"session.tree.v1",parseSessionCloneResult);}
-  stop(instanceId:string,operationId=this.createRequestId()):Promise<StopResult>{return this.request("instance.stop",{operationId,instanceId},"instance.catalog",parseStopResult);}
+  stop(instanceId:string,operationId=this.createRequestId()):Promise<StopResult>{return this.request("instance.stop",{operationId,instanceId},"instance.catalog",parseStopResult,undefined,this.longMutationTimeoutMs);}
 
   async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;claimController?:boolean}):Promise<EventSubscription>{
     const since=options.since;const helloId=this.createRequestId(),requestId=this.createRequestId();
@@ -193,7 +194,7 @@ export class DockClient {
   }
 
   private hello(requestId:string,capabilities:string[]):ClientHello{return {kind:"hello",requestId,versions:[2],client:{name:"alu-dock-client",version:DOCK_VERSION,clientId:this.clientId},requiredCapabilities:capabilities};}
-  private request<TType extends ControlRequest["type"],T>(type:TType,params:Params<TType>,capability:Capability,parse:Parser<T>,onHello?:(ack:HelloAck)=>void):Promise<T>{
+  private request<TType extends ControlRequest["type"],T>(type:TType,params:Params<TType>,capability:Capability,parse:Parser<T>,onHello?:(ack:HelloAck)=>void,requestTimeoutMs=this.timeoutMs):Promise<T>{
     const helloId=this.createRequestId();
     const requestId=this.createRequestId();
     const request={kind:"request",version:2,requestId,type,params} as Extract<ControlRequest,{type:TType}>;
@@ -207,8 +208,8 @@ export class DockClient {
       let requestSent=false;
       const timeout=setTimeout(()=>{
         if(requestSent&&operationId) finish(new ControlClientError("effect_unknown",`Operation ${operationId} timed out after it was sent; query current state before retrying`,operationId));
-        else finish(new ControlClientError("timeout",`Control request timed out after ${this.timeoutMs}ms`));
-      },this.timeoutMs);
+        else finish(new ControlClientError("timeout",`Control request timed out after ${requestTimeoutMs}ms`));
+      },requestTimeoutMs);
       const finish=(error?:unknown,result?:T):void=>{
         if(settled)return;
         settled=true;

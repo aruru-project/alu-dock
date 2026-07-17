@@ -110,7 +110,7 @@ alu-dock service logs --help
 - `Enter`：发送；运行中默认作为 steer；Editor 支持 multiline paste 与 history
 - `Alt+Enter` 或 `/follow MESSAGE`：排队为 follow-up；未消费文本只显示在composer上方的pending tray，不提前写入正式transcript
 - `Alt+Up`：按steering-first、follow-up-later顺序撤回全部仍可撤回的未消费queue到editor，不中止当前run；已离开Pi内部queue、正等待公开`message_start`的极窄in-flight窗口不会被复制
-- `Esc`、空编辑器 `Ctrl+C` 或 `/abort`：正常对话中Esc先尝试恢复queue，只有全部可撤回正文成功回到editor后才取消当前run/retry/compaction；存在`inFlight`、失败或`effect_unknown`时不伪称恢复、不中止run。tree branch summary进行中时调用公开`abortBranchSummary()`路径，实例保持可复用
+- `Esc`、空编辑器 `Ctrl+C` 或 `/abort`：正常对话中Esc先尝试恢复queue，只有全部可撤回正文成功回到editor后才取消当前run/retry/compaction；active manual compaction可绕过普通configuration gate直接调用公开`abortCompaction()`，stop也先commit stopping intent再取消compaction。存在queue `inFlight`、恢复失败或dequeue `effect_unknown`时不伪称恢复、不中止run。tree branch summary进行中时调用公开`abortBranchSummary()`路径，实例保持可复用
 - `PageUp` / `PageDown`：始终操作同一独立history viewport；到达顶部按200项反向加载，prepend保持entry/row视觉锚点，回看时暂停追尾并提示新输出；`Ctrl+End`回到保留的最新页/底部
 - 普通拖动：默认由终端原生框选，Windows Terminal复制使用`Ctrl+Shift+C`。`Alt+M`或`/mouse`显式启用Dock 1000/1006 mouse tracking后，滚轮操作app-owned history、`Shift+拖动`仍可绕过；Esc或同快捷键恢复默认terminal selection。默认模式的普通wheel不承诺Dock内部history语义
 - `Ctrl+O`：展开/折叠全部 generic tool output；`Alt+O` 只切换最近一项详情；工具默认折叠
@@ -158,7 +158,7 @@ alu-dock prompt INSTANCE_ID "start a new run"
 alu-dock prompt INSTANCE_ID --delivery followUp "then summarize"
 ```
 
-也可用 `--socket PATH` 或 `ALU_DOCK_SOCKET` 指定 socket。`prompt` receipt 只表示 preflight 已接受；`queued=true` 不表示任务完成。socket 父目录必须为当前用户私有目录，socket mode 固定为 `0600`。
+也可用 `--socket PATH` 或 `ALU_DOCK_SOCKET` 指定 socket。`prompt` receipt 以`kind:"prompt"|"extension_command"`闭合区分普通Pi input与立即extension command；普通receipt只表示preflight已接受，`queued=true`不表示任务完成。socket 父目录必须为当前用户私有目录，socket mode固定为`0600`。
 
 ## 状态模型
 

@@ -105,6 +105,8 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
     const compacted = await instance.compactSession("real-compact", "preserve decisions");
     assert.equal(compacted.summary, "deterministic extension summary");
     assert.ok(compacted.firstKeptEntryId.length > 0);
+    const compactionEvents = instance.eventsSince().events.filter((event) => event.type === "compaction.started" || event.type === "compaction.completed");
+    assert.deepEqual(compactionEvents.map((event) => event.data.operationId), ["real-compact", "real-compact"]);
     assert.ok((await instance.getHistoryPage(undefined, 200)).entries.some((entry) => entry.content.some((block) => block.type === "text" && block.text === "deterministic extension summary")));
 
     assert.equal((await instance.reloadSession("real-reload")).cancelled, false);

@@ -337,13 +337,14 @@ interface CommandReceiptDto {
   operationId: string;
   instanceId: string;
   accepted: true;
+  kind: "prompt" | "extension_command";
   delivery: "prompt" | "steer" | "followUp";
   queued: boolean;
   acceptedAt: string;
 }
 ```
 
-普通 prompt/steer/followUp 的 receipt 仍表示 Pi preflight 已接受，不表示 run 完成；实现可继续使用封装在 pinned Pi adapter 内的 `preflightResult`。Exact registered extension command 是明确例外：Host 通过当前 generation 的 public `AgentSession.extensionRunner.getCommand()`重检并完成 pre-effect catalog accepted commit 后，以无 `streamingBehavior` 的 prompt立即执行；receipt 固定 `delivery:"prompt",queued:false`，表示命令路由已接受而不是 handler 已完成。若 handler 未启动 model run则另发 `command.handled{kind:"extension_command"}`。该event是operation/activity和replay所需的机器事实，不是默认conversation正文；客户端成功路径静默投影它，但不得静默`command.rejected`、extension error/notification或命令专用结果。
+`kind:"prompt"`的普通 prompt/steer/followUp receipt 仍表示 Pi preflight 已接受，不表示 run 完成；实现可继续使用封装在 pinned Pi adapter 内的 `preflightResult`。Exact registered extension command 是明确例外：Host 通过当前 generation 的 public `AgentSession.extensionRunner.getCommand()`重检并完成 pre-effect catalog accepted commit 后，以无 `streamingBehavior` 的 prompt立即执行；receipt 固定 `kind:"extension_command",delivery:"prompt",queued:false`，表示命令路由已接受而不是 handler 已完成。该closed discriminator允许running parent继续保有不同的`activeCommandId`；普通`kind:"prompt"` receipt仍必须与非queued active operation一致。若 handler 未启动 model run则另发 `command.handled{kind:"extension_command"}`。该event是operation/activity和replay所需的机器事实，不是默认conversation正文；客户端成功路径静默投影它，但不得静默`command.rejected`、extension error/notification或命令专用结果。
 
 ### Queue消费与恢复合同
 
@@ -446,8 +447,8 @@ Parser、catalog loader 和 registry mutation 共用同一个 invariant validato
 | steer/followUp | `active + running` |
 | model/thinking/tools/settings/session navigate/replacement | `active + quiescent` |
 | compact | active；具体 abort/compact 语义交给 Pi，Dock 阻止并发 config/replacement |
-| abort | active；run/retry走`abort()`，compaction走`abortCompaction()`，tree branch summary走`abortBranchSummary()`；均等待对应稳定边界，不伪造无关`run.settled` |
-| stop | active；stopping/stopped 同 operation 走幂等结果；host_lost/runtime_error 不当作 live stop |
+| abort | active；run/retry走`abort()`，active manual compaction绕过普通configuration gate并走`abortCompaction()`，tree branch summary走`abortBranchSummary()`；均等待对应稳定边界，不伪造无关`run.settled` |
+| stop | active；active manual compaction时先commit stopping intent、再取消compaction并等待其configuration boundary后dispose；其他configuration仍先线性化完成。stopping/stopped 同 operation 走幂等结果；host_lost/runtime_error 不当作 live stop |
 | reopen | `host_lost|runtime_error + reopenable` |
 | interaction response | active、同 generation、当前 lease、pending interaction |
 
@@ -681,8 +682,8 @@ interface EventDataMap {
   "tool.completed": { toolCallId: string; toolName: string; text: string; isError: boolean; omittedFields?: string[] };
   "queue.changed": PendingDto;
   "queue.cleared": PendingDto & { queueItemIds: string[]; reason: "dequeued" | "abort" | "stop" | "replacement" | "host_draining" };
-  "compaction.started": { reason: CompactionReason };
-  "compaction.completed": { reason: CompactionReason; aborted: boolean; willRetry: boolean; error?: string };
+  "compaction.started": { reason: CompactionReason; operationId?: string };
+  "compaction.completed": { reason: CompactionReason; operationId?: string; aborted: boolean; willRetry: boolean; error?: string };
   "session.replaced": {
     reason: "new" | "resume" | "fork" | "reload";
     previousSessionFile?: string;
@@ -718,7 +719,7 @@ Numeric counters必须是 non-negative safe integer；timestamp使用 ISO-8601 U
 
 ### 不可自动 retry
 
-所有 mutation：instance create/stop/forget、catalog prune、instance reopen、command submit/abort、queue dequeue、model/thinking/tool/settings mutation、session switch/new/name/compact/reload/navigate/fork/clone、trust remember decision。Transport close 后 client 显示 `effect_unknown`，用户先查询再决定。
+所有 mutation：instance create/stop/forget、catalog prune、instance reopen、command submit/abort、queue dequeue、model/thinking/tool/settings mutation、session switch/new/name/compact/reload/navigate/fork/clone、trust remember decision。Transport close 后 client 显示 `effect_unknown`，用户先查询再决定。默认typed client继续以30秒约束普通请求，但对abort、compact、reload和stop使用10分钟long-mutation等待；显式`timeoutMs/longMutationTimeoutMs`可为测试或机器调用收紧。延长等待不改变不可自动retry合同，manual compaction仍可由Esc/`command.abort`或stop取消。
 
 | Mutation | 收敛查询 |
 |---|---|

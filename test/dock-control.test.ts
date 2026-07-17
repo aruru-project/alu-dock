@@ -1124,6 +1124,28 @@ test("a second client can steer, queue follow-up, and stop idempotently", async 
   );
 });
 
+test("typed clients accept an immediate extension command while preserving the running parent", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "extension-running");
+  const parentOperationId = created.activeCommandId;
+  assert.ok(parentOperationId);
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  runtime.extensionCommands.add("fixture-command");
+
+  const handled = await client.prompt(created.id, "/fixture-command now", "auto", "extension-running-op");
+
+  assert.deepEqual(
+    { kind: handled.receipt.kind, delivery: handled.receipt.delivery, queued: handled.receipt.queued },
+    { kind: "extension_command", delivery: "prompt", queued: false },
+  );
+  assert.equal(handled.instance.activeCommandId, parentOperationId);
+  assert.equal(handled.instance.execution, "running");
+  assert.equal(handled.instance.pending.total, 0);
+});
+
 test("manual compaction aborts a running model command without stealing its run operation ID", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
@@ -1139,7 +1161,97 @@ test("manual compaction aborts a running model command without stealing its run 
   const events = (await client.events(created.id)).page.events;
   const settled = events.find((event) => event.type === "run.settled");
   assert.equal(settled?.type === "run.settled" ? settled.data.operationId : undefined, originalCommandId);
-  assert.ok(events.some((event) => event.type === "compaction.completed"));
+  assert.ok(events.some((event) => event.type === "compaction.completed" && event.data.operationId === "manual-compact-op"));
+});
+
+test("compact uses its explicit long-mutation timeout instead of the ordinary request timeout", async (context) => {
+  const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
+  context.after(() => cleanupHarness(harness));
+  const setupClient = new DockClient({ socketPath: harness.socketPath });
+  const created = await setupClient.create(harness.directory, "long-compaction", "create-long-compaction");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const block = runtime.blockNextCompaction();
+  const client = new DockClient({ socketPath: harness.socketPath, timeoutMs: 25, longMutationTimeoutMs: 250 });
+  const compacting = client.compactSession(created.id, undefined, "long-compact-op");
+  await block.entered;
+  const release = setTimeout(() => block.finish(), 75);
+  context.after(() => clearTimeout(release));
+
+  const compacted = await compacting;
+
+  assert.equal(compacted.result.tokensBefore, 123);
+  assert.equal(compacted.instance.execution, "idle");
+});
+
+test("stop preempts a manual compaction even before its start event is projected", async (context) => {
+  const catalog = new ScriptedCatalogCommitPort();
+  const stopIntentGate = catalog.gateAt(2);
+  const harness = await createTransactionHarness(catalog);
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "blocked-compaction", "create-blocked-compaction");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const startBlock = runtime.blockNextCompactionStart();
+  runtime.blockNextCompaction();
+  const compacting = client.compactSession(created.id, undefined, "blocked-compact-op");
+  const compactFailure = assert.rejects(
+    compacting,
+    (error: unknown) => error instanceof ControlClientError
+      && error.code === "effect_unknown"
+      && error.operationId === "blocked-compact-op",
+  );
+  await startBlock.entered;
+
+  const stopping = client.stop(created.id, "stop-during-compaction");
+  await stopIntentGate.entered;
+  assert.equal(catalog.calls[1]?.context.kind, "instance.stop.intent");
+  stopIntentGate.release();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(harness.registry.get(created.id).snapshot().lifecycle, "stopping");
+  startBlock.release();
+  const stopped = await stopping;
+  await compactFailure;
+
+  assert.equal(stopped.instance.lifecycle, "stopped");
+  assert.equal(stopped.instance.runtimeGeneration, created.runtimeGeneration);
+  assert.equal(stopped.instance.executor.sessionFile, created.executor.sessionFile);
+  assert.equal(runtime.abortCalls, 1);
+  assert.equal(runtime.disposeCalls, 1);
+  const events = harness.registry.get(created.id).eventsSince().events;
+  const stopRequested = events.find((event) => event.type === "instance.state_changed" && event.data.reason === "stop_requested");
+  const compactionCompleted = events.find((event) => event.type === "compaction.completed");
+  assert.equal(compactionCompleted?.type === "compaction.completed" ? compactionCompleted.data.operationId : undefined, "blocked-compact-op");
+  assert.equal(compactionCompleted?.type === "compaction.completed" ? compactionCompleted.data.aborted : undefined, true);
+  assert.ok(stopRequested && compactionCompleted && stopRequested.sequence < compactionCompleted.sequence);
+});
+
+test("abort bypasses the configuration gate for an active manual compaction", async (context) => {
+  const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "abort-compaction", "create-abort-compaction");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const block = runtime.blockNextCompaction();
+  const compacting = client.compactSession(created.id, undefined, "abort-compact-op");
+  const compactFailure = assert.rejects(
+    compacting,
+    (error: unknown) => error instanceof ControlClientError
+      && error.code === "effect_unknown"
+      && error.operationId === "abort-compact-op",
+  );
+  await block.entered;
+
+  const aborted = await client.abort(created.id, "abort-active-compaction");
+  await compactFailure;
+
+  assert.equal(aborted.instance.lifecycle, "active");
+  assert.equal(aborted.instance.execution, "idle");
+  assert.equal(aborted.instance.lastRun, "never");
+  assert.equal(runtime.abortCalls, 1);
+  assert.equal(runtime.disposeCalls, 0);
+  const completed = harness.registry.get(created.id).eventsSince().events.find((event) => event.type === "compaction.completed");
+  assert.equal(completed?.type === "compaction.completed" ? completed.data.operationId : undefined, "abort-compact-op");
+  assert.equal(completed?.type === "compaction.completed" ? completed.data.aborted : undefined, true);
 });
 
 test("abort is operation-deduplicated and keeps the instance reusable", async (context) => {
@@ -1202,6 +1314,7 @@ test("a reconnected client can start a fresh prompt on an idle instance", async 
   const created = await new DockClient({ socketPath }).create(directory);
   assert.equal(created.execution, "idle");
   const accepted = await new DockClient({ socketPath }).prompt(created.id, "start now");
+  assert.equal(accepted.receipt.kind, "prompt");
   assert.equal(accepted.receipt.delivery, "prompt");
   assert.equal(accepted.receipt.queued, false);
   assert.equal(accepted.instance.execution, "running");

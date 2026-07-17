@@ -50,7 +50,7 @@ export default function (pi) {
 
   try {
     const receipt = await instance.submit("/ui-fixture", "followUp", "real-extension-command");
-    assert.deepEqual({ delivery: receipt.delivery, queued: receipt.queued }, { delivery: "prompt", queued: false });
+    assert.deepEqual({ kind: receipt.kind, delivery: receipt.delivery, queued: receipt.queued }, { kind: "extension_command", delivery: "prompt", queued: false });
     assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages, []);
     await responseTask;
     await instance.waitForIdle();

@@ -116,8 +116,8 @@ export interface EventDataMap {
   "tool.completed": { toolCallId: string; toolName: string; text: string; isError: boolean; omittedFields?: string[] };
   "queue.changed": PendingDto;
   "queue.cleared": PendingDto & { queueItemIds: string[]; reason: "dequeued" | "abort" | "stop" | "replacement" | "host_draining" };
-  "compaction.started": { reason: "manual" | "threshold" | "overflow" };
-  "compaction.completed": { reason: "manual" | "threshold" | "overflow"; aborted: boolean; willRetry: boolean; error?: string };
+  "compaction.started": { reason: "manual" | "threshold" | "overflow"; operationId?: string };
+  "compaction.completed": { reason: "manual" | "threshold" | "overflow"; operationId?: string; aborted: boolean; willRetry: boolean; error?: string };
   "session.replaced": { reason: "new" | "resume" | "fork" | "reload"; previousSessionFile?: string; sessionFile?: string; runtimeGeneration: number; cwd: string; piSessionId: string; name?: string };
   "session.navigated": { targetId: string; leafId?: string; treeRevision: string; summaryCreated: boolean };
   "session.info_changed": { name?: string };
@@ -212,6 +212,7 @@ export interface CommandReceipt {
   accepted: true;
   instanceId: string;
   operationId: string;
+  kind: "prompt" | "extension_command";
   delivery: Exclude<DeliveryMode, "auto">;
   queued: boolean;
   acceptedAt: string;

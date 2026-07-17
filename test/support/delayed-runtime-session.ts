@@ -22,10 +22,12 @@ import { SETTING_DEFINITIONS, SETTING_KEYS } from "../../src/core/config-project
 class Deferred<T> {
   readonly promise: Promise<T>;
   resolve!: (value: T | PromiseLike<T>) => void;
+  reject!: (reason?: unknown) => void;
 
   constructor() {
-    this.promise = new Promise<T>((resolve) => {
+    this.promise = new Promise<T>((resolve, reject) => {
       this.resolve = resolve;
+      this.reject = reject;
     });
   }
 }
@@ -35,6 +37,8 @@ export class DelayedRuntimeSession implements RuntimeSession {
   sessionId: string;
   sessionFile: string;
   isStreaming = false;
+  isCompacting = false;
+  readonly extensionCommands = new Set<string>();
   sessionMutationCalls = { new: 0, switch: 0, name: 0, compact: 0, reload: 0, navigate: 0, fork: 0, clone: 0 };
   sessionName: string | undefined;
   abortCalls = 0;
@@ -67,6 +71,9 @@ export class DelayedRuntimeSession implements RuntimeSession {
   private currentRun: Deferred<void> | undefined;
   private disposeBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
   private modelMutationBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
+  private nextCompactionStartBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
+  private nextCompactionBlock: { entered: Deferred<void>; result: Deferred<RuntimeCompactionResult> } | undefined;
+  private activeCompactionBlock: { entered: Deferred<void>; result: Deferred<RuntimeCompactionResult> } | undefined;
   private nextNavigationBlock: { entered: Deferred<void>; result: Deferred<RuntimeNavigateResult> } | undefined;
   private activeNavigationBlock: { entered: Deferred<void>; result: Deferred<RuntimeNavigateResult> } | undefined;
   private activeTools = new Set(["read"]);
@@ -95,11 +102,20 @@ export class DelayedRuntimeSession implements RuntimeSession {
     return () => this.listeners.delete(listener);
   }
 
-  classifyInput(_text: string): "prompt" { return "prompt"; }
+  classifyInput(text: string): "extension_command" | "prompt" {
+    if (!text.startsWith("/")) return "prompt";
+    const spaceIndex = text.indexOf(" ");
+    const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
+    return this.extensionCommands.has(commandName) ? "extension_command" : "prompt";
+  }
 
   prompt(text: string, options?: RuntimePromptOptions): Promise<void> {
     this.promptCalls += 1;
     this.promptMessages.push(text);
+    if (this.classifyInput(text) === "extension_command") {
+      options?.preflightResult?.(true);
+      return Promise.resolve();
+    }
     if (this.isStreaming && options?.streamingBehavior) {
       if (options.streamingBehavior === "steer") this.steeringQueue.push(text);
       else this.followUpQueue.push(text);
@@ -251,11 +267,50 @@ export class DelayedRuntimeSession implements RuntimeSession {
   async compact(): Promise<RuntimeCompactionResult> {
     this.sessionMutationCalls.compact += 1;
     if (this.isStreaming) this.settle("aborted for compaction", "aborted");
+    const startBlock = this.nextCompactionStartBlock;
+    this.nextCompactionStartBlock = undefined;
+    if (startBlock) {
+      startBlock.entered.resolve();
+      await startBlock.release.promise;
+    }
+    this.isCompacting = true;
     this.emit({ type: "compaction_start", reason: "manual" });
+    const block = this.nextCompactionBlock;
+    this.nextCompactionBlock = undefined;
+    if (block) {
+      this.activeCompactionBlock = block;
+      block.entered.resolve();
+      try { return await block.result.promise; }
+      finally { if (this.activeCompactionBlock === block) this.activeCompactionBlock = undefined; }
+    }
     const result = { summary: "fixture summary", firstKeptEntryId: "kept-1", tokensBefore: 123 };
+    this.isCompacting = false;
     this.emit({ type: "compaction_end", reason: "manual", result, aborted: false, willRetry: false });
     if (this.sessionMutationError) throw this.sessionMutationError;
     return result;
+  }
+
+  blockNextCompactionStart(): { entered: Promise<void>; release: () => void } {
+    if (this.nextCompactionStartBlock) throw new Error("Fixture compaction start is already blocked");
+    const block = { entered: new Deferred<void>(), release: new Deferred<void>() };
+    this.nextCompactionStartBlock = block;
+    return { entered: block.entered.promise, release: () => block.release.resolve() };
+  }
+
+  blockNextCompaction(): { entered: Promise<void>; finish: (result?: RuntimeCompactionResult) => void } {
+    if (this.nextCompactionBlock || this.activeCompactionBlock) throw new Error("Fixture compaction is already blocked");
+    const block = { entered: new Deferred<void>(), result: new Deferred<RuntimeCompactionResult>() };
+    this.nextCompactionBlock = block;
+    return {
+      entered: block.entered.promise,
+      finish: (result = { summary: "fixture summary", firstKeptEntryId: "kept-1", tokensBefore: 123 }) => {
+        if (this.activeCompactionBlock === block) {
+          this.isCompacting = false;
+          this.emit({ type: "compaction_end", reason: "manual", result, aborted: false, willRetry: false });
+        }
+        block.result.resolve(result);
+      },
+    };
   }
 
   async reload(): Promise<{ cancelled: boolean }> {
@@ -327,6 +382,14 @@ export class DelayedRuntimeSession implements RuntimeSession {
     if (this.abortError) throw this.abortError;
     if (this.activeNavigationBlock) {
       this.activeNavigationBlock.result.resolve({ cancelled: true, aborted: true, summaryCreated: false });
+      return;
+    }
+    if (this.isCompacting) {
+      this.isCompacting = false;
+      this.emit({ type: "compaction_end", reason: "manual", result: undefined, aborted: true, willRetry: false });
+      const block = this.activeCompactionBlock;
+      this.activeCompactionBlock = undefined;
+      block?.result.reject(new Error("Compaction cancelled"));
       return;
     }
     if (this.isStreaming) this.settle("aborted", "aborted");
