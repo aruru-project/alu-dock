@@ -1,4 +1,5 @@
 import type { DockEvent, InstanceSnapshot } from "../core/managed-instance.js";
+import { knownCompactionFeedback } from "./compaction-feedback.js";
 
 export type RunActivityPhase =
   | "idle"
@@ -131,9 +132,8 @@ export function reduceRunActivity(
 
     case "compaction.completed":
       if (event.data.aborted) return activityFromSnapshot(snapshot);
-      if (event.data.error && /(?:nothing to compact|already compacted|compaction (?:was )?cancelled|compaction (?:was )?canceled)/iu.test(event.data.error)) {
-        return { phase: "idle", label: /already compacted/iu.test(event.data.error) ? "already compacted" : "nothing to compact" };
-      }
+      const known = knownCompactionFeedback(event.data.error);
+      if (known) return { phase: "idle", label: known === "already_compacted" ? "already compacted" : "nothing to compact" };
       if (event.data.error) return { phase: "error", label: "compaction failed" };
       if (event.data.willRetry || snapshot.execution === "running") {
         return { phase: "waiting", label: "waiting for model" };

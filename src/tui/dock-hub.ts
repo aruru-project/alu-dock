@@ -401,7 +401,7 @@ async function selectMenu(
   }
 }
 
-class HubMenuLayout implements Component {
+export class HubMenuLayout implements Component {
   constructor(
     private readonly brand: AluHubBrand,
     private readonly heading: Component,
@@ -413,7 +413,7 @@ class HubMenuLayout implements Component {
     const boundedWidth = Math.max(1, width);
     if (boundedWidth < 64) {
       return [
-        ...this.brand.render(boundedWidth),
+        ...this.brand.renderCompact(boundedWidth),
         ...this.heading.render(boundedWidth),
         ...this.list.render(boundedWidth),
         ...this.footer.render(boundedWidth),

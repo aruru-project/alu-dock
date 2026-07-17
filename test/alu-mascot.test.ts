@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import type { Component } from "@earendil-works/pi-tui";
+
 import { AluHubBrand, mascotVisibleWidth, renderHubAlu, renderWorkAlu } from "../src/tui/alu-mascot.js";
-import { HubBlinkController } from "../src/tui/dock-hub.js";
+import { HubBlinkController, HubMenuLayout } from "../src/tui/dock-hub.js";
 
 const CONTROL_PATTERN = /\u001b\](?:[^\u0007]|\u001b(?!\\))*(?:\u0007|\u001b\\)|\u001b\[(?:[0-?]*[ -/]*)?[@-~]/gu;
 
@@ -27,6 +29,22 @@ test("Alu assets are responsive, monochrome-safe, and use only bounded SGR color
   assert.equal(renderWorkAlu("tool", 0, "none", true), "✿⌁");
   assert.notEqual(renderWorkAlu("waiting", 0, "none"), renderWorkAlu("waiting", 1, "none"));
   assert.match(renderWorkAlu("error", 0, "none"), /×﹏×/u);
+});
+
+test("stacked Hub keeps the compact seal through the side-layout breakpoint", () => {
+  const component = (lines: string[]): Component => ({ render: () => lines, invalidate() {} });
+  const layout = new HubMenuLayout(
+    new AluHubBrand(),
+    component(["title", "subtitle"]),
+    component(["one", "two", "three", "four", "five"]),
+    component(["hint"]),
+  );
+  for (const width of [43, 44, 63]) {
+    const lines = layout.render(width);
+    assert.equal(lines.length, 9);
+    assert.match(lines[0] ?? "", /✿\(◆ᴗ◆\) ALU/u);
+  }
+  assert.ok(layout.render(64).length <= 10, "side-by-side layout must fit the standard mascot without a row cliff");
 });
 
 test("Hub blink owns one visible-only timer and tears it down", () => {

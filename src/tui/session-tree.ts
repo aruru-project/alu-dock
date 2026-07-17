@@ -90,7 +90,7 @@ export function treePickerItems(
   return nodes.map((node) => {
     const branchDepth = branchAncestorCount(node, byId, childCount);
     const isBranchPoint = (childCount.get(node.entryId) ?? 0) > 1;
-    const isLeaf = !node.hasChildren || (childCount.get(node.entryId) ?? 0) === 0;
+    const isLeaf = !node.hasChildren;
     const onActivePath = activePath.has(node.entryId);
     const marker = node.entryId === leafId
       ? "●"

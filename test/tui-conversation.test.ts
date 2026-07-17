@@ -85,6 +85,7 @@ test("Work help is scope-grouped and keeps every command syntax on one source li
   assert.ok(help.indexOf("SESSION") < help.indexOf("RUNTIME"));
   assert.ok(help.indexOf("RUNTIME") < help.indexOf("CLIENT"));
   assert.ok(help.indexOf("CLIENT") < help.indexOf("EXTENSION"));
+  for (const command of ["config", "install", "login"]) assert.match(help, new RegExp(`/${command}\\b`, "u"));
 });
 
 test("Stage 3 setting command values are typed and bounded", () => {
@@ -441,10 +442,11 @@ test("compaction keeps successful and real failures durable while no-op/cancel s
   conversation.apply(event(2, "compaction.completed", { reason: "manual", aborted: false, willRetry: false, error: "Compaction failed: Nothing to compact (session too small)" }));
   conversation.apply(event(3, "compaction.completed", { reason: "manual", aborted: true, willRetry: false }));
   conversation.apply(event(4, "compaction.completed", { reason: "manual", aborted: false, willRetry: false, error: "Provider compaction failed" }));
+  conversation.apply(event(5, "compaction.completed", { reason: "manual", aborted: false, willRetry: false, error: "Provider wrote an entry, then said nothing to compact while closing" }));
 
   assert.deepEqual(conversation.snapshot().map((entry) => [entry.kind, entry.text]), [
-    ["system", "Compacting context · manual."],
     ["error", "Provider compaction failed"],
+    ["error", "Provider wrote an entry, then said nothing to compact while closing"],
   ]);
 });
 

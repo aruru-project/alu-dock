@@ -7,6 +7,7 @@ import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 import { parseCommandsResult } from "../src/control/protocol.js";
+import { RuntimeCompactionKnownFailureError } from "../src/core/runtime-session.js";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
 
 const EXTENSION_SOURCE = (logPath: string): string => `
@@ -116,6 +117,12 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
     assert.notEqual(newSessionFile, targetFile);
     await instance.setSessionName("real-new-name", "Temporary child");
     assert.ok(newSessionFile.startsWith(`${sessionDir}/`), "Pi reserves the persisted path and writes it lazily after an assistant message");
+    await assert.rejects(
+      instance.compactSession("real-empty-compact"),
+      (error: unknown) => error instanceof RuntimeCompactionKnownFailureError
+        && error.reason === "nothing_to_compact",
+    );
+    assert.equal(instance.snapshot().execution, "idle");
     assert.equal((await instance.switchSession("real-resume-2", targetFile, { canonicalCwd: cwd, projectTrusted: true })).cancelled, false);
     assert.equal(instance.snapshot().runtimeGeneration, 5);
     assert.equal(instance.snapshot().name, "Stage 3 named");

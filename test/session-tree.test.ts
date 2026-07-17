@@ -95,6 +95,12 @@ test("tree picker compresses linear depth and exposes branch points, active path
   assert.match(branchB.label, /● Alu · new branch answer/u);
   assert.match(branchB.description, /current leaf/u);
   assert.doesNotMatch(items.map((item) => `${item.label} ${item.description}`).join("\n"), /leaf-a|leaf-b/u, "internal IDs stay searchable values, not primary copy");
+
+  const cappedParent = treePickerItems([
+    { entryId: "capped-parent", depth: 4, kind: "message", role: "assistant", summary: "children outside selector cap", hasChildren: true },
+  ]).at(0)!;
+  assert.doesNotMatch(cappedParent.label, /○/u);
+  assert.doesNotMatch(cappedParent.description, /sibling branch leaf/u);
 });
 
 test("tree view filtering, picker projection, and direct command parsing remain Dock-owned", () => {

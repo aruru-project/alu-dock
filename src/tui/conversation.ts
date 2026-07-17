@@ -9,6 +9,7 @@ import {
 import type { DockEvent, HistoryEntryDto, InstanceSnapshot, JsonObject, JsonValue } from "../core/managed-instance.js";
 import type { HistoryWindowSnapshot } from "./history-pagination.js";
 import { renderWorkAlu } from "./alu-mascot.js";
+import { knownCompactionFeedback } from "./compaction-feedback.js";
 import type { RunActivityState } from "./run-activity.js";
 import { markdownTheme, paint } from "./theme.js";
 
@@ -281,13 +282,13 @@ export class DockConversation implements Component {
         break;
 
       case "compaction.started":
-        this.add("system", `Compacting context · ${event.data.reason}.`);
+        // In-progress compaction belongs exclusively to fixed activity.
         break;
 
       case "compaction.completed":
         // Definitive no-op/cancel outcomes belong to the replaceable activity
         // surface, not the durable session conversation.
-        if (event.data.aborted || isKnownCompactionNoop(event.data.error)) break;
+        if (event.data.aborted || knownCompactionFeedback(event.data.error)) break;
         this.add(event.data.error ? "error" : "system", event.data.error ?? `Compaction completed${event.data.willRetry ? " · retrying" : ""}.`);
         break;
 
@@ -1114,11 +1115,6 @@ function truncate(text: string, limit: number): string {
 
 function stringArraysEqual(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
-function isKnownCompactionNoop(error: string | undefined): boolean {
-  if (!error) return false;
-  return /(?:nothing to compact|already compacted|compaction (?:was )?cancelled|compaction (?:was )?canceled)/iu.test(error);
 }
 
 function looksLikeDiff(text: string | undefined): text is string {

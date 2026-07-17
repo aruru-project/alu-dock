@@ -44,6 +44,10 @@ export class AluHubBrand implements Component {
   renderLarge(width: number): string[] {
     return renderHubAlu(width, this.blink, detectTerminalColorLevel(), true);
   }
+
+  renderCompact(width: number): string[] {
+    return [truncateToWidth(colorizeSeal(this.blink, detectTerminalColorLevel()), Math.max(1, width))];
+  }
 }
 
 export function renderHubAlu(
