@@ -1,88 +1,65 @@
-# Alu Dock — Agent 工程指南
+# Alu Dock — Agent 工程地图
 
-## 快速开始
+## 产品状态
 
-1. 根据任务选择一张 [`docs/agent_maps/`](docs/agent_maps/) 模块图谱。
-2. 只读图谱列出的入口、直接依赖和对应测试。
-3. 代码、类型和测试不足以回答时，再扩大搜索范围。
-4. 历史计划与验证证据通过Git、Kanban和release receipts追溯，不进入当前工作树。
+Alu Dock V0.1 正在开发中。它是本机单用户的受管 Pi 运行时工程底座：长期 Host 持有 runtime、任务实例和副作用，SSH TUI 等客户端通过结构化控制面观察与控制。
 
-## 技术栈
+能力真相以当前代码、类型和测试为准。当前裸 `alu-dock` 会按 cwd smart-open/reopen/create 并直接进入 attached Session Work，源码中尚无独立 Dock Hub。
 
-- Node.js `>=22.19.0`、TypeScript ESM。
-- `@earendil-works/pi-coding-agent@0.80.6`；生产代码只用 package-root exports。
-- `@earendil-works/pi-tui@0.80.6` 是 V0.1 临时 client toolkit，不得把其类型泄漏到 Host、Protocol或Core port。
-- 单机、单 Unix 用户、SSH headless；managed Host由 `systemd --user` 持有。
+V0.1 冻结目标与当前实现要明确区分：裸命令最终应进入无 runtime 副作用、按 cwd 提供上下文的 Dock Hub；显式 `new` 与 `attach` 直达 Session Work；磁盘 Pi sessions 进入独立 Resume/Adopt inventory。不得把该目标写成已经实现的事实。
 
-## 系统结构
+## 技术与结构
+
+- Node.js `>=22.19.0`，TypeScript ESM。
+- Pi SDK：`@earendil-works/pi-coding-agent@0.80.6`，生产代码只使用 package-root exports。
+- `@earendil-works/pi-tui@0.80.6` 是 V0.1 客户端 toolkit，不得把其类型泄漏到 Host、Protocol 或 Core port。
+- Managed Host 面向 `systemd --user`；开发模式使用独立 dev socket。
 
 ```text
-cli / interactive composition
-        │
-        ├── Dock Hub / Session Work TUI ── DockClient
-        │                                  │
-        ▼                                  ▼
-control protocol ── DockHost ── DockRegistry / catalog transactions
-                                      │
-                                      ▼
-                               ManagedInstance
-                                      │ RuntimeSession port
-                                      ▼
-                                PiRuntimeHost
-                                      │
-                         Pi public SDK / session JSONL
+cli / interactive / tui
+           │
+           ▼
+   DockClient / Protocol V2
+           │
+           ▼
+ DockHost ── DockRegistry / catalog
+           │
+           ▼
+     ManagedInstance
+           │ RuntimeSession port
+           ▼
+       Pi adapters
 ```
 
-依赖向内：`cli|tui → control → core ports/DTOs ← pi adapters`。`src/pi/*`可以依赖Core；Core和TUI不得依赖Pi runtime对象。
+依赖方向：`cli|tui → control → core ports/DTOs ← pi adapters`。Core 与 TUI 不得依赖 Pi runtime 对象。
 
-## 模块图谱
+## 按任务进入
 
 | 任务范围 | 先读 |
 |---|---|
 | Protocol、Host dispatch、DockClient、CLI、catalog | [`docs/agent_maps/control.md`](docs/agent_maps/control.md) |
 | ManagedInstance、Pi adapter、session replacement、settings、Extension UI | [`docs/agent_maps/runtime.md`](docs/agent_maps/runtime.md) |
-| Hub/Work TUI、conversation、history、tree、queue、mouse、activity | [`docs/agent_maps/tui.md`](docs/agent_maps/tui.md) |
+| 当前 interactive flow、目标 Hub、Session Work、history/tree/queue/activity | [`docs/agent_maps/tui.md`](docs/agent_maps/tui.md) |
 | systemd、managed startup、durable lifecycle、dogfood release | [`docs/agent_maps/deployment.md`](docs/agent_maps/deployment.md) |
 | 测试选择与门禁 | [`docs/qa.md`](docs/qa.md) |
 
-Managed发布或运维时额外读取[`docs/dogfood-deployment.md`](docs/dogfood-deployment.md)。
+Managed 发布或运维另读 [`docs/dogfood-deployment.md`](docs/dogfood-deployment.md)。从对应 map 列出的入口、直接依赖与测试开始；只有这些材料不足时才扩大读取范围。
 
-## 全局硬约束
+## 跨模块核心合同
 
-1. Host是Pi runtime、extensions、tools、admission、run Promise和副作用的唯一owner。
-2. Dock `instanceId`、Pi `sessionId/sessionFile`、`runtimeGeneration`不可混用。
-3. Wire major为`2`；advertised request/result/event必须是bounded closed schema。Capability只能在实现和门禁通过后advertise。
-4. Event identity是`(hostEpoch, instanceId, runtimeGeneration, sequence)`；replacement从`session.replaced` sequence 1开始新generation。
-5. Mutation不自动retry。传输丢失或post-effect不确定返回`effect_unknown`和原operation ID；operation ledger只提供Same-Host dedup，不宣称cross-Host exactly-once。
-6. Catalog commit是可观察边界；required commit前不得发布success、snapshot或event。
-7. Project trust必须先于target runtime构造、project resources、extension hook、teardown和catalog mutation。
-8. Host loss不恢复或重放prompt、queue、Promise或tool effect；explicit reopen是generation+1 fresh transaction。
-9. Durable catalog只保存身份、session metadata和保守intent；不保存正文、interaction、event log或Promise。
-10. Terminal-facing值过滤C0/C1；Protocol不传function、handler、component、binary、image bytes、data URI或raw base64。
-11. Work TUI中的session new/resume/fork/clone可以replacement当前Pi session；Dock Hub操作managed instances，不能静默替换无关source instance。
-12. 裸`alu-dock`进入按当前`pwd`提供上下文、无runtime副作用的Dock Hub；显式`new`和`attach TARGET`直达Session Work。磁盘Pi sessions只进入独立Resume/Adopt inventory。
-13. Human CLI必须闭环：可见ID/name可直接用于推荐动作；prefix/name歧义fail closed；不适用lifecycle的动作不展示；raw JSON只属于machine surface。
-14. 到1.0前是greenfield：直接替换当前合同，不加compatibility layer、migration、dual stack或legacy alias。
-15. 不从本仓修改Pi、`alu-daemon`、Rails WebConsole、Redis bridge、Alubot、npm/git package cache或live release。
+1. **Host 唯一持有运行时。** Pi runtime、extensions、tools、admission、run Promise 与副作用都属于 Host；客户端只消费控制面，不得成为第二 runtime owner。
+2. **身份不可混用。** Dock `instanceId`、Pi `sessionId/sessionFile` 与 `runtimeGeneration` 表示不同生命周期；session replacement 保留 Dock instance 并推进 generation。
+3. **控制面保持封闭。** Wire major 是 `2`；request/result/event 必须是有界、closed、JSON-safe schema，不传 runtime 对象、handler、component、binary、image bytes、data URI 或 raw base64。
+4. **信任先于构造和副作用。** Project trust 必须在目标 runtime、project resources、extension hooks、teardown 或 catalog mutation 之前确定。
+5. **Catalog commit 是可观察边界。** Required commit 完成前不得发布对应 success、snapshot 或 event；durable catalog 只保存身份、session metadata 与保守 intent，不保存正文、interaction、event log、queue 或 Promise。
+6. **Host loss 不触发隐式恢复。** 不自动恢复或重放 prompt、queue、interaction、Promise 或 tool effect；显式 reopen 是新 generation 的 fresh transaction。
+7. **不把不确定副作用当成失败重试。** Mutation 不自动 retry；传输丢失或 post-effect 不确定必须保留原 operation identity，并以不确定结果呈现。
+8. **普通客户端入口不拥有 service 生命周期。** `open`、`new`、`attach` 只连接既有 Host，不得隐式 install、start、restart 或 fork detached Host。
 
-## 实施纪律
+模块内的状态机、UI、settings、deployment 与测试细节以对应 agent map、代码和测试为准，不在顶层重复定义。
 
-- 一个能力只有一个owner模块；入口文件只做composition和routing。
-- 同一working tree保持一个writer；reviewer默认只读。
-- 实现期间运行focused检查；完整capability slice结束后执行一次对应门禁。不要按字段重复完整gate。
-- Settings成功路径固定为Pi public setter → `await flush()` → `drainErrors()`；没有public setter的字段保持只读。
-- 仓库故意没有`.pi/settings.json`；不得重建旧compaction guard。
-- TUI只消费closed DTO/event。Host内部事实只有在具有用户影响和可行动性时才进入conversation或warning。
-- 人工验收前，实现者先检查80×24与120×40真实输出。
+## 测试与发布入口
 
-## 图谱维护
+按 [`docs/qa.md`](docs/qa.md) 选择与改动匹配的最窄检查；Markdown-only 改动的入口是 `git diff --check` 与链接/路径核对。
 
-只有以下结构变化才更新对应agent map：
-
-- 主要入口文件；
-- 模块owner或依赖方向；
-- runtime/request/event调用链；
-- 单一数据源或持久化位置；
-- 对应测试入口。
-
-图谱不写任务状态、排期、release ID、测试累计数、实现过程或决策历史。
+Managed service 操作和 dogfood 发布合同见 [`docs/dogfood-deployment.md`](docs/dogfood-deployment.md)。未经明确授权，不运行真实 Pi/model smoke，不部署、不切换 release，也不重启 service。
