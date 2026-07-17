@@ -12,7 +12,9 @@ async function main(): Promise<void> {
   const client = new DockClient({ socketPath: args.socketPath, timeoutMs: 30_000 });
   const ping = await client.ping();
   const instance = await client.create(args.cwd, `release-smoke-${args.releaseId.slice(-12)}`);
+  let stopAttempted = false;
   let stopped = false;
+  let forgetAttempted = false;
   try {
     const [catalog, resources, tools, settings, snapshot, tree] = await Promise.all([
       client.commands(instance.id),
@@ -39,8 +41,11 @@ async function main(): Promise<void> {
     const projection = JSON.stringify({ catalog, resources, tools, settings });
     assert.doesNotMatch(projection, /data:[^,]*;base64,/iu);
     assert.doesNotMatch(projection, /"(?:handler|execute|component)"\s*:/u);
+    stopAttempted = true;
     await client.stop(instance.id);
     stopped = true;
+    forgetAttempted = true;
+    await client.forget(instance.id);
     process.stdout.write(`${JSON.stringify({
       kind: "dogfood.release_smoke",
       releaseId: args.releaseId,
@@ -58,7 +63,14 @@ async function main(): Promise<void> {
       passed: true,
     })}\n`);
   } finally {
-    if (!stopped) await client.stop(instance.id).catch(() => {});
+    if (!stopAttempted) {
+      stopAttempted = true;
+      stopped = await client.stop(instance.id).then(() => true, () => false);
+    }
+    if (stopped && !forgetAttempted) {
+      forgetAttempted = true;
+      await client.forget(instance.id).catch(() => {});
+    }
   }
 }
 

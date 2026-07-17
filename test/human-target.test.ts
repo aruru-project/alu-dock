@@ -39,7 +39,7 @@ test("displayed instance prefixes expand until unique across ID and exact-name c
   assert.equal(resolvedId(resolveHumanTarget(universe, uniqueInstanceIdPrefix(first, universe))), first.id);
 });
 
-test("Hub projects cwd context first and never recommends Attach for terminal or recoverable records", () => {
+test("Hub keeps a stable game-style root menu and separates current work from History", () => {
   const activeOther = instance("active00-0000-4000-8000-000000000001", "other", { cwd: "/other" });
   const recoverable = instance("recover0-0000-4000-8000-000000000002", "recover", {
     cwd: "/project", lifecycle: "host_lost", execution: "unavailable", reopenable: true, ownerHostEpoch: undefined,
@@ -47,12 +47,12 @@ test("Hub projects cwd context first and never recommends Attach for terminal or
   const stopped = instance("stopped0-0000-4000-8000-000000000003", "old", {
     cwd: "/project", lifecycle: "stopped", execution: "unavailable", ownerHostEpoch: undefined,
   });
-  const entries = buildDockHubEntries([activeOther, stopped, recoverable], [], "/project");
-  assert.match(entries[0]?.label ?? "", /recover/u);
+  const entries = buildDockHubEntries([activeOther, stopped, recoverable], [], "/project", undefined, 0, false, false);
+  assert.deepEqual(entries.map((entry) => entry.label), ["New", "Continue · 2", "History · 1", "Pi Sessions", "Leave Hub"]);
+  assert.doesNotMatch(JSON.stringify(entries), /recover|old|other/u, "root menu must not flatten catalog records");
   assert.equal(instanceActionSummary(recoverable), "Reopen or Forget");
   assert.doesNotMatch(instanceActionSummary(recoverable), /Attach/u);
-  assert.match(instanceActionSummary(stopped), /Attach unavailable/u);
-  assert.match(entries.at(-2)?.label ?? "", /Pi Sessions/u);
+  assert.equal(instanceActionSummary(stopped), "History record");
 });
 
 function resolvedId(result: ReturnType<typeof resolveHumanTarget>): string {

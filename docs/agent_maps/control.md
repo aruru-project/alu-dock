@@ -8,7 +8,7 @@ Protocol V2、Unix socket、DockClient、Host dispatch、managed instance目录�
 
 ```text
 src/cli.ts
-├── bare Hub / open / new / attach ──dynamic import──> src/interactive.ts ──> DockClient
+├── bare Hub / -c / open / new / attach ──dynamic import──> src/interactive.ts ──> DockClient
 ├── list/help ──> src/cli-list.ts / src/cli-help.ts
 ├── create/status/events/prompt/... ──> DockClient
 ├── serve ──> DockRegistry ──> DockHost
@@ -23,7 +23,7 @@ DockClient
                     └── ManagedInstance: runtime transaction/state
 ```
 
-当前空 argv 由 `src/cli.ts:parseGlobalArgs()` 映射为 `hub`；`src/interactive.ts` 首屏只查询只读 catalog，Pi session inventory 在用户选择对应入口后才延迟加载；只有明确选择 New、Resume、Adopt 或 Attach 后才进入 mutation/Work。显式 `open` 暂时保留旧 smart-entry，`new` 与 `attach TARGET` 直达 Work。
+当前空 argv 由 `src/cli.ts:parseGlobalArgs()` 映射为 `hub`；`src/interactive.ts` 首屏只查询只读 catalog，Pi session inventory 在用户选择对应入口后才延迟加载。固定根菜单为 New、Continue、History、Pi Sessions、Leave；Continue 只含 active/reopenable，History 包含 stopped 与不可恢复的 terminal catalog records。`-c`/`--continue` 显式选择当前 cwd 最近的 active/reopenable 实例，没有则 New。显式 `open` 暂时保留旧 smart-entry，`new` 与 `attach TARGET` 直达 Work。
 
 ## 文件owner
 
@@ -85,7 +85,7 @@ DockClient
 - Mutations由caller operation ID关联，client不自动retry。
 - Registry只在required catalog commit后publish instance或success。
 - `session.inventory` 只返回 bounded closed metadata，不构造 runtime；`instance.adopt` 必须先验证 session target 与 project trust，再构造 runtime 和 commit catalog。
-- `forget`/`prune`只删Dock catalog record，不删Pi session file。
+- Hub History 与 `forget`/`prune`只删Dock catalog record，不删Pi session file；History Continue 通过已保存 sessionFile 创建新 Dock identity。
 - `ensure-host.ts`只验证连接；普通open/new/attach不得导入deployment模块自动启动Host。
 - Human CLI不直接输出raw protocol error JSON。
 - Human CLI、Protocol V2 machine control与Pi-registered model tools是独立surface；Agent不得通过自身CLI形成self-loop。

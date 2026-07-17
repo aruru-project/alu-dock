@@ -42,7 +42,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (parsed.command === "hub" || parsed.command === "open" || parsed.command === "new" || parsed.command === "attach") {
+  if (parsed.command === "hub" || parsed.command === "continue" || parsed.command === "open" || parsed.command === "new" || parsed.command === "attach") {
     const options = parseInteractiveArgs(parsed.command, parsed.commandArgs);
     const { openDock } = await import("./interactive.js");
     await openDock({ socketPath: parsed.socketPath, ...options });
@@ -375,6 +375,9 @@ function parseGlobalArgs(args: string[]): ParsedArgs {
   if (command === "--help" || command === "-h") {
     return { socketPath, socketExplicit, command: "help", commandArgs: [] };
   }
+  if (command === "-c" || command === "--continue") {
+    return { socketPath, socketExplicit, command: "continue", commandArgs: remaining };
+  }
   if (command === "help") return { socketPath, socketExplicit, command, commandArgs: remaining };
   return { socketPath, socketExplicit, command, commandArgs: remaining };
 }
@@ -387,9 +390,9 @@ function parseServeMode(args: string[]): "managed" | "dev" {
 }
 
 function parseInteractiveArgs(
-  command: "hub" | "open" | "new" | "attach",
+  command: "hub" | "continue" | "open" | "new" | "attach",
   args: string[],
-): { mode: "hub" | "open" | "new" | "attach"; cwd: string; name?: string; target?: string; forceNew?: boolean } {
+): { mode: "hub" | "continue" | "open" | "new" | "attach"; cwd: string; name?: string; target?: string; forceNew?: boolean } {
   let cwd = process.cwd();
   let name: string | undefined;
   let target: string | undefined;
@@ -398,12 +401,12 @@ function parseInteractiveArgs(
   while (mutable.length > 0) {
     const arg = mutable.shift();
     if (arg === "--cwd") {
-      if (command === "attach" || command === "hub") throw new Error(`${command} does not accept --cwd`);
+      if (command === "attach" || command === "hub" || command === "continue") throw new Error(`${command} does not accept --cwd`);
       const value = mutable.shift();
       if (!value) throw new Error("--cwd requires a path");
       cwd = value;
     } else if (arg === "--name") {
-      if (command === "attach" || command === "hub") throw new Error(`${command} does not accept --name`);
+      if (command === "attach" || command === "hub" || command === "continue") throw new Error(`${command} does not accept --name`);
       const value = mutable.shift();
       if (!value) throw new Error("--name requires a non-empty value");
       name = value;
@@ -421,6 +424,7 @@ function parseInteractiveArgs(
     }
   }
   if (command === "hub" && args.length > 0) throw new Error("The bare Dock Hub does not accept arguments");
+  if (command === "continue" && args.length > 0) throw new Error("continue does not accept arguments; it uses the current directory");
   if (command === "attach" && target === undefined) throw new Error("attach requires TARGET; use a full ID, displayed unique prefix, or unique exact name");
   if (forceNew && target !== undefined) throw new Error(`${command} cannot combine TARGET with --new`);
   return { mode: command, cwd, name, target, forceNew };

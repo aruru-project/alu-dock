@@ -13,8 +13,11 @@ import { uniqueInstanceIdPrefix } from "../human-target.js";
 import { paint, selectListTheme } from "./theme.js";
 
 const NEW_INSTANCE = "hub:new";
+const CONTINUE = "hub:continue";
+const HISTORY = "hub:history";
 const SESSION_INVENTORY = "hub:sessions";
 const EXIT_HUB = "hub:exit";
+const MORE_INSTANCES = "hub:instances-more";
 const MORE_SESSIONS = "hub:sessions-more";
 const BACK = "hub:back";
 const MAX_HUB_INSTANCES = 100;
@@ -56,10 +59,20 @@ export async function runDockHub(client: DockClient, cwd: string): Promise<DockH
       "Alu Dock Hub",
       `Project · ${terminalSafe(contextCwd)}`,
       entries,
-      "↑↓ choose · Enter actions · Esc leave Hub",
+      "↑↓ choose · Enter open · Esc leave Hub",
     );
     if (!selected || selected === EXIT_HUB) return { kind: "exit" };
     if (selected === NEW_INSTANCE) return { kind: "new" };
+    if (selected === CONTINUE) {
+      const action = await chooseContinueAction(client, instances, contextCwd);
+      if (action) return action;
+      continue;
+    }
+    if (selected === HISTORY) {
+      const action = await chooseHistoryAction(client, instances, contextCwd);
+      if (action) return action;
+      continue;
+    }
     if (selected === SESSION_INVENTORY) {
       if (!inventoryLoaded && inventoryWarning === undefined) {
         process.stdout.write("Loading Pi Sessions…\n");
@@ -75,13 +88,6 @@ export async function runDockHub(client: DockClient, cwd: string): Promise<DockH
       }
       const sessionAction = await chooseSessionAction(instances, sessions, contextCwd, sessionTotal, inventoryTruncated);
       if (sessionAction) return sessionAction;
-      continue;
-    }
-    if (selected.startsWith("instance:")) {
-      const instance = instances.find((candidate) => candidate.id === selected.slice("instance:".length));
-      if (!instance) continue;
-      const action = await chooseInstanceAction(client, instance, instances);
-      if (action) return action;
     }
   }
 }
@@ -95,38 +101,158 @@ export function buildDockHubEntries(
   inventoryTruncated = false,
   inventoryLoaded = true,
 ): DockHubEntry[] {
-  const ordered = [...instances].sort((left, right) => compareHubInstances(left, right, cwd));
-  const visible = ordered.slice(0, MAX_HUB_INSTANCES);
-  const entries: DockHubEntry[] = visible.map((instance) => ({
-    value: `instance:${instance.id}`,
-    label: `${stateIcon(instance)} ${terminalSafe(instance.name || "(unnamed)")} [${uniqueInstanceIdPrefix(instance, instances)}]`,
-    description: `${terminalSafe(instance.cwd)} · ${instance.lifecycle}/${instance.execution} · ${instanceActionSummary(instance)}`,
-  }));
-  if (instances.length > visible.length) {
-    entries.push({
-      value: "hub:catalog-more",
-      label: `… ${instances.length - visible.length} older Dock record(s)`,
-      description: "Use alu-dock list --all to inspect the bounded human catalog",
-    });
-  }
-  entries.push({ value: NEW_INSTANCE, label: "+ New Dock instance", description: `Create in ${terminalSafe(cwd)}` });
-  entries.push({
-    value: SESSION_INVENTORY,
-    label: inventoryLoaded
-      ? `Pi Sessions · ${inventoryTruncated ? `${sessions.length} of ${sessionTotal}` : sessions.length}`
-      : "Pi Sessions",
-    description: inventoryWarning ?? `Browse saved sessions · Resume or Adopt${inventoryTruncated ? " · more available" : ""}`,
-  });
-  entries.push({ value: EXIT_HUB, label: "Leave Hub", description: "Return to the shell" });
-  return entries;
+  const continuable = instances.filter(isContinuable).length;
+  const history = instances.filter(isHistoryRecord).length;
+  return [
+    { value: NEW_INSTANCE, label: "New", description: `Create a Dock instance in ${terminalSafe(cwd)}` },
+    {
+      value: CONTINUE,
+      label: `Continue · ${continuable}`,
+      description: continuable > 0 ? "Attach or reopen current Dock work" : "No active or reopenable Dock instances",
+    },
+    {
+      value: HISTORY,
+      label: `History · ${history}`,
+      description: history > 0 ? "Open or forget past Dock records" : "No Dock history",
+    },
+    {
+      value: SESSION_INVENTORY,
+      label: inventoryLoaded
+        ? `Pi Sessions · ${inventoryTruncated ? `${sessions.length} of ${sessionTotal}` : sessions.length}`
+        : "Pi Sessions",
+      description: inventoryWarning ?? `Browse all saved Pi sessions${inventoryTruncated ? " · more available" : ""}`,
+    },
+    { value: EXIT_HUB, label: "Leave Hub", description: "Return to the shell" },
+  ];
 }
 
 export function instanceActionSummary(instance: InstanceSnapshot): string {
   if (instance.lifecycle === "active") return "Attach or Stop";
   if ((instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error") && instance.reopenable) return "Reopen or Forget";
   if (instance.lifecycle === "stopping") return "stop in progress; Attach unavailable";
-  if (instance.lifecycle === "stopped") return "stopped history; Attach unavailable";
+  if (instance.lifecycle === "stopped") return "History record";
   return "runtime unavailable; Forget only";
+}
+
+async function chooseContinueAction(
+  client: DockClient,
+  instances: readonly InstanceSnapshot[],
+  cwd: string,
+): Promise<DockHubAction | undefined> {
+  const ordered = instances.filter(isContinuable).sort((left, right) => compareHubInstances(left, right, cwd));
+  const visible = ordered.slice(0, MAX_HUB_INSTANCES);
+  const entries: DockHubEntry[] = visible.map((instance) => ({
+    value: `instance:${instance.id}`,
+    label: `${stateIcon(instance)} ${terminalSafe(instance.name || "(unnamed)")} [${uniqueInstanceIdPrefix(instance, instances)}]`,
+    description: `${terminalSafe(instance.cwd)} · ${instance.lifecycle}/${instance.execution} · ${instanceActionSummary(instance)}`,
+  }));
+  if (ordered.length > visible.length) {
+    entries.push({
+      value: MORE_INSTANCES,
+      label: `… ${ordered.length - visible.length} more current Dock instance(s)`,
+      description: "Use alu-dock list to inspect the bounded human catalog",
+    });
+  }
+  entries.push({ value: BACK, label: "Back to Hub", description: "no change" });
+  const selected = await selectMenu(
+    "Continue",
+    ordered.length > 0 ? "Current Dock work" : "No active or reopenable Dock instances",
+    entries,
+    "↑↓ choose · Enter actions · Esc back",
+  );
+  if (!selected || selected === BACK || selected === MORE_INSTANCES) return undefined;
+  const instance = instances.find((candidate) => candidate.id === selected.slice("instance:".length));
+  return instance ? chooseInstanceAction(client, instance, instances) : undefined;
+}
+
+async function chooseHistoryAction(
+  client: DockClient,
+  instances: readonly InstanceSnapshot[],
+  cwd: string,
+): Promise<DockHubAction | undefined> {
+  const ordered = instances
+    .filter(isHistoryRecord)
+    .sort((left, right) => compareHistory(left, right, cwd));
+  const visible = ordered.slice(0, MAX_HUB_INSTANCES);
+  const entries: DockHubEntry[] = visible.map((instance) => ({
+    value: `history:${instance.id}`,
+    label: `${terminalSafe(instance.name || "(unnamed)")} [${uniqueInstanceIdPrefix(instance, instances)}]`,
+    description: `${terminalSafe(instance.cwd)} · ${instance.lifecycle} · ${instance.executor.sessionFile ? "saved Pi session" : "no saved Pi session"} · ${instance.updatedAt}`,
+  }));
+  if (ordered.length > visible.length) {
+    entries.push({
+      value: MORE_INSTANCES,
+      label: `… ${ordered.length - visible.length} more history record(s)`,
+      description: "Use alu-dock list --all to inspect the bounded human catalog",
+    });
+  }
+  entries.push({ value: BACK, label: "Back to Hub", description: "no change" });
+  const selected = await selectMenu(
+    "History",
+    ordered.length > 0 ? "Past Dock records" : "No Dock history",
+    entries,
+    "↑↓ choose · Enter open · Esc back",
+  );
+  if (!selected || selected === BACK || selected === MORE_INSTANCES) return undefined;
+  const record = instances.find((candidate) => candidate.id === selected.slice("history:".length));
+  return record ? chooseHistoryRecordAction(client, record, instances) : undefined;
+}
+
+async function chooseHistoryRecordAction(
+  client: DockClient,
+  record: InstanceSnapshot,
+  instances: readonly InstanceSnapshot[],
+): Promise<DockHubAction | undefined> {
+  const shortId = uniqueInstanceIdPrefix(record, instances);
+  const sessionFile = record.lifecycle === "stopped" ? record.executor.sessionFile : undefined;
+  const linked = sessionFile
+    ? instances
+      .filter((candidate) => candidate.id !== record.id && candidate.executor.sessionFile === sessionFile && isContinuable(candidate))
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id))
+    : [];
+  const current = linked[0];
+  const entries: DockHubEntry[] = [];
+  if (sessionFile) {
+    entries.push({
+      value: "continue",
+      label: current ? "Continue current Dock instance" : "Continue saved session",
+      description: current
+        ? "This Pi session already has current Dock work"
+        : "Open the saved Pi session in a new Dock instance",
+    });
+  }
+  entries.push({
+    value: "forget",
+    label: "Forget history record",
+    description: "Remove this Dock history entry; keep the Pi session file",
+  });
+  entries.push({ value: BACK, label: "Back to History", description: "no change" });
+  const selected = await selectMenu(
+    `${terminalSafe(record.name || "Dock history")} [${shortId}]`,
+    `${terminalSafe(record.cwd)} · ${record.lifecycle}`,
+    entries,
+    "↑↓ choose · Enter confirm · Esc back",
+  );
+  if (!selected || selected === BACK) return undefined;
+  if (selected === "forget") {
+    await client.forget(record.id);
+    process.stdout.write(`Forgot History record ${shortId}; Pi session files were not deleted.\n`);
+    return undefined;
+  }
+
+  if (!sessionFile) return undefined;
+  if (current?.lifecycle === "active") return { kind: "attach", instance: current };
+  if (current) return { kind: "reopen", instance: current };
+  return {
+    kind: "adopt",
+    session: {
+      sessionId: record.executor.piSessionId,
+      sessionFile,
+      name: record.name,
+      cwd: record.cwd,
+      updatedAt: record.updatedAt,
+    },
+  };
 }
 
 async function chooseInstanceAction(
@@ -142,10 +268,8 @@ async function chooseInstanceAction(
   } else if ((instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error") && instance.reopenable) {
     entries.push({ value: "reopen", label: "Reopen persisted context", description: "start a fresh runtime generation with no prompt/effect replay" });
     entries.push({ value: "forget", label: "Forget Dock record", description: "keep the Pi session file" });
-  } else if (instance.lifecycle !== "stopping") {
-    entries.push({ value: "forget", label: "Forget Dock record", description: "remove only this terminal catalog record" });
   }
-  entries.push({ value: BACK, label: "Back to Dock instances", description: "no change" });
+  entries.push({ value: BACK, label: "Back to Continue", description: "no change" });
   const selected = await selectMenu(
     `${terminalSafe(instance.name || "Dock instance")} [${shortId}]`,
     `${instance.lifecycle}/${instance.execution} · ${terminalSafe(instance.cwd)}`,
@@ -187,7 +311,7 @@ async function chooseSessionAction(
   if (omitted > 0 || truncated) {
     entries.push({ value: MORE_SESSIONS, label: `… ${omitted} more persisted session(s)`, description: "older entries are omitted from this bounded Hub view" });
   }
-  entries.push({ value: BACK, label: "Back to Dock instances", description: "no change" });
+  entries.push({ value: BACK, label: "Back to Hub", description: "no change" });
   const selected = await selectMenu(
     "Pi Sessions",
     "Choose a saved session",
@@ -270,6 +394,16 @@ async function selectMenu(
   }
 }
 
+function isContinuable(instance: InstanceSnapshot): boolean {
+  return instance.lifecycle === "active"
+    || ((instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error") && instance.reopenable);
+}
+
+function isHistoryRecord(instance: InstanceSnapshot): boolean {
+  return instance.lifecycle === "stopped"
+    || ((instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error") && !instance.reopenable);
+}
+
 function compareHubInstances(left: InstanceSnapshot, right: InstanceSnapshot, cwd: string): number {
   const leftProject = resolve(left.cwd) === resolve(cwd) ? 0 : 1;
   const rightProject = resolve(right.cwd) === resolve(cwd) ? 0 : 1;
@@ -279,13 +413,18 @@ function compareHubInstances(left: InstanceSnapshot, right: InstanceSnapshot, cw
     || left.id.localeCompare(right.id);
 }
 
+function compareHistory(left: InstanceSnapshot, right: InstanceSnapshot, cwd: string): number {
+  const leftProject = resolve(left.cwd) === resolve(cwd) ? 0 : 1;
+  const rightProject = resolve(right.cwd) === resolve(cwd) ? 0 : 1;
+  return leftProject - rightProject
+    || right.updatedAt.localeCompare(left.updatedAt)
+    || left.id.localeCompare(right.id);
+}
+
 function instancePriority(instance: InstanceSnapshot): number {
   if (instance.lifecycle === "active" && instance.execution === "running") return 0;
   if (instance.lifecycle === "active") return 1;
-  if ((instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error") && instance.reopenable) return 2;
-  if (instance.lifecycle === "stopping") return 3;
-  if (instance.lifecycle === "stopped") return 5;
-  return 4;
+  return 2;
 }
 
 function compareSessions(left: SessionDto, right: SessionDto, cwd: string): number {
@@ -296,10 +435,7 @@ function compareSessions(left: SessionDto, right: SessionDto, cwd: string): numb
 function stateIcon(instance: InstanceSnapshot): string {
   if (instance.lifecycle === "active" && instance.execution === "running") return "◆";
   if (instance.lifecycle === "active") return "●";
-  if ((instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error") && instance.reopenable) return "↻";
-  if (instance.lifecycle === "stopping") return "◇";
-  if (instance.lifecycle === "stopped") return "○";
-  return "!";
+  return "↻";
 }
 
 function terminalSafe(value: string): string {

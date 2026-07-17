@@ -59,7 +59,7 @@ def main() -> int:
     status = 1
     try:
         action = os.environ.get("ALU_DOCK_PTY_ACTION", "detach")
-        hub_actions = ("hub-exit", "hub-signal", "hub-new", "hub-adopt")
+        hub_actions = ("hub-exit", "hub-signal", "hub-new", "hub-continue", "hub-history", "hub-history-forget", "hub-adopt")
         startup_marker = b"Alu Dock Hub" if action in hub_actions else b"NIGHT CONSOLE"
         set_size(fd, 24, 80)
         deadline = time.monotonic() + 12
@@ -89,13 +89,57 @@ def main() -> int:
             elif action == "hub-signal":
                 os.kill(pid, signal.SIGTERM)
             elif action == "hub-new":
-                os.write(fd, b"\r")  # Empty Hub defaults to New.
+                os.write(fd, b"\r")  # Hub defaults to New.
                 work_deadline = time.monotonic() + 8
                 while b"NIGHT CONSOLE" not in output and time.monotonic() < work_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
+            elif action == "hub-continue":
+                os.write(fd, b"\x1b[B\r")  # Continue is second in the stable root menu.
+                continue_deadline = time.monotonic() + 5
+                while b"Current Dock work" not in output and time.monotonic() < continue_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\r")  # Select the current Dock instance.
+                action_deadline = time.monotonic() + 5
+                while b"Attach Session Work" not in output and time.monotonic() < action_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\r")
+                work_deadline = time.monotonic() + 8
+                while b"NIGHT CONSOLE" not in output and time.monotonic() < work_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+            elif action in ("hub-history", "hub-history-forget"):
+                os.write(fd, b"\x1b[B\x1b[B\r")  # History is third.
+                history_deadline = time.monotonic() + 5
+                while b"Past Dock records" not in output and time.monotonic() < history_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\r")  # Select the newest stopped record.
+                action_deadline = time.monotonic() + 5
+                while b"Forget history record" not in output and time.monotonic() < action_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                if action == "hub-history":
+                    os.write(fd, b"\r")
+                    work_deadline = time.monotonic() + 8
+                    while b"NIGHT CONSOLE" not in output and time.monotonic() < work_deadline:
+                        if read_available(fd, output, 0.05) < 0:
+                            break
+                else:
+                    os.write(fd, b"\x1b[B\r")  # Forget is below Continue.
+                    forget_deadline = time.monotonic() + 5
+                    while b"Forgot History record" not in output and time.monotonic() < forget_deadline:
+                        if read_available(fd, output, 0.05) < 0:
+                            break
+                    empty_deadline = time.monotonic() + 5
+                    while b"No Dock history" not in output and time.monotonic() < empty_deadline:
+                        if read_available(fd, output, 0.05) < 0:
+                            break
+                    os.write(fd, b"\x1b")
             elif action == "hub-adopt":
-                os.write(fd, b"\x1b[B\r")  # Pi Sessions is below New in an empty Hub.
+                os.write(fd, b"\x1b[B\x1b[B\x1b[B\r")  # Pi Sessions is fourth.
                 inventory_deadline = time.monotonic() + 5
                 while b"Choose a saved session" not in output and time.monotonic() < inventory_deadline:
                     if read_available(fd, output, 0.05) < 0:
@@ -381,7 +425,7 @@ def main() -> int:
                 os.write(fd, b"\x0f")  # Ctrl+O: collapse/expand tool output.
                 time.sleep(0.1)
                 read_available(fd, output, 0.05)
-            if action not in ("hub-exit", "hub-signal"):
+            if action not in ("hub-exit", "hub-signal", "hub-history-forget"):
                 os.write(fd, b"\x04")  # Ctrl+D: detach without stopping.
 
         exit_deadline = time.monotonic() + 8

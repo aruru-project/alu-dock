@@ -7,7 +7,7 @@ Interactive入口、Dock Hub、attached Session Work、conversation、history、
 ## 当前入口与数据流
 
 ```text
-src/cli.ts bare Hub / open / new / attach
+src/cli.ts bare Hub / -c / open / new / attach
   └── src/interactive.ts: openDock()
         ├── ensureHost()
         ├── bare → runDockHub(client, cwd)
@@ -26,14 +26,16 @@ runDockTui()
   └── editor/slash/key input ──> DockClient mutations
 ```
 
-当前独立 Hub 由 `src/tui/dock-hub.ts` 负责，首屏只读取 Dock catalog，Resume/Adopt inventory 在用户进入 Pi Sessions 后延迟加载；New、Resume、Adopt、Attach、Stop、Forget 都要求明确选择。managed-instance 列表与 Resume/Adopt inventory 不进入 attached `dock-tui.ts`。#175 的大阿露视觉资产与低频眨眼仍是后续独立 slice。
+当前独立 Hub 由 `src/tui/dock-hub.ts` 负责，固定根菜单顺序是 New、Continue、History、Pi Sessions、Leave。首屏只读取 Dock catalog；Continue 再展示 active/reopenable 工作，History 再展示 stopped 与不可恢复的 terminal records，Resume/Adopt inventory 在用户进入 Pi Sessions 后延迟加载。History Continue 从原 Pi session 创建新 Dock identity，Forget 只删 History record。managed-instance 列表与 Resume/Adopt inventory 不进入 attached `dock-tui.ts`。`-c`/`--continue` 是显式 current-project smart-entry。#175 的大阿露视觉资产与低频眨眼仍是后续独立 slice。
 
 ## Scope边界
 
 ```text
 Dock Hub
   primary object: Dock instance
-  actions: managed instance lifecycle/navigation
+  root: New / Continue / History / Pi Sessions / Leave
+  current work: active/reopenable managed instance lifecycle
+  history: stopped/unrecoverable Dock records; stopped saved sessions may Continue, all may Forget
   separate inventory: persisted Pi sessions for Resume/Adopt
   mascot: client-local, low-frequency blink only; no Host/instance aggregation
 
@@ -83,7 +85,7 @@ Warning必须说明用户影响和可执行动作；closed Host projection本身
 
 | 需求 | 从这里开始 | 随后检查 |
 |---|---|---|
-| bare Hub / instance list / Resume inventory | `interactive.ts` + 新focused Hub模块 | `cli.ts`, `cli-list.ts`, DockClient queries、80×24/120×40 PTY |
+| bare Hub / Continue / History / Resume inventory / `-c` | `interactive.ts` + `dock-hub.ts` | `cli.ts`, `cli-list.ts`, DockClient queries、80×24/120×40 PTY |
 | Work信息层级或multiline | `conversation.ts`, `screen-layout.ts` | `pi-tui-screen.ts`, `dock-tui.ts`, render tests |
 | transient activity | `run-activity.ts`, `activity-pulse.ts` | snapshot reducer、fixed activity slot、idle CPU |
 | conversation event展示 | `conversation.ts` | event lifetime分类、history replay dedup |

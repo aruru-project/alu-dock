@@ -1,6 +1,7 @@
 const HELP_FLAGS = new Set(["--help", "-h"]);
 
 const PUBLIC_TOPICS = new Set([
+  "continue",
   "open",
   "new",
   "attach",
@@ -59,6 +60,7 @@ export function renderCliHelp(topics: readonly string[]): string {
   if (topic === "service") return serviceHelp(rest);
   if (rest.length > 0) throw new Error(`${topic} does not have help subtopics`);
   switch (topic) {
+    case "continue": return continueHelp();
     case "open": return openHelp();
     case "new": return newHelp();
     case "attach": return attachHelp();
@@ -73,7 +75,11 @@ export function renderCliHelp(topics: readonly string[]): string {
 }
 
 function overviewHelp(): string {
-  return `Alu Dock — managed Pi development terminal for SSH\n\nUsage:\n  alu-dock\n  alu-dock COMMAND [OPTIONS]\n  alu-dock help [COMMAND]\n\nStart here:\n  alu-dock                 Open the Dock Hub\n  alu-dock new             Create a new Pi session and enter Work\n  alu-dock attach TARGET   Attach to a known active instance\n\nHuman commands:\n  open      Explicit legacy smart-entry or reopen by TARGET\n  new       Create a separate instance and Pi session\n  attach    Resolve TARGET and enter Work without taking Host ownership\n  list      Show actionable instances (or all catalog history)\n  status    Show one instance in detail\n  stop      Explicitly stop and dispose one instance\n  forget    Remove one terminal record from the Dock catalog\n  prune     Remove stopped records from the Dock catalog\n  service   Manage the systemd --user Host\n  help      Explore command help\n\nThe managed Host must be running. The Hub opens with pwd as its project context.\nCtrl+D detaches Work; stop is destructive to the live runtime.\n\nExplore:\n  alu-dock help open\n  alu-dock help service\n  alu-dock COMMAND --help\n`;
+  return `Alu Dock — managed Pi development terminal for SSH\n\nUsage:\n  alu-dock\n  alu-dock COMMAND [OPTIONS]\n  alu-dock help [COMMAND]\n\nStart here:\n  alu-dock                 Open the Dock Hub\n  alu-dock -c              Continue recent work here, or create it\n  alu-dock new             Create a new Pi session and enter Work\n  alu-dock attach TARGET   Attach to a known active instance\n\nHuman commands:\n  continue  Current-directory smart entry (-c, --continue)\n  open      Explicit legacy smart-entry or reopen by TARGET\n  new       Create a separate instance and Pi session\n  attach    Resolve TARGET and enter Work without taking Host ownership\n  list      Show actionable instances (or all catalog history)\n  status    Show one instance in detail\n  stop      Explicitly stop and dispose one instance\n  forget    Remove one terminal record from the Dock catalog\n  prune     Remove stopped records from the Dock catalog\n  service   Manage the systemd --user Host\n  help      Explore command help\n\nThe managed Host must be running. The Hub opens with pwd as its project context.\nCtrl+D detaches Work; stop is destructive to the live runtime.\n\nExplore:\n  alu-dock help open\n  alu-dock help service\n  alu-dock COMMAND --help\n`;
+}
+
+function continueHelp(): string {
+  return `alu-dock -c — continue recent work in the current directory\n\nUsage:\n  alu-dock -c\n  alu-dock --continue\n  alu-dock continue\n\nSelects the most recently updated active or reopenable Dock instance for the\ncurrent directory and enters Session Work. Active work is attached; recoverable\nwork is explicitly reopened. When no candidate exists, a new Dock instance and\nPi session are created. Stopped History and the separate Pi Sessions inventory\nare not searched.\n\nThis command connects only to an existing Host; it never starts systemd or forks\na detached Host.\n`;
 }
 
 function openHelp(): string {

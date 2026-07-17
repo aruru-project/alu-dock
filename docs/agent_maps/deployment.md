@@ -53,7 +53,7 @@ Corrupt catalog evidence保留；失败时不得先构造prior runtime。Startup
 | `src/deployment/user-service.ts` | explicit generated-unit lifecycle、readiness、logs | `user-service` |
 | `src/deployment/dogfood-release.ts` | release layout、unit/launcher rendering、release ID | `dogfood-release` |
 | `scripts/deploy-dogfood.ts` | full immutable publish/switch/smoke/rollback transaction | `dogfood-release` + real deploy gate |
-| `scripts/dogfood-smoke.ts` | released DockClient command/resources/tools/settings smoke | release gate |
+| `scripts/dogfood-smoke.ts` | released DockClient command/resources/tools/settings smoke；Stop 后 Forget 自身 record，不污染 History | release gate |
 | `src/cli.ts:serve()` | managed/dev mode composition与signal shutdown | `managed-mode`, process tests |
 | `src/control/dock-host.ts` | bind-first startup、drain、socket ownership、fatal completion | `durable-host-process`, `dock-control` |
 | `src/control/durable-catalog-store.ts` | strict schema-1 load、atomic replace、directory sync | `durable-catalog-store` |

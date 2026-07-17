@@ -33,20 +33,21 @@ test("top-level help is human-only, bounded, and locally rendered", async () => 
   for (const result of [flag, command, short]) assertHelpSuccess(result);
   assert.equal(flag.stdout, command.stdout);
   assert.equal(command.stdout, short.stdout);
-  for (const publicCommand of ["open", "new", "attach", "list", "status", "stop", "forget", "prune", "service", "help"]) {
+  for (const publicCommand of ["continue", "open", "new", "attach", "list", "status", "stop", "forget", "prune", "service", "help"]) {
     assert.match(flag.stdout, new RegExp(`\\b${publicCommand}\\b`, "u"));
   }
   for (const internalSignature of ["alu-dock serve", "alu-dock ping", "alu-dock create", "alu-dock reopen", "alu-dock events", "alu-dock prompt", "--socket"]) {
     assert.doesNotMatch(flag.stdout, new RegExp(escapeRegExp(internalSignature), "u"));
   }
   assert.match(flag.stdout, /Open the Dock Hub/u);
+  assert.match(flag.stdout, /alu-dock -c/u);
   assert.doesNotMatch(flag.stdout, /side-effect-free/u);
   assert.match(flag.stdout, /attach TARGET/u);
   assert.ok(Math.max(...flag.stdout.trimEnd().split("\n").map((line) => line.length)) <= 80);
 });
 
 test("every public human command supports equivalent local help forms", async () => {
-  for (const command of ["open", "new", "attach", "list", "status", "stop", "forget", "prune"]) {
+  for (const command of ["continue", "open", "new", "attach", "list", "status", "stop", "forget", "prune"]) {
     const [flag, topic] = await Promise.all([
       runCli([command, "--help"]),
       runCli(["help", command]),
@@ -57,6 +58,15 @@ test("every public human command supports equivalent local help forms", async ()
     assert.match(flag.stdout, new RegExp(`alu-dock ${command}`, "u"));
   }
 
+  const [continueShort, continueLong] = await Promise.all([
+    runCli(["-c", "--help"]),
+    runCli(["--continue", "--help"]),
+  ]);
+  assertHelpSuccess(continueShort);
+  assertHelpSuccess(continueLong);
+  assert.equal(continueShort.stdout, continueLong.stdout);
+  assert.match(continueShort.stdout, /most recently updated/u);
+
   const positional = await runCli(["open", "--cwd", "/path/that/does/not/exist", "--name", "ignored", "--help"]);
   assertHelpSuccess(positional);
   assert.match(positional.stdout, /smart project entry/u);
@@ -66,7 +76,7 @@ test("every public human command supports equivalent local help forms", async ()
   assert.match(missingBusinessArgument.stdout, /TARGET/u);
 });
 
-test("interactive command grammar keeps bare Hub, new, and attach intents distinct", async () => {
+test("interactive command grammar keeps bare Hub, continue, new, and attach intents distinct", async () => {
   const missingTarget = await runCli(["attach"]);
   assert.equal(missingTarget.code, 1);
   assert.match(missingTarget.stderr, /^Alu Dock: attach requires TARGET/u);
@@ -78,6 +88,14 @@ test("interactive command grammar keeps bare Hub, new, and attach intents distin
     assert.equal(blankTarget.stdout, "");
     assert.match(blankTarget.stderr, new RegExp(`^Alu Dock: ${command} TARGET must be non-empty`, "u"));
   }
+
+  const continueTarget = await runCli(["-c", "target"]);
+  assert.equal(continueTarget.code, 1);
+  assert.match(continueTarget.stderr, /continue does not accept TARGET/u);
+
+  const continueCwd = await runCli(["--continue", "--cwd", "/tmp"]);
+  assert.equal(continueCwd.code, 1);
+  assert.match(continueCwd.stderr, /continue does not accept --cwd/u);
 
   const attachNew = await runCli(["attach", "target", "--new"]);
   assert.equal(attachNew.code, 1);

@@ -14,7 +14,7 @@ import { selectInstance } from "./tui/select-instance.js";
 export interface OpenDockOptions {
   socketPath: string;
   cwd: string;
-  mode: "hub" | "open" | "new" | "attach";
+  mode: "hub" | "continue" | "open" | "new" | "attach";
   name?: string;
   target?: string;
   forceNew?: boolean;
@@ -77,7 +77,7 @@ async function executeHubAction(
 async function resolveWorkInstance(
   client: DockClient,
   options: {
-    mode: "open" | "new" | "attach";
+    mode: "continue" | "open" | "new" | "attach";
     cwd: string;
     name?: string;
     target?: string;
@@ -85,6 +85,15 @@ async function resolveWorkInstance(
   },
 ): Promise<InstanceSnapshot | undefined> {
   if (options.mode === "new" || options.forceNew) return createWithNotice(client, options.cwd, options.name);
+
+  if (options.mode === "continue") {
+    const candidate = (await client.list("all"))
+      .filter((instance) => resolve(instance.cwd) === options.cwd && isContinuable(instance))
+      .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt) || right.id.localeCompare(left.id))[0];
+    if (!candidate) return createWithNotice(client, options.cwd, options.name);
+    if (candidate.lifecycle === "active") return candidate;
+    return reopenWithNotice(client, candidate);
+  }
 
   if (options.target !== undefined) {
     const instance = requireHumanTarget(await client.list("all"), options.target);
@@ -111,6 +120,11 @@ async function resolveWorkInstance(
   if (selection === "new") return createWithNotice(client, options.cwd, options.name);
   if (selection && selection.lifecycle !== "active") return reopenWithNotice(client, selection);
   return selection;
+}
+
+function isContinuable(instance: InstanceSnapshot): boolean {
+  return instance.lifecycle === "active"
+    || ((instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error") && instance.reopenable);
 }
 
 function assertAttachable(instance: InstanceSnapshot): InstanceSnapshot {
