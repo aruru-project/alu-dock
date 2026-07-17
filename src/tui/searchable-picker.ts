@@ -18,6 +18,7 @@ export interface SearchablePickerOptions {
   body?: string;
   maxVisible?: number;
   initialValue?: string;
+  pageNavigation?: boolean;
   requestRender: () => void;
 }
 
@@ -32,6 +33,7 @@ export class SearchablePicker extends Container implements Focusable {
   private readonly footer: string;
   private readonly body: string | undefined;
   private readonly requestRender: () => void;
+  private readonly pageNavigation: boolean;
   private focusedValue = false;
 
   onSelect?: (item: SearchableItem) => void;
@@ -50,6 +52,7 @@ export class SearchablePicker extends Container implements Focusable {
     this.footer = safeDisplayText(options.footer ?? "type to filter · ↑↓ choose · Enter select · Esc cancel");
     this.body = options.body === undefined ? undefined : safeBodyText(options.body);
     this.requestRender = options.requestRender;
+    this.pageNavigation = options.pageNavigation === true;
     const initialIndex = options.initialValue === undefined
       ? -1
       : this.filteredItems.findIndex((item) => item.value === options.initialValue);
@@ -68,10 +71,10 @@ export class SearchablePicker extends Container implements Focusable {
       this.move(-1);
     } else if (matchesKey(data, Key.down)) {
       this.move(1);
-    } else if (matchesKey(data, Key.pageUp)) {
-      this.move(-this.maxVisible);
-    } else if (matchesKey(data, Key.pageDown)) {
-      this.move(this.maxVisible);
+    } else if (matchesKey(data, Key.pageUp) || (this.pageNavigation && matchesKey(data, Key.left))) {
+      this.movePage(-1);
+    } else if (matchesKey(data, Key.pageDown) || (this.pageNavigation && matchesKey(data, Key.right))) {
+      this.movePage(1);
     } else if (matchesKey(data, Key.enter)) {
       const selected = this.filteredItems[this.selectedIndex];
       if (selected) this.onSelect?.(selected);
@@ -144,6 +147,14 @@ export class SearchablePicker extends Container implements Focusable {
     if (this.filteredItems.length === 0) return;
     const length = this.filteredItems.length;
     this.selectedIndex = (this.selectedIndex + delta % length + length) % length;
+  }
+
+  private movePage(direction: -1 | 1): void {
+    if (this.filteredItems.length === 0) return;
+    this.selectedIndex = Math.max(
+      0,
+      Math.min(this.filteredItems.length - 1, this.selectedIndex + direction * this.maxVisible),
+    );
   }
 }
 

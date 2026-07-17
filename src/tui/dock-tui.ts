@@ -581,6 +581,7 @@ export async function runDockTui(
     items: Array<{ value: string; label: string; description?: string }>,
     currentValue?: string,
     footerText = "type to filter · ↑↓ choose · Enter select · Esc cancel",
+    options: { pageNavigation?: boolean } = {},
   ): Promise<string | undefined> {
     if (items.length === 0) return undefined;
     const picker = new SearchablePicker(
@@ -594,6 +595,7 @@ export async function runDockTui(
         footer: terminalSafe(footerText),
         maxVisible: Math.min(items.length, 14),
         ...(currentValue === undefined ? {} : { initialValue: currentValue }),
+        ...(options.pageNavigation === undefined ? {} : { pageNavigation: options.pageNavigation }),
         requestRender: () => tui.requestRender(),
       },
     );
@@ -856,9 +858,7 @@ export async function runDockTui(
   }
 
   async function loadSessionTree(): Promise<{ nodes: TreeNodeDto[]; leafId?: string; total: number; revision: string }> {
-    const tree = await collectSessionTree((revision, cursor, limit) => client.tree(instance.id, revision, cursor, limit));
-    if (tree.capped) conversation.addNotice(`Tree selector is showing the first ${tree.nodes.length.toLocaleString()} of ${tree.total.toLocaleString()} entries.`, true);
-    return tree;
+    return collectSessionTree((revision, cursor, limit) => client.tree(instance.id, revision, cursor, limit));
   }
 
   async function chooseTreeNode(
@@ -877,7 +877,8 @@ export async function runDockTui(
       titleText,
       treePickerItems(candidates, tree.leafId, tree.nodes),
       tree.leafId,
-      "type text/id/label · ↑↓ choose · Enter select · Esc cancel",
+      "type text/id/label · ↑↓ move · ←→/PgUp/PgDn page · Enter select · Esc cancel",
+      { pageNavigation: true },
     );
     return selected === undefined ? undefined : byId.get(selected);
   }

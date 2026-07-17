@@ -58,6 +58,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
   history: RuntimeHistoryEntry[] = [];
   treeNodes: RuntimeTreeNode[] = [];
   treeLeafId: string | undefined;
+  treeReadCalls = 0;
   navigationResult: RuntimeNavigateResult | undefined;
   metrics: RuntimeSessionMetrics = {
     messages: { user: 0, assistant: 0, toolCalls: 0, toolResults: 0, total: 0 },
@@ -149,6 +150,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
   getHistory(): RuntimeHistoryEntry[] { return structuredClone(this.history); }
 
   getTree(): RuntimeTreeSnapshot {
+    this.treeReadCalls += 1;
     return {
       nodes: structuredClone(this.treeNodes),
       ...(this.treeLeafId === undefined ? {} : { leafId: this.treeLeafId }),

@@ -66,6 +66,39 @@ test("tree collection holds one revision and reports a bounded selector cap", as
   await assert.rejects(collectSessionTree(async (_revision, cursor) => cursor === undefined ? pages[0] as typeof pages[number] : { ...pages[1], treeRevision: "changed" } as typeof pages[number]), /changed during pagination/);
 });
 
+test("tree collection includes and searches entries beyond the former 5,000-node selector cap", async () => {
+  const total = 14_392;
+  const large = Array.from({ length: total }, (_, index): TreeNodeDto => ({
+    entryId: `entry-${index}`,
+    ...(index === 0 ? {} : { parentId: `entry-${index - 1}` }),
+    depth: index,
+    kind: "message",
+    role: index % 2 === 0 ? "user" : "assistant",
+    summary: index === 12_345 ? "needle beyond old cap" : `turn ${index}`,
+    hasChildren: index < total - 1,
+  }));
+  let calls = 0;
+  const collected = await collectSessionTree(async (revision, afterEntryId, limit = 200) => {
+    calls += 1;
+    const start = afterEntryId === undefined ? 0 : Number(afterEntryId.slice("entry-".length)) + 1;
+    const pageNodes = large.slice(start, start + limit);
+    const truncated = start + pageNodes.length < large.length;
+    return {
+      treeRevision: revision ?? "g1-large",
+      nodes: pageNodes,
+      leafId: `entry-${total - 1}`,
+      total,
+      truncated,
+      ...(truncated ? { nextAfterEntryId: pageNodes.at(-1)?.entryId } : {}),
+    };
+  });
+
+  assert.equal(calls, Math.ceil(total / 200));
+  assert.equal(collected.capped, false);
+  assert.equal(collected.nodes.length, total);
+  assert.equal(treePickerItems(collected.nodes, collected.leafId).find((item) => item.label.includes("needle beyond old cap"))?.value, "entry-12345");
+});
+
 test("tree picker compresses linear depth and exposes branch points, active path, and sibling leaves", () => {
   const branched: TreeNodeDto[] = [
     { entryId: "root", depth: 0, kind: "message", role: "user", summary: "start task", hasChildren: true },

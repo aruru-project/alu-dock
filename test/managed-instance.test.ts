@@ -14,6 +14,7 @@ import {
 } from "../src/core/managed-instance.js";
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, ToolDto } from "../src/core/config-projection.js";
 import { RuntimeCompactionKnownFailureError } from "../src/core/runtime-session.js";
+import { DelayedRuntimeSession } from "./support/delayed-runtime-session.js";
 import type {
   ClearedRuntimeQueue,
   RuntimeCompactionResult,
@@ -27,6 +28,38 @@ import type {
   RuntimeSessionMetrics,
   RuntimeThinkingLevel,
 } from "../src/core/runtime-session.js";
+
+test("tree pages reuse one projected revision and invalidate after a persisted entry", async () => {
+  const session = new DelayedRuntimeSession("tree-cache");
+  session.treeNodes = Array.from({ length: 401 }, (_, index) => ({
+    entryId: `entry-${index}`,
+    ...(index === 0 ? {} : { parentId: `entry-${index - 1}` }),
+    depth: index,
+    kind: "message" as const,
+    role: index % 2 === 0 ? "user" as const : "assistant" as const,
+    summary: `turn ${index}`,
+    hasChildren: index < 400,
+  }));
+  session.treeLeafId = "entry-400";
+  const instance = new ManagedInstance({ cwd: "/fixture/cwd", session });
+
+  const first = await instance.getTreePage(undefined, undefined, 200);
+  const second = await instance.getTreePage(first.treeRevision, first.nextAfterEntryId, 200);
+  await instance.getTreePage(first.treeRevision, second.nextAfterEntryId, 200);
+  assert.equal(session.treeReadCalls, 1);
+
+  session.treeNodes[400] = { ...session.treeNodes[400]!, hasChildren: true };
+  session.treeNodes.push({
+    entryId: "entry-401", parentId: "entry-400", depth: 401, kind: "message", role: "assistant", summary: "new", hasChildren: false,
+  });
+  session.treeLeafId = "entry-401";
+  session.emit({ type: "entry_appended", entry: { id: "entry-401" } });
+  await assert.rejects(
+    instance.getTreePage(first.treeRevision, first.nextAfterEntryId, 200),
+    /Session tree changed/,
+  );
+  assert.equal(session.treeReadCalls, 2);
+});
 
 class Deferred<T> {
   readonly promise: Promise<T>;

@@ -107,7 +107,7 @@ export type {
   TreePageDto,
 } from "./instance-dto.js";
 export { MAX_PENDING_QUEUE_ITEMS, MAX_PENDING_QUEUE_TEXT_CHARS } from "./instance-dto.js";
-import { projectRuntimeNavigateResult, projectRuntimeTree } from "./session-tree.js";
+import { projectRuntimeNavigateResult, projectRuntimeTree, type ProjectedSessionTree } from "./session-tree.js";
 
 export interface ManagedInstanceOptions {
   id?: string;
@@ -279,6 +279,7 @@ export class ManagedInstance {
   private shutdownRequestedAt: string | undefined;
   private transitionTail: Promise<void> = Promise.resolve();
   private historyRefreshTail: Promise<void> = Promise.resolve();
+  private treeProjectionCache: { projection: ProjectedSessionTree; indexByEntryId: Map<string, number> } | undefined;
   private hostDrainActive = false;
   private hostDrainPromise: Promise<void> | undefined;
   private runtimeQueueClearAttempted = false;
@@ -647,15 +648,15 @@ export class ManagedInstance {
     limit: number,
   ): Promise<TreePageDto> {
     return this.withProjectionRead(async () => {
-      const tree = this.currentTreeProjection();
       if ((treeRevision === undefined) !== (afterEntryId === undefined)) {
         throw new InvalidTreeCursorError("Tree continuation requires both treeRevision and afterEntryId");
       }
+      const tree = this.currentTreeProjection(treeRevision === undefined);
       if (treeRevision !== undefined && treeRevision !== tree.treeRevision) throw new InvalidTreeCursorError();
       let start = 0;
       if (afterEntryId !== undefined) {
-        const index = tree.nodes.findIndex((node) => node.entryId === afterEntryId);
-        if (index < 0) throw new InvalidTreeCursorError("Tree continuation entry does not belong to this revision");
+        const index = this.treeProjectionCache?.indexByEntryId.get(afterEntryId);
+        if (index === undefined) throw new InvalidTreeCursorError("Tree continuation entry does not belong to this revision");
         start = index + 1;
       }
       const boundedLimit = Math.max(1, Math.min(200, Math.floor(limit)));
@@ -683,7 +684,7 @@ export class ManagedInstance {
       await this.beginConfiguration("navigating the session tree", false, "navigation");
       configurationStarted = true;
       if (!this.session.navigateTree) throw new Error("Runtime does not support session tree navigation");
-      if (!this.currentTreeProjection().nodes.some((node) => node.entryId === targetId)) {
+      if (!this.currentTreeProjection(true).nodes.some((node) => node.entryId === targetId)) {
         throw new InvalidTreeCursorError("Navigation target does not belong to the current session tree");
       }
       this.receiptBoundaryOperationId = operationId;
@@ -693,7 +694,7 @@ export class ManagedInstance {
       const result = projectRuntimeNavigateResult(await pending);
       await this.closeRuntimeOperationBoundary(operationId);
       if (result.cancelled) return result;
-      const tree = this.currentTreeProjection();
+      const tree = this.currentTreeProjection(true);
       await this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "session.navigate", effect: "post_effect", operationId, instanceId: this.id },
         () => this.touch(),
@@ -839,7 +840,7 @@ export class ManagedInstance {
     return this.replaceRuntime("forking session", operationId, "fork", { requestedEntryId: entryId }, async () => (
       this.session.fork!(operationId, entryId, "before", "fork")
     ), () => {
-      const target = this.currentTreeProjection().nodes.find((node) => node.entryId === entryId);
+      const target = this.currentTreeProjection(true).nodes.find((node) => node.entryId === entryId);
       if (target?.kind !== "message" || target.role !== "user") {
         throw new InvalidTreeCursorError("Fork target must be a user message in the current session tree");
       }
@@ -852,7 +853,7 @@ export class ManagedInstance {
       const result = await this.session.fork!(operationId, entryId, "at", "clone");
       return { cancelled: result.cancelled };
     }, () => {
-      const tree = this.currentTreeProjection();
+      const tree = this.currentTreeProjection(true);
       if (tree.leafId !== entryId) throw new InvalidTreeCursorError("Clone entry must be the current session leaf");
     });
   }
@@ -1859,9 +1860,15 @@ export class ManagedInstance {
     if (this.replacementIntent === undefined) this.recoverySessionFile = undefined;
   }
 
-  private currentTreeProjection(): { treeRevision: string; nodes: TreeNodeDto[]; leafId?: string } {
+  private currentTreeProjection(forceRefresh = false): ProjectedSessionTree {
+    if (!forceRefresh && this.treeProjectionCache) return this.treeProjectionCache.projection;
     if (!this.session.getTree) throw new Error("Runtime does not support session tree projection");
-    return projectRuntimeTree(this.session.getTree(), this.runtimeGenerationValue);
+    const projection = projectRuntimeTree(this.session.getTree(), this.runtimeGenerationValue);
+    this.treeProjectionCache = {
+      projection,
+      indexByEntryId: new Map(projection.nodes.map((node, index) => [node.entryId, index])),
+    };
+    return projection;
   }
 
   private buildHistoryPage(beforeEntryId: string | undefined, limit: number, beforeTimestamp?: string): HistoryPageDto {
@@ -2152,6 +2159,7 @@ export class ManagedInstance {
   }
 
   private refreshHistory(): void {
+    this.treeProjectionCache = undefined;
     this.historyValue = this.session.getHistory().map(projectRuntimeHistoryEntry);
   }
 

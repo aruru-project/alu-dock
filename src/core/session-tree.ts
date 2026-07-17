@@ -7,6 +7,8 @@ import type {
 } from "./runtime-session.js";
 import type { TreeNodeDto } from "./instance-dto.js";
 
+export const MAX_PROJECTED_SESSION_TREE_NODES = 100_000;
+
 export interface ProjectedSessionTree {
   treeRevision: string;
   nodes: TreeNodeDto[];
@@ -27,8 +29,8 @@ export function projectRuntimeTree(
   runtimeGeneration: number,
 ): ProjectedSessionTree {
   if (!Number.isSafeInteger(runtimeGeneration) || runtimeGeneration < 1) throw new Error("Runtime tree generation must be positive");
-  if (runtimeTree === null || typeof runtimeTree !== "object" || !Array.isArray(runtimeTree.nodes) || runtimeTree.nodes.length > 100_000) {
-    throw new Error("Runtime session tree is invalid or exceeds 100000 entries");
+  if (runtimeTree === null || typeof runtimeTree !== "object" || !Array.isArray(runtimeTree.nodes) || runtimeTree.nodes.length > MAX_PROJECTED_SESSION_TREE_NODES) {
+    throw new Error(`Runtime session tree is invalid or exceeds ${MAX_PROJECTED_SESSION_TREE_NODES} entries`);
   }
   const ids = new Set<string>();
   const ancestors: string[] = [];

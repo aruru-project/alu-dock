@@ -1,4 +1,5 @@
 import type { TreeNodeDto } from "../core/instance-dto.js";
+import { MAX_PROJECTED_SESSION_TREE_NODES } from "../core/session-tree.js";
 
 export type TreeFilterMode = "default" | "no-tools" | "user-only" | "labeled-only" | "all";
 
@@ -31,7 +32,7 @@ export interface TreeNavigationCommand {
 /** Collect one stable revision without coupling the view state to DockClient. */
 export async function collectSessionTree(
   fetchPage: (revision?: string, afterEntryId?: string, limit?: number) => Promise<SessionTreePage>,
-  maxNodes = 5_000,
+  maxNodes = MAX_PROJECTED_SESSION_TREE_NODES,
 ): Promise<CollectedSessionTree> {
   if (!Number.isSafeInteger(maxNodes) || maxNodes < 1) throw new Error("Session tree collection cap must be a positive integer");
   const boundedMaxNodes = maxNodes;
@@ -87,8 +88,15 @@ export function treePickerItems(
     cursor = cursor.parentId === undefined ? undefined : byId.get(cursor.parentId);
   }
 
+  const branchDepthById = new Map<string, number>();
+  for (const node of topology) {
+    const parentBranchDepth = node.parentId === undefined ? 0 : (branchDepthById.get(node.parentId) ?? 0);
+    const parentBranches = node.parentId !== undefined && (childCount.get(node.parentId) ?? 0) > 1;
+    branchDepthById.set(node.entryId, parentBranchDepth + (parentBranches ? 1 : 0));
+  }
+
   return nodes.map((node) => {
-    const branchDepth = branchAncestorCount(node, byId, childCount);
+    const branchDepth = branchDepthById.get(node.entryId) ?? 0;
     const isBranchPoint = (childCount.get(node.entryId) ?? 0) > 1;
     const isLeaf = !node.hasChildren;
     const onActivePath = activePath.has(node.entryId);
@@ -111,22 +119,6 @@ export function treePickerItems(
       description: flags.join(" · ") || role.toLowerCase(),
     };
   });
-}
-
-function branchAncestorCount(
-  node: TreeNodeDto,
-  byId: ReadonlyMap<string, TreeNodeDto>,
-  childCount: ReadonlyMap<string, number>,
-): number {
-  let count = 0;
-  let parent = node.parentId === undefined ? undefined : byId.get(node.parentId);
-  const seen = new Set<string>();
-  while (parent && !seen.has(parent.entryId)) {
-    seen.add(parent.entryId);
-    if ((childCount.get(parent.entryId) ?? 0) > 1) count += 1;
-    parent = parent.parentId === undefined ? undefined : byId.get(parent.parentId);
-  }
-  return count;
 }
 
 function semanticTreeRole(node: TreeNodeDto): string {

@@ -342,6 +342,22 @@ test("searchable picker accepts typed filtering while preserving IME focus propa
   assert.equal(cancelled, true);
 });
 
+test("tree picker uses left/right and page keys for clamped page movement", () => {
+  const picker = new SearchablePicker(
+    Array.from({ length: 30 }, (_, index) => ({ value: `entry-${index}`, label: `Entry ${index}` })),
+    { title: "Tree", maxVisible: 10, pageNavigation: true, requestRender: () => {} },
+  );
+  picker.handleInput("\u001b[D");
+  assert.equal(picker.getSelectedItem()?.value, "entry-0");
+  picker.handleInput("\u001b[C");
+  assert.equal(picker.getSelectedItem()?.value, "entry-10");
+  picker.handleInput("\u001b[6~");
+  picker.handleInput("\u001b[6~");
+  assert.equal(picker.getSelectedItem()?.value, "entry-29");
+  picker.handleInput("\u001b[5~");
+  assert.equal(picker.getSelectedItem()?.value, "entry-19");
+});
+
 test("run activity recovers the current phase from replay only while the snapshot is running", () => {
   const events = [
     event(1, "run.started", { operationId: "op-1", delivery: "prompt" }),
