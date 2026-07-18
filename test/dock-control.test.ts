@@ -1549,7 +1549,13 @@ test("a runtime-driven post-compaction continuation starts while every client is
     conversationBootstrap: true,
   });
   assert.equal(compactingReplay.initial.instance.execution, "running");
+  assert.equal(compactingReplay.initial.instance.compacting, true);
+  assert.equal(compactingReplay.initial.instance.lastRun, "succeeded");
   assert.deepEqual(compactingReplay.initial.page.events, [], "compaction without an active agent run has no conversation tail");
+  const projected = harness.registry.get(created.id).eventsSince().events;
+  const compactionStarted = projected.findIndex((event) => event.type === "compaction.started");
+  const runSettled = projected.findIndex((event) => event.type === "run.settled");
+  assert.ok(compactionStarted >= 0 && runSettled > compactionStarted, "Pi can publish compaction_start before its externally visible agent_settled");
   compactingReplay.close();
   await compactingReplay.done;
 
@@ -1561,6 +1567,7 @@ test("a runtime-driven post-compaction continuation starts while every client is
   const observer = new DockClient({ socketPath: harness.socketPath });
   const status = await observer.status(created.id);
   assert.equal(status.execution, "running");
+  assert.equal(status.compacting, false);
   assert.equal(status.activeCommandId, undefined);
   const replay = await observer.streamEvents(created.id, {
     onEvent: () => {},
@@ -2967,7 +2974,7 @@ test("stream callbacks follow initial response order and accept one-step replace
         const cursor = { hostEpoch: "epoch-1", instanceId: "instance-1", runtimeGeneration: 1, sequence: 1 };
         const snapshot = {
           id: "instance-1", creationOperationId: "create-1", cwd: directory,
-          lifecycle: "active", execution: "running", lastRun: "never", reopenable: false,
+          lifecycle: "active", execution: "running", compacting: false, lastRun: "never", reopenable: false,
           runtimeGeneration: 1, ownerHostEpoch: "epoch-1", pending: { steering: 0, followUp: 0, total: 0 },
           executor: { kind: "fake", piSessionId: "pi-1" }, extensionStatus: {}, activeCommandId: "command-1",
           createdAt: "2026-07-14T00:00:00.000Z", updatedAt: "2026-07-14T00:00:00.000Z", eventCursor: cursor,

@@ -456,16 +456,18 @@ export class DelayedRuntimeSession implements RuntimeSession {
     this.emit({ type: "agent_end", messages: [], willRetry: false });
     const continuation = this.postSettlementContinuation;
     this.postSettlementContinuation = undefined;
+    if (continuation) {
+      // Pi awaits extension agent_settled handlers before publishing its
+      // AgentSession agent_settled event. ctx.compact() launches an async task;
+      // its already-idle abort can resume and emit compaction_start first.
+      this.isCompacting = true;
+      this.emit({ type: "compaction_start", reason: "manual" });
+      continuation.compactionStarted.resolve();
+    }
     this.emit({ type: "agent_settled" });
     run.resolve();
     if (continuation) {
       void (async () => {
-        // Pi's extension compact callback begins after agent_settled: compact()
-        // first awaits abort(), then publishes compaction_start.
-        await Promise.resolve();
-        this.isCompacting = true;
-        this.emit({ type: "compaction_start", reason: "manual" });
-        continuation.compactionStarted.resolve();
         await continuation.finishCompaction.promise;
         this.isCompacting = false;
         this.emit({

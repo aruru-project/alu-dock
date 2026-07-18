@@ -165,6 +165,7 @@ interface PendingQueueMessage extends PendingMessageDto {
 interface MutableState {
   lifecycle: InstanceLifecycle;
   execution: InstanceExecution;
+  compacting: boolean;
   lastRun: LastRunResult;
   pendingSteering: number;
   pendingFollowUp: number;
@@ -372,6 +373,7 @@ export class ManagedInstance {
     this.state = {
       lifecycle: "active",
       execution: "idle",
+      compacting: false,
       lastRun: "never",
       pendingSteering: 0,
       pendingFollowUp: 0,
@@ -418,6 +420,7 @@ export class ManagedInstance {
     validateInstanceStateInvariant({
       lifecycle: snapshot.lifecycle,
       execution: snapshot.execution,
+      compacting: snapshot.compacting,
       ownerHostEpoch: snapshot.ownerHostEpoch,
       pendingCount: snapshot.pending.total,
       activeCommandId: snapshot.activeCommandId,
@@ -517,6 +520,7 @@ export class ManagedInstance {
       this.shutdownRequestedAt = undefined;
       this.state.lifecycle = "host_lost";
       this.state.execution = "unavailable";
+      this.state.compacting = false;
       if (busy) this.state.lastRun = "interrupted";
       this.state.activeCommandId = undefined;
       this.state.pendingSteering = 0;
@@ -559,6 +563,7 @@ export class ManagedInstance {
       cwd: this.cwd,
       lifecycle: this.state.lifecycle,
       execution: this.state.execution,
+      compacting: this.state.compacting,
       lastRun: this.state.lastRun,
       reopenable: (this.state.lifecycle === "host_lost" || this.state.lifecycle === "runtime_error")
         && (this.recoverySessionFile !== undefined || this.durableSessionFileValue !== undefined),
@@ -1740,6 +1745,7 @@ export class ManagedInstance {
         this.catalogAdmissionOperationId = undefined;
         this.state.lifecycle = "stopped";
         this.state.execution = "unavailable";
+        this.state.compacting = false;
         this.state.activeCommandId = undefined;
         this.state.pendingSteering = 0;
         this.state.pendingFollowUp = 0;
@@ -2301,6 +2307,7 @@ export class ManagedInstance {
         this.lastAssistantOutcome = undefined;
         this.extensionCommandInitiator = undefined;
         this.state.execution = "idle";
+        this.state.compacting = false;
         this.state.lastRun = "never";
         this.state.activeCommandId = undefined;
         this.state.lastError = undefined;
@@ -2345,6 +2352,7 @@ export class ManagedInstance {
         this.interruptionValue = { reason: "replacement_failed", at: this.timestamp() };
         this.state.lifecycle = "runtime_error";
         this.state.execution = "unavailable";
+        this.state.compacting = false;
         this.state.activeCommandId = undefined;
         this.state.pendingSteering = 0;
         this.state.pendingFollowUp = 0;
@@ -2413,6 +2421,7 @@ export class ManagedInstance {
         await this.commitCatalogTransition(context("compaction.started"), () => {
           this.startCompactionBoundary(operationId);
           this.state.execution = "running";
+          this.state.compacting = true;
           this.touch();
         }, () => this.appendEvent("compaction.started", {
           reason: compactionReason(event.reason),
@@ -2423,6 +2432,7 @@ export class ManagedInstance {
         try {
           await this.commitCatalogTransition(context("compaction.completed"), () => {
             if (this.state.activeCommandId === undefined && event.willRetry !== true) this.state.execution = "idle";
+            this.state.compacting = false;
             this.touch();
           }, () => {
             this.appendEvent("compaction.completed", {
@@ -2466,6 +2476,11 @@ export class ManagedInstance {
         this.state.execution = "idle";
         this.state.lastError = undefined;
       }
+      // Pi awaits extension agent_settled handlers before publishing its own
+      // agent_settled event. An extension-triggered compact() can therefore
+      // publish compaction_start first. Settling the completed agent run must
+      // not make that still-active compaction look idle.
+      if (this.compactionActive) this.state.execution = "running";
       this.state.lastRun = result;
       this.state.activeCommandId = undefined;
       this.touch();
@@ -2513,6 +2528,7 @@ export class ManagedInstance {
       this.lastAssistantOutcome = undefined;
       this.extensionCommandInitiator = undefined;
       this.state.execution = "idle";
+      this.state.compacting = false;
       this.state.lastRun = "never";
       this.state.activeCommandId = undefined;
       this.state.lastError = undefined;
@@ -2547,6 +2563,7 @@ export class ManagedInstance {
       this.replacementIntent = undefined;
       this.state.lifecycle = "runtime_error";
       this.state.execution = "unavailable";
+      this.state.compacting = false;
       this.state.activeCommandId = undefined;
       this.state.pendingSteering = 0;
       this.state.pendingFollowUp = 0;
@@ -2694,6 +2711,7 @@ export class ManagedInstance {
       case "compaction_start":
         this.startCompactionBoundary(this.receiptBoundaryOperationId);
         this.state.execution = "running";
+        this.state.compacting = true;
         this.touch();
         this.appendEvent("compaction.started", {
           reason: compactionReason(event.reason),
@@ -2703,6 +2721,7 @@ export class ManagedInstance {
 
       case "compaction_end":
         if (this.state.activeCommandId === undefined && event.willRetry !== true) this.state.execution = "idle";
+        this.state.compacting = false;
         this.touch();
         this.appendEvent("compaction.completed", {
           reason: compactionReason(event.reason),
@@ -2744,6 +2763,10 @@ export class ManagedInstance {
       this.state.lastError = undefined;
     }
 
+    // Extension-triggered compaction_start may precede Pi's externally
+    // published agent_settled event even though the extension hook is named
+    // agent_settled. Preserve the active compaction boundary.
+    if (this.compactionActive) this.state.execution = "running";
     this.state.lastRun = result;
     this.state.activeCommandId = undefined;
     this.touch();
@@ -2937,6 +2960,7 @@ export class ManagedInstance {
       reason,
       lifecycle: this.state.lifecycle,
       execution: this.state.execution,
+      compacting: this.state.compacting,
       lastRun: this.state.lastRun,
       pending: {
         steering: this.state.pendingSteering,

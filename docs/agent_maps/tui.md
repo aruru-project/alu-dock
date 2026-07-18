@@ -111,6 +111,7 @@ Warning必须说明用户影响和可执行动作；closed Host projection本身
 - Extension UI只支持bounded closed text；不transport component factory、image、binary或data URI。Host若截断tool output必须附明确truncation marker；modal或config/session inventory不完整时，Work/Hub显示shown/total或首条scan diagnostic，不能把bounded prefix呈现为完整结果。
 - Extension `notify`与`setStatus`不可混用：notify遵循Pi的chat-tail语义，连续tail info才替换，warning/error逐条追加；setStatus属于keyed footer state。两者都不得覆盖小阿露runtime activity。
 - `submitting`是回车后等待Host admission的client-local状态：逻辑上立即生效，但只有持续未决200ms后才显示；快速no-run command不得闪烁，`waiting for model`只由真实run start或authoritative running snapshot触发。
+- Runtime activity按仍在进行的较新boundary投影：fresh attach从closed snapshot `compacting`恢复active compaction；`compaction.started`之后到达的旧run `run.settled`不得覆盖`compacting context`；`compaction.completed`结束该phase，后续continuation必须由真实`run.started`进入waiting。
 - Work所有动画都通过pi-tui frame cache请求正常render；禁止cache外绝对行写入。idle无timer。Hub最多一个visible时才运行的低频本地blink timer。
 - Renderer替换必须一次性cut over，不维护dual renderer或compatibility facade。
 

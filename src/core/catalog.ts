@@ -122,6 +122,7 @@ export class CatalogCorruptError extends Error {
 export function validateInstanceStateInvariant(value: {
   lifecycle: InstanceLifecycle;
   execution: InstanceExecution;
+  compacting?: boolean;
   ownerHostEpoch?: string;
   pendingCount: number;
   activeCommandId?: string;
@@ -136,6 +137,7 @@ export function validateInstanceStateInvariant(value: {
   if ((value.lifecycle === "active" || value.lifecycle === "stopping") !== (value.ownerHostEpoch !== undefined)) throw new Error("Instance owner Host epoch invariant failed");
   if (terminal && (value.pendingCount !== 0 || value.activeCommandId !== undefined || value.admissionPending || value.admissionOperationId !== undefined)) throw new Error("Unavailable instance retains active catalog facts");
   if (value.activeCommandId !== undefined && value.execution !== "running") throw new Error("Active command requires running execution");
+  if (value.compacting && value.execution !== "running") throw new Error("Active compaction requires running execution");
   if (value.admissionPending && ((value.lifecycle !== "active" && value.lifecycle !== "stopping") || value.admissionOperationId === undefined)) throw new Error("Admission intent is incomplete");
   if (!value.admissionPending && value.admissionOperationId !== undefined) throw new Error("Admission operation exists without an intent");
 }

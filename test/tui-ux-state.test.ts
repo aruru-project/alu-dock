@@ -57,6 +57,7 @@ function snapshot(overrides: Partial<InstanceSnapshot> = {}): InstanceSnapshot {
     updatedAt: "2026-07-15T00:00:00.000Z",
     eventCursor: { hostEpoch: "epoch-1", instanceId: "dock-1", runtimeGeneration: 1, sequence: 1 },
     ...overrides,
+    compacting: overrides.compacting ?? false,
   };
 }
 
@@ -624,13 +625,17 @@ test("tree picker uses left/right and page keys for clamped page movement", () =
   assert.equal(picker.getSelectedItem()?.value, "entry-19");
 });
 
-test("run activity recovers the current phase from replay only while the snapshot is running", () => {
+test("run activity recovers active tool and compaction phases from authoritative attach state", () => {
   const events = [
     event(1, "run.started", { operationId: "op-1", delivery: "prompt" }),
     event(2, "tool.started", { toolCallId: "t-1", toolName: "read", args: {}, omittedFields: [] }),
   ];
   assert.equal(activityFromReplay(snapshot(), events).label, "tool read");
   assert.equal(activityFromReplay(snapshot({ execution: "idle", lastRun: "succeeded" }), events).phase, "idle");
+  assert.deepEqual(activityFromReplay(snapshot({ compacting: true }), []), {
+    phase: "compaction",
+    label: "compacting context",
+  });
 });
 
 test("command handled clears client-local submission activity without inventing a model wait", () => {
@@ -684,14 +689,24 @@ test("run activity covers compaction queue interaction abort failure and host lo
   }), idle);
   assert.deepEqual(activity, { phase: "idle", label: "compacted" });
   activity = reduceRunActivity(activity, event(2, "instance.state_changed", {
-    reason: "compaction_completed", lifecycle: "active", execution: "running", lastRun: "never",
+    reason: "compaction_completed", lifecycle: "active", execution: "running", compacting: false, lastRun: "never",
     pending: { steering: 0, followUp: 0, total: 0 }, activeCommandId: undefined, lastError: undefined,
   }), running);
   assert.deepEqual(activity, { phase: "waiting", label: "waiting for model" });
-  activity = reduceRunActivity({ phase: "compaction", label: "compacting context" }, event(2, "compaction.completed", {
+  let guardActivity = reduceRunActivity(
+    { phase: "compaction", label: "compacting context" },
+    event(2, "run.settled", { operationId: "guard-run", result: "succeeded", stopReason: "stop" }),
+    running,
+  );
+  assert.deepEqual(guardActivity, { phase: "compaction", label: "compacting context" });
+  guardActivity = reduceRunActivity(guardActivity, event(2, "compaction.completed", {
     operationId: "guard-compaction", automatic: false, willRetry: false,
   }), running);
-  assert.deepEqual(activity, { phase: "waiting", label: "waiting for model" });
+  assert.deepEqual(guardActivity, { phase: "idle", label: "compacted" });
+  guardActivity = reduceRunActivity(guardActivity, event(2, "run.started", {
+    operationId: "runtime-initiated",
+  }), running);
+  assert.deepEqual(guardActivity, { phase: "waiting", label: "waiting for model" });
   activity = reduceRunActivity(activity, event(2, "compaction.completed", {
     operationId: "compact-cancelled", automatic: false, willRetry: false, aborted: true,
   }), idle);

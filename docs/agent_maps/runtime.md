@@ -108,6 +108,7 @@ ManagedInstance replacement intent
 - branch-summary cancellation使用Pi公开`abortBranchSummary()`路径；不能假设agent abort覆盖它。
 - Host loss后的reopen是Registry创建fresh runtime transaction，不恢复旧queue/Promise/tool effect。
 - Extension可在`agent_settled`后触发无client command ID的follow-on run（例如Sol guard compact后续跑）。它使用closed `run.started` identity `runtime-initiated`，仍完全由Host持有；fresh attach必须恢复其未完成tail，client detach/attach/read不得成为启动条件。
+- Pi会先await Extension的`agent_settled` handler、再向runtime subscriber发布`agent_settled`；handler内启动的`ctx.compact()`因此可能先发布`compaction_start`。已建立的compaction boundary必须保持`execution: running`与ephemeral snapshot `compacting: true`直到`compaction_end`，后到的run settlement只结算旧run，不得把instance降为idle；`compacting`不进入durable catalog。
 
 ## 常见修改路由
 

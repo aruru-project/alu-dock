@@ -70,7 +70,7 @@ test("V2 hello is closed, bounded, and rejects duplicate capabilities", () => {
 function validSnapshot(): Record<string, unknown> {
   return {
     id: "i1", creationOperationId: "op-create", cwd: "/tmp/project",
-    lifecycle: "active", execution: "idle", lastRun: "never", reopenable: false,
+    lifecycle: "active", execution: "idle", compacting: false, lastRun: "never", reopenable: false,
     runtimeGeneration: 1, ownerHostEpoch: "epoch-1",
     pending: { steering: 0, followUp: 0, total: 0 },
     executor: { kind: "fixture", piSessionId: "pi-1" }, extensionStatus: {},
@@ -732,6 +732,8 @@ test("response, snapshot, replay, and event parsers reject open or inconsistent 
   assert.throws(() => parseStatusResult({ instance: { ...validSnapshot(), extra: true } }), /Unexpected field/);
   assert.throws(() => parseStatusResult({ instance: { ...validSnapshot(), pending: { steering: 1, followUp: 1, total: 1 } } }), /total is inconsistent/);
   assert.throws(() => parseStatusResult({ instance: { ...validSnapshot(), lifecycle: "stopped", execution: "idle", ownerHostEpoch: undefined } }), /Lifecycle\/execution/);
+  assert.throws(() => parseStatusResult({ instance: { ...validSnapshot(), compacting: true } }), /compacting requires running/);
+  assert.equal(parseStatusResult({ instance: { ...validSnapshot(), execution: "running", compacting: true } }).instance.compacting, true);
   assert.throws(() => parseStatusResult({ instance: { ...validSnapshot(), eventCursor: { hostEpoch: "epoch-1", instanceId: "other", runtimeGeneration: 1, sequence: 1 } } }), /cursor domain/);
 
   const envelope = (event: unknown): Record<string, unknown> => ({ kind: "event", version: 2, requestId: "attach-1", hostEpoch: "epoch-1", event });

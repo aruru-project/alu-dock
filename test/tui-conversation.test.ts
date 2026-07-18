@@ -32,6 +32,7 @@ function snapshot(): InstanceSnapshot {
     cwd: "/tmp/demo",
     lifecycle: "active",
     execution: "running",
+    compacting: false,
     lastRun: "never",
     reopenable: false,
     runtimeGeneration: 1,
@@ -620,7 +621,7 @@ test("live snapshot projection updates metrics, extension status, state, and rep
   }));
   projected = projectSnapshot(projected, event(3, "extension.status_changed", { key: "build", text: "green" }));
   projected = projectSnapshot(projected, event(4, "instance.state_changed", {
-    reason: "settled", lifecycle: "active", execution: "idle", lastRun: "succeeded",
+    reason: "settled", lifecycle: "active", execution: "idle", compacting: false, lastRun: "succeeded",
     pending: { steering: 0, followUp: 0, total: 0 },
   }));
   projected = projectSnapshot(projected, {

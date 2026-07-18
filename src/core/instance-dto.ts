@@ -99,7 +99,7 @@ export type SettingsChangedData = {
 
 export interface EventDataMap {
   "instance.created": { cwd: string; name?: string; executor: ExecutorIdentity };
-  "instance.state_changed": { reason: string; lifecycle: InstanceLifecycle; execution: InstanceExecution; lastRun: LastRunResult; pending: PendingDto; activeCommandId?: string; lastError?: string };
+  "instance.state_changed": { reason: string; lifecycle: InstanceLifecycle; execution: InstanceExecution; compacting: boolean; lastRun: LastRunResult; pending: PendingDto; activeCommandId?: string; lastError?: string };
   "instance.reopened": { previousLifecycle: "host_lost" | "runtime_error"; sessionFile: string; runtimeGeneration: number };
   "instance.stopped": { cleanupErrors: string[] };
   "instance.runtime_error": { operationId: string; kind: "create" | "new" | "switch" | "fork" | "clone" | "reload" | "reopen"; error: string; recoverySessionFile?: string };
@@ -159,6 +159,7 @@ export interface InstanceSnapshot {
   cwd: string;
   lifecycle: InstanceLifecycle;
   execution: InstanceExecution;
+  compacting: boolean;
   lastRun: LastRunResult;
   reopenable: boolean;
   runtimeGeneration: number;

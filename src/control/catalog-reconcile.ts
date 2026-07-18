@@ -100,6 +100,7 @@ export function catalogSnapshotFromRecord(
     cwd: record.cwd,
     lifecycle: record.lifecycle,
     execution: record.execution,
+    compacting: false,
     lastRun: record.lastRun,
     reopenable,
     runtimeGeneration: record.runtimeGeneration,

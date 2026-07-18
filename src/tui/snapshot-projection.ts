@@ -27,6 +27,7 @@ export function projectSnapshot(snapshot: InstanceSnapshot, event: DockEvent): I
       cwd: event.data.cwd,
       name: event.data.name,
       execution: "idle",
+      compacting: false,
       lastRun: "never",
       pending: { steering: 0, followUp: 0, total: 0 },
       activeCommandId: undefined,
@@ -67,7 +68,13 @@ export function projectSnapshot(snapshot: InstanceSnapshot, event: DockEvent): I
   }
   if (event.type !== "instance.state_changed") {
     if (event.type === "instance.stopped") {
-      return { ...snapshot, lifecycle: "stopped", execution: "unavailable", ownerHostEpoch: undefined, updatedAt: event.occurredAt };
+      return { ...snapshot, lifecycle: "stopped", execution: "unavailable", compacting: false, ownerHostEpoch: undefined, updatedAt: event.occurredAt };
+    }
+    if (event.type === "compaction.started") {
+      return { ...snapshot, execution: "running", compacting: true, updatedAt: event.occurredAt, eventCursor: advanceCursor(snapshot, event) };
+    }
+    if (event.type === "compaction.completed") {
+      return { ...snapshot, compacting: false, updatedAt: event.occurredAt, eventCursor: advanceCursor(snapshot, event) };
     }
     return { ...snapshot, eventCursor: advanceCursor(snapshot, event) };
   }
@@ -76,6 +83,7 @@ export function projectSnapshot(snapshot: InstanceSnapshot, event: DockEvent): I
     ...snapshot,
     lifecycle: enumData(event, "lifecycle", ["active", "stopping", "stopped"] as const) ?? snapshot.lifecycle,
     execution: enumData(event, "execution", ["idle", "running", "failed", "unavailable"] as const) ?? snapshot.execution,
+    compacting: booleanData(event, "compacting") ?? snapshot.compacting,
     lastRun: enumData(event, "lastRun", ["never", "succeeded", "failed", "aborted", "interrupted"] as const) ?? snapshot.lastRun,
     pending: pendingData(event) ?? snapshot.pending,
     activeCommandId: eventString(event, "activeCommandId"),
@@ -106,6 +114,11 @@ function pendingData(event: DockEvent): InstanceSnapshot["pending"] | undefined 
   return typeof pending.steering === "number" && typeof pending.followUp === "number" && typeof pending.total === "number"
     ? { steering: pending.steering, followUp: pending.followUp, total: pending.total }
     : undefined;
+}
+
+function booleanData(event: DockEvent, key: string): boolean | undefined {
+  const value = (event.data as unknown as Record<string, unknown>)[key];
+  return typeof value === "boolean" ? value : undefined;
 }
 
 function thinkingData(event: DockEvent, key: string): RuntimeThinkingLevel | undefined {

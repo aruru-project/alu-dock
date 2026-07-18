@@ -27,6 +27,7 @@ export function activityFromSnapshot(snapshot: InstanceSnapshot): RunActivitySta
   if (snapshot.lifecycle === "stopped") return { phase: "disconnected", label: "stopped" };
   if (snapshot.lifecycle === "host_lost") return { phase: "disconnected", label: "host lost" };
   if (snapshot.lifecycle === "runtime_error") return { phase: "error", label: "runtime error" };
+  if (snapshot.compacting) return { phase: "compaction", label: "compacting context" };
   if (snapshot.execution === "running") return { phase: "waiting", label: "waiting for model" };
   if (snapshot.pending.total > 0) return queued(snapshot.pending.total);
   return READY;
@@ -134,7 +135,6 @@ export function reduceRunActivity(
       return { phase: "compaction", label: "compacting context" };
 
     case "compaction.completed":
-      if (snapshot.execution === "running") return { phase: "waiting", label: "waiting for model" };
       if (event.data.aborted) return { phase: "idle", label: "compaction cancelled" };
       const known = knownCompactionFeedback(event.data.error);
       if (known) return { phase: "idle", label: known === "already_compacted" ? "already compacted" : "nothing to compact" };
@@ -156,6 +156,10 @@ export function reduceRunActivity(
       return activityFromSnapshot(snapshot);
 
     case "run.settled":
+      // An extension can start compaction from its agent_settled hook before Pi
+      // publishes the run's own settled event. That settled run must not erase
+      // the newer, still-active compaction phase.
+      if (current.phase === "compaction") return current;
       return snapshot.pending.total > 0 ? queued(snapshot.pending.total) : READY;
 
     case "session.replaced":

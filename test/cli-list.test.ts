@@ -158,6 +158,7 @@ function instance(index: number, overrides: Partial<InstanceSnapshot> = {}): Ins
       sequence: 999_999,
     },
     ...overrides,
+    compacting: overrides.compacting ?? false,
   };
 }
 
