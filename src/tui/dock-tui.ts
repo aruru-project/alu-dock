@@ -6,6 +6,7 @@ import {
   Editor,
   Key,
   matchesKey,
+  ProcessTerminal,
   TUI,
   type AutocompleteItem,
   type AutocompleteProvider,
@@ -24,11 +25,9 @@ import type { ProjectTrustChoice } from "../control/project-trust.js";
 import { ActivityPulseController } from "./activity-pulse.js";
 import { DockActivityLine, DockConversation, DockStatusLine, DockWorkHeader } from "./conversation.js";
 import { ExtensionTextDialog } from "./extension-text-dialog.js";
-import { PagedHistoryWindow, HISTORY_PAGE_SIZE } from "./history-pagination.js";
-import { DockMouseTrackingMode, DockProcessTerminal, parseMouseWheel } from "./mouse-input.js";
+import { drainFullHistory, HISTORY_PAGE_SIZE, reconcileFlowingEvents } from "./history-pagination.js";
 import { PendingQueueTray } from "./pending-queue.js";
 import { prependRestoredQueueText } from "./queue-restoration.js";
-import { FixedDockScreen } from "./pi-tui-screen.js";
 import {
   abortingActivity,
   activityFromReplay,
@@ -79,12 +78,10 @@ export async function runDockTui(
 ): Promise<DockTuiResult> {
   assertInteractiveTerminal();
 
-  const terminal = new DockProcessTerminal();
+  const terminal = new ProcessTerminal();
   const tui = new TUI(terminal, process.env.PI_HARDWARE_CURSOR === "1");
   const conversation = new DockConversation();
-  const historyWindow = new PagedHistoryWindow();
   const pendingQueue = new PendingQueueTray();
-  const dockMouseTracking = new DockMouseTrackingMode();
   const activity = new DockActivityLine();
   let instance = initialInstance;
   const header = new DockWorkHeader(() => instance);
@@ -100,7 +97,6 @@ export async function runDockTui(
   let controllerReattach: Promise<void> | undefined;
   let cleanupErrors: string[] | undefined;
   let editor!: Editor;
-  let screen: FixedDockScreen | undefined;
   let settings: SettingDto[] = [];
   let commands: CommandDto[] = [];
   let terminalProgressEnabled = false;
@@ -111,8 +107,8 @@ export async function runDockTui(
   let treeNavigationPending = false;
   let treeNavigationAbortPending = false;
   let treeNavigationAbortRequested = false;
-  let earlierHistoryLoad: Promise<void> | undefined;
-  let latestHistoryReload: Promise<void> | undefined;
+  let initialHistoryLoading = true;
+  let initialBufferedEvents: DockEvent[] = [];
   let resolveExit!: (reason: DockTuiExitReason) => void;
   let lastIdleEscapeAt = 0;
   let exiting = false;
@@ -143,23 +139,29 @@ export async function runDockTui(
       void reacquireController({ ...instance.eventCursor });
       navigationHistoryToken = undefined;
       navigationBufferedEvents = [];
-      historyWindow.invalidate(event.runtimeGeneration);
+      initialHistoryLoading = false;
+      initialBufferedEvents = [];
       replacementHistoryGeneration = event.runtimeGeneration;
       replacementBufferedEvents = [event];
       conversation.reset();
-      screen?.scrollToBottom();
       conversation.addNotice("Loading replacement session history…");
       terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
-      void refreshReplacementProjection(event.runtimeGeneration, { ...instance.eventCursor });
-    } else if (replacementHistoryGeneration === event.runtimeGeneration) {
-      replacementBufferedEvents.push(event);
+      void refreshReplacementProjection(event.runtimeGeneration);
     } else if (event.type === "session.navigated") {
       const token = `${event.runtimeGeneration}:${event.sequence}`;
-      historyWindow.invalidate(event.runtimeGeneration);
+      replacementHistoryGeneration = undefined;
+      replacementBufferedEvents = [];
+      initialHistoryLoading = false;
+      initialBufferedEvents = [];
       navigationHistoryToken = token;
       navigationBufferedEvents = [event];
+      conversation.reset();
       conversation.addNotice("Loading navigated branch history…");
       void refreshNavigationProjection(token, event.runtimeGeneration);
+    } else if (initialHistoryLoading) {
+      initialBufferedEvents.push(event);
+    } else if (replacementHistoryGeneration === event.runtimeGeneration) {
+      replacementBufferedEvents.push(event);
     } else if (navigationHistoryToken !== undefined && event.runtimeGeneration === instance.runtimeGeneration) {
       navigationBufferedEvents.push(event);
     } else {
@@ -170,6 +172,7 @@ export async function runDockTui(
       activeExtensionDialog.closeFromHost();
     }
     if (event.type === "settings.changed") applyLiveSetting(event.data.key, event.data.value);
+    if (event.type === "extension.tools_expanded_changed") conversation.setToolsExpanded(event.data.expanded);
     if (event.type === "session.info_changed") terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
     if (event.type === "instance.stopped" && editor) editor.disableSubmit = true;
     updateTerminalProgress();
@@ -177,26 +180,58 @@ export async function runDockTui(
   };
 
   subscription = await client.streamEvents(instance.id, { onEvent, requireTuiProjection: true, claimController: true, conversationBootstrap: true });
-  instance = subscription.initial.instance;
-  lastEventGeneration = subscription.initial.page.latest.runtimeGeneration;
-  lastEventSequence = subscription.initial.page.latest.sequence;
-  const initialHistoryNeedsReload = subscription.initial.historyTruncated
-    && subscription.initial.recentHistory.length === 0;
-  historyWindow.reset(
-    subscription.initial.recentHistory,
-    subscription.initial.historyTruncated,
-    subscription.initial.instance.runtimeGeneration,
-  );
-  conversation.replacePagedHistory(historyWindow.snapshot());
-  pendingQueue.reset(subscription.initial.pendingMessages);
-  conversation.applyBootstrapReplay(subscription.initial.page.events);
-  status.update(instance);
-  runActivity = activityFromReplay(instance, subscription.initial.page.events);
-  activity.setActivity(runActivity);
+  const initialProjection = subscription.initial.instance;
+  instance = initialProjection;
   controllerLeaseToken = subscription.initial.controller.status === "acquired"
     ? subscription.initial.controller.leaseToken
     : undefined;
   status.setController(subscription.initial.controller.status);
+  if (lastEventGeneration < subscription.initial.page.latest.runtimeGeneration
+    || (lastEventGeneration === subscription.initial.page.latest.runtimeGeneration && lastEventSequence < subscription.initial.page.latest.sequence)) {
+    lastEventGeneration = subscription.initial.page.latest.runtimeGeneration;
+    lastEventSequence = subscription.initial.page.latest.sequence;
+  }
+  const initialGeneration = initialProjection.runtimeGeneration;
+  const initialHistory = await drainFullHistory(
+    initialProjection.id,
+    initialGeneration,
+    subscription.initial.recentHistory,
+    subscription.initial.historyTruncated,
+    (beforeEntryId) => client.history(initialProjection.id, beforeEntryId, HISTORY_PAGE_SIZE),
+  ).then(
+    (value) => ({ ok: true as const, value }),
+    (error: unknown) => ({ ok: false as const, error }),
+  );
+  if (shouldApplyInitialHistory(
+    initialHistoryLoading,
+    replacementHistoryGeneration,
+    navigationHistoryToken,
+    instance.runtimeGeneration,
+    initialGeneration,
+  )) {
+    const historyEntries = initialHistory.ok ? initialHistory.value.entries : subscription.initial.recentHistory;
+    const boundary = initialHistory.ok
+      ? (initialHistory.value.bootstrapBoundary ?? initialProjection)
+      : initialProjection;
+    const buffered = initialBufferedEvents;
+    const reconciled = reconcileFlowingEvents(historyEntries, subscription.initial.page.events, buffered);
+    instance = boundary;
+    pendingQueue.reset(subscription.initial.pendingMessages);
+    for (const event of buffered) {
+      if (event.runtimeGeneration !== initialGeneration || event.sequence <= boundary.eventCursor.sequence) continue;
+      instance = projectSnapshot(instance, event);
+    }
+    for (const event of reconciled) pendingQueue.apply(event);
+    conversation.applyHistory(historyEntries, false);
+    conversation.applyReplay(reconciled, false);
+    if (!initialHistory.ok) conversation.addNotice(`Earlier session history unavailable: ${errorText(initialHistory.error)}`, true);
+    conversation.setToolsExpanded(instance.toolsExpanded);
+    status.update(instance);
+    runActivity = activityFromReplay(instance, reconciled);
+    activity.setActivity(runActivity);
+  }
+  initialHistoryLoading = false;
+  initialBufferedEvents = [];
 
   function reacquireController(since: EventCursor): Promise<void> {
     if (controllerReattach) return controllerReattach;
@@ -275,15 +310,6 @@ export async function runDockTui(
     }
     if (text === "/help") {
       conversation.addNotice(workHelpText());
-      tui.requestRender();
-      return;
-    }
-    if (text === "/mouse") {
-      setDockMouseTracking(!dockMouseTracking.active);
-      return;
-    }
-    if (text.startsWith("/mouse")) {
-      conversation.addNotice("Usage: /mouse", true);
       tui.requestRender();
       return;
     }
@@ -1410,10 +1436,14 @@ export async function runDockTui(
     tui.requestRender();
   }
 
-  async function refreshReplacementProjection(generation: number, cursor: InstanceSnapshot["eventCursor"]): Promise<void> {
+  async function refreshReplacementProjection(generation: number): Promise<void> {
     const [projectionLoad, settingsLoad, commandsLoad] = await Promise.allSettled([
       (async () => {
-        const projection = await client.streamEvents(instance.id, { since: cursor, onEvent: () => {}, requireTuiProjection: true });
+        const projection = await client.streamEvents(instance.id, {
+          onEvent: () => {},
+          requireTuiProjection: true,
+          conversationBootstrap: true,
+        });
         projection.close();
         await projection.done.catch(() => {});
         return projection.initial;
@@ -1423,35 +1453,50 @@ export async function runDockTui(
     ]);
     if (replacementHistoryGeneration !== generation) return;
 
-    const buffered = replacementBufferedEvents;
-    replacementBufferedEvents = [];
-    replacementHistoryGeneration = undefined;
     conversation.reset();
-    screen?.scrollToBottom();
+    let reconciled: DockEvent[] = [];
     if (projectionLoad.status === "fulfilled") {
-      instance = projectionLoad.value.instance;
+      const projection = projectionLoad.value;
+      const full = await drainFullHistory(
+        instance.id,
+        generation,
+        projection.recentHistory,
+        projection.historyTruncated,
+        (beforeEntryId) => client.history(instance.id, beforeEntryId, HISTORY_PAGE_SIZE),
+      ).then(
+        (value) => ({ ok: true as const, value }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+      if (replacementHistoryGeneration !== generation || instance.runtimeGeneration !== generation) return;
+      const buffered = replacementBufferedEvents;
+      replacementBufferedEvents = [];
+      replacementHistoryGeneration = undefined;
+      const historyEntries = full.ok ? full.value.entries : projection.recentHistory;
+      const historyBoundary = full.ok
+        ? (full.value.bootstrapBoundary ?? projection.instance)
+        : projection.instance;
+      reconciled = reconcileFlowingEvents(historyEntries, projection.page.events, buffered);
+      instance = historyBoundary;
+      pendingQueue.reset(projection.pendingMessages);
       for (const event of buffered) {
-        if (event.runtimeGeneration === generation && event.sequence > instance.eventCursor.sequence) {
-          instance = projectSnapshot(instance, event);
-        }
+        if (event.runtimeGeneration !== generation || event.sequence <= historyBoundary.eventCursor.sequence) continue;
+        instance = projectSnapshot(instance, event);
+        pendingQueue.apply(event);
       }
       status.update(instance);
       terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
-      historyWindow.reset(
-        projectionLoad.value.recentHistory,
-        projectionLoad.value.historyTruncated,
-        projectionLoad.value.instance.runtimeGeneration,
-      );
-      conversation.replacePagedHistory(historyWindow.snapshot());
-      const replacement = buffered.find((event) => event.type === "session.replaced");
-      if (replacement) conversation.apply(replacement);
-      conversation.applyReplay(projectionLoad.value.page.events, projectionLoad.value.page.truncated);
-      for (const event of buffered) {
-        if (event.type !== "session.replaced" && event.sequence > projectionLoad.value.page.latest.sequence) conversation.apply(event);
-      }
+      conversation.applyHistory(historyEntries, false);
+      conversation.applyReplay(reconciled, false);
+      if (!full.ok) conversation.addNotice(`Replacement history unavailable: ${errorText(full.error)}`, true);
+      conversation.setToolsExpanded(instance.toolsExpanded);
     } else {
+      const buffered = replacementBufferedEvents;
+      replacementBufferedEvents = [];
+      replacementHistoryGeneration = undefined;
+      reconciled = reconcileFlowingEvents([], [], buffered);
       conversation.addNotice(`Replacement history unavailable: ${errorText(projectionLoad.reason)}`, true);
-      conversation.applyReplay(buffered, false);
+      conversation.applyReplay(reconciled, false);
+      conversation.setToolsExpanded(instance.toolsExpanded);
     }
 
     if (settingsLoad.status === "fulfilled") {
@@ -1465,12 +1510,33 @@ export async function runDockTui(
       if (commandsLoad.value.truncated) conversation.addNotice(`Replacement command catalog is bounded: showing ${commands.length} of ${commandsLoad.value.total}.`, true);
     } else conversation.addNotice(`Replacement command catalog unavailable: ${errorText(commandsLoad.reason)}`, true);
     rebuildAutocomplete();
-    activity.setActivity("session history loaded");
+    if (instance.execution === "running" || instance.compacting) {
+      runActivity = activityFromReplay(instance, reconciled);
+      activity.setActivity(runActivity);
+    } else {
+      activity.setActivity("session history loaded");
+    }
     tui.requestRender();
   }
 
   async function refreshNavigationProjection(token: string, generation: number): Promise<void> {
-    const loaded = await client.history(instance.id, undefined, 200).then(
+    const loaded = await (async () => {
+      const projection = await client.streamEvents(instance.id, {
+        onEvent: () => {},
+        requireTuiProjection: true,
+        conversationBootstrap: true,
+      });
+      projection.close();
+      await projection.done.catch(() => {});
+      const full = await drainFullHistory(
+        instance.id,
+        generation,
+        projection.initial.recentHistory,
+        projection.initial.historyTruncated,
+        (beforeEntryId) => client.history(instance.id, beforeEntryId, HISTORY_PAGE_SIZE),
+      );
+      return { projection: projection.initial, full };
+    })().then(
       (value) => ({ ok: true as const, value }),
       (error: unknown) => ({ ok: false as const, error }),
     );
@@ -1479,124 +1545,33 @@ export async function runDockTui(
     navigationBufferedEvents = [];
     navigationHistoryToken = undefined;
     conversation.reset();
-    screen?.scrollToBottom();
     if (!loaded.ok) {
       conversation.addNotice(`Navigated branch history unavailable: ${errorText(loaded.error)}`, true);
-      conversation.applyReplay(buffered, false);
+      conversation.applyReplay(reconcileFlowingEvents([], [], buffered), false);
+      conversation.setToolsExpanded(instance.toolsExpanded);
       tui.requestRender();
       return;
     }
-    instance = loaded.value.instance;
-    status.update(instance);
-    historyWindow.reset(loaded.value.entries, loaded.value.hasEarlier, loaded.value.instance.runtimeGeneration);
-    conversation.replacePagedHistory(historyWindow.snapshot());
-    const navigated = buffered.find((event) => event.type === "session.navigated");
-    if (navigated) conversation.apply(navigated);
+    const { projection, full } = loaded.value;
+    const boundary = full.bootstrapBoundary ?? projection.instance;
+    const reconciled = reconcileFlowingEvents(full.entries, projection.page.events, buffered);
+    instance = boundary;
     for (const event of buffered) {
-      if (event.type !== "session.navigated" && event.sequence > loaded.value.instance.eventCursor.sequence) {
-        instance = projectSnapshot(instance, event);
-        conversation.apply(event);
-      }
+      if (event.runtimeGeneration !== generation || event.sequence <= boundary.eventCursor.sequence) continue;
+      instance = projectSnapshot(instance, event);
     }
     status.update(instance);
-    activity.setActivity("branch history loaded");
-    tui.requestRender();
-  }
-
-  function loadEarlierHistory(): Promise<void> {
-    if (earlierHistoryLoad) return earlierHistoryLoad;
-    const task = loadEarlierHistoryOnce();
-    const tracked = task.finally(() => {
-      if (earlierHistoryLoad === tracked) earlierHistoryLoad = undefined;
-    });
-    earlierHistoryLoad = tracked;
-    return tracked;
-  }
-
-  async function loadEarlierHistoryOnce(): Promise<void> {
-    const request = historyWindow.beginEarlier();
-    if (!request) {
-      const history = historyWindow.snapshot();
-      if (!history.hasEarlier && history.loadState !== "loading") {
-        activity.setActivity("start of session history");
-        tui.requestRender();
-      }
-      return;
+    conversation.applyHistory(full.entries, false);
+    conversation.applyReplay(reconciled, false);
+    conversation.setToolsExpanded(instance.toolsExpanded);
+    status.update(instance);
+    if (instance.execution === "running" || instance.compacting) {
+      runActivity = activityFromReplay(instance, reconciled);
+      activity.setActivity(runActivity);
+    } else {
+      activity.setActivity("branch history loaded");
     }
-
-    const loadingAnchor = screen?.captureHistoryAnchor();
-    conversation.replacePagedHistory(historyWindow.snapshot());
-    screen?.restoreHistoryAnchor(loadingAnchor);
-    activity.setActivity("loading earlier history");
     tui.requestRender();
-
-    const loaded = await client.history(instance.id, request.beforeEntryId, HISTORY_PAGE_SIZE).then(
-      (value) => ({ ok: true as const, value }),
-      (error: unknown) => ({ ok: false as const, error }),
-    );
-    if (exiting || historyWindow.snapshot().generation !== request.generation) return;
-
-    const anchor = screen?.captureHistoryAnchor();
-    if (!loaded.ok) {
-      historyWindow.failEarlier(request, errorText(loaded.error));
-      conversation.replacePagedHistory(historyWindow.snapshot());
-      screen?.restoreHistoryAnchor(anchor);
-      activity.setActivity("earlier history unavailable");
-      tui.requestRender();
-      return;
-    }
-    if (loaded.value.instance.id !== instance.id || loaded.value.instance.runtimeGeneration !== request.generation) {
-      historyWindow.failEarlier(request, "Session changed while earlier history was loading");
-      conversation.replacePagedHistory(historyWindow.snapshot());
-      screen?.restoreHistoryAnchor(anchor);
-      activity.setActivity("history changed");
-      tui.requestRender();
-      return;
-    }
-
-    historyWindow.completeEarlier(request, {
-      entries: loaded.value.entries,
-      hasEarlier: loaded.value.hasEarlier,
-      ...(loaded.value.nextBeforeEntryId === undefined ? {} : { nextBeforeEntryId: loaded.value.nextBeforeEntryId }),
-    });
-    conversation.replacePagedHistory(historyWindow.snapshot());
-    screen?.restoreHistoryAnchor(anchor);
-    const history = historyWindow.snapshot();
-    activity.setActivity(history.loadState === "error"
-      ? "earlier history cursor stalled"
-      : history.hasEarlier
-        ? `history loaded · ${history.entries.length} retained`
-        : "start of session history");
-    tui.requestRender();
-  }
-
-  function reloadLatestHistoryAfterCursorError(): Promise<void> {
-    if (latestHistoryReload) return latestHistoryReload;
-    const generation = instance.runtimeGeneration;
-    const task = (async () => {
-      activity.setActivity("reloading latest history");
-      tui.requestRender();
-      const loaded = await client.history(instance.id, undefined, HISTORY_PAGE_SIZE);
-      if (exiting || instance.runtimeGeneration !== generation) return;
-      if (loaded.instance.id !== instance.id || loaded.instance.runtimeGeneration !== generation) {
-        throw new Error("Session changed while latest history was reloading");
-      }
-      historyWindow.reset(loaded.entries, loaded.hasEarlier, generation);
-      conversation.replacePagedHistory(historyWindow.snapshot());
-      screen?.scrollToBottom();
-      activity.setActivity("latest history reloaded");
-      tui.requestRender();
-    })().catch((error: unknown) => {
-      if (exiting) return;
-      conversation.addNotice(`Latest history reload failed: ${errorText(error)}`, true);
-      activity.setActivity("latest history unavailable");
-      tui.requestRender();
-    });
-    const tracked = task.finally(() => {
-      if (latestHistoryReload === tracked) latestHistoryReload = undefined;
-    });
-    latestHistoryReload = tracked;
-    return tracked;
   }
 
   function rebuildAutocomplete(): void {
@@ -1683,10 +1658,22 @@ export async function runDockTui(
     terminal.setProgress(terminalProgressEnabled && instance.lifecycle === "active" && instance.execution === "running");
   }
 
-  function setDockMouseTracking(active: boolean): void {
-    const modeChanged = dockMouseTracking.setActive(active);
-    const trackingChanged = terminal.setMouseTracking(active);
-    if (modeChanged || trackingChanged) tui.requestRender();
+  async function toggleAuthoritativeToolsExpanded(): Promise<void> {
+    const expectedRuntimeGeneration = instance.runtimeGeneration;
+    const expanded = !instance.toolsExpanded;
+    try {
+      const result = await client.setToolsExpanded(instance.id, expectedRuntimeGeneration, expanded, randomUUID());
+      if (result.instance.runtimeGeneration !== expectedRuntimeGeneration) return;
+      if (snapshotIsNotOlder(result.instance, instance)) {
+        instance = result.instance;
+        status.update(instance);
+        conversation.setToolsExpanded(instance.toolsExpanded);
+        if (instance.execution !== "running") activity.setActivity(expanded ? "all tools expanded" : "tools collapsed");
+      }
+    } catch (error) {
+      showError(error);
+    }
+    tui.requestRender();
   }
 
   const activityPulse = new ActivityPulseController(activity, {
@@ -1696,76 +1683,31 @@ export async function runDockTui(
   });
   activity.setAnimationListener(() => activityPulse.sync());
 
-  const composerDock = new Container();
-  composerDock.addChild(activity);
-  composerDock.addChild(dockMouseTracking);
-  composerDock.addChild(pendingQueue);
-  composerDock.addChild(editor);
-  screen = new FixedDockScreen(terminal, {
-    header,
-    history: conversation,
-    status,
-    editor: composerDock,
-    historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
-  });
-  tui.addChild(screen);
+  const workFlow = new Container();
+  workFlow.addChild(conversation);
+  workFlow.addChild(activity);
+  workFlow.addChild(pendingQueue);
+  workFlow.addChild(editor);
+  workFlow.addChild(header);
+  workFlow.addChild(status);
+  tui.addChild(workFlow);
   tui.setFocus(editor);
   terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
 
   const removeInputListener = tui.addInputListener((data) => {
     if (tui.hasOverlay()) return undefined;
-    if (matchesKey(data, Key.alt("m"))) {
-      setDockMouseTracking(!dockMouseTracking.active);
-      return { consume: true };
-    }
-    if (dockMouseTracking.active && matchesKey(data, "escape") && !editor.isShowingAutocomplete()) {
-      setDockMouseTracking(false);
-      return { consume: true };
-    }
-    const wheel = dockMouseTracking.active ? parseMouseWheel(data) : undefined;
-    if (wheel) {
-      const reachedBoundary = wheel === "up" ? screen?.scrollUp(3) : screen?.scrollDown(3);
-      if (wheel === "up" && reachedBoundary) void loadEarlierHistory();
-      tui.requestRender();
-      return { consume: true };
-    }
-    if (matchesKey(data, Key.pageUp) && !editor.isShowingAutocomplete()) {
-      if (screen?.pageUp()) void loadEarlierHistory();
-      tui.requestRender();
-      return { consume: true };
-    }
-    if (matchesKey(data, Key.pageDown) && !editor.isShowingAutocomplete()) {
-      screen?.pageDown();
-      tui.requestRender();
-      return { consume: true };
-    }
-    if (matchesKey(data, Key.ctrl("end"))) {
-      const reloadStaleHistory = historyWindow.snapshot().loadState === "error";
-      screen?.scrollToBottom();
-      if (reloadStaleHistory) void reloadLatestHistoryAfterCursorError();
-      tui.requestRender();
-      return { consume: true };
-    }
     if (matchesKey(data, "ctrl+d") && editor.getText().length === 0) {
       finish("detached");
       return { consume: true };
     }
     if (matchesKey(data, Key.alt("o"))) {
       const toggled = conversation.toggleLatestDetailExpanded();
-      if (toggled) {
-        if (toggled.expanded) screen?.revealHistoryAnchor(() => conversation.latestDetailAnchor());
-        else screen?.scrollToBottom();
-        if (instance.execution !== "running") activity.setActivity(`${toggled.name} ${toggled.expanded ? "expanded" : "collapsed"}`);
-      }
+      if (toggled && instance.execution !== "running") activity.setActivity(`${toggled.name} ${toggled.expanded ? "expanded" : "collapsed"}`);
       tui.requestRender();
       return { consume: true };
     }
     if (matchesKey(data, "ctrl+o")) {
-      const expanded = conversation.toggleToolsExpanded();
-      if (expanded) screen?.revealHistoryAnchor(() => conversation.latestToolAnchor());
-      else screen?.scrollToBottom();
-      if (instance.execution !== "running") activity.setActivity(expanded ? "all tools expanded" : "tools collapsed");
-      tui.requestRender();
+      void toggleAuthoritativeToolsExpanded();
       return { consume: true };
     }
     if (matchesKey(data, Key.alt("up"))) {
@@ -1856,7 +1798,6 @@ export async function runDockTui(
   watchEventSubscription(subscription);
 
   tui.start();
-  if (initialHistoryNeedsReload) void reloadLatestHistoryAfterCursorError();
   activityPulse.setEnabled(true);
   updateTerminalProgress();
   const reason = await exit;
@@ -1872,8 +1813,6 @@ export async function runDockTui(
   client.closeActiveConnections();
   await Promise.all([
     controllerReattach?.catch(() => {}),
-    earlierHistoryLoad?.catch(() => {}),
-    latestHistoryReload?.catch(() => {}),
     subscription.done.catch(() => {}),
   ]);
   terminal.setProgress(false);
@@ -2017,8 +1956,9 @@ export function workHelpText(): string {
     "  /install                  show Pi CLI package ownership",
     "  /login                    show Pi CLI login ownership",
     "EXTENSION",
+    "  Ctrl+O                    set all tool details for this runtime",
+    "  Alt+O                     toggle the latest detail locally",
     "  Type / to discover extension, skill, and prompt commands.",
-    "  /mouse toggles the optional Dock-owned history wheel.",
   ].join("\n");
 }
 
@@ -2045,7 +1985,6 @@ export function commandCatalog(commands: CommandDto[]): Array<{ name: string; de
     { name: "install", description: "show Pi CLI package ownership guidance" },
     { name: "login", description: "show Pi CLI login ownership guidance" },
     { name: "model", description: "choose or set provider/model", argumentHint: "PROVIDER/MODEL" },
-    { name: "mouse", description: "toggle Dock mouse tracking and app-owned history wheel" },
     { name: "name", description: "set or clear the Pi session name", argumentHint: "NAME" },
     { name: "new", description: "create a new Pi session", argumentHint: "PARENT_SESSION" },
     { name: "reload", description: "coherently reload Pi resources" },
@@ -2061,6 +2000,26 @@ export function commandCatalog(commands: CommandDto[]): Array<{ name: string; de
   ];
   for (const command of dockCommands) catalog.set(command.name, command);
   return [...catalog.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+export function shouldApplyInitialHistory(
+  loading: boolean,
+  replacementGeneration: number | undefined,
+  navigationToken: string | undefined,
+  currentGeneration: number,
+  initialGeneration: number,
+): boolean {
+  return loading
+    && replacementGeneration === undefined
+    && navigationToken === undefined
+    && currentGeneration === initialGeneration;
+}
+
+export function snapshotIsNotOlder(candidate: InstanceSnapshot, current: InstanceSnapshot): boolean {
+  return candidate.eventCursor.hostEpoch === current.eventCursor.hostEpoch
+    && candidate.eventCursor.instanceId === current.eventCursor.instanceId
+    && candidate.eventCursor.runtimeGeneration === current.eventCursor.runtimeGeneration
+    && candidate.eventCursor.sequence >= current.eventCursor.sequence;
 }
 
 function errorText(error: unknown): string {

@@ -25,6 +25,7 @@ export interface InteractionResult {
 
 export interface ExtensionUiProjection {
   extensionStatus: Record<string, string>;
+  toolsExpanded: boolean;
   activeInteraction?: { id: string; method: DialogMethod; expiresAt: string };
 }
 
@@ -34,6 +35,7 @@ export type ExtensionUiEventType =
   | "interaction.cancelled"
   | "extension.notification"
   | "extension.status_changed"
+  | "extension.tools_expanded_changed"
   | "extension.widget_changed"
   | "extension.error";
 
@@ -107,6 +109,7 @@ export class ExtensionUiBroker {
   private controller: ControllerLease | undefined;
   private readonly tombstones = new Map<string, InteractionTombstone>();
   private unsupportedWarningEmitted = false;
+  private toolsExpanded = false;
   private mutationTail: Promise<void> = Promise.resolve();
   private suspended = false;
 
@@ -128,6 +131,7 @@ export class ExtensionUiBroker {
   projection(): ExtensionUiProjection {
     return {
       extensionStatus: Object.fromEntries([...this.statuses.entries()].sort(([left], [right]) => left.localeCompare(right))),
+      toolsExpanded: this.toolsExpanded,
       ...(this.active === undefined ? {} : {
         activeInteraction: {
           id: this.active.id,
@@ -167,6 +171,7 @@ export class ExtensionUiBroker {
     this.controller = undefined;
     this.statuses.clear();
     this.widgets.clear();
+    this.toolsExpanded = false;
     this.projectionChanged();
     void this.serialize(async () => {
       await this.cancelAllDialogs("replacement", leaseToken);
@@ -190,6 +195,7 @@ export class ExtensionUiBroker {
       this.controller = undefined;
       this.statuses.clear();
       this.widgets.clear();
+      this.toolsExpanded = false;
       this.tombstones.clear();
       this.bufferedEvents.length = 0;
       this.projectionChanged();
@@ -203,6 +209,7 @@ export class ExtensionUiBroker {
       this.controller = undefined;
       this.statuses.clear();
       this.widgets.clear();
+      this.toolsExpanded = false;
       this.projectionChanged();
       await this.cancelAllDialogs("host_draining", leaseToken);
       this.tombstones.clear();
@@ -273,6 +280,21 @@ export class ExtensionUiBroker {
       message: safeText(message, MAX_TEXT_CHARS),
       level: level === "warning" || level === "error" ? level : "info",
     });
+  }
+
+  getToolsExpanded(): boolean {
+    return this.toolsExpanded;
+  }
+
+  setToolsExpanded(expanded: boolean): void {
+    if (typeof expanded !== "boolean") {
+      this.recordError("Extension tool expansion must be a boolean");
+      return;
+    }
+    this.toolsExpanded = expanded;
+    this.projectionChanged();
+    // Same-value sets are intentional: clients clear local per-entry overrides.
+    void this.emit("extension.tools_expanded_changed", { expanded });
   }
 
   setStatus(key: string, text: string | undefined): void {

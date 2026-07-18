@@ -56,12 +56,15 @@ const MAX_JSON_KEYS = 100;
 const MAX_JSON_ARRAY = 200;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
+export const TOOLS_EXPANDED_CAPABILITY = "extension_ui.tools-expanded.v1" as const;
+
 export const IMPLEMENTED_CAPABILITIES = [
   "catalog.maintenance.v1",
   "catalog.v1",
   "core.v2",
   "events.follow",
   "events.replay-purpose.v1",
+  TOOLS_EXPANDED_CAPABILITY,
   "extension_ui.v1",
   "host.info",
   "instance.catalog",
@@ -132,6 +135,7 @@ export type ControlRequest =
   | Request<"catalog.prune", { operationId: string; selector: "stopped" }>
   | Request<"instance.reopen", { operationId: string; instanceId: string; sessionFile?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"interaction.respond", { operationId: string; instanceId: string; leaseToken: string; interactionId: string; response: InteractionResponse }>
+  | Request<"extension.tools_expanded.set", { operationId: string; instanceId: string; expectedRuntimeGeneration: number; expanded: boolean }>
   | Request<"command.submit", { operationId: string; instanceId: string; message: string; delivery: DeliveryMode }>
   | Request<"command.abort", { operationId: string; instanceId: string }>
   | Request<"queue.dequeue", { operationId: string; instanceId: string }>
@@ -190,6 +194,7 @@ export interface AttachInitialDto {
 }
 export type EventsResult = AttachInitialDto;
 export interface InteractionRespondResult { interactionId: string; state: "resolved" | "already_resolved" }
+export interface ToolsExpandedResult { instance: InstanceSnapshot }
 export interface PromptResult { receipt: CommandReceipt; instance: InstanceSnapshot }
 export interface AbortResult { instance: InstanceSnapshot }
 export interface QueueDequeueResult { receipt: QueueDequeueReceipt; instance: InstanceSnapshot }
@@ -237,6 +242,7 @@ export function implementedCapabilities(): string[] { return [...IMPLEMENTED_CAP
 export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "host.info") return "host.info";
   if (type === "instance.forget" || type === "catalog.prune") return "catalog.maintenance.v1";
+  if (type === "extension.tools_expanded.set") return TOOLS_EXPANDED_CAPABILITY;
   if (type === "interaction.respond") return "extension_ui.v1";
   if (type === "instance.reopen") return "session.reopen";
   if (type === "instance.adopt") return "session.adopt.v1";
@@ -257,8 +263,27 @@ export function requiredCapabilities(capability: Capability): string[] {
   return [...new Set<Capability>([
     "core.v2",
     ...(capability === "events.replay-purpose.v1" ? ["events.follow" as const] : []),
+    ...(capabilityProjectsInstanceSnapshot(capability) ? [TOOLS_EXPANDED_CAPABILITY] : []),
     capability,
   ])];
+}
+
+function capabilityProjectsInstanceSnapshot(capability: Capability): boolean {
+  return capability === TOOLS_EXPANDED_CAPABILITY
+    || capability === "events.follow"
+    || capability === "events.replay-purpose.v1"
+    || capability === "instance.catalog"
+    || capability === "models.v1"
+    || capability === "queue.control.v1"
+    || capability === "run.abort.v1"
+    || capability === "session.adopt.v1"
+    || capability === "session.commands.v1"
+    || capability === "session.core"
+    || capability === "session.reopen"
+    || capability === "session.tree.v1"
+    || capability === "settings.v1"
+    || capability === "tools.v1"
+    || capability === "tui.projection.v1";
 }
 export function createHelloAck(requestId: string, host: HostIdentity): HelloAck {
   return {
@@ -410,6 +435,14 @@ export function parseControlRequest(input: unknown): ControlRequest {
         response: parseInteractionResponse(params.response, "params.response", "invalid_request"),
       } };
     }
+    case "extension.tools_expanded.set":
+      exact(params, ["operationId", "instanceId", "expectedRuntimeGeneration", "expanded"], "invalid_request");
+      return { ...base, type, params: {
+        operationId: operationId(),
+        instanceId: instanceId(),
+        expectedRuntimeGeneration: positive(params.expectedRuntimeGeneration, "params.expectedRuntimeGeneration", "invalid_request"),
+        expanded: boolean(params.expanded, "params.expanded", "invalid_request"),
+      } };
     case "command.submit": exact(params, ["operationId", "instanceId", "message", "delivery"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), message: string(params.message, "params.message", MAX_PROMPT_CHARS, "invalid_request"), delivery: enumeration(params.delivery, "params.delivery", ["auto", "prompt", "steer", "followUp"], "invalid_request") } };
     case "command.abort": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "queue.dequeue": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
@@ -997,10 +1030,10 @@ function parseMetrics(input: unknown, field: string): NonNullable<InstanceSnapsh
   return result;
 }
 function parseInstance(input: unknown, field: string): InstanceSnapshot {
-  const value = object(input, field); exact(value, ["id", "creationOperationId", "name", "cwd", "lifecycle", "execution", "compacting", "lastRun", "reopenable", "runtimeGeneration", "ownerHostEpoch", "interruption", "pending", "executor", "metrics", "extensionStatus", "activeInteraction", "activeCommandId", "lastError", "createdAt", "updatedAt", "eventCursor"]);
+  const value = object(input, field); exact(value, ["id", "creationOperationId", "name", "cwd", "lifecycle", "execution", "compacting", "lastRun", "reopenable", "runtimeGeneration", "ownerHostEpoch", "interruption", "pending", "executor", "metrics", "extensionStatus", "toolsExpanded", "activeInteraction", "activeCommandId", "lastError", "createdAt", "updatedAt", "eventCursor"]);
   const snapshot: InstanceSnapshot = {
     id: id(value.id, `${field}.id`), creationOperationId: id(value.creationOperationId, `${field}.creationOperationId`), name: optionalString(value.name, `${field}.name`, MAX_INSTANCE_NAME_CHARS), cwd: string(value.cwd, `${field}.cwd`, MAX_CONTROL_CWD_CHARS),
-    lifecycle: enumeration(value.lifecycle, `${field}.lifecycle`, ["active", "stopping", "stopped", "host_lost", "runtime_error"]), execution: enumeration(value.execution, `${field}.execution`, ["idle", "running", "failed", "unavailable"]), compacting: boolean(value.compacting, `${field}.compacting`), lastRun: enumeration(value.lastRun, `${field}.lastRun`, ["never", "succeeded", "failed", "aborted", "interrupted"]), reopenable: boolean(value.reopenable, `${field}.reopenable`), runtimeGeneration: positive(value.runtimeGeneration, `${field}.runtimeGeneration`), ownerHostEpoch: optionalString(value.ownerHostEpoch, `${field}.ownerHostEpoch`, 128), pending: parsePending(value.pending, `${field}.pending`), executor: parseExecutor(value.executor, `${field}.executor`), metrics: value.metrics === undefined ? undefined : parseMetrics(value.metrics, `${field}.metrics`), extensionStatus: {}, activeCommandId: optionalString(value.activeCommandId, `${field}.activeCommandId`, 128), lastError: optionalString(value.lastError, `${field}.lastError`, MAX_MESSAGE), createdAt: timestamp(value.createdAt, `${field}.createdAt`), updatedAt: timestamp(value.updatedAt, `${field}.updatedAt`), eventCursor: parseCursor(value.eventCursor, `${field}.eventCursor`),
+    lifecycle: enumeration(value.lifecycle, `${field}.lifecycle`, ["active", "stopping", "stopped", "host_lost", "runtime_error"]), execution: enumeration(value.execution, `${field}.execution`, ["idle", "running", "failed", "unavailable"]), compacting: boolean(value.compacting, `${field}.compacting`), lastRun: enumeration(value.lastRun, `${field}.lastRun`, ["never", "succeeded", "failed", "aborted", "interrupted"]), reopenable: boolean(value.reopenable, `${field}.reopenable`), runtimeGeneration: positive(value.runtimeGeneration, `${field}.runtimeGeneration`), ownerHostEpoch: optionalString(value.ownerHostEpoch, `${field}.ownerHostEpoch`, 128), pending: parsePending(value.pending, `${field}.pending`), executor: parseExecutor(value.executor, `${field}.executor`), metrics: value.metrics === undefined ? undefined : parseMetrics(value.metrics, `${field}.metrics`), extensionStatus: {}, toolsExpanded: boolean(value.toolsExpanded, `${field}.toolsExpanded`), activeCommandId: optionalString(value.activeCommandId, `${field}.activeCommandId`, 128), lastError: optionalString(value.lastError, `${field}.lastError`, MAX_MESSAGE), createdAt: timestamp(value.createdAt, `${field}.createdAt`), updatedAt: timestamp(value.updatedAt, `${field}.updatedAt`), eventCursor: parseCursor(value.eventCursor, `${field}.eventCursor`),
   };
   if (value.interruption !== undefined) { const interruption = object(value.interruption, `${field}.interruption`); exact(interruption, ["reason", "at"]); snapshot.interruption = { reason: enumeration(interruption.reason, "interruption.reason", ["host_crash", "host_shutdown", "replacement_failed"]), at: timestamp(interruption.at, "interruption.at") }; }
   const status = object(value.extensionStatus, `${field}.extensionStatus`); if (Object.keys(status).length > 64) throw validation("invalid_response", "extensionStatus has too many keys"); for (const [key, item] of Object.entries(status)) snapshot.extensionStatus[extensionKey(key, "extensionStatus key")] = payloadFreeString(item, `extensionStatus.${key}`, MAX_MESSAGE);
@@ -1079,6 +1112,7 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "interaction.cancelled": exact(data, ["interactionId", "method", "reason"]); return { interactionId: text("interactionId", 128), method: enumeration(data.method, "method", ["select", "confirm", "input", "editor"]), reason: enumeration(data.reason, "reason", ["user", "timeout", "signal", "detach", "replacement", "host_draining", "overflow"]) };
     case "extension.notification": exact(data, ["message", "level"]); return { message: payloadFreeString(data.message, `${field}.message`, MAX_TEXT), level: enumeration(data.level, "level", ["info", "warning", "error"]) };
     case "extension.status_changed": exact(data, ["key", "text"]); return { key: extensionKey(data.key, `${field}.key`), text: data.text === undefined ? undefined : payloadFreeString(data.text, `${field}.text`, MAX_MESSAGE) };
+    case "extension.tools_expanded_changed": exact(data, ["expanded"]); return { expanded: boolean(data.expanded, `${field}.expanded`) };
     case "extension.widget_changed": exact(data, ["key", "lines", "placement"]); return { key: extensionKey(data.key, `${field}.key`), lines: data.lines === undefined ? undefined : payloadFreeStrings(data.lines, `${field}.lines`, MAX_JSON_ARRAY, MAX_TEXT), placement: data.placement === undefined ? undefined : enumeration(data.placement, "placement", ["aboveEditor", "belowEditor"]) };
     case "extension.error": exact(data, ["source", "event", "error"]); return { source: data.source === undefined ? undefined : payloadFreeString(data.source, `${field}.source`, 256), event: data.event === undefined ? undefined : payloadFreeString(data.event, `${field}.event`, 128), error: payloadFreeString(data.error, `${field}.error`, MAX_MESSAGE) };
     default: throw validation("invalid_response", `Unsupported event type: ${type}`);

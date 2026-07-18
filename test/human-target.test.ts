@@ -75,6 +75,7 @@ function instance(id: string, name: string, overrides: Partial<InstanceSnapshot>
     pending: { steering: 0, followUp: 0, total: 0 },
     executor: { kind: "fixture", piSessionId: `pi-${id}`, sessionFile: `/sessions/${id}.jsonl` },
     extensionStatus: {},
+    toolsExpanded: false,
     createdAt: "2026-07-14T00:00:00.000Z",
     updatedAt: "2026-07-14T00:00:00.000Z",
     eventCursor: { hostEpoch: "epoch", instanceId: id, runtimeGeneration: 1, sequence: 0 },

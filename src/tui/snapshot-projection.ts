@@ -12,6 +12,9 @@ export function projectSnapshot(snapshot: InstanceSnapshot, event: DockEvent): I
       eventCursor: advanceCursor(snapshot, event),
     };
   }
+  if (event.type === "extension.tools_expanded_changed") {
+    return { ...snapshot, toolsExpanded: event.data.expanded, updatedAt: event.occurredAt, eventCursor: advanceCursor(snapshot, event) };
+  }
   if (event.type === "extension.status_changed") {
     const extensionStatus = { ...snapshot.extensionStatus };
     if (event.data.text === undefined) delete extensionStatus[event.data.key];
@@ -33,6 +36,7 @@ export function projectSnapshot(snapshot: InstanceSnapshot, event: DockEvent): I
       activeCommandId: undefined,
       lastError: undefined,
       extensionStatus: {},
+      toolsExpanded: false,
       runtimeGeneration: event.data.runtimeGeneration,
       executor: { ...snapshot.executor, piSessionId: event.data.piSessionId, sessionFile: event.data.sessionFile },
       updatedAt: event.occurredAt,

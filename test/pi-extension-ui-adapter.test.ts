@@ -35,6 +35,19 @@ test("Pi extension UI adapter exposes bounded dialogs and fail-closed unsupporte
   assert.equal(events.some((event) => event.type === "extension.notification"), true);
   assert.equal(events.some((event) => event.type === "extension.widget_changed"), true);
 
+  assert.equal(ui.getToolsExpanded(), false);
+  ui.setToolsExpanded(true);
+  ui.setToolsExpanded(true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(ui.getToolsExpanded(), true);
+  assert.equal(events.filter((event) => event.type === "extension.tools_expanded_changed").length, 2);
+  assert.equal(events.some((event) => event.type === "extension.notification"
+    && /tool expansion|tools expanded/u.test(String((event.data as { message?: string }).message))), false);
+  broker.beginGenerationChange();
+  generation = 2;
+  await broker.completeGenerationChange();
+  assert.equal(ui.getToolsExpanded(), false);
+
   let factoryCalled = false;
   const customResult = await ui.custom((_tui, _theme, _keybindings, done) => {
     factoryCalled = true;
@@ -49,7 +62,6 @@ test("Pi extension UI adapter exposes bounded dialogs and fail-closed unsupporte
   assert.equal(degradationWarnings.length, 1);
   assert.match(String((degradationWarnings[0]?.data as { message?: string }).message), /custom components/u);
 
-  generation = 2;
   assert.equal(ui.getEditorText(), "");
   assert.equal(events.filter((event) => event.type === "extension.notification"
     && /visual request was ignored/u.test(String((event.data as { message?: string }).message))).length, 1);

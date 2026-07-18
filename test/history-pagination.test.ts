@@ -1,116 +1,142 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { visibleWidth } from "@earendil-works/pi-tui";
+import type { DockEvent, HistoryEntryDto, InstanceSnapshot } from "../src/core/instance-dto.js";
+import { drainFullHistory, HISTORY_PAGE_SIZE, reconcileFlowingEvents } from "../src/tui/history-pagination.js";
 
-import type { HistoryEntryDto } from "../src/core/instance-dto.js";
-import {
-  HISTORY_PAGE_SIZE,
-  PagedHistoryWindow,
-} from "../src/tui/history-pagination.js";
-import { DockMouseTrackingMode, parseMouseWheel, mouseTrackingSequences } from "../src/tui/mouse-input.js";
+function entry(index: number): HistoryEntryDto {
+  return { entryId: `entry-${index}`, role: index % 2 === 0 ? "user" : "assistant", content: [{ type: "text", text: `history ${index}` }] };
+}
 
-function entry(index: number, text = `history ${index}`): HistoryEntryDto {
+function snapshot(sequence = 1, overrides: Partial<InstanceSnapshot> = {}): InstanceSnapshot {
   return {
-    entryId: `history-${index}`,
-    role: index % 2 === 0 ? "user" : "assistant",
-    content: [{ type: "text", text }],
+    id: "dock-1",
+    creationOperationId: "create-1",
+    cwd: "/tmp/project",
+    lifecycle: "active",
+    execution: "idle",
+    compacting: false,
+    lastRun: "never",
+    reopenable: false,
+    runtimeGeneration: 1,
+    ownerHostEpoch: "epoch-1",
+    pending: { steering: 0, followUp: 0, total: 0 },
+    executor: { kind: "fixture", piSessionId: "pi-1" },
+    extensionStatus: {},
+    toolsExpanded: false,
+    createdAt: "2026-07-19T00:00:00.000Z",
+    updatedAt: "2026-07-19T00:00:00.000Z",
+    eventCursor: { hostEpoch: "epoch-1", instanceId: "dock-1", runtimeGeneration: 1, sequence },
+    ...overrides,
   };
 }
 
-test("paged history deduplicates concurrent loads and rejects stale generation completions", () => {
-  const history = new PagedHistoryWindow();
-  history.reset([entry(4), entry(5)], true, 3);
-  const request = history.beginEarlier();
-  assert.ok(request);
-  assert.equal(request.beforeEntryId, "history-4");
-  assert.equal(history.beginEarlier(), undefined);
-  assert.equal(history.snapshot().loadState, "loading");
-
-  history.invalidate(4);
-  assert.equal(history.completeEarlier(request, {
-    entries: [entry(2), entry(3)],
-    hasEarlier: true,
-    nextBeforeEntryId: "history-2",
-  }), false);
-  assert.deepEqual(history.snapshot().entries, []);
-  assert.equal(history.snapshot().generation, 4);
-});
-
-test("paged history keeps 8500 entries continuously navigable without a client cache gap", () => {
+test("eager history drain retains all 8,500 entries in oldest-to-newest order", async () => {
   const all = Array.from({ length: 8_500 }, (_, index) => entry(index));
-  const history = new PagedHistoryWindow();
-  history.reset(all.slice(-HISTORY_PAGE_SIZE), true, 1);
-  const reached = new Set(history.snapshot().entries.map((item) => item.entryId));
-  let pages = 0;
-
-  while (history.snapshot().hasEarlier) {
-    const request = history.beginEarlier();
-    assert.ok(request);
-    const end = all.findIndex((item) => item.entryId === request.beforeEntryId);
-    assert.ok(end > 0);
-    const start = Math.max(0, end - HISTORY_PAGE_SIZE);
-    const page = all.slice(start, end);
-    assert.equal(history.completeEarlier(request, {
-      entries: page,
+  const seed = all.slice(-100);
+  let loads = 0;
+  const result = await drainFullHistory("dock-1", 1, seed, true, async (beforeEntryId) => {
+    loads += 1;
+    assert.ok(beforeEntryId);
+    const before = Number(beforeEntryId.slice("entry-".length));
+    const start = Math.max(0, before - HISTORY_PAGE_SIZE);
+    return {
+      entries: all.slice(start, before),
       hasEarlier: start > 0,
-      ...(start > 0 ? { nextBeforeEntryId: page[0]!.entryId } : {}),
-    }), true);
-    for (const item of history.snapshot().entries) reached.add(item.entryId);
-    assert.equal(history.snapshot().entries.length, all.length - start);
-    pages += 1;
-    assert.ok(pages < 100);
-  }
-
-  const snapshot = history.snapshot();
-  assert.equal(pages, 42);
-  assert.equal(reached.size, all.length);
-  assert.equal(snapshot.entries[0]?.entryId, "history-0");
-  assert.equal(snapshot.entries.at(-1)?.entryId, "history-8499");
-  assert.equal(snapshot.entries.length, all.length);
-  assert.deepEqual(history.snapshot().entries, snapshot.entries);
+      ...(start > 0 ? { nextBeforeEntryId: `entry-${start}` } : {}),
+      instance: snapshot(loads + 1),
+    };
+  });
+  assert.equal(result.entries.length, 8_500);
+  assert.equal(result.entries[0]?.entryId, "entry-0");
+  assert.equal(result.entries.at(-1)?.entryId, "entry-8499");
+  assert.equal(new Set(result.entries.map((item) => item.entryId)).size, 8_500);
+  assert.equal(result.bootstrapBoundary, undefined);
 });
 
-test("paged history exposes retryable cursor errors without advancing or looping", () => {
-  const history = new PagedHistoryWindow();
-  history.reset([entry(10), entry(11)], true, 2);
-  const request = history.beginEarlier();
-  assert.ok(request);
-  assert.equal(history.completeEarlier(request, {
-    entries: [entry(10)],
-    hasEarlier: true,
-    nextBeforeEntryId: "history-10",
-  }), false);
-  assert.equal(history.snapshot().loadState, "error");
-  assert.match(history.snapshot().error ?? "", /did not advance/);
-  assert.ok(history.beginEarlier(), "a PageUp retry should be admitted after an error");
+test("eager history drain deduplicates page overlap without changing order", async () => {
+  const seed = [entry(4), entry(5), entry(5)];
+  const result = await drainFullHistory("dock-1", 1, seed, true, async (beforeEntryId) => {
+    assert.equal(beforeEntryId, "entry-4");
+    return { entries: [entry(0), entry(1), entry(2), entry(3), entry(4), entry(3)], hasEarlier: false, instance: snapshot(20) };
+  });
+  assert.deepEqual(result.entries.map((item) => item.entryId), ["entry-0", "entry-1", "entry-2", "entry-3", "entry-4", "entry-5"]);
 });
 
-test("Dock mouse tracking is explicit, bounded, and inactive by default", () => {
-  const mode = new DockMouseTrackingMode();
-  assert.equal(mode.active, false);
-  assert.deepEqual(mode.render(80), []);
-  assert.equal(mode.setActive(true), true);
-  assert.equal(mode.setActive(true), false);
-  const line = mode.render(43)[0] ?? "";
-  assert.match(line, /Dock mouse tracking/u);
-  assert.ok(visibleWidth(line) <= 43);
-  assert.equal(mode.setActive(false), true);
-  assert.deepEqual(mode.render(80), []);
+test("empty seed bootstraps latest history and exposes only that live boundary", async () => {
+  const latestBoundary = snapshot(10);
+  const calls: Array<string | undefined> = [];
+  const result = await drainFullHistory("dock-1", 1, [], true, async (beforeEntryId) => {
+    calls.push(beforeEntryId);
+    if (beforeEntryId === undefined) {
+      return { entries: [entry(3), entry(4)], hasEarlier: true, nextBeforeEntryId: "entry-3", instance: latestBoundary };
+    }
+    assert.equal(beforeEntryId, "entry-3");
+    return { entries: [entry(0), entry(1), entry(2), entry(3)], hasEarlier: false, instance: snapshot(99) };
+  });
+  assert.deepEqual(calls, [undefined, "entry-3"]);
+  assert.strictEqual(result.bootstrapBoundary, latestBoundary);
+  assert.deepEqual(result.entries.map((item) => item.entryId), ["entry-0", "entry-1", "entry-2", "entry-3", "entry-4"]);
 });
 
-test("mouse wheel parser accepts SGR and legacy xterm presses and ignores non-wheel input", () => {
-  assert.equal(parseMouseWheel("\u001b[<64;20;5M"), "up");
-  assert.equal(parseMouseWheel("\u001b[<65;20;5M"), "down");
-  assert.equal(parseMouseWheel("\u001b[<68;20;5M"), "up", "modifier bits must not change direction");
-  assert.equal(parseMouseWheel(`\u001b[M${String.fromCharCode(96, 42, 37)}`), "up");
-  assert.equal(parseMouseWheel(`\u001b[M${String.fromCharCode(97, 42, 37)}`), "down");
-  assert.equal(parseMouseWheel("\u001b[<0;20;5M"), undefined);
-  assert.equal(parseMouseWheel("\u001b[5~"), undefined);
+test("nonempty seed earlier pages never advance the live reconciliation boundary", async () => {
+  const result = await drainFullHistory("dock-1", 1, [entry(2), entry(3)], true, async () => ({
+    entries: [entry(0), entry(1), entry(2)],
+    hasEarlier: false,
+    instance: snapshot(500),
+  }));
+  assert.equal(result.bootstrapBoundary, undefined);
+  assert.deepEqual(result.entries.map((item) => item.entryId), ["entry-0", "entry-1", "entry-2", "entry-3"]);
+});
 
-  const sequences = mouseTrackingSequences();
-  assert.match(sequences.enable, /\?1000h/);
-  assert.match(sequences.enable, /\?1006h/);
-  assert.match(sequences.disable, /\?1006l/);
-  assert.match(sequences.disable, /\?1000l/);
+test("eager history drain rejects stalled cursors", async () => {
+  await assert.rejects(
+    drainFullHistory("dock-1", 1, [entry(4)], true, async () => ({
+      entries: [entry(2), entry(3)], hasEarlier: true, nextBeforeEntryId: "entry-4", instance: snapshot(),
+    })),
+    /cursor did not advance/u,
+  );
+});
+
+test("eager history drain rejects instance or generation changes", async () => {
+  await assert.rejects(
+    drainFullHistory("dock-1", 1, [entry(2)], true, async () => ({
+      entries: [entry(0), entry(1)], hasEarlier: false, instance: snapshot(2, { runtimeGeneration: 2 }),
+    })),
+    /Session changed while history was loading/u,
+  );
+  await assert.rejects(
+    drainFullHistory("dock-1", 1, [], true, async () => ({
+      entries: [], hasEarlier: false, instance: snapshot(2, { id: "other" }),
+    })),
+    /Session changed while history was loading/u,
+  );
+});
+
+test("flowing reconciliation removes persisted frames but retains unresolved and non-durable live events once", () => {
+  const history: HistoryEntryDto[] = [{
+    entryId: "persisted-user",
+    role: "user",
+    content: [{ type: "text", text: "already persisted" }],
+  }];
+  const makeEvent = (sequence: number, type: DockEvent["type"], data: Record<string, unknown>): DockEvent => ({
+    scope: "instance",
+    sequence,
+    instanceId: "dock-1",
+    runtimeGeneration: 1,
+    occurredAt: "2026-07-19T00:00:00.000Z",
+    type,
+    data,
+  }) as DockEvent;
+  const covered = makeEvent(2, "message.submitted", {
+    operationId: "op-covered", messageId: "message-covered", role: "user", text: "already persisted", delivery: "prompt",
+  });
+  const unresolved = makeEvent(3, "message.delta", {
+    messageId: "message-live", role: "assistant", block: "text", delta: "still streaming",
+  });
+  const feedback = makeEvent(4, "resources.reloaded", { resources: [], diagnostics: [] });
+
+  const reconciled = reconcileFlowingEvents(history, [covered, unresolved], [unresolved, feedback]);
+  assert.deepEqual(reconciled.map((event) => event.sequence), [3, 4]);
+  assert.equal(reconciled.filter((event) => event.sequence === 3).length, 1, "overlapping attach/live events are deduplicated");
 });

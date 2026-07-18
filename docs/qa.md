@@ -116,7 +116,7 @@ test/fixtures/pty-tui-driver.py
 - 80×24与120×40；
 - long cwd/name、multiline input、tool output、tree/picker/dialog；
 - resize、scroll、detach、signal；
-- normal terminal selection与explicit mouse mode cleanup；
+- Hub alternate-screen click/wheel cleanup与Work terminal-native selection/scrollback隔离；
 - 无颜色、ANSI 16/256环境；
 - idle时无不必要animation timer或持续重绘。
 

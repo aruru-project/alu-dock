@@ -73,7 +73,7 @@ function validSnapshot(): Record<string, unknown> {
     lifecycle: "active", execution: "idle", compacting: false, lastRun: "never", reopenable: false,
     runtimeGeneration: 1, ownerHostEpoch: "epoch-1",
     pending: { steering: 0, followUp: 0, total: 0 },
-    executor: { kind: "fixture", piSessionId: "pi-1" }, extensionStatus: {},
+    executor: { kind: "fixture", piSessionId: "pi-1" }, extensionStatus: {}, toolsExpanded: false,
     createdAt: "2026-07-14T00:00:00.000Z", updatedAt: "2026-07-14T00:00:00.000Z",
     eventCursor: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 },
   };
@@ -82,6 +82,41 @@ function validSnapshot(): Record<string, unknown> {
 function validEvent(type = "message.delta", data: Record<string, unknown> = { messageId: "m1", block: "text", delta: "hello" }): Record<string, unknown> {
   return { scope: "instance", sequence: 1, instanceId: "i1", runtimeGeneration: 1, occurredAt: "2026-07-14T00:00:00.000Z", type, data };
 }
+
+test("toolsExpanded request, snapshot, and event contracts are strict", () => {
+  const base = { kind: "request", version: 2, requestId: "tools-expanded-1", type: "extension.tools_expanded.set" };
+  assert.deepEqual(parseControlRequest({
+    ...base,
+    params: { operationId: "operation-1", instanceId: "i1", expectedRuntimeGeneration: 1, expanded: true },
+  }), {
+    ...base,
+    params: { operationId: "operation-1", instanceId: "i1", expectedRuntimeGeneration: 1, expanded: true },
+  });
+  assert.throws(() => parseControlRequest({
+    ...base,
+    params: { operationId: "operation-1", instanceId: "i1", expectedRuntimeGeneration: 1, expanded: true, extra: true },
+  }), /Unexpected field/u);
+  assert.throws(() => parseControlRequest({
+    ...base,
+    params: { operationId: "operation-1", instanceId: "i1", expectedRuntimeGeneration: 0, expanded: "yes" },
+  }), /expectedRuntimeGeneration|expanded/u);
+
+  assert.equal(parseStatusResult({ instance: { ...validSnapshot(), toolsExpanded: true } }).instance.toolsExpanded, true);
+  const { toolsExpanded: _missing, ...withoutToolsExpanded } = validSnapshot();
+  assert.throws(() => parseStatusResult({ instance: withoutToolsExpanded }), /toolsExpanded/u);
+  assert.throws(() => parseStatusResult({ instance: { ...validSnapshot(), toolsExpanded: "yes" } }), /toolsExpanded/u);
+
+  const envelope = (data: unknown) => ({
+    kind: "event", version: 2, requestId: "attach-1", hostEpoch: "epoch-1",
+    event: validEvent("extension.tools_expanded_changed", data as Record<string, unknown>),
+  });
+  const parsedEvent = parseControlEventEnvelope(envelope({ expanded: true }), "attach-1", "epoch-1").event;
+  assert.equal(parsedEvent.type, "extension.tools_expanded_changed");
+  if (parsedEvent.type !== "extension.tools_expanded_changed") assert.fail("unexpected event type");
+  assert.equal(parsedEvent.data.expanded, true);
+  assert.throws(() => parseControlEventEnvelope(envelope({ expanded: true, extra: true }), "attach-1", "epoch-1"), /Unexpected field/u);
+  assert.throws(() => parseControlEventEnvelope(envelope({ expanded: 1 }), "attach-1", "epoch-1"), /expanded/u);
+});
 
 test("V2 requests reject unsupported versions, unknown fields, invalid cursors, and invalid enums", () => {
   assert.throws(
@@ -169,7 +204,8 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   assert.throws(() => parseControlRequest({ ...base, type: "instance.list", params: { selector: "all", limit: 101 } }), /must not exceed 100/u);
   assert.equal(capabilityForRequest("instance.adopt"), "session.adopt.v1");
   assert.equal(capabilityForRequest("session.inventory"), "session.inventory.v1");
-  assert.deepEqual(requiredCapabilities("events.replay-purpose.v1"), ["core.v2", "events.follow", "events.replay-purpose.v1"]);
+  assert.equal(capabilityForRequest("extension.tools_expanded.set"), "extension_ui.tools-expanded.v1");
+  assert.deepEqual(requiredCapabilities("events.replay-purpose.v1"), ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "events.replay-purpose.v1"]);
 
   const adopted = parseControlRequest({
     ...base,

@@ -44,6 +44,7 @@ function snapshot(): InstanceSnapshot {
       model: { provider: "openai-codex", id: "gpt-test" },
     },
     extensionStatus: { "alu-kanban": "ready" },
+    toolsExpanded: false,
     metrics: {
       messages: { user: 2, assistant: 1, toolCalls: 1, toolResults: 1, total: 5 },
       tokens: { input: 800, output: 200, cacheRead: 200, cacheWrite: 0, total: 1_200 },
@@ -69,7 +70,9 @@ test("autocomplete combines Dock and projected extension skill and prompt comman
   assert.ok(catalog.some((command) => command.name === "unsafe[2J"));
   assert.equal(catalog.some((command) => command.name.includes("\u001b")), false);
   assert.equal(catalog.find((command) => command.name === "prompt-review")?.argumentHint, "arguments");
-  for (const name of ["settings", "tools", "tree", "fork", "clone", "new", "resume", "name", "compact", "reload", "resources", "mouse"]) assert.ok(catalog.some((command) => command.name === name));
+  for (const name of ["settings", "tools", "tree", "fork", "clone", "new", "resume", "name", "compact", "reload", "resources"]) assert.ok(catalog.some((command) => command.name === name));
+
+  assert.equal(catalog.some((command) => command.name === "mouse"), false);
 
   const provider = new CombinedAutocompleteProvider(catalog, "/tmp");
   const suggestions = await provider.getSuggestions(["/skill-c"], 0, 8, { signal: new AbortController().signal });
@@ -87,6 +90,7 @@ test("Work help is scope-grouped and keeps every command syntax on one source li
   assert.ok(help.indexOf("RUNTIME") < help.indexOf("CLIENT"));
   assert.ok(help.indexOf("CLIENT") < help.indexOf("EXTENSION"));
   for (const command of ["config", "install", "login"]) assert.match(help, new RegExp(`/${command}\\b`, "u"));
+  assert.doesNotMatch(help, /\/mouse\b/u);
 });
 
 test("Stage 3 setting command values are typed and bounded", () => {
@@ -125,7 +129,7 @@ test("Night Console uses semantic local surfaces without taking over the termina
   assert.doesNotMatch(ansi16.userSurface("question"), /\u001b\[4[0-7]m/u, "local surfaces fall back to foreground-only at 16 colors");
 });
 
-test("long live runs retain every projected conversation entry", () => {
+test("full flowing conversation render includes the complete ordered transcript", () => {
   const conversation = new DockConversation();
   for (let index = 0; index < 500; index += 1) {
     conversation.apply(event(index + 1, "message.submitted", {
@@ -137,8 +141,9 @@ test("long live runs retain every projected conversation entry", () => {
     }));
   }
   assert.equal(conversation.snapshot().length, 500);
-  assert.equal(conversation.snapshot()[0]?.text, "live entry 0");
-  assert.equal(conversation.snapshot().at(-1)?.text, "live entry 499");
+  const rendered = conversation.render(40).join("\n");
+  assert.ok(rendered.indexOf("live entry 0") < rendered.indexOf("live entry 499"));
+  assert.match(rendered, /live entry 250/u);
 });
 
 test("conversation reset replaces old session history", () => {
@@ -192,7 +197,6 @@ test("conversation projects persisted history before live replay", () => {
   ], true);
 
   assert.deepEqual(conversation.snapshot(), [
-    { kind: "system", text: "Earlier session history is available through paged history.", complete: true },
     { kind: "user", text: "old question", complete: true },
     { kind: "thinking", text: "old plan", complete: true },
     { kind: "assistant", text: "old answer", complete: true },
@@ -237,42 +241,6 @@ test("compaction summaries default to one line and expand explicitly", () => {
   assert.equal(ordinary.toggleLatestDetailExpanded(), undefined);
 });
 
-test("paged history rebuild stays contiguous and ordered before live events", () => {
-  const conversation = new DockConversation();
-  conversation.applyHistory([
-    { entryId: "h8", role: "user", content: [{ type: "text", text: "recent eight" }] },
-    { entryId: "h9", role: "assistant", content: [{ type: "text", text: "recent nine" }] },
-  ], true);
-  conversation.apply(event(1, "message.submitted", {
-    operationId: "live-op",
-    messageId: "live-user",
-    role: "user",
-    text: "live tail",
-    delivery: "prompt",
-  }));
-
-  conversation.replacePagedHistory({
-    entries: [
-      { entryId: "h0", role: "user", content: [{ type: "text", text: "old zero" }] },
-      { entryId: "h1", role: "assistant", content: [{ type: "text", text: "old one" }] },
-      { entryId: "h8", role: "user", content: [{ type: "text", text: "recent eight" }] },
-      { entryId: "h9", role: "assistant", content: [{ type: "text", text: "recent nine" }] },
-    ],
-    hasEarlier: false,
-    loadState: "idle",
-    generation: 1,
-    revision: 2,
-  });
-
-  assert.deepEqual(conversation.snapshot().map((item) => item.text), [
-    "old zero",
-    "old one",
-    "recent eight",
-    "recent nine",
-    "live tail",
-  ]);
-});
-
 test("fresh conversation bootstrap ignores lifecycle replay and keeps only unresolved message/tool frames", () => {
   const conversation = new DockConversation();
   conversation.applyHistory([{ entryId: "h1", role: "assistant", content: [{ type: "text", text: "current branch" }] }], false);
@@ -308,7 +276,7 @@ test("an empty persisted branch still shows an unresolved active tool bootstrap"
   assert.deepEqual(conversation.snapshot().map((entry) => [entry.kind, entry.text]), [
     ["tool", "read running\nargs\n{\n  \"path\": \"src/offline.ts\"\n}"],
   ]);
-  assert.doesNotMatch(conversation.renderViewport(80, 12).lines.join("\n"), /Start a conversation|hidden continuation control/u);
+  assert.doesNotMatch(conversation.render(80).join("\n"), /Start a conversation|hidden continuation control/u);
 });
 
 test("conversation projects replay and live deltas into readable messages", () => {
@@ -443,71 +411,23 @@ test("collapsed tool rows identify common operations without exposing arbitrary 
   }
 });
 
-test("live tool argument updates refresh the collapsed operation summary", () => {
+test("authoritative toolsExpanded updates clear per-tool overrides", () => {
   const conversation = new DockConversation();
   conversation.apply(event(1, "tool.started", {
-    toolCallId: "summary-update", toolName: "read", args: { path: "src/old.ts" },
+    toolCallId: "authoritative-tool", toolName: "read", args: { path: "src/current.ts" },
   }));
-  const initialRevision = conversation.revision;
-  assert.match(conversation.render(80).join("\n"), /src\/old\.ts/u);
+  conversation.apply(event(2, "tool.completed", {
+    toolCallId: "authoritative-tool", toolName: "read", isError: false, text: "authoritative detail",
+  }));
 
-  conversation.apply(event(2, "tool.args_updated", {
-    toolCallId: "summary-update", args: { path: "src/new\u001b[2J.ts", offset: 20, limit: 2 },
-  }));
-  assert.ok(conversation.revision > initialRevision);
-  const updated = conversation.render(80).join("\n");
-  assert.match(updated, /src\/new\[2J\.ts.*lines 20–21/u);
-  assert.doesNotMatch(updated, /src\/old\.ts/u);
+  conversation.setToolsExpanded(true);
+  assert.match(conversation.render(80).join("\n"), /authoritative detail/u);
+  assert.deepEqual(conversation.toggleLatestToolExpanded(), { expanded: false, name: "read" });
+  assert.doesNotMatch(conversation.render(80).join("\n"), /authoritative detail/u);
 
-  const longPrefix = "x".repeat(5_000);
-  conversation.apply(event(3, "tool.args_updated", {
-    toolCallId: "summary-update", args: { content: longPrefix, path: "src/first.ts" },
-  }));
-  const truncatedArgsRevision = conversation.revision;
-  conversation.apply(event(4, "tool.args_updated", {
-    toolCallId: "summary-update", args: { content: longPrefix, path: "src/second.ts" },
-  }));
-  assert.ok(conversation.revision > truncatedArgsRevision, "summary changes beyond truncated detail JSON remain visible");
-  assert.match(conversation.render(80).join("\n"), /src\/second\.ts/u);
-});
-
-test("duplicate tool projections do not invalidate cached conversation output", () => {
-  const conversation = new DockConversation();
-  conversation.apply(event(1, "tool.started", {
-    toolCallId: "tool-cache",
-    toolName: "edit",
-    args: { path: "src/a.ts" },
-  }));
-  const startedRevision = conversation.revision;
-  const startedLines = conversation.render(80);
-
-  conversation.apply(event(2, "tool.args_updated", {
-    toolCallId: "tool-cache",
-    args: { path: "src/a.ts" },
-  }));
-  assert.equal(conversation.revision, startedRevision);
-  assert.strictEqual(conversation.render(80), startedLines);
-
-  conversation.apply(event(3, "tool.output_updated", {
-    toolCallId: "tool-cache",
-    text: "partial output",
-  }));
-  const outputRevision = conversation.revision;
-  const outputLines = conversation.render(80);
-  assert.ok(outputRevision > startedRevision);
-
-  conversation.apply(event(4, "tool.output_updated", {
-    toolCallId: "tool-cache",
-    text: "partial output",
-  }));
-  assert.equal(conversation.revision, outputRevision);
-  assert.strictEqual(conversation.render(80), outputLines);
-
-  conversation.apply(event(5, "tool.output_updated", {
-    toolCallId: "tool-cache",
-    text: "changed output",
-  }));
-  assert.ok(conversation.revision > outputRevision);
+  conversation.setToolsExpanded(true);
+  assert.equal(conversation.areToolsExpanded(), true);
+  assert.match(conversation.render(80).join("\n"), /authoritative detail/u);
 });
 
 test("collapsed tool failures expose a safe first-line reason and preserve expandable detail", () => {
@@ -521,7 +441,6 @@ test("collapsed tool failures expose a safe first-line reason and preserve expan
   assert.match(collapsed, /× bash failed/);
   assert.match(collapsed, /bash failed.*false.*expanded failure detail/u);
   assert.deepEqual(conversation.toggleLatestToolExpanded(), { expanded: true, name: "bash" });
-  assert.ok((conversation.latestToolOffsetFromBottom(60) ?? 0) > 0);
   assert.match(conversation.render(60).join("\n"), /expanded failure detail/);
 
   const structured = new DockConversation();
@@ -620,7 +539,9 @@ test("live snapshot projection updates metrics, extension status, state, and rep
     },
   }));
   projected = projectSnapshot(projected, event(3, "extension.status_changed", { key: "build", text: "green" }));
-  projected = projectSnapshot(projected, event(4, "instance.state_changed", {
+  projected = projectSnapshot(projected, event(4, "extension.tools_expanded_changed", { expanded: true }));
+  assert.equal(projected.toolsExpanded, true);
+  projected = projectSnapshot(projected, event(5, "instance.state_changed", {
     reason: "settled", lifecycle: "active", execution: "idle", compacting: false, lastRun: "succeeded",
     pending: { steering: 0, followUp: 0, total: 0 },
   }));
@@ -631,6 +552,7 @@ test("live snapshot projection updates metrics, extension status, state, and rep
 
   assert.equal(projected.metrics?.context?.percent, 20);
   assert.deepEqual(projected.extensionStatus, {});
+  assert.equal(projected.toolsExpanded, false, "session replacement resets extension UI state");
   assert.equal(projected.execution, "idle");
   assert.equal(projected.lastRun, "never");
   assert.equal(projected.activeCommandId, undefined);
@@ -688,6 +610,11 @@ test("Work chrome separates semantic header metrics extensions and activity", ()
   assert.equal(narrowStatus.length, 2);
   assert.doesNotMatch(narrowStatus.join("\n"), /waiting for model/);
   for (const line of [...narrowHeader, ...narrowActivity, ...narrowStatus]) assert.ok(visibleWidth(line) <= 43);
+
+  const flowingFooter = [...header.render(120), ...status.render(120)];
+  assert.match(flowingFooter[0] ?? "", /customer migration/u, "former header is the first footer row");
+  assert.match(flowingFooter[1] ?? "", /cache 20%/u, "metrics follow the former header");
+  assert.match(flowingFooter[2] ?? "", /alu-kanban: ready/u, "reserved extension row remains last");
 
   const emptyExtensions = new DockStatusLine({ ...current, extensionStatus: {} }).render(80);
   assert.equal(emptyExtensions[1], "");

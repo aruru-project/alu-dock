@@ -7,7 +7,6 @@ import {
 } from "@earendil-works/pi-tui";
 
 import type { DockEvent, HistoryEntryDto, InstanceSnapshot, JsonObject, JsonValue } from "../core/managed-instance.js";
-import type { HistoryWindowSnapshot } from "./history-pagination.js";
 import { renderWorkAlu } from "./alu-mascot.js";
 import { knownCompactionFeedback } from "./compaction-feedback.js";
 import type { RunActivityState } from "./run-activity.js";
@@ -30,34 +29,12 @@ interface ConversationEntry {
   summaryKind?: "compaction" | "branch";
   renderRevision: number;
   renderCache?: { width: number; revision: number; expanded: boolean; lines: string[] };
-  rowCountCache?: { width: number; revision: number; expanded: boolean; count: number };
-}
-
-export interface ConversationRowAnchor {
-  entryKey: string;
-  rowWithinEntry: number;
-}
-
-export interface ConversationViewportSlice {
-  lines: string[];
-  anchors: ConversationRowAnchor[];
-  topAnchor?: ConversationRowAnchor;
-  canScrollUp: boolean;
-  canScrollDown: boolean;
-}
-
-export interface ConversationAnchorMove {
-  anchor: ConversationRowAnchor;
-  reachedBoundary: boolean;
 }
 
 interface ConversationRenderCache {
   width: number;
   revision: number;
   lines: string[];
-  spanKeys: string[];
-  spanStarts: number[];
-  spanCounts: number[];
 }
 
 interface ToolProjection {
@@ -88,11 +65,9 @@ export class DockConversation implements Component {
   private lastToggledDetailKey: string | undefined;
   private outputPadding = 1;
   private revisionValue = 0;
-  private outputRevisionValue = 0;
   private historyDisplayCount = 0;
   private liveEntrySequence = 0;
   private renderCache: ConversationRenderCache | undefined;
-  private readonly materializedEntries = new Set<ConversationEntry>();
 
   reset(): void {
     this.entries.length = 0;
@@ -105,32 +80,12 @@ export class DockConversation implements Component {
     this.toolExpansionOverrides.clear();
     this.expandedCompactionSummaries.clear();
     this.lastToggledDetailKey = undefined;
-    this.materializedEntries.clear();
     this.markLayoutChanged();
   }
 
-  applyHistory(entries: HistoryEntryDto[], truncated: boolean): void {
-    this.replacePagedHistory({
-      entries,
-      hasEarlier: truncated,
-      ...(truncated && entries[0] ? { nextBeforeEntryId: entries[0].entryId } : {}),
-      loadState: "idle",
-      generation: 0,
-      revision: 0,
-    });
-  }
-
-  replacePagedHistory(window: HistoryWindowSnapshot): void {
+  applyHistory(entries: HistoryEntryDto[], _truncated: boolean): void {
     const liveEntries = this.entries.slice(this.historyDisplayCount);
-    const historyEntries = this.projectHistory(window.entries);
-    if (window.hasEarlier) {
-      const text = window.loadState === "loading"
-        ? "Loading earlier session history…"
-        : window.loadState === "error"
-          ? `Earlier session history unavailable: ${window.error ?? "unknown error"}. PageUp retries · Ctrl+End reloads latest.`
-          : "Earlier session history is available through paged history.";
-      historyEntries.unshift(this.createEntry("history:earlier-boundary", "system", text));
-    }
+    const historyEntries = this.projectHistory(entries);
     this.entries.splice(0, this.entries.length, ...historyEntries, ...liveEntries);
     this.historyDisplayCount = historyEntries.length;
     for (const toolCallId of this.toolExpansionOverrides.keys()) {
@@ -144,9 +99,6 @@ export class DockConversation implements Component {
     }
     const retainedEntries = new Set(this.entries);
     if (this.lastExtensionInfo && !retainedEntries.has(this.lastExtensionInfo)) this.lastExtensionInfo = undefined;
-    for (const entry of this.materializedEntries) {
-      if (!retainedEntries.has(entry)) this.materializedEntries.delete(entry);
-    }
     this.markLayoutChanged();
   }
 
@@ -403,10 +355,13 @@ export class DockConversation implements Component {
       this.markLayoutChanged();
     }
   }
-  toggleToolsExpanded(): boolean {
-    this.toolsExpanded = !this.toolsExpanded;
+  setToolsExpanded(expanded: boolean): void {
+    this.toolsExpanded = expanded;
     this.toolExpansionOverrides.clear();
     this.markLayoutChanged();
+  }
+  toggleToolsExpanded(): boolean {
+    this.setToolsExpanded(!this.toolsExpanded);
     return this.toolsExpanded;
   }
   toggleLatestToolExpanded(): { expanded: boolean; name: string } | undefined {
@@ -437,132 +392,9 @@ export class DockConversation implements Component {
     return { expanded, name: "context summary" };
   }
   areToolsExpanded(): boolean { return this.toolsExpanded; }
-  latestToolOffsetFromBottom(width: number): number | undefined {
-    const latestIndex = this.entries.findLastIndex((entry) => entry.toolCallId !== undefined);
-    if (latestIndex < 0) return undefined;
-    const contentWidth = Math.max(1, width - this.outputPadding - 1);
-    let rows = 0;
-    for (let index = latestIndex + 1; index < this.entries.length; index += 1) {
-      const entry = this.entries[index];
-      if (!entry || (this.hideThinking && entry.kind === "thinking")) continue;
-      rows += this.entryRowCount(entry, contentWidth);
-    }
-    return rows;
-  }
-  latestDetailOffsetFromBottom(width: number): number | undefined {
-    const latestIndex = this.lastToggledDetailKey === undefined
-      ? -1
-      : this.entries.findIndex((entry) => entry.key === this.lastToggledDetailKey);
-    if (latestIndex < 0) return undefined;
-    const contentWidth = Math.max(1, width - this.outputPadding - 1);
-    let rows = 0;
-    for (let index = latestIndex + 1; index < this.entries.length; index += 1) {
-      const entry = this.entries[index];
-      if (!entry || (this.hideThinking && entry.kind === "thinking")) continue;
-      rows += this.entryRowCount(entry, contentWidth);
-    }
-    return rows;
-  }
-  latestToolAnchor(): ConversationRowAnchor | undefined {
-    const entry = this.entries.findLast((candidate) => candidate.toolCallId !== undefined);
-    return entry ? { entryKey: entry.key, rowWithinEntry: 0 } : undefined;
-  }
-  latestDetailAnchor(): ConversationRowAnchor | undefined {
-    if (!this.lastToggledDetailKey) return undefined;
-    return this.entries.some((entry) => entry.key === this.lastToggledDetailKey)
-      ? { entryKey: this.lastToggledDetailKey, rowWithinEntry: 0 }
-      : undefined;
-  }
-
-  /** Render only the viewport neighborhood; full history remains in the model. */
-  renderViewport(width: number, rows: number, anchor?: ConversationRowAnchor): ConversationViewportSlice {
-    const boundedRows = Math.max(0, Math.floor(rows));
-    if (boundedRows === 0) {
-      this.retainMaterialized(new Set());
-      return { lines: [], anchors: [], canScrollUp: false, canScrollDown: false };
-    }
-    if (this.entries.length === 0) {
-      const lines = [paint.muted("  Start a conversation below.")];
-      this.retainMaterialized(new Set());
-      return {
-        lines,
-        anchors: [{ entryKey: "conversation:empty", rowWithinEntry: 0 }],
-        topAnchor: { entryKey: "conversation:empty", rowWithinEntry: 0 },
-        canScrollUp: false,
-        canScrollDown: false,
-      };
-    }
-
-    const contentWidth = this.contentWidth(width);
-    const normalized = anchor ? this.normalizeAnchor(anchor, contentWidth) : undefined;
-    if (!normalized) return this.renderBottomViewport(width, boundedRows, contentWidth);
-
-    let slice = this.renderForwardViewport(width, boundedRows, contentWidth, normalized);
-    if (slice.lines.length < boundedRows && !slice.canScrollDown) {
-      const shifted = this.moveAnchor(width, normalized, -(boundedRows - slice.lines.length));
-      if (shifted && (shifted.anchor.entryKey !== normalized.entryKey || shifted.anchor.rowWithinEntry !== normalized.rowWithinEntry)) {
-        slice = this.renderForwardViewport(width, boundedRows, contentWidth, shifted.anchor);
-      }
-    }
-    return slice;
-  }
-
-  moveAnchor(width: number, anchor: ConversationRowAnchor, deltaRows: number): ConversationAnchorMove | undefined {
-    const contentWidth = this.contentWidth(width);
-    const visible = this.visibleEntryIndices();
-    if (visible.length === 0) return undefined;
-    let position = visible.findIndex((index) => this.entries[index]?.key === anchor.entryKey);
-    if (position < 0) return undefined;
-    let entry = this.entries[visible[position]!]!;
-    let row = Math.min(Math.max(0, Math.floor(anchor.rowWithinEntry)), this.entryRowCount(entry, contentWidth) - 1);
-    let remaining = Math.abs(Math.trunc(deltaRows));
-    const direction = deltaRows < 0 ? -1 : 1;
-
-    while (remaining > 0) {
-      if (direction < 0) {
-        if (row >= remaining) {
-          row -= remaining;
-          remaining = 0;
-          break;
-        }
-        remaining -= row + 1;
-        if (position === 0) { row = 0; remaining = 0; break; }
-        position -= 1;
-        entry = this.entries[visible[position]!]!;
-        row = this.entryRowCount(entry, contentWidth) - 1;
-      } else {
-        const rowCount = this.entryRowCount(entry, contentWidth);
-        const available = rowCount - row - 1;
-        if (available >= remaining) {
-          row += remaining;
-          remaining = 0;
-          break;
-        }
-        remaining -= available + 1;
-        if (position === visible.length - 1) { row = rowCount - 1; remaining = 0; break; }
-        position += 1;
-        entry = this.entries[visible[position]!]!;
-        row = 0;
-      }
-    }
-
-    const rowCount = this.entryRowCount(entry, contentWidth);
-    const reachedBoundary = direction < 0
-      ? position === 0 && row === 0
-      : position === visible.length - 1 && row === rowCount - 1;
-    return { anchor: { entryKey: entry.key, rowWithinEntry: row }, reachedBoundary };
-  }
-
-  get revision(): number { return this.revisionValue; }
-  get outputRevision(): number { return this.outputRevisionValue; }
-
   invalidate(): void {
     this.renderCache = undefined;
-    this.materializedEntries.clear();
-    for (const entry of this.entries) {
-      entry.renderCache = undefined;
-      entry.rowCountCache = undefined;
-    }
+    for (const entry of this.entries) entry.renderCache = undefined;
   }
 
   render(width: number): string[] {
@@ -571,210 +403,29 @@ export class DockConversation implements Component {
     }
     if (this.entries.length === 0) {
       const lines = [paint.muted("  Start a conversation below.")];
-      this.renderCache = {
-        width,
-        revision: this.revisionValue,
-        lines,
-        spanKeys: ["conversation:empty"],
-        spanStarts: [0],
-        spanCounts: [1],
-      };
+      this.renderCache = { width, revision: this.revisionValue, lines };
       return lines;
     }
 
     const indent = " ".repeat(this.outputPadding + 1);
     const contentWidth = Math.max(1, width - visibleIndentWidth(indent));
     const lines: string[] = [];
-    const spanKeys: string[] = [];
-    const spanStarts: number[] = [];
-    const spanCounts: number[] = [];
     for (const entry of this.entries) {
       if (this.hideThinking && entry.kind === "thinking") continue;
-      const startRow = lines.length;
       for (const line of this.renderEntry(entry, contentWidth)) {
         // Every entry renderer is width-bounded. Avoid rescanning all cached
         // history rows on each live delta merely to truncate them a second time.
         lines.push(`${indent}${line}`);
       }
       lines.push("");
-      spanKeys.push(entry.key);
-      spanStarts.push(startRow);
-      spanCounts.push(lines.length - startRow);
     }
-    this.renderCache = {
-      width,
-      revision: this.revisionValue,
-      lines,
-      spanKeys,
-      spanStarts,
-      spanCounts,
-    };
+    this.renderCache = { width, revision: this.revisionValue, lines };
     return lines;
-  }
-
-  rowAnchor(width: number, rowIndex: number): ConversationRowAnchor | undefined {
-    this.render(width);
-    const target = Math.max(0, Math.floor(rowIndex));
-    const cache = this.renderCache;
-    if (!cache) return undefined;
-    for (let index = 0; index < cache.spanKeys.length; index += 1) {
-      const startRow = cache.spanStarts[index] ?? 0;
-      if (target >= startRow && target < startRow + (cache.spanCounts[index] ?? 0)) {
-        return { entryKey: cache.spanKeys[index]!, rowWithinEntry: target - startRow };
-      }
-    }
-    return undefined;
-  }
-
-  rowIndexForAnchor(width: number, anchor: ConversationRowAnchor): number | undefined {
-    this.render(width);
-    const cache = this.renderCache;
-    const index = cache?.spanKeys.indexOf(anchor.entryKey) ?? -1;
-    if (!cache || index < 0) return undefined;
-    const startRow = cache.spanStarts[index] ?? 0;
-    const rowCount = cache.spanCounts[index] ?? 1;
-    return startRow + Math.min(Math.max(0, anchor.rowWithinEntry), rowCount - 1);
   }
 
   /** Plain projection used by deterministic tests and non-TTY validation. */
   snapshot(): ReadonlyArray<{ kind: EntryKind; text: string; complete: boolean }> {
     return this.entries.map(({ kind, text, complete }) => ({ kind, text, complete }));
-  }
-
-  private renderBottomViewport(width: number, rows: number, contentWidth: number): ConversationViewportSlice {
-    const visible = this.visibleEntryIndices();
-    const keep = new Set<ConversationEntry>();
-    const spans: Array<{ entry: ConversationEntry; lines: string[]; anchors: ConversationRowAnchor[] }> = [];
-    let position = visible.length - 1;
-    let collectedRows = 0;
-    while (position >= 0 && collectedRows < rows) {
-      const entry = this.entries[visible[position]!]!;
-      const span = this.renderEntrySpan(entry, width, contentWidth);
-      keep.add(entry);
-      spans.unshift({ entry, ...span });
-      collectedRows += span.lines.length;
-      position -= 1;
-    }
-    if (position >= 0) {
-      const overscan = this.entries[visible[position]!]!;
-      this.renderEntry(overscan, contentWidth);
-      keep.add(overscan);
-    }
-    const allLines = spans.flatMap((span) => span.lines);
-    const allAnchors = spans.flatMap((span) => span.anchors);
-    const start = Math.max(0, allLines.length - rows);
-    const lines = allLines.slice(start);
-    const anchors = allAnchors.slice(start);
-    this.retainMaterialized(keep);
-    return {
-      lines,
-      anchors,
-      ...(anchors[0] ? { topAnchor: { ...anchors[0] } } : {}),
-      canScrollUp: start > 0 || position >= 0,
-      canScrollDown: false,
-    };
-  }
-
-  private renderForwardViewport(
-    width: number,
-    rows: number,
-    contentWidth: number,
-    anchor: ConversationRowAnchor,
-  ): ConversationViewportSlice {
-    const visible = this.visibleEntryIndices();
-    let position = visible.findIndex((index) => this.entries[index]?.key === anchor.entryKey);
-    if (position < 0) return this.renderBottomViewport(width, rows, contentWidth);
-    const keep = new Set<ConversationEntry>();
-    const lines: string[] = [];
-    const anchors: ConversationRowAnchor[] = [];
-    let first = true;
-    let canScrollDown = false;
-
-    while (position < visible.length && lines.length < rows) {
-      const entry = this.entries[visible[position]!]!;
-      const span = this.renderEntrySpan(entry, width, contentWidth);
-      keep.add(entry);
-      const start = first ? Math.min(anchor.rowWithinEntry, span.lines.length - 1) : 0;
-      first = false;
-      const remaining = rows - lines.length;
-      const available = span.lines.length - start;
-      const take = Math.min(remaining, available);
-      lines.push(...span.lines.slice(start, start + take));
-      anchors.push(...span.anchors.slice(start, start + take));
-      if (take < available) {
-        canScrollDown = true;
-        break;
-      }
-      position += 1;
-      canScrollDown = position < visible.length;
-    }
-
-    const firstPosition = visible.findIndex((index) => this.entries[index]?.key === anchors[0]?.entryKey);
-    if (firstPosition > 0) {
-      const overscan = this.entries[visible[firstPosition - 1]!]!;
-      this.renderEntry(overscan, contentWidth);
-      keep.add(overscan);
-    }
-    if (position < visible.length) {
-      const overscan = this.entries[visible[position]!]!;
-      this.renderEntry(overscan, contentWidth);
-      keep.add(overscan);
-    }
-    this.retainMaterialized(keep);
-    const top = anchors[0];
-    return {
-      lines,
-      anchors,
-      ...(top ? { topAnchor: { ...top } } : {}),
-      canScrollUp: top ? firstPosition > 0 || top.rowWithinEntry > 0 : false,
-      canScrollDown,
-    };
-  }
-
-  private renderEntrySpan(
-    entry: ConversationEntry,
-    width: number,
-    contentWidth = this.contentWidth(width),
-  ): { lines: string[]; anchors: ConversationRowAnchor[] } {
-    const indent = " ".repeat(this.outputPadding + 1);
-    const rendered = this.renderEntry(entry, contentWidth);
-    const lines = [...rendered.map((line) => `${indent}${line}`), ""];
-    return {
-      lines,
-      anchors: lines.map((_, rowWithinEntry) => ({ entryKey: entry.key, rowWithinEntry })),
-    };
-  }
-
-  private normalizeAnchor(anchor: ConversationRowAnchor, contentWidth: number): ConversationRowAnchor | undefined {
-    const entry = this.entries.find((candidate) => candidate.key === anchor.entryKey);
-    if (!entry || (this.hideThinking && entry.kind === "thinking")) return undefined;
-    return {
-      entryKey: entry.key,
-      rowWithinEntry: Math.min(Math.max(0, Math.floor(anchor.rowWithinEntry)), this.entryRowCount(entry, contentWidth) - 1),
-    };
-  }
-
-  private visibleEntryIndices(): number[] {
-    const result: number[] = [];
-    for (let index = 0; index < this.entries.length; index += 1) {
-      if (!this.hideThinking || this.entries[index]?.kind !== "thinking") result.push(index);
-    }
-    return result;
-  }
-
-  private contentWidth(width: number): number {
-    return Math.max(1, width - this.outputPadding - 1);
-  }
-
-  private entryRowCount(entry: ConversationEntry, width: number): number {
-    const expanded = this.entryExpanded(entry);
-    const cached = entry.rowCountCache;
-    if (cached?.width === width && cached.revision === entry.renderRevision && cached.expanded === expanded) {
-      return cached.count;
-    }
-    const count = this.renderEntry(entry, width).length + 1;
-    entry.rowCountCache = { width, revision: entry.renderRevision, expanded, count };
-    return count;
   }
 
   private entryExpanded(entry: ConversationEntry): boolean {
@@ -785,22 +436,10 @@ export class DockConversation implements Component {
         : true;
   }
 
-  private retainMaterialized(retained: ReadonlySet<ConversationEntry>): void {
-    for (const entry of this.materializedEntries) {
-      if (retained.has(entry)) continue;
-      entry.renderCache = undefined;
-      this.materializedEntries.delete(entry);
-    }
-    for (const entry of retained) this.materializedEntries.add(entry);
-  }
-
   private renderEntry(entry: ConversationEntry, width: number): string[] {
     const expanded = this.entryExpanded(entry);
     const cached = entry.renderCache;
-    if (cached?.width === width && cached.revision === entry.renderRevision && cached.expanded === expanded) {
-      this.materializedEntries.add(entry);
-      return cached.lines;
-    }
+    if (cached?.width === width && cached.revision === entry.renderRevision && cached.expanded === expanded) return cached.lines;
 
     let lines: string[];
     if (entry.toolCallId) {
@@ -854,8 +493,6 @@ export class DockConversation implements Component {
     }
 
     entry.renderCache = { width, revision: entry.renderRevision, expanded, lines };
-    entry.rowCountCache = { width, revision: entry.renderRevision, expanded, count: lines.length + 1 };
-    this.materializedEntries.add(entry);
     return lines;
   }
 
@@ -995,15 +632,10 @@ export class DockConversation implements Component {
   private touchEntry(entry: ConversationEntry): void {
     entry.renderRevision += 1;
     entry.renderCache = undefined;
-    entry.rowCountCache = undefined;
-    this.materializedEntries.delete(entry);
   }
 
   private markLayoutChanged(): void { this.revisionValue += 1; }
-  private markOutputChanged(): void {
-    this.revisionValue += 1;
-    this.outputRevisionValue += 1;
-  }
+  private markOutputChanged(): void { this.revisionValue += 1; }
 }
 
 function projectToolState(tool: ToolProjection, state: ToolState): void {

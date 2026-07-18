@@ -12,6 +12,7 @@ import {
   projectJsonObject,
   QueueCapacityError,
   RuntimeEffectUnknownError,
+  StaleRuntimeGenerationError,
 } from "../src/core/managed-instance.js";
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, ToolDto } from "../src/core/config-projection.js";
 import { RuntimeCompactionKnownFailureError } from "../src/core/runtime-session.js";
@@ -374,6 +375,39 @@ test("suspended replacement UI cannot leak candidate status into the committed g
   broker.setStatus("fixture", "candidate generation");
   assert.deepEqual(instance.snapshot().extensionStatus, { fixture: "old generation" });
   await broker.failGenerationChange();
+});
+
+test("authoritative tool expansion rejects stale generations and stays ephemeral", async () => {
+  const broker = new ExtensionUiBroker();
+  const instance = new ManagedInstance({
+    id: "dock-instance-tools-expanded",
+    cwd: "/tmp/project",
+    session: new FakeRuntimeSession(),
+    extensionUiBroker: broker,
+  });
+  let catalogCommits = 0;
+  instance.bindCatalogPort({
+    assertWritable: () => {},
+    commit: async () => { catalogCommits += 1; },
+  });
+  instance.markCatalogCommitted();
+
+  assert.throws(() => instance.setToolsExpanded(true, 2), StaleRuntimeGenerationError);
+  assert.equal(instance.snapshot().toolsExpanded, false);
+  broker.beginGenerationChange();
+  assert.throws(
+    () => instance.setToolsExpanded(true, 1),
+    (error: unknown) => error instanceof InstanceBusyError && /session replacement/u.test(error.message),
+    "an old-generation client must not seed candidate-generation UI state",
+  );
+  await broker.completeGenerationChange();
+  const updated = instance.setToolsExpanded(true, 1);
+  assert.equal(updated.toolsExpanded, true, "the mutation returns a fresh authoritative snapshot");
+  assert.equal(instance.snapshot().toolsExpanded, true);
+  await flushBackground();
+  assert.equal(instance.eventsSince().events.some((item) => item.type === "extension.tools_expanded_changed" && item.data.expanded), true);
+  assert.equal(catalogCommits, 0, "UI expansion must not cross the durable catalog boundary");
+  assert.equal("toolsExpanded" in instance.catalogRecord(), false);
 });
 
 test("submit returns after preflight while the runtime promise remains host-owned", async () => {

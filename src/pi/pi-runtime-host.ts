@@ -11,6 +11,7 @@ import {
   type ExtensionUIContext,
   type PromptOptions,
   SessionManager,
+  buildContextEntries,
   createAgentSessionFromServices,
   createAgentSessionRuntime,
   createAgentSessionServices,
@@ -389,7 +390,8 @@ export class PiRuntimeHost implements RuntimeSession {
   }
 
   getHistory(): RuntimeHistoryEntry[] {
-    return this.requireActive().session.sessionManager.getBranch()
+    const branch = this.requireActive().session.sessionManager.getBranch();
+    return buildContextEntries(branch)
       .map(projectHistoryEntry)
       .filter((entry): entry is RuntimeHistoryEntry => entry !== undefined);
   }

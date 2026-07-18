@@ -236,6 +236,13 @@ export class InstanceBusyError extends Error {
   }
 }
 
+export class StaleRuntimeGenerationError extends Error {
+  constructor(readonly expected: number, readonly actual: number) {
+    super(`Runtime generation changed from expected ${expected} to ${actual}`);
+    this.name = "StaleRuntimeGenerationError";
+  }
+}
+
 export class InvalidHistoryCursorError extends Error {
   constructor(readonly beforeEntryId: string) {
     super(`History entry ${beforeEntryId} does not belong to the current session branch`);
@@ -631,6 +638,16 @@ export class ManagedInstance {
   respondInteraction(leaseToken: string, interactionId: string, response: InteractionResponse): Promise<InteractionResult> {
     this.assertActive();
     return this.extensionUi.respond(leaseToken, interactionId, response);
+  }
+
+  setToolsExpanded(expanded: boolean, expectedRuntimeGeneration: number): InstanceSnapshot {
+    this.assertActive();
+    if (expectedRuntimeGeneration !== this.runtimeGenerationValue) {
+      throw new StaleRuntimeGenerationError(expectedRuntimeGeneration, this.runtimeGenerationValue);
+    }
+    if (this.extensionUi.isSuspended()) throw new InstanceBusyError(this.id, "changing tool expansion during session replacement");
+    this.extensionUi.setToolsExpanded(expanded);
+    return this.snapshot();
   }
 
   cancelInteractionsForHostDrain(): Promise<void> {
@@ -1685,6 +1702,7 @@ export class ManagedInstance {
     this.committedSnapshotValue = {
       ...this.committedSnapshotValue,
       extensionStatus: cloneJson(projection.extensionStatus),
+      toolsExpanded: projection.toolsExpanded,
       ...(projection.activeInteraction === undefined
         ? { activeInteraction: undefined }
         : { activeInteraction: cloneJson(projection.activeInteraction) }),

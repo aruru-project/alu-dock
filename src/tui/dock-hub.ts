@@ -14,6 +14,7 @@ import type { DockClient } from "../control/dock-client.js";
 import type { InstanceSnapshot, SessionDto } from "../core/managed-instance.js";
 import { uniqueInstanceIdPrefix } from "../human-target.js";
 import { AluHubBrand } from "./alu-mascot.js";
+import { mouseTrackingSequences, parseTerminalMouseEvent } from "./mouse-input.js";
 import { paint, selectListTheme } from "./theme.js";
 
 const NEW_INSTANCE = "hub:new";
@@ -26,6 +27,8 @@ const MORE_SESSIONS = "hub:sessions-more";
 const BACK = "hub:back";
 const MAX_HUB_INSTANCES = 100;
 const MAX_HUB_SESSIONS = 200;
+const ENTER_ALTERNATE_SCREEN = "\u001b[?1049h";
+const LEAVE_ALTERNATE_SCREEN = "\u001b[?1049l";
 
 export type DockHubAction =
   | { kind: "attach"; instance: InstanceSnapshot }
@@ -42,60 +45,84 @@ export interface DockHubEntry {
 
 /** Read-only construction: entering the Hub lists state but never creates a runtime. */
 export async function runDockHub(client: DockClient, cwd: string): Promise<DockHubAction> {
+  const terminal = new HubProcessTerminal();
   const contextCwd = resolve(cwd);
   let sessions: SessionDto[] = [];
   let sessionTotal = 0;
   let inventoryTruncated = false;
   let inventoryLoaded = false;
   let inventoryWarning: string | undefined;
-  while (true) {
-    const instances = await client.list("all");
-    const entries = buildDockHubEntries(
-      instances,
-      sessions,
-      contextCwd,
-      inventoryWarning,
-      sessionTotal,
-      inventoryTruncated,
-      inventoryLoaded,
-    );
-    const selected = await selectMenu(
-      "Alu Dock Hub",
-      `Project · ${terminalSafe(contextCwd)}`,
-      entries,
-      "↑↓ choose · Enter open · Esc leave Hub",
-    );
-    if (!selected || selected === EXIT_HUB) return { kind: "exit" };
-    if (selected === NEW_INSTANCE) return { kind: "new" };
-    if (selected === CONTINUE) {
-      const action = await chooseContinueAction(client, instances, contextCwd);
-      if (action) return action;
-      continue;
-    }
-    if (selected === HISTORY) {
-      const action = await chooseHistoryAction(client, instances, contextCwd);
-      if (action) return action;
-      continue;
-    }
-    if (selected === SESSION_INVENTORY) {
-      if (!inventoryLoaded && inventoryWarning === undefined) {
-        process.stdout.write("Loading Pi Sessions…\n");
-        try {
-          const inventory = await client.sessionInventory(contextCwd, "all");
-          sessions = inventory.sessions;
-          sessionTotal = inventory.total;
-          inventoryTruncated = inventory.truncated;
-          inventoryWarning = inventory.incomplete
-            ? `Pi session inventory incomplete: ${inventory.diagnostics[0]?.message ?? "one or more saved sessions could not be inspected"}${inventory.diagnosticsTruncated ? " · more diagnostics omitted" : ""}`
-            : undefined;
-          inventoryLoaded = true;
-        } catch (error) {
-          inventoryWarning = `Pi session inventory unavailable: ${errorMessage(error)}`;
-        }
+  let signalRequested = false;
+  const onPresentationSignal = (): void => {
+    signalRequested = true;
+    // A visible menu must stop its TUI before 1049l; between menus there is no
+    // TUI owner, so restore the shell immediately even if a Host read is pending.
+    if (!terminal.menuActive) terminal.leaveHubPresentation();
+  };
+
+  process.on("SIGINT", onPresentationSignal);
+  process.on("SIGTERM", onPresentationSignal);
+  try {
+    terminal.enterHubPresentation();
+    while (true) {
+      const instances = await client.list("all");
+      if (signalRequested) return { kind: "exit" };
+      const entries = buildDockHubEntries(
+        instances,
+        sessions,
+        contextCwd,
+        inventoryWarning,
+        sessionTotal,
+        inventoryTruncated,
+        inventoryLoaded,
+      );
+      const selected = await selectMenu(
+        terminal,
+        "Alu Dock Hub",
+        `Project · ${terminalSafe(contextCwd)}`,
+        entries,
+        "↑↓ choose · Enter open · Esc leave Hub",
+      );
+      if (signalRequested || !selected || selected === EXIT_HUB) return { kind: "exit" };
+      if (selected === NEW_INSTANCE) return { kind: "new" };
+      if (selected === CONTINUE) {
+        const action = await chooseContinueAction(terminal, client, instances, contextCwd);
+        if (signalRequested) return { kind: "exit" };
+        if (action) return action;
+        continue;
       }
-      const sessionAction = await chooseSessionAction(instances, sessions, contextCwd, sessionTotal, inventoryTruncated, inventoryWarning);
-      if (sessionAction) return sessionAction;
+      if (selected === HISTORY) {
+        const action = await chooseHistoryAction(terminal, client, instances, contextCwd);
+        if (signalRequested) return { kind: "exit" };
+        if (action) return action;
+        continue;
+      }
+      if (selected === SESSION_INVENTORY) {
+        if (!inventoryLoaded && inventoryWarning === undefined) {
+          terminal.write("Loading Pi Sessions…\n");
+          try {
+            const inventory = await client.sessionInventory(contextCwd, "all");
+            sessions = inventory.sessions;
+            sessionTotal = inventory.total;
+            inventoryTruncated = inventory.truncated;
+            inventoryWarning = inventory.incomplete
+              ? `Pi session inventory incomplete: ${inventory.diagnostics[0]?.message ?? "one or more saved sessions could not be inspected"}${inventory.diagnosticsTruncated ? " · more diagnostics omitted" : ""}`
+              : undefined;
+            inventoryLoaded = true;
+          } catch (error) {
+            inventoryWarning = `Pi session inventory unavailable: ${errorMessage(error)}`;
+          }
+        }
+        if (signalRequested) return { kind: "exit" };
+        const sessionAction = await chooseSessionAction(terminal, instances, sessions, contextCwd, sessionTotal, inventoryTruncated, inventoryWarning);
+        if (signalRequested) return { kind: "exit" };
+        if (sessionAction) return sessionAction;
+      }
     }
+  } finally {
+    terminal.leaveHubPresentation();
+    process.off("SIGINT", onPresentationSignal);
+    process.off("SIGTERM", onPresentationSignal);
   }
 }
 
@@ -142,6 +169,7 @@ export function instanceActionSummary(instance: InstanceSnapshot): string {
 }
 
 async function chooseContinueAction(
+  terminal: HubProcessTerminal,
   client: DockClient,
   instances: readonly InstanceSnapshot[],
   cwd: string,
@@ -162,6 +190,7 @@ async function chooseContinueAction(
   }
   entries.push({ value: BACK, label: "Back to Hub", description: "no change" });
   const selected = await selectMenu(
+    terminal,
     "Continue",
     ordered.length > 0 ? "Current Dock work" : "No active or reopenable Dock instances",
     entries,
@@ -169,10 +198,11 @@ async function chooseContinueAction(
   );
   if (!selected || selected === BACK || selected === MORE_INSTANCES) return undefined;
   const instance = instances.find((candidate) => candidate.id === selected.slice("instance:".length));
-  return instance ? chooseInstanceAction(client, instance, instances) : undefined;
+  return instance ? chooseInstanceAction(terminal, client, instance, instances) : undefined;
 }
 
 async function chooseHistoryAction(
+  terminal: HubProcessTerminal,
   client: DockClient,
   instances: readonly InstanceSnapshot[],
   cwd: string,
@@ -195,6 +225,7 @@ async function chooseHistoryAction(
   }
   entries.push({ value: BACK, label: "Back to Hub", description: "no change" });
   const selected = await selectMenu(
+    terminal,
     "History",
     ordered.length > 0 ? "Past Dock records" : "No Dock history",
     entries,
@@ -202,10 +233,11 @@ async function chooseHistoryAction(
   );
   if (!selected || selected === BACK || selected === MORE_INSTANCES) return undefined;
   const record = instances.find((candidate) => candidate.id === selected.slice("history:".length));
-  return record ? chooseHistoryRecordAction(client, record, instances) : undefined;
+  return record ? chooseHistoryRecordAction(terminal, client, record, instances) : undefined;
 }
 
 async function chooseHistoryRecordAction(
+  terminal: HubProcessTerminal,
   client: DockClient,
   record: InstanceSnapshot,
   instances: readonly InstanceSnapshot[],
@@ -235,6 +267,7 @@ async function chooseHistoryRecordAction(
   });
   entries.push({ value: BACK, label: "Back to History", description: "no change" });
   const selected = await selectMenu(
+    terminal,
     `${terminalSafe(record.name || "Dock history")} [${shortId}]`,
     `${terminalSafe(record.cwd)} · ${record.lifecycle}`,
     entries,
@@ -243,7 +276,7 @@ async function chooseHistoryRecordAction(
   if (!selected || selected === BACK) return undefined;
   if (selected === "forget") {
     await client.forget(record.id);
-    process.stdout.write(`Forgot History record ${shortId}; Pi session files were not deleted.\n`);
+    terminal.write(`Forgot History record ${shortId}; Pi session files were not deleted.\n`);
     return undefined;
   }
 
@@ -263,6 +296,7 @@ async function chooseHistoryRecordAction(
 }
 
 async function chooseInstanceAction(
+  terminal: HubProcessTerminal,
   client: DockClient,
   instance: InstanceSnapshot,
   universe: readonly InstanceSnapshot[],
@@ -278,6 +312,7 @@ async function chooseInstanceAction(
   }
   entries.push({ value: BACK, label: "Back to Continue", description: "no change" });
   const selected = await selectMenu(
+    terminal,
     `${terminalSafe(instance.name || "Dock instance")} [${shortId}]`,
     `${instance.lifecycle}/${instance.execution} · ${terminalSafe(instance.cwd)}`,
     entries,
@@ -288,17 +323,18 @@ async function chooseInstanceAction(
   if (selected === "reopen") return { kind: "reopen", instance };
   if (selected === "stop") {
     const stopped = await client.stop(instance.id);
-    process.stdout.write(`Stopped ${displayName(stopped.instance)}.\n`);
+    terminal.write(`Stopped ${displayName(stopped.instance)}.\n`);
     return undefined;
   }
   if (selected === "forget") {
     await client.forget(instance.id);
-    process.stdout.write(`Forgot Dock record ${shortId}; Pi session files were not deleted.\n`);
+    terminal.write(`Forgot Dock record ${shortId}; Pi session files were not deleted.\n`);
   }
   return undefined;
 }
 
 async function chooseSessionAction(
+  terminal: HubProcessTerminal,
   instances: readonly InstanceSnapshot[],
   sessions: readonly SessionDto[],
   cwd: string,
@@ -320,6 +356,7 @@ async function chooseSessionAction(
   }
   entries.push({ value: BACK, label: "Back to Hub", description: "no change" });
   const selected = await selectMenu(
+    terminal,
     "Pi Sessions",
     warning ? terminalSafe(warning) : sessions.length > 0 ? "Choose a saved session" : "No persisted Pi sessions found",
     entries,
@@ -344,6 +381,7 @@ async function chooseSessionAction(
   }
   actionEntries.push({ value: BACK, label: "Back to Pi Sessions", description: "no change" });
   const action = await selectMenu(
+    terminal,
     terminalSafe(session.name || session.sessionId),
     terminalSafe(session.sessionFile),
     actionEntries,
@@ -358,24 +396,38 @@ async function chooseSessionAction(
 }
 
 async function selectMenu(
+  terminal: HubProcessTerminal,
   title: string,
   subtitle: string,
   entries: readonly DockHubEntry[],
   hint: string,
 ): Promise<string | undefined> {
-  const terminal = new ProcessTerminal();
   const tui = new TUI(terminal, process.env.PI_HARDWARE_CURSOR === "1");
   const items: SelectItem[] = entries.map((entry) => ({
     value: entry.value,
     label: terminalSafe(entry.label),
     description: terminalSafe(entry.description),
   }));
-  const list = new SelectList(items, Math.min(Math.max(items.length, 1), 12), selectListTheme);
-  const heading = new Text(`${paint.bold(paint.accent(terminalSafe(title)))}\n${paint.muted(terminalSafe(subtitle))}`, 1, 1);
-  const footer = new Text(paint.muted(`  ${terminalSafe(hint)}`), 0, 1);
+  const maxVisible = Math.min(Math.max(items.length, 1), 12);
+  const list = new SelectList(items, maxVisible, selectListTheme);
+  const heading = new Text(`${paint.bold(paint.accent(terminalSafe(title)))}\n${paint.muted(terminalSafe(subtitle))}`, 1, 0);
+  const footer = new Text(paint.muted(`  ${terminalSafe(hint)}`), 0, 0);
   const brand = new AluHubBrand();
-  const layout = new HubMenuLayout(brand, heading, list, footer);
+  const selectedIndex = (): number => {
+    const selected = list.getSelectedItem();
+    return selected ? items.findIndex((item) => item.value === selected.value) : 0;
+  };
+  const layout = new HubMenuLayout(
+    brand,
+    heading,
+    list,
+    footer,
+    () => terminal.rows,
+    () => visibleHubItemIndices(items.length, maxVisible, selectedIndex()),
+  );
   let settled = false;
+  let started = false;
+  let signalReceived = false;
   let resolveSelection!: (selection: string | undefined) => void;
   const selection = new Promise<string | undefined>((resolveSelectionPromise) => { resolveSelection = resolveSelectionPromise; });
   const finish = (value: string | undefined): void => {
@@ -383,61 +435,166 @@ async function selectMenu(
     settled = true;
     resolveSelection(value);
   };
-  const onSignal = (): void => finish(undefined);
+  const onSignal = (): void => {
+    signalReceived = true;
+    finish(undefined);
+  };
   list.onSelect = (item) => finish(item.value);
   list.onCancel = () => finish(undefined);
+  const removeMouseListener = tui.addInputListener((data) => {
+    const event = parseTerminalMouseEvent(data);
+    if (!event) return undefined;
+    if (event.kind === "wheel") {
+      list.handleInput(event.direction === "up" ? "\u001b[A" : "\u001b[B");
+      tui.requestRender();
+      return { consume: true };
+    }
+    const index = layout.hitTest(event.x, event.y);
+    if (index !== undefined) {
+      list.setSelectedIndex(index);
+      list.handleInput("\r");
+    }
+    return { consume: true };
+  });
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
   tui.addChild(layout);
   tui.setFocus(list);
-  tui.start();
   const blink = new HubBlinkController(brand, () => tui.requestRender());
-  blink.start();
   try {
+    terminal.clearScreen();
+    tui.start();
+    started = true;
+    blink.start();
     return await selection;
   } finally {
     blink.stop();
+    removeMouseListener();
+    if (started && !signalReceived) await terminal.drainInput(200, 30).catch(() => {});
+    // Keep cursor/raw-mode cleanup inside the alternate screen. The outer Hub
+    // owner emits 1049l only after this menu promise settles.
+    tui.stop();
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
-    await terminal.drainInput(200, 30).catch(() => {});
-    tui.stop();
   }
 }
 
+export class HubProcessTerminal extends ProcessTerminal {
+  private presentationActive = false;
+  private mouseActive = false;
+
+  get menuActive(): boolean { return this.mouseActive; }
+
+  enterHubPresentation(): void {
+    if (this.presentationActive) return;
+    this.presentationActive = true;
+    this.write(ENTER_ALTERNATE_SCREEN);
+  }
+
+  override start(onInput: (data: string) => void, onResize: () => void): void {
+    super.start(onInput, onResize);
+    if (!this.mouseActive) {
+      this.mouseActive = true;
+      this.write(mouseTrackingSequences().enable);
+    }
+  }
+
+  override stop(): void {
+    if (this.mouseActive) {
+      this.mouseActive = false;
+      this.write(mouseTrackingSequences().disable);
+    }
+    super.stop();
+  }
+
+  leaveHubPresentation(): void {
+    if (!this.presentationActive) return;
+    this.presentationActive = false;
+    this.mouseActive = false;
+    this.write(`${mouseTrackingSequences().disable}${LEAVE_ALTERNATE_SCREEN}`);
+  }
+}
+
+export function visibleHubItemIndices(itemCount: number, maxVisible: number, selectedIndex: number): number[] {
+  if (itemCount <= 0 || maxVisible <= 0) return [];
+  const boundedVisible = Math.min(itemCount, Math.max(1, Math.floor(maxVisible)));
+  const boundedSelected = Math.max(0, Math.min(Math.floor(selectedIndex), itemCount - 1));
+  const start = Math.max(0, Math.min(boundedSelected - Math.floor(boundedVisible / 2), itemCount - boundedVisible));
+  return Array.from({ length: boundedVisible }, (_, offset) => start + offset);
+}
+
+interface HubHitbox {
+  index: number;
+  xMin: number;
+  xMax: number;
+  y: number;
+}
+
 export class HubMenuLayout implements Component {
+  private hitboxes: HubHitbox[] = [];
+
   constructor(
     private readonly brand: AluHubBrand,
     private readonly heading: Component,
     private readonly list: Component,
     private readonly footer: Component,
+    private readonly getRows: () => number = () => 1,
+    private readonly getVisibleItemIndices: () => readonly number[] = () => [],
   ) {}
 
+  hitTest(x: number, y: number): number | undefined {
+    if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y)) return undefined;
+    return this.hitboxes.find((hitbox) => hitbox.y === y && x >= hitbox.xMin && x <= hitbox.xMax)?.index;
+  }
+
   render(width: number): string[] {
-    const boundedWidth = Math.max(1, width);
-    if (boundedWidth < 64) {
-      return [
-        ...this.brand.renderCompact(boundedWidth),
-        ...this.heading.render(boundedWidth),
-        ...this.list.render(boundedWidth),
-        ...this.footer.render(boundedWidth),
-      ];
+    const boundedWidth = Math.max(1, Math.floor(width));
+    const height = Math.max(1, Math.floor(this.getRows()));
+    const compact = boundedWidth < 64;
+    let content: string[];
+    let listStart: number;
+    let listXMin: number;
+
+    if (compact) {
+      const brand = this.brand.renderCompact(boundedWidth);
+      const heading = this.heading.render(boundedWidth);
+      const list = this.list.render(boundedWidth);
+      content = [...brand, ...heading, ...list, ...this.footer.render(boundedWidth)];
+      listStart = brand.length + heading.length;
+      listXMin = 1;
+    } else {
+      const mascotWidth = 22;
+      const gutter = 2;
+      const panelWidth = Math.max(1, boundedWidth - mascotWidth - gutter);
+      const mascot = this.brand.renderLarge(mascotWidth);
+      const heading = this.heading.render(panelWidth);
+      const list = this.list.render(panelWidth);
+      const panel = [...heading, ...list, ...this.footer.render(panelWidth)];
+      const contentRows = Math.max(mascot.length, panel.length);
+      content = Array.from({ length: contentRows }, (_, index) => {
+        const left = truncateToWidth(mascot[index] ?? "", mascotWidth);
+        const padded = `${left}${" ".repeat(Math.max(0, mascotWidth - visibleWidth(left)))}`;
+        return truncateToWidth(`${padded}${" ".repeat(gutter)}${panel[index] ?? ""}`, boundedWidth);
+      });
+      listStart = heading.length;
+      listXMin = mascotWidth + gutter + 1;
     }
 
-    const mascotWidth = 22;
-    const gutter = 2;
-    const panelWidth = Math.max(1, boundedWidth - mascotWidth - gutter);
-    const mascot = this.brand.renderLarge(mascotWidth);
-    const panel = [
-      ...this.heading.render(panelWidth),
-      ...this.list.render(panelWidth),
-      ...this.footer.render(panelWidth),
+    const topPadding = Math.max(0, Math.floor((height - content.length) / 2));
+    const visibleContent = content.slice(0, Math.max(0, height - topPadding));
+    const lines = [
+      ...Array.from({ length: topPadding }, () => ""),
+      ...visibleContent,
     ];
-    const rows = Math.max(mascot.length, panel.length);
-    return Array.from({ length: rows }, (_, index) => {
-      const left = truncateToWidth(mascot[index] ?? "", mascotWidth);
-      const padded = `${left}${" ".repeat(Math.max(0, mascotWidth - visibleWidth(left)))}`;
-      return truncateToWidth(`${padded}${" ".repeat(gutter)}${panel[index] ?? ""}`, boundedWidth);
+    while (lines.length < height) lines.push("");
+
+    this.hitboxes = this.getVisibleItemIndices().flatMap((index, offset) => {
+      const row = topPadding + listStart + offset;
+      return row >= 0 && row < visibleContent.length + topPadding
+        ? [{ index, xMin: listXMin, xMax: boundedWidth, y: row + 1 }]
+        : [];
     });
+    return lines.map((line) => truncateToWidth(line, boundedWidth));
   }
 
   invalidate(): void {

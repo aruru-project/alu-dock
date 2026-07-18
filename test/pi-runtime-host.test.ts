@@ -408,7 +408,7 @@ test("Pi runtime host projects public session stats for the SSH footer", async (
   await host.dispose();
 });
 
-test("Pi runtime history uses public SessionManager branch entries", async () => {
+test("Pi runtime history uses public context entries in model-visible order", async () => {
   const trace: string[] = [];
   const { host, initial } = await runtimeHost(trace, (_owner, session) => {
     session.historyEntries = [
@@ -419,9 +419,9 @@ test("Pi runtime history uses public SessionManager branch entries", async () =>
   });
 
   assert.deepEqual(host.getHistory().map((entry) => [entry.entryId, entry.role, entry.summaryKind, entry.content]), [
+    ["h3", "system", "compaction", "summary"],
     ["h1", "user", undefined, "question"],
     ["h2", "system", undefined, "notice"],
-    ["h3", "system", "compaction", "summary"],
   ]);
   initial.historyEntries.push(
     { type: "custom_message", id: "hidden", parentId: "h3", timestamp: "2026-07-14T00:00:03.000Z", customType: "hidden", content: "secret", display: false },

@@ -18,7 +18,7 @@ src/cli.ts bare Hub / -c / open / new / attach
 
 runDockTui()
   ├── initial closed queries: attach/history/settings/tools/resources/commands
-  ├── FixedDockScreen + conversation/editor/chrome
+  ├── flowing Container: conversation → activity/queue → editor → three-row footer
   ├── streamEvents()
   │     ├── snapshot-projection reducer
   │     ├── DockConversation
@@ -26,7 +26,7 @@ runDockTui()
   └── editor/slash/key input ──> DockClient mutations
 ```
 
-当前独立 Hub 由 `src/tui/dock-hub.ts` 负责，固定根菜单顺序是 New、Continue、History、Pi Sessions、Leave。首屏只读取 Dock catalog；Continue 再展示 active/reopenable 工作，History 再展示 stopped 与不可恢复的 terminal records，Resume/Adopt inventory 在用户进入 Pi Sessions 后延迟加载。History Continue 从原 Pi session 创建新 Dock identity，Forget 只删 History record。managed-instance 列表与 Resume/Adopt inventory 不进入 attached `dock-tui.ts`。`-c`/`--continue` 是显式 current-project smart-entry。Hub 以响应式大阿露/窄印章呈现品牌，唯一低频眨眼 timer 只在 menu 可见时存在；Work 小阿露复用 current-session activity pulse，idle 不启动 timer。
+当前独立 Hub 由 `src/tui/dock-hub.ts` 负责，固定根菜单顺序是 New、Continue、History、Pi Sessions、Leave。首屏只读取 Dock catalog；Continue 再展示 active/reopenable 工作，History 再展示 stopped 与不可恢复的 terminal records，Resume/Adopt inventory 在用户进入 Pi Sessions 后延迟加载。History Continue 从原 Pi session 创建新 Dock identity，Forget 只删 History record。managed-instance 列表与 Resume/Adopt inventory 不进入 attached `dock-tui.ts`。`-c`/`--continue` 是显式 current-project smart-entry。Hub 以一次 alternate-screen 生命周期和响应式大阿露/窄印章呈现所有菜单，菜单可见时独占 xterm 1000/1006 click/wheel，离开或转入 Work 前先关闭 tracking 并恢复 shell screen；唯一低频眨眼 timer 也只在 menu 可见时存在。Work 小阿露复用 current-session activity pulse，idle 不启动 timer；Work 始终使用可流动 main buffer 与 terminal-native mouse。
 
 ## Scope边界
 
@@ -51,21 +51,19 @@ Session Work TUI
 |---|---|---|
 | `src/interactive.ts` | TTY entry composition、Hub action/Work routing、human target lifecycle、trust prompt | CLI/managed/PTY tests |
 | `src/tui/dock-hub.ts` | Dock instances主列表、lifecycle actions、独立Pi session Resume/Adopt inventory、visible-only Hub blink ownership | `human-target`, `dock-control` PTY |
-| `src/tui/dock-tui.ts` | attached Work workflow composition、commands、focus/key actions | `tui-ux-state`, PTY fixture |
-| `src/tui/conversation.ts` | session conversation rows、UI-only extension notify rows、hard/soft multiline tool rendering | `tui-conversation` |
+| `src/tui/dock-tui.ts` | attached Work flowing composition、commands、focus/key actions、replacement reconciliation | `tui-ux-state`, PTY fixture |
+| `src/tui/conversation.ts` | complete flowing branch conversation、UI-only extension notify rows、hard/soft multiline tool rendering | `tui-conversation` |
 | `src/tui/snapshot-projection.ts` | DockEvent → local InstanceSnapshot reducer | `tui-ux-state` |
 | `src/tui/run-activity.ts` | runtime/queue/interaction专属的current-session activity reducer | `tui-ux-state` |
 | `src/tui/activity-pulse.ts` | frame-cached activity animation scheduler；idle无timer | `tui-ux-state` |
-| `src/tui/pi-tui-screen.ts` | fixed screen section composition与history anchor | `tui-ux-state` |
-| `src/tui/screen-layout.ts` | viewport math、fixed chrome、resize composition | `tui-ux-state` |
-| `src/tui/history-pagination.ts` | bounded history window、earlier-page cursor、anchor preservation | `history-pagination` |
+| `src/tui/history-pagination.ts` | eager reverse-page drain、overlap dedup、history/live exact reconciliation | `history-pagination` |
 | `src/tui/pending-queue.ts` | pending queue tray projection | `tui-ux-state` |
 | `src/tui/queue-restoration.ts` | dequeue text prepend且不覆盖concurrent draft | `queue-restoration` |
 | `src/tui/session-tree.ts` | tree pagination/filter、branch topology/active path picker、command parsing | `session-tree` |
 | `src/tui/settings-controls.ts` | setting choices、command values、completion | `tui-ux-state` |
 | `src/tui/extension-text-dialog.ts` | bounded extension select/confirm/input/editor UI | extension UI/TUI tests |
 | `src/tui/searchable-picker.ts`, `search-filter.ts` | reusable picker与deterministic filtering | `tui-ux-state` |
-| `src/tui/mouse-input.ts` | explicit Dock mouse mode、wheel decoding、terminal mode cleanup | `tui-ux-state`, PTY |
+| `src/tui/mouse-input.ts` | Hub-only bounded click/wheel decoding、paired tracking sequences | Hub parser/layout、PTY |
 | `src/tui/select-instance.ts` | 仅供显式旧 `open` smart-entry 的legacy chooser | managed/PTY tests |
 | `src/tui/theme.ts` | terminal color capability与Night Console palette | render/PTY checks |
 | `src/tui/alu-mascot.ts` | 大/小阿露静态帧、TrueColor/ANSI/NO_COLOR安全投影 | `alu-mascot`, PTY |
@@ -89,23 +87,24 @@ Warning必须说明用户影响和可执行动作；closed Host projection本身
 | 需求 | 从这里开始 | 随后检查 |
 |---|---|---|
 | bare Hub / Continue / History / Resume inventory / `-c` | `interactive.ts` + `dock-hub.ts` | `cli.ts`, `cli-list.ts`, DockClient queries、80×24/120×40 PTY |
-| Work信息层级或multiline | `conversation.ts`, `screen-layout.ts` | `pi-tui-screen.ts`, `dock-tui.ts`, render tests |
-| transient activity | `run-activity.ts`, `activity-pulse.ts` | snapshot reducer、fixed activity slot、idle CPU |
+| Work信息层级或multiline | `conversation.ts`, `dock-tui.ts` | flowing component order、footer rows、render tests |
+| transient activity | `run-activity.ts`, `activity-pulse.ts` | snapshot reducer、activity slot、idle CPU |
 | conversation event展示 | `conversation.ts` | event lifetime分类、history replay dedup |
-| history paging/scroll/resize | `history-pagination.ts`, `screen-layout.ts` | anchor、mouse wheel、PTY resize |
+| history加载/scroll/resize | `history-pagination.ts`, `dock-tui.ts` | eager drain、live boundary、native scrollback、PTY resize |
 | `/tree` picker与返回branch | `tui/session-tree.ts`, `session-tree-surface.ts`, `dock-tui.ts` | `work-modal.ts`、Core/runtime tree map、real Pi tree tests |
 | queue tray/restoration | `pending-queue.ts`, `queue-restoration.ts` | command admission、draft concurrency |
-| mouse mode | `mouse-input.ts` | detach/signal/error cleanup、normal terminal selection |
+| Hub mouse / fullscreen | `dock-hub.ts`, `mouse-input.ts` | Leave/Work/signal/error cleanup ordering、click/wheel hitbox、resize |
 | Logo/mascot | `alu-mascot.ts` + `dock-hub.ts` | Hub blink无语义；Work只由current session activity驱动 |
 | command completion/settings | `dock-tui.ts`, `settings-controls.ts` | command catalog、terminal sanitization |
 
 ## 交互硬约束
 
-- 普通drag/selection与原生scrollback属于terminal；默认滚轮必须能查看进入Dock前的shell输出。只有显式Alt+M或`/mouse`启用1000/1006 tracking并把滚轮交给Dock history；Work导航不得用清空terminal scrollback的force redraw。
+- Hub 独占一次 alternate screen 生命周期；只有可见 Hub menu 启用成对的1000/1006 tracking，滚轮每次只移动一个选项，左键只激活真实可见item。Leave、转入Work、signal与异常路径必须先关闭tracking再恢复main screen。
+- Session Work 始终使用可流动的main buffer与terminal-native drag/selection/scrollback，不启用1000/1006或alternate screen，也没有Alt+M、`/mouse`模式；Work导航不得用清空terminal scrollback的force redraw。
 - detach、stop、signal和异常退出都恢复terminal mode；Ctrl+D 是不等待长 Host mutation 的本地最高优先级 detach。
 - Work overlay 统一使用有边界的 modal frame 与栈式焦点恢复；picker/text/editor child在每次render时从当前terminal rows取得完整内容预算，resize后立即重算，先保留selection/footer再裁切body/input viewport。80×24时80% overlay最多19行（17 child rows + 2 frame rows）。固定动作不用 searchable picker。Tree 的 Branch action 保持原 Tree surface 挂载，Esc 返回时保留 filter/search/fold/selection。
 - Work TUI不持有Pi对象，不读取session JSONL；只通过DockClient和closed DTO/event。Fresh attach 的对话真相是当前 branch history，不把旧 lifecycle/navigation replay 投影为 conversation；无command ID的`runtime-initiated` active run仍恢复未完成tool/message tail。`display:false` custom control message永不成为conversation。
-- History pages一经读取保持连续，不用client entry/text cap制造可见gap；paging只影响获取时机。`FixedDockScreen`通过entry anchor驱动`DockConversation.renderViewport()`，只materialize viewport邻域，expanded tools、数万行历史与多次compaction不得挤掉或阻塞composer/footer。
+- 当前branch effective history必须在进入Work时跨内部200-entry页完整drain，paging只属于传输获取，UI不暴露page/anchor/paused状态。`DockConversation`按stock Pi方式作为flowing chat container进入terminal scrollback；历史、coherent attach bootstrap与加载期间live events按内容/cursor去重且恰好投影一次。长历史、expanded tools与多次compaction仍须保持composer/footer响应。
 - Queue是Same-Host memory；in-flight/failed/ambiguous mutation不声称已restore，也不自动abort。
 - Exact extension command不进入pending queue；unknown slash保留Pi-native语义。
 - Extension UI只支持bounded closed text；不transport component factory、image、binary或data URI。Host若截断tool output必须附明确truncation marker；modal或config/session inventory不完整时，Work/Hub显示shown/total或首条scan diagnostic，不能把bounded prefix呈现为完整结果。
@@ -120,8 +119,8 @@ Warning必须说明用户影响和可执行动作；closed Host projection本身
 提交人类可见surface前，必须亲看：
 
 - 80×24：最小SSH窗口、长cwd/name、multiline input、tool output、dialog；
-- 120×40：正常层级、history宽度、fixed chrome、tree/picker；
-- resize、detach、signal、mouse mode cleanup；
+- 120×40：正常层级、flowing history宽度、三行footer、tree/picker；
+- resize、detach、signal、Hub mouse/alternate-screen cleanup与Work main-buffer隔离；
 - 无颜色与ANSI 16/256能力下仍可读。
 
 ## 默认不读

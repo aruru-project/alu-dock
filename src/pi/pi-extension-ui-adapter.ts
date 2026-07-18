@@ -46,8 +46,8 @@ export function createPiExtensionUiContext(broker: ExtensionUiBroker): Extension
     getAllThemes: () => [],
     getTheme: () => undefined,
     setTheme: () => ({ success: false, error: "Theme switching is unsupported by Alu Dock" }),
-    getToolsExpanded: () => false,
-    setToolsExpanded: () => broker.unsupported("extension-controlled tool expansion"),
+    getToolsExpanded: () => broker.getToolsExpanded(),
+    setToolsExpanded: (expanded) => broker.setToolsExpanded(expanded),
   };
   return context;
 }

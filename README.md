@@ -10,8 +10,8 @@ Alu Dock 的 V0.1 仍在开发中。当前候选已经具备：
 
 - 私有 Unix socket 上的长期 Host 与 durable managed catalog；
 - instance 的创建、列出、接入、停止、显式 reopen、adopt、forget 与 prune；
-- 默认 Dock Hub：固定提供 New、Continue、History、Pi Sessions 与 Leave；进入时不创建或恢复 runtime，并以响应式阿露品牌帧呈现；
-- attached Session Work TUI，包括分层 conversation/activity、保留换行的 tool output、可辨认分支的 tree、queue、settings/resources 与 extension 文本交互；
+- 默认 Dock Hub：固定提供 New、Continue、History、Pi Sessions 与 Leave；进入时不创建或恢复 runtime，并以响应式全屏阿露品牌帧呈现；Hub 独占一个 alternate-screen 生命周期，并只在菜单可见时启用点击/滚轮；
+- attached Session Work TUI，包括分层 conversation/activity、保留换行的 tool output、可辨认分支的 tree、queue、settings/resources 与 extension 文本交互；Work 使用可流动的 main buffer 与 terminal-native mouse，不启用 Hub tracking，也没有 Alt+M 或 `/mouse` 模式；`Ctrl+O` 更新 Host-authoritative 的 generation-scoped tool 展开状态，`Alt+O` 只切换当前客户端的最近详情；
 - 同一 Dock instance 内的 Pi session new/resume/fork/clone/reload；
 - 显式的 `systemd --user` service 管理。
 
@@ -34,7 +34,7 @@ alu-dock attach TARGET          # 完整 ID、唯一 prefix 或唯一精确 name
 alu-dock list
 ```
 
-在 Session Work 中按 `Ctrl+D` 会 detach，Host 中的 instance 继续运行。需要结束 runtime 时再显式执行：
+Dock Hub 离开、报错或转入 Session Work 前会先关闭 Hub mouse tracking 并恢复原 shell screen。Session Work 保持在 main buffer，终端原生选择与滚动行为不需要模式切换；按 `Ctrl+D` 会 detach，Host 中的 instance 继续运行。需要结束 runtime 时再显式执行：
 
 ```bash
 alu-dock stop TARGET

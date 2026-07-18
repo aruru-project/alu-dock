@@ -117,7 +117,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.v1", "host.info", "instance.catalog", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tools.v1", "tui.projection.v1"]);
+  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.tools-expanded.v1", "extension_ui.v1", "host.info", "instance.catalog", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -133,6 +133,17 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
   assert.equal(factoryCalls, 1);
   assert.equal(created.creationOperationId, "request-1");
   assert.equal(created.ownerHostEpoch, "host-epoch-gate");
+  await client.setToolsExpanded(created.id, created.runtimeGeneration, true, "compat-expanded");
+  const legacyAttach = await exchangeRequestAfterHello(
+    socketPath,
+    ["core.v2", "events.follow"],
+    { kind: "request", version: 2, requestId: "legacy-attach", type: "instance.attach", params: { instanceId: created.id, follow: false, controller: "observe" } },
+  );
+  const legacyResult = objectValue(legacyAttach.result);
+  assert.equal("toolsExpanded" in objectValue(legacyResult.instance), false);
+  const legacyEvents = objectValue(legacyResult.page).events;
+  assert.ok(Array.isArray(legacyEvents));
+  assert.equal(legacyEvents.some((event) => objectValue(event).type === "extension.tools_expanded_changed"), false);
   assert.deepEqual((await client.hostInfo()).diagnostics[0], {
     severity: "info", message: "Development registry is in-memory and non-durable", source: "registry",
   });
@@ -393,7 +404,7 @@ test("SSH TUI reacquires its controller after runtime replacement", async (conte
   assert.equal(pty.status, 0, output.slice(-4_000));
   assert.match(output, /Post replacement confirm/);
   assert.doesNotMatch(output, /connected\/acquired/);
-  assert.doesNotMatch(output, /Host event stream closed|connection lost/);
+  assert.doesNotMatch(output, /Replacement history unavailable|Host event stream closed|connection lost/);
 });
 
 test("two clients observe and replay one host-owned running instance", async (context) => {
@@ -595,6 +606,17 @@ test("bare SSH TTY opens and leaves the Hub with zero runtime or catalog side ef
   assert.match(output, /Project ·/u);
   assert.doesNotMatch(output, /does not create or resume a runtime/u);
   assert.match(output, /Left Alu Dock Hub/u);
+  assertHubPresentation(output, "Left Alu Dock Hub");
+
+  const clicked = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+  ], "hub-click-leave");
+  const clickedOutput = Buffer.from(clicked.output, "base64").toString("utf8");
+  assert.equal(clicked.timedOut, false, clickedOutput.slice(-2_000));
+  assert.equal(clicked.status, 0, clickedOutput.slice(-2_000));
+  assertHubPresentation(clickedOutput, "Left Alu Dock Hub");
 
   const narrow = await runPtyTui([
     process.execPath,
@@ -605,6 +627,7 @@ test("bare SSH TTY opens and leaves the Hub with zero runtime or catalog side ef
   assert.equal(narrow.timedOut, false, narrowOutput.slice(-2_000));
   assert.equal(narrow.status, 0, narrowOutput.slice(-2_000));
   assert.match(narrowOutput, /✿\(◆ᴗ◆\) ALU/u);
+  assertHubPresentation(narrowOutput, "Left Alu Dock Hub");
 
   const signalled = await runPtyTui([
     process.execPath,
@@ -615,10 +638,56 @@ test("bare SSH TTY opens and leaves the Hub with zero runtime or catalog side ef
   assert.equal(signalled.timedOut, false, signalOutput.slice(-2_000));
   assert.equal(signalled.status, 0, signalOutput.slice(-2_000));
   assert.match(signalOutput, /Left Alu Dock Hub/u);
+  assertHubPresentation(signalOutput, "Left Alu Dock Hub");
+  const signalLeave = signalOutput.indexOf("\u001b[?1049l");
+  const signalMarker = signalOutput.indexOf("Left Alu Dock Hub", signalLeave);
+  assert.ok(signalOutput.lastIndexOf("\u001b[?2004l", signalLeave) >= 0, "TUI input mode must stop before screen restore");
+  assert.ok(signalOutput.lastIndexOf("\u001b[?25h", signalLeave) >= 0, "TUI cursor cleanup must precede screen restore");
+  assert.doesNotMatch(
+    signalOutput.slice(signalLeave + "\u001b[?1049l".length, signalMarker),
+    /\u001b\[[0-?]*[ -/]*[@-~]/u,
+    "active-menu TUI cleanup must not spill onto the restored shell screen",
+  );
   assert.equal(factoryCalls, 0);
   assert.equal(inventoryCalls, 0, "Hub first paint must not scan persisted Pi sessions");
   assert.equal(registry.catalogRevision(), revision);
   assert.deepEqual(registry.list(), []);
+});
+
+test("Hub signal restores the shell immediately while Pi session inventory is still pending", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-hub-signal-inventory-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => (
+    new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedRuntimeSession(`pi-${id}`) })
+  ));
+  const host = new DockHost({
+    socketPath,
+    registry,
+    sessionInventory: {
+      list: async () => {
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, 750));
+        return { sessions: [], incomplete: false, diagnostics: [] };
+      },
+    },
+  });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+
+  const pty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+  ], "hub-signal-inventory");
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-2_000));
+  assert.equal(pty.status, 0, output.slice(-2_000));
+  assert.match(output, /Loading Pi Sessions/u);
+  assert.ok(pty.signalRestoreMs >= 0 && pty.signalRestoreMs < 500, `shell restore took ${pty.signalRestoreMs}ms`);
+  assertHubPresentation(output, "Left Alu Dock Hub");
+  const leave = output.indexOf("\u001b[?1049l");
+  const marker = output.indexOf("Left Alu Dock Hub", leave);
+  assert.doesNotMatch(output.slice(leave + "\u001b[?1049l".length, marker), /\u001b\[[0-?]*[ -/]*[@-~]/u);
 });
 
 test("Hub New and persisted-session Adopt explicitly enter Session Work", async (context) => {
@@ -637,6 +706,9 @@ test("Hub New and persisted-session Adopt explicitly enter Session Work", async 
   assert.match(newOutput, /cache /u);
   assert.doesNotMatch(newOutput, /NIGHT CONSOLE/u);
   assert.match(newOutput, /✿\([•◆]_?[ᴗ_]?[•◆]\)/u, "Work keeps the current-session Alu in its fixed activity surface");
+  assertHubPresentation(newOutput, "Creating a Pi session");
+  const restoredNew = newOutput.indexOf("\u001b[?1049l");
+  assert.doesNotMatch(newOutput.slice(restoredNew + 1), /\u001b\[\?1049h|\u001b\[\?1000h|\u001b\[\?1006h/u, "Work must remain on the main buffer with native mouse");
   assert.equal(newHarness.registry.list().length, 1);
 
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-hub-adopt-"));
@@ -729,6 +801,20 @@ test("Hub Continue opens current work and History continues a stopped saved sess
   assert.match(continueOutput, /cache /u);
   assert.doesNotMatch(continueOutput, /NIGHT CONSOLE/u);
   assert.equal((await continueClient.status(current.id)).lifecycle, "active");
+  assertHubPresentation(continueOutput, "cache ");
+
+  const mouseContinuePty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", continueHarness.socketPath,
+  ], "hub-mouse-continue");
+  const mouseContinueOutput = Buffer.from(mouseContinuePty.output, "base64").toString("utf8");
+  assert.equal(mouseContinuePty.timedOut, false, mouseContinueOutput.slice(-2_000));
+  assert.equal(mouseContinuePty.status, 0, mouseContinueOutput.slice(-2_000));
+  assert.match(mouseContinueOutput, /Current Dock work/u);
+  assert.match(mouseContinueOutput, /Attach Session Work/u);
+  assert.match(mouseContinueOutput, /cache /u);
+  assertHubPresentation(mouseContinueOutput, "cache ");
 
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-hub-history-"));
   await chmod(directory, 0o700);
@@ -798,17 +884,21 @@ test("SSH TUI replays, resizes, handles input, and detaches without stopping", a
   assert.match(output, /deterministic delayed task/);
   assert.match(output, /waiting for model/);
   const redrawFrames = fullRedrawFrames(output);
-  const narrowFrame = redrawFrames.find((frame) => frame.length === 18 && frame.every((line) => visibleWidth(line) <= 43));
-  assert.ok(narrowFrame, "43-column Work chrome must produce a bounded full redraw");
-  assert.match(narrowFrame[0] ?? "", /pty-demo.*default.*off/u);
+  const narrowFrame = redrawFrames.find((frame) => (
+    frame.length <= 18
+    && frame.every((line) => visibleWidth(line) <= 43)
+    && frame.some((line) => /pty-demo.*default.*off/u.test(line))
+  ));
+  assert.ok(narrowFrame, "43-column flowing Work chrome must produce a bounded redraw");
   const initial80 = plainTerminalOutput(output.slice(0, output.indexOf("\u001b[2J\u001b[H\u001b[3J")));
   assert.match(initial80, /pty-demo.*fixture\/default.*think off/u);
   const resizedFrame = lastFullRedrawFrame(output);
-  assert.equal(resizedFrame.length, 18, `expected one fixed 18-row screen:\n${resizedFrame.join("\n")}`);
+  assert.ok(resizedFrame.length > 0 && resizedFrame.length <= 18, `expected bounded flowing chrome:\n${resizedFrame.join("\n")}`);
+  assert.ok(resizedFrame.every((line) => visibleWidth(line) <= 120));
   const activityRow = resizedFrame.findIndex((line) => /waiting for model/u.test(line));
-  assert.ok(activityRow >= 0 && activityRow < resizedFrame.length - 3, "live activity must sit above the composer rather than inside the footer");
-  assert.match(resizedFrame.at(-3) ?? "", /^─+$/u, "the editor bottom border must remain immediately above the two-row status dock");
-  assert.match(resizedFrame[0] ?? "", /pty-demo.*default.*off/u);
+  assert.ok(activityRow >= 0 && activityRow < resizedFrame.length - 4, "live activity must sit above the composer and three-row footer");
+  assert.match(resizedFrame.at(-4) ?? "", /^─+$/u, "the editor bottom border must remain above footer metadata");
+  assert.match(resizedFrame.at(-3) ?? "", /pty-demo.*default.*off/u);
   assert.match(resizedFrame.at(-2) ?? "", /cache .*ctx .*↑.*↓.*\$/u);
   assert.doesNotMatch(resizedFrame.at(-2) ?? "", /waiting for model|running|connected|acquired|d:|p:/u);
   assert.equal(resizedFrame.at(-1), "", "the reserved extension row stays blank when no extension owns it");
@@ -882,8 +972,9 @@ test("SSH TUI preserves concurrent composer input while transcript deltas remain
   assert.match(output, /responding/u);
   const streamingFrame = lastFullRedrawFrame(output);
   const activityRow = streamingFrame.findIndex((line) => /responding/u.test(line));
-  assert.ok(activityRow >= 0 && activityRow < streamingFrame.length - 3);
-  assert.match(streamingFrame.at(-3) ?? "", /^─+$/u);
+  assert.ok(activityRow >= 0 && activityRow < streamingFrame.length - 4);
+  assert.match(streamingFrame.at(-4) ?? "", /^─+$/u);
+  assert.match(streamingFrame.at(-3) ?? "", /pty-st.*default.*off/u);
   assert.match(streamingFrame.at(-2) ?? "", /cache .*ctx .*↑.*↓.*\$/u);
   assert.doesNotMatch(streamingFrame.at(-2) ?? "", /responding|running|connected|acquired|d:|p:/u);
   assert.equal(streamingFrame.at(-1), "");
@@ -938,7 +1029,7 @@ test("SSH TUI keeps repeated no-run completion facts out of live and replayed co
   assert.equal(events.some((event) => event.type === "run.started"), false);
 });
 
-test("SSH TUI defaults to terminal selection and pairs opt-in Dock mouse tracking without aborting", async (context) => {
+test("Session Work stays on the flowing main buffer with terminal-native mouse", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
   await harness.host.start();
@@ -951,23 +1042,16 @@ test("SSH TUI defaults to terminal selection and pairs opt-in Dock mouse trackin
     join(process.cwd(), "dist/src/cli.js"),
     "--socket", harness.socketPath,
     "attach", created.id,
-  ], "mouse-selection");
+  ], "work-native-mouse");
   const output = Buffer.from(pty.output, "base64").toString("utf8");
   assert.equal(pty.timedOut, false, output.slice(-2_000));
   assert.equal(pty.status, 0, output.slice(-2_000));
-  assert.match(output, /Dock mouse tracking/u);
-  assert.equal(pty.startupMouseEnableCount, 0, "fresh TUI startup must leave native terminal selection enabled");
-  assert.equal(pty.mouseOverlayPriority, true, "autocomplete Esc must take priority over leaving Dock mouse mode");
-
+  assert.equal(pty.startupMouseEnableCount, 0, "Work startup must leave native terminal selection enabled");
   const { enable, disable } = mouseTrackingSequences();
-  assert.equal(output.split(enable).length - 1, 3, "startup must not capture ordinary terminal drag");
-  assert.equal(output.split(disable).length - 1, 3, "each explicit opt-in, including detach, must be paired with cleanup");
-  let offset = 0;
-  for (const sequence of [enable, disable, enable, disable, enable, disable]) {
-    const index = output.indexOf(sequence, offset);
-    assert.ok(index >= offset, `missing ordered mouse sequence ${JSON.stringify(sequence)}`);
-    offset = index + sequence.length;
-  }
+  assert.doesNotMatch(output, /\u001b\[\?1049[hl]/u, "Work never enters alternate screen");
+  assert.equal(output.includes(enable), false, "Work never enables xterm tracking");
+  assert.equal(output.includes(disable), false, "Work has no synthetic mouse mode to clean up");
+  assert.doesNotMatch(output, /Dock mouse tracking|\/mouse\b|Alt\+M/u);
   assert.equal(runtime.abortCalls, 0);
   assert.equal((await client.status(created.id)).execution, "running");
 });
@@ -1063,7 +1147,7 @@ test("SSH TUI Alt+Up restores all pending text while Escape restores then aborts
   assert.equal(final.pending.total, 0);
 });
 
-test("SSH TUI model picker filters typed input and history viewport scroll-locks", async (context) => {
+test("SSH TUI model picker filters input while complete history flows into native scrollback", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-pty-ux-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
@@ -1111,52 +1195,52 @@ test("SSH TUI model picker filters typed input and history viewport scroll-locks
   assert.equal(runtime?.modelMutationCalls, 1);
   assert.deepEqual(runtime?.getModelState().model, { provider: "fixture", id: "local" });
 
-  const scrollReady = join(directory, "scroll.ready");
-  const scrollRun = runPtyTui([
-    process.execPath,
-    join(process.cwd(), "dist/src/cli.js"),
-    "--socket", socketPath,
-    "attach", created.id,
-  ], "scroll", scrollReady);
-  await waitForPath(`${scrollReady}.locked`);
-  await client.prompt(created.id, "new output while history is locked");
-  const scrollPty = await scrollRun;
-  const scrollOutput = Buffer.from(scrollPty.output, "base64").toString("utf8");
-  assert.equal(scrollPty.timedOut, false, scrollOutput.slice(-4_000));
-  assert.equal(scrollPty.status, 0, scrollOutput.slice(-4_000));
-  assert.match(scrollOutput, /history paused/);
-  assert.match(scrollOutput, /new output/);
-  await client.abort(created.id);
-
   const historyPty = await runPtyTui([
     process.execPath,
     join(process.cwd(), "dist/src/cli.js"),
     "--socket", socketPath,
     "attach", created.id,
-  ], "history-page");
+  ], "history-flow");
   const historyOutput = Buffer.from(historyPty.output, "base64").toString("utf8");
   assert.equal(historyPty.timedOut, false, historyOutput.slice(-4_000));
   assert.equal(historyPty.status, 0, historyOutput.slice(-4_000));
-  assert.match(historyOutput, /historical line 0/, "reverse pagination must reach beyond the recent 200-entry tail");
-  assert.ok(historyOutput.includes("\u001b[?1000h\u001b[?1006h"), "explicit Dock wheel mode must enable paired mouse tracking");
-  assert.ok(historyOutput.includes("\u001b[?1006l\u001b[?1000l"), "TUI must restore terminal mouse tracking on detach");
+  assert.match(historyOutput, /historical line 0/, "internal reverse paging must eagerly reach the oldest branch entry");
+  assert.match(historyOutput, /historical line 449/);
+  assert.doesNotMatch(historyOutput, /history paused|\u001b\[\?1000h|\u001b\[\?1006h/u, "Work leaves scrolling and selection to the terminal");
+
+  const liveReady = join(directory, "live-flow.ready");
+  const liveRun = runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+    "attach", created.id,
+  ], "history-live-flow", liveReady);
+  await waitForPath(liveReady);
+  await client.prompt(created.id, "new output in the flowing transcript");
+  const livePty = await liveRun;
+  const liveOutput = Buffer.from(livePty.output, "base64").toString("utf8");
+  assert.equal(livePty.timedOut, false, liveOutput.slice(-4_000));
+  assert.equal(livePty.status, 0, liveOutput.slice(-4_000));
+  assert.match(liveOutput, /new output in the flowing transcript/u);
+  assert.doesNotMatch(liveOutput, /history paused/u);
+  await client.abort(created.id);
 
   const framePty = await runPtyTui([
     process.execPath,
     join(process.cwd(), "dist/src/cli.js"),
     "--socket", socketPath,
     "attach", created.id,
-  ], "history-frame-stability");
+  ], "flow-frame-stability");
   const frameOutput = Buffer.from(framePty.output, "base64").toString("utf8");
   assert.equal(framePty.timedOut, false, frameOutput.slice(-4_000));
   assert.equal(framePty.status, 0, frameOutput.slice(-4_000));
-  assert.equal(framePty.navigationScrollbackClearCount, 0, "Work navigation must not erase native terminal scrollback");
-  assert.ok(framePty.navigationRenderBatches >= 1, "repeated PageUp must still render through pi-tui's frame cache");
-  assert.equal(framePty.draftVisible, true, "the real editor draft must remain responsive after repeated PageUp");
+  assert.equal(framePty.navigationScrollbackClearCount, 0, "ordinary Work updates must not erase native terminal scrollback");
+  assert.ok(framePty.navigationRenderBatches >= 1, "Ctrl+O must render through pi-tui's frame cache");
+  assert.equal(framePty.draftVisible, true, "the real editor draft must survive an authoritative tool-fold update");
   assert.doesNotMatch(frameOutput, /\u001b\[s/u, "activity animation must not write outside the frame cache");
   const resizedFrame = lastFullRedrawFrame(frameOutput);
-  assert.equal(resizedFrame.length, 58, `expected one fixed 58-row screen:\n${resizedFrame.join("\n")}`);
-  assert.match(resizedFrame.at(-3) ?? "", /^─+$/u, "the composer bottom border must remain above the footer");
+  assert.ok(resizedFrame.length > 58, "the complete transcript must flow beyond the terminal viewport into native scrollback");
+  assert.match(resizedFrame.at(-4) ?? "", /^─+$/u, "the composer bottom border must remain above footer metadata");
   assert.match(resizedFrame.at(-2) ?? "", /cache .*ctx .*↑.*↓.*\$/u, "the cache footer must survive the initial resize");
   assert.ok(resizedFrame.every((line) => visibleWidth(line) <= 252));
 
@@ -1896,6 +1980,34 @@ test("same-host operation receipts deduplicate every implemented mutation and re
   assert.equal(factoryCalls, 1);
 
   const session = sessions.get(firstInstance.id) as DelayedRuntimeSession;
+  const [firstExpansion, duplicateExpansion] = await Promise.all([
+    firstClient.setToolsExpanded(firstInstance.id, firstInstance.runtimeGeneration, true, "shared-tools-expanded"),
+    secondClient.setToolsExpanded(firstInstance.id, firstInstance.runtimeGeneration, true, "shared-tools-expanded"),
+  ]);
+  assert.deepEqual(duplicateExpansion, firstExpansion);
+  assert.equal(firstExpansion.instance.toolsExpanded, true);
+  await assert.rejects(
+    firstClient.setToolsExpanded(firstInstance.id, firstInstance.runtimeGeneration, false, "shared-tools-expanded"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "operation_conflict",
+  );
+  const sameValueExpansion = await secondClient.setToolsExpanded(
+    firstInstance.id,
+    firstInstance.runtimeGeneration,
+    true,
+    "same-value-tools-expanded",
+  );
+  assert.equal(sameValueExpansion.instance.toolsExpanded, true);
+  const collapsedExpansion = await firstClient.setToolsExpanded(
+    firstInstance.id,
+    firstInstance.runtimeGeneration,
+    false,
+    "newer-tools-expanded",
+  );
+  assert.equal(collapsedExpansion.instance.toolsExpanded, false);
+  const expansionEvents = (await firstClient.events(firstInstance.id)).page.events
+    .filter((event) => event.type === "extension.tools_expanded_changed");
+  assert.deepEqual(expansionEvents.map((event) => event.data.expanded), [true, true, false]);
+
   const [firstModel, duplicateModel] = await Promise.all([
     firstClient.setModel(firstInstance.id, "fixture", "local", "shared-model"),
     secondClient.setModel(firstInstance.id, "fixture", "local", "shared-model"),
@@ -2586,7 +2698,7 @@ test("adopt negotiates its dedicated capability before sending a mutation", asyn
             kind: "hello_ack", requestId: frame.requestId, version: 2,
             host: { pid: 7, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "old-host", startedAt: "2026-07-14T00:00:00.000Z" },
             catalogSchemaVersion: 1,
-            capabilities: ["core.v2", "instance.catalog"],
+            capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "instance.catalog"],
             limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
           }));
         } else mutationRequests += 1;
@@ -2601,6 +2713,65 @@ test("adopt negotiates its dedicated capability before sending a mutation", asyn
     (error: unknown) => error instanceof ControlClientError && error.code === "protocol_incompatible",
   );
   assert.equal(mutationRequests, 0);
+});
+
+test("read-only list bridges a pre-toolsExpanded V2 Host during staged update inspection", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-legacy-list-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const hellos: string[][] = [];
+  let listRequests = 0;
+  const server = createServer((socket) => {
+    const decoder = new JsonLineDecoder();
+    socket.on("data", (chunk: Buffer) => {
+      for (const line of decoder.push(chunk)) {
+        const frame = objectValue(JSON.parse(line) as unknown);
+        if (frame.kind === "hello") {
+          const requiredCapabilities = frame.requiredCapabilities as string[];
+          hellos.push(requiredCapabilities);
+          if (requiredCapabilities.includes("extension_ui.tools-expanded.v1")) {
+            socket.end(encodeJsonLine({
+              kind: "hello_error", requestId: frame.requestId,
+              error: { code: "capability_missing", message: "Required capabilities are unavailable", missing: ["extension_ui.tools-expanded.v1"] },
+            }));
+            continue;
+          }
+          socket.write(encodeJsonLine({
+            kind: "hello_ack", requestId: frame.requestId, version: 2,
+            host: { pid: 7, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "legacy-list-epoch", startedAt: "2026-07-14T00:00:00.000Z" },
+            catalogSchemaVersion: 1,
+            capabilities: ["core.v2", "instance.catalog"],
+            limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
+          }));
+        } else {
+          listRequests += 1;
+          const cursor = { hostEpoch: "legacy-list-epoch", instanceId: "legacy-instance", runtimeGeneration: 1, sequence: 0 };
+          socket.end(encodeJsonLine({
+            kind: "response", version: 2, requestId: frame.requestId, hostEpoch: "legacy-list-epoch", ok: true,
+            result: {
+              instances: [{
+                id: "legacy-instance", creationOperationId: "legacy-create", cwd: directory,
+                lifecycle: "active", execution: "idle", compacting: false, lastRun: "never", reopenable: false,
+                runtimeGeneration: 1, ownerHostEpoch: "legacy-list-epoch", pending: { steering: 0, followUp: 0, total: 0 },
+                executor: { kind: "pi-sdk", piSessionId: "legacy-pi" }, extensionStatus: {},
+                createdAt: "2026-07-14T00:00:00.000Z", updatedAt: "2026-07-14T00:00:00.000Z", eventCursor: cursor,
+              }],
+              page: { revision: 1, total: 1, hiddenStopped: 0 },
+            },
+          }));
+        }
+      }
+    });
+  });
+  await listen(server, socketPath);
+  context.after(async () => { await close(server); await rm(directory, { recursive: true, force: true }); });
+
+  const listed = await new DockClient({ socketPath }).list();
+  assert.equal(listed[0]?.toolsExpanded, false);
+  assert.equal(listRequests, 1);
+  assert.equal(hellos.length, 2);
+  assert.equal(hellos[0]?.includes("extension_ui.tools-expanded.v1"), true);
+  assert.equal(hellos[1]?.includes("extension_ui.tools-expanded.v1"), false);
 });
 
 test("typed list rejects a non-progressing continuation without issuing another request", async (context) => {
@@ -2620,7 +2791,7 @@ test("typed list rejects a non-progressing continuation without issuing another 
             version: 2,
             host: { pid: 8, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "list-progress-epoch", startedAt: "2026-07-14T00:00:00.000Z" },
             catalogSchemaVersion: 1,
-            capabilities: ["core.v2", "instance.catalog"],
+            capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "instance.catalog"],
             limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
           }));
         } else {
@@ -2654,7 +2825,7 @@ test("an LF-truncated control response is reported as recoverable connection los
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-partial-frame-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  const capabilities = ["core.v2", "events.follow", "instance.catalog", "queue.control.v1", "run.abort.v1", "tui.projection.v1"];
+  const capabilities = ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "instance.catalog", "queue.control.v1", "run.abort.v1", "tui.projection.v1"];
   const server = createServer((socket) => {
     const decoder = new JsonLineDecoder();
     socket.on("data", (chunk: Buffer) => {
@@ -2878,7 +3049,7 @@ test("post-send mutation transport loss is effect_unknown with caller operation 
       for (const line of decoder.push(chunk)) {
         const frame = objectValue(JSON.parse(line) as unknown);
         if (frame.kind === "hello") {
-          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 8, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "effect-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "instance.catalog"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
+          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 8, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "effect-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "instance.catalog"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
         } else socket.destroy();
       }
     });
@@ -2904,7 +3075,7 @@ test("post-send mutation timeout is effect_unknown and is not retried", async (c
       for (const line of decoder.push(chunk)) {
         const frame = objectValue(JSON.parse(line) as unknown);
         if (frame.kind === "hello") {
-          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 9, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "timeout-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "instance.catalog"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
+          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 9, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "timeout-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "instance.catalog"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
         } else requests += 1;
       }
     });
@@ -2966,7 +3137,7 @@ test("stream callbacks follow initial response order and accept one-step replace
             kind: "hello_ack", requestId: "fixed", version: 2,
             host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
             catalogSchemaVersion: 1,
-            capabilities: ["core.v2", "events.follow"],
+            capabilities: ["core.v2", "events.follow", "extension_ui.tools-expanded.v1"],
             limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
           }));
           continue;
@@ -2977,7 +3148,7 @@ test("stream callbacks follow initial response order and accept one-step replace
           id: "instance-1", creationOperationId: "create-1", cwd: directory,
           lifecycle: "active", execution: "running", compacting: false, lastRun: "never", reopenable: false,
           runtimeGeneration: 1, ownerHostEpoch: "epoch-1", pending: { steering: 0, followUp: 0, total: 0 },
-          executor: { kind: "fake", piSessionId: "pi-1" }, extensionStatus: {}, activeCommandId: "command-1",
+          executor: { kind: "fake", piSessionId: "pi-1" }, extensionStatus: {}, toolsExpanded: false, activeCommandId: "command-1",
           createdAt: "2026-07-14T00:00:00.000Z", updatedAt: "2026-07-14T00:00:00.000Z", eventCursor: cursor,
         };
         const live = { scope: "instance", sequence: 2, instanceId: "instance-1", runtimeGeneration: 1, occurredAt: "2026-07-14T00:00:01.000Z", type: "extension.error", data: { error: "live" } };
@@ -3027,7 +3198,7 @@ test("conversation bootstrap negotiates replay-purpose support before sending at
           kind: "hello_ack", requestId: "fixed", version: 2,
           host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
           catalogSchemaVersion: 1,
-          capabilities: ["core.v2", "events.follow", "queue.control.v1", "run.abort.v1", "tui.projection.v1"],
+          capabilities: ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "queue.control.v1", "run.abort.v1", "tui.projection.v1"],
           limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
         }));
       }
@@ -3059,7 +3230,7 @@ test("TUI projection capability is required before the attach request", async (c
           kind: "hello_ack", requestId: "fixed", version: 2,
           host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
           catalogSchemaVersion: 1,
-          capabilities: ["core.v2", "events.follow", "run.abort.v1"],
+          capabilities: ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "run.abort.v1"],
           limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
         }));
       }
@@ -3664,16 +3835,16 @@ interface PtyTuiResult {
   stableDraftRewrites: number;
   localizedActivityBatches: number;
   startupMouseEnableCount: number;
-  mouseOverlayPriority: boolean;
   navigationScrollbackClearCount: number;
   navigationRenderBatches: number;
   draftVisible: boolean;
+  signalRestoreMs: number;
   output: string;
 }
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "work-responsive" | "hub-exit" | "hub-narrow" | "hub-signal" | "hub-new" | "hub-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "compact-detach" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "scroll" | "history-page" | "history-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "mouse-selection" | "extension-dialogs" | "extension-replacement" = "detach",
+  action: "detach" | "work-responsive" | "hub-exit" | "hub-click-leave" | "hub-narrow" | "hub-signal" | "hub-signal-inventory" | "hub-new" | "hub-continue" | "hub-mouse-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "compact-detach" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "history-flow" | "history-live-flow" | "flow-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "work-native-mouse" | "extension-dialogs" | "extension-replacement" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {
@@ -3703,7 +3874,7 @@ async function runPtyTui(
         assert.equal(typeof parsed.stableDraftRewrites, "number");
         assert.equal(typeof parsed.localizedActivityBatches, "number");
         assert.equal(typeof parsed.startupMouseEnableCount, "number");
-        assert.equal(typeof parsed.mouseOverlayPriority, "boolean");
+        assert.equal(typeof parsed.signalRestoreMs, "number");
         assert.equal(typeof parsed.navigationScrollbackClearCount, "number");
         assert.equal(typeof parsed.navigationRenderBatches, "number");
         assert.equal(typeof parsed.draftVisible, "boolean");
@@ -3714,6 +3885,19 @@ async function runPtyTui(
       }
     });
   });
+}
+
+function assertHubPresentation(output: string, mainScreenMarker: string): void {
+  const { enable, disable } = mouseTrackingSequences();
+  assert.equal(output.split("\u001b[?1049h").length - 1, 1, "runDockHub must enter alternate screen once");
+  assert.equal(output.split("\u001b[?1049l").length - 1, 1, "runDockHub must restore alternate screen once");
+  assert.ok(output.includes(enable), "visible Hub menu must enable paired 1000/1006 tracking");
+  const leave = output.indexOf("\u001b[?1049l");
+  const cleanup = output.lastIndexOf(disable, leave);
+  const marker = output.indexOf(mainScreenMarker, leave);
+  assert.ok(cleanup >= 0 && cleanup < leave, "Hub mouse cleanup must precede alternate-screen restore");
+  assert.ok(marker > leave, `${mainScreenMarker} must be emitted on the restored main screen`);
+  assert.doesNotMatch(output.slice(leave + "\u001b[?1049l".length), /\u001b\[\?1049h|\u001b\[\?1000h|\u001b\[\?1006h/u);
 }
 
 function lastFullRedrawFrame(output: string): string[] {

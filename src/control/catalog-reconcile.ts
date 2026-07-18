@@ -116,6 +116,7 @@ export function catalogSnapshotFromRecord(
       ...(record.thinkingLevel === undefined ? {} : { thinkingLevel: record.thinkingLevel }),
     },
     extensionStatus: {},
+    toolsExpanded: false,
     ...(record.activeCommandId === undefined ? {} : { activeCommandId: record.activeCommandId }),
     ...(record.lastError === undefined ? {} : { lastError: record.lastError }),
     createdAt: record.createdAt,

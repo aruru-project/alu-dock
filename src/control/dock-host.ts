@@ -30,6 +30,7 @@ import {
   InvalidDeliveryModeError,
   QueueCapacityError,
   RuntimeEffectUnknownError,
+  StaleRuntimeGenerationError,
   type AttachProjection,
   type DockEvent,
   type JsonObject,
@@ -69,6 +70,7 @@ import {
   parseClientHello,
   parseControlRequest,
   ProtocolValidationError,
+  TOOLS_EXPANDED_CAPABILITY,
 } from "./protocol.js";
 
 const MAX_SOCKET_WRITE_BUFFER = MAX_CONTROL_LINE_BYTES;
@@ -118,6 +120,7 @@ export class DockHost {
   private startPromise: Promise<void> | undefined;
   private stopPromise: Promise<void> | undefined;
   private readonly connections = new Set<Socket>();
+  private readonly connectionRequirements = new WeakMap<Socket, ReadonlySet<string>>();
   private readonly attachConnections = new Map<string, Set<Socket>>();
   private readonly inFlightDispatches = new Set<Promise<void>>();
   private readonly operationLedger: OperationLedger;
@@ -302,7 +305,7 @@ export class DockHost {
     let requestSeen = false;
     let terminal = false;
     let eventUnsubscribe: (() => void) | undefined;
-    const cleanup = (): void => { eventUnsubscribe?.(); eventUnsubscribe = undefined; this.connections.delete(socket); };
+    const cleanup = (): void => { eventUnsubscribe?.(); eventUnsubscribe = undefined; this.connectionRequirements.delete(socket); this.connections.delete(socket); };
     socket.once("close", cleanup);
     socket.once("error", () => {});
 
@@ -323,6 +326,7 @@ export class DockHost {
         catch (error) { const mapped = mapControlError(error); terminal = true; this.sendHelloError(socket, extractRequestId(line), "invalid_hello", mapped.message); return; }
         helloSeen = true;
         clientRequirements = new Set(hello.requiredCapabilities);
+        this.connectionRequirements.set(socket, clientRequirements);
         if (this.state !== "running" && this.state !== "mutation_faulted") {
           terminal = true;
           this.sendHelloError(socket, hello.requestId, this.state === "draining" || this.state === "stopping" || this.state === "stopped" ? "host_draining" : "host_starting", "Alu Dock host is not ready");
@@ -469,6 +473,13 @@ export class DockHost {
         });
         this.sendSuccessAndEnd(socket, request.requestId, result); return;
       }
+      case "extension.tools_expanded.set": {
+        const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, async () => {
+          const instance = this.registry.get(request.params.instanceId);
+          return { instance: instance.setToolsExpanded(request.params.expanded, request.params.expectedRuntimeGeneration) };
+        });
+        this.sendSuccessAndEnd(socket, request.requestId, result); return;
+      }
       case "instance.stop": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const receipt=await instance.stop(request.params.operationId);return {receipt:{operationId:receipt.operationId,alreadyStopped:receipt.alreadyStopped,cleanupErrors:receipt.cleanupErrors},instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
@@ -527,6 +538,7 @@ export class DockHost {
     const cursor=request.params.since;
     if(cursor && cursor.instanceId!==instance.id) throw new ProtocolValidationError("invalid_cursor","Cursor belongs to another instance");
     const follow=request.params.follow;
+    const includeToolsExpanded=this.connectionRequirements.get(socket)?.has(TOOLS_EXPANDED_CAPABILITY)===true;
     let initializing=true,pending:DockEvent[]=[]; let initializationOverflow=false; let lastGeneration=instance.runtimeGeneration,lastSent=0; let unsubscribe=()=>{};
     let controller:ControllerClaim|{status:"observing"}=request.params.controller==="observe"?{status:"observing"}:{status:"unavailable"};
     let controllerReleased=false,subscriptionClosed=false;
@@ -544,7 +556,7 @@ export class DockHost {
         lastGeneration=event.runtimeGeneration;lastSent=0;
       }
       if(event.sequence<=lastSent)return true;
-      const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event);if(outcome==="written"||outcome==="backpressured")lastSent=event.sequence;if(outcome==="written")return true;if(outcome==="backpressured")closeAfterBackpressure();else{closeSubscription();socket.destroy();}return false;
+      const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event,includeToolsExpanded);if(outcome==="written"||outcome==="backpressured")lastSent=event.sequence;if(outcome==="written")return true;if(outcome==="backpressured")closeAfterBackpressure();else{closeSubscription();socket.destroy();}return false;
     };
     unsubscribe=instance.subscribe(event=>{if(initializing){pending.push(event);if(pending.length>MAX_INITIAL_EVENT_QUEUE){pending=[];initializationOverflow=true;closeSubscription();}return;}sendLiveEvent(event);});
     if(follow&&request.params.controller==="claim")controller=await instance.claimInteractionController();
@@ -563,7 +575,7 @@ export class DockHost {
       return;
     }
     const result=createBoundedEventsResult(projection,follow,request.requestId,controller);
-    const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,result));
+    const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,projectToolsExpandedForClient(result,includeToolsExpanded)));
     if(responseOutcome==="backpressured"){
       const drained=await waitForSocketDrain(socket,ATTACH_DRAIN_TIMEOUT_MS);
       if(!drained){initializing=false;pending=[];closeAfterBackpressure();return;}
@@ -571,7 +583,7 @@ export class DockHost {
         initializing=false;pending=[];
         if(initializationOverflow&&!socket.destroyed&&!socket.writableEnded){
           const diagnostic=await instance.reportControlDegradation(ATTACH_INITIAL_OVERFLOW_MESSAGE);
-          const diagnosticOutcome=writeEvent(socket,request.requestId,this.hostEpoch,diagnostic);
+          const diagnosticOutcome=writeEvent(socket,request.requestId,this.hostEpoch,diagnostic,includeToolsExpanded);
           if(diagnosticOutcome==="written")socket.end();else closeAfterBackpressure();
         }else closeAfterBackpressure();
         return;
@@ -599,7 +611,7 @@ export class DockHost {
     for (const socket of streams) socket.destroy();
   }
 
-  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,result));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
+  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const includeToolsExpanded=this.connectionRequirements.get(socket)?.has(TOOLS_EXPANDED_CAPABILITY)===true;const projected=projectToolsExpandedForClient(result,includeToolsExpanded);const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,projected));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
   private sendErrorAndEnd(socket:Socket,code:string,message:string,requestId:string,details?:JsonObject,retryable=false):void { if(socket.destroyed||socket.writableEnded)return;const response:ControlResponse={kind:"response",version:2,requestId,hostEpoch:this.hostEpoch,ok:false,error:{code,message:truncateMessage(message),retryable,...(details===undefined?{}:{details})}};if(endEnvelope(socket,response)==="too_large")socket.destroy(); }
   private sendHelloError(socket:Socket,requestId:string,code:HelloError["error"]["code"],message:string,details:{hostVersions?:number[];missing?:string[];retryAfterMs?:number}={}):void { if(socket.destroyed||socket.writableEnded)return;const envelope:HelloError={kind:"hello_error",requestId,error:{code,message:truncateMessage(message),...details}};try{socket.end(encodeJsonLine(envelope));}catch{socket.destroy();} }
 }
@@ -725,7 +737,48 @@ function createBoundedEventsResult(projection:AttachProjection,following:boolean
     return result;
   }
 }
-function writeEvent(socket:Socket,requestId:string,hostEpoch:string,event:DockEvent):WriteOutcome { const envelope:ControlEventEnvelope={kind:"event",version:2,requestId,hostEpoch,event};return writeEnvelope(socket,envelope); }
+function projectToolsExpandedForClient(value: unknown, includeToolsExpanded: boolean): unknown {
+  if (includeToolsExpanded || value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((item) => projectToolsExpandedForClient(item, false));
+
+  const source = value as Record<string, unknown>;
+  const isSnapshot = typeof source.id === "string"
+    && typeof source.lifecycle === "string"
+    && typeof source.runtimeGeneration === "number"
+    && source.eventCursor !== null
+    && typeof source.eventCursor === "object"
+    && source.extensionStatus !== null
+    && typeof source.extensionStatus === "object";
+  const isEventPage = Array.isArray(source.events)
+    && source.earliest !== null
+    && typeof source.earliest === "object"
+    && source.latest !== null
+    && typeof source.latest === "object";
+  const projected: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(source)) {
+    if (isSnapshot && key === "toolsExpanded") continue;
+    if (isEventPage && key === "events" && Array.isArray(child)) {
+      projected[key] = child
+        .filter((event) => !isToolsExpandedEvent(event))
+        .map((event) => projectToolsExpandedForClient(event, false));
+      continue;
+    }
+    projected[key] = projectToolsExpandedForClient(child, false);
+  }
+  return projected;
+}
+
+function isToolsExpandedEvent(value: unknown): boolean {
+  return value !== null
+    && typeof value === "object"
+    && (value as { type?: unknown }).type === "extension.tools_expanded_changed";
+}
+
+function writeEvent(socket:Socket,requestId:string,hostEpoch:string,event:DockEvent,includeToolsExpanded:boolean):WriteOutcome {
+  if (!includeToolsExpanded && event.type === "extension.tools_expanded_changed") return "written";
+  const envelope:ControlEventEnvelope={kind:"event",version:2,requestId,hostEpoch,event};
+  return writeEnvelope(socket,envelope);
+}
 
 function writeEnvelope(socket: Socket, envelope: unknown): WriteOutcome {
   if (socket.destroyed || socket.writableEnded) return "failed";
@@ -833,6 +886,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   }
   if (error instanceof CatalogOperationRecordedError) return { code: "operation_conflict", message: error.message };
   if (error instanceof InvalidHistoryCursorError) return { code: "invalid_cursor", message: error.message };
+  if (error instanceof StaleRuntimeGenerationError) return { code: "stale_runtime_generation", message: error.message, details: { expectedRuntimeGeneration: error.expected, actualRuntimeGeneration: error.actual } };
   if (error instanceof InvalidTreeCursorError) return { code: "invalid_cursor", message: error.message };
   if (error instanceof InteractionNotFoundError) return { code: error.code, message: error.message };
   if (error instanceof InteractionExpiredError) return { code: error.code, message: error.message };

@@ -19,6 +19,18 @@ def set_size(fd: int, rows: int, columns: int) -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
 
 
+def hub_item_y(rows: int, columns: int, item_index: int, item_count: int) -> int:
+    list_rows = min(max(item_count, 1), 12) + (1 if item_count > 12 else 0)
+    if columns < 64:
+        content_rows = 1 + 2 + list_rows + 1
+        list_start = 1 + 2
+    else:
+        content_rows = max(10, 2 + list_rows + 1)
+        list_start = 2
+    top_padding = max(0, (rows - content_rows) // 2)
+    return top_padding + list_start + item_index + 1
+
+
 def read_available(fd: int, output: bytearray, timeout: float) -> int:
     ready, _, _ = select.select([fd], [], [], timeout)
     if not ready:
@@ -33,6 +45,14 @@ def read_available(fd: int, output: bytearray, timeout: float) -> int:
         return -1
     output.extend(chunk)
     return len(chunk)
+
+
+def write_input(fd: int, output: bytearray, data: bytes, settle: float = 0.04) -> None:
+    os.write(fd, data)
+    deadline = time.monotonic() + settle
+    while time.monotonic() < deadline:
+        if read_available(fd, output, 0.01) < 0:
+            break
 
 
 def main() -> int:
@@ -53,15 +73,15 @@ def main() -> int:
     stable_draft_rewrites = 0
     localized_activity_batches = 0
     startup_mouse_enable_count = 0
-    mouse_overlay_priority = False
     navigation_scrollback_clear_count = 0
     navigation_render_batches = 0
     draft_visible = False
+    signal_restore_ms = -1.0
     timed_out = False
     status = 1
     try:
         action = os.environ.get("ALU_DOCK_PTY_ACTION", "detach")
-        hub_actions = ("hub-exit", "hub-narrow", "hub-signal", "hub-new", "hub-continue", "hub-history", "hub-history-forget", "hub-adopt")
+        hub_actions = ("hub-exit", "hub-click-leave", "hub-narrow", "hub-signal", "hub-signal-inventory", "hub-new", "hub-continue", "hub-mouse-continue", "hub-history", "hub-history-forget", "hub-adopt")
         startup_marker = b"Alu Dock Hub" if action in hub_actions else b"cache "
         set_size(fd, 24, 80)
         deadline = time.monotonic() + 12
@@ -72,15 +92,16 @@ def main() -> int:
             timed_out = True
         else:
             before_resize = len(output)
+            completed_renders = bytes(output).count(b"\x1b[?2026l")
             if action in hub_actions:
                 set_size(fd, 18 if action == "hub-narrow" else 40, 43 if action == "hub-narrow" else 120)
-            elif action == "history-frame-stability":
+            elif action == "flow-frame-stability":
                 set_size(fd, 58, 252)
             else:
                 set_size(fd, 18, 43)
             os.kill(pid, signal.SIGWINCH)
             resize_deadline = time.monotonic() + 2
-            while len(output) == before_resize and time.monotonic() < resize_deadline:
+            while bytes(output).count(b"\x1b[?2026l") <= completed_renders and time.monotonic() < resize_deadline:
                 if read_available(fd, output, 0.05) < 0:
                     break
             resized_bytes = len(output) - before_resize
@@ -93,33 +114,66 @@ def main() -> int:
                     time.sleep(0.12)
                     while read_available(fd, output, 0.01) > 0:
                         pass
-                os.write(fd, b"\x03" if action == "hub-narrow" else b"\x1b")  # Leave without choosing a mutation.
+                os.write(fd, b"\x03" if action == "hub-narrow" else b"\x1b")  # Keyboard leave without mutation.
+            elif action == "hub-click-leave":
+                y = hub_item_y(40, 120, 4, 5)
+                os.write(fd, f"\x1b[<0;30;{y}M".encode("ascii"))
             elif action == "hub-signal":
                 os.kill(pid, signal.SIGTERM)
+            elif action == "hub-signal-inventory":
+                for _ in range(3):
+                    write_input(fd, output, b"\x1b[B")  # Pi Sessions is fourth.
+                os.write(fd, b"\r")
+                loading_deadline = time.monotonic() + 5
+                while b"Loading Pi Sessions" not in output and time.monotonic() < loading_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                signal_sent = time.monotonic()
+                os.kill(pid, signal.SIGTERM)
+                restore_deadline = signal_sent + 1
+                while b"\x1b[?1049l" not in output and time.monotonic() < restore_deadline:
+                    if read_available(fd, output, 0.01) < 0:
+                        break
+                if b"\x1b[?1049l" in output:
+                    signal_restore_ms = (time.monotonic() - signal_sent) * 1000
             elif action == "hub-new":
                 os.write(fd, b"\r")  # Hub defaults to New.
                 work_deadline = time.monotonic() + 8
                 while b"cache " not in output and time.monotonic() < work_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
-            elif action == "hub-continue":
-                os.write(fd, b"\x1b[B\r")  # Continue is second in the stable root menu.
+            elif action in ("hub-continue", "hub-mouse-continue"):
+                if action == "hub-continue":
+                    write_input(fd, output, b"\x1b[B")  # Continue is second in the stable root menu.
+                else:
+                    write_input(fd, output, b"\x1b[<65;30;20M")  # One wheel step selects Continue.
+                os.write(fd, b"\r")
                 continue_deadline = time.monotonic() + 5
                 while b"Current Dock work" not in output and time.monotonic() < continue_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
-                os.write(fd, b"\r")  # Select the current Dock instance.
+                if action == "hub-continue":
+                    os.write(fd, b"\r")
+                else:
+                    y = hub_item_y(40, 120, 0, 2)
+                    os.write(fd, f"\x1b[<0;30;{y}M".encode("ascii"))
                 action_deadline = time.monotonic() + 5
                 while b"Attach Session Work" not in output and time.monotonic() < action_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
-                os.write(fd, b"\r")
+                if action == "hub-continue":
+                    os.write(fd, b"\r")
+                else:
+                    y = hub_item_y(40, 120, 0, 3)
+                    os.write(fd, f"\x1b[<0;30;{y}M".encode("ascii"))
                 work_deadline = time.monotonic() + 8
                 while b"cache " not in output and time.monotonic() < work_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
             elif action in ("hub-history", "hub-history-forget"):
-                os.write(fd, b"\x1b[B\x1b[B\r")  # History is third.
+                write_input(fd, output, b"\x1b[B")
+                write_input(fd, output, b"\x1b[B")  # History is third.
+                os.write(fd, b"\r")
                 history_deadline = time.monotonic() + 5
                 while b"Past Dock records" not in output and time.monotonic() < history_deadline:
                     if read_available(fd, output, 0.05) < 0:
@@ -136,7 +190,8 @@ def main() -> int:
                         if read_available(fd, output, 0.05) < 0:
                             break
                 else:
-                    os.write(fd, b"\x1b[B\r")  # Forget is below Continue.
+                    write_input(fd, output, b"\x1b[B")  # Forget is below Continue.
+                    os.write(fd, b"\r")
                     forget_deadline = time.monotonic() + 5
                     while b"Forgot History record" not in output and time.monotonic() < forget_deadline:
                         if read_available(fd, output, 0.05) < 0:
@@ -147,7 +202,9 @@ def main() -> int:
                             break
                     os.write(fd, b"\x1b")
             elif action == "hub-adopt":
-                os.write(fd, b"\x1b[B\x1b[B\x1b[B\r")  # Pi Sessions is fourth.
+                for _ in range(3):
+                    write_input(fd, output, b"\x1b[B")  # Pi Sessions is fourth.
+                os.write(fd, b"\r")
                 inventory_deadline = time.monotonic() + 5
                 while b"Pi session inventory incomplete" not in output and time.monotonic() < inventory_deadline:
                     if read_available(fd, output, 0.05) < 0:
@@ -227,64 +284,26 @@ def main() -> int:
                 while b"Model changed to fixture/local" not in output and time.monotonic() < selected_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
-            elif action == "scroll":
-                os.write(fd, b"\x1b[5~")  # PageUp
-                scroll_deadline = time.monotonic() + 3
-                while b"history paused" not in output and time.monotonic() < scroll_deadline:
+            elif action == "history-flow":
+                pass  # Eager history already flowed into native terminal scrollback.
+            elif action == "history-live-flow":
+                live_deadline = time.monotonic() + 4
+                while b"new output" not in output and time.monotonic() < live_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
-                if ready_file:
-                    with open(ready_file + ".locked", "w", encoding="utf-8") as marker:
-                        marker.write("locked\n")
-                unseen_deadline = time.monotonic() + 4
-                while b"new output" not in output and time.monotonic() < unseen_deadline:
-                    if read_available(fd, output, 0.05) < 0:
-                        break
-                os.write(fd, b"\x1b[6~")  # PageDown returns one PageUp to the bottom.
-                time.sleep(0.1)
-                read_available(fd, output, 0.05)
-            elif action == "history-page":
-                # Opt into Dock mouse tracking before exercising SGR wheel.
-                os.write(fd, b"\x1bm")
-                time.sleep(0.08)
-                read_available(fd, output, 0.02)
-                for _ in range(6):
-                    os.write(fd, b"\x1b[<64;10;5M")
-                    time.sleep(0.02)
-                    read_available(fd, output, 0.01)
-                history_deadline = time.monotonic() + 12
-                attempts = 0
-                while b"historical line 0" not in output and time.monotonic() < history_deadline and attempts < 280:
-                    os.write(fd, b"\x1b[5~")
-                    attempts += 1
-                    time.sleep(0.025)
-                    read_available(fd, output, 0.01)
-                if b"historical line 0" in output:
-                    os.write(fd, b"\x1b[<65;10;5M")
-                    os.write(fd, b"\x1b[6~")
-                    os.write(fd, b"\x1b[1;5F")  # Ctrl+End returns to the retained live tail.
-                    time.sleep(0.1)
-                    read_available(fd, output, 0.05)
-            elif action == "history-frame-stability":
+            elif action == "flow-frame-stability":
                 time.sleep(0.05)
                 while read_available(fd, output, 0.01) > 0:
                     pass
                 navigation_start = len(output)
-                os.write(fd, b"\x0f")  # Ctrl+O, then repeat the real PageUp failure sequence.
-                for _ in range(80):
-                    os.write(fd, b"\x1b[5~")
-                    time.sleep(0.012)
-                    read_available(fd, output, 0.004)
                 marker = b"ALU_LAYOUT_PTY_MARKER"
-                os.write(fd, marker)
-                time.sleep(0.08)
-                read_available(fd, output, 0.02)
-                os.write(fd, b"\x1b[6~")
+                write_input(fd, output, marker, 0.08)
+                os.write(fd, b"\x0f")  # Host-authoritative Ctrl+O must preserve the draft.
                 frame_deadline = time.monotonic() + 3
                 while time.monotonic() < frame_deadline:
                     if read_available(fd, output, 0.03) < 0:
                         break
-                    if marker in bytes(output[navigation_start:]):
+                    if marker in bytes(output[navigation_start:]) and bytes(output[navigation_start:]).count(b"\x1b[?2026h") >= 1:
                         break
                 navigation_output = bytes(output[navigation_start:])
                 navigation_scrollback_clear_count = navigation_output.count(b"\x1b[3J")
@@ -376,41 +395,8 @@ def main() -> int:
                 os.write(fd, b"\x03")
                 time.sleep(0.05)
                 read_available(fd, output, 0.02)
-            elif action == "mouse-selection":
+            elif action == "work-native-mouse":
                 startup_mouse_enable_count = bytes(output).count(b"\x1b[?1000h\x1b[?1006h")
-                os.write(fd, b"\x1bm")  # Alt+M opts into Dock mouse tracking.
-                mode_deadline = time.monotonic() + 2
-                while b"Dock mouse tracking" not in output and time.monotonic() < mode_deadline:
-                    if read_available(fd, output, 0.02) < 0:
-                        break
-                os.write(fd, b"/m")  # Autocomplete must consume Esc before mouse mode.
-                time.sleep(0.08)
-                while read_available(fd, output, 0.01) > 0:
-                    pass
-                disable_sequence = b"\x1b[?1006l\x1b[?1000l"
-                disables_before_overlay_escape = bytes(output).count(disable_sequence)
-                os.write(fd, b"\x1b")
-                time.sleep(0.08)
-                while read_available(fd, output, 0.01) > 0:
-                    pass
-                mouse_overlay_priority = bytes(output).count(disable_sequence) == disables_before_overlay_escape
-                os.write(fd, b"\x03")  # Clear the autocomplete query.
-                os.write(fd, b"\x1b")  # Esc now returns to default terminal selection.
-                time.sleep(0.08)
-                while read_available(fd, output, 0.01) > 0:
-                    pass
-                os.write(fd, b"/mouse\r")  # Slash command opts in again.
-                time.sleep(0.12)
-                while read_available(fd, output, 0.01) > 0:
-                    pass
-                os.write(fd, b"\x1bm")  # Alt+M returns without aborting the run.
-                time.sleep(0.08)
-                while read_available(fd, output, 0.01) > 0:
-                    pass
-                os.write(fd, b"/mouse\r")  # Leave tracking active so terminal.stop() must clean it up.
-                time.sleep(0.08)
-                while read_available(fd, output, 0.01) > 0:
-                    pass
             elif action == "command-handled":
                 for command in (b"/chain\r", b"/chain-prompts\r"):
                     os.write(fd, command)
@@ -515,7 +501,7 @@ def main() -> int:
                 os.write(fd, b"\x0f")  # Ctrl+O: collapse/expand tool output.
                 time.sleep(0.1)
                 read_available(fd, output, 0.05)
-            if action not in ("hub-exit", "hub-signal", "hub-history-forget"):
+            if action not in ("hub-exit", "hub-click-leave", "hub-signal", "hub-signal-inventory", "hub-history-forget"):
                 os.write(fd, b"\x04")  # Ctrl+D: detach without stopping.
 
         exit_deadline = time.monotonic() + 8
@@ -548,10 +534,10 @@ def main() -> int:
         "stableDraftRewrites": stable_draft_rewrites,
         "localizedActivityBatches": localized_activity_batches,
         "startupMouseEnableCount": startup_mouse_enable_count,
-        "mouseOverlayPriority": mouse_overlay_priority,
         "navigationScrollbackClearCount": navigation_scrollback_clear_count,
         "navigationRenderBatches": navigation_render_batches,
         "draftVisible": draft_visible,
+        "signalRestoreMs": signal_restore_ms,
         "output": base64.b64encode(bytes(output)).decode("ascii"),
     }))
     return 0

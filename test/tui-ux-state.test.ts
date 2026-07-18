@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
+import { visibleWidth, type TUI } from "@earendil-works/pi-tui";
 
-import type { DockEvent, HistoryEntryDto, InstanceSnapshot } from "../src/core/managed-instance.js";
+import type { DockEvent, InstanceSnapshot } from "../src/core/managed-instance.js";
 import {
   abortingActivity,
   activityFromReplay,
@@ -12,17 +12,11 @@ import {
   submittingActivity,
 } from "../src/tui/run-activity.js";
 import { ActivityPulseController } from "../src/tui/activity-pulse.js";
-import { DockActivityLine, DockConversation } from "../src/tui/conversation.js";
-import { FixedDockScreen } from "../src/tui/pi-tui-screen.js";
-import {
-  HistoryViewport,
-  composeFixedScreen,
-  fitFixedScreenChrome,
-} from "../src/tui/screen-layout.js";
+import { DockActivityLine } from "../src/tui/conversation.js";
 import { filterSearchableItems } from "../src/tui/search-filter.js";
 import { SearchablePicker } from "../src/tui/searchable-picker.js";
 import { ExtensionTextDialog } from "../src/tui/extension-text-dialog.js";
-import { pickerContentRowBudget } from "../src/tui/dock-tui.js";
+import { pickerContentRowBudget, shouldApplyInitialHistory, snapshotIsNotOlder } from "../src/tui/dock-tui.js";
 import { SessionTreeSurface } from "../src/tui/session-tree-surface.js";
 import { FixedActionDialog, WorkModalFrame } from "../src/tui/work-modal.js";
 import type { TreeNodeDto } from "../src/core/instance-dto.js";
@@ -53,6 +47,7 @@ function snapshot(overrides: Partial<InstanceSnapshot> = {}): InstanceSnapshot {
     pending: { steering: 0, followUp: 0, total: 0 },
     executor: { kind: "pi-sdk", piSessionId: "pi-1" },
     extensionStatus: {},
+    toolsExpanded: false,
     createdAt: "2026-07-15T00:00:00.000Z",
     updatedAt: "2026-07-15T00:00:00.000Z",
     eventCursor: { hostEpoch: "epoch-1", instanceId: "dock-1", runtimeGeneration: 1, sequence: 1 },
@@ -61,74 +56,29 @@ function snapshot(overrides: Partial<InstanceSnapshot> = {}): InstanceSnapshot {
   };
 }
 
-test("fixed screen keeps the composer immediately above the compact footer", () => {
-  const chrome = fitFixedScreenChrome({
-    height: 12,
-    header: ["header"],
-    status: ["status 1", "status 2"],
-    help: ["help"],
-    editor: ["editor 1", "editor 2"],
-  });
-  assert.equal(chrome.historyRows, 6);
-
-  const lines = composeFixedScreen({
-    height: 12,
-    header: chrome.header,
-    history: ["history 1", "history 2"],
-    status: chrome.status,
-    help: chrome.help,
-    editor: chrome.editor,
-  });
-  assert.equal(lines.length, 12);
-  assert.equal(lines.at(-1), "help");
-  assert.ok(lines.indexOf("history 2") < lines.indexOf("editor 1"));
-  assert.ok(lines.indexOf("editor 2") < lines.indexOf("status 1"));
-  assert.ok(lines.indexOf("status 2") < lines.indexOf("help"));
+test("same-generation navigation permanently preempts a stale initial history drain", () => {
+  assert.equal(shouldApplyInitialHistory(true, undefined, undefined, 1, 1), true);
+  assert.equal(shouldApplyInitialHistory(false, undefined, undefined, 1, 1), false, "cleared navigation tokens must not revive initial history");
+  assert.equal(shouldApplyInitialHistory(true, undefined, "1:7", 1, 1), false);
+  assert.equal(shouldApplyInitialHistory(true, 2, undefined, 2, 1), false);
 });
 
-test("activity slot stays fixed above composer without moving a locked history anchor", () => {
-  const conversation = new DockConversation();
-  conversation.applyHistory(Array.from({ length: 30 }, (_, index): HistoryEntryDto => ({
-    entryId: `activity-history-${index}`,
-    role: index % 2 === 0 ? "user" : "assistant",
-    content: [{ type: "text", text: `activity history row ${index}` }],
-  })), false);
-  const activity = new DockActivityLine();
-  const header: Component = { render: () => ["header"], invalidate: () => {} };
-  const status: Component = { render: () => ["status one", "status two"], invalidate: () => {} };
-  const editor: Component = { render: (width) => [...activity.render(width), "composer"], invalidate: () => {} };
-  const screen = new FixedDockScreen({ rows: 18 }, {
-    header,
-    history: conversation,
-    status,
-    editor,
-    historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
+test("tool-expansion mutation receipts cannot overwrite newer stream truth", () => {
+  const current = snapshot({
+    toolsExpanded: false,
+    eventCursor: { hostEpoch: "epoch-1", instanceId: "dock-1", runtimeGeneration: 1, sequence: 7 },
   });
-
-  screen.render(43);
-  screen.pageUp();
-  screen.render(43);
-  const beforeAnchor = screen.captureHistoryAnchor();
-  const beforeViewport = screen.viewportSnapshot();
-  assert.ok(beforeAnchor);
-
-  activity.setActivity({ phase: "responding", label: "responding" });
-  const changed = screen.render(43);
-  assert.deepEqual(screen.captureHistoryAnchor(), beforeAnchor);
-  assert.deepEqual(screen.viewportSnapshot(), beforeViewport);
-  const historyRow = changed.findIndex((line) => line.includes("activity history row"));
-  const activityRow = changed.findIndex((line) => line.includes("responding"));
-  const composerRow = changed.indexOf("composer");
-  const statusRow = changed.indexOf("status one");
-  assert.ok(historyRow >= 0 && historyRow < activityRow);
-  assert.ok(activityRow < composerRow && composerRow < statusRow);
-
-  for (const width of [43, 80, 120]) {
-    activity.setActivity({ phase: "tool", label: `tool ${"read ".repeat(40)}` });
-    const lines = activity.render(width);
-    assert.equal(lines.length, 1);
-    assert.ok(visibleWidth(lines[0] ?? "") <= width);
-  }
+  assert.equal(snapshotIsNotOlder(snapshot({
+    toolsExpanded: true,
+    eventCursor: { hostEpoch: "epoch-1", instanceId: "dock-1", runtimeGeneration: 1, sequence: 6 },
+  }), current), false);
+  assert.equal(snapshotIsNotOlder(snapshot({
+    toolsExpanded: true,
+    eventCursor: { hostEpoch: "epoch-1", instanceId: "dock-1", runtimeGeneration: 1, sequence: 7 },
+  }), current), true);
+  assert.equal(snapshotIsNotOlder(snapshot({
+    eventCursor: { hostEpoch: "other-epoch", instanceId: "dock-1", runtimeGeneration: 1, sequence: 8 },
+  }), current), false);
 });
 
 test("activity pulse schedules cached frame renders and has no idle timer", () => {
@@ -165,284 +115,6 @@ test("activity pulse schedules cached frame renders and has no idle timer", () =
   assert.equal(controller.pulseNow(), false);
   assert.equal(renderRequests, 2);
   controller.stop();
-});
-
-test("virtual history keeps its entry anchor while live output arrives below", () => {
-  const conversation = new DockConversation();
-  conversation.applyHistory(Array.from({ length: 40 }, (_, index): HistoryEntryDto => ({
-    entryId: `locked-${index}`,
-    role: index % 2 === 0 ? "user" : "assistant",
-    content: [{ type: "text", text: `locked history ${index}` }],
-  })), false);
-  const empty: Component = { render: () => [], invalidate: () => {} };
-  const screen = new FixedDockScreen({ rows: 12 }, {
-    header: empty,
-    history: conversation,
-    status: empty,
-    editor: { render: () => ["COMPOSER"], invalidate: () => {} },
-    historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
-  });
-  screen.render(60);
-  screen.pageUp();
-  const before = screen.render(60);
-  const anchor = screen.captureHistoryAnchor();
-  assert.ok(anchor);
-  const anchoredText = before[anchor.screenRow]?.replace(/\x1b\[[0-9;]*m/gu, "");
-
-  conversation.apply(event(200, "message.submitted", {
-    operationId: "new-live-output",
-    messageId: "new-live-output",
-    role: "user",
-    text: "new live output below the lock",
-    delivery: "prompt",
-  }));
-  const after = screen.render(60);
-  assert.deepEqual(screen.captureHistoryAnchor(), anchor);
-  assert.equal(after[anchor.screenRow]?.replace(/\x1b\[[0-9;]*m/gu, ""), anchoredText);
-  assert.equal(screen.viewportSnapshot().unseenUpdates, 1);
-  assert.match(after.join("\n"), /history paused/u);
-  assert.doesNotMatch(after.join("\n"), /new live output below the lock/u);
-});
-
-test("history viewport auto-follows, locks on page-up, counts unseen output, and returns to bottom", () => {
-  const viewport = new HistoryViewport();
-  const initial = Array.from({ length: 10 }, (_, index) => `line ${index}`);
-  assert.deepEqual(
-    viewport.project(initial, 4, { width: 80, revision: 1, outputRevision: 1 }).lines,
-    ["line 6", "line 7", "line 8", "line 9"],
-  );
-
-  viewport.pageUp();
-  let locked = viewport.project(initial, 4, { width: 80, revision: 1, outputRevision: 1 });
-  assert.equal(locked.locked, true);
-  assert.deepEqual(locked.lines, ["line 4", "line 5", "line 6"]);
-  viewport.pageDown();
-  assert.equal(viewport.project(initial, 4, { width: 80, revision: 1, outputRevision: 1 }).locked, false);
-
-  viewport.pageUp();
-  locked = viewport.project(initial, 4, { width: 80, revision: 1, outputRevision: 1 });
-  const withOutput = [...initial, "line 10"];
-  const anchored = viewport.project(withOutput, 4, { width: 80, revision: 2, outputRevision: 2 });
-  assert.deepEqual(anchored.lines, locked.lines, "new output must not move the historical rows being read");
-  assert.equal(anchored.unseenUpdates, 1);
-
-  viewport.scrollToBottom();
-  const followed = viewport.project(withOutput, 4, { width: 80, revision: 2, outputRevision: 2 });
-  assert.equal(followed.locked, false);
-  assert.equal(followed.unseenUpdates, 0);
-  assert.deepEqual(followed.lines, ["line 7", "line 8", "line 9", "line 10"]);
-});
-
-test("fixed screen preserves an entry-and-row anchor across contiguous prepend and resize", () => {
-  const conversation = new DockConversation();
-  const initial = Array.from({ length: 12 }, (_, index): HistoryEntryDto => ({
-    entryId: `entry-${index + 20}`,
-    role: index % 2 === 0 ? "user" : "assistant",
-    content: [{ type: "text", text: `anchor history ${index + 20} with enough words to wrap at narrow widths` }],
-  }));
-  conversation.replacePagedHistory({
-    entries: initial,
-    hasEarlier: true,
-    nextBeforeEntryId: initial[0]!.entryId,
-    loadState: "idle",
-    generation: 1,
-    revision: 1,
-  });
-  const empty: Component = { render: () => [], invalidate: () => {} };
-  const terminal = { rows: 12 };
-  const screen = new FixedDockScreen(terminal, {
-    header: empty,
-    history: conversation,
-    status: empty,
-    help: empty,
-    editor: empty,
-    historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
-  });
-
-  screen.render(42);
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    const atTop = screen.pageUp();
-    screen.render(42);
-    if (atTop) break;
-  }
-  const anchor = screen.captureHistoryAnchor();
-  assert.ok(anchor);
-  assert.match(anchor.row.entryKey, /^history:entry-/);
-  const beforePrepend = screen.render(42);
-  const anchoredText = "anchor history 20";
-  const anchoredScreenRow = beforePrepend.findIndex((line) => line.includes(anchoredText));
-  assert.ok(anchoredScreenRow >= 0);
-
-  conversation.apply(event(90, "message.submitted", {
-    operationId: "live-during-page",
-    messageId: "live-during-page",
-    role: "user",
-    text: "live output while the earlier page is loading",
-    delivery: "prompt",
-  }));
-  const older = Array.from({ length: 8 }, (_, index): HistoryEntryDto => ({
-    entryId: `entry-${index + 12}`,
-    role: "assistant",
-    content: [{ type: "text", text: `older history ${index + 12}` }],
-  }));
-  conversation.replacePagedHistory({
-    entries: [...older, ...initial],
-    hasEarlier: true,
-    nextBeforeEntryId: older[0]!.entryId,
-    loadState: "idle",
-    generation: 1,
-    revision: 2,
-  });
-  screen.restoreHistoryAnchor(anchor);
-  const afterPrependRows = screen.render(42);
-  assert.equal(afterPrependRows.findIndex((line) => line.includes(anchoredText)), anchoredScreenRow);
-
-  const resizeAnchor = screen.captureHistoryAnchor();
-  assert.ok(resizeAnchor);
-  screen.render(28);
-  const afterResize = screen.captureHistoryAnchor();
-  assert.equal(afterResize?.row.entryKey, resizeAnchor.row.entryKey);
-  assert.equal(afterResize?.screenRow, resizeAnchor.screenRow);
-
-  terminal.rows = 8;
-  const heightAnchor = screen.captureHistoryAnchor();
-  assert.ok(heightAnchor);
-  screen.render(28);
-  const afterHeightResize = screen.captureHistoryAnchor();
-  assert.equal(afterHeightResize?.row.entryKey, heightAnchor.row.entryKey);
-  assert.ok((afterHeightResize?.screenRow ?? 99) <= heightAnchor.screenRow);
-});
-
-test("a temporarily zero-row history preserves its virtual lock and anchor", () => {
-  const conversation = new DockConversation();
-  conversation.applyHistory(Array.from({ length: 40 }, (_, index): HistoryEntryDto => ({
-    entryId: `zero-row-${index}`,
-    role: index % 2 === 0 ? "user" : "assistant",
-    content: [{ type: "text", text: `zero row history ${index}` }],
-  })), false);
-  let editorRows = ["COMPOSER"];
-  const screen = new FixedDockScreen({ rows: 12 }, {
-    header: { render: () => [], invalidate: () => {} },
-    history: conversation,
-    status: { render: () => [], invalidate: () => {} },
-    editor: { render: () => editorRows, invalidate: () => {} },
-    historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
-  });
-  screen.render(60);
-  screen.pageUp();
-  screen.render(60);
-  const anchor = screen.captureHistoryAnchor();
-  assert.ok(anchor);
-  assert.equal(screen.viewportSnapshot().locked, true);
-
-  editorRows = Array.from({ length: 12 }, (_, index) => `editor ${index}`);
-  const covered = screen.render(60);
-  assert.equal(covered.some((line) => line.includes("zero row history")), false);
-  assert.equal(screen.viewportSnapshot().locked, true);
-
-  editorRows = ["COMPOSER"];
-  screen.render(60);
-  assert.equal(screen.viewportSnapshot().locked, true);
-  assert.deepEqual(screen.captureHistoryAnchor(), anchor);
-});
-
-test("80x24 expanded long history renders only the viewport neighborhood and keeps the composer", () => {
-  const conversation = new DockConversation();
-  const history: HistoryEntryDto[] = [];
-  for (let index = 0; index < 2_000; index += 1) {
-    const callId = `long-tool-${index}`;
-    history.push({
-      entryId: `long-assistant-${index}`,
-      role: "assistant",
-      content: [{ type: "tool_call", toolCallId: callId, toolName: "bash", args: {} }],
-    }, {
-      entryId: `long-result-${index}`,
-      role: "tool",
-      content: [{
-        type: "tool_result",
-        toolCallId: callId,
-        toolName: "bash",
-        text: `detail-${index}\n${"expanded output ".repeat(250)}`,
-        isError: false,
-      }],
-    });
-  }
-  conversation.applyHistory(history, false);
-  const screen = new FixedDockScreen({ rows: 24 }, {
-    header: { render: () => ["header"], invalidate: () => {} },
-    history: conversation,
-    status: { render: () => ["metrics", "extensions"], invalidate: () => {} },
-    editor: { render: () => ["activity", "COMPOSER"], invalidate: () => {} },
-    historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
-  });
-  screen.render(80);
-
-  const started = performance.now();
-  assert.equal(conversation.toggleToolsExpanded(), true);
-  screen.revealHistoryAnchor(() => conversation.latestToolAnchor());
-  const lines = screen.render(80);
-  const elapsedMs = performance.now() - started;
-
-  assert.equal(lines.length, 24);
-  assert.ok(lines.indexOf("COMPOSER") > lines.findIndex((line) => line.includes("detail-1999")));
-  assert.ok(lines.indexOf("COMPOSER") < lines.indexOf("metrics"));
-  assert.doesNotMatch(lines.join("\n"), /detail-0(?:\D|$)/u);
-  assert.ok(lines.every((line) => visibleWidth(line) <= 80));
-  assert.ok(elapsedMs < 1_000, `expanded viewport render took ${elapsedMs.toFixed(1)}ms`);
-});
-
-test("virtual Work history stays continuous across thousands of rows and repeated compactions", () => {
-  const conversation = new DockConversation();
-  const history = Array.from({ length: 8_500 }, (_, index): HistoryEntryDto => ({
-    entryId: `continuous-${index}`,
-    role: index % 500 === 0 ? "system" : index % 2 === 0 ? "user" : "assistant",
-    content: [{ type: "text", text: index % 500 === 0 ? `compaction ${index}\nsummary retained` : `continuous history ${index}` }],
-    ...(index % 500 === 0 ? { summaryKind: "compaction" as const } : {}),
-  }));
-  conversation.applyHistory(history, false);
-  const empty: Component = { render: () => [], invalidate: () => {} };
-  const screen = new FixedDockScreen({ rows: 24 }, {
-    header: empty,
-    history: conversation,
-    status: empty,
-    editor: { render: () => ["COMPOSER"], invalidate: () => {} },
-    historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
-  });
-  let lines = screen.render(80);
-  assert.match(lines.join("\n"), /continuous history 8499/u);
-
-  let reachedTop = false;
-  for (let page = 0; page < 1_000; page += 1) {
-    reachedTop = screen.pageUp();
-    lines = screen.render(80);
-    if (reachedTop) break;
-  }
-  assert.equal(reachedTop, true);
-  assert.match(lines.join("\n"), /compaction 0/u);
-  assert.equal(lines.at(-1), "COMPOSER");
-
-  let reachedBottom = false;
-  for (let page = 0; page < 1_000; page += 1) {
-    reachedBottom = screen.pageDown();
-    lines = screen.render(80);
-    if (reachedBottom) break;
-  }
-  assert.equal(reachedBottom, true);
-  assert.match(lines.join("\n"), /continuous history 8499/u);
-  assert.equal(lines.at(-1), "COMPOSER");
-});
-
-test("layout-only tool expansion preserves an explicit reveal offset", () => {
-  const viewport = new HistoryViewport();
-  const collapsed = Array.from({ length: 12 }, (_, index) => `line ${index}`);
-  viewport.project(collapsed, 5, { width: 43, revision: 1, outputRevision: 1 });
-  viewport.scrollToOffsetFromBottom(4);
-  viewport.project(collapsed, 5, { width: 43, revision: 1, outputRevision: 1 });
-
-  const expanded = [...collapsed.slice(0, 6), "detail a", "detail b", "detail c", ...collapsed.slice(6)];
-  const projection = viewport.project(expanded, 5, { width: 43, revision: 2, outputRevision: 1 });
-  assert.equal(projection.offsetFromBottom, 4);
-  assert.equal(projection.unseenUpdates, 0);
 });
 
 test("model search ranks name provider and id matches and supports fuzzy subsequences", () => {

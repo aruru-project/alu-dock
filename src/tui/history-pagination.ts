@@ -1,128 +1,102 @@
-import type { HistoryEntryDto, HistoryPageDto } from "../core/instance-dto.js";
+import type {
+  ContentBlockDto,
+  DockEvent,
+  HistoryEntryDto,
+  InstanceSnapshot,
+} from "../core/instance-dto.js";
 
 export const HISTORY_PAGE_SIZE = 200;
 
-export type HistoryLoadState = "idle" | "loading" | "error";
-
-export interface HistoryWindowSnapshot {
-  entries: readonly HistoryEntryDto[];
+export interface FullHistoryPage {
+  entries: HistoryEntryDto[];
   hasEarlier: boolean;
   nextBeforeEntryId?: string;
-  loadState: HistoryLoadState;
-  error?: string;
-  generation: number;
-  revision: number;
+  instance: InstanceSnapshot;
 }
 
-export interface EarlierHistoryRequest {
-  token: number;
-  generation: number;
-  beforeEntryId: string;
+export interface FullHistoryResult {
+  entries: HistoryEntryDto[];
+  /** Present only when an empty seed required a latest-page bootstrap. */
+  bootstrapBoundary?: InstanceSnapshot;
+}
+
+/** Drain a reverse-paged branch into one oldest-to-newest, gap-free projection. */
+export async function drainFullHistory(
+  instanceId: string,
+  generation: number,
+  seed: readonly HistoryEntryDto[],
+  seedHasEarlier: boolean,
+  load: (beforeEntryId?: string) => Promise<FullHistoryPage>,
+): Promise<FullHistoryResult> {
+  let newest = deduplicate(seed);
+  let hasEarlier = seedHasEarlier;
+  let before = newest[0]?.entryId;
+  let bootstrapBoundary: InstanceSnapshot | undefined;
+
+  // Only an empty seed may establish a newer live-event boundary. Pages loaded
+  // before a nonempty attach/projection tail are historical data and must not
+  // advance that tail's original reconciliation cursor.
+  if (hasEarlier && !before) {
+    const latest = await load(undefined);
+    assertPageIdentity(latest, instanceId, generation);
+    newest = deduplicate(latest.entries);
+    hasEarlier = latest.hasEarlier;
+    before = latest.nextBeforeEntryId ?? newest[0]?.entryId;
+    bootstrapBoundary = latest.instance;
+  }
+
+  const seenEntryIds = new Set(newest.map((entry) => entry.entryId));
+  const newestFirstSegments: HistoryEntryDto[][] = [newest];
+  const seenCursors = new Set<string>();
+  while (hasEarlier) {
+    if (!before || seenCursors.has(before)) throw new Error("History cursor did not advance");
+    seenCursors.add(before);
+    const page = await load(before);
+    assertPageIdentity(page, instanceId, generation);
+    const older = deduplicate(page.entries).filter((entry) => {
+      if (seenEntryIds.has(entry.entryId)) return false;
+      seenEntryIds.add(entry.entryId);
+      return true;
+    });
+    newestFirstSegments.push(older);
+    hasEarlier = page.hasEarlier;
+    const next = page.nextBeforeEntryId ?? page.entries[0]?.entryId;
+    if (hasEarlier && (!next || next === before || seenCursors.has(next))) {
+      throw new Error("History cursor did not advance");
+    }
+    before = next;
+  }
+
+  return {
+    entries: newestFirstSegments.reverse().flat(),
+    ...(bootstrapBoundary === undefined ? {} : { bootstrapBoundary }),
+  };
 }
 
 /**
- * Client-local contiguous reverse-history window.
- *
- * The Host remains the history owner. Pages are retained after they are read so
- * PageUp/PageDown is continuous and no client cache boundary becomes product
- * history semantics. Rendering is independently virtualized by viewport.
+ * Merge a coherent attach bootstrap with events observed while older history
+ * pages were loading. Persisted message/tool frames are removed by content
+ * identity; unresolved frames and non-durable live feedback remain exactly once.
  */
-export class PagedHistoryWindow {
-  private entriesValue: HistoryEntryDto[] = [];
-  private hasEarlierValue = false;
-  private nextBeforeEntryIdValue: string | undefined;
-  private loadStateValue: HistoryLoadState = "idle";
-  private errorValue: string | undefined;
-  private generationValue = 0;
-  private revisionValue = 0;
-  private tokenCounter = 0;
-  private activeRequest: EarlierHistoryRequest | undefined;
-
-  reset(entries: readonly HistoryEntryDto[], hasEarlier: boolean, generation: number): void {
-    this.tokenCounter += 1;
-    this.activeRequest = undefined;
-    this.entriesValue = deduplicate(entries);
-    this.generationValue = generation;
-    this.loadStateValue = "idle";
-    this.errorValue = undefined;
-    this.hasEarlierValue = hasEarlier && this.entriesValue.length > 0;
-    this.nextBeforeEntryIdValue = this.hasEarlierValue ? this.entriesValue[0]?.entryId : undefined;
-    if (hasEarlier && !this.nextBeforeEntryIdValue) {
-      this.loadStateValue = "error";
-      this.errorValue = "Earlier history cursor is unavailable";
-    }
-    this.revisionValue += 1;
+export function reconcileFlowingEvents(
+  history: readonly HistoryEntryDto[],
+  bootstrapEvents: readonly DockEvent[],
+  bufferedEvents: readonly DockEvent[],
+): DockEvent[] {
+  const candidates = new Map<string, DockEvent>();
+  for (const event of bootstrapEvents) {
+    if (isConversationFrame(event)) candidates.set(eventKey(event), event);
   }
+  for (const event of bufferedEvents) candidates.set(eventKey(event), event);
+  const ordered = [...candidates.values()].sort((left, right) => (
+    left.runtimeGeneration - right.runtimeGeneration || left.sequence - right.sequence
+  ));
+  return eventsNotCoveredByHistory(ordered, history);
+}
 
-  invalidate(generation: number): void {
-    this.reset([], false, generation);
-  }
-
-  beginEarlier(): EarlierHistoryRequest | undefined {
-    if (this.activeRequest || !this.hasEarlierValue || !this.nextBeforeEntryIdValue) return undefined;
-    const request: EarlierHistoryRequest = {
-      token: ++this.tokenCounter,
-      generation: this.generationValue,
-      beforeEntryId: this.nextBeforeEntryIdValue,
-    };
-    this.activeRequest = request;
-    this.loadStateValue = "loading";
-    this.errorValue = undefined;
-    this.revisionValue += 1;
-    return request;
-  }
-
-  completeEarlier(request: EarlierHistoryRequest, page: HistoryPageDto): boolean {
-    if (!this.isCurrent(request)) return false;
-    this.activeRequest = undefined;
-
-    const pageEntries = deduplicate(page.entries);
-    const nextCursor = page.hasEarlier ? page.nextBeforeEntryId : undefined;
-    if (page.hasEarlier && (!nextCursor || nextCursor === request.beforeEntryId)) {
-      this.failCurrent("Earlier history cursor did not advance");
-      return false;
-    }
-
-    const existingIds = new Set(this.entriesValue.map((entry) => entry.entryId));
-    const uniquePage = pageEntries.filter((entry) => !existingIds.has(entry.entryId));
-    this.entriesValue = [...uniquePage, ...this.entriesValue];
-    this.hasEarlierValue = page.hasEarlier;
-    this.nextBeforeEntryIdValue = nextCursor;
-    this.loadStateValue = "idle";
-    this.errorValue = undefined;
-    this.revisionValue += 1;
-    return true;
-  }
-
-  failEarlier(request: EarlierHistoryRequest, message: string): boolean {
-    if (!this.isCurrent(request)) return false;
-    this.activeRequest = undefined;
-    this.failCurrent(message);
-    return true;
-  }
-
-  snapshot(): HistoryWindowSnapshot {
-    return {
-      entries: this.entriesValue,
-      hasEarlier: this.hasEarlierValue,
-      ...(this.nextBeforeEntryIdValue === undefined ? {} : { nextBeforeEntryId: this.nextBeforeEntryIdValue }),
-      loadState: this.loadStateValue,
-      ...(this.errorValue === undefined ? {} : { error: this.errorValue }),
-      generation: this.generationValue,
-      revision: this.revisionValue,
-    };
-  }
-
-  private isCurrent(request: EarlierHistoryRequest): boolean {
-    return this.activeRequest?.token === request.token
-      && request.generation === this.generationValue
-      && request.beforeEntryId === this.activeRequest.beforeEntryId;
-  }
-
-  private failCurrent(message: string): void {
-    this.loadStateValue = "error";
-    this.errorValue = terminalLine(message);
-    this.revisionValue += 1;
+function assertPageIdentity(page: FullHistoryPage, instanceId: string, generation: number): void {
+  if (page.instance.id !== instanceId || page.instance.runtimeGeneration !== generation) {
+    throw new Error("Session changed while history was loading");
   }
 }
 
@@ -137,6 +111,82 @@ function deduplicate(entries: readonly HistoryEntryDto[]): HistoryEntryDto[] {
   return result;
 }
 
-function terminalLine(value: string): string {
-  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 2_048);
+function eventKey(event: DockEvent): string {
+  return `${event.runtimeGeneration}:${event.sequence}`;
+}
+
+function isConversationFrame(event: DockEvent): boolean {
+  return event.type === "message.submitted"
+    || event.type === "message.delta"
+    || event.type === "message.completed"
+    || event.type === "tool.started"
+    || event.type === "tool.args_updated"
+    || event.type === "tool.output_updated"
+    || event.type === "tool.completed";
+}
+
+function eventsNotCoveredByHistory(events: DockEvent[], history: readonly HistoryEntryDto[]): DockEvent[] {
+  const counts = new Map<string, number>();
+  for (const entry of history) {
+    const fingerprint = historyFingerprint(entry.role, entry.content);
+    counts.set(fingerprint, (counts.get(fingerprint) ?? 0) + 1);
+  }
+  const coveredMessages = new Set<string>();
+  const coveredTools = new Set<string>();
+  const consume = (fingerprint: string): boolean => {
+    const count = counts.get(fingerprint) ?? 0;
+    if (count < 1) return false;
+    if (count === 1) counts.delete(fingerprint);
+    else counts.set(fingerprint, count - 1);
+    return true;
+  };
+
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!;
+    if (event.type === "message.completed") {
+      if (event.data.role === "user" || coveredMessages.has(event.data.messageId)) continue;
+      if (consume(historyFingerprint(event.data.role, event.data.content))) coveredMessages.add(event.data.messageId);
+    } else if (event.type === "message.submitted") {
+      if (coveredMessages.has(event.data.messageId)) continue;
+      if (consume(historyFingerprint("user", [{ type: "text", text: event.data.text }]))) coveredMessages.add(event.data.messageId);
+    } else if (event.type === "tool.completed") {
+      const content: ContentBlockDto[] = [{
+        type: "tool_result",
+        toolCallId: event.data.toolCallId,
+        toolName: event.data.toolName,
+        text: event.data.text,
+        isError: event.data.isError,
+      }];
+      if (consume(historyFingerprint("tool", content))) coveredTools.add(event.data.toolCallId);
+    }
+  }
+
+  return events.filter((event) => {
+    if (event.type === "message.submitted" || event.type === "message.delta" || event.type === "message.completed") {
+      return !coveredMessages.has(event.data.messageId);
+    }
+    if (event.type === "tool.started" || event.type === "tool.args_updated" || event.type === "tool.output_updated" || event.type === "tool.completed") {
+      return !coveredTools.has(event.data.toolCallId);
+    }
+    return true;
+  });
+}
+
+function historyFingerprint(role: HistoryEntryDto["role"], content: readonly ContentBlockDto[]): string {
+  const normalized = content.map((block) => {
+    if (block.type === "tool_call") {
+      return { type: block.type, toolCallId: block.toolCallId, toolName: block.toolName, args: block.args };
+    }
+    if (block.type === "tool_result") {
+      return {
+        type: block.type,
+        toolCallId: block.toolCallId,
+        toolName: block.toolName,
+        text: block.text,
+        isError: block.isError,
+      };
+    }
+    return block;
+  });
+  return JSON.stringify({ role, content: normalized });
 }

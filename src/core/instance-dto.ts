@@ -141,6 +141,7 @@ export interface EventDataMap {
   "interaction.cancelled": { interactionId: string; method: "select" | "confirm" | "input" | "editor"; reason: "user" | "timeout" | "signal" | "detach" | "replacement" | "host_draining" | "overflow" };
   "extension.notification": { message: string; level: "info" | "warning" | "error" };
   "extension.status_changed": { key: string; text?: string };
+  "extension.tools_expanded_changed": { expanded: boolean };
   "extension.widget_changed": { key: string; lines?: string[]; placement?: "aboveEditor" | "belowEditor" };
   "extension.error": { source?: string; event?: string; error: string };
 }
@@ -169,6 +170,7 @@ export interface InstanceSnapshot {
   executor: ExecutorIdentity;
   metrics?: SessionMetricsDto;
   extensionStatus: Record<string, string>;
+  toolsExpanded: boolean;
   activeInteraction?: { id: string; method: "select" | "confirm" | "input" | "editor"; expiresAt: string };
   activeCommandId?: string;
   lastError?: string;

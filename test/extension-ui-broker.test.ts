@@ -130,6 +130,29 @@ test("wrong leases, detach, signal, and generation changes resolve fail closed",
   assert.deepEqual(await broker.claimController(), { status: "acquired", leaseToken: "id-6" });
 });
 
+test("tool expansion is readable, emits same-value authoritative events, and resets per generation", async () => {
+  const harnessState = harness();
+  const { broker, events } = harnessState;
+  assert.equal(broker.getToolsExpanded(), false);
+  assert.equal(broker.projection().toolsExpanded, false);
+
+  broker.setToolsExpanded(true);
+  broker.setToolsExpanded(true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(broker.getToolsExpanded(), true);
+  assert.equal(broker.projection().toolsExpanded, true);
+  assert.deepEqual(events.filter((item) => item.type === "extension.tools_expanded_changed").map((item) => item.data), [
+    { expanded: true },
+    { expanded: true },
+  ]);
+
+  broker.beginGenerationChange();
+  assert.equal(broker.getToolsExpanded(), false);
+  harnessState.setGeneration(2);
+  await broker.completeGenerationChange();
+  assert.equal(broker.projection().toolsExpanded, false);
+});
+
 test("dialog timeout wins the serialized race and resolves fail closed", async () => {
   const { broker, events } = harness();
   const claim = await broker.claimController();
