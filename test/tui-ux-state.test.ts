@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { visibleWidth, type Component } from "@earendil-works/pi-tui";
+import { visibleWidth, type Component, type TUI } from "@earendil-works/pi-tui";
 
 import type { DockEvent, HistoryEntryDto, InstanceSnapshot } from "../src/core/managed-instance.js";
 import {
@@ -21,6 +21,8 @@ import {
 } from "../src/tui/screen-layout.js";
 import { filterSearchableItems } from "../src/tui/search-filter.js";
 import { SearchablePicker } from "../src/tui/searchable-picker.js";
+import { ExtensionTextDialog } from "../src/tui/extension-text-dialog.js";
+import { pickerContentRowBudget } from "../src/tui/dock-tui.js";
 import { SessionTreeSurface } from "../src/tui/session-tree-surface.js";
 import { FixedActionDialog, WorkModalFrame } from "../src/tui/work-modal.js";
 import type { TreeNodeDto } from "../src/core/instance-dto.js";
@@ -534,6 +536,57 @@ test("searchable picker accepts typed filtering while preserving IME focus propa
   picker.onCancel = () => { cancelled = true; };
   picker.handleInput("\u001b");
   assert.equal(cancelled, true);
+});
+
+test("resized 80x24 searchable Work modals retain selection, position, and footer inside their row budget", () => {
+  let terminalRows = 40;
+  const picker = new SearchablePicker(
+    Array.from({ length: 40 }, (_, index) => ({ value: `item-${index}`, label: `Item ${index}`, description: "bounded choice" })),
+    {
+      title: "Bounded picker",
+      body: "A deliberately long status body that wraps while the modal remains fully operable on a standard SSH viewport.",
+      maxVisible: 14,
+      maxRows: () => pickerContentRowBudget(terminalRows),
+      pageNavigation: true,
+      requestRender: () => {},
+    },
+  );
+  const frame = new WorkModalFrame(picker);
+  assert.ok(frame.render(64).length <= pickerContentRowBudget(terminalRows) + 2);
+  terminalRows = 24;
+  frame.render(64);
+  picker.handleInput("\u001b[6~");
+  const rendered = frame.render(64);
+  assert.ok(rendered.length <= 19, "80% of 24 rows leaves 19 complete overlay rows");
+  assert.match(rendered.join("\n"), /Item 8/u);
+  assert.match(rendered.join("\n"), /\(9\/40\)/u);
+  assert.match(rendered.at(-2) ?? "", /Enter select/u);
+  assert.match(rendered.at(-1) ?? "", /^╰─/u);
+});
+
+test("resized 80x24 extension editor modals keep clipped-content markers and footer visible", () => {
+  const terminal = { rows: 40 };
+  const tui = { terminal, requestRender: () => {} } as unknown as TUI;
+  const dialog = new ExtensionTextDialog({
+    mode: "editor",
+    title: "Extension editor",
+    placeholder: "A long placeholder that wraps across substantially more than two lines so its bounded presentation must disclose omitted guidance rather than silently clipping it.",
+    prefill: Array.from({ length: 30 }, (_, index) => `${String(index).padStart(2, "0")} ${"x".repeat(60)}`).join("\n"),
+    requestRender: () => {},
+    tui,
+    maxRows: () => pickerContentRowBudget(terminal.rows),
+  });
+  dialog.focused = true;
+  const frame = new WorkModalFrame(dialog);
+  assert.ok(frame.render(40).length <= pickerContentRowBudget(40) + 2);
+  terminal.rows = 24;
+  for (let index = 0; index < 40; index += 1) dialog.handleInput("\u001b[A");
+  const rendered = frame.render(40);
+  assert.ok(rendered.length <= 19);
+  assert.match(rendered.join("\n"), /…/u, "clipped placeholder is disclosed");
+  assert.match(rendered.join("\n"), /↓/u, "content below the editor viewport is disclosed");
+  assert.match(rendered.at(-2) ?? "", /Enter submit/u);
+  assert.match(rendered.at(-1) ?? "", /^╰─/u);
 });
 
 test("dedicated tree surface handles filters, search clearing, branch keys, and responsive semantic rows", () => {

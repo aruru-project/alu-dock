@@ -314,6 +314,10 @@ export class ExtensionUiBroker {
       return;
     }
     const projected = lines.map((line) => safeLine(line, MAX_TEXT_CHARS));
+    if (projected.reduce((total, line) => total + line.length, 0) > MAX_EDITOR_CHARS) {
+      this.recordError("Extension widget payload exceeds the bounded declarative surface");
+      return;
+    }
     const actualPlacement = placement === "belowEditor" ? "belowEditor" : "aboveEditor";
     this.widgets.set(safeKey, { lines: projected, placement: actualPlacement });
     void this.emit("extension.widget_changed", { key: safeKey, lines: projected, placement: actualPlacement });

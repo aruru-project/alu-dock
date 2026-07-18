@@ -13,7 +13,11 @@ import { dirname, join, relative, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 import type { SessionDto } from "../core/instance-dto.js";
-import type { SessionInventory } from "../core/session-inventory.js";
+import type {
+  SessionInventory,
+  SessionInventoryDiagnostic,
+  SessionInventoryScan,
+} from "../core/session-inventory.js";
 
 const CACHE_SCHEMA_VERSION = 1;
 const MAX_CACHE_BYTES = 32 * 1024 * 1024;
@@ -23,6 +27,7 @@ const NAME_LINE_BYTES = 64 * 1024;
 const NAME_SCAN_CHUNK_BYTES = 1024 * 1024;
 const SCAN_CONCURRENCY = 4;
 const SESSION_INFO_TOKEN = Buffer.from('"session_info"', "utf8");
+const MAX_INVENTORY_DIAGNOSTICS = 100;
 
 interface SessionInventoryCacheRecord {
   path: string;
@@ -65,33 +70,36 @@ class PiSessionMetadataIndex {
     private readonly cachePath?: string,
   ) {}
 
-  list(cwd: string, scope: "cwd" | "all"): Promise<SessionDto[]> {
+  list(cwd: string, scope: "cwd" | "all"): Promise<SessionInventoryScan> {
     const task = this.queue.then(async () => this.listSerial(cwd, scope));
     this.queue = task.then(() => undefined, () => undefined);
     return task;
   }
 
-  private async listSerial(cwd: string, scope: "cwd" | "all"): Promise<SessionDto[]> {
+  private async listSerial(cwd: string, scope: "cwd" | "all"): Promise<SessionInventoryScan> {
     await this.loadCache();
     const canonicalCwd = await realpath(resolve(cwd));
     const scopeDirectory = scope === "cwd"
       ? join(this.sessionsRoot, defaultSessionDirectoryName(canonicalCwd))
       : undefined;
-    const files = scopeDirectory === undefined
+    const discovery = scopeDirectory === undefined
       ? await discoverAllSessionFiles(this.sessionsRoot)
       : await discoverSessionFiles(scopeDirectory);
+    const files = discovery.files;
+    const diagnostics = [...discovery.diagnostics];
     const discovered = new Set(files);
     let dirty = false;
 
     const refreshed = await mapConcurrent(files, SCAN_CONCURRENCY, async (path) => {
       const previous = this.records.get(path);
-      const next = await refreshRecord(path, previous);
-      if (!sameRecord(previous, next)) dirty = true;
-      return { path, next };
+      const result = await refreshRecord(path, previous);
+      if (!sameRecord(previous, result.record)) dirty = true;
+      return { path, ...result };
     });
-    for (const { path, next } of refreshed) {
-      if (next) this.records.set(path, next);
+    for (const { path, record, diagnostic } of refreshed) {
+      if (record) this.records.set(path, record);
       else this.records.delete(path);
+      if (diagnostic) diagnostics.push(diagnostic);
     }
 
     for (const path of [...this.records.keys()]) {
@@ -103,13 +111,26 @@ class PiSessionMetadataIndex {
         dirty = true;
       }
     }
-    if (dirty) await this.saveCache();
+    if (dirty) {
+      try {
+        const saved = await this.saveCache();
+        if (!saved && this.cachePath) diagnostics.push(inventoryDiagnostic(this.cachePath, "Session metadata cache exceeded its 32 MiB bound; authoritative sessions were scanned without updating the cache"));
+      } catch (error) {
+        if (this.cachePath) diagnostics.push(inventoryDiagnostic(this.cachePath, `Session metadata cache could not be updated; authoritative sessions were still scanned: ${errorText(error)}`));
+      }
+    }
 
-    return files
+    const sessions = files
       .map((path) => this.records.get(path))
       .filter((record): record is SessionInventoryCacheRecord => record !== undefined)
       .map(projectSession)
       .sort((left, right) => (right.updatedAt ?? "").localeCompare(left.updatedAt ?? "") || left.sessionFile.localeCompare(right.sessionFile));
+    return {
+      sessions,
+      incomplete: diagnostics.length > 0,
+      diagnostics: diagnostics.slice(0, MAX_INVENTORY_DIAGNOSTICS),
+      ...(diagnostics.length > MAX_INVENTORY_DIAGNOSTICS ? { diagnosticsTruncated: true } : {}),
+    };
   }
 
   private async loadCache(): Promise<void> {
@@ -130,8 +151,8 @@ class PiSessionMetadataIndex {
     }
   }
 
-  private async saveCache(): Promise<void> {
-    if (!this.cachePath) return;
+  private async saveCache(): Promise<boolean> {
+    if (!this.cachePath) return true;
     const records = [...this.records.values()].sort((left, right) => left.path.localeCompare(right.path));
     const cache: SessionInventoryCacheFile = {
       schemaVersion: CACHE_SCHEMA_VERSION,
@@ -139,7 +160,7 @@ class PiSessionMetadataIndex {
       records,
     };
     const bytes = `${JSON.stringify(cache)}\n`;
-    if (Buffer.byteLength(bytes, "utf8") > MAX_CACHE_BYTES) return;
+    if (Buffer.byteLength(bytes, "utf8") > MAX_CACHE_BYTES) return false;
     const directory = dirname(this.cachePath);
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const temporary = join(directory, `.session-inventory-v1.tmp-${process.pid}-${randomUUID()}`);
@@ -151,6 +172,7 @@ class PiSessionMetadataIndex {
       await handle.close();
       handle = undefined;
       await rename(temporary, this.cachePath);
+      return true;
     } finally {
       await handle?.close().catch(() => {});
       await rm(temporary, { force: true }).catch(() => {});
@@ -161,22 +183,22 @@ class PiSessionMetadataIndex {
 async function refreshRecord(
   path: string,
   previous: SessionInventoryCacheRecord | undefined,
-): Promise<SessionInventoryCacheRecord | undefined> {
+): Promise<{ record?: SessionInventoryCacheRecord; diagnostic?: SessionInventoryDiagnostic }> {
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const info = await handle.stat();
-    if (!info.isFile()) return undefined;
+    if (!info.isFile()) return { diagnostic: inventoryDiagnostic(path, "Persisted session path is not a regular file") };
     if (
       previous
       && previous.dev === info.dev
       && previous.ino === info.ino
       && previous.size === info.size
       && previous.mtimeMs === info.mtimeMs
-    ) return previous;
+    ) return { record: previous };
 
     const header = await readSessionHeader(handle, info.size);
-    if (!header) return undefined;
+    if (!header) return { diagnostic: inventoryDiagnostic(path, "Persisted session has an invalid or oversized Pi header") };
     const appendOnly = previous !== undefined
       && previous.dev === info.dev
       && previous.ino === info.ino
@@ -188,7 +210,7 @@ async function refreshRecord(
       appendOnly ? Math.max(0, previous.size - NAME_LINE_BYTES) : 0,
       info.size,
     );
-    return {
+    return { record: {
       path: resolve(path),
       dev: info.dev,
       ino: info.ino,
@@ -197,9 +219,9 @@ async function refreshRecord(
       sessionId: header.sessionId,
       cwd: header.cwd,
       name: nameResult.found ? (nameResult.name ?? null) : (appendOnly ? previous.name : null),
-    };
-  } catch {
-    return undefined;
+    } };
+  } catch (error) {
+    return { diagnostic: inventoryDiagnostic(path, `Persisted session could not be read: ${errorText(error)}`) };
   } finally {
     await handle?.close().catch(() => {});
   }
@@ -285,26 +307,39 @@ async function readMetadataLine(
   }
 }
 
-async function discoverAllSessionFiles(root: string): Promise<string[]> {
+interface SessionFileDiscovery {
+  files: string[];
+  diagnostics: SessionInventoryDiagnostic[];
+}
+
+async function discoverAllSessionFiles(root: string): Promise<SessionFileDiscovery> {
   try {
     const directories = (await readdir(root, { withFileTypes: true }))
       .filter((entry) => entry.isDirectory())
       .map((entry) => join(root, entry.name));
     const nested = await mapConcurrent(directories, SCAN_CONCURRENCY, discoverSessionFiles);
-    return nested.flat().sort();
-  } catch {
-    return [];
+    return {
+      files: nested.flatMap((result) => result.files).sort(),
+      diagnostics: nested.flatMap((result) => result.diagnostics),
+    };
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return { files: [], diagnostics: [] };
+    return { files: [], diagnostics: [inventoryDiagnostic(root, `Persisted session root could not be scanned: ${errorText(error)}`)] };
   }
 }
 
-async function discoverSessionFiles(directory: string): Promise<string[]> {
+async function discoverSessionFiles(directory: string): Promise<SessionFileDiscovery> {
   try {
-    return (await readdir(directory, { withFileTypes: true }))
-      .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
-      .map((entry) => resolve(directory, entry.name))
-      .sort();
-  } catch {
-    return [];
+    return {
+      files: (await readdir(directory, { withFileTypes: true }))
+        .filter((entry) => entry.isFile() && entry.name.endsWith(".jsonl"))
+        .map((entry) => resolve(directory, entry.name))
+        .sort(),
+      diagnostics: [],
+    };
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return { files: [], diagnostics: [] };
+    return { files: [], diagnostics: [inventoryDiagnostic(directory, `Persisted session directory could not be scanned: ${errorText(error)}`)] };
   }
 }
 
@@ -380,6 +415,22 @@ function isWithin(root: string, path: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function inventoryDiagnostic(path: string, message: string): SessionInventoryDiagnostic {
+  return {
+    path: boundedText(resolve(path), 16_384),
+    message: boundedText(message, 2_048),
+  };
+}
+
+function errorCode(error: unknown): string | undefined {
+  return isRecord(error) && typeof error.code === "string" ? error.code : undefined;
+}
+
+function errorText(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return boundedText(message, 1_024) || "unknown I/O error";
 }
 
 function boundedText(value: string, limit: number): string {

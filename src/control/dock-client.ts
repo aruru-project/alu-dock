@@ -155,23 +155,23 @@ export class DockClient {
   respondInteraction(instanceId:string,leaseToken:string,interactionId:string,response:InteractionResponse,operationId=this.createRequestId()):Promise<InteractionRespondResult>{if("value" in response){const limit=response.method==="select"?8_000:256_000;if(response.value.length>limit)return Promise.reject(new ControlClientError("invalid_request",`Interaction ${response.method} response exceeds ${limit} characters`,operationId));if(containsBinaryPayload(response.value))return Promise.reject(new ControlClientError("invalid_request","Interaction responses cannot contain binary, image, data URI, or raw base64 payloads",operationId));}return this.request("interaction.respond",{operationId,instanceId,leaseToken,interactionId,response},"extension_ui.v1",parseInteractionRespondResult);}
   abort(instanceId:string,operationId=this.createRequestId()):Promise<AbortResult>{return this.request("command.abort",{operationId,instanceId},"run.abort.v1",parseAbortResult,undefined,this.longMutationTimeoutMs);}
   dequeue(instanceId:string,operationId=this.createRequestId()):Promise<QueueDequeueResult>{return this.request("queue.dequeue",{operationId,instanceId},"queue.control.v1",parseQueueDequeueResult);}
-  models(instanceId:string):Promise<ModelsResult>{return this.request("model.list",{instanceId},"models.v1",parseModelsResult);}
+  models(instanceId:string):Promise<ModelsResult>{return this.request("model.list",{instanceId},["models.v1","projection.completeness.v1"],parseModelsResult);}
   setModel(instanceId:string,provider:string,modelId:string,operationId=this.createRequestId()):Promise<ModelConfigurationResult>{return this.request("model.set",{operationId,instanceId,provider,modelId},"models.v1",parseModelConfigurationResult);}
   setThinking(instanceId:string,level:RuntimeThinkingLevel,operationId=this.createRequestId()):Promise<ThinkingConfigurationResult>{return this.request("thinking.set",{operationId,instanceId,level},"models.v1",parseThinkingConfigurationResult);}
-  tools(instanceId:string):Promise<ToolsResult>{return this.request("tool.list",{instanceId},"tools.v1",parseToolsResult);}
-  setActiveTools(instanceId:string,names:string[],operationId=this.createRequestId()):Promise<ToolsResult>{return this.request("tool.set_active",{operationId,instanceId,names},"tools.v1",parseToolsResult);}
+  tools(instanceId:string):Promise<ToolsResult>{return this.request("tool.list",{instanceId},["tools.v1","projection.completeness.v1"],parseToolsResult);}
+  setActiveTools(instanceId:string,names:string[],operationId=this.createRequestId()):Promise<ToolsResult>{return this.request("tool.set_active",{operationId,instanceId,names},["tools.v1","projection.completeness.v1"],parseToolsResult);}
   settings(instanceId:string):Promise<SettingsResult>{return this.request("settings.get",{instanceId},"settings.v1",parseSettingsResult);}
   updateSetting(instanceId:string,update:SettingUpdate,operationId=this.createRequestId()):Promise<SettingUpdateResult>{return this.request("settings.update",{operationId,instanceId,update},"settings.v1",parseSettingUpdateResult);}
-  resources(instanceId:string):Promise<ResourcesResult>{return this.request("resource.get",{instanceId},"resources.v1",parseResourcesResult);}
-  commands(instanceId:string,prefix?:string):Promise<CommandsResult>{return this.request("command.catalog",{instanceId,prefix},"resources.v1",parseCommandsResult);}
+  resources(instanceId:string):Promise<ResourcesResult>{return this.request("resource.get",{instanceId},["resources.v1","projection.completeness.v1"],parseResourcesResult);}
+  commands(instanceId:string,prefix?:string):Promise<CommandsResult>{return this.request("command.catalog",{instanceId,prefix},["resources.v1","projection.completeness.v1"],parseCommandsResult);}
   history(instanceId:string,beforeEntryId?:string,limit=200):Promise<HistoryResult>{return this.request("session.history",{instanceId,beforeEntryId,limit},"tui.projection.v1",parseHistoryResult);}
-  sessionInventory(cwd:string,scope:"cwd"|"all"="cwd"):Promise<SessionInventoryResult>{return this.request("session.inventory",{cwd,scope},"session.inventory.v1",parseSessionInventoryResult);}
-  sessions(instanceId:string,scope:"cwd"|"all"):Promise<SessionsResult>{return this.request("session.list",{instanceId,scope},"session.core",parseSessionsResult);}
+  sessionInventory(cwd:string,scope:"cwd"|"all"="cwd"):Promise<SessionInventoryResult>{return this.request("session.inventory",{cwd,scope},["session.inventory.v1","session.inventory-diagnostics.v1"],parseSessionInventoryResult);}
+  sessions(instanceId:string,scope:"cwd"|"all"):Promise<SessionsResult>{return this.request("session.list",{instanceId,scope},["session.core","projection.completeness.v1"],parseSessionsResult);}
   switchSession(instanceId:string,sessionFile:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<SessionReplacementResult>{return this.request("session.switch",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.commands.v1",parseSessionReplacementResult);}
   newSession(instanceId:string,parentSession?:string,operationId=this.createRequestId()):Promise<SessionReplacementResult>{return this.request("session.new",{operationId,instanceId,parentSession},"session.commands.v1",parseSessionReplacementResult);}
   nameSession(instanceId:string,name:string,operationId=this.createRequestId()):Promise<SessionNameResult>{return this.request("session.name",{operationId,instanceId,name},"session.commands.v1",parseSessionNameResult);}
   compactSession(instanceId:string,customInstructions?:string,operationId=this.createRequestId()):Promise<SessionCompactionResult>{return this.request("session.compact",{operationId,instanceId,customInstructions},"session.commands.v1",parseSessionCompactionResult,undefined,this.longMutationTimeoutMs);}
-  reloadSession(instanceId:string,operationId=this.createRequestId()):Promise<SessionReloadResult>{return this.request("session.reload",{operationId,instanceId},"session.commands.v1",parseSessionReloadResult,undefined,this.longMutationTimeoutMs);}
+  reloadSession(instanceId:string,operationId=this.createRequestId()):Promise<SessionReloadResult>{return this.request("session.reload",{operationId,instanceId},["session.commands.v1","projection.completeness.v1"],parseSessionReloadResult,undefined,this.longMutationTimeoutMs);}
   tree(instanceId:string,treeRevision?:string,afterEntryId?:string,limit=200):Promise<SessionTreeResult>{return this.request("session.tree",{instanceId,treeRevision,afterEntryId,limit},"session.tree.v1",parseSessionTreeResult);}
   navigateSession(instanceId:string,targetId:string,options:{summarize?:boolean;customInstructions?:string;replaceInstructions?:boolean;label?:string}={},operationId=this.createRequestId()):Promise<SessionNavigateResult>{return this.request("session.navigate",{operationId,instanceId,targetId,...options},"session.tree.v1",parseSessionNavigateResult);}
   forkSession(instanceId:string,entryId:string,operationId=this.createRequestId()):Promise<SessionForkResult>{return this.request("session.fork",{operationId,instanceId,entryId},"session.tree.v1",parseSessionForkResult);}
@@ -203,7 +203,7 @@ export class DockClient {
       }
       if(event.sequence<=lastSequence)throw new ProtocolValidationError("invalid_response","Live event cursor domain/order is invalid");
       lastSequence=event.sequence;
-      if(!callbacksReady){if(pending.length>=MAX_PENDING_STREAM_EVENTS)throw new ProtocolValidationError("invalid_response","Too many pending events");pending.push(event);}else options.onEvent(event);
+      if(!callbacksReady){if(pending.length>=MAX_PENDING_STREAM_EVENTS)throw new ControlClientError("event_handoff_overflow","More than 1000 events arrived during attach handoff; reconnect from the last accepted cursor");pending.push(event);}else options.onEvent(event);
     }catch(e){fail(e);}};
     socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,streamCapabilities))));socket.on("data",(chunk:Buffer)=>{try{for(const line of decoder.push(chunk))consume(line);}catch(e){fail(e);}});socket.once("end",()=>{try{decoder.finish();}catch(e){fail(e);}});socket.once("error",e=>fail(transportError(e)));socket.once("close",hadError=>{clearTimeout(timeout);if(!initialSettled){const e=new ControlClientError("connection_closed","Host closed before responding");initialSettled=true;rejectInitial(e);settleDone(e);}else if(!doneSettled){closeRequested?settleDone():settleDone(new ControlClientError("connection_closed",hadError?"Event stream closed after a transport error":"Host closed the event stream unexpectedly"));}});
     return initial;
@@ -212,8 +212,9 @@ export class DockClient {
   private openSocket():Socket{const socket=createConnection(this.socketPath);this.activeSockets.add(socket);socket.once("close",()=>this.activeSockets.delete(socket));return socket;}
   private timeoutFor(type:ControlRequest["type"]):number{return LONG_MUTATION_TYPES.has(type)?this.longMutationTimeoutMs:this.timeoutMs;}
   private hello(requestId:string,capabilities:string[]):ClientHello{return {kind:"hello",requestId,versions:[2],client:{name:"alu-dock-client",version:DOCK_VERSION,clientId:this.clientId},requiredCapabilities:capabilities};}
-  private request<TType extends ControlRequest["type"],T>(type:TType,params:Params<TType>,capability:Capability,parse:Parser<T>,onHello?:(ack:HelloAck)=>void,requestTimeoutMs=this.timeoutFor(type)):Promise<T>{
+  private request<TType extends ControlRequest["type"],T>(type:TType,params:Params<TType>,capability:Capability|readonly Capability[],parse:Parser<T>,onHello?:(ack:HelloAck)=>void,requestTimeoutMs=this.timeoutFor(type)):Promise<T>{
     const helloId=this.createRequestId();
+    const requestCapabilities=[...new Set((Array.isArray(capability)?capability:[capability]).flatMap((item)=>requiredCapabilities(item)))];
     const requestId=this.createRequestId();
     const request={kind:"request",version:2,requestId,type,params} as Extract<ControlRequest,{type:TType}>;
     const operationId = "operationId" in params && typeof params.operationId === "string" ? params.operationId : undefined;
@@ -249,7 +250,7 @@ export class DockClient {
           if(phase==="hello"){
             const ack=parseHelloReply(raw,helloId);
             hostEpoch=ack.host.hostEpoch;
-            for(const required of requiredCapabilities(capability)){
+            for(const required of requestCapabilities){
               if(!ack.capabilities.includes(required))throw new ProtocolValidationError("protocol_incompatible",`Host lacks ${required}`);
             }
             onHello?.(ack);
@@ -270,7 +271,7 @@ export class DockClient {
           else finish(error);
         }
       };
-      socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,requiredCapabilities(capability)))));
+      socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,requestCapabilities))));
       socket.on("data",(chunk:Buffer)=>{try{for(const line of decoder.push(chunk))consume(line);}catch(error){finish(error);}});
       socket.once("end",()=>{try{decoder.finish();}catch(error){
         if(error instanceof JsonLineError&&error.code==="incomplete_record")finishTransport(normalizeClientError(error));

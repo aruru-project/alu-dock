@@ -9,6 +9,7 @@ import {
   InvalidDeliveryModeError,
   ManagedInstance,
   MAX_PENDING_QUEUE_ITEMS,
+  projectJsonObject,
   QueueCapacityError,
   RuntimeEffectUnknownError,
 } from "../src/core/managed-instance.js";
@@ -710,6 +711,38 @@ test("parent settlement buffered by extension admission retains the parent catal
   await instance.waitForIdle();
 });
 
+test("admission overflow retains the newest runtime tail and reports bounded degradation", async () => {
+  const session = new FakeRuntimeSession();
+  session.extensionCommands.add("overflow-command");
+  const instance = createInstance(session, 2_000);
+  const admissionEntered = new Deferred<void>();
+  const releaseAdmissionCommit = new Deferred<void>();
+  instance.bindCatalogPort({
+    assertWritable: () => {},
+    commit: async (_record, context) => {
+      if (context.kind === "command.admission" && context.operationId === "overflow-op") {
+        admissionEntered.resolve();
+        await releaseAdmissionCommit.promise;
+      }
+    },
+  });
+  instance.markCatalogCommitted();
+
+  const submitting = instance.submit("/overflow-command", "auto", "overflow-op");
+  await admissionEntered.promise;
+  for (let index = 0; index < 1_000; index += 1) {
+    session.emit({ type: "queue_update", steering: [], followUp: [] });
+  }
+  session.emit({ type: "queue_update", steering: ["newest"], followUp: [] });
+  releaseAdmissionCommit.resolve();
+  await submitting;
+  await flushBackground();
+
+  assert.equal(instance.snapshot().pending.steering, 1);
+  assert.ok(instance.eventsSince().events.some((event) => event.type === "extension.error"
+    && /newest bounded tail/u.test(event.data.error)));
+});
+
 test("an async extension command cannot revive or clear a parent that settles during its handler", async () => {
   const session = new FakeRuntimeSession();
   session.extensionCommands.add("slow-command");
@@ -1134,6 +1167,35 @@ test("observer exceptions and mutations cannot escape into the runtime listener 
   assert.equal(dataRecord(instance.eventsSince().events.at(-1)?.data).steering, 1);
 });
 
+test("high-cardinality configuration projections report explicit completeness metadata", async () => {
+  class LargeCatalogRuntime extends FakeRuntimeSession {
+    override async listTools(): Promise<ToolDto[]> {
+      return Array.from({ length: 2_001 }, (_, index) => ({
+        name: `tool-${String(index).padStart(4, "0")}`,
+        description: "fixture",
+        active: false,
+        source: { kind: "built-in" as const },
+      }));
+    }
+    override async getCommands(): Promise<CommandDto[]> {
+      return Array.from({ length: 2_001 }, (_, index) => ({
+        name: `command-${String(index).padStart(4, "0")}`,
+        source: { kind: "extension" as const },
+        argumentCompletions: false,
+      }));
+    }
+  }
+  const instance = createInstance(new LargeCatalogRuntime());
+  const tools = await instance.listTools();
+  const commands = await instance.getCommands();
+  assert.deepEqual({ shown: tools.tools.length, total: tools.total, truncated: tools.truncated }, {
+    shown: 2_000, total: 2_001, truncated: true,
+  });
+  assert.deepEqual({ shown: commands.commands.length, total: commands.total, truncated: commands.truncated }, {
+    shown: 2_000, total: 2_001, truncated: true,
+  });
+});
+
 test("runtime event data is sanitized into JSON-serializable values", () => {
   const session = new FakeRuntimeSession();
   const instance = createInstance(session);
@@ -1163,6 +1225,75 @@ test("runtime event data is sanitized into JSON-serializable values", () => {
   assert.deepEqual(eventData.omittedFields, ["/count", "/callback", "/marker", "/bytes", "/imageData", "/payload"]);
   assert.doesNotMatch(JSON.stringify(page), /data:image|secret/);
   assert.ok(!JSON.stringify(page).includes(rawBase64));
+});
+
+test("structured runtime projection does not traverse getters beyond its accepted key prefix", () => {
+  let getterReads = 0;
+  const source: Record<string, unknown> = {};
+  for (let index = 0; index < 5_000; index += 1) {
+    Object.defineProperty(source, `field-${String(index).padStart(4, "0")}`, {
+      enumerable: true,
+      get: () => { getterReads += 1; return index; },
+    });
+  }
+  Object.defineProperty(source, "throwing", { enumerable: true, get: () => { throw new Error("getter failed"); } });
+  const projected = projectJsonObject(source);
+  assert.equal(Object.keys(projected.value).length, 100);
+  assert.equal(getterReads, 100);
+  assert.ok(projected.omittedFields.length > 0);
+
+  const unicode = projectJsonObject({ text: `${"x".repeat(7_999)}😀` }).value.text;
+  assert.equal(typeof unicode, "string");
+  assert.ok((unicode as string).endsWith("x…"));
+  assert.doesNotMatch(JSON.stringify(unicode), /\\ud83d/u);
+});
+
+test("large structured runtime payloads remain below one control record with explicit omissions", () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  const oversizedArgs = Object.fromEntries(Array.from(
+    { length: 100 },
+    (_, index) => [`field-${index}`, "\\".repeat(8_000)],
+  ));
+  session.emit({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: Array.from({ length: 200 }, (_, index) => ({
+        type: "toolCall", id: `large-${index}`, name: "fixture", arguments: oversizedArgs,
+      })),
+      stopReason: "toolUse",
+    },
+  });
+  const completed = instance.eventsSince().events.find((event) => event.type === "message.completed");
+  assert.ok(completed?.type === "message.completed");
+  assert.ok(Buffer.byteLength(JSON.stringify(completed), "utf8") < 1024 * 1024);
+  assert.deepEqual(completed.data.content.at(-1), {
+    type: "text",
+    text: "[Additional message content omitted to fit the bounded control event]",
+  });
+  const first = completed.data.content[0];
+  assert.ok(first?.type === "tool_call" && (first.omittedFields?.length ?? 0) > 0);
+});
+
+test("oversized tool output carries an explicit Host truncation notice without splitting Unicode", () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  const notice = "\n[tool output truncated by Host projection]";
+  const prefix = `${"x".repeat(8_000 - notice.length - 1)}😀`;
+  session.emit({
+    type: "tool_execution_end",
+    toolCallId: "large-tool",
+    toolName: "bash",
+    result: { content: [{ type: "text", text: `${prefix}${"z".repeat(200)}` }] },
+    isError: false,
+  });
+  const completed = instance.eventsSince().events.find((event) => event.type === "tool.completed");
+  assert.ok(completed?.type === "tool.completed");
+  assert.ok(completed.data.text.length <= 8_000);
+  assert.match(completed.data.text, /\[tool output truncated by Host projection\]$/u);
+  assert.ok(completed.data.text.endsWith(`x${notice}`), "a boundary surrogate pair is omitted as a whole");
+  assert.doesNotMatch(completed.data.text, /\uFFFD/u);
 });
 
 test("assistant and tool-call streaming use stable distinct IDs with argument updates", () => {

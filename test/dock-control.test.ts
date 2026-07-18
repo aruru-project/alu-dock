@@ -117,7 +117,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.v1", "host.info", "instance.catalog", "models.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tools.v1", "tui.projection.v1"]);
+  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.v1", "host.info", "instance.catalog", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -575,7 +575,7 @@ test("bare SSH TTY opens and leaves the Hub with zero runtime or catalog side ef
   const host = new DockHost({
     socketPath,
     registry,
-    sessionInventory: { list: async () => { inventoryCalls += 1; return []; } },
+    sessionInventory: { list: async () => { inventoryCalls += 1; return { sessions: [], incomplete: false, diagnostics: [] }; } },
   });
   context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
   await host.start();
@@ -651,7 +651,11 @@ test("Hub New and persisted-session Adopt explicitly enter Session Work", async 
   const host = new DockHost({
     socketPath,
     registry,
-    sessionInventory: { list: async () => [{ sessionId: "hub-session", sessionFile, name: "Hub session", cwd: directory }] },
+    sessionInventory: { list: async () => ({
+      sessions: [{ sessionId: "hub-session", sessionFile, name: "Hub session", cwd: directory }],
+      incomplete: true,
+      diagnostics: [{ message: "One saved session could not be inspected", path: "/sessions/broken.jsonl" }],
+    }) },
   });
   context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
   await host.start();
@@ -663,7 +667,7 @@ test("Hub New and persisted-session Adopt explicitly enter Session Work", async 
   const adoptOutput = Buffer.from(adoptPty.output, "base64").toString("utf8");
   assert.equal(adoptPty.timedOut, false, adoptOutput.slice(-2_000));
   assert.equal(adoptPty.status, 0, adoptOutput.slice(-2_000));
-  assert.match(adoptOutput, /Choose a saved session/u);
+  assert.match(adoptOutput, /Pi session inventory incomplete: One saved session could not be inspected/u);
   assert.match(adoptOutput, /Adopting persisted Pi session/u);
   assert.match(adoptOutput, /cache /u);
   assert.doesNotMatch(adoptOutput, /NIGHT CONSOLE/u);
@@ -1912,6 +1916,33 @@ test("same-host operation receipts deduplicate every implemented mutation and re
   assert.equal(session.abortCalls, 1);
 });
 
+test("expired Host receipts reject through DockClient without replaying their side effects", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-expired-receipt-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  let factoryCalls = 0;
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
+    factoryCalls += 1;
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedRuntimeSession(`pi-${id}`) });
+  }, () => `expired-${factoryCalls + 1}`);
+  const host = new DockHost({ socketPath, registry, operationReceiptCapacity: 1 });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+  const created = await client.create(directory, undefined, "old-create-op");
+  await client.nameSession(created.id, "renamed", "newer-name-op");
+
+  await assert.rejects(
+    client.create(directory, undefined, "old-create-op"),
+    (error: unknown) => error instanceof ControlClientError
+      && error.code === "operation_receipt_expired"
+      && error.operationId === "old-create-op"
+      && error.details?.operationId === "old-create-op"
+      && /do not retry/u.test(String(error.details?.queryHint)),
+  );
+  assert.equal(factoryCalls, 1);
+});
+
 test("models settings failures are typed, evented, and leave the in-memory state honest", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-settings-failure-"));
   await chmod(directory, 0o700);
@@ -2003,6 +2034,7 @@ test("Hub session inventory is runtime-free and adoption publishes one managed i
   const sessionFile = "/sessions/orphan.jsonl";
   let factoryCalls = 0;
   let inventoryCalls = 0;
+  let inventoryIncomplete = false;
   let inventorySessions: SessionDto[] = [{ sessionId: "orphan", sessionFile, name: "Orphan", cwd: directory, updatedAt: "2026-07-14T01:02:03.000Z" }];
   const trust = new ProjectTrustCoordinator({
     requiresTrust: () => true,
@@ -2030,7 +2062,11 @@ test("Hub session inventory is runtime-free and adoption publishes one managed i
         inventoryCalls += 1;
         assert.equal(cwd, directory);
         assert.equal(scope, "all");
-        return inventorySessions;
+        return {
+          sessions: inventorySessions,
+          incomplete: inventoryIncomplete,
+          diagnostics: inventoryIncomplete ? [{ message: "One saved session could not be read", path: "/sessions/broken.jsonl" }] : [],
+        };
       },
     },
   });
@@ -2072,6 +2108,7 @@ test("Hub session inventory is runtime-free and adoption publishes one managed i
   );
   assert.equal(factoryCalls, 1, "one persisted session file cannot back two live Dock runtimes");
 
+  inventoryIncomplete = true;
   inventorySessions = Array.from({ length: 100 }, (_, index) => ({
     sessionId: `bounded-${index}`,
     sessionFile: `/sessions/${index}-${"x".repeat(16_000)}.jsonl`,
@@ -2081,6 +2118,8 @@ test("Hub session inventory is runtime-free and adoption publishes one managed i
   assert.equal(bounded.total, 100);
   assert.equal(bounded.truncated, true);
   assert.ok(bounded.sessions.length > 0 && bounded.sessions.length < bounded.total);
+  assert.equal(bounded.incomplete, true);
+  assert.deepEqual(bounded.diagnostics, [{ message: "One saved session could not be read", path: "/sessions/broken.jsonl" }]);
   assert.deepEqual(bounded.query, { cwd: directory, scope: "all" });
 });
 
@@ -2641,15 +2680,100 @@ test("large history and attach projections stay complete JSONL frames and retain
   assert.equal(history.entries.at(-1)?.entryId, "large-history-4");
   assert.equal(history.hasEarlier, true);
   assert.equal(history.nextBeforeEntryId, history.entries[0]?.entryId);
-  assert.match(JSON.stringify(history.entries[0]?.content), /History content truncated/u);
+  assert.match(JSON.stringify(history.entries[0]?.content), /(?:History content truncated|Additional message content omitted)/u);
 
   const subscription = await client.streamEvents(created.id, { onEvent: () => {}, requireTuiProjection: true });
   assert.ok(subscription.initial.recentHistory.length > 0);
   assert.equal(subscription.initial.recentHistory.at(-1)?.entryId, "large-history-4");
   assert.equal(subscription.initial.historyTruncated, true);
-  assert.match(JSON.stringify(subscription.initial.recentHistory[0]?.content), /History content truncated/u);
+  assert.match(JSON.stringify(subscription.initial.recentHistory[0]?.content), /(?:History content truncated|Additional message content omitted)/u);
   subscription.close();
   await subscription.done;
+});
+
+test("attach initialization overflow is an explicit recoverable projection failure", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "attach-overflow");
+  const runtime = harness.sessions.get(created.id)!;
+  runtime.settle("ready");
+  const instance = harness.registry.get(created.id);
+  await instance.waitForIdle();
+
+  const originalProjection = instance.getAttachProjection.bind(instance);
+  let releaseProjection!: () => void;
+  let projectionEntered!: () => void;
+  const blocked = new Promise<void>((resolve) => { releaseProjection = resolve; });
+  const entered = new Promise<void>((resolve) => { projectionEntered = resolve; });
+  instance.getAttachProjection = async (...args) => {
+    projectionEntered();
+    await blocked;
+    return originalProjection(...args);
+  };
+
+  const attaching = client.streamEvents(created.id, { onEvent: () => {}, requireTuiProjection: true });
+  await entered;
+  for (let index = 0; index < 1_001; index += 1) runtime.emit({ type: "dock_extension_error", error: `burst-${index}` });
+  await instance.waitForIdle();
+  releaseProjection();
+  await assert.rejects(
+    attaching,
+    (error: unknown) => error instanceof ControlClientError
+      && error.code === "attach_initial_overflow"
+      && /reconnect/u.test(error.message),
+  );
+});
+
+test("oversized runtime payloads are projected into one safe live event without poisoning reconnect", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "bounded-live-event");
+  const runtime = harness.sessions.get(created.id)!;
+  const seen: DockEvent[] = [];
+  let resolveFollowUp!: () => void;
+  const followUp = new Promise<void>((resolve) => { resolveFollowUp = resolve; });
+  const subscription = await client.streamEvents(created.id, {
+    requireTuiProjection: true,
+    onEvent: (event) => {
+      seen.push(event);
+      if (event.type === "extension.error" && event.data.error === "stream still alive") resolveFollowUp();
+    },
+  });
+  const reconnectCursor = subscription.initial.page.latest;
+  const args = Object.fromEntries(Array.from({ length: 100 }, (_, index) => [`field-${index}`, "\\".repeat(8_000)]));
+  runtime.emit({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: Array.from({ length: 200 }, (_, index) => ({ type: "toolCall", id: `call-${index}`, name: "fixture", arguments: args })),
+      stopReason: "toolUse",
+    },
+  });
+  runtime.emit({ type: "dock_extension_error", error: "stream still alive" });
+  await followUp;
+  const completed = seen.find((event) => event.type === "message.completed");
+  assert.ok(completed);
+  assert.ok(Buffer.byteLength(JSON.stringify(completed), "utf8") < 1024 * 1024);
+  assert.match(JSON.stringify(completed), /Additional message content omitted/u);
+  subscription.close();
+  await subscription.done;
+
+  const reconnected = await client.streamEvents(created.id, {
+    since: reconnectCursor,
+    requireTuiProjection: true,
+    onEvent: () => {},
+  });
+  const replayedCompleted = reconnected.initial.page.events.find((event) => event.type === "message.completed");
+  assert.ok(replayedCompleted);
+  assert.ok(Buffer.byteLength(JSON.stringify(replayedCompleted), "utf8") < 1024 * 1024);
+  assert.match(JSON.stringify(replayedCompleted), /Additional message content omitted/u);
+  assert.ok(reconnected.initial.page.events.some((event) => event.type === "extension.error" && event.data.error === "stream still alive"));
+  reconnected.close();
+  await reconnected.done;
 });
 
 test("slow attach readers receive only LF-complete frames across live-event backpressure", async (context) => {
@@ -2967,6 +3091,18 @@ test("tools, settings, resources, and commands integrate with capability gates a
   const duplicate = await client.setActiveTools(instance.id, ["write"], "tools-op");
   assert.deepEqual(first, duplicate);
   assert.equal(runtime?.toolMutationCalls, 1);
+
+  const legacy = await exchangeRequestAfterHello(
+    socketPath,
+    ["core.v2", "tools.v1"],
+    { kind: "request", version: 2, requestId: "legacy-tools-request", type: "tool.set_active", params: { operationId: "mixed-tools-op", instanceId: instance.id, names: ["read"] } },
+  );
+  const legacyResult = objectValue(legacy.result);
+  assert.equal("total" in legacyResult, false);
+  const upgradedDuplicate = await client.setActiveTools(instance.id, ["read"], "mixed-tools-op");
+  assert.equal(upgradedDuplicate.total, upgradedDuplicate.tools.length);
+  assert.equal(upgradedDuplicate.truncated, false);
+  assert.equal(runtime?.toolMutationCalls, 2, "negotiated response shape must not enter the operation receipt");
 
   const settings = await client.settings(instance.id);
   assert.equal(settings.settings.length, SETTING_KEYS.length);
@@ -3625,6 +3761,43 @@ async function exchangePipelined(socketPath: string, frames: unknown[]): Promise
       } catch (error) { socket.destroy(); rejectFrame(error); }
     });
     socket.once("close", () => result ? resolveFrame(result) : rejectFrame(new Error("connection closed without a frame")));
+    socket.once("error", rejectFrame);
+  });
+}
+
+async function exchangeRequestAfterHello(
+  socketPath: string,
+  capabilities: string[],
+  request: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  return new Promise((resolveFrame, rejectFrame) => {
+    const socket = createConnection(socketPath);
+    const decoder = new JsonLineDecoder();
+    let helloComplete = false;
+    socket.once("connect", () => socket.write(encodeJsonLine({
+      kind: "hello",
+      requestId: "legacy-hello",
+      versions: [2],
+      client: { name: "legacy-test", version: "0.1.0", clientId: "legacy-client" },
+      requiredCapabilities: capabilities,
+    })));
+    socket.on("data", (chunk: Buffer) => {
+      try {
+        for (const line of decoder.push(chunk)) {
+          const frame = objectValue(JSON.parse(line) as unknown);
+          if (!helloComplete) {
+            helloComplete = true;
+            socket.write(encodeJsonLine(request));
+          } else {
+            socket.destroy();
+            resolveFrame(frame);
+          }
+        }
+      } catch (error) {
+        socket.destroy();
+        rejectFrame(error);
+      }
+    });
     socket.once("error", rejectFrame);
   });
 }

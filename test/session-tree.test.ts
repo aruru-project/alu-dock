@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { projectRuntimeNavigateResult, projectRuntimeTree } from "../src/core/session-tree.js";
+import {
+  MAX_PROJECTED_SESSION_TREE_NODES,
+  projectRuntimeNavigateResult,
+  projectRuntimeTree,
+} from "../src/core/session-tree.js";
 import {
   collectSessionTree,
   filterSessionTree,
@@ -35,6 +39,23 @@ test("tree projection revisions include generation, leaf, labels, and structure 
   assert.throws(() => projectRuntimeTree({ nodes: [{ ...runtime.nodes[0]!, depth: 1 }], leafId: "u1" }, 1), /depth zero/);
   assert.throws(() => projectRuntimeTree({ nodes: [{ ...runtime.nodes[0]!, hasChildren: false }, runtime.nodes[1] as typeof runtime.nodes[number]], leafId: "tool" }, 1), /child projection/);
   assert.throws(() => projectRuntimeTree({ nodes: [runtime.nodes[0] as typeof runtime.nodes[number], { ...runtime.nodes[2]!, parentId: "tool", depth: 2 }], leafId: "model" }, 1), /depth-first pre-order/);
+});
+
+test("tree projection accepts its documented 100000-node bound and rejects the next node", () => {
+  const atBound = Array.from({ length: MAX_PROJECTED_SESSION_TREE_NODES }, (_, index) => ({
+    entryId: `bounded-${index}`,
+    depth: 0,
+    kind: "message" as const,
+    role: "user" as const,
+    summary: `turn ${index}`,
+    hasChildren: false,
+  }));
+  const projected = projectRuntimeTree({ nodes: atBound, leafId: `bounded-${atBound.length - 1}` }, 1);
+  assert.equal(projected.nodes.length, MAX_PROJECTED_SESSION_TREE_NODES);
+  assert.throws(
+    () => projectRuntimeTree({ nodes: [...atBound, { ...atBound[0]!, entryId: "overflow" }] }, 1),
+    /exceeds 100000 entries/u,
+  );
 });
 
 test("navigation result projection is closed, abort-consistent, and binary-safe", () => {

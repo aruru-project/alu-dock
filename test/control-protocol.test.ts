@@ -515,6 +515,10 @@ test("canonical projection ordering handles names that are prefixes of hyphenate
   ];
   assert.deepEqual(parseCommandsResult({ commands }).commands.map((command) => command.name), ["chain", "chain-prompts", "run", "run-chain"]);
   assert.throws(() => parseCommandsResult({ commands: [commands[1], commands[0]] }), /deterministically sorted/);
+  assert.deepEqual(parseCommandsResult({ commands: commands.slice(0, 2), total: 4, truncated: true }), {
+    commands: commands.slice(0, 2), total: 4, truncated: true,
+  });
+  assert.throws(() => parseCommandsResult({ commands: commands.slice(0, 2), total: 4, truncated: false }), /metadata is inconsistent/u);
 
   const tools = [
     { name: "run", description: "Run", active: true, source },
@@ -530,7 +534,14 @@ test("canonical projection ordering handles names that are prefixes of hyphenate
     { severity: "warning", message: "run", source: "fixture" },
     { severity: "warning", message: "run-chain", source: "fixture" },
   ];
-  assert.deepEqual(parseResourcesResult({ resources, diagnostics }), { resources, diagnostics });
+  assert.deepEqual(parseResourcesResult({ resources, diagnostics }), {
+    resources,
+    diagnostics,
+    resourceTotal: 2,
+    resourcesTruncated: false,
+    diagnosticTotal: 2,
+    diagnosticsTruncated: false,
+  });
 });
 
 function settingDto(key: SettingKey, values: SettingValueMap): Record<string, unknown> {
@@ -666,8 +677,19 @@ test("model persistence and session list results are closed", () => {
   }), {
     sessions: [{ sessionId: "s1", sessionFile: "/tmp/s1.jsonl", name: undefined, cwd: "/tmp", updatedAt: undefined }],
     query: { cwd: "/tmp", scope: "all" }, total: 2, truncated: true,
+    incomplete: false, diagnostics: [], diagnosticsTruncated: false,
   });
+  assert.deepEqual(parseSessionInventoryResult({
+    sessions: [], query: { cwd: "/tmp", scope: "all" }, total: 0, truncated: false,
+    incomplete: true,
+    diagnostics: [{ message: "Could not read one session", path: "/tmp/broken.jsonl" }],
+    diagnosticsTruncated: false,
+  }).diagnostics, [{ message: "Could not read one session", path: "/tmp/broken.jsonl" }]);
   assert.throws(() => parseSessionInventoryResult({ sessions: [], query: { cwd: "/tmp", scope: "all" }, total: 2, truncated: false }), /truncation metadata/);
+  assert.throws(() => parseSessionInventoryResult({
+    sessions: [], query: { cwd: "/tmp", scope: "all" }, total: 0, truncated: false,
+    incomplete: false, diagnostics: [{ message: "hidden failure" }], diagnosticsTruncated: false,
+  }), /Complete session inventory/u);
 });
 
 test("response, snapshot, replay, and event parsers reject open or inconsistent DTOs", () => {
@@ -685,6 +707,16 @@ test("response, snapshot, replay, and event parsers reject open or inconsistent 
   assert.equal(trustResponse.ok, false);
   if (trustResponse.ok) assert.fail("Expected trust error response");
   assert.equal(trustResponse.error.details?.challengeId, "challenge-1");
+  const expiredReceipt = parseControlResponse({
+    kind: "response", version: 2, requestId: "r1", hostEpoch: "epoch-1", ok: false,
+    error: {
+      code: "operation_receipt_expired", message: "receipt expired", retryable: false,
+      details: { operationId: "operation-1", queryHint: "Query current state; do not retry this operation ID" },
+    },
+  }, "r1", "epoch-1");
+  assert.equal(expiredReceipt.ok, false);
+  if (expiredReceipt.ok) assert.fail("Expected expired receipt response");
+  assert.equal(expiredReceipt.error.details?.operationId, "operation-1");
   assert.throws(() => parseControlResponse({
     kind: "response", version: 2, requestId: "r1", hostEpoch: "epoch-1", ok: false,
     error: {

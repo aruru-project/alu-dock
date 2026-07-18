@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { OperationConflictError, OperationLedger } from "../src/control/operation-ledger.js";
+import { OperationConflictError, OperationLedger, OperationReceiptExpiredError } from "../src/control/operation-ledger.js";
 
 class Deferred<T> {
   readonly promise: Promise<T>;
@@ -53,6 +53,17 @@ test("settled receipt cap never evicts a live operation", async () => {
   const firstLive = ledger.run("live", "instance.create", { cwd: "/tmp" }, () => { liveEffects += 1; return live.promise; });
   await ledger.run("settled-1", "model.set", { modelId: "a" }, () => "a");
   await ledger.run("settled-2", "model.set", { modelId: "b" }, () => "b");
+  let retiredEffects = 0;
+  await assert.rejects(
+    ledger.run("settled-1", "model.set", { modelId: "a" }, () => { retiredEffects += 1; return "repeated"; }),
+    (error: unknown) => error instanceof OperationReceiptExpiredError
+      && error.code === "operation_receipt_expired",
+  );
+  await assert.rejects(
+    ledger.run("settled-1", "model.set", { modelId: "changed" }, () => "repeated"),
+    (error: unknown) => error instanceof OperationConflictError,
+  );
+  assert.equal(retiredEffects, 0);
 
   const duplicateLive = ledger.run("live", "instance.create", { cwd: "/tmp" }, () => { liveEffects += 1; return "wrong"; });
   assert.equal(duplicateLive, firstLive);

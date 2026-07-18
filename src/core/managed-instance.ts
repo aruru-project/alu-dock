@@ -43,6 +43,7 @@ import type {
   RuntimeReplacementResult,
   RuntimeSession,
   RuntimeSessionMetrics,
+  RuntimeToolProjection,
   RuntimeSessionTarget,
   RuntimeThinkingLevel,
 } from "./runtime-session.js";
@@ -108,6 +109,21 @@ export type {
 } from "./instance-dto.js";
 export { MAX_PENDING_QUEUE_ITEMS, MAX_PENDING_QUEUE_TEXT_CHARS } from "./instance-dto.js";
 import { projectRuntimeNavigateResult, projectRuntimeTree, type ProjectedSessionTree } from "./session-tree.js";
+
+export interface BoundedCollectionProjection<T> {
+  items: T[];
+  total: number;
+  truncated: boolean;
+}
+
+export interface ManagedResourceProjection {
+  resources: ResourceDto[];
+  diagnostics: DiagnosticDto[];
+  resourceTotal: number;
+  resourcesTruncated: boolean;
+  diagnosticTotal: number;
+  diagnosticsTruncated: boolean;
+}
 
 export interface ManagedInstanceOptions {
   id?: string;
@@ -592,6 +608,12 @@ export class ManagedInstance {
     return () => this.subscribers.delete(listener);
   }
 
+  reportControlDegradation(message: string): Promise<DockEvent> {
+    return this.enqueueTransition(async () => cloneDockEvent(this.appendEvent("extension.error", {
+      error: safeWireText(message, 2_048, "Control stream degraded"),
+    })));
+  }
+
   claimInteractionController(): Promise<ControllerClaim> {
     this.assertActive();
     return this.extensionUi.claimController();
@@ -614,28 +636,30 @@ export class ManagedInstance {
     this.applyModelState(this.session.getModelState());
   }
 
-  async listModels(): Promise<{ models: RuntimeModelInfo[]; state: RuntimeModelState }> {
+  async listModels(): Promise<{ models: RuntimeModelInfo[]; state: RuntimeModelState; total: number; truncated: boolean }> {
     return this.withProjectionRead(async () => {
-      const models = (await this.session.listModels()).slice(0, 2_000).map((model) => ({
+      const source = (await this.session.listModels()).map((model) => ({
         ...model,
         provider: truncate(model.provider, 256) ?? "unknown",
         id: truncate(model.id, 512) ?? "unknown",
         name: truncate(model.name, 256) ?? "unknown",
       }));
-      return { models, state: this.session.getModelState() };
+      const projected = boundedCollectionProjection(source);
+      return { models: projected.items, state: this.session.getModelState(), total: projected.total, truncated: projected.truncated };
     });
   }
 
-  async listSessions(scope: "cwd" | "all"): Promise<SessionDto[]> {
+  async listSessions(scope: "cwd" | "all"): Promise<{ sessions: SessionDto[]; total: number; truncated: boolean }> {
     return this.withProjectionRead(async () => {
-      const sessions = await this.session.listSessions(scope);
-      return sessions.slice(0, 2_000).map((session) => ({
+      const source = (await this.session.listSessions(scope)).map((session) => ({
         sessionId: truncate(session.sessionId, 128) ?? "unknown",
         sessionFile: truncate(session.sessionFile, 16_384) ?? "",
         ...(session.name === undefined ? {} : { name: truncate(session.name, 256) ?? "" }),
         cwd: truncate(session.cwd, 16_384) ?? "",
         ...(isIsoTimestamp(session.updatedAt) ? { updatedAt: session.updatedAt } : {}),
       }));
+      const projected = boundedCollectionProjection(source);
+      return { sessions: projected.items, total: projected.total, truncated: projected.truncated };
     });
   }
 
@@ -756,19 +780,19 @@ export class ManagedInstance {
     });
   }
 
-  async listTools(): Promise<ToolDto[]> {
-    return this.withProjectionRead(async () => cloneJson(await this.session.listTools()).slice(0, 2_000));
+  async listTools(): Promise<{ tools: ToolDto[]; total: number; truncated: boolean }> {
+    return this.withProjectionRead(async () => boundedRuntimeToolProjection(await this.session.listTools()));
   }
 
-  async setActiveTools(names: string[], operationId = this.createCommandId()): Promise<ToolDto[]> {
+  async setActiveTools(names: string[], operationId = this.createCommandId()): Promise<{ tools: ToolDto[]; total: number; truncated: boolean }> {
     await this.beginConfiguration("changing active tools", { admission: "live" });
     try {
-      const tools = cloneJson(await this.session.setActiveTools([...names])).slice(0, 2_000);
+      const projected = boundedRuntimeToolProjection(await this.session.setActiveTools([...names]));
       await this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "tool.set_active", effect: "post_effect", operationId, instanceId: this.id },
         () => this.touch(),
       ));
-      return tools;
+      return projected;
     } finally {
       this.endConfiguration();
     }
@@ -811,17 +835,30 @@ export class ManagedInstance {
     }
   }
 
-  async getResources(): Promise<{ resources: ResourceDto[]; diagnostics: DiagnosticDto[] }> {
+  async getResources(): Promise<ManagedResourceProjection> {
     return this.withProjectionRead(async () => {
       const result = cloneJson(await this.session.getResources());
-      return { resources: result.resources.slice(0, 2_000), diagnostics: result.diagnostics.slice(0, 2_000) };
+      const resources = boundedCollectionProjection(result.resources, 350_000);
+      const diagnostics = boundedCollectionProjection(result.diagnostics, 200_000);
+      const resourceTotal = result.resourceTotal ?? resources.total;
+      const diagnosticTotal = result.diagnosticTotal ?? diagnostics.total;
+      return {
+        resources: resources.items,
+        diagnostics: diagnostics.items,
+        resourceTotal,
+        resourcesTruncated: result.resourcesTruncated === true || resources.truncated || resources.items.length < resourceTotal,
+        diagnosticTotal,
+        diagnosticsTruncated: result.diagnosticsTruncated === true || diagnostics.truncated || diagnostics.items.length < diagnosticTotal,
+      };
     });
   }
 
-  async getCommands(prefix?: string): Promise<CommandDto[]> {
+  async getCommands(prefix?: string): Promise<{ commands: CommandDto[]; total: number; truncated: boolean }> {
     return this.withProjectionRead(async () => {
-      const commands = cloneJson(await this.session.getCommands());
-      return commands.filter((command) => prefix === undefined || command.name.startsWith(prefix)).slice(0, 2_000);
+      const commands = cloneJson(await this.session.getCommands())
+        .filter((command) => prefix === undefined || command.name.startsWith(prefix));
+      const projected = boundedCollectionProjection(commands);
+      return { commands: projected.items, total: projected.total, truncated: projected.truncated };
     });
   }
 
@@ -923,7 +960,12 @@ export class ManagedInstance {
     if (!result.cancelled) {
       const projected = await this.getResources();
       await this.enqueueTransition(async () => {
-        this.appendEvent("resources.reloaded", projected);
+        this.appendEvent("resources.reloaded", { resources: projected.resources, diagnostics: projected.diagnostics });
+        if (projected.resourcesTruncated || projected.diagnosticsTruncated) {
+          this.appendEvent("extension.error", {
+            error: `Resource projection is bounded: ${projected.resources.length}/${projected.resourceTotal} resources and ${projected.diagnostics.length}/${projected.diagnosticTotal} diagnostics`,
+          });
+        }
       });
     }
     return result;
@@ -2131,8 +2173,11 @@ export class ManagedInstance {
   private dispatchRuntimeEvent(event: RuntimeEvent): void {
     if (this.hostDrainActive) return;
     if (this.catalogAdmissionOperationId !== undefined) {
-      if (this.admissionBufferedEvents.length >= 1_000) this.admissionBufferOverflow = true;
-      else this.admissionBufferedEvents.push(event);
+      if (this.admissionBufferedEvents.length >= 1_000) {
+        this.admissionBufferedEvents.shift();
+        this.admissionBufferOverflow = true;
+      }
+      this.admissionBufferedEvents.push(event);
       return;
     }
     if (!this.catalogPort) {
@@ -2170,7 +2215,7 @@ export class ManagedInstance {
       return task;
     });
     if (overflow) {
-      tasks.push(this.enqueueCatalogRuntimeEvent({ type: "dock_extension_error", error: "Admission runtime event buffer exceeded 1000 events" }));
+      tasks.push(this.enqueueCatalogRuntimeEvent({ type: "dock_extension_error", error: "Admission runtime event buffer exceeded 1000 events; the newest bounded tail and authoritative history/metrics were retained" }));
       const refresh = this.enqueueTransition(async () => { this.refreshHistory(); this.refreshMetrics(); });
       this.trackHistoryRefresh(refresh);
       tasks.push(refresh);
@@ -3211,6 +3256,33 @@ function settingAdmission(key: SettingKey): "idle" | "live" {
   return RUN_SENSITIVE_SETTING_KEYS.has(key) ? "idle" : "live";
 }
 
+function boundedRuntimeToolProjection(source: ToolDto[] | RuntimeToolProjection): { tools: ToolDto[]; total: number; truncated: boolean } {
+  const runtime = Array.isArray(source)
+    ? { tools: source, total: source.length, truncated: false }
+    : source;
+  if (!Number.isSafeInteger(runtime.total) || runtime.total < runtime.tools.length || runtime.truncated !== (runtime.tools.length < runtime.total)) {
+    throw new Error("Runtime returned inconsistent tool completeness metadata");
+  }
+  const projected = boundedCollectionProjection(runtime.tools);
+  return {
+    tools: cloneJson(projected.items),
+    total: runtime.total,
+    truncated: runtime.truncated || projected.items.length < runtime.total,
+  };
+}
+
+function boundedCollectionProjection<T>(source: readonly T[], maxBytes = 600_000): BoundedCollectionProjection<T> {
+  const items: T[] = [];
+  let bytes = 2;
+  for (const item of source.slice(0, 2_000)) {
+    const itemBytes = Buffer.byteLength(JSON.stringify(item), "utf8") + (items.length > 0 ? 1 : 0);
+    if (bytes + itemBytes > maxBytes) break;
+    items.push(item);
+    bytes += itemBytes;
+  }
+  return { items, total: source.length, truncated: items.length < source.length };
+}
+
 function projectCompactionResult(result: RuntimeCompactionResult): SessionCompactionDto {
   if (typeof result.summary !== "string" || typeof result.firstKeptEntryId !== "string" || result.firstKeptEntryId.length === 0 || result.firstKeptEntryId.length > 128 || !Number.isSafeInteger(result.tokensBefore) || result.tokensBefore < 0) {
     throw new Error("Pi returned an invalid compaction result");
@@ -3269,50 +3341,72 @@ function projectContentBlocks(content: unknown): ContentBlockDto[] {
   }
   if (!Array.isArray(content)) return [];
   const blocks: ContentBlockDto[] = [];
+  const maxBytes = 512_000;
+  let bytes = 2;
+  const append = (candidate: ContentBlockDto, useOmissionReserve = false): boolean => {
+    const candidateBytes = Buffer.byteLength(JSON.stringify(candidate), "utf8") + (blocks.length > 0 ? 1 : 0);
+    const limit = useOmissionReserve ? maxBytes : maxBytes - 256;
+    if (bytes + candidateBytes > limit) return false;
+    blocks.push(candidate);
+    bytes += candidateBytes;
+    return true;
+  };
+  let bounded = true;
   for (const item of content.slice(0, 200)) {
     const block = recordValue(item);
     if (!block) continue;
+    let candidate: ContentBlockDto | undefined;
     if (block.type === "text" && typeof block.text === "string") {
-      if (isBinaryText(block.text)) {
-        blocks.push({ type: "omitted", kind: "binary", description: "Binary data omitted" });
-      } else {
-        blocks.push({ type: "text", text: truncate(block.text, 8_000) ?? "" });
-      }
+      candidate = isBinaryText(block.text)
+        ? { type: "omitted", kind: "binary", description: "Binary data omitted" }
+        : { type: "text", text: truncate(block.text, 8_000) ?? "" };
     } else if (block.type === "thinking" && typeof block.thinking === "string") {
-      if (isBinaryText(block.thinking)) {
-        blocks.push({ type: "omitted", kind: "binary", description: "Binary data omitted" });
-      } else {
-        blocks.push({ type: "thinking", text: truncate(block.thinking, 8_000) ?? "" });
-      }
+      candidate = isBinaryText(block.thinking)
+        ? { type: "omitted", kind: "binary", description: "Binary data omitted" }
+        : { type: "thinking", text: truncate(block.thinking, 8_000) ?? "" };
     } else if ((block.type === "toolCall" || block.type === "tool_call") && typeof block.name === "string") {
       const projected = projectJsonObject(block.arguments);
-      blocks.push({
+      candidate = {
         type: "tool_call",
         toolCallId: boundedRuntimeString(block.id, 128, "unknown"),
         toolName: boundedRuntimeString(block.name, 256, "unknown"),
         args: projected.value,
         ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
-      });
+      };
     } else if (block.type === "toolResult" || block.type === "tool_result") {
       const projected = projectJsonObject(block);
-      blocks.push({
+      candidate = {
         type: "tool_result",
         toolCallId: boundedRuntimeString(block.toolCallId ?? block.id, 128, "unknown"),
         toolName: boundedRuntimeString(block.toolName ?? block.name, 256, "unknown"),
         text: projectToolText(block.content),
         isError: block.isError === true,
         ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
-      });
+      };
     } else if (block.type === "image") {
-      blocks.push({ type: "omitted", kind: "image", description: "Image bytes omitted; local path remains in tool text when provided" });
+      candidate = { type: "omitted", kind: "image", description: "Image bytes omitted; local path remains in tool text when provided" };
     }
+    if (candidate && !append(candidate)) { bounded = false; break; }
+  }
+  if (!bounded || content.length > 200) {
+    append({ type: "text", text: "[Additional message content omitted to fit the bounded control event]" }, true);
   }
   return blocks;
 }
 
 function truncate(value: string | undefined, limit: number): string | undefined {
   if (value === undefined || value.length <= limit) return value;
-  return limit < 1 ? "" : `${value.slice(0, limit - 1)}…`;
+  if (limit < 1) return "";
+  const end = unicodeSafeSliceEnd(value, limit - 1);
+  return `${value.slice(0, end)}…`;
+}
+
+function unicodeSafeSliceEnd(value: string, requestedEnd: number): number {
+  return requestedEnd > 0
+    && /[\uD800-\uDBFF]/u.test(value[requestedEnd - 1] ?? "")
+    && /[\uDC00-\uDFFF]/u.test(value[requestedEnd] ?? "")
+    ? requestedEnd - 1
+    : requestedEnd;
 }
 
 function safeWireText(value: string, limit: number, omission: string): string {
@@ -3346,6 +3440,9 @@ const MAX_JSON_DEPTH = 8;
 const MAX_JSON_KEYS = 100;
 const MAX_JSON_ARRAY = 200;
 const MAX_JSON_STRING = 8_000;
+const MAX_JSON_PROJECTED_NODES = 2_000;
+const MAX_JSON_PROJECTED_BYTES = 256_000;
+const MAX_JSON_OMITTED_FIELDS = 200;
 const SENSITIVE_KEY = /base64|binary|imageData/i;
 const DATA_URI = /data:[^,]*;base64,/i;
 const BASE64_PAYLOAD = /^(?=.{128,}$)(?=.*(?:[0-9+/]|={1,2}$))(?:[A-Za-z0-9+/]{4})+(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
@@ -3357,28 +3454,55 @@ function isBinaryText(value: string): boolean {
 
 export function projectJsonObject(input: unknown): { value: JsonObject; omittedFields: string[] } {
   const omittedFields: string[] = [];
+  const omittedSet = new Set<string>();
   const seen = new WeakSet<object>();
-  const project = (value: unknown, path: string, depth: number): JsonValue | undefined => {
-    if (typeof value === "string") {
-      if (isBinaryText(value)) { omittedFields.push(path || "/"); return undefined; }
-      return truncate(value, MAX_JSON_STRING) ?? "";
+  let projectedNodes = 0;
+  let projectedBytes = 0;
+  let budgetExhausted = false;
+  const omit = (path: string): void => {
+    const safePath = (path || "/").slice(0, 512);
+    if (omittedSet.has(safePath) || omittedFields.length >= MAX_JSON_OMITTED_FIELDS) return;
+    omittedSet.add(safePath);
+    omittedFields.push(safePath);
+  };
+  const reserve = (bytes: number, path: string): boolean => {
+    if (budgetExhausted || projectedBytes + bytes > MAX_JSON_PROJECTED_BYTES) {
+      budgetExhausted = true;
+      omit(path);
+      return false;
     }
-    if (value === null || typeof value === "boolean") return value;
-    if (typeof value === "number") {
-      if (Number.isFinite(value)) return value;
-      omittedFields.push(path || "/");
+    projectedBytes += bytes;
+    return true;
+  };
+  const project = (value: unknown, path: string, depth: number): JsonValue | undefined => {
+    if (budgetExhausted || projectedNodes >= MAX_JSON_PROJECTED_NODES) {
+      budgetExhausted = true;
+      omit(path);
       return undefined;
     }
+    projectedNodes += 1;
+    if (typeof value === "string") {
+      if (isBinaryText(value)) { omit(path); return undefined; }
+      const projected = truncate(value, MAX_JSON_STRING) ?? "";
+      return reserve(Buffer.byteLength(JSON.stringify(projected), "utf8"), path) ? projected : undefined;
+    }
+    if (value === null || typeof value === "boolean") {
+      return reserve(value === null ? 4 : value ? 4 : 5, path) ? value : undefined;
+    }
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) { omit(path); return undefined; }
+      return reserve(Buffer.byteLength(JSON.stringify(value), "utf8"), path) ? value : undefined;
+    }
     if (typeof value !== "object" || value === null || typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
-      omittedFields.push(path || "/");
+      omit(path);
       return undefined;
     }
     if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
-      omittedFields.push(path || "/");
+      omit(path);
       return undefined;
     }
-    if (depth >= MAX_JSON_DEPTH || seen.has(value)) {
-      omittedFields.push(path || "/");
+    if (depth >= MAX_JSON_DEPTH || seen.has(value) || !reserve(2, path)) {
+      omit(path);
       return undefined;
     }
     seen.add(value);
@@ -3386,25 +3510,36 @@ export function projectJsonObject(input: unknown): { value: JsonObject; omittedF
       const result: JsonValue[] = [];
       for (let index = 0; index < value.length; index += 1) {
         const itemPath = `${path}/${index}`;
-        if (index >= MAX_JSON_ARRAY) { omittedFields.push(itemPath); continue; }
-        const item = project(value[index], itemPath, depth + 1);
+        if (index >= MAX_JSON_ARRAY || budgetExhausted || projectedNodes >= MAX_JSON_PROJECTED_NODES) { omit(itemPath); break; }
+        if (result.length > 0 && !reserve(1, itemPath)) break;
+        let sourceItem: unknown;
+        try { sourceItem = value[index]; }
+        catch { omit(itemPath); continue; }
+        const item = project(sourceItem, itemPath, depth + 1);
         if (item !== undefined) result.push(item);
       }
       return result;
     }
     const result: JsonObject = {};
-    const entries = Object.entries(value as Record<string, unknown>);
-    for (let index = 0; index < entries.length; index += 1) {
-      const [key, item] = entries[index] as [string, unknown];
-      const itemPath = `${path}/${escapeJsonPointer(key)}`;
-      if (index >= MAX_JSON_KEYS || SENSITIVE_KEY.test(key)) { omittedFields.push(itemPath); continue; }
-      const projected = project(item, itemPath, depth + 1);
+    let index = 0;
+    for (const key in value as Record<string, unknown>) {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
+      const itemPath = `${path}/${escapeJsonPointer(key.slice(0, 256))}`;
+      if (index >= MAX_JSON_KEYS || budgetExhausted || projectedNodes >= MAX_JSON_PROJECTED_NODES) { omit(itemPath); break; }
+      index += 1;
+      if (key.length < 1 || key.length > 256 || /[\u0000-\u001f\u007f-\u009f]/u.test(key) || SENSITIVE_KEY.test(key)) { omit(itemPath); continue; }
+      const separatorBytes = Object.keys(result).length > 0 ? 1 : 0;
+      if (!reserve(separatorBytes + Buffer.byteLength(JSON.stringify(key), "utf8") + 1, itemPath)) break;
+      let sourceItem: unknown;
+      try { sourceItem = (value as Record<string, unknown>)[key]; }
+      catch { omit(itemPath); continue; }
+      const projected = project(sourceItem, itemPath, depth + 1);
       if (projected !== undefined) result[key] = projected;
     }
     return result;
   };
   const value = project(input, "", 0);
-  return { value: isJsonObject(value) ? value : {}, omittedFields: [...new Set(omittedFields)] };
+  return { value: isJsonObject(value) ? value : {}, omittedFields };
 }
 
 function escapeJsonPointer(value: string): string { return value.replace(/~/g, "~0").replace(/\//g, "~1"); }
@@ -3413,5 +3548,9 @@ function isJsonObject(value: JsonValue | undefined): value is JsonObject { retur
 function projectToolText(content: unknown): string {
   const text = extractText(content);
   if (!text || isBinaryText(text)) return "";
-  return truncate(text, 8_000) ?? "";
+  const limit = 8_000;
+  if (text.length <= limit) return text;
+  const notice = "\n[tool output truncated by Host projection]";
+  const requestedEnd = Math.max(0, limit - notice.length);
+  return `${text.slice(0, unicodeSafeSliceEnd(text, requestedEnd))}${notice}`;
 }

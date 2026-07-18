@@ -17,6 +17,8 @@ export interface SearchablePickerOptions {
   footer?: string;
   body?: string;
   maxVisible?: number;
+  /** Complete child-row budget inside the Work modal frame. */
+  maxRows?: number | (() => number);
   initialValue?: string;
   pageNavigation?: boolean;
   requestRender: () => void;
@@ -29,6 +31,8 @@ export class SearchablePicker extends Container implements Focusable {
   private filteredItems: SearchableItem[];
   private selectedIndex = 0;
   private readonly maxVisible: number;
+  private readonly maxRows: (() => number) | undefined;
+  private lastPageSize: number;
   private readonly title: string;
   private readonly footer: string;
   private body: string | undefined;
@@ -49,6 +53,12 @@ export class SearchablePicker extends Container implements Focusable {
     }));
     this.filteredItems = [...this.allItems];
     this.maxVisible = Math.max(1, Math.floor(options.maxVisible ?? 12));
+    this.maxRows = options.maxRows === undefined
+      ? undefined
+      : typeof options.maxRows === "function"
+        ? () => normalizeRowBudget((options.maxRows as () => number)())
+        : () => normalizeRowBudget(options.maxRows as number);
+    this.lastPageSize = this.maxVisible;
     this.title = safeDisplayText(options.title);
     this.footer = safeDisplayText(options.footer ?? "type to filter · ↑↓ choose · Enter select · Esc cancel");
     this.body = options.body === undefined ? undefined : safeBodyText(options.body);
@@ -95,26 +105,41 @@ export class SearchablePicker extends Container implements Focusable {
 
   override render(width: number): string[] {
     const safeWidth = Math.max(1, width);
+    const maxRows = this.maxRows?.();
     const searchPrefix = "  Search: ";
     const inputWidth = Math.max(1, safeWidth - visibleWidth(searchPrefix) - 1);
     const inputLine = this.searchInput.render(inputWidth)[0] ?? "";
     const lines = [truncateToWidth(`  ${paint.bold(paint.accent(this.title))}`, safeWidth)];
-    if (this.body) {
-      lines.push(...wrapTextWithAnsi(`  ${this.body}`, safeWidth).map((line) => truncateToWidth(line, safeWidth)), "");
+    const bodyLines = this.body
+      ? wrapTextWithAnsi(`  ${this.body}`, safeWidth).map((line) => truncateToWidth(line, safeWidth))
+      : [];
+    const bodyLimit = maxRows === undefined
+      ? bodyLines.length
+      : Math.min(bodyLines.length, 2, Math.max(0, maxRows - 6));
+    if (bodyLimit > 0) {
+      const visibleBody = bodyLines.slice(0, bodyLimit);
+      if (bodyLines.length > bodyLimit) visibleBody[visibleBody.length - 1] = truncateToWidth(`${visibleBody.at(-1) ?? ""}…`, safeWidth);
+      lines.push(...visibleBody, "");
     }
     lines.push(truncateToWidth(`${paint.muted(searchPrefix)}${inputLine}`, safeWidth), "");
 
+    const fixedRows = lines.length + 2; // blank separator + footer below the item viewport
+    const contentRows = maxRows === undefined ? this.maxVisible + 1 : Math.max(1, maxRows - fixedRows);
     if (this.filteredItems.length === 0) {
+      this.lastPageSize = 1;
       lines.push(truncateToWidth(paint.muted(`  ${this.emptyText}`), safeWidth));
     } else {
+      const countNeeded = this.filteredItems.length > Math.min(this.maxVisible, contentRows);
+      const visibleLimit = Math.max(1, Math.min(this.maxVisible, contentRows - (countNeeded && contentRows > 1 ? 1 : 0)));
+      this.lastPageSize = visibleLimit;
       const start = Math.max(
         0,
         Math.min(
-          this.selectedIndex - Math.floor(this.maxVisible / 2),
-          this.filteredItems.length - this.maxVisible,
+          this.selectedIndex - Math.floor(visibleLimit / 2),
+          this.filteredItems.length - visibleLimit,
         ),
       );
-      const end = Math.min(this.filteredItems.length, start + this.maxVisible);
+      const end = Math.min(this.filteredItems.length, start + visibleLimit);
       for (let index = start; index < end; index += 1) {
         const item = this.filteredItems[index];
         if (!item) continue;
@@ -124,7 +149,7 @@ export class SearchablePicker extends Container implements Focusable {
         const text = `${prefix}${item.label}${detail}`;
         lines.push(truncateToWidth(selected ? paint.accent(text) : text, safeWidth));
       }
-      if (start > 0 || end < this.filteredItems.length) {
+      if ((start > 0 || end < this.filteredItems.length) && contentRows > visibleLimit) {
         lines.push(truncateToWidth(
           paint.muted(`  (${this.selectedIndex + 1}/${this.filteredItems.length})`),
           safeWidth,
@@ -133,7 +158,8 @@ export class SearchablePicker extends Container implements Focusable {
     }
 
     lines.push("", truncateToWidth(`  ${paint.muted(this.footer)}`, safeWidth));
-    return lines;
+    return maxRows === undefined ? lines : lines.slice(0, maxRows);
+
   }
 
   override invalidate(): void {
@@ -187,9 +213,13 @@ export class SearchablePicker extends Container implements Focusable {
     if (this.filteredItems.length === 0) return;
     this.selectedIndex = Math.max(
       0,
-      Math.min(this.filteredItems.length - 1, this.selectedIndex + direction * this.maxVisible),
+      Math.min(this.filteredItems.length - 1, this.selectedIndex + direction * this.lastPageSize),
     );
   }
+}
+
+function normalizeRowBudget(value: number): number {
+  return Math.max(6, Math.floor(Number.isFinite(value) ? value : 6));
 }
 
 function safeDisplayText(value: string): string {

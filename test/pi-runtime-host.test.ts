@@ -1102,7 +1102,9 @@ test("Pi runtime host projects tools without executable or binary payloads", asy
   });
   host.activateInitial();
 
-  const tools = await host.listTools();
+  const projection = await host.listTools();
+  const tools = projection.tools;
+  assert.deepEqual({ total: projection.total, truncated: projection.truncated }, { total: 2, truncated: false });
   assert.deepEqual(tools.map((tool) => tool.name), ["extension-tool", "read"]);
   const read = tools.find((tool) => tool.name === "read");
   assert.deepEqual(read?.source, { kind: "built-in" });
@@ -1114,7 +1116,7 @@ test("Pi runtime host projects tools without executable or binary payloads", asy
   await assert.rejects(host.setActiveTools(["missing"]), /Unknown tool/);
   await assert.rejects(host.setActiveTools(["read", "read"]), /Duplicate tool name/);
   assert.equal(initial.toolSetCalls, 0);
-  assert.deepEqual((await host.setActiveTools(["extension-tool"])).filter((tool) => tool.active).map((tool) => tool.name), ["extension-tool"]);
+  assert.deepEqual((await host.setActiveTools(["extension-tool"])).tools.filter((tool) => tool.active).map((tool) => tool.name), ["extension-tool"]);
   assert.equal(initial.toolSetCalls, 1);
   await host.dispose();
 });
@@ -1312,22 +1314,25 @@ test("projection caps select canonical membership before slicing", async () => {
   });
   host.activateInitial();
 
-  const firstTools = (await host.listTools()).map((tool) => tool.name);
+  const firstToolProjection = await host.listTools();
+  const firstTools = firstToolProjection.tools.map((tool) => tool.name);
   const firstResources = (await host.getResources()).resources.map((resource) => resource.name);
   const firstDiagnostics = (await host.getResources()).diagnostics.map((diagnostic) => diagnostic.message);
   const firstCommands = (await host.getCommands()).map((command) => command.name);
   ordered = [...names].reverse();
   initial.allTools = ordered.map((name) => ({ name, description: name, parameters: {}, sourceInfo }));
-  assert.deepEqual((await host.listTools()).map((tool) => tool.name), firstTools);
+  const reversedToolProjection = await host.listTools();
+  assert.deepEqual(reversedToolProjection.tools.map((tool) => tool.name), firstTools);
+  assert.deepEqual({ total: reversedToolProjection.total, truncated: reversedToolProjection.truncated }, { total: 2_001, truncated: true });
   assert.deepEqual((await host.getResources()).resources.map((resource) => resource.name), firstResources);
   assert.deepEqual((await host.getResources()).diagnostics.map((diagnostic) => diagnostic.message), firstDiagnostics);
   assert.deepEqual((await host.getCommands()).map((command) => command.name), firstCommands);
   assert.equal(firstTools.at(-1), "item-1999");
-  assert.equal(firstCommands.at(-1), "item-1999");
-  await assert.rejects(host.setActiveTools(["item-2000"]), /Unknown tool/);
-  assert.equal(initial.toolSetCalls, 0);
+  assert.equal(firstCommands.at(-1), "item-2000", "ManagedInstance, not the Pi adapter, owns command completeness bounds");
+  await host.setActiveTools(["item-2000"]);
+  assert.equal(initial.toolSetCalls, 1, "tool validation uses the complete Pi registry, not the projected prefix");
   await host.setActiveTools(["item-1999"]);
-  assert.equal(initial.toolSetCalls, 1);
+  assert.equal(initial.toolSetCalls, 2);
   await host.dispose();
 });
 

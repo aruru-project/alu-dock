@@ -45,7 +45,7 @@ import {
   InstanceNotReopenableError,
   InstanceUnavailableError,
 } from "./dock-registry.js";
-import { OperationConflictError, OperationLedger } from "./operation-ledger.js";
+import { OperationConflictError, OperationLedger, OperationReceiptExpiredError } from "./operation-ledger.js";
 import { ProjectTrustChallengeError, ProjectTrustRequiredError } from "./project-trust.js";
 import { encodeJsonLine, JsonLineDecoder, JsonLineError } from "./json-lines.js";
 import { executeSessionCommand, isSessionCommandRequest } from "./session-command-service.js";
@@ -73,9 +73,11 @@ import {
 
 const MAX_SOCKET_WRITE_BUFFER = MAX_CONTROL_LINE_BYTES;
 const MAX_SESSION_INVENTORY_RESULT_BYTES = 512 * 1_024;
+const MAX_SESSION_INVENTORY_DIAGNOSTIC_BYTES = 64 * 1_024;
 const MAX_SESSION_INVENTORY_ITEMS = 2_000;
 const MAX_INITIAL_EVENT_QUEUE = 1_000;
 const ATTACH_DRAIN_TIMEOUT_MS = 5_000;
+const ATTACH_INITIAL_OVERFLOW_MESSAGE = "Attach initialization exceeded the 1000-event handoff bound; reconnect to obtain an authoritative fresh projection";
 
 type HostState = "new" | "starting" | "running" | "mutation_faulted" | "draining" | "stopping" | "stopped";
 type WriteOutcome = "written" | "backpressured" | "failed" | "too_large";
@@ -98,6 +100,7 @@ export interface DockHostOptions {
   registry: DockRegistry;
   statePath?: string;
   faultDrainTimeoutMs?: number;
+  operationReceiptCapacity?: number;
   initialize?: () => Promise<void>;
   sessionInventory?: SessionInventory;
 }
@@ -117,7 +120,7 @@ export class DockHost {
   private readonly connections = new Set<Socket>();
   private readonly attachConnections = new Map<string, Set<Socket>>();
   private readonly inFlightDispatches = new Set<Promise<void>>();
-  private readonly operationLedger = new OperationLedger();
+  private readonly operationLedger: OperationLedger;
   private readonly faultDrainTimeoutMs: number;
   private readonly initialize: (() => Promise<void>) | undefined;
   private readonly sessionInventory: SessionInventory;
@@ -137,9 +140,10 @@ export class DockHost {
     this.registry = options.registry;
     this.hostEpoch = options.registry.hostEpoch;
     this.startedAt = options.registry.startedAt;
+    this.operationLedger = new OperationLedger(options.operationReceiptCapacity);
     this.faultDrainTimeoutMs = Math.max(1, options.faultDrainTimeoutMs ?? 5_000);
     this.initialize = options.initialize;
-    this.sessionInventory = options.sessionInventory ?? { list: async () => [] };
+    this.sessionInventory = options.sessionInventory ?? { list: async () => ({ sessions: [], incomplete: false, diagnostics: [] }) };
     this.faultStartedPromise = new Promise((resolveFaultStarted) => { this.resolveFaultStarted = resolveFaultStarted; });
     this.fatalPromise = new Promise((resolveFatal) => { this.resolveFatal = resolveFatal; });
   }
@@ -294,6 +298,7 @@ export class DockHost {
     this.connections.add(socket);
     const decoder = new JsonLineDecoder();
     let helloSeen = false;
+    let clientRequirements = new Set<string>();
     let requestSeen = false;
     let terminal = false;
     let eventUnsubscribe: (() => void) | undefined;
@@ -317,6 +322,7 @@ export class DockHost {
         try { hello = parseClientHello(raw); }
         catch (error) { const mapped = mapControlError(error); terminal = true; this.sendHelloError(socket, extractRequestId(line), "invalid_hello", mapped.message); return; }
         helloSeen = true;
+        clientRequirements = new Set(hello.requiredCapabilities);
         if (this.state !== "running" && this.state !== "mutation_faulted") {
           terminal = true;
           this.sendHelloError(socket, hello.requestId, this.state === "draining" || this.state === "stopping" || this.state === "stopped" ? "host_draining" : "host_starting", "Alu Dock host is not ready");
@@ -350,7 +356,7 @@ export class DockHost {
         terminal = true; this.sendErrorAndEnd(socket, "capability_missing", `Capability ${capabilityForRequest(request.type)} is unavailable`, request.requestId); return;
       }
       let task!: Promise<void>;
-      task = this.dispatch(request, socket, (unsubscribe) => { eventUnsubscribe = unsubscribe; })
+      task = this.dispatch(request, socket, (unsubscribe) => { eventUnsubscribe = unsubscribe; }, clientRequirements)
         .catch((error: unknown) => {
           const operationId = mutationOperationId(request);
           const normalized = operationId !== undefined
@@ -369,9 +375,24 @@ export class DockHost {
     socket.on("end", () => { try { decoder.finish(); } catch (error) { const mapped=mapControlError(error); this.sendErrorAndEnd(socket,mapped.code,mapped.message,"unknown"); } });
   }
 
-  private async dispatch(request: ControlRequest, socket: Socket, setEventUnsubscribe: (unsubscribe: () => void) => void): Promise<void> {
+  private async dispatch(
+    request: ControlRequest,
+    socket: Socket,
+    setEventUnsubscribe: (unsubscribe: () => void) => void,
+    clientRequirements: ReadonlySet<string>,
+  ): Promise<void> {
     if (isSessionCommandRequest(request)) {
-      this.sendSuccessAndEnd(socket, request.requestId, await executeSessionCommand(request, this.registry, this.operationLedger));
+      const result = await executeSessionCommand(request, this.registry, this.operationLedger);
+      if (request.type === "session.reload" && !clientRequirements.has("projection.completeness.v1")) {
+        const projected = result as { instance: unknown; resources: unknown; diagnostics: unknown };
+        this.sendSuccessAndEnd(socket, request.requestId, {
+          instance: projected.instance,
+          resources: projected.resources,
+          diagnostics: projected.diagnostics,
+        });
+      } else {
+        this.sendSuccessAndEnd(socket, request.requestId, result);
+      }
       return;
     }
     switch (request.type) {
@@ -464,7 +485,7 @@ export class DockHost {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const receipt=await instance.dequeue(request.params.operationId);return {receipt,instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
-      case "model.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listModels(); this.sendSuccessAndEnd(socket,request.requestId,{models:result.models,availableThinkingLevels:result.state.availableThinkingLevels,instance:instance.snapshot()}); return; }
+      case "model.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listModels(); this.sendSuccessAndEnd(socket,request.requestId,{models:result.models,availableThinkingLevels:result.state.availableThinkingLevels,instance:instance.snapshot(),...collectionCompleteness(result,clientRequirements)}); return; }
       case "model.set": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);await instance.selectModel(request.params.provider,request.params.modelId,request.params.operationId);return {instance:instance.snapshot(),settingsWrite:{persisted:true as const}};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
@@ -473,25 +494,29 @@ export class DockHost {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const state=await instance.setThinkingLevel(request.params.level,request.params.operationId);return {actualLevel:state.thinkingLevel,availableThinkingLevels:state.availableThinkingLevels,instance:instance.snapshot(),settingsWrite:{persisted:true as const}};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
-      case "tool.list": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{tools:await instance.listTools(),instance:instance.snapshot()}); return; }
+      case "tool.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listTools(); this.sendSuccessAndEnd(socket,request.requestId,{tools:result.tools,instance:instance.snapshot(),...collectionCompleteness(result,clientRequirements)}); return; }
       case "tool.set_active": {
-        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const tools=await instance.setActiveTools(request.params.names,request.params.operationId);return {tools,instance:instance.snapshot()};});
-        this.sendSuccessAndEnd(socket,request.requestId,result); return;
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const tools=await instance.setActiveTools(request.params.names,request.params.operationId);return {tools:tools.tools,instance:instance.snapshot(),total:tools.total,truncated:tools.truncated};});
+        this.sendSuccessAndEnd(socket,request.requestId,{tools:result.tools,instance:result.instance,...collectionCompleteness(result,clientRequirements)}); return;
       }
       case "settings.get": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{settings:await instance.getSettings()}); return; }
       case "settings.update": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const setting=await instance.updateSetting(request.params.update,request.params.operationId);return {setting,instance:instance.snapshot(),reloadRequired:setting.reloadRequired,hostRestartRequired:setting.hostRestartRequired};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
-      case "resource.get": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getResources()); return; }
-      case "command.catalog": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{commands:await instance.getCommands(request.params.prefix)}); return; }
+      case "resource.get": { const instance=this.registry.get(request.params.instanceId); const result=await instance.getResources(); this.sendSuccessAndEnd(socket,request.requestId,clientRequirements.has("projection.completeness.v1")?result:{resources:result.resources,diagnostics:result.diagnostics}); return; }
+      case "command.catalog": { const instance=this.registry.get(request.params.instanceId); const result=await instance.getCommands(request.params.prefix); this.sendSuccessAndEnd(socket,request.requestId,{commands:result.commands,...collectionCompleteness(result,clientRequirements)}); return; }
       case "session.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getHistoryPage(request.params.beforeEntryId,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,createBoundedHistoryResult(page,request.requestId,this.hostEpoch)); return; }
       case "session.inventory": {
-        const sessions = await this.sessionInventory.list(request.params.cwd, request.params.scope);
-        this.sendSuccessAndEnd(socket, request.requestId, boundedSessionInventory(sessions, request.params));
+        const inventory = await this.sessionInventory.list(request.params.cwd, request.params.scope);
+        this.sendSuccessAndEnd(socket, request.requestId, boundedSessionInventory(
+          inventory,
+          request.params,
+          clientRequirements.has("session.inventory-diagnostics.v1"),
+        ));
         return;
       }
-      case "session.list": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{sessions:await instance.listSessions(request.params.scope)}); return; }
+      case "session.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listSessions(request.params.scope); this.sendSuccessAndEnd(socket,request.requestId,{sessions:result.sessions,...collectionCompleteness(result,clientRequirements)}); return; }
       case "session.tree": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getTreePage(request.params.treeRevision,request.params.afterEntryId,request.params.limit)); return; }
     }
   }
@@ -502,7 +527,7 @@ export class DockHost {
     const cursor=request.params.since;
     if(cursor && cursor.instanceId!==instance.id) throw new ProtocolValidationError("invalid_cursor","Cursor belongs to another instance");
     const follow=request.params.follow;
-    let initializing=true,pending:DockEvent[]=[]; let lastGeneration=instance.runtimeGeneration,lastSent=0; let unsubscribe=()=>{};
+    let initializing=true,pending:DockEvent[]=[]; let initializationOverflow=false; let lastGeneration=instance.runtimeGeneration,lastSent=0; let unsubscribe=()=>{};
     let controller:ControllerClaim|{status:"observing"}=request.params.controller==="observe"?{status:"observing"}:{status:"unavailable"};
     let controllerReleased=false,subscriptionClosed=false;
     const releaseController=():void=>{
@@ -521,18 +546,36 @@ export class DockHost {
       if(event.sequence<=lastSent)return true;
       const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event);if(outcome==="written"||outcome==="backpressured")lastSent=event.sequence;if(outcome==="written")return true;if(outcome==="backpressured")closeAfterBackpressure();else{closeSubscription();socket.destroy();}return false;
     };
-    unsubscribe=instance.subscribe(event=>{if(initializing){pending.push(event);if(pending.length>MAX_INITIAL_EVENT_QUEUE){pending=[];closeAfterBackpressure();}return;}sendLiveEvent(event);});
+    unsubscribe=instance.subscribe(event=>{if(initializing){pending.push(event);if(pending.length>MAX_INITIAL_EVENT_QUEUE){pending=[];initializationOverflow=true;closeSubscription();}return;}sendLiveEvent(event);});
     if(follow&&request.params.controller==="claim")controller=await instance.claimInteractionController();
-    if(subscriptionClosed){releaseController();initializing=false;pending=[];return;}
+    if(subscriptionClosed){
+      releaseController();initializing=false;pending=[];
+      if(initializationOverflow)this.sendErrorAndEnd(socket,"attach_initial_overflow",ATTACH_INITIAL_OVERFLOW_MESSAGE,request.requestId);
+      return;
+    }
     setEventUnsubscribe(closeSubscription);
     if(socket.destroyed){closeSubscription();return;}
     let projection:AttachProjection;
     try{projection=await instance.getAttachProjection(cursor,MAX_HISTORY_ITEMS,request.params.replay??"legacy_history_overlay");}catch(error){initializing=false;pending=[];closeSubscription();throw error;}
+    if(subscriptionClosed){
+      releaseController();initializing=false;pending=[];
+      if(initializationOverflow)this.sendErrorAndEnd(socket,"attach_initial_overflow",ATTACH_INITIAL_OVERFLOW_MESSAGE,request.requestId);
+      return;
+    }
     const result=createBoundedEventsResult(projection,follow,request.requestId,controller);
     const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,result));
     if(responseOutcome==="backpressured"){
       const drained=await waitForSocketDrain(socket,ATTACH_DRAIN_TIMEOUT_MS);
-      if(!drained||subscriptionClosed){initializing=false;pending=[];closeAfterBackpressure();return;}
+      if(!drained){initializing=false;pending=[];closeAfterBackpressure();return;}
+      if(subscriptionClosed){
+        initializing=false;pending=[];
+        if(initializationOverflow&&!socket.destroyed&&!socket.writableEnded){
+          const diagnostic=await instance.reportControlDegradation(ATTACH_INITIAL_OVERFLOW_MESSAGE);
+          const diagnosticOutcome=writeEvent(socket,request.requestId,this.hostEpoch,diagnostic);
+          if(diagnosticOutcome==="written")socket.end();else closeAfterBackpressure();
+        }else closeAfterBackpressure();
+        return;
+      }
     }else if(responseOutcome!=="written"){
       initializing=false;pending=[];if(responseOutcome==="too_large"){closeSubscription();this.sendErrorAndEnd(socket,"response_too_large","Attach response exceeds the JSONL record limit",request.requestId);}else closeSubscription();return;
     }
@@ -582,19 +625,55 @@ function isMutationRequest(type: ControlRequest["type"]): boolean {
     && type !== "session.tree";
 }
 
+function collectionCompleteness(
+  result: { total: number; truncated: boolean },
+  clientRequirements: ReadonlySet<string>,
+): { total: number; truncated: boolean } | Record<string, never> {
+  return clientRequirements.has("projection.completeness.v1")
+    ? { total: result.total, truncated: result.truncated }
+    : {};
+}
+
 function boundedSessionInventory(
   source: Awaited<ReturnType<SessionInventory["list"]>>,
   query: { cwd: string; scope: "cwd" | "all" },
-): { sessions: Awaited<ReturnType<SessionInventory["list"]>>; query: { cwd: string; scope: "cwd" | "all" }; total: number; truncated: boolean } {
-  const sessions: Awaited<ReturnType<SessionInventory["list"]>> = [];
-  let bytes = 256;
-  for (const session of source.slice(0, MAX_SESSION_INVENTORY_ITEMS)) {
+  includeDiagnostics: boolean,
+): {
+  sessions: Awaited<ReturnType<SessionInventory["list"]>>["sessions"];
+  query: { cwd: string; scope: "cwd" | "all" };
+  total: number;
+  truncated: boolean;
+  incomplete?: boolean;
+  diagnostics?: Awaited<ReturnType<SessionInventory["list"]>>["diagnostics"];
+  diagnosticsTruncated?: boolean;
+} {
+  const diagnostics: Awaited<ReturnType<SessionInventory["list"]>>["diagnostics"] = [];
+  let diagnosticBytes = 0;
+  for (const diagnostic of source.diagnostics) {
+    const itemBytes = Buffer.byteLength(JSON.stringify(diagnostic), "utf8") + 1;
+    if (diagnosticBytes + itemBytes > MAX_SESSION_INVENTORY_DIAGNOSTIC_BYTES) break;
+    diagnostics.push(diagnostic);
+    diagnosticBytes += itemBytes;
+  }
+  const sessions: Awaited<ReturnType<SessionInventory["list"]>>["sessions"] = [];
+  let bytes = 256 + diagnosticBytes;
+  for (const session of source.sessions.slice(0, MAX_SESSION_INVENTORY_ITEMS)) {
     const itemBytes = Buffer.byteLength(JSON.stringify(session), "utf8") + 1;
     if (bytes + itemBytes > MAX_SESSION_INVENTORY_RESULT_BYTES) break;
     sessions.push(session);
     bytes += itemBytes;
   }
-  return { sessions, query: { ...query }, total: source.length, truncated: sessions.length < source.length };
+  return {
+    sessions,
+    query: { ...query },
+    total: source.sessions.length,
+    truncated: sessions.length < source.sessions.length,
+    ...(includeDiagnostics ? {
+      incomplete: source.incomplete,
+      diagnostics,
+      diagnosticsTruncated: source.diagnosticsTruncated === true || diagnostics.length < source.diagnostics.length,
+    } : {}),
+  };
 }
 
 function successResponse(requestId:string,hostEpoch:string,result:unknown):ControlResponse { return {kind:"response",version:2,requestId,hostEpoch,ok:true,result}; }
@@ -769,6 +848,9 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof RuntimeInvalidSettingValueError) return { code: "settings_invalid", message: error.message };
   if (error instanceof RuntimeSettingsWriteError) return { code: "settings_write_failed", message: error.message };
   if (error instanceof OperationConflictError) return { code: "operation_conflict", message: error.message };
+  if (error instanceof OperationReceiptExpiredError) {
+    return { code: "operation_receipt_expired", message: error.message, details: { operationId: error.operationId, queryHint: "Query current state; do not retry this operation ID" } };
+  }
   if (error instanceof SyntaxError) return { code: "invalid_json", message: "Request is not valid JSON" };
   if (error instanceof JsonLineError) {
     return {

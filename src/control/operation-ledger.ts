@@ -1,9 +1,20 @@
+import { createHash } from "node:crypto";
+
 export class OperationConflictError extends Error {
   readonly code = "operation_conflict";
 
   constructor(readonly operationId: string) {
     super(`Operation ID ${operationId} was already used for a different mutation`);
     this.name = "OperationConflictError";
+  }
+}
+
+export class OperationReceiptExpiredError extends Error {
+  readonly code = "operation_receipt_expired";
+
+  constructor(readonly operationId: string) {
+    super(`Operation ID ${operationId} already completed on this Host, but its full receipt has expired; query current state instead of retrying`);
+    this.name = "OperationReceiptExpiredError";
   }
 }
 
@@ -14,11 +25,13 @@ interface LedgerEntry<T = unknown> {
 }
 
 /**
- * Same-Host mutation receipt ledger. Live operations are never evicted; only
- * the oldest settled receipts are removed when the configured bound is passed.
+ * Same-Host mutation receipt ledger. Live operations are never evicted. Full
+ * settled results are bounded, while compact retired identities remain for the
+ * Host lifetime so eviction can never turn a duplicate into a new side effect.
  */
 export class OperationLedger {
   private readonly entries = new Map<string, LedgerEntry>();
+  private readonly retired = new Map<string, string>();
   private readonly settledOrder: string[] = [];
   private readonly settledCapacity: number;
 
@@ -36,6 +49,12 @@ export class OperationLedger {
         return Promise.reject(new OperationConflictError(operationId));
       }
       return existing.promise as Promise<T>;
+    }
+    const retiredFingerprint = this.retired.get(operationId);
+    if (retiredFingerprint !== undefined) {
+      return Promise.reject(retiredFingerprint === fingerprint
+        ? new OperationReceiptExpiredError(operationId)
+        : new OperationConflictError(operationId));
     }
 
     // The continuation starts on a microtask, after the entry is visible to a
@@ -62,7 +81,10 @@ export class OperationLedger {
       const oldest = this.settledOrder.shift();
       if (oldest === undefined) break;
       const candidate = this.entries.get(oldest);
-      if (candidate?.settled) this.entries.delete(oldest);
+      if (candidate?.settled) {
+        this.retired.set(oldest, candidate.fingerprint);
+        this.entries.delete(oldest);
+      }
     }
   }
 }
@@ -74,7 +96,7 @@ function isTrustPreflightError(error: unknown): boolean {
 }
 
 function stableFingerprint(mutationType: string, params: unknown): string {
-  return `${mutationType}:${stableSerialize(params)}`;
+  return createHash("sha256").update(mutationType).update("\0").update(stableSerialize(params)).digest("hex");
 }
 
 function stableSerialize(value: unknown): string {

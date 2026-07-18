@@ -59,6 +59,11 @@ import { FixedActionDialog, WorkModalFrame } from "./work-modal.js";
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly RuntimeThinkingLevel[];
 
+export function pickerContentRowBudget(terminalRows: number): number {
+  const rows = Number.isFinite(terminalRows) ? Math.max(1, Math.floor(terminalRows)) : 24;
+  return Math.max(6, Math.floor(rows * 0.8) - 2); // 80% overlay minus WorkModalFrame borders
+}
+
 export type DockTuiExitReason = "detached" | "stopped" | "signal";
 
 export interface DockTuiResult {
@@ -239,8 +244,10 @@ export async function runDockTui(
   ]);
   if (settingsLoad.status === "fulfilled") settings = settingsLoad.value.settings;
   else conversation.addNotice(`Settings unavailable: ${errorText(settingsLoad.reason)}`, true);
-  if (commandsLoad.status === "fulfilled") commands = commandsLoad.value.commands;
-  else conversation.addNotice(`Command catalog unavailable: ${errorText(commandsLoad.reason)}`, true);
+  if (commandsLoad.status === "fulfilled") {
+    commands = commandsLoad.value.commands;
+    if (commandsLoad.value.truncated) conversation.addNotice(`Command catalog is bounded: showing ${commands.length} of ${commandsLoad.value.total}.`, true);
+  } else conversation.addNotice(`Command catalog unavailable: ${errorText(commandsLoad.reason)}`, true);
 
   editor = new Editor(tui, editorTheme, {
     paddingX: numericSetting(settings, "editorPaddingX", 1),
@@ -475,7 +482,8 @@ export async function runDockTui(
 
   async function restoreQueue(): Promise<boolean> {
     editor.disableSubmit = true;
-    activity.setActivity("restoring queued messages");
+    runActivity = { phase: "queued", label: "restoring queued messages" };
+    activity.setActivity(runActivity);
     tui.requestRender();
     try {
       const result = await client.dequeue(instance.id);
@@ -486,12 +494,17 @@ export async function runDockTui(
       if (result.receipt.inFlight.length > 0) {
         const count = result.receipt.inFlight.length;
         conversation.addNotice(`${count} queued message${count === 1 ? " is" : "s are"} already entering Pi consumption and cannot be restored safely; the run was not aborted.`, true);
-        activity.setActivity(`${count} message${count === 1 ? " is" : "s are"} entering consumption · not restored`);
+        runActivity = { phase: "idle", label: `${count} message${count === 1 ? " is" : "s are"} entering consumption · not restored` };
+        activity.setActivity(runActivity);
         return false;
       }
-      activity.setActivity(result.receipt.restored.length > 0
-        ? `Restored ${result.receipt.restored.length} queued message${result.receipt.restored.length === 1 ? "" : "s"} to editor`
-        : "queue empty");
+      runActivity = {
+        phase: "idle",
+        label: result.receipt.restored.length > 0
+          ? `Restored ${result.receipt.restored.length} queued message${result.receipt.restored.length === 1 ? "" : "s"} to editor`
+          : "queue empty",
+      };
+      activity.setActivity(runActivity);
       return true;
     } catch (error) {
       showError(error);
@@ -536,6 +549,7 @@ export async function runDockTui(
       const catalog = await client.models(instance.id);
       instance = catalog.instance;
       status.update(instance);
+      if (catalog.truncated) conversation.addNotice(`Model catalog is bounded: showing ${catalog.models.length} of ${catalog.total}.`, true);
       const selected = await showModelPicker(catalog.models);
       if (selected) await switchModel(selected.provider, selected.id);
       else activity.setActivity("model unchanged");
@@ -588,6 +602,7 @@ export async function runDockTui(
         title: terminalSafe(titleText),
         footer: terminalSafe(footerText),
         maxVisible: Math.min(items.length, 14),
+        maxRows: () => pickerContentRowBudget(terminal.rows),
         ...(currentValue === undefined ? {} : { initialValue: currentValue }),
         ...(options.pageNavigation === undefined ? {} : { pageNavigation: options.pageNavigation }),
         requestRender: () => tui.requestRender(),
@@ -679,6 +694,7 @@ export async function runDockTui(
           title: request.title,
           footer: "type to filter · ↑↓ choose · Enter select · Esc cancel",
           maxVisible: Math.min(request.options.length, 14),
+          maxRows: () => pickerContentRowBudget(terminal.rows),
           requestRender: () => tui.requestRender(),
         },
       );
@@ -703,6 +719,7 @@ export async function runDockTui(
         ...(request.method === "editor" && request.prefill !== undefined ? { prefill: request.prefill } : {}),
         requestRender: () => tui.requestRender(),
         tui,
+        maxRows: () => pickerContentRowBudget(terminal.rows),
       });
       dialog.onSubmit = (value) => finish({ response: { method: request.method, value }, fromHost: false });
       dialog.onCancel = () => finish({ response: { method: request.method, cancelled: true }, fromHost: false });
@@ -821,7 +838,9 @@ export async function runDockTui(
     activity.setActivity("loading tools");
     tui.requestRender();
     try {
-      let tools = (await client.tools(instance.id)).tools;
+      const catalog = await client.tools(instance.id);
+      let tools = catalog.tools;
+      if (catalog.truncated) conversation.addNotice(`Tool catalog is bounded: showing ${tools.length} of ${catalog.total}.`, true);
       while (true) {
         const selected = await showChoicePicker(
           "Active tools",
@@ -836,6 +855,7 @@ export async function runDockTui(
         instance = result.instance;
         status.update(instance);
         tools = result.tools;
+        if (result.truncated) conversation.addNotice(`Tool catalog is bounded: showing ${tools.length} of ${result.total}.`, true);
         activity.setActivity(`tool ${selected} toggled`);
       }
       activity.setActivity("tools updated");
@@ -858,6 +878,7 @@ export async function runDockTui(
       instance = result.instance;
       status.update(instance);
       conversation.addNotice(`Active tools: ${result.tools.filter((tool) => tool.active).map((tool) => tool.name).join(", ") || "none"}.`);
+      if (result.truncated) conversation.addNotice(`Tool catalog is bounded: showing ${result.tools.length} of ${result.total}.`, true);
       activity.setActivity("tools updated");
     } catch (error) { showError(error); }
     finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.requestRender(); }
@@ -897,6 +918,7 @@ export async function runDockTui(
       body: "Loading the complete session tree…",
       footer: "type text/id/label · ↑↓ move · ←→/PgUp/PgDn page · Enter select · Esc cancel",
       maxVisible: 14,
+      maxRows: () => pickerContentRowBudget(terminal.rows),
       pageNavigation: true,
       requestRender: () => tui.requestRender(),
     });
@@ -1128,6 +1150,7 @@ export async function runDockTui(
       ...(placeholder === undefined ? {} : { placeholder }),
       requestRender: () => tui.requestRender(),
       tui,
+      maxRows: () => pickerContentRowBudget(terminal.rows),
     });
     let resolveText!: (value: string | undefined) => void;
     const result = new Promise<string | undefined>((resolve) => { resolveText = resolve; });
@@ -1158,6 +1181,7 @@ export async function runDockTui(
       title: "Resume Pi session",
       body: "Loading persisted Pi sessions…",
       maxVisible: 14,
+      maxRows: () => pickerContentRowBudget(terminal.rows),
       requestRender: () => tui.requestRender(),
     });
     picker.setEmptyText("Loading…");
@@ -1184,10 +1208,12 @@ export async function runDockTui(
         };
       });
       picker.replaceItems(items);
-      picker.setEmptyText("No persisted Pi sessions found");
-      picker.setBody(inventory.truncated
-        ? `Showing ${sessions.length.toLocaleString()} of ${inventory.total.toLocaleString()} persisted sessions`
-        : undefined);
+      picker.setEmptyText(inventory.incomplete ? "No readable persisted Pi sessions found" : "No persisted Pi sessions found");
+      const inventoryNotices = [
+        ...(inventory.truncated ? [`Showing ${sessions.length.toLocaleString()} of ${inventory.total.toLocaleString()} persisted sessions`] : []),
+        ...(inventory.incomplete ? [`Inventory incomplete: ${inventory.diagnostics[0]?.message ?? "one or more saved sessions could not be inspected"}${inventory.diagnosticsTruncated ? " · more diagnostics omitted" : ""}`] : []),
+      ];
+      picker.setBody(inventoryNotices.length > 0 ? inventoryNotices.join(" · ") : undefined);
     }).catch(() => {
       if (!active) return;
       picker.setEmptyText("Session inventory unavailable");
@@ -1299,6 +1325,9 @@ export async function runDockTui(
       status.update(instance);
       for (const diagnostic of result.diagnostics) conversation.addNotice(`${diagnostic.severity}: ${diagnostic.message}`, diagnostic.severity === "error");
       activity.setActivity(`reloaded ${result.resources.length} resources`);
+      if (result.resourcesTruncated || result.diagnosticsTruncated) {
+        conversation.addNotice(`Reload projection is bounded: ${result.resources.length}/${result.resourceTotal} resources · ${result.diagnostics.length}/${result.diagnosticTotal} diagnostics.`, true);
+      }
     } catch (error) { showError(error); }
     finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.requestRender(); }
   }
@@ -1315,6 +1344,9 @@ export async function runDockTui(
       const resource = indexed.find((candidate) => candidate.value === selected)?.resource;
       if (resource) conversation.addNotice(`${resource.kind} ${resource.name}${resource.path ? ` · ${resource.path}` : ""}`);
       activity.setActivity(`${result.resources.length} resources · ${result.diagnostics.length} diagnostics`);
+      if (result.resourcesTruncated || result.diagnosticsTruncated) {
+        conversation.addNotice(`Resource projection is bounded: ${result.resources.length}/${result.resourceTotal} resources · ${result.diagnostics.length}/${result.diagnosticTotal} diagnostics.`, true);
+      }
     } catch (error) { showError(error); }
     finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
   }
@@ -1417,8 +1449,10 @@ export async function runDockTui(
     } else {
       conversation.addNotice(`Replacement settings unavailable: ${errorText(settingsLoad.reason)}`, true);
     }
-    if (commandsLoad.status === "fulfilled") commands = commandsLoad.value.commands;
-    else conversation.addNotice(`Replacement command catalog unavailable: ${errorText(commandsLoad.reason)}`, true);
+    if (commandsLoad.status === "fulfilled") {
+      commands = commandsLoad.value.commands;
+      if (commandsLoad.value.truncated) conversation.addNotice(`Replacement command catalog is bounded: showing ${commands.length} of ${commandsLoad.value.total}.`, true);
+    } else conversation.addNotice(`Replacement command catalog unavailable: ${errorText(commandsLoad.reason)}`, true);
     rebuildAutocomplete();
     activity.setActivity("session history loaded");
     tui.requestRender();

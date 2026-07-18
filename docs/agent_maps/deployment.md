@@ -68,7 +68,7 @@ Corrupt catalog evidence保留；失败时不得先构造prior runtime。Startup
 - SIGKILL/Host loss：没有cleanup保证；下一Host只根据durable catalog与Pi session metadata做保守reconcile。
 - Mutation-fault：Host切read-only、drain admitted work、退出非零；不继续接受mutation。
 - Socket path：private directory、socket mode `0600`、bind identity校验；不得删除不属于当前Host的socket。
-- Readiness：unit active不等于ready；必须同时满足MainPID、Protocol V2 hello、managed capability set。
+- Readiness：unit active不等于ready；必须同时满足MainPID、Protocol V2 hello、managed capability set。仅`connection_error`、`connection_closed`与`timeout`属于startup瞬时probe失败并可重试；malformed response、protocol mismatch等确定性错误立即原样失败，不能等待15秒后误报为hello unavailable。
 
 ## 常见修改路由
 

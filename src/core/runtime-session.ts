@@ -212,6 +212,12 @@ export class RuntimeSettingsWriteError extends Error {
  * AgentSession. Keeping it structural makes lifecycle tests deterministic and
  * prevents the host state machine from depending on Pi internals.
  */
+export interface RuntimeToolProjection {
+  tools: ToolDto[];
+  total: number;
+  truncated: boolean;
+}
+
 export interface RuntimeSession {
   readonly sessionId: string;
   readonly sessionFile: string | undefined;
@@ -228,11 +234,18 @@ export interface RuntimeSession {
   getHistory(): RuntimeHistoryEntry[];
   getTree?(): RuntimeTreeSnapshot;
   navigateTree?(targetId: string, options?: RuntimeNavigateOptions): Promise<RuntimeNavigateResult>;
-  listTools(): Promise<ToolDto[]>;
-  setActiveTools(names: string[]): Promise<ToolDto[]>;
+  listTools(): Promise<ToolDto[] | RuntimeToolProjection>;
+  setActiveTools(names: string[]): Promise<ToolDto[] | RuntimeToolProjection>;
   getSettings(): Promise<SettingDto[]>;
   updateSetting(update: SettingUpdate): Promise<SettingDto>;
-  getResources(): Promise<{ resources: ResourceDto[]; diagnostics: DiagnosticDto[] }>;
+  getResources(): Promise<{
+    resources: ResourceDto[];
+    diagnostics: DiagnosticDto[];
+    resourceTotal?: number;
+    resourcesTruncated?: boolean;
+    diagnosticTotal?: number;
+    diagnosticsTruncated?: boolean;
+  }>;
   getCommands(): Promise<CommandDto[]>;
   resolveSessionTarget?(sessionFile: string): Promise<RuntimeSessionTarget>;
   newSession?(operationId: string, parentSession?: string): Promise<RuntimeReplacementResult>;

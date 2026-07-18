@@ -40,6 +40,7 @@ import type {
   RuntimeSessionMetrics,
   RuntimeSessionTarget,
   RuntimeThinkingLevel,
+  RuntimeToolProjection,
   RuntimeTreeNode,
   RuntimeTreeSnapshot,
 } from "../core/runtime-session.js";
@@ -230,22 +231,27 @@ export class PiRuntimeHost implements RuntimeSession {
     })).sort((left, right) => left.provider.localeCompare(right.provider) || left.name.localeCompare(right.name));
   }
 
-  async listTools(): Promise<ToolDto[]> {
+  async listTools(): Promise<RuntimeToolProjection> {
     const session = this.requireActive().session;
     return projectVisibleTools(session);
   }
 
-  async setActiveTools(names: string[]): Promise<ToolDto[]> {
+  async setActiveTools(names: string[]): Promise<RuntimeToolProjection> {
     const session = this.requireActive().session;
     if (!Array.isArray(names) || names.length > MAX_PROJECTION_ITEMS) throw new Error("Active tool names must be a bounded array");
-    const registry = new Set(projectVisibleTools(session).map((tool) => tool.name));
-    const seen = new Set<string>();
+    const remaining = new Set<string>();
     for (const name of names) {
       if (typeof name !== "string" || name.length < 1 || name.length > 256) throw new Error("Active tool names must be bounded non-empty strings");
-      if (seen.has(name)) throw new Error(`Duplicate tool name: ${name}`);
-      seen.add(name);
-      if (!registry.has(name)) throw new RuntimeUnknownToolError(name);
+      if (remaining.has(name)) throw new Error(`Duplicate tool name: ${name}`);
+      remaining.add(name);
     }
+    for (const tool of session.getAllTools()) {
+      const name = validCatalogName(tool.name);
+      if (name !== undefined) remaining.delete(name);
+      if (remaining.size === 0) break;
+    }
+    const unknown = remaining.values().next().value;
+    if (unknown !== undefined) throw new RuntimeUnknownToolError(unknown);
     session.setActiveToolsByName([...names]);
     return this.listTools();
   }
@@ -266,7 +272,14 @@ export class PiRuntimeHost implements RuntimeSession {
     return projectPiSetting(binding.services.settingsManager, key);
   }
 
-  async getResources(): Promise<{ resources: ResourceDto[]; diagnostics: DiagnosticDto[] }> {
+  async getResources(): Promise<{
+    resources: ResourceDto[];
+    diagnostics: DiagnosticDto[];
+    resourceTotal: number;
+    resourcesTruncated: boolean;
+    diagnosticTotal: number;
+    diagnosticsTruncated: boolean;
+  }> {
     const loader = this.requireActive().services.resourceLoader;
     const extensions = loader.getExtensions();
     const skills = loader.getSkills();
@@ -305,9 +318,17 @@ export class PiRuntimeHost implements RuntimeSession {
       ...skills.diagnostics.map(projectDiagnostic),
       ...prompts.diagnostics.map(projectDiagnostic),
     ];
+    const sortedResources = resources.sort(compareResourceDtos);
+    const sortedDiagnostics = diagnostics.sort(compareDiagnosticDtos);
+    const projectedResources = capJsonItems(sortedResources, 350_000);
+    const projectedDiagnostics = capJsonItems(sortedDiagnostics, 250_000);
     return {
-      resources: capJsonItems(resources.sort(compareResourceDtos), 350_000),
-      diagnostics: capJsonItems(diagnostics.sort(compareDiagnosticDtos), 250_000),
+      resources: projectedResources,
+      diagnostics: projectedDiagnostics,
+      resourceTotal: sortedResources.length,
+      resourcesTruncated: projectedResources.length < sortedResources.length,
+      diagnosticTotal: sortedDiagnostics.length,
+      diagnosticsTruncated: projectedDiagnostics.length < sortedDiagnostics.length,
     };
   }
 
@@ -351,7 +372,7 @@ export class PiRuntimeHost implements RuntimeSession {
         });
       }
     }
-    return commands.sort(compareCommandDtos).slice(0, MAX_PROJECTION_ITEMS);
+    return commands.sort(compareCommandDtos);
   }
 
   async listSessions(scope: "cwd" | "all"): Promise<RuntimeSessionInfo[]> {
@@ -758,12 +779,20 @@ export class PiRuntimeHost implements RuntimeSession {
 }
 
 const MAX_PROJECTION_ITEMS = 2_000;
+const MAX_TOOL_PROJECTION_BYTES = 600_000;
 const DATA_URI = /data:[^,]*;base64,/i;
 const RAW_BASE64 = /^(?:[A-Za-z0-9+/]{4}){32,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 function boundedString(value: unknown, limit: number, fallback: string): string {
   if (typeof value !== "string" || value.length === 0) return fallback;
-  return value.length <= limit ? value : `${value.slice(0, Math.max(0, limit - 1))}…`;
+  if (value.length <= limit) return value;
+  const requestedEnd = Math.max(0, limit - 1);
+  const end = requestedEnd > 0
+    && /[\uD800-\uDBFF]/u.test(value[requestedEnd - 1] ?? "")
+    && /[\uDC00-\uDFFF]/u.test(value[requestedEnd] ?? "")
+    ? requestedEnd - 1
+    : requestedEnd;
+  return `${value.slice(0, end)}…`;
 }
 
 function safeOptionalText(value: unknown, limit: number): string | undefined {
@@ -1131,22 +1160,70 @@ function extensionCommandName(text: string): string | undefined {
   return name.length > 0 ? name : undefined;
 }
 
-function projectVisibleTools(session: AgentSession): ToolDto[] {
+type PiTool = (ReturnType<AgentSession["getAllTools"]>)[number];
+interface VisibleToolRef { tool: PiTool; name: string }
+
+function projectVisibleTools(session: AgentSession): RuntimeToolProjection {
   const active = new Set(session.getActiveToolNames());
-  const tools: ToolDto[] = [];
+  const selected: VisibleToolRef[] = [];
+  let total = 0;
   for (const tool of session.getAllTools()) {
     const name = validCatalogName(tool.name);
     if (name === undefined) continue;
+    total += 1;
+    retainCanonicalToolPrefix(selected, { tool, name }, MAX_PROJECTION_ITEMS);
+  }
+  selected.sort(compareVisibleToolRefs);
+  const tools: ToolDto[] = [];
+  let bytes = 2;
+  for (const { tool, name } of selected) {
+    if (tools.length >= MAX_PROJECTION_ITEMS) break;
     const schema = projectJsonObject(tool.parameters).value;
-    tools.push({
+    const candidate: ToolDto = {
       name,
       description: safeRequiredText(tool.description, 2_048, "Tool description omitted"),
       active: active.has(tool.name),
       source: projectSource(tool.sourceInfo, tool.sourceInfo.source === "builtin" ? "built-in" : "extension"),
       ...(Object.keys(schema).length > 0 ? { parameterSchema: schema } : {}),
-    });
+    };
+    const itemBytes = Buffer.byteLength(JSON.stringify(candidate), "utf8") + (tools.length > 0 ? 1 : 0);
+    if (bytes + itemBytes > MAX_TOOL_PROJECTION_BYTES) break;
+    tools.push(candidate);
+    bytes += itemBytes;
   }
-  return tools.sort(compareToolDtos).slice(0, MAX_PROJECTION_ITEMS);
+  tools.sort(compareToolDtos);
+  return { tools, total, truncated: tools.length < total };
+}
+
+function retainCanonicalToolPrefix(heap: VisibleToolRef[], candidate: VisibleToolRef, limit: number): void {
+  if (heap.length < limit) {
+    heap.push(candidate);
+    let index = heap.length - 1;
+    while (index > 0) {
+      const parent = Math.floor((index - 1) / 2);
+      if (compareVisibleToolRefs(heap[parent]!, heap[index]!) >= 0) break;
+      [heap[parent], heap[index]] = [heap[index]!, heap[parent]!];
+      index = parent;
+    }
+    return;
+  }
+  if (compareVisibleToolRefs(candidate, heap[0]!) >= 0) return;
+  heap[0] = candidate;
+  let index = 0;
+  while (true) {
+    const left = index * 2 + 1;
+    const right = left + 1;
+    let largest = index;
+    if (left < heap.length && compareVisibleToolRefs(heap[left]!, heap[largest]!) > 0) largest = left;
+    if (right < heap.length && compareVisibleToolRefs(heap[right]!, heap[largest]!) > 0) largest = right;
+    if (largest === index) break;
+    [heap[index], heap[largest]] = [heap[largest]!, heap[index]!];
+    index = largest;
+  }
+}
+
+function compareVisibleToolRefs(left: VisibleToolRef, right: VisibleToolRef): number {
+  return left.name < right.name ? -1 : left.name > right.name ? 1 : 0;
 }
 
 function projectSource(source: SourceInfo, kind: SourceDto["kind"]): SourceDto {

@@ -85,12 +85,15 @@ export async function runDockHub(client: DockClient, cwd: string): Promise<DockH
           sessions = inventory.sessions;
           sessionTotal = inventory.total;
           inventoryTruncated = inventory.truncated;
+          inventoryWarning = inventory.incomplete
+            ? `Pi session inventory incomplete: ${inventory.diagnostics[0]?.message ?? "one or more saved sessions could not be inspected"}${inventory.diagnosticsTruncated ? " · more diagnostics omitted" : ""}`
+            : undefined;
           inventoryLoaded = true;
         } catch (error) {
           inventoryWarning = `Pi session inventory unavailable: ${errorMessage(error)}`;
         }
       }
-      const sessionAction = await chooseSessionAction(instances, sessions, contextCwd, sessionTotal, inventoryTruncated);
+      const sessionAction = await chooseSessionAction(instances, sessions, contextCwd, sessionTotal, inventoryTruncated, inventoryWarning);
       if (sessionAction) return sessionAction;
     }
   }
@@ -301,8 +304,8 @@ async function chooseSessionAction(
   cwd: string,
   total: number,
   truncated: boolean,
+  warning?: string,
 ): Promise<DockHubAction | undefined> {
-  if (sessions.length === 0) return undefined;
   const ordered = [...sessions].sort((left, right) => compareSessions(left, right, cwd));
   const byFile = new Map(ordered.map((session) => [session.sessionFile, session]));
   const visible = ordered.slice(0, MAX_HUB_SESSIONS);
@@ -318,7 +321,7 @@ async function chooseSessionAction(
   entries.push({ value: BACK, label: "Back to Hub", description: "no change" });
   const selected = await selectMenu(
     "Pi Sessions",
-    "Choose a saved session",
+    warning ? terminalSafe(warning) : sessions.length > 0 ? "Choose a saved session" : "No persisted Pi sessions found",
     entries,
     "↑↓ choose · Enter Resume/Adopt · Esc back",
   );

@@ -134,6 +134,15 @@ ManagedInstance replacement intent
 - Nonzero subagent child exit必须成为model/history/TUI都可见的真实tool error。
 - `pi install`、`pi config`与`pi login`仍由原Pi CLI负责。
 
+## Projection bounds 与恢复语义
+
+- Config inventories必须先确定canonical membership，再由adapter/Core按最多2,000项及control-envelope字节预算裁切；高基数tool registry扫描完整集合计数，但只用bounded max-heap保留canonical prefix，不复制/排序全catalog。`total`/`truncated`或resource/diagnostic独立 completeness metadata必须一路传到Protocol/TUI；adapter若先裁切，Core不能二次裁切后声称完整。
+- Runtime structured JSON 使用depth 8、object key 100、array item 200、2,000 projected nodes、256 KiB aggregate预算和最多200条omitted paths；一条completed message再受512 KiB content预算。Tool text超过8,000字符时保留完整Unicode边界并附 `[tool output truncated by Host projection]`，而不是只有不可解释的省略号。
+- Admission catalog commit期间的runtime handoff保留最新1,000-event tail；发生overflow必须发布显式extension error并刷新authoritative history/metrics，不能继续声称事件流完整。涉及该路径的改动必须验证最终queue/run状态，而不只验证错误字符串。
+- Session metadata inventory逐root/directory/file报告bounded scan diagnostics；JSONL仍是authoritative，cache write/load失败不能把cache升级为真相源。
+- Extension widget仍最多200行、每行8,000字符，同时受256,000字符aggregate预算；超限整个widget拒绝并发布`extension.error`，不静默显示前缀。
+- Session tree采用complete bounded topology：100,000 node为接受边界，100,001明确失败；当前分页发生在完整projection之后。标准边界测试在本机约0.3秒完成，但超过此界限的Tree在V0.1不可用，不能自动丢节点伪装为完整树。
+
 ## 默认不读
 
 - Pi安装目录、`node_modules`实现或上游源码：仅当public API合同无法由`.d.ts`和官方docs确认时读取。

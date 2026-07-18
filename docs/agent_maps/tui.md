@@ -101,12 +101,12 @@ Warning必须说明用户影响和可执行动作；closed Host projection本身
 
 - 普通drag/selection属于terminal；只有显式Alt+M或`/mouse`启用1000/1006 tracking。
 - detach、stop、signal和异常退出都恢复terminal mode；Ctrl+D 是不等待长 Host mutation 的本地最高优先级 detach。
-- Work overlay 统一使用有边界的 modal frame 与栈式焦点恢复；固定动作不用 searchable picker。Tree 的 Branch action 保持原 Tree surface 挂载，Esc 返回时保留 filter/search/fold/selection。
+- Work overlay 统一使用有边界的 modal frame 与栈式焦点恢复；picker/text/editor child在每次render时从当前terminal rows取得完整内容预算，resize后立即重算，先保留selection/footer再裁切body/input viewport。80×24时80% overlay最多19行（17 child rows + 2 frame rows）。固定动作不用 searchable picker。Tree 的 Branch action 保持原 Tree surface 挂载，Esc 返回时保留 filter/search/fold/selection。
 - Work TUI不持有Pi对象，不读取session JSONL；只通过DockClient和closed DTO/event。Fresh attach 的对话真相是当前 branch history，不把旧 lifecycle/navigation replay 投影为 conversation；无command ID的`runtime-initiated` active run仍恢复未完成tool/message tail。`display:false` custom control message永不成为conversation。
 - History pages一经读取保持连续，不用client entry/text cap制造可见gap；paging只影响获取时机。`FixedDockScreen`通过entry anchor驱动`DockConversation.renderViewport()`，只materialize viewport邻域，expanded tools、数万行历史与多次compaction不得挤掉或阻塞composer/footer。
 - Queue是Same-Host memory；in-flight/failed/ambiguous mutation不声称已restore，也不自动abort。
 - Exact extension command不进入pending queue；unknown slash保留Pi-native语义。
-- Extension UI只支持bounded closed text；不transport component factory、image、binary或data URI。
+- Extension UI只支持bounded closed text；不transport component factory、image、binary或data URI。Host若截断tool output必须附明确truncation marker；modal或config/session inventory不完整时，Work/Hub显示shown/total或首条scan diagnostic，不能把bounded prefix呈现为完整结果。
 - 动画只写固定surface；idle无timer。Localized activity write绕过pi-tui frame cache，因此placement移动/隐藏时必须在下一正常frame强制reconcile旧物理行，不能留下重复activity。Hub最多一个visible时才运行的低频本地blink timer。
 - Renderer替换必须一次性cut over，不维护dual renderer或compatibility facade。
 

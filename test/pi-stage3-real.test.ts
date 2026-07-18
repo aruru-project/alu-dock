@@ -97,7 +97,7 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
   try {
     const updated = await instance.updateSetting({ key: "autoRetry", value: false }, "real-setting");
     assert.equal(updated.value, false);
-    assert.ok((await instance.setActiveTools(["read"], "real-tools")).find((tool) => tool.name === "read")?.active);
+    assert.ok((await instance.setActiveTools(["read"], "real-tools")).tools.find((tool) => tool.name === "read")?.active);
 
     assert.equal((await instance.switchSession("real-resume-1", targetFile, { canonicalCwd: cwd, projectTrusted: true })).cancelled, false);
     await instance.setSessionName("real-name", "Stage 3 named");
@@ -136,7 +136,7 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
     assert.deepEqual(persistedSettings.compaction, { enabled: true, reserveTokens: 100, keepRecentTokens: 100 });
     const resources = await instance.getResources();
     assert.ok(resources.resources.some((resource) => resource.kind === "extension" && resource.name.includes("stage3-fixture")));
-    const commands = parseCommandsResult({ commands: await instance.getCommands() }).commands;
+    const commands = parseCommandsResult(await instance.getCommands()).commands;
     assert.deepEqual(commands.map((command) => command.name), ["chain", "chain-prompts", "run", "run-chain"]);
 
     await instance.stop("real-stop");

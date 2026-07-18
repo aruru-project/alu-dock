@@ -66,6 +66,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "host.info",
   "instance.catalog",
   "models.v1",
+  "projection.completeness.v1",
   "queue.control.v1",
   "resources.v1",
   "run.abort.v1",
@@ -74,6 +75,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "session.commands.v1",
   "session.core",
   "session.inventory.v1",
+  "session.inventory-diagnostics.v1",
   "session.reopen",
   "session.tree.v1",
   "settings.v1",
@@ -195,30 +197,40 @@ export interface StopResult { receipt: { operationId: string; alreadyStopped: bo
 export interface ForgetResult { receipt: { operationId: string; forgottenId: string; previousLifecycle: "stopped" | "host_lost" | "runtime_error"; piSessionFilesDeleted: 0 } }
 export interface PruneResult { receipt: { operationId: string; selector: "stopped"; forgottenIds: string[]; forgottenCount: number; hasMore: boolean; piSessionFilesDeleted: 0 } }
 export interface ReopenResult { operationId: string; previousLifecycle: "host_lost" | "runtime_error"; instance: InstanceSnapshot }
-export interface ModelsResult { models: RuntimeModelInfo[]; availableThinkingLevels: RuntimeThinkingLevel[]; instance: InstanceSnapshot }
+export interface ModelsResult { models: RuntimeModelInfo[]; availableThinkingLevels: RuntimeThinkingLevel[]; instance: InstanceSnapshot; total: number; truncated: boolean }
 export interface ModelConfigurationResult { instance: InstanceSnapshot; settingsWrite: { persisted: true } }
 export interface ThinkingConfigurationResult { actualLevel: RuntimeThinkingLevel; availableThinkingLevels: RuntimeThinkingLevel[]; instance: InstanceSnapshot; settingsWrite: { persisted: true } }
-export interface SessionsResult { sessions: SessionDto[] }
+export interface SessionsResult { sessions: SessionDto[]; total: number; truncated: boolean }
 export interface SessionInventoryResult {
   sessions: SessionDto[];
   query: { cwd: string; scope: "cwd" | "all" };
   total: number;
   truncated: boolean;
+  incomplete: boolean;
+  diagnostics: Array<{ message: string; path?: string }>;
+  diagnosticsTruncated: boolean;
 }
 export interface HistoryResult { entries: HistoryEntryDto[]; hasEarlier: boolean; nextBeforeEntryId?: string; instance: InstanceSnapshot }
 export interface SessionReplacementResult { cancelled: boolean; instance: InstanceSnapshot }
 export interface SessionNameResult { instance: InstanceSnapshot }
 export interface SessionCompactionResult { result: { summary: string; firstKeptEntryId: string; tokensBefore: number }; instance: InstanceSnapshot }
-export interface SessionReloadResult { instance: InstanceSnapshot; resources: ResourceDto[]; diagnostics: DiagnosticDto[] }
+export interface SessionReloadResult extends ResourcesResult { instance: InstanceSnapshot }
 export interface SessionTreeResult { treeRevision: string; nodes: TreeNodeDto[]; leafId?: string; total: number; truncated: boolean; nextAfterEntryId?: string }
 export interface SessionNavigateResult { cancelled: boolean; aborted?: boolean; editorText?: string; instance: InstanceSnapshot }
 export interface SessionForkResult { cancelled: boolean; selectedText?: string; instance: InstanceSnapshot }
 export interface SessionCloneResult { cancelled: boolean; instance: InstanceSnapshot }
-export interface ToolsResult { tools: ToolDto[]; instance: InstanceSnapshot }
+export interface ToolsResult { tools: ToolDto[]; instance: InstanceSnapshot; total: number; truncated: boolean }
 export interface SettingsResult { settings: SettingDto[] }
 export interface SettingUpdateResult { setting: SettingDto; instance: InstanceSnapshot; reloadRequired: boolean; hostRestartRequired: boolean }
-export interface ResourcesResult { resources: ResourceDto[]; diagnostics: DiagnosticDto[] }
-export interface CommandsResult { commands: CommandDto[] }
+export interface ResourcesResult {
+  resources: ResourceDto[];
+  diagnostics: DiagnosticDto[];
+  resourceTotal: number;
+  resourcesTruncated: boolean;
+  diagnosticTotal: number;
+  diagnosticsTruncated: boolean;
+}
+export interface CommandsResult { commands: CommandDto[]; total: number; truncated: boolean }
 export type ConfigurationResult = ModelConfigurationResult | ThinkingConfigurationResult | SettingUpdateResult;
 
 export function implementedCapabilities(): string[] { return [...IMPLEMENTED_CAPABILITIES].sort(); }
@@ -487,7 +499,7 @@ export function parseControlResponse(input: unknown, requestId: string, hostEpoc
 
 function parseErrorDetails(code:string,input:unknown):JsonObject {
   const details=object(input,"error.details");
-  if(code==="effect_unknown") { exact(details,["operationId","queryHint"]); return {operationId:id(details.operationId,"error.details.operationId"),queryHint:string(details.queryHint,"error.details.queryHint",256)}; }
+  if(code==="effect_unknown"||code==="operation_receipt_expired") { exact(details,["operationId","queryHint"]); return {operationId:id(details.operationId,"error.details.operationId"),queryHint:string(details.queryHint,"error.details.queryHint",256)}; }
   if(code==="instance_busy") { exact(details,["lifecycle","execution"]); return {lifecycle:enumeration(details.lifecycle,"error.details.lifecycle",["active","stopping","stopped","host_lost","runtime_error"]),execution:enumeration(details.execution,"error.details.execution",["idle","running","failed","unavailable"])}; }
   if(code==="project_trust_required") {
     exact(details,["challengeId","operationId","cwd","choices","expiresAt"]);
@@ -667,9 +679,10 @@ export function parsePruneResult(input: unknown): PruneResult {
   } };
 }
 export function parseModelsResult(input: unknown): ModelsResult {
-  const value = object(input, "models result"); exact(value, ["models", "availableThinkingLevels", "instance"]);
+  const value = object(input, "models result"); exact(value, ["models", "availableThinkingLevels", "instance", "total", "truncated"]);
   const models = array(value.models, "models", MAX_COLLECTION).map((item, index) => { const model = object(item, `models[${index}]`); exact(model, ["provider", "id", "name", "reasoning", "contextWindow"]); return { provider: string(model.provider, "provider", MAX_MODEL_PROVIDER_CHARS), id: string(model.id, "id", MAX_MODEL_ID_CHARS), name: string(model.name, "name", 256), reasoning: boolean(model.reasoning, "reasoning"), contextWindow: model.contextWindow === undefined ? undefined : positive(model.contextWindow, "contextWindow") }; });
-  return { models, availableThinkingLevels: thinkingLevels(value.availableThinkingLevels), instance: parseInstance(value.instance, "instance") };
+  const completeness = parseCollectionCompleteness(value, models.length);
+  return { models, availableThinkingLevels: thinkingLevels(value.availableThinkingLevels), instance: parseInstance(value.instance, "instance"), ...completeness };
 }
 export function parseModelConfigurationResult(input: unknown): ModelConfigurationResult {
   const value = object(input, "model configuration result"); exact(value, ["instance", "settingsWrite"]);
@@ -681,17 +694,29 @@ export function parseThinkingConfigurationResult(input: unknown): ThinkingConfig
 }
 function parseSettingsWrite(input: unknown): { persisted: true } { const write = object(input, "settingsWrite"); exact(write, ["persisted"]); if (write.persisted !== true) throw validation("invalid_response", "settingsWrite.persisted must be true"); return { persisted: true }; }
 export function parseSessionsResult(input: unknown): SessionsResult {
-  const value = object(input, "sessions result"); exact(value, ["sessions"]);
-  return { sessions: parseSessionDtos(value.sessions) };
+  const value = object(input, "sessions result"); exact(value, ["sessions", "total", "truncated"]);
+  const sessions = parseSessionDtos(value.sessions);
+  return { sessions, ...parseCollectionCompleteness(value, sessions.length) };
 }
 
 export function parseSessionInventoryResult(input: unknown): SessionInventoryResult {
-  const value = object(input, "session inventory result"); exact(value, ["sessions", "query", "total", "truncated"]);
+  const value = object(input, "session inventory result");
+  exact(value, ["sessions", "query", "total", "truncated", "incomplete", "diagnostics", "diagnosticsTruncated"]);
   const query = object(value.query, "query"); exact(query, ["cwd", "scope"]);
   const sessions = parseSessionDtos(value.sessions);
   const total = unsigned(value.total, "total");
   const truncated = boolean(value.truncated, "truncated");
+  const diagnostics = value.diagnostics === undefined ? [] : array(value.diagnostics, "diagnostics", 100).map((item, index) => {
+    const diagnostic = object(item, `diagnostics[${index}]`); exact(diagnostic, ["message", "path"]);
+    return {
+      message: string(diagnostic.message, `diagnostics[${index}].message`, MAX_MESSAGE),
+      ...(diagnostic.path === undefined ? {} : { path: string(diagnostic.path, `diagnostics[${index}].path`, MAX_CONTROL_CWD_CHARS) }),
+    };
+  });
+  const incomplete = value.incomplete === undefined ? false : boolean(value.incomplete, "incomplete");
+  const diagnosticsTruncated = value.diagnosticsTruncated === undefined ? false : boolean(value.diagnosticsTruncated, "diagnosticsTruncated");
   if (total < sessions.length || truncated !== (sessions.length < total)) throw validation("invalid_response", "Session inventory truncation metadata is inconsistent");
+  if (!incomplete && (diagnostics.length > 0 || diagnosticsTruncated)) throw validation("invalid_response", "Complete session inventory cannot carry scan diagnostics");
   return {
     sessions,
     query: {
@@ -700,6 +725,9 @@ export function parseSessionInventoryResult(input: unknown): SessionInventoryRes
     },
     total,
     truncated,
+    incomplete,
+    diagnostics,
+    diagnosticsTruncated,
   };
 }
 
@@ -756,8 +784,16 @@ export function parseSessionCompactionResult(input: unknown): SessionCompactionR
   };
 }
 export function parseSessionReloadResult(input: unknown): SessionReloadResult {
-  const value = object(input, "session reload result"); exact(value, ["instance", "resources", "diagnostics"]);
-  const projected = parseResourcesResult({ resources: value.resources, diagnostics: value.diagnostics });
+  const value = object(input, "session reload result");
+  exact(value, ["instance", "resources", "diagnostics", "resourceTotal", "resourcesTruncated", "diagnosticTotal", "diagnosticsTruncated"]);
+  const projected = parseResourcesResult({
+    resources: value.resources,
+    diagnostics: value.diagnostics,
+    resourceTotal: value.resourceTotal,
+    resourcesTruncated: value.resourcesTruncated,
+    diagnosticTotal: value.diagnosticTotal,
+    diagnosticsTruncated: value.diagnosticsTruncated,
+  });
   return { instance: parseActiveSessionInstance(value.instance, "Session reload"), ...projected };
 }
 
@@ -840,10 +876,10 @@ function parseActiveSessionInstance(input: unknown, operation: string): Instance
 }
 
 export function parseToolsResult(input: unknown): ToolsResult {
-  const value = object(input, "tools result"); exact(value, ["tools", "instance"]);
+  const value = object(input, "tools result"); exact(value, ["tools", "instance", "total", "truncated"]);
   const tools = array(value.tools, "tools", MAX_COLLECTION).map((item, index) => parseTool(item, `tools[${index}]`));
   assertSorted(tools, "tools", compareToolDtos);
-  return { tools, instance: parseInstance(value.instance, "instance") };
+  return { tools, instance: parseInstance(value.instance, "instance"), ...parseCollectionCompleteness(value, tools.length) };
 }
 export function parseSettingsResult(input: unknown): SettingsResult {
   const value = object(input, "settings result"); exact(value, ["settings"]);
@@ -860,18 +896,42 @@ export function parseSettingUpdateResult(input: unknown): SettingUpdateResult {
   return { setting, instance: parseInstance(value.instance, "instance"), reloadRequired, hostRestartRequired };
 }
 export function parseResourcesResult(input: unknown): ResourcesResult {
-  const value = object(input, "resources result"); exact(value, ["resources", "diagnostics"]);
+  const value = object(input, "resources result");
+  exact(value, ["resources", "diagnostics", "resourceTotal", "resourcesTruncated", "diagnosticTotal", "diagnosticsTruncated"]);
   const resources = array(value.resources, "resources", MAX_COLLECTION).map((item, index) => parseResource(item, `resources[${index}]`));
   const diagnostics = array(value.diagnostics, "diagnostics", MAX_COLLECTION).map((item, index) => parseDiagnostic(item, `diagnostics[${index}]`));
   assertSorted(resources, "resources", compareResourceDtos);
   assertSorted(diagnostics, "diagnostics", compareDiagnosticDtos);
-  return { resources, diagnostics };
+  const resourceCompleteness = parseCollectionCompleteness(value, resources.length, "resourceTotal", "resourcesTruncated");
+  const diagnosticCompleteness = parseCollectionCompleteness(value, diagnostics.length, "diagnosticTotal", "diagnosticsTruncated");
+  return {
+    resources,
+    diagnostics,
+    resourceTotal: resourceCompleteness.total,
+    resourcesTruncated: resourceCompleteness.truncated,
+    diagnosticTotal: diagnosticCompleteness.total,
+    diagnosticsTruncated: diagnosticCompleteness.truncated,
+  };
 }
 export function parseCommandsResult(input: unknown): CommandsResult {
-  const value = object(input, "commands result"); exact(value, ["commands"]);
+  const value = object(input, "commands result"); exact(value, ["commands", "total", "truncated"]);
   const commands = array(value.commands, "commands", MAX_COLLECTION).map((item, index) => parseCommand(item, `commands[${index}]`));
   assertSorted(commands, "commands", compareCommandDtos);
-  return { commands };
+  return { commands, ...parseCollectionCompleteness(value, commands.length) };
+}
+
+function parseCollectionCompleteness(
+  value: Record<string, unknown>,
+  returned: number,
+  totalField = "total",
+  truncatedField = "truncated",
+): { total: number; truncated: boolean } {
+  const total = value[totalField] === undefined ? returned : unsigned(value[totalField], totalField);
+  const truncated = value[truncatedField] === undefined ? false : boolean(value[truncatedField], truncatedField);
+  if (total < returned || truncated !== (returned < total)) {
+    throw validation("invalid_response", `${totalField}/${truncatedField} collection metadata is inconsistent`);
+  }
+  return { total, truncated };
 }
 
 function parseReceipt(input: unknown): CommandReceipt {

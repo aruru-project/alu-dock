@@ -145,7 +145,7 @@ def main() -> int:
             elif action == "hub-adopt":
                 os.write(fd, b"\x1b[B\x1b[B\x1b[B\r")  # Pi Sessions is fourth.
                 inventory_deadline = time.monotonic() + 5
-                while b"Choose a saved session" not in output and time.monotonic() < inventory_deadline:
+                while b"Pi session inventory incomplete" not in output and time.monotonic() < inventory_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\r")  # Select the only persisted session.
@@ -396,8 +396,8 @@ def main() -> int:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 if b"expanded tool detail" not in output:
-                    os.write(fd, b"\x1b[6~")  # PageDown through detail when narrow chrome leaves fewer rows.
-                    expand_deadline = time.monotonic() + 2
+                    os.write(fd, b"\x1b[6~\x1b[1;5F")  # PageDown/Ctrl+End reveal the expanded tail in narrow chrome.
+                    expand_deadline = time.monotonic() + 5
                     while b"expanded tool detail" not in output and time.monotonic() < expand_deadline:
                         if read_available(fd, output, 0.05) < 0:
                             break

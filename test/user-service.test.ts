@@ -101,6 +101,37 @@ test("service install refuses to overwrite a non-generated user unit", async () 
   assert.equal(await readFile(manager.unitFile, "utf8"), "[Service]\nExecStart=/bin/false\n");
 });
 
+test("service readiness fails immediately on a definitive protocol error", async () => {
+  const home = await mkdtemp(join(tmpdir(), "alu-dock-service-protocol-"));
+  let sleeps = 0;
+  const run: ServiceCommandRunner = (executable, args) => {
+    if (executable === "systemctl" && args[1] === "show") {
+      return { status: 0, stdout: "ActiveState=active\nSubState=running\nMainPID=99\nUnitFileState=enabled\n", stderr: "" };
+    }
+    return { status: 0, stdout: "", stderr: "" };
+  };
+  let probeCalls = 0;
+  const manager = new UserServiceManager({
+    home,
+    nodePath: "/opt/node/bin/node",
+    cliPath: "/srv/alu-dock/dist/src/cli.js",
+    socketPath: join(home, "dock.sock"),
+    timeoutMs: 15_000,
+    run,
+    probe: async () => {
+      probeCalls += 1;
+      if (probeCalls === 1) throw new ControlClientError("connection_error", "not started yet");
+      throw new ControlClientError("invalid_response", "managed hello is malformed");
+    },
+    sleep: async () => { sleeps += 1; },
+  });
+  await manager.install(false);
+  await assert.rejects(manager.start(), (error: unknown) => error instanceof ControlClientError
+    && error.code === "invalid_response"
+    && error.message === "managed hello is malformed");
+  assert.equal(sleeps, 0);
+});
+
 test("service readiness requires MainPID match and complete managed capabilities", async () => {
   const home = await mkdtemp(join(tmpdir(), "alu-dock-service-pid-"));
   const run: ServiceCommandRunner = (executable, args) => {

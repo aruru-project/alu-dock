@@ -218,7 +218,7 @@ export class UserServiceManager {
     try { return await this.probe(); }
     catch (error) {
       if (error instanceof ControlClientError && ["connection_error", "connection_closed", "timeout"].includes(error.code)) return undefined;
-      return undefined;
+      throw error;
     }
   }
 

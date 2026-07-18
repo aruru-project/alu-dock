@@ -91,6 +91,16 @@ DockClient
 - Human CLI不直接输出raw protocol error JSON。
 - Human CLI、Protocol V2 machine control与Pi-registered model tools是独立surface；Agent不得通过自身CLI形成self-loop。
 
+## Bounds 与显式降级
+
+- Protocol V2 单条 JSONL 记录上限是 1 MiB；runtime message/tool JSON 先在 Core 按节点、字段和聚合字节预算投影，超出内容写入 `omittedFields` 或明确的 Host truncation marker，不能把 oversized live event 留成反复断流的 poison event。
+- `projection.completeness.v1` 为 model、tool、resource、diagnostic、command 与 Pi-session list 返回 `total`/`truncated`；新 DockClient 必须协商该能力并在 Work 中提示不完整投影。Host 对未协商该能力的旧客户端保留 legacy result shape，且 operation receipt 永远缓存能力无关的 canonical result。
+- `session.inventory-diagnostics.v1` 区分“确实没有 saved session”与 JSONL root/directory/file 扫描失败；结果带 `incomplete`、bounded diagnostics 和 `diagnosticsTruncated`。Hub/Resume 必须显示该事实，不能把失败说成空 inventory。
+- Attach 初始化期间只保留 1,000 个 handoff event；超过时 Host 返回 `attach_initial_overflow` 与 reconnect 指引，不得无诊断关闭。client initial-callback handoff 的同类溢出使用 `event_handoff_overflow`。
+- Same-Host operation ledger 只保留最近 1,000 个完整 receipt，但将更早 operation ID 的 SHA-256 mutation fingerprint 保留到 Host 退出；重复旧 ID 返回 `operation_receipt_expired` 或 `operation_conflict`，绝不因 receipt 淘汰重做副作用。Host restart/hostEpoch 变化仍是新的 operation domain。
+- Session inventory 当前由稳定排序后的 2,000-item / 512 KiB 双界限约束并返回 `total/truncated`；catalog list、history 与 tree 使用各自 cursor。超过无 cursor inventory/config projection 的尾部在 V0.1 不可选，必须在 UI 明示，不能默认为完整。
+- Durable catalog 的 10,000-record / 16 MiB 是显式 fail-closed 维护边界；达到前应通过 History Forget / stopped prune 缩减，Host 不静默删除记录。
+
 ## 默认不读
 
 - `src/tui/*`：除非改human interactive flow。

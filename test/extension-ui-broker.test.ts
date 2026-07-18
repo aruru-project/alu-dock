@@ -150,12 +150,15 @@ test("notifications, statuses, widgets, and overflow remain closed and bounded",
   broker.notify("data:image/png;base64,A0+/A0+/", "info");
   broker.setStatus("binary", `attachment: ${rawBase64}`);
   broker.setWidget("binary", [rawBase64]);
+  broker.setWidget("oversized", Array.from({ length: 33 }, () => "x".repeat(8_000)));
   assert.deepEqual(broker.projection().extensionStatus, {
     binary: "[binary/image payload omitted]",
     workerstatus: "busynow",
   });
   assert.equal(events.some((event) => event.type === "extension.notification" && (event.data as { message?: string }).message === "hello[2J"), true);
   assert.equal(events.some((event) => event.type === "extension.widget_changed" && (event.data as { placement?: string }).placement === "belowEditor"), true);
+  assert.equal(events.some((event) => event.type === "extension.widget_changed" && (event.data as { key?: string }).key === "oversized"), false);
+  assert.equal(events.some((event) => event.type === "extension.error" && /widget payload exceeds/u.test(String((event.data as { error?: string }).error))), true);
   assert.equal(JSON.stringify(events).includes("data:image/png;base64"), false);
   assert.equal(JSON.stringify(events).includes(rawBase64), false);
 
