@@ -16,7 +16,7 @@ import { ProjectTrustCoordinator } from "../src/control/project-trust.js";
 import { ExtensionUiBroker } from "../src/core/extension-ui-broker.js";
 import { ManagedInstance, type DockEvent, type SessionDto } from "../src/core/managed-instance.js";
 import { SETTING_KEYS } from "../src/core/config-projection.js";
-import { RuntimeCompactionKnownFailureError, RuntimeInvalidSettingValueError, RuntimeSettingsWriteError, type RuntimePromptOptions } from "../src/core/runtime-session.js";
+import { RuntimeCompactionKnownFailureError, RuntimeInvalidSettingValueError, RuntimeSettingsWriteError, type RuntimeHistoryEntry, type RuntimePromptOptions } from "../src/core/runtime-session.js";
 import { mouseTrackingSequences } from "../src/tui/mouse-input.js";
 import { DelayedRuntimeSession } from "./support/delayed-runtime-session.js";
 import { ScriptedCatalogCommitPort } from "./support/scripted-catalog-port.js";
@@ -2359,6 +2359,139 @@ test("typed list rejects a non-progressing continuation without issuing another 
     (error: unknown) => error instanceof ControlClientError && error.code === "invalid_response",
   );
   assert.equal(listRequests, 1);
+});
+
+test("an LF-truncated control response is reported as recoverable connection loss", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-partial-frame-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const capabilities = ["core.v2", "events.follow", "instance.catalog", "queue.control.v1", "run.abort.v1", "tui.projection.v1"];
+  const server = createServer((socket) => {
+    const decoder = new JsonLineDecoder();
+    socket.on("data", (chunk: Buffer) => {
+      for (const line of decoder.push(chunk)) {
+        const frame = objectValue(JSON.parse(line) as unknown);
+        if (frame.kind === "hello") {
+          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 8, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "partial-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities, limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
+        } else socket.end('{"kind":"response"');
+      }
+    });
+  });
+  await listen(server, socketPath);
+  context.after(async () => { await close(server); await rm(directory, { recursive: true, force: true }); });
+
+  const client = new DockClient({ socketPath });
+  await assert.rejects(
+    client.streamEvents("partial-instance", { onEvent: () => {}, requireTuiProjection: true }),
+    (error: unknown) => error instanceof ControlClientError
+      && error.code === "connection_closed"
+      && /reconnect to recover current state/u.test(error.message)
+      && !/LF terminator/u.test(error.message),
+  );
+  await assert.rejects(
+    client.create(directory, undefined, "partial-mutation"),
+    (error: unknown) => error instanceof ControlClientError
+      && error.code === "effect_unknown"
+      && error.operationId === "partial-mutation",
+  );
+});
+
+test("large history and attach projections stay complete JSONL frames and retain newest history", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "large history", "large-history-create");
+  const runtime = harness.sessions.get(created.id)!;
+  const blocks = Array.from({ length: 180 }, (_, index) => ({ type: "text", text: `${String(index).padStart(3, "0")}:${"x".repeat(7_900)}` }));
+  runtime.history = Array.from({ length: 4 }, (_, index): RuntimeHistoryEntry => ({
+    entryId: `large-history-${index + 1}`,
+    timestamp: `2026-07-14T00:00:0${index}.000Z`,
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: blocks,
+  }));
+  runtime.settle("history refreshed");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const history = await client.history(created.id);
+  assert.ok(history.entries.length > 0 && history.entries.length < runtime.history.length, `returned ${history.entries.length} of ${runtime.history.length}`);
+  assert.equal(history.entries.at(-1)?.entryId, "large-history-4");
+  assert.equal(history.hasEarlier, true);
+  assert.equal(history.nextBeforeEntryId, history.entries[0]?.entryId);
+  assert.match(JSON.stringify(history.entries[0]?.content), /History content truncated/u);
+
+  const subscription = await client.streamEvents(created.id, { onEvent: () => {}, requireTuiProjection: true });
+  assert.ok(subscription.initial.recentHistory.length > 0);
+  assert.equal(subscription.initial.recentHistory.at(-1)?.entryId, "large-history-4");
+  assert.equal(subscription.initial.historyTruncated, true);
+  assert.match(JSON.stringify(subscription.initial.recentHistory[0]?.content), /History content truncated/u);
+  subscription.close();
+  await subscription.done;
+});
+
+test("slow attach readers receive only LF-complete frames across live-event backpressure", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "slow reader", "slow-reader-create");
+  harness.sessions.get(created.id)!.settle("ready");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const socket = createConnection(harness.socketPath);
+  const decoder = new JsonLineDecoder();
+  const frames: string[] = [];
+  let finishError: unknown;
+  let streamFinished = false;
+  const finished = new Promise<void>((resolve) => {
+    const finish = (): void => {
+      if (streamFinished) return;
+      streamFinished = true;
+      try { decoder.finish(); } catch (error) { finishError = error; }
+      resolve();
+    };
+    socket.on("data", (chunk: Buffer) => frames.push(...decoder.push(chunk)));
+    socket.once("end", finish);
+    socket.once("close", finish);
+  });
+  await new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
+  socket.write(encodeJsonLine({
+    kind: "hello", requestId: "slow-hello", versions: [2],
+    client: { name: "slow-reader-test", version: "0.1.0", clientId: "slow-reader-client" },
+    requiredCapabilities: ["core.v2", "events.follow"],
+  }));
+  const waitForFrames = async (count: number): Promise<void> => {
+    const deadline = Date.now() + 5_000;
+    while (frames.length < count && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.ok(frames.length >= count, `expected ${count} frames, received ${frames.length}`);
+  };
+  await waitForFrames(1);
+  socket.write(encodeJsonLine({ kind: "request", version: 2, requestId: "slow-attach", type: "instance.attach", params: { instanceId: created.id, follow: true, controller: "observe" } }));
+  await waitForFrames(2);
+  socket.pause();
+
+  const runtime = harness.sessions.get(created.id)!;
+  for (let index = 0; index < 180; index += 1) {
+    runtime.emit({
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "text_delta",
+        contentIndex: 0,
+        delta: `${String(index).padStart(3, "0")}:${"q".repeat(7_900)}`,
+        partial: { role: "assistant", content: [] },
+      },
+    });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 1_200));
+  socket.resume();
+  await Promise.race([finished, new Promise<void>((_, reject) => {
+    const timeout = setTimeout(() => reject(new Error("slow stream did not finish")), 10_000);
+    timeout.unref();
+  })]);
+
+  assert.equal(finishError, undefined);
+  assert.ok(frames.length > 2);
+  for (const frame of frames) assert.doesNotThrow(() => JSON.parse(frame));
 });
 
 test("post-send mutation transport loss is effect_unknown with caller operation ID, while reads stay transport errors", async (context) => {

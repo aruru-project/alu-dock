@@ -65,6 +65,7 @@ import {
   type ControlResponse,
   type EventsResult,
   type HelloError,
+  type HistoryResult,
   parseClientHello,
   parseControlRequest,
   ProtocolValidationError,
@@ -74,7 +75,7 @@ const MAX_SOCKET_WRITE_BUFFER = MAX_CONTROL_LINE_BYTES;
 const MAX_SESSION_INVENTORY_RESULT_BYTES = 512 * 1_024;
 const MAX_SESSION_INVENTORY_ITEMS = 2_000;
 const MAX_INITIAL_EVENT_QUEUE = 1_000;
-const BACKPRESSURE_CLOSE_TIMEOUT_MS = 1_000;
+const ATTACH_DRAIN_TIMEOUT_MS = 5_000;
 
 type HostState = "new" | "starting" | "running" | "mutation_faulted" | "draining" | "stopping" | "stopped";
 type WriteOutcome = "written" | "backpressured" | "failed" | "too_large";
@@ -484,7 +485,7 @@ export class DockHost {
       }
       case "resource.get": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getResources()); return; }
       case "command.catalog": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{commands:await instance.getCommands(request.params.prefix)}); return; }
-      case "session.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getHistoryPage(request.params.beforeEntryId,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
+      case "session.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getHistoryPage(request.params.beforeEntryId,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,createBoundedHistoryResult(page,request.requestId,this.hostEpoch)); return; }
       case "session.inventory": {
         const sessions = await this.sessionInventory.list(request.params.cwd, request.params.scope);
         this.sendSuccessAndEnd(socket, request.requestId, boundedSessionInventory(sessions, request.params));
@@ -503,14 +504,14 @@ export class DockHost {
     const follow=request.params.follow;
     let initializing=true,pending:DockEvent[]=[]; let lastGeneration=instance.runtimeGeneration,lastSent=0; let unsubscribe=()=>{};
     let controller:ControllerClaim|{status:"observing"}=request.params.controller==="observe"?{status:"observing"}:{status:"unavailable"};
-    let controllerReleased=false;
+    let controllerReleased=false,subscriptionClosed=false;
     const releaseController=():void=>{
       if(controllerReleased||controller.status!=="acquired")return;
       controllerReleased=true;
       void instance.releaseInteractionController(controller.leaseToken,"detach");
     };
-    const closeSubscription=():void=>{unsubscribe();releaseController();};
-    const closeAfterBackpressure=():void=>{closeSubscription();if(!socket.writableNeedDrain){socket.end();return;}const timeout=setTimeout(()=>socket.destroy(),BACKPRESSURE_CLOSE_TIMEOUT_MS);socket.once("drain",()=>{clearTimeout(timeout);if(!socket.destroyed)socket.end();});socket.once("close",()=>clearTimeout(timeout));};
+    const closeSubscription=():void=>{if(subscriptionClosed)return;subscriptionClosed=true;unsubscribe();releaseController();};
+    const closeAfterBackpressure=():void=>{closeSubscription();if(!socket.destroyed&&!socket.writableEnded)socket.end();};
     const sendLiveEvent=(event:DockEvent):boolean=>{
       if(event.runtimeGeneration<lastGeneration)return true;
       if(event.runtimeGeneration>lastGeneration){
@@ -520,15 +521,21 @@ export class DockHost {
       if(event.sequence<=lastSent)return true;
       const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event);if(outcome==="written"||outcome==="backpressured")lastSent=event.sequence;if(outcome==="written")return true;if(outcome==="backpressured")closeAfterBackpressure();else{closeSubscription();socket.destroy();}return false;
     };
-    unsubscribe=instance.subscribe(event=>{if(initializing){pending.push(event);if(pending.length>MAX_INITIAL_EVENT_QUEUE){pending=[];closeSubscription();socket.destroy();}return;}sendLiveEvent(event);});
+    unsubscribe=instance.subscribe(event=>{if(initializing){pending.push(event);if(pending.length>MAX_INITIAL_EVENT_QUEUE){pending=[];closeAfterBackpressure();}return;}sendLiveEvent(event);});
     if(follow&&request.params.controller==="claim")controller=await instance.claimInteractionController();
+    if(subscriptionClosed){releaseController();initializing=false;pending=[];return;}
     setEventUnsubscribe(closeSubscription);
     if(socket.destroyed){closeSubscription();return;}
     let projection:AttachProjection;
     try{projection=await instance.getAttachProjection(cursor,MAX_HISTORY_ITEMS);}catch(error){initializing=false;pending=[];closeSubscription();throw error;}
     const result=createBoundedEventsResult(projection,follow,request.requestId,controller);
     const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,result));
-    if(responseOutcome!=="written"){initializing=false;pending=[];if(responseOutcome==="backpressured")closeAfterBackpressure();else if(responseOutcome==="too_large"){closeSubscription();this.sendErrorAndEnd(socket,"response_too_large","Attach response exceeds the JSONL record limit",request.requestId);}else closeSubscription();return;}
+    if(responseOutcome==="backpressured"){
+      const drained=await waitForSocketDrain(socket,ATTACH_DRAIN_TIMEOUT_MS);
+      if(!drained||subscriptionClosed){initializing=false;pending=[];closeAfterBackpressure();return;}
+    }else if(responseOutcome!=="written"){
+      initializing=false;pending=[];if(responseOutcome==="too_large"){closeSubscription();this.sendErrorAndEnd(socket,"response_too_large","Attach response exceeds the JSONL record limit",request.requestId);}else closeSubscription();return;
+    }
     lastGeneration=result.instance.runtimeGeneration;lastSent=Math.max(projection.replaySince,result.page.latest.sequence);initializing=false;pending.sort((a,b)=>a.runtimeGeneration-b.runtimeGeneration||a.sequence-b.sequence);for(const event of pending){if(!sendLiveEvent(event))return;}pending=[];if(!follow){closeSubscription();socket.end();}
   }
 
@@ -591,12 +598,36 @@ function boundedSessionInventory(
 }
 
 function successResponse(requestId:string,hostEpoch:string,result:unknown):ControlResponse { return {kind:"response",version:2,requestId,hostEpoch,ok:true,result}; }
+function createBoundedHistoryResult(source:HistoryResult,requestId:string,hostEpoch:string):HistoryResult {
+  let entries=source.entries;
+  while(entries.length>0){
+    const hasEarlier=source.hasEarlier||entries.length<source.entries.length;
+    const candidate:HistoryResult={entries,hasEarlier,...(hasEarlier&&entries[0]?{nextBeforeEntryId:entries[0].entryId}:{}),instance:source.instance};
+    if(encodedSize(successResponse(requestId,hostEpoch,candidate))<=MAX_CONTROL_LINE_BYTES)return candidate;
+    if(entries.length===1){
+      entries=[slimHistoryEntry(entries[0]!)];
+      const slim:HistoryResult={entries,hasEarlier,...(hasEarlier?{nextBeforeEntryId:entries[0]!.entryId}:{}),instance:source.instance};
+      return slim;
+    }
+    entries=entries.slice(1);
+  }
+  return {entries:[],hasEarlier:false,instance:source.instance};
+}
+function slimHistoryEntry(entry:HistoryResult["entries"][number]):HistoryResult["entries"][number] {
+  const marker="[History content truncated to fit the control response]";
+  const first=entry.content[0];
+  if(first?.type==="tool_result")return {...entry,content:[{...first,text:marker,omittedFields:[...(first.omittedFields??[]),"/content"]}]};
+  if(first?.type==="tool_call")return {...entry,content:[{...first,args:{},omittedFields:[...(first.omittedFields??[]),"/arguments"]},{type:"text",text:marker}]};
+  if(first?.type==="thinking")return {...entry,content:[{type:"thinking",text:marker}]};
+  return {...entry,content:[{type:"text",text:marker}]};
+}
 function createBoundedEventsResult(projection:AttachProjection,following:boolean,requestId:string,controller:ControllerClaim|{status:"observing"}):EventsResult {
   const source=projection.page;
   let events=source.events;
   let truncated=source.truncated;
   let history=projection.recentHistory;
   let historyTruncated=projection.historyTruncated;
+  let historySlimmed=false;
   if(events.length>MAX_REPLAY_EVENTS){events=events.slice(-MAX_REPLAY_EVENTS);truncated=true;}
   let earliest=events.length>0&&truncated?{...source.earliest,sequence:events[0]!.sequence}:source.earliest;
   while(true){
@@ -604,7 +635,9 @@ function createBoundedEventsResult(projection:AttachProjection,following:boolean
     const result:EventsResult={instance:projection.instance,page,recentHistory:history,historyTruncated,pendingMessages:projection.pendingMessages,controller,following};
     const hostEpoch=projection.instance.ownerHostEpoch??source.latest.hostEpoch;
     if(encodedSize(successResponse(requestId,hostEpoch,result))<=MAX_CONTROL_LINE_BYTES)return result;
-    if(history.length>0){history=history.slice(1);historyTruncated=true;continue;}
+    if(history.length>1){history=history.slice(1);historyTruncated=true;continue;}
+    if(history.length===1&&!historySlimmed){history=[slimHistoryEntry(history[0]!)];historyTruncated=true;historySlimmed=true;continue;}
+    if(history.length===1){history=[];historyTruncated=true;continue;}
     if(events.length>0){
       events=events.slice(1);truncated=true;
       earliest={...source.latest,sequence:events[0]?.sequence??source.latest.sequence};
@@ -626,10 +659,6 @@ function writeEnvelope(socket: Socket, envelope: unknown): WriteOutcome {
   }
   const bytes = Buffer.byteLength(encoded, "utf8");
   if (bytes > MAX_CONTROL_LINE_BYTES) return "too_large";
-  if (socket.writableLength + bytes > MAX_SOCKET_WRITE_BUFFER) {
-    socket.destroy();
-    return "failed";
-  }
   try {
     return socket.write(encoded) ? "written" : "backpressured";
   } catch {
@@ -649,10 +678,6 @@ function endEnvelope(socket: Socket, envelope: ControlResponse): WriteOutcome {
   }
   const bytes = Buffer.byteLength(encoded, "utf8");
   if (bytes > MAX_CONTROL_LINE_BYTES) return "too_large";
-  if (socket.writableLength + bytes > MAX_SOCKET_WRITE_BUFFER) {
-    socket.destroy();
-    return "failed";
-  }
   try {
     socket.end(encoded);
     return "written";
@@ -660,6 +685,30 @@ function endEnvelope(socket: Socket, envelope: ControlResponse): WriteOutcome {
     socket.destroy();
     return "failed";
   }
+}
+
+function waitForSocketDrain(socket: Socket, timeoutMs: number): Promise<boolean> {
+  if (socket.destroyed || socket.writableEnded) return Promise.resolve(false);
+  if (!socket.writableNeedDrain) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (drained: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      socket.off("drain", onDrain);
+      socket.off("close", onClose);
+      socket.off("error", onClose);
+      resolve(drained);
+    };
+    const onDrain = (): void => finish(true);
+    const onClose = (): void => finish(false);
+    const timeout = setTimeout(() => finish(false), timeoutMs);
+    timeout.unref();
+    socket.once("drain", onDrain);
+    socket.once("close", onClose);
+    socket.once("error", onClose);
+  });
 }
 
 function encodedSize(value: unknown): number {

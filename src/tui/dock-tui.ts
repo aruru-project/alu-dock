@@ -173,6 +173,8 @@ export async function runDockTui(
   instance = subscription.initial.instance;
   lastEventGeneration = subscription.initial.page.latest.runtimeGeneration;
   lastEventSequence = subscription.initial.page.latest.sequence;
+  const initialHistoryNeedsReload = subscription.initial.historyTruncated
+    && subscription.initial.recentHistory.length === 0;
   historyWindow.reset(
     subscription.initial.recentHistory,
     subscription.initial.historyTruncated,
@@ -1731,6 +1733,7 @@ export async function runDockTui(
   watchEventSubscription(subscription);
 
   tui.start();
+  if (initialHistoryNeedsReload) void reloadLatestHistoryAfterCursorError();
   activityPulse.setEnabled(true);
   updateTerminalProgress();
   const reason = await exit;

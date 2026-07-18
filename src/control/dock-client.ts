@@ -7,7 +7,7 @@ import type { RuntimeThinkingLevel } from "../core/runtime-session.js";
 import type { SettingUpdate } from "../core/config-projection.js";
 import type { ProjectTrustChoice } from "./project-trust.js";
 import { DOCK_VERSION } from "../version.js";
-import { encodeJsonLine, JsonLineDecoder } from "./json-lines.js";
+import { encodeJsonLine, JsonLineDecoder, JsonLineError } from "./json-lines.js";
 import {
   CONTROL_PROTOCOL_VERSION,
   MAX_INSTANCE_LIST_ITEMS,
@@ -259,7 +259,10 @@ export class DockClient {
       };
       socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,requiredCapabilities(capability)))));
       socket.on("data",(chunk:Buffer)=>{try{for(const line of decoder.push(chunk))consume(line);}catch(error){finish(error);}});
-      socket.once("end",()=>{try{decoder.finish();}catch(error){finish(error);}});
+      socket.once("end",()=>{try{decoder.finish();}catch(error){
+        if(error instanceof JsonLineError&&error.code==="incomplete_record")finishTransport(normalizeClientError(error));
+        else finish(error);
+      }});
       socket.once("error",error=>finishTransport(transportError(error)));
       socket.once("close",()=>{if(!settled)finishTransport(new ControlClientError("connection_closed","Host closed before responding"));});
     });
@@ -340,5 +343,5 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
     if(type==="instance.reopen"&&record.operationId!==params.operationId)throw new ProtocolValidationError("invalid_response","Reopen operationId does not match request operationId");
   }
 }
-function normalizeClientError(e:unknown):ControlClientError{if(e instanceof ControlClientError)return e;if(e instanceof ProtocolValidationError)return new ControlClientError(e.code==="unsupported_protocol"?"protocol_incompatible":e.code,e.message);if(e instanceof Error)return new ControlClientError("invalid_response",e.message);return new ControlClientError("invalid_response",String(e));}
+function normalizeClientError(e:unknown):ControlClientError{if(e instanceof ControlClientError)return e;if(e instanceof JsonLineError&&e.code==="incomplete_record")return new ControlClientError("connection_closed","Host connection closed during a control response; reconnect to recover current state");if(e instanceof ProtocolValidationError)return new ControlClientError(e.code==="unsupported_protocol"?"protocol_incompatible":e.code,e.message);if(e instanceof Error)return new ControlClientError("invalid_response",e.message);return new ControlClientError("invalid_response",String(e));}
 function transportError(e:Error):ControlClientError{const code=(e as NodeJS.ErrnoException).code;return new ControlClientError("connection_error",`${code?`${code}: `:""}${e.message}`);}
