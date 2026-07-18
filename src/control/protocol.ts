@@ -61,6 +61,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "catalog.v1",
   "core.v2",
   "events.follow",
+  "events.replay-purpose.v1",
   "extension_ui.v1",
   "host.info",
   "instance.catalog",
@@ -123,7 +124,7 @@ export type ControlRequest =
   | Request<"instance.adopt", { operationId: string; sessionFile: string; name?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.list", { selector: "actionable" | "all"; cursor?: InstanceListCursor; limit: number }>
   | Request<"instance.get", { instanceId: string }>
-  | Request<"instance.attach", { instanceId: string; since?: EventCursor; follow: boolean; controller: "claim" | "observe" }>
+  | Request<"instance.attach", { instanceId: string; since?: EventCursor; follow: boolean; controller: "claim" | "observe"; replay?: "event_log" | "conversation_bootstrap" }>
   | Request<"instance.stop", { operationId: string; instanceId: string }>
   | Request<"instance.forget", { operationId: string; instanceId: string }>
   | Request<"catalog.prune", { operationId: string; selector: "stopped" }>
@@ -241,7 +242,11 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   return "models.v1";
 }
 export function requiredCapabilities(capability: Capability): string[] {
-  return [...new Set<Capability>(["core.v2", capability])];
+  return [...new Set<Capability>([
+    "core.v2",
+    ...(capability === "events.replay-purpose.v1" ? ["events.follow" as const] : []),
+    capability,
+  ])];
 }
 export function createHelloAck(requestId: string, host: HostIdentity): HelloAck {
   return {
@@ -362,11 +367,14 @@ export function parseControlRequest(input: unknown): ControlRequest {
     };
     case "instance.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "instance.attach": {
-      exact(params, ["instanceId", "since", "follow", "controller"], "invalid_request");
+      exact(params, ["instanceId", "since", "follow", "controller", "replay"], "invalid_request");
       const follow = boolean(params.follow, "params.follow", "invalid_request");
       const controller = enumeration(params.controller, "params.controller", ["claim", "observe"], "invalid_request");
+      const replay = params.replay === undefined ? undefined : enumeration(params.replay, "params.replay", ["event_log", "conversation_bootstrap"], "invalid_request");
+      const since = params.since === undefined ? undefined : parseCursor(params.since, "params.since", "invalid_request");
       if (controller === "claim" && !follow) throw validation("invalid_request", "controller claim requires a follow attach stream");
-      return { ...base, type, params: { instanceId: instanceId(), since: params.since === undefined ? undefined : parseCursor(params.since, "params.since", "invalid_request"), follow, controller } };
+      if (replay === "conversation_bootstrap" && (since !== undefined || !follow)) throw validation("invalid_request", "conversation bootstrap requires a fresh follow stream without a cursor");
+      return { ...base, type, params: { instanceId: instanceId(), since, follow, controller, ...(replay === undefined ? {} : { replay }) } };
     }
     case "instance.stop": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "instance.forget": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };

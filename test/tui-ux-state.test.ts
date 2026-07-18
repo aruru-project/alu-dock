@@ -22,6 +22,7 @@ import {
 import { filterSearchableItems } from "../src/tui/search-filter.js";
 import { SearchablePicker } from "../src/tui/searchable-picker.js";
 import { SessionTreeSurface } from "../src/tui/session-tree-surface.js";
+import { FixedActionDialog, WorkModalFrame } from "../src/tui/work-modal.js";
 import type { TreeNodeDto } from "../src/core/instance-dto.js";
 
 function event(sequence: number, type: DockEvent["type"], data: Record<string, unknown>): DockEvent {
@@ -393,6 +394,33 @@ test("dedicated tree surface handles filters, search clearing, branch keys, and 
   surface.handleInput("\r");
   assert.ok(selected);
   assert.ok(renders > 0);
+});
+
+test("fixed Work actions have a visible modal boundary, target context, and no search field", () => {
+  let selected: string | undefined;
+  let cancelled = 0;
+  const dialog = new FixedActionDialog("Branch action", ["Target: user: verify Windows input", "user · d2b26f41"], [
+    { value: "navigate", label: "Navigate directly", description: "Switch without summarization." },
+    { value: "summary", label: "Navigate with summary", description: "Ask Pi to summarize first." },
+    { value: "custom", label: "Summary with additional instructions" },
+    { value: "replace", label: "Summary with replacement instructions" },
+  ], "navigate");
+  dialog.onSelect = (value) => { selected = value; };
+  dialog.onCancel = () => { cancelled += 1; };
+  const frame = new WorkModalFrame(dialog);
+  frame.focused = true;
+  const rendered = frame.render(80).join("\n");
+  assert.match(rendered, /^╭─/u);
+  assert.match(rendered, /Target: user: verify Windows input/u);
+  assert.match(rendered, /Navigate directly/u);
+  assert.doesNotMatch(rendered, /Search|type to filter/u);
+  assert.ok(frame.render(43).every((line) => visibleWidth(line) <= 43));
+  assert.ok(frame.render(43).length <= 15);
+  frame.handleInput("\x1b[B");
+  frame.handleInput("\r");
+  assert.equal(selected, "summary");
+  frame.handleInput("\x1b");
+  assert.equal(cancelled, 1);
 });
 
 test("tree picker uses left/right and page keys for clamped page movement", () => {

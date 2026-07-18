@@ -37,6 +37,7 @@ import {
   parseResourcesResult,
   parseCommandsResult,
   ProtocolValidationError,
+  requiredCapabilities,
 } from "../src/control/protocol.js";
 import { SETTING_DEFINITIONS, SETTING_KEYS, type SettingKey, type SettingValueMap } from "../src/core/config-projection.js";
 
@@ -104,6 +105,28 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
     type: "instance.attach",
     params: { instanceId: "i1", follow: false, controller: "claim" },
   }), /requires a follow attach stream/);
+  const legacyAttach = parseControlRequest({
+    ...base,
+    type: "instance.attach",
+    params: { instanceId: "i1", follow: true, controller: "observe" },
+  });
+  assert.equal(legacyAttach.type === "instance.attach" && "replay" in legacyAttach.params, false);
+  const conversationAttach = parseControlRequest({
+    ...base,
+    type: "instance.attach",
+    params: { instanceId: "i1", follow: true, controller: "observe", replay: "conversation_bootstrap" },
+  });
+  assert.equal(conversationAttach.type === "instance.attach" ? conversationAttach.params.replay : undefined, "conversation_bootstrap");
+  assert.throws(() => parseControlRequest({
+    ...base,
+    type: "instance.attach",
+    params: { instanceId: "i1", follow: false, controller: "observe", replay: "conversation_bootstrap" },
+  }), /requires a fresh follow stream/);
+  assert.throws(() => parseControlRequest({
+    ...base,
+    type: "instance.attach",
+    params: { instanceId: "i1", since: { hostEpoch: "e1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, follow: true, controller: "observe", replay: "conversation_bootstrap" },
+  }), /without a cursor/);
   assert.throws(() => parseControlRequest({
     ...base,
     type: "command.submit",
@@ -146,6 +169,7 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   assert.throws(() => parseControlRequest({ ...base, type: "instance.list", params: { selector: "all", limit: 101 } }), /must not exceed 100/u);
   assert.equal(capabilityForRequest("instance.adopt"), "session.adopt.v1");
   assert.equal(capabilityForRequest("session.inventory"), "session.inventory.v1");
+  assert.deepEqual(requiredCapabilities("events.replay-purpose.v1"), ["core.v2", "events.follow", "events.replay-purpose.v1"]);
 
   const adopted = parseControlRequest({
     ...base,

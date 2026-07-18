@@ -149,9 +149,23 @@ export class DockConversation implements Component {
   }
 
   applyReplay(events: DockEvent[], _truncated: boolean): void {
-    // Persisted Pi history is the conversation truth. A bounded Host event-ring
-    // gap only limits transient reconstruction and must not look like data loss.
+    // Cursor-bound replay is a live delta and must preserve exact event order.
     for (const event of events) this.apply(event);
+  }
+
+  applyBootstrapReplay(events: DockEvent[]): void {
+    // Fresh attach already has branch-scoped persisted history. Only unresolved
+    // message/tool frames from the current Host-owned run may extend it; control
+    // and lifecycle events are state recovery, never durable conversation.
+    for (const event of events) {
+      if (event.type === "message.submitted"
+        || event.type === "message.delta"
+        || event.type === "message.completed"
+        || event.type === "tool.started"
+        || event.type === "tool.args_updated"
+        || event.type === "tool.output_updated"
+        || event.type === "tool.completed") this.apply(event);
+    }
   }
 
   apply(event: DockEvent): void {

@@ -55,6 +55,7 @@ import {
   settingValueChoices,
 } from "./settings-controls.js";
 import { editorTheme, paint } from "./theme.js";
+import { FixedActionDialog, WorkModalFrame } from "./work-modal.js";
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly RuntimeThinkingLevel[];
 
@@ -168,7 +169,7 @@ export async function runDockTui(
     tui.requestRender();
   };
 
-  subscription = await client.streamEvents(instance.id, { onEvent, requireTuiProjection: true, claimController: true });
+  subscription = await client.streamEvents(instance.id, { onEvent, requireTuiProjection: true, claimController: true, conversationBootstrap: true });
   instance = subscription.initial.instance;
   lastEventGeneration = subscription.initial.page.latest.runtimeGeneration;
   lastEventSequence = subscription.initial.page.latest.sequence;
@@ -181,10 +182,7 @@ export async function runDockTui(
   );
   conversation.replacePagedHistory(historyWindow.snapshot());
   pendingQueue.reset(subscription.initial.pendingMessages);
-  conversation.applyReplay(
-    subscription.initial.page.events,
-    subscription.initial.page.truncated,
-  );
+  conversation.applyBootstrapReplay(subscription.initial.page.events);
   status.update(instance);
   runActivity = activityFromReplay(instance, subscription.initial.page.events);
   activity.setActivity(runActivity);
@@ -599,7 +597,37 @@ export async function runDockTui(
     const selection = new Promise<string | undefined>((resolve) => { resolveChoice = resolve; });
     picker.onSelect = (item) => resolveChoice(item.value);
     picker.onCancel = () => resolveChoice(undefined);
-    const overlay = tui.showOverlay(picker, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
+    const frame = new WorkModalFrame(picker);
+    const overlay = tui.showOverlay(frame, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
+    tui.setFocus(frame);
+    try { return await selection; }
+    finally { overlay.hide(); }
+  }
+
+  async function showFixedActions<T extends string>(
+    titleText: string,
+    body: readonly string[],
+    items: Array<{ value: T; label: string; description?: string }>,
+    initialValue?: T,
+  ): Promise<T | undefined> {
+    if (items.length === 0) return undefined;
+    const dialog = new FixedActionDialog(
+      terminalSafe(titleText),
+      body.map(terminalSafe),
+      items.map((item) => ({
+        value: item.value,
+        label: terminalSafe(item.label),
+        ...(item.description === undefined ? {} : { description: terminalSafe(item.description) }),
+      })),
+      initialValue,
+    );
+    let resolveChoice!: (value: T | undefined) => void;
+    const selection = new Promise<T | undefined>((resolve) => { resolveChoice = resolve; });
+    dialog.onSelect = resolveChoice;
+    dialog.onCancel = () => resolveChoice(undefined);
+    const frame = new WorkModalFrame(dialog);
+    const overlay = tui.showOverlay(frame, { width: "90%", minWidth: 44, maxHeight: "88%", anchor: "center", margin: 0 });
+    tui.setFocus(frame);
     try { return await selection; }
     finally { overlay.hide(); }
   }
@@ -643,7 +671,7 @@ export async function runDockTui(
       resolveDialog(outcome);
     };
 
-    let component: SearchablePicker | ExtensionTextDialog;
+    let component: SearchablePicker | FixedActionDialog<"yes" | "no"> | ExtensionTextDialog;
     if (request.method === "select") {
       const picker = new SearchablePicker(
         request.options.map((option) => ({ value: option, label: option })),
@@ -658,20 +686,15 @@ export async function runDockTui(
       picker.onCancel = () => finish({ response: { method: "select", cancelled: true }, fromHost: false });
       component = picker;
     } else if (request.method === "confirm") {
-      const picker = new SearchablePicker([
-        { value: "yes", label: "Yes" },
-        { value: "no", label: "No" },
-      ], {
-        title: request.title,
-        body: request.message,
-        footer: "↑↓ choose · Enter confirm · Esc cancel",
-        maxVisible: 2,
-        initialValue: "no",
-        requestRender: () => tui.requestRender(),
-      });
-      picker.onSelect = (item) => finish({ response: { method: "confirm", confirmed: item.value === "yes" }, fromHost: false });
-      picker.onCancel = () => finish({ response: { method: "confirm", cancelled: true }, fromHost: false });
-      component = picker;
+      const dialog = new FixedActionDialog(
+        request.title,
+        [request.message],
+        [{ value: "yes", label: "Yes" }, { value: "no", label: "No" }],
+        "no",
+      );
+      dialog.onSelect = (value) => finish({ response: { method: "confirm", confirmed: value === "yes" }, fromHost: false });
+      dialog.onCancel = () => finish({ response: { method: "confirm", cancelled: true }, fromHost: false });
+      component = dialog;
     } else {
       const dialog = new ExtensionTextDialog({
         mode: request.method,
@@ -690,13 +713,14 @@ export async function runDockTui(
       interactionId: request.interactionId,
       closeFromHost: () => finish({ fromHost: true }),
     };
-    const overlay = tui.showOverlay(component, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
+    const frame = new WorkModalFrame(component);
+    const overlay = tui.showOverlay(frame, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
+    tui.setFocus(frame);
     try {
       return await result;
     } finally {
       overlay.hide();
       if (activeExtensionDialog?.interactionId === request.interactionId) activeExtensionDialog = undefined;
-      tui.setFocus(editor);
       tui.requestRender();
     }
   }
@@ -728,7 +752,12 @@ export async function runDockTui(
         return;
       }
       const choices = settingValueChoices(setting);
-      const selected = await showChoicePicker(`Set ${setting.key}`, choices, settingChoiceValue(setting));
+      const selected = await showFixedActions(
+        `Set ${setting.key}`,
+        [`Current: ${formatSettingValue(setting.value)} · ${setting.source}`],
+        choices,
+        settingChoiceValue(setting),
+      );
       if (selected === undefined) { activity.setActivity("setting unchanged"); return; }
       const update = parseSettingCommandValue(setting, selected);
       if (!update) {
@@ -842,8 +871,9 @@ export async function runDockTui(
       const result = await client.models(instance.id);
       instance = result.instance;
       status.update(instance);
-      const selected = await showChoicePicker(
+      const selected = await showFixedActions(
         "Thinking level",
+        [`Current: ${instance.executor.thinkingLevel ?? "off"}`],
         result.availableThinkingLevels.map((level) => ({ value: level, label: level })),
         instance.executor.thinkingLevel,
       );
@@ -876,8 +906,9 @@ export async function runDockTui(
     const selection = new Promise<string | undefined>((resolve) => { resolveChoice = resolve; });
     picker.onSelect = (item) => resolveChoice(item.value);
     picker.onCancel = () => resolveChoice(undefined);
-    const overlay = tui.showOverlay(picker, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
-    tui.setFocus(picker);
+    const frame = new WorkModalFrame(picker);
+    const overlay = tui.showOverlay(frame, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
+    tui.setFocus(frame);
 
     void loadSessionTree().then((tree) => {
       if (!active) return;
@@ -901,27 +932,34 @@ export async function runDockTui(
     } finally {
       active = false;
       overlay.hide();
-      tui.setFocus(editor);
     }
   }
 
-  async function chooseSessionTreeNode(initialSelectedId?: string): Promise<{ node: TreeNodeDto; leafId?: string } | undefined> {
+  async function chooseTreeNavigation(): Promise<void> {
+    editor.disableSubmit = true;
+    activity.setActivity("loading session tree");
+    tui.requestRender();
     const configuredFilter = settings.find((setting) => setting.key === "treeFilterMode")?.value;
     const surface = new SessionTreeSurface({
       title: "Navigate session tree",
       initialFilter: isTreeFilterMode(configuredFilter) ? configuredFilter : "default",
-      ...(initialSelectedId === undefined ? {} : { initialSelectedId }),
       terminalRows: () => terminal.rows,
       requestRender: () => tui.requestRender(),
     });
+    const frame = new WorkModalFrame(surface);
+    const treeOverlay = tui.showOverlay(frame, { width: "98%", minWidth: 36, maxHeight: "96%", anchor: "center", margin: 0 });
     let active = true;
     let leafId: string | undefined;
-    let resolveChoice!: (node: TreeNodeDto | undefined) => void;
-    const selection = new Promise<TreeNodeDto | undefined>((resolve) => { resolveChoice = resolve; });
-    surface.onSelect = (node) => resolveChoice(node);
-    surface.onCancel = () => resolveChoice(undefined);
-    const overlay = tui.showOverlay(surface, { width: "98%", minWidth: 36, maxHeight: "96%", anchor: "center", margin: 0 });
-    tui.setFocus(surface);
+    const nextSelection = (): Promise<TreeNodeDto | undefined> => new Promise((resolve) => {
+      let settled = false;
+      const finish = (node: TreeNodeDto | undefined): void => {
+        if (settled) return;
+        settled = true;
+        resolve(node);
+      };
+      surface.onSelect = finish;
+      surface.onCancel = () => finish(undefined);
+    });
     void loadSessionTree().then((tree) => {
       if (!active) return;
       leafId = tree.leafId;
@@ -930,35 +968,23 @@ export async function runDockTui(
       if (active) surface.setLoadFailure("Session tree unavailable · press Esc to return");
     });
     try {
-      const node = await selection;
-      return node === undefined ? undefined : { node, ...(leafId === undefined ? {} : { leafId }) };
-    } finally {
-      active = false;
-      overlay.hide();
-      tui.setFocus(editor);
-    }
-  }
-
-  async function chooseTreeNavigation(): Promise<void> {
-    editor.disableSubmit = true;
-    activity.setActivity("loading session tree");
-    tui.requestRender();
-    let selectedId: string | undefined;
-    try {
       while (true) {
-        const selection = await chooseSessionTreeNode(selectedId);
-        if (!selection) { activity.setActivity("tree unchanged"); return; }
-        const target = selection.node;
-        selectedId = target.entryId;
-        if (target.entryId === selection.leafId) {
+        treeOverlay.focus();
+        const target = await nextSelection();
+        if (!target) { activity.setActivity("tree unchanged"); return; }
+        if (target.entryId === leafId) {
           activity.setActivity("already at this point");
           continue;
         }
-        const action = await showChoicePicker("Navigation mode", [
-          { value: "navigate", label: "Navigate", description: "switch branch without model summarization" },
-          { value: "summary", label: "Navigate with summary", description: "use Pi branch summarization" },
-          { value: "custom", label: "Summary with additional instructions" },
-          { value: "replace", label: "Summary with replacement instructions" },
+        const targetRole = target.role ?? target.kind;
+        const action = await showFixedActions("Branch action", [
+          `Target: ${target.label ? `[${target.label}] ` : ""}${target.summary}`,
+          `${targetRole} · ${target.entryId}${leafId ? ` · current leaf ${leafId}` : ""}`,
+        ], [
+          { value: "navigate", label: "Navigate directly", description: "Switch to this branch point without model summarization." },
+          { value: "summary", label: "Navigate with summary", description: "Ask Pi to summarize the abandoned branch before switching." },
+          { value: "custom", label: "Summary with additional instructions", description: "Add guidance while keeping Pi's branch-summary behavior." },
+          { value: "replace", label: "Summary with replacement instructions", description: "Replace Pi's default branch-summary instructions." },
         ], "navigate");
         if (!action) continue;
         const options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {};
@@ -970,9 +996,11 @@ export async function runDockTui(
           if (action === "replace") options.replaceInstructions = true;
         }
         if (options.summarize) {
-          const labelMode = await showChoicePicker("Optional branch label", [
-            { value: "none", label: "No label" },
-            { value: "label", label: "Add label" },
+          const labelMode = await showFixedActions("Optional branch label", [
+            `Target: ${target.summary}`,
+          ], [
+            { value: "none", label: "No label", description: "Navigate without changing the target label." },
+            { value: "label", label: "Add label", description: "Name this branch point before navigation completes." },
           ], "none");
           if (labelMode === undefined) continue;
           if (labelMode === "label") {
@@ -981,11 +1009,19 @@ export async function runDockTui(
             if (label.trim()) options.label = label.trim();
           }
         }
+        active = false;
+        treeOverlay.hide();
         await navigateTree(target.entryId, options);
         return;
       }
     } catch (error) { showError(error); }
-    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
+    finally {
+      active = false;
+      treeOverlay.hide();
+      if (instance.lifecycle === "active") editor.disableSubmit = false;
+      tui.setFocus(editor);
+      tui.requestRender();
+    }
   }
 
   async function navigateTreeFromCommand(target: string): Promise<void> {
@@ -1097,10 +1133,11 @@ export async function runDockTui(
     const result = new Promise<string | undefined>((resolve) => { resolveText = resolve; });
     dialog.onSubmit = (value) => resolveText(value);
     dialog.onCancel = () => resolveText(undefined);
-    const overlay = tui.showOverlay(dialog, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
-    tui.setFocus(dialog);
+    const frame = new WorkModalFrame(dialog);
+    const overlay = tui.showOverlay(frame, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
+    tui.setFocus(frame);
     try { return await result; }
-    finally { overlay.hide(); tui.setFocus(editor); }
+    finally { overlay.hide(); }
   }
 
   async function chooseSession(): Promise<void> {
@@ -1129,8 +1166,9 @@ export async function runDockTui(
     const selection = new Promise<string | undefined>((resolve) => { resolveChoice = resolve; });
     picker.onSelect = (item) => resolveChoice(item.value);
     picker.onCancel = () => resolveChoice(undefined);
-    const overlay = tui.showOverlay(picker, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
-    tui.setFocus(picker);
+    const frame = new WorkModalFrame(picker);
+    const overlay = tui.showOverlay(frame, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
+    tui.setFocus(frame);
 
     void client.sessionInventory(instance.cwd, "all").then((inventory) => {
       if (!active) return;
@@ -1162,7 +1200,6 @@ export async function runDockTui(
     } finally {
       active = false;
       overlay.hide();
-      tui.setFocus(editor);
     }
   }
 
@@ -1190,11 +1227,11 @@ export async function runDockTui(
   }
 
   async function chooseProjectTrust(cwd: string): Promise<ProjectTrustChoice | undefined> {
-    const selected = await showChoicePicker("Project-local Pi resources", [
-      { value: "trust_once", label: "Trust once", description: cwd },
-      { value: "trust_and_remember", label: "Trust and remember", description: cwd },
-      { value: "deny_once", label: "Do not trust once", description: "continue without project resources" },
-      { value: "deny_and_remember", label: "Do not trust and remember", description: "continue without project resources" },
+    const selected = await showFixedActions("Project-local Pi resources", [cwd], [
+      { value: "trust_once", label: "Trust once", description: "Load project resources for this operation." },
+      { value: "trust_and_remember", label: "Trust and remember", description: "Load project resources and persist this decision." },
+      { value: "deny_once", label: "Do not trust once", description: "Continue without project resources." },
+      { value: "deny_and_remember", label: "Do not trust and remember", description: "Continue without project resources and persist this decision." },
     ]);
     return isProjectTrustChoice(selected) ? selected : undefined;
   }
@@ -1571,6 +1608,7 @@ export async function runDockTui(
   }
 
   function showError(error: unknown): void {
+    if (exiting) return;
     const message = error instanceof ControlClientError
       ? `${error.code}: ${error.message}`
       : errorText(error);
@@ -1785,13 +1823,16 @@ export async function runDockTui(
   removeInputListener();
   process.off("SIGINT", onSigint);
   process.off("SIGTERM", onSigterm);
+  // Detach is a local control action. Close every client transport immediately;
+  // sent mutations remain Host-owned and may complete after this process exits.
+  subscription.close();
+  client.closeActiveConnections();
   await Promise.all([
     controllerReattach?.catch(() => {}),
     earlierHistoryLoad?.catch(() => {}),
     latestHistoryReload?.catch(() => {}),
+    subscription.done.catch(() => {}),
   ]);
-  subscription.close();
-  await subscription.done.catch(() => {});
   terminal.setProgress(false);
   await terminal.drainInput(200, 30).catch(() => {});
   tui.stop();

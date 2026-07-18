@@ -1253,6 +1253,56 @@ test("truncated attach history removes older covered replay instead of reversing
   assert.equal(projection.page.events.some((event) => event.type === "message.completed" || event.type === "message.delta"), false);
 });
 
+test("fresh conversation bootstrap drops idle generation history while event-log attach remains complete", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  instance.recordExtensionError("old diagnostic");
+  session.emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "sibling branch answer" }], stopReason: "stop" } });
+
+  const bootstrap = await instance.getAttachProjection(undefined, 200, "conversation_bootstrap");
+  assert.deepEqual(bootstrap.page.events, []);
+  const eventLog = await instance.getAttachProjection(undefined, 200, "event_log");
+  assert.ok(eventLog.page.events.some((event) => event.type === "extension.error"));
+  assert.ok(eventLog.page.events.some((event) => event.type === "message.completed"));
+});
+
+test("fresh conversation bootstrap retains only the active run tail and cursor replay stays raw", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  session.emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "old sibling" }], stopReason: "stop" } });
+  const beforeRun = instance.eventsSince().latest;
+  await instance.submit("current prompt", "prompt", "active-bootstrap");
+  session.startRun();
+  session.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "partial answer", partial: { role: "assistant", content: [] } } });
+
+  const bootstrap = await instance.getAttachProjection(undefined, 200, "conversation_bootstrap");
+  assert.equal(bootstrap.page.events.some((event) => event.type === "message.completed" && event.data.role === "assistant"), false);
+  assert.ok(bootstrap.page.events.some((event) => event.type === "message.submitted" && event.data.operationId === "active-bootstrap"));
+  assert.ok(bootstrap.page.events.some((event) => event.type === "message.delta" && event.data.delta === "partial answer"));
+
+  session.history = [{ entryId: "persisted-current", role: "assistant", content: [{ type: "text", text: "partial answer" }] }];
+  session.emit({ type: "entry_appended", entry: { id: "persisted-current" } });
+  const cursorReplay = await instance.getAttachProjection(beforeRun, 200, "event_log");
+  assert.ok(cursorReplay.page.events.some((event) => event.type === "message.delta" && event.data.delta === "partial answer"));
+});
+
+test("truncated fresh bootstrap retains the available active run tail after its start marker is evicted", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session, 3);
+  await instance.submit("current prompt", "prompt", "truncated-active");
+  session.startRun();
+  for (const delta of ["one", "two", "three", "four", "five"]) {
+    session.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta, partial: { role: "assistant", content: [] } } });
+  }
+
+  const bootstrap = await instance.getAttachProjection(undefined, 200, "conversation_bootstrap");
+  assert.equal(bootstrap.page.truncated, true);
+  assert.deepEqual(
+    bootstrap.page.events.filter((event) => event.type === "message.delta").map((event) => event.type === "message.delta" ? event.data.delta : ""),
+    ["three", "four", "five"],
+  );
+});
+
 test("bounded events expose a monotonic cursor and truncation signal", () => {
   const instance = createInstance(new FakeRuntimeSession(), 3);
 

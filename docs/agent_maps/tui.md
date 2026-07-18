@@ -91,7 +91,7 @@ Warning必须说明用户影响和可执行动作；closed Host projection本身
 | transient activity | `run-activity.ts`, `activity-pulse.ts` | snapshot reducer、fixed activity slot、idle CPU |
 | conversation event展示 | `conversation.ts` | event lifetime分类、history replay dedup |
 | history paging/scroll/resize | `history-pagination.ts`, `screen-layout.ts` | anchor、mouse wheel、PTY resize |
-| `/tree` picker与返回branch | `tui/session-tree.ts`, `dock-tui.ts` | Core/runtime tree map、real Pi tree tests |
+| `/tree` picker与返回branch | `tui/session-tree.ts`, `session-tree-surface.ts`, `dock-tui.ts` | `work-modal.ts`、Core/runtime tree map、real Pi tree tests |
 | queue tray/restoration | `pending-queue.ts`, `queue-restoration.ts` | command admission、draft concurrency |
 | mouse mode | `mouse-input.ts` | detach/signal/error cleanup、normal terminal selection |
 | Logo/mascot | `alu-mascot.ts` + `dock-hub.ts` | Hub blink无语义；Work只由current session activity驱动 |
@@ -100,8 +100,9 @@ Warning必须说明用户影响和可执行动作；closed Host projection本身
 ## 交互硬约束
 
 - 普通drag/selection属于terminal；只有显式Alt+M或`/mouse`启用1000/1006 tracking。
-- detach、stop、signal和异常退出都恢复terminal mode。
-- Work TUI不持有Pi对象，不读取session JSONL；只通过DockClient和closed DTO/event。
+- detach、stop、signal和异常退出都恢复terminal mode；Ctrl+D 是不等待长 Host mutation 的本地最高优先级 detach。
+- Work overlay 统一使用有边界的 modal frame 与栈式焦点恢复；固定动作不用 searchable picker。Tree 的 Branch action 保持原 Tree surface 挂载，Esc 返回时保留 filter/search/fold/selection。
+- Work TUI不持有Pi对象，不读取session JSONL；只通过DockClient和closed DTO/event。Fresh attach 的对话真相是当前 branch history，不把旧 lifecycle/navigation replay 投影为 conversation。
 - Queue是Same-Host memory；in-flight/failed/ambiguous mutation不声称已restore，也不自动abort。
 - Exact extension command不进入pending queue；unknown slash保留Pi-native语义。
 - Extension UI只支持bounded closed text；不transport component factory、image、binary或data URI。

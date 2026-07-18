@@ -527,7 +527,7 @@ export class DockHost {
     setEventUnsubscribe(closeSubscription);
     if(socket.destroyed){closeSubscription();return;}
     let projection:AttachProjection;
-    try{projection=await instance.getAttachProjection(cursor,MAX_HISTORY_ITEMS);}catch(error){initializing=false;pending=[];closeSubscription();throw error;}
+    try{projection=await instance.getAttachProjection(cursor,MAX_HISTORY_ITEMS,request.params.replay??"legacy_history_overlay");}catch(error){initializing=false;pending=[];closeSubscription();throw error;}
     const result=createBoundedEventsResult(projection,follow,request.requestId,controller);
     const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,result));
     if(responseOutcome==="backpressured"){

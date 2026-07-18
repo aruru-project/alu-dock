@@ -412,13 +412,26 @@ def main() -> int:
                 while loaded_marker not in output and time.monotonic() < loaded_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
+                os.write(fd, b"\x01")  # Ctrl+A: temporary All filter must survive Branch action Esc.
                 os.write(fd, b"original branch answer")
                 time.sleep(0.04)
                 while read_available(fd, output, 0.01) > 0:
                     pass
                 os.write(fd, b"\r")
                 mode_deadline = time.monotonic() + 5
-                while b"Navigation mode" not in output and time.monotonic() < mode_deadline:
+                while b"Branch action" not in output and time.monotonic() < mode_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                back_start = len(output)
+                os.write(fd, b"\x1b")  # Esc returns to the same Tree surface and selection.
+                back_deadline = time.monotonic() + 5
+                while b"Search [all]" not in output[back_start:] and time.monotonic() < back_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                action_start = len(output)
+                os.write(fd, b"\r")  # The previously selected branch remains selected.
+                action_deadline = time.monotonic() + 5
+                while b"Branch action" not in output[action_start:] and time.monotonic() < action_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\r")
@@ -442,6 +455,12 @@ def main() -> int:
                 os.write(fd, b"/clone\r")
                 clone_deadline = time.monotonic() + 5
                 while b"generation 3" not in output and time.monotonic() < clone_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+            elif action == "compact-detach":
+                os.write(fd, b"/compact\r")
+                compact_deadline = time.monotonic() + 5
+                while b"compacting" not in output and time.monotonic() < compact_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
             elif action == "stage3":

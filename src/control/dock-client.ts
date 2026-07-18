@@ -90,6 +90,11 @@ import {
 type Params<T extends ControlRequest["type"]> = Extract<ControlRequest,{type:T}>["params"];
 type Parser<T>=(input:unknown)=>T;
 const MAX_PENDING_STREAM_EVENTS=1_000;
+const LONG_MUTATION_TYPES = new Set<ControlRequest["type"]>([
+  "instance.create", "instance.adopt", "instance.reopen", "instance.stop",
+  "command.abort", "session.switch", "session.new", "session.compact", "session.reload",
+  "session.navigate", "session.fork", "session.clone",
+]);
 
 export interface EventSubscription { initial:EventsResult; close:()=>void; done:Promise<void> }
 export interface DockClientOptions { socketPath:string; timeoutMs?:number; longMutationTimeoutMs?:number; requestId?:()=>string; clientId?:string }
@@ -103,7 +108,11 @@ export class DockClient {
   private readonly longMutationTimeoutMs:number;
   private readonly createRequestId:()=>string;
   private readonly clientId:string;
+  private readonly activeSockets=new Set<Socket>();
   constructor(options:DockClientOptions){this.socketPath=resolve(options.socketPath);this.timeoutMs=options.timeoutMs??30_000;this.longMutationTimeoutMs=options.longMutationTimeoutMs??options.timeoutMs??600_000;this.createRequestId=options.requestId??randomUUID;this.clientId=options.clientId??randomUUID();}
+
+  /** Close this client's transport scope. Sent Host mutations remain Host-owned and are never retried. */
+  closeActiveConnections():void{for(const socket of this.activeSockets)socket.destroy();this.activeSockets.clear();}
 
   async hostInfo():Promise<HostInfoResult>{return this.request("host.info",{},"host.info",parseHostInfoResult);}
   async ping():Promise<PingResult>{let negotiated:string[]=[];const info=await this.request("host.info",{},"host.info",parseHostInfoResult,(ack)=>{negotiated=[...ack.capabilities];});return {pid:info.host.pid,protocolVersion:2,hostEpoch:info.host.hostEpoch,capabilities:negotiated};}
@@ -141,7 +150,7 @@ export class DockClient {
   forget(instanceId:string,operationId=this.createRequestId()):Promise<ForgetResult>{return this.request("instance.forget",{operationId,instanceId},"catalog.maintenance.v1",parseForgetResult);}
   pruneStopped(operationId=this.createRequestId()):Promise<PruneResult>{return this.request("catalog.prune",{operationId,selector:"stopped"},"catalog.maintenance.v1",parsePruneResult);}
   reopen(instanceId:string,operationId=this.createRequestId(),sessionFile?:string,trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<ReopenResult>{return this.request("instance.reopen",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.reopen",parseReopenResult);}
-  events(instanceId:string,since?:EventCursor):Promise<EventsResult>{return this.request("instance.attach",{instanceId,since,follow:false,controller:"observe"},"events.follow",parseEventsResult);}
+  events(instanceId:string,since?:EventCursor):Promise<EventsResult>{return this.request("instance.attach",{instanceId,since,follow:false,controller:"observe",replay:"event_log"},"events.replay-purpose.v1",parseEventsResult);}
   prompt(instanceId:string,message:string,delivery:DeliveryMode="auto",operationId=this.createRequestId()):Promise<PromptResult>{return this.request("command.submit",{operationId,instanceId,message,delivery},"session.core",parsePromptResult);}
   respondInteraction(instanceId:string,leaseToken:string,interactionId:string,response:InteractionResponse,operationId=this.createRequestId()):Promise<InteractionRespondResult>{if("value" in response){const limit=response.method==="select"?8_000:256_000;if(response.value.length>limit)return Promise.reject(new ControlClientError("invalid_request",`Interaction ${response.method} response exceeds ${limit} characters`,operationId));if(containsBinaryPayload(response.value))return Promise.reject(new ControlClientError("invalid_request","Interaction responses cannot contain binary, image, data URI, or raw base64 payloads",operationId));}return this.request("interaction.respond",{operationId,instanceId,leaseToken,interactionId,response},"extension_ui.v1",parseInteractionRespondResult);}
   abort(instanceId:string,operationId=this.createRequestId()):Promise<AbortResult>{return this.request("command.abort",{operationId,instanceId},"run.abort.v1",parseAbortResult,undefined,this.longMutationTimeoutMs);}
@@ -169,12 +178,14 @@ export class DockClient {
   cloneSession(instanceId:string,entryId:string,operationId=this.createRequestId()):Promise<SessionCloneResult>{return this.request("session.clone",{operationId,instanceId,entryId},"session.tree.v1",parseSessionCloneResult);}
   stop(instanceId:string,operationId=this.createRequestId()):Promise<StopResult>{return this.request("instance.stop",{operationId,instanceId},"instance.catalog",parseStopResult,undefined,this.longMutationTimeoutMs);}
 
-  async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;claimController?:boolean}):Promise<EventSubscription>{
+  async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;claimController?:boolean;conversationBootstrap?:boolean}):Promise<EventSubscription>{
     const since=options.since;const helloId=this.createRequestId(),requestId=this.createRequestId();
+    const replay = options.conversationBootstrap ? "conversation_bootstrap" : since === undefined ? undefined : "event_log";
     const streamCapabilities:string[]=options.requireTuiProjection?["core.v2","events.follow","queue.control.v1","run.abort.v1","tui.projection.v1"]:requiredCapabilities("events.follow");
+    if(replay!==undefined&&!streamCapabilities.includes("events.replay-purpose.v1"))streamCapabilities.push("events.replay-purpose.v1");
     if(options.claimController&&!streamCapabilities.includes("extension_ui.v1"))streamCapabilities.push("extension_ui.v1");
-    const request:ControlRequest={kind:"request",version:2,requestId,type:"instance.attach",params:{instanceId,since,follow:true,controller:options.claimController?"claim":"observe"}};
-    const socket=createConnection(this.socketPath),decoder=new JsonLineDecoder();let phase:"hello"|"response"|"events"="hello",hostEpoch="",initialSettled=false,doneSettled=false,closeRequested=false,callbacksReady=false,pending:DockEvent[]=[],runtimeGeneration:number|undefined,lastSequence=-1;
+    const request:ControlRequest={kind:"request",version:2,requestId,type:"instance.attach",params:{instanceId,since,follow:true,controller:options.claimController?"claim":"observe",...(replay===undefined?{}:{replay})}};
+    const socket=this.openSocket(),decoder=new JsonLineDecoder();let phase:"hello"|"response"|"events"="hello",hostEpoch="",initialSettled=false,doneSettled=false,closeRequested=false,callbacksReady=false,pending:DockEvent[]=[],runtimeGeneration:number|undefined,lastSequence=-1;
     let resolveInitial!:(x:EventSubscription)=>void,rejectInitial!:(e:unknown)=>void,resolveDone!:()=>void,rejectDone!:(e:unknown)=>void;
     const done=new Promise<void>((r,j)=>{resolveDone=r;rejectDone=j;});void done.catch(()=>{});const initial=new Promise<EventSubscription>((r,j)=>{resolveInitial=r;rejectInitial=j;});
     const settleDone=(e?:unknown)=>{if(doneSettled)return;doneSettled=true;e===undefined?resolveDone():rejectDone(e);};
@@ -198,14 +209,16 @@ export class DockClient {
     return initial;
   }
 
+  private openSocket():Socket{const socket=createConnection(this.socketPath);this.activeSockets.add(socket);socket.once("close",()=>this.activeSockets.delete(socket));return socket;}
+  private timeoutFor(type:ControlRequest["type"]):number{return LONG_MUTATION_TYPES.has(type)?this.longMutationTimeoutMs:this.timeoutMs;}
   private hello(requestId:string,capabilities:string[]):ClientHello{return {kind:"hello",requestId,versions:[2],client:{name:"alu-dock-client",version:DOCK_VERSION,clientId:this.clientId},requiredCapabilities:capabilities};}
-  private request<TType extends ControlRequest["type"],T>(type:TType,params:Params<TType>,capability:Capability,parse:Parser<T>,onHello?:(ack:HelloAck)=>void,requestTimeoutMs=this.timeoutMs):Promise<T>{
+  private request<TType extends ControlRequest["type"],T>(type:TType,params:Params<TType>,capability:Capability,parse:Parser<T>,onHello?:(ack:HelloAck)=>void,requestTimeoutMs=this.timeoutFor(type)):Promise<T>{
     const helloId=this.createRequestId();
     const requestId=this.createRequestId();
     const request={kind:"request",version:2,requestId,type,params} as Extract<ControlRequest,{type:TType}>;
     const operationId = "operationId" in params && typeof params.operationId === "string" ? params.operationId : undefined;
     return new Promise<T>((resolveRequest,rejectRequest)=>{
-      const socket=createConnection(this.socketPath);
+      const socket=this.openSocket();
       const decoder=new JsonLineDecoder();
       let phase:"hello"|"response"="hello";
       let hostEpoch="";

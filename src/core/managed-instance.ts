@@ -719,7 +719,11 @@ export class ManagedInstance {
     }
   }
 
-  async getAttachProjection(cursor: EventCursor | undefined, historyLimit = 200): Promise<AttachProjection> {
+  async getAttachProjection(
+    cursor: EventCursor | undefined,
+    historyLimit = 200,
+    replayPurpose: "legacy_history_overlay" | "event_log" | "conversation_bootstrap" = "legacy_history_overlay",
+  ): Promise<AttachProjection> {
     return this.withCommittedProjectionRead(() => {
       const instance = this.snapshot();
       const epochChanged = cursor !== undefined && cursor.hostEpoch !== this.hostEpoch;
@@ -727,7 +731,11 @@ export class ManagedInstance {
       const replaySince = epochChanged || generationChanged ? 0 : cursor?.sequence ?? 0;
       const sourcePage = this.eventsSince(replaySince);
       const history = this.buildHistoryPage(undefined, historyLimit);
-      const page = { ...sourcePage, events: eventsNotCoveredByHistory(sourcePage.events, this.historyValue) };
+      const page = replayPurpose === "conversation_bootstrap"
+        ? { ...sourcePage, events: conversationBootstrapEvents(sourcePage.events, this.historyValue, instance, sourcePage.truncated) }
+        : replayPurpose === "legacy_history_overlay"
+          ? { ...sourcePage, events: eventsNotCoveredByHistory(sourcePage.events, this.historyValue) }
+          : sourcePage;
       return {
         instance,
         page,
@@ -3009,6 +3017,24 @@ function selectClearedQueueMessages(
   select("steer", cleared.steering);
   select("followUp", cleared.followUp);
   return { restored, restoredQueueItemIds: [...selected] };
+}
+
+function conversationBootstrapEvents(
+  events: DockEvent[],
+  history: HistoryEntryDto[],
+  instance: InstanceSnapshot,
+  truncated: boolean,
+): DockEvent[] {
+  if (instance.execution !== "running" || instance.activeCommandId === undefined) return [];
+  let start = events.findLastIndex((event) => event.type === "run.started" && event.data.operationId === instance.activeCommandId);
+  if (start < 0) {
+    start = events.findLastIndex((event) => event.type === "message.submitted" && event.data.operationId === instance.activeCommandId);
+  }
+  // A truncated ring contains only events newer than its evicted prefix. If the
+  // snapshot still identifies an active command, every retained frame is part
+  // of that command's live era even when its start marker has fallen out.
+  if (start < 0 && !truncated) return [];
+  return eventsNotCoveredByHistory(start < 0 ? events : events.slice(start), history);
 }
 
 function eventsNotCoveredByHistory(events: DockEvent[], history: HistoryEntryDto[]): DockEvent[] {

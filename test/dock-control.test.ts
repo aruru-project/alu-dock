@@ -117,7 +117,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "core.v2", "events.follow", "extension_ui.v1", "host.info", "instance.catalog", "models.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tools.v1", "tui.projection.v1"]);
+  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.v1", "host.info", "instance.catalog", "models.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -1448,6 +1448,59 @@ test("compact uses its explicit long-mutation timeout instead of the ordinary re
   assert.equal(compacted.instance.execution, "idle");
 });
 
+test("closing a client transport scope releases a blocked compaction caller while the Host completes once", async (context) => {
+  const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
+  context.after(() => cleanupHarness(harness));
+  const setupClient = new DockClient({ socketPath: harness.socketPath });
+  const created = await setupClient.create(harness.directory, "detached-compaction", "create-detached-compaction");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const block = runtime.blockNextCompaction();
+  const client = new DockClient({ socketPath: harness.socketPath, timeoutMs: 25, longMutationTimeoutMs: 10_000 });
+  const compacting = client.compactSession(created.id, undefined, "detached-compact-op");
+  await block.entered;
+  client.closeActiveConnections();
+
+  await assert.rejects(
+    compacting,
+    (error: unknown) => error instanceof ControlClientError
+      && error.code === "effect_unknown"
+      && error.operationId === "detached-compact-op",
+  );
+  assert.equal(runtime.sessionMutationCalls.compact, 1);
+  block.finish();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const observer = new DockClient({ socketPath: harness.socketPath });
+  assert.equal((await observer.status(created.id)).lifecycle, "active");
+  assert.equal(runtime.sessionMutationCalls.compact, 1);
+});
+
+test("SSH TUI Ctrl+D detaches promptly while Host-owned compaction remains blocked", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "pty-compact-detach", "create-pty-compact-detach");
+  const runtime = harness.sessions.get(created.id)!;
+  const block = runtime.blockNextCompaction();
+  const startedAt = Date.now();
+  const pty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", harness.socketPath,
+    "attach", created.id,
+  ], "compact-detach");
+  const elapsed = Date.now() - startedAt;
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-4_000));
+  assert.equal(pty.status, 0, output.slice(-4_000));
+  assert.ok(elapsed < 6_000, `detach took ${elapsed}ms`);
+  assert.equal(runtime.sessionMutationCalls.compact, 1);
+
+  block.finish();
+  assert.equal((await client.status(created.id)).lifecycle, "active");
+  assert.equal(runtime.sessionMutationCalls.compact, 1);
+});
+
 test("stop preempts a manual compaction even before its start event is projected", async (context) => {
   const catalog = new ScriptedCatalogCommitPort();
   const stopIntentGate = catalog.gateAt(2);
@@ -2096,6 +2149,37 @@ test("session.tree.v1 paginates revisions, navigates in-file, and replaces on fo
   assert.equal(runtime.sessionMutationCalls.clone, 1);
 });
 
+test("fresh conversation bootstrap omits old navigation and sibling-generation events while explicit events stays raw", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "bootstrap-branch");
+  const runtime = harness.sessions.get(created.id)!;
+  runtime.treeNodes = [
+    { entryId: "bootstrap-root", depth: 0, kind: "message", role: "user", summary: "root", hasChildren: true },
+    { entryId: "bootstrap-a", parentId: "bootstrap-root", depth: 1, kind: "message", role: "assistant", summary: "branch A", hasChildren: false },
+    { entryId: "bootstrap-b", parentId: "bootstrap-root", depth: 1, kind: "message", role: "assistant", summary: "branch B", hasChildren: false },
+  ];
+  runtime.treeLeafId = "bootstrap-a";
+  runtime.settle("old branch answer");
+  await harness.registry.get(created.id).waitForIdle();
+  await client.navigateSession(created.id, "bootstrap-b", {}, "bootstrap-nav-b");
+  await client.navigateSession(created.id, "bootstrap-a", {}, "bootstrap-nav-a");
+
+  const raw = await client.events(created.id);
+  assert.equal(raw.page.events.filter((event) => event.type === "session.navigated").length, 2);
+  assert.ok(raw.page.events.some((event) => event.type === "message.completed"));
+  const bootstrap = await client.streamEvents(created.id, {
+    onEvent: () => {},
+    requireTuiProjection: true,
+    conversationBootstrap: true,
+  });
+  assert.deepEqual(bootstrap.initial.page.events, []);
+  bootstrap.close();
+  await bootstrap.done;
+});
+
 test("session.commands.v1 names, compacts, replaces, reloads, and deduplicates mutations", async (context) => {
   const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
   context.after(() => cleanupHarness(harness));
@@ -2581,6 +2665,7 @@ test("stream callbacks follow initial response order and accept one-step replace
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-frame-order-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
+  let attachParams: Record<string, unknown> | undefined;
   const server = createServer((socket) => {
     const decoder = new JsonLineDecoder();
     socket.on("data", (chunk: Buffer) => {
@@ -2596,6 +2681,7 @@ test("stream callbacks follow initial response order and accept one-step replace
           }));
           continue;
         }
+        attachParams = frame.params as Record<string, unknown>;
         const cursor = { hostEpoch: "epoch-1", instanceId: "instance-1", runtimeGeneration: 1, sequence: 1 };
         const snapshot = {
           id: "instance-1", creationOperationId: "create-1", cwd: directory,
@@ -2631,8 +2717,41 @@ test("stream callbacks follow initial response order and accept one-step replace
   order.push("initial");
   await new Promise((resolveTurn) => setImmediate(resolveTurn));
   assert.deepEqual(order, ["initial", "extension.error", "session.replaced", "extension.error"]);
+  assert.equal(attachParams && "replay" in attachParams, false);
   subscription.close();
   await subscription.done;
+});
+
+test("conversation bootstrap negotiates replay-purpose support before sending attach", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-replay-capability-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  let businessRequests = 0;
+  const server = createServer((socket) => {
+    const decoder = new JsonLineDecoder();
+    socket.on("data", (chunk: Buffer) => {
+      for (const line of decoder.push(chunk)) {
+        const frame = JSON.parse(line) as Record<string, unknown>;
+        if (frame.kind !== "hello") { businessRequests += 1; continue; }
+        socket.write(encodeJsonLine({
+          kind: "hello_ack", requestId: "fixed", version: 2,
+          host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
+          catalogSchemaVersion: 1,
+          capabilities: ["core.v2", "events.follow", "queue.control.v1", "run.abort.v1", "tui.projection.v1"],
+          limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
+        }));
+      }
+    });
+  });
+  await listen(server, socketPath);
+  context.after(async () => { await close(server); await rm(directory, { recursive: true, force: true }); });
+
+  const client = new DockClient({ socketPath, requestId: () => "fixed" });
+  await assert.rejects(
+    client.streamEvents("instance-1", { onEvent: () => {}, requireTuiProjection: true, conversationBootstrap: true }),
+    (error: unknown) => error instanceof ControlClientError && error.code === "protocol_incompatible",
+  );
+  assert.equal(businessRequests, 0);
 });
 
 test("TUI projection capability is required before the attach request", async (context) => {
@@ -3250,7 +3369,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "work-responsive" | "hub-exit" | "hub-narrow" | "hub-signal" | "hub-new" | "hub-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "scroll" | "history-page" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "mouse-selection" | "extension-dialogs" | "extension-replacement" = "detach",
+  action: "detach" | "work-responsive" | "hub-exit" | "hub-narrow" | "hub-signal" | "hub-new" | "hub-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "compact-detach" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "scroll" | "history-page" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "mouse-selection" | "extension-dialogs" | "extension-replacement" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {

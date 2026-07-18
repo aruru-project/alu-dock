@@ -244,6 +244,22 @@ test("paged history rebuild keeps the bounded gap ordered before live events", (
   ]);
 });
 
+test("fresh conversation bootstrap ignores lifecycle replay and keeps only unresolved message/tool frames", () => {
+  const conversation = new DockConversation();
+  conversation.applyHistory([{ entryId: "h1", role: "assistant", content: [{ type: "text", text: "current branch" }] }], false);
+  conversation.applyBootstrapReplay([
+    event(1, "session.replaced", { reason: "resume", previousSessionId: "old", runtimeGeneration: 1 }),
+    event(2, "session.navigated", { targetId: "old-branch", leafId: "old-branch", treeRevision: "r1", summaryCreated: false }),
+    event(3, "compaction.completed", { reason: "manual", aborted: false, willRetry: false }),
+    event(4, "message.submitted", { operationId: "active", messageId: "u-active", role: "user", text: "current prompt", delivery: "prompt" }),
+    event(5, "message.delta", { messageId: "a-active", block: "text", delta: "partial" }),
+  ]);
+  const projected = conversation.snapshot();
+  assert.deepEqual(projected.map((entry) => entry.text), ["current branch", "current prompt", "partial"]);
+  assert.equal(JSON.stringify(projected).includes("old-branch"), false);
+  assert.equal(JSON.stringify(projected).includes("Compaction completed"), false);
+});
+
 test("conversation projects replay and live deltas into readable messages", () => {
   const conversation = new DockConversation();
   conversation.applyReplay([
