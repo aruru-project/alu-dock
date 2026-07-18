@@ -822,7 +822,7 @@ test("SSH TUI replays, resizes, handles input, and detaches without stopping", a
   assert.equal(runtime.disposeCalls, 0);
 });
 
-test("SSH TUI animates only the fixed activity row while a typed composer stays unchanged", async (context) => {
+test("SSH TUI animates through its frame cache while a typed composer stays unchanged", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
   await harness.host.start();
@@ -839,10 +839,10 @@ test("SSH TUI animates only the fixed activity row while a typed composer stays 
   assert.equal(pty.timedOut, false, output.slice(-2_000));
   assert.equal(pty.status, 0, output.slice(-2_000));
   assert.equal(pty.draftVisible, true, output.slice(-2_000));
-  assert.ok(pty.localizedActivityBatches >= 1, "a silent running Host must retain visible liveness");
-  assert.equal(pty.stableRenderBatches, pty.localizedActivityBatches, "timer output must be localized activity-row writes only");
+  assert.ok(pty.stableRenderBatches >= 1, "a silent running Host must retain visible liveness");
+  assert.equal(pty.localizedActivityBatches, 0, "activity must never bypass pi-tui's frame cache");
   assert.equal(pty.stableDraftRewrites, 0, "activity ticks must not rewrite the composer draft");
-  assert.ok(pty.stableOutputBytes > 0 && pty.stableOutputBytes < 2_000, "localized pulse output must remain bounded");
+  assert.ok(pty.stableOutputBytes > 0 && pty.stableOutputBytes < 2_000, "cached pulse output must remain bounded");
 });
 
 test("SSH TUI preserves concurrent composer input while transcript deltas remain event-driven", async (context) => {
@@ -1139,6 +1139,24 @@ test("SSH TUI model picker filters typed input and history viewport scroll-locks
   assert.match(historyOutput, /historical line 0/, "reverse pagination must reach beyond the recent 200-entry tail");
   assert.ok(historyOutput.includes("\u001b[?1000h\u001b[?1006h"), "explicit Dock wheel mode must enable paired mouse tracking");
   assert.ok(historyOutput.includes("\u001b[?1006l\u001b[?1000l"), "TUI must restore terminal mouse tracking on detach");
+
+  const framePty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+    "attach", created.id,
+  ], "history-frame-stability");
+  const frameOutput = Buffer.from(framePty.output, "base64").toString("utf8");
+  assert.equal(framePty.timedOut, false, frameOutput.slice(-4_000));
+  assert.equal(framePty.status, 0, frameOutput.slice(-4_000));
+  assert.ok((frameOutput.match(/\u001b\[2J\u001b\[H\u001b\[3J/gu) ?? []).length >= 20, "repeated PageUp must reset rather than accumulate terminal cursor drift");
+  assert.doesNotMatch(frameOutput, /\u001b\[s/u, "activity animation must not write outside the frame cache");
+  const stableFrame = lastFullRedrawFrame(frameOutput);
+  assert.equal(stableFrame.length, 58, `expected one fixed 58-row screen:\n${stableFrame.join("\n")}`);
+  assert.ok(stableFrame.some((line) => line.includes("ALU_LAYOUT_PTY_MARKER")), "the real editor draft must remain in the fixed frame");
+  assert.match(stableFrame.at(-3) ?? "", /^─+$/u, "the composer bottom border must remain above the footer");
+  assert.match(stableFrame.at(-2) ?? "", /cache .*ctx .*↑.*↓.*\$/u, "the cache footer must survive repeated PageUp");
+  assert.ok(stableFrame.every((line) => visibleWidth(line) <= 252));
 
   const toolPty = await runPtyTui([
     process.execPath,
@@ -3644,7 +3662,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "work-responsive" | "hub-exit" | "hub-narrow" | "hub-signal" | "hub-new" | "hub-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "compact-detach" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "scroll" | "history-page" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "mouse-selection" | "extension-dialogs" | "extension-replacement" = "detach",
+  action: "detach" | "work-responsive" | "hub-exit" | "hub-narrow" | "hub-signal" | "hub-new" | "hub-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "compact-detach" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "scroll" | "history-page" | "history-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "mouse-selection" | "extension-dialogs" | "extension-replacement" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {

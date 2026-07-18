@@ -29,10 +29,6 @@ interface ScreenSections {
   help?: Component;
   editor: Component;
   historyVersion: () => { revision: number; outputRevision: number };
-  activityPlacement?: {
-    editorRow: number;
-    update: (placement: { screenRow: number; width: number; screenRows: number } | undefined) => void;
-  };
 }
 
 /** Thin pi-tui compositor; all viewport behavior lives in screen-layout.ts. */
@@ -52,7 +48,6 @@ export class FixedDockScreen extends Container {
   private virtualOffsetFromBottom = 0;
   private lastVirtualVersion: { revision: number; outputRevision: number } | undefined;
   private explicitVirtualNavigation = false;
-  private lastActivityPlacement: { screenRow: number; width: number; screenRows: number } | undefined;
 
   constructor(
     private readonly terminal: { rows: number },
@@ -83,19 +78,6 @@ export class FixedDockScreen extends Container {
     const help = this.sections.help?.render(nextWidth) ?? [];
     const editor = this.sections.editor.render(nextWidth);
     const chrome = fitFixedScreenChrome({ height, header, status, help, editor });
-    const placement = this.sections.activityPlacement;
-    let nextActivityPlacement: { screenRow: number; width: number; screenRows: number } | undefined;
-    if (placement) {
-      const clippedEditorRows = editor.length - chrome.editor.length;
-      const visibleEditorRow = placement.editorRow - clippedEditorRows;
-      nextActivityPlacement = visibleEditorRow >= 0 && visibleEditorRow < chrome.editor.length
-        ? {
-          screenRow: height - chrome.status.length - chrome.help.length - chrome.editor.length + visibleEditorRow,
-          width: nextWidth,
-          screenRows: height,
-        }
-        : undefined;
-    }
     if (
       this.lastHistoryRows !== undefined
       && chrome.historyRows !== this.lastHistoryRows
@@ -110,7 +92,7 @@ export class FixedDockScreen extends Container {
       ? this.renderVirtualHistory(nextWidth, chrome.historyRows, version)
       : this.renderMaterializedHistory(nextWidth, chrome.historyRows, version);
 
-    const lines = composeFixedScreen({
+    return composeFixedScreen({
       height,
       header: chrome.header,
       history: projectedHistory,
@@ -118,8 +100,6 @@ export class FixedDockScreen extends Container {
       help: chrome.help,
       editor: chrome.editor,
     });
-    this.reconcileActivityPlacement(lines, nextActivityPlacement);
-    return lines;
   }
 
   pageUp(): boolean {
@@ -181,31 +161,6 @@ export class FixedDockScreen extends Container {
       visibleRows: this.virtualVisibleRows,
       canScrollUp: this.virtualCanScrollUp,
     };
-  }
-
-  private reconcileActivityPlacement(
-    lines: string[],
-    next: { screenRow: number; width: number; screenRows: number } | undefined,
-  ): void {
-    const previous = this.lastActivityPlacement;
-    const moved = previous?.screenRow !== next?.screenRow
-      || previous?.width !== next?.width
-      || previous?.screenRows !== next?.screenRows;
-    if (
-      moved
-      && previous
-      && previous.width === this.renderWidth
-      && previous.screenRows === this.renderHeight
-      && previous.screenRow >= 0
-      && previous.screenRow < lines.length
-    ) {
-      // Local animation writes intentionally bypass pi-tui's frame cache. Make
-      // the vacated row differ for one normal frame so differential rendering
-      // restores its real content instead of leaving a stale activity clone.
-      lines[previous.screenRow] = `${lines[previous.screenRow] ?? ""}\u001b[0m`;
-    }
-    this.lastActivityPlacement = next === undefined ? undefined : { ...next };
-    this.sections.activityPlacement?.update(next === undefined ? undefined : { ...next });
   }
 
   private renderMaterializedHistory(

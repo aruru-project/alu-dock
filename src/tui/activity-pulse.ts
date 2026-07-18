@@ -1,13 +1,7 @@
 import type { DockActivityLine } from "./conversation.js";
 
-export interface ActivityPlacement {
-  screenRow: number;
-  width: number;
-  screenRows: number;
-}
-
-export interface LocalizedActivityWriter {
-  writeActivityRow(screenRow: number, line: string, width: number, screenRows: number): boolean;
+export interface ActivityRenderScheduler {
+  requestRender(): void;
 }
 
 export interface ActivityPulseOptions {
@@ -17,12 +11,8 @@ export interface ActivityPulseOptions {
   clearInterval?: (timer: NodeJS.Timeout) => void;
 }
 
-/**
- * Advances only the fixed activity row. It never asks pi-tui to render, so the
- * editor, cursor marker, history viewport, and composer border remain untouched.
- */
+/** Advances the activity frame through pi-tui's single frame renderer. */
 export class ActivityPulseController {
-  private placement: ActivityPlacement | undefined;
   private timer: NodeJS.Timeout | undefined;
   private enabled = false;
   private readonly intervalMs: number;
@@ -32,7 +22,7 @@ export class ActivityPulseController {
 
   constructor(
     private readonly activity: DockActivityLine,
-    private readonly writer: LocalizedActivityWriter,
+    private readonly scheduler: ActivityRenderScheduler,
     options: ActivityPulseOptions = {},
   ) {
     this.intervalMs = Math.max(200, Math.floor(options.intervalMs ?? 320));
@@ -44,10 +34,6 @@ export class ActivityPulseController {
   setEnabled(enabled: boolean): void {
     this.enabled = enabled;
     this.sync();
-  }
-
-  setPlacement(placement: ActivityPlacement | undefined): void {
-    this.placement = placement === undefined ? undefined : { ...placement };
   }
 
   sync(): void {
@@ -62,17 +48,15 @@ export class ActivityPulseController {
   }
 
   pulseNow(): boolean {
-    const placement = this.placement;
-    if (!this.enabled || !placement || !this.activity.isAnimated() || !this.canWrite()) return false;
+    if (!this.enabled || !this.activity.isAnimated() || !this.canWrite()) return false;
     if (!this.activity.advanceAnimationFrame()) return false;
-    const line = this.activity.render(placement.width)[0] ?? "";
-    return this.writer.writeActivityRow(placement.screenRow, line, placement.width, placement.screenRows);
+    this.scheduler.requestRender();
+    return true;
   }
 
   stop(): void {
     this.enabled = false;
     if (this.timer) this.cancel(this.timer);
     this.timer = undefined;
-    this.placement = undefined;
   }
 }

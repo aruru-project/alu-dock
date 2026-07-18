@@ -130,14 +130,14 @@ test("activity slot stays fixed above composer without moving a locked history a
   }
 });
 
-test("activity pulse writes only the placed row and has no idle timer", () => {
+test("activity pulse schedules cached frame renders and has no idle timer", () => {
   const activity = new DockActivityLine();
-  const writes: Array<{ row: number; line: string; width: number; screenRows: number }> = [];
+  let renderRequests = 0;
   let scheduled: (() => void) | undefined;
   let schedules = 0;
   let cancels = 0;
   const controller = new ActivityPulseController(activity, {
-    writeActivityRow: (row, line, width, screenRows) => { writes.push({ row, line, width, screenRows }); return true; },
+    requestRender: () => { renderRequests += 1; },
   }, {
     setInterval: (callback) => {
       scheduled = callback;
@@ -147,76 +147,23 @@ test("activity pulse writes only the placed row and has no idle timer", () => {
     clearInterval: () => { cancels += 1; },
   });
   activity.setAnimationListener(() => controller.sync());
-  controller.setPlacement({ screenRow: 10, width: 43, screenRows: 24 });
   controller.setEnabled(true);
   assert.equal(schedules, 0, "idle must not schedule animation");
 
   activity.setActivity({ phase: "waiting", label: "waiting for model" });
   assert.equal(schedules, 1);
+  const firstFrame = activity.render(43)[0];
   scheduled?.();
+  const secondFrame = activity.render(43)[0];
   scheduled?.();
-  assert.equal(writes.length, 2);
-  assert.deepEqual(writes.map(({ row, width, screenRows }) => ({ row, width, screenRows })), [
-    { row: 10, width: 43, screenRows: 24 },
-    { row: 10, width: 43, screenRows: 24 },
-  ]);
-  assert.notEqual(writes[0]?.line, writes[1]?.line);
-  assert.ok(writes.every(({ line }) => visibleWidth(line) <= 43));
+  assert.equal(renderRequests, 2);
+  assert.notEqual(firstFrame, secondFrame);
 
   activity.setActivity({ phase: "idle", label: "ready" });
   assert.equal(cancels, 1);
   assert.equal(controller.pulseNow(), false);
-  assert.equal(writes.length, 2);
+  assert.equal(renderRequests, 2);
   controller.stop();
-});
-
-test("fixed screen reports the activity physical row without changing chrome height", () => {
-  const conversation = new DockConversation();
-  const placements: Array<{ screenRow: number; width: number; screenRows: number } | undefined> = [];
-  const screen = new FixedDockScreen({ rows: 12 }, {
-    header: { render: () => ["header"], invalidate: () => {} },
-    history: conversation,
-    status: { render: () => ["status one", "status two"], invalidate: () => {} },
-    editor: { render: () => ["activity", "composer"], invalidate: () => {} },
-    historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
-    activityPlacement: { editorRow: 0, update: (placement) => placements.push(placement) },
-  });
-  const lines = screen.render(43);
-  assert.deepEqual(placements.at(-1), { screenRow: 8, width: 43, screenRows: 12 });
-  assert.equal(lines[8], "activity");
-  assert.equal(lines[9], "composer");
-});
-
-test("activity placement transitions reconcile the vacated physical row", () => {
-  const conversation = new DockConversation();
-  conversation.applyHistory(Array.from({ length: 20 }, (_, index): HistoryEntryDto => ({
-    entryId: `activity-move-${index}`,
-    role: "assistant",
-    content: [{ type: "text", text: `activity move history ${index}` }],
-  })), false);
-  const placements: Array<{ screenRow: number; width: number; screenRows: number } | undefined> = [];
-  let editorRows = ["waiting for model", "composer"];
-  const screen = new FixedDockScreen({ rows: 12 }, {
-    header: { render: () => ["header"], invalidate: () => {} },
-    history: conversation,
-    status: { render: () => ["status one", "status two"], invalidate: () => {} },
-    editor: { render: () => editorRows, invalidate: () => {} },
-    historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
-    activityPlacement: { editorRow: 0, update: (placement) => placements.push(placement) },
-  });
-  screen.render(43);
-  assert.equal(placements.at(-1)?.screenRow, 8);
-
-  editorRows = ["waiting for model", "queued steer", "composer"];
-  const moved = screen.render(43);
-  assert.equal(placements.at(-1)?.screenRow, 7);
-  assert.equal(moved.filter((line) => line.includes("waiting for model")).length, 1);
-  assert.match(moved[8] ?? "", /queued steer/u);
-  assert.match(moved[8] ?? "", /\u001b\[0m$/u, "the old physical row must be dirtied for pi-tui reconciliation");
-
-  const stable = screen.render(43);
-  assert.equal(stable.filter((line) => line.includes("waiting for model")).length, 1);
-  assert.doesNotMatch(stable[8] ?? "", /\u001b\[0m$/u, "reconciliation marker is one-frame only");
 });
 
 test("virtual history keeps its entry anchor while live output arrives below", () => {

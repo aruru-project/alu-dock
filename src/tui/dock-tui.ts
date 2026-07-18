@@ -1678,7 +1678,9 @@ export async function runDockTui(
     if (modeChanged || trackingChanged) tui.requestRender();
   }
 
-  const activityPulse = new ActivityPulseController(activity, terminal, {
+  const activityPulse = new ActivityPulseController(activity, {
+    requestRender: () => tui.requestRender(),
+  }, {
     canWrite: () => !exiting && !tui.hasOverlay(),
   });
   activity.setAnimationListener(() => activityPulse.sync());
@@ -1694,7 +1696,6 @@ export async function runDockTui(
     status,
     editor: composerDock,
     historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
-    activityPlacement: { editorRow: 0, update: (placement) => activityPulse.setPlacement(placement) },
   });
   tui.addChild(screen);
   tui.setFocus(editor);
@@ -1714,24 +1715,24 @@ export async function runDockTui(
     if (wheel) {
       const reachedBoundary = wheel === "up" ? screen?.scrollUp(3) : screen?.scrollDown(3);
       if (wheel === "up" && reachedBoundary) void loadEarlierHistory();
-      tui.requestRender();
+      tui.requestRender(true);
       return { consume: true };
     }
     if (matchesKey(data, Key.pageUp) && !editor.isShowingAutocomplete()) {
       if (screen?.pageUp()) void loadEarlierHistory();
-      tui.requestRender();
+      tui.requestRender(true);
       return { consume: true };
     }
     if (matchesKey(data, Key.pageDown) && !editor.isShowingAutocomplete()) {
       screen?.pageDown();
-      tui.requestRender();
+      tui.requestRender(true);
       return { consume: true };
     }
     if (matchesKey(data, Key.ctrl("end"))) {
       const reloadStaleHistory = historyWindow.snapshot().loadState === "error";
       screen?.scrollToBottom();
       if (reloadStaleHistory) void reloadLatestHistoryAfterCursorError();
-      tui.requestRender();
+      tui.requestRender(true);
       return { consume: true };
     }
     if (matchesKey(data, "ctrl+d") && editor.getText().length === 0) {
@@ -1745,7 +1746,7 @@ export async function runDockTui(
         else screen?.scrollToBottom();
         if (instance.execution !== "running") activity.setActivity(`${toggled.name} ${toggled.expanded ? "expanded" : "collapsed"}`);
       }
-      tui.requestRender();
+      tui.requestRender(true);
       return { consume: true };
     }
     if (matchesKey(data, "ctrl+o")) {
@@ -1753,7 +1754,7 @@ export async function runDockTui(
       if (expanded) screen?.revealHistoryAnchor(() => conversation.latestToolAnchor());
       else screen?.scrollToBottom();
       if (instance.execution !== "running") activity.setActivity(expanded ? "all tools expanded" : "tools collapsed");
-      tui.requestRender();
+      tui.requestRender(true);
       return { consume: true };
     }
     if (matchesKey(data, Key.alt("up"))) {

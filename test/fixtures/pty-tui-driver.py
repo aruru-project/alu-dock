@@ -72,6 +72,8 @@ def main() -> int:
             before_resize = len(output)
             if action in hub_actions:
                 set_size(fd, 18 if action == "hub-narrow" else 40, 43 if action == "hub-narrow" else 120)
+            elif action == "history-frame-stability":
+                set_size(fd, 58, 252)
             else:
                 set_size(fd, 18, 43)
             os.kill(pid, signal.SIGWINCH)
@@ -261,6 +263,28 @@ def main() -> int:
                     os.write(fd, b"\x1b[1;5F")  # Ctrl+End returns to the retained live tail.
                     time.sleep(0.1)
                     read_available(fd, output, 0.05)
+            elif action == "history-frame-stability":
+                os.write(fd, b"\x0f")  # Ctrl+O, then repeat the real PageUp failure sequence.
+                for _ in range(80):
+                    os.write(fd, b"\x1b[5~")
+                    time.sleep(0.012)
+                    read_available(fd, output, 0.004)
+                marker = b"ALU_LAYOUT_PTY_MARKER"
+                os.write(fd, marker)
+                time.sleep(0.08)
+                read_available(fd, output, 0.02)
+                frame_start = len(output)
+                os.write(fd, b"\x1b[6~")  # Force one complete frame containing the draft and footer.
+                frame_deadline = time.monotonic() + 3
+                while time.monotonic() < frame_deadline:
+                    if read_available(fd, output, 0.03) < 0:
+                        break
+                    frame_output = bytes(output[frame_start:])
+                    if marker in frame_output and b"cache " in frame_output:
+                        break
+                os.write(fd, b"\x03")
+                time.sleep(0.05)
+                read_available(fd, output, 0.02)
             elif action in ("queue-restore", "queue-inflight", "queue-abort"):
                 queue_deadline = time.monotonic() + 4
                 while b"steer next" not in output and time.monotonic() < queue_deadline:
