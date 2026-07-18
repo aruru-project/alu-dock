@@ -79,6 +79,17 @@ validate/admit
 
 若post-effect commit未知，使用原operation ID返回`effect_unknown`；若同operation已有明确完成证据，不得再把known failure伪装成ambiguity。Manual compaction 在调用前后比较 public SessionManager compaction entries：未新增entry的 `nothing_to_compact`、already-compacted、cancel 与明确provider failure映射为 closed typed failure；调用后出现新compaction entry再异常仍保持 `effect_unknown`。
 
+### Work mutation admission
+
+Admission按能力分类，不用command-name例外：
+
+- **live**：session name、model、thinking、active tools，以及22个可写setting中的17个非run-sensitive key；它们仍串行通过configuration/catalog边界，但可与既有run和queue共存，不改写`activeCommandId`。同步`session_info_changed`必须归属于name operation，而非当前model command。
+- **idle**：tree navigation、new/switch/fork/clone/reload；另有5个会改变当前agent loop、queue drain、retry或transport语义的setting：`autoCompaction`、`autoRetry`、`steeringMode`、`followUpMode`、`transport`。
+- **run-preempting**：manual compaction；允许接管active run，但仍拒绝并发control mutation与未清queue。
+- **run control / queue**：abort、stop、steer、follow-up和dequeue沿用各自状态机，不走configuration admission。
+
+`compactionReserveTokens`与`compactionKeepRecentTokens`是其余2个setting key，因Pi尚无public setter而只读，不计入mutation admission。
+
 ## Session replacement
 
 `new`、`switch`、`fork`、`clone`、`reload`都由ManagedInstance管理generation rollover；PiRuntimeHost只执行mechanism并rebind当前session。

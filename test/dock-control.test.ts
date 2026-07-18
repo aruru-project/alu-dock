@@ -15,7 +15,7 @@ import { encodeJsonLine, JsonLineDecoder } from "../src/control/json-lines.js";
 import { ProjectTrustCoordinator } from "../src/control/project-trust.js";
 import { ExtensionUiBroker } from "../src/core/extension-ui-broker.js";
 import { ManagedInstance, type DockEvent, type SessionDto } from "../src/core/managed-instance.js";
-import { SETTING_KEYS } from "../src/core/config-projection.js";
+import { SETTING_KEYS, type SettingUpdate } from "../src/core/config-projection.js";
 import { RuntimeCompactionKnownFailureError, RuntimeInvalidSettingValueError, RuntimeSettingsWriteError, type RuntimeHistoryEntry, type RuntimePromptOptions } from "../src/core/runtime-session.js";
 import { mouseTrackingSequences } from "../src/tui/mouse-input.js";
 import { DelayedRuntimeSession } from "./support/delayed-runtime-session.js";
@@ -1646,13 +1646,15 @@ test("a reconnected client can start a fresh prompt on an idle instance", async 
   assert.equal(replay.instance.lastRun, "succeeded");
 });
 
-test("an idle instance lists and switches Pi models and thinking through the control plane", async (context) => {
+test("a running instance applies live metadata and next-step configuration without disturbing the run or queue", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-model-control-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => (
-    new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedRuntimeSession(`pi-${id}`) })
-  ), () => "model-instance");
+  let runtime: DelayedRuntimeSession | undefined;
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
+    runtime = new DelayedRuntimeSession(`pi-${id}`);
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
+  }, () => "model-instance");
   const host = new DockHost({ socketPath, registry });
   context.after(async () => {
     await host.stop().catch(() => {});
@@ -1677,14 +1679,102 @@ test("an idle instance lists and switches Pi models and thinking through the con
 
   const accepted = await client.prompt(created.id, "start");
   assert.equal(accepted.instance.execution, "running");
-  await assert.rejects(
-    client.setModel(created.id, "fixture", "default"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "instance_busy",
-  );
+  const activeCommandId = accepted.instance.activeCommandId;
+  assert.ok(activeCommandId);
+  const queued = await client.prompt(created.id, "use this next", "steer");
+  assert.equal(queued.instance.pending.total, 1);
+
+  const liveModel = await client.setModel(created.id, "fixture", "default");
+  const liveThinking = await client.setThinking(created.id, "low");
+  const liveTools = await client.setActiveTools(created.id, ["read", "write"]);
+  const liveName = await client.nameSession(created.id, "Still running");
+  for (const snapshot of [liveModel.instance, liveThinking.instance, liveTools.instance, liveName.instance]) {
+    assert.equal(snapshot.execution, "running");
+    assert.equal(snapshot.activeCommandId, activeCommandId);
+    assert.equal(snapshot.pending.total, 1);
+  }
+  assert.equal(liveName.instance.name, "Still running");
+  assert.deepEqual(liveTools.tools.filter((tool) => tool.active).map((tool) => tool.name), ["read", "write"]);
+
+  const liveSettingUpdates: SettingUpdate[] = [
+    { key: "enableSkillCommands", value: false },
+    { key: "hideThinking", value: true },
+    { key: "showCacheMissNotices", value: true },
+    { key: "showHardwareCursor", value: true },
+    { key: "clearOnShrink", value: false },
+    { key: "showTerminalProgress", value: false },
+    { key: "quietStartup", value: true },
+    { key: "collapseChangelog", value: true },
+    { key: "enableInstallTelemetry", value: false },
+    { key: "doubleEscapeAction", value: "fork" },
+    { key: "treeFilterMode", value: "all" },
+    { key: "defaultProjectTrust", value: "never" },
+    { key: "httpIdleTimeoutMs", value: 1_234 },
+    { key: "editorPaddingX", value: 3 },
+    { key: "outputPad", value: 1 },
+    { key: "autocompleteMaxVisible", value: 20 },
+    { key: "warnings", value: { anthropicExtraUsage: true } },
+  ];
+  for (const [index, update] of liveSettingUpdates.entries()) {
+    const result = await client.updateSetting(created.id, update, `live-setting-${index}`);
+    assert.deepEqual(result.setting.value, update.value);
+    assert.equal(result.instance.execution, "running");
+    assert.equal(result.instance.activeCommandId, activeCommandId);
+    assert.equal(result.instance.pending.total, 1);
+  }
+  for (const [index, update] of ([
+    { key: "autoCompaction", value: false },
+    { key: "autoRetry", value: false },
+    { key: "steeringMode", value: "one-at-a-time" },
+    { key: "followUpMode", value: "one-at-a-time" },
+    { key: "transport", value: "websocket" },
+  ] satisfies SettingUpdate[]).entries()) {
+    await assert.rejects(
+      client.updateSetting(created.id, update, `busy-setting-${index}`),
+      (error: unknown) => error instanceof ControlClientError && error.code === "instance_busy",
+    );
+  }
+  assert.deepEqual(runtime && {
+    model: runtime.modelMutationCalls,
+    thinking: runtime.thinkingMutationCalls,
+    tools: runtime.toolMutationCalls,
+    setting: runtime.settingMutationCalls,
+    name: runtime.sessionMutationCalls.name,
+  }, { model: 2, thinking: 2, tools: 1, setting: liveSettingUpdates.length, name: 1 });
+
+  for (const mutation of [
+    client.navigateSession(created.id, "any-entry", {}, "busy-navigation"),
+    client.newSession(created.id, undefined, "busy-new"),
+    client.forkSession(created.id, "any-entry", "busy-fork"),
+    client.cloneSession(created.id, "any-entry", "busy-clone"),
+    client.reloadSession(created.id, "busy-reload"),
+  ]) {
+    await assert.rejects(mutation, (error: unknown) => error instanceof ControlClientError && error.code === "instance_busy");
+  }
 
   const events = await client.events(created.id);
   assert.ok(events.page.events.some((event) => event.type === "model.changed"));
   assert.ok(events.page.events.some((event) => event.type === "thinking.changed"));
+  assert.ok(events.page.events.some((event) => event.type === "session.info_changed"));
+});
+
+test("running session name publication is attributed to the naming operation", async (context) => {
+  const port = new ScriptedCatalogCommitPort();
+  const harness = await createTransactionHarness(port);
+  context.after(() => cleanupHarness(harness));
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, undefined, "create-live-name-attribution");
+  const running = await client.prompt(created.id, "keep running", "prompt", "active-model-operation");
+  assert.equal(running.instance.execution, "running");
+
+  const named = await client.nameSession(created.id, "Live metadata", "live-name-operation");
+  assert.equal(named.instance.name, "Live metadata");
+  assert.equal(named.instance.execution, "running");
+  assert.equal(named.instance.activeCommandId, "active-model-operation");
+  assert.deepEqual(
+    port.calls.filter((call) => call.context.kind === "session.name").map((call) => call.context.operationId),
+    ["live-name-operation"],
+  );
 });
 
 test("same-host operation receipts deduplicate every implemented mutation and reject conflicts", async (context) => {

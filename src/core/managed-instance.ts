@@ -269,6 +269,7 @@ export class ManagedInstance {
   private readonly admissionBufferedEvents: RuntimeEvent[] = [];
   private admissionBufferOverflow = false;
   private receiptBoundaryOperationId: string | undefined;
+  private sessionNameOperationId: string | undefined;
   private readonly receiptBoundaryTasks: Promise<void>[] = [];
   private replacementIntent: CatalogInstanceRecord["replacement"];
   private durableSessionFileValue: string | undefined;
@@ -681,7 +682,7 @@ export class ManagedInstance {
     let configurationStarted = false;
     let runtimeCalled = false;
     try {
-      await this.beginConfiguration("navigating the session tree", false, "navigation");
+      await this.beginConfiguration("navigating the session tree", { kind: "navigation" });
       configurationStarted = true;
       if (!this.session.navigateTree) throw new Error("Runtime does not support session tree navigation");
       if (!this.currentTreeProjection(true).nodes.some((node) => node.entryId === targetId)) {
@@ -754,7 +755,7 @@ export class ManagedInstance {
   }
 
   async setActiveTools(names: string[], operationId = this.createCommandId()): Promise<ToolDto[]> {
-    await this.beginConfiguration("changing active tools");
+    await this.beginConfiguration("changing active tools", { admission: "live" });
     try {
       const tools = cloneJson(await this.session.setActiveTools([...names])).slice(0, 2_000);
       await this.enqueueTransition(() => this.commitCatalogTransition(
@@ -772,7 +773,7 @@ export class ManagedInstance {
   }
 
   async updateSetting(update: SettingUpdate, operationId = this.createCommandId()): Promise<SettingDto> {
-    await this.beginConfiguration("changing settings");
+    await this.beginConfiguration(`changing ${update.key}`, { admission: settingAdmission(update.key) });
     try {
       const setting = cloneJson(await this.session.updateSetting(cloneJson(update)));
       await this.enqueueTransition(() => this.commitCatalogTransition(
@@ -867,10 +868,11 @@ export class ManagedInstance {
   }
 
   async setSessionName(operationId: string, name: string): Promise<void> {
-    await this.beginConfiguration("naming the session");
+    await this.beginConfiguration("naming the session", { admission: "live" });
     let runtimeCalled = false;
     try {
       if (!this.session.setSessionName) throw new Error("Runtime does not support session naming");
+      this.sessionNameOperationId = operationId;
       this.receiptBoundaryOperationId = operationId;
       runtimeCalled = true;
       const actualName = this.session.setSessionName(name);
@@ -881,12 +883,13 @@ export class ManagedInstance {
       if (runtimeCalled && !isKnownMutationBoundaryError(error)) throw new RuntimeEffectUnknownError(operationId, error);
       throw error;
     } finally {
+      if (this.sessionNameOperationId === operationId) this.sessionNameOperationId = undefined;
       this.endConfiguration();
     }
   }
 
   async compactSession(operationId: string, customInstructions?: string): Promise<SessionCompactionDto> {
-    await this.beginConfiguration("compacting the session", true, "compaction");
+    await this.beginConfiguration("compacting the session", { admission: "run_preempting", kind: "compaction" });
     let runtimeCalled = false;
     try {
       if (!this.session.compact) throw new Error("Runtime does not support compaction");
@@ -921,7 +924,7 @@ export class ManagedInstance {
   }
 
   async selectModel(provider: string, modelId: string, operationId = this.createCommandId()): Promise<RuntimeModelState> {
-    await this.beginConfiguration("switching model");
+    await this.beginConfiguration("switching model", { admission: "live" });
     try {
       const state = await this.session.selectModel(provider, modelId);
       await this.enqueueTransition(() => this.commitCatalogTransition(
@@ -950,7 +953,7 @@ export class ManagedInstance {
   }
 
   async setThinkingLevel(level: RuntimeThinkingLevel, operationId = this.createCommandId()): Promise<RuntimeModelState> {
-    await this.beginConfiguration("changing thinking level");
+    await this.beginConfiguration("changing thinking level", { admission: "live" });
     try {
       const state = await this.session.setThinkingLevel(level);
       await this.enqueueTransition(() => this.commitCatalogTransition(
@@ -1943,20 +1946,27 @@ export class ManagedInstance {
 
   private async beginConfiguration(
     action: string,
-    allowRunning = false,
-    kind: "general" | "navigation" | "compaction" = "general",
+    options: {
+      admission?: "idle" | "live" | "run_preempting";
+      kind?: "general" | "navigation" | "compaction";
+    } = {},
   ): Promise<void> {
+    const admission = options.admission ?? "idle";
+    const kind = options.kind ?? "general";
     this.catalogPort?.assertWritable();
     this.assertActive();
-    if (
-      this.configurationPending
+    const controlMutationPending = this.configurationPending
       || this.commandAbortPending
       || this.queueMutationPending
       || this.pendingAdmission !== undefined
-      || this.pendingQueueMessages.length > 0
-      || this.state.pendingSteering + this.state.pendingFollowUp > 0
-      || this.compactionActive
-      || (!allowRunning && (this.state.execution === "running" || this.session.isStreaming))
+      || this.compactionActive;
+    const queuedWorkPending = this.pendingQueueMessages.length > 0
+      || this.state.pendingSteering + this.state.pendingFollowUp > 0;
+    const activeRun = this.state.execution === "running" || this.session.isStreaming;
+    if (
+      controlMutationPending
+      || (admission !== "live" && queuedWorkPending)
+      || (admission === "idle" && activeRun)
     ) {
       throw new InstanceBusyError(this.id, action);
     }
@@ -2200,9 +2210,11 @@ export class ManagedInstance {
       ?? extensionInitiatorOperationId
       ?? this.compactionOperationId
       ?? this.compactionRequestOperationId
-      ?? this.receiptBoundaryOperationId
+      ?? (event.type === "session_info_changed" ? this.sessionNameOperationId : undefined)
+      ?? (this.sessionNameOperationId === undefined ? this.receiptBoundaryOperationId : undefined)
       ?? this.replacementIntent?.operationId
-      ?? this.state.activeCommandId;
+      ?? this.state.activeCommandId
+      ?? this.receiptBoundaryOperationId;
     const context = (kind: string): CatalogMutationContext => ({
       kind,
       effect: "post_effect",
@@ -3170,6 +3182,21 @@ function projectRuntimeMetrics(value: RuntimeSessionMetrics): SessionMetricsDto 
       },
     }),
   };
+}
+
+const RUN_SENSITIVE_SETTING_KEYS: ReadonlySet<SettingKey> = new Set([
+  "autoCompaction",
+  "autoRetry",
+  "steeringMode",
+  "followUpMode",
+  "transport",
+]);
+
+function settingAdmission(key: SettingKey): "idle" | "live" {
+  // These settings can alter the active agent loop, queue draining, retry, or
+  // transport semantics. Presentation, startup/reload, trust defaults, and
+  // Host-restart settings only affect this/next client or a future boundary.
+  return RUN_SENSITIVE_SETTING_KEYS.has(key) ? "idle" : "live";
 }
 
 function projectCompactionResult(result: RuntimeCompactionResult): SessionCompactionDto {

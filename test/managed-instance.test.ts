@@ -589,7 +589,10 @@ test("delivery modes make queue acceptance explicit", async () => {
   assert.equal(followUp.delivery, "followUp");
   assert.equal(followUp.queued, true);
   assert.equal(session.promptCalls.at(-1)?.options?.streamingBehavior, "followUp");
-  await assert.rejects(instance.selectModel("fixture", "model-b", "model-while-queued"), InstanceBusyError);
+  const changedModel = await instance.selectModel("fixture", "model-b", "model-while-queued");
+  assert.deepEqual(changedModel.model, { provider: "fixture", id: "model-b" });
+  assert.equal(instance.snapshot().execution, "running");
+  assert.equal(instance.snapshot().pending.total, 2);
 
   await assert.rejects(
     instance.submit("parallel prompt", "prompt"),
