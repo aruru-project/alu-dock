@@ -185,6 +185,43 @@ test("fixed screen reports the activity physical row without changing chrome hei
   assert.equal(lines[9], "composer");
 });
 
+test("virtual history keeps its entry anchor while live output arrives below", () => {
+  const conversation = new DockConversation();
+  conversation.applyHistory(Array.from({ length: 40 }, (_, index): HistoryEntryDto => ({
+    entryId: `locked-${index}`,
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: [{ type: "text", text: `locked history ${index}` }],
+  })), false);
+  const empty: Component = { render: () => [], invalidate: () => {} };
+  const screen = new FixedDockScreen({ rows: 12 }, {
+    header: empty,
+    history: conversation,
+    status: empty,
+    editor: { render: () => ["COMPOSER"], invalidate: () => {} },
+    historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
+  });
+  screen.render(60);
+  screen.pageUp();
+  const before = screen.render(60);
+  const anchor = screen.captureHistoryAnchor();
+  assert.ok(anchor);
+  const anchoredText = before[anchor.screenRow]?.replace(/\x1b\[[0-9;]*m/gu, "");
+
+  conversation.apply(event(200, "message.submitted", {
+    operationId: "new-live-output",
+    messageId: "new-live-output",
+    role: "user",
+    text: "new live output below the lock",
+    delivery: "prompt",
+  }));
+  const after = screen.render(60);
+  assert.deepEqual(screen.captureHistoryAnchor(), anchor);
+  assert.equal(after[anchor.screenRow]?.replace(/\x1b\[[0-9;]*m/gu, ""), anchoredText);
+  assert.equal(screen.viewportSnapshot().unseenUpdates, 1);
+  assert.match(after.join("\n"), /history paused/u);
+  assert.doesNotMatch(after.join("\n"), /new live output below the lock/u);
+});
+
 test("history viewport auto-follows, locks on page-up, counts unseen output, and returns to bottom", () => {
   const viewport = new HistoryViewport();
   const initial = Array.from({ length: 10 }, (_, index) => `line ${index}`);
@@ -214,7 +251,7 @@ test("history viewport auto-follows, locks on page-up, counts unseen output, and
   assert.deepEqual(followed.lines, ["line 7", "line 8", "line 9", "line 10"]);
 });
 
-test("fixed screen preserves an entry-and-row anchor across prepend eviction and resize", () => {
+test("fixed screen preserves an entry-and-row anchor across contiguous prepend and resize", () => {
   const conversation = new DockConversation();
   const initial = Array.from({ length: 12 }, (_, index): HistoryEntryDto => ({
     entryId: `entry-${index + 20}`,
@@ -224,7 +261,6 @@ test("fixed screen preserves an entry-and-row anchor across prepend eviction and
   conversation.replacePagedHistory({
     entries: initial,
     hasEarlier: true,
-    hasNewer: false,
     nextBeforeEntryId: initial[0]!.entryId,
     loadState: "idle",
     generation: 1,
@@ -268,11 +304,9 @@ test("fixed screen preserves an entry-and-row anchor across prepend eviction and
     content: [{ type: "text", text: `older history ${index + 12}` }],
   }));
   conversation.replacePagedHistory({
-    entries: [...older, ...initial.slice(0, 6), ...initial.slice(-2)],
+    entries: [...older, ...initial],
     hasEarlier: true,
-    hasNewer: true,
     nextBeforeEntryId: older[0]!.entryId,
-    newerBoundaryEntryId: initial.at(-2)!.entryId,
     loadState: "idle",
     generation: 1,
     revision: 2,
@@ -295,6 +329,125 @@ test("fixed screen preserves an entry-and-row anchor across prepend eviction and
   const afterHeightResize = screen.captureHistoryAnchor();
   assert.equal(afterHeightResize?.row.entryKey, heightAnchor.row.entryKey);
   assert.ok((afterHeightResize?.screenRow ?? 99) <= heightAnchor.screenRow);
+});
+
+test("a temporarily zero-row history preserves its virtual lock and anchor", () => {
+  const conversation = new DockConversation();
+  conversation.applyHistory(Array.from({ length: 40 }, (_, index): HistoryEntryDto => ({
+    entryId: `zero-row-${index}`,
+    role: index % 2 === 0 ? "user" : "assistant",
+    content: [{ type: "text", text: `zero row history ${index}` }],
+  })), false);
+  let editorRows = ["COMPOSER"];
+  const screen = new FixedDockScreen({ rows: 12 }, {
+    header: { render: () => [], invalidate: () => {} },
+    history: conversation,
+    status: { render: () => [], invalidate: () => {} },
+    editor: { render: () => editorRows, invalidate: () => {} },
+    historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
+  });
+  screen.render(60);
+  screen.pageUp();
+  screen.render(60);
+  const anchor = screen.captureHistoryAnchor();
+  assert.ok(anchor);
+  assert.equal(screen.viewportSnapshot().locked, true);
+
+  editorRows = Array.from({ length: 12 }, (_, index) => `editor ${index}`);
+  const covered = screen.render(60);
+  assert.equal(covered.some((line) => line.includes("zero row history")), false);
+  assert.equal(screen.viewportSnapshot().locked, true);
+
+  editorRows = ["COMPOSER"];
+  screen.render(60);
+  assert.equal(screen.viewportSnapshot().locked, true);
+  assert.deepEqual(screen.captureHistoryAnchor(), anchor);
+});
+
+test("80x24 expanded long history renders only the viewport neighborhood and keeps the composer", () => {
+  const conversation = new DockConversation();
+  const history: HistoryEntryDto[] = [];
+  for (let index = 0; index < 2_000; index += 1) {
+    const callId = `long-tool-${index}`;
+    history.push({
+      entryId: `long-assistant-${index}`,
+      role: "assistant",
+      content: [{ type: "tool_call", toolCallId: callId, toolName: "bash", args: {} }],
+    }, {
+      entryId: `long-result-${index}`,
+      role: "tool",
+      content: [{
+        type: "tool_result",
+        toolCallId: callId,
+        toolName: "bash",
+        text: `detail-${index}\n${"expanded output ".repeat(250)}`,
+        isError: false,
+      }],
+    });
+  }
+  conversation.applyHistory(history, false);
+  const screen = new FixedDockScreen({ rows: 24 }, {
+    header: { render: () => ["header"], invalidate: () => {} },
+    history: conversation,
+    status: { render: () => ["metrics", "extensions"], invalidate: () => {} },
+    editor: { render: () => ["activity", "COMPOSER"], invalidate: () => {} },
+    historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
+  });
+  screen.render(80);
+
+  const started = performance.now();
+  assert.equal(conversation.toggleToolsExpanded(), true);
+  screen.revealHistoryAnchor(() => conversation.latestToolAnchor());
+  const lines = screen.render(80);
+  const elapsedMs = performance.now() - started;
+
+  assert.equal(lines.length, 24);
+  assert.ok(lines.indexOf("COMPOSER") > lines.findIndex((line) => line.includes("detail-1999")));
+  assert.ok(lines.indexOf("COMPOSER") < lines.indexOf("metrics"));
+  assert.doesNotMatch(lines.join("\n"), /detail-0(?:\D|$)/u);
+  assert.ok(lines.every((line) => visibleWidth(line) <= 80));
+  assert.ok(elapsedMs < 1_000, `expanded viewport render took ${elapsedMs.toFixed(1)}ms`);
+});
+
+test("virtual Work history stays continuous across thousands of rows and repeated compactions", () => {
+  const conversation = new DockConversation();
+  const history = Array.from({ length: 8_500 }, (_, index): HistoryEntryDto => ({
+    entryId: `continuous-${index}`,
+    role: index % 500 === 0 ? "system" : index % 2 === 0 ? "user" : "assistant",
+    content: [{ type: "text", text: index % 500 === 0 ? `compaction ${index}\nsummary retained` : `continuous history ${index}` }],
+    ...(index % 500 === 0 ? { summaryKind: "compaction" as const } : {}),
+  }));
+  conversation.applyHistory(history, false);
+  const empty: Component = { render: () => [], invalidate: () => {} };
+  const screen = new FixedDockScreen({ rows: 24 }, {
+    header: empty,
+    history: conversation,
+    status: empty,
+    editor: { render: () => ["COMPOSER"], invalidate: () => {} },
+    historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
+  });
+  let lines = screen.render(80);
+  assert.match(lines.join("\n"), /continuous history 8499/u);
+
+  let reachedTop = false;
+  for (let page = 0; page < 1_000; page += 1) {
+    reachedTop = screen.pageUp();
+    lines = screen.render(80);
+    if (reachedTop) break;
+  }
+  assert.equal(reachedTop, true);
+  assert.match(lines.join("\n"), /compaction 0/u);
+  assert.equal(lines.at(-1), "COMPOSER");
+
+  let reachedBottom = false;
+  for (let page = 0; page < 1_000; page += 1) {
+    reachedBottom = screen.pageDown();
+    lines = screen.render(80);
+    if (reachedBottom) break;
+  }
+  assert.equal(reachedBottom, true);
+  assert.match(lines.join("\n"), /continuous history 8499/u);
+  assert.equal(lines.at(-1), "COMPOSER");
 });
 
 test("layout-only tool expansion preserves an explicit reveal offset", () => {

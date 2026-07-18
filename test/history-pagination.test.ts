@@ -6,7 +6,6 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import type { HistoryEntryDto } from "../src/core/instance-dto.js";
 import {
   HISTORY_PAGE_SIZE,
-  MAX_HISTORY_WINDOW_ENTRIES,
   PagedHistoryWindow,
 } from "../src/tui/history-pagination.js";
 import { DockMouseTrackingMode, parseMouseWheel, mouseTrackingSequences } from "../src/tui/mouse-input.js";
@@ -38,7 +37,7 @@ test("paged history deduplicates concurrent loads and rejects stale generation c
   assert.equal(history.snapshot().generation, 4);
 });
 
-test("paged history reaches 8500 entries through bounded reverse pages while pinning the live tail", () => {
+test("paged history keeps 8500 entries continuously navigable without a client cache gap", () => {
   const all = Array.from({ length: 8_500 }, (_, index) => entry(index));
   const history = new PagedHistoryWindow();
   history.reset(all.slice(-HISTORY_PAGE_SIZE), true, 1);
@@ -58,7 +57,7 @@ test("paged history reaches 8500 entries through bounded reverse pages while pin
       ...(start > 0 ? { nextBeforeEntryId: page[0]!.entryId } : {}),
     }), true);
     for (const item of history.snapshot().entries) reached.add(item.entryId);
-    assert.ok(history.snapshot().entries.length <= MAX_HISTORY_WINDOW_ENTRIES);
+    assert.equal(history.snapshot().entries.length, all.length - start);
     pages += 1;
     assert.ok(pages < 100);
   }
@@ -68,17 +67,8 @@ test("paged history reaches 8500 entries through bounded reverse pages while pin
   assert.equal(reached.size, all.length);
   assert.equal(snapshot.entries[0]?.entryId, "history-0");
   assert.equal(snapshot.entries.at(-1)?.entryId, "history-8499");
-  assert.equal(snapshot.hasNewer, true);
-  assert.equal(snapshot.newerBoundaryEntryId, "history-8300");
-
-  assert.equal(history.returnToLatest(), true);
-  const latest = history.snapshot();
-  assert.equal(latest.entries.length, HISTORY_PAGE_SIZE);
-  assert.equal(latest.entries[0]?.entryId, "history-8300");
-  assert.equal(latest.entries.at(-1)?.entryId, "history-8499");
-  assert.equal(latest.hasEarlier, true);
-  assert.equal(latest.hasNewer, false);
-  assert.equal(latest.nextBeforeEntryId, "history-8300");
+  assert.equal(snapshot.entries.length, all.length);
+  assert.deepEqual(history.snapshot().entries, snapshot.entries);
 });
 
 test("paged history exposes retryable cursor errors without advancing or looping", () => {

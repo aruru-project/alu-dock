@@ -124,6 +124,22 @@ test("Night Console uses semantic local surfaces without taking over the termina
   assert.doesNotMatch(ansi16.userSurface("question"), /\u001b\[4[0-7]m/u, "local surfaces fall back to foreground-only at 16 colors");
 });
 
+test("long live runs retain every projected conversation entry", () => {
+  const conversation = new DockConversation();
+  for (let index = 0; index < 500; index += 1) {
+    conversation.apply(event(index + 1, "message.submitted", {
+      operationId: `live-${index}`,
+      messageId: `live-${index}`,
+      role: "user",
+      text: `live entry ${index}`,
+      delivery: "steer",
+    }));
+  }
+  assert.equal(conversation.snapshot().length, 500);
+  assert.equal(conversation.snapshot()[0]?.text, "live entry 0");
+  assert.equal(conversation.snapshot().at(-1)?.text, "live entry 499");
+});
+
 test("conversation reset replaces old session history", () => {
   const conversation = new DockConversation();
   conversation.addNotice("old session");
@@ -205,7 +221,7 @@ test("compaction summaries default to one line and expand explicitly", () => {
   assert.equal(ordinary.toggleLatestDetailExpanded(), undefined);
 });
 
-test("paged history rebuild keeps the bounded gap ordered before live events", () => {
+test("paged history rebuild stays contiguous and ordered before live events", () => {
   const conversation = new DockConversation();
   conversation.applyHistory([
     { entryId: "h8", role: "user", content: [{ type: "text", text: "recent eight" }] },
@@ -227,8 +243,6 @@ test("paged history rebuild keeps the bounded gap ordered before live events", (
       { entryId: "h9", role: "assistant", content: [{ type: "text", text: "recent nine" }] },
     ],
     hasEarlier: false,
-    hasNewer: true,
-    newerBoundaryEntryId: "h8",
     loadState: "idle",
     generation: 1,
     revision: 2,
@@ -237,7 +251,6 @@ test("paged history rebuild keeps the bounded gap ordered before live events", (
   assert.deepEqual(conversation.snapshot().map((item) => item.text), [
     "old zero",
     "old one",
-    "Newer session history crossed a bounded-memory gap · PageDown continues at the retained live tail.",
     "recent eight",
     "recent nine",
     "live tail",

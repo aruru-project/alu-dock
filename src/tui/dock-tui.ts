@@ -1695,9 +1695,6 @@ export async function runDockTui(
     }
     if (matchesKey(data, Key.ctrl("end"))) {
       const reloadStaleHistory = historyWindow.snapshot().loadState === "error";
-      if (!reloadStaleHistory && historyWindow.returnToLatest()) {
-        conversation.replacePagedHistory(historyWindow.snapshot());
-      }
       screen?.scrollToBottom();
       if (reloadStaleHistory) void reloadLatestHistoryAfterCursorError();
       tui.requestRender();
@@ -1710,7 +1707,7 @@ export async function runDockTui(
     if (matchesKey(data, Key.alt("o"))) {
       const toggled = conversation.toggleLatestDetailExpanded();
       if (toggled) {
-        if (toggled.expanded) screen?.revealOffsetFromBottom((width) => conversation.latestDetailOffsetFromBottom(width));
+        if (toggled.expanded) screen?.revealHistoryAnchor(() => conversation.latestDetailAnchor());
         else screen?.scrollToBottom();
         if (instance.execution !== "running") activity.setActivity(`${toggled.name} ${toggled.expanded ? "expanded" : "collapsed"}`);
       }
@@ -1719,7 +1716,7 @@ export async function runDockTui(
     }
     if (matchesKey(data, "ctrl+o")) {
       const expanded = conversation.toggleToolsExpanded();
-      if (expanded) screen?.revealOffsetFromBottom((width) => conversation.latestToolOffsetFromBottom(width));
+      if (expanded) screen?.revealHistoryAnchor(() => conversation.latestToolAnchor());
       else screen?.scrollToBottom();
       if (instance.execution !== "running") activity.setActivity(expanded ? "all tools expanded" : "tools collapsed");
       tui.requestRender();
