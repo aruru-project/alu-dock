@@ -42,12 +42,11 @@ import { SearchablePicker } from "./searchable-picker.js";
 import { projectSnapshot } from "./snapshot-projection.js";
 import {
   collectSessionTree,
-  filterSessionTree,
   isTreeFilterMode,
   parseTreeNavigationCommand,
   treePickerItems,
-  type TreeFilterMode,
 } from "./session-tree.js";
+import { SessionTreeSurface } from "./session-tree-surface.js";
 import {
   formatSettingValue,
   parseSettingCommandValue,
@@ -858,10 +857,9 @@ export async function runDockTui(
     return collectSessionTree((revision, cursor, limit) => client.tree(instance.id, revision, cursor, limit));
   }
 
-  async function chooseTreeNode(
+  async function chooseTreeListNode(
     titleText: string,
-    predicate: (node: TreeNodeDto) => boolean = () => true,
-    filterMode?: TreeFilterMode,
+    predicate: (node: TreeNodeDto) => boolean,
   ): Promise<TreeNodeDto | undefined> {
     const byId = new Map<string, TreeNodeDto>();
     const picker = new SearchablePicker([], {
@@ -883,7 +881,7 @@ export async function runDockTui(
 
     void loadSessionTree().then((tree) => {
       if (!active) return;
-      const candidates = (filterMode === undefined ? tree.nodes : filterSessionTree(tree.nodes, filterMode)).filter(predicate);
+      const candidates = tree.nodes.filter(predicate);
       for (const node of candidates) byId.set(node.entryId, node);
       picker.replaceItems(treePickerItems(candidates, tree.leafId, tree.nodes));
       picker.setSelectedValue(tree.leafId);
@@ -907,42 +905,85 @@ export async function runDockTui(
     }
   }
 
+  async function chooseSessionTreeNode(initialSelectedId?: string): Promise<{ node: TreeNodeDto; leafId?: string } | undefined> {
+    const configuredFilter = settings.find((setting) => setting.key === "treeFilterMode")?.value;
+    const surface = new SessionTreeSurface({
+      title: "Navigate session tree",
+      initialFilter: isTreeFilterMode(configuredFilter) ? configuredFilter : "default",
+      ...(initialSelectedId === undefined ? {} : { initialSelectedId }),
+      terminalRows: () => terminal.rows,
+      requestRender: () => tui.requestRender(),
+    });
+    let active = true;
+    let leafId: string | undefined;
+    let resolveChoice!: (node: TreeNodeDto | undefined) => void;
+    const selection = new Promise<TreeNodeDto | undefined>((resolve) => { resolveChoice = resolve; });
+    surface.onSelect = (node) => resolveChoice(node);
+    surface.onCancel = () => resolveChoice(undefined);
+    const overlay = tui.showOverlay(surface, { width: "98%", minWidth: 36, maxHeight: "96%", anchor: "center", margin: 0 });
+    tui.setFocus(surface);
+    void loadSessionTree().then((tree) => {
+      if (!active) return;
+      leafId = tree.leafId;
+      surface.replaceTree(tree.nodes, tree.leafId);
+    }).catch(() => {
+      if (active) surface.setLoadFailure("Session tree unavailable · press Esc to return");
+    });
+    try {
+      const node = await selection;
+      return node === undefined ? undefined : { node, ...(leafId === undefined ? {} : { leafId }) };
+    } finally {
+      active = false;
+      overlay.hide();
+      tui.setFocus(editor);
+    }
+  }
+
   async function chooseTreeNavigation(): Promise<void> {
     editor.disableSubmit = true;
     activity.setActivity("loading session tree");
     tui.requestRender();
+    let selectedId: string | undefined;
     try {
-      const configuredFilter = settings.find((setting) => setting.key === "treeFilterMode")?.value;
-      const target = await chooseTreeNode("Navigate session tree", () => true, isTreeFilterMode(configuredFilter) ? configuredFilter : "default");
-      if (!target) { activity.setActivity("tree unchanged"); return; }
-      const action = await showChoicePicker("Navigation mode", [
-        { value: "navigate", label: "Navigate", description: "switch branch without model summarization" },
-        { value: "summary", label: "Navigate with summary", description: "use Pi branch summarization" },
-        { value: "custom", label: "Summary with additional instructions" },
-        { value: "replace", label: "Summary with replacement instructions" },
-      ], "navigate");
-      if (!action) { activity.setActivity("tree unchanged"); return; }
-      const options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {};
-      if (action !== "navigate") options.summarize = true;
-      if (action === "custom" || action === "replace") {
-        const instructions = await showLocalTextDialog("Branch summary instructions", "editor", "Describe what the summary must preserve");
-        if (instructions === undefined || instructions.trim().length === 0) { activity.setActivity("tree unchanged"); return; }
-        options.customInstructions = instructions;
-        if (action === "replace") options.replaceInstructions = true;
-      }
-      if (options.summarize) {
-        const labelMode = await showChoicePicker("Optional branch label", [
-          { value: "none", label: "No label" },
-          { value: "label", label: "Add label" },
-        ], "none");
-        if (labelMode === undefined) { activity.setActivity("tree unchanged"); return; }
-        if (labelMode === "label") {
-          const label = await showLocalTextDialog("Branch label", "input", "Short label for the navigation target");
-          if (label === undefined) { activity.setActivity("tree unchanged"); return; }
-          if (label.trim()) options.label = label.trim();
+      while (true) {
+        const selection = await chooseSessionTreeNode(selectedId);
+        if (!selection) { activity.setActivity("tree unchanged"); return; }
+        const target = selection.node;
+        selectedId = target.entryId;
+        if (target.entryId === selection.leafId) {
+          activity.setActivity("already at this point");
+          continue;
         }
+        const action = await showChoicePicker("Navigation mode", [
+          { value: "navigate", label: "Navigate", description: "switch branch without model summarization" },
+          { value: "summary", label: "Navigate with summary", description: "use Pi branch summarization" },
+          { value: "custom", label: "Summary with additional instructions" },
+          { value: "replace", label: "Summary with replacement instructions" },
+        ], "navigate");
+        if (!action) continue;
+        const options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {};
+        if (action !== "navigate") options.summarize = true;
+        if (action === "custom" || action === "replace") {
+          const instructions = await showLocalTextDialog("Branch summary instructions", "editor", "Describe what the summary must preserve");
+          if (instructions === undefined || instructions.trim().length === 0) continue;
+          options.customInstructions = instructions;
+          if (action === "replace") options.replaceInstructions = true;
+        }
+        if (options.summarize) {
+          const labelMode = await showChoicePicker("Optional branch label", [
+            { value: "none", label: "No label" },
+            { value: "label", label: "Add label" },
+          ], "none");
+          if (labelMode === undefined) continue;
+          if (labelMode === "label") {
+            const label = await showLocalTextDialog("Branch label", "input", "Short label for the navigation target");
+            if (label === undefined) continue;
+            if (label.trim()) options.label = label.trim();
+          }
+        }
+        await navigateTree(target.entryId, options);
+        return;
       }
-      await navigateTree(target.entryId, options);
     } catch (error) { showError(error); }
     finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
   }
@@ -966,11 +1007,12 @@ export async function runDockTui(
     treeNavigationAbortRequested = false;
     activity.setActivity(options.summarize ? "summarizing branch · Esc/Ctrl+C abort" : "navigating tree");
     tui.requestRender();
+    const draftWasEmpty = editor.getText().length === 0;
     try {
       const result = await client.navigateSession(instance.id, targetId, options);
       instance = result.instance;
       status.update(instance);
-      if (result.editorText !== undefined) editor.setText(result.editorText);
+      if (result.editorText !== undefined && draftWasEmpty && editor.getText().length === 0) editor.setText(result.editorText);
       activity.setActivity(result.cancelled ? result.aborted || treeNavigationAbortRequested ? "navigation aborted" : "navigation cancelled by extension" : "branch selected");
     } catch (error) { showError(error); }
     finally {
@@ -998,7 +1040,7 @@ export async function runDockTui(
     activity.setActivity("loading fork targets");
     tui.requestRender();
     try {
-      const target = await chooseTreeNode("Fork before user message", (node) => node.kind === "message" && node.role === "user");
+      const target = await chooseTreeListNode("Fork before user message", (node) => node.kind === "message" && node.role === "user");
       if (target) await forkSession(target.entryId);
       else activity.setActivity("fork cancelled");
     } catch (error) { showError(error); }

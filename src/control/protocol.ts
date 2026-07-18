@@ -800,10 +800,14 @@ export function parseSessionCloneResult(input: unknown): SessionCloneResult {
 
 function parseTreeNode(input: unknown, field: string): TreeNodeDto {
   const node = object(input, field);
-  exact(node, ["entryId", "parentId", "depth", "kind", "role", "label", "timestamp", "summary", "hasChildren"]);
+  exact(node, ["entryId", "parentId", "depth", "kind", "role", "displayClass", "state", "label", "timestamp", "summary", "hasChildren"]);
   const kind = enumeration(node.kind, `${field}.kind`, ["message", "thinking_level_change", "model_change", "compaction", "branch_summary", "custom", "custom_message", "label", "session_info"]);
   const role = node.role === undefined ? undefined : enumeration(node.role, `${field}.role`, ["user", "assistant", "tool", "system"]);
+  const displayClass = enumeration(node.displayClass, `${field}.displayClass`, ["content", "tool", "metadata", "structural"]);
+  const state = node.state === undefined ? undefined : enumeration(node.state, `${field}.state`, ["error", "aborted"]);
   if ((kind === "message") !== (role !== undefined)) throw validation("invalid_response", `${field} message role invariant failed`);
+  if (role === "tool" && displayClass !== "tool") throw validation("invalid_response", `${field} tool display class invariant failed`);
+  if (state !== undefined && role !== "assistant" && role !== "tool") throw validation("invalid_response", `${field} state invariant failed`);
   const depth = unsigned(node.depth, `${field}.depth`);
   if (depth > 100_000) throw validation("invalid_response", `${field}.depth exceeds 100000`);
   return {
@@ -812,6 +816,8 @@ function parseTreeNode(input: unknown, field: string): TreeNodeDto {
     depth,
     kind,
     ...(role === undefined ? {} : { role }),
+    displayClass,
+    ...(state === undefined ? {} : { state }),
     ...(node.label === undefined ? {} : { label: payloadFreeString(node.label, `${field}.label`, MAX_INSTANCE_NAME_CHARS) }),
     ...(node.timestamp === undefined ? {} : { timestamp: timestamp(node.timestamp, `${field}.timestamp`) }),
     summary: payloadFreeString(node.summary, `${field}.summary`, MAX_MESSAGE),

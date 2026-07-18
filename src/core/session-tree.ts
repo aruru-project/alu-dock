@@ -20,6 +20,8 @@ const TREE_KINDS = [
   "custom", "custom_message", "label", "session_info",
 ] as const;
 const TREE_ROLES = ["user", "assistant", "tool", "system"] as const;
+const TREE_DISPLAY_CLASSES = ["content", "tool", "metadata", "structural"] as const;
+const TREE_STATES = ["error", "aborted"] as const;
 const DATA_URI = /data:[^,]*;base64,/i;
 const BASE64_PAYLOAD = /^(?=.{128,}$)(?=.*(?:[0-9+/]|={1,2}$))(?:[A-Za-z0-9+/]{4})+(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
@@ -97,6 +99,13 @@ function projectRuntimeTreeNode(node: RuntimeTreeNode): TreeNodeDto {
   const kind = enumRuntimeValue(node.kind, TREE_KINDS, "Runtime tree node kind");
   const role = node.role === undefined ? undefined : enumRuntimeValue(node.role, TREE_ROLES, "Runtime tree node role");
   if ((kind === "message") !== (role !== undefined)) throw new Error("Runtime tree message role invariant failed");
+  const inferredClass = kind === "message" ? (role === "tool" ? "tool" : "content")
+    : kind === "compaction" || kind === "branch_summary" || kind === "custom_message" ? "content"
+      : kind === "custom" ? "structural" : "metadata";
+  const displayClass = node.displayClass === undefined ? inferredClass : enumRuntimeValue(node.displayClass, TREE_DISPLAY_CLASSES, "Runtime tree display class");
+  const state = node.state === undefined ? undefined : enumRuntimeValue(node.state, TREE_STATES, "Runtime tree node state");
+  if (role === "tool" && displayClass !== "tool") throw new Error("Runtime tree tool display class invariant failed");
+  if (state !== undefined && role !== "assistant" && role !== "tool") throw new Error("Runtime tree state invariant failed");
   if (!Number.isSafeInteger(node.depth) || node.depth < 0 || node.depth > 100_000) throw new Error("Runtime tree node depth is invalid");
   if (typeof node.hasChildren !== "boolean") throw new Error("Runtime tree node hasChildren must be boolean");
   const entryId = boundedRuntimeId(node.entryId, "Runtime tree entry ID");
@@ -109,6 +118,8 @@ function projectRuntimeTreeNode(node: RuntimeTreeNode): TreeNodeDto {
     depth: node.depth,
     kind,
     ...(role === undefined ? {} : { role }),
+    displayClass,
+    ...(state === undefined ? {} : { state }),
     ...(label === undefined ? {} : { label }),
     ...(timestamp === undefined ? {} : { timestamp }),
     summary: safeTreeText(node.summary, 2_048, "Session entry details omitted") ?? "Session entry details omitted",

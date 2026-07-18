@@ -21,6 +21,8 @@ import {
 } from "../src/tui/screen-layout.js";
 import { filterSearchableItems } from "../src/tui/search-filter.js";
 import { SearchablePicker } from "../src/tui/searchable-picker.js";
+import { SessionTreeSurface } from "../src/tui/session-tree-surface.js";
+import type { TreeNodeDto } from "../src/core/instance-dto.js";
 
 function event(sequence: number, type: DockEvent["type"], data: Record<string, unknown>): DockEvent {
   return {
@@ -346,6 +348,51 @@ test("searchable picker accepts typed filtering while preserving IME focus propa
   picker.onCancel = () => { cancelled = true; };
   picker.handleInput("\u001b");
   assert.equal(cancelled, true);
+});
+
+test("dedicated tree surface handles filters, search clearing, branch keys, and responsive semantic rows", () => {
+  const tree: TreeNodeDto[] = [
+    { entryId: "root", depth: 0, kind: "message", role: "user", displayClass: "content", summary: "start", hasChildren: true },
+    { entryId: "branch-a", parentId: "root", depth: 1, kind: "message", role: "user", displayClass: "content", summary: "approach alpha", hasChildren: true },
+    { entryId: "error-a", parentId: "branch-a", depth: 2, kind: "message", role: "assistant", displayClass: "content", state: "error", summary: "WebSocket error", hasChildren: false },
+    { entryId: "wrapper-b", parentId: "root", depth: 1, kind: "message", role: "assistant", displayClass: "structural", summary: "Tool call: alu_kanban", hasChildren: true },
+    { entryId: "tool-b", parentId: "wrapper-b", depth: 2, kind: "message", role: "tool", displayClass: "tool", summary: "[alu_kanban: get_card · card #185]", hasChildren: true },
+    { entryId: "compact-b", parentId: "tool-b", depth: 3, kind: "compaction", displayClass: "content", summary: "[compaction: 42k tokens]", hasChildren: false },
+  ];
+  let renders = 0;
+  let cancelled = 0;
+  let selected: string | undefined;
+  const surface = new SessionTreeSurface({ title: "Session Tree", initialFilter: "default", terminalRows: () => 24, requestRender: () => { renders += 1; } });
+  surface.onCancel = () => { cancelled += 1; };
+  surface.onSelect = (node) => { selected = node.entryId; };
+  surface.replaceTree(tree, "compact-b");
+  surface.focused = true;
+
+  const initial = surface.render(80).join("\n");
+  assert.match(initial, /\[alu_kanban: get_card · card #185\]/u);
+  assert.match(initial, /WebSocket error/u);
+  assert.match(initial, /\[compaction: 42k tokens\]/u);
+  assert.doesNotMatch(initial, /Tool call: alu_kanban/u, "structural tool-call wrappers stay hidden");
+  assert.ok(surface.render(43).every((line) => visibleWidth(line) <= 43));
+  assert.ok(surface.render(120).every((line) => visibleWidth(line) <= 120));
+
+  surface.handleInput("\x0f"); // Ctrl+O: no-tools
+  assert.equal(surface.getFilterMode(), "no-tools");
+  assert.doesNotMatch(surface.render(80).join("\n"), /alu_kanban/u);
+  surface.handleInput("\x15"); // Ctrl+U: user-only
+  assert.equal(surface.getFilterMode(), "user-only");
+  surface.handleInput("alpha");
+  assert.equal(surface.getQuery(), "alpha");
+  surface.handleInput("\x1b");
+  assert.equal(surface.getQuery(), "");
+  assert.equal(cancelled, 0, "first Escape clears local search state");
+  surface.handleInput("\x1b");
+  assert.equal(cancelled, 1);
+
+  surface.handleInput("\x04"); // Ctrl+D: default
+  surface.handleInput("\r");
+  assert.ok(selected);
+  assert.ok(renders > 0);
 });
 
 test("tree picker uses left/right and page keys for clamped page movement", () => {

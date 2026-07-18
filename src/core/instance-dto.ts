@@ -62,12 +62,16 @@ export type TreeNodeKind =
   | "custom_message"
   | "label"
   | "session_info";
+export type TreeNodeDisplayClass = "content" | "tool" | "metadata" | "structural";
+export type TreeNodeState = "error" | "aborted";
 export interface TreeNodeDto {
   entryId: string;
   parentId?: string;
   depth: number;
   kind: TreeNodeKind;
   role?: "user" | "assistant" | "tool" | "system";
+  displayClass: TreeNodeDisplayClass;
+  state?: TreeNodeState;
   label?: string;
   timestamp?: string;
   summary: string;

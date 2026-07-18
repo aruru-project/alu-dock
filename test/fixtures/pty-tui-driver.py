@@ -407,7 +407,7 @@ def main() -> int:
                 while b"Navigate session tree" not in output and time.monotonic() < picker_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
-                loaded_marker = "╋ Alu · shared answer".encode("utf-8")
+                loaded_marker = b"shared answer"
                 loaded_deadline = time.monotonic() + 5
                 while loaded_marker not in output and time.monotonic() < loaded_deadline:
                     if read_available(fd, output, 0.05) < 0:

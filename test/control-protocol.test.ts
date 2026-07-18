@@ -426,11 +426,14 @@ test("Stage 6 tree, navigate, fork, and clone DTOs are closed and cursor-bounded
   assert.equal(parseControlRequest({ ...base, type: "session.clone", params: { operationId: "clone-1", instanceId: "i1", entryId: "e2" } }).type, "session.clone");
   assert.throws(() => parseControlRequest({ ...base, type: "session.fork", params: { operationId: "fork-1", instanceId: "i1", entryId: "e1", position: "at" } }), /Unexpected field/);
 
-  const node = { entryId: "e1", depth: 0, kind: "message", role: "user", timestamp: "2026-07-14T00:00:00.000Z", summary: "hello", hasChildren: true };
+  const node = { entryId: "e1", depth: 0, kind: "message", role: "user", displayClass: "content", timestamp: "2026-07-14T00:00:00.000Z", summary: "hello", hasChildren: true };
   assert.deepEqual(parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [node], leafId: "e1", total: 2, truncated: true, nextAfterEntryId: "e1" }), {
     treeRevision: "g1-revision", nodes: [node], leafId: "e1", total: 2, truncated: true, nextAfterEntryId: "e1",
   });
   assert.throws(() => parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [{ ...node, raw: true }], total: 1, truncated: false }), /Unexpected field/);
+  const { displayClass: _displayClass, ...missingDisplayClass } = node;
+  assert.throws(() => parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [missingDisplayClass], total: 1, truncated: false }), /displayClass/);
+  assert.throws(() => parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [{ ...node, displayClass: "structural", state: "error" }], total: 1, truncated: false }), /state invariant/);
   assert.throws(() => parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [{ ...node, role: undefined, kind: "message" }], total: 1, truncated: false }), /role invariant/);
   assert.throws(() => parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [node], total: 2, truncated: true, nextAfterEntryId: "other" }), /last returned entry/);
   assert.throws(() => parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [{ ...node, summary: `tool: ${"A0+/".repeat(32)}` }], total: 1, truncated: false }), /cannot contain binary/);

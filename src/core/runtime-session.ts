@@ -95,6 +95,8 @@ export interface RuntimeTreeNode {
   depth: number;
   kind: RuntimeTreeNodeKind;
   role?: "user" | "assistant" | "tool" | "system";
+  displayClass?: "content" | "tool" | "metadata" | "structural";
+  state?: "error" | "aborted";
   label?: string;
   /** Included only in Host-side revision material; never projected to clients. */
   labelTimestamp?: string;

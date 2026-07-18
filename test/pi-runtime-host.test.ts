@@ -535,8 +535,8 @@ test("Pi runtime host projects the public tree and routes navigate, fork, and cl
   assert.deepEqual(host.getTree(), {
     leafId: "tree-assistant",
     nodes: [
-      { entryId: "tree-user", depth: 0, kind: "message", role: "user", label: "start", labelTimestamp: timestamp, timestamp, summary: "edit this prompt", hasChildren: true },
-      { entryId: "tree-assistant", parentId: "tree-user", depth: 1, kind: "message", role: "assistant", timestamp: "2026-07-14T00:00:01.000Z", summary: "answer", hasChildren: false },
+      { entryId: "tree-user", depth: 0, kind: "message", role: "user", displayClass: "content", label: "start", labelTimestamp: timestamp, timestamp, summary: "edit this prompt", hasChildren: true },
+      { entryId: "tree-assistant", parentId: "tree-user", depth: 1, kind: "message", role: "assistant", displayClass: "content", timestamp: "2026-07-14T00:00:01.000Z", summary: "answer", hasChildren: false },
     ],
   });
   assert.deepEqual(await host.navigateTree("tree-user"), { cancelled: false, editorText: "edit this prompt", summaryCreated: false });
@@ -584,6 +584,33 @@ test("Pi runtime host projects the public tree and routes navigate, fork, and cl
   assert.ok(commits.some((commit) => commit.startsWith("fork:")));
   assert.ok(commits.some((commit) => commit.startsWith("clone:")));
   await cloneRuntime.host.dispose();
+});
+
+test("Pi tree projection hides tool-call wrappers semantically and summarizes invocation instead of result JSON", async () => {
+  const timestamp = "2026-07-14T00:00:00.000Z";
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+  const user = { type: "message", id: "tool-user", parentId: null, timestamp, message: { role: "user", content: "inspect card", timestamp: 1 } } as unknown as SessionEntry;
+  const call = { type: "message", id: "tool-call", parentId: "tool-user", timestamp, message: { role: "assistant", content: [{ type: "toolCall", id: "call-1", name: "alu_kanban", arguments: { action: "get_card", card_id: 185 } }], timestamp: 2, stopReason: "toolUse", usage, api: "fixture", provider: "fixture", model: "fixture" } } as unknown as SessionEntry;
+  const result = { type: "message", id: "tool-result", parentId: "tool-call", timestamp, message: { role: "toolResult", toolCallId: "call-1", toolName: "alu_kanban", content: [{ type: "text", text: JSON.stringify({ description: "very large result", checklist: [1, 2, 3] }) }], isError: false, timestamp: 3 } } as unknown as SessionEntry;
+  const error = { type: "message", id: "assistant-error", parentId: "tool-result", timestamp, message: { role: "assistant", content: [], timestamp: 4, stopReason: "error", errorMessage: "WebSocket error", usage, api: "fixture", provider: "fixture", model: "fixture" } } as unknown as SessionEntry;
+  const roots: SessionTreeNode[] = [{ entry: user, children: [{ entry: call, children: [{ entry: result, children: [{ entry: error, children: [] }] }] }] }];
+  const { host } = await runtimeHost([], (_owner, session) => {
+    session.treeRoots = roots;
+    session.treeLeafId = "assistant-error";
+  });
+  host.activateInitial();
+  const tree = host.getTree();
+  const wrapper = tree.nodes.find((node) => node.entryId === "tool-call");
+  const tool = tree.nodes.find((node) => node.entryId === "tool-result");
+  const failed = tree.nodes.find((node) => node.entryId === "assistant-error");
+  assert.equal(wrapper?.displayClass, "structural");
+  assert.equal(tool?.displayClass, "tool");
+  assert.equal(tool?.summary, "[alu_kanban: get_card · card #185]");
+  assert.doesNotMatch(JSON.stringify(tool), /very large result|checklist/u);
+  assert.equal(failed?.displayClass, "content");
+  assert.equal(failed?.state, "error");
+  assert.equal(failed?.summary, "WebSocket error");
+  await host.dispose();
 });
 
 test("navigation post-effect catalog failure exposes effect_unknown without publishing session.navigated", async () => {

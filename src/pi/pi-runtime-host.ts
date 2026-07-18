@@ -377,11 +377,12 @@ export class PiRuntimeHost implements RuntimeSession {
     const manager = this.requireActive().session.sessionManager;
     const nodes: RuntimeTreeNode[] = [];
     const roots = manager.getTree();
+    const toolCalls = collectTreeToolCalls(roots);
     const stack: Array<{ node: SessionTreeNode; parentId?: string; depth: number }> = [];
     for (let index = roots.length - 1; index >= 0; index -= 1) stack.push({ node: roots[index] as SessionTreeNode, depth: 0 });
     while (stack.length > 0) {
       const current = stack.pop() as { node: SessionTreeNode; parentId?: string; depth: number };
-      projectTreeNode(current.node, current.parentId, current.depth, nodes);
+      projectTreeNode(current.node, current.parentId, current.depth, nodes, toolCalls);
       for (let index = current.node.children.length - 1; index >= 0; index -= 1) {
         stack.push({ node: current.node.children[index] as SessionTreeNode, parentId: current.node.entry.id, depth: current.depth + 1 });
       }
@@ -822,11 +823,37 @@ function projectHistoryEntry(entry: SessionEntry): RuntimeHistoryEntry | undefin
   return undefined;
 }
 
+interface TreeToolCall { name: string; arguments: Record<string, unknown> }
+
+function collectTreeToolCalls(roots: readonly SessionTreeNode[]): Map<string, TreeToolCall> {
+  const calls = new Map<string, TreeToolCall>();
+  const stack = [...roots];
+  while (stack.length > 0) {
+    const node = stack.pop() as SessionTreeNode;
+    const entry = node.entry;
+    if (entry.type === "message") {
+      const message = entry.message as unknown as Record<string, unknown>;
+      if (message.role === "assistant" && Array.isArray(message.content)) {
+        for (const item of message.content) {
+          if (item === null || typeof item !== "object" || Array.isArray(item)) continue;
+          const block = item as Record<string, unknown>;
+          if ((block.type === "toolCall" || block.type === "tool_call") && typeof block.id === "string" && typeof block.name === "string") {
+            calls.set(block.id, { name: treeLine(block.name, 256, "tool"), arguments: isRecord(block.arguments) ? block.arguments : {} });
+          }
+        }
+      }
+    }
+    for (const child of node.children) stack.push(child);
+  }
+  return calls;
+}
+
 function projectTreeNode(
   node: SessionTreeNode,
   parentId: string | undefined,
   depth: number,
   output: RuntimeTreeNode[],
+  toolCalls: ReadonlyMap<string, TreeToolCall>,
 ): void {
   if (output.length >= 100_000) throw new Error("Pi session tree exceeds 100000 entries");
   const entry = node.entry;
@@ -834,39 +861,48 @@ function projectTreeNode(
   if (!["message", "thinking_level_change", "model_change", "compaction", "branch_summary", "custom", "custom_message", "label", "session_info"].includes(kind)) {
     throw new Error(`Unsupported Pi session tree entry kind: ${kind}`);
   }
-  const role = entry.type === "message" ? treeMessageRole((entry.message as unknown as Record<string, unknown>).role) : undefined;
+  const message = entry.type === "message" ? entry.message as unknown as Record<string, unknown> : undefined;
+  const role = message === undefined ? undefined : treeMessageRole(message.role);
+  const state = message === undefined ? undefined : treeMessageState(message);
+  const displayClass = treeDisplayClass(entry, role, state);
   output.push({
     entryId: entry.id,
     ...(parentId === undefined ? {} : { parentId }),
     depth,
     kind: kind as RuntimeTreeNode["kind"],
     ...(role === undefined ? {} : { role }),
+    displayClass,
+    ...(state === undefined ? {} : { state }),
     ...(node.label === undefined ? {} : { label: treeLine(node.label, 256, "Session label omitted") }),
     ...(node.labelTimestamp === undefined ? {} : { labelTimestamp: node.labelTimestamp }),
     timestamp: entry.timestamp,
-    summary: projectTreeSummary(entry),
+    summary: projectTreeSummary(entry, toolCalls),
     hasChildren: node.children.length > 0,
   });
 }
 
-function projectTreeSummary(entry: SessionEntry): string {
+function projectTreeSummary(entry: SessionEntry, toolCalls: ReadonlyMap<string, TreeToolCall>): string {
   switch (entry.type) {
     case "message": {
       const message = entry.message as unknown as Record<string, unknown>;
       if (message.role === "bashExecution") {
         return treeLine(message.command, 2_048, "Shell execution");
       }
-      if (message.role === "toolResult") {
-        const name = treeLine(message.toolName, 256, "tool");
-        const detail = contentText(message.content);
-        return detail ? treeLine(`${name}: ${detail}`, 2_048, `Tool result: ${name}`) : `Tool result: ${name}`;
+      if (message.role === "toolResult" || message.role === "tool") {
+        const call = typeof message.toolCallId === "string" ? toolCalls.get(message.toolCallId) : undefined;
+        const name = call?.name ?? treeLine(message.toolName, 256, "tool");
+        return call === undefined ? `Tool: ${name}` : formatTreeToolCall(name, call.arguments);
       }
+      if (message.role === "assistant" && typeof message.errorMessage === "string") {
+        return treeLine(message.errorMessage, 2_048, "Assistant error");
+      }
+      if (message.role === "assistant" && message.stopReason === "aborted") return "(aborted)";
       return treeLine(contentText(message.content), 2_048, `${treeMessageRole(message.role)} message`);
     }
     case "thinking_level_change": return treeLine(`Thinking level: ${entry.thinkingLevel}`, 2_048, "Thinking level change");
     case "model_change": return treeLine(`Model: ${entry.provider}/${entry.modelId}`, 2_048, "Model change");
-    case "compaction": return treeLine(entry.summary, 2_048, "Compaction summary");
-    case "branch_summary": return treeLine(entry.summary, 2_048, "Branch summary");
+    case "compaction": return `[compaction: ${Math.round(entry.tokensBefore / 1_000)}k tokens]`;
+    case "branch_summary": return treeLine(`[branch summary]: ${entry.summary}`, 2_048, "[branch summary]");
     case "custom": return treeLine(`Custom entry: ${entry.customType}`, 2_048, "Custom entry");
     case "custom_message": return treeLine(contentText(entry.content), 2_048, `Custom message: ${entry.customType}`);
     case "label": return treeLine(entry.label ? `Label ${entry.targetId}: ${entry.label}` : `Label cleared: ${entry.targetId}`, 2_048, "Label change");
@@ -878,6 +914,129 @@ function treeMessageRole(value: unknown): "user" | "assistant" | "tool" | "syste
   if (value === "user" || value === "assistant") return value;
   if (value === "tool" || value === "toolResult") return "tool";
   return "system";
+}
+
+function treeMessageState(message: Record<string, unknown>): RuntimeTreeNode["state"] {
+  if (message.role === "assistant") {
+    if (message.stopReason === "aborted") return "aborted";
+    if (message.stopReason === "error" || typeof message.errorMessage === "string") return "error";
+  }
+  if ((message.role === "tool" || message.role === "toolResult") && message.isError === true) return "error";
+  return undefined;
+}
+
+function treeDisplayClass(
+  entry: SessionEntry,
+  role: RuntimeTreeNode["role"],
+  state: RuntimeTreeNode["state"],
+): NonNullable<RuntimeTreeNode["displayClass"]> {
+  if (entry.type === "message") {
+    const message = entry.message as unknown as Record<string, unknown>;
+    if (role === "tool") return "tool";
+    if (role === "assistant" && state === undefined && !hasTreeText(message.content) && hasTreeToolCall(message.content)) return "structural";
+    return "content";
+  }
+  if (entry.type === "compaction" || entry.type === "branch_summary" || entry.type === "custom_message") return "content";
+  return "metadata";
+}
+
+function hasTreeText(value: unknown): boolean {
+  if (typeof value === "string") return value.trim().length > 0;
+  return Array.isArray(value) && value.some((item) => {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return false;
+    const block = item as Record<string, unknown>;
+    return block.type === "text" && typeof block.text === "string" && block.text.trim().length > 0;
+  });
+}
+
+function hasTreeToolCall(value: unknown): boolean {
+  return Array.isArray(value) && value.some((item) => {
+    if (item === null || typeof item !== "object" || Array.isArray(item)) return false;
+    const type = (item as Record<string, unknown>).type;
+    return type === "toolCall" || type === "tool_call";
+  });
+}
+
+function formatTreeToolCall(name: string, args: Record<string, unknown>): string {
+  const normalizedName = name.toLowerCase().split(/[.:/]/u).at(-1) ?? name.toLowerCase();
+  const path = treeStringArg(args, ["path", "file_path", "output_path"]);
+  let detail: string | undefined;
+  if (normalizedName === "read") {
+    const offset = treeIntegerArg(args.offset);
+    const limit = treeIntegerArg(args.limit);
+    const range = offset === undefined ? undefined
+      : limit === undefined ? `from line ${offset}` : `lines ${offset}-${offset + Math.max(0, limit - 1)}`;
+    detail = treeJoin([path && treePathPreview(path), range]);
+  } else if (normalizedName === "write") {
+    detail = path && treePathPreview(path);
+  } else if (normalizedName === "edit") {
+    const edits = Array.isArray(args.edits) ? args.edits.length
+      : typeof args.oldText === "string" || typeof args.newText === "string" ? 1 : undefined;
+    detail = treeJoin([path && treePathPreview(path), edits === undefined ? undefined : `${edits} ${edits === 1 ? "edit" : "edits"}`]);
+  } else if (normalizedName === "bash") {
+    detail = treeCommandPreview(treeStringArg(args, ["command"]));
+  } else if (normalizedName === "grep") {
+    detail = treeJoin([treeStringArg(args, ["pattern"]), path && `in ${treePathPreview(path)}`]);
+  } else if (normalizedName === "find") {
+    detail = treeJoin([treeStringArg(args, ["pattern"]), path && `in ${treePathPreview(path)}`]);
+  } else if (normalizedName === "ls") {
+    detail = path && treePathPreview(path);
+  } else {
+    const action = treeStringArg(args, ["action"]);
+    const cardId = treeScalarArg(args.card_id ?? args.cardId);
+    const query = treeStringArg(args, ["query", "pattern"]);
+    const target = treeStringArg(args, ["target_id", "instance_id", "instanceId"]);
+    detail = treeJoin([
+      path && treePathPreview(path),
+      action,
+      cardId && `card #${cardId}`,
+      query && `query: ${query}`,
+      target && `target ${target}`,
+    ]);
+  }
+  return treeLine(`[${name}${detail ? `: ${detail}` : ""}]`, 2_048, `[${name}]`);
+}
+
+function treeStringArg(args: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  for (const key of keys) {
+    const value = args[key];
+    if (typeof value === "string" && value.trim().length > 0) return value;
+  }
+  return undefined;
+}
+
+function treeScalarArg(value: unknown): string | undefined {
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? String(value) : undefined;
+}
+
+function treeIntegerArg(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function treeJoin(parts: Array<string | undefined | false>): string | undefined {
+  const values = parts.filter((part): part is string => typeof part === "string" && part.trim().length > 0)
+    .map((part) => part.replace(/[\t\r\n]+/gu, " ").replace(/\s+/gu, " ").trim());
+  return values.length === 0 ? undefined : values.slice(0, 4).join(" · ");
+}
+
+function treePathPreview(value: string): string {
+  const normalized = value.replace(/[\t\r\n]+/gu, " ").trim();
+  const home = process.env.HOME;
+  const shortened = home && normalized.startsWith(home) ? `~${normalized.slice(home.length)}` : normalized;
+  const parts = shortened.split(/[\\/]/u).filter(Boolean);
+  return parts.length > 5 ? `…/${parts.slice(-4).join("/")}` : shortened;
+}
+
+function treeCommandPreview(command: string | undefined): string | undefined {
+  if (!command) return undefined;
+  const lines = command.split(/\r?\n/gu).map((line) => line.trim()).filter(Boolean);
+  if (lines.length === 0) return undefined;
+  const first = lines[0] as string;
+  return lines.length === 1 ? first : `${first} ↵ +${lines.length - 1} ${lines.length === 2 ? "line" : "lines"}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function contentText(value: unknown): string | undefined {
