@@ -77,6 +77,13 @@ export class DelayedRuntimeSession implements RuntimeSession {
   private activeCompactionBlock: { entered: Deferred<void>; result: Deferred<RuntimeCompactionResult> } | undefined;
   private nextNavigationBlock: { entered: Deferred<void>; result: Deferred<RuntimeNavigateResult> } | undefined;
   private activeNavigationBlock: { entered: Deferred<void>; result: Deferred<RuntimeNavigateResult> } | undefined;
+  private postSettlementContinuation: {
+    compactionStarted: Deferred<void>;
+    finishCompaction: Deferred<void>;
+    continuationStarted: Deferred<void>;
+    toolCallId: string;
+    toolName: string;
+  } | undefined;
   private activeTools = new Set(["read"]);
   private readonly settingValues: SettingValueMap = {
     autoCompaction: true, compactionReserveTokens: 165_536, compactionKeepRecentTokens: 20_000,
@@ -447,8 +454,68 @@ export class DelayedRuntimeSession implements RuntimeSession {
     });
     this.isStreaming = false;
     this.emit({ type: "agent_end", messages: [], willRetry: false });
+    const continuation = this.postSettlementContinuation;
+    this.postSettlementContinuation = undefined;
     this.emit({ type: "agent_settled" });
     run.resolve();
+    if (continuation) {
+      void (async () => {
+        // Pi's extension compact callback begins after agent_settled: compact()
+        // first awaits abort(), then publishes compaction_start.
+        await Promise.resolve();
+        this.isCompacting = true;
+        this.emit({ type: "compaction_start", reason: "manual" });
+        continuation.compactionStarted.resolve();
+        await continuation.finishCompaction.promise;
+        this.isCompacting = false;
+        this.emit({
+          type: "compaction_end",
+          reason: "manual",
+          result: { summary: "guard summary", firstKeptEntryId: "kept", tokensBefore: 252_531 },
+          aborted: false,
+          willRetry: false,
+        });
+        await Promise.resolve();
+        this.isStreaming = true;
+        this.emit({ type: "agent_start" });
+        const hidden = {
+          role: "custom",
+          customType: "sol-mid-turn-guard",
+          content: "hidden continuation",
+          display: false,
+        };
+        this.emit({ type: "message_start", message: hidden });
+        this.emit({ type: "message_end", message: hidden });
+        this.emit({
+          type: "tool_execution_start",
+          toolCallId: continuation.toolCallId,
+          toolName: continuation.toolName,
+          args: { path: "src/offline.ts" },
+        });
+        continuation.continuationStarted.resolve();
+      })();
+    }
+  }
+
+  armPostSettlementContinuation(options: { toolCallId?: string; toolName?: string } = {}): {
+    compactionStarted: Promise<void>;
+    finishCompaction: () => void;
+    continuationStarted: Promise<void>;
+  } {
+    if (this.postSettlementContinuation) throw new Error("A post-settlement continuation is already armed");
+    const continuation = {
+      compactionStarted: new Deferred<void>(),
+      finishCompaction: new Deferred<void>(),
+      continuationStarted: new Deferred<void>(),
+      toolCallId: options.toolCallId ?? "offline-tool",
+      toolName: options.toolName ?? "read",
+    };
+    this.postSettlementContinuation = continuation;
+    return {
+      compactionStarted: continuation.compactionStarted.promise,
+      finishCompaction: () => continuation.finishCompaction.resolve(),
+      continuationStarted: continuation.continuationStarted.promise,
+    };
   }
 
   emit(event: RuntimeEvent): void {

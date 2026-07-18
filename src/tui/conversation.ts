@@ -26,6 +26,7 @@ interface ConversationEntry {
   toolName?: string;
   toolState?: ToolState;
   toolSummary?: string;
+  toolErrorSummary?: string;
   summaryKind?: "compaction" | "branch";
   renderRevision: number;
   renderCache?: { width: number; revision: number; expanded: boolean; lines: string[] };
@@ -935,11 +936,13 @@ export class DockConversation implements Component {
       && tool.entry.toolName === tool.name
       && tool.entry.toolState === state
       && tool.entry.toolSummary === tool.summary
+      && tool.entry.toolErrorSummary === (state === "failed" ? summarizeToolFailure(tool.output) : undefined)
     ) return;
     tool.entry.text = text;
     tool.entry.toolName = tool.name;
     tool.entry.toolState = state;
     tool.entry.toolSummary = tool.summary;
+    tool.entry.toolErrorSummary = state === "failed" ? summarizeToolFailure(tool.output) : undefined;
     this.touchEntry(tool.entry);
     this.markOutputChanged();
   }
@@ -994,6 +997,7 @@ function projectToolState(tool: ToolProjection, state: ToolState): void {
   tool.entry.toolName = tool.name;
   tool.entry.toolState = state;
   tool.entry.toolSummary = tool.summary;
+  tool.entry.toolErrorSummary = state === "failed" ? summarizeToolFailure(tool.output) : undefined;
   tool.entry.renderRevision += 1;
   tool.entry.renderCache = undefined;
 }
@@ -1117,6 +1121,7 @@ function renderToolHeader(entry: ConversationEntry, width: number, expanded: boo
   const hint = expanded ? "Alt+O fold" : "Alt+O detail";
   const segments = [title];
   if (entry.toolSummary) segments.push(paint.muted(entry.toolSummary));
+  if (entry.toolErrorSummary) segments.push(paint.error(entry.toolErrorSummary));
   segments.push(paint.faint(hint));
   return truncateToWidth(segments.join(paint.faint(" · ")), width);
 }
@@ -1414,6 +1419,37 @@ function joinToolSummary(parts: Array<string | undefined>): string | undefined {
 
 function normalizeToolSummaryPart(value: string): string {
   return safeTerminalLine(value).replace(/\s+/gu, " ").trim();
+}
+
+function summarizeToolFailure(output: string | undefined): string | undefined {
+  if (!output) return undefined;
+  const trimmed = safeTerminalText(output).trim();
+  if (!trimmed) return undefined;
+  let candidate: string | undefined;
+  try {
+    const parsed: unknown = JSON.parse(trimmed);
+    candidate = failureTextFromJson(parsed);
+  } catch {
+    candidate = trimmed;
+  }
+  const firstLine = candidate?.split("\n").map((line) => line.trim()).find((line) => line.length > 0);
+  if (!firstLine) return undefined;
+  return truncateToWidth(normalizeToolSummaryPart(firstLine), MAX_TOOL_SUMMARY);
+}
+
+function failureTextFromJson(value: unknown): string | undefined {
+  if (typeof value === "string") return value;
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const record = value as Record<string, unknown>;
+  for (const key of ["error", "message", "reason", "stderr"] as const) {
+    const candidate = record[key];
+    if (typeof candidate === "string" && candidate.trim().length > 0) return candidate;
+    if (key === "error" && candidate !== null && typeof candidate === "object" && !Array.isArray(candidate)) {
+      const nested = (candidate as Record<string, unknown>).message;
+      if (typeof nested === "string" && nested.trim().length > 0) return nested;
+    }
+  }
+  return undefined;
 }
 
 function formatToolArgs(toolName: string, args: JsonObject, limit: number): string | undefined {

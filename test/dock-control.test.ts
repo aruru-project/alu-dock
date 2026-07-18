@@ -1501,6 +1501,55 @@ test("SSH TUI Ctrl+D detaches promptly while Host-owned compaction remains block
   assert.equal(runtime.sessionMutationCalls.compact, 1);
 });
 
+test("a runtime-driven post-compaction continuation starts while every client is detached", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "offline-continuation");
+  const runtime = harness.sessions.get(created.id)!;
+  const attached = await client.streamEvents(created.id, {
+    onEvent: () => {},
+    requireTuiProjection: true,
+    conversationBootstrap: true,
+  });
+  attached.close();
+  await attached.done;
+
+  const guard = runtime.armPostSettlementContinuation({ toolCallId: "offline-tool" });
+  runtime.settle("guard stopped after a tool boundary");
+  await guard.compactionStarted;
+  const compactionObserver = new DockClient({ socketPath: harness.socketPath });
+  const compactingReplay = await compactionObserver.streamEvents(created.id, {
+    onEvent: () => {},
+    requireTuiProjection: true,
+    conversationBootstrap: true,
+  });
+  assert.equal(compactingReplay.initial.instance.execution, "running");
+  assert.deepEqual(compactingReplay.initial.page.events, [], "compaction without an active agent run has no conversation tail");
+  compactingReplay.close();
+  await compactingReplay.done;
+
+  guard.finishCompaction();
+  await guard.continuationStarted;
+
+  // The observer is created only after the continuation has started; no attach
+  // or read can be the trigger for this Host-owned work.
+  const observer = new DockClient({ socketPath: harness.socketPath });
+  const status = await observer.status(created.id);
+  assert.equal(status.execution, "running");
+  assert.equal(status.activeCommandId, undefined);
+  const replay = await observer.streamEvents(created.id, {
+    onEvent: () => {},
+    requireTuiProjection: true,
+    conversationBootstrap: true,
+  });
+  assert.ok(replay.initial.page.events.some((event) => event.type === "run.started"));
+  assert.ok(replay.initial.page.events.some((event) => event.type === "tool.started" && event.data.toolCallId === "offline-tool"));
+  replay.close();
+  await replay.done;
+});
+
 test("stop preempts a manual compaction even before its start event is projected", async (context) => {
   const catalog = new ScriptedCatalogCommitPort();
   const stopIntentGate = catalog.gateAt(2);

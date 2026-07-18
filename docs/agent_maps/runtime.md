@@ -107,6 +107,7 @@ ManagedInstance replacement intent
 - previous Pi session file保持可恢复，不做隐式删除。
 - branch-summary cancellation使用Pi公开`abortBranchSummary()`路径；不能假设agent abort覆盖它。
 - Host loss后的reopen是Registry创建fresh runtime transaction，不恢复旧queue/Promise/tool effect。
+- Extension可在`agent_settled`后触发无client command ID的follow-on run（例如Sol guard compact后续跑）。它使用closed `run.started` identity `runtime-initiated`，仍完全由Host持有；fresh attach必须恢复其未完成tail，client detach/attach/read不得成为启动条件。
 
 ## 常见修改路由
 

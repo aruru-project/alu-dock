@@ -273,6 +273,28 @@ test("fresh conversation bootstrap ignores lifecycle replay and keeps only unres
   assert.equal(JSON.stringify(projected).includes("Compaction completed"), false);
 });
 
+test("an empty persisted branch still shows an unresolved active tool bootstrap", () => {
+  const conversation = new DockConversation();
+  conversation.applyHistory([], false);
+  conversation.applyBootstrapReplay([
+    event(20, "run.started", { operationId: "runtime-initiated" }),
+    event(21, "message.completed", {
+      messageId: "hidden-guard",
+      role: "system",
+      content: [{ type: "text", text: "hidden continuation control" }],
+    }),
+    event(22, "tool.started", {
+      toolCallId: "offline-continuation-tool",
+      toolName: "read",
+      args: { path: "src/offline.ts" },
+    }),
+  ]);
+  assert.deepEqual(conversation.snapshot().map((entry) => [entry.kind, entry.text]), [
+    ["tool", "read running\nargs\n{\n  \"path\": \"src/offline.ts\"\n}"],
+  ]);
+  assert.doesNotMatch(conversation.renderViewport(80, 12).lines.join("\n"), /Start a conversation|hidden continuation control/u);
+});
+
 test("conversation projects replay and live deltas into readable messages", () => {
   const conversation = new DockConversation();
   conversation.applyReplay([
@@ -472,20 +494,31 @@ test("duplicate tool projections do not invalidate cached conversation output", 
   assert.ok(conversation.revision > outputRevision);
 });
 
-test("tool failures stay collapsed by default and preserve expandable error detail", () => {
+test("collapsed tool failures expose a safe first-line reason and preserve expandable detail", () => {
   const conversation = new DockConversation();
   conversation.apply(event(1, "tool.started", { toolCallId: "failed-tool", toolName: "bash", args: { command: "false" } }));
   conversation.apply(event(2, "tool.completed", {
     toolCallId: "failed-tool", toolName: "bash", isError: true, text: "expanded failure detail",
   }));
   conversation.addNotice("later assistant-visible output");
-  const collapsed = conversation.render(60).join("\n");
+  const collapsed = conversation.render(120).join("\n");
   assert.match(collapsed, /× bash failed/);
-  assert.match(collapsed, /bash failed.*false/u);
-  assert.doesNotMatch(collapsed, /expanded failure detail/);
+  assert.match(collapsed, /bash failed.*false.*expanded failure detail/u);
   assert.deepEqual(conversation.toggleLatestToolExpanded(), { expanded: true, name: "bash" });
   assert.ok((conversation.latestToolOffsetFromBottom(60) ?? 0) > 0);
   assert.match(conversation.render(60).join("\n"), /expanded failure detail/);
+
+  const structured = new DockConversation();
+  structured.apply(event(3, "tool.started", { toolCallId: "json-error", toolName: "subagent", args: { agent: "scout" } }));
+  structured.apply(event(4, "tool.completed", {
+    toolCallId: "json-error",
+    toolName: "subagent",
+    isError: true,
+    text: JSON.stringify({ error: { message: "child exited 2" }, privatePayload: { token: "must-not-render" } }),
+  }));
+  const structuredCollapsed = structured.render(100).join("\n");
+  assert.match(structuredCollapsed, /child exited 2/u);
+  assert.doesNotMatch(structuredCollapsed, /privatePayload|must-not-render/u);
 });
 
 test("subagent tool completion mirrors the closed isError lifecycle instead of claiming done", () => {
@@ -494,10 +527,12 @@ test("subagent tool completion mirrors the closed isError lifecycle instead of c
     toolCallId: "subagent-failed", toolName: "subagent", args: { agent: "scout" },
   }));
   conversation.apply(event(2, "tool.completed", {
-    toolCallId: "subagent-failed", toolName: "subagent", isError: true, text: "spawn pi ENOENT",
+    toolCallId: "subagent-failed", toolName: "subagent", isError: true,
+    text: "Native pi-subagents intercom currently handles supervisor replies. Child agents initiate asks with contact_supervisor.",
   }));
-  const projected = conversation.render(80).join("\n");
+  const projected = conversation.render(120).join("\n");
   assert.match(projected, /× subagent failed/u);
+  assert.match(projected, /Native pi-subagents intercom/u);
   assert.doesNotMatch(projected, /✓ subagent done/u);
 });
 

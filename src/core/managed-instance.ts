@@ -733,7 +733,13 @@ export class ManagedInstance {
       const sourcePage = this.eventsSince(replaySince);
       const history = this.buildHistoryPage(undefined, historyLimit);
       const page = replayPurpose === "conversation_bootstrap"
-        ? { ...sourcePage, events: conversationBootstrapEvents(sourcePage.events, this.historyValue, instance, sourcePage.truncated) }
+        ? { ...sourcePage, events: conversationBootstrapEvents(
+          sourcePage.events,
+          this.historyValue,
+          instance,
+          sourcePage.truncated,
+          this.session.isStreaming,
+        ) }
         : replayPurpose === "legacy_history_overlay"
           ? { ...sourcePage, events: eventsNotCoveredByHistory(sourcePage.events, this.historyValue) }
           : sourcePage;
@@ -3036,15 +3042,21 @@ function conversationBootstrapEvents(
   history: HistoryEntryDto[],
   instance: InstanceSnapshot,
   truncated: boolean,
+  runtimeAgentActive: boolean,
 ): DockEvent[] {
-  if (instance.execution !== "running" || instance.activeCommandId === undefined) return [];
-  let start = events.findLastIndex((event) => event.type === "run.started" && event.data.operationId === instance.activeCommandId);
+  if (instance.execution !== "running") return [];
+  if (instance.activeCommandId === undefined && !runtimeAgentActive) return [];
+  // Extension-triggered turns (for example a post-compaction continuation)
+  // are Host-owned runs without a client command ID. Their closed run.started
+  // identity is still stable and must recover the unresolved tail on attach.
+  const activeOperationId = instance.activeCommandId ?? "runtime-initiated";
+  let start = events.findLastIndex((event) => event.type === "run.started" && event.data.operationId === activeOperationId);
   if (start < 0) {
-    start = events.findLastIndex((event) => event.type === "message.submitted" && event.data.operationId === instance.activeCommandId);
+    start = events.findLastIndex((event) => event.type === "message.submitted" && event.data.operationId === activeOperationId);
   }
   // A truncated ring contains only events newer than its evicted prefix. If the
-  // snapshot still identifies an active command, every retained frame is part
-  // of that command's live era even when its start marker has fallen out.
+  // snapshot still identifies an active run, every retained frame is part of
+  // that run's live era even when its start marker has fallen out.
   if (start < 0 && !truncated) return [];
   return eventsNotCoveredByHistory(start < 0 ? events : events.slice(start), history);
 }

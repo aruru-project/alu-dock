@@ -717,9 +717,13 @@ test("run activity covers compaction queue interaction abort failure and host lo
   assert.deepEqual(activity, { phase: "idle", label: "compacted" });
   activity = reduceRunActivity(activity, event(2, "instance.state_changed", {
     reason: "compaction_completed", lifecycle: "active", execution: "running", lastRun: "never",
-    pending: { steering: 0, followUp: 0, total: 0 }, activeCommandId: "run-1", lastError: undefined,
+    pending: { steering: 0, followUp: 0, total: 0 }, activeCommandId: undefined, lastError: undefined,
   }), running);
-  assert.deepEqual(activity, { phase: "idle", label: "compacted" });
+  assert.deepEqual(activity, { phase: "waiting", label: "waiting for model" });
+  activity = reduceRunActivity({ phase: "compaction", label: "compacting context" }, event(2, "compaction.completed", {
+    operationId: "guard-compaction", automatic: false, willRetry: false,
+  }), running);
+  assert.deepEqual(activity, { phase: "waiting", label: "waiting for model" });
   activity = reduceRunActivity(activity, event(2, "compaction.completed", {
     operationId: "compact-cancelled", automatic: false, willRetry: false, aborted: true,
   }), idle);

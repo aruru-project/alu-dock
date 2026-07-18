@@ -131,6 +131,7 @@ export function reduceRunActivity(
       return { phase: "compaction", label: "compacting context" };
 
     case "compaction.completed":
+      if (snapshot.execution === "running") return { phase: "waiting", label: "waiting for model" };
       if (event.data.aborted) return { phase: "idle", label: "compaction cancelled" };
       const known = knownCompactionFeedback(event.data.error);
       if (known) return { phase: "idle", label: known === "already_compacted" ? "already compacted" : "nothing to compact" };
@@ -159,9 +160,6 @@ export function reduceRunActivity(
 
     case "instance.state_changed":
       if (event.data.execution === "running" && current.phase === "idle") {
-        if (event.data.reason === "compaction_completed" && [
-          "compacted", "nothing to compact", "already compacted", "compaction cancelled",
-        ].includes(current.label)) return current;
         return { phase: "waiting", label: "waiting for model" };
       }
       if (event.data.execution !== "running" && event.data.pending.total === 0) {
