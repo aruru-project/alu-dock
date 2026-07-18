@@ -185,6 +185,38 @@ test("fixed screen reports the activity physical row without changing chrome hei
   assert.equal(lines[9], "composer");
 });
 
+test("activity placement transitions reconcile the vacated physical row", () => {
+  const conversation = new DockConversation();
+  conversation.applyHistory(Array.from({ length: 20 }, (_, index): HistoryEntryDto => ({
+    entryId: `activity-move-${index}`,
+    role: "assistant",
+    content: [{ type: "text", text: `activity move history ${index}` }],
+  })), false);
+  const placements: Array<{ screenRow: number; width: number; screenRows: number } | undefined> = [];
+  let editorRows = ["waiting for model", "composer"];
+  const screen = new FixedDockScreen({ rows: 12 }, {
+    header: { render: () => ["header"], invalidate: () => {} },
+    history: conversation,
+    status: { render: () => ["status one", "status two"], invalidate: () => {} },
+    editor: { render: () => editorRows, invalidate: () => {} },
+    historyVersion: () => ({ revision: conversation.revision, outputRevision: conversation.outputRevision }),
+    activityPlacement: { editorRow: 0, update: (placement) => placements.push(placement) },
+  });
+  screen.render(43);
+  assert.equal(placements.at(-1)?.screenRow, 8);
+
+  editorRows = ["waiting for model", "queued steer", "composer"];
+  const moved = screen.render(43);
+  assert.equal(placements.at(-1)?.screenRow, 7);
+  assert.equal(moved.filter((line) => line.includes("waiting for model")).length, 1);
+  assert.match(moved[8] ?? "", /queued steer/u);
+  assert.match(moved[8] ?? "", /\u001b\[0m$/u, "the old physical row must be dirtied for pi-tui reconciliation");
+
+  const stable = screen.render(43);
+  assert.equal(stable.filter((line) => line.includes("waiting for model")).length, 1);
+  assert.doesNotMatch(stable[8] ?? "", /\u001b\[0m$/u, "reconciliation marker is one-frame only");
+});
+
 test("virtual history keeps its entry anchor while live output arrives below", () => {
   const conversation = new DockConversation();
   conversation.applyHistory(Array.from({ length: 40 }, (_, index): HistoryEntryDto => ({

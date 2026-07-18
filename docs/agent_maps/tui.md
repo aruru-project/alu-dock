@@ -107,7 +107,7 @@ Warning必须说明用户影响和可执行动作；closed Host projection本身
 - Queue是Same-Host memory；in-flight/failed/ambiguous mutation不声称已restore，也不自动abort。
 - Exact extension command不进入pending queue；unknown slash保留Pi-native语义。
 - Extension UI只支持bounded closed text；不transport component factory、image、binary或data URI。
-- 动画只写固定surface；idle无timer。Hub最多一个visible时才运行的低频本地blink timer。
+- 动画只写固定surface；idle无timer。Localized activity write绕过pi-tui frame cache，因此placement移动/隐藏时必须在下一正常frame强制reconcile旧物理行，不能留下重复activity。Hub最多一个visible时才运行的低频本地blink timer。
 - Renderer替换必须一次性cut over，不维护dual renderer或compatibility facade。
 
 ## 人工输出门禁
