@@ -54,6 +54,8 @@ def main() -> int:
     localized_activity_batches = 0
     startup_mouse_enable_count = 0
     mouse_overlay_priority = False
+    navigation_scrollback_clear_count = 0
+    navigation_render_batches = 0
     draft_visible = False
     timed_out = False
     status = 1
@@ -264,6 +266,10 @@ def main() -> int:
                     time.sleep(0.1)
                     read_available(fd, output, 0.05)
             elif action == "history-frame-stability":
+                time.sleep(0.05)
+                while read_available(fd, output, 0.01) > 0:
+                    pass
+                navigation_start = len(output)
                 os.write(fd, b"\x0f")  # Ctrl+O, then repeat the real PageUp failure sequence.
                 for _ in range(80):
                     os.write(fd, b"\x1b[5~")
@@ -273,15 +279,17 @@ def main() -> int:
                 os.write(fd, marker)
                 time.sleep(0.08)
                 read_available(fd, output, 0.02)
-                frame_start = len(output)
-                os.write(fd, b"\x1b[6~")  # Force one complete frame containing the draft and footer.
+                os.write(fd, b"\x1b[6~")
                 frame_deadline = time.monotonic() + 3
                 while time.monotonic() < frame_deadline:
                     if read_available(fd, output, 0.03) < 0:
                         break
-                    frame_output = bytes(output[frame_start:])
-                    if marker in frame_output and b"cache " in frame_output:
+                    if marker in bytes(output[navigation_start:]):
                         break
+                navigation_output = bytes(output[navigation_start:])
+                navigation_scrollback_clear_count = navigation_output.count(b"\x1b[3J")
+                navigation_render_batches = navigation_output.count(b"\x1b[?2026h")
+                draft_visible = marker in navigation_output
                 os.write(fd, b"\x03")
                 time.sleep(0.05)
                 read_available(fd, output, 0.02)
@@ -541,6 +549,8 @@ def main() -> int:
         "localizedActivityBatches": localized_activity_batches,
         "startupMouseEnableCount": startup_mouse_enable_count,
         "mouseOverlayPriority": mouse_overlay_priority,
+        "navigationScrollbackClearCount": navigation_scrollback_clear_count,
+        "navigationRenderBatches": navigation_render_batches,
         "draftVisible": draft_visible,
         "output": base64.b64encode(bytes(output)).decode("ascii"),
     }))

@@ -1150,14 +1150,15 @@ test("SSH TUI model picker filters typed input and history viewport scroll-locks
   const frameOutput = Buffer.from(framePty.output, "base64").toString("utf8");
   assert.equal(framePty.timedOut, false, frameOutput.slice(-4_000));
   assert.equal(framePty.status, 0, frameOutput.slice(-4_000));
-  assert.ok((frameOutput.match(/\u001b\[2J\u001b\[H\u001b\[3J/gu) ?? []).length >= 20, "repeated PageUp must reset rather than accumulate terminal cursor drift");
+  assert.equal(framePty.navigationScrollbackClearCount, 0, "Work navigation must not erase native terminal scrollback");
+  assert.ok(framePty.navigationRenderBatches >= 1, "repeated PageUp must still render through pi-tui's frame cache");
+  assert.equal(framePty.draftVisible, true, "the real editor draft must remain responsive after repeated PageUp");
   assert.doesNotMatch(frameOutput, /\u001b\[s/u, "activity animation must not write outside the frame cache");
-  const stableFrame = lastFullRedrawFrame(frameOutput);
-  assert.equal(stableFrame.length, 58, `expected one fixed 58-row screen:\n${stableFrame.join("\n")}`);
-  assert.ok(stableFrame.some((line) => line.includes("ALU_LAYOUT_PTY_MARKER")), "the real editor draft must remain in the fixed frame");
-  assert.match(stableFrame.at(-3) ?? "", /^─+$/u, "the composer bottom border must remain above the footer");
-  assert.match(stableFrame.at(-2) ?? "", /cache .*ctx .*↑.*↓.*\$/u, "the cache footer must survive repeated PageUp");
-  assert.ok(stableFrame.every((line) => visibleWidth(line) <= 252));
+  const resizedFrame = lastFullRedrawFrame(frameOutput);
+  assert.equal(resizedFrame.length, 58, `expected one fixed 58-row screen:\n${resizedFrame.join("\n")}`);
+  assert.match(resizedFrame.at(-3) ?? "", /^─+$/u, "the composer bottom border must remain above the footer");
+  assert.match(resizedFrame.at(-2) ?? "", /cache .*ctx .*↑.*↓.*\$/u, "the cache footer must survive the initial resize");
+  assert.ok(resizedFrame.every((line) => visibleWidth(line) <= 252));
 
   const toolPty = await runPtyTui([
     process.execPath,
@@ -3664,6 +3665,8 @@ interface PtyTuiResult {
   localizedActivityBatches: number;
   startupMouseEnableCount: number;
   mouseOverlayPriority: boolean;
+  navigationScrollbackClearCount: number;
+  navigationRenderBatches: number;
   draftVisible: boolean;
   output: string;
 }
@@ -3701,6 +3704,8 @@ async function runPtyTui(
         assert.equal(typeof parsed.localizedActivityBatches, "number");
         assert.equal(typeof parsed.startupMouseEnableCount, "number");
         assert.equal(typeof parsed.mouseOverlayPriority, "boolean");
+        assert.equal(typeof parsed.navigationScrollbackClearCount, "number");
+        assert.equal(typeof parsed.navigationRenderBatches, "number");
         assert.equal(typeof parsed.draftVisible, "boolean");
         assert.equal(typeof parsed.output, "string");
         resolveRun(parsed as PtyTuiResult);

@@ -1726,24 +1726,24 @@ export async function runDockTui(
     if (wheel) {
       const reachedBoundary = wheel === "up" ? screen?.scrollUp(3) : screen?.scrollDown(3);
       if (wheel === "up" && reachedBoundary) void loadEarlierHistory();
-      tui.requestRender(true);
+      tui.requestRender();
       return { consume: true };
     }
     if (matchesKey(data, Key.pageUp) && !editor.isShowingAutocomplete()) {
       if (screen?.pageUp()) void loadEarlierHistory();
-      tui.requestRender(true);
+      tui.requestRender();
       return { consume: true };
     }
     if (matchesKey(data, Key.pageDown) && !editor.isShowingAutocomplete()) {
       screen?.pageDown();
-      tui.requestRender(true);
+      tui.requestRender();
       return { consume: true };
     }
     if (matchesKey(data, Key.ctrl("end"))) {
       const reloadStaleHistory = historyWindow.snapshot().loadState === "error";
       screen?.scrollToBottom();
       if (reloadStaleHistory) void reloadLatestHistoryAfterCursorError();
-      tui.requestRender(true);
+      tui.requestRender();
       return { consume: true };
     }
     if (matchesKey(data, "ctrl+d") && editor.getText().length === 0) {
@@ -1757,7 +1757,7 @@ export async function runDockTui(
         else screen?.scrollToBottom();
         if (instance.execution !== "running") activity.setActivity(`${toggled.name} ${toggled.expanded ? "expanded" : "collapsed"}`);
       }
-      tui.requestRender(true);
+      tui.requestRender();
       return { consume: true };
     }
     if (matchesKey(data, "ctrl+o")) {
@@ -1765,7 +1765,7 @@ export async function runDockTui(
       if (expanded) screen?.revealHistoryAnchor(() => conversation.latestToolAnchor());
       else screen?.scrollToBottom();
       if (instance.execution !== "running") activity.setActivity(expanded ? "all tools expanded" : "tools collapsed");
-      tui.requestRender(true);
+      tui.requestRender();
       return { consume: true };
     }
     if (matchesKey(data, Key.alt("up"))) {
