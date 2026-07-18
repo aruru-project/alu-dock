@@ -30,6 +30,7 @@ const SERVICE_TOPICS = new Set([
   "restart",
   "status",
   "logs",
+  "update",
   "uninstall",
 ]);
 
@@ -120,7 +121,7 @@ function helpHelp(): string {
 
 function serviceHelp(rest: readonly string[]): string {
   if (rest.length === 0) {
-    return `alu-dock service — manage the systemd --user Host\n\nUsage:\n  alu-dock service [status]\n  alu-dock service COMMAND [OPTIONS]\n\nCommands:\n  install     Install the generated user unit\n  start       Start the managed Host\n  stop        Stop the Host\n  restart     Restart the Host\n  status      Show systemd readiness and managed capabilities\n  logs        Read the user journal\n  uninstall   Remove only an Alu Dock-generated unit\n\nA service restart does not resume prompts, queues, interactions, tool effects or\nrun Promises. Inspect active work before stopping or restarting the Host.\n\nExplore:\n  alu-dock help service install\n  alu-dock service logs --help\n`;
+    return `alu-dock service — manage the systemd --user Host\n\nUsage:\n  alu-dock service [status]\n  alu-dock service COMMAND [OPTIONS]\n\nCommands:\n  install     Install the generated user unit\n  start       Start the managed Host\n  stop        Stop the Host\n  restart     Restart the Host\n  status      Show systemd readiness and managed capabilities\n  logs        Read the user journal\n  update      Apply a previously staged dogfood release\n  uninstall   Remove only an Alu Dock-generated unit\n\nAn agent can prepare an immutable release with 'npm run stage:dogfood' without\ntouching the running Host. Applying it explicitly stops and replaces the Host;\nno prompt, queue, interaction, tool effect or run Promise is resumed.\n\nExplore:\n  alu-dock help service install\n  alu-dock service logs --help\n`;
   }
   if (rest.length !== 1 || !SERVICE_TOPICS.has(rest[0] as string)) {
     throw new Error(`Unknown service help topic: ${rest.join(" ")}`);
@@ -138,6 +139,8 @@ function serviceHelp(rest: readonly string[]): string {
       return `alu-dock service status — inspect managed readiness\n\nUsage:\n  alu-dock service status\n\nReads systemd state and verifies the expected MainPID, V2 handshake and managed\ncapabilities. It does not start or restart the service.\n`;
     case "logs":
       return `alu-dock service logs — read Host journal output\n\nUsage:\n  alu-dock service logs [--lines N] [--follow]\n\nOptions:\n  --lines N, -n N   Read 1–10000 lines (default: 200)\n  --follow, -f      Follow new journal entries\n\nExamples:\n  alu-dock service logs --lines 100\n  alu-dock service logs --follow\n`;
+    case "update":
+      return `alu-dock service update — apply a staged dogfood release\n\nUsage:\n  alu-dock service update apply [RELEASE_ID]\n\nFirst prepare the immutable release from a clean Alu Dock checkout:\n\n  npm run stage:dogfood\n\nStaging runs the complete gate and build but does not switch current, stop the\nHost, or touch systemd. After the current turn finishes, press Ctrl+D. Run the\nprinted apply command from the outer shell. It stops the old Host, switches to\nthe staged release, starts it, and runs readiness/smoke checks.\n\nDo not invoke apply from an agent tool. Active runtime state is not migrated or\nreplayed; recoverable Pi session metadata remains available for explicit reopen.\n`;
     case "uninstall":
       return `alu-dock service uninstall — remove the generated unit\n\nUsage:\n  alu-dock service uninstall\n\nRemoves only a unit carrying Alu Dock's generated marker. It does not delete the\ndurable catalog or Pi session files.\n`;
     default:

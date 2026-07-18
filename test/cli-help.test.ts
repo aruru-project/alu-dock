@@ -115,7 +115,7 @@ test("service help is explorable without constructing a service manager", async 
   assertHelpSuccess(serviceTopic);
   assert.equal(serviceFlag.stdout, serviceTopic.stdout);
 
-  for (const action of ["install", "start", "stop", "restart", "status", "logs", "uninstall"]) {
+  for (const action of ["install", "start", "stop", "restart", "status", "logs", "update", "uninstall"]) {
     const [flag, topic] = await Promise.all([
       runCli(["service", action, "--help"]),
       runCli(["help", "service", action]),
@@ -148,7 +148,7 @@ test("help text is terminal-safe static guidance", () => {
   for (const topics of [
     [], ["open"], ["new"], ["attach"], ["list"], ["status"], ["stop"], ["forget"], ["prune"], ["help"],
     ["service"], ["service", "install"], ["service", "start"], ["service", "stop"],
-    ["service", "restart"], ["service", "status"], ["service", "logs"], ["service", "uninstall"],
+    ["service", "restart"], ["service", "status"], ["service", "logs"], ["service", "update"], ["service", "uninstall"],
     ["create"],
   ]) {
     const output = renderCliHelp(topics);

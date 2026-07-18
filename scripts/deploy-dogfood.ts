@@ -24,14 +24,18 @@ import {
   DOGFOOD_UNIT_NAME,
   dogfoodReleaseLayout,
   releaseId,
+  parseDogfoodPendingRelease,
   renderDogfoodLauncher,
   renderDogfoodUnit,
   renderReleasedHostInspectionScript,
+  type DogfoodPendingRelease,
   type DogfoodReleaseLayout,
 } from "../src/deployment/dogfood-release.js";
 import { DOCK_VERSION, PI_SDK_VERSION } from "../src/version.js";
 
 interface DeployOptions {
+  mode: "deploy" | "stage" | "apply";
+  expectedReleaseId?: string;
   releaseRoot: string;
   projectCwd: string;
   replaceUnmanaged: boolean;
@@ -55,6 +59,18 @@ const STOP_TIMEOUT_MS = 12_000;
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
+  if (options.mode === "stage") {
+    await stageRelease(options);
+    return;
+  }
+  if (options.mode === "apply") {
+    await applyStagedRelease(options);
+    return;
+  }
+  await deployNow(options);
+}
+
+async function deployNow(options: DeployOptions): Promise<void> {
   const repository = resolve(process.cwd());
   assertRepository(repository);
   const layout = dogfoodReleaseLayout(homedir(), options.releaseRoot);
@@ -146,6 +162,173 @@ async function main(): Promise<void> {
   } finally {
     await rm(staging, { recursive: true, force: true });
   }
+}
+
+async function stageRelease(options: DeployOptions): Promise<void> {
+  const repository = resolve(process.cwd());
+  assertRepository(repository);
+  const commit = command("git", ["rev-parse", "HEAD"], { cwd: repository, capture: true }).stdout.trim();
+  assertCleanRepository(repository);
+  runReleaseGate(repository);
+  assertCleanRepository(repository);
+
+  const layout = dogfoodReleaseLayout(homedir(), options.releaseRoot);
+  const id = releaseId(new Date(), commit);
+  await prepareLayout(layout);
+  const staging = join(layout.root, `.staging-${id}-${process.pid}`);
+  const finalRelease = join(layout.releases, id);
+  await rm(staging, { recursive: true, force: true });
+  if (await pathExists(finalRelease)) throw new Error(`Release already exists: ${finalRelease}`);
+
+  try {
+    await buildRelease({ repository, staging, id, commit });
+    await rename(staging, finalRelease);
+    const previousRelease = await currentRelease(layout);
+    const pending: DogfoodPendingRelease = {
+      schemaVersion: 1,
+      releaseId: id,
+      commit,
+      stagedAt: new Date().toISOString(),
+      projectCwd: options.projectCwd,
+      ...(previousRelease === undefined ? {} : { previousRelease }),
+    };
+    await writeReceipt(layout, `${id}.staged.json`, { ...pending, status: "staged", releasePath: finalRelease });
+    await writeFileAtomically(layout.pending, `${JSON.stringify(pending, null, 2)}\n`, 0o600);
+    const applyArgv = [process.execPath, join(finalRelease, "dist", "scripts", "deploy-dogfood.js"), "--apply", id, "--release-root", options.releaseRoot];
+    process.stdout.write(`${JSON.stringify({
+      kind: "dogfood.staged",
+      ...pending,
+      releasePath: finalRelease,
+      applyArgv,
+      applyCommand: applyArgv.map(shellCommandQuote).join(" "),
+    })}\n`);
+  } finally {
+    await rm(staging, { recursive: true, force: true });
+  }
+}
+
+async function applyStagedRelease(options: DeployOptions): Promise<void> {
+  const layout = dogfoodReleaseLayout(homedir(), options.releaseRoot);
+  const pending = parseDogfoodPendingRelease(JSON.parse(await readFile(layout.pending, "utf8")));
+  if (options.expectedReleaseId !== undefined && options.expectedReleaseId !== pending.releaseId) {
+    throw new Error(`Pending release is ${pending.releaseId}, not ${options.expectedReleaseId}`);
+  }
+  const finalRelease = join(layout.releases, pending.releaseId);
+  const metadata = JSON.parse(await readFile(join(finalRelease, "RELEASE.json"), "utf8")) as Record<string, unknown>;
+  if (metadata.releaseId !== pending.releaseId || metadata.commit !== pending.commit) throw new Error("Pending release metadata does not match its staged receipt");
+
+  const previousRelease = await currentRelease(layout);
+  if (previousRelease !== pending.previousRelease) throw new Error("Pending release is stale because current changed after it was staged");
+
+  const socketPath = defaultSocketPath();
+  const before = await inspectCurrentHost(socketPath, layout);
+  const mainPid = unitMainPid();
+  if (mainPid > 0 && await hasProcessAncestor(mainPid)) {
+    throw new Error("Update apply cannot run inside the managed Host; finish the turn, press Ctrl+D, then run the staged apply command from your shell");
+  }
+  if (before && !before.managed && !options.replaceUnmanaged) {
+    throw new Error(`Update apply refused: PID ${before.pid} owns the socket outside ${DOGFOOD_UNIT_NAME}; use --replace-unmanaged only after confirming interruption is intended`);
+  }
+
+  const serviceWasActive = isUnitActive();
+  const generatedFiles = await Promise.all([
+    captureGeneratedFile(layout.launcher),
+    captureGeneratedFile(layout.unitFile),
+  ]);
+  let switched = false;
+  let generatedFilesTouched = false;
+  let ready: ReadyHost | undefined;
+  try {
+    if (before && !before.managed) await stopUnmanagedHost(before.pid, socketPath);
+    else if (serviceWasActive) command("systemctl", ["--user", "stop", DOGFOOD_UNIT_NAME]);
+
+    generatedFilesTouched = true;
+    await installGeneratedFiles(layout);
+    await switchCurrent(layout, finalRelease);
+    switched = true;
+    command("systemctl", ["--user", "daemon-reload"]);
+    command("systemctl", ["--user", "enable", DOGFOOD_UNIT_NAME]);
+    command("systemctl", ["--user", "start", DOGFOOD_UNIT_NAME]);
+
+    ready = await waitForReadyHost(socketPath, before?.hostEpoch);
+    const smoke = runReleasedSmoke(finalRelease, socketPath, pending.projectCwd, pending.releaseId);
+    const receipt = {
+      schemaVersion: 1,
+      status: "deployed",
+      releaseId: pending.releaseId,
+      commit: pending.commit,
+      stagedAt: pending.stagedAt,
+      deployedAt: new Date().toISOString(),
+      releasePath: finalRelease,
+      previousRelease,
+      nodePath: process.execPath,
+      nodeVersion: process.version,
+      dockVersion: DOCK_VERSION,
+      piSdkVersion: PI_SDK_VERSION,
+      unit: DOGFOOD_UNIT_NAME,
+      mainPid: ready.pid,
+      hostEpoch: ready.hostEpoch,
+      previousHostEpoch: before?.hostEpoch,
+      gate: { typescript: "pass", tests: "pass", audit: "pass", imports: "pass", cleanTree: "pass" },
+      smoke,
+    };
+    await writeReceipt(layout, `${pending.releaseId}.json`, receipt);
+    const pendingCleanup = await rm(layout.pending, { force: true }).then(() => "removed", (cleanupError: unknown) => `failed: ${boundedMessage(cleanupError)}`);
+    process.stdout.write(`${JSON.stringify({ kind: "dogfood.deployed", ...receipt, pendingCleanup })}\n`);
+  } catch (error) {
+    const rollbackAttempted = switched || generatedFilesTouched || serviceWasActive;
+    let rollback = "not_needed";
+    if (rollbackAttempted) {
+      try {
+        await rollbackStagedApply(layout, previousRelease, generatedFiles, switched, serviceWasActive);
+        rollback = "passed";
+      } catch (rollbackError) {
+        rollback = `failed: ${boundedMessage(rollbackError)}`;
+      }
+    }
+    await writeReceipt(layout, `${pending.releaseId}.apply-failed-${Date.now()}.json`, {
+      schemaVersion: 1,
+      status: "failed",
+      releaseId: pending.releaseId,
+      commit: pending.commit,
+      failedAt: new Date().toISOString(),
+      message: boundedMessage(error),
+      rollback,
+    }).catch(() => {});
+    throw error;
+  }
+}
+
+async function rollbackStagedApply(
+  layout: DogfoodReleaseLayout,
+  previousRelease: string | undefined,
+  generatedFiles: GeneratedFileSnapshot[],
+  switched: boolean,
+  serviceWasActive: boolean,
+): Promise<void> {
+  command("systemctl", ["--user", "stop", DOGFOOD_UNIT_NAME], { allowFailure: true });
+  if (switched && previousRelease) await switchCurrent(layout, previousRelease);
+  if (switched && !previousRelease) await rm(layout.current, { force: true });
+  await restoreGeneratedFiles(generatedFiles);
+  command("systemctl", ["--user", "daemon-reload"]);
+  if (serviceWasActive && previousRelease) command("systemctl", ["--user", "start", DOGFOOD_UNIT_NAME]);
+}
+
+async function hasProcessAncestor(targetPid: number): Promise<boolean> {
+  let candidate = process.pid;
+  const visited = new Set<number>();
+  while (candidate > 1 && !visited.has(candidate)) {
+    if (candidate === targetPid) return true;
+    visited.add(candidate);
+    let stat: string;
+    try { stat = await readFile(`/proc/${candidate}/stat`, "utf8"); }
+    catch { return false; }
+    const close = stat.lastIndexOf(")");
+    const parent = close < 0 ? 0 : Number(stat.slice(close + 2).split(" ")[1]);
+    if (!Number.isSafeInteger(parent) || parent < 1) return false;
+    candidate = parent;
+  }
+  return candidate === targetPid;
 }
 
 function runReleaseGate(repository: string): void {
@@ -423,25 +606,47 @@ function command(executable: string, args: string[], options: CommandOptions = {
 }
 
 function parseArgs(args: string[]): DeployOptions {
+  let mode: DeployOptions["mode"] = "deploy";
+  let expectedReleaseId: string | undefined;
   let releaseRoot = join(homedir(), "release", "alu-dock");
   let projectCwd = resolve(process.cwd());
   let replaceUnmanaged = false;
   let allowActive = false;
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index];
-    if (value === "--release-root") releaseRoot = requiredValue(args, ++index, value);
+    if (value === "--stage") mode = "stage";
+    else if (value === "--apply") {
+      mode = "apply";
+      const candidate = args[index + 1];
+      if (candidate && !candidate.startsWith("--")) {
+        expectedReleaseId = candidate;
+        index += 1;
+      }
+    } else if (value === "--release-root") releaseRoot = requiredValue(args, ++index, value);
     else if (value === "--project-cwd") projectCwd = requiredValue(args, ++index, value);
     else if (value === "--replace-unmanaged") replaceUnmanaged = true;
     else if (value === "--allow-active") allowActive = true;
     else if (value === "--help") {
-      process.stdout.write("Usage: npm run deploy:dogfood -- [--replace-unmanaged] [--allow-active] [--release-root PATH] [--project-cwd PATH]\n");
+      process.stdout.write("Usage: deploy-dogfood [--stage | --apply [RELEASE_ID]] [--replace-unmanaged] [--allow-active] [--release-root PATH] [--project-cwd PATH]\n");
       process.exit(0);
     } else throw new Error(`Unknown deploy argument: ${String(value)}`);
   }
+  if (mode !== "deploy" && allowActive) throw new Error("--allow-active is only supported by the one-step deploy path");
   releaseRoot = resolve(releaseRoot);
   projectCwd = resolve(projectCwd);
   if (!isAbsolute(releaseRoot) || !isAbsolute(projectCwd)) throw new Error("Deployment paths must be absolute");
-  return { releaseRoot, projectCwd, replaceUnmanaged, allowActive };
+  return {
+    mode,
+    ...(expectedReleaseId === undefined ? {} : { expectedReleaseId }),
+    releaseRoot,
+    projectCwd,
+    replaceUnmanaged,
+    allowActive,
+  };
+}
+
+function shellCommandQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 function requiredValue(args: string[], index: number, option: string): string {

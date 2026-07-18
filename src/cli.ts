@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 
@@ -266,6 +267,19 @@ async function manageService(socketPath: string, socketExplicit: boolean, args: 
       requireNoArgs(rest, "service status");
       writeJson({ kind: "service", action, ...(await manager.status()) });
       return;
+    case "update": {
+      const [updateAction, releaseId, ...extra] = rest;
+      if (updateAction !== "apply" || extra.length > 0) throw new Error("service update requires apply [RELEASE_ID]");
+      if (releaseId?.startsWith("-")) throw new Error(`Unknown service update argument: ${releaseId}`);
+      const scriptPath = resolve(dirname(entryPath), "..", "scripts", "deploy-dogfood.js");
+      const result = spawnSync(process.execPath, [scriptPath, "--apply", ...(releaseId === undefined ? [] : [releaseId])], {
+        stdio: "inherit",
+        env: process.env,
+      });
+      if (result.error) throw result.error;
+      if (result.status !== 0) process.exitCode = result.status ?? 1;
+      return;
+    }
     case "logs": {
       let lines = 200;
       let follow = false;

@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   DOGFOOD_GENERATED_MARKER,
   dogfoodReleaseLayout,
+  parseDogfoodPendingRelease,
   releaseId,
   renderDogfoodLauncher,
   renderDogfoodUnit,
@@ -21,6 +22,7 @@ test("dogfood release layout keeps immutable releases behind one stable launcher
     releases: "/srv/releases/alu-dock/releases",
     receipts: "/srv/releases/alu-dock/receipts",
     current: "/srv/releases/alu-dock/current",
+    pending: "/srv/releases/alu-dock/pending.json",
     launcher: "/srv/releases/alu-dock/bin/alu-dock",
     userLauncher: "/home/tester/.local/bin/alu-dock",
     unitFile: "/home/tester/.config/systemd/user/alu-dock.service",
@@ -28,6 +30,20 @@ test("dogfood release layout keeps immutable releases behind one stable launcher
   assert.equal(releaseId(new Date("2026-07-15T05:06:07.000Z"), "a".repeat(40)), "20260715T050607Z-aaaaaaaaaaaa");
   assert.throws(() => releaseId(new Date("invalid"), "a".repeat(40)), /timestamp/);
   assert.throws(() => releaseId(new Date(), "not-a-sha"), /Git SHA/);
+});
+
+test("pending dogfood releases use a closed stage/apply receipt", () => {
+  const pending = parseDogfoodPendingRelease({
+    schemaVersion: 1,
+    releaseId: "20260719T120000Z-aaaaaaaaaaaa",
+    commit: "a".repeat(40),
+    stagedAt: "2026-07-19T12:00:00.000Z",
+    projectCwd: "/srv/alu-dock",
+    previousRelease: "/srv/releases/alu-dock/releases/previous",
+  });
+  assert.equal(pending.releaseId, "20260719T120000Z-aaaaaaaaaaaa");
+  assert.throws(() => parseDogfoodPendingRelease({ ...pending, extra: true }), /unknown fields/);
+  assert.throws(() => parseDogfoodPendingRelease({ ...pending, releaseId: "latest" }), /ID is invalid/);
 });
 
 test("generated launcher pins Node and marks interactive startup as managed", () => {

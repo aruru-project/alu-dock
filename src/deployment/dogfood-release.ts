@@ -9,9 +9,19 @@ export interface DogfoodReleaseLayout {
   releases: string;
   receipts: string;
   current: string;
+  pending: string;
   launcher: string;
   userLauncher: string;
   unitFile: string;
+}
+
+export interface DogfoodPendingRelease {
+  schemaVersion: 1;
+  releaseId: string;
+  commit: string;
+  stagedAt: string;
+  projectCwd: string;
+  previousRelease?: string;
 }
 
 export interface DogfoodUnitOptions {
@@ -27,6 +37,7 @@ export function dogfoodReleaseLayout(home: string, releaseRoot = join(home, "rel
     releases: join(root, "releases"),
     receipts: join(root, "receipts"),
     current: join(root, "current"),
+    pending: join(root, "pending.json"),
     launcher: join(root, "bin", "alu-dock"),
     userLauncher: join(resolve(home), ".local", "bin", "alu-dock"),
     unitFile: join(resolve(home), ".config", "systemd", "user", DOGFOOD_UNIT_NAME),
@@ -88,6 +99,27 @@ StandardError=journal
 [Install]
 WantedBy=default.target
 `;
+}
+
+export function parseDogfoodPendingRelease(value: unknown): DogfoodPendingRelease {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error("Pending dogfood release must be an object");
+  const record = value as Record<string, unknown>;
+  const allowed = new Set(["schemaVersion", "releaseId", "commit", "stagedAt", "projectCwd", "previousRelease"]);
+  if (Object.keys(record).some((key) => !allowed.has(key))) throw new Error("Pending dogfood release contains unknown fields");
+  if (record.schemaVersion !== 1) throw new Error("Pending dogfood release schema is unsupported");
+  if (typeof record.releaseId !== "string" || !/^\d{8}T\d{6}Z-[0-9a-f]{12}$/u.test(record.releaseId)) throw new Error("Pending dogfood release ID is invalid");
+  if (typeof record.commit !== "string" || !/^[0-9a-f]{40}$/u.test(record.commit)) throw new Error("Pending dogfood commit is invalid");
+  if (typeof record.stagedAt !== "string" || !Number.isFinite(Date.parse(record.stagedAt))) throw new Error("Pending dogfood stagedAt is invalid");
+  if (typeof record.projectCwd !== "string" || !record.projectCwd.startsWith("/")) throw new Error("Pending dogfood project cwd is invalid");
+  if (record.previousRelease !== undefined && (typeof record.previousRelease !== "string" || !record.previousRelease.startsWith("/"))) throw new Error("Pending dogfood previous release is invalid");
+  return {
+    schemaVersion: 1,
+    releaseId: record.releaseId,
+    commit: record.commit,
+    stagedAt: record.stagedAt,
+    projectCwd: record.projectCwd,
+    ...(record.previousRelease === undefined ? {} : { previousRelease: record.previousRelease }),
+  };
 }
 
 export function releaseId(timestamp: Date, commit: string): string {

@@ -17,8 +17,9 @@ src/cli.ts service ...
 
 Release lifecycle
 scripts/deploy-dogfood.ts
-  ├── clean committed HEAD + complete gate
-  ├── build immutable staging release
+  ├── stage: clean committed HEAD + complete gate + immutable pending release
+  ├── apply: explicit outer-shell Host replacement using the pending release
+  ├── one-step deploy: retained operator path
   ├── install generated launcher/unit
   ├── atomic current symlink switch
   ├── systemd restart/start
@@ -52,7 +53,7 @@ Corrupt catalog evidence保留；失败时不得先构造prior runtime。Startup
 |---|---|---|
 | `src/deployment/user-service.ts` | explicit generated-unit lifecycle、readiness、logs | `user-service` |
 | `src/deployment/dogfood-release.ts` | release layout、unit/launcher rendering、release ID | `dogfood-release` |
-| `scripts/deploy-dogfood.ts` | full immutable publish/switch/smoke/rollback transaction | `dogfood-release` + real deploy gate |
+| `scripts/deploy-dogfood.ts` | stage/apply与一次性immutable publish/switch/smoke/rollback transaction | `dogfood-release` + real deploy gate |
 | `scripts/dogfood-smoke.ts` | released DockClient command/resources/tools/settings smoke；Stop 后 Forget 自身 record，不污染 History | release gate |
 | `src/cli.ts:serve()` | managed/dev mode composition与signal shutdown | `managed-mode`, process tests |
 | `src/control/dock-host.ts` | bind-first startup、drain、socket ownership、fatal completion | `durable-host-process`, `dock-control` |
@@ -84,7 +85,8 @@ Corrupt catalog evidence保留；失败时不得先构造prior runtime。Startup
 
 ## Release规则
 
-- 只有用户明确授权后才允许deploy、切换`current`、restart service或创建tag。
+- 只有用户明确授权后才允许apply/deploy、切换`current`、restart service或创建tag；stage不触碰运行Host。
+- `npm run stage:dogfood`允许Host-owned agent准备pending release；apply必须在turn结束、Ctrl+D后由外层shell显式运行，并拒绝managed Host后代进程。
 - 只发布clean committed HEAD；先完成code gate，再创建immutable release。
 - Release位于`dogfoodReleaseLayout()`定义的immutable目录；禁止直接patch live release。
 - 默认拒绝在active instance存在时restart。

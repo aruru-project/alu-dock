@@ -3,6 +3,8 @@
 ## 原则
 
 - 只发布clean committed HEAD。
+- Agent可在现有Host运行时stage新版；stage只构建release与pending receipt，不切换、不重启。
+- Apply必须由当前turn结束并Ctrl+D后，从外层shell显式执行；不得从Host-owned tool中自杀式调用。
 - Release目录创建后不可原地修改；失败时整体回滚。
 - `current`只通过原子symlink切换。
 - 默认拒绝在active instance存在时restart。
@@ -50,11 +52,25 @@ alu-dock service install --now
 
 ## 发布
 
+常规一次性发布：
+
 ```bash
 npm run deploy:dogfood
 ```
 
-发布器必须依次完成：
+Dogfood自更新使用两阶段流程：
+
+```bash
+# 可由Alu Dock中的agent执行；不会影响当前Host
+npm run stage:dogfood
+
+# 当前turn结束后Ctrl+D，在外层shell执行stage输出的固定命令
+alu-dock service update apply [RELEASE_ID]
+```
+
+Stage完成完整code gate与immutable release build，只更新`pending.json`和stage receipt。Apply是显式Host replacement授权：停止旧Host、原子切换`current`、启动新版并执行readiness/smoke；active runtime、queue、interaction、Promise或tool effect不会迁移或重放。Apply检测到自身运行在managed Host的子进程中时必须拒绝，避免tool call杀死其owner。
+
+一次性发布器必须依次完成：
 
 1. 验证clean committed HEAD；
 2. 运行完整code gate；
