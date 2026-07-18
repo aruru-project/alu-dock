@@ -76,7 +76,10 @@ export function reduceRunActivity(
       if (snapshot.execution === "running" && snapshot.activeCommandId !== undefined && snapshot.activeCommandId !== event.data.operationId) {
         return current.phase === "idle" ? activityFromSnapshot(snapshot) : current;
       }
-      return { phase: "waiting", label: "waiting for model" };
+      // Acceptance confirms Host ownership, not that a model run exists. Keep
+      // the client-local submitting phase until run.started/message.submitted,
+      // command.handled, or the authoritative response snapshot resolves it.
+      return current;
 
     case "command.handled":
       if (snapshot.execution === "running") return current.phase === "idle" ? activityFromSnapshot(snapshot) : current;

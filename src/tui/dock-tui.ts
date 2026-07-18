@@ -58,6 +58,7 @@ import { editorTheme, paint } from "./theme.js";
 import { FixedActionDialog, WorkModalFrame } from "./work-modal.js";
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly RuntimeThinkingLevel[];
+const SUBMITTING_FEEDBACK_DELAY_MS = 200;
 
 export function pickerContentRowBudget(terminalRows: number): number {
   const rows = Number.isFinite(terminalRows) ? Math.max(1, Math.floor(terminalRows)) : 24;
@@ -89,6 +90,7 @@ export async function runDockTui(
   const header = new DockWorkHeader(() => instance);
   const status = new DockStatusLine(instance);
   let runActivity = activityFromSnapshot(instance);
+  let submittingFeedbackVisible = false;
   activity.setActivity(runActivity);
   let subscription: EventSubscription | undefined;
   let controllerLeaseToken: string | undefined;
@@ -133,7 +135,7 @@ export async function runDockTui(
     status.update(instance);
     pendingQueue.apply(event);
     runActivity = reduceRunActivity(runActivity, event, instance);
-    activity.setActivity(runActivity);
+    if (runActivity.phase !== "submitting" || submittingFeedbackVisible) activity.setActivity(runActivity);
     if (event.type === "session.replaced") {
       activeExtensionDialog?.closeFromHost();
       controllerLeaseToken = undefined;
@@ -456,20 +458,29 @@ export async function runDockTui(
 
   async function sendPrompt(message: string, delivery: DeliveryMode): Promise<void> {
     editor.disableSubmit = true;
-    runActivity = submittingActivity();
-    activity.setActivity(runActivity);
-    tui.requestRender();
+    const submitting = submittingActivity();
+    runActivity = submitting;
+    submittingFeedbackVisible = false;
+    const feedbackTimer = setTimeout(() => {
+      if (exiting || runActivity !== submitting) return;
+      submittingFeedbackVisible = true;
+      activity.setActivity(submitting);
+      tui.requestRender();
+    }, SUBMITTING_FEEDBACK_DELAY_MS);
+    feedbackTimer.unref?.();
     try {
       const result = await client.prompt(instance.id, message, delivery);
       instance = result.instance;
       status.update(instance);
-      if (runActivity.phase === "submitting") {
+      if (runActivity === submitting) {
         runActivity = activityFromSnapshot(instance);
         activity.setActivity(runActivity);
       }
     } catch (error) {
       showError(error);
     } finally {
+      clearTimeout(feedbackTimer);
+      submittingFeedbackVisible = false;
       if (instance.lifecycle === "active") editor.disableSubmit = false;
       tui.requestRender();
     }

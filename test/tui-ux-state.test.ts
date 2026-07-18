@@ -633,12 +633,12 @@ test("run activity recovers the current phase from replay only while the snapsho
   assert.equal(activityFromReplay(snapshot({ execution: "idle", lastRun: "succeeded" }), events).phase, "idle");
 });
 
-test("command handled clears waiting activity without requiring transcript output", () => {
+test("command handled clears client-local submission activity without inventing a model wait", () => {
   let activity = submittingActivity();
   activity = reduceRunActivity(activity, event(1, "command.accepted", {
     operationId: "no-run-1", delivery: "prompt", queued: false, acceptedAt: "2026-07-15T00:00:00.000Z",
   }), snapshot());
-  assert.equal(activity.phase, "waiting");
+  assert.equal(activity.phase, "submitting");
 
   activity = reduceRunActivity(activity, event(2, "command.handled", {
     operationId: "no-run-1", kind: "extension_command",
@@ -737,39 +737,43 @@ test("run activity distinguishes waiting thinking response tool retry and clears
   activity = reduceRunActivity(activity, event(1, "command.accepted", {
     operationId: "op-1", delivery: "prompt", queued: false, acceptedAt: "2026-07-15T00:00:00.000Z",
   }), running);
+  assert.equal(activity.phase, "submitting");
+  activity = reduceRunActivity(activity, event(2, "run.started", {
+    operationId: "op-1",
+  }), running);
   assert.equal(activity.phase, "waiting");
 
-  activity = reduceRunActivity(activity, event(2, "message.delta", {
+  activity = reduceRunActivity(activity, event(3, "message.delta", {
     messageId: "a-1", block: "thinking", delta: "plan",
   }), running);
   assert.equal(activity.phase, "thinking");
 
-  activity = reduceRunActivity(activity, event(3, "message.delta", {
+  activity = reduceRunActivity(activity, event(4, "message.delta", {
     messageId: "a-1", block: "text", delta: "answer",
   }), running);
   assert.equal(activity.phase, "responding");
 
-  activity = reduceRunActivity(activity, event(4, "tool.started", {
+  activity = reduceRunActivity(activity, event(5, "tool.started", {
     toolCallId: "t-1", toolName: "read", args: {}, omittedFields: [],
   }), running);
   assert.deepEqual({ phase: activity.phase, label: activity.label }, { phase: "tool", label: "tool read" });
-  activity = reduceRunActivity(activity, event(5, "message.completed", {
+  activity = reduceRunActivity(activity, event(6, "message.completed", {
     messageId: "a-1", role: "assistant", content: [{ type: "tool_call", toolCallId: "t-1", toolName: "read", args: {} }],
   }), running);
   assert.deepEqual({ phase: activity.phase, label: activity.label }, { phase: "tool", label: "tool read" });
 
-  activity = reduceRunActivity(activity, event(6, "tool.completed", {
+  activity = reduceRunActivity(activity, event(7, "tool.completed", {
     toolCallId: "t-1", toolName: "read", text: "done", isError: false, omittedFields: [],
   }), running);
   assert.equal(activity.phase, "waiting");
 
-  activity = reduceRunActivity(activity, event(7, "run.retry_started", {
+  activity = reduceRunActivity(activity, event(8, "run.retry_started", {
     attempt: 2, maxAttempts: 3, delayMs: 100, error: "retry",
   }), running);
   assert.equal(activity.label, "retry 2/3");
 
   const idle = snapshot({ execution: "idle", lastRun: "succeeded" });
-  activity = reduceRunActivity(activity, event(8, "run.settled", {
+  activity = reduceRunActivity(activity, event(9, "run.settled", {
     operationId: "op-1", result: "succeeded",
   }), idle);
   assert.deepEqual(activity, activityFromSnapshot(idle));

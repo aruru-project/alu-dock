@@ -914,6 +914,7 @@ test("SSH TUI keeps repeated no-run completion facts out of live and replayed co
   assert.equal(livePty.timedOut, false, liveOutput.slice(-2_000));
   assert.equal(livePty.status, 0, liveOutput.slice(-2_000));
   assert.doesNotMatch(liveOutput, /Command handled without starting a model run/u);
+  assert.doesNotMatch(liveOutput, /submitting|waiting for model/u);
 
   const replayPty = await runPtyTui([
     process.execPath,
