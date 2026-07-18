@@ -13,7 +13,7 @@ import { knownCompactionFeedback } from "./compaction-feedback.js";
 import type { RunActivityState } from "./run-activity.js";
 import { markdownTheme, paint } from "./theme.js";
 
-type EntryKind = "user" | "assistant" | "thinking" | "tool" | "system" | "error";
+type EntryKind = "user" | "assistant" | "thinking" | "tool" | "system" | "status" | "warning" | "error";
 type ToolState = "running" | "done" | "failed";
 
 interface ConversationEntry {
@@ -80,6 +80,7 @@ export class DockConversation implements Component {
   private readonly tools = new Map<string, ToolProjection>();
   private currentAssistant: ConversationEntry | undefined;
   private currentThinking: ConversationEntry | undefined;
+  private lastExtensionInfo: ConversationEntry | undefined;
   private hideThinking = false;
   private toolsExpanded = false;
   private readonly toolExpansionOverrides = new Map<string, boolean>();
@@ -98,6 +99,7 @@ export class DockConversation implements Component {
     this.tools.clear();
     this.currentAssistant = undefined;
     this.currentThinking = undefined;
+    this.lastExtensionInfo = undefined;
     this.historyDisplayCount = 0;
     this.liveEntrySequence = 0;
     this.toolExpansionOverrides.clear();
@@ -141,6 +143,7 @@ export class DockConversation implements Component {
       this.lastToggledDetailKey = undefined;
     }
     const retainedEntries = new Set(this.entries);
+    if (this.lastExtensionInfo && !retainedEntries.has(this.lastExtensionInfo)) this.lastExtensionInfo = undefined;
     for (const entry of this.materializedEntries) {
       if (!retainedEntries.has(entry)) this.materializedEntries.delete(entry);
     }
@@ -364,9 +367,7 @@ export class DockConversation implements Component {
         break;
 
       case "extension.notification":
-        // Informational extension feedback is replaceable activity, projected
-        // by the Work shell. Warnings and errors remain durable and honest.
-        if (event.data.level !== "info") this.add(event.data.level === "error" ? "error" : "system", event.data.message);
+        this.addExtensionNotification(event.data.level, event.data.message);
         break;
 
       case "resources.reloaded":
@@ -845,9 +846,11 @@ export class DockConversation implements Component {
         ? content.map((line) => `${paint.thinking("│")} ${line}`)
         : content;
     } else if (entry.kind === "error") {
-      lines = renderNotice(entry.text.length > 0 ? entry.text : "Unknown error", width, true);
+      lines = renderNotice(entry.text.length > 0 ? entry.text : "Unknown error", width, "error");
+    } else if (entry.kind === "warning") {
+      lines = renderNotice(entry.text.length > 0 ? entry.text : "Warning", width, "warning");
     } else {
-      lines = renderNotice(entry.text.length > 0 ? entry.text : "…", width, false);
+      lines = renderNotice(entry.text.length > 0 ? entry.text : "…", width, "info");
     }
 
     entry.renderCache = { width, revision: entry.renderRevision, expanded, lines };
@@ -951,6 +954,21 @@ export class DockConversation implements Component {
     const entry = this.add("tool", "", complete);
     entry.toolCallId = toolCallId;
     return entry;
+  }
+
+  private addExtensionNotification(level: "info" | "warning" | "error", message: string): void {
+    if (level === "info") {
+      const previous = this.lastExtensionInfo;
+      if (previous && this.entries.at(-1) === previous) {
+        previous.text = safeTerminalText(message);
+        this.touchEntry(previous);
+        this.markOutputChanged();
+        return;
+      }
+      this.lastExtensionInfo = this.add("status", message);
+      return;
+    }
+    this.add(level === "warning" ? "warning" : "error", message);
   }
 
   private isToolExpanded(entry: ConversationEntry): boolean {
@@ -1149,12 +1167,13 @@ function renderToolDetailLine(
   return `${toolStatePainter(state)(softContinuation ? "┆" : "│")} ${projected}`;
 }
 
-function renderNotice(text: string, width: number, error: boolean): string[] {
-  if (width < 3) return wrapPlainText(text, width).map(error ? paint.error : paint.muted);
+function renderNotice(text: string, width: number, tone: "info" | "warning" | "error"): string[] {
+  const painter = tone === "error" ? paint.error : tone === "warning" ? paint.warning : paint.muted;
+  if (width < 3) return wrapPlainText(text, width).map(painter);
   const bodyWidth = width - 2;
   return wrapPlainText(text, bodyWidth).map((line, index) => {
-    const marker = index === 0 ? (error ? "!" : "·") : "│";
-    return `${error ? paint.error(marker) : paint.faint(marker)} ${error ? paint.error(line) : paint.muted(line)}`;
+    const marker = index === 0 ? (tone === "info" ? "·" : "!") : "│";
+    return `${tone === "info" ? paint.faint(marker) : painter(marker)} ${painter(line)}`;
   });
 }
 

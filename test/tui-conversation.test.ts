@@ -148,7 +148,7 @@ test("conversation reset replaces old session history", () => {
   assert.deepEqual(conversation.snapshot(), [{ kind: "assistant", text: "new session", complete: true }]);
 });
 
-test("no-run completion and informational extension status stay out while durable failures remain visible", () => {
+test("extension notifications follow Pi tail replacement and severity semantics", () => {
   const conversation = new DockConversation();
   conversation.applyReplay([
     event(1, "command.handled", { operationId: "no-run-1", kind: "extension_command" }),
@@ -156,15 +156,30 @@ test("no-run completion and informational extension status stay out while durabl
   ], false);
   assert.deepEqual(conversation.snapshot(), []);
 
-  conversation.apply(event(3, "command.rejected", { operationId: "rejected-1", reason: "preflight_failed", error: "Command rejected visibly" }));
-  conversation.apply(event(4, "extension.notification", { level: "info", message: "Replaceable extension status" }));
-  conversation.apply(event(5, "extension.notification", { level: "warning", message: "Durable extension warning" }));
-  conversation.apply(event(6, "extension.error", { error: "Extension failed visibly" }));
+  conversation.apply(event(3, "extension.notification", { level: "info", message: "rm-confirm ON" }));
+  conversation.apply(event(4, "extension.notification", { level: "info", message: "rm-confirm status ON" }));
+  conversation.apply(event(5, "message.submitted", {
+    operationId: "prompt-1", messageId: "prompt-1", role: "user", text: "intervening message", delivery: "prompt",
+  }));
+  conversation.apply(event(6, "extension.notification", { level: "info", message: "Kanban status" }));
+  conversation.apply(event(7, "extension.notification", { level: "warning", message: "rm-confirm OFF" }));
+  conversation.apply(event(8, "extension.notification", { level: "warning", message: "rm-confirm remains OFF" }));
+  conversation.apply(event(9, "extension.notification", { level: "error", message: "Extension command failed" }));
+  conversation.apply(event(10, "extension.error", { error: "Extension hook failed" }));
+
   assert.deepEqual(conversation.snapshot().map((entry) => [entry.kind, entry.text]), [
-    ["error", "Command rejected visibly"],
-    ["system", "Durable extension warning"],
-    ["error", "Extension failed visibly"],
+    ["status", "rm-confirm status ON"],
+    ["user", "intervening message"],
+    ["status", "Kanban status"],
+    ["warning", "rm-confirm OFF"],
+    ["warning", "rm-confirm remains OFF"],
+    ["error", "Extension command failed"],
+    ["error", "Extension hook failed"],
   ]);
+  const rendered = conversation.render(80).join("\n");
+  assert.match(rendered, /rm-confirm status ON/u);
+  assert.match(rendered, /rm-confirm OFF/u);
+  assert.match(rendered, /Extension command failed/u);
 });
 
 test("conversation projects persisted history before live replay", () => {

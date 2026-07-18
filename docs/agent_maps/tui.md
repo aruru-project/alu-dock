@@ -52,10 +52,10 @@ Session Work TUI
 | `src/interactive.ts` | TTY entry composition、Hub action/Work routing、human target lifecycle、trust prompt | CLI/managed/PTY tests |
 | `src/tui/dock-hub.ts` | Dock instances主列表、lifecycle actions、独立Pi session Resume/Adopt inventory、visible-only Hub blink ownership | `human-target`, `dock-control` PTY |
 | `src/tui/dock-tui.ts` | attached Work workflow composition、commands、focus/key actions | `tui-ux-state`, PTY fixture |
-| `src/tui/conversation.ts` | durable conversation rows、hard/soft multiline tool rendering、status/activity line投影 | `tui-conversation` |
+| `src/tui/conversation.ts` | session conversation rows、UI-only extension notify rows、hard/soft multiline tool rendering | `tui-conversation` |
 | `src/tui/snapshot-projection.ts` | DockEvent → local InstanceSnapshot reducer | `tui-ux-state` |
-| `src/tui/run-activity.ts` | current-session transient activity reducer | `tui-ux-state` |
-| `src/tui/activity-pulse.ts` | fixed localized animation writer；idle无timer | `tui-ux-state` |
+| `src/tui/run-activity.ts` | runtime/queue/interaction专属的current-session activity reducer | `tui-ux-state` |
+| `src/tui/activity-pulse.ts` | frame-cached activity animation scheduler；idle无timer | `tui-ux-state` |
 | `src/tui/pi-tui-screen.ts` | fixed screen section composition与history anchor | `tui-ux-state` |
 | `src/tui/screen-layout.ts` | viewport math、fixed chrome、resize composition | `tui-ux-state` |
 | `src/tui/history-pagination.ts` | bounded history window、earlier-page cursor、anchor preservation | `history-pagination` |
@@ -75,7 +75,9 @@ Session Work TUI
 | 类别 | 去向 | 示例 |
 |---|---|---|
 | Durable conversation | `DockConversation` | user/assistant/tool result、session-changing outcome |
-| Transient status/activity | activity/status fixed slot | submitting、model streaming、tool running、aborting |
+| Runtime activity | 小阿露fixed activity slot | submitting、model streaming、tool running、queue、interaction、aborting；extension notify不得写入 |
+| Extension notify feedback | `DockConversation`的UI-only rows | 连续tail `info`原位替换；有可见内容介入后新建；`warning/error`逐条追加；不写Pi session history |
+| Persistent extension status | reserved extension footer row | `setStatus(key,text)`同key替换、不同key并存、`undefined`删除 |
 | Interaction | focused dialog/editor | Extension UI select/confirm/input/editor |
 | Explicit diagnostics | requested diagnostic surface或actionable warning | Host unavailable、setting persistence failure |
 | Internal bookkeeping | 不渲染 | replay bounds、cursor revision、operation ledger、expected pagination state |
@@ -107,7 +109,8 @@ Warning必须说明用户影响和可执行动作；closed Host projection本身
 - Queue是Same-Host memory；in-flight/failed/ambiguous mutation不声称已restore，也不自动abort。
 - Exact extension command不进入pending queue；unknown slash保留Pi-native语义。
 - Extension UI只支持bounded closed text；不transport component factory、image、binary或data URI。Host若截断tool output必须附明确truncation marker；modal或config/session inventory不完整时，Work/Hub显示shown/total或首条scan diagnostic，不能把bounded prefix呈现为完整结果。
-- 动画只写固定surface；idle无timer。Localized activity write绕过pi-tui frame cache，因此placement移动/隐藏时必须在下一正常frame强制reconcile旧物理行，不能留下重复activity。Hub最多一个visible时才运行的低频本地blink timer。
+- Extension `notify`与`setStatus`不可混用：notify遵循Pi的chat-tail语义，连续tail info才替换，warning/error逐条追加；setStatus属于keyed footer state。两者都不得覆盖小阿露runtime activity。
+- Work所有动画都通过pi-tui frame cache请求正常render；禁止cache外绝对行写入。idle无timer。Hub最多一个visible时才运行的低频本地blink timer。
 - Renderer替换必须一次性cut over，不维护dual renderer或compatibility facade。
 
 ## 人工输出门禁

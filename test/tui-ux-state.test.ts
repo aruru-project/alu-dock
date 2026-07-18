@@ -660,47 +660,15 @@ test("command handled clears waiting activity without requiring transcript outpu
     operationId: "extension-op", kind: "extension_command",
   }), parent);
   assert.deepEqual(activity, { phase: "tool", label: "tool bash" });
-});
-
-test("informational extension feedback replaces activity and survives no-run completion", () => {
-  const idle = snapshot({ execution: "idle", lastRun: "succeeded" });
-  let activity = reduceRunActivity(activityFromSnapshot(idle), event(1, "extension.notification", {
-    level: "info", message: "Guard is enabled",
-  }), idle);
-  assert.deepEqual(activity, { phase: "idle", label: "Guard is enabled" });
-  activity = reduceRunActivity(activity, event(2, "command.handled", {
-    operationId: "extension-status", kind: "extension_command",
-  }), idle);
-  assert.deepEqual(activity, { phase: "idle", label: "Guard is enabled" });
-  activity = reduceRunActivity(activity, event(3, "extension.notification", {
-    level: "info", message: "Guard is disabled",
-  }), idle);
-  assert.deepEqual(activity, { phase: "idle", label: "Guard is disabled" });
-});
-
-test("the second extension command result survives its committed idle state event", () => {
-  const idle = snapshot({ execution: "idle", lastRun: "succeeded" });
-  const idleState = {
-    reason: "extension_command_handled", lifecycle: "active", execution: "idle", lastRun: "succeeded",
-    pending: { steering: 0, followUp: 0, total: 0 }, activeCommandId: undefined, lastError: undefined,
-  };
-  let activity = activityFromSnapshot(idle);
-  activity = reduceRunActivity(activity, event(1, "command.accepted", {
-    operationId: "rm-off", delivery: "prompt", queued: false, acceptedAt: "2026-07-15T00:00:00.000Z",
-  }), idle);
-  activity = reduceRunActivity(activity, event(2, "instance.state_changed", idleState), idle);
-  activity = reduceRunActivity(activity, event(3, "command.handled", { operationId: "rm-off", kind: "extension_command" }), idle);
-  activity = reduceRunActivity(activity, event(4, "instance.state_changed", idleState), idle);
-
-  activity = reduceRunActivity(activity, event(5, "command.accepted", {
-    operationId: "rm-on", delivery: "prompt", queued: false, acceptedAt: "2026-07-15T00:00:01.000Z",
-  }), idle);
   activity = reduceRunActivity(activity, event(6, "extension.notification", {
-    level: "info", message: "rm confirmation enabled",
-  }), idle);
-  activity = reduceRunActivity(activity, event(7, "command.handled", { operationId: "rm-on", kind: "extension_command" }), idle);
-  activity = reduceRunActivity(activity, event(8, "instance.state_changed", idleState), idle);
-  assert.deepEqual(activity, { phase: "idle", label: "rm confirmation enabled" });
+    level: "info", message: "Kanban status",
+  }), parent);
+  assert.deepEqual(activity, { phase: "tool", label: "tool bash" });
+
+  const idle = snapshot({ execution: "idle", lastRun: "succeeded" });
+  assert.deepEqual(reduceRunActivity(activityFromSnapshot(idle), event(7, "extension.notification", {
+    level: "info", message: "rm-confirm ON",
+  }), idle), { phase: "idle", label: "ready" });
 });
 
 test("run activity covers compaction queue interaction abort failure and host loss", () => {

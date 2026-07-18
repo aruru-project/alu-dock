@@ -176,10 +176,6 @@ export function reduceRunActivity(
       return { phase: "error", label: "error" };
 
     case "extension.notification":
-      return event.data.level === "info"
-        ? { phase: "idle", label: event.data.message }
-        : current;
-
     case "extension.error":
       return current;
 
