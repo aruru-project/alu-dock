@@ -19,6 +19,7 @@ import { ExtensionTextDialog } from "../src/tui/extension-text-dialog.js";
 import { pickerContentRowBudget, shouldApplyInitialHistory, snapshotIsNotOlder } from "../src/tui/dock-tui.js";
 import { SessionTreeSurface } from "../src/tui/session-tree-surface.js";
 import { FixedActionDialog, WorkModalFrame } from "../src/tui/work-modal.js";
+import { projectSnapshot } from "../src/tui/snapshot-projection.js";
 import type { TreeNodeDto } from "../src/core/instance-dto.js";
 
 function event(sequence: number, type: DockEvent["type"], data: Record<string, unknown>): DockEvent {
@@ -297,12 +298,12 @@ test("tree picker uses left/right and page keys for clamped page movement", () =
   assert.equal(picker.getSelectedItem()?.value, "entry-19");
 });
 
-test("run activity recovers active tool and compaction phases from authoritative attach state", () => {
+test("run activity keeps tool telemetry orthogonal while recovering authoritative attach state", () => {
   const events = [
     event(1, "run.started", { operationId: "op-1", delivery: "prompt" }),
     event(2, "tool.started", { toolCallId: "t-1", toolName: "read", args: {}, omittedFields: [] }),
   ];
-  assert.equal(activityFromReplay(snapshot(), events).label, "tool read");
+  assert.equal(activityFromReplay(snapshot(), events).label, "waiting for model");
   assert.equal(activityFromReplay(snapshot({ execution: "idle", lastRun: "succeeded" }), events).phase, "idle");
   assert.deepEqual(activityFromReplay(snapshot({ compacting: true }), []), {
     phase: "compaction",
@@ -316,31 +317,41 @@ test("command handled clears client-local submission activity without inventing 
     operationId: "no-run-1", delivery: "prompt", queued: false, acceptedAt: "2026-07-15T00:00:00.000Z",
   }), snapshot());
   assert.equal(activity.phase, "submitting");
+  activity = reduceRunActivity(activity, event(2, "instance.state_changed", {
+    reason: "command_accepted", lifecycle: "active", execution: "running", compacting: false, lastRun: "never",
+    pending: { steering: 0, followUp: 0, total: 0 }, activeCommandId: "no-run-1",
+  }), snapshot());
+  assert.equal(activity.phase, "submitting");
 
-  activity = reduceRunActivity(activity, event(2, "command.handled", {
+  activity = reduceRunActivity(activity, event(3, "command.handled", {
     operationId: "no-run-1", kind: "extension_command",
+  }), snapshot());
+  assert.equal(activity.phase, "submitting");
+  activity = reduceRunActivity(activity, event(4, "instance.state_changed", {
+    reason: "command_handled_without_run", lifecycle: "active", execution: "idle", compacting: false, lastRun: "never",
+    pending: { steering: 0, followUp: 0, total: 0 }, activeCommandId: undefined,
   }), snapshot({ execution: "idle" }));
   assert.deepEqual(activity, { phase: "idle", label: "ready" });
 
-  activity = reduceRunActivity(activity, event(3, "command.handled", {
+  activity = reduceRunActivity(activity, event(5, "command.handled", {
     operationId: "no-run-2", kind: "no_run",
   }), snapshot({ execution: "idle", pending: { steering: 0, followUp: 2, total: 2 } }));
-  assert.deepEqual(activity, { phase: "queued", label: "queued 2" });
+  assert.deepEqual(activity, { phase: "idle", label: "ready" });
 
   const parent = snapshot({ activeCommandId: "parent-op" });
-  activity = { phase: "tool", label: "tool bash" };
+  activity = { phase: "responding", label: "responding" };
   activity = reduceRunActivity(activity, event(4, "command.accepted", {
     operationId: "extension-op", delivery: "prompt", queued: false, acceptedAt: "2026-07-15T00:00:00.000Z",
   }), parent);
-  assert.deepEqual(activity, { phase: "tool", label: "tool bash" });
+  assert.deepEqual(activity, { phase: "responding", label: "responding" });
   activity = reduceRunActivity(activity, event(5, "command.handled", {
     operationId: "extension-op", kind: "extension_command",
   }), parent);
-  assert.deepEqual(activity, { phase: "tool", label: "tool bash" });
+  assert.deepEqual(activity, { phase: "responding", label: "responding" });
   activity = reduceRunActivity(activity, event(6, "extension.notification", {
     level: "info", message: "Kanban status",
   }), parent);
-  assert.deepEqual(activity, { phase: "tool", label: "tool bash" });
+  assert.deepEqual(activity, { phase: "responding", label: "responding" });
 
   const idle = snapshot({ execution: "idle", lastRun: "succeeded" });
   assert.deepEqual(reduceRunActivity(activityFromSnapshot(idle), event(7, "extension.notification", {
@@ -359,7 +370,7 @@ test("run activity covers compaction queue interaction abort failure and host lo
   activity = reduceRunActivity(activity, event(2, "compaction.completed", {
     operationId: "compact-1", automatic: true, willRetry: false,
   }), idle);
-  assert.deepEqual(activity, { phase: "idle", label: "compacted" });
+  assert.deepEqual(activity, { phase: "idle", label: "ready" });
   activity = reduceRunActivity(activity, event(2, "instance.state_changed", {
     reason: "compaction_completed", lifecycle: "active", execution: "running", compacting: false, lastRun: "never",
     pending: { steering: 0, followUp: 0, total: 0 }, activeCommandId: undefined, lastError: undefined,
@@ -374,7 +385,7 @@ test("run activity covers compaction queue interaction abort failure and host lo
   guardActivity = reduceRunActivity(guardActivity, event(2, "compaction.completed", {
     operationId: "guard-compaction", automatic: false, willRetry: false,
   }), running);
-  assert.deepEqual(guardActivity, { phase: "idle", label: "compacted" });
+  assert.deepEqual(guardActivity, { phase: "waiting", label: "waiting for model" });
   guardActivity = reduceRunActivity(guardActivity, event(2, "run.started", {
     operationId: "runtime-initiated",
   }), running);
@@ -382,21 +393,22 @@ test("run activity covers compaction queue interaction abort failure and host lo
   activity = reduceRunActivity(activity, event(2, "compaction.completed", {
     operationId: "compact-cancelled", automatic: false, willRetry: false, aborted: true,
   }), idle);
-  assert.deepEqual(activity, { phase: "idle", label: "compaction cancelled" });
+  assert.deepEqual(activity, { phase: "idle", label: "ready" });
 
   const pending = snapshot({ execution: "idle", pending: { steering: 0, followUp: 2, total: 2 } });
   activity = reduceRunActivity(activity, event(3, "compaction.completed", {
     operationId: "compact-collision", automatic: false, willRetry: false,
     error: "Provider wrote an entry, then said nothing to compact while closing",
   }), idle);
-  assert.deepEqual(activity, { phase: "error", label: "compaction failed" });
+  assert.deepEqual(activity, { phase: "idle", label: "ready" });
 
   activity = reduceRunActivity(activity, event(4, "queue.changed", { steering: 0, followUp: 2, total: 2 }), pending);
-  assert.deepEqual({ phase: activity.phase, label: activity.label }, { phase: "queued", label: "queued 2" });
+  assert.deepEqual({ phase: activity.phase, label: activity.label }, { phase: "idle", label: "ready" });
+  activity = { phase: "waiting", label: "waiting for model" };
   activity = reduceRunActivity(activity, event(5, "message.submitted", {
     operationId: "queued-op", messageId: "user-queued-op", role: "user", text: "consumed", delivery: "followUp", queueItemId: "queue-1",
   }), running);
-  assert.equal(activity.phase, "waiting");
+  assert.equal(activity.phase, "waiting", "queue consumption preserves model activity");
 
   activity = reduceRunActivity(activity, event(6, "interaction.requested", {
     interactionId: "interaction-1", method: "confirm", title: "Proceed?", timeoutAt: "2026-07-15T00:01:00.000Z",
@@ -411,14 +423,33 @@ test("run activity covers compaction queue interaction abort failure and host lo
   activity = reduceRunActivity(activity, event(8, "run.settled", {
     operationId: "op-1", result: "failed", error: "offline",
   }), snapshot({ execution: "failed", lastRun: "failed" }));
-  assert.equal(activity.phase, "idle");
+  assert.deepEqual(activity, { phase: "error", label: "run failed" });
   assert.deepEqual(
     activityFromSnapshot(snapshot({ lifecycle: "host_lost", execution: "unavailable" })),
     { phase: "disconnected", label: "host lost" },
   );
 });
 
-test("run activity distinguishes waiting thinking response tool retry and clears on settlement", () => {
+test("runtime-error state projection cannot regress authoritative Activity to ready", () => {
+  const failure = event(1, "instance.runtime_error", {
+    operationId: "replace-1", kind: "resume", error: "replacement failed",
+  });
+  let projected = projectSnapshot(snapshot(), failure);
+  let activity = reduceRunActivity(activityFromSnapshot(snapshot()), failure, projected);
+  assert.deepEqual(activity, { phase: "error", label: "runtime error" });
+
+  const state = event(2, "instance.state_changed", {
+    reason: "runtime_replacement_failed", lifecycle: "runtime_error", execution: "unavailable", compacting: false,
+    lastRun: "interrupted", pending: { steering: 0, followUp: 0, total: 0 }, activeCommandId: undefined,
+    lastError: "replacement failed",
+  });
+  projected = projectSnapshot(projected, state);
+  activity = reduceRunActivity(activity, state, projected);
+  assert.equal(projected.lifecycle, "runtime_error");
+  assert.deepEqual(activity, { phase: "error", label: "runtime error" });
+});
+
+test("run activity distinguishes model phases while tools remain conversation-only", () => {
   const running = snapshot();
   let activity = submittingActivity();
   activity = reduceRunActivity(activity, event(1, "command.accepted", {
@@ -443,11 +474,11 @@ test("run activity distinguishes waiting thinking response tool retry and clears
   activity = reduceRunActivity(activity, event(5, "tool.started", {
     toolCallId: "t-1", toolName: "read", args: {}, omittedFields: [],
   }), running);
-  assert.deepEqual({ phase: activity.phase, label: activity.label }, { phase: "tool", label: "tool read" });
+  assert.deepEqual({ phase: activity.phase, label: activity.label }, { phase: "responding", label: "responding" });
   activity = reduceRunActivity(activity, event(6, "message.completed", {
     messageId: "a-1", role: "assistant", content: [{ type: "tool_call", toolCallId: "t-1", toolName: "read", args: {} }],
   }), running);
-  assert.deepEqual({ phase: activity.phase, label: activity.label }, { phase: "tool", label: "tool read" });
+  assert.deepEqual({ phase: activity.phase, label: activity.label }, { phase: "waiting", label: "waiting for model" });
 
   activity = reduceRunActivity(activity, event(7, "tool.completed", {
     toolCallId: "t-1", toolName: "read", text: "done", isError: false, omittedFields: [],

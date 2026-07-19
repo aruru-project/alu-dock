@@ -1,6 +1,7 @@
 import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
 
 import type { RunActivityPhase } from "./run-activity.js";
+import { ALU_PALETTE, type AluPaletteName } from "./alu-palette.js";
 import { detectTerminalColorLevel, type TerminalColorLevel } from "./theme.js";
 
 const LARGE_OPEN = [
@@ -17,18 +18,6 @@ const LARGE_OPEN = [
 ] as const;
 
 const LARGE_BLINK = LARGE_OPEN.map((line, index) => index === 2 ? line.replaceAll("◆", "━") : line);
-
-const palette = {
-  hair: { rgb: [105, 66, 78], ansi256: 95, ansi16: 31 },
-  highlight: { rgb: [151, 98, 105], ansi256: 138, ansi16: 91 },
-  gold: { rgb: [246, 193, 71], ansi256: 221, ansi16: 93 },
-  skin: { rgb: [244, 216, 206], ansi256: 224, ansi16: 97 },
-  navy: { rgb: [108, 132, 205], ansi256: 104, ansi16: 94 },
-  pink: { rgb: [221, 126, 158], ansi256: 175, ansi16: 95 },
-  white: { rgb: [230, 225, 242], ansi256: 255, ansi16: 97 },
-} as const;
-
-type PaletteTone = keyof typeof palette;
 
 /** Static, protocol-free Alu asset. It never infers Host or fleet health. */
 export class AluHubBrand implements Component {
@@ -62,24 +51,23 @@ export function renderHubAlu(
 }
 
 export function renderWorkAlu(
-  phase: RunActivityPhase | "status",
+  phase: RunActivityPhase,
   frame = 0,
   level: TerminalColorLevel = detectTerminalColorLevel(),
   compact = false,
 ): string {
   if (compact) {
-    const mark = phase === "idle" || phase === "status" ? "·"
+    const mark = phase === "idle" ? "·"
       : phase === "error" || phase === "disconnected" ? "×"
-        : phase === "tool" ? "⌁" : frame % 2 === 0 ? "◆" : "◇";
+        : frame % 2 === 0 ? "◆" : "◇";
     return colorizeSealFace(`✿${mark}`, level);
   }
-  const face = phase === "idle" || phase === "status"
+  const face = phase === "idle"
     ? "✿(•ᴗ•)"
     : phase === "error" || phase === "disconnected"
       ? "✿(×﹏×)"
-      : phase === "tool" ? "✿(⌁ᴗ⌁)"
-        : phase === "compaction" ? `✿(${frame % 2 === 0 ? "◆" : "◇"}ᴗ${frame % 2 === 0 ? "◇" : "◆"})`
-          : `✿(${frame % 2 === 0 ? "◆" : "•"}_${frame % 2 === 0 ? "◆" : "•"})`;
+      : phase === "compaction" ? `✿(${frame % 2 === 0 ? "◆" : "◇"}ᴗ${frame % 2 === 0 ? "◇" : "◆"})`
+        : `✿(${frame % 2 === 0 ? "◆" : "•"}_${frame % 2 === 0 ? "◆" : "•"})`;
   return colorizeSealFace(face, level);
 }
 
@@ -110,9 +98,9 @@ function colorizeMascotLine(line: string, level: TerminalColorLevel): string {
   }).join("");
 }
 
-function color(text: string, tone: PaletteTone, level: TerminalColorLevel): string {
+function color(text: string, tone: AluPaletteName, level: TerminalColorLevel): string {
   if (level === "none" || text.length === 0) return text;
-  const selected = palette[tone];
+  const selected = ALU_PALETTE[tone];
   const codes = level === "truecolor"
     ? [38, 2, ...selected.rgb]
     : level === "ansi256" ? [38, 5, selected.ansi256] : [selected.ansi16];

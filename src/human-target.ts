@@ -31,7 +31,7 @@ export function resolveHumanTarget(
     return {
       kind: "not_found",
       target,
-      message: `No Dock instance matches TARGET ${quote(target)}. Run \`alu-dock list --all\` or open the Hub with \`alu-dock\`.`,
+      message: `No Dock instance matches TARGET ${quote(target)}. Run \`aludock list --all\` or open the Hub with \`aludock\`.`,
     };
   }
   const choices = matches.slice(0, 6).map((instance) => `${displayName(instance)} [${instance.id}]`).join(", ");

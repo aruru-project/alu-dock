@@ -64,6 +64,7 @@ import {
 import { projectJsonObject } from "../core/managed-instance.js";
 import { RuntimeModelNotFoundError, RuntimeSettingsWriteError, RuntimeUnknownToolError } from "../core/runtime-session.js";
 import { configurePiNetwork } from "./configure-pi-network.js";
+import { GitBranchObserver, type GitBranchObserverPort } from "./git-branch-observer.js";
 import { createPiExtensionUiContext } from "./pi-extension-ui-adapter.js";
 import { piToolResultNormalizerExtension } from "./pi-tool-result-normalizer.js";
 import {
@@ -109,6 +110,10 @@ export interface PiRuntimeHostOptions {
   isSessionFileDurable?: (path: string) => boolean;
   extensionUiBroker?: ExtensionUiBroker;
   uiContext?: ExtensionUIContext;
+  gitBranchObserverFactory?: (
+    cwd: string,
+    onChange: (branch: string | undefined) => void,
+  ) => Promise<GitBranchObserverPort>;
 }
 
 export interface CreatePiRuntimeHostOptions {
@@ -128,6 +133,7 @@ interface Binding {
   session: AgentSession;
   services: AgentSessionServices;
   unsubscribe: () => void;
+  gitBranchObserver?: GitBranchObserverPort;
   buffered: RuntimeEvent[];
   bufferEvents: boolean;
 }
@@ -196,6 +202,7 @@ export class PiRuntimeHost implements RuntimeSession {
   }
   get diagnostics(): readonly unknown[] { return this.options.runtime.diagnostics; }
   get modelFallbackMessage(): string | undefined { return this.options.runtime.modelFallbackMessage; }
+  getGitBranch(): string | undefined { return this.requireActive().gitBranchObserver?.branch; }
   currentSession(): AgentSession { return this.requireActive().session; }
 
   /** Flush startup events only after ManagedInstance has attached its stable subscriber. */
@@ -602,12 +609,14 @@ export class PiRuntimeHost implements RuntimeSession {
         await binding.session.reload({ beforeSessionStart: () => { seamCalls += 1; } });
         if (seamCalls !== 1) throw new Error(`Reload rebind seam ran ${seamCalls} times`);
         await this.options.commitReplacement?.({ operationId, kind: "reload", previousSessionFile, sessionFile: binding.session.sessionFile });
+        binding.bufferEvents = false;
         this.publishReplacement("reload", previousSessionFile, binding.session.sessionFile);
-        for (const event of buffered) this.publish(event);
+        this.publishReplacementBuffer(buffered);
         return { cancelled: false };
       } catch (error) {
         binding.token.active = false;
         binding.unsubscribe();
+        binding.gitBranchObserver?.dispose();
         this.active = undefined;
         await this.disposeRuntimeOnce().catch(() => {});
         this.unavailable = true;
@@ -705,9 +714,18 @@ export class PiRuntimeHost implements RuntimeSession {
         const event = { type: "dock_extension_error", error: boundedErrorMessage(error) };
         if (this.active === binding && !binding.bufferEvents) this.publish(event); else binding.buffered.push(event);
       } });
+      const publishBranch = (branch: string | undefined): void => {
+        if (!token.active) return;
+        const event: RuntimeEvent = { type: "dock_git_branch_changed", branch };
+        if (this.active === binding && !binding.bufferEvents) this.publish(event); else binding.buffered.push(event);
+      };
+      binding.gitBranchObserver = await (this.options.gitBranchObserverFactory
+        ? this.options.gitBranchObserverFactory(binding.services.cwd, publishBranch)
+        : GitBranchObserver.create(binding.services.cwd, publishBranch));
     } catch (error) {
       token.active = false;
       binding.unsubscribe();
+      binding.gitBranchObserver?.dispose();
       if (this.staged === binding) this.staged = undefined;
       throw error;
     }
@@ -731,7 +749,15 @@ export class PiRuntimeHost implements RuntimeSession {
     binding.buffered = [];
     binding.bufferEvents = false;
     this.publishReplacement(kind, previousSessionFile, binding.session.sessionFile);
-    for (const event of events) this.publish(event);
+    this.publishReplacementBuffer(events);
+  }
+
+  private publishReplacementBuffer(events: readonly RuntimeEvent[]): void {
+    for (const event of events) {
+      // The replacement event already carries the observer's latest cache.
+      // Replaying intermediate branch invalidations could regress the new generation.
+      if (event.type !== "dock_git_branch_changed") this.publish(event);
+    }
   }
 
   private publishReplacement(kind: ReplacementKind, previousSessionFile?: string, sessionFile?: string): void {
@@ -742,6 +768,7 @@ export class PiRuntimeHost implements RuntimeSession {
       sessionFile,
       cwd: this.active?.services.cwd,
       name: this.active?.session.sessionManager.getSessionName(),
+      gitBranch: this.active?.gitBranchObserver?.branch,
     });
   }
 
@@ -750,6 +777,7 @@ export class PiRuntimeHost implements RuntimeSession {
       if (!binding) continue;
       binding.token.active = false;
       binding.unsubscribe();
+      binding.gitBranchObserver?.dispose();
     }
     this.active = undefined;
     this.staged = undefined;

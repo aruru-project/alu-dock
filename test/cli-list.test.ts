@@ -12,7 +12,7 @@ import type { InstanceSnapshot } from "../src/core/managed-instance.js";
 test("human list has an actionable empty state", () => {
   assert.equal(
     renderHumanInstanceList([], 80),
-    "No Alu Dock instances.\nStart one: alu-dock new\n",
+    "No Alu Dock instances.\nStart one: aludock new\n",
   );
 });
 
@@ -26,7 +26,7 @@ test("human list default selection hides only stopped history and reports how to
   assert.equal(selected.hiddenStopped, 1);
   const output = renderHumanInstanceList(selected.instances, 80, { mode: "actionable", hiddenStopped: selected.hiddenStopped });
   assert.match(output, /Alu Dock actionable · 3 · 1 stopped hidden/u);
-  assert.match(output, /History: alu-dock list --all/u);
+  assert.match(output, /History: aludock list --all/u);
   assert.doesNotMatch(output, new RegExp(stopped.id.slice(0, 8), "u"));
 
   const empty = renderHumanInstanceList([], 43, { mode: "actionable", hiddenStopped: 25 });

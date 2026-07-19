@@ -4,15 +4,15 @@
 
 Alu Dock V0.1 正在开发中。它是本机单用户的受管 Pi 运行时工程底座：长期 Host 持有 runtime、任务实例和副作用，SSH TUI 等客户端通过结构化控制面观察与控制。
 
-能力真相以当前代码、类型和测试为准。当前裸 `alu-dock` 进入无 runtime 副作用、按 cwd 提供上下文的 Dock Hub；固定根菜单将 New、Continue、History、Pi Sessions 与 Leave 分层。Hub 在一次 alternate-screen 生命周期内呈现所有菜单，并只在菜单可见时启用 Hub click/wheel tracking；进入 Session Work 前先恢复 shell screen。Session Work 使用可流动 main buffer 与 terminal-native mouse，不提供 Alt+M 或 `/mouse` 模式。`-c`/`--continue` 显式执行 current-project smart-entry，选择最近的 active/reopenable 实例，没有则 New；显式 `new` 与 `attach TARGET` 直达 Session Work。磁盘 Pi sessions 通过独立 Resume/Adopt inventory 进入；显式 `open` 暂时保留旧 smart-entry。
+能力真相以当前代码、类型和测试为准。当前裸 `aludock` 进入无 runtime 副作用、按 cwd 提供上下文的 Dock Hub；固定根菜单将 New、Continue、History、Pi Sessions 与 Leave 分层。Hub 在一次 alternate-screen 生命周期内呈现所有菜单，并只在菜单可见时启用 Hub click/wheel tracking；进入 Session Work 前先恢复 shell screen。Session Work 使用可流动 main buffer 与 terminal-native mouse，不提供 Alt+M 或 `/mouse` 模式。`-c`/`--continue` 显式执行 current-project smart-entry，选择最近的 active/reopenable 实例，没有则 New；显式 `new` 与 `attach TARGET` 直达 Session Work。磁盘 Pi sessions 通过独立 Resume/Adopt inventory 进入；显式 `open` 暂时保留旧 smart-entry。
 
-V0.1 候选已具备响应式 Hub/Work 阿露资产、branch-aware `/tree` 与分层 Work activity，但仍未完成最终统一真人验收和正式版本签收；当前 dogfood rollout 不得写成 V0.1 已发布或已签收。
+V0.1 候选已具备响应式 Hub/Work 阿露资产、branch-aware `/tree` 与分层 Work activity，但仍未完成最终统一真人验收和正式版本签收；当前 Athena rollout 不得写成 V0.1 已发布或已签收。
 
 ## UI 视觉主题合同
 
-Alu Dock 的视觉身份只来自阿露原稿与既有阿露资产，不使用通用“科技终端”模板。canonical terminal palette 定义在 `src/tui/alu-mascot.ts`：发色 `#69424e`、高光 `#976269`、金色 `#f6c147`、肤色 `#f4d8ce`、蓝紫 `#6c84cd`、粉色 `#dd7e9e`、暖白 `#e6e1f2`。整体应是暖梅紫/玫瑰/金色与偏紫的靛蓝/薰衣草色；蓝色必须偏紫、偏靛，不得滑向 cyan。
+Alu Dock 的视觉身份只来自阿露原稿与既有阿露资产，不使用通用“科技终端”模板。canonical terminal palette 定义在 `src/tui/alu-palette.ts`：发色 `#69424e`、高光 `#976269`、金色 `#f6c147`、肤色 `#f4d8ce`、蓝紫 `#6c84cd`、粉色 `#dd7e9e`、暖白 `#e6e1f2`。整体应是暖梅紫/玫瑰/金色与偏紫的靛蓝/薰衣草色；蓝色必须偏紫、偏靛，不得滑向 cyan。
 
-未经用户明确批准，禁止新增青、青绿、turquoise、teal、emerald 或霓虹科技蓝，尤其不得将它们用作 accent、success、selection 或默认交互色。成功可由符号、文字和层级表达，不需要套用绿色。`src/tui/theme.ts` 必须复用/派生 canonical palette，不得维护另一套任意色板；当前不合约的青/青绿颜色属于待移除实现，不构成产品事实。
+未经用户明确批准，禁止新增青、青绿、turquoise、teal、emerald 或霓虹科技蓝，尤其不得将它们用作 accent、success、selection 或默认交互色。成功可由符号、文字和层级表达，不需要套用绿色。`src/tui/theme.ts` 必须复用/派生 canonical palette，不得维护另一套任意色板。
 
 对齐 stock Pi 只对齐成熟的信息架构、conversation 语义层级、分组、留白和折叠行为，不复制 Pi 配色，也不得把 assistant、thinking、compaction、tool execution/result 降维成同质的单行遥测日志。终端背景仍归用户所有；局部 surface 只能使用 canonical palette 派生的低亮度暖色或蓝紫色调。任何新颜色或全局视觉方向都必须先取得用户明确确认。
 
@@ -48,10 +48,10 @@ cli / Hub / Session Work tui
 | Protocol、Host dispatch、DockClient、CLI、catalog | [`docs/agent_maps/control.md`](docs/agent_maps/control.md) |
 | ManagedInstance、Pi adapter、session replacement、settings、Extension UI | [`docs/agent_maps/runtime.md`](docs/agent_maps/runtime.md) |
 | 当前 interactive flow、目标 Hub、Session Work、history/tree/queue/activity | [`docs/agent_maps/tui.md`](docs/agent_maps/tui.md) |
-| systemd、managed startup、durable lifecycle、dogfood release | [`docs/agent_maps/deployment.md`](docs/agent_maps/deployment.md) |
+| systemd、managed startup、durable lifecycle、Athena release | [`docs/agent_maps/deployment.md`](docs/agent_maps/deployment.md) |
 | 测试选择与门禁 | [`docs/qa.md`](docs/qa.md) |
 
-Managed 发布或运维另读 [`docs/dogfood-deployment.md`](docs/dogfood-deployment.md)。从对应 map 列出的入口、直接依赖与测试开始；只有这些材料不足时才扩大读取范围。
+Managed 发布或运维另读 [`docs/athena-deployment.md`](docs/athena-deployment.md)。从对应 map 列出的入口、直接依赖与测试开始；只有这些材料不足时才扩大读取范围。
 
 ## 跨模块核心合同
 
@@ -71,4 +71,4 @@ Managed 发布或运维另读 [`docs/dogfood-deployment.md`](docs/dogfood-deploy
 
 按 [`docs/qa.md`](docs/qa.md) 选择与改动匹配的最窄检查；Markdown-only 改动的入口是 `git diff --check` 与链接/路径核对。
 
-Managed service 操作和 dogfood 发布合同见 [`docs/dogfood-deployment.md`](docs/dogfood-deployment.md)。未经明确授权，不运行真实 Pi/model smoke，不部署、不切换 release，也不重启 service。
+Managed service 操作和 Athena 发布合同见 [`docs/athena-deployment.md`](docs/athena-deployment.md)。未经明确授权，不运行真实 Pi/model smoke，不部署、不切换 release，也不重启 service。

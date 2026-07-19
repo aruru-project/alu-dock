@@ -1,5 +1,7 @@
 import type { EditorTheme, MarkdownTheme, SelectListTheme } from "@earendil-works/pi-tui";
 
+import { ALU_PALETTE } from "./alu-palette.js";
+
 export type TerminalColorLevel = "none" | "ansi16" | "ansi256" | "truecolor";
 
 interface Tone {
@@ -15,23 +17,46 @@ interface Decoration {
   backgroundAtAnsi16?: boolean;
 }
 
-// Night Console assumes the user's terminal already owns a dark background.
-// Only local transcript surfaces receive a background; Dock never paints the screen.
+function mixTone(left: Tone, right: Tone, ratio: number, ansi256: number, ansi16: number): Tone {
+  const mix = (index: 0 | 1 | 2): number => Math.round(left.rgb[index] * (1 - ratio) + right.rgb[index] * ratio);
+  return { rgb: [mix(0), mix(1), mix(2)], ansi256, ansi16 };
+}
+
+function shadeTone(source: Tone, factor: number, ansi256: number, ansi16: number): Tone {
+  return {
+    rgb: [
+      Math.round(source.rgb[0] * factor),
+      Math.round(source.rgb[1] * factor),
+      Math.round(source.rgb[2] * factor),
+    ],
+    ansi256,
+    ansi16,
+  };
+}
+
+// The terminal background remains user-owned. Every semantic color and local
+// surface is either canonical or a deterministic mix/shade of canonical Alu.
+const plumIndigo = mixTone(ALU_PALETTE.hair, ALU_PALETTE.navy, 0.5, 60, 35);
+const warmError = mixTone(ALU_PALETTE.hair, ALU_PALETTE.pink, 0.25, 96, 31);
+const warmRunning = mixTone(ALU_PALETTE.hair, ALU_PALETTE.gold, 0.18, 94, 33);
 const tones = {
-  text: { rgb: [214, 225, 240], ansi256: 253, ansi16: 97 },
-  muted: { rgb: [127, 142, 163], ansi256: 102, ansi16: 90 },
-  faint: { rgb: [83, 97, 118], ansi256: 60, ansi16: 90 },
-  accent: { rgb: [125, 211, 252], ansi256: 117, ansi16: 96 },
-  user: { rgb: [147, 197, 253], ansi256: 111, ansi16: 94 },
-  thinking: { rgb: [196, 181, 253], ansi256: 183, ansi16: 95 },
-  running: { rgb: [129, 140, 248], ansi256: 105, ansi16: 94 },
-  success: { rgb: [94, 234, 212], ansi256: 80, ansi16: 96 },
-  queue: { rgb: [242, 200, 121], ansi256: 222, ansi16: 93 },
-  warning: { rgb: [251, 191, 36], ansi256: 214, ansi16: 93 },
-  error: { rgb: [251, 113, 133], ansi256: 204, ansi16: 91 },
-  userSurface: { rgb: [17, 28, 48], ansi256: 234, ansi16: 34 },
-  toolSurface: { rgb: [11, 18, 32], ansi256: 233, ansi16: 30 },
-  selection: { rgb: [22, 78, 99], ansi256: 23, ansi16: 34 },
+  text: ALU_PALETTE.white,
+  muted: mixTone(ALU_PALETTE.hair, ALU_PALETTE.white, 0.55, 145, 37),
+  faint: ALU_PALETTE.highlight,
+  accent: ALU_PALETTE.pink,
+  user: ALU_PALETTE.navy,
+  thinking: mixTone(ALU_PALETTE.navy, ALU_PALETTE.white, 0.5, 147, 95),
+  running: ALU_PALETTE.gold,
+  success: ALU_PALETTE.white,
+  queue: ALU_PALETTE.highlight,
+  warning: ALU_PALETTE.gold,
+  error: ALU_PALETTE.pink,
+  userSurface: shadeTone(plumIndigo, 0.33, 235, 34),
+  toolSurface: shadeTone(ALU_PALETTE.hair, 0.26, 234, 30),
+  toolRunningSurface: shadeTone(warmRunning, 0.34, 237, 33),
+  toolErrorSurface: shadeTone(warmError, 0.38, 236, 31),
+  compactionSurface: shadeTone(plumIndigo, 0.4, 236, 35),
+  selection: ALU_PALETTE.navy,
 } satisfies Record<string, Tone>;
 
 export function detectTerminalColorLevel(
@@ -45,15 +70,20 @@ export function detectTerminalColorLevel(
   return "ansi16";
 }
 
-export function createNightConsolePaint(level: TerminalColorLevel) {
+export function createAluPaint(level: TerminalColorLevel) {
   const decorate = (text: string, decoration: Decoration): string => {
     if (level === "none" || text.length === 0) return text;
     const codes = [...(decoration.attributes ?? [])];
     if (decoration.foreground) codes.push(...foregroundCodes(level, decoration.foreground));
-    if (decoration.background && (level !== "ansi16" || decoration.backgroundAtAnsi16 === true)) {
-      codes.push(...backgroundCodes(level, decoration.background));
-    }
-    return codes.length === 0 ? text : `\u001b[${codes.join(";")}m${text}\u001b[0m`;
+    const backgroundEnabled = decoration.background !== undefined
+      && (level !== "ansi16" || decoration.backgroundAtAnsi16 === true);
+    if (decoration.background && backgroundEnabled) codes.push(...backgroundCodes(level, decoration.background));
+    if (codes.length === 0) return text;
+    const opening = `\u001b[${codes.join(";")}m`;
+    // Nested Markdown/semantic painters reset SGR. Re-apply a local surface
+    // after each reset so its background reaches the row padding as one block.
+    const content = backgroundEnabled ? text.replaceAll("\u001b[0m", `\u001b[0m${opening}`) : text;
+    return `${opening}${content}\u001b[0m`;
   };
 
   return {
@@ -76,6 +106,18 @@ export function createNightConsolePaint(level: TerminalColorLevel) {
     toolSurface: (text: string): string => decorate(text, {
       foreground: tones.muted,
       background: tones.toolSurface,
+    }),
+    toolRunningSurface: (text: string): string => decorate(text, {
+      foreground: tones.text,
+      background: tones.toolRunningSurface,
+    }),
+    toolErrorSurface: (text: string): string => decorate(text, {
+      foreground: tones.text,
+      background: tones.toolErrorSurface,
+    }),
+    compactionSurface: (text: string): string => decorate(text, {
+      foreground: tones.text,
+      background: tones.compactionSurface,
     }),
     selection: (text: string): string => decorate(text, {
       foreground: tones.text,
@@ -105,7 +147,7 @@ function backgroundCodes(level: Exclude<TerminalColorLevel, "none">, tone: Tone)
   return [40];
 }
 
-export const paint = createNightConsolePaint(detectTerminalColorLevel());
+export const paint = createAluPaint(detectTerminalColorLevel());
 
 export const markdownTheme: MarkdownTheme = {
   heading: (text) => paint.bold(paint.accent(text)),

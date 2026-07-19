@@ -58,10 +58,11 @@ export class DockConversation implements Component {
   private currentAssistant: ConversationEntry | undefined;
   private currentThinking: ConversationEntry | undefined;
   private lastExtensionInfo: ConversationEntry | undefined;
+  private lastLocalStatus: ConversationEntry | undefined;
   private hideThinking = false;
   private toolsExpanded = false;
   private readonly toolExpansionOverrides = new Map<string, boolean>();
-  private readonly expandedCompactionSummaries = new Set<string>();
+  private readonly compactionExpansionOverrides = new Map<string, boolean>();
   private lastToggledDetailKey: string | undefined;
   private outputPadding = 1;
   private revisionValue = 0;
@@ -75,10 +76,11 @@ export class DockConversation implements Component {
     this.currentAssistant = undefined;
     this.currentThinking = undefined;
     this.lastExtensionInfo = undefined;
+    this.lastLocalStatus = undefined;
     this.historyDisplayCount = 0;
     this.liveEntrySequence = 0;
     this.toolExpansionOverrides.clear();
-    this.expandedCompactionSummaries.clear();
+    this.compactionExpansionOverrides.clear();
     this.lastToggledDetailKey = undefined;
     this.markLayoutChanged();
   }
@@ -91,14 +93,15 @@ export class DockConversation implements Component {
     for (const toolCallId of this.toolExpansionOverrides.keys()) {
       if (!this.entries.some((entry) => entry.toolCallId === toolCallId)) this.toolExpansionOverrides.delete(toolCallId);
     }
-    for (const entryKey of this.expandedCompactionSummaries) {
-      if (!this.entries.some((entry) => entry.key === entryKey)) this.expandedCompactionSummaries.delete(entryKey);
+    for (const entryKey of this.compactionExpansionOverrides.keys()) {
+      if (!this.entries.some((entry) => entry.key === entryKey)) this.compactionExpansionOverrides.delete(entryKey);
     }
     if (this.lastToggledDetailKey && !this.entries.some((entry) => entry.key === this.lastToggledDetailKey)) {
       this.lastToggledDetailKey = undefined;
     }
     const retainedEntries = new Set(this.entries);
     if (this.lastExtensionInfo && !retainedEntries.has(this.lastExtensionInfo)) this.lastExtensionInfo = undefined;
+    if (this.lastLocalStatus && !retainedEntries.has(this.lastLocalStatus)) this.lastLocalStatus = undefined;
     this.markLayoutChanged();
   }
 
@@ -339,6 +342,19 @@ export class DockConversation implements Component {
     this.add(error ? "error" : "system", text);
   }
 
+  /** Pi-style chat-tail status: consecutive local feedback replaces in place. */
+  addStatus(text: string): void {
+    const message = safeTerminalText(text);
+    const previous = this.lastLocalStatus;
+    if (previous && this.entries.at(-1) === previous) {
+      previous.text = message;
+      this.touchEntry(previous);
+      this.markOutputChanged();
+      return;
+    }
+    this.lastLocalStatus = this.add("status", message);
+  }
+
   setHideThinking(hidden: boolean): void {
     if (hidden === this.hideThinking) return;
     this.hideThinking = hidden;
@@ -374,7 +390,8 @@ export class DockConversation implements Component {
   }
   toggleLatestDetailExpanded(): { expanded: boolean; name: string } | undefined {
     const reversed = [...this.entries].reverse();
-    // A persisted context summary must remain reachable even after later tool use.
+    // Compaction is otherwise unreachable once a later tool appears because
+    // Work deliberately has no transcript-row focus cursor.
     const entry = reversed.find((candidate) => candidate.summaryKind === "compaction")
       ?? reversed.find((candidate) => candidate.toolCallId !== undefined);
     if (!entry) return undefined;
@@ -385,11 +402,10 @@ export class DockConversation implements Component {
       this.markLayoutChanged();
       return { expanded, name: entry.toolName ?? "tool" };
     }
-    const expanded = !this.expandedCompactionSummaries.has(entry.key);
-    if (expanded) this.expandedCompactionSummaries.add(entry.key);
-    else this.expandedCompactionSummaries.delete(entry.key);
+    const expanded = !this.isCompactionExpanded(entry);
+    this.compactionExpansionOverrides.set(entry.key, expanded);
     this.markLayoutChanged();
-    return { expanded, name: "context summary" };
+    return { expanded, name: "compaction" };
   }
   areToolsExpanded(): boolean { return this.toolsExpanded; }
   invalidate(): void {
@@ -432,7 +448,7 @@ export class DockConversation implements Component {
     return entry.toolCallId !== undefined
       ? this.isToolExpanded(entry)
       : entry.summaryKind === "compaction"
-        ? this.expandedCompactionSummaries.has(entry.key)
+        ? this.isCompactionExpanded(entry)
         : true;
   }
 
@@ -443,31 +459,21 @@ export class DockConversation implements Component {
 
     let lines: string[];
     if (entry.toolCallId) {
-      const header = renderToolHeader(entry, width, expanded);
-      if (!expanded) {
-        lines = [header];
-      } else if (entry.diffText) {
+      const content: string[] = [renderToolHeader(entry, width)];
+      if (expanded && entry.diffText) {
         const marker = "\nresult\n";
         const markerIndex = entry.text.indexOf(marker);
         const detailText = markerIndex >= 0 ? entry.text.slice(0, markerIndex) : entry.text.split("\n")[0] ?? "";
         const details = detailText.split("\n").slice(1).join("\n");
-        lines = [
-          header,
-          ...renderToolDetails(details, width, entry.toolState),
-          ...renderDockDiff(entry.diffText).map((line) => renderToolDetailLine(line, width, entry.toolState, false)),
-        ];
-      } else {
+        content.push(...renderToolDetails(details, width));
+        content.push(...renderDockDiff(entry.diffText).map((line) => `  ${line}`));
+      } else if (expanded) {
         const details = entry.text.split("\n").slice(1).join("\n");
-        lines = [header, ...renderToolDetails(details, width, entry.toolState)];
+        content.push(...renderToolDetails(details, width));
       }
+      lines = renderToolSurface(content, width, entry.toolState);
     } else if (entry.summaryKind === "compaction") {
-      const header = renderCompactionSummaryHeader(entry.text, width, expanded);
-      if (!expanded) {
-        lines = [header];
-      } else {
-        const markdown = new Markdown(entry.text.length > 0 ? entry.text : "…", 0, 0, markdownTheme);
-        lines = [header, ...markdown.render(width)];
-      }
+      lines = renderCompactionSummary(entry.text, width, expanded);
     } else if (entry.kind === "user") {
       lines = renderUserSurface(entry.text.length > 0 ? entry.text : "…", width);
     } else if (entry.kind === "assistant" || entry.kind === "thinking") {
@@ -482,7 +488,7 @@ export class DockConversation implements Component {
       );
       const content = markdown.render(innerWidth);
       lines = entry.kind === "thinking"
-        ? content.map((line) => `${paint.thinking("│")} ${line}`)
+        ? content.map((line) => `  ${paint.thinking(line)}`)
         : content;
     } else if (entry.kind === "error") {
       lines = renderNotice(entry.text.length > 0 ? entry.text : "Unknown error", width, "error");
@@ -514,14 +520,26 @@ export class DockConversation implements Component {
     };
 
     for (const source of entries) {
-      const thinking = contentText(source.content, "thinking");
       const text = contentText(source.content, "text");
       if (source.role === "user") {
         addProjected(source, "user", text ?? historyOmissions(source));
       } else if (source.role === "assistant") {
-        if (thinking) addProjected(source, "thinking", thinking);
-        if (text) addProjected(source, "assistant", text);
+        let visibleBlock = false;
         for (const block of source.content) {
+          if (block.type === "thinking") {
+            if (block.text.length > 0) {
+              addProjected(source, "thinking", block.text);
+              visibleBlock = true;
+            }
+            continue;
+          }
+          if (block.type === "text") {
+            if (block.text.length > 0) {
+              addProjected(source, "assistant", block.text);
+              visibleBlock = true;
+            }
+            continue;
+          }
           if (block.type !== "tool_call") continue;
           const toolEntry = addProjected(source, "tool", "");
           toolEntry.toolCallId = block.toolCallId;
@@ -535,7 +553,9 @@ export class DockConversation implements Component {
           };
           projectedTools.set(block.toolCallId, tool);
           projectToolState(tool, "done");
+          visibleBlock = true;
         }
+        if (!visibleBlock && !source.error) addProjected(source, "assistant", historyOmissions(source));
         if (source.error) addProjected(source, "error", source.error);
       } else if (source.role === "tool") {
         for (const block of source.content) {
@@ -613,6 +633,10 @@ export class DockConversation implements Component {
     return this.toolExpansionOverrides.get(entry.toolCallId) ?? this.toolsExpanded;
   }
 
+  private isCompactionExpanded(entry: ConversationEntry): boolean {
+    return this.compactionExpansionOverrides.get(entry.key) ?? false;
+  }
+
   private add(kind: EntryKind, text: string, complete = true): ConversationEntry {
     const entry = this.createEntry(`live:${++this.liveEntrySequence}`, kind, text, complete);
     this.entries.push(entry);
@@ -654,7 +678,7 @@ function projectToolState(tool: ToolProjection, state: ToolState): void {
 
 export class DockActivityLine implements Component {
   private label = "ready";
-  private phase: RunActivityState["phase"] | "status" = "idle";
+  private phase: RunActivityState["phase"] = "idle";
   private animationFrame = 0;
   private animationListener: (() => void) | undefined;
 
@@ -663,12 +687,11 @@ export class DockActivityLine implements Component {
     listener?.();
   }
 
-  setActivity(activity: string | RunActivityState): void {
-    const label = safeTerminalLine(typeof activity === "string" ? activity : activity.label);
-    const nextPhase = typeof activity === "string" ? inferActivityPhase(label) : activity.phase;
-    if (nextPhase !== this.phase) this.animationFrame = 0;
+  setActivity(activity: RunActivityState): void {
+    const label = safeTerminalLine(activity.label);
+    if (activity.phase !== this.phase) this.animationFrame = 0;
     this.label = label;
-    this.phase = nextPhase;
+    this.phase = activity.phase;
     this.animationListener?.();
   }
 
@@ -700,6 +723,7 @@ export class DockWorkHeader implements Component {
     const snapshot = this.snapshot();
     const name = safeTerminalLine(snapshot.name || "Unnamed session");
     const cwd = safeTerminalLine(snapshot.cwd);
+    const branch = snapshot.gitBranch === undefined ? undefined : safeTerminalLine(snapshot.gitBranch);
     const provider = safeTerminalLine(snapshot.executor.model?.provider ?? "");
     const modelId = safeTerminalLine(snapshot.executor.model?.id ?? "no model");
     const model = provider.length > 0 ? `${provider}/${modelId}` : modelId;
@@ -710,8 +734,9 @@ export class DockWorkHeader implements Component {
     return [fitOpposedLine(
       boundedWidth,
       paint.bold(paint.primary(name)),
-      paint.muted(cwd),
+      cwd,
       right,
+      branch,
     )];
   }
 }
@@ -752,51 +777,57 @@ function renderUserSurface(text: string, width: number): string[] {
   });
 }
 
-function renderCompactionSummaryHeader(text: string, width: number, expanded: boolean): string {
-  const preview = text.replace(/[\r\n\t]+/gu, " ").replace(/\s+/gu, " ").trim();
-  const title = paint.thinking("◆ Context summary");
-  const hint = paint.faint(expanded ? "Alt+O fold" : "Alt+O detail");
-  return truncateToWidth(
-    expanded || preview.length === 0
-      ? `${title}${paint.faint(" · ")}${hint}`
-      : `${title}${paint.faint(" · ")}${preview}${paint.faint(" · ")}${hint}`,
-    width,
-  );
+function renderCompactionSummary(text: string, width: number, expanded: boolean): string[] {
+  const bodyWidth = Math.max(1, width - 2);
+  const lines = [
+    paint.bold(paint.warning(expanded ? "[compaction · expanded]" : "[compaction]")),
+    "",
+  ];
+  if (!expanded) {
+    lines.push(...wrapPlainText("Earlier conversation was compacted into this summary.", bodyWidth));
+    lines.push(...wrapPlainText("Alt+O expands it; messages below are the retained context.", bodyWidth).map(paint.muted));
+  } else {
+    lines.push(paint.muted("Alt+O collapse"), "");
+    const markdown = new Markdown(text.length > 0 ? text : "Summary unavailable", 0, 0, markdownTheme);
+    lines.push(...markdown.render(bodyWidth));
+  }
+  return renderSemanticSurface(lines, width, paint.compactionSurface);
 }
 
-function renderToolHeader(entry: ConversationEntry, width: number, expanded: boolean): string {
+function renderToolHeader(entry: ConversationEntry, width: number): string {
   const state = entry.toolState ?? (entry.complete ? "done" : "running");
   const icon = state === "failed" ? "×" : state === "done" ? "✓" : "◆";
-  const title = toolStatePainter(state)(`${icon} ${entry.toolName ?? "tool"} ${state}`);
-  const hint = expanded ? "Alt+O fold" : "Alt+O detail";
-  const segments = [title];
-  if (entry.toolSummary) segments.push(paint.muted(entry.toolSummary));
+  const segments = [toolStatePainter(state)(`${icon} ${entry.toolName ?? "tool"}`)];
+  if (entry.toolSummary) segments.push(paint.primary(entry.toolSummary));
   if (entry.toolErrorSummary) segments.push(paint.error(entry.toolErrorSummary));
-  segments.push(paint.faint(hint));
-  return truncateToWidth(segments.join(paint.faint(" · ")), width);
+  return truncateToWidth(segments.join(paint.faint(" · ")), Math.max(1, width - 2));
 }
 
-function renderToolDetails(text: string, width: number, state: ToolState | undefined): string[] {
+function renderToolDetails(text: string, width: number): string[] {
   if (text.length === 0) return [];
-  const bodyWidth = Math.max(1, width - 2);
-  return text.split("\n").flatMap((sourceLine) => {
-    const wrapped = wrapTextWithAnsi(sourceLine || " ", bodyWidth);
-    return wrapped.map((line, index) => renderToolDetailLine(line, width, state, true, index > 0));
-  });
+  const bodyWidth = Math.max(1, width - 4);
+  return text.split("\n").flatMap((sourceLine) => (
+    wrapTextWithAnsi(sourceLine || " ", bodyWidth).map((line) => `  ${line}`)
+  ));
 }
 
-function renderToolDetailLine(
-  line: string,
+function renderToolSurface(lines: string[], width: number, state: ToolState | undefined): string[] {
+  const painter = state === "failed"
+    ? paint.toolErrorSurface
+    : state === "running" || state === undefined
+      ? paint.toolRunningSurface
+      : paint.toolSurface;
+  return renderSemanticSurface(lines, width, painter);
+}
+
+function renderSemanticSurface(
+  lines: readonly string[],
   width: number,
-  state: ToolState | undefined,
-  surface: boolean,
-  softContinuation = false,
-): string {
-  if (width < 3) return truncateToWidth(line, width);
-  const bodyWidth = width - 2;
-  const body = truncateToWidth(line || " ", bodyWidth);
-  const projected = surface ? paint.toolSurface(padToVisibleWidth(body, bodyWidth)) : body;
-  return `${toolStatePainter(state)(softContinuation ? "┆" : "│")} ${projected}`;
+  painter: (text: string) => string,
+): string[] {
+  const boundedWidth = Math.max(1, width);
+  if (boundedWidth < 3) return lines.map((line) => painter(truncateToWidth(line, boundedWidth)));
+  return lines.map((line) => painter(padToVisibleWidth(` ${line}`, boundedWidth)));
 }
 
 function renderNotice(text: string, width: number, tone: "info" | "warning" | "error"): string[] {
@@ -825,7 +856,7 @@ function toolStatePainter(state: ToolState | undefined): (text: string) => strin
   return paint.running;
 }
 
-function fitOpposedLine(width: number, name: string, cwd: string, right: string): string {
+function fitOpposedLine(width: number, name: string, cwd: string, right: string, branch?: string): string {
   const boundedWidth = Math.max(1, width);
   if (boundedWidth <= 4) return truncateToWidth(name, boundedWidth);
   const innerWidth = boundedWidth - 2;
@@ -835,12 +866,36 @@ function fitOpposedLine(width: number, name: string, cwd: string, right: string)
   const separator = paint.faint(" · ");
   const leftContentWidth = Math.max(1, leftWidth - visibleWidth(separator));
   const minimumNameWidth = Math.min(12, Math.max(4, Math.floor(leftContentWidth * 0.4)));
-  const cwdWidth = Math.min(visibleWidth(cwd), Math.max(1, leftContentWidth - minimumNameWidth));
+  const workspaceWidth = visibleWidth(cwd) + (branch === undefined ? 0 : visibleWidth(branch) + 3);
+  const cwdWidth = Math.min(workspaceWidth, Math.max(1, leftContentWidth - minimumNameWidth));
   const nameWidth = Math.max(1, leftContentWidth - cwdWidth);
-  const fittedLeft = `${truncateToWidth(name, nameWidth)}${separator}${truncateToWidth(cwd, cwdWidth)}`;
+  const fittedLeft = `${truncateToWidth(name, nameWidth)}${separator}${fitWorkspaceContext(cwd, branch, cwdWidth)}`;
   const fittedRight = truncateToWidth(right, rightWidth);
   const spacing = Math.max(1, innerWidth - visibleWidth(fittedLeft) - visibleWidth(fittedRight));
   return truncateToWidth(` ${fittedLeft}${" ".repeat(spacing)}${fittedRight}`, boundedWidth);
+}
+
+function fitWorkspaceContext(cwd: string, branch: string | undefined, width: number): string {
+  const boundedWidth = Math.max(1, width);
+  if (branch === undefined) return paint.muted(truncateToWidth(cwd, boundedWidth));
+  const suffix = `(${branch})`;
+  if (visibleWidth(suffix) >= boundedWidth) return paint.accent(truncateToWidth(suffix, boundedWidth));
+  const pathWidth = boundedWidth - visibleWidth(suffix) - 1;
+  return `${paint.muted(truncateFromLeft(cwd, pathWidth))}${paint.faint(" ")}${paint.accent(suffix)}`;
+}
+
+function truncateFromLeft(text: string, width: number): string {
+  const boundedWidth = Math.max(1, width);
+  if (visibleWidth(text) <= boundedWidth) return text;
+  const characters = [...text];
+  let low = 0;
+  let high = characters.length;
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (visibleWidth(`…${characters.slice(middle).join("")}`) <= boundedWidth) high = middle;
+    else low = middle + 1;
+  }
+  return `…${characters.slice(low).join("")}`;
 }
 
 function fitFooterSegments(width: number, segments: readonly string[]): string {
@@ -869,50 +924,31 @@ function formatMetricSegments(snapshot: InstanceSnapshot): string[] {
   ];
 }
 
-function inferActivityPhase(label: string): RunActivityState["phase"] | "status" {
-  const normalized = label.toLowerCase();
-  if (/host|disconnect|closed|stopped/u.test(normalized)) return "disconnected";
-  if (/error|failed|unavailable/u.test(normalized)) return "error";
-  if (/abort|stopping/u.test(normalized)) return "aborting";
-  if (/queue/u.test(normalized)) return "queued";
-  if (/tool/u.test(normalized)) return "tool";
-  if (/think/u.test(normalized)) return "thinking";
-  if (/respond|stream/u.test(normalized)) return "responding";
-  if (/retry/u.test(normalized)) return "retry";
-  if (/compact/u.test(normalized)) return "compaction";
-  if (/submit/u.test(normalized)) return "submitting";
-  if (/wait/u.test(normalized)) return "waiting";
-  if (/ready|idle/u.test(normalized)) return "idle";
-  return "status";
-}
-
 const ACTIVITY_FRAMES = ["◐", "◓", "◑", "◒"] as const;
 
-function isAnimatedActivityPhase(phase: RunActivityState["phase"] | "status"): boolean {
+function isAnimatedActivityPhase(phase: RunActivityState["phase"]): boolean {
   return phase === "submitting"
     || phase === "waiting"
     || phase === "thinking"
     || phase === "responding"
-    || phase === "tool"
     || phase === "retry"
     || phase === "compaction"
     || phase === "aborting";
 }
 
-function activitySymbolFor(phase: RunActivityState["phase"] | "status", frame: number): string {
+function activitySymbolFor(phase: RunActivityState["phase"], frame: number): string {
   if (isAnimatedActivityPhase(phase)) return ACTIVITY_FRAMES[frame % ACTIVITY_FRAMES.length] ?? ACTIVITY_FRAMES[0];
   if (phase === "idle") return "○";
-  if (phase === "queued") return "◇";
   if (phase === "interaction") return "?";
   if (phase === "error" || phase === "disconnected") return "×";
   return "●";
 }
 
-function activityPainter(phase: RunActivityState["phase"] | "status"): (text: string) => string {
+function activityPainter(phase: RunActivityState["phase"]): (text: string) => string {
   if (phase === "error" || phase === "disconnected") return paint.error;
-  if (phase === "queued" || phase === "interaction") return paint.queue;
+  if (phase === "interaction") return paint.queue;
   if (phase === "thinking") return paint.thinking;
-  if (phase === "idle" || phase === "status") return paint.muted;
+  if (phase === "idle") return paint.muted;
   return paint.running;
 }
 

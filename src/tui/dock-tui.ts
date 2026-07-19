@@ -33,7 +33,6 @@ import {
   activityFromReplay,
   activityFromSnapshot,
   disconnectedActivity,
-  errorActivity,
   reduceRunActivity,
   submittingActivity,
 } from "./run-activity.js";
@@ -452,7 +451,8 @@ export async function runDockTui(
     }
     if (text === "/stop") {
       editor.disableSubmit = true;
-      activity.setActivity("stopping");
+      runActivity = { phase: "aborting", label: "stopping" };
+      activity.setActivity(runActivity);
       tui.requestRender();
       try {
         const result = await client.stop(instance.id);
@@ -485,10 +485,11 @@ export async function runDockTui(
   async function sendPrompt(message: string, delivery: DeliveryMode): Promise<void> {
     editor.disableSubmit = true;
     const submitting = submittingActivity();
-    runActivity = submitting;
+    const projectSubmitting = runActivity.phase === "idle" && instance.execution !== "running";
+    if (projectSubmitting) runActivity = submitting;
     submittingFeedbackVisible = false;
     const feedbackTimer = setTimeout(() => {
-      if (exiting || runActivity !== submitting) return;
+      if (exiting || !projectSubmitting || runActivity !== submitting) return;
       submittingFeedbackVisible = true;
       activity.setActivity(submitting);
       tui.requestRender();
@@ -498,12 +499,14 @@ export async function runDockTui(
       const result = await client.prompt(instance.id, message, delivery);
       instance = result.instance;
       status.update(instance);
+      // A successful admission receipt is not a model run. The stream's
+      // run.started or command.handled event alone closes submitting.
+    } catch (error) {
+      showError(error);
       if (runActivity === submitting) {
         runActivity = activityFromSnapshot(instance);
         activity.setActivity(runActivity);
       }
-    } catch (error) {
-      showError(error);
     } finally {
       clearTimeout(feedbackTimer);
       submittingFeedbackVisible = false;
@@ -519,9 +522,7 @@ export async function runDockTui(
 
   async function restoreQueue(): Promise<boolean> {
     editor.disableSubmit = true;
-    runActivity = { phase: "queued", label: "restoring queued messages" };
-    activity.setActivity(runActivity);
-    tui.requestRender();
+    showStatus("restoring queued messages");
     try {
       const result = await client.dequeue(instance.id);
       instance = result.instance;
@@ -531,17 +532,11 @@ export async function runDockTui(
       if (result.receipt.inFlight.length > 0) {
         const count = result.receipt.inFlight.length;
         conversation.addNotice(`${count} queued message${count === 1 ? " is" : "s are"} already entering Pi consumption and cannot be restored safely; the run was not aborted.`, true);
-        runActivity = { phase: "idle", label: `${count} message${count === 1 ? " is" : "s are"} entering consumption · not restored` };
-        activity.setActivity(runActivity);
         return false;
       }
-      runActivity = {
-        phase: "idle",
-        label: result.receipt.restored.length > 0
-          ? `Restored ${result.receipt.restored.length} queued message${result.receipt.restored.length === 1 ? "" : "s"} to editor`
-          : "queue empty",
-      };
-      activity.setActivity(runActivity);
+      showStatus(result.receipt.restored.length > 0
+        ? `Restored ${result.receipt.restored.length} queued message${result.receipt.restored.length === 1 ? "" : "s"} to editor`
+        : "queue empty");
       return true;
     } catch (error) {
       showError(error);
@@ -554,8 +549,7 @@ export async function runDockTui(
 
   async function abortRun(): Promise<void> {
     if (instance.execution !== "running") {
-      activity.setActivity("nothing to abort");
-      tui.requestRender();
+      showStatus("nothing to abort");
       return;
     }
     editor.disableSubmit = true;
@@ -580,8 +574,7 @@ export async function runDockTui(
 
   async function chooseModel(): Promise<void> {
     editor.disableSubmit = true;
-    activity.setActivity("loading models");
-    tui.requestRender();
+    showStatus("loading models");
     try {
       const catalog = await client.models(instance.id);
       instance = catalog.instance;
@@ -589,7 +582,7 @@ export async function runDockTui(
       if (catalog.truncated) conversation.addNotice(`Model catalog is bounded: showing ${catalog.models.length} of ${catalog.total}.`, true);
       const selected = await showModelPicker(catalog.models);
       if (selected) await switchModel(selected.provider, selected.id);
-      else activity.setActivity("model unchanged");
+      else showStatus("model unchanged");
     } catch (error) {
       showError(error);
     } finally {
@@ -781,7 +774,7 @@ export async function runDockTui(
 
   async function chooseSetting(): Promise<void> {
     editor.disableSubmit = true;
-    activity.setActivity("loading settings");
+    showStatus("loading settings");
     tui.requestRender();
     try {
       settings = (await client.settings(instance.id)).settings;
@@ -793,7 +786,7 @@ export async function runDockTui(
           description: `${formatSettingValue(setting.value)} · ${setting.source}${setting.writable ? "" : " · read-only"}${setting.reloadRequired ? " · reload" : ""}${setting.hostRestartRequired ? " · host restart" : ""}`,
         })),
       );
-      if (!key) { activity.setActivity("settings unchanged"); return; }
+      if (!key) { showStatus("settings unchanged"); return; }
       const setting = settings.find((candidate) => candidate.key === key);
       if (!setting || !setting.writable) {
         conversation.addNotice(`${key} is read-only.`, true);
@@ -802,7 +795,7 @@ export async function runDockTui(
       if (setting.valueType === "integer") {
         editor.setText(`/settings ${setting.key} ${String(setting.value)}`);
         conversation.addNotice(`Edit the integer value for ${setting.key}, then press Enter.`);
-        activity.setActivity("setting ready to edit");
+        showStatus("setting ready to edit");
         return;
       }
       const choices = settingValueChoices(setting);
@@ -812,7 +805,7 @@ export async function runDockTui(
         choices,
         settingChoiceValue(setting),
       );
-      if (selected === undefined) { activity.setActivity("setting unchanged"); return; }
+      if (selected === undefined) { showStatus("setting unchanged"); return; }
       const update = parseSettingCommandValue(setting, selected);
       if (!update) {
         conversation.addNotice(`Invalid value for ${setting.key}.`, true);
@@ -853,7 +846,7 @@ export async function runDockTui(
 
   async function applySettingUpdate(update: SettingUpdate): Promise<void> {
     editor.disableSubmit = true;
-    activity.setActivity(`setting ${update.key}`);
+    showStatus(`setting ${update.key}`);
     tui.requestRender();
     try {
       const result = await client.updateSetting(instance.id, update);
@@ -863,7 +856,7 @@ export async function runDockTui(
       applyLiveSetting(result.setting.key, result.setting.value);
       const boundary = result.hostRestartRequired ? " · Host restart required" : result.reloadRequired ? " · run /reload" : "";
       conversation.addNotice(`${result.setting.key} = ${formatSettingValue(result.setting.value)}${boundary}`);
-      activity.setActivity(`setting ${result.setting.key} saved`);
+      showStatus(`setting ${result.setting.key} saved`);
       rebuildAutocomplete();
     } finally {
       if (instance.lifecycle === "active") editor.disableSubmit = false;
@@ -872,7 +865,7 @@ export async function runDockTui(
 
   async function chooseTools(): Promise<void> {
     editor.disableSubmit = true;
-    activity.setActivity("loading tools");
+    showStatus("loading tools");
     tui.requestRender();
     try {
       const catalog = await client.tools(instance.id);
@@ -893,9 +886,9 @@ export async function runDockTui(
         status.update(instance);
         tools = result.tools;
         if (result.truncated) conversation.addNotice(`Tool catalog is bounded: showing ${tools.length} of ${result.total}.`, true);
-        activity.setActivity(`tool ${selected} toggled`);
+        showStatus(`tool ${selected} toggled`);
       }
-      activity.setActivity("tools updated");
+      showStatus("tools updated");
     } catch (error) {
       showError(error);
     } finally {
@@ -908,7 +901,7 @@ export async function runDockTui(
   async function setToolsFromCommand(target: string): Promise<void> {
     const names = target === "none" ? [] : [...new Set(target.split(/[\s,]+/u).filter(Boolean))].sort();
     editor.disableSubmit = true;
-    activity.setActivity("updating tools");
+    showStatus("updating tools");
     tui.requestRender();
     try {
       const result = await client.setActiveTools(instance.id, names);
@@ -916,14 +909,14 @@ export async function runDockTui(
       status.update(instance);
       conversation.addNotice(`Active tools: ${result.tools.filter((tool) => tool.active).map((tool) => tool.name).join(", ") || "none"}.`);
       if (result.truncated) conversation.addNotice(`Tool catalog is bounded: showing ${result.tools.length} of ${result.total}.`, true);
-      activity.setActivity("tools updated");
+      showStatus("tools updated");
     } catch (error) { showError(error); }
     finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.requestRender(); }
   }
 
   async function chooseThinking(): Promise<void> {
     editor.disableSubmit = true;
-    activity.setActivity("loading thinking levels");
+    showStatus("loading thinking levels");
     tui.requestRender();
     try {
       const result = await client.models(instance.id);
@@ -936,7 +929,7 @@ export async function runDockTui(
         instance.executor.thinkingLevel,
       );
       if (selected && isThinkingLevel(selected)) await switchThinking(selected);
-      else activity.setActivity("thinking unchanged");
+      else showStatus("thinking unchanged");
     } catch (error) { showError(error); }
     finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
   }
@@ -996,7 +989,7 @@ export async function runDockTui(
 
   async function chooseTreeNavigation(): Promise<void> {
     editor.disableSubmit = true;
-    activity.setActivity("loading session tree");
+    showStatus("loading session tree");
     tui.requestRender();
     const configuredFilter = settings.find((setting) => setting.key === "treeFilterMode")?.value;
     const surface = new SessionTreeSurface({
@@ -1030,9 +1023,9 @@ export async function runDockTui(
       while (true) {
         treeOverlay.focus();
         const target = await nextSelection();
-        if (!target) { activity.setActivity("tree unchanged"); return; }
+        if (!target) { showStatus("tree unchanged"); return; }
         if (target.entryId === leafId) {
-          activity.setActivity("already at this point");
+          showStatus("already at this point");
           continue;
         }
         const targetRole = target.role ?? target.kind;
@@ -1100,7 +1093,7 @@ export async function runDockTui(
     editor.disableSubmit = true;
     treeNavigationPending = true;
     treeNavigationAbortRequested = false;
-    activity.setActivity(options.summarize ? "summarizing branch · Esc/Ctrl+C abort" : "navigating tree");
+    showStatus(options.summarize ? "summarizing branch · Esc/Ctrl+C abort" : "navigating tree");
     tui.requestRender();
     const draftWasEmpty = editor.getText().length === 0;
     try {
@@ -1108,7 +1101,7 @@ export async function runDockTui(
       instance = result.instance;
       status.update(instance);
       if (result.editorText !== undefined && draftWasEmpty && editor.getText().length === 0) editor.setText(result.editorText);
-      activity.setActivity(result.cancelled ? result.aborted || treeNavigationAbortRequested ? "navigation aborted" : "navigation cancelled by extension" : "branch selected");
+      showStatus(result.cancelled ? result.aborted || treeNavigationAbortRequested ? "navigation aborted" : "navigation cancelled by extension" : "branch selected");
     } catch (error) { showError(error); }
     finally {
       treeNavigationPending = false;
@@ -1123,7 +1116,7 @@ export async function runDockTui(
     if (!treeNavigationPending || treeNavigationAbortPending) return;
     treeNavigationAbortPending = true;
     treeNavigationAbortRequested = true;
-    activity.setActivity("aborting branch navigation");
+    showStatus("aborting branch navigation");
     tui.requestRender();
     try { await client.abort(instance.id); }
     catch (error) { showError(error); }
@@ -1132,46 +1125,46 @@ export async function runDockTui(
 
   async function chooseForkTarget(): Promise<void> {
     editor.disableSubmit = true;
-    activity.setActivity("loading fork targets");
+    showStatus("loading fork targets");
     tui.requestRender();
     try {
       const target = await chooseTreeListNode("Fork before user message", (node) => node.kind === "message" && node.role === "user");
       if (target) await forkSession(target.entryId);
-      else activity.setActivity("fork cancelled");
+      else showStatus("fork cancelled");
     } catch (error) { showError(error); }
     finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
   }
 
   async function forkSession(entryId: string): Promise<void> {
     editor.disableSubmit = true;
-    activity.setActivity("forking session");
+    showStatus("forking session");
     tui.requestRender();
     try {
       const result = await client.forkSession(instance.id, entryId);
       instance = result.instance;
       status.update(instance);
       if (result.selectedText !== undefined) editor.setText(result.selectedText);
-      activity.setActivity(result.cancelled ? "fork cancelled by extension" : "fork ready · edit and submit selected prompt");
+      showStatus(result.cancelled ? "fork cancelled by extension" : "fork ready · edit and submit selected prompt");
     } catch (error) { showError(error); }
     finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
   }
 
   async function cloneSession(): Promise<void> {
     editor.disableSubmit = true;
-    activity.setActivity("finding current leaf");
+    showStatus("finding current leaf");
     tui.requestRender();
     try {
       const tree = await client.tree(instance.id, undefined, undefined, 1);
       if (!tree.leafId) {
         conversation.addNotice("The current session has no leaf to clone.", true);
-        activity.setActivity("clone unavailable");
+        showStatus("clone unavailable");
         return;
       }
       const result = await client.cloneSession(instance.id, tree.leafId);
       instance = result.instance;
       status.update(instance);
       if (!result.cancelled) editor.setText("");
-      activity.setActivity(result.cancelled ? "clone cancelled by extension" : "session cloned");
+      showStatus(result.cancelled ? "clone cancelled by extension" : "session cloned");
     } catch (error) { showError(error); }
     finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
   }
@@ -1202,11 +1195,11 @@ export async function runDockTui(
 
   async function chooseSession(): Promise<void> {
     editor.disableSubmit = true;
-    activity.setActivity("loading sessions");
+    showStatus("loading sessions");
     tui.requestRender();
     try {
       const target = await showSessionInventoryPicker();
-      if (!target) { activity.setActivity("session unchanged"); return; }
+      if (!target) { showStatus("session unchanged"); return; }
       await resumeSession(target.sessionFile);
     } catch (error) { showError(error); }
     finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
@@ -1268,7 +1261,7 @@ export async function runDockTui(
 
   async function resumeSession(sessionFile: string): Promise<void> {
     editor.disableSubmit = true;
-    activity.setActivity("resuming session");
+    showStatus("resuming session");
     tui.requestRender();
     const operationId = randomUUID();
     try {
@@ -1279,12 +1272,12 @@ export async function runDockTui(
         const challenge = projectTrustChallenge(error, operationId);
         if (!challenge) throw error;
         const decision = await chooseProjectTrust(challenge.cwd);
-        if (!decision) { activity.setActivity("resume cancelled"); return; }
+        if (!decision) { showStatus("resume cancelled"); return; }
         result = await client.switchSession(instance.id, sessionFile, operationId, { challengeId: challenge.challengeId, decision });
       }
       instance = result.instance;
       status.update(instance);
-      activity.setActivity(result.cancelled ? "resume cancelled by extension" : "session resumed");
+      showStatus(result.cancelled ? "resume cancelled by extension" : "session resumed");
     } catch (error) { showError(error); }
     finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
   }
@@ -1301,20 +1294,20 @@ export async function runDockTui(
 
   async function createNewSession(parentSession?: string): Promise<void> {
     editor.disableSubmit = true;
-    activity.setActivity("creating session");
+    showStatus("creating session");
     tui.requestRender();
     try {
       const result = await client.newSession(instance.id, parentSession);
       instance = result.instance;
       status.update(instance);
-      activity.setActivity(result.cancelled ? "new session cancelled by extension" : "new session ready");
+      showStatus(result.cancelled ? "new session cancelled by extension" : "new session ready");
     } catch (error) { showError(error); }
     finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.requestRender(); }
   }
 
   async function nameSession(name: string): Promise<void> {
     editor.disableSubmit = true;
-    activity.setActivity("naming session");
+    showStatus("naming session");
     tui.requestRender();
     try {
       const result = await client.nameSession(instance.id, name);
@@ -1322,28 +1315,29 @@ export async function runDockTui(
       status.update(instance);
       terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
       conversation.addNotice(instance.name ? `Session name: ${terminalSafe(instance.name)}.` : "Session name cleared.");
-      activity.setActivity(instance.name ? `named ${terminalSafe(instance.name)}` : "session name cleared");
+      showStatus(instance.name ? `named ${terminalSafe(instance.name)}` : "session name cleared");
     } catch (error) { showError(error); }
     finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.requestRender(); }
   }
 
   async function compactSession(customInstructions?: string): Promise<void> {
     editor.disableSubmit = true;
-    activity.setActivity("compacting");
     tui.requestRender();
     try {
       const result = await client.compactSession(instance.id, customInstructions);
       instance = result.instance;
       status.update(instance);
       conversation.addNotice(`Compacted ${result.result.tokensBefore.toLocaleString()} tokens · kept from ${result.result.firstKeptEntryId}.`);
-      runActivity = { phase: "idle", label: "compacted" };
+      runActivity = activityFromSnapshot(instance);
       activity.setActivity(runActivity);
     } catch (error) {
       if (error instanceof ControlClientError && error.code === "compaction_not_needed") {
-        runActivity = { phase: "idle", label: "nothing to compact" };
+        showStatus("nothing to compact");
+        runActivity = activityFromSnapshot(instance);
         activity.setActivity(runActivity);
       } else if (error instanceof ControlClientError && error.code === "compaction_cancelled") {
-        runActivity = { phase: "idle", label: "compaction cancelled" };
+        showStatus("compaction cancelled");
+        runActivity = activityFromSnapshot(instance);
         activity.setActivity(runActivity);
       } else {
         showError(error);
@@ -1354,14 +1348,14 @@ export async function runDockTui(
 
   async function reloadSession(): Promise<void> {
     editor.disableSubmit = true;
-    activity.setActivity("reloading resources");
+    showStatus("reloading resources");
     tui.requestRender();
     try {
       const result = await client.reloadSession(instance.id);
       instance = result.instance;
       status.update(instance);
       for (const diagnostic of result.diagnostics) conversation.addNotice(`${diagnostic.severity}: ${diagnostic.message}`, diagnostic.severity === "error");
-      activity.setActivity(`reloaded ${result.resources.length} resources`);
+      showStatus(`reloaded ${result.resources.length} resources`);
       if (result.resourcesTruncated || result.diagnosticsTruncated) {
         conversation.addNotice(`Reload projection is bounded: ${result.resources.length}/${result.resourceTotal} resources · ${result.diagnostics.length}/${result.diagnosticTotal} diagnostics.`, true);
       }
@@ -1371,7 +1365,7 @@ export async function runDockTui(
 
   async function showResources(): Promise<void> {
     editor.disableSubmit = true;
-    activity.setActivity("loading resources");
+    showStatus("loading resources");
     tui.requestRender();
     try {
       const result = await client.resources(instance.id);
@@ -1380,7 +1374,7 @@ export async function runDockTui(
       const selected = await showChoicePicker("Pi resources", indexed.map(({ resource, value }) => ({ value, label: `${resource.kind}: ${resource.name}`, description: resource.path ?? resource.source?.package ?? resource.source?.kind })));
       const resource = indexed.find((candidate) => candidate.value === selected)?.resource;
       if (resource) conversation.addNotice(`${resource.kind} ${resource.name}${resource.path ? ` · ${resource.path}` : ""}`);
-      activity.setActivity(`${result.resources.length} resources · ${result.diagnostics.length} diagnostics`);
+      showStatus(`${result.resources.length} resources · ${result.diagnostics.length} diagnostics`);
       if (result.resourcesTruncated || result.diagnosticsTruncated) {
         conversation.addNotice(`Resource projection is bounded: ${result.resources.length}/${result.resourceTotal} resources · ${result.diagnostics.length}/${result.diagnosticTotal} diagnostics.`, true);
       }
@@ -1390,13 +1384,13 @@ export async function runDockTui(
 
   async function switchModel(provider: string, modelId: string): Promise<void> {
     editor.disableSubmit = true;
-    activity.setActivity(`switching to ${provider}/${modelId}`);
+    showStatus(`switching to ${provider}/${modelId}`);
     tui.requestRender();
     try {
       const result = await client.setModel(instance.id, provider, modelId);
       instance = result.instance;
       status.update(instance);
-      activity.setActivity(`model ${modelId}`);
+      showStatus(`model ${modelId}`);
     } catch (error) {
       showError(error);
     } finally {
@@ -1407,13 +1401,13 @@ export async function runDockTui(
 
   async function switchThinking(level: RuntimeThinkingLevel): Promise<void> {
     editor.disableSubmit = true;
-    activity.setActivity(`thinking ${level}`);
+    showStatus(`thinking ${level}`);
     tui.requestRender();
     try {
       const result = await client.setThinking(instance.id, level);
       instance = result.instance;
       status.update(instance);
-      activity.setActivity(`thinking ${instance.executor.thinkingLevel ?? level}`);
+      showStatus(`thinking ${instance.executor.thinkingLevel ?? level}`);
     } catch (error) {
       showError(error);
     } finally {
@@ -1423,13 +1417,13 @@ export async function runDockTui(
   }
 
   async function refreshStatus(): Promise<void> {
-    activity.setActivity("refreshing");
+    showStatus("refreshing");
     tui.requestRender();
     try {
       instance = await client.status(instance.id);
       status.update(instance);
       conversation.addNotice(formatWorkStatus(instance));
-      activity.setActivity("status refreshed");
+      showStatus("status refreshed");
     } catch (error) {
       showError(error);
     }
@@ -1514,7 +1508,8 @@ export async function runDockTui(
       runActivity = activityFromReplay(instance, reconciled);
       activity.setActivity(runActivity);
     } else {
-      activity.setActivity("session history loaded");
+      runActivity = activityFromSnapshot(instance);
+      activity.setActivity(runActivity);
     }
     tui.requestRender();
   }
@@ -1569,7 +1564,8 @@ export async function runDockTui(
       runActivity = activityFromReplay(instance, reconciled);
       activity.setActivity(runActivity);
     } else {
-      activity.setActivity("branch history loaded");
+      runActivity = activityFromSnapshot(instance);
+      activity.setActivity(runActivity);
     }
     tui.requestRender();
   }
@@ -1627,14 +1623,18 @@ export async function runDockTui(
     editor.setAutocompleteProvider(new TerminalSafeAutocompleteProvider(new CombinedAutocompleteProvider(autocompleteCommands, instance.cwd)));
   }
 
+  function showStatus(message: string): void {
+    if (exiting) return;
+    conversation.addStatus(message);
+    tui.requestRender();
+  }
+
   function showError(error: unknown): void {
     if (exiting) return;
     const message = error instanceof ControlClientError
       ? `${error.code}: ${error.message}`
       : errorText(error);
     conversation.addNotice(message, true);
-    runActivity = errorActivity();
-    activity.setActivity(runActivity);
     tui.requestRender();
   }
 
@@ -1668,7 +1668,7 @@ export async function runDockTui(
         instance = result.instance;
         status.update(instance);
         conversation.setToolsExpanded(instance.toolsExpanded);
-        if (instance.execution !== "running") activity.setActivity(expanded ? "all tools expanded" : "tools collapsed");
+        showStatus(expanded ? "all tools expanded" : "tools collapsed");
       }
     } catch (error) {
       showError(error);
@@ -1702,7 +1702,7 @@ export async function runDockTui(
     }
     if (matchesKey(data, Key.alt("o"))) {
       const toggled = conversation.toggleLatestDetailExpanded();
-      if (toggled && instance.execution !== "running") activity.setActivity(`${toggled.name} ${toggled.expanded ? "expanded" : "collapsed"}`);
+      if (toggled) showStatus(`${toggled.name} ${toggled.expanded ? "expanded" : "collapsed"}`);
       tui.requestRender();
       return { consume: true };
     }
@@ -1742,7 +1742,7 @@ export async function runDockTui(
           else void chooseTreeNavigation();
         } else {
           lastIdleEscapeAt = now;
-          if (action !== "none") activity.setActivity(`Esc again to open ${action === "fork" ? "fork" : "tree"}`);
+          if (action !== "none") showStatus(`Esc again to open ${action === "fork" ? "fork" : "tree"}`);
         }
         tui.requestRender();
         return { consume: true };
@@ -1754,11 +1754,11 @@ export async function runDockTui(
         void abortTreeNavigation();
       } else if (editor.getText().length > 0) {
         editor.setText("");
-        activity.setActivity("input cleared");
+        showStatus("input cleared");
       } else if (instance.execution === "running") {
         void abortRun();
       } else {
-        activity.setActivity("Ctrl+D detaches");
+        showStatus("Ctrl+D detaches");
       }
       tui.requestRender();
       return { consume: true };
@@ -1855,7 +1855,7 @@ export function formatWorkStatus(snapshot: InstanceSnapshot): string {
   return [
     `Status: ${snapshot.lifecycle === "active" ? snapshot.execution : snapshot.lifecycle}`,
     `Session: ${terminalSafe(snapshot.name || "(unnamed)")}`,
-    `Work cwd: ${terminalSafe(snapshot.cwd)}`,
+    `Work cwd: ${terminalSafe(snapshot.cwd)}${snapshot.gitBranch === undefined ? "" : ` (${terminalSafe(snapshot.gitBranch)})`}`,
     `Model: ${model} · thinking ${terminalSafe(snapshot.executor.thinkingLevel ?? "off")}`,
     `Dock ID: ${terminalSafe(snapshot.id)}`,
     `Pi session ID: ${terminalSafe(snapshot.executor.piSessionId)}`,

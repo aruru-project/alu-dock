@@ -11,6 +11,7 @@ import { encodeJsonLine, JsonLineDecoder, JsonLineError } from "./json-lines.js"
 import {
   CONTROL_PROTOCOL_VERSION,
   MAX_INSTANCE_LIST_ITEMS,
+  GIT_BRANCH_CAPABILITY,
   TOOLS_EXPANDED_CAPABILITY,
   type Capability,
   type ClientHello,
@@ -151,7 +152,8 @@ export class DockClient {
     } catch (error) {
       if (!(error instanceof ControlClientError)
         || (error.code !== "capability_missing"
-          && (error.code !== "protocol_incompatible" || !error.message.includes(TOOLS_EXPANDED_CAPABILITY)))) throw error;
+          && (error.code !== "protocol_incompatible"
+            || (![TOOLS_EXPANDED_CAPABILITY, GIT_BRANCH_CAPABILITY].some((capability) => error.message.includes(capability)))))) throw error;
       // Safe read-only bridge used by staged releases to inspect the previous
       // Host before apply. No request was sent when capability negotiation failed.
       return this.request("instance.list", params, "instance.catalog", parseLegacyListResult, undefined, this.timeoutFor("instance.list"), true);
@@ -193,7 +195,7 @@ export class DockClient {
   async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;claimController?:boolean;conversationBootstrap?:boolean}):Promise<EventSubscription>{
     const since=options.since;const helloId=this.createRequestId(),requestId=this.createRequestId();
     const replay = options.conversationBootstrap ? "conversation_bootstrap" : since === undefined ? undefined : "event_log";
-    const streamCapabilities:string[]=options.requireTuiProjection?["core.v2",TOOLS_EXPANDED_CAPABILITY,"events.follow","queue.control.v1","run.abort.v1","tui.projection.v1"]:requiredCapabilities("events.follow");
+    const streamCapabilities:string[]=options.requireTuiProjection?["core.v2",TOOLS_EXPANDED_CAPABILITY,GIT_BRANCH_CAPABILITY,"events.follow","queue.control.v1","run.abort.v1","tui.projection.v1"]:requiredCapabilities("events.follow");
     if(replay!==undefined&&!streamCapabilities.includes("events.replay-purpose.v1"))streamCapabilities.push("events.replay-purpose.v1");
     if(options.claimController&&!streamCapabilities.includes("extension_ui.v1"))streamCapabilities.push("extension_ui.v1");
     const request:ControlRequest={kind:"request",version:2,requestId,type:"instance.attach",params:{instanceId,since,follow:true,controller:options.claimController?"claim":"observe",...(replay===undefined?{}:{replay})}};
@@ -227,7 +229,7 @@ export class DockClient {
   private request<TType extends ControlRequest["type"],T>(type:TType,params:Params<TType>,capability:Capability|readonly Capability[],parse:Parser<T>,onHello?:(ack:HelloAck)=>void,requestTimeoutMs=this.timeoutFor(type),legacySnapshotCompatibility=false):Promise<T>{
     const helloId=this.createRequestId();
     const requestCapabilities=[...new Set((Array.isArray(capability)?capability:[capability]).flatMap((item)=>requiredCapabilities(item)))]
-      .filter((item) => !legacySnapshotCompatibility || item !== TOOLS_EXPANDED_CAPABILITY);
+      .filter((item) => !legacySnapshotCompatibility || (item !== TOOLS_EXPANDED_CAPABILITY && item !== GIT_BRANCH_CAPABILITY));
     const requestId=this.createRequestId();
     const request={kind:"request",version:2,requestId,type,params} as Extract<ControlRequest,{type:TType}>;
     const operationId = "operationId" in params && typeof params.operationId === "string" ? params.operationId : undefined;

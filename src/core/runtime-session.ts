@@ -225,6 +225,8 @@ export interface RuntimeSession {
 
   /** Current session path only when it has actually been materialized durably. */
   getDurableSessionFile?(): string | undefined;
+  /** Cached Host-side Git branch; undefined means the cwd is not a repository. */
+  getGitBranch?(): string | undefined;
   subscribe(listener: (event: RuntimeEvent) => void): () => void;
   /** Exact current-generation registered extension command routing; all other input remains a prompt. */
   classifyInput(text: string): RuntimeInputKind;

@@ -11,45 +11,45 @@ Alu Dock 的 V0.1 仍在开发中。当前候选已经具备：
 - 私有 Unix socket 上的长期 Host 与 durable managed catalog；
 - instance 的创建、列出、接入、停止、显式 reopen、adopt、forget 与 prune；
 - 默认 Dock Hub：固定提供 New、Continue、History、Pi Sessions 与 Leave；进入时不创建或恢复 runtime，并以响应式全屏阿露品牌帧呈现；Hub 独占一个 alternate-screen 生命周期，并只在菜单可见时启用点击/滚轮；
-- attached Session Work TUI，包括分层 conversation/activity、保留换行的 tool output、可辨认分支的 tree、queue、settings/resources 与 extension 文本交互；Work 使用可流动的 main buffer 与 terminal-native mouse，不启用 Hub tracking，也没有 Alt+M 或 `/mouse` 模式；`Ctrl+O` 更新 Host-authoritative 的 generation-scoped tool 展开状态，`Alt+O` 只切换当前客户端的最近详情；
+- attached Session Work TUI，包括使用canonical Alu palette的分层 conversation/activity、保留顺序与换行的 thinking/tool/compaction surface、可辨认分支的 tree、queue、settings/resources 与 extension 文本交互；footer通过Host-authoritative watcher实时显示`cwd (Git branch)`；Work 使用可流动的 main buffer 与 terminal-native mouse，不启用 Hub tracking，也没有 Alt+M 或 `/mouse` 模式；`Ctrl+O` 更新 Host-authoritative 的 generation-scoped tool 展开状态，`Alt+O` 只切换当前客户端的最近详情；
 - 同一 Dock instance 内的 Pi session new/resume/fork/clone/reload；
 - 显式的 `systemd --user` service 管理。
 
-当前裸 `alu-dock` 进入 Dock Hub；`pwd` 只作为 Continue、History、Pi Sessions 的排序上下文和 New 默认目录，进入或退出 Hub 本身不产生 runtime/catalog mutation。Continue 只展示 active/reopenable Dock 工作，History 管理 stopped/不可恢复记录，并可从 stopped 记录的 Pi session 继续；完整磁盘 Pi sessions 仍通过独立 Resume/Adopt inventory 进入。显式 `new` 与 `attach TARGET` 直达 Session Work；`-c`/`--continue` 复用改版前的 current-project smart-entry：进入最近的可继续实例，没有则 New。完整 ID、列表展示的唯一 prefix 与唯一精确 name 共用 fail-closed TARGET 解析。
+当前裸 `aludock` 进入 Dock Hub；`pwd` 只作为 Continue、History、Pi Sessions 的排序上下文和 New 默认目录，进入或退出 Hub 本身不产生 runtime/catalog mutation。Continue 只展示 active/reopenable Dock 工作，History 管理 stopped/不可恢复记录，并可从 stopped 记录的 Pi session 继续；完整磁盘 Pi sessions 仍通过独立 Resume/Adopt inventory 进入。显式 `new` 与 `attach TARGET` 直达 Session Work；`-c`/`--continue` 复用改版前的 current-project smart-entry：进入最近的可继续实例，没有则 New。完整 ID、列表展示的唯一 prefix 与唯一精确 name 共用 fail-closed TARGET 解析。
 
-V0.1 候选仍待统一真实 Pi、SSH 与用户签收门禁，不得视为已发布。显式 `alu-dock open` 当前仍保留旧的 project smart-entry，可能创建或 reopen runtime；默认安全入口是裸命令 Hub。
+V0.1 候选仍待统一真实 Pi、SSH 与用户签收门禁，不得视为已发布。显式 `aludock open` 当前仍保留旧的 project smart-entry，可能创建或 reopen runtime；默认安全入口是裸命令 Hub。
 
 ## 当前快速开始
 
-要求 Node.js `>=22.19.0`，并且 `alu-dock` 命令可用。首次使用时，`alu-dock service install --now` 会安装并启动 managed Host。
+要求 Node.js `>=22.19.0`，并且 `aludock` 命令可用。首次使用时，`aludock service install --now` 会安装并启动 managed Host。
 
 ```bash
-alu-dock service install --now
-alu-dock service status
+aludock service install --now
+aludock service status
 
-alu-dock                       # 进入无 runtime 副作用的 Dock Hub
-alu-dock -c                    # 继续当前目录最近的 Dock 工作；没有则 New
-alu-dock new --cwd "$PWD" --name demo
-alu-dock attach TARGET          # 完整 ID、唯一 prefix 或唯一精确 name
-alu-dock list
+aludock                       # 进入无 runtime 副作用的 Dock Hub
+aludock -c                    # 继续当前目录最近的 Dock 工作；没有则 New
+aludock new --cwd "$PWD" --name demo
+aludock attach TARGET          # 完整 ID、唯一 prefix 或唯一精确 name
+aludock list
 ```
 
 Dock Hub 离开、报错或转入 Session Work 前会先关闭 Hub mouse tracking 并恢复原 shell screen。Session Work 保持在 main buffer，终端原生选择与滚动行为不需要模式切换；按 `Ctrl+D` 会 detach，Host 中的 instance 继续运行。需要结束 runtime 时再显式执行：
 
 ```bash
-alu-dock stop TARGET
+aludock stop TARGET
 ```
 
 Service 只由显式命令管理；普通 Hub、`-c`、`open`、`new`、`attach` 不会自动启动或重启它。
 
 ```bash
-alu-dock service start
-alu-dock service stop
-alu-dock service restart
-alu-dock service status
-alu-dock service logs --lines 200
-alu-dock service logs --follow
-alu-dock service uninstall
+aludock service start
+aludock service stop
+aludock service restart
+aludock service status
+aludock service logs --lines 200
+aludock service logs --follow
+aludock service uninstall
 ```
 
 `forget` 与 `prune` 只移除 Dock catalog 记录，不删除 Pi session 文件。
@@ -98,4 +98,4 @@ npm run cli
 
 - 贡献者与 agent 工程地图：[`AGENTS.md`](AGENTS.md)
 - 测试路由：[`docs/qa.md`](docs/qa.md)
-- Managed service 与 dogfood 发布：[`docs/dogfood-deployment.md`](docs/dogfood-deployment.md)
+- Managed service 与 Athena 发布：[`docs/athena-deployment.md`](docs/athena-deployment.md)

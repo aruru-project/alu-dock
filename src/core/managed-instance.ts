@@ -277,6 +277,7 @@ export class ManagedInstance {
   private readonly extensionUi: ExtensionUiBroker;
   private nameValue: string | undefined;
   private cwdValue: string;
+  private gitBranchValue: string | undefined;
   private readonly executorIdentity: ExecutorIdentity;
   private historyValue: HistoryEntryDto[];
   private metricsValue: SessionMetricsDto;
@@ -362,6 +363,7 @@ export class ManagedInstance {
     this.nameValue = options.name;
     this.cwdValue = options.cwd;
     this.session = options.session;
+    this.gitBranchValue = projectGitBranch(this.session.getGitBranch?.());
     const requestedCapacity = options.eventCapacity ?? 500;
     this.eventCapacity = Number.isFinite(requestedCapacity) && requestedCapacity >= 1
       ? Math.floor(requestedCapacity)
@@ -568,6 +570,7 @@ export class ManagedInstance {
       creationOperationId: this.creationOperationId,
       name: this.name,
       cwd: this.cwd,
+      gitBranch: this.gitBranchValue,
       lifecycle: this.state.lifecycle,
       execution: this.state.execution,
       compacting: this.state.compacting,
@@ -2194,6 +2197,18 @@ export class ManagedInstance {
     });
   }
 
+  private applyGitBranchChanged(value: unknown): void {
+    const branch = projectGitBranch(value);
+    if (branch === this.gitBranchValue) return;
+    this.gitBranchValue = branch;
+    if (this.catalogPort && this.committedSnapshotValue) {
+      const snapshot = { ...this.committedSnapshotValue, gitBranch: branch };
+      if (branch === undefined) delete snapshot.gitBranch;
+      this.committedSnapshotValue = snapshot;
+    }
+    this.appendEvent("git.branch_changed", branch === undefined ? {} : { branch });
+  }
+
   private dispatchRuntimeEvent(event: RuntimeEvent): void {
     if (this.hostDrainActive) return;
     if (this.catalogAdmissionOperationId !== undefined) {
@@ -2275,6 +2290,10 @@ export class ManagedInstance {
 
   private async handleCatalogRuntimeEvent(event: RuntimeEvent): Promise<void> {
     this.catalogPort?.assertWritable();
+    if (event.type === "dock_git_branch_changed") {
+      this.applyGitBranchChanged(event.branch);
+      return;
+    }
     const extensionInitiatorOperationId = event.type === "agent_start"
       && this.extensionCommandInitiator?.runtimeGeneration === this.runtimeGenerationValue
       && this.extensionCommandInitiator.agentStartCount === this.agentStartCount
@@ -2333,6 +2352,7 @@ export class ManagedInstance {
         this.state.pendingFollowUp = 0;
         if (cwd !== undefined) this.cwdValue = cwd;
         this.nameValue = name;
+        this.gitBranchValue = projectGitBranch(event.gitBranch ?? this.session.getGitBranch?.());
         this.executorIdentity.piSessionId = truncate(this.session.sessionId, 128) ?? "unknown";
         this.executorIdentity.sessionFile = truncate(this.session.sessionFile, 16_384);
         this.durableSessionFileValue = this.runtimeDurableSessionFile();
@@ -2343,7 +2363,7 @@ export class ManagedInstance {
         this.publishedRuntimeGenerationValue = this.runtimeGenerationValue;
         this.nextEventSequence = 1;
         this.eventLog.length = 0;
-        this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue });
+        this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue, gitBranch: this.gitBranchValue });
         if (replacedQueue.total > 0) this.appendEvent("queue.cleared", { ...replacedQueue, reason: "replacement" });
       });
       void this.extensionUi.completeGenerationChange();
@@ -2515,6 +2535,10 @@ export class ManagedInstance {
 
   private handleRuntimeEvent(event: RuntimeEvent): void {
     if (this.state.lifecycle === "stopped") return;
+    if (event.type === "dock_git_branch_changed") {
+      this.applyGitBranchChanged(event.branch);
+      return;
+    }
     if (event.type === "dock_session_replaced") {
       this.extensionUi.beginGenerationChange();
       const replacedQueue = removedQueueProjection(this.pendingQueueMessages, this.state);
@@ -2554,13 +2578,14 @@ export class ManagedInstance {
       this.state.pendingFollowUp = 0;
       if (cwd !== undefined) this.cwdValue = cwd;
       this.nameValue = name;
+      this.gitBranchValue = projectGitBranch(event.gitBranch ?? this.session.getGitBranch?.());
       this.executorIdentity.piSessionId = truncate(this.session.sessionId, 128) ?? "unknown";
       this.executorIdentity.sessionFile = truncate(this.session.sessionFile, 16_384);
       this.durableSessionFileValue = this.runtimeDurableSessionFile();
       this.recoverySessionFile = this.durableSessionFileValue === undefined ? previousDurableSessionFile : undefined;
       this.applyModelState(this.session.getModelState());
       this.touch();
-      this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue });
+      this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue, gitBranch: this.gitBranchValue });
       if (replacedQueue.total > 0) this.appendEvent("queue.cleared", { ...replacedQueue, reason: "replacement" });
       void this.extensionUi.completeGenerationChange();
       return;
@@ -3057,6 +3082,14 @@ function boundedRuntimeString(value: unknown, limit: number, fallback: string): 
 
 function optionalRuntimeString(value: unknown, limit: number): string | undefined {
   return typeof value === "string" ? safeWireText(value, limit, "Sensitive payload omitted") : undefined;
+}
+
+function projectGitBranch(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || value.length === 0 || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) {
+    throw new Error("Runtime Git branch projection is not terminal-safe");
+  }
+  return safeWireText(value, 256, "Git branch omitted");
 }
 
 function runtimeMessageHash(text: string): string {

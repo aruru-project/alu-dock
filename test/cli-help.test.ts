@@ -6,7 +6,7 @@ import test from "node:test";
 import { renderCliHelp, requestedCliHelp } from "../src/cli-help.js";
 
 const cliPath = fileURLToPath(new URL("../src/cli.js", import.meta.url));
-const unavailableSocket = "/tmp/alu-dock-help-must-not-connect.sock";
+const unavailableSocket = "/tmp/aludock-help-must-not-connect.sock";
 
 interface CliResult {
   code: number | null;
@@ -36,11 +36,11 @@ test("top-level help is human-only, bounded, and locally rendered", async () => 
   for (const publicCommand of ["continue", "open", "new", "attach", "list", "status", "stop", "forget", "prune", "service", "help"]) {
     assert.match(flag.stdout, new RegExp(`\\b${publicCommand}\\b`, "u"));
   }
-  for (const internalSignature of ["alu-dock serve", "alu-dock ping", "alu-dock create", "alu-dock reopen", "alu-dock events", "alu-dock prompt", "--socket"]) {
+  for (const internalSignature of ["aludock serve", "aludock ping", "aludock create", "aludock reopen", "aludock events", "aludock prompt", "--socket"]) {
     assert.doesNotMatch(flag.stdout, new RegExp(escapeRegExp(internalSignature), "u"));
   }
   assert.match(flag.stdout, /Open the Dock Hub/u);
-  assert.match(flag.stdout, /alu-dock -c/u);
+  assert.match(flag.stdout, /aludock -c/u);
   assert.doesNotMatch(flag.stdout, /side-effect-free/u);
   assert.match(flag.stdout, /attach TARGET/u);
   assert.ok(Math.max(...flag.stdout.trimEnd().split("\n").map((line) => line.length)) <= 80);
@@ -55,7 +55,7 @@ test("every public human command supports equivalent local help forms", async ()
     assertHelpSuccess(flag);
     assertHelpSuccess(topic);
     assert.equal(flag.stdout, topic.stdout, command);
-    assert.match(flag.stdout, new RegExp(`alu-dock ${command}`, "u"));
+    assert.match(flag.stdout, new RegExp(`aludock ${command}`, "u"));
   }
 
   const [continueShort, continueLong] = await Promise.all([
@@ -126,6 +126,13 @@ test("service help is explorable without constructing a service manager", async 
     assert.match(flag.stdout, new RegExp(`service ${action}`, "u"));
   }
 
+  const updateHelp = renderCliHelp(["service", "update"]);
+  assert.match(updateHelp, /staged Athena release/u);
+  assert.match(updateHelp, /npm run stage:athena/u);
+  assert.match(updateHelp, /aludock service update apply \[RELEASE_ID\] \[--allow-active\]/u);
+  assert.match(updateHelp, /destructive Host-replacement opt-in/u);
+  assert.doesNotMatch(updateHelp, /dogfood|alu-dock service/u);
+
   const ignoredInvalidOption = await runCli(["service", "logs", "--lines", "not-a-number", "--help"]);
   assertHelpSuccess(ignoredInvalidOption);
   assert.match(ignoredInvalidOption.stdout, /--lines N/u);
@@ -141,7 +148,7 @@ test("explicit internal help redirects to typed control without polluting the ov
   assert.equal(flag.stdout, topic.stdout);
   assert.match(flag.stdout, /internal control command/u);
   assert.match(flag.stdout, /DockClient\/Protocol V2/u);
-  assert.match(flag.stdout, /alu-dock new/u);
+  assert.match(flag.stdout, /aludock new/u);
 });
 
 test("help text is terminal-safe static guidance", () => {

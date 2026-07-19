@@ -81,6 +81,7 @@ class FakeRuntimeSession implements RuntimeSession {
   readonly sessionFile = "/tmp/pi-session-1.jsonl";
   isStreaming = false;
   isCompacting = false;
+  gitBranch: string | undefined;
   promptDeferred = new Deferred<void>();
   preflightEntered = new Deferred<void>();
   promptCalls: Array<{ text: string; options?: RuntimePromptOptions }> = [];
@@ -107,6 +108,8 @@ class FakeRuntimeSession implements RuntimeSession {
   private readonly listeners = new Set<(event: RuntimeEvent) => void>();
   private readonly steeringQueue: string[] = [];
   private readonly followUpQueue: string[] = [];
+  getGitBranch(): string | undefined { return this.gitBranch; }
+
   private modelState: RuntimeModelState = {
     model: { provider: "fixture", id: "model-a" },
     thinkingLevel: "off",
@@ -467,6 +470,28 @@ test("runtime metrics are present initially and refresh through a closed event",
   assert.deepEqual(instance.snapshot().metrics, session.metrics);
   const event = instance.eventsSince().events.find((candidate) => candidate.type === "session.metrics_changed");
   assert.equal(event?.data.metrics.context?.percent, 45);
+});
+
+test("Git branch projection is cached, live, bounded, and generation-local", () => {
+  const session = new FakeRuntimeSession();
+  session.gitBranch = "main";
+  const instance = createInstance(session);
+  assert.equal(instance.snapshot().gitBranch, "main");
+
+  session.gitBranch = "feature/live";
+  session.emit({ type: "dock_git_branch_changed", branch: "feature/live" });
+  assert.equal(instance.snapshot().gitBranch, "feature/live");
+  const changed = instance.eventsSince().events.find((candidate) => candidate.type === "git.branch_changed");
+  assert.deepEqual(changed?.data, { branch: "feature/live" });
+
+  session.gitBranch = undefined;
+  session.emit({ type: "dock_git_branch_changed", branch: undefined });
+  assert.equal(instance.snapshot().gitBranch, undefined);
+  assert.deepEqual(instance.eventsSince().events.at(-1)?.data, {});
+
+  session.emit({ type: "dock_git_branch_changed", branch: "unsafe\nbranch" });
+  assert.equal(instance.snapshot().gitBranch, undefined);
+  assert.equal(instance.eventsSince().events.at(-1)?.type, "instance.error");
 });
 
 test("abort ends the run without disposing the reusable instance", async () => {

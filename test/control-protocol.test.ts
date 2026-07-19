@@ -118,6 +118,21 @@ test("toolsExpanded request, snapshot, and event contracts are strict", () => {
   assert.throws(() => parseControlEventEnvelope(envelope({ expanded: 1 }), "attach-1", "epoch-1"), /expanded/u);
 });
 
+test("Git branch snapshot and event projections are closed, bounded, and terminal-safe", () => {
+  const branchSnapshot = parseStatusResult({ instance: { ...validSnapshot(), gitBranch: "feature/live" } });
+  assert.equal(branchSnapshot.instance.gitBranch, "feature/live");
+  assert.throws(() => parseStatusResult({ instance: { ...validSnapshot(), gitBranch: "unsafe\nbranch" } }), /terminal-safe/);
+  assert.throws(() => parseStatusResult({ instance: { ...validSnapshot(), gitBranch: "x".repeat(257) } }), /bounded string/);
+
+  const envelope = (data: Record<string, unknown>) => ({
+    kind: "event", version: 2, requestId: "branch-stream", hostEpoch: "epoch-1",
+    event: validEvent("git.branch_changed", data),
+  });
+  assert.deepEqual(parseControlEventEnvelope(envelope({ branch: "main" }), "branch-stream", "epoch-1").event.data, { branch: "main" });
+  assert.deepEqual(parseControlEventEnvelope(envelope({}), "branch-stream", "epoch-1").event.data, {});
+  assert.throws(() => parseControlEventEnvelope(envelope({ branch: "main", extra: true }), "branch-stream", "epoch-1"), /Unexpected field/);
+});
+
 test("V2 requests reject unsupported versions, unknown fields, invalid cursors, and invalid enums", () => {
   assert.throws(
     () => parseControlRequest({ version: 3, requestId: "r1", type: "ping" }),
@@ -205,7 +220,7 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   assert.equal(capabilityForRequest("instance.adopt"), "session.adopt.v1");
   assert.equal(capabilityForRequest("session.inventory"), "session.inventory.v1");
   assert.equal(capabilityForRequest("extension.tools_expanded.set"), "extension_ui.tools-expanded.v1");
-  assert.deepEqual(requiredCapabilities("events.replay-purpose.v1"), ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "events.replay-purpose.v1"]);
+  assert.deepEqual(requiredCapabilities("events.replay-purpose.v1"), ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "events.replay-purpose.v1"]);
 
   const adopted = parseControlRequest({
     ...base,

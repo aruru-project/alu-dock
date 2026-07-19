@@ -10,7 +10,7 @@ import { commandCatalog, formatWorkStatus, workHelpText } from "../src/tui/dock-
 import { PendingQueueTray } from "../src/tui/pending-queue.js";
 import { projectSnapshot } from "../src/tui/snapshot-projection.js";
 import { parseSettingCommandValue } from "../src/tui/settings-controls.js";
-import { createNightConsolePaint, detectTerminalColorLevel } from "../src/tui/theme.js";
+import { createAluPaint, detectTerminalColorLevel } from "../src/tui/theme.js";
 
 function event(sequence: number, type: DockEvent["type"], data: Record<string, unknown>): DockEvent {
   return {
@@ -111,22 +111,41 @@ test("Stage 3 setting command values are typed and bounded", () => {
   assert.equal(parseSettingCommandValue(readOnly, "200000"), undefined);
 });
 
-test("Night Console uses semantic local surfaces without taking over the terminal background", () => {
+test("Alu palette uses semantic local surfaces without taking over the terminal background", () => {
   assert.equal(detectTerminalColorLevel({ TERM: "xterm-256color", NO_COLOR: "" }, true), "none");
   assert.equal(detectTerminalColorLevel({ TERM: "xterm-256color" }, true), "ansi256");
   assert.equal(detectTerminalColorLevel({ TERM: "xterm-256color", COLORTERM: "truecolor" }, true), "truecolor");
 
-  const plain = createNightConsolePaint("none");
+  const plain = createAluPaint("none");
   assert.equal(plain.userSurface("question"), "question");
   assert.equal(plain.running("run"), "run");
 
-  const truecolor = createNightConsolePaint("truecolor");
-  assert.match(truecolor.userSurface("question"), /\u001b\[38;2;214;225;240;48;2;17;28;48mquestion\u001b\[0m/u);
+  const truecolor = createAluPaint("truecolor");
+  assert.match(truecolor.userSurface("question"), /\u001b\[38;2;230;225;242;48;2;35;33;47mquestion\u001b\[0m/u);
   assert.notEqual(truecolor.running("state"), truecolor.success("state"));
   assert.notEqual(truecolor.success("state"), truecolor.error("state"));
+  assert.match(truecolor.accent("accent"), /38;2;221;126;158/u);
+  assert.match(truecolor.success("success"), /38;2;230;225;242/u);
+  assert.match(truecolor.selection("selected"), /48;2;108;132;205/u);
+  const nestedSurface = truecolor.toolSurface(`${truecolor.success("✓")} trailing padding`);
+  assert.match(nestedSurface, /\u001b\[0m\u001b\[38;2;174;153;168;48;2;27;17;20m trailing padding/u,
+    "nested semantic colors must restore the enclosing surface after SGR reset");
+  for (const sample of [truecolor.accent("x"), truecolor.success("x"), truecolor.selection("x")]) {
+    assert.doesNotMatch(sample, /125;211;252|94;234;212|22;78;99/u, "legacy cyan/teal colors are forbidden");
+  }
 
-  const ansi16 = createNightConsolePaint("ansi16");
+  const ansi16 = createAluPaint("ansi16");
   assert.doesNotMatch(ansi16.userSurface("question"), /\u001b\[4[0-7]m/u, "local surfaces fall back to foreground-only at 16 colors");
+});
+
+test("local UI status replaces at the chat tail without becoming runtime activity", () => {
+  const conversation = new DockConversation();
+  conversation.addStatus("loading tools");
+  conversation.addStatus("tools updated");
+  assert.deepEqual(conversation.snapshot(), [{ kind: "status", text: "tools updated", complete: true }]);
+  conversation.addNotice("model output");
+  conversation.addStatus("settings saved");
+  assert.deepEqual(conversation.snapshot().map((entry) => entry.text), ["tools updated", "model output", "settings saved"]);
 });
 
 test("full flowing conversation render includes the complete ordered transcript", () => {
@@ -202,10 +221,29 @@ test("conversation projects persisted history before live replay", () => {
     { kind: "assistant", text: "old answer", complete: true },
     { kind: "tool", text: "read done\nargs\n{\n  \"path\": \"/tmp/old\"\n}\nresult\nold result", complete: true },
   ]);
-  assert.match(conversation.render(100).join("\n"), /read done.*\/tmp\/old/u);
+  assert.match(conversation.render(100).join("\n"), /✓ read.*\/tmp\/old/u);
 });
 
-test("compaction summaries default to one line and expand explicitly", () => {
+test("persisted assistant content blocks retain Pi order instead of telemetry grouping", () => {
+  const conversation = new DockConversation();
+  conversation.applyHistory([{
+    entryId: "ordered-assistant",
+    role: "assistant",
+    content: [
+      { type: "text", text: "first answer" },
+      { type: "thinking", text: "later reasoning" },
+      { type: "text", text: "final answer" },
+      { type: "tool_call", toolCallId: "ordered-tool", toolName: "read", args: { path: "ordered.ts" } },
+    ],
+  }], false);
+  assert.deepEqual(conversation.snapshot().map((entry) => entry.kind), ["assistant", "thinking", "assistant", "tool"]);
+  const rendered = conversation.render(80).join("\n");
+  assert.ok(rendered.indexOf("first answer") < rendered.indexOf("later reasoning"));
+  assert.ok(rendered.indexOf("later reasoning") < rendered.indexOf("final answer"));
+  assert.ok(rendered.indexOf("final answer") < rendered.indexOf("read"));
+});
+
+test("compaction summaries have a readable folded surface and expand explicitly", () => {
   const conversation = new DockConversation();
   conversation.applyHistory([
     {
@@ -227,14 +265,15 @@ test("compaction summaries default to one line and expand explicitly", () => {
   ], false);
 
   const folded = conversation.render(43).filter((line) => line.trim().length > 0);
-  const summaryLine = folded.find((line) => /Context summary/u.test(line));
-  assert.ok(summaryLine, "the folded context summary remains visible");
-  assert.doesNotMatch(summaryLine, /END OF SUMMARY/u);
-  assert.deepEqual(conversation.toggleLatestDetailExpanded(), { expanded: true, name: "context summary" });
+  const summaryLine = folded.find((line) => /\[compaction\]/u.test(line));
+  assert.ok(summaryLine, "the folded compaction surface remains visible");
+  assert.match(folded.join("\n"), /Earlier conversation was compacted/u);
+  assert.doesNotMatch(folded.join("\n"), /END OF SUMMARY/u);
+  assert.deepEqual(conversation.toggleLatestDetailExpanded(), { expanded: true, name: "compaction" });
   const expanded = conversation.render(80).join("\n");
   assert.match(expanded, /Goal/u);
   assert.match(expanded, /END OF SUMMARY/u);
-  assert.deepEqual(conversation.toggleLatestDetailExpanded(), { expanded: false, name: "context summary" });
+  assert.deepEqual(conversation.toggleLatestDetailExpanded(), { expanded: false, name: "compaction" });
 
   const ordinary = new DockConversation();
   ordinary.applyHistory([{ entryId: "system-1", role: "system", content: [{ type: "text", text: "ordinary system text" }] }], false);
@@ -306,7 +345,8 @@ test("conversation projects replay and live deltas into readable messages", () =
   const rendered = conversation.render(24);
   for (const line of rendered) assert.ok(visibleWidth(line) <= 24);
   assert.match(rendered.join("\n"), /▎/);
-  assert.match(rendered.join("\n"), /│ secret reasoning/);
+  assert.match(rendered.join("\n"), /secret reasoning/);
+  assert.doesNotMatch(rendered.join("\n"), /│ secret reasoning/);
   assert.doesNotMatch(rendered.join("\n"), /^\s*(You|Assistant|Thinking)\s*$/mu);
 });
 
@@ -338,14 +378,13 @@ test("bash tool details preserve hard newlines and indentation without JSON esca
   }));
   conversation.toggleLatestToolExpanded();
   const rendered = conversation.render(80).join("\n");
-  assert.match(rendered, /│   printf one/u);
-  assert.match(rendered, /│     printf two/u);
-  assert.match(rendered, /│       printf three/u);
-  assert.match(rendered, /│   second/u);
+  assert.match(rendered, /^\s+printf one\s*$/mu);
+  assert.match(rendered, /^\s+printf two\s*$/mu);
+  assert.match(rendered, /^\s+printf three\s*$/mu);
+  assert.match(rendered, /^\s+second\s*$/mu);
   assert.doesNotMatch(rendered, /\\n/u);
 
-  const narrow = conversation.render(18).join("\n");
-  assert.match(narrow, /┆ /u, "soft wraps use a continuation marker distinct from source newlines");
+  for (const line of conversation.render(18)) assert.ok(visibleWidth(line) <= 18);
 });
 
 test("conversation renders Markdown, code, thinking policy, and diff tools at bounded widths", () => {
@@ -365,8 +404,8 @@ test("conversation renders Markdown, code, thinking policy, and diff tools at bo
   assert.ok(conversation.snapshot().some((entry) => entry.kind === "thinking" && entry.text === "**plan**"));
   assert.match(conversation.snapshot().at(-1)?.text ?? "", /src\/a\.ts/);
   const collapsed = conversation.render(60).join("\n");
-  assert.match(collapsed, /Alt\+O detail/);
-  assert.doesNotMatch(collapsed, /\+new/);
+  assert.match(collapsed, /✓ edit.*src\/a\.ts/u);
+  assert.doesNotMatch(collapsed, /Alt\+O detail|\+new/u);
   assert.deepEqual(conversation.toggleLatestToolExpanded(), { expanded: true, name: "edit" });
   assert.match(conversation.render(60).join("\n"), /\+new/);
   conversation.toggleToolsExpanded();
@@ -400,11 +439,11 @@ test("collapsed tool rows identify common operations without exposing arbitrary 
   }
 
   const rendered = conversation.render(120).join("\n");
-  assert.match(rendered, /read done.*…\/src\/tui\/conversation\.ts.*lines 10–14/u);
-  assert.match(rendered, /bash done.*npm run check.*↵ \+1 line/u);
-  assert.match(rendered, /edit done.*src\/tui\/theme\.ts.*2 edits/u);
-  assert.match(rendered, /write done.*README\.md.*3 lines/u);
-  assert.match(rendered, /alu_kanban done.*get_card.*card #164/u);
+  assert.match(rendered, /✓ read.*…\/src\/tui\/conversation\.ts.*lines 10–14/u);
+  assert.match(rendered, /✓ bash.*npm run check.*↵ \+1 line/u);
+  assert.match(rendered, /✓ edit.*src\/tui\/theme\.ts.*2 edits/u);
+  assert.match(rendered, /✓ write.*README\.md.*3 lines/u);
+  assert.match(rendered, /✓ alu_kanban.*get_card.*card #164/u);
   assert.doesNotMatch(rendered, /ARBITRARY PAYLOAD MUST STAY FOLDED/u);
   for (const width of [20, 43, 80]) {
     for (const line of conversation.render(width)) assert.ok(visibleWidth(line) <= width, `${visibleWidth(line)} > ${width}`);
@@ -438,8 +477,8 @@ test("collapsed tool failures expose a safe first-line reason and preserve expan
   }));
   conversation.addNotice("later assistant-visible output");
   const collapsed = conversation.render(120).join("\n");
-  assert.match(collapsed, /× bash failed/);
-  assert.match(collapsed, /bash failed.*false.*expanded failure detail/u);
+  assert.match(collapsed, /× bash.*false.*expanded failure detail/u);
+  assert.doesNotMatch(collapsed, /bash failed/u);
   assert.deepEqual(conversation.toggleLatestToolExpanded(), { expanded: true, name: "bash" });
   assert.match(conversation.render(60).join("\n"), /expanded failure detail/);
 
@@ -466,7 +505,8 @@ test("subagent tool completion mirrors the closed isError lifecycle instead of c
     text: "Native pi-subagents intercom currently handles supervisor replies. Child agents initiate asks with contact_supervisor.",
   }));
   const projected = conversation.render(120).join("\n");
-  assert.match(projected, /× subagent failed/u);
+  assert.match(projected, /× subagent.*scout/u);
+  assert.doesNotMatch(projected, /subagent failed/u);
   assert.match(projected, /Native pi-subagents intercom/u);
   assert.doesNotMatch(projected, /✓ subagent done/u);
 });
@@ -541,12 +581,14 @@ test("live snapshot projection updates metrics, extension status, state, and rep
   projected = projectSnapshot(projected, event(3, "extension.status_changed", { key: "build", text: "green" }));
   projected = projectSnapshot(projected, event(4, "extension.tools_expanded_changed", { expanded: true }));
   assert.equal(projected.toolsExpanded, true);
-  projected = projectSnapshot(projected, event(5, "instance.state_changed", {
+  projected = projectSnapshot(projected, event(5, "git.branch_changed", { branch: "feature/live" }));
+  assert.equal(projected.gitBranch, "feature/live");
+  projected = projectSnapshot(projected, event(6, "instance.state_changed", {
     reason: "settled", lifecycle: "active", execution: "idle", compacting: false, lastRun: "succeeded",
     pending: { steering: 0, followUp: 0, total: 0 },
   }));
   projected = projectSnapshot(projected, {
-    ...event(1, "session.replaced", { reason: "reload", runtimeGeneration: 2, sessionFile: "/tmp/pi-2.jsonl", cwd: "/tmp/reloaded", piSessionId: "pi-2" }),
+    ...event(1, "session.replaced", { reason: "reload", runtimeGeneration: 2, sessionFile: "/tmp/pi-2.jsonl", cwd: "/tmp/reloaded", piSessionId: "pi-2", gitBranch: "replacement" }),
     runtimeGeneration: 2,
   });
 
@@ -558,6 +600,7 @@ test("live snapshot projection updates metrics, extension status, state, and rep
   assert.equal(projected.activeCommandId, undefined);
   assert.equal(projected.runtimeGeneration, 2);
   assert.equal(projected.cwd, "/tmp/reloaded");
+  assert.equal(projected.gitBranch, "replacement");
   assert.equal(projected.name, undefined);
   assert.equal(projected.executor.piSessionId, "pi-2");
   assert.equal(projected.eventCursor.runtimeGeneration, 2);
@@ -574,7 +617,7 @@ test("Work chrome separates semantic header metrics extensions and activity", ()
   const header = new DockWorkHeader(() => current);
   const activity = new DockActivityLine();
   const status = new DockStatusLine(current);
-  activity.setActivity("streaming");
+  activity.setActivity({ phase: "responding", label: "responding" });
   const headerLine = header.render(120).join("\n");
   const lines = status.render(120);
   assert.equal(lines.length, 2);
@@ -596,15 +639,16 @@ test("Work chrome separates semantic header metrics extensions and activity", ()
     ...current,
     name: "A very long customer migration session name",
     cwd: "/work/customer/project",
+    gitBranch: "feature/live",
     executor: { ...current.executor, thinkingLevel: "high" },
   };
   const responsiveHeader = header.render(80).join("\n");
-  assert.match(responsiveHeader, /A very.*\/work\/customer\/project.*gpt-test.*think high/u);
+  assert.match(responsiveHeader, /A very.*…er\/project \(feature\/live\).*gpt-test.*think high/u);
   activity.setActivity({ phase: "waiting", label: "waiting for model" });
   const narrowActivity = activity.render(43);
   const narrowHeader = header.render(43);
   const narrowStatus = status.render(43);
-  assert.match(narrowHeader.join("\n"), /A ve.*\/work.*gpt-test.*high/u);
+  assert.match(narrowHeader.join("\n"), /A ve.*\(featur.*gpt-test.*high/u);
   assert.equal(narrowActivity.length, 1);
   assert.match(narrowActivity[0] ?? "", /waiting for model/);
   assert.equal(narrowStatus.length, 2);
@@ -616,10 +660,17 @@ test("Work chrome separates semantic header metrics extensions and activity", ()
   assert.match(flowingFooter[1] ?? "", /cache 20%/u, "metrics follow the former header");
   assert.match(flowingFooter[2] ?? "", /alu-kanban: ready/u, "reserved extension row remains last");
 
+  const detachedHeader = new DockWorkHeader(() => ({ ...current, gitBranch: "detached" })).render(100).join("\n");
+  assert.match(detachedHeader, /project \(detached\)/u);
+  const nonRepositoryHeader = new DockWorkHeader(() => ({ ...current, gitBranch: undefined })).render(100).join("\n");
+  assert.match(nonRepositoryHeader, /customer\/project/u);
+  assert.doesNotMatch(nonRepositoryHeader, /\(feature\/live\)|\(detached\)/u);
+
   const emptyExtensions = new DockStatusLine({ ...current, extensionStatus: {} }).render(80);
   assert.equal(emptyExtensions[1], "");
 
   const diagnostics = formatWorkStatus(current);
+  assert.match(diagnostics, /Work cwd: \/work\/customer\/project \(feature\/live\)/u);
   assert.match(diagnostics, /Dock ID: dock-1/u);
   assert.match(diagnostics, /Pi session ID: pi-1/u);
   assert.match(diagnostics, /Runtime generation: 1/u);

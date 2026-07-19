@@ -47,7 +47,7 @@ async function main(): Promise<void> {
     forgetAttempted = true;
     await client.forget(instance.id);
     process.stdout.write(`${JSON.stringify({
-      kind: "dogfood.release_smoke",
+      kind: "athena.release_smoke",
       releaseId: args.releaseId,
       pid: ping.pid,
       hostEpoch: ping.hostEpoch,
@@ -83,9 +83,9 @@ function parseArgs(args: string[]): SmokeArgs {
     if (value === "--socket") socketPath = requiredValue(args, ++index, value);
     else if (value === "--cwd") cwd = requiredValue(args, ++index, value);
     else if (value === "--release") releaseId = requiredValue(args, ++index, value);
-    else throw new Error(`Unknown dogfood smoke argument: ${String(value)}`);
+    else throw new Error(`Unknown athena smoke argument: ${String(value)}`);
   }
-  if (!socketPath || !cwd || !releaseId) throw new Error("dogfood smoke requires --socket, --cwd, and --release");
+  if (!socketPath || !cwd || !releaseId) throw new Error("athena smoke requires --socket, --cwd, and --release");
   return { socketPath: resolve(socketPath), cwd: resolve(cwd), releaseId };
 }
 
@@ -97,6 +97,6 @@ function requiredValue(args: string[], index: number, option: string): string {
 
 main().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`${JSON.stringify({ kind: "dogfood.release_smoke_failed", message })}\n`);
+  process.stderr.write(`${JSON.stringify({ kind: "athena.release_smoke_failed", message })}\n`);
   process.exitCode = 1;
 });

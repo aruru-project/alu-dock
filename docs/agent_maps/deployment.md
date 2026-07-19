@@ -1,8 +1,8 @@
-# Managed Host 与 Dogfood Deployment 图谱
+# Managed Host 与 Athena Deployment 图谱
 
 ## 适用范围
 
-`systemd --user`、managed Host startup/readiness、durable catalog process lifecycle、immutable dogfood release、rollback与receipt。
+`systemd --user`、managed Host startup/readiness、durable catalog process lifecycle、immutable Athena release、rollback与receipt。
 
 ## 两条调用链
 
@@ -16,7 +16,7 @@ src/cli.ts service ...
               └── released cli.js serve --managed
 
 Release lifecycle
-scripts/deploy-dogfood.ts
+scripts/deploy-athena.ts
   ├── stage: clean committed HEAD + complete gate + immutable pending release
   ├── apply: explicit outer-shell Host replacement using the pending release
   ├── one-step deploy: retained operator path
@@ -52,9 +52,9 @@ Corrupt catalog evidence保留；失败时不得先构造prior runtime。Startup
 | 文件 | 唯一职责 | 主要测试 |
 |---|---|---|
 | `src/deployment/user-service.ts` | explicit generated-unit lifecycle、readiness、logs | `user-service` |
-| `src/deployment/dogfood-release.ts` | release layout、unit/launcher rendering、release ID | `dogfood-release` |
-| `scripts/deploy-dogfood.ts` | stage/apply与一次性immutable publish/switch/smoke/rollback transaction | `dogfood-release` + real deploy gate |
-| `scripts/dogfood-smoke.ts` | released DockClient command/resources/tools/settings smoke；Stop 后 Forget 自身 record，不污染 History | release gate |
+| `src/deployment/athena-release.ts` | release layout、unit/launcher rendering、release ID | `athena-release` |
+| `scripts/deploy-athena.ts` | stage/apply与一次性immutable publish/switch/smoke/rollback transaction | `athena-release` + real deploy gate |
+| `scripts/athena-smoke.ts` | released DockClient command/resources/tools/settings smoke；Stop 后 Forget 自身 record，不污染 History | release gate |
 | `src/cli.ts:serve()` | managed/dev mode composition与signal shutdown | `managed-mode`, process tests |
 | `src/control/dock-host.ts` | bind-first startup、drain、socket ownership、fatal completion | `durable-host-process`, `dock-control` |
 | `src/control/durable-catalog-store.ts` | strict schema-1 load、atomic replace、directory sync | `durable-catalog-store` |
@@ -79,20 +79,20 @@ Corrupt catalog evidence保留；失败时不得先构造prior runtime。Startup
 | managed startup顺序 | `cli.ts:serve`, `dock-host.ts` | catalog initialize、socket fault tests |
 | catalog file schema/atomicity | `core/catalog.ts`, `durable-catalog-store.ts` | reconcile、transaction、fault injection |
 | SIGTERM/SIGKILL行为 | `dock-host.ts`, `dock-registry.ts`, `managed-instance.ts` | durable subprocess fixture |
-| release layout/unit | `dogfood-release.ts` | deploy script、unit test、generated marker safety |
-| publish/rollback | `scripts/deploy-dogfood.ts` | released smoke、receipt、current symlink、service state |
-| installed resource startup | `scripts/dogfood-smoke.ts` | actual released DockClient full resources/tools/settings path |
+| release layout/unit | `athena-release.ts` | deploy script、unit test、generated marker safety |
+| publish/rollback | `scripts/deploy-athena.ts` | released smoke、receipt、current symlink、service state |
+| installed resource startup | `scripts/athena-smoke.ts` | actual released DockClient full resources/tools/settings path |
 
 ## Release规则
 
 - 只有用户明确授权后才允许apply/deploy、切换`current`、restart service或创建tag；stage不触碰运行Host。
-- `npm run stage:dogfood`允许Host-owned agent准备pending release；apply必须在turn结束、Ctrl+D后由外层shell显式运行，并拒绝managed Host后代进程。
+- `npm run stage:athena`允许Host-owned agent准备pending release；apply必须在turn结束、Ctrl+D后由外层shell显式运行，并拒绝managed Host后代进程。Apply默认拒绝active instance；`--allow-active`是明确的破坏性Host replacement opt-in。
 - 只发布clean committed HEAD；先完成code gate，再创建immutable release。
-- Release位于`dogfoodReleaseLayout()`定义的immutable目录；禁止直接patch live release。
-- 默认拒绝在active instance存在时restart。
-- 切换后验证systemd MainPID、V2 hello/hostEpoch、journal和released-client installed-resource smoke。
-- 任一步失败都回滚完整release与generated files；receipt记录code gate与deploy gate。
-- `npm run cli`只用于开发；managed dogfood的人类入口是installed `alu-dock`。
+- Release位于`athenaReleaseLayout()`定义的immutable目录；禁止直接patch live release。
+- 默认拒绝在active instance存在时restart；若unit/MainPID/socket仍有ownership证据但Host inspection失败，也必须fail-closed。
+- 所有publish路径都必须先停止并验证旧unit inactive，再改写generated files或切换`current`；切换后验证systemd MainPID、V2 hello/hostEpoch、journal和released-client installed-resource smoke。
+- 任一步失败都回滚完整release、generated files、launcher及service active/enabled状态；receipt记录code gate与deploy gate。
+- `npm run cli`只用于开发；managed Athena的人类入口是installed `aludock`。
 
 ## 测试层次
 

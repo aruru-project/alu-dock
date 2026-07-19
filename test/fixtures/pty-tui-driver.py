@@ -405,7 +405,7 @@ def main() -> int:
                         pass
             elif action == "tool-fold":
                 fold_deadline = time.monotonic() + 3
-                while b"Alt+O detail" not in output and time.monotonic() < fold_deadline:
+                while "✓ read".encode("utf-8") not in output and time.monotonic() < fold_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\x1bo")  # Alt+O: expand latest tool only.

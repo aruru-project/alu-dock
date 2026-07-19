@@ -70,6 +70,7 @@ import {
   parseClientHello,
   parseControlRequest,
   ProtocolValidationError,
+  GIT_BRANCH_CAPABILITY,
   TOOLS_EXPANDED_CAPABILITY,
 } from "./protocol.js";
 
@@ -538,7 +539,11 @@ export class DockHost {
     const cursor=request.params.since;
     if(cursor && cursor.instanceId!==instance.id) throw new ProtocolValidationError("invalid_cursor","Cursor belongs to another instance");
     const follow=request.params.follow;
-    const includeToolsExpanded=this.connectionRequirements.get(socket)?.has(TOOLS_EXPANDED_CAPABILITY)===true;
+    const requirements=this.connectionRequirements.get(socket);
+    const projectionCapabilities={
+      toolsExpanded: requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,
+      gitBranch: requirements?.has(GIT_BRANCH_CAPABILITY)===true,
+    };
     let initializing=true,pending:DockEvent[]=[]; let initializationOverflow=false; let lastGeneration=instance.runtimeGeneration,lastSent=0; let unsubscribe=()=>{};
     let controller:ControllerClaim|{status:"observing"}=request.params.controller==="observe"?{status:"observing"}:{status:"unavailable"};
     let controllerReleased=false,subscriptionClosed=false;
@@ -556,7 +561,7 @@ export class DockHost {
         lastGeneration=event.runtimeGeneration;lastSent=0;
       }
       if(event.sequence<=lastSent)return true;
-      const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event,includeToolsExpanded);if(outcome==="written"||outcome==="backpressured")lastSent=event.sequence;if(outcome==="written")return true;if(outcome==="backpressured")closeAfterBackpressure();else{closeSubscription();socket.destroy();}return false;
+      const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event,projectionCapabilities);if(outcome==="written"||outcome==="backpressured")lastSent=event.sequence;if(outcome==="written")return true;if(outcome==="backpressured")closeAfterBackpressure();else{closeSubscription();socket.destroy();}return false;
     };
     unsubscribe=instance.subscribe(event=>{if(initializing){pending.push(event);if(pending.length>MAX_INITIAL_EVENT_QUEUE){pending=[];initializationOverflow=true;closeSubscription();}return;}sendLiveEvent(event);});
     if(follow&&request.params.controller==="claim")controller=await instance.claimInteractionController();
@@ -575,7 +580,7 @@ export class DockHost {
       return;
     }
     const result=createBoundedEventsResult(projection,follow,request.requestId,controller);
-    const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,projectToolsExpandedForClient(result,includeToolsExpanded)));
+    const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,projectForClient(result,projectionCapabilities)));
     if(responseOutcome==="backpressured"){
       const drained=await waitForSocketDrain(socket,ATTACH_DRAIN_TIMEOUT_MS);
       if(!drained){initializing=false;pending=[];closeAfterBackpressure();return;}
@@ -583,7 +588,7 @@ export class DockHost {
         initializing=false;pending=[];
         if(initializationOverflow&&!socket.destroyed&&!socket.writableEnded){
           const diagnostic=await instance.reportControlDegradation(ATTACH_INITIAL_OVERFLOW_MESSAGE);
-          const diagnosticOutcome=writeEvent(socket,request.requestId,this.hostEpoch,diagnostic,includeToolsExpanded);
+          const diagnosticOutcome=writeEvent(socket,request.requestId,this.hostEpoch,diagnostic,projectionCapabilities);
           if(diagnosticOutcome==="written")socket.end();else closeAfterBackpressure();
         }else closeAfterBackpressure();
         return;
@@ -611,7 +616,7 @@ export class DockHost {
     for (const socket of streams) socket.destroy();
   }
 
-  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const includeToolsExpanded=this.connectionRequirements.get(socket)?.has(TOOLS_EXPANDED_CAPABILITY)===true;const projected=projectToolsExpandedForClient(result,includeToolsExpanded);const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,projected));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
+  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const requirements=this.connectionRequirements.get(socket);const projected=projectForClient(result,{toolsExpanded:requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,gitBranch:requirements?.has(GIT_BRANCH_CAPABILITY)===true});const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,projected));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
   private sendErrorAndEnd(socket:Socket,code:string,message:string,requestId:string,details?:JsonObject,retryable=false):void { if(socket.destroyed||socket.writableEnded)return;const response:ControlResponse={kind:"response",version:2,requestId,hostEpoch:this.hostEpoch,ok:false,error:{code,message:truncateMessage(message),retryable,...(details===undefined?{}:{details})}};if(endEnvelope(socket,response)==="too_large")socket.destroy(); }
   private sendHelloError(socket:Socket,requestId:string,code:HelloError["error"]["code"],message:string,details:{hostVersions?:number[];missing?:string[];retryAfterMs?:number}={}):void { if(socket.destroyed||socket.writableEnded)return;const envelope:HelloError={kind:"hello_error",requestId,error:{code,message:truncateMessage(message),...details}};try{socket.end(encodeJsonLine(envelope));}catch{socket.destroy();} }
 }
@@ -737,9 +742,14 @@ function createBoundedEventsResult(projection:AttachProjection,following:boolean
     return result;
   }
 }
-function projectToolsExpandedForClient(value: unknown, includeToolsExpanded: boolean): unknown {
-  if (includeToolsExpanded || value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map((item) => projectToolsExpandedForClient(item, false));
+interface ClientProjectionCapabilities {
+  toolsExpanded: boolean;
+  gitBranch: boolean;
+}
+
+function projectForClient(value: unknown, capabilities: ClientProjectionCapabilities): unknown {
+  if ((capabilities.toolsExpanded && capabilities.gitBranch) || value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((item) => projectForClient(item, capabilities));
 
   const source = value as Record<string, unknown>;
   const isSnapshot = typeof source.id === "string"
@@ -754,29 +764,39 @@ function projectToolsExpandedForClient(value: unknown, includeToolsExpanded: boo
     && typeof source.earliest === "object"
     && source.latest !== null
     && typeof source.latest === "object";
+  const eventType = typeof source.type === "string" ? source.type : undefined;
   const projected: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(source)) {
-    if (isSnapshot && key === "toolsExpanded") continue;
+    if (isSnapshot && key === "toolsExpanded" && !capabilities.toolsExpanded) continue;
+    if (isSnapshot && key === "gitBranch" && !capabilities.gitBranch) continue;
     if (isEventPage && key === "events" && Array.isArray(child)) {
       projected[key] = child
-        .filter((event) => !isToolsExpandedEvent(event))
-        .map((event) => projectToolsExpandedForClient(event, false));
+        .filter((event) => !isUnsupportedProjectionEvent(event, capabilities))
+        .map((event) => projectForClient(event, capabilities));
       continue;
     }
-    projected[key] = projectToolsExpandedForClient(child, false);
+    if (eventType === "session.replaced" && key === "data" && !capabilities.gitBranch && child !== null && typeof child === "object" && !Array.isArray(child)) {
+      const data = { ...(child as Record<string, unknown>) };
+      delete data.gitBranch;
+      projected[key] = projectForClient(data, capabilities);
+      continue;
+    }
+    projected[key] = projectForClient(child, capabilities);
   }
   return projected;
 }
 
-function isToolsExpandedEvent(value: unknown): boolean {
-  return value !== null
-    && typeof value === "object"
-    && (value as { type?: unknown }).type === "extension.tools_expanded_changed";
+function isUnsupportedProjectionEvent(value: unknown, capabilities: ClientProjectionCapabilities): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const type = (value as { type?: unknown }).type;
+  return (!capabilities.toolsExpanded && type === "extension.tools_expanded_changed")
+    || (!capabilities.gitBranch && type === "git.branch_changed");
 }
 
-function writeEvent(socket:Socket,requestId:string,hostEpoch:string,event:DockEvent,includeToolsExpanded:boolean):WriteOutcome {
-  if (!includeToolsExpanded && event.type === "extension.tools_expanded_changed") return "written";
-  const envelope:ControlEventEnvelope={kind:"event",version:2,requestId,hostEpoch,event};
+function writeEvent(socket:Socket,requestId:string,hostEpoch:string,event:DockEvent,capabilities:ClientProjectionCapabilities):WriteOutcome {
+  if (isUnsupportedProjectionEvent(event, capabilities)) return "written";
+  const projectedEvent=projectForClient(event,capabilities) as DockEvent;
+  const envelope:ControlEventEnvelope={kind:"event",version:2,requestId,hostEpoch,event:projectedEvent};
   return writeEnvelope(socket,envelope);
 }
 

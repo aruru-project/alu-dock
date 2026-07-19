@@ -41,6 +41,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
   readonly extensionCommands = new Set<string>();
   sessionMutationCalls = { new: 0, switch: 0, name: 0, compact: 0, reload: 0, navigate: 0, fork: 0, clone: 0 };
   sessionName: string | undefined;
+  gitBranch: string | undefined;
   abortCalls = 0;
   clearQueueCalls = 0;
   abortError: Error | undefined;
@@ -103,6 +104,13 @@ export class DelayedRuntimeSession implements RuntimeSession {
   constructor(sessionId: string) {
     this.sessionId = sessionId;
     this.sessionFile = `/tmp/${sessionId}.jsonl`;
+  }
+
+  getGitBranch(): string | undefined { return this.gitBranch; }
+
+  setGitBranch(branch: string | undefined): void {
+    this.gitBranch = branch;
+    this.emit({ type: "dock_git_branch_changed", branch });
   }
 
   subscribe(listener: (event: RuntimeEvent) => void): () => void {

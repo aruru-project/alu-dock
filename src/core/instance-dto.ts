@@ -123,10 +123,11 @@ export interface EventDataMap {
   "queue.cleared": PendingDto & { queueItemIds: string[]; reason: "dequeued" | "abort" | "stop" | "replacement" | "host_draining" };
   "compaction.started": { reason: "manual" | "threshold" | "overflow"; operationId?: string };
   "compaction.completed": { reason: "manual" | "threshold" | "overflow"; operationId?: string; aborted: boolean; willRetry: boolean; error?: string };
-  "session.replaced": { reason: "new" | "resume" | "fork" | "reload"; previousSessionFile?: string; sessionFile?: string; runtimeGeneration: number; cwd: string; piSessionId: string; name?: string };
+  "session.replaced": { reason: "new" | "resume" | "fork" | "reload"; previousSessionFile?: string; sessionFile?: string; runtimeGeneration: number; cwd: string; piSessionId: string; name?: string; gitBranch?: string };
   "session.navigated": { targetId: string; leafId?: string; treeRevision: string; summaryCreated: boolean };
   "session.info_changed": { name?: string };
   "session.metrics_changed": { metrics: SessionMetricsDto };
+  "git.branch_changed": { branch?: string };
   "model.changed": { provider: string; id: string; thinkingLevel: RuntimeThinkingLevel; availableThinkingLevels: RuntimeThinkingLevel[] };
   "thinking.changed": { requested: RuntimeThinkingLevel; thinkingLevel: RuntimeThinkingLevel; availableThinkingLevels: RuntimeThinkingLevel[] };
   "resources.reloaded": { resources: ResourceDto[]; diagnostics: DiagnosticDto[] };
@@ -158,6 +159,7 @@ export interface InstanceSnapshot {
   creationOperationId: string;
   name?: string;
   cwd: string;
+  gitBranch?: string;
   lifecycle: InstanceLifecycle;
   execution: InstanceExecution;
   compacting: boolean;

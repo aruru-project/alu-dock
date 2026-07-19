@@ -17,6 +17,7 @@ import { CatalogEffectUnknownError } from "../src/core/catalog.js";
 import { SETTING_KEYS } from "../src/core/config-projection.js";
 import { ManagedInstance } from "../src/core/managed-instance.js";
 import { RuntimeCompactionKnownFailureError, RuntimeInvalidSettingValueError, RuntimeSettingsWriteError } from "../src/core/runtime-session.js";
+import type { GitBranchObserverPort } from "../src/pi/git-branch-observer.js";
 import {
   PiRuntimeHost,
   type PiRuntimeHostOptions,
@@ -346,6 +347,20 @@ class FakeRuntimeOwner {
   }
 }
 
+class FakeGitBranchObserver implements GitBranchObserverPort {
+  disposeCalls = 0;
+  constructor(
+    public branch: string | undefined,
+    private readonly onChange: (branch: string | undefined) => void,
+  ) {}
+  emit(branch: string | undefined): void {
+    if (this.disposeCalls > 0) return;
+    this.branch = branch;
+    this.onChange(branch);
+  }
+  dispose(): void { this.disposeCalls += 1; }
+}
+
 async function runtimeHost(
   trace: string[],
   configure: (owner: FakeRuntimeOwner, initial: FakeSession) => void = () => {},
@@ -381,6 +396,54 @@ test("Pi runtime host binds initial listener before extensions and delays startu
   await host.dispose();
   assert.equal(initial.unsubscribeCalls, 1);
   assert.equal(initial.disposeCalls, 1);
+});
+
+test("Pi runtime host owns Git observers across live changes and replacement disposal", async () => {
+  const trace: string[] = [];
+  const observers: FakeGitBranchObserver[] = [];
+  const { host } = await runtimeHost(trace, undefined, {
+    gitBranchObserverFactory: async (_cwd, onChange) => {
+      const observer = new FakeGitBranchObserver(observers.length === 0 ? "main" : "replacement", onChange);
+      observers.push(observer);
+      return observer;
+    },
+    commitReplacement: async () => {
+      observers[1]?.emit("candidate-intermediate");
+      observers[1]?.emit("replacement-final");
+    },
+  });
+  const events: Array<{ type: string; branch?: unknown }> = [];
+  host.subscribe((event) => events.push({ type: event.type, branch: event.branch ?? event.gitBranch }));
+  host.activateInitial();
+  assert.equal(host.getGitBranch(), "main");
+
+  observers[0]?.emit("feature/live");
+  assert.equal(host.getGitBranch(), "feature/live");
+  assert.deepEqual(events.at(-1), { type: "dock_git_branch_changed", branch: "feature/live" });
+
+  await host.newSession("replace-with-observer");
+  assert.equal(observers[0]?.disposeCalls, 1);
+  assert.equal(host.getGitBranch(), "replacement-final");
+  assert.deepEqual(events.find((event) => event.type === "dock_session_replaced"), {
+    type: "dock_session_replaced",
+    branch: "replacement-final",
+  });
+  assert.equal(events.some((event) => event.branch === "candidate-intermediate"), false);
+  assert.equal(events.some((event) => event.type === "dock_git_branch_changed" && event.branch === "replacement-final"), false);
+
+  events.length = 0;
+  await host.reload("reload-with-observer");
+  assert.deepEqual(events.find((event) => event.type === "dock_session_replaced"), {
+    type: "dock_session_replaced",
+    branch: "replacement-final",
+  });
+  assert.equal(events.some((event) => event.type === "dock_git_branch_changed"), false);
+
+  const count = events.length;
+  observers[0]?.emit("stale");
+  assert.equal(events.length, count);
+  await host.dispose();
+  assert.equal(observers[1]?.disposeCalls, 1);
 });
 
 test("Pi runtime host projects public session stats for the SSH footer", async () => {

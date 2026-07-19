@@ -89,9 +89,12 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
   let factoryCalls = 0;
+  let gatedSession: DelayedRuntimeSession | undefined;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
     factoryCalls += 1;
-    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedRuntimeSession(`pi-${id}`) });
+    gatedSession = new DelayedRuntimeSession(`pi-${id}`);
+    gatedSession.gitBranch = "main";
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: gatedSession });
   }, () => "gated-instance", { hostEpoch: "host-epoch-gate", startedAt: "2026-07-14T00:00:00.000Z" });
   const host = new DockHost({ socketPath, registry });
   context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
@@ -117,7 +120,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.tools-expanded.v1", "extension_ui.v1", "host.info", "instance.catalog", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tools.v1", "tui.projection.v1"]);
+  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.tools-expanded.v1", "extension_ui.v1", "git.branch-footer.v1", "host.info", "instance.catalog", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -133,7 +136,10 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
   assert.equal(factoryCalls, 1);
   assert.equal(created.creationOperationId, "request-1");
   assert.equal(created.ownerHostEpoch, "host-epoch-gate");
+  assert.equal(created.gitBranch, "main");
   await client.setToolsExpanded(created.id, created.runtimeGeneration, true, "compat-expanded");
+  gatedSession?.setGitBranch("feature/live");
+  assert.equal((await client.status(created.id)).gitBranch, "feature/live");
   const legacyAttach = await exchangeRequestAfterHello(
     socketPath,
     ["core.v2", "events.follow"],
@@ -141,9 +147,11 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
   );
   const legacyResult = objectValue(legacyAttach.result);
   assert.equal("toolsExpanded" in objectValue(legacyResult.instance), false);
+  assert.equal("gitBranch" in objectValue(legacyResult.instance), false);
   const legacyEvents = objectValue(legacyResult.page).events;
   assert.ok(Array.isArray(legacyEvents));
   assert.equal(legacyEvents.some((event) => objectValue(event).type === "extension.tools_expanded_changed"), false);
+  assert.equal(legacyEvents.some((event) => objectValue(event).type === "git.branch_changed"), false);
   assert.deepEqual((await client.hostInfo()).diagnostics[0], {
     severity: "info", message: "Development registry is in-memory and non-durable", source: "registry",
   });
@@ -1253,7 +1261,8 @@ test("SSH TUI model picker filters input while complete history flows into nativ
   const toolOutput = Buffer.from(toolPty.output, "base64").toString("utf8");
   assert.equal(toolPty.timedOut, false, toolOutput.slice(-4_000));
   assert.equal(toolPty.status, 0, toolOutput.slice(-4_000));
-  assert.match(toolOutput, /Alt\+O detail/);
+  assert.match(toolOutput, /✓ read/u);
+  assert.doesNotMatch(toolOutput, /Alt\+O detail/u);
   assert.match(toolOutput, /expanded tool detail/);
   assert.equal(runtime?.disposeCalls, 0);
 });
@@ -2715,7 +2724,7 @@ test("adopt negotiates its dedicated capability before sending a mutation", asyn
   assert.equal(mutationRequests, 0);
 });
 
-test("read-only list bridges a pre-toolsExpanded V2 Host during staged update inspection", async (context) => {
+test("read-only list bridges a pre-projection-capability V2 Host during staged update inspection", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-legacy-list-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
@@ -2771,7 +2780,9 @@ test("read-only list bridges a pre-toolsExpanded V2 Host during staged update in
   assert.equal(listRequests, 1);
   assert.equal(hellos.length, 2);
   assert.equal(hellos[0]?.includes("extension_ui.tools-expanded.v1"), true);
+  assert.equal(hellos[0]?.includes("git.branch-footer.v1"), true);
   assert.equal(hellos[1]?.includes("extension_ui.tools-expanded.v1"), false);
+  assert.equal(hellos[1]?.includes("git.branch-footer.v1"), false);
 });
 
 test("typed list rejects a non-progressing continuation without issuing another request", async (context) => {
@@ -2791,7 +2802,7 @@ test("typed list rejects a non-progressing continuation without issuing another 
             version: 2,
             host: { pid: 8, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "list-progress-epoch", startedAt: "2026-07-14T00:00:00.000Z" },
             catalogSchemaVersion: 1,
-            capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "instance.catalog"],
+            capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.catalog"],
             limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
           }));
         } else {
@@ -2825,7 +2836,7 @@ test("an LF-truncated control response is reported as recoverable connection los
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-partial-frame-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  const capabilities = ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "instance.catalog", "queue.control.v1", "run.abort.v1", "tui.projection.v1"];
+  const capabilities = ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.catalog", "queue.control.v1", "run.abort.v1", "tui.projection.v1"];
   const server = createServer((socket) => {
     const decoder = new JsonLineDecoder();
     socket.on("data", (chunk: Buffer) => {
@@ -3049,7 +3060,7 @@ test("post-send mutation transport loss is effect_unknown with caller operation 
       for (const line of decoder.push(chunk)) {
         const frame = objectValue(JSON.parse(line) as unknown);
         if (frame.kind === "hello") {
-          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 8, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "effect-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "instance.catalog"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
+          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 8, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "effect-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.catalog"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
         } else socket.destroy();
       }
     });
@@ -3075,7 +3086,7 @@ test("post-send mutation timeout is effect_unknown and is not retried", async (c
       for (const line of decoder.push(chunk)) {
         const frame = objectValue(JSON.parse(line) as unknown);
         if (frame.kind === "hello") {
-          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 9, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "timeout-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "instance.catalog"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
+          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 9, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "timeout-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.catalog"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
         } else requests += 1;
       }
     });
@@ -3137,7 +3148,7 @@ test("stream callbacks follow initial response order and accept one-step replace
             kind: "hello_ack", requestId: "fixed", version: 2,
             host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
             catalogSchemaVersion: 1,
-            capabilities: ["core.v2", "events.follow", "extension_ui.tools-expanded.v1"],
+            capabilities: ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1"],
             limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
           }));
           continue;
@@ -3198,7 +3209,7 @@ test("conversation bootstrap negotiates replay-purpose support before sending at
           kind: "hello_ack", requestId: "fixed", version: 2,
           host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
           catalogSchemaVersion: 1,
-          capabilities: ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "queue.control.v1", "run.abort.v1", "tui.projection.v1"],
+          capabilities: ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "queue.control.v1", "run.abort.v1", "tui.projection.v1"],
           limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
         }));
       }
@@ -3230,7 +3241,7 @@ test("TUI projection capability is required before the attach request", async (c
           kind: "hello_ack", requestId: "fixed", version: 2,
           host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
           catalogSchemaVersion: 1,
-          capabilities: ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "run.abort.v1"],
+          capabilities: ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "run.abort.v1"],
           limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
         }));
       }

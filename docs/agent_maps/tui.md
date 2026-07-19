@@ -54,7 +54,7 @@ Session Work TUI
 | `src/tui/dock-tui.ts` | attached Work flowing composition、commands、focus/key actions、replacement reconciliation | `tui-ux-state`, PTY fixture |
 | `src/tui/conversation.ts` | complete flowing branch conversation、UI-only extension notify rows、hard/soft multiline tool rendering | `tui-conversation` |
 | `src/tui/snapshot-projection.ts` | DockEvent → local InstanceSnapshot reducer | `tui-ux-state` |
-| `src/tui/run-activity.ts` | runtime/queue/interaction专属的current-session activity reducer | `tui-ux-state` |
+| `src/tui/run-activity.ts` | authoritative runtime/model/boundary current-session activity reducer | `tui-ux-state` |
 | `src/tui/activity-pulse.ts` | frame-cached activity animation scheduler；idle无timer | `tui-ux-state` |
 | `src/tui/history-pagination.ts` | eager reverse-page drain、overlap dedup、history/live exact reconciliation | `history-pagination` |
 | `src/tui/pending-queue.ts` | pending queue tray projection | `tui-ux-state` |
@@ -65,7 +65,8 @@ Session Work TUI
 | `src/tui/searchable-picker.ts`, `search-filter.ts` | reusable picker与deterministic filtering | `tui-ux-state` |
 | `src/tui/mouse-input.ts` | Hub-only bounded click/wheel decoding、paired tracking sequences | Hub parser/layout、PTY |
 | `src/tui/select-instance.ts` | 仅供显式旧 `open` smart-entry 的legacy chooser | managed/PTY tests |
-| `src/tui/theme.ts` | terminal color capability与Night Console palette | render/PTY checks |
+| `src/tui/alu-palette.ts` | canonical Alu palette（mascot与Work theme共同唯一来源） | render/ANSI/NO_COLOR checks |
+| `src/tui/theme.ts` | terminal color capability与palette-derived semantic paint | render/PTY checks |
 | `src/tui/alu-mascot.ts` | 大/小阿露静态帧、TrueColor/ANSI/NO_COLOR安全投影 | `alu-mascot`, PTY |
 
 ## 人类事实分类
@@ -73,7 +74,7 @@ Session Work TUI
 | 类别 | 去向 | 示例 |
 |---|---|---|
 | Durable conversation | `DockConversation` | user/assistant/tool result、session-changing outcome |
-| Runtime activity | 小阿露fixed activity slot | submitting、model streaming、tool running、queue、interaction、aborting；extension notify不得写入 |
+| Runtime activity | 小阿露fixed activity slot | submitting admission、model waiting/thinking/responding、compaction/retry/interaction/aborting；queue/tool/local feedback不得写入 |
 | Extension notify feedback | `DockConversation`的UI-only rows | 连续tail `info`原位替换；有可见内容介入后新建；`warning/error`逐条追加；不写Pi session history |
 | Persistent extension status | reserved extension footer row | `setStatus(key,text)`同key替换、不同key并存、`undefined`删除 |
 | Interaction | focused dialog/editor | Extension UI select/confirm/input/editor |
@@ -84,7 +85,7 @@ Warning必须说明用户影响和可执行动作；closed Host projection本身
 
 ## Alu 视觉主题硬约束
 
-- `src/tui/alu-mascot.ts` 的阿露色板是唯一 canonical palette：`#69424e`、`#976269`、`#f6c147`、`#f4d8ce`、`#6c84cd`、`#dd7e9e`、`#e6e1f2`。原稿与产品决定见 card #202；蓝色只允许偏紫/偏靛方向。
+- `src/tui/alu-palette.ts` 是 mascot 与 Work 共享的唯一 canonical palette：`#69424e`、`#976269`、`#f6c147`、`#f4d8ce`、`#6c84cd`、`#dd7e9e`、`#e6e1f2`。原稿与产品决定见 card #202；蓝色只允许偏紫/偏靛方向。
 - 禁止把 cyan、teal、turquoise、emerald、青绿或霓虹科技蓝作为 accent、success、selection 或默认交互色；不得以常见 dark-dashboard/Tailwind 风格代替阿露身份。成功状态优先由 `✓`、文案和结构表达。
 - `theme.ts` 只能复用或从 canonical palette 派生前景、局部 surface 与降级色；不得自行维护第二套品牌色。终端背景由用户拥有，不做全屏背景接管。
 - 对齐 stock Pi 的对象是 conversation 的角色层级、分组、间距、内容优先与展开/折叠语义，不是 Pi 的颜色。compaction、thinking、assistant、tool invocation/result 必须一眼可区分，collapsed 也必须保留语义，禁止统一压成“图标 + done + 一行摘要 + 快捷键”的遥测日志。
@@ -111,7 +112,7 @@ Warning必须说明用户影响和可执行动作；closed Host projection本身
 - Session Work 始终使用可流动的main buffer与terminal-native drag/selection/scrollback，不启用1000/1006或alternate screen，也没有Alt+M、`/mouse`模式；Work导航不得用清空terminal scrollback的force redraw。
 - detach、stop、signal和异常退出都恢复terminal mode；Ctrl+D 是不等待长 Host mutation 的本地最高优先级 detach。
 - Work overlay 统一使用有边界的 modal frame 与栈式焦点恢复；picker/text/editor child在每次render时从当前terminal rows取得完整内容预算，resize后立即重算，先保留selection/footer再裁切body/input viewport。80×24时80% overlay最多19行（17 child rows + 2 frame rows）。固定动作不用 searchable picker。Tree 的 Branch action 保持原 Tree surface 挂载，Esc 返回时保留 filter/search/fold/selection。
-- Work TUI不持有Pi对象，不读取session JSONL；只通过DockClient和closed DTO/event。Fresh attach 的对话真相是当前 branch history，不把旧 lifecycle/navigation replay 投影为 conversation；无command ID的`runtime-initiated` active run仍恢复未完成tool/message tail。`display:false` custom control message永不成为conversation。
+- Work TUI不持有Pi对象，不读取session JSONL，也不从client shell轮询Git；只通过DockClient和closed DTO/event。Footer workspace context使用Host协商的`git.branch-footer.v1`投影：repository显示`cwd (branch)`、detached HEAD显示`cwd (detached)`、非repository只显示cwd。Fresh attach 的对话真相是当前 branch history，不把旧 lifecycle/navigation replay 投影为 conversation；无command ID的`runtime-initiated` active run仍恢复未完成tool/message tail。`display:false` custom control message永不成为conversation。
 - 当前branch effective history必须在进入Work时跨内部200-entry页完整drain，paging只属于传输获取，UI不暴露page/anchor/paused状态。`DockConversation`按stock Pi方式作为flowing chat container进入terminal scrollback；历史、coherent attach bootstrap与加载期间live events按内容/cursor去重且恰好投影一次。长历史、expanded tools与多次compaction仍须保持composer/footer响应。
 - Queue是Same-Host memory；in-flight/failed/ambiguous mutation不声称已restore，也不自动abort。Queue与active run正交，pending内容只进入composer邻近tray/conversation tail，不得抢占固定Activity中的model phase。
 - Exact extension command不进入pending queue；unknown slash保留Pi-native语义。

@@ -23,7 +23,7 @@ export interface OpenDockOptions {
 /** Human entry point. Only an explicit Hub action or direct Work command may construct a runtime. */
 export async function openDock(options: OpenDockOptions): Promise<void> {
   if (process.stdin.isTTY !== true || process.stdout.isTTY !== true) {
-    throw new Error("The Alu Dock interactive client requires a TTY; run `alu-dock --help` for non-interactive guidance");
+    throw new Error("The Alu Dock interactive client requires a TTY; run `aludock --help` for non-interactive guidance");
   }
 
   const cwd = resolve(options.cwd);
@@ -57,7 +57,7 @@ export async function openDock(options: OpenDockOptions): Promise<void> {
     process.stdout.write(`Stopped ${displayName(result.instance)}.${cleanup}\n`);
   } else {
     process.stdout.write(
-      `Detached from ${displayName(result.instance)}; the instance remains host-owned. Run alu-dock to return to the Hub.\n`,
+      `Detached from ${displayName(result.instance)}; the instance remains host-owned. Run aludock to return to the Hub.\n`,
     );
   }
 }
@@ -107,8 +107,8 @@ async function resolveWorkInstance(
 
   if (options.mode === "attach") throw new Error("attach requires TARGET; use a full ID, displayed unique prefix, or unique exact name");
 
-  // Explicit `alu-dock open` keeps the legacy project smart-entry. Bare
-  // `alu-dock` never reaches this path and therefore cannot create/reopen.
+  // Explicit `aludock open` keeps the legacy project smart-entry. Bare
+  // `aludock` never reaches this path and therefore cannot create/reopen.
   const matching = (await client.list("all"))
     .filter((instance) => instance.lifecycle !== "stopped" && resolve(instance.cwd) === options.cwd)
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
@@ -138,7 +138,7 @@ function lifecycleActionError(
 ): string {
   const identity = displayName(instance);
   if ((instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error") && instance.reopenable) {
-    return `${identity} is ${instance.lifecycle} and cannot be attached without a runtime. Use \`alu-dock open ${instance.id}\` to reopen it, or choose Resume in the Hub.`;
+    return `${identity} is ${instance.lifecycle} and cannot be attached without a runtime. Use \`aludock open ${instance.id}\` to reopen it, or choose Resume in the Hub.`;
   }
   if (instance.lifecycle === "stopping") return `${identity} is stopping; wait for a terminal state before choosing another action.`;
   if (instance.lifecycle === "stopped") return `${identity} is stopped history and cannot be ${action === "attach" ? "attached" : "opened"}. Adopt its Pi session from the Hub or create a new instance.`;

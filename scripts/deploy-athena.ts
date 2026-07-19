@@ -20,17 +20,24 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import { defaultSocketPath } from "../src/control/socket-path.js";
 import {
-  DOGFOOD_GENERATED_MARKER,
-  DOGFOOD_UNIT_NAME,
-  dogfoodReleaseLayout,
+  ATHENA_UNIT_NAME,
+  assertAthenaHostReplacementAllowed,
+  assertAthenaJournalClean,
+  athenaHostAbsenceIsConfirmed,
+  athenaReleaseLayout,
+  isAthenaGeneratedContent,
+  parseAthenaPendingRelease,
+  parseAthenaSystemdUnitEvidence,
+  planAthenaLegacyLauncherCleanup,
+  planAthenaRollback,
   releaseId,
-  parseDogfoodPendingRelease,
-  renderDogfoodLauncher,
-  renderDogfoodUnit,
+  renderAthenaLauncher,
+  renderAthenaUnit,
   renderReleasedHostInspectionScript,
-  type DogfoodPendingRelease,
-  type DogfoodReleaseLayout,
-} from "../src/deployment/dogfood-release.js";
+  type AthenaPendingRelease,
+  type AthenaReleaseLayout,
+  type AthenaSystemdUnitEvidence,
+} from "../src/deployment/athena-release.js";
 import { DOCK_VERSION, PI_SDK_VERSION } from "../src/version.js";
 
 interface DeployOptions {
@@ -51,6 +58,11 @@ interface HostBeforeDeploy {
 
 interface ReadyHost { pid: number; hostEpoch: string }
 interface GeneratedFileSnapshot { path: string; content?: string; mode?: number }
+interface GeneratedSymlinkSnapshot { path: string; target?: string }
+interface LegacyLauncherSnapshot {
+  launcher?: GeneratedFileSnapshot;
+  userLauncher?: GeneratedSymlinkSnapshot;
+}
 interface CommandOptions { cwd?: string; capture?: boolean; allowFailure?: boolean }
 interface CommandResult { status: number; stdout: string; stderr: string }
 
@@ -73,17 +85,15 @@ async function main(): Promise<void> {
 async function deployNow(options: DeployOptions): Promise<void> {
   const repository = resolve(process.cwd());
   assertRepository(repository);
-  const layout = dogfoodReleaseLayout(homedir(), options.releaseRoot);
+  const layout = athenaReleaseLayout(homedir(), options.releaseRoot);
   const socketPath = defaultSocketPath();
 
   const commit = command("git", ["rev-parse", "HEAD"], { cwd: repository, capture: true }).stdout.trim();
   assertCleanRepository(repository);
-  const before = await inspectCurrentHost(socketPath, layout);
-  if (before?.activeInstances && !options.allowActive) {
-    throw new Error(`Deployment refused: current Host has ${before.activeInstances} active instance(s); stop them first or pass --allow-active explicitly`);
-  }
+  let before = await inspectCurrentHost(socketPath, layout);
+  assertAthenaHostReplacementAllowed(before?.activeInstances ?? 0, options.allowActive);
   if (before && !before.managed && !options.replaceUnmanaged) {
-    throw new Error(`Deployment refused: PID ${before.pid} owns the socket outside ${DOGFOOD_UNIT_NAME}; rerun with --replace-unmanaged after confirming no active work`);
+    throw new Error(`Deployment refused: PID ${before.pid} owns the socket outside ${ATHENA_UNIT_NAME}; rerun with --replace-unmanaged after confirming no active work`);
   }
 
   runReleaseGate(repository);
@@ -100,28 +110,48 @@ async function deployNow(options: DeployOptions): Promise<void> {
   let switched = false;
   let generatedFilesTouched = false;
   let previousGeneratedFiles: GeneratedFileSnapshot[] = [];
+  let previousUserLauncher: GeneratedSymlinkSnapshot | undefined;
+  let previousLegacyLauncher: LegacyLauncherSnapshot | undefined;
+  let serviceStopAttempted = false;
+  let serviceWasActive = false;
+  let serviceWasEnabled = false;
   let ready: ReadyHost | undefined;
   try {
     await buildRelease({ repository, staging, id, commit });
     await rename(staging, finalRelease);
+    const latestBefore = await inspectCurrentHost(socketPath, layout);
+    if (latestBefore?.hostEpoch !== before?.hostEpoch || latestBefore?.pid !== before?.pid) {
+      throw new Error("Deployment refused because Host ownership changed while the release gate was running");
+    }
+    before = latestBefore;
+    assertAthenaHostReplacementAllowed(before?.activeInstances ?? 0, options.allowActive);
+    const unitBeforeMutation = inspectSystemdUnit();
+    serviceWasActive = unitBeforeMutation.active;
+    serviceWasEnabled = unitBeforeMutation.enabled;
     previousRelease = await currentRelease(layout);
     previousGeneratedFiles = await Promise.all([
       captureGeneratedFile(layout.launcher),
       captureGeneratedFile(layout.unitFile),
     ]);
+    previousUserLauncher = await captureGeneratedSymlink(layout.userLauncher, layout.launcher);
+    previousLegacyLauncher = await captureLegacyLauncher(layout);
+    serviceStopAttempted = true;
+    restoreUnitActivity("leave_stopped");
+    if (before && !before.managed) await stopUnmanagedHost(before.pid, socketPath);
     generatedFilesTouched = true;
     await installGeneratedFiles(layout);
+    await removeLegacyLauncher(previousLegacyLauncher, layout);
     await switchCurrent(layout, finalRelease);
     switched = true;
 
+    const journalStartedAt = new Date();
     command("systemctl", ["--user", "daemon-reload"]);
-    if (before && !before.managed) await stopUnmanagedHost(before.pid, socketPath);
-    command("systemctl", ["--user", "enable", DOGFOOD_UNIT_NAME]);
-    if (isUnitActive()) command("systemctl", ["--user", "restart", DOGFOOD_UNIT_NAME]);
-    else command("systemctl", ["--user", "start", DOGFOOD_UNIT_NAME]);
+    command("systemctl", ["--user", "enable", ATHENA_UNIT_NAME]);
+    command("systemctl", ["--user", "start", ATHENA_UNIT_NAME]);
 
     ready = await waitForReadyHost(socketPath, before?.hostEpoch);
     const smoke = runReleasedSmoke(finalRelease, socketPath, options.projectCwd, id);
+    const journal = checkReleaseJournal(journalStartedAt);
     const receipt = {
       schemaVersion: 1,
       status: "deployed",
@@ -134,15 +164,16 @@ async function deployNow(options: DeployOptions): Promise<void> {
       nodeVersion: process.version,
       dockVersion: DOCK_VERSION,
       piSdkVersion: PI_SDK_VERSION,
-      unit: DOGFOOD_UNIT_NAME,
+      unit: ATHENA_UNIT_NAME,
       mainPid: ready.pid,
       hostEpoch: ready.hostEpoch,
       previousHostEpoch: before?.hostEpoch,
       gate: { typescript: "pass", tests: "pass", audit: "pass", imports: "pass", cleanTree: "pass" },
       smoke,
+      journal,
     };
     await writeReceipt(layout, `${id}.json`, receipt);
-    process.stdout.write(`${JSON.stringify({ kind: "dogfood.deployed", ...receipt })}\n`);
+    process.stdout.write(`${JSON.stringify({ kind: "athena.deployed", ...receipt })}\n`);
   } catch (error) {
     const message = boundedMessage(error);
     await writeReceipt(layout, `${id}.failed.json`, {
@@ -155,8 +186,8 @@ async function deployNow(options: DeployOptions): Promise<void> {
       attemptedRelease: finalRelease,
       message,
     }).catch(() => {});
-    if (switched || generatedFilesTouched) await rollback(layout, previousRelease, previousGeneratedFiles, switched).catch((rollbackError: unknown) => {
-      process.stderr.write(`${JSON.stringify({ kind: "dogfood.rollback_failed", message: boundedMessage(rollbackError) })}\n`);
+    if (switched || generatedFilesTouched || serviceStopAttempted) await rollback(layout, previousRelease, previousGeneratedFiles, previousUserLauncher, previousLegacyLauncher, switched, serviceWasActive, serviceWasEnabled).catch((rollbackError: unknown) => {
+      process.stderr.write(`${JSON.stringify({ kind: "athena.rollback_failed", message: boundedMessage(rollbackError) })}\n`);
     });
     throw error;
   } finally {
@@ -172,7 +203,7 @@ async function stageRelease(options: DeployOptions): Promise<void> {
   runReleaseGate(repository);
   assertCleanRepository(repository);
 
-  const layout = dogfoodReleaseLayout(homedir(), options.releaseRoot);
+  const layout = athenaReleaseLayout(homedir(), options.releaseRoot);
   const id = releaseId(new Date(), commit);
   await prepareLayout(layout);
   const staging = join(layout.root, `.staging-${id}-${process.pid}`);
@@ -184,7 +215,7 @@ async function stageRelease(options: DeployOptions): Promise<void> {
     await buildRelease({ repository, staging, id, commit });
     await rename(staging, finalRelease);
     const previousRelease = await currentRelease(layout);
-    const pending: DogfoodPendingRelease = {
+    const pending: AthenaPendingRelease = {
       schemaVersion: 1,
       releaseId: id,
       commit,
@@ -194,9 +225,9 @@ async function stageRelease(options: DeployOptions): Promise<void> {
     };
     await writeReceipt(layout, `${id}.staged.json`, { ...pending, status: "staged", releasePath: finalRelease });
     await writeFileAtomically(layout.pending, `${JSON.stringify(pending, null, 2)}\n`, 0o600);
-    const applyArgv = [process.execPath, join(finalRelease, "dist", "scripts", "deploy-dogfood.js"), "--apply", id, "--release-root", options.releaseRoot];
+    const applyArgv = [process.execPath, join(finalRelease, "dist", "scripts", "deploy-athena.js"), "--apply", id, "--release-root", options.releaseRoot];
     process.stdout.write(`${JSON.stringify({
-      kind: "dogfood.staged",
+      kind: "athena.staged",
       ...pending,
       releasePath: finalRelease,
       applyArgv,
@@ -208,8 +239,8 @@ async function stageRelease(options: DeployOptions): Promise<void> {
 }
 
 async function applyStagedRelease(options: DeployOptions): Promise<void> {
-  const layout = dogfoodReleaseLayout(homedir(), options.releaseRoot);
-  const pending = parseDogfoodPendingRelease(JSON.parse(await readFile(layout.pending, "utf8")));
+  const layout = athenaReleaseLayout(homedir(), options.releaseRoot);
+  const pending = parseAthenaPendingRelease(JSON.parse(await readFile(layout.pending, "utf8")));
   if (options.expectedReleaseId !== undefined && options.expectedReleaseId !== pending.releaseId) {
     throw new Error(`Pending release is ${pending.releaseId}, not ${options.expectedReleaseId}`);
   }
@@ -221,37 +252,51 @@ async function applyStagedRelease(options: DeployOptions): Promise<void> {
   if (previousRelease !== pending.previousRelease) throw new Error("Pending release is stale because current changed after it was staged");
 
   const socketPath = defaultSocketPath();
-  const before = await inspectCurrentHost(socketPath, layout);
-  const mainPid = unitMainPid();
-  if (mainPid > 0 && await hasProcessAncestor(mainPid)) {
+  let before = await inspectCurrentHost(socketPath, layout);
+  assertAthenaHostReplacementAllowed(before?.activeInstances ?? 0, options.allowActive);
+  const preflightUnit = inspectSystemdUnit();
+  if (preflightUnit.mainPid > 0 && await hasProcessAncestor(preflightUnit.mainPid)) {
     throw new Error("Update apply cannot run inside the managed Host; finish the turn, press Ctrl+D, then run the staged apply command from your shell");
   }
   if (before && !before.managed && !options.replaceUnmanaged) {
-    throw new Error(`Update apply refused: PID ${before.pid} owns the socket outside ${DOGFOOD_UNIT_NAME}; use --replace-unmanaged only after confirming interruption is intended`);
+    throw new Error(`Update apply refused: PID ${before.pid} owns the socket outside ${ATHENA_UNIT_NAME}; use --replace-unmanaged only after confirming interruption is intended`);
   }
 
-  const serviceWasActive = isUnitActive();
   const generatedFiles = await Promise.all([
     captureGeneratedFile(layout.launcher),
     captureGeneratedFile(layout.unitFile),
   ]);
+  const userLauncher = await captureGeneratedSymlink(layout.userLauncher, layout.launcher);
+  const legacyLauncher = await captureLegacyLauncher(layout);
+  const latestBefore = await inspectCurrentHost(socketPath, layout);
+  if (latestBefore?.hostEpoch !== before?.hostEpoch || latestBefore?.pid !== before?.pid) {
+    throw new Error("Update apply refused because Host ownership changed during preflight");
+  }
+  before = latestBefore;
+  assertAthenaHostReplacementAllowed(before?.activeInstances ?? 0, options.allowActive);
+  const unitBeforeMutation = inspectSystemdUnit();
+  const serviceWasActive = unitBeforeMutation.active;
+  const serviceWasEnabled = unitBeforeMutation.enabled;
   let switched = false;
   let generatedFilesTouched = false;
   let ready: ReadyHost | undefined;
   try {
+    restoreUnitActivity("leave_stopped");
     if (before && !before.managed) await stopUnmanagedHost(before.pid, socketPath);
-    else if (serviceWasActive) command("systemctl", ["--user", "stop", DOGFOOD_UNIT_NAME]);
 
     generatedFilesTouched = true;
     await installGeneratedFiles(layout);
+    await removeLegacyLauncher(legacyLauncher, layout);
     await switchCurrent(layout, finalRelease);
     switched = true;
+    const journalStartedAt = new Date();
     command("systemctl", ["--user", "daemon-reload"]);
-    command("systemctl", ["--user", "enable", DOGFOOD_UNIT_NAME]);
-    command("systemctl", ["--user", "start", DOGFOOD_UNIT_NAME]);
+    command("systemctl", ["--user", "enable", ATHENA_UNIT_NAME]);
+    command("systemctl", ["--user", "start", ATHENA_UNIT_NAME]);
 
     ready = await waitForReadyHost(socketPath, before?.hostEpoch);
     const smoke = runReleasedSmoke(finalRelease, socketPath, pending.projectCwd, pending.releaseId);
+    const journal = checkReleaseJournal(journalStartedAt);
     const receipt = {
       schemaVersion: 1,
       status: "deployed",
@@ -265,22 +310,23 @@ async function applyStagedRelease(options: DeployOptions): Promise<void> {
       nodeVersion: process.version,
       dockVersion: DOCK_VERSION,
       piSdkVersion: PI_SDK_VERSION,
-      unit: DOGFOOD_UNIT_NAME,
+      unit: ATHENA_UNIT_NAME,
       mainPid: ready.pid,
       hostEpoch: ready.hostEpoch,
       previousHostEpoch: before?.hostEpoch,
       gate: { typescript: "pass", tests: "pass", audit: "pass", imports: "pass", cleanTree: "pass" },
       smoke,
+      journal,
     };
     await writeReceipt(layout, `${pending.releaseId}.json`, receipt);
     const pendingCleanup = await rm(layout.pending, { force: true }).then(() => "removed", (cleanupError: unknown) => `failed: ${boundedMessage(cleanupError)}`);
-    process.stdout.write(`${JSON.stringify({ kind: "dogfood.deployed", ...receipt, pendingCleanup })}\n`);
+    process.stdout.write(`${JSON.stringify({ kind: "athena.deployed", ...receipt, pendingCleanup })}\n`);
   } catch (error) {
     const rollbackAttempted = switched || generatedFilesTouched || serviceWasActive;
     let rollback = "not_needed";
     if (rollbackAttempted) {
       try {
-        await rollbackStagedApply(layout, previousRelease, generatedFiles, switched, serviceWasActive);
+        await rollbackStagedApply(layout, previousRelease, generatedFiles, userLauncher, legacyLauncher, switched, serviceWasActive, serviceWasEnabled);
         rollback = "passed";
       } catch (rollbackError) {
         rollback = `failed: ${boundedMessage(rollbackError)}`;
@@ -300,18 +346,25 @@ async function applyStagedRelease(options: DeployOptions): Promise<void> {
 }
 
 async function rollbackStagedApply(
-  layout: DogfoodReleaseLayout,
+  layout: AthenaReleaseLayout,
   previousRelease: string | undefined,
   generatedFiles: GeneratedFileSnapshot[],
+  userLauncher: GeneratedSymlinkSnapshot,
+  legacyLauncher: LegacyLauncherSnapshot,
   switched: boolean,
   serviceWasActive: boolean,
+  serviceWasEnabled: boolean,
 ): Promise<void> {
-  command("systemctl", ["--user", "stop", DOGFOOD_UNIT_NAME], { allowFailure: true });
-  if (switched && previousRelease) await switchCurrent(layout, previousRelease);
-  if (switched && !previousRelease) await rm(layout.current, { force: true });
+  const plan = planAthenaRollback(serviceWasActive, serviceWasEnabled, previousRelease !== undefined);
+  restoreUnitActivity("leave_stopped");
+  if (switched && plan.current === "switch_previous") await switchCurrent(layout, previousRelease!);
+  if (switched && plan.current === "remove_current") await rm(layout.current, { force: true });
   await restoreGeneratedFiles(generatedFiles);
+  await restoreGeneratedSymlink(userLauncher);
+  await restoreLegacyLauncher(legacyLauncher);
   command("systemctl", ["--user", "daemon-reload"]);
-  if (serviceWasActive && previousRelease) command("systemctl", ["--user", "start", DOGFOOD_UNIT_NAME]);
+  restoreUnitEnablement(plan.enablement);
+  restoreUnitActivity(plan.service);
 }
 
 async function hasProcessAncestor(targetPid: number): Promise<boolean> {
@@ -364,15 +417,15 @@ async function buildRelease(input: { repository: string; staging: string; id: st
   }, null, 2)}\n`, { mode: 0o644, flag: "wx" });
 }
 
-async function installGeneratedFiles(layout: DogfoodReleaseLayout): Promise<void> {
+async function installGeneratedFiles(layout: AthenaReleaseLayout): Promise<void> {
   await Promise.all([
     mkdir(dirname(layout.launcher), { recursive: true, mode: 0o755 }),
     mkdir(dirname(layout.userLauncher), { recursive: true, mode: 0o755 }),
     mkdir(dirname(layout.unitFile), { recursive: true, mode: 0o755 }),
   ]);
   const cliPath = join(layout.current, "dist", "src", "cli.js");
-  await writeGeneratedFile(layout.launcher, renderDogfoodLauncher(process.execPath, cliPath), 0o755);
-  await writeGeneratedFile(layout.unitFile, renderDogfoodUnit({ nodePath: process.execPath, cliPath, homePath: homedir() }), 0o644);
+  await writeGeneratedFile(layout.launcher, renderAthenaLauncher(process.execPath, cliPath), 0o755);
+  await writeGeneratedFile(layout.unitFile, renderAthenaUnit({ nodePath: process.execPath, cliPath, homePath: homedir() }), 0o644);
   await ensureLauncherSymlink(layout.userLauncher, layout.launcher);
 }
 
@@ -396,12 +449,17 @@ async function captureGeneratedFile(path: string): Promise<GeneratedFileSnapshot
 }
 
 function isGeneratedFileContent(content: string): boolean {
-  return content.startsWith(`${DOGFOOD_GENERATED_MARKER}\n`)
-    || content.startsWith(`#!/bin/sh\n${DOGFOOD_GENERATED_MARKER}\n`);
+  return isAthenaGeneratedContent(content);
 }
 
 async function restoreGeneratedFiles(snapshots: GeneratedFileSnapshot[]): Promise<void> {
   for (const snapshot of snapshots) {
+    if (await pathExists(snapshot.path, false)) {
+      const info = await lstat(snapshot.path);
+      if (!info.isFile() || info.isSymbolicLink()) throw new Error(`Refusing to replace non-regular generated file during rollback: ${snapshot.path}`);
+      const existing = await readFile(snapshot.path, "utf8").catch(() => "");
+      if (!isGeneratedFileContent(existing)) throw new Error(`Refusing to replace non-generated file during rollback: ${snapshot.path}`);
+    }
     if (snapshot.content === undefined) await rm(snapshot.path, { force: true });
     else await writeFileAtomically(snapshot.path, snapshot.content, snapshot.mode ?? 0o600);
   }
@@ -413,6 +471,88 @@ async function writeFileAtomically(path: string, content: string, mode: number):
     await writeFile(temporary, content, { mode, flag: "wx" });
     await chmod(temporary, mode);
     await rename(temporary, path);
+  } finally {
+    await rm(temporary, { force: true }).catch(() => {});
+  }
+}
+
+async function captureLegacyLauncher(layout: AthenaReleaseLayout): Promise<LegacyLauncherSnapshot> {
+  let launcherState: "absent" | "generated" | "unowned" = "absent";
+  let launcher: GeneratedFileSnapshot | undefined;
+  if (await pathExists(layout.legacyLauncher, false)) {
+    const info = await lstat(layout.legacyLauncher);
+    if (!info.isFile() || info.isSymbolicLink()) launcherState = "unowned";
+    else {
+      const content = await readFile(layout.legacyLauncher, "utf8").catch(() => "");
+      if (isGeneratedFileContent(content)) {
+        launcherState = "generated";
+        launcher = { path: layout.legacyLauncher, content, mode: info.mode & 0o777 };
+      } else launcherState = "unowned";
+    }
+  }
+
+  let userLauncherState: "absent" | "legacy_target" | "other" = "absent";
+  let userLauncher: GeneratedSymlinkSnapshot | undefined;
+  if (await pathExists(layout.legacyUserLauncher, false)) {
+    const info = await lstat(layout.legacyUserLauncher);
+    if (info.isSymbolicLink()) {
+      const target = await readlink(layout.legacyUserLauncher);
+      if (resolve(dirname(layout.legacyUserLauncher), target) === resolve(layout.legacyLauncher)) {
+        userLauncherState = "legacy_target";
+        userLauncher = { path: layout.legacyUserLauncher, target };
+      } else userLauncherState = "other";
+    } else userLauncherState = "other";
+  }
+
+  const plan = planAthenaLegacyLauncherCleanup(launcherState, userLauncherState);
+  return {
+    ...(!plan.removeLauncher || launcher === undefined ? {} : { launcher }),
+    ...(!plan.removeUserLauncher || userLauncher === undefined ? {} : { userLauncher }),
+  };
+}
+
+async function removeLegacyLauncher(snapshot: LegacyLauncherSnapshot, layout: AthenaReleaseLayout): Promise<void> {
+  if (snapshot.userLauncher) {
+    const current = await captureGeneratedSymlink(snapshot.userLauncher.path, layout.legacyLauncher);
+    if (current.target !== snapshot.userLauncher.target) throw new Error("Legacy user launcher changed during Athena update");
+    await rm(snapshot.userLauncher.path);
+  }
+  if (snapshot.launcher) {
+    const content = await readFile(snapshot.launcher.path, "utf8");
+    if (!isGeneratedFileContent(content)) throw new Error("Legacy launcher ownership changed during Athena update");
+    await rm(snapshot.launcher.path);
+  }
+}
+
+async function restoreLegacyLauncher(snapshot: LegacyLauncherSnapshot): Promise<void> {
+  if (snapshot.launcher) await restoreGeneratedFiles([snapshot.launcher]);
+  if (snapshot.userLauncher) await restoreGeneratedSymlink(snapshot.userLauncher);
+}
+
+async function captureGeneratedSymlink(path: string, expectedTarget: string): Promise<GeneratedSymlinkSnapshot> {
+  if (!await pathExists(path, false)) return { path };
+  const info = await lstat(path);
+  if (!info.isSymbolicLink()) throw new Error(`Refusing to snapshot non-symlink launcher: ${path}`);
+  const target = await readlink(path);
+  if (resolve(dirname(path), target) !== resolve(expectedTarget)) throw new Error(`Refusing to snapshot launcher with an unexpected target: ${path}`);
+  return { path, target };
+}
+
+async function restoreGeneratedSymlink(snapshot: GeneratedSymlinkSnapshot): Promise<void> {
+  if (await pathExists(snapshot.path, false)) {
+    const info = await lstat(snapshot.path);
+    if (!info.isSymbolicLink()) throw new Error(`Refusing to replace non-symlink launcher during rollback: ${snapshot.path}`);
+  }
+  if (snapshot.target === undefined) {
+    await rm(snapshot.path, { force: true });
+    return;
+  }
+  await mkdir(dirname(snapshot.path), { recursive: true, mode: 0o755 });
+  const temporary = `${snapshot.path}.tmp-${process.pid}-${randomUUID()}`;
+  try {
+    await rm(temporary, { force: true });
+    await symlink(snapshot.target, temporary);
+    await rename(temporary, snapshot.path);
   } finally {
     await rm(temporary, { force: true }).catch(() => {});
   }
@@ -430,14 +570,14 @@ async function ensureLauncherSymlink(path: string, target: string): Promise<void
   await rename(temporary, path);
 }
 
-async function prepareLayout(layout: DogfoodReleaseLayout): Promise<void> {
+async function prepareLayout(layout: AthenaReleaseLayout): Promise<void> {
   await Promise.all([
     mkdir(layout.releases, { recursive: true, mode: 0o755 }),
     mkdir(layout.receipts, { recursive: true, mode: 0o700 }),
   ]);
 }
 
-async function currentRelease(layout: DogfoodReleaseLayout): Promise<string | undefined> {
+async function currentRelease(layout: AthenaReleaseLayout): Promise<string | undefined> {
   if (!await pathExists(layout.current, false)) return undefined;
   const info = await lstat(layout.current);
   if (!info.isSymbolicLink()) throw new Error(`Current release pointer is not a symlink: ${layout.current}`);
@@ -447,19 +587,19 @@ async function currentRelease(layout: DogfoodReleaseLayout): Promise<string | un
   return target;
 }
 
-async function switchCurrent(layout: DogfoodReleaseLayout, target: string): Promise<void> {
+async function switchCurrent(layout: AthenaReleaseLayout, target: string): Promise<void> {
   const temporary = `${layout.current}.tmp-${process.pid}-${randomUUID()}`;
   await symlink(relative(dirname(layout.current), target), temporary);
   await rename(temporary, layout.current);
 }
 
-async function inspectCurrentHost(socketPath: string, layout: DogfoodReleaseLayout): Promise<HostBeforeDeploy | undefined> {
+async function inspectCurrentHost(socketPath: string, layout: AthenaReleaseLayout): Promise<HostBeforeDeploy | undefined> {
   const released = await currentRelease(layout);
   if (released) {
     const projection = inspectWithReleasedClient(released, socketPath);
     if (projection) {
-      const mainPid = unitMainPid();
-      return { ...projection, managed: isUnitActive() && mainPid === projection.pid };
+      const unit = inspectSystemdUnit();
+      return { ...projection, managed: unit.active && unit.mainPid === projection.pid };
     }
   }
 
@@ -467,15 +607,20 @@ async function inspectCurrentHost(socketPath: string, layout: DogfoodReleaseLayo
   try {
     const ping = await client.ping();
     const instances = await client.list();
-    const mainPid = unitMainPid();
+    const unit = inspectSystemdUnit();
     return {
       pid: ping.pid,
       hostEpoch: ping.hostEpoch,
       activeInstances: instances.filter((instance) => instance.lifecycle === "active" || instance.lifecycle === "stopping").length,
-      managed: isUnitActive() && mainPid === ping.pid,
+      managed: unit.active && unit.mainPid === ping.pid,
     };
   } catch (error) {
-    if (error instanceof ControlClientError && ["connection_error", "connection_closed", "timeout"].includes(error.code)) return undefined;
+    if (error instanceof ControlClientError && ["connection_error", "connection_closed", "timeout"].includes(error.code)) {
+      const unit = inspectSystemdUnit();
+      const socketPresent = await pathExists(socketPath, false);
+      if (athenaHostAbsenceIsConfirmed(unit.active, unit.mainPid, socketPresent)) return undefined;
+      throw new Error(`Athena update cannot establish an idle Host because inspection failed (${error.code}) while service or socket ownership evidence remains`);
+    }
     throw error;
   }
 }
@@ -509,13 +654,27 @@ async function stopUnmanagedHost(pid: number, socketPath: string): Promise<void>
   throw new Error(`Unmanaged Host PID ${pid} did not stop within ${STOP_TIMEOUT_MS}ms`);
 }
 
+function checkReleaseJournal(startedAt: Date): { since: string; priority: "err..alert"; severeEntries: 0 } {
+  const since = `@${(startedAt.getTime() / 1_000).toFixed(3)}`;
+  const result = command("journalctl", [
+    "--user", "-u", ATHENA_UNIT_NAME,
+    "--since", since,
+    "--priority", "err..alert",
+    "--lines", "200",
+    "--output", "cat",
+    "--no-pager",
+  ], { capture: true });
+  assertAthenaJournalClean(result.stdout);
+  return { since: startedAt.toISOString(), priority: "err..alert", severeEntries: 0 };
+}
+
 async function waitForReadyHost(socketPath: string, previousEpoch?: string): Promise<ReadyHost> {
   const deadline = Date.now() + READY_TIMEOUT_MS;
   let lastError = "service did not answer";
   while (Date.now() < deadline) {
     try {
       const ping = await new DockClient({ socketPath, timeoutMs: 500 }).ping();
-      const mainPid = unitMainPid();
+      const mainPid = inspectSystemdUnit().mainPid;
       const capabilities = new Set(ping.capabilities);
       const missing = ["catalog.maintenance.v1", "catalog.v1", "service.managed.v1", "session.reopen", "session.tree.v1"].filter((capability) => !capabilities.has(capability));
       if (mainPid !== ping.pid) lastError = `hello PID ${ping.pid} does not match MainPID ${mainPid}`;
@@ -525,12 +684,12 @@ async function waitForReadyHost(socketPath: string, previousEpoch?: string): Pro
     } catch (error) { lastError = boundedMessage(error); }
     await delay(100);
   }
-  const journal = command("journalctl", ["--user", "-u", DOGFOOD_UNIT_NAME, "-n", "80", "--no-pager"], { capture: true, allowFailure: true });
+  const journal = command("journalctl", ["--user", "-u", ATHENA_UNIT_NAME, "-n", "80", "--no-pager"], { capture: true, allowFailure: true });
   throw new Error(`Managed Host did not become ready within ${READY_TIMEOUT_MS}ms: ${lastError}; journal: ${(journal.stdout || journal.stderr).slice(-4_000)}`);
 }
 
 function runReleasedSmoke(release: string, socketPath: string, cwd: string, id: string): Record<string, unknown> {
-  const result = command(process.execPath, [join(release, "dist", "scripts", "dogfood-smoke.js"), "--socket", socketPath, "--cwd", cwd, "--release", id], { cwd: release, capture: true });
+  const result = command(process.execPath, [join(release, "dist", "scripts", "athena-smoke.js"), "--socket", socketPath, "--cwd", cwd, "--release", id], { cwd: release, capture: true });
   const line = result.stdout.trim().split("\n").at(-1);
   if (!line) throw new Error("Released smoke returned no receipt");
   const parsed: unknown = JSON.parse(line);
@@ -539,22 +698,28 @@ function runReleasedSmoke(release: string, socketPath: string, cwd: string, id: 
 }
 
 async function rollback(
-  layout: DogfoodReleaseLayout,
+  layout: AthenaReleaseLayout,
   previousRelease: string | undefined,
   generatedFiles: GeneratedFileSnapshot[],
+  userLauncher: GeneratedSymlinkSnapshot | undefined,
+  legacyLauncher: LegacyLauncherSnapshot | undefined,
   currentWasSwitched: boolean,
+  serviceWasActive: boolean,
+  serviceWasEnabled: boolean,
 ): Promise<void> {
-  if (currentWasSwitched && previousRelease) await switchCurrent(layout, previousRelease);
-  if (currentWasSwitched && !previousRelease) {
-    command("systemctl", ["--user", "stop", DOGFOOD_UNIT_NAME], { allowFailure: true });
-    await rm(layout.current, { force: true });
-  }
+  const plan = planAthenaRollback(serviceWasActive, serviceWasEnabled, previousRelease !== undefined);
+  restoreUnitActivity("leave_stopped");
+  if (currentWasSwitched && plan.current === "switch_previous") await switchCurrent(layout, previousRelease!);
+  if (currentWasSwitched && plan.current === "remove_current") await rm(layout.current, { force: true });
   await restoreGeneratedFiles(generatedFiles);
-  command("systemctl", ["--user", "daemon-reload"], { allowFailure: true });
-  if (currentWasSwitched && previousRelease) command("systemctl", ["--user", "restart", DOGFOOD_UNIT_NAME], { allowFailure: true });
+  if (userLauncher) await restoreGeneratedSymlink(userLauncher);
+  if (legacyLauncher) await restoreLegacyLauncher(legacyLauncher);
+  command("systemctl", ["--user", "daemon-reload"]);
+  restoreUnitEnablement(plan.enablement);
+  restoreUnitActivity(plan.service);
 }
 
-async function writeReceipt(layout: DogfoodReleaseLayout, name: string, value: unknown): Promise<void> {
+async function writeReceipt(layout: AthenaReleaseLayout, name: string, value: unknown): Promise<void> {
   await mkdir(layout.receipts, { recursive: true, mode: 0o700 });
   const destination = join(layout.receipts, name);
   const temporary = `${destination}.tmp-${process.pid}`;
@@ -564,24 +729,35 @@ async function writeReceipt(layout: DogfoodReleaseLayout, name: string, value: u
 
 function assertRepository(repository: string): void {
   const top = command("git", ["rev-parse", "--show-toplevel"], { cwd: repository, capture: true }).stdout.trim();
-  if (resolve(top) !== repository) throw new Error("Dogfood deploy must run from the Alu Dock repository root");
+  if (resolve(top) !== repository) throw new Error("Athena deploy must run from the Alu Dock repository root");
   const packageName = command(process.execPath, ["-e", "process.stdout.write(require('./package.json').name)"], { cwd: repository, capture: true }).stdout;
   if (packageName !== "alu-dock") throw new Error("Current repository is not alu-dock");
 }
 
 function assertCleanRepository(repository: string): void {
   const status = command("git", ["status", "--porcelain", "--untracked-files=all"], { cwd: repository, capture: true }).stdout.trim();
-  if (status) throw new Error(`Dogfood deploy requires a clean committed HEAD:\n${status}`);
+  if (status) throw new Error(`Athena deploy requires a clean committed HEAD:\n${status}`);
 }
 
-function isUnitActive(): boolean {
-  return command("systemctl", ["--user", "is-active", "--quiet", DOGFOOD_UNIT_NAME], { capture: true, allowFailure: true }).status === 0;
+function inspectSystemdUnit(): AthenaSystemdUnitEvidence {
+  const result = command("systemctl", [
+    "--user", "show", ATHENA_UNIT_NAME,
+    "--property", "MainPID",
+    "--property", "LoadState",
+    "--property", "ActiveState",
+    "--property", "UnitFileState",
+  ], { capture: true });
+  return parseAthenaSystemdUnitEvidence(result.stdout);
 }
 
-function unitMainPid(): number {
-  const result = command("systemctl", ["--user", "show", DOGFOOD_UNIT_NAME, "--property", "MainPID", "--value"], { capture: true, allowFailure: true });
-  const pid = Number(result.stdout.trim());
-  return Number.isSafeInteger(pid) && pid > 0 ? pid : 0;
+function restoreUnitEnablement(action: "enable" | "disable"): void {
+  command("systemctl", ["--user", action, ATHENA_UNIT_NAME], { capture: true, allowFailure: true });
+  if (inspectSystemdUnit().enabled !== (action === "enable")) throw new Error(`Athena rollback could not restore service enablement (${action})`);
+}
+
+function restoreUnitActivity(action: "start" | "leave_stopped"): void {
+  command("systemctl", ["--user", action === "start" ? "start" : "stop", ATHENA_UNIT_NAME], { capture: true, allowFailure: true });
+  if (inspectSystemdUnit().active !== (action === "start")) throw new Error(`Athena rollback could not restore service activity (${action})`);
 }
 
 function assertNoMatches(pattern: string, paths: string[], cwd: string): void {
@@ -627,11 +803,11 @@ function parseArgs(args: string[]): DeployOptions {
     else if (value === "--replace-unmanaged") replaceUnmanaged = true;
     else if (value === "--allow-active") allowActive = true;
     else if (value === "--help") {
-      process.stdout.write("Usage: deploy-dogfood [--stage | --apply [RELEASE_ID]] [--replace-unmanaged] [--allow-active] [--release-root PATH] [--project-cwd PATH]\n");
+      process.stdout.write("Usage: deploy-athena [--stage | --apply [RELEASE_ID]] [--replace-unmanaged] [--allow-active] [--release-root PATH] [--project-cwd PATH]\n");
       process.exit(0);
     } else throw new Error(`Unknown deploy argument: ${String(value)}`);
   }
-  if (mode !== "deploy" && allowActive) throw new Error("--allow-active is only supported by the one-step deploy path");
+  if (mode === "stage" && allowActive) throw new Error("--allow-active is not valid while staging");
   releaseRoot = resolve(releaseRoot);
   projectCwd = resolve(projectCwd);
   if (!isAbsolute(releaseRoot) || !isAbsolute(projectCwd)) throw new Error("Deployment paths must be absolute");
@@ -678,6 +854,6 @@ function boundedMessage(error: unknown): string {
 function delay(ms: number): Promise<void> { return new Promise((resolveDelay) => setTimeout(resolveDelay, ms)); }
 
 main().catch((error: unknown) => {
-  process.stderr.write(`${JSON.stringify({ kind: "dogfood.deploy_failed", message: boundedMessage(error) })}\n`);
+  process.stderr.write(`${JSON.stringify({ kind: "athena.deploy_failed", message: boundedMessage(error) })}\n`);
   process.exitCode = 1;
 });

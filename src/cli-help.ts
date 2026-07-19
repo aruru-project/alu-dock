@@ -76,73 +76,73 @@ export function renderCliHelp(topics: readonly string[]): string {
 }
 
 function overviewHelp(): string {
-  return `Alu Dock — managed Pi development terminal for SSH\n\nUsage:\n  alu-dock\n  alu-dock COMMAND [OPTIONS]\n  alu-dock help [COMMAND]\n\nStart here:\n  alu-dock                 Open the Dock Hub\n  alu-dock -c              Continue recent work here, or create it\n  alu-dock new             Create a new Pi session and enter Work\n  alu-dock attach TARGET   Attach to a known active instance\n\nHuman commands:\n  continue  Current-directory smart entry (-c, --continue)\n  open      Explicit legacy smart-entry or reopen by TARGET\n  new       Create a separate instance and Pi session\n  attach    Resolve TARGET and enter Work without taking Host ownership\n  list      Show actionable instances (or all catalog history)\n  status    Show one instance in detail\n  stop      Explicitly stop and dispose one instance\n  forget    Remove one terminal record from the Dock catalog\n  prune     Remove stopped records from the Dock catalog\n  service   Manage the systemd --user Host\n  help      Explore command help\n\nThe managed Host must be running. The Hub opens with pwd as its project context.\nCtrl+D detaches Work; stop is destructive to the live runtime.\n\nExplore:\n  alu-dock help open\n  alu-dock help service\n  alu-dock COMMAND --help\n`;
+  return `Alu Dock — managed Pi development terminal for SSH\n\nUsage:\n  aludock\n  aludock COMMAND [OPTIONS]\n  aludock help [COMMAND]\n\nStart here:\n  aludock                 Open the Dock Hub\n  aludock -c              Continue recent work here, or create it\n  aludock new             Create a new Pi session and enter Work\n  aludock attach TARGET   Attach to a known active instance\n\nHuman commands:\n  continue  Current-directory smart entry (-c, --continue)\n  open      Explicit legacy smart-entry or reopen by TARGET\n  new       Create a separate instance and Pi session\n  attach    Resolve TARGET and enter Work without taking Host ownership\n  list      Show actionable instances (or all catalog history)\n  status    Show one instance in detail\n  stop      Explicitly stop and dispose one instance\n  forget    Remove one terminal record from the Dock catalog\n  prune     Remove stopped records from the Dock catalog\n  service   Manage the systemd --user Host\n  help      Explore command help\n\nThe managed Host must be running. The Hub opens with pwd as its project context.\nCtrl+D detaches Work; stop is destructive to the live runtime.\n\nExplore:\n  aludock help open\n  aludock help service\n  aludock COMMAND --help\n`;
 }
 
 function continueHelp(): string {
-  return `alu-dock -c — continue recent work in the current directory\n\nUsage:\n  alu-dock -c\n  alu-dock --continue\n  alu-dock continue\n\nSelects the most recently updated active or reopenable Dock instance for the\ncurrent directory and enters Session Work. Active work is attached; recoverable\nwork is explicitly reopened. When no candidate exists, a new Dock instance and\nPi session are created. Stopped History and the separate Pi Sessions inventory\nare not searched.\n\nThis command connects only to an existing Host; it never starts systemd or forks\na detached Host.\n`;
+  return `aludock -c — continue recent work in the current directory\n\nUsage:\n  aludock -c\n  aludock --continue\n  aludock continue\n\nSelects the most recently updated active or reopenable Dock instance for the\ncurrent directory and enters Session Work. Active work is attached; recoverable\nwork is explicitly reopened. When no candidate exists, a new Dock instance and\nPi session are created. Stopped History and the separate Pi Sessions inventory\nare not searched.\n\nThis command connects only to an existing Host; it never starts systemd or forks\na detached Host.\n`;
 }
 
 function openHelp(): string {
-  return `alu-dock open — explicit smart project entry\n\nUsage:\n  alu-dock open [TARGET] [--cwd PATH] [--name NAME] [--new]\n\nWithout TARGET, this explicit legacy command examines non-stopped instances for\nthe project directory and may create or reopen a runtime. TARGET accepts a full\nID, unique displayed ID prefix, or unique exact name. Active instances attach;\nrecoverable instances reopen.\n\nOptions:\n  --cwd PATH   Project directory (default: current directory)\n  --name NAME  Name a newly created instance\n  --new        Force a separate instance instead of reusing a match\n\nExamples:\n  alu-dock open --cwd ~/work/project\n  alu-dock open 019f7005\n  alu-dock open review\n  alu-dock open --new --name review\n\nOrdinary open never starts systemd or forks a detached Host. When the Host is\ndown, use 'alu-dock service start'.\n`;
+  return `aludock open — explicit smart project entry\n\nUsage:\n  aludock open [TARGET] [--cwd PATH] [--name NAME] [--new]\n\nWithout TARGET, this explicit legacy command examines non-stopped instances for\nthe project directory and may create or reopen a runtime. TARGET accepts a full\nID, unique displayed ID prefix, or unique exact name. Active instances attach;\nrecoverable instances reopen.\n\nOptions:\n  --cwd PATH   Project directory (default: current directory)\n  --name NAME  Name a newly created instance\n  --new        Force a separate instance instead of reusing a match\n\nExamples:\n  aludock open --cwd ~/work/project\n  aludock open 019f7005\n  aludock open review\n  aludock open --new --name review\n\nOrdinary open never starts systemd or forks a detached Host. When the Host is\ndown, use 'aludock service start'.\n`;
 }
 
 function newHelp(): string {
-  return `alu-dock new — create a separate Pi session\n\nUsage:\n  alu-dock new [--cwd PATH] [--name NAME]\n\nAlways creates a new Host-owned instance, even when the project already has an\nactive instance. It then attaches the interactive TUI.\n\nOptions:\n  --cwd PATH   Project directory (default: current directory)\n  --name NAME  Human-readable instance/session name\n\nExamples:\n  alu-dock new\n  alu-dock new --cwd ~/work/project --name experiment\n\nUse Ctrl+D to detach without stopping the new instance.\n`;
+  return `aludock new — create a separate Pi session\n\nUsage:\n  aludock new [--cwd PATH] [--name NAME]\n\nAlways creates a new Host-owned instance, even when the project already has an\nactive instance. It then attaches the interactive TUI.\n\nOptions:\n  --cwd PATH   Project directory (default: current directory)\n  --name NAME  Human-readable instance/session name\n\nExamples:\n  aludock new\n  aludock new --cwd ~/work/project --name experiment\n\nUse Ctrl+D to detach without stopping the new instance.\n`;
 }
 
 function attachHelp(): string {
-  return `alu-dock attach — attach an interactive client\n\nUsage:\n  alu-dock attach TARGET\n\nTARGET is a full ID, a unique displayed ID prefix, or a unique exact name. It\nmust resolve to an active Host-owned instance; recoverable and stopped records\nreturn an actionable lifecycle error instead of being treated as attachable.\nAttaching does not transfer runtime ownership or interrupt an in-flight run.\n\nExamples:\n  alu-dock attach 019f7005\n  alu-dock attach review\n\nCtrl+D detaches. Use 'alu-dock stop TARGET' only when disposal is intended.\n`;
+  return `aludock attach — attach an interactive client\n\nUsage:\n  aludock attach TARGET\n\nTARGET is a full ID, a unique displayed ID prefix, or a unique exact name. It\nmust resolve to an active Host-owned instance; recoverable and stopped records\nreturn an actionable lifecycle error instead of being treated as attachable.\nAttaching does not transfer runtime ownership or interrupt an in-flight run.\n\nExamples:\n  aludock attach 019f7005\n  aludock attach review\n\nCtrl+D detaches. Use 'aludock stop TARGET' only when disposal is intended.\n`;
 }
 
 function listHelp(): string {
-  return `alu-dock list — scan actionable instances\n\nUsage:\n  alu-dock list [--all]\n\nBy default, shows a bounded human-readable summary of active, stopping,\nhost-lost and runtime-error records while reporting how many stopped records are\nhidden.\nUse --all to include stopped catalog history.\n\nOptions:\n  --all   Include stopped Dock records\n\nExamples:\n  alu-dock list\n  alu-dock list --all\n  alu-dock status TARGET\n\nThis is a read-only request. Typed automation should use DockClient/Protocol V2\nrather than parse terminal text.\n`;
+  return `aludock list — scan actionable instances\n\nUsage:\n  aludock list [--all]\n\nBy default, shows a bounded human-readable summary of active, stopping,\nhost-lost and runtime-error records while reporting how many stopped records are\nhidden.\nUse --all to include stopped catalog history.\n\nOptions:\n  --all   Include stopped Dock records\n\nExamples:\n  aludock list\n  aludock list --all\n  aludock status TARGET\n\nThis is a read-only request. Typed automation should use DockClient/Protocol V2\nrather than parse terminal text.\n`;
 }
 
 function statusHelp(): string {
-  return `alu-dock status — inspect one instance\n\nUsage:\n  alu-dock status TARGET\n\nResolves a full ID, unique displayed ID prefix, or unique exact name and reads\nthe current closed instance snapshot. It does not attach,\nresume, retry, reopen, or mutate the instance.\n\nExample:\n  alu-dock status 019f7005\n`;
+  return `aludock status — inspect one instance\n\nUsage:\n  aludock status TARGET\n\nResolves a full ID, unique displayed ID prefix, or unique exact name and reads\nthe current closed instance snapshot. It does not attach,\nresume, retry, reopen, or mutate the instance.\n\nExample:\n  aludock status 019f7005\n`;
 }
 
 function stopHelp(): string {
-  return `alu-dock stop — dispose one instance\n\nUsage:\n  alu-dock stop TARGET\n\nResolves the same human TARGET grammar as the Hub, explicitly stops the\nHost-owned runtime, and marks the catalog record stopped. It is not detach and\ncan interrupt a run. No prompt, queue, Promise, interaction or tool effect is\nreplayed.\n\nExample:\n  alu-dock stop 019f7005\n\nTo leave work running, attach and press Ctrl+D instead.\n`;
+  return `aludock stop — dispose one instance\n\nUsage:\n  aludock stop TARGET\n\nResolves the same human TARGET grammar as the Hub, explicitly stops the\nHost-owned runtime, and marks the catalog record stopped. It is not detach and\ncan interrupt a run. No prompt, queue, Promise, interaction or tool effect is\nreplayed.\n\nExample:\n  aludock stop 019f7005\n\nTo leave work running, attach and press Ctrl+D instead.\n`;
 }
 
 function forgetHelp(): string {
-  return `alu-dock forget — remove one terminal Dock record\n\nUsage:\n  alu-dock forget TARGET\n\nResolves the same human TARGET grammar and removes a stopped, host-lost, or\nruntime-error record from the Host-owned Dock catalog after an atomic commit.\nActive and stopping instances are rejected. Pi session files, project files and\nruntime resources are never deleted. Forgetting a recoverable record removes\nonly Dock's reopen pointer.\n\nExample:\n  alu-dock forget 019f7005\n\nMutations are not automatically retried after an ambiguous transport outcome.\n`;
+  return `aludock forget — remove one terminal Dock record\n\nUsage:\n  aludock forget TARGET\n\nResolves the same human TARGET grammar and removes a stopped, host-lost, or\nruntime-error record from the Host-owned Dock catalog after an atomic commit.\nActive and stopping instances are rejected. Pi session files, project files and\nruntime resources are never deleted. Forgetting a recoverable record removes\nonly Dock's reopen pointer.\n\nExample:\n  aludock forget 019f7005\n\nMutations are not automatically retried after an ambiguous transport outcome.\n`;
 }
 
 function pruneHelp(): string {
-  return `alu-dock prune — remove stopped Dock history\n\nUsage:\n  alu-dock prune --stopped\n\nAtomically removes a bounded batch of stopped records only. Recoverable\nhost-lost/runtime-error records are preserved. Repeat when the receipt reports\nthat more stopped records remain. Pi session files are never deleted.\n\nExample:\n  alu-dock prune --stopped\n`;
+  return `aludock prune — remove stopped Dock history\n\nUsage:\n  aludock prune --stopped\n\nAtomically removes a bounded batch of stopped records only. Recoverable\nhost-lost/runtime-error records are preserved. Repeat when the receipt reports\nthat more stopped records remain. Pi session files are never deleted.\n\nExample:\n  aludock prune --stopped\n`;
 }
 
 function helpHelp(): string {
-  return `alu-dock help — explore the human CLI\n\nUsage:\n  alu-dock help\n  alu-dock help COMMAND\n  alu-dock help service SUBCOMMAND\n  alu-dock COMMAND --help\n\nHelp is local and read-only: it does not connect to the Host, query the catalog,\nstart systemd, generate an operation ID, or require a TTY.\n\nExamples:\n  alu-dock help open\n  alu-dock help service logs\n  alu-dock stop --help\n`;
+  return `aludock help — explore the human CLI\n\nUsage:\n  aludock help\n  aludock help COMMAND\n  aludock help service SUBCOMMAND\n  aludock COMMAND --help\n\nHelp is local and read-only: it does not connect to the Host, query the catalog,\nstart systemd, generate an operation ID, or require a TTY.\n\nExamples:\n  aludock help open\n  aludock help service logs\n  aludock stop --help\n`;
 }
 
 function serviceHelp(rest: readonly string[]): string {
   if (rest.length === 0) {
-    return `alu-dock service — manage the systemd --user Host\n\nUsage:\n  alu-dock service [status]\n  alu-dock service COMMAND [OPTIONS]\n\nCommands:\n  install     Install the generated user unit\n  start       Start the managed Host\n  stop        Stop the Host\n  restart     Restart the Host\n  status      Show systemd readiness and managed capabilities\n  logs        Read the user journal\n  update      Apply a previously staged dogfood release\n  uninstall   Remove only an Alu Dock-generated unit\n\nAn agent can prepare an immutable release with 'npm run stage:dogfood' without\ntouching the running Host. Applying it explicitly stops and replaces the Host;\nno prompt, queue, interaction, tool effect or run Promise is resumed.\n\nExplore:\n  alu-dock help service install\n  alu-dock service logs --help\n`;
+    return `aludock service — manage the systemd --user Host\n\nUsage:\n  aludock service [status]\n  aludock service COMMAND [OPTIONS]\n\nCommands:\n  install     Install the generated user unit\n  start       Start the managed Host\n  stop        Stop the Host\n  restart     Restart the Host\n  status      Show systemd readiness and managed capabilities\n  logs        Read the user journal\n  update      Apply a previously staged Athena release\n  uninstall   Remove only an Alu Dock-generated unit\n\nAn agent can prepare an immutable release with 'npm run stage:athena' without\ntouching the running Host. Applying it explicitly stops and replaces the Host;\nno prompt, queue, interaction, tool effect or run Promise is resumed.\n\nExplore:\n  aludock help service install\n  aludock service logs --help\n`;
   }
   if (rest.length !== 1 || !SERVICE_TOPICS.has(rest[0] as string)) {
     throw new Error(`Unknown service help topic: ${rest.join(" ")}`);
   }
   switch (rest[0]) {
     case "install":
-      return `alu-dock service install — install the generated user unit\n\nUsage:\n  alu-dock service install [--now]\n\nOptions:\n  --now   Enable and start the unit after installation\n\nRefuses to overwrite a unit not generated by Alu Dock.\n`;
+      return `aludock service install — install the generated user unit\n\nUsage:\n  aludock service install [--now]\n\nOptions:\n  --now   Enable and start the unit after installation\n\nRefuses to overwrite a unit not generated by Alu Dock.\n`;
     case "start":
-      return `alu-dock service start — start the managed Host\n\nUsage:\n  alu-dock service start\n\nStarts the installed systemd --user unit and waits for managed V2 readiness.\n`;
+      return `aludock service start — start the managed Host\n\nUsage:\n  aludock service start\n\nStarts the installed systemd --user unit and waits for managed V2 readiness.\n`;
     case "stop":
-      return `alu-dock service stop — stop the managed Host\n\nUsage:\n  alu-dock service stop\n\nStops the systemd --user Host. In-flight work is not replayed after Host loss.\nInspect 'alu-dock list' first when practical.\n`;
+      return `aludock service stop — stop the managed Host\n\nUsage:\n  aludock service stop\n\nStops the systemd --user Host. In-flight work is not replayed after Host loss.\nInspect 'aludock list' first when practical.\n`;
     case "restart":
-      return `alu-dock service restart — replace the managed Host\n\nUsage:\n  alu-dock service restart\n\nRestarts the systemd --user unit and waits for readiness. Existing runs, queues,\ninteractions and side-effect Promises are not resumed or replayed.\n`;
+      return `aludock service restart — replace the managed Host\n\nUsage:\n  aludock service restart\n\nRestarts the systemd --user unit and waits for readiness. Existing runs, queues,\ninteractions and side-effect Promises are not resumed or replayed.\n`;
     case "status":
-      return `alu-dock service status — inspect managed readiness\n\nUsage:\n  alu-dock service status\n\nReads systemd state and verifies the expected MainPID, V2 handshake and managed\ncapabilities. It does not start or restart the service.\n`;
+      return `aludock service status — inspect managed readiness\n\nUsage:\n  aludock service status\n\nReads systemd state and verifies the expected MainPID, V2 handshake and managed\ncapabilities. It does not start or restart the service.\n`;
     case "logs":
-      return `alu-dock service logs — read Host journal output\n\nUsage:\n  alu-dock service logs [--lines N] [--follow]\n\nOptions:\n  --lines N, -n N   Read 1–10000 lines (default: 200)\n  --follow, -f      Follow new journal entries\n\nExamples:\n  alu-dock service logs --lines 100\n  alu-dock service logs --follow\n`;
+      return `aludock service logs — read Host journal output\n\nUsage:\n  aludock service logs [--lines N] [--follow]\n\nOptions:\n  --lines N, -n N   Read 1–10000 lines (default: 200)\n  --follow, -f      Follow new journal entries\n\nExamples:\n  aludock service logs --lines 100\n  aludock service logs --follow\n`;
     case "update":
-      return `alu-dock service update — apply a staged dogfood release\n\nUsage:\n  alu-dock service update apply [RELEASE_ID]\n\nFirst prepare the immutable release from a clean Alu Dock checkout:\n\n  npm run stage:dogfood\n\nStaging runs the complete gate and build but does not switch current, stop the\nHost, or touch systemd. After the current turn finishes, press Ctrl+D. Run the\nprinted apply command from the outer shell. It stops the old Host, switches to\nthe staged release, starts it, and runs readiness/smoke checks.\n\nDo not invoke apply from an agent tool. Active runtime state is not migrated or\nreplayed; recoverable Pi session metadata remains available for explicit reopen.\n`;
+      return `aludock service update — apply a staged Athena release\n\nUsage:\n  aludock service update apply [RELEASE_ID] [--allow-active]\n\nBy default apply refuses while any active instance remains. '--allow-active' is\nan explicit destructive Host-replacement opt-in: active runtime, queue,\ninteraction, Promise and tool effects are not migrated or replayed.\n\nFirst prepare the immutable release from a clean Alu Dock checkout:\n\n  npm run stage:athena\n\nStaging runs the complete gate and build but does not switch current, stop the\nHost, or touch systemd. After the current turn finishes, press Ctrl+D. Run the\nprinted apply command from the outer shell. It stops the old Host, switches to\nthe staged release, starts it, and runs readiness/smoke checks.\n\nDo not invoke apply from an agent tool. Active runtime state is not migrated or\nreplayed; recoverable Pi session metadata remains available for explicit reopen.\n`;
     case "uninstall":
-      return `alu-dock service uninstall — remove the generated unit\n\nUsage:\n  alu-dock service uninstall\n\nRemoves only a unit carrying Alu Dock's generated marker. It does not delete the\ndurable catalog or Pi session files.\n`;
+      return `aludock service uninstall — remove the generated unit\n\nUsage:\n  aludock service uninstall\n\nRemoves only a unit carrying Alu Dock's generated marker. It does not delete the\ndurable catalog or Pi session files.\n`;
     default:
       throw new Error(`Unknown service help topic: ${String(rest[0])}`);
   }
@@ -150,11 +150,11 @@ function serviceHelp(rest: readonly string[]): string {
 
 function internalTopicHelp(topic: string): string {
   const humanAlternative: Record<string, string> = {
-    serve: "Use 'alu-dock service' to manage the Host.",
-    ping: "Use 'alu-dock service status' for human readiness checks.",
-    create: "Use 'alu-dock new' to create and attach interactively.",
-    reopen: "Use 'alu-dock open' to choose and reopen recoverable context.",
-    events: "Use the interactive TUI or 'alu-dock status' for human inspection.",
+    serve: "Use 'aludock service' to manage the Host.",
+    ping: "Use 'aludock service status' for human readiness checks.",
+    create: "Use 'aludock new' to create and attach interactively.",
+    reopen: "Use 'aludock open' to choose and reopen recoverable context.",
+    events: "Use the interactive TUI or 'aludock status' for human inspection.",
     prompt: "Submit prompts through the attached interactive TUI.",
   };
   return `${topic} is an internal control command used by tests, release smoke, or\noperator diagnostics. It is intentionally omitted from the public human command\ntaxonomy and is not a model tool surface.\n\n${humanAlternative[topic] ?? "Use the public human workflow instead."}\nTyped automation should call DockClient/Protocol V2. See the repository's\ninternal control documentation.\n`;

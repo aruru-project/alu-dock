@@ -26,7 +26,7 @@ test("Alu assets are responsive, monochrome-safe, and use only bounded SGR color
 
   assert.equal(renderWorkAlu("idle", 0, "none"), "✿(•ᴗ•)");
   assert.equal(renderWorkAlu("idle", 0, "none", true), "✿·");
-  assert.equal(renderWorkAlu("tool", 0, "none", true), "✿⌁");
+  assert.equal(renderWorkAlu("responding", 0, "none", true), "✿◆");
   assert.notEqual(renderWorkAlu("waiting", 0, "none"), renderWorkAlu("waiting", 1, "none"));
   assert.match(renderWorkAlu("error", 0, "none"), /×﹏×/u);
 });

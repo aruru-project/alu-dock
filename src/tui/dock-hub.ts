@@ -185,7 +185,7 @@ async function chooseContinueAction(
     entries.push({
       value: MORE_INSTANCES,
       label: `… ${ordered.length - visible.length} more current Dock instance(s)`,
-      description: "Use alu-dock list to inspect the bounded human catalog",
+      description: "Use aludock list to inspect the bounded human catalog",
     });
   }
   entries.push({ value: BACK, label: "Back to Hub", description: "no change" });
@@ -220,7 +220,7 @@ async function chooseHistoryAction(
     entries.push({
       value: MORE_INSTANCES,
       label: `… ${ordered.length - visible.length} more history record(s)`,
-      description: "Use alu-dock list --all to inspect the bounded human catalog",
+      description: "Use aludock list --all to inspect the bounded human catalog",
     });
   }
   entries.push({ value: BACK, label: "Back to Hub", description: "no change" });

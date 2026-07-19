@@ -43,9 +43,9 @@ export function renderHumanInstanceList(
   const totalInstances = Math.max(instances.length, Math.floor(options.totalInstances ?? instances.length));
   if (instances.length === 0) {
     if (mode === "actionable" && hiddenStopped > 0) {
-      return `${fit("No actionable Alu Dock instances.", width)}\n${fit(`${hiddenStopped} stopped hidden · alu-dock list --all`, width)}\n${fit("Start one: alu-dock new", width)}\n`;
+      return `${fit("No actionable Alu Dock instances.", width)}\n${fit(`${hiddenStopped} stopped hidden · aludock list --all`, width)}\n${fit("Start one: aludock new", width)}\n`;
     }
-    return `${fit(mode === "actionable" ? "No actionable Alu Dock instances." : "No Alu Dock instances.", width)}\n${fit("Start one: alu-dock new", width)}\n`;
+    return `${fit(mode === "actionable" ? "No actionable Alu Dock instances." : "No Alu Dock instances.", width)}\n${fit("Start one: aludock new", width)}\n`;
   }
 
   const ordered = [...instances].sort(compareInstances);
@@ -60,11 +60,11 @@ export function renderHumanInstanceList(
   if (omitted > 0) {
     lines.push("", fit(`Showing ${visible.length} of ${totalInstances} · ${omitted} older records omitted`, width));
   }
-  if (mode === "actionable" && hiddenStopped > 0) lines.push("", fit("History: alu-dock list --all", width));
+  if (mode === "actionable" && hiddenStopped > 0) lines.push("", fit("History: aludock list --all", width));
   lines.push("", fit(
     width >= 60
-      ? "Next: alu-dock attach TARGET · alu-dock status TARGET · alu-dock stop TARGET"
-      : "Next: alu-dock attach TARGET",
+      ? "Next: aludock attach TARGET · aludock status TARGET · aludock stop TARGET"
+      : "Next: aludock attach TARGET",
     width,
   ));
   return `${lines.join("\n")}\n`;

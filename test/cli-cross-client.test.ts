@@ -18,7 +18,7 @@ const fixturePath = join(compiledTestDirectory, "fixtures", "delayed-host.js");
 const cliPath = join(compiledTestDirectory, "..", "src", "cli.js");
 
 test("independent CLI processes reconnect to one delayed host-owned instance", { timeout: 15_000 }, async () => {
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-cli-"));
+  const directory = await mkdtemp(join(tmpdir(), "aludock-cli-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
   const child = fork(fixturePath, [socketPath, directory], {
@@ -34,7 +34,7 @@ test("independent CLI processes reconnect to one delayed host-owned instance", {
 
     const emptyList = await runCliText(socketPath, ["list"]);
     assert.match(emptyList, /No actionable Alu Dock instances/u);
-    assert.match(emptyList, /alu-dock new/u);
+    assert.match(emptyList, /aludock new/u);
 
     // Client A creates the instance and exits immediately after the response.
     const createdOutput = await runCli(socketPath, ["create", "--cwd", directory, "--name", "cross-client"]);

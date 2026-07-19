@@ -5,7 +5,7 @@
   "description": "Host-owned Pi SDK runtime dock for SSH workflows",
   "type": "module",
   "bin": {
-    "alu-dock": "dist/src/cli.js"
+    "aludock": "dist/src/cli.js"
   },
   "engines": {
     "node": ">=22.19.0"
@@ -18,8 +18,8 @@
     "serve": "npm run build && ALU_DOCK_SOCKET=${ALU_DOCK_SOCKET:-${XDG_RUNTIME_DIR:-$HOME/.alu-dock/run}/alu-dock-dev.sock} node dist/src/cli.js serve --dev",
     "smoke:sdk": "npm run build && node dist/scripts/sdk-smoke.js",
     "bench:tui": "npm run build && node --expose-gc dist/scripts/tui-render-benchmark.js",
-    "stage:dogfood": "npm run build && node dist/scripts/deploy-dogfood.js --stage",
-    "deploy:dogfood": "npm run build && node dist/scripts/deploy-dogfood.js"
+    "stage:athena": "npm run build && node dist/scripts/deploy-athena.js --stage",
+    "deploy:athena": "npm run build && node dist/scripts/deploy-athena.js"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.80.6",

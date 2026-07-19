@@ -131,7 +131,7 @@ async function main(): Promise<void> {
       }
       const result = await client.pruneStopped();
       process.stdout.write(`Pruned ${result.receipt.forgottenCount} stopped Dock record${result.receipt.forgottenCount === 1 ? "" : "s"}. Pi session files were not deleted.\n`);
-      if (result.receipt.hasMore) process.stdout.write("More stopped records remain; run alu-dock prune --stopped again.\n");
+      if (result.receipt.hasMore) process.stdout.write("More stopped records remain; run aludock prune --stopped again.\n");
       return;
     }
 
@@ -268,11 +268,23 @@ async function manageService(socketPath: string, socketExplicit: boolean, args: 
       writeJson({ kind: "service", action, ...(await manager.status()) });
       return;
     case "update": {
-      const [updateAction, releaseId, ...extra] = rest;
-      if (updateAction !== "apply" || extra.length > 0) throw new Error("service update requires apply [RELEASE_ID]");
-      if (releaseId?.startsWith("-")) throw new Error(`Unknown service update argument: ${releaseId}`);
-      const scriptPath = resolve(dirname(entryPath), "..", "scripts", "deploy-dogfood.js");
-      const result = spawnSync(process.execPath, [scriptPath, "--apply", ...(releaseId === undefined ? [] : [releaseId])], {
+      const [updateAction, ...updateArgs] = rest;
+      if (updateAction !== "apply") throw new Error("service update requires apply [RELEASE_ID] [--allow-active]");
+      let releaseId: string | undefined;
+      let allowActive = false;
+      for (const argument of updateArgs) {
+        if (argument === "--allow-active") allowActive = true;
+        else if (argument.startsWith("-")) throw new Error(`Unknown service update argument: ${argument}`);
+        else if (releaseId === undefined) releaseId = argument;
+        else throw new Error("service update accepts at most one RELEASE_ID");
+      }
+      const scriptPath = resolve(dirname(entryPath), "..", "scripts", "deploy-athena.js");
+      const result = spawnSync(process.execPath, [
+        scriptPath,
+        "--apply",
+        ...(releaseId === undefined ? [] : [releaseId]),
+        ...(allowActive ? ["--allow-active"] : []),
+      ], {
         stdio: "inherit",
         env: process.env,
       });
@@ -301,7 +313,7 @@ async function manageService(socketPath: string, socketExplicit: boolean, args: 
       writeJson({ kind: "service", action, ...(await manager.uninstall()) });
       return;
     default:
-      throw new Error("service requires install, start, stop, restart, status, logs, or uninstall");
+      throw new Error("service requires install, start, stop, restart, status, logs, update, or uninstall");
   }
 }
 

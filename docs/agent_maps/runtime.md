@@ -2,7 +2,7 @@
 
 ## 适用范围
 
-ManagedInstance状态机、RuntimeSession port、Pi SDK adapter、session replacement、tree、compaction、settings、Extension UI、tool result normalization。
+ManagedInstance状态机、RuntimeSession port、Pi SDK adapter、session replacement、tree、compaction、settings、Extension UI、Git workspace projection、tool result normalization。
 
 ## 构造与运行调用链
 
@@ -41,7 +41,8 @@ Pi runtime event
 | `src/core/extension-ui-broker.ts` | bounded text interaction、controller lease、timeout/cancel/tombstone | `extension-ui-broker` |
 | `src/pi/create-pi-instance.ts` | trust之后的runtime composition、安全reopen、ManagedInstance构造 | Pi reopen/stage tests |
 | `src/pi/session-inventory.ts` | runtime-free session metadata index；header/name增量扫描与可重建cache | `pi-session-inventory`, `dock-control` |
-| `src/pi/pi-runtime-host.ts` | 唯一生产Pi runtime adapter、session binding与replacement | `pi-runtime-host`, Pi real tests |
+| `src/pi/pi-runtime-host.ts` | 唯一生产Pi runtime adapter、session binding、Git observer lifecycle与replacement | `pi-runtime-host`, Pi real tests |
+| `src/pi/git-branch-observer.ts` | trust后Host-owned Git branch cache、worktree/reftable watches、bounded shell-free refresh | `git-branch-observer` |
 | `src/pi/pi-settings-adapter.ts` | Pi native setting projection、validation、setter/flush errors | `pi-runtime-host` |
 | `src/pi/pi-extension-ui-adapter.ts` | Pi ExtensionUIContext → ExtensionUiBroker text surface | extension UI tests |
 | `src/pi/pi-tool-result-normalizer.ts` | subagent child failure/invalid telemetry → real tool error | `pi-tool-result-normalizer` |
@@ -58,7 +59,8 @@ ManagedInstance
         runtimeGeneration, event sequence/history projection, replacement transaction
 
 PiRuntimeHost
-  owns: concrete Pi SDK objects, active AgentSession binding, resources/settings bridge
+  owns: concrete Pi SDK objects, active AgentSession binding, resources/settings bridge,
+        current-binding Git observer and stale-callback fence
 
 TUI
   owns only: viewport/search/focus/tool-fold/local transient UI state
@@ -107,6 +109,7 @@ ManagedInstance replacement intent
 - previous Pi session file保持可恢复，不做隐式删除。
 - branch-summary cancellation使用Pi公开`abortBranchSummary()`路径；不能假设agent abort覆盖它。
 - Host loss后的reopen是Registry创建fresh runtime transaction，不恢复旧queue/Promise/tool effect。
+- 每个active/staged binding拥有独立Git observer；promotion把candidate branch作为`session.replaced` generation bootstrap，旧binding同步关闭watcher并fence callback。Git branch不进durable catalog。
 - Extension可在`agent_settled`后触发无client command ID的follow-on run（例如Sol guard compact后续跑）。它使用closed `run.started` identity `runtime-initiated`，仍完全由Host持有；fresh attach必须恢复其未完成tail，client detach/attach/read不得成为启动条件。
 - Pi会先await Extension的`agent_settled` handler、再向runtime subscriber发布`agent_settled`；handler内启动的`ctx.compact()`因此可能先发布`compaction_start`。已建立的compaction boundary必须保持`execution: running`与ephemeral snapshot `compacting: true`直到`compaction_end`，后到的run settlement只结算旧run，不得把instance降为idle；`compacting`不进入durable catalog。
 
@@ -121,6 +124,7 @@ ManagedInstance replacement intent
 | compaction start/completion/failure | `managed-instance.ts` | PiRuntimeHost compact、session-command service、operation attribution tests |
 | model/thinking/settings | `config-projection.ts`, `pi-settings-adapter.ts` | Managed commit/event、settings TUI |
 | resources/tools/commands | `pi-runtime-host.ts` | closed config DTO、startup/client smoke |
+| Git branch/footer context | `git-branch-observer.ts`, `pi-runtime-host.ts` | Managed snapshot/event、Protocol capability、TUI footer、normal/worktree/detached tests |
 | Extension text UI | `extension-ui-broker.ts` | Pi adapter、Protocol interaction、TUI dialog |
 | tool telemetry classification | `pi-tool-result-normalizer.ts` | real extension result shape、normalizer tests |
 

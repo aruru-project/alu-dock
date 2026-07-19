@@ -1,5 +1,4 @@
 import type { DockEvent, InstanceSnapshot } from "../core/managed-instance.js";
-import { knownCompactionFeedback } from "./compaction-feedback.js";
 
 export type RunActivityPhase =
   | "idle"
@@ -7,10 +6,8 @@ export type RunActivityPhase =
   | "waiting"
   | "thinking"
   | "responding"
-  | "tool"
   | "retry"
   | "compaction"
-  | "queued"
   | "interaction"
   | "aborting"
   | "disconnected"
@@ -29,7 +26,7 @@ export function activityFromSnapshot(snapshot: InstanceSnapshot): RunActivitySta
   if (snapshot.lifecycle === "runtime_error") return { phase: "error", label: "runtime error" };
   if (snapshot.compacting) return { phase: "compaction", label: "compacting context" };
   if (snapshot.execution === "running") return { phase: "waiting", label: "waiting for model" };
-  if (snapshot.pending.total > 0) return queued(snapshot.pending.total);
+  if (snapshot.execution === "failed") return { phase: "error", label: "run failed" };
   return READY;
 }
 
@@ -43,10 +40,6 @@ export function abortingActivity(): RunActivityState {
 
 export function disconnectedActivity(label = "host stream closed"): RunActivityState {
   return { phase: "disconnected", label };
-}
-
-export function errorActivity(label = "error"): RunActivityState {
-  return { phase: "error", label };
 }
 
 /** Recover the most specific current phase when attaching to an already-running instance. */
@@ -63,7 +56,11 @@ export function activityFromReplay(
   return activity.phase === "idle" ? activityFromSnapshot(snapshot) : activity;
 }
 
-/** Reduce typed Host events into one honest, promptly-cleared activity indicator. */
+/**
+ * Project one authoritative top-level runtime phase. Queue state belongs to the
+ * pending tray and tool execution belongs to conversation surfaces; neither is
+ * allowed to replace model activity.
+ */
 export function reduceRunActivity(
   current: RunActivityState,
   event: DockEvent,
@@ -71,126 +68,118 @@ export function reduceRunActivity(
 ): RunActivityState {
   if (snapshot.lifecycle !== "active") return activityFromSnapshot(snapshot);
 
+  // Compaction is a newer explicit boundary and outranks stale run/tool/queue
+  // events until its own completion arrives.
+  if (snapshot.compacting && event.type !== "compaction.completed") {
+    return { phase: "compaction", label: "compacting context" };
+  }
+
   switch (event.type) {
     case "command.accepted":
-      if (event.data.queued) return queued(snapshot.pending.total || 1);
-      if (snapshot.execution === "running" && snapshot.activeCommandId !== undefined && snapshot.activeCommandId !== event.data.operationId) {
-        return current.phase === "idle" ? activityFromSnapshot(snapshot) : current;
-      }
-      // Acceptance confirms Host ownership, not that a model run exists. Keep
-      // the client-local submitting phase until run.started/message.submitted,
-      // command.handled, or the authoritative response snapshot resolves it.
+      // Admission reserves Host state before Pi proves a model run. Only the
+      // later run.started boundary may turn a local submission into waiting.
       return current;
 
     case "command.handled":
-      if (snapshot.execution === "running") return current.phase === "idle" ? activityFromSnapshot(snapshot) : current;
-      if (snapshot.pending.total > 0) return queued(snapshot.pending.total);
-      return current.phase === "idle" && current.label !== READY.label ? current : READY;
-
     case "command.rejected":
-      return { phase: "error", label: "command rejected" };
+      // The outcome event precedes its authoritative state snapshot. Keep a
+      // hidden/local submit phase across that brief stale-running window.
+      if (current.phase === "submitting" && snapshot.execution === "running") return current;
+      return snapshot.execution === "running" ? preserveActiveModelPhase(current, snapshot) : activityFromSnapshot(snapshot);
 
     case "run.started":
-    case "message.submitted":
-      return { phase: "waiting", label: "waiting for model" };
+      return hasOperationBoundary(current)
+        ? current
+        : { phase: "waiting", label: "waiting for model" };
 
     case "message.delta":
+      if (hasOperationBoundary(current)) return current;
       return event.data.block === "thinking"
         ? { phase: "thinking", label: "thinking" }
         : { phase: "responding", label: "responding" };
 
+    case "message.submitted":
+      return current;
+
     case "message.completed":
-      if (current.phase === "tool") return current;
+      if (hasOperationBoundary(current)) return current;
       return event.data.role === "assistant" && snapshot.execution === "running"
         ? { phase: "waiting", label: "waiting for model" }
         : current;
 
     case "tool.started":
     case "tool.args_updated":
-    case "tool.output_updated": {
-      const toolName = event.type === "tool.started" ? event.data.toolName : undefined;
-      return {
-        phase: "tool",
-        label: toolName ? `tool ${toolName}` : current.phase === "tool" ? current.label : "tool running",
-      };
-    }
-
+    case "tool.output_updated":
     case "tool.completed":
-      return snapshot.execution === "running"
-        ? { phase: "waiting", label: "waiting for model" }
-        : activityFromSnapshot(snapshot);
+    case "message.queued":
+    case "queue.changed":
+    case "queue.cleared":
+      return preserveActiveModelPhase(current, snapshot);
 
     case "run.retry_started":
-      return {
-        phase: "retry",
-        label: `retry ${event.data.attempt}/${event.data.maxAttempts}`,
-      };
+      return { phase: "retry", label: `retry ${event.data.attempt}/${event.data.maxAttempts}` };
 
     case "run.retry_completed":
       return event.data.success
-        ? { phase: "waiting", label: "waiting for model" }
+        ? activityFromSnapshot(snapshot)
         : { phase: "error", label: "retry failed" };
 
     case "compaction.started":
       return { phase: "compaction", label: "compacting context" };
 
     case "compaction.completed":
-      if (event.data.aborted) return { phase: "idle", label: "compaction cancelled" };
-      const known = knownCompactionFeedback(event.data.error);
-      if (known) return { phase: "idle", label: known === "already_compacted" ? "already compacted" : "nothing to compact" };
-      if (event.data.error) return { phase: "error", label: "compaction failed" };
-      return { phase: "idle", label: "compacted" };
-
-    case "queue.changed":
-      if (snapshot.execution === "running") return current.phase === "idle" ? activityFromSnapshot(snapshot) : current;
-      return event.data.total > 0 ? queued(event.data.total) : READY;
-
-    case "queue.cleared":
-      return snapshot.execution === "running" ? current : READY;
+      return activityFromSnapshot(snapshot);
 
     case "interaction.requested":
       return { phase: "interaction", label: `waiting for ${event.data.method}` };
 
     case "interaction.resolved":
     case "interaction.cancelled":
-      return activityFromSnapshot(snapshot);
+      return current.phase === "interaction" ? activityFromSnapshot(snapshot) : current;
 
     case "run.settled":
-      // An extension can start compaction from its agent_settled hook before Pi
-      // publishes the run's own settled event. That settled run must not erase
-      // the newer, still-active compaction phase.
-      if (current.phase === "compaction") return current;
-      return snapshot.pending.total > 0 ? queued(snapshot.pending.total) : READY;
+      // Pi may publish an older run settlement after an extension has already
+      // opened compaction or an interaction boundary.
+      if (current.phase === "compaction" || current.phase === "interaction") return current;
+      return activityFromSnapshot(snapshot);
 
     case "session.replaced":
       return READY;
 
     case "instance.state_changed":
-      if (event.data.execution === "running" && current.phase === "idle") {
-        return { phase: "waiting", label: "waiting for model" };
-      }
-      if (event.data.execution !== "running" && event.data.pending.total === 0) {
-        return current.phase === "idle" && current.label !== READY.label ? current : READY;
-      }
-      return current;
+      if (snapshot.compacting) return { phase: "compaction", label: "compacting context" };
+      if (snapshot.execution === "running") return current.phase === "submitting" ? current : preserveActiveModelPhase(current, snapshot);
+      return activityFromSnapshot(snapshot);
 
     case "instance.stopped":
       return { phase: "disconnected", label: "stopped" };
 
     case "instance.runtime_error":
+      return { phase: "error", label: "runtime error" };
+
     case "instance.error":
     case "settings.write_failed":
-      return { phase: "error", label: "error" };
-
     case "extension.notification":
     case "extension.error":
-      return current;
+      return preserveActiveModelPhase(current, snapshot);
 
     default:
       return current;
   }
 }
 
-function queued(total: number): RunActivityState {
-  return { phase: "queued", label: `queued ${Math.max(1, total)}` };
+function preserveActiveModelPhase(current: RunActivityState, snapshot: InstanceSnapshot): RunActivityState {
+  if (hasOperationBoundary(current) || isModelPhase(current.phase)) return current;
+  return activityFromSnapshot(snapshot);
+}
+
+function isModelPhase(phase: RunActivityPhase): boolean {
+  return phase === "waiting" || phase === "thinking" || phase === "responding";
+}
+
+function hasOperationBoundary(current: RunActivityState): boolean {
+  return current.phase === "compaction"
+    || current.phase === "retry"
+    || current.phase === "interaction"
+    || current.phase === "aborting";
 }

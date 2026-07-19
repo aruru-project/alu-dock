@@ -4,6 +4,9 @@ import type { RuntimeThinkingLevel } from "../core/runtime-session.js";
 const THINKING_LEVELS: readonly RuntimeThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 export function projectSnapshot(snapshot: InstanceSnapshot, event: DockEvent): InstanceSnapshot {
+  if (event.type === "git.branch_changed") {
+    return { ...snapshot, gitBranch: event.data.branch, updatedAt: event.occurredAt, eventCursor: advanceCursor(snapshot, event) };
+  }
   if (event.type === "session.metrics_changed") {
     return {
       ...snapshot,
@@ -29,6 +32,7 @@ export function projectSnapshot(snapshot: InstanceSnapshot, event: DockEvent): I
       ...snapshot,
       cwd: event.data.cwd,
       name: event.data.name,
+      gitBranch: event.data.gitBranch,
       execution: "idle",
       compacting: false,
       lastRun: "never",
@@ -78,14 +82,20 @@ export function projectSnapshot(snapshot: InstanceSnapshot, event: DockEvent): I
       return { ...snapshot, execution: "running", compacting: true, updatedAt: event.occurredAt, eventCursor: advanceCursor(snapshot, event) };
     }
     if (event.type === "compaction.completed") {
-      return { ...snapshot, compacting: false, updatedAt: event.occurredAt, eventCursor: advanceCursor(snapshot, event) };
+      return {
+        ...snapshot,
+        execution: snapshot.activeCommandId === undefined && !event.data.willRetry ? "idle" : snapshot.execution,
+        compacting: false,
+        updatedAt: event.occurredAt,
+        eventCursor: advanceCursor(snapshot, event),
+      };
     }
     return { ...snapshot, eventCursor: advanceCursor(snapshot, event) };
   }
 
   return {
     ...snapshot,
-    lifecycle: enumData(event, "lifecycle", ["active", "stopping", "stopped"] as const) ?? snapshot.lifecycle,
+    lifecycle: enumData(event, "lifecycle", ["active", "stopping", "stopped", "host_lost", "runtime_error"] as const) ?? snapshot.lifecycle,
     execution: enumData(event, "execution", ["idle", "running", "failed", "unavailable"] as const) ?? snapshot.execution,
     compacting: booleanData(event, "compacting") ?? snapshot.compacting,
     lastRun: enumData(event, "lastRun", ["never", "succeeded", "failed", "aborted", "interrupted"] as const) ?? snapshot.lastRun,

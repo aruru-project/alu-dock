@@ -15,11 +15,11 @@ import { dirname, resolve } from "node:path";
 import { ControlClientError, DockClient } from "../control/dock-client.js";
 import type { PingResult } from "../control/protocol.js";
 import {
-  DOGFOOD_GENERATED_MARKER,
-  DOGFOOD_UNIT_NAME,
-  dogfoodReleaseLayout,
-  renderDogfoodUnit,
-} from "./dogfood-release.js";
+  ATHENA_UNIT_NAME,
+  athenaReleaseLayout,
+  isAthenaGeneratedContent,
+  renderAthenaUnit,
+} from "./athena-release.js";
 
 const READY_TIMEOUT_MS = 15_000;
 const READY_POLL_MS = 100;
@@ -76,7 +76,7 @@ export class UserServiceManager {
 
   constructor(private readonly options: UserServiceManagerOptions) {
     const home = resolve(options.home ?? homedir());
-    this.unitFile = dogfoodReleaseLayout(home).unitFile;
+    this.unitFile = athenaReleaseLayout(home).unitFile;
     this.timeoutMs = Math.max(1, options.timeoutMs ?? READY_TIMEOUT_MS);
     this.run = options.run ?? runCommand;
     this.probe = options.probe ?? (() => new DockClient({ socketPath: options.socketPath, timeoutMs: 500 }).ping());
@@ -87,13 +87,13 @@ export class UserServiceManager {
     const previous = startNow ? await this.tryProbe() : undefined;
     await this.writeUnit();
     this.systemctl(["daemon-reload"]);
-    this.systemctl(["enable", DOGFOOD_UNIT_NAME]);
+    this.systemctl(["enable", ATHENA_UNIT_NAME]);
     if (startNow) {
       if (this.unitProperties().ActiveState === "active") {
-        this.systemctl(["restart", DOGFOOD_UNIT_NAME]);
+        this.systemctl(["restart", ATHENA_UNIT_NAME]);
         await this.waitForReady(previous?.hostEpoch);
       } else {
-        this.systemctl(["start", DOGFOOD_UNIT_NAME]);
+        this.systemctl(["start", ATHENA_UNIT_NAME]);
         await this.waitForReady();
       }
     }
@@ -102,7 +102,7 @@ export class UserServiceManager {
 
   async start(): Promise<UserServiceStatus> {
     await this.requireGeneratedUnit();
-    this.systemctl(["start", DOGFOOD_UNIT_NAME]);
+    this.systemctl(["start", ATHENA_UNIT_NAME]);
     await this.waitForReady();
     return this.status();
   }
@@ -110,14 +110,14 @@ export class UserServiceManager {
   async restart(): Promise<UserServiceStatus> {
     await this.requireGeneratedUnit();
     const previous = await this.tryProbe();
-    this.systemctl(["restart", DOGFOOD_UNIT_NAME]);
+    this.systemctl(["restart", ATHENA_UNIT_NAME]);
     await this.waitForReady(previous?.hostEpoch);
     return this.status();
   }
 
   async stop(): Promise<UserServiceStatus> {
     await this.requireGeneratedUnit();
-    this.systemctl(["stop", DOGFOOD_UNIT_NAME]);
+    this.systemctl(["stop", ATHENA_UNIT_NAME]);
     return this.status();
   }
 
@@ -125,13 +125,13 @@ export class UserServiceManager {
     const info = await lstatIfPresent(this.unitFile);
     if (!info) {
       this.systemctl(["daemon-reload"]);
-      return { unit: DOGFOOD_UNIT_NAME, unitFile: this.unitFile, removed: false };
+      return { unit: ATHENA_UNIT_NAME, unitFile: this.unitFile, removed: false };
     }
     await this.requireGeneratedUnit();
-    this.systemctl(["disable", "--now", DOGFOOD_UNIT_NAME], true);
+    this.systemctl(["disable", "--now", ATHENA_UNIT_NAME], true);
     await rm(this.unitFile);
     this.systemctl(["daemon-reload"]);
-    return { unit: DOGFOOD_UNIT_NAME, unitFile: this.unitFile, removed: true };
+    return { unit: ATHENA_UNIT_NAME, unitFile: this.unitFile, removed: true };
   }
 
   async status(): Promise<UserServiceStatus> {
@@ -145,7 +145,7 @@ export class UserServiceManager {
     const linger = this.lingerState();
     if (linger !== "yes") diagnostics.push("User linger is not enabled; Alu Dock does not modify login policy automatically");
     return {
-      unit: DOGFOOD_UNIT_NAME,
+      unit: ATHENA_UNIT_NAME,
       unitFile: this.unitFile,
       activeState: properties.ActiveState || "unknown",
       subState: properties.SubState || "unknown",
@@ -161,7 +161,7 @@ export class UserServiceManager {
   logs(lines: number, follow: boolean): ServiceCommandResult {
     const boundedLines = Number.isSafeInteger(lines) && lines >= 1 && lines <= 10_000 ? lines : 200;
     return this.run("journalctl", [
-      "--user", "-u", DOGFOOD_UNIT_NAME, "-n", String(boundedLines), "--no-pager",
+      "--user", "-u", ATHENA_UNIT_NAME, "-n", String(boundedLines), "--no-pager",
       ...(follow ? ["--follow"] : []),
     ], { inherit: true, allowFailure: true });
   }
@@ -171,7 +171,7 @@ export class UserServiceManager {
     if (!info) throw new Error(`Alu Dock service is not installed: ${this.unitFile}`);
     if (!info.isFile() || info.isSymbolicLink()) throw new Error(`Refusing to manage non-regular unit file: ${this.unitFile}`);
     const existing = await readFile(this.unitFile, "utf8");
-    if (!existing.startsWith(`${DOGFOOD_GENERATED_MARKER}\n`)) throw new Error(`Refusing to manage non-generated unit file: ${this.unitFile}`);
+    if (!isAthenaGeneratedContent(existing)) throw new Error(`Refusing to manage non-generated unit file: ${this.unitFile}`);
   }
 
   private async writeUnit(): Promise<void> {
@@ -180,9 +180,9 @@ export class UserServiceManager {
     if (existingInfo) {
       if (!existingInfo.isFile() || existingInfo.isSymbolicLink()) throw new Error(`Refusing to overwrite non-regular unit file: ${this.unitFile}`);
       const existing = await readFile(this.unitFile, "utf8");
-      if (!existing.startsWith(`${DOGFOOD_GENERATED_MARKER}\n`)) throw new Error(`Refusing to overwrite non-generated unit file: ${this.unitFile}`);
+      if (!isAthenaGeneratedContent(existing)) throw new Error(`Refusing to overwrite non-generated unit file: ${this.unitFile}`);
     }
-    const content = renderDogfoodUnit({
+    const content = renderAthenaUnit({
       nodePath: resolve(this.options.nodePath),
       cliPath: resolve(this.options.cliPath),
       homePath: resolve(this.options.home ?? homedir()),
@@ -210,7 +210,7 @@ export class UserServiceManager {
       else return ping;
       await this.sleep(READY_POLL_MS);
     }
-    const journal = this.run("journalctl", ["--user", "-u", DOGFOOD_UNIT_NAME, "-n", "80", "--no-pager"], { allowFailure: true });
+    const journal = this.run("journalctl", ["--user", "-u", ATHENA_UNIT_NAME, "-n", "80", "--no-pager"], { allowFailure: true });
     throw new Error(`Alu Dock service did not become ready within ${this.timeoutMs}ms: ${last}; journal: ${(journal.stdout || journal.stderr).slice(-4_000)}`);
   }
 
@@ -224,7 +224,7 @@ export class UserServiceManager {
 
   private unitProperties(): Record<string, string> {
     const result = this.run("systemctl", [
-      "--user", "show", DOGFOOD_UNIT_NAME,
+      "--user", "show", ATHENA_UNIT_NAME,
       "--property=ActiveState,SubState,MainPID,UnitFileState",
     ], { allowFailure: true });
     const properties: Record<string, string> = {};

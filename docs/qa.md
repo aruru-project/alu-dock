@@ -95,7 +95,7 @@ Real Pi tests不得调用model；它们验证public API、session文件、resour
 ```text
 scripts/sdk-smoke.ts             # 显式provider/model调用 smoke；只在任务授权时运行
 scripts/tui-render-benchmark.ts  # conversation delta/tool render CPU benchmark
-scripts/dogfood-smoke.ts         # released DockClient installed-resource smoke
+scripts/athena-smoke.ts         # released DockClient installed-resource smoke
 ```
 
 ### TUI
