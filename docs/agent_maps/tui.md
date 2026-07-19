@@ -82,6 +82,14 @@ Session Work TUI
 
 Warning必须说明用户影响和可执行动作；closed Host projection本身不等于conversation展示许可。
 
+## Alu 视觉主题硬约束
+
+- `src/tui/alu-mascot.ts` 的阿露色板是唯一 canonical palette：`#69424e`、`#976269`、`#f6c147`、`#f4d8ce`、`#6c84cd`、`#dd7e9e`、`#e6e1f2`。原稿与产品决定见 card #202；蓝色只允许偏紫/偏靛方向。
+- 禁止把 cyan、teal、turquoise、emerald、青绿或霓虹科技蓝作为 accent、success、selection 或默认交互色；不得以常见 dark-dashboard/Tailwind 风格代替阿露身份。成功状态优先由 `✓`、文案和结构表达。
+- `theme.ts` 只能复用或从 canonical palette 派生前景、局部 surface 与降级色；不得自行维护第二套品牌色。终端背景由用户拥有，不做全屏背景接管。
+- 对齐 stock Pi 的对象是 conversation 的角色层级、分组、间距、内容优先与展开/折叠语义，不是 Pi 的颜色。compaction、thinking、assistant、tool invocation/result 必须一眼可区分，collapsed 也必须保留语义，禁止统一压成“图标 + done + 一行摘要 + 快捷键”的遥测日志。
+- 新增颜色、改变品牌主次关系或采用新的全局视觉风格前，必须先取得用户明确确认；80×24、120×40、ANSI 16/256、TrueColor 与 `NO_COLOR` 都要保持同一语义层级。
+
 ## 常见修改路由
 
 | 需求 | 从这里开始 | 随后检查 |
