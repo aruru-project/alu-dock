@@ -399,16 +399,28 @@ export class DockRegistry {
 
   getSnapshot(instanceId: string): InstanceSnapshot {
     this.assertCatalogReady();
-    const live = this.instances.get(instanceId);
-    if (live) return live.snapshot();
-    return catalogSnapshotFromRecord(this.catalogRecord(instanceId), this.hostEpoch);
+    return this.safeSnapshot(this.catalogRecord(instanceId));
   }
 
   list(): InstanceSnapshot[] {
     this.assertCatalogReady();
     return this.catalog.current().instances
-      .map((record) => this.instances.get(record.id)?.snapshot() ?? catalogSnapshotFromRecord(record, this.hostEpoch))
+      .map((record) => this.safeSnapshot(record))
       .sort(newestInstanceFirst);
+  }
+
+  /**
+   * A live projection fault belongs to one instance. Fall back to its last
+   * committed catalog record so Hub/list/status for unrelated instances stay
+   * usable; strict Protocol validation remains unchanged.
+   */
+  private safeSnapshot(record: CatalogInstanceRecord): InstanceSnapshot {
+    const live = this.instances.get(record.id);
+    if (live) {
+      try { return live.snapshot(); }
+      catch { /* bounded catalog fallback below */ }
+    }
+    return catalogSnapshotFromRecord(record, this.hostEpoch);
   }
 
   listPage(input: {
@@ -434,7 +446,7 @@ export class DockRegistry {
     }
     if (input.cursor && input.cursor.selector !== input.selector) throw new Error("Catalog list cursor selector mismatch");
     const all = projection.instances
-      .map((record) => this.instances.get(record.id)?.snapshot() ?? catalogSnapshotFromRecord(record, this.hostEpoch))
+      .map((record) => this.safeSnapshot(record))
       .sort(newestInstanceFirst);
     const hiddenStopped = all.filter((instance) => instance.lifecycle === "stopped").length;
     const selected = input.selector === "all" ? all : all.filter((instance) => instance.lifecycle !== "stopped");

@@ -15,7 +15,10 @@ import {
   StaleRuntimeGenerationError,
 } from "../src/core/managed-instance.js";
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, ToolDto } from "../src/core/config-projection.js";
-import { RuntimeCompactionKnownFailureError } from "../src/core/runtime-session.js";
+import {
+  RuntimeCompactionKnownFailureError,
+  RuntimeQueueRejectedBeforeEffectError,
+} from "../src/core/runtime-session.js";
 import { DelayedRuntimeSession } from "./support/delayed-runtime-session.js";
 import type {
   ClearedRuntimeQueue,
@@ -85,12 +88,14 @@ class FakeRuntimeSession implements RuntimeSession {
   promptDeferred = new Deferred<void>();
   preflightEntered = new Deferred<void>();
   promptCalls: Array<{ text: string; options?: RuntimePromptOptions }> = [];
+  queueMessageCalls: Array<{ text: string; delivery: "steer" | "followUp" }> = [];
   abortCalls = 0;
   disposeCalls = 0;
   clearQueueResult: ClearedRuntimeQueue | undefined;
   rejectPreflightWith: Error | undefined;
   delayPreflight = false;
   queueProjection: (text: string) => string = (text) => text;
+  queueMessageReject: "before" | "after" | undefined;
   readonly extensionCommands = new Set<string>();
   extensionCommandBlock: Deferred<void> | undefined;
   disposeError: Error | undefined;
@@ -152,6 +157,18 @@ class FakeRuntimeSession implements RuntimeSession {
     }
     options?.preflightResult?.(true);
     return this.promptDeferred.promise;
+  }
+
+  queueMessage(text: string, delivery: "steer" | "followUp"): Promise<void> {
+    this.queueMessageCalls.push({ text, delivery });
+    if (this.queueMessageReject === "before") {
+      return Promise.reject(new RuntimeQueueRejectedBeforeEffectError(new Error("queue validation failed")));
+    }
+    if (delivery === "steer") this.steeringQueue.push(this.queueProjection(text));
+    else this.followUpQueue.push(this.queueProjection(text));
+    this.emitQueue();
+    if (this.queueMessageReject === "after") return Promise.reject(new Error("queue acknowledgement failed"));
+    return Promise.resolve();
   }
 
   async listModels(): Promise<RuntimeModelInfo[]> {
@@ -264,6 +281,13 @@ class FakeRuntimeSession implements RuntimeSession {
     callback?.(success);
     if (success) this.startRun();
     else this.promptDeferred.reject(new Error("preflight rejected"));
+  }
+
+  acceptPreflightThenRejectBeforeStart(error: Error): void {
+    const callback = this.pendingPreflight;
+    this.pendingPreflight = undefined;
+    callback?.(true);
+    this.promptDeferred.reject(error);
   }
 
   startRun(): void {
@@ -525,6 +549,353 @@ test("known compaction failure remains definitive instead of becoming effect_unk
   assert.equal((await instance.listModels()).models.length, 2, "configuration gate must be released after a known no-op");
 });
 
+test("Sol-style settled compaction defers concurrent input in the Host and flushes it exactly once", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+
+  session.isStreaming = true;
+  session.emit({ type: "agent_start" });
+  session.emitAssistantEnd("stop");
+  session.isStreaming = false;
+  session.isCompacting = true;
+  session.emit({ type: "compaction_start", reason: "threshold" });
+  session.emit({ type: "agent_settled" });
+
+  const receipt = await instance.submit("keep this after compaction", "auto", "during-compaction");
+  assert.equal(receipt.queued, true);
+  assert.equal(receipt.delivery, "steer");
+  assert.equal(session.promptCalls.length, 0, "Pi prompt must not be called while compaction owns the session");
+  assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages.map((item) => item.operationId), ["during-compaction"]);
+  assert.deepEqual(instance.snapshot().pending, { steering: 1, followUp: 0, total: 1 });
+
+  session.isCompacting = false;
+  session.emit({ type: "compaction_end", reason: "threshold", result: {}, aborted: false, willRetry: false });
+  await flushBackground();
+  assert.deepEqual(session.promptCalls.map((call) => call.text), ["keep this after compaction"]);
+
+  session.startRun();
+  await flushBackground();
+  assert.equal(instance.snapshot().activeCommandId, "during-compaction");
+  assert.equal(instance.snapshot().pending.total, 0);
+  assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages, []);
+  const submitted = instance.eventsSince().events.filter((event) => event.type === "message.submitted");
+  assert.equal(submitted.at(-1)?.data.operationId, "during-compaction");
+  assert.equal(submitted.at(-1)?.data.queueItemId, receipt.queued ? (instance.eventsSince().events.find((event) => event.type === "message.queued")?.data.queueItemId) : undefined);
+  for (const event of instance.eventsSince().events) {
+    if (event.type === "instance.state_changed") {
+      assert.equal(event.data.compacting && event.data.execution !== "running", false, "idle+compacting must never be published");
+    }
+  }
+
+  session.settle();
+  await instance.waitForIdle();
+});
+
+test("compaction beginning during durable admission reroutes the text before Pi is called", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  const admissionEntered = new Deferred<void>();
+  const releaseAdmission = new Deferred<void>();
+  instance.bindCatalogPort({
+    assertWritable: () => {},
+    commit: async (_record, context) => {
+      if (context.kind === "command.admission") {
+        admissionEntered.resolve();
+        await releaseAdmission.promise;
+      }
+    },
+  });
+  instance.markCatalogCommitted();
+
+  const submitting = instance.submit("crosses the admission boundary", "auto", "admission-race");
+  await admissionEntered.promise;
+  session.isCompacting = true;
+  session.emit({ type: "compaction_start", reason: "threshold" });
+  releaseAdmission.resolve();
+  const receipt = await submitting;
+
+  assert.equal(receipt.queued, true);
+  assert.equal(session.promptCalls.length, 0);
+  assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages.map((item) => item.operationId), ["admission-race"]);
+
+  session.isCompacting = false;
+  session.emit({ type: "compaction_end", reason: "threshold", result: {}, aborted: false, willRetry: false });
+  await flushBackground();
+  session.startRun();
+  session.settle();
+  await instance.waitForIdle();
+});
+
+test("runtime isCompacting closes the pre-event race and definite flush failure remains dequeue-restorable", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+
+  session.isCompacting = true;
+  const receipt = await instance.submit("race-safe text", "auto", "compaction-race");
+  assert.equal(receipt.queued, true);
+  assert.equal(session.promptCalls.length, 0);
+  assert.equal(instance.snapshot().compacting, true);
+  assert.equal(instance.snapshot().execution, "running");
+
+  session.emit({ type: "compaction_start", reason: "manual" });
+  session.rejectPreflightWith = new Error("definite preflight rejection");
+  session.isCompacting = false;
+  session.emit({ type: "compaction_end", reason: "manual", result: {}, aborted: false, willRetry: false });
+  await flushBackground();
+  await flushBackground();
+  assert.equal(session.promptCalls.length, 1);
+  assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages.map((item) => item.operationId), ["compaction-race"]);
+  assert.equal(instance.snapshot().pending.total, 1);
+
+  const restored = await instance.dequeue("restore-after-flush-failure");
+  assert.deepEqual(restored.restored.map((item) => item.text), ["race-safe text"]);
+  assert.deepEqual(restored.inFlight, []);
+  assert.equal(instance.snapshot().pending.total, 0);
+  await flushBackground();
+  assert.equal(session.promptCalls.length, 1, "definite failure must not trigger an automatic retry");
+});
+
+test("a newer submission cannot overtake the first deferred preflight after compaction_end", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  session.isCompacting = true;
+  session.emit({ type: "compaction_start", reason: "threshold" });
+  await instance.submit("first deferred", "auto", "fifo-first");
+  session.delayPreflight = true;
+
+  session.isCompacting = false;
+  session.emit({ type: "compaction_end", reason: "threshold", result: {}, aborted: false, willRetry: false });
+  await session.preflightEntered.promise;
+  const second = await instance.submit("second during drain", "auto", "fifo-second");
+  assert.equal(second.queued, true);
+  assert.deepEqual(session.promptCalls.map((call) => call.text), ["first deferred"]);
+
+  session.delayPreflight = false;
+  session.triggerPreflight(true);
+  await flushBackground();
+  assert.deepEqual(session.promptCalls.map((call) => call.text), ["first deferred", "second during drain"]);
+  assert.equal(session.promptCalls[1]?.options?.streamingBehavior, "steer");
+  session.consumeNextQueued();
+  session.settle();
+  await instance.waitForIdle();
+});
+
+test("accepted fresh dispatch ambiguity stays visible and dequeue reports it in flight", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  session.isCompacting = true;
+  session.emit({ type: "compaction_start", reason: "threshold" });
+  await instance.submit("ambiguous fresh text", "auto", "ambiguous-fresh");
+  session.delayPreflight = true;
+  session.isCompacting = false;
+  session.emit({ type: "compaction_end", reason: "threshold", result: {}, aborted: false, willRetry: false });
+  await session.preflightEntered.promise;
+  session.acceptPreflightThenRejectBeforeStart(new Error("transport vanished after acceptance"));
+  await flushBackground();
+
+  const attached = await instance.getAttachProjection(undefined);
+  assert.equal(attached.instance.pending.total, 1);
+  assert.deepEqual(attached.pendingMessages.map((item) => item.operationId), ["ambiguous-fresh"]);
+  const dequeued = await instance.dequeue("inspect-ambiguous-fresh");
+  assert.deepEqual(dequeued.restored, []);
+  assert.deepEqual(dequeued.inFlight.map((item) => item.operationId), ["ambiguous-fresh"]);
+  const after = await instance.getAttachProjection(undefined);
+  assert.equal(after.instance.pending.total, 0);
+  assert.deepEqual(after.pendingMessages, []);
+
+  session.startRun();
+  await flushBackground();
+  const submitted = instance.eventsSince().events.find((event) => event.type === "message.submitted" && event.data.operationId === "ambiguous-fresh");
+  assert.equal(submitted?.type, "message.submitted", "late message_start must retain the dequeued in-flight operation identity");
+  session.settle();
+});
+
+test("stale deferred rejection cannot publish its operation into a replacement generation", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  session.isCompacting = true;
+  session.emit({ type: "compaction_start", reason: "threshold" });
+  await instance.submit("old generation deferred", "auto", "old-deferred-operation");
+  session.delayPreflight = true;
+  session.isCompacting = false;
+  session.emit({ type: "compaction_end", reason: "threshold", result: {}, aborted: false, willRetry: false });
+  await session.preflightEntered.promise;
+
+  session.acceptPreflightThenRejectBeforeStart(new Error("old generation rejected late"));
+  session.emit({
+    type: "dock_session_replaced",
+    operationId: "runtime-replacement",
+    reason: "new",
+    previousSessionFile: "/tmp/pi-session-1.jsonl",
+    sessionFile: "/tmp/pi-session-2.jsonl",
+    cwd: "/tmp/project",
+  });
+  session.delayPreflight = false;
+  session.promptDeferred = new Deferred<void>();
+  const replacementReceipt = await instance.submit("new generation prompt", "auto", "new-generation-operation");
+  assert.equal(replacementReceipt.queued, false, "an old drainer must not retain Queue custody in the replacement generation");
+  session.startRun();
+  session.settle();
+  await flushBackground();
+  await flushBackground();
+
+  assert.equal(instance.runtimeGeneration, 2);
+  assert.equal(
+    instance.eventsSince().events.some((event) => event.type === "instance.error" && event.data.operationId === "old-deferred-operation"),
+    false,
+  );
+  assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages, []);
+});
+
+test("Host queue keeps the lossless prompt while exposing only its bounded safe projection", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  const binaryLikePrompt = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0".repeat(8);
+  session.isCompacting = true;
+  session.emit({ type: "compaction_start", reason: "threshold" });
+  await instance.submit(binaryLikePrompt, "auto", "lossless-deferred");
+  const attached = await instance.getAttachProjection(undefined);
+  assert.equal(attached.pendingMessages[0]?.text, "Queued message omitted");
+
+  session.isCompacting = false;
+  session.emit({ type: "compaction_end", reason: "threshold", result: {}, aborted: false, willRetry: false });
+  await flushBackground();
+  assert.equal(session.promptCalls[0]?.text, binaryLikePrompt);
+  session.startRun();
+  session.settle();
+  await instance.waitForIdle();
+});
+
+test("compaction queue admission commit failure leaves no text or Pi effect behind", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  instance.bindCatalogPort({
+    assertWritable: () => {},
+    commit: async () => { throw new Error("catalog admission unavailable"); },
+  });
+  instance.markCatalogCommitted();
+  session.isCompacting = true;
+
+  await assert.rejects(
+    instance.submit("must remain local", "auto", "failed-compaction-admission"),
+    /catalog admission unavailable/,
+  );
+  assert.equal(session.promptCalls.length, 0);
+  assert.equal(instance.snapshot().pending.total, 0);
+  assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages, []);
+});
+
+test("retrying compaction queues every deferred item without starting a competing fresh prompt", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  session.isCompacting = true;
+  session.emit({ type: "compaction_start", reason: "overflow" });
+  await instance.submit("retry steer", "auto", "retry-steer");
+  await instance.submit("retry follow", "followUp", "retry-follow");
+
+  session.isCompacting = false;
+  session.emit({ type: "compaction_end", reason: "overflow", result: {}, aborted: false, willRetry: true });
+  await flushBackground();
+  assert.equal(session.promptCalls.length, 0);
+  assert.deepEqual(session.queueMessageCalls, [
+    { text: "retry steer", delivery: "steer" },
+    { text: "retry follow", delivery: "followUp" },
+  ]);
+  assert.deepEqual(instance.snapshot().pending, { steering: 1, followUp: 1, total: 2 });
+  assert.equal(instance.snapshot().execution, "running");
+});
+
+test("post-effect retry-queue rejection stays uncertain and blocks later FIFO dispatch", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  session.isCompacting = true;
+  session.emit({ type: "compaction_start", reason: "overflow" });
+  await instance.submit("possibly queued", "auto", "queue-uncertain-first");
+  await instance.submit("must not pass", "auto", "queue-uncertain-second");
+  session.queueMessageReject = "after";
+
+  session.isCompacting = false;
+  session.emit({ type: "compaction_end", reason: "overflow", result: {}, aborted: false, willRetry: true });
+  await flushBackground();
+  await flushBackground();
+  assert.deepEqual(session.queueMessageCalls, [{ text: "possibly queued", delivery: "steer" }]);
+  assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages.map((item) => item.operationId), [
+    "queue-uncertain-first",
+    "queue-uncertain-second",
+  ]);
+  await flushBackground();
+  assert.equal(session.queueMessageCalls.length, 1, "uncertain custody must never be retried or overtaken");
+});
+
+test("duplicate compaction-deferred messages preserve FIFO operation identity", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  session.isCompacting = true;
+  session.emit({ type: "compaction_start", reason: "threshold" });
+
+  await instance.submit("identical", "auto", "duplicate-one");
+  await instance.submit("identical", "auto", "duplicate-two");
+  session.isCompacting = false;
+  session.emit({ type: "compaction_end", reason: "threshold", result: {}, aborted: false, willRetry: false });
+  await flushBackground();
+  assert.deepEqual(session.promptCalls.map((call) => call.text), ["identical"], "only the first item may start a fresh run");
+
+  session.startRun();
+  await flushBackground();
+  assert.deepEqual(session.promptCalls.map((call) => call.text), ["identical", "identical"]);
+  assert.equal(session.promptCalls[1]?.options?.streamingBehavior, "steer");
+  assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages.map((item) => item.operationId), ["duplicate-two"]);
+
+  assert.equal(session.consumeNextQueued(), "identical");
+  await flushBackground();
+  const submittedOperations = instance.eventsSince().events
+    .filter((event) => event.type === "message.submitted")
+    .map((event) => event.data.operationId);
+  assert.deepEqual(submittedOperations.slice(-2), ["duplicate-one", "duplicate-two"]);
+  assert.equal(instance.snapshot().pending.total, 0);
+  session.settle();
+  await instance.waitForIdle();
+});
+
+test("a prompt Promise resolving during compaction cannot publish idle plus compacting", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  await instance.submit("accepted immediately before compaction", "auto", "before-compaction");
+  session.isCompacting = true;
+  session.emit({ type: "compaction_start", reason: "threshold" });
+  session.promptDeferred.resolve();
+  await flushBackground();
+
+  assert.equal(instance.snapshot().compacting, true);
+  assert.equal(instance.snapshot().execution, "running");
+  assert.equal(instance.eventsSince().events.some((event) => (
+    event.type === "instance.state_changed" && event.data.compacting && event.data.execution !== "running"
+  )), false);
+
+  session.isCompacting = false;
+  session.emit({ type: "compaction_end", reason: "threshold", result: {}, aborted: false, willRetry: false });
+});
+
+test("two instances keep identical queue text and operation identity isolated", async () => {
+  const sessionA = new FakeRuntimeSession();
+  const sessionB = new FakeRuntimeSession();
+  const instanceA = new ManagedInstance({ id: "dock-a", cwd: "/tmp/a", session: sessionA, now: createClock() });
+  const instanceB = new ManagedInstance({ id: "dock-b", cwd: "/tmp/b", session: sessionB, now: createClock() });
+
+  sessionA.isCompacting = true;
+  sessionA.emit({ type: "compaction_start", reason: "threshold" });
+  await instanceA.submit("same text", "auto", "operation-a");
+
+  sessionB.isStreaming = true;
+  sessionB.emit({ type: "agent_start" });
+  await instanceB.submit("same text", "auto", "operation-b");
+
+  assert.deepEqual((await instanceA.getAttachProjection(undefined)).pendingMessages.map((item) => item.operationId), ["operation-a"]);
+  assert.deepEqual((await instanceB.getAttachProjection(undefined)).pendingMessages.map((item) => item.operationId), ["operation-b"]);
+  assert.equal(instanceA.eventsSince().events.some((event) => event.instanceId !== "dock-a"), false);
+  assert.equal(instanceB.eventsSince().events.some((event) => event.instanceId !== "dock-b"), false);
+});
+
 test("abort cancels compaction without fabricating an aborted model run", async () => {
   const session = new FakeRuntimeSession();
   const instance = createInstance(session);
@@ -702,6 +1073,20 @@ test("registered extension commands bypass running Queue admission without corru
 
   session.settle();
   await instance.waitForIdle();
+});
+
+test("exact extension commands remain immediate during compaction while ordinary text stays Host-deferred", async () => {
+  const session = new FakeRuntimeSession();
+  session.extensionCommands.add("inspect-now");
+  const instance = createInstance(session);
+  session.isCompacting = true;
+  session.emit({ type: "compaction_start", reason: "threshold" });
+
+  const command = await instance.submit("/inspect-now", "auto", "compaction-extension-command");
+  assert.equal(command.kind, "extension_command");
+  assert.equal(command.queued, false);
+  assert.deepEqual(session.promptCalls.map((call) => call.text), ["/inspect-now"]);
+  assert.equal(instance.snapshot().pending.total, 0);
 });
 
 test("extension command catalog admission commits conservative intent before its immediate effect", async () => {
@@ -971,7 +1356,8 @@ test("dequeue never restores a message Pi already removed for an in-flight messa
   const receipt = await instance.dequeue("dequeue-in-flight");
   assert.deepEqual(receipt.restored, []);
   assert.deepEqual(receipt.inFlight.map((item) => item.operationId), ["in-flight-op"]);
-  assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages.map((item) => item.operationId), ["in-flight-op"]);
+  assert.deepEqual(instance.snapshot().pending, { steering: 0, followUp: 0, total: 0 });
+  assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages, []);
 
   session.finishConsumeQueued(inFlightText!);
   const consumed = instance.eventsSince().events.find((event) => event.type === "message.submitted" && event.data.operationId === "in-flight-op");

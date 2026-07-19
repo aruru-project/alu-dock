@@ -112,6 +112,7 @@ ManagedInstance replacement intent
 - 每个active/staged binding拥有独立Git observer；promotion把candidate branch作为`session.replaced` generation bootstrap，旧binding同步关闭watcher并fence callback。Git branch不进durable catalog。
 - Extension可在`agent_settled`后触发无client command ID的follow-on run（例如Sol guard compact后续跑）。它使用closed `run.started` identity `runtime-initiated`，仍完全由Host持有；fresh attach必须恢复其未完成tail，client detach/attach/read不得成为启动条件。
 - Pi会先await Extension的`agent_settled` handler、再向runtime subscriber发布`agent_settled`；handler内启动的`ctx.compact()`因此可能先发布`compaction_start`。已建立的compaction boundary必须保持`execution: running`与ephemeral snapshot `compacting: true`直到`compaction_end`，后到的run settlement只结算旧run，不得把instance降为idle；`compacting`不进入durable catalog。
+- `isCompacting`与`isStreaming`是独立维度。普通输入在compaction期间由对应`ManagedInstance`以`host_deferred`持有，保留原operation/queue-item identity与FIFO，不调用`AgentSession.prompt()`；attach/dequeue仍可见。最终`compaction_end`后首条按stock Pi语义启动fresh prompt，其余进入同一Pi session queue；`willRetry`时全部通过public steer/follow-up queue进入retry turn。preflight definite failure恢复为可dequeue，post-accept ambiguity不重试、不跨generation、不持久化，Host loss后也不replay。
 
 ## 常见修改路由
 

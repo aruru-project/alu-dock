@@ -16,7 +16,11 @@ import {
   type InteractionResponse,
   type InteractionResult,
 } from "./extension-ui-broker.js";
-import { RuntimeCompactionKnownFailureError, RuntimeSettingsWriteError } from "./runtime-session.js";
+import {
+  RuntimeCompactionKnownFailureError,
+  RuntimeQueueRejectedBeforeEffectError,
+  RuntimeSettingsWriteError,
+} from "./runtime-session.js";
 import type {
   CommandDto,
   DiagnosticDto,
@@ -158,7 +162,18 @@ interface AcceptedPromptMessage {
   text: string;
 }
 
+interface QueuedUserMessageStart {
+  queued: PendingQueueMessage;
+  consumedText: string;
+}
+
+type PendingQueuePhase = "runtime_queued" | "host_deferred" | "dispatching" | "fresh_in_flight" | "effect_unknown";
+
 interface PendingQueueMessage extends PendingMessageDto {
+  /** Internal same-Host custody; never crosses Protocol V2 or the durable catalog. */
+  phase: PendingQueuePhase;
+  /** Lossless runtime payload; `text` remains the bounded closed-wire projection. */
+  originalText?: string;
   runtimeTextHash?: string;
 }
 
@@ -184,6 +199,7 @@ interface WorkingCheckpoint {
   agentSettledCount: number;
   assistantMessageSequence: number;
   currentAssistantMessageId: string | undefined;
+  currentUserMessageId: string | undefined;
   announcedToolCalls: string[];
   lastAssistantOutcome: AssistantOutcome | undefined;
   stopRequestedWhileRunning: boolean;
@@ -322,7 +338,14 @@ export class ManagedInstance {
   private currentUserMessageId: string | undefined;
   private readonly announcedToolCalls = new Set<string>();
   private readonly acceptedPromptMessages: AcceptedPromptMessage[] = [];
+  /** User-visible, still-restorable Queue custody for this runtime generation. */
   private readonly pendingQueueMessages: PendingQueueMessage[] = [];
+  /**
+   * Items removed from the Queue by an explicit dequeue after Pi had already
+   * begun consuming them. They are not pending/restorable, but their identity
+   * remains until message_start so duplicate text cannot steal attribution.
+   */
+  private readonly inFlightQueueMessages: PendingQueueMessage[] = [];
   private runtimeSteeringHashes: string[] = [];
   private runtimeFollowUpHashes: string[] = [];
   private lastAssistantOutcome: AssistantOutcome | undefined;
@@ -330,6 +353,12 @@ export class ManagedInstance {
   private extensionCommandInitiator: { operationId: string; runtimeGeneration: number; agentStartCount: number } | undefined;
   private stopRequestedWhileRunning = false;
   private compactionActive = false;
+  /** Synchronous runtime-edge truth closes the gap before catalog projection catches up. */
+  private runtimeCompactingObserved = false;
+  private compactionQueueDrainTask: Promise<void> | undefined;
+  private compactionQueueDrainGeneration: number | undefined;
+  private nextAgentStartOperationId: string | undefined;
+  private nextAgentStartBoundary: { operationId: string; resolve: () => void } | undefined;
   private compactionRequestOperationId: string | undefined;
   private compactionOperationId: string | undefined;
   private compactionBoundary: Promise<void> | undefined;
@@ -530,6 +559,8 @@ export class ManagedInstance {
       this.state.lifecycle = "host_lost";
       this.state.execution = "unavailable";
       this.state.compacting = false;
+      this.runtimeCompactingObserved = false;
+      this.clearDeferredStartAttribution();
       if (busy) this.state.lastRun = "interrupted";
       this.state.activeCommandId = undefined;
       this.state.pendingSteering = 0;
@@ -1057,16 +1088,26 @@ export class ManagedInstance {
   async submit(message: string, delivery: DeliveryMode = "auto", operationId = this.createCommandId()): Promise<CommandReceipt> {
     this.assertActive();
     if (this.pendingAdmission) throw new InstanceAdmissionPendingError(this.id);
-    if (this.configurationPending || this.commandAbortPending || this.queueMutationPending) throw new InstanceBusyError(this.id, "submitting a prompt");
     if (message.trim().length === 0) {
       throw new Error("Prompt message must not be empty");
     }
 
+    const compacting = this.runtimeCompactionInProgress();
+    const hostQueueCustody = this.hostQueueCustodyActive();
     if (this.session.classifyInput(message) === "extension_command") {
+      if (this.commandAbortPending || this.queueMutationPending || (this.configurationPending && !compacting)) {
+        throw new InstanceBusyError(this.id, "submitting an extension command");
+      }
       return this.submitExtensionCommand(message, operationId);
     }
+    if (this.commandAbortPending || this.queueMutationPending) throw new InstanceBusyError(this.id, "submitting a prompt");
+    if (compacting || hostQueueCustody) return this.submitCompactionDeferred(message, delivery, operationId);
+    if (this.configurationPending) throw new InstanceBusyError(this.id, "submitting a prompt");
 
-    const running = this.state.execution === "running" || this.session.isStreaming;
+    // A queued compaction_end may leave the catalog projection momentarily
+    // running+compacting after Pi has already become idle. Do not route that
+    // bounded transition window back through streamingBehavior.
+    const running = this.session.isStreaming || (this.state.execution === "running" && !this.state.compacting);
     const resolvedDelivery = resolveDelivery(delivery, running);
     const streamingBehavior = resolvedDelivery === "steer" || resolvedDelivery === "followUp"
       ? resolvedDelivery
@@ -1183,6 +1224,7 @@ export class ManagedInstance {
           delivery: actualDelivery === "followUp" ? "followUp" : "steer",
           text: safeWireText(message, MAX_PENDING_QUEUE_TEXT_CHARS, "Queued message omitted"),
           acceptedAt,
+          phase: "runtime_queued",
         }
         : undefined;
       if (pendingMessage) {
@@ -1254,6 +1296,32 @@ export class ManagedInstance {
       });
     };
 
+    // Compaction can start while the pre-effect catalog admission is awaiting
+    // durability. Re-route before Pi sees the text; buffered start/end events
+    // remain ordered behind the accepted Host queue item.
+    if (this.runtimeCompactionInProgress() || this.hostQueueCustodyActive()) {
+      let deferredDelivery: "steer" | "followUp";
+      try {
+        const rerouted = resolveDelivery(delivery, true);
+        if (rerouted === "prompt") throw new InvalidDeliveryModeError(rerouted, true);
+        if (!this.canQueueMessage(message)) throw new QueueCapacityError();
+        deferredDelivery = rerouted;
+      } catch (error) {
+        await rejectBeforeRun(error, "compaction_started_during_admission");
+        return receiptPromise;
+      }
+      try {
+        const receipt = await this.completeCompactionDeferredAdmission(message, deferredDelivery, commandId);
+        release();
+        return receipt;
+      } catch (error) {
+        this.catalogAdmissionOperationId = undefined;
+        await this.flushAdmissionRuntimeEvents().catch(() => {});
+        release();
+        throw error;
+      }
+    }
+
     let runtimePromise: Promise<void>;
     try {
       runtimePromise = this.session.prompt(message, {
@@ -1278,15 +1346,23 @@ export class ManagedInstance {
         && this.state.execution === "running"
         && this.agentStartCount === agentStartsBeforeCommand
         && !this.session.isStreaming
+        && !this.runtimeCompactionInProgress()
+        && !this.state.compacting
       ) {
+        let handledWithoutRun = false;
         await this.enqueueTransition(() => this.commitCatalogTransition(
           { kind: "command.no_run", effect: "post_effect", operationId: commandId, instanceId: this.id },
           () => {
+            // Re-check inside the serialized transition: compaction_start may
+            // have arrived after the Promise predicate above.
+            if (this.runtimeCompactionInProgress() || this.state.compacting) return;
+            handledWithoutRun = true;
             this.state.execution = "idle";
             this.state.activeCommandId = undefined;
             this.touch();
           },
           () => {
+            if (!handledWithoutRun) return;
             this.discardAcceptedPrompt(commandId);
             this.appendEvent("command.handled", { operationId: commandId, kind: "no_run" });
             this.appendStateEvent("command_handled_without_run");
@@ -1341,6 +1417,361 @@ export class ManagedInstance {
     this.backgroundTasks.add(trackedPromise);
 
     return receiptPromise;
+  }
+
+  private runtimeCompactionInProgress(): boolean {
+    return this.runtimeCompactingObserved || this.session.isCompacting;
+  }
+
+  private hostQueueCustodyActive(): boolean {
+    return (this.compactionQueueDrainTask !== undefined && this.compactionQueueDrainGeneration === this.runtimeGenerationValue)
+      || this.pendingQueueMessages.some((item) => (
+      item.phase === "host_deferred"
+      || item.phase === "dispatching"
+      || item.phase === "fresh_in_flight"
+      || item.phase === "effect_unknown"
+    ));
+  }
+
+  private trackedQueueMessages(): PendingQueueMessage[] {
+    return [...this.inFlightQueueMessages, ...this.pendingQueueMessages];
+  }
+
+  private clearDeferredStartAttribution(): void {
+    this.nextAgentStartOperationId = undefined;
+    const boundary = this.nextAgentStartBoundary;
+    this.nextAgentStartBoundary = undefined;
+    boundary?.resolve();
+  }
+
+  /**
+   * Stock Pi keeps ordinary input outside AgentSession while compaction owns
+   * the session. Dock must do the same in the Host so detach/attach does not
+   * transfer queue custody to one TUI client.
+   */
+  private async submitCompactionDeferred(
+    message: string,
+    delivery: DeliveryMode,
+    operationId: string,
+  ): Promise<CommandReceipt> {
+    const resolvedDelivery = resolveDelivery(delivery, true);
+    if (resolvedDelivery === "prompt") throw new InvalidDeliveryModeError(resolvedDelivery, true);
+    if (!this.canQueueMessage(message)) throw new QueueCapacityError();
+
+    const admissionToken = {};
+    let releaseAdmission!: () => void;
+    const admissionBoundary = new Promise<void>((resolve) => { releaseAdmission = resolve; });
+    this.pendingAdmission = { token: admissionToken, boundary: admissionBoundary, release: releaseAdmission };
+    this.catalogAdmissionOperationId = operationId;
+
+    try {
+      await this.enqueueTransition(() => this.commitCatalogTransition(
+        { kind: "command.admission", effect: "pre_effect", operationId, instanceId: this.id },
+        () => {},
+      ));
+      return await this.completeCompactionDeferredAdmission(message, resolvedDelivery, operationId);
+    } catch (error) {
+      this.catalogAdmissionOperationId = undefined;
+      await this.flushAdmissionRuntimeEvents().catch(() => {});
+      throw error;
+    } finally {
+      if (this.pendingAdmission?.token === admissionToken) {
+        this.pendingAdmission = undefined;
+        releaseAdmission();
+      }
+    }
+  }
+
+  private async completeCompactionDeferredAdmission(
+    message: string,
+    resolvedDelivery: "steer" | "followUp",
+    operationId: string,
+  ): Promise<CommandReceipt> {
+    const acceptedAt = this.timestamp();
+    const pendingMessage: PendingQueueMessage = {
+      queueItemId: randomUUID(),
+      operationId,
+      delivery: resolvedDelivery,
+      text: safeWireText(message, MAX_PENDING_QUEUE_TEXT_CHARS, "Queued message omitted"),
+      acceptedAt,
+      phase: "host_deferred",
+      originalText: message,
+    };
+    await this.enqueueTransition(() => this.commitCatalogTransition(
+      { kind: "command.accepted", effect: "pre_effect", operationId, instanceId: this.id },
+      () => {
+        this.assertActive();
+        this.catalogAdmissionOperationId = undefined;
+        this.state.lastError = undefined;
+        if (pendingMessage.delivery === "steer") this.state.pendingSteering += 1;
+        else this.state.pendingFollowUp += 1;
+        // The public start event can be queued behind this admission. Keep the
+        // snapshot valid as soon as synchronous Pi truth says compacting.
+        if (this.runtimeCompactionInProgress()) {
+          this.startCompactionBoundary();
+          this.state.execution = "running";
+          this.state.compacting = true;
+        }
+        this.touch(acceptedAt);
+      },
+      () => {
+        this.pendingQueueMessages.push(pendingMessage);
+        this.appendEvent("command.accepted", {
+          operationId,
+          delivery: resolvedDelivery,
+          queued: true,
+          acceptedAt,
+        }, acceptedAt);
+        this.appendEvent("message.queued", pendingMessageProjection([pendingMessage])[0]!, acceptedAt);
+        this.appendStateEvent("command_deferred_for_compaction", acceptedAt);
+      },
+    ));
+    this.catalogAdmissionOperationId = undefined;
+    await this.flushAdmissionRuntimeEvents();
+    if (!this.runtimeCompactionInProgress()) this.scheduleCompactionQueueDrain(false);
+    return {
+      accepted: true,
+      instanceId: this.id,
+      operationId,
+      kind: "prompt",
+      delivery: resolvedDelivery,
+      queued: true,
+      acceptedAt,
+    };
+  }
+
+  private scheduleCompactionQueueDrain(willRetry: boolean): void {
+    if (
+      (this.compactionQueueDrainTask && this.compactionQueueDrainGeneration === this.runtimeGenerationValue)
+      || this.runtimeCompactionInProgress()
+      || this.queueMutationPending
+      || this.stopPromise
+    ) return;
+    const firstCustodyItem = this.pendingQueueMessages.find((item) => (
+      item.phase === "host_deferred"
+      || item.phase === "dispatching"
+      || item.phase === "fresh_in_flight"
+      || item.phase === "effect_unknown"
+    ));
+    if (firstCustodyItem?.phase !== "host_deferred") return;
+    const generation = this.runtimeGenerationValue;
+    let rearmAfterDrain = false;
+    let tracked!: Promise<void>;
+    tracked = this.drainCompactionQueue(generation, willRetry)
+      .then((mayRearm) => { rearmAfterDrain = mayRearm; })
+      .catch(async (error: unknown) => {
+        if (this.hostDrainActive || this.runtimeGenerationValue !== generation || this.state.lifecycle !== "active") return;
+        const text = safeWireText(errorMessage(error), 2_048, "Deferred queue dispatch failed");
+        await this.enqueueTransition(async () => {
+          if (this.hostDrainActive || this.runtimeGenerationValue !== generation || this.state.lifecycle !== "active") return;
+          this.appendEvent("instance.error", { source: "command_background", error: text });
+        }).catch(() => {});
+      })
+      .finally(() => {
+        if (this.compactionQueueDrainTask === tracked) {
+          this.compactionQueueDrainTask = undefined;
+          this.compactionQueueDrainGeneration = undefined;
+        }
+        this.backgroundTasks.delete(tracked);
+        // An admission can land exactly as a successful drainer observes an
+        // empty tail. Failures/ambiguity deliberately do not re-arm, and an
+        // old generation can never schedule work for its replacement.
+        if (
+          rearmAfterDrain
+          && this.runtimeGenerationValue === generation
+          && !this.runtimeCompactionInProgress()
+        ) this.scheduleCompactionQueueDrain(willRetry);
+      });
+    this.compactionQueueDrainTask = tracked;
+    this.compactionQueueDrainGeneration = generation;
+    this.backgroundTasks.add(tracked);
+  }
+
+  private async drainCompactionQueue(generation: number, willRetry: boolean): Promise<boolean> {
+    while (
+      !this.hostDrainActive
+      && this.state.lifecycle === "active"
+      && this.runtimeGenerationValue === generation
+      && !this.runtimeCompactionInProgress()
+      && !this.queueMutationPending
+      && !this.stopPromise
+    ) {
+      const firstCustodyItem = this.pendingQueueMessages.find((candidate) => (
+        candidate.phase === "host_deferred"
+        || candidate.phase === "dispatching"
+        || candidate.phase === "fresh_in_flight"
+        || candidate.phase === "effect_unknown"
+      ));
+      if (!firstCustodyItem) return true;
+      if (firstCustodyItem.phase !== "host_deferred") return false;
+      const accepted = await this.dispatchCompactionQueueItem(firstCustodyItem, generation, willRetry);
+      // Definite preflight failure leaves the original item restorable; an
+      // accepted-but-ambiguous failure stays in flight. Neither may be retried
+      // or allow later FIFO items to pass automatically.
+      if (!accepted) return false;
+    }
+    return false;
+  }
+
+  private async dispatchCompactionQueueItem(
+    item: PendingQueueMessage,
+    generation: number,
+    forceRuntimeQueue: boolean,
+  ): Promise<boolean> {
+    if (item.phase !== "host_deferred") return true;
+    item.phase = "dispatching";
+    if (forceRuntimeQueue) {
+      try {
+        await this.session.queueMessage(item.originalText ?? item.text, item.delivery);
+        item.phase = "runtime_queued";
+        await this.transitionTail;
+        return true;
+      } catch (error) {
+        if (error instanceof RuntimeQueueRejectedBeforeEffectError) {
+          item.phase = "host_deferred";
+        } else {
+          // Generic adapter errors are conservative: absence of a projected
+          // queue_update is never proof that Pi lacks custody.
+          item.phase = "effect_unknown";
+        }
+        await this.transitionTail;
+        await this.reportDeferredDispatchFailure(item, error, generation);
+        return false;
+      }
+    }
+    const agentStartsBefore = this.agentStartCount;
+    let preflightStatus: "pending" | "accepted" | "rejected" = "pending";
+    let freshDispatch = false;
+    let dispatchMayContinue = true;
+    let resolvePreflight!: (accepted: boolean) => void;
+    const preflight = new Promise<boolean>((resolve) => { resolvePreflight = resolve; });
+    let resolveFreshStart!: () => void;
+    const freshStart = new Promise<void>((resolve) => { resolveFreshStart = resolve; });
+
+    const onPreflight = (success: boolean): void => {
+      if (preflightStatus !== "pending") return;
+      if (!success || this.hostDrainActive || this.runtimeGenerationValue !== generation || this.state.lifecycle !== "active") {
+        preflightStatus = "rejected";
+        if (item.phase === "dispatching") item.phase = "host_deferred";
+        resolvePreflight(false);
+        return;
+      }
+      preflightStatus = "accepted";
+      if (this.session.isStreaming) {
+        // Pi has accepted the item into its per-session queue. Its queue_update
+        // event remains authoritative for counts and text-hash reconciliation.
+        item.phase = "runtime_queued";
+      } else {
+        // Pi will start this first post-compaction item as a fresh prompt.
+        freshDispatch = true;
+        item.phase = "fresh_in_flight";
+        this.nextAgentStartOperationId = item.operationId;
+        this.nextAgentStartBoundary = { operationId: item.operationId, resolve: resolveFreshStart };
+      }
+      resolvePreflight(true);
+    };
+
+    let runtimePromise: Promise<void>;
+    try {
+      runtimePromise = this.session.prompt(item.originalText ?? item.text, {
+        streamingBehavior: item.delivery,
+        source: "rpc",
+        preflightResult: onPreflight,
+      });
+    } catch (error) {
+      onPreflight(false);
+      await this.reportDeferredDispatchFailure(item, error, generation);
+      return false;
+    }
+
+    const observed = runtimePromise.then(async () => {
+      if (preflightStatus === "pending") onPreflight(true);
+      await this.transitionTail;
+      if (
+        item.phase === "fresh_in_flight"
+        && this.runtimeGenerationValue === generation
+        && this.agentStartCount === agentStartsBefore
+        && !this.session.isStreaming
+      ) {
+        if (this.nextAgentStartOperationId === item.operationId) this.nextAgentStartOperationId = undefined;
+        if (this.nextAgentStartBoundary?.operationId === item.operationId) {
+          this.nextAgentStartBoundary = undefined;
+          resolveFreshStart();
+        }
+        // An input hook handled the text without a run. It is no longer a
+        // resendable queue item, but must leave the tray explicitly.
+        await this.enqueueTransition(() => this.commitCatalogTransition(
+          { kind: "command.no_run", effect: "post_effect", operationId: item.operationId, instanceId: this.id },
+          () => {
+            const index = this.pendingQueueMessages.indexOf(item);
+            if (index >= 0) this.pendingQueueMessages.splice(index, 1);
+            if (item.delivery === "steer") this.state.pendingSteering = Math.max(0, this.state.pendingSteering - 1);
+            else this.state.pendingFollowUp = Math.max(0, this.state.pendingFollowUp - 1);
+            this.touch();
+          },
+          () => {
+            this.appendEvent("queue.cleared", {
+              steering: item.delivery === "steer" ? 1 : 0,
+              followUp: item.delivery === "followUp" ? 1 : 0,
+              total: 1,
+              queueItemIds: [item.queueItemId],
+              reason: "dequeued",
+            });
+            this.appendEvent("command.handled", { operationId: item.operationId, kind: "no_run" });
+            this.appendStateEvent("deferred_command_handled_without_run");
+          },
+        ));
+      }
+    }).catch(async (error: unknown) => {
+      if (preflightStatus === "pending") {
+        onPreflight(false);
+        await this.reportDeferredDispatchFailure(item, error, generation);
+        return;
+      }
+      // Once Pi accepted preflight, an effect may already exist. Keep identity
+      // in-flight and never retry automatically or advance later FIFO items
+      // past an ambiguous dispatch.
+      dispatchMayContinue = false;
+      if (this.nextAgentStartOperationId === item.operationId && !this.session.isStreaming) {
+        this.nextAgentStartOperationId = undefined;
+      }
+      if (this.nextAgentStartBoundary?.operationId === item.operationId) {
+        this.nextAgentStartBoundary = undefined;
+        resolveFreshStart();
+      }
+      await this.reportDeferredDispatchFailure(item, error, generation);
+    });
+    let tracked!: Promise<void>;
+    tracked = observed.finally(() => this.backgroundTasks.delete(tracked));
+    this.backgroundTasks.add(tracked);
+
+    const accepted = await preflight;
+    if (accepted && freshDispatch) await freshStart;
+    else if (accepted) await runtimePromise.catch(() => {});
+    // Let the observed rejection handler publish its conservative outcome
+    // before deciding whether a later FIFO item may advance.
+    await Promise.resolve();
+    return accepted && dispatchMayContinue;
+  }
+
+  private async reportDeferredDispatchFailure(
+    item: PendingQueueMessage,
+    error: unknown,
+    generation: number,
+  ): Promise<void> {
+    if (this.hostDrainActive || this.runtimeGenerationValue !== generation || this.state.lifecycle !== "active") return;
+    const text = safeWireText(errorMessage(error), 2_048, "Deferred queue dispatch failed");
+    await this.enqueueTransition(async () => {
+      // Replacement can commit while an old Pi Promise is settling. The old
+      // generation may resolve local waiters, but it cannot publish into the
+      // new generation's event stream or operation attribution.
+      if (this.hostDrainActive || this.runtimeGenerationValue !== generation || this.state.lifecycle !== "active") return;
+      this.appendEvent("instance.error", {
+        operationId: item.operationId,
+        source: "command_background",
+        error: text,
+      });
+    }).catch(() => {});
   }
 
   private async submitExtensionCommand(message: string, operationId: string): Promise<CommandReceipt> {
@@ -1487,17 +1918,42 @@ export class ManagedInstance {
       try {
         const cleared = this.session.clearQueue();
         await this.closeRuntimeOperationBoundary(operationId);
-        const selection = selectClearedQueueMessages(pendingBefore, cleared, this.timestamp());
-        const restoredIds = new Set(selection.restoredQueueItemIds);
+        const hostDeferred = pendingBefore.filter((item) => item.phase === "host_deferred");
+        const selection = selectClearedQueueMessages(
+          pendingBefore.filter((item) => item.phase !== "host_deferred"),
+          cleared,
+          this.timestamp(),
+        );
+        const restoredIds = new Set([
+          ...hostDeferred.map((item) => item.queueItemId),
+          ...selection.restoredQueueItemIds,
+        ]);
         const retainedIds = new Set(pendingBefore.filter((item) => !restoredIds.has(item.queueItemId)).map((item) => item.queueItemId));
-        const restored = selection.restored;
+        const restored = orderPendingMessages([
+          ...pendingMessageProjection(hostDeferred),
+          ...selection.restored,
+        ]);
         let inFlight: PendingMessageDto[] = [];
+        let removedFromQueue: PendingMessageDto[] = [];
         await this.enqueueTransition(() => this.commitCatalogTransition(
           { kind: "queue.dequeue", effect: "post_effect", operationId, instanceId: this.id },
           () => {
             const retained = this.pendingQueueMessages.filter((item) => retainedIds.has(item.queueItemId));
-            this.pendingQueueMessages.splice(0, this.pendingQueueMessages.length, ...retained);
+            const restoredStillPending = this.pendingQueueMessages.filter((item) => restoredIds.has(item.queueItemId));
+            for (const item of retained) {
+              if (!this.inFlightQueueMessages.some((candidate) => candidate.queueItemId === item.queueItemId)) {
+                this.inFlightQueueMessages.push(item);
+              }
+            }
             inFlight = pendingMessageProjection(retained);
+            removedFromQueue = orderPendingMessages([
+              ...pendingMessageProjection(restoredStillPending),
+              ...inFlight,
+              ...restored.filter((item) => !restoredStillPending.some((candidate) => candidate.queueItemId === item.queueItemId)),
+            ]);
+            const removedIds = new Set(pendingBefore.map((item) => item.queueItemId));
+            const remaining = this.pendingQueueMessages.filter((item) => !removedIds.has(item.queueItemId));
+            this.pendingQueueMessages.splice(0, this.pendingQueueMessages.length, ...remaining);
             this.runtimeSteeringHashes = [];
             this.runtimeFollowUpHashes = [];
             this.state.pendingSteering = 0;
@@ -1505,10 +1961,10 @@ export class ManagedInstance {
             this.touch();
           },
           () => this.appendEvent("queue.cleared", {
-            steering: restored.filter((item) => item.delivery === "steer").length,
-            followUp: restored.filter((item) => item.delivery === "followUp").length,
-            total: restored.length,
-            queueItemIds: selection.restoredQueueItemIds,
+            steering: removedFromQueue.filter((item) => item.delivery === "steer").length,
+            followUp: removedFromQueue.filter((item) => item.delivery === "followUp").length,
+            total: removedFromQueue.length,
+            queueItemIds: removedFromQueue.map((item) => item.queueItemId),
             reason: "dequeued",
           }),
         ));
@@ -1674,6 +2130,10 @@ export class ManagedInstance {
           this.stopRequestedWhileRunning = this.state.execution === "running" || this.session.isStreaming;
           this.stopRequestedAt = requestedAt;
           this.state.lifecycle = "stopping";
+          // Direct cleanup of an already unavailable runtime still traverses
+          // the live `stopping` lifecycle; keep that intermediate projection
+          // closed instead of pairing stopping with unavailable.
+          if (this.state.execution === "unavailable") this.state.execution = "failed";
           this.touch(requestedAt);
         },
         () => this.appendStateEvent("stop_requested", requestedAt),
@@ -1714,7 +2174,7 @@ export class ManagedInstance {
 
   private async performStop(operationId: string, admissionBoundary?: Promise<void>, configurationBoundary?: Promise<void>, compactionStartedBoundary?: Promise<boolean>): Promise<StopReceipt> {
     const cleanupErrors: string[] = [];
-    const pendingQueueItemIds = this.pendingQueueMessages.map((item) => item.queueItemId);
+    const pendingQueueItemIds = this.trackedQueueMessages().map((item) => item.queueItemId);
     await this.extensionUi.cancelForHostDrain();
     let clearedCounts: { steering: number; followUp: number } | undefined;
     const captureCleanupError = (stage: string, error: unknown): void => {
@@ -1767,11 +2227,14 @@ export class ManagedInstance {
         this.state.lifecycle = "stopped";
         this.state.execution = "unavailable";
         this.state.compacting = false;
+        this.runtimeCompactingObserved = false;
+        this.clearDeferredStartAttribution();
         this.state.activeCommandId = undefined;
         this.state.pendingSteering = 0;
         this.state.pendingFollowUp = 0;
         this.acceptedPromptMessages.length = 0;
         this.pendingQueueMessages.length = 0;
+        this.inFlightQueueMessages.length = 0;
         this.runtimeSteeringHashes = [];
         this.runtimeFollowUpHashes = [];
         this.recoverySessionFile = undefined;
@@ -1855,6 +2318,7 @@ export class ManagedInstance {
     try {
       this.catalogPort?.assertWritable();
       mutate();
+      this.assertWorkingStateInvariant();
       this.refreshDurableSessionFile();
       if (this.catalogPort) await this.catalogPort.commit(this.catalogRecord(), context);
     } catch (error) {
@@ -1864,6 +2328,17 @@ export class ManagedInstance {
     if (this.catalogPort) this.committedSnapshotValue = this.workingSnapshot();
     publish();
     if (this.catalogPort) this.committedSnapshotValue = this.workingSnapshot();
+  }
+
+  private assertWorkingStateInvariant(): void {
+    validateInstanceStateInvariant({
+      lifecycle: this.state.lifecycle,
+      execution: this.state.execution,
+      compacting: this.state.compacting,
+      ownerHostEpoch: this.state.lifecycle === "active" || this.state.lifecycle === "stopping" ? this.hostEpoch : undefined,
+      pendingCount: this.state.pendingSteering + this.state.pendingFollowUp,
+      activeCommandId: this.state.activeCommandId,
+    });
   }
 
   private currentLastKnownState(): NonNullable<CatalogInstanceRecord["lastKnown"]> {
@@ -1889,6 +2364,7 @@ export class ManagedInstance {
       agentSettledCount: this.agentSettledCount,
       assistantMessageSequence: this.assistantMessageSequence,
       currentAssistantMessageId: this.currentAssistantMessageId,
+      currentUserMessageId: this.currentUserMessageId,
       announcedToolCalls: [...this.announcedToolCalls],
       lastAssistantOutcome: this.lastAssistantOutcome ? { ...this.lastAssistantOutcome } : undefined,
       stopRequestedWhileRunning: this.stopRequestedWhileRunning,
@@ -1917,6 +2393,7 @@ export class ManagedInstance {
     this.agentSettledCount = checkpoint.agentSettledCount;
     this.assistantMessageSequence = checkpoint.assistantMessageSequence;
     this.currentAssistantMessageId = checkpoint.currentAssistantMessageId;
+    this.currentUserMessageId = checkpoint.currentUserMessageId;
     this.announcedToolCalls.clear();
     for (const toolCallId of checkpoint.announcedToolCalls) this.announcedToolCalls.add(toolCallId);
     this.lastAssistantOutcome = checkpoint.lastAssistantOutcome;
@@ -2036,6 +2513,7 @@ export class ManagedInstance {
       || this.pendingAdmission !== undefined
       || this.compactionActive;
     const queuedWorkPending = this.pendingQueueMessages.length > 0
+      || this.inFlightQueueMessages.length > 0
       || this.state.pendingSteering + this.state.pendingFollowUp > 0;
     const activeRun = this.state.execution === "running" || this.session.isStreaming;
     if (
@@ -2211,6 +2689,21 @@ export class ManagedInstance {
 
   private dispatchRuntimeEvent(event: RuntimeEvent): void {
     if (this.hostDrainActive) return;
+    // Pi's auto-compaction emits start before isCompacting becomes observable,
+    // so capture the lifecycle edge synchronously rather than waiting for the
+    // catalog transition. End clears it before new admissions are routed.
+    if (event.type === "compaction_start") this.runtimeCompactingObserved = true;
+    else if (event.type === "compaction_end") this.runtimeCompactingObserved = false;
+    if (event.type === "agent_start" && this.nextAgentStartOperationId !== undefined) {
+      const operationId = this.nextAgentStartOperationId;
+      event = { ...event, dockOperationId: operationId };
+      this.nextAgentStartOperationId = undefined;
+      if (this.nextAgentStartBoundary?.operationId === operationId) {
+        const boundary = this.nextAgentStartBoundary;
+        this.nextAgentStartBoundary = undefined;
+        boundary.resolve();
+      }
+    }
     if (this.catalogAdmissionOperationId !== undefined) {
       if (this.admissionBufferedEvents.length >= 1_000) {
         this.admissionBufferedEvents.shift();
@@ -2299,8 +2792,12 @@ export class ManagedInstance {
       && this.extensionCommandInitiator.agentStartCount === this.agentStartCount
       ? this.extensionCommandInitiator.operationId
       : undefined;
+    const deferredOperationId = event.type === "agent_start"
+      ? optionalRuntimeString(event.dockOperationId, 128)
+      : undefined;
     const operationId = this.catalogAdmissionOperationId
       ?? (event.type === "agent_settled" ? this.state.activeCommandId : undefined)
+      ?? deferredOperationId
       ?? extensionInitiatorOperationId
       ?? this.compactionOperationId
       ?? this.compactionRequestOperationId
@@ -2317,7 +2814,7 @@ export class ManagedInstance {
     });
     if (event.type === "dock_session_replaced") {
       this.extensionUi.beginGenerationChange();
-      const replacedQueue = removedQueueProjection(this.pendingQueueMessages, this.state);
+      const replacedQueue = removedQueueProjection(this.trackedQueueMessages(), this.state);
       const previousSessionFile = optionalRuntimeString(event.previousSessionFile, 16_384);
       const sessionFile = optionalRuntimeString(event.sessionFile, 16_384);
       const cwd = optionalRuntimeString(event.cwd, 16_384);
@@ -2339,10 +2836,14 @@ export class ManagedInstance {
         this.announcedToolCalls.clear();
         this.acceptedPromptMessages.length = 0;
         this.pendingQueueMessages.length = 0;
+        this.inFlightQueueMessages.length = 0;
         this.runtimeSteeringHashes = [];
         this.runtimeFollowUpHashes = [];
         this.lastAssistantOutcome = undefined;
         this.extensionCommandInitiator = undefined;
+        this.runtimeCompactingObserved = false;
+        this.clearDeferredStartAttribution();
+        this.finishCompactionBoundary();
         this.state.execution = "idle";
         this.state.compacting = false;
         this.state.lastRun = "never";
@@ -2410,7 +2911,9 @@ export class ManagedInstance {
     switch (event.type) {
       case "agent_start":
         await this.commitCatalogTransition(context("run.started"), () => {
-          if (extensionInitiatorOperationId !== undefined) {
+          if (deferredOperationId !== undefined) {
+            this.state.activeCommandId = deferredOperationId;
+          } else if (extensionInitiatorOperationId !== undefined) {
             this.state.activeCommandId = extensionInitiatorOperationId;
             this.extensionCommandInitiator = undefined;
           }
@@ -2429,19 +2932,39 @@ export class ManagedInstance {
       case "agent_settled":
         await this.commitAgentSettled(context("run.settled"));
         return;
+      case "message_start": {
+        const queuedStart = this.queuedUserMessageStart(event);
+        const needsPendingCommit = queuedStart !== undefined
+          && (queuedStart.queued.phase === "fresh_in_flight" || queuedStart.queued.phase === "effect_unknown");
+        if (!needsPendingCommit || queuedStart === undefined) {
+          this.handleRuntimeEvent(event);
+          return;
+        }
+        await this.commitCatalogTransition(context("message.submitted"), () => {
+          this.removeQueuedUserMessage(queuedStart, true);
+          this.touch();
+        }, () => {
+          this.publishQueuedUserMessage(queuedStart);
+          this.appendEvent("queue.changed", {
+            steering: this.state.pendingSteering,
+            followUp: this.state.pendingFollowUp,
+            total: this.state.pendingSteering + this.state.pendingFollowUp,
+          });
+          this.appendStateEvent("deferred_message_submitted");
+        });
+        this.scheduleCompactionQueueDrain(false);
+        return;
+      }
       case "queue_update": {
         const steering = stringArray(event.steering);
         const followUp = stringArray(event.followUp);
         this.synchronizePendingRuntimeQueue(steering, followUp);
+        const pending = this.mergedRuntimePendingCounts(steering.length, followUp.length);
         await this.commitCatalogTransition(context("queue.changed"), () => {
-          this.state.pendingSteering = steering.length;
-          this.state.pendingFollowUp = followUp.length;
+          this.state.pendingSteering = pending.steering;
+          this.state.pendingFollowUp = pending.followUp;
           this.touch();
-        }, () => this.appendEvent("queue.changed", {
-          steering: steering.length,
-          followUp: followUp.length,
-          total: steering.length + followUp.length,
-        }));
+        }, () => this.appendEvent("queue.changed", pending));
         return;
       }
       case "auto_retry_start":
@@ -2485,6 +3008,7 @@ export class ManagedInstance {
         } finally {
           this.finishCompactionBoundary();
         }
+        this.scheduleCompactionQueueDrain(event.willRetry === true);
         return;
       }
       default:
@@ -2541,7 +3065,7 @@ export class ManagedInstance {
     }
     if (event.type === "dock_session_replaced") {
       this.extensionUi.beginGenerationChange();
-      const replacedQueue = removedQueueProjection(this.pendingQueueMessages, this.state);
+      const replacedQueue = removedQueueProjection(this.trackedQueueMessages(), this.state);
       const previousSessionFile = optionalRuntimeString(event.previousSessionFile, 16_384);
       const sessionFile = optionalRuntimeString(event.sessionFile, 16_384);
       const cwd = optionalRuntimeString(event.cwd, 16_384);
@@ -2565,10 +3089,14 @@ export class ManagedInstance {
       this.announcedToolCalls.clear();
       this.acceptedPromptMessages.length = 0;
       this.pendingQueueMessages.length = 0;
+      this.inFlightQueueMessages.length = 0;
       this.runtimeSteeringHashes = [];
       this.runtimeFollowUpHashes = [];
       this.lastAssistantOutcome = undefined;
       this.extensionCommandInitiator = undefined;
+      this.runtimeCompactingObserved = false;
+      this.clearDeferredStartAttribution();
+      this.finishCompactionBoundary();
       this.state.execution = "idle";
       this.state.compacting = false;
       this.state.lastRun = "never";
@@ -2627,11 +3155,14 @@ export class ManagedInstance {
     }
     switch (event.type) {
       case "agent_start": {
+        const deferredOperationId = optionalRuntimeString(event.dockOperationId, 128);
         const extensionInitiatorOperationId = this.extensionCommandInitiator?.runtimeGeneration === this.runtimeGenerationValue
           && this.extensionCommandInitiator.agentStartCount === this.agentStartCount
           ? this.extensionCommandInitiator.operationId
           : undefined;
-        if (extensionInitiatorOperationId !== undefined) {
+        if (deferredOperationId !== undefined) {
+          this.state.activeCommandId = deferredOperationId;
+        } else if (extensionInitiatorOperationId !== undefined) {
           this.state.activeCommandId = extensionInitiatorOperationId;
           this.extensionCommandInitiator = undefined;
         }
@@ -2657,14 +3188,11 @@ export class ManagedInstance {
         const steering = stringArray(event.steering);
         const followUp = stringArray(event.followUp);
         this.synchronizePendingRuntimeQueue(steering, followUp);
-        this.state.pendingSteering = steering.length;
-        this.state.pendingFollowUp = followUp.length;
+        const pending = this.mergedRuntimePendingCounts(steering.length, followUp.length);
+        this.state.pendingSteering = pending.steering;
+        this.state.pendingFollowUp = pending.followUp;
         this.touch();
-        this.appendEvent("queue.changed", {
-          steering: steering.length,
-          followUp: followUp.length,
-          total: steering.length + followUp.length,
-        });
+        this.appendEvent("queue.changed", pending);
         break;
       }
 
@@ -2775,6 +3303,7 @@ export class ManagedInstance {
         });
         this.appendStateEvent("compaction_completed");
         this.finishCompactionBoundary();
+        this.scheduleCompactionQueueDrain(event.willRetry === true);
         break;
 
       default:
@@ -2844,11 +3373,15 @@ export class ManagedInstance {
   }
 
   private canQueueMessage(message: string): boolean {
+    const tracked = this.trackedQueueMessages();
     const projectedCount = Math.max(
-      this.pendingQueueMessages.length,
+      tracked.length,
       this.state.pendingSteering + this.state.pendingFollowUp,
     ) + 1;
-    const projectedCharacters = this.pendingQueueMessages.reduce((total, item) => total + item.text.length, 0) + message.length;
+    const projectedCharacters = tracked.reduce(
+      (total, item) => total + (item.originalText?.length ?? item.text.length),
+      0,
+    ) + message.length;
     return projectedCount <= MAX_PENDING_QUEUE_ITEMS && projectedCharacters <= MAX_PENDING_QUEUE_TEXT_CHARS;
   }
 
@@ -2864,45 +3397,99 @@ export class ManagedInstance {
     this.assignPendingRuntimeHashes("followUp", this.runtimeFollowUpHashes);
   }
 
+  private mergedRuntimePendingCounts(runtimeSteering: number, runtimeFollowUp: number): PendingDto {
+    const hostPending = (delivery: "steer" | "followUp"): number => this.pendingQueueMessages.filter((item) => (
+      item.delivery === delivery
+      && (
+        item.phase === "host_deferred"
+        || ((item.phase === "dispatching" || item.phase === "effect_unknown") && item.runtimeTextHash === undefined)
+      )
+    )).length;
+    const steering = runtimeSteering + hostPending("steer");
+    const followUp = runtimeFollowUp + hostPending("followUp");
+    return { steering, followUp, total: steering + followUp };
+  }
+
   private assignPendingRuntimeHashes(delivery: "steer" | "followUp", runtimeHashes: string[]): void {
     const available = [...runtimeHashes];
-    for (const item of this.pendingQueueMessages) {
-      if (item.delivery !== delivery || item.runtimeTextHash === undefined) continue;
+    const runtimeCandidates = this.trackedQueueMessages().filter((item) => (
+      item.delivery === delivery
+      && (item.phase === "runtime_queued" || item.phase === "dispatching" || item.phase === "effect_unknown")
+    ));
+    for (const item of runtimeCandidates) {
+      if (item.runtimeTextHash === undefined) continue;
       const index = available.indexOf(item.runtimeTextHash);
       if (index >= 0) available.splice(index, 1);
     }
-    const unassigned = this.pendingQueueMessages.filter((item) => item.delivery === delivery && item.runtimeTextHash === undefined);
+    const unassigned = runtimeCandidates.filter((item) => item.runtimeTextHash === undefined);
     for (let index = 0; index < Math.min(unassigned.length, available.length); index += 1) {
       unassigned[index]!.runtimeTextHash = available[index]!;
     }
   }
 
-  private handleMessageStart(event: RuntimeEvent): void {
+  private queuedUserMessageStart(event: RuntimeEvent): QueuedUserMessageStart | undefined {
     const message = recordValue(event.message);
-    if (!message || stringValue(message.role) !== "user") return;
+    if (!message || stringValue(message.role) !== "user") return undefined;
     const consumedText = runtimeUserMessageText(message.content);
     const consumedHash = runtimeMessageHash(consumedText);
+    const eligible = (item: PendingQueueMessage): boolean => item.phase === "runtime_queued"
+      || item.phase === "fresh_in_flight"
+      || item.phase === "effect_unknown";
+    const tracked = this.trackedQueueMessages();
     const queueCandidates = [
-      ...this.pendingQueueMessages.filter((item) => item.delivery === "steer"),
-      ...this.pendingQueueMessages.filter((item) => item.delivery === "followUp"),
+      ...tracked.filter((item) => item.delivery === "steer" && eligible(item)),
+      ...tracked.filter((item) => item.delivery === "followUp" && eligible(item)),
     ];
     const queued = queueCandidates.find((item) => item.runtimeTextHash === consumedHash)
+      ?? queueCandidates.find((item) => (item.originalText ?? item.text) === consumedText)
       ?? queueCandidates.find((item) => item.text === consumedText);
-    if (queued) {
-      const index = this.pendingQueueMessages.indexOf(queued);
-      if (index >= 0) this.pendingQueueMessages.splice(index, 1);
-      this.currentUserMessageId = `user-${queued.operationId}`;
-      this.appendEvent("message.submitted", {
-        operationId: queued.operationId,
-        messageId: this.currentUserMessageId,
-        role: "user",
-        text: safeWireText(consumedText || queued.text, MAX_PENDING_QUEUE_TEXT_CHARS, "User message omitted"),
-        delivery: queued.delivery,
-        queueItemId: queued.queueItemId,
-      });
+    return queued ? { queued, consumedText } : undefined;
+  }
+
+  private removeQueuedUserMessage(start: QueuedUserMessageStart, updatePendingCount: boolean): void {
+    const pendingIndex = this.pendingQueueMessages.indexOf(start.queued);
+    if (pendingIndex >= 0) this.pendingQueueMessages.splice(pendingIndex, 1);
+    const inFlightIndex = this.inFlightQueueMessages.indexOf(start.queued);
+    if (inFlightIndex >= 0) this.inFlightQueueMessages.splice(inFlightIndex, 1);
+    if (updatePendingCount) {
+      if (start.queued.delivery === "steer") this.state.pendingSteering = Math.max(0, this.state.pendingSteering - 1);
+      else this.state.pendingFollowUp = Math.max(0, this.state.pendingFollowUp - 1);
+    }
+    this.currentUserMessageId = `user-${start.queued.operationId}`;
+  }
+
+  private publishQueuedUserMessage(start: QueuedUserMessageStart): void {
+    this.appendEvent("message.submitted", {
+      operationId: start.queued.operationId,
+      messageId: this.currentUserMessageId ?? `user-${start.queued.operationId}`,
+      role: "user",
+      text: safeWireText(start.consumedText || start.queued.text, MAX_PENDING_QUEUE_TEXT_CHARS, "User message omitted"),
+      delivery: start.queued.delivery,
+      queueItemId: start.queued.queueItemId,
+    });
+  }
+
+  private handleMessageStart(event: RuntimeEvent): void {
+    const queuedStart = this.queuedUserMessageStart(event);
+    if (queuedStart) {
+      const updatePendingCount = this.pendingQueueMessages.includes(queuedStart.queued)
+        && (queuedStart.queued.phase === "fresh_in_flight" || queuedStart.queued.phase === "effect_unknown");
+      this.removeQueuedUserMessage(queuedStart, updatePendingCount);
+      this.publishQueuedUserMessage(queuedStart);
+      if (updatePendingCount) {
+        this.appendEvent("queue.changed", {
+          steering: this.state.pendingSteering,
+          followUp: this.state.pendingFollowUp,
+          total: this.state.pendingSteering + this.state.pendingFollowUp,
+        });
+        this.appendStateEvent("deferred_message_submitted");
+      }
       return;
     }
 
+    const message = recordValue(event.message);
+    if (!message || stringValue(message.role) !== "user") return;
+    const consumedText = runtimeUserMessageText(message.content);
     const activeOperationId = this.state.activeCommandId;
     const promptIndex = activeOperationId === undefined
       ? 0
@@ -2999,6 +3586,10 @@ export class ManagedInstance {
   }
 
   private appendStateEvent(reason: string, occurredAt?: string): void {
+    // Never publish a malformed projection that would force every strict
+    // client to disconnect. The catalog transition validates the same shape
+    // before commit; this is defense in depth for non-catalog test/runtime use.
+    this.assertWorkingStateInvariant();
     this.appendEvent("instance.state_changed", {
       reason,
       lifecycle: this.state.lifecycle,
@@ -3120,7 +3711,20 @@ function removedQueueProjection(
 function pendingMessageProjection(pending: readonly PendingQueueMessage[]): PendingMessageDto[] {
   const steering = pending.filter((item) => item.delivery === "steer");
   const followUp = pending.filter((item) => item.delivery === "followUp");
-  return cloneJson([...steering, ...followUp].map(({ runtimeTextHash: _runtimeTextHash, ...item }) => item));
+  return cloneJson([...steering, ...followUp].map((item) => ({
+    queueItemId: item.queueItemId,
+    operationId: item.operationId,
+    delivery: item.delivery,
+    text: item.text,
+    acceptedAt: item.acceptedAt,
+  })));
+}
+
+function orderPendingMessages(messages: readonly PendingMessageDto[]): PendingMessageDto[] {
+  return cloneJson([
+    ...messages.filter((item) => item.delivery === "steer"),
+    ...messages.filter((item) => item.delivery === "followUp"),
+  ]);
 }
 
 function selectClearedQueueMessages(

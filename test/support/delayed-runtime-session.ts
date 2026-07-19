@@ -149,6 +149,13 @@ export class DelayedRuntimeSession implements RuntimeSession {
     return this.currentRun.promise;
   }
 
+  queueMessage(text: string, delivery: "steer" | "followUp"): Promise<void> {
+    if (delivery === "steer") this.steeringQueue.push(text);
+    else this.followUpQueue.push(text);
+    this.emitQueue();
+    return Promise.resolve();
+  }
+
   async listModels(): Promise<RuntimeModelInfo[]> {
     return [
       { provider: "fixture", id: "default", name: "Fixture Default", reasoning: true },

@@ -23,7 +23,11 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import type { ExtensionUiBroker } from "../core/extension-ui-broker.js";
-import { RuntimeCompactionKnownFailureError } from "../core/runtime-session.js";
+import {
+  RuntimeCompactionKnownFailureError,
+  RuntimeQueueEffectUnknownError,
+  RuntimeQueueRejectedBeforeEffectError,
+} from "../core/runtime-session.js";
 import type {
   ClearedRuntimeQueue,
   RuntimeCompactionResult,
@@ -153,6 +157,7 @@ export class PiRuntimeHost implements RuntimeSession {
   private replacementRunning = false;
   private treeNavigation: Promise<RuntimeNavigateResult> | undefined;
   private initialActivated = false;
+  private queueUpdateSequence = 0;
 
   private constructor(private readonly options: PiRuntimeHostOptions) {
     options.runtime.setBeforeSessionInvalidate(() => {
@@ -182,6 +187,7 @@ export class PiRuntimeHost implements RuntimeSession {
   get sessionId(): string { return this.requireActive().session.sessionId; }
   get sessionFile(): string | undefined { return this.requireActive().session.sessionFile; }
   get isStreaming(): boolean { return this.active?.session.isStreaming ?? false; }
+  get isCompacting(): boolean { return this.active?.session.isCompacting ?? false; }
   getDurableSessionFile(): string | undefined {
     const path = this.active?.session.sessionFile;
     if (path === undefined) return undefined;
@@ -231,6 +237,22 @@ export class PiRuntimeHost implements RuntimeSession {
 
   prompt(text: string, options?: RuntimePromptOptions): Promise<void> {
     return this.requireActive().session.prompt(text, options as PromptOptions | undefined);
+  }
+
+  queueMessage(text: string, delivery: "steer" | "followUp"): Promise<void> {
+    const session = this.requireActive().session;
+    const updateSequenceBefore = this.queueUpdateSequence;
+    const before = delivery === "steer"
+      ? session.getSteeringMessages().length
+      : session.getFollowUpMessages().length;
+    const mutation = delivery === "steer" ? session.steer(text) : session.followUp(text);
+    const appliedSynchronously = this.queueUpdateSequence > updateSequenceBefore || (delivery === "steer"
+      ? session.getSteeringMessages().length
+      : session.getFollowUpMessages().length) > before;
+    return mutation.catch((error: unknown) => {
+      if (!appliedSynchronously) throw new RuntimeQueueRejectedBeforeEffectError(error);
+      throw new RuntimeQueueEffectUnknownError(error);
+    });
   }
 
   async listModels(): Promise<RuntimeModelInfo[]> {
@@ -784,6 +806,7 @@ export class PiRuntimeHost implements RuntimeSession {
   }
 
   private publish(event: RuntimeEvent): void {
+    if (event.type === "queue_update") this.queueUpdateSequence += 1;
     for (const subscriber of this.subscribers) {
       try { subscriber(event); } catch { /* isolate Host observers from Pi callbacks */ }
     }

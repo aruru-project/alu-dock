@@ -16,7 +16,13 @@ import { CatalogTransactionCoordinator } from "../src/control/catalog-transactio
 import { CatalogEffectUnknownError } from "../src/core/catalog.js";
 import { SETTING_KEYS } from "../src/core/config-projection.js";
 import { ManagedInstance } from "../src/core/managed-instance.js";
-import { RuntimeCompactionKnownFailureError, RuntimeInvalidSettingValueError, RuntimeSettingsWriteError } from "../src/core/runtime-session.js";
+import {
+  RuntimeCompactionKnownFailureError,
+  RuntimeInvalidSettingValueError,
+  RuntimeQueueEffectUnknownError,
+  RuntimeQueueRejectedBeforeEffectError,
+  RuntimeSettingsWriteError,
+} from "../src/core/runtime-session.js";
 import type { GitBranchObserverPort } from "../src/pi/git-branch-observer.js";
 import {
   PiRuntimeHost,
@@ -67,6 +73,8 @@ class FakeSession {
   abortCalls = 0;
   abortCompactionCalls = 0;
   abortBranchSummaryCalls = 0;
+  queueCalls: Array<{ text: string; delivery: "steer" | "followUp" }> = [];
+  queueFailure: "before" | "after" | undefined;
   navigateCalls = 0;
   disposeCalls = 0;
   unsubscribeCalls = 0;
@@ -160,6 +168,18 @@ class FakeSession {
   abort(): Promise<void> { this.abortCalls += 1; return Promise.resolve(); }
   abortCompaction(): void { this.abortCompactionCalls += 1; }
   abortBranchSummary(): void { this.abortBranchSummaryCalls += 1; }
+  async steer(text: string): Promise<void> {
+    if (this.queueFailure === "before") throw new Error("queue validation failed");
+    this.queueCalls.push({ text, delivery: "steer" });
+    if (this.queueFailure === "after") throw new Error("queue acknowledgement failed");
+  }
+  async followUp(text: string): Promise<void> {
+    if (this.queueFailure === "before") throw new Error("queue validation failed");
+    this.queueCalls.push({ text, delivery: "followUp" });
+    if (this.queueFailure === "after") throw new Error("queue acknowledgement failed");
+  }
+  getSteeringMessages(): string[] { return this.queueCalls.filter((item) => item.delivery === "steer").map((item) => item.text); }
+  getFollowUpMessages(): string[] { return this.queueCalls.filter((item) => item.delivery === "followUp").map((item) => item.text); }
   finishCompaction(): void {
     this.isCompacting = false;
     this.emit({ type: "compaction_end", reason: "manual", result: undefined, aborted: true, willRetry: false });
@@ -396,6 +416,34 @@ test("Pi runtime host binds initial listener before extensions and delays startu
   await host.dispose();
   assert.equal(initial.unsubscribeCalls, 1);
   assert.equal(initial.disposeCalls, 1);
+});
+
+test("Pi runtime host projects public compaction independently from streaming", async () => {
+  const trace: string[] = [];
+  const { host, initial } = await runtimeHost(trace);
+  assert.equal(host.isStreaming, false);
+  assert.equal(host.isCompacting, false);
+  initial.isCompacting = true;
+  assert.equal(host.isCompacting, true);
+  assert.equal(host.isStreaming, false);
+  initial.isStreaming = true;
+  assert.equal(host.isCompacting, true);
+  assert.equal(host.isStreaming, true);
+  initial.isCompacting = false;
+  assert.equal(host.isCompacting, false);
+  await host.queueMessage("retry steer", "steer");
+  await host.queueMessage("retry follow", "followUp");
+  assert.deepEqual(initial.queueCalls, [
+    { text: "retry steer", delivery: "steer" },
+    { text: "retry follow", delivery: "followUp" },
+  ]);
+  initial.queueFailure = "before";
+  await assert.rejects(host.queueMessage("definite", "steer"), RuntimeQueueRejectedBeforeEffectError);
+  assert.equal(initial.queueCalls.length, 2);
+  initial.queueFailure = "after";
+  await assert.rejects(host.queueMessage("uncertain", "followUp"), RuntimeQueueEffectUnknownError);
+  assert.equal(initial.queueCalls.at(-1)?.text, "uncertain");
+  await host.dispose();
 });
 
 test("Pi runtime host owns Git observers across live changes and replacement disposal", async () => {

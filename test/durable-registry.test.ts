@@ -307,6 +307,38 @@ test("same-Host runtime_error reopen closes stale attach streams after commit", 
   assert.ok(seen.includes("instance.runtime_error"));
 });
 
+test("one malformed live projection falls back to its catalog record without poisoning other instances", async () => {
+  const { cwd, catalogPath } = await fixturePath();
+  const runtimes: DelayedRuntimeSession[] = [];
+  let id = 0;
+  const registry = new DockRegistry(
+    async (input) => createFixtureInstance(input, runtimes),
+    () => `dock-safe-list-${++id}`,
+    { hostEpoch: "safe-list-host", catalogStore: new FileCatalogStore(catalogPath) },
+  );
+  await registry.initializeCatalog();
+  const malformed = await registry.create({ operationId: "create-malformed", cwd });
+  const healthy = await registry.create({ operationId: "create-healthy", cwd });
+  const originalSnapshot = malformed.snapshot.bind(malformed);
+  Object.defineProperty(malformed, "snapshot", {
+    configurable: true,
+    value: () => { throw new Error("Active compaction requires running execution"); },
+  });
+
+  const page = registry.listPage({ selector: "actionable", limit: 100, maxBytes: MAX_INSTANCE_LIST_RESULT_BYTES });
+  assert.equal(page.instances.length, 2);
+  assert.equal(page.page.total, 2);
+  assert.equal(page.instances.find((item) => item.id === healthy.id)?.execution, "idle");
+  const fallback = page.instances.find((item) => item.id === malformed.id);
+  assert.equal(fallback?.execution, "idle");
+  assert.equal(fallback?.compacting, false);
+  assert.equal(registry.getSnapshot(healthy.id).id, healthy.id);
+  assert.equal(registry.getSnapshot(malformed.id).id, malformed.id);
+
+  Object.defineProperty(malformed, "snapshot", { configurable: true, value: originalSnapshot });
+  assert.equal(registry.getSnapshot(malformed.id).id, malformed.id);
+});
+
 test("revision-bound instance.list pages keep large stopped catalogs bounded", async (context) => {
   const { cwd, catalogPath } = await fixturePath();
   const stoppedRecords: CatalogInstanceRecord[] = Array.from({ length: 10_000 }, (_, index) => {

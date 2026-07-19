@@ -1618,6 +1618,79 @@ test("SSH TUI Ctrl+D detaches promptly while Host-owned compaction remains block
   assert.equal(runtime.sessionMutationCalls.compact, 1);
 });
 
+test("Sol-style compaction keeps a concurrent cross-client prompt visible and hands it to the hidden continuation once", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const first = new DockClient({ socketPath: harness.socketPath });
+  const created = await first.create(harness.directory, "compaction-queue-integration");
+  const runtime = harness.sessions.get(created.id)!;
+
+  const guard = runtime.armPostSettlementContinuation({ toolCallId: "guard-continuation-tool" });
+  runtime.settle("settled into guard compaction");
+  await guard.compactionStarted;
+  assert.equal(runtime.promptCalls, 1);
+  assert.equal(runtime.isCompacting, true);
+  assert.equal((await first.status(created.id)).compacting, true);
+
+  const second = new DockClient({ socketPath: harness.socketPath });
+  const queued = await second.prompt(created.id, "must survive compaction", "auto", "compaction-queued-operation");
+  assert.equal(queued.receipt.queued, true);
+  assert.equal(queued.receipt.delivery, "steer");
+  assert.equal(runtime.promptCalls, 1, "Host must retain compaction-time text before calling Pi again");
+  const attached = await second.streamEvents(created.id, { onEvent: () => {}, requireTuiProjection: true, conversationBootstrap: true });
+  assert.deepEqual(attached.initial.pendingMessages.map((item) => item.operationId), ["compaction-queued-operation"]);
+  attached.close();
+  await attached.done;
+  assert.ok((await second.list()).some((item) => item.id === created.id), "a valid compaction queue must keep Hub/list usable");
+
+  guard.finishCompaction();
+  await guard.continuationStarted;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(runtime.promptCalls, 2);
+  assert.equal(runtime.promptMessages.at(-1), "must survive compaction");
+  const whileQueued = await first.status(created.id);
+  assert.equal(whileQueued.compacting, false);
+  assert.equal(whileQueued.execution, "running");
+  assert.equal(whileQueued.pending.total, 1);
+
+  assert.equal(runtime.consumeNextQueued(), "must survive compaction");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const afterConsume = await second.status(created.id);
+  assert.equal(afterConsume.pending.total, 0);
+  const submitted = harness.registry.get(created.id).eventsSince().events.filter((event) => event.type === "message.submitted");
+  assert.equal(submitted.at(-1)?.data.operationId, "compaction-queued-operation");
+});
+
+test("two live Host instances keep identical compaction and Pi queue items isolated", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const createdA = await client.create(harness.directory, "queue-isolation-a");
+  const createdB = await client.create(harness.directory, "queue-isolation-b");
+  const runtimeA = harness.sessions.get(createdA.id)!;
+
+  runtimeA.isCompacting = true;
+  runtimeA.emit({ type: "compaction_start", reason: "threshold" });
+  await client.prompt(createdA.id, "identical cross-instance text", "auto", "isolation-operation-a");
+  await client.prompt(createdB.id, "identical cross-instance text", "auto", "isolation-operation-b");
+
+  const attachA = await client.streamEvents(createdA.id, { onEvent: () => {}, requireTuiProjection: true, conversationBootstrap: true });
+  const attachB = await client.streamEvents(createdB.id, { onEvent: () => {}, requireTuiProjection: true, conversationBootstrap: true });
+  assert.deepEqual(attachA.initial.pendingMessages.map((item) => item.operationId), ["isolation-operation-a"]);
+  assert.deepEqual(attachB.initial.pendingMessages.map((item) => item.operationId), ["isolation-operation-b"]);
+  attachA.close();
+  attachB.close();
+  await Promise.all([attachA.done, attachB.done]);
+
+  const restoredB = await client.dequeue(createdB.id, "dequeue-isolation-b");
+  assert.deepEqual(restoredB.receipt.restored.map((item) => item.operationId), ["isolation-operation-b"]);
+  assert.deepEqual((await client.dequeue(createdA.id, "dequeue-isolation-a")).receipt.restored.map((item) => item.operationId), ["isolation-operation-a"]);
+  assert.equal((await client.status(createdA.id)).pending.total, 0);
+  assert.equal((await client.status(createdB.id)).pending.total, 0);
+});
+
 test("a runtime-driven post-compaction continuation starts while every client is detached", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));

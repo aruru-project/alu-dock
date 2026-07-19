@@ -27,7 +27,7 @@ import { DockActivityLine, DockConversation, DockStatusLine, DockWorkMetadata } 
 import { ExtensionTextDialog } from "./extension-text-dialog.js";
 import { drainFullHistory, HISTORY_PAGE_SIZE, reconcileFlowingEvents } from "./history-pagination.js";
 import { PendingQueueTray } from "./pending-queue.js";
-import { prependRestoredQueueText } from "./queue-restoration.js";
+import { prependRestoredQueueText, submissionRecovery } from "./queue-restoration.js";
 import {
   abortingActivity,
   activityFromReplay,
@@ -484,6 +484,7 @@ export async function runDockTui(
 
   async function sendPrompt(message: string, delivery: DeliveryMode): Promise<void> {
     editor.disableSubmit = true;
+    const operationId = randomUUID();
     const submitting = submittingActivity();
     const projectSubmitting = runActivity.phase === "idle" && instance.execution !== "running";
     if (projectSubmitting) runActivity = submitting;
@@ -496,13 +497,25 @@ export async function runDockTui(
     }, SUBMITTING_FEEDBACK_DELAY_MS);
     feedbackTimer.unref?.();
     try {
-      const result = await client.prompt(instance.id, message, delivery);
+      const result = await client.prompt(instance.id, message, delivery, operationId);
       instance = result.instance;
       status.update(instance);
       // A successful admission receipt is not a model run. The stream's
       // run.started or command.handled event alone closes submitting.
     } catch (error) {
+      // Submission consumed the editor's only copy before transport/admission
+      // completed. Restore it locally, but never retry automatically.
+      const effectUnknown = error instanceof ControlClientError && error.code === "effect_unknown";
+      const recovery = submissionRecovery(
+        editor.getText(),
+        message,
+        delivery,
+        effectUnknown,
+        effectUnknown ? error.operationId ?? operationId : operationId,
+      );
+      editor.setText(recovery.draft);
       showError(error);
+      conversation.addNotice(recovery.notice, true);
       if (runActivity === submitting) {
         runActivity = activityFromSnapshot(instance);
         activity.setActivity(runActivity);
@@ -527,7 +540,7 @@ export async function runDockTui(
       const result = await client.dequeue(instance.id);
       instance = result.instance;
       status.update(instance);
-      pendingQueue.remove(result.receipt.restored.map((message) => message.queueItemId));
+      pendingQueue.remove([...result.receipt.restored, ...result.receipt.inFlight].map((message) => message.queueItemId));
       restoreMessagesToEditor(result.receipt.restored);
       if (result.receipt.inFlight.length > 0) {
         const count = result.receipt.inFlight.length;

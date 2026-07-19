@@ -68,7 +68,7 @@ CLI / Dock Hub / Session Work TUI
    Host-owned Pi runtimes
 ```
 
-Dock instance 与 Pi session 是不同身份；一个 instance 可以在 session replacement 后继续存在。Host 退出或丢失时，不会自动恢复或重放进行中的 prompt、queue 或工具副作用。
+Dock instance 与 Pi session 是不同身份；一个 instance 可以在 session replacement 后继续存在。Compaction期间的新输入由对应instance的Host内存Queue持有，并可跨detach/attach观察；两个instance的Queue不会共享。Host 退出或丢失时，不会自动恢复或重放进行中的 prompt、queue 或工具副作用。
 
 生产 Host 使用 immutable release 中精确固定的 Pi SDK，不调用 `$PATH` 中的全局 `pi`。Standalone/global Pi 可以独立共存，也可共享当前 `~/.pi/agent` 资源目录，但同一个 Pi session file 不得同时由两个 runtime 进程持有。
 

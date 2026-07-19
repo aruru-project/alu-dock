@@ -152,6 +152,24 @@ export interface ClearedRuntimeQueue {
   followUp: string[];
 }
 
+/** Public queue validation failed before Pi gained custody of the text. */
+export class RuntimeQueueRejectedBeforeEffectError extends Error {
+  constructor(cause?: unknown) {
+    super("Runtime rejected queued text before applying it");
+    this.name = "RuntimeQueueRejectedBeforeEffectError";
+    this.cause = cause;
+  }
+}
+
+/** Pi queue custody was observed before the queue call failed. */
+export class RuntimeQueueEffectUnknownError extends Error {
+  constructor(cause?: unknown) {
+    super("Runtime queue mutation may have taken effect");
+    this.name = "RuntimeQueueEffectUnknownError";
+    this.cause = cause;
+  }
+}
+
 export class RuntimeUnknownToolError extends Error {
   constructor(readonly toolName: string) {
     super(`Unknown tool: ${toolName}`);
@@ -222,6 +240,8 @@ export interface RuntimeSession {
   readonly sessionId: string;
   readonly sessionFile: string | undefined;
   readonly isStreaming: boolean;
+  /** Independent from model streaming: Pi may compact a settled session. */
+  readonly isCompacting: boolean;
 
   /** Current session path only when it has actually been materialized durably. */
   getDurableSessionFile?(): string | undefined;
@@ -231,6 +251,8 @@ export interface RuntimeSession {
   /** Exact current-generation registered extension command routing; all other input remains a prompt. */
   classifyInput(text: string): RuntimeInputKind;
   prompt(text: string, options?: RuntimePromptOptions): Promise<void>;
+  /** Queue already-admitted text for an active/retrying Pi turn without starting a fresh prompt. */
+  queueMessage(text: string, delivery: "steer" | "followUp"): Promise<void>;
   listModels(): Promise<RuntimeModelInfo[]>;
   listSessions(scope: "cwd" | "all"): Promise<RuntimeSessionInfo[]>;
   getHistory(): RuntimeHistoryEntry[];
