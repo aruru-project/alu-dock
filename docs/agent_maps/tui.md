@@ -113,11 +113,13 @@ Warning必须说明用户影响和可执行动作；closed Host projection本身
 - Work overlay 统一使用有边界的 modal frame 与栈式焦点恢复；picker/text/editor child在每次render时从当前terminal rows取得完整内容预算，resize后立即重算，先保留selection/footer再裁切body/input viewport。80×24时80% overlay最多19行（17 child rows + 2 frame rows）。固定动作不用 searchable picker。Tree 的 Branch action 保持原 Tree surface 挂载，Esc 返回时保留 filter/search/fold/selection。
 - Work TUI不持有Pi对象，不读取session JSONL；只通过DockClient和closed DTO/event。Fresh attach 的对话真相是当前 branch history，不把旧 lifecycle/navigation replay 投影为 conversation；无command ID的`runtime-initiated` active run仍恢复未完成tool/message tail。`display:false` custom control message永不成为conversation。
 - 当前branch effective history必须在进入Work时跨内部200-entry页完整drain，paging只属于传输获取，UI不暴露page/anchor/paused状态。`DockConversation`按stock Pi方式作为flowing chat container进入terminal scrollback；历史、coherent attach bootstrap与加载期间live events按内容/cursor去重且恰好投影一次。长历史、expanded tools与多次compaction仍须保持composer/footer响应。
-- Queue是Same-Host memory；in-flight/failed/ambiguous mutation不声称已restore，也不自动abort。
+- Queue是Same-Host memory；in-flight/failed/ambiguous mutation不声称已restore，也不自动abort。Queue与active run正交，pending内容只进入composer邻近tray/conversation tail，不得抢占固定Activity中的model phase。
 - Exact extension command不进入pending queue；unknown slash保留Pi-native语义。
 - Extension UI只支持bounded closed text；不transport component factory、image、binary或data URI。Host若截断tool output必须附明确truncation marker；modal或config/session inventory不完整时，Work/Hub显示shown/total或首条scan diagnostic，不能把bounded prefix呈现为完整结果。
 - Extension `notify`与`setStatus`不可混用：notify遵循Pi的chat-tail语义，连续tail info才替换，warning/error逐条追加；setStatus属于keyed footer state。两者都不得覆盖小阿露runtime activity。
-- `submitting`是回车后等待Host admission的client-local状态：逻辑上立即生效，但只有持续未决200ms后才显示；快速no-run command不得闪烁，`waiting for model`只由真实run start或authoritative running snapshot触发。
+- 固定Activity对齐stock Pi的top-level working状态机，唯一owner是authoritative runtime phase。Editor draft、queued follow-up、tool/bash start/update/end、picker/config/local command反馈都与active model run正交，不得覆盖`waiting for model`、`thinking`或`responding`；tool细节属于conversation surface，queue属于pending tray。局部操作结果使用modal或Pi式chat-tail status反馈。
+- Activity优先级必须由明确boundary决定：disconnect/error/stopped > compaction/abort/retry/interaction > active model run > idle。临时phase结束后从最新snapshot/event重新投影，不恢复陈旧本地label；`ready`只来自authoritative settlement或idle snapshot。
+- `submitting`是回车后等待Host admission的client-local状态：逻辑上立即生效，但只有持续未决200ms后才显示；快速no-run command不得闪烁，已有active run上的新prompt即使进入queue也保持原model phase，`waiting for model`只由真实run start或authoritative running snapshot触发。
 - Runtime activity按仍在进行的较新boundary投影：fresh attach从closed snapshot `compacting`恢复active compaction；`compaction.started`之后到达的旧run `run.settled`不得覆盖`compacting context`；`compaction.completed`结束该phase，后续continuation必须由真实`run.started`进入waiting。
 - Work所有动画都通过pi-tui frame cache请求正常render；禁止cache外绝对行写入。idle无timer。Hub最多一个visible时才运行的低频本地blink timer。
 - Renderer替换必须一次性cut over，不维护dual renderer或compatibility facade。
