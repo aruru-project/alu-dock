@@ -23,7 +23,7 @@ import type {
 } from "../core/runtime-session.js";
 import type { ProjectTrustChoice } from "../control/project-trust.js";
 import { ActivityPulseController } from "./activity-pulse.js";
-import { DockActivityLine, DockConversation, DockStatusLine, DockWorkHeader } from "./conversation.js";
+import { DockActivityLine, DockConversation, DockStatusLine, DockWorkMetadata } from "./conversation.js";
 import { ExtensionTextDialog } from "./extension-text-dialog.js";
 import { drainFullHistory, HISTORY_PAGE_SIZE, reconcileFlowingEvents } from "./history-pagination.js";
 import { PendingQueueTray } from "./pending-queue.js";
@@ -83,7 +83,7 @@ export async function runDockTui(
   const pendingQueue = new PendingQueueTray();
   const activity = new DockActivityLine();
   let instance = initialInstance;
-  const header = new DockWorkHeader(() => instance);
+  const metadata = new DockWorkMetadata(() => instance);
   const status = new DockStatusLine(instance);
   let runActivity = activityFromSnapshot(instance);
   let submittingFeedbackVisible = false;
@@ -1688,7 +1688,7 @@ export async function runDockTui(
   workFlow.addChild(activity);
   workFlow.addChild(pendingQueue);
   workFlow.addChild(editor);
-  workFlow.addChild(header);
+  workFlow.addChild(metadata);
   workFlow.addChild(status);
   tui.addChild(workFlow);
   tui.setFocus(editor);

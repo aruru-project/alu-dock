@@ -54,7 +54,7 @@ Corrupt catalog evidence保留；失败时不得先构造prior runtime。Startup
 | `src/deployment/user-service.ts` | explicit generated-unit lifecycle、readiness、logs | `user-service` |
 | `src/deployment/athena-release.ts` | release layout、unit/launcher rendering、release ID | `athena-release` |
 | `scripts/deploy-athena.ts` | stage/apply与一次性immutable publish/switch/smoke/rollback transaction | `athena-release` + real deploy gate |
-| `scripts/athena-smoke.ts` | released DockClient command/resources/tools/settings smoke；Stop 后 Forget 自身 record，不污染 History | release gate |
+| `scripts/athena-smoke.ts` | released DockClient commands/resources/tools/settings/tree smoke；Stop 后 Forget 自身 record，不污染 History | release gate |
 | `src/cli.ts:serve()` | managed/dev mode composition与signal shutdown | `managed-mode`, process tests |
 | `src/control/dock-host.ts` | bind-first startup、drain、socket ownership、fatal completion | `durable-host-process`, `dock-control` |
 | `src/control/durable-catalog-store.ts` | strict schema-1 load、atomic replace、directory sync | `durable-catalog-store` |
@@ -81,7 +81,7 @@ Corrupt catalog evidence保留；失败时不得先构造prior runtime。Startup
 | SIGTERM/SIGKILL行为 | `dock-host.ts`, `dock-registry.ts`, `managed-instance.ts` | durable subprocess fixture |
 | release layout/unit | `athena-release.ts` | deploy script、unit test、generated marker safety |
 | publish/rollback | `scripts/deploy-athena.ts` | released smoke、receipt、current symlink、service state |
-| installed resource startup | `scripts/athena-smoke.ts` | actual released DockClient full resources/tools/settings path |
+| installed resource startup | `scripts/athena-smoke.ts` | actual released DockClient commands/resources/tools/settings/tree path |
 
 ## Release规则
 

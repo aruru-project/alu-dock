@@ -10,6 +10,7 @@
 | Catalog/Registry | `catalog-transactions`, `durable-catalog-store`, `durable-registry` |
 | ManagedInstance mutation | `managed-instance`, `operation-ledger` |
 | Pi adapter | 对应Pi unit fixture + no-model-call real Pi smoke |
+| Pi dependency cohort | 跨版本breaking notes + exact pins/lockfile + 完整代码门禁 + no-model real Pi/PTY；目标model smoke另行授权 |
 | TUI projection/layout | 对应pure TUI test + PTY at 80×24 and 120×40 |
 | Session replacement/tree | generation/history tests + Pi tree/reopen real tests |
 | Managed lifecycle | subprocess SIGTERM/SIGKILL tests；必要时唯一临时user unit |
@@ -130,7 +131,7 @@ test/fixtures/pty-tui-driver.py
 2. immutable release build；
 3. 默认确认无active instance；
 4. switch/restart后核对MainPID、V2 hello与新hostEpoch；
-5. 使用released DockClient读取commands/resources/tools/settings；
+5. 使用released DockClient读取commands/resources/tools/settings/tree；
 6. 检查journal severe errors；
 7. 验证rollback-forward并写immutable receipt。
 

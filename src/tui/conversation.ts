@@ -714,7 +714,7 @@ export class DockActivityLine implements Component {
   invalidate(): void {}
 }
 
-export class DockWorkHeader implements Component {
+export class DockWorkMetadata implements Component {
   constructor(private readonly snapshot: () => InstanceSnapshot) {}
   invalidate(): void {}
 

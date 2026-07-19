@@ -5,7 +5,7 @@ import { CombinedAutocompleteProvider, visibleWidth } from "@earendil-works/pi-t
 
 import type { SettingDto } from "../src/core/config-projection.js";
 import type { DockEvent, InstanceSnapshot } from "../src/core/managed-instance.js";
-import { DockActivityLine, DockConversation, DockStatusLine, DockWorkHeader } from "../src/tui/conversation.js";
+import { DockActivityLine, DockConversation, DockStatusLine, DockWorkMetadata } from "../src/tui/conversation.js";
 import { commandCatalog, formatWorkStatus, workHelpText } from "../src/tui/dock-tui.js";
 import { PendingQueueTray } from "../src/tui/pending-queue.js";
 import { projectSnapshot } from "../src/tui/snapshot-projection.js";
@@ -608,32 +608,32 @@ test("live snapshot projection updates metrics, extension status, state, and rep
   assert.equal(projected.executor.sessionFile, "/tmp/pi-2.jsonl");
 });
 
-test("Work chrome separates semantic header metrics extensions and activity", () => {
+test("Work chrome separates semantic metadata metrics extensions and activity", () => {
   const conversation = new DockConversation();
   conversation.applyReplay([], true);
   assert.deepEqual(conversation.snapshot(), []);
 
   let current = snapshot();
-  const header = new DockWorkHeader(() => current);
+  const metadata = new DockWorkMetadata(() => current);
   const activity = new DockActivityLine();
   const status = new DockStatusLine(current);
   activity.setActivity({ phase: "responding", label: "responding" });
-  const headerLine = header.render(120).join("\n");
+  const metadataLine = metadata.render(120).join("\n");
   const lines = status.render(120);
   assert.equal(lines.length, 2);
   const footer = lines.join("\n");
-  assert.match(headerLine, /demo/);
-  assert.match(headerLine, /\/tmp\/demo/);
-  assert.match(headerLine, /openai-codex\/gpt-test/);
-  assert.match(headerLine, /think off/);
+  assert.match(metadataLine, /demo/);
+  assert.match(metadataLine, /\/tmp\/demo/);
+  assert.match(metadataLine, /openai-codex\/gpt-test/);
+  assert.match(metadataLine, /think off/);
   assert.match(footer, /ctx 1\.0k\/10\.0k 10%/);
   assert.match(footer, /cache 20%/);
   assert.match(footer, /↑800 ↓200/);
   assert.match(footer, /\$0\.0042/);
   assert.match(footer, /alu-kanban: ready/);
-  assert.doesNotMatch(`${headerLine}\n${footer}`, /ALU DOCK|NIGHT CONSOLE|connected|acquired|observing|d:dock|p:pi-|running|cmp/u);
+  assert.doesNotMatch(`${metadataLine}\n${footer}`, /ALU DOCK|NIGHT CONSOLE|connected|acquired|observing|d:dock|p:pi-|running|cmp/u);
   assert.doesNotMatch(footer, /demo|gpt-test|streaming/);
-  for (const line of [headerLine, ...lines]) assert.ok(visibleWidth(line) <= 120);
+  for (const line of [metadataLine, ...lines]) assert.ok(visibleWidth(line) <= 120);
 
   current = {
     ...current,
@@ -642,29 +642,29 @@ test("Work chrome separates semantic header metrics extensions and activity", ()
     gitBranch: "feature/live",
     executor: { ...current.executor, thinkingLevel: "high" },
   };
-  const responsiveHeader = header.render(80).join("\n");
-  assert.match(responsiveHeader, /A very.*…er\/project \(feature\/live\).*gpt-test.*think high/u);
+  const responsiveMetadata = metadata.render(80).join("\n");
+  assert.match(responsiveMetadata, /A very.*…er\/project \(feature\/live\).*gpt-test.*think high/u);
   activity.setActivity({ phase: "waiting", label: "waiting for model" });
   const narrowActivity = activity.render(43);
-  const narrowHeader = header.render(43);
+  const narrowMetadata = metadata.render(43);
   const narrowStatus = status.render(43);
-  assert.match(narrowHeader.join("\n"), /A ve.*\(featur.*gpt-test.*high/u);
+  assert.match(narrowMetadata.join("\n"), /A ve.*\(featur.*gpt-test.*high/u);
   assert.equal(narrowActivity.length, 1);
   assert.match(narrowActivity[0] ?? "", /waiting for model/);
   assert.equal(narrowStatus.length, 2);
   assert.doesNotMatch(narrowStatus.join("\n"), /waiting for model/);
-  for (const line of [...narrowHeader, ...narrowActivity, ...narrowStatus]) assert.ok(visibleWidth(line) <= 43);
+  for (const line of [...narrowMetadata, ...narrowActivity, ...narrowStatus]) assert.ok(visibleWidth(line) <= 43);
 
-  const flowingFooter = [...header.render(120), ...status.render(120)];
-  assert.match(flowingFooter[0] ?? "", /customer migration/u, "former header is the first footer row");
-  assert.match(flowingFooter[1] ?? "", /cache 20%/u, "metrics follow the former header");
+  const flowingFooter = [...metadata.render(120), ...status.render(120)];
+  assert.match(flowingFooter[0] ?? "", /customer migration/u, "metadata is the first footer row");
+  assert.match(flowingFooter[1] ?? "", /cache 20%/u, "metrics follow metadata");
   assert.match(flowingFooter[2] ?? "", /alu-kanban: ready/u, "reserved extension row remains last");
 
-  const detachedHeader = new DockWorkHeader(() => ({ ...current, gitBranch: "detached" })).render(100).join("\n");
-  assert.match(detachedHeader, /project \(detached\)/u);
-  const nonRepositoryHeader = new DockWorkHeader(() => ({ ...current, gitBranch: undefined })).render(100).join("\n");
-  assert.match(nonRepositoryHeader, /customer\/project/u);
-  assert.doesNotMatch(nonRepositoryHeader, /\(feature\/live\)|\(detached\)/u);
+  const detachedMetadata = new DockWorkMetadata(() => ({ ...current, gitBranch: "detached" })).render(100).join("\n");
+  assert.match(detachedMetadata, /project \(detached\)/u);
+  const nonRepositoryMetadata = new DockWorkMetadata(() => ({ ...current, gitBranch: undefined })).render(100).join("\n");
+  assert.match(nonRepositoryMetadata, /customer\/project/u);
+  assert.doesNotMatch(nonRepositoryMetadata, /\(feature\/live\)|\(detached\)/u);
 
   const emptyExtensions = new DockStatusLine({ ...current, extensionStatus: {} }).render(80);
   assert.equal(emptyExtensions[1], "");
