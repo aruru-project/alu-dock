@@ -232,6 +232,13 @@ test("dedicated tree surface handles filters, search clearing, branch keys, and 
   assert.match(initial, /\[alu_kanban: get_card · card #185\]/u);
   assert.match(initial, /WebSocket error/u);
   assert.match(initial, /\[compaction: 42k tokens\]/u);
+  const initialSelection = initial.split("\n").filter((line) => line.startsWith("▶ "));
+  assert.equal(initialSelection.length, 1, "tree selection uses one unmistakable solid cursor even without color");
+  assert.match(initialSelection[0] ?? "", /\[compaction: 42k tokens\]/u);
+  surface.handleInput("\u001b[A");
+  const moved = surface.render(80).join("\n");
+  assert.equal(moved.split("\n").filter((line) => line.startsWith("▶ ")).length, 1);
+  assert.doesNotMatch(moved.split("\n").find((line) => line.includes("[compaction: 42k tokens]")) ?? "", /^▶ /u, "selection highlight moves with the cursor");
   assert.doesNotMatch(initial, /Tool call: alu_kanban/u, "structural tool-call wrappers stay hidden");
   assert.ok(surface.render(43).every((line) => visibleWidth(line) <= 43));
   assert.ok(surface.render(120).every((line) => visibleWidth(line) <= 120));

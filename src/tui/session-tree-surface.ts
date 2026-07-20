@@ -152,7 +152,7 @@ function renderHelp(width: number): string[] {
 }
 
 function renderTreeRow(item: VisibleTreeNode, selected: boolean): RenderedTreeRow {
-  const cursor = selected ? paint.accent("› ") : "  ";
+  const cursor = selected ? paint.bold(paint.warning("▶ ")) : "  ";
   const branchMarker = item.folded ? paint.accent("⊞ ") : item.foldable ? paint.faint("⊟ ") : "";
   const pathMarker = item.currentLeaf ? paint.accent("● ") : item.activePath ? paint.accent("• ") : "";
   const prefix = paint.faint(item.prefix);
@@ -195,9 +195,14 @@ function renderHorizontalViewport(rows: readonly RenderedTreeRow[], width: numbe
   if (selected && selected.anchorColumn > bodyWidth - Math.max(4, Math.floor(bodyWidth / 3))) {
     scroll = Math.min(maxScroll, Math.max(0, selected.anchorColumn - Math.max(2, Math.floor(bodyWidth / 4))));
   }
-  return rows.map((row) => truncateToWidth(
-    scroll > 0 ? `${row.gutter}${sliceByColumn(row.body, scroll, bodyWidth, true)}\u001b[0m` : `${row.gutter}${row.body}`,
-    width,
-    "",
-  ));
+  return rows.map((row) => {
+    const visible = truncateToWidth(
+      scroll > 0 ? `${row.gutter}${sliceByColumn(row.body, scroll, bodyWidth, true)}\u001b[0m` : `${row.gutter}${row.body}`,
+      width,
+      "",
+    );
+    if (!row.selected) return visible;
+    const padded = `${visible}${" ".repeat(Math.max(0, width - visibleWidth(visible)))}`;
+    return paint.selection(padded);
+  });
 }
