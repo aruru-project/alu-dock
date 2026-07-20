@@ -54,6 +54,8 @@ export interface RuntimeHistoryEntry {
   error?: string;
   toolCallId?: string;
   toolName?: string;
+  /** Closed presentation projection of an edit tool result. */
+  toolDiff?: string;
   isError?: boolean;
 }
 

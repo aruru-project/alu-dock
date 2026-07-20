@@ -4,6 +4,7 @@ import test from "node:test";
 import { CombinedAutocompleteProvider, TUI, visibleWidth, type Terminal } from "@earendil-works/pi-tui";
 
 import type { SettingDto } from "../src/core/config-projection.js";
+import { projectDisplayEditDiff } from "../src/core/edit-diff-projection.js";
 import type { DockEvent, InstanceSnapshot } from "../src/core/managed-instance.js";
 import { DockActivityLine, DockConversation, DockStatusLine, DockWorkMetadata } from "../src/tui/conversation.js";
 import { commandCatalog, formatWorkStatus, workHelpText } from "../src/tui/dock-tui.js";
@@ -248,6 +249,41 @@ test("conversation projects persisted history before live replay", () => {
   assert.match(conversation.render(100).join("\n"), /✓ read.*\/tmp\/old/u);
 });
 
+test("persisted Pi edit results retain the same explicit added and deleted preview as live events", () => {
+  const conversation = new DockConversation();
+  conversation.applyHistory([
+    {
+      entryId: "edit-call",
+      role: "assistant",
+      content: [{
+        type: "tool_call",
+        toolCallId: "edit-history",
+        toolName: "edit",
+        args: {
+          path: "src/history.ts",
+          edits: [{ oldText: "return oldValue;", newText: "return newValue;" }],
+        },
+      }],
+    },
+    {
+      entryId: "edit-result",
+      role: "tool",
+      content: [{
+        type: "tool_result",
+        toolCallId: "edit-history",
+        toolName: "edit",
+        text: "-1 return oldValue;\n+1 return newValue;",
+        isError: false,
+      }],
+    },
+  ], false);
+
+  const rendered = conversation.render(80).join("\n");
+  assert.match(rendered, /-1 return oldValue;/u);
+  assert.match(rendered, /\+1 return newValue;/u);
+  assert.doesNotMatch(rendered, /Successfully replaced/u);
+});
+
 test("persisted assistant content blocks retain Pi order instead of telemetry grouping", () => {
   const conversation = new DockConversation();
   conversation.applyHistory([{
@@ -441,19 +477,27 @@ test("conversation renders Markdown, code, thinking policy, and diff tools at bo
     messageId: "a1", role: "assistant",
     content: [{ type: "thinking", text: "**plan**" }, { type: "text", text: "# Result\n\n```ts\nconst answer = 42;\n```" }],
   }));
-  conversation.apply(event(4, "tool.started", { toolCallId: "t1", toolName: "edit", args: { path: "src/a.ts" } }));
+  conversation.apply(event(4, "tool.started", {
+    toolCallId: "t1",
+    toolName: "edit",
+    args: { path: "src/a.ts", edits: [{ oldText: "const value = 'old';", newText: "const value = 'new';" }] },
+  }));
+  const runningEdit = conversation.render(60);
   conversation.apply(event(5, "tool.completed", {
     toolCallId: "t1", toolName: "edit", isError: false,
-    text: "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-old\n+new",
+    text: "     ...\n  9 const keep = true;\n-10 const value = 'old';\n+10 const value = 'new';\n 11 return value;\n     ...",
   }));
+  assert.ok(conversation.render(60).length >= runningEdit.length, "a successful real Pi edit result must not collapse its tool surface");
 
   assert.ok(conversation.snapshot().some((entry) => entry.kind === "thinking" && entry.text === "**plan**"));
   assert.match(conversation.snapshot().at(-1)?.text ?? "", /src\/a\.ts/);
   const collapsed = conversation.render(60).join("\n");
   assert.match(collapsed, /✓ edit.*src\/a\.ts/u);
-  assert.match(collapsed, /\+new/u, "collapsed tools retain a bounded Pi-style result preview");
+  assert.match(collapsed, /-10 const value = 'old';/u);
+  assert.match(collapsed, /\+10 const value = 'new';/u, "real Pi edit result details retain an explicit added/deleted preview");
+  assert.doesNotMatch(collapsed, /Successfully replaced/u, "the semantic diff replaces redundant edit success telemetry");
   assert.deepEqual(conversation.toggleLatestToolExpanded(), { expanded: true, name: "edit" });
-  assert.match(conversation.render(60).join("\n"), /\+new/);
+  assert.match(conversation.render(60).join("\n"), /\+10 const value = 'new';/u);
   conversation.toggleToolsExpanded();
   for (const width of [20, 43, 100]) {
     for (const line of conversation.render(width)) assert.ok(visibleWidth(line) <= width, `${visibleWidth(line)} > ${width}`);
@@ -464,6 +508,31 @@ test("conversation renders Markdown, code, thinking policy, and diff tools at bo
   hidden.apply(event(1, "message.delta", { messageId: "a2", block: "thinking", delta: "private" }));
   hidden.apply(event(2, "message.completed", { messageId: "a2", role: "assistant", content: [{ type: "thinking", text: "private" }] }));
   assert.equal(hidden.snapshot().some((entry) => entry.kind === "thinking"), false);
+});
+
+test("Host-truncated Pi edit diffs keep diff semantics and never fall back to raw edit arguments", () => {
+  const conversation = new DockConversation();
+  const projectedDiff = projectDisplayEditDiff(`-1 oldValue();\n+1 newValue();\n+2 ${"const next = value; ".repeat(1_000)}`);
+  assert.ok(projectedDiff !== undefined);
+  conversation.apply(event(1, "tool.started", {
+    toolCallId: "edit-truncated",
+    toolName: "edit",
+    args: { path: "src/large.ts", edits: [{ oldText: "private old argument", newText: "private new argument" }] },
+  }));
+  conversation.apply(event(2, "tool.completed", {
+    toolCallId: "edit-truncated",
+    toolName: "edit",
+    isError: false,
+    text: projectedDiff,
+  }));
+
+  const collapsed = conversation.render(80).join("\n");
+  assert.match(collapsed, /-1 oldValue\(\);/u);
+  assert.match(collapsed, /\+1 newValue\(\);/u);
+  assert.match(collapsed, /truncated by Host projection/u);
+  conversation.toggleLatestToolExpanded();
+  const expanded = conversation.render(80).join("\n");
+  assert.doesNotMatch(expanded, /private old argument|private new argument/u);
 });
 
 test("collapsed tool rows identify common operations without exposing arbitrary payload fields", () => {

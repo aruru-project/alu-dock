@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { projectDisplayEditDiff } from "../src/core/edit-diff-projection.js";
 import { ExtensionUiBroker } from "../src/core/extension-ui-broker.js";
 import {
   InstanceAdmissionPendingError,
@@ -1719,6 +1720,144 @@ test("large structured runtime payloads remain below one control record with exp
   });
   const first = completed.data.content[0];
   assert.ok(first?.type === "tool_call" && (first.omittedFields?.length ?? 0) > 0);
+});
+
+test("edit result details become a closed bounded diff surface for live events and history", async () => {
+  const liveSession = new FakeRuntimeSession();
+  const liveInstance = createInstance(liveSession);
+  liveSession.emit({
+    type: "tool_execution_end",
+    toolCallId: "edit-live",
+    toolName: "edit",
+    result: {
+      content: [{ type: "text", text: "Successfully replaced 1 block(s) in src/live.ts." }],
+      details: {
+        diff: " 1 const keep = true;\n-2 const value = 'old';\n+2 const value = 'new';",
+        patch: "p".repeat(9_000),
+        privatePayload: Buffer.from("secret".repeat(100)).toString("base64"),
+      },
+    },
+    isError: false,
+  });
+  const completed = liveInstance.eventsSince().events.find((event) => event.type === "tool.completed");
+  assert.ok(completed?.type === "tool.completed");
+  assert.equal(completed.data.text, " 1 const keep = true;\n-2 const value = 'old';\n+2 const value = 'new';");
+  assert.equal(completed.data.omittedFields, undefined, "private detail paths do not cross through omission metadata");
+  assert.doesNotMatch(JSON.stringify(completed), /Successfully replaced|patch|privatePayload|secret/u);
+
+  liveSession.emit({
+    type: "tool_execution_end",
+    toolCallId: "edit-failed",
+    toolName: "edit",
+    result: {
+      content: [{ type: "text", text: "Could not find the requested block." }],
+      details: { diff: "-1 stale\n+1 unsafe" },
+    },
+    isError: true,
+  });
+  const failed = liveInstance.eventsSince().events.find((event) => event.type === "tool.completed" && event.data.toolCallId === "edit-failed");
+  assert.ok(failed?.type === "tool.completed");
+  assert.equal(failed.data.text, "Could not find the requested block.", "failed edits retain the authoritative error instead of a speculative diff");
+
+  liveSession.emit({
+    type: "tool_execution_end",
+    toolCallId: "edit-malformed",
+    toolName: "edit",
+    result: {
+      content: [{ type: "text", text: "Successfully replaced a legacy block." }],
+      details: { diff: "not a numbered Pi edit diff" },
+    },
+    isError: false,
+  });
+  const malformed = liveInstance.eventsSince().events.find((event) => event.type === "tool.completed" && event.data.toolCallId === "edit-malformed");
+  assert.ok(malformed?.type === "tool.completed");
+  assert.equal(malformed.data.text, "Successfully replaced a legacy block.", "malformed details fall back to authoritative content");
+
+  liveSession.emit({
+    type: "message_end",
+    message: {
+      id: "assistant-with-tool-result",
+      role: "assistant",
+      content: [{
+        type: "toolResult",
+        toolCallId: "embedded-edit",
+        toolName: "edit",
+        content: [{ type: "text", text: "Successfully replaced embedded edit." }],
+        details: { diff: "-7 oldEmbedded();\n+7 newEmbedded();", patch: "p".repeat(9_000) },
+        isError: false,
+      }],
+      stopReason: "stop",
+    },
+  });
+  const embedded = liveInstance.eventsSince().events.filter((event) => event.type === "message.completed").at(-1);
+  assert.ok(embedded?.type === "message.completed");
+  assert.deepEqual(embedded.data.content, [{
+    type: "tool_result",
+    toolCallId: "embedded-edit",
+    toolName: "edit",
+    text: "-7 oldEmbedded();\n+7 newEmbedded();",
+    isError: false,
+  }]);
+
+  const largeDiff = Array.from({ length: 2_000 }, (_, index) => `${index % 2 === 0 ? "-" : "+"}${index + 1} const value${index} = true;`).join("\n");
+  liveSession.emit({
+    type: "tool_execution_end",
+    toolCallId: "edit-large-live",
+    toolName: "edit",
+    result: { content: [{ type: "text", text: "Successfully replaced a large block." }], details: { diff: largeDiff } },
+    isError: false,
+  });
+  const largeLive = liveInstance.eventsSince().events.find((event) => event.type === "tool.completed" && event.data.toolCallId === "edit-large-live");
+  assert.ok(largeLive?.type === "tool.completed");
+  assert.match(largeLive.data.text, /\[tool output truncated by Host projection\]$/u);
+  const historyBoundedLargeDiff = projectDisplayEditDiff(largeDiff);
+  assert.ok(historyBoundedLargeDiff !== undefined);
+
+  const historySession = new FakeRuntimeSession();
+  historySession.history = [{
+    entryId: "edit-history",
+    role: "toolResult",
+    content: [{ type: "text", text: "Successfully replaced 1 block(s) in src/history.ts." }],
+    toolCallId: "edit-history-call",
+    toolName: "edit",
+    toolDiff: "-4 oldCall();\n+4 newCall();",
+    isError: false,
+  }, {
+    entryId: "edit-history-malformed",
+    role: "toolResult",
+    content: [{ type: "text", text: "Legacy edit result." }],
+    toolCallId: "edit-history-malformed-call",
+    toolName: "edit",
+    toolDiff: "+private-data\n[tool output truncated by Host projection]",
+    isError: false,
+  }, {
+    entryId: "edit-history-large",
+    role: "toolResult",
+    content: [{ type: "text", text: "Successfully replaced a large history block." }],
+    toolCallId: "edit-history-large-call",
+    toolName: "edit",
+    toolDiff: historyBoundedLargeDiff,
+    isError: false,
+  }];
+  const historyInstance = createInstance(historySession);
+  const history = await historyInstance.getHistoryPage(undefined, 200);
+  assert.deepEqual(history.entries[0]?.content, [{
+    type: "tool_result",
+    toolCallId: "edit-history-call",
+    toolName: "edit",
+    text: "-4 oldCall();\n+4 newCall();",
+    isError: false,
+  }]);
+  assert.deepEqual(history.entries[1]?.content, [{
+    type: "tool_result",
+    toolCallId: "edit-history-malformed-call",
+    toolName: "edit",
+    text: "Legacy edit result.",
+    isError: false,
+  }]);
+  const largeHistoryText = history.entries[2]?.content[0];
+  assert.ok(largeHistoryText?.type === "tool_result");
+  assert.equal(largeHistoryText.text, largeLive.data.text, "oversized live and reattached edit diffs share the same bounded projection");
 });
 
 test("oversized tool output carries an explicit Host truncation notice without splitting Unicode", () => {

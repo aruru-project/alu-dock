@@ -22,6 +22,7 @@ import {
   type SourceInfo,
 } from "@earendil-works/pi-coding-agent";
 
+import { projectDisplayEditDiff } from "../core/edit-diff-projection.js";
 import type { ExtensionUiBroker } from "../core/extension-ui-broker.js";
 import {
   RuntimeCompactionKnownFailureError,
@@ -862,6 +863,12 @@ function safeRequiredText(value: unknown, limit: number, fallback: string): stri
   return safeOptionalText(value, limit) ?? fallback;
 }
 
+function projectEditToolDiff(toolName: unknown, details: unknown): string | undefined {
+  if (typeof toolName !== "string" || (toolName.toLowerCase().split(/[.:/]/u).at(-1) ?? "") !== "edit") return undefined;
+  if (details === null || typeof details !== "object" || Array.isArray(details)) return undefined;
+  return projectDisplayEditDiff((details as Record<string, unknown>).diff);
+}
+
 function projectHistoryEntry(entry: SessionEntry): RuntimeHistoryEntry | undefined {
   const base = {
     entryId: entry.id,
@@ -872,6 +879,8 @@ function projectHistoryEntry(entry: SessionEntry): RuntimeHistoryEntry | undefin
     const message = entry.message as unknown as Record<string, unknown>;
     const role = typeof message.role === "string" ? message.role : "system";
     if (role === "custom" && message.display === false) return undefined;
+    const toolName = typeof message.toolName === "string" ? message.toolName : undefined;
+    const toolDiff = role === "toolResult" ? projectEditToolDiff(toolName, message.details) : undefined;
     let content: unknown = message.content;
     if (role === "bashExecution") {
       const command = typeof message.command === "string" ? message.command : "";
@@ -889,7 +898,8 @@ function projectHistoryEntry(entry: SessionEntry): RuntimeHistoryEntry | undefin
       ...(typeof message.stopReason === "string" ? { stopReason: message.stopReason } : {}),
       ...(typeof message.errorMessage === "string" ? { error: message.errorMessage } : {}),
       ...(typeof message.toolCallId === "string" ? { toolCallId: message.toolCallId } : {}),
-      ...(typeof message.toolName === "string" ? { toolName: message.toolName } : {}),
+      ...(toolName === undefined ? {} : { toolName }),
+      ...(toolDiff === undefined ? {} : { toolDiff }),
       ...(typeof message.isError === "boolean" ? { isError: message.isError } : {}),
     };
   }

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { isProjectedDisplayEditDiff, projectDisplayEditDiff } from "./edit-diff-projection.js";
 import {
   CatalogEffectUnknownError,
   CatalogWriteError,
@@ -3248,12 +3249,15 @@ export class ManagedInstance {
 
       case "tool_execution_end": {
         const toolCallId = boundedRuntimeString(event.toolCallId, 128, "unknown");
-        const projected = projectJsonObject(event.result);
+        const toolName = boundedRuntimeString(event.toolName, 256, "unknown");
+        const isError = event.isError === true;
+        const result = recordValue(event.result);
+        const projected = projectJsonObject({ content: result?.content });
         this.appendEvent("tool.completed", {
           toolCallId,
-          toolName: boundedRuntimeString(event.toolName, 256, "unknown"),
-          isError: event.isError === true,
-          text: projectToolText(recordValue(event.result)?.content),
+          toolName,
+          isError,
+          text: projectToolResultText(result?.content, isError, editToolDiff(toolName, result?.details)),
           ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
         });
         this.announcedToolCalls.delete(toolCallId);
@@ -3860,15 +3864,20 @@ function projectRuntimeHistoryEntry(entry: RuntimeHistoryEntry): HistoryEntryDto
   const summaryKind = entry.summaryKind
     ?? (entry.role === "compactionSummary" ? "compaction" : entry.role === "branchSummary" ? "branch" : undefined);
   const entryId = boundedRuntimeString(entry.entryId, 128, "unknown-entry");
-  const content: ContentBlockDto[] = role === "tool"
-    ? [{
+  let content: ContentBlockDto[];
+  if (role === "tool") {
+    const toolName = boundedRuntimeString(entry.toolName, 256, "tool");
+    const isError = entry.isError === true;
+    content = [{
       type: "tool_result",
       toolCallId: boundedRuntimeString(entry.toolCallId, 128, `tool-${entryId}`),
-      toolName: boundedRuntimeString(entry.toolName, 256, "tool"),
-      text: projectToolText(entry.content),
-      isError: entry.isError === true,
-    }]
-    : projectContentBlocks(entry.content);
+      toolName,
+      text: projectToolResultText(entry.content, isError, historyEditToolDiff(toolName, entry.toolDiff)),
+      isError,
+    }];
+  } else {
+    content = projectContentBlocks(entry.content);
+  }
   return {
     entryId,
     ...(entry.parentId === undefined ? {} : { parentId: boundedRuntimeString(entry.parentId, 128, "unknown-parent") }),
@@ -4053,13 +4062,15 @@ function projectContentBlocks(content: unknown): ContentBlockDto[] {
         ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
       };
     } else if (block.type === "toolResult" || block.type === "tool_result") {
-      const projected = projectJsonObject(block);
+      const projected = projectJsonObject({ content: block.content });
+      const toolName = boundedRuntimeString(block.toolName ?? block.name, 256, "unknown");
+      const isError = block.isError === true;
       candidate = {
         type: "tool_result",
         toolCallId: boundedRuntimeString(block.toolCallId ?? block.id, 128, "unknown"),
-        toolName: boundedRuntimeString(block.toolName ?? block.name, 256, "unknown"),
-        text: projectToolText(block.content),
-        isError: block.isError === true,
+        toolName,
+        text: projectToolResultText(block.content, isError, editToolDiff(toolName, block.details)),
+        isError,
         ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
       };
     } else if (block.type === "image") {
@@ -4224,6 +4235,19 @@ export function projectJsonObject(input: unknown): { value: JsonObject; omittedF
 function escapeJsonPointer(value: string): string { return value.replace(/~/g, "~0").replace(/\//g, "~1"); }
 function isIsoTimestamp(value: string | undefined): value is string { return value !== undefined && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value; }
 function isJsonObject(value: JsonValue | undefined): value is JsonObject { return value !== undefined && value !== null && typeof value === "object" && !Array.isArray(value); }
+function editToolDiff(toolName: string, details: unknown): string | undefined {
+  if ((toolName.toLowerCase().split(/[.:/]/u).at(-1) ?? "") !== "edit") return undefined;
+  const diff = recordValue(details)?.diff;
+  return projectDisplayEditDiff(diff);
+}
+function historyEditToolDiff(toolName: string, diff: unknown): string | undefined {
+  if ((toolName.toLowerCase().split(/[.:/]/u).at(-1) ?? "") !== "edit") return undefined;
+  return typeof diff === "string" && isProjectedDisplayEditDiff(diff) ? diff : undefined;
+}
+function projectToolResultText(content: unknown, isError: boolean, diff: string | undefined): string {
+  if (!isError && diff !== undefined) return projectToolText(diff);
+  return projectToolText(content);
+}
 function projectToolText(content: unknown): string {
   const text = extractText(content);
   if (!text || isBinaryText(text)) return "";

@@ -7,6 +7,7 @@ import {
   type Component,
 } from "@earendil-works/pi-tui";
 
+import { isProjectedDisplayEditDiff } from "../core/edit-diff-projection.js";
 import type { DockEvent, HistoryEntryDto, InstanceSnapshot, JsonObject, JsonValue } from "../core/managed-instance.js";
 import { renderWorkAlu } from "./alu-mascot.js";
 import { knownCompactionFeedback } from "./compaction-feedback.js";
@@ -243,7 +244,6 @@ export class DockConversation implements Component {
         const isError = event.data.isError === true;
         tool.entry.complete = true;
         this.updateTool(tool, isError ? "failed" : "done");
-        tool.entry.diffText = !isError && looksLikeDiff(tool.output) ? tool.output : undefined;
         this.tools.delete(callId);
         break;
       }
@@ -479,14 +479,15 @@ export class DockConversation implements Component {
     if (entry.toolCallId) {
       const content: string[] = [renderToolHeader(entry, width)];
       if (expanded) {
-        if (entry.toolArgs) content.push(paint.faint("args"), ...renderToolDetails(entry.toolArgs, width));
+        if (entry.toolArgs && !entry.diffText) content.push(paint.faint("args"), ...renderToolDetails(entry.toolArgs, width));
         if (entry.toolOmitted && entry.toolOmitted.length > 0) {
           content.push(paint.warning(`omitted: ${entry.toolOmitted.join(", ")}`));
         }
-        if (entry.toolOutput) {
-          content.push(paint.faint("result"));
-          if (entry.diffText) content.push(...renderDockDiff(entry.diffText).flatMap((line) => renderToolDetailLine(line, width)));
-          else content.push(...renderToolDetails(entry.toolOutput, width));
+        if (entry.diffText) {
+          content.push(paint.faint(entry.toolState === "running" ? "changes" : "result"));
+          content.push(...renderDockDiff(entry.diffText).flatMap((line) => renderToolDetailLine(line, width)));
+        } else if (entry.toolOutput) {
+          content.push(paint.faint("result"), ...renderToolDetails(entry.toolOutput, width));
         }
       } else {
         content.push(...renderToolPreview(entry, width));
@@ -601,7 +602,6 @@ export class DockConversation implements Component {
           tool.output = truncate(safeTerminalText(block.text), MAX_TOOL_OUTPUT);
           tool.omitted = [...new Set([...tool.omitted, ...(block.omittedFields ?? [])])];
           projectToolState(tool, block.isError ? "failed" : "done");
-          tool.entry.diffText = !block.isError && looksLikeDiff(tool.output) ? tool.output : undefined;
           projectedTools.delete(block.toolCallId);
         }
       } else {
@@ -633,6 +633,7 @@ export class DockConversation implements Component {
     tool.entry.toolArgs = tool.args === undefined ? undefined : safeTerminalText(tool.args);
     tool.entry.toolOutput = tool.output === undefined ? undefined : truncate(safeTerminalText(tool.output), MAX_TOOL_OUTPUT);
     tool.entry.toolOmitted = tool.omitted.map(safeTerminalLine);
+    tool.entry.diffText = state !== "failed" && looksLikeToolDiff(tool.name, tool.output) ? tool.output : undefined;
     this.touchEntry(tool.entry);
     this.markOutputChanged();
   }
@@ -705,6 +706,7 @@ function projectToolState(tool: ToolProjection, state: ToolState): void {
   tool.entry.toolArgs = tool.args === undefined ? undefined : safeTerminalText(tool.args);
   tool.entry.toolOutput = tool.output === undefined ? undefined : truncate(safeTerminalText(tool.output), MAX_TOOL_OUTPUT);
   tool.entry.toolOmitted = tool.omitted.map(safeTerminalLine);
+  tool.entry.diffText = state !== "failed" && looksLikeToolDiff(tool.name, tool.output) ? tool.output : undefined;
   tool.entry.renderRevision += 1;
   tool.entry.renderCache = undefined;
 }
@@ -861,7 +863,7 @@ function renderToolPreview(entry: ConversationEntry, width: number): string[] {
   if (!output) return lines;
 
   const toolName = toolBaseName(entry.toolName ?? "tool");
-  if (!KNOWN_PREVIEW_TOOLS.has(toolName) && looksLikeStructuredJson(output)) {
+  if (!entry.diffText && !KNOWN_PREVIEW_TOOLS.has(toolName) && looksLikeStructuredJson(output)) {
     const summary = entry.toolState === "failed"
       ? ["structured error result · Ctrl+O full details"]
       : summarizeStructuredToolResult(output) ?? ["structured result truncated or unavailable · Ctrl+O full details"];
@@ -870,7 +872,7 @@ function renderToolPreview(entry: ConversationEntry, width: number): string[] {
   }
 
   const bodyWidth = Math.max(1, width - 4);
-  const styledSource = entry.diffText ? renderDockDiff(output) : output.split("\n");
+  const styledSource = entry.diffText ? renderDockDiff(entry.diffText) : output.split("\n");
   const visualRows = styledSource.flatMap((line) => wrapTextWithAnsi(line || " ", bodyWidth));
   const budget = toolPreviewBudget(toolName);
   const mode = toolName === "bash" ? "tail" : entry.diffText ? "head-tail" : "head";
@@ -1317,7 +1319,12 @@ function stringArraysEqual(left: readonly string[], right: readonly string[]): b
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function looksLikeDiff(text: string | undefined): text is string {
+function looksLikeToolDiff(toolName: string, text: string | undefined): text is string {
+  if (looksLikeDiff(text)) return true;
+  return toolBaseName(toolName) === "edit" && isProjectedDisplayEditDiff(text);
+}
+
+function looksLikeDiff(text: string | undefined): boolean {
   if (!text) return false;
   return text.startsWith("diff --git ") || (/^--- .+\n\+\+\+ .+/m.test(text) && /^@@ /m.test(text));
 }

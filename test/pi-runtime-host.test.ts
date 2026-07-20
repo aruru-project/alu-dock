@@ -545,6 +545,104 @@ test("Pi runtime history uses public context entries in model-visible order", as
   await host.dispose();
 });
 
+test("Pi runtime history retains only the bounded edit diff presentation detail", async () => {
+  const trace: string[] = [];
+  const { host, initial } = await runtimeHost(trace, (_owner, session) => {
+    session.historyEntries = [{
+      type: "message",
+      id: "edit-result",
+      parentId: null,
+      timestamp: "2026-07-14T00:00:00.000Z",
+      message: {
+        role: "toolResult",
+        toolCallId: "edit-1",
+        toolName: "edit",
+        content: [{ type: "text", text: "Successfully replaced 1 block(s) in src/a.ts." }],
+        details: {
+          diff: " 1 const keep = true;\n-2 const value = 'old';\n+2 const value = 'new';",
+          patch: "private unified patch",
+          firstChangedLine: 2,
+        },
+        isError: false,
+        timestamp: 1,
+      },
+    }];
+  });
+
+  assert.deepEqual(host.getHistory(), [{
+    entryId: "edit-result",
+    timestamp: "2026-07-14T00:00:00.000Z",
+    role: "toolResult",
+    content: [{ type: "text", text: "Successfully replaced 1 block(s) in src/a.ts." }],
+    toolCallId: "edit-1",
+    toolName: "edit",
+    toolDiff: " 1 const keep = true;\n-2 const value = 'old';\n+2 const value = 'new';",
+    isError: false,
+  }]);
+  assert.doesNotMatch(JSON.stringify(host.getHistory()), /private unified patch/u);
+
+  initial.historyEntries.push({
+    type: "message",
+    id: "edit-result-malformed",
+    parentId: "edit-result",
+    timestamp: "2026-07-14T00:00:01.000Z",
+    message: {
+      role: "toolResult",
+      toolCallId: "edit-2",
+      toolName: "edit",
+      content: [{ type: "text", text: "Legacy edit result." }],
+      details: { diff: "not a numbered Pi edit diff", patch: "private malformed patch" },
+      isError: false,
+      timestamp: 2,
+    },
+  });
+  const malformed = host.getHistory().find((entry) => entry.entryId === "edit-result-malformed");
+  assert.equal(malformed?.toolDiff, undefined);
+  assert.doesNotMatch(JSON.stringify(malformed), /private malformed patch|not a numbered Pi edit diff/u);
+
+  const largeDiff = Array.from({ length: 2_000 }, (_, index) => `${index % 2 === 0 ? "-" : "+"}${index + 1} const value${index} = true;`).join("\n");
+  initial.historyEntries.push({
+    type: "message",
+    id: "edit-result-large",
+    parentId: "edit-result-malformed",
+    timestamp: "2026-07-14T00:00:02.000Z",
+    message: {
+      role: "toolResult",
+      toolCallId: "edit-3",
+      toolName: "edit",
+      content: [{ type: "text", text: "Successfully replaced a large block." }],
+      details: { diff: largeDiff, patch: "private large patch" },
+      isError: false,
+      timestamp: 3,
+    },
+  });
+  const boundedLarge = host.getHistory().find((entry) => entry.entryId === "edit-result-large")?.toolDiff;
+  assert.ok(boundedLarge !== undefined && boundedLarge.length <= 8_000);
+  assert.match(boundedLarge, /\[tool output truncated by Host projection\]$/u);
+
+  const singleLongRow = `+1 ${"x".repeat(20_000)}`;
+  initial.historyEntries.push({
+    type: "message",
+    id: "edit-result-single-long-row",
+    parentId: "edit-result-large",
+    timestamp: "2026-07-14T00:00:03.000Z",
+    message: {
+      role: "toolResult",
+      toolCallId: "edit-4",
+      toolName: "edit",
+      content: [{ type: "text", text: "Successfully replaced one long row." }],
+      details: { diff: singleLongRow },
+      isError: false,
+      timestamp: 4,
+    },
+  });
+  const boundedSingleRow = host.getHistory().find((entry) => entry.entryId === "edit-result-single-long-row")?.toolDiff;
+  assert.ok(boundedSingleRow !== undefined && boundedSingleRow.length <= 8_000);
+  assert.match(boundedSingleRow, /^\+1 x/u);
+  assert.match(boundedSingleRow, /\[tool output truncated by Host projection\]$/u);
+  await host.dispose();
+});
+
 test("Pi runtime host resolves public session targets and forwards new-session parent metadata", async () => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-session-target-"));
   const cwd = join(directory, "cwd");
