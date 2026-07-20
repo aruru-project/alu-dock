@@ -1,4 +1,9 @@
 import { containsBinaryPayload, type InteractionResponse } from "../core/extension-ui-broker.js";
+import {
+  toolPresentationMatchesText,
+  validateBuiltInToolPresentation,
+  type BuiltInToolPresentation,
+} from "../core/tool-result-presentation.js";
 import { MAX_PENDING_QUEUE_ITEMS, MAX_PENDING_QUEUE_TEXT_CHARS } from "../core/managed-instance.js";
 import type {
   CommandReceipt,
@@ -58,6 +63,7 @@ const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "ma
 
 export const TOOLS_EXPANDED_CAPABILITY = "extension_ui.tools-expanded.v1" as const;
 export const GIT_BRANCH_CAPABILITY = "git.branch-footer.v1" as const;
+export const TOOL_RESULT_PRESENTATION_CAPABILITY = "tool-result-presentation.v1" as const;
 
 export const IMPLEMENTED_CAPABILITIES = [
   "catalog.maintenance.v1",
@@ -67,6 +73,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "events.replay-purpose.v1",
   TOOLS_EXPANDED_CAPABILITY,
   GIT_BRANCH_CAPABILITY,
+  TOOL_RESULT_PRESENTATION_CAPABILITY,
   "extension_ui.v1",
   "host.info",
   "instance.catalog",
@@ -266,8 +273,16 @@ export function requiredCapabilities(capability: Capability): string[] {
     "core.v2",
     ...(capability === "events.replay-purpose.v1" ? ["events.follow" as const] : []),
     ...(capabilityProjectsInstanceSnapshot(capability) ? [TOOLS_EXPANDED_CAPABILITY, GIT_BRANCH_CAPABILITY] : []),
+    ...(capabilityProjectsToolResults(capability) ? [TOOL_RESULT_PRESENTATION_CAPABILITY] : []),
     capability,
   ])];
+}
+
+function capabilityProjectsToolResults(capability: Capability): boolean {
+  return capability === "events.follow"
+    || capability === "events.replay-purpose.v1"
+    || capability === "tui.projection.v1"
+    || capability === TOOL_RESULT_PRESENTATION_CAPABILITY;
 }
 
 function capabilityProjectsInstanceSnapshot(capability: Capability): boolean {
@@ -1095,8 +1110,20 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "message.completed": exact(data, ["messageId", "role", "content", "stopReason", "error"]); return { messageId: text("messageId", 128), role: enumeration(data.role, "role", ["user", "assistant", "tool", "system"]), content: parseContent(data.content, `${field}.content`), stopReason: optionalText("stopReason", 128), error: optionalText("error", MAX_MESSAGE) };
     case "tool.started": exact(data, ["toolCallId", "toolName", "args", "omittedFields"]); return toolArgs(data, field, true);
     case "tool.args_updated": exact(data, ["toolCallId", "args", "omittedFields"]); return toolArgs(data, field, false);
-    case "tool.output_updated": exact(data, ["toolCallId", "text"]); return { toolCallId: text("toolCallId", 128), text: boundedString(data.text, `${field}.text`, MAX_TEXT) };
-    case "tool.completed": exact(data, ["toolCallId", "toolName", "text", "isError", "omittedFields"]); return { toolCallId: text("toolCallId", 128), toolName: text("toolName", 256), text: boundedString(data.text, `${field}.text`, MAX_TEXT), isError: boolean(data.isError, "isError"), omittedFields: omitted(data.omittedFields, "omittedFields") };
+    case "tool.output_updated": {
+      exact(data, ["toolCallId", "text", "presentation"]);
+      const resultText = boundedString(data.text, `${field}.text`, MAX_TEXT);
+      const presentation = data.presentation === undefined ? undefined : parseToolPresentation(data.presentation, `${field}.presentation`, undefined, false, resultText);
+      return { toolCallId: text("toolCallId", 128), text: resultText, ...(presentation === undefined ? {} : { presentation }) };
+    }
+    case "tool.completed": {
+      exact(data, ["toolCallId", "toolName", "text", "isError", "presentation", "omittedFields"]);
+      const toolName = text("toolName", 256);
+      const isError = boolean(data.isError, "isError");
+      const resultText = boundedString(data.text, `${field}.text`, MAX_TEXT);
+      const presentation = data.presentation === undefined ? undefined : parseToolPresentation(data.presentation, `${field}.presentation`, toolName, isError, resultText);
+      return { toolCallId: text("toolCallId", 128), toolName, text: resultText, isError, ...(presentation === undefined ? {} : { presentation }), omittedFields: omitted(data.omittedFields, "omittedFields") };
+    }
     case "queue.changed": exact(data, ["steering", "followUp", "total"]); return parsePending(data, field);
     case "queue.cleared": exact(data, ["steering", "followUp", "total", "queueItemIds", "reason"]); return { ...parsePending({ steering: data.steering, followUp: data.followUp, total: data.total }, field), queueItemIds: strings(data.queueItemIds, `${field}.queueItemIds`, MAX_PENDING_QUEUE_ITEMS, 128), reason: enumeration(data.reason, `${field}.reason`, ["dequeued", "abort", "stop", "replacement", "host_draining"]) };
     case "compaction.started": exact(data, ["reason", "operationId"]); return { reason: enumeration(data.reason, "reason", ["manual", "threshold", "overflow"]), operationId: optionalText("operationId", 128) };
@@ -1126,12 +1153,35 @@ function toolArgs(data: Record<string, unknown>, field: string, withName: boolea
   const result = { toolCallId: id(data.toolCallId, `${field}.toolCallId`), args: parseJsonObject(data.args, `${field}.args`), omittedFields: omitted(data.omittedFields, `${field}.omittedFields`) };
   return withName ? { ...result, toolName: string(data.toolName, `${field}.toolName`, 256) } : result;
 }
+function parseToolPresentation(
+  input: unknown,
+  field: string,
+  toolName: string | undefined,
+  isError: boolean,
+  resultText: string,
+): BuiltInToolPresentation {
+  const value = object(input, field);
+  const kind = typeof value.kind === "string" ? value.kind : undefined;
+  const projected = validateBuiltInToolPresentation(toolName ?? kind, value, isError);
+  if (projected === undefined || !toolPresentationMatchesText(projected, resultText, isError)) {
+    throw validation("invalid_response", `${field} is not a valid closed built-in tool presentation`);
+  }
+  return projected;
+}
+
 function parseContent(input: unknown, field: string): ContentBlockDto[] {
   return array(input, field, MAX_JSON_ARRAY).map((item, index) => {
     const block = object(item, `${field}[${index}]`); const type = enumeration(block.type, `${field}[${index}].type`, ["text", "thinking", "tool_call", "tool_result", "omitted"]);
     if (type === "text" || type === "thinking") { exact(block, ["type", "text"]); return { type, text: boundedString(block.text, `${field}[${index}].text`, MAX_TEXT) }; }
     if (type === "tool_call") { exact(block, ["type", "toolCallId", "toolName", "args", "omittedFields"]); return { type, toolCallId: id(block.toolCallId, "toolCallId"), toolName: string(block.toolName, "toolName", 256), args: parseJsonObject(block.args, "args"), omittedFields: omitted(block.omittedFields, "omittedFields") }; }
-    if (type === "tool_result") { exact(block, ["type", "toolCallId", "toolName", "text", "isError", "omittedFields"]); return { type, toolCallId: id(block.toolCallId, "toolCallId"), toolName: string(block.toolName, "toolName", 256), text: boundedString(block.text, "text", MAX_TEXT), isError: boolean(block.isError, "isError"), omittedFields: omitted(block.omittedFields, "omittedFields") }; }
+    if (type === "tool_result") {
+      exact(block, ["type", "toolCallId", "toolName", "text", "isError", "presentation", "omittedFields"]);
+      const toolName = string(block.toolName, "toolName", 256);
+      const isError = boolean(block.isError, "isError");
+      const resultText = boundedString(block.text, "text", MAX_TEXT);
+      const presentation = block.presentation === undefined ? undefined : parseToolPresentation(block.presentation, `${field}[${index}].presentation`, toolName, isError, resultText);
+      return { type, toolCallId: id(block.toolCallId, "toolCallId"), toolName, text: resultText, isError, ...(presentation === undefined ? {} : { presentation }), omittedFields: omitted(block.omittedFields, "omittedFields") };
+    }
     exact(block, ["type", "kind", "description"]); return { type, kind: enumeration(block.kind, "kind", ["image", "binary"]), description: string(block.description, "description", MAX_MESSAGE) };
   });
 }

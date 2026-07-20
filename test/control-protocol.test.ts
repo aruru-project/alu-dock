@@ -133,6 +133,60 @@ test("Git branch snapshot and event projections are closed, bounded, and termina
   assert.throws(() => parseControlEventEnvelope(envelope({ branch: "main", extra: true }), "branch-stream", "epoch-1"), /Unexpected field/);
 });
 
+test("built-in tool presentations are closed, bounded, and failure-safe", () => {
+  const envelope = (toolName: string, isError: boolean, presentation: Record<string, unknown>, resultText?: string) => ({
+    kind: "event", version: 2, requestId: "tool-stream", hostEpoch: "epoch-1",
+    event: validEvent("tool.completed", {
+      toolCallId: `call-${toolName}`,
+      toolName,
+      text: resultText ?? (isError ? "authoritative failure" : typeof presentation.displayDiff === "string" ? presentation.displayDiff : "result"),
+      isError,
+      presentation,
+    }),
+  });
+  const presentations = [
+    { kind: "bash", preview: "tail", completeness: "truncated", notices: [
+      { code: "output_truncated", by: "lines", shown: 2_000, total: 3_000, limit: 2_000 },
+      { code: "full_output_saved", path: "/tmp/pi-bash-safe.log" },
+    ] },
+    { kind: "read", preview: "head", completeness: "truncated", notices: [
+      { code: "continue_with_offset", offset: 2_001 },
+    ] },
+    { kind: "edit", preview: "head-tail", completeness: "complete", notices: [], displayDiff: "-1 old();\n+1 next();" },
+    { kind: "write", preview: "head", completeness: "complete", notices: [] },
+    { kind: "grep", preview: "head", completeness: "truncated", notices: [
+      { code: "limit_reached", unit: "matches", limit: 100 },
+      { code: "lines_truncated", maxChars: 500 },
+    ] },
+    { kind: "find", preview: "head", completeness: "truncated", notices: [
+      { code: "limit_reached", unit: "results", limit: 1_000 },
+    ] },
+    { kind: "ls", preview: "head", completeness: "truncated", notices: [
+      { code: "limit_reached", unit: "entries", limit: 500 },
+    ] },
+  ] as const;
+  for (const presentation of presentations) {
+    const parsed = parseControlEventEnvelope(envelope(presentation.kind, false, presentation as unknown as Record<string, unknown>), "tool-stream", "epoch-1").event;
+    assert.ok(parsed.type === "tool.completed");
+    assert.deepEqual(parsed.data.presentation, presentation);
+  }
+
+  const validBash = presentations[0] as unknown as Record<string, unknown>;
+  assert.throws(() => parseControlEventEnvelope(envelope("bash", false, { ...validBash, privateDetails: true }), "tool-stream", "epoch-1"), /valid closed built-in tool presentation/u);
+  assert.throws(() => parseControlEventEnvelope(envelope("bash", false, { ...validBash, preview: "head" }), "tool-stream", "epoch-1"), /valid closed/u);
+  assert.throws(() => parseControlEventEnvelope(envelope("bash", false, { kind: "bash", preview: "tail", completeness: "truncated", notices: [{ code: "private" }] }), "tool-stream", "epoch-1"), /valid closed/u);
+  assert.throws(() => parseControlEventEnvelope(envelope("grep", false, { kind: "grep", preview: "head", completeness: "truncated", notices: [{ code: "limit_reached", unit: "matches", limit: 1_000_000_001 }] }), "tool-stream", "epoch-1"), /valid closed/u);
+  assert.throws(() => parseControlEventEnvelope(envelope("bash", false, { kind: "bash", preview: "tail", completeness: "truncated", notices: [{ code: "full_output_saved", path: `data:text/plain;base64,${"QQ==".repeat(64)}` }] }), "tool-stream", "epoch-1"), /valid closed/u);
+  const hostMarker = "[tool output truncated by Host projection]";
+  assert.throws(() => parseControlEventEnvelope(envelope("read", false, {
+    kind: "read", preview: "head", completeness: "complete", notices: [],
+  }, `head\n${hostMarker}`), "tool-stream", "epoch-1"), /valid closed/u, "the reserved Host marker cannot claim complete output");
+  assert.throws(() => parseControlEventEnvelope(envelope("read", false, {
+    kind: "read", preview: "head", completeness: "truncated", notices: [{ code: "host_projection_truncated" }],
+  }, "head without marker"), "tool-stream", "epoch-1"), /valid closed/u, "typed Host truncation requires the reserved marker");
+  assert.throws(() => parseControlEventEnvelope(envelope("edit", true, presentations[2] as unknown as Record<string, unknown>), "tool-stream", "epoch-1"), /valid closed/u);
+});
+
 test("V2 requests reject unsupported versions, unknown fields, invalid cursors, and invalid enums", () => {
   assert.throws(
     () => parseControlRequest({ version: 3, requestId: "r1", type: "ping" }),
@@ -220,7 +274,7 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   assert.equal(capabilityForRequest("instance.adopt"), "session.adopt.v1");
   assert.equal(capabilityForRequest("session.inventory"), "session.inventory.v1");
   assert.equal(capabilityForRequest("extension.tools_expanded.set"), "extension_ui.tools-expanded.v1");
-  assert.deepEqual(requiredCapabilities("events.replay-purpose.v1"), ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "events.replay-purpose.v1"]);
+  assert.deepEqual(requiredCapabilities("events.replay-purpose.v1"), ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "tool-result-presentation.v1", "events.replay-purpose.v1"]);
 
   const adopted = parseControlRequest({
     ...base,

@@ -12,6 +12,7 @@ import {
   CONTROL_PROTOCOL_VERSION,
   MAX_INSTANCE_LIST_ITEMS,
   GIT_BRANCH_CAPABILITY,
+  TOOL_RESULT_PRESENTATION_CAPABILITY,
   TOOLS_EXPANDED_CAPABILITY,
   type Capability,
   type ClientHello,
@@ -195,7 +196,7 @@ export class DockClient {
   async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;claimController?:boolean;conversationBootstrap?:boolean}):Promise<EventSubscription>{
     const since=options.since;const helloId=this.createRequestId(),requestId=this.createRequestId();
     const replay = options.conversationBootstrap ? "conversation_bootstrap" : since === undefined ? undefined : "event_log";
-    const streamCapabilities:string[]=options.requireTuiProjection?["core.v2",TOOLS_EXPANDED_CAPABILITY,GIT_BRANCH_CAPABILITY,"events.follow","queue.control.v1","run.abort.v1","tui.projection.v1"]:requiredCapabilities("events.follow");
+    const streamCapabilities:string[]=options.requireTuiProjection?["core.v2",TOOLS_EXPANDED_CAPABILITY,GIT_BRANCH_CAPABILITY,TOOL_RESULT_PRESENTATION_CAPABILITY,"events.follow","queue.control.v1","run.abort.v1","tui.projection.v1"]:requiredCapabilities("events.follow");
     if(replay!==undefined&&!streamCapabilities.includes("events.replay-purpose.v1"))streamCapabilities.push("events.replay-purpose.v1");
     if(options.claimController&&!streamCapabilities.includes("extension_ui.v1"))streamCapabilities.push("extension_ui.v1");
     const request:ControlRequest={kind:"request",version:2,requestId,type:"instance.attach",params:{instanceId,since,follow:true,controller:options.claimController?"claim":"observe",...(replay===undefined?{}:{replay})}};

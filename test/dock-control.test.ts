@@ -120,7 +120,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.tools-expanded.v1", "extension_ui.v1", "git.branch-footer.v1", "host.info", "instance.catalog", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tools.v1", "tui.projection.v1"]);
+  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.tools-expanded.v1", "extension_ui.v1", "git.branch-footer.v1", "host.info", "instance.catalog", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tool-result-presentation.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -139,6 +139,42 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
   assert.equal(created.gitBranch, "main");
   await client.setToolsExpanded(created.id, created.runtimeGeneration, true, "compat-expanded");
   gatedSession?.setGitBranch("feature/live");
+  gatedSession?.emit({
+    type: "tool_execution_start",
+    toolCallId: "legacy-extension",
+    toolName: "custom_extension_tool",
+    args: {
+      presentation: "extension-owned-argument",
+      nested: { presentation: "also-extension-owned" },
+      shapeCollision: { type: "tool_result", toolCallId: "argument-call", toolName: "argument-tool", presentation: "still-extension-owned" },
+    },
+  });
+  gatedSession?.emit({
+    type: "tool_execution_end",
+    toolCallId: "legacy-bash",
+    toolName: "bash",
+    result: {
+      content: [{ type: "text", text: "tail\n\n[Showing lines 2-3 of 3. Full output: /tmp/pi-bash-legacy.log]" }],
+      details: {
+        truncation: { truncated: true, truncatedBy: "lines", outputLines: 2, totalLines: 3, maxLines: 2, maxBytes: 51_200 },
+        fullOutputPath: "/tmp/pi-bash-legacy.log",
+      },
+    },
+    isError: false,
+  });
+  if (gatedSession) {
+    gatedSession.history = [{
+      entryId: "legacy-history-read",
+      role: "toolResult",
+      content: [{ type: "text", text: "historical read" }],
+      toolCallId: "legacy-history-call",
+      toolName: "read",
+      toolPresentation: { kind: "read", preview: "head", completeness: "complete", notices: [] },
+      isError: false,
+    }];
+    gatedSession.emit({ type: "entry_appended" });
+    await new Promise((resolveTurn) => setImmediate(resolveTurn));
+  }
   assert.equal((await client.status(created.id)).gitBranch, "feature/live");
   const legacyAttach = await exchangeRequestAfterHello(
     socketPath,
@@ -152,6 +188,24 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
   assert.ok(Array.isArray(legacyEvents));
   assert.equal(legacyEvents.some((event) => objectValue(event).type === "extension.tools_expanded_changed"), false);
   assert.equal(legacyEvents.some((event) => objectValue(event).type === "git.branch_changed"), false);
+  const legacyStarted = legacyEvents.map(objectValue).find((event) => event.type === "tool.started" && objectValue(event.data).toolCallId === "legacy-extension");
+  assert.deepEqual(objectValue(objectValue(legacyStarted).data).args, {
+    presentation: "extension-owned-argument",
+    nested: { presentation: "also-extension-owned" },
+    shapeCollision: { type: "tool_result", toolCallId: "argument-call", toolName: "argument-tool", presentation: "still-extension-owned" },
+  }, "the built-in capability fence must not rewrite extension arguments named presentation, even when they mimic a result block");
+  const legacyCompleted = legacyEvents.map(objectValue).find((event) => event.type === "tool.completed" && objectValue(event.data).toolCallId === "legacy-bash");
+  assert.equal("presentation" in objectValue(objectValue(legacyCompleted).data), false, "legacy strict clients never receive the typed event field");
+  const legacyHistoryResponse = await exchangeRequestAfterHello(
+    socketPath,
+    ["core.v2"],
+    { kind: "request", version: 2, requestId: "legacy-history", type: "session.history", params: { instanceId: created.id, limit: 20 } },
+  );
+  const legacyHistoryEntries = objectValue(legacyHistoryResponse.result).entries;
+  assert.ok(Array.isArray(legacyHistoryEntries));
+  const legacyHistoryBlock = objectValue(legacyHistoryEntries[0]).content;
+  assert.ok(Array.isArray(legacyHistoryBlock));
+  assert.equal("presentation" in objectValue(legacyHistoryBlock[0]), false, "legacy strict clients never receive the typed history field");
   assert.deepEqual((await client.hostInfo()).diagnostics[0], {
     severity: "info", message: "Development registry is in-memory and non-durable", source: "registry",
   });
@@ -2909,7 +2963,7 @@ test("an LF-truncated control response is reported as recoverable connection los
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-partial-frame-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  const capabilities = ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.catalog", "queue.control.v1", "run.abort.v1", "tui.projection.v1"];
+  const capabilities = ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.catalog", "queue.control.v1", "run.abort.v1", "tool-result-presentation.v1", "tui.projection.v1"];
   const server = createServer((socket) => {
     const decoder = new JsonLineDecoder();
     socket.on("data", (chunk: Buffer) => {
@@ -3221,7 +3275,7 @@ test("stream callbacks follow initial response order and accept one-step replace
             kind: "hello_ack", requestId: "fixed", version: 2,
             host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
             catalogSchemaVersion: 1,
-            capabilities: ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1"],
+            capabilities: ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "tool-result-presentation.v1"],
             limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
           }));
           continue;
@@ -3282,7 +3336,7 @@ test("conversation bootstrap negotiates replay-purpose support before sending at
           kind: "hello_ack", requestId: "fixed", version: 2,
           host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
           catalogSchemaVersion: 1,
-          capabilities: ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "queue.control.v1", "run.abort.v1", "tui.projection.v1"],
+          capabilities: ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "queue.control.v1", "run.abort.v1", "tool-result-presentation.v1", "tui.projection.v1"],
           limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
         }));
       }

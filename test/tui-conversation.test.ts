@@ -151,6 +151,7 @@ test("Alu palette uses semantic local surfaces without taking over the terminal 
   assert.notEqual(truecolor.success("state"), truecolor.error("state"));
   assert.match(truecolor.accent("accent"), /38;2;221;126;158/u);
   assert.match(truecolor.success("success"), /38;2;230;225;242/u);
+  assert.match(truecolor.warning("truncated"), /38;2;246;193;71/u, "tool decision notices use canonical Alu gold");
   assert.match(truecolor.selection("selected"), /48;2;108;132;205/u);
   const nestedSurface = truecolor.toolSurface(`${truecolor.success("✓")} trailing padding`);
   assert.match(nestedSurface, /\u001b\[0m\u001b\[38;2;174;153;168;48;2;27;17;20m trailing padding/u,
@@ -607,6 +608,83 @@ test("bounded tool previews retain content without shrinking across automatic li
   }
 });
 
+test("built-in presentations keep decision-critical tail, limits, continuation, and saved-output notices visible", () => {
+  const renderCompleted = (toolName: string, text: string, presentation: Record<string, unknown>) => {
+    const live = new DockConversation();
+    live.apply(event(1, "tool.completed", { toolCallId: `call-${toolName}`, toolName, isError: false, text, presentation }));
+    const history = new DockConversation();
+    history.applyHistory([{
+      entryId: `history-${toolName}`,
+      role: "tool",
+      content: [{ type: "tool_result", toolCallId: `call-${toolName}`, toolName, text, isError: false, presentation: presentation as never }],
+    }], false);
+    assert.deepEqual(history.render(100), live.render(100), `${toolName} live/history rendering diverged`);
+    return live.render(100).join("\n");
+  };
+
+  const bashText = `${Array.from({ length: 30 }, (_, index) => `bash line ${index + 1}`).join("\n")}\n\n[Showing lines 71-100 of 100. Full output: /tmp/pi-bash-visible.log]`;
+  const bash = renderCompleted("bash", bashText, {
+    kind: "bash", preview: "tail", completeness: "truncated", notices: [
+      { code: "output_truncated", by: "lines", shown: 30, total: 100, limit: 30 },
+      { code: "full_output_saved", path: "/tmp/pi-bash-visible.log" },
+    ],
+  });
+  assert.match(bash, /bash line 30/u);
+  assert.doesNotMatch(bash, /bash line 1\s*$/mu);
+  assert.match(bash, /earlier visual lines · Ctrl\+O details/u);
+  assert.match(bash, /truncated · showing 30 lines of 100/u);
+  assert.match(bash, /full output saved · \/tmp\/pi-bash-visible\.log/u);
+  assert.doesNotMatch(bash, /Showing lines 71-100/u, "raw Pi footer is replaced by one styled semantic notice set");
+
+  const readText = `${Array.from({ length: 15 }, (_, index) => `read line ${index + 1}`).join("\n")}\n\n[Showing lines 1-15 of 40. Use offset=16 to continue.]`;
+  const read = renderCompleted("read", readText, {
+    kind: "read", preview: "head", completeness: "truncated", notices: [{ code: "continue_with_offset", offset: 16 }],
+  });
+  assert.match(read, /read line 1/u);
+  assert.doesNotMatch(read, /read line 15/u);
+  assert.match(read, /continue with read offset=16/u);
+
+  const hostProjectedRead = renderCompleted("read", `${Array.from({ length: 30 }, (_, index) => `projected line ${index + 1}`).join("\n")}\n[tool output truncated by Host projection]`, {
+    kind: "read", preview: "head", completeness: "truncated", notices: [{ code: "host_projection_truncated" }],
+  });
+  assert.match(hostProjectedRead, /projected line 1/u);
+  assert.doesNotMatch(hostProjectedRead, /projected line 30/u, "head preview may fold ordinary tail rows");
+  assert.match(hostProjectedRead, /tool output truncated by Host projection/u, "Host truncation stays outside the foldable content budget");
+
+  const grep = renderCompleted("grep", Array.from({ length: 20 }, (_, index) => `match ${index + 1}`).join("\n"), {
+    kind: "grep", preview: "head", completeness: "truncated", notices: [
+      { code: "limit_reached", unit: "matches", limit: 100 },
+      { code: "lines_truncated", maxChars: 500 },
+    ],
+  });
+  assert.match(grep, /100 matches limit reached/u);
+  assert.match(grep, /use read for full lines/u);
+
+  const find = renderCompleted("find", "a.ts\nb.ts", {
+    kind: "find", preview: "head", completeness: "truncated", notices: [{ code: "limit_reached", unit: "results", limit: 1_000 }],
+  });
+  assert.match(find, /1,000 results limit reached/u);
+  const ls = renderCompleted("ls", "a\nb", {
+    kind: "ls", preview: "head", completeness: "truncated", notices: [{ code: "limit_reached", unit: "entries", limit: 500 }],
+  });
+  assert.match(ls, /500 entries limit reached/u);
+
+  const semanticUpdate = new DockConversation();
+  semanticUpdate.apply(event(1, "tool.started", { toolCallId: "same-output", toolName: "find", args: { path: "." } }));
+  semanticUpdate.apply(event(2, "tool.output_updated", {
+    toolCallId: "same-output", text: "same projected text",
+    presentation: { kind: "find", preview: "head", completeness: "complete", notices: [] },
+  }));
+  assert.doesNotMatch(semanticUpdate.render(100).join("\n"), /results limit reached/u);
+  semanticUpdate.apply(event(3, "tool.output_updated", {
+    toolCallId: "same-output", text: "same projected text",
+    presentation: { kind: "find", preview: "head", completeness: "truncated", notices: [{ code: "limit_reached", unit: "results", limit: 1_000 }] },
+  }));
+  assert.match(semanticUpdate.render(100).join("\n"), /1,000 results limit reached/u, "presentation-only updates are decision data");
+
+  for (const rendered of [bash, read, hostProjectedRead, grep, find, ls]) assert.doesNotMatch(rendered, /full details/u);
+});
+
 test("automatic tool preview contraction does not trigger pi-tui full redraw", async () => {
   const conversation = new DockConversation();
   for (let index = 0; index < 20; index += 1) conversation.addNotice(`settled history ${index}`);
@@ -709,7 +787,7 @@ test("authoritative toolsExpanded updates clear per-tool overrides", () => {
   const preview = conversation.render(80).join("\n");
   assert.match(preview, /authoritative detail 1/u);
   assert.doesNotMatch(preview, /authoritative detail 14/u);
-  assert.match(preview, /visual lines · Ctrl\+O full details/u);
+  assert.match(preview, /visual lines · Ctrl\+O details/u);
 
   conversation.setToolsExpanded(true);
   assert.equal(conversation.areToolsExpanded(), true);
@@ -728,6 +806,20 @@ test("collapsed tool failures expose a safe first-line reason and preserve expan
   assert.doesNotMatch(collapsed, /bash failed/u);
   assert.deepEqual(conversation.toggleLatestToolExpanded(), { expanded: true, name: "bash" });
   assert.match(conversation.render(60).join("\n"), /expanded failure detail/);
+
+  const longBashFailure = new DockConversation();
+  longBashFailure.apply(event(3, "tool.started", { toolCallId: "long-bash-error", toolName: "bash", args: { command: "long-command" } }));
+  longBashFailure.apply(event(4, "tool.completed", {
+    toolCallId: "long-bash-error",
+    toolName: "bash",
+    isError: true,
+    text: `${Array.from({ length: 30 }, (_, index) => `noisy output ${index + 1}`).join("\n")}\n\nCommand exited with code 7`,
+    presentation: { kind: "bash", preview: "tail", completeness: "complete", notices: [] },
+  }));
+  const longFailurePreview = longBashFailure.render(100).join("\n");
+  assert.match(longFailurePreview, /× bash.*Command exited with code 7/u, "terminal failure reason stays in the header even after noisy output");
+  assert.match(longFailurePreview, /noisy output 30/u);
+  assert.doesNotMatch(longFailurePreview, /noisy output 1\s*$/mu);
 
   const structured = new DockConversation();
   structured.apply(event(3, "tool.started", { toolCallId: "json-error", toolName: "subagent", args: { agent: "scout" } }));

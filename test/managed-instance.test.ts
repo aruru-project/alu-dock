@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { projectDisplayEditDiff } from "../src/core/edit-diff-projection.js";
+import { projectBuiltInToolPresentation } from "../src/core/tool-result-presentation.js";
 import { ExtensionUiBroker } from "../src/core/extension-ui-broker.js";
 import {
   InstanceAdmissionPendingError,
@@ -1797,6 +1798,13 @@ test("edit result details become a closed bounded diff surface for live events a
     toolName: "edit",
     text: "-7 oldEmbedded();\n+7 newEmbedded();",
     isError: false,
+    presentation: {
+      kind: "edit",
+      preview: "head-tail",
+      completeness: "complete",
+      notices: [],
+      displayDiff: "-7 oldEmbedded();\n+7 newEmbedded();",
+    },
   }]);
 
   const largeDiff = Array.from({ length: 2_000 }, (_, index) => `${index % 2 === 0 ? "-" : "+"}${index + 1} const value${index} = true;`).join("\n");
@@ -1820,7 +1828,7 @@ test("edit result details become a closed bounded diff surface for live events a
     content: [{ type: "text", text: "Successfully replaced 1 block(s) in src/history.ts." }],
     toolCallId: "edit-history-call",
     toolName: "edit",
-    toolDiff: "-4 oldCall();\n+4 newCall();",
+    toolPresentation: projectBuiltInToolPresentation("edit", "Successfully replaced history.", { diff: "-4 oldCall();\n+4 newCall();" }, false),
     isError: false,
   }, {
     entryId: "edit-history-malformed",
@@ -1828,7 +1836,13 @@ test("edit result details become a closed bounded diff surface for live events a
     content: [{ type: "text", text: "Legacy edit result." }],
     toolCallId: "edit-history-malformed-call",
     toolName: "edit",
-    toolDiff: "+private-data\n[tool output truncated by Host projection]",
+    toolPresentation: {
+      kind: "edit",
+      preview: "head-tail",
+      completeness: "truncated",
+      notices: [{ code: "host_projection_truncated" }],
+      displayDiff: "+private-data\n[tool output truncated by Host projection]",
+    },
     isError: false,
   }, {
     entryId: "edit-history-large",
@@ -1836,7 +1850,7 @@ test("edit result details become a closed bounded diff surface for live events a
     content: [{ type: "text", text: "Successfully replaced a large history block." }],
     toolCallId: "edit-history-large-call",
     toolName: "edit",
-    toolDiff: historyBoundedLargeDiff,
+    toolPresentation: projectBuiltInToolPresentation("edit", "Successfully replaced large history.", { diff: largeDiff }, false),
     isError: false,
   }];
   const historyInstance = createInstance(historySession);
@@ -1847,6 +1861,13 @@ test("edit result details become a closed bounded diff surface for live events a
     toolName: "edit",
     text: "-4 oldCall();\n+4 newCall();",
     isError: false,
+    presentation: {
+      kind: "edit",
+      preview: "head-tail",
+      completeness: "complete",
+      notices: [],
+      displayDiff: "-4 oldCall();\n+4 newCall();",
+    },
   }]);
   assert.deepEqual(history.entries[1]?.content, [{
     type: "tool_result",
@@ -1854,30 +1875,93 @@ test("edit result details become a closed bounded diff surface for live events a
     toolName: "edit",
     text: "Legacy edit result.",
     isError: false,
+    presentation: {
+      kind: "edit",
+      preview: "head-tail",
+      completeness: "complete",
+      notices: [],
+    },
   }]);
   const largeHistoryText = history.entries[2]?.content[0];
   assert.ok(largeHistoryText?.type === "tool_result");
   assert.equal(largeHistoryText.text, largeLive.data.text, "oversized live and reattached edit diffs share the same bounded projection");
 });
 
-test("oversized tool output carries an explicit Host truncation notice without splitting Unicode", () => {
+test("built-in detail projections are identical for live completion and reattached history", async () => {
+  const cases = [
+    {
+      toolName: "bash",
+      content: "tail\n\n[Showing lines 51-100 of 100. Full output: /tmp/pi-bash-parity.log]",
+      details: { truncation: { truncated: true, truncatedBy: "lines", outputLines: 50, totalLines: 100, maxLines: 50, maxBytes: 51_200 }, fullOutputPath: "/tmp/pi-bash-parity.log" },
+    },
+    {
+      toolName: "read",
+      content: "head\n\n[Showing lines 1-20 of 40. Use offset=21 to continue.]",
+      details: { truncation: { truncated: true, truncatedBy: "lines", outputLines: 20, totalLines: 40, maxLines: 20, maxBytes: 51_200 } },
+    },
+    { toolName: "grep", content: "matches\n\n[100 matches limit reached]", details: { matchLimitReached: 100, linesTruncated: true } },
+    { toolName: "find", content: "files\n\n[1000 results limit reached]", details: { resultLimitReached: 1_000 } },
+    { toolName: "ls", content: "entries\n\n[500 entries limit reached]", details: { entryLimitReached: 500 } },
+    { toolName: "write", content: "Successfully wrote file", details: undefined },
+  ] as const;
+
+  const liveSession = new FakeRuntimeSession();
+  const liveInstance = createInstance(liveSession);
+  for (const [index, item] of cases.entries()) {
+    liveSession.emit({
+      type: "tool_execution_end",
+      toolCallId: `live-${index}`,
+      toolName: item.toolName,
+      result: { content: [{ type: "text", text: item.content }], details: item.details },
+      isError: false,
+    });
+  }
+  const live = liveInstance.eventsSince().events.filter((event) => event.type === "tool.completed");
+
+  const historySession = new FakeRuntimeSession();
+  historySession.history = cases.map((item, index) => ({
+    entryId: `history-${index}`,
+    role: "toolResult",
+    content: [{ type: "text", text: item.content }],
+    toolCallId: `live-${index}`,
+    toolName: item.toolName,
+    toolPresentation: projectBuiltInToolPresentation(item.toolName, item.content, item.details, false),
+    isError: false,
+  }));
+  const history = await createInstance(historySession).getHistoryPage(undefined, 200);
+  for (const [index, event] of live.entries()) {
+    assert.ok(event.type === "tool.completed");
+    const block = history.entries[index]?.content[0];
+    assert.ok(block?.type === "tool_result");
+    assert.deepEqual(block.presentation, event.data.presentation, `${cases[index]?.toolName} presentation diverged`);
+    assert.equal(block.text, event.data.text, `${cases[index]?.toolName} text diverged`);
+  }
+});
+
+test("oversized bash output retains the authoritative tail with an explicit Unicode-safe Host notice", () => {
   const session = new FakeRuntimeSession();
   const instance = createInstance(session);
   const notice = "\n[tool output truncated by Host projection]";
-  const prefix = `${"x".repeat(8_000 - notice.length - 1)}😀`;
+  const source = `${"x".repeat(8_000)}😀${"z".repeat(200)}`;
   session.emit({
     type: "tool_execution_end",
     toolCallId: "large-tool",
     toolName: "bash",
-    result: { content: [{ type: "text", text: `${prefix}${"z".repeat(200)}` }] },
+    result: { content: [{ type: "text", text: source }] },
     isError: false,
   });
   const completed = instance.eventsSince().events.find((event) => event.type === "tool.completed");
   assert.ok(completed?.type === "tool.completed");
   assert.ok(completed.data.text.length <= 8_000);
-  assert.match(completed.data.text, /\[tool output truncated by Host projection\]$/u);
-  assert.ok(completed.data.text.endsWith(`x${notice}`), "a boundary surrogate pair is omitted as a whole");
+  assert.match(completed.data.text, /z{200}\n\[tool output truncated by Host projection\]$/u);
   assert.doesNotMatch(completed.data.text, /\uFFFD/u);
+  assert.deepEqual(completed.data.presentation, {
+    kind: "bash",
+    preview: "tail",
+    completeness: "truncated",
+    notices: [{ code: "host_projection_truncated" }],
+  });
+  assert.ok(completed.data.text.endsWith(notice));
 });
 
 test("assistant and tool-call streaming use stable distinct IDs with argument updates", () => {

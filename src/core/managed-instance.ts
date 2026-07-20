@@ -1,6 +1,12 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import { isProjectedDisplayEditDiff, projectDisplayEditDiff } from "./edit-diff-projection.js";
+import {
+  boundToolResultText,
+  projectBuiltInToolPresentation,
+  toolPresentationMatchesText,
+  validateBuiltInToolPresentation,
+  type BuiltInToolPresentation,
+} from "./tool-result-presentation.js";
 import {
   CatalogEffectUnknownError,
   CatalogWriteError,
@@ -3232,17 +3238,27 @@ export class ManagedInstance {
 
       case "tool_execution_update": {
         const toolCallId = boundedRuntimeString(event.toolCallId, 128, "unknown");
+        const toolName = boundedRuntimeString(event.toolName, 256, "unknown");
         if (!this.announcedToolCalls.has(toolCallId)) {
           this.announcedToolCalls.add(toolCallId);
           this.appendEvent("tool.started", {
             toolCallId,
-            toolName: boundedRuntimeString(event.toolName, 256, "unknown"),
+            toolName,
             args: {},
           });
         }
+        const partialResult = recordValue(event.partialResult);
+        const resultProjection = projectRuntimeToolResult(
+          toolName,
+          partialResult?.content,
+          false,
+          partialResult?.presentation,
+          partialResult?.details,
+        );
         this.appendEvent("tool.output_updated", {
           toolCallId,
-          text: projectToolText(recordValue(event.partialResult)?.content),
+          text: resultProjection.text,
+          ...(resultProjection.presentation === undefined ? {} : { presentation: resultProjection.presentation }),
         });
         break;
       }
@@ -3252,12 +3268,20 @@ export class ManagedInstance {
         const toolName = boundedRuntimeString(event.toolName, 256, "unknown");
         const isError = event.isError === true;
         const result = recordValue(event.result);
+        const resultProjection = projectRuntimeToolResult(
+          toolName,
+          result?.content,
+          isError,
+          result?.presentation,
+          result?.details,
+        );
         const projected = projectJsonObject({ content: result?.content });
         this.appendEvent("tool.completed", {
           toolCallId,
           toolName,
           isError,
-          text: projectToolResultText(result?.content, isError, editToolDiff(toolName, result?.details)),
+          text: resultProjection.text,
+          ...(resultProjection.presentation === undefined ? {} : { presentation: resultProjection.presentation }),
           ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
         });
         this.announcedToolCalls.delete(toolCallId);
@@ -3868,12 +3892,14 @@ function projectRuntimeHistoryEntry(entry: RuntimeHistoryEntry): HistoryEntryDto
   if (role === "tool") {
     const toolName = boundedRuntimeString(entry.toolName, 256, "tool");
     const isError = entry.isError === true;
+    const resultProjection = projectRuntimeToolResult(toolName, entry.content, isError, entry.toolPresentation);
     content = [{
       type: "tool_result",
       toolCallId: boundedRuntimeString(entry.toolCallId, 128, `tool-${entryId}`),
       toolName,
-      text: projectToolResultText(entry.content, isError, historyEditToolDiff(toolName, entry.toolDiff)),
+      text: resultProjection.text,
       isError,
+      ...(resultProjection.presentation === undefined ? {} : { presentation: resultProjection.presentation }),
     }];
   } else {
     content = projectContentBlocks(entry.content);
@@ -4065,12 +4091,14 @@ function projectContentBlocks(content: unknown): ContentBlockDto[] {
       const projected = projectJsonObject({ content: block.content });
       const toolName = boundedRuntimeString(block.toolName ?? block.name, 256, "unknown");
       const isError = block.isError === true;
+      const resultProjection = projectRuntimeToolResult(toolName, block.content, isError, block.presentation, block.details);
       candidate = {
         type: "tool_result",
         toolCallId: boundedRuntimeString(block.toolCallId ?? block.id, 128, "unknown"),
         toolName,
-        text: projectToolResultText(block.content, isError, editToolDiff(toolName, block.details)),
+        text: resultProjection.text,
         isError,
+        ...(resultProjection.presentation === undefined ? {} : { presentation: resultProjection.presentation }),
         ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
       };
     } else if (block.type === "image") {
@@ -4235,25 +4263,22 @@ export function projectJsonObject(input: unknown): { value: JsonObject; omittedF
 function escapeJsonPointer(value: string): string { return value.replace(/~/g, "~0").replace(/\//g, "~1"); }
 function isIsoTimestamp(value: string | undefined): value is string { return value !== undefined && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value; }
 function isJsonObject(value: JsonValue | undefined): value is JsonObject { return value !== undefined && value !== null && typeof value === "object" && !Array.isArray(value); }
-function editToolDiff(toolName: string, details: unknown): string | undefined {
-  if ((toolName.toLowerCase().split(/[.:/]/u).at(-1) ?? "") !== "edit") return undefined;
-  const diff = recordValue(details)?.diff;
-  return projectDisplayEditDiff(diff);
-}
-function historyEditToolDiff(toolName: string, diff: unknown): string | undefined {
-  if ((toolName.toLowerCase().split(/[.:/]/u).at(-1) ?? "") !== "edit") return undefined;
-  return typeof diff === "string" && isProjectedDisplayEditDiff(diff) ? diff : undefined;
-}
-function projectToolResultText(content: unknown, isError: boolean, diff: string | undefined): string {
-  if (!isError && diff !== undefined) return projectToolText(diff);
-  return projectToolText(content);
-}
-function projectToolText(content: unknown): string {
-  const text = extractText(content);
-  if (!text || isBinaryText(text)) return "";
-  const limit = 8_000;
-  if (text.length <= limit) return text;
-  const notice = "\n[tool output truncated by Host projection]";
-  const requestedEnd = Math.max(0, limit - notice.length);
-  return `${text.slice(0, unicodeSafeSliceEnd(text, requestedEnd))}${notice}`;
+function projectRuntimeToolResult(
+  toolName: string,
+  content: unknown,
+  isError: boolean,
+  projectedPresentation?: unknown,
+  rawDetails?: unknown,
+): { text: string; presentation?: BuiltInToolPresentation } {
+  const extracted = extractText(content) ?? "";
+  const text = isBinaryText(extracted) ? "" : extracted;
+  const presentation = projectedPresentation === undefined
+    ? projectBuiltInToolPresentation(toolName, text, rawDetails, isError)
+    : validateBuiltInToolPresentation(toolName, projectedPresentation, isError)
+      ?? projectBuiltInToolPresentation(toolName, text, rawDetails, isError);
+  const bounded = boundToolResultText(text, isError, presentation);
+  if (bounded.presentation !== undefined && !toolPresentationMatchesText(bounded.presentation, bounded.text, isError)) {
+    return boundToolResultText(text, isError, projectBuiltInToolPresentation(toolName, text, undefined, isError));
+  }
+  return bounded;
 }

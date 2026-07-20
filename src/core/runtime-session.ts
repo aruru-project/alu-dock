@@ -7,6 +7,7 @@ import type {
   SettingUpdate,
   ToolDto,
 } from "./config-projection.js";
+import type { BuiltInToolPresentation } from "./tool-result-presentation.js";
 
 export interface RuntimeEvent {
   type: string;
@@ -54,8 +55,8 @@ export interface RuntimeHistoryEntry {
   error?: string;
   toolCallId?: string;
   toolName?: string;
-  /** Closed presentation projection of an edit tool result. */
-  toolDiff?: string;
+  /** Closed, typed presentation projection of a stock built-in tool result. */
+  toolPresentation?: BuiltInToolPresentation;
   isError?: boolean;
 }
 

@@ -71,6 +71,7 @@ import {
   parseControlRequest,
   ProtocolValidationError,
   GIT_BRANCH_CAPABILITY,
+  TOOL_RESULT_PRESENTATION_CAPABILITY,
   TOOLS_EXPANDED_CAPABILITY,
 } from "./protocol.js";
 
@@ -543,6 +544,7 @@ export class DockHost {
     const projectionCapabilities={
       toolsExpanded: requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,
       gitBranch: requirements?.has(GIT_BRANCH_CAPABILITY)===true,
+      toolPresentation: requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,
     };
     let initializing=true,pending:DockEvent[]=[]; let initializationOverflow=false; let lastGeneration=instance.runtimeGeneration,lastSent=0; let unsubscribe=()=>{};
     let controller:ControllerClaim|{status:"observing"}=request.params.controller==="observe"?{status:"observing"}:{status:"unavailable"};
@@ -616,7 +618,7 @@ export class DockHost {
     for (const socket of streams) socket.destroy();
   }
 
-  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const requirements=this.connectionRequirements.get(socket);const projected=projectForClient(result,{toolsExpanded:requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,gitBranch:requirements?.has(GIT_BRANCH_CAPABILITY)===true});const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,projected));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
+  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const requirements=this.connectionRequirements.get(socket);const projected=projectForClient(result,{toolsExpanded:requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,gitBranch:requirements?.has(GIT_BRANCH_CAPABILITY)===true,toolPresentation:requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true});const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,projected));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
   private sendErrorAndEnd(socket:Socket,code:string,message:string,requestId:string,details?:JsonObject,retryable=false):void { if(socket.destroyed||socket.writableEnded)return;const response:ControlResponse={kind:"response",version:2,requestId,hostEpoch:this.hostEpoch,ok:false,error:{code,message:truncateMessage(message),retryable,...(details===undefined?{}:{details})}};if(endEnvelope(socket,response)==="too_large")socket.destroy(); }
   private sendHelloError(socket:Socket,requestId:string,code:HelloError["error"]["code"],message:string,details:{hostVersions?:number[];missing?:string[];retryAfterMs?:number}={}):void { if(socket.destroyed||socket.writableEnded)return;const envelope:HelloError={kind:"hello_error",requestId,error:{code,message:truncateMessage(message),...details}};try{socket.end(encodeJsonLine(envelope));}catch{socket.destroy();} }
 }
@@ -745,11 +747,18 @@ function createBoundedEventsResult(projection:AttachProjection,following:boolean
 interface ClientProjectionCapabilities {
   toolsExpanded: boolean;
   gitBranch: boolean;
+  toolPresentation: boolean;
 }
 
-function projectForClient(value: unknown, capabilities: ClientProjectionCapabilities): unknown {
-  if ((capabilities.toolsExpanded && capabilities.gitBranch) || value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map((item) => projectForClient(item, capabilities));
+type ClientProjectionContext = "root" | "generic" | "event" | "tool-event-data" | "message-data" | "history-entry" | "content-block";
+
+function projectForClient(
+  value: unknown,
+  capabilities: ClientProjectionCapabilities,
+  context: ClientProjectionContext = "root",
+): unknown {
+  if ((capabilities.toolsExpanded && capabilities.gitBranch && capabilities.toolPresentation) || value === null || typeof value !== "object") return value;
+  if (Array.isArray(value)) return value.map((item) => projectForClient(item, capabilities, context));
 
   const source = value as Record<string, unknown>;
   const isSnapshot = typeof source.id === "string"
@@ -759,29 +768,54 @@ function projectForClient(value: unknown, capabilities: ClientProjectionCapabili
     && typeof source.eventCursor === "object"
     && source.extensionStatus !== null
     && typeof source.extensionStatus === "object";
-  const isEventPage = Array.isArray(source.events)
+  const isEventPage = context === "root"
+    && Array.isArray(source.events)
     && source.earliest !== null
     && typeof source.earliest === "object"
     && source.latest !== null
     && typeof source.latest === "object";
-  const eventType = typeof source.type === "string" ? source.type : undefined;
+  const isAttachProjection = context === "root"
+    && Array.isArray(source.recentHistory)
+    && typeof source.historyTruncated === "boolean"
+    && source.instance !== null
+    && typeof source.instance === "object";
+  const isHistoryPage = context === "root"
+    && Array.isArray(source.entries)
+    && typeof source.hasEarlier === "boolean"
+    && source.instance !== null
+    && typeof source.instance === "object";
+  const eventType = context === "event" && typeof source.type === "string" ? source.type : undefined;
+  const isToolResultBlock = context === "content-block"
+    && source.type === "tool_result"
+    && typeof source.toolCallId === "string"
+    && typeof source.toolName === "string";
   const projected: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(source)) {
     if (isSnapshot && key === "toolsExpanded" && !capabilities.toolsExpanded) continue;
     if (isSnapshot && key === "gitBranch" && !capabilities.gitBranch) continue;
+    if (key === "presentation" && !capabilities.toolPresentation && (context === "tool-event-data" || isToolResultBlock)) continue;
     if (isEventPage && key === "events" && Array.isArray(child)) {
       projected[key] = child
         .filter((event) => !isUnsupportedProjectionEvent(event, capabilities))
-        .map((event) => projectForClient(event, capabilities));
+        .map((event) => projectForClient(event, capabilities, "event"));
       continue;
     }
     if (eventType === "session.replaced" && key === "data" && !capabilities.gitBranch && child !== null && typeof child === "object" && !Array.isArray(child)) {
       const data = { ...(child as Record<string, unknown>) };
       delete data.gitBranch;
-      projected[key] = projectForClient(data, capabilities);
+      projected[key] = projectForClient(data, capabilities, "generic");
       continue;
     }
-    projected[key] = projectForClient(child, capabilities);
+    let childContext: ClientProjectionContext = "generic";
+    if (context === "root" && key === "page") childContext = "root";
+    if (isAttachProjection && key === "recentHistory") childContext = "history-entry";
+    if (isHistoryPage && key === "entries") childContext = "history-entry";
+    if (context === "event" && key === "data") {
+      if (eventType === "tool.output_updated" || eventType === "tool.completed") childContext = "tool-event-data";
+      if (eventType === "message.completed") childContext = "message-data";
+    }
+    if ((context === "message-data" || context === "history-entry") && key === "content") childContext = "content-block";
+    projected[key] = projectForClient(child, capabilities, childContext);
   }
   return projected;
 }
@@ -795,7 +829,7 @@ function isUnsupportedProjectionEvent(value: unknown, capabilities: ClientProjec
 
 function writeEvent(socket:Socket,requestId:string,hostEpoch:string,event:DockEvent,capabilities:ClientProjectionCapabilities):WriteOutcome {
   if (isUnsupportedProjectionEvent(event, capabilities)) return "written";
-  const projectedEvent=projectForClient(event,capabilities) as DockEvent;
+  const projectedEvent=projectForClient(event,capabilities,"event") as DockEvent;
   const envelope:ControlEventEnvelope={kind:"event",version:2,requestId,hostEpoch,event:projectedEvent};
   return writeEnvelope(socket,envelope);
 }

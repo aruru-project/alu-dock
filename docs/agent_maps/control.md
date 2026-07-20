@@ -50,6 +50,7 @@ DockClient
 | `src/control/ensure-host.ts` | client readiness probe；不得隐式拥有service lifecycle | `ensure-host` |
 | `src/core/catalog.ts` | durable catalog DTO、invariants、typed commit errors | catalog测试组 |
 | `src/core/instance-dto.ts` | snapshots、events、cursors、history、receipts的closed DTO | protocol/runtime/TUI测试组 |
+| `src/core/tool-result-presentation.ts` | stock built-in result details → closed typed presentation、preview direction与bounds | `managed-instance`, `control-protocol`, TUI tests |
 | `src/core/session-inventory.ts` | 无runtime构造的Host-owned persisted-session inventory port | `dock-control` |
 | `src/pi/session-inventory.ts` | Pi JSONL header/name metadata增量索引；cache可重建且不成为session真相源 | `pi-session-inventory`, `dock-control` |
 
@@ -81,7 +82,7 @@ DockClient
 ## 必守边界
 
 - Protocol payload只能包含closed JSON-safe DTO。
-- 每个connection先hello，随后只允许一个request；event follow是该request的streaming结果。新的 attach replay 语义必须先协商 `events.replay-purpose.v1`；省略 replay 保持旧 history-overlay 行为。`toolsExpanded` snapshot field、event与setter由 `extension_ui.tools-expanded.v1` 单独协商；Git branch snapshot/event/replacement bootstrap由 `git.branch-footer.v1` 协商。Host 对未协商的旧V2 client省略对应field并过滤对应event。只有read-only `instance.list`提供一次pre-capability fallback，供staged release检查待替换的旧Host；mutation不降级重试。
+- 每个connection先hello，随后只允许一个request；event follow是该request的streaming结果。新的 attach replay 语义必须先协商 `events.replay-purpose.v1`；省略 replay 保持旧 history-overlay 行为。`toolsExpanded` snapshot field、event与setter由 `extension_ui.tools-expanded.v1` 单独协商；Git branch snapshot/event/replacement bootstrap由 `git.branch-footer.v1` 协商；built-in tool result的typed presentation由 `tool-result-presentation.v1` 协商。Host 对未协商的旧V2 client省略对应field并过滤对应event。只有read-only `instance.list`提供一次pre-capability fallback，供staged release检查待替换的旧Host；mutation不降级重试。
 - Fresh conversation bootstrap 只组合当前 branch history 与 active run 未持久化 tail；显式 events/cursor reconnect 使用 raw event log。
 - Mutations由caller operation ID关联，client不自动retry；本地 detach 可关闭整个 client transport scope，但不得 abort、retry 或接管已发送的 Host mutation。
 - Registry只在required catalog commit后publish instance或success。
@@ -93,7 +94,7 @@ DockClient
 
 ## Bounds 与显式降级
 
-- Protocol V2 单条 JSONL 记录上限是 1 MiB；runtime message/tool JSON 先在 Core 按节点、字段和聚合字节预算投影，超出内容写入 `omittedFields` 或明确的 Host truncation marker，不能把 oversized live event 留成反复断流的 poison event。
+- Protocol V2 单条 JSONL 记录上限是 1 MiB；runtime message/tool JSON 先在 Core 按节点、字段和聚合字节预算投影，超出内容写入 `omittedFields` 或明确的 Host truncation marker，不能把 oversized live event 留成反复断流的 poison event。`tool-result-presentation.v1`只允许`bash/read/edit/write/grep/find/ls`判别联合与最多8条typed notice；路径最多4,096字符、计数最多1,000,000,000，raw/private details与binary/data URI不得进入wire。
 - `projection.completeness.v1` 为 model、tool、resource、diagnostic、command 与 Pi-session list 返回 `total`/`truncated`；新 DockClient 必须协商该能力并在 Work 中提示不完整投影。Host 对未协商该能力的旧客户端保留 legacy result shape，且 operation receipt 永远缓存能力无关的 canonical result。
 - `session.inventory-diagnostics.v1` 区分“确实没有 saved session”与 JSONL root/directory/file 扫描失败；结果带 `incomplete`、bounded diagnostics 和 `diagnosticsTruncated`。Hub/Resume 必须显示该事实，不能把失败说成空 inventory。
 - Attach 初始化期间只保留 1,000 个 handoff event；超过时 Host 返回 `attach_initial_overflow` 与 reconnect 指引，不得无诊断关闭。client initial-callback handoff 的同类溢出使用 `event_handoff_overflow`。

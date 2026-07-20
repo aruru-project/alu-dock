@@ -7,7 +7,13 @@ import {
   type Component,
 } from "@earendil-works/pi-tui";
 
-import { isProjectedDisplayEditDiff } from "../core/edit-diff-projection.js";
+import { TOOL_OUTPUT_TRUNCATION_MARKER, isProjectedDisplayEditDiff } from "../core/edit-diff-projection.js";
+import {
+  isToolPresentationNoticeLine,
+  toolPresentationNoticeText,
+  type BuiltInToolPresentation,
+  type ToolResultNotice,
+} from "../core/tool-result-presentation.js";
 import type { DockEvent, HistoryEntryDto, InstanceSnapshot, JsonObject, JsonValue } from "../core/managed-instance.js";
 import { renderWorkAlu } from "./alu-mascot.js";
 import { knownCompactionFeedback } from "./compaction-feedback.js";
@@ -30,6 +36,7 @@ interface ConversationEntry {
   toolErrorSummary?: string;
   toolArgs?: string;
   toolOutput?: string;
+  toolPresentation?: BuiltInToolPresentation;
   toolOmitted?: string[];
   toolRenderFloor?: { width: number; expanded: boolean; rows: number };
   summaryKind?: "compaction" | "branch";
@@ -50,6 +57,7 @@ interface ToolProjection {
   args?: string;
   summary?: string;
   output?: string;
+  presentation?: BuiltInToolPresentation;
   omitted: string[];
 }
 
@@ -196,6 +204,7 @@ export class DockConversation implements Component {
         projected.args = formatToolArgs(name, event.data.args, MAX_TOOL_ARGS);
         projected.summary = summarizeToolArgs(name, event.data.args);
         projected.omitted = [...new Set([...projected.omitted, ...(event.data.omittedFields ?? [])])];
+        projected.presentation = undefined;
         projected.entry.complete = false;
         projected.entry.diffText = undefined;
         this.tools.set(callId, projected);
@@ -223,8 +232,10 @@ export class DockConversation implements Component {
         const tool = this.tools.get(callId);
         if (!tool) break;
         const output = truncate(stringData(event, "text") ?? "", MAX_TOOL_OUTPUT);
-        if (tool.output === output) break;
+        const presentation = event.data.presentation?.kind === toolBaseName(tool.name) ? event.data.presentation : undefined;
+        if (tool.output === output && tool.presentation === presentation) break;
         tool.output = output;
+        tool.presentation = presentation;
         this.updateTool(tool, "running");
         break;
       }
@@ -240,6 +251,7 @@ export class DockConversation implements Component {
         };
         tool.name = name;
         tool.output = truncate(stringData(event, "text") ?? "", MAX_TOOL_OUTPUT);
+        tool.presentation = event.data.presentation?.kind === toolBaseName(name) ? event.data.presentation : undefined;
         tool.omitted = [...new Set([...tool.omitted, ...(event.data.omittedFields ?? [])])];
         const isError = event.data.isError === true;
         tool.entry.complete = true;
@@ -485,9 +497,14 @@ export class DockConversation implements Component {
         }
         if (entry.diffText) {
           content.push(paint.faint(entry.toolState === "running" ? "changes" : "result"));
-          content.push(...renderDockDiff(entry.diffText).flatMap((line) => renderToolDetailLine(line, width)));
-        } else if (entry.toolOutput) {
-          content.push(paint.faint("result"), ...renderToolDetails(entry.toolOutput, width));
+          const diff = removeProjectedNoticeLines(entry.diffText, entry.toolPresentation);
+          content.push(...renderDockDiff(diff).flatMap((line) => renderToolDetailLine(line, width)));
+          content.push(...renderToolPresentationNotices(entry.toolPresentation, width));
+        } else if (entry.toolOutput || (entry.toolPresentation?.notices.length ?? 0) > 0) {
+          content.push(paint.faint("result"));
+          const output = removeProjectedNoticeLines(entry.toolOutput ?? "", entry.toolPresentation);
+          if (output.length > 0) content.push(...renderToolDetails(output, width));
+          content.push(...renderToolPresentationNotices(entry.toolPresentation, width));
         }
       } else {
         content.push(...renderToolPreview(entry, width));
@@ -600,6 +617,7 @@ export class DockConversation implements Component {
           })();
           tool.name = block.toolName;
           tool.output = truncate(safeTerminalText(block.text), MAX_TOOL_OUTPUT);
+          tool.presentation = block.presentation?.kind === toolBaseName(block.toolName) ? block.presentation : undefined;
           tool.omitted = [...new Set([...tool.omitted, ...(block.omittedFields ?? [])])];
           projectToolState(tool, block.isError ? "failed" : "done");
           projectedTools.delete(block.toolCallId);
@@ -624,6 +642,7 @@ export class DockConversation implements Component {
       && tool.entry.toolState === state
       && tool.entry.toolSummary === tool.summary
       && tool.entry.toolErrorSummary === (state === "failed" ? summarizeToolFailure(tool.output) : undefined)
+      && toolPresentationsEqual(tool.entry.toolPresentation, tool.presentation)
     ) return;
     tool.entry.text = text;
     tool.entry.toolName = tool.name;
@@ -632,8 +651,11 @@ export class DockConversation implements Component {
     tool.entry.toolErrorSummary = state === "failed" ? summarizeToolFailure(tool.output) : undefined;
     tool.entry.toolArgs = tool.args === undefined ? undefined : safeTerminalText(tool.args);
     tool.entry.toolOutput = tool.output === undefined ? undefined : truncate(safeTerminalText(tool.output), MAX_TOOL_OUTPUT);
+    tool.entry.toolPresentation = tool.presentation;
     tool.entry.toolOmitted = tool.omitted.map(safeTerminalLine);
-    tool.entry.diffText = state !== "failed" && looksLikeToolDiff(tool.name, tool.output) ? tool.output : undefined;
+    tool.entry.diffText = state !== "failed"
+      ? tool.presentation?.displayDiff ?? (looksLikeToolDiff(tool.name, tool.output) ? tool.output : undefined)
+      : undefined;
     this.touchEntry(tool.entry);
     this.markOutputChanged();
   }
@@ -705,8 +727,11 @@ function projectToolState(tool: ToolProjection, state: ToolState): void {
   tool.entry.toolErrorSummary = state === "failed" ? summarizeToolFailure(tool.output) : undefined;
   tool.entry.toolArgs = tool.args === undefined ? undefined : safeTerminalText(tool.args);
   tool.entry.toolOutput = tool.output === undefined ? undefined : truncate(safeTerminalText(tool.output), MAX_TOOL_OUTPUT);
+  tool.entry.toolPresentation = tool.presentation;
   tool.entry.toolOmitted = tool.omitted.map(safeTerminalLine);
-  tool.entry.diffText = state !== "failed" && looksLikeToolDiff(tool.name, tool.output) ? tool.output : undefined;
+  tool.entry.diffText = state !== "failed"
+    ? tool.presentation?.displayDiff ?? (looksLikeToolDiff(tool.name, tool.output) ? tool.output : undefined)
+    : undefined;
   tool.entry.renderRevision += 1;
   tool.entry.renderCache = undefined;
 }
@@ -846,7 +871,10 @@ function renderToolHeader(entry: ConversationEntry, width: number): string {
 
 function renderToolDetails(text: string, width: number): string[] {
   if (text.length === 0) return [];
-  return text.split("\n").flatMap((sourceLine) => renderToolDetailLine(sourceLine || " ", width));
+  return text.split("\n").flatMap((sourceLine) => {
+    const line = sourceLine || " ";
+    return renderToolDetailLine(isToolPresentationNoticeLine(line) ? paint.warning(line) : line, width);
+  });
 }
 
 function renderToolDetailLine(line: string, width: number): string[] {
@@ -859,26 +887,52 @@ function renderToolPreview(entry: ConversationEntry, width: number): string[] {
   if (entry.toolOmitted && entry.toolOmitted.length > 0) {
     lines.push(paint.warning(`omitted: ${entry.toolOmitted.join(", ")}`));
   }
-  const output = entry.toolOutput?.trim();
-  if (!output) return lines;
-
+  const output = entry.toolOutput?.trim() ?? "";
   const toolName = toolBaseName(entry.toolName ?? "tool");
-  if (!entry.diffText && !KNOWN_PREVIEW_TOOLS.has(toolName) && looksLikeStructuredJson(output)) {
+  if (!entry.diffText && !entry.toolPresentation && !KNOWN_PREVIEW_TOOLS.has(toolName) && looksLikeStructuredJson(output)) {
     const summary = entry.toolState === "failed"
-      ? ["structured error result · Ctrl+O full details"]
-      : summarizeStructuredToolResult(output) ?? ["structured result truncated or unavailable · Ctrl+O full details"];
+      ? ["structured error result · Ctrl+O details"]
+      : summarizeStructuredToolResult(output) ?? ["structured result truncated or unavailable · Ctrl+O details"];
     lines.push(...summary.map((line) => `  ${paint.muted(line)}`));
     return lines;
   }
 
   const bodyWidth = Math.max(1, width - 4);
-  const styledSource = entry.diffText ? renderDockDiff(entry.diffText) : output.split("\n");
-  const visualRows = styledSource.flatMap((line) => wrapTextWithAnsi(line || " ", bodyWidth));
-  const budget = toolPreviewBudget(toolName);
-  const mode = toolName === "bash" ? "tail" : entry.diffText ? "head-tail" : "head";
-  const preview = selectToolPreviewRows(visualRows, budget, mode);
-  lines.push(...preview.map((line) => `  ${line}`));
+  const source = entry.diffText ?? output;
+  const body = removeProjectedNoticeLines(source, entry.toolPresentation);
+  if (body.length > 0) {
+    const styledSource = entry.diffText ? renderDockDiff(body) : body.split("\n");
+    const visualRows = styledSource.flatMap((line) => wrapTextWithAnsi(line || " ", bodyWidth));
+    const budget = toolPreviewBudget(toolName);
+    const mode = entry.toolPresentation?.preview ?? (toolName === "bash" ? "tail" : entry.diffText ? "head-tail" : "head");
+    const preview = selectToolPreviewRows(visualRows, budget, mode);
+    lines.push(...preview.map((line) => `  ${line}`));
+  }
+  lines.push(...renderToolPresentationNotices(entry.toolPresentation, width));
   return lines;
+}
+
+function removeProjectedNoticeLines(text: string, presentation: BuiltInToolPresentation | undefined): string {
+  if (text.length === 0 || presentation === undefined || presentation.notices.length === 0) return text;
+  const lines = text.split("\n").filter((line) => line.trim() !== TOOL_OUTPUT_TRUNCATION_MARKER);
+  while (lines.at(-1)?.trim() === "") lines.pop();
+  while (lines.length > 0 && isToolPresentationNoticeLine(lines.at(-1) ?? "")) {
+    lines.pop();
+    while (lines.at(-1)?.trim() === "") lines.pop();
+  }
+  return lines.join("\n");
+}
+
+function renderToolPresentationNotices(
+  presentation: BuiltInToolPresentation | undefined,
+  width: number,
+): string[] {
+  if (presentation === undefined || presentation.notices.length === 0) return [];
+  return presentation.notices.flatMap((notice) => renderToolPresentationNotice(notice, width));
+}
+
+function renderToolPresentationNotice(notice: ToolResultNotice, width: number): string[] {
+  return renderToolDetailLine(paint.warning(`! ${toolPresentationNoticeText(notice)}`), width);
 }
 
 const KNOWN_PREVIEW_TOOLS = new Set(["bash", "read", "write", "edit", "grep", "find", "ls"]);
@@ -900,7 +954,7 @@ function selectToolPreviewRows(
   if (rows.length <= budget) return [...rows];
   const visibleBudget = Math.max(1, budget);
   const hidden = rows.length - visibleBudget;
-  const marker = paint.faint(`… ${hidden} ${mode === "tail" ? "earlier" : "more"} visual lines · Ctrl+O full details`);
+  const marker = paint.faint(`… ${hidden} ${mode === "tail" ? "earlier" : "more"} visual lines · Ctrl+O details`);
   if (mode === "tail") return [marker, ...rows.slice(-visibleBudget)];
   if (mode === "head-tail") {
     const head = Math.ceil(visibleBudget / 2);
@@ -919,8 +973,8 @@ function summarizeStructuredToolResult(text: string): string[] | undefined {
   if (!looksLikeStructuredJson(text)) return undefined;
   try {
     const parsed: unknown = JSON.parse(text);
-    if (Array.isArray(parsed)) return [`structured result · ${parsed.length} items · Ctrl+O full details`];
-    if (parsed === null || typeof parsed !== "object") return ["structured result · Ctrl+O full details"];
+    if (Array.isArray(parsed)) return [`structured result · ${parsed.length} items · Ctrl+O details`];
+    if (parsed === null || typeof parsed !== "object") return ["structured result · Ctrl+O details"];
     const record = parsed as Record<string, unknown>;
     const parts: string[] = [];
     if (record.ok === true) parts.push("ok");
@@ -936,7 +990,7 @@ function summarizeStructuredToolResult(text: string): string[] | undefined {
       if (value) parts.push(`${key} ${normalizeToolSummaryPart(value)}`);
     }
     if (parts.length === 0) parts.push("structured result");
-    return [`${parts.slice(0, 4).join(" · ")} · Ctrl+O full details`];
+    return [`${parts.slice(0, 4).join(" · ")} · Ctrl+O details`];
   } catch {
     return undefined;
   }
@@ -1254,9 +1308,11 @@ function summarizeToolFailure(output: string | undefined): string | undefined {
   } catch {
     candidate = looksLikeStructuredJson(trimmed) ? "structured error result" : trimmed;
   }
-  const firstLine = candidate?.split("\n").map((line) => line.trim()).find((line) => line.length > 0);
-  if (!firstLine) return undefined;
-  return truncateToWidth(normalizeToolSummaryPart(firstLine), MAX_TOOL_SUMMARY);
+  const candidates = candidate?.split("\n").map((line) => line.trim()).filter((line) => line.length > 0) ?? [];
+  const explicitReason = [...candidates].reverse().find((line) => /^(?:command (?:exited|timed out|aborted)|operation aborted|error\b|failed\b|permission denied\b)/iu.test(line));
+  const summary = explicitReason ?? candidates.find((line) => !isToolPresentationNoticeLine(line));
+  if (!summary) return undefined;
+  return truncateToWidth(normalizeToolSummaryPart(summary), MAX_TOOL_SUMMARY);
 }
 
 function failureTextFromJson(value: unknown): string | undefined {
@@ -1313,6 +1369,10 @@ function safeTerminalLine(text: string): string {
 
 function truncate(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, limit)}…`;
+}
+
+function toolPresentationsEqual(left: BuiltInToolPresentation | undefined, right: BuiltInToolPresentation | undefined): boolean {
+  return left === right || (left !== undefined && right !== undefined && JSON.stringify(left) === JSON.stringify(right));
 }
 
 function stringArraysEqual(left: readonly string[], right: readonly string[]): boolean {

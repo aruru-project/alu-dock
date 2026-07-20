@@ -1,5 +1,6 @@
 import type { DiagnosticDto, ResourceDto, SettingValueMap } from "./config-projection.js";
 import type { RuntimeSessionMetrics, RuntimeThinkingLevel } from "./runtime-session.js";
+import type { BuiltInToolPresentation } from "./tool-result-presentation.js";
 
 export type InstanceLifecycle = "active" | "stopping" | "stopped" | "host_lost" | "runtime_error";
 export type InstanceExecution = "idle" | "running" | "failed" | "unavailable";
@@ -23,7 +24,7 @@ export type ContentBlockDto =
   | { type: "text"; text: string }
   | { type: "thinking"; text: string }
   | { type: "tool_call"; toolCallId: string; toolName: string; args: JsonObject; omittedFields?: string[] }
-  | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; omittedFields?: string[] }
+  | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; presentation?: BuiltInToolPresentation; omittedFields?: string[] }
   | { type: "omitted"; kind: "image" | "binary"; description: string };
 
 export const MAX_PENDING_QUEUE_ITEMS = 64;
@@ -117,8 +118,8 @@ export interface EventDataMap {
   "message.completed": { messageId: string; role: "user" | "assistant" | "tool" | "system"; content: ContentBlockDto[]; stopReason?: string; error?: string };
   "tool.started": { toolCallId: string; toolName: string; args: JsonObject; omittedFields?: string[] };
   "tool.args_updated": { toolCallId: string; args: JsonObject; omittedFields?: string[] };
-  "tool.output_updated": { toolCallId: string; text: string };
-  "tool.completed": { toolCallId: string; toolName: string; text: string; isError: boolean; omittedFields?: string[] };
+  "tool.output_updated": { toolCallId: string; text: string; presentation?: BuiltInToolPresentation };
+  "tool.completed": { toolCallId: string; toolName: string; text: string; isError: boolean; presentation?: BuiltInToolPresentation; omittedFields?: string[] };
   "queue.changed": PendingDto;
   "queue.cleared": PendingDto & { queueItemIds: string[]; reason: "dequeued" | "abort" | "stop" | "replacement" | "host_draining" };
   "compaction.started": { reason: "manual" | "threshold" | "overflow"; operationId?: string };

@@ -36,6 +36,7 @@ Pi runtime event
 | `src/core/instance-dto.ts` | closed instance/history/tree/event/receipt DTO与bounds | `managed-instance`, `control-protocol`, TUI tests |
 | `src/core/config-projection.ts` | settings/tools/resources/commands metadata合同 | `managed-instance`, `pi-runtime-host` |
 | `src/core/runtime-session.ts` | Pi无关RuntimeSession port与typed runtime errors | runtime测试组 |
+| `src/core/tool-result-presentation.ts` | built-in details白名单、closed presentation与head/tail hard bound | runtime/protocol/TUI测试组 |
 | `src/core/managed-instance.ts` | lifecycle、admission、queue、mutation transaction、generation、event/state唯一owner | `managed-instance` |
 | `src/core/session-tree.ts` | runtime tree validation/projection、binary safety、generation-bound revision/pagination | `session-tree`, Pi tree tests |
 | `src/core/extension-ui-broker.ts` | bounded text interaction、controller lease、timeout/cancel/tombstone | `extension-ui-broker` |
@@ -145,7 +146,8 @@ ManagedInstance replacement intent
 ## Projection bounds 与恢复语义
 
 - Config inventories必须先确定canonical membership，再由adapter/Core按最多2,000项及control-envelope字节预算裁切；高基数tool registry扫描完整集合计数，但只用bounded max-heap保留canonical prefix，不复制/排序全catalog。`total`/`truncated`或resource/diagnostic独立 completeness metadata必须一路传到Protocol/TUI；adapter若先裁切，Core不能二次裁切后声称完整。
-- Runtime structured JSON 使用depth 8、object key 100、array item 200、2,000 projected nodes、256 KiB aggregate预算和最多200条omitted paths；一条completed message再受512 KiB content预算。Tool text超过8,000字符时保留完整Unicode边界并附 `[tool output truncated by Host projection]`，而不是只有不可解释的省略号。Built-in `edit`成功结果从runtime details只提取通过Pi numbered-row grammar验证的bounded display diff进入closed tool text，patch与其他private details不得过边界；失败结果保留原error text。Pi history adapter只保留同一closed `toolDiff`，保证reattach与live一致。
+- Runtime structured JSON 使用depth 8、object key 100、array item 200、2,000 projected nodes、256 KiB aggregate预算和最多200条omitted paths；一条completed message再受512 KiB content预算。Tool text超过8,000字符时保留完整Unicode边界并附 `[tool output truncated by Host projection]`，而不是只有不可解释的省略号；`bash`保留authoritative tail，失败保留head+tail，其余built-in保留head。
+- `bash/read/edit/write/grep/find/ls`使用统一`BuiltInToolPresentation`判别联合：只投影preview direction、complete/truncated、bounded truncation/limit/continuation/full-output notices与成功`edit`的display diff。Pi adapter在runtime event与history边界删除raw details；`patch`、`firstChangedLine`、truncation内的重复content、unknown/private字段与binary/data URI不得进入Core/Protocol。失败结果始终保留authoritative error text，不采用success diff。live与reattach history使用同一projection并由Core再次验证。
 - Admission catalog commit期间的runtime handoff保留最新1,000-event tail；发生overflow必须发布显式extension error并刷新authoritative history/metrics，不能继续声称事件流完整。涉及该路径的改动必须验证最终queue/run状态，而不只验证错误字符串。
 - Session metadata inventory逐root/directory/file报告bounded scan diagnostics；JSONL仍是authoritative，cache write/load失败不能把cache升级为真相源。
 - Extension widget仍最多200行、每行8,000字符，同时受256,000字符aggregate预算；超限整个widget拒绝并发布`extension.error`，不静默显示前缀。

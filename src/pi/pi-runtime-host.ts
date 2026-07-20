@@ -22,7 +22,7 @@ import {
   type SourceInfo,
 } from "@earendil-works/pi-coding-agent";
 
-import { projectDisplayEditDiff } from "../core/edit-diff-projection.js";
+import { projectBuiltInToolPresentation } from "../core/tool-result-presentation.js";
 import type { ExtensionUiBroker } from "../core/extension-ui-broker.js";
 import {
   RuntimeCompactionKnownFailureError,
@@ -726,7 +726,7 @@ export class PiRuntimeHost implements RuntimeSession {
     const binding: Binding = { token, session, services: this.options.runtime.services, unsubscribe: () => {}, buffered: [], bufferEvents: true };
     binding.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
       if (!token.active) return;
-      const projected = event as unknown as RuntimeEvent;
+      const projected = projectAgentSessionEvent(event);
       if (this.active === binding && !binding.bufferEvents) this.publish(projected);
       else binding.buffered.push(projected);
     });
@@ -863,10 +863,73 @@ function safeRequiredText(value: unknown, limit: number, fallback: string): stri
   return safeOptionalText(value, limit) ?? fallback;
 }
 
-function projectEditToolDiff(toolName: unknown, details: unknown): string | undefined {
-  if (typeof toolName !== "string" || (toolName.toLowerCase().split(/[.:/]/u).at(-1) ?? "") !== "edit") return undefined;
-  if (details === null || typeof details !== "object" || Array.isArray(details)) return undefined;
-  return projectDisplayEditDiff((details as Record<string, unknown>).diff);
+function projectAgentSessionEvent(event: AgentSessionEvent): RuntimeEvent {
+  const source = event as unknown as Record<string, unknown>;
+  if (source.type === "tool_execution_end") {
+    const result = isRecord(source.result) ? source.result : undefined;
+    const toolName = typeof source.toolName === "string" ? source.toolName : undefined;
+    const isError = source.isError === true;
+    const presentation = projectBuiltInToolPresentation(toolName, toolResultText(result?.content), result?.details, isError);
+    return {
+      ...source,
+      result: {
+        content: result?.content,
+        ...(presentation === undefined ? {} : { presentation }),
+      },
+    } as unknown as RuntimeEvent;
+  }
+  if (source.type === "tool_execution_update") {
+    const partialResult = isRecord(source.partialResult) ? source.partialResult : undefined;
+    const toolName = typeof source.toolName === "string" ? source.toolName : undefined;
+    const presentation = projectBuiltInToolPresentation(toolName, toolResultText(partialResult?.content), partialResult?.details, false);
+    return {
+      ...source,
+      partialResult: {
+        content: partialResult?.content,
+        ...(presentation === undefined ? {} : { presentation }),
+      },
+    } as unknown as RuntimeEvent;
+  }
+  if (source.type === "message_end" && isRecord(source.message)) {
+    return { ...source, message: projectRuntimeMessage(source.message) } as unknown as RuntimeEvent;
+  }
+  return source as RuntimeEvent;
+}
+
+function projectRuntimeMessage(message: Record<string, unknown>): Record<string, unknown> {
+  const projected = { ...message };
+  const role = typeof message.role === "string" ? message.role : undefined;
+  if (role === "toolResult") {
+    const toolName = typeof message.toolName === "string" ? message.toolName : undefined;
+    const isError = message.isError === true;
+    const presentation = projectBuiltInToolPresentation(toolName, toolResultText(message.content), message.details, isError);
+    delete projected.details;
+    if (presentation !== undefined) projected.presentation = presentation;
+  }
+  if (Array.isArray(message.content)) {
+    projected.content = message.content.map((item) => {
+      if (!isRecord(item) || (item.type !== "toolResult" && item.type !== "tool_result")) return item;
+      const block = { ...item };
+      const toolName = typeof item.toolName === "string" ? item.toolName : typeof item.name === "string" ? item.name : undefined;
+      const isError = item.isError === true;
+      const presentation = projectBuiltInToolPresentation(toolName, toolResultText(item.content), item.details, isError);
+      delete block.details;
+      if (presentation !== undefined) block.presentation = presentation;
+      return block;
+    });
+  }
+  return projected;
+}
+
+function toolResultText(content: unknown): string | undefined {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return undefined;
+  const parts: string[] = [];
+  for (const item of content.slice(0, 200)) {
+    if (!isRecord(item) || item.type !== "text" || typeof item.text !== "string") continue;
+    parts.push(item.text);
+  }
+  return parts.length > 0 ? parts.join("") : undefined;
 }
 
 function projectHistoryEntry(entry: SessionEntry): RuntimeHistoryEntry | undefined {
@@ -880,7 +943,10 @@ function projectHistoryEntry(entry: SessionEntry): RuntimeHistoryEntry | undefin
     const role = typeof message.role === "string" ? message.role : "system";
     if (role === "custom" && message.display === false) return undefined;
     const toolName = typeof message.toolName === "string" ? message.toolName : undefined;
-    const toolDiff = role === "toolResult" ? projectEditToolDiff(toolName, message.details) : undefined;
+    const isError = message.isError === true;
+    const toolPresentation = role === "toolResult"
+      ? projectBuiltInToolPresentation(toolName, toolResultText(message.content), message.details, isError)
+      : undefined;
     let content: unknown = message.content;
     if (role === "bashExecution") {
       const command = typeof message.command === "string" ? message.command : "";
@@ -899,7 +965,7 @@ function projectHistoryEntry(entry: SessionEntry): RuntimeHistoryEntry | undefin
       ...(typeof message.errorMessage === "string" ? { error: message.errorMessage } : {}),
       ...(typeof message.toolCallId === "string" ? { toolCallId: message.toolCallId } : {}),
       ...(toolName === undefined ? {} : { toolName }),
-      ...(toolDiff === undefined ? {} : { toolDiff }),
+      ...(toolPresentation === undefined ? {} : { toolPresentation }),
       ...(typeof message.isError === "boolean" ? { isError: message.isError } : {}),
     };
   }
