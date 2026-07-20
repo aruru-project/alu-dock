@@ -88,7 +88,7 @@ Warning必须说明用户影响和可执行动作；closed Host projection本身
 - `src/tui/alu-palette.ts` 是 mascot 与 Work 共享的唯一 canonical palette：`#69424e`、`#976269`、`#f6c147`、`#f4d8ce`、`#6c84cd`、`#dd7e9e`、`#e6e1f2`。原稿与产品决定见 card #202；蓝色只允许偏紫/偏靛方向。
 - 禁止把 cyan、teal、turquoise、emerald、青绿或霓虹科技蓝作为 accent、success、selection 或默认交互色；不得以常见 dark-dashboard/Tailwind 风格代替阿露身份。成功状态优先由 `✓`、文案和结构表达。
 - `theme.ts` 只能复用或从 canonical palette 派生前景、局部 surface 与降级色；不得自行维护第二套品牌色。终端背景由用户拥有，不做全屏背景接管。
-- 对齐 stock Pi 的对象是 conversation 的角色层级、分组、间距、内容优先与展开/折叠语义，不是 Pi 的颜色。compaction、thinking、assistant、tool invocation/result 必须一眼可区分，collapsed 也必须保留语义，禁止统一压成“图标 + done + 一行摘要 + 快捷键”的遥测日志。
+- 对齐 stock Pi 的对象是 conversation 的角色层级、分组、间距、内容优先与展开/折叠语义，不是 Pi 的颜色。User message 使用Pi式全宽Box、`outputPad`横向padding、上下各一行padding与Markdown行内语义，但局部背景只用canonical pink派生的低亮暖粉。compaction、thinking、assistant、tool invocation/result 必须一眼可区分；默认tool是有界call/result preview而非“图标 + done + 一行摘要 + 快捷键”的遥测日志，Ctrl+O仍是Host-authoritative全局full detail，Alt+O仍是本地detail folding。
 - 新增颜色、改变品牌主次关系或采用新的全局视觉风格前，必须先取得用户明确确认；80×24、120×40、ANSI 16/256、TrueColor 与 `NO_COLOR` 都要保持同一语义层级。
 
 ## 常见修改路由
@@ -109,11 +109,11 @@ Warning必须说明用户影响和可执行动作；closed Host projection本身
 ## 交互硬约束
 
 - Hub 独占一次 alternate screen 生命周期；只有可见 Hub menu 启用成对的1000/1006 tracking，滚轮每次只移动一个选项，左键只激活真实可见item。Leave、转入Work、signal与异常路径必须先关闭tracking再恢复main screen。
-- Session Work 始终使用可流动的main buffer与terminal-native drag/selection/scrollback，不启用1000/1006或alternate screen，也没有Alt+M、`/mouse`模式；Work导航不得用清空terminal scrollback的force redraw。
+- Session Work 始终使用可流动的main buffer与terminal-native drag/selection/scrollback，不启用1000/1006或alternate screen，也没有Alt+M、`/mouse`模式；Work导航不得用清空terminal scrollback的force redraw。共享Pi setting中的`clearOnShrink`不改变这个合同：Work client始终将pi-tui clear-on-shrink关闭，普通render不得输出`ESC[3J`。
 - detach、stop、signal和异常退出都恢复terminal mode；Ctrl+D 是不等待长 Host mutation 的本地最高优先级 detach。
 - Work overlay 统一使用有边界的 modal frame 与栈式焦点恢复；picker/text/editor child在每次render时从当前terminal rows取得完整内容预算，resize后立即重算，先保留selection/footer再裁切body/input viewport。80×24时80% overlay最多19行（17 child rows + 2 frame rows）。固定动作不用 searchable picker。Tree 的 Branch action 保持原 Tree surface 挂载，Esc 返回时保留 filter/search/fold/selection。
 - Work TUI不持有Pi对象，不读取session JSONL，也不从client shell轮询Git；只通过DockClient和closed DTO/event。Footer workspace context使用Host协商的`git.branch-footer.v1`投影：repository显示`cwd (branch)`、detached HEAD显示`cwd (detached)`、非repository只显示cwd。Fresh attach 的对话真相是当前 branch history，不把旧 lifecycle/navigation replay 投影为 conversation；无command ID的`runtime-initiated` active run仍恢复未完成tool/message tail。`display:false` custom control message永不成为conversation。
-- 当前branch effective history必须在进入Work时跨内部200-entry页完整drain，paging只属于传输获取，UI不暴露page/anchor/paused状态。`DockConversation`按stock Pi方式作为flowing chat container进入terminal scrollback；历史、coherent attach bootstrap与加载期间live events按内容/cursor去重且恰好投影一次。长历史、expanded tools与多次compaction仍须保持composer/footer响应。
+- 当前branch effective history必须在进入Work时跨内部200-entry页完整drain，paging只属于传输获取，UI不暴露page/anchor/paused状态。`DockConversation`按stock Pi方式作为flowing chat container进入terminal scrollback；历史、coherent attach bootstrap与加载期间live events按内容/cursor去重且恰好投影一次。默认tool preview按视觉行有界并明确标出本地隐藏内容；running/update/completion等自动生命周期更新在同一width下不得缩短已显示tool surface，避免editor/footer上浮。长历史、expanded tools与多次compaction仍须保持composer/footer响应。
 - Queue是instance/generation-scoped的Same-Host memory；in-flight/failed/ambiguous mutation不声称已restore，也不自动abort。Compaction期间Host-deferred消息必须在detach/attach后继续显示，且不得与另一个instance串线。Queue与active run正交，pending内容只进入composer邻近tray/conversation tail，不得抢占固定Activity中的model phase。
 - Editor提交后若收到definite rejection或`effect_unknown`，必须把原delivery intent与文本prepend回当前draft，不覆盖等待期间的新输入；ambiguous outcome要显示原operation ID与“先核对再手动重发”，但绝不自动retry。
 - Exact extension command不进入pending queue；unknown slash保留Pi-native语义。

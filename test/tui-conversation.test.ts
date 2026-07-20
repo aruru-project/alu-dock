@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CombinedAutocompleteProvider, visibleWidth } from "@earendil-works/pi-tui";
+import { CombinedAutocompleteProvider, TUI, visibleWidth, type Terminal } from "@earendil-works/pi-tui";
 
 import type { SettingDto } from "../src/core/config-projection.js";
 import type { DockEvent, InstanceSnapshot } from "../src/core/managed-instance.js";
@@ -11,6 +11,30 @@ import { PendingQueueTray } from "../src/tui/pending-queue.js";
 import { projectSnapshot } from "../src/tui/snapshot-projection.js";
 import { parseSettingCommandValue } from "../src/tui/settings-controls.js";
 import { createAluPaint, detectTerminalColorLevel } from "../src/tui/theme.js";
+
+class RecordingTerminal implements Terminal {
+  readonly writes: string[] = [];
+  columns = 80;
+  rows = 24;
+  kittyProtocolActive = false;
+  start(_onInput: (data: string) => void, _onResize: () => void): void {}
+  stop(): void {}
+  async drainInput(): Promise<void> {}
+  write(data: string): void { this.writes.push(data); }
+  moveBy(lines: number): void { this.writes.push(lines > 0 ? `\u001b[${lines}B` : lines < 0 ? `\u001b[${-lines}A` : ""); }
+  hideCursor(): void { this.writes.push("\u001b[?25l"); }
+  showCursor(): void { this.writes.push("\u001b[?25h"); }
+  clearLine(): void { this.writes.push("\u001b[K"); }
+  clearFromCursor(): void { this.writes.push("\u001b[J"); }
+  clearScreen(): void { this.writes.push("\u001b[2J\u001b[H"); }
+  setTitle(title: string): void { this.writes.push(`\u001b]0;${title}\u0007`); }
+  setProgress(_active: boolean): void {}
+}
+
+async function flushTuiRender(tui: TUI): Promise<void> {
+  tui.requestRender();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+}
 
 function event(sequence: number, type: DockEvent["type"], data: Record<string, unknown>): DockEvent {
   return {
@@ -121,7 +145,7 @@ test("Alu palette uses semantic local surfaces without taking over the terminal 
   assert.equal(plain.running("run"), "run");
 
   const truecolor = createAluPaint("truecolor");
-  assert.match(truecolor.userSurface("question"), /\u001b\[38;2;230;225;242;48;2;35;33;47mquestion\u001b\[0m/u);
+  assert.match(truecolor.userSurface("question"), /\u001b\[38;2;230;225;242;48;2;66;38;47mquestion\u001b\[0m/u);
   assert.notEqual(truecolor.running("state"), truecolor.success("state"));
   assert.notEqual(truecolor.success("state"), truecolor.error("state"));
   assert.match(truecolor.accent("accent"), /38;2;221;126;158/u);
@@ -344,10 +368,32 @@ test("conversation projects replay and live deltas into readable messages", () =
   ]);
   const rendered = conversation.render(24);
   for (const line of rendered) assert.ok(visibleWidth(line) <= 24);
-  assert.match(rendered.join("\n"), /▎/);
+  assert.doesNotMatch(rendered.join("\n"), /▎/);
+  assert.equal(rendered[0], " ".repeat(24), "Pi-style user box reserves a full-width top padding row");
+  assert.match(rendered[1] ?? "", /^ hello\[2J\s+$/u);
+  assert.equal(rendered[2], " ".repeat(24), "Pi-style user box reserves a full-width bottom padding row");
   assert.match(rendered.join("\n"), /secret reasoning/);
   assert.doesNotMatch(rendered.join("\n"), /│ secret reasoning/);
   assert.doesNotMatch(rendered.join("\n"), /^\s*(You|Assistant|Thinking)\s*$/mu);
+});
+
+test("user messages mirror Pi box padding and Markdown semantics with a full-width surface", () => {
+  const conversation = new DockConversation();
+  conversation.apply(event(1, "message.submitted", {
+    operationId: "markdown-user",
+    messageId: "markdown-user",
+    role: "user",
+    text: "Use **bold** and `inline` code.\n\n3. keep this marker",
+    delivery: "prompt",
+  }));
+
+  const rendered = conversation.render(32);
+  assert.equal(rendered[0], " ".repeat(32));
+  assert.equal(rendered.at(-2), " ".repeat(32));
+  assert.match(rendered.join("\n"), /Use bold and inline code\./u);
+  assert.match(rendered.join("\n"), /3\. keep this marker/u);
+  assert.doesNotMatch(rendered.join("\n"), /\*\*bold\*\*|`inline`|▎/u);
+  for (const line of rendered) assert.ok(visibleWidth(line) <= 32);
 });
 
 test("conversation collapses transport retry noise into retry status and one final error", () => {
@@ -405,7 +451,7 @@ test("conversation renders Markdown, code, thinking policy, and diff tools at bo
   assert.match(conversation.snapshot().at(-1)?.text ?? "", /src\/a\.ts/);
   const collapsed = conversation.render(60).join("\n");
   assert.match(collapsed, /✓ edit.*src\/a\.ts/u);
-  assert.doesNotMatch(collapsed, /Alt\+O detail|\+new/u);
+  assert.match(collapsed, /\+new/u, "collapsed tools retain a bounded Pi-style result preview");
   assert.deepEqual(conversation.toggleLatestToolExpanded(), { expanded: true, name: "edit" });
   assert.match(conversation.render(60).join("\n"), /\+new/);
   conversation.toggleToolsExpanded();
@@ -450,23 +496,155 @@ test("collapsed tool rows identify common operations without exposing arbitrary 
   }
 });
 
+test("bounded tool previews retain content without shrinking across automatic lifecycle updates", () => {
+  for (const width of [20, 43, 80]) {
+    const conversation = new DockConversation();
+    conversation.apply(event(1, "tool.started", {
+      toolCallId: `stable-${width}`,
+      toolName: "read",
+      args: { path: "src/stable.ts" },
+    }));
+    conversation.render(width);
+
+    conversation.apply(event(2, "tool.output_updated", {
+      toolCallId: `stable-${width}`,
+      text: Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join("\n"),
+    }));
+    const longPreview = conversation.render(width);
+    assert.match(longPreview.join("\n"), /line 1/u);
+    assert.match(longPreview.join("\n"), /line 10/u);
+    assert.doesNotMatch(longPreview.join("\n"), /line 11|line 30/u);
+    assert.match(longPreview.join("\n"), /20 more visu/u);
+    if (width >= 43) assert.match(longPreview.join("\n"), /Ctrl\+O/u);
+
+    conversation.apply(event(3, "tool.output_updated", {
+      toolCallId: `stable-${width}`,
+      text: "short update",
+    }));
+    const shortPreview = conversation.render(width);
+    assert.equal(shortPreview.length, longPreview.length, `tool update shrank at width ${width}`);
+    assert.match(shortPreview.join("\n"), /short update/u);
+
+    conversation.apply(event(4, "tool.completed", {
+      toolCallId: `stable-${width}`,
+      toolName: "read",
+      isError: false,
+      text: "final",
+    }));
+    const completed = conversation.render(width);
+    assert.equal(completed.length, longPreview.length, `tool completion shrank at width ${width}`);
+    assert.match(completed.join("\n"), /final/u);
+    for (const line of completed) assert.ok(visibleWidth(line) <= width);
+  }
+});
+
+test("automatic tool preview contraction does not trigger pi-tui full redraw", async () => {
+  const conversation = new DockConversation();
+  for (let index = 0; index < 20; index += 1) conversation.addNotice(`settled history ${index}`);
+  conversation.apply(event(100, "tool.started", {
+    toolCallId: "renderer-stable",
+    toolName: "read",
+    args: { path: "src/stable.ts" },
+  }));
+
+  const terminal = new RecordingTerminal();
+  const tui = new TUI(terminal);
+  tui.setClearOnShrink(true);
+  tui.addChild(conversation);
+  tui.start();
+  await flushTuiRender(tui);
+
+  conversation.apply(event(101, "tool.output_updated", {
+    toolCallId: "renderer-stable",
+    text: Array.from({ length: 30 }, (_, index) => `renderer line ${index + 1}`).join("\n"),
+  }));
+  await flushTuiRender(tui);
+  const redrawsBeforeContraction = tui.fullRedraws;
+  const writesBeforeContraction = terminal.writes.length;
+
+  conversation.apply(event(102, "tool.output_updated", {
+    toolCallId: "renderer-stable",
+    text: "short renderer update",
+  }));
+  await flushTuiRender(tui);
+  conversation.apply(event(103, "tool.completed", {
+    toolCallId: "renderer-stable",
+    toolName: "read",
+    isError: false,
+    text: "final renderer output",
+  }));
+  await flushTuiRender(tui);
+  tui.stop();
+
+  assert.equal(tui.fullRedraws, redrawsBeforeContraction);
+  const contractionWrites = terminal.writes.slice(writesBeforeContraction).join("");
+  assert.doesNotMatch(contractionWrites, /\u001b\[3J/u);
+  assert.doesNotMatch(contractionWrites, /\u001b\[\?1049h|\u001b\[\?1000h|\u001b\[\?1006h/u);
+});
+
+test("generic structured tool previews expose safe outcome fields without arbitrary payloads", () => {
+  const conversation = new DockConversation();
+  conversation.apply(event(1, "tool.started", {
+    toolCallId: "kanban-safe-preview",
+    toolName: "alu_kanban",
+    args: { action: "update_card", card_id: 209, description: "PRIVATE INPUT" },
+  }));
+  conversation.apply(event(2, "tool.completed", {
+    toolCallId: "kanban-safe-preview",
+    toolName: "alu_kanban",
+    isError: false,
+    text: JSON.stringify({
+      ok: true,
+      action: "update_card",
+      card_id: 209,
+      persisted: { description: "PRIVATE OUTPUT" },
+    }),
+  }));
+
+  const preview = conversation.render(80).join("\n");
+  assert.match(preview, /ok · update_card · card #209/u);
+  assert.doesNotMatch(preview, /PRIVATE INPUT|PRIVATE OUTPUT|persisted/u);
+  assert.deepEqual(conversation.toggleLatestToolExpanded(), { expanded: true, name: "alu_kanban" });
+  assert.match(conversation.render(80).join("\n"), /PRIVATE OUTPUT/u);
+
+  const malformed = new DockConversation();
+  malformed.apply(event(3, "tool.started", {
+    toolCallId: "malformed-structured-preview",
+    toolName: "alu_kanban",
+    args: { action: "update_card", card_id: 210 },
+  }));
+  malformed.apply(event(4, "tool.completed", {
+    toolCallId: "malformed-structured-preview",
+    toolName: "alu_kanban",
+    isError: false,
+    text: "{\"ok\":true,\"private\":\"MUST NOT LEAK",
+  }));
+  const malformedPreview = malformed.render(80).join("\n");
+  assert.match(malformedPreview, /structured result truncated or unavailable/u);
+  assert.doesNotMatch(malformedPreview, /MUST NOT LEAK|private/u);
+});
+
 test("authoritative toolsExpanded updates clear per-tool overrides", () => {
   const conversation = new DockConversation();
   conversation.apply(event(1, "tool.started", {
     toolCallId: "authoritative-tool", toolName: "read", args: { path: "src/current.ts" },
   }));
   conversation.apply(event(2, "tool.completed", {
-    toolCallId: "authoritative-tool", toolName: "read", isError: false, text: "authoritative detail",
+    toolCallId: "authoritative-tool", toolName: "read", isError: false,
+    text: Array.from({ length: 14 }, (_, index) => `authoritative detail ${index + 1}`).join("\n"),
   }));
 
   conversation.setToolsExpanded(true);
-  assert.match(conversation.render(80).join("\n"), /authoritative detail/u);
+  assert.match(conversation.render(80).join("\n"), /authoritative detail 14/u);
   assert.deepEqual(conversation.toggleLatestToolExpanded(), { expanded: false, name: "read" });
-  assert.doesNotMatch(conversation.render(80).join("\n"), /authoritative detail/u);
+  const preview = conversation.render(80).join("\n");
+  assert.match(preview, /authoritative detail 1/u);
+  assert.doesNotMatch(preview, /authoritative detail 14/u);
+  assert.match(preview, /visual lines · Ctrl\+O full details/u);
 
   conversation.setToolsExpanded(true);
   assert.equal(conversation.areToolsExpanded(), true);
-  assert.match(conversation.render(80).join("\n"), /authoritative detail/u);
+  assert.match(conversation.render(80).join("\n"), /authoritative detail 14/u);
 });
 
 test("collapsed tool failures expose a safe first-line reason and preserve expandable detail", () => {
@@ -493,6 +671,25 @@ test("collapsed tool failures expose a safe first-line reason and preserve expan
   const structuredCollapsed = structured.render(100).join("\n");
   assert.match(structuredCollapsed, /child exited 2/u);
   assert.doesNotMatch(structuredCollapsed, /privatePayload|must-not-render/u);
+});
+
+test("interrupted active tools retain the settlement reason in preview and full detail", () => {
+  const conversation = new DockConversation();
+  conversation.apply(event(1, "tool.started", {
+    toolCallId: "interrupted-tool",
+    toolName: "read",
+    args: { path: "src/long-running.ts" },
+  }));
+  conversation.apply(event(2, "tool.output_updated", {
+    toolCallId: "interrupted-tool",
+    text: Array.from({ length: 30 }, (_, index) => `partial line ${index + 1}`).join("\n"),
+  }));
+  conversation.apply(event(3, "run.settled", { result: "aborted" }));
+  const preview = conversation.render(80).join("\n");
+  assert.match(preview, /× read.*interrupted by aborted/u);
+  assert.doesNotMatch(preview, /partial line 30/u, "the reason must remain visible even when a head preview clips the output tail");
+  assert.deepEqual(conversation.toggleLatestToolExpanded(), { expanded: true, name: "read" });
+  assert.match(conversation.render(80).join("\n"), /partial line 30[\s\S]*interrupted by aborted/u);
 });
 
 test("subagent tool completion mirrors the closed isError lifecycle instead of claiming done", () => {

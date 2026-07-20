@@ -51,7 +51,7 @@ const tones = {
   queue: ALU_PALETTE.highlight,
   warning: ALU_PALETTE.gold,
   error: ALU_PALETTE.pink,
-  userSurface: shadeTone(plumIndigo, 0.33, 235, 34),
+  userSurface: shadeTone(ALU_PALETTE.pink, 0.3, 53, 35),
   toolSurface: shadeTone(ALU_PALETTE.hair, 0.26, 234, 30),
   toolRunningSurface: shadeTone(warmRunning, 0.34, 237, 33),
   toolErrorSurface: shadeTone(warmError, 0.38, 236, 31),

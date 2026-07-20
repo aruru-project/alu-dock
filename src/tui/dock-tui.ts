@@ -290,7 +290,9 @@ export async function runDockTui(
     autocompleteMaxVisible: numericSetting(settings, "autocompleteMaxVisible", 10),
   });
   tui.setShowHardwareCursor(booleanSetting(settings, "showHardwareCursor", process.env.PI_HARDWARE_CURSOR === "1"));
-  tui.setClearOnShrink(booleanSetting(settings, "clearOnShrink", true));
+  // Work owns native main-buffer scrollback. Stock pi-tui's clear-on-shrink
+  // path emits ESC[3J, so this client deliberately never enables it.
+  tui.setClearOnShrink(false);
   terminalProgressEnabled = booleanSetting(settings, "showTerminalProgress", true);
   conversation.setHideThinking(booleanSetting(settings, "hideThinking", false));
   conversation.setOutputPadding(numericSetting(settings, "outputPad", 1));
@@ -1659,7 +1661,8 @@ export async function runDockTui(
     if (key === "editorPaddingX" && typeof value === "number" && editor) editor.setPaddingX(value);
     if (key === "autocompleteMaxVisible" && typeof value === "number" && editor) editor.setAutocompleteMaxVisible(value);
     if (key === "showHardwareCursor" && typeof value === "boolean") tui.setShowHardwareCursor(value);
-    if (key === "clearOnShrink" && typeof value === "boolean") tui.setClearOnShrink(value);
+    // clearOnShrink remains a shared Pi setting, but Work keeps it disabled to
+    // preserve terminal-native scrollback and avoid normal-update ESC[3J.
     if (key === "showTerminalProgress" && typeof value === "boolean") {
       terminalProgressEnabled = value;
       updateTerminalProgress();

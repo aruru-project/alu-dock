@@ -1,4 +1,5 @@
 import {
+  Box,
   Markdown,
   truncateToWidth,
   visibleWidth,
@@ -26,6 +27,10 @@ interface ConversationEntry {
   toolState?: ToolState;
   toolSummary?: string;
   toolErrorSummary?: string;
+  toolArgs?: string;
+  toolOutput?: string;
+  toolOmitted?: string[];
+  toolRenderFloor?: { width: number; expanded: boolean; rows: number };
   summaryKind?: "compaction" | "branch";
   renderRevision: number;
   renderCache?: { width: number; revision: number; expanded: boolean; lines: string[] };
@@ -282,8 +287,10 @@ export class DockConversation implements Component {
         this.currentThinking = undefined;
         for (const tool of this.tools.values()) {
           tool.entry.complete = true;
+          const interruption = result === "succeeded" ? undefined : `interrupted by ${result ?? "settlement"}`;
+          if (interruption) tool.output = [tool.output, interruption].filter(Boolean).join("\n");
           this.updateTool(tool, result === "succeeded" ? "done" : "failed");
-          if (result !== "succeeded") tool.entry.text += `\ninterrupted by ${result ?? "settlement"}`;
+          if (interruption) tool.entry.toolErrorSummary = interruption;
         }
         this.tools.clear();
         if (result === "failed") this.add("error", stringData(event, "error") ?? "Run failed");
@@ -296,8 +303,10 @@ export class DockConversation implements Component {
         if (this.currentThinking) this.currentThinking.complete = true;
         for (const tool of this.tools.values()) {
           tool.entry.complete = true;
+          const interruption = "interrupted by session replacement";
+          tool.output = [tool.output, interruption].filter(Boolean).join("\n");
           this.updateTool(tool, "failed");
-          tool.entry.text += "\ninterrupted by session replacement";
+          tool.entry.toolErrorSummary = interruption;
         }
         this.add("system", `Session ${event.data.reason} · generation ${event.data.runtimeGeneration}.`);
         this.currentAssistant = undefined;
@@ -368,12 +377,16 @@ export class DockConversation implements Component {
     const next = Math.max(0, Math.min(3, Math.floor(padding)));
     if (next !== this.outputPadding) {
       this.outputPadding = next;
+      for (const entry of this.entries) entry.renderCache = undefined;
       this.markLayoutChanged();
     }
   }
   setToolsExpanded(expanded: boolean): void {
     this.toolsExpanded = expanded;
     this.toolExpansionOverrides.clear();
+    for (const entry of this.entries) {
+      if (entry.toolCallId) entry.toolRenderFloor = undefined;
+    }
     this.markLayoutChanged();
   }
   toggleToolsExpanded(): boolean {
@@ -385,6 +398,7 @@ export class DockConversation implements Component {
     if (!entry?.toolCallId) return undefined;
     const expanded = !this.isToolExpanded(entry);
     this.toolExpansionOverrides.set(entry.toolCallId, expanded);
+    entry.toolRenderFloor = undefined;
     this.markLayoutChanged();
     return { expanded, name: entry.toolName ?? "tool" };
   }
@@ -399,6 +413,7 @@ export class DockConversation implements Component {
     if (entry.toolCallId) {
       const expanded = !this.isToolExpanded(entry);
       this.toolExpansionOverrides.set(entry.toolCallId, expanded);
+      entry.toolRenderFloor = undefined;
       this.markLayoutChanged();
       return { expanded, name: entry.toolName ?? "tool" };
     }
@@ -423,15 +438,18 @@ export class DockConversation implements Component {
       return lines;
     }
 
-    const indent = " ".repeat(this.outputPadding + 1);
+    const indent = " ".repeat(this.outputPadding);
     const contentWidth = Math.max(1, width - visibleIndentWidth(indent));
     const lines: string[] = [];
     for (const entry of this.entries) {
       if (this.hideThinking && entry.kind === "thinking") continue;
-      for (const line of this.renderEntry(entry, contentWidth)) {
+      const fullWidthSurface = entry.kind === "user" || entry.toolCallId !== undefined || entry.summaryKind === "compaction";
+      const entryWidth = fullWidthSurface ? width : contentWidth;
+      const entryIndent = fullWidthSurface ? "" : indent;
+      for (const line of this.renderEntry(entry, entryWidth)) {
         // Every entry renderer is width-bounded. Avoid rescanning all cached
         // history rows on each live delta merely to truncate them a second time.
-        lines.push(`${indent}${line}`);
+        lines.push(`${entryIndent}${line}`);
       }
       lines.push("");
     }
@@ -460,22 +478,31 @@ export class DockConversation implements Component {
     let lines: string[];
     if (entry.toolCallId) {
       const content: string[] = [renderToolHeader(entry, width)];
-      if (expanded && entry.diffText) {
-        const marker = "\nresult\n";
-        const markerIndex = entry.text.indexOf(marker);
-        const detailText = markerIndex >= 0 ? entry.text.slice(0, markerIndex) : entry.text.split("\n")[0] ?? "";
-        const details = detailText.split("\n").slice(1).join("\n");
-        content.push(...renderToolDetails(details, width));
-        content.push(...renderDockDiff(entry.diffText).map((line) => `  ${line}`));
-      } else if (expanded) {
-        const details = entry.text.split("\n").slice(1).join("\n");
-        content.push(...renderToolDetails(details, width));
+      if (expanded) {
+        if (entry.toolArgs) content.push(paint.faint("args"), ...renderToolDetails(entry.toolArgs, width));
+        if (entry.toolOmitted && entry.toolOmitted.length > 0) {
+          content.push(paint.warning(`omitted: ${entry.toolOmitted.join(", ")}`));
+        }
+        if (entry.toolOutput) {
+          content.push(paint.faint("result"));
+          if (entry.diffText) content.push(...renderDockDiff(entry.diffText).flatMap((line) => renderToolDetailLine(line, width)));
+          else content.push(...renderToolDetails(entry.toolOutput, width));
+        }
+      } else {
+        content.push(...renderToolPreview(entry, width));
       }
+      const floor = entry.toolRenderFloor;
+      const naturalRows = content.length;
+      const floorRows = floor?.width === width && floor.expanded === expanded
+        ? Math.max(floor.rows, naturalRows)
+        : naturalRows;
+      entry.toolRenderFloor = { width, expanded, rows: floorRows };
+      while (content.length < floorRows) content.push("");
       lines = renderToolSurface(content, width, entry.toolState);
     } else if (entry.summaryKind === "compaction") {
       lines = renderCompactionSummary(entry.text, width, expanded);
     } else if (entry.kind === "user") {
-      lines = renderUserSurface(entry.text.length > 0 ? entry.text : "…", width);
+      lines = renderUserSurface(entry.text.length > 0 ? entry.text : "…", width, this.outputPadding);
     } else if (entry.kind === "assistant" || entry.kind === "thinking") {
       const text = entry.text.length > 0 ? entry.text : "…";
       const innerWidth = entry.kind === "thinking" ? Math.max(1, width - 2) : width;
@@ -571,10 +598,10 @@ export class DockConversation implements Component {
             };
           })();
           tool.name = block.toolName;
-          tool.output = block.text;
+          tool.output = truncate(safeTerminalText(block.text), MAX_TOOL_OUTPUT);
           tool.omitted = [...new Set([...tool.omitted, ...(block.omittedFields ?? [])])];
           projectToolState(tool, block.isError ? "failed" : "done");
-          tool.entry.diffText = !block.isError && looksLikeDiff(block.text) ? block.text : undefined;
+          tool.entry.diffText = !block.isError && looksLikeDiff(tool.output) ? tool.output : undefined;
           projectedTools.delete(block.toolCallId);
         }
       } else {
@@ -603,6 +630,9 @@ export class DockConversation implements Component {
     tool.entry.toolState = state;
     tool.entry.toolSummary = tool.summary;
     tool.entry.toolErrorSummary = state === "failed" ? summarizeToolFailure(tool.output) : undefined;
+    tool.entry.toolArgs = tool.args === undefined ? undefined : safeTerminalText(tool.args);
+    tool.entry.toolOutput = tool.output === undefined ? undefined : truncate(safeTerminalText(tool.output), MAX_TOOL_OUTPUT);
+    tool.entry.toolOmitted = tool.omitted.map(safeTerminalLine);
     this.touchEntry(tool.entry);
     this.markOutputChanged();
   }
@@ -672,6 +702,9 @@ function projectToolState(tool: ToolProjection, state: ToolState): void {
   tool.entry.toolState = state;
   tool.entry.toolSummary = tool.summary;
   tool.entry.toolErrorSummary = state === "failed" ? summarizeToolFailure(tool.output) : undefined;
+  tool.entry.toolArgs = tool.args === undefined ? undefined : safeTerminalText(tool.args);
+  tool.entry.toolOutput = tool.output === undefined ? undefined : truncate(safeTerminalText(tool.output), MAX_TOOL_OUTPUT);
+  tool.entry.toolOmitted = tool.omitted.map(safeTerminalLine);
   tool.entry.renderRevision += 1;
   tool.entry.renderCache = undefined;
 }
@@ -768,13 +801,19 @@ export class DockStatusLine implements Component {
   }
 }
 
-function renderUserSurface(text: string, width: number): string[] {
-  if (width < 3) return wrapPlainText(text, width).map(paint.userSurface);
-  const bodyWidth = width - 2;
-  return wrapPlainText(text, bodyWidth).map((line) => {
-    const body = padToVisibleWidth(` ${line}`, width - 1);
-    return `${paint.user("▎")}${paint.userSurface(body)}`;
-  });
+function renderUserSurface(text: string, width: number, outputPadding: number): string[] {
+  const boundedWidth = Math.max(1, width);
+  if (boundedWidth <= outputPadding * 2) return wrapPlainText(text, boundedWidth).map(paint.userSurface);
+  const box = new Box(outputPadding, 1, paint.userSurface);
+  box.addChild(new Markdown(
+    text,
+    0,
+    0,
+    markdownTheme,
+    { color: paint.primary },
+    { preserveOrderedListMarkers: true, preserveBackslashEscapes: true },
+  ));
+  return box.render(boundedWidth);
 }
 
 function renderCompactionSummary(text: string, width: number, expanded: boolean): string[] {
@@ -805,10 +844,100 @@ function renderToolHeader(entry: ConversationEntry, width: number): string {
 
 function renderToolDetails(text: string, width: number): string[] {
   if (text.length === 0) return [];
+  return text.split("\n").flatMap((sourceLine) => renderToolDetailLine(sourceLine || " ", width));
+}
+
+function renderToolDetailLine(line: string, width: number): string[] {
   const bodyWidth = Math.max(1, width - 4);
-  return text.split("\n").flatMap((sourceLine) => (
-    wrapTextWithAnsi(sourceLine || " ", bodyWidth).map((line) => `  ${line}`)
-  ));
+  return wrapTextWithAnsi(line, bodyWidth).map((wrapped) => `  ${wrapped}`);
+}
+
+function renderToolPreview(entry: ConversationEntry, width: number): string[] {
+  const lines: string[] = [];
+  if (entry.toolOmitted && entry.toolOmitted.length > 0) {
+    lines.push(paint.warning(`omitted: ${entry.toolOmitted.join(", ")}`));
+  }
+  const output = entry.toolOutput?.trim();
+  if (!output) return lines;
+
+  const toolName = toolBaseName(entry.toolName ?? "tool");
+  if (!KNOWN_PREVIEW_TOOLS.has(toolName) && looksLikeStructuredJson(output)) {
+    const summary = entry.toolState === "failed"
+      ? ["structured error result · Ctrl+O full details"]
+      : summarizeStructuredToolResult(output) ?? ["structured result truncated or unavailable · Ctrl+O full details"];
+    lines.push(...summary.map((line) => `  ${paint.muted(line)}`));
+    return lines;
+  }
+
+  const bodyWidth = Math.max(1, width - 4);
+  const styledSource = entry.diffText ? renderDockDiff(output) : output.split("\n");
+  const visualRows = styledSource.flatMap((line) => wrapTextWithAnsi(line || " ", bodyWidth));
+  const budget = toolPreviewBudget(toolName);
+  const mode = toolName === "bash" ? "tail" : entry.diffText ? "head-tail" : "head";
+  const preview = selectToolPreviewRows(visualRows, budget, mode);
+  lines.push(...preview.map((line) => `  ${line}`));
+  return lines;
+}
+
+const KNOWN_PREVIEW_TOOLS = new Set(["bash", "read", "write", "edit", "grep", "find", "ls"]);
+
+function toolPreviewBudget(toolName: string): number {
+  if (toolName === "bash") return 5;
+  if (toolName === "read" || toolName === "write") return 10;
+  if (toolName === "grep") return 15;
+  if (toolName === "find" || toolName === "ls") return 20;
+  if (toolName === "edit") return 10;
+  return 5;
+}
+
+function selectToolPreviewRows(
+  rows: readonly string[],
+  budget: number,
+  mode: "head" | "tail" | "head-tail",
+): string[] {
+  if (rows.length <= budget) return [...rows];
+  const visibleBudget = Math.max(1, budget);
+  const hidden = rows.length - visibleBudget;
+  const marker = paint.faint(`… ${hidden} ${mode === "tail" ? "earlier" : "more"} visual lines · Ctrl+O full details`);
+  if (mode === "tail") return [marker, ...rows.slice(-visibleBudget)];
+  if (mode === "head-tail") {
+    const head = Math.ceil(visibleBudget / 2);
+    const tail = Math.floor(visibleBudget / 2);
+    return [...rows.slice(0, head), marker, ...(tail > 0 ? rows.slice(-tail) : [])];
+  }
+  return [...rows.slice(0, visibleBudget), marker];
+}
+
+function looksLikeStructuredJson(text: string): boolean {
+  const first = text.trimStart()[0];
+  return first === "{" || first === "[";
+}
+
+function summarizeStructuredToolResult(text: string): string[] | undefined {
+  if (!looksLikeStructuredJson(text)) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(text);
+    if (Array.isArray(parsed)) return [`structured result · ${parsed.length} items · Ctrl+O full details`];
+    if (parsed === null || typeof parsed !== "object") return ["structured result · Ctrl+O full details"];
+    const record = parsed as Record<string, unknown>;
+    const parts: string[] = [];
+    if (record.ok === true) parts.push("ok");
+    else if (record.ok === false) parts.push("not ok");
+    for (const key of ["action", "status", "state"] as const) {
+      const value = scalarArgument(record[key] as JsonValue | undefined);
+      if (value) parts.push(normalizeToolSummaryPart(value));
+    }
+    const cardId = scalarArgument((record.card_id ?? record.cardId) as JsonValue | undefined);
+    if (cardId) parts.push(`card #${normalizeToolSummaryPart(cardId)}`);
+    for (const key of ["count", "total"] as const) {
+      const value = scalarArgument(record[key] as JsonValue | undefined);
+      if (value) parts.push(`${key} ${normalizeToolSummaryPart(value)}`);
+    }
+    if (parts.length === 0) parts.push("structured result");
+    return [`${parts.slice(0, 4).join(" · ")} · Ctrl+O full details`];
+  } catch {
+    return undefined;
+  }
 }
 
 function renderToolSurface(lines: string[], width: number, state: ToolState | undefined): string[] {
@@ -983,8 +1112,12 @@ function historyOmissions(entry: HistoryEntryDto): string {
     .join("\n");
 }
 
+function toolBaseName(toolName: string): string {
+  return toolName.toLowerCase().split(/[.:/]/u).at(-1) ?? toolName.toLowerCase();
+}
+
 function summarizeToolArgs(toolName: string, args: JsonObject): string | undefined {
-  const name = toolName.toLowerCase().split(/[.:/]/u).at(-1) ?? toolName.toLowerCase();
+  const name = toolBaseName(toolName);
   const pathArgument = firstStringArgument(args, ["path", "file_path"]);
   const path = pathArgument === undefined ? undefined : pathPreview(pathArgument);
 
@@ -1117,7 +1250,7 @@ function summarizeToolFailure(output: string | undefined): string | undefined {
     const parsed: unknown = JSON.parse(trimmed);
     candidate = failureTextFromJson(parsed);
   } catch {
-    candidate = trimmed;
+    candidate = looksLikeStructuredJson(trimmed) ? "structured error result" : trimmed;
   }
   const firstLine = candidate?.split("\n").map((line) => line.trim()).find((line) => line.length > 0);
   if (!firstLine) return undefined;
@@ -1140,7 +1273,7 @@ function failureTextFromJson(value: unknown): string | undefined {
 }
 
 function formatToolArgs(toolName: string, args: JsonObject, limit: number): string | undefined {
-  const name = toolName.toLowerCase().split(/[.:/]/u).at(-1) ?? toolName.toLowerCase();
+  const name = toolBaseName(toolName);
   if (name !== "bash" || typeof args.command !== "string") return formatJson(args, limit);
 
   const command = safeTerminalText(args.command).replace(/\t/gu, "    ");
