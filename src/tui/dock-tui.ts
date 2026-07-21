@@ -25,6 +25,7 @@ import type { ProjectTrustChoice } from "../control/project-trust.js";
 import { ActivityPulseController } from "./activity-pulse.js";
 import { DockActivityLine, DockConversation, DockStatusLine, DockWorkMetadata } from "./conversation.js";
 import { ExtensionTextDialog } from "./extension-text-dialog.js";
+import { ExtensionWidgetSurface } from "./extension-widget-surface.js";
 import { drainFullHistory, HISTORY_PAGE_SIZE, reconcileFlowingEvents } from "./history-pagination.js";
 import { PendingQueueTray } from "./pending-queue.js";
 import { prependRestoredQueueText, submissionRecovery } from "./queue-restoration.js";
@@ -85,6 +86,9 @@ export async function runDockTui(
   let instance = initialInstance;
   const metadata = new DockWorkMetadata(() => instance);
   const status = new DockStatusLine(instance);
+  const widgetsAboveEditor = new ExtensionWidgetSurface("aboveEditor", reportExtensionWidgetViewport);
+  const widgetsBelowEditor = new ExtensionWidgetSurface("belowEditor", reportExtensionWidgetViewport);
+  let lastWidgetViewportRequest = "";
   let runActivity = activityFromSnapshot(instance);
   let submittingFeedbackVisible = false;
   activity.setActivity(runActivity);
@@ -129,6 +133,13 @@ export async function runDockTui(
     instance = projectSnapshot(instance, event);
     status.update(instance);
     pendingQueue.apply(event);
+    if (event.type === "session.replaced") {
+      widgetsAboveEditor.reset();
+      widgetsBelowEditor.reset();
+    } else {
+      widgetsAboveEditor.apply(event);
+      widgetsBelowEditor.apply(event);
+    }
     runActivity = reduceRunActivity(runActivity, event, instance);
     if (runActivity.phase !== "submitting" || submittingFeedbackVisible) activity.setActivity(runActivity);
     if (event.type === "session.replaced") {
@@ -231,6 +242,24 @@ export async function runDockTui(
   }
   initialHistoryLoading = false;
   initialBufferedEvents = [];
+
+  function reportExtensionWidgetViewport(width: number): void {
+    const leaseToken = controllerLeaseToken;
+    if (!leaseToken || exiting) return;
+    const height = Math.max(1, terminal.rows);
+    const requestKey = `${leaseToken}:${instance.runtimeGeneration}:${width}:${height}`;
+    if (requestKey === lastWidgetViewportRequest) return;
+    lastWidgetViewportRequest = requestKey;
+    void client.setExtensionWidgetViewport(
+      instance.id,
+      leaseToken,
+      instance.runtimeGeneration,
+      width,
+      height,
+    ).catch(() => {
+      if (lastWidgetViewportRequest === requestKey) lastWidgetViewportRequest = "";
+    });
+  }
 
   function reacquireController(since: EventCursor): Promise<void> {
     if (controllerReattach) return controllerReattach;
@@ -1700,9 +1729,11 @@ export async function runDockTui(
 
   const workFlow = new Container();
   workFlow.addChild(conversation);
+  workFlow.addChild(widgetsAboveEditor);
   workFlow.addChild(activity);
   workFlow.addChild(pendingQueue);
   workFlow.addChild(editor);
+  workFlow.addChild(widgetsBelowEditor);
   workFlow.addChild(metadata);
   workFlow.addChild(status);
   tui.addChild(workFlow);

@@ -18,7 +18,7 @@ src/cli.ts bare Hub / -c / open / new / attach
 
 runDockTui()
   ├── initial closed queries: attach/history/settings/tools/resources/commands
-  ├── flowing Container: conversation → activity/queue → editor → three-row footer
+  ├── flowing Container: conversation → extension widgets → activity/queue → editor → three-row footer
   ├── streamEvents()
   │     ├── snapshot-projection reducer
   │     ├── DockConversation
@@ -62,6 +62,7 @@ Session Work TUI
 | `src/tui/session-tree.ts` | tree pagination/filter、branch topology/active path picker、command parsing | `session-tree` |
 | `src/tui/settings-controls.ts` | setting choices、command values、completion | `tui-ux-state` |
 | `src/tui/extension-text-dialog.ts` | bounded extension select/confirm/input/editor UI | extension UI/TUI tests |
+| `src/tui/extension-widget-surface.ts` | Host-rendered Pi widget的keyed above/below-editor挂载区域 | extension widget/TUI tests |
 | `src/tui/searchable-picker.ts`, `search-filter.ts` | reusable picker与deterministic filtering | `tui-ux-state` |
 | `src/tui/mouse-input.ts` | Hub-only bounded click/wheel decoding、paired tracking sequences | Hub parser/layout、PTY |
 | `src/tui/select-instance.ts` | 仅供显式旧 `open` smart-entry 的legacy chooser | managed/PTY tests |
@@ -117,7 +118,7 @@ Warning必须说明用户影响和可执行动作；closed Host projection本身
 - Queue是instance/generation-scoped的Same-Host memory；in-flight/failed/ambiguous mutation不声称已restore，也不自动abort。手动`/compact`只发起Host mutation，不得在等待整次compaction response期间禁用Work editor；从manual compaction intent到runtime start/end期间提交的普通输入都由Host接管，detach/attach后继续显示，且不得与另一个instance串线。Queue与active run正交，pending内容只进入composer邻近tray/conversation tail，不得抢占固定Activity中的model phase。
 - Editor提交后若收到definite rejection或`effect_unknown`，必须把原delivery intent与文本prepend回当前draft，不覆盖等待期间的新输入；ambiguous outcome要显示原operation ID与“先核对再手动重发”，但绝不自动retry。
 - Exact extension command不进入pending queue；unknown slash保留Pi-native语义。
-- Extension UI只支持bounded text；不transport component factory、image、binary或data URI。普通Pi tool output不得被Dock二次裁剪；只有接近control-frame上限的transport fallback才附明确提示。modal或config/session inventory不完整时，Work/Hub显示shown/total或首条scan diagnostic，不能把bounded prefix呈现为完整结果。
+- Extension widget component factory只在Host的Pi adapter中执行；Work把当前viewport交给Host，并在小阿露Activity上方挂载默认`aboveEditor`结果、在editor下方挂载`belowEditor`结果。控制面只transport Host渲染出的bounded text lines，不transport factory、Component、image、binary或data URI。普通Pi tool output不得被Dock二次裁剪；只有接近control-frame上限的transport fallback才附明确提示。modal或config/session inventory不完整时，Work/Hub显示shown/total或首条scan diagnostic，不能把bounded prefix呈现为完整结果。
 - Extension `notify`与`setStatus`不可混用：notify遵循Pi的chat-tail语义，连续tail info才替换，warning/error逐条追加；setStatus属于keyed footer state。两者都不得覆盖小阿露runtime activity。
 - 固定Activity对齐stock Pi的top-level working状态机，唯一owner是authoritative runtime phase。Editor draft、queued follow-up、tool/bash start/update/end、picker/config/local command反馈都与active model run正交，不得覆盖`waiting for model`、`thinking`或`responding`；tool细节属于conversation surface，queue属于pending tray。局部操作结果使用modal或Pi式chat-tail status反馈。
 - Activity优先级必须由明确boundary决定：disconnect/error/stopped > compaction/abort/retry/interaction > active model run > idle。临时phase结束后从最新snapshot/event重新投影，不恢复陈旧本地label；`ready`只来自authoritative settlement或idle snapshot。

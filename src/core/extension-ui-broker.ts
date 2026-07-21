@@ -29,6 +29,16 @@ export interface ExtensionUiProjection {
   activeInteraction?: { id: string; method: DialogMethod; expiresAt: string };
 }
 
+export interface ExtensionWidgetViewport {
+  width: number;
+  height: number;
+}
+
+export interface ExtensionWidgetRenderer {
+  render(viewport: ExtensionWidgetViewport): void;
+  reset(): void;
+}
+
 export type ExtensionUiEventType =
   | "interaction.requested"
   | "interaction.resolved"
@@ -110,6 +120,8 @@ export class ExtensionUiBroker {
   private readonly tombstones = new Map<string, InteractionTombstone>();
   private unsupportedWarningEmitted = false;
   private toolsExpanded = false;
+  private widgetViewport: ExtensionWidgetViewport | undefined;
+  private widgetRenderer: ExtensionWidgetRenderer | undefined;
   private mutationTail: Promise<void> = Promise.resolve();
   private suspended = false;
 
@@ -142,6 +154,11 @@ export class ExtensionUiBroker {
     };
   }
 
+  bindWidgetRenderer(renderer: ExtensionWidgetRenderer): void {
+    if (this.widgetRenderer) throw new Error("Extension widget renderer is already bound");
+    this.widgetRenderer = renderer;
+  }
+
   claimController(): Promise<ControllerClaim> {
     return this.serialize(async () => {
       if (this.suspended || this.controller) return { status: "unavailable" };
@@ -159,6 +176,7 @@ export class ExtensionUiBroker {
     return this.serialize(async () => {
       if (this.controller?.token !== leaseToken) return;
       this.controller = undefined;
+      this.widgetViewport = undefined;
       this.projectionChanged();
       await this.cancelAllDialogs(reason, leaseToken);
     });
@@ -172,6 +190,8 @@ export class ExtensionUiBroker {
     this.statuses.clear();
     this.widgets.clear();
     this.toolsExpanded = false;
+    this.widgetViewport = undefined;
+    this.widgetRenderer?.reset();
     this.projectionChanged();
     void this.serialize(async () => {
       await this.cancelAllDialogs("replacement", leaseToken);
@@ -196,6 +216,8 @@ export class ExtensionUiBroker {
       this.statuses.clear();
       this.widgets.clear();
       this.toolsExpanded = false;
+      this.widgetViewport = undefined;
+      this.widgetRenderer?.reset();
       this.tombstones.clear();
       this.bufferedEvents.length = 0;
       this.projectionChanged();
@@ -210,6 +232,8 @@ export class ExtensionUiBroker {
       this.statuses.clear();
       this.widgets.clear();
       this.toolsExpanded = false;
+      this.widgetViewport = undefined;
+      this.widgetRenderer?.reset();
       this.projectionChanged();
       await this.cancelAllDialogs("host_draining", leaseToken);
       this.tombstones.clear();
@@ -316,6 +340,14 @@ export class ExtensionUiBroker {
     void this.emit("extension.status_changed", { key: safeKey, ...(text === undefined ? {} : { text: this.statuses.get(safeKey) }) });
   }
 
+  setWidgetViewport(leaseToken: string, viewport: ExtensionWidgetViewport): void {
+    if (this.controller?.token !== leaseToken || this.controller.generation !== this.generation()) {
+      throw new InteractionWrongLeaseError("widget-viewport");
+    }
+    this.widgetViewport = { ...viewport };
+    this.widgetRenderer?.render(this.widgetViewport);
+  }
+
   setWidget(key: string, lines: string[] | undefined, placement: "aboveEditor" | "belowEditor" = "aboveEditor"): void {
     const safeKey = safeLine(key, 128);
     if (!safeKey || isUnsafeRecordKey(safeKey)) {
@@ -343,6 +375,11 @@ export class ExtensionUiBroker {
     const actualPlacement = placement === "belowEditor" ? "belowEditor" : "aboveEditor";
     this.widgets.set(safeKey, { lines: projected, placement: actualPlacement });
     void this.emit("extension.widget_changed", { key: safeKey, lines: projected, placement: actualPlacement });
+  }
+
+  reportWidgetError(key: string, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    this.recordError(`Extension widget ${safeLine(key, 128) || "unknown"} failed to render: ${message}`);
   }
 
   unsupported(feature: string): void {

@@ -690,6 +690,19 @@ export class ManagedInstance {
     return this.snapshot();
   }
 
+  setExtensionWidgetViewport(
+    leaseToken: string,
+    expectedRuntimeGeneration: number,
+    viewport: { width: number; height: number },
+  ): void {
+    this.assertActive();
+    if (expectedRuntimeGeneration !== this.runtimeGenerationValue) {
+      throw new StaleRuntimeGenerationError(expectedRuntimeGeneration, this.runtimeGenerationValue);
+    }
+    if (this.extensionUi.isSuspended()) throw new InstanceBusyError(this.id, "rendering extension widgets during session replacement");
+    this.extensionUi.setWidgetViewport(leaseToken, viewport);
+  }
+
   cancelInteractionsForHostDrain(): Promise<void> {
     return this.extensionUi.cancelForHostDrain();
   }

@@ -116,6 +116,12 @@ test("toolsExpanded request, snapshot, and event contracts are strict", () => {
   assert.equal(parsedEvent.data.expanded, true);
   assert.throws(() => parseControlEventEnvelope(envelope({ expanded: true, extra: true }), "attach-1", "epoch-1"), /Unexpected field/u);
   assert.throws(() => parseControlEventEnvelope(envelope({ expanded: 1 }), "attach-1", "epoch-1"), /expanded/u);
+
+  const viewport = { kind: "request", version: 2, requestId: "widget-viewport-1", type: "extension.widget_viewport.set", params: {
+    instanceId: "i1", leaseToken: "lease-1", expectedRuntimeGeneration: 1, width: 96, height: 32,
+  } };
+  assert.deepEqual(parseControlRequest(viewport), viewport);
+  assert.throws(() => parseControlRequest({ ...viewport, params: { ...viewport.params, width: 0 } }), /width/u);
 });
 
 test("Git branch snapshot and event projections are closed, bounded, and terminal-safe", () => {
@@ -281,6 +287,7 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   assert.equal(capabilityForRequest("instance.adopt"), "session.adopt.v1");
   assert.equal(capabilityForRequest("session.inventory"), "session.inventory.v1");
   assert.equal(capabilityForRequest("extension.tools_expanded.set"), "extension_ui.tools-expanded.v1");
+  assert.equal(capabilityForRequest("extension.widget_viewport.set"), "extension_ui.widgets.v1");
   assert.deepEqual(requiredCapabilities("events.replay-purpose.v1"), ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "tool-result-presentation.v1", "events.replay-purpose.v1"]);
 
   const adopted = parseControlRequest({

@@ -31,6 +31,25 @@ test("Pi extension UI adapter exposes bounded dialogs and fail-closed unsupporte
   ui.notify("visible", "info");
   ui.setStatus("adapter", ui.theme.fg("accent", "ready"));
   ui.setWidget("lines", ["one", "two"], { placement: "belowEditor" });
+  let renderedWidth = 0;
+  let requestComponentRender = (): void => {};
+  ui.setWidget("component", (tui) => {
+    requestComponentRender = () => tui.requestRender();
+    return {
+      render(width: number) {
+        renderedWidth = width;
+        return [`component at ${width}`];
+      },
+      invalidate() {},
+    };
+  });
+  broker.setWidgetViewport(claim.leaseToken, { width: 72, height: 24 });
+  assert.equal(renderedWidth, 72);
+  assert.equal(events.some((event) => event.type === "extension.widget_changed"
+    && (event.data as { key?: string; lines?: string[] }).key === "component"
+    && (event.data as { lines?: string[] }).lines?.[0] === "component at 72"), true);
+  requestComponentRender();
+  await Promise.resolve();
   assert.deepEqual(broker.projection().extensionStatus, { adapter: "ready" });
   assert.equal(events.some((event) => event.type === "extension.notification"), true);
   assert.equal(events.some((event) => event.type === "extension.widget_changed"), true);

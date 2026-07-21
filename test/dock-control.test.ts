@@ -120,7 +120,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.tools-expanded.v1", "extension_ui.v1", "git.branch-footer.v1", "host.info", "instance.catalog", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tool-result-presentation.v1", "tools.v1", "tui.projection.v1"]);
+  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.tools-expanded.v1", "extension_ui.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "host.info", "instance.catalog", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tool-result-presentation.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -315,6 +315,11 @@ test("extension UI lease round-trips dialogs and detach cancels fail closed", as
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
   const broker = new ExtensionUiBroker();
+  let widgetViewport: { width: number; height: number } | undefined;
+  broker.bindWidgetRenderer({
+    render: (viewport) => { widgetViewport = viewport; },
+    reset: () => { widgetViewport = undefined; },
+  });
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
     const session = new DelayedRuntimeSession(`pi-${id}`);
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session, extensionUiBroker: broker });
@@ -338,6 +343,11 @@ test("extension UI lease round-trips dialogs and detach cancels fail closed", as
   assert.equal(controller.initial.controller.status, "acquired");
   if (controller.initial.controller.status !== "acquired") return;
   const leaseToken = controller.initial.controller.leaseToken;
+  assert.deepEqual(
+    await client.setExtensionWidgetViewport(instance.id, leaseToken, instance.runtimeGeneration, 96, 32),
+    { accepted: true },
+  );
+  assert.deepEqual(widgetViewport, { width: 96, height: 32 });
   await assert.rejects(
     client.respondInteraction(instance.id, leaseToken, "not-sent", { method: "input", value: "A0+/".repeat(32) }, "binary-response"),
     (error: unknown) => error instanceof ControlClientError && error.code === "invalid_request",

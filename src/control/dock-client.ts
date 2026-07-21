@@ -14,6 +14,7 @@ import {
   GIT_BRANCH_CAPABILITY,
   TOOL_RESULT_PRESENTATION_CAPABILITY,
   TOOLS_EXPANDED_CAPABILITY,
+  EXTENSION_WIDGET_CAPABILITY,
   type Capability,
   type ClientHello,
   type ControlRequest,
@@ -29,6 +30,7 @@ import {
   parseHostInfoResult,
   parseHistoryResult,
   parseInteractionRespondResult,
+  parseWidgetViewportResult,
   requiredCapabilities,
   parseListResult,
   parseModelsResult,
@@ -64,6 +66,7 @@ import {
   type HostInfoResult,
   type HistoryResult,
   type InteractionRespondResult,
+  type WidgetViewportResult,
   type InstanceListCursor,
   type ListResult,
   type ModelsResult,
@@ -168,6 +171,7 @@ export class DockClient {
   prompt(instanceId:string,message:string,delivery:DeliveryMode="auto",operationId=this.createRequestId()):Promise<PromptResult>{return this.request("command.submit",{operationId,instanceId,message,delivery},"session.core",parsePromptResult);}
   respondInteraction(instanceId:string,leaseToken:string,interactionId:string,response:InteractionResponse,operationId=this.createRequestId()):Promise<InteractionRespondResult>{if("value" in response){const limit=response.method==="select"?8_000:256_000;if(response.value.length>limit)return Promise.reject(new ControlClientError("invalid_request",`Interaction ${response.method} response exceeds ${limit} characters`,operationId));if(containsBinaryPayload(response.value))return Promise.reject(new ControlClientError("invalid_request","Interaction responses cannot contain binary, image, data URI, or raw base64 payloads",operationId));}return this.request("interaction.respond",{operationId,instanceId,leaseToken,interactionId,response},"extension_ui.v1",parseInteractionRespondResult);}
   setToolsExpanded(instanceId:string,expectedRuntimeGeneration:number,expanded:boolean,operationId=this.createRequestId()):Promise<{instance:InstanceSnapshot}>{return this.request("extension.tools_expanded.set",{operationId,instanceId,expectedRuntimeGeneration,expanded},TOOLS_EXPANDED_CAPABILITY,parseStatusResult);}
+  setExtensionWidgetViewport(instanceId:string,leaseToken:string,expectedRuntimeGeneration:number,width:number,height:number):Promise<WidgetViewportResult>{return this.request("extension.widget_viewport.set",{instanceId,leaseToken,expectedRuntimeGeneration,width,height},EXTENSION_WIDGET_CAPABILITY,parseWidgetViewportResult);}
   abort(instanceId:string,operationId=this.createRequestId()):Promise<AbortResult>{return this.request("command.abort",{operationId,instanceId},"run.abort.v1",parseAbortResult,undefined,this.longMutationTimeoutMs);}
   dequeue(instanceId:string,operationId=this.createRequestId()):Promise<QueueDequeueResult>{return this.request("queue.dequeue",{operationId,instanceId},"queue.control.v1",parseQueueDequeueResult);}
   models(instanceId:string):Promise<ModelsResult>{return this.request("model.list",{instanceId},["models.v1","projection.completeness.v1"],parseModelsResult);}
@@ -196,7 +200,7 @@ export class DockClient {
   async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;claimController?:boolean;conversationBootstrap?:boolean}):Promise<EventSubscription>{
     const since=options.since;const helloId=this.createRequestId(),requestId=this.createRequestId();
     const replay = options.conversationBootstrap ? "conversation_bootstrap" : since === undefined ? undefined : "event_log";
-    const streamCapabilities:string[]=options.requireTuiProjection?["core.v2",TOOLS_EXPANDED_CAPABILITY,GIT_BRANCH_CAPABILITY,TOOL_RESULT_PRESENTATION_CAPABILITY,"events.follow","queue.control.v1","run.abort.v1","tui.projection.v1"]:requiredCapabilities("events.follow");
+    const streamCapabilities:string[]=options.requireTuiProjection?["core.v2",TOOLS_EXPANDED_CAPABILITY,EXTENSION_WIDGET_CAPABILITY,GIT_BRANCH_CAPABILITY,TOOL_RESULT_PRESENTATION_CAPABILITY,"events.follow","queue.control.v1","run.abort.v1","tui.projection.v1"]:requiredCapabilities("events.follow");
     if(replay!==undefined&&!streamCapabilities.includes("events.replay-purpose.v1"))streamCapabilities.push("events.replay-purpose.v1");
     if(options.claimController&&!streamCapabilities.includes("extension_ui.v1"))streamCapabilities.push("extension_ui.v1");
     const request:ControlRequest={kind:"request",version:2,requestId,type:"instance.attach",params:{instanceId,since,follow:true,controller:options.claimController?"claim":"observe",...(replay===undefined?{}:{replay})}};

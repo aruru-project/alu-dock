@@ -1,10 +1,65 @@
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type { Component, TUI } from "@earendil-works/pi-tui";
 
-import type { ExtensionUiBroker } from "../core/extension-ui-broker.js";
+import type { ExtensionUiBroker, ExtensionWidgetViewport } from "../core/extension-ui-broker.js";
+
+type WidgetComponent = Component & { dispose?(): void };
+type WidgetEntry =
+  | { kind: "lines"; lines: string[]; placement: "aboveEditor" | "belowEditor" }
+  | { kind: "component"; component: WidgetComponent; placement: "aboveEditor" | "belowEditor" };
+
+type RenderAwareExtensionUiContext = ExtensionUIContext & { requestRender?: () => void };
 
 /** Adapt Pi's complete UI interface to Dock's deliberately bounded broker. */
 export function createPiExtensionUiContext(broker: ExtensionUiBroker): ExtensionUIContext {
-  const context: ExtensionUIContext = {
+  const widgets = new Map<string, WidgetEntry>();
+  let viewport: ExtensionWidgetViewport | undefined;
+  let renderQueued = false;
+
+  const renderEntry = (key: string, entry: WidgetEntry): void => {
+    if (entry.kind === "lines") {
+      broker.setWidget(key, entry.lines, entry.placement);
+      return;
+    }
+    if (!viewport) return;
+    try {
+      broker.setWidget(key, entry.component.render(viewport.width), entry.placement);
+    } catch (error) {
+      broker.reportWidgetError(key, error);
+    }
+  };
+
+  const renderWidgets = (): void => {
+    if (!viewport) return;
+    for (const [key, entry] of widgets) renderEntry(key, entry);
+  };
+
+  const scheduleRender = (): void => {
+    if (renderQueued) return;
+    renderQueued = true;
+    queueMicrotask(() => {
+      renderQueued = false;
+      renderWidgets();
+    });
+  };
+
+  const widgetTui = { requestRender: scheduleRender } as unknown as TUI;
+
+  broker.bindWidgetRenderer({
+    render(nextViewport) {
+      viewport = { ...nextViewport };
+      renderWidgets();
+    },
+    reset() {
+      viewport = undefined;
+      for (const entry of widgets.values()) {
+        if (entry.kind === "component") entry.component.dispose?.();
+      }
+      widgets.clear();
+    },
+  });
+
+  const context: RenderAwareExtensionUiContext = {
     select: (title, options, opts) => broker.select(title, options, opts),
     confirm: (title, message, opts) => broker.confirm(title, message, opts),
     input: (title, placeholder, opts) => broker.input(title, placeholder, opts),
@@ -20,10 +75,30 @@ export function createPiExtensionUiContext(broker: ExtensionUiBroker): Extension
     setWorkingIndicator: () => broker.unsupported("working indicators"),
     setHiddenThinkingLabel: () => broker.unsupported("hidden-thinking labels"),
     setWidget(key, content, options) {
-      if (content === undefined || Array.isArray(content)) {
-        broker.setWidget(key, content, options?.placement);
-      } else {
-        broker.unsupported("component widgets");
+      const existing = widgets.get(key);
+      if (existing?.kind === "component") existing.component.dispose?.();
+      widgets.delete(key);
+      if (content === undefined) {
+        broker.setWidget(key, undefined);
+        return;
+      }
+      const placement = options?.placement === "belowEditor" ? "belowEditor" : "aboveEditor";
+      if (Array.isArray(content)) {
+        const entry: WidgetEntry = { kind: "lines", lines: [...content], placement };
+        widgets.set(key, entry);
+        renderEntry(key, entry);
+        return;
+      }
+      try {
+        const entry: WidgetEntry = {
+          kind: "component",
+          component: content(widgetTui, HEADLESS_THEME),
+          placement,
+        };
+        widgets.set(key, entry);
+        renderEntry(key, entry);
+      } catch (error) {
+        broker.reportWidgetError(key, error);
       }
     },
     setFooter: (factory) => { if (factory) broker.unsupported("custom footers"); },
@@ -48,6 +123,7 @@ export function createPiExtensionUiContext(broker: ExtensionUiBroker): Extension
     setTheme: () => ({ success: false, error: "Theme switching is unsupported by Alu Dock" }),
     getToolsExpanded: () => broker.getToolsExpanded(),
     setToolsExpanded: (expanded) => broker.setToolsExpanded(expanded),
+    requestRender: scheduleRender,
   };
   return context;
 }

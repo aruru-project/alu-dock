@@ -482,6 +482,15 @@ export class DockHost {
         });
         this.sendSuccessAndEnd(socket, request.requestId, result); return;
       }
+      case "extension.widget_viewport.set": {
+        const instance = this.registry.get(request.params.instanceId);
+        instance.setExtensionWidgetViewport(
+          request.params.leaseToken,
+          request.params.expectedRuntimeGeneration,
+          { width: request.params.width, height: request.params.height },
+        );
+        this.sendSuccessAndEnd(socket, request.requestId, { accepted: true }); return;
+      }
       case "instance.stop": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const receipt=await instance.stop(request.params.operationId);return {receipt:{operationId:receipt.operationId,alreadyStopped:receipt.alreadyStopped,cleanupErrors:receipt.cleanupErrors},instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
@@ -633,6 +642,7 @@ function isMutationRequest(type: ControlRequest["type"]): boolean {
     && type !== "instance.list"
     && type !== "instance.get"
     && type !== "instance.attach"
+    && type !== "extension.widget_viewport.set"
     && type !== "model.list"
     && type !== "tool.list"
     && type !== "settings.get"

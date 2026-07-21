@@ -39,7 +39,7 @@ Pi runtime event
 | `src/core/tool-result-presentation.ts` | built-in details白名单、preview direction与control-frame fallback | runtime/protocol/TUI测试组 |
 | `src/core/managed-instance.ts` | lifecycle、admission、queue、mutation transaction、generation、event/state唯一owner | `managed-instance` |
 | `src/core/session-tree.ts` | runtime tree validation/projection、binary safety、generation-bound revision/pagination | `session-tree`, Pi tree tests |
-| `src/core/extension-ui-broker.ts` | bounded text interaction、controller lease、timeout/cancel/tombstone | `extension-ui-broker` |
+| `src/core/extension-ui-broker.ts` | bounded text interaction、widget viewport/render bridge、controller lease、timeout/cancel/tombstone | `extension-ui-broker` |
 | `src/pi/create-pi-instance.ts` | trust之后的runtime composition、安全reopen、ManagedInstance构造 | Pi reopen/stage tests |
 | `src/pi/session-inventory.ts` | runtime-free session metadata index；header/name增量扫描与可重建cache | `pi-session-inventory`, `dock-control` |
 | `src/pi/pi-runtime-host.ts` | 唯一生产Pi runtime adapter、session binding、Git observer lifecycle与replacement | `pi-runtime-host`, Pi real tests |
@@ -127,7 +127,7 @@ ManagedInstance replacement intent
 | model/thinking/settings | `config-projection.ts`, `pi-settings-adapter.ts` | Managed commit/event、settings TUI |
 | resources/tools/commands | `pi-runtime-host.ts` | closed config DTO、startup/client smoke |
 | Git branch/footer context | `git-branch-observer.ts`, `pi-runtime-host.ts` | Managed snapshot/event、Protocol capability、TUI footer、normal/worktree/detached tests |
-| Extension text UI | `extension-ui-broker.ts` | Pi adapter、Protocol interaction、TUI dialog |
+| Extension UI / widget | `extension-ui-broker.ts` | Pi adapter、Protocol interaction、Work widget surface与TUI dialog |
 | tool telemetry classification | `pi-tool-result-normalizer.ts` | real extension result shape、normalizer tests |
 
 ## Pi API规则

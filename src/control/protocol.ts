@@ -62,6 +62,7 @@ const MAX_JSON_ARRAY = 200;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 export const TOOLS_EXPANDED_CAPABILITY = "extension_ui.tools-expanded.v1" as const;
+export const EXTENSION_WIDGET_CAPABILITY = "extension_ui.widgets.v1" as const;
 export const GIT_BRANCH_CAPABILITY = "git.branch-footer.v1" as const;
 export const TOOL_RESULT_PRESENTATION_CAPABILITY = "tool-result-presentation.v1" as const;
 
@@ -72,6 +73,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "events.follow",
   "events.replay-purpose.v1",
   TOOLS_EXPANDED_CAPABILITY,
+  EXTENSION_WIDGET_CAPABILITY,
   GIT_BRANCH_CAPABILITY,
   TOOL_RESULT_PRESENTATION_CAPABILITY,
   "extension_ui.v1",
@@ -145,6 +147,7 @@ export type ControlRequest =
   | Request<"instance.reopen", { operationId: string; instanceId: string; sessionFile?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"interaction.respond", { operationId: string; instanceId: string; leaseToken: string; interactionId: string; response: InteractionResponse }>
   | Request<"extension.tools_expanded.set", { operationId: string; instanceId: string; expectedRuntimeGeneration: number; expanded: boolean }>
+  | Request<"extension.widget_viewport.set", { instanceId: string; leaseToken: string; expectedRuntimeGeneration: number; width: number; height: number }>
   | Request<"command.submit", { operationId: string; instanceId: string; message: string; delivery: DeliveryMode }>
   | Request<"command.abort", { operationId: string; instanceId: string }>
   | Request<"queue.dequeue", { operationId: string; instanceId: string }>
@@ -203,6 +206,7 @@ export interface AttachInitialDto {
 }
 export type EventsResult = AttachInitialDto;
 export interface InteractionRespondResult { interactionId: string; state: "resolved" | "already_resolved" }
+export interface WidgetViewportResult { accepted: true }
 export interface ToolsExpandedResult { instance: InstanceSnapshot }
 export interface PromptResult { receipt: CommandReceipt; instance: InstanceSnapshot }
 export interface AbortResult { instance: InstanceSnapshot }
@@ -252,6 +256,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "host.info") return "host.info";
   if (type === "instance.forget" || type === "catalog.prune") return "catalog.maintenance.v1";
   if (type === "extension.tools_expanded.set") return TOOLS_EXPANDED_CAPABILITY;
+  if (type === "extension.widget_viewport.set") return EXTENSION_WIDGET_CAPABILITY;
   if (type === "interaction.respond") return "extension_ui.v1";
   if (type === "instance.reopen") return "session.reopen";
   if (type === "instance.adopt") return "session.adopt.v1";
@@ -461,6 +466,19 @@ export function parseControlRequest(input: unknown): ControlRequest {
         expectedRuntimeGeneration: positive(params.expectedRuntimeGeneration, "params.expectedRuntimeGeneration", "invalid_request"),
         expanded: boolean(params.expanded, "params.expanded", "invalid_request"),
       } };
+    case "extension.widget_viewport.set": {
+      exact(params, ["instanceId", "leaseToken", "expectedRuntimeGeneration", "width", "height"], "invalid_request");
+      const width = positive(params.width, "params.width", "invalid_request");
+      const height = positive(params.height, "params.height", "invalid_request");
+      if (width > 10_000 || height > 10_000) throw validation("invalid_request", "Extension widget viewport exceeds 10000 cells");
+      return { ...base, type, params: {
+        instanceId: instanceId(),
+        leaseToken: string(params.leaseToken, "params.leaseToken", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request"),
+        expectedRuntimeGeneration: positive(params.expectedRuntimeGeneration, "params.expectedRuntimeGeneration", "invalid_request"),
+        width,
+        height,
+      } };
+    }
     case "command.submit": exact(params, ["operationId", "instanceId", "message", "delivery"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), message: string(params.message, "params.message", MAX_PROMPT_CHARS, "invalid_request"), delivery: enumeration(params.delivery, "params.delivery", ["auto", "prompt", "steer", "followUp"], "invalid_request") } };
     case "command.abort": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "queue.dequeue": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
@@ -643,6 +661,12 @@ export function parseInteractionRespondResult(input: unknown): InteractionRespon
   const value = object(input, "interaction response result");
   exact(value, ["interactionId", "state"]);
   return { interactionId: id(value.interactionId, "interactionId"), state: enumeration(value.state, "state", ["resolved", "already_resolved"]) };
+}
+export function parseWidgetViewportResult(input: unknown): WidgetViewportResult {
+  const value = object(input, "extension widget viewport result");
+  exact(value, ["accepted"]);
+  if (boolean(value.accepted, "accepted") !== true) throw validation("invalid_response", "Extension widget viewport was not accepted");
+  return { accepted: true };
 }
 export function parsePromptResult(input: unknown): PromptResult {
   const value = object(input, "prompt result"); exact(value, ["receipt", "instance"]);
