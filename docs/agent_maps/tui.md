@@ -26,7 +26,7 @@ runDockTui()
   └── editor/slash/key input ──> DockClient mutations
 ```
 
-当前独立 Hub 由 `src/tui/dock-hub.ts` 负责，固定根菜单顺序是 New、Continue、History、Pi Sessions、Leave。首屏只读取 Dock catalog；Continue 再展示 active/reopenable 工作，History 再展示 stopped 与不可恢复的 terminal records，Resume/Adopt inventory 在用户进入 Pi Sessions 后延迟加载。History Continue 从原 Pi session 创建新 Dock identity，Forget 只删 History record。managed-instance 列表与 Resume/Adopt inventory 不进入 attached `dock-tui.ts`。`-c`/`--continue` 是显式 current-project smart-entry。Hub 以一次 alternate-screen 生命周期和响应式大阿露/窄印章呈现所有菜单，菜单可见时独占 xterm 1000/1006 click/wheel，离开或转入 Work 前先关闭 tracking 并恢复 shell screen；唯一低频眨眼 timer 也只在 menu 可见时存在。Work 小阿露复用 current-session activity pulse，idle 不启动 timer；Work 始终使用可流动 main buffer 与 terminal-native mouse。
+当前独立 Hub 由 `src/tui/dock-hub.ts` 负责，固定根菜单顺序是 New、Continue、History、Pi Sessions、Leave。首屏只读取 Dock catalog；Continue 再展示 active/reopenable 工作，History 再展示 stopped 与不可恢复的 terminal records，全局 Resume/Adopt inventory 在用户进入 Pi Sessions 后延迟加载。History Continue 从原 Pi session 创建新 Dock identity，Forget 只删 History record。Work `/resume` 不创建 Dock identity，只切换当前 instance 的 Pi session；它的 picker 必须使用 `cwd` scope，只展示当前 Work 项目的 Pi sessions，跨项目恢复留在 Hub。`-c`/`--continue` 是显式 current-project smart-entry。Hub 以一次 alternate-screen 生命周期和响应式大阿露/窄印章呈现所有菜单，菜单可见时独占 xterm 1000/1006 click/wheel，离开或转入 Work 前先关闭 tracking 并恢复 shell screen；唯一低频眨眼 timer 也只在 menu 可见时存在。Work 小阿露复用 current-session activity pulse，idle 不启动 timer；Work 始终使用可流动 main buffer 与 terminal-native mouse。
 
 ## Scope边界
 

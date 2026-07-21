@@ -1239,7 +1239,7 @@ export async function runDockTui(
     const overlay = tui.showOverlay(frame, { width: "80%", minWidth: 40, maxHeight: "80%", anchor: "center", margin: 1 });
     tui.setFocus(frame);
 
-    void client.sessionInventory(instance.cwd, "all").then((inventory) => {
+    void client.sessionInventory(instance.cwd, "cwd").then((inventory) => {
       if (!active) return;
       const sessions = [...inventory.sessions]
         .sort((left, right) => (right.updatedAt ?? "").localeCompare(left.updatedAt ?? ""));
