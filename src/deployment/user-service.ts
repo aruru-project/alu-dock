@@ -217,7 +217,7 @@ export class UserServiceManager {
   private async tryProbe(): Promise<PingResult | undefined> {
     try { return await this.probe(); }
     catch (error) {
-      if (error instanceof ControlClientError && ["connection_error", "connection_closed", "timeout"].includes(error.code)) return undefined;
+      if (error instanceof ControlClientError && ["connection_error", "connection_closed", "timeout", "host_starting"].includes(error.code)) return undefined;
       throw error;
     }
   }

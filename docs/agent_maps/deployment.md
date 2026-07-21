@@ -71,7 +71,8 @@ live records 转为保守 unavailable 状态，不恢复 queue、Promise 或 eff
 - Socket path：private directory、socket mode `0600`、bind identity 校验；不得删除不属于当前
   Host 的 socket。
 - Readiness：unit active 不等于 ready；必须同时满足 MainPID、Protocol V2 hello 与 managed
-  capability set。确定性 protocol 错误立即失败，只有短暂连接错误会在 15 秒内重试。
+  capability set。确定性 protocol 错误立即失败；短暂连接错误与启动中的 `host_starting`
+  会在 15 秒内重试。
 
 ## 本地安装规则
 

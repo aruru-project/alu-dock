@@ -115,13 +115,15 @@ test("service install refuses to overwrite a non-generated user unit", async () 
 test("service readiness fails immediately on a definitive protocol error", async () => {
   const home = await mkdtemp(join(tmpdir(), "alu-dock-service-protocol-"));
   let sleeps = 0;
+  let started = false;
   const run: ServiceCommandRunner = (executable, args) => {
+    if (executable === "systemctl" && args[1] === "start") started = true;
     if (executable === "systemctl" && args[1] === "show") {
       return { status: 0, stdout: "ActiveState=active\nSubState=running\nMainPID=99\nUnitFileState=enabled\n", stderr: "" };
     }
     return { status: 0, stdout: "", stderr: "" };
   };
-  let probeCalls = 0;
+  let startedProbeCalls = 0;
   const manager = new UserServiceManager({
     home,
     nodePath: "/opt/node/bin/node",
@@ -130,8 +132,9 @@ test("service readiness fails immediately on a definitive protocol error", async
     timeoutMs: 15_000,
     run,
     probe: async () => {
-      probeCalls += 1;
-      if (probeCalls === 1) throw new ControlClientError("connection_error", "not started yet");
+      if (!started) throw new ControlClientError("connection_error", "inactive");
+      startedProbeCalls += 1;
+      if (startedProbeCalls === 1) throw new ControlClientError("host_starting", "Alu Dock host is not ready");
       throw new ControlClientError("invalid_response", "managed hello is malformed");
     },
     sleep: async () => { sleeps += 1; },
@@ -140,7 +143,8 @@ test("service readiness fails immediately on a definitive protocol error", async
   await assert.rejects(manager.start(), (error: unknown) => error instanceof ControlClientError
     && error.code === "invalid_response"
     && error.message === "managed hello is malformed");
-  assert.equal(sleeps, 0);
+  assert.equal(startedProbeCalls, 2);
+  assert.equal(sleeps, 1, "host_starting is transient but malformed hello still fails immediately");
 });
 
 test("service readiness requires MainPID match and complete managed capabilities", async () => {
