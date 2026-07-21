@@ -475,12 +475,18 @@ def main() -> int:
                 while b"generation 3" not in output and time.monotonic() < clone_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
-            elif action == "compact-detach":
+            elif action in ("compact-detach", "compact-queue"):
                 os.write(fd, b"/compact\r")
                 compact_deadline = time.monotonic() + 5
                 while b"compacting" not in output and time.monotonic() < compact_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
+                if action == "compact-queue":
+                    os.write(fd, b"manual queue survives\r")
+                    queue_deadline = time.monotonic() + 5
+                    while b"steer next" not in output and time.monotonic() < queue_deadline:
+                        if read_available(fd, output, 0.05) < 0:
+                            break
             elif action == "stage3":
                 steps = [
                     (b"/settings autoRetry false\r", b"autoRetry = false"),

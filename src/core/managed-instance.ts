@@ -1099,6 +1099,7 @@ export class ManagedInstance {
     }
 
     const compacting = this.runtimeCompactionInProgress();
+    const manualCompactionPending = this.manualCompactionAdmissionActive();
     const hostQueueCustody = this.hostQueueCustodyActive();
     if (this.session.classifyInput(message) === "extension_command") {
       if (this.commandAbortPending || this.queueMutationPending || (this.configurationPending && !compacting)) {
@@ -1107,7 +1108,7 @@ export class ManagedInstance {
       return this.submitExtensionCommand(message, operationId);
     }
     if (this.commandAbortPending || this.queueMutationPending) throw new InstanceBusyError(this.id, "submitting a prompt");
-    if (compacting || hostQueueCustody) return this.submitCompactionDeferred(message, delivery, operationId);
+    if (compacting || manualCompactionPending || hostQueueCustody) return this.submitCompactionDeferred(message, delivery, operationId);
     if (this.configurationPending) throw new InstanceBusyError(this.id, "submitting a prompt");
 
     // A queued compaction_end may leave the catalog projection momentarily
@@ -1429,6 +1430,10 @@ export class ManagedInstance {
     return this.runtimeCompactingObserved || this.session.isCompacting;
   }
 
+  private manualCompactionAdmissionActive(): boolean {
+    return this.configurationPending && this.configurationKind === "compaction";
+  }
+
   private hostQueueCustodyActive(): boolean {
     return (this.compactionQueueDrainTask !== undefined && this.compactionQueueDrainGeneration === this.runtimeGenerationValue)
       || this.pendingQueueMessages.some((item) => (
@@ -1534,7 +1539,9 @@ export class ManagedInstance {
     ));
     this.catalogAdmissionOperationId = undefined;
     await this.flushAdmissionRuntimeEvents();
-    if (!this.runtimeCompactionInProgress()) this.scheduleCompactionQueueDrain(false);
+    if (!this.runtimeCompactionInProgress() && !this.manualCompactionAdmissionActive()) {
+      this.scheduleCompactionQueueDrain(false);
+    }
     return {
       accepted: true,
       instanceId: this.id,
@@ -1550,6 +1557,7 @@ export class ManagedInstance {
     if (
       (this.compactionQueueDrainTask && this.compactionQueueDrainGeneration === this.runtimeGenerationValue)
       || this.runtimeCompactionInProgress()
+      || this.manualCompactionAdmissionActive()
       || this.queueMutationPending
       || this.stopPromise
     ) return;
@@ -2550,6 +2558,7 @@ export class ManagedInstance {
   }
 
   private endConfiguration(): void {
+    const endedManualCompaction = this.configurationKind === "compaction";
     this.configurationPending = false;
     if (this.configurationKind === "navigation") {
       this.resolveNavigationStarted?.();
@@ -2566,6 +2575,9 @@ export class ManagedInstance {
     this.resolveConfigurationBoundary?.();
     this.resolveConfigurationBoundary = undefined;
     this.configurationBoundary = undefined;
+    if (endedManualCompaction && !this.runtimeCompactionInProgress()) {
+      this.scheduleCompactionQueueDrain(false);
+    }
   }
 
   private async replaceRuntime<T extends RuntimeReplacementResult>(

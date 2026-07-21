@@ -1600,6 +1600,40 @@ test("manual compaction aborts a running model command without stealing its run 
   assert.ok(events.some((event) => event.type === "compaction.completed" && event.data.operationId === "manual-compact-op"));
 });
 
+test("manual compaction takes Host queue custody before the runtime start event", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const first = new DockClient({ socketPath: harness.socketPath });
+  const second = new DockClient({ socketPath: harness.socketPath });
+  const created = await first.create(harness.directory, "manual-compaction-prestart-queue");
+  const runtime = harness.sessions.get(created.id)!;
+  const start = runtime.blockNextCompactionStart();
+  const active = runtime.blockNextCompaction();
+  const promptCallsBeforeCompaction = runtime.promptCalls;
+
+  const compacting = first.compactSession(created.id, undefined, "manual-prestart-compact-op");
+  await start.entered;
+  assert.equal(runtime.isCompacting, false, "fixture is still before Pi's compaction_start boundary");
+
+  const queued = await second.prompt(created.id, "queued before manual compaction start", "auto", "manual-prestart-queue-op");
+  assert.equal(queued.receipt.queued, true);
+  assert.equal(queued.receipt.delivery, "steer");
+  assert.equal(runtime.promptCalls, promptCallsBeforeCompaction, "Host custody must not race a fresh prompt against compaction startup");
+  assert.equal((await second.status(created.id)).pending.total, 1);
+
+  start.release();
+  await active.entered;
+  assert.equal(runtime.isCompacting, true);
+  assert.equal(runtime.promptCalls, promptCallsBeforeCompaction);
+
+  active.finish();
+  await compacting;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(runtime.promptCalls, promptCallsBeforeCompaction + 1);
+  assert.equal(runtime.promptMessages.at(-1), "queued before manual compaction start");
+});
+
 test("compact uses its explicit long-mutation timeout instead of the ordinary request timeout", async (context) => {
   const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
   context.after(() => cleanupHarness(harness));
@@ -1670,6 +1704,35 @@ test("SSH TUI Ctrl+D detaches promptly while Host-owned compaction remains block
   block.finish();
   assert.equal((await client.status(created.id)).lifecycle, "active");
   assert.equal(runtime.sessionMutationCalls.compact, 1);
+});
+
+test("the same Work can queue input during manual compaction and detach without losing Host custody", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "pty-manual-compaction-queue", "create-pty-manual-compaction-queue");
+  const runtime = harness.sessions.get(created.id)!;
+  const block = runtime.blockNextCompaction();
+  const promptCallsBeforeCompaction = runtime.promptCalls;
+
+  const pty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", harness.socketPath,
+    "attach", created.id,
+  ], "compact-queue");
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-4_000));
+  assert.equal(pty.status, 0, output.slice(-4_000));
+  assert.match(output, /steer next/u, "manual compaction must leave the Work editor able to submit into Queue");
+  assert.equal(runtime.promptCalls, promptCallsBeforeCompaction);
+  assert.equal((await client.status(created.id)).pending.total, 1, "queued text remains Host-owned after TUI detach");
+
+  block.finish();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(runtime.promptCalls, promptCallsBeforeCompaction + 1);
+  assert.equal(runtime.promptMessages.at(-1), "manual queue survives");
 });
 
 test("Sol-style compaction keeps a concurrent cross-client prompt visible and hands it to the hidden continuation once", async (context) => {
@@ -3982,7 +4045,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "work-responsive" | "hub-exit" | "hub-click-leave" | "hub-narrow" | "hub-signal" | "hub-signal-inventory" | "hub-new" | "hub-continue" | "hub-mouse-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "compact-detach" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "history-flow" | "history-live-flow" | "flow-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "work-native-mouse" | "extension-dialogs" | "extension-replacement" = "detach",
+  action: "detach" | "work-responsive" | "hub-exit" | "hub-click-leave" | "hub-narrow" | "hub-signal" | "hub-signal-inventory" | "hub-new" | "hub-continue" | "hub-mouse-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "compact-detach" | "compact-queue" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "history-flow" | "history-live-flow" | "flow-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "work-native-mouse" | "extension-dialogs" | "extension-replacement" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {

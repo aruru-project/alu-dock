@@ -1336,7 +1336,6 @@ export async function runDockTui(
   }
 
   async function compactSession(customInstructions?: string): Promise<void> {
-    editor.disableSubmit = true;
     tui.requestRender();
     try {
       const result = await client.compactSession(instance.id, customInstructions);
@@ -1358,7 +1357,7 @@ export async function runDockTui(
         showError(error);
       }
     }
-    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.requestRender(); }
+    finally { tui.requestRender(); }
   }
 
   async function reloadSession(): Promise<void> {

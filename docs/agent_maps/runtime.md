@@ -140,6 +140,7 @@ ManagedInstance replacement intent
 - Setting mutation固定：public setter → `await flush()` → `drainErrors()`。
 - `compaction.reserveTokens`与`compaction.keepRecentTokens`在Pi提供public setter前只读。
 - Extension exact registered command先由当前generation runner分类，保持`delivery:"prompt", queued:false`；unknown slash、skill、template仍走Pi-native prompt语义。
+- Manual compaction intent一旦进入`configurationKind:"compaction"`，普通prompt admission即属于Host compaction Queue custody；不能等待Pi的`compaction_start`才开放Queue。pre-start消息不得提前drain与`session.compact()`竞争；manual mutation结束且runtime不再compacting后再恢复fresh dispatch。
 - Nonzero subagent child exit必须成为model/history/TUI都可见的真实tool error。
 - `pi install`、`pi config`与`pi login`仍由原Pi CLI负责。
 

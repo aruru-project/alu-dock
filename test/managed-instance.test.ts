@@ -370,6 +370,17 @@ class KnownCompactionFailureSession extends FakeRuntimeSession {
   }
 }
 
+class PreStartCompactionFailureSession extends FakeRuntimeSession {
+  readonly compactEntered = new Deferred<void>();
+  readonly releaseCompact = new Deferred<void>();
+
+  async compact(): Promise<RuntimeCompactionResult> {
+    this.compactEntered.resolve();
+    await this.releaseCompact.promise;
+    throw new RuntimeCompactionKnownFailureError("nothing_to_compact", "Nothing to compact before start");
+  }
+}
+
 function createInstance(session = new FakeRuntimeSession(), eventCapacity = 50): ManagedInstance {
   let commandSequence = 0;
   return new ManagedInstance({
@@ -549,6 +560,26 @@ test("known compaction failure remains definitive instead of becoming effect_unk
   assert.equal(instance.snapshot().execution, "idle");
   assert.ok(instance.eventsSince().events.some((event) => event.type === "compaction.completed" && event.data.error?.includes("Nothing to compact")));
   assert.equal((await instance.listModels()).models.length, 2, "configuration gate must be released after a known no-op");
+});
+
+test("manual compaction pre-start custody drains after a definitive no-op", async () => {
+  const session = new PreStartCompactionFailureSession();
+  const instance = createInstance(session);
+  const compacting = instance.compactSession("manual-noop");
+  await session.compactEntered.promise;
+
+  const receipt = await instance.submit("run after manual no-op", "auto", "manual-noop-queued");
+  assert.equal(receipt.queued, true);
+  assert.equal(session.promptCalls.length, 0, "pre-start custody cannot dispatch while manual compaction is unresolved");
+
+  session.releaseCompact.resolve();
+  await assert.rejects(
+    compacting,
+    (error: unknown) => error instanceof RuntimeCompactionKnownFailureError
+      && error.reason === "nothing_to_compact",
+  );
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(session.promptCalls.at(-1)?.text, "run after manual no-op");
 });
 
 test("Sol-style settled compaction defers concurrent input in the Host and flushes it exactly once", async () => {
