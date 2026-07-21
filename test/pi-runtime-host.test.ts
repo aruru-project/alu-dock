@@ -519,7 +519,7 @@ test("Pi runtime host projects public session stats for the SSH footer", async (
   await host.dispose();
 });
 
-test("Pi runtime events replace raw built-in details with a closed presentation", async () => {
+test("Pi runtime events expose useful built-in presentation without raw private details", async () => {
   const trace: string[] = [];
   const { host, initial } = await runtimeHost(trace);
   const events: Array<{ type: string; [key: string]: unknown }> = [];
@@ -542,7 +542,7 @@ test("Pi runtime events replace raw built-in details with a closed presentation"
   const event = events.find((candidate) => candidate.type === "tool_execution_end");
   const result = event?.result as Record<string, unknown> | undefined;
   assert.deepEqual(result?.presentation, {
-    kind: "bash", preview: "tail", completeness: "truncated", notices: [
+    kind: "bash", preview: "tail", notices: [
       { code: "output_truncated", by: "lines", shown: 2, total: 3, limit: 2 },
       { code: "full_output_saved", path: "/tmp/pi-bash-event.log" },
     ],
@@ -591,7 +591,7 @@ test("Pi runtime history uses public context entries in model-visible order", as
   await host.dispose();
 });
 
-test("Pi runtime history retains only the bounded edit diff presentation detail", async () => {
+test("Pi runtime history retains Pi edit diffs without private detail payloads", async () => {
   const trace: string[] = [];
   const { host, initial } = await runtimeHost(trace, (_owner, session) => {
     session.historyEntries = [{
@@ -625,7 +625,6 @@ test("Pi runtime history retains only the bounded edit diff presentation detail"
     toolPresentation: {
       kind: "edit",
       preview: "head-tail",
-      completeness: "complete",
       notices: [],
       displayDiff: " 1 const keep = true;\n-2 const value = 'old';\n+2 const value = 'new';",
     },
@@ -650,7 +649,7 @@ test("Pi runtime history retains only the bounded edit diff presentation detail"
   });
   const malformed = host.getHistory().find((entry) => entry.entryId === "edit-result-malformed");
   assert.deepEqual(malformed?.toolPresentation, {
-    kind: "edit", preview: "head-tail", completeness: "complete", notices: [],
+    kind: "edit", preview: "head-tail", notices: [],
   });
   assert.doesNotMatch(JSON.stringify(malformed), /private malformed patch|not a numbered Pi edit diff/u);
 
@@ -670,9 +669,8 @@ test("Pi runtime history retains only the bounded edit diff presentation detail"
       timestamp: 3,
     },
   });
-  const boundedLarge = host.getHistory().find((entry) => entry.entryId === "edit-result-large")?.toolPresentation?.displayDiff;
-  assert.ok(boundedLarge !== undefined && boundedLarge.length <= 8_000);
-  assert.match(boundedLarge, /\[tool output truncated by Host projection\]$/u);
+  const projectedLarge = host.getHistory().find((entry) => entry.entryId === "edit-result-large")?.toolPresentation?.displayDiff;
+  assert.equal(projectedLarge, largeDiff, "Dock does not re-truncate Pi's display diff");
 
   const singleLongRow = `+1 ${"x".repeat(20_000)}`;
   initial.historyEntries.push({
@@ -690,10 +688,8 @@ test("Pi runtime history retains only the bounded edit diff presentation detail"
       timestamp: 4,
     },
   });
-  const boundedSingleRow = host.getHistory().find((entry) => entry.entryId === "edit-result-single-long-row")?.toolPresentation?.displayDiff;
-  assert.ok(boundedSingleRow !== undefined && boundedSingleRow.length <= 8_000);
-  assert.match(boundedSingleRow, /^\+1 x/u);
-  assert.match(boundedSingleRow, /\[tool output truncated by Host projection\]$/u);
+  const projectedSingleRow = host.getHistory().find((entry) => entry.entryId === "edit-result-single-long-row")?.toolPresentation?.displayDiff;
+  assert.equal(projectedSingleRow, singleLongRow, "a long Pi diff row remains available to Ctrl+O details");
   await host.dispose();
 });
 
@@ -729,27 +725,27 @@ test("Pi runtime history projects every built-in result detail without private p
 
   const presentations = Object.fromEntries(host.getHistory().map((entry) => [entry.entryId, entry.toolPresentation]));
   assert.deepEqual(presentations.bash, {
-    kind: "bash", preview: "tail", completeness: "truncated", notices: [
+    kind: "bash", preview: "tail", notices: [
       { code: "output_truncated", by: "lines", shown: 2_000, total: 3_000, limit: 2_000 },
       { code: "full_output_saved", path: "/tmp/pi-bash-safe.log" },
     ],
   });
   assert.deepEqual(presentations.read, {
-    kind: "read", preview: "head", completeness: "truncated", notices: [
+    kind: "read", preview: "head", notices: [
       { code: "output_truncated", by: "bytes", shown: 1_500, total: 4_000, limit: 51_200 },
       { code: "continue_with_offset", offset: 2_001 },
     ],
   });
   assert.deepEqual(presentations.grep, {
-    kind: "grep", preview: "head", completeness: "truncated", notices: [
+    kind: "grep", preview: "head", notices: [
       { code: "output_truncated", by: "bytes", shown: 100, total: 100, limit: 51_200 },
       { code: "limit_reached", unit: "matches", limit: 100 },
       { code: "lines_truncated", maxChars: 500 },
     ],
   });
-  assert.deepEqual(presentations.find, { kind: "find", preview: "head", completeness: "truncated", notices: [{ code: "limit_reached", unit: "results", limit: 1_000 }] });
-  assert.deepEqual(presentations.ls, { kind: "ls", preview: "head", completeness: "truncated", notices: [{ code: "limit_reached", unit: "entries", limit: 500 }] });
-  assert.deepEqual(presentations.write, { kind: "write", preview: "head", completeness: "complete", notices: [] });
+  assert.deepEqual(presentations.find, { kind: "find", preview: "head", notices: [{ code: "limit_reached", unit: "results", limit: 1_000 }] });
+  assert.deepEqual(presentations.ls, { kind: "ls", preview: "head", notices: [{ code: "limit_reached", unit: "entries", limit: 500 }] });
+  assert.deepEqual(presentations.write, { kind: "write", preview: "head", notices: [] });
   assert.doesNotMatch(JSON.stringify(host.getHistory()), /privatePayload|must-not-cross/u);
   await host.dispose();
 });

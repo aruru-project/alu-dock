@@ -152,6 +152,9 @@ test("Alu palette uses semantic local surfaces without taking over the terminal 
   assert.match(truecolor.accent("accent"), /38;2;221;126;158/u);
   assert.match(truecolor.success("success"), /38;2;230;225;242/u);
   assert.match(truecolor.warning("truncated"), /38;2;246;193;71/u, "tool decision notices use canonical Alu gold");
+  assert.match(truecolor.diffAdded("+ added"), /38;2;108;132;205/u, "diff additions use canonical Alu indigo");
+  assert.match(truecolor.diffRemoved("- removed"), /38;2;221;126;158/u, "diff removals use canonical Alu pink");
+  assert.match(truecolor.diffHunk("@@ hunk"), /38;2;246;193;71/u, "diff hunks use canonical Alu gold");
   assert.match(truecolor.selection("selected"), /48;2;108;132;205/u);
   const nestedSurface = truecolor.toolSurface(`${truecolor.success("✓")} trailing padding`);
   assert.match(nestedSurface, /\u001b\[0m\u001b\[38;2;174;153;168;48;2;27;17;20m trailing padding/u,
@@ -283,6 +286,64 @@ test("persisted Pi edit results retain the same explicit added and deleted previ
   assert.match(rendered, /-1 return oldValue;/u);
   assert.match(rendered, /\+1 return newValue;/u);
   assert.doesNotMatch(rendered, /Successfully replaced/u);
+});
+
+test("collapsed multi-hunk edit previews prioritize actual changes over surrounding context", () => {
+  const conversation = new DockConversation();
+  const displayDiff = [
+    "     ...",
+    "  50 success: ALU_PALETTE.white,",
+    "  51 queue: ALU_PALETTE.highlight,",
+    "  52 warning: ALU_PALETTE.gold,",
+    "  53 error: ALU_PALETTE.pink,",
+    "+ 54 diffAdded: ALU_PALETTE.navy,",
+    "+ 55 diffRemoved: ALU_PALETTE.pink,",
+    "+ 56 diffHunk: ALU_PALETTE.gold,",
+    "  54 userSurface: shadeTone(ALU_PALETTE.pink),",
+    "  55 toolSurface: shadeTone(ALU_PALETTE.hair),",
+    "     ...",
+    "  96 success: decorate(tones.success),",
+    "  97 queue: decorate(tones.queue),",
+    "  98 warning: decorate(tones.warning),",
+    "  99 error: decorate(tones.error),",
+    "+103 diffAdded: decorate(tones.diffAdded),",
+    "+104 diffRemoved: decorate(tones.diffRemoved),",
+    "+105 diffHunk: decorate(tones.diffHunk),",
+    " 100 muted: decorate(tones.muted),",
+    " 101 faint: decorate(tones.faint),",
+    "     ...",
+  ].join("\n");
+  conversation.apply(event(1, "tool.started", {
+    toolCallId: "multi-edit",
+    toolName: "edit",
+    args: {
+      path: "src/tui/theme.ts",
+      edits: [
+        { oldText: "old first block", newText: "new first block" },
+        { oldText: "old second block", newText: "new second block" },
+      ],
+    },
+  }));
+  conversation.apply(event(2, "tool.completed", {
+    toolCallId: "multi-edit",
+    toolName: "edit",
+    isError: false,
+    text: displayDiff,
+    presentation: {
+      kind: "edit",
+      preview: "head-tail",
+      notices: [],
+      displayDiff,
+    },
+  }));
+
+  const collapsed = conversation.render(100).join("\n");
+  assert.match(collapsed, /\+ 54 diffAdded/u);
+  assert.match(collapsed, /\+ 56 diffHunk/u);
+  assert.match(collapsed, /\+103 diffAdded/u);
+  assert.match(collapsed, /\+105 diffHunk/u);
+  assert.match(collapsed, /context visual lines hidden · Ctrl\+O details/u);
+  assert.doesNotMatch(collapsed, /old first block|old second block/u, "collapsed success must not fall back to edit arguments");
 });
 
 test("persisted assistant content blocks retain Pi order instead of telemetry grouping", () => {
@@ -511,10 +572,11 @@ test("conversation renders Markdown, code, thinking policy, and diff tools at bo
   assert.equal(hidden.snapshot().some((entry) => entry.kind === "thinking"), false);
 });
 
-test("Host-truncated Pi edit diffs keep diff semantics and never fall back to raw edit arguments", () => {
+test("long Pi edit diffs remain available and never fall back to raw edit arguments", () => {
   const conversation = new DockConversation();
-  const projectedDiff = projectDisplayEditDiff(`-1 oldValue();\n+1 newValue();\n+2 ${"const next = value; ".repeat(1_000)}`);
-  assert.ok(projectedDiff !== undefined);
+  const sourceDiff = `-1 oldValue();\n+1 newValue();\n+2 ${"const next = value; ".repeat(1_000)}`;
+  const projectedDiff = projectDisplayEditDiff(sourceDiff);
+  assert.equal(projectedDiff, sourceDiff, "Dock does not add a second display truncation layer");
   conversation.apply(event(1, "tool.started", {
     toolCallId: "edit-truncated",
     toolName: "edit",
@@ -530,7 +592,7 @@ test("Host-truncated Pi edit diffs keep diff semantics and never fall back to ra
   const collapsed = conversation.render(80).join("\n");
   assert.match(collapsed, /-1 oldValue\(\);/u);
   assert.match(collapsed, /\+1 newValue\(\);/u);
-  assert.match(collapsed, /truncated by Host projection/u);
+  assert.doesNotMatch(collapsed, /truncated by Host projection/u);
   conversation.toggleLatestToolExpanded();
   const expanded = conversation.render(80).join("\n");
   assert.doesNotMatch(expanded, /private old argument|private new argument/u);
@@ -645,7 +707,7 @@ test("built-in presentations keep decision-critical tail, limits, continuation, 
 
   const bashText = `${Array.from({ length: 30 }, (_, index) => `bash line ${index + 1}`).join("\n")}\n\n[Showing lines 71-100 of 100. Full output: /tmp/pi-bash-visible.log]`;
   const bash = renderCompleted("bash", bashText, {
-    kind: "bash", preview: "tail", completeness: "truncated", notices: [
+    kind: "bash", preview: "tail", notices: [
       { code: "output_truncated", by: "lines", shown: 30, total: 100, limit: 30 },
       { code: "full_output_saved", path: "/tmp/pi-bash-visible.log" },
     ],
@@ -659,21 +721,21 @@ test("built-in presentations keep decision-critical tail, limits, continuation, 
 
   const readText = `${Array.from({ length: 15 }, (_, index) => `read line ${index + 1}`).join("\n")}\n\n[Showing lines 1-15 of 40. Use offset=16 to continue.]`;
   const read = renderCompleted("read", readText, {
-    kind: "read", preview: "head", completeness: "truncated", notices: [{ code: "continue_with_offset", offset: 16 }],
+    kind: "read", preview: "head", notices: [{ code: "continue_with_offset", offset: 16 }],
   });
   assert.match(read, /read line 1/u);
   assert.doesNotMatch(read, /read line 15/u);
   assert.match(read, /continue with read offset=16/u);
 
   const hostProjectedRead = renderCompleted("read", `${Array.from({ length: 30 }, (_, index) => `projected line ${index + 1}`).join("\n")}\n[tool output truncated by Host projection]`, {
-    kind: "read", preview: "head", completeness: "truncated", notices: [{ code: "host_projection_truncated" }],
+    kind: "read", preview: "head", notices: [{ code: "host_projection_truncated" }],
   });
   assert.match(hostProjectedRead, /projected line 1/u);
   assert.doesNotMatch(hostProjectedRead, /projected line 30/u, "head preview may fold ordinary tail rows");
   assert.match(hostProjectedRead, /tool output truncated by Host projection/u, "Host truncation stays outside the foldable content budget");
 
   const grep = renderCompleted("grep", Array.from({ length: 20 }, (_, index) => `match ${index + 1}`).join("\n"), {
-    kind: "grep", preview: "head", completeness: "truncated", notices: [
+    kind: "grep", preview: "head", notices: [
       { code: "limit_reached", unit: "matches", limit: 100 },
       { code: "lines_truncated", maxChars: 500 },
     ],
@@ -682,11 +744,11 @@ test("built-in presentations keep decision-critical tail, limits, continuation, 
   assert.match(grep, /use read for full lines/u);
 
   const find = renderCompleted("find", "a.ts\nb.ts", {
-    kind: "find", preview: "head", completeness: "truncated", notices: [{ code: "limit_reached", unit: "results", limit: 1_000 }],
+    kind: "find", preview: "head", notices: [{ code: "limit_reached", unit: "results", limit: 1_000 }],
   });
   assert.match(find, /1,000 results limit reached/u);
   const ls = renderCompleted("ls", "a\nb", {
-    kind: "ls", preview: "head", completeness: "truncated", notices: [{ code: "limit_reached", unit: "entries", limit: 500 }],
+    kind: "ls", preview: "head", notices: [{ code: "limit_reached", unit: "entries", limit: 500 }],
   });
   assert.match(ls, /500 entries limit reached/u);
 
@@ -694,12 +756,12 @@ test("built-in presentations keep decision-critical tail, limits, continuation, 
   semanticUpdate.apply(event(1, "tool.started", { toolCallId: "same-output", toolName: "find", args: { path: "." } }));
   semanticUpdate.apply(event(2, "tool.output_updated", {
     toolCallId: "same-output", text: "same projected text",
-    presentation: { kind: "find", preview: "head", completeness: "complete", notices: [] },
+    presentation: { kind: "find", preview: "head", notices: [] },
   }));
   assert.doesNotMatch(semanticUpdate.render(100).join("\n"), /results limit reached/u);
   semanticUpdate.apply(event(3, "tool.output_updated", {
     toolCallId: "same-output", text: "same projected text",
-    presentation: { kind: "find", preview: "head", completeness: "truncated", notices: [{ code: "limit_reached", unit: "results", limit: 1_000 }] },
+    presentation: { kind: "find", preview: "head", notices: [{ code: "limit_reached", unit: "results", limit: 1_000 }] },
   }));
   assert.match(semanticUpdate.render(100).join("\n"), /1,000 results limit reached/u, "presentation-only updates are decision data");
 
@@ -835,7 +897,7 @@ test("collapsed tool failures expose a safe first-line reason and preserve expan
     toolName: "bash",
     isError: true,
     text: `${Array.from({ length: 30 }, (_, index) => `noisy output ${index + 1}`).join("\n")}\n\nCommand exited with code 7`,
-    presentation: { kind: "bash", preview: "tail", completeness: "complete", notices: [] },
+    presentation: { kind: "bash", preview: "tail", notices: [] },
   }));
   const longFailurePreview = longBashFailure.render(100).join("\n");
   assert.match(longFailurePreview, /× bash.*Command exited with code 7/u, "terminal failure reason stays in the header even after noisy output");

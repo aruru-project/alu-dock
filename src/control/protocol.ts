@@ -1,6 +1,5 @@
 import { containsBinaryPayload, type InteractionResponse } from "../core/extension-ui-broker.js";
 import {
-  toolPresentationMatchesText,
   validateBuiltInToolPresentation,
   type BuiltInToolPresentation,
 } from "../core/tool-result-presentation.js";
@@ -54,6 +53,7 @@ export const MAX_INSTANCE_LIST_ITEMS = 100;
 export const MAX_INSTANCE_LIST_RESULT_BYTES = 768 * 1_024;
 export const MAX_CATALOG_PRUNE_ITEMS = 1_000;
 const MAX_TEXT = 8_000;
+const MAX_TOOL_RESULT_TEXT = 256_000;
 const MAX_MESSAGE = 2_048;
 const MAX_COLLECTION = 2_000;
 const MAX_JSON_DEPTH = 8;
@@ -1112,16 +1112,16 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "tool.args_updated": exact(data, ["toolCallId", "args", "omittedFields"]); return toolArgs(data, field, false);
     case "tool.output_updated": {
       exact(data, ["toolCallId", "text", "presentation"]);
-      const resultText = boundedString(data.text, `${field}.text`, MAX_TEXT);
-      const presentation = data.presentation === undefined ? undefined : parseToolPresentation(data.presentation, `${field}.presentation`, undefined, false, resultText);
+      const resultText = boundedString(data.text, `${field}.text`, MAX_TOOL_RESULT_TEXT);
+      const presentation = data.presentation === undefined ? undefined : parseToolPresentation(data.presentation, `${field}.presentation`, undefined, false);
       return { toolCallId: text("toolCallId", 128), text: resultText, ...(presentation === undefined ? {} : { presentation }) };
     }
     case "tool.completed": {
       exact(data, ["toolCallId", "toolName", "text", "isError", "presentation", "omittedFields"]);
       const toolName = text("toolName", 256);
       const isError = boolean(data.isError, "isError");
-      const resultText = boundedString(data.text, `${field}.text`, MAX_TEXT);
-      const presentation = data.presentation === undefined ? undefined : parseToolPresentation(data.presentation, `${field}.presentation`, toolName, isError, resultText);
+      const resultText = boundedString(data.text, `${field}.text`, MAX_TOOL_RESULT_TEXT);
+      const presentation = data.presentation === undefined ? undefined : parseToolPresentation(data.presentation, `${field}.presentation`, toolName, isError);
       return { toolCallId: text("toolCallId", 128), toolName, text: resultText, isError, ...(presentation === undefined ? {} : { presentation }), omittedFields: omitted(data.omittedFields, "omittedFields") };
     }
     case "queue.changed": exact(data, ["steering", "followUp", "total"]); return parsePending(data, field);
@@ -1158,14 +1158,11 @@ function parseToolPresentation(
   field: string,
   toolName: string | undefined,
   isError: boolean,
-  resultText: string,
 ): BuiltInToolPresentation {
   const value = object(input, field);
   const kind = typeof value.kind === "string" ? value.kind : undefined;
   const projected = validateBuiltInToolPresentation(toolName ?? kind, value, isError);
-  if (projected === undefined || !toolPresentationMatchesText(projected, resultText, isError)) {
-    throw validation("invalid_response", `${field} is not a valid closed built-in tool presentation`);
-  }
+  if (projected === undefined) throw validation("invalid_response", `${field} is not a valid built-in tool presentation`);
   return projected;
 }
 
@@ -1178,8 +1175,8 @@ function parseContent(input: unknown, field: string): ContentBlockDto[] {
       exact(block, ["type", "toolCallId", "toolName", "text", "isError", "presentation", "omittedFields"]);
       const toolName = string(block.toolName, "toolName", 256);
       const isError = boolean(block.isError, "isError");
-      const resultText = boundedString(block.text, "text", MAX_TEXT);
-      const presentation = block.presentation === undefined ? undefined : parseToolPresentation(block.presentation, `${field}[${index}].presentation`, toolName, isError, resultText);
+      const resultText = boundedString(block.text, "text", MAX_TOOL_RESULT_TEXT);
+      const presentation = block.presentation === undefined ? undefined : parseToolPresentation(block.presentation, `${field}[${index}].presentation`, toolName, isError);
       return { type, toolCallId: id(block.toolCallId, "toolCallId"), toolName, text: resultText, isError, ...(presentation === undefined ? {} : { presentation }), omittedFields: omitted(block.omittedFields, "omittedFields") };
     }
     exact(block, ["type", "kind", "description"]); return { type, kind: enumeration(block.kind, "kind", ["image", "binary"]), description: string(block.description, "description", MAX_MESSAGE) };

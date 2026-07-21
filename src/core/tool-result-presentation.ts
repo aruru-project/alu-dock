@@ -4,15 +4,15 @@ import {
   projectDisplayEditDiff,
 } from "./edit-diff-projection.js";
 
-export const MAX_TOOL_RESULT_TEXT_CHARS = 8_000;
+// Pi built-ins already apply their own output policy. This limit exists only so one
+// tool result remains below the 1 MiB control-frame ceiling; it is not a UI preview limit.
+export const MAX_TRANSPORT_TOOL_RESULT_CHARS = 256_000;
 export const MAX_TOOL_FULL_OUTPUT_PATH_CHARS = 4_096;
 export const MAX_TOOL_PRESENTATION_NOTICES = 8;
 export const MAX_TOOL_PRESENTATION_COUNT = 1_000_000_000;
 
 export type BuiltInToolKind = "bash" | "read" | "edit" | "write" | "grep" | "find" | "ls";
 export type ToolPreviewDirection = "head" | "tail" | "head-tail";
-export type ToolResultCompleteness = "complete" | "truncated";
-
 export type ToolResultNotice =
   | {
     code: "output_truncated";
@@ -32,7 +32,6 @@ export type ToolResultNotice =
 export interface BuiltInToolPresentation {
   kind: BuiltInToolKind;
   preview: ToolPreviewDirection;
-  completeness: ToolResultCompleteness;
   notices: ToolResultNotice[];
   displayDiff?: string;
 }
@@ -103,7 +102,6 @@ export function projectBuiltInToolPresentation(
     return {
       kind,
       preview: previewDirectionForTool(kind),
-      completeness: presentationCompleteness(canonicalNotices),
       notices: canonicalNotices,
       ...(displayDiff === undefined ? {} : { displayDiff }),
     };
@@ -111,13 +109,12 @@ export function projectBuiltInToolPresentation(
     return {
       kind,
       preview: previewDirectionForTool(kind),
-      completeness: "complete",
       notices: [],
     };
   }
 }
 
-/** Revalidate an internal RuntimeSession projection before it reaches a client. */
+/** Keep useful built-in presentation fields; malformed optional metadata never suppresses valid output. */
 export function validateBuiltInToolPresentation(
   toolName: unknown,
   value: unknown,
@@ -126,39 +123,29 @@ export function validateBuiltInToolPresentation(
   const expectedKind = builtInToolKind(toolName);
   const record = plainRecord(value);
   if (expectedKind === undefined || record === undefined) return undefined;
-  try {
-    if (!hasOnlyKeys(record, ["kind", "preview", "completeness", "notices", "displayDiff"])) return undefined;
-    if (record.kind !== expectedKind || record.preview !== previewDirectionForTool(expectedKind)) return undefined;
-    if (record.completeness !== "complete" && record.completeness !== "truncated") return undefined;
-    if (!Array.isArray(record.notices) || record.notices.length > MAX_TOOL_PRESENTATION_NOTICES) return undefined;
-    const notices = record.notices.map(validateNotice);
-    if (notices.some((notice) => notice === undefined)) return undefined;
-    const canonicalNotices = notices as ToolResultNotice[];
-    if (!noticesAllowedForTool(expectedKind, canonicalNotices)) return undefined;
-    if (record.completeness !== presentationCompleteness(canonicalNotices)) return undefined;
-    if (new Set(canonicalNotices.map(noticeKey)).size !== canonicalNotices.length) return undefined;
 
-    let displayDiff: string | undefined;
-    if (record.displayDiff !== undefined) {
-      if (expectedKind !== "edit" || isError || typeof record.displayDiff !== "string" || !isProjectedDisplayEditDiff(record.displayDiff)) return undefined;
-      displayDiff = record.displayDiff;
-    }
-    const diffWasHostTruncated = displayDiff !== undefined && hasHostProjectionMarkerLine(displayDiff);
-    const declaresHostTruncation = canonicalNotices.some((notice) => notice.code === "host_projection_truncated");
-    if (expectedKind === "edit" && displayDiff !== undefined && diffWasHostTruncated !== declaresHostTruncation) return undefined;
-    return {
-      kind: expectedKind,
-      preview: previewDirectionForTool(expectedKind),
-      completeness: record.completeness,
-      notices: canonicalNotices,
-      ...(displayDiff === undefined ? {} : { displayDiff }),
-    };
-  } catch {
-    return undefined;
-  }
+  const notices = Array.isArray(record.notices)
+    ? deduplicateNotices(record.notices
+      .slice(0, MAX_TOOL_PRESENTATION_NOTICES)
+      .map(validateNotice)
+      .filter((notice): notice is ToolResultNotice => notice !== undefined)
+      .filter((notice) => noticeAllowedForTool(expectedKind, notice)))
+    : [];
+  const displayDiff = expectedKind === "edit"
+    && !isError
+    && typeof record.displayDiff === "string"
+    && isProjectedDisplayEditDiff(record.displayDiff)
+    ? record.displayDiff
+    : undefined;
+  return {
+    kind: expectedKind,
+    preview: previewDirectionForTool(expectedKind),
+    notices,
+    ...(displayDiff === undefined ? {} : { displayDiff }),
+  };
 }
 
-/** Apply the Host hard bound without reversing stock Pi's head/tail semantics. */
+/** Last-resort control-frame fallback; normal Pi built-in output passes through unchanged. */
 export function boundToolResultText(
   text: string,
   isError: boolean,
@@ -172,7 +159,7 @@ export function boundToolResultText(
     && !presentation.notices.some((notice) => notice.code === "host_projection_truncated")
     ? withNotice(presentation, { code: "host_projection_truncated" })
     : presentation;
-  if (text.length <= MAX_TOOL_RESULT_TEXT_CHARS) {
+  if (text.length <= MAX_TRANSPORT_TOOL_RESULT_CHARS) {
     return { text, ...(effectivePresentation === undefined ? {} : { presentation: effectivePresentation }) };
   }
 
@@ -190,17 +177,6 @@ export function boundToolResultText(
     text: projectedText,
     ...(projectedPresentation === undefined ? {} : { presentation: projectedPresentation }),
   };
-}
-
-export function toolPresentationMatchesText(
-  presentation: BuiltInToolPresentation,
-  text: string,
-  isError: boolean,
-): boolean {
-  if (isError && presentation.displayDiff !== undefined) return false;
-  if (presentation.displayDiff !== undefined && text !== presentation.displayDiff) return false;
-  const declaresHostTruncation = presentation.notices.some((notice) => notice.code === "host_projection_truncated");
-  return declaresHostTruncation === hasHostProjectionMarkerLine(text);
 }
 
 export function toolPresentationNoticeText(notice: ToolResultNotice): string {
@@ -290,29 +266,22 @@ function validateNotice(value: unknown): ToolResultNotice | undefined {
   return undefined;
 }
 
-function noticesAllowedForTool(kind: BuiltInToolKind, notices: readonly ToolResultNotice[]): boolean {
-  return notices.every((notice) => {
-    if (notice.code === "host_projection_truncated") return true;
-    if (kind === "bash") return notice.code === "output_truncated" || notice.code === "full_output_saved";
-    if (kind === "read") return notice.code === "output_truncated" || notice.code === "continue_with_offset";
-    if (kind === "grep") return notice.code === "output_truncated"
-      || (notice.code === "limit_reached" && notice.unit === "matches")
-      || notice.code === "lines_truncated";
-    if (kind === "find") return notice.code === "output_truncated"
-      || (notice.code === "limit_reached" && notice.unit === "results");
-    if (kind === "ls") return notice.code === "output_truncated"
-      || (notice.code === "limit_reached" && notice.unit === "entries");
-    return false;
-  });
-}
-
-function presentationCompleteness(notices: readonly ToolResultNotice[]): ToolResultCompleteness {
-  return notices.length > 0 ? "truncated" : "complete";
+function noticeAllowedForTool(kind: BuiltInToolKind, notice: ToolResultNotice): boolean {
+  if (notice.code === "host_projection_truncated") return true;
+  if (kind === "bash") return notice.code === "output_truncated" || notice.code === "full_output_saved";
+  if (kind === "read") return notice.code === "output_truncated" || notice.code === "continue_with_offset";
+  if (kind === "grep") return notice.code === "output_truncated"
+    || (notice.code === "limit_reached" && notice.unit === "matches")
+    || notice.code === "lines_truncated";
+  if (kind === "find") return notice.code === "output_truncated"
+    || (notice.code === "limit_reached" && notice.unit === "results");
+  if (kind === "ls") return notice.code === "output_truncated"
+    || (notice.code === "limit_reached" && notice.unit === "entries");
+  return false;
 }
 
 function withNotice(presentation: BuiltInToolPresentation, notice: ToolResultNotice): BuiltInToolPresentation {
-  const notices = deduplicateNotices([...presentation.notices, notice]);
-  return { ...presentation, completeness: presentationCompleteness(notices), notices };
+  return { ...presentation, notices: deduplicateNotices([...presentation.notices, notice]) };
 }
 
 function deduplicateNotices(notices: readonly ToolResultNotice[]): ToolResultNotice[] {
@@ -341,20 +310,20 @@ function continuationOffset(contentText: string | undefined): number | undefined
 
 function retainHead(text: string, marker: string): string {
   const notice = `\n${marker}`;
-  const end = unicodeSafeSliceEnd(text, MAX_TOOL_RESULT_TEXT_CHARS - notice.length);
+  const end = unicodeSafeSliceEnd(text, MAX_TRANSPORT_TOOL_RESULT_CHARS - notice.length);
   return `${text.slice(0, end)}${notice}`;
 }
 
 function retainTail(text: string, marker: string): string {
   const notice = `\n${marker}`;
-  const requestedStart = text.length - (MAX_TOOL_RESULT_TEXT_CHARS - notice.length);
+  const requestedStart = text.length - (MAX_TRANSPORT_TOOL_RESULT_CHARS - notice.length);
   const start = unicodeSafeSliceStart(text, requestedStart);
   return `${text.slice(start)}${notice}`;
 }
 
 function retainHeadTail(text: string, marker: string): string {
   const notice = `\n${marker}\n`;
-  const available = MAX_TOOL_RESULT_TEXT_CHARS - notice.length;
+  const available = MAX_TRANSPORT_TOOL_RESULT_CHARS - notice.length;
   const headRequested = Math.ceil(available / 2);
   const tailRequested = Math.floor(available / 2);
   const headEnd = unicodeSafeSliceEnd(text, headRequested);

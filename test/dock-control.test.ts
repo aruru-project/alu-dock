@@ -169,7 +169,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
       content: [{ type: "text", text: "historical read" }],
       toolCallId: "legacy-history-call",
       toolName: "read",
-      toolPresentation: { kind: "read", preview: "head", completeness: "complete", notices: [] },
+      toolPresentation: { kind: "read", preview: "head", notices: [] },
       isError: false,
     }];
     gatedSession.emit({ type: "entry_appended" });

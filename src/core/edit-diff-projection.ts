@@ -4,7 +4,9 @@ const DATA_URI = /data:[^,]*;base64,/iu;
 const BASE64_PAYLOAD = /^(?=.{128,}$)(?=.*(?:[0-9+/]|={1,2}$))(?:[A-Za-z0-9+/]{4})+(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 
 export const TOOL_OUTPUT_TRUNCATION_MARKER = "[tool output truncated by Host projection]";
-export const MAX_EDIT_DIFF_TEXT_CHARS = 8_000;
+// Keep Pi's display diff intact in normal operation. This only leaves room below
+// the 1 MiB control-frame ceiling for envelopes and adjacent history metadata.
+export const MAX_TRANSPORT_EDIT_DIFF_CHARS = 256_000;
 
 /** Validate Pi's display-oriented, line-numbered edit diff without importing Pi types. */
 export function isDisplayEditDiff(value: unknown): boolean {
@@ -14,12 +16,12 @@ export function isDisplayEditDiff(value: unknown): boolean {
     && lines.every((line) => DISPLAY_EDIT_ROW.test(line));
 }
 
-/** Produce the closed, hard-bounded edit diff used identically by live events and history. */
+/** Preserve Pi's display diff; only the control-frame fallback may shorten it. */
 export function projectDisplayEditDiff(value: unknown): string | undefined {
   if (typeof value !== "string" || containsBinaryText(value) || !isDisplayEditDiff(value)) return undefined;
-  if (value.length <= MAX_EDIT_DIFF_TEXT_CHARS) return value;
+  if (value.length <= MAX_TRANSPORT_EDIT_DIFF_CHARS) return value;
   const notice = `\n${TOOL_OUTPUT_TRUNCATION_MARKER}`;
-  const requestedEnd = MAX_EDIT_DIFF_TEXT_CHARS - notice.length;
+  const requestedEnd = MAX_TRANSPORT_EDIT_DIFF_CHARS - notice.length;
   const end = requestedEnd > 0
     && /[\uD800-\uDBFF]/u.test(value[requestedEnd - 1] ?? "")
     && /[\uDC00-\uDFFF]/u.test(value[requestedEnd] ?? "")
@@ -30,10 +32,10 @@ export function projectDisplayEditDiff(value: unknown): string | undefined {
 
 /** Accept only raw display diffs or the exact bounded form produced above. */
 export function isProjectedDisplayEditDiff(value: unknown): boolean {
-  if (typeof value !== "string" || value.length === 0 || value.length > MAX_EDIT_DIFF_TEXT_CHARS || containsBinaryText(value)) return false;
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_TRANSPORT_EDIT_DIFF_CHARS || containsBinaryText(value)) return false;
   if (isDisplayEditDiff(value)) return true;
   const notice = `\n${TOOL_OUTPUT_TRUNCATION_MARKER}`;
-  if ((value.length !== MAX_EDIT_DIFF_TEXT_CHARS && value.length !== MAX_EDIT_DIFF_TEXT_CHARS - 1) || !value.endsWith(notice)) return false;
+  if ((value.length !== MAX_TRANSPORT_EDIT_DIFF_CHARS && value.length !== MAX_TRANSPORT_EDIT_DIFF_CHARS - 1) || !value.endsWith(notice)) return false;
   const body = value.slice(0, -notice.length);
   if (body.length === 0) return false;
   const lines = body.split("\n");

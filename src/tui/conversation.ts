@@ -901,11 +901,22 @@ function renderToolPreview(entry: ConversationEntry, width: number): string[] {
   const source = entry.diffText ?? output;
   const body = removeProjectedNoticeLines(source, entry.toolPresentation);
   if (body.length > 0) {
-    const styledSource = entry.diffText ? renderDockDiff(body) : body.split("\n");
-    const visualRows = styledSource.flatMap((line) => wrapTextWithAnsi(expandHorizontalTabs(line || " "), bodyWidth));
+    const sourceLines = body.split("\n");
+    const styledSource = entry.diffText ? renderDockDiff(body) : sourceLines;
+    const visualRows: Array<{ text: string; changed: boolean; notice: boolean }> = [];
+    for (const [index, line] of styledSource.entries()) {
+      const sourceLine = sourceLines[index] ?? "";
+      const changed = entry.diffText !== undefined && isChangedDiffLine(sourceLine);
+      const notice = isToolPresentationNoticeLine(sourceLine);
+      for (const wrapped of wrapTextWithAnsi(expandHorizontalTabs(line || " "), bodyWidth)) {
+        visualRows.push({ text: wrapped, changed, notice });
+      }
+    }
     const budget = toolPreviewBudget(toolName);
     const mode = entry.toolPresentation?.preview ?? (toolName === "bash" ? "tail" : entry.diffText ? "head-tail" : "head");
-    const preview = selectToolPreviewRows(visualRows, budget, mode);
+    const preview = entry.diffText
+      ? selectDiffPreviewRows(visualRows, budget)
+      : selectToolPreviewRows(visualRows.map((row) => row.text), budget, mode);
     lines.push(...preview.map((line) => `  ${line}`));
   }
   lines.push(...renderToolPresentationNotices(entry.toolPresentation, width));
@@ -962,6 +973,50 @@ function selectToolPreviewRows(
     return [...rows.slice(0, head), marker, ...(tail > 0 ? rows.slice(-tail) : [])];
   }
   return [...rows.slice(0, visibleBudget), marker];
+}
+
+function selectDiffPreviewRows(
+  rows: readonly { text: string; changed: boolean; notice: boolean }[],
+  budget: number,
+): string[] {
+  if (rows.length <= budget) return rows.map((row) => row.text);
+  const visibleBudget = Math.max(1, budget);
+  const noticeIndexes = rows.flatMap((row, index) => row.notice ? [index] : []);
+  const changedIndexes = rows.flatMap((row, index) => row.changed && !row.notice ? [index] : []);
+  if (changedIndexes.length === 0) {
+    return selectToolPreviewRows(rows.map((row) => row.text), visibleBudget, "head-tail");
+  }
+
+  const selected = new Set<number>(noticeIndexes.slice(0, visibleBudget));
+  const changeBudget = visibleBudget - selected.size;
+  if (changedIndexes.length > changeBudget) {
+    const head = Math.ceil(changeBudget / 2);
+    const tail = Math.floor(changeBudget / 2);
+    for (const index of changedIndexes.slice(0, head)) selected.add(index);
+    if (tail > 0) for (const index of changedIndexes.slice(-tail)) selected.add(index);
+  } else {
+    for (const index of changedIndexes) selected.add(index);
+    for (let distance = 1; selected.size < visibleBudget && distance < rows.length; distance++) {
+      for (const index of changedIndexes) {
+        if (selected.size >= visibleBudget) break;
+        const before = index - distance;
+        if (before >= 0) selected.add(before);
+        if (selected.size >= visibleBudget) break;
+        const after = index + distance;
+        if (after < rows.length) selected.add(after);
+      }
+    }
+  }
+
+  const preview = [...selected].sort((left, right) => left - right).map((index) => rows[index]!.text);
+  const hidden = rows.length - preview.length;
+  preview.push(paint.faint(`… ${hidden} context visual lines hidden · Ctrl+O details`));
+  return preview;
+}
+
+function isChangedDiffLine(line: string): boolean {
+  return (line.startsWith("+") && !line.startsWith("+++ "))
+    || (line.startsWith("-") && !line.startsWith("--- "));
 }
 
 function looksLikeStructuredJson(text: string): boolean {
@@ -1403,9 +1458,9 @@ function looksLikeDiff(text: string | undefined): boolean {
 function renderDockDiff(text: string): string[] {
   return text.split("\n").map((line) => {
     if (line.startsWith("+++ ") || line.startsWith("--- ") || line.startsWith("diff --git ")) return paint.bold(line);
-    if (line.startsWith("@@ ")) return paint.accent(line);
-    if (line.startsWith("+")) return paint.success(line);
-    if (line.startsWith("-")) return paint.error(line);
+    if (line.startsWith("@@ ")) return paint.diffHunk(line);
+    if (line.startsWith("+")) return paint.diffAdded(line);
+    if (line.startsWith("-")) return paint.diffRemoved(line);
     return line;
   });
 }

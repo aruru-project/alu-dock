@@ -3,7 +3,6 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   boundToolResultText,
   projectBuiltInToolPresentation,
-  toolPresentationMatchesText,
   validateBuiltInToolPresentation,
   type BuiltInToolPresentation,
 } from "./tool-result-presentation.js";
@@ -4276,9 +4275,5 @@ function projectRuntimeToolResult(
     ? projectBuiltInToolPresentation(toolName, text, rawDetails, isError)
     : validateBuiltInToolPresentation(toolName, projectedPresentation, isError)
       ?? projectBuiltInToolPresentation(toolName, text, rawDetails, isError);
-  const bounded = boundToolResultText(text, isError, presentation);
-  if (bounded.presentation !== undefined && !toolPresentationMatchesText(bounded.presentation, bounded.text, isError)) {
-    return boundToolResultText(text, isError, projectBuiltInToolPresentation(toolName, text, undefined, isError));
-  }
-  return bounded;
+  return boundToolResultText(text, isError, presentation);
 }

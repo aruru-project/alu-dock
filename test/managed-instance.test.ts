@@ -1801,7 +1801,6 @@ test("edit result details become a closed bounded diff surface for live events a
     presentation: {
       kind: "edit",
       preview: "head-tail",
-      completeness: "complete",
       notices: [],
       displayDiff: "-7 oldEmbedded();\n+7 newEmbedded();",
     },
@@ -1817,9 +1816,8 @@ test("edit result details become a closed bounded diff surface for live events a
   });
   const largeLive = liveInstance.eventsSince().events.find((event) => event.type === "tool.completed" && event.data.toolCallId === "edit-large-live");
   assert.ok(largeLive?.type === "tool.completed");
-  assert.match(largeLive.data.text, /\[tool output truncated by Host projection\]$/u);
-  const historyBoundedLargeDiff = projectDisplayEditDiff(largeDiff);
-  assert.ok(historyBoundedLargeDiff !== undefined);
+  assert.equal(largeLive.data.text, largeDiff, "Dock does not re-truncate Pi's display diff");
+  assert.equal(projectDisplayEditDiff(largeDiff), largeDiff);
 
   const historySession = new FakeRuntimeSession();
   historySession.history = [{
@@ -1839,7 +1837,6 @@ test("edit result details become a closed bounded diff surface for live events a
     toolPresentation: {
       kind: "edit",
       preview: "head-tail",
-      completeness: "truncated",
       notices: [{ code: "host_projection_truncated" }],
       displayDiff: "+private-data\n[tool output truncated by Host projection]",
     },
@@ -1864,7 +1861,6 @@ test("edit result details become a closed bounded diff surface for live events a
     presentation: {
       kind: "edit",
       preview: "head-tail",
-      completeness: "complete",
       notices: [],
       displayDiff: "-4 oldCall();\n+4 newCall();",
     },
@@ -1878,13 +1874,12 @@ test("edit result details become a closed bounded diff surface for live events a
     presentation: {
       kind: "edit",
       preview: "head-tail",
-      completeness: "complete",
-      notices: [],
+      notices: [{ code: "host_projection_truncated" }],
     },
   }]);
   const largeHistoryText = history.entries[2]?.content[0];
   assert.ok(largeHistoryText?.type === "tool_result");
-  assert.equal(largeHistoryText.text, largeLive.data.text, "oversized live and reattached edit diffs share the same bounded projection");
+  assert.equal(largeHistoryText.text, largeLive.data.text, "live and reattached edit diffs preserve the same Pi projection");
 });
 
 test("built-in detail projections are identical for live completion and reattached history", async () => {
@@ -1938,11 +1933,11 @@ test("built-in detail projections are identical for live completion and reattach
   }
 });
 
-test("oversized bash output retains the authoritative tail with an explicit Unicode-safe Host notice", () => {
+test("only control-frame-sized bash output uses the Unicode-safe transport fallback", () => {
   const session = new FakeRuntimeSession();
   const instance = createInstance(session);
   const notice = "\n[tool output truncated by Host projection]";
-  const source = `${"x".repeat(8_000)}😀${"z".repeat(200)}`;
+  const source = `${"x".repeat(256_000)}😀${"z".repeat(200)}`;
   session.emit({
     type: "tool_execution_end",
     toolCallId: "large-tool",
@@ -1952,13 +1947,12 @@ test("oversized bash output retains the authoritative tail with an explicit Unic
   });
   const completed = instance.eventsSince().events.find((event) => event.type === "tool.completed");
   assert.ok(completed?.type === "tool.completed");
-  assert.ok(completed.data.text.length <= 8_000);
+  assert.ok(completed.data.text.length <= 256_000);
   assert.match(completed.data.text, /z{200}\n\[tool output truncated by Host projection\]$/u);
   assert.doesNotMatch(completed.data.text, /\uFFFD/u);
   assert.deepEqual(completed.data.presentation, {
     kind: "bash",
     preview: "tail",
-    completeness: "truncated",
     notices: [{ code: "host_projection_truncated" }],
   });
   assert.ok(completed.data.text.endsWith(notice));
