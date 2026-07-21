@@ -132,8 +132,8 @@ ManagedInstance replacement intent
 
 ## Pi API规则
 
-- 生产Host只从当前immutable release的exact-pinned依赖加载Pi SDK，不调用`$PATH`中的全局`pi`；只从`@earendil-works/pi-coding-agent` package root导入生产API，禁止private subpath。
-- `pi-coding-agent`与`pi-tui`作为一个cohort显式升级：先核对跨越版本的breaking notes，在隔离checkout同步改exact pins与adapter，再通过typecheck、完整测试、no-model real Pi、PTY和Athena release门禁；目标model smoke仍需单独授权。不得把Dock升级自动扩展成全局Pi/RPC服务升级。
+- 生产Host只从`~/.local/share/alu-dock`安装包的exact-pinned依赖加载Pi SDK，不调用`$PATH`中的全局`pi`；只从`@earendil-works/pi-coding-agent` package root导入生产API，禁止private subpath。
+- `pi-coding-agent`与`pi-tui`作为一个cohort显式升级：先核对跨越版本的breaking notes，在隔离checkout同步改exact pins与adapter，再通过typecheck、完整测试、no-model real Pi和PTY；安装仍由外层显式执行`npm run install:local`，目标model smoke需单独授权。不得把Dock升级自动扩展成全局Pi/RPC服务升级。
 - Standalone/global Pi可拥有独立runtime并与Dock共享当前`~/.pi/agent`资源目录；同一个Pi session file不得被两个runtime进程并发持有或写入。
 - 没有public API的行为明确defer，不通过内部字段或直接编辑Pi JSON伪造。
 - Settings沿用Pi native snapshot、lock、field merge与last-writer-wins语义。

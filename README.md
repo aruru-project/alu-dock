@@ -17,14 +17,14 @@ Alu Dock 的 V0.1 仍是待签收候选。当前候选已经具备：
 
 当前裸 `aludock` 进入 Dock Hub；`pwd` 只作为 Continue、History、Pi Sessions 的排序上下文和 New 默认目录，进入或退出 Hub 本身不产生 runtime/catalog mutation。Continue 只展示 active/reopenable Dock 工作，History 管理 stopped/不可恢复记录，并可从 stopped 记录的 Pi session 继续；完整磁盘 Pi sessions 仍通过独立 Resume/Adopt inventory 进入。显式 `new` 与 `attach TARGET` 直达 Session Work；`-c`/`--continue` 复用改版前的 current-project smart-entry：进入最近的可继续实例，没有则 New。完整 ID、列表展示的唯一 prefix 与唯一精确 name 共用 fail-closed TARGET 解析。
 
-Athena 当前运行一版已通过完整源码/发布门禁与响应式 Hub/Work 人类视觉复验的候选 release，仍待普通开发任务 soak、最终统一回归和明确签收；在此之前不得视为 V0.1 已发布或已打 tag。显式 `aludock open` 当前仍保留旧的 project smart-entry，可能创建或 reopen runtime；默认安全入口是裸命令 Hub。
+V0.1 仍待普通开发任务 soak、最终统一回归和明确签收；在此之前不得视为已发布或已打 tag。显式 `aludock open` 当前仍保留旧的 project smart-entry，可能创建或 reopen runtime；默认安全入口是裸命令 Hub。
 
 ## 当前快速开始
 
-要求 Node.js `>=22.19.0`，并且 `aludock` 命令可用。首次使用时，`aludock service install --now` 会安装并启动 managed Host。
+要求 Node.js `>=22.19.0`。从 clean committed checkout 在外层 shell 安装或更新本地包：
 
 ```bash
-aludock service install --now
+npm run install:local
 aludock service status
 
 aludock                       # 进入无 runtime 副作用的 Dock Hub
@@ -70,7 +70,7 @@ CLI / Dock Hub / Session Work TUI
 
 Dock instance 与 Pi session 是不同身份；一个 instance 可以在 session replacement 后继续存在。Compaction期间的新输入由对应instance的Host内存Queue持有，并可跨detach/attach观察；两个instance的Queue不会共享。Host 退出或丢失时，不会自动恢复或重放进行中的 prompt、queue 或工具副作用。
 
-生产 Host 使用 immutable release 中精确固定的 Pi SDK，不调用 `$PATH` 中的全局 `pi`。Standalone/global Pi 可以独立共存，也可共享当前 `~/.pi/agent` 资源目录，但同一个 Pi session file 不得同时由两个 runtime 进程持有。
+生产 Host 使用 `~/.local/share/alu-dock` 安装包中精确固定的 Pi SDK，不调用 `$PATH` 中的全局 `pi`。Standalone/global Pi 可以独立共存，也可共享当前 `~/.pi/agent` 资源目录，但同一个 Pi session file 不得同时由两个 runtime 进程持有。
 
 ## 从源码运行
 
@@ -100,4 +100,4 @@ npm run cli
 
 - 贡献者与 agent 工程地图：[`AGENTS.md`](AGENTS.md)
 - 测试路由：[`docs/qa.md`](docs/qa.md)
-- Managed service 与 Athena 发布：[`docs/athena-deployment.md`](docs/athena-deployment.md)
+- Managed service 与本地安装：[`docs/local-install.md`](docs/local-install.md)

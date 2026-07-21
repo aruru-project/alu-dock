@@ -398,8 +398,8 @@ def main() -> int:
             elif action == "work-native-mouse":
                 startup_mouse_enable_count = bytes(output).count(b"\x1b[?1000h\x1b[?1006h")
             elif action == "command-handled":
-                for command in (b"/chain\r", b"/chain-prompts\r"):
-                    os.write(fd, command)
+                for message in (b"fixture no-run one\r", b"fixture no-run two\r"):
+                    os.write(fd, message)
                     time.sleep(0.15)
                     while read_available(fd, output, 0.01) > 0:
                         pass

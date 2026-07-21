@@ -30,7 +30,6 @@ const SERVICE_TOPICS = new Set([
   "restart",
   "status",
   "logs",
-  "update",
   "uninstall",
 ]);
 
@@ -121,7 +120,7 @@ function helpHelp(): string {
 
 function serviceHelp(rest: readonly string[]): string {
   if (rest.length === 0) {
-    return `aludock service — manage the systemd --user Host\n\nUsage:\n  aludock service [status]\n  aludock service COMMAND [OPTIONS]\n\nCommands:\n  install     Install the generated user unit\n  start       Start the managed Host\n  stop        Stop the Host\n  restart     Restart the Host\n  status      Show systemd readiness and managed capabilities\n  logs        Read the user journal\n  update      Apply a previously staged Athena release\n  uninstall   Remove only an Alu Dock-generated unit\n\nAn agent can prepare an immutable release with 'npm run stage:athena' without\ntouching the running Host. Applying it explicitly stops and replaces the Host;\nno prompt, queue, interaction, tool effect or run Promise is resumed.\n\nExplore:\n  aludock help service install\n  aludock service logs --help\n`;
+    return `aludock service — manage the systemd --user Host\n\nUsage:\n  aludock service [status]\n  aludock service COMMAND [OPTIONS]\n\nCommands:\n  install     Install the generated user unit\n  start       Start the managed Host\n  stop        Stop the Host\n  restart     Restart the Host\n  status      Show systemd readiness and managed capabilities\n  logs        Read the user journal\n  uninstall   Remove only an Alu Dock-generated unit\n\nInstall or update the local package from a clean checkout with:\n\n  npm run install:local\n\nThe installer refuses active Dock instances and must run outside the managed\nHost. Service commands never run tests or modify Pi session files.\n\nExplore:\n  aludock help service install\n  aludock service logs --help\n`;
   }
   if (rest.length !== 1 || !SERVICE_TOPICS.has(rest[0] as string)) {
     throw new Error(`Unknown service help topic: ${rest.join(" ")}`);
@@ -139,8 +138,6 @@ function serviceHelp(rest: readonly string[]): string {
       return `aludock service status — inspect managed readiness\n\nUsage:\n  aludock service status\n\nReads systemd state and verifies the expected MainPID, V2 handshake and managed\ncapabilities. It does not start or restart the service.\n`;
     case "logs":
       return `aludock service logs — read Host journal output\n\nUsage:\n  aludock service logs [--lines N] [--follow]\n\nOptions:\n  --lines N, -n N   Read 1–10000 lines (default: 200)\n  --follow, -f      Follow new journal entries\n\nExamples:\n  aludock service logs --lines 100\n  aludock service logs --follow\n`;
-    case "update":
-      return `aludock service update — apply a staged Athena release\n\nUsage:\n  aludock service update apply [RELEASE_ID] [--allow-active]\n\nBy default apply refuses while any active instance remains. '--allow-active' is\nan explicit destructive Host-replacement opt-in: active runtime, queue,\ninteraction, Promise and tool effects are not migrated or replayed.\n\nFirst prepare the immutable release from a clean Alu Dock checkout:\n\n  npm run stage:athena\n\nStaging runs the complete gate and build but does not switch current, stop the\nHost, or touch systemd. After the current turn finishes, press Ctrl+D. Run the\nprinted apply command from the outer shell. It stops the old Host, switches to\nthe staged release, starts it, and runs readiness/smoke checks.\n\nDo not invoke apply from an agent tool. Active runtime state is not migrated or\nreplayed; recoverable Pi session metadata remains available for explicit reopen.\n`;
     case "uninstall":
       return `aludock service uninstall — remove the generated unit\n\nUsage:\n  aludock service uninstall\n\nRemoves only a unit carrying Alu Dock's generated marker. It does not delete the\ndurable catalog or Pi session files.\n`;
     default:
@@ -157,5 +154,5 @@ function internalTopicHelp(topic: string): string {
     events: "Use the interactive TUI or 'aludock status' for human inspection.",
     prompt: "Submit prompts through the attached interactive TUI.",
   };
-  return `${topic} is an internal control command used by tests, release smoke, or\noperator diagnostics. It is intentionally omitted from the public human command\ntaxonomy and is not a model tool surface.\n\n${humanAlternative[topic] ?? "Use the public human workflow instead."}\nTyped automation should call DockClient/Protocol V2. See the repository's\ninternal control documentation.\n`;
+  return `${topic} is an internal control command used by tests or operator\ndiagnostics. It is intentionally omitted from the public human command taxonomy\nand is not a model tool surface.\n\n${humanAlternative[topic] ?? "Use the public human workflow instead."}\nTyped automation should call DockClient/Protocol V2. See the repository's\ninternal control documentation.\n`;
 }

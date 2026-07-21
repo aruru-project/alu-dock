@@ -613,12 +613,12 @@ test("Stage 1C projection result parsers omit open shapes and enforce frozen met
 test("canonical projection ordering handles names that are prefixes of hyphenated names", () => {
   const source = { kind: "extension" as const, package: "npm:fixture", path: "/fixture/index.ts" };
   const commands = [
-    { name: "chain", description: "Chain", source, argumentCompletions: true },
-    { name: "chain-prompts", description: "Chain prompts", source, argumentCompletions: false },
-    { name: "run", description: "Run", source, argumentCompletions: true },
-    { name: "run-chain", description: "Run chain", source, argumentCompletions: true },
+    { name: "fixture-a", description: "Prefix fixture", source, argumentCompletions: true },
+    { name: "fixture-a-long", description: "Long prefix fixture", source, argumentCompletions: false },
+    { name: "fixture-b", description: "Second prefix fixture", source, argumentCompletions: true },
+    { name: "fixture-b-long", description: "Second long prefix fixture", source, argumentCompletions: true },
   ];
-  assert.deepEqual(parseCommandsResult({ commands }).commands.map((command) => command.name), ["chain", "chain-prompts", "run", "run-chain"]);
+  assert.deepEqual(parseCommandsResult({ commands }).commands.map((command) => command.name), ["fixture-a", "fixture-a-long", "fixture-b", "fixture-b-long"]);
   assert.throws(() => parseCommandsResult({ commands: [commands[1], commands[0]] }), /deterministically sorted/);
   assert.deepEqual(parseCommandsResult({ commands: commands.slice(0, 2), total: 4, truncated: true }), {
     commands: commands.slice(0, 2), total: 4, truncated: true,
@@ -626,18 +626,18 @@ test("canonical projection ordering handles names that are prefixes of hyphenate
   assert.throws(() => parseCommandsResult({ commands: commands.slice(0, 2), total: 4, truncated: false }), /metadata is inconsistent/u);
 
   const tools = [
-    { name: "run", description: "Run", active: true, source },
-    { name: "run-chain", description: "Run chain", active: true, source },
+    { name: "fixture-b", description: "Second prefix fixture", active: true, source },
+    { name: "fixture-b-long", description: "Second long prefix fixture", active: true, source },
   ];
-  assert.deepEqual(parseToolsResult({ tools, instance: validSnapshot() }).tools.map((tool) => tool.name), ["run", "run-chain"]);
+  assert.deepEqual(parseToolsResult({ tools, instance: validSnapshot() }).tools.map((tool) => tool.name), ["fixture-b", "fixture-b-long"]);
 
   const resources = [
-    { kind: "prompt", name: "chain", path: "/fixture/chain.md", source: { kind: "prompt" } },
-    { kind: "prompt", name: "chain-prompts", path: "/fixture/chain-prompts.md", source: { kind: "prompt" } },
+    { kind: "prompt", name: "fixture-a", path: "/fixture/a.md", source: { kind: "prompt" } },
+    { kind: "prompt", name: "fixture-a-long", path: "/fixture/a-long.md", source: { kind: "prompt" } },
   ];
   const diagnostics = [
-    { severity: "warning", message: "run", source: "fixture" },
-    { severity: "warning", message: "run-chain", source: "fixture" },
+    { severity: "warning", message: "fixture-b", source: "fixture" },
+    { severity: "warning", message: "fixture-b-long", source: "fixture" },
   ];
   assert.deepEqual(parseResourcesResult({ resources, diagnostics }), {
     resources,

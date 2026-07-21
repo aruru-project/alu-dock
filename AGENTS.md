@@ -6,7 +6,7 @@ Alu Dock V0.1 仍是待签收候选。它是本机单用户的受管 Pi 运行�
 
 能力真相以当前代码、类型和测试为准。当前裸 `aludock` 进入无 runtime 副作用、按 cwd 提供上下文的 Dock Hub；固定根菜单将 New、Continue、History、Pi Sessions 与 Leave 分层。Hub 在一次 alternate-screen 生命周期内呈现所有菜单，并只在菜单可见时启用 Hub click/wheel tracking；进入 Session Work 前先恢复 shell screen。Session Work 使用可流动 main buffer 与 terminal-native mouse，不提供 Alt+M 或 `/mouse` 模式。`-c`/`--continue` 显式执行 current-project smart-entry，选择最近的 active/reopenable 实例，没有则 New；显式 `new` 与 `attach TARGET` 直达 Session Work。磁盘 Pi sessions 通过独立 Resume/Adopt inventory 进入；显式 `open` 暂时保留旧 smart-entry。
 
-Athena 当前运行一版已通过完整源码/发布门禁与响应式 Hub/Work 人类视觉复验的候选 release，并具备 branch-aware `/tree` 与分层 Work activity；仍待普通开发任务 soak、最终统一回归和明确版本签收。Checkout HEAD 是否已部署必须以 `current` symlink 与 immutable receipt 为准；不得因 `package.json` 已是 `0.1.0` 或已有候选 receipt 就写成 V0.1 已发布、已签收或已打 tag。
+V0.1 仍待普通开发任务 soak、最终统一回归和明确签收；不得因 `package.json` 已是 `0.1.0` 就写成已发布、已签收或已打 tag。Checkout 与本机已安装包可能不同；以 `~/.local/share/alu-dock` 中实际安装的 package 和 `aludock service status` 为准。
 
 ## UI 视觉主题合同
 
@@ -20,7 +20,7 @@ Alu Dock 的视觉身份只来自阿露原稿与既有阿露资产，不使用�
 
 - Node.js `>=22.19.0`，TypeScript ESM。
 - 当前 Pi runtime cohort 精确固定为 `@earendil-works/pi-coding-agent@0.80.6` 与 `@earendil-works/pi-tui@0.80.6`；生产代码只使用 package-root exports，且不得把 pi-tui 类型泄漏到 Host、Protocol 或 Core port。
-- Managed production Host 从 immutable release 的本地依赖加载 Pi SDK，不调用 `$PATH` 中的全局 `pi`。Pi cohort 升级必须显式同步改动 exact pins、adapter 与门禁；不得顺带升级、重启或移除独立的全局 Pi/RPC 服务。
+- Managed production Host 从 `~/.local/share/alu-dock` 安装包的本地依赖加载 Pi SDK，不调用 `$PATH` 中的全局 `pi`。Pi cohort 升级必须显式同步改动 exact pins、adapter 与门禁；不得顺带升级、重启或移除独立的全局 Pi/RPC 服务。
 - Managed Host 面向 `systemd --user`；开发模式使用独立 dev socket。
 
 ```text
@@ -48,10 +48,10 @@ cli / Hub / Session Work tui
 | Protocol、Host dispatch、DockClient、CLI、catalog | [`docs/agent_maps/control.md`](docs/agent_maps/control.md) |
 | ManagedInstance、Pi adapter、session replacement、settings、Extension UI | [`docs/agent_maps/runtime.md`](docs/agent_maps/runtime.md) |
 | 当前 interactive flow、目标 Hub、Session Work、history/tree/queue/activity | [`docs/agent_maps/tui.md`](docs/agent_maps/tui.md) |
-| systemd、managed startup、durable lifecycle、Athena release | [`docs/agent_maps/deployment.md`](docs/agent_maps/deployment.md) |
+| systemd、managed startup、durable lifecycle、本地安装 | [`docs/agent_maps/deployment.md`](docs/agent_maps/deployment.md) |
 | 测试选择与门禁 | [`docs/qa.md`](docs/qa.md) |
 
-Managed 发布或运维另读 [`docs/athena-deployment.md`](docs/athena-deployment.md)。从对应 map 列出的入口、直接依赖与测试开始；只有这些材料不足时才扩大读取范围。
+Managed 安装或运维另读 [`docs/local-install.md`](docs/local-install.md)。从对应 map 列出的入口、直接依赖与测试开始；只有这些材料不足时才扩大读取范围。
 
 ## 跨模块核心合同
 
@@ -68,8 +68,8 @@ Managed 发布或运维另读 [`docs/athena-deployment.md`](docs/athena-deployme
 
 模块内的状态机、UI、settings、deployment 与测试细节以对应 agent map、代码和测试为准，不在顶层重复定义。
 
-## 测试与发布入口
+## 测试与安装入口
 
 按 [`docs/qa.md`](docs/qa.md) 选择与改动匹配的最窄检查；Markdown-only 改动的入口是 `git diff --check` 与链接/路径核对。
 
-Managed service 操作和 Athena 发布合同见 [`docs/athena-deployment.md`](docs/athena-deployment.md)。未经明确授权，不运行真实 Pi/model smoke，不部署、不切换 release，也不重启 service。
+Managed service 操作和本地安装合同见 [`docs/local-install.md`](docs/local-install.md)。测试与安装彼此独立；未经明确授权，不运行真实 Pi/model smoke、不执行 `npm run install:local`，也不重启 service。

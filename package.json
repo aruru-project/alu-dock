@@ -7,6 +7,10 @@
   "bin": {
     "aludock": "dist/src/cli.js"
   },
+  "files": [
+    "dist/src",
+    "README.md"
+  ],
   "engines": {
     "node": ">=22.19.0"
   },
@@ -18,8 +22,8 @@
     "serve": "npm run build && ALU_DOCK_SOCKET=${ALU_DOCK_SOCKET:-${XDG_RUNTIME_DIR:-$HOME/.alu-dock/run}/alu-dock-dev.sock} node dist/src/cli.js serve --dev",
     "smoke:sdk": "npm run build && node dist/scripts/sdk-smoke.js",
     "bench:tui": "npm run build && node --expose-gc dist/scripts/tui-render-benchmark.js",
-    "stage:athena": "npm run build && node dist/scripts/deploy-athena.js --stage",
-    "deploy:athena": "npm run build && node dist/scripts/deploy-athena.js"
+    "prepack": "npm run build",
+    "install:local": "npm run build && node dist/scripts/install-local.js"
   },
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.80.6",

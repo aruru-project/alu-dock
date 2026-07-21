@@ -115,7 +115,7 @@ test("service help is explorable without constructing a service manager", async 
   assertHelpSuccess(serviceTopic);
   assert.equal(serviceFlag.stdout, serviceTopic.stdout);
 
-  for (const action of ["install", "start", "stop", "restart", "status", "logs", "update", "uninstall"]) {
+  for (const action of ["install", "start", "stop", "restart", "status", "logs", "uninstall"]) {
     const [flag, topic] = await Promise.all([
       runCli(["service", action, "--help"]),
       runCli(["help", "service", action]),
@@ -126,12 +126,10 @@ test("service help is explorable without constructing a service manager", async 
     assert.match(flag.stdout, new RegExp(`service ${action}`, "u"));
   }
 
-  const updateHelp = renderCliHelp(["service", "update"]);
-  assert.match(updateHelp, /staged Athena release/u);
-  assert.match(updateHelp, /npm run stage:athena/u);
-  assert.match(updateHelp, /aludock service update apply \[RELEASE_ID\] \[--allow-active\]/u);
-  assert.match(updateHelp, /destructive Host-replacement opt-in/u);
-  assert.doesNotMatch(updateHelp, /dogfood|alu-dock service/u);
+  const serviceHelp = renderCliHelp(["service"]);
+  assert.match(serviceHelp, /npm run install:local/u);
+  assert.match(serviceHelp, /refuses active Dock instances/u);
+  assert.doesNotMatch(serviceHelp, /stage:athena|service update|allow-active|receipt|rollback/u);
 
   const ignoredInvalidOption = await runCli(["service", "logs", "--lines", "not-a-number", "--help"]);
   assertHelpSuccess(ignoredInvalidOption);
@@ -155,7 +153,7 @@ test("help text is terminal-safe static guidance", () => {
   for (const topics of [
     [], ["open"], ["new"], ["attach"], ["list"], ["status"], ["stop"], ["forget"], ["prune"], ["help"],
     ["service"], ["service", "install"], ["service", "start"], ["service", "stop"],
-    ["service", "restart"], ["service", "status"], ["service", "logs"], ["service", "update"], ["service", "uninstall"],
+    ["service", "restart"], ["service", "status"], ["service", "logs"], ["service", "uninstall"],
     ["create"],
   ]) {
     const output = renderCliHelp(topics);

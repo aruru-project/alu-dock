@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 
@@ -267,31 +266,6 @@ async function manageService(socketPath: string, socketExplicit: boolean, args: 
       requireNoArgs(rest, "service status");
       writeJson({ kind: "service", action, ...(await manager.status()) });
       return;
-    case "update": {
-      const [updateAction, ...updateArgs] = rest;
-      if (updateAction !== "apply") throw new Error("service update requires apply [RELEASE_ID] [--allow-active]");
-      let releaseId: string | undefined;
-      let allowActive = false;
-      for (const argument of updateArgs) {
-        if (argument === "--allow-active") allowActive = true;
-        else if (argument.startsWith("-")) throw new Error(`Unknown service update argument: ${argument}`);
-        else if (releaseId === undefined) releaseId = argument;
-        else throw new Error("service update accepts at most one RELEASE_ID");
-      }
-      const scriptPath = resolve(dirname(entryPath), "..", "scripts", "deploy-athena.js");
-      const result = spawnSync(process.execPath, [
-        scriptPath,
-        "--apply",
-        ...(releaseId === undefined ? [] : [releaseId]),
-        ...(allowActive ? ["--allow-active"] : []),
-      ], {
-        stdio: "inherit",
-        env: process.env,
-      });
-      if (result.error) throw result.error;
-      if (result.status !== 0) process.exitCode = result.status ?? 1;
-      return;
-    }
     case "logs": {
       let lines = 200;
       let follow = false;
@@ -313,7 +287,7 @@ async function manageService(socketPath: string, socketExplicit: boolean, args: 
       writeJson({ kind: "service", action, ...(await manager.uninstall()) });
       return;
     default:
-      throw new Error("service requires install, start, stop, restart, status, logs, update, or uninstall");
+      throw new Error("service requires install, start, stop, restart, status, logs, or uninstall");
   }
 }
 

@@ -14,7 +14,7 @@
 | TUI projection/layout | 对应pure TUI test + PTY at 80×24 and 120×40 |
 | Session replacement/tree | generation/history tests + Pi tree/reopen real tests |
 | Managed lifecycle | subprocess SIGTERM/SIGKILL tests；必要时唯一临时user unit |
-| Release code | full gate + authorized immutable deploy gate |
+| Local install / service code | `local-install`, `user-service`；真实安装需另行授权 |
 
 测试由TypeScript编译后用Node test runner执行。Focused示例：
 
@@ -96,7 +96,6 @@ Real Pi tests不得调用model；它们验证public API、session文件、resour
 ```text
 scripts/sdk-smoke.ts             # 显式provider/model调用 smoke；只在任务授权时运行
 scripts/tui-render-benchmark.ts  # conversation delta/tool render CPU benchmark
-scripts/athena-smoke.ts         # released DockClient installed-resource smoke
 ```
 
 ### TUI
@@ -123,16 +122,19 @@ test/fixtures/pty-tui-driver.py
 
 截图或文字receipt只能记录证据，不能替代真实PTY判断。
 
-## Managed release门禁
+## 本地安装验证
 
-仅在用户明确授权deployment后执行：
+代码验证与安装彼此独立。`npm run install:local` 不运行测试，也不把测试结果保存为
+release receipt。修改安装或 service 代码时先运行 `local-install`、`user-service` focused
+测试；里程碑前再由开发者显式运行一次完整代码门禁。
 
-1. clean committed HEAD完成完整代码门禁；
-2. immutable release build；
-3. 默认确认无active instance；
-4. switch/restart后核对MainPID、V2 hello与新hostEpoch；
-5. 使用released DockClient读取commands/resources/tools/settings/tree；
-6. 检查journal severe errors；
-7. 验证rollback-forward并写immutable receipt。
+真实安装只在用户明确授权后、从 managed Host 外层执行：
 
-验证证据记录在Kanban、相关commit和immutable release receipt中；仓库不新增per-slice validation文档。相关gate通过后创建honest focused commit。
+1. 确认 checkout clean committed；
+2. 确认无 active/stopping instance；
+3. 运行 `npm run install:local`；
+4. 核对 `~/.local/bin/aludock` 指向固定 npm prefix；
+5. 核对 `aludock service status` 的 MainPID、hello、hostEpoch 与 ready；
+6. 核对 catalog 记录仍存在。
+
+失败立即报告，不自动重跑完整测试，不自动强制重启 active runtime。

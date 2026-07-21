@@ -236,8 +236,8 @@ export class DelayedRuntimeSession implements RuntimeSession {
   async getCommands(): Promise<CommandDto[]> {
     const source = { kind: "extension" as const, path: "/fixture/ext.ts" };
     return [
-      { name: "chain", description: "chain command", source, argumentCompletions: true },
-      { name: "chain-prompts", description: "chain prompts command", source, argumentCompletions: false },
+      { name: "fixture-prefix", description: "prefix fixture command", source, argumentCompletions: true },
+      { name: "fixture-prefix-long", description: "long prefix fixture command", source, argumentCompletions: false },
     ];
   }
 

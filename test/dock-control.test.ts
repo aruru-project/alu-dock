@@ -1082,7 +1082,7 @@ test("SSH TUI keeps repeated no-run completion facts out of live and replayed co
 
   assert.ok(runtime);
   assert.equal(runtime.promptCalls, 2);
-  assert.deepEqual(runtime.promptMessages, ["/chain", "/chain-prompts"]);
+  assert.deepEqual(runtime.promptMessages, ["fixture no-run one", "fixture no-run two"]);
   const status = await client.status(created.id);
   assert.equal(status.execution, "idle");
   assert.equal(status.lastRun, "never");
@@ -3457,7 +3457,7 @@ test("tools, settings, resources, and commands integrate with capability gates a
   assert.equal(runtime?.settingMutationCalls, 1);
 
   assert.equal((await client.resources(instance.id)).resources[0]?.name, "AGENTS.md");
-  assert.deepEqual((await client.commands(instance.id, "chain")).commands.map((command) => command.name), ["chain", "chain-prompts"]);
+  assert.deepEqual((await client.commands(instance.id, "fixture-prefix")).commands.map((command) => command.name), ["fixture-prefix", "fixture-prefix-long"]);
   assert.deepEqual((await client.commands(instance.id, "missing")).commands, []);
 });
 
