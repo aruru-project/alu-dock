@@ -879,7 +879,7 @@ function renderToolDetails(text: string, width: number): string[] {
 
 function renderToolDetailLine(line: string, width: number): string[] {
   const bodyWidth = Math.max(1, width - 4);
-  return wrapTextWithAnsi(line, bodyWidth).map((wrapped) => `  ${wrapped}`);
+  return wrapTextWithAnsi(expandHorizontalTabs(line), bodyWidth).map((wrapped) => `  ${wrapped}`);
 }
 
 function renderToolPreview(entry: ConversationEntry, width: number): string[] {
@@ -902,7 +902,7 @@ function renderToolPreview(entry: ConversationEntry, width: number): string[] {
   const body = removeProjectedNoticeLines(source, entry.toolPresentation);
   if (body.length > 0) {
     const styledSource = entry.diffText ? renderDockDiff(body) : body.split("\n");
-    const visualRows = styledSource.flatMap((line) => wrapTextWithAnsi(line || " ", bodyWidth));
+    const visualRows = styledSource.flatMap((line) => wrapTextWithAnsi(expandHorizontalTabs(line || " "), bodyWidth));
     const budget = toolPreviewBudget(toolName);
     const mode = entry.toolPresentation?.preview ?? (toolName === "bash" ? "tail" : entry.diffText ? "head-tail" : "head");
     const preview = selectToolPreviewRows(visualRows, budget, mode);
@@ -1011,8 +1011,19 @@ function renderSemanticSurface(
   painter: (text: string) => string,
 ): string[] {
   const boundedWidth = Math.max(1, width);
-  if (boundedWidth < 3) return lines.map((line) => painter(truncateToWidth(line, boundedWidth)));
-  return lines.map((line) => painter(padToVisibleWidth(` ${line}`, boundedWidth)));
+  if (boundedWidth < 3) return lines.map((line) => painter(truncateToWidth(expandHorizontalTabs(line), boundedWidth)));
+  return lines.map((line) => painter(padToVisibleWidth(expandHorizontalTabs(` ${line}`), boundedWidth)));
+}
+
+function expandHorizontalTabs(text: string): string {
+  if (!text.includes("\t")) return text;
+  const parts = text.split("\t");
+  let expanded = parts[0] ?? "";
+  for (const part of parts.slice(1)) {
+    const spaces = 8 - (visibleWidth(expanded) % 8);
+    expanded += `${" ".repeat(spaces)}${part}`;
+  }
+  return expanded;
 }
 
 function renderNotice(text: string, width: number, tone: "info" | "warning" | "error"): string[] {

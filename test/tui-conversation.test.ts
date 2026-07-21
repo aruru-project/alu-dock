@@ -566,6 +566,27 @@ test("collapsed tool rows identify common operations without exposing arbitrary 
   }
 });
 
+test("tool surfaces expand terminal tabs so background rows stay contiguous", () => {
+  const conversation = new DockConversation();
+  conversation.apply(event(1, "tool.started", {
+    toolCallId: "tabbed-bash-output",
+    toolName: "bash",
+    args: { command: "du -sh $HOME/.local/share/alu-dock" },
+  }));
+  conversation.apply(event(2, "tool.completed", {
+    toolCallId: "tabbed-bash-output",
+    toolName: "bash",
+    isError: false,
+    text: "current install: 176M\t/home/luziyi/.local/share/alu-dock\ncurrent files: 20503",
+  }));
+
+  const rendered = conversation.render(80);
+  assert.equal(rendered.some((line) => line.includes("\t")), false);
+  assert.match(rendered.join("\n"), /current install: 176M +\/home\/luziyi/u);
+  const outputRow = rendered.find((line) => line.includes("current install"));
+  assert.equal(visibleWidth(outputRow ?? ""), 80, "the entire painted surface row remains materialized");
+});
+
 test("bounded tool previews retain content without shrinking across automatic lifecycle updates", () => {
   for (const width of [20, 43, 80]) {
     const conversation = new DockConversation();
