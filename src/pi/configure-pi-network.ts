@@ -7,6 +7,18 @@ const DEFAULT_HTTP_IDLE_TIMEOUT_MS = 300_000;
 const originalGlobalFetch = globalThis.fetch;
 let installedGlobalFetch: typeof globalThis.fetch | undefined;
 let installedConfiguration: string | undefined;
+let installedDispatcher: undici.Dispatcher | undefined;
+
+interface ProxyEnvironmentSlot {
+  initialized: boolean;
+  managed: boolean;
+  lastApplied?: string;
+}
+
+const proxyEnvironment: Record<"HTTP_PROXY" | "HTTPS_PROXY", ProxyEnvironmentSlot> = {
+  HTTP_PROXY: { initialized: false, managed: false },
+  HTTPS_PROXY: { initialized: false, managed: false },
+};
 
 /**
  * Apply the same process-wide proxy and Undici bootstrap as the Pi CLI.
@@ -33,10 +45,30 @@ export function configurePiNetwork(settingsManager: SettingsManager): void {
 }
 
 function applyHttpProxySettings(httpProxy: string | undefined): void {
-  const proxy = httpProxy?.trim();
-  if (!proxy) return;
-  process.env.HTTP_PROXY ??= proxy;
-  process.env.HTTPS_PROXY ??= proxy;
+  const proxy = httpProxy?.trim() || undefined;
+  applyProxyEnvironment("HTTP_PROXY", proxy);
+  applyProxyEnvironment("HTTPS_PROXY", proxy);
+}
+
+function applyProxyEnvironment(key: "HTTP_PROXY" | "HTTPS_PROXY", proxy: string | undefined): void {
+  const slot = proxyEnvironment[key];
+  if (!slot.initialized) {
+    slot.initialized = true;
+    slot.managed = process.env[key] === undefined;
+  }
+  if (!slot.managed) return;
+
+  // Do not overwrite a value installed by another Host subsystem after Dock's
+  // first network bootstrap. Environment inherited at process start is never
+  // considered Dock-owned.
+  if (process.env[key] !== slot.lastApplied) {
+    slot.managed = false;
+    return;
+  }
+
+  if (proxy === undefined) delete process.env[key];
+  else process.env[key] = proxy;
+  slot.lastApplied = proxy;
 }
 
 function configureHttpDispatcher(timeoutMs = DEFAULT_HTTP_IDLE_TIMEOUT_MS): void {
@@ -51,7 +83,13 @@ function configureHttpDispatcher(timeoutMs = DEFAULT_HTTP_IDLE_TIMEOUT_MS): void
     clientFactory: createUndiciClient,
     factory: createUndiciOriginDispatcher,
   }));
+  const previousDispatcher = installedDispatcher;
   undici.setGlobalDispatcher(dispatcher);
+  installedDispatcher = dispatcher;
+  // This setting is intentionally process-wide for future requests from every
+  // managed runtime. Graceful close lets requests already using the previous
+  // dispatcher finish instead of turning a settings reload into cancellation.
+  if (previousDispatcher) void previousDispatcher.close().catch(ignoreUndiciDispatcherError);
 
   // Keep fetch/WebSocket and the dispatcher on the same Undici implementation,
   // matching Pi's CLI bootstrap. Preserve deliberate third-party replacements.

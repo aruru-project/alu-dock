@@ -138,7 +138,7 @@ export const SETTING_DEFINITIONS: { readonly [K in SettingKey]: SettingDefinitio
   doubleEscapeAction: enumDefinition(["doubleEscapeAction"], ["fork", "tree", "none"]),
   treeFilterMode: enumDefinition(["treeFilterMode"], ["default", "no-tools", "user-only", "labeled-only", "all"]),
   defaultProjectTrust: enumDefinition(["defaultProjectTrust"], ["ask", "always", "never"]),
-  httpIdleTimeoutMs: integerDefinition(["httpIdleTimeoutMs"], 0, 2_147_483_647, true),
+  httpIdleTimeoutMs: integerDefinition(["httpIdleTimeoutMs"], 0, 2_147_483_647),
   editorPaddingX: integerDefinition(["editorPaddingX"], 0, 3),
   outputPad: integerDefinition(["outputPad"], 0, 1),
   autocompleteMaxVisible: integerDefinition(["autocompleteMaxVisible"], 3, 20),

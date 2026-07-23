@@ -54,6 +54,9 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
     defaultModel: "gpt-4o-mini",
     compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 100 },
   }));
+  await writeFile(join(agentDir, "models.json"), JSON.stringify({
+    providers: { openai: { modelOverrides: { "gpt-4o-mini": { contextWindow: 111_111 } } } },
+  }));
   await writeFile(join(extensionDir, "stage3-fixture.ts"), EXTENSION_SOURCE(lifecycleLog));
 
   const target = SessionManager.create(cwd, sessionDir);
@@ -95,6 +98,7 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
     name: "stage3-real",
   });
   try {
+    assert.equal(instance.snapshot().metrics?.context?.contextWindow, 111_111);
     const updated = await instance.updateSetting({ key: "autoRetry", value: false }, "real-setting");
     assert.equal(updated.value, false);
     assert.ok((await instance.setActiveTools(["read"], "real-tools")).tools.find((tool) => tool.name === "read")?.active);
@@ -110,7 +114,11 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
     assert.deepEqual(compactionEvents.map((event) => event.data.operationId), ["real-compact", "real-compact"]);
     assert.ok((await instance.getHistoryPage(undefined, 200)).entries.some((entry) => entry.content.some((block) => block.type === "text" && block.text === "deterministic extension summary")));
 
+    await writeFile(join(agentDir, "models.json"), JSON.stringify({
+      providers: { openai: { modelOverrides: { "gpt-4o-mini": { contextWindow: 222_222 } } } },
+    }));
     assert.equal((await instance.reloadSession("real-reload")).cancelled, false);
+    assert.equal(instance.snapshot().metrics?.context?.contextWindow, 222_222);
     assert.equal((await instance.newSession("real-new")).cancelled, false);
     const newSessionFile = instance.snapshot().executor.sessionFile;
     assert.ok(newSessionFile);

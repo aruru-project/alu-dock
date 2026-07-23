@@ -119,6 +119,7 @@ export interface PiRuntimeHostOptions {
     cwd: string,
     onChange: (branch: string | undefined) => void,
   ) => Promise<GitBranchObserverPort>;
+  configureNetwork?: (settingsManager: AgentSessionServices["settingsManager"]) => void;
 }
 
 export interface CreatePiRuntimeHostOptions {
@@ -301,6 +302,8 @@ export class PiRuntimeHost implements RuntimeSession {
     validatedPiSettingValue(binding.services.settingsManager, key);
     applyPiSetting(binding.session, binding.services.settingsManager, update);
     await this.persistSettings(binding, key);
+    if (key === "transport") binding.session.agent.transport = update.value;
+    if (key === "httpIdleTimeoutMs") this.options.configureNetwork?.(binding.services.settingsManager);
     return projectPiSetting(binding.services.settingsManager, key);
   }
 
@@ -312,7 +315,8 @@ export class PiRuntimeHost implements RuntimeSession {
     diagnosticTotal: number;
     diagnosticsTruncated: boolean;
   }> {
-    const loader = this.requireActive().services.resourceLoader;
+    const binding = this.requireActive();
+    const loader = binding.services.resourceLoader;
     const extensions = loader.getExtensions();
     const skills = loader.getSkills();
     const prompts = loader.getPrompts();
@@ -345,10 +349,12 @@ export class PiRuntimeHost implements RuntimeSession {
         kind: "context", name: boundedString(basename(context.path), 256, "context"), ...(path ? { path } : {}),
       });
     }
+    const modelError = binding.services.modelRuntime.getError();
     const diagnostics: DiagnosticDto[] = [
       ...extensions.errors.map((failure) => ({ severity: "error" as const, message: safeRequiredText(failure.error, 2_048, "Extension load failure omitted"), source: boundedString(failure.path, 256, "extension") })),
       ...skills.diagnostics.map(projectDiagnostic),
       ...prompts.diagnostics.map(projectDiagnostic),
+      ...(modelError ? [{ severity: "error" as const, message: safeRequiredText(modelError, 2_048, "Model configuration error omitted"), source: "models.json" }] : []),
     ];
     const sortedResources = resources.sort(compareResourceDtos);
     const sortedDiagnostics = diagnostics.sort(compareDiagnosticDtos);
@@ -629,8 +635,18 @@ export class PiRuntimeHost implements RuntimeSession {
       binding.bufferEvents = true;
       this.options.extensionUiBroker?.beginGenerationChange();
       try {
+        await binding.services.modelRuntime.reloadConfig();
         let seamCalls = 0;
-        await binding.session.reload({ beforeSessionStart: () => { seamCalls += 1; } });
+        await binding.session.reload({
+          beforeSessionStart: () => {
+            seamCalls += 1;
+            // Extension providers have been re-registered by this point, so
+            // refresh model objects only now rather than against the old runner.
+            refreshSessionModelReferences(binding.session, binding.services);
+            syncAgentRuntimeSettings(binding.session, binding.services.settingsManager);
+            this.options.configureNetwork?.(binding.services.settingsManager);
+          },
+        });
         if (seamCalls !== 1) throw new Error(`Reload rebind seam ran ${seamCalls} times`);
         await this.options.commitReplacement?.({ operationId, kind: "reload", previousSessionFile, sessionFile: binding.session.sessionFile });
         binding.bufferEvents = false;
@@ -1387,6 +1403,26 @@ function projectDiagnostic(diagnostic: ResourceDiagnostic): DiagnosticDto {
   };
 }
 
+function refreshSessionModelReferences(session: AgentSession, services: AgentSessionServices): void {
+  const current = session.model;
+  if (current) {
+    const refreshed = services.modelRuntime.getModel(current.provider, current.id);
+    if (refreshed) session.agent.state.model = refreshed;
+  }
+  if (session.scopedModels.length > 0) {
+    session.setScopedModels(session.scopedModels.map((scoped) => ({
+      ...scoped,
+      model: services.modelRuntime.getModel(scoped.model.provider, scoped.model.id) ?? scoped.model,
+    })));
+  }
+}
+
+function syncAgentRuntimeSettings(session: AgentSession, settingsManager: SettingsManager): void {
+  session.agent.transport = settingsManager.getTransport();
+  session.agent.thinkingBudgets = settingsManager.getThinkingBudgets();
+  session.agent.maxRetryDelayMs = settingsManager.getProviderRetrySettings().maxRetryDelayMs;
+}
+
 export async function createPiRuntimeHost(options: CreatePiRuntimeHostOptions): Promise<PiRuntimeHost> {
   const uiContext = options.extensionUiBroker ? createPiExtensionUiContext(options.extensionUiBroker) : undefined;
   const trustByCwd = new Map<string, boolean>([[options.cwd, options.projectTrusted]]);
@@ -1421,6 +1457,7 @@ export async function createPiRuntimeHost(options: CreatePiRuntimeHostOptions): 
     extensionUiBroker: options.extensionUiBroker,
     uiContext,
     setProjectTrust: (cwd, trusted) => trustByCwd.set(cwd, trusted),
+    configureNetwork: configurePiNetwork,
   });
 }
 

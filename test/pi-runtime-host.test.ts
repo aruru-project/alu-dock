@@ -36,6 +36,7 @@ interface FakeModel {
   id: string;
   name: string;
   reasoning: boolean;
+  contextWindow?: number;
 }
 
 class FakeSession {
@@ -58,7 +59,15 @@ class FakeSession {
   usesDefaultSessionDir = true;
   isStreaming = false;
   isCompacting = false;
-  model: FakeModel | undefined;
+  readonly agent = {
+    state: { model: undefined as FakeModel | undefined },
+    transport: "auto" as "auto" | "sse" | "websocket" | "websocket-cached",
+    thinkingBudgets: undefined as unknown,
+    maxRetryDelayMs: undefined as number | undefined,
+  };
+  get model(): FakeModel | undefined { return this.agent.state.model; }
+  set model(model: FakeModel | undefined) { this.agent.state.model = model; }
+  scopedModels: Array<{ model: FakeModel; thinkingLevel?: "off" | "high" }> = [];
   thinkingLevel: "off" | "high" = "off";
   steeringMode: "all" | "one-at-a-time" = "all";
   followUpMode: "all" | "one-at-a-time" = "all";
@@ -66,6 +75,7 @@ class FakeSession {
   bindError: Error | undefined;
   bindEvent: { type: string; [key: string]: unknown } | undefined;
   reloadError: Error | undefined;
+  reloadBeforeStart: (() => void) | undefined;
   reloadEvent: { type: string; [key: string]: unknown } | undefined;
   compactError: Error | undefined;
   appendCompactionBeforeError = false;
@@ -164,6 +174,9 @@ class FakeSession {
     this.toolSetCalls += 1;
     this.activeToolNames = [...names];
   }
+  setScopedModels(models: Array<{ model: FakeModel; thinkingLevel?: "off" | "high" }>): void {
+    this.scopedModels = models;
+  }
   clearQueue(): { steering: string[]; followUp: string[] } { return { steering: [], followUp: [] }; }
   abort(): Promise<void> { this.abortCalls += 1; return Promise.resolve(); }
   abortCompaction(): void { this.abortCompactionCalls += 1; }
@@ -208,6 +221,7 @@ class FakeSession {
   async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
     this.trace.push(`${this.sessionId}:reload`);
     if (this.reloadError) throw this.reloadError;
+    this.reloadBeforeStart?.();
     await options?.beforeSessionStart?.();
     if (this.reloadEvent) this.emit(this.reloadEvent);
   }
@@ -256,6 +270,10 @@ class FakeSettingsManager {
   errors: Array<{ scope: "global" | "project"; error: Error }> = [];
   flushError: Error | undefined;
 
+  getTransport(): "auto" { return "auto"; }
+  getThinkingBudgets(): undefined { return undefined; }
+  getProviderRetrySettings(): { maxRetryDelayMs?: number } { return {}; }
+
   async flush(): Promise<void> {
     this.order.push("flush");
     if (this.flushError) throw this.flushError;
@@ -282,18 +300,20 @@ function settingsManagerFromRaw(globalSettings: unknown, projectSettings?: unkno
   }, { projectTrusted });
 }
 
-function services(options: { settings?: unknown; model?: FakeModel; cwd?: string; resourceLoader?: unknown } = {}): AgentSessionServices {
+function services(options: { settings?: unknown; model?: FakeModel; modelRuntime?: unknown; cwd?: string; resourceLoader?: unknown } = {}): AgentSessionServices {
   const settings = options.settings ?? new FakeSettingsManager();
   const model = options.model;
   return {
     cwd: options.cwd ?? "/project",
     agentDir: "/agent",
     settingsManager: settings as unknown as AgentSessionServices["settingsManager"],
-    modelRuntime: {
+    modelRuntime: (options.modelRuntime ?? {
+      reloadConfig: async () => {},
       getAvailable: async () => model ? [model] : [],
       getModel: (provider: string, id: string) => model?.provider === provider && model.id === id ? model : undefined,
       checkAuth: async (provider: string) => provider === model?.provider ? { state: "available" } : undefined,
-    } as unknown as AgentSessionServices["modelRuntime"],
+      getError: () => undefined,
+    }) as AgentSessionServices["modelRuntime"],
     resourceLoader: (options.resourceLoader ?? {
       getExtensions: () => ({ extensions: [], errors: [] }),
       getSkills: () => ({ skills: [], diagnostics: [] }),
@@ -1321,6 +1341,49 @@ test("reload buffers events, commits before publication, and increments generati
   await instance.stop("stop-1");
 });
 
+test("reload refreshes model config, active model references, runtime settings, and network without restarting Host", async () => {
+  const trace: string[] = [];
+  const oldModel: FakeModel = { provider: "fixture", id: "model-a", name: "old", reasoning: true, contextWindow: 100 };
+  const newModel: FakeModel = { provider: "fixture", id: "model-a", name: "new", reasoning: true, contextWindow: 372_000 };
+  let catalogModel = oldModel;
+  const modelRuntime = {
+    reloadConfig: async () => { trace.push("model:reload"); },
+    getAvailable: async () => [catalogModel],
+    getModel: (provider: string, id: string) => provider === catalogModel.provider && id === catalogModel.id ? catalogModel : undefined,
+    checkAuth: async () => ({ state: "available" }),
+    getError: () => "model warning",
+  };
+  const reloadSettings = {
+    getTransport: () => "websocket-cached" as const,
+    getThinkingBudgets: () => ({ low: 2_048 }),
+    getProviderRetrySettings: () => ({ maxRetryDelayMs: 321 }),
+  };
+  const { host, initial } = await runtimeHost(trace, (owner, session) => {
+    session.model = oldModel;
+    session.scopedModels = [{ model: oldModel, thinkingLevel: "high" }];
+    session.reloadBeforeStart = () => { trace.push("extensions:rebuilt"); catalogModel = newModel; };
+    owner.services = services({ settings: reloadSettings, modelRuntime });
+  }, {
+    configureNetwork: () => { trace.push("network:configure"); },
+  });
+  host.activateInitial();
+
+  await host.reload("reload-runtime-config");
+
+  assert.ok(trace.indexOf("model:reload") < trace.indexOf("initial:reload"));
+  assert.ok(trace.indexOf("extensions:rebuilt") < trace.indexOf("network:configure"));
+  assert.equal(initial.model, newModel);
+  assert.equal(initial.scopedModels[0]?.model, newModel);
+  assert.equal(initial.agent.transport, "websocket-cached");
+  assert.deepEqual(initial.agent.thinkingBudgets, { low: 2_048 });
+  assert.equal(initial.agent.maxRetryDelayMs, 321);
+  assert.equal(trace.filter((entry) => entry === "network:configure").length, 1);
+  assert.deepEqual((await host.getResources()).diagnostics.at(-1), {
+    severity: "error", message: "model warning", source: "models.json",
+  });
+  await host.dispose();
+});
+
 test("reload failure disposes the unsafe runtime exactly once", async () => {
   const trace: string[] = [];
   const failures: string[] = [];
@@ -1520,9 +1583,12 @@ test("Pi runtime host exposes and persists the exact general-settings allowlist"
     editorPaddingX: 1, outputPad: 0, autocompleteMaxVisible: 10,
     warnings: { anthropicExtraUsage: false },
   });
+  let configuredTimeout: number | undefined;
   const { host, initial } = await runtimeHost(trace, (owner, session) => {
     session.settingsManager = manager;
     owner.services = services({ settings: manager });
+  }, {
+    configureNetwork: (settingsManager) => { configuredTimeout = settingsManager.getHttpIdleTimeoutMs(); },
   });
   host.activateInitial();
 
@@ -1540,7 +1606,7 @@ test("Pi runtime host exposes and persists the exact general-settings allowlist"
     ["compactionKeepRecentTokens", 20_000],
   ]);
   assert.equal(settings.find((setting) => setting.key === "enableSkillCommands")?.reloadRequired, true);
-  assert.equal(settings.find((setting) => setting.key === "httpIdleTimeoutMs")?.hostRestartRequired, true);
+  assert.equal(settings.find((setting) => setting.key === "httpIdleTimeoutMs")?.hostRestartRequired, false);
 
   const updates = [
     { key: "autoCompaction", value: false }, { key: "autoRetry", value: false },
@@ -1562,6 +1628,8 @@ test("Pi runtime host exposes and persists the exact general-settings allowlist"
   }
   assert.equal(initial.steeringMode, "one-at-a-time");
   assert.equal(initial.followUpMode, "one-at-a-time");
+  assert.equal(initial.agent.transport, "websocket");
+  assert.equal(configuredTimeout, 1234);
   await host.dispose();
 });
 
@@ -1684,6 +1752,12 @@ test("general setting persistence preserves baseline/write attribution and hones
   assert.equal(events.filter((event) => event.type === "settings.changed").at(-1)?.data.value, "one-at-a-time");
   assert.equal(events.at(-1)?.type, "settings.write_failed");
   assert.deepEqual(calls, ["drain", "setter", "flush", "drain"]);
+
+  await assert.rejects(
+    instance.updateSetting({ key: "transport", value: "websocket" }),
+    (error: unknown) => error instanceof RuntimeSettingsWriteError && error.mutationApplied,
+  );
+  assert.equal(initial.agent.transport, "auto", "failed persistence must not change the live transport");
   await instance.stop("stop-1");
 });
 

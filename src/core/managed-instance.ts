@@ -3985,12 +3985,14 @@ const RUN_SENSITIVE_SETTING_KEYS: ReadonlySet<SettingKey> = new Set([
   "steeringMode",
   "followUpMode",
   "transport",
+  "httpIdleTimeoutMs",
 ]);
 
 function settingAdmission(key: SettingKey): "idle" | "live" {
-  // These settings can alter the active agent loop, queue draining, retry, or
-  // transport semantics. Presentation, startup/reload, trust defaults, and
-  // Host-restart settings only affect this/next client or a future boundary.
+  // These settings can alter the active agent loop, queue draining, retry,
+  // transport, or the process-wide HTTP dispatcher. Presentation,
+  // startup/reload, and trust defaults only affect this/next client or a future
+  // boundary.
   return RUN_SENSITIVE_SETTING_KEYS.has(key) ? "idle" : "live";
 }
 

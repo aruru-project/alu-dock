@@ -86,8 +86,8 @@ validate/admit
 
 Admission按能力分类，不用command-name例外：
 
-- **live**：session name、model、thinking、active tools，以及22个可写setting中的17个非run-sensitive key；它们仍串行通过configuration/catalog边界，但可与既有run和queue共存，不改写`activeCommandId`。同步`session_info_changed`必须归属于name operation，而非当前model command。
-- **idle**：tree navigation、new/switch/fork/clone/reload；另有5个会改变当前agent loop、queue drain、retry或transport语义的setting：`autoCompaction`、`autoRetry`、`steeringMode`、`followUpMode`、`transport`。
+- **live**：session name、model、thinking、active tools，以及22个可写setting中的16个非run-sensitive key；它们仍串行通过configuration/catalog边界，但可与既有run和queue共存，不改写`activeCommandId`。同步`session_info_changed`必须归属于name operation，而非当前model command。
+- **idle**：tree navigation、new/switch/fork/clone/reload；另有6个会改变当前agent loop、queue drain、retry、transport或process-wide HTTP dispatcher语义的setting：`autoCompaction`、`autoRetry`、`steeringMode`、`followUpMode`、`transport`、`httpIdleTimeoutMs`。
 - **run-preempting**：manual compaction；允许接管active run，但仍拒绝并发control mutation与未清queue。
 - **run control / queue**：abort、stop、steer、follow-up和dequeue沿用各自状态机，不走configuration admission。
 
@@ -137,7 +137,8 @@ ManagedInstance replacement intent
 - Standalone/global Pi可拥有独立runtime并与Dock共享当前`~/.pi/agent`资源目录；同一个Pi session file不得被两个runtime进程并发持有或写入。
 - 没有public API的行为明确defer，不通过内部字段或直接编辑Pi JSON伪造。
 - Settings沿用Pi native snapshot、lock、field merge与last-writer-wins语义。
-- Setting mutation固定：public setter → `await flush()` → `drainErrors()`。
+- Work `/reload`除Pi resources/settings外还刷新`ModelRuntime`配置；extension providers重建后再刷新当前model/scoped-model public references，并同步agent transport/thinking budgets/retry delay与Host-owned HTTP dispatcher。这些Pi配置边界不得升级为Host restart。
+- Setting mutation固定：public setter → `await flush()` → `drainErrors()`；`transport`仅在持久化成功后同步当前agent，`httpIdleTimeoutMs`在idle admission后重配process-wide dispatcher。新dispatcher用于所有runtime的后续请求，旧dispatcher graceful close，既有请求不因reload取消。
 - `compaction.reserveTokens`与`compaction.keepRecentTokens`在Pi提供public setter前只读。
 - Extension exact registered command先由当前generation runner分类，保持`delivery:"prompt", queued:false`；unknown slash、skill、template仍走Pi-native prompt语义。
 - Manual compaction intent一旦进入`configurationKind:"compaction"`，普通prompt admission即属于Host compaction Queue custody；不能等待Pi的`compaction_start`才开放Queue。pre-start消息不得提前drain与`session.compact()`竞争；manual mutation结束且runtime不再compacting后再恢复fresh dispatch。

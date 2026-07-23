@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 
 const compiledTestDirectory = dirname(fileURLToPath(import.meta.url));
 const fixturePath = join(compiledTestDirectory, "fixtures", "pi-network-probe.js");
+const reloadFixturePath = join(compiledTestDirectory, "fixtures", "pi-network-reload-probe.js");
 
 test("Pi SDK network bootstrap proxies fetch and WebSocket like the Pi CLI", { timeout: 15_000 }, async () => {
   const settingsFetch = await runProxyProbe("settings", "fetch");
@@ -20,6 +21,21 @@ test("Pi SDK network bootstrap proxies fetch and WebSocket like the Pi CLI", { t
   assert.equal(environmentWebSocket.result.dispatcher, "EnvHttpProxyAgent");
   assert.equal(environmentWebSocket.result.httpProxy, environmentWebSocket.proxyUrl);
   assert.equal(environmentWebSocket.result.httpsProxy, environmentWebSocket.proxyUrl);
+});
+
+test("Pi SDK network bootstrap can replace and remove settings-owned proxy values", async () => {
+  const { stdout, stderr } = await new Promise<{ stdout: string; stderr: string }>((resolveRun, rejectRun) => {
+    execFile(process.execPath, [reloadFixturePath], { encoding: "utf8", timeout: 8_000 }, (error, stdout, stderr) => {
+      if (error) rejectRun(new Error(`Network reload probe failed: ${error.message}\nstdout: ${stdout}\nstderr: ${stderr}`));
+      else resolveRun({ stdout, stderr });
+    });
+  });
+  assert.equal(stderr, "");
+  assert.deepEqual(JSON.parse(stdout), [
+    { httpProxy: "http://127.0.0.1:41001", httpsProxy: "http://127.0.0.1:41001" },
+    { httpProxy: "http://127.0.0.1:41002", httpsProxy: "http://127.0.0.1:41002" },
+    {},
+  ]);
 });
 
 async function runProxyProbe(
