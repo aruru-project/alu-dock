@@ -288,13 +288,12 @@ function services(options: { settings?: unknown; model?: FakeModel; cwd?: string
   return {
     cwd: options.cwd ?? "/project",
     agentDir: "/agent",
-    authStorage: {} as AgentSessionServices["authStorage"],
     settingsManager: settings as unknown as AgentSessionServices["settingsManager"],
-    modelRegistry: {
-      getAvailable: () => model ? [model] : [],
-      find: (provider: string, id: string) => model?.provider === provider && model.id === id ? model : undefined,
-      hasConfiguredAuth: (candidate: FakeModel) => candidate === model,
-    } as unknown as AgentSessionServices["modelRegistry"],
+    modelRuntime: {
+      getAvailable: async () => model ? [model] : [],
+      getModel: (provider: string, id: string) => model?.provider === provider && model.id === id ? model : undefined,
+      checkAuth: async (provider: string) => provider === model?.provider ? { state: "available" } : undefined,
+    } as unknown as AgentSessionServices["modelRuntime"],
     resourceLoader: (options.resourceLoader ?? {
       getExtensions: () => ({ extensions: [], errors: [] }),
       getSkills: () => ({ skills: [], diagnostics: [] }),

@@ -9,7 +9,7 @@ let installedGlobalFetch: typeof globalThis.fetch | undefined;
 let installedConfiguration: string | undefined;
 
 /**
- * Apply the same process-wide proxy and Undici bootstrap as Pi 0.80.6 CLI.
+ * Apply the same process-wide proxy and Undici bootstrap as the Pi CLI.
  *
  * SDK runtime factories intentionally do not initialize network globals; Pi's
  * CLI does that in main() before creating a runtime. Dock is the SDK process,

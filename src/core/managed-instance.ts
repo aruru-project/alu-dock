@@ -1403,7 +1403,7 @@ export class ManagedInstance {
         this.discardAcceptedPrompt(commandId);
         this.appendEvent("instance.error", { operationId: commandId, source: "command_background", error: messageText });
       });
-      // Pi 0.80.6 emits agent_settled from _runAgentPrompt.finally before the
+      // Pi emits agent_settled from _runAgentPrompt.finally before the
       // prompt Promise rejects. Only project a fallback failure if that public
       // lifecycle guarantee was not observed at all.
       if (

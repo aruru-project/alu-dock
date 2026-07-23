@@ -19,7 +19,7 @@ Alu Dock 的视觉身份只来自阿露原稿与既有阿露资产，不使用�
 ## 技术与结构
 
 - Node.js `>=22.19.0`，TypeScript ESM。
-- 当前 Pi runtime cohort 精确固定为 `@earendil-works/pi-coding-agent@0.80.6` 与 `@earendil-works/pi-tui@0.80.6`；生产代码只使用 package-root exports，且不得把 pi-tui 类型泄漏到 Host、Protocol 或 Core port。
+- 当前 Pi runtime cohort 精确固定为 `@earendil-works/pi-coding-agent@0.81.1` 与 `@earendil-works/pi-tui@0.81.1`；生产代码只使用 package-root exports，且不得把 pi-tui 类型泄漏到 Host、Protocol 或 Core port。
 - Managed production Host 从 `~/.local/share/alu-dock` 安装包的本地依赖加载 Pi SDK，不调用 `$PATH` 中的全局 `pi`。Pi cohort 升级必须显式同步改动 exact pins、adapter 与门禁；不得顺带升级、重启或移除独立的全局 Pi/RPC 服务。
 - Managed Host 面向 `systemd --user`；开发模式使用独立 dev socket。
 

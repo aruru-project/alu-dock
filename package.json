@@ -26,8 +26,8 @@
     "install:local": "npm run build && node dist/scripts/install-local.js"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.80.6",
-    "@earendil-works/pi-tui": "0.80.6",
+    "@earendil-works/pi-coding-agent": "0.81.1",
+    "@earendil-works/pi-tui": "0.81.1",
     "undici": "8.5.0"
   },
   "devDependencies": {

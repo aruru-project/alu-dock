@@ -3036,7 +3036,7 @@ test("an LF-truncated control response is reported as recoverable connection los
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-partial-frame-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  const capabilities = ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.catalog", "queue.control.v1", "run.abort.v1", "tool-result-presentation.v1", "tui.projection.v1"];
+  const capabilities = ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "instance.catalog", "queue.control.v1", "run.abort.v1", "tool-result-presentation.v1", "tui.projection.v1"];
   const server = createServer((socket) => {
     const decoder = new JsonLineDecoder();
     socket.on("data", (chunk: Buffer) => {

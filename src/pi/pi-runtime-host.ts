@@ -257,7 +257,8 @@ export class PiRuntimeHost implements RuntimeSession {
   }
 
   async listModels(): Promise<RuntimeModelInfo[]> {
-    return this.requireActive().services.modelRegistry.getAvailable().map((model) => ({
+    const models = await this.requireActive().services.modelRuntime.getAvailable();
+    return models.map((model) => ({
       provider: model.provider, id: model.id, name: model.name, reasoning: model.reasoning,
     })).sort((left, right) => left.provider.localeCompare(right.provider) || left.name.localeCompare(right.name));
   }
@@ -464,8 +465,8 @@ export class PiRuntimeHost implements RuntimeSession {
 
   async selectModel(provider: string, modelId: string): Promise<RuntimeModelState> {
     const binding = this.requireActive();
-    const model = binding.services.modelRegistry.find(provider, modelId);
-    if (!model || !binding.services.modelRegistry.hasConfiguredAuth(model)) throw new RuntimeModelNotFoundError(provider, modelId);
+    const model = binding.services.modelRuntime.getModel(provider, modelId);
+    if (!model || !(await binding.services.modelRuntime.checkAuth(provider))) throw new RuntimeModelNotFoundError(provider, modelId);
     this.assertCleanSettingsBaseline(binding, "model");
     await binding.session.setModel(model);
     await this.persistSettings(binding, "model");

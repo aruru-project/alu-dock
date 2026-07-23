@@ -3,7 +3,7 @@ import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 const MAX_INSPECTED_RESULTS = 256;
 
 /**
- * Pi 0.80.6 treats an extension tool's returned `isError` field as ordinary
+ * Pi treats an extension tool's returned `isError` field as ordinary
  * payload metadata. pi-subagents also records each child exit code in details,
  * so normalize that authoritative child outcome through the public
  * `tool_result` hook before the model, session history, and Dock projection see
