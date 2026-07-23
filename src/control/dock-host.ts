@@ -79,9 +79,10 @@ const MAX_SOCKET_WRITE_BUFFER = MAX_CONTROL_LINE_BYTES;
 const MAX_SESSION_INVENTORY_RESULT_BYTES = 512 * 1_024;
 const MAX_SESSION_INVENTORY_DIAGNOSTIC_BYTES = 64 * 1_024;
 const MAX_SESSION_INVENTORY_ITEMS = 2_000;
-const MAX_INITIAL_EVENT_QUEUE = 1_000;
+const MAX_ATTACH_EVENT_QUEUE = 1_000;
+const MAX_ATTACH_EVENT_QUEUE_BYTES = 4 * MAX_CONTROL_LINE_BYTES;
 const ATTACH_DRAIN_TIMEOUT_MS = 5_000;
-const ATTACH_INITIAL_OVERFLOW_MESSAGE = "Attach initialization exceeded the 1000-event handoff bound; reconnect to obtain an authoritative fresh projection";
+const ATTACH_INITIAL_OVERFLOW_MESSAGE = "Attach initialization exceeded the bounded event handoff queue; reconnect to obtain an authoritative fresh projection";
 
 type HostState = "new" | "starting" | "running" | "mutation_faulted" | "draining" | "stopping" | "stopped";
 type WriteOutcome = "written" | "backpressured" | "failed" | "too_large";
@@ -124,6 +125,7 @@ export class DockHost {
   private readonly connections = new Set<Socket>();
   private readonly connectionRequirements = new WeakMap<Socket, ReadonlySet<string>>();
   private readonly attachConnections = new Map<string, Set<Socket>>();
+  private readonly attachBackpressureStats = { blocked: 0, drained: 0, overflow: 0, timeout: 0 };
   private readonly inFlightDispatches = new Set<Promise<void>>();
   private readonly operationLedger: OperationLedger;
   private readonly faultDrainTimeoutMs: number;
@@ -555,7 +557,10 @@ export class DockHost {
       gitBranch: requirements?.has(GIT_BRANCH_CAPABILITY)===true,
       toolPresentation: requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,
     };
-    let initializing=true,pending:DockEvent[]=[]; let initializationOverflow=false; let lastGeneration=instance.runtimeGeneration,lastSent=0; let unsubscribe=()=>{};
+    type QueuedEvent = { event: DockEvent; bytes: number };
+    let initializing=true,pending:QueuedEvent[]=[]; let pendingBytes=0,initializationOverflow=false;
+    let lastGeneration=instance.runtimeGeneration,lastAccepted=0; let unsubscribe=()=>{};
+    let liveQueue:QueuedEvent[]=[]; let liveQueueBytes=0,waitingForDrain=false;
     let controller:ControllerClaim|{status:"observing"}=request.params.controller==="observe"?{status:"observing"}:{status:"unavailable"};
     let controllerReleased=false,subscriptionClosed=false;
     const releaseController=():void=>{
@@ -563,51 +568,118 @@ export class DockHost {
       controllerReleased=true;
       void instance.releaseInteractionController(controller.leaseToken,"detach");
     };
-    const closeSubscription=():void=>{if(subscriptionClosed)return;subscriptionClosed=true;unsubscribe();releaseController();};
-    const closeAfterBackpressure=():void=>{closeSubscription();if(!socket.destroyed&&!socket.writableEnded)socket.end();};
+    const clearQueues=():void=>{pending=[];pendingBytes=0;liveQueue=[];liveQueueBytes=0;};
+    const closeSubscription=():void=>{if(subscriptionClosed)return;subscriptionClosed=true;unsubscribe();releaseController();clearQueues();};
+    const abortBackpressuredStream=():void=>{closeSubscription();if(!socket.destroyed)socket.destroy();};
+    const boundedEvent=(event:DockEvent):QueuedEvent|undefined=>{
+      const bytes=eventFrameSize(request.requestId,this.hostEpoch,event,projectionCapabilities);
+      if(bytes===0)return undefined;
+      if(!Number.isFinite(bytes)||bytes>MAX_CONTROL_LINE_BYTES){closeSubscription();socket.destroy();return undefined;}
+      return {event,bytes};
+    };
+    const appendBounded=(queue:QueuedEvent[],queued:QueuedEvent,currentBytes:number):number|undefined=>{
+      if(queue.length>=MAX_ATTACH_EVENT_QUEUE||currentBytes+queued.bytes>MAX_ATTACH_EVENT_QUEUE_BYTES)return undefined;
+      queue.push(queued);return currentBytes+queued.bytes;
+    };
+    const flushLiveQueue=():void=>{
+      if(subscriptionClosed||waitingForDrain)return;
+      while(liveQueue.length>0){
+        const queued=liveQueue.shift() as QueuedEvent;liveQueueBytes-=queued.bytes;
+        const outcome=writeEvent(socket,request.requestId,this.hostEpoch,queued.event,projectionCapabilities);
+        if(outcome==="written")continue;
+        if(outcome==="backpressured"){
+          this.attachBackpressureStats.blocked+=1;
+          waitingForDrain=true;
+          void waitForSocketDrain(socket,ATTACH_DRAIN_TIMEOUT_MS).then((drained)=>{
+            if(subscriptionClosed)return;
+            if(!drained){this.attachBackpressureStats.timeout+=1;abortBackpressuredStream();return;}
+            this.attachBackpressureStats.drained+=1;
+            waitingForDrain=false;flushLiveQueue();
+          });
+          return;
+        }
+        closeSubscription();socket.destroy();return;
+      }
+    };
     const sendLiveEvent=(event:DockEvent):boolean=>{
       if(event.runtimeGeneration<lastGeneration)return true;
       if(event.runtimeGeneration>lastGeneration){
         if(event.runtimeGeneration!==lastGeneration+1||event.type!=="session.replaced"||event.sequence!==1){closeSubscription();socket.destroy();return false;}
-        lastGeneration=event.runtimeGeneration;lastSent=0;
+        lastGeneration=event.runtimeGeneration;lastAccepted=0;
       }
-      if(event.sequence<=lastSent)return true;
-      const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event,projectionCapabilities);if(outcome==="written"||outcome==="backpressured")lastSent=event.sequence;if(outcome==="written")return true;if(outcome==="backpressured")closeAfterBackpressure();else{closeSubscription();socket.destroy();}return false;
+      if(event.sequence<=lastAccepted)return true;
+      const queued=boundedEvent(event);
+      if(subscriptionClosed)return false;
+      lastAccepted=event.sequence;
+      if(!queued)return true;
+      if(waitingForDrain||liveQueue.length>0){
+        const nextBytes=appendBounded(liveQueue,queued,liveQueueBytes);
+        if(nextBytes===undefined){this.attachBackpressureStats.overflow+=1;abortBackpressuredStream();return false;}
+        liveQueueBytes=nextBytes;return true;
+      }
+      const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event,projectionCapabilities);
+      if(outcome==="written")return true;
+      if(outcome==="backpressured"){
+        this.attachBackpressureStats.blocked+=1;
+        waitingForDrain=true;
+        void waitForSocketDrain(socket,ATTACH_DRAIN_TIMEOUT_MS).then((drained)=>{
+          if(subscriptionClosed)return;
+          if(!drained){this.attachBackpressureStats.timeout+=1;abortBackpressuredStream();return;}
+          this.attachBackpressureStats.drained+=1;
+          waitingForDrain=false;flushLiveQueue();
+        });
+        return true;
+      }
+      closeSubscription();socket.destroy();return false;
     };
-    unsubscribe=instance.subscribe(event=>{if(initializing){pending.push(event);if(pending.length>MAX_INITIAL_EVENT_QUEUE){pending=[];initializationOverflow=true;closeSubscription();}return;}sendLiveEvent(event);});
+    unsubscribe=instance.subscribe(event=>{
+      if(initializing){
+        const queued=boundedEvent(event);
+        if(subscriptionClosed||!queued)return;
+        const nextBytes=appendBounded(pending,queued,pendingBytes);
+        if(nextBytes===undefined){
+          this.attachBackpressureStats.overflow+=1;
+          initializationOverflow=true;
+          void instance.reportControlDegradation(ATTACH_INITIAL_OVERFLOW_MESSAGE).catch(()=>{});
+          closeSubscription();return;
+        }
+        pendingBytes=nextBytes;return;
+      }
+      sendLiveEvent(event);
+    });
+    if(subscriptionClosed)unsubscribe();
+    setEventUnsubscribe(closeSubscription);
     if(follow&&request.params.controller==="claim")controller=await instance.claimInteractionController();
     if(subscriptionClosed){
-      releaseController();initializing=false;pending=[];
+      releaseController();initializing=false;clearQueues();
       if(initializationOverflow)this.sendErrorAndEnd(socket,"attach_initial_overflow",ATTACH_INITIAL_OVERFLOW_MESSAGE,request.requestId);
       return;
     }
-    setEventUnsubscribe(closeSubscription);
     if(socket.destroyed){closeSubscription();return;}
     let projection:AttachProjection;
-    try{projection=await instance.getAttachProjection(cursor,MAX_HISTORY_ITEMS,request.params.replay??"legacy_history_overlay");}catch(error){initializing=false;pending=[];closeSubscription();throw error;}
+    try{projection=await instance.getAttachProjection(cursor,MAX_HISTORY_ITEMS,request.params.replay??"legacy_history_overlay");}catch(error){initializing=false;clearQueues();closeSubscription();throw error;}
     if(subscriptionClosed){
-      releaseController();initializing=false;pending=[];
+      releaseController();initializing=false;clearQueues();
       if(initializationOverflow)this.sendErrorAndEnd(socket,"attach_initial_overflow",ATTACH_INITIAL_OVERFLOW_MESSAGE,request.requestId);
       return;
     }
     const result=createBoundedEventsResult(projection,follow,request.requestId,controller);
     const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,projectForClient(result,projectionCapabilities)));
     if(responseOutcome==="backpressured"){
+      this.attachBackpressureStats.blocked+=1;
       const drained=await waitForSocketDrain(socket,ATTACH_DRAIN_TIMEOUT_MS);
-      if(!drained){initializing=false;pending=[];closeAfterBackpressure();return;}
-      if(subscriptionClosed){
-        initializing=false;pending=[];
-        if(initializationOverflow&&!socket.destroyed&&!socket.writableEnded){
-          const diagnostic=await instance.reportControlDegradation(ATTACH_INITIAL_OVERFLOW_MESSAGE);
-          const diagnosticOutcome=writeEvent(socket,request.requestId,this.hostEpoch,diagnostic,projectionCapabilities);
-          if(diagnosticOutcome==="written")socket.end();else closeAfterBackpressure();
-        }else closeAfterBackpressure();
-        return;
-      }
+      if(!drained){this.attachBackpressureStats.timeout+=1;initializing=false;clearQueues();abortBackpressuredStream();return;}
+      this.attachBackpressureStats.drained+=1;
+      if(subscriptionClosed){initializing=false;clearQueues();abortBackpressuredStream();return;}
     }else if(responseOutcome!=="written"){
-      initializing=false;pending=[];if(responseOutcome==="too_large"){closeSubscription();this.sendErrorAndEnd(socket,"response_too_large","Attach response exceeds the JSONL record limit",request.requestId);}else closeSubscription();return;
+      initializing=false;clearQueues();if(responseOutcome==="too_large"){closeSubscription();this.sendErrorAndEnd(socket,"response_too_large","Attach response exceeds the JSONL record limit",request.requestId);}else closeSubscription();return;
     }
-    lastGeneration=result.instance.runtimeGeneration;lastSent=Math.max(projection.replaySince,result.page.latest.sequence);initializing=false;pending.sort((a,b)=>a.runtimeGeneration-b.runtimeGeneration||a.sequence-b.sequence);for(const event of pending){if(!sendLiveEvent(event))return;}pending=[];if(!follow){closeSubscription();socket.end();}
+    lastGeneration=result.instance.runtimeGeneration;lastAccepted=Math.max(projection.replaySince,result.page.latest.sequence);
+    initializing=false;
+    const handoff=pending.sort((a,b)=>a.event.runtimeGeneration-b.event.runtimeGeneration||a.event.sequence-b.event.sequence);
+    pending=[];pendingBytes=0;
+    for(const queued of handoff){if(!sendLiveEvent(queued.event))return;}
+    if(!follow){closeSubscription();socket.end();}
   }
 
   private trackAttachStream(instanceId: string, socket: Socket): void {
@@ -837,11 +909,20 @@ function isUnsupportedProjectionEvent(value: unknown, capabilities: ClientProjec
     || (!capabilities.gitBranch && type === "git.branch_changed");
 }
 
-function writeEvent(socket:Socket,requestId:string,hostEpoch:string,event:DockEvent,capabilities:ClientProjectionCapabilities):WriteOutcome {
-  if (isUnsupportedProjectionEvent(event, capabilities)) return "written";
+function controlEventEnvelope(requestId:string,hostEpoch:string,event:DockEvent,capabilities:ClientProjectionCapabilities):ControlEventEnvelope|undefined {
+  if (isUnsupportedProjectionEvent(event, capabilities)) return undefined;
   const projectedEvent=projectForClient(event,capabilities,"event") as DockEvent;
-  const envelope:ControlEventEnvelope={kind:"event",version:2,requestId,hostEpoch,event:projectedEvent};
-  return writeEnvelope(socket,envelope);
+  return {kind:"event",version:2,requestId,hostEpoch,event:projectedEvent};
+}
+
+function eventFrameSize(requestId:string,hostEpoch:string,event:DockEvent,capabilities:ClientProjectionCapabilities):number {
+  const envelope=controlEventEnvelope(requestId,hostEpoch,event,capabilities);
+  return envelope===undefined?0:encodedSize(envelope);
+}
+
+function writeEvent(socket:Socket,requestId:string,hostEpoch:string,event:DockEvent,capabilities:ClientProjectionCapabilities):WriteOutcome {
+  const envelope=controlEventEnvelope(requestId,hostEpoch,event,capabilities);
+  return envelope===undefined?"written":writeEnvelope(socket,envelope);
 }
 
 function writeEnvelope(socket: Socket, envelope: unknown): WriteOutcome {

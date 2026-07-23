@@ -69,6 +69,7 @@ export type DockTuiExitReason = "detached" | "stopped" | "signal";
 export interface DockTuiResult {
   reason: DockTuiExitReason;
   instance: InstanceSnapshot;
+  detachTruth: "host_owned" | "status_unknown" | "not_active";
   cleanupErrors?: string[];
 }
 
@@ -98,6 +99,11 @@ export async function runDockTui(
   let lastEventGeneration = instance.runtimeGeneration;
   let lastEventSequence = instance.eventCursor.sequence;
   let controllerReattach: Promise<void> | undefined;
+  let eventStreamRecovery: Promise<void> | undefined;
+  let deferredEventStreamFailure: { watched: EventSubscription; error: unknown } | undefined;
+  let eventStreamConnected = true;
+  let submitBlockDepth = 0;
+  let detachTruth: DockTuiResult["detachTruth"] = initialInstance.lifecycle === "active" ? "host_owned" : "not_active";
   let cleanupErrors: string[] | undefined;
   let editor!: Editor;
   let settings: SettingDto[] = [];
@@ -123,6 +129,25 @@ export async function runDockTui(
     if (exiting) return;
     exiting = true;
     resolveExit(reason);
+  };
+
+  const refreshEditorSubmit = (): void => {
+    editor.disableSubmit = submitBlockDepth > 0 || !eventStreamConnected || instance.lifecycle !== "active";
+  };
+  const blockEditorSubmit = (): void => {
+    submitBlockDepth += 1;
+    editor.disableSubmit = true;
+  };
+  const restoreEditorSubmit = (): void => {
+    submitBlockDepth = Math.max(0, submitBlockDepth - 1);
+    refreshEditorSubmit();
+  };
+  const requireCoherentControl = (action: string): boolean => {
+    if (eventStreamConnected && instance.lifecycle === "active") return true;
+    refreshEditorSubmit();
+    conversation.addNotice(`${action} was not sent because this TUI does not have a coherent event stream. Ctrl+D and reattach if recovery does not complete.`, true);
+    tui.requestRender();
+    return false;
   };
 
   const onEvent = (event: DockEvent): void => {
@@ -184,9 +209,16 @@ export async function runDockTui(
     if (event.type === "settings.changed") applyLiveSetting(event.data.key, event.data.value);
     if (event.type === "extension.tools_expanded_changed") conversation.setToolsExpanded(event.data.expanded);
     if (event.type === "session.info_changed") terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
-    if (event.type === "instance.stopped" && editor) editor.disableSubmit = true;
-    updateTerminalProgress();
-    tui.requestRender();
+    if (instance.lifecycle !== "active") {
+      detachTruth = "not_active";
+      if (editor) refreshEditorSubmit();
+    } else if (eventStreamConnected) {
+      detachTruth = "host_owned";
+    }
+    if (!initialHistoryLoading) {
+      updateTerminalProgress();
+      tui.requestRender();
+    }
   };
 
   subscription = await client.streamEvents(instance.id, { onEvent, requireTuiProjection: true, claimController: true, conversationBootstrap: true });
@@ -329,6 +361,12 @@ export async function runDockTui(
   rebuildAutocomplete();
   editor.onSubmit = (text) => {
     if (!text) return;
+    if (!eventStreamConnected) {
+      refreshEditorSubmit();
+      conversation.addNotice("Control input was not sent because the event stream is not coherent. Ctrl+D and reattach if recovery does not complete.", true);
+      tui.requestRender();
+      return;
+    }
     editor.addToHistory(text);
     void handleInput(text);
   };
@@ -481,18 +519,19 @@ export async function runDockTui(
       return;
     }
     if (text === "/stop") {
-      editor.disableSubmit = true;
+      blockEditorSubmit();
       runActivity = { phase: "aborting", label: "stopping" };
       activity.setActivity(runActivity);
       tui.requestRender();
       try {
+        if (!requireCoherentControl("Stop")) { restoreEditorSubmit(); return; }
         const result = await client.stop(instance.id);
         instance = result.instance;
         status.update(instance);
         cleanupErrors = result.receipt.cleanupErrors;
         finish("stopped");
       } catch (error) {
-        editor.disableSubmit = false;
+        restoreEditorSubmit();
         showError(error);
       }
       return;
@@ -514,7 +553,7 @@ export async function runDockTui(
   }
 
   async function sendPrompt(message: string, delivery: DeliveryMode): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     const operationId = randomUUID();
     const submitting = submittingActivity();
     const projectSubmitting = runActivity.phase === "idle" && instance.execution !== "running";
@@ -528,6 +567,7 @@ export async function runDockTui(
     }, SUBMITTING_FEEDBACK_DELAY_MS);
     feedbackTimer.unref?.();
     try {
+      if (!requireCoherentControl("Message submission")) return;
       const result = await client.prompt(instance.id, message, delivery, operationId);
       instance = result.instance;
       status.update(instance);
@@ -554,7 +594,7 @@ export async function runDockTui(
     } finally {
       clearTimeout(feedbackTimer);
       submittingFeedbackVisible = false;
-      if (instance.lifecycle === "active") editor.disableSubmit = false;
+      restoreEditorSubmit();
       tui.requestRender();
     }
   }
@@ -565,9 +605,10 @@ export async function runDockTui(
   }
 
   async function restoreQueue(): Promise<boolean> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus("restoring queued messages");
     try {
+      if (!requireCoherentControl("Queue restoration")) return false;
       const result = await client.dequeue(instance.id);
       instance = result.instance;
       status.update(instance);
@@ -586,7 +627,7 @@ export async function runDockTui(
       showError(error);
       return false;
     } finally {
-      if (instance.lifecycle === "active") editor.disableSubmit = false;
+      restoreEditorSubmit();
       tui.requestRender();
     }
   }
@@ -596,13 +637,13 @@ export async function runDockTui(
       showStatus("nothing to abort");
       return;
     }
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     runActivity = abortingActivity();
     activity.setActivity(runActivity);
     tui.requestRender();
     try {
       if ((instance.pending.total > 0 || pendingQueue.count > 0) && !await restoreQueue()) return;
-      editor.disableSubmit = true;
+      if (!requireCoherentControl("Run abort")) return;
       const result = await client.abort(instance.id);
       instance = result.instance;
       status.update(instance);
@@ -611,13 +652,13 @@ export async function runDockTui(
     } catch (error) {
       showError(error);
     } finally {
-      if (instance.lifecycle === "active") editor.disableSubmit = false;
+      restoreEditorSubmit();
       tui.requestRender();
     }
   }
 
   async function chooseModel(): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus("loading models");
     try {
       const catalog = await client.models(instance.id);
@@ -630,7 +671,7 @@ export async function runDockTui(
     } catch (error) {
       showError(error);
     } finally {
-      if (instance.lifecycle === "active") editor.disableSubmit = false;
+      restoreEditorSubmit();
       tui.setFocus(editor);
       tui.requestRender();
     }
@@ -736,6 +777,7 @@ export async function runDockTui(
 
     const outcome = await presentExtensionDialog(event.data);
     if (outcome.fromHost || outcome.response === undefined) return;
+    if (!requireCoherentControl("Extension interaction response")) return;
     try {
       await client.respondInteraction(instance.id, leaseToken, event.data.interactionId, outcome.response);
     } catch (error) {
@@ -817,7 +859,7 @@ export async function runDockTui(
   }
 
   async function chooseSetting(): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus("loading settings");
     tui.requestRender();
     try {
@@ -859,7 +901,7 @@ export async function runDockTui(
     } catch (error) {
       showError(error);
     } finally {
-      if (instance.lifecycle === "active") editor.disableSubmit = false;
+      restoreEditorSubmit();
       tui.setFocus(editor);
       tui.requestRender();
     }
@@ -889,10 +931,11 @@ export async function runDockTui(
   }
 
   async function applySettingUpdate(update: SettingUpdate): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus(`setting ${update.key}`);
     tui.requestRender();
     try {
+      if (!requireCoherentControl("Setting update")) return;
       const result = await client.updateSetting(instance.id, update);
       instance = result.instance;
       status.update(instance);
@@ -903,12 +946,12 @@ export async function runDockTui(
       showStatus(`setting ${result.setting.key} saved`);
       rebuildAutocomplete();
     } finally {
-      if (instance.lifecycle === "active") editor.disableSubmit = false;
+      restoreEditorSubmit();
     }
   }
 
   async function chooseTools(): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus("loading tools");
     tui.requestRender();
     try {
@@ -925,6 +968,7 @@ export async function runDockTui(
         if (selected === undefined) break;
         const active = new Set(tools.filter((tool) => tool.active).map((tool) => tool.name));
         if (active.has(selected)) active.delete(selected); else active.add(selected);
+        if (!requireCoherentControl("Tool update")) return;
         const result = await client.setActiveTools(instance.id, [...active].sort());
         instance = result.instance;
         status.update(instance);
@@ -936,7 +980,7 @@ export async function runDockTui(
     } catch (error) {
       showError(error);
     } finally {
-      if (instance.lifecycle === "active") editor.disableSubmit = false;
+      restoreEditorSubmit();
       tui.setFocus(editor);
       tui.requestRender();
     }
@@ -944,10 +988,11 @@ export async function runDockTui(
 
   async function setToolsFromCommand(target: string): Promise<void> {
     const names = target === "none" ? [] : [...new Set(target.split(/[\s,]+/u).filter(Boolean))].sort();
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus("updating tools");
     tui.requestRender();
     try {
+      if (!requireCoherentControl("Tool update")) return;
       const result = await client.setActiveTools(instance.id, names);
       instance = result.instance;
       status.update(instance);
@@ -955,11 +1000,11 @@ export async function runDockTui(
       if (result.truncated) conversation.addNotice(`Tool catalog is bounded: showing ${result.tools.length} of ${result.total}.`, true);
       showStatus("tools updated");
     } catch (error) { showError(error); }
-    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.requestRender(); }
+    finally { restoreEditorSubmit(); tui.requestRender(); }
   }
 
   async function chooseThinking(): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus("loading thinking levels");
     tui.requestRender();
     try {
@@ -975,7 +1020,7 @@ export async function runDockTui(
       if (selected && isThinkingLevel(selected)) await switchThinking(selected);
       else showStatus("thinking unchanged");
     } catch (error) { showError(error); }
-    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
+    finally { restoreEditorSubmit(); tui.setFocus(editor); tui.requestRender(); }
   }
 
   async function loadSessionTree(): Promise<{ nodes: TreeNodeDto[]; leafId?: string; total: number; revision: string; capped: boolean }> {
@@ -1032,7 +1077,7 @@ export async function runDockTui(
   }
 
   async function chooseTreeNavigation(): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus("loading session tree");
     tui.requestRender();
     const configuredFilter = settings.find((setting) => setting.key === "treeFilterMode")?.value;
@@ -1114,7 +1159,7 @@ export async function runDockTui(
     finally {
       active = false;
       treeOverlay.hide();
-      if (instance.lifecycle === "active") editor.disableSubmit = false;
+      restoreEditorSubmit();
       tui.setFocus(editor);
       tui.requestRender();
     }
@@ -1134,13 +1179,14 @@ export async function runDockTui(
     targetId: string,
     options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
   ): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     treeNavigationPending = true;
     treeNavigationAbortRequested = false;
     showStatus(options.summarize ? "summarizing branch · Esc/Ctrl+C abort" : "navigating tree");
     tui.requestRender();
     const draftWasEmpty = editor.getText().length === 0;
     try {
+      if (!requireCoherentControl("Tree navigation")) return;
       const result = await client.navigateSession(instance.id, targetId, options);
       instance = result.instance;
       status.update(instance);
@@ -1150,7 +1196,7 @@ export async function runDockTui(
     finally {
       treeNavigationPending = false;
       treeNavigationAbortRequested = false;
-      if (instance.lifecycle === "active") editor.disableSubmit = false;
+      restoreEditorSubmit();
       tui.setFocus(editor);
       tui.requestRender();
     }
@@ -1162,13 +1208,16 @@ export async function runDockTui(
     treeNavigationAbortRequested = true;
     showStatus("aborting branch navigation");
     tui.requestRender();
-    try { await client.abort(instance.id); }
+    try {
+      if (!requireCoherentControl("Tree navigation abort")) return;
+      await client.abort(instance.id);
+    }
     catch (error) { showError(error); }
     finally { treeNavigationAbortPending = false; }
   }
 
   async function chooseForkTarget(): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus("loading fork targets");
     tui.requestRender();
     try {
@@ -1176,25 +1225,26 @@ export async function runDockTui(
       if (target) await forkSession(target.entryId);
       else showStatus("fork cancelled");
     } catch (error) { showError(error); }
-    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
+    finally { restoreEditorSubmit(); tui.setFocus(editor); tui.requestRender(); }
   }
 
   async function forkSession(entryId: string): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus("forking session");
     tui.requestRender();
     try {
+      if (!requireCoherentControl("Session fork")) return;
       const result = await client.forkSession(instance.id, entryId);
       instance = result.instance;
       status.update(instance);
       if (result.selectedText !== undefined) editor.setText(result.selectedText);
       showStatus(result.cancelled ? "fork cancelled by extension" : "fork ready · edit and submit selected prompt");
     } catch (error) { showError(error); }
-    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
+    finally { restoreEditorSubmit(); tui.setFocus(editor); tui.requestRender(); }
   }
 
   async function cloneSession(): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus("finding current leaf");
     tui.requestRender();
     try {
@@ -1204,13 +1254,14 @@ export async function runDockTui(
         showStatus("clone unavailable");
         return;
       }
+      if (!requireCoherentControl("Session clone")) return;
       const result = await client.cloneSession(instance.id, tree.leafId);
       instance = result.instance;
       status.update(instance);
       if (!result.cancelled) editor.setText("");
       showStatus(result.cancelled ? "clone cancelled by extension" : "session cloned");
     } catch (error) { showError(error); }
-    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
+    finally { restoreEditorSubmit(); tui.setFocus(editor); tui.requestRender(); }
   }
 
   async function showLocalTextDialog(
@@ -1238,7 +1289,7 @@ export async function runDockTui(
   }
 
   async function chooseSession(): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus("loading sessions");
     tui.requestRender();
     try {
@@ -1246,7 +1297,7 @@ export async function runDockTui(
       if (!target) { showStatus("session unchanged"); return; }
       await resumeSession(target.sessionFile);
     } catch (error) { showError(error); }
-    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
+    finally { restoreEditorSubmit(); tui.setFocus(editor); tui.requestRender(); }
   }
 
   async function showSessionInventoryPicker(): Promise<SessionDto | undefined> {
@@ -1304,26 +1355,28 @@ export async function runDockTui(
   }
 
   async function resumeSession(sessionFile: string): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus("resuming session");
     tui.requestRender();
     const operationId = randomUUID();
     try {
       let result;
       try {
+        if (!requireCoherentControl("Session resume")) return;
         result = await client.switchSession(instance.id, sessionFile, operationId);
       } catch (error) {
         const challenge = projectTrustChallenge(error, operationId);
         if (!challenge) throw error;
         const decision = await chooseProjectTrust(challenge.cwd);
         if (!decision) { showStatus("resume cancelled"); return; }
+        if (!requireCoherentControl("Session resume")) return;
         result = await client.switchSession(instance.id, sessionFile, operationId, { challengeId: challenge.challengeId, decision });
       }
       instance = result.instance;
       status.update(instance);
       showStatus(result.cancelled ? "resume cancelled by extension" : "session resumed");
     } catch (error) { showError(error); }
-    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
+    finally { restoreEditorSubmit(); tui.setFocus(editor); tui.requestRender(); }
   }
 
   async function chooseProjectTrust(cwd: string): Promise<ProjectTrustChoice | undefined> {
@@ -1337,23 +1390,25 @@ export async function runDockTui(
   }
 
   async function createNewSession(parentSession?: string): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus("creating session");
     tui.requestRender();
     try {
+      if (!requireCoherentControl("New session")) return;
       const result = await client.newSession(instance.id, parentSession);
       instance = result.instance;
       status.update(instance);
       showStatus(result.cancelled ? "new session cancelled by extension" : "new session ready");
     } catch (error) { showError(error); }
-    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.requestRender(); }
+    finally { restoreEditorSubmit(); tui.requestRender(); }
   }
 
   async function nameSession(name: string): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus("naming session");
     tui.requestRender();
     try {
+      if (!requireCoherentControl("Session name update")) return;
       const result = await client.nameSession(instance.id, name);
       instance = result.instance;
       status.update(instance);
@@ -1361,12 +1416,13 @@ export async function runDockTui(
       conversation.addNotice(instance.name ? `Session name: ${terminalSafe(instance.name)}.` : "Session name cleared.");
       showStatus(instance.name ? `named ${terminalSafe(instance.name)}` : "session name cleared");
     } catch (error) { showError(error); }
-    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.requestRender(); }
+    finally { restoreEditorSubmit(); tui.requestRender(); }
   }
 
   async function compactSession(customInstructions?: string): Promise<void> {
     tui.requestRender();
     try {
+      if (!requireCoherentControl("Compaction")) return;
       const result = await client.compactSession(instance.id, customInstructions);
       instance = result.instance;
       status.update(instance);
@@ -1390,10 +1446,11 @@ export async function runDockTui(
   }
 
   async function reloadSession(): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus("reloading resources");
     tui.requestRender();
     try {
+      if (!requireCoherentControl("Session reload")) return;
       const result = await client.reloadSession(instance.id);
       instance = result.instance;
       status.update(instance);
@@ -1403,11 +1460,11 @@ export async function runDockTui(
         conversation.addNotice(`Reload projection is bounded: ${result.resources.length}/${result.resourceTotal} resources · ${result.diagnostics.length}/${result.diagnosticTotal} diagnostics.`, true);
       }
     } catch (error) { showError(error); }
-    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.requestRender(); }
+    finally { restoreEditorSubmit(); tui.requestRender(); }
   }
 
   async function showResources(): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus("loading resources");
     tui.requestRender();
     try {
@@ -1422,14 +1479,15 @@ export async function runDockTui(
         conversation.addNotice(`Resource projection is bounded: ${result.resources.length}/${result.resourceTotal} resources · ${result.diagnostics.length}/${result.diagnosticTotal} diagnostics.`, true);
       }
     } catch (error) { showError(error); }
-    finally { if (instance.lifecycle === "active") editor.disableSubmit = false; tui.setFocus(editor); tui.requestRender(); }
+    finally { restoreEditorSubmit(); tui.setFocus(editor); tui.requestRender(); }
   }
 
   async function switchModel(provider: string, modelId: string): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus(`switching to ${provider}/${modelId}`);
     tui.requestRender();
     try {
+      if (!requireCoherentControl("Model update")) return;
       const result = await client.setModel(instance.id, provider, modelId);
       instance = result.instance;
       status.update(instance);
@@ -1437,16 +1495,17 @@ export async function runDockTui(
     } catch (error) {
       showError(error);
     } finally {
-      if (instance.lifecycle === "active") editor.disableSubmit = false;
+      restoreEditorSubmit();
       tui.requestRender();
     }
   }
 
   async function switchThinking(level: RuntimeThinkingLevel): Promise<void> {
-    editor.disableSubmit = true;
+    blockEditorSubmit();
     showStatus(`thinking ${level}`);
     tui.requestRender();
     try {
+      if (!requireCoherentControl("Thinking update")) return;
       const result = await client.setThinking(instance.id, level);
       instance = result.instance;
       status.update(instance);
@@ -1454,7 +1513,7 @@ export async function runDockTui(
     } catch (error) {
       showError(error);
     } finally {
-      if (instance.lifecycle === "active") editor.disableSubmit = false;
+      restoreEditorSubmit();
       tui.requestRender();
     }
   }
@@ -1706,6 +1765,7 @@ export async function runDockTui(
     const expectedRuntimeGeneration = instance.runtimeGeneration;
     const expanded = !instance.toolsExpanded;
     try {
+      if (!requireCoherentControl("Tool detail update")) return;
       const result = await client.setToolsExpanded(instance.id, expectedRuntimeGeneration, expanded, randomUUID());
       if (result.instance.runtimeGeneration !== expectedRuntimeGeneration) return;
       if (snapshotIsNotOlder(result.instance, instance)) {
@@ -1753,7 +1813,8 @@ export async function runDockTui(
       return { consume: true };
     }
     if (matchesKey(data, "ctrl+o")) {
-      void toggleAuthoritativeToolsExpanded();
+      if (eventStreamConnected) void toggleAuthoritativeToolsExpanded();
+      else showStatus("control unavailable · Ctrl+D detach");
       return { consume: true };
     }
     if (matchesKey(data, Key.alt("up"))) {
@@ -1772,11 +1833,13 @@ export async function runDockTui(
     if (matchesKey(data, "escape")) {
       if (editor.isShowingAutocomplete()) return undefined;
       if (treeNavigationPending) {
-        void abortTreeNavigation();
+        if (eventStreamConnected) void abortTreeNavigation();
+        else showStatus("control unavailable · navigation was not aborted");
         return { consume: true };
       }
       if (instance.execution === "running") {
-        void abortRun();
+        if (eventStreamConnected) void abortRun();
+        else showStatus("control unavailable · run was not aborted");
         return { consume: true };
       }
       if (editor.getText().length === 0 && !editor.disableSubmit) {
@@ -1797,12 +1860,14 @@ export async function runDockTui(
     }
     if (matchesKey(data, "ctrl+c")) {
       if (treeNavigationPending) {
-        void abortTreeNavigation();
+        if (eventStreamConnected) void abortTreeNavigation();
+        else showStatus("control unavailable · navigation was not aborted");
       } else if (editor.getText().length > 0) {
         editor.setText("");
         showStatus("input cleared");
       } else if (instance.execution === "running") {
-        void abortRun();
+        if (eventStreamConnected) void abortRun();
+        else showStatus("control unavailable · run was not aborted");
       } else {
         showStatus("Ctrl+D detaches");
       }
@@ -1819,27 +1884,147 @@ export async function runDockTui(
 
   function watchEventSubscription(watched: EventSubscription): void {
     void watched.done.then(() => {
-      if (exiting || subscription !== watched) return;
-      activeExtensionDialog?.closeFromHost();
-      editor.disableSubmit = true;
-      terminal.setProgress(false);
-      status.setConnection("disconnected");
-      runActivity = disconnectedActivity("host stream closed · Ctrl+D detach");
-      activity.setActivity(runActivity);
-      conversation.addNotice("Host event stream closed. No command was replayed; this TUI is now read-only.", true);
-      tui.requestRender();
+      recoverEventSubscription(watched, new ControlClientError("connection_closed", "Host ended the event stream"));
     }).catch((error: unknown) => {
-      if (exiting || subscription !== watched) return;
-      activeExtensionDialog?.closeFromHost();
-      editor.disableSubmit = true;
-      terminal.setProgress(false);
-      status.setConnection("lost");
-      runActivity = disconnectedActivity("connection lost · Ctrl+D detach");
-      activity.setActivity(runActivity);
-      conversation.addNotice("Host connection lost. No command was replayed; this TUI is now read-only.", true);
-      conversation.addNotice(errorText(error), true);
-      tui.requestRender();
+      recoverEventSubscription(watched, error);
     });
+  }
+
+  function recoverEventSubscription(watched: EventSubscription, streamError: unknown): void {
+    if (exiting || subscription !== watched) return;
+    if (eventStreamRecovery) {
+      deferredEventStreamFailure = { watched, error: streamError };
+      return;
+    }
+    const cursor: EventCursor = {
+      hostEpoch: instance.eventCursor.hostEpoch,
+      instanceId: instance.id,
+      runtimeGeneration: lastEventGeneration,
+      sequence: lastEventSequence,
+    };
+    activeExtensionDialog?.closeFromHost();
+    controllerLeaseToken = undefined;
+    status.setController("unavailable");
+    eventStreamConnected = false;
+    refreshEditorSubmit();
+    terminal.setProgress(false);
+    status.setConnection("disconnected");
+    runActivity = disconnectedActivity("checking event stream · task status unknown");
+    activity.setActivity(runActivity);
+    detachTruth = "status_unknown";
+    conversation.addNotice("Event stream interrupted; checking authoritative Host state. No command was replayed.", true);
+    tui.requestRender();
+
+    const recovery = (async () => {
+      let authoritative: InstanceSnapshot;
+      try {
+        authoritative = await client.status(instance.id);
+      } catch (statusError) {
+        if (exiting || subscription !== watched) return;
+        status.setConnection("lost");
+        runActivity = disconnectedActivity("control unavailable · status unknown · Ctrl+D detach");
+        activity.setActivity(runActivity);
+        conversation.addNotice("Control connection unavailable; this instance's current status is unknown. This TUI remains read-only; Ctrl+D and reattach after checking the Host.", true);
+        conversation.addNotice(`Event stream: ${errorText(streamError)}`, true);
+        conversation.addNotice(`Status probe: ${errorText(statusError)}`, true);
+        tui.requestRender();
+        return;
+      }
+      if (exiting || subscription !== watched) return;
+
+      detachTruth = authoritative.lifecycle === "active" ? "host_owned" : "not_active";
+      const sameDomain = authoritative.id === cursor.instanceId
+        && authoritative.runtimeGeneration === cursor.runtimeGeneration
+        && authoritative.eventCursor.hostEpoch === cursor.hostEpoch;
+      if (authoritative.lifecycle !== "active" || !sameDomain) {
+        instance = authoritative;
+        status.update(instance);
+        refreshEditorSubmit();
+        runActivity = activityFromSnapshot(instance);
+        activity.setActivity(runActivity);
+        const truth = authoritative.lifecycle === "active"
+          ? "The runtime ownership or generation changed"
+          : `Authoritative instance state is ${authoritative.lifecycle}`;
+        conversation.addNotice(`${truth}; this TUI remains read-only. No command was replayed; Ctrl+D and attach again for a coherent view.`, true);
+        tui.requestRender();
+        return;
+      }
+
+      let next: EventSubscription | undefined;
+      let candidateReady = false;
+      const candidateBufferedEvents: DockEvent[] = [];
+      const onCandidateEvent = (event: DockEvent): void => {
+        if (candidateReady) onEvent(event);
+        else candidateBufferedEvents.push(event);
+      };
+      try {
+        next = await client.streamEvents(instance.id, {
+          since: cursor,
+          onEvent: onCandidateEvent,
+          requireTuiProjection: true,
+          claimController: true,
+        });
+        if (next.initial.page.epochChanged || next.initial.page.generationChanged || next.initial.page.truncated) {
+          throw new ControlClientError("event_replay_gap", "The event replay cursor can no longer produce a complete incremental view");
+        }
+        if (next.initial.instance.lifecycle !== "active") {
+          instance = next.initial.instance;
+          detachTruth = "not_active";
+          refreshEditorSubmit();
+          throw new ControlClientError("instance_not_active", `Authoritative instance state became ${instance.lifecycle} during event-stream recovery`);
+        }
+        if (exiting || subscription !== watched) {
+          next.close();
+          await next.done.catch(() => {});
+          return;
+        }
+        controllerLeaseToken = next.initial.controller.status === "acquired"
+          ? next.initial.controller.leaseToken
+          : undefined;
+        status.setController(next.initial.controller.status);
+        for (const event of next.initial.page.events) onEvent(event);
+        instance = next.initial.instance;
+        lastEventGeneration = next.initial.page.latest.runtimeGeneration;
+        lastEventSequence = next.initial.page.latest.sequence;
+        pendingQueue.reset(next.initial.pendingMessages);
+        status.update(instance);
+        status.setConnection("connected");
+        runActivity = activityFromReplay(instance, next.initial.page.events);
+        activity.setActivity(runActivity);
+        detachTruth = instance.lifecycle === "active" ? "host_owned" : "not_active";
+        conversation.addNotice(`Event stream reconnected; the instance remained Host-owned (${instance.lifecycle}/${instance.execution}). No command was resent.`);
+        subscription = next;
+        eventStreamConnected = true;
+        candidateReady = true;
+        for (const event of candidateBufferedEvents) onEvent(event);
+        candidateBufferedEvents.length = 0;
+        refreshEditorSubmit();
+        watchEventSubscription(next);
+        updateTerminalProgress();
+        tui.requestRender();
+      } catch (reconnectError) {
+        if (next) {
+          next.close();
+          await next.done.catch(() => {});
+        }
+        if (exiting || subscription !== watched) return;
+        runActivity = disconnectedActivity("event stream interrupted · task still running · Ctrl+D detach");
+        activity.setActivity(runActivity);
+        conversation.addNotice(`Event stream remains disconnected; current authoritative instance status is ${instance.lifecycle}/${instance.execution}. This TUI remains read-only; Ctrl+D and attach again.`, true);
+        conversation.addNotice(`Reconnect: ${errorText(reconnectError)}`, true);
+        tui.requestRender();
+      }
+    })();
+    const tracked = recovery.finally(() => {
+      if (eventStreamRecovery !== tracked) return;
+      eventStreamRecovery = undefined;
+      const deferred = deferredEventStreamFailure;
+      deferredEventStreamFailure = undefined;
+      if (deferred && !exiting && subscription === deferred.watched) {
+        recoverEventSubscription(deferred.watched, deferred.error);
+      }
+    });
+    eventStreamRecovery = tracked;
   }
   watchEventSubscription(subscription);
 
@@ -1859,13 +2044,14 @@ export async function runDockTui(
   client.closeActiveConnections();
   await Promise.all([
     controllerReattach?.catch(() => {}),
+    eventStreamRecovery?.catch(() => {}),
     subscription.done.catch(() => {}),
   ]);
   terminal.setProgress(false);
   await terminal.drainInput(200, 30).catch(() => {});
   tui.stop();
 
-  return { reason, instance, cleanupErrors };
+  return { reason, instance, detachTruth, cleanupErrors };
 }
 
 function assertInteractiveTerminal(): void {

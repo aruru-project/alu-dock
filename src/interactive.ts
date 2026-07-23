@@ -55,9 +55,17 @@ export async function openDock(options: OpenDockOptions): Promise<void> {
       ? ` Cleanup warnings: ${result.cleanupErrors.join("; ")}`
       : "";
     process.stdout.write(`Stopped ${displayName(result.instance)}.${cleanup}\n`);
-  } else {
+  } else if (result.detachTruth === "host_owned") {
     process.stdout.write(
       `Detached from ${displayName(result.instance)}; the instance remains host-owned. Run aludock to return to the Hub.\n`,
+    );
+  } else if (result.detachTruth === "not_active") {
+    process.stdout.write(
+      `Detached from ${displayName(result.instance)}; authoritative instance state is ${result.instance.lifecycle}. Run aludock to return to the Hub.\n`,
+    );
+  } else {
+    process.stdout.write(
+      `Detached from ${displayName(result.instance)}; current Host ownership/status is unknown and no stop is claimed. Check aludock service status, then run aludock.\n`,
     );
   }
 }

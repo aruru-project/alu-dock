@@ -1476,7 +1476,98 @@ test("SSH TUI Ctrl+C aborts a run while preserving the reusable instance", async
   assert.equal(runtime.disposeCalls, 0);
 });
 
-test("SSH TUI reports transport loss read-only and never replays the running command", async (context) => {
+test("SSH TUI recovers a dropped event stream from its accepted cursor without replaying a command", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "pty-stream-recovery");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const readyFile = join(harness.directory, "pty-recovery.ready");
+
+  const ptyRun = runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", harness.socketPath,
+    "attach", created.id,
+  ], "stream-recover", readyFile);
+  await waitForPath(readyFile);
+  const promptCallsBeforeDrop = runtime.promptCalls;
+  (harness.host as unknown as { closeStaleAttachStreams(instanceId: string): void }).closeStaleAttachStreams(created.id);
+  const pty = await ptyRun;
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-3_000));
+  assert.equal(pty.status, 0, output.slice(-3_000));
+  assert.match(output, /Event stream interrupted; checking/);
+  assert.match(output, /authoritative Host state\. No command was/);
+  assert.match(output, /Event stream reconnected; the instance/);
+  assert.match(output, /remained Host-owned \(active\/running\)/);
+  assert.match(output, /command was resent/);
+  assert.match(output, /Status: running/);
+  assert.doesNotMatch(output, /Host connection lost/);
+  assert.equal(runtime.promptCalls, promptCallsBeforeDrop);
+  assert.equal(runtime.disposeCalls, 0);
+  assert.equal((await client.status(created.id)).lifecycle, "active");
+});
+
+test("SSH TUI blocks an already-open model picker when stream recovery has a replay gap", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "pty-model-gap");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const readyFile = join(harness.directory, "pty-model-gap.ready");
+
+  const ptyRun = runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", harness.socketPath,
+    "attach", created.id,
+  ], "model-disconnect", readyFile);
+  await waitForPath(`${readyFile}.picker`);
+  const modelMutationsBeforeDrop = runtime.modelMutationCalls;
+  (harness.host as unknown as { closeStaleAttachStreams(instanceId: string): void }).closeStaleAttachStreams(created.id);
+  for (let index = 0; index < 1_100; index += 1) runtime.emit({ type: "dock_extension_error", error: `recovery-gap-${index}` });
+
+  const pty = await ptyRun;
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-4_000));
+  assert.equal(pty.status, 0, output.slice(-4_000));
+  assert.match(output, /Event stream remains disconnected/);
+  assert.match(output, /Model update was not sent/);
+  assert.doesNotMatch(output, /Model changed to fixture\/local/);
+  assert.equal(runtime.modelMutationCalls, modelMutationsBeforeDrop);
+  assert.equal((await client.status(created.id)).lifecycle, "active");
+});
+
+test("SSH TUI detach reports an externally stopped instance instead of claiming Host ownership", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "pty-external-stop");
+  const readyFile = join(harness.directory, "pty-external-stop.ready");
+
+  const ptyRun = runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", harness.socketPath,
+    "attach", created.id,
+  ], "external-stop", readyFile);
+  await waitForPath(readyFile);
+  const stopped = await client.stop(created.id, "external-stop-operation");
+  assert.equal(stopped.instance.lifecycle, "stopped");
+  const pty = await ptyRun;
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-3_000));
+  assert.equal(pty.status, 0, output.slice(-3_000));
+  assert.match(output, /Detached from pty-external-stop/);
+  assert.match(output, /authoritative instance state is stopped/);
+  assert.doesNotMatch(output, /the instance remains host-owned/);
+});
+
+test("SSH TUI reports true Host loss as unknown and never replays the running command", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
   await harness.host.start();
@@ -1497,9 +1588,14 @@ test("SSH TUI reports transport loss read-only and never replays the running com
   const output = Buffer.from(pty.output, "base64").toString("utf8");
   assert.equal(pty.timedOut, false, output.slice(-2_000));
   assert.equal(pty.status, 0, output.slice(-2_000));
-  assert.match(output, /Host connection lost/);
-  assert.match(output, /replayed; this TUI is now read-only/);
+  assert.match(output, /Control connection unavailable; this/);
+  assert.match(output, /instance's current status is unknown/);
+  assert.match(output, /No command was/);
+  assert.match(output, /replayed\./);
+  assert.doesNotMatch(output, /Host connection lost/);
   assert.match(output, /Detached from pty-host-loss/);
+  assert.match(output, /current Host ownership\/status is unknown and no stop is claimed/);
+  assert.doesNotMatch(output, /the instance remains host-owned/);
 
   const conservative = harness.registry.get(created.id).snapshot();
   assert.equal(conservative.lifecycle, "active");
@@ -2082,7 +2178,6 @@ test("a running instance applies live metadata and next-step configuration witho
     { key: "doubleEscapeAction", value: "fork" },
     { key: "treeFilterMode", value: "all" },
     { key: "defaultProjectTrust", value: "never" },
-    { key: "httpIdleTimeoutMs", value: 1_234 },
     { key: "editorPaddingX", value: 3 },
     { key: "outputPad", value: 1 },
     { key: "autocompleteMaxVisible", value: 20 },
@@ -2101,6 +2196,7 @@ test("a running instance applies live metadata and next-step configuration witho
     { key: "steeringMode", value: "one-at-a-time" },
     { key: "followUpMode", value: "one-at-a-time" },
     { key: "transport", value: "websocket" },
+    { key: "httpIdleTimeoutMs", value: 1_234 },
   ] satisfies SettingUpdate[]).entries()) {
     await assert.rejects(
       client.updateSetting(created.id, update, `busy-setting-${index}`),
@@ -3133,6 +3229,14 @@ test("attach initialization overflow is an explicit recoverable projection failu
       && error.code === "attach_initial_overflow"
       && /reconnect/u.test(error.message),
   );
+  let degradationObserved = false;
+  const degradationDeadline = Date.now() + 5_000;
+  while (!degradationObserved && Date.now() < degradationDeadline) {
+    const replay = await client.events(created.id);
+    degradationObserved = replay.page.events.some((event) => event.type === "extension.error" && /bounded event handoff queue/u.test(event.data.error));
+    if (!degradationObserved) await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(degradationObserved, true, "initialization overflow must remain diagnosable after reconnect");
 });
 
 test("oversized runtime payloads are projected into one safe live event without poisoning reconnect", async (context) => {
@@ -3185,7 +3289,7 @@ test("oversized runtime payloads are projected into one safe live event without 
   await reconnected.done;
 });
 
-test("slow attach readers receive only LF-complete frames across live-event backpressure", async (context) => {
+test("slow attach readers drain bounded live-event backpressure without losing the stream", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
   await harness.host.start();
@@ -3238,16 +3342,153 @@ test("slow attach readers receive only LF-complete frames across live-event back
       },
     });
   }
+  const hostProbe = harness.host as unknown as { attachBackpressureStats: { blocked: number; drained: number; overflow: number; timeout: number } };
+  const backpressureDeadline = Date.now() + 5_000;
+  while (hostProbe.attachBackpressureStats.blocked === 0 && Date.now() < backpressureDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.ok(hostProbe.attachBackpressureStats.blocked > 0, "the fixture must actually cross the server socket high-water mark");
   await new Promise((resolve) => setTimeout(resolve, 1_200));
+  assert.equal(streamFinished, false, "temporary backpressure must not close the follow stream");
   socket.resume();
+  runtime.emit({ type: "dock_extension_error", error: "post-drain sentinel" });
+  const sentinelDeadline = Date.now() + 10_000;
+  while (!frames.some((frame) => frame.includes("post-drain sentinel")) && Date.now() < sentinelDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(frames.some((frame) => frame.includes("post-drain sentinel")), "events queued across drain must remain observable");
+  assert.equal(streamFinished, false, "the stream must remain usable after drain");
+
+  const eventCursors = frames.map((frame) => JSON.parse(frame) as { kind?: string; event?: { sequence?: number } })
+    .filter((frame) => frame.kind === "event")
+    .map((frame) => frame.event?.sequence)
+    .filter((sequence): sequence is number => typeof sequence === "number");
+  assert.ok(eventCursors.length >= 181);
+  for (let index = 1; index < eventCursors.length; index += 1) assert.ok(eventCursors[index]! > eventCursors[index - 1]!);
+
+  socket.end();
   await Promise.race([finished, new Promise<void>((_, reject) => {
-    const timeout = setTimeout(() => reject(new Error("slow stream did not finish")), 10_000);
+    const timeout = setTimeout(() => reject(new Error("slow stream did not finish after client close")), 10_000);
     timeout.unref();
   })]);
-
   assert.equal(finishError, undefined);
-  assert.ok(frames.length > 2);
   for (const frame of frames) assert.doesNotThrow(() => JSON.parse(frame));
+});
+
+test("permanently stalled attach readers are bounded and can reconnect without affecting the runtime", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "stalled reader", "stalled-reader-create");
+  harness.sessions.get(created.id)!.settle("ready");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const socket = createConnection(harness.socketPath);
+  const decoder = new JsonLineDecoder();
+  const frames: string[] = [];
+  socket.on("data", (chunk: Buffer) => frames.push(...decoder.push(chunk)));
+  await new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
+  socket.write(encodeJsonLine({
+    kind: "hello", requestId: "stalled-hello", versions: [2],
+    client: { name: "stalled-reader-test", version: "0.1.0", clientId: "stalled-reader-client" },
+    requiredCapabilities: ["core.v2", "events.follow", "extension_ui.v1"],
+  }));
+  const frameDeadline = Date.now() + 5_000;
+  while (frames.length < 1 && Date.now() < frameDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  socket.write(encodeJsonLine({ kind: "request", version: 2, requestId: "stalled-attach", type: "instance.attach", params: { instanceId: created.id, follow: true, controller: "claim" } }));
+  while (frames.length < 2 && Date.now() < frameDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.ok(frames.length >= 2);
+  assert.match(frames[1]!, /"controller":\{"status":"acquired"/u);
+  socket.pause();
+
+  const serverSocket = [...((harness.host as unknown as { attachConnections: Map<string, Set<{ destroyed: boolean }>> }).attachConnections.get(created.id) ?? [])][0];
+  assert.ok(serverSocket);
+  const runtime = harness.sessions.get(created.id)!;
+  for (let index = 0; index < 800; index += 1) {
+    runtime.emit({
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "text_delta",
+        contentIndex: 0,
+        delta: `${String(index).padStart(3, "0")}:${"z".repeat(7_900)}`,
+        partial: { role: "assistant", content: [] },
+      },
+    });
+  }
+  const hostProbe = harness.host as unknown as { attachBackpressureStats: { blocked: number; drained: number; overflow: number; timeout: number } };
+  const overflowDeadline = Date.now() + 5_000;
+  while (hostProbe.attachBackpressureStats.overflow === 0 && Date.now() < overflowDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.ok(hostProbe.attachBackpressureStats.overflow > 0, "the fixture must fill the bounded application queue");
+  assert.equal(serverSocket.destroyed, true, "the bounded application queue must abort a permanently stalled stream");
+  assert.equal((await client.status(created.id)).lifecycle, "active");
+  const reclaimedController = await harness.registry.get(created.id).claimInteractionController();
+  assert.equal(reclaimedController.status, "acquired", "overflow cleanup must release the disconnected controller");
+  if (reclaimedController.status === "acquired") await harness.registry.get(created.id).releaseInteractionController(reclaimedController.leaseToken, "detach");
+
+  const recovered = await client.streamEvents(created.id, { onEvent: () => {}, requireTuiProjection: true });
+  assert.equal(recovered.initial.instance.lifecycle, "active");
+  recovered.close();
+  await recovered.done;
+  socket.destroy();
+});
+
+test("attach drain timeout aborts the stalled stream, releases its controller, and leaves the runtime active", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "timeout reader", "timeout-reader-create");
+  harness.sessions.get(created.id)!.settle("ready");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const socket = createConnection(harness.socketPath);
+  const decoder = new JsonLineDecoder();
+  const frames: string[] = [];
+  socket.on("data", (chunk: Buffer) => frames.push(...decoder.push(chunk)));
+  await new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
+  socket.write(encodeJsonLine({
+    kind: "hello", requestId: "timeout-hello", versions: [2],
+    client: { name: "timeout-reader-test", version: "0.1.0", clientId: "timeout-reader-client" },
+    requiredCapabilities: ["core.v2", "events.follow", "extension_ui.v1"],
+  }));
+  const frameDeadline = Date.now() + 5_000;
+  while (frames.length < 1 && Date.now() < frameDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  socket.write(encodeJsonLine({ kind: "request", version: 2, requestId: "timeout-attach", type: "instance.attach", params: { instanceId: created.id, follow: true, controller: "claim" } }));
+  while (frames.length < 2 && Date.now() < frameDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.ok(frames.length >= 2);
+  assert.match(frames[1]!, /"controller":\{"status":"acquired"/u);
+  socket.pause();
+
+  const serverSocket = [...((harness.host as unknown as { attachConnections: Map<string, Set<{ destroyed: boolean }>> }).attachConnections.get(created.id) ?? [])][0];
+  assert.ok(serverSocket);
+  const runtime = harness.sessions.get(created.id)!;
+  for (let index = 0; index < 450; index += 1) {
+    runtime.emit({
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "text_delta",
+        contentIndex: 0,
+        delta: `${String(index).padStart(3, "0")}:${"t".repeat(7_900)}`,
+        partial: { role: "assistant", content: [] },
+      },
+    });
+  }
+  const hostProbe = harness.host as unknown as { attachBackpressureStats: { blocked: number; drained: number; overflow: number; timeout: number } };
+  const timeoutDeadline = Date.now() + 10_000;
+  while (hostProbe.attachBackpressureStats.timeout === 0 && hostProbe.attachBackpressureStats.overflow === 0 && Date.now() < timeoutDeadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(hostProbe.attachBackpressureStats.overflow, 0, "the fixture must exercise timeout rather than queue overflow");
+  assert.ok(hostProbe.attachBackpressureStats.timeout > 0, "a permanently blocked socket must hit the drain deadline");
+  assert.equal(serverSocket.destroyed, true);
+  assert.equal((await client.status(created.id)).lifecycle, "active");
+  const reclaimedController = await harness.registry.get(created.id).claimInteractionController();
+  assert.equal(reclaimedController.status, "acquired", "timeout cleanup must release the disconnected controller");
+  if (reclaimedController.status === "acquired") await harness.registry.get(created.id).releaseInteractionController(reclaimedController.leaseToken, "detach");
+  socket.destroy();
 });
 
 test("post-send mutation transport loss is effect_unknown with caller operation ID, while reads stay transport errors", async (context) => {
@@ -4055,7 +4296,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "work-responsive" | "hub-exit" | "hub-click-leave" | "hub-narrow" | "hub-signal" | "hub-signal-inventory" | "hub-new" | "hub-continue" | "hub-mouse-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "compact-detach" | "compact-queue" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "history-flow" | "history-live-flow" | "flow-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "work-native-mouse" | "extension-dialogs" | "extension-replacement" = "detach",
+  action: "detach" | "work-responsive" | "hub-exit" | "hub-click-leave" | "hub-narrow" | "hub-signal" | "hub-signal-inventory" | "hub-new" | "hub-continue" | "hub-mouse-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "stream-recover" | "external-stop" | "compact-detach" | "compact-queue" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "model-disconnect" | "history-flow" | "history-live-flow" | "flow-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "work-native-mouse" | "extension-dialogs" | "extension-replacement" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {

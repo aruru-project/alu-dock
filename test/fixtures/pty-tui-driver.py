@@ -247,7 +247,22 @@ def main() -> int:
                 read_available(fd, output, 0.05)
             elif action == "transport-close":
                 close_deadline = time.monotonic() + 6
-                while b"replayed; this TUI" not in output and time.monotonic() < close_deadline:
+                while b"status is unknown" not in output and time.monotonic() < close_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+            elif action == "stream-recover":
+                recovery_deadline = time.monotonic() + 8
+                while b"Event stream reconnected" not in output and time.monotonic() < recovery_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"/status\r")
+                status_deadline = time.monotonic() + 5
+                while b"Status: running" not in output and time.monotonic() < status_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+            elif action == "external-stop":
+                stop_deadline = time.monotonic() + 8
+                while b"stopped" not in output and time.monotonic() < stop_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
             elif action == "extension-dialogs":
@@ -273,15 +288,23 @@ def main() -> int:
                 os.write(fd, b"\x1b[A\r")  # Confirm defaults to No; move to explicit Yes.
                 time.sleep(0.1)
                 read_available(fd, output, 0.05)
-            elif action == "model-search":
+            elif action in ("model-search", "model-disconnect"):
                 os.write(fd, b"/model\r")
                 picker_deadline = time.monotonic() + 4
                 while b"Search:" not in output and time.monotonic() < picker_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
+                if action == "model-disconnect" and ready_file:
+                    with open(ready_file + ".picker", "w", encoding="utf-8") as marker:
+                        marker.write("picker\n")
+                    disconnect_deadline = time.monotonic() + 8
+                    while b"Event stream remains disconnected" not in output and time.monotonic() < disconnect_deadline:
+                        if read_available(fd, output, 0.05) < 0:
+                            break
                 os.write(fd, b"local\r")
                 selected_deadline = time.monotonic() + 4
-                while b"Model changed to fixture/local" not in output and time.monotonic() < selected_deadline:
+                selected_marker = b"Model update was not sent" if action == "model-disconnect" else b"Model changed to fixture/local"
+                while selected_marker not in output and time.monotonic() < selected_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
             elif action == "history-flow":
