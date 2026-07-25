@@ -131,10 +131,10 @@ release receipt。修改安装或 service 代码时先运行 `local-install`、`
 真实安装只在用户明确授权后、从 managed Host 外层执行：
 
 1. 确认 checkout clean committed；
-2. 确认无 active/stopping instance；
-3. 运行 `npm run install:local`；
+2. 确认没有 running/compaction/Queue/interaction/stopping 状态；idle instance 不阻塞；
+3. 运行 `npm run install:local`；确需中断 active work 时由用户显式追加 `-- --replace-active`；
 4. 核对 `~/.local/bin/aludock` 指向固定 npm prefix；
 5. 核对 `aludock service status` 的 MainPID、hello、hostEpoch 与 ready；
 6. 核对 catalog 记录仍存在。
 
-失败立即报告，不自动重跑完整测试，不自动强制重启 active runtime。
+失败立即报告，不自动重跑完整测试；不得替用户擅自追加 `--replace-active`。

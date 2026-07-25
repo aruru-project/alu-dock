@@ -8,7 +8,10 @@ import {
   ALU_DOCK_GENERATED_MARKER,
   assertLocalInstallAllowed,
   isAluDockGeneratedContent,
+  localInstallBlockingInstances,
+  localInstallInspectionMayAssumeHostAbsent,
   localInstallLayout,
+  parseLocalInstallArguments,
   renderAluDockUnit,
 } from "../src/deployment/local-install.js";
 
@@ -51,15 +54,42 @@ test("local install uses one stable npm prefix and launcher", () => {
   });
 });
 
-test("local install refuses active instances without a force override", () => {
-  assert.doesNotThrow(() => assertLocalInstallAllowed([{ id: "stopped", lifecycle: "stopped" }]));
+test("local install ignores quiescent instances and identifies only active work", () => {
+  const instances = [
+    { id: "idle", lifecycle: "active", execution: "idle" },
+    { id: "settled-failure", lifecycle: "active", execution: "failed" },
+    { id: "stopped", lifecycle: "stopped", execution: "unavailable" },
+    { id: "running", lifecycle: "active", execution: "running" },
+    { id: "interaction", lifecycle: "active", execution: "idle", activeInteraction: { id: "dialog" } },
+    { id: "queued", lifecycle: "active", execution: "idle", pending: { total: 1 } },
+    { id: "stopping", lifecycle: "stopping", execution: "running" },
+  ] as const;
+  assert.deepEqual(localInstallBlockingInstances(instances).map((instance) => instance.id), [
+    "running", "interaction", "queued", "stopping",
+  ]);
+  assert.doesNotThrow(() => assertLocalInstallAllowed(instances.slice(0, 3)));
+});
+
+test("local install fails closed after reaching the Host during admission", () => {
+  assert.equal(localInstallInspectionMayAssumeHostAbsent(false, "connection_error"), true);
+  assert.equal(localInstallInspectionMayAssumeHostAbsent(true, "connection_error"), false);
+  assert.equal(localInstallInspectionMayAssumeHostAbsent(false, "connection_closed"), false);
+  assert.equal(localInstallInspectionMayAssumeHostAbsent(false, "timeout"), false);
+});
+
+test("local install explains the explicit active-work replacement override", () => {
+  const instances = [
+    { id: "active-id", name: "active-name", lifecycle: "active", execution: "running" },
+    { id: "stopping-id", lifecycle: "stopping", execution: "running" },
+  ] as const;
   assert.throws(
-    () => assertLocalInstallAllowed([
-      { id: "active-id", name: "active-name", lifecycle: "active" },
-      { id: "stopping-id", lifecycle: "stopping" },
-    ]),
-    /active-name \(active-id\).*stopping-id.*Stop them first/u,
+    () => assertLocalInstallAllowed(instances),
+    /active-name \(active-id\).*stopping-id.*npm run install:local -- --replace-active.*interrupts active runs/su,
   );
+  assert.doesNotThrow(() => assertLocalInstallAllowed(instances, true));
+  assert.deepEqual(parseLocalInstallArguments([]), { replaceActive: false });
+  assert.deepEqual(parseLocalInstallArguments(["--replace-active"]), { replaceActive: true });
+  assert.throws(() => parseLocalInstallArguments(["--allow-active"]), /Unknown local install option.*--replace-active/u);
 });
 
 test("generated ownership accepts the current unit during one-time local migration", () => {
@@ -101,5 +131,6 @@ test("local installer has no staged release or rollback path", async () => {
   const source = await readFile(join(process.cwd(), "scripts", "install-local.ts"), "utf8");
   assert.match(source, /npm run install:local from the outer shell/u);
   assert.match(source, /assertLocalInstallAllowed/u);
+  assert.match(source, /parseLocalInstallArguments/u);
   assert.doesNotMatch(source, /pending\.json|receipt|rollback|allow-active|switchCurrent|stage:athena/u);
 });

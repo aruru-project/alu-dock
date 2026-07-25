@@ -18,7 +18,7 @@ src/cli.ts service ...
 
 Local install
 npm run install:local
-  ├── clean checkout + active-instance refusal
+  ├── clean checkout + active-work admission
   ├── npm pack
   ├── npm install --prefix ~/.local/share/alu-dock
   ├── ~/.local/bin/aludock
@@ -51,7 +51,7 @@ live records 转为保守 unavailable 状态，不恢复 queue、Promise 或 eff
 
 | 文件 | 唯一职责 | 主要测试 |
 |---|---|---|
-| `src/deployment/local-install.ts` | 固定安装布局、generated unit、active-instance admission | `local-install` |
+| `src/deployment/local-install.ts` | 固定安装布局、generated unit、active-work admission | `local-install` |
 | `scripts/install-local.ts` | npm pack/install、launcher、显式 service restart/readiness | `local-install` |
 | `src/deployment/user-service.ts` | generated-unit lifecycle、readiness、logs | `user-service` |
 | `src/cli.ts:serve()` | managed/dev mode composition 与 signal shutdown | `managed-mode`, process tests |
@@ -78,7 +78,8 @@ live records 转为保守 unavailable 状态，不恢复 queue、Promise 或 eff
 
 - 只有用户明确授权后才允许 `npm run install:local` 或 restart service。
 - 安装必须从 managed Host 之外执行，并要求 clean committed checkout。
-- active/stopping instance 存在时直接拒绝；没有 force/allow-active 路径。
+- active 但 idle/已结算的 instance 不阻塞；running、compaction、Queue、interaction 与 stopping 默认拒绝，并提示 `npm run install:local -- --replace-active`。该显式选项允许整体替换 Host，但不迁移或重放任何未决工作。
+- Host replacement 后不自动重建旧 runtime；保留的 Pi session metadata 只允许用户显式 Continue/reopen。
 - 安装包只包含 `dist/src`、README 与 npm 必需元数据；test、fixture、开发脚本不进入 tarball。
 - 固定 prefix 为 `~/.local/share/alu-dock`；unit 指向其中安装的 CLI，不使用 timestamp release
   或 `current` symlink。

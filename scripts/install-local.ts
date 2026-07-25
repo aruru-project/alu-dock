@@ -7,7 +7,13 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import { defaultSocketPath } from "../src/control/socket-path.js";
-import { assertLocalInstallAllowed, isAluDockGeneratedContent, localInstallLayout } from "../src/deployment/local-install.js";
+import {
+  assertLocalInstallAllowed,
+  isAluDockGeneratedContent,
+  localInstallInspectionMayAssumeHostAbsent,
+  localInstallLayout,
+  parseLocalInstallArguments,
+} from "../src/deployment/local-install.js";
 
 interface CommandResult { stdout: string; stderr: string }
 
@@ -16,9 +22,10 @@ async function main(): Promise<void> {
     throw new Error("Detach first, then run npm run install:local from the outer shell.");
   }
 
+  const options = parseLocalInstallArguments(process.argv.slice(2));
   const projectRoot = resolve(process.cwd());
   await requireCleanCheckout(projectRoot);
-  await requireNoActiveInstances();
+  await requireInstallAllowed(options.replaceActive);
 
   const home = resolve(homedir());
   const layout = localInstallLayout(home);
@@ -39,6 +46,7 @@ async function main(): Promise<void> {
     ], projectRoot);
     await installUserExecutable(layout.userExecutable, layout.packageExecutable, home, layout.root);
 
+    await requireInstallAllowed(options.replaceActive);
     process.stdout.write("Restarting alu-dock.service…\n");
     const service = run(process.execPath, [layout.cliPath, "service", "install", "--now"], projectRoot);
     const status = parseServiceStatus(service.stdout);
@@ -54,13 +62,23 @@ async function requireCleanCheckout(projectRoot: string): Promise<void> {
   if (status.length > 0) throw new Error("Local install requires a clean committed checkout.");
 }
 
-async function requireNoActiveInstances(): Promise<void> {
+async function requireInstallAllowed(replaceActive: boolean): Promise<void> {
+  if (replaceActive) return;
   const client = new DockClient({ socketPath: defaultSocketPath(), timeoutMs: 1_000 });
+  let hostReached = false;
   try {
     await client.ping();
+    hostReached = true;
     assertLocalInstallAllowed(await client.list("all"));
   } catch (error) {
-    if (error instanceof ControlClientError && ["connection_error", "connection_closed", "timeout"].includes(error.code)) return;
+    if (error instanceof ControlClientError && localInstallInspectionMayAssumeHostAbsent(hostReached, error.code)) return;
+    if (error instanceof ControlClientError) {
+      throw new Error(
+        `Local install could not verify that the Dock has no active work: ${error.message}\n`
+        + "Retry when the Host is responsive, or explicitly replace it:\n"
+        + "  npm run install:local -- --replace-active",
+      );
+    }
     throw error;
   }
 }

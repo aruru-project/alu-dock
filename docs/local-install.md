@@ -33,16 +33,26 @@ npm run install:local
 命令只做以下工作：
 
 1. 确认 checkout clean；
-2. 连接现有 Host 并拒绝 active/stopping instance；
+2. 连接现有 Host；idle/已结算的 instance 不阻塞，running、compaction、Queue、interaction 与 stopping 状态默认拒绝；
 3. build 并 `npm pack`；
 4. 将 tarball 安装到 `~/.local/share/alu-dock`；
 5. 更新 `~/.local/bin/aludock` 和 Alu Dock-owned user unit；
 6. restart/start service，并等待 MainPID 与 Protocol V2 hello readiness。
 
-安装器不运行测试，不提供强制替换 active runtime 的开关，也不自动回滚。失败信息直接
-保留给 operator 处理。若当前 unit 来自旧 Athena/dogfood 安装器，第一次本地安装只识别
-其 generated marker 以安全改写 unit 和 launcher；旧 `~/release/alu-dock` 目录不会自动
-删除，确认新安装正常后可手动清理。
+若明确接受中断所有正在工作的 Host-owned runtime，可使用：
+
+```bash
+npm run install:local -- --replace-active
+```
+
+普通安装被 active work 阻塞时会原样列出实例并提示这条命令。`--replace-active` 只放宽
+Host replacement admission；它不会迁移或重放 run、Queue、interaction、Promise 或 tool
+side effect。idle instance 虽不阻塞安装，也不会在新 Host 中自动构造 runtime；其 Pi session
+metadata 保留为可显式 Continue/reopen 的记录。
+
+安装器不运行测试，也不自动回滚。失败信息直接保留给 operator 处理。若当前 unit 来自旧
+Athena/dogfood 安装器，第一次本地安装只识别其 generated marker 以安全改写 unit 和
+launcher；旧 `~/release/alu-dock` 目录不会自动删除，确认新安装正常后可手动清理。
 
 从 managed Host 内调用会立即拒绝。先 Ctrl+D 离开 Work，再从外层 shell 或 standalone
 Pi 执行安装。

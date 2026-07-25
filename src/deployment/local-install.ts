@@ -81,11 +81,61 @@ WantedBy=default.target
 `;
 }
 
-export function assertLocalInstallAllowed(activeInstances: readonly { id: string; name?: string; lifecycle: string }[]): void {
-  const active = activeInstances.filter((instance) => instance.lifecycle === "active" || instance.lifecycle === "stopping");
-  if (active.length === 0) return;
-  const labels = active.map((instance) => instance.name ? `${instance.name} (${instance.id})` : instance.id);
-  throw new Error(`Local install refused while ${active.length} Dock instance(s) are active: ${labels.join(", ")}. Stop them first.`);
+export interface LocalInstallInstanceState {
+  id: string;
+  name?: string;
+  lifecycle: "active" | "stopping" | "stopped" | "host_lost" | "runtime_error";
+  execution: "idle" | "running" | "failed" | "unavailable";
+  compacting?: boolean;
+  pending?: { total: number };
+  activeInteraction?: unknown;
+  activeCommandId?: string;
+}
+
+export interface LocalInstallOptions {
+  replaceActive: boolean;
+}
+
+export function parseLocalInstallArguments(args: readonly string[]): LocalInstallOptions {
+  let replaceActive = false;
+  for (const argument of args) {
+    if (argument === "--replace-active") replaceActive = true;
+    else throw new Error(`Unknown local install option: ${argument}. Usage: npm run install:local -- [--replace-active]`);
+  }
+  return { replaceActive };
+}
+
+export function localInstallInspectionMayAssumeHostAbsent(hostReached: boolean, errorCode: string): boolean {
+  return !hostReached && errorCode === "connection_error";
+}
+
+export function localInstallBlockingInstances(instances: readonly LocalInstallInstanceState[]): LocalInstallInstanceState[] {
+  return instances.filter((instance) => {
+    if (instance.lifecycle === "stopping") return true;
+    if (instance.lifecycle !== "active") return false;
+    return instance.execution === "running"
+      || instance.execution === "unavailable"
+      || instance.compacting === true
+      || (instance.pending?.total ?? 0) > 0
+      || instance.activeInteraction !== undefined
+      || instance.activeCommandId !== undefined;
+  });
+}
+
+export function assertLocalInstallAllowed(instances: readonly LocalInstallInstanceState[], replaceActive = false): void {
+  const blocking = localInstallBlockingInstances(instances);
+  if (blocking.length === 0 || replaceActive) return;
+  const labels = blocking.map((instance) => {
+    const label = instance.name ? `${instance.name} (${instance.id})` : instance.id;
+    const state = instance.compacting ? "compacting" : instance.lifecycle === "stopping" ? "stopping" : instance.execution;
+    return `${label} [${state}]`;
+  });
+  throw new Error(
+    `Local install refused while ${blocking.length} Dock instance(s) have active work: ${labels.join(", ")}.\n`
+    + "Wait for them to become idle, stop them, or explicitly replace the Host:\n"
+    + "  npm run install:local -- --replace-active\n"
+    + "Replacing the Host interrupts active runs, Queue items, interactions, and in-flight tool effects.",
+  );
 }
 
 function managedExecutablePath(nodePath: string, homePath: string): string {
