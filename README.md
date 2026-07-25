@@ -6,7 +6,7 @@ Alu Dock 是面向本机单用户、SSH/headless 研发工作流的受管 Pi 运
 
 ## 当前成熟度
 
-Alu Dock 的 V0.1 仍是待签收候选。当前候选已经具备：
+Alu Dock V0.1 已完成本机部署和用户签收；`v0.1.0` 是当前本地发布版本。它已经具备：
 
 - 私有 Unix socket 上的长期 Host 与 durable managed catalog；
 - instance 的创建、列出、接入、停止、显式 reopen、adopt、forget 与 prune；
@@ -17,7 +17,7 @@ Alu Dock 的 V0.1 仍是待签收候选。当前候选已经具备：
 
 当前裸 `aludock` 进入 Dock Hub；`pwd` 只作为 Continue、History、Pi Sessions 的排序上下文和 New 默认目录，进入或退出 Hub 本身不产生 runtime/catalog mutation。Continue 只展示 active/reopenable Dock 工作，History 管理 stopped/不可恢复记录，并可从 stopped 记录的 Pi session 继续；完整磁盘 Pi sessions 仍通过独立 Resume/Adopt inventory 进入。显式 `new` 与 `attach TARGET` 直达 Session Work；`-c`/`--continue` 复用改版前的 current-project smart-entry：进入最近的可继续实例，没有则 New。完整 ID、列表展示的唯一 prefix 与唯一精确 name 共用 fail-closed TARGET 解析。
 
-V0.1 仍待普通开发任务 soak、最终统一回归和明确签收；在此之前不得视为已发布或已打 tag。显式 `aludock open` 当前仍保留旧的 project smart-entry，可能创建或 reopen runtime；默认安全入口是裸命令 Hub。
+V0.1 是本地单用户项目的已签收版本，不表示公开 npm 发布或对外托管服务。后续改动继续以 checkout、测试和本机实际安装状态为准。显式 `aludock open` 当前仍保留旧的 project smart-entry，可能创建或 reopen runtime；默认安全入口是裸命令 Hub。
 
 ## 当前快速开始
 

@@ -2,11 +2,11 @@
 
 ## 产品状态
 
-Alu Dock V0.1 仍是待签收候选。它是本机单用户的受管 Pi 运行时工程底座：长期 Host 持有 Alu Dock 管理的 runtime、任务实例和副作用，SSH TUI 等客户端通过结构化控制面观察与控制。
+Alu Dock V0.1 已完成本机部署和用户签收；`v0.1.0` 是当前本地发布版本。它是本机单用户的受管 Pi 运行时工程底座：长期 Host 持有 Alu Dock 管理的 runtime、任务实例和副作用，SSH TUI 等客户端通过结构化控制面观察与控制。
 
 能力真相以当前代码、类型和测试为准。当前裸 `aludock` 进入无 runtime 副作用、按 cwd 提供上下文的 Dock Hub；固定根菜单将 New、Continue、History、Pi Sessions 与 Leave 分层。Hub 在一次 alternate-screen 生命周期内呈现所有菜单，并只在菜单可见时启用 Hub click/wheel tracking；进入 Session Work 前先恢复 shell screen。Session Work 使用可流动 main buffer 与 terminal-native mouse，不提供 Alt+M 或 `/mouse` 模式。`-c`/`--continue` 显式执行 current-project smart-entry，选择最近的 active/reopenable 实例，没有则 New；显式 `new` 与 `attach TARGET` 直达 Session Work。磁盘 Pi sessions 通过独立 Resume/Adopt inventory 进入；显式 `open` 暂时保留旧 smart-entry。
 
-V0.1 仍待普通开发任务 soak、最终统一回归和明确签收；不得因 `package.json` 已是 `0.1.0` 就写成已发布、已签收或已打 tag。Checkout 与本机已安装包可能不同；以 `~/.local/share/alu-dock` 中实际安装的 package 和 `aludock service status` 为准。
+V0.1 的“发布”仅指这个本地单用户项目已经部署并签收，不表示公开 npm 发布、远程服务或多用户承诺。Checkout 与本机已安装包仍可能在后续开发中不同；运行状态以 `~/.local/share/alu-dock` 中实际安装的 package 和 `aludock service status` 为准。
 
 ## UI 视觉主题合同
 
