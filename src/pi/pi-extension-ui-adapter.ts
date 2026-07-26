@@ -1,7 +1,23 @@
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 
-import type { ExtensionUiBroker, ExtensionWidgetViewport } from "../core/extension-ui-broker.js";
+import type { ExtensionDialogOptions, ExtensionWidgetRenderer, ExtensionWidgetViewport } from "../core/extension-ui-broker.js";
+
+/** Child-local surface needed by Pi's ExtensionUIContext adapter. */
+export interface PiExtensionUiPort {
+  select(title: string, options: string[], opts?: ExtensionDialogOptions): Promise<string | undefined>;
+  confirm(title: string, message: string, opts?: ExtensionDialogOptions): Promise<boolean>;
+  input(title: string, placeholder?: string, opts?: ExtensionDialogOptions): Promise<string | undefined>;
+  editor(title: string, prefill?: string): Promise<string | undefined>;
+  notify(message: string, level?: "info" | "warning" | "error"): void;
+  getToolsExpanded(): boolean;
+  setToolsExpanded(expanded: boolean): void;
+  setStatus(key: string, text: string | undefined): void;
+  setWidget(key: string, lines: string[] | undefined, placement?: "aboveEditor" | "belowEditor"): void;
+  reportWidgetError(key: string, error: unknown): void;
+  unsupported(feature: string): void;
+  bindWidgetRenderer(renderer: ExtensionWidgetRenderer): void;
+}
 
 type WidgetComponent = Component & { dispose?(): void };
 type WidgetEntry =
@@ -11,7 +27,7 @@ type WidgetEntry =
 type RenderAwareExtensionUiContext = ExtensionUIContext & { requestRender?: () => void };
 
 /** Adapt Pi's complete UI interface to Dock's deliberately bounded broker. */
-export function createPiExtensionUiContext(broker: ExtensionUiBroker): ExtensionUIContext {
+export function createPiExtensionUiContext(broker: PiExtensionUiPort): ExtensionUIContext {
   const widgets = new Map<string, WidgetEntry>();
   let viewport: ExtensionWidgetViewport | undefined;
   let renderQueued = false;

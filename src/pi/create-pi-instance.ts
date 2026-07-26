@@ -1,19 +1,20 @@
-import { lstat, realpath } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { randomUUID } from "node:crypto";
+import { resolve } from "node:path";
 
 import {
   getAgentDir,
   hasTrustRequiringProjectResources,
   ProjectTrustStore,
-  SessionManager,
   SettingsManager,
-  VERSION,
 } from "@earendil-works/pi-coding-agent";
 
 import { ExtensionUiBroker } from "../core/extension-ui-broker.js";
 import { ManagedInstance } from "../core/managed-instance.js";
 import { ProjectTrustCoordinator } from "../control/project-trust.js";
-import { createPiRuntimeHost } from "./pi-runtime-host.js";
+import { PI_SDK_VERSION } from "../version.js";
+import { resolvePiReopenTarget } from "./pi-session-target.js";
+import { WorkerRuntimeSession } from "./worker-runtime-session.js";
+import type { WorkerProcessTimeouts } from "./worker-process.js";
 
 export interface CreatePiInstanceOptions {
   id?: string;
@@ -31,42 +32,54 @@ export interface CreatePiInstanceOptions {
   initialRuntimeGeneration?: number;
   createdAt?: string;
   reopenedFrom?: "host_lost" | "runtime_error";
+  /** Test-only process seam; production always uses the default worker entry. */
+  workerEntry?: string;
+  workerTimeouts?: Partial<WorkerProcessTimeouts>;
+  onWorkerSpawn?: (pid: number) => void;
 }
 
-/** Create the single Host-owned Pi runtime facade after project trust has been resolved. */
+/** Construct the Host state machine around one independent Pi worker after trust. */
 export async function createPiInstance(options: CreatePiInstanceOptions): Promise<ManagedInstance> {
   const cwd = resolve(options.cwd);
   const agentDir = resolve(options.agentDir ?? getAgentDir());
-  const sessionPath = options.sessionFile ? resolve(options.sessionFile) : undefined;
-  const reopened = sessionPath
-    ? await openValidatedPiSession(sessionPath, options.sessionDir ? resolve(options.sessionDir) : undefined, cwd)
-    : undefined;
-  if (reopened && reopened.cwd !== cwd) throw new Error(`Pi session working directory changed before runtime construction: ${sessionPath}`);
+  const instanceId = options.id ?? randomUUID();
+  const hostEpoch = options.hostEpoch ?? randomUUID();
   const extensionUiBroker = new ExtensionUiBroker();
-  const runtime = await createPiRuntimeHost({
-    cwd,
-    agentDir,
-    sessionDir: options.sessionDir ? resolve(options.sessionDir) : undefined,
-    tools: options.tools,
-    excludeTools: options.excludeTools,
-    projectTrusted: options.projectTrusted,
+  const created = await WorkerRuntimeSession.create({
+    identity: {
+      hostEpoch,
+      instanceId,
+      runtimeGeneration: options.initialRuntimeGeneration ?? 1,
+    },
+    init: {
+      cwd,
+      agentDir,
+      ...(options.sessionDir === undefined ? {} : { sessionDir: resolve(options.sessionDir) }),
+      ...(options.tools === undefined ? {} : { tools: options.tools }),
+      ...(options.excludeTools === undefined ? {} : { excludeTools: options.excludeTools }),
+      projectTrusted: options.projectTrusted,
+      ...(options.sessionFile === undefined ? {} : { sessionFile: resolve(options.sessionFile) }),
+      ...(options.name === undefined || options.sessionFile !== undefined ? {} : { initialName: options.name }),
+    },
     extensionUiBroker,
-    sessionManager: reopened?.manager,
+    ...(options.workerEntry === undefined ? {} : { workerEntry: options.workerEntry }),
+    ...(options.workerTimeouts === undefined ? {} : { workerTimeouts: options.workerTimeouts }),
+    ...(options.onWorkerSpawn === undefined ? {} : { onWorkerSpawn: options.onWorkerSpawn }),
   });
+  const runtime = created.session;
   try {
     const modelState = runtime.getModelState();
-    const persistedName = reopened ? runtime.currentSession().sessionManager.getSessionName() : undefined;
-    const initialName = options.reopenedFrom ? persistedName : options.name ?? persistedName;
+    const initialName = options.reopenedFrom ? created.persistedName : options.name ?? created.persistedName;
     const instance = new ManagedInstance({
-      id: options.id,
+      id: instanceId,
       creationOperationId: options.creationOperationId,
-      hostEpoch: options.hostEpoch,
+      hostEpoch,
       name: initialName,
       cwd,
       session: runtime,
       executor: {
         kind: "pi-sdk",
-        version: VERSION,
+        version: PI_SDK_VERSION,
         model: modelState.model,
         thinkingLevel: modelState.thinkingLevel,
       },
@@ -76,14 +89,10 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
       reopenedFrom: options.reopenedFrom,
       extensionUiBroker,
     });
-    runtime.activateInitial();
+    await runtime.activateInitial();
     instance.synchronizeModelState();
-    for (const diagnostic of runtime.diagnostics) {
-      const value = diagnostic as { message?: unknown };
-      instance.recordExtensionError(typeof value.message === "string" ? value.message : diagnostic);
-    }
-    if (runtime.modelFallbackMessage) instance.recordExtensionError(runtime.modelFallbackMessage);
-    if (options.name && !reopened) runtime.currentSession().setSessionName(options.name);
+    for (const diagnostic of created.diagnostics) instance.recordExtensionError(diagnostic);
+    if (created.modelFallbackMessage) instance.recordExtensionError(created.modelFallbackMessage);
     return instance;
   } catch (error) {
     await runtime.dispose().catch(() => {});
@@ -91,33 +100,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
   }
 }
 
-export async function resolvePiReopenTarget(sessionFile: string): Promise<{ cwd: string }> {
-  const opened = await openValidatedPiSession(resolve(sessionFile));
-  return { cwd: opened.cwd };
-}
-
-async function openValidatedPiSession(
-  path: string,
-  sessionDir?: string,
-  cwdOverride?: string,
-): Promise<{ cwd: string; manager: SessionManager }> {
-  const canonicalPath = await realpath(path).catch(() => undefined);
-  if (canonicalPath !== path) throw new Error(`Pi session file is not a real non-symlink path: ${path}`);
-  const before = await lstat(path).catch(() => undefined);
-  if (!before?.isFile() || before.isSymbolicLink()) throw new Error(`Pi session file is not a regular file: ${path}`);
-  const getuid = process.getuid;
-  if (typeof getuid !== "function" || before.uid !== getuid()) throw new Error(`Pi session file is not owned by the current user: ${path}`);
-  const manager = SessionManager.open(path, sessionDir, cwdOverride);
-  const after = await lstat(path).catch(() => undefined);
-  if (!after?.isFile() || after.isSymbolicLink() || after.dev !== before.dev || after.ino !== before.ino || after.uid !== before.uid) {
-    throw new Error(`Pi session file changed while opening: ${path}`);
-  }
-  const header = manager.getHeader();
-  const cwd = header?.cwd;
-  if (!cwd || !isAbsolute(cwd)) throw new Error(`Pi session header has no absolute working directory: ${path}`);
-  const canonicalCwd = await realpath(resolve(cwd));
-  return { cwd: canonicalCwd, manager };
-}
+export { resolvePiReopenTarget } from "./pi-session-target.js";
 
 /** Production trust coordinator. Importing this module remains confined to the long-lived server path. */
 export function createPiProjectTrustCoordinator(agentDir = resolve(getAgentDir())): ProjectTrustCoordinator {

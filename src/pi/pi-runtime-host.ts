@@ -23,7 +23,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import { projectBuiltInToolPresentation } from "../core/tool-result-presentation.js";
-import type { ExtensionUiBroker } from "../core/extension-ui-broker.js";
+import type { PiExtensionUiPort } from "./pi-extension-ui-adapter.js";
 import {
   RuntimeCompactionKnownFailureError,
   RuntimeQueueEffectUnknownError,
@@ -106,6 +106,12 @@ type RuntimeOwner = Pick<AgentSessionRuntime,
 
 type ReplacementKind = "new" | "switch" | "fork" | "clone" | "reload";
 
+export interface PiExtensionUiLifecyclePort extends PiExtensionUiPort {
+  beginGenerationChange(kind?: "binding" | "reload"): void;
+  completeGenerationChange(): Promise<void>;
+  failGenerationChange(): Promise<void>;
+}
+
 export interface PiRuntimeHostOptions {
   runtime: RuntimeOwner;
   sessionCatalog?: PiSessionCatalog;
@@ -113,8 +119,11 @@ export interface PiRuntimeHostOptions {
   commitReplacement?: (change: { operationId: string; kind: ReplacementKind; previousSessionFile?: string; sessionFile?: string }) => Promise<void>;
   commitRuntimeError?: (failure: { operationId: string; kind: ReplacementKind; error: unknown; recoverySessionFile?: string }) => Promise<void>;
   isSessionFileDurable?: (path: string) => boolean;
-  extensionUiBroker?: ExtensionUiBroker;
+  extensionUiBroker?: PiExtensionUiLifecyclePort;
   uiContext?: ExtensionUIContext;
+  uiContextFactory?: () => ExtensionUIContext;
+  initialProcessCwd?: string;
+  setProcessCwd?: (cwd: string) => void;
   gitBranchObserverFactory?: (
     cwd: string,
     onChange: (branch: string | undefined) => void,
@@ -129,7 +138,9 @@ export interface CreatePiRuntimeHostOptions {
   tools?: string[];
   excludeTools?: string[];
   projectTrusted: boolean;
-  extensionUiBroker?: ExtensionUiBroker;
+  extensionUiBroker?: PiExtensionUiLifecyclePort;
+  extensionUiContextPortFactory?: () => PiExtensionUiPort;
+  setProcessCwd?: (cwd: string) => void;
   sessionManager?: SessionManager;
 }
 
@@ -138,6 +149,7 @@ interface Binding {
   token: BindingToken;
   session: AgentSession;
   services: AgentSessionServices;
+  cwd: string;
   unsubscribe: () => void;
   gitBranchObserver?: GitBranchObserverPort;
   buffered: RuntimeEvent[];
@@ -160,11 +172,13 @@ export class PiRuntimeHost implements RuntimeSession {
   private treeNavigation: Promise<RuntimeNavigateResult> | undefined;
   private initialActivated = false;
   private queueUpdateSequence = 0;
+  private processCwdValue: string | undefined;
 
   private constructor(private readonly options: PiRuntimeHostOptions) {
+    this.processCwdValue = options.initialProcessCwd;
     options.runtime.setBeforeSessionInvalidate(() => {
       if (this.replacementRunning) this.replacementInvalidated = true;
-      options.extensionUiBroker?.beginGenerationChange();
+      options.extensionUiBroker?.beginGenerationChange("binding");
       this.invalidateBindingsSynchronously();
     });
     options.runtime.setRebindSession(async (session) => {
@@ -212,6 +226,12 @@ export class PiRuntimeHost implements RuntimeSession {
   get modelFallbackMessage(): string | undefined { return this.options.runtime.modelFallbackMessage; }
   getGitBranch(): string | undefined { return this.requireActive().gitBranchObserver?.branch; }
   currentSession(): AgentSession { return this.requireActive().session; }
+  getExtensionCommandNames(): string[] {
+    return this.requireActive().session.extensionRunner.getRegisteredCommands()
+      .map((command) => command.invocationName)
+      .filter((name) => typeof name === "string" && name.length > 0 && name.length <= 256)
+      .sort();
+  }
 
   /** Flush startup events only after ManagedInstance has attached its stable subscriber. */
   activateInitial(): void {
@@ -561,7 +581,12 @@ export class PiRuntimeHost implements RuntimeSession {
   ): Promise<{ cancelled: boolean }> {
     return this.serialize(() => {
       this.options.setProjectTrust?.(trust.canonicalCwd, trust.projectTrusted);
-      return this.replace(operationId, "switch", () => this.options.runtime.switchSession(path));
+      return this.replace(
+        operationId,
+        "switch",
+        () => this.options.runtime.switchSession(path),
+        trust.canonicalCwd,
+      );
     });
   }
 
@@ -633,7 +658,7 @@ export class PiRuntimeHost implements RuntimeSession {
       const originalBuffer = binding.buffered;
       binding.buffered = buffered;
       binding.bufferEvents = true;
-      this.options.extensionUiBroker?.beginGenerationChange();
+      this.options.extensionUiBroker?.beginGenerationChange("reload");
       try {
         await binding.services.modelRuntime.reloadConfig();
         let seamCalls = 0;
@@ -686,17 +711,28 @@ export class PiRuntimeHost implements RuntimeSession {
     return this.disposePromise;
   }
 
-  private async replace<T extends { cancelled: boolean }>(operationId: string, kind: "new" | "switch" | "fork" | "clone", operation: () => Promise<T>): Promise<T> {
+  private async replace<T extends { cancelled: boolean }>(
+    operationId: string,
+    kind: "new" | "switch" | "fork" | "clone",
+    operation: () => Promise<T>,
+    constructionCwd?: string,
+  ): Promise<T> {
     const previousSessionFile = this.sessionFile;
+    const previousProcessCwd = this.processCwdValue;
     this.rebindEntered = false;
     this.replacementInvalidated = false;
     this.replacementRunning = true;
     try {
+      if (constructionCwd !== undefined) {
+        this.options.setProcessCwd?.(constructionCwd);
+        this.processCwdValue = constructionCwd;
+      }
       const result = await operation();
       if (result.cancelled) {
         if (this.rebindEntered || this.replacementInvalidated || !this.active) {
           throw new Error("Cancelled replacement changed the active runtime binding");
         }
+        this.restoreProcessCwd(previousProcessCwd);
         return result;
       }
       if (!this.rebindEntered || !this.staged) throw new Error("Runtime replacement completed without exactly one rebind");
@@ -704,7 +740,10 @@ export class PiRuntimeHost implements RuntimeSession {
       this.promoteStaged(kind, previousSessionFile);
       return result;
     } catch (error) {
-      if (!this.replacementInvalidated) throw error;
+      if (!this.replacementInvalidated) {
+        this.restoreProcessCwd(previousProcessCwd);
+        throw error;
+      }
       if (this.rebindEntered) await this.disposeRuntimeOnce().catch(() => {});
       else this.runtimeDisposed = true; // SDK already disposed the old session before factory failure.
       this.invalidateBindingsSynchronously();
@@ -715,6 +754,12 @@ export class PiRuntimeHost implements RuntimeSession {
     } finally {
       this.replacementRunning = false;
     }
+  }
+
+  private restoreProcessCwd(previousProcessCwd: string | undefined): void {
+    if (previousProcessCwd === undefined || previousProcessCwd === this.processCwdValue) return;
+    this.options.setProcessCwd?.(previousProcessCwd);
+    this.processCwdValue = previousProcessCwd;
   }
 
   private async commitRuntimeError(operationId: string, kind: ReplacementKind, error: unknown, recoverySessionFile?: string): Promise<void> {
@@ -740,7 +785,7 @@ export class PiRuntimeHost implements RuntimeSession {
   private async stageCandidate(session: AgentSession): Promise<void> {
     if (this.staged) throw new Error("Runtime attempted more than one candidate rebind");
     const token = { active: true };
-    const binding: Binding = { token, session, services: this.options.runtime.services, unsubscribe: () => {}, buffered: [], bufferEvents: true };
+    const binding: Binding = { token, session, services: this.options.runtime.services, cwd: this.options.runtime.services.cwd, unsubscribe: () => {}, buffered: [], bufferEvents: true };
     binding.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
       if (!token.active) return;
       const projected = projectAgentSessionEvent(event);
@@ -748,8 +793,12 @@ export class PiRuntimeHost implements RuntimeSession {
       else binding.buffered.push(projected);
     });
     this.staged = binding;
+    const previousProcessCwd = this.processCwdValue;
     try {
-      await session.bindExtensions({ uiContext: this.options.uiContext, mode: this.options.uiContext ? "rpc" : "print", onError: (error) => {
+      this.options.setProcessCwd?.(binding.cwd);
+      this.processCwdValue = binding.cwd;
+      const uiContext = this.options.uiContextFactory?.() ?? this.options.uiContext;
+      await session.bindExtensions({ uiContext, mode: uiContext ? "rpc" : "print", onError: (error) => {
         if (!token.active) return;
         const event = { type: "dock_extension_error", error: boundedErrorMessage(error) };
         if (this.active === binding && !binding.bufferEvents) this.publish(event); else binding.buffered.push(event);
@@ -760,13 +809,17 @@ export class PiRuntimeHost implements RuntimeSession {
         if (this.active === binding && !binding.bufferEvents) this.publish(event); else binding.buffered.push(event);
       };
       binding.gitBranchObserver = await (this.options.gitBranchObserverFactory
-        ? this.options.gitBranchObserverFactory(binding.services.cwd, publishBranch)
-        : GitBranchObserver.create(binding.services.cwd, publishBranch));
+        ? this.options.gitBranchObserverFactory(binding.cwd, publishBranch)
+        : GitBranchObserver.create(binding.cwd, publishBranch));
     } catch (error) {
       token.active = false;
       binding.unsubscribe();
       binding.gitBranchObserver?.dispose();
       if (this.staged === binding) this.staged = undefined;
+      if (previousProcessCwd !== undefined) {
+        try { this.options.setProcessCwd?.(previousProcessCwd); this.processCwdValue = previousProcessCwd; }
+        catch { /* Runtime replacement will fail closed and dispose this Worker. */ }
+      }
       throw error;
     }
   }
@@ -806,7 +859,7 @@ export class PiRuntimeHost implements RuntimeSession {
       reason: kind === "switch" ? "resume" : kind === "clone" ? "fork" : kind,
       previousSessionFile,
       sessionFile,
-      cwd: this.active?.services.cwd,
+      cwd: this.active?.cwd,
       name: this.active?.session.sessionManager.getSessionName(),
       gitBranch: this.active?.gitBranchObserver?.branch,
     });
@@ -882,60 +935,110 @@ function safeRequiredText(value: unknown, limit: number, fallback: string): stri
 
 function projectAgentSessionEvent(event: AgentSessionEvent): RuntimeEvent {
   const source = event as unknown as Record<string, unknown>;
-  if (source.type === "tool_execution_end") {
-    const result = isRecord(source.result) ? source.result : undefined;
-    const toolName = typeof source.toolName === "string" ? source.toolName : undefined;
-    const isError = source.isError === true;
-    const presentation = projectBuiltInToolPresentation(toolName, toolResultText(result?.content), result?.details, isError);
-    return {
-      ...source,
-      result: {
-        content: result?.content,
-        ...(presentation === undefined ? {} : { presentation }),
-      },
-    } as unknown as RuntimeEvent;
+  const type = typeof source.type === "string" ? source.type : "unknown";
+  if (type === "agent_end") return { type, willRetry: source.willRetry === true };
+  if (type === "turn_end" || type === "entry_appended") return { type };
+  if ((type === "message_start" || type === "message_end") && isRecord(source.message)) {
+    return { type, message: projectRuntimeMessage(source.message) };
   }
-  if (source.type === "tool_execution_update") {
-    const partialResult = isRecord(source.partialResult) ? source.partialResult : undefined;
-    const toolName = typeof source.toolName === "string" ? source.toolName : undefined;
-    const presentation = projectBuiltInToolPresentation(toolName, toolResultText(partialResult?.content), partialResult?.details, false);
-    return {
-      ...source,
-      partialResult: {
-        content: partialResult?.content,
-        ...(presentation === undefined ? {} : { presentation }),
-      },
-    } as unknown as RuntimeEvent;
+  if (type === "message_update" && isRecord(source.assistantMessageEvent)) {
+    return { type, assistantMessageEvent: projectAssistantMessageEvent(source.assistantMessageEvent) };
   }
-  if (source.type === "message_end" && isRecord(source.message)) {
-    return { ...source, message: projectRuntimeMessage(source.message) } as unknown as RuntimeEvent;
+  if (type === "tool_execution_start") {
+    return {
+      type,
+      toolCallId: safeRequiredText(source.toolCallId, 128, "unknown"),
+      toolName: safeRequiredText(source.toolName, 256, "tool"),
+      args: projectJsonObject(source.args).value,
+    };
+  }
+  if (type === "tool_execution_end" || type === "tool_execution_update") {
+    const resultKey = type === "tool_execution_end" ? "result" : "partialResult";
+    const result = isRecord(source[resultKey]) ? source[resultKey] as Record<string, unknown> : undefined;
+    const toolName = typeof source.toolName === "string" ? source.toolName : undefined;
+    const isError = type === "tool_execution_end" && source.isError === true;
+    const contentText = safeRequiredText(toolResultText(result?.content), 256_000, "Sensitive tool output omitted");
+    const content = projectPrivateToolContent(result?.content);
+    const presentation = projectBuiltInToolPresentation(toolName, contentText, result?.details, isError);
+    return {
+      type,
+      toolCallId: safeRequiredText(source.toolCallId, 128, "unknown"),
+      toolName: safeRequiredText(source.toolName, 256, "tool"),
+      [resultKey]: { content, ...(presentation === undefined ? {} : { presentation }) },
+      ...(type === "tool_execution_end" ? { isError } : {}),
+    };
+  }
+  if (type === "compaction_end") {
+    return {
+      type,
+      reason: source.reason,
+      aborted: source.aborted === true,
+      willRetry: source.willRetry === true,
+      ...(safeOptionalText(source.errorMessage, 2_048) === undefined ? {} : { errorMessage: safeOptionalText(source.errorMessage, 2_048) }),
+    };
   }
   return source as RuntimeEvent;
 }
 
 function projectRuntimeMessage(message: Record<string, unknown>): Record<string, unknown> {
-  const projected = { ...message };
-  const role = typeof message.role === "string" ? message.role : undefined;
-  if (role === "toolResult") {
-    const toolName = typeof message.toolName === "string" ? message.toolName : undefined;
-    const isError = message.isError === true;
-    const presentation = projectBuiltInToolPresentation(toolName, toolResultText(message.content), message.details, isError);
-    delete projected.details;
-    if (presentation !== undefined) projected.presentation = presentation;
-  }
-  if (Array.isArray(message.content)) {
-    projected.content = message.content.map((item) => {
-      if (!isRecord(item) || (item.type !== "toolResult" && item.type !== "tool_result")) return item;
-      const block = { ...item };
-      const toolName = typeof item.toolName === "string" ? item.toolName : typeof item.name === "string" ? item.name : undefined;
-      const isError = item.isError === true;
-      const presentation = projectBuiltInToolPresentation(toolName, toolResultText(item.content), item.details, isError);
-      delete block.details;
-      if (presentation !== undefined) block.presentation = presentation;
-      return block;
-    });
-  }
+  const role = safeRequiredText(message.role, 64, "system");
+  const projected: Record<string, unknown> = {
+    role,
+    content: role === "toolResult" ? projectPrivateToolContent(message.content) : projectPrivateContent(message.content),
+  };
+  const stopReason = safeOptionalText(message.stopReason, 128);
+  const errorMessage = safeOptionalText(message.errorMessage, 2_048);
+  const toolCallId = safeOptionalText(message.toolCallId, 128);
+  if (stopReason !== undefined) projected.stopReason = stopReason;
+  if (errorMessage !== undefined) projected.errorMessage = errorMessage;
+  if (toolCallId !== undefined) projected.toolCallId = toolCallId;
   return projected;
+}
+
+function projectAssistantMessageEvent(update: Record<string, unknown>): Record<string, unknown> {
+  const type = safeRequiredText(update.type, 64, "unknown");
+  const projected: Record<string, unknown> = { type };
+  if (typeof update.contentIndex === "number" && Number.isSafeInteger(update.contentIndex) && update.contentIndex >= 0) projected.contentIndex = update.contentIndex;
+  const delta = safeOptionalText(update.delta, 8_000);
+  if (delta !== undefined) projected.delta = delta;
+  if (isRecord(update.partial)) projected.partial = { content: projectPrivateContent(update.partial.content) };
+  if (isRecord(update.toolCall)) projected.toolCall = projectPrivateToolCall(update.toolCall);
+  return projected;
+}
+
+function projectPrivateContent(content: unknown): unknown {
+  if (typeof content === "string") return safeRequiredText(content, 256_000, "Sensitive content omitted");
+  if (!Array.isArray(content)) return [];
+  const blocks: Record<string, unknown>[] = [];
+  for (const item of content.slice(0, 200)) {
+    if (!isRecord(item)) continue;
+    if (item.type === "text") blocks.push({ type: "text", text: safeRequiredText(item.text, 8_000, "Sensitive content omitted") });
+    else if (item.type === "thinking") blocks.push({ type: "thinking", thinking: safeRequiredText(item.thinking, 8_000, "Sensitive thinking omitted") });
+    else if (item.type === "toolCall" || item.type === "tool_call") blocks.push(projectPrivateToolCall(item));
+    else if (item.type === "image") blocks.push({ type: "text", text: "[Image bytes omitted]" });
+  }
+  if (content.length > 200) blocks.push({ type: "text", text: "[Additional content omitted]" });
+  return blocks;
+}
+
+function projectPrivateToolContent(content: unknown): unknown {
+  if (typeof content === "string") return safeRequiredText(content, 256_000, "Sensitive tool output omitted");
+  if (!Array.isArray(content)) return [];
+  return content.slice(0, 200).flatMap((item): Record<string, unknown>[] => {
+    if (!isRecord(item)) return [];
+    if (item.type === "text") return [{ type: "text", text: safeRequiredText(item.text, 256_000, "Sensitive tool output omitted") }];
+    if (item.type === "image") return [{ type: "text", text: "[Image bytes omitted]" }];
+    return [];
+  });
+}
+
+function projectPrivateToolCall(value: Record<string, unknown>): Record<string, unknown> {
+  return {
+    type: "toolCall",
+    id: safeRequiredText(value.id, 128, "unknown"),
+    name: safeRequiredText(value.name, 256, "tool"),
+    arguments: projectJsonObject(value.arguments).value,
+  };
 }
 
 function toolResultText(content: unknown): string | undefined {
@@ -964,13 +1067,17 @@ function projectHistoryEntry(entry: SessionEntry): RuntimeHistoryEntry | undefin
     const toolPresentation = role === "toolResult"
       ? projectBuiltInToolPresentation(toolName, toolResultText(message.content), message.details, isError)
       : undefined;
-    let content: unknown = message.content;
+    let content: unknown = role === "toolResult"
+      ? projectPrivateToolContent(message.content)
+      : projectPrivateContent(message.content);
     if (role === "bashExecution") {
-      const command = typeof message.command === "string" ? message.command : "";
-      const output = typeof message.output === "string" ? message.output : "";
+      const command = safeRequiredText(message.command, 8_000, "Sensitive command omitted");
+      const output = typeof message.output === "string" && message.output.length === 0
+        ? ""
+        : safeRequiredText(message.output, 256_000, "Sensitive output omitted");
       content = `! ${command}${output ? `\n${output}` : ""}`;
     } else if (role === "branchSummary" || role === "compactionSummary") {
-      content = typeof message.summary === "string" ? message.summary : "";
+      content = safeRequiredText(message.summary, 256_000, "Sensitive summary omitted");
     }
     return {
       ...base,
@@ -988,7 +1095,7 @@ function projectHistoryEntry(entry: SessionEntry): RuntimeHistoryEntry | undefin
   }
   if (entry.type === "custom_message") {
     if (!entry.display) return undefined;
-    return { ...base, role: "system", content: entry.content };
+    return { ...base, role: "system", content: projectPrivateContent(entry.content) };
   }
   if (entry.type === "thinking_level_change") return { ...base, role: "system", content: `Thinking level changed to ${entry.thinkingLevel}` };
   if (entry.type === "model_change") return { ...base, role: "system", content: `Model changed to ${entry.provider}/${entry.modelId}` };
@@ -1424,7 +1531,12 @@ function syncAgentRuntimeSettings(session: AgentSession, settingsManager: Settin
 }
 
 export async function createPiRuntimeHost(options: CreatePiRuntimeHostOptions): Promise<PiRuntimeHost> {
-  const uiContext = options.extensionUiBroker ? createPiExtensionUiContext(options.extensionUiBroker) : undefined;
+  const uiContext = options.extensionUiBroker && !options.extensionUiContextPortFactory
+    ? createPiExtensionUiContext(options.extensionUiBroker)
+    : undefined;
+  const createUiContext = options.extensionUiContextPortFactory
+    ? () => createPiExtensionUiContext(options.extensionUiContextPortFactory!())
+    : undefined;
   const trustByCwd = new Map<string, boolean>([[options.cwd, options.projectTrusted]]);
   const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
     const canonicalCwd = await realpath(resolve(cwd));
@@ -1456,8 +1568,11 @@ export async function createPiRuntimeHost(options: CreatePiRuntimeHostOptions): 
     runtime,
     extensionUiBroker: options.extensionUiBroker,
     uiContext,
+    uiContextFactory: createUiContext,
     setProjectTrust: (cwd, trusted) => trustByCwd.set(cwd, trusted),
     configureNetwork: configurePiNetwork,
+    initialProcessCwd: options.cwd,
+    ...(options.setProcessCwd === undefined ? {} : { setProcessCwd: options.setProcessCwd }),
   });
 }
 

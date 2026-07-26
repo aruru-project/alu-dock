@@ -1,0 +1,251 @@
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, readFile, readlink, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import test from "node:test";
+
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { createPiInstance } from "../src/pi/create-pi-instance.js";
+import { RuntimeEffectUnknownError } from "../src/core/managed-instance.js";
+import { PiWorkerProcess } from "../src/pi/worker-process.js";
+import { OrderedWorkerSender, WorkerFrameReceiver, type WorkerIdentity } from "../src/pi/worker-protocol.js";
+
+test("real no-model Pi gate isolates two Dock instances in distinct workers and fences one worker loss", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-dock-two-workers-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const pids: number[] = [];
+  const first = await createPiInstance({
+    id: "worker-first", hostEpoch: "worker-host", creationOperationId: "create-first",
+    cwd: process.cwd(), agentDir: join(root, "agent-first"), sessionDir: join(root, "sessions-first"),
+    projectTrusted: false, tools: [], onWorkerSpawn: (pid) => pids.push(pid),
+  });
+  const second = await createPiInstance({
+    id: "worker-second", hostEpoch: "worker-host", creationOperationId: "create-second",
+    cwd: process.cwd(), agentDir: join(root, "agent-second"), sessionDir: join(root, "sessions-second"),
+    projectTrusted: false, tools: [], onWorkerSpawn: (pid) => pids.push(pid),
+  });
+  try {
+    assert.equal(pids.length, 2);
+    assert.notEqual(pids[0], pids[1]);
+    if (process.platform === "linux") {
+      assert.equal(await readlink(`/proc/${pids[0]}/cwd`), process.cwd());
+      assert.equal(await readlink(`/proc/${pids[1]}/cwd`), process.cwd());
+    }
+    assert.equal(first.snapshot().lifecycle, "active");
+    assert.equal(second.snapshot().lifecycle, "active");
+    process.kill(pids[0]!, "SIGKILL");
+    for (let attempt = 0; attempt < 100 && first.snapshot().lifecycle !== "runtime_error"; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(first.snapshot().lifecycle, "runtime_error");
+    assert.equal(first.snapshot().runtimeGeneration, 1);
+    assert.equal(first.snapshot().interruption?.reason, "replacement_failed");
+    assert.equal(second.snapshot().lifecycle, "active");
+    assert.equal(second.snapshot().execution, "idle");
+    await second.disposeUnpublished();
+    assert.equal(processExists(pids[1]!), false, "graceful Host disposal must reap the worker");
+  } finally {
+    await Promise.allSettled([first.disposeUnpublished(), second.disposeUnpublished()]);
+  }
+});
+
+test("cross-project session replacement updates the Worker process cwd before extension rebind", async (context) => {
+  if (process.platform !== "linux") { context.skip("/proc cwd proof requires Linux"); return; }
+  const root = await mkdtemp(join(tmpdir(), "alu-dock-worker-cwd-"));
+  const cwdA = join(root, "project-a");
+  const cwdB = join(root, "project-b");
+  await mkdir(cwdA, { recursive: true });
+  await mkdir(cwdB, { recursive: true });
+  await mkdir(join(root, "target-sessions"), { recursive: true });
+  const sourceAgentDir = join(root, "source-agent");
+  const cwdProbe = join(root, "extension-factory-cwd.txt");
+  await mkdir(join(sourceAgentDir, "extensions"), { recursive: true });
+  await writeFile(join(sourceAgentDir, "extensions", "cwd-probe.ts"), `
+import { appendFileSync } from "node:fs";
+export default function () {
+  appendFileSync(${JSON.stringify(cwdProbe)}, process.cwd() + "\\n");
+}
+`, "utf8");
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const target = SessionManager.create(cwdB, join(root, "target-sessions"));
+  type SessionMessage = Parameters<SessionManager["appendMessage"]>[0];
+  target.appendMessage({ role: "user", content: [{ type: "text", text: "cross-project target" }], timestamp: Date.now() } as SessionMessage);
+  target.appendMessage({
+    role: "assistant", content: [{ type: "text", text: "target answer" }], api: "openai-responses",
+    provider: "openai", model: "fixture", stopReason: "stop", timestamp: Date.now(),
+    usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+  } as SessionMessage);
+  const targetFile = target.getSessionFile();
+  assert.ok(targetFile);
+  const targetHeader = JSON.parse((await readFile(targetFile!, "utf8")).split("\n", 1)[0]!) as { cwd?: string };
+  assert.equal(targetHeader.cwd, cwdB);
+
+  let sourcePid = 0;
+  const source = await createPiInstance({
+    id: "cwd-source", hostEpoch: "cwd-host", creationOperationId: "cwd-source-create",
+    cwd: cwdA, agentDir: sourceAgentDir, sessionDir: join(root, "source-sessions"),
+    projectTrusted: true, tools: [], onWorkerSpawn: (pid) => { sourcePid = pid; },
+  });
+  try {
+    assert.equal(await readlink(`/proc/${sourcePid}/cwd`), cwdA);
+    assert.deepEqual((await readFile(cwdProbe, "utf8")).trim().split("\n"), [cwdA]);
+    assert.equal((await source.switchSession("cwd-switch", targetFile!, { canonicalCwd: cwdB, projectTrusted: true })).cancelled, false);
+    assert.equal(await readlink(`/proc/${sourcePid}/cwd`), cwdB);
+    assert.equal(source.snapshot().cwd, cwdB);
+    assert.deepEqual(
+      (await readFile(cwdProbe, "utf8")).trim().split("\n"),
+      [cwdA, cwdB],
+      "replacement extension factories must observe the target cwd during construction",
+    );
+  } finally {
+    await source.disposeUnpublished();
+  }
+});
+
+test("accepted Worker mutation loss is effect_unknown only after process reap and is never replayed", async () => {
+  let workerPid = 0;
+  const instance = await createPiInstance({
+    id: "accepted-loss", hostEpoch: "accepted-loss-host", creationOperationId: "accepted-loss-create",
+    cwd: process.cwd(), agentDir: join(tmpdir(), "accepted-loss-agent"), projectTrusted: false, tools: [],
+    workerEntry: fileURLToPath(new URL("./fixtures/hanging-pi-worker.js", import.meta.url)),
+    workerTimeouts: { mutationMs: 100, termMs: 200 },
+    onWorkerSpawn: (pid) => { workerPid = pid; },
+  });
+  try {
+    await assert.rejects(
+      instance.setActiveTools(["read"], "accepted-worker-operation"),
+      (error: unknown) => error instanceof RuntimeEffectUnknownError && error.operationId === "accepted-worker-operation",
+    );
+    assert.equal(processExists(workerPid), false, "effect_unknown must not settle before the old Worker owner is reaped");
+    assert.equal(instance.snapshot().lifecycle, "runtime_error");
+    assert.equal(instance.snapshot().interruption?.reason, "replacement_failed");
+    assert.equal(instance.snapshot().runtimeGeneration, 1);
+  } finally {
+    await instance.disposeUnpublished();
+  }
+});
+
+test("malformed success after Worker mutation acceptance remains effect_unknown until reap", async () => {
+  let workerPid = 0;
+  const instance = await createPiInstance({
+    id: "malformed-accepted", hostEpoch: "malformed-host", creationOperationId: "malformed-create",
+    cwd: process.cwd(), agentDir: join(tmpdir(), "malformed-accepted-agent"), projectTrusted: false, tools: [],
+    workerEntry: fileURLToPath(new URL("./fixtures/hanging-pi-worker.js", import.meta.url)),
+    workerTimeouts: { mutationMs: 1_000, termMs: 200 },
+    onWorkerSpawn: (pid) => { workerPid = pid; },
+  });
+  try {
+    await assert.rejects(
+      instance.updateSetting({ key: "autoCompaction", value: true }, "malformed-setting-operation"),
+      (error: unknown) => error instanceof RuntimeEffectUnknownError && error.operationId === "malformed-setting-operation",
+    );
+    assert.equal(processExists(workerPid), false, "accepted malformed success must settle only after Worker reap");
+    assert.equal(instance.snapshot().lifecycle, "runtime_error");
+  } finally {
+    await instance.disposeUnpublished();
+  }
+});
+
+test("stuck extension disposal is bounded, reaps the process tree, and self-terminates after Host IPC loss", async (context) => {
+  if (process.platform !== "linux") { context.skip("process-group proof requires Linux"); return; }
+  const root = await mkdtemp(join(tmpdir(), "alu-dock-worker-reap-"));
+  const agentDir = join(root, "agent");
+  const sessionDir = join(root, "sessions");
+  const descendantFile = join(root, "descendant.pid");
+  await mkdir(join(agentDir, "extensions"), { recursive: true });
+  await mkdir(sessionDir, { recursive: true });
+  await writeFile(join(agentDir, "extensions", "stuck-dispose.ts"), `
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+export default function (pi) {
+  pi.on("session_start", () => {
+    const child = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    writeFileSync(${JSON.stringify(descendantFile)}, String(child.pid));
+  });
+  pi.on("session_shutdown", () => new Promise(() => {}));
+}
+`, "utf8");
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  let workerPid = 0;
+  const instance = await createPiInstance({
+    id: "worker-reap", hostEpoch: "worker-reap-host", creationOperationId: "create-reap",
+    cwd: process.cwd(), agentDir, sessionDir, projectTrusted: true, tools: [],
+    workerTimeouts: { controlMs: 200, gracefulShutdownMs: 200, termMs: 300 },
+    onWorkerSpawn: (pid) => { workerPid = pid; },
+  });
+  context.after(() => instance.disposeUnpublished().catch(() => {}));
+  const descendantPid = await waitForPidFile(descendantFile);
+  process.kill(workerPid, "SIGKILL");
+  for (let attempt = 0; attempt < 200 && instance.snapshot().lifecycle !== "runtime_error"; attempt += 1) {
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+  }
+  assert.equal(instance.snapshot().lifecycle, "runtime_error");
+  assert.equal(processExists(workerPid), false);
+  assert.equal(processExists(descendantPid), false, "unexpected Worker exit must still reap extension descendants before runtime_lost");
+
+  await rm(descendantFile, { force: true });
+  let disposeWorkerPid = 0;
+  const disposeInstance = await createPiInstance({
+    id: "worker-dispose", hostEpoch: "worker-reap-host", creationOperationId: "create-dispose",
+    cwd: process.cwd(), agentDir, sessionDir: join(root, "dispose-sessions"), projectTrusted: true, tools: [],
+    workerTimeouts: { controlMs: 200, gracefulShutdownMs: 200, termMs: 300 },
+    onWorkerSpawn: (pid) => { disposeWorkerPid = pid; },
+  });
+  context.after(() => disposeInstance.disposeUnpublished().catch(() => {}));
+  const disposeDescendantPid = await waitForPidFile(descendantFile);
+  const startedAt = Date.now();
+  await disposeInstance.disposeUnpublished();
+  assert.ok(Date.now() - startedAt < 2_500, "stuck disposal must be bounded by supervisor deadlines");
+  assert.equal(processExists(disposeWorkerPid), false);
+  assert.equal(processExists(disposeDescendantPid), false, "Worker process-group termination must SIGKILL descendants that ignore SIGTERM");
+
+  await rm(descendantFile, { force: true });
+  const orphanIdentity: WorkerIdentity = { hostEpoch: "orphan-host", instanceId: "orphan-instance", runtimeGeneration: 1, workerIncarnation: "orphan-incarnation" };
+  const orphan = new PiWorkerProcess({
+    identity: orphanIdentity,
+    init: { cwd: process.cwd(), agentDir, sessionDir: join(root, "orphan-sessions"), projectTrusted: true, tools: [] },
+  });
+  const orphanReceiver = new WorkerFrameReceiver(() => true);
+  const orphanSender = new OrderedWorkerSender(orphanIdentity, (message, callback) => orphan.child.send(message, callback));
+  await new Promise<void>((resolveReady, rejectReady) => {
+    const timer = setTimeout(() => rejectReady(new Error("orphan worker did not start")), 10_000);
+    orphan.child.on("message", (raw) => {
+      try {
+        const envelope = orphanReceiver.accept(raw);
+        if (envelope?.kind === "call" && envelope.capability === "dock.identity") {
+          void orphanSender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: true, result: { identity: orphanIdentity, capabilities: ["dock.identity"] } }).catch(rejectReady);
+        }
+        if (envelope?.kind === "ready") { clearTimeout(timer); resolveReady(); }
+      } catch (error) { clearTimeout(timer); rejectReady(error); }
+    });
+    orphan.child.once("error", rejectReady);
+  });
+  context.after(() => orphan.terminate().catch(() => {}));
+  const orphanPid = orphan.child.pid!;
+  const orphanDescendantPid = await waitForPidFile(descendantFile);
+  orphan.child.disconnect();
+  for (let attempt = 0; attempt < 100 && processExists(orphanPid); attempt += 1) {
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 50));
+  }
+  assert.equal(processExists(orphanPid), false, "detached Worker must self-terminate when Host IPC disappears");
+  assert.equal(processExists(orphanDescendantPid), false, "Host-loss watchdog must terminate extension descendants");
+});
+
+async function waitForPidFile(path: string): Promise<number> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    try {
+      const pid = Number.parseInt(await readFile(path, "utf8"), 10);
+      if (Number.isSafeInteger(pid) && pid > 0) return pid;
+    } catch {}
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+  }
+  throw new Error("extension descendant PID was not published");
+}
+
+function processExists(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch { return false; }
+}

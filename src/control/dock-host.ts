@@ -35,7 +35,7 @@ import {
   type DockEvent,
   type JsonObject,
 } from "../core/managed-instance.js";
-import { RuntimeCompactionKnownFailureError, RuntimeInvalidSettingValueError, RuntimeModelNotFoundError, RuntimeSettingsWriteError, RuntimeUnknownToolError } from "../core/runtime-session.js";
+import { RuntimeCompactionKnownFailureError, RuntimeInvalidSettingValueError, RuntimeModelNotFoundError, RuntimeSettingsWriteError, RuntimeUnavailableBeforeEffectError, RuntimeUnknownToolError } from "../core/runtime-session.js";
 import type { SessionInventory } from "../core/session-inventory.js";
 import {
   CatalogListCursorStaleError,
@@ -1002,6 +1002,9 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   }
   if (error instanceof RuntimeEffectUnknownError) {
     return { code: "effect_unknown", message: error.message, details: { operationId: error.operationId, queryHint: error.queryHint } };
+  }
+  if (error instanceof RuntimeUnavailableBeforeEffectError) {
+    return { code: "runtime_unavailable", message: error.message };
   }
   if (error instanceof RuntimeCompactionKnownFailureError) {
     const code = error.reason === "nothing_to_compact" || error.reason === "already_compacted"

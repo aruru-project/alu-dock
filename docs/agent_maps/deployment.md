@@ -2,8 +2,7 @@
 
 ## 适用范围
 
-`systemd --user`、managed Host startup/readiness、durable catalog process lifecycle，以及
-普通 npm 本地安装。Alu Dock 没有 stage/apply、release channel、receipt 或自动回滚系统。
+这里记录 `systemd --user`、managed Host startup/readiness、durable catalog process lifecycle 和本地安装相关代码。
 
 ## 两条调用链
 
@@ -42,6 +41,7 @@ cli serve --managed
       4. no-runtime startup reconcile
       5. atomic normalized catalog commit
       6. enter running and advertise hello
+      7. only explicit instance create/reopen starts its independent Pi Worker
 ```
 
 Corrupt catalog evidence 保留；失败时不得先构造 prior runtime。Startup normalization 把旧
@@ -60,13 +60,13 @@ live records 转为保守 unavailable 状态，不恢复 queue、Promise 或 eff
 | `src/control/catalog-reconcile.ts` | Host-loss normalization；无 Pi runtime 构造 | `durable-registry` |
 | `src/control/catalog-transactions.ts` | serialized commit 与 mutation fault | `catalog-transactions` |
 | `src/control/socket-path.ts` | XDG runtime/state 路径 | `ensure-host`, `user-service` |
+| `src/pi/worker-process.ts` | active instance的detached process group、bounded termination与reap | `pi-workers-real` |
+| `src/pi/pi-worker-entry.ts` | Host-loss orphan watchdog与Worker-side dispose | `pi-workers-real` |
 
 ## 生命周期边界
 
-- SIGTERM：停止接收新 request，等待已 admit 工作，commit shutdown intent，dispose runtime，
-  保留 reopen metadata。
-- SIGKILL/Host loss：没有 cleanup 保证；下一 Host 只根据 durable catalog 与 Pi session metadata
-  做保守 reconcile。
+- SIGTERM：停止接收新 request，等待已 admit 工作，commit shutdown intent，并行bounded dispose各instance Worker；未退出的Worker process group升级TERM/KILL并确认direct child reap，保留reopen metadata。若intent写入与owner release都失败，则先durably quarantine为non-reopenable，后续Host不得把显式session-file override当作绕过路径。
+- SIGKILL/Host loss：Host没有cleanup保证；Worker在IPC断开后启动本地hard-stop watchdog并终止自己的process group。下一Host只根据durable catalog与Pi session metadata做保守reconcile，不恢复runtime/queue/Promise。
 - Mutation-fault：Host 切 read-only、drain admitted work、退出非零；不继续接受 mutation。
 - Socket path：private directory、socket mode `0600`、bind identity 校验；不得删除不属于当前
   Host 的 socket。
@@ -88,16 +88,9 @@ live records 转为保守 unavailable 状态，不恢复 queue、Promise 或 eff
 - service install/restart 后必须核对 MainPID 与 hello readiness。
 - 旧 `~/release/alu-dock` 目录不自动迁移或删除，确认新安装后由用户手动清理。
 
-## 测试层次
-
-1. Pure unit：layout/unit render、catalog parser/reconcile。
-2. Integration：atomic write fault、transaction boundary、readiness probes。
-3. Subprocess：SIGTERM、SIGKILL、create race、corrupt evidence retention。
-4. Real managed：必要时使用唯一临时 `systemd --user` unit。
-5. Authorized local install：从外层 shell 安装并检查 service status。
+相关测试按 [`docs/qa.md`](../qa.md) 选择。
 
 ## 默认不读
 
 - TUI 实现；deployment 只验证 client-visible readiness。
 - Pi internals；startup reconciliation 不得构造 Pi 对象。
-- 旧 release/receipt 历史，除非用户明确要求清理或审计。

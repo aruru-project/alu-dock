@@ -173,6 +173,16 @@ export class RuntimeQueueEffectUnknownError extends Error {
   }
 }
 
+/** Worker transport failed before the child acknowledged effectful custody. */
+export class RuntimeUnavailableBeforeEffectError extends Error {
+  constructor(message: string) { super(message); this.name = "RuntimeUnavailableBeforeEffectError"; }
+}
+
+/** Worker acknowledged an effectful call before transport/runtime loss. */
+export class RuntimeMutationEffectUnknownError extends Error {
+  constructor(message: string, cause?: unknown) { super(message); this.name = "RuntimeMutationEffectUnknownError"; this.cause = cause; }
+}
+
 export class RuntimeUnknownToolError extends Error {
   constructor(readonly toolName: string) {
     super(`Unknown tool: ${toolName}`);
@@ -181,7 +191,7 @@ export class RuntimeUnknownToolError extends Error {
 }
 
 export class RuntimeModelNotFoundError extends Error {
-  constructor(provider: string, modelId: string) {
+  constructor(readonly provider: string, readonly modelId: string) {
     super(`Pi model not found or unavailable: ${provider}/${modelId}`);
     this.name = "RuntimeModelNotFoundError";
   }
@@ -278,14 +288,14 @@ export interface RuntimeSession {
   newSession?(operationId: string, parentSession?: string): Promise<RuntimeReplacementResult>;
   switchSession?(operationId: string, sessionFile: string, trust: RuntimeProjectTrust): Promise<RuntimeReplacementResult>;
   fork?(operationId: string, entryId: string, position: "before" | "at", kind: "fork" | "clone"): Promise<RuntimeForkResult>;
-  setSessionName?(name: string): string | undefined;
+  setSessionName?(name: string): string | undefined | Promise<string | undefined>;
   compact?(customInstructions?: string): Promise<RuntimeCompactionResult>;
   reload?(operationId: string): Promise<RuntimeReplacementResult>;
   selectModel(provider: string, modelId: string): Promise<RuntimeModelState>;
   setThinkingLevel(level: RuntimeThinkingLevel): Promise<RuntimeModelState>;
   getModelState(): RuntimeModelState;
   getMetrics(): RuntimeSessionMetrics;
-  clearQueue(): ClearedRuntimeQueue;
+  clearQueue(): ClearedRuntimeQueue | Promise<ClearedRuntimeQueue>;
   abort(): Promise<void>;
   waitForIdle(): Promise<void>;
   dispose(): Promise<void>;

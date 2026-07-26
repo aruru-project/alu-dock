@@ -196,6 +196,7 @@ test("catalog and wire facts share lifecycle invariants including active failed 
   assert.throws(() => validateCatalogRecord(record("bad-admission", { admissionPending: true })), /Admission intent/);
   assert.throws(() => validateCatalogRecord(record("bad-terminal", { lifecycle: "stopped", execution: "unavailable", ownerHostEpoch: undefined, pendingCount: 1 })), /retains active/);
   assert.doesNotThrow(() => validateCatalogRecord(record("recoverable", { lifecycle: "runtime_error", execution: "unavailable", ownerHostEpoch: undefined, recoverySessionFile: "/tmp/recover.jsonl" })));
+  assert.doesNotThrow(() => validateCatalogRecord(record("worker-lost", { lifecycle: "runtime_error", execution: "unavailable", ownerHostEpoch: undefined, interruption: { reason: "replacement_failed", at: "2026-07-14T00:00:00.000Z" } })));
   assert.doesNotThrow(() => validateCatalogRecord(record("deferred-live", { recoverySessionFile: "/tmp/previous.jsonl" })));
   assert.throws(() => validateCatalogRecord(record("bad-recovery", { sessionFile: "/tmp/current.jsonl", recoverySessionFile: "/tmp/recover.jsonl" })), /Recovery session/);
   assert.doesNotThrow(() => validateCatalogRecord(record("fork-intent", {

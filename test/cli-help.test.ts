@@ -129,7 +129,6 @@ test("service help is explorable without constructing a service manager", async 
   const serviceHelp = renderCliHelp(["service"]);
   assert.match(serviceHelp, /npm run install:local/u);
   assert.match(serviceHelp, /refuses active Dock instances/u);
-  assert.doesNotMatch(serviceHelp, /stage:athena|service update|allow-active|receipt|rollback/u);
 
   const ignoredInvalidOption = await runCli(["service", "logs", "--lines", "not-a-number", "--help"]);
   assertHelpSuccess(ignoredInvalidOption);

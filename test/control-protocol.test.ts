@@ -79,6 +79,15 @@ function validSnapshot(): Record<string, unknown> {
   };
 }
 
+test("Worker loss preserves the existing closed Protocol V2 interruption enum", () => {
+  const unavailable = {
+    ...validSnapshot(), lifecycle: "runtime_error", execution: "unavailable", reopenable: true,
+    ownerHostEpoch: undefined, interruption: { reason: "replacement_failed", at: "2026-07-14T00:00:00.000Z" },
+  };
+  assert.equal(parseStatusResult({ instance: unavailable }).instance.interruption?.reason, "replacement_failed");
+  assert.throws(() => parseStatusResult({ instance: { ...unavailable, interruption: { reason: "runtime_lost", at: "2026-07-14T00:00:00.000Z" } } }), /interruption.reason/);
+});
+
 function validEvent(type = "message.delta", data: Record<string, unknown> = { messageId: "m1", block: "text", delta: "hello" }): Record<string, unknown> {
   return { scope: "instance", sequence: 1, instanceId: "i1", runtimeGeneration: 1, occurredAt: "2026-07-14T00:00:00.000Z", type, data };
 }

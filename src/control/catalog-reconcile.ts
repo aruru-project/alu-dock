@@ -132,6 +132,7 @@ export function catalogSnapshotFromRecord(
 
 export function catalogReopenSessionFile(record: CatalogInstanceRecord): string | undefined {
   if (record.lifecycle !== "host_lost" && record.lifecycle !== "runtime_error") return undefined;
+  if (record.ownerReleaseUnconfirmed) return undefined;
   return record.recoverySessionFile ?? record.sessionFile;
 }
 
@@ -151,34 +152,13 @@ function normalizePriorLiveRecord(
     || record.admissionPending
     || record.pendingCount > 0
     || record.replacement !== undefined;
-  if (record.stopRequestedAt !== undefined) {
-    const stopped: CatalogInstanceRecord = {
-      ...structuredClone(record),
-      lifecycle: "stopped",
-      execution: "unavailable",
-      lastRun: busy ? "interrupted" : record.lastRun,
-      admissionPending: false,
-      pendingCount: 0,
-      updatedAt,
-    };
-    delete stopped.ownerHostEpoch;
-    delete stopped.activeCommandId;
-    delete stopped.admissionOperationId;
-    delete stopped.replacement;
-    delete stopped.recoverySessionFile;
-    delete stopped.lastKnown;
-    delete stopped.interruption;
-    delete stopped.stopRequestedAt;
-    delete stopped.shutdownRequestedAt;
-    return stopped;
-  }
-
   const recoverySessionFile = record.replacement?.previousSessionFile
     ?? record.recoverySessionFile
     ?? record.sessionFile;
+  const ownerReleaseUnconfirmed = record.stopRequestedAt !== undefined || record.shutdownRequestedAt !== undefined;
   const normalized: CatalogInstanceRecord = {
     ...structuredClone(record),
-    lifecycle: "host_lost",
+    lifecycle: ownerReleaseUnconfirmed ? "runtime_error" : "host_lost",
     execution: "unavailable",
     lastRun: busy ? "interrupted" : record.lastRun,
     admissionPending: false,
@@ -190,11 +170,14 @@ function normalizePriorLiveRecord(
       pendingCount: record.pendingCount,
     },
     interruption: {
-      reason: record.shutdownRequestedAt === undefined ? "host_crash" : "host_shutdown",
+      reason: ownerReleaseUnconfirmed ? "replacement_failed" : "host_crash",
       at: updatedAt,
     },
     ...(recoverySessionFile === undefined ? {} : { recoverySessionFile }),
-    lastError: "Previous Alu Dock Host ended; explicitly reopen to continue this session context",
+    ...(ownerReleaseUnconfirmed ? { ownerReleaseUnconfirmed: true as const } : {}),
+    lastError: ownerReleaseUnconfirmed
+      ? "Previous runtime owner release was not confirmed; this instance cannot be reopened"
+      : "Previous Alu Dock Host ended; explicitly reopen to continue this session context",
     updatedAt,
   };
   delete normalized.ownerHostEpoch;

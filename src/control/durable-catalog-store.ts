@@ -142,7 +142,7 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
     "runtimeGeneration", "ownerHostEpoch", "piSessionId", "sessionFile", "model",
     "thinkingLevel", "activeCommandId", "admissionPending", "admissionOperationId",
     "pendingCount", "replacement", "recoverySessionFile", "lastKnown", "interruption",
-    "stopRequestedAt", "shutdownRequestedAt", "lastError", "createdAt", "updatedAt",
+    "stopRequestedAt", "shutdownRequestedAt", "ownerReleaseUnconfirmed", "lastError", "createdAt", "updatedAt",
   ], field);
   const modelValue = value.model === undefined ? undefined : object(value.model, `${field}.model`);
   if (modelValue) exact(modelValue, ["provider", "id"], `${field}.model`);
@@ -192,10 +192,16 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
     } }),
     ...(value.stopRequestedAt === undefined ? {} : { stopRequestedAt: timestamp(value.stopRequestedAt, `${field}.stopRequestedAt`) }),
     ...(value.shutdownRequestedAt === undefined ? {} : { shutdownRequestedAt: timestamp(value.shutdownRequestedAt, `${field}.shutdownRequestedAt`) }),
+    ...(value.ownerReleaseUnconfirmed === undefined ? {} : {
+      ownerReleaseUnconfirmed: true as const,
+    }),
     ...(value.lastError === undefined ? {} : { lastError: text(value.lastError, `${field}.lastError`, 2_048) }),
     createdAt: timestamp(value.createdAt, `${field}.createdAt`),
     updatedAt: timestamp(value.updatedAt, `${field}.updatedAt`),
   };
+  if (value.ownerReleaseUnconfirmed !== undefined && boolean(value.ownerReleaseUnconfirmed, `${field}.ownerReleaseUnconfirmed`) !== true) {
+    throw new Error(`${field}.ownerReleaseUnconfirmed must be true when present`);
+  }
   return record;
 }
 

@@ -55,6 +55,7 @@ export interface CatalogInstanceRecord {
   interruption?: CatalogInterruption;
   stopRequestedAt?: string;
   shutdownRequestedAt?: string;
+  ownerReleaseUnconfirmed?: true;
   lastError?: string;
   createdAt: string;
   updatedAt: string;
@@ -210,6 +211,9 @@ export function validateCatalogRecord(record: CatalogInstanceRecord): void {
     timestamp(record.shutdownRequestedAt, "Shutdown intent timestamp");
   }
   if (record.stopRequestedAt !== undefined && record.shutdownRequestedAt !== undefined) throw new Error("Stop and Host-shutdown intents are mutually exclusive");
+  if (record.ownerReleaseUnconfirmed !== undefined && (record.ownerReleaseUnconfirmed !== true || record.lifecycle !== "runtime_error")) {
+    throw new Error("Unconfirmed owner release requires a runtime-error lifecycle");
+  }
   if (record.lastError !== undefined) requiredBoundedText(record.lastError, 2_048, "Catalog last error");
 }
 

@@ -46,6 +46,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
   clearQueueCalls = 0;
   abortError: Error | undefined;
   disposeCalls = 0;
+  disposeError: Error | undefined;
   promptCalls = 0;
   promptMessages: string[] = [];
   modelMutationCalls = 0;
@@ -436,6 +437,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
       block.entered.resolve();
       await block.release.promise;
     }
+    if (this.disposeError) throw this.disposeError;
   }
 
   drainNextQueuedWithoutMessageStart(): string | undefined {

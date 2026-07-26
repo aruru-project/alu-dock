@@ -6,7 +6,7 @@ import {
   InvalidTreeCursorError,
   RuntimeEffectUnknownError,
 } from "../core/managed-instance.js";
-import { RuntimeCompactionKnownFailureError } from "../core/runtime-session.js";
+import { RuntimeCompactionKnownFailureError, RuntimeUnavailableBeforeEffectError } from "../core/runtime-session.js";
 import type { DockRegistry } from "./dock-registry.js";
 import type { OperationLedger } from "./operation-ledger.js";
 import type { ControlRequest } from "./protocol.js";
@@ -126,6 +126,7 @@ async function runtimeMutation<T>(operationId: string, mutate: () => Promise<T>)
       || error instanceof MutationFaultedError
       || error instanceof RuntimeEffectUnknownError
       || error instanceof RuntimeCompactionKnownFailureError
+      || error instanceof RuntimeUnavailableBeforeEffectError
       || error instanceof InstanceNotActiveError
       || error instanceof InstanceBusyError
       || error instanceof InstanceAdmissionPendingError

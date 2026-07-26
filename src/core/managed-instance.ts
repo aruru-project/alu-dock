@@ -24,8 +24,10 @@ import {
 } from "./extension-ui-broker.js";
 import {
   RuntimeCompactionKnownFailureError,
+  RuntimeMutationEffectUnknownError,
   RuntimeQueueRejectedBeforeEffectError,
   RuntimeSettingsWriteError,
+  RuntimeUnavailableBeforeEffectError,
 } from "./runtime-session.js";
 import type {
   CommandDto,
@@ -218,6 +220,7 @@ interface WorkingCheckpoint {
   interruption: CatalogInstanceRecord["interruption"];
   stopRequestedAt: string | undefined;
   shutdownRequestedAt: string | undefined;
+  ownerReleaseUnconfirmed: boolean;
 }
 
 export class InstanceNotActiveError extends Error {
@@ -325,6 +328,7 @@ export class ManagedInstance {
   private interruptionValue: CatalogInstanceRecord["interruption"];
   private stopRequestedAt: string | undefined;
   private shutdownRequestedAt: string | undefined;
+  private ownerReleaseUnconfirmed = false;
   private transitionTail: Promise<void> = Promise.resolve();
   private historyRefreshTail: Promise<void> = Promise.resolve();
   private treeProjectionCache: { projection: ProjectedSessionTree; indexByEntryId: Map<string, number> } | undefined;
@@ -498,6 +502,7 @@ export class ManagedInstance {
       ...(this.interruptionValue === undefined ? {} : { interruption: cloneJson(this.interruptionValue) }),
       ...(this.stopRequestedAt === undefined ? {} : { stopRequestedAt: this.stopRequestedAt }),
       ...(this.shutdownRequestedAt === undefined ? {} : { shutdownRequestedAt: this.shutdownRequestedAt }),
+      ...(this.ownerReleaseUnconfirmed ? { ownerReleaseUnconfirmed: true as const } : {}),
       ...(snapshot.lastError === undefined ? {} : { lastError: snapshot.lastError }),
       createdAt: snapshot.createdAt,
       updatedAt: snapshot.updatedAt,
@@ -537,9 +542,51 @@ export class ManagedInstance {
             this.touch(shutdownRequestedAt);
           },
         ));
-      } catch (error) {
-        await this.drainRuntimeWithoutCatalog();
-        throw error;
+      } catch (intentError) {
+        const lastKnown = this.currentLastKnownState();
+        const recoverySessionFile = this.replacementIntent?.previousSessionFile
+          ?? this.recoverySessionFile
+          ?? this.durableSessionFileValue;
+        try {
+          await this.drainRuntimeWithoutCatalog();
+        } catch (disposalError) {
+          // The shutdown intent did not become authoritative and owner release
+          // also could not be proven. Commit a distinct post-effect quarantine
+          // so a later Host can never mistake this record for an ordinary,
+          // reopenable crash recovery.
+          const timestamp = this.timestamp();
+          this.catalogAdmissionOperationId = undefined;
+          this.replacementIntent = undefined;
+          this.recoverySessionFile = recoverySessionFile;
+          this.lastKnownValue = lastKnown;
+          this.interruptionValue = { reason: "replacement_failed", at: timestamp };
+          this.stopRequestedAt = undefined;
+          this.shutdownRequestedAt = undefined;
+          this.ownerReleaseUnconfirmed = true;
+          this.state.lifecycle = "runtime_error";
+          this.state.execution = "unavailable";
+          this.state.compacting = false;
+          this.runtimeCompactingObserved = false;
+          this.clearDeferredStartAttribution();
+          if (lastKnown.lifecycle === "stopping" || lastKnown.execution === "running" || lastKnown.pendingCount > 0 || lastKnown.activeCommandId !== undefined) this.state.lastRun = "interrupted";
+          this.state.activeCommandId = undefined;
+          this.state.pendingSteering = 0;
+          this.state.pendingFollowUp = 0;
+          this.state.lastError = "Previous runtime owner release was not confirmed; this instance cannot be reopened";
+          this.touch(timestamp);
+          try {
+            await this.catalogPort.commit(this.catalogRecord(), {
+              kind: "host.shutdown.owner_unconfirmed",
+              effect: "post_effect",
+              instanceId: this.id,
+            });
+            this.committedSnapshotValue = this.workingSnapshot();
+          } catch (quarantineError) {
+            throw new AggregateError([intentError, disposalError, quarantineError], "Failed to persist unconfirmed Worker owner quarantine");
+          }
+          throw new AggregateError([intentError, disposalError], "Worker owner release was not confirmed and the instance was quarantined");
+        }
+        throw intentError;
       }
 
       this.hostDrainActive = true;
@@ -596,9 +643,11 @@ export class ManagedInstance {
     const admission = this.pendingAdmission;
     this.pendingAdmission = undefined;
     admission?.release();
-    try { this.clearRuntimeQueueOnce(); } catch { /* Best-effort non-catalog drain. */ }
+    try { await this.clearRuntimeQueueOnce(); } catch { /* Best-effort non-catalog drain. */ }
     try { await this.abortRuntimeOnce(); } catch { /* Best-effort non-catalog drain. */ }
-    try { await this.disposeRuntimeOnce(); } catch { /* Host reports the fatal catalog fault. */ }
+    // A failed reap must remain visible to the caller. Publishing host_lost or
+    // stopped after this point could admit a second owner for the same session.
+    await this.disposeRuntimeOnce();
   }
 
   private workingSnapshot(): InstanceSnapshot {
@@ -612,7 +661,8 @@ export class ManagedInstance {
       execution: this.state.execution,
       compacting: this.state.compacting,
       lastRun: this.state.lastRun,
-      reopenable: (this.state.lifecycle === "host_lost" || this.state.lifecycle === "runtime_error")
+      reopenable: !this.ownerReleaseUnconfirmed
+        && (this.state.lifecycle === "host_lost" || this.state.lifecycle === "runtime_error")
         && (this.recoverySessionFile !== undefined || this.durableSessionFileValue !== undefined),
       runtimeGeneration: this.runtimeGeneration,
       ownerHostEpoch: this.state.lifecycle === "active" || this.state.lifecycle === "stopping" ? this.hostEpoch : undefined,
@@ -868,6 +918,9 @@ export class ManagedInstance {
         () => this.touch(),
       ));
       return projected;
+    } catch (error) {
+      if (error instanceof RuntimeMutationEffectUnknownError) throw new RuntimeEffectUnknownError(operationId, error);
+      throw error;
     } finally {
       this.endConfiguration();
     }
@@ -888,6 +941,7 @@ export class ManagedInstance {
       ));
       return setting;
     } catch (error) {
+      if (error instanceof RuntimeMutationEffectUnknownError) throw new RuntimeEffectUnknownError(operationId, error);
       if (error instanceof RuntimeSettingsWriteError) {
         if (error.mutationApplied && error.setting !== "model" && error.setting !== "thinking") {
           const current = await this.session.getSettings().catch(() => undefined);
@@ -993,7 +1047,7 @@ export class ManagedInstance {
       this.sessionNameOperationId = operationId;
       this.receiptBoundaryOperationId = operationId;
       runtimeCalled = true;
-      const actualName = this.session.setSessionName(name);
+      const actualName = await this.session.setSessionName(name);
       await this.closeRuntimeOperationBoundary(operationId);
       if (this.nameValue !== actualName) throw new Error("Runtime completed session naming without publishing session_info_changed");
     } catch (error) {
@@ -1057,6 +1111,7 @@ export class ManagedInstance {
       ));
       return state;
     } catch (error) {
+      if (error instanceof RuntimeMutationEffectUnknownError) throw new RuntimeEffectUnknownError(operationId, error);
       if (error instanceof RuntimeSettingsWriteError) {
         if (error.mutationApplied) {
           const state = this.session.getModelState();
@@ -1086,6 +1141,7 @@ export class ManagedInstance {
       ));
       return state;
     } catch (error) {
+      if (error instanceof RuntimeMutationEffectUnknownError) throw new RuntimeEffectUnknownError(operationId, error);
       if (error instanceof RuntimeSettingsWriteError) {
         if (error.mutationApplied) {
           const state = this.session.getModelState();
@@ -1392,6 +1448,13 @@ export class ManagedInstance {
     }).catch(async (error: unknown) => {
       const messageText = safeWireText(errorMessage(error), 2_048, "Sensitive command error omitted");
       if (preflightStatus !== "accepted") {
+        if (error instanceof RuntimeMutationEffectUnknownError) {
+          this.catalogAdmissionOperationId = undefined;
+          await this.flushAdmissionRuntimeEvents().catch(() => {});
+          if (!receiptSettled) { receiptSettled = true; rejectReceipt(new RuntimeEffectUnknownError(commandId, error)); }
+          release();
+          return;
+        }
         await rejectBeforeRun(error, "preflight_failed");
         return;
       }
@@ -1943,7 +2006,7 @@ export class ManagedInstance {
 
       this.receiptBoundaryOperationId = operationId;
       try {
-        const cleared = this.session.clearQueue();
+        const cleared = await this.session.clearQueue();
         await this.closeRuntimeOperationBoundary(operationId);
         const hostDeferred = pendingBefore.filter((item) => item.phase === "host_deferred");
         const selection = selectClearedQueueMessages(
@@ -1999,7 +2062,7 @@ export class ManagedInstance {
       } catch (error) {
         try { await this.closeRuntimeOperationBoundary(operationId); }
         catch (transitionError) { throw transitionError; }
-        if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError) throw error;
+        if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError || error instanceof RuntimeUnavailableBeforeEffectError) throw error;
         throw new RuntimeEffectUnknownError(operationId, error);
       } finally {
         if (this.receiptBoundaryOperationId === operationId) this.receiptBoundaryOperationId = undefined;
@@ -2057,7 +2120,7 @@ export class ManagedInstance {
       } catch (error) {
         try { await this.closeRuntimeOperationBoundary(operationId); }
         catch (transitionError) { throw transitionError; }
-        if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError) throw error;
+        if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError || error instanceof RuntimeUnavailableBeforeEffectError) throw error;
         throw new RuntimeEffectUnknownError(operationId, error);
       } finally {
         if (this.receiptBoundaryOperationId === operationId) this.receiptBoundaryOperationId = undefined;
@@ -2082,7 +2145,7 @@ export class ManagedInstance {
       if (configurationBoundary) await configurationBoundary;
       await this.transitionTail;
     } catch (error) {
-      if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError) throw error;
+      if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError || error instanceof RuntimeUnavailableBeforeEffectError) throw error;
       throw new RuntimeEffectUnknownError(operationId, error);
     } finally {
       this.commandAbortPending = false;
@@ -2100,7 +2163,7 @@ export class ManagedInstance {
       await this.session.abort();
       await this.configurationBoundary;
     } catch (error) {
-      if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError) throw error;
+      if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError || error instanceof RuntimeUnavailableBeforeEffectError) throw error;
       throw new RuntimeEffectUnknownError(operationId, error);
     } finally {
       this.commandAbortPending = false;
@@ -2215,7 +2278,7 @@ export class ManagedInstance {
     }
 
     try {
-      const cleared = this.clearRuntimeQueueOnce();
+      const cleared = await this.clearRuntimeQueueOnce();
       clearedCounts = { steering: cleared.steering.length, followUp: cleared.followUp.length };
     } catch (error) {
       captureCleanupError("clearQueue", error);
@@ -2245,7 +2308,12 @@ export class ManagedInstance {
     await this.transitionTail;
 
     try { await this.disposeRuntimeOnce(); }
-    catch (error) { captureCleanupError("dispose", error); }
+    catch (error) {
+      captureCleanupError("dispose", error);
+      // Keep lifecycle=stopping and the old owner claim. A stopped record would
+      // be continuable even though the Worker process tree may still exist.
+      throw new RuntimeEffectUnknownError(operationId, error);
+    }
 
     await this.enqueueTransition(() => this.commitCatalogTransition(
       { kind: "instance.stop.complete", effect: "post_effect", operationId, instanceId: this.id },
@@ -2296,10 +2364,10 @@ export class ManagedInstance {
     return receipt;
   }
 
-  private clearRuntimeQueueOnce(): ClearedRuntimeQueue {
+  private async clearRuntimeQueueOnce(): Promise<ClearedRuntimeQueue> {
     if (this.runtimeQueueClearAttempted) return this.runtimeClearedQueue;
     this.runtimeQueueClearAttempted = true;
-    this.runtimeClearedQueue = this.session.clearQueue();
+    this.runtimeClearedQueue = await this.session.clearQueue();
     return this.runtimeClearedQueue;
   }
 
@@ -2404,6 +2472,7 @@ export class ManagedInstance {
       interruption: this.interruptionValue ? cloneJson(this.interruptionValue) : undefined,
       stopRequestedAt: this.stopRequestedAt,
       shutdownRequestedAt: this.shutdownRequestedAt,
+      ownerReleaseUnconfirmed: this.ownerReleaseUnconfirmed,
     };
   }
 
@@ -2434,6 +2503,7 @@ export class ManagedInstance {
     this.interruptionValue = checkpoint.interruption;
     this.stopRequestedAt = checkpoint.stopRequestedAt;
     this.shutdownRequestedAt = checkpoint.shutdownRequestedAt;
+    this.ownerReleaseUnconfirmed = checkpoint.ownerReleaseUnconfirmed;
   }
 
   private runtimeDurableSessionFile(): string | undefined {
@@ -2635,6 +2705,9 @@ export class ManagedInstance {
       try { result = await replace(); }
       catch (error) {
         await this.closeRuntimeOperationBoundary(operationId);
+        if (error instanceof RuntimeMutationEffectUnknownError) {
+          throw new RuntimeEffectUnknownError(operationId, error);
+        }
         if (this.replacementIntent) {
           await this.enqueueTransition(() => this.commitCatalogTransition(
             { kind: `session.${kind}.failed`, effect: "post_effect", operationId, instanceId: this.id },
@@ -2909,11 +2982,13 @@ export class ManagedInstance {
       }, () => this.appendEvent("session.info_changed", { name }));
       return;
     }
-    if (event.type === "dock_runtime_error") {
+    if (event.type === "dock_runtime_error" || event.type === "dock_runtime_lost") {
       void this.extensionUi.failGenerationChange();
-      const error = boundedRuntimeString(event.error, 2_048, "Runtime replacement failed");
+      const runtimeLost = event.type === "dock_runtime_lost";
+      const error = boundedRuntimeString(event.error, 2_048, runtimeLost ? "Runtime worker was lost" : "Runtime replacement failed");
       const recoverySessionFile = optionalRuntimeString(event.recoverySessionFile, 16_384)
-        ?? this.replacementIntent?.previousSessionFile;
+        ?? this.replacementIntent?.previousSessionFile
+        ?? this.durableSessionFileValue;
       const lastKnown = this.currentLastKnownState();
       await this.commitCatalogTransition(context("session.runtime_error"), () => {
         this.replacementIntent = undefined;
@@ -2931,11 +3006,11 @@ export class ManagedInstance {
       }, () => {
         this.appendEvent("instance.runtime_error", {
           operationId: boundedRuntimeString(event.operationId, 128, "runtime-internal"),
-          kind: event.kind === "reload" || event.kind === "switch" || event.kind === "fork" || event.kind === "clone" ? event.kind : "new",
+          kind: runtimeLost ? "create" : event.kind === "reload" || event.kind === "switch" || event.kind === "fork" || event.kind === "clone" ? event.kind : "new",
           error,
           recoverySessionFile,
         });
-        this.appendStateEvent("runtime_replacement_failed");
+        this.appendStateEvent(runtimeLost ? "runtime_worker_lost" : "runtime_replacement_failed");
       });
       return;
     }
@@ -3156,12 +3231,14 @@ export class ManagedInstance {
       this.appendEvent("session.info_changed", { name });
       return;
     }
-    if (event.type === "dock_runtime_error") {
+    if (event.type === "dock_runtime_error" || event.type === "dock_runtime_lost") {
       void this.extensionUi.failGenerationChange();
+      const runtimeLost = event.type === "dock_runtime_lost";
       this.lastKnownValue = this.currentLastKnownState();
       this.interruptionValue = { reason: "replacement_failed", at: this.timestamp() };
       this.recoverySessionFile = optionalRuntimeString(event.recoverySessionFile, 16_384)
-        ?? this.replacementIntent?.previousSessionFile;
+        ?? this.replacementIntent?.previousSessionFile
+        ?? this.durableSessionFileValue;
       this.replacementIntent = undefined;
       this.state.lifecycle = "runtime_error";
       this.state.execution = "unavailable";
@@ -3169,15 +3246,15 @@ export class ManagedInstance {
       this.state.activeCommandId = undefined;
       this.state.pendingSteering = 0;
       this.state.pendingFollowUp = 0;
-      this.state.lastError = boundedRuntimeString(event.error, 2_048, "Runtime replacement failed");
+      this.state.lastError = boundedRuntimeString(event.error, 2_048, runtimeLost ? "Runtime worker was lost" : "Runtime replacement failed");
       this.touch();
       this.appendEvent("instance.runtime_error", {
         operationId: boundedRuntimeString(event.operationId, 128, "runtime-internal"),
-        kind: event.kind === "reload" || event.kind === "switch" || event.kind === "fork" || event.kind === "clone" ? event.kind : "new",
+        kind: runtimeLost ? "create" : event.kind === "reload" || event.kind === "switch" || event.kind === "fork" || event.kind === "clone" ? event.kind : "new",
         error: this.state.lastError,
         recoverySessionFile: this.recoverySessionFile,
       });
-      this.appendStateEvent("runtime_replacement_failed");
+      this.appendStateEvent(runtimeLost ? "runtime_worker_lost" : "runtime_replacement_failed");
       return;
     }
     if (event.type === "dock_extension_error") {
@@ -4039,6 +4116,7 @@ function isKnownMutationBoundaryError(error: unknown): boolean {
     || error instanceof CatalogWriteError
     || error instanceof MutationFaultedError
     || error instanceof RuntimeEffectUnknownError
+    || error instanceof RuntimeUnavailableBeforeEffectError
     || error instanceof RuntimeCompactionKnownFailureError;
 }
 

@@ -11,6 +11,7 @@ import { FileCatalogStore } from "../src/control/durable-catalog-store.js";
 import {
   CatalogOperationRecordedError,
   DockRegistry,
+  InstanceNotReopenableError,
   InstanceUnavailableError,
   type InstanceFactoryInput,
 } from "../src/control/dock-registry.js";
@@ -206,6 +207,56 @@ test("graceful durable Host drain records host_lost rather than explicit stop", 
   assert.equal(record?.lifecycle, "host_lost");
   assert.equal(record?.shutdownRequestedAt, undefined);
   assert.equal(record?.lastKnown?.activeCommandId, "run-shutdown");
+});
+
+test("failed shutdown intent plus unconfirmed disposal is durably quarantined across restart", async () => {
+  const { cwd, catalogPath } = await fixturePath();
+  const baseStore = new FileCatalogStore(catalogPath);
+  let failShutdownIntent = true;
+  const faultingStore = {
+    path: baseStore.path,
+    load: () => baseStore.load(),
+    commit: async (...args: Parameters<FileCatalogStore["commit"]>) => {
+      const [, context] = args;
+      if (failShutdownIntent && context.kind === "host.shutdown.intent") {
+        failShutdownIntent = false;
+        throw new Error("injected shutdown intent failure");
+      }
+      await baseStore.commit(...args);
+    },
+  };
+  const runtimes: DelayedRuntimeSession[] = [];
+  const registry = new DockRegistry(
+    async (input) => createFixtureInstance(input, runtimes),
+    () => "dock-quarantine",
+    { hostEpoch: "quarantine-host", startedAt: "2026-07-15T03:00:00.000Z", catalogStore: faultingStore },
+  );
+  await registry.initializeCatalog();
+  await registry.create({ operationId: "create-quarantine", cwd });
+  runtimes[0]!.disposeError = new Error("owner release not confirmed");
+
+  await assert.rejects(registry.shutdownAllForHostDrain(), /failed durable Host shutdown/i);
+  const quarantined = (await baseStore.load())?.instances[0];
+  assert.equal(quarantined?.lifecycle, "runtime_error");
+  assert.equal(quarantined?.ownerReleaseUnconfirmed, true);
+
+  const restarted = new DockRegistry(
+    async () => { throw new Error("quarantined record must not construct a runtime"); },
+    () => "unused",
+    { hostEpoch: "quarantine-restart", startedAt: "2026-07-15T04:00:00.000Z", catalogStore: baseStore },
+  );
+  await restarted.initializeCatalog();
+  const snapshot = restarted.getSnapshot("dock-quarantine");
+  assert.equal(snapshot.lifecycle, "runtime_error");
+  assert.equal(snapshot.reopenable, false);
+  await assert.rejects(
+    restarted.reopen({ operationId: "unsafe-reopen", instanceId: "dock-quarantine" }),
+    InstanceNotReopenableError,
+  );
+  await assert.rejects(
+    restarted.reopen({ operationId: "unsafe-override", instanceId: "dock-quarantine", sessionFile: quarantined!.sessionFile! }),
+    InstanceNotReopenableError,
+  );
 });
 
 test("socket-first Host startup serves catalog-only snapshots and reopen over Protocol V2", async (context) => {

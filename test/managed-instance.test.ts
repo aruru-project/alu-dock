@@ -19,7 +19,9 @@ import {
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, ToolDto } from "../src/core/config-projection.js";
 import {
   RuntimeCompactionKnownFailureError,
+  RuntimeMutationEffectUnknownError,
   RuntimeQueueRejectedBeforeEffectError,
+  RuntimeUnavailableBeforeEffectError,
 } from "../src/core/runtime-session.js";
 import { DelayedRuntimeSession } from "./support/delayed-runtime-session.js";
 import type {
@@ -35,6 +37,51 @@ import type {
   RuntimeSessionMetrics,
   RuntimeThinkingLevel,
 } from "../src/core/runtime-session.js";
+
+test("worker-accepted runtime mutations preserve the caller operation ID as effect_unknown", async () => {
+  class AmbiguousMutationRuntime extends DelayedRuntimeSession {
+    override async setActiveTools(): Promise<ToolDto[]> { throw new RuntimeMutationEffectUnknownError("worker lost after acceptance"); }
+    override async updateSetting(): Promise<SettingDto> { throw new RuntimeMutationEffectUnknownError("worker lost after acceptance"); }
+    override async selectModel(): Promise<RuntimeModelState> { throw new RuntimeMutationEffectUnknownError("worker lost after acceptance"); }
+    override async setThinkingLevel(): Promise<RuntimeModelState> { throw new RuntimeMutationEffectUnknownError("worker lost after acceptance"); }
+    override async reload(): Promise<{ cancelled: boolean }> { throw new RuntimeMutationEffectUnknownError("worker lost after acceptance"); }
+  }
+  const instance = new ManagedInstance({ cwd: "/fixture/cwd", session: new AmbiguousMutationRuntime("ambiguous-worker") });
+  const cases: Array<[string, () => Promise<unknown>]> = [
+    ["tools-worker-loss", () => instance.setActiveTools(["read"], "tools-worker-loss")],
+    ["setting-worker-loss", () => instance.updateSetting({ key: "autoRetry", value: false }, "setting-worker-loss")],
+    ["model-worker-loss", () => instance.selectModel("fixture", "local", "model-worker-loss")],
+    ["thinking-worker-loss", () => instance.setThinkingLevel("low", "thinking-worker-loss")],
+    ["reload-worker-loss", () => instance.reloadSession("reload-worker-loss")],
+  ];
+  for (const [operationId, mutate] of cases) {
+    await assert.rejects(mutate(), (error: unknown) => error instanceof RuntimeEffectUnknownError && error.operationId === operationId);
+  }
+});
+
+test("pre-accept Worker loss stays runtime_unavailable for dequeue and abort", async () => {
+  class ClearUnavailableRuntime extends DelayedRuntimeSession {
+    override clearQueue(): ClearedRuntimeQueue { throw new RuntimeUnavailableBeforeEffectError("lost before clearQueue acceptance"); }
+  }
+  const dequeueInstance = new ManagedInstance({ cwd: "/fixture/cwd", session: new ClearUnavailableRuntime("clear-unavailable") });
+  await dequeueInstance.submit("start run", "auto", "run-before-dequeue");
+  await dequeueInstance.submit("queued follow-up", "followUp", "queued-before-dequeue");
+  await assert.rejects(
+    dequeueInstance.dequeue("dequeue-pre-effect"),
+    (error: unknown) => error instanceof RuntimeUnavailableBeforeEffectError,
+  );
+
+  class AbortUnavailableRuntime extends DelayedRuntimeSession {
+    override abort(): Promise<void> { return Promise.reject(new RuntimeUnavailableBeforeEffectError("lost before abort acceptance")); }
+  }
+  const abortRuntime = new AbortUnavailableRuntime("abort-unavailable");
+  const abortInstance = new ManagedInstance({ cwd: "/fixture/cwd", session: abortRuntime });
+  await abortInstance.submit("keep running", "auto", "running-before-abort");
+  await assert.rejects(
+    abortInstance.abort("abort-pre-effect"),
+    (error: unknown) => error instanceof RuntimeUnavailableBeforeEffectError,
+  );
+});
 
 test("tree pages reuse one projected revision and invalidate after a persisted entry", async () => {
   const session = new DelayedRuntimeSession("tree-cache");
@@ -1595,30 +1642,26 @@ test("agent_settled without an assistant outcome fails closed", async () => {
   assert.match(instance.snapshot().lastError ?? "", /without an assistant outcome/);
 });
 
-test("concurrent stop is idempotent and cleanup errors still reach stopped", async () => {
+test("concurrent stop stays non-reopenable when runtime disposal cannot confirm owner release", async () => {
   const session = new FakeRuntimeSession();
   session.clearQueueResult = { steering: ["s1"], followUp: ["f1", "f2"] };
   session.abortError = new Error("abort exploded");
   session.disposeError = new Error("dispose exploded");
   const instance = createInstance(session);
 
-  const [first, second] = await Promise.all([instance.stop("stop-a"), instance.stop("stop-b")]);
+  const [first, second] = await Promise.allSettled([instance.stop("stop-a"), instance.stop("stop-b")]);
 
-  assert.equal(first.stopped, true);
-  assert.equal(first.operationId, "stop-a");
-  assert.equal(first.alreadyStopped, false);
-  assert.equal(second.operationId, "stop-b");
-  assert.equal(second.alreadyStopped, true);
-  assert.deepEqual(first.cleanupErrors, [
-    "abort: abort exploded",
-    "dispose: dispose exploded",
-  ]);
-  assert.equal(instance.snapshot().lifecycle, "stopped");
+  assert.equal(first.status, "rejected");
+  assert.equal(second.status, "rejected");
+  if (first.status === "rejected") {
+    assert.equal(first.reason instanceof RuntimeEffectUnknownError, true);
+    assert.equal((first.reason as RuntimeEffectUnknownError).operationId, "stop-a");
+  }
+  assert.equal(instance.snapshot().lifecycle, "stopping");
+  assert.equal(instance.snapshot().reopenable, false);
   assert.equal(session.abortCalls, 1);
   assert.equal(session.disposeCalls, 1);
-  const cleared = instance.eventsSince().events.find((event) => event.type === "queue.cleared");
-  assert.equal(cleared?.data.steering, 1);
-  assert.equal(cleared?.data.followUp, 2);
+  assert.equal(instance.eventsSince().events.some((event) => event.type === "instance.stopped"), false);
 });
 
 test("observer exceptions and mutations cannot escape into the runtime listener chain", () => {

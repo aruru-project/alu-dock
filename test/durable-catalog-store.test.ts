@@ -52,10 +52,18 @@ test("durable catalog round-trips closed records with private atomic files", asy
   const { root, path } = await temporaryCatalog();
   const store = new FileCatalogStore(path);
   assert.equal(await store.load(), undefined);
-  const value = projection(1, [record("one")]);
+  const value = projection(1, [
+    record("one"),
+    record("worker-lost", {
+      lifecycle: "runtime_error", execution: "unavailable", ownerHostEpoch: undefined,
+      interruption: { reason: "replacement_failed", at: "2026-07-15T00:01:00.000Z" },
+      recoverySessionFile: "/tmp/worker-lost.jsonl",
+      ownerReleaseUnconfirmed: true,
+    }),
+  ]);
   await store.commit(value, { kind: "test", effect: "pre_effect" });
 
-  assert.deepEqual(await store.load(), value);
+  assert.deepEqual(await store.load(), JSON.parse(JSON.stringify(value)) as CatalogProjection);
   assert.equal((await lstat(join(root, "state"))).mode & 0o777, 0o700);
   assert.equal((await lstat(path)).mode & 0o777, 0o600);
   assert.deepEqual((await readdir(join(root, "state"))).sort(), ["catalog.json"]);
@@ -174,14 +182,17 @@ test("startup reconcile conservatively normalizes old live facts without a runti
   assert.equal(running?.replacement, undefined);
 
   const shutdown = result.projection.instances.find((item) => item.id === "shutdown");
-  assert.equal(shutdown?.lifecycle, "host_lost");
+  assert.equal(shutdown?.lifecycle, "runtime_error");
   assert.equal(shutdown?.lastRun, "failed");
-  assert.equal(shutdown?.interruption?.reason, "host_shutdown");
+  assert.equal(shutdown?.interruption?.reason, "replacement_failed");
+  assert.equal(shutdown?.ownerReleaseUnconfirmed, true);
+  assert.equal(catalogSnapshotFromRecord(shutdown as CatalogInstanceRecord, "new-host").reopenable, false);
 
   const stopped = result.projection.instances.find((item) => item.id === "stop");
-  assert.equal(stopped?.lifecycle, "stopped");
+  assert.equal(stopped?.lifecycle, "runtime_error");
   assert.equal(stopped?.execution, "unavailable");
-  assert.equal(stopped?.recoverySessionFile, undefined);
+  assert.equal(stopped?.ownerReleaseUnconfirmed, true);
+  assert.equal(catalogSnapshotFromRecord(stopped as CatalogInstanceRecord, "new-host").reopenable, false);
 
   const snapshot = catalogSnapshotFromRecord(running as CatalogInstanceRecord, "new-host");
   assert.equal(snapshot.reopenable, true);

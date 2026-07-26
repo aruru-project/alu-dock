@@ -9,7 +9,7 @@
 | Protocol/Client/Host request | `control-protocol`, `dock-control`, `cli-cross-client` |
 | Catalog/Registry | `catalog-transactions`, `durable-catalog-store`, `durable-registry` |
 | ManagedInstance mutation | `managed-instance`, `operation-ledger` |
-| Pi adapter | 对应Pi unit fixture + no-model-call real Pi smoke |
+| Pi adapter / Worker IPC | 对应Pi unit fixture + `worker-protocol` + no-model-call real双Worker smoke |
 | Pi dependency cohort | 跨版本breaking notes + exact pins/lockfile + 完整代码门禁 + no-model real Pi/PTY；目标model smoke另行授权 |
 | TUI projection/layout | 对应pure TUI test + PTY at 80×24 and 120×40 |
 | Session replacement/tree | generation/history tests + Pi tree/reopen real tests |
@@ -25,29 +25,17 @@ node --test dist/test/control-protocol.test.js dist/test/dock-control.test.js
 
 不要为每个字段重复完整build/test/audit；完成一个cohesive slice后统一运行。
 
-## 完整代码门禁
+## 常用检查
+
+按改动选择检查，不把它们串成固定的发布流水线：
 
 ```bash
-npm run check -- --pretty false
-npm test
-npm audit --audit-level=high
-git diff --check
+npm run check -- --pretty false   # 类型和编译边界
+npm test                          # 改动跨越多个模块时再跑完整测试
+git diff --check                 # 文本与补丁格式
 ```
 
-同时检查：
-
-```bash
-# 生产/测试不得使用Pi private subpath
-! rg '@earendil-works/pi-coding-agent/' src test scripts
-
-# TUI不得持有Pi runtime构造API
-! rg 'AgentSession|createAgentSession' src/tui
-
-# 仓库不得重建project settings guard
-test ! -e .pi/settings.json
-```
-
-`npm run build`必须先删除`dist`并生成clean build；当前`package.json`的`build`脚本已负责该动作。
+改 Pi 依赖时再运行 `npm audit` 并核对 exact pins；改 runtime 边界时再检查 TUI、Core 和 Control 没有直接导入 Pi SDK。`npm run build` 会先清理 `dist`。
 
 ## 按模块定位测试
 
@@ -79,6 +67,8 @@ test/ensure-host.test.ts
 ```text
 test/managed-instance.test.ts
 test/pi-runtime-host.test.ts
+test/worker-protocol.test.ts
+test/pi-workers-real.test.ts
 test/pi-stage3-real.test.ts
 test/pi-reopen-real.test.ts
 test/pi-tree-hooks-real.test.ts
@@ -89,7 +79,7 @@ test/pi-tool-result-normalizer.test.ts
 test/pi-network.test.ts
 ```
 
-Real Pi tests不得调用model；它们验证public API、session文件、resource loading、replacement与hooks。
+Real Pi tests不得调用model；它们验证public API、session文件、resource loading、replacement与hooks。Worker real gate还必须验证distinct PID/cwd、reverse Host identity capability、单Worker loss隔离、stuck dispose的process-group回收与Host IPC loss后的orphan watchdog。
 
 辅助脚本：
 
@@ -109,9 +99,9 @@ test/session-tree.test.ts
 test/fixtures/pty-tui-driver.py
 ```
 
-## 人类surface门禁
+## TUI 手工检查
 
-在请求用户验收前，由实现者亲自检查：
+改动 TUI surface 时，由实现者亲自检查与改动相关的场景：
 
 - 80×24与120×40；
 - long cwd/name、multiline input、tool output、tree/picker/dialog；
@@ -120,21 +110,10 @@ test/fixtures/pty-tui-driver.py
 - 无颜色、ANSI 16/256环境；
 - idle时无不必要animation timer或持续重绘。
 
-截图或文字receipt只能记录证据，不能替代真实PTY判断。
+截图或文字记录只能辅助检查，不能替代真实PTY判断。
 
-## 本地安装验证
+## 本地安装
 
-代码验证与安装彼此独立。`npm run install:local` 不运行测试，也不把测试结果保存为
-release receipt。修改安装或 service 代码时先运行 `local-install`、`user-service` focused
-测试；里程碑前再由开发者显式运行一次完整代码门禁。
+`npm run install:local` 不运行测试。修改安装或 service 代码时运行 `local-install`、`user-service` focused 测试；其他检查按本文件前面的改动路由选择。
 
-真实安装只在用户明确授权后、从 managed Host 外层执行：
-
-1. 确认 checkout clean committed；
-2. 确认没有 running/compaction/Queue/interaction/stopping 状态；idle instance 不阻塞；
-3. 运行 `npm run install:local`；确需中断 active work 时由用户显式追加 `-- --replace-active`；
-4. 核对 `~/.local/bin/aludock` 指向固定 npm prefix；
-5. 核对 `aludock service status` 的 MainPID、hello、hostEpoch 与 ready；
-6. 核对 catalog 记录仍存在。
-
-失败立即报告，不自动重跑完整测试；不得替用户擅自追加 `--replace-active`。
+只有用户明确要求时才从 managed Host 外执行安装。命令和常见问题见 [`docs/local-install.md`](local-install.md)，不要擅自追加 `--replace-active`。

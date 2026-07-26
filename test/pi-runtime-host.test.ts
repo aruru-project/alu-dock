@@ -15,7 +15,7 @@ import {
 import { CatalogTransactionCoordinator } from "../src/control/catalog-transactions.js";
 import { CatalogEffectUnknownError } from "../src/core/catalog.js";
 import { SETTING_KEYS } from "../src/core/config-projection.js";
-import { ManagedInstance } from "../src/core/managed-instance.js";
+import { ManagedInstance, RuntimeEffectUnknownError } from "../src/core/managed-instance.js";
 import {
   RuntimeCompactionKnownFailureError,
   RuntimeInvalidSettingValueError,
@@ -581,6 +581,21 @@ test("Pi runtime events expose useful built-in presentation without raw private 
   assert.equal("presentation" in (extensionResult ?? {}), false, "built-in adapters use exact names and never generalize extension details");
   assert.equal("details" in (extensionResult ?? {}), false);
   assert.doesNotMatch(JSON.stringify(extensionEvent), /private-extension-path|privatePayload/u);
+
+  initial.emit({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: [
+        { type: "text", text: "data:image/png;base64," + "A".repeat(256) },
+        { type: "image", data: "private-image-bytes", mimeType: "image/png" },
+      ],
+      stopReason: "stop",
+    },
+  });
+  const messageEvent = events.find((candidate) => candidate.type === "message_end");
+  assert.doesNotMatch(JSON.stringify(messageEvent), /data:image|private-image-bytes|AAAA/u);
+  assert.match(JSON.stringify(messageEvent), /Sensitive content omitted|Image bytes omitted/u);
   await host.dispose();
 });
 
@@ -1169,6 +1184,23 @@ test("cancelled replacement leaves binding and generation untouched", async () =
   assert.equal(initial.disposeCalls, 0);
   assert.equal(owner.candidate, undefined);
   await instance.stop("stop-1");
+});
+
+test("cancelled cross-project switch restores the Worker construction cwd", async () => {
+  const trace: string[] = [];
+  const cwdCalls: string[] = [];
+  const { host, owner } = await runtimeHost(trace, (runtime) => { runtime.mode = "cancel"; }, {
+    setProcessCwd: (cwd) => { cwdCalls.push(cwd); },
+  });
+  host.activateInitial();
+
+  assert.deepEqual(await host.switchSession("cancel-switch", "/sessions/target.jsonl", {
+    canonicalCwd: "/target",
+    projectTrusted: false,
+  }), { cancelled: true });
+  assert.deepEqual(cwdCalls, ["/project", "/target", "/project"]);
+  assert.equal(owner.candidate, undefined);
+  await host.dispose();
 });
 
 test("fork cancellation clears durable intent while fork factory failure preserves previous-session recovery", async () => {
@@ -1824,11 +1856,14 @@ test("rejected runtime disposal still invalidates every binding", async () => {
   const instance = new ManagedInstance({ cwd: "/project", session: host });
   host.activateInitial();
 
-  const receipt = await instance.stop("stop-1");
-  assert.deepEqual(receipt.cleanupErrors, ["dispose: shutdown hook failed"]);
+  await assert.rejects(
+    instance.stop("stop-1"),
+    (error: unknown) => error instanceof RuntimeEffectUnknownError && error.operationId === "stop-1",
+  );
   assert.equal(initial.unsubscribeCalls, 1);
   assert.equal(owner.disposeCalls, 1);
-  assert.equal(instance.snapshot().lifecycle, "stopped");
+  assert.equal(instance.snapshot().lifecycle, "stopping");
+  assert.equal(instance.snapshot().reopenable, false);
 });
 
 test("stop awaits the runtime owner shutdown before reporting stopped", async () => {

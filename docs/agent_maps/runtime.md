@@ -9,24 +9,30 @@ ManagedInstance状态机、RuntimeSession port、Pi SDK adapter、session replac
 ```text
 cli serve
   └── createPiProjectTrustCoordinator()
-        └── DockRegistry resolves trust + canonical cwd
+        └── DockRegistry resolves trust + canonical cwd + session owner
               └── createPiInstance()
-                    ├── validate/open Pi session file (optional)
-                    ├── ExtensionUiBroker
-                    └── createPiRuntimeHost()
-                          └── Pi public SDK objects
+                    ├── ExtensionUiBroker (Host authority)
+                    ├── WorkerRuntimeSession / PiWorkerProcess
                     └── ManagedInstance(RuntimeSession port)
+                          │ private, bounded Worker IPC
+                          ▼
+                    pi-worker-entry (cwd = project)
+                          ├── validate/open Pi session file (optional)
+                          ├── WorkerExtensionUiEndpoint
+                          └── createPiRuntimeHost()
+                                └── Pi public SDK objects + extensions
 
 DockHost / session-command-service
   └── ManagedInstance serialized transaction
         └── RuntimeSession interface
-              └── PiRuntimeHost
-                    └── AgentSessionRuntime / AgentSession / SessionManager
+              └── WorkerRuntimeSession proxy
+                    └── PiRuntimeHost inside one OS Worker
 
 Pi runtime event
-  └── PiRuntimeHost binding token
-        └── ManagedInstance projection + generation fence
-              └── closed DockEvent / snapshot
+  └── PiRuntimeHost binding token in Worker
+        └── ordered generation-bound IPC event/cache
+              └── ManagedInstance projection + catalog boundary
+                    └── closed DockEvent / snapshot
 ```
 
 ## 文件owner
@@ -40,9 +46,15 @@ Pi runtime event
 | `src/core/managed-instance.ts` | lifecycle、admission、queue、mutation transaction、generation、event/state唯一owner | `managed-instance` |
 | `src/core/session-tree.ts` | runtime tree validation/projection、binary safety、generation-bound revision/pagination | `session-tree`, Pi tree tests |
 | `src/core/extension-ui-broker.ts` | bounded text interaction、widget viewport/render bridge、controller lease、timeout/cancel/tombstone | `extension-ui-broker` |
-| `src/pi/create-pi-instance.ts` | trust之后的runtime composition、安全reopen、ManagedInstance构造 | Pi reopen/stage tests |
+| `src/pi/create-pi-instance.ts` | trust之后的Host/Worker composition与ManagedInstance构造 | Worker/Pi real tests |
+| `src/pi/pi-session-target.ts` | Worker构造Pi前的bounded JSONL header preflight；构造后用public SessionManager复核 | Worker/Pi reopen tests |
+| `src/pi/worker-protocol.ts` | closed/versioned/bounded双向IPC、identity/generation fence与typed errors | `worker-protocol` |
+| `src/pi/worker-process.ts` | 每instance独立进程组、deadline、TERM/KILL与direct-child reap | `pi-workers-real` |
+| `src/pi/worker-runtime-session.ts` | Host-side RuntimeSession proxy、cache/event ordering、effect custody、loss publication | Worker/control tests |
+| `src/pi/pi-worker-entry.ts` | Worker bootstrap、Host identity capability、Pi composition与orphan watchdog | `pi-workers-real` |
+| `src/pi/worker-extension-ui.ts` | Worker-side Pi UI promises/component rendering与generation fence | extension UI real tests |
 | `src/pi/session-inventory.ts` | runtime-free session metadata index；header/name增量扫描与可重建cache | `pi-session-inventory`, `dock-control` |
-| `src/pi/pi-runtime-host.ts` | 唯一生产Pi runtime adapter、session binding、Git observer lifecycle与replacement | `pi-runtime-host`, Pi real tests |
+| `src/pi/pi-runtime-host.ts` | Worker内唯一生产Pi runtime adapter、session binding、Git observer lifecycle与replacement | `pi-runtime-host`, Pi real tests |
 | `src/pi/git-branch-observer.ts` | trust后Host-owned Git branch cache、worktree/reftable watches、bounded shell-free refresh | `git-branch-observer` |
 | `src/pi/pi-settings-adapter.ts` | Pi native setting projection、validation、setter/flush errors | `pi-runtime-host` |
 | `src/pi/pi-extension-ui-adapter.ts` | Pi ExtensionUIContext → ExtensionUiBroker text surface | extension UI tests |
@@ -53,21 +65,28 @@ Pi runtime event
 
 ```text
 DockRegistry
-  owns: instance membership, hostEpoch, durable catalog projection
+  owns: instance membership, hostEpoch, durable catalog projection, session-file owner admission
 
-ManagedInstance
+ManagedInstance (Host)
   owns: lifecycle/execution, admission, pending queue, active operation,
         runtimeGeneration, event sequence/history projection, replacement transaction
 
-PiRuntimeHost
-  owns: concrete Pi SDK objects, active AgentSession binding, resources/settings bridge,
-        current-binding Git observer and stale-callback fence
+WorkerRuntimeSession / PiWorkerProcess (Host)
+  owns: Worker identity/incarnation, IPC ordering/deadlines, cached closed runtime projection,
+        process-group termination/reap and conservative runtime-loss publication
+
+PiRuntimeHost (one instance Worker)
+  owns: concrete Pi SDK objects, active AgentSession binding, extension lifecycle,
+        resources/settings bridge, current-binding Git observer and stale-callback fence
+
+ExtensionUiBroker (Host) / WorkerExtensionUiEndpoint (Worker)
+  own respectively: interaction/controller/projection authority / Pi promises and components
 
 TUI
   owns only: viewport/search/focus/tool-fold/local transient UI state
 ```
 
-Core不得import `@earendil-works/pi-coding-agent`。生产Pi对象不得离开`src/pi/*`。
+Core不得import `@earendil-works/pi-coding-agent`。Pi SDK object、callback、`AbortSignal`、extension component与raw error不得离开Worker；生产代码仍只从Pi package root导入。
 
 ## Mutation transaction形状
 
@@ -95,7 +114,7 @@ Admission按能力分类，不用command-name例外：
 
 ## Session replacement
 
-`new`、`switch`、`fork`、`clone`、`reload`都由ManagedInstance管理generation rollover；PiRuntimeHost只执行mechanism并rebind当前session。
+`new`、`switch`、`fork`、`clone`、`reload`都由ManagedInstance管理generation rollover；Worker内PiRuntimeHost只执行mechanism并rebind当前session，Host-side WorkerRuntimeSession在replacement event进入时同步推进IPC fence。
 
 ```text
 ManagedInstance replacement intent
@@ -109,7 +128,10 @@ ManagedInstance replacement intent
 - Dock instance ID保持不变。
 - previous Pi session file保持可恢复，不做隐式删除。
 - branch-summary cancellation使用Pi公开`abortBranchSummary()`路径；不能假设agent abort覆盖它。
-- Host loss后的reopen是Registry创建fresh runtime transaction，不恢复旧queue/Promise/tool effect。
+- Host loss后的reopen是Registry创建fresh Worker transaction，不恢复旧queue/Promise/tool effect。
+- Worker identity固定为`hostEpoch + instanceId + runtimeGeneration + workerIncarnation`；replacement推进generation但不换Dock instance，stale frame/UI/callback被两端拒绝。
+- Worker异常、deadline或IPC loss先终止整个process group并确认direct child reaped，再通过私有`dock_runtime_lost`推进runtime error与recovery metadata；对外Protocol V2继续使用既有`replacement_failed` interruption值。无法确认reap时durable catalog写入`ownerReleaseUnconfirmed` quarantine并保持non-reopenable，显式session-file override也不得绕过。
+- Host→Worker mutation由child在调用Pi前发送`accepted` custody frame；accepted前失联返回`runtime_unavailable`，accepted后失联保留调用者operation ID并返回`effect_unknown`，两者都不自动重放。
 - 每个active/staged binding拥有独立Git observer；promotion把candidate branch作为`session.replaced` generation bootstrap，旧binding同步关闭watcher并fence callback。Git branch不进durable catalog。
 - Extension可在`agent_settled`后触发无client command ID的follow-on run（例如Sol guard compact后续跑）。它使用closed `run.started` identity `runtime-initiated`，仍完全由Host持有；fresh attach必须恢复其未完成tail，client detach/attach/read不得成为启动条件。
 - Pi会先await Extension的`agent_settled` handler、再向runtime subscriber发布`agent_settled`；handler内启动的`ctx.compact()`因此可能先发布`compaction_start`。已建立的compaction boundary必须保持`execution: running`与ephemeral snapshot `compacting: true`直到`compaction_end`，后到的run settlement只结算旧run，不得把instance降为idle；`compacting`不进入durable catalog。
@@ -119,7 +141,7 @@ ManagedInstance replacement intent
 
 | 需求 | 从这里开始 | 随后检查 |
 |---|---|---|
-| lifecycle/admission/queue/stop | `managed-instance.ts` | catalog port、DockHost error mapping、managed tests |
+| lifecycle/admission/queue/stop | `managed-instance.ts` | Worker control deadline、catalog port、DockHost error mapping、managed tests |
 | event/snapshot/history DTO | `instance-dto.ts` | Managed projection、Protocol parser、TUI reducer |
 | `/tree` round-trip | `runtime-session.ts`, `pi-runtime-host.ts`, `core/session-tree.ts` | Managed navigation transaction、Protocol、`tui/session-tree.ts`、real tree tests |
 | session new/resume/fork/clone/reload | `managed-instance.ts` | PiRuntimeHost binding、catalog replacement、generation tests |
@@ -127,7 +149,7 @@ ManagedInstance replacement intent
 | model/thinking/settings | `config-projection.ts`, `pi-settings-adapter.ts` | Managed commit/event、settings TUI |
 | resources/tools/commands | `pi-runtime-host.ts` | closed config DTO、startup/client smoke |
 | Git branch/footer context | `git-branch-observer.ts`, `pi-runtime-host.ts` | Managed snapshot/event、Protocol capability、TUI footer、normal/worktree/detached tests |
-| Extension UI / widget | `extension-ui-broker.ts` | Pi adapter、Protocol interaction、Work widget surface与TUI dialog |
+| Extension UI / widget | `extension-ui-broker.ts`, `worker-extension-ui.ts` | Pi adapter、Worker IPC、Protocol interaction、Work widget surface与TUI dialog |
 | tool telemetry classification | `pi-tool-result-normalizer.ts` | real extension result shape、normalizer tests |
 
 ## Pi API规则
@@ -153,7 +175,7 @@ ManagedInstance replacement intent
 - Admission catalog commit期间的runtime handoff保留最新1,000-event tail；发生overflow必须发布显式extension error并刷新authoritative history/metrics，不能继续声称事件流完整。涉及该路径的改动必须验证最终queue/run状态，而不只验证错误字符串。
 - Session metadata inventory逐root/directory/file报告bounded scan diagnostics；JSONL仍是authoritative，cache write/load失败不能把cache升级为真相源。
 - Extension widget仍最多200行、每行8,000字符，同时受256,000字符aggregate预算；超限整个widget拒绝并发布`extension.error`，不静默显示前缀。
-- Session tree采用complete bounded topology：100,000 node为接受边界，100,001明确失败；当前分页发生在完整projection之后。标准边界测试在本机约0.3秒完成，但超过此界限的Tree在V0.1不可用，不能自动丢节点伪装为完整树。
+- Session tree采用complete bounded topology：100,000 node为接受边界，100,001明确失败；当前分页发生在完整projection之后。标准边界测试在本机约0.3秒完成；超过此界限的Tree不可用，不能自动丢节点伪装为完整树。
 
 ## 默认不读
 

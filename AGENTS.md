@@ -1,12 +1,10 @@
 # Alu Dock — Agent 工程地图
 
-## 产品状态
+## 项目现状
 
-Alu Dock V0.1 已完成本机部署和用户签收；`v0.1.0` 是当前本地发布版本。它是本机单用户的受管 Pi 运行时工程底座：长期 Host 持有 Alu Dock 管理的 runtime、任务实例和副作用，SSH TUI 等客户端通过结构化控制面观察与控制。
+Alu Dock 是本机单用户的受管 Pi 运行时底座。长期 Host 持有任务实例、operation/catalog 权威与 Worker 生命周期；每个 active instance 的完整 Pi runtime 运行在自己的 OS Worker 进程中。SSH TUI 等客户端只通过结构化控制面观察和操作。
 
-能力真相以当前代码、类型和测试为准。当前裸 `aludock` 进入无 runtime 副作用、按 cwd 提供上下文的 Dock Hub；固定根菜单将 New、Continue、History、Pi Sessions 与 Leave 分层。Hub 在一次 alternate-screen 生命周期内呈现所有菜单，并只在菜单可见时启用 Hub click/wheel tracking；进入 Session Work 前先恢复 shell screen。Session Work 使用可流动 main buffer 与 terminal-native mouse，不提供 Alt+M 或 `/mouse` 模式。`-c`/`--continue` 显式执行 current-project smart-entry，选择最近的 active/reopenable 实例，没有则 New；显式 `new` 与 `attach TARGET` 直达 Session Work。磁盘 Pi sessions 通过独立 Resume/Adopt inventory 进入；显式 `open` 暂时保留旧 smart-entry。
-
-V0.1 的“发布”仅指这个本地单用户项目已经部署并签收，不表示公开 npm 发布、远程服务或多用户承诺。Checkout 与本机已安装包仍可能在后续开发中不同；运行状态以 `~/.local/share/alu-dock` 中实际安装的 package 和 `aludock service status` 为准。
+裸 `aludock` 打开不创建 runtime 的 Dock Hub，菜单依次是 New、Continue、History、Pi Sessions 和 Leave。Hub 使用 alternate screen；进入 Session Work 前恢复 shell screen。Session Work 使用可流动的 main buffer 和终端原生鼠标。`-c`/`--continue` 继续当前项目最近的 active/reopenable instance，没有则 New；`new` 和 `attach TARGET` 直接进入 Session Work。磁盘上的 Pi sessions 从 Resume/Adopt inventory 进入；`open` 暂时保留旧的 smart-entry 行为。
 
 ## UI 视觉主题合同
 
@@ -36,7 +34,11 @@ cli / Hub / Session Work tui
      ManagedInstance
            │ RuntimeSession port
            ▼
-       Pi adapters
+ WorkerRuntimeSession / supervisor
+           │ private Worker IPC
+           ▼
+ one instance Worker process
+           └── PiRuntimeHost / Pi SDK / extensions
 ```
 
 依赖方向：`cli|tui → control → core ports/DTOs ← pi adapters`。Core 与 TUI 不得依赖 Pi runtime 对象。
@@ -55,7 +57,7 @@ Managed 安装或运维另读 [`docs/local-install.md`](docs/local-install.md)�
 
 ## 跨模块核心合同
 
-1. **Host 唯一持有 Dock runtime。** Alu Dock 管理的 Pi runtime、extensions、tools、admission、run Promise 与副作用都属于 Host；客户端只消费控制面，不得成为第二 runtime owner。
+1. **Host 唯一持有 Dock 控制权。** `ManagedInstance`、admission、Queue、operation/catalog/generation truth 与 Worker supervisor 属于 Host；每个 instance 的 Pi SDK objects、extensions、tools 与 Pi Promise 只属于该 instance 的独立 Worker。客户端只消费控制面，不得成为第二 runtime owner。
 2. **身份不可混用。** Dock `instanceId`、Pi `sessionId/sessionFile` 与 `runtimeGeneration` 表示不同生命周期；session replacement 保留 Dock instance 并推进 generation。
 3. **控制面保持封闭。** Wire major 是 `2`；request/result/event 必须是有界、closed、JSON-safe schema，不传 runtime 对象、handler、component、binary、image bytes、data URI 或 raw base64。
 4. **信任先于构造和副作用。** Project trust 必须在目标 runtime、project resources、extension hooks、teardown 或 catalog mutation 之前确定。
@@ -65,6 +67,7 @@ Managed 安装或运维另读 [`docs/local-install.md`](docs/local-install.md)�
 8. **普通客户端入口不拥有 service 生命周期。** Hub、`-c`、`open`、`new`、`attach` 只连接既有 Host，不得隐式 install、start、restart 或 fork detached Host。
 9. **Hub inventory 不等于 runtime。** `session.inventory` 只读取 bounded Pi session metadata；只有用户选择 New、Continue、History 中的 saved-session continuation、Resume、Adopt 或 Attach 后才允许进入对应 mutation/Work 路径。History 的 Forget 只删 Dock record，不删 Pi session。
 10. **外部 Pi 可共存，但 session owner 唯一。** 独立的全局/standalone Pi runtime 拥有自己的进程与服务生命周期；它可与 Dock 共用当前 `~/.pi/agent` 认证、settings、extensions、skills 和 session 存储，但同一 Pi session file 绝不能被两个 runtime 进程并发打开或续写。
+11. **Worker boundary 是 Host 私有实现。** Worker 以 `hostEpoch + instanceId + runtimeGeneration + workerIncarnation` 身份运行；IPC 必须封闭、有界、版本化、generation-fenced，且只开放 Host allowlist capability。Worker loss 必须先终止并确认回收进程 owner，才发布可恢复状态；旧 Worker 的事件、UI 与 receipt 一律失效。
 
 模块内的状态机、UI、settings、deployment 与测试细节以对应 agent map、代码和测试为准，不在顶层重复定义。
 

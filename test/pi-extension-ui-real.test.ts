@@ -20,9 +20,26 @@ export default function (pi) {
     description: "Exercise the Alu Dock extension UI broker",
     handler: async (_args, ctx) => {
       ctx.ui.setStatus("fixture", "ready\\u001b[2J");
+      ctx.ui.setToolsExpanded(true);
+      ctx.ui.setWidget("fixture", ["worker widget"]);
       ctx.ui.notify("fixture body\\u001b[2J", "info");
       const confirmed = await ctx.ui.confirm("Approve fixture", "This stays local.");
       ctx.ui.notify(confirmed ? "fixture approved" : "fixture denied", confirmed ? "info" : "error");
+    },
+  });
+  pi.registerCommand("invalid-ui", {
+    handler: async (_args, ctx) => {
+      await ctx.ui.select("Too many", Array.from({ length: 201 }, (_, index) => String(index)));
+    },
+  });
+  pi.registerCommand("ui-headroom", {
+    handler: async (_args, ctx) => {
+      ctx.ui.setStatus("headroom", "x".repeat(3000));
+    },
+  });
+  pi.registerCommand("ui-component", {
+    handler: async (_args, ctx) => {
+      ctx.ui.setWidget("component", () => ({ render: (width) => ["component:" + width] }));
     },
   });
 }
@@ -40,11 +57,12 @@ export default function (pi) {
   const claim = await instance.claimInteractionController();
   assert.equal(claim.status, "acquired");
   if (claim.status !== "acquired") return;
+  let leaseToken = claim.leaseToken;
   let responseTask: Promise<unknown> = Promise.resolve();
   const unsubscribe = instance.subscribe((event) => {
     events.push(event);
     if (event.type === "interaction.requested" && event.data.method === "confirm") {
-      responseTask = instance.respondInteraction(claim.leaseToken, event.data.interactionId, { method: "confirm", confirmed: true });
+      responseTask = instance.respondInteraction(leaseToken, event.data.interactionId, { method: "confirm", confirmed: true });
     }
   });
 
@@ -60,6 +78,7 @@ export default function (pi) {
     assert.equal(snapshot.lastRun, "never");
     assert.deepEqual(snapshot.metrics?.messages, { user: 0, assistant: 0, toolCalls: 0, toolResults: 0, total: 0 });
     assert.deepEqual(snapshot.extensionStatus, { fixture: "ready[2J" });
+    assert.equal(snapshot.toolsExpanded, true);
     const handled = events.find((event) => event.type === "command.handled" && event.data.operationId === "real-extension-command");
     assert.equal(handled?.type, "command.handled");
     if (handled?.type !== "command.handled") assert.fail("extension command was not projected as handled");
@@ -71,6 +90,43 @@ export default function (pi) {
       .filter((event): event is Extract<DockEvent, { type: "extension.notification" }> => event.type === "extension.notification")
       .map((event) => event.data.message);
     assert.deepEqual(notifications, ["fixture body[2J", "fixture approved"]);
+    const widget = events.find((event) => event.type === "extension.widget_changed" && event.data.key === "fixture");
+    assert.equal(widget?.type, "extension.widget_changed");
+    if (widget?.type === "extension.widget_changed") assert.deepEqual(widget.data.lines, ["worker widget"]);
+
+    assert.equal((await instance.newSession("ui-generation-reset")).cancelled, false);
+    assert.equal(instance.snapshot().toolsExpanded, false);
+    assert.deepEqual(instance.snapshot().extensionStatus, {});
+    await instance.submit("/invalid-ui", "followUp", "invalid-ui-command");
+    await instance.waitForIdle();
+    assert.equal(instance.snapshot().lifecycle, "active");
+    assert.equal(events.some((event) => event.type === "extension.error" && /select options/.test(event.data.error)), true);
+
+    await instance.submit("/ui-headroom", "followUp", "ui-headroom-command");
+    await instance.waitForIdle();
+    assert.equal(instance.snapshot().lifecycle, "active");
+    assert.equal(instance.snapshot().extensionStatus?.headroom?.length, 2_048);
+
+    assert.equal((await instance.reloadSession("ui-reload")).cancelled, false);
+    assert.equal(instance.snapshot().toolsExpanded, false);
+    const reloadClaim = await instance.claimInteractionController();
+    assert.equal(reloadClaim.status, "acquired");
+    if (reloadClaim.status !== "acquired") assert.fail("controller was not reacquired after reload");
+    leaseToken = reloadClaim.leaseToken;
+    await instance.submit("/ui-fixture", "followUp", "ui-after-reload");
+    await responseTask;
+    await instance.waitForIdle();
+    assert.equal(instance.snapshot().lifecycle, "active");
+    assert.equal(instance.snapshot().extensionStatus?.fixture, "ready[2J");
+
+    await instance.submit("/ui-component", "followUp", "component-after-reload");
+    instance.setExtensionWidgetViewport(leaseToken, instance.snapshot().runtimeGeneration, { width: 73, height: 24 });
+    for (let attempt = 0; attempt < 100 && !events.some((event) => event.type === "extension.widget_changed" && event.data.key === "component"); attempt += 1) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+    }
+    const component = events.findLast((event) => event.type === "extension.widget_changed" && event.data.key === "component");
+    assert.equal(component?.type, "extension.widget_changed");
+    if (component?.type === "extension.widget_changed") assert.deepEqual(component.data.lines, ["component:73"]);
   } finally {
     unsubscribe();
     await instance.stop();

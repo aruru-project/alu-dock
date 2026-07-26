@@ -317,6 +317,7 @@ export class DockRegistry {
   private async performReopen(input: ReopenRegistryInstanceInput): Promise<{ instance: ManagedInstance; previousLifecycle: "host_lost" | "runtime_error" }> {
     const record = this.catalogRecord(input.instanceId);
     if (record.lifecycle !== "host_lost" && record.lifecycle !== "runtime_error") throw new InstanceNotReopenableError(input.instanceId);
+    if (record.ownerReleaseUnconfirmed) throw new InstanceNotReopenableError(input.instanceId);
     const previousLifecycle = record.lifecycle;
     const sessionFile = input.sessionFile ?? catalogReopenSessionFile(record);
     if (!sessionFile || !this.reopenTargetResolver) throw new InstanceNotReopenableError(input.instanceId);

@@ -39,6 +39,11 @@ export interface ExtensionWidgetRenderer {
   reset(): void;
 }
 
+/** Host-to-worker half of the private extension UI bridge. */
+export interface ExtensionUiRemoteEndpoint {
+  setToolsExpanded(expanded: boolean): void;
+}
+
 export type ExtensionUiEventType =
   | "interaction.requested"
   | "interaction.resolved"
@@ -122,6 +127,7 @@ export class ExtensionUiBroker {
   private toolsExpanded = false;
   private widgetViewport: ExtensionWidgetViewport | undefined;
   private widgetRenderer: ExtensionWidgetRenderer | undefined;
+  private remoteEndpoint: ExtensionUiRemoteEndpoint | undefined;
   private mutationTail: Promise<void> = Promise.resolve();
   private suspended = false;
 
@@ -157,6 +163,11 @@ export class ExtensionUiBroker {
   bindWidgetRenderer(renderer: ExtensionWidgetRenderer): void {
     if (this.widgetRenderer) throw new Error("Extension widget renderer is already bound");
     this.widgetRenderer = renderer;
+  }
+
+  bindRemoteEndpoint(endpoint: ExtensionUiRemoteEndpoint): void {
+    if (this.remoteEndpoint) throw new Error("Extension UI remote endpoint is already bound");
+    this.remoteEndpoint = endpoint;
   }
 
   claimController(): Promise<ControllerClaim> {
@@ -311,11 +322,21 @@ export class ExtensionUiBroker {
   }
 
   setToolsExpanded(expanded: boolean): void {
+    this.applyToolsExpanded(expanded, true);
+  }
+
+  /** Apply child-originated state without echoing it back over the bridge. */
+  applyRemoteToolsExpanded(expanded: boolean): void {
+    this.applyToolsExpanded(expanded, false);
+  }
+
+  private applyToolsExpanded(expanded: boolean, forward: boolean): void {
     if (typeof expanded !== "boolean") {
       this.recordError("Extension tool expansion must be a boolean");
       return;
     }
     this.toolsExpanded = expanded;
+    if (forward) this.remoteEndpoint?.setToolsExpanded(expanded);
     this.projectionChanged();
     // Same-value sets are intentional: clients clear local per-entry overrides.
     void this.emit("extension.tools_expanded_changed", { expanded });
