@@ -104,3 +104,4 @@ npm run cli
 - 贡献者与 agent 工程地图：[`AGENTS.md`](AGENTS.md)
 - 测试路由：[`docs/qa.md`](docs/qa.md)
 - Managed service 与本地安装：[`docs/local-install.md`](docs/local-install.md)
+- Rails / Web 后端接入 Protocol V2：[`docs/web-client-integration.md`](docs/web-client-integration.md)

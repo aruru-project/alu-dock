@@ -1,0 +1,570 @@
+# Web 后端接入 Alu Dock Protocol V2
+
+本文面向需要从 Rails 等本机 Web 后端接入 Alu Dock 的开发者。它描述 Alu Dock 已提供的控制面、Protocol V2 的消费规则以及当前尚未提供的能力。
+
+## 结论
+
+Alu Dock V0.2 已经具备多实例 WebConsole 的主要控制底座：
+
+- 查看和管理多个 Dock instance；
+- 获取权威 snapshot、当前会话历史、Queue 和运行统计；
+- 接入正在运行的 instance，持续接收结构化事件；
+- 提交文字 prompt、steer 和 follow-up，执行整轮 abort 和 Queue 控制；
+- 管理模型、thinking、tools、settings、resources 和 session/tree；
+- 观察并回复 extension 的 select、confirm、input 和 editor 交互；
+- Web 后端断开后，Host 中的 instance 和运行中的工作继续存在。
+
+但当前版本还不能支持 Web 无损切换：`command.submit` 尚不能携带图片，extension title/editor text 仍被丢弃，并有一处 generation error 合同不一致。这些 Dock 侧缺口由 Card #216 补齐后，Rails 才能完成不低于现有 WebConsole 的正式切换。
+
+推荐边界是：
+
+```text
+Browser
+   │ HTTP / WebSocket
+   ▼
+Rails / Web backend
+   │ private Unix socket · Protocol V2
+   ▼
+Alu Dock Host
+   └── one isolated Worker/Pi runtime per active instance
+```
+
+浏览器不直接连接 Dock，不持有 interaction lease，也不接触 Pi SDK、Worker IPC 或 runtime object。Alu Dock 不提供 Redis/RPC 兼容层，也不负责 Rails、ActionCable 或页面状态机。
+
+正式接入以功能不退化为底线。Rails 可以先开发 catalog、attach、conversation、Queue 与 session 等已经稳定的部分；图片与新增 Extension UI wire shape 必须等待 #216 固定，不能由 Rails 猜测或自行复制 Pi 私有协议。
+
+## 运行边界
+
+### 本机同用户
+
+Managed Host 的 socket 通常位于：
+
+```text
+${XDG_RUNTIME_DIR}/alu-dock/dock.sock
+# 常见展开：/run/user/<uid>/alu-dock/dock.sock
+```
+
+systemd 创建的目录权限是 `0700`，socket 权限是 `0600`。Rails 必须与 Alu Dock Host 使用同一 OS 用户运行，并通过部署配置得到 socket 路径。不要放宽 socket 权限来支持其他用户或公网访问。
+
+开发环境可通过 `ALU_DOCK_SOCKET` 为客户端和开发 Host 配置同一个绝对路径。Managed Host 自身不接受该变量覆盖 systemd 的 runtime socket。
+
+### Service 生命周期
+
+Protocol V2 客户端只连接已经运行的 Host。普通 Web 请求不得隐式安装、启动、重启或替换 Alu Dock service。Host 不可用时，Web 后端应报告控制面不可用。
+
+## Wire 协议
+
+### JSONL
+
+Protocol V2 使用 Unix stream socket 上的 UTF-8 JSON Lines：
+
+- 每条 frame 是一个完整 JSON object，以 `\n` 结束；
+- 单条 frame 最大 1 MiB；
+- 每个连接必须先完成 hello；
+- hello 后每个连接只允许一个业务 request；
+- 普通 request 返回一个 response 后关闭；
+- `instance.attach` 的 follow 模式先返回一个 response，然后在同一连接持续返回 event frames。
+
+请求 object 是 closed schema。不要向 request 或 hello 添加未定义字段。
+
+### Hello
+
+每个新连接先发送：
+
+```json
+{"kind":"hello","requestId":"hello-uuid","versions":[2],"client":{"name":"alubot-admin","version":"1.0.0","clientId":"rails-boot-uuid"},"requiredCapabilities":["core.v2","host.info"]}
+```
+
+成功响应：
+
+```json
+{"kind":"hello_ack","requestId":"hello-uuid","version":2,"host":{"pid":1234,"dockVersion":"0.2.0","piSdkVersion":"0.81.1","hostEpoch":"host-epoch","startedAt":"2026-01-01T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["catalog.maintenance.v1","catalog.v1","core.v2","events.follow","events.replay-purpose.v1","extension_ui.tools-expanded.v1","extension_ui.v1","extension_ui.widgets.v1","git.branch-footer.v1","host.info","instance.catalog","models.v1","projection.completeness.v1","queue.control.v1","resources.v1","run.abort.v1","service.managed.v1","session.adopt.v1","session.commands.v1","session.core","session.inventory-diagnostics.v1","session.inventory.v1","session.reopen","session.tree.v1","settings.v1","tool-result-presentation.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200,"maxInstanceListItems":100,"maxInstanceListBytes":786432}}
+```
+
+客户端必须在发送业务 request 前验证：
+
+- `kind == "hello_ack"`；
+- hello `requestId` 相同；
+- `version == 2`；
+- `catalogSchemaVersion == 1`；
+- 所有 required capabilities 都存在；
+- 保存本次连接协商得到的 `host.hostEpoch`。
+
+`hello_error` 表示业务 request 尚未发送，因此 mutation 尚未发生。常见 code 包括 `unsupported_protocol`、`capability_missing`、`host_starting` 和 `host_draining`。
+
+### Request 与 response
+
+Hello 成功后发送一个业务 request：
+
+```json
+{"kind":"request","version":2,"requestId":"request-uuid","type":"instance.get","params":{"instanceId":"instance-id"}}
+```
+
+成功 response envelope（下例的空 instance 仅表示省略具体 DTO 字段）：
+
+```json
+{"kind":"response","version":2,"requestId":"request-uuid","hostEpoch":"host-epoch","ok":true,"result":{"instance":{}}}
+```
+
+失败 response：
+
+```json
+{"kind":"response","version":2,"requestId":"request-uuid","hostEpoch":"host-epoch","ok":false,"error":{"code":"not_found","message":"...","retryable":false}}
+```
+
+必须校验 response 的 `requestId`、`version` 和 `hostEpoch`。业务 request 已发送后出现 timeout、断连、非法 response 或 correlation mismatch 时，read 可以重新查询；mutation 必须按“结果可能未知”处理，不能自动重放。
+
+### 最小 Ruby transport 示例
+
+下面只演示 wire state machine，不是完整 Rails client：
+
+```ruby
+require "json"
+require "securerandom"
+require "socket"
+
+socket = UNIXSocket.new(ENV.fetch("ALU_DOCK_SOCKET"))
+hello_id = SecureRandom.uuid
+
+socket.write({
+  kind: "hello",
+  requestId: hello_id,
+  versions: [2],
+  client: {
+    name: "alubot-admin",
+    version: "1.0.0",
+    clientId: "rails-#{Process.pid}"
+  },
+  requiredCapabilities: ["core.v2", "host.info"]
+}.to_json << "\n")
+
+hello = JSON.parse(socket.gets || raise("Dock closed during hello"))
+required = ["core.v2", "host.info"]
+raise "Protocol negotiation failed" unless
+  hello["kind"] == "hello_ack" &&
+  hello["requestId"] == hello_id &&
+  hello["version"] == 2 &&
+  hello["catalogSchemaVersion"] == 1 &&
+  required.all? { |capability| hello.fetch("capabilities", []).include?(capability) }
+
+request_id = SecureRandom.uuid
+socket.write({
+  kind: "request",
+  version: 2,
+  requestId: request_id,
+  type: "host.info",
+  params: {}
+}.to_json << "\n")
+
+response = JSON.parse(socket.gets || raise("Dock closed before response"))
+raise "Response correlation failed" unless
+  response["kind"] == "response" &&
+  response["requestId"] == request_id &&
+  response["hostEpoch"] == hello.dig("host", "hostEpoch")
+```
+
+生产客户端还必须实现 frame 大小限制、读取 timeout、closed response 校验和 mutation ambiguity 规则。
+
+## 身份模型
+
+以下身份不能混用：
+
+| 身份 | 含义 |
+|---|---|
+| `instance.id` | Dock 工作身份；Web 应以它作为工作区主键 |
+| `executor.piSessionId` | 当前 Pi session 身份 |
+| `executor.sessionFile` | 当前 Pi session 的可选本机文件路径；某些状态下不存在 |
+| `runtimeGeneration` | 当前 instance 内的 runtime/session generation |
+| `hostEpoch` | 本次 Host 进程域 |
+| `operationId` | 一次调用者意图对应的 mutation 身份 |
+| catalog `revision` | 一次 catalog 分页读取所属的版本 |
+| event `sequence` | 一个 instance generation 内的事件序号 |
+
+成功且未取消的 session new/switch/fork/clone/reload 保留 `instance.id`，并推进 `runtimeGeneration`。这些 request 即使 `ok: true` 也可能返回 `cancelled: true`；客户端必须先检查结果。Host 重启会改变 `hostEpoch`。不要使用 Pi session ID 或文件路径替代 Dock instance identity。
+
+## 推荐的 Web 初始流程
+
+1. 用 `host.info` 检查 Host 和 capabilities。
+2. 用 `instance.list` 分页读取 catalog。
+3. 用户选择 active instance 后，用 `instance.attach`：
+   - 首次打开使用 `replay: "conversation_bootstrap"`；
+   - 只观察时使用 `controller: "observe"`；
+   - 需要回复 extension interaction 时才使用 `controller: "claim"`。
+4. 使用 attach response 中的 snapshot、recent history 和 pending messages 建立初始页面。
+5. 按顺序消费同一 socket 后续的 event frames。
+6. 更早历史通过 `session.history` 分页读取；models、settings、tools 等按页面需要延迟请求。
+
+Catalog 当前没有全局 follow stream。Web 可以定期重新执行 revision-bound `instance.list`；打开某个 instance 后使用它自己的 attach stream。是否需要 catalog 级实时订阅，应由实际 Web 体验决定。
+
+## Instance catalog 与生命周期
+
+### Catalog 分页
+
+请求：
+
+```json
+{"kind":"request","version":2,"requestId":"request-uuid","type":"instance.list","params":{"selector":"all","limit":100}}
+```
+
+- `selector: "all"` 返回全部 catalog records；
+- `selector: "actionable"` 只排除 `stopped`，不代表其余记录一定可 reopen；
+- response 的 `page` 包含 `revision`、`total`、`hiddenStopped` 和可选 `nextCursor`；
+- 后续页必须原样发送 `nextCursor`；
+- 收到 retryable `cursor_stale` 时丢弃已拼接页面并从第一页重新读取；
+- 不得把不同 catalog revision 的页面拼成一份结果。
+
+### 生命周期动作
+
+| Snapshot 状态 | Web 可提供的主要动作 |
+|---|---|
+| `active` | attach、prompt、配置、session 操作、abort、stop |
+| `stopping` | 只展示权威状态并等待终态 |
+| `stopped` | 展示记录；如需继续其 Pi session，应 adopt 为新的 Dock instance |
+| `host_lost` / `runtime_error` 且 `reopenable == true` | 显式 `instance.reopen` |
+| `host_lost` / `runtime_error` 且不可 reopen | 展示失败事实；可 forget |
+
+`instance.forget` 和 `catalog.prune` 只删除 Dock catalog record，不删除 Pi session 文件。
+
+### 已支持的 catalog 操作
+
+- `host.info`
+- `instance.create`
+- `instance.adopt`
+- `instance.list`
+- `instance.get`
+- `instance.attach`
+- `instance.stop`
+- `instance.reopen`
+- `instance.forget`
+- `catalog.prune`
+- `session.inventory`
+
+Create、adopt、reopen 和跨项目 switch 可能先返回 `project_trust_required`。参见“Project trust”。
+
+## Attach、history 与实时事件
+
+### 首次打开
+
+首次打开 conversation 使用 follow attach，且不能带 `since`：
+
+```json
+{"kind":"request","version":2,"requestId":"attach-uuid","type":"instance.attach","params":{"instanceId":"instance-id","follow":true,"controller":"observe","replay":"conversation_bootstrap"}}
+```
+
+Response 的 `result` 包含：
+
+- `instance`：当前权威 snapshot；
+- `page.events`：bootstrap 所需的 bounded events；
+- `page.earliest` / `page.latest`：完整 cursor；
+- `page.truncated`、`epochChanged`、`generationChanged`；
+- `recentHistory`、`historyTruncated`；
+- `pendingMessages`；
+- `controller` 状态；
+- `following: true`。
+
+Attach response 必须先完成处理，随后再处理 event frames。
+
+### Event frame
+
+```json
+{"kind":"event","version":2,"requestId":"attach-uuid","hostEpoch":"host-epoch","event":{"scope":"instance","sequence":42,"instanceId":"instance-id","runtimeGeneration":3,"occurredAt":"2026-01-01T00:00:00.000Z","type":"message.delta","data":{"messageId":"message-id","block":"text","delta":"hello"}}}
+```
+
+一个 generation 内 `sequence` 必须严格递增。正常 generation rollover 只能是：
+
+- 新 generation 恰好为旧 generation `+1`；
+- 第一条 event 是 `session.replaced`；
+- `sequence == 1`；
+- event data 中的 generation 与 envelope 一致。
+
+### 断线重连
+
+客户端确认接受一条 event 后，保存 cursor：
+
+```json
+{
+  "hostEpoch": "event envelope hostEpoch",
+  "instanceId": "event.instanceId",
+  "runtimeGeneration": 3,
+  "sequence": 42
+}
+```
+
+重连使用：
+
+```json
+{"kind":"request","version":2,"requestId":"attach-uuid-2","type":"instance.attach","params":{"instanceId":"instance-id","since":{"hostEpoch":"host-epoch","instanceId":"instance-id","runtimeGeneration":3,"sequence":42},"follow":true,"controller":"observe","replay":"event_log"}}
+```
+
+遇到以下任一情况，不得假装拥有连续 delta：
+
+- `page.truncated == true`；
+- `epochChanged == true`；
+- `generationChanged == true`；
+- `attach_initial_overflow`；
+- stream 因背压、timeout 或 transport error 中断。
+
+此时重新读取 authoritative snapshot，并使用 fresh conversation bootstrap/history 重建页面。观察流断开不表示 runtime 失败，也不会终止 instance。
+
+### 历史分页
+
+`session.history` 每页最多 200 条，使用 `beforeEntryId` 向前分页；response 包含 `entries`、`hasEarlier`、可选 `nextBeforeEntryId` 和 `instance`。`historyTruncated` 只属于 fresh attach 的 bootstrap result。两种 surface 的不完整标记都必须按各自语义处理。
+
+Content block 可能是：
+
+- `text`
+- `thinking`
+- `tool_call`
+- `tool_result`
+- `omitted`，表示 image/binary 没有进入控制面
+
+客户端不得依赖 Pi 私有 message shape。
+
+## 命令、Queue 与运行控制
+
+### 提交文本
+
+```json
+{"kind":"request","version":2,"requestId":"request-uuid","type":"command.submit","params":{"operationId":"operation-uuid","instanceId":"instance-id","message":"继续处理这个问题","delivery":"auto"}}
+```
+
+`delivery`：
+
+- `auto`：由 Host 根据当前状态确定 prompt/steer/follow-up；
+- `prompt`：要求启动普通 prompt；运行中会被拒绝；
+- `steer`：发送或排入 steering Queue；
+- `followUp`：发送或排入 follow-up Queue。
+
+Success receipt 返回实际 delivery、是否 queued、accepted time 和原 operation ID。
+
+### 已支持的运行控制
+
+- `command.abort`：中止当前 run；
+- `queue.dequeue`：取回 Host Queue 中尚未消费的消息；
+- attach snapshot/event：观察 Queue 计数和具体 pending messages。
+
+当前没有 arbitrary PTY、直接 shell RPC 或独立 bash 控制 endpoint。Web 可以提交 Pi/extension command，但 Alu Dock 不把自己变成远程 shell 服务。
+
+## Model、tools、settings 与资源
+
+已支持：
+
+- `model.list` / `model.set`
+- `thinking.set`
+- `tool.list` / `tool.set_active`
+- `settings.get` / `settings.update`
+- `resource.get`
+- `command.catalog`
+
+读取 collection 时应协商 `projection.completeness.v1`，并展示 `total` / `truncated`。不要把 truncated collection 当成完整结果。
+
+Snapshot 的整个 `metrics` projection 都可能不存在。存在时包含：
+
+- user/assistant/tool message counts；
+- input/output/cache/total tokens；
+- cost；
+- 可选的 context object，其中 tokens 和 percent 还可能为空。
+
+## Session 与 Tree
+
+已支持：
+
+- `session.list`
+- `session.switch`
+- `session.new`
+- `session.name`
+- `session.compact`
+- `session.reload`
+- `session.tree`
+- `session.navigate`
+- `session.fork`
+- `session.clone`
+
+Session replacement 会保留 Dock instance identity，并通过 `session.replaced` 公布新 generation。不要在 Web 中把它实现成新的 Dock instance，除非使用的是 `instance.adopt` 创建独立工作。
+
+## Extension UI
+
+### Controller lease
+
+Attach 使用 `controller: "claim"` 时，成功 response 可能返回：
+
+```json
+{"status":"acquired","leaseToken":"lease-token"}
+```
+
+也可能返回 `observing` 或 `unavailable`。每个 instance 同时只有一个 interaction controller；其他连接仍可观察事件。
+
+Lease 只保留在 Web 后端，不应发送给浏览器。浏览器提交的 select/confirm/input/editor 回复由 Rails 鉴权后映射为 `interaction.respond`。
+
+`extension.widget_viewport.set` 不是交互回复，而是 ephemeral viewport-size control。它发送 `instanceId`、`leaseToken`、`expectedRuntimeGeneration`、`width` 和 `height`，没有 `operationId`，也不进入 operation ledger 或 mutation ambiguity 处理。
+
+Controller stream 断开、session replacement 或 Host drain 会释放 lease，并可能取消尚未完成的 interaction。Web 应通过 `interaction.cancelled` / `interaction.resolved` 更新页面。
+
+### 支持的交互与投影
+
+- select
+- confirm
+- input
+- editor
+- extension notification
+- extension status
+- terminal-rendered text widget lines
+- tools-expanded state
+
+Pi component object、callback、Promise 和任意 binary 不会跨过 Protocol V2。
+
+## Mutation 与 operation identity
+
+所有进入 Host operation ledger 的 mutation 都由调用方生成独立 `operationId`。它与 transport `requestId` 不同。Ephemeral `extension.widget_viewport.set` 是例外：它没有 operation ID，也不具有 ledger dedup/ambiguity 语义。
+
+规则：
+
+1. 一个新的用户意图使用一个新的 operation ID。
+2. 相同 Host epoch 内，相同 ID 和相同 mutation 会共享 in-flight/settled receipt。
+3. 相同 ID 配不同参数或不同 mutation 会返回 `operation_conflict`。
+4. 旧 receipt 淘汰后返回 `operation_receipt_expired`，Host 不会再次执行该 ID。
+5. mutation 发送后的 timeout、断连或非法 response 必须显示为 outcome unknown，并保留原 operation ID。
+6. 不自动重试 mutation，尤其不能在 `hostEpoch` 已变化后重放。
+7. 使用 `instance.get`、history 和 events 查询当前权威事实；无法确定时保留“结果未知”，不要把它改写成失败。
+
+`runtime_unavailable` 表示 Worker 在取得 mutation effect custody 前丢失；`effect_unknown` 表示 effect 可能已经发生。这两个结果不能合并。
+
+当前没有独立 `operation.get` endpoint。只有实际 Web 流程证明 snapshot/event 无法完成必要 reconciliation 时，才应考虑由 Dock 增加 outcome query。
+
+## Project trust
+
+Create、adopt、reopen 或跨项目 switch 可能返回：
+
+```json
+{
+  "code": "project_trust_required",
+  "details": {
+    "challengeId": "challenge-id",
+    "operationId": "operation-uuid",
+    "cwd": "/canonical/project",
+    "choices": [
+      "trust_once",
+      "trust_and_remember",
+      "deny_once",
+      "deny_and_remember"
+    ],
+    "expiresAt": "2026-01-01T00:05:00.000Z"
+  }
+}
+```
+
+用户选择后，重复原 mutation 的类型、operation ID、目标参数，并增加 `trustChallengeId` 和 `projectTrustDecision`。Challenge 与原操作及 canonical cwd 绑定，过期或改变参数会被拒绝。
+
+`deny_*` 的含义是继续构造一个不信任 project resources 的 runtime，不是取消本次操作。取消应由 Web 自己停止提交第二次 request。
+
+## Capability 速查
+
+所有现代 request 都应协商 `core.v2` 和对应 operation capability：
+
+| Request | Capability |
+|---|---|
+| `host.info` | `host.info` |
+| `instance.create/list/get/stop` | `instance.catalog` |
+| `instance.attach` | `events.follow` |
+| 带 `replay` 的 attach | 再加 `events.replay-purpose.v1` |
+| `instance.adopt` | `session.adopt.v1` |
+| `instance.reopen` | `session.reopen` |
+| `instance.forget`, `catalog.prune` | `catalog.maintenance.v1` |
+| `command.submit`, `session.list` | `session.core` |
+| `command.abort` | `run.abort.v1` |
+| `queue.dequeue` | `queue.control.v1` |
+| `model.*`, `thinking.set` | `models.v1` |
+| `tool.*` | `tools.v1` |
+| `settings.*` | `settings.v1` |
+| `resource.get`, `command.catalog` | `resources.v1` |
+| `session.history` | `tui.projection.v1` |
+| `session.inventory` | `session.inventory.v1` |
+| `session.switch/new/name/compact/reload` | `session.commands.v1` |
+| `session.tree/navigate/fork/clone` | `session.tree.v1` |
+| `interaction.respond` | `extension_ui.v1` |
+| tools-expanded control | `extension_ui.tools-expanded.v1` |
+| widget projection/viewport | `extension_ui.widgets.v1` |
+
+推荐同时按需协商：
+
+- `projection.completeness.v1`
+- `session.inventory-diagnostics.v1`
+- `git.branch-footer.v1`
+- `tool-result-presentation.v1`
+
+Capability 会改变 closed response/event shape：
+
+- 未协商 `extension_ui.tools-expanded.v1` 时，Host 省略 snapshot 的 `toolsExpanded` 并过滤对应 change event；
+- 未协商 `extension_ui.widgets.v1` 时，Host 过滤 widget change events；
+- 未协商 `git.branch-footer.v1` 时，Host 省略 snapshot/replacement 的 `gitBranch` 并过滤 branch event；
+- 未协商 `tool-result-presentation.v1` 时，Host 省略 tool result 的 typed `presentation`；
+- 未协商 `projection.completeness.v1` 时，部分 collection response 省略 `total` / `truncated`；
+- 未协商 `session.inventory-diagnostics.v1` 时，inventory response 省略 `incomplete`、diagnostics 和 diagnostic truncation；
+- 被 capability 过滤的 event 仍占用原始 sequence，因此客户端只要求 sequence 严格递增，不能要求连续。
+
+严格 Ruby schema 必须按当前连接协商的 capability 选择对应 projection shape。不要在 capability negotiation 失败后降级重发 mutation。
+
+## 常见错误处理
+
+| Code | 客户端含义 |
+|---|---|
+| `capability_missing` / `protocol_incompatible` | 停止该功能，不发送 mutation |
+| `not_found` | instance 不存在 |
+| `instance_not_active` / `instance_not_reopenable` | 当前 lifecycle 不允许动作 |
+| `instance_busy` / `admission_pending` | 显示权威忙碌状态；不要盲目循环请求 |
+| `invalid_delivery` | 当前运行状态不接受指定 delivery |
+| `queue_capacity` | Queue 已达边界 |
+| `cursor_stale` | 丢弃 catalog 分页并从第一页重读 |
+| `invalid_cursor` | 放弃增量并重新 bootstrap |
+| `project_trust_required` | 走显式 trust 决策流程 |
+| `effect_unknown` | 查询权威状态；绝不自动重放 |
+| `runtime_unavailable` | mutation 未取得 effect custody，可由用户基于新状态决定下一步 |
+| `operation_conflict` | operation ID 被用于不同意图，是调用方错误 |
+| `operation_receipt_expired` | 该 ID 不可再次执行；查询当前状态 |
+| `mutation_faulted` / `host_draining` | Host 不再接受 mutation，等待人工处理/service 恢复 |
+
+Error code 是可扩展字符串。未知 code 应作为普通明确失败展示；只有明确属于 transport-after-send 的 mutation failure 才能由客户端提升为 outcome unknown。
+
+## 当前没有提供的能力
+
+以下不是 Protocol V2 当前承诺：
+
+- Browser 直连 Dock；
+- Redis/Pi RPC 兼容；
+- 多用户、跨 UID、容器或远程认证；
+- arbitrary PTY / shell RPC；
+- binary、base64 或 data URI 穿过控制面；
+- catalog-wide 实时事件流；
+- stopped/host-lost record 在不恢复 runtime 时的完整 conversation 浏览；
+- 独立 operation outcome 查询；
+- 通过 Protocol V2 管理 systemd service。
+
+图片输入不是未来可选项，而是 Card #216 的必备能力：prompt、steer、follow-up 与 Host Queue 都必须保留图片并最终交给 Pi 视觉通道。Rails 继续拥有上传、StudioImage、图库和浏览器图片响应。
+
+其余能力只有被 Web 的真实产品需求证明需要、且权威数据确实属于 Host/runtime 边界时，才在 Alu Dock 增加：
+
+1. **Catalog 实时更新**：只有轮询无法满足体验时，再增加 Host-owned catalog revision stream；conversation events 仍保持 instance-scoped。
+2. **Operation outcome 查询**：只有 snapshot/event reconciliation 无法满足真实流程时再增加。
+3. **跨用户/远程访问**：需要单独设计认证与授权 transport，不能放宽当前 socket 权限。
+
+## Alu Dock 侧近期工作
+
+在 Rails 完成正式切换前，Alu Dock 侧由 Card #216 完成：
+
+1. 让 prompt、steer、follow-up 与 Queue 支持图片并实际进入 Pi 视觉通道；
+2. 固定 live/history 中用户图片与 `show_image` 的最小跨客户端语义；
+3. 让 extension title 更新和 editor text 注入到达 controller client；
+4. 修复 `stale_runtime_generation` response details 与 canonical parser 不一致；
+5. 为 hello、instance list、fresh attach、cursor reconnect、Queue、图片、interaction 和 ambiguous mutation 提供固定跨语言 wire 示例。
+
+不增加独立 `abort_bash`；当前需求只保留整轮 abort。Rails 可以先开发已经稳定的多实例、conversation、Queue 和 session 接入，但最终切换必须等待上述缺口完成。
+
+## 权威代码入口
+
+- Request、response、capability、bounds 与 wire parser：`src/control/protocol.ts`
+- Host routing 与 attach stream：`src/control/dock-host.ts`
+- TypeScript 参考客户端：`src/control/dock-client.ts`
+- Snapshot、history、event 与 cursor DTO：`src/core/instance-dto.ts`
+- Model/tool/settings/resource DTO：`src/core/config-projection.ts`
+- Socket 路径：`src/control/socket-path.ts`
+- Protocol/Host 集成证据：`test/control-protocol.test.ts`、`test/dock-control.test.ts`
