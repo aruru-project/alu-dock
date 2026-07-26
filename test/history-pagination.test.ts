@@ -140,3 +140,35 @@ test("flowing reconciliation removes persisted frames but retains unresolved and
   assert.deepEqual(reconciled.map((event) => event.sequence), [3, 4]);
   assert.equal(reconciled.filter((event) => event.sequence === 3).length, 1, "overlapping attach/live events are deduplicated");
 });
+
+test("flowing reconciliation anchors an active image turn to the current history suffix", () => {
+  const makeEvent = (sequence: number, type: DockEvent["type"], data: Record<string, unknown>): DockEvent => ({
+    scope: "instance",
+    sequence,
+    instanceId: "dock-1",
+    runtimeGeneration: 1,
+    occurredAt: "2026-07-19T00:00:00.000Z",
+    type,
+    data,
+  }) as DockEvent;
+  const current = makeEvent(8, "message.submitted", {
+    operationId: "current-image",
+    messageId: "current-image-message",
+    role: "user",
+    text: "same",
+    images: [{ path: "/tmp/current.png", mimeType: "image/png" }],
+    delivery: "prompt",
+  });
+  const olderHistory: HistoryEntryDto[] = [
+    { entryId: "old-image", role: "user", content: [{ type: "text", text: "same" }, { type: "image", mimeType: "image/png" }] },
+    { entryId: "old-answer", role: "assistant", content: [{ type: "text", text: "old answer" }] },
+  ];
+
+  assert.deepEqual(reconcileFlowingEvents(olderHistory, [current], []).map((event) => event.sequence), [8]);
+  const currentPersisted = [...olderHistory, {
+    entryId: "current-image",
+    role: "user" as const,
+    content: [{ type: "text" as const, text: "same" }, { type: "image" as const, mimeType: "image/png" }],
+  }];
+  assert.deepEqual(reconcileFlowingEvents(currentPersisted, [current], []), []);
+});

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import { resolve } from "node:path";
 import { containsBinaryPayload, type InteractionResponse } from "../core/extension-ui-broker.js";
-import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot } from "../core/managed-instance.js";
+import type { DeliveryMode, DockEvent, EventCursor, ImagePathDto, InstanceSnapshot } from "../core/managed-instance.js";
 import type { RuntimeThinkingLevel } from "../core/runtime-session.js";
 import type { SettingUpdate } from "../core/config-projection.js";
 import type { ProjectTrustChoice } from "./project-trust.js";
@@ -15,6 +15,8 @@ import {
   TOOL_RESULT_PRESENTATION_CAPABILITY,
   TOOLS_EXPANDED_CAPABILITY,
   EXTENSION_WIDGET_CAPABILITY,
+  CONTROLLER_DIRECTIVES_CAPABILITY,
+  IMAGE_INPUT_CAPABILITY,
   type Capability,
   type ClientHello,
   type ControlRequest,
@@ -167,13 +169,13 @@ export class DockClient {
   forget(instanceId:string,operationId=this.createRequestId()):Promise<ForgetResult>{return this.request("instance.forget",{operationId,instanceId},"catalog.maintenance.v1",parseForgetResult);}
   pruneStopped(operationId=this.createRequestId()):Promise<PruneResult>{return this.request("catalog.prune",{operationId,selector:"stopped"},"catalog.maintenance.v1",parsePruneResult);}
   reopen(instanceId:string,operationId=this.createRequestId(),sessionFile?:string,trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<ReopenResult>{return this.request("instance.reopen",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.reopen",parseReopenResult);}
-  events(instanceId:string,since?:EventCursor):Promise<EventsResult>{return this.request("instance.attach",{instanceId,since,follow:false,controller:"observe",replay:"event_log"},"events.replay-purpose.v1",parseEventsResult);}
-  prompt(instanceId:string,message:string,delivery:DeliveryMode="auto",operationId=this.createRequestId()):Promise<PromptResult>{return this.request("command.submit",{operationId,instanceId,message,delivery},"session.core",parsePromptResult);}
+  events(instanceId:string,since?:EventCursor):Promise<EventsResult>{return this.request("instance.attach",{instanceId,since,follow:false,controller:"observe",replay:"event_log"},["events.replay-purpose.v1",IMAGE_INPUT_CAPABILITY],parseEventsResult);}
+  prompt(instanceId:string,message:string,delivery:DeliveryMode="auto",operationId=this.createRequestId(),images?:ImagePathDto[]):Promise<PromptResult>{return this.request("command.submit",{operationId,instanceId,message,...(images===undefined?{}:{images}),delivery},images===undefined?"session.core":["session.core",IMAGE_INPUT_CAPABILITY],parsePromptResult);}
   respondInteraction(instanceId:string,leaseToken:string,interactionId:string,response:InteractionResponse,operationId=this.createRequestId()):Promise<InteractionRespondResult>{if("value" in response){const limit=response.method==="select"?8_000:256_000;if(response.value.length>limit)return Promise.reject(new ControlClientError("invalid_request",`Interaction ${response.method} response exceeds ${limit} characters`,operationId));if(containsBinaryPayload(response.value))return Promise.reject(new ControlClientError("invalid_request","Interaction responses cannot contain binary, image, data URI, or raw base64 payloads",operationId));}return this.request("interaction.respond",{operationId,instanceId,leaseToken,interactionId,response},"extension_ui.v1",parseInteractionRespondResult);}
   setToolsExpanded(instanceId:string,expectedRuntimeGeneration:number,expanded:boolean,operationId=this.createRequestId()):Promise<{instance:InstanceSnapshot}>{return this.request("extension.tools_expanded.set",{operationId,instanceId,expectedRuntimeGeneration,expanded},TOOLS_EXPANDED_CAPABILITY,parseStatusResult);}
   setExtensionWidgetViewport(instanceId:string,leaseToken:string,expectedRuntimeGeneration:number,width:number,height:number):Promise<WidgetViewportResult>{return this.request("extension.widget_viewport.set",{instanceId,leaseToken,expectedRuntimeGeneration,width,height},EXTENSION_WIDGET_CAPABILITY,parseWidgetViewportResult);}
   abort(instanceId:string,operationId=this.createRequestId()):Promise<AbortResult>{return this.request("command.abort",{operationId,instanceId},"run.abort.v1",parseAbortResult,undefined,this.longMutationTimeoutMs);}
-  dequeue(instanceId:string,operationId=this.createRequestId()):Promise<QueueDequeueResult>{return this.request("queue.dequeue",{operationId,instanceId},"queue.control.v1",parseQueueDequeueResult);}
+  dequeue(instanceId:string,operationId=this.createRequestId()):Promise<QueueDequeueResult>{return this.request("queue.dequeue",{operationId,instanceId},["queue.control.v1",IMAGE_INPUT_CAPABILITY],parseQueueDequeueResult);}
   models(instanceId:string):Promise<ModelsResult>{return this.request("model.list",{instanceId},["models.v1","projection.completeness.v1"],parseModelsResult);}
   setModel(instanceId:string,provider:string,modelId:string,operationId=this.createRequestId()):Promise<ModelConfigurationResult>{return this.request("model.set",{operationId,instanceId,provider,modelId},"models.v1",parseModelConfigurationResult);}
   setThinking(instanceId:string,level:RuntimeThinkingLevel,operationId=this.createRequestId()):Promise<ThinkingConfigurationResult>{return this.request("thinking.set",{operationId,instanceId,level},"models.v1",parseThinkingConfigurationResult);}
@@ -183,7 +185,7 @@ export class DockClient {
   updateSetting(instanceId:string,update:SettingUpdate,operationId=this.createRequestId()):Promise<SettingUpdateResult>{return this.request("settings.update",{operationId,instanceId,update},"settings.v1",parseSettingUpdateResult);}
   resources(instanceId:string):Promise<ResourcesResult>{return this.request("resource.get",{instanceId},["resources.v1","projection.completeness.v1"],parseResourcesResult);}
   commands(instanceId:string,prefix?:string):Promise<CommandsResult>{return this.request("command.catalog",{instanceId,prefix},["resources.v1","projection.completeness.v1"],parseCommandsResult);}
-  history(instanceId:string,beforeEntryId?:string,limit=200):Promise<HistoryResult>{return this.request("session.history",{instanceId,beforeEntryId,limit},"tui.projection.v1",parseHistoryResult);}
+  history(instanceId:string,beforeEntryId?:string,limit=200):Promise<HistoryResult>{return this.request("session.history",{instanceId,beforeEntryId,limit},["tui.projection.v1",IMAGE_INPUT_CAPABILITY],parseHistoryResult);}
   sessionInventory(cwd:string,scope:"cwd"|"all"="cwd"):Promise<SessionInventoryResult>{return this.request("session.inventory",{cwd,scope},["session.inventory.v1","session.inventory-diagnostics.v1"],parseSessionInventoryResult);}
   sessions(instanceId:string,scope:"cwd"|"all"):Promise<SessionsResult>{return this.request("session.list",{instanceId,scope},["session.core","projection.completeness.v1"],parseSessionsResult);}
   switchSession(instanceId:string,sessionFile:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<SessionReplacementResult>{return this.request("session.switch",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.commands.v1",parseSessionReplacementResult);}
@@ -200,9 +202,13 @@ export class DockClient {
   async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;claimController?:boolean;conversationBootstrap?:boolean}):Promise<EventSubscription>{
     const since=options.since;const helloId=this.createRequestId(),requestId=this.createRequestId();
     const replay = options.conversationBootstrap ? "conversation_bootstrap" : since === undefined ? undefined : "event_log";
-    const streamCapabilities:string[]=options.requireTuiProjection?["core.v2",TOOLS_EXPANDED_CAPABILITY,EXTENSION_WIDGET_CAPABILITY,GIT_BRANCH_CAPABILITY,TOOL_RESULT_PRESENTATION_CAPABILITY,"events.follow","queue.control.v1","run.abort.v1","tui.projection.v1"]:requiredCapabilities("events.follow");
+    const streamCapabilities:string[]=options.requireTuiProjection?["core.v2",TOOLS_EXPANDED_CAPABILITY,EXTENSION_WIDGET_CAPABILITY,GIT_BRANCH_CAPABILITY,TOOL_RESULT_PRESENTATION_CAPABILITY,IMAGE_INPUT_CAPABILITY,"events.follow","queue.control.v1","run.abort.v1","tui.projection.v1"]:requiredCapabilities("events.follow");
+    if(!streamCapabilities.includes(IMAGE_INPUT_CAPABILITY))streamCapabilities.push(IMAGE_INPUT_CAPABILITY);
     if(replay!==undefined&&!streamCapabilities.includes("events.replay-purpose.v1"))streamCapabilities.push("events.replay-purpose.v1");
-    if(options.claimController&&!streamCapabilities.includes("extension_ui.v1"))streamCapabilities.push("extension_ui.v1");
+    if(options.claimController){
+      if(!streamCapabilities.includes("extension_ui.v1"))streamCapabilities.push("extension_ui.v1");
+      if(!streamCapabilities.includes(CONTROLLER_DIRECTIVES_CAPABILITY))streamCapabilities.push(CONTROLLER_DIRECTIVES_CAPABILITY);
+    }
     const request:ControlRequest={kind:"request",version:2,requestId,type:"instance.attach",params:{instanceId,since,follow:true,controller:options.claimController?"claim":"observe",...(replay===undefined?{}:{replay})}};
     const socket=this.openSocket(),decoder=new JsonLineDecoder();let phase:"hello"|"response"|"events"="hello",hostEpoch="",initialSettled=false,doneSettled=false,closeRequested=false,callbacksReady=false,pending:DockEvent[]=[],runtimeGeneration:number|undefined,lastSequence=-1;
     let resolveInitial!:(x:EventSubscription)=>void,rejectInitial!:(e:unknown)=>void,resolveDone!:()=>void,rejectDone!:(e:unknown)=>void;

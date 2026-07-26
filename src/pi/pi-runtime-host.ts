@@ -1,5 +1,5 @@
 import { lstatSync, realpathSync } from "node:fs";
-import { realpath } from "node:fs/promises";
+import { open, realpath } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 
 import {
@@ -22,6 +22,13 @@ import {
   type SourceInfo,
 } from "@earendil-works/pi-coding-agent";
 
+import {
+  MAX_IMAGE_AGGREGATE_BYTES,
+  MAX_IMAGE_BYTES,
+  MAX_IMAGE_MIME_TYPE_CHARS,
+  MAX_IMAGE_PATH_CHARS,
+  MAX_INPUT_IMAGES,
+} from "../core/instance-dto.js";
 import { projectBuiltInToolPresentation } from "../core/tool-result-presentation.js";
 import type { PiExtensionUiPort } from "./pi-extension-ui-adapter.js";
 import {
@@ -35,6 +42,7 @@ import type {
   RuntimeEvent,
   RuntimeForkResult,
   RuntimeHistoryEntry,
+  RuntimeImagePath,
   RuntimeInputKind,
   RuntimeModelInfo,
   RuntimeModelState,
@@ -257,17 +265,25 @@ export class PiRuntimeHost implements RuntimeSession {
       : "extension_command";
   }
 
-  prompt(text: string, options?: RuntimePromptOptions): Promise<void> {
-    return this.requireActive().session.prompt(text, options as PromptOptions | undefined);
+  async prompt(text: string, options?: RuntimePromptOptions): Promise<void> {
+    const { images, ...promptOptions } = options ?? {};
+    const visualContent = await loadPiImages(images);
+    await this.requireActive().session.prompt(text, {
+      ...promptOptions,
+      ...(visualContent === undefined ? {} : { images: visualContent }),
+    } as PromptOptions);
   }
 
-  queueMessage(text: string, delivery: "steer" | "followUp"): Promise<void> {
+  async queueMessage(text: string, delivery: "steer" | "followUp", images?: RuntimeImagePath[]): Promise<void> {
+    let visualContent: PiImageContent[] | undefined;
+    try { visualContent = await loadPiImages(images); }
+    catch (error) { throw new RuntimeQueueRejectedBeforeEffectError(error); }
     const session = this.requireActive().session;
     const updateSequenceBefore = this.queueUpdateSequence;
     const before = delivery === "steer"
       ? session.getSteeringMessages().length
       : session.getFollowUpMessages().length;
-    const mutation = delivery === "steer" ? session.steer(text) : session.followUp(text);
+    const mutation = delivery === "steer" ? session.steer(text, visualContent) : session.followUp(text, visualContent);
     const appliedSynchronously = this.queueUpdateSequence > updateSequenceBefore || (delivery === "steer"
       ? session.getSteeringMessages().length
       : session.getFollowUpMessages().length) > before;
@@ -919,6 +935,70 @@ function boundedString(value: unknown, limit: number, fallback: string): string 
   return `${value.slice(0, end)}…`;
 }
 
+interface PiImageContent { type: "image"; data: string; mimeType: string }
+
+function safeImageMimeType(value: unknown): string {
+  return typeof value === "string"
+    && value.length <= MAX_IMAGE_MIME_TYPE_CHARS
+    && /^image\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/u.test(value)
+    ? value
+    : "image/unknown";
+}
+
+async function loadPiImages(images: readonly RuntimeImagePath[] | undefined): Promise<PiImageContent[] | undefined> {
+  if (images === undefined || images.length === 0) return undefined;
+  if (!Array.isArray(images) || images.length > MAX_INPUT_IMAGES) throw new Error(`Image input exceeds ${MAX_INPUT_IMAGES} files`);
+  const opened: Array<{ handle: Awaited<ReturnType<typeof open>>; mimeType: string; size: number }> = [];
+  let aggregate = 0;
+  try {
+    const seen = new Set<string>();
+    for (const [index, image] of images.entries()) {
+      const imageNumber = index + 1;
+      if (!image || typeof image.path !== "string" || image.path.length < 1 || image.path.length > MAX_IMAGE_PATH_CHARS || !image.path.startsWith("/") || /[\u0000-\u001f\u007f-\u009f]/u.test(image.path)) throw new Error(`Image ${imageNumber} path must be a bounded absolute local path`);
+      const mimeType = safeImageMimeType(image.mimeType);
+      if (mimeType !== image.mimeType) throw new Error(`Image ${imageNumber} MIME type must be a bounded image/* value`);
+      const descriptorKey = `${image.path}\u0000${mimeType}`;
+      if (seen.has(descriptorKey)) throw new Error("Image descriptors must be unique");
+      seen.add(descriptorKey);
+      let handle: Awaited<ReturnType<typeof open>>;
+      try { handle = await open(image.path, "r"); }
+      catch { throw new Error(`Image ${imageNumber} could not be opened`); }
+      try {
+        const stat = await handle.stat();
+        if (!stat.isFile()) throw new Error(`Image ${imageNumber} path is not a regular file`);
+        if (stat.size > MAX_IMAGE_BYTES) throw new Error(`Image ${imageNumber} exceeds ${MAX_IMAGE_BYTES} bytes`);
+        aggregate += stat.size;
+        if (aggregate > MAX_IMAGE_AGGREGATE_BYTES) throw new Error(`Image input exceeds ${MAX_IMAGE_AGGREGATE_BYTES} aggregate bytes`);
+        opened.push({ handle, mimeType, size: stat.size });
+      } catch (error) {
+        await handle.close().catch(() => {});
+        throw error;
+      }
+    }
+    const result: PiImageContent[] = [];
+    for (const [index, image] of opened.entries()) {
+      const bytes = Buffer.allocUnsafe(image.size);
+      let offset = 0;
+      try {
+        while (offset < bytes.length) {
+          const read = await image.handle.read(bytes, offset, bytes.length - offset, offset);
+          if (read.bytesRead === 0) break;
+          offset += read.bytesRead;
+        }
+        const extra = Buffer.allocUnsafe(1);
+        const extraRead = await image.handle.read(extra, 0, 1, offset);
+        if (extraRead.bytesRead > 0) throw new Error("changed");
+      } catch {
+        throw new Error(`Image ${index + 1} could not be read as a stable file`);
+      }
+      result.push({ type: "image", data: bytes.subarray(0, offset).toString("base64"), mimeType: image.mimeType });
+    }
+    return result;
+  } finally {
+    await Promise.all(opened.map(({ handle }) => handle.close().catch(() => {})));
+  }
+}
+
 function safeOptionalText(value: unknown, limit: number): string | undefined {
   if (typeof value !== "string" || value.length === 0 || containsBinaryText(value)) return undefined;
   return boundedString(value, limit, "");
@@ -1012,10 +1092,10 @@ function projectPrivateContent(content: unknown): unknown {
   const blocks: Record<string, unknown>[] = [];
   for (const item of content.slice(0, 200)) {
     if (!isRecord(item)) continue;
-    if (item.type === "text") blocks.push({ type: "text", text: safeRequiredText(item.text, 8_000, "Sensitive content omitted") });
+    if (item.type === "text") blocks.push({ type: "text", text: item.text === "" ? "" : safeRequiredText(item.text, 8_000, "Sensitive content omitted") });
     else if (item.type === "thinking") blocks.push({ type: "thinking", thinking: safeRequiredText(item.thinking, 8_000, "Sensitive thinking omitted") });
     else if (item.type === "toolCall" || item.type === "tool_call") blocks.push(projectPrivateToolCall(item));
-    else if (item.type === "image") blocks.push({ type: "text", text: "[Image bytes omitted]" });
+    else if (item.type === "image") blocks.push({ type: "image", mimeType: safeImageMimeType(item.mimeType) });
   }
   if (content.length > 200) blocks.push({ type: "text", text: "[Additional content omitted]" });
   return blocks;
@@ -1027,7 +1107,7 @@ function projectPrivateToolContent(content: unknown): unknown {
   return content.slice(0, 200).flatMap((item): Record<string, unknown>[] => {
     if (!isRecord(item)) return [];
     if (item.type === "text") return [{ type: "text", text: safeRequiredText(item.text, 256_000, "Sensitive tool output omitted") }];
-    if (item.type === "image") return [{ type: "text", text: "[Image bytes omitted]" }];
+    if (item.type === "image") return [{ type: "image", mimeType: safeImageMimeType(item.mimeType) }];
     return [];
   });
 }

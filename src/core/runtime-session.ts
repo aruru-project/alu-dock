@@ -14,8 +14,14 @@ export interface RuntimeEvent {
   [key: string]: unknown;
 }
 
+export interface RuntimeImagePath {
+  path: string;
+  mimeType: string;
+}
+
 export interface RuntimePromptOptions {
   streamingBehavior?: "steer" | "followUp";
+  images?: RuntimeImagePath[];
   source?: "interactive" | "rpc" | "extension";
   preflightResult?: (success: boolean) => void;
 }
@@ -264,8 +270,8 @@ export interface RuntimeSession {
   /** Exact current-generation registered extension command routing; all other input remains a prompt. */
   classifyInput(text: string): RuntimeInputKind;
   prompt(text: string, options?: RuntimePromptOptions): Promise<void>;
-  /** Queue already-admitted text for an active/retrying Pi turn without starting a fresh prompt. */
-  queueMessage(text: string, delivery: "steer" | "followUp"): Promise<void>;
+  /** Queue already-admitted text/images for an active/retrying Pi turn without starting a fresh prompt. */
+  queueMessage(text: string, delivery: "steer" | "followUp", images?: RuntimeImagePath[]): Promise<void>;
   listModels(): Promise<RuntimeModelInfo[]>;
   listSessions(scope: "cwd" | "all"): Promise<RuntimeSessionInfo[]>;
   getHistory(): RuntimeHistoryEntry[];

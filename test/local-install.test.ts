@@ -15,14 +15,14 @@ import {
   renderAluDockUnit,
 } from "../src/deployment/local-install.js";
 
-test("package exposes only the installed Alu Dock runtime", async () => {
+test("package exposes the installed Alu Dock runtime and its operator/client documentation", async () => {
   const manifest = JSON.parse(await readFile(join(process.cwd(), "package.json"), "utf8")) as {
     bin?: unknown;
     files?: unknown;
     scripts?: Record<string, string>;
   };
   assert.deepEqual(manifest.bin, { aludock: "dist/src/cli.js" });
-  assert.deepEqual(manifest.files, ["dist/src", "README.md"]);
+  assert.deepEqual(manifest.files, ["dist/src", "docs", "README.md"]);
   assert.equal(manifest.scripts?.["install:local"], "npm run build && node dist/scripts/install-local.js");
   assert.doesNotMatch(manifest.scripts?.["install:local"] ?? "", /\btest\b/u);
 });
@@ -37,7 +37,7 @@ test("npm package excludes tests, fixtures, and development scripts", () => {
   const paths = report[0]?.files?.map((file) => file.path).filter((path): path is string => typeof path === "string") ?? [];
   assert.ok(paths.includes("dist/src/cli.js"));
   assert.ok(paths.includes("package.json"));
-  assert.ok(paths.every((path) => path === "package.json" || path === "README.md" || path.startsWith("dist/src/")), paths.join("\n"));
+  assert.ok(paths.every((path) => path === "package.json" || path === "README.md" || path.startsWith("dist/src/") || path.startsWith("docs/")), paths.join("\n"));
   assert.equal(paths.some((path) => path.startsWith("dist/test/") || path.startsWith("dist/scripts/") || path.startsWith("test/")), false);
 });
 

@@ -20,6 +20,8 @@ export default function (pi) {
     description: "Exercise the Alu Dock extension UI broker",
     handler: async (_args, ctx) => {
       ctx.ui.setStatus("fixture", "ready\\u001b[2J");
+      ctx.ui.setTitle("fixture controller title");
+      ctx.ui.setEditorText("fixture draft\\r\\nsecond line");
       ctx.ui.setToolsExpanded(true);
       ctx.ui.setWidget("fixture", ["worker widget"]);
       ctx.ui.notify("fixture body\\u001b[2J", "info");
@@ -86,6 +88,12 @@ export default function (pi) {
     assert.equal(events.some((event) => event.type === "message.queued" || event.type === "message.submitted"), false);
     assert.equal(events.some((event) => event.type === "run.started"), false);
     assert.equal(events.some((event) => event.type === "interaction.resolved"), true);
+    assert.equal(events.some((event) => event.type === "extension.title_set"
+      && event.data.controllerId === claim.controllerId
+      && event.data.title === "fixture controller title"), true);
+    assert.equal(events.some((event) => event.type === "extension.editor_text_set"
+      && event.data.controllerId === claim.controllerId
+      && event.data.text === "fixture draft\nsecond line"), true);
     const notifications = events
       .filter((event): event is Extract<DockEvent, { type: "extension.notification" }> => event.type === "extension.notification")
       .map((event) => event.data.message);
@@ -113,11 +121,18 @@ export default function (pi) {
     assert.equal(reloadClaim.status, "acquired");
     if (reloadClaim.status !== "acquired") assert.fail("controller was not reacquired after reload");
     leaseToken = reloadClaim.leaseToken;
+    assert.notEqual(reloadClaim.controllerId, claim.controllerId);
     await instance.submit("/ui-fixture", "followUp", "ui-after-reload");
     await responseTask;
     await instance.waitForIdle();
     assert.equal(instance.snapshot().lifecycle, "active");
     assert.equal(instance.snapshot().extensionStatus?.fixture, "ready[2J");
+    const reloadTitle = events.findLast((event) => event.type === "extension.title_set");
+    const reloadEditor = events.findLast((event) => event.type === "extension.editor_text_set");
+    assert.equal(reloadTitle?.type, "extension.title_set");
+    if (reloadTitle?.type === "extension.title_set") assert.equal(reloadTitle.data.controllerId, reloadClaim.controllerId);
+    assert.equal(reloadEditor?.type, "extension.editor_text_set");
+    if (reloadEditor?.type === "extension.editor_text_set") assert.equal(reloadEditor.data.controllerId, reloadClaim.controllerId);
 
     await instance.submit("/ui-component", "followUp", "component-after-reload");
     instance.setExtensionWidgetViewport(leaseToken, instance.snapshot().runtimeGeneration, { width: 73, height: 24 });

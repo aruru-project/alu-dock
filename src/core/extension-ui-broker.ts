@@ -15,7 +15,7 @@ export interface ExtensionDialogOptions {
 }
 
 export type ControllerClaim =
-  | { status: "acquired"; leaseToken: string }
+  | { status: "acquired"; leaseToken: string; controllerId: string }
   | { status: "unavailable" };
 
 export interface InteractionResult {
@@ -49,6 +49,8 @@ export type ExtensionUiEventType =
   | "interaction.resolved"
   | "interaction.cancelled"
   | "extension.notification"
+  | "extension.title_set"
+  | "extension.editor_text_set"
   | "extension.status_changed"
   | "extension.tools_expanded_changed"
   | "extension.widget_changed"
@@ -62,6 +64,7 @@ export interface ExtensionUiEventSink {
 
 interface ControllerLease {
   token: string;
+  controllerId: string;
   generation: number;
 }
 
@@ -173,13 +176,17 @@ export class ExtensionUiBroker {
   claimController(): Promise<ControllerClaim> {
     return this.serialize(async () => {
       if (this.suspended || this.controller) return { status: "unavailable" };
+      const token = this.createId();
+      let controllerId = this.createId();
+      while (controllerId === token) controllerId = this.createId();
       const lease: ControllerLease = {
-        token: this.createId(),
+        token,
+        controllerId,
         generation: this.generation(),
       };
       this.controller = lease;
       this.projectionChanged();
-      return { status: "acquired", leaseToken: lease.token };
+      return { status: "acquired", leaseToken: lease.token, controllerId: lease.controllerId };
     });
   }
 
@@ -315,6 +322,20 @@ export class ExtensionUiBroker {
       message: safeText(message, MAX_TEXT_CHARS),
       level: level === "warning" || level === "error" ? level : "info",
     });
+  }
+
+  setTitle(title: string): void {
+    void this.serialize(() => this.emitControllerDirective("extension.title_set", {
+      controllerId: this.controller?.controllerId ?? "",
+      title: safeLine(title, MAX_TITLE_CHARS),
+    }));
+  }
+
+  setEditorText(text: string): void {
+    void this.serialize(() => this.emitControllerDirective("extension.editor_text_set", {
+      controllerId: this.controller?.controllerId ?? "",
+      text: safeText(text, MAX_EDITOR_CHARS),
+    }));
   }
 
   getToolsExpanded(): boolean {
@@ -650,6 +671,20 @@ export class ExtensionUiBroker {
 
   private recordError(error: string): void {
     void this.emit("extension.error", { error: safeLine(error, MAX_TITLE_CHARS) });
+  }
+
+  private emitControllerDirective<T extends "extension.title_set" | "extension.editor_text_set">(
+    type: T,
+    data: EventDataMap[T],
+  ): Promise<void> {
+    const controller = this.controller;
+    if (this.suspended || !controller || controller.generation !== this.generation() || !this.sink) return Promise.resolve();
+    const targeted = { ...data, controllerId: controller.controllerId } as EventDataMap[T];
+    try {
+      return Promise.resolve(this.sink.emit(type, targeted));
+    } catch {
+      return Promise.resolve();
+    }
   }
 
   private emit<T extends ExtensionUiEventType>(type: T, data: EventDataMap[T], force = false): Promise<void> {

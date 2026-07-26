@@ -3,7 +3,14 @@ import {
   validateBuiltInToolPresentation,
   type BuiltInToolPresentation,
 } from "../core/tool-result-presentation.js";
-import { MAX_PENDING_QUEUE_ITEMS, MAX_PENDING_QUEUE_TEXT_CHARS } from "../core/managed-instance.js";
+import {
+  MAX_IMAGE_MIME_TYPE_CHARS,
+  MAX_IMAGE_PATH_CHARS,
+  MAX_INPUT_IMAGES,
+  MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS,
+  MAX_PENDING_QUEUE_ITEMS,
+  MAX_PENDING_QUEUE_TEXT_CHARS,
+} from "../core/managed-instance.js";
 import type {
   CommandReceipt,
   ContentBlockDto,
@@ -14,6 +21,7 @@ import type {
   EventPage,
   ExecutorIdentity,
   HistoryEntryDto,
+  ImagePathDto,
   InstanceSnapshot,
   JsonObject,
   JsonValue,
@@ -63,17 +71,21 @@ const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "ma
 
 export const TOOLS_EXPANDED_CAPABILITY = "extension_ui.tools-expanded.v1" as const;
 export const EXTENSION_WIDGET_CAPABILITY = "extension_ui.widgets.v1" as const;
+export const CONTROLLER_DIRECTIVES_CAPABILITY = "extension_ui.controller-directives.v1" as const;
 export const GIT_BRANCH_CAPABILITY = "git.branch-footer.v1" as const;
 export const TOOL_RESULT_PRESENTATION_CAPABILITY = "tool-result-presentation.v1" as const;
+export const IMAGE_INPUT_CAPABILITY = "command.images.path.v1" as const;
 
 export const IMPLEMENTED_CAPABILITIES = [
   "catalog.maintenance.v1",
   "catalog.v1",
   "core.v2",
+  IMAGE_INPUT_CAPABILITY,
   "events.follow",
   "events.replay-purpose.v1",
   TOOLS_EXPANDED_CAPABILITY,
   EXTENSION_WIDGET_CAPABILITY,
+  CONTROLLER_DIRECTIVES_CAPABILITY,
   GIT_BRANCH_CAPABILITY,
   TOOL_RESULT_PRESENTATION_CAPABILITY,
   "extension_ui.v1",
@@ -148,7 +160,7 @@ export type ControlRequest =
   | Request<"interaction.respond", { operationId: string; instanceId: string; leaseToken: string; interactionId: string; response: InteractionResponse }>
   | Request<"extension.tools_expanded.set", { operationId: string; instanceId: string; expectedRuntimeGeneration: number; expanded: boolean }>
   | Request<"extension.widget_viewport.set", { instanceId: string; leaseToken: string; expectedRuntimeGeneration: number; width: number; height: number }>
-  | Request<"command.submit", { operationId: string; instanceId: string; message: string; delivery: DeliveryMode }>
+  | Request<"command.submit", { operationId: string; instanceId: string; message: string; images?: ImagePathDto[]; delivery: DeliveryMode }>
   | Request<"command.abort", { operationId: string; instanceId: string }>
   | Request<"queue.dequeue", { operationId: string; instanceId: string }>
   | Request<"model.list", { instanceId: string }>
@@ -201,7 +213,7 @@ export interface AttachInitialDto {
   recentHistory: HistoryEntryDto[];
   historyTruncated: boolean;
   pendingMessages: PendingMessageDto[];
-  controller: { status: "acquired"; leaseToken: string } | { status: "observing" | "unavailable" };
+  controller: { status: "acquired"; leaseToken: string; controllerId: string } | { status: "observing" | "unavailable" };
   following: boolean;
 }
 export type EventsResult = AttachInitialDto;
@@ -479,7 +491,13 @@ export function parseControlRequest(input: unknown): ControlRequest {
         height,
       } };
     }
-    case "command.submit": exact(params, ["operationId", "instanceId", "message", "delivery"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), message: string(params.message, "params.message", MAX_PROMPT_CHARS, "invalid_request"), delivery: enumeration(params.delivery, "params.delivery", ["auto", "prompt", "steer", "followUp"], "invalid_request") } };
+    case "command.submit": {
+      exact(params, ["operationId", "instanceId", "message", "images", "delivery"], "invalid_request");
+      const message = boundedString(params.message, "params.message", MAX_PROMPT_CHARS, "invalid_request");
+      const images = params.images === undefined ? undefined : parseImagePaths(params.images, "params.images", "invalid_request");
+      if (message.trim().length === 0 && (images === undefined || images.length === 0)) throw validation("invalid_request", "command.submit requires message text or at least one image");
+      return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), message, ...(images === undefined ? {} : { images }), delivery: enumeration(params.delivery, "params.delivery", ["auto", "prompt", "steer", "followUp"], "invalid_request") } };
+    }
     case "command.abort": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "queue.dequeue": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "model.list": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
@@ -555,6 +573,7 @@ export function parseControlResponse(input: unknown, requestId: string, hostEpoc
   const error = object(value.error, "response.error");
   exact(error, ["code", "message", "retryable", "details"]);
   const code=string(error.code, "error.code", 128);
+  if (code === "stale_runtime_generation" && error.details === undefined) throw validation("invalid_response", "stale_runtime_generation requires error details");
   return {
     kind: "response", version: 2, requestId, hostEpoch, ok: false,
     error: {
@@ -570,6 +589,7 @@ function parseErrorDetails(code:string,input:unknown):JsonObject {
   const details=object(input,"error.details");
   if(code==="effect_unknown"||code==="operation_receipt_expired") { exact(details,["operationId","queryHint"]); return {operationId:id(details.operationId,"error.details.operationId"),queryHint:string(details.queryHint,"error.details.queryHint",256)}; }
   if(code==="instance_busy") { exact(details,["lifecycle","execution"]); return {lifecycle:enumeration(details.lifecycle,"error.details.lifecycle",["active","stopping","stopped","host_lost","runtime_error"]),execution:enumeration(details.execution,"error.details.execution",["idle","running","failed","unavailable"])}; }
+  if(code==="stale_runtime_generation") { exact(details,["expectedRuntimeGeneration","actualRuntimeGeneration"]); return {expectedRuntimeGeneration:positive(details.expectedRuntimeGeneration,"error.details.expectedRuntimeGeneration"),actualRuntimeGeneration:positive(details.actualRuntimeGeneration,"error.details.actualRuntimeGeneration")}; }
   if(code==="project_trust_required") {
     exact(details,["challengeId","operationId","cwd","choices","expiresAt"]);
     const expected=["trust_once","trust_and_remember","deny_once","deny_and_remember"] as const;
@@ -646,13 +666,14 @@ export function parseEventsResult(input: unknown): EventsResult {
   const pendingMessages = array(value.pendingMessages, "pendingMessages", MAX_PENDING_QUEUE_ITEMS).map((item, index) => parsePendingMessage(item, `pendingMessages[${index}]`));
   if (new Set(pendingMessages.map((item) => item.queueItemId)).size !== pendingMessages.length) throw validation("invalid_response", "pendingMessages queue item IDs must be unique");
   if (pendingMessages.reduce((total, item) => total + item.text.length, 0) > MAX_PENDING_QUEUE_TEXT_CHARS) throw validation("invalid_response", "pendingMessages text exceeds the aggregate queue limit");
+  if (pendingMessages.reduce((total, item) => total + imagePathCharacters(item.images), 0) > MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS) throw validation("invalid_response", "pendingMessages image descriptors exceed the aggregate queue limit");
   const firstFollowUp = pendingMessages.findIndex((item) => item.delivery === "followUp");
   if (firstFollowUp >= 0 && pendingMessages.slice(firstFollowUp).some((item) => item.delivery === "steer")) throw validation("invalid_response", "pendingMessages are not in consumption order");
   const controller = object(value.controller, "controller");
   const controllerStatus = enumeration(controller.status, "controller.status", ["acquired", "observing", "unavailable"]);
   if (controllerStatus === "acquired") {
-    exact(controller, ["status", "leaseToken"]);
-    return { instance, page: { events, earliest, latest, truncated: boolean(page.truncated, "page.truncated"), epochChanged: boolean(page.epochChanged, "page.epochChanged"), generationChanged: boolean(page.generationChanged, "page.generationChanged") }, recentHistory: history, historyTruncated: boolean(value.historyTruncated, "historyTruncated"), pendingMessages, controller: { status: controllerStatus, leaseToken: id(controller.leaseToken, "controller.leaseToken") }, following: boolean(value.following, "following") };
+    exact(controller, ["status", "leaseToken", "controllerId"]);
+    return { instance, page: { events, earliest, latest, truncated: boolean(page.truncated, "page.truncated"), epochChanged: boolean(page.epochChanged, "page.epochChanged"), generationChanged: boolean(page.generationChanged, "page.generationChanged") }, recentHistory: history, historyTruncated: boolean(value.historyTruncated, "historyTruncated"), pendingMessages, controller: { status: controllerStatus, leaseToken: id(controller.leaseToken, "controller.leaseToken"), controllerId: id(controller.controllerId, "controller.controllerId") }, following: boolean(value.following, "following") };
   }
   exact(controller, ["status"]);
   return { instance, page: { events, earliest, latest, truncated: boolean(page.truncated, "page.truncated"), epochChanged: boolean(page.epochChanged, "page.epochChanged"), generationChanged: boolean(page.generationChanged, "page.generationChanged") }, recentHistory: history, historyTruncated: boolean(value.historyTruncated, "historyTruncated"), pendingMessages, controller: { status: controllerStatus }, following: boolean(value.following, "following") };
@@ -708,6 +729,7 @@ export function parseQueueDequeueResult(input: unknown): QueueDequeueResult {
   const all = [...restored, ...inFlight];
   if (all.length > MAX_PENDING_QUEUE_ITEMS || new Set(all.map((item) => item.queueItemId)).size !== all.length) throw validation("invalid_response", "Queue dequeue item IDs must be unique and bounded");
   if (all.reduce((total, item) => total + item.text.length, 0) > MAX_PENDING_QUEUE_TEXT_CHARS) throw validation("invalid_response", "Queue dequeue text exceeds the aggregate queue limit");
+  if (all.reduce((total, item) => total + imagePathCharacters(item.images), 0) > MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS) throw validation("invalid_response", "Queue dequeue image descriptors exceed the aggregate queue limit");
   for (const [field, items] of [["restored", restored], ["inFlight", inFlight]] as const) {
     const firstFollowUp = items.findIndex((item) => item.delivery === "followUp");
     if (firstFollowUp >= 0 && items.slice(firstFollowUp).some((item) => item.delivery === "steer")) throw validation("invalid_response", `Queue dequeue ${field} items are not in consumption order`);
@@ -1038,18 +1060,39 @@ function parseExecutor(input: unknown, field: string): ExecutorIdentity {
   if (executor.model !== undefined) { const value = object(executor.model, `${field}.model`); exact(value, ["provider", "id", "name"]); const name=optionalString(value.name, `${field}.model.name`, 256); model = { provider: string(value.provider, `${field}.model.provider`, MAX_MODEL_PROVIDER_CHARS), id: string(value.id, `${field}.model.id`, MAX_MODEL_ID_CHARS), ...(name === undefined ? {} : { name }) }; }
   return { kind: string(executor.kind, `${field}.kind`, 128), version: optionalString(executor.version, `${field}.version`, 128), piSessionId: id(executor.piSessionId, `${field}.piSessionId`), sessionFile: optionalString(executor.sessionFile, `${field}.sessionFile`, MAX_CONTROL_CWD_CHARS), model, thinkingLevel: executor.thinkingLevel === undefined ? undefined : enumeration(executor.thinkingLevel, `${field}.thinkingLevel`, THINKING_LEVELS) };
 }
+function parseImagePaths(input: unknown, field: string, code = "invalid_response"): ImagePathDto[] {
+  const images = array(input, field, MAX_INPUT_IMAGES, code).map((item, index) => {
+    const image = object(item, `${field}[${index}]`, code);
+    exact(image, ["path", "mimeType"], code);
+    const path = string(image.path, `${field}[${index}].path`, MAX_IMAGE_PATH_CHARS, code);
+    if (!path.startsWith("/") || /[\u0000-\u001f\u007f-\u009f]/u.test(path)) throw validation(code, `${field}[${index}].path must be an absolute local path without control characters`);
+    const mimeType = string(image.mimeType, `${field}[${index}].mimeType`, MAX_IMAGE_MIME_TYPE_CHARS, code);
+    if (!/^image\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/u.test(mimeType)) throw validation(code, `${field}[${index}].mimeType must be a bounded image/* value`);
+    return { path, mimeType };
+  });
+  if (new Set(images.map((image) => `${image.path}\u0000${image.mimeType}`)).size !== images.length) throw validation(code, `${field} must not contain duplicate descriptors`);
+  return images;
+}
+
 function parsePendingMessage(input: unknown, field: string): PendingMessageDto {
-  const item = object(input, field); exact(item, ["queueItemId", "operationId", "delivery", "text", "acceptedAt"]);
-  const text = string(item.text, `${field}.text`, MAX_PROMPT_CHARS);
+  const item = object(input, field); exact(item, ["queueItemId", "operationId", "delivery", "text", "images", "acceptedAt"]);
+  const text = boundedString(item.text, `${field}.text`, MAX_PROMPT_CHARS);
+  const images = item.images === undefined ? undefined : parseImagePaths(item.images, `${field}.images`);
+  if (text.length === 0 && (images === undefined || images.length === 0)) throw validation("invalid_response", `${field} requires text or at least one image`);
   if (/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u.test(text)) throw validation("invalid_response", `${field}.text contains terminal control characters`);
   return {
     queueItemId: id(item.queueItemId, `${field}.queueItemId`),
     operationId: id(item.operationId, `${field}.operationId`),
     delivery: enumeration(item.delivery, `${field}.delivery`, ["steer", "followUp"]),
     text,
+    ...(images === undefined ? {} : { images }),
     acceptedAt: timestamp(item.acceptedAt, `${field}.acceptedAt`),
   };
 }
+function imagePathCharacters(images: readonly ImagePathDto[] | undefined): number {
+  return (images ?? []).reduce((total, image) => total + image.path.length + image.mimeType.length, 0);
+}
+
 function parsePending(input: unknown, field: string): InstanceSnapshot["pending"] {
   const pending = object(input, field); exact(pending, ["steering", "followUp", "total"]);
   const result = { steering: unsigned(pending.steering, `${field}.steering`), followUp: unsigned(pending.followUp, `${field}.followUp`), total: unsigned(pending.total, `${field}.total`) };
@@ -1124,11 +1167,11 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "run.settled": exact(data, ["operationId", "result", "stopReason", "error"]); return { operationId: optionalText("operationId", 128), result: enumeration(data.result, "result", ["never", "succeeded", "failed", "aborted", "interrupted"]), stopReason: optionalText("stopReason", 128), error: optionalText("error", MAX_MESSAGE) };
     case "message.queued": return parsePendingMessage(data, field);
     case "message.submitted": {
-      exact(data, ["operationId", "messageId", "role", "text", "delivery", "queueItemId"]);
+      exact(data, ["operationId", "messageId", "role", "text", "images", "delivery", "queueItemId"]);
       const delivery = enumeration(data.delivery, "delivery", ["prompt", "steer", "followUp"]);
       const queueItemId = optionalText("queueItemId", 128);
       if ((delivery === "prompt") === (queueItemId !== undefined)) throw validation("invalid_response", "message.submitted queueItemId does not match delivery");
-      return { operationId: text("operationId", 128), messageId: text("messageId", 128), role: enumeration(data.role, "role", ["user"]), text: text("text", MAX_PROMPT_CHARS), delivery, queueItemId };
+      return { operationId: text("operationId", 128), messageId: text("messageId", 128), role: enumeration(data.role, "role", ["user"]), text: boundedString(data.text, `${field}.text`, MAX_PROMPT_CHARS), ...(data.images === undefined ? {} : { images: parseImagePaths(data.images, `${field}.images`) }), delivery, queueItemId };
     }
     case "message.delta": exact(data, ["messageId", "block", "delta"]); return { messageId: text("messageId", 128), block: enumeration(data.block, "block", ["text", "thinking"]), delta: boundedString(data.delta, `${field}.delta`, MAX_TEXT) };
     case "message.completed": exact(data, ["messageId", "role", "content", "stopReason", "error"]); return { messageId: text("messageId", 128), role: enumeration(data.role, "role", ["user", "assistant", "tool", "system"]), content: parseContent(data.content, `${field}.content`), stopReason: optionalText("stopReason", 128), error: optionalText("error", MAX_MESSAGE) };
@@ -1166,6 +1209,18 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "interaction.resolved": exact(data, ["interactionId", "method"]); return { interactionId: text("interactionId", 128), method: enumeration(data.method, "method", ["select", "confirm", "input", "editor"]) };
     case "interaction.cancelled": exact(data, ["interactionId", "method", "reason"]); return { interactionId: text("interactionId", 128), method: enumeration(data.method, "method", ["select", "confirm", "input", "editor"]), reason: enumeration(data.reason, "reason", ["user", "timeout", "signal", "detach", "replacement", "host_draining", "overflow"]) };
     case "extension.notification": exact(data, ["message", "level"]); return { message: payloadFreeString(data.message, `${field}.message`, MAX_TEXT), level: enumeration(data.level, "level", ["info", "warning", "error"]) };
+    case "extension.title_set": {
+      exact(data, ["controllerId", "title"]);
+      const title = payloadFreeBoundedString(data.title, `${field}.title`, 2_048);
+      if (/[\u0000-\u001f\u007f-\u009f]/u.test(title)) throw validation("invalid_response", `${field}.title contains terminal control characters`);
+      return { controllerId: id(data.controllerId, `${field}.controllerId`), title };
+    }
+    case "extension.editor_text_set": {
+      exact(data, ["controllerId", "text"]);
+      const editorText = payloadFreeBoundedString(data.text, `${field}.text`, 256_000);
+      if (/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u.test(editorText)) throw validation("invalid_response", `${field}.text contains terminal control characters`);
+      return { controllerId: id(data.controllerId, `${field}.controllerId`), text: editorText };
+    }
     case "extension.status_changed": exact(data, ["key", "text"]); return { key: extensionKey(data.key, `${field}.key`), text: data.text === undefined ? undefined : payloadFreeString(data.text, `${field}.text`, MAX_MESSAGE) };
     case "extension.tools_expanded_changed": exact(data, ["expanded"]); return { expanded: boolean(data.expanded, `${field}.expanded`) };
     case "extension.widget_changed": exact(data, ["key", "lines", "placement"]); return { key: extensionKey(data.key, `${field}.key`), lines: data.lines === undefined ? undefined : payloadFreeStrings(data.lines, `${field}.lines`, MAX_JSON_ARRAY, MAX_TEXT), placement: data.placement === undefined ? undefined : enumeration(data.placement, "placement", ["aboveEditor", "belowEditor"]) };
@@ -1192,8 +1247,9 @@ function parseToolPresentation(
 
 function parseContent(input: unknown, field: string): ContentBlockDto[] {
   return array(input, field, MAX_JSON_ARRAY).map((item, index) => {
-    const block = object(item, `${field}[${index}]`); const type = enumeration(block.type, `${field}[${index}].type`, ["text", "thinking", "tool_call", "tool_result", "omitted"]);
+    const block = object(item, `${field}[${index}]`); const type = enumeration(block.type, `${field}[${index}].type`, ["text", "thinking", "image", "tool_call", "tool_result", "omitted"]);
     if (type === "text" || type === "thinking") { exact(block, ["type", "text"]); return { type, text: boundedString(block.text, `${field}[${index}].text`, MAX_TEXT) }; }
+    if (type === "image") { exact(block, ["type", "mimeType"]); const mimeType = string(block.mimeType, `${field}[${index}].mimeType`, MAX_IMAGE_MIME_TYPE_CHARS); if (!/^image\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/u.test(mimeType)) throw validation("invalid_response", `${field}[${index}].mimeType must be image/*`); return { type, mimeType }; }
     if (type === "tool_call") { exact(block, ["type", "toolCallId", "toolName", "args", "omittedFields"]); return { type, toolCallId: id(block.toolCallId, "toolCallId"), toolName: string(block.toolName, "toolName", 256), args: parseJsonObject(block.args, "args"), omittedFields: omitted(block.omittedFields, "omittedFields") }; }
     if (type === "tool_result") {
       exact(block, ["type", "toolCallId", "toolName", "text", "isError", "presentation", "omittedFields"]);

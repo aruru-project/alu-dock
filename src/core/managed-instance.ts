@@ -59,7 +59,14 @@ import type {
   RuntimeSessionTarget,
   RuntimeThinkingLevel,
 } from "./runtime-session.js";
-import { MAX_PENDING_QUEUE_ITEMS, MAX_PENDING_QUEUE_TEXT_CHARS } from "./instance-dto.js";
+import {
+  MAX_IMAGE_MIME_TYPE_CHARS,
+  MAX_IMAGE_PATH_CHARS,
+  MAX_INPUT_IMAGES,
+  MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS,
+  MAX_PENDING_QUEUE_ITEMS,
+  MAX_PENDING_QUEUE_TEXT_CHARS,
+} from "./instance-dto.js";
 import type {
   AttachProjection,
   CommandReceipt,
@@ -72,6 +79,7 @@ import type {
   ExecutorIdentity,
   HistoryEntryDto,
   HistoryPageDto,
+  ImagePathDto,
   InstanceExecution,
   InstanceLifecycle,
   InstanceSnapshot,
@@ -101,6 +109,7 @@ export type {
   ExecutorIdentity,
   HistoryEntryDto,
   HistoryPageDto,
+  ImagePathDto,
   InstanceExecution,
   InstanceLifecycle,
   InstanceSnapshot,
@@ -119,7 +128,16 @@ export type {
   TreeNodeDto,
   TreePageDto,
 } from "./instance-dto.js";
-export { MAX_PENDING_QUEUE_ITEMS, MAX_PENDING_QUEUE_TEXT_CHARS } from "./instance-dto.js";
+export {
+  MAX_IMAGE_AGGREGATE_BYTES,
+  MAX_IMAGE_BYTES,
+  MAX_IMAGE_MIME_TYPE_CHARS,
+  MAX_IMAGE_PATH_CHARS,
+  MAX_INPUT_IMAGES,
+  MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS,
+  MAX_PENDING_QUEUE_ITEMS,
+  MAX_PENDING_QUEUE_TEXT_CHARS,
+} from "./instance-dto.js";
 import { projectRuntimeNavigateResult, projectRuntimeTree, type ProjectedSessionTree } from "./session-tree.js";
 
 export interface BoundedCollectionProjection<T> {
@@ -168,6 +186,7 @@ interface PendingAdmission {
 interface AcceptedPromptMessage {
   operationId: string;
   text: string;
+  images?: ImagePathDto[];
 }
 
 interface QueuedUserMessageStart {
@@ -890,7 +909,7 @@ export class ManagedInstance {
           this.session.isStreaming,
         ) }
         : replayPurpose === "legacy_history_overlay"
-          ? { ...sourcePage, events: eventsNotCoveredByHistory(sourcePage.events, this.historyValue) }
+          ? { ...sourcePage, events: reconcileConversationEventsWithHistory(sourcePage.events, this.historyValue) }
           : sourcePage;
       return {
         instance,
@@ -1160,24 +1179,26 @@ export class ManagedInstance {
     }
   }
 
-  async submit(message: string, delivery: DeliveryMode = "auto", operationId = this.createCommandId()): Promise<CommandReceipt> {
+  async submit(message: string, delivery: DeliveryMode = "auto", operationId = this.createCommandId(), images?: readonly ImagePathDto[]): Promise<CommandReceipt> {
     this.assertActive();
     if (this.pendingAdmission) throw new InstanceAdmissionPendingError(this.id);
-    if (message.trim().length === 0) {
-      throw new Error("Prompt message must not be empty");
+    const inputImages = cloneInputImages(images);
+    if (message.trim().length === 0 && inputImages.length === 0) {
+      throw new Error("Prompt message or image must be provided");
     }
 
     const compacting = this.runtimeCompactionInProgress();
     const manualCompactionPending = this.manualCompactionAdmissionActive();
     const hostQueueCustody = this.hostQueueCustodyActive();
     if (this.session.classifyInput(message) === "extension_command") {
+      if (inputImages.length > 0) throw new Error("Registered extension commands do not accept image attachments");
       if (this.commandAbortPending || this.queueMutationPending || (this.configurationPending && !compacting)) {
         throw new InstanceBusyError(this.id, "submitting an extension command");
       }
       return this.submitExtensionCommand(message, operationId);
     }
     if (this.commandAbortPending || this.queueMutationPending) throw new InstanceBusyError(this.id, "submitting a prompt");
-    if (compacting || manualCompactionPending || hostQueueCustody) return this.submitCompactionDeferred(message, delivery, operationId);
+    if (compacting || manualCompactionPending || hostQueueCustody) return this.submitCompactionDeferred(message, delivery, operationId, inputImages);
     if (this.configurationPending) throw new InstanceBusyError(this.id, "submitting a prompt");
 
     // A queued compaction_end may leave the catalog projection momentarily
@@ -1188,7 +1209,7 @@ export class ManagedInstance {
     const streamingBehavior = resolvedDelivery === "steer" || resolvedDelivery === "followUp"
       ? resolvedDelivery
       : undefined;
-    if (streamingBehavior !== undefined && !this.canQueueMessage(message)) throw new QueueCapacityError();
+    if (streamingBehavior !== undefined && !this.canQueueMessage(message, inputImages)) throw new QueueCapacityError();
     let actualDelivery = resolvedDelivery;
     let actuallyQueued = streamingBehavior !== undefined;
     const commandId = operationId;
@@ -1299,6 +1320,7 @@ export class ManagedInstance {
           operationId: commandId,
           delivery: actualDelivery === "followUp" ? "followUp" : "steer",
           text: safeWireText(message, MAX_PENDING_QUEUE_TEXT_CHARS, "Queued message omitted"),
+          ...(inputImages.length === 0 ? {} : { images: cloneInputImages(inputImages) }),
           acceptedAt,
           phase: "runtime_queued",
         }
@@ -1306,7 +1328,7 @@ export class ManagedInstance {
       if (pendingMessage) {
         this.pendingQueueMessages.push(pendingMessage);
         this.assignPendingRuntimeHashes(pendingMessage.delivery, pendingMessage.delivery === "steer" ? this.runtimeSteeringHashes : this.runtimeFollowUpHashes);
-      } else this.acceptedPromptMessages.push({ operationId: commandId, text: message });
+      } else this.acceptedPromptMessages.push({ operationId: commandId, text: message, ...(inputImages.length === 0 ? {} : { images: cloneInputImages(inputImages) }) });
       const acceptedTransition = this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "command.accepted", effect: "post_effect", operationId: commandId, instanceId: this.id },
         () => {
@@ -1380,14 +1402,14 @@ export class ManagedInstance {
       try {
         const rerouted = resolveDelivery(delivery, true);
         if (rerouted === "prompt") throw new InvalidDeliveryModeError(rerouted, true);
-        if (!this.canQueueMessage(message)) throw new QueueCapacityError();
+        if (!this.canQueueMessage(message, inputImages)) throw new QueueCapacityError();
         deferredDelivery = rerouted;
       } catch (error) {
         await rejectBeforeRun(error, "compaction_started_during_admission");
         return receiptPromise;
       }
       try {
-        const receipt = await this.completeCompactionDeferredAdmission(message, deferredDelivery, commandId);
+        const receipt = await this.completeCompactionDeferredAdmission(message, deferredDelivery, commandId, inputImages);
         release();
         return receipt;
       } catch (error) {
@@ -1402,6 +1424,7 @@ export class ManagedInstance {
     try {
       runtimePromise = this.session.prompt(message, {
         streamingBehavior,
+        ...(inputImages.length === 0 ? {} : { images: cloneInputImages(inputImages) }),
         source: "rpc",
         preflightResult: onPreflight,
       });
@@ -1540,10 +1563,11 @@ export class ManagedInstance {
     message: string,
     delivery: DeliveryMode,
     operationId: string,
+    images: readonly ImagePathDto[],
   ): Promise<CommandReceipt> {
     const resolvedDelivery = resolveDelivery(delivery, true);
     if (resolvedDelivery === "prompt") throw new InvalidDeliveryModeError(resolvedDelivery, true);
-    if (!this.canQueueMessage(message)) throw new QueueCapacityError();
+    if (!this.canQueueMessage(message, images)) throw new QueueCapacityError();
 
     const admissionToken = {};
     let releaseAdmission!: () => void;
@@ -1556,7 +1580,7 @@ export class ManagedInstance {
         { kind: "command.admission", effect: "pre_effect", operationId, instanceId: this.id },
         () => {},
       ));
-      return await this.completeCompactionDeferredAdmission(message, resolvedDelivery, operationId);
+      return await this.completeCompactionDeferredAdmission(message, resolvedDelivery, operationId, images);
     } catch (error) {
       this.catalogAdmissionOperationId = undefined;
       await this.flushAdmissionRuntimeEvents().catch(() => {});
@@ -1573,6 +1597,7 @@ export class ManagedInstance {
     message: string,
     resolvedDelivery: "steer" | "followUp",
     operationId: string,
+    images: readonly ImagePathDto[],
   ): Promise<CommandReceipt> {
     const acceptedAt = this.timestamp();
     const pendingMessage: PendingQueueMessage = {
@@ -1580,6 +1605,7 @@ export class ManagedInstance {
       operationId,
       delivery: resolvedDelivery,
       text: safeWireText(message, MAX_PENDING_QUEUE_TEXT_CHARS, "Queued message omitted"),
+      ...(images.length === 0 ? {} : { images: cloneInputImages(images) }),
       acceptedAt,
       phase: "host_deferred",
       originalText: message,
@@ -1712,7 +1738,7 @@ export class ManagedInstance {
     item.phase = "dispatching";
     if (forceRuntimeQueue) {
       try {
-        await this.session.queueMessage(item.originalText ?? item.text, item.delivery);
+        await this.session.queueMessage(item.originalText ?? item.text, item.delivery, item.images);
         item.phase = "runtime_queued";
         await this.transitionTail;
         return true;
@@ -1765,6 +1791,7 @@ export class ManagedInstance {
     try {
       runtimePromise = this.session.prompt(item.originalText ?? item.text, {
         streamingBehavior: item.delivery,
+        ...(item.images === undefined ? {} : { images: cloneInputImages(item.images) }),
         source: "rpc",
         preflightResult: onPreflight,
       });
@@ -3501,7 +3528,7 @@ export class ManagedInstance {
     return pendingMessageProjection(this.pendingQueueMessages);
   }
 
-  private canQueueMessage(message: string): boolean {
+  private canQueueMessage(message: string, images: readonly ImagePathDto[] = []): boolean {
     const tracked = this.trackedQueueMessages();
     const projectedCount = Math.max(
       tracked.length,
@@ -3511,7 +3538,13 @@ export class ManagedInstance {
       (total, item) => total + (item.originalText?.length ?? item.text.length),
       0,
     ) + message.length;
-    return projectedCount <= MAX_PENDING_QUEUE_ITEMS && projectedCharacters <= MAX_PENDING_QUEUE_TEXT_CHARS;
+    const projectedImageCharacters = tracked.reduce(
+      (total, item) => total + imageDescriptorCharacters(item.images),
+      0,
+    ) + imageDescriptorCharacters(images);
+    return projectedCount <= MAX_PENDING_QUEUE_ITEMS
+      && projectedCharacters <= MAX_PENDING_QUEUE_TEXT_CHARS
+      && projectedImageCharacters <= MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS;
   }
 
   private discardAcceptedPrompt(operationId: string): void {
@@ -3593,6 +3626,7 @@ export class ManagedInstance {
       messageId: this.currentUserMessageId ?? `user-${start.queued.operationId}`,
       role: "user",
       text: safeWireText(start.consumedText || start.queued.text, MAX_PENDING_QUEUE_TEXT_CHARS, "User message omitted"),
+      ...(start.queued.images === undefined ? {} : { images: cloneInputImages(start.queued.images) }),
       delivery: start.queued.delivery,
       queueItemId: start.queued.queueItemId,
     });
@@ -3631,6 +3665,7 @@ export class ManagedInstance {
       messageId: this.currentUserMessageId,
       role: "user",
       text: safeWireText(consumedText || accepted?.text || "", MAX_PENDING_QUEUE_TEXT_CHARS, "User message omitted"),
+      ...(accepted?.images === undefined ? {} : { images: cloneInputImages(accepted.images) }),
       delivery: "prompt",
     });
   }
@@ -3812,6 +3847,26 @@ function projectGitBranch(value: unknown): string | undefined {
   return safeWireText(value, 256, "Git branch omitted");
 }
 
+function cloneInputImages(images: readonly ImagePathDto[] | undefined): ImagePathDto[] {
+  if (images === undefined) return [];
+  if (!Array.isArray(images) || images.length > MAX_INPUT_IMAGES) throw new Error(`Prompt images must contain at most ${MAX_INPUT_IMAGES} items`);
+  const result = images.map((image) => {
+    if (!image || typeof image.path !== "string" || image.path.length < 1 || image.path.length > MAX_IMAGE_PATH_CHARS || !image.path.startsWith("/") || /[\u0000-\u001f\u007f-\u009f]/u.test(image.path)) {
+      throw new Error("Prompt image path must be a bounded absolute local path");
+    }
+    if (typeof image.mimeType !== "string" || image.mimeType.length > MAX_IMAGE_MIME_TYPE_CHARS || !/^image\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/u.test(image.mimeType)) {
+      throw new Error("Prompt image MIME type must be a bounded image/* value");
+    }
+    return { path: image.path, mimeType: image.mimeType };
+  });
+  if (new Set(result.map((image) => `${image.path}\u0000${image.mimeType}`)).size !== result.length) throw new Error("Prompt images must be unique");
+  return result;
+}
+
+function imageDescriptorCharacters(images: readonly ImagePathDto[] | undefined): number {
+  return (images ?? []).reduce((total, image) => total + image.path.length + image.mimeType.length, 0);
+}
+
 function runtimeMessageHash(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
@@ -3845,6 +3900,7 @@ function pendingMessageProjection(pending: readonly PendingQueueMessage[]): Pend
     operationId: item.operationId,
     delivery: item.delivery,
     text: item.text,
+    ...(item.images === undefined ? {} : { images: cloneInputImages(item.images) }),
     acceptedAt: item.acceptedAt,
   })));
 }
@@ -3911,12 +3967,14 @@ function conversationBootstrapEvents(
   // snapshot still identifies an active run, every retained frame is part of
   // that run's live era even when its start marker has fallen out.
   if (start < 0 && !truncated) return [];
-  return eventsNotCoveredByHistory(start < 0 ? events : events.slice(start), history);
+  return reconcileConversationEventsWithHistory(start < 0 ? events : events.slice(start), history, true);
 }
 
-function eventsNotCoveredByHistory(events: DockEvent[], history: HistoryEntryDto[]): DockEvent[] {
+/** Remove only conversation frames proven durable in the supplied branch history. */
+export function reconcileConversationEventsWithHistory(events: DockEvent[], history: readonly HistoryEntryDto[], activeTail = false): DockEvent[] {
+  const comparableHistory = activeTail ? historySuffixCoveredByEvents(events, history) : history;
   const counts = new Map<string, number>();
-  for (const entry of history) {
+  for (const entry of comparableHistory) {
     const fingerprint = historyFingerprint(entry.role, entry.content);
     counts.set(fingerprint, (counts.get(fingerprint) ?? 0) + 1);
   }
@@ -3935,7 +3993,11 @@ function eventsNotCoveredByHistory(events: DockEvent[], history: HistoryEntryDto
       if (consume(historyFingerprint(event.data.role, event.data.content))) coveredMessages.add(event.data.messageId);
     } else if (event.type === "message.submitted") {
       if (coveredMessages.has(event.data.messageId)) continue;
-      if (consume(historyFingerprint("user", [{ type: "text", text: event.data.text }]))) coveredMessages.add(event.data.messageId);
+      const content: ContentBlockDto[] = [
+        { type: "text", text: event.data.text },
+        ...(event.data.images ?? []).map((image) => ({ type: "image" as const, mimeType: image.mimeType })),
+      ];
+      if (consume(historyFingerprint("user", content))) coveredMessages.add(event.data.messageId);
     } else if (event.type === "tool.completed") {
       const content: ContentBlockDto[] = [{
         type: "tool_result",
@@ -3956,6 +4018,52 @@ function eventsNotCoveredByHistory(events: DockEvent[], history: HistoryEntryDto
     }
     return true;
   });
+}
+
+function historySuffixCoveredByEvents(events: DockEvent[], history: readonly HistoryEntryDto[]): readonly HistoryEntryDto[] {
+  const submitted = events.find((event): event is Extract<DockEvent, { type: "message.submitted" }> => event.type === "message.submitted");
+  if (!submitted) return history;
+
+  const eventFingerprints = new Map<string, string>();
+  const toolFingerprints = new Map<string, string>();
+  for (const event of events) {
+    if (event.type === "message.submitted") {
+      eventFingerprints.set(event.data.messageId, historyFingerprint("user", [
+        { type: "text", text: event.data.text },
+        ...(event.data.images ?? []).map((image) => ({ type: "image" as const, mimeType: image.mimeType })),
+      ]));
+    } else if (event.type === "message.completed" && !eventFingerprints.has(event.data.messageId)) {
+      eventFingerprints.set(event.data.messageId, historyFingerprint(event.data.role, event.data.content));
+    } else if (event.type === "tool.completed") {
+      toolFingerprints.set(event.data.toolCallId, historyFingerprint("tool", [{
+        type: "tool_result",
+        toolCallId: event.data.toolCallId,
+        toolName: event.data.toolName,
+        text: event.data.text,
+        isError: event.data.isError,
+      }]));
+    }
+  }
+
+  const available = new Map<string, number>();
+  for (const fingerprint of [...eventFingerprints.values(), ...toolFingerprints.values()]) {
+    available.set(fingerprint, (available.get(fingerprint) ?? 0) + 1);
+  }
+  const anchor = eventFingerprints.get(submitted.data.messageId);
+  if (!anchor) return [];
+  for (let start = history.length - 1; start >= 0; start -= 1) {
+    if (historyFingerprint(history[start]!.role, history[start]!.content) !== anchor) continue;
+    const remaining = new Map(available);
+    let covered = true;
+    for (const entry of history.slice(start)) {
+      const fingerprint = historyFingerprint(entry.role, entry.content);
+      const count = remaining.get(fingerprint) ?? 0;
+      if (count < 1) { covered = false; break; }
+      if (count === 1) remaining.delete(fingerprint); else remaining.set(fingerprint, count - 1);
+    }
+    if (covered) return history.slice(start);
+  }
+  return [];
 }
 
 function historyFingerprint(role: HistoryEntryDto["role"], content: ContentBlockDto[]): string {
@@ -4205,8 +4313,8 @@ function projectContentBlocks(content: unknown): ContentBlockDto[] {
         ...(resultProjection.presentation === undefined ? {} : { presentation: resultProjection.presentation }),
         ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
       };
-    } else if (block.type === "image") {
-      candidate = { type: "omitted", kind: "image", description: "Image bytes omitted; local path remains in tool text when provided" };
+    } else if (block.type === "image" && typeof block.mimeType === "string") {
+      candidate = { type: "image", mimeType: boundedRuntimeString(block.mimeType, 256, "image/unknown") };
     }
     if (candidate && !append(candidate)) { bounded = false; break; }
   }

@@ -497,6 +497,40 @@ test("authoritative tool expansion rejects stale generations and stays ephemeral
   assert.equal("toolsExpanded" in instance.catalogRecord(), false);
 });
 
+test("image-only prompt and streaming input preserve one operation payload", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  const first = [{ path: "/tmp/visual-one", mimeType: "image/x-first" }];
+  await instance.submit("", "auto", "image-only", first);
+  assert.deepEqual(session.promptCalls[0]?.options?.images, first);
+  session.startRun();
+  const second = [{ path: "/tmp/visual-two", mimeType: "image/x-second" }];
+  await instance.submit("same", "steer", "image-steer", second);
+  assert.deepEqual(session.promptCalls[1]?.options?.images, second);
+  assert.equal(session.promptCalls[1]?.options?.streamingBehavior, "steer");
+});
+
+test("compaction custody keeps same-text different-image queue items distinct through attach and dequeue", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  session.isCompacting = true;
+  session.emit({ type: "compaction_start", reason: "threshold" });
+  const first = [{ path: "/tmp/fifo-one", mimeType: "image/x-one" }];
+  const second = [{ path: "/tmp/fifo-two", mimeType: "image/x-two" }];
+  await instance.submit("same", "auto", "fifo-image-one", first);
+  await instance.submit("same", "auto", "fifo-image-two", second);
+  const attached = await instance.getAttachProjection(undefined);
+  assert.deepEqual(attached.pendingMessages.map((item) => ({ operationId: item.operationId, images: item.images })), [
+    { operationId: "fifo-image-one", images: first },
+    { operationId: "fifo-image-two", images: second },
+  ]);
+  const dequeued = await instance.dequeue("dequeue-image-fifo");
+  assert.deepEqual(dequeued.restored.map((item) => ({ operationId: item.operationId, images: item.images })), [
+    { operationId: "fifo-image-one", images: first },
+    { operationId: "fifo-image-two", images: second },
+  ]);
+});
+
 test("submit returns after preflight while the runtime promise remains host-owned", async () => {
   const session = new FakeRuntimeSession();
   const instance = createInstance(session);
@@ -2099,6 +2133,46 @@ test("attach history coverage removes replay frames for the same stable assistan
   const projection = await instance.getAttachProjection(undefined);
   assert.deepEqual(projection.recentHistory.map((entry) => entry.entryId), ["history-assistant"]);
   assert.equal(projection.page.events.some((event) => event.type === "message.delta" || event.type === "message.completed" && event.data.role === "assistant"), false);
+});
+
+test("image-only history covers the matching live user turn during conversation bootstrap", async () => {
+  const session = new FakeRuntimeSession();
+  const instance = createInstance(session);
+  const images = [{ path: "/tmp/image-only.png", mimeType: "image/png" }];
+  await instance.submit("", "prompt", "image-only-bootstrap", images);
+  session.startRun();
+  session.history = [{
+    entryId: "persisted-image-only",
+    role: "user",
+    content: [{ type: "text", text: "" }, { type: "image", mimeType: "image/png" }],
+  }];
+  session.emit({ type: "entry_appended", entry: { id: "persisted-image-only" } });
+
+  const bootstrap = await instance.getAttachProjection(undefined, 200, "conversation_bootstrap");
+  assert.deepEqual(bootstrap.recentHistory[0]?.content, [{ type: "text", text: "" }, { type: "image", mimeType: "image/png" }]);
+  assert.equal(bootstrap.page.events.some((event) => event.type === "message.submitted" || event.type === "message.completed" && event.data.role === "user"), false);
+});
+
+test("active image submission is not hidden by an older same-text and same-MIME turn", async () => {
+  const session = new FakeRuntimeSession();
+  session.history = [
+    { entryId: "old-image", role: "user", content: [{ type: "text", text: "same" }, { type: "image", mimeType: "image/png" }] },
+    { entryId: "old-answer", role: "assistant", content: [{ type: "text", text: "old answer" }] },
+  ];
+  const instance = createInstance(session);
+  const images = [{ path: "/tmp/current.png", mimeType: "image/png" }];
+  await instance.submit("same", "prompt", "current-image-operation", images);
+  session.startRun();
+
+  const beforePersistence = await instance.getAttachProjection(undefined, 200, "conversation_bootstrap");
+  assert.equal(beforePersistence.page.events.some((event) => event.type === "message.submitted"
+    && event.data.operationId === "current-image-operation"
+    && event.data.images?.[0]?.path === "/tmp/current.png"), true);
+
+  session.history.push({ entryId: "current-image", role: "user", content: [{ type: "text", text: "same" }, { type: "image", mimeType: "image/png" }] });
+  session.emit({ type: "entry_appended", entry: { id: "current-image" } });
+  const afterPersistence = await instance.getAttachProjection(undefined, 200, "conversation_bootstrap");
+  assert.equal(afterPersistence.page.events.some((event) => event.type === "message.submitted" && event.data.operationId === "current-image-operation"), false);
 });
 
 test("truncated attach history removes older covered replay instead of reversing chronology", async () => {

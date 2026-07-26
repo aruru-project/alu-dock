@@ -37,6 +37,8 @@ import {
   parseResourcesResult,
   parseCommandsResult,
   ProtocolValidationError,
+  CONTROLLER_DIRECTIVES_CAPABILITY,
+  implementedCapabilities,
   requiredCapabilities,
 } from "../src/control/protocol.js";
 import { SETTING_DEFINITIONS, SETTING_KEYS, type SettingKey, type SettingValueMap } from "../src/core/config-projection.js";
@@ -91,6 +93,55 @@ test("Worker loss preserves the existing closed Protocol V2 interruption enum", 
 function validEvent(type = "message.delta", data: Record<string, unknown> = { messageId: "m1", block: "text", delta: "hello" }): Record<string, unknown> {
   return { scope: "instance", sequence: 1, instanceId: "i1", runtimeGeneration: 1, occurredAt: "2026-07-14T00:00:00.000Z", type, data };
 }
+
+test("controller directive capability and events are separately negotiated, closed, bounded, and payload-free", () => {
+  assert.ok(implementedCapabilities().includes(CONTROLLER_DIRECTIVES_CAPABILITY));
+  assert.ok(requiredCapabilities(CONTROLLER_DIRECTIVES_CAPABILITY).includes(CONTROLLER_DIRECTIVES_CAPABILITY));
+  const envelope = (event: unknown): Record<string, unknown> => ({ kind: "event", version: 2, requestId: "stream-1", hostEpoch: "epoch-1", event });
+  const title = parseControlEventEnvelope(envelope(validEvent("extension.title_set", {
+    controllerId: "controller-1", title: "Review queue",
+  })), "stream-1", "epoch-1").event;
+  assert.equal(title.type, "extension.title_set");
+  if (title.type === "extension.title_set") assert.deepEqual(title.data, { controllerId: "controller-1", title: "Review queue" });
+  const editor = parseControlEventEnvelope(envelope(validEvent("extension.editor_text_set", {
+    controllerId: "controller-1", text: "line one\nline two\tindented",
+  })), "stream-1", "epoch-1").event;
+  assert.equal(editor.type, "extension.editor_text_set");
+  if (editor.type === "extension.editor_text_set") assert.equal(editor.data.text, "line one\nline two\tindented");
+  assert.throws(() => parseControlEventEnvelope(envelope(validEvent("extension.title_set", { controllerId: "controller-1", title: "bad\nline" })), "stream-1", "epoch-1"), /control characters/);
+  assert.throws(() => parseControlEventEnvelope(envelope(validEvent("extension.title_set", { controllerId: "controller-1", title: "x".repeat(2_049) })), "stream-1", "epoch-1"), /bounded/);
+  assert.throws(() => parseControlEventEnvelope(envelope(validEvent("extension.editor_text_set", { controllerId: "controller-1", text: "bad\u001b[2J" })), "stream-1", "epoch-1"), /control characters/);
+  assert.throws(() => parseControlEventEnvelope(envelope(validEvent("extension.editor_text_set", { controllerId: "controller-1", text: "data:image/png;base64,A0+\/A0+\/" })), "stream-1", "epoch-1"), /binary/);
+  assert.throws(() => parseControlEventEnvelope(envelope(validEvent("extension.editor_text_set", { controllerId: "controller-1", text: "x".repeat(256_001) })), "stream-1", "epoch-1"), /bounded/);
+  assert.throws(() => parseControlEventEnvelope(envelope(validEvent("extension.title_set", { controllerId: "controller-1", title: "ok", extra: true })), "stream-1", "epoch-1"), /Unexpected field/);
+});
+
+test("image command paths and stale-generation error details remain closed", () => {
+  const request = { kind: "request", version: 2, requestId: "image-request", type: "command.submit" };
+  assert.deepEqual(parseControlRequest({
+    ...request,
+    params: { operationId: "image-op", instanceId: "i1", message: "", images: [{ path: "/tmp/input.png", mimeType: "image/png" }], delivery: "prompt" },
+  }).params, { operationId: "image-op", instanceId: "i1", message: "", images: [{ path: "/tmp/input.png", mimeType: "image/png" }], delivery: "prompt" });
+  assert.throws(() => parseControlRequest({ ...request, params: { operationId: "image-op", instanceId: "i1", message: "", delivery: "prompt" } }), /requires message text or at least one image/);
+  assert.throws(() => parseControlRequest({ ...request, params: { operationId: "image-op", instanceId: "i1", message: "", images: [{ path: "relative.png", mimeType: "image/png" }], delivery: "prompt" } }), /absolute local path/);
+  assert.throws(() => parseControlRequest({ ...request, params: { operationId: "image-op", instanceId: "i1", message: "", images: [{ path: "/tmp/input.png", mimeType: "text/plain" }], delivery: "prompt" } }), /image\/\*/);
+  assert.throws(() => parseControlRequest({ ...request, params: { operationId: "image-op", instanceId: "i1", message: "", images: [{ path: "/tmp/input.png", mimeType: "image/png", data: "AAAA" }], delivery: "prompt" } }), /Unexpected field/);
+
+  const stale = parseControlResponse({
+    kind: "response", version: 2, requestId: "stale-1", hostEpoch: "epoch-1", ok: false,
+    error: { code: "stale_runtime_generation", message: "stale", retryable: false, details: { expectedRuntimeGeneration: 1, actualRuntimeGeneration: 2 } },
+  }, "stale-1", "epoch-1");
+  assert.equal(stale.ok, false);
+  if (!stale.ok) assert.deepEqual(stale.error.details, { expectedRuntimeGeneration: 1, actualRuntimeGeneration: 2 });
+  assert.throws(() => parseControlResponse({
+    kind: "response", version: 2, requestId: "stale-1", hostEpoch: "epoch-1", ok: false,
+    error: { code: "stale_runtime_generation", message: "stale", retryable: false },
+  }, "stale-1", "epoch-1"), /requires error details/);
+  assert.throws(() => parseControlResponse({
+    kind: "response", version: 2, requestId: "stale-1", hostEpoch: "epoch-1", ok: false,
+    error: { code: "stale_runtime_generation", message: "stale", retryable: false, details: { expectedRuntimeGeneration: 1, actualRuntimeGeneration: 2, controllerId: "not-authority" } },
+  }, "stale-1", "epoch-1"), /Unexpected field/);
+});
 
 test("toolsExpanded request, snapshot, and event contracts are strict", () => {
   const base = { kind: "request", version: 2, requestId: "tools-expanded-1", type: "extension.tools_expanded.set" };
@@ -518,13 +569,17 @@ test("Stage 4 interaction requests, responses, and controller leases are closed"
   const attach = parseEventsResult({
     instance: validSnapshot(),
     page: { events: [], earliest: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, latest: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, truncated: false, epochChanged: false, generationChanged: false },
-    recentHistory: [], historyTruncated: false, pendingMessages: [], controller: { status: "acquired", leaseToken: "lease-1" }, following: true,
+    recentHistory: [], historyTruncated: false, pendingMessages: [], controller: { status: "acquired", leaseToken: "lease-1", controllerId: "controller-1" }, following: true,
   });
-  assert.deepEqual(attach.controller, { status: "acquired", leaseToken: "lease-1" });
+  assert.deepEqual(attach.controller, { status: "acquired", leaseToken: "lease-1", controllerId: "controller-1" });
   assert.throws(() => parseEventsResult({
     ...attach,
     controller: { status: "acquired" },
-  }), /leaseToken/);
+  }), /leaseToken|controllerId/);
+  assert.throws(() => parseEventsResult({
+    ...attach,
+    controller: { status: "acquired", leaseToken: "lease-1" },
+  }), /controllerId/);
   assert.throws(() => parseControlEventEnvelope({
     kind: "event", version: 2, requestId: "stream-1", hostEpoch: "epoch-1",
     event: validEvent("extension.notification", { message: "data:image/png;base64,A0+/", level: "info" }),

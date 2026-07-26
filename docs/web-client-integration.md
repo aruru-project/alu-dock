@@ -9,12 +9,12 @@ Alu Dock V0.2 已经具备多实例 WebConsole 的主要控制底座：
 - 查看和管理多个 Dock instance；
 - 获取权威 snapshot、当前会话历史、Queue 和运行统计；
 - 接入正在运行的 instance，持续接收结构化事件；
-- 提交文字 prompt、steer 和 follow-up，执行整轮 abort 和 Queue 控制；
+- 提交文字或本机图片 prompt、steer 和 follow-up，执行整轮 abort 和 Queue 控制；
 - 管理模型、thinking、tools、settings、resources 和 session/tree；
 - 观察并回复 extension 的 select、confirm、input 和 editor 交互；
 - Web 后端断开后，Host 中的 instance 和运行中的工作继续存在。
 
-但当前版本还不能支持 Web 无损切换：`command.submit` 尚不能携带图片，extension title/editor text 仍被丢弃，并有一处 generation error 合同不一致。这些 Dock 侧缺口由 Card #216 补齐后，Rails 才能完成不低于现有 WebConsole 的正式切换。
+图片输入、generation error 与 controller 专属的 extension title/editor text 合同均已固定。Rails 可据此完成不低于现有 WebConsole 的正式切换；Web 适配层实现本身仍由 Card #183 负责。
 
 推荐边界是：
 
@@ -31,7 +31,7 @@ Alu Dock Host
 
 浏览器不直接连接 Dock，不持有 interaction lease，也不接触 Pi SDK、Worker IPC 或 runtime object。Alu Dock 不提供 Redis/RPC 兼容层，也不负责 Rails、ActionCable 或页面状态机。
 
-正式接入以功能不退化为底线。Rails 可以先开发 catalog、attach、conversation、Queue 与 session 等已经稳定的部分；图片与新增 Extension UI wire shape 必须等待 #216 固定，不能由 Rails 猜测或自行复制 Pi 私有协议。
+正式接入以功能不退化为底线。Rails 应直接采用本文已固定的 catalog、attach、conversation、Queue、图片与 Extension UI wire shape，不能自行猜测或复制 Pi 私有协议。
 
 ## 运行边界
 
@@ -78,7 +78,7 @@ Protocol V2 使用 Unix stream socket 上的 UTF-8 JSON Lines：
 成功响应：
 
 ```json
-{"kind":"hello_ack","requestId":"hello-uuid","version":2,"host":{"pid":1234,"dockVersion":"0.2.0","piSdkVersion":"0.81.1","hostEpoch":"host-epoch","startedAt":"2026-01-01T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["catalog.maintenance.v1","catalog.v1","core.v2","events.follow","events.replay-purpose.v1","extension_ui.tools-expanded.v1","extension_ui.v1","extension_ui.widgets.v1","git.branch-footer.v1","host.info","instance.catalog","models.v1","projection.completeness.v1","queue.control.v1","resources.v1","run.abort.v1","service.managed.v1","session.adopt.v1","session.commands.v1","session.core","session.inventory-diagnostics.v1","session.inventory.v1","session.reopen","session.tree.v1","settings.v1","tool-result-presentation.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200,"maxInstanceListItems":100,"maxInstanceListBytes":786432}}
+{"kind":"hello_ack","requestId":"hello-uuid","version":2,"host":{"pid":1234,"dockVersion":"0.2.0","piSdkVersion":"0.81.1","hostEpoch":"host-epoch","startedAt":"2026-01-01T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["catalog.maintenance.v1","catalog.v1","command.images.path.v1","core.v2","events.follow","events.replay-purpose.v1","extension_ui.controller-directives.v1","extension_ui.tools-expanded.v1","extension_ui.v1","extension_ui.widgets.v1","git.branch-footer.v1","host.info","instance.catalog","models.v1","projection.completeness.v1","queue.control.v1","resources.v1","run.abort.v1","service.managed.v1","session.adopt.v1","session.commands.v1","session.core","session.inventory-diagnostics.v1","session.inventory.v1","session.reopen","session.tree.v1","settings.v1","tool-result-presentation.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200,"maxInstanceListItems":100,"maxInstanceListBytes":786432}}
 ```
 
 客户端必须在发送业务 request 前验证：
@@ -314,9 +314,10 @@ Content block 可能是：
 
 - `text`
 - `thinking`
+- `image { mimeType }`（仅在协商 `command.images.path.v1` 后出现，不含 bytes/path）
 - `tool_call`
 - `tool_result`
-- `omitted`，表示 image/binary 没有进入控制面
+- `omitted`，表示 image/binary 没有进入控制面；未协商图片能力的旧客户端也用它接收图片 presence 降级
 
 客户端不得依赖 Pi 私有 message shape。
 
@@ -336,6 +337,40 @@ Content block 可能是：
 - `followUp`：发送或排入 follow-up Queue。
 
 Success receipt 返回实际 delivery、是否 queued、accepted time 和原 operation ID。
+
+### 提交本机图片
+
+图片输入必须在 hello 中协商 `command.images.path.v1`。每个 descriptor 是 closed `{path, mimeType}`；`path` 是 Host/Worker 同一 UID 可访问的绝对本机路径，`mimeType` 是 bounded `image/*`。一条 mutation 最多 10 张，单张最多 20 MiB、合计最多 80 MiB。支持图片-only消息：`message` 可为空，但 `images` 不可同时为空。
+
+```json
+{"kind":"request","version":2,"requestId":"image-request","type":"command.submit","params":{"operationId":"image-operation","instanceId":"instance-id","message":"比较这两张图","delivery":"auto","images":[{"path":"/srv/alubot/uploads/a.webp","mimeType":"image/webp"},{"path":"/srv/alubot/uploads/b.custom","mimeType":"image/x-project-preview"}]}}
+```
+
+文本与所有图片共享同一个 `operationId`；同一 ID 配不同路径或 MIME 会 `operation_conflict`。Host Queue 的 `message.queued`、fresh attach 的 `pendingMessages`、`queue.dequeue` 与 `message.submitted` 会为图片-capable客户端原样保留 descriptor，因此相同文字/不同图片不会混合。示例 queued surface：
+
+```json
+{"type":"message.queued","data":{"queueItemId":"queue-1","operationId":"image-operation","delivery":"steer","text":"比较这两张图","images":[{"path":"/srv/alubot/uploads/a.webp","mimeType":"image/webp"}],"acceptedAt":"2026-01-01T00:00:00.000Z"}}
+```
+
+只有 Worker 在真正消费/dispatch 前打开 regular file 并编码为 Pi public structural image content；Protocol V2、Worker event/history、catalog 都不携带 bytes、base64 或 data URI。调用方必须保持文件内容稳定、同 UID 可读，直到 Queue item 被消费或 dequeue；路径只在当前 Host generation 的 custody/projection 中存在，不进 catalog。Host loss/replacement 后不会恢复路径或重放 Queue。历史只能保证图片 presence/MIME，不能保证原路径或媒体仍可恢复。
+
+### `show_image` live/history 关联
+
+不新增专用事件。Live client 按 `toolCallId` 合并 `tool.started` 与可选 `tool.args_updated`，取得最后的 `args.path`，并且只在同 ID/name 的 `tool.completed.isError == false` 后授权展示：
+
+```json
+{"type":"tool.started","data":{"toolCallId":"call-7","toolName":"show_image","args":{"path":"/tmp/result.png"}}}
+{"type":"tool.completed","data":{"toolCallId":"call-7","toolName":"show_image","text":"shown","isError":false}}
+```
+
+History 使用同一关联规则；call/result 可能跨分页：
+
+```json
+{"entryId":"h-call","role":"assistant","content":[{"type":"tool_call","toolCallId":"call-7","toolName":"show_image","args":{"path":"/tmp/result.png"}}]}
+{"entryId":"h-result","role":"tool","content":[{"type":"tool_result","toolCallId":"call-7","toolName":"show_image","text":"shown","isError":false}]}
+```
+
+缺少 path、result 为 error、history 尚未分页完整时都不得授权，也不得读取 Pi 私有 JSONL。
 
 ### 已支持的运行控制
 
@@ -389,12 +424,12 @@ Session replacement 会保留 Dock instance identity，并通过 `session.replac
 Attach 使用 `controller: "claim"` 时，成功 response 可能返回：
 
 ```json
-{"status":"acquired","leaseToken":"lease-token"}
+{"status":"acquired","leaseToken":"lease-token","controllerId":"controller-routing-id"}
 ```
 
 也可能返回 `observing` 或 `unavailable`。每个 instance 同时只有一个 interaction controller；其他连接仍可观察事件。
 
-Lease 只保留在 Web 后端，不应发送给浏览器。浏览器提交的 select/confirm/input/editor 回复由 Rails 鉴权后映射为 `interaction.respond`。
+`leaseToken` 是唯一 authority credential，只保留在 Web 后端，不应发送给浏览器。`controllerId` 是独立生成的非授权 routing identity，只用于把 ephemeral controller directive 匹配到当前 lease；不能用它调用 `interaction.respond` 或 viewport control。浏览器提交的 select/confirm/input/editor 回复由 Rails 鉴权后映射为 `interaction.respond`。
 
 `extension.widget_viewport.set` 不是交互回复，而是 ephemeral viewport-size control。它发送 `instanceId`、`leaseToken`、`expectedRuntimeGeneration`、`width` 和 `height`，没有 `operationId`，也不进入 operation ledger 或 mutation ambiguity 处理。
 
@@ -408,10 +443,18 @@ Controller stream 断开、session replacement 或 Host drain 会释放 lease，
 - editor
 - extension notification
 - extension status
+- 当前 controller 的 terminal title / editor text 单向 directive
 - terminal-rendered text widget lines
 - tools-expanded state
 
-Pi component object、callback、Promise 和任意 binary 不会跨过 Protocol V2。
+协商 `extension_ui.controller-directives.v1` 的 controller stream 可收到以下 closed one-way events；Host 只向拥有完全匹配 `controllerId` 的 stream 投递，observer、旧 client 和其他 lease 不会收到 payload：
+
+```json
+{"kind":"event","version":2,"requestId":"attach-uuid","hostEpoch":"host-epoch","event":{"scope":"instance","sequence":43,"instanceId":"instance-id","runtimeGeneration":3,"occurredAt":"2026-01-01T00:00:01.000Z","type":"extension.title_set","data":{"controllerId":"controller-routing-id","title":"Review queue"}}}
+{"kind":"event","version":2,"requestId":"attach-uuid","hostEpoch":"host-epoch","event":{"scope":"instance","sequence":44,"instanceId":"instance-id","runtimeGeneration":3,"occurredAt":"2026-01-01T00:00:02.000Z","type":"extension.editor_text_set","data":{"controllerId":"controller-routing-id","text":"Draft from extension\nSecond line"}}}
+```
+
+两者不进入 snapshot，不为新 lease/generation replay；无 controller 或 replacement suspension 期间的调用直接丢弃。`getEditorText` 仍不支持。Pi component object、callback、Promise 和任意 binary 不会跨过 Protocol V2。
 
 ## Mutation 与 operation identity
 
@@ -470,7 +513,7 @@ Create、adopt、reopen 或跨项目 switch 可能返回：
 | `instance.adopt` | `session.adopt.v1` |
 | `instance.reopen` | `session.reopen` |
 | `instance.forget`, `catalog.prune` | `catalog.maintenance.v1` |
-| `command.submit`, `session.list` | `session.core` |
+| `command.submit`, `session.list` | `session.core`；带图片再要求 `command.images.path.v1` |
 | `command.abort` | `run.abort.v1` |
 | `queue.dequeue` | `queue.control.v1` |
 | `model.*`, `thinking.set` | `models.v1` |
@@ -482,6 +525,7 @@ Create、adopt、reopen 或跨项目 switch 可能返回：
 | `session.switch/new/name/compact/reload` | `session.commands.v1` |
 | `session.tree/navigate/fork/clone` | `session.tree.v1` |
 | `interaction.respond` | `extension_ui.v1` |
+| controller title/editor directives | `extension_ui.controller-directives.v1`（另需 controller claim） |
 | tools-expanded control | `extension_ui.tools-expanded.v1` |
 | widget projection/viewport | `extension_ui.widgets.v1` |
 
@@ -494,10 +538,12 @@ Create、adopt、reopen 或跨项目 switch 可能返回：
 
 Capability 会改变 closed response/event shape：
 
+- 未协商 `extension_ui.controller-directives.v1` 时，Host 从 acquired controller shape 省略 `controllerId`，并过滤 title/editor directive events；即使协商，非匹配 controller stream 仍被过滤；
 - 未协商 `extension_ui.tools-expanded.v1` 时，Host 省略 snapshot 的 `toolsExpanded` 并过滤对应 change event；
 - 未协商 `extension_ui.widgets.v1` 时，Host 过滤 widget change events；
 - 未协商 `git.branch-footer.v1` 时，Host 省略 snapshot/replacement 的 `gitBranch` 并过滤 branch event；
 - 未协商 `tool-result-presentation.v1` 时，Host 省略 tool result 的 typed `presentation`；
+- 未协商 `command.images.path.v1` 时，Host 省略 pending/submitted 的 `images` path fields，并把 canonical image block 降级为既有 `omitted/image`；event sequence 不改变；
 - 未协商 `projection.completeness.v1` 时，部分 collection response 省略 `total` / `truncated`；
 - 未协商 `session.inventory-diagnostics.v1` 时，inventory response 省略 `incomplete`、diagnostics 和 diagnostic truncation；
 - 被 capability 过滤的 event 仍占用原始 sequence，因此客户端只要求 sequence 严格递增，不能要求连续。
@@ -539,7 +585,7 @@ Error code 是可扩展字符串。未知 code 应作为普通明确失败展示
 - 独立 operation outcome 查询；
 - 通过 Protocol V2 管理 systemd service。
 
-图片输入不是未来可选项，而是 Card #216 的必备能力：prompt、steer、follow-up 与 Host Queue 都必须保留图片并最终交给 Pi 视觉通道。Rails 继续拥有上传、StudioImage、图库和浏览器图片响应。
+图片输入现已由 `command.images.path.v1` 提供；Rails 继续拥有上传、StudioImage、图库、文件生命周期和浏览器图片响应。
 
 其余能力只有被 Web 的真实产品需求证明需要、且权威数据确实属于 Host/runtime 边界时，才在 Alu Dock 增加：
 
@@ -547,17 +593,11 @@ Error code 是可扩展字符串。未知 code 应作为普通明确失败展示
 2. **Operation outcome 查询**：只有 snapshot/event reconciliation 无法满足真实流程时再增加。
 3. **跨用户/远程访问**：需要单独设计认证与授权 transport，不能放宽当前 socket 权限。
 
-## Alu Dock 侧近期工作
+## Alu Dock 侧接入合同
 
-在 Rails 完成正式切换前，Alu Dock 侧由 Card #216 完成：
+Card #216 已固定本文所示的 hello、instance list、fresh attach、cursor reconnect、Queue、图片、interaction、controller directive 与 ambiguous mutation 规则。Extension title 更新和 editor text 注入通过独立 capability 只到达当前 controller client；图片 prompt/steer/follow-up/Queue、用户图片 metadata、`show_image` live/history 关联和 `stale_runtime_generation` details 也不再需要 Rails 猜测或读取 Pi 私有协议。
 
-1. 让 prompt、steer、follow-up 与 Queue 支持图片并实际进入 Pi 视觉通道；
-2. 固定 live/history 中用户图片与 `show_image` 的最小跨客户端语义；
-3. 让 extension title 更新和 editor text 注入到达 controller client；
-4. 修复 `stale_runtime_generation` response details 与 canonical parser 不一致；
-5. 为 hello、instance list、fresh attach、cursor reconnect、Queue、图片、interaction 和 ambiguous mutation 提供固定跨语言 wire 示例。
-
-不增加独立 `abort_bash`；当前需求只保留整轮 abort。Rails 可以先开发已经稳定的多实例、conversation、Queue 和 session 接入，但最终切换必须等待上述缺口完成。
+不增加独立 `abort_bash`；当前需求只保留整轮 abort。Alu Dock 侧接入能力已具备，Rails/WebConsole 的正式切换继续由 Card #183 推进。
 
 ## 权威代码入口
 

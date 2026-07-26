@@ -55,7 +55,7 @@ test("extension UI dialogs fail closed immediately without a controller", async 
 test("one lease serializes dialogs and validates method-specific responses", async () => {
   const { broker, events } = harness();
   const claim = await broker.claimController();
-  assert.deepEqual(claim, { status: "acquired", leaseToken: "id-1" });
+  assert.deepEqual(claim, { status: "acquired", leaseToken: "id-1", controllerId: "id-2" });
   assert.deepEqual(await broker.claimController(), { status: "unavailable" });
   if (claim.status !== "acquired") return;
 
@@ -127,7 +127,45 @@ test("wrong leases, detach, signal, and generation changes resolve fail closed",
   setGeneration(2);
   await broker.completeGenerationChange();
   assert.deepEqual(broker.projection().extensionStatus, {});
-  assert.deepEqual(await broker.claimController(), { status: "acquired", leaseToken: "id-6" });
+  assert.deepEqual(await broker.claimController(), { status: "acquired", leaseToken: "id-8", controllerId: "id-9" });
+});
+
+test("controller directives are targeted, bounded, dropped without a lease, and never replayed to a fresh lease", async () => {
+  const harnessState = harness();
+  const { broker, events } = harnessState;
+  broker.setTitle("dropped");
+  broker.setEditorText("dropped");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(events.some((event) => event.type === "extension.title_set" || event.type === "extension.editor_text_set"), false);
+
+  const first = await broker.claimController();
+  assert.equal(first.status, "acquired");
+  if (first.status !== "acquired") return;
+  assert.notEqual(first.leaseToken, first.controllerId);
+  broker.setTitle(`Review\u001b[2J\n${"x".repeat(2_100)}`);
+  broker.setEditorText(`line one\r\nline two\u001b[2J`);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const title = events.find((event) => event.type === "extension.title_set")?.data as EventDataMap["extension.title_set"];
+  const editorText = events.find((event) => event.type === "extension.editor_text_set")?.data as EventDataMap["extension.editor_text_set"];
+  assert.equal(title.controllerId, first.controllerId);
+  assert.ok(title.title.length <= 2_048);
+  assert.equal(/[\u0000-\u001f\u007f-\u009f]/u.test(title.title), false);
+  assert.deepEqual(editorText, { controllerId: first.controllerId, text: "line one\nline two[2J" });
+
+  await broker.releaseController(first.leaseToken);
+  broker.setTitle("detached");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const beforeFresh = events.length;
+  const fresh = await broker.claimController();
+  assert.equal(fresh.status, "acquired");
+  if (fresh.status !== "acquired") return;
+  assert.notEqual(fresh.controllerId, first.controllerId);
+  assert.equal(events.length, beforeFresh);
+  broker.beginGenerationChange();
+  broker.setEditorText("suspended");
+  harnessState.setGeneration(2);
+  await broker.completeGenerationChange();
+  assert.equal(events.some((event) => event.type === "extension.editor_text_set" && (event.data as { text?: string }).text === "suspended"), false);
 });
 
 test("tool expansion is readable, emits same-value authoritative events, and resets per generation", async () => {

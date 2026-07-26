@@ -117,10 +117,10 @@ export class WorkerRuntimeSession implements RuntimeSession {
   classifyInput(text: string): RuntimeInputKind { const name = extensionCommandName(text); return name !== undefined && this.extensionCommands.has(name) ? "extension_command" : "prompt"; }
   activateInitial(): Promise<void> { return this.call("runtime.activate", {}, "request").then(() => {}); }
   prompt(text: string, options?: RuntimePromptOptions): Promise<void> {
-    const wireOptions = options ? { ...(options.streamingBehavior === undefined ? {} : { streamingBehavior: options.streamingBehavior }), ...(options.source === undefined ? {} : { source: options.source }) } : undefined;
+    const wireOptions = options ? { ...(options.streamingBehavior === undefined ? {} : { streamingBehavior: options.streamingBehavior }), ...(options.images === undefined ? {} : { images: structuredClone(options.images) }), ...(options.source === undefined ? {} : { source: options.source }) } : undefined;
     return this.call("runtime.prompt", { text, ...(wireOptions === undefined ? {} : { options: wireOptions }) }, "none", options?.preflightResult).then(() => {});
   }
-  queueMessage(text: string, delivery: "steer" | "followUp"): Promise<void> { return this.call("runtime.queueMessage", { text, delivery }, "mutation").then(() => {}); }
+  queueMessage(text: string, delivery: "steer" | "followUp", images?: import("../core/runtime-session.js").RuntimeImagePath[]): Promise<void> { return this.call("runtime.queueMessage", { text, delivery, ...(images === undefined ? {} : { images: structuredClone(images) }) }, "mutation").then(() => {}); }
   listModels(): Promise<RuntimeModelInfo[]> { return this.call("runtime.listModels", {}, "request") as Promise<RuntimeModelInfo[]>; }
   listSessions(scope: "cwd" | "all"): Promise<RuntimeSessionInfo[]> { return this.call("runtime.listSessions", { scope }, "request") as Promise<RuntimeSessionInfo[]>; }
   navigateTree(targetId: string, options?: RuntimeNavigateOptions): Promise<RuntimeNavigateResult> { return this.call("runtime.navigateTree", { targetId, ...(options === undefined ? {} : { options }) }, "none") as Promise<RuntimeNavigateResult>; }
@@ -274,6 +274,8 @@ export class WorkerRuntimeSession implements RuntimeSession {
         case "ui.input": result = await broker.input(args.title as string, args.placeholder as string | undefined, opts); break;
         case "ui.editor": result = await broker.editor(args.title as string, args.prefill as string | undefined); break;
         case "ui.notify": broker.notify(args.message as string, args.level as never); break;
+        case "ui.setTitle": broker.setTitle(args.title as string); break;
+        case "ui.setEditorText": broker.setEditorText(args.text as string); break;
         case "ui.setStatus": broker.setStatus(args.key as string, args.text as string | undefined); break;
         case "ui.setWidget": broker.setWidget(args.key as string, args.lines as string[] | undefined, args.placement as never); break;
         case "ui.widgetError": broker.reportWidgetError(args.key as string, args.error); break;

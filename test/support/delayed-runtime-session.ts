@@ -49,6 +49,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
   disposeError: Error | undefined;
   promptCalls = 0;
   promptMessages: string[] = [];
+  promptOptions: Array<RuntimePromptOptions | undefined> = [];
   modelMutationCalls = 0;
   thinkingMutationCalls = 0;
   toolMutationCalls = 0;
@@ -129,6 +130,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
   prompt(text: string, options?: RuntimePromptOptions): Promise<void> {
     this.promptCalls += 1;
     this.promptMessages.push(text);
+    this.promptOptions.push(options === undefined ? undefined : structuredClone({ ...options, preflightResult: undefined }));
     if (this.classifyInput(text) === "extension_command") {
       options?.preflightResult?.(true);
       return Promise.resolve();

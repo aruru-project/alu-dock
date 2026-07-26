@@ -10,6 +10,8 @@ export interface PiExtensionUiPort {
   input(title: string, placeholder?: string, opts?: ExtensionDialogOptions): Promise<string | undefined>;
   editor(title: string, prefill?: string): Promise<string | undefined>;
   notify(message: string, level?: "info" | "warning" | "error"): void;
+  setTitle(title: string): void;
+  setEditorText(text: string): void;
   getToolsExpanded(): boolean;
   setToolsExpanded(expanded: boolean): void;
   setStatus(key: string, text: string | undefined): void;
@@ -119,13 +121,13 @@ export function createPiExtensionUiContext(broker: PiExtensionUiPort): Extension
     },
     setFooter: (factory) => { if (factory) broker.unsupported("custom footers"); },
     setHeader: (factory) => { if (factory) broker.unsupported("custom headers"); },
-    setTitle: () => broker.unsupported("terminal titles"),
+    setTitle: (title) => broker.setTitle(title),
     custom: async <T>() => {
       broker.unsupported("custom components");
       return undefined as T;
     },
     pasteToEditor: () => broker.unsupported("editor paste injection"),
-    setEditorText: () => broker.unsupported("editor text injection"),
+    setEditorText: (text) => broker.setEditorText(text),
     getEditorText: () => {
       broker.unsupported("editor text reads");
       return "";

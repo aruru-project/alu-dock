@@ -71,6 +71,8 @@ import {
   parseControlRequest,
   ProtocolValidationError,
   GIT_BRANCH_CAPABILITY,
+  IMAGE_INPUT_CAPABILITY,
+  CONTROLLER_DIRECTIVES_CAPABILITY,
   TOOL_RESULT_PRESENTATION_CAPABILITY,
   TOOLS_EXPANDED_CAPABILITY,
 } from "./protocol.js";
@@ -498,7 +500,8 @@ export class DockHost {
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
       case "command.submit": {
-        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const receipt=await instance.submit(request.params.message,request.params.delivery,request.params.operationId);return {receipt,instance:instance.snapshot()};});
+        if (request.params.images !== undefined && !this.connectionRequirements.get(socket)?.has(IMAGE_INPUT_CAPABILITY)) throw new ProtocolValidationError("capability_missing", `Capability ${IMAGE_INPUT_CAPABILITY} is required for image input`);
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const receipt=await instance.submit(request.params.message,request.params.delivery,request.params.operationId,request.params.images);return {receipt,instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
       case "command.abort": {
@@ -552,10 +555,12 @@ export class DockHost {
     if(cursor && cursor.instanceId!==instance.id) throw new ProtocolValidationError("invalid_cursor","Cursor belongs to another instance");
     const follow=request.params.follow;
     const requirements=this.connectionRequirements.get(socket);
-    const projectionCapabilities={
+    const projectionCapabilities:ClientProjectionCapabilities={
       toolsExpanded: requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,
       gitBranch: requirements?.has(GIT_BRANCH_CAPABILITY)===true,
       toolPresentation: requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,
+      images: requirements?.has(IMAGE_INPUT_CAPABILITY)===true,
+      controllerDirectives: requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true,
     };
     type QueuedEvent = { event: DockEvent; bytes: number };
     let initializing=true,pending:QueuedEvent[]=[]; let pendingBytes=0,initializationOverflow=false;
@@ -572,7 +577,13 @@ export class DockHost {
     const closeSubscription=():void=>{if(subscriptionClosed)return;subscriptionClosed=true;unsubscribe();releaseController();clearQueues();};
     const abortBackpressuredStream=():void=>{closeSubscription();if(!socket.destroyed)socket.destroy();};
     const boundedEvent=(event:DockEvent):QueuedEvent|undefined=>{
-      const bytes=eventFrameSize(request.requestId,this.hostEpoch,event,projectionCapabilities);
+      const directiveControllerId=initializing&&isControllerDirective(event)
+        ? event.data.controllerId
+        : undefined;
+      const sizingCapabilities=directiveControllerId===undefined
+        ? projectionCapabilities
+        : {...projectionCapabilities,controllerId:directiveControllerId};
+      const bytes=eventFrameSize(request.requestId,this.hostEpoch,event,sizingCapabilities);
       if(bytes===0)return undefined;
       if(!Number.isFinite(bytes)||bytes>MAX_CONTROL_LINE_BYTES){closeSubscription();socket.destroy();return undefined;}
       return {event,bytes};
@@ -650,6 +661,7 @@ export class DockHost {
     if(subscriptionClosed)unsubscribe();
     setEventUnsubscribe(closeSubscription);
     if(follow&&request.params.controller==="claim")controller=await instance.claimInteractionController();
+    projectionCapabilities.controllerId=controller.status==="acquired"?controller.controllerId:undefined;
     if(subscriptionClosed){
       releaseController();initializing=false;clearQueues();
       if(initializationOverflow)this.sendErrorAndEnd(socket,"attach_initial_overflow",ATTACH_INITIAL_OVERFLOW_MESSAGE,request.requestId);
@@ -699,7 +711,7 @@ export class DockHost {
     for (const socket of streams) socket.destroy();
   }
 
-  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const requirements=this.connectionRequirements.get(socket);const projected=projectForClient(result,{toolsExpanded:requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,gitBranch:requirements?.has(GIT_BRANCH_CAPABILITY)===true,toolPresentation:requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true});const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,projected));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
+  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const requirements=this.connectionRequirements.get(socket);const projected=projectForClient(result,{toolsExpanded:requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,gitBranch:requirements?.has(GIT_BRANCH_CAPABILITY)===true,toolPresentation:requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,images:requirements?.has(IMAGE_INPUT_CAPABILITY)===true,controllerDirectives:requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true});const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,projected));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
   private sendErrorAndEnd(socket:Socket,code:string,message:string,requestId:string,details?:JsonObject,retryable=false):void { if(socket.destroyed||socket.writableEnded)return;const response:ControlResponse={kind:"response",version:2,requestId,hostEpoch:this.hostEpoch,ok:false,error:{code,message:truncateMessage(message),retryable,...(details===undefined?{}:{details})}};if(endEnvelope(socket,response)==="too_large")socket.destroy(); }
   private sendHelloError(socket:Socket,requestId:string,code:HelloError["error"]["code"],message:string,details:{hostVersions?:number[];missing?:string[];retryAfterMs?:number}={}):void { if(socket.destroyed||socket.writableEnded)return;const envelope:HelloError={kind:"hello_error",requestId,error:{code,message:truncateMessage(message),...details}};try{socket.end(encodeJsonLine(envelope));}catch{socket.destroy();} }
 }
@@ -830,16 +842,19 @@ interface ClientProjectionCapabilities {
   toolsExpanded: boolean;
   gitBranch: boolean;
   toolPresentation: boolean;
+  images: boolean;
+  controllerDirectives: boolean;
+  controllerId?: string;
 }
 
-type ClientProjectionContext = "root" | "generic" | "event" | "tool-event-data" | "message-data" | "history-entry" | "content-block";
+type ClientProjectionContext = "root" | "generic" | "event" | "pending-message" | "submitted-message" | "tool-event-data" | "message-data" | "history-entry" | "content-block";
 
 function projectForClient(
   value: unknown,
   capabilities: ClientProjectionCapabilities,
   context: ClientProjectionContext = "root",
 ): unknown {
-  if ((capabilities.toolsExpanded && capabilities.gitBranch && capabilities.toolPresentation) || value === null || typeof value !== "object") return value;
+  if (value === null || typeof value !== "object") return value;
   if (Array.isArray(value)) return value.map((item) => projectForClient(item, capabilities, context));
 
   const source = value as Record<string, unknown>;
@@ -871,11 +886,28 @@ function projectForClient(
     && source.type === "tool_result"
     && typeof source.toolCallId === "string"
     && typeof source.toolName === "string";
+  const imageInputContext = context === "pending-message" || context === "submitted-message";
+  const legacyImageOnlyText = !capabilities.images
+    && imageInputContext
+    && source.text === ""
+    && Array.isArray(source.images)
+    && source.images.length > 0;
   const projected: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(source)) {
     if (isSnapshot && key === "toolsExpanded" && !capabilities.toolsExpanded) continue;
     if (isSnapshot && key === "gitBranch" && !capabilities.gitBranch) continue;
+    if (isAttachProjection && key === "controller" && !capabilities.controllerDirectives && child !== null && typeof child === "object" && !Array.isArray(child)) {
+      const legacyController = { ...(child as Record<string, unknown>) };
+      delete legacyController.controllerId;
+      projected[key] = projectForClient(legacyController, capabilities, "generic");
+      continue;
+    }
     if (key === "presentation" && !capabilities.toolPresentation && (context === "tool-event-data" || isToolResultBlock)) continue;
+    if (key === "images" && !capabilities.images && imageInputContext) continue;
+    if (key === "text" && legacyImageOnlyText) {
+      projected[key] = "[Image attached]";
+      continue;
+    }
     if (isEventPage && key === "events" && Array.isArray(child)) {
       projected[key] = child
         .filter((event) => !isUnsupportedProjectionEvent(event, capabilities))
@@ -891,20 +923,36 @@ function projectForClient(
     let childContext: ClientProjectionContext = "generic";
     if (context === "root" && key === "page") childContext = "root";
     if (isAttachProjection && key === "recentHistory") childContext = "history-entry";
+    if (isAttachProjection && key === "pendingMessages") childContext = "pending-message";
     if (isHistoryPage && key === "entries") childContext = "history-entry";
+    if ((key === "restored" || key === "inFlight") && Array.isArray(child) && Array.isArray(source.restored) && Array.isArray(source.inFlight)) childContext = "pending-message";
     if (context === "event" && key === "data") {
+      if (eventType === "message.queued") childContext = "pending-message";
+      if (eventType === "message.submitted") childContext = "submitted-message";
       if (eventType === "tool.output_updated" || eventType === "tool.completed") childContext = "tool-event-data";
       if (eventType === "message.completed") childContext = "message-data";
     }
     if ((context === "message-data" || context === "history-entry") && key === "content") childContext = "content-block";
+    if (context === "content-block" && source.type === "image" && !capabilities.images) {
+      return { type: "omitted", kind: "image", description: "Image bytes omitted" };
+    }
     projected[key] = projectForClient(child, capabilities, childContext);
   }
   return projected;
 }
 
+function isControllerDirective(value: unknown): value is Extract<DockEvent, { type: "extension.title_set" | "extension.editor_text_set" }> {
+  if (value === null || typeof value !== "object") return false;
+  const type = (value as { type?: unknown }).type;
+  return type === "extension.title_set" || type === "extension.editor_text_set";
+}
+
 function isUnsupportedProjectionEvent(value: unknown, capabilities: ClientProjectionCapabilities): boolean {
   if (value === null || typeof value !== "object") return false;
   const type = (value as { type?: unknown }).type;
+  if (isControllerDirective(value)) {
+    return !capabilities.controllerDirectives || value.data.controllerId !== capabilities.controllerId;
+  }
   return (!capabilities.toolsExpanded && type === "extension.tools_expanded_changed")
     || (!capabilities.gitBranch && type === "git.branch_changed");
 }

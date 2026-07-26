@@ -120,7 +120,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.tools-expanded.v1", "extension_ui.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "host.info", "instance.catalog", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tool-result-presentation.v1", "tools.v1", "tui.projection.v1"]);
+  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "command.images.path.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.controller-directives.v1", "extension_ui.tools-expanded.v1", "extension_ui.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "host.info", "instance.catalog", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tool-result-presentation.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -329,6 +329,18 @@ test("extension UI lease round-trips dialogs and detach cancels fail closed", as
   await host.start();
   const client = new DockClient({ socketPath });
   const instance = await client.create(directory, "extension-ui");
+  const claimController = broker.claimController.bind(broker);
+  let injectClaimHandoff = true;
+  broker.claimController = async () => {
+    const claim = await claimController();
+    if (claim.status === "acquired" && injectClaimHandoff) {
+      injectClaimHandoff = false;
+      broker.setTitle("claim-handoff title");
+      broker.setEditorText("claim-handoff draft");
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    return claim;
+  };
   const liveEvents: DockEvent[] = [];
   let resolveRequested!: (event: Extract<DockEvent, { type: "interaction.requested" }>) => void;
   let requestedPromise = new Promise<Extract<DockEvent, { type: "interaction.requested" }>>((resolve) => { resolveRequested = resolve; });
@@ -343,6 +355,14 @@ test("extension UI lease round-trips dialogs and detach cancels fail closed", as
   assert.equal(controller.initial.controller.status, "acquired");
   if (controller.initial.controller.status !== "acquired") return;
   const leaseToken = controller.initial.controller.leaseToken;
+  const controllerId = controller.initial.controller.controllerId;
+  assert.notEqual(leaseToken, controllerId);
+  assert.equal(controller.initial.page.events.some((event) => event.type === "extension.title_set"
+    && event.data.controllerId === controllerId
+    && event.data.title === "claim-handoff title"), true);
+  assert.equal(controller.initial.page.events.some((event) => event.type === "extension.editor_text_set"
+    && event.data.controllerId === controllerId
+    && event.data.text === "claim-handoff draft"), true);
   assert.deepEqual(
     await client.setExtensionWidgetViewport(instance.id, leaseToken, instance.runtimeGeneration, 96, 32),
     { accepted: true },
@@ -357,11 +377,26 @@ test("extension UI lease round-trips dialogs and detach cancels fail closed", as
     (error: unknown) => error instanceof ControlClientError && error.code === "invalid_request",
   );
 
+  const observerEvents: DockEvent[] = [];
   const observer = await new DockClient({ socketPath }).streamEvents(instance.id, {
     claimController: true,
-    onEvent: () => {},
+    onEvent: (event) => { observerEvents.push(event); },
   });
   assert.equal(observer.initial.controller.status, "unavailable");
+  broker.setTitle("Controller-only title");
+  broker.setEditorText("controller-only draft\nsecond line");
+  const directiveDeadline = Date.now() + 2_000;
+  while (liveEvents.filter((event) => event.type === "extension.title_set" || event.type === "extension.editor_text_set").length < 2
+    && Date.now() < directiveDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(liveEvents.some((event) => event.type === "extension.title_set"
+    && event.data.controllerId === controllerId
+    && event.data.title === "Controller-only title"), true);
+  assert.equal(liveEvents.some((event) => event.type === "extension.editor_text_set"
+    && event.data.controllerId === controllerId
+    && event.data.text === "controller-only draft\nsecond line"), true);
+  assert.equal(observerEvents.some((event) => event.type === "extension.title_set" || event.type === "extension.editor_text_set"), false);
+  const oldClientReplay = await client.events(instance.id);
+  assert.equal(oldClientReplay.page.events.some((event) => event.type === "extension.title_set" || event.type === "extension.editor_text_set"), false);
   observer.close();
   await observer.done;
 
@@ -389,9 +424,35 @@ test("extension UI lease round-trips dialogs and detach cancels fail closed", as
   controller.close();
   await controller.done;
   assert.equal(await input, undefined);
+  broker.setTitle("dropped while detached");
+  broker.setEditorText("dropped while detached");
+  await new Promise<void>((resolve) => setImmediate(resolve));
   const replay = await client.events(instance.id);
   assert.equal(replay.page.events.some((event) => event.type === "interaction.cancelled" && event.data.interactionId === inputRequest.data.interactionId && event.data.reason === "detach"), true);
+  assert.equal(replay.page.events.some((event) => event.type === "extension.title_set" || event.type === "extension.editor_text_set"), false);
   assert.equal(await broker.confirm("No controller", "fail closed"), false);
+
+  const freshEvents: DockEvent[] = [];
+  const freshController = await client.streamEvents(instance.id, {
+    claimController: true,
+    requireTuiProjection: true,
+    onEvent: (event) => { freshEvents.push(event); },
+  });
+  assert.equal(freshController.initial.controller.status, "acquired");
+  if (freshController.initial.controller.status === "acquired") {
+    const freshControllerId = freshController.initial.controller.controllerId;
+    assert.notEqual(freshControllerId, controllerId);
+    assert.equal(freshController.initial.page.events.some((event) => event.type === "extension.title_set" || event.type === "extension.editor_text_set"), false);
+    broker.setTitle("fresh controller title");
+    const freshDeadline = Date.now() + 2_000;
+    while (!freshEvents.some((event) => event.type === "extension.title_set")
+      && Date.now() < freshDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(freshEvents.some((event) => event.type === "extension.title_set"
+      && event.data.controllerId === freshControllerId
+      && event.data.title === "fresh controller title"), true);
+  }
+  freshController.close();
+  await freshController.done;
   assert.ok(liveEvents.some((event) => event.type === "interaction.resolved"));
 });
 
@@ -418,6 +479,9 @@ test("SSH TUI controller completes select confirm input and editor extension dia
   ], "extension-dialogs", readyFile);
   await waitForPath(readyFile);
 
+  broker.setTitle("PTY extension title");
+  broker.setEditorText("PTY injected draft");
+  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(await broker.select("Pick fixture", ["Alpha", "Beta"]), "Beta");
   assert.equal(await broker.confirm("Confirm fixture", "Proceed?"), true);
   assert.equal(await broker.input("Input fixture", "value"), "typed value");
@@ -427,7 +491,7 @@ test("SSH TUI controller completes select confirm input and editor extension dia
   const output = Buffer.from(pty.output, "base64").toString("utf8");
   assert.equal(pty.timedOut, false, output.slice(-4_000));
   assert.equal(pty.status, 0, output.slice(-4_000));
-  for (const marker of ["Pick fixture", "Confirm fixture", "Input fixture", "Edit fixture"]) assert.match(output, new RegExp(marker));
+  for (const marker of ["PTY extension title", "PTY injected draft", "Pick fixture", "Confirm fixture", "Input fixture", "Edit fixture"]) assert.match(output, new RegExp(marker));
   assert.doesNotMatch(output, /connected\/acquired/);
 });
 
@@ -469,12 +533,16 @@ test("SSH TUI reacquires its controller after runtime replacement", async (conte
     if (!confirmed) await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
   }
   assert.equal(confirmed, true);
+  broker.setTitle("Post replacement extension title");
+  broker.setEditorText("post replacement injected draft");
 
   const pty = await ptyRun;
   const output = Buffer.from(pty.output, "base64").toString("utf8");
   assert.equal(pty.timedOut, false, output.slice(-4_000));
   assert.equal(pty.status, 0, output.slice(-4_000));
   assert.match(output, /Post replacement confirm/);
+  assert.match(output, /Post replacement extension title/);
+  assert.match(output, /post replacement injected draft/);
   assert.doesNotMatch(output, /connected\/acquired/);
   assert.doesNotMatch(output, /Replacement history unavailable|Host event stream closed|connection lost/);
 });
@@ -3132,7 +3200,7 @@ test("an LF-truncated control response is reported as recoverable connection los
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-partial-frame-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  const capabilities = ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "instance.catalog", "queue.control.v1", "run.abort.v1", "tool-result-presentation.v1", "tui.projection.v1"];
+  const capabilities = ["command.images.path.v1", "core.v2", "events.follow", "extension_ui.tools-expanded.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "instance.catalog", "queue.control.v1", "run.abort.v1", "tool-result-presentation.v1", "tui.projection.v1"];
   const server = createServer((socket) => {
     const decoder = new JsonLineDecoder();
     socket.on("data", (chunk: Buffer) => {
@@ -3589,7 +3657,7 @@ test("stream callbacks follow initial response order and accept one-step replace
             kind: "hello_ack", requestId: "fixed", version: 2,
             host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
             catalogSchemaVersion: 1,
-            capabilities: ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "tool-result-presentation.v1"],
+            capabilities: ["command.images.path.v1", "core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "tool-result-presentation.v1"],
             limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
           }));
           continue;
@@ -4499,3 +4567,87 @@ async function close(server: Server): Promise<void> {
   if (!server.listening) return;
   await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
 }
+
+test("Dock client image mutation reaches Host custody and stale generation remains a definite rejection", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const instance = await client.create(harness.directory, undefined, "create-image-contract");
+  const images = [{ path: join(harness.directory, "input.custom"), mimeType: "image/x-custom" }];
+  const receipt = await client.prompt(instance.id, "same", "auto", "image-wire-op", images);
+  assert.equal(receipt.receipt.operationId, "image-wire-op");
+  const runtime = harness.sessions.get(instance.id)!;
+  assert.deepEqual(runtime.promptOptions.at(-1)?.images, images);
+  await assert.rejects(
+    client.prompt(instance.id, "same", "auto", "image-wire-op", [{ path: join(harness.directory, "changed.custom"), mimeType: "image/x-custom" }]),
+    (error: unknown) => error instanceof ControlClientError && error.code === "operation_conflict",
+  );
+
+  await assert.rejects(
+    client.setToolsExpanded(instance.id, instance.runtimeGeneration + 1, true, "stale-generation-op"),
+    (error: unknown) => error instanceof ControlClientError
+      && error.code === "stale_runtime_generation"
+      && error.details?.expectedRuntimeGeneration === instance.runtimeGeneration + 1
+      && error.details?.actualRuntimeGeneration === instance.runtimeGeneration,
+  );
+});
+
+test("image projection is capability compatible and show_image correlates live with history", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const instance = await client.create(harness.directory, undefined, "create-projection-contract");
+  const runtime = harness.sessions.get(instance.id)!;
+  runtime.history = [
+    { entryId: "image-user", role: "user", content: [{ type: "image", mimeType: "image/x-custom", data: "never-wire" }] },
+    { entryId: "show-call", role: "assistant", content: [{ type: "toolCall", id: "show-1", name: "show_image", arguments: { path: "/tmp/show.png" } }] },
+    { entryId: "show-result", role: "toolResult", toolCallId: "show-1", toolName: "show_image", isError: false, content: [{ type: "text", text: "shown" }] },
+  ];
+  runtime.emit({ type: "entry_appended" });
+  runtime.emit({ type: "tool_execution_start", toolCallId: "show-live", toolName: "show_image", args: { path: "/tmp/live.png" } });
+  runtime.emit({ type: "tool_execution_end", toolCallId: "show-live", toolName: "show_image", result: { content: [{ type: "text", text: "shown" }] }, isError: false });
+
+  const modernHistory = await client.history(instance.id);
+  assert.deepEqual(modernHistory.entries[0]?.content, [{ type: "image", mimeType: "image/x-custom" }]);
+  assert.equal(JSON.stringify(modernHistory).includes("never-wire"), false);
+  assert.deepEqual(modernHistory.entries[1]?.content, [{ type: "tool_call", toolCallId: "show-1", toolName: "show_image", args: { path: "/tmp/show.png" }, omittedFields: undefined }]);
+  assert.equal((modernHistory.entries[2]?.content[0] as { isError?: boolean }).isError, false);
+  const live = (await client.events(instance.id)).page.events;
+  assert.ok(live.some((event) => event.type === "tool.started" && event.data.toolCallId === "show-live" && event.data.toolName === "show_image" && event.data.args.path === "/tmp/live.png"));
+  assert.ok(live.some((event) => event.type === "tool.completed" && event.data.toolCallId === "show-live" && event.data.toolName === "show_image" && event.data.isError === false));
+
+  const legacy = await exchangeRequestAfterHello(harness.socketPath, ["core.v2", "tui.projection.v1"], {
+    kind: "request", version: 2, requestId: "legacy-image-history", type: "session.history",
+    params: { instanceId: instance.id, limit: 200 },
+  });
+  const legacyEntries = objectValue(legacy.result).entries as Array<{ content: unknown[] }>;
+  assert.deepEqual(legacyEntries[0]?.content, [{ type: "omitted", kind: "image", description: "Image bytes omitted" }]);
+  assert.equal(JSON.stringify(legacy).includes("never-wire"), false);
+
+  runtime.isStreaming = true;
+  const queuedImages = [{ path: join(harness.directory, "queued-only.png"), mimeType: "image/png" }];
+  await client.prompt(instance.id, "", "steer", "legacy-image-only", queuedImages);
+  runtime.emit({ type: "tool_execution_start", toolCallId: "generic-images-arg", toolName: "custom_tool", args: { images: ["keep-tool-argument"], text: "" } });
+  const legacyAttach = await exchangeRequestAfterHello(harness.socketPath, ["core.v2", "events.follow", "events.replay-purpose.v1"], {
+    kind: "request", version: 2, requestId: "legacy-image-attach", type: "instance.attach",
+    params: { instanceId: instance.id, follow: false, controller: "observe", replay: "event_log" },
+  });
+  const legacyAttachResult = objectValue(legacyAttach.result);
+  assert.equal((legacyAttachResult.pendingMessages as Array<{ text: string }>).at(-1)?.text, "[Image attached]");
+  const legacyEvents = objectValue(legacyAttachResult.page).events as Array<{ type: string; data: { text?: string; images?: unknown } }>;
+  const queuedEvent = legacyEvents.find((event) => event.type === "message.queued" && event.data.text === "[Image attached]");
+  assert.ok(queuedEvent);
+  assert.equal(queuedEvent.data.images, undefined);
+  const genericToolEvent = legacyEvents.find((event) => event.type === "tool.started" && (event.data as { toolCallId?: string }).toolCallId === "generic-images-arg");
+  assert.deepEqual((genericToolEvent?.data as { args?: { images?: unknown } }).args?.images, ["keep-tool-argument"]);
+
+  const legacyDequeue = await exchangeRequestAfterHello(harness.socketPath, ["core.v2", "queue.control.v1"], {
+    kind: "request", version: 2, requestId: "legacy-image-dequeue", type: "queue.dequeue",
+    params: { operationId: "legacy-image-dequeue-op", instanceId: instance.id },
+  });
+  const restored = objectValue(objectValue(legacyDequeue.result).receipt).restored as Array<{ text: string; images?: unknown }>;
+  assert.equal(restored[0]?.text, "[Image attached]");
+  assert.equal(restored[0]?.images, undefined);
+});

@@ -1,9 +1,9 @@
 import type {
-  ContentBlockDto,
   DockEvent,
   HistoryEntryDto,
   InstanceSnapshot,
 } from "../core/instance-dto.js";
+import { reconcileConversationEventsWithHistory } from "../core/managed-instance.js";
 
 export const HISTORY_PAGE_SIZE = 200;
 
@@ -91,7 +91,7 @@ export function reconcileFlowingEvents(
   const ordered = [...candidates.values()].sort((left, right) => (
     left.runtimeGeneration - right.runtimeGeneration || left.sequence - right.sequence
   ));
-  return eventsNotCoveredByHistory(ordered, history);
+  return reconcileConversationEventsWithHistory(ordered, history, true);
 }
 
 function assertPageIdentity(page: FullHistoryPage, instanceId: string, generation: number): void {
@@ -123,70 +123,4 @@ function isConversationFrame(event: DockEvent): boolean {
     || event.type === "tool.args_updated"
     || event.type === "tool.output_updated"
     || event.type === "tool.completed";
-}
-
-function eventsNotCoveredByHistory(events: DockEvent[], history: readonly HistoryEntryDto[]): DockEvent[] {
-  const counts = new Map<string, number>();
-  for (const entry of history) {
-    const fingerprint = historyFingerprint(entry.role, entry.content);
-    counts.set(fingerprint, (counts.get(fingerprint) ?? 0) + 1);
-  }
-  const coveredMessages = new Set<string>();
-  const coveredTools = new Set<string>();
-  const consume = (fingerprint: string): boolean => {
-    const count = counts.get(fingerprint) ?? 0;
-    if (count < 1) return false;
-    if (count === 1) counts.delete(fingerprint);
-    else counts.set(fingerprint, count - 1);
-    return true;
-  };
-
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]!;
-    if (event.type === "message.completed") {
-      if (event.data.role === "user" || coveredMessages.has(event.data.messageId)) continue;
-      if (consume(historyFingerprint(event.data.role, event.data.content))) coveredMessages.add(event.data.messageId);
-    } else if (event.type === "message.submitted") {
-      if (coveredMessages.has(event.data.messageId)) continue;
-      if (consume(historyFingerprint("user", [{ type: "text", text: event.data.text }]))) coveredMessages.add(event.data.messageId);
-    } else if (event.type === "tool.completed") {
-      const content: ContentBlockDto[] = [{
-        type: "tool_result",
-        toolCallId: event.data.toolCallId,
-        toolName: event.data.toolName,
-        text: event.data.text,
-        isError: event.data.isError,
-      }];
-      if (consume(historyFingerprint("tool", content))) coveredTools.add(event.data.toolCallId);
-    }
-  }
-
-  return events.filter((event) => {
-    if (event.type === "message.submitted" || event.type === "message.delta" || event.type === "message.completed") {
-      return !coveredMessages.has(event.data.messageId);
-    }
-    if (event.type === "tool.started" || event.type === "tool.args_updated" || event.type === "tool.output_updated" || event.type === "tool.completed") {
-      return !coveredTools.has(event.data.toolCallId);
-    }
-    return true;
-  });
-}
-
-function historyFingerprint(role: HistoryEntryDto["role"], content: readonly ContentBlockDto[]): string {
-  const normalized = content.map((block) => {
-    if (block.type === "tool_call") {
-      return { type: block.type, toolCallId: block.toolCallId, toolName: block.toolName, args: block.args };
-    }
-    if (block.type === "tool_result") {
-      return {
-        type: block.type,
-        toolCallId: block.toolCallId,
-        toolName: block.toolName,
-        text: block.text,
-        isError: block.isError,
-      };
-    }
-    return block;
-  });
-  return JSON.stringify({ role, content: normalized });
 }

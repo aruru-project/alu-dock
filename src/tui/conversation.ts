@@ -142,7 +142,7 @@ export class DockConversation implements Component {
   apply(event: DockEvent): void {
     switch (event.type) {
       case "message.submitted":
-        this.add("user", stringData(event, "text") ?? "");
+        this.add("user", userMessageText(event.data.text, event.data.images ?? []));
         break;
 
       case "message.delta": {
@@ -567,7 +567,8 @@ export class DockConversation implements Component {
     for (const source of entries) {
       const text = contentText(source.content, "text");
       if (source.role === "user") {
-        addProjected(source, "user", text ?? historyOmissions(source));
+        const projected = userMessageText(text ?? "", source.content.filter((block) => block.type === "image"));
+        addProjected(source, "user", projected || historyOmissions(source));
       } else if (source.role === "assistant") {
         let visibleBlock = false;
         for (const block of source.content) {
@@ -1225,6 +1226,12 @@ function contentText(value: unknown, type: "text" | "thinking"): string | undefi
     return block.type === type && typeof block.text === "string" ? [block.text] : [];
   }).join("");
   return text || undefined;
+}
+
+function userMessageText(text: string, images: readonly { mimeType: string }[]): string {
+  const imageLines = images.map((image, index) => `[Image ${index + 1} · ${image.mimeType}]`);
+  if (text.length === 0) return imageLines.join("\n");
+  return imageLines.length === 0 ? text : `${text}\n\n${imageLines.join("\n")}`;
 }
 
 function historyOmissions(entry: HistoryEntryDto): string {

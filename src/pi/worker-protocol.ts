@@ -7,6 +7,12 @@ import {
   RuntimeSettingsWriteError,
   RuntimeUnknownToolError,
 } from "../core/runtime-session.js";
+import { containsBinaryPayload } from "../core/extension-ui-broker.js";
+import {
+  MAX_IMAGE_MIME_TYPE_CHARS,
+  MAX_IMAGE_PATH_CHARS,
+  MAX_INPUT_IMAGES,
+} from "../core/instance-dto.js";
 import {
   SETTING_DEFINITIONS,
   SETTING_KEYS,
@@ -38,7 +44,7 @@ export type RuntimeCapability =
 
 export type UiCapability =
   | "ui.select" | "ui.confirm" | "ui.input" | "ui.editor"
-  | "ui.notify" | "ui.setStatus" | "ui.setWidget" | "ui.widgetError"
+  | "ui.notify" | "ui.setTitle" | "ui.setEditorText" | "ui.setStatus" | "ui.setWidget" | "ui.widgetError"
   | "ui.unsupported" | "ui.setToolsExpanded" | "ui.cancel" | "ui.viewport" | "ui.reset" | "ui.generationBegin";
 
 export type DockCapability = "dock.identity";
@@ -47,7 +53,7 @@ export type ReverseWorkerCapability = DockCapability | Exclude<UiCapability, "ui
 /** Host-enforced capabilities available to an ordinary managed Pi Worker. */
 export const ORDINARY_REVERSE_WORKER_CAPABILITIES: readonly ReverseWorkerCapability[] = [
   "dock.identity",
-  "ui.select", "ui.confirm", "ui.input", "ui.editor", "ui.notify", "ui.setStatus",
+  "ui.select", "ui.confirm", "ui.input", "ui.editor", "ui.notify", "ui.setTitle", "ui.setEditorText", "ui.setStatus",
   "ui.setWidget", "ui.widgetError", "ui.unsupported", "ui.setToolsExpanded", "ui.cancel",
   "ui.generationBegin",
 ];
@@ -364,11 +370,13 @@ function validatePrivateContent(raw: unknown): void {
   if (!Array.isArray(raw) || raw.length > 201) throw new Error("Worker message content is invalid");
   for (const item of raw) {
     const block = record(item, "Worker content block");
-    const type = oneOf(block.type, ["text", "thinking", "toolCall"], "Worker content block type");
+    const type = oneOf(block.type, ["text", "thinking", "image", "toolCall"], "Worker content block type");
     if (type === "text") {
       exactKeys(block, ["type", "text"], "Worker text block"); boundedString(block.text, 8_000, "Worker text", true);
     } else if (type === "thinking") {
       exactKeys(block, ["type", "thinking"], "Worker thinking block"); boundedString(block.thinking, 8_000, "Worker thinking", true);
+    } else if (type === "image") {
+      exactKeys(block, ["type", "mimeType"], "Worker image block"); validateImageMimeType(block.mimeType, "Worker image MIME type");
     } else {
       validatePrivateToolCall(block);
     }
@@ -379,8 +387,10 @@ function validatePrivateToolContent(raw: unknown): void {
   if (typeof raw === "string") { boundedString(raw, 256_000, "Worker tool content", true); return; }
   if (!Array.isArray(raw) || raw.length > 200) throw new Error("Worker tool content is invalid");
   for (const item of raw) {
-    const block = record(item, "Worker tool content block"); exactKeys(block, ["type", "text"], "Worker tool content block");
-    if (block.type !== "text") throw new Error("Worker tool content block type is invalid"); boundedString(block.text, 256_000, "Worker tool text", true);
+    const block = record(item, "Worker tool content block");
+    const type = oneOf(block.type, ["text", "image"], "Worker tool content block type");
+    if (type === "text") { exactKeys(block, ["type", "text"], "Worker tool text block"); boundedString(block.text, 256_000, "Worker tool text", true); }
+    else { exactKeys(block, ["type", "mimeType"], "Worker tool image block"); validateImageMimeType(block.mimeType, "Worker tool image MIME type"); }
   }
 }
 
@@ -448,8 +458,8 @@ export function validateCapabilityArgs(capability: WorkerCapability, raw: unknow
     case "runtime.activate": case "runtime.listModels": case "runtime.listTools": case "runtime.getSettings":
     case "runtime.getResources": case "runtime.getCommands": case "runtime.clearQueue": case "runtime.abort":
     case "runtime.waitForIdle": case "runtime.dispose": keys(); return;
-    case "runtime.prompt": keys("text", "options"); boundedString(args.text, 256_000, "Prompt text"); if (args.options !== undefined) validatePromptOptions(args.options); return;
-    case "runtime.queueMessage": keys("text", "delivery"); boundedString(args.text, 256_000, "Queue text"); oneOf(args.delivery, ["steer", "followUp"], "Queue delivery"); return;
+    case "runtime.prompt": keys("text", "options"); boundedString(args.text, 256_000, "Prompt text", true); if (args.options !== undefined) validatePromptOptions(args.options); return;
+    case "runtime.queueMessage": keys("text", "delivery", "images"); boundedString(args.text, 256_000, "Queue text", true); oneOf(args.delivery, ["steer", "followUp"], "Queue delivery"); if (args.images !== undefined) validateImagePaths(args.images); return;
     case "runtime.listSessions": keys("scope"); oneOf(args.scope, ["cwd", "all"], "Session scope"); return;
     case "runtime.navigateTree": {
       keys("targetId", "options"); boundedString(args.targetId, 128, "Tree target");
@@ -482,6 +492,8 @@ export function validateCapabilityArgs(capability: WorkerCapability, raw: unknow
     case "ui.input": keys("title", "placeholder", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); optionalString(args.placeholder, 4_096); validateDialogOptions(args.optionsMeta); return;
     case "ui.editor": keys("title", "prefill"); boundedString(args.title, 4_096, "Dialog title", true); optionalString(args.prefill, 300_000); return;
     case "ui.notify": keys("message", "level"); boundedString(args.message, 16_000, "Notification", true); oneOf(args.level, ["info", "warning", "error"], "Notification level"); return;
+    case "ui.setTitle": keys("title"); directiveString(args.title, 2_048, "Terminal title", false); return;
+    case "ui.setEditorText": keys("text"); directiveString(args.text, 256_000, "Editor text", true); return;
     case "ui.setStatus": keys("key", "text"); boundedString(args.key, 512, "Status key"); optionalString(args.text, 16_000); return;
     case "ui.setWidget": keys("key", "lines", "placement"); boundedString(args.key, 512, "Widget key"); if (args.lines !== undefined) stringArray(args.lines, 512, 16_000, "Widget lines"); oneOf(args.placement, ["aboveEditor", "belowEditor"], "Widget placement"); return;
     case "ui.widgetError": keys("key", "error"); boundedString(args.key, 128, "Widget key"); boundedString(args.error, 2_048, "Widget error", true); return;
@@ -810,16 +822,35 @@ function validateWorkerErrorDetails(code: WorkerErrorDto["code"], details: Recor
 function parseCapability(raw: unknown): WorkerCapability {
   return oneOf(raw, [
     "runtime.activate", "runtime.prompt", "runtime.queueMessage", "runtime.listModels", "runtime.listSessions", "runtime.navigateTree", "runtime.listTools", "runtime.setActiveTools", "runtime.getSettings", "runtime.updateSetting", "runtime.getResources", "runtime.getCommands", "runtime.resolveSessionTarget", "runtime.newSession", "runtime.switchSession", "runtime.fork", "runtime.setSessionName", "runtime.compact", "runtime.reload", "runtime.selectModel", "runtime.setThinkingLevel", "runtime.clearQueue", "runtime.abort", "runtime.waitForIdle", "runtime.dispose",
-    "ui.select", "ui.confirm", "ui.input", "ui.editor", "ui.notify", "ui.setStatus", "ui.setWidget", "ui.widgetError", "ui.unsupported", "ui.setToolsExpanded", "ui.cancel", "ui.viewport", "ui.reset", "ui.generationBegin",
+    "ui.select", "ui.confirm", "ui.input", "ui.editor", "ui.notify", "ui.setTitle", "ui.setEditorText", "ui.setStatus", "ui.setWidget", "ui.widgetError", "ui.unsupported", "ui.setToolsExpanded", "ui.cancel", "ui.viewport", "ui.reset", "ui.generationBegin",
     "dock.identity",
   ] as const, "Worker capability");
 }
 
 function validatePromptOptions(raw: unknown): void {
   const value = record(raw, "Prompt options");
-  exactKeys(value, ["streamingBehavior", "source"], "Prompt options");
+  exactKeys(value, ["streamingBehavior", "images", "source"], "Prompt options");
   if (value.streamingBehavior !== undefined) oneOf(value.streamingBehavior, ["steer", "followUp"], "Prompt streaming behavior");
+  if (value.images !== undefined) validateImagePaths(value.images);
   if (value.source !== undefined) oneOf(value.source, ["interactive", "rpc", "extension"], "Prompt source");
+}
+
+function validateImageMimeType(raw: unknown, field: string): string {
+  const mimeType = boundedString(raw, MAX_IMAGE_MIME_TYPE_CHARS, field);
+  if (!/^image\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/u.test(mimeType)) throw new Error(`${field} must be image/*`);
+  return mimeType;
+}
+
+function validateImagePaths(raw: unknown): void {
+  if (!Array.isArray(raw) || raw.length > MAX_INPUT_IMAGES) throw new Error("Worker image paths must be a bounded array");
+  const seen = new Set<string>();
+  for (const item of raw) {
+    const image = record(item, "Worker image path"); exactKeys(image, ["path", "mimeType"], "Worker image path");
+    const path = boundedString(image.path, MAX_IMAGE_PATH_CHARS, "Worker image path");
+    if (!path.startsWith("/") || /[\u0000-\u001f\u007f-\u009f]/u.test(path)) throw new Error("Worker image path must be absolute and control-free");
+    const mimeType = validateImageMimeType(image.mimeType, "Worker image MIME type");
+    const key = `${path}\u0000${mimeType}`; if (seen.has(key)) throw new Error("Worker image paths must be unique"); seen.add(key);
+  }
 }
 
 function validateDialogOptions(raw: unknown): void {
@@ -875,6 +906,12 @@ function boundedString(raw: unknown, limit: number, label: string, empty = false
 function optionalString(raw: unknown, limit: number): string | undefined {
   if (raw === undefined) return undefined;
   return boundedString(raw, limit, "Optional value", true);
+}
+function directiveString(raw: unknown, limit: number, label: string, multiline: boolean): string {
+  const value = boundedString(raw, limit, label, true);
+  const controls = multiline ? /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u : /[\u0000-\u001f\u007f-\u009f]/u;
+  if (controls.test(value) || containsBinaryPayload(value)) throw new Error(`${label} must be control-safe and payload-free`);
+  return value;
 }
 function positiveInteger(raw: unknown, label: string): number { if (!Number.isSafeInteger(raw) || (raw as number) < 1) throw new Error(`${label} must be a positive integer`); return raw as number; }
 function nonNegativeInteger(raw: unknown, label: string): number { if (!Number.isSafeInteger(raw) || (raw as number) < 0) throw new Error(`${label} must be a non-negative integer`); return raw as number; }

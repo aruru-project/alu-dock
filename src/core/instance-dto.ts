@@ -20,15 +20,24 @@ export type JsonScalar = string | number | boolean | null;
 export type JsonValue = JsonScalar | JsonValue[] | { [key: string]: JsonValue };
 export type JsonObject = { [key: string]: JsonValue };
 
+export interface ImagePathDto { path: string; mimeType: string }
+
 export type ContentBlockDto =
   | { type: "text"; text: string }
   | { type: "thinking"; text: string }
+  | { type: "image"; mimeType: string }
   | { type: "tool_call"; toolCallId: string; toolName: string; args: JsonObject; omittedFields?: string[] }
   | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; presentation?: BuiltInToolPresentation; omittedFields?: string[] }
   | { type: "omitted"; kind: "image" | "binary"; description: string };
 
 export const MAX_PENDING_QUEUE_ITEMS = 64;
 export const MAX_PENDING_QUEUE_TEXT_CHARS = 256_000;
+export const MAX_INPUT_IMAGES = 10;
+export const MAX_IMAGE_PATH_CHARS = 16_384;
+export const MAX_IMAGE_MIME_TYPE_CHARS = 256;
+export const MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS = 512_000;
+export const MAX_IMAGE_BYTES = 20 * 1_024 * 1_024;
+export const MAX_IMAGE_AGGREGATE_BYTES = 80 * 1_024 * 1_024;
 
 export interface PendingDto { steering: number; followUp: number; total: number }
 export interface PendingMessageDto {
@@ -36,6 +45,7 @@ export interface PendingMessageDto {
   operationId: string;
   delivery: "steer" | "followUp";
   text: string;
+  images?: ImagePathDto[];
   acceptedAt: string;
 }
 export interface HistoryEntryDto {
@@ -113,7 +123,7 @@ export interface EventDataMap {
   "run.retry_completed": { success: boolean; attempt: number; error?: string };
   "run.settled": { operationId?: string; result: LastRunResult; stopReason?: string; error?: string };
   "message.queued": PendingMessageDto;
-  "message.submitted": { operationId: string; messageId: string; role: "user"; text: string; delivery: "prompt" | "steer" | "followUp"; queueItemId?: string };
+  "message.submitted": { operationId: string; messageId: string; role: "user"; text: string; images?: ImagePathDto[]; delivery: "prompt" | "steer" | "followUp"; queueItemId?: string };
   "message.delta": { messageId: string; block: "text" | "thinking"; delta: string };
   "message.completed": { messageId: string; role: "user" | "assistant" | "tool" | "system"; content: ContentBlockDto[]; stopReason?: string; error?: string };
   "tool.started": { toolCallId: string; toolName: string; args: JsonObject; omittedFields?: string[] };
@@ -142,6 +152,8 @@ export interface EventDataMap {
   "interaction.resolved": { interactionId: string; method: "select" | "confirm" | "input" | "editor" };
   "interaction.cancelled": { interactionId: string; method: "select" | "confirm" | "input" | "editor"; reason: "user" | "timeout" | "signal" | "detach" | "replacement" | "host_draining" | "overflow" };
   "extension.notification": { message: string; level: "info" | "warning" | "error" };
+  "extension.title_set": { controllerId: string; title: string };
+  "extension.editor_text_set": { controllerId: string; text: string };
   "extension.status_changed": { key: string; text?: string };
   "extension.tools_expanded_changed": { expanded: boolean };
   "extension.widget_changed": { key: string; lines?: string[]; placement?: "aboveEditor" | "belowEditor" };

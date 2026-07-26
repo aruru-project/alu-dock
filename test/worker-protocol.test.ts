@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  ORDINARY_REVERSE_WORKER_CAPABILITIES,
   OrderedWorkerSender,
   WorkerFrameReceiver,
   parseWorkerEnvelope,
@@ -111,4 +112,28 @@ test("private worker protocol rejects malformed critical events, unknown capabil
     sequence: 1, transferId: "x", index: 0, count: 1,
     payload: JSON.stringify({ kind: "call", callId: "x", capability: "runtime.abort", args: {} }),
   }), /fence/);
+});
+
+test("Worker controller directive capabilities are exact, bounded, control-safe, and payload-free", () => {
+  const call = (capability: "ui.setTitle" | "ui.setEditorText", args: Record<string, unknown>) => parseWorkerEnvelope({ kind: "call", callId: "directive-call", capability, args });
+  assert.ok(ORDINARY_REVERSE_WORKER_CAPABILITIES.includes("ui.setTitle"));
+  assert.ok(ORDINARY_REVERSE_WORKER_CAPABILITIES.includes("ui.setEditorText"));
+  assert.doesNotThrow(() => call("ui.setTitle", { title: "Review queue" }));
+  assert.doesNotThrow(() => call("ui.setEditorText", { text: "line one\nline two\tindented" }));
+  assert.throws(() => call("ui.setTitle", { title: "bad\nline" }), /control-safe/i);
+  assert.throws(() => call("ui.setTitle", { title: "x".repeat(2_049) }), /bounded/i);
+  assert.throws(() => call("ui.setEditorText", { text: "bad\u001b[2J" }), /control-safe/i);
+  assert.throws(() => call("ui.setEditorText", { text: "data:image/png;base64,A0+\/A0+\/" }), /payload-free/i);
+  assert.throws(() => call("ui.setEditorText", { text: "x".repeat(256_001) }), /bounded/i);
+  assert.throws(() => call("ui.setTitle", { title: "ok", injected: true }), /unknown field/i);
+  assert.throws(() => validateCapabilityResult("ui.setTitle", "unexpected"), /must be empty/i);
+  assert.doesNotThrow(() => validateCapabilityResult("ui.setEditorText", null));
+});
+
+test("Worker prompt and queue image path arguments remain closed and bounded", () => {
+  const call = (capability: "runtime.prompt" | "runtime.queueMessage", args: Record<string, unknown>) => parseWorkerEnvelope({ kind: "call", callId: "image-call", capability, args });
+  assert.doesNotThrow(() => call("runtime.prompt", { text: "", options: { images: [{ path: "/tmp/input", mimeType: "image/x-custom" }] } }));
+  assert.doesNotThrow(() => call("runtime.queueMessage", { text: "same", delivery: "steer", images: [{ path: "/tmp/input", mimeType: "image/png" }] }));
+  assert.throws(() => call("runtime.prompt", { text: "", options: { images: [{ path: "relative", mimeType: "image/png" }] } }));
+  assert.throws(() => call("runtime.queueMessage", { text: "same", delivery: "steer", images: [{ path: "/tmp/input", mimeType: "image/png", data: "AAAA" }] }));
 });

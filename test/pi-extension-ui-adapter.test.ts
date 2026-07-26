@@ -29,6 +29,8 @@ test("Pi extension UI adapter exposes bounded dialogs and fail-closed unsupporte
   assert.equal(await selection, "two");
 
   ui.notify("visible", "info");
+  ui.setTitle("Extension title");
+  ui.setEditorText("extension draft\nsecond line");
   ui.setStatus("adapter", ui.theme.fg("accent", "ready"));
   ui.setWidget("lines", ["one", "two"], { placement: "belowEditor" });
   let renderedWidth = 0;
@@ -49,9 +51,15 @@ test("Pi extension UI adapter exposes bounded dialogs and fail-closed unsupporte
     && (event.data as { key?: string; lines?: string[] }).key === "component"
     && (event.data as { lines?: string[] }).lines?.[0] === "component at 72"), true);
   requestComponentRender();
-  await Promise.resolve();
+  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(broker.projection().extensionStatus, { adapter: "ready" });
   assert.equal(events.some((event) => event.type === "extension.notification"), true);
+  assert.equal(events.some((event) => event.type === "extension.title_set"
+    && (event.data as { controllerId?: string; title?: string }).controllerId === claim.controllerId
+    && (event.data as { title?: string }).title === "Extension title"), true);
+  assert.equal(events.some((event) => event.type === "extension.editor_text_set"
+    && (event.data as { controllerId?: string; text?: string }).controllerId === claim.controllerId
+    && (event.data as { text?: string }).text === "extension draft\nsecond line"), true);
   assert.equal(events.some((event) => event.type === "extension.widget_changed"), true);
 
   assert.equal(ui.getToolsExpanded(), false);

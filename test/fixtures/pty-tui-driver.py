@@ -95,6 +95,8 @@ def main() -> int:
             completed_renders = bytes(output).count(b"\x1b[?2026l")
             if action in hub_actions:
                 set_size(fd, 18 if action == "hub-narrow" else 40, 43 if action == "hub-narrow" else 120)
+            elif action in ("extension-dialogs", "extension-replacement"):
+                set_size(fd, 40, 120)
             elif action == "flow-frame-stability":
                 set_size(fd, 58, 252)
             else:
@@ -280,14 +282,22 @@ def main() -> int:
                     os.write(fd, response)
                     time.sleep(0.1)
                     read_available(fd, output, 0.05)
+                os.write(fd, b"\x03")  # Clear the injected main-editor draft before detach.
+                time.sleep(0.05)
+                read_available(fd, output, 0.02)
             elif action == "extension-replacement":
                 dialog_deadline = time.monotonic() + 5
                 while b"Post replacement confirm" not in output and time.monotonic() < dialog_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\x1b[A\r")  # Confirm defaults to No; move to explicit Yes.
-                time.sleep(0.1)
-                read_available(fd, output, 0.05)
+                directive_deadline = time.monotonic() + 5
+                while (b"Post replacement extension title" not in output or b"post replacement injected draft" not in output) and time.monotonic() < directive_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\x03")  # Clear the injected main-editor draft before detach.
+                time.sleep(0.05)
+                read_available(fd, output, 0.02)
             elif action in ("model-search", "model-disconnect"):
                 os.write(fd, b"/model\r")
                 picker_deadline = time.monotonic() + 4

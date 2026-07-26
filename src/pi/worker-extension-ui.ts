@@ -33,6 +33,8 @@ export class WorkerExtensionUiEndpoint implements PiExtensionUiLifecyclePort {
       input: (title, placeholder, opts) => active() ? this.input(title, placeholder, opts) : Promise.resolve(undefined),
       editor: (title, prefill) => active() ? this.editor(title, prefill) : Promise.resolve(undefined),
       notify: (message, level) => { if (active()) this.notify(message, level); },
+      setTitle: (title) => { if (active()) this.setTitle(title); },
+      setEditorText: (text) => { if (active()) this.setEditorText(text); },
       getToolsExpanded: () => active() ? this.getToolsExpanded() : false,
       setToolsExpanded: (expanded) => { if (active()) this.setToolsExpanded(expanded); },
       setStatus: (key, text) => { if (active()) this.setStatus(key, text); },
@@ -62,6 +64,10 @@ export class WorkerExtensionUiEndpoint implements PiExtensionUiLifecyclePort {
   notify(message: string, level: "info" | "warning" | "error" = "info"): void {
     this.fire("ui.notify", { message, level });
   }
+
+  setTitle(title: string): void { this.fire("ui.setTitle", { title }); }
+
+  setEditorText(text: string): void { this.fire("ui.setEditorText", { text: text.replace(/\r\n?/gu, "\n") }); }
 
   getToolsExpanded(): boolean { return this.toolsExpanded; }
 

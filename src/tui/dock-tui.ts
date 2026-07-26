@@ -95,6 +95,9 @@ export async function runDockTui(
   activity.setActivity(runActivity);
   let subscription: EventSubscription | undefined;
   let controllerLeaseToken: string | undefined;
+  let controllerId: string | undefined;
+  let pendingEditorDirective: { controllerId: string; runtimeGeneration: number; text: string } | undefined;
+  let pendingTitleDirective: { controllerId: string; runtimeGeneration: number; title: string } | undefined;
   let activeExtensionDialog: { interactionId: string; closeFromHost: () => void } | undefined;
   let lastEventGeneration = instance.runtimeGeneration;
   let lastEventSequence = instance.eventCursor.sequence;
@@ -150,6 +153,46 @@ export async function runDockTui(
     return false;
   };
 
+  const restoreTerminalTitle = (): void => {
+    const directive = pendingTitleDirective;
+    if (directive !== undefined
+      && directive.controllerId === controllerId
+      && directive.runtimeGeneration === instance.runtimeGeneration) {
+      terminal.setTitle(terminalSafe(directive.title));
+      return;
+    }
+    terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
+  };
+
+  const clearControllerRouting = (): void => {
+    controllerLeaseToken = undefined;
+    controllerId = undefined;
+    pendingEditorDirective = undefined;
+    pendingTitleDirective = undefined;
+    restoreTerminalTitle();
+  };
+
+  const applyControllerDirective = (event: DockEvent): void => {
+    if (event.runtimeGeneration !== instance.runtimeGeneration || controllerId === undefined) return;
+    if (event.type === "extension.title_set" && event.data.controllerId === controllerId) {
+      pendingTitleDirective = { controllerId, runtimeGeneration: event.runtimeGeneration, title: event.data.title };
+      restoreTerminalTitle();
+      return;
+    }
+    if (event.type === "extension.editor_text_set" && event.data.controllerId === controllerId) {
+      if (!editor) {
+        pendingEditorDirective = { controllerId, runtimeGeneration: event.runtimeGeneration, text: event.data.text };
+        return;
+      }
+      editor.setText(event.data.text);
+      tui.requestRender();
+    }
+  };
+
+  const applyInitialControllerDirectives = (events: DockEvent[]): void => {
+    for (const event of events) applyControllerDirective(event);
+  };
+
   const onEvent = (event: DockEvent): void => {
     if (event.runtimeGeneration < lastEventGeneration) return;
     if (event.runtimeGeneration === lastEventGeneration && event.sequence <= lastEventSequence) return;
@@ -169,7 +212,7 @@ export async function runDockTui(
     if (runActivity.phase !== "submitting" || submittingFeedbackVisible) activity.setActivity(runActivity);
     if (event.type === "session.replaced") {
       activeExtensionDialog?.closeFromHost();
-      controllerLeaseToken = undefined;
+      clearControllerRouting();
       status.setController("unavailable");
       void reacquireController({ ...instance.eventCursor });
       navigationHistoryToken = undefined;
@@ -208,8 +251,13 @@ export async function runDockTui(
     }
     if (event.type === "settings.changed") applyLiveSetting(event.data.key, event.data.value);
     if (event.type === "extension.tools_expanded_changed") conversation.setToolsExpanded(event.data.expanded);
-    if (event.type === "session.info_changed") terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
+    applyControllerDirective(event);
+    if (event.type === "session.info_changed") {
+      pendingTitleDirective = undefined;
+      restoreTerminalTitle();
+    }
     if (instance.lifecycle !== "active") {
+      clearControllerRouting();
       detachTruth = "not_active";
       if (editor) refreshEditorSubmit();
     } else if (eventStreamConnected) {
@@ -227,7 +275,11 @@ export async function runDockTui(
   controllerLeaseToken = subscription.initial.controller.status === "acquired"
     ? subscription.initial.controller.leaseToken
     : undefined;
+  controllerId = subscription.initial.controller.status === "acquired"
+    ? subscription.initial.controller.controllerId
+    : undefined;
   status.setController(subscription.initial.controller.status);
+  applyInitialControllerDirectives(subscription.initial.page.events);
   if (lastEventGeneration < subscription.initial.page.latest.runtimeGeneration
     || (lastEventGeneration === subscription.initial.page.latest.runtimeGeneration && lastEventSequence < subscription.initial.page.latest.sequence)) {
     lastEventGeneration = subscription.initial.page.latest.runtimeGeneration;
@@ -314,6 +366,9 @@ export async function runDockTui(
         controllerLeaseToken = next.initial.controller.status === "acquired"
           ? next.initial.controller.leaseToken
           : undefined;
+        controllerId = next.initial.controller.status === "acquired"
+          ? next.initial.controller.controllerId
+          : undefined;
         status.setController(next.initial.controller.status);
         watchEventSubscription(next);
         for (const event of next.initial.page.events) onEvent(event);
@@ -322,7 +377,7 @@ export async function runDockTui(
         tui.requestRender();
       } catch (error) {
         if (exiting) return;
-        controllerLeaseToken = undefined;
+        clearControllerRouting();
         status.setController("unavailable");
         conversation.addNotice(`Controller reattach failed: ${errorText(error)}`, true);
         tui.requestRender();
@@ -350,6 +405,14 @@ export async function runDockTui(
     paddingX: numericSetting(settings, "editorPaddingX", 1),
     autocompleteMaxVisible: numericSetting(settings, "autocompleteMaxVisible", 10),
   });
+  const editorDirective = pendingEditorDirective as { controllerId: string; runtimeGeneration: number; text: string } | undefined;
+  if (editorDirective !== undefined) {
+    if (editorDirective.controllerId === controllerId
+      && editorDirective.runtimeGeneration === instance.runtimeGeneration) {
+      editor.setText(editorDirective.text);
+    }
+  }
+  pendingEditorDirective = undefined;
   tui.setShowHardwareCursor(booleanSetting(settings, "showHardwareCursor", process.env.PI_HARDWARE_CURSOR === "1"));
   // Work owns native main-buffer scrollback. Stock pi-tui's clear-on-shrink
   // path emits ESC[3J, so this client deliberately never enables it.
@@ -783,7 +846,7 @@ export async function runDockTui(
     } catch (error) {
       if (error instanceof ControlClientError && (error.code === "interaction_expired" || error.code === "interaction_not_found")) return;
       if (error instanceof ControlClientError && error.code === "interaction_wrong_lease") {
-        controllerLeaseToken = undefined;
+        clearControllerRouting();
         status.setController("unavailable");
       }
       showError(error);
@@ -1412,7 +1475,8 @@ export async function runDockTui(
       const result = await client.nameSession(instance.id, name);
       instance = result.instance;
       status.update(instance);
-      terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
+      pendingTitleDirective = undefined;
+      restoreTerminalTitle();
       conversation.addNotice(instance.name ? `Session name: ${terminalSafe(instance.name)}.` : "Session name cleared.");
       showStatus(instance.name ? `named ${terminalSafe(instance.name)}` : "session name cleared");
     } catch (error) { showError(error); }
@@ -1580,7 +1644,7 @@ export async function runDockTui(
         pendingQueue.apply(event);
       }
       status.update(instance);
-      terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
+      restoreTerminalTitle();
       conversation.applyHistory(historyEntries, false);
       conversation.applyReplay(reconciled, false);
       if (!full.ok) conversation.addNotice(`Replacement history unavailable: ${errorText(full.error)}`, true);
@@ -1798,7 +1862,7 @@ export async function runDockTui(
   workFlow.addChild(status);
   tui.addChild(workFlow);
   tui.setFocus(editor);
-  terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
+  restoreTerminalTitle();
 
   const removeInputListener = tui.addInputListener((data) => {
     if (tui.hasOverlay()) return undefined;
@@ -1903,7 +1967,7 @@ export async function runDockTui(
       sequence: lastEventSequence,
     };
     activeExtensionDialog?.closeFromHost();
-    controllerLeaseToken = undefined;
+    clearControllerRouting();
     status.setController("unavailable");
     eventStreamConnected = false;
     refreshEditorSubmit();
@@ -1981,6 +2045,9 @@ export async function runDockTui(
         controllerLeaseToken = next.initial.controller.status === "acquired"
           ? next.initial.controller.leaseToken
           : undefined;
+        controllerId = next.initial.controller.status === "acquired"
+          ? next.initial.controller.controllerId
+          : undefined;
         status.setController(next.initial.controller.status);
         for (const event of next.initial.page.events) onEvent(event);
         instance = next.initial.instance;
@@ -2035,6 +2102,7 @@ export async function runDockTui(
 
   activityPulse.stop();
   activeExtensionDialog?.closeFromHost();
+  clearControllerRouting();
   removeInputListener();
   process.off("SIGINT", onSigint);
   process.off("SIGTERM", onSigterm);

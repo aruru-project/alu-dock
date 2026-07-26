@@ -83,7 +83,8 @@ class FakeSession {
   abortCalls = 0;
   abortCompactionCalls = 0;
   abortBranchSummaryCalls = 0;
-  queueCalls: Array<{ text: string; delivery: "steer" | "followUp" }> = [];
+  promptCalls: Array<{ text: string; images?: Array<{ type: "image"; data: string; mimeType: string }> }> = [];
+  queueCalls: Array<{ text: string; delivery: "steer" | "followUp"; images?: Array<{ type: "image"; data: string; mimeType: string }> }> = [];
   queueFailure: "before" | "after" | undefined;
   navigateCalls = 0;
   disposeCalls = 0;
@@ -149,7 +150,7 @@ class FakeSession {
     for (const listener of this.listeners) listener(event);
   }
 
-  prompt(): Promise<void> { return Promise.resolve(); }
+  prompt(text: string, options?: { images?: Array<{ type: "image"; data: string; mimeType: string }> }): Promise<void> { this.promptCalls.push({ text, ...(options?.images === undefined ? {} : { images: options.images }) }); return Promise.resolve(); }
   async setModel(model: FakeModel): Promise<void> {
     this.trace.push(`${this.sessionId}:setModel`);
     this.model = model;
@@ -181,14 +182,14 @@ class FakeSession {
   abort(): Promise<void> { this.abortCalls += 1; return Promise.resolve(); }
   abortCompaction(): void { this.abortCompactionCalls += 1; }
   abortBranchSummary(): void { this.abortBranchSummaryCalls += 1; }
-  async steer(text: string): Promise<void> {
+  async steer(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<void> {
     if (this.queueFailure === "before") throw new Error("queue validation failed");
-    this.queueCalls.push({ text, delivery: "steer" });
+    this.queueCalls.push({ text, delivery: "steer", ...(images === undefined ? {} : { images }) });
     if (this.queueFailure === "after") throw new Error("queue acknowledgement failed");
   }
-  async followUp(text: string): Promise<void> {
+  async followUp(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<void> {
     if (this.queueFailure === "before") throw new Error("queue validation failed");
-    this.queueCalls.push({ text, delivery: "followUp" });
+    this.queueCalls.push({ text, delivery: "followUp", ...(images === undefined ? {} : { images }) });
     if (this.queueFailure === "after") throw new Error("queue acknowledgement failed");
   }
   getSteeringMessages(): string[] { return this.queueCalls.filter((item) => item.delivery === "steer").map((item) => item.text); }
@@ -435,6 +436,40 @@ test("Pi runtime host binds initial listener before extensions and delays startu
   await host.dispose();
   assert.equal(initial.unsubscribeCalls, 1);
   assert.equal(initial.disposeCalls, 1);
+});
+
+test("Pi runtime host converts bounded local images for prompt, steer, and follow-up without projecting bytes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "alu-dock-image-"));
+  const path = join(root, "fixture.custom");
+  await writeFile(path, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  const { host, initial } = await runtimeHost([]);
+  const images = [{ path, mimeType: "image/x-fixture" }];
+  try {
+    await host.prompt("", { images });
+    await host.queueMessage("same", "steer", images);
+    await host.queueMessage("same", "followUp", images);
+    const expected = [{ type: "image" as const, data: "iVBORw==", mimeType: "image/x-fixture" }];
+    assert.deepEqual(initial.promptCalls, [{ text: "", images: expected }]);
+    assert.deepEqual(initial.queueCalls, [
+      { text: "same", delivery: "steer", images: expected },
+      { text: "same", delivery: "followUp", images: expected },
+    ]);
+    await assert.rejects(
+      host.queueMessage("missing", "steer", [{ path: join(root, "missing"), mimeType: "image/png" }]),
+      (error: unknown) => error instanceof RuntimeQueueRejectedBeforeEffectError && !String(error.cause).includes(root),
+    );
+    assert.equal(initial.queueCalls.length, 2);
+
+    const events: unknown[] = [];
+    host.subscribe((event) => events.push(event));
+    host.activateInitial();
+    initial.emit({ type: "message_end", message: { role: "user", content: [{ type: "image", data: "private", mimeType: "image/x-fixture" }] } });
+    assert.deepEqual(events.at(-1), { type: "message_end", message: { role: "user", content: [{ type: "image", mimeType: "image/x-fixture" }] } });
+    assert.equal(JSON.stringify(events).includes("private"), false);
+  } finally {
+    await host.dispose();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("Pi runtime host projects public compaction independently from streaming", async () => {

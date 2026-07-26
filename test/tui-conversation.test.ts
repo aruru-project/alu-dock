@@ -194,6 +194,27 @@ test("full flowing conversation render includes the complete ordered transcript"
   assert.match(rendered, /live entry 250/u);
 });
 
+test("conversation renders live and historical user image metadata without blank turns", () => {
+  const live = new DockConversation();
+  live.apply(event(1, "message.submitted", {
+    operationId: "image-only",
+    messageId: "image-only",
+    role: "user",
+    text: "",
+    images: [{ path: "/tmp/input.png", mimeType: "image/png" }],
+    delivery: "prompt",
+  }));
+  assert.deepEqual(live.snapshot(), [{ kind: "user", text: "[Image 1 · image/png]", complete: true }]);
+
+  const historical = new DockConversation();
+  historical.applyHistory([{
+    entryId: "historical-image",
+    role: "user",
+    content: [{ type: "text", text: "caption" }, { type: "image", mimeType: "image/webp" }],
+  }], false);
+  assert.deepEqual(historical.snapshot(), [{ kind: "user", text: "caption\n\n[Image 1 · image/webp]", complete: true }]);
+});
+
 test("conversation reset replaces old session history", () => {
   const conversation = new DockConversation();
   conversation.addNotice("old session");

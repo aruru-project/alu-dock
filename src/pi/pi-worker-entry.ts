@@ -187,7 +187,7 @@ async function dispatchRuntime(runtime: PiRuntimeHost, capability: RuntimeCapabi
       ...((args.options ?? {}) as object),
       preflightResult: (success) => { void sender.sendEnvelope({ kind: "preflight", callId, success }); },
     });
-    case "runtime.queueMessage": return runtime.queueMessage(args.text as string, args.delivery as "steer" | "followUp");
+    case "runtime.queueMessage": return runtime.queueMessage(args.text as string, args.delivery as "steer" | "followUp", args.images as import("../core/runtime-session.js").RuntimeImagePath[] | undefined);
     case "runtime.listModels": return runtime.listModels();
     case "runtime.listSessions": return runtime.listSessions(args.scope as "cwd" | "all");
     case "runtime.navigateTree": return runtime.navigateTree(args.targetId as string, args.options as never);
