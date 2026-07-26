@@ -40,6 +40,7 @@ import {
   parseCommandsResult,
   ProtocolValidationError,
   CONTROLLER_DIRECTIVES_CAPABILITY,
+  PERSISTENT_INTERACTIONS_CAPABILITY,
   INSTANCE_KEYS_CAPABILITY,
   implementedCapabilities,
   requiredCapabilities,
@@ -99,6 +100,7 @@ function validEvent(type = "message.delta", data: Record<string, unknown> = { me
 
 test("controller directive capability and events are separately negotiated, closed, bounded, and payload-free", () => {
   assert.ok(implementedCapabilities().includes(CONTROLLER_DIRECTIVES_CAPABILITY));
+  assert.ok(implementedCapabilities().includes(PERSISTENT_INTERACTIONS_CAPABILITY));
   assert.ok(requiredCapabilities(CONTROLLER_DIRECTIVES_CAPABILITY).includes(CONTROLLER_DIRECTIVES_CAPABILITY));
   const envelope = (event: unknown): Record<string, unknown> => ({ kind: "event", version: 2, requestId: "stream-1", hostEpoch: "epoch-1", event });
   const title = parseControlEventEnvelope(envelope(validEvent("extension.title_set", {
@@ -604,6 +606,14 @@ test("Stage 4 interaction requests, responses, and controller leases are closed"
     recentHistory: [], historyTruncated: false, pendingMessages: [], controller: { status: "acquired", leaseToken: "lease-1", controllerId: "controller-1" }, following: true,
   });
   assert.deepEqual(attach.controller, { status: "acquired", leaseToken: "lease-1", controllerId: "controller-1" });
+  const persistentRequest = parseControlEventEnvelope({
+    kind: "event", version: 2, requestId: "stream-1", hostEpoch: "epoch-1",
+    event: validEvent("interaction.requested", { interactionId: "dialog-1", method: "confirm", title: "Delete", message: "Proceed?", issuedAt: "2026-01-01T00:00:00.000Z" }),
+  }, "stream-1", "epoch-1").event;
+  assert.ok(persistentRequest.type === "interaction.requested");
+  assert.equal(persistentRequest.data.expiresAt, undefined);
+  const persistentSnapshot = parseStatusResult({ instance: { ...validSnapshot(), activeInteraction: { id: "dialog-1", method: "confirm" } } }).instance;
+  assert.deepEqual(persistentSnapshot.activeInteraction, { id: "dialog-1", method: "confirm" });
   assert.throws(() => parseEventsResult({
     ...attach,
     controller: { status: "acquired" },

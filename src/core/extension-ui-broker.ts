@@ -26,7 +26,7 @@ export interface InteractionResult {
 export interface ExtensionUiProjection {
   extensionStatus: Record<string, string>;
   toolsExpanded: boolean;
-  activeInteraction?: { id: string; method: DialogMethod; expiresAt: string };
+  activeInteraction?: { id: string; method: DialogMethod; expiresAt?: string };
 }
 
 export interface ExtensionWidgetViewport {
@@ -81,7 +81,8 @@ interface PendingDialog {
   request: EventDataMap["interaction.requested"];
   defaultValue: DialogValue;
   resolve: (value: DialogValue) => void;
-  expiresAtMs: number;
+  reject: (error: Error) => void;
+  expiresAtMs?: number;
   signal?: AbortSignal;
   abortListener?: () => void;
   timer?: NodeJS.Timeout;
@@ -97,7 +98,7 @@ interface InteractionTombstone {
 }
 
 const MAX_DIALOGS = 16;
-const MAX_DIALOG_LIFETIME_MS = 5 * 60_000;
+const MAX_EXPLICIT_DIALOG_TIMEOUT_MS = 5 * 60_000;
 const TOMBSTONE_TTL_MS = 5 * 60_000;
 const MAX_TOMBSTONES = 256;
 const MAX_STATUS_KEYS = 64;
@@ -133,6 +134,7 @@ export class ExtensionUiBroker {
   private remoteEndpoint: ExtensionUiRemoteEndpoint | undefined;
   private mutationTail: Promise<void> = Promise.resolve();
   private suspended = false;
+  private suspensionReason: "replacement" | "host_draining" | undefined;
 
   constructor(
     private readonly now: () => Date = () => new Date(),
@@ -149,6 +151,14 @@ export class ExtensionUiBroker {
 
   isSuspended(): boolean { return this.suspended; }
 
+  isControllerLeaseCurrent(leaseToken: string, generation: number): boolean {
+    return !this.suspended && this.controller?.token === leaseToken && this.controller.generation === generation;
+  }
+
+  hasPendingInteraction(): boolean {
+    return this.active !== undefined || this.queue.length > 0;
+  }
+
   projection(): ExtensionUiProjection {
     return {
       extensionStatus: Object.fromEntries([...this.statuses.entries()].sort(([left], [right]) => left.localeCompare(right))),
@@ -157,7 +167,7 @@ export class ExtensionUiBroker {
         activeInteraction: {
           id: this.active.id,
           method: this.active.method,
-          expiresAt: this.active.request.expiresAt,
+          ...(this.active.request.expiresAt === undefined ? {} : { expiresAt: this.active.request.expiresAt }),
         },
       }),
     };
@@ -186,6 +196,8 @@ export class ExtensionUiBroker {
       };
       this.controller = lease;
       this.projectionChanged();
+      if (this.active) await this.emit("interaction.requested", this.active.request);
+      else await this.activateNextDialog();
       return { status: "acquired", leaseToken: lease.token, controllerId: lease.controllerId };
     });
   }
@@ -195,14 +207,17 @@ export class ExtensionUiBroker {
       if (this.controller?.token !== leaseToken) return;
       this.controller = undefined;
       this.widgetViewport = undefined;
+      // The interaction belongs to the runtime generation, not this transport
+      // lease. A later controller claim re-emits the same full request.
       this.projectionChanged();
-      await this.cancelAllDialogs(reason, leaseToken);
+      if (reason === "host_draining") await this.cancelAllDialogs("host_draining", leaseToken);
     });
   }
 
   beginGenerationChange(): void {
     if (this.suspended) return;
     this.suspended = true;
+    this.suspensionReason = "replacement";
     const leaseToken = this.controller?.token;
     this.controller = undefined;
     this.statuses.clear();
@@ -220,6 +235,7 @@ export class ExtensionUiBroker {
   completeGenerationChange(): Promise<void> {
     return this.serialize(async () => {
       this.suspended = false;
+      this.suspensionReason = undefined;
       this.pruneTombstones();
       this.projectionChanged();
       const buffered = this.bufferedEvents.splice(0);
@@ -229,6 +245,7 @@ export class ExtensionUiBroker {
 
   failGenerationChange(): Promise<void> {
     this.suspended = true;
+    this.suspensionReason = "replacement";
     return this.serialize(async () => {
       this.controller = undefined;
       this.statuses.clear();
@@ -242,8 +259,19 @@ export class ExtensionUiBroker {
     });
   }
 
+  suspendForHostDrain(): Promise<void> {
+    this.suspended = true;
+    this.suspensionReason = "host_draining";
+    return this.serialize(() => {
+      this.controller = undefined;
+      this.widgetViewport = undefined;
+      this.projectionChanged();
+    });
+  }
+
   cancelForHostDrain(): Promise<void> {
     this.suspended = true;
+    this.suspensionReason = "host_draining";
     return this.serialize(async () => {
       const leaseToken = this.controller?.token;
       this.controller = undefined;
@@ -261,8 +289,9 @@ export class ExtensionUiBroker {
 
   select(title: string, options: string[], opts?: ExtensionDialogOptions): Promise<string | undefined> {
     if (!Array.isArray(options) || options.length < 1 || options.length > MAX_OPTIONS) {
-      this.recordError("Extension select options must contain between 1 and 200 items");
-      return Promise.resolve(undefined);
+      const message = "Extension select options must contain between 1 and 200 items";
+      this.recordError(message);
+      return Promise.reject(new ExtensionUiRequestError(message));
     }
     const wireToOriginal = new Map<string, string>();
     const projected: string[] = [];
@@ -270,18 +299,21 @@ export class ExtensionUiBroker {
     let projectedChars = safeTitle.length;
     for (const original of options) {
       if (typeof original !== "string" || original.length > MAX_TEXT_CHARS) {
-        this.recordError("Extension select options must be bounded strings");
-        return Promise.resolve(undefined);
+        const message = "Extension select options must be bounded strings";
+        this.recordError(message);
+        return Promise.reject(new ExtensionUiRequestError(message));
       }
       const wire = safeLine(original, MAX_TEXT_CHARS);
       if (wireToOriginal.has(wire)) {
-        this.recordError("Extension select options collide after terminal sanitization");
-        return Promise.resolve(undefined);
+        const message = "Extension select options collide after terminal sanitization";
+        this.recordError(message);
+        return Promise.reject(new ExtensionUiRequestError(message));
       }
       projectedChars += wire.length;
       if (projectedChars > MAX_EDITOR_CHARS) {
-        this.recordError("Extension select payload exceeds the bounded interaction surface");
-        return Promise.resolve(undefined);
+        const message = "Extension select payload exceeds the bounded interaction surface";
+        this.recordError(message);
+        return Promise.reject(new ExtensionUiRequestError(message));
       }
       wireToOriginal.set(wire, original);
       projected.push(wire);
@@ -469,44 +501,55 @@ export class ExtensionUiBroker {
     opts?: ExtensionDialogOptions,
     selectValues?: Map<string, string>,
   ): Promise<T> {
-    if (opts?.signal?.aborted || this.suspended || !this.controller) return Promise.resolve(defaultValue);
+    if (opts?.signal?.aborted) return Promise.resolve(defaultValue);
+    if (this.suspended) return Promise.reject(new InteractionLifecycleCancelledError(this.suspensionReason ?? "replacement"));
     const issuedAtMs = this.now().getTime();
     const requestedTimeout = opts?.timeout;
     const lifetime = requestedTimeout === undefined
-      ? MAX_DIALOG_LIFETIME_MS
-      : Number.isFinite(requestedTimeout) ? Math.max(0, Math.min(MAX_DIALOG_LIFETIME_MS, Math.floor(requestedTimeout))) : 0;
+      ? undefined
+      : Number.isFinite(requestedTimeout) ? Math.max(0, Math.min(MAX_EXPLICIT_DIALOG_TIMEOUT_MS, Math.floor(requestedTimeout))) : 0;
     if (lifetime === 0) return Promise.resolve(defaultValue);
-    const expiresAtMs = issuedAtMs + lifetime;
+    const expiresAtMs = lifetime === undefined ? undefined : issuedAtMs + lifetime;
     const interactionId = this.createId();
     const request = {
       ...input,
       interactionId,
       issuedAt: new Date(issuedAtMs).toISOString(),
-      expiresAt: new Date(expiresAtMs).toISOString(),
+      ...(expiresAtMs === undefined ? {} : { expiresAt: new Date(expiresAtMs).toISOString() }),
     } as EventDataMap["interaction.requested"];
 
     let resolveDialog!: (value: DialogValue) => void;
-    const result = new Promise<T>((resolve) => { resolveDialog = (value) => resolve(value as T); });
+    let rejectDialog!: (error: Error) => void;
+    const result = new Promise<T>((resolve, reject) => {
+      resolveDialog = (value) => resolve(value as T);
+      rejectDialog = reject;
+    });
     const dialog: PendingDialog = {
       id: interactionId,
       method: input.method,
       request,
       defaultValue,
       resolve: resolveDialog,
+      reject: rejectDialog,
       expiresAtMs,
       signal: opts?.signal,
       selectValues,
     };
 
     void this.serialize(async () => {
-      if (dialog.signal?.aborted || this.suspended || !this.controller) {
+      if (dialog.signal?.aborted) {
         dialog.resolve(defaultValue);
+        return;
+      }
+      if (this.suspended) {
+        dialog.reject(new InteractionLifecycleCancelledError(this.suspensionReason ?? "replacement"));
         return;
       }
       if (this.dialogCount() >= MAX_DIALOGS) {
         await this.emit("interaction.cancelled", { interactionId, method: dialog.method, reason: "overflow" });
-        this.recordError("Extension interaction queue limit exceeded");
-        dialog.resolve(defaultValue);
+        const message = "Extension interaction queue limit exceeded";
+        this.recordError(message);
+        dialog.reject(new ExtensionUiRequestError(message));
         return;
       }
       this.installCancellation(dialog);
@@ -517,11 +560,13 @@ export class ExtensionUiBroker {
   }
 
   private installCancellation(dialog: PendingDialog): void {
-    const delay = Math.max(0, dialog.expiresAtMs - this.now().getTime());
-    dialog.timer = setTimeout(() => {
-      void this.serialize(() => this.cancelDialog(dialog, "timeout"));
-    }, delay);
-    dialog.timer.unref();
+    if (dialog.expiresAtMs !== undefined) {
+      const delay = Math.max(0, dialog.expiresAtMs - this.now().getTime());
+      dialog.timer = setTimeout(() => {
+        void this.serialize(() => this.cancelDialog(dialog, "timeout"));
+      }, delay);
+      dialog.timer.unref();
+    }
     if (dialog.signal) {
       dialog.abortListener = () => { void this.serialize(() => this.cancelDialog(dialog, "signal")); };
       dialog.signal.addEventListener("abort", dialog.abortListener, { once: true });
@@ -532,7 +577,7 @@ export class ExtensionUiBroker {
     if (this.active || this.suspended || !this.controller) return;
     while (this.queue.length > 0) {
       const dialog = this.queue.shift()!;
-      if (dialog.expiresAtMs <= this.now().getTime()) {
+      if (dialog.expiresAtMs !== undefined && dialog.expiresAtMs <= this.now().getTime()) {
         await this.cancelDialog(dialog, "timeout");
         continue;
       }
@@ -560,7 +605,7 @@ export class ExtensionUiBroker {
       expiresAtMs: this.now().getTime() + TOMBSTONE_TTL_MS,
     });
     await this.emit("interaction.cancelled", { interactionId: dialog.id, method: dialog.method, reason });
-    dialog.resolve(dialog.defaultValue);
+    this.settleCancelledDialog(dialog, reason);
     await this.activateNextDialog();
   }
 
@@ -578,8 +623,16 @@ export class ExtensionUiBroker {
         expiresAtMs: this.now().getTime() + TOMBSTONE_TTL_MS,
       });
       await this.emit("interaction.cancelled", { interactionId: dialog.id, method: dialog.method, reason }, true);
-      dialog.resolve(dialog.defaultValue);
+      this.settleCancelledDialog(dialog, reason);
     }
+  }
+
+  private settleCancelledDialog(dialog: PendingDialog, reason: InteractionCancelReason): void {
+    if (reason === "replacement" || reason === "host_draining") {
+      dialog.reject(new InteractionLifecycleCancelledError(reason));
+      return;
+    }
+    dialog.resolve(dialog.defaultValue);
   }
 
   private validateResponse(dialog: PendingDialog, response: InteractionResponse): string | boolean | undefined {
@@ -721,6 +774,18 @@ export class InteractionWrongLeaseError extends Error {
 export class InteractionInvalidResponseError extends Error {
   readonly code = "interaction_invalid_response";
   constructor(readonly interactionId: string) { super(`Interaction ${interactionId} response is invalid`); this.name = "InteractionInvalidResponseError"; }
+}
+export class InteractionLifecycleCancelledError extends Error {
+  constructor(readonly reason: "replacement" | "host_draining") {
+    super(`Extension UI interaction cancelled by runtime lifecycle: ${reason}`);
+    this.name = "InteractionLifecycleCancelledError";
+  }
+}
+export class ExtensionUiRequestError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ExtensionUiRequestError";
+  }
 }
 
 function canonicalResponse(response: InteractionResponse): string {

@@ -8,6 +8,15 @@ import type { UiCapability } from "./worker-protocol.js";
 
 export type WorkerUiCall = (capability: UiCapability, args: Record<string, unknown>, signal?: AbortSignal) => Promise<unknown>;
 
+export class WorkerUiLifecycleCancelledError extends Error {
+  readonly reason = "replacement";
+
+  constructor() {
+    super("Extension UI interaction cancelled by runtime generation replacement");
+    this.name = "WorkerUiLifecycleCancelledError";
+  }
+}
+
 /** Pi-facing endpoint that retains component objects and rendering inside the child. */
 export class WorkerExtensionUiEndpoint implements PiExtensionUiLifecyclePort {
   private renderer: ExtensionWidgetRenderer | undefined;
@@ -27,11 +36,12 @@ export class WorkerExtensionUiEndpoint implements PiExtensionUiLifecyclePort {
   createGenerationPort(): PiExtensionUiPort {
     const generation = this.generation;
     const active = (): boolean => generation === this.generation;
+    const cancelled = <T>(): Promise<T> => Promise.reject(new WorkerUiLifecycleCancelledError());
     return {
-      select: (title, options, opts) => active() ? this.select(title, options, opts) : Promise.resolve(undefined),
-      confirm: (title, message, opts) => active() ? this.confirm(title, message, opts) : Promise.resolve(false),
-      input: (title, placeholder, opts) => active() ? this.input(title, placeholder, opts) : Promise.resolve(undefined),
-      editor: (title, prefill) => active() ? this.editor(title, prefill) : Promise.resolve(undefined),
+      select: (title, options, opts) => active() ? this.select(title, options, opts) : cancelled(),
+      confirm: (title, message, opts) => active() ? this.confirm(title, message, opts) : cancelled(),
+      input: (title, placeholder, opts) => active() ? this.input(title, placeholder, opts) : cancelled(),
+      editor: (title, prefill) => active() ? this.editor(title, prefill) : cancelled(),
       notify: (message, level) => { if (active()) this.notify(message, level); },
       setTitle: (title) => { if (active()) this.setTitle(title); },
       setEditorText: (text) => { if (active()) this.setEditorText(text); },

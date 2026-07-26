@@ -78,7 +78,7 @@ Protocol V2 使用 Unix stream socket 上的 UTF-8 JSON Lines：
 成功响应：
 
 ```json
-{"kind":"hello_ack","requestId":"hello-uuid","version":2,"host":{"pid":1234,"dockVersion":"0.2.0","piSdkVersion":"0.81.1","hostEpoch":"host-epoch","startedAt":"2026-01-01T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["catalog.maintenance.v1","catalog.v1","command.images.path.v1","core.v2","events.follow","events.replay-purpose.v1","extension_ui.controller-directives.v1","extension_ui.tools-expanded.v1","extension_ui.v1","extension_ui.widgets.v1","git.branch-footer.v1","host.info","instance.catalog","instance.keys.v1","models.v1","projection.completeness.v1","queue.control.v1","resources.v1","run.abort.v1","service.managed.v1","session.adopt.v1","session.commands.v1","session.core","session.inventory-diagnostics.v1","session.inventory.v1","session.reopen","session.tree.v1","settings.v1","tool-result-presentation.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200,"maxInstanceListItems":100,"maxInstanceListBytes":786432}}
+{"kind":"hello_ack","requestId":"hello-uuid","version":2,"host":{"pid":1234,"dockVersion":"0.2.0","piSdkVersion":"0.81.1","hostEpoch":"host-epoch","startedAt":"2026-01-01T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["catalog.maintenance.v1","catalog.v1","command.images.path.v1","core.v2","events.follow","events.replay-purpose.v1","extension_ui.controller-directives.v1","extension_ui.persistent-interactions.v1","extension_ui.tools-expanded.v1","extension_ui.v1","extension_ui.widgets.v1","git.branch-footer.v1","host.info","instance.catalog","instance.keys.v1","models.v1","projection.completeness.v1","queue.control.v1","resources.v1","run.abort.v1","service.managed.v1","session.adopt.v1","session.commands.v1","session.core","session.inventory-diagnostics.v1","session.inventory.v1","session.reopen","session.tree.v1","settings.v1","tool-result-presentation.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200,"maxInstanceListItems":100,"maxInstanceListBytes":786432}}
 ```
 
 客户端必须在发送业务 request 前验证：
@@ -454,7 +454,21 @@ Attach 使用 `controller: "claim"` 时，成功 response 可能返回：
 
 `extension.widget_viewport.set` 不是交互回复，而是 ephemeral viewport-size control。它发送 `instanceId`、`leaseToken`、`expectedRuntimeGeneration`、`width` 和 `height`，没有 `operationId`，也不进入 operation ledger 或 mutation ambiguity 处理。
 
-Controller stream 断开、session replacement 或 Host drain 会释放 lease，并可能取消尚未完成的 interaction。Web 应通过 `interaction.cancelled` / `interaction.resolved` 更新页面。
+Controller stream 断开只释放该 transport lease，**不会**回答、拒绝或取消尚未完成的 interaction。无 controller、SSH/ActionCable 断线、Rails 重启和浏览器重连期间，interaction 仍属于原 runtime generation，Worker 中对应的 Pi UI Promise 与当前模型/tool boundary 继续保持 pending。只有真实的 `interaction.respond`、extension 明确提供的 `AbortSignal`/timeout、generation replacement、instance stop 或 Host drain 才能结束它；其中 replacement/stop/Host drain 会终止旧 runtime work 并让 UI bridge 以 lifecycle error 失败，不会向 extension 返回伪造的 `false`/`undefined`。
+
+能处理该语义的客户端必须在 hello 中协商 `extension_ui.persistent-interactions.v1`；没有该 capability 的连接不能 claim controller，Host 也不会向它投影 persistent interaction 状态。新 controller claim 成功后，Host 会把当前 pending interaction 的完整原始 `interaction.requested` 重新加入 attach 初始 `page.events`，interaction ID 保持不变。客户端必须处理初始页而不只监听后续 live frames，并按 interaction ID 幂等地恢复同一个弹窗。
+
+无 extension 明确 timeout 的请求不包含 `expiresAt`，表示没有绝对期限：
+
+```json
+{"type":"interaction.requested","data":{"interactionId":"interaction-id","method":"confirm","title":"Approve command","message":"Allow this operation?","issuedAt":"2026-01-01T00:00:00.000Z"}}
+```
+
+只有 extension 明确要求 timeout 时才带 `expiresAt`。基础设施断线不得合成 `{cancelled:true}`、`false` 或 `undefined`。若 Web 无法恢复弹窗，应停止/冻结当前 run 并向用户展示诊断，绝不能让模型在无人决定时继续。
+
+`interaction.respond` 是有 operation ID 的 mutation。Host 成功确认时，result 为 `{"interactionId":"…","state":"resolved"}`；同一 lease 对同一 interaction 重复提交完全相同的 response 时可返回 `state: "already_resolved"`。两者都表示 Host 已确认该答案，Web 此时才能关闭弹窗；其他 error 或连接断开都不是确认。
+
+响应传输失败时，不要假定用户答案已经生效，也不要自动生成新 operation 重发：先用 `instance.get` 查看 `activeInteraction.id`，必要时重新 claim/attach。若相同 ID 仍 pending，重新呈现原问题；若已消失，以 Host 的 `interaction.resolved`/snapshot 为准。
 
 ### 支持的交互与投影
 
@@ -546,7 +560,8 @@ Create、ensure（仅实际创建时）、adopt、reopen 或跨项目 switch 可
 | `session.inventory` | `session.inventory.v1` |
 | `session.switch/new/name/compact/reload` | `session.commands.v1` |
 | `session.tree/navigate/fork/clone` | `session.tree.v1` |
-| `interaction.respond` | `extension_ui.v1` |
+| controller claim、persistent interaction 投影 | `extension_ui.persistent-interactions.v1`（另需 `events.follow`） |
+| `interaction.respond` | `extension_ui.v1` + `extension_ui.persistent-interactions.v1` |
 | controller title/editor directives | `extension_ui.controller-directives.v1`（另需 controller claim） |
 | tools-expanded control | `extension_ui.tools-expanded.v1` |
 | widget projection/viewport | `extension_ui.widgets.v1` |
@@ -561,6 +576,7 @@ Create、ensure（仅实际创建时）、adopt、reopen 或跨项目 switch 可
 Capability 会改变 closed response/event shape：
 
 - 未协商 `instance.keys.v1` 时，Host 从 snapshot 省略 `key`，旧客户端仍按普通 instance 工作；
+- 未协商 `extension_ui.persistent-interactions.v1` 时，Host 省略 snapshot 的 `activeInteraction` 并过滤 interaction events；这类连接不能 claim controller 或发送 `interaction.respond`；
 - 未协商 `extension_ui.controller-directives.v1` 时，Host 从 acquired controller shape 省略 `controllerId`，并过滤 title/editor directive events；即使协商，非匹配 controller stream 仍被过滤；
 - 未协商 `extension_ui.tools-expanded.v1` 时，Host 省略 snapshot 的 `toolsExpanded` 并过滤对应 change event；
 - 未协商 `extension_ui.widgets.v1` 时，Host 过滤 widget change events；
@@ -619,6 +635,15 @@ Error code 是可扩展字符串。未知 code 应作为普通明确失败展示
 ## Alu Dock 侧接入合同
 
 Card #216 已固定本文所示的 hello、业务 key ensure、instance list、fresh attach、cursor reconnect、Queue、图片、interaction、controller directive 与 ambiguous mutation 规则。Dock 不解释 `alu` 等 key 的业务含义；Alubot Admin 可用 `instance.ensure` 在 Alu Workstation cwd 首次创建并稳定取得唯一工作台，普通 New Work 仍创建无 key 的并行 instance。Extension title 更新和 editor text 注入通过独立 capability 只到达当前 controller client；图片 prompt/steer/follow-up/Queue、用户图片 metadata、`show_image` live/history 关联和 `stale_runtime_generation` details 也不再需要 Rails 猜测或读取 Pi 私有协议。
+
+Alubot Admin 接入当前版本时还必须：
+
+1. hello 增加 required capability `extension_ui.persistent-interactions.v1`；
+2. controller attach 的初始 `page.events` 与后续 live frames 使用同一套 interaction handler；
+3. 将 `interaction.requested.data.expiresAt` 解析为可选字段，缺省时不得启动本地倒计时；
+4. controller socket/ActionCable/browser 断开时只丢弃本地 lease，不向 Dock 发送取消或默认答案；
+5. 新 lease 收到相同 interaction ID 时恢复/替换原弹窗，不创建第二个业务确认；
+6. `interaction.respond` 传输结果不确定时先查询 `activeInteraction`，不自动重放 mutation。
 
 不增加独立 `abort_bash`；当前需求只保留整轮 abort。Alu Dock 侧接入能力已具备，Rails/WebConsole 的正式切换继续由 Card #183 推进。
 

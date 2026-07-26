@@ -13,7 +13,7 @@ import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
 import { encodeJsonLine, JsonLineDecoder } from "../src/control/json-lines.js";
 import { ProjectTrustCoordinator } from "../src/control/project-trust.js";
-import { ExtensionUiBroker } from "../src/core/extension-ui-broker.js";
+import { ExtensionUiBroker, InteractionLifecycleCancelledError } from "../src/core/extension-ui-broker.js";
 import { ManagedInstance, type DockEvent, type SessionDto } from "../src/core/managed-instance.js";
 import { SETTING_KEYS, type SettingUpdate } from "../src/core/config-projection.js";
 import { RuntimeCompactionKnownFailureError, RuntimeInvalidSettingValueError, RuntimeSettingsWriteError, type RuntimeHistoryEntry, type RuntimePromptOptions } from "../src/core/runtime-session.js";
@@ -120,7 +120,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "command.images.path.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.controller-directives.v1", "extension_ui.tools-expanded.v1", "extension_ui.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "host.info", "instance.catalog", "instance.keys.v1", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tool-result-presentation.v1", "tools.v1", "tui.projection.v1"]);
+  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "command.images.path.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.controller-directives.v1", "extension_ui.persistent-interactions.v1", "extension_ui.tools-expanded.v1", "extension_ui.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "host.info", "instance.catalog", "instance.keys.v1", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tool-result-presentation.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -310,7 +310,7 @@ test("session switch resolves target project trust before replacement effects", 
   assert.equal(runtime?.sessionMutationCalls.switch, 1);
 });
 
-test("extension UI lease round-trips dialogs and detach cancels fail closed", async (context) => {
+test("extension UI lease preserves dialogs across detach and re-presents them to the next controller", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-extension-ui-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
@@ -329,10 +329,24 @@ test("extension UI lease round-trips dialogs and detach cancels fail closed", as
   await host.start();
   const client = new DockClient({ socketPath });
   const instance = await client.create(directory, "extension-ui");
+  const legacyClaim = await exchangeRequestAfterHello(socketPath, ["core.v2", "events.follow", "extension_ui.v1"], {
+    kind: "request",
+    version: 2,
+    requestId: "legacy-controller-claim",
+    type: "instance.attach",
+    params: { instanceId: instance.id, follow: true, controller: "claim" },
+  });
+  assert.equal(legacyClaim.ok, false);
+  assert.equal(objectValue(legacyClaim.error).code, "capability_missing");
   const claimController = broker.claimController.bind(broker);
   let injectClaimHandoff = true;
+  let replaceDuringClaim = false;
   broker.claimController = async () => {
     const claim = await claimController();
+    if (claim.status === "acquired" && replaceDuringClaim) {
+      replaceDuringClaim = false;
+      await registry.get(instance.id).newSession("attach-claim-generation-race");
+    }
     if (claim.status === "acquired" && injectClaimHandoff) {
       injectClaimHandoff = false;
       broker.setTitle("claim-handoff title");
@@ -418,31 +432,42 @@ test("extension UI lease round-trips dialogs and detach cancels fail closed", as
   );
 
   requestedPromise = new Promise((resolve) => { resolveRequested = resolve; });
-  const input = broker.input("Name", "optional");
+  let inputSettled = false;
+  const input = broker.input("Name", "optional").then((value) => { inputSettled = true; return value; });
   const inputRequest = await requestedPromise;
   assert.equal(inputRequest.data.method, "input");
+  assert.equal(inputRequest.data.expiresAt, undefined);
   controller.close();
   await controller.done;
-  assert.equal(await input, undefined);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(inputSettled, false);
   broker.setTitle("dropped while detached");
   broker.setEditorText("dropped while detached");
   await new Promise<void>((resolve) => setImmediate(resolve));
   const replay = await client.events(instance.id);
-  assert.equal(replay.page.events.some((event) => event.type === "interaction.cancelled" && event.data.interactionId === inputRequest.data.interactionId && event.data.reason === "detach"), true);
+  assert.equal(replay.instance.activeInteraction?.id, inputRequest.data.interactionId);
+  assert.equal(replay.page.events.some((event) => event.type === "interaction.cancelled" && event.data.interactionId === inputRequest.data.interactionId), false);
   assert.equal(replay.page.events.some((event) => event.type === "extension.title_set" || event.type === "extension.editor_text_set"), false);
-  assert.equal(await broker.confirm("No controller", "fail closed"), false);
 
   const freshEvents: DockEvent[] = [];
   const freshController = await client.streamEvents(instance.id, {
     claimController: true,
     requireTuiProjection: true,
+    conversationBootstrap: true,
     onEvent: (event) => { freshEvents.push(event); },
   });
   assert.equal(freshController.initial.controller.status, "acquired");
   if (freshController.initial.controller.status === "acquired") {
+    const freshLeaseToken = freshController.initial.controller.leaseToken;
     const freshControllerId = freshController.initial.controller.controllerId;
     assert.notEqual(freshControllerId, controllerId);
+    const rePresented = freshController.initial.page.events.find((event) => event.type === "interaction.requested" && event.data.interactionId === inputRequest.data.interactionId);
+    assert.equal(rePresented?.type, "interaction.requested");
+    assert.equal(rePresented?.data.method, "input");
+    assert.equal(rePresented?.data.expiresAt, undefined);
     assert.equal(freshController.initial.page.events.some((event) => event.type === "extension.title_set" || event.type === "extension.editor_text_set"), false);
+    await client.respondInteraction(instance.id, freshLeaseToken, inputRequest.data.interactionId, { method: "input", value: "reattached value" }, "respond-after-reattach");
+    assert.equal(await input, "reattached value");
     broker.setTitle("fresh controller title");
     const freshDeadline = Date.now() + 2_000;
     while (!freshEvents.some((event) => event.type === "extension.title_set")
@@ -453,7 +478,48 @@ test("extension UI lease round-trips dialogs and detach cancels fail closed", as
   }
   freshController.close();
   await freshController.done;
+
+  let detachedSettled = false;
+  const detachedConfirmation = broker.confirm("No controller", "wait for attach").then((value) => { detachedSettled = true; return value; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(detachedSettled, false);
+  const finalController = await client.streamEvents(instance.id, { claimController: true, onEvent: () => {} });
+  assert.equal(finalController.initial.controller.status, "acquired");
+  if (finalController.initial.controller.status === "acquired") {
+    const pendingInteractionId = finalController.initial.instance.activeInteraction?.id;
+    const pendingRequest = finalController.initial.page.events.find((event) => event.type === "interaction.requested"
+      && event.data.interactionId === pendingInteractionId);
+    assert.ok(pendingRequest && pendingRequest.type === "interaction.requested" && pendingRequest.data.method === "confirm");
+    await client.respondInteraction(instance.id, finalController.initial.controller.leaseToken, pendingRequest.data.interactionId, { method: "confirm", confirmed: true }, "respond-no-controller");
+    assert.equal(await detachedConfirmation, true);
+  }
+  finalController.close();
+  await finalController.done;
+
+  replaceDuringClaim = true;
+  const raceController = await client.streamEvents(instance.id, { claimController: true, onEvent: () => {} });
+  assert.equal(raceController.initial.instance.runtimeGeneration, 2);
+  assert.equal(raceController.initial.controller.status, "acquired");
+  if (raceController.initial.controller.status === "acquired") {
+    assert.equal(registry.get(instance.id).isInteractionControllerCurrent(
+      raceController.initial.controller.leaseToken,
+      raceController.initial.instance.runtimeGeneration,
+    ), true);
+  }
+  raceController.close();
+  await raceController.done;
   assert.ok(liveEvents.some((event) => event.type === "interaction.resolved"));
+
+  const hostDrainInteraction = broker.confirm("Host drain", "Do not synthesize a denial.")
+    .then((value) => ({ status: "resolved" as const, value }), (error: unknown) => ({ status: "rejected" as const, error }));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await host.stop();
+  const hostDrainOutcome = await hostDrainInteraction;
+  assert.equal(hostDrainOutcome.status, "rejected");
+  if (hostDrainOutcome.status === "rejected") {
+    assert.equal(hostDrainOutcome.error instanceof InteractionLifecycleCancelledError
+      && hostDrainOutcome.error.reason === "host_draining", true);
+  }
 });
 
 test("SSH TUI controller completes select confirm input and editor extension dialogs", async (context) => {
@@ -495,6 +561,80 @@ test("SSH TUI controller completes select confirm input and editor extension dia
   assert.doesNotMatch(output, /connected\/acquired/);
 });
 
+test("SSH TUI restores a pending extension interaction from a fresh attach bootstrap", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-extension-fresh-attach-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const readyFile = join(directory, "fresh-attach.ready");
+  const broker = new ExtensionUiBroker();
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
+    const session = new DelayedRuntimeSession(`pi-${id}`);
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session, extensionUiBroker: broker });
+  }, () => "extension-fresh-attach-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+  const instance = await client.create(directory, "extension-fresh-attach");
+  const confirmation = broker.confirm("Fresh attach confirm", "Restore this pending question.");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const pty = await runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+    "attach", instance.id,
+  ], "extension-pending-attach", readyFile);
+  assert.equal(await confirmation, true);
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-4_000));
+  assert.equal(pty.status, 0, output.slice(-4_000));
+  assert.match(output, /Fresh attach confirm/);
+});
+
+test("SSH TUI re-presents an interaction when the Host rejects its first response", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-extension-response-retry-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const readyFile = join(directory, "response-retry.ready");
+  const broker = new ExtensionUiBroker();
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
+    const session = new DelayedRuntimeSession(`pi-${id}`);
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session, extensionUiBroker: broker });
+  }, () => "extension-response-retry-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+  const instance = await client.create(directory, "extension-response-retry");
+  const managed = registry.get(instance.id);
+  const respondInteraction = managed.respondInteraction.bind(managed);
+  let rejectFirstResponse = true;
+  managed.respondInteraction = (leaseToken, interactionId, response) => {
+    if (rejectFirstResponse) {
+      rejectFirstResponse = false;
+      return Promise.reject(new Error("fixture response delivery failure"));
+    }
+    return respondInteraction(leaseToken, interactionId, response);
+  };
+  const ptyRun = runPtyTui([
+    process.execPath,
+    join(process.cwd(), "dist/src/cli.js"),
+    "--socket", socketPath,
+    "attach", instance.id,
+  ], "extension-response-retry", readyFile);
+  await waitForPath(readyFile);
+
+  const confirmation = broker.confirm("Retry response confirm", "The first delivery will fail.");
+  assert.equal(await confirmation, true);
+  const pty = await ptyRun;
+  const output = Buffer.from(pty.output, "base64").toString("utf8");
+  assert.equal(pty.timedOut, false, output.slice(-4_000));
+  assert.equal(pty.status, 0, output.slice(-4_000));
+  assert.match(output, /Retry response confirm/);
+  assert.match(output, /same question remains pending/);
+});
+
 test("SSH TUI reacquires its controller after runtime replacement", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-extension-replacement-"));
   await chmod(directory, 0o700);
@@ -520,17 +660,15 @@ test("SSH TUI reacquires its controller after runtime replacement", async (conte
 
   const replacement = await client.newSession(instance.id);
   assert.equal(replacement.instance.runtimeGeneration, 2);
-  let confirmed = false;
-  const confirmationDeadline = Date.now() + 3_000;
-  while (!confirmed && Date.now() < confirmationDeadline) {
-    const attempt = broker.confirm("Post replacement confirm", "Controller lease was reacquired.");
-    const outcome = await Promise.race([
-      attempt.then((value) => ({ settled: true as const, value })),
-      new Promise<{ settled: false }>((resolveDelay) => setTimeout(() => resolveDelay({ settled: false }), 30)),
-    ]);
-    if (!outcome.settled) confirmed = await attempt;
-    else confirmed = outcome.value;
-    if (!confirmed) await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+  let confirmationTimeout: NodeJS.Timeout | undefined;
+  const confirmed = await Promise.race([
+    broker.confirm("Post replacement confirm", "Controller lease was reacquired."),
+    new Promise<undefined>((resolveDelay) => { confirmationTimeout = setTimeout(() => resolveDelay(undefined), 5_000); }),
+  ]).finally(() => { if (confirmationTimeout) clearTimeout(confirmationTimeout); });
+  if (confirmed === undefined) {
+    const failedPty = await ptyRun;
+    const failedOutput = Buffer.from(failedPty.output, "base64").toString("utf8");
+    assert.fail(`replacement interaction remained pending: ${JSON.stringify(broker.projection())}\n${failedOutput.slice(-8_000)}`);
   }
   assert.equal(confirmed, true);
   broker.setTitle("Post replacement extension title");
@@ -3272,7 +3410,7 @@ test("an LF-truncated control response is reported as recoverable connection los
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-partial-frame-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  const capabilities = ["command.images.path.v1", "core.v2", "events.follow", "extension_ui.tools-expanded.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "instance.catalog", "instance.keys.v1", "queue.control.v1", "run.abort.v1", "tool-result-presentation.v1", "tui.projection.v1"];
+  const capabilities = ["command.images.path.v1", "core.v2", "events.follow", "extension_ui.persistent-interactions.v1", "extension_ui.tools-expanded.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "instance.catalog", "instance.keys.v1", "queue.control.v1", "run.abort.v1", "tool-result-presentation.v1", "tui.projection.v1"];
   const server = createServer((socket) => {
     const decoder = new JsonLineDecoder();
     socket.on("data", (chunk: Buffer) => {
@@ -3532,7 +3670,7 @@ test("permanently stalled attach readers are bounded and can reconnect without a
   socket.write(encodeJsonLine({
     kind: "hello", requestId: "stalled-hello", versions: [2],
     client: { name: "stalled-reader-test", version: "0.1.0", clientId: "stalled-reader-client" },
-    requiredCapabilities: ["core.v2", "events.follow", "extension_ui.v1"],
+    requiredCapabilities: ["core.v2", "events.follow", "extension_ui.v1", "extension_ui.persistent-interactions.v1"],
   }));
   const frameDeadline = Date.now() + 5_000;
   while (frames.length < 1 && Date.now() < frameDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
@@ -3592,7 +3730,7 @@ test("attach drain timeout aborts the stalled stream, releases its controller, a
   socket.write(encodeJsonLine({
     kind: "hello", requestId: "timeout-hello", versions: [2],
     client: { name: "timeout-reader-test", version: "0.1.0", clientId: "timeout-reader-client" },
-    requiredCapabilities: ["core.v2", "events.follow", "extension_ui.v1"],
+    requiredCapabilities: ["core.v2", "events.follow", "extension_ui.v1", "extension_ui.persistent-interactions.v1"],
   }));
   const frameDeadline = Date.now() + 5_000;
   while (frames.length < 1 && Date.now() < frameDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
@@ -3729,7 +3867,7 @@ test("stream callbacks follow initial response order and accept one-step replace
             kind: "hello_ack", requestId: "fixed", version: 2,
             host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
             catalogSchemaVersion: 1,
-            capabilities: ["command.images.path.v1", "core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.keys.v1", "tool-result-presentation.v1"],
+            capabilities: ["command.images.path.v1", "core.v2", "events.follow", "extension_ui.persistent-interactions.v1", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.keys.v1", "tool-result-presentation.v1"],
             limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
           }));
           continue;
@@ -4439,7 +4577,7 @@ interface PtyTuiResult {
 
 async function runPtyTui(
   command: string[],
-  action: "detach" | "work-responsive" | "hub-exit" | "hub-click-leave" | "hub-narrow" | "hub-signal" | "hub-signal-inventory" | "hub-new" | "hub-continue" | "hub-mouse-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "stream-recover" | "external-stop" | "compact-detach" | "compact-queue" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "model-disconnect" | "history-flow" | "history-live-flow" | "flow-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "work-native-mouse" | "extension-dialogs" | "extension-replacement" = "detach",
+  action: "detach" | "work-responsive" | "hub-exit" | "hub-click-leave" | "hub-narrow" | "hub-signal" | "hub-signal-inventory" | "hub-new" | "hub-continue" | "hub-mouse-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "stream-recover" | "external-stop" | "compact-detach" | "compact-queue" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "model-disconnect" | "history-flow" | "history-live-flow" | "flow-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "work-native-mouse" | "extension-dialogs" | "extension-replacement" | "extension-pending-attach" | "extension-response-retry" = "detach",
   readyFile?: string,
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {

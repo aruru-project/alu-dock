@@ -45,7 +45,7 @@ Pi runtime event
 | `src/core/tool-result-presentation.ts` | built-in details白名单、preview direction与control-frame fallback | runtime/protocol/TUI测试组 |
 | `src/core/managed-instance.ts` | lifecycle、admission、queue、mutation transaction、generation、event/state唯一owner | `managed-instance` |
 | `src/core/session-tree.ts` | runtime tree validation/projection、binary safety、generation-bound revision/pagination | `session-tree`, Pi tree tests |
-| `src/core/extension-ui-broker.ts` | bounded text interaction、widget viewport/render bridge、controller lease、timeout/cancel/tombstone | `extension-ui-broker` |
+| `src/core/extension-ui-broker.ts` | generation-scoped persistent text interaction、widget viewport/render bridge、controller lease、explicit timeout/cancel/tombstone | `extension-ui-broker` |
 | `src/pi/create-pi-instance.ts` | trust之后的Host/Worker composition与ManagedInstance构造 | Worker/Pi real tests |
 | `src/pi/pi-session-target.ts` | Worker构造Pi前的bounded JSONL header preflight；构造后用public SessionManager复核 | Worker/Pi reopen tests |
 | `src/pi/worker-protocol.ts` | closed/versioned/bounded双向IPC、identity/generation fence与typed errors | `worker-protocol` |
@@ -133,6 +133,7 @@ ManagedInstance replacement intent
 - Worker异常、deadline或IPC loss先终止整个process group并确认direct child reaped，再通过私有`dock_runtime_lost`推进runtime error与recovery metadata；对外Protocol V2继续使用既有`replacement_failed` interruption值。无法确认reap时durable catalog写入`ownerReleaseUnconfirmed` quarantine并保持non-reopenable，显式session-file override也不得绕过。
 - Host→Worker mutation由child在调用Pi前发送`accepted` custody frame；accepted前失联返回`runtime_unavailable`，accepted后失联保留调用者operation ID并返回`effect_unknown`，两者都不自动重放。
 - 每个active/staged binding拥有独立Git observer；promotion把candidate branch作为`session.replaced` generation bootstrap，旧binding同步关闭watcher并fence callback。Git branch不进durable catalog。
+- Extension UI 的人工交互属于 runtime generation，不属于临时 controller transport。没有 controller、detach、stream interruption 或 reconnect 不得合成拒绝/取消并恢复模型；无 explicit extension timeout 的 Promise 没有绝对期限。新 controller claim 必须重新投影同一 interaction ID 的完整请求；若无法安全恢复，只能终止/冻结当前 run 并暴露诊断，不能让模型无人决定时继续。
 - Extension可在`agent_settled`后触发无client command ID的follow-on run（例如Sol guard compact后续跑）。它使用closed `run.started` identity `runtime-initiated`，仍完全由Host持有；fresh attach必须恢复其未完成tail，client detach/attach/read不得成为启动条件。
 - Pi会先await Extension的`agent_settled` handler、再向runtime subscriber发布`agent_settled`；handler内启动的`ctx.compact()`因此可能先发布`compaction_start`。已建立的compaction boundary必须保持`execution: running`与ephemeral snapshot `compacting: true`直到`compaction_end`，后到的run settlement只结算旧run，不得把instance降为idle；`compacting`不进入durable catalog。
 - `isCompacting`与`isStreaming`是独立维度。普通输入在compaction期间由对应`ManagedInstance`以`host_deferred`持有，保留原operation/queue-item identity与FIFO，不调用`AgentSession.prompt()`；attach/dequeue仍可见。最终`compaction_end`后首条按stock Pi语义启动fresh prompt，其余进入同一Pi session queue；`willRetry`时全部通过public steer/follow-up queue进入retry turn。preflight definite failure恢复为可dequeue，post-accept ambiguity不重试、不跨generation、不持久化，Host loss后也不replay。

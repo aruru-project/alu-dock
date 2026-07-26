@@ -350,10 +350,16 @@ export async function runDockTui(
     const previous = subscription;
     if (!previous) return Promise.resolve();
     const task = (async () => {
+      const candidateBufferedEvents: DockEvent[] = [];
+      let candidateReady = false;
+      const onCandidateEvent = (event: DockEvent): void => {
+        if (candidateReady) onEvent(event);
+        else candidateBufferedEvents.push(event);
+      };
       try {
         const next = await client.streamEvents(instance.id, {
           since,
-          onEvent,
+          onEvent: onCandidateEvent,
           requireTuiProjection: true,
           claimController: true,
         });
@@ -372,6 +378,12 @@ export async function runDockTui(
         status.setController(next.initial.controller.status);
         watchEventSubscription(next);
         for (const event of next.initial.page.events) onEvent(event);
+        candidateReady = true;
+        for (const event of candidateBufferedEvents) onEvent(event);
+        candidateBufferedEvents.length = 0;
+        const pendingInteraction = [...next.initial.page.events].reverse().find((event) => event.type === "interaction.requested"
+          && event.data.interactionId === next.initial.instance.activeInteraction?.id);
+        if (pendingInteraction?.type === "interaction.requested" && !activeExtensionDialog) void handleExtensionInteraction(pendingInteraction);
         pendingQueue.reset(next.initial.pendingMessages);
         previous.close();
         tui.requestRender();
@@ -850,6 +862,21 @@ export async function runDockTui(
         status.setController("unavailable");
       }
       showError(error);
+      // A failed response transport is not a user cancellation. Query the
+      // authoritative interaction and re-present the same request when it is
+      // still pending; otherwise the Host-resolved result wins.
+      try {
+        const authoritative = await client.status(instance.id);
+        instance = authoritative;
+        status.update(instance);
+        if (authoritative.activeInteraction?.id === event.data.interactionId && controllerLeaseToken === leaseToken) {
+          conversation.addNotice("The interaction response was not confirmed by the Host; the same question remains pending.", true);
+          queueMicrotask(() => { void handleExtensionInteraction(event); });
+        }
+      } catch (statusError) {
+        conversation.addNotice(`Interaction status is unknown; the runtime remains blocked until a controller reattaches. ${errorText(statusError)}`, true);
+      }
+      tui.requestRender();
     }
   }
 
@@ -2095,8 +2122,11 @@ export async function runDockTui(
   }
   watchEventSubscription(subscription);
 
+  const initialInteraction = subscription === undefined ? undefined : [...subscription.initial.page.events].reverse().find((event) => event.type === "interaction.requested"
+    && event.data.interactionId === subscription?.initial.instance.activeInteraction?.id);
   tui.start();
   activityPulse.setEnabled(true);
+  if (initialInteraction?.type === "interaction.requested") void handleExtensionInteraction(initialInteraction);
   updateTerminalProgress();
   const reason = await exit;
 

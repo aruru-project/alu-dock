@@ -3,8 +3,10 @@ import test from "node:test";
 
 import {
   ExtensionUiBroker,
+  ExtensionUiRequestError,
   InteractionExpiredError,
   InteractionInvalidResponseError,
+  InteractionLifecycleCancelledError,
   InteractionWrongLeaseError,
   type ExtensionUiEventSink,
 } from "../src/core/extension-ui-broker.js";
@@ -14,9 +16,10 @@ function harness() {
   let generation = 1;
   let nextId = 0;
   let projectionChanges = 0;
+  let nowMs = Date.parse("2026-07-15T00:00:00.000Z");
   const events: Array<{ type: string; data: unknown }> = [];
   const broker = new ExtensionUiBroker(
-    () => new Date("2026-07-15T00:00:00.000Z"),
+    () => new Date(nowMs),
     () => `id-${++nextId}`,
   );
   const sink: ExtensionUiEventSink = {
@@ -30,6 +33,7 @@ function harness() {
     events,
     get projectionChanges() { return projectionChanges; },
     setGeneration(value: number) { generation = value; },
+    advanceTime(milliseconds: number) { nowMs += milliseconds; },
   };
 }
 
@@ -39,16 +43,31 @@ function requested(events: Array<{ type: string; data: unknown }>): EventDataMap
     .map((event) => event.data as EventDataMap["interaction.requested"]);
 }
 
-test("extension UI dialogs fail closed immediately without a controller", async () => {
-  const { broker, events } = harness();
-  assert.equal(await broker.select("Choose", ["yes", "no"]), undefined);
-  assert.equal(await broker.confirm("Delete", "Really?"), false);
-  assert.equal(await broker.input("Name"), undefined);
-  assert.equal(await broker.editor("Body", "draft"), undefined);
-  assert.equal(await broker.select("Oversized", ["x".repeat(8_001)]), undefined);
-  assert.equal(await broker.select("Collision", ["same\n", "same"]), undefined);
-  assert.equal(await broker.select("Aggregate", Array.from({ length: 33 }, (_, index) => `${index}:`.padEnd(8_000, "x"))), undefined);
+test("extension UI dialogs wait without a controller and activate on the first claim", async () => {
+  const { broker, events, advanceTime } = harness();
+  await assert.rejects(broker.select("Oversized", ["x".repeat(8_001)]), ExtensionUiRequestError);
+  await assert.rejects(broker.select("Collision", ["same\n", "same"]), ExtensionUiRequestError);
+  await assert.rejects(
+    broker.select("Aggregate", Array.from({ length: 33 }, (_, index) => `${index}:`.padEnd(8_000, "x"))),
+    ExtensionUiRequestError,
+  );
+
+  let settled = false;
+  const selected = broker.select("Choose", ["yes", "no"]).then((value) => { settled = true; return value; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
   assert.equal(requested(events).length, 0);
+  advanceTime(6 * 60_000);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, "dialogs without an explicit extension timeout must survive beyond five minutes");
+
+  const claim = await broker.claimController();
+  assert.equal(claim.status, "acquired");
+  if (claim.status !== "acquired") return;
+  const request = requested(events)[0]!;
+  assert.equal(request.expiresAt, undefined);
+  await broker.respond(claim.leaseToken, request.interactionId, { method: "select", value: "yes" });
+  assert.equal(await selected, "yes");
   assert.equal(events.filter((event) => event.type === "extension.error").length, 3);
 });
 
@@ -66,7 +85,8 @@ test("one lease serializes dialogs and validates method-specific responses", asy
   assert.ok(first && first.method === "select");
   assert.equal(first.title, "Pick[2J");
   assert.deepEqual(first.options, ["A[2J", "B"]);
-  assert.equal(broker.projection().activeInteraction?.id, first.interactionId);
+  assert.equal(first.expiresAt, undefined);
+  assert.deepEqual(broker.projection().activeInteraction, { id: first.interactionId, method: "select" });
 
   await assert.rejects(
     broker.respond(claim.leaseToken, first.interactionId, { method: "select", value: "missing" }),
@@ -93,7 +113,7 @@ test("one lease serializes dialogs and validates method-specific responses", asy
   );
 });
 
-test("wrong leases, detach, signal, and generation changes resolve fail closed", async () => {
+test("detach preserves an interaction for the next lease while signal and generation changes cancel", async () => {
   const { broker, events, setGeneration } = harness();
   const claim = await broker.claimController();
   if (claim.status !== "acquired") return;
@@ -112,18 +132,27 @@ test("wrong leases, detach, signal, and generation changes resolve fail closed",
     InteractionExpiredError,
   );
 
-  const confirmed = broker.confirm("Delete", "Really?");
+  let confirmationSettled = false;
+  const confirmed = broker.confirm("Delete", "Really?").then((value) => { confirmationSettled = true; return value; });
   await Promise.resolve();
+  const confirmationRequest = requested(events).at(-1)!;
   await broker.releaseController(claim.leaseToken, "detach");
-  assert.equal(await confirmed, false);
-  assert.equal(events.some((event) => event.type === "interaction.cancelled" && (event.data as { reason?: string }).reason === "detach"), true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(confirmationSettled, false);
+  assert.equal(events.some((event) => event.type === "interaction.cancelled" && (event.data as { reason?: string }).reason === "detach"), false);
 
   const replacementClaim = await broker.claimController();
   assert.equal(replacementClaim.status, "acquired");
+  if (replacementClaim.status !== "acquired") return;
+  assert.equal(requested(events).at(-1)?.interactionId, confirmationRequest.interactionId);
+  await broker.respond(replacementClaim.leaseToken, confirmationRequest.interactionId, { method: "confirm", confirmed: true });
+  assert.equal(await confirmed, true);
   broker.setStatus("fixture", "ready");
   const input = broker.input("Name");
+  await new Promise<void>((resolve) => setImmediate(resolve));
   broker.beginGenerationChange();
-  assert.equal(await input, undefined);
+  await assert.rejects(input, (error: unknown) => error instanceof InteractionLifecycleCancelledError && error.reason === "replacement");
+  assert.equal(events.some((event) => event.type === "interaction.cancelled" && (event.data as { reason?: string }).reason === "replacement"), true);
   setGeneration(2);
   await broker.completeGenerationChange();
   assert.deepEqual(broker.projection().extensionStatus, {});
@@ -225,10 +254,15 @@ test("notifications, statuses, widgets, and overflow remain closed and bounded",
 
   const claim = await broker.claimController();
   if (claim.status !== "acquired") return;
-  const pending = Array.from({ length: 16 }, (_, index) => broker.confirm(`Confirm ${index}`, "continue?"));
+  await assert.rejects(broker.select("Invalid", []), ExtensionUiRequestError);
+  const pending = Array.from({ length: 16 }, (_, index) => broker.confirm(`Confirm ${index}`, "continue?")
+    .then((value) => ({ status: "resolved" as const, value }), (error: unknown) => ({ status: "rejected" as const, error })));
   const overflow = broker.confirm("Overflow", "continue?");
-  assert.equal(await overflow, false);
+  await assert.rejects(overflow, ExtensionUiRequestError);
   assert.equal(events.some((event) => event.type === "interaction.cancelled" && (event.data as { reason?: string }).reason === "overflow"), true);
   await broker.cancelForHostDrain();
-  assert.deepEqual(await Promise.all(pending), Array.from({ length: 16 }, () => false));
+  const drained = await Promise.all(pending);
+  assert.equal(drained.every((outcome) => outcome.status === "rejected"
+    && outcome.error instanceof InteractionLifecycleCancelledError
+    && outcome.error.reason === "host_draining"), true);
 });

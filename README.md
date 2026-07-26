@@ -71,7 +71,7 @@ CLI / Dock Hub / Session Work TUI
 
 Dock instance、Pi session 与 runtime generation 是不同身份；一个 instance 可以在 session replacement 后继续存在。Compaction期间的新输入由对应instance的Host内存Queue持有，并可跨detach/attach观察；两个instance的Queue不会共享。Host 退出或丢失时，不会自动恢复或重放进行中的 prompt、queue 或工具副作用。
 
-Worker 使用 generation-bound 私有 IPC；Pi SDK objects、extension promises 与 component objects 不离开 Worker，Host 只接收 closed DTO/event。单个 Worker 失联时，Host 在确认回收该进程 owner 后把该 instance 转为保守的 `runtime_error`，其他 instance 与 Hub 继续可用；已接受但结果未知的 mutation 不自动重试。
+Worker 使用 generation-bound 私有 IPC；Pi SDK objects、extension promises 与 component objects 不离开 Worker，Host 只接收 closed DTO/event。Extension UI 人工确认在没有 controller、detach 或重连期间保持 pending；基础设施故障不得伪造拒绝后让模型继续。单个 Worker 失联时，Host 在确认回收该进程 owner 后把该 instance 转为保守的 `runtime_error`，其他 instance 与 Hub 继续可用；已接受但结果未知的 mutation 不自动重试。
 
 生产 Host 和 Worker 都使用 `~/.local/share/alu-dock` 安装包中精确固定的 Pi SDK，不调用 `$PATH` 中的全局 `pi`。Standalone/global Pi 可以独立共存，也可共享当前 `~/.pi/agent` 资源目录，但同一个 Pi session file 不得同时由两个 runtime 进程持有。
 

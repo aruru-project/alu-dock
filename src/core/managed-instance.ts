@@ -183,6 +183,7 @@ interface PendingAdmission {
   token: object;
   boundary: Promise<void>;
   release: () => void;
+  waitBeforeStop: boolean;
 }
 
 interface AcceptedPromptMessage {
@@ -664,14 +665,16 @@ export class ManagedInstance {
   }
 
   private async drainRuntimeWithoutCatalog(): Promise<void> {
-    await this.extensionUi.cancelForHostDrain();
+    await this.extensionUi.suspendForHostDrain();
     this.hostDrainActive = true;
     await this.transitionTail;
     const admission = this.pendingAdmission;
     this.pendingAdmission = undefined;
     admission?.release();
+    const abort = this.abortRuntimeOnce().then(() => true, () => false);
+    await this.extensionUi.cancelForHostDrain();
+    await abort;
     try { await this.clearRuntimeQueueOnce(); } catch { /* Best-effort non-catalog drain. */ }
-    try { await this.abortRuntimeOnce(); } catch { /* Best-effort non-catalog drain. */ }
     // A failed reap must remain visible to the caller. Publishing host_lost or
     // stopped after this point could admit a second owner for the same session.
     await this.disposeRuntimeOnce();
@@ -753,6 +756,10 @@ export class ManagedInstance {
     return this.extensionUi.releaseController(leaseToken, reason);
   }
 
+  isInteractionControllerCurrent(leaseToken: string, runtimeGeneration: number): boolean {
+    return this.extensionUi.isControllerLeaseCurrent(leaseToken, runtimeGeneration);
+  }
+
   respondInteraction(leaseToken: string, interactionId: string, response: InteractionResponse): Promise<InteractionResult> {
     this.assertActive();
     return this.extensionUi.respond(leaseToken, interactionId, response);
@@ -781,8 +788,17 @@ export class ManagedInstance {
     this.extensionUi.setWidgetViewport(leaseToken, viewport);
   }
 
-  cancelInteractionsForHostDrain(): Promise<void> {
-    return this.extensionUi.cancelForHostDrain();
+  async cancelInteractionsForHostDrain(): Promise<void> {
+    await this.extensionUi.suspendForHostDrain();
+    const mustUnblockRuntime = this.extensionUi.hasPendingInteraction();
+    if (!mustUnblockRuntime) {
+      await this.extensionUi.cancelForHostDrain();
+      return;
+    }
+    const abort = this.abortRuntimeOnce().then(() => undefined, (error: unknown) => error);
+    await this.extensionUi.cancelForHostDrain();
+    const abortError = await abort;
+    if (abortError !== undefined) throw abortError;
   }
 
   synchronizeModelState(): void {
@@ -1234,6 +1250,7 @@ export class ManagedInstance {
       token: admissionToken,
       boundary: admissionBoundary,
       release: releaseAdmission,
+      waitBeforeStop: true,
     };
     this.catalogAdmissionOperationId = commandId;
     try {
@@ -1581,7 +1598,7 @@ export class ManagedInstance {
     const admissionToken = {};
     let releaseAdmission!: () => void;
     const admissionBoundary = new Promise<void>((resolve) => { releaseAdmission = resolve; });
-    this.pendingAdmission = { token: admissionToken, boundary: admissionBoundary, release: releaseAdmission };
+    this.pendingAdmission = { token: admissionToken, boundary: admissionBoundary, release: releaseAdmission, waitBeforeStop: true };
     this.catalogAdmissionOperationId = operationId;
 
     try {
@@ -1911,7 +1928,7 @@ export class ManagedInstance {
       this.pendingAdmission = undefined;
       admission.release();
     };
-    this.pendingAdmission = { token: admissionToken, boundary: admissionBoundary, release: releaseAdmission };
+    this.pendingAdmission = { token: admissionToken, boundary: admissionBoundary, release: releaseAdmission, waitBeforeStop: true };
     this.catalogAdmissionOperationId = commandId;
 
     try {
@@ -1955,6 +1972,7 @@ export class ManagedInstance {
           this.appendStateEvent("extension_command_accepted", acceptedAt);
         },
       ));
+      if (this.pendingAdmission?.token === admissionToken) this.pendingAdmission.waitBeforeStop = false;
 
       const runtimeGeneration = this.runtimeGenerationValue;
       const agentStartsBeforeCommand = this.agentStartCount;
@@ -2247,7 +2265,9 @@ export class ManagedInstance {
     if (commandAbortBoundary) await commandAbortBoundary;
     const queueMutationBoundary = this.queueMutationBoundary;
     if (queueMutationBoundary) await queueMutationBoundary;
-    const admissionBoundary = this.pendingAdmission?.boundary;
+    const admissionBoundary = this.pendingAdmission?.waitBeforeStop === true
+      ? this.pendingAdmission.boundary
+      : undefined;
     const requestedAt = this.timestamp();
     try {
       await this.enqueueTransition(() => this.commitCatalogTransition(
@@ -2305,7 +2325,7 @@ export class ManagedInstance {
   private async performStop(operationId: string, admissionBoundary?: Promise<void>, configurationBoundary?: Promise<void>, compactionStartedBoundary?: Promise<boolean>): Promise<StopReceipt> {
     const cleanupErrors: string[] = [];
     const pendingQueueItemIds = this.trackedQueueMessages().map((item) => item.queueItemId);
-    await this.extensionUi.cancelForHostDrain();
+    await this.extensionUi.suspendForHostDrain();
     let clearedCounts: { steering: number; followUp: number } | undefined;
     const captureCleanupError = (stage: string, error: unknown): void => {
       const message = safeWireText(`${stage}: ${errorMessage(error)}`, 2_048, `${stage}: sensitive cleanup error omitted`);
@@ -2317,24 +2337,26 @@ export class ManagedInstance {
       catch (error) { captureCleanupError("preflight", error); }
     }
 
-    try {
-      const cleared = await this.clearRuntimeQueueOnce();
-      clearedCounts = { steering: cleared.steering.length, followUp: cleared.followUp.length };
-    } catch (error) {
-      captureCleanupError("clearQueue", error);
-    }
-
     if (compactionStartedBoundary) {
       try { await compactionStartedBoundary; }
       catch (error) { captureCleanupError("compactionStart", error); }
     }
 
     let abortSucceeded = false;
+    const abort = this.abortRuntimeOnce().then(
+      () => ({ succeeded: true as const }),
+      (error: unknown) => ({ succeeded: false as const, error }),
+    );
+    await this.extensionUi.cancelForHostDrain();
+    const abortOutcome = await abort;
+    if (abortOutcome.succeeded) abortSucceeded = true;
+    else captureCleanupError("abort", abortOutcome.error);
+
     try {
-      await this.abortRuntimeOnce();
-      abortSucceeded = true;
+      const cleared = await this.clearRuntimeQueueOnce();
+      clearedCounts = { steering: cleared.steering.length, followUp: cleared.followUp.length };
     } catch (error) {
-      captureCleanupError("abort", error);
+      captureCleanupError("clearQueue", error);
     }
 
     if (configurationBoundary) {
@@ -3968,21 +3990,29 @@ function conversationBootstrapEvents(
   truncated: boolean,
   runtimeAgentActive: boolean,
 ): DockEvent[] {
-  if (instance.execution !== "running") return [];
-  if (instance.activeCommandId === undefined && !runtimeAgentActive) return [];
-  // Extension-triggered turns (for example a post-compaction continuation)
-  // are Host-owned runs without a client command ID. Their closed run.started
-  // identity is still stable and must recover the unresolved tail on attach.
-  const activeOperationId = instance.activeCommandId ?? "runtime-initiated";
-  let start = events.findLastIndex((event) => event.type === "run.started" && event.data.operationId === activeOperationId);
-  if (start < 0) {
-    start = events.findLastIndex((event) => event.type === "message.submitted" && event.data.operationId === activeOperationId);
+  let conversation: DockEvent[] = [];
+  if (instance.execution === "running" && (instance.activeCommandId !== undefined || runtimeAgentActive)) {
+    // Extension-triggered turns (for example a post-compaction continuation)
+    // are Host-owned runs without a client command ID. Their closed run.started
+    // identity is still stable and must recover the unresolved tail on attach.
+    const activeOperationId = instance.activeCommandId ?? "runtime-initiated";
+    let start = events.findLastIndex((event) => event.type === "run.started" && event.data.operationId === activeOperationId);
+    if (start < 0) {
+      start = events.findLastIndex((event) => event.type === "message.submitted" && event.data.operationId === activeOperationId);
+    }
+    // A truncated ring contains only events newer than its evicted prefix. If the
+    // snapshot still identifies an active run, every retained frame is part of
+    // that run's live era even when its start marker has fallen out.
+    if (start >= 0 || truncated) {
+      conversation = reconcileConversationEventsWithHistory(start < 0 ? events : events.slice(start), history, true);
+    }
   }
-  // A truncated ring contains only events newer than its evicted prefix. If the
-  // snapshot still identifies an active run, every retained frame is part of
-  // that run's live era even when its start marker has fallen out.
-  if (start < 0 && !truncated) return [];
-  return reconcileConversationEventsWithHistory(start < 0 ? events : events.slice(start), history, true);
+
+  const activeInteractionId = instance.activeInteraction?.id;
+  const interaction = activeInteractionId === undefined ? undefined : events.findLast((event) => event.type === "interaction.requested"
+    && event.data.interactionId === activeInteractionId);
+  if (interaction === undefined || conversation.some((event) => event.sequence === interaction.sequence)) return conversation;
+  return [...conversation, interaction].sort((left, right) => left.runtimeGeneration - right.runtimeGeneration || left.sequence - right.sequence);
 }
 
 /** Remove only conversation frames proven durable in the supplied branch history. */

@@ -68,6 +68,7 @@ Managed 安装或运维另读 [`docs/local-install.md`](docs/local-install.md)�
 9. **Hub inventory 不等于 runtime。** `session.inventory` 只读取 bounded Pi session metadata；只有用户选择 New、Continue、History 中的 saved-session continuation、Resume、Adopt 或 Attach 后才允许进入对应 mutation/Work 路径。History 的 Forget 只删 Dock record，不删 Pi session。
 10. **外部 Pi 可共存，但 session owner 唯一。** 独立的全局/standalone Pi runtime 拥有自己的进程与服务生命周期；它可与 Dock 共用当前 `~/.pi/agent` 认证、settings、extensions、skills 和 session 存储，但同一 Pi session file 绝不能被两个 runtime 进程并发打开或续写。
 11. **Worker boundary 是 Host 私有实现。** Worker 以 `hostEpoch + instanceId + runtimeGeneration + workerIncarnation` 身份运行；IPC 必须封闭、有界、版本化、generation-fenced，且只开放 Host allowlist capability。Worker loss 必须先终止并确认回收进程 owner，才发布可恢复状态；旧 Worker 的事件、UI 与 receipt 一律失效。
+12. **人工确认的缺席不是拒绝。** Extension UI interaction 属于 runtime generation；无 controller、detach、stream interruption 或 reconnect 期间保持 pending。只有真实用户响应、extension 明确 signal/timeout 或 runtime lifecycle termination 才能结束；若无法恢复，只能停止/冻结当前 run 并暴露诊断，禁止伪造默认值后继续模型。
 
 模块内的状态机、UI、settings、deployment 与测试细节以对应 agent map、代码和测试为准，不在顶层重复定义。
 

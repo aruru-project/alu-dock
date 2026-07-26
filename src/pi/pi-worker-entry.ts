@@ -2,7 +2,7 @@ import { resolve } from "node:path";
 
 import { createPiRuntimeHost, type PiRuntimeHost } from "./pi-runtime-host.js";
 import { openValidatedPiSession } from "./pi-session-target.js";
-import { WorkerExtensionUiEndpoint } from "./worker-extension-ui.js";
+import { WorkerExtensionUiEndpoint, WorkerUiLifecycleCancelledError } from "./worker-extension-ui.js";
 import {
   ORDINARY_REVERSE_WORKER_CAPABILITIES,
   OrderedWorkerSender,
@@ -120,7 +120,7 @@ async function runWorker(): Promise<void> {
     if (event.type === "dock_session_replaced") {
       generation += 1;
       sender.updateRuntimeGeneration(generation);
-      for (const pending of hostCalls.values()) pending.resolve(undefined);
+      for (const pending of hostCalls.values()) pending.reject(new WorkerUiLifecycleCancelledError());
       hostCalls.clear();
     }
   });

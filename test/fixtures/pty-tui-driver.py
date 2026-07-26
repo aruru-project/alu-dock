@@ -95,7 +95,7 @@ def main() -> int:
             completed_renders = bytes(output).count(b"\x1b[?2026l")
             if action in hub_actions:
                 set_size(fd, 18 if action == "hub-narrow" else 40, 43 if action == "hub-narrow" else 120)
-            elif action in ("extension-dialogs", "extension-replacement"):
+            elif action in ("extension-dialogs", "extension-replacement", "extension-pending-attach", "extension-response-retry"):
                 set_size(fd, 40, 120)
             elif action == "flow-frame-stability":
                 set_size(fd, 58, 252)
@@ -298,6 +298,27 @@ def main() -> int:
                 os.write(fd, b"\x03")  # Clear the injected main-editor draft before detach.
                 time.sleep(0.05)
                 read_available(fd, output, 0.02)
+            elif action == "extension-pending-attach":
+                dialog_deadline = time.monotonic() + 5
+                while b"Fresh attach confirm" not in output and time.monotonic() < dialog_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\x1b[A\r")
+                time.sleep(0.1)
+                read_available(fd, output, 0.05)
+            elif action == "extension-response-retry":
+                dialog_deadline = time.monotonic() + 5
+                while b"Retry response confirm" not in output and time.monotonic() < dialog_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\x1b[A\r")
+                retry_deadline = time.monotonic() + 5
+                while b"same question remains pending" not in output and time.monotonic() < retry_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\x1b[A\r")
+                time.sleep(0.1)
+                read_available(fd, output, 0.05)
             elif action in ("model-search", "model-disconnect"):
                 os.write(fd, b"/model\r")
                 picker_deadline = time.monotonic() + 4

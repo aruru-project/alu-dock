@@ -73,6 +73,7 @@ const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "ma
 export const TOOLS_EXPANDED_CAPABILITY = "extension_ui.tools-expanded.v1" as const;
 export const EXTENSION_WIDGET_CAPABILITY = "extension_ui.widgets.v1" as const;
 export const CONTROLLER_DIRECTIVES_CAPABILITY = "extension_ui.controller-directives.v1" as const;
+export const PERSISTENT_INTERACTIONS_CAPABILITY = "extension_ui.persistent-interactions.v1" as const;
 export const GIT_BRANCH_CAPABILITY = "git.branch-footer.v1" as const;
 export const TOOL_RESULT_PRESENTATION_CAPABILITY = "tool-result-presentation.v1" as const;
 export const IMAGE_INPUT_CAPABILITY = "command.images.path.v1" as const;
@@ -88,6 +89,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   TOOLS_EXPANDED_CAPABILITY,
   EXTENSION_WIDGET_CAPABILITY,
   CONTROLLER_DIRECTIVES_CAPABILITY,
+  PERSISTENT_INTERACTIONS_CAPABILITY,
   GIT_BRANCH_CAPABILITY,
   TOOL_RESULT_PRESENTATION_CAPABILITY,
   "extension_ui.v1",
@@ -1161,7 +1163,7 @@ function parseInstance(input: unknown, field: string): InstanceSnapshot {
   };
   if (value.interruption !== undefined) { const interruption = object(value.interruption, `${field}.interruption`); exact(interruption, ["reason", "at"]); snapshot.interruption = { reason: enumeration(interruption.reason, "interruption.reason", ["host_crash", "host_shutdown", "replacement_failed"]), at: timestamp(interruption.at, "interruption.at") }; }
   const status = object(value.extensionStatus, `${field}.extensionStatus`); if (Object.keys(status).length > 64) throw validation("invalid_response", "extensionStatus has too many keys"); for (const [key, item] of Object.entries(status)) snapshot.extensionStatus[extensionKey(key, "extensionStatus key")] = payloadFreeString(item, `extensionStatus.${key}`, MAX_MESSAGE);
-  if (value.activeInteraction !== undefined) { const interaction = object(value.activeInteraction, `${field}.activeInteraction`); exact(interaction, ["id", "method", "expiresAt"]); snapshot.activeInteraction = { id: id(interaction.id, "activeInteraction.id"), method: enumeration(interaction.method, "activeInteraction.method", ["select", "confirm", "input", "editor"]), expiresAt: timestamp(interaction.expiresAt, "activeInteraction.expiresAt") }; }
+  if (value.activeInteraction !== undefined) { const interaction = object(value.activeInteraction, `${field}.activeInteraction`); exact(interaction, ["id", "method", "expiresAt"]); snapshot.activeInteraction = { id: id(interaction.id, "activeInteraction.id"), method: enumeration(interaction.method, "activeInteraction.method", ["select", "confirm", "input", "editor"]), ...(interaction.expiresAt === undefined ? {} : { expiresAt: timestamp(interaction.expiresAt, "activeInteraction.expiresAt") }) }; }
   assertCursorDomain(snapshot.eventCursor, snapshot, `${field}.eventCursor`);
   const terminal = snapshot.lifecycle === "stopped" || snapshot.lifecycle === "host_lost" || snapshot.lifecycle === "runtime_error";
   if (terminal !== (snapshot.execution === "unavailable")) throw validation("invalid_response", "Lifecycle/execution combination is invalid");
@@ -1338,11 +1340,12 @@ function parseDialogRequest(data: Record<string, unknown>, field: string): Event
   const interactionId = id(data.interactionId, `${field}.interactionId`);
   const title = payloadFreeString(data.title, `${field}.title`, MAX_MESSAGE);
   const issuedAt = timestamp(data.issuedAt, `${field}.issuedAt`);
-  const expiresAt = timestamp(data.expiresAt, `${field}.expiresAt`);
-  if (method === "select") { exact(data, ["interactionId", "method", "title", "options", "issuedAt", "expiresAt"]); return { interactionId, method, title, options: payloadFreeStrings(data.options, `${field}.options`, 200, MAX_TEXT), issuedAt, expiresAt }; }
-  if (method === "confirm") { exact(data, ["interactionId", "method", "title", "message", "issuedAt", "expiresAt"]); return { interactionId, method, title, message: payloadFreeString(data.message, `${field}.message`, MAX_TEXT), issuedAt, expiresAt }; }
-  if (method === "input") { exact(data, ["interactionId", "method", "title", "placeholder", "issuedAt", "expiresAt"]); return { interactionId, method, title, ...(data.placeholder === undefined ? {} : { placeholder: payloadFreeString(data.placeholder, `${field}.placeholder`, MAX_TEXT) }), issuedAt, expiresAt }; }
-  exact(data, ["interactionId", "method", "title", "prefill", "issuedAt", "expiresAt"]); return { interactionId, method, title, ...(data.prefill === undefined ? {} : { prefill: payloadFreeString(data.prefill, `${field}.prefill`, MAX_PROMPT_CHARS) }), issuedAt, expiresAt };
+  const expiresAt = data.expiresAt === undefined ? undefined : timestamp(data.expiresAt, `${field}.expiresAt`);
+  const lifetime = expiresAt === undefined ? {} : { expiresAt };
+  if (method === "select") { exact(data, ["interactionId", "method", "title", "options", "issuedAt", "expiresAt"]); return { interactionId, method, title, options: payloadFreeStrings(data.options, `${field}.options`, 200, MAX_TEXT), issuedAt, ...lifetime }; }
+  if (method === "confirm") { exact(data, ["interactionId", "method", "title", "message", "issuedAt", "expiresAt"]); return { interactionId, method, title, message: payloadFreeString(data.message, `${field}.message`, MAX_TEXT), issuedAt, ...lifetime }; }
+  if (method === "input") { exact(data, ["interactionId", "method", "title", "placeholder", "issuedAt", "expiresAt"]); return { interactionId, method, title, ...(data.placeholder === undefined ? {} : { placeholder: payloadFreeString(data.placeholder, `${field}.placeholder`, MAX_TEXT) }), issuedAt, ...lifetime }; }
+  exact(data, ["interactionId", "method", "title", "prefill", "issuedAt", "expiresAt"]); return { interactionId, method, title, ...(data.prefill === undefined ? {} : { prefill: payloadFreeString(data.prefill, `${field}.prefill`, MAX_PROMPT_CHARS) }), issuedAt, ...lifetime };
 }
 
 function payloadFreeString(input: unknown, field: string, max: number, code = "invalid_response"): string {

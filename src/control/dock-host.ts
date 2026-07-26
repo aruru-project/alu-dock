@@ -74,6 +74,7 @@ import {
   IMAGE_INPUT_CAPABILITY,
   INSTANCE_KEYS_CAPABILITY,
   CONTROLLER_DIRECTIVES_CAPABILITY,
+  PERSISTENT_INTERACTIONS_CAPABILITY,
   TOOL_RESULT_PRESENTATION_CAPABILITY,
   TOOLS_EXPANDED_CAPABILITY,
 } from "./protocol.js";
@@ -486,6 +487,7 @@ export class DockHost {
         this.sendSuccessAndEnd(socket, request.requestId, result); return;
       }
       case "interaction.respond": {
+        if (!clientRequirements.has(PERSISTENT_INTERACTIONS_CAPABILITY)) throw new ProtocolValidationError("capability_missing", `Capability ${PERSISTENT_INTERACTIONS_CAPABILITY} is required for interaction responses`);
         const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, async () => {
           const instance = this.registry.get(request.params.instanceId);
           return instance.respondInteraction(request.params.leaseToken, request.params.interactionId, request.params.response);
@@ -563,11 +565,12 @@ export class DockHost {
 
   private async attachEventStream(request: Extract<ControlRequest,{type:"instance.attach"}>,socket:Socket,setEventUnsubscribe:(unsubscribe:()=>void)=>void):Promise<void> {
     const instance=this.registry.get(request.params.instanceId);
+    const requirements=this.connectionRequirements.get(socket);
+    if(request.params.controller==="claim"&&requirements?.has(PERSISTENT_INTERACTIONS_CAPABILITY)!==true)throw new ProtocolValidationError("capability_missing",`Capability ${PERSISTENT_INTERACTIONS_CAPABILITY} is required to claim the interaction controller`);
     this.trackAttachStream(instance.id, socket);
     const cursor=request.params.since;
     if(cursor && cursor.instanceId!==instance.id) throw new ProtocolValidationError("invalid_cursor","Cursor belongs to another instance");
     const follow=request.params.follow;
-    const requirements=this.connectionRequirements.get(socket);
     const projectionCapabilities:ClientProjectionCapabilities={
       toolsExpanded: requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,
       gitBranch: requirements?.has(GIT_BRANCH_CAPABILITY)===true,
@@ -575,6 +578,7 @@ export class DockHost {
       toolPresentation: requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,
       images: requirements?.has(IMAGE_INPUT_CAPABILITY)===true,
       controllerDirectives: requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true,
+      persistentInteractions: requirements?.has(PERSISTENT_INTERACTIONS_CAPABILITY)===true,
     };
     type QueuedEvent = { event: DockEvent; bytes: number };
     let initializing=true,pending:QueuedEvent[]=[]; let pendingBytes=0,initializationOverflow=false;
@@ -674,16 +678,29 @@ export class DockHost {
     });
     if(subscriptionClosed)unsubscribe();
     setEventUnsubscribe(closeSubscription);
-    if(follow&&request.params.controller==="claim")controller=await instance.claimInteractionController();
-    projectionCapabilities.controllerId=controller.status==="acquired"?controller.controllerId:undefined;
+    let projection!:AttachProjection;
+    try{
+      if(follow&&request.params.controller==="claim"){
+        for(let attempt=0;attempt<3;attempt+=1){
+          controller=await instance.claimInteractionController();
+          controllerReleased=false;
+          projectionCapabilities.controllerId=controller.status==="acquired"?controller.controllerId:undefined;
+          projection=await instance.getAttachProjection(cursor,MAX_HISTORY_ITEMS,request.params.replay??"legacy_history_overlay");
+          if(controller.status!=="acquired"||instance.isInteractionControllerCurrent(controller.leaseToken,projection.instance.runtimeGeneration))break;
+          await instance.releaseInteractionController(controller.leaseToken,"detach");
+          controller={status:"unavailable"};
+          projectionCapabilities.controllerId=undefined;
+        }
+      }else{
+        projection=await instance.getAttachProjection(cursor,MAX_HISTORY_ITEMS,request.params.replay??"legacy_history_overlay");
+      }
+    }catch(error){initializing=false;clearQueues();closeSubscription();throw error;}
     if(subscriptionClosed){
       releaseController();initializing=false;clearQueues();
       if(initializationOverflow)this.sendErrorAndEnd(socket,"attach_initial_overflow",ATTACH_INITIAL_OVERFLOW_MESSAGE,request.requestId);
       return;
     }
     if(socket.destroyed){closeSubscription();return;}
-    let projection:AttachProjection;
-    try{projection=await instance.getAttachProjection(cursor,MAX_HISTORY_ITEMS,request.params.replay??"legacy_history_overlay");}catch(error){initializing=false;clearQueues();closeSubscription();throw error;}
     if(subscriptionClosed){
       releaseController();initializing=false;clearQueues();
       if(initializationOverflow)this.sendErrorAndEnd(socket,"attach_initial_overflow",ATTACH_INITIAL_OVERFLOW_MESSAGE,request.requestId);
@@ -725,7 +742,7 @@ export class DockHost {
     for (const socket of streams) socket.destroy();
   }
 
-  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const requirements=this.connectionRequirements.get(socket);const projected=projectForClient(result,{toolsExpanded:requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,gitBranch:requirements?.has(GIT_BRANCH_CAPABILITY)===true,instanceKeys:requirements?.has(INSTANCE_KEYS_CAPABILITY)===true,toolPresentation:requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,images:requirements?.has(IMAGE_INPUT_CAPABILITY)===true,controllerDirectives:requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true});const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,projected));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
+  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const requirements=this.connectionRequirements.get(socket);const projected=projectForClient(result,{toolsExpanded:requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,gitBranch:requirements?.has(GIT_BRANCH_CAPABILITY)===true,instanceKeys:requirements?.has(INSTANCE_KEYS_CAPABILITY)===true,toolPresentation:requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,images:requirements?.has(IMAGE_INPUT_CAPABILITY)===true,controllerDirectives:requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true,persistentInteractions:requirements?.has(PERSISTENT_INTERACTIONS_CAPABILITY)===true});const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,projected));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
   private sendErrorAndEnd(socket:Socket,code:string,message:string,requestId:string,details?:JsonObject,retryable=false):void { if(socket.destroyed||socket.writableEnded)return;const response:ControlResponse={kind:"response",version:2,requestId,hostEpoch:this.hostEpoch,ok:false,error:{code,message:truncateMessage(message),retryable,...(details===undefined?{}:{details})}};if(endEnvelope(socket,response)==="too_large")socket.destroy(); }
   private sendHelloError(socket:Socket,requestId:string,code:HelloError["error"]["code"],message:string,details:{hostVersions?:number[];missing?:string[];retryAfterMs?:number}={}):void { if(socket.destroyed||socket.writableEnded)return;const envelope:HelloError={kind:"hello_error",requestId,error:{code,message:truncateMessage(message),...details}};try{socket.end(encodeJsonLine(envelope));}catch{socket.destroy();} }
 }
@@ -860,6 +877,7 @@ interface ClientProjectionCapabilities {
   toolPresentation: boolean;
   images: boolean;
   controllerDirectives: boolean;
+  persistentInteractions: boolean;
   controllerId?: string;
 }
 
@@ -913,6 +931,7 @@ function projectForClient(
     if (isSnapshot && key === "toolsExpanded" && !capabilities.toolsExpanded) continue;
     if (isSnapshot && key === "gitBranch" && !capabilities.gitBranch) continue;
     if (isSnapshot && key === "key" && !capabilities.instanceKeys) continue;
+    if (isSnapshot && key === "activeInteraction" && !capabilities.persistentInteractions) continue;
     if (isAttachProjection && key === "controller" && !capabilities.controllerDirectives && child !== null && typeof child === "object" && !Array.isArray(child)) {
       const legacyController = { ...(child as Record<string, unknown>) };
       delete legacyController.controllerId;
@@ -971,7 +990,8 @@ function isUnsupportedProjectionEvent(value: unknown, capabilities: ClientProjec
     return !capabilities.controllerDirectives || value.data.controllerId !== capabilities.controllerId;
   }
   return (!capabilities.toolsExpanded && type === "extension.tools_expanded_changed")
-    || (!capabilities.gitBranch && type === "git.branch_changed");
+    || (!capabilities.gitBranch && type === "git.branch_changed")
+    || (!capabilities.persistentInteractions && (type === "interaction.requested" || type === "interaction.resolved" || type === "interaction.cancelled"));
 }
 
 function controlEventEnvelope(requestId:string,hostEpoch:string,event:DockEvent,capabilities:ClientProjectionCapabilities):ControlEventEnvelope|undefined {
