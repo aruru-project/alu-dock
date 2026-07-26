@@ -70,12 +70,12 @@ async function createTransactionHarness(port: ScriptedCatalogCommitPort, faultDr
   const socketPath = join(directory, "dock.sock");
   const sessions = new Map<string, DelayedRuntimeSession>();
   let sequence = 0;
-  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, name }) => {
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, key, name }) => {
     const session = new DelayedRuntimeSession(`pi-${id}`);
     sessions.set(id, session);
     const modelState = session.getModelState();
     return new ManagedInstance({
-      id, creationOperationId, hostEpoch, cwd, name, session, eventCapacity: 500,
+      id, creationOperationId, hostEpoch, cwd, key, name, session, eventCapacity: 500,
       executor: { kind: "fixture", model: modelState.model, thinkingLevel: modelState.thinkingLevel },
     });
   }, () => `transaction-${++sequence}`, { catalogCommitPort: port });
@@ -581,6 +581,42 @@ test("keyed ensure returns one Host-owned instance to simultaneous clients", asy
   await harness.registry.get(first.instance.id).waitForIdle();
   const replacement = await firstClient.newSession(first.instance.id, undefined, "keyed-session-new");
   assert.equal(replacement.instance.key, "alu");
+});
+
+test("committed stop intent releases a key before cleanup so a moved workspace can replace it", async (context) => {
+  const harness = await createHarness();
+  let releaseDispose = (): void => {};
+  context.after(async () => { releaseDispose(); await cleanupHarness(harness); });
+  await harness.host.start();
+
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const original = await client.ensure("alu", harness.directory, "Old Alu Workstation", "ensure-old-alu");
+  const runtime = harness.sessions.get(original.instance.id) as DelayedRuntimeSession;
+  const disposeBlock = runtime.blockDispose();
+  releaseDispose = disposeBlock.release;
+
+  const stopping = client.stop(original.instance.id, "retire-wrong-alu-cwd");
+  await disposeBlock.entered;
+  assert.equal((await client.status(original.instance.id)).lifecycle, "stopping");
+  assert.equal((await client.status(original.instance.id)).key, undefined);
+  assert.equal(await client.getByKey("alu"), undefined);
+
+  const movedCwd = join(harness.directory, "moved-alu-workstation");
+  await mkdir(movedCwd);
+  const replacement = await client.ensure("alu", movedCwd, "Moved Alu Workstation", "ensure-moved-alu");
+  assert.equal(replacement.created, true);
+  assert.notEqual(replacement.instance.id, original.instance.id);
+  assert.equal(replacement.instance.key, "alu");
+  assert.equal(replacement.instance.cwd, movedCwd);
+  assert.equal((await client.getByKey("alu"))?.id, replacement.instance.id);
+
+  disposeBlock.release();
+  const stopped = await stopping;
+  assert.equal(stopped.instance.lifecycle, "stopped");
+  assert.equal(stopped.instance.key, undefined);
+  const history = await client.list();
+  assert.equal(history.find((instance) => instance.id === original.instance.id)?.key, undefined);
+  assert.equal(history.find((instance) => instance.id === replacement.instance.id)?.key, "alu");
 });
 
 test("two clients observe and replay one host-owned running instance", async (context) => {
@@ -4353,7 +4389,7 @@ test("stop commit failures distinguish pre-cleanup rollback from post-cleanup am
   const preHarness = await createTransactionHarness(prePort);
   context.after(() => cleanupHarness(preHarness));
   const preClient = new DockClient({ socketPath: preHarness.socketPath });
-  const preCreated = await preClient.create(preHarness.directory, undefined, "create-stop-pre-fault");
+  const preCreated = (await preClient.ensure("pre-stop-key", preHarness.directory, undefined, "create-stop-pre-fault")).instance;
   const preRuntime = preHarness.sessions.get(preCreated.id) as DelayedRuntimeSession;
   await assert.rejects(
     preClient.stop(preCreated.id, "stop-pre-failed"),
@@ -4362,6 +4398,7 @@ test("stop commit failures distinguish pre-cleanup rollback from post-cleanup am
   assert.equal(preRuntime.abortCalls, 0);
   assert.equal(preRuntime.disposeCalls, 0);
   assert.equal(preHarness.registry.get(preCreated.id).snapshot().lifecycle, "active");
+  assert.equal((await preClient.getByKey("pre-stop-key"))?.id, preCreated.id, "failed stop intent must roll the key release back");
   assert.equal(preHarness.registry.catalogHealth(), "healthy");
 
   const postPort = new ScriptedCatalogCommitPort();
@@ -4369,7 +4406,7 @@ test("stop commit failures distinguish pre-cleanup rollback from post-cleanup am
   const postHarness = await createTransactionHarness(postPort);
   context.after(() => cleanupHarness(postHarness));
   const postClient = new DockClient({ socketPath: postHarness.socketPath });
-  const postCreated = await postClient.create(postHarness.directory, undefined, "create-stop-post-fault");
+  const postCreated = (await postClient.ensure("post-stop-key", postHarness.directory, undefined, "create-stop-post-fault")).instance;
   const postRuntime = postHarness.sessions.get(postCreated.id) as DelayedRuntimeSession;
   await assert.rejects(
     postClient.stop(postCreated.id, "stop-post-failed"),
@@ -4379,6 +4416,8 @@ test("stop commit failures distinguish pre-cleanup rollback from post-cleanup am
   assert.equal(postRuntime.abortCalls, 1);
   assert.equal(postRuntime.disposeCalls, 1);
   assert.equal(postHarness.registry.get(postCreated.id).snapshot().lifecycle, "stopping");
+  assert.equal(postHarness.registry.get(postCreated.id).snapshot().key, undefined);
+  assert.equal(postHarness.registry.getSnapshotByKey("post-stop-key"), undefined, "committed stop intent keeps the key released after later ambiguity");
   assert.equal(postHarness.registry.get(postCreated.id).eventsSince().events.some((event) => event.type === "instance.stopped"), false);
 });
 

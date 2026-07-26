@@ -85,7 +85,7 @@ DockClient
 - 每个connection先hello，随后只允许一个request；event follow是该request的streaming结果。新的 attach replay 语义必须先协商 `events.replay-purpose.v1`；省略 replay 保持旧 history-overlay 行为。`toolsExpanded` snapshot field、event与setter由 `extension_ui.tools-expanded.v1` 单独协商；业务层唯一instance key与`instance.ensure`由`instance.keys.v1`协商；Git branch snapshot/event/replacement bootstrap由 `git.branch-footer.v1` 协商；built-in tool result的typed presentation由 `tool-result-presentation.v1` 协商。Host 对未协商的旧V2 client省略对应field并过滤对应event。只有read-only `instance.list`提供一次pre-capability fallback，供staged release检查待替换的旧Host；mutation不降级重试。
 - Fresh conversation bootstrap 只组合当前 branch history 与 active run 未持久化 tail；显式 events/cursor reconnect 使用 raw event log。
 - Mutations由caller operation ID关联，client不自动retry；本地 detach 可关闭整个 client transport scope，但不得 abort、retry 或接管已发送的 Host mutation。
-- Registry只在required catalog commit后publish instance或success；`instance.ensure`对相同opaque业务key串行get-or-create，只有首个请求构造runtime，后续请求返回同一已提交instance。
+- Registry只在required catalog commit后publish instance或success；`instance.ensure`对相同opaque业务key串行get-or-create，只有首个请求构造runtime，后续请求返回同一已提交instance。key表示当前业务入口：explicit stop intent commit时立即从旧instance释放，cleanup继续按instance ID进行，新的ensure不等待旧Worker退出；intent commit失败则回滚并保留key。
 - `session.inventory` 只返回 bounded closed metadata，不构造 runtime；`instance.adopt` 必须先验证 session target 与 project trust，再构造 runtime 和 commit catalog。
 - Hub History 与 `forget`/`prune`只删Dock catalog record，不删Pi session file；History Continue 通过已保存 sessionFile 创建新 Dock identity。
 - `ensure-host.ts`只验证连接；普通open/new/attach不得导入deployment模块自动启动Host。

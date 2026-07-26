@@ -220,6 +220,7 @@ interface MutableState {
 
 interface WorkingCheckpoint {
   state: MutableState;
+  key: string | undefined;
   name: string | undefined;
   cwd: string;
   executor: ExecutorIdentity;
@@ -321,7 +322,7 @@ export class ManagedInstance {
 
   private readonly session: RuntimeSession;
   private readonly extensionUi: ExtensionUiBroker;
-  private readonly keyValue: string | undefined;
+  private keyValue: string | undefined;
   private nameValue: string | undefined;
   private cwdValue: string;
   private gitBranchValue: string | undefined;
@@ -2254,6 +2255,10 @@ export class ManagedInstance {
         () => {
           this.stopRequestedWhileRunning = this.state.execution === "running" || this.session.isStreaming;
           this.stopRequestedAt = requestedAt;
+          // A committed explicit stop retires this instance from its business
+          // entry immediately. Cleanup continues by instance ID and must not
+          // block a fresh keyed instance in a corrected or moved workspace.
+          this.keyValue = undefined;
           this.state.lifecycle = "stopping";
           // Direct cleanup of an already unavailable runtime still traverses
           // the live `stopping` lifecycle; keep that intermediate projection
@@ -2486,6 +2491,7 @@ export class ManagedInstance {
   private captureWorkingCheckpoint(): WorkingCheckpoint {
     return {
       state: cloneJson(this.state),
+      key: this.keyValue,
       name: this.nameValue,
       cwd: this.cwdValue,
       executor: cloneJson(this.executorIdentity),
@@ -2513,6 +2519,7 @@ export class ManagedInstance {
 
   private restoreWorkingCheckpoint(checkpoint: WorkingCheckpoint): void {
     this.state = checkpoint.state;
+    this.keyValue = checkpoint.key;
     this.nameValue = checkpoint.name;
     this.cwdValue = checkpoint.cwd;
     Object.assign(this.executorIdentity, checkpoint.executor);

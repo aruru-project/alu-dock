@@ -197,14 +197,14 @@ Dock 不定义 `primary`、`alu` 或 `voice` 的业务含义。调用方先用�
 {"created":true,"instance":{"id":"instance-id","key":"alu"}}
 ```
 
-若 `alu` 已存在，Host 忽略只供首次创建使用的 `cwd`/`name`，返回同一 instance 且 `created: false`。同一 Host 同时收到多个相同 key 的首次请求时，只创建一个 instance，后续请求等待并取得第一个已提交的 `instanceId`。key 随 catalog record 持久化；session replacement、reopen 和 Host 重启不改变 key，forget 删除 record 时 key 自然消失。
+若 `alu` 已存在，Host 忽略只供首次创建使用的 `cwd`/`name`，返回同一 instance 且 `created: false`。同一 Host 同时收到多个相同 key 的首次请求时，只创建一个 instance，后续请求等待并取得第一个已提交的 `instanceId`。session replacement、reopen 和 Host restart 不改变 key。
 
-Key 是发现机制，不是权限、controller lease、Worker 类型、运行优先级或自动 reopen。返回已有 stopped/host_lost/runtime_error instance 时，调用方仍须按其权威 lifecycle 决定展示、reopen 或 forget。
+Key 是当前业务入口，不是权限、controller lease、Worker 类型、运行优先级或自动 reopen。调用方应核对返回 snapshot 的 authoritative `cwd`；若业务工作目录已搬迁或绑定错误，应显式 stop 旧 instance。`instance.stop` 的 durable intent 一经提交，旧 instance 立即释放 key，继续按原 `instanceId` 完成 cleanup 并保留无 key 的 history record；调用方无需等待 cleanup 即可在正确 cwd 再次 `instance.ensure`。stop intent 提交失败则 key 保持不变。forget 删除 record 时也自然移除 key。
 
 ## 推荐的 Web 初始流程
 
 1. 用 `host.info` 检查 Host 和 capabilities。
-2. 固定业务工作台先用 `instance.get_by_key` 查询约定 key；不存在时用 `instance.ensure` 创建。若 ensure 结果因传输丢失而不确定，重新执行只读查询，不重放 mutation。多实例目录仍用 `instance.list` 分页读取 catalog。
+2. 固定业务工作台先用 `instance.get_by_key` 查询约定 key；不存在时用 `instance.ensure` 创建，并核对返回的 canonical `cwd`。cwd 不符合当前配置时，显式 stop 旧 instance；stop intent 提交后即可在正确 cwd ensure 新 instance。若 ensure 结果因传输丢失而不确定，重新执行只读查询，不重放 mutation。多实例目录仍用 `instance.list` 分页读取 catalog。
 3. 目标 instance active 后，用 `instance.attach`：
    - 首次打开使用 `replay: "conversation_bootstrap"`；
    - 只观察时使用 `controller: "observe"`；
