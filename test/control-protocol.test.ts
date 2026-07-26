@@ -9,11 +9,13 @@ import {
   parseControlEventEnvelope,
   parseControlRequest,
   parseControlResponse,
+  parseEnsureResult,
   parseEventsResult,
   parseForgetResult,
   parseHostInfoResult,
   parseHistoryResult,
   parseInteractionRespondResult,
+  parseKeyLookupResult,
   parseListResult,
   parseModelConfigurationResult,
   parsePruneResult,
@@ -38,6 +40,7 @@ import {
   parseCommandsResult,
   ProtocolValidationError,
   CONTROLLER_DIRECTIVES_CAPABILITY,
+  INSTANCE_KEYS_CAPABILITY,
   implementedCapabilities,
   requiredCapabilities,
 } from "../src/control/protocol.js";
@@ -71,7 +74,7 @@ test("V2 hello is closed, bounded, and rejects duplicate capabilities", () => {
 
 function validSnapshot(): Record<string, unknown> {
   return {
-    id: "i1", creationOperationId: "op-create", cwd: "/tmp/project",
+    id: "i1", creationOperationId: "op-create", key: "alu", cwd: "/tmp/project",
     lifecycle: "active", execution: "idle", compacting: false, lastRun: "never", reopenable: false,
     runtimeGeneration: 1, ownerHostEpoch: "epoch-1",
     pending: { steering: 0, followUp: 0, total: 0 },
@@ -345,10 +348,39 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   }), /selector does not match/u);
   assert.throws(() => parseControlRequest({ ...base, type: "instance.list", params: { selector: "all", limit: 101 } }), /must not exceed 100/u);
   assert.equal(capabilityForRequest("instance.adopt"), "session.adopt.v1");
+  assert.equal(capabilityForRequest("instance.ensure"), INSTANCE_KEYS_CAPABILITY);
+  assert.equal(capabilityForRequest("instance.get_by_key"), INSTANCE_KEYS_CAPABILITY);
   assert.equal(capabilityForRequest("session.inventory"), "session.inventory.v1");
   assert.equal(capabilityForRequest("extension.tools_expanded.set"), "extension_ui.tools-expanded.v1");
   assert.equal(capabilityForRequest("extension.widget_viewport.set"), "extension_ui.widgets.v1");
-  assert.deepEqual(requiredCapabilities("events.replay-purpose.v1"), ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "tool-result-presentation.v1", "events.replay-purpose.v1"]);
+  assert.deepEqual(requiredCapabilities("events.replay-purpose.v1"), ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.keys.v1", "tool-result-presentation.v1", "events.replay-purpose.v1"]);
+
+  const ensured = parseControlRequest({
+    ...base,
+    type: "instance.ensure",
+    params: { operationId: "ensure-1", key: "alu", cwd: "/tmp/project", name: "Alu Workstation" },
+  });
+  assert.deepEqual(ensured.params, {
+    operationId: "ensure-1", key: "alu", cwd: "/tmp/project", name: "Alu Workstation",
+    trustChallengeId: undefined, projectTrustDecision: undefined,
+  });
+  assert.throws(() => parseControlRequest({
+    ...base,
+    type: "instance.ensure",
+    params: { operationId: "ensure-2", key: "", cwd: "/tmp/project" },
+  }), /non-empty/u);
+  assert.throws(() => parseControlRequest({
+    ...base,
+    type: "instance.ensure",
+    params: { operationId: "ensure-3", key: "bad\nkey", cwd: "/tmp/project" },
+  }), /control characters/u);
+  assert.deepEqual(parseEnsureResult({ created: false, instance: validSnapshot() }), {
+    created: false,
+    instance: parseStatusResult({ instance: validSnapshot() }).instance,
+  });
+  assert.deepEqual(parseControlRequest({ ...base, type: "instance.get_by_key", params: { key: "alu" } }).params, { key: "alu" });
+  assert.equal(parseKeyLookupResult({ instance: null }).instance, null);
+  assert.equal(parseKeyLookupResult({ instance: validSnapshot() }).instance?.key, "alu");
 
   const adopted = parseControlRequest({
     ...base,

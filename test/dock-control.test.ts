@@ -44,12 +44,12 @@ async function createHarness(): Promise<Harness> {
   const socketPath = join(directory, "dock.sock");
   const sessions = new Map<string, DelayedRuntimeSession>();
   let sequence = 0;
-  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, name }) => {
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, key, name }) => {
     const session = new DelayedRuntimeSession(`pi-${id}`);
     sessions.set(id, session);
     const modelState = session.getModelState();
     const instance = new ManagedInstance({
-      id, creationOperationId, hostEpoch, cwd, name, session, eventCapacity: 500,
+      id, creationOperationId, hostEpoch, cwd, key, name, session, eventCapacity: 500,
       executor: { kind: "fixture", model: modelState.model, thinkingLevel: modelState.thinkingLevel },
     });
     await instance.submit("deterministic delayed task");
@@ -120,7 +120,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "command.images.path.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.controller-directives.v1", "extension_ui.tools-expanded.v1", "extension_ui.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "host.info", "instance.catalog", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tool-result-presentation.v1", "tools.v1", "tui.projection.v1"]);
+  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "command.images.path.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.controller-directives.v1", "extension_ui.tools-expanded.v1", "extension_ui.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "host.info", "instance.catalog", "instance.keys.v1", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tool-result-presentation.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -545,6 +545,42 @@ test("SSH TUI reacquires its controller after runtime replacement", async (conte
   assert.match(output, /post replacement injected draft/);
   assert.doesNotMatch(output, /connected\/acquired/);
   assert.doesNotMatch(output, /Replacement history unavailable|Host event stream closed|connection lost/);
+});
+
+test("keyed ensure returns one Host-owned instance to simultaneous clients", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+
+  const firstClient = new DockClient({ socketPath: harness.socketPath });
+  const secondClient = new DockClient({ socketPath: harness.socketPath });
+  const [first, second] = await Promise.all([
+    firstClient.ensure("alu", harness.directory, "Alu Workstation", "ensure-alu-first"),
+    secondClient.ensure("alu", harness.directory, "Ignored second name", "ensure-alu-second"),
+  ]);
+
+  assert.equal(first.created || second.created, true);
+  assert.equal(first.created && second.created, false);
+  assert.equal(first.instance.id, second.instance.id);
+  assert.equal(first.instance.key, "alu");
+  assert.equal(second.instance.key, "alu");
+  assert.equal(harness.registry.list().length, 1);
+  assert.equal((await firstClient.list())[0]?.key, "alu");
+  assert.equal((await firstClient.getByKey("alu"))?.id, first.instance.id);
+  assert.equal(await firstClient.getByKey("missing"), undefined);
+
+  const legacy = await exchangeRequestAfterHello(
+    harness.socketPath,
+    ["core.v2", "instance.catalog", "extension_ui.tools-expanded.v1", "git.branch-footer.v1"],
+    { kind: "request", version: 2, requestId: "legacy-key-list", type: "instance.list", params: { selector: "all", limit: 100 } },
+  );
+  const legacyInstances = objectValue(legacy.result).instances as Array<Record<string, unknown>>;
+  assert.equal("key" in (legacyInstances[0] ?? {}), false);
+
+  harness.sessions.get(first.instance.id)?.settle("ready for replacement");
+  await harness.registry.get(first.instance.id).waitForIdle();
+  const replacement = await firstClient.newSession(first.instance.id, undefined, "keyed-session-new");
+  assert.equal(replacement.instance.key, "alu");
 });
 
 test("two clients observe and replay one host-owned running instance", async (context) => {
@@ -3200,7 +3236,7 @@ test("an LF-truncated control response is reported as recoverable connection los
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-partial-frame-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  const capabilities = ["command.images.path.v1", "core.v2", "events.follow", "extension_ui.tools-expanded.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "instance.catalog", "queue.control.v1", "run.abort.v1", "tool-result-presentation.v1", "tui.projection.v1"];
+  const capabilities = ["command.images.path.v1", "core.v2", "events.follow", "extension_ui.tools-expanded.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "instance.catalog", "instance.keys.v1", "queue.control.v1", "run.abort.v1", "tool-result-presentation.v1", "tui.projection.v1"];
   const server = createServer((socket) => {
     const decoder = new JsonLineDecoder();
     socket.on("data", (chunk: Buffer) => {
@@ -3569,7 +3605,7 @@ test("post-send mutation transport loss is effect_unknown with caller operation 
       for (const line of decoder.push(chunk)) {
         const frame = objectValue(JSON.parse(line) as unknown);
         if (frame.kind === "hello") {
-          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 8, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "effect-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.catalog"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
+          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 8, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "effect-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.catalog", "instance.keys.v1"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
         } else socket.destroy();
       }
     });
@@ -3595,7 +3631,7 @@ test("post-send mutation timeout is effect_unknown and is not retried", async (c
       for (const line of decoder.push(chunk)) {
         const frame = objectValue(JSON.parse(line) as unknown);
         if (frame.kind === "hello") {
-          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 9, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "timeout-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.catalog"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
+          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 9, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "timeout-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.catalog", "instance.keys.v1"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
         } else requests += 1;
       }
     });
@@ -3657,7 +3693,7 @@ test("stream callbacks follow initial response order and accept one-step replace
             kind: "hello_ack", requestId: "fixed", version: 2,
             host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
             catalogSchemaVersion: 1,
-            capabilities: ["command.images.path.v1", "core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "tool-result-presentation.v1"],
+            capabilities: ["command.images.path.v1", "core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.keys.v1", "tool-result-presentation.v1"],
             limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
           }));
           continue;

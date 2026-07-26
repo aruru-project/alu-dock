@@ -2154,7 +2154,7 @@ export function formatWorkStatus(snapshot: InstanceSnapshot): string {
     : "none";
   return [
     `Status: ${snapshot.lifecycle === "active" ? snapshot.execution : snapshot.lifecycle}`,
-    `Session: ${terminalSafe(snapshot.name || "(unnamed)")}`,
+    `Session: ${terminalSafe(snapshot.name || "(unnamed)")}${snapshot.key === undefined ? "" : ` [${terminalSafe(snapshot.key)}]`}`,
     `Work cwd: ${terminalSafe(snapshot.cwd)}${snapshot.gitBranch === undefined ? "" : ` (${terminalSafe(snapshot.gitBranch)})`}`,
     `Model: ${model} · thinking ${terminalSafe(snapshot.executor.thinkingLevel ?? "off")}`,
     `Dock ID: ${terminalSafe(snapshot.id)}`,

@@ -34,6 +34,7 @@ export interface CatalogInterruption {
 export interface CatalogInstanceRecord {
   id: string;
   creationOperationId: string;
+  key?: string;
   name?: string;
   cwd: string;
   lifecycle: InstanceLifecycle;
@@ -146,6 +147,7 @@ export function validateInstanceStateInvariant(value: {
 export function validateCatalogRecord(record: CatalogInstanceRecord): void {
   requiredBoundedText(record.id, 128, "Catalog instance ID");
   requiredBoundedText(record.creationOperationId, 128, "Catalog creation operation ID");
+  if (record.key !== undefined) validateInstanceKey(record.key);
   absolutePath(record.cwd, "Catalog cwd");
   requiredBoundedText(record.piSessionId, 128, "Catalog Pi session ID");
   if (record.name !== undefined) requiredBoundedText(record.name, 256, "Catalog instance name");
@@ -224,16 +226,23 @@ export function validateCatalogProjection(projection: CatalogProjection): void {
   if (!Array.isArray(projection.instances) || projection.instances.length > 10_000) throw new Error("Catalog instance collection is invalid or too large");
   const ids = new Set<string>();
   const creationOperations = new Set<string>();
+  const keys = new Set<string>();
   for (const record of projection.instances) {
     validateCatalogRecord(record);
     if (ids.has(record.id)) throw new Error(`Duplicate catalog instance ID: ${record.id}`);
     if (creationOperations.has(record.creationOperationId)) throw new Error(`Duplicate catalog creation operation ID: ${record.creationOperationId}`);
+    if (record.key !== undefined && keys.has(record.key)) throw new Error(`Duplicate catalog instance key: ${record.key}`);
     ids.add(record.id);
     creationOperations.add(record.creationOperationId);
+    if (record.key !== undefined) keys.add(record.key);
     if ((record.lifecycle === "active" || record.lifecycle === "stopping") && record.ownerHostEpoch !== projection.lastHostEpoch) {
       throw new Error("Live catalog record owner does not match lastHostEpoch");
     }
   }
+}
+
+export function validateInstanceKey(value: string): void {
+  requiredBoundedText(value, 128, "Catalog instance key");
 }
 
 function requiredBoundedText(value: string, limit: number, label: string): void {

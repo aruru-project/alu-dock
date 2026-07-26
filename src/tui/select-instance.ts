@@ -20,7 +20,9 @@ export async function selectInstance(
   const items: SelectItem[] = [
     ...instances.map((instance) => ({
       value: instance.id,
-      label: terminalSafe(instance.name || instance.id.slice(0, 8)),
+      label: instance.key === undefined
+        ? terminalSafe(instance.name || instance.id.slice(0, 8))
+        : `[${terminalSafe(instance.key)}] ${terminalSafe(instance.name || instance.id.slice(0, 8))}`,
       description: `${instance.lifecycle}/${instance.execution}${instance.reopenable ? " · reopen context" : ""} · ${instance.executor.model?.id ?? "no model"}`,
     })),
     { value: NEW_INSTANCE, label: "+ New instance", description: "create in this directory" },

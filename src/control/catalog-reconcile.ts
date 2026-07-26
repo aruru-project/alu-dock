@@ -96,6 +96,7 @@ export function catalogSnapshotFromRecord(
   return {
     id: record.id,
     creationOperationId: record.creationOperationId,
+    ...(record.key === undefined ? {} : { key: record.key }),
     ...(record.name === undefined ? {} : { name: record.name }),
     cwd: record.cwd,
     lifecycle: record.lifecycle,

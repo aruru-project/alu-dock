@@ -78,7 +78,7 @@ Protocol V2 使用 Unix stream socket 上的 UTF-8 JSON Lines：
 成功响应：
 
 ```json
-{"kind":"hello_ack","requestId":"hello-uuid","version":2,"host":{"pid":1234,"dockVersion":"0.2.0","piSdkVersion":"0.81.1","hostEpoch":"host-epoch","startedAt":"2026-01-01T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["catalog.maintenance.v1","catalog.v1","command.images.path.v1","core.v2","events.follow","events.replay-purpose.v1","extension_ui.controller-directives.v1","extension_ui.tools-expanded.v1","extension_ui.v1","extension_ui.widgets.v1","git.branch-footer.v1","host.info","instance.catalog","models.v1","projection.completeness.v1","queue.control.v1","resources.v1","run.abort.v1","service.managed.v1","session.adopt.v1","session.commands.v1","session.core","session.inventory-diagnostics.v1","session.inventory.v1","session.reopen","session.tree.v1","settings.v1","tool-result-presentation.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200,"maxInstanceListItems":100,"maxInstanceListBytes":786432}}
+{"kind":"hello_ack","requestId":"hello-uuid","version":2,"host":{"pid":1234,"dockVersion":"0.2.0","piSdkVersion":"0.81.1","hostEpoch":"host-epoch","startedAt":"2026-01-01T00:00:00.000Z"},"catalogSchemaVersion":1,"capabilities":["catalog.maintenance.v1","catalog.v1","command.images.path.v1","core.v2","events.follow","events.replay-purpose.v1","extension_ui.controller-directives.v1","extension_ui.tools-expanded.v1","extension_ui.v1","extension_ui.widgets.v1","git.branch-footer.v1","host.info","instance.catalog","instance.keys.v1","models.v1","projection.completeness.v1","queue.control.v1","resources.v1","run.abort.v1","service.managed.v1","session.adopt.v1","session.commands.v1","session.core","session.inventory-diagnostics.v1","session.inventory.v1","session.reopen","session.tree.v1","settings.v1","tool-result-presentation.v1","tools.v1","tui.projection.v1"],"limits":{"maxLineBytes":1048576,"maxPromptChars":256000,"maxReplayEvents":1000,"maxHistoryItems":200,"maxInstanceListItems":100,"maxInstanceListBytes":786432}}
 ```
 
 客户端必须在发送业务 request 前验证：
@@ -172,6 +172,7 @@ raise "Response correlation failed" unless
 | 身份 | 含义 |
 |---|---|
 | `instance.id` | Dock 工作身份；Web 应以它作为工作区主键 |
+| `instance.key` | 可选的业务层唯一 key；只用于稳定找到同一个 Dock instance |
 | `executor.piSessionId` | 当前 Pi session 身份 |
 | `executor.sessionFile` | 当前 Pi session 的可选本机文件路径；某些状态下不存在 |
 | `runtimeGeneration` | 当前 instance 内的 runtime/session generation |
@@ -180,13 +181,31 @@ raise "Response correlation failed" unless
 | catalog `revision` | 一次 catalog 分页读取所属的版本 |
 | event `sequence` | 一个 instance generation 内的事件序号 |
 
-成功且未取消的 session new/switch/fork/clone/reload 保留 `instance.id`，并推进 `runtimeGeneration`。这些 request 即使 `ok: true` 也可能返回 `cancelled: true`；客户端必须先检查结果。Host 重启会改变 `hostEpoch`。不要使用 Pi session ID 或文件路径替代 Dock instance identity。
+成功且未取消的 session new/switch/fork/clone/reload 保留 `instance.id` 和可选 `instance.key`，并推进 `runtimeGeneration`。这些 request 即使 `ok: true` 也可能返回 `cancelled: true`；客户端必须先检查结果。Host 重启会改变 `hostEpoch`。不要使用 Pi session ID、文件路径、instance name、cwd 或更新时间替代 Dock instance identity/key。
+
+### 业务 key 与唯一工作入口
+
+Dock 不定义 `primary`、`alu` 或 `voice` 的业务含义。调用方先用只读 `instance.get_by_key {"key":"alu"}` 查询；没有结果时，可以用一个最长 128 字符、无控制字符的 opaque `key` 获取或创建唯一 instance：
+
+```json
+{"kind":"request","version":2,"requestId":"request-uuid","type":"instance.ensure","params":{"operationId":"operation-uuid","key":"alu","cwd":"/home/luziyi/workshop/alu_workstation","name":"Alu Workstation"}}
+```
+
+协商能力为 `instance.keys.v1`。成功 result 包含 `created` 和完整 instance snapshot；以下只摘出相关字段：
+
+```json
+{"created":true,"instance":{"id":"instance-id","key":"alu"}}
+```
+
+若 `alu` 已存在，Host 忽略只供首次创建使用的 `cwd`/`name`，返回同一 instance 且 `created: false`。同一 Host 同时收到多个相同 key 的首次请求时，只创建一个 instance，后续请求等待并取得第一个已提交的 `instanceId`。key 随 catalog record 持久化；session replacement、reopen 和 Host 重启不改变 key，forget 删除 record 时 key 自然消失。
+
+Key 是发现机制，不是权限、controller lease、Worker 类型、运行优先级或自动 reopen。返回已有 stopped/host_lost/runtime_error instance 时，调用方仍须按其权威 lifecycle 决定展示、reopen 或 forget。
 
 ## 推荐的 Web 初始流程
 
 1. 用 `host.info` 检查 Host 和 capabilities。
-2. 用 `instance.list` 分页读取 catalog。
-3. 用户选择 active instance 后，用 `instance.attach`：
+2. 固定业务工作台先用 `instance.get_by_key` 查询约定 key；不存在时用 `instance.ensure` 创建。若 ensure 结果因传输丢失而不确定，重新执行只读查询，不重放 mutation。多实例目录仍用 `instance.list` 分页读取 catalog。
+3. 目标 instance active 后，用 `instance.attach`：
    - 首次打开使用 `replay: "conversation_bootstrap"`；
    - 只观察时使用 `controller: "observe"`；
    - 需要回复 extension interaction 时才使用 `controller: "claim"`。
@@ -229,6 +248,8 @@ Catalog 当前没有全局 follow stream。Web 可以定期重新执行 revision
 
 - `host.info`
 - `instance.create`
+- `instance.ensure`
+- `instance.get_by_key`
 - `instance.adopt`
 - `instance.list`
 - `instance.get`
@@ -239,7 +260,7 @@ Catalog 当前没有全局 follow stream。Web 可以定期重新执行 revision
 - `catalog.prune`
 - `session.inventory`
 
-Create、adopt、reopen 和跨项目 switch 可能先返回 `project_trust_required`。参见“Project trust”。
+Create、ensure（仅实际创建时）、adopt、reopen 和跨项目 switch 可能先返回 `project_trust_required`。参见“Project trust”。
 
 ## Attach、history 与实时事件
 
@@ -476,7 +497,7 @@ Controller stream 断开、session replacement 或 Host drain 会释放 lease，
 
 ## Project trust
 
-Create、adopt、reopen 或跨项目 switch 可能返回：
+Create、ensure（仅实际创建时）、adopt、reopen 或跨项目 switch 可能返回：
 
 ```json
 {
@@ -508,6 +529,7 @@ Create、adopt、reopen 或跨项目 switch 可能返回：
 |---|---|
 | `host.info` | `host.info` |
 | `instance.create/list/get/stop` | `instance.catalog` |
+| `instance.ensure`、`instance.get_by_key`、snapshot `key` | `instance.keys.v1` |
 | `instance.attach` | `events.follow` |
 | 带 `replay` 的 attach | 再加 `events.replay-purpose.v1` |
 | `instance.adopt` | `session.adopt.v1` |
@@ -538,6 +560,7 @@ Create、adopt、reopen 或跨项目 switch 可能返回：
 
 Capability 会改变 closed response/event shape：
 
+- 未协商 `instance.keys.v1` 时，Host 从 snapshot 省略 `key`，旧客户端仍按普通 instance 工作；
 - 未协商 `extension_ui.controller-directives.v1` 时，Host 从 acquired controller shape 省略 `controllerId`，并过滤 title/editor directive events；即使协商，非匹配 controller stream 仍被过滤；
 - 未协商 `extension_ui.tools-expanded.v1` 时，Host 省略 snapshot 的 `toolsExpanded` 并过滤对应 change event；
 - 未协商 `extension_ui.widgets.v1` 时，Host 过滤 widget change events；
@@ -595,7 +618,7 @@ Error code 是可扩展字符串。未知 code 应作为普通明确失败展示
 
 ## Alu Dock 侧接入合同
 
-Card #216 已固定本文所示的 hello、instance list、fresh attach、cursor reconnect、Queue、图片、interaction、controller directive 与 ambiguous mutation 规则。Extension title 更新和 editor text 注入通过独立 capability 只到达当前 controller client；图片 prompt/steer/follow-up/Queue、用户图片 metadata、`show_image` live/history 关联和 `stale_runtime_generation` details 也不再需要 Rails 猜测或读取 Pi 私有协议。
+Card #216 已固定本文所示的 hello、业务 key ensure、instance list、fresh attach、cursor reconnect、Queue、图片、interaction、controller directive 与 ambiguous mutation 规则。Dock 不解释 `alu` 等 key 的业务含义；Alubot Admin 可用 `instance.ensure` 在 Alu Workstation cwd 首次创建并稳定取得唯一工作台，普通 New Work 仍创建无 key 的并行 instance。Extension title 更新和 editor text 注入通过独立 capability 只到达当前 controller client；图片 prompt/steer/follow-up/Queue、用户图片 metadata、`show_image` live/history 关联和 `stale_runtime_generation` details 也不再需要 Rails 猜测或读取 Pi 私有协议。
 
 不增加独立 `abort_bash`；当前需求只保留整轮 abort。Alu Dock 侧接入能力已具备，Rails/WebConsole 的正式切换继续由 Card #183 推进。
 

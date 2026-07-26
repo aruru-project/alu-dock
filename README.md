@@ -9,7 +9,7 @@ Alu Dock 是面向本机单用户、SSH/headless 研发工作流的受管 Pi 运
 当前实现包括：
 
 - 私有 Unix socket 上的长期 Host 与 durable managed catalog；
-- instance 的创建、列出、接入、停止、显式 reopen、adopt、forget 与 prune；
+- instance 的创建、按业务 key 唯一获取、列出、接入、停止、显式 reopen、adopt、forget 与 prune；
 - 默认 Dock Hub：固定提供 New、Continue、History、Pi Sessions 与 Leave；进入时不创建或恢复 runtime，并以响应式全屏阿露品牌帧呈现；Hub 独占一个 alternate-screen 生命周期，并只在菜单可见时启用点击/滚轮；
 - attached Session Work TUI，包括使用canonical Alu palette的分层 conversation/activity、保留顺序与换行的 thinking/tool/compaction surface、可辨认分支的 tree、queue、settings/resources 与 extension 文本交互；footer通过Host-authoritative watcher实时显示`cwd (Git branch)`；Work 使用可流动的 main buffer 与 terminal-native mouse，不启用 Hub tracking，也没有 Alt+M 或 `/mouse` 模式；`Ctrl+O` 更新 Host-authoritative 的 generation-scoped tool 展开状态，`Alt+O` 只切换当前客户端的最近详情；
 - 同一 Dock instance 内的 Pi session new/resume/fork/clone/reload；

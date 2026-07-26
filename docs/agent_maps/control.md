@@ -39,7 +39,7 @@ DockClient
 | `src/control/dock-client.ts` | typed transport、hello negotiation、response validation、timeout；不持有runtime state | `dock-control`, `cli-cross-client` |
 | `src/control/dock-host.ts` | private socket lifecycle、hello、dispatch composition、event streaming、fault drain | `dock-control`, `durable-host-process` |
 | `src/control/session-command-service.ts` | `session.*` mutation执行、operation ledger衔接、trust/replacement结果 | `dock-control`, `operation-ledger` |
-| `src/control/dock-registry.ts` | instance目录、create/adopt/reopen/forget/prune、catalog projection | `durable-registry`, `dock-control` |
+| `src/control/dock-registry.ts` | instance目录、keyed ensure、create/adopt/reopen/forget/prune、catalog projection | `durable-registry`, `dock-control` |
 | `src/control/operation-ledger.ts` | Same-Host operation dedup/conflict | `operation-ledger` |
 | `src/control/project-trust.ts` | bounded challenge、decision与canonical cwd流程 | `project-trust` |
 | `src/control/catalog-transactions.ts` | serialized commit、commit boundary、mutation-fault状态 | `catalog-transactions` |
@@ -74,7 +74,7 @@ DockClient
 | 新request/capability | `protocol.ts` | `dock-client.ts` → service/registry → `dock-host.ts` |
 | Human CLI command或TARGET解析 | `cli.ts`, `cli-help.ts`, `cli-list.ts`, `human-target.ts` | `interactive.ts`, lifecycle动作、CLI tests |
 | attach/replay/follow | `dock-host.ts`, `dock-client.ts` | `instance-dto.ts`, `ManagedInstance.getAttachProjection()`；区分 legacy overlay、raw cursor log、fresh conversation bootstrap |
-| create/adopt/reopen/forget/prune | `dock-registry.ts` | catalog transaction/store、trust、durable tests |
+| keyed ensure、create/adopt/reopen/forget/prune | `dock-registry.ts` | catalog transaction/store、trust、durable tests |
 | mutation ambiguity/dedup | `operation-ledger.ts`, `catalog-transactions.ts` | owning mutation、error mapping、cross-client tests |
 | project trust | `project-trust.ts` | Registry preflight、Pi factory、CLI prompt |
 | wire bounds或sanitization | `protocol.ts`, closed DTO owner | client result parser、fuzz/invalid tests |
@@ -82,10 +82,10 @@ DockClient
 ## 必守边界
 
 - Protocol payload只能包含closed JSON-safe DTO。
-- 每个connection先hello，随后只允许一个request；event follow是该request的streaming结果。新的 attach replay 语义必须先协商 `events.replay-purpose.v1`；省略 replay 保持旧 history-overlay 行为。`toolsExpanded` snapshot field、event与setter由 `extension_ui.tools-expanded.v1` 单独协商；Git branch snapshot/event/replacement bootstrap由 `git.branch-footer.v1` 协商；built-in tool result的typed presentation由 `tool-result-presentation.v1` 协商。Host 对未协商的旧V2 client省略对应field并过滤对应event。只有read-only `instance.list`提供一次pre-capability fallback，供staged release检查待替换的旧Host；mutation不降级重试。
+- 每个connection先hello，随后只允许一个request；event follow是该request的streaming结果。新的 attach replay 语义必须先协商 `events.replay-purpose.v1`；省略 replay 保持旧 history-overlay 行为。`toolsExpanded` snapshot field、event与setter由 `extension_ui.tools-expanded.v1` 单独协商；业务层唯一instance key与`instance.ensure`由`instance.keys.v1`协商；Git branch snapshot/event/replacement bootstrap由 `git.branch-footer.v1` 协商；built-in tool result的typed presentation由 `tool-result-presentation.v1` 协商。Host 对未协商的旧V2 client省略对应field并过滤对应event。只有read-only `instance.list`提供一次pre-capability fallback，供staged release检查待替换的旧Host；mutation不降级重试。
 - Fresh conversation bootstrap 只组合当前 branch history 与 active run 未持久化 tail；显式 events/cursor reconnect 使用 raw event log。
 - Mutations由caller operation ID关联，client不自动retry；本地 detach 可关闭整个 client transport scope，但不得 abort、retry 或接管已发送的 Host mutation。
-- Registry只在required catalog commit后publish instance或success。
+- Registry只在required catalog commit后publish instance或success；`instance.ensure`对相同opaque业务key串行get-or-create，只有首个请求构造runtime，后续请求返回同一已提交instance。
 - `session.inventory` 只返回 bounded closed metadata，不构造 runtime；`instance.adopt` 必须先验证 session target 与 project trust，再构造 runtime 和 commit catalog。
 - Hub History 与 `forget`/`prune`只删Dock catalog record，不删Pi session file；History Continue 通过已保存 sessionFile 创建新 Dock identity。
 - `ensure-host.ts`只验证连接；普通open/new/attach不得导入deployment模块自动启动Host。

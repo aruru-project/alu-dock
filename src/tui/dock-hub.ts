@@ -178,7 +178,7 @@ async function chooseContinueAction(
   const visible = ordered.slice(0, MAX_HUB_INSTANCES);
   const entries: DockHubEntry[] = visible.map((instance) => ({
     value: `instance:${instance.id}`,
-    label: `${stateIcon(instance)} ${terminalSafe(instance.name || "(unnamed)")} [${uniqueInstanceIdPrefix(instance, instances)}]`,
+    label: `${stateIcon(instance)} ${instanceDisplayLabel(instance, "(unnamed)")} [${uniqueInstanceIdPrefix(instance, instances)}]`,
     description: `${terminalSafe(instance.cwd)} · ${instance.lifecycle}/${instance.execution} · ${instanceActionSummary(instance)}`,
   }));
   if (ordered.length > visible.length) {
@@ -213,7 +213,7 @@ async function chooseHistoryAction(
   const visible = ordered.slice(0, MAX_HUB_INSTANCES);
   const entries: DockHubEntry[] = visible.map((instance) => ({
     value: `history:${instance.id}`,
-    label: `${terminalSafe(instance.name || "(unnamed)")} [${uniqueInstanceIdPrefix(instance, instances)}]`,
+    label: `${instanceDisplayLabel(instance, "(unnamed)")} [${uniqueInstanceIdPrefix(instance, instances)}]`,
     description: `${terminalSafe(instance.cwd)} · ${instance.lifecycle} · ${instance.executor.sessionFile ? "saved Pi session" : "no saved Pi session"} · ${instance.updatedAt}`,
   }));
   if (ordered.length > visible.length) {
@@ -268,7 +268,7 @@ async function chooseHistoryRecordAction(
   entries.push({ value: BACK, label: "Back to History", description: "no change" });
   const selected = await selectMenu(
     terminal,
-    `${terminalSafe(record.name || "Dock history")} [${shortId}]`,
+    `${instanceDisplayLabel(record, "Dock history")} [${shortId}]`,
     `${terminalSafe(record.cwd)} · ${record.lifecycle}`,
     entries,
     "↑↓ choose · Enter confirm · Esc back",
@@ -313,7 +313,7 @@ async function chooseInstanceAction(
   entries.push({ value: BACK, label: "Back to Continue", description: "no change" });
   const selected = await selectMenu(
     terminal,
-    `${terminalSafe(instance.name || "Dock instance")} [${shortId}]`,
+    `${instanceDisplayLabel(instance, "Dock instance")} [${shortId}]`,
     `${instance.lifecycle}/${instance.execution} · ${terminalSafe(instance.cwd)}`,
     entries,
     "↑↓ choose · Enter confirm · Esc back",
@@ -708,8 +708,14 @@ function terminalSafe(value: string): string {
     .trim() || "—";
 }
 
+function instanceDisplayLabel(instance: InstanceSnapshot, fallback: string): string {
+  const name = terminalSafe(instance.name || fallback);
+  return instance.key === undefined ? name : `[${terminalSafe(instance.key)}] ${name}`;
+}
+
 function displayName(instance: InstanceSnapshot): string {
-  return instance.name ? `${terminalSafe(instance.name)} (${instance.id.slice(0, 8)})` : instance.id.slice(0, 8);
+  const identity = instance.name ? `${terminalSafe(instance.name)} (${instance.id.slice(0, 8)})` : instance.id.slice(0, 8);
+  return instance.key === undefined ? identity : `[${terminalSafe(instance.key)}] ${identity}`;
 }
 
 function errorMessage(error: unknown): string {

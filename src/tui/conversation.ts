@@ -782,7 +782,8 @@ export class DockWorkMetadata implements Component {
   render(width: number): string[] {
     const boundedWidth = Math.max(1, width);
     const snapshot = this.snapshot();
-    const name = safeTerminalLine(snapshot.name || "Unnamed session");
+    const sessionName = safeTerminalLine(snapshot.name || "Unnamed session");
+    const name = snapshot.key === undefined ? sessionName : `${sessionName} [${safeTerminalLine(snapshot.key)}]`;
     const cwd = safeTerminalLine(snapshot.cwd);
     const branch = snapshot.gitBranch === undefined ? undefined : safeTerminalLine(snapshot.gitBranch);
     const provider = safeTerminalLine(snapshot.executor.model?.provider ?? "");

@@ -20,6 +20,7 @@ export interface CreatePiInstanceOptions {
   id?: string;
   creationOperationId?: string;
   hostEpoch?: string;
+  key?: string;
   name?: string;
   cwd: string;
   projectTrusted: boolean;
@@ -74,6 +75,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
       id: instanceId,
       creationOperationId: options.creationOperationId,
       hostEpoch,
+      key: options.key,
       name: initialName,
       cwd,
       session: runtime,

@@ -50,7 +50,7 @@ test("human list orders decision-relevant state and omits machine-only snapshot 
       model: { provider: "openai-codex", id: "gpt-test" },
     },
   });
-  const idle = instance(2, { name: "idle", lifecycle: "active", execution: "idle" });
+  const idle = instance(2, { key: "alu", name: "idle", lifecycle: "active", execution: "idle" });
   const recoverable = instance(3, {
     name: "recover me",
     lifecycle: "host_lost",
@@ -65,7 +65,7 @@ test("human list orders decision-relevant state and omits machine-only snapshot 
   assert.ok(output.indexOf(recoverable.id.slice(0, 8)) < output.indexOf(stopped.id.slice(0, 8)));
   for (const expected of [
     "active [2J run", "active/running", "g7", "openai-codex/gpt-test", "pending 2",
-    "host_lost/unavailable", "reopenable", "/workspace/project-1",
+    "host_lost/unavailable", "reopenable", "/workspace/project-1", "[alu] idle",
   ]) assert.match(output, new RegExp(escapeRegExp(expected), "u"));
   assert.doesNotMatch(output, /\u001b/u);
   for (const secret of [

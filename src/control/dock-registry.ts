@@ -2,10 +2,11 @@ import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import type {
-  CatalogCommitPort,
-  CatalogInstanceRecord,
-  CatalogStore,
+import {
+  type CatalogCommitPort,
+  type CatalogInstanceRecord,
+  type CatalogStore,
+  validateInstanceKey,
 } from "../core/catalog.js";
 import { InstanceBusyError, type InstanceLifecycle, type ManagedInstance, type InstanceSnapshot } from "../core/managed-instance.js";
 import { CatalogTransactionCoordinator, type CatalogFault, type CatalogHealth } from "./catalog-transactions.js";
@@ -25,6 +26,7 @@ export interface InstanceFactoryInput {
   creationOperationId: string;
   hostEpoch: string;
   cwd: string;
+  key?: string;
   name?: string;
   projectTrusted: boolean;
   sessionFile?: string;
@@ -41,6 +43,10 @@ export interface CreateRegistryInstanceInput {
   name?: string;
   trustChallengeId?: string;
   projectTrustDecision?: ProjectTrustChoice;
+}
+
+export interface EnsureRegistryInstanceInput extends CreateRegistryInstanceInput {
+  key: string;
 }
 
 export interface AdoptRegistryInstanceInput {
@@ -123,6 +129,7 @@ export class DockRegistry {
   private readonly catalogStore: CatalogStore | undefined;
   private readonly reopenInFlight = new Map<string, string>();
   private readonly sessionFileClaims = new Map<string, { ownerId: string; operationId: string }>();
+  private readonly keyEnsureTails = new Map<string, Promise<void>>();
   private catalogMaintenancePending = false;
   private readonly runtimeReopenListeners = new Set<(instanceId: string) => void>();
   private readonly catalogRemovalListeners = new Set<(instanceIds: readonly string[]) => void>();
@@ -172,6 +179,30 @@ export class DockRegistry {
   }
 
   async create(input: CreateRegistryInstanceInput): Promise<ManagedInstance> {
+    return this.createNew(input);
+  }
+
+  async ensure(input: EnsureRegistryInstanceInput): Promise<{ created: boolean; instance: InstanceSnapshot }> {
+    this.assertCatalogReady();
+    validateInstanceKey(input.key);
+    const previous = this.keyEnsureTails.get(input.key) ?? Promise.resolve();
+    let release!: () => void;
+    const turn = new Promise<void>((resolveTurn) => { release = resolveTurn; });
+    this.keyEnsureTails.set(input.key, turn);
+    await previous.catch(() => {});
+    try {
+      this.catalog.assertWritable();
+      const existing = this.catalog.current().instances.find((record) => record.key === input.key);
+      if (existing) return { created: false, instance: this.safeSnapshot(existing) };
+      const instance = await this.createNew(input, input.key);
+      return { created: true, instance: instance.snapshot() };
+    } finally {
+      release();
+      if (this.keyEnsureTails.get(input.key) === turn) this.keyEnsureTails.delete(input.key);
+    }
+  }
+
+  private async createNew(input: CreateRegistryInstanceInput, key?: string): Promise<ManagedInstance> {
     this.assertCatalogReady();
     this.catalog.assertWritable();
     if (this.catalog.current().instances.some((record) => record.creationOperationId === input.operationId)) {
@@ -191,11 +222,12 @@ export class DockRegistry {
     if (this.instances.has(id) || this.catalog.current().instances.some((record) => record.id === id)) {
       throw new Error(`Generated duplicate instance identity: ${id}`);
     }
-    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, name: input.name, projectTrusted: resolution.projectTrusted });
+    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted });
     if (
       instance.id !== id
       || instance.creationOperationId !== input.operationId
       || instance.hostEpoch !== this.hostEpoch
+      || instance.key !== key
     ) {
       await instance.disposeUnpublished().catch(() => {});
       throw new Error("Instance factory returned an identity outside the registry Host domain");
@@ -203,7 +235,7 @@ export class DockRegistry {
     instance.bindCatalogPort(this.catalog.forInstance(id));
     try {
       await this.catalog.create(instance.catalogRecord(), {
-        kind: "instance.create",
+        kind: key === undefined ? "instance.create" : "instance.ensure",
         effect: "rollback_contained",
         operationId: input.operationId,
         instanceId: id,
@@ -350,6 +382,7 @@ export class DockRegistry {
       creationOperationId: record.creationOperationId,
       hostEpoch: this.hostEpoch,
       cwd: trust.canonicalCwd,
+      key: record.key,
       name: record.name,
       projectTrusted: trust.projectTrusted,
       sessionFile,
@@ -361,6 +394,7 @@ export class DockRegistry {
       candidate.id !== record.id
       || candidate.creationOperationId !== record.creationOperationId
       || candidate.hostEpoch !== this.hostEpoch
+      || candidate.key !== record.key
       || candidate.runtimeGeneration !== nextGeneration
       || candidate.snapshot().lifecycle !== "active"
     ) {
@@ -401,6 +435,13 @@ export class DockRegistry {
   getSnapshot(instanceId: string): InstanceSnapshot {
     this.assertCatalogReady();
     return this.safeSnapshot(this.catalogRecord(instanceId));
+  }
+
+  getSnapshotByKey(key: string): InstanceSnapshot | undefined {
+    this.assertCatalogReady();
+    validateInstanceKey(key);
+    const record = this.catalog.current().instances.find((item) => item.key === key);
+    return record === undefined ? undefined : this.safeSnapshot(record);
   }
 
   list(): InstanceSnapshot[] {

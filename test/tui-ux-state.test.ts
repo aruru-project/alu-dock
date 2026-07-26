@@ -12,11 +12,11 @@ import {
   submittingActivity,
 } from "../src/tui/run-activity.js";
 import { ActivityPulseController } from "../src/tui/activity-pulse.js";
-import { DockActivityLine } from "../src/tui/conversation.js";
+import { DockActivityLine, DockWorkMetadata } from "../src/tui/conversation.js";
 import { filterSearchableItems } from "../src/tui/search-filter.js";
 import { SearchablePicker } from "../src/tui/searchable-picker.js";
 import { ExtensionTextDialog } from "../src/tui/extension-text-dialog.js";
-import { pickerContentRowBudget, shouldApplyInitialHistory, snapshotIsNotOlder } from "../src/tui/dock-tui.js";
+import { formatWorkStatus, pickerContentRowBudget, shouldApplyInitialHistory, snapshotIsNotOlder } from "../src/tui/dock-tui.js";
 import { SessionTreeSurface } from "../src/tui/session-tree-surface.js";
 import { FixedActionDialog, WorkModalFrame } from "../src/tui/work-modal.js";
 import { projectSnapshot } from "../src/tui/snapshot-projection.js";
@@ -56,6 +56,13 @@ function snapshot(overrides: Partial<InstanceSnapshot> = {}): InstanceSnapshot {
     compacting: overrides.compacting ?? false,
   };
 }
+
+test("keyed instances display their business key beside the Work name", () => {
+  const keyed = snapshot({ key: "alu", name: "Alu Workstation" });
+  const metadata = new DockWorkMetadata(() => keyed).render(120).join("\n");
+  assert.match(metadata, /Alu Workstation.*\[alu\]/u);
+  assert.match(formatWorkStatus(keyed), /Session: Alu Workstation \[alu\]/u);
+});
 
 test("same-generation navigation permanently preempts a stale initial history drain", () => {
   assert.equal(shouldApplyInitialHistory(true, undefined, undefined, 1, 1), true);

@@ -53,7 +53,7 @@ test("durable catalog round-trips closed records with private atomic files", asy
   const store = new FileCatalogStore(path);
   assert.equal(await store.load(), undefined);
   const value = projection(1, [
-    record("one"),
+    record("one", { key: "alu" }),
     record("worker-lost", {
       lifecycle: "runtime_error", execution: "unavailable", ownerHostEpoch: undefined,
       interruption: { reason: "replacement_failed", at: "2026-07-15T00:01:00.000Z" },
@@ -64,9 +64,23 @@ test("durable catalog round-trips closed records with private atomic files", asy
   await store.commit(value, { kind: "test", effect: "pre_effect" });
 
   assert.deepEqual(await store.load(), JSON.parse(JSON.stringify(value)) as CatalogProjection);
+  assert.equal((await store.load())?.instances[0]?.key, "alu");
   assert.equal((await lstat(join(root, "state"))).mode & 0o777, 0o700);
   assert.equal((await lstat(path)).mode & 0o777, 0o600);
   assert.deepEqual((await readdir(join(root, "state"))).sort(), ["catalog.json"]);
+});
+
+test("durable catalog rejects duplicate and unsafe instance keys", async () => {
+  const { path } = await temporaryCatalog();
+  const store = new FileCatalogStore(path);
+  await assert.rejects(
+    store.commit(projection(1, [record("one", { key: "alu" }), record("two", { key: "alu" })]), { kind: "test", effect: "pre_effect" }),
+    /Duplicate catalog instance key/u,
+  );
+  await assert.rejects(
+    store.commit(projection(1, [record("one", { key: "bad\nkey" })]), { kind: "test", effect: "pre_effect" }),
+    /instance key/u,
+  );
 });
 
 test("durable catalog closes fork/clone intents and deferred-file recovery facts", async () => {

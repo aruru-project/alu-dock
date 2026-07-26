@@ -13,6 +13,7 @@ import {
   type CatalogInstanceRecord,
   type CatalogMutationContext,
   type InstanceCatalogMutationPort,
+  validateInstanceKey,
   validateInstanceStateInvariant,
 } from "./catalog.js";
 import {
@@ -157,6 +158,7 @@ export interface ManagedResourceProjection {
 
 export interface ManagedInstanceOptions {
   id?: string;
+  key?: string;
   name?: string;
   cwd: string;
   session: RuntimeSession;
@@ -319,6 +321,7 @@ export class ManagedInstance {
 
   private readonly session: RuntimeSession;
   private readonly extensionUi: ExtensionUiBroker;
+  private readonly keyValue: string | undefined;
   private nameValue: string | undefined;
   private cwdValue: string;
   private gitBranchValue: string | undefined;
@@ -411,6 +414,7 @@ export class ManagedInstance {
   private stopPromise: Promise<StopReceipt> | undefined;
 
   get runtimeGeneration(): number { return this.runtimeGenerationValue; }
+  get key(): string | undefined { return this.keyValue; }
   get name(): string | undefined { return this.nameValue; }
   get cwd(): string { return this.cwdValue; }
 
@@ -418,6 +422,8 @@ export class ManagedInstance {
     this.id = options.id ?? randomUUID();
     this.creationOperationId = options.creationOperationId ?? randomUUID();
     this.hostEpoch = options.hostEpoch ?? randomUUID();
+    if (options.key !== undefined) validateInstanceKey(options.key);
+    this.keyValue = options.key;
     this.nameValue = options.name;
     this.cwdValue = options.cwd;
     this.session = options.session;
@@ -500,6 +506,7 @@ export class ManagedInstance {
     const record: CatalogInstanceRecord = {
       id: snapshot.id,
       creationOperationId: snapshot.creationOperationId,
+      ...(snapshot.key === undefined ? {} : { key: snapshot.key }),
       ...(snapshot.name === undefined ? {} : { name: snapshot.name }),
       cwd: snapshot.cwd,
       lifecycle: snapshot.lifecycle,
@@ -673,6 +680,7 @@ export class ManagedInstance {
     return {
       id: this.id,
       creationOperationId: this.creationOperationId,
+      key: this.key,
       name: this.name,
       cwd: this.cwd,
       gitBranch: this.gitBranchValue,

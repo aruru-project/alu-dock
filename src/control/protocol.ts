@@ -47,6 +47,7 @@ export const CONTROL_PROTOCOL_VERSION = 2 as const;
 export const MAX_CONTROL_LINE_BYTES = 1024 * 1024;
 export const MAX_CONTROL_REQUEST_ID_CHARS = 128;
 export const MAX_INSTANCE_ID_CHARS = 128;
+export const MAX_INSTANCE_KEY_CHARS = 128;
 export const MAX_INSTANCE_NAME_CHARS = 256;
 export const MAX_CONTROL_CWD_CHARS = 16_384;
 export const MAX_PROMPT_CHARS = 256_000;
@@ -75,6 +76,7 @@ export const CONTROLLER_DIRECTIVES_CAPABILITY = "extension_ui.controller-directi
 export const GIT_BRANCH_CAPABILITY = "git.branch-footer.v1" as const;
 export const TOOL_RESULT_PRESENTATION_CAPABILITY = "tool-result-presentation.v1" as const;
 export const IMAGE_INPUT_CAPABILITY = "command.images.path.v1" as const;
+export const INSTANCE_KEYS_CAPABILITY = "instance.keys.v1" as const;
 
 export const IMPLEMENTED_CAPABILITIES = [
   "catalog.maintenance.v1",
@@ -91,6 +93,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "extension_ui.v1",
   "host.info",
   "instance.catalog",
+  INSTANCE_KEYS_CAPABILITY,
   "models.v1",
   "projection.completeness.v1",
   "queue.control.v1",
@@ -149,8 +152,10 @@ type Request<T extends string, P> = { kind: "request"; version: 2; requestId: st
 export type ControlRequest =
   | Request<"host.info", Record<string, never>>
   | Request<"instance.create", { operationId: string; cwd: string; name?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
+  | Request<"instance.ensure", { operationId: string; key: string; cwd: string; name?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.adopt", { operationId: string; sessionFile: string; name?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.list", { selector: "actionable" | "all"; cursor?: InstanceListCursor; limit: number }>
+  | Request<"instance.get_by_key", { key: string }>
   | Request<"instance.get", { instanceId: string }>
   | Request<"instance.attach", { instanceId: string; since?: EventCursor; follow: boolean; controller: "claim" | "observe"; replay?: "event_log" | "conversation_bootstrap" }>
   | Request<"instance.stop", { operationId: string; instanceId: string }>
@@ -200,6 +205,8 @@ export interface HostInfoResult {
 }
 export interface PingResult { pid: number; protocolVersion: 2; hostEpoch: string; capabilities: string[] }
 export interface CreateResult { instance: InstanceSnapshot }
+export interface EnsureResult { created: boolean; instance: InstanceSnapshot }
+export interface KeyLookupResult { instance: InstanceSnapshot | null }
 export type AdoptResult = CreateResult;
 export interface InstanceListCursor { revision: number; offset: number; selector: "actionable" | "all" }
 export interface ListResult {
@@ -272,6 +279,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "interaction.respond") return "extension_ui.v1";
   if (type === "instance.reopen") return "session.reopen";
   if (type === "instance.adopt") return "session.adopt.v1";
+  if (type === "instance.ensure" || type === "instance.get_by_key") return INSTANCE_KEYS_CAPABILITY;
   if (type.startsWith("instance.")) return type === "instance.attach" ? "events.follow" : "instance.catalog";
   if (type === "command.abort") return "run.abort.v1";
   if (type === "queue.dequeue") return "queue.control.v1";
@@ -289,7 +297,7 @@ export function requiredCapabilities(capability: Capability): string[] {
   return [...new Set<Capability>([
     "core.v2",
     ...(capability === "events.replay-purpose.v1" ? ["events.follow" as const] : []),
-    ...(capabilityProjectsInstanceSnapshot(capability) ? [TOOLS_EXPANDED_CAPABILITY, GIT_BRANCH_CAPABILITY] : []),
+    ...(capabilityProjectsInstanceSnapshot(capability) ? [TOOLS_EXPANDED_CAPABILITY, GIT_BRANCH_CAPABILITY, INSTANCE_KEYS_CAPABILITY] : []),
     ...(capabilityProjectsToolResults(capability) ? [TOOL_RESULT_PRESENTATION_CAPABILITY] : []),
     capability,
   ])];
@@ -305,6 +313,7 @@ function capabilityProjectsToolResults(capability: Capability): boolean {
 function capabilityProjectsInstanceSnapshot(capability: Capability): boolean {
   return capability === TOOLS_EXPANDED_CAPABILITY
     || capability === GIT_BRANCH_CAPABILITY
+    || capability === INSTANCE_KEYS_CAPABILITY
     || capability === "events.follow"
     || capability === "events.replay-purpose.v1"
     || capability === "instance.catalog"
@@ -419,6 +428,22 @@ export function parseControlRequest(input: unknown): ControlRequest {
       if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
       return { ...base, type, params: { operationId: operationId(), cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"), name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), trustChallengeId, projectTrustDecision } };
     }
+    case "instance.ensure": {
+      exact(params, ["operationId", "key", "cwd", "name", "trustChallengeId", "projectTrustDecision"], "invalid_request");
+      const trustChallengeId = optionalString(params.trustChallengeId, "params.trustChallengeId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
+      const projectTrustDecision = params.projectTrustDecision === undefined ? undefined : enumeration(params.projectTrustDecision, "params.projectTrustDecision", ["trust_once", "trust_and_remember", "deny_once", "deny_and_remember"], "invalid_request");
+      if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
+      const key = string(params.key, "params.key", MAX_INSTANCE_KEY_CHARS, "invalid_request");
+      if (/[\u0000-\u001f\u007f-\u009f]/u.test(key)) throw validation("invalid_request", "params.key must not contain control characters");
+      return { ...base, type, params: {
+        operationId: operationId(),
+        key,
+        cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"),
+        name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"),
+        trustChallengeId,
+        projectTrustDecision,
+      } };
+    }
     case "instance.adopt": {
       exact(params, ["operationId", "sessionFile", "name", "trustChallengeId", "projectTrustDecision"], "invalid_request");
       const trustChallengeId = optionalString(params.trustChallengeId, "params.trustChallengeId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
@@ -437,6 +462,12 @@ export function parseControlRequest(input: unknown): ControlRequest {
       if (cursor && cursor.selector !== selector) throw validation("invalid_request", "params.cursor selector does not match params.selector");
       return { ...base, type, params: { selector, cursor, limit } };
     };
+    case "instance.get_by_key": {
+      exact(params, ["key"], "invalid_request");
+      const key = string(params.key, "params.key", MAX_INSTANCE_KEY_CHARS, "invalid_request");
+      if (/[\u0000-\u001f\u007f-\u009f]/u.test(key)) throw validation("invalid_request", "params.key must not contain control characters");
+      return { ...base, type, params: { key } };
+    }
     case "instance.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "instance.attach": {
       exact(params, ["instanceId", "since", "follow", "controller", "replay"], "invalid_request");
@@ -632,6 +663,14 @@ export function parseHostInfoResult(input: unknown): HostInfoResult {
   return { state: enumeration(value.state, "state", ["ready", "mutation_faulted", "draining"]), host: parseHost(value.host, "host"), catalog: { schemaVersion, revision: unsigned(catalog.revision, "catalog.revision"), lastReconciledAt: timestamp(catalog.lastReconciledAt, "catalog.lastReconciledAt") }, paths: { socket: string(paths.socket, "paths.socket", MAX_CONTROL_CWD_CHARS), state: string(paths.state, "paths.state", MAX_CONTROL_CWD_CHARS) }, diagnostics };
 }
 export function parseCreateResult(input: unknown): CreateResult { const value = object(input, "create result"); exact(value, ["instance"]); return { instance: parseInstance(value.instance, "instance") }; }
+export function parseEnsureResult(input: unknown): EnsureResult {
+  const value = object(input, "ensure result"); exact(value, ["created", "instance"]);
+  return { created: boolean(value.created, "created"), instance: parseInstance(value.instance, "instance") };
+}
+export function parseKeyLookupResult(input: unknown): KeyLookupResult {
+  const value = object(input, "instance key lookup result"); exact(value, ["instance"]);
+  return { instance: value.instance === null ? null : parseInstance(value.instance, "instance") };
+}
 export function parseListResult(input: unknown): ListResult {
   const value = object(input, "list result"); exact(value, ["instances", "page"]);
   const instances = array(value.instances, "instances", MAX_INSTANCE_LIST_ITEMS).map((item, index) => parseInstance(item, `instances[${index}]`));
@@ -1115,9 +1154,9 @@ function parseMetrics(input: unknown, field: string): NonNullable<InstanceSnapsh
   return result;
 }
 function parseInstance(input: unknown, field: string): InstanceSnapshot {
-  const value = object(input, field); exact(value, ["id", "creationOperationId", "name", "cwd", "gitBranch", "lifecycle", "execution", "compacting", "lastRun", "reopenable", "runtimeGeneration", "ownerHostEpoch", "interruption", "pending", "executor", "metrics", "extensionStatus", "toolsExpanded", "activeInteraction", "activeCommandId", "lastError", "createdAt", "updatedAt", "eventCursor"]);
+  const value = object(input, field); exact(value, ["id", "creationOperationId", "key", "name", "cwd", "gitBranch", "lifecycle", "execution", "compacting", "lastRun", "reopenable", "runtimeGeneration", "ownerHostEpoch", "interruption", "pending", "executor", "metrics", "extensionStatus", "toolsExpanded", "activeInteraction", "activeCommandId", "lastError", "createdAt", "updatedAt", "eventCursor"]);
   const snapshot: InstanceSnapshot = {
-    id: id(value.id, `${field}.id`), creationOperationId: id(value.creationOperationId, `${field}.creationOperationId`), name: optionalString(value.name, `${field}.name`, MAX_INSTANCE_NAME_CHARS), cwd: string(value.cwd, `${field}.cwd`, MAX_CONTROL_CWD_CHARS), gitBranch: value.gitBranch === undefined ? undefined : gitBranch(value.gitBranch, `${field}.gitBranch`),
+    id: id(value.id, `${field}.id`), creationOperationId: id(value.creationOperationId, `${field}.creationOperationId`), key: optionalString(value.key, `${field}.key`, MAX_INSTANCE_KEY_CHARS), name: optionalString(value.name, `${field}.name`, MAX_INSTANCE_NAME_CHARS), cwd: string(value.cwd, `${field}.cwd`, MAX_CONTROL_CWD_CHARS), gitBranch: value.gitBranch === undefined ? undefined : gitBranch(value.gitBranch, `${field}.gitBranch`),
     lifecycle: enumeration(value.lifecycle, `${field}.lifecycle`, ["active", "stopping", "stopped", "host_lost", "runtime_error"]), execution: enumeration(value.execution, `${field}.execution`, ["idle", "running", "failed", "unavailable"]), compacting: boolean(value.compacting, `${field}.compacting`), lastRun: enumeration(value.lastRun, `${field}.lastRun`, ["never", "succeeded", "failed", "aborted", "interrupted"]), reopenable: boolean(value.reopenable, `${field}.reopenable`), runtimeGeneration: positive(value.runtimeGeneration, `${field}.runtimeGeneration`), ownerHostEpoch: optionalString(value.ownerHostEpoch, `${field}.ownerHostEpoch`, 128), pending: parsePending(value.pending, `${field}.pending`), executor: parseExecutor(value.executor, `${field}.executor`), metrics: value.metrics === undefined ? undefined : parseMetrics(value.metrics, `${field}.metrics`), extensionStatus: {}, toolsExpanded: boolean(value.toolsExpanded, `${field}.toolsExpanded`), activeCommandId: optionalString(value.activeCommandId, `${field}.activeCommandId`, 128), lastError: optionalString(value.lastError, `${field}.lastError`, MAX_MESSAGE), createdAt: timestamp(value.createdAt, `${field}.createdAt`), updatedAt: timestamp(value.updatedAt, `${field}.updatedAt`), eventCursor: parseCursor(value.eventCursor, `${field}.eventCursor`),
   };
   if (value.interruption !== undefined) { const interruption = object(value.interruption, `${field}.interruption`); exact(interruption, ["reason", "at"]); snapshot.interruption = { reason: enumeration(interruption.reason, "interruption.reason", ["host_crash", "host_shutdown", "replacement_failed"]), at: timestamp(interruption.at, "interruption.at") }; }

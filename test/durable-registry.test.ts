@@ -36,6 +36,7 @@ function createFixtureInstance(
     creationOperationId: input.creationOperationId,
     hostEpoch: input.hostEpoch,
     cwd: input.cwd,
+    key: input.key,
     name: input.name,
     session: runtime,
     initialRuntimeGeneration: input.initialRuntimeGeneration,
@@ -96,6 +97,51 @@ test("startup exposes catalog-only host_lost records and explicit reopen starts 
   assert.equal(reopened.instance.snapshot().execution, "idle");
   assert.equal(reopened.instance.eventsSince().events[0]?.type, "instance.reopened");
   assert.equal(reopened.instance.eventsSince().events[0]?.sequence, 1);
+});
+
+test("concurrent ensure calls for one business key return one durable instance", async () => {
+  const { cwd, catalogPath } = await fixturePath();
+  let factoryCalls = 0;
+  let releaseFactory!: () => void;
+  let signalStarted!: () => void;
+  const factoryGate = new Promise<void>((resolveGate) => { releaseFactory = resolveGate; });
+  const factoryStarted = new Promise<void>((resolveStarted) => { signalStarted = resolveStarted; });
+  const registry = new DockRegistry(
+    async (input) => {
+      factoryCalls += 1;
+      signalStarted();
+      await factoryGate;
+      return createFixtureInstance(input, []);
+    },
+    () => "dock-alu",
+    { hostEpoch: "ensure-host", startedAt: "2026-07-15T01:00:00.000Z", catalogStore: new FileCatalogStore(catalogPath) },
+  );
+  await registry.initializeCatalog();
+
+  const first = registry.ensure({ operationId: "ensure-first", key: "alu", cwd });
+  await factoryStarted;
+  const second = registry.ensure({ operationId: "ensure-second", key: "alu", cwd });
+  releaseFactory();
+
+  const [created, existing] = await Promise.all([first, second]);
+  assert.equal(created.created, true);
+  assert.equal(existing.created, false);
+  assert.equal(created.instance.id, "dock-alu");
+  assert.equal(existing.instance.id, created.instance.id);
+  assert.equal(existing.instance.key, "alu");
+  assert.equal(factoryCalls, 1);
+
+  const restarted = new DockRegistry(
+    async (input) => createFixtureInstance(input, []),
+    () => "must-not-create",
+    { hostEpoch: "ensure-restart", startedAt: "2026-07-15T02:00:00.000Z", catalogStore: new FileCatalogStore(catalogPath) },
+  );
+  await restarted.initializeCatalog();
+  const recovered = await restarted.ensure({ operationId: "ensure-after-restart", key: "alu", cwd });
+  assert.equal(recovered.created, false);
+  assert.equal(recovered.instance.id, "dock-alu");
+  assert.equal(recovered.instance.key, "alu");
+  assert.equal(recovered.instance.lifecycle, "host_lost");
 });
 
 test("concurrent reopen operations admit only one runtime candidate", async () => {

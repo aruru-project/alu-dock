@@ -17,6 +17,7 @@ import {
   EXTENSION_WIDGET_CAPABILITY,
   CONTROLLER_DIRECTIVES_CAPABILITY,
   IMAGE_INPUT_CAPABILITY,
+  INSTANCE_KEYS_CAPABILITY,
   type Capability,
   type ClientHello,
   type ControlRequest,
@@ -26,12 +27,14 @@ import {
   parseControlEventEnvelope,
   parseControlResponse,
   parseCreateResult,
+  parseEnsureResult,
   parseEventsResult,
   parseForgetResult,
   parseHelloReply,
   parseHostInfoResult,
   parseHistoryResult,
   parseInteractionRespondResult,
+  parseKeyLookupResult,
   parseWidgetViewportResult,
   requiredCapabilities,
   parseListResult,
@@ -62,6 +65,7 @@ import {
   type AdoptResult,
   type ModelConfigurationResult,
   type ThinkingConfigurationResult,
+  type EnsureResult,
   type EventsResult,
   type ForgetResult,
   type HelloAck,
@@ -70,6 +74,7 @@ import {
   type InteractionRespondResult,
   type WidgetViewportResult,
   type InstanceListCursor,
+  type KeyLookupResult,
   type ListResult,
   type ModelsResult,
   type PingResult,
@@ -99,7 +104,7 @@ type Params<T extends ControlRequest["type"]> = Extract<ControlRequest,{type:T}>
 type Parser<T>=(input:unknown)=>T;
 const MAX_PENDING_STREAM_EVENTS=1_000;
 const LONG_MUTATION_TYPES = new Set<ControlRequest["type"]>([
-  "instance.create", "instance.adopt", "instance.reopen", "instance.stop",
+  "instance.create", "instance.ensure", "instance.adopt", "instance.reopen", "instance.stop",
   "command.abort", "session.switch", "session.new", "session.compact", "session.reload",
   "session.navigate", "session.fork", "session.clone",
 ]);
@@ -125,6 +130,8 @@ export class DockClient {
   async hostInfo():Promise<HostInfoResult>{return this.request("host.info",{},"host.info",parseHostInfoResult);}
   async ping():Promise<PingResult>{let negotiated:string[]=[];const info=await this.request("host.info",{},"host.info",parseHostInfoResult,(ack)=>{negotiated=[...ack.capabilities];});return {pid:info.host.pid,protocolVersion:2,hostEpoch:info.host.hostEpoch,capabilities:negotiated};}
   async create(cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<InstanceSnapshot>{const result=await this.request("instance.create",{operationId,cwd,name,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"instance.catalog",parseCreateResult);return result.instance;}
+  ensure(key:string,cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<EnsureResult>{return this.request("instance.ensure",{operationId,key,cwd,name,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},INSTANCE_KEYS_CAPABILITY,parseEnsureResult);}
+  async getByKey(key:string):Promise<InstanceSnapshot|undefined>{const result:KeyLookupResult=await this.request("instance.get_by_key",{key},INSTANCE_KEYS_CAPABILITY,parseKeyLookupResult);return result.instance??undefined;}
   adopt(sessionFile:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<AdoptResult>{return this.request("instance.adopt",{operationId,sessionFile,name,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.adopt.v1",parseCreateResult);}
   async list(selector: "actionable" | "all" = "all"): Promise<InstanceSnapshot[]> {
     const instances: InstanceSnapshot[] = [];
@@ -159,7 +166,7 @@ export class DockClient {
       if (!(error instanceof ControlClientError)
         || (error.code !== "capability_missing"
           && (error.code !== "protocol_incompatible"
-            || (![TOOLS_EXPANDED_CAPABILITY, GIT_BRANCH_CAPABILITY].some((capability) => error.message.includes(capability)))))) throw error;
+            || (![TOOLS_EXPANDED_CAPABILITY, GIT_BRANCH_CAPABILITY, INSTANCE_KEYS_CAPABILITY].some((capability) => error.message.includes(capability)))))) throw error;
       // Safe read-only bridge used by staged releases to inspect the previous
       // Host before apply. No request was sent when capability negotiation failed.
       return this.request("instance.list", params, "instance.catalog", parseLegacyListResult, undefined, this.timeoutFor("instance.list"), true);
@@ -202,7 +209,7 @@ export class DockClient {
   async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;claimController?:boolean;conversationBootstrap?:boolean}):Promise<EventSubscription>{
     const since=options.since;const helloId=this.createRequestId(),requestId=this.createRequestId();
     const replay = options.conversationBootstrap ? "conversation_bootstrap" : since === undefined ? undefined : "event_log";
-    const streamCapabilities:string[]=options.requireTuiProjection?["core.v2",TOOLS_EXPANDED_CAPABILITY,EXTENSION_WIDGET_CAPABILITY,GIT_BRANCH_CAPABILITY,TOOL_RESULT_PRESENTATION_CAPABILITY,IMAGE_INPUT_CAPABILITY,"events.follow","queue.control.v1","run.abort.v1","tui.projection.v1"]:requiredCapabilities("events.follow");
+    const streamCapabilities:string[]=options.requireTuiProjection?["core.v2",TOOLS_EXPANDED_CAPABILITY,EXTENSION_WIDGET_CAPABILITY,GIT_BRANCH_CAPABILITY,INSTANCE_KEYS_CAPABILITY,TOOL_RESULT_PRESENTATION_CAPABILITY,IMAGE_INPUT_CAPABILITY,"events.follow","queue.control.v1","run.abort.v1","tui.projection.v1"]:requiredCapabilities("events.follow");
     if(!streamCapabilities.includes(IMAGE_INPUT_CAPABILITY))streamCapabilities.push(IMAGE_INPUT_CAPABILITY);
     if(replay!==undefined&&!streamCapabilities.includes("events.replay-purpose.v1"))streamCapabilities.push("events.replay-purpose.v1");
     if(options.claimController){
@@ -240,7 +247,7 @@ export class DockClient {
   private request<TType extends ControlRequest["type"],T>(type:TType,params:Params<TType>,capability:Capability|readonly Capability[],parse:Parser<T>,onHello?:(ack:HelloAck)=>void,requestTimeoutMs=this.timeoutFor(type),legacySnapshotCompatibility=false):Promise<T>{
     const helloId=this.createRequestId();
     const requestCapabilities=[...new Set((Array.isArray(capability)?capability:[capability]).flatMap((item)=>requiredCapabilities(item)))]
-      .filter((item) => !legacySnapshotCompatibility || (item !== TOOLS_EXPANDED_CAPABILITY && item !== GIT_BRANCH_CAPABILITY));
+      .filter((item) => !legacySnapshotCompatibility || (item !== TOOLS_EXPANDED_CAPABILITY && item !== GIT_BRANCH_CAPABILITY && item !== INSTANCE_KEYS_CAPABILITY));
     const requestId=this.createRequestId();
     const request={kind:"request",version:2,requestId,type,params} as Extract<ControlRequest,{type:TType}>;
     const operationId = "operationId" in params && typeof params.operationId === "string" ? params.operationId : undefined;
@@ -335,6 +342,10 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
   if(Array.isArray(record.instances))snapshots.push(...record.instances as InstanceSnapshot[]);
   for(const snapshot of snapshots){if((snapshot.lifecycle==="active"||snapshot.lifecycle==="stopping")&&snapshot.ownerHostEpoch!==hostEpoch)throw new ProtocolValidationError("invalid_response","Instance owner does not match negotiated Host epoch");}
   if("instanceId" in params&&typeof params.instanceId==="string"&&snapshots[0]&&snapshots[0].id!==params.instanceId)throw new ProtocolValidationError("invalid_response","Result instance does not match request instanceId");
+  if(type==="instance.ensure"||type==="instance.get_by_key"){
+    const requested=params as Extract<ControlRequest,{type:"instance.ensure"|"instance.get_by_key"}>["params"];
+    if(snapshots[0]&&snapshots[0].key!==requested.key)throw new ProtocolValidationError("invalid_response","Result does not match requested instance key");
+  }
   if(type==="instance.attach"){
     const page=record.page as {earliest?:EventCursor;latest?:EventCursor}|undefined;
     if(!page||page.earliest?.hostEpoch!==hostEpoch||page.latest?.hostEpoch!==hostEpoch)throw new ProtocolValidationError("invalid_response","Attach cursors do not match negotiated Host epoch");

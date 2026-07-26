@@ -72,6 +72,7 @@ import {
   ProtocolValidationError,
   GIT_BRANCH_CAPABILITY,
   IMAGE_INPUT_CAPABILITY,
+  INSTANCE_KEYS_CAPABILITY,
   CONTROLLER_DIRECTIVES_CAPABILITY,
   TOOL_RESULT_PRESENTATION_CAPABILITY,
   TOOLS_EXPANDED_CAPABILITY,
@@ -424,6 +425,17 @@ export class DockHost {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=await this.registry.create({operationId:request.params.operationId,cwd:request.params.cwd,name:request.params.name,trustChallengeId:request.params.trustChallengeId,projectTrustDecision:request.params.projectTrustDecision});return {instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
+      case "instance.ensure": {
+        const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, () => this.registry.ensure({
+          operationId: request.params.operationId,
+          key: request.params.key,
+          cwd: request.params.cwd,
+          name: request.params.name,
+          trustChallengeId: request.params.trustChallengeId,
+          projectTrustDecision: request.params.projectTrustDecision,
+        }));
+        this.sendSuccessAndEnd(socket, request.requestId, result); return;
+      }
       case "instance.adopt": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=await this.registry.adopt({operationId:request.params.operationId,sessionFile:request.params.sessionFile,name:request.params.name,trustChallengeId:request.params.trustChallengeId,projectTrustDecision:request.params.projectTrustDecision});return {instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
@@ -432,6 +444,7 @@ export class DockHost {
         ...request.params,
         maxBytes: MAX_INSTANCE_LIST_RESULT_BYTES,
       })); return;
+      case "instance.get_by_key": this.sendSuccessAndEnd(socket,request.requestId,{instance:this.registry.getSnapshotByKey(request.params.key)??null}); return;
       case "instance.get": this.sendSuccessAndEnd(socket,request.requestId,{instance:this.registry.getSnapshot(request.params.instanceId)}); return;
       case "instance.attach": await this.attachEventStream(request,socket,setEventUnsubscribe); return;
       case "instance.forget": {
@@ -558,6 +571,7 @@ export class DockHost {
     const projectionCapabilities:ClientProjectionCapabilities={
       toolsExpanded: requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,
       gitBranch: requirements?.has(GIT_BRANCH_CAPABILITY)===true,
+      instanceKeys: requirements?.has(INSTANCE_KEYS_CAPABILITY)===true,
       toolPresentation: requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,
       images: requirements?.has(IMAGE_INPUT_CAPABILITY)===true,
       controllerDirectives: requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true,
@@ -711,7 +725,7 @@ export class DockHost {
     for (const socket of streams) socket.destroy();
   }
 
-  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const requirements=this.connectionRequirements.get(socket);const projected=projectForClient(result,{toolsExpanded:requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,gitBranch:requirements?.has(GIT_BRANCH_CAPABILITY)===true,toolPresentation:requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,images:requirements?.has(IMAGE_INPUT_CAPABILITY)===true,controllerDirectives:requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true});const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,projected));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
+  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const requirements=this.connectionRequirements.get(socket);const projected=projectForClient(result,{toolsExpanded:requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,gitBranch:requirements?.has(GIT_BRANCH_CAPABILITY)===true,instanceKeys:requirements?.has(INSTANCE_KEYS_CAPABILITY)===true,toolPresentation:requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,images:requirements?.has(IMAGE_INPUT_CAPABILITY)===true,controllerDirectives:requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true});const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,projected));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
   private sendErrorAndEnd(socket:Socket,code:string,message:string,requestId:string,details?:JsonObject,retryable=false):void { if(socket.destroyed||socket.writableEnded)return;const response:ControlResponse={kind:"response",version:2,requestId,hostEpoch:this.hostEpoch,ok:false,error:{code,message:truncateMessage(message),retryable,...(details===undefined?{}:{details})}};if(endEnvelope(socket,response)==="too_large")socket.destroy(); }
   private sendHelloError(socket:Socket,requestId:string,code:HelloError["error"]["code"],message:string,details:{hostVersions?:number[];missing?:string[];retryAfterMs?:number}={}):void { if(socket.destroyed||socket.writableEnded)return;const envelope:HelloError={kind:"hello_error",requestId,error:{code,message:truncateMessage(message),...details}};try{socket.end(encodeJsonLine(envelope));}catch{socket.destroy();} }
 }
@@ -724,6 +738,7 @@ function mutationOperationId(request: ControlRequest): string | undefined {
 function isMutationRequest(type: ControlRequest["type"]): boolean {
   return type !== "host.info"
     && type !== "instance.list"
+    && type !== "instance.get_by_key"
     && type !== "instance.get"
     && type !== "instance.attach"
     && type !== "extension.widget_viewport.set"
@@ -841,6 +856,7 @@ function createBoundedEventsResult(projection:AttachProjection,following:boolean
 interface ClientProjectionCapabilities {
   toolsExpanded: boolean;
   gitBranch: boolean;
+  instanceKeys: boolean;
   toolPresentation: boolean;
   images: boolean;
   controllerDirectives: boolean;
@@ -896,6 +912,7 @@ function projectForClient(
   for (const [key, child] of Object.entries(source)) {
     if (isSnapshot && key === "toolsExpanded" && !capabilities.toolsExpanded) continue;
     if (isSnapshot && key === "gitBranch" && !capabilities.gitBranch) continue;
+    if (isSnapshot && key === "key" && !capabilities.instanceKeys) continue;
     if (isAttachProjection && key === "controller" && !capabilities.controllerDirectives && child !== null && typeof child === "object" && !Array.isArray(child)) {
       const legacyController = { ...(child as Record<string, unknown>) };
       delete legacyController.controllerId;

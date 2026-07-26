@@ -170,6 +170,7 @@ export interface EventCursor {
 export interface InstanceSnapshot {
   id: string;
   creationOperationId: string;
+  key?: string;
   name?: string;
   cwd: string;
   gitBranch?: string;

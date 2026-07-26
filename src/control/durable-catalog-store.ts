@@ -138,7 +138,7 @@ export function parseCatalogProjection(input: unknown): CatalogProjection {
 function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecord {
   const value = object(input, field);
   exact(value, [
-    "id", "creationOperationId", "name", "cwd", "lifecycle", "execution", "lastRun",
+    "id", "creationOperationId", "key", "name", "cwd", "lifecycle", "execution", "lastRun",
     "runtimeGeneration", "ownerHostEpoch", "piSessionId", "sessionFile", "model",
     "thinkingLevel", "activeCommandId", "admissionPending", "admissionOperationId",
     "pendingCount", "replacement", "recoverySessionFile", "lastKnown", "interruption",
@@ -156,6 +156,7 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
   const record: CatalogInstanceRecord = {
     id: text(value.id, `${field}.id`, 128),
     creationOperationId: text(value.creationOperationId, `${field}.creationOperationId`, 128),
+    ...(value.key === undefined ? {} : { key: text(value.key, `${field}.key`, 128) }),
     ...(value.name === undefined ? {} : { name: text(value.name, `${field}.name`, 256) }),
     cwd: text(value.cwd, `${field}.cwd`, 16_384),
     lifecycle: enumeration(value.lifecycle, `${field}.lifecycle`, ["active", "stopping", "stopped", "host_lost", "runtime_error"]),
