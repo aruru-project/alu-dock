@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import { resolve } from "node:path";
-import { containsBinaryPayload, type InteractionResponse } from "../core/extension-ui-broker.js";
+import type { InteractionResponse } from "../core/extension-ui-broker.js";
 import type { DeliveryMode, DockEvent, EventCursor, ImagePathDto, InstanceSnapshot } from "../core/managed-instance.js";
 import type { RuntimeThinkingLevel } from "../core/runtime-session.js";
 import type { SettingUpdate } from "../core/config-projection.js";
@@ -19,6 +19,7 @@ import {
   PERSISTENT_INTERACTIONS_CAPABILITY,
   IMAGE_INPUT_CAPABILITY,
   INSTANCE_KEYS_CAPABILITY,
+  CONVERSATION_CONTENT_CAPABILITY,
   type Capability,
   type ClientHello,
   type ControlRequest,
@@ -34,6 +35,8 @@ import {
   parseHelloReply,
   parseHostInfoResult,
   parseHistoryResult,
+  parseConversationHistoryResult,
+  parseConversationContentResult,
   parseInteractionRespondResult,
   parseKeyLookupResult,
   parseWidgetViewportResult,
@@ -72,6 +75,8 @@ import {
   type HelloAck,
   type HostInfoResult,
   type HistoryResult,
+  type ConversationHistoryResult,
+  type ConversationContentResult,
   type InteractionRespondResult,
   type WidgetViewportResult,
   type InstanceListCursor,
@@ -179,7 +184,7 @@ export class DockClient {
   reopen(instanceId:string,operationId=this.createRequestId(),sessionFile?:string,trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<ReopenResult>{return this.request("instance.reopen",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.reopen",parseReopenResult);}
   events(instanceId:string,since?:EventCursor):Promise<EventsResult>{return this.request("instance.attach",{instanceId,since,follow:false,controller:"observe",replay:"event_log"},["events.replay-purpose.v1",IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY],parseEventsResult);}
   prompt(instanceId:string,message:string,delivery:DeliveryMode="auto",operationId=this.createRequestId(),images?:ImagePathDto[]):Promise<PromptResult>{return this.request("command.submit",{operationId,instanceId,message,...(images===undefined?{}:{images}),delivery},images===undefined?"session.core":["session.core",IMAGE_INPUT_CAPABILITY],parsePromptResult);}
-  respondInteraction(instanceId:string,leaseToken:string,interactionId:string,response:InteractionResponse,operationId=this.createRequestId()):Promise<InteractionRespondResult>{if("value" in response){const limit=response.method==="select"?8_000:256_000;if(response.value.length>limit)return Promise.reject(new ControlClientError("invalid_request",`Interaction ${response.method} response exceeds ${limit} characters`,operationId));if(containsBinaryPayload(response.value))return Promise.reject(new ControlClientError("invalid_request","Interaction responses cannot contain binary, image, data URI, or raw base64 payloads",operationId));}return this.request("interaction.respond",{operationId,instanceId,leaseToken,interactionId,response},["extension_ui.v1",PERSISTENT_INTERACTIONS_CAPABILITY],parseInteractionRespondResult);}
+  respondInteraction(instanceId:string,leaseToken:string,interactionId:string,response:InteractionResponse,operationId=this.createRequestId()):Promise<InteractionRespondResult>{if("value" in response){const limit=response.method==="select"?8_000:256_000;if(response.value.length>limit)return Promise.reject(new ControlClientError("invalid_request",`Interaction ${response.method} response exceeds ${limit} characters`,operationId));}return this.request("interaction.respond",{operationId,instanceId,leaseToken,interactionId,response},["extension_ui.v1",PERSISTENT_INTERACTIONS_CAPABILITY],parseInteractionRespondResult);}
   setToolsExpanded(instanceId:string,expectedRuntimeGeneration:number,expanded:boolean,operationId=this.createRequestId()):Promise<{instance:InstanceSnapshot}>{return this.request("extension.tools_expanded.set",{operationId,instanceId,expectedRuntimeGeneration,expanded},TOOLS_EXPANDED_CAPABILITY,parseStatusResult);}
   setExtensionWidgetViewport(instanceId:string,leaseToken:string,expectedRuntimeGeneration:number,width:number,height:number):Promise<WidgetViewportResult>{return this.request("extension.widget_viewport.set",{instanceId,leaseToken,expectedRuntimeGeneration,width,height},EXTENSION_WIDGET_CAPABILITY,parseWidgetViewportResult);}
   abort(instanceId:string,operationId=this.createRequestId()):Promise<AbortResult>{return this.request("command.abort",{operationId,instanceId},"run.abort.v1",parseAbortResult,undefined,this.longMutationTimeoutMs);}
@@ -194,6 +199,8 @@ export class DockClient {
   resources(instanceId:string):Promise<ResourcesResult>{return this.request("resource.get",{instanceId},["resources.v1","projection.completeness.v1"],parseResourcesResult);}
   commands(instanceId:string,prefix?:string):Promise<CommandsResult>{return this.request("command.catalog",{instanceId,prefix},["resources.v1","projection.completeness.v1"],parseCommandsResult);}
   history(instanceId:string,beforeEntryId?:string,limit=200):Promise<HistoryResult>{return this.request("session.history",{instanceId,beforeEntryId,limit},["tui.projection.v1",IMAGE_INPUT_CAPABILITY],parseHistoryResult);}
+  async conversationHistory(instanceId:string,cursor?:string,limit=50):Promise<ConversationHistoryResult>{const result=await this.request("conversation.history",{instanceId,cursor,limit},CONVERSATION_CONTENT_CAPABILITY,parseConversationHistoryResult);if(result.instance.id!==instanceId)throw new ControlClientError("invalid_response","Conversation history result belongs to another instance");return result;}
+  async conversationContent(instanceId:string,contentRef:string,cursor?:string):Promise<ConversationContentResult>{const result=await this.request("conversation.content",{instanceId,contentRef,cursor},CONVERSATION_CONTENT_CAPABILITY,parseConversationContentResult);if(result.instanceId!==instanceId||result.contentRef!==contentRef)throw new ControlClientError("invalid_response","Conversation content result belongs to another request");return result;}
   sessionInventory(cwd:string,scope:"cwd"|"all"="cwd"):Promise<SessionInventoryResult>{return this.request("session.inventory",{cwd,scope},["session.inventory.v1","session.inventory-diagnostics.v1"],parseSessionInventoryResult);}
   sessions(instanceId:string,scope:"cwd"|"all"):Promise<SessionsResult>{return this.request("session.list",{instanceId,scope},["session.core","projection.completeness.v1"],parseSessionsResult);}
   switchSession(instanceId:string,sessionFile:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<SessionReplacementResult>{return this.request("session.switch",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.commands.v1",parseSessionReplacementResult);}

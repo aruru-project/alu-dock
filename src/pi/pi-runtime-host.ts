@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, realpathSync } from "node:fs";
 import { open, realpath } from "node:fs/promises";
 import { basename, resolve } from "node:path";
@@ -33,12 +34,16 @@ import { projectBuiltInToolPresentation } from "../core/tool-result-presentation
 import type { PiExtensionUiPort } from "./pi-extension-ui-adapter.js";
 import {
   RuntimeCompactionKnownFailureError,
+  RuntimeConversationCursorError,
   RuntimeQueueEffectUnknownError,
   RuntimeQueueRejectedBeforeEffectError,
 } from "../core/runtime-session.js";
 import type {
   ClearedRuntimeQueue,
   RuntimeCompactionResult,
+  RuntimeConversationContentChunk,
+  RuntimeConversationContentPage,
+  RuntimeConversationHistoryPage,
   RuntimeEvent,
   RuntimeForkResult,
   RuntimeHistoryEntry,
@@ -181,6 +186,10 @@ export class PiRuntimeHost implements RuntimeSession {
   private initialActivated = false;
   private queueUpdateSequence = 0;
   private processCwdValue: string | undefined;
+  private conversationRevisionValue: string | undefined;
+  private conversationScope = randomUUID();
+  private readonly conversationHistoryCursors = new Map<string, { revision: string; end: number }>();
+  private readonly conversationContentCursors = new Map<string, { revision: string; contentRef: string; blockIndex: number; offset: number }>();
 
   private constructor(private readonly options: PiRuntimeHostOptions) {
     this.processCwdValue = options.initialProcessCwd;
@@ -463,10 +472,122 @@ export class PiRuntimeHost implements RuntimeSession {
   }
 
   getHistory(): RuntimeHistoryEntry[] {
+    return this.conversationEntries().map(({ projected }) => projected);
+  }
+
+  async getConversationHistory(cursor?: string, limit = 50): Promise<RuntimeConversationHistoryPage> {
+    const state = this.conversationState();
+    const boundedLimit = Math.max(1, Math.min(200, Math.floor(limit)));
+    let end = state.entries.length;
+    if (cursor !== undefined) {
+      const continuation = this.conversationHistoryCursors.get(cursor);
+      if (!continuation || continuation.revision !== state.revision) throw new RuntimeConversationCursorError("Conversation history cursor is stale");
+      end = continuation.end;
+    }
+    const start = Math.max(0, end - boundedLimit);
+    const entries = state.entries.slice(start, end).map(({ source, projected }) => ({
+      entry: projected,
+      contentRef: conversationContentRef(state.revision, source.id),
+      contentComplete: conversationPreviewIsComplete(source, projected),
+      totalBlocks: conversationBlockCount(source),
+    }));
+    if (start === 0) return { revision: state.revision, entries, hasEarlier: false };
+    const nextCursor = randomUUID();
+    this.conversationHistoryCursors.set(nextCursor, { revision: state.revision, end: start });
+    trimTokenMap(this.conversationHistoryCursors);
+    return { revision: state.revision, entries, hasEarlier: true, nextCursor };
+  }
+
+  async getConversationContent(contentRef: string, cursor?: string): Promise<RuntimeConversationContentPage> {
+    const state = this.conversationState();
+    let blockIndex = 0;
+    let offset = 0;
+    if (cursor !== undefined) {
+      const continuation = this.conversationContentCursors.get(cursor);
+      if (!continuation || continuation.revision !== state.revision || continuation.contentRef !== contentRef) {
+        throw new RuntimeConversationCursorError("Conversation content cursor is stale");
+      }
+      blockIndex = continuation.blockIndex;
+      offset = continuation.offset;
+    }
+    const selected = state.entries.find(({ source }) => conversationContentRef(state.revision, source.id) === contentRef);
+    if (!selected) throw new RuntimeConversationCursorError("Conversation content reference is stale");
+    const blocks = conversationContentBlocks(selected.source, selected.projected);
+    const chunks: RuntimeConversationContentChunk[] = [];
+    let chars = 0;
+    while (blockIndex < blocks.length && chunks.length < 64 && chars < 64_000) {
+      const block = blocks[blockIndex]!;
+      if (block.type === "text" || block.type === "thinking") {
+        const remaining = Math.max(1, 64_000 - chars);
+        const end = unicodeSafeEnd(block.text, Math.min(block.text.length, offset + Math.min(32_000, remaining)));
+        const text = block.text.slice(offset, end);
+        const blockComplete = end >= block.text.length;
+        chunks.push({ blockIndex, type: block.type, text, offset, blockComplete });
+        chars += text.length;
+        if (blockComplete) { blockIndex += 1; offset = 0; } else { offset = end; break; }
+      } else if (block.type === "image") {
+        const remaining = Math.max(1, 64_000 - chars);
+        const end = unicodeSafeEnd(block.data, Math.min(block.data.length, offset + Math.min(32_000, remaining)));
+        const data = block.data.slice(offset, end);
+        const blockComplete = end >= block.data.length;
+        chunks.push({ ...block, blockIndex, data, offset, blockComplete });
+        chars += data.length;
+        if (blockComplete) { blockIndex += 1; offset = 0; } else { offset = end; break; }
+      } else if (block.type === "tool_call") {
+        const remaining = Math.max(1, 64_000 - chars);
+        const end = unicodeSafeEnd(block.argumentsJson, Math.min(block.argumentsJson.length, offset + Math.min(32_000, remaining)));
+        const argumentsJson = block.argumentsJson.slice(offset, end);
+        const blockComplete = end >= block.argumentsJson.length;
+        chunks.push({ ...block, blockIndex, argumentsJson, offset, blockComplete });
+        chars += argumentsJson.length;
+        if (blockComplete) { blockIndex += 1; offset = 0; } else { offset = end; break; }
+      } else if (block.type === "tool_result") {
+        const remaining = Math.max(1, 64_000 - chars);
+        const end = unicodeSafeEnd(block.text, Math.min(block.text.length, offset + Math.min(32_000, remaining)));
+        const text = block.text.slice(offset, end);
+        const blockComplete = end >= block.text.length;
+        chunks.push({ ...block, blockIndex, text, offset, blockComplete });
+        chars += text.length;
+        if (blockComplete) { blockIndex += 1; offset = 0; } else { offset = end; break; }
+      } else {
+        chunks.push({ ...block, blockIndex } as RuntimeConversationContentChunk);
+        blockIndex += 1;
+        offset = 0;
+      }
+    }
+    if (blockIndex >= blocks.length) return { revision: state.revision, contentRef, chunks, complete: true };
+    const nextCursor = randomUUID();
+    this.conversationContentCursors.set(nextCursor, { revision: state.revision, contentRef, blockIndex, offset });
+    trimTokenMap(this.conversationContentCursors);
+    return { revision: state.revision, contentRef, chunks, complete: false, nextCursor };
+  }
+
+  private conversationEntries(): Array<{ source: SessionEntry; projected: RuntimeHistoryEntry }> {
     const branch = this.requireActive().session.sessionManager.getBranch();
-    return buildContextEntries(branch)
-      .map(projectHistoryEntry)
-      .filter((entry): entry is RuntimeHistoryEntry => entry !== undefined);
+    return buildContextEntries(branch).flatMap((source) => {
+      const projected = projectHistoryEntry(source);
+      return projected === undefined ? [] : [{ source, projected }];
+    });
+  }
+
+  private conversationState(): { revision: string; entries: Array<{ source: SessionEntry; projected: RuntimeHistoryEntry }> } {
+    const entries = this.conversationEntries();
+    const manager = this.requireActive().session.sessionManager;
+    const revision = createHash("sha256")
+      .update(this.conversationScope)
+      .update("\u0000")
+      .update(manager.getSessionId())
+      .update("\u0000")
+      .update(manager.getLeafId() ?? "")
+      .update("\u0000")
+      .update(entries.map(({ source }) => source.id).join("\u0000"))
+      .digest("hex");
+    if (revision !== this.conversationRevisionValue) {
+      this.conversationRevisionValue = revision;
+      this.conversationHistoryCursors.clear();
+      this.conversationContentCursors.clear();
+    }
+    return { revision, entries };
   }
 
   getTree(): RuntimeTreeSnapshot {
@@ -804,9 +925,10 @@ export class PiRuntimeHost implements RuntimeSession {
     const binding: Binding = { token, session, services: this.options.runtime.services, cwd: this.options.runtime.services.cwd, unsubscribe: () => {}, buffered: [], bufferEvents: true };
     binding.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
       if (!token.active) return;
-      const projected = projectAgentSessionEvent(event);
-      if (this.active === binding && !binding.bufferEvents) this.publish(projected);
-      else binding.buffered.push(projected);
+      for (const projected of projectAgentSessionEvents(event)) {
+        if (this.active === binding && !binding.bufferEvents) this.publish(projected);
+        else binding.buffered.push(projected);
+      }
     });
     this.staged = binding;
     const previousProcessCwd = this.processCwdValue;
@@ -882,6 +1004,10 @@ export class PiRuntimeHost implements RuntimeSession {
   }
 
   private invalidateBindingsSynchronously(): void {
+    this.conversationScope = randomUUID();
+    this.conversationRevisionValue = undefined;
+    this.conversationHistoryCursors.clear();
+    this.conversationContentCursors.clear();
     for (const binding of [this.active, this.staged]) {
       if (!binding) continue;
       binding.token.active = false;
@@ -920,8 +1046,6 @@ export class PiRuntimeHost implements RuntimeSession {
 
 const MAX_PROJECTION_ITEMS = 2_000;
 const MAX_TOOL_PROJECTION_BYTES = 600_000;
-const DATA_URI = /data:[^,]*;base64,/i;
-const RAW_BASE64 = /^(?:[A-Za-z0-9+/]{4}){32,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 function boundedString(value: unknown, limit: number, fallback: string): string {
   if (typeof value !== "string" || value.length === 0) return fallback;
@@ -1000,20 +1124,33 @@ async function loadPiImages(images: readonly RuntimeImagePath[] | undefined): Pr
 }
 
 function safeOptionalText(value: unknown, limit: number): string | undefined {
-  if (typeof value !== "string" || value.length === 0 || containsBinaryText(value)) return undefined;
+  if (typeof value !== "string" || value.length === 0) return undefined;
   return boundedString(value, limit, "");
-}
-
-function containsBinaryText(value: string): boolean {
-  if (DATA_URI.test(value) || RAW_BASE64.test(value.replace(/\s+/gu, ""))) return true;
-  return value.split(/[^A-Za-z0-9+/=]+/gu).some((part) => RAW_BASE64.test(part));
 }
 
 function safeRequiredText(value: unknown, limit: number, fallback: string): string {
   return safeOptionalText(value, limit) ?? fallback;
 }
 
-function projectAgentSessionEvent(event: AgentSessionEvent): RuntimeEvent {
+function projectAgentSessionEvents(event: AgentSessionEvent): RuntimeEvent[] {
+  const source = event as unknown as Record<string, unknown>;
+  if (source.type === "agent_message_delta" && isRecord(source.assistantMessageEvent)) {
+    const update = source.assistantMessageEvent;
+    if ((update.type === "text_delta" || update.type === "thinking_delta") && typeof update.delta === "string" && update.delta.length > 8_000) {
+      const projected: RuntimeEvent[] = [];
+      let offset = 0;
+      while (offset < update.delta.length) {
+        const end = unicodeSafeEnd(update.delta, Math.min(update.delta.length, offset + 8_000));
+        projected.push(projectAgentSessionEvent({ ...source, assistantMessageEvent: { ...update, delta: update.delta.slice(offset, end) } }));
+        offset = end;
+      }
+      return projected;
+    }
+  }
+  return [projectAgentSessionEvent(source)];
+}
+
+function projectAgentSessionEvent(event: AgentSessionEvent | Record<string, unknown>): RuntimeEvent {
   const source = event as unknown as Record<string, unknown>;
   const type = typeof source.type === "string" ? source.type : "unknown";
   if (type === "agent_end") return { type, willRetry: source.willRetry === true };
@@ -1087,12 +1224,12 @@ function projectAssistantMessageEvent(update: Record<string, unknown>): Record<s
 }
 
 function projectPrivateContent(content: unknown): unknown {
-  if (typeof content === "string") return safeRequiredText(content, 256_000, "Sensitive content omitted");
+  if (typeof content === "string") return safeRequiredText(content, 256_000, "Content unavailable");
   if (!Array.isArray(content)) return [];
   const blocks: Record<string, unknown>[] = [];
   for (const item of content.slice(0, 200)) {
     if (!isRecord(item)) continue;
-    if (item.type === "text") blocks.push({ type: "text", text: item.text === "" ? "" : safeRequiredText(item.text, 8_000, "Sensitive content omitted") });
+    if (item.type === "text") blocks.push({ type: "text", text: item.text === "" ? "" : safeRequiredText(item.text, 8_000, "Content unavailable") });
     else if (item.type === "thinking") blocks.push({ type: "thinking", thinking: safeRequiredText(item.thinking, 8_000, "Sensitive thinking omitted") });
     else if (item.type === "toolCall" || item.type === "tool_call") blocks.push(projectPrivateToolCall(item));
     else if (item.type === "image") blocks.push({ type: "image", mimeType: safeImageMimeType(item.mimeType) });
@@ -1183,6 +1320,104 @@ function projectHistoryEntry(entry: SessionEntry): RuntimeHistoryEntry | undefin
   if (entry.type === "branch_summary") return { ...base, role: "system", summaryKind: "branch", content: entry.summary };
   if (entry.type === "session_info" && entry.name) return { ...base, role: "system", content: `Session named ${entry.name}` };
   return undefined;
+}
+
+type ConversationTextSourceBlock = { type: "text" | "thinking"; text: string };
+type ConversationOmittedSourceBlock = { type: "omitted"; kind: "image" | "binary"; description: string };
+type ConversationSourceBlock =
+  | ConversationTextSourceBlock
+  | { type: "image"; mimeType: string; data: string }
+  | { type: "tool_call"; toolCallId: string; toolName: string; argumentsJson: string }
+  | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; omittedFields?: string[] }
+  | ConversationOmittedSourceBlock;
+
+function conversationContentBlocks(entry: SessionEntry, projected: RuntimeHistoryEntry): ConversationSourceBlock[] {
+  const omitted = (kind: "image" | "binary", description: string): ConversationOmittedSourceBlock => ({ type: "omitted", kind, description });
+  const text = (type: "text" | "thinking", value: unknown): ConversationTextSourceBlock => ({
+    type,
+    text: typeof value === "string" ? value : "",
+  });
+  if (entry.type === "compaction" || entry.type === "branch_summary") return [text("text", entry.summary)];
+  if (entry.type === "thinking_level_change" || entry.type === "model_change" || entry.type === "session_info") {
+    const value = typeof projected.content === "string" ? projected.content : String(projected.content ?? "");
+    return [text("text", value)];
+  }
+  const content = entry.type === "custom_message"
+    ? entry.content
+    : entry.type === "message"
+      ? (entry.message as unknown as Record<string, unknown>).content
+      : undefined;
+  if (entry.type === "message") {
+    const message = entry.message as unknown as Record<string, unknown>;
+    const role = typeof message.role === "string" ? message.role : "system";
+    if (role === "bashExecution") {
+      const command = typeof message.command === "string" ? message.command : "";
+      const output = typeof message.output === "string" ? message.output : "";
+      return [text("text", `! ${command}${output ? `\n${output}` : ""}`)];
+    }
+    if (role === "branchSummary" || role === "compactionSummary") return [text("text", message.summary)];
+    if (role === "toolResult") {
+      const toolCallId = typeof message.toolCallId === "string" ? boundedString(message.toolCallId, 128, "unknown") : "unknown";
+      const toolName = typeof message.toolName === "string" ? boundedString(message.toolName, 256, "tool") : "tool";
+      const isError = message.isError === true;
+      const items = typeof message.content === "string" ? [{ type: "text", text: message.content }] : Array.isArray(message.content) ? message.content : [];
+      return items.flatMap((item): ConversationSourceBlock[] => {
+        if (!isRecord(item)) return [];
+        if (item.type === "image") return [{ type: "image", mimeType: safeImageMimeType(item.mimeType), data: typeof item.data === "string" ? item.data : "" }];
+        if (item.type !== "text") return [];
+        const value = text("text", item.text);
+        return [{ type: "tool_result", toolCallId, toolName, text: value.text, isError }];
+      });
+    }
+  }
+  const items = typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content : [];
+  return items.flatMap((item): ConversationSourceBlock[] => {
+    if (!isRecord(item)) return [];
+    if (item.type === "text") return [text("text", item.text)];
+    if (item.type === "thinking") return [text("thinking", item.thinking)];
+    if (item.type === "image") return [{ type: "image", mimeType: safeImageMimeType(item.mimeType), data: typeof item.data === "string" ? item.data : "" }];
+    if ((item.type === "toolCall" || item.type === "tool_call") && typeof item.name === "string") {
+      try {
+        const argumentsJson = JSON.stringify(item.arguments ?? {});
+        return [{
+          type: "tool_call",
+          toolCallId: safeRequiredText(item.id, 128, "unknown"),
+          toolName: safeRequiredText(item.name, 256, "tool"),
+          argumentsJson,
+        }];
+      } catch {
+        return [omitted("binary", "Unserializable tool arguments omitted")];
+      }
+    }
+    return [];
+  });
+}
+
+function conversationBlockCount(entry: SessionEntry): number {
+  const projected = projectHistoryEntry(entry);
+  return projected === undefined ? 0 : conversationContentBlocks(entry, projected).length;
+}
+
+function conversationPreviewIsComplete(_entry: SessionEntry, _projected: RuntimeHistoryEntry): boolean {
+  // Legacy history was not designed to prove exactness. New clients hydrate via
+  // contentRef; never claim a bounded preview is authoritative by inference.
+  return false;
+}
+
+function unicodeSafeEnd(value: string, requestedEnd: number): number {
+  return requestedEnd > 0
+    && /[\uD800-\uDBFF]/u.test(value[requestedEnd - 1] ?? "")
+    && /[\uDC00-\uDFFF]/u.test(value[requestedEnd] ?? "")
+    ? requestedEnd - 1
+    : requestedEnd;
+}
+
+function conversationContentRef(revision: string, entryId: string): string {
+  return createHash("sha256").update(revision).update("\u0000").update(entryId).digest("hex");
+}
+
+function trimTokenMap<T>(map: Map<string, T>, max = 8_192): void {
+  while (map.size > max) map.delete(map.keys().next().value as string);
 }
 
 interface TreeToolCall { name: string; arguments: Record<string, unknown> }
@@ -1478,7 +1713,6 @@ function isTreeLineSeparator(code: number): boolean {
 function safeSelectedText(value: unknown): string {
   if (typeof value !== "string") throw new Error("Pi returned invalid selected editor text");
   if (value.length > 256_000) throw new Error("Selected editor text exceeds 256000 characters");
-  if (containsBinaryText(value)) throw new Error("Selected editor text cannot contain binary or image payloads");
   return value.replace(/\r\n?/gu, "\n").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/gu, " ");
 }
 

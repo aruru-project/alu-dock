@@ -45,8 +45,6 @@ interface ProjectedTruncation {
 }
 
 const BUILT_IN_TOOLS = new Set<BuiltInToolKind>(["bash", "read", "edit", "write", "grep", "find", "ls"]);
-const DATA_URI = /data:[^,]*;base64,/iu;
-const BASE64_PAYLOAD = /^(?=.{128,}$)(?=.*(?:[0-9+/]|={1,2}$))(?:[A-Za-z0-9+/]{4})+(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
 const CONTROL_TEXT = /[\u0000-\u001f\u007f-\u009f]/u;
 
 export function builtInToolKind(toolName: unknown): BuiltInToolKind | undefined {
@@ -361,7 +359,7 @@ function formatBytes(bytes: number): string {
 
 function safePath(value: unknown): string | undefined {
   if (typeof value !== "string" || value.length === 0 || value.length > MAX_TOOL_FULL_OUTPUT_PATH_CHARS) return undefined;
-  if (CONTROL_TEXT.test(value) || containsBinaryText(value)) return undefined;
+  if (CONTROL_TEXT.test(value)) return undefined;
   return value;
 }
 
@@ -385,10 +383,5 @@ function plainRecord(value: unknown): Record<string, unknown> | undefined {
 function hasOnlyKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const allowed = new Set(keys);
   return Object.keys(value).every((key) => allowed.has(key));
-}
-
-function containsBinaryText(value: string): boolean {
-  if (DATA_URI.test(value) || BASE64_PAYLOAD.test(value.replace(/\s+/gu, ""))) return true;
-  return value.split(/[^A-Za-z0-9+/=]+/gu).some((part) => BASE64_PAYLOAD.test(part));
 }
 

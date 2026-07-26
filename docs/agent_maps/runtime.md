@@ -171,8 +171,8 @@ ManagedInstance replacement intent
 ## Projection bounds 与恢复语义
 
 - Config inventories必须先确定canonical membership，再由adapter/Core按最多2,000项及control-envelope字节预算裁切；高基数tool registry扫描完整集合计数，但只用bounded max-heap保留canonical prefix，不复制/排序全catalog。`total`/`truncated`或resource/diagnostic独立 completeness metadata必须一路传到Protocol/TUI；adapter若先裁切，Core不能二次裁切后声称完整。
-- Runtime structured JSON 使用depth 8、object key 100、array item 200、2,000 projected nodes、256 KiB aggregate预算和最多200条omitted paths；一条completed message再受512 KiB content预算。Pi built-in tool text与display diff在正常范围内原样进入Core；Dock不再施加8,000字符的第二层显示裁剪。只有接近1 MiB control-frame上限的结果才使用256,000字符transport fallback，并明确保留Unicode边界与裁切提示。
-- `bash/read/edit/write/grep/find/ls`使用统一`BuiltInToolPresentation`：只投影preview direction、truncation/limit/continuation/full-output notices与成功`edit`的display diff。Pi adapter在runtime event与history边界删除raw details；`patch`、`firstChangedLine`、truncation内的重复content、unknown/private字段与binary/data URI不得进入Core/Protocol。可识别的有效字段独立保留；未知或畸形optional metadata不能让有效tool text或display diff整块消失。失败结果始终保留authoritative error text，不采用success diff；live与reattach history使用同一projection。
+- Legacy runtime event/history structured JSON可以使用节点、字段和聚合预算生成明确不完整的preview，但这些预算不得成为conversation语义上限。`conversation.content.v1`由Worker通过Pi public SessionManager authority提供revision/contentRef/cursor分页；text、thinking、tool arguments/result与image data按Unicode安全边界分片，单帧/单页限制不得永久截断内容。
+- `bash/read/edit/write/grep/find/ls`使用统一`BuiltInToolPresentation`：只投影preview direction、truncation/limit/continuation/full-output notices与成功`edit`的display diff。Pi adapter可以从typed presentation preview中排除未定义的raw details，但不得根据字符串内容猜测base64/Data URI并删除普通语义。失败结果始终保留authoritative error text，不采用success diff；完整tool text由conversation content分页恢复。
 - Admission catalog commit期间的runtime handoff保留最新1,000-event tail；发生overflow必须发布显式extension error并刷新authoritative history/metrics，不能继续声称事件流完整。涉及该路径的改动必须验证最终queue/run状态，而不只验证错误字符串。
 - Session metadata inventory逐root/directory/file报告bounded scan diagnostics；JSONL仍是authoritative，cache write/load失败不能把cache升级为真相源。
 - Extension widget仍最多200行、每行8,000字符，同时受256,000字符aggregate预算；超限整个widget拒绝并发布`extension.error`，不静默显示前缀。

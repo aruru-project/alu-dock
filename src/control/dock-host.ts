@@ -35,7 +35,7 @@ import {
   type DockEvent,
   type JsonObject,
 } from "../core/managed-instance.js";
-import { RuntimeCompactionKnownFailureError, RuntimeInvalidSettingValueError, RuntimeModelNotFoundError, RuntimeSettingsWriteError, RuntimeUnavailableBeforeEffectError, RuntimeUnknownToolError } from "../core/runtime-session.js";
+import { RuntimeCompactionKnownFailureError, RuntimeConversationCursorError, RuntimeInvalidSettingValueError, RuntimeModelNotFoundError, RuntimeSettingsWriteError, RuntimeUnavailableBeforeEffectError, RuntimeUnknownToolError } from "../core/runtime-session.js";
 import type { SessionInventory } from "../core/session-inventory.js";
 import {
   CatalogListCursorStaleError,
@@ -549,6 +549,8 @@ export class DockHost {
       case "resource.get": { const instance=this.registry.get(request.params.instanceId); const result=await instance.getResources(); this.sendSuccessAndEnd(socket,request.requestId,clientRequirements.has("projection.completeness.v1")?result:{resources:result.resources,diagnostics:result.diagnostics}); return; }
       case "command.catalog": { const instance=this.registry.get(request.params.instanceId); const result=await instance.getCommands(request.params.prefix); this.sendSuccessAndEnd(socket,request.requestId,{commands:result.commands,...collectionCompleteness(result,clientRequirements)}); return; }
       case "session.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getHistoryPage(request.params.beforeEntryId,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,createBoundedHistoryResult(page,request.requestId,this.hostEpoch)); return; }
+      case "conversation.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getConversationHistory(request.params.cursor,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
+      case "conversation.content": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getConversationContent(request.params.contentRef,request.params.cursor); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
       case "session.inventory": {
         const inventory = await this.sessionInventory.list(request.params.cwd, request.params.scope);
         this.sendSuccessAndEnd(socket, request.requestId, boundedSessionInventory(
@@ -765,6 +767,8 @@ function isMutationRequest(type: ControlRequest["type"]): boolean {
     && type !== "resource.get"
     && type !== "command.catalog"
     && type !== "session.history"
+    && type !== "conversation.history"
+    && type !== "conversation.content"
     && type !== "session.inventory"
     && type !== "session.list"
     && type !== "session.tree";
@@ -1119,6 +1123,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   }
   if (error instanceof CatalogOperationRecordedError) return { code: "operation_conflict", message: error.message };
   if (error instanceof InvalidHistoryCursorError) return { code: "invalid_cursor", message: error.message };
+  if (error instanceof RuntimeConversationCursorError) return { code: "invalid_cursor", message: error.message };
   if (error instanceof StaleRuntimeGenerationError) return { code: "stale_runtime_generation", message: error.message, details: { expectedRuntimeGeneration: error.expected, actualRuntimeGeneration: error.actual } };
   if (error instanceof InvalidTreeCursorError) return { code: "invalid_cursor", message: error.message };
   if (error instanceof InteractionNotFoundError) return { code: error.code, message: error.message };

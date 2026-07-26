@@ -45,6 +45,7 @@ export type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingKey, Se
 import type {
   ClearedRuntimeQueue,
   RuntimeCompactionResult,
+  RuntimeConversationContentChunk,
   RuntimeEvent,
   RuntimeForkResult,
   RuntimeHistoryEntry,
@@ -72,6 +73,9 @@ import type {
   AttachProjection,
   CommandReceipt,
   ContentBlockDto,
+  ConversationContentChunkDto,
+  ConversationContentPageDto,
+  ConversationHistoryPageDto,
   DeliveryMode,
   DockEvent,
   EventCursor,
@@ -102,6 +106,10 @@ export type {
   AttachProjection,
   CommandReceipt,
   ContentBlockDto,
+  ConversationContentChunkDto,
+  ConversationContentPageDto,
+  ConversationHistoryEntryDto,
+  ConversationHistoryPageDto,
   DeliveryMode,
   DockEvent,
   EventCursor,
@@ -834,6 +842,49 @@ export class ManagedInstance {
 
   async getHistoryPage(beforeEntryId: string | undefined, limit: number): Promise<HistoryPageDto & { instance: InstanceSnapshot }> {
     return this.withCommittedProjectionRead(() => ({ ...this.buildHistoryPage(beforeEntryId, limit), instance: this.snapshot() }));
+  }
+
+  async getConversationHistory(cursor?: string, limit = 50): Promise<ConversationHistoryPageDto> {
+    return this.withProjectionRead(async () => {
+      this.assertActive();
+      if (!this.session.getConversationHistory) throw new Error("Runtime does not support complete conversation history");
+      const generation = this.runtimeGenerationValue;
+      const page = await this.session.getConversationHistory(cursor, limit);
+      if (generation !== this.runtimeGenerationValue) throw new StaleRuntimeGenerationError(generation, this.runtimeGenerationValue);
+      return {
+        instance: this.snapshot(),
+        revision: boundedRuntimeString(page.revision, 128, "unknown-revision"),
+        entries: page.entries.map((item) => ({
+          entry: projectConversationHistoryPreview(item.entry),
+          contentRef: boundedRuntimeString(item.contentRef, 128, "unknown-content"),
+          contentComplete: item.contentComplete,
+          totalBlocks: Math.max(0, Math.floor(item.totalBlocks)),
+        })),
+        hasEarlier: page.hasEarlier,
+        ...(page.nextCursor === undefined ? {} : { nextCursor: boundedRuntimeString(page.nextCursor, 128, "unknown-cursor") }),
+      };
+    });
+  }
+
+  async getConversationContent(contentRef: string, cursor?: string): Promise<ConversationContentPageDto> {
+    return this.withProjectionRead(async () => {
+      this.assertActive();
+      if (!this.session.getConversationContent) throw new Error("Runtime does not support complete conversation content");
+      const generation = this.runtimeGenerationValue;
+      const page = await this.session.getConversationContent(contentRef, cursor);
+      if (generation !== this.runtimeGenerationValue) throw new StaleRuntimeGenerationError(generation, this.runtimeGenerationValue);
+      const chunks = page.chunks.map(projectRuntimeConversationChunk);
+      if (Buffer.byteLength(JSON.stringify(chunks), "utf8") > 512 * 1024) throw new Error("Runtime returned an oversized conversation content page");
+      return {
+        instanceId: this.id,
+        runtimeGeneration: generation,
+        revision: boundedRuntimeString(page.revision, 128, "unknown-revision"),
+        contentRef: boundedRuntimeString(page.contentRef, 128, "unknown-content"),
+        chunks,
+        complete: page.complete,
+        ...(page.nextCursor === undefined ? {} : { nextCursor: boundedRuntimeString(page.nextCursor, 128, "unknown-cursor") }),
+      };
+    });
   }
 
   async getTreePage(
@@ -4170,6 +4221,93 @@ function projectRuntimeHistoryEntry(entry: RuntimeHistoryEntry): HistoryEntryDto
   };
 }
 
+function projectConversationHistoryPreview(entry: RuntimeHistoryEntry): HistoryEntryDto {
+  const projected = projectRuntimeHistoryEntry(entry);
+  const content: ContentBlockDto[] = [];
+  let remaining = 4_000;
+  for (const block of projected.content.slice(0, 16)) {
+    if (block.type === "text" || block.type === "thinking") {
+      const text = truncate(block.text, remaining) ?? "";
+      content.push({ type: block.type, text });
+      remaining = Math.max(0, remaining - text.length);
+    } else if (block.type === "tool_call") {
+      content.push({
+        type: "tool_call",
+        toolCallId: block.toolCallId,
+        toolName: block.toolName,
+        args: {},
+        omittedFields: ["/"],
+      });
+    } else if (block.type === "tool_result") {
+      const text = truncate(block.text, remaining) ?? "";
+      const { presentation: _presentation, ...metadata } = block;
+      content.push({ ...metadata, text });
+      remaining = Math.max(0, remaining - text.length);
+    } else {
+      content.push(block);
+    }
+    if (remaining === 0) break;
+  }
+  return { ...projected, content };
+}
+
+function projectRuntimeConversationChunk(chunk: RuntimeConversationContentChunk): ConversationContentChunkDto {
+  if (chunk.type === "text" || chunk.type === "thinking") {
+    if (chunk.text.length > 32_000) throw new Error("Runtime returned oversized conversation text content");
+    return {
+      blockIndex: nonNegativeNumber(chunk.blockIndex),
+      type: chunk.type,
+      text: chunk.text,
+      offset: nonNegativeNumber(chunk.offset),
+      blockComplete: chunk.blockComplete,
+    };
+  }
+  if (chunk.type === "image") {
+    if (chunk.data.length > 32_000) throw new Error("Runtime returned oversized conversation image content");
+    return {
+      blockIndex: nonNegativeNumber(chunk.blockIndex),
+      type: "image",
+      mimeType: boundedRuntimeString(chunk.mimeType, 256, "image/unknown"),
+      data: chunk.data,
+      offset: nonNegativeNumber(chunk.offset),
+      blockComplete: chunk.blockComplete,
+    };
+  }
+  if (chunk.type === "tool_call") {
+    if (chunk.argumentsJson.length > 32_000) throw new Error("Runtime returned oversized conversation tool arguments");
+    return {
+      blockIndex: nonNegativeNumber(chunk.blockIndex),
+      type: "tool_call",
+      toolCallId: boundedRuntimeString(chunk.toolCallId, 128, "unknown"),
+      toolName: boundedRuntimeString(chunk.toolName, 256, "tool"),
+      argumentsJson: chunk.argumentsJson,
+      offset: nonNegativeNumber(chunk.offset),
+      blockComplete: chunk.blockComplete,
+    };
+  }
+  if (chunk.type === "tool_result") {
+    if (chunk.text.length > 32_000) throw new Error("Runtime returned oversized conversation tool content");
+    return {
+      blockIndex: nonNegativeNumber(chunk.blockIndex),
+      type: "tool_result",
+      toolCallId: boundedRuntimeString(chunk.toolCallId, 128, "unknown"),
+      toolName: boundedRuntimeString(chunk.toolName, 256, "tool"),
+      text: chunk.text,
+      offset: nonNegativeNumber(chunk.offset),
+      blockComplete: chunk.blockComplete,
+      isError: chunk.isError,
+      ...(chunk.omittedFields === undefined ? {} : { omittedFields: [...chunk.omittedFields] }),
+    };
+  }
+  if (chunk.type !== "omitted") throw new Error("Runtime returned an unsupported conversation chunk");
+  return {
+    blockIndex: nonNegativeNumber(chunk.blockIndex),
+    type: "omitted",
+    kind: chunk.kind,
+    description: boundedRuntimeString(chunk.description, 2_048, "Content omitted"),
+  };
+}
+
 function historyRole(value: string): HistoryEntryDto["role"] {
   if (value === "user") return "user";
   if (value === "tool" || value === "toolResult") return "tool";
@@ -4306,9 +4444,7 @@ function extractText(content: unknown): string | undefined {
 
 function projectContentBlocks(content: unknown): ContentBlockDto[] {
   if (typeof content === "string") {
-    return isBinaryText(content)
-      ? [{ type: "omitted", kind: "binary", description: "Binary data omitted" }]
-      : [{ type: "text", text: truncate(content, 8_000) ?? "" }];
+    return [{ type: "text", text: truncate(content, 8_000) ?? "" }];
   }
   if (!Array.isArray(content)) return [];
   const blocks: ContentBlockDto[] = [];
@@ -4328,13 +4464,9 @@ function projectContentBlocks(content: unknown): ContentBlockDto[] {
     if (!block) continue;
     let candidate: ContentBlockDto | undefined;
     if (block.type === "text" && typeof block.text === "string") {
-      candidate = isBinaryText(block.text)
-        ? { type: "omitted", kind: "binary", description: "Binary data omitted" }
-        : { type: "text", text: truncate(block.text, 8_000) ?? "" };
+      candidate = { type: "text", text: truncate(block.text, 8_000) ?? "" };
     } else if (block.type === "thinking" && typeof block.thinking === "string") {
-      candidate = isBinaryText(block.thinking)
-        ? { type: "omitted", kind: "binary", description: "Binary data omitted" }
-        : { type: "thinking", text: truncate(block.thinking, 8_000) ?? "" };
+      candidate = { type: "thinking", text: truncate(block.thinking, 8_000) ?? "" };
     } else if ((block.type === "toolCall" || block.type === "tool_call") && typeof block.name === "string") {
       const projected = projectJsonObject(block.arguments);
       candidate = {
@@ -4385,7 +4517,7 @@ function unicodeSafeSliceEnd(value: string, requestedEnd: number): number {
 }
 
 function safeWireText(value: string, limit: number, omission: string): string {
-  return isBinaryText(value) ? omission : truncate(value, limit) ?? omission;
+  return truncate(value, limit) ?? omission;
 }
 
 function errorMessage(error: unknown): string {
@@ -4418,14 +4550,6 @@ const MAX_JSON_STRING = 8_000;
 const MAX_JSON_PROJECTED_NODES = 2_000;
 const MAX_JSON_PROJECTED_BYTES = 256_000;
 const MAX_JSON_OMITTED_FIELDS = 200;
-const SENSITIVE_KEY = /base64|binary|imageData/i;
-const DATA_URI = /data:[^,]*;base64,/i;
-const BASE64_PAYLOAD = /^(?=.{128,}$)(?=.*(?:[0-9+/]|={1,2}$))(?:[A-Za-z0-9+/]{4})+(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-
-function isBinaryText(value: string): boolean {
-  if (DATA_URI.test(value) || BASE64_PAYLOAD.test(value.replace(/\s+/gu, ""))) return true;
-  return value.split(/[^A-Za-z0-9+/=]+/gu).some((part) => BASE64_PAYLOAD.test(part));
-}
 
 export function projectJsonObject(input: unknown): { value: JsonObject; omittedFields: string[] } {
   const omittedFields: string[] = [];
@@ -4457,7 +4581,6 @@ export function projectJsonObject(input: unknown): { value: JsonObject; omittedF
     }
     projectedNodes += 1;
     if (typeof value === "string") {
-      if (isBinaryText(value)) { omit(path); return undefined; }
       const projected = truncate(value, MAX_JSON_STRING) ?? "";
       return reserve(Buffer.byteLength(JSON.stringify(projected), "utf8"), path) ? projected : undefined;
     }
@@ -4502,7 +4625,7 @@ export function projectJsonObject(input: unknown): { value: JsonObject; omittedF
       const itemPath = `${path}/${escapeJsonPointer(key.slice(0, 256))}`;
       if (index >= MAX_JSON_KEYS || budgetExhausted || projectedNodes >= MAX_JSON_PROJECTED_NODES) { omit(itemPath); break; }
       index += 1;
-      if (key.length < 1 || key.length > 256 || /[\u0000-\u001f\u007f-\u009f]/u.test(key) || SENSITIVE_KEY.test(key)) { omit(itemPath); continue; }
+      if (key.length < 1 || key.length > 256 || /[\u0000-\u001f\u007f-\u009f]/u.test(key)) { omit(itemPath); continue; }
       const separatorBytes = Object.keys(result).length > 0 ? 1 : 0;
       if (!reserve(separatorBytes + Buffer.byteLength(JSON.stringify(key), "utf8") + 1, itemPath)) break;
       let sourceItem: unknown;
@@ -4527,8 +4650,7 @@ function projectRuntimeToolResult(
   projectedPresentation?: unknown,
   rawDetails?: unknown,
 ): { text: string; presentation?: BuiltInToolPresentation } {
-  const extracted = extractText(content) ?? "";
-  const text = isBinaryText(extracted) ? "" : extracted;
+  const text = extractText(content) ?? "";
   const presentation = projectedPresentation === undefined
     ? projectBuiltInToolPresentation(toolName, text, rawDetails, isError)
     : validateBuiltInToolPresentation(toolName, projectedPresentation, isError)

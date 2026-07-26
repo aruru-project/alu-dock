@@ -59,7 +59,7 @@ Managed 安装或运维另读 [`docs/local-install.md`](docs/local-install.md)�
 
 1. **Host 唯一持有 Dock 控制权。** `ManagedInstance`、admission、Queue、operation/catalog/generation truth 与 Worker supervisor 属于 Host；每个 instance 的 Pi SDK objects、extensions、tools 与 Pi Promise 只属于该 instance 的独立 Worker。客户端只消费控制面，不得成为第二 runtime owner。
 2. **身份不可混用。** Dock `instanceId`、Pi `sessionId/sessionFile` 与 `runtimeGeneration` 表示不同生命周期；session replacement 保留 Dock instance 并推进 generation。
-3. **控制面保持封闭。** Wire major 是 `2`；request/result/event 必须是有界、closed、JSON-safe schema，不传 runtime 对象、handler、component、binary、image bytes、data URI 或 raw base64。
+3. **控制面保持封闭但不得删改语义。** Wire major 是 `2`；request/result/event 必须是 closed、JSON-safe schema，不传 runtime 对象、handler、component 或 Promise。Pi session 中的文本、Data URI、base64 与 image block 都是应保留的 conversation 语义；大型内容必须以有界 frame/page 分片传输，任何单帧、单页或背压限制都不得成为内容过滤或永久截断。
 4. **信任先于构造和副作用。** Project trust 必须在目标 runtime、project resources、extension hooks、teardown 或 catalog mutation 之前确定。
 5. **Catalog commit 是可观察边界。** Required commit 完成前不得发布对应 success、snapshot 或 event；durable catalog 只保存身份、session metadata 与保守 intent，不保存正文、interaction、event log、queue 或 Promise。
 6. **Host loss 不触发隐式恢复。** 不自动恢复或重放 prompt、queue、interaction、Promise 或 tool effect；显式 reopen 是新 generation 的 fresh transaction。

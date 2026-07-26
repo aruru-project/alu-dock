@@ -63,6 +63,39 @@ export interface HistoryPageDto {
   hasEarlier: boolean;
   nextBeforeEntryId?: string;
 }
+
+export type ConversationContentChunkDto =
+  | { blockIndex: number; type: "text" | "thinking"; text: string; offset: number; blockComplete: boolean }
+  | { blockIndex: number; type: "image"; mimeType: string; data: string; offset: number; blockComplete: boolean }
+  | { blockIndex: number; type: "tool_call"; toolCallId: string; toolName: string; argumentsJson: string; offset: number; blockComplete: boolean }
+  | { blockIndex: number; type: "tool_result"; toolCallId: string; toolName: string; text: string; offset: number; blockComplete: boolean; isError: boolean; omittedFields?: string[] }
+  | { blockIndex: number; type: "omitted"; kind: "image" | "binary"; description: string };
+
+export interface ConversationHistoryEntryDto {
+  entry: HistoryEntryDto;
+  contentRef: string;
+  contentComplete: boolean;
+  totalBlocks: number;
+}
+
+export interface ConversationHistoryPageDto {
+  instance: InstanceSnapshot;
+  revision: string;
+  entries: ConversationHistoryEntryDto[];
+  hasEarlier: boolean;
+  nextCursor?: string;
+}
+
+export interface ConversationContentPageDto {
+  instanceId: string;
+  runtimeGeneration: number;
+  revision: string;
+  contentRef: string;
+  chunks: ConversationContentChunkDto[];
+  complete: boolean;
+  nextCursor?: string;
+}
+
 export type TreeNodeKind =
   | "message"
   | "thinking_level_change"

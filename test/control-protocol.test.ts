@@ -14,6 +14,8 @@ import {
   parseForgetResult,
   parseHostInfoResult,
   parseHistoryResult,
+  parseConversationHistoryResult,
+  parseConversationContentResult,
   parseInteractionRespondResult,
   parseKeyLookupResult,
   parseListResult,
@@ -42,6 +44,7 @@ import {
   CONTROLLER_DIRECTIVES_CAPABILITY,
   PERSISTENT_INTERACTIONS_CAPABILITY,
   INSTANCE_KEYS_CAPABILITY,
+  CONVERSATION_CONTENT_CAPABILITY,
   implementedCapabilities,
   requiredCapabilities,
 } from "../src/control/protocol.js";
@@ -98,7 +101,7 @@ function validEvent(type = "message.delta", data: Record<string, unknown> = { me
   return { scope: "instance", sequence: 1, instanceId: "i1", runtimeGeneration: 1, occurredAt: "2026-07-14T00:00:00.000Z", type, data };
 }
 
-test("controller directive capability and events are separately negotiated, closed, bounded, and payload-free", () => {
+test("controller directive capability and events are separately negotiated, closed, bounded, and preserve semantic text", () => {
   assert.ok(implementedCapabilities().includes(CONTROLLER_DIRECTIVES_CAPABILITY));
   assert.ok(implementedCapabilities().includes(PERSISTENT_INTERACTIONS_CAPABILITY));
   assert.ok(requiredCapabilities(CONTROLLER_DIRECTIVES_CAPABILITY).includes(CONTROLLER_DIRECTIVES_CAPABILITY));
@@ -116,7 +119,8 @@ test("controller directive capability and events are separately negotiated, clos
   assert.throws(() => parseControlEventEnvelope(envelope(validEvent("extension.title_set", { controllerId: "controller-1", title: "bad\nline" })), "stream-1", "epoch-1"), /control characters/);
   assert.throws(() => parseControlEventEnvelope(envelope(validEvent("extension.title_set", { controllerId: "controller-1", title: "x".repeat(2_049) })), "stream-1", "epoch-1"), /bounded/);
   assert.throws(() => parseControlEventEnvelope(envelope(validEvent("extension.editor_text_set", { controllerId: "controller-1", text: "bad\u001b[2J" })), "stream-1", "epoch-1"), /control characters/);
-  assert.throws(() => parseControlEventEnvelope(envelope(validEvent("extension.editor_text_set", { controllerId: "controller-1", text: "data:image/png;base64,A0+\/A0+\/" })), "stream-1", "epoch-1"), /binary/);
+  const dataUriEditor = parseControlEventEnvelope(envelope(validEvent("extension.editor_text_set", { controllerId: "controller-1", text: "data:image/png;base64,A0+\/A0+\/" })), "stream-1", "epoch-1").event;
+  assert.equal(dataUriEditor.type === "extension.editor_text_set" ? dataUriEditor.data.text : undefined, "data:image/png;base64,A0+/A0+/");
   assert.throws(() => parseControlEventEnvelope(envelope(validEvent("extension.editor_text_set", { controllerId: "controller-1", text: "x".repeat(256_001) })), "stream-1", "epoch-1"), /bounded/);
   assert.throws(() => parseControlEventEnvelope(envelope(validEvent("extension.title_set", { controllerId: "controller-1", title: "ok", extra: true })), "stream-1", "epoch-1"), /Unexpected field/);
 });
@@ -326,6 +330,9 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   });
   assert.deepEqual(parseControlRequest({ ...base, type: "session.history", params: { instanceId: "i1", beforeEntryId: "entry-2", limit: 200 } }).params, { instanceId: "i1", beforeEntryId: "entry-2", limit: 200 });
   assert.throws(() => parseControlRequest({ ...base, type: "session.history", params: { instanceId: "i1", limit: 201 } }), /between 1 and 200/);
+  assert.deepEqual(parseControlRequest({ ...base, type: "conversation.history", params: { instanceId: "i1", cursor: "cursor-1", limit: 50 } }).params, { instanceId: "i1", cursor: "cursor-1", limit: 50 });
+  assert.deepEqual(parseControlRequest({ ...base, type: "conversation.content", params: { instanceId: "i1", contentRef: "content-1", cursor: "cursor-2" } }).params, { instanceId: "i1", contentRef: "content-1", cursor: "cursor-2" });
+  assert.throws(() => parseControlRequest({ ...base, type: "conversation.content", params: { instanceId: "i1", contentRef: "" } }), /non-empty/);
   assert.deepEqual(parseControlRequest({ ...base, type: "session.inventory", params: { cwd: "/tmp/project", scope: "cwd" } }), {
     ...base, type: "session.inventory", params: { cwd: "/tmp/project", scope: "cwd" },
   });
@@ -352,6 +359,8 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   assert.equal(capabilityForRequest("instance.adopt"), "session.adopt.v1");
   assert.equal(capabilityForRequest("instance.ensure"), INSTANCE_KEYS_CAPABILITY);
   assert.equal(capabilityForRequest("instance.get_by_key"), INSTANCE_KEYS_CAPABILITY);
+  assert.equal(capabilityForRequest("conversation.history"), CONVERSATION_CONTENT_CAPABILITY);
+  assert.equal(capabilityForRequest("conversation.content"), CONVERSATION_CONTENT_CAPABILITY);
   assert.equal(capabilityForRequest("session.inventory"), "session.inventory.v1");
   assert.equal(capabilityForRequest("extension.tools_expanded.set"), "extension_ui.tools-expanded.v1");
   assert.equal(capabilityForRequest("extension.widget_viewport.set"), "extension_ui.widgets.v1");
@@ -579,22 +588,25 @@ test("Stage 4 interaction requests, responses, and controller leases are closed"
       response: { method: "select", cancelled: false },
     },
   }), /must be true/);
-  assert.throws(() => parseControlRequest({
+  const editorDataUri = parseControlRequest({
     ...base,
     type: "interaction.respond",
     params: {
       operationId: "respond-1", instanceId: "i1", leaseToken: "lease-1", interactionId: "dialog-1",
       response: { method: "editor", value: "data:image/png;base64,A0+/A0+/A0+/" },
     },
-  }), /cannot contain binary/);
-  assert.throws(() => parseControlRequest({
+  });
+  assert.equal(editorDataUri.type === "interaction.respond" && "value" in editorDataUri.params.response ? editorDataUri.params.response.value : undefined, "data:image/png;base64,A0+/A0+/A0+/");
+  const rawBase64 = "A0+/".repeat(32);
+  const inputBase64 = parseControlRequest({
     ...base,
     type: "interaction.respond",
     params: {
       operationId: "respond-1", instanceId: "i1", leaseToken: "lease-1", interactionId: "dialog-1",
-      response: { method: "input", value: "A0+/".repeat(32) },
+      response: { method: "input", value: rawBase64 },
     },
-  }), /cannot contain binary/);
+  });
+  assert.equal(inputBase64.type === "interaction.respond" && "value" in inputBase64.params.response ? inputBase64.params.response.value : undefined, rawBase64);
   assert.deepEqual(parseInteractionRespondResult({ interactionId: "dialog-1", state: "already_resolved" }), {
     interactionId: "dialog-1", state: "already_resolved",
   });
@@ -622,10 +634,11 @@ test("Stage 4 interaction requests, responses, and controller leases are closed"
     ...attach,
     controller: { status: "acquired", leaseToken: "lease-1" },
   }), /controllerId/);
-  assert.throws(() => parseControlEventEnvelope({
+  const dataUriNotification = parseControlEventEnvelope({
     kind: "event", version: 2, requestId: "stream-1", hostEpoch: "epoch-1",
     event: validEvent("extension.notification", { message: "data:image/png;base64,A0+/", level: "info" }),
-  }, "stream-1", "epoch-1"), /cannot contain binary/);
+  }, "stream-1", "epoch-1").event;
+  assert.equal(dataUriNotification.type === "extension.notification" ? dataUriNotification.data.message : undefined, "data:image/png;base64,A0+/");
   assert.throws(() => parseControlEventEnvelope({
     kind: "event", version: 2, requestId: "stream-1", hostEpoch: "epoch-1",
     event: validEvent("extension.status_changed", { key: "__proto__", text: "unsafe" }),
@@ -685,7 +698,8 @@ test("Stage 6 tree, navigate, fork, and clone DTOs are closed and cursor-bounded
   assert.throws(() => parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [{ ...node, displayClass: "structural", state: "error" }], total: 1, truncated: false }), /state invariant/);
   assert.throws(() => parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [{ ...node, role: undefined, kind: "message" }], total: 1, truncated: false }), /role invariant/);
   assert.throws(() => parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [node], total: 2, truncated: true, nextAfterEntryId: "other" }), /last returned entry/);
-  assert.throws(() => parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [{ ...node, summary: `tool: ${"A0+/".repeat(32)}` }], total: 1, truncated: false }), /cannot contain binary/);
+  const base64Summary = `tool: ${"A0+/".repeat(32)}`;
+  assert.equal(parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [{ ...node, summary: base64Summary }], total: 1, truncated: false }).nodes[0]?.summary, base64Summary);
   assert.throws(() => parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [{ ...node, depth: 100_001 }], total: 1, truncated: false }), /depth exceeds 100000/);
   assert.throws(() => parseSessionTreeResult({ treeRevision: "g1-revision", nodes: [], total: 100_001, truncated: false }), /total exceeds 100000/);
 
@@ -693,7 +707,8 @@ test("Stage 6 tree, navigate, fork, and clone DTOs are closed and cursor-bounded
   assert.throws(() => parseSessionNavigateResult({ cancelled: false, aborted: true, instance: validSnapshot() }), /must be cancelled/);
   assert.equal(parseSessionForkResult({ cancelled: false, selectedText: "fork prompt", instance: validSnapshot() }).selectedText, "fork prompt");
   assert.throws(() => parseSessionForkResult({ cancelled: false, instance: validSnapshot() }), /must return selected text/);
-  assert.throws(() => parseSessionForkResult({ cancelled: false, selectedText: `attachment: ${"A0+/".repeat(32)}`, instance: validSnapshot() }), /cannot contain binary/);
+  const base64Selection = `attachment: ${"A0+/".repeat(32)}`;
+  assert.equal(parseSessionForkResult({ cancelled: false, selectedText: base64Selection, instance: validSnapshot() }).selectedText, base64Selection);
   assert.equal(parseSessionCloneResult({ cancelled: false, instance: validSnapshot() }).cancelled, false);
 });
 
@@ -785,6 +800,41 @@ test("history results are closed and pagination-consistent", () => {
   assert.throws(() => parseHistoryResult({ entries: [{ ...entry, summaryKind: "unknown" }], hasEarlier: false, instance: validSnapshot() }), /unsupported value/);
   assert.throws(() => parseHistoryResult({ entries: [entry], hasEarlier: false, nextBeforeEntryId: "h2", instance: validSnapshot() }), /cursor is inconsistent/);
   assert.throws(() => parseHistoryResult({ entries: [{ ...entry, content: [{ type: "text", text: "x", raw: true }] }], hasEarlier: false, instance: validSnapshot() }), /Unexpected field/);
+});
+
+test("conversation content results keep bounded chunks and independent completeness", () => {
+  const entry = { entryId: "h2", parentId: "h1", role: "assistant", timestamp: "2026-07-14T00:00:00.000Z", content: [{ type: "text", text: "preview" }], stopReason: "stop" };
+  const history = parseConversationHistoryResult({
+    instance: validSnapshot(),
+    revision: "revision-1",
+    entries: [{ entry, contentRef: "content-1", contentComplete: false, totalBlocks: 2 }],
+    hasEarlier: true,
+    nextCursor: "history-cursor",
+  });
+  assert.equal(history.entries[0]?.contentComplete, false);
+  assert.equal(history.entries[0]?.totalBlocks, 2);
+  assert.throws(() => parseConversationHistoryResult({ ...history, hasEarlier: false }), /cursor is inconsistent/);
+
+  const content = parseConversationContentResult({
+    instanceId: "i1",
+    runtimeGeneration: 1,
+    revision: "revision-1",
+    contentRef: "content-1",
+    chunks: [
+      { blockIndex: 0, type: "text", text: "part", offset: 0, blockComplete: false },
+      { blockIndex: 1, type: "tool_call", toolCallId: "call-1", toolName: "search", argumentsJson: "{\"query\":\"part\"}", offset: 0, blockComplete: true },
+    ],
+    complete: false,
+    nextCursor: "content-cursor",
+  });
+  assert.equal(content.chunks.length, 2);
+  assert.throws(() => parseConversationContentResult({ ...content, complete: true }), /cursor is inconsistent/);
+  const dataUri = `data:image/png;base64,${"A".repeat(256)}`;
+  const dataUriContent = parseConversationContentResult({
+    ...content,
+    chunks: [{ blockIndex: 0, type: "text", text: dataUri, offset: 0, blockComplete: true }],
+  });
+  assert.equal(dataUriContent.chunks[0]?.type === "text" ? dataUriContent.chunks[0].text : undefined, dataUri);
 });
 
 test("session metrics are closed, finite, non-negative, and percentage-bounded", () => {

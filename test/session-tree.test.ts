@@ -22,7 +22,7 @@ const nodes: TreeNodeDto[] = [
   { entryId: "u2", parentId: "model", depth: 3, kind: "message", role: "user", displayClass: "content", label: "decision", summary: "second", hasChildren: false },
 ];
 
-test("tree projection revisions include generation, leaf, labels, and structure while omitting binary summaries", () => {
+test("tree projection revisions include generation, leaf, labels, and semantic summaries", () => {
   const runtime = {
     nodes: nodes.map((node) => ({ ...node, ...(node.entryId === "tool" ? { summary: `Tool result: ${"A0+/".repeat(32)}` } : {}) })),
     leafId: "u2",
@@ -34,8 +34,8 @@ test("tree projection revisions include generation, leaf, labels, and structure 
   assert.equal(first.treeRevision, same.treeRevision);
   assert.notEqual(first.treeRevision, nextGeneration.treeRevision);
   assert.notEqual(first.treeRevision, nextLeaf.treeRevision);
-  assert.equal(first.nodes.find((node) => node.entryId === "tool")?.summary, "Session entry details omitted");
-  assert.doesNotMatch(JSON.stringify(first), /A0\+\//);
+  assert.equal(first.nodes.find((node) => node.entryId === "tool")?.summary, `Tool result: ${"A0+/".repeat(32)}`);
+  assert.match(JSON.stringify(first), /A0\+\//);
   assert.throws(() => projectRuntimeTree({ nodes: [{ ...runtime.nodes[0]!, depth: 1 }], leafId: "u1" }, 1), /depth zero/);
   assert.throws(() => projectRuntimeTree({ nodes: [{ ...runtime.nodes[0]!, hasChildren: false }, runtime.nodes[1] as typeof runtime.nodes[number]], leafId: "tool" }, 1), /child projection/);
   assert.throws(() => projectRuntimeTree({ nodes: [runtime.nodes[0] as typeof runtime.nodes[number], { ...runtime.nodes[2]!, parentId: "tool", depth: 2 }], leafId: "model" }, 1), /depth-first pre-order/);
@@ -58,15 +58,16 @@ test("tree projection accepts its documented 100000-node bound and rejects the n
   );
 });
 
-test("navigation result projection is closed, abort-consistent, and binary-safe", () => {
+test("navigation result projection is closed, abort-consistent, and preserves semantic text", () => {
   assert.deepEqual(projectRuntimeNavigateResult({ cancelled: false, editorText: "line 1\r\nline 2", summaryCreated: false }), {
     cancelled: false, editorText: "line 1\nline 2", summaryCreated: false,
   });
   assert.throws(() => projectRuntimeNavigateResult({ cancelled: false, aborted: true, summaryCreated: false }), /must be cancelled/);
   assert.throws(() => projectRuntimeNavigateResult({ cancelled: true, editorText: "stale", summaryCreated: false }), /cannot return editor text/);
   assert.throws(() => projectRuntimeNavigateResult({ cancelled: false, editorText: "x".repeat(256_001), summaryCreated: false }), /oversized/);
-  assert.deepEqual(projectRuntimeNavigateResult({ cancelled: false, editorText: `attachment: ${"A0+/".repeat(32)}`, summaryCreated: false }), {
-    cancelled: false, summaryCreated: false,
+  const encodedText = `attachment: ${"A0+/".repeat(32)}`;
+  assert.deepEqual(projectRuntimeNavigateResult({ cancelled: false, editorText: encodedText, summaryCreated: false }), {
+    cancelled: false, editorText: encodedText, summaryCreated: false,
   });
 });
 

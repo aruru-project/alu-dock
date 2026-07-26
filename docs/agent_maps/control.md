@@ -94,7 +94,7 @@ DockClient
 
 ## Bounds 与显式降级
 
-- Protocol V2 单条 JSONL 记录上限是1 MiB；runtime structured JSON仍按节点、字段和聚合字节预算投影。Pi built-in tool text/display diff不受通用8,000字符限制，独立允许到256,000字符以容纳正常完整结果；只有接近control-frame上限时才触发明确的transport fallback，不能让oversized live event成为反复断流的poison event。`tool-result-presentation.v1`只传`bash/read/edit/write/grep/find/ls`可识别的preview、notice与edit display diff；未知optional metadata被忽略，不能导致有效tool text整块拒收。raw/private details与binary/data URI仍不得进入wire。
+- Protocol V2 单条 JSONL 记录上限是1 MiB，但这只是transport frame bound，不是语义上限。普通文本、Data URI、raw base64与结构化image data不得按内容猜测、拒绝或删除；大型conversation通过`conversation.content.v1`按revision/contentRef/cursor分片读取。Pi built-in tool text/display diff的legacy projection只负责bounded preview；authoritative content必须可继续读取。`tool-result-presentation.v1`只传`bash/read/edit/write/grep/find/ls`可识别的preview、notice与edit display diff；未知optional metadata被忽略，不能导致有效tool text整块拒收。
 - `projection.completeness.v1` 为 model、tool、resource、diagnostic、command 与 Pi-session list 返回 `total`/`truncated`；新 DockClient 必须协商该能力并在 Work 中提示不完整投影。Host 对未协商该能力的旧客户端保留 legacy result shape，且 operation receipt 永远缓存能力无关的 canonical result。
 - `session.inventory-diagnostics.v1` 区分“确实没有 saved session”与 JSONL root/directory/file 扫描失败；结果带 `incomplete`、bounded diagnostics 和 `diagnosticsTruncated`。Hub/Resume 必须显示该事实，不能把失败说成空 inventory。
 - Attach 初始化与 live follow 都使用 1,000-event / 4 MiB 双界限。`socket.write() === false` 只表示背压：Host 必须等待 drain，并在有界队列内保持 cursor 顺序；只有 drain timeout 或队列超限才关闭该观察流，且不得影响 Host-owned runtime。初始化超限写入 bounded degradation event 供 reconnect 观察；若响应尚未发布，同时返回 `attach_initial_overflow`。client initial-callback handoff 的同类溢出使用 `event_handoff_overflow`。

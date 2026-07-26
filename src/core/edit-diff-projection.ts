@@ -1,8 +1,5 @@
 const DISPLAY_EDIT_CHANGE = /^[+-]\s*\d+\s/u;
 const DISPLAY_EDIT_ROW = /^[ +-](?:\s*\d+\s|\s+\.\.\.$)/u;
-const DATA_URI = /data:[^,]*;base64,/iu;
-const BASE64_PAYLOAD = /^(?=.{128,}$)(?=.*(?:[0-9+/]|={1,2}$))(?:[A-Za-z0-9+/]{4})+(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u;
-
 export const TOOL_OUTPUT_TRUNCATION_MARKER = "[tool output truncated by Host projection]";
 // Keep Pi's display diff intact in normal operation. This only leaves room below
 // the 1 MiB control-frame ceiling for envelopes and adjacent history metadata.
@@ -18,7 +15,7 @@ export function isDisplayEditDiff(value: unknown): boolean {
 
 /** Preserve Pi's display diff; only the control-frame fallback may shorten it. */
 export function projectDisplayEditDiff(value: unknown): string | undefined {
-  if (typeof value !== "string" || containsBinaryText(value) || !isDisplayEditDiff(value)) return undefined;
+  if (typeof value !== "string" || !isDisplayEditDiff(value)) return undefined;
   if (value.length <= MAX_TRANSPORT_EDIT_DIFF_CHARS) return value;
   const notice = `\n${TOOL_OUTPUT_TRUNCATION_MARKER}`;
   const requestedEnd = MAX_TRANSPORT_EDIT_DIFF_CHARS - notice.length;
@@ -32,7 +29,7 @@ export function projectDisplayEditDiff(value: unknown): string | undefined {
 
 /** Accept only raw display diffs or the exact bounded form produced above. */
 export function isProjectedDisplayEditDiff(value: unknown): boolean {
-  if (typeof value !== "string" || value.length === 0 || value.length > MAX_TRANSPORT_EDIT_DIFF_CHARS || containsBinaryText(value)) return false;
+  if (typeof value !== "string" || value.length === 0 || value.length > MAX_TRANSPORT_EDIT_DIFF_CHARS) return false;
   if (isDisplayEditDiff(value)) return true;
   const notice = `\n${TOOL_OUTPUT_TRUNCATION_MARKER}`;
   if ((value.length !== MAX_TRANSPORT_EDIT_DIFF_CHARS && value.length !== MAX_TRANSPORT_EDIT_DIFF_CHARS - 1) || !value.endsWith(notice)) return false;
@@ -48,9 +45,4 @@ function isDisplayEditRowPrefix(value: string): boolean {
   if (value.length === 0) return true;
   return /^[ +-](?: *| *\d+| *\d+ .*)$/u.test(value)
     || /^  *\.{0,3}$/u.test(value);
-}
-
-function containsBinaryText(value: string): boolean {
-  if (DATA_URI.test(value) || BASE64_PAYLOAD.test(value.replace(/\s+/gu, ""))) return true;
-  return value.split(/[^A-Za-z0-9+/=]+/gu).some((part) => BASE64_PAYLOAD.test(part));
 }

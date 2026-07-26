@@ -114,7 +114,62 @@ test("private worker protocol rejects malformed critical events, unknown capabil
   }), /fence/);
 });
 
-test("Worker controller directive capabilities are exact, bounded, control-safe, and payload-free", () => {
+test("Worker conversation capabilities keep pages bounded and validate lossless chunks", () => {
+  assert.doesNotThrow(() => parseWorkerEnvelope({
+    kind: "call",
+    callId: "history-call",
+    capability: "runtime.getConversationHistory",
+    args: { cursor: "cursor-1", limit: 50 },
+  }));
+  assert.doesNotThrow(() => validateCapabilityResult("runtime.getConversationHistory", {
+    revision: "revision-1",
+    entries: [{
+      entry: { entryId: "entry-1", role: "assistant", content: [{ type: "text", text: "preview" }] },
+      contentRef: "content-1",
+      contentComplete: false,
+      totalBlocks: 1,
+    }],
+    hasEarlier: true,
+    nextCursor: "cursor-2",
+  }));
+  assert.doesNotThrow(() => validateCapabilityResult("runtime.getConversationContent", {
+    revision: "revision-1",
+    contentRef: "content-1",
+    chunks: [{
+      blockIndex: 0,
+      type: "tool_call",
+      toolCallId: "call-1",
+      toolName: "search",
+      argumentsJson: "{\"query\":\"value\"}",
+      offset: 0,
+      blockComplete: true,
+    }],
+    complete: false,
+    nextCursor: "cursor-3",
+  }));
+  assert.throws(() => validateCapabilityResult("runtime.getConversationContent", {
+    revision: "revision-1",
+    contentRef: "content-1",
+    chunks: [{ blockIndex: 0, type: "text", text: "x".repeat(32_001), offset: 0, blockComplete: true }],
+    complete: true,
+  }), /bounded/i);
+  assert.throws(() => validateCapabilityResult("runtime.getConversationContent", {
+    revision: "revision-1",
+    contentRef: "content-1",
+    chunks: Array.from({ length: 17 }, (_, blockIndex) => ({
+      blockIndex, type: "text", text: "😀".repeat(16_000), offset: 0, blockComplete: true,
+    })),
+    complete: true,
+  }), /capability bound/i);
+  assert.throws(() => validateCapabilityResult("runtime.getConversationContent", {
+    revision: "revision-1",
+    contentRef: "content-1",
+    chunks: [],
+    complete: false,
+  }), /continuation/i);
+});
+
+test("Worker controller directive capabilities are exact, bounded, control-safe, and preserve semantic text", () => {
   const call = (capability: "ui.setTitle" | "ui.setEditorText", args: Record<string, unknown>) => parseWorkerEnvelope({ kind: "call", callId: "directive-call", capability, args });
   assert.ok(ORDINARY_REVERSE_WORKER_CAPABILITIES.includes("ui.setTitle"));
   assert.ok(ORDINARY_REVERSE_WORKER_CAPABILITIES.includes("ui.setEditorText"));
@@ -123,7 +178,7 @@ test("Worker controller directive capabilities are exact, bounded, control-safe,
   assert.throws(() => call("ui.setTitle", { title: "bad\nline" }), /control-safe/i);
   assert.throws(() => call("ui.setTitle", { title: "x".repeat(2_049) }), /bounded/i);
   assert.throws(() => call("ui.setEditorText", { text: "bad\u001b[2J" }), /control-safe/i);
-  assert.throws(() => call("ui.setEditorText", { text: "data:image/png;base64,A0+\/A0+\/" }), /payload-free/i);
+  assert.doesNotThrow(() => call("ui.setEditorText", { text: "data:image/png;base64,A0+\/A0+\/" }));
   assert.throws(() => call("ui.setEditorText", { text: "x".repeat(256_001) }), /bounded/i);
   assert.throws(() => call("ui.setTitle", { title: "ok", injected: true }), /unknown field/i);
   assert.throws(() => validateCapabilityResult("ui.setTitle", "unexpected"), /must be empty/i);

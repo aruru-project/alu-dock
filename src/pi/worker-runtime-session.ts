@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 
 import type { ExtensionUiBroker } from "../core/extension-ui-broker.js";
 import type {
-  ClearedRuntimeQueue, RuntimeCompactionResult, RuntimeEvent, RuntimeForkResult,
+  ClearedRuntimeQueue, RuntimeCompactionResult, RuntimeConversationContentPage,
+  RuntimeConversationHistoryPage, RuntimeEvent, RuntimeForkResult,
   RuntimeHistoryEntry, RuntimeInputKind, RuntimeModelInfo, RuntimeModelState,
   RuntimeNavigateOptions, RuntimeNavigateResult, RuntimePromptOptions, RuntimeProjectTrust,
   RuntimeReplacementResult, RuntimeSession, RuntimeSessionInfo, RuntimeSessionMetrics,
@@ -123,6 +124,12 @@ export class WorkerRuntimeSession implements RuntimeSession {
   queueMessage(text: string, delivery: "steer" | "followUp", images?: import("../core/runtime-session.js").RuntimeImagePath[]): Promise<void> { return this.call("runtime.queueMessage", { text, delivery, ...(images === undefined ? {} : { images: structuredClone(images) }) }, "mutation").then(() => {}); }
   listModels(): Promise<RuntimeModelInfo[]> { return this.call("runtime.listModels", {}, "request") as Promise<RuntimeModelInfo[]>; }
   listSessions(scope: "cwd" | "all"): Promise<RuntimeSessionInfo[]> { return this.call("runtime.listSessions", { scope }, "request") as Promise<RuntimeSessionInfo[]>; }
+  getConversationHistory(cursor?: string, limit?: number): Promise<RuntimeConversationHistoryPage> {
+    return this.call("runtime.getConversationHistory", { ...(cursor === undefined ? {} : { cursor }), ...(limit === undefined ? {} : { limit }) }, "request") as Promise<RuntimeConversationHistoryPage>;
+  }
+  getConversationContent(contentRef: string, cursor?: string): Promise<RuntimeConversationContentPage> {
+    return this.call("runtime.getConversationContent", { contentRef, ...(cursor === undefined ? {} : { cursor }) }, "request") as Promise<RuntimeConversationContentPage>;
+  }
   navigateTree(targetId: string, options?: RuntimeNavigateOptions): Promise<RuntimeNavigateResult> { return this.call("runtime.navigateTree", { targetId, ...(options === undefined ? {} : { options }) }, "none") as Promise<RuntimeNavigateResult>; }
   listTools(): Promise<ToolDto[] | RuntimeToolProjection> { return this.call("runtime.listTools", {}, "request") as Promise<ToolDto[] | RuntimeToolProjection>; }
   setActiveTools(names: string[]): Promise<ToolDto[] | RuntimeToolProjection> { return this.call("runtime.setActiveTools", { names }, "mutation") as Promise<ToolDto[] | RuntimeToolProjection>; }

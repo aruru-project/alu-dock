@@ -46,6 +46,7 @@ class FakeSession {
   readonly listeners = new Set<(event: { type: string; [key: string]: unknown }) => void>();
   readonly sessionManager = {
     getCwd: () => "/project",
+    getSessionId: () => this.sessionId,
     getSessionDir: () => "/sessions",
     usesDefaultSessionDir: () => this.usesDefaultSessionDir,
     getBranch: () => structuredClone(this.historyEntries),
@@ -629,8 +630,10 @@ test("Pi runtime events expose useful built-in presentation without raw private 
     },
   });
   const messageEvent = events.find((candidate) => candidate.type === "message_end");
-  assert.doesNotMatch(JSON.stringify(messageEvent), /data:image|private-image-bytes|AAAA/u);
-  assert.match(JSON.stringify(messageEvent), /Sensitive content omitted|Image bytes omitted/u);
+  assert.match(JSON.stringify(messageEvent), /data:image\/png;base64/);
+  assert.match(JSON.stringify(messageEvent), /A{128}/);
+  assert.doesNotMatch(JSON.stringify(messageEvent), /private-image-bytes/u);
+  assert.match(JSON.stringify(messageEvent), /image\/png/u);
   await host.dispose();
 });
 
@@ -657,6 +660,129 @@ test("Pi runtime history uses public context entries in model-visible order", as
   );
   assert.equal(host.getHistory().some((entry) => entry.entryId === "hidden"), false);
   assert.equal(host.getHistory().some((entry) => entry.entryId === "hidden-guard"), false);
+  await host.dispose();
+});
+
+test("Pi runtime conversation pages recover content beyond legacy text, block, and aggregate bounds", async () => {
+  const longText = `${"A sentence with unicode 你.\n".repeat(23_000)}😀tail`;
+  const longThinking = `${"想".repeat(40_000)}end`;
+  const toolArguments = { query: "ordinary search phrase with spaces. ".repeat(2_500), nested: { keep: true } };
+  const dataUri = `data:image/png;base64,${"A".repeat(256)}`;
+  const imageData = "iVBORw0KGgo".repeat(20_000);
+  const smallBlocks = Array.from({ length: 205 }, (_, index) => ({ type: "text" as const, text: `block-${index}` }));
+  const { host, initial } = await runtimeHost([], (_owner, session) => {
+    session.historyEntries = [{
+      type: "message",
+      id: "large-assistant",
+      parentId: null,
+      timestamp: "2026-07-14T00:00:00.000Z",
+      message: {
+        role: "assistant",
+        content: [
+          ...smallBlocks,
+          { type: "text", text: longText },
+          { type: "thinking", thinking: longThinking },
+          { type: "toolCall", id: "call-large", name: "search", arguments: toolArguments },
+          { type: "text", text: dataUri },
+        ],
+        stopReason: "stop",
+        timestamp: 1,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        api: "fixture",
+        provider: "fixture",
+        model: "fixture",
+      },
+    }, {
+      type: "message",
+      id: "image-user",
+      parentId: "large-assistant",
+      timestamp: "2026-07-14T00:00:01.000Z",
+      message: { role: "user", content: [{ type: "image", data: imageData, mimeType: "image/png" }], timestamp: 2 },
+    }];
+  });
+
+  const history = await host.getConversationHistory(undefined, 2);
+  assert.equal(history.entries.length, 2);
+  const largeHistory = history.entries.find((item) => item.entry.entryId === "large-assistant");
+  const imageHistory = history.entries.find((item) => item.entry.entryId === "image-user");
+  assert.equal(largeHistory?.contentComplete, false);
+  assert.equal(largeHistory?.totalBlocks, 209);
+  assert.equal(imageHistory?.totalBlocks, 1);
+  assert.ok(JSON.stringify(largeHistory?.entry).length < 16_000, "history is a bounded preview");
+
+  const contentRef = largeHistory!.contentRef;
+  const textByBlock = new Map<number, string>();
+  let cursor: string | undefined;
+  let revision: string | undefined;
+  let pageCount = 0;
+  do {
+    const page = await host.getConversationContent(contentRef, cursor);
+    revision ??= page.revision;
+    assert.equal(page.revision, revision);
+    pageCount += 1;
+    for (const chunk of page.chunks) {
+      if (chunk.type === "text" || chunk.type === "thinking") {
+        const previous = textByBlock.get(chunk.blockIndex) ?? "";
+        assert.equal(chunk.offset, previous.length);
+        textByBlock.set(chunk.blockIndex, previous + chunk.text);
+      } else if (chunk.type === "tool_call") {
+        const previous = textByBlock.get(chunk.blockIndex) ?? "";
+        assert.equal(chunk.offset, previous.length);
+        textByBlock.set(chunk.blockIndex, previous + chunk.argumentsJson);
+      }
+    }
+    cursor = page.nextCursor;
+    if (page.complete) assert.equal(cursor, undefined);
+  } while (cursor !== undefined);
+
+  assert.ok(pageCount > 1, "content spans multiple bounded pages");
+  assert.equal(textByBlock.get(205), longText);
+  assert.equal(textByBlock.get(206), longThinking);
+  assert.deepEqual(JSON.parse(textByBlock.get(207) ?? ""), toolArguments);
+  assert.equal(textByBlock.get(208), dataUri);
+
+  let imageCursor: string | undefined;
+  let recoveredImage = "";
+  do {
+    const page = await host.getConversationContent(imageHistory!.contentRef, imageCursor);
+    for (const chunk of page.chunks) {
+      if (chunk.type !== "image") continue;
+      assert.equal(chunk.offset, recoveredImage.length);
+      assert.equal(chunk.mimeType, "image/png");
+      recoveredImage += chunk.data;
+    }
+    imageCursor = page.nextCursor;
+  } while (imageCursor !== undefined);
+  assert.equal(recoveredImage, imageData);
+
+  initial.historyEntries.push({
+    type: "message",
+    id: "new-user",
+    parentId: "large-assistant",
+    timestamp: "2026-07-14T00:00:01.000Z",
+    message: { role: "user", content: "new", timestamp: 2 },
+  });
+  await assert.rejects(host.getConversationContent(contentRef), /reference is stale/);
+  await host.dispose();
+});
+
+test("Pi runtime splits oversized live text deltas without losing Unicode", async () => {
+  const { host, initial } = await runtimeHost([]);
+  const events: Array<Record<string, unknown>> = [];
+  host.subscribe((event) => events.push(event));
+  host.activateInitial();
+  const delta = `${"x".repeat(7_999)}😀${"y".repeat(8_100)}`;
+  initial.emit({
+    type: "agent_message_delta",
+    assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta },
+  });
+  const updates = events
+    .filter((event) => event.type === "agent_message_delta")
+    .map((event) => event.assistantMessageEvent as { delta: string });
+  assert.ok(updates.length >= 3);
+  assert.equal(updates.map((update) => update.delta).join(""), delta);
+  assert.ok(updates.every((update) => update.delta.length <= 8_000));
+  assert.ok(updates.every((update) => !/[\uD800-\uDBFF]$/u.test(update.delta)));
   await host.dispose();
 });
 
@@ -1525,7 +1651,7 @@ test("Pi runtime host isolates settings errors around model and thinking mutatio
   await host.dispose();
 });
 
-test("Pi runtime host projects tools without executable or binary payloads", async () => {
+test("Pi runtime host projects typed tool metadata without executable values or text guessing", async () => {
   const trace: string[] = [];
   const { host, initial } = await runtimeHost(trace, (_owner, session) => {
     session.activeToolNames = ["read"];
@@ -1553,9 +1679,9 @@ test("Pi runtime host projects tools without executable or binary payloads", asy
   assert.deepEqual(tools.map((tool) => tool.name), ["extension-tool", "read"]);
   const read = tools.find((tool) => tool.name === "read");
   assert.deepEqual(read?.source, { kind: "built-in" });
-  assert.equal(read?.description, "Tool description omitted");
+  assert.equal(read?.description, "data:image/png;base64,c2VjcmV0");
   assert.deepEqual(read?.parameterSchema, { type: "object", safe: "value" });
-  assert.doesNotMatch(JSON.stringify(tools), /data:image|secret|promptGuidelines|execute/);
+  assert.doesNotMatch(JSON.stringify(tools), /secret|promptGuidelines|execute/);
   assert.deepEqual(tools[0]?.source, { kind: "extension", path: "/agent/extensions/tool.ts", package: "example-package" });
 
   await assert.rejects(host.setActiveTools(["missing"]), /Unknown tool/);
@@ -1566,7 +1692,7 @@ test("Pi runtime host projects tools without executable or binary payloads", asy
   await host.dispose();
 });
 
-test("Pi runtime host projects executable resource and command metadata without bodies or handlers", async () => {
+test("Pi runtime host projects executable resource and command metadata without bodies, handlers, or text guessing", async () => {
   const trace: string[] = [];
   const sourceInfo = { path: "/agent/extensions/example.ts", source: "example-package", scope: "user" as const, origin: "package" as const };
   const secondSource = { ...sourceInfo, path: "/agent/extensions/example-2.ts" };
@@ -1617,8 +1743,8 @@ test("Pi runtime host projects executable resource and command metadata without 
     "skill:skill-a",
   ]);
   assert.equal(result.diagnostics.length, 3);
-  assert.equal(result.diagnostics[0]?.message, "Extension load failure omitted");
-  assert.doesNotMatch(JSON.stringify(result), /data:image|TOP SECRET|handler/);
+  assert.equal(result.diagnostics[0]?.message, "data:image/png;base64,c2VjcmV0");
+  assert.doesNotMatch(JSON.stringify(result), /TOP SECRET|handler/);
   const commands = await host.getCommands();
   assert.deepEqual(commands.map((item) => `${item.source.kind}:${item.name}`), [
     "prompt:prompt-a",

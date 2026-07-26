@@ -134,11 +134,8 @@ function assertSettingValue(key: SettingKey, value: unknown): void {
   }
 }
 
-const DATA_URI = /data:[^,]*;base64,/i;
-const RAW_BASE64 = /^(?:[A-Za-z0-9+/]{4}){32,}(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
-
 function boundedErrorMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
-  if (message.length === 0 || DATA_URI.test(message) || RAW_BASE64.test(message.replace(/\s+/g, ""))) return "Settings error details omitted";
+  if (message.length === 0) return "Settings error details omitted";
   return message.length <= 2_048 ? message : `${message.slice(0, 2_047)}…`;
 }

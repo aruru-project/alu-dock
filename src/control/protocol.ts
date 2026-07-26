@@ -1,4 +1,4 @@
-import { containsBinaryPayload, type InteractionResponse } from "../core/extension-ui-broker.js";
+import type { InteractionResponse } from "../core/extension-ui-broker.js";
 import {
   validateBuiltInToolPresentation,
   type BuiltInToolPresentation,
@@ -14,6 +14,9 @@ import {
 import type {
   CommandReceipt,
   ContentBlockDto,
+  ConversationContentChunkDto,
+  ConversationContentPageDto,
+  ConversationHistoryPageDto,
   DeliveryMode,
   DockEvent,
   EventCursor,
@@ -57,6 +60,7 @@ export const MAX_CAPABILITIES = 128;
 export const MAX_CAPABILITY_CHARS = 128;
 export const MAX_REPLAY_EVENTS = 1_000;
 export const MAX_HISTORY_ITEMS = 200;
+export const MAX_CONVERSATION_HISTORY_ITEMS = 50;
 export const MAX_INSTANCE_LIST_ITEMS = 100;
 // Leave ample room for the response envelope under MAX_CONTROL_LINE_BYTES.
 export const MAX_INSTANCE_LIST_RESULT_BYTES = 768 * 1_024;
@@ -78,10 +82,12 @@ export const GIT_BRANCH_CAPABILITY = "git.branch-footer.v1" as const;
 export const TOOL_RESULT_PRESENTATION_CAPABILITY = "tool-result-presentation.v1" as const;
 export const IMAGE_INPUT_CAPABILITY = "command.images.path.v1" as const;
 export const INSTANCE_KEYS_CAPABILITY = "instance.keys.v1" as const;
+export const CONVERSATION_CONTENT_CAPABILITY = "conversation.content.v1" as const;
 
 export const IMPLEMENTED_CAPABILITIES = [
   "catalog.maintenance.v1",
   "catalog.v1",
+  CONVERSATION_CONTENT_CAPABILITY,
   "core.v2",
   IMAGE_INPUT_CAPABILITY,
   "events.follow",
@@ -180,6 +186,8 @@ export type ControlRequest =
   | Request<"resource.get", { instanceId: string }>
   | Request<"command.catalog", { instanceId: string; prefix?: string }>
   | Request<"session.history", { instanceId: string; beforeEntryId?: string; limit: number }>
+  | Request<"conversation.history", { instanceId: string; cursor?: string; limit: number }>
+  | Request<"conversation.content", { instanceId: string; contentRef: string; cursor?: string }>
   | Request<"session.inventory", { cwd: string; scope: "cwd" | "all" }>
   | Request<"session.list", { instanceId: string; scope: "cwd" | "all" }>
   | Request<"session.switch", { operationId: string; instanceId: string; sessionFile: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
@@ -250,6 +258,8 @@ export interface SessionInventoryResult {
   diagnosticsTruncated: boolean;
 }
 export interface HistoryResult { entries: HistoryEntryDto[]; hasEarlier: boolean; nextBeforeEntryId?: string; instance: InstanceSnapshot }
+export type ConversationHistoryResult = ConversationHistoryPageDto;
+export type ConversationContentResult = ConversationContentPageDto;
 export interface SessionReplacementResult { cancelled: boolean; instance: InstanceSnapshot }
 export interface SessionNameResult { instance: InstanceSnapshot }
 export interface SessionCompactionResult { result: { summary: string; firstKeptEntryId: string; tokensBefore: number }; instance: InstanceSnapshot }
@@ -286,6 +296,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "command.abort") return "run.abort.v1";
   if (type === "queue.dequeue") return "queue.control.v1";
   if (type === "session.history") return "tui.projection.v1";
+  if (type === "conversation.history" || type === "conversation.content") return CONVERSATION_CONTENT_CAPABILITY;
   if (type === "session.inventory") return "session.inventory.v1";
   if (type === "session.tree" || type === "session.navigate" || type === "session.fork" || type === "session.clone") return "session.tree.v1";
   if (type === "command.submit" || type === "session.list") return "session.core";
@@ -316,6 +327,7 @@ function capabilityProjectsInstanceSnapshot(capability: Capability): boolean {
   return capability === TOOLS_EXPANDED_CAPABILITY
     || capability === GIT_BRANCH_CAPABILITY
     || capability === INSTANCE_KEYS_CAPABILITY
+    || capability === CONVERSATION_CONTENT_CAPABILITY
     || capability === "events.follow"
     || capability === "events.replay-purpose.v1"
     || capability === "instance.catalog"
@@ -546,6 +558,19 @@ export function parseControlRequest(input: unknown): ControlRequest {
       exact(params, ["instanceId", "beforeEntryId", "limit"], "invalid_request");
       if (!Number.isSafeInteger(params.limit) || (params.limit as number) < 1 || (params.limit as number) > MAX_HISTORY_ITEMS) throw validation("invalid_request", `params.limit must be between 1 and ${MAX_HISTORY_ITEMS}`);
       return { ...base, type, params: { instanceId: instanceId(), beforeEntryId: optionalString(params.beforeEntryId, "params.beforeEntryId", 128, "invalid_request"), limit: params.limit as number } };
+    }
+    case "conversation.history": {
+      exact(params, ["instanceId", "cursor", "limit"], "invalid_request");
+      if (!Number.isSafeInteger(params.limit) || (params.limit as number) < 1 || (params.limit as number) > MAX_CONVERSATION_HISTORY_ITEMS) throw validation("invalid_request", `params.limit must be between 1 and ${MAX_CONVERSATION_HISTORY_ITEMS}`);
+      return { ...base, type, params: { instanceId: instanceId(), cursor: optionalString(params.cursor, "params.cursor", 128, "invalid_request"), limit: params.limit as number } };
+    }
+    case "conversation.content": {
+      exact(params, ["instanceId", "contentRef", "cursor"], "invalid_request");
+      return { ...base, type, params: {
+        instanceId: instanceId(),
+        contentRef: string(params.contentRef, "params.contentRef", 128, "invalid_request"),
+        cursor: optionalString(params.cursor, "params.cursor", 128, "invalid_request"),
+      } };
     }
     case "session.inventory": {
       exact(params, ["cwd", "scope"], "invalid_request");
@@ -897,6 +922,118 @@ export function parseHistoryResult(input: unknown): HistoryResult {
   return { entries, hasEarlier, nextBeforeEntryId, instance: parseInstance(value.instance, "instance") };
 }
 
+export function parseConversationHistoryResult(input: unknown): ConversationHistoryResult {
+  const value = object(input, "conversation history result");
+  exact(value, ["instance", "revision", "entries", "hasEarlier", "nextCursor"]);
+  const revision = string(value.revision, "revision", 128);
+  const entries = array(value.entries, "entries", MAX_CONVERSATION_HISTORY_ITEMS).map((item, index) => {
+    const entry = object(item, `entries[${index}]`);
+    exact(entry, ["entry", "contentRef", "contentComplete", "totalBlocks"]);
+    const totalBlocks = unsigned(entry.totalBlocks, `entries[${index}].totalBlocks`);
+    if (totalBlocks > 1_000_000) throw validation("invalid_response", `entries[${index}].totalBlocks exceeds the supported bound`);
+    return {
+      entry: parseHistoryEntry(entry.entry, `entries[${index}].entry`),
+      contentRef: string(entry.contentRef, `entries[${index}].contentRef`, 128),
+      contentComplete: boolean(entry.contentComplete, `entries[${index}].contentComplete`),
+      totalBlocks,
+    };
+  });
+  const ids = entries.map((item) => item.entry.entryId);
+  if (new Set(ids).size !== ids.length) throw validation("invalid_response", "conversation history entry IDs must be unique");
+  const refs = entries.map((item) => item.contentRef);
+  if (new Set(refs).size !== refs.length) throw validation("invalid_response", "conversation content references must be unique");
+  const hasEarlier = boolean(value.hasEarlier, "hasEarlier");
+  const nextCursor = optionalString(value.nextCursor, "nextCursor", 128);
+  if (hasEarlier !== (nextCursor !== undefined)) throw validation("invalid_response", "conversation history pagination cursor is inconsistent");
+  if (hasEarlier && entries.length === 0) throw validation("invalid_response", "a continued conversation history page cannot be empty");
+  return {
+    instance: parseActiveSessionInstance(value.instance, "Conversation history"),
+    revision,
+    entries,
+    hasEarlier,
+    ...(nextCursor === undefined ? {} : { nextCursor }),
+  };
+}
+
+export function parseConversationContentResult(input: unknown): ConversationContentResult {
+  const value = object(input, "conversation content result");
+  exact(value, ["instanceId", "runtimeGeneration", "revision", "contentRef", "chunks", "complete", "nextCursor"]);
+  const chunks = array(value.chunks, "chunks", 64).map((item, index) => parseConversationContentChunk(item, `chunks[${index}]`));
+  const complete = boolean(value.complete, "complete");
+  const nextCursor = optionalString(value.nextCursor, "nextCursor", 128);
+  if (complete === (nextCursor !== undefined)) throw validation("invalid_response", "conversation content pagination cursor is inconsistent");
+  if (!complete && chunks.length === 0) throw validation("invalid_response", "an incomplete conversation content page cannot be empty");
+  return {
+    instanceId: id(value.instanceId, "instanceId"),
+    runtimeGeneration: positive(value.runtimeGeneration, "runtimeGeneration"),
+    revision: string(value.revision, "revision", 128),
+    contentRef: string(value.contentRef, "contentRef", 128),
+    chunks,
+    complete,
+    ...(nextCursor === undefined ? {} : { nextCursor }),
+  };
+}
+
+function parseConversationContentChunk(input: unknown, field: string): ConversationContentChunkDto {
+  const chunk = object(input, field);
+  const type = enumeration(chunk.type, `${field}.type`, ["text", "thinking", "image", "tool_call", "tool_result", "omitted"] as const);
+  const blockIndex = unsigned(chunk.blockIndex, `${field}.blockIndex`);
+  if (type === "text" || type === "thinking") {
+    exact(chunk, ["blockIndex", "type", "text", "offset", "blockComplete"]);
+    return {
+      blockIndex,
+      type,
+      text: payloadFreeBoundedString(chunk.text, `${field}.text`, 32_000),
+      offset: unsigned(chunk.offset, `${field}.offset`),
+      blockComplete: boolean(chunk.blockComplete, `${field}.blockComplete`),
+    };
+  }
+  if (type === "image") {
+    exact(chunk, ["blockIndex", "type", "mimeType", "data", "offset", "blockComplete"]);
+    return {
+      blockIndex,
+      type,
+      mimeType: imageMimeType(chunk.mimeType, `${field}.mimeType`),
+      data: boundedString(chunk.data, `${field}.data`, 32_000),
+      offset: unsigned(chunk.offset, `${field}.offset`),
+      blockComplete: boolean(chunk.blockComplete, `${field}.blockComplete`),
+    };
+  }
+  if (type === "tool_call") {
+    exact(chunk, ["blockIndex", "type", "toolCallId", "toolName", "argumentsJson", "offset", "blockComplete"]);
+    return {
+      blockIndex,
+      type,
+      toolCallId: id(chunk.toolCallId, `${field}.toolCallId`),
+      toolName: string(chunk.toolName, `${field}.toolName`, 256),
+      argumentsJson: payloadFreeBoundedString(chunk.argumentsJson, `${field}.argumentsJson`, 32_000),
+      offset: unsigned(chunk.offset, `${field}.offset`),
+      blockComplete: boolean(chunk.blockComplete, `${field}.blockComplete`),
+    };
+  }
+  if (type === "tool_result") {
+    exact(chunk, ["blockIndex", "type", "toolCallId", "toolName", "text", "offset", "blockComplete", "isError", "omittedFields"]);
+    return {
+      blockIndex,
+      type,
+      toolCallId: id(chunk.toolCallId, `${field}.toolCallId`),
+      toolName: string(chunk.toolName, `${field}.toolName`, 256),
+      text: payloadFreeBoundedString(chunk.text, `${field}.text`, 32_000),
+      offset: unsigned(chunk.offset, `${field}.offset`),
+      blockComplete: boolean(chunk.blockComplete, `${field}.blockComplete`),
+      isError: boolean(chunk.isError, `${field}.isError`),
+      omittedFields: omitted(chunk.omittedFields, `${field}.omittedFields`),
+    };
+  }
+  exact(chunk, ["blockIndex", "type", "kind", "description"]);
+  return {
+    blockIndex,
+    type,
+    kind: enumeration(chunk.kind, `${field}.kind`, ["image", "binary"] as const),
+    description: string(chunk.description, `${field}.description`, MAX_MESSAGE),
+  };
+}
+
 export function parseSessionReplacementResult(input: unknown): SessionReplacementResult {
   const value = object(input, "session replacement result"); exact(value, ["cancelled", "instance"]);
   const instance = parseInstance(value.instance, "instance");
@@ -1101,14 +1238,19 @@ function parseExecutor(input: unknown, field: string): ExecutorIdentity {
   if (executor.model !== undefined) { const value = object(executor.model, `${field}.model`); exact(value, ["provider", "id", "name"]); const name=optionalString(value.name, `${field}.model.name`, 256); model = { provider: string(value.provider, `${field}.model.provider`, MAX_MODEL_PROVIDER_CHARS), id: string(value.id, `${field}.model.id`, MAX_MODEL_ID_CHARS), ...(name === undefined ? {} : { name }) }; }
   return { kind: string(executor.kind, `${field}.kind`, 128), version: optionalString(executor.version, `${field}.version`, 128), piSessionId: id(executor.piSessionId, `${field}.piSessionId`), sessionFile: optionalString(executor.sessionFile, `${field}.sessionFile`, MAX_CONTROL_CWD_CHARS), model, thinkingLevel: executor.thinkingLevel === undefined ? undefined : enumeration(executor.thinkingLevel, `${field}.thinkingLevel`, THINKING_LEVELS) };
 }
+function imageMimeType(input: unknown, field: string, code = "invalid_response"): string {
+  const mimeType = string(input, field, MAX_IMAGE_MIME_TYPE_CHARS, code);
+  if (!/^image\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/u.test(mimeType)) throw validation(code, `${field} must be a bounded image/* value`);
+  return mimeType;
+}
+
 function parseImagePaths(input: unknown, field: string, code = "invalid_response"): ImagePathDto[] {
   const images = array(input, field, MAX_INPUT_IMAGES, code).map((item, index) => {
     const image = object(item, `${field}[${index}]`, code);
     exact(image, ["path", "mimeType"], code);
     const path = string(image.path, `${field}[${index}].path`, MAX_IMAGE_PATH_CHARS, code);
     if (!path.startsWith("/") || /[\u0000-\u001f\u007f-\u009f]/u.test(path)) throw validation(code, `${field}[${index}].path must be an absolute local path without control characters`);
-    const mimeType = string(image.mimeType, `${field}[${index}].mimeType`, MAX_IMAGE_MIME_TYPE_CHARS, code);
-    if (!/^image\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/u.test(mimeType)) throw validation(code, `${field}[${index}].mimeType must be a bounded image/* value`);
+    const mimeType = imageMimeType(image.mimeType, `${field}[${index}].mimeType`, code);
     return { path, mimeType };
   });
   if (new Set(images.map((image) => `${image.path}\u0000${image.mimeType}`)).size !== images.length) throw validation(code, `${field} must not contain duplicate descriptors`);
@@ -1331,7 +1473,6 @@ function parseInteractionResponse(input: unknown, field: string, code = "invalid
   }
   exact(value, ["method", "value"], code);
   const responseValue = string(value.value, `${field}.value`, method === "select" ? MAX_TEXT : MAX_PROMPT_CHARS, code);
-  if (containsBinaryPayload(responseValue)) throw validation(code, `${field}.value cannot contain binary, image, data URI, or raw base64 payloads`);
   return { method, value: responseValue };
 }
 
@@ -1349,23 +1490,15 @@ function parseDialogRequest(data: Record<string, unknown>, field: string): Event
 }
 
 function payloadFreeString(input: unknown, field: string, max: number, code = "invalid_response"): string {
-  const value = string(input, field, max, code);
-  if (containsBinaryPayload(value)) throw validation(code, `${field} cannot contain binary, image, data URI, or raw base64 payloads`);
-  return value;
+  return string(input, field, max, code);
 }
 
 function payloadFreeBoundedString(input: unknown, field: string, max: number, code = "invalid_response"): string {
-  const value = boundedString(input, field, max, code);
-  if (containsBinaryPayload(value)) throw validation(code, `${field} cannot contain binary, image, data URI, or raw base64 payloads`);
-  return value;
+  return boundedString(input, field, max, code);
 }
 
 function payloadFreeStrings(input: unknown, field: string, maxItems: number, maxChars: number, code = "invalid_response"): string[] {
-  const values = strings(input, field, maxItems, maxChars, code);
-  for (const [index, value] of values.entries()) {
-    if (containsBinaryPayload(value)) throw validation(code, `${field}[${index}] cannot contain binary, image, data URI, or raw base64 payloads`);
-  }
-  return values;
+  return strings(input, field, maxItems, maxChars, code);
 }
 
 function extensionKey(input: unknown, field: string): string {

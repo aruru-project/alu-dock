@@ -1,5 +1,6 @@
 import {
   RuntimeCompactionKnownFailureError,
+  RuntimeConversationCursorError,
   RuntimeInvalidSettingValueError,
   RuntimeModelNotFoundError,
   RuntimeQueueEffectUnknownError,
@@ -7,7 +8,6 @@ import {
   RuntimeSettingsWriteError,
   RuntimeUnknownToolError,
 } from "../core/runtime-session.js";
-import { containsBinaryPayload } from "../core/extension-ui-broker.js";
 import {
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
@@ -34,7 +34,7 @@ export interface WorkerIdentity {
 
 export type RuntimeCapability =
   | "runtime.activate" | "runtime.prompt" | "runtime.queueMessage"
-  | "runtime.listModels" | "runtime.listSessions" | "runtime.navigateTree"
+  | "runtime.listModels" | "runtime.listSessions" | "runtime.getConversationHistory" | "runtime.getConversationContent" | "runtime.navigateTree"
   | "runtime.listTools" | "runtime.setActiveTools" | "runtime.getSettings"
   | "runtime.updateSetting" | "runtime.getResources" | "runtime.getCommands"
   | "runtime.resolveSessionTarget" | "runtime.newSession" | "runtime.switchSession"
@@ -75,7 +75,7 @@ export interface WorkerErrorDto {
   code:
     | "compaction_known_failure" | "queue_rejected" | "queue_effect_unknown"
     | "unknown_tool" | "model_not_found" | "invalid_setting" | "settings_write"
-    | "runtime_error";
+    | "conversation_cursor" | "runtime_error";
   name: string;
   message: string;
   details?: Record<string, unknown>;
@@ -450,6 +450,74 @@ function validateToolNotice(raw: unknown): void {
   } else exactKeys(notice, ["code"], "Worker host-projection notice");
 }
 
+function validateConversationHistoryPage(raw: unknown): void {
+  const page = record(raw, "Conversation history page");
+  exactKeys(page, ["revision", "entries", "hasEarlier", "nextCursor"], "Conversation history page");
+  boundedString(page.revision, 128, "Conversation revision");
+  if (!Array.isArray(page.entries) || page.entries.length > 200) throw new Error("Conversation history entries are invalid");
+  for (const item of page.entries) {
+    const value = record(item, "Conversation history item");
+    exactKeys(value, ["entry", "contentRef", "contentComplete", "totalBlocks"], "Conversation history item");
+    validateWorkerHistoryEntry(value.entry);
+    boundedString(value.contentRef, 128, "Conversation content reference");
+    if (typeof value.contentComplete !== "boolean") throw new Error("Conversation content completeness is invalid");
+    nonNegativeInteger(value.totalBlocks, "Conversation block count");
+  }
+  if (typeof page.hasEarlier !== "boolean") throw new Error("Conversation history completeness is invalid");
+  optionalString(page.nextCursor, 128);
+  if (page.hasEarlier !== (page.nextCursor !== undefined)) throw new Error("Conversation history continuation is inconsistent");
+}
+
+function validateConversationContentPage(raw: unknown): void {
+  if (Buffer.byteLength(JSON.stringify(raw), "utf8") > 512 * 1024) throw new Error("Conversation content page exceeds the Worker capability bound");
+  const page = record(raw, "Conversation content page");
+  exactKeys(page, ["revision", "contentRef", "chunks", "complete", "nextCursor"], "Conversation content page");
+  boundedString(page.revision, 128, "Conversation revision");
+  boundedString(page.contentRef, 128, "Conversation content reference");
+  if (!Array.isArray(page.chunks) || page.chunks.length > 64) throw new Error("Conversation content chunks are invalid");
+  for (const item of page.chunks) {
+    const chunk = record(item, "Conversation content chunk");
+    const type = oneOf(chunk.type, ["text", "thinking", "image", "tool_call", "tool_result", "omitted"], "Conversation content chunk type");
+    nonNegativeInteger(chunk.blockIndex, "Conversation block index");
+    if (type === "text" || type === "thinking") {
+      exactKeys(chunk, ["blockIndex", "type", "text", "offset", "blockComplete"], "Conversation text chunk");
+      boundedString(chunk.text, 32_000, "Conversation text chunk", true); nonNegativeInteger(chunk.offset, "Conversation text offset");
+      if (typeof chunk.blockComplete !== "boolean") throw new Error("Conversation block completeness is invalid");
+    } else if (type === "image") {
+      exactKeys(chunk, ["blockIndex", "type", "mimeType", "data", "offset", "blockComplete"], "Conversation image chunk");
+      validateImageMimeType(chunk.mimeType, "Conversation image MIME type"); boundedString(chunk.data, 32_000, "Conversation image data", true);
+      nonNegativeInteger(chunk.offset, "Conversation image offset"); if (typeof chunk.blockComplete !== "boolean") throw new Error("Conversation image completeness is invalid");
+    } else if (type === "tool_call") {
+      exactKeys(chunk, ["blockIndex", "type", "toolCallId", "toolName", "argumentsJson", "offset", "blockComplete"], "Conversation tool-call chunk");
+      boundedString(chunk.toolCallId, 128, "Conversation tool-call id"); boundedString(chunk.toolName, 256, "Conversation tool-call name"); boundedString(chunk.argumentsJson, 32_000, "Conversation tool-call arguments", true);
+      nonNegativeInteger(chunk.offset, "Conversation tool-call offset"); if (typeof chunk.blockComplete !== "boolean") throw new Error("Conversation tool-call completeness is invalid");
+    } else if (type === "tool_result") {
+      exactKeys(chunk, ["blockIndex", "type", "toolCallId", "toolName", "text", "offset", "blockComplete", "isError", "omittedFields"], "Conversation tool-result chunk");
+      boundedString(chunk.toolCallId, 128, "Conversation tool-result id"); boundedString(chunk.toolName, 256, "Conversation tool-result name"); boundedString(chunk.text, 32_000, "Conversation tool-result text", true);
+      nonNegativeInteger(chunk.offset, "Conversation tool-result offset"); if (typeof chunk.blockComplete !== "boolean" || typeof chunk.isError !== "boolean") throw new Error("Conversation tool-result flags are invalid");
+      if (chunk.omittedFields !== undefined) stringArray(chunk.omittedFields, 200, 2_048, "Conversation omitted fields");
+    } else {
+      exactKeys(chunk, ["blockIndex", "type", "kind", "description"], "Conversation omitted chunk"); oneOf(chunk.kind, ["image", "binary"], "Conversation omission kind"); boundedString(chunk.description, 2_048, "Conversation omission description");
+    }
+  }
+  if (typeof page.complete !== "boolean") throw new Error("Conversation page completeness is invalid");
+  optionalString(page.nextCursor, 128);
+  if (page.complete === (page.nextCursor !== undefined)) throw new Error("Conversation content continuation is inconsistent");
+}
+
+function validateWorkerHistoryEntry(raw: unknown): void {
+  const entry = record(raw, "Worker history entry");
+  exactKeys(entry, ["entryId", "parentId", "timestamp", "role", "summaryKind", "content", "stopReason", "error", "toolCallId", "toolName", "toolPresentation", "isError"], "Worker history entry");
+  boundedString(entry.entryId, 128, "History entry id");
+  oneOf(entry.role, ["user", "assistant", "tool", "toolResult", "system", "bashExecution", "custom", "branchSummary", "compactionSummary"], "History role");
+  if (entry.summaryKind !== undefined) oneOf(entry.summaryKind, ["compaction", "branch"], "History summary kind");
+  if (entry.role === "tool" || entry.role === "toolResult") validatePrivateToolContent(entry.content); else validatePrivateContent(entry.content);
+  optionalString(entry.parentId, 128); optionalString(entry.timestamp, 128); optionalString(entry.stopReason, 128);
+  optionalString(entry.error, 2_048); optionalString(entry.toolCallId, 128); optionalString(entry.toolName, 256);
+  if (entry.toolPresentation !== undefined) validateToolPresentation(entry.toolPresentation);
+  if (entry.isError !== undefined && typeof entry.isError !== "boolean") throw new Error("History error flag is invalid");
+}
+
 export function validateCapabilityArgs(capability: WorkerCapability, raw: unknown): void {
   const args = record(raw, `${capability} arguments`);
   const keys = (...allowed: string[]): void => exactKeys(args, allowed, `${capability} arguments`);
@@ -461,6 +529,8 @@ export function validateCapabilityArgs(capability: WorkerCapability, raw: unknow
     case "runtime.prompt": keys("text", "options"); boundedString(args.text, 256_000, "Prompt text", true); if (args.options !== undefined) validatePromptOptions(args.options); return;
     case "runtime.queueMessage": keys("text", "delivery", "images"); boundedString(args.text, 256_000, "Queue text", true); oneOf(args.delivery, ["steer", "followUp"], "Queue delivery"); if (args.images !== undefined) validateImagePaths(args.images); return;
     case "runtime.listSessions": keys("scope"); oneOf(args.scope, ["cwd", "all"], "Session scope"); return;
+    case "runtime.getConversationHistory": keys("cursor", "limit"); optionalString(args.cursor, 128); if (args.limit !== undefined) { positiveInteger(args.limit, "Conversation history limit"); if ((args.limit as number) > 200) throw new Error("Conversation history limit exceeds 200"); } return;
+    case "runtime.getConversationContent": keys("contentRef", "cursor"); boundedString(args.contentRef, 128, "Conversation content reference"); optionalString(args.cursor, 128); return;
     case "runtime.navigateTree": {
       keys("targetId", "options"); boundedString(args.targetId, 128, "Tree target");
       if (args.options !== undefined) {
@@ -538,6 +608,8 @@ export function validateCapabilityResult(capability: RuntimeCapability | UiCapab
         boundedString(value.sessionId, 128, "Session id"); boundedString(value.sessionFile, 16_384, "Session file"); boundedString(value.cwd, 16_384, "Session cwd"); optionalString(value.name, 256); optionalString(value.updatedAt, 128);
       }
       return;
+    case "runtime.getConversationHistory": validateConversationHistoryPage(result); return;
+    case "runtime.getConversationContent": validateConversationContentPage(result); return;
     case "runtime.listTools": case "runtime.setActiveTools":
       if (Array.isArray(result)) { for (const item of result) validateTool(item); return; }
       {
@@ -593,6 +665,7 @@ export function validateCapabilityResult(capability: RuntimeCapability | UiCapab
 export function encodeWorkerError(error: unknown): WorkerErrorDto {
   const base = { name: error instanceof Error ? error.name : "Error", message: boundedErrorMessage(error) };
   if (error instanceof RuntimeCompactionKnownFailureError) return { ...base, code: "compaction_known_failure", details: { reason: error.reason } };
+  if (error instanceof RuntimeConversationCursorError) return { ...base, code: "conversation_cursor" };
   if (error instanceof RuntimeQueueRejectedBeforeEffectError) return { ...base, code: "queue_rejected" };
   if (error instanceof RuntimeQueueEffectUnknownError) return { ...base, code: "queue_effect_unknown" };
   if (error instanceof RuntimeUnknownToolError) return { ...base, code: "unknown_tool", details: { toolName: error.toolName } };
@@ -605,6 +678,7 @@ export function encodeWorkerError(error: unknown): WorkerErrorDto {
 export function decodeWorkerError(error: WorkerErrorDto): Error {
   switch (error.code) {
     case "compaction_known_failure": return new RuntimeCompactionKnownFailureError(oneOfValue(error.details?.reason, ["nothing_to_compact", "already_compacted", "cancelled", "failed"], "failed"), error.message);
+    case "conversation_cursor": return new RuntimeConversationCursorError(error.message);
     case "queue_rejected": return new RuntimeQueueRejectedBeforeEffectError(new Error(error.message));
     case "queue_effect_unknown": return new RuntimeQueueEffectUnknownError(new Error(error.message));
     case "unknown_tool": return new RuntimeUnknownToolError(typeof error.details?.toolName === "string" ? error.details.toolName : "unknown");
@@ -789,14 +863,14 @@ function parseWorkerCache(raw: unknown): WorkerCache {
 function parseWorkerError(raw: unknown): WorkerErrorDto {
   const value = record(raw, "Worker error");
   exactKeys(value, ["code", "name", "message", "details"], "Worker error");
-  const code = oneOf(value.code, ["compaction_known_failure", "queue_rejected", "queue_effect_unknown", "unknown_tool", "model_not_found", "invalid_setting", "settings_write", "runtime_error"] as const, "Worker error code");
+  const code = oneOf(value.code, ["compaction_known_failure", "queue_rejected", "queue_effect_unknown", "unknown_tool", "model_not_found", "invalid_setting", "settings_write", "conversation_cursor", "runtime_error"] as const, "Worker error code");
   const details = value.details === undefined ? undefined : record(value.details, "Worker error details");
   validateWorkerErrorDetails(code, details);
   return { code, name: boundedString(value.name, 128, "Worker error name"), message: boundedString(value.message, 2_048, "Worker error message", true), ...(details === undefined ? {} : { details }) };
 }
 
 function validateWorkerErrorDetails(code: WorkerErrorDto["code"], details: Record<string, unknown> | undefined): void {
-  if (code === "runtime_error" || code === "queue_rejected" || code === "queue_effect_unknown") {
+  if (code === "runtime_error" || code === "conversation_cursor" || code === "queue_rejected" || code === "queue_effect_unknown") {
     if (details !== undefined && Object.keys(details).length > 0) throw new Error(`${code} details are invalid`);
     return;
   }
@@ -821,7 +895,7 @@ function validateWorkerErrorDetails(code: WorkerErrorDto["code"], details: Recor
 
 function parseCapability(raw: unknown): WorkerCapability {
   return oneOf(raw, [
-    "runtime.activate", "runtime.prompt", "runtime.queueMessage", "runtime.listModels", "runtime.listSessions", "runtime.navigateTree", "runtime.listTools", "runtime.setActiveTools", "runtime.getSettings", "runtime.updateSetting", "runtime.getResources", "runtime.getCommands", "runtime.resolveSessionTarget", "runtime.newSession", "runtime.switchSession", "runtime.fork", "runtime.setSessionName", "runtime.compact", "runtime.reload", "runtime.selectModel", "runtime.setThinkingLevel", "runtime.clearQueue", "runtime.abort", "runtime.waitForIdle", "runtime.dispose",
+    "runtime.activate", "runtime.prompt", "runtime.queueMessage", "runtime.listModels", "runtime.listSessions", "runtime.getConversationHistory", "runtime.getConversationContent", "runtime.navigateTree", "runtime.listTools", "runtime.setActiveTools", "runtime.getSettings", "runtime.updateSetting", "runtime.getResources", "runtime.getCommands", "runtime.resolveSessionTarget", "runtime.newSession", "runtime.switchSession", "runtime.fork", "runtime.setSessionName", "runtime.compact", "runtime.reload", "runtime.selectModel", "runtime.setThinkingLevel", "runtime.clearQueue", "runtime.abort", "runtime.waitForIdle", "runtime.dispose",
     "ui.select", "ui.confirm", "ui.input", "ui.editor", "ui.notify", "ui.setTitle", "ui.setEditorText", "ui.setStatus", "ui.setWidget", "ui.widgetError", "ui.unsupported", "ui.setToolsExpanded", "ui.cancel", "ui.viewport", "ui.reset", "ui.generationBegin",
     "dock.identity",
   ] as const, "Worker capability");
@@ -910,7 +984,7 @@ function optionalString(raw: unknown, limit: number): string | undefined {
 function directiveString(raw: unknown, limit: number, label: string, multiline: boolean): string {
   const value = boundedString(raw, limit, label, true);
   const controls = multiline ? /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u : /[\u0000-\u001f\u007f-\u009f]/u;
-  if (controls.test(value) || containsBinaryPayload(value)) throw new Error(`${label} must be control-safe and payload-free`);
+  if (controls.test(value)) throw new Error(`${label} must be control-safe`);
   return value;
 }
 function positiveInteger(raw: unknown, label: string): number { if (!Number.isSafeInteger(raw) || (raw as number) < 1) throw new Error(`${label} must be a positive integer`); return raw as number; }

@@ -861,7 +861,7 @@ test("stale deferred rejection cannot publish its operation into a replacement g
   assert.deepEqual((await instance.getAttachProjection(undefined)).pendingMessages, []);
 });
 
-test("Host queue keeps the lossless prompt while exposing only its bounded safe projection", async () => {
+test("Host queue keeps semantic base64-like prompt text in its bounded projection", async () => {
   const session = new FakeRuntimeSession();
   const instance = createInstance(session);
   const binaryLikePrompt = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0".repeat(8);
@@ -869,7 +869,7 @@ test("Host queue keeps the lossless prompt while exposing only its bounded safe 
   session.emit({ type: "compaction_start", reason: "threshold" });
   await instance.submit(binaryLikePrompt, "auto", "lossless-deferred");
   const attached = await instance.getAttachProjection(undefined);
-  assert.equal(attached.pendingMessages[0]?.text, "Queued message omitted");
+  assert.equal(attached.pendingMessages[0]?.text, binaryLikePrompt);
 
   session.isCompacting = false;
   session.emit({ type: "compaction_end", reason: "threshold", result: {}, aborted: false, willRetry: false });
@@ -1776,10 +1776,14 @@ test("runtime event data is sanitized into JSON-serializable values", () => {
   const event = page.events.find((item) => item.type === "tool.started");
   const eventData = dataRecord(event?.data);
   const args = eventData.args as Record<string, unknown>;
-  assert.deepEqual(args, { ordinary: "abcdefghijklmnopabcdefghijklmnop" });
-  assert.deepEqual(eventData.omittedFields, ["/count", "/callback", "/marker", "/bytes", "/imageData", "/payload"]);
-  assert.doesNotMatch(JSON.stringify(page), /data:image|secret/);
-  assert.ok(!JSON.stringify(page).includes(rawBase64));
+  assert.deepEqual(args, {
+    imageData: "data:image/png;base64,c2VjcmV0",
+    payload: rawBase64,
+    ordinary: "abcdefghijklmnopabcdefghijklmnop",
+  });
+  assert.deepEqual(eventData.omittedFields, ["/count", "/callback", "/marker", "/bytes"]);
+  assert.match(JSON.stringify(page), /data:image/);
+  assert.ok(JSON.stringify(page).includes(rawBase64));
 });
 
 test("structured runtime projection does not traverse getters beyond its accepted key prefix", () => {
@@ -2093,7 +2097,7 @@ test("assistant and tool-call streaming use stable distinct IDs with argument up
   assert.deepEqual(updates.map((candidate) => dataRecord(candidate.data).args), [{ path: "ab" }, { path: "abc" }]);
 });
 
-test("completed message content omits data URIs and raw base64", () => {
+test("completed message content preserves data URIs and raw base64 as semantic text", () => {
   const session = new FakeRuntimeSession();
   const instance = createInstance(session);
   const rawBase64 = Buffer.from("binary-message".repeat(100)).toString("base64");
@@ -2115,11 +2119,11 @@ test("completed message content omits data URIs and raw base64", () => {
   const completed = instance.eventsSince().events.find((event) => event.type === "message.completed");
   assert.ok(completed?.type === "message.completed");
   assert.deepEqual(completed.data.content, [
-    { type: "omitted", kind: "binary", description: "Binary data omitted" },
-    { type: "omitted", kind: "binary", description: "Binary data omitted" },
+    { type: "text", text: rawBase64 },
+    { type: "thinking", text: `data:image/png;base64,${rawBase64}` },
     { type: "text", text: "ordinary answer" },
   ]);
-  assert.ok(!JSON.stringify(completed).includes(rawBase64));
+  assert.ok(JSON.stringify(completed).includes(rawBase64));
 });
 
 test("attach history coverage removes replay frames for the same stable assistant message", async () => {

@@ -1,6 +1,9 @@
 import type {
   ClearedRuntimeQueue,
   RuntimeCompactionResult,
+  RuntimeConversationContentChunk,
+  RuntimeConversationContentPage,
+  RuntimeConversationHistoryPage,
   RuntimeEvent,
   RuntimeHistoryEntry,
   RuntimeModelInfo,
@@ -15,7 +18,7 @@ import type {
   RuntimeTreeNode,
   RuntimeTreeSnapshot,
 } from "../../src/core/runtime-session.js";
-import { RuntimeSettingsWriteError } from "../../src/core/runtime-session.js";
+import { RuntimeConversationCursorError, RuntimeSettingsWriteError } from "../../src/core/runtime-session.js";
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, SettingValueMap, ToolDto } from "../../src/core/config-projection.js";
 import { SETTING_DEFINITIONS, SETTING_KEYS } from "../../src/core/config-projection.js";
 
@@ -59,6 +62,8 @@ export class DelayedRuntimeSession implements RuntimeSession {
   sessionMutationError: Error | undefined;
   sessionCatalog: RuntimeSessionInfo[] = [];
   history: RuntimeHistoryEntry[] = [];
+  conversationRevision = "fixture-conversation-revision";
+  readonly conversationContent = new Map<string, RuntimeConversationContentChunk[]>();
   treeNodes: RuntimeTreeNode[] = [];
   treeLeafId: string | undefined;
   treeReadCalls = 0;
@@ -173,6 +178,36 @@ export class DelayedRuntimeSession implements RuntimeSession {
   }
 
   getHistory(): RuntimeHistoryEntry[] { return structuredClone(this.history); }
+
+  async getConversationHistory(cursor?: string, limit = 50): Promise<RuntimeConversationHistoryPage> {
+    const end = cursor === undefined ? this.history.length : Number.parseInt(cursor, 10);
+    if (!Number.isSafeInteger(end) || end < 0 || end > this.history.length) throw new RuntimeConversationCursorError();
+    const start = Math.max(0, end - Math.max(1, Math.min(200, Math.floor(limit))));
+    const entries = this.history.slice(start, end).map((entry) => ({
+      entry: structuredClone(entry),
+      contentRef: `fixture-${entry.entryId}`,
+      contentComplete: false,
+      totalBlocks: this.conversationContent.get(`fixture-${entry.entryId}`)?.length ?? (Array.isArray(entry.content) ? entry.content.length : 1),
+    }));
+    return {
+      revision: this.conversationRevision,
+      entries,
+      hasEarlier: start > 0,
+      ...(start > 0 ? { nextCursor: String(start) } : {}),
+    };
+  }
+
+  async getConversationContent(contentRef: string, cursor?: string): Promise<RuntimeConversationContentPage> {
+    if (cursor !== undefined) throw new RuntimeConversationCursorError();
+    const chunks = this.conversationContent.get(contentRef);
+    if (!chunks) throw new RuntimeConversationCursorError("Conversation content reference is stale");
+    return {
+      revision: this.conversationRevision,
+      contentRef,
+      chunks: structuredClone(chunks),
+      complete: true,
+    };
+  }
 
   getTree(): RuntimeTreeSnapshot {
     this.treeReadCalls += 1;

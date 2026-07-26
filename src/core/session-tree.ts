@@ -22,8 +22,6 @@ const TREE_KINDS = [
 const TREE_ROLES = ["user", "assistant", "tool", "system"] as const;
 const TREE_DISPLAY_CLASSES = ["content", "tool", "metadata", "structural"] as const;
 const TREE_STATES = ["error", "aborted"] as const;
-const DATA_URI = /data:[^,]*;base64,/i;
-const BASE64_PAYLOAD = /^(?=.{128,}$)(?=.*(?:[0-9+/]|={1,2}$))(?:[A-Za-z0-9+/]{4})+(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 /** Validate, sanitize, and revision a Pi-agnostic runtime tree projection. */
 export function projectRuntimeTree(
@@ -142,7 +140,7 @@ function canonicalRuntimeTimestamp(value: unknown): string {
 }
 
 function safeTreeText(value: unknown, limit: number, fallback: string | undefined): string | undefined {
-  if (typeof value !== "string" || isBinaryText(value)) return fallback;
+  if (typeof value !== "string") return fallback;
   const sanitized = value.replace(/\r\n?/gu, "\n").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/gu, " ");
   if (sanitized.length === 0) return fallback;
   return truncate(sanitized, limit) ?? fallback;
@@ -156,9 +154,4 @@ function enumRuntimeValue<const T extends readonly string[]>(value: unknown, all
 function truncate(value: string | undefined, limit: number): string | undefined {
   if (value === undefined || value.length <= limit) return value;
   return limit < 1 ? "" : `${value.slice(0, limit - 1)}…`;
-}
-
-function isBinaryText(value: string): boolean {
-  if (DATA_URI.test(value) || BASE64_PAYLOAD.test(value.replace(/\s+/gu, ""))) return true;
-  return value.split(/[^A-Za-z0-9+/=]+/gu).some((part) => BASE64_PAYLOAD.test(part));
 }

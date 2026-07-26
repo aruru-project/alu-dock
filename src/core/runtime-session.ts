@@ -66,6 +66,42 @@ export interface RuntimeHistoryEntry {
   isError?: boolean;
 }
 
+export class RuntimeConversationCursorError extends Error {
+  constructor(message = "Conversation continuation is stale") {
+    super(message);
+    this.name = "RuntimeConversationCursorError";
+  }
+}
+
+export type RuntimeConversationContentChunk =
+  | { blockIndex: number; type: "text" | "thinking"; text: string; offset: number; blockComplete: boolean }
+  | { blockIndex: number; type: "image"; mimeType: string; data: string; offset: number; blockComplete: boolean }
+  | { blockIndex: number; type: "tool_call"; toolCallId: string; toolName: string; argumentsJson: string; offset: number; blockComplete: boolean }
+  | { blockIndex: number; type: "tool_result"; toolCallId: string; toolName: string; text: string; offset: number; blockComplete: boolean; isError: boolean; omittedFields?: string[] }
+  | { blockIndex: number; type: "omitted"; kind: "image" | "binary"; description: string };
+
+export interface RuntimeConversationHistoryEntry {
+  entry: RuntimeHistoryEntry;
+  contentRef: string;
+  contentComplete: boolean;
+  totalBlocks: number;
+}
+
+export interface RuntimeConversationHistoryPage {
+  revision: string;
+  entries: RuntimeConversationHistoryEntry[];
+  hasEarlier: boolean;
+  nextCursor?: string;
+}
+
+export interface RuntimeConversationContentPage {
+  revision: string;
+  contentRef: string;
+  chunks: RuntimeConversationContentChunk[];
+  complete: boolean;
+  nextCursor?: string;
+}
+
 export interface RuntimeSessionInfo {
   sessionId: string;
   sessionFile: string;
@@ -275,6 +311,8 @@ export interface RuntimeSession {
   listModels(): Promise<RuntimeModelInfo[]>;
   listSessions(scope: "cwd" | "all"): Promise<RuntimeSessionInfo[]>;
   getHistory(): RuntimeHistoryEntry[];
+  getConversationHistory?(cursor?: string, limit?: number): Promise<RuntimeConversationHistoryPage>;
+  getConversationContent?(contentRef: string, cursor?: string): Promise<RuntimeConversationContentPage>;
   getTree?(): RuntimeTreeSnapshot;
   navigateTree?(targetId: string, options?: RuntimeNavigateOptions): Promise<RuntimeNavigateResult>;
   listTools(): Promise<ToolDto[] | RuntimeToolProjection>;

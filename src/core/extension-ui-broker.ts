@@ -108,9 +108,6 @@ const MAX_TEXT_CHARS = 8_000;
 const MAX_EDITOR_CHARS = 256_000;
 const MAX_OPTIONS = 200;
 const MAX_LINES = 200;
-const BINARY_OMISSION = "[binary/image payload omitted]";
-const DATA_URI = /data:[^,]*;base64,/i;
-const RAW_BASE64 = /^(?=.{128,}$)(?=.*(?:[0-9+/]|={1,2}$))(?:[A-Za-z0-9+/]{4})+(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 
 /**
  * Host-owned, renderer-independent extension UI state machine.
@@ -794,11 +791,6 @@ function canonicalResponse(response: InteractionResponse): string {
   return JSON.stringify({ method: response.method, value: response.value });
 }
 
-export function containsBinaryPayload(value: string): boolean {
-  if (DATA_URI.test(value) || RAW_BASE64.test(value.replace(/\s+/gu, ""))) return true;
-  return value.split(/[^A-Za-z0-9+/=]+/gu).some((part) => RAW_BASE64.test(part));
-}
-
 function isUnsafeRecordKey(value: string): boolean {
   return value === "__proto__" || value === "prototype" || value === "constructor";
 }
@@ -806,13 +798,11 @@ function isUnsafeRecordKey(value: string): boolean {
 function safeLine(value: unknown, limit: number): string {
   if (typeof value !== "string") return "";
   const safe = value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, "");
-  const projected = containsBinaryPayload(safe) ? BINARY_OMISSION : safe;
-  return projected.length <= limit ? projected : `${projected.slice(0, Math.max(0, limit - 1))}…`;
+  return safe.length <= limit ? safe : `${safe.slice(0, Math.max(0, limit - 1))}…`;
 }
 
 function safeText(value: unknown, limit: number): string {
   if (typeof value !== "string") return "";
   const normalized = value.replace(/\r\n?/gu, "\n").replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/gu, "");
-  const projected = containsBinaryPayload(normalized) ? BINARY_OMISSION : normalized;
-  return projected.length <= limit ? projected : `${projected.slice(0, Math.max(0, limit - 1))}…`;
+  return normalized.length <= limit ? normalized : `${normalized.slice(0, Math.max(0, limit - 1))}…`;
 }

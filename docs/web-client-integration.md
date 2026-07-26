@@ -59,7 +59,7 @@ Protocol V2 客户端只连接已经运行的 Host。普通 Web 请求不得隐�
 Protocol V2 使用 Unix stream socket 上的 UTF-8 JSON Lines：
 
 - 每条 frame 是一个完整 JSON object，以 `\n` 结束；
-- 单条 frame 最大 1 MiB；
+- 单条 frame 最大 1 MiB；这是 transport frame 上限，不是 conversation 内容上限。大型语义内容通过 `conversation.content.v1` 的有界页面和 chunk 连续读取，禁止为适配 frame 而删除或截断内容；
 - 每个连接必须先完成 hello；
 - hello 后每个连接只允许一个业务 request；
 - 普通 request 返回一个 response 后关闭；
@@ -327,20 +327,53 @@ Attach response 必须先完成处理，随后再处理 event frames。
 
 此时重新读取 authoritative snapshot，并使用 fresh conversation bootstrap/history 重建页面。观察流断开不表示 runtime 失败，也不会终止 instance。
 
-### 历史分页
+### 完整 conversation 分页
 
-`session.history` 每页最多 200 条，使用 `beforeEntryId` 向前分页；response 包含 `entries`、`hasEarlier`、可选 `nextBeforeEntryId` 和 `instance`。`historyTruncated` 只属于 fresh attach 的 bootstrap result。两种 surface 的不完整标记都必须按各自语义处理。
+协商 `conversation.content.v1` 的 Protocol V2 客户端可以分两步读取 authoritative conversation。`session.history` / fresh attach 的 `recentHistory` 仍是 legacy/bootstrap preview，不代表完整内容。
 
-Content block 可能是：
+当前 transcript 与 Pi/Alu Dock 保持一致：使用当前 leaf 的 compaction context；更早内容和 sibling branch 通过既有 `session.tree` / `session.navigate` 进入，不把整个 tree 扁平化进一条 transcript。
 
-- `text`
-- `thinking`
-- `image { mimeType }`（仅在协商 `command.images.path.v1` 后出现，不含 bytes/path）
-- `tool_call`
-- `tool_result`
-- `omitted`，表示 image/binary 没有进入控制面；未协商图片能力的旧客户端也用它接收图片 presence 降级
+首先读取当前 conversation page：
 
-客户端不得依赖 Pi 私有 message shape。
+```json
+{"kind":"request","version":2,"requestId":"history-1","type":"conversation.history","params":{"instanceId":"instance-id","limit":50}}
+```
+
+Result：
+
+```json
+{
+  "instance":{"id":"instance-id","runtimeGeneration":3},
+  "revision":"opaque-revision",
+  "entries":[{
+    "entry":{"entryId":"entry-1","role":"assistant","content":[{"type":"text","text":"bounded preview"}]},
+    "contentRef":"opaque-content-ref",
+    "contentComplete":false,
+    "totalBlocks":2
+  }],
+  "hasEarlier":true,
+  "nextCursor":"opaque-history-cursor"
+}
+```
+
+用 `nextCursor` 继续向前读取；同一次扫描的所有页面必须保持同一 `revision`。每条 entry 的 preview 不证明完整；`contentComplete == false` 时按 `contentRef` 读取权威 block 内容：
+
+```json
+{"kind":"request","version":2,"requestId":"content-1","type":"conversation.content","params":{"instanceId":"instance-id","contentRef":"opaque-content-ref"}}
+```
+
+Result 的 `chunks` 是有序 transfer units：
+
+- `text` / `thinking`：`{blockIndex,type,text,offset,blockComplete}`
+- `image`：`{blockIndex,type:"image",mimeType,data,offset,blockComplete}`；`data` 是 Pi image block 的原始字符串分片，不是普通文本 block
+- `tool_call`：`{blockIndex,type:"tool_call",toolCallId,toolName,argumentsJson,offset,blockComplete}`
+- `tool_result`：`{blockIndex,type:"tool_result",toolCallId,toolName,text,offset,blockComplete,isError}`
+
+当 `complete == false` 时使用 `nextCursor` 继续；按同一 `blockIndex` 校验 `offset` 后拼接，直到 `blockComplete == true`。页面 `revision`、`contentRef`、`instanceId` 和 `runtimeGeneration` 必须与当前读取一致。branch、session 或 generation 改变后，旧 ref/cursor 返回 `invalid_cursor` 或 `stale_runtime_generation`，客户端重新开始 history scan。
+
+Data URI、raw base64、长文本和工具参数都是普通 conversation 语义，Dock 不按内容猜测、替换或拒绝。单个 frame/page 的 bound 只能决定分页位置。
+
+`page.truncated` 只描述 event replay 连续性；`contentComplete` 只描述 entry 内容完整性，两者不得混用。
 
 ## 命令、Queue 与运行控制
 
@@ -373,7 +406,9 @@ Success receipt 返回实际 delivery、是否 queued、accepted time 和原 ope
 {"type":"message.queued","data":{"queueItemId":"queue-1","operationId":"image-operation","delivery":"steer","text":"比较这两张图","images":[{"path":"/srv/alubot/uploads/a.webp","mimeType":"image/webp"}],"acceptedAt":"2026-01-01T00:00:00.000Z"}}
 ```
 
-只有 Worker 在真正消费/dispatch 前打开 regular file 并编码为 Pi public structural image content；Protocol V2、Worker event/history、catalog 都不携带 bytes、base64 或 data URI。调用方必须保持文件内容稳定、同 UID 可读，直到 Queue item 被消费或 dequeue；路径只在当前 Host generation 的 custody/projection 中存在，不进 catalog。Host loss/replacement 后不会恢复路径或重放 Queue。历史只能保证图片 presence/MIME，不能保证原路径或媒体仍可恢复。
+只有 Worker 在真正消费/dispatch 前打开 regular file 并编码为 Pi public structural image content。调用方必须保持文件内容稳定、同 UID 可读，直到 Queue item 被消费或 dequeue；路径只在当前 Host generation 的 custody/projection 中存在，不进 catalog。Host loss/replacement 后不会恢复路径或重放 Queue。
+
+输入 mutation 仍只传本机 path descriptor；进入 Pi session 后，authoritative conversation image block 可通过 `conversation.content.v1` 的 `image {mimeType,data,offset,blockComplete}` 分片读取。Live/bootstrap preview 可以只带图片 presence/MIME，但不代表完整历史。
 
 ### `show_image` live/history 关联
 
@@ -618,7 +653,6 @@ Error code 是可扩展字符串。未知 code 应作为普通明确失败展示
 - Redis/Pi RPC 兼容；
 - 多用户、跨 UID、容器或远程认证；
 - arbitrary PTY / shell RPC；
-- binary、base64 或 data URI 穿过控制面；
 - catalog-wide 实时事件流；
 - stopped/host-lost record 在不恢复 runtime 时的完整 conversation 浏览；
 - 独立 operation outcome 查询；

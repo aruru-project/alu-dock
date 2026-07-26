@@ -190,6 +190,8 @@ async function dispatchRuntime(runtime: PiRuntimeHost, capability: RuntimeCapabi
     case "runtime.queueMessage": return runtime.queueMessage(args.text as string, args.delivery as "steer" | "followUp", args.images as import("../core/runtime-session.js").RuntimeImagePath[] | undefined);
     case "runtime.listModels": return runtime.listModels();
     case "runtime.listSessions": return runtime.listSessions(args.scope as "cwd" | "all");
+    case "runtime.getConversationHistory": return runtime.getConversationHistory(args.cursor as string | undefined, args.limit as number | undefined);
+    case "runtime.getConversationContent": return runtime.getConversationContent(args.contentRef as string, args.cursor as string | undefined);
     case "runtime.navigateTree": return runtime.navigateTree(args.targetId as string, args.options as never);
     case "runtime.listTools": return runtime.listTools();
     case "runtime.setActiveTools": return runtime.setActiveTools(args.names as string[]);

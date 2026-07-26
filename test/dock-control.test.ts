@@ -120,7 +120,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "command.images.path.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.controller-directives.v1", "extension_ui.persistent-interactions.v1", "extension_ui.tools-expanded.v1", "extension_ui.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "host.info", "instance.catalog", "instance.keys.v1", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tool-result-presentation.v1", "tools.v1", "tui.projection.v1"]);
+  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "command.images.path.v1", "conversation.content.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.controller-directives.v1", "extension_ui.persistent-interactions.v1", "extension_ui.tools-expanded.v1", "extension_ui.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "host.info", "instance.catalog", "instance.keys.v1", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tool-result-presentation.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -2698,7 +2698,7 @@ test("models settings failures are typed, evented, and leave the in-memory state
   assert.equal((session as DelayedRuntimeSession).thinkingMutationCalls, 2);
 });
 
-test("tui projection exposes stable paged history and attach history without binary payloads", async (context) => {
+test("tui projection exposes stable paged history and attach history while preserving semantic text", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
   await harness.host.start();
@@ -2718,7 +2718,7 @@ test("tui projection exposes stable paged history and attach history without bin
   assert.deepEqual(latest.entries.map((entry) => entry.entryId), ["h2", "h3"]);
   assert.equal(latest.hasEarlier, true);
   assert.equal(latest.nextBeforeEntryId, "h2");
-  assert.equal(JSON.stringify(latest).includes("data:image"), false);
+  assert.equal(JSON.stringify(latest).includes("data:image"), true);
   const earlier = await client.history(created.id, latest.nextBeforeEntryId, 2);
   assert.deepEqual(earlier.entries.map((entry) => entry.entryId), ["h1"]);
   assert.equal(earlier.hasEarlier, false);
@@ -2747,6 +2747,57 @@ test("tui projection exposes stable paged history and attach history without bin
   assert.ok(bounded.initial.page.events.length > 0, "paged history must be trimmed before recent events");
   bounded.close();
   await bounded.done;
+});
+
+test("conversation content survives fresh clients through revision-bound Protocol V2 pages", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "conversation-content");
+  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  runtime.history = [
+    { entryId: "h1", role: "user", content: "one" },
+    { entryId: "h2", parentId: "h1", role: "assistant", content: "legacy preview" },
+    { entryId: "h3", parentId: "h2", role: "assistant", content: "legacy preview" },
+  ];
+  const fullText = `${"long".repeat(10_000)}😀done`;
+  const imageData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB";
+  runtime.conversationContent.set("fixture-h3", [
+    { blockIndex: 0, type: "text", text: fullText.slice(0, 32_000), offset: 0, blockComplete: false },
+    { blockIndex: 0, type: "text", text: fullText.slice(32_000), offset: 32_000, blockComplete: true },
+    { blockIndex: 1, type: "tool_call", toolCallId: "call-1", toolName: "search", argumentsJson: "{\"query\":\"complete\"}", offset: 0, blockComplete: true },
+    { blockIndex: 2, type: "image", mimeType: "image/png", data: imageData, offset: 0, blockComplete: true },
+  ]);
+  runtime.emit({ type: "entry_appended", entry: { id: "h3" } });
+
+  const latest = await client.conversationHistory(created.id, undefined, 2);
+  assert.equal(latest.instance.runtimeGeneration, created.runtimeGeneration);
+  assert.equal(latest.revision, runtime.conversationRevision);
+  assert.deepEqual(latest.entries.map((item) => item.entry.entryId), ["h2", "h3"]);
+  assert.ok(latest.entries.every((item) => item.contentComplete === false));
+  assert.equal(latest.hasEarlier, true);
+
+  const earlier = await client.conversationHistory(created.id, latest.nextCursor, 2);
+  assert.deepEqual(earlier.entries.map((item) => item.entry.entryId), ["h1"]);
+  assert.equal(earlier.revision, latest.revision);
+
+  const freshClient = new DockClient({ socketPath: harness.socketPath });
+  const contentRef = latest.entries[1]!.contentRef;
+  const content = await freshClient.conversationContent(created.id, contentRef);
+  assert.equal(content.runtimeGeneration, created.runtimeGeneration);
+  assert.equal(content.revision, latest.revision);
+  assert.equal(content.complete, true);
+  assert.equal(content.chunks.filter((chunk) => chunk.type === "text").map((chunk) => chunk.type === "text" ? chunk.text : "").join(""), fullText);
+  assert.equal(content.chunks.find((chunk) => chunk.type === "tool_call")?.type, "tool_call");
+  const image = content.chunks.find((chunk) => chunk.type === "image");
+  assert.deepEqual(image, { blockIndex: 2, type: "image", mimeType: "image/png", data: imageData, offset: 0, blockComplete: true });
+
+  runtime.conversationContent.delete(contentRef);
+  await assert.rejects(
+    freshClient.conversationContent(created.id, contentRef),
+    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_cursor",
+  );
 });
 
 test("Hub session inventory is runtime-free and adoption publishes one managed instance", async (context) => {
