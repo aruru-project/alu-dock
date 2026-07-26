@@ -1,79 +1,48 @@
-# Alu Dock — Agent 工程地图
+# Alu Dock
 
-## 项目现状
+## 项目是什么
 
-Alu Dock 是本机单用户的受管 Pi 运行时底座。长期 Host 持有任务实例、operation/catalog 权威与 Worker 生命周期；每个 active instance 的完整 Pi runtime 运行在自己的 OS Worker 进程中。SSH TUI 等客户端只通过结构化控制面观察和操作。
+Alu Dock 是本机单用户的 Agent 运行与控制主体。它提供长期 Host Service、受管工作实例、统一协议和多个客户端入口，让 Agent 工作可以脱离单个终端持续运行、观察和接管。
 
-裸 `aludock` 打开不创建 runtime 的 Dock Hub，菜单依次是 New、Continue、History、Pi Sessions 和 Leave。Hub 使用 alternate screen；进入 Session Work 前恢复 shell screen。Session Work 使用可流动的 main buffer 和终端原生鼠标。`-c`/`--continue` 继续当前项目最近的 active/reopenable instance，没有则 New；`new` 和 `attach TARGET` 直接进入 Session Work。磁盘上的 Pi sessions 从 Resume/Adopt inventory 进入；`open` 暂时保留旧的 smart-entry 行为。
+当前唯一 Agent 实现是 Pi。Pi 是当前成熟基底，不是 Alu Dock 永久唯一的 Agent 类型；未来可以通过新的 Worker adapter 接入轻量语音等其他 Agent。
 
-## UI 视觉主题合同
-
-Alu Dock 的视觉身份只来自阿露原稿与既有阿露资产，不使用通用“科技终端”模板。canonical terminal palette 定义在 `src/tui/alu-palette.ts`：发色 `#69424e`、高光 `#976269`、金色 `#f6c147`、肤色 `#f4d8ce`、蓝紫 `#6c84cd`、粉色 `#dd7e9e`、暖白 `#e6e1f2`。整体应是暖梅紫/玫瑰/金色与偏紫的靛蓝/薰衣草色；蓝色必须偏紫、偏靛，不得滑向 cyan。
-
-未经用户明确批准，禁止新增青、青绿、turquoise、teal、emerald 或霓虹科技蓝，尤其不得将它们用作 accent、success、selection 或默认交互色。成功可由符号、文字和层级表达，不需要套用绿色。`src/tui/theme.ts` 必须复用/派生 canonical palette，不得维护另一套任意色板。
-
-对齐 stock Pi 只对齐成熟的信息架构、conversation 语义层级、分组、留白和折叠行为，不复制 Pi 配色，也不得把 assistant、thinking、compaction、tool execution/result 降维成同质的单行遥测日志。终端背景仍归用户所有；局部 surface 只能使用 canonical palette 派生的低亮度暖色或蓝紫色调。任何新颜色或全局视觉方向都必须先取得用户明确确认。
-
-## 技术与结构
-
-- Node.js `>=22.19.0`，TypeScript ESM。
-- 当前 Pi runtime cohort 精确固定为 `@earendil-works/pi-coding-agent@0.81.1` 与 `@earendil-works/pi-tui@0.81.1`；生产代码只使用 package-root exports，且不得把 pi-tui 类型泄漏到 Host、Protocol 或 Core port。
-- Managed production Host 从 `~/.local/share/alu-dock` 安装包的本地依赖加载 Pi SDK，不调用 `$PATH` 中的全局 `pi`。Pi cohort 升级必须显式同步改动 exact pins、adapter 与门禁；不得顺带升级、重启或移除独立的全局 Pi/RPC 服务。
-- Managed Host 面向 `systemd --user`；开发模式使用独立 dev socket。
+## 架构
 
 ```text
-cli / Hub / Session Work tui
-           │
-           ▼
-   DockClient / Protocol V2
-           │
-           ▼
- DockHost ── DockRegistry / catalog
-           │
-           ▼
-     ManagedInstance
-           │ RuntimeSession port
-           ▼
- WorkerRuntimeSession / supervisor
-           │ private Worker IPC
-           ▼
- one instance Worker process
-           └── PiRuntimeHost / Pi SDK / extensions
+Hub TUI / Work TUI / Rails-WebUI / future clients
+                         │
+                    Protocol V2
+                         │
+                  Dock Host Service
+             control authority + session gateway
+                         │
+                 private Worker transport
+                         │
+                    Agent Worker
+                         │
+                    Agent adapter
+                         │
+                Pi / future Agent runtime
 ```
 
-依赖方向：`cli|tui → control → core ports/DTOs ← pi adapters`。Core 与 TUI 不得依赖 Pi runtime 对象。
+- **Protocol V2** 是 Dock 对客户端的协议。客户端不直连 Worker，也不接触 Agent 私有对象或私有存储。
+- **Host** 管理 instance、catalog、operation、Queue、controller、generation 与 Worker 生命周期，并把 Agent 会话流量路由到正确的 Worker。Host 不重新实现 Agent runtime，也不改写 Agent 内容。
+- **Worker** 持有完整 Agent runtime、session、tools、extensions、components、callbacks 与 Promise。Agent adapter 在这里完成 Agent 与 Dock 协议之间的转换。
+- **客户端** 各自实现所需界面。一个客户端尚未支持某项能力，不影响 Agent、其他客户端或已经工作的能力。
+- 新增使用既有能力的 Agent，主要增加 Worker adapter 和 runtime 注册；新增真正的 Agent 能力时，在 Protocol V2 定义一次，再由需要它的客户端实现。
+- 同一能力只保留一个 Dock 协议定义。不得通过逐方法 proxy、重复 DTO、重复 projection 或兼容壳在 Host 与 Worker 间模拟本地 runtime 对象。
 
-## 按任务进入
+## 工程入口
 
-| 任务范围 | 先读 |
+| 范围 | 文档 |
 |---|---|
-| Protocol、Host dispatch、DockClient、CLI、catalog | [`docs/agent_maps/control.md`](docs/agent_maps/control.md) |
-| ManagedInstance、Pi adapter、session replacement、settings、Extension UI | [`docs/agent_maps/runtime.md`](docs/agent_maps/runtime.md) |
-| 当前 interactive flow、目标 Hub、Session Work、history/tree/queue/activity | [`docs/agent_maps/tui.md`](docs/agent_maps/tui.md) |
-| systemd、managed startup、durable lifecycle、本地安装 | [`docs/agent_maps/deployment.md`](docs/agent_maps/deployment.md) |
-| 测试选择与门禁 | [`docs/qa.md`](docs/qa.md) |
+| Protocol V2、Host、DockClient、CLI、catalog | [`docs/agent_maps/control.md`](docs/agent_maps/control.md) |
+| Agent Worker、Pi adapter、session 与 Extension UI | [`docs/agent_maps/runtime.md`](docs/agent_maps/runtime.md) |
+| Hub 与 Session Work TUI | [`docs/agent_maps/tui.md`](docs/agent_maps/tui.md) |
+| Managed service 与部署 | [`docs/agent_maps/deployment.md`](docs/agent_maps/deployment.md) |
+| 测试选择 | [`docs/qa.md`](docs/qa.md) |
+| 本地安装和运维 | [`docs/local-install.md`](docs/local-install.md) |
 
-Managed 安装或运维另读 [`docs/local-install.md`](docs/local-install.md)。从对应 map 列出的入口、直接依赖与测试开始；只有这些材料不足时才扩大读取范围。
+项目使用 Node.js、TypeScript ESM。实现任务先读对应模块文档和直接相关代码，不把某个模块的实现细节提升成全项目规则。
 
-## 跨模块核心合同
-
-1. **Host 唯一持有 Dock 控制权。** `ManagedInstance`、admission、Queue、operation/catalog/generation truth 与 Worker supervisor 属于 Host；每个 instance 的 Pi SDK objects、extensions、tools 与 Pi Promise 只属于该 instance 的独立 Worker。客户端只消费控制面，不得成为第二 runtime owner。
-2. **身份不可混用。** Dock `instanceId`、Pi `sessionId/sessionFile` 与 `runtimeGeneration` 表示不同生命周期；session replacement 保留 Dock instance 并推进 generation。
-3. **控制面保持封闭但不得删改语义。** Wire major 是 `2`；request/result/event 必须是 closed、JSON-safe schema，不传 runtime 对象、handler、component 或 Promise。Pi session 中的文本、Data URI、base64 与 image block 都是应保留的 conversation 语义；大型内容必须以有界 frame/page 分片传输，任何单帧、单页或背压限制都不得成为内容过滤或永久截断。
-4. **信任先于构造和副作用。** Project trust 必须在目标 runtime、project resources、extension hooks、teardown 或 catalog mutation 之前确定。
-5. **Catalog commit 是可观察边界。** Required commit 完成前不得发布对应 success、snapshot 或 event；durable catalog 只保存身份、session metadata 与保守 intent，不保存正文、interaction、event log、queue 或 Promise。
-6. **Host loss 不触发隐式恢复。** 不自动恢复或重放 prompt、queue、interaction、Promise 或 tool effect；显式 reopen 是新 generation 的 fresh transaction。
-7. **不把不确定副作用当成失败重试。** Mutation 不自动 retry；传输丢失或 post-effect 不确定必须保留原 operation identity，并以不确定结果呈现。
-8. **普通客户端入口不拥有 service 生命周期。** Hub、`-c`、`open`、`new`、`attach` 只连接既有 Host，不得隐式 install、start、restart 或 fork detached Host。
-9. **Hub inventory 不等于 runtime。** `session.inventory` 只读取 bounded Pi session metadata；只有用户选择 New、Continue、History 中的 saved-session continuation、Resume、Adopt 或 Attach 后才允许进入对应 mutation/Work 路径。History 的 Forget 只删 Dock record，不删 Pi session。
-10. **外部 Pi 可共存，但 session owner 唯一。** 独立的全局/standalone Pi runtime 拥有自己的进程与服务生命周期；它可与 Dock 共用当前 `~/.pi/agent` 认证、settings、extensions、skills 和 session 存储，但同一 Pi session file 绝不能被两个 runtime 进程并发打开或续写。
-11. **Worker boundary 是 Host 私有实现。** Worker 以 `hostEpoch + instanceId + runtimeGeneration + workerIncarnation` 身份运行；IPC 必须封闭、有界、版本化、generation-fenced，且只开放 Host allowlist capability。Worker loss 必须先终止并确认回收进程 owner，才发布可恢复状态；旧 Worker 的事件、UI 与 receipt 一律失效。
-12. **人工确认的缺席不是拒绝。** Extension UI interaction 属于 runtime generation；无 controller、detach、stream interruption 或 reconnect 期间保持 pending。只有真实用户响应、extension 明确 signal/timeout 或 runtime lifecycle termination 才能结束；若无法恢复，只能停止/冻结当前 run 并暴露诊断，禁止伪造默认值后继续模型。
-
-模块内的状态机、UI、settings、deployment 与测试细节以对应 agent map、代码和测试为准，不在顶层重复定义。
-
-## 测试与安装入口
-
-按 [`docs/qa.md`](docs/qa.md) 选择与改动匹配的最窄检查；Markdown-only 改动的入口是 `git diff --check` 与链接/路径核对。
-
-Managed service 操作和本地安装合同见 [`docs/local-install.md`](docs/local-install.md)。测试与安装彼此独立；未经明确授权，不运行真实 Pi/model smoke、不执行 `npm run install:local`，也不重启 service。
+未经明确授权，不执行真实模型调用、不安装本地版本，也不启动、停止或重启 managed service。

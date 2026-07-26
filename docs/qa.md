@@ -1,119 +1,56 @@
-# Alu Dock 测试路由
+# 测试与验证
 
-## 先选最窄门禁
+## 原则
 
-| 改动 | 首选检查 |
-|---|---|
-| Agent map / Markdown only | `git diff --check` + 手动验证链接/路径 |
-| DTO、parser、pure reducer | `npm run check -- --pretty false` + 对应focused test |
-| Protocol/Client/Host request | `control-protocol`, `dock-control`, `cli-cross-client` |
-| Catalog/Registry | `catalog-transactions`, `durable-catalog-store`, `durable-registry` |
-| ManagedInstance mutation | `managed-instance`, `operation-ledger` |
-| Pi adapter / Worker IPC | 对应Pi unit fixture + `worker-protocol` + no-model-call real双Worker smoke |
-| Pi dependency cohort | 跨版本breaking notes + exact pins/lockfile + 完整代码门禁 + no-model real Pi/PTY；目标model smoke另行授权 |
-| TUI projection/layout | 对应pure TUI test + PTY at 80×24 and 120×40 |
-| Session replacement/tree | generation/history tests + Pi tree/reopen real tests |
-| Managed lifecycle | subprocess SIGTERM/SIGKILL tests；必要时唯一临时user unit |
-| Local install / service code | `local-install`, `user-service`；真实安装需另行授权 |
+测试证明产品行为和系统边界，不定义产品目标，也不保护准备删除的内部结构。
 
-测试由TypeScript编译后用Node test runner执行。Focused示例：
+保留测试的理由应属于以下之一：
+
+- 用户可观察的 Hub、Work、Web 或 Protocol V2 行为；
+- Host/catalog/operation/Queue/controller 的正确性；
+- Worker 进程隔离、generation、replacement、loss 与 reap；
+- Agent adapter 与真实 Agent public API 的行为；
+- 纯 parser、分页、布局等明确模块合同。
+
+旧类名、调用层数、逐方法 proxy、重复 projection、compatibility facade 和无真实产品依据的内容限制不构成测试合同。删除旧实现时应同时删除只保护该实现的测试。
+
+## 选择检查
+
+先运行与改动最接近的检查，完成一个完整改动后再决定是否扩大范围：
 
 ```bash
+npm run check -- --pretty false
 npm run build
-node --test dist/test/control-protocol.test.js dist/test/dock-control.test.js
+node --test dist/test/<focused-test>.test.js
+git diff --check
 ```
 
-不要为每个字段重复完整build/test/audit；完成一个cohesive slice后统一运行。
+只有跨越多个模块或准备合并时才运行完整 `npm test`。不要为每个字段重复完整构建和全套测试。
 
-## 常用检查
+## 验证层次
 
-按改动选择检查，不把它们串成固定的发布流水线：
+### Protocol 与 Host
 
-```bash
-npm run check -- --pretty false   # 类型和编译边界
-npm test                          # 改动跨越多个模块时再跑完整测试
-git diff --check                 # 文本与补丁格式
-```
+验证真实 Protocol V2 hello、request/response、attach/event、mutation identity 和 reconnect，不绕过 Host 直接调用内部对象来证明客户端流程。
 
-改 Pi 依赖时再运行 `npm audit` 并核对 exact pins；改 runtime 边界时再检查 TUI、Core 和 Control 没有直接导入 Pi SDK。`npm run build` 会先清理 `dist`。
+### Worker 与 Agent adapter
 
-## 按模块定位测试
-
-### Control / CLI
-
-```text
-test/control-protocol.test.ts
-test/dock-control.test.ts
-test/cli-cross-client.test.ts
-test/cli-help.test.ts
-test/cli-list.test.ts
-test/operation-ledger.test.ts
-test/project-trust.test.ts
-```
-
-### Catalog / durable Host
-
-```text
-test/catalog-transactions.test.ts
-test/durable-catalog-store.test.ts
-test/durable-registry.test.ts
-test/durable-host-process.test.ts
-test/managed-mode.test.ts
-test/ensure-host.test.ts
-```
-
-### Core / Pi runtime
-
-```text
-test/managed-instance.test.ts
-test/pi-runtime-host.test.ts
-test/worker-protocol.test.ts
-test/pi-workers-real.test.ts
-test/pi-stage3-real.test.ts
-test/pi-reopen-real.test.ts
-test/pi-tree-hooks-real.test.ts
-test/pi-tree-real.test.ts
-test/pi-extension-ui-adapter.test.ts
-test/pi-extension-ui-real.test.ts
-test/pi-tool-result-normalizer.test.ts
-test/pi-network.test.ts
-```
-
-Real Pi tests不得调用model；它们验证public API、session文件、resource loading、replacement与hooks。Worker real gate还必须验证distinct PID/cwd、reverse Host identity capability、单Worker loss隔离、stuck dispose的process-group回收与Host IPC loss后的orphan watchdog。
-
-辅助脚本：
-
-```text
-scripts/sdk-smoke.ts             # 显式provider/model调用 smoke；只在任务授权时运行
-scripts/tui-render-benchmark.ts  # conversation delta/tool render CPU benchmark
-```
+验证 Worker 是独立 OS 进程，Host/Worker identity 正确，单个 Worker loss不影响其他 instance，并且 Agent adapter 使用真实 public API。Real Pi gate 不调用模型。
 
 ### TUI
 
-```text
-test/tui-conversation.test.ts
-test/tui-ux-state.test.ts
-test/history-pagination.test.ts
-test/queue-restoration.test.ts
-test/session-tree.test.ts
-test/fixtures/pty-tui-driver.py
-```
+纯 reducer/layout 测试只能证明局部逻辑。修改人类可见 surface 时，还要通过真实 PTY 检查相关窗口尺寸、输入、resize、scroll、detach 和终端恢复。
 
-## TUI 手工检查
+### Deployment
 
-改动 TUI surface 时，由实现者亲自检查与改动相关的场景：
+Service、installer 或 process lifecycle 改动使用隔离环境验证。真实安装和 service 操作必须另行获得用户授权。
 
-- 80×24与120×40；
-- long cwd/name、multiline input、tool output、tree/picker/dialog；
-- resize、scroll、detach、signal；
-- Hub alternate-screen click/wheel cleanup与Work terminal-native selection/scrollback隔离；
-- 无颜色、ANSI 16/256环境；
-- idle时无不必要animation timer或持续重绘。
+## 真实模型调用
 
-截图或文字记录只能辅助检查，不能替代真实PTY判断。
+普通测试不得调用模型。只有任务明确需要并得到授权时，才运行 provider/model smoke；结果不能成为普通单元测试的前置条件。
 
-## 本地安装
+## 重构
 
-`npm run install:local` 不运行测试。修改安装或 service 代码时运行 `local-install`、`user-service` focused 测试；其他检查按本文件前面的改动路由选择。
+架构重构先确定要保留的产品行为，再选择对应黑盒和边界测试。不要以“让全部旧测试原样通过”为目标，也不要通过新增 fallback 或双轨实现换取旧测试通过。
 
-只有用户明确要求时才从 managed Host 外执行安装。命令和常见问题见 [`docs/local-install.md`](local-install.md)，不要擅自追加 `--replace-active`。
+Git 历史已经保存被删除的测试。没有必要把过期测试留在工作树中充当 archive。

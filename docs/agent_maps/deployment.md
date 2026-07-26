@@ -1,96 +1,80 @@
-# Managed Host 与本地安装图谱
+# Managed Host 与部署
 
-## 适用范围
+## 这部分负责什么
 
-这里记录 `systemd --user`、managed Host startup/readiness、durable catalog process lifecycle 和本地安装相关代码。
-
-## 两条调用链
+Alu Dock 使用一个长期 `systemd --user` Host Service。每个 active instance 的 Agent runtime 运行在独立 Worker 进程中。
 
 ```text
-Explicit service lifecycle
-src/cli.ts service ...
-  └── UserServiceManager
-        ├── generated alu-dock.service
-        ├── systemctl --user
-        └── Protocol V2 hello + MainPID readiness
-              └── installed cli.js serve --managed
-
-Local install
-npm run install:local
-  ├── clean checkout + active-work admission
-  ├── npm pack
-  ├── npm install --prefix ~/.local/share/alu-dock
-  ├── ~/.local/bin/aludock
-  ├── generated unit install/restart
-  └── hello/MainPID readiness
+systemd --user
+      │
+Dock Host Service
+      ├── private Unix socket
+      ├── durable catalog
+      └── supervised Agent Workers
 ```
 
-普通 `open`、`new`、`attach` 只连接既有 Host；不得导入 `UserServiceManager` 自动启动或
-重启 service。
+## Host startup
 
-## Managed Host startup
+Managed Host 启动时：
 
-```text
-cli serve --managed
-  → validate ALU_DOCK_MANAGED + systemd directories
-  → create FileCatalogStore + DockRegistry
-  → DockHost.start()
-      1. create and bind private socket
-      2. verify socket ownership/mode/identity
-      3. load strict catalog
-      4. no-runtime startup reconcile
-      5. atomic normalized catalog commit
-      6. enter running and advertise hello
-      7. only explicit instance create/reopen starts its independent Pi Worker
+1. 绑定并验证私有 Unix socket；
+2. 加载 durable catalog；
+3. 对上一次 Host 遗留状态做保守恢复；
+4. 进入 ready；
+5. 只有显式 create、continue、adopt 或 reopen 才启动 Worker。
+
+Startup 不自动恢复或重放旧 prompt、Queue、interaction、Promise 或 tool effect。
+
+## Worker lifecycle
+
+Host 为每个 active instance 创建独立 Worker，并负责：
+
+- Worker identity 与 runtime generation；
+- process group、termination deadline 与 direct-child reap；
+- replacement 和旧 Worker fencing；
+- Worker loss后的保守 instance 状态；
+- 无法确认 owner release 时的 quarantine。
+
+Worker 与 Host IPC 断开后必须自行终止，不能成为孤儿 runtime。Host 不能在旧 owner 尚未确认释放时为同一 Agent session 创建新 owner。
+
+## Host shutdown 与 loss
+
+正常 shutdown 停止接收新 mutation，处理已接收工作的关闭边界，提交必要 catalog 状态，并终止所有 Worker。
+
+Host 被强制终止时没有 cleanup 保证。下一次启动只使用 durable catalog 和 Agent session metadata 判断可执行动作，不猜测内存中的工作结果。
+
+## Service 管理
+
+普通 Hub、Work、`new`、`attach` 和 Web 请求只连接已有 Host，不安装、启动或重启 service。
+
+Service 生命周期只能由显式命令管理：
+
+```bash
+aludock service install [--now]
+aludock service start
+aludock service stop
+aludock service restart
+aludock service status
+aludock service logs [--lines N] [--follow]
+aludock service uninstall
 ```
 
-Corrupt catalog evidence 保留；失败时不得先构造 prior runtime。Startup normalization 把旧
-live records 转为保守 unavailable 状态，不恢复 queue、Promise 或 effects。
+## 本地安装
 
-## 文件 owner
+本地安装更新 `~/.local/share/alu-dock` 中的包、launcher 和 user service。安装与测试是两件事；安装器不替代测试。
 
-| 文件 | 唯一职责 | 主要测试 |
-|---|---|---|
-| `src/deployment/local-install.ts` | 固定安装布局、generated unit、active-work admission | `local-install` |
-| `scripts/install-local.ts` | npm pack/install、launcher、显式 service restart/readiness | `local-install` |
-| `src/deployment/user-service.ts` | generated-unit lifecycle、readiness、logs | `user-service` |
-| `src/cli.ts:serve()` | managed/dev mode composition 与 signal shutdown | `managed-mode`, process tests |
-| `src/control/dock-host.ts` | bind-first startup、drain、socket ownership、fatal completion | `durable-host-process`, `dock-control` |
-| `src/control/durable-catalog-store.ts` | strict schema-1 load、atomic replace、directory sync | `durable-catalog-store` |
-| `src/control/catalog-reconcile.ts` | Host-loss normalization；无 Pi runtime 构造 | `durable-registry` |
-| `src/control/catalog-transactions.ts` | serialized commit 与 mutation fault | `catalog-transactions` |
-| `src/control/socket-path.ts` | XDG runtime/state 路径 | `ensure-host`, `user-service` |
-| `src/pi/worker-process.ts` | active instance的detached process group、bounded termination与reap | `pi-workers-real` |
-| `src/pi/pi-worker-entry.ts` | Host-loss orphan watchdog与Worker-side dispose | `pi-workers-real` |
+存在未完成 run、Queue、interaction 或 stopping instance 时，安装默认拒绝。显式替换 active Host 会中断这些工作，也不会迁移或重放内存状态。
 
-## 生命周期边界
+未经用户明确授权，不执行安装、service restart 或真实模型调用。
 
-- SIGTERM：停止接收新 request，等待已 admit 工作，commit shutdown intent，并行bounded dispose各instance Worker；未退出的Worker process group升级TERM/KILL并确认direct child reap，保留reopen metadata。若intent写入与owner release都失败，则先durably quarantine为non-reopenable，后续Host不得把显式session-file override当作绕过路径。
-- SIGKILL/Host loss：Host没有cleanup保证；Worker在IPC断开后启动本地hard-stop watchdog并终止自己的process group。下一Host只根据durable catalog与Pi session metadata做保守reconcile，不恢复runtime/queue/Promise。
-- Mutation-fault：Host 切 read-only、drain admitted work、退出非零；不继续接受 mutation。
-- Socket path：private directory、socket mode `0600`、bind identity 校验；不得删除不属于当前
-  Host 的 socket。
-- Readiness：unit active 不等于 ready；必须同时满足 MainPID、Protocol V2 hello 与 managed
-  capability set。确定性 protocol 错误立即失败；短暂连接错误与启动中的 `host_starting`
-  会在 15 秒内重试。
+## 代码范围
 
-## 本地安装规则
+- `src/deployment/`：安装布局和 user service 管理。
+- `scripts/install-local.ts`：本地打包与安装入口。
+- `src/control/dock-host.ts`：Host socket 与 shutdown。
+- `src/control/durable-catalog-store.ts`：durable catalog。
+- `src/control/catalog-reconcile.ts`：Host startup recovery。
+- `src/pi/worker-process.ts`：Worker process supervision。
+- `src/pi/pi-worker-entry.ts`：当前 Pi Worker 入口和 Host-loss shutdown。
 
-- 只有用户明确授权后才允许 `npm run install:local` 或 restart service。
-- 安装必须从 managed Host 之外执行，并要求 clean committed checkout。
-- active 但 idle/已结算的 instance 不阻塞；running、compaction、Queue、interaction 与 stopping 默认拒绝，并提示 `npm run install:local -- --replace-active`。该显式选项允许整体替换 Host，但不迁移或重放任何未决工作。
-- Host replacement 后不自动重建旧 runtime；保留的 Pi session metadata 只允许用户显式 Continue/reopen。
-- 安装包只包含 `dist/src`、README 与 npm 必需元数据；test、fixture、开发脚本不进入 tarball。
-- 固定 prefix 为 `~/.local/share/alu-dock`；unit 指向其中安装的 CLI，不使用 timestamp release
-  或 `current` symlink。
-- 安装器不运行测试。测试由开发者按 `docs/qa.md` 显式执行。
-- 安装器只替换 Alu Dock-owned launcher/unit；同名用户文件必须拒绝覆盖。
-- service install/restart 后必须核对 MainPID 与 hello readiness。
-- 旧 `~/release/alu-dock` 目录不自动迁移或删除，确认新安装后由用户手动清理。
-
-相关测试按 [`docs/qa.md`](../qa.md) 选择。
-
-## 默认不读
-
-- TUI 实现；deployment 只验证 client-visible readiness。
-- Pi internals；startup reconciliation 不得构造 Pi 对象。
+部署代码只管理进程、文件和 service，不实现 Agent session 能力。

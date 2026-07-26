@@ -1,110 +1,97 @@
-# Control、Protocol 与 CLI 图谱
+# Control、Protocol V2 与 Host
 
-## 适用范围
+## 这部分负责什么
 
-Protocol V2、Unix socket、DockClient、Host dispatch、managed instance目录、durable catalog、human CLI。
-
-## 入口与调用链
+Protocol V2 是 Dock 对 Hub、Work、Rails/WebUI 和未来客户端的统一协议。Dock Host Service 通过它提供实例管理和 Agent 会话访问。
 
 ```text
-src/cli.ts
-├── bare Hub / -c / open / new / attach ──dynamic import──> src/interactive.ts ──> DockClient
-├── list/help ──> src/cli-list.ts / src/cli-help.ts
-├── create/status/events/prompt/... ──> DockClient
-├── serve ──> DockRegistry ──> DockHost
-└── service ──> deployment/user-service.ts
-
-DockClient
-  └── hello + one request / connection
-        └── protocol parser
-              └── DockHost.dispatch()
-                    ├── DockRegistry: instance identity/catalog lifecycle
-                    ├── session-command-service: session capability execution
-                    └── ManagedInstance: runtime transaction/state
+Client
+  │ Protocol V2
+  ▼
+Dock Host Service
+  ├── control authority
+  └── session gateway
+         │
+         ▼
+      Agent Worker
 ```
 
-当前空 argv 由 `src/cli.ts:parseGlobalArgs()` 映射为 `hub`；`src/interactive.ts` 首屏只查询只读 catalog，Pi session inventory 在用户选择对应入口后才延迟加载。固定根菜单为 New、Continue、History、Pi Sessions、Leave；Continue 只含 active/reopenable，History 包含 stopped 与不可恢复的 terminal catalog records。`-c`/`--continue` 显式选择当前 cwd 最近的 active/reopenable 实例，没有则 New。显式 `open` 暂时保留旧 smart-entry，`new` 与 `attach TARGET` 直达 Work。
+Protocol V2 不暴露 Worker endpoint、Agent runtime object 或 Agent 私有存储。
 
-## 文件owner
+## Host 的两类工作
 
-| 文件 | 唯一职责 | 主要测试 |
-|---|---|---|
-| `src/cli.ts` | argv解析、human/machine command composition、serve/service入口 | `cli-cross-client`, `cli-help`, `cli-list`, `managed-mode` |
-| `src/index.ts` | package public exports；新增外部API时显式审查 | build、SDK smoke |
-| `src/version.ts` | Dock/Pi/catalog版本常量 | build、protocol/release tests |
-| `src/cli-help.ts` | human help投影 | `cli-help` |
-| `src/cli-list.ts` | human instance列表、唯一可执行短ID与可行动命令投影 | `cli-list` |
-| `src/human-target.ts` | exact ID、唯一ID prefix、唯一精确name的fail-closed解析 | `human-target`, `cli-cross-client` |
-| `src/control/protocol.ts` | closed request/result/event schema、bounds、parser、capability表 | `control-protocol` |
-| `src/control/dock-client.ts` | typed transport、hello negotiation、response validation、timeout；不持有runtime state | `dock-control`, `cli-cross-client` |
-| `src/control/dock-host.ts` | private socket lifecycle、hello、dispatch composition、event streaming、fault drain | `dock-control`, `durable-host-process` |
-| `src/control/session-command-service.ts` | `session.*` mutation执行、operation ledger衔接、trust/replacement结果 | `dock-control`, `operation-ledger` |
-| `src/control/dock-registry.ts` | instance目录、keyed ensure、create/adopt/reopen/forget/prune、catalog projection | `durable-registry`, `dock-control` |
-| `src/control/operation-ledger.ts` | Same-Host operation dedup/conflict | `operation-ledger` |
-| `src/control/project-trust.ts` | bounded challenge、decision与canonical cwd流程 | `project-trust` |
-| `src/control/catalog-transactions.ts` | serialized commit、commit boundary、mutation-fault状态 | `catalog-transactions` |
-| `src/control/durable-catalog-store.ts` | strict schema-1 load与atomic file replacement | `durable-catalog-store` |
-| `src/control/catalog-reconcile.ts` | 无runtime的startup normalization | `durable-registry` |
-| `src/control/json-lines.ts` | bounded JSONL framing | `control-protocol`, `dock-control` |
-| `src/control/socket-path.ts` | managed/dev socket路径 | `ensure-host`, `user-service` |
-| `src/control/ensure-host.ts` | client readiness probe；不得隐式拥有service lifecycle | `ensure-host` |
-| `src/core/catalog.ts` | durable catalog DTO、invariants、typed commit errors | catalog测试组 |
-| `src/core/instance-dto.ts` | snapshots、events、cursors、history、receipts的closed DTO | protocol/runtime/TUI测试组 |
-| `src/core/tool-result-presentation.ts` | stock built-in result details → typed presentation、preview direction与control-frame fallback | `managed-instance`, `control-protocol`, TUI tests |
-| `src/core/session-inventory.ts` | 无runtime构造的Host-owned persisted-session inventory port | `dock-control` |
-| `src/pi/session-inventory.ts` | Pi JSONL header/name metadata增量索引；cache可重建且不成为session真相源 | `pi-session-inventory`, `dock-control` |
+### Control
 
-## 请求修改顺序
+Host 自己处理：
 
-```text
-1. protocol.ts: request/result DTO + fail-closed parser + bound
-2. dock-client.ts: typed method + result parser + correlation validation
-3. owning service/registry/ManagedInstance: execution
-4. dock-host.ts: only routing/composition
-5. implementedCapabilities(): only after implementation exists
-6. protocol + client/host integration tests
-```
+- instance create、ensure、list、get、stop、reopen、forget；
+- catalog、project trust 与 persisted-session inventory；
+- Worker lifecycle、runtime kind 与 generation；
+- Queue、operation、controller 与 attach/reconnect。
 
-不要把capability business logic继续堆进`DockHost.dispatch()`。
+这些状态属于 Dock，不交给 Agent runtime 决定。
 
-## 常见修改路由
+### Session gateway
 
-| 需求 | 从这里开始 | 随后检查 |
-|---|---|---|
-| 新request/capability | `protocol.ts` | `dock-client.ts` → service/registry → `dock-host.ts` |
-| Human CLI command或TARGET解析 | `cli.ts`, `cli-help.ts`, `cli-list.ts`, `human-target.ts` | `interactive.ts`, lifecycle动作、CLI tests |
-| attach/replay/follow | `dock-host.ts`, `dock-client.ts` | `instance-dto.ts`, `ManagedInstance.getAttachProjection()`；区分 legacy overlay、raw cursor log、fresh conversation bootstrap |
-| keyed ensure、create/adopt/reopen/forget/prune | `dock-registry.ts` | catalog transaction/store、trust、durable tests |
-| mutation ambiguity/dedup | `operation-ledger.ts`, `catalog-transactions.ts` | owning mutation、error mapping、cross-client tests |
-| project trust | `project-trust.ts` | Registry preflight、Pi factory、CLI prompt |
-| wire bounds或sanitization | `protocol.ts`, closed DTO owner | client result parser、fuzz/invalid tests |
+Prompt、conversation、model、tools、settings、session、tree 和 Extension UI 等 Agent 会话能力，由 Host 完成必要的 instance、operation、controller 与 lifecycle 判断后路由给 Worker。
 
-## 必守边界
+Host 不为这些能力维护第二套 Agent 实现，也不重复投影 Worker 已经产生的 Dock event/result。
 
-- Protocol payload只能包含closed JSON-safe DTO。
-- 每个connection先hello，随后只允许一个request；event follow是该request的streaming结果。新的 attach replay 语义必须先协商 `events.replay-purpose.v1`；省略 replay 保持旧 history-overlay 行为。`toolsExpanded` snapshot field、event与setter由 `extension_ui.tools-expanded.v1` 单独协商；业务层唯一instance key与`instance.ensure`由`instance.keys.v1`协商；Git branch snapshot/event/replacement bootstrap由 `git.branch-footer.v1` 协商；built-in tool result的typed presentation由 `tool-result-presentation.v1` 协商。Host 对未协商的旧V2 client省略对应field并过滤对应event。只有read-only `instance.list`提供一次pre-capability fallback，供staged release检查待替换的旧Host；mutation不降级重试。
-- Fresh conversation bootstrap 只组合当前 branch history 与 active run 未持久化 tail；显式 events/cursor reconnect 使用 raw event log。
-- Mutations由caller operation ID关联，client不自动retry；本地 detach 可关闭整个 client transport scope，但不得 abort、retry 或接管已发送的 Host mutation。
-- Registry只在required catalog commit后publish instance或success；`instance.ensure`对相同opaque业务key串行get-or-create，只有首个请求构造runtime，后续请求返回同一已提交instance。key表示当前业务入口：explicit stop intent commit时立即从旧instance释放，cleanup继续按instance ID进行，新的ensure不等待旧Worker退出；intent commit失败则回滚并保留key。
-- `session.inventory` 只返回 bounded closed metadata，不构造 runtime；`instance.adopt` 必须先验证 session target 与 project trust，再构造 runtime 和 commit catalog。
-- Hub History 与 `forget`/`prune`只删Dock catalog record，不删Pi session file；History Continue 通过已保存 sessionFile 创建新 Dock identity。
-- `ensure-host.ts`只验证连接；普通open/new/attach不得导入deployment模块自动启动Host。
-- Human CLI不直接输出raw protocol error JSON。
-- Human CLI、Protocol V2 machine control与Pi-registered model tools是独立surface；Agent不得通过自身CLI形成self-loop。
+## Protocol V2
 
-## Bounds 与显式降级
+连接使用本机私有 Unix socket 和 JSONL：
 
-- Protocol V2 单条 JSONL 记录上限是1 MiB，但这只是transport frame bound，不是语义上限。普通文本、Data URI、raw base64与结构化image data不得按内容猜测、拒绝或删除；大型conversation通过`conversation.content.v1`按revision/contentRef/cursor分片读取。Pi built-in tool text/display diff的legacy projection只负责bounded preview；authoritative content必须可继续读取。`tool-result-presentation.v1`只传`bash/read/edit/write/grep/find/ls`可识别的preview、notice与edit display diff；未知optional metadata被忽略，不能导致有效tool text整块拒收。
-- `projection.completeness.v1` 为 model、tool、resource、diagnostic、command 与 Pi-session list 返回 `total`/`truncated`；新 DockClient 必须协商该能力并在 Work 中提示不完整投影。Host 对未协商该能力的旧客户端保留 legacy result shape，且 operation receipt 永远缓存能力无关的 canonical result。
-- `session.inventory-diagnostics.v1` 区分“确实没有 saved session”与 JSONL root/directory/file 扫描失败；结果带 `incomplete`、bounded diagnostics 和 `diagnosticsTruncated`。Hub/Resume 必须显示该事实，不能把失败说成空 inventory。
-- Attach 初始化与 live follow 都使用 1,000-event / 4 MiB 双界限。`socket.write() === false` 只表示背压：Host 必须等待 drain，并在有界队列内保持 cursor 顺序；只有 drain timeout 或队列超限才关闭该观察流，且不得影响 Host-owned runtime。初始化超限写入 bounded degradation event 供 reconnect 观察；若响应尚未发布，同时返回 `attach_initial_overflow`。client initial-callback handoff 的同类溢出使用 `event_handoff_overflow`。
-- Same-Host operation ledger 只保留最近 1,000 个完整 receipt，但将更早 operation ID 的 SHA-256 mutation fingerprint 保留到 Host 退出；重复旧 ID 返回 `operation_receipt_expired` 或 `operation_conflict`，绝不因 receipt 淘汰重做副作用。Host restart/hostEpoch 变化仍是新的 operation domain。
-- Session inventory 当前由稳定排序后的 2,000-item / 512 KiB 双界限约束并返回 `total/truncated`；catalog list、history 与 tree 使用各自 cursor。超过无 cursor inventory/config projection 的尾部不可选，必须在 UI 明示，不能默认为完整。
-- `instance.list`/status不得让一个live instance的非法projection污染整个catalog结果。Registry对该instance的`ManagedInstance.snapshot()`异常只回退到其最近已提交的bounded catalog snapshot；Protocol parser继续严格拒绝非法wire state，不做跨实例字段修补。
-- Durable catalog 的 10,000-record / 16 MiB 是显式 fail-closed 维护边界；达到前应通过 History Forget / stopped prune 缩减，Host 不静默删除记录。
+1. 客户端先发送 hello，并协商版本与 capabilities；
+2. hello 成功后发送业务 request；
+3. 普通 request 返回一个 response；
+4. attach/follow request 在初始 response 后持续接收 event。
 
-## 默认不读
+Request、response 和 event 使用 closed JSON-safe shape。单 frame 可以有传输上限，但业务内容不能因此永久截断；大型 conversation 使用分页和 chunk 继续读取。
 
-- `src/tui/*`：除非改human interactive flow。
-- Pi package internals与`src/pi/*`：除非closed RuntimeSession port必须变化。
-- Git历史中的计划/验证证据与`dist/`。
+Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 TUI 或 Web 客户端重写。
+
+## 身份
+
+以下身份用途不同：
+
+- `hostEpoch`：一次 Host 进程域；
+- `instanceId`：Dock 工作实例；
+- Agent 原生 session identity：当前 Worker 内的会话；
+- `runtimeGeneration`：instance 内一次 runtime/session generation；
+- `operationId`：一次调用者 mutation 意图；
+- event cursor：一次 attach/reconnect 的观察位置。
+
+客户端不能用 name、cwd、Agent session ID 或文件路径代替 Dock instance identity。
+
+## Mutation
+
+Host 对 mutation 负责 admission、operation 去重和结果归属。客户端发送 mutation 后遇到断线或无法确认的 response，不能自动重放；应查询当前状态，并在仍无法确定时保留结果未知。
+
+Worker 接受副作用前失联和接受后失联是不同结果。Host 必须保留这个区别，不能把可能已经执行的 mutation 当成普通失败重试。
+
+## Attach 与 reconnect
+
+Attach 返回当前 snapshot 和初始事件，然后可以持续 follow。客户端保存已接受的 cursor；断线后只有在 Host、instance、generation 和 replay 连续性都能确认时继续增量，否则重新读取权威 snapshot 与 conversation。
+
+观察连接中断不等于 Agent runtime 失败，也不结束 instance。
+
+## Capabilities
+
+Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力。
+
+- Agent 提供但客户端未实现的能力，只在该客户端不可用；
+- 新 Agent 实现现有能力时，不修改 Protocol V2 和其他客户端；
+- 真正的新 Agent 能力在 Protocol V2 定义一次，再由需要它的客户端实现；
+- capability negotiation 不能成为删除内容或降低其他客户端能力的理由。
+
+## 代码范围
+
+- `src/control/protocol.ts`：Protocol V2 shape、hello、capabilities 与 wire parser。
+- `src/control/dock-client.ts`：TypeScript 客户端 transport。
+- `src/control/dock-host.ts`：Host socket、request routing 与 event follow。
+- `src/control/dock-registry.ts`：instance 与 catalog lifecycle。
+- `src/control/operation-ledger.ts`：Host epoch 内的 mutation identity。
+- `src/control/catalog-*.ts`：durable catalog transaction 与 recovery。
+- `src/control/json-lines.ts`：JSONL framing。
+
+新增功能时先判断它属于 Host control 还是 Agent session。不要把 Agent session 能力塞进 catalog/Managed state，也不要为同一 Protocol V2 shape 在 Worker、Host 和客户端分别维护重复定义。
