@@ -40,7 +40,7 @@ Hub TUI / Work TUI / Rails-WebUI / future clients
 | Agent Worker、Pi adapter、session 与 Extension UI | [`docs/agent_maps/runtime.md`](docs/agent_maps/runtime.md) |
 | Hub 与 Session Work TUI | [`docs/agent_maps/tui.md`](docs/agent_maps/tui.md) |
 | Managed service 与部署 | [`docs/agent_maps/deployment.md`](docs/agent_maps/deployment.md) |
-| 测试选择 | [`docs/qa.md`](docs/qa.md) |
+| 测试配额、用户可见文案与验证层次 | [`docs/qa.md`](docs/qa.md) |
 | 本地安装和运维 | [`docs/local-install.md`](docs/local-install.md) |
 
 项目使用 Node.js、TypeScript ESM。实现任务先读对应模块文档和直接相关代码，不把某个模块的实现细节提升成全项目规则。
