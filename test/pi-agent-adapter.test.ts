@@ -17,19 +17,50 @@ import { CatalogEffectUnknownError } from "../src/core/catalog.js";
 import { SETTING_KEYS } from "../src/core/config-projection.js";
 import { ManagedInstance, RuntimeEffectUnknownError } from "../src/core/managed-instance.js";
 import {
-  RuntimeCompactionKnownFailureError,
-  RuntimeInvalidSettingValueError,
-  RuntimeQueueEffectUnknownError,
-  RuntimeQueueRejectedBeforeEffectError,
-  RuntimeSettingsWriteError,
-} from "../src/core/runtime-session.js";
+  AgentCompactionKnownFailureError,
+  AgentInvalidSettingValueError,
+  AgentQueueEffectUnknownError,
+  AgentQueueRejectedBeforeEffectError,
+  AgentSettingsWriteError,
+} from "../src/core/agent-worker.js";
+import type { AgentEvent, AgentInvokeOptions, AgentRequest, AgentWorkerConnection, AgentWorkerControl, AgentWorkerState } from "../src/core/agent-worker.js";
 import type { GitBranchObserverPort } from "../src/pi/git-branch-observer.js";
 import {
-  PiRuntimeHost,
-  type PiRuntimeHostOptions,
+  PiAgentAdapter,
+  type PiAgentAdapterOptions,
   type PiSessionCatalog,
-} from "../src/pi/pi-runtime-host.js";
+} from "../src/pi/pi-agent-adapter.js";
 import { ScriptedCatalogCommitPort } from "./support/scripted-catalog-port.js";
+
+function localConnection(adapter: PiAgentAdapter): AgentWorkerConnection {
+  const capture = (): AgentWorkerState => {
+    const durableSessionFile = adapter.getDurableSessionFile();
+    return {
+      sessionId: adapter.sessionId,
+      ...(adapter.sessionFile === undefined ? {} : { sessionFile: adapter.sessionFile }),
+      ...(durableSessionFile === undefined ? {} : { durableSessionFile }),
+      isStreaming: adapter.isStreaming,
+      isCompacting: adapter.isCompacting,
+      ...(adapter.getGitBranch() === undefined ? {} : { gitBranch: adapter.getGitBranch() }),
+      modelState: adapter.getModelState(),
+      metrics: adapter.getMetrics(),
+      extensionCommands: adapter.getExtensionCommandNames(),
+    };
+  };
+  let lastState = capture();
+  return {
+    state(): AgentWorkerState {
+      try { lastState = capture(); } catch {}
+      return structuredClone(lastState);
+    },
+    invoke(request: AgentRequest, options?: AgentInvokeOptions): Promise<unknown> {
+      return adapter.dispatch(request, options?.context, options?.preflightResult);
+    },
+    control(request: AgentWorkerControl): Promise<unknown> { return adapter.control(request); },
+    subscribe(listener: (event: AgentEvent) => void): () => void { return adapter.subscribe(listener); },
+    dispose(): Promise<void> { return adapter.dispose(); },
+  };
+}
 
 interface FakeModel {
   provider: string;
@@ -405,15 +436,15 @@ class FakeGitBranchObserver implements GitBranchObserverPort {
 async function runtimeHost(
   trace: string[],
   configure: (owner: FakeRuntimeOwner, initial: FakeSession) => void = () => {},
-  options: Omit<PiRuntimeHostOptions, "runtime"> = {},
-): Promise<{ host: PiRuntimeHost; owner: FakeRuntimeOwner; initial: FakeSession }> {
+  options: Omit<PiAgentAdapterOptions, "runtime"> = {},
+): Promise<{ host: PiAgentAdapter; owner: FakeRuntimeOwner; initial: FakeSession }> {
   const initial = new FakeSession("initial", "/sessions/initial.jsonl", trace);
   const owner = new FakeRuntimeOwner(initial, trace);
   configure(owner, initial);
-  const host = await PiRuntimeHost.create({
+  const host = await PiAgentAdapter.create({
     isSessionFileDurable: () => true,
     ...options,
-    runtime: owner as unknown as PiRuntimeHostOptions["runtime"],
+    runtime: owner as unknown as PiAgentAdapterOptions["runtime"],
   });
   return { host, owner, initial };
 }
@@ -457,7 +488,7 @@ test("Pi runtime host converts bounded local images for prompt, steer, and follo
     ]);
     await assert.rejects(
       host.queueMessage("missing", "steer", [{ path: join(root, "missing"), mimeType: "image/png" }]),
-      (error: unknown) => error instanceof RuntimeQueueRejectedBeforeEffectError && !String(error.cause).includes(root),
+      (error: unknown) => error instanceof AgentQueueRejectedBeforeEffectError && !String(error.cause).includes(root),
     );
     assert.equal(initial.queueCalls.length, 2);
 
@@ -493,10 +524,10 @@ test("Pi runtime host projects public compaction independently from streaming", 
     { text: "retry follow", delivery: "followUp" },
   ]);
   initial.queueFailure = "before";
-  await assert.rejects(host.queueMessage("definite", "steer"), RuntimeQueueRejectedBeforeEffectError);
+  await assert.rejects(host.queueMessage("definite", "steer"), AgentQueueRejectedBeforeEffectError);
   assert.equal(initial.queueCalls.length, 2);
   initial.queueFailure = "after";
-  await assert.rejects(host.queueMessage("uncertain", "followUp"), RuntimeQueueEffectUnknownError);
+  await assert.rejects(host.queueMessage("uncertain", "followUp"), AgentQueueEffectUnknownError);
   assert.equal(initial.queueCalls.at(-1)?.text, "uncertain");
   await host.dispose();
 });
@@ -990,7 +1021,7 @@ test("Pi runtime host distinguishes known no-effect compaction failures from pos
   knownRuntime.host.activateInitial();
   await assert.rejects(
     knownRuntime.host.compact(),
-    (error: unknown) => error instanceof RuntimeCompactionKnownFailureError
+    (error: unknown) => error instanceof AgentCompactionKnownFailureError
       && error.reason === "nothing_to_compact",
   );
   await knownRuntime.host.dispose();
@@ -1003,7 +1034,7 @@ test("Pi runtime host distinguishes known no-effect compaction failures from pos
   await assert.rejects(
     ambiguousRuntime.host.compact(),
     (error: unknown) => error instanceof Error
-      && !(error instanceof RuntimeCompactionKnownFailureError)
+      && !(error instanceof AgentCompactionKnownFailureError)
       && error.message === "post-append hook failed",
   );
   await ambiguousRuntime.host.dispose();
@@ -1138,7 +1169,7 @@ test("navigation post-effect catalog failure exposes effect_unknown without publ
     session.treeRoots = [{ entry: assistantEntry, children: [] }];
     session.treeLeafId = null;
   });
-  const instance = new ManagedInstance({ id: "navigate-fault", creationOperationId: "create-navigate-fault", hostEpoch: "epoch-navigate-fault", cwd: "/project", session: host });
+  const instance = new ManagedInstance({ id: "navigate-fault", creationOperationId: "create-navigate-fault", hostEpoch: "epoch-navigate-fault", cwd: "/project", session: localConnection(host), initialHistory: host.getHistory() });
   host.activateInitial();
   const port = new ScriptedCatalogCommitPort();
   const catalog = new CatalogTransactionCoordinator(port, instance.hostEpoch);
@@ -1171,7 +1202,7 @@ test("successful replacement invalidates old binding and publishes new generatio
     creationOperationId: "create-1",
     hostEpoch: "epoch-1",
     cwd: "/project",
-    session: host,
+    session: localConnection(host), initialHistory: host.getHistory(),
   });
   host.activateInitial();
   const staleCursor = {
@@ -1206,7 +1237,7 @@ test("replacement catalog failure keeps the committed generation and reports the
     creationOperationId: "create-catalog-fault",
     hostEpoch: "epoch-catalog-fault",
     cwd: "/project",
-    session: host,
+    session: localConnection(host), initialHistory: host.getHistory(),
   });
   host.activateInitial();
   const port = new ScriptedCatalogCommitPort();
@@ -1245,7 +1276,7 @@ test("replacement teardown failure commits runtime_error with the previous recov
     creationOperationId: "create-runtime-error",
     hostEpoch: "epoch-runtime-error",
     cwd: "/project",
-    session: host,
+    session: localConnection(host), initialHistory: host.getHistory(),
   });
   host.activateInitial();
   const port = new ScriptedCatalogCommitPort();
@@ -1278,7 +1309,7 @@ test("runtime-error catalog failure retains the committed replacement intent", a
     creationOperationId: "create-runtime-error-fault",
     hostEpoch: "epoch-runtime-error-fault",
     cwd: "/project",
-    session: host,
+    session: localConnection(host), initialHistory: host.getHistory(),
   });
   host.activateInitial();
   const port = new ScriptedCatalogCommitPort();
@@ -1317,7 +1348,7 @@ test("switch applies pre-resolved target trust before SDK hooks", async () => {
       trace.push("trust:resolved");
     },
   });
-  const instance = new ManagedInstance({ cwd: "/project", session: host });
+  const instance = new ManagedInstance({ cwd: "/project", session: localConnection(host), initialHistory: host.getHistory() });
   host.activateInitial();
 
   await instance.switchSession("switch-1", "/sessions/target.jsonl", {
@@ -1336,7 +1367,7 @@ test("switch applies pre-resolved target trust before SDK hooks", async () => {
 test("cancelled replacement leaves binding and generation untouched", async () => {
   const trace: string[] = [];
   const { host, owner, initial } = await runtimeHost(trace, (runtime) => { runtime.mode = "cancel"; });
-  const instance = new ManagedInstance({ cwd: "/project", session: host });
+  const instance = new ManagedInstance({ cwd: "/project", session: localConnection(host), initialHistory: host.getHistory() });
   host.activateInitial();
 
   assert.deepEqual(await instance.newSession("cancel-1"), { cancelled: true });
@@ -1375,7 +1406,7 @@ test("fork cancellation clears durable intent while fork factory failure preserv
     session.treeRoots = tree;
     session.treeLeafId = "fork-user";
   });
-  const cancelled = new ManagedInstance({ id: "fork-cancel", creationOperationId: "create-fork-cancel", hostEpoch: "epoch-fork-cancel", cwd: "/project", session: cancelledRuntime.host });
+  const cancelled = new ManagedInstance({ id: "fork-cancel", creationOperationId: "create-fork-cancel", hostEpoch: "epoch-fork-cancel", cwd: "/project", session: localConnection(cancelledRuntime.host), initialHistory: cancelledRuntime.host.getHistory() });
   cancelledRuntime.host.activateInitial();
   const cancelPort = new ScriptedCatalogCommitPort();
   const cancelCatalog = new CatalogTransactionCoordinator(cancelPort, cancelled.hostEpoch);
@@ -1394,7 +1425,7 @@ test("fork cancellation clears durable intent while fork factory failure preserv
     session.treeRoots = tree;
     session.treeLeafId = "fork-user";
   });
-  const failed = new ManagedInstance({ id: "fork-failed", creationOperationId: "create-fork-failed", hostEpoch: "epoch-fork-failed", cwd: "/project", session: failedRuntime.host });
+  const failed = new ManagedInstance({ id: "fork-failed", creationOperationId: "create-fork-failed", hostEpoch: "epoch-fork-failed", cwd: "/project", session: localConnection(failedRuntime.host), initialHistory: failedRuntime.host.getHistory() });
   failedRuntime.host.activateInitial();
   const failurePort = new ScriptedCatalogCommitPort();
   const failureCatalog = new CatalogTransactionCoordinator(failurePort, failed.hostEpoch);
@@ -1421,7 +1452,7 @@ test("a replacement whose Pi file is deferred keeps only the previous durable re
     session.treeRoots = [{ entry: user, children: [] }];
     session.treeLeafId = "deferred-user";
   }, { isSessionFileDurable: (path) => durable.has(path) });
-  const instance = new ManagedInstance({ id: "deferred-fork", creationOperationId: "create-deferred-fork", hostEpoch: "epoch-deferred-fork", cwd: "/project", session: runtime.host });
+  const instance = new ManagedInstance({ id: "deferred-fork", creationOperationId: "create-deferred-fork", hostEpoch: "epoch-deferred-fork", cwd: "/project", session: localConnection(runtime.host), initialHistory: runtime.host.getHistory() });
   runtime.host.activateInitial();
   const port = new ScriptedCatalogCommitPort();
   const catalog = new CatalogTransactionCoordinator(port, instance.hostEpoch);
@@ -1451,7 +1482,7 @@ test("replacement commit failure disposes the candidate before runtime_error pub
     commitReplacement: async () => { throw new Error("catalog commit failed"); },
     commitRuntimeError: async () => { runtimeErrorCommits += 1; },
   });
-  const instance = new ManagedInstance({ cwd: "/project", session: host });
+  const instance = new ManagedInstance({ cwd: "/project", session: localConnection(host), initialHistory: host.getHistory() });
   host.activateInitial();
 
   await assert.rejects(instance.newSession("commit-fail"), /catalog commit failed/);
@@ -1471,7 +1502,7 @@ test("a replacement hook failure before invalidation preserves the active runtim
   const { host, owner, initial } = await runtimeHost(trace, (runtime) => { runtime.mode = "hook-fail"; }, {
     commitRuntimeError: async () => { runtimeErrorCommits += 1; },
   });
-  const instance = new ManagedInstance({ cwd: "/project", session: host });
+  const instance = new ManagedInstance({ cwd: "/project", session: localConnection(host), initialHistory: host.getHistory() });
   host.activateInitial();
 
   await assert.rejects(instance.newSession("hook-fail"), /before hook failed/);
@@ -1491,7 +1522,7 @@ test("factory and bind failures fail closed without reviving stale sessions", as
     const { host, owner, initial } = await runtimeHost(trace, (runtime) => { runtime.mode = mode; }, {
       commitRuntimeError: async (failure) => { failures.push(`${failure.operationId}:${failure.kind}`); },
     });
-    const instance = new ManagedInstance({ cwd: "/project", session: host });
+    const instance = new ManagedInstance({ cwd: "/project", session: localConnection(host), initialHistory: host.getHistory() });
     host.activateInitial();
 
     await assert.rejects(instance.newSession(`op-${mode}`), new RegExp(mode === "factory-fail" ? "factory" : "bind"));
@@ -1521,7 +1552,7 @@ test("reload buffers events, commits before publication, and increments generati
   }, {
     commitReplacement: async () => { trace.push("reload:commit"); },
   });
-  const instance = new ManagedInstance({ cwd: "/project", session: host });
+  const instance = new ManagedInstance({ cwd: "/project", session: localConnection(host), initialHistory: host.getHistory() });
   host.activateInitial();
 
   assert.deepEqual(await instance.reloadSession("reload-1"), { cancelled: false });
@@ -1585,7 +1616,7 @@ test("reload failure disposes the unsafe runtime exactly once", async () => {
   }, {
     commitRuntimeError: async (failure) => { failures.push(`${failure.operationId}:${failure.kind}`); },
   });
-  const instance = new ManagedInstance({ cwd: "/project", session: host });
+  const instance = new ManagedInstance({ cwd: "/project", session: localConnection(host), initialHistory: host.getHistory() });
   host.activateInitial();
 
   await assert.rejects(instance.reloadSession("reload-fail"), /reload failed/);
@@ -1601,7 +1632,7 @@ test("reload failure disposes the unsafe runtime exactly once", async () => {
 test("ManagedInstance rejects replacement while the runtime is busy", async () => {
   const trace: string[] = [];
   const { host, initial } = await runtimeHost(trace);
-  const instance = new ManagedInstance({ cwd: "/project", session: host });
+  const instance = new ManagedInstance({ cwd: "/project", session: localConnection(host), initialHistory: host.getHistory() });
   host.activateInitial();
   initial.isStreaming = true;
 
@@ -1624,7 +1655,7 @@ test("Pi runtime host isolates settings errors around model and thinking mutatio
   settings.errors.push({ scope: "project", error: new Error("old parse failure") });
   await assert.rejects(
     host.selectModel("fixture", "model-a"),
-    (error: unknown) => error instanceof RuntimeSettingsWriteError
+    (error: unknown) => error instanceof AgentSettingsWriteError
       && error.phase === "baseline"
       && error.mutationApplied === false,
   );
@@ -1640,7 +1671,7 @@ test("Pi runtime host isolates settings errors around model and thinking mutatio
   settings.flushError = new Error("flush failed");
   await assert.rejects(
     host.setThinkingLevel("high"),
-    (error: unknown) => error instanceof RuntimeSettingsWriteError
+    (error: unknown) => error instanceof AgentSettingsWriteError
       && error.phase === "write"
       && error.mutationApplied === true
       && error.errors[0]?.scope === "unknown",
@@ -1842,7 +1873,7 @@ test("settings projection rejects malformed effective Pi values without reflecti
     host.activateInitial();
     await assert.rejects(
       host.getSettings(),
-      (error: unknown) => error instanceof RuntimeInvalidSettingValueError
+      (error: unknown) => error instanceof AgentInvalidSettingValueError
         && error.setting === fixture.key
         && error.message === `Pi setting ${fixture.key} has an invalid effective value`,
     );
@@ -1928,7 +1959,7 @@ test("general setting persistence preserves baseline/write attribution and hones
     session.settingsManager = manager;
     owner.services = services({ settings: manager });
   });
-  const instance = new ManagedInstance({ cwd: "/project", session: host });
+  const instance = new ManagedInstance({ cwd: "/project", session: localConnection(host), initialHistory: host.getHistory() });
   host.activateInitial();
 
   await instance.updateSetting({ key: "enableSkillCommands", value: false });
@@ -1938,7 +1969,7 @@ test("general setting persistence preserves baseline/write attribution and hones
   manager.flush = async () => { calls.push("flush"); throw new Error("write failed"); };
   await assert.rejects(
     instance.updateSetting({ key: "steeringMode", value: "one-at-a-time" }),
-    (error: unknown) => error instanceof RuntimeSettingsWriteError && error.mutationApplied,
+    (error: unknown) => error instanceof AgentSettingsWriteError && error.mutationApplied,
   );
   assert.equal(initial.steeringMode, "one-at-a-time");
   const events = instance.eventsSince().events;
@@ -1948,7 +1979,7 @@ test("general setting persistence preserves baseline/write attribution and hones
 
   await assert.rejects(
     instance.updateSetting({ key: "transport", value: "websocket" }),
-    (error: unknown) => error instanceof RuntimeSettingsWriteError && error.mutationApplied,
+    (error: unknown) => error instanceof AgentSettingsWriteError && error.mutationApplied,
   );
   assert.equal(initial.agent.transport, "auto", "failed persistence must not change the live transport");
   await instance.stop("stop-1");
@@ -2014,7 +2045,7 @@ test("rejected runtime disposal still invalidates every binding", async () => {
   const { host, owner, initial } = await runtimeHost(trace, (runtime) => {
     runtime.disposeErrorBeforeInvalidate = new Error("shutdown hook failed");
   });
-  const instance = new ManagedInstance({ cwd: "/project", session: host });
+  const instance = new ManagedInstance({ cwd: "/project", session: localConnection(host), initialHistory: host.getHistory() });
   host.activateInitial();
 
   await assert.rejects(
@@ -2030,7 +2061,7 @@ test("rejected runtime disposal still invalidates every binding", async () => {
 test("stop awaits the runtime owner shutdown before reporting stopped", async () => {
   const trace: string[] = [];
   const { host } = await runtimeHost(trace);
-  const instance = new ManagedInstance({ cwd: "/project", session: host });
+  const instance = new ManagedInstance({ cwd: "/project", session: localConnection(host), initialHistory: host.getHistory() });
   host.activateInitial();
 
   const receipt = await instance.stop("stop-1");

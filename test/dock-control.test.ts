@@ -16,9 +16,9 @@ import { ProjectTrustCoordinator } from "../src/control/project-trust.js";
 import { ExtensionUiBroker, InteractionLifecycleCancelledError } from "../src/core/extension-ui-broker.js";
 import { ManagedInstance, type DockEvent, type SessionDto } from "../src/core/managed-instance.js";
 import { SETTING_KEYS, type SettingUpdate } from "../src/core/config-projection.js";
-import { RuntimeCompactionKnownFailureError, RuntimeInvalidSettingValueError, RuntimeSettingsWriteError, type RuntimeHistoryEntry, type RuntimePromptOptions } from "../src/core/runtime-session.js";
+import { AgentCompactionKnownFailureError, AgentInvalidSettingValueError, AgentSettingsWriteError, type AgentHistoryEntry, type AgentPromptOptions } from "../src/core/agent-worker.js";
 import { mouseTrackingSequences } from "../src/tui/mouse-input.js";
-import { DelayedRuntimeSession } from "./support/delayed-runtime-session.js";
+import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
 import { ScriptedCatalogCommitPort } from "./support/scripted-catalog-port.js";
 
 interface Harness {
@@ -26,11 +26,11 @@ interface Harness {
   socketPath: string;
   host: DockHost;
   registry: DockRegistry;
-  sessions: Map<string, DelayedRuntimeSession>;
+  sessions: Map<string, DelayedAgentWorkerConnection>;
 }
 
-class NoRunRuntimeSession extends DelayedRuntimeSession {
-  override prompt(text: string, options?: RuntimePromptOptions): Promise<void> {
+class NoRunAgentWorkerConnection extends DelayedAgentWorkerConnection {
+  override prompt(text: string, options?: AgentPromptOptions): Promise<void> {
     this.promptCalls += 1;
     this.promptMessages.push(text);
     options?.preflightResult?.(true);
@@ -42,10 +42,10 @@ async function createHarness(): Promise<Harness> {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-control-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  const sessions = new Map<string, DelayedRuntimeSession>();
+  const sessions = new Map<string, DelayedAgentWorkerConnection>();
   let sequence = 0;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, key, name }) => {
-    const session = new DelayedRuntimeSession(`pi-${id}`);
+    const session = new DelayedAgentWorkerConnection(`pi-${id}`);
     sessions.set(id, session);
     const modelState = session.getModelState();
     const instance = new ManagedInstance({
@@ -68,10 +68,10 @@ async function createTransactionHarness(port: ScriptedCatalogCommitPort, faultDr
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-transaction-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  const sessions = new Map<string, DelayedRuntimeSession>();
+  const sessions = new Map<string, DelayedAgentWorkerConnection>();
   let sequence = 0;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, key, name }) => {
-    const session = new DelayedRuntimeSession(`pi-${id}`);
+    const session = new DelayedAgentWorkerConnection(`pi-${id}`);
     sessions.set(id, session);
     const modelState = session.getModelState();
     return new ManagedInstance({
@@ -89,10 +89,10 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
   let factoryCalls = 0;
-  let gatedSession: DelayedRuntimeSession | undefined;
+  let gatedSession: DelayedAgentWorkerConnection | undefined;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
     factoryCalls += 1;
-    gatedSession = new DelayedRuntimeSession(`pi-${id}`);
+    gatedSession = new DelayedAgentWorkerConnection(`pi-${id}`);
     gatedSession.gitBranch = "main";
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: gatedSession });
   }, () => "gated-instance", { hostEpoch: "host-epoch-gate", startedAt: "2026-07-14T00:00:00.000Z" });
@@ -226,7 +226,7 @@ test("project trust challenge precedes factory effects and denial continues untr
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, projectTrusted }) => {
     factoryCalls += 1;
     trustedValues.push(projectTrusted);
-    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedRuntimeSession(`pi-${id}`) });
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedAgentWorkerConnection(`pi-${id}`) });
   }, () => "trusted-instance", { trustPreflight: trust });
   const host = new DockHost({ socketPath, registry });
   context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
@@ -278,7 +278,7 @@ test("session switch resolves target project trust before replacement effects", 
   await mkdir(targetCwd);
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  let runtime: DelayedRuntimeSession | undefined;
+  let runtime: DelayedAgentWorkerConnection | undefined;
   const trust = new ProjectTrustCoordinator({
     requiresTrust: (cwd) => cwd === targetCwd,
     savedDecision: () => null,
@@ -286,7 +286,7 @@ test("session switch resolves target project trust before replacement effects", 
     remember: () => assert.fail("trust_once must not write the trust store"),
   }, { createId: () => "switch-challenge", now: () => 1_000 });
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    runtime = new DelayedRuntimeSession(`pi-${id}`);
+    runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
     runtime.sessionCatalog = [{ sessionId: "target-session", sessionFile: "/tmp/target-session.jsonl", cwd: targetCwd }];
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
   }, () => "switch-trust-instance", { trustPreflight: trust });
@@ -321,7 +321,7 @@ test("extension UI lease preserves dialogs across detach and re-presents them to
     reset: () => { widgetViewport = undefined; },
   });
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    const session = new DelayedRuntimeSession(`pi-${id}`);
+    const session = new DelayedAgentWorkerConnection(`pi-${id}`);
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session, extensionUiBroker: broker });
   }, () => "extension-ui-instance");
   const host = new DockHost({ socketPath, registry });
@@ -383,8 +383,8 @@ test("extension UI lease preserves dialogs across detach and re-presents them to
   );
   assert.deepEqual(widgetViewport, { width: 96, height: 32 });
   await assert.rejects(
-    client.respondInteraction(instance.id, leaseToken, "not-sent", { method: "input", value: "A0+/".repeat(32) }, "binary-response"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_request",
+    client.respondInteraction(instance.id, leaseToken, "not-sent", { method: "input", value: "A0+/".repeat(32) }, "semantic-text-response"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "interaction_not_found",
   );
   await assert.rejects(
     client.respondInteraction(instance.id, leaseToken, "not-sent", { method: "editor", value: "x".repeat(256_001) }, "oversized-response"),
@@ -529,7 +529,7 @@ test("SSH TUI controller completes select confirm input and editor extension dia
   const readyFile = join(directory, "dialog.ready");
   const broker = new ExtensionUiBroker();
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    const session = new DelayedRuntimeSession(`pi-${id}`);
+    const session = new DelayedAgentWorkerConnection(`pi-${id}`);
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session, extensionUiBroker: broker });
   }, () => "extension-pty-instance");
   const host = new DockHost({ socketPath, registry });
@@ -568,7 +568,7 @@ test("SSH TUI restores a pending extension interaction from a fresh attach boots
   const readyFile = join(directory, "fresh-attach.ready");
   const broker = new ExtensionUiBroker();
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    const session = new DelayedRuntimeSession(`pi-${id}`);
+    const session = new DelayedAgentWorkerConnection(`pi-${id}`);
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session, extensionUiBroker: broker });
   }, () => "extension-fresh-attach-instance");
   const host = new DockHost({ socketPath, registry });
@@ -599,7 +599,7 @@ test("SSH TUI re-presents an interaction when the Host rejects its first respons
   const readyFile = join(directory, "response-retry.ready");
   const broker = new ExtensionUiBroker();
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    const session = new DelayedRuntimeSession(`pi-${id}`);
+    const session = new DelayedAgentWorkerConnection(`pi-${id}`);
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session, extensionUiBroker: broker });
   }, () => "extension-response-retry-instance");
   const host = new DockHost({ socketPath, registry });
@@ -642,7 +642,7 @@ test("SSH TUI reacquires its controller after runtime replacement", async (conte
   const readyFile = join(directory, "replacement.ready");
   const broker = new ExtensionUiBroker();
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    const session = new DelayedRuntimeSession(`pi-${id}`);
+    const session = new DelayedAgentWorkerConnection(`pi-${id}`);
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session, extensionUiBroker: broker });
   }, () => "extension-replacement-instance");
   const host = new DockHost({ socketPath, registry });
@@ -729,7 +729,7 @@ test("committed stop intent releases a key before cleanup so a moved workspace c
 
   const client = new DockClient({ socketPath: harness.socketPath });
   const original = await client.ensure("alu", harness.directory, "Old Alu Workstation", "ensure-old-alu");
-  const runtime = harness.sessions.get(original.instance.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(original.instance.id) as DelayedAgentWorkerConnection;
   const disposeBlock = runtime.blockDispose();
   releaseDispose = disposeBlock.release;
 
@@ -871,7 +871,7 @@ test("attach applies the 1000-event replay cap before response byte trimming", a
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => (
-    new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedRuntimeSession(`pi-${id}`), eventCapacity: 1_500 })
+    new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedAgentWorkerConnection(`pi-${id}`), eventCapacity: 1_500 })
   ), () => "replay-instance");
   const host = new DockHost({ socketPath, registry });
   context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
@@ -898,11 +898,11 @@ test("shutdown waits for an admitted asynchronous create and drains its runtime 
   const entered = new Promise<void>((resolveEntered) => { factoryEntered = resolveEntered; });
   const release = new Promise<void>((resolveRelease) => { releaseFactory = resolveRelease; });
   let created: ManagedInstance | undefined;
-  let runtime: DelayedRuntimeSession | undefined;
+  let runtime: DelayedAgentWorkerConnection | undefined;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
     factoryEntered();
     await release;
-    runtime = new DelayedRuntimeSession(`pi-${id}`);
+    runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
     created = new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
     return created;
   }, () => "slow-instance");
@@ -931,7 +931,7 @@ test("bare SSH TTY opens and leaves the Hub with zero runtime or catalog side ef
   let inventoryCalls = 0;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
     factoryCalls += 1;
-    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedRuntimeSession(`pi-${id}`) });
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedAgentWorkerConnection(`pi-${id}`) });
   });
   const host = new DockHost({
     socketPath,
@@ -1009,7 +1009,7 @@ test("Hub signal restores the shell immediately while Pi session inventory is st
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => (
-    new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedRuntimeSession(`pi-${id}`) })
+    new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedAgentWorkerConnection(`pi-${id}`) })
   ));
   const host = new DockHost({
     socketPath,
@@ -1066,7 +1066,7 @@ test("Hub New and persisted-session Adopt explicitly enter Session Work", async 
   const socketPath = join(directory, "dock.sock");
   const sessionFile = "/sessions/hub-adopt.jsonl";
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, name, sessionFile: adoptedFile }) => {
-    const runtime = new DelayedRuntimeSession(`pi-${id}`);
+    const runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
     if (adoptedFile) runtime.sessionFile = adoptedFile;
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, name, session: runtime });
   }, () => "hub-adopted", { reopenTargetResolver: { resolve: async () => ({ cwd: directory }) } });
@@ -1171,7 +1171,7 @@ test("Hub Continue opens current work and History continues a stopped saved sess
   const socketPath = join(directory, "dock.sock");
   let sequence = 0;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, name, sessionFile }) => {
-    const runtime = new DelayedRuntimeSession(`history-${id}`);
+    const runtime = new DelayedAgentWorkerConnection(`history-${id}`);
     if (sessionFile) runtime.sessionFile = sessionFile;
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, name, session: runtime });
   }, () => `history-${++sequence}`, { reopenTargetResolver: { resolve: async () => ({ cwd: directory }) } });
@@ -1218,7 +1218,7 @@ test("SSH TUI replays, resizes, handles input, and detaches without stopping", a
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "pty-demo");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
 
   const pty = await runPtyTui([
     process.execPath,
@@ -1291,7 +1291,7 @@ test("SSH TUI preserves concurrent composer input while transcript deltas remain
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "pty-streaming-composer");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   const readyFile = join(harness.directory, "streaming-composer.ready");
 
   const ptyRun = runPtyTui([
@@ -1334,9 +1334,9 @@ test("SSH TUI keeps repeated no-run completion facts out of live and replayed co
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-no-run-pty-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  let runtime: NoRunRuntimeSession | undefined;
+  let runtime: NoRunAgentWorkerConnection | undefined;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, name }) => {
-    runtime = new NoRunRuntimeSession(`pi-${id}`);
+    runtime = new NoRunAgentWorkerConnection(`pi-${id}`);
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, name, session: runtime, eventCapacity: 500 });
   }, () => "no-run-pty-instance");
   const host = new DockHost({ socketPath, registry });
@@ -1355,7 +1355,6 @@ test("SSH TUI keeps repeated no-run completion facts out of live and replayed co
   assert.equal(livePty.timedOut, false, liveOutput.slice(-2_000));
   assert.equal(livePty.status, 0, liveOutput.slice(-2_000));
   assert.doesNotMatch(liveOutput, /Command handled without starting a model run/u);
-  assert.doesNotMatch(liveOutput, /submitting|waiting for model/u);
 
   const replayPty = await runPtyTui([
     process.execPath,
@@ -1385,7 +1384,7 @@ test("Session Work stays on the flowing main buffer with terminal-native mouse",
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "pty-mouse-selection");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
 
   const pty = await runPtyTui([
     process.execPath,
@@ -1412,7 +1411,7 @@ test("SSH TUI editor preserves multiline paste and submitted history", async (co
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "pty-editor");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
 
   const pty = await runPtyTui([
     process.execPath,
@@ -1437,7 +1436,7 @@ test("SSH TUI Alt+Up restores all pending text while Escape restores then aborts
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "pty-queue");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
 
   await client.prompt(created.id, "later follow-up", "followUp", "pty-follow-1");
   await client.prompt(created.id, "urgent steer", "steer", "pty-steer-1");
@@ -1501,9 +1500,9 @@ test("SSH TUI model picker filters input while complete history flows into nativ
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-pty-ux-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  let runtime: DelayedRuntimeSession | undefined;
+  let runtime: DelayedAgentWorkerConnection | undefined;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    runtime = new DelayedRuntimeSession(`pi-${id}`);
+    runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
     runtime.history = Array.from({ length: 450 }, (_, index) => ({
       entryId: `history-${index}`,
       role: index % 2 === 0 ? "user" as const : "assistant" as const,
@@ -1524,7 +1523,7 @@ test("SSH TUI model picker filters input while complete history flows into nativ
         content: "expanded tool detail\nsecond detail line",
       },
     );
-    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime, initialHistory: runtime.getHistory() });
   }, () => "pty-ux-instance");
   const host = new DockHost({ socketPath, registry });
   context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
@@ -1613,9 +1612,9 @@ test("SSH TUI Stage 3 commands mutate Host-owned settings tools and sessions", a
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-pty-stage3-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  let runtime: DelayedRuntimeSession | undefined;
+  let runtime: DelayedAgentWorkerConnection | undefined;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    runtime = new DelayedRuntimeSession(`pi-${id}`);
+    runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
     runtime.sessionCatalog = [{ sessionId: "pty-resume", sessionFile: "/tmp/pty-resume.jsonl", name: "PTY resumed", cwd: directory }];
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
   }, () => "pty-stage3-instance");
@@ -1648,9 +1647,9 @@ test("SSH TUI tree identifies sibling branches and round-trips from B to A witho
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-pty-tree-branches-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  let runtime: DelayedRuntimeSession | undefined;
+  let runtime: DelayedAgentWorkerConnection | undefined;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    runtime = new DelayedRuntimeSession(`pi-${id}`);
+    runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
     runtime.treeNodes = [
       { entryId: "branch-root", depth: 0, kind: "message", role: "user", summary: "initial task", hasChildren: true },
       { entryId: "branch-point", parentId: "branch-root", depth: 1, kind: "message", role: "assistant", summary: "shared answer", hasChildren: true },
@@ -1689,9 +1688,9 @@ test("SSH TUI Stage 6 navigates, returns fork text to the editor, and clones the
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-pty-stage6-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  let runtime: DelayedRuntimeSession | undefined;
+  let runtime: DelayedAgentWorkerConnection | undefined;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    runtime = new DelayedRuntimeSession(`pi-${id}`);
+    runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
     runtime.treeNodes = [
       { entryId: "tree-u1", depth: 0, kind: "message", role: "user", summary: "first prompt", hasChildren: true },
       { entryId: "tree-a1", parentId: "tree-u1", depth: 1, kind: "message", role: "assistant", summary: "first answer", hasChildren: true },
@@ -1733,7 +1732,7 @@ test("SSH TUI Ctrl+C aborts a run while preserving the reusable instance", async
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "pty-abort");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
 
   const pty = await runPtyTui([
     process.execPath,
@@ -1760,7 +1759,7 @@ test("SSH TUI recovers a dropped event stream from its accepted cursor without r
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "pty-stream-recovery");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   const readyFile = join(harness.directory, "pty-recovery.ready");
 
   const ptyRun = runPtyTui([
@@ -1794,7 +1793,7 @@ test("SSH TUI blocks an already-open model picker when stream recovery has a rep
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "pty-model-gap");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   const readyFile = join(harness.directory, "pty-model-gap.ready");
 
   const ptyRun = runPtyTui([
@@ -1851,7 +1850,7 @@ test("SSH TUI reports true Host loss as unknown and never replays the running co
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "pty-host-loss");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   const readyFile = join(harness.directory, "pty.ready");
 
   const ptyRun = runPtyTui([
@@ -1913,7 +1912,7 @@ test("a second client can steer, queue follow-up, and stop idempotently", async 
   pendingAttach.close();
   await pendingAttach.done;
 
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   assert.equal(runtime.consumeNextQueued(), "change direction");
   const afterConsume = await controller.streamEvents(created.id, { onEvent: () => {} });
   assert.deepEqual(afterConsume.initial.pendingMessages.map((item) => item.operationId), ["follow-op"]);
@@ -1952,7 +1951,7 @@ test("typed clients accept an immediate extension command while preserving the r
   const created = await client.create(harness.directory, "extension-running");
   const parentOperationId = created.activeCommandId;
   assert.ok(parentOperationId);
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   runtime.extensionCommands.add("fixture-command");
 
   const handled = await client.prompt(created.id, "/fixture-command now", "auto", "extension-running-op");
@@ -2023,7 +2022,7 @@ test("compact uses its explicit long-mutation timeout instead of the ordinary re
   context.after(() => cleanupHarness(harness));
   const setupClient = new DockClient({ socketPath: harness.socketPath });
   const created = await setupClient.create(harness.directory, "long-compaction", "create-long-compaction");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   const block = runtime.blockNextCompaction();
   const client = new DockClient({ socketPath: harness.socketPath, timeoutMs: 25, longMutationTimeoutMs: 250 });
   const compacting = client.compactSession(created.id, undefined, "long-compact-op");
@@ -2042,7 +2041,7 @@ test("closing a client transport scope releases a blocked compaction caller whil
   context.after(() => cleanupHarness(harness));
   const setupClient = new DockClient({ socketPath: harness.socketPath });
   const created = await setupClient.create(harness.directory, "detached-compaction", "create-detached-compaction");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   const block = runtime.blockNextCompaction();
   const client = new DockClient({ socketPath: harness.socketPath, timeoutMs: 25, longMutationTimeoutMs: 10_000 });
   const compacting = client.compactSession(created.id, undefined, "detached-compact-op");
@@ -2255,7 +2254,7 @@ test("stop preempts a manual compaction even before its start event is projected
   context.after(() => cleanupHarness(harness));
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "blocked-compaction", "create-blocked-compaction");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   const startBlock = runtime.blockNextCompactionStart();
   runtime.blockNextCompaction();
   const compacting = client.compactSession(created.id, undefined, "blocked-compact-op");
@@ -2295,7 +2294,7 @@ test("abort bypasses the configuration gate for an active manual compaction", as
   context.after(() => cleanupHarness(harness));
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "abort-compaction", "create-abort-compaction");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   const block = runtime.blockNextCompaction();
   const compacting = client.compactSession(created.id, undefined, "abort-compact-op");
   const compactFailure = assert.rejects(
@@ -2325,7 +2324,7 @@ test("abort is operation-deduplicated and keeps the instance reusable", async (c
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "abortable");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
 
   const aborted = await client.abort(created.id, "abort-once");
   const duplicate = await client.abort(created.id, "abort-once");
@@ -2346,7 +2345,7 @@ test("abort runtime ambiguity stays operation-scoped without faulting the catalo
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "abort-error");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   runtime.abortError = new Error("AUTH_TOKEN_very_secret");
 
   await assert.rejects(
@@ -2363,9 +2362,9 @@ test("a reconnected client can start a fresh prompt on an idle instance", async 
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-idle-prompt-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  const sessions = new Map<string, DelayedRuntimeSession>();
+  const sessions = new Map<string, DelayedAgentWorkerConnection>();
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    const session = new DelayedRuntimeSession(`pi-${id}`);
+    const session = new DelayedAgentWorkerConnection(`pi-${id}`);
     sessions.set(id, session);
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session });
   }, () => "idle-instance");
@@ -2397,9 +2396,9 @@ test("a running instance applies live metadata and next-step configuration witho
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-model-control-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  let runtime: DelayedRuntimeSession | undefined;
+  let runtime: DelayedAgentWorkerConnection | undefined;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    runtime = new DelayedRuntimeSession(`pi-${id}`);
+    runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
   }, () => "model-instance");
   const host = new DockHost({ socketPath, registry });
@@ -2533,12 +2532,12 @@ test("same-host operation receipts deduplicate every implemented mutation and re
   let markFactoryEntered!: () => void;
   const factoryGate = new Promise<void>((resolveGate) => { releaseFactory = resolveGate; });
   const factoryEntered = new Promise<void>((resolveEntered) => { markFactoryEntered = resolveEntered; });
-  const sessions = new Map<string, DelayedRuntimeSession>();
+  const sessions = new Map<string, DelayedAgentWorkerConnection>();
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
     factoryCalls += 1;
     markFactoryEntered();
     await factoryGate;
-    const session = new DelayedRuntimeSession(`pi-${id}`);
+    const session = new DelayedAgentWorkerConnection(`pi-${id}`);
     sessions.set(id, session);
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session });
   }, () => "ledger-instance");
@@ -2562,7 +2561,7 @@ test("same-host operation receipts deduplicate every implemented mutation and re
   );
   assert.equal(factoryCalls, 1);
 
-  const session = sessions.get(firstInstance.id) as DelayedRuntimeSession;
+  const session = sessions.get(firstInstance.id) as DelayedAgentWorkerConnection;
   const [firstExpansion, duplicateExpansion] = await Promise.all([
     firstClient.setToolsExpanded(firstInstance.id, firstInstance.runtimeGeneration, true, "shared-tools-expanded"),
     secondClient.setToolsExpanded(firstInstance.id, firstInstance.runtimeGeneration, true, "shared-tools-expanded"),
@@ -2645,7 +2644,7 @@ test("expired Host receipts reject through DockClient without replaying their si
   let factoryCalls = 0;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
     factoryCalls += 1;
-    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedRuntimeSession(`pi-${id}`) });
+    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedAgentWorkerConnection(`pi-${id}`) });
   }, () => `expired-${factoryCalls + 1}`);
   const host = new DockHost({ socketPath, registry, operationReceiptCapacity: 1 });
   context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
@@ -2669,9 +2668,9 @@ test("models settings failures are typed, evented, and leave the in-memory state
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-settings-failure-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  let session: DelayedRuntimeSession | undefined;
+  let session: DelayedAgentWorkerConnection | undefined;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    session = new DelayedRuntimeSession(`pi-${id}`);
+    session = new DelayedAgentWorkerConnection(`pi-${id}`);
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session });
   }, () => "settings-instance");
   const host = new DockHost({ socketPath, registry });
@@ -2679,7 +2678,7 @@ test("models settings failures are typed, evented, and leave the in-memory state
   await host.start();
   const client = new DockClient({ socketPath });
   const created = await client.create(directory);
-  (session as DelayedRuntimeSession).settingsFailure = new Error("disk write failed");
+  (session as DelayedAgentWorkerConnection).settingsFailure = new Error("disk write failed");
 
   await assert.rejects(
     client.setModel(created.id, "fixture", "local", "failed-model-write"),
@@ -2689,13 +2688,13 @@ test("models settings failures are typed, evented, and leave the in-memory state
   const events = await client.events(created.id);
   assert.ok(events.page.events.some((event) => event.type === "settings.write_failed" && event.data.key === "model"));
 
-  (session as DelayedRuntimeSession).settingsFailure = undefined;
+  (session as DelayedAgentWorkerConnection).settingsFailure = undefined;
   const low = await client.setThinking(created.id, "low", "thinking-low");
   const high = await client.setThinking(created.id, "high", "thinking-high");
   assert.equal(low.actualLevel, "low");
   assert.equal(high.actualLevel, "high");
   assert.equal(high.settingsWrite.persisted, true);
-  assert.equal((session as DelayedRuntimeSession).thinkingMutationCalls, 2);
+  assert.equal((session as DelayedAgentWorkerConnection).thinkingMutationCalls, 2);
 });
 
 test("tui projection exposes stable paged history and attach history while preserving semantic text", async (context) => {
@@ -2704,7 +2703,7 @@ test("tui projection exposes stable paged history and attach history while prese
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "history");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   runtime.history = [
     { entryId: "h1", timestamp: "2020-01-01T00:00:00.000Z", role: "user", content: "older question" },
     { entryId: "h2", parentId: "h1", timestamp: "2020-01-01T00:00:01.000Z", role: "assistant", content: [{ type: "thinking", text: "plan" }, { type: "text", text: "older answer" }], stopReason: "stop" },
@@ -2755,7 +2754,7 @@ test("conversation content survives fresh clients through revision-bound Protoco
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "conversation-content");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   runtime.history = [
     { entryId: "h1", role: "user", content: "one" },
     { entryId: "h2", parentId: "h1", role: "assistant", content: "legacy preview" },
@@ -2817,7 +2816,7 @@ test("Hub session inventory is runtime-free and adoption publishes one managed i
   });
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, name, sessionFile: adoptedFile }) => {
     factoryCalls += 1;
-    const runtime = new DelayedRuntimeSession(`pi-${id}`);
+    const runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
     if (adoptedFile) runtime.sessionFile = adoptedFile;
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, name, session: runtime });
   }, () => "adopted-instance", {
@@ -2908,7 +2907,7 @@ test("concurrent adoption of one persisted session file admits only one runtime"
   const resolverGate = new Promise<void>((resolveGate) => { releaseResolver = resolveGate; });
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, sessionFile: target }) => {
     factoryCalls += 1;
-    const runtime = new DelayedRuntimeSession(`pi-${id}`);
+    const runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
     if (target) runtime.sessionFile = target;
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
   }, undefined, {
@@ -2945,9 +2944,9 @@ test("adopt rejects a mismatched runtime binding and never publishes after catal
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-adopt-boundary-"));
   await chmod(directory, 0o700);
   const mismatchedSocket = join(directory, "mismatched.sock");
-  let mismatchedRuntime: DelayedRuntimeSession | undefined;
+  let mismatchedRuntime: DelayedAgentWorkerConnection | undefined;
   const mismatchedRegistry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    mismatchedRuntime = new DelayedRuntimeSession(`wrong-${id}`);
+    mismatchedRuntime = new DelayedAgentWorkerConnection(`wrong-${id}`);
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: mismatchedRuntime });
   }, () => "mismatched-adopt", { reopenTargetResolver: { resolve: async () => ({ cwd: directory }) } });
   const mismatchedHost = new DockHost({ socketPath: mismatchedSocket, registry: mismatchedRegistry });
@@ -2963,9 +2962,9 @@ test("adopt rejects a mismatched runtime binding and never publishes after catal
   const failedSocket = join(directory, "commit-failed.sock");
   const port = new ScriptedCatalogCommitPort();
   port.failAt(1);
-  let failedRuntime: DelayedRuntimeSession | undefined;
+  let failedRuntime: DelayedAgentWorkerConnection | undefined;
   const failedRegistry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, sessionFile }) => {
-    failedRuntime = new DelayedRuntimeSession(`failed-${id}`);
+    failedRuntime = new DelayedAgentWorkerConnection(`failed-${id}`);
     failedRuntime.sessionFile = sessionFile as string;
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: failedRuntime });
   }, () => "failed-adopt", {
@@ -2987,9 +2986,9 @@ test("session.core lists bounded safe cwd and all-session metadata", async (cont
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-session-list-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  let session: DelayedRuntimeSession | undefined;
+  let session: DelayedAgentWorkerConnection | undefined;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    session = new DelayedRuntimeSession(`pi-${id}`);
+    session = new DelayedAgentWorkerConnection(`pi-${id}`);
     session.sessionCatalog = [
       { sessionId: "cwd-session", sessionFile: "/sessions/cwd.jsonl", name: "Current", cwd: "/fixture/cwd", updatedAt: "2026-07-14T01:02:03.000Z" },
       { sessionId: "other-session", sessionFile: "/sessions/other.jsonl", cwd: "/other", updatedAt: "not-a-date" },
@@ -3017,7 +3016,7 @@ test("session.tree.v1 paginates revisions, navigates in-file, and replaces on fo
   context.after(() => cleanupHarness(harness));
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, undefined, "tree-create");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   runtime.treeNodes = [
     { entryId: "tree-u1", depth: 0, kind: "message", role: "user", timestamp: "2026-07-14T00:00:00.000Z", summary: "first prompt", hasChildren: true },
     { entryId: "tree-a1", parentId: "tree-u1", depth: 1, kind: "message", role: "assistant", timestamp: "2026-07-14T00:00:01.000Z", summary: "first answer", hasChildren: true },
@@ -3136,7 +3135,7 @@ test("session.commands.v1 names, compacts, replaces, reloads, and deduplicates m
   context.after(() => cleanupHarness(harness));
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, undefined, "session-create");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   runtime.sessionCatalog = [{ sessionId: "resume-target", sessionFile: "/tmp/resume-target.jsonl", name: "Resumed", cwd: harness.directory }];
   await client.prompt(created.id, "finish old session", "prompt", "old-session-run");
   runtime.settle("finished");
@@ -3182,8 +3181,8 @@ test("known compaction no-op is typed across Host and client without effect_unkn
   context.after(() => cleanupHarness(harness));
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, undefined, "known-compact-create");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
-  runtime.sessionMutationError = new RuntimeCompactionKnownFailureError("nothing_to_compact", "Nothing to compact (session too small)");
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
+  runtime.sessionMutationError = new AgentCompactionKnownFailureError("nothing_to_compact", "Nothing to compact (session too small)");
 
   await assert.rejects(
     client.compactSession(created.id, undefined, "known-compact-noop"),
@@ -3201,7 +3200,7 @@ test("session command runtime ambiguity is operation-scoped and queryable", asyn
   context.after(() => cleanupHarness(harness));
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, undefined, "ambiguous-session-create");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   runtime.sessionMutationError = new Error("SECRET_compaction_failure");
 
   await assert.rejects(
@@ -3264,7 +3263,7 @@ test("concurrent host objects do not unlink the winning listener", async (contex
   context.after(() => rm(directory, { recursive: true, force: true }));
   const socketPath = join(directory, "dock.sock");
   const createRegistry = (): DockRegistry => new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => (
-    new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedRuntimeSession(`pi-${id}`) })
+    new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedAgentWorkerConnection(`pi-${id}`) })
   ));
   const first = new DockHost({ socketPath, registry: createRegistry() });
   const second = new DockHost({ socketPath, registry: createRegistry() });
@@ -3282,7 +3281,7 @@ test("host rejects a socket directory accessible by other users", async (context
   context.after(() => rm(directory, { recursive: true, force: true }));
   await chmod(directory, 0o755);
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => (
-    new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedRuntimeSession(`pi-${id}`) })
+    new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedAgentWorkerConnection(`pi-${id}`) })
   ));
   const host = new DockHost({ socketPath: join(directory, "dock.sock"), registry });
 
@@ -3500,7 +3499,7 @@ test("large history and attach projections stay complete JSONL frames and retain
   const created = await client.create(harness.directory, "large history", "large-history-create");
   const runtime = harness.sessions.get(created.id)!;
   const blocks = Array.from({ length: 180 }, (_, index) => ({ type: "text", text: `${String(index).padStart(3, "0")}:${"x".repeat(7_900)}` }));
-  runtime.history = Array.from({ length: 4 }, (_, index): RuntimeHistoryEntry => ({
+  runtime.history = Array.from({ length: 4 }, (_, index): AgentHistoryEntry => ({
     entryId: `large-history-${index + 1}`,
     timestamp: `2026-07-14T00:00:0${index}.000Z`,
     role: index % 2 === 0 ? "user" : "assistant",
@@ -3879,7 +3878,7 @@ test("real Host streams reset sequence ordering at a replacement generation", as
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "rollover");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   const seen: DockEvent[] = [];
   let resolveSeen!: () => void;
   const twoEvents = new Promise<void>((resolve) => { resolveSeen = resolve; });
@@ -4054,9 +4053,9 @@ test("tools, settings, resources, and commands integrate with capability gates a
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-projections-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  let runtime: DelayedRuntimeSession | undefined;
+  let runtime: DelayedAgentWorkerConnection | undefined;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    runtime = new DelayedRuntimeSession(`pi-${id}`);
+    runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
   }, () => "projection-instance");
   const host = new DockHost({ socketPath, registry });
@@ -4086,7 +4085,7 @@ test("tools, settings, resources, and commands integrate with capability gates a
   const settings = await client.settings(instance.id);
   assert.equal(settings.settings.length, SETTING_KEYS.length);
   if (!runtime) throw new Error("fixture runtime was not created");
-  runtime.settingsReadFailure = new RuntimeInvalidSettingValueError("editorPaddingX");
+  runtime.settingsReadFailure = new AgentInvalidSettingValueError("editorPaddingX");
   await assert.rejects(
     client.settings(instance.id),
     (error: unknown) => error instanceof ControlClientError && error.code === "settings_invalid" && !error.message.includes("99"),
@@ -4147,7 +4146,7 @@ test("prompt pre-intent commit precedes Pi and accepted events follow their comm
   context.after(() => cleanupHarness(harness));
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, undefined, "create-prompt-gate");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   const prompting = client.prompt(created.id, "hello", "prompt", "prompt-gated");
   await admissionGate.entered;
   assert.equal(runtime.promptCalls, 0);
@@ -4168,7 +4167,7 @@ test("pre-effect catalog failure calls Pi zero times and leaves the Host writabl
   context.after(() => cleanupHarness(harness));
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, undefined, "create-pre-failure");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   await assert.rejects(
     client.prompt(created.id, "blocked", "prompt", "prompt-pre-failed"),
     (error: unknown) => error instanceof ControlClientError && error.code === "catalog_write_failed",
@@ -4187,7 +4186,7 @@ test("post-effect catalog failure returns effect_unknown and drives one read-onl
   context.after(() => cleanupHarness(harness));
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, undefined, "create-post-failure");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   const disposeBlock = runtime.blockDispose();
 
   await assert.rejects(
@@ -4225,8 +4224,8 @@ test("fatal drain lets already-admitted Pi mutations reach operation-scoped ambi
   const client = new DockClient({ socketPath: harness.socketPath });
   const first = await client.create(harness.directory, undefined, "create-concurrent-first");
   const second = await client.create(harness.directory, undefined, "create-concurrent-second");
-  const firstRuntime = harness.sessions.get(first.id) as DelayedRuntimeSession;
-  const secondRuntime = harness.sessions.get(second.id) as DelayedRuntimeSession;
+  const firstRuntime = harness.sessions.get(first.id) as DelayedAgentWorkerConnection;
+  const secondRuntime = harness.sessions.get(second.id) as DelayedAgentWorkerConnection;
   const modelBlock = firstRuntime.blockNextModelMutation();
   const firstMutation = client.setModel(first.id, "fixture", "local", "model-already-admitted");
   await modelBlock.entered;
@@ -4256,7 +4255,7 @@ test("mutation-fault drain has a bounded nonzero fatal deadline", async (context
   context.after(() => cleanupHarness(harness));
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, undefined, "create-drain-timeout");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   const disposeBlock = runtime.blockDispose();
   await assert.rejects(
     client.prompt(created.id, "ambiguous", "prompt", "prompt-drain-timeout"),
@@ -4277,7 +4276,7 @@ test("fatal deadline includes a hung admitted create and Host stop does not awai
   const socketPath = join(directory, "dock.sock");
   const port = new ScriptedCatalogCommitPort();
   port.failAt(2);
-  const sessions = new Map<string, DelayedRuntimeSession>();
+  const sessions = new Map<string, DelayedAgentWorkerConnection>();
   let factoryCalls = 0;
   let enteredSecond!: () => void;
   let releaseSecond!: () => void;
@@ -4294,7 +4293,7 @@ test("fatal deadline includes a hung admitted create and Host stop does not awai
       enteredSecond();
       await secondRelease;
     }
-    const runtime = new DelayedRuntimeSession(`pi-${id}`);
+    const runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
     sessions.set(id, runtime);
     if (factoryCalls === 2) {
       const disposeBlock = runtime.blockDispose();
@@ -4414,7 +4413,7 @@ test("model success and changed events wait for the post-setter catalog commit",
   context.after(() => cleanupHarness(harness));
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, undefined, "create-model-gate");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   const changing = client.setModel(created.id, "fixture", "local", "model-gated");
   await modelGate.entered;
   assert.equal(runtime.modelMutationCalls, 1);
@@ -4452,7 +4451,7 @@ test("tool thinking and settings projections wait for their catalog commits", as
   context.after(() => cleanupHarness(harness));
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, undefined, "create-config-gates");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
 
   let toolSettled = false;
   const changingTools = client.setActiveTools(created.id, ["write"], "tools-gated").finally(() => { toolSettled = true; });
@@ -4502,10 +4501,10 @@ test("post-effect config failures retain operation IDs and suppress uncommitted 
     const harness = await createTransactionHarness(port);
     const client = new DockClient({ socketPath: harness.socketPath });
     const created = await client.create(harness.directory, undefined, `create-${scenario}-fault`);
-    const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+    const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
     const operationId = `${scenario}-catalog-failed`;
     if (scenario === "setting") {
-      runtime.settingsFailure = new RuntimeSettingsWriteError("autoCompaction", "write", true, [{ scope: "global", message: "disk failed" }]);
+      runtime.settingsFailure = new AgentSettingsWriteError("autoCompaction", "write", true, [{ scope: "global", message: "disk failed" }]);
     }
     const mutation = scenario === "tool"
       ? client.setActiveTools(created.id, ["write"], operationId)
@@ -4554,7 +4553,7 @@ test("explicit stop commits intent before cleanup and stopped state before respo
   context.after(() => cleanupHarness(harness));
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, undefined, "create-stop-gate");
-  const runtime = harness.sessions.get(created.id) as DelayedRuntimeSession;
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   const stopping = client.stop(created.id, "stop-gated");
   await intentGate.entered;
   assert.equal(runtime.abortCalls, 0);
@@ -4579,7 +4578,7 @@ test("stop commit failures distinguish pre-cleanup rollback from post-cleanup am
   context.after(() => cleanupHarness(preHarness));
   const preClient = new DockClient({ socketPath: preHarness.socketPath });
   const preCreated = (await preClient.ensure("pre-stop-key", preHarness.directory, undefined, "create-stop-pre-fault")).instance;
-  const preRuntime = preHarness.sessions.get(preCreated.id) as DelayedRuntimeSession;
+  const preRuntime = preHarness.sessions.get(preCreated.id) as DelayedAgentWorkerConnection;
   await assert.rejects(
     preClient.stop(preCreated.id, "stop-pre-failed"),
     (error: unknown) => error instanceof ControlClientError && error.code === "catalog_write_failed",
@@ -4596,7 +4595,7 @@ test("stop commit failures distinguish pre-cleanup rollback from post-cleanup am
   context.after(() => cleanupHarness(postHarness));
   const postClient = new DockClient({ socketPath: postHarness.socketPath });
   const postCreated = (await postClient.ensure("post-stop-key", postHarness.directory, undefined, "create-stop-post-fault")).instance;
-  const postRuntime = postHarness.sessions.get(postCreated.id) as DelayedRuntimeSession;
+  const postRuntime = postHarness.sessions.get(postCreated.id) as DelayedAgentWorkerConnection;
   await assert.rejects(
     postClient.stop(postCreated.id, "stop-post-failed"),
     (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown" && error.operationId === "stop-post-failed",

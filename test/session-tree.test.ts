@@ -3,7 +3,7 @@ import test from "node:test";
 
 import {
   MAX_PROJECTED_SESSION_TREE_NODES,
-  projectRuntimeNavigateResult,
+  projectAgentNavigateResult,
   projectRuntimeTree,
 } from "../src/core/session-tree.js";
 import {
@@ -59,14 +59,14 @@ test("tree projection accepts its documented 100000-node bound and rejects the n
 });
 
 test("navigation result projection is closed, abort-consistent, and preserves semantic text", () => {
-  assert.deepEqual(projectRuntimeNavigateResult({ cancelled: false, editorText: "line 1\r\nline 2", summaryCreated: false }), {
+  assert.deepEqual(projectAgentNavigateResult({ cancelled: false, editorText: "line 1\r\nline 2", summaryCreated: false }), {
     cancelled: false, editorText: "line 1\nline 2", summaryCreated: false,
   });
-  assert.throws(() => projectRuntimeNavigateResult({ cancelled: false, aborted: true, summaryCreated: false }), /must be cancelled/);
-  assert.throws(() => projectRuntimeNavigateResult({ cancelled: true, editorText: "stale", summaryCreated: false }), /cannot return editor text/);
-  assert.throws(() => projectRuntimeNavigateResult({ cancelled: false, editorText: "x".repeat(256_001), summaryCreated: false }), /oversized/);
+  assert.throws(() => projectAgentNavigateResult({ cancelled: false, aborted: true, summaryCreated: false }), /must be cancelled/);
+  assert.throws(() => projectAgentNavigateResult({ cancelled: true, editorText: "stale", summaryCreated: false }), /cannot return editor text/);
+  assert.throws(() => projectAgentNavigateResult({ cancelled: false, editorText: "x".repeat(256_001), summaryCreated: false }), /oversized/);
   const encodedText = `attachment: ${"A0+/".repeat(32)}`;
-  assert.deepEqual(projectRuntimeNavigateResult({ cancelled: false, editorText: encodedText, summaryCreated: false }), {
+  assert.deepEqual(projectAgentNavigateResult({ cancelled: false, editorText: encodedText, summaryCreated: false }), {
     cancelled: false, editorText: encodedText, summaryCreated: false,
   });
 });

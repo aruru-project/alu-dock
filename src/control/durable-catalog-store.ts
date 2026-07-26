@@ -20,7 +20,7 @@ import {
   type CatalogStore,
   validateCatalogProjection,
 } from "../core/catalog.js";
-import type { RuntimeThinkingLevel } from "../core/runtime-session.js";
+import type { ThinkingLevel } from "../core/agent-worker.js";
 
 const MAX_CATALOG_BYTES = 16 * 1024 * 1024;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -167,7 +167,7 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
     piSessionId: text(value.piSessionId, `${field}.piSessionId`, 128),
     ...(value.sessionFile === undefined ? {} : { sessionFile: text(value.sessionFile, `${field}.sessionFile`, 16_384) }),
     ...(modelValue === undefined ? {} : { model: { provider: text(modelValue.provider, `${field}.model.provider`, 256), id: text(modelValue.id, `${field}.model.id`, 512) } }),
-    ...(value.thinkingLevel === undefined ? {} : { thinkingLevel: enumeration(value.thinkingLevel, `${field}.thinkingLevel`, THINKING_LEVELS) as RuntimeThinkingLevel }),
+    ...(value.thinkingLevel === undefined ? {} : { thinkingLevel: enumeration(value.thinkingLevel, `${field}.thinkingLevel`, THINKING_LEVELS) as ThinkingLevel }),
     ...(value.activeCommandId === undefined ? {} : { activeCommandId: text(value.activeCommandId, `${field}.activeCommandId`, 128) }),
     admissionPending: boolean(value.admissionPending, `${field}.admissionPending`),
     ...(value.admissionOperationId === undefined ? {} : { admissionOperationId: text(value.admissionOperationId, `${field}.admissionOperationId`, 128) }),

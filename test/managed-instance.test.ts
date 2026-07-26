@@ -18,33 +18,37 @@ import {
 } from "../src/core/managed-instance.js";
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, ToolDto } from "../src/core/config-projection.js";
 import {
-  RuntimeCompactionKnownFailureError,
-  RuntimeMutationEffectUnknownError,
-  RuntimeQueueRejectedBeforeEffectError,
-  RuntimeUnavailableBeforeEffectError,
-} from "../src/core/runtime-session.js";
-import { DelayedRuntimeSession } from "./support/delayed-runtime-session.js";
+  AgentCompactionKnownFailureError,
+  AgentMutationEffectUnknownError,
+  AgentQueueRejectedBeforeEffectError,
+  AgentUnavailableBeforeEffectError,
+} from "../src/core/agent-worker.js";
+import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
 import type {
-  ClearedRuntimeQueue,
-  RuntimeCompactionResult,
-  RuntimeEvent,
-  RuntimeHistoryEntry,
-  RuntimeModelInfo,
-  RuntimeModelState,
-  RuntimePromptOptions,
-  RuntimeSession,
-  RuntimeSessionInfo,
-  RuntimeSessionMetrics,
-  RuntimeThinkingLevel,
-} from "../src/core/runtime-session.js";
+  ClearedAgentQueue,
+  AgentCompactionResult,
+  AgentEvent,
+  AgentHistoryEntry,
+  AgentInvokeOptions,
+  AgentModelInfo,
+  AgentModelState,
+  AgentPromptOptions,
+  AgentRequest,
+  AgentWorkerConnection,
+  AgentWorkerControl,
+  AgentWorkerState,
+  AgentSessionInfo,
+  AgentSessionMetrics,
+  ThinkingLevel,
+} from "../src/core/agent-worker.js";
 
 test("worker-accepted runtime mutations preserve the caller operation ID as effect_unknown", async () => {
-  class AmbiguousMutationRuntime extends DelayedRuntimeSession {
-    override async setActiveTools(): Promise<ToolDto[]> { throw new RuntimeMutationEffectUnknownError("worker lost after acceptance"); }
-    override async updateSetting(): Promise<SettingDto> { throw new RuntimeMutationEffectUnknownError("worker lost after acceptance"); }
-    override async selectModel(): Promise<RuntimeModelState> { throw new RuntimeMutationEffectUnknownError("worker lost after acceptance"); }
-    override async setThinkingLevel(): Promise<RuntimeModelState> { throw new RuntimeMutationEffectUnknownError("worker lost after acceptance"); }
-    override async reload(): Promise<{ cancelled: boolean }> { throw new RuntimeMutationEffectUnknownError("worker lost after acceptance"); }
+  class AmbiguousMutationRuntime extends DelayedAgentWorkerConnection {
+    override async setActiveTools(): Promise<ToolDto[]> { throw new AgentMutationEffectUnknownError("worker lost after acceptance"); }
+    override async updateSetting(): Promise<SettingDto> { throw new AgentMutationEffectUnknownError("worker lost after acceptance"); }
+    override async selectModel(): Promise<AgentModelState> { throw new AgentMutationEffectUnknownError("worker lost after acceptance"); }
+    override async setThinkingLevel(): Promise<AgentModelState> { throw new AgentMutationEffectUnknownError("worker lost after acceptance"); }
+    override async reload(): Promise<{ cancelled: boolean }> { throw new AgentMutationEffectUnknownError("worker lost after acceptance"); }
   }
   const instance = new ManagedInstance({ cwd: "/fixture/cwd", session: new AmbiguousMutationRuntime("ambiguous-worker") });
   const cases: Array<[string, () => Promise<unknown>]> = [
@@ -60,31 +64,31 @@ test("worker-accepted runtime mutations preserve the caller operation ID as effe
 });
 
 test("pre-accept Worker loss stays runtime_unavailable for dequeue and abort", async () => {
-  class ClearUnavailableRuntime extends DelayedRuntimeSession {
-    override clearQueue(): ClearedRuntimeQueue { throw new RuntimeUnavailableBeforeEffectError("lost before clearQueue acceptance"); }
+  class ClearUnavailableRuntime extends DelayedAgentWorkerConnection {
+    override clearQueue(): ClearedAgentQueue { throw new AgentUnavailableBeforeEffectError("lost before clearQueue acceptance"); }
   }
   const dequeueInstance = new ManagedInstance({ cwd: "/fixture/cwd", session: new ClearUnavailableRuntime("clear-unavailable") });
   await dequeueInstance.submit("start run", "auto", "run-before-dequeue");
   await dequeueInstance.submit("queued follow-up", "followUp", "queued-before-dequeue");
   await assert.rejects(
     dequeueInstance.dequeue("dequeue-pre-effect"),
-    (error: unknown) => error instanceof RuntimeUnavailableBeforeEffectError,
+    (error: unknown) => error instanceof AgentUnavailableBeforeEffectError,
   );
 
-  class AbortUnavailableRuntime extends DelayedRuntimeSession {
-    override abort(): Promise<void> { return Promise.reject(new RuntimeUnavailableBeforeEffectError("lost before abort acceptance")); }
+  class AbortUnavailableRuntime extends DelayedAgentWorkerConnection {
+    override abort(): Promise<void> { return Promise.reject(new AgentUnavailableBeforeEffectError("lost before abort acceptance")); }
   }
   const abortRuntime = new AbortUnavailableRuntime("abort-unavailable");
   const abortInstance = new ManagedInstance({ cwd: "/fixture/cwd", session: abortRuntime });
   await abortInstance.submit("keep running", "auto", "running-before-abort");
   await assert.rejects(
     abortInstance.abort("abort-pre-effect"),
-    (error: unknown) => error instanceof RuntimeUnavailableBeforeEffectError,
+    (error: unknown) => error instanceof AgentUnavailableBeforeEffectError,
   );
 });
 
 test("tree pages reuse one projected revision and invalidate after a persisted entry", async () => {
-  const session = new DelayedRuntimeSession("tree-cache");
+  const session = new DelayedAgentWorkerConnection("tree-cache");
   session.treeNodes = Array.from({ length: 401 }, (_, index) => ({
     entryId: `entry-${index}`,
     ...(index === 0 ? {} : { parentId: `entry-${index - 1}` }),
@@ -128,7 +132,7 @@ class Deferred<T> {
   }
 }
 
-class FakeRuntimeSession implements RuntimeSession {
+class FakeAgentWorkerConnection implements AgentWorkerConnection {
   readonly sessionId = "pi-session-1";
   readonly sessionFile = "/tmp/pi-session-1.jsonl";
   isStreaming = false;
@@ -136,11 +140,11 @@ class FakeRuntimeSession implements RuntimeSession {
   gitBranch: string | undefined;
   promptDeferred = new Deferred<void>();
   preflightEntered = new Deferred<void>();
-  promptCalls: Array<{ text: string; options?: RuntimePromptOptions }> = [];
+  promptCalls: Array<{ text: string; options?: AgentPromptOptions }> = [];
   queueMessageCalls: Array<{ text: string; delivery: "steer" | "followUp" }> = [];
   abortCalls = 0;
   disposeCalls = 0;
-  clearQueueResult: ClearedRuntimeQueue | undefined;
+  clearQueueResult: ClearedAgentQueue | undefined;
   rejectPreflightWith: Error | undefined;
   delayPreflight = false;
   queueProjection: (text: string) => string = (text) => text;
@@ -151,26 +155,75 @@ class FakeRuntimeSession implements RuntimeSession {
   abortError: Error | undefined;
   abortBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
   compactionAbortBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
-  history: RuntimeHistoryEntry[] = [];
-  metrics: RuntimeSessionMetrics = {
+  history: AgentHistoryEntry[] = [];
+  metrics: AgentSessionMetrics = {
     messages: { user: 0, assistant: 0, toolCalls: 0, toolResults: 0, total: 0 },
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     cost: 0,
   };
 
   private pendingPreflight: ((success: boolean) => void) | undefined;
-  private readonly listeners = new Set<(event: RuntimeEvent) => void>();
+  private readonly listeners = new Set<(event: AgentEvent) => void>();
   private readonly steeringQueue: string[] = [];
   private readonly followUpQueue: string[] = [];
   getGitBranch(): string | undefined { return this.gitBranch; }
 
-  private modelState: RuntimeModelState = {
+  private modelState: AgentModelState = {
     model: { provider: "fixture", id: "model-a" },
     thinkingLevel: "off",
     availableThinkingLevels: ["off", "low", "high"],
   };
 
-  subscribe(listener: (event: RuntimeEvent) => void): () => void {
+  state(): AgentWorkerState {
+    return {
+      sessionId: this.sessionId,
+      sessionFile: this.sessionFile,
+      durableSessionFile: this.sessionFile,
+      isStreaming: this.isStreaming,
+      isCompacting: this.isCompacting,
+      ...(this.gitBranch === undefined ? {} : { gitBranch: this.gitBranch }),
+      modelState: this.getModelState(),
+      metrics: this.getMetrics(),
+      extensionCommands: [...this.extensionCommands],
+    };
+  }
+
+  async invoke(request: AgentRequest, options?: AgentInvokeOptions): Promise<unknown> {
+    const params = request.params as Record<string, any>;
+    switch (request.type) {
+      case "command.submit": return options?.context?.type === "force_queue"
+        ? this.queueMessage(params.message, params.delivery)
+        : this.prompt(params.message, {
+        ...(params.delivery === "steer" || params.delivery === "followUp" ? { streamingBehavior: params.delivery } : {}),
+        ...(params.images === undefined ? {} : { images: params.images }),
+          preflightResult: options?.preflightResult,
+        });
+      case "command.abort": return this.abort();
+      case "queue.dequeue": return this.clearQueue();
+      case "model.list": return this.listModels();
+      case "model.set": return this.selectModel(params.provider, params.modelId);
+      case "thinking.set": return this.setThinkingLevel(params.level);
+      case "tool.list": return this.listTools();
+      case "tool.set_active": return this.setActiveTools(params.names);
+      case "settings.get": return this.getSettings();
+      case "settings.update": return this.updateSetting(params.update);
+      case "resource.get": return this.getResources();
+      case "command.catalog": return this.getCommands();
+      case "session.history": return this.getHistory();
+      case "session.list": return this.listSessions(params.scope);
+      case "session.compact": return this.compact();
+      case "session.reload": return this.reload();
+      default: throw new Error(`Fake Agent Worker request is not configured: ${request.type}`);
+    }
+  }
+
+  control(request: AgentWorkerControl): Promise<unknown> {
+    if (request.type === "wait_for_idle") return this.waitForIdle();
+    if (request.type === "dispose") return this.dispose();
+    return Promise.resolve(null);
+  }
+
+  subscribe(listener: (event: AgentEvent) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
@@ -182,7 +235,7 @@ class FakeRuntimeSession implements RuntimeSession {
     return this.extensionCommands.has(commandName) ? "extension_command" : "prompt";
   }
 
-  prompt(text: string, options?: RuntimePromptOptions): Promise<void> {
+  prompt(text: string, options?: AgentPromptOptions): Promise<void> {
     this.promptCalls.push({ text, options });
     if (this.rejectPreflightWith) {
       options?.preflightResult?.(false);
@@ -211,7 +264,7 @@ class FakeRuntimeSession implements RuntimeSession {
   queueMessage(text: string, delivery: "steer" | "followUp"): Promise<void> {
     this.queueMessageCalls.push({ text, delivery });
     if (this.queueMessageReject === "before") {
-      return Promise.reject(new RuntimeQueueRejectedBeforeEffectError(new Error("queue validation failed")));
+      return Promise.reject(new AgentQueueRejectedBeforeEffectError(new Error("queue validation failed")));
     }
     if (delivery === "steer") this.steeringQueue.push(this.queueProjection(text));
     else this.followUpQueue.push(this.queueProjection(text));
@@ -220,18 +273,18 @@ class FakeRuntimeSession implements RuntimeSession {
     return Promise.resolve();
   }
 
-  async listModels(): Promise<RuntimeModelInfo[]> {
+  async listModels(): Promise<AgentModelInfo[]> {
     return [
       { provider: "fixture", id: "model-a", name: "Model A", reasoning: true },
       { provider: "fixture", id: "model-b", name: "Model B", reasoning: false },
     ];
   }
 
-  async listSessions(_scope: "cwd" | "all"): Promise<RuntimeSessionInfo[]> {
+  async listSessions(_scope: "cwd" | "all"): Promise<AgentSessionInfo[]> {
     return [];
   }
 
-  getHistory(): RuntimeHistoryEntry[] { return structuredClone(this.history); }
+  getHistory(): AgentHistoryEntry[] { return structuredClone(this.history); }
 
   async listTools(): Promise<ToolDto[]> { return []; }
   async setActiveTools(_names: string[]): Promise<ToolDto[]> { return []; }
@@ -239,8 +292,10 @@ class FakeRuntimeSession implements RuntimeSession {
   async updateSetting(_update: SettingUpdate): Promise<SettingDto> { throw new Error("not configured"); }
   async getResources(): Promise<{ resources: ResourceDto[]; diagnostics: DiagnosticDto[] }> { return { resources: [], diagnostics: [] }; }
   async getCommands(): Promise<CommandDto[]> { return []; }
+  async compact(): Promise<AgentCompactionResult> { throw new Error("not configured"); }
+  async reload(): Promise<{ cancelled: boolean }> { throw new Error("not configured"); }
 
-  async selectModel(provider: string, modelId: string): Promise<RuntimeModelState> {
+  async selectModel(provider: string, modelId: string): Promise<AgentModelState> {
     this.modelState = {
       model: { provider, id: modelId },
       thinkingLevel: modelId === "model-b" ? "off" : this.modelState.thinkingLevel,
@@ -249,13 +304,13 @@ class FakeRuntimeSession implements RuntimeSession {
     return this.getModelState();
   }
 
-  async setThinkingLevel(level: RuntimeThinkingLevel): Promise<RuntimeModelState> {
+  async setThinkingLevel(level: ThinkingLevel): Promise<AgentModelState> {
     const effective = this.modelState.availableThinkingLevels.includes(level) ? level : "off";
     this.modelState = { ...this.modelState, thinkingLevel: effective };
     return this.getModelState();
   }
 
-  getModelState(): RuntimeModelState {
+  getModelState(): AgentModelState {
     return {
       ...this.modelState,
       model: this.modelState.model ? { ...this.modelState.model } : undefined,
@@ -263,9 +318,9 @@ class FakeRuntimeSession implements RuntimeSession {
     };
   }
 
-  getMetrics(): RuntimeSessionMetrics { return structuredClone(this.metrics); }
+  getMetrics(): AgentSessionMetrics { return structuredClone(this.metrics); }
 
-  clearQueue(): ClearedRuntimeQueue {
+  clearQueue(): ClearedAgentQueue {
     const cleared = this.clearQueueResult ?? {
       steering: [...this.steeringQueue],
       followUp: [...this.followUpQueue],
@@ -380,7 +435,7 @@ class FakeRuntimeSession implements RuntimeSession {
     this.promptDeferred.resolve();
   }
 
-  emit(event: RuntimeEvent): void {
+  emit(event: AgentEvent): void {
     for (const listener of this.listeners) listener(event);
   }
 
@@ -404,8 +459,8 @@ function createClock(): () => Date {
   return () => new Date(Date.UTC(2026, 6, 14, 0, 0, tick++));
 }
 
-class KnownCompactionFailureSession extends FakeRuntimeSession {
-  async compact(): Promise<RuntimeCompactionResult> {
+class KnownCompactionFailureSession extends FakeAgentWorkerConnection {
+  async compact(): Promise<AgentCompactionResult> {
     this.isCompacting = true;
     this.emit({ type: "compaction_start", reason: "manual" });
     this.isCompacting = false;
@@ -413,27 +468,28 @@ class KnownCompactionFailureSession extends FakeRuntimeSession {
       type: "compaction_end", reason: "manual", result: undefined, aborted: false, willRetry: false,
       errorMessage: "Compaction failed: Nothing to compact (session too small)",
     });
-    throw new RuntimeCompactionKnownFailureError("nothing_to_compact", "Nothing to compact (session too small)");
+    throw new AgentCompactionKnownFailureError("nothing_to_compact", "Nothing to compact (session too small)");
   }
 }
 
-class PreStartCompactionFailureSession extends FakeRuntimeSession {
+class PreStartCompactionFailureSession extends FakeAgentWorkerConnection {
   readonly compactEntered = new Deferred<void>();
   readonly releaseCompact = new Deferred<void>();
 
-  async compact(): Promise<RuntimeCompactionResult> {
+  async compact(): Promise<AgentCompactionResult> {
     this.compactEntered.resolve();
     await this.releaseCompact.promise;
-    throw new RuntimeCompactionKnownFailureError("nothing_to_compact", "Nothing to compact before start");
+    throw new AgentCompactionKnownFailureError("nothing_to_compact", "Nothing to compact before start");
   }
 }
 
-function createInstance(session = new FakeRuntimeSession(), eventCapacity = 50): ManagedInstance {
+function createInstance(session = new FakeAgentWorkerConnection(), eventCapacity = 50): ManagedInstance {
   let commandSequence = 0;
   return new ManagedInstance({
     id: "dock-instance-1",
     cwd: "/tmp/project",
     session,
+    initialHistory: session.getHistory(),
     eventCapacity,
     now: createClock(),
     commandId: () => `command-${++commandSequence}`,
@@ -451,7 +507,7 @@ test("suspended replacement UI cannot leak candidate status into the committed g
   const instance = new ManagedInstance({
     id: "dock-instance-ui-generation",
     cwd: "/tmp/project",
-    session: new FakeRuntimeSession(),
+    session: new FakeAgentWorkerConnection(),
     extensionUiBroker: broker,
   });
   instance.markCatalogCommitted();
@@ -469,7 +525,7 @@ test("authoritative tool expansion rejects stale generations and stays ephemeral
   const instance = new ManagedInstance({
     id: "dock-instance-tools-expanded",
     cwd: "/tmp/project",
-    session: new FakeRuntimeSession(),
+    session: new FakeAgentWorkerConnection(),
     extensionUiBroker: broker,
   });
   let catalogCommits = 0;
@@ -498,7 +554,7 @@ test("authoritative tool expansion rejects stale generations and stays ephemeral
 });
 
 test("image-only prompt and streaming input preserve one operation payload", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   const first = [{ path: "/tmp/visual-one", mimeType: "image/x-first" }];
   await instance.submit("", "auto", "image-only", first);
@@ -511,7 +567,7 @@ test("image-only prompt and streaming input preserve one operation payload", asy
 });
 
 test("compaction custody keeps same-text different-image queue items distinct through attach and dequeue", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   session.isCompacting = true;
   session.emit({ type: "compaction_start", reason: "threshold" });
@@ -532,7 +588,7 @@ test("compaction custody keeps same-text different-image queue items distinct th
 });
 
 test("submit returns after preflight while the runtime promise remains host-owned", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
 
   const receipt = await instance.submit("do a long task");
@@ -573,7 +629,7 @@ test("submit returns after preflight while the runtime promise remains host-owne
 });
 
 test("runtime metrics are present initially and refresh through a closed event", () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   assert.equal(instance.snapshot().metrics?.tokens.total, 0);
 
@@ -591,7 +647,7 @@ test("runtime metrics are present initially and refresh through a closed event",
 });
 
 test("Git branch projection is cached, live, bounded, and generation-local", () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   session.gitBranch = "main";
   const instance = createInstance(session);
   assert.equal(instance.snapshot().gitBranch, "main");
@@ -613,7 +669,7 @@ test("Git branch projection is cached, live, bounded, and generation-local", () 
 });
 
 test("abort ends the run without disposing the reusable instance", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   await instance.submit("keep running");
   session.startRun();
@@ -634,7 +690,7 @@ test("known compaction failure remains definitive instead of becoming effect_unk
 
   await assert.rejects(
     instance.compactSession("compact-known-noop"),
-    (error: unknown) => error instanceof RuntimeCompactionKnownFailureError
+    (error: unknown) => error instanceof AgentCompactionKnownFailureError
       && error.reason === "nothing_to_compact",
   );
 
@@ -656,7 +712,7 @@ test("manual compaction pre-start custody drains after a definitive no-op", asyn
   session.releaseCompact.resolve();
   await assert.rejects(
     compacting,
-    (error: unknown) => error instanceof RuntimeCompactionKnownFailureError
+    (error: unknown) => error instanceof AgentCompactionKnownFailureError
       && error.reason === "nothing_to_compact",
   );
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -664,7 +720,7 @@ test("manual compaction pre-start custody drains after a definitive no-op", asyn
 });
 
 test("Sol-style settled compaction defers concurrent input in the Host and flushes it exactly once", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
 
   session.isStreaming = true;
@@ -706,7 +762,7 @@ test("Sol-style settled compaction defers concurrent input in the Host and flush
 });
 
 test("compaction beginning during durable admission reroutes the text before Pi is called", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   const admissionEntered = new Deferred<void>();
   const releaseAdmission = new Deferred<void>();
@@ -741,7 +797,7 @@ test("compaction beginning during durable admission reroutes the text before Pi 
 });
 
 test("runtime isCompacting closes the pre-event race and definite flush failure remains dequeue-restorable", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
 
   session.isCompacting = true;
@@ -770,7 +826,7 @@ test("runtime isCompacting closes the pre-event race and definite flush failure 
 });
 
 test("a newer submission cannot overtake the first deferred preflight after compaction_end", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   session.isCompacting = true;
   session.emit({ type: "compaction_start", reason: "threshold" });
@@ -795,7 +851,7 @@ test("a newer submission cannot overtake the first deferred preflight after comp
 });
 
 test("accepted fresh dispatch ambiguity stays visible and dequeue reports it in flight", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   session.isCompacting = true;
   session.emit({ type: "compaction_start", reason: "threshold" });
@@ -825,7 +881,7 @@ test("accepted fresh dispatch ambiguity stays visible and dequeue reports it in 
 });
 
 test("stale deferred rejection cannot publish its operation into a replacement generation", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   session.isCompacting = true;
   session.emit({ type: "compaction_start", reason: "threshold" });
@@ -862,7 +918,7 @@ test("stale deferred rejection cannot publish its operation into a replacement g
 });
 
 test("Host queue keeps semantic base64-like prompt text in its bounded projection", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   const binaryLikePrompt = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo0".repeat(8);
   session.isCompacting = true;
@@ -881,7 +937,7 @@ test("Host queue keeps semantic base64-like prompt text in its bounded projectio
 });
 
 test("compaction queue admission commit failure leaves no text or Pi effect behind", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   instance.bindCatalogPort({
     assertWritable: () => {},
@@ -900,7 +956,7 @@ test("compaction queue admission commit failure leaves no text or Pi effect behi
 });
 
 test("retrying compaction queues every deferred item without starting a competing fresh prompt", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   session.isCompacting = true;
   session.emit({ type: "compaction_start", reason: "overflow" });
@@ -920,7 +976,7 @@ test("retrying compaction queues every deferred item without starting a competin
 });
 
 test("post-effect retry-queue rejection stays uncertain and blocks later FIFO dispatch", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   session.isCompacting = true;
   session.emit({ type: "compaction_start", reason: "overflow" });
@@ -942,7 +998,7 @@ test("post-effect retry-queue rejection stays uncertain and blocks later FIFO di
 });
 
 test("duplicate compaction-deferred messages preserve FIFO operation identity", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   session.isCompacting = true;
   session.emit({ type: "compaction_start", reason: "threshold" });
@@ -972,7 +1028,7 @@ test("duplicate compaction-deferred messages preserve FIFO operation identity", 
 });
 
 test("a prompt Promise resolving during compaction cannot publish idle plus compacting", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   await instance.submit("accepted immediately before compaction", "auto", "before-compaction");
   session.isCompacting = true;
@@ -991,8 +1047,8 @@ test("a prompt Promise resolving during compaction cannot publish idle plus comp
 });
 
 test("two instances keep identical queue text and operation identity isolated", async () => {
-  const sessionA = new FakeRuntimeSession();
-  const sessionB = new FakeRuntimeSession();
+  const sessionA = new FakeAgentWorkerConnection();
+  const sessionB = new FakeAgentWorkerConnection();
   const instanceA = new ManagedInstance({ id: "dock-a", cwd: "/tmp/a", session: sessionA, now: createClock() });
   const instanceB = new ManagedInstance({ id: "dock-b", cwd: "/tmp/b", session: sessionB, now: createClock() });
 
@@ -1011,7 +1067,7 @@ test("two instances keep identical queue text and operation identity isolated", 
 });
 
 test("abort cancels compaction without fabricating an aborted model run", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   session.isCompacting = true;
   session.emit({ type: "compaction_start", reason: "manual" });
@@ -1034,7 +1090,7 @@ test("abort cancels compaction without fabricating an aborted model run", async 
 });
 
 test("abort serializes competing mutations and projection reads until its committed boundary", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   await instance.submit("keep running");
   session.startRun();
@@ -1056,7 +1112,7 @@ test("abort serializes competing mutations and projection reads until its commit
 });
 
 test("an abort runtime error reports operation-scoped ambiguity without leaking its cause", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   await instance.submit("keep running");
   session.startRun();
@@ -1071,7 +1127,7 @@ test("an abort runtime error reports operation-scoped ambiguity without leaking 
 });
 
 test("failed and aborted runs project to distinct structured state", async () => {
-  const failedSession = new FakeRuntimeSession();
+  const failedSession = new FakeAgentWorkerConnection();
   const failed = createInstance(failedSession);
   await failed.submit("fail");
   failedSession.startRun();
@@ -1082,7 +1138,7 @@ test("failed and aborted runs project to distinct structured state", async () =>
   assert.equal(failed.snapshot().lastRun, "failed");
   assert.equal(failed.snapshot().lastError, "provider exploded");
 
-  const abortedSession = new FakeRuntimeSession();
+  const abortedSession = new FakeAgentWorkerConnection();
   const aborted = createInstance(abortedSession);
   await aborted.submit("keep running");
   abortedSession.startRun();
@@ -1104,7 +1160,7 @@ test("failed and aborted runs project to distinct structured state", async () =>
 });
 
 test("preflight rejection is reported as a rejected command, not a settled run", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   session.rejectPreflightWith = new Error("no configured model");
   const instance = createInstance(session);
 
@@ -1117,7 +1173,7 @@ test("preflight rejection is reported as a rejected command, not a settled run",
 });
 
 test("delivery modes make queue acceptance explicit", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
 
   await assert.rejects(instance.submit("too early", "steer"), InvalidDeliveryModeError);
@@ -1148,7 +1204,7 @@ test("delivery modes make queue acceptance explicit", async () => {
 });
 
 test("registered extension commands bypass running Queue admission without corrupting the parent operation", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   session.extensionCommands.add("rm-confirm");
   const instance = createInstance(session);
   await instance.submit("parent run", "prompt", "parent-op");
@@ -1190,7 +1246,7 @@ test("registered extension commands bypass running Queue admission without corru
 });
 
 test("exact extension commands remain immediate during compaction while ordinary text stays Host-deferred", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   session.extensionCommands.add("inspect-now");
   const instance = createInstance(session);
   session.isCompacting = true;
@@ -1204,7 +1260,7 @@ test("exact extension commands remain immediate during compaction while ordinary
 });
 
 test("extension command catalog admission commits conservative intent before its immediate effect", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   session.extensionCommands.add("catalog-command");
   const instance = createInstance(session);
   const commits: Array<{ kind: string; effect: string; admissionPending: boolean; admissionOperationId?: string }> = [];
@@ -1234,7 +1290,7 @@ test("extension command catalog admission commits conservative intent before its
 });
 
 test("parent settlement buffered by extension admission retains the parent catalog operation", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   session.extensionCommands.add("admission-command");
   const instance = createInstance(session);
   const admissionEntered = new Deferred<void>();
@@ -1270,7 +1326,7 @@ test("parent settlement buffered by extension admission retains the parent catal
 });
 
 test("admission overflow retains the newest runtime tail and reports bounded degradation", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   session.extensionCommands.add("overflow-command");
   const instance = createInstance(session, 2_000);
   const admissionEntered = new Deferred<void>();
@@ -1302,7 +1358,7 @@ test("admission overflow retains the newest runtime tail and reports bounded deg
 });
 
 test("an async extension command cannot revive or clear a parent that settles during its handler", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   session.extensionCommands.add("slow-command");
   const instance = createInstance(session);
   await instance.submit("parent run", "prompt", "parent-op");
@@ -1327,7 +1383,7 @@ test("an async extension command cannot revive or clear a parent that settles du
 });
 
 test("an idle extension command that starts a run transfers only the new run to its operation", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   session.extensionCommands.add("start-turn");
   const instance = createInstance(session);
   const commandBlock = new Deferred<void>();
@@ -1349,7 +1405,7 @@ test("an idle extension command that starts a run transfers only the new run to 
 });
 
 test("extension command failures preserve parent state and old-generation completions are fenced", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   session.extensionCommands.add("fail-command");
   const instance = createInstance(session);
   await instance.submit("parent run", "prompt", "parent-op");
@@ -1383,7 +1439,7 @@ test("extension command failures preserve parent state and old-generation comple
 });
 
 test("queued text stays pending until user message_start and template expansion keeps its operation identity", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   await instance.submit("original");
   session.startRun();
@@ -1414,7 +1470,7 @@ test("queued text stays pending until user message_start and template expansion 
 });
 
 test("duplicate expanded queue messages consume against their accepted FIFO identities", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   await instance.submit("original");
   session.startRun();
@@ -1433,7 +1489,7 @@ test("duplicate expanded queue messages consume against their accepted FIFO iden
 });
 
 test("runtime-driven replacement explicitly clears any surviving ephemeral queue projection", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   await instance.submit("original");
   session.startRun();
@@ -1459,7 +1515,7 @@ test("runtime-driven replacement explicitly clears any surviving ephemeral queue
 });
 
 test("dequeue never restores a message Pi already removed for an in-flight message_start", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   await instance.submit("original");
   session.startRun();
@@ -1481,7 +1537,7 @@ test("dequeue never restores a message Pi already removed for an in-flight messa
 });
 
 test("dequeue separates a Pi-drained item from the remaining restorable batch without loss", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   await instance.submit("original");
   session.startRun();
@@ -1503,7 +1559,7 @@ test("dequeue separates a Pi-drained item from the remaining restorable batch wi
 });
 
 test("dequeue restores every pending message in steering-first order without aborting the run", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   await instance.submit("original");
   session.startRun();
@@ -1528,7 +1584,7 @@ test("dequeue restores every pending message in steering-first order without abo
 });
 
 test("pending queue admission is bounded before another Pi effect", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   await instance.submit("original");
   session.startRun();
@@ -1544,7 +1600,7 @@ test("pending queue admission is bounded before another Pi effect", async () => 
 });
 
 test("a queued request becomes a tracked prompt when the original run settles during preflight", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   instance.bindCatalogPort({ assertWritable: () => {}, commit: async () => {} });
   instance.markCatalogCommitted();
@@ -1585,7 +1641,7 @@ test("a queued request becomes a tracked prompt when the original run settles du
 });
 
 test("an unresolved preflight reserves admission and rejects a concurrent normal prompt", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   session.delayPreflight = true;
   const instance = createInstance(session);
 
@@ -1606,7 +1662,7 @@ test("an unresolved preflight reserves admission and rejects a concurrent normal
 });
 
 test("stop waits for a pending preflight and a late acceptance cannot revive the instance", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   session.delayPreflight = true;
   const instance = createInstance(session);
 
@@ -1637,7 +1693,7 @@ test("stop waits for a pending preflight and a late acceptance cannot revive the
 });
 
 test("a Promise rejection after agent_settled cannot overwrite the settled outcome", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
 
   await instance.submit("run");
@@ -1660,7 +1716,7 @@ test("a Promise rejection after agent_settled cannot overwrite the settled outco
 });
 
 test("agent_settled without an assistant outcome fails closed", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
 
   await instance.submit("run");
@@ -1677,7 +1733,7 @@ test("agent_settled without an assistant outcome fails closed", async () => {
 });
 
 test("concurrent stop stays non-reopenable when runtime disposal cannot confirm owner release", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   session.clearQueueResult = { steering: ["s1"], followUp: ["f1", "f2"] };
   session.abortError = new Error("abort exploded");
   session.disposeError = new Error("dispose exploded");
@@ -1699,7 +1755,7 @@ test("concurrent stop stays non-reopenable when runtime disposal cannot confirm 
 });
 
 test("observer exceptions and mutations cannot escape into the runtime listener chain", () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   const seen: string[] = [];
 
@@ -1723,7 +1779,7 @@ test("observer exceptions and mutations cannot escape into the runtime listener 
 });
 
 test("high-cardinality configuration projections report explicit completeness metadata", async () => {
-  class LargeCatalogRuntime extends FakeRuntimeSession {
+  class LargeCatalogRuntime extends FakeAgentWorkerConnection {
     override async listTools(): Promise<ToolDto[]> {
       return Array.from({ length: 2_001 }, (_, index) => ({
         name: `tool-${String(index).padStart(4, "0")}`,
@@ -1752,7 +1808,7 @@ test("high-cardinality configuration projections report explicit completeness me
 });
 
 test("runtime event data is sanitized into JSON-serializable values", () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   const rawBase64 = Buffer.from("secret".repeat(100)).toString("base64");
 
@@ -1808,7 +1864,7 @@ test("structured runtime projection does not traverse getters beyond its accepte
 });
 
 test("large structured runtime payloads remain below one control record with explicit omissions", () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   const oversizedArgs = Object.fromEntries(Array.from(
     { length: 100 },
@@ -1836,7 +1892,7 @@ test("large structured runtime payloads remain below one control record with exp
 });
 
 test("edit result details become a closed bounded diff surface for live events and history", async () => {
-  const liveSession = new FakeRuntimeSession();
+  const liveSession = new FakeAgentWorkerConnection();
   const liveInstance = createInstance(liveSession);
   liveSession.emit({
     type: "tool_execution_end",
@@ -1931,7 +1987,7 @@ test("edit result details become a closed bounded diff surface for live events a
   assert.equal(largeLive.data.text, largeDiff, "Dock does not re-truncate Pi's display diff");
   assert.equal(projectDisplayEditDiff(largeDiff), largeDiff);
 
-  const historySession = new FakeRuntimeSession();
+  const historySession = new FakeAgentWorkerConnection();
   historySession.history = [{
     entryId: "edit-history",
     role: "toolResult",
@@ -2012,7 +2068,7 @@ test("built-in detail projections are identical for live completion and reattach
     { toolName: "write", content: "Successfully wrote file", details: undefined },
   ] as const;
 
-  const liveSession = new FakeRuntimeSession();
+  const liveSession = new FakeAgentWorkerConnection();
   const liveInstance = createInstance(liveSession);
   for (const [index, item] of cases.entries()) {
     liveSession.emit({
@@ -2025,7 +2081,7 @@ test("built-in detail projections are identical for live completion and reattach
   }
   const live = liveInstance.eventsSince().events.filter((event) => event.type === "tool.completed");
 
-  const historySession = new FakeRuntimeSession();
+  const historySession = new FakeAgentWorkerConnection();
   historySession.history = cases.map((item, index) => ({
     entryId: `history-${index}`,
     role: "toolResult",
@@ -2046,7 +2102,7 @@ test("built-in detail projections are identical for live completion and reattach
 });
 
 test("only control-frame-sized bash output uses the Unicode-safe transport fallback", () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   const notice = "\n[tool output truncated by Host projection]";
   const source = `${"x".repeat(256_000)}😀${"z".repeat(200)}`;
@@ -2071,7 +2127,7 @@ test("only control-frame-sized bash output uses the Unicode-safe transport fallb
 });
 
 test("assistant and tool-call streaming use stable distinct IDs with argument updates", () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   session.startRun();
   session.emit({ type: "message_update", assistantMessageEvent: { type: "start", partial: { role: "assistant", content: [] } } });
@@ -2098,7 +2154,7 @@ test("assistant and tool-call streaming use stable distinct IDs with argument up
 });
 
 test("completed message content preserves data URIs and raw base64 as semantic text", () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   const rawBase64 = Buffer.from("binary-message".repeat(100)).toString("base64");
 
@@ -2127,7 +2183,7 @@ test("completed message content preserves data URIs and raw base64 as semantic t
 });
 
 test("attach history coverage removes replay frames for the same stable assistant message", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   session.history = [{ entryId: "history-assistant", role: "assistant", content: [{ type: "text", text: "final" }] }];
   const instance = createInstance(session);
   session.emit({ type: "message_update", assistantMessageEvent: { type: "start", partial: { role: "assistant", content: [] } } });
@@ -2140,7 +2196,7 @@ test("attach history coverage removes replay frames for the same stable assistan
 });
 
 test("image-only history covers the matching live user turn during conversation bootstrap", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   const images = [{ path: "/tmp/image-only.png", mimeType: "image/png" }];
   await instance.submit("", "prompt", "image-only-bootstrap", images);
@@ -2158,7 +2214,7 @@ test("image-only history covers the matching live user turn during conversation 
 });
 
 test("active image submission is not hidden by an older same-text and same-MIME turn", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   session.history = [
     { entryId: "old-image", role: "user", content: [{ type: "text", text: "same" }, { type: "image", mimeType: "image/png" }] },
     { entryId: "old-answer", role: "assistant", content: [{ type: "text", text: "old answer" }] },
@@ -2180,7 +2236,7 @@ test("active image submission is not hidden by an older same-text and same-MIME 
 });
 
 test("truncated attach history removes older covered replay instead of reversing chronology", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   session.history = Array.from({ length: 201 }, (_, index) => ({
     entryId: `h${index}`,
     role: "assistant",
@@ -2202,7 +2258,7 @@ test("truncated attach history removes older covered replay instead of reversing
 });
 
 test("fresh conversation bootstrap drops idle generation history while event-log attach remains complete", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   instance.recordExtensionError("old diagnostic");
   session.emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "sibling branch answer" }], stopReason: "stop" } });
@@ -2215,7 +2271,7 @@ test("fresh conversation bootstrap drops idle generation history while event-log
 });
 
 test("fresh conversation bootstrap retains only the active run tail and cursor replay stays raw", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session);
   session.emit({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "old sibling" }], stopReason: "stop" } });
   const beforeRun = instance.eventsSince().latest;
@@ -2235,7 +2291,7 @@ test("fresh conversation bootstrap retains only the active run tail and cursor r
 });
 
 test("truncated fresh bootstrap retains the available active run tail after its start marker is evicted", async () => {
-  const session = new FakeRuntimeSession();
+  const session = new FakeAgentWorkerConnection();
   const instance = createInstance(session, 3);
   await instance.submit("current prompt", "prompt", "truncated-active");
   session.startRun();
@@ -2252,7 +2308,7 @@ test("truncated fresh bootstrap retains the available active run tail after its 
 });
 
 test("bounded events expose a monotonic cursor and truncation signal", () => {
-  const instance = createInstance(new FakeRuntimeSession(), 3);
+  const instance = createInstance(new FakeAgentWorkerConnection(), 3);
 
   instance.recordExtensionError("one");
   instance.recordExtensionError("two");
@@ -2267,7 +2323,7 @@ test("bounded events expose a monotonic cursor and truncation signal", () => {
 
 test("non-finite event capacity falls back to a bounded default", () => {
   for (const capacity of [Number.POSITIVE_INFINITY, Number.NaN]) {
-    const instance = createInstance(new FakeRuntimeSession(), capacity);
+    const instance = createInstance(new FakeAgentWorkerConnection(), capacity);
     for (let index = 0; index < 510; index += 1) {
       instance.recordExtensionError(`error-${index}`);
     }

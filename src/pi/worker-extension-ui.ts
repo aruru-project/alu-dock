@@ -2,7 +2,7 @@ import type {
   ExtensionDialogOptions,
   ExtensionWidgetRenderer,
 } from "../core/extension-ui-broker.js";
-import type { PiExtensionUiLifecyclePort } from "./pi-runtime-host.js";
+import type { PiExtensionUiLifecyclePort } from "./pi-agent-adapter.js";
 import type { PiExtensionUiPort } from "./pi-extension-ui-adapter.js";
 import type { UiCapability } from "./worker-protocol.js";
 

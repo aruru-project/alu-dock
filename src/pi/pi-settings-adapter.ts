@@ -8,7 +8,7 @@ import {
   type SettingUpdate,
   type SettingValueMap,
 } from "../core/config-projection.js";
-import { RuntimeInvalidSettingValueError } from "../core/runtime-session.js";
+import { AgentInvalidSettingValueError } from "../core/agent-worker.js";
 
 export function projectPiSettings(manager: SettingsManager): SettingDto[] {
   return SETTING_KEYS.map((key) => projectPiSetting(manager, key));
@@ -34,7 +34,7 @@ export function projectPiSetting(manager: SettingsManager, key: SettingKey): Set
 export function validatedPiSettingValue<K extends SettingKey>(manager: SettingsManager, key: K): SettingValueMap[K] {
   const value = settingValue(manager, key) as SettingValueMap[K];
   try { assertSettingValue(key, value); }
-  catch { throw new RuntimeInvalidSettingValueError(key); }
+  catch { throw new AgentInvalidSettingValueError(key); }
   return value;
 }
 

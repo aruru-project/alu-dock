@@ -10,10 +10,11 @@ import {
 
 import { ExtensionUiBroker } from "../core/extension-ui-broker.js";
 import { ManagedInstance } from "../core/managed-instance.js";
+import type { AgentHistoryEntry, AgentRequest } from "../core/agent-worker.js";
 import { ProjectTrustCoordinator } from "../control/project-trust.js";
 import { PI_SDK_VERSION } from "../version.js";
 import { resolvePiReopenTarget } from "./pi-session-target.js";
-import { WorkerRuntimeSession } from "./worker-runtime-session.js";
+import { AgentWorkerConnection } from "./agent-worker-connection.js";
 import type { WorkerProcessTimeouts } from "./worker-process.js";
 
 export interface CreatePiInstanceOptions {
@@ -46,7 +47,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
   const instanceId = options.id ?? randomUUID();
   const hostEpoch = options.hostEpoch ?? randomUUID();
   const extensionUiBroker = new ExtensionUiBroker();
-  const created = await WorkerRuntimeSession.create({
+  const created = await AgentWorkerConnection.create({
     identity: {
       hostEpoch,
       instanceId,
@@ -69,7 +70,12 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
   });
   const runtime = created.session;
   try {
-    const modelState = runtime.getModelState();
+    const modelState = runtime.state().modelState;
+    const historyRequest = {
+      kind: "request", version: 2, requestId: randomUUID(), type: "session.history",
+      params: { instanceId, limit: 200 },
+    } as AgentRequest;
+    const initialHistory = await runtime.invoke(historyRequest) as AgentHistoryEntry[];
     const initialName = options.reopenedFrom ? created.persistedName : options.name ?? created.persistedName;
     const instance = new ManagedInstance({
       id: instanceId,
@@ -90,8 +96,9 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
       createdAt: options.createdAt,
       reopenedFrom: options.reopenedFrom,
       extensionUiBroker,
+      initialHistory,
     });
-    await runtime.activateInitial();
+    await runtime.control({ type: "activate" });
     instance.synchronizeModelState();
     for (const diagnostic of created.diagnostics) instance.recordExtensionError(diagnostic);
     if (created.modelFallbackMessage) instance.recordExtensionError(created.modelFallbackMessage);

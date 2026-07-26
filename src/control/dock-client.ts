@@ -3,7 +3,7 @@ import { createConnection, type Socket } from "node:net";
 import { resolve } from "node:path";
 import type { InteractionResponse } from "../core/extension-ui-broker.js";
 import type { DeliveryMode, DockEvent, EventCursor, ImagePathDto, InstanceSnapshot } from "../core/managed-instance.js";
-import type { RuntimeThinkingLevel } from "../core/runtime-session.js";
+import type { ThinkingLevel } from "../core/agent-worker.js";
 import type { SettingUpdate } from "../core/config-projection.js";
 import type { ProjectTrustChoice } from "./project-trust.js";
 import { DOCK_VERSION } from "../version.js";
@@ -191,7 +191,7 @@ export class DockClient {
   dequeue(instanceId:string,operationId=this.createRequestId()):Promise<QueueDequeueResult>{return this.request("queue.dequeue",{operationId,instanceId},["queue.control.v1",IMAGE_INPUT_CAPABILITY],parseQueueDequeueResult);}
   models(instanceId:string):Promise<ModelsResult>{return this.request("model.list",{instanceId},["models.v1","projection.completeness.v1"],parseModelsResult);}
   setModel(instanceId:string,provider:string,modelId:string,operationId=this.createRequestId()):Promise<ModelConfigurationResult>{return this.request("model.set",{operationId,instanceId,provider,modelId},"models.v1",parseModelConfigurationResult);}
-  setThinking(instanceId:string,level:RuntimeThinkingLevel,operationId=this.createRequestId()):Promise<ThinkingConfigurationResult>{return this.request("thinking.set",{operationId,instanceId,level},"models.v1",parseThinkingConfigurationResult);}
+  setThinking(instanceId:string,level:ThinkingLevel,operationId=this.createRequestId()):Promise<ThinkingConfigurationResult>{return this.request("thinking.set",{operationId,instanceId,level},"models.v1",parseThinkingConfigurationResult);}
   tools(instanceId:string):Promise<ToolsResult>{return this.request("tool.list",{instanceId},["tools.v1","projection.completeness.v1"],parseToolsResult);}
   setActiveTools(instanceId:string,names:string[],operationId=this.createRequestId()):Promise<ToolsResult>{return this.request("tool.set_active",{operationId,instanceId,names},["tools.v1","projection.completeness.v1"],parseToolsResult);}
   settings(instanceId:string):Promise<SettingsResult>{return this.request("settings.get",{instanceId},"settings.v1",parseSettingsResult);}

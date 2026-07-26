@@ -35,7 +35,7 @@ import {
   type DockEvent,
   type JsonObject,
 } from "../core/managed-instance.js";
-import { RuntimeCompactionKnownFailureError, RuntimeConversationCursorError, RuntimeInvalidSettingValueError, RuntimeModelNotFoundError, RuntimeSettingsWriteError, RuntimeUnavailableBeforeEffectError, RuntimeUnknownToolError } from "../core/runtime-session.js";
+import { AgentCompactionKnownFailureError, AgentConversationCursorError, AgentInvalidSettingValueError, AgentModelNotFoundError, AgentSettingsWriteError, AgentUnavailableBeforeEffectError, AgentUnknownToolError } from "../core/agent-worker.js";
 import type { SessionInventory } from "../core/session-inventory.js";
 import {
   CatalogListCursorStaleError,
@@ -1092,10 +1092,10 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof RuntimeEffectUnknownError) {
     return { code: "effect_unknown", message: error.message, details: { operationId: error.operationId, queryHint: error.queryHint } };
   }
-  if (error instanceof RuntimeUnavailableBeforeEffectError) {
+  if (error instanceof AgentUnavailableBeforeEffectError) {
     return { code: "runtime_unavailable", message: error.message };
   }
-  if (error instanceof RuntimeCompactionKnownFailureError) {
+  if (error instanceof AgentCompactionKnownFailureError) {
     const code = error.reason === "nothing_to_compact" || error.reason === "already_compacted"
       ? "compaction_not_needed"
       : error.reason === "cancelled" ? "compaction_cancelled" : "compaction_failed";
@@ -1123,7 +1123,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   }
   if (error instanceof CatalogOperationRecordedError) return { code: "operation_conflict", message: error.message };
   if (error instanceof InvalidHistoryCursorError) return { code: "invalid_cursor", message: error.message };
-  if (error instanceof RuntimeConversationCursorError) return { code: "invalid_cursor", message: error.message };
+  if (error instanceof AgentConversationCursorError) return { code: "invalid_cursor", message: error.message };
   if (error instanceof StaleRuntimeGenerationError) return { code: "stale_runtime_generation", message: error.message, details: { expectedRuntimeGeneration: error.expected, actualRuntimeGeneration: error.actual } };
   if (error instanceof InvalidTreeCursorError) return { code: "invalid_cursor", message: error.message };
   if (error instanceof InteractionNotFoundError) return { code: error.code, message: error.message };
@@ -1135,10 +1135,10 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof QueueCapacityError) return { code: "queue_capacity", message: error.message };
   if (error instanceof InstanceAdmissionPendingError) return { code: "admission_pending", message: error.message };
   if (error instanceof InstanceBusyError) return { code: "instance_busy", message: error.message };
-  if (error instanceof RuntimeModelNotFoundError) return { code: "model_not_found", message: error.message };
-  if (error instanceof RuntimeUnknownToolError) return { code: "unknown_tool", message: error.message };
-  if (error instanceof RuntimeInvalidSettingValueError) return { code: "settings_invalid", message: error.message };
-  if (error instanceof RuntimeSettingsWriteError) return { code: "settings_write_failed", message: error.message };
+  if (error instanceof AgentModelNotFoundError) return { code: "model_not_found", message: error.message };
+  if (error instanceof AgentUnknownToolError) return { code: "unknown_tool", message: error.message };
+  if (error instanceof AgentInvalidSettingValueError) return { code: "settings_invalid", message: error.message };
+  if (error instanceof AgentSettingsWriteError) return { code: "settings_write_failed", message: error.message };
   if (error instanceof OperationConflictError) return { code: "operation_conflict", message: error.message };
   if (error instanceof OperationReceiptExpiredError) {
     return { code: "operation_receipt_expired", message: error.message, details: { operationId: error.operationId, queryHint: "Query current state; do not retry this operation ID" } };

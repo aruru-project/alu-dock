@@ -1,24 +1,28 @@
 import type {
-  ClearedRuntimeQueue,
-  RuntimeCompactionResult,
-  RuntimeConversationContentChunk,
-  RuntimeConversationContentPage,
-  RuntimeConversationHistoryPage,
-  RuntimeEvent,
-  RuntimeHistoryEntry,
-  RuntimeModelInfo,
-  RuntimeModelState,
-  RuntimeNavigateOptions,
-  RuntimeNavigateResult,
-  RuntimePromptOptions,
-  RuntimeSession,
-  RuntimeSessionInfo,
-  RuntimeSessionMetrics,
-  RuntimeThinkingLevel,
-  RuntimeTreeNode,
-  RuntimeTreeSnapshot,
-} from "../../src/core/runtime-session.js";
-import { RuntimeConversationCursorError, RuntimeSettingsWriteError } from "../../src/core/runtime-session.js";
+  ClearedAgentQueue,
+  AgentCompactionResult,
+  AgentConversationContentChunk,
+  AgentConversationContentPage,
+  AgentConversationHistoryPage,
+  AgentEvent,
+  AgentHistoryEntry,
+  AgentInvokeOptions,
+  AgentModelInfo,
+  AgentModelState,
+  AgentNavigateOptions,
+  AgentNavigateResult,
+  AgentPromptOptions,
+  AgentRequest,
+  AgentWorkerConnection,
+  AgentWorkerControl,
+  AgentWorkerState,
+  AgentSessionInfo,
+  AgentSessionMetrics,
+  ThinkingLevel,
+  AgentTreeNode,
+  AgentTreeSnapshot,
+} from "../../src/core/agent-worker.js";
+import { AgentConversationCursorError, AgentSettingsWriteError } from "../../src/core/agent-worker.js";
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, SettingValueMap, ToolDto } from "../../src/core/config-projection.js";
 import { SETTING_DEFINITIONS, SETTING_KEYS } from "../../src/core/config-projection.js";
 
@@ -36,7 +40,7 @@ class Deferred<T> {
 }
 
 /** Deterministic in-flight runtime used only by control-plane tests. */
-export class DelayedRuntimeSession implements RuntimeSession {
+export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   sessionId: string;
   sessionFile: string;
   isStreaming = false;
@@ -52,7 +56,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
   disposeError: Error | undefined;
   promptCalls = 0;
   promptMessages: string[] = [];
-  promptOptions: Array<RuntimePromptOptions | undefined> = [];
+  promptOptions: Array<AgentPromptOptions | undefined> = [];
   modelMutationCalls = 0;
   thinkingMutationCalls = 0;
   toolMutationCalls = 0;
@@ -60,31 +64,31 @@ export class DelayedRuntimeSession implements RuntimeSession {
   settingsFailure: Error | undefined;
   settingsReadFailure: Error | undefined;
   sessionMutationError: Error | undefined;
-  sessionCatalog: RuntimeSessionInfo[] = [];
-  history: RuntimeHistoryEntry[] = [];
+  sessionCatalog: AgentSessionInfo[] = [];
+  history: AgentHistoryEntry[] = [];
   conversationRevision = "fixture-conversation-revision";
-  readonly conversationContent = new Map<string, RuntimeConversationContentChunk[]>();
-  treeNodes: RuntimeTreeNode[] = [];
+  readonly conversationContent = new Map<string, AgentConversationContentChunk[]>();
+  treeNodes: AgentTreeNode[] = [];
   treeLeafId: string | undefined;
   treeReadCalls = 0;
-  navigationResult: RuntimeNavigateResult | undefined;
-  metrics: RuntimeSessionMetrics = {
+  navigationResult: AgentNavigateResult | undefined;
+  metrics: AgentSessionMetrics = {
     messages: { user: 0, assistant: 0, toolCalls: 0, toolResults: 0, total: 0 },
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     cost: 0,
   };
 
-  private readonly listeners = new Set<(event: RuntimeEvent) => void>();
+  private readonly listeners = new Set<(event: AgentEvent) => void>();
   private readonly steeringQueue: string[] = [];
   private readonly followUpQueue: string[] = [];
   private currentRun: Deferred<void> | undefined;
   private disposeBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
   private modelMutationBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
   private nextCompactionStartBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
-  private nextCompactionBlock: { entered: Deferred<void>; result: Deferred<RuntimeCompactionResult> } | undefined;
-  private activeCompactionBlock: { entered: Deferred<void>; result: Deferred<RuntimeCompactionResult> } | undefined;
-  private nextNavigationBlock: { entered: Deferred<void>; result: Deferred<RuntimeNavigateResult> } | undefined;
-  private activeNavigationBlock: { entered: Deferred<void>; result: Deferred<RuntimeNavigateResult> } | undefined;
+  private nextCompactionBlock: { entered: Deferred<void>; result: Deferred<AgentCompactionResult> } | undefined;
+  private activeCompactionBlock: { entered: Deferred<void>; result: Deferred<AgentCompactionResult> } | undefined;
+  private nextNavigationBlock: { entered: Deferred<void>; result: Deferred<AgentNavigateResult> } | undefined;
+  private activeNavigationBlock: { entered: Deferred<void>; result: Deferred<AgentNavigateResult> } | undefined;
   private postSettlementContinuation: {
     compactionStarted: Deferred<void>;
     finishCompaction: Deferred<void>;
@@ -102,7 +106,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
     doubleEscapeAction: "tree", treeFilterMode: "default", defaultProjectTrust: "ask",
     httpIdleTimeoutMs: 0, editorPaddingX: 0, outputPad: 0, autocompleteMaxVisible: 10, warnings: {},
   };
-  private modelState: RuntimeModelState = {
+  private modelState: AgentModelState = {
     model: { provider: "fixture", id: "default" },
     thinkingLevel: "off",
     availableThinkingLevels: ["off", "low", "high"],
@@ -113,6 +117,64 @@ export class DelayedRuntimeSession implements RuntimeSession {
     this.sessionFile = `/tmp/${sessionId}.jsonl`;
   }
 
+  state(): AgentWorkerState {
+    return {
+      sessionId: this.sessionId,
+      sessionFile: this.sessionFile,
+      durableSessionFile: this.sessionFile,
+      isStreaming: this.isStreaming,
+      isCompacting: this.isCompacting,
+      ...(this.gitBranch === undefined ? {} : { gitBranch: this.gitBranch }),
+      modelState: this.getModelState(),
+      metrics: this.getMetrics(),
+      extensionCommands: [...this.extensionCommands],
+    };
+  }
+
+  async invoke(request: AgentRequest, options?: AgentInvokeOptions): Promise<unknown> {
+    const p = request.params as Record<string, any>;
+    switch (request.type) {
+      case "command.submit": return options?.context?.type === "force_queue"
+        ? this.queueMessage(p.message, p.delivery)
+        : this.prompt(p.message, {
+          ...(p.delivery === "steer" || p.delivery === "followUp" ? { streamingBehavior: p.delivery } : {}),
+          ...(p.images === undefined ? {} : { images: p.images }),
+          preflightResult: options?.preflightResult,
+        });
+      case "command.abort": return this.abort();
+      case "queue.dequeue": return this.clearQueue();
+      case "model.list": return this.listModels();
+      case "model.set": return this.selectModel(p.provider, p.modelId);
+      case "thinking.set": return this.setThinkingLevel(p.level);
+      case "tool.list": return this.listTools();
+      case "tool.set_active": return this.setActiveTools(p.names);
+      case "settings.get": return this.getSettings();
+      case "settings.update": return this.updateSetting(p.update);
+      case "resource.get": return this.getResources();
+      case "command.catalog": return this.getCommands();
+      case "session.history": return this.getHistory();
+      case "conversation.history": return this.getConversationHistory(p.cursor, p.limit);
+      case "conversation.content": return this.getConversationContent(p.contentRef, p.cursor);
+      case "session.list": return this.listSessions(p.scope);
+      case "session.switch": return this.switchSession(p.operationId, p.sessionFile);
+      case "session.new": return this.newSession(p.operationId, p.parentSession);
+      case "session.name": return this.setSessionName(p.name);
+      case "session.compact": return this.compact();
+      case "session.reload": return this.reload();
+      case "session.tree": return this.getTree();
+      case "session.navigate": return this.navigateTree(p.targetId, p);
+      case "session.fork": return this.fork(p.operationId, p.entryId, "before", "fork");
+      case "session.clone": return this.fork(p.operationId, p.entryId, "at", "clone");
+    }
+  }
+
+  control(request: AgentWorkerControl): Promise<unknown> {
+    if (request.type === "resolve_session_target") return this.resolveSessionTarget(request.sessionFile);
+    if (request.type === "wait_for_idle") return this.waitForIdle();
+    if (request.type === "dispose") return this.dispose();
+    return Promise.resolve(null);
+  }
+
   getGitBranch(): string | undefined { return this.gitBranch; }
 
   setGitBranch(branch: string | undefined): void {
@@ -120,7 +182,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
     this.emit({ type: "dock_git_branch_changed", branch });
   }
 
-  subscribe(listener: (event: RuntimeEvent) => void): () => void {
+  subscribe(listener: (event: AgentEvent) => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   }
@@ -132,7 +194,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
     return this.extensionCommands.has(commandName) ? "extension_command" : "prompt";
   }
 
-  prompt(text: string, options?: RuntimePromptOptions): Promise<void> {
+  prompt(text: string, options?: AgentPromptOptions): Promise<void> {
     this.promptCalls += 1;
     this.promptMessages.push(text);
     this.promptOptions.push(options === undefined ? undefined : structuredClone({ ...options, preflightResult: undefined }));
@@ -164,24 +226,24 @@ export class DelayedRuntimeSession implements RuntimeSession {
     return Promise.resolve();
   }
 
-  async listModels(): Promise<RuntimeModelInfo[]> {
+  async listModels(): Promise<AgentModelInfo[]> {
     return [
       { provider: "fixture", id: "default", name: "Fixture Default", reasoning: true },
       { provider: "fixture", id: "local", name: "Fixture Local", reasoning: true },
     ];
   }
 
-  async listSessions(scope: "cwd" | "all"): Promise<RuntimeSessionInfo[]> {
+  async listSessions(scope: "cwd" | "all"): Promise<AgentSessionInfo[]> {
     return this.sessionCatalog
       .filter((session) => scope === "all" || session.cwd === "/fixture/cwd")
       .map((session) => ({ ...session }));
   }
 
-  getHistory(): RuntimeHistoryEntry[] { return structuredClone(this.history); }
+  getHistory(): AgentHistoryEntry[] { return structuredClone(this.history); }
 
-  async getConversationHistory(cursor?: string, limit = 50): Promise<RuntimeConversationHistoryPage> {
+  async getConversationHistory(cursor?: string, limit = 50): Promise<AgentConversationHistoryPage> {
     const end = cursor === undefined ? this.history.length : Number.parseInt(cursor, 10);
-    if (!Number.isSafeInteger(end) || end < 0 || end > this.history.length) throw new RuntimeConversationCursorError();
+    if (!Number.isSafeInteger(end) || end < 0 || end > this.history.length) throw new AgentConversationCursorError();
     const start = Math.max(0, end - Math.max(1, Math.min(200, Math.floor(limit))));
     const entries = this.history.slice(start, end).map((entry) => ({
       entry: structuredClone(entry),
@@ -197,10 +259,10 @@ export class DelayedRuntimeSession implements RuntimeSession {
     };
   }
 
-  async getConversationContent(contentRef: string, cursor?: string): Promise<RuntimeConversationContentPage> {
-    if (cursor !== undefined) throw new RuntimeConversationCursorError();
+  async getConversationContent(contentRef: string, cursor?: string): Promise<AgentConversationContentPage> {
+    if (cursor !== undefined) throw new AgentConversationCursorError();
     const chunks = this.conversationContent.get(contentRef);
-    if (!chunks) throw new RuntimeConversationCursorError("Conversation content reference is stale");
+    if (!chunks) throw new AgentConversationCursorError("Conversation content reference is stale");
     return {
       revision: this.conversationRevision,
       contentRef,
@@ -209,7 +271,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
     };
   }
 
-  getTree(): RuntimeTreeSnapshot {
+  getTree(): AgentTreeSnapshot {
     this.treeReadCalls += 1;
     return {
       nodes: structuredClone(this.treeNodes),
@@ -217,7 +279,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
     };
   }
 
-  async navigateTree(targetId: string, _options: RuntimeNavigateOptions = {}): Promise<RuntimeNavigateResult> {
+  async navigateTree(targetId: string, _options: AgentNavigateOptions = {}): Promise<AgentNavigateResult> {
     this.sessionMutationCalls.navigate += 1;
     const target = this.treeNodes.find((node) => node.entryId === targetId);
     if (!target) throw new Error(`Unknown tree entry: ${targetId}`);
@@ -326,7 +388,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
     return actual;
   }
 
-  async compact(): Promise<RuntimeCompactionResult> {
+  async compact(): Promise<AgentCompactionResult> {
     this.sessionMutationCalls.compact += 1;
     if (this.isStreaming) this.settle("aborted for compaction", "aborted");
     const startBlock = this.nextCompactionStartBlock;
@@ -359,9 +421,9 @@ export class DelayedRuntimeSession implements RuntimeSession {
     return { entered: block.entered.promise, release: () => block.release.resolve() };
   }
 
-  blockNextCompaction(): { entered: Promise<void>; finish: (result?: RuntimeCompactionResult) => void } {
+  blockNextCompaction(): { entered: Promise<void>; finish: (result?: AgentCompactionResult) => void } {
     if (this.nextCompactionBlock || this.activeCompactionBlock) throw new Error("Fixture compaction is already blocked");
-    const block = { entered: new Deferred<void>(), result: new Deferred<RuntimeCompactionResult>() };
+    const block = { entered: new Deferred<void>(), result: new Deferred<AgentCompactionResult>() };
     this.nextCompactionBlock = block;
     return {
       entered: block.entered.promise,
@@ -381,9 +443,9 @@ export class DelayedRuntimeSession implements RuntimeSession {
     return { cancelled: false };
   }
 
-  blockNextNavigation(): { entered: Promise<void>; finish: (result?: RuntimeNavigateResult) => void } {
+  blockNextNavigation(): { entered: Promise<void>; finish: (result?: AgentNavigateResult) => void } {
     if (this.nextNavigationBlock || this.activeNavigationBlock) throw new Error("Fixture navigation is already blocked");
-    const block = { entered: new Deferred<void>(), result: new Deferred<RuntimeNavigateResult>() };
+    const block = { entered: new Deferred<void>(), result: new Deferred<AgentNavigateResult>() };
     this.nextNavigationBlock = block;
     return {
       entered: block.entered.promise,
@@ -397,7 +459,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
     return { entered: block.entered.promise, release: () => block.release.resolve() };
   }
 
-  async selectModel(provider: string, modelId: string): Promise<RuntimeModelState> {
+  async selectModel(provider: string, modelId: string): Promise<AgentModelState> {
     this.modelMutationCalls += 1;
     this.modelState = { ...this.modelState, model: { provider, id: modelId } };
     const block = this.modelMutationBlock;
@@ -410,14 +472,14 @@ export class DelayedRuntimeSession implements RuntimeSession {
     return this.getModelState();
   }
 
-  async setThinkingLevel(level: RuntimeThinkingLevel): Promise<RuntimeModelState> {
+  async setThinkingLevel(level: ThinkingLevel): Promise<AgentModelState> {
     this.thinkingMutationCalls += 1;
     this.modelState = { ...this.modelState, thinkingLevel: level };
     this.throwSettingsFailure("thinking");
     return this.getModelState();
   }
 
-  getModelState(): RuntimeModelState {
+  getModelState(): AgentModelState {
     return {
       ...this.modelState,
       model: this.modelState.model ? { ...this.modelState.model } : undefined,
@@ -425,9 +487,9 @@ export class DelayedRuntimeSession implements RuntimeSession {
     };
   }
 
-  getMetrics(): RuntimeSessionMetrics { return structuredClone(this.metrics); }
+  getMetrics(): AgentSessionMetrics { return structuredClone(this.metrics); }
 
-  clearQueue(): ClearedRuntimeQueue {
+  clearQueue(): ClearedAgentQueue {
     this.clearQueueCalls += 1;
     const cleared = {
       steering: [...this.steeringQueue],
@@ -574,7 +636,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
     };
   }
 
-  emit(event: RuntimeEvent): void {
+  emit(event: AgentEvent): void {
     for (const listener of this.listeners) listener(event);
   }
 
@@ -594,7 +656,7 @@ export class DelayedRuntimeSession implements RuntimeSession {
 
   private throwSettingsFailure(setting: import("../../src/core/config-projection.js").SettingKey | "model" | "thinking"): void {
     if (!this.settingsFailure) return;
-    throw new RuntimeSettingsWriteError(
+    throw new AgentSettingsWriteError(
       setting,
       "write",
       true,

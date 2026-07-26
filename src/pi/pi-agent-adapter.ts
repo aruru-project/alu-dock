@@ -33,36 +33,38 @@ import {
 import { projectBuiltInToolPresentation } from "../core/tool-result-presentation.js";
 import type { PiExtensionUiPort } from "./pi-extension-ui-adapter.js";
 import {
-  RuntimeCompactionKnownFailureError,
-  RuntimeConversationCursorError,
-  RuntimeQueueEffectUnknownError,
-  RuntimeQueueRejectedBeforeEffectError,
-} from "../core/runtime-session.js";
+  AgentCompactionKnownFailureError,
+  AgentConversationCursorError,
+  AgentQueueEffectUnknownError,
+  AgentQueueRejectedBeforeEffectError,
+} from "../core/agent-worker.js";
 import type {
-  ClearedRuntimeQueue,
-  RuntimeCompactionResult,
-  RuntimeConversationContentChunk,
-  RuntimeConversationContentPage,
-  RuntimeConversationHistoryPage,
-  RuntimeEvent,
-  RuntimeForkResult,
-  RuntimeHistoryEntry,
-  RuntimeImagePath,
-  RuntimeInputKind,
-  RuntimeModelInfo,
-  RuntimeModelState,
-  RuntimeNavigateOptions,
-  RuntimeNavigateResult,
-  RuntimePromptOptions,
-  RuntimeSession,
-  RuntimeSessionInfo,
-  RuntimeSessionMetrics,
-  RuntimeSessionTarget,
-  RuntimeThinkingLevel,
-  RuntimeToolProjection,
-  RuntimeTreeNode,
-  RuntimeTreeSnapshot,
-} from "../core/runtime-session.js";
+  ClearedAgentQueue,
+  AgentCompactionResult,
+  AgentConversationContentChunk,
+  AgentConversationContentPage,
+  AgentConversationHistoryPage,
+  AgentEvent,
+  AgentForkResult,
+  AgentHistoryEntry,
+  AgentImagePath,
+  AgentInputKind,
+  AgentInvokeContext,
+  AgentModelInfo,
+  AgentModelState,
+  AgentNavigateOptions,
+  AgentNavigateResult,
+  AgentPromptOptions,
+  AgentRequest,
+  AgentWorkerControl,
+  AgentSessionInfo,
+  AgentSessionMetrics,
+  AgentSessionTarget,
+  ThinkingLevel,
+  AgentToolProjection,
+  AgentTreeNode,
+  AgentTreeSnapshot,
+} from "../core/agent-worker.js";
 import type {
   CommandDto,
   DiagnosticDto,
@@ -80,7 +82,7 @@ import {
   compareToolDtos,
 } from "../core/config-projection.js";
 import { projectJsonObject } from "../core/managed-instance.js";
-import { RuntimeModelNotFoundError, RuntimeSettingsWriteError, RuntimeUnknownToolError } from "../core/runtime-session.js";
+import { AgentModelNotFoundError, AgentSettingsWriteError, AgentUnknownToolError } from "../core/agent-worker.js";
 import { configurePiNetwork } from "./configure-pi-network.js";
 import { GitBranchObserver, type GitBranchObserverPort } from "./git-branch-observer.js";
 import { createPiExtensionUiContext } from "./pi-extension-ui-adapter.js";
@@ -125,7 +127,7 @@ export interface PiExtensionUiLifecyclePort extends PiExtensionUiPort {
   failGenerationChange(): Promise<void>;
 }
 
-export interface PiRuntimeHostOptions {
+export interface PiAgentAdapterOptions {
   runtime: RuntimeOwner;
   sessionCatalog?: PiSessionCatalog;
   setProjectTrust?: (cwd: string, trusted: boolean) => void;
@@ -144,7 +146,7 @@ export interface PiRuntimeHostOptions {
   configureNetwork?: (settingsManager: AgentSessionServices["settingsManager"]) => void;
 }
 
-export interface CreatePiRuntimeHostOptions {
+export interface CreatePiAgentAdapterOptions {
   cwd: string;
   agentDir: string;
   sessionDir?: string;
@@ -165,13 +167,13 @@ interface Binding {
   cwd: string;
   unsubscribe: () => void;
   gitBranchObserver?: GitBranchObserverPort;
-  buffered: RuntimeEvent[];
+  buffered: AgentEvent[];
   bufferEvents: boolean;
 }
 
-/** Stable Host-owned facade around the SDK's one mutable AgentSessionRuntime. */
-export class PiRuntimeHost implements RuntimeSession {
-  private readonly subscribers = new Set<(event: RuntimeEvent) => void>();
+/** In-Worker Pi adapter around the SDK's mutable AgentSessionRuntime. */
+export class PiAgentAdapter {
+  private readonly subscribers = new Set<(event: AgentEvent) => void>();
   private active: Binding | undefined;
   private staged: Binding | undefined;
   private disposed = false;
@@ -182,7 +184,7 @@ export class PiRuntimeHost implements RuntimeSession {
   private rebindEntered = false;
   private replacementInvalidated = false;
   private replacementRunning = false;
-  private treeNavigation: Promise<RuntimeNavigateResult> | undefined;
+  private treeNavigation: Promise<AgentNavigateResult> | undefined;
   private initialActivated = false;
   private queueUpdateSequence = 0;
   private processCwdValue: string | undefined;
@@ -191,7 +193,7 @@ export class PiRuntimeHost implements RuntimeSession {
   private readonly conversationHistoryCursors = new Map<string, { revision: string; end: number }>();
   private readonly conversationContentCursors = new Map<string, { revision: string; contentRef: string; blockIndex: number; offset: number }>();
 
-  private constructor(private readonly options: PiRuntimeHostOptions) {
+  private constructor(private readonly options: PiAgentAdapterOptions) {
     this.processCwdValue = options.initialProcessCwd;
     options.runtime.setBeforeSessionInvalidate(() => {
       if (this.replacementRunning) this.replacementInvalidated = true;
@@ -204,8 +206,8 @@ export class PiRuntimeHost implements RuntimeSession {
     });
   }
 
-  static async create(options: PiRuntimeHostOptions): Promise<PiRuntimeHost> {
-    const host = new PiRuntimeHost(options);
+  static async create(options: PiAgentAdapterOptions): Promise<PiAgentAdapter> {
+    const host = new PiAgentAdapter(options);
     try {
       await host.stageCandidate(options.runtime.session);
       host.promoteInitial();
@@ -261,12 +263,67 @@ export class PiRuntimeHost implements RuntimeSession {
     for (const event of events) this.publish(event);
   }
 
-  subscribe(listener: (event: RuntimeEvent) => void): () => void {
+  subscribe(listener: (event: AgentEvent) => void): () => void {
     this.subscribers.add(listener);
     return () => this.subscribers.delete(listener);
   }
 
-  classifyInput(text: string): RuntimeInputKind {
+  async dispatch(request: AgentRequest, context?: AgentInvokeContext, preflightResult?: (success: boolean) => void): Promise<unknown> {
+    switch (request.type) {
+      case "command.submit": {
+        const { delivery: requestedDelivery, message, images } = request.params;
+        const delivery = requestedDelivery === "auto" ? (this.isStreaming ? "followUp" : "prompt") : requestedDelivery;
+        if (context?.type === "force_queue") {
+          if (delivery === "prompt") throw new Error("Forced Agent queue delivery requires steer or followUp");
+          return this.queueMessage(message, delivery, images);
+        }
+        return this.prompt(message, {
+          source: "rpc",
+          ...(delivery === "prompt" ? {} : { streamingBehavior: delivery }),
+          ...(images === undefined ? {} : { images }),
+          preflightResult,
+        });
+      }
+      case "command.abort": await this.abort(); return null;
+      case "queue.dequeue": return this.clearQueue();
+      case "model.list": return this.listModels();
+      case "model.set": return this.selectModel(request.params.provider, request.params.modelId);
+      case "thinking.set": return this.setThinkingLevel(request.params.level);
+      case "tool.list": return this.listTools();
+      case "tool.set_active": return this.setActiveTools(request.params.names);
+      case "settings.get": return this.getSettings();
+      case "settings.update": return this.updateSetting(request.params.update);
+      case "resource.get": return this.getResources();
+      case "command.catalog": return this.getCommands();
+      case "session.history": return this.getHistory();
+      case "conversation.history": return this.getConversationHistory(request.params.cursor, request.params.limit);
+      case "conversation.content": return this.getConversationContent(request.params.contentRef, request.params.cursor);
+      case "session.list": return this.listSessions(request.params.scope);
+      case "session.switch": {
+        if (context?.type !== "session_switch") throw new Error("Session switch requires resolved Host trust context");
+        return this.switchSession(request.params.operationId, request.params.sessionFile, context);
+      }
+      case "session.new": return this.newSession(request.params.operationId, request.params.parentSession);
+      case "session.name": return this.setSessionName(request.params.name);
+      case "session.compact": return this.compact(request.params.customInstructions);
+      case "session.reload": return this.reload(request.params.operationId);
+      case "session.tree": return this.getTree();
+      case "session.navigate": return this.navigateTree(request.params.targetId, request.params);
+      case "session.fork": return this.fork(request.params.operationId, request.params.entryId, "before", "fork");
+      case "session.clone": return this.fork(request.params.operationId, request.params.entryId, "at", "clone");
+    }
+  }
+
+  async control(request: AgentWorkerControl): Promise<unknown> {
+    switch (request.type) {
+      case "activate": this.activateInitial(); return null;
+      case "resolve_session_target": return this.resolveSessionTarget(request.sessionFile);
+      case "wait_for_idle": await this.waitForIdle(); return null;
+      case "dispose": await this.dispose(); return null;
+    }
+  }
+
+  classifyInput(text: string): AgentInputKind {
     const commandName = extensionCommandName(text);
     if (commandName === undefined) return "prompt";
     return this.requireActive().session.extensionRunner.getCommand(commandName) === undefined
@@ -274,7 +331,7 @@ export class PiRuntimeHost implements RuntimeSession {
       : "extension_command";
   }
 
-  async prompt(text: string, options?: RuntimePromptOptions): Promise<void> {
+  async prompt(text: string, options?: AgentPromptOptions): Promise<void> {
     const { images, ...promptOptions } = options ?? {};
     const visualContent = await loadPiImages(images);
     await this.requireActive().session.prompt(text, {
@@ -283,10 +340,10 @@ export class PiRuntimeHost implements RuntimeSession {
     } as PromptOptions);
   }
 
-  async queueMessage(text: string, delivery: "steer" | "followUp", images?: RuntimeImagePath[]): Promise<void> {
+  async queueMessage(text: string, delivery: "steer" | "followUp", images?: AgentImagePath[]): Promise<void> {
     let visualContent: PiImageContent[] | undefined;
     try { visualContent = await loadPiImages(images); }
-    catch (error) { throw new RuntimeQueueRejectedBeforeEffectError(error); }
+    catch (error) { throw new AgentQueueRejectedBeforeEffectError(error); }
     const session = this.requireActive().session;
     const updateSequenceBefore = this.queueUpdateSequence;
     const before = delivery === "steer"
@@ -297,24 +354,24 @@ export class PiRuntimeHost implements RuntimeSession {
       ? session.getSteeringMessages().length
       : session.getFollowUpMessages().length) > before;
     return mutation.catch((error: unknown) => {
-      if (!appliedSynchronously) throw new RuntimeQueueRejectedBeforeEffectError(error);
-      throw new RuntimeQueueEffectUnknownError(error);
+      if (!appliedSynchronously) throw new AgentQueueRejectedBeforeEffectError(error);
+      throw new AgentQueueEffectUnknownError(error);
     });
   }
 
-  async listModels(): Promise<RuntimeModelInfo[]> {
+  async listModels(): Promise<AgentModelInfo[]> {
     const models = await this.requireActive().services.modelRuntime.getAvailable();
     return models.map((model) => ({
       provider: model.provider, id: model.id, name: model.name, reasoning: model.reasoning,
     })).sort((left, right) => left.provider.localeCompare(right.provider) || left.name.localeCompare(right.name));
   }
 
-  async listTools(): Promise<RuntimeToolProjection> {
+  async listTools(): Promise<AgentToolProjection> {
     const session = this.requireActive().session;
     return projectVisibleTools(session);
   }
 
-  async setActiveTools(names: string[]): Promise<RuntimeToolProjection> {
+  async setActiveTools(names: string[]): Promise<AgentToolProjection> {
     const session = this.requireActive().session;
     if (!Array.isArray(names) || names.length > MAX_PROJECTION_ITEMS) throw new Error("Active tool names must be a bounded array");
     const remaining = new Set<string>();
@@ -329,7 +386,7 @@ export class PiRuntimeHost implements RuntimeSession {
       if (remaining.size === 0) break;
     }
     const unknown = remaining.values().next().value;
-    if (unknown !== undefined) throw new RuntimeUnknownToolError(unknown);
+    if (unknown !== undefined) throw new AgentUnknownToolError(unknown);
     session.setActiveToolsByName([...names]);
     return this.listTools();
   }
@@ -458,7 +515,7 @@ export class PiRuntimeHost implements RuntimeSession {
     return commands.sort(compareCommandDtos);
   }
 
-  async listSessions(scope: "cwd" | "all"): Promise<RuntimeSessionInfo[]> {
+  async listSessions(scope: "cwd" | "all"): Promise<AgentSessionInfo[]> {
     const binding = this.requireActive();
     const manager = binding.session.sessionManager;
     const catalog = this.options.sessionCatalog ?? DEFAULT_SESSION_CATALOG;
@@ -471,17 +528,17 @@ export class PiRuntimeHost implements RuntimeSession {
     }));
   }
 
-  getHistory(): RuntimeHistoryEntry[] {
+  getHistory(): AgentHistoryEntry[] {
     return this.conversationEntries().map(({ projected }) => projected);
   }
 
-  async getConversationHistory(cursor?: string, limit = 50): Promise<RuntimeConversationHistoryPage> {
+  async getConversationHistory(cursor?: string, limit = 50): Promise<AgentConversationHistoryPage> {
     const state = this.conversationState();
     const boundedLimit = Math.max(1, Math.min(200, Math.floor(limit)));
     let end = state.entries.length;
     if (cursor !== undefined) {
       const continuation = this.conversationHistoryCursors.get(cursor);
-      if (!continuation || continuation.revision !== state.revision) throw new RuntimeConversationCursorError("Conversation history cursor is stale");
+      if (!continuation || continuation.revision !== state.revision) throw new AgentConversationCursorError("Conversation history cursor is stale");
       end = continuation.end;
     }
     const start = Math.max(0, end - boundedLimit);
@@ -498,22 +555,22 @@ export class PiRuntimeHost implements RuntimeSession {
     return { revision: state.revision, entries, hasEarlier: true, nextCursor };
   }
 
-  async getConversationContent(contentRef: string, cursor?: string): Promise<RuntimeConversationContentPage> {
+  async getConversationContent(contentRef: string, cursor?: string): Promise<AgentConversationContentPage> {
     const state = this.conversationState();
     let blockIndex = 0;
     let offset = 0;
     if (cursor !== undefined) {
       const continuation = this.conversationContentCursors.get(cursor);
       if (!continuation || continuation.revision !== state.revision || continuation.contentRef !== contentRef) {
-        throw new RuntimeConversationCursorError("Conversation content cursor is stale");
+        throw new AgentConversationCursorError("Conversation content cursor is stale");
       }
       blockIndex = continuation.blockIndex;
       offset = continuation.offset;
     }
     const selected = state.entries.find(({ source }) => conversationContentRef(state.revision, source.id) === contentRef);
-    if (!selected) throw new RuntimeConversationCursorError("Conversation content reference is stale");
+    if (!selected) throw new AgentConversationCursorError("Conversation content reference is stale");
     const blocks = conversationContentBlocks(selected.source, selected.projected);
-    const chunks: RuntimeConversationContentChunk[] = [];
+    const chunks: AgentConversationContentChunk[] = [];
     let chars = 0;
     while (blockIndex < blocks.length && chunks.length < 64 && chars < 64_000) {
       const block = blocks[blockIndex]!;
@@ -550,7 +607,7 @@ export class PiRuntimeHost implements RuntimeSession {
         chars += text.length;
         if (blockComplete) { blockIndex += 1; offset = 0; } else { offset = end; break; }
       } else {
-        chunks.push({ ...block, blockIndex } as RuntimeConversationContentChunk);
+        chunks.push({ ...block, blockIndex } as AgentConversationContentChunk);
         blockIndex += 1;
         offset = 0;
       }
@@ -562,7 +619,7 @@ export class PiRuntimeHost implements RuntimeSession {
     return { revision: state.revision, contentRef, chunks, complete: false, nextCursor };
   }
 
-  private conversationEntries(): Array<{ source: SessionEntry; projected: RuntimeHistoryEntry }> {
+  private conversationEntries(): Array<{ source: SessionEntry; projected: AgentHistoryEntry }> {
     const branch = this.requireActive().session.sessionManager.getBranch();
     return buildContextEntries(branch).flatMap((source) => {
       const projected = projectHistoryEntry(source);
@@ -570,7 +627,7 @@ export class PiRuntimeHost implements RuntimeSession {
     });
   }
 
-  private conversationState(): { revision: string; entries: Array<{ source: SessionEntry; projected: RuntimeHistoryEntry }> } {
+  private conversationState(): { revision: string; entries: Array<{ source: SessionEntry; projected: AgentHistoryEntry }> } {
     const entries = this.conversationEntries();
     const manager = this.requireActive().session.sessionManager;
     const revision = createHash("sha256")
@@ -590,9 +647,9 @@ export class PiRuntimeHost implements RuntimeSession {
     return { revision, entries };
   }
 
-  getTree(): RuntimeTreeSnapshot {
+  getTree(): AgentTreeSnapshot {
     const manager = this.requireActive().session.sessionManager;
-    const nodes: RuntimeTreeNode[] = [];
+    const nodes: AgentTreeNode[] = [];
     const roots = manager.getTree();
     const toolCalls = collectTreeToolCalls(roots);
     const stack: Array<{ node: SessionTreeNode; parentId?: string; depth: number }> = [];
@@ -608,7 +665,7 @@ export class PiRuntimeHost implements RuntimeSession {
     return { nodes, ...(leafId === undefined ? {} : { leafId }) };
   }
 
-  navigateTree(targetId: string, options: RuntimeNavigateOptions = {}): Promise<RuntimeNavigateResult> {
+  navigateTree(targetId: string, options: AgentNavigateOptions = {}): Promise<AgentNavigateResult> {
     if (this.treeNavigation) return Promise.reject(new Error("A session tree navigation is already active"));
     const navigation = this.serialize(async () => {
       const result = await this.requireActive().session.navigateTree(targetId, options);
@@ -626,17 +683,17 @@ export class PiRuntimeHost implements RuntimeSession {
     return tracked;
   }
 
-  async selectModel(provider: string, modelId: string): Promise<RuntimeModelState> {
+  async selectModel(provider: string, modelId: string): Promise<AgentModelState> {
     const binding = this.requireActive();
     const model = binding.services.modelRuntime.getModel(provider, modelId);
-    if (!model || !(await binding.services.modelRuntime.checkAuth(provider))) throw new RuntimeModelNotFoundError(provider, modelId);
+    if (!model || !(await binding.services.modelRuntime.checkAuth(provider))) throw new AgentModelNotFoundError(provider, modelId);
     this.assertCleanSettingsBaseline(binding, "model");
     await binding.session.setModel(model);
     await this.persistSettings(binding, "model");
     return this.getModelState();
   }
 
-  async setThinkingLevel(level: RuntimeThinkingLevel): Promise<RuntimeModelState> {
+  async setThinkingLevel(level: ThinkingLevel): Promise<AgentModelState> {
     const binding = this.requireActive();
     this.assertCleanSettingsBaseline(binding, "thinking");
     binding.session.setThinkingLevel(level);
@@ -644,7 +701,7 @@ export class PiRuntimeHost implements RuntimeSession {
     return this.getModelState();
   }
 
-  getModelState(): RuntimeModelState {
+  getModelState(): AgentModelState {
     const session = this.requireActive().session;
     return {
       model: session.model ? { provider: session.model.provider, id: session.model.id } : undefined,
@@ -653,7 +710,7 @@ export class PiRuntimeHost implements RuntimeSession {
     };
   }
 
-  getMetrics(): RuntimeSessionMetrics {
+  getMetrics(): AgentSessionMetrics {
     const stats = this.requireActive().session.getSessionStats();
     return {
       messages: {
@@ -669,7 +726,7 @@ export class PiRuntimeHost implements RuntimeSession {
     };
   }
 
-  clearQueue(): ClearedRuntimeQueue { return this.requireActive().session.clearQueue(); }
+  clearQueue(): ClearedAgentQueue { return this.requireActive().session.clearQueue(); }
   async abort(): Promise<void> {
     const session = this.active?.session;
     if (!session) return;
@@ -698,7 +755,7 @@ export class PiRuntimeHost implements RuntimeSession {
   }
   waitForIdle(): Promise<void> { return this.active?.session.waitForIdle() ?? Promise.resolve(); }
 
-  async resolveSessionTarget(path: string): Promise<RuntimeSessionTarget> {
+  async resolveSessionTarget(path: string): Promise<AgentSessionTarget> {
     const manager = SessionManager.open(path);
     return { canonicalCwd: await realpath(resolve(manager.getCwd())) };
   }
@@ -732,7 +789,7 @@ export class PiRuntimeHost implements RuntimeSession {
     entryId: string,
     position: "before" | "at",
     kind: "fork" | "clone",
-  ): Promise<RuntimeForkResult> {
+  ): Promise<AgentForkResult> {
     return this.serialize(() => {
       const binding = this.requireActive();
       if (kind === "clone" && binding.session.sessionManager.getLeafId() !== entryId) {
@@ -761,7 +818,7 @@ export class PiRuntimeHost implements RuntimeSession {
     return session.sessionManager.getSessionName();
   }
 
-  compact(customInstructions?: string): Promise<RuntimeCompactionResult> {
+  compact(customInstructions?: string): Promise<AgentCompactionResult> {
     return this.serialize(async () => {
       const session = this.requireActive().session;
       const previousCompactionIds = new Set(
@@ -782,7 +839,7 @@ export class PiRuntimeHost implements RuntimeSession {
         if (appended) throw error;
         const message = error instanceof Error ? error.message : String(error);
         const reason = error instanceof Error && error.name === "AbortError" ? "cancelled" : compactionFailureReason(message);
-        throw new RuntimeCompactionKnownFailureError(reason, message);
+        throw new AgentCompactionKnownFailureError(reason, message);
       }
     });
   }
@@ -791,7 +848,7 @@ export class PiRuntimeHost implements RuntimeSession {
     return this.serialize(async () => {
       const previousSessionFile = this.sessionFile;
       const binding = this.requireActive();
-      const buffered: RuntimeEvent[] = [];
+      const buffered: AgentEvent[] = [];
       const originalBuffer = binding.buffered;
       binding.buffered = buffered;
       binding.bufferEvents = true;
@@ -943,7 +1000,7 @@ export class PiRuntimeHost implements RuntimeSession {
       } });
       const publishBranch = (branch: string | undefined): void => {
         if (!token.active) return;
-        const event: RuntimeEvent = { type: "dock_git_branch_changed", branch };
+        const event: AgentEvent = { type: "dock_git_branch_changed", branch };
         if (this.active === binding && !binding.bufferEvents) this.publish(event); else binding.buffered.push(event);
       };
       binding.gitBranchObserver = await (this.options.gitBranchObserverFactory
@@ -983,7 +1040,7 @@ export class PiRuntimeHost implements RuntimeSession {
     this.publishReplacementBuffer(events);
   }
 
-  private publishReplacementBuffer(events: readonly RuntimeEvent[]): void {
+  private publishReplacementBuffer(events: readonly AgentEvent[]): void {
     for (const event of events) {
       // The replacement event already carries the observer's latest cache.
       // Replaying intermediate branch invalidations could regress the new generation.
@@ -1018,7 +1075,7 @@ export class PiRuntimeHost implements RuntimeSession {
     this.staged = undefined;
   }
 
-  private publish(event: RuntimeEvent): void {
+  private publish(event: AgentEvent): void {
     if (event.type === "queue_update") this.queueUpdateSequence += 1;
     for (const subscriber of this.subscribers) {
       try { subscriber(event); } catch { /* isolate Host observers from Pi callbacks */ }
@@ -1032,7 +1089,7 @@ export class PiRuntimeHost implements RuntimeSession {
 
   private assertCleanSettingsBaseline(binding: Binding, setting: SettingKey | "model" | "thinking"): void {
     const failures = projectSettingsErrors(binding.services.settingsManager.drainErrors());
-    if (failures.length > 0) throw new RuntimeSettingsWriteError(setting, "baseline", false, failures);
+    if (failures.length > 0) throw new AgentSettingsWriteError(setting, "baseline", false, failures);
   }
 
   private async persistSettings(binding: Binding, setting: SettingKey | "model" | "thinking"): Promise<void> {
@@ -1040,7 +1097,7 @@ export class PiRuntimeHost implements RuntimeSession {
     try { await binding.services.settingsManager.flush(); }
     catch (error) { failures.push({ scope: "unknown", message: boundedErrorMessage(error) }); }
     failures.push(...projectSettingsErrors(binding.services.settingsManager.drainErrors()));
-    if (failures.length > 0) throw new RuntimeSettingsWriteError(setting, "write", true, failures);
+    if (failures.length > 0) throw new AgentSettingsWriteError(setting, "write", true, failures);
   }
 }
 
@@ -1069,7 +1126,7 @@ function safeImageMimeType(value: unknown): string {
     : "image/unknown";
 }
 
-async function loadPiImages(images: readonly RuntimeImagePath[] | undefined): Promise<PiImageContent[] | undefined> {
+async function loadPiImages(images: readonly AgentImagePath[] | undefined): Promise<PiImageContent[] | undefined> {
   if (images === undefined || images.length === 0) return undefined;
   if (!Array.isArray(images) || images.length > MAX_INPUT_IMAGES) throw new Error(`Image input exceeds ${MAX_INPUT_IMAGES} files`);
   const opened: Array<{ handle: Awaited<ReturnType<typeof open>>; mimeType: string; size: number }> = [];
@@ -1132,12 +1189,12 @@ function safeRequiredText(value: unknown, limit: number, fallback: string): stri
   return safeOptionalText(value, limit) ?? fallback;
 }
 
-function projectAgentSessionEvents(event: AgentSessionEvent): RuntimeEvent[] {
+function projectAgentSessionEvents(event: AgentSessionEvent): AgentEvent[] {
   const source = event as unknown as Record<string, unknown>;
   if (source.type === "agent_message_delta" && isRecord(source.assistantMessageEvent)) {
     const update = source.assistantMessageEvent;
     if ((update.type === "text_delta" || update.type === "thinking_delta") && typeof update.delta === "string" && update.delta.length > 8_000) {
-      const projected: RuntimeEvent[] = [];
+      const projected: AgentEvent[] = [];
       let offset = 0;
       while (offset < update.delta.length) {
         const end = unicodeSafeEnd(update.delta, Math.min(update.delta.length, offset + 8_000));
@@ -1150,7 +1207,7 @@ function projectAgentSessionEvents(event: AgentSessionEvent): RuntimeEvent[] {
   return [projectAgentSessionEvent(source)];
 }
 
-function projectAgentSessionEvent(event: AgentSessionEvent | Record<string, unknown>): RuntimeEvent {
+function projectAgentSessionEvent(event: AgentSessionEvent | Record<string, unknown>): AgentEvent {
   const source = event as unknown as Record<string, unknown>;
   const type = typeof source.type === "string" ? source.type : "unknown";
   if (type === "agent_end") return { type, willRetry: source.willRetry === true };
@@ -1174,7 +1231,7 @@ function projectAgentSessionEvent(event: AgentSessionEvent | Record<string, unkn
     const result = isRecord(source[resultKey]) ? source[resultKey] as Record<string, unknown> : undefined;
     const toolName = typeof source.toolName === "string" ? source.toolName : undefined;
     const isError = type === "tool_execution_end" && source.isError === true;
-    const contentText = safeRequiredText(toolResultText(result?.content), 256_000, "Sensitive tool output omitted");
+    const contentText = safeOptionalText(toolResultText(result?.content), 256_000);
     const content = projectPrivateToolContent(result?.content);
     const presentation = projectBuiltInToolPresentation(toolName, contentText, result?.details, isError);
     return {
@@ -1194,7 +1251,7 @@ function projectAgentSessionEvent(event: AgentSessionEvent | Record<string, unkn
       ...(safeOptionalText(source.errorMessage, 2_048) === undefined ? {} : { errorMessage: safeOptionalText(source.errorMessage, 2_048) }),
     };
   }
-  return source as RuntimeEvent;
+  return source as AgentEvent;
 }
 
 function projectRuntimeMessage(message: Record<string, unknown>): Record<string, unknown> {
@@ -1230,7 +1287,10 @@ function projectPrivateContent(content: unknown): unknown {
   for (const item of content.slice(0, 200)) {
     if (!isRecord(item)) continue;
     if (item.type === "text") blocks.push({ type: "text", text: item.text === "" ? "" : safeRequiredText(item.text, 8_000, "Content unavailable") });
-    else if (item.type === "thinking") blocks.push({ type: "thinking", thinking: safeRequiredText(item.thinking, 8_000, "Sensitive thinking omitted") });
+    else if (item.type === "thinking") {
+      const thinking = safeOptionalText(item.thinking, 8_000);
+      if (thinking !== undefined) blocks.push({ type: "thinking", thinking });
+    }
     else if (item.type === "toolCall" || item.type === "tool_call") blocks.push(projectPrivateToolCall(item));
     else if (item.type === "image") blocks.push({ type: "image", mimeType: safeImageMimeType(item.mimeType) });
   }
@@ -1239,11 +1299,11 @@ function projectPrivateContent(content: unknown): unknown {
 }
 
 function projectPrivateToolContent(content: unknown): unknown {
-  if (typeof content === "string") return safeRequiredText(content, 256_000, "Sensitive tool output omitted");
+  if (typeof content === "string") return boundedString(content, 256_000, "");
   if (!Array.isArray(content)) return [];
   return content.slice(0, 200).flatMap((item): Record<string, unknown>[] => {
     if (!isRecord(item)) return [];
-    if (item.type === "text") return [{ type: "text", text: safeRequiredText(item.text, 256_000, "Sensitive tool output omitted") }];
+    if (item.type === "text" && typeof item.text === "string") return [{ type: "text", text: boundedString(item.text, 256_000, "") }];
     if (item.type === "image") return [{ type: "image", mimeType: safeImageMimeType(item.mimeType) }];
     return [];
   });
@@ -1269,7 +1329,7 @@ function toolResultText(content: unknown): string | undefined {
   return parts.length > 0 ? parts.join("") : undefined;
 }
 
-function projectHistoryEntry(entry: SessionEntry): RuntimeHistoryEntry | undefined {
+function projectHistoryEntry(entry: SessionEntry): AgentHistoryEntry | undefined {
   const base = {
     entryId: entry.id,
     ...(entry.parentId === null ? {} : { parentId: entry.parentId }),
@@ -1288,13 +1348,11 @@ function projectHistoryEntry(entry: SessionEntry): RuntimeHistoryEntry | undefin
       ? projectPrivateToolContent(message.content)
       : projectPrivateContent(message.content);
     if (role === "bashExecution") {
-      const command = safeRequiredText(message.command, 8_000, "Sensitive command omitted");
-      const output = typeof message.output === "string" && message.output.length === 0
-        ? ""
-        : safeRequiredText(message.output, 256_000, "Sensitive output omitted");
+      const command = typeof message.command === "string" ? boundedString(message.command, 8_000, "") : "";
+      const output = typeof message.output === "string" ? boundedString(message.output, 256_000, "") : "";
       content = `! ${command}${output ? `\n${output}` : ""}`;
     } else if (role === "branchSummary" || role === "compactionSummary") {
-      content = safeRequiredText(message.summary, 256_000, "Sensitive summary omitted");
+      content = typeof message.summary === "string" ? boundedString(message.summary, 256_000, "") : "";
     }
     return {
       ...base,
@@ -1331,7 +1389,7 @@ type ConversationSourceBlock =
   | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; omittedFields?: string[] }
   | ConversationOmittedSourceBlock;
 
-function conversationContentBlocks(entry: SessionEntry, projected: RuntimeHistoryEntry): ConversationSourceBlock[] {
+function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryEntry): ConversationSourceBlock[] {
   const omitted = (kind: "image" | "binary", description: string): ConversationOmittedSourceBlock => ({ type: "omitted", kind, description });
   const text = (type: "text" | "thinking", value: unknown): ConversationTextSourceBlock => ({
     type,
@@ -1398,7 +1456,7 @@ function conversationBlockCount(entry: SessionEntry): number {
   return projected === undefined ? 0 : conversationContentBlocks(entry, projected).length;
 }
 
-function conversationPreviewIsComplete(_entry: SessionEntry, _projected: RuntimeHistoryEntry): boolean {
+function conversationPreviewIsComplete(_entry: SessionEntry, _projected: AgentHistoryEntry): boolean {
   // Legacy history was not designed to prove exactness. New clients hydrate via
   // contentRef; never claim a bounded preview is authoritative by inference.
   return false;
@@ -1449,7 +1507,7 @@ function projectTreeNode(
   node: SessionTreeNode,
   parentId: string | undefined,
   depth: number,
-  output: RuntimeTreeNode[],
+  output: AgentTreeNode[],
   toolCalls: ReadonlyMap<string, TreeToolCall>,
 ): void {
   if (output.length >= 100_000) throw new Error("Pi session tree exceeds 100000 entries");
@@ -1466,7 +1524,7 @@ function projectTreeNode(
     entryId: entry.id,
     ...(parentId === undefined ? {} : { parentId }),
     depth,
-    kind: kind as RuntimeTreeNode["kind"],
+    kind: kind as AgentTreeNode["kind"],
     ...(role === undefined ? {} : { role }),
     displayClass,
     ...(state === undefined ? {} : { state }),
@@ -1513,7 +1571,7 @@ function treeMessageRole(value: unknown): "user" | "assistant" | "tool" | "syste
   return "system";
 }
 
-function treeMessageState(message: Record<string, unknown>): RuntimeTreeNode["state"] {
+function treeMessageState(message: Record<string, unknown>): AgentTreeNode["state"] {
   if (message.role === "assistant") {
     if (message.stopReason === "aborted") return "aborted";
     if (message.stopReason === "error" || typeof message.errorMessage === "string") return "error";
@@ -1524,9 +1582,9 @@ function treeMessageState(message: Record<string, unknown>): RuntimeTreeNode["st
 
 function treeDisplayClass(
   entry: SessionEntry,
-  role: RuntimeTreeNode["role"],
-  state: RuntimeTreeNode["state"],
-): NonNullable<RuntimeTreeNode["displayClass"]> {
+  role: AgentTreeNode["role"],
+  state: AgentTreeNode["state"],
+): NonNullable<AgentTreeNode["displayClass"]> {
   if (entry.type === "message") {
     const message = entry.message as unknown as Record<string, unknown>;
     if (role === "tool") return "tool";
@@ -1730,7 +1788,7 @@ function extensionCommandName(text: string): string | undefined {
 type PiTool = (ReturnType<AgentSession["getAllTools"]>)[number];
 interface VisibleToolRef { tool: PiTool; name: string }
 
-function projectVisibleTools(session: AgentSession): RuntimeToolProjection {
+function projectVisibleTools(session: AgentSession): AgentToolProjection {
   const active = new Set(session.getActiveToolNames());
   const selected: VisibleToolRef[] = [];
   let total = 0;
@@ -1844,7 +1902,7 @@ function syncAgentRuntimeSettings(session: AgentSession, settingsManager: Settin
   session.agent.maxRetryDelayMs = settingsManager.getProviderRetrySettings().maxRetryDelayMs;
 }
 
-export async function createPiRuntimeHost(options: CreatePiRuntimeHostOptions): Promise<PiRuntimeHost> {
+export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions): Promise<PiAgentAdapter> {
   const uiContext = options.extensionUiBroker && !options.extensionUiContextPortFactory
     ? createPiExtensionUiContext(options.extensionUiBroker)
     : undefined;
@@ -1878,7 +1936,7 @@ export async function createPiRuntimeHost(options: CreatePiRuntimeHostOptions): 
   const runtime = await createAgentSessionRuntime(createRuntime, {
     cwd: options.cwd, agentDir: options.agentDir, sessionManager,
   });
-  return PiRuntimeHost.create({
+  return PiAgentAdapter.create({
     runtime,
     extensionUiBroker: options.extensionUiBroker,
     uiContext,

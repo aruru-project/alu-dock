@@ -1,5 +1,5 @@
 import type { DiagnosticDto, ResourceDto, SettingValueMap } from "./config-projection.js";
-import type { RuntimeSessionMetrics, RuntimeThinkingLevel } from "./runtime-session.js";
+import type { AgentSessionMetrics, ThinkingLevel } from "./agent-worker.js";
 import type { BuiltInToolPresentation } from "./tool-result-presentation.js";
 
 export type InstanceLifecycle = "active" | "stopping" | "stopped" | "host_lost" | "runtime_error";
@@ -13,7 +13,7 @@ export interface ExecutorIdentity {
   piSessionId: string;
   sessionFile?: string;
   model?: { provider: string; id: string; name?: string };
-  thinkingLevel?: RuntimeThinkingLevel;
+  thinkingLevel?: ThinkingLevel;
 }
 
 export type JsonScalar = string | number | boolean | null;
@@ -129,7 +129,7 @@ export interface TreePageDto {
   truncated: boolean;
   nextAfterEntryId?: string;
 }
-export type SessionMetricsDto = RuntimeSessionMetrics;
+export type SessionMetricsDto = AgentSessionMetrics;
 export interface SessionDto { sessionId: string; sessionFile: string; name?: string; cwd: string; updatedAt?: string }
 export interface SessionCompactionDto { summary: string; firstKeptEntryId: string; tokensBefore: number }
 export type SettingsChangedData = {
@@ -172,8 +172,8 @@ export interface EventDataMap {
   "session.info_changed": { name?: string };
   "session.metrics_changed": { metrics: SessionMetricsDto };
   "git.branch_changed": { branch?: string };
-  "model.changed": { provider: string; id: string; thinkingLevel: RuntimeThinkingLevel; availableThinkingLevels: RuntimeThinkingLevel[] };
-  "thinking.changed": { requested: RuntimeThinkingLevel; thinkingLevel: RuntimeThinkingLevel; availableThinkingLevels: RuntimeThinkingLevel[] };
+  "model.changed": { provider: string; id: string; thinkingLevel: ThinkingLevel; availableThinkingLevels: ThinkingLevel[] };
+  "thinking.changed": { requested: ThinkingLevel; thinkingLevel: ThinkingLevel; availableThinkingLevels: ThinkingLevel[] };
   "resources.reloaded": { resources: ResourceDto[]; diagnostics: DiagnosticDto[] };
   "settings.changed": SettingsChangedData;
   "settings.write_failed": { key: keyof SettingValueMap | "model" | "thinking"; error: string };

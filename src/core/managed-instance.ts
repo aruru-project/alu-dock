@@ -24,12 +24,12 @@ import {
   type InteractionResult,
 } from "./extension-ui-broker.js";
 import {
-  RuntimeCompactionKnownFailureError,
-  RuntimeMutationEffectUnknownError,
-  RuntimeQueueRejectedBeforeEffectError,
-  RuntimeSettingsWriteError,
-  RuntimeUnavailableBeforeEffectError,
-} from "./runtime-session.js";
+  AgentCompactionKnownFailureError,
+  AgentMutationEffectUnknownError,
+  AgentQueueRejectedBeforeEffectError,
+  AgentSettingsWriteError,
+  AgentUnavailableBeforeEffectError,
+} from "./agent-worker.js";
 import type {
   CommandDto,
   DiagnosticDto,
@@ -43,24 +43,31 @@ import type {
 } from "./config-projection.js";
 export type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingKey, SettingUpdate, SettingValueMap, SourceDto, ToolDto } from "./config-projection.js";
 import type {
-  ClearedRuntimeQueue,
-  RuntimeCompactionResult,
-  RuntimeConversationContentChunk,
-  RuntimeEvent,
-  RuntimeForkResult,
-  RuntimeHistoryEntry,
-  RuntimeModelInfo,
-  RuntimeModelState,
-  RuntimeNavigateOptions,
-  RuntimeNavigateResult,
-  RuntimeProjectTrust,
-  RuntimeReplacementResult,
-  RuntimeSession,
-  RuntimeSessionMetrics,
-  RuntimeToolProjection,
-  RuntimeSessionTarget,
-  RuntimeThinkingLevel,
-} from "./runtime-session.js";
+  ClearedAgentQueue,
+  AgentCompactionResult,
+  AgentInvokeOptions,
+  AgentRequest,
+  AgentConversationContentChunk,
+  AgentConversationContentPage,
+  AgentConversationHistoryPage,
+  AgentEvent,
+  AgentForkResult,
+  AgentHistoryEntry,
+  AgentInputKind,
+  AgentModelInfo,
+  AgentModelState,
+  AgentNavigateOptions,
+  AgentNavigateResult,
+  AgentProjectTrust,
+  AgentReplacementResult,
+  AgentWorkerConnection,
+  AgentSessionInfo,
+  AgentSessionMetrics,
+  AgentToolProjection,
+  AgentSessionTarget,
+  AgentTreeSnapshot,
+  ThinkingLevel,
+} from "./agent-worker.js";
 import {
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
@@ -147,7 +154,7 @@ export {
   MAX_PENDING_QUEUE_ITEMS,
   MAX_PENDING_QUEUE_TEXT_CHARS,
 } from "./instance-dto.js";
-import { projectRuntimeNavigateResult, projectRuntimeTree, type ProjectedSessionTree } from "./session-tree.js";
+import { projectAgentNavigateResult, projectRuntimeTree, type ProjectedSessionTree } from "./session-tree.js";
 
 export interface BoundedCollectionProjection<T> {
   items: T[];
@@ -169,7 +176,7 @@ export interface ManagedInstanceOptions {
   key?: string;
   name?: string;
   cwd: string;
-  session: RuntimeSession;
+  session: AgentWorkerConnection;
   executor?: Omit<ExecutorIdentity, "piSessionId" | "sessionFile">;
   eventCapacity?: number;
   now?: () => Date;
@@ -180,6 +187,7 @@ export interface ManagedInstanceOptions {
   createdAt?: string;
   reopenedFrom?: "host_lost" | "runtime_error";
   extensionUiBroker?: ExtensionUiBroker;
+  initialHistory?: AgentHistoryEntry[];
 }
 
 interface AssistantOutcome {
@@ -329,7 +337,7 @@ export class ManagedInstance {
   readonly hostEpoch: string;
   readonly createdAt: string;
 
-  private readonly session: RuntimeSession;
+  private readonly session: AgentWorkerConnection;
   private readonly extensionUi: ExtensionUiBroker;
   private keyValue: string | undefined;
   private nameValue: string | undefined;
@@ -348,7 +356,7 @@ export class ManagedInstance {
   private catalogPort: InstanceCatalogMutationPort | undefined;
   private committedSnapshotValue: InstanceSnapshot | undefined;
   private catalogAdmissionOperationId: string | undefined;
-  private readonly admissionBufferedEvents: RuntimeEvent[] = [];
+  private readonly admissionBufferedEvents: AgentEvent[] = [];
   private admissionBufferOverflow = false;
   private receiptBoundaryOperationId: string | undefined;
   private sessionNameOperationId: string | undefined;
@@ -367,7 +375,7 @@ export class ManagedInstance {
   private hostDrainActive = false;
   private hostDrainPromise: Promise<void> | undefined;
   private runtimeQueueClearAttempted = false;
-  private runtimeClearedQueue: ClearedRuntimeQueue = { steering: [], followUp: [] };
+  private runtimeClearedQueue: ClearedAgentQueue = { steering: [], followUp: [] };
   private runtimeAbortPromise: Promise<void> | undefined;
   private runtimeDisposePromise: Promise<void> | undefined;
   private runtimeGenerationValue = 1;
@@ -437,7 +445,7 @@ export class ManagedInstance {
     this.nameValue = options.name;
     this.cwdValue = options.cwd;
     this.session = options.session;
-    this.gitBranchValue = projectGitBranch(this.session.getGitBranch?.());
+    this.gitBranchValue = projectGitBranch(this.agentState().gitBranch);
     const requestedCapacity = options.eventCapacity ?? 500;
     this.eventCapacity = Number.isFinite(requestedCapacity) && requestedCapacity >= 1
       ? Math.floor(requestedCapacity)
@@ -467,14 +475,14 @@ export class ManagedInstance {
       version: truncate(options.executor?.version, 128),
       model: options.executor?.model ? { provider: truncate(options.executor.model.provider, 256) ?? "unknown", id: truncate(options.executor.model.id, 512) ?? "unknown", name: truncate(options.executor.model.name, 256) } : undefined,
       thinkingLevel: options.executor?.thinkingLevel,
-      piSessionId: truncate(this.session.sessionId, 128) ?? "unknown",
-      sessionFile: truncate(this.session.sessionFile, 16_384),
+      piSessionId: truncate(this.agentState().sessionId, 128) ?? "unknown",
+      sessionFile: truncate(this.agentState().sessionFile, 16_384),
     };
     this.durableSessionFileValue = this.runtimeDurableSessionFile();
-    this.historyValue = this.session.getHistory().map(projectRuntimeHistoryEntry);
-    this.metricsValue = projectRuntimeMetrics(this.session.getMetrics());
+    this.historyValue = (options.initialHistory ?? []).map(projectAgentHistoryEntry);
+    this.metricsValue = projectRuntimeMetrics(this.agentState().metrics);
 
-    this.session.subscribe((event) => this.dispatchRuntimeEvent(event));
+    this.session.subscribe((event) => this.dispatchAgentEvent(event));
 
     if (options.reopenedFrom) {
       const sessionFile = this.executorIdentity.sessionFile;
@@ -496,6 +504,19 @@ export class ManagedInstance {
       emit: (type, data) => this.enqueueExtensionUiEvent(type, data),
       projectionChanged: () => this.syncExtensionUiProjection(),
     });
+  }
+
+  private agentState() { return this.session.state(); }
+
+  private invokeAgent<T>(type: AgentRequest["type"], params: Record<string, unknown>, options?: AgentInvokeOptions): Promise<T> {
+    const requestId = typeof params.operationId === "string" ? params.operationId : randomUUID();
+    const request = { kind: "request", version: 2, requestId, type, params: { instanceId: this.id, ...params } } as AgentRequest;
+    return this.session.invoke(request, options) as Promise<T>;
+  }
+
+  private classifyAgentInput(text: string): AgentInputKind {
+    const match = /^\/([^\s]+)/u.exec(text);
+    return match?.[1] && this.agentState().extensionCommands.includes(match[1]) ? "extension_command" : "prompt";
   }
 
   snapshot(): InstanceSnapshot {
@@ -751,7 +772,7 @@ export class ManagedInstance {
 
   reportControlDegradation(message: string): Promise<DockEvent> {
     return this.enqueueTransition(async () => cloneDockEvent(this.appendEvent("extension.error", {
-      error: safeWireText(message, 2_048, "Control stream degraded"),
+      error: safeWireText(message, 2_048),
     })));
   }
 
@@ -810,25 +831,25 @@ export class ManagedInstance {
   }
 
   synchronizeModelState(): void {
-    this.applyModelState(this.session.getModelState());
+    this.applyModelState(this.agentState().modelState);
   }
 
-  async listModels(): Promise<{ models: RuntimeModelInfo[]; state: RuntimeModelState; total: number; truncated: boolean }> {
+  async listModels(): Promise<{ models: AgentModelInfo[]; state: AgentModelState; total: number; truncated: boolean }> {
     return this.withProjectionRead(async () => {
-      const source = (await this.session.listModels()).map((model) => ({
+      const source = (await this.invokeAgent<AgentModelInfo[]>("model.list", {})).map((model) => ({
         ...model,
         provider: truncate(model.provider, 256) ?? "unknown",
         id: truncate(model.id, 512) ?? "unknown",
         name: truncate(model.name, 256) ?? "unknown",
       }));
       const projected = boundedCollectionProjection(source);
-      return { models: projected.items, state: this.session.getModelState(), total: projected.total, truncated: projected.truncated };
+      return { models: projected.items, state: this.agentState().modelState, total: projected.total, truncated: projected.truncated };
     });
   }
 
   async listSessions(scope: "cwd" | "all"): Promise<{ sessions: SessionDto[]; total: number; truncated: boolean }> {
     return this.withProjectionRead(async () => {
-      const source = (await this.session.listSessions(scope)).map((session) => ({
+      const source = (await this.invokeAgent<AgentSessionInfo[]>("session.list", { scope })).map((session) => ({
         sessionId: truncate(session.sessionId, 128) ?? "unknown",
         sessionFile: truncate(session.sessionFile, 16_384) ?? "",
         ...(session.name === undefined ? {} : { name: truncate(session.name, 256) ?? "" }),
@@ -847,9 +868,8 @@ export class ManagedInstance {
   async getConversationHistory(cursor?: string, limit = 50): Promise<ConversationHistoryPageDto> {
     return this.withProjectionRead(async () => {
       this.assertActive();
-      if (!this.session.getConversationHistory) throw new Error("Runtime does not support complete conversation history");
       const generation = this.runtimeGenerationValue;
-      const page = await this.session.getConversationHistory(cursor, limit);
+      const page = await this.invokeAgent<AgentConversationHistoryPage>("conversation.history", { ...(cursor === undefined ? {} : { cursor }), limit });
       if (generation !== this.runtimeGenerationValue) throw new StaleRuntimeGenerationError(generation, this.runtimeGenerationValue);
       return {
         instance: this.snapshot(),
@@ -869,9 +889,8 @@ export class ManagedInstance {
   async getConversationContent(contentRef: string, cursor?: string): Promise<ConversationContentPageDto> {
     return this.withProjectionRead(async () => {
       this.assertActive();
-      if (!this.session.getConversationContent) throw new Error("Runtime does not support complete conversation content");
       const generation = this.runtimeGenerationValue;
-      const page = await this.session.getConversationContent(contentRef, cursor);
+      const page = await this.invokeAgent<AgentConversationContentPage>("conversation.content", { contentRef, ...(cursor === undefined ? {} : { cursor }) });
       if (generation !== this.runtimeGenerationValue) throw new StaleRuntimeGenerationError(generation, this.runtimeGenerationValue);
       const chunks = page.chunks.map(projectRuntimeConversationChunk);
       if (Buffer.byteLength(JSON.stringify(chunks), "utf8") > 512 * 1024) throw new Error("Runtime returned an oversized conversation content page");
@@ -896,7 +915,9 @@ export class ManagedInstance {
       if ((treeRevision === undefined) !== (afterEntryId === undefined)) {
         throw new InvalidTreeCursorError("Tree continuation requires both treeRevision and afterEntryId");
       }
-      const tree = this.currentTreeProjection(treeRevision === undefined);
+      const tree = treeRevision === undefined || this.treeProjectionCache === undefined
+        ? await this.refreshTreeProjectionFromAgent()
+        : this.currentTreeProjection();
       if (treeRevision !== undefined && treeRevision !== tree.treeRevision) throw new InvalidTreeCursorError();
       let start = 0;
       if (afterEntryId !== undefined) {
@@ -921,30 +942,32 @@ export class ManagedInstance {
   async navigateSession(
     operationId: string,
     targetId: string,
-    options: RuntimeNavigateOptions = {},
-  ): Promise<RuntimeNavigateResult> {
+    options: AgentNavigateOptions = {},
+  ): Promise<AgentNavigateResult> {
     let configurationStarted = false;
     let runtimeCalled = false;
     try {
       await this.beginConfiguration("navigating the session tree", { kind: "navigation" });
       configurationStarted = true;
-      if (!this.session.navigateTree) throw new Error("Runtime does not support session tree navigation");
-      if (!this.currentTreeProjection(true).nodes.some((node) => node.entryId === targetId)) {
+      if (!(await this.refreshTreeProjectionFromAgent()).nodes.some((node) => node.entryId === targetId)) {
         throw new InvalidTreeCursorError("Navigation target does not belong to the current session tree");
       }
       this.receiptBoundaryOperationId = operationId;
       runtimeCalled = true;
-      const pending = this.session.navigateTree(targetId, cloneJson(options));
+      const pending = this.invokeAgent<AgentNavigateResult>("session.navigate", { operationId, targetId, ...cloneJson(options) });
       this.resolveNavigationStarted?.();
-      const result = projectRuntimeNavigateResult(await pending);
+      const result = projectAgentNavigateResult(await pending);
       await this.closeRuntimeOperationBoundary(operationId);
+      if (!result.cancelled) {
+        await this.refreshHistory();
+        await this.refreshTreeProjectionFromAgent();
+      }
       if (result.cancelled) return result;
-      const tree = this.currentTreeProjection(true);
+      const tree = this.currentTreeProjection();
       await this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "session.navigate", effect: "post_effect", operationId, instanceId: this.id },
         () => this.touch(),
         () => {
-          this.refreshHistory();
           this.refreshMetrics();
           this.appendEvent("session.navigated", {
             targetId,
@@ -982,7 +1005,7 @@ export class ManagedInstance {
           this.historyValue,
           instance,
           sourcePage.truncated,
-          this.session.isStreaming,
+          this.agentState().isStreaming,
         ) }
         : replayPurpose === "legacy_history_overlay"
           ? { ...sourcePage, events: reconcileConversationEventsWithHistory(sourcePage.events, this.historyValue) }
@@ -1001,20 +1024,20 @@ export class ManagedInstance {
   }
 
   async listTools(): Promise<{ tools: ToolDto[]; total: number; truncated: boolean }> {
-    return this.withProjectionRead(async () => boundedRuntimeToolProjection(await this.session.listTools()));
+    return this.withProjectionRead(async () => boundedAgentToolProjection(await this.invokeAgent<ToolDto[] | AgentToolProjection>("tool.list", {})));
   }
 
   async setActiveTools(names: string[], operationId = this.createCommandId()): Promise<{ tools: ToolDto[]; total: number; truncated: boolean }> {
     await this.beginConfiguration("changing active tools", { admission: "live" });
     try {
-      const projected = boundedRuntimeToolProjection(await this.session.setActiveTools([...names]));
+      const projected = boundedAgentToolProjection(await this.invokeAgent<ToolDto[] | AgentToolProjection>("tool.set_active", { operationId, names: [...names] }));
       await this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "tool.set_active", effect: "post_effect", operationId, instanceId: this.id },
         () => this.touch(),
       ));
       return projected;
     } catch (error) {
-      if (error instanceof RuntimeMutationEffectUnknownError) throw new RuntimeEffectUnknownError(operationId, error);
+      if (error instanceof AgentMutationEffectUnknownError) throw new RuntimeEffectUnknownError(operationId, error);
       throw error;
     } finally {
       this.endConfiguration();
@@ -1022,13 +1045,13 @@ export class ManagedInstance {
   }
 
   async getSettings(): Promise<SettingDto[]> {
-    return this.withProjectionRead(async () => cloneJson(await this.session.getSettings()));
+    return this.withProjectionRead(async () => cloneJson(await this.invokeAgent<SettingDto[]>("settings.get", {})));
   }
 
   async updateSetting(update: SettingUpdate, operationId = this.createCommandId()): Promise<SettingDto> {
     await this.beginConfiguration(`changing ${update.key}`, { admission: settingAdmission(update.key) });
     try {
-      const setting = cloneJson(await this.session.updateSetting(cloneJson(update)));
+      const setting = cloneJson(await this.invokeAgent<SettingDto>("settings.update", { operationId, update: cloneJson(update) }));
       await this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "settings.update", effect: "post_effect", operationId, instanceId: this.id },
         () => this.touch(),
@@ -1036,10 +1059,10 @@ export class ManagedInstance {
       ));
       return setting;
     } catch (error) {
-      if (error instanceof RuntimeMutationEffectUnknownError) throw new RuntimeEffectUnknownError(operationId, error);
-      if (error instanceof RuntimeSettingsWriteError) {
+      if (error instanceof AgentMutationEffectUnknownError) throw new RuntimeEffectUnknownError(operationId, error);
+      if (error instanceof AgentSettingsWriteError) {
         if (error.mutationApplied && error.setting !== "model" && error.setting !== "thinking") {
-          const current = await this.session.getSettings().catch(() => undefined);
+          const current = await this.invokeAgent<SettingDto[]>("settings.get", {}).catch(() => undefined);
           const setting = current?.find((candidate) => candidate.key === error.setting);
           await this.enqueueTransition(() => this.commitCatalogTransition(
             { kind: "settings.update", effect: "post_effect", operationId, instanceId: this.id },
@@ -1061,7 +1084,7 @@ export class ManagedInstance {
 
   async getResources(): Promise<ManagedResourceProjection> {
     return this.withProjectionRead(async () => {
-      const result = cloneJson(await this.session.getResources());
+      const result = cloneJson(await this.invokeAgent<{ resources: ResourceDto[]; diagnostics: DiagnosticDto[]; resourceTotal?: number; resourcesTruncated?: boolean; diagnosticTotal?: number; diagnosticsTruncated?: boolean }>("resource.get", {}));
       const resources = boundedCollectionProjection(result.resources, 350_000);
       const diagnostics = boundedCollectionProjection(result.diagnostics, 200_000);
       const resourceTotal = result.resourceTotal ?? resources.total;
@@ -1079,57 +1102,54 @@ export class ManagedInstance {
 
   async getCommands(prefix?: string): Promise<{ commands: CommandDto[]; total: number; truncated: boolean }> {
     return this.withProjectionRead(async () => {
-      const commands = cloneJson(await this.session.getCommands())
+      const commands = cloneJson(await this.invokeAgent<CommandDto[]>("command.catalog", {}))
         .filter((command) => prefix === undefined || command.name.startsWith(prefix));
       const projected = boundedCollectionProjection(commands);
       return { commands: projected.items, total: projected.total, truncated: projected.truncated };
     });
   }
 
-  async resolveSessionTarget(sessionFile: string): Promise<RuntimeSessionTarget> {
+  async resolveSessionTarget(sessionFile: string): Promise<AgentSessionTarget> {
     return this.withProjectionRead(async () => {
-      if (!this.session.resolveSessionTarget) throw new Error("Runtime does not support session target resolution");
-      return cloneJson(await this.session.resolveSessionTarget(sessionFile));
+      return cloneJson(await this.session.control({ type: "resolve_session_target", sessionFile }) as AgentSessionTarget);
     });
   }
 
-  async newSession(operationId: string, parentSession?: string): Promise<RuntimeReplacementResult> {
+  async newSession(operationId: string, parentSession?: string): Promise<AgentReplacementResult> {
     return this.replaceRuntime("creating a new session", operationId, "new", {}, async () => {
-      if (!this.session.newSession) throw new Error("Runtime does not support session replacement");
-      return this.session.newSession(operationId, parentSession);
+      return this.invokeAgent<AgentReplacementResult>("session.new", { operationId, ...(parentSession === undefined ? {} : { parentSession }) });
     });
   }
 
   async switchSession(
     operationId: string,
     sessionFile: string,
-    trust: RuntimeProjectTrust,
-  ): Promise<RuntimeReplacementResult> {
+    trust: AgentProjectTrust,
+  ): Promise<AgentReplacementResult> {
     return this.replaceRuntime("switching session", operationId, "switch", { requestedSessionFile: sessionFile }, async () => {
-      if (!this.session.switchSession) throw new Error("Runtime does not support session replacement");
-      return this.session.switchSession(operationId, sessionFile, trust);
+      return this.invokeAgent<AgentReplacementResult>("session.switch", { operationId, sessionFile }, {
+        context: { type: "session_switch", canonicalCwd: trust.canonicalCwd, projectTrusted: trust.projectTrusted },
+      });
     });
   }
 
-  async forkSession(operationId: string, entryId: string): Promise<RuntimeForkResult> {
-    if (!this.session.fork) throw new Error("Runtime does not support session forking");
+  async forkSession(operationId: string, entryId: string): Promise<AgentForkResult> {
     return this.replaceRuntime("forking session", operationId, "fork", { requestedEntryId: entryId }, async () => (
-      this.session.fork!(operationId, entryId, "before", "fork")
-    ), () => {
-      const target = this.currentTreeProjection(true).nodes.find((node) => node.entryId === entryId);
+      this.invokeAgent<AgentForkResult>("session.fork", { operationId, entryId })
+    ), async () => {
+      const target = (await this.refreshTreeProjectionFromAgent()).nodes.find((node) => node.entryId === entryId);
       if (target?.kind !== "message" || target.role !== "user") {
         throw new InvalidTreeCursorError("Fork target must be a user message in the current session tree");
       }
     });
   }
 
-  async cloneSession(operationId: string, entryId: string): Promise<RuntimeReplacementResult> {
-    if (!this.session.fork) throw new Error("Runtime does not support session cloning");
+  async cloneSession(operationId: string, entryId: string): Promise<AgentReplacementResult> {
     return this.replaceRuntime("cloning session", operationId, "clone", { requestedEntryId: entryId }, async () => {
-      const result = await this.session.fork!(operationId, entryId, "at", "clone");
+      const result = await this.invokeAgent<AgentForkResult>("session.clone", { operationId, entryId });
       return { cancelled: result.cancelled };
-    }, () => {
-      const tree = this.currentTreeProjection(true);
+    }, async () => {
+      const tree = await this.refreshTreeProjectionFromAgent();
       if (tree.leafId !== entryId) throw new InvalidTreeCursorError("Clone entry must be the current session leaf");
     });
   }
@@ -1138,11 +1158,10 @@ export class ManagedInstance {
     await this.beginConfiguration("naming the session", { admission: "live" });
     let runtimeCalled = false;
     try {
-      if (!this.session.setSessionName) throw new Error("Runtime does not support session naming");
       this.sessionNameOperationId = operationId;
       this.receiptBoundaryOperationId = operationId;
       runtimeCalled = true;
-      const actualName = await this.session.setSessionName(name);
+      const actualName = await this.invokeAgent<string | undefined>("session.name", { operationId, name });
       await this.closeRuntimeOperationBoundary(operationId);
       if (this.nameValue !== actualName) throw new Error("Runtime completed session naming without publishing session_info_changed");
     } catch (error) {
@@ -1159,11 +1178,10 @@ export class ManagedInstance {
     await this.beginConfiguration("compacting the session", { admission: "run_preempting", kind: "compaction" });
     let runtimeCalled = false;
     try {
-      if (!this.session.compact) throw new Error("Runtime does not support compaction");
       this.compactionRequestOperationId = operationId;
       this.receiptBoundaryOperationId = operationId;
       runtimeCalled = true;
-      const result = projectCompactionResult(await this.session.compact(customInstructions));
+      const result = projectCompactionResult(await this.invokeAgent<AgentCompactionResult>("session.compact", { operationId, ...(customInstructions === undefined ? {} : { customInstructions }) }));
       await this.closeRuntimeOperationBoundary(operationId);
       return result;
     } catch (error) {
@@ -1176,10 +1194,9 @@ export class ManagedInstance {
     }
   }
 
-  async reloadSession(operationId: string): Promise<RuntimeReplacementResult> {
+  async reloadSession(operationId: string): Promise<AgentReplacementResult> {
     const result = await this.replaceRuntime("reloading resources", operationId, "reload", {}, async () => {
-      if (!this.session.reload) throw new Error("Runtime does not support reload");
-      return this.session.reload(operationId);
+      return this.invokeAgent<AgentReplacementResult>("session.reload", { operationId });
     });
     if (!result.cancelled) {
       const projected = await this.getResources();
@@ -1195,10 +1212,10 @@ export class ManagedInstance {
     return result;
   }
 
-  async selectModel(provider: string, modelId: string, operationId = this.createCommandId()): Promise<RuntimeModelState> {
+  async selectModel(provider: string, modelId: string, operationId = this.createCommandId()): Promise<AgentModelState> {
     await this.beginConfiguration("switching model", { admission: "live" });
     try {
-      const state = await this.session.selectModel(provider, modelId);
+      const state = await this.invokeAgent<AgentModelState>("model.set", { operationId, provider, modelId });
       await this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "model.set", effect: "post_effect", operationId, instanceId: this.id },
         () => { this.applyModelState(state); this.touch(); },
@@ -1206,10 +1223,10 @@ export class ManagedInstance {
       ));
       return state;
     } catch (error) {
-      if (error instanceof RuntimeMutationEffectUnknownError) throw new RuntimeEffectUnknownError(operationId, error);
-      if (error instanceof RuntimeSettingsWriteError) {
+      if (error instanceof AgentMutationEffectUnknownError) throw new RuntimeEffectUnknownError(operationId, error);
+      if (error instanceof AgentSettingsWriteError) {
         if (error.mutationApplied) {
-          const state = this.session.getModelState();
+          const state = this.agentState().modelState;
           await this.enqueueTransition(() => this.commitCatalogTransition(
             { kind: "model.set", effect: "post_effect", operationId, instanceId: this.id },
             () => { this.applyModelState(state); this.touch(); },
@@ -1225,10 +1242,10 @@ export class ManagedInstance {
     }
   }
 
-  async setThinkingLevel(level: RuntimeThinkingLevel, operationId = this.createCommandId()): Promise<RuntimeModelState> {
+  async setThinkingLevel(level: ThinkingLevel, operationId = this.createCommandId()): Promise<AgentModelState> {
     await this.beginConfiguration("changing thinking level", { admission: "live" });
     try {
-      const state = await this.session.setThinkingLevel(level);
+      const state = await this.invokeAgent<AgentModelState>("thinking.set", { operationId, level });
       await this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "thinking.set", effect: "post_effect", operationId, instanceId: this.id },
         () => { this.applyModelState(state); this.touch(); },
@@ -1236,10 +1253,10 @@ export class ManagedInstance {
       ));
       return state;
     } catch (error) {
-      if (error instanceof RuntimeMutationEffectUnknownError) throw new RuntimeEffectUnknownError(operationId, error);
-      if (error instanceof RuntimeSettingsWriteError) {
+      if (error instanceof AgentMutationEffectUnknownError) throw new RuntimeEffectUnknownError(operationId, error);
+      if (error instanceof AgentSettingsWriteError) {
         if (error.mutationApplied) {
-          const state = this.session.getModelState();
+          const state = this.agentState().modelState;
           await this.enqueueTransition(() => this.commitCatalogTransition(
             { kind: "thinking.set", effect: "post_effect", operationId, instanceId: this.id },
             () => { this.applyModelState(state); this.touch(); },
@@ -1266,7 +1283,7 @@ export class ManagedInstance {
     const compacting = this.runtimeCompactionInProgress();
     const manualCompactionPending = this.manualCompactionAdmissionActive();
     const hostQueueCustody = this.hostQueueCustodyActive();
-    if (this.session.classifyInput(message) === "extension_command") {
+    if (this.classifyAgentInput(message) === "extension_command") {
       if (inputImages.length > 0) throw new Error("Registered extension commands do not accept image attachments");
       if (this.commandAbortPending || this.queueMutationPending || (this.configurationPending && !compacting)) {
         throw new InstanceBusyError(this.id, "submitting an extension command");
@@ -1280,7 +1297,7 @@ export class ManagedInstance {
     // A queued compaction_end may leave the catalog projection momentarily
     // running+compacting after Pi has already become idle. Do not route that
     // bounded transition window back through streamingBehavior.
-    const running = this.session.isStreaming || (this.state.execution === "running" && !this.state.compacting);
+    const running = this.agentState().isStreaming || (this.state.execution === "running" && !this.state.compacting);
     const resolvedDelivery = resolveDelivery(delivery, running);
     const streamingBehavior = resolvedDelivery === "steer" || resolvedDelivery === "followUp"
       ? resolvedDelivery
@@ -1337,7 +1354,7 @@ export class ManagedInstance {
     const rejectBeforeRun = async (error: unknown, reason: string): Promise<void> => {
       if (preflightStatus === "accepted" || (preflightStatus === "rejected" && receiptSettled)) return;
       preflightStatus = "rejected";
-      const messageText = safeWireText(errorMessage(error), 2_048, "Sensitive command error omitted");
+      const messageText = safeWireText(errorMessage(error), 2_048);
       try {
         const transition = this.enqueueTransition(() => this.commitCatalogTransition(
           { kind: "command.rejected", effect: "post_effect", operationId: commandId, instanceId: this.id },
@@ -1352,7 +1369,7 @@ export class ManagedInstance {
           },
         ));
         this.catalogAdmissionOperationId = undefined;
-        const bufferedEvents = this.flushAdmissionRuntimeEvents();
+        const bufferedEvents = this.flushAdmissionAgentEvents();
         await Promise.all([transition, bufferedEvents]);
       } catch (commitError) {
         error = commitError;
@@ -1379,15 +1396,15 @@ export class ManagedInstance {
       preflightStatus = "accepted";
       // Pi re-checks isStreaming only after asynchronous extension input hooks.
       // Queue and fresh-prompt events are serialized behind this accepted commit.
-      let precedingRuntimeEvents = Promise.resolve();
-      if (streamingBehavior !== undefined && !this.session.isStreaming) {
+      let precedingAgentEvents = Promise.resolve();
+      if (streamingBehavior !== undefined && !this.agentState().isStreaming) {
         actualDelivery = "prompt";
         actuallyQueued = false;
         // Events buffered while asynchronous input hooks were running belong
         // to the run that just settled. Commit them before assigning the fresh
         // prompt's operation ID so the old settlement cannot clear the new run.
         this.catalogAdmissionOperationId = undefined;
-        precedingRuntimeEvents = this.flushAdmissionRuntimeEvents();
+        precedingAgentEvents = this.flushAdmissionAgentEvents();
       }
 
       const acceptedAt = this.timestamp();
@@ -1396,7 +1413,7 @@ export class ManagedInstance {
           queueItemId: randomUUID(),
           operationId: commandId,
           delivery: actualDelivery === "followUp" ? "followUp" : "steer",
-          text: safeWireText(message, MAX_PENDING_QUEUE_TEXT_CHARS, "Queued message omitted"),
+          text: safeWireText(message, MAX_PENDING_QUEUE_TEXT_CHARS),
           ...(inputImages.length === 0 ? {} : { images: cloneInputImages(inputImages) }),
           acceptedAt,
           phase: "runtime_queued",
@@ -1428,10 +1445,10 @@ export class ManagedInstance {
           this.appendStateEvent("command_accepted", acceptedAt);
         },
       ));
-      preflightTransition = Promise.all([precedingRuntimeEvents, acceptedTransition]).then(() => {});
+      preflightTransition = Promise.all([precedingAgentEvents, acceptedTransition]).then(() => {});
       this.catalogAdmissionOperationId = undefined;
       this.receiptBoundaryOperationId = commandId;
-      const bufferedEvents = this.flushAdmissionRuntimeEvents();
+      const bufferedEvents = this.flushAdmissionAgentEvents();
       preflightTransition = Promise.all([preflightTransition, bufferedEvents]).then(async () => {
         // Pi may emit queue/agent_start synchronously immediately after the
         // callback returns. Include those ordered transitions in the receipt boundary.
@@ -1491,7 +1508,7 @@ export class ManagedInstance {
         return receipt;
       } catch (error) {
         this.catalogAdmissionOperationId = undefined;
-        await this.flushAdmissionRuntimeEvents().catch(() => {});
+        await this.flushAdmissionAgentEvents().catch(() => {});
         release();
         throw error;
       }
@@ -1499,12 +1516,12 @@ export class ManagedInstance {
 
     let runtimePromise: Promise<void>;
     try {
-      runtimePromise = this.session.prompt(message, {
-        streamingBehavior,
+      runtimePromise = this.invokeAgent<void>("command.submit", {
+        operationId: commandId,
+        message,
         ...(inputImages.length === 0 ? {} : { images: cloneInputImages(inputImages) }),
-        source: "rpc",
-        preflightResult: onPreflight,
-      });
+        delivery: streamingBehavior ?? "prompt",
+      }, { preflightResult: onPreflight });
     } catch (error) {
       await rejectBeforeRun(error, "prompt_threw_before_preflight");
       return receiptPromise;
@@ -1521,7 +1538,7 @@ export class ManagedInstance {
         && this.state.lifecycle === "active"
         && this.state.execution === "running"
         && this.agentStartCount === agentStartsBeforeCommand
-        && !this.session.isStreaming
+        && !this.agentState().isStreaming
         && !this.runtimeCompactionInProgress()
         && !this.state.compacting
       ) {
@@ -1546,11 +1563,11 @@ export class ManagedInstance {
         ));
       }
     }).catch(async (error: unknown) => {
-      const messageText = safeWireText(errorMessage(error), 2_048, "Sensitive command error omitted");
+      const messageText = safeWireText(errorMessage(error), 2_048);
       if (preflightStatus !== "accepted") {
-        if (error instanceof RuntimeMutationEffectUnknownError) {
+        if (error instanceof AgentMutationEffectUnknownError) {
           this.catalogAdmissionOperationId = undefined;
-          await this.flushAdmissionRuntimeEvents().catch(() => {});
+          await this.flushAdmissionAgentEvents().catch(() => {});
           if (!receiptSettled) { receiptSettled = true; rejectReceipt(new RuntimeEffectUnknownError(commandId, error)); }
           release();
           return;
@@ -1603,7 +1620,7 @@ export class ManagedInstance {
   }
 
   private runtimeCompactionInProgress(): boolean {
-    return this.runtimeCompactingObserved || this.session.isCompacting;
+    return this.runtimeCompactingObserved || this.agentState().isCompacting;
   }
 
   private manualCompactionAdmissionActive(): boolean {
@@ -1660,7 +1677,7 @@ export class ManagedInstance {
       return await this.completeCompactionDeferredAdmission(message, resolvedDelivery, operationId, images);
     } catch (error) {
       this.catalogAdmissionOperationId = undefined;
-      await this.flushAdmissionRuntimeEvents().catch(() => {});
+      await this.flushAdmissionAgentEvents().catch(() => {});
       throw error;
     } finally {
       if (this.pendingAdmission?.token === admissionToken) {
@@ -1681,7 +1698,7 @@ export class ManagedInstance {
       queueItemId: randomUUID(),
       operationId,
       delivery: resolvedDelivery,
-      text: safeWireText(message, MAX_PENDING_QUEUE_TEXT_CHARS, "Queued message omitted"),
+      text: safeWireText(message, MAX_PENDING_QUEUE_TEXT_CHARS),
       ...(images.length === 0 ? {} : { images: cloneInputImages(images) }),
       acceptedAt,
       phase: "host_deferred",
@@ -1717,7 +1734,7 @@ export class ManagedInstance {
       },
     ));
     this.catalogAdmissionOperationId = undefined;
-    await this.flushAdmissionRuntimeEvents();
+    await this.flushAdmissionAgentEvents();
     if (!this.runtimeCompactionInProgress() && !this.manualCompactionAdmissionActive()) {
       this.scheduleCompactionQueueDrain(false);
     }
@@ -1754,7 +1771,7 @@ export class ManagedInstance {
       .then((mayRearm) => { rearmAfterDrain = mayRearm; })
       .catch(async (error: unknown) => {
         if (this.hostDrainActive || this.runtimeGenerationValue !== generation || this.state.lifecycle !== "active") return;
-        const text = safeWireText(errorMessage(error), 2_048, "Deferred queue dispatch failed");
+        const text = safeWireText(errorMessage(error), 2_048);
         await this.enqueueTransition(async () => {
           if (this.hostDrainActive || this.runtimeGenerationValue !== generation || this.state.lifecycle !== "active") return;
           this.appendEvent("instance.error", { source: "command_background", error: text });
@@ -1815,12 +1832,17 @@ export class ManagedInstance {
     item.phase = "dispatching";
     if (forceRuntimeQueue) {
       try {
-        await this.session.queueMessage(item.originalText ?? item.text, item.delivery, item.images);
+        await this.invokeAgent<void>("command.submit", {
+          operationId: item.operationId,
+          message: item.originalText ?? item.text,
+          ...(item.images === undefined ? {} : { images: cloneInputImages(item.images) }),
+          delivery: item.delivery,
+        }, { context: { type: "force_queue" } });
         item.phase = "runtime_queued";
         await this.transitionTail;
         return true;
       } catch (error) {
-        if (error instanceof RuntimeQueueRejectedBeforeEffectError) {
+        if (error instanceof AgentQueueRejectedBeforeEffectError) {
           item.phase = "host_deferred";
         } else {
           // Generic adapter errors are conservative: absence of a projected
@@ -1850,7 +1872,7 @@ export class ManagedInstance {
         return;
       }
       preflightStatus = "accepted";
-      if (this.session.isStreaming) {
+      if (this.agentState().isStreaming) {
         // Pi has accepted the item into its per-session queue. Its queue_update
         // event remains authoritative for counts and text-hash reconciliation.
         item.phase = "runtime_queued";
@@ -1866,12 +1888,12 @@ export class ManagedInstance {
 
     let runtimePromise: Promise<void>;
     try {
-      runtimePromise = this.session.prompt(item.originalText ?? item.text, {
-        streamingBehavior: item.delivery,
+      runtimePromise = this.invokeAgent<void>("command.submit", {
+        operationId: item.operationId,
+        message: item.originalText ?? item.text,
         ...(item.images === undefined ? {} : { images: cloneInputImages(item.images) }),
-        source: "rpc",
-        preflightResult: onPreflight,
-      });
+        delivery: item.delivery,
+      }, { preflightResult: onPreflight });
     } catch (error) {
       onPreflight(false);
       await this.reportDeferredDispatchFailure(item, error, generation);
@@ -1885,7 +1907,7 @@ export class ManagedInstance {
         item.phase === "fresh_in_flight"
         && this.runtimeGenerationValue === generation
         && this.agentStartCount === agentStartsBefore
-        && !this.session.isStreaming
+        && !this.agentState().isStreaming
       ) {
         if (this.nextAgentStartOperationId === item.operationId) this.nextAgentStartOperationId = undefined;
         if (this.nextAgentStartBoundary?.operationId === item.operationId) {
@@ -1926,7 +1948,7 @@ export class ManagedInstance {
       // in-flight and never retry automatically or advance later FIFO items
       // past an ambiguous dispatch.
       dispatchMayContinue = false;
-      if (this.nextAgentStartOperationId === item.operationId && !this.session.isStreaming) {
+      if (this.nextAgentStartOperationId === item.operationId && !this.agentState().isStreaming) {
         this.nextAgentStartOperationId = undefined;
       }
       if (this.nextAgentStartBoundary?.operationId === item.operationId) {
@@ -1954,7 +1976,7 @@ export class ManagedInstance {
     generation: number,
   ): Promise<void> {
     if (this.hostDrainActive || this.runtimeGenerationValue !== generation || this.state.lifecycle !== "active") return;
-    const text = safeWireText(errorMessage(error), 2_048, "Deferred queue dispatch failed");
+    const text = safeWireText(errorMessage(error), 2_048);
     await this.enqueueTransition(async () => {
       // Replacement can commit while an old Pi Promise is settling. The old
       // generation may resolve local waiters, but it cannot publish into the
@@ -1988,8 +2010,8 @@ export class ManagedInstance {
         () => {},
       ));
       this.catalogAdmissionOperationId = undefined;
-      await this.flushAdmissionRuntimeEvents();
-      if (this.session.classifyInput(message) !== "extension_command") {
+      await this.flushAdmissionAgentEvents();
+      if (this.classifyAgentInput(message) !== "extension_command") {
         const error = new Error("Registered extension command changed during admission");
         const rejectedAt = this.timestamp();
         await this.enqueueTransition(() => this.commitCatalogTransition(
@@ -2027,14 +2049,14 @@ export class ManagedInstance {
 
       const runtimeGeneration = this.runtimeGenerationValue;
       const agentStartsBeforeCommand = this.agentStartCount;
-      const parentRunning = this.state.execution === "running" || this.session.isStreaming;
+      const parentRunning = this.state.execution === "running" || this.agentState().isStreaming;
       if (!parentRunning) {
         this.extensionCommandInitiator = { operationId: commandId, runtimeGeneration, agentStartCount: agentStartsBeforeCommand };
       }
 
       let runtimePromise: Promise<void>;
       try {
-        runtimePromise = this.session.prompt(message, { source: "rpc" });
+        runtimePromise = this.invokeAgent<void>("command.submit", { operationId: commandId, message, delivery: "prompt" });
       } catch (error) {
         runtimePromise = Promise.reject(error);
       }
@@ -2043,7 +2065,7 @@ export class ManagedInstance {
         await this.transitionTail;
         if (this.runtimeGenerationValue !== runtimeGeneration || this.state.lifecycle !== "active") return;
         const commandStartedRun = this.agentStartCount > agentStartsBeforeCommand
-          || (!parentRunning && this.session.isStreaming);
+          || (!parentRunning && this.agentState().isStreaming);
         if (this.extensionCommandInitiator?.operationId === commandId) this.extensionCommandInitiator = undefined;
         if (commandStartedRun) return;
         await this.enqueueTransition(() => this.commitCatalogTransition(
@@ -2060,7 +2082,7 @@ export class ManagedInstance {
         if (this.catalogPort) {
           try { this.catalogPort.assertWritable(); } catch { return; }
         }
-        const messageText = safeWireText(errorMessage(error), 2_048, "Sensitive command error omitted");
+        const messageText = safeWireText(errorMessage(error), 2_048);
         await this.enqueueTransition(async () => {
           this.appendEvent("instance.error", { operationId: commandId, source: "command_background", error: messageText });
         });
@@ -2083,7 +2105,7 @@ export class ManagedInstance {
       };
     } catch (error) {
       this.catalogAdmissionOperationId = undefined;
-      void this.flushAdmissionRuntimeEvents().catch(() => {});
+      void this.flushAdmissionAgentEvents().catch(() => {});
       release();
       throw error;
     }
@@ -2111,7 +2133,7 @@ export class ManagedInstance {
 
       this.receiptBoundaryOperationId = operationId;
       try {
-        const cleared = await this.session.clearQueue();
+        const cleared = await this.invokeAgent<ClearedAgentQueue>("queue.dequeue", { operationId });
         await this.closeRuntimeOperationBoundary(operationId);
         const hostDeferred = pendingBefore.filter((item) => item.phase === "host_deferred");
         const selection = selectClearedQueueMessages(
@@ -2167,7 +2189,7 @@ export class ManagedInstance {
       } catch (error) {
         try { await this.closeRuntimeOperationBoundary(operationId); }
         catch (transitionError) { throw transitionError; }
-        if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError || error instanceof RuntimeUnavailableBeforeEffectError) throw error;
+        if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError || error instanceof AgentUnavailableBeforeEffectError) throw error;
         throw new RuntimeEffectUnknownError(operationId, error);
       } finally {
         if (this.receiptBoundaryOperationId === operationId) this.receiptBoundaryOperationId = undefined;
@@ -2197,16 +2219,16 @@ export class ManagedInstance {
       this.assertActive();
       if (this.pendingAdmission) throw new InstanceAdmissionPendingError(this.id);
       if (this.configurationPending) throw new InstanceBusyError(this.id, "aborting the current run");
-      if (this.state.execution !== "running" && !this.session.isStreaming) return;
+      if (this.state.execution !== "running" && !this.agentState().isStreaming) return;
 
       this.receiptBoundaryOperationId = operationId;
       try {
-        await this.session.abort();
-        await this.session.waitForIdle();
+        await this.invokeAgent<void>("command.abort", { operationId });
+        await this.session.control({ type: "wait_for_idle" });
         const compactionBoundary = this.compactionBoundary;
         if (compactionBoundary) await compactionBoundary;
         await this.closeRuntimeOperationBoundary(operationId);
-        if (this.state.execution === "running" && !this.session.isStreaming) {
+        if (this.state.execution === "running" && !this.agentState().isStreaming) {
           await this.enqueueTransition(() => this.commitCatalogTransition(
             { kind: "command.abort.completed", effect: "post_effect", operationId, instanceId: this.id },
             () => {
@@ -2225,7 +2247,7 @@ export class ManagedInstance {
       } catch (error) {
         try { await this.closeRuntimeOperationBoundary(operationId); }
         catch (transitionError) { throw transitionError; }
-        if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError || error instanceof RuntimeUnavailableBeforeEffectError) throw error;
+        if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError || error instanceof AgentUnavailableBeforeEffectError) throw error;
         throw new RuntimeEffectUnknownError(operationId, error);
       } finally {
         if (this.receiptBoundaryOperationId === operationId) this.receiptBoundaryOperationId = undefined;
@@ -2246,11 +2268,11 @@ export class ManagedInstance {
     const compactionStartedBoundary = this.compactionStartedBoundary;
     try {
       const started = compactionStartedBoundary ? await compactionStartedBoundary : this.compactionActive;
-      if (started && this.compactionActive) await this.session.abort();
+      if (started && this.compactionActive) await this.invokeAgent<void>("command.abort", { operationId });
       if (configurationBoundary) await configurationBoundary;
       await this.transitionTail;
     } catch (error) {
-      if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError || error instanceof RuntimeUnavailableBeforeEffectError) throw error;
+      if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError || error instanceof AgentUnavailableBeforeEffectError) throw error;
       throw new RuntimeEffectUnknownError(operationId, error);
     } finally {
       this.commandAbortPending = false;
@@ -2265,10 +2287,10 @@ export class ManagedInstance {
     this.commandAbortBoundary = new Promise<void>((resolve) => { this.resolveCommandAbortBoundary = resolve; });
     try {
       await this.navigationStartedBoundary;
-      await this.session.abort();
+      await this.invokeAgent<void>("command.abort", { operationId });
       await this.configurationBoundary;
     } catch (error) {
-      if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError || error instanceof RuntimeUnavailableBeforeEffectError) throw error;
+      if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError || error instanceof AgentUnavailableBeforeEffectError) throw error;
       throw new RuntimeEffectUnknownError(operationId, error);
     } finally {
       this.commandAbortPending = false;
@@ -2279,7 +2301,7 @@ export class ManagedInstance {
   }
 
   async waitForIdle(): Promise<void> {
-    await this.session.waitForIdle();
+    await this.session.control({ type: "wait_for_idle" });
     if (this.backgroundTasks.size > 0) {
       await Promise.allSettled([...this.backgroundTasks]);
     }
@@ -2324,7 +2346,7 @@ export class ManagedInstance {
       await this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "instance.stop.intent", effect: "pre_effect", operationId, instanceId: this.id },
         () => {
-          this.stopRequestedWhileRunning = this.state.execution === "running" || this.session.isStreaming;
+          this.stopRequestedWhileRunning = this.state.execution === "running" || this.agentState().isStreaming;
           this.stopRequestedAt = requestedAt;
           // A committed explicit stop retires this instance from its business
           // entry immediately. Cleanup continues by instance ID and must not
@@ -2348,7 +2370,7 @@ export class ManagedInstance {
 
   recordExtensionError(error: unknown): void {
     if (this.hostDrainActive) return;
-    this.appendEvent("extension.error", { error: safeWireText(errorMessage(error), 2_048, "Sensitive error payload omitted") });
+    this.appendEvent("extension.error", { error: safeWireText(errorMessage(error), 2_048) });
   }
 
   private enqueueExtensionUiEvent<T extends ExtensionUiEventType>(type: T, data: EventDataMap[T]): Promise<void> {
@@ -2379,7 +2401,7 @@ export class ManagedInstance {
     await this.extensionUi.suspendForHostDrain();
     let clearedCounts: { steering: number; followUp: number } | undefined;
     const captureCleanupError = (stage: string, error: unknown): void => {
-      const message = safeWireText(`${stage}: ${errorMessage(error)}`, 2_048, `${stage}: sensitive cleanup error omitted`);
+      const message = safeWireText(`${stage}: ${errorMessage(error)}`, 2_048);
       cleanupErrors.push(message);
     };
 
@@ -2477,16 +2499,16 @@ export class ManagedInstance {
     return receipt;
   }
 
-  private async clearRuntimeQueueOnce(): Promise<ClearedRuntimeQueue> {
+  private async clearRuntimeQueueOnce(): Promise<ClearedAgentQueue> {
     if (this.runtimeQueueClearAttempted) return this.runtimeClearedQueue;
     this.runtimeQueueClearAttempted = true;
-    this.runtimeClearedQueue = await this.session.clearQueue();
+    this.runtimeClearedQueue = await this.invokeAgent<ClearedAgentQueue>("queue.dequeue", { operationId: randomUUID() });
     return this.runtimeClearedQueue;
   }
 
   private abortRuntimeOnce(): Promise<void> {
     if (!this.runtimeAbortPromise) {
-      try { this.runtimeAbortPromise = Promise.resolve(this.session.abort()); }
+      try { this.runtimeAbortPromise = this.invokeAgent<void>("command.abort", { operationId: randomUUID() }); }
       catch (error) { this.runtimeAbortPromise = Promise.reject(error); }
     }
     return this.runtimeAbortPromise;
@@ -2622,7 +2644,7 @@ export class ManagedInstance {
   }
 
   private runtimeDurableSessionFile(): string | undefined {
-    const value = this.session.getDurableSessionFile ? this.session.getDurableSessionFile() : this.session.sessionFile;
+    const value = this.agentState().durableSessionFile;
     const projected = truncate(value, 16_384);
     return projected !== undefined && projected === this.executorIdentity.sessionFile ? projected : undefined;
   }
@@ -2635,10 +2657,19 @@ export class ManagedInstance {
     if (this.replacementIntent === undefined) this.recoverySessionFile = undefined;
   }
 
-  private currentTreeProjection(forceRefresh = false): ProjectedSessionTree {
-    if (!forceRefresh && this.treeProjectionCache) return this.treeProjectionCache.projection;
-    if (!this.session.getTree) throw new Error("Runtime does not support session tree projection");
-    const projection = projectRuntimeTree(this.session.getTree(), this.runtimeGenerationValue);
+  private currentTreeProjection(): ProjectedSessionTree {
+    return this.treeProjectionCache?.projection ?? this.storeTreeProjection({ nodes: [] });
+  }
+
+  private async refreshTreeProjectionFromAgent(): Promise<ProjectedSessionTree> {
+    const generation = this.runtimeGenerationValue;
+    const tree = await this.invokeAgent<AgentTreeSnapshot>("session.tree", { limit: 200 });
+    if (generation !== this.runtimeGenerationValue) throw new StaleRuntimeGenerationError(generation, this.runtimeGenerationValue);
+    return this.storeTreeProjection(tree);
+  }
+
+  private storeTreeProjection(tree: AgentTreeSnapshot): ProjectedSessionTree {
+    const projection = projectRuntimeTree(tree, this.runtimeGenerationValue);
     this.treeProjectionCache = {
       projection,
       indexByEntryId: new Map(projection.nodes.map((node, index) => [node.entryId, index])),
@@ -2727,7 +2758,7 @@ export class ManagedInstance {
     const queuedWorkPending = this.pendingQueueMessages.length > 0
       || this.inFlightQueueMessages.length > 0
       || this.state.pendingSteering + this.state.pendingFollowUp > 0;
-    const activeRun = this.state.execution === "running" || this.session.isStreaming;
+    const activeRun = this.state.execution === "running" || this.agentState().isStreaming;
     if (
       controlMutationPending
       || (admission !== "live" && queuedWorkPending)
@@ -2778,17 +2809,17 @@ export class ManagedInstance {
     }
   }
 
-  private async replaceRuntime<T extends RuntimeReplacementResult>(
+  private async replaceRuntime<T extends AgentReplacementResult>(
     action: string,
     operationId: string,
     kind: "new" | "switch" | "fork" | "clone" | "reload",
     target: { requestedSessionFile?: string; requestedEntryId?: string },
     replace: () => Promise<T>,
-    validateTarget?: () => void,
+    validateTarget?: () => void | Promise<void>,
   ): Promise<T> {
     await this.beginConfiguration(action);
     try {
-      validateTarget?.();
+      await validateTarget?.();
       const startedAt = this.timestamp();
       const currentDurableSessionFile = this.runtimeDurableSessionFile();
       const previousRecoverySessionFile = currentDurableSessionFile
@@ -2820,7 +2851,7 @@ export class ManagedInstance {
       try { result = await replace(); }
       catch (error) {
         await this.closeRuntimeOperationBoundary(operationId);
-        if (error instanceof RuntimeMutationEffectUnknownError) {
+        if (error instanceof AgentMutationEffectUnknownError) {
           throw new RuntimeEffectUnknownError(operationId, error);
         }
         if (this.replacementIntent) {
@@ -2855,12 +2886,12 @@ export class ManagedInstance {
     await Promise.all(tasks);
   }
 
-  private applyModelState(state: RuntimeModelState): void {
+  private applyModelState(state: AgentModelState): void {
     this.executorIdentity.model = state.model ? { provider: truncate(state.model.provider, 256) ?? "unknown", id: truncate(state.model.id, 512) ?? "unknown" } : undefined;
     this.executorIdentity.thinkingLevel = state.thinkingLevel;
   }
 
-  private appendModelChanged(state: RuntimeModelState): void {
+  private appendModelChanged(state: AgentModelState): void {
     this.appendEvent("model.changed", {
       provider: state.model?.provider ?? "unknown",
       id: state.model?.id ?? "unknown",
@@ -2869,7 +2900,7 @@ export class ManagedInstance {
     });
   }
 
-  private appendThinkingChanged(requested: RuntimeThinkingLevel, state: RuntimeModelState): void {
+  private appendThinkingChanged(requested: ThinkingLevel, state: AgentModelState): void {
     this.appendEvent("thinking.changed", {
       requested,
       thinkingLevel: state.thinkingLevel,
@@ -2887,10 +2918,10 @@ export class ManagedInstance {
     } as SettingsChangedData);
   }
 
-  private appendSettingsWriteFailed(error: RuntimeSettingsWriteError): void {
+  private appendSettingsWriteFailed(error: AgentSettingsWriteError): void {
     this.appendEvent("settings.write_failed", {
       key: error.setting,
-      error: safeWireText(error.message, 2_048, "Sensitive settings write error omitted"),
+      error: safeWireText(error.message, 2_048),
     });
   }
 
@@ -2906,7 +2937,7 @@ export class ManagedInstance {
     this.appendEvent("git.branch_changed", branch === undefined ? {} : { branch });
   }
 
-  private dispatchRuntimeEvent(event: RuntimeEvent): void {
+  private dispatchAgentEvent(event: AgentEvent): void {
     if (this.hostDrainActive) return;
     // Pi's auto-compaction emits start before isCompacting becomes observable,
     // so capture the lifecycle edge synchronously rather than waiting for the
@@ -2932,19 +2963,26 @@ export class ManagedInstance {
       return;
     }
     if (!this.catalogPort) {
-      try { this.handleRuntimeEvent(event); if (refreshesHistory(event)) this.refreshHistory(); if (refreshesMetrics(event)) this.refreshMetrics(); }
-      catch (error) { this.appendProjectionError(event, error); }
+      try {
+        this.handleAgentEvent(event);
+        if (refreshesMetrics(event)) this.refreshMetrics();
+        if (refreshesHistory(event)) {
+          const refresh = this.refreshHistory();
+          this.trackHistoryRefresh(refresh);
+          void refresh.catch((error) => this.appendProjectionError(event, error));
+        }
+      } catch (error) { this.appendProjectionError(event, error); }
       return;
     }
-    const task = this.enqueueCatalogRuntimeEvent(event);
+    const task = this.enqueueCatalogAgentEvent(event);
     if (refreshesHistory(event)) this.trackHistoryRefresh(task);
     void task.catch(() => {});
     if (this.receiptBoundaryOperationId !== undefined) this.receiptBoundaryTasks.push(task);
   }
 
-  private enqueueCatalogRuntimeEvent(event: RuntimeEvent): Promise<void> {
+  private enqueueCatalogAgentEvent(event: AgentEvent): Promise<void> {
     return this.enqueueTransition(async () => {
-      try { await this.handleCatalogRuntimeEvent(event); if (refreshesHistory(event)) this.refreshHistory(); if (refreshesMetrics(event)) this.refreshMetrics(); }
+      try { await this.handleCatalogAgentEvent(event); if (refreshesHistory(event)) await this.refreshHistory(); if (refreshesMetrics(event)) this.refreshMetrics(); }
       catch (error) {
         try {
           this.catalogPort?.assertWritable();
@@ -2956,18 +2994,18 @@ export class ManagedInstance {
     });
   }
 
-  private flushAdmissionRuntimeEvents(): Promise<void> {
+  private flushAdmissionAgentEvents(): Promise<void> {
     const events = this.admissionBufferedEvents.splice(0);
     const overflow = this.admissionBufferOverflow;
     this.admissionBufferOverflow = false;
     const tasks = events.map((event) => {
-      const task = this.enqueueCatalogRuntimeEvent(event);
+      const task = this.enqueueCatalogAgentEvent(event);
       if (refreshesHistory(event)) this.trackHistoryRefresh(task);
       return task;
     });
     if (overflow) {
-      tasks.push(this.enqueueCatalogRuntimeEvent({ type: "dock_extension_error", error: "Admission runtime event buffer exceeded 1000 events; the newest bounded tail and authoritative history/metrics were retained" }));
-      const refresh = this.enqueueTransition(async () => { this.refreshHistory(); this.refreshMetrics(); });
+      tasks.push(this.enqueueCatalogAgentEvent({ type: "dock_extension_error", error: "Admission runtime event buffer exceeded 1000 events; the newest bounded tail and authoritative history/metrics were retained" }));
+      const refresh = this.enqueueTransition(async () => { await this.refreshHistory(); this.refreshMetrics(); });
       this.trackHistoryRefresh(refresh);
       tasks.push(refresh);
     }
@@ -2978,13 +3016,14 @@ export class ManagedInstance {
     this.historyRefreshTail = task.then(() => {}, () => {});
   }
 
-  private refreshHistory(): void {
+  private async refreshHistory(): Promise<void> {
     this.treeProjectionCache = undefined;
-    this.historyValue = this.session.getHistory().map(projectRuntimeHistoryEntry);
+    const history = await this.invokeAgent<AgentHistoryEntry[]>("session.history", { limit: 200 });
+    this.historyValue = history.map(projectAgentHistoryEntry);
   }
 
   private refreshMetrics(): void {
-    const metrics = projectRuntimeMetrics(this.session.getMetrics());
+    const metrics = projectRuntimeMetrics(this.agentState().metrics);
     if (JSON.stringify(metrics) === JSON.stringify(this.metricsValue)) return;
     this.metricsValue = metrics;
     if (this.catalogPort && this.committedSnapshotValue) {
@@ -2993,14 +3032,14 @@ export class ManagedInstance {
     this.appendEvent("session.metrics_changed", { metrics: cloneJson(metrics) });
   }
 
-  private appendProjectionError(event: RuntimeEvent, error: unknown): void {
+  private appendProjectionError(event: AgentEvent, error: unknown): void {
     this.appendEvent("instance.error", { source: "event_projection",
-      error: safeWireText(errorMessage(error), 2_048, "Sensitive projection error omitted"),
+      error: safeWireText(errorMessage(error), 2_048),
       runtimeEventType: truncate(event.type, 128),
     });
   }
 
-  private async handleCatalogRuntimeEvent(event: RuntimeEvent): Promise<void> {
+  private async handleCatalogAgentEvent(event: AgentEvent): Promise<void> {
     this.catalogPort?.assertWritable();
     if (event.type === "dock_git_branch_changed") {
       this.applyGitBranchChanged(event.branch);
@@ -3072,12 +3111,12 @@ export class ManagedInstance {
         this.state.pendingFollowUp = 0;
         if (cwd !== undefined) this.cwdValue = cwd;
         this.nameValue = name;
-        this.gitBranchValue = projectGitBranch(event.gitBranch ?? this.session.getGitBranch?.());
-        this.executorIdentity.piSessionId = truncate(this.session.sessionId, 128) ?? "unknown";
-        this.executorIdentity.sessionFile = truncate(this.session.sessionFile, 16_384);
+        this.gitBranchValue = projectGitBranch(event.gitBranch ?? this.agentState().gitBranch);
+        this.executorIdentity.piSessionId = truncate(this.agentState().sessionId, 128) ?? "unknown";
+        this.executorIdentity.sessionFile = truncate(this.agentState().sessionFile, 16_384);
         this.durableSessionFileValue = this.runtimeDurableSessionFile();
         this.recoverySessionFile = this.durableSessionFileValue === undefined ? previousDurableSessionFile : undefined;
-        this.applyModelState(this.session.getModelState());
+        this.applyModelState(this.agentState().modelState);
         this.touch();
       }, () => {
         this.publishedRuntimeGenerationValue = this.runtimeGenerationValue;
@@ -3158,7 +3197,7 @@ export class ManagedInstance {
         const needsPendingCommit = queuedStart !== undefined
           && (queuedStart.queued.phase === "fresh_in_flight" || queuedStart.queued.phase === "effect_unknown");
         if (!needsPendingCommit || queuedStart === undefined) {
-          this.handleRuntimeEvent(event);
+          this.handleAgentEvent(event);
           return;
         }
         await this.commitCatalogTransition(context("message.submitted"), () => {
@@ -3233,7 +3272,7 @@ export class ManagedInstance {
         return;
       }
       default:
-        this.handleRuntimeEvent(event);
+        this.handleAgentEvent(event);
     }
   }
 
@@ -3278,7 +3317,7 @@ export class ManagedInstance {
     });
   }
 
-  private handleRuntimeEvent(event: RuntimeEvent): void {
+  private handleAgentEvent(event: AgentEvent): void {
     if (this.state.lifecycle === "stopped") return;
     if (event.type === "dock_git_branch_changed") {
       this.applyGitBranchChanged(event.branch);
@@ -3327,12 +3366,12 @@ export class ManagedInstance {
       this.state.pendingFollowUp = 0;
       if (cwd !== undefined) this.cwdValue = cwd;
       this.nameValue = name;
-      this.gitBranchValue = projectGitBranch(event.gitBranch ?? this.session.getGitBranch?.());
-      this.executorIdentity.piSessionId = truncate(this.session.sessionId, 128) ?? "unknown";
-      this.executorIdentity.sessionFile = truncate(this.session.sessionFile, 16_384);
+      this.gitBranchValue = projectGitBranch(event.gitBranch ?? this.agentState().gitBranch);
+      this.executorIdentity.piSessionId = truncate(this.agentState().sessionId, 128) ?? "unknown";
+      this.executorIdentity.sessionFile = truncate(this.agentState().sessionFile, 16_384);
       this.durableSessionFileValue = this.runtimeDurableSessionFile();
       this.recoverySessionFile = this.durableSessionFileValue === undefined ? previousDurableSessionFile : undefined;
-      this.applyModelState(this.session.getModelState());
+      this.applyModelState(this.agentState().modelState);
       this.touch();
       this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue, gitBranch: this.gitBranchValue });
       if (replacedQueue.total > 0) this.appendEvent("queue.cleared", { ...replacedQueue, reason: "replacement" });
@@ -3677,7 +3716,7 @@ export class ManagedInstance {
     }
   }
 
-  private queuedUserMessageStart(event: RuntimeEvent): QueuedUserMessageStart | undefined {
+  private queuedUserMessageStart(event: AgentEvent): QueuedUserMessageStart | undefined {
     const message = recordValue(event.message);
     if (!message || stringValue(message.role) !== "user") return undefined;
     const consumedText = runtimeUserMessageText(message.content);
@@ -3713,14 +3752,14 @@ export class ManagedInstance {
       operationId: start.queued.operationId,
       messageId: this.currentUserMessageId ?? `user-${start.queued.operationId}`,
       role: "user",
-      text: safeWireText(start.consumedText || start.queued.text, MAX_PENDING_QUEUE_TEXT_CHARS, "User message omitted"),
+      text: safeWireText(start.consumedText || start.queued.text, MAX_PENDING_QUEUE_TEXT_CHARS),
       ...(start.queued.images === undefined ? {} : { images: cloneInputImages(start.queued.images) }),
       delivery: start.queued.delivery,
       queueItemId: start.queued.queueItemId,
     });
   }
 
-  private handleMessageStart(event: RuntimeEvent): void {
+  private handleMessageStart(event: AgentEvent): void {
     const queuedStart = this.queuedUserMessageStart(event);
     if (queuedStart) {
       const updatePendingCount = this.pendingQueueMessages.includes(queuedStart.queued)
@@ -3752,13 +3791,13 @@ export class ManagedInstance {
       operationId,
       messageId: this.currentUserMessageId,
       role: "user",
-      text: safeWireText(consumedText || accepted?.text || "", MAX_PENDING_QUEUE_TEXT_CHARS, "User message omitted"),
+      text: safeWireText(consumedText || accepted?.text || "", MAX_PENDING_QUEUE_TEXT_CHARS),
       ...(accepted?.images === undefined ? {} : { images: cloneInputImages(accepted.images) }),
       delivery: "prompt",
     });
   }
 
-  private handleMessageUpdate(event: RuntimeEvent): void {
+  private handleMessageUpdate(event: AgentEvent): void {
     const update = recordValue(event.assistantMessageEvent);
     if (!update) return;
     const updateType = stringValue(update.type);
@@ -3803,7 +3842,7 @@ export class ManagedInstance {
     }
   }
 
-  private handleMessageEnd(event: RuntimeEvent): void {
+  private handleMessageEnd(event: AgentEvent): void {
     const message = recordValue(event.message);
     if (!message) return;
     const role = stringValue(message.role);
@@ -3920,11 +3959,11 @@ function stringValue(value: unknown): string | undefined {
 }
 
 function boundedRuntimeString(value: unknown, limit: number, fallback: string): string {
-  return typeof value === "string" ? safeWireText(value, limit, fallback) : fallback;
+  return typeof value === "string" ? safeWireText(value, limit) : fallback;
 }
 
 function optionalRuntimeString(value: unknown, limit: number): string | undefined {
-  return typeof value === "string" ? safeWireText(value, limit, "Sensitive payload omitted") : undefined;
+  return typeof value === "string" ? safeWireText(value, limit) : undefined;
 }
 
 function projectGitBranch(value: unknown): string | undefined {
@@ -3932,7 +3971,7 @@ function projectGitBranch(value: unknown): string | undefined {
   if (typeof value !== "string" || value.length === 0 || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) {
     throw new Error("Runtime Git branch projection is not terminal-safe");
   }
-  return safeWireText(value, 256, "Git branch omitted");
+  return safeWireText(value, 256);
 }
 
 function cloneInputImages(images: readonly ImagePathDto[] | undefined): ImagePathDto[] {
@@ -4002,7 +4041,7 @@ function orderPendingMessages(messages: readonly PendingMessageDto[]): PendingMe
 
 function selectClearedQueueMessages(
   pending: readonly PendingQueueMessage[],
-  cleared: ClearedRuntimeQueue,
+  cleared: ClearedAgentQueue,
   acceptedAt: string,
 ): { restored: PendingMessageDto[]; restoredQueueItemIds: string[] } {
   const selected = new Set<string>();
@@ -4023,7 +4062,7 @@ function selectClearedQueueMessages(
           queueItemId,
           operationId: `runtime-queue-${randomUUID()}`,
           delivery,
-          text: safeWireText(text, MAX_PENDING_QUEUE_TEXT_CHARS, "Queued message omitted"),
+          text: safeWireText(text, MAX_PENDING_QUEUE_TEXT_CHARS),
           acceptedAt,
         });
       }
@@ -4171,7 +4210,7 @@ function historyFingerprint(role: HistoryEntryDto["role"], content: ContentBlock
   return JSON.stringify({ role, content: normalized });
 }
 
-function refreshesHistory(event: RuntimeEvent): boolean {
+function refreshesHistory(event: AgentEvent): boolean {
   return event.type === "entry_appended"
     || event.type === "message_end"
     || event.type === "session_info_changed"
@@ -4179,7 +4218,7 @@ function refreshesHistory(event: RuntimeEvent): boolean {
     || event.type === "dock_session_replaced";
 }
 
-function refreshesMetrics(event: RuntimeEvent): boolean {
+function refreshesMetrics(event: AgentEvent): boolean {
   return event.type === "entry_appended"
     || event.type === "message_end"
     || event.type === "tool_execution_end"
@@ -4188,7 +4227,7 @@ function refreshesMetrics(event: RuntimeEvent): boolean {
     || event.type === "dock_session_replaced";
 }
 
-function projectRuntimeHistoryEntry(entry: RuntimeHistoryEntry): HistoryEntryDto {
+function projectAgentHistoryEntry(entry: AgentHistoryEntry): HistoryEntryDto {
   const role = historyRole(entry.role);
   const summaryKind = entry.summaryKind
     ?? (entry.role === "compactionSummary" ? "compaction" : entry.role === "branchSummary" ? "branch" : undefined);
@@ -4217,12 +4256,12 @@ function projectRuntimeHistoryEntry(entry: RuntimeHistoryEntry): HistoryEntryDto
     ...(isIsoTimestamp(entry.timestamp) ? { timestamp: entry.timestamp } : {}),
     content,
     ...(entry.stopReason === undefined ? {} : { stopReason: boundedRuntimeString(entry.stopReason, 128, "unknown") }),
-    ...(entry.error === undefined ? {} : { error: safeWireText(entry.error, 2_048, "History error omitted") }),
+    ...(entry.error === undefined ? {} : { error: safeWireText(entry.error, 2_048) }),
   };
 }
 
-function projectConversationHistoryPreview(entry: RuntimeHistoryEntry): HistoryEntryDto {
-  const projected = projectRuntimeHistoryEntry(entry);
+function projectConversationHistoryPreview(entry: AgentHistoryEntry): HistoryEntryDto {
+  const projected = projectAgentHistoryEntry(entry);
   const content: ContentBlockDto[] = [];
   let remaining = 4_000;
   for (const block of projected.content.slice(0, 16)) {
@@ -4251,7 +4290,7 @@ function projectConversationHistoryPreview(entry: RuntimeHistoryEntry): HistoryE
   return { ...projected, content };
 }
 
-function projectRuntimeConversationChunk(chunk: RuntimeConversationContentChunk): ConversationContentChunkDto {
+function projectRuntimeConversationChunk(chunk: AgentConversationContentChunk): ConversationContentChunkDto {
   if (chunk.type === "text" || chunk.type === "thinking") {
     if (chunk.text.length > 32_000) throw new Error("Runtime returned oversized conversation text content");
     return {
@@ -4315,7 +4354,7 @@ function historyRole(value: string): HistoryEntryDto["role"] {
   return "assistant";
 }
 
-function projectRuntimeMetrics(value: RuntimeSessionMetrics): SessionMetricsDto {
+function projectRuntimeMetrics(value: AgentSessionMetrics): SessionMetricsDto {
   const context = value.context;
   return {
     messages: {
@@ -4364,7 +4403,7 @@ function settingAdmission(key: SettingKey): "idle" | "live" {
   return RUN_SENSITIVE_SETTING_KEYS.has(key) ? "idle" : "live";
 }
 
-function boundedRuntimeToolProjection(source: ToolDto[] | RuntimeToolProjection): { tools: ToolDto[]; total: number; truncated: boolean } {
+function boundedAgentToolProjection(source: ToolDto[] | AgentToolProjection): { tools: ToolDto[]; total: number; truncated: boolean } {
   const runtime = Array.isArray(source)
     ? { tools: source, total: source.length, truncated: false }
     : source;
@@ -4391,12 +4430,12 @@ function boundedCollectionProjection<T>(source: readonly T[], maxBytes = 600_000
   return { items, total: source.length, truncated: items.length < source.length };
 }
 
-function projectCompactionResult(result: RuntimeCompactionResult): SessionCompactionDto {
+function projectCompactionResult(result: AgentCompactionResult): SessionCompactionDto {
   if (typeof result.summary !== "string" || typeof result.firstKeptEntryId !== "string" || result.firstKeptEntryId.length === 0 || result.firstKeptEntryId.length > 128 || !Number.isSafeInteger(result.tokensBefore) || result.tokensBefore < 0) {
     throw new Error("Pi returned an invalid compaction result");
   }
   return {
-    summary: safeWireText(result.summary, 8_000, "Compaction summary omitted"),
+    summary: safeWireText(result.summary, 8_000),
     firstKeptEntryId: result.firstKeptEntryId,
     tokensBefore: result.tokensBefore,
   };
@@ -4407,8 +4446,8 @@ function isKnownMutationBoundaryError(error: unknown): boolean {
     || error instanceof CatalogWriteError
     || error instanceof MutationFaultedError
     || error instanceof RuntimeEffectUnknownError
-    || error instanceof RuntimeUnavailableBeforeEffectError
-    || error instanceof RuntimeCompactionKnownFailureError;
+    || error instanceof AgentUnavailableBeforeEffectError
+    || error instanceof AgentCompactionKnownFailureError;
 }
 
 function nonNegativeNumber(value: unknown): number {
@@ -4516,8 +4555,8 @@ function unicodeSafeSliceEnd(value: string, requestedEnd: number): number {
     : requestedEnd;
 }
 
-function safeWireText(value: string, limit: number, omission: string): string {
-  return truncate(value, limit) ?? omission;
+function safeWireText(value: string, limit: number): string {
+  return truncate(value, limit) ?? "";
 }
 
 function errorMessage(error: unknown): string {

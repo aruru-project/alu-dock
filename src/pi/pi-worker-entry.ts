@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-import { createPiRuntimeHost, type PiRuntimeHost } from "./pi-runtime-host.js";
+import { createPiAgentAdapter, type PiAgentAdapter } from "./pi-agent-adapter.js";
 import { openValidatedPiSession } from "./pi-session-target.js";
 import { WorkerExtensionUiEndpoint, WorkerUiLifecycleCancelledError } from "./worker-extension-ui.js";
 import {
@@ -10,16 +10,15 @@ import {
   decodeWorkerError,
   encodeWorkerError,
   parseWorkerIdentity,
-  validateCapabilityResult,
+  validateUiCapabilityResult,
   type DockCapability,
   type ReverseWorkerCapability,
-  type RuntimeCapability,
   type UiCapability,
-  type WorkerCache,
   type WorkerEnvelope,
   type WorkerIdentity,
 } from "./worker-protocol.js";
 import type { PiWorkerInitOptions } from "./worker-process.js";
+import type { AgentRequest, AgentWorkerState } from "../core/agent-worker.js";
 
 interface PendingHostCall {
   capability: UiCapability | DockCapability;
@@ -46,7 +45,7 @@ async function runWorker(): Promise<void> {
       || (received.runtimeGeneration === generation - 1 && hostGenerationSeen < generation)));
   const hostCalls = new Map<string, PendingHostCall>();
   let nextHostCall = 0;
-  let runtime: PiRuntimeHost | undefined;
+  let runtime: PiAgentAdapter | undefined;
   let shutdownPromise: Promise<void> | undefined;
   let hostCapabilities = new Set<ReverseWorkerCapability>(["dock.identity"]);
 
@@ -100,7 +99,7 @@ async function runWorker(): Promise<void> {
     ? await openValidatedPiSession(sessionPath, init.sessionDir ? resolve(init.sessionDir) : undefined, init.cwd)
     : undefined;
   if (reopened && reopened.cwd !== init.cwd) throw new Error("Pi session working directory changed before worker runtime construction");
-  runtime = await createPiRuntimeHost({
+  runtime = await createPiAgentAdapter({
     cwd: init.cwd,
     agentDir: init.agentDir,
     ...(init.sessionDir === undefined ? {} : { sessionDir: init.sessionDir }),
@@ -114,8 +113,7 @@ async function runWorker(): Promise<void> {
   });
   if (init.initialName !== undefined && !reopened) runtime.currentSession().setSessionName(init.initialName);
   runtime.subscribe((event) => {
-    const includeHistory = refreshesHistory(event.type);
-    const envelope: WorkerEnvelope = { kind: "event", event, cache: captureCache(runtime!, includeHistory, event.type === "dock_session_replaced") };
+    const envelope: WorkerEnvelope = { kind: "event", event, state: captureState(runtime!) };
     void sender.sendEnvelope(envelope).catch(() => process.exit(1));
     if (event.type === "dock_session_replaced") {
       generation += 1;
@@ -128,7 +126,7 @@ async function runWorker(): Promise<void> {
   const diagnostics = runtime.diagnostics.map((item) => boundedError(item));
   await sender.sendEnvelope({
     kind: "ready",
-    cache: captureCache(runtime, true, true),
+    state: captureState(runtime),
     diagnostics,
     ...(runtime.modelFallbackMessage === undefined ? {} : { modelFallbackMessage: runtime.modelFallbackMessage }),
     ...(runtime.currentSession().sessionManager.getSessionName() === undefined ? {} : { persistedName: runtime.currentSession().sessionManager.getSessionName() }),
@@ -141,23 +139,30 @@ async function runWorker(): Promise<void> {
       if (!pending) return;
       hostCalls.delete(envelope.callId);
       if (envelope.ok) {
-        if (pending.capability.startsWith("ui.")) validateCapabilityResult(pending.capability as UiCapability, envelope.result);
+        if (pending.capability.startsWith("ui.")) validateUiCapabilityResult(pending.capability as UiCapability, envelope.result);
         pending.resolve(envelope.result);
       } else pending.reject(decodeWorkerError(envelope.error));
       return;
     }
-    if (envelope.kind !== "call") return;
+    if (envelope.kind !== "agent_request" && envelope.kind !== "agent_control" && envelope.kind !== "call") return;
     try {
-      if (isAcceptedCapability(envelope.capability)) await sender.sendEnvelope({ kind: "accepted", callId: envelope.callId });
-      const result = envelope.capability.startsWith("runtime.")
-        ? await dispatchRuntime(runtime!, envelope.capability as RuntimeCapability, envelope.args as Record<string, unknown>, envelope.callId, sender)
-        : dispatchHostUi(ui, envelope.capability as UiCapability, envelope.args as Record<string, unknown>);
-      const cache = envelope.capability === "runtime.dispose" ? undefined : responseCache(runtime!, envelope.capability);
-      await sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: true, result, ...(cache === undefined ? {} : { cache }) });
-      if (envelope.capability === "runtime.dispose") setTimeout(() => process.exit(0), 0);
+      if (envelope.kind === "agent_request" && envelope.request.params.instanceId !== identity.instanceId) {
+        throw new Error("Worker Agent request instance identity mismatch");
+      }
+      const accepted = envelope.kind === "agent_request" ? isAcceptedRequest(envelope.request.type)
+        : envelope.kind === "agent_control" && envelope.control.type === "dispose";
+      if (accepted) await sender.sendEnvelope({ kind: "accepted", callId: envelope.callId });
+      const result = envelope.kind === "agent_request"
+        ? await runtime!.dispatch(envelope.request, envelope.context, (success) => { void sender.sendEnvelope({ kind: "preflight", callId: envelope.callId, success }); })
+        : envelope.kind === "agent_control"
+          ? await runtime!.control(envelope.control)
+          : dispatchHostUi(ui, envelope.capability as UiCapability, envelope.args as Record<string, unknown>);
+      const disposed = envelope.kind === "agent_control" && envelope.control.type === "dispose";
+      await sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: true, result, ...(disposed ? {} : { state: captureState(runtime!) }) });
+      if (disposed) setTimeout(() => process.exit(0), 0);
     } catch (error) {
-      const cache = tryCaptureCache(runtime!);
-      await sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: false, error: encodeWorkerError(error), ...(cache === undefined ? {} : { cache }) }).catch(() => {});
+      const state = tryCaptureState(runtime!);
+      await sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: false, error: encodeWorkerError(error), ...(state === undefined ? {} : { state }) }).catch(() => {});
     }
   }
 
@@ -180,41 +185,6 @@ async function runWorker(): Promise<void> {
   }
 }
 
-async function dispatchRuntime(runtime: PiRuntimeHost, capability: RuntimeCapability, args: Record<string, unknown>, callId: string, sender: OrderedWorkerSender): Promise<unknown> {
-  switch (capability) {
-    case "runtime.activate": runtime.activateInitial(); return null;
-    case "runtime.prompt": return runtime.prompt(args.text as string, {
-      ...((args.options ?? {}) as object),
-      preflightResult: (success) => { void sender.sendEnvelope({ kind: "preflight", callId, success }); },
-    });
-    case "runtime.queueMessage": return runtime.queueMessage(args.text as string, args.delivery as "steer" | "followUp", args.images as import("../core/runtime-session.js").RuntimeImagePath[] | undefined);
-    case "runtime.listModels": return runtime.listModels();
-    case "runtime.listSessions": return runtime.listSessions(args.scope as "cwd" | "all");
-    case "runtime.getConversationHistory": return runtime.getConversationHistory(args.cursor as string | undefined, args.limit as number | undefined);
-    case "runtime.getConversationContent": return runtime.getConversationContent(args.contentRef as string, args.cursor as string | undefined);
-    case "runtime.navigateTree": return runtime.navigateTree(args.targetId as string, args.options as never);
-    case "runtime.listTools": return runtime.listTools();
-    case "runtime.setActiveTools": return runtime.setActiveTools(args.names as string[]);
-    case "runtime.getSettings": return runtime.getSettings();
-    case "runtime.updateSetting": return runtime.updateSetting(args.update as never);
-    case "runtime.getResources": return runtime.getResources();
-    case "runtime.getCommands": return runtime.getCommands();
-    case "runtime.resolveSessionTarget": return runtime.resolveSessionTarget(args.sessionFile as string);
-    case "runtime.newSession": return runtime.newSession(args.operationId as string, args.parentSession as string | undefined);
-    case "runtime.switchSession": return runtime.switchSession(args.operationId as string, args.sessionFile as string, args.trust as never);
-    case "runtime.fork": return runtime.fork(args.operationId as string, args.entryId as string, args.position as "before" | "at", args.forkKind as "fork" | "clone");
-    case "runtime.setSessionName": return runtime.setSessionName(args.name as string);
-    case "runtime.compact": return runtime.compact(args.customInstructions as string | undefined);
-    case "runtime.reload": return runtime.reload(args.operationId as string);
-    case "runtime.selectModel": return runtime.selectModel(args.provider as string, args.modelId as string);
-    case "runtime.setThinkingLevel": return runtime.setThinkingLevel(args.level as never);
-    case "runtime.clearQueue": return runtime.clearQueue();
-    case "runtime.abort": return runtime.abort();
-    case "runtime.waitForIdle": return runtime.waitForIdle();
-    case "runtime.dispose": return runtime.dispose();
-  }
-}
-
 function dispatchHostUi(ui: WorkerExtensionUiEndpoint, capability: UiCapability, args: Record<string, unknown>): unknown {
   switch (capability) {
     case "ui.setToolsExpanded": ui.applyHostToolsExpanded(args.expanded === true); return null;
@@ -224,8 +194,7 @@ function dispatchHostUi(ui: WorkerExtensionUiEndpoint, capability: UiCapability,
   }
 }
 
-function captureCache(runtime: PiRuntimeHost, includeHistory: boolean, includeTree: boolean): WorkerCache {
-  const tree = includeTree ? tryCaptureTree(runtime) : undefined;
+function captureState(runtime: PiAgentAdapter): AgentWorkerState {
   return {
     sessionId: runtime.sessionId,
     ...(runtime.sessionFile === undefined ? {} : { sessionFile: runtime.sessionFile }),
@@ -235,31 +204,13 @@ function captureCache(runtime: PiRuntimeHost, includeHistory: boolean, includeTr
     ...(runtime.getGitBranch() === undefined ? {} : { gitBranch: runtime.getGitBranch() }),
     modelState: runtime.getModelState(),
     metrics: runtime.getMetrics(),
-    ...(includeHistory ? { history: runtime.getHistory() } : {}),
-    ...(tree === undefined ? {} : { tree }),
     extensionCommands: runtime.getExtensionCommandNames(),
   };
 }
 
-function responseCache(runtime: PiRuntimeHost, capability: string): WorkerCache | undefined {
-  try {
-    return captureCache(runtime, capability === "runtime.navigateTree", capability === "runtime.navigateTree");
-  } catch { return undefined; }
-}
-function tryCaptureCache(runtime: PiRuntimeHost): WorkerCache | undefined { try { return captureCache(runtime, false, false); } catch { return undefined; } }
-function tryCaptureTree(runtime: PiRuntimeHost): ReturnType<PiRuntimeHost["getTree"]> | undefined {
-  try { return runtime.getTree(); }
-  catch { return undefined; }
-}
-function isAcceptedCapability(capability: string): boolean {
-  return capability === "runtime.prompt" || capability === "runtime.queueMessage"
-    || capability === "runtime.navigateTree" || capability === "runtime.setActiveTools"
-    || capability === "runtime.updateSetting" || capability === "runtime.newSession"
-    || capability === "runtime.switchSession" || capability === "runtime.fork"
-    || capability === "runtime.setSessionName" || capability === "runtime.compact"
-    || capability === "runtime.reload" || capability === "runtime.selectModel"
-    || capability === "runtime.setThinkingLevel" || capability === "runtime.clearQueue"
-    || capability === "runtime.abort" || capability === "runtime.dispose";
+function tryCaptureState(runtime: PiAgentAdapter): AgentWorkerState | undefined { try { return captureState(runtime); } catch { return undefined; } }
+function isAcceptedRequest(type: AgentRequest["type"]): boolean {
+  return !["model.list", "tool.list", "settings.get", "resource.get", "command.catalog", "session.history", "conversation.history", "conversation.content", "session.list", "session.tree"].includes(type);
 }
 function parseEnvJson(name: string): unknown { const value = process.env[name]; if (!value) throw new Error(`Missing ${name}`); return JSON.parse(value); }
 function parseInit(raw: unknown): PiWorkerInitOptions {
@@ -319,5 +270,4 @@ function hardKillOwnProcessGroup(): void {
   try { process.kill(-process.pid, "SIGKILL"); }
   catch { process.exit(1); }
 }
-function refreshesHistory(type: string): boolean { return type === "entry_appended" || type === "message_end" || type === "session_info_changed" || type === "compaction_end" || type === "dock_session_replaced"; }
 function boundedError(error: unknown): string { const text = error instanceof Error ? error.message : String(error); return text.length <= 2_048 ? text : text.slice(0, 2_048); }

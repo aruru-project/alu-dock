@@ -17,7 +17,7 @@ import {
 } from "../src/control/dock-registry.js";
 import { type CatalogInstanceRecord, CatalogWriteError } from "../src/core/catalog.js";
 import { InstanceBusyError, ManagedInstance } from "../src/core/managed-instance.js";
-import { DelayedRuntimeSession } from "./support/delayed-runtime-session.js";
+import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
 
 async function fixturePath(): Promise<{ cwd: string; catalogPath: string }> {
   const cwd = await mkdtemp(join(tmpdir(), "alu-dock-registry-"));
@@ -26,9 +26,9 @@ async function fixturePath(): Promise<{ cwd: string; catalogPath: string }> {
 
 function createFixtureInstance(
   input: InstanceFactoryInput,
-  runtimes: DelayedRuntimeSession[],
+  runtimes: DelayedAgentWorkerConnection[],
 ): ManagedInstance {
-  const runtime = new DelayedRuntimeSession(`pi-${runtimes.length + 1}`);
+  const runtime = new DelayedAgentWorkerConnection(`pi-${runtimes.length + 1}`);
   if (input.sessionFile) runtime.sessionFile = input.sessionFile;
   runtimes.push(runtime);
   return new ManagedInstance({
@@ -47,7 +47,7 @@ function createFixtureInstance(
 
 test("startup exposes catalog-only host_lost records and explicit reopen starts no old command", async () => {
   const { cwd, catalogPath } = await fixturePath();
-  const firstRuntimes: DelayedRuntimeSession[] = [];
+  const firstRuntimes: DelayedAgentWorkerConnection[] = [];
   const first = new DockRegistry(
     async (input) => createFixtureInstance(input, firstRuntimes),
     () => "dock-one",
@@ -59,7 +59,7 @@ test("startup exposes catalog-only host_lost records and explicit reopen starts 
   assert.equal(firstRuntimes[0]?.promptCalls, 1);
   assert.equal(created.snapshot().execution, "running");
 
-  const reopenedRuntimes: DelayedRuntimeSession[] = [];
+  const reopenedRuntimes: DelayedAgentWorkerConnection[] = [];
   let factoryCalls = 0;
   const second = new DockRegistry(
     async (input) => { factoryCalls += 1; return createFixtureInstance(input, reopenedRuntimes); },
@@ -158,7 +158,7 @@ test("concurrent reopen operations admit only one runtime candidate", async () =
   let signalStarted!: () => void;
   const factoryGate = new Promise<void>((resolveGate) => { releaseFactory = resolveGate; });
   const factoryStarted = new Promise<void>((resolveStarted) => { signalStarted = resolveStarted; });
-  const runtimes: DelayedRuntimeSession[] = [];
+  const runtimes: DelayedAgentWorkerConnection[] = [];
   let factoryCalls = 0;
   const registry = new DockRegistry(
     async (input) => {
@@ -189,7 +189,7 @@ test("concurrent reopen operations admit only one runtime candidate", async () =
 
 test("reopen catalog failure disposes its candidate and preserves unavailable facts", async () => {
   const { cwd, catalogPath } = await fixturePath();
-  const seedRuntimes: DelayedRuntimeSession[] = [];
+  const seedRuntimes: DelayedAgentWorkerConnection[] = [];
   const seed = new DockRegistry(
     async (input) => createFixtureInstance(input, seedRuntimes),
     () => "dock-failed",
@@ -202,7 +202,7 @@ test("reopen catalog failure disposes its candidate and preserves unavailable fa
   const faultedStore = new FileCatalogStore(catalogPath, {
     fault: (phase) => { if (failWrites && phase === "rename") throw new Error("reopen rename fault"); },
   });
-  const candidates: DelayedRuntimeSession[] = [];
+  const candidates: DelayedAgentWorkerConnection[] = [];
   const registry = new DockRegistry(
     async (input) => createFixtureInstance(input, candidates),
     () => "unused-id",
@@ -228,7 +228,7 @@ test("reopen catalog failure disposes its candidate and preserves unavailable fa
 
 test("graceful durable Host drain records host_lost rather than explicit stop", async () => {
   const { cwd, catalogPath } = await fixturePath();
-  const runtimes: DelayedRuntimeSession[] = [];
+  const runtimes: DelayedAgentWorkerConnection[] = [];
   const store = new FileCatalogStore(catalogPath);
   const registry = new DockRegistry(
     async (input) => createFixtureInstance(input, runtimes),
@@ -271,7 +271,7 @@ test("failed shutdown intent plus unconfirmed disposal is durably quarantined ac
       await baseStore.commit(...args);
     },
   };
-  const runtimes: DelayedRuntimeSession[] = [];
+  const runtimes: DelayedAgentWorkerConnection[] = [];
   const registry = new DockRegistry(
     async (input) => createFixtureInstance(input, runtimes),
     () => "dock-quarantine",
@@ -307,7 +307,7 @@ test("failed shutdown intent plus unconfirmed disposal is durably quarantined ac
 
 test("socket-first Host startup serves catalog-only snapshots and reopen over Protocol V2", async (context) => {
   const { cwd, catalogPath } = await fixturePath();
-  const seedRuntimes: DelayedRuntimeSession[] = [];
+  const seedRuntimes: DelayedAgentWorkerConnection[] = [];
   const seed = new DockRegistry(
     async (input) => createFixtureInstance(input, seedRuntimes),
     () => "dock-protocol",
@@ -318,7 +318,7 @@ test("socket-first Host startup serves catalog-only snapshots and reopen over Pr
   await seed.shutdownAllForHostDrain();
 
   const socketPath = join(cwd, "dock.sock");
-  const runtimes: DelayedRuntimeSession[] = [];
+  const runtimes: DelayedAgentWorkerConnection[] = [];
   let factoryCalls = 0;
   const registry = new DockRegistry(
     async (input) => { factoryCalls += 1; return createFixtureInstance(input, runtimes); },
@@ -363,7 +363,7 @@ test("socket-first Host startup serves catalog-only snapshots and reopen over Pr
 test("same-Host runtime_error reopen closes stale attach streams after commit", async (context) => {
   const { cwd, catalogPath } = await fixturePath();
   const socketPath = join(cwd, "reopen-stream.sock");
-  const runtimes: DelayedRuntimeSession[] = [];
+  const runtimes: DelayedAgentWorkerConnection[] = [];
   const registry = new DockRegistry(
     async (input) => createFixtureInstance(input, runtimes),
     () => "dock-reopen-stream",
@@ -406,7 +406,7 @@ test("same-Host runtime_error reopen closes stale attach streams after commit", 
 
 test("one malformed live projection falls back to its catalog record without poisoning other instances", async () => {
   const { cwd, catalogPath } = await fixturePath();
-  const runtimes: DelayedRuntimeSession[] = [];
+  const runtimes: DelayedAgentWorkerConnection[] = [];
   let id = 0;
   const registry = new DockRegistry(
     async (input) => createFixtureInstance(input, runtimes),
@@ -573,11 +573,11 @@ test("durable catalog removal ambiguity returns effect_unknown and preserves que
 test("Protocol V2 forget and prune remove only terminal Dock records after commit", async (context) => {
   const { cwd, catalogPath } = await fixturePath();
   const socketPath = join(cwd, "maintenance.sock");
-  const runtimes = new Map<string, DelayedRuntimeSession>();
+  const runtimes = new Map<string, DelayedAgentWorkerConnection>();
   let id = 0;
   const registry = new DockRegistry(
     async (input) => {
-      const runtime = new DelayedRuntimeSession(`pi-${input.id}`);
+      const runtime = new DelayedAgentWorkerConnection(`pi-${input.id}`);
       runtime.sessionFile = join(cwd, `${input.id}.jsonl`);
       runtimes.set(input.id, runtime);
       return new ManagedInstance({

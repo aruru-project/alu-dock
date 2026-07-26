@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto";
 
 import type {
-  RuntimeNavigateResult,
-  RuntimeTreeNode,
-  RuntimeTreeSnapshot,
-} from "./runtime-session.js";
+  AgentNavigateResult,
+  AgentTreeNode,
+  AgentTreeSnapshot,
+} from "./agent-worker.js";
 import type { TreeNodeDto } from "./instance-dto.js";
 
 export const MAX_PROJECTED_SESSION_TREE_NODES = 100_000;
@@ -25,7 +25,7 @@ const TREE_STATES = ["error", "aborted"] as const;
 
 /** Validate, sanitize, and revision a Pi-agnostic runtime tree projection. */
 export function projectRuntimeTree(
-  runtimeTree: RuntimeTreeSnapshot,
+  runtimeTree: AgentTreeSnapshot,
   runtimeGeneration: number,
 ): ProjectedSessionTree {
   if (!Number.isSafeInteger(runtimeGeneration) || runtimeGeneration < 1) throw new Error("Runtime tree generation must be positive");
@@ -35,9 +35,9 @@ export function projectRuntimeTree(
   const ids = new Set<string>();
   const ancestors: string[] = [];
   const nodes: TreeNodeDto[] = [];
-  const revisionNodes: RuntimeTreeNode[] = [];
+  const revisionNodes: AgentTreeNode[] = [];
   for (const node of runtimeTree.nodes) {
-    const projected = projectRuntimeTreeNode(node);
+    const projected = projectAgentTreeNode(node);
     if (ids.has(projected.entryId)) throw new Error(`Runtime session tree contains duplicate entry ID: ${projected.entryId}`);
     if (projected.parentId === undefined) {
       if (projected.depth !== 0) throw new Error("Runtime session tree root must have depth zero");
@@ -73,7 +73,7 @@ export function projectRuntimeTree(
   };
 }
 
-export function projectRuntimeNavigateResult(result: RuntimeNavigateResult): RuntimeNavigateResult {
+export function projectAgentNavigateResult(result: AgentNavigateResult): AgentNavigateResult {
   if (result === null || typeof result !== "object" || typeof result.cancelled !== "boolean" || typeof result.summaryCreated !== "boolean") {
     throw new Error("Runtime returned an invalid tree navigation result");
   }
@@ -92,7 +92,7 @@ export function projectRuntimeNavigateResult(result: RuntimeNavigateResult): Run
   };
 }
 
-function projectRuntimeTreeNode(node: RuntimeTreeNode): TreeNodeDto {
+function projectAgentTreeNode(node: AgentTreeNode): TreeNodeDto {
   if (node === null || typeof node !== "object") throw new Error("Runtime tree node must be an object");
   const kind = enumRuntimeValue(node.kind, TREE_KINDS, "Runtime tree node kind");
   const role = node.role === undefined ? undefined : enumRuntimeValue(node.role, TREE_ROLES, "Runtime tree node role");

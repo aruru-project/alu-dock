@@ -1,8 +1,8 @@
+import type { AgentWorkerState } from "../../src/core/agent-worker.js";
 import {
   OrderedWorkerSender,
   WorkerFrameReceiver,
   parseWorkerIdentity,
-  type WorkerCache,
 } from "../../src/pi/worker-protocol.js";
 
 if (process.env.ALU_DOCK_PI_WORKER === "1" && typeof process.send === "function") {
@@ -26,31 +26,37 @@ async function run(): Promise<void> {
       resolveIdentity();
       return;
     }
-    if (envelope.kind !== "call") return;
-    if (envelope.capability === "runtime.setActiveTools") {
-      void sender.sendEnvelope({ kind: "accepted", callId: envelope.callId });
+    if (envelope.kind === "agent_request") {
+      if (envelope.request.type === "tool.set_active") {
+        void sender.sendEnvelope({ kind: "accepted", callId: envelope.callId });
+        return;
+      }
+      if (envelope.request.type === "settings.update") {
+        void sender.sendEnvelope({ kind: "accepted", callId: envelope.callId })
+          .then(() => sender.sendEnvelope({
+            kind: "response",
+            callId: envelope.callId,
+            ok: true,
+            result: { key: "autoCompaction" },
+            state: { ...STATE, injected: true } as AgentWorkerState,
+          }));
+        return;
+      }
+      void sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: true, result: [] });
       return;
     }
-    if (envelope.capability === "runtime.updateSetting") {
+    if (envelope.kind === "agent_control") {
       void sender.sendEnvelope({ kind: "accepted", callId: envelope.callId })
-        .then(() => sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: true, result: { key: "autoCompaction" } }));
-      return;
+        .then(() => sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: true, result: null, state: STATE }));
     }
-    if (envelope.capability === "runtime.dispose") {
-      void sender.sendEnvelope({ kind: "accepted", callId: envelope.callId })
-        .then(() => sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: true, result: null }))
-        .then(() => process.exit(0));
-      return;
-    }
-    void sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: true, result: emptyResult(envelope.capability) });
   });
 
   await sender.sendEnvelope({ kind: "call", callId: "fixture-identity", capability: "dock.identity", args: {} });
   await identityReady;
-  await sender.sendEnvelope({ kind: "ready", cache: CACHE, diagnostics: [], pid: process.pid });
+  await sender.sendEnvelope({ kind: "ready", state: STATE, diagnostics: [], pid: process.pid });
 }
 
-const CACHE: WorkerCache = {
+const STATE: AgentWorkerState = {
   sessionId: "hanging-worker-session",
   sessionFile: "/tmp/hanging-worker-session.jsonl",
   durableSessionFile: "/tmp/hanging-worker-session.jsonl",
@@ -62,12 +68,5 @@ const CACHE: WorkerCache = {
     tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     cost: 0,
   },
-  history: [],
-  tree: { nodes: [] },
   extensionCommands: [],
 };
-
-function emptyResult(capability: string): unknown {
-  if (capability === "runtime.activate" || capability === "runtime.abort" || capability === "runtime.waitForIdle") return null;
-  return [];
-}

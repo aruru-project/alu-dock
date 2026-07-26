@@ -1,13 +1,15 @@
 import {
-  RuntimeCompactionKnownFailureError,
-  RuntimeConversationCursorError,
-  RuntimeInvalidSettingValueError,
-  RuntimeModelNotFoundError,
-  RuntimeQueueEffectUnknownError,
-  RuntimeQueueRejectedBeforeEffectError,
-  RuntimeSettingsWriteError,
-  RuntimeUnknownToolError,
-} from "../core/runtime-session.js";
+  AgentCompactionKnownFailureError,
+  AgentConversationCursorError,
+  AgentInvalidSettingValueError,
+  AgentModelNotFoundError,
+  AgentQueueEffectUnknownError,
+  AgentQueueRejectedBeforeEffectError,
+  AgentSettingsWriteError,
+  AgentUnknownToolError,
+} from "../core/agent-worker.js";
+import type { AgentInvokeContext, AgentRequest, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
+import { parseControlRequest } from "../control/protocol.js";
 import {
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
@@ -32,16 +34,6 @@ export interface WorkerIdentity {
   workerIncarnation: string;
 }
 
-export type RuntimeCapability =
-  | "runtime.activate" | "runtime.prompt" | "runtime.queueMessage"
-  | "runtime.listModels" | "runtime.listSessions" | "runtime.getConversationHistory" | "runtime.getConversationContent" | "runtime.navigateTree"
-  | "runtime.listTools" | "runtime.setActiveTools" | "runtime.getSettings"
-  | "runtime.updateSetting" | "runtime.getResources" | "runtime.getCommands"
-  | "runtime.resolveSessionTarget" | "runtime.newSession" | "runtime.switchSession"
-  | "runtime.fork" | "runtime.setSessionName" | "runtime.compact" | "runtime.reload"
-  | "runtime.selectModel" | "runtime.setThinkingLevel" | "runtime.clearQueue"
-  | "runtime.abort" | "runtime.waitForIdle" | "runtime.dispose";
-
 export type UiCapability =
   | "ui.select" | "ui.confirm" | "ui.input" | "ui.editor"
   | "ui.notify" | "ui.setTitle" | "ui.setEditorText" | "ui.setStatus" | "ui.setWidget" | "ui.widgetError"
@@ -49,16 +41,12 @@ export type UiCapability =
 
 export type DockCapability = "dock.identity";
 export type ReverseWorkerCapability = DockCapability | Exclude<UiCapability, "ui.viewport" | "ui.reset">;
-
-/** Host-enforced capabilities available to an ordinary managed Pi Worker. */
 export const ORDINARY_REVERSE_WORKER_CAPABILITIES: readonly ReverseWorkerCapability[] = [
   "dock.identity",
   "ui.select", "ui.confirm", "ui.input", "ui.editor", "ui.notify", "ui.setTitle", "ui.setEditorText", "ui.setStatus",
-  "ui.setWidget", "ui.widgetError", "ui.unsupported", "ui.setToolsExpanded", "ui.cancel",
-  "ui.generationBegin",
+  "ui.setWidget", "ui.widgetError", "ui.unsupported", "ui.setToolsExpanded", "ui.cancel", "ui.generationBegin",
 ];
-
-export type WorkerCapability = RuntimeCapability | UiCapability | DockCapability;
+export type WorkerCapability = UiCapability | DockCapability;
 
 export interface WorkerFrame {
   protocol: typeof PI_WORKER_PROTOCOL;
@@ -82,28 +70,16 @@ export interface WorkerErrorDto {
 }
 
 export type WorkerEnvelope =
-  | { kind: "ready"; cache: WorkerCache; diagnostics: string[]; modelFallbackMessage?: string; persistedName?: string; pid: number }
+  | { kind: "ready"; state: AgentWorkerState; diagnostics: string[]; modelFallbackMessage?: string; persistedName?: string; pid: number }
+  | { kind: "agent_request"; callId: string; request: AgentRequest; context?: AgentInvokeContext }
+  | { kind: "agent_control"; callId: string; control: AgentWorkerControl }
   | { kind: "call"; callId: string; capability: WorkerCapability; args: unknown }
   | { kind: "accepted"; callId: string }
-  | { kind: "response"; callId: string; ok: true; result: unknown; cache?: WorkerCache }
-  | { kind: "response"; callId: string; ok: false; error: WorkerErrorDto; cache?: WorkerCache }
-  | { kind: "event"; event: Record<string, unknown>; cache: WorkerCache }
+  | { kind: "response"; callId: string; ok: true; result: unknown; state?: AgentWorkerState }
+  | { kind: "response"; callId: string; ok: false; error: WorkerErrorDto; state?: AgentWorkerState }
+  | { kind: "event"; event: Record<string, unknown>; state: AgentWorkerState }
   | { kind: "preflight"; callId: string; success: boolean }
   | { kind: "fatal"; error: WorkerErrorDto };
-
-export interface WorkerCache {
-  sessionId: string;
-  sessionFile?: string;
-  durableSessionFile?: string;
-  isStreaming: boolean;
-  isCompacting: boolean;
-  gitBranch?: string;
-  modelState: unknown;
-  metrics: unknown;
-  history?: unknown[];
-  tree?: unknown;
-  extensionCommands?: string[];
-}
 
 export type IpcSend = (message: WorkerFrame, callback: (error: Error | null) => void) => boolean;
 
@@ -226,14 +202,31 @@ export function parseWorkerEnvelope(raw: unknown): WorkerEnvelope {
   const kind = boundedString(value.kind, 32, "Worker envelope kind");
   switch (kind) {
     case "ready": {
-      exactKeys(value, ["kind", "cache", "diagnostics", "modelFallbackMessage", "persistedName", "pid"], "Worker ready envelope");
+      exactKeys(value, ["kind", "state", "diagnostics", "modelFallbackMessage", "persistedName", "pid"], "Worker ready envelope");
       const diagnostics = stringArray(value.diagnostics, 2_000, 2_048, "Worker diagnostics");
-      return { kind, cache: parseWorkerCache(value.cache), diagnostics, ...(optionalString(value.modelFallbackMessage, 2_048) === undefined ? {} : { modelFallbackMessage: optionalString(value.modelFallbackMessage, 2_048) }), ...(optionalString(value.persistedName, 256) === undefined ? {} : { persistedName: optionalString(value.persistedName, 256) }), pid: positiveInteger(value.pid, "Worker pid") };
+      return { kind, state: parseAgentWorkerState(value.state), diagnostics, ...(optionalString(value.modelFallbackMessage, 2_048) === undefined ? {} : { modelFallbackMessage: optionalString(value.modelFallbackMessage, 2_048) }), ...(optionalString(value.persistedName, 256) === undefined ? {} : { persistedName: optionalString(value.persistedName, 256) }), pid: positiveInteger(value.pid, "Worker pid") };
+    }
+    case "agent_request": {
+      exactKeys(value, ["kind", "callId", "request", "context"], "Worker Agent request envelope");
+      const request = parseControlRequest(value.request);
+      if (!isAgentRequest(request.type)) throw new Error("Worker received a non-Agent Protocol V2 request");
+      const context = value.context === undefined ? undefined : parseAgentInvokeContext(value.context);
+      if ((request.type === "session.switch") !== (context?.type === "session_switch")) {
+        throw new Error("Worker session switch request requires resolved Host invoke context");
+      }
+      if (context?.type === "force_queue" && (request.type !== "command.submit" || request.params.delivery === "prompt")) {
+        throw new Error("Worker forced queue context requires a steer or followUp command submission");
+      }
+      return { kind, callId: boundedString(value.callId, 128, "Worker call ID"), request: request as AgentRequest, ...(context === undefined ? {} : { context }) };
+    }
+    case "agent_control": {
+      exactKeys(value, ["kind", "callId", "control"], "Worker Agent control envelope");
+      return { kind, callId: boundedString(value.callId, 128, "Worker call ID"), control: parseAgentWorkerControl(value.control) };
     }
     case "call": {
       exactKeys(value, ["kind", "callId", "capability", "args"], "Worker call envelope");
       const capability = parseCapability(value.capability);
-      validateCapabilityArgs(capability, value.args);
+      validateUiCapabilityArgs(capability, value.args);
       return { kind, callId: boundedString(value.callId, 128, "Worker call ID"), capability, args: value.args };
     }
     case "accepted":
@@ -241,22 +234,22 @@ export function parseWorkerEnvelope(raw: unknown): WorkerEnvelope {
       return { kind, callId: boundedString(value.callId, 128, "Worker call ID") };
     case "response": {
       const callId = boundedString(value.callId, 128, "Worker call ID");
-      const cache = value.cache === undefined ? undefined : parseWorkerCache(value.cache);
+      const state = value.state === undefined ? undefined : parseAgentWorkerState(value.state);
       if (value.ok === true) {
-        exactKeys(value, ["kind", "callId", "ok", "result", "cache"], "Worker success response envelope");
-        return { kind, callId, ok: true, result: value.result, ...(cache ? { cache } : {}) };
+        exactKeys(value, ["kind", "callId", "ok", "result", "state"], "Worker success response envelope");
+        return { kind, callId, ok: true, result: value.result, ...(state ? { state } : {}) };
       }
       if (value.ok === false) {
-        exactKeys(value, ["kind", "callId", "ok", "error", "cache"], "Worker error response envelope");
-        return { kind, callId, ok: false, error: parseWorkerError(value.error), ...(cache ? { cache } : {}) };
+        exactKeys(value, ["kind", "callId", "ok", "error", "state"], "Worker error response envelope");
+        return { kind, callId, ok: false, error: parseWorkerError(value.error), ...(state ? { state } : {}) };
       }
       throw new Error("Worker response status is invalid");
     }
     case "event": {
-      exactKeys(value, ["kind", "event", "cache"], "Worker event envelope");
+      exactKeys(value, ["kind", "event", "state"], "Worker event envelope");
       const event = record(value.event, "Worker runtime event");
-      validateWorkerRuntimeEvent(event);
-      return { kind, event, cache: parseWorkerCache(value.cache) };
+      validateWorkerAgentEvent(event);
+      return { kind, event, state: parseAgentWorkerState(value.state) };
     }
     case "preflight":
       exactKeys(value, ["kind", "callId", "success"], "Worker preflight envelope");
@@ -269,7 +262,7 @@ export function parseWorkerEnvelope(raw: unknown): WorkerEnvelope {
   }
 }
 
-function validateWorkerRuntimeEvent(event: Record<string, unknown>): void {
+function validateWorkerAgentEvent(event: Record<string, unknown>): void {
   const type = oneOf(event.type, [
     "agent_start", "agent_end", "agent_settled", "turn_start", "turn_end",
     "message_start", "message_update", "message_end",
@@ -518,45 +511,11 @@ function validateWorkerHistoryEntry(raw: unknown): void {
   if (entry.isError !== undefined && typeof entry.isError !== "boolean") throw new Error("History error flag is invalid");
 }
 
-export function validateCapabilityArgs(capability: WorkerCapability, raw: unknown): void {
+export function validateUiCapabilityArgs(capability: WorkerCapability, raw: unknown): void {
   const args = record(raw, `${capability} arguments`);
   const keys = (...allowed: string[]): void => exactKeys(args, allowed, `${capability} arguments`);
   switch (capability) {
     case "dock.identity": keys(); return;
-    case "runtime.activate": case "runtime.listModels": case "runtime.listTools": case "runtime.getSettings":
-    case "runtime.getResources": case "runtime.getCommands": case "runtime.clearQueue": case "runtime.abort":
-    case "runtime.waitForIdle": case "runtime.dispose": keys(); return;
-    case "runtime.prompt": keys("text", "options"); boundedString(args.text, 256_000, "Prompt text", true); if (args.options !== undefined) validatePromptOptions(args.options); return;
-    case "runtime.queueMessage": keys("text", "delivery", "images"); boundedString(args.text, 256_000, "Queue text", true); oneOf(args.delivery, ["steer", "followUp"], "Queue delivery"); if (args.images !== undefined) validateImagePaths(args.images); return;
-    case "runtime.listSessions": keys("scope"); oneOf(args.scope, ["cwd", "all"], "Session scope"); return;
-    case "runtime.getConversationHistory": keys("cursor", "limit"); optionalString(args.cursor, 128); if (args.limit !== undefined) { positiveInteger(args.limit, "Conversation history limit"); if ((args.limit as number) > 200) throw new Error("Conversation history limit exceeds 200"); } return;
-    case "runtime.getConversationContent": keys("contentRef", "cursor"); boundedString(args.contentRef, 128, "Conversation content reference"); optionalString(args.cursor, 128); return;
-    case "runtime.navigateTree": {
-      keys("targetId", "options"); boundedString(args.targetId, 128, "Tree target");
-      if (args.options !== undefined) {
-        const options = record(args.options, "Tree options");
-        exactKeys(options, ["summarize", "customInstructions", "replaceInstructions", "label"], "Tree options");
-        optionalBoolean(options.summarize, "Tree summarize flag"); optionalString(options.customInstructions, 256_000);
-        optionalBoolean(options.replaceInstructions, "Tree replacement flag"); optionalString(options.label, 256);
-      }
-      return;
-    }
-    case "runtime.setActiveTools": keys("names"); stringArray(args.names, 2_000, 256, "Tool names"); return;
-    case "runtime.updateSetting": keys("update"); validateSettingUpdate(args.update); return;
-    case "runtime.resolveSessionTarget": keys("sessionFile"); boundedString(args.sessionFile, 16_384, "Session file"); return;
-    case "runtime.newSession": keys("operationId", "parentSession"); boundedString(args.operationId, 128, "Operation ID"); optionalString(args.parentSession, 16_384); return;
-    case "runtime.switchSession": {
-      keys("operationId", "sessionFile", "trust"); boundedString(args.operationId, 128, "Operation ID"); boundedString(args.sessionFile, 16_384, "Session file");
-      const trust = record(args.trust, "Project trust"); exactKeys(trust, ["canonicalCwd", "projectTrusted"], "Project trust");
-      boundedString(trust.canonicalCwd, 16_384, "Trusted project cwd"); if (typeof trust.projectTrusted !== "boolean") throw new Error("Project trust flag is invalid");
-      return;
-    }
-    case "runtime.fork": keys("operationId", "entryId", "position", "forkKind"); boundedString(args.operationId, 128, "Operation ID"); boundedString(args.entryId, 128, "Entry ID"); oneOf(args.position, ["before", "at"], "Fork position"); oneOf(args.forkKind, ["fork", "clone"], "Fork kind"); return;
-    case "runtime.setSessionName": keys("name"); boundedString(args.name, 256, "Session name"); return;
-    case "runtime.compact": keys("customInstructions"); optionalString(args.customInstructions, 256_000); return;
-    case "runtime.reload": keys("operationId"); boundedString(args.operationId, 128, "Operation ID"); return;
-    case "runtime.selectModel": keys("provider", "modelId"); boundedString(args.provider, 256, "Model provider"); boundedString(args.modelId, 256, "Model ID"); return;
-    case "runtime.setThinkingLevel": keys("level"); oneOf(args.level, ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "Thinking level"); return;
     case "ui.select": keys("title", "options", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); stringArray(args.options, 256, 16_000, "Dialog options"); validateDialogOptions(args.optionsMeta); return;
     case "ui.confirm": keys("title", "message", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); boundedString(args.message, 16_000, "Dialog message", true); validateDialogOptions(args.optionsMeta); return;
     case "ui.input": keys("title", "placeholder", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); optionalString(args.placeholder, 4_096); validateDialogOptions(args.optionsMeta); return;
@@ -575,119 +534,41 @@ export function validateCapabilityArgs(capability: WorkerCapability, raw: unknow
   }
 }
 
-export function validateCapabilityResult(capability: RuntimeCapability | UiCapability, result: unknown): void {
-  if (capability.startsWith("ui.")) {
-    if (capability === "ui.select" || capability === "ui.input" || capability === "ui.editor") {
-      if (result !== undefined && result !== null) boundedString(result, capability === "ui.editor" ? 300_000 : 16_000, `${capability} result`, true);
-      return;
-    }
-    if (capability === "ui.confirm") {
-      if (typeof result !== "boolean") throw new Error("ui.confirm result must be boolean");
-      return;
-    }
-    if (result !== undefined && result !== null) throw new Error(`${capability} result must be empty`);
+export function validateUiCapabilityResult(capability: UiCapability, result: unknown): void {
+  if (capability === "ui.select" || capability === "ui.input" || capability === "ui.editor") {
+    if (result !== undefined && result !== null) boundedString(result, capability === "ui.editor" ? 300_000 : 16_000, `${capability} result`, true);
     return;
   }
-  const array = (label: string): unknown[] => {
-    if (!Array.isArray(result) || result.length > 100_000) throw new Error(`${label} result is invalid`);
-    return result;
-  };
-  switch (capability) {
-    case "runtime.activate": case "runtime.prompt": case "runtime.queueMessage": case "runtime.abort":
-    case "runtime.waitForIdle": case "runtime.dispose":
-      if (result !== null && result !== undefined) throw new Error(`${capability} result must be empty`); return;
-    case "runtime.listModels":
-      for (const item of array("Model list")) {
-        const value = record(item, "Model result"); exactKeys(value, ["provider", "id", "name", "reasoning"], "Model result");
-        boundedString(value.provider, 256, "Model provider"); boundedString(value.id, 512, "Model id"); boundedString(value.name, 512, "Model name"); if (typeof value.reasoning !== "boolean") throw new Error("Model reasoning flag is invalid");
-      }
-      return;
-    case "runtime.listSessions":
-      for (const item of array("Session list")) {
-        const value = record(item, "Session result"); exactKeys(value, ["sessionId", "sessionFile", "name", "cwd", "updatedAt"], "Session result");
-        boundedString(value.sessionId, 128, "Session id"); boundedString(value.sessionFile, 16_384, "Session file"); boundedString(value.cwd, 16_384, "Session cwd"); optionalString(value.name, 256); optionalString(value.updatedAt, 128);
-      }
-      return;
-    case "runtime.getConversationHistory": validateConversationHistoryPage(result); return;
-    case "runtime.getConversationContent": validateConversationContentPage(result); return;
-    case "runtime.listTools": case "runtime.setActiveTools":
-      if (Array.isArray(result)) { for (const item of result) validateTool(item); return; }
-      {
-        const value = record(result, "Tool projection"); exactKeys(value, ["tools", "total", "truncated"], "Tool projection");
-        if (!Array.isArray(value.tools) || value.tools.length > 2_000) throw new Error("Tool projection items are invalid");
-        for (const item of value.tools) validateTool(item);
-        nonNegativeInteger(value.total, "Tool total"); if (typeof value.truncated !== "boolean") throw new Error("Tool truncation is invalid"); return;
-      }
-    case "runtime.getSettings":
-      for (const item of array(capability)) validateSetting(item); return;
-    case "runtime.getCommands":
-      for (const item of array(capability)) validateCommand(item); return;
-    case "runtime.getResources": {
-      const value = record(result, "Resource result");
-      exactKeys(value, ["resources", "diagnostics", "resourceTotal", "resourcesTruncated", "diagnosticTotal", "diagnosticsTruncated"], "Resource result");
-      if (!Array.isArray(value.resources) || value.resources.length > 2_000 || !Array.isArray(value.diagnostics) || value.diagnostics.length > 2_000) throw new Error("Resource result arrays are invalid");
-      for (const resource of value.resources) validateResource(resource);
-      for (const diagnostic of value.diagnostics) validateDiagnostic(diagnostic);
-      optionalNonNegativeInteger(value.resourceTotal, "Resource total"); optionalBoolean(value.resourcesTruncated, "Resource truncation");
-      optionalNonNegativeInteger(value.diagnosticTotal, "Diagnostic total"); optionalBoolean(value.diagnosticsTruncated, "Diagnostic truncation");
-      return;
-    }
-    case "runtime.resolveSessionTarget": {
-      const target = record(result, "Session target"); exactKeys(target, ["canonicalCwd"], "Session target"); boundedString(target.canonicalCwd, 16_384, "Canonical cwd"); return;
-    }
-    case "runtime.newSession": case "runtime.switchSession": case "runtime.reload": {
-      const value = record(result, "Replacement result"); exactKeys(value, ["cancelled"], "Replacement result");
-      if (typeof value.cancelled !== "boolean") throw new Error("Replacement cancellation is invalid"); return;
-    }
-    case "runtime.fork": {
-      const value = record(result, "Fork result"); exactKeys(value, ["cancelled", "selectedText"], "Fork result"); if (typeof value.cancelled !== "boolean") throw new Error("Fork cancellation is invalid"); optionalString(value.selectedText, 256_000); return;
-    }
-    case "runtime.navigateTree": {
-      const value = record(result, "Navigation result"); exactKeys(value, ["cancelled", "aborted", "editorText", "summaryCreated"], "Navigation result");
-      if (typeof value.cancelled !== "boolean" || typeof value.summaryCreated !== "boolean") throw new Error("Navigation result flags are invalid");
-      if (value.aborted !== undefined && typeof value.aborted !== "boolean") throw new Error("Navigation abort flag is invalid");
-      optionalString(value.editorText, 256_000); return;
-    }
-    case "runtime.updateSetting": validateSetting(result); return;
-    case "runtime.compact": {
-      const value = record(result, "Compaction result"); exactKeys(value, ["summary", "firstKeptEntryId", "tokensBefore"], "Compaction result"); boundedString(value.summary, 2_000_000, "Compaction summary", true);
-      boundedString(value.firstKeptEntryId, 128, "First kept entry"); nonNegativeInteger(value.tokensBefore, "Compaction token count"); return;
-    }
-    case "runtime.selectModel": case "runtime.setThinkingLevel": validateModelState(result, `${capability} result`); return;
-    case "runtime.clearQueue": {
-      const value = record(result, "Cleared queue result"); exactKeys(value, ["steering", "followUp"], "Cleared queue result");
-      stringArray(value.steering, 1_000, 256_000, "Cleared steering queue"); stringArray(value.followUp, 1_000, 256_000, "Cleared follow-up queue"); return;
-    }
-    case "runtime.setSessionName": if (result !== undefined && result !== null) boundedString(result, 256, "Session name", true); return;
-  }
+  if (capability === "ui.confirm") { if (typeof result !== "boolean") throw new Error("ui.confirm result must be boolean"); return; }
+  if (result !== undefined && result !== null) throw new Error(`${capability} result must be empty`);
 }
 
 export function encodeWorkerError(error: unknown): WorkerErrorDto {
   const base = { name: error instanceof Error ? error.name : "Error", message: boundedErrorMessage(error) };
-  if (error instanceof RuntimeCompactionKnownFailureError) return { ...base, code: "compaction_known_failure", details: { reason: error.reason } };
-  if (error instanceof RuntimeConversationCursorError) return { ...base, code: "conversation_cursor" };
-  if (error instanceof RuntimeQueueRejectedBeforeEffectError) return { ...base, code: "queue_rejected" };
-  if (error instanceof RuntimeQueueEffectUnknownError) return { ...base, code: "queue_effect_unknown" };
-  if (error instanceof RuntimeUnknownToolError) return { ...base, code: "unknown_tool", details: { toolName: error.toolName } };
-  if (error instanceof RuntimeModelNotFoundError) return { ...base, code: "model_not_found", details: { provider: error.provider, modelId: error.modelId } };
-  if (error instanceof RuntimeInvalidSettingValueError) return { ...base, code: "invalid_setting", details: { setting: error.setting } };
-  if (error instanceof RuntimeSettingsWriteError) return { ...base, code: "settings_write", details: { setting: error.setting, phase: error.phase, mutationApplied: error.mutationApplied, errors: error.errors } };
+  if (error instanceof AgentCompactionKnownFailureError) return { ...base, code: "compaction_known_failure", details: { reason: error.reason } };
+  if (error instanceof AgentConversationCursorError) return { ...base, code: "conversation_cursor" };
+  if (error instanceof AgentQueueRejectedBeforeEffectError) return { ...base, code: "queue_rejected" };
+  if (error instanceof AgentQueueEffectUnknownError) return { ...base, code: "queue_effect_unknown" };
+  if (error instanceof AgentUnknownToolError) return { ...base, code: "unknown_tool", details: { toolName: error.toolName } };
+  if (error instanceof AgentModelNotFoundError) return { ...base, code: "model_not_found", details: { provider: error.provider, modelId: error.modelId } };
+  if (error instanceof AgentInvalidSettingValueError) return { ...base, code: "invalid_setting", details: { setting: error.setting } };
+  if (error instanceof AgentSettingsWriteError) return { ...base, code: "settings_write", details: { setting: error.setting, phase: error.phase, mutationApplied: error.mutationApplied, errors: error.errors } };
   return { ...base, code: "runtime_error" };
 }
 
 export function decodeWorkerError(error: WorkerErrorDto): Error {
   switch (error.code) {
-    case "compaction_known_failure": return new RuntimeCompactionKnownFailureError(oneOfValue(error.details?.reason, ["nothing_to_compact", "already_compacted", "cancelled", "failed"], "failed"), error.message);
-    case "conversation_cursor": return new RuntimeConversationCursorError(error.message);
-    case "queue_rejected": return new RuntimeQueueRejectedBeforeEffectError(new Error(error.message));
-    case "queue_effect_unknown": return new RuntimeQueueEffectUnknownError(new Error(error.message));
-    case "unknown_tool": return new RuntimeUnknownToolError(typeof error.details?.toolName === "string" ? error.details.toolName : "unknown");
-    case "model_not_found": return new RuntimeModelNotFoundError(
+    case "compaction_known_failure": return new AgentCompactionKnownFailureError(oneOfValue(error.details?.reason, ["nothing_to_compact", "already_compacted", "cancelled", "failed"], "failed"), error.message);
+    case "conversation_cursor": return new AgentConversationCursorError(error.message);
+    case "queue_rejected": return new AgentQueueRejectedBeforeEffectError(new Error(error.message));
+    case "queue_effect_unknown": return new AgentQueueEffectUnknownError(new Error(error.message));
+    case "unknown_tool": return new AgentUnknownToolError(typeof error.details?.toolName === "string" ? error.details.toolName : "unknown");
+    case "model_not_found": return new AgentModelNotFoundError(
       typeof error.details?.provider === "string" ? error.details.provider : "unknown",
       typeof error.details?.modelId === "string" ? error.details.modelId : "unknown",
     );
-    case "invalid_setting": return new RuntimeInvalidSettingValueError((typeof error.details?.setting === "string" ? error.details.setting : "autoCompaction") as SettingKey);
-    case "settings_write": return new RuntimeSettingsWriteError(
+    case "invalid_setting": return new AgentInvalidSettingValueError((typeof error.details?.setting === "string" ? error.details.setting : "autoCompaction") as SettingKey);
+    case "settings_write": return new AgentSettingsWriteError(
       (typeof error.details?.setting === "string" ? error.details.setting : "model") as SettingKey | "model" | "thinking",
       error.details?.phase === "baseline" ? "baseline" : "write",
       error.details?.mutationApplied === true,
@@ -823,43 +704,6 @@ function validateTree(raw: unknown): void {
   }
 }
 
-function parseWorkerCache(raw: unknown): WorkerCache {
-  const value = record(raw, "Worker cache");
-  exactKeys(value, ["sessionId", "sessionFile", "durableSessionFile", "isStreaming", "isCompacting", "gitBranch", "modelState", "metrics", "history", "tree", "extensionCommands"], "Worker cache");
-  if (typeof value.isStreaming !== "boolean" || typeof value.isCompacting !== "boolean") throw new Error("Worker streaming cache is invalid");
-  if (value.history !== undefined) {
-    if (!Array.isArray(value.history) || value.history.length > 1_000_000) throw new Error("Worker history cache is invalid");
-    for (const item of value.history) {
-      const entry = record(item, "Worker history entry");
-      exactKeys(entry, ["entryId", "parentId", "timestamp", "role", "summaryKind", "content", "stopReason", "error", "toolCallId", "toolName", "toolPresentation", "isError"], "Worker history entry");
-      boundedString(entry.entryId, 128, "History entry id");
-      oneOf(entry.role, ["user", "assistant", "tool", "toolResult", "system", "bashExecution", "custom", "branchSummary", "compactionSummary"], "History role");
-      if (entry.summaryKind !== undefined) oneOf(entry.summaryKind, ["compaction", "branch"], "History summary kind");
-      if (entry.role === "tool" || entry.role === "toolResult") validatePrivateToolContent(entry.content); else validatePrivateContent(entry.content);
-      optionalString(entry.parentId, 128); optionalString(entry.timestamp, 128); optionalString(entry.stopReason, 128);
-      optionalString(entry.error, 2_048); optionalString(entry.toolCallId, 128); optionalString(entry.toolName, 256);
-      if (entry.toolPresentation !== undefined) validateToolPresentation(entry.toolPresentation);
-      if (entry.isError !== undefined && typeof entry.isError !== "boolean") throw new Error("History error flag is invalid");
-    }
-  }
-  validateModelState(value.modelState, "Worker model state");
-  validateMetrics(value.metrics);
-  if (value.tree !== undefined) validateTree(value.tree);
-  return {
-    sessionId: boundedString(value.sessionId, 128, "Worker session ID"),
-    ...(optionalString(value.sessionFile, 16_384) === undefined ? {} : { sessionFile: optionalString(value.sessionFile, 16_384) }),
-    ...(optionalString(value.durableSessionFile, 16_384) === undefined ? {} : { durableSessionFile: optionalString(value.durableSessionFile, 16_384) }),
-    isStreaming: value.isStreaming,
-    isCompacting: value.isCompacting,
-    ...(optionalString(value.gitBranch, 256) === undefined ? {} : { gitBranch: optionalString(value.gitBranch, 256) }),
-    modelState: value.modelState,
-    metrics: value.metrics,
-    ...(value.history === undefined ? {} : { history: value.history }),
-    ...(value.tree === undefined ? {} : { tree: value.tree }),
-    ...(value.extensionCommands === undefined ? {} : { extensionCommands: stringArray(value.extensionCommands, 2_000, 256, "Extension commands") }),
-  };
-}
-
 function parseWorkerError(raw: unknown): WorkerErrorDto {
   const value = record(raw, "Worker error");
   exactKeys(value, ["code", "name", "message", "details"], "Worker error");
@@ -893,9 +737,43 @@ function validateWorkerErrorDetails(code: WorkerErrorDto["code"], details: Recor
   }
 }
 
+function parseAgentWorkerState(raw: unknown): AgentWorkerState {
+  const value = record(raw, "Worker Agent state");
+  exactKeys(value, ["sessionId", "sessionFile", "durableSessionFile", "isStreaming", "isCompacting", "gitBranch", "modelState", "metrics", "extensionCommands"], "Worker Agent state");
+  boundedString(value.sessionId, 128, "Agent session ID"); optionalString(value.sessionFile, 16_384); optionalString(value.durableSessionFile, 16_384); optionalString(value.gitBranch, 256);
+  if (typeof value.isStreaming !== "boolean" || typeof value.isCompacting !== "boolean") throw new Error("Worker Agent lifecycle state is invalid");
+  if (!Array.isArray(value.extensionCommands)) throw new Error("Worker Agent projection state is invalid");
+  validateJsonValue(value.modelState); validateJsonValue(value.metrics);
+  stringArray(value.extensionCommands, 2_000, 256, "Worker extension commands");
+  return value as unknown as AgentWorkerState;
+}
+
+function parseAgentInvokeContext(raw: unknown): AgentInvokeContext {
+  const value = record(raw, "Worker Agent invoke context");
+  if (value.type === "force_queue") {
+    exactKeys(value, ["type"], "Worker Agent invoke context");
+    return { type: "force_queue" };
+  }
+  exactKeys(value, ["type", "canonicalCwd", "projectTrusted"], "Worker Agent invoke context");
+  if (value.type !== "session_switch" || typeof value.projectTrusted !== "boolean") throw new Error("Worker Agent invoke context is invalid");
+  const canonicalCwd = boundedString(value.canonicalCwd, 16_384, "Canonical session cwd");
+  if (!canonicalCwd.startsWith("/")) throw new Error("Canonical session cwd must be absolute");
+  return { type: "session_switch", canonicalCwd, projectTrusted: value.projectTrusted };
+}
+
+function parseAgentWorkerControl(raw: unknown): AgentWorkerControl {
+  const value = record(raw, "Worker Agent control");
+  const type = oneOf(value.type, ["activate", "resolve_session_target", "wait_for_idle", "dispose"], "Worker Agent control type");
+  if (type === "resolve_session_target") { exactKeys(value, ["type", "sessionFile"], "Worker Agent control"); return { type, sessionFile: boundedString(value.sessionFile, 16_384, "Session file") }; }
+  exactKeys(value, ["type"], "Worker Agent control"); return { type };
+}
+
+function isAgentRequest(type: string): type is AgentRequest["type"] {
+  return ["command.submit", "command.abort", "queue.dequeue", "model.list", "model.set", "thinking.set", "tool.list", "tool.set_active", "settings.get", "settings.update", "resource.get", "command.catalog", "session.history", "conversation.history", "conversation.content", "session.list", "session.switch", "session.new", "session.name", "session.compact", "session.reload", "session.tree", "session.navigate", "session.fork", "session.clone"].includes(type);
+}
+
 function parseCapability(raw: unknown): WorkerCapability {
   return oneOf(raw, [
-    "runtime.activate", "runtime.prompt", "runtime.queueMessage", "runtime.listModels", "runtime.listSessions", "runtime.getConversationHistory", "runtime.getConversationContent", "runtime.navigateTree", "runtime.listTools", "runtime.setActiveTools", "runtime.getSettings", "runtime.updateSetting", "runtime.getResources", "runtime.getCommands", "runtime.resolveSessionTarget", "runtime.newSession", "runtime.switchSession", "runtime.fork", "runtime.setSessionName", "runtime.compact", "runtime.reload", "runtime.selectModel", "runtime.setThinkingLevel", "runtime.clearQueue", "runtime.abort", "runtime.waitForIdle", "runtime.dispose",
     "ui.select", "ui.confirm", "ui.input", "ui.editor", "ui.notify", "ui.setTitle", "ui.setEditorText", "ui.setStatus", "ui.setWidget", "ui.widgetError", "ui.unsupported", "ui.setToolsExpanded", "ui.cancel", "ui.viewport", "ui.reset", "ui.generationBegin",
     "dock.identity",
   ] as const, "Worker capability");

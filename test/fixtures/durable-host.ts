@@ -4,7 +4,7 @@ import { DockHost } from "../../src/control/dock-host.js";
 import { FileCatalogStore } from "../../src/control/durable-catalog-store.js";
 import { DockRegistry } from "../../src/control/dock-registry.js";
 import { ManagedInstance } from "../../src/core/managed-instance.js";
-import { DelayedRuntimeSession } from "../support/delayed-runtime-session.js";
+import { DelayedAgentWorkerConnection } from "../support/delayed-agent-worker.js";
 
 const [socketPath, catalogPath, cwd, hostEpoch = randomUUID()] = process.argv.slice(2);
 if (!socketPath || !catalogPath || !cwd) throw new Error("durable-host fixture requires socket, catalog, and cwd");
@@ -14,7 +14,7 @@ const createDelayMs = Number(process.env.ALU_DOCK_FIXTURE_CREATE_DELAY_MS ?? "0"
 const registry = new DockRegistry(async (input) => {
   if (Number.isFinite(createDelayMs) && createDelayMs > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, createDelayMs));
   runtimeCount += 1;
-  const runtime = new DelayedRuntimeSession(`fixture-${hostEpoch}-${runtimeCount}`);
+  const runtime = new DelayedAgentWorkerConnection(`fixture-${hostEpoch}-${runtimeCount}`);
   if (input.sessionFile) runtime.sessionFile = input.sessionFile;
   return new ManagedInstance({
     id: input.id,

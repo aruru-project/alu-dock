@@ -3,18 +3,18 @@
 import { DockHost } from "../../src/control/dock-host.js";
 import { DockRegistry } from "../../src/control/dock-registry.js";
 import { ManagedInstance } from "../../src/core/managed-instance.js";
-import { DelayedRuntimeSession } from "../support/delayed-runtime-session.js";
+import { DelayedAgentWorkerConnection } from "../support/delayed-agent-worker.js";
 
 const [socketPath, allowedCwd, mode] = process.argv.slice(2);
 if (!socketPath || !allowedCwd) throw new Error("delayed-host fixture requires SOCKET_PATH CWD [--idle]");
 const startWithDelayedRun = mode !== "--idle";
 
-const sessions = new Map<string, DelayedRuntimeSession>();
+const sessions = new Map<string, DelayedAgentWorkerConnection>();
 const instances = new Map<string, ManagedInstance>();
 let sequence = 0;
 const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, name }) => {
   if (cwd !== allowedCwd) throw new Error(`unexpected fixture cwd: ${cwd}`);
-  const session = new DelayedRuntimeSession(`fixture-pi-${id}`);
+  const session = new DelayedAgentWorkerConnection(`fixture-pi-${id}`);
   const instance = new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, name, session, eventCapacity: 100 });
   sessions.set(id, session);
   instances.set(id, instance);

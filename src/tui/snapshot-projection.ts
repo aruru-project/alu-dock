@@ -1,7 +1,7 @@
 import type { DockEvent, InstanceSnapshot } from "../core/instance-dto.js";
-import type { RuntimeThinkingLevel } from "../core/runtime-session.js";
+import type { ThinkingLevel } from "../core/agent-worker.js";
 
-const THINKING_LEVELS: readonly RuntimeThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 export function projectSnapshot(snapshot: InstanceSnapshot, event: DockEvent): InstanceSnapshot {
   if (event.type === "git.branch_changed") {
@@ -135,7 +135,7 @@ function booleanData(event: DockEvent, key: string): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
-function thinkingData(event: DockEvent, key: string): RuntimeThinkingLevel | undefined {
+function thinkingData(event: DockEvent, key: string): ThinkingLevel | undefined {
   const value = (event.data as unknown as Record<string, unknown>)[key];
-  return typeof value === "string" && THINKING_LEVELS.includes(value as RuntimeThinkingLevel) ? value as RuntimeThinkingLevel : undefined;
+  return typeof value === "string" && THINKING_LEVELS.includes(value as ThinkingLevel) ? value as ThinkingLevel : undefined;
 }

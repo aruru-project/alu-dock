@@ -42,7 +42,7 @@ import {
   compareResourceDtos,
   compareToolDtos,
 } from "../core/config-projection.js";
-import type { RuntimeModelInfo, RuntimeThinkingLevel } from "../core/runtime-session.js";
+import type { AgentModelInfo, ThinkingLevel } from "../core/agent-worker.js";
 import type { ProjectTrustChoice } from "./project-trust.js";
 import { CATALOG_SCHEMA_VERSION, DOCK_VERSION, PI_SDK_VERSION } from "../version.js";
 
@@ -178,7 +178,7 @@ export type ControlRequest =
   | Request<"queue.dequeue", { operationId: string; instanceId: string }>
   | Request<"model.list", { instanceId: string }>
   | Request<"model.set", { operationId: string; instanceId: string; provider: string; modelId: string }>
-  | Request<"thinking.set", { operationId: string; instanceId: string; level: RuntimeThinkingLevel }>
+  | Request<"thinking.set", { operationId: string; instanceId: string; level: ThinkingLevel }>
   | Request<"tool.list", { instanceId: string }>
   | Request<"tool.set_active", { operationId: string; instanceId: string; names: string[] }>
   | Request<"settings.get", { instanceId: string }>
@@ -244,9 +244,9 @@ export interface StopResult { receipt: { operationId: string; alreadyStopped: bo
 export interface ForgetResult { receipt: { operationId: string; forgottenId: string; previousLifecycle: "stopped" | "host_lost" | "runtime_error"; piSessionFilesDeleted: 0 } }
 export interface PruneResult { receipt: { operationId: string; selector: "stopped"; forgottenIds: string[]; forgottenCount: number; hasMore: boolean; piSessionFilesDeleted: 0 } }
 export interface ReopenResult { operationId: string; previousLifecycle: "host_lost" | "runtime_error"; instance: InstanceSnapshot }
-export interface ModelsResult { models: RuntimeModelInfo[]; availableThinkingLevels: RuntimeThinkingLevel[]; instance: InstanceSnapshot; total: number; truncated: boolean }
+export interface ModelsResult { models: AgentModelInfo[]; availableThinkingLevels: ThinkingLevel[]; instance: InstanceSnapshot; total: number; truncated: boolean }
 export interface ModelConfigurationResult { instance: InstanceSnapshot; settingsWrite: { persisted: true } }
-export interface ThinkingConfigurationResult { actualLevel: RuntimeThinkingLevel; availableThinkingLevels: RuntimeThinkingLevel[]; instance: InstanceSnapshot; settingsWrite: { persisted: true } }
+export interface ThinkingConfigurationResult { actualLevel: ThinkingLevel; availableThinkingLevels: ThinkingLevel[]; instance: InstanceSnapshot; settingsWrite: { persisted: true } }
 export interface SessionsResult { sessions: SessionDto[]; total: number; truncated: boolean }
 export interface SessionInventoryResult {
   sessions: SessionDto[];
@@ -1333,7 +1333,7 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
   const data = object(input, field);
   const text = (key: string, max = MAX_TEXT): string => string(data[key], `${field}.${key}`, max);
   const optionalText = (key: string, max = MAX_TEXT): string | undefined => optionalString(data[key], `${field}.${key}`, max);
-  const levels = (key: string): RuntimeThinkingLevel[] => thinkingLevels(data[key]);
+  const levels = (key: string): ThinkingLevel[] => thinkingLevels(data[key]);
   switch (type) {
     case "instance.created": exact(data, ["cwd", "name", "executor"]); return { cwd: text("cwd", MAX_CONTROL_CWD_CHARS), name: optionalText("name", MAX_INSTANCE_NAME_CHARS), executor: parseExecutor(data.executor, `${field}.executor`) };
     case "instance.state_changed": exact(data, ["reason", "lifecycle", "execution", "compacting", "lastRun", "pending", "activeCommandId", "lastError"]); { const result = { reason: text("reason", MAX_MESSAGE), lifecycle: enumeration(data.lifecycle, "lifecycle", ["active", "stopping", "stopped", "host_lost", "runtime_error"]), execution: enumeration(data.execution, "execution", ["idle", "running", "failed", "unavailable"]), compacting: boolean(data.compacting, "compacting"), lastRun: enumeration(data.lastRun, "lastRun", ["never", "succeeded", "failed", "aborted", "interrupted"]), pending: parsePending(data.pending, `${field}.pending`), activeCommandId: optionalText("activeCommandId", 128), lastError: optionalText("lastError", MAX_MESSAGE) }; if (result.activeCommandId && result.execution !== "running") throw validation("invalid_response", "state event activeCommandId requires running"); if (result.compacting && result.execution !== "running") throw validation("invalid_response", "state event compacting requires running"); return result; }
@@ -1564,7 +1564,7 @@ function assertSorted<T>(values: T[], field: string, compare: (left: T, right: T
   }
 }
 function omitted(input: unknown, field: string): string[] | undefined { if (input === undefined) return undefined; const result = strings(input, field, MAX_JSON_ARRAY, MAX_CONTROL_CWD_CHARS); if (result.some((item) => !item.startsWith("/"))) throw validation("invalid_response", `${field} must contain relative JSON pointers`); return result; }
-function thinkingLevels(input: unknown): RuntimeThinkingLevel[] { return array(input, "availableThinkingLevels", THINKING_LEVELS.length).map((item) => enumeration(item, "thinking level", THINKING_LEVELS)); }
+function thinkingLevels(input: unknown): ThinkingLevel[] { return array(input, "availableThinkingLevels", THINKING_LEVELS.length).map((item) => enumeration(item, "thinking level", THINKING_LEVELS)); }
 
 export class ProtocolValidationError extends Error { constructor(readonly code: string, message: string) { super(message); this.name = "ProtocolValidationError"; } }
 function validation(code: string, message: string): ProtocolValidationError { return new ProtocolValidationError(code, message); }

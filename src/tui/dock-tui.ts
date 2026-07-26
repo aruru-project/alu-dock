@@ -18,9 +18,9 @@ import type { InteractionResponse } from "../core/extension-ui-broker.js";
 import type { CommandDto, SettingDto, SettingUpdate } from "../core/config-projection.js";
 import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot, PendingMessageDto, SessionDto, TreeNodeDto } from "../core/managed-instance.js";
 import type {
-  RuntimeModelInfo,
-  RuntimeThinkingLevel,
-} from "../core/runtime-session.js";
+  AgentModelInfo,
+  ThinkingLevel,
+} from "../core/agent-worker.js";
 import type { ProjectTrustChoice } from "../control/project-trust.js";
 import { ActivityPulseController } from "./activity-pulse.js";
 import { DockActivityLine, DockConversation, DockStatusLine, DockWorkMetadata } from "./conversation.js";
@@ -56,7 +56,7 @@ import {
 import { editorTheme, paint } from "./theme.js";
 import { FixedActionDialog, WorkModalFrame } from "./work-modal.js";
 
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly RuntimeThinkingLevel[];
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ThinkingLevel[];
 const SUBMITTING_FEEDBACK_DELAY_MS = 200;
 
 export function pickerContentRowBudget(terminalRows: number): number {
@@ -752,7 +752,7 @@ export async function runDockTui(
     }
   }
 
-  async function showModelPicker(models: RuntimeModelInfo[]): Promise<RuntimeModelInfo | undefined> {
+  async function showModelPicker(models: AgentModelInfo[]): Promise<AgentModelInfo | undefined> {
     if (models.length === 0) {
       conversation.addNotice("Pi reported no models with configured authentication.", true);
       return undefined;
@@ -1591,7 +1591,7 @@ export async function runDockTui(
     }
   }
 
-  async function switchThinking(level: RuntimeThinkingLevel): Promise<void> {
+  async function switchThinking(level: ThinkingLevel): Promise<void> {
     blockEditorSubmit();
     showStatus(`thinking ${level}`);
     tui.requestRender();
@@ -2170,7 +2170,7 @@ function parseModelTarget(value: string): { provider: string; id: string } | und
   return { provider: value.slice(0, separator), id: value.slice(separator + 1) };
 }
 
-function isThinkingLevel(value: string): value is RuntimeThinkingLevel {
+function isThinkingLevel(value: string): value is ThinkingLevel {
   return (THINKING_LEVELS as readonly string[]).includes(value);
 }
 

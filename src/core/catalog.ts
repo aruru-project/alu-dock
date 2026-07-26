@@ -1,5 +1,5 @@
 import type { InstanceExecution, InstanceLifecycle, LastRunResult } from "./managed-instance.js";
-import type { RuntimeThinkingLevel } from "./runtime-session.js";
+import type { ThinkingLevel } from "./agent-worker.js";
 
 export type CatalogMutationEffect = "pre_effect" | "post_effect" | "rollback_contained";
 
@@ -45,7 +45,7 @@ export interface CatalogInstanceRecord {
   piSessionId: string;
   sessionFile?: string;
   model?: { provider: string; id: string };
-  thinkingLevel?: RuntimeThinkingLevel;
+  thinkingLevel?: ThinkingLevel;
   activeCommandId?: string;
   admissionPending: boolean;
   admissionOperationId?: string;
