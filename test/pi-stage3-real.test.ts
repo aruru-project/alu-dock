@@ -90,13 +90,23 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
   const targetFile = target.getSessionFile();
   assert.ok(targetFile);
 
-  const instance = await createPiInstance({
-    cwd,
-    agentDir,
-    sessionDir,
-    projectTrusted: true,
-    name: "stage3-real",
-  });
+  const previousPiOffline = process.env.PI_OFFLINE;
+  process.env.PI_OFFLINE = "1";
+  const instance = await (async () => {
+    try {
+      return await createPiInstance({
+        cwd,
+        agentDir,
+        sessionDir,
+        projectTrusted: true,
+        name: "stage3-real",
+        workerTimeouts: { mutationMs: 10_000 },
+      });
+    } finally {
+      if (previousPiOffline === undefined) delete process.env.PI_OFFLINE;
+      else process.env.PI_OFFLINE = previousPiOffline;
+    }
+  })();
   try {
     assert.equal(instance.snapshot().metrics?.context?.contextWindow, 111_111);
     const updated = await instance.updateSetting({ key: "autoRetry", value: false }, "real-setting");
@@ -166,6 +176,9 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
       "start:resume",
       "shutdown:quit",
     ]);
+  } catch (error) {
+    const lifecycle = await readFile(lifecycleLog, "utf8").catch(() => "<unavailable>");
+    throw new Error(`Stage 3 lifecycle before failure:\n${lifecycle.trim()}`, { cause: error });
   } finally {
     if (instance.snapshot().lifecycle === "active") await instance.stop("real-cleanup").catch(() => {});
     await rm(root, { recursive: true, force: true });

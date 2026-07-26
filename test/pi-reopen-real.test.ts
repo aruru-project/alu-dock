@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -66,5 +66,9 @@ test("real Pi reopens a persisted session as a fresh Dock generation without a m
     assert.equal(snapshot.metrics?.tokens.total, 0);
   } finally {
     await reopened.disposeUnpublished();
+    await Promise.all([
+      rm(cwd, { recursive: true, force: true }),
+      rm(sessionDir, { recursive: true, force: true }),
+    ]);
   }
 });
