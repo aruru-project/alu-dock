@@ -90,6 +90,6 @@ npm run cli
 - Agent Worker 与 runtime：[`docs/agent_maps/runtime.md`](docs/agent_maps/runtime.md)
 - Hub 与 Work TUI：[`docs/agent_maps/tui.md`](docs/agent_maps/tui.md)
 - 部署：[`docs/agent_maps/deployment.md`](docs/agent_maps/deployment.md)
-- Web 接入：[`docs/web-client-integration.md`](docs/web-client-integration.md)
+- 客户端接入：[`docs/client-integration.md`](docs/client-integration.md)
 - 测试：[`docs/qa.md`](docs/qa.md)
 - 本地安装：[`docs/local-install.md`](docs/local-install.md)
