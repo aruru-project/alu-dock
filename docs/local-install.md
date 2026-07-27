@@ -14,7 +14,7 @@ Host 和 Worker 从安装包自己的依赖加载 Agent runtime，不调用 `$PA
 
 ## 安装或更新
 
-从 clean committed checkout 执行：
+从要安装的工作区执行：
 
 ```bash
 npm run install:local

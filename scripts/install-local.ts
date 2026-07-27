@@ -24,7 +24,6 @@ async function main(): Promise<void> {
 
   const options = parseLocalInstallArguments(process.argv.slice(2));
   const projectRoot = resolve(process.cwd());
-  await requireCleanCheckout(projectRoot);
   await requireInstallAllowed(options.replaceActive);
 
   const home = resolve(homedir());
@@ -51,15 +50,10 @@ async function main(): Promise<void> {
     const service = run(process.execPath, [layout.cliPath, "service", "install", "--now"], projectRoot);
     const status = parseServiceStatus(service.stdout);
     const commit = run("git", ["rev-parse", "--short=12", "HEAD"], projectRoot).stdout.trim();
-    process.stdout.write(`Ready · PID ${status.mainPid} · commit ${commit}\n`);
+    process.stdout.write(`Ready · PID ${status.mainPid} · working tree at ${commit}\n`);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
-}
-
-async function requireCleanCheckout(projectRoot: string): Promise<void> {
-  const status = run("git", ["status", "--porcelain", "--untracked-files=normal"], projectRoot).stdout.trim();
-  if (status.length > 0) throw new Error("Local install requires a clean committed checkout.");
 }
 
 async function requireInstallAllowed(replaceActive: boolean): Promise<void> {
