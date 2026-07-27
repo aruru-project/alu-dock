@@ -1,12 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import {
-  boundToolResultText,
-  projectBuiltInToolPresentation,
-  validateBuiltInToolPresentation,
-  type BuiltInToolPresentation,
-} from "./tool-result-presentation.js";
-import {
   CatalogEffectUnknownError,
   CatalogWriteError,
   MutationFaultedError,
@@ -80,6 +74,7 @@ import type {
   AttachProjection,
   CommandReceipt,
   ContentBlockDto,
+  ConversationFrame,
   ConversationContentChunkDto,
   ConversationContentPageDto,
   ConversationHistoryPageDto,
@@ -113,6 +108,7 @@ export type {
   AttachProjection,
   CommandReceipt,
   ContentBlockDto,
+  ConversationFrame,
   ConversationContentChunkDto,
   ConversationContentPageDto,
   ConversationHistoryEntryDto,
@@ -210,7 +206,6 @@ interface AcceptedPromptMessage {
 
 interface QueuedUserMessageStart {
   queued: PendingQueueMessage;
-  consumedText: string;
 }
 
 type PendingQueuePhase = "runtime_queued" | "host_deferred" | "dispatching" | "fresh_in_flight" | "effect_unknown";
@@ -244,10 +239,6 @@ interface WorkingCheckpoint {
   runtimeGeneration: number;
   agentStartCount: number;
   agentSettledCount: number;
-  assistantMessageSequence: number;
-  currentAssistantMessageId: string | undefined;
-  currentUserMessageId: string | undefined;
-  announcedToolCalls: string[];
   lastAssistantOutcome: AssistantOutcome | undefined;
   stopRequestedWhileRunning: boolean;
   catalogAdmissionOperationId: string | undefined;
@@ -345,11 +336,19 @@ export class ManagedInstance {
   private gitBranchValue: string | undefined;
   private readonly executorIdentity: ExecutorIdentity;
   private historyValue: HistoryEntryDto[];
+  private historyRevisionValue = 1;
   private metricsValue: SessionMetricsDto;
   private readonly eventCapacity: number;
   private readonly now: () => Date;
   private readonly createCommandId: () => string;
   private readonly eventLog: DockEvent[] = [];
+  /**
+   * Conversation frames which have not yet crossed into the authoritative
+   * persisted-history projection. This is a transport cache for late joiners,
+   * not a second conversation model: frames are retained and released only by
+   * their explicit lifecycle and Worker history boundary.
+   */
+  private readonly activeConversationEvents: DockEvent[] = [];
   private readonly subscribers = new Set<(event: DockEvent) => void>();
   private readonly backgroundTasks = new Set<Promise<void>>();
   private state: MutableState;
@@ -383,11 +382,8 @@ export class ManagedInstance {
   private nextEventSequence = 1;
   private agentStartCount = 0;
   private agentSettledCount = 0;
-  private assistantMessageSequence = 0;
-  private currentAssistantMessageId: string | undefined;
-  private currentUserMessageId: string | undefined;
-  private readonly announcedToolCalls = new Set<string>();
   private readonly acceptedPromptMessages: AcceptedPromptMessage[] = [];
+  private readonly consumedQueueItemIds = new Map<string, string>();
   /** User-visible, still-restorable Queue custody for this runtime generation. */
   private readonly pendingQueueMessages: PendingQueueMessage[] = [];
   /**
@@ -1000,20 +996,13 @@ export class ManagedInstance {
       const sourcePage = this.eventsSince(replaySince);
       const history = this.buildHistoryPage(undefined, historyLimit);
       const page = replayPurpose === "conversation_bootstrap"
-        ? { ...sourcePage, events: conversationBootstrapEvents(
-          sourcePage.events,
-          this.historyValue,
-          instance,
-          sourcePage.truncated,
-          this.agentState().isStreaming,
-        ) }
-        : replayPurpose === "legacy_history_overlay"
-          ? { ...sourcePage, events: reconcileConversationEventsWithHistory(sourcePage.events, this.historyValue) }
-          : sourcePage;
+        ? { ...sourcePage, events: conversationBootstrapEvents(this.activeConversationEvents, sourcePage.events, instance) }
+        : sourcePage;
       return {
         instance,
         page,
         recentHistory: history.entries,
+        historyRevision: history.historyRevision,
         historyTruncated: history.hasEarlier,
         pendingMessages: this.pendingMessagesProjection(),
         replaySince,
@@ -2593,10 +2582,6 @@ export class ManagedInstance {
       runtimeGeneration: this.runtimeGenerationValue,
       agentStartCount: this.agentStartCount,
       agentSettledCount: this.agentSettledCount,
-      assistantMessageSequence: this.assistantMessageSequence,
-      currentAssistantMessageId: this.currentAssistantMessageId,
-      currentUserMessageId: this.currentUserMessageId,
-      announcedToolCalls: [...this.announcedToolCalls],
       lastAssistantOutcome: this.lastAssistantOutcome ? { ...this.lastAssistantOutcome } : undefined,
       stopRequestedWhileRunning: this.stopRequestedWhileRunning,
       catalogAdmissionOperationId: this.catalogAdmissionOperationId,
@@ -2624,11 +2609,6 @@ export class ManagedInstance {
     this.runtimeGenerationValue = checkpoint.runtimeGeneration;
     this.agentStartCount = checkpoint.agentStartCount;
     this.agentSettledCount = checkpoint.agentSettledCount;
-    this.assistantMessageSequence = checkpoint.assistantMessageSequence;
-    this.currentAssistantMessageId = checkpoint.currentAssistantMessageId;
-    this.currentUserMessageId = checkpoint.currentUserMessageId;
-    this.announcedToolCalls.clear();
-    for (const toolCallId of checkpoint.announcedToolCalls) this.announcedToolCalls.add(toolCallId);
     this.lastAssistantOutcome = checkpoint.lastAssistantOutcome;
     this.stopRequestedWhileRunning = checkpoint.stopRequestedWhileRunning;
     this.catalogAdmissionOperationId = checkpoint.catalogAdmissionOperationId;
@@ -2691,6 +2671,7 @@ export class ManagedInstance {
     const start = Math.max(0, end - boundedLimit);
     const entries = cloneJson(source.slice(start, end));
     return {
+      historyRevision: this.historyRevisionValue,
       entries,
       hasEarlier: start > 0,
       ...(start > 0 && entries[0] ? { nextBeforeEntryId: entries[0].entryId } : {}),
@@ -2965,6 +2946,10 @@ export class ManagedInstance {
     if (!this.catalogPort) {
       try {
         this.handleAgentEvent(event);
+        if (event.type === "conversation_checkpoint") {
+          this.installConversationCheckpoint(event);
+          this.releasePersistedConversation(this.nextEventSequence - 1);
+        }
         if (refreshesMetrics(event)) this.refreshMetrics();
         if (refreshesHistory(event)) {
           const refresh = this.refreshHistory();
@@ -2975,14 +2960,23 @@ export class ManagedInstance {
       return;
     }
     const task = this.enqueueCatalogAgentEvent(event);
-    if (refreshesHistory(event)) this.trackHistoryRefresh(task);
+    if (event.type === "conversation_checkpoint" || refreshesHistory(event)) this.trackHistoryRefresh(task);
     void task.catch(() => {});
     if (this.receiptBoundaryOperationId !== undefined) this.receiptBoundaryTasks.push(task);
   }
 
   private enqueueCatalogAgentEvent(event: AgentEvent): Promise<void> {
     return this.enqueueTransition(async () => {
-      try { await this.handleCatalogAgentEvent(event); if (refreshesHistory(event)) await this.refreshHistory(); if (refreshesMetrics(event)) this.refreshMetrics(); }
+      try {
+        await this.handleCatalogAgentEvent(event);
+        if (event.type === "conversation_checkpoint") {
+          this.installConversationCheckpoint(event);
+          this.releasePersistedConversation(this.nextEventSequence - 1);
+        } else if (refreshesHistory(event)) {
+          await this.refreshHistory();
+        }
+        if (refreshesMetrics(event)) this.refreshMetrics();
+      }
       catch (error) {
         try {
           this.catalogPort?.assertWritable();
@@ -3020,6 +3014,7 @@ export class ManagedInstance {
     this.treeProjectionCache = undefined;
     const history = await this.invokeAgent<AgentHistoryEntry[]>("session.history", { limit: 200 });
     this.historyValue = history.map(projectAgentHistoryEntry);
+    this.historyRevisionValue += 1;
   }
 
   private refreshMetrics(): void {
@@ -3088,11 +3083,8 @@ export class ManagedInstance {
         this.shutdownRequestedAt = undefined;
         this.agentStartCount = 0;
         this.agentSettledCount = 0;
-        this.assistantMessageSequence = 0;
-        this.currentAssistantMessageId = undefined;
-        this.currentUserMessageId = undefined;
-        this.announcedToolCalls.clear();
         this.acceptedPromptMessages.length = 0;
+        this.consumedQueueItemIds.clear();
         this.pendingQueueMessages.length = 0;
         this.inFlightQueueMessages.length = 0;
         this.runtimeSteeringHashes = [];
@@ -3122,6 +3114,7 @@ export class ManagedInstance {
         this.publishedRuntimeGenerationValue = this.runtimeGenerationValue;
         this.nextEventSequence = 1;
         this.eventLog.length = 0;
+        this.activeConversationEvents.length = 0;
         this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue, gitBranch: this.gitBranchValue });
         if (replacedQueue.total > 0) this.appendEvent("queue.cleared", { ...replacedQueue, reason: "replacement" });
       });
@@ -3178,8 +3171,6 @@ export class ManagedInstance {
             this.extensionCommandInitiator = undefined;
           }
           this.agentStartCount += 1;
-          this.currentAssistantMessageId = undefined;
-          this.announcedToolCalls.clear();
           this.lastAssistantOutcome = undefined;
           this.state.execution = "running";
           this.state.lastError = undefined;
@@ -3190,21 +3181,29 @@ export class ManagedInstance {
         });
         return;
       case "agent_settled":
+        this.lastAssistantOutcome = {
+          stopReason: optionalRuntimeString(event.stopReason, 128),
+          errorMessage: optionalRuntimeString(event.error, 2_048),
+        };
         await this.commitAgentSettled(context("run.settled"));
         return;
-      case "message_start": {
-        const queuedStart = this.queuedUserMessageStart(event);
-        const needsPendingCommit = queuedStart !== undefined
-          && (queuedStart.queued.phase === "fresh_in_flight" || queuedStart.queued.phase === "effect_unknown");
-        if (!needsPendingCommit || queuedStart === undefined) {
+      case "dock_queue_consumed": {
+        const consumed = this.workerConsumedQueueMessage(event);
+        const needsPendingCommit = consumed !== undefined
+          && (consumed.queued.phase === "fresh_in_flight" || consumed.queued.phase === "effect_unknown");
+        if (!needsPendingCommit || consumed === undefined) {
           this.handleAgentEvent(event);
           return;
         }
-        await this.commitCatalogTransition(context("message.submitted"), () => {
-          this.removeQueuedUserMessage(queuedStart, true);
+        await this.commitCatalogTransition(context("queue.consumed"), () => {
+          const operationId = optionalRuntimeString(event.operationId, 128);
+          const acceptedIndex = operationId === undefined ? -1 : this.acceptedPromptMessages.findIndex((candidate) => candidate.operationId === operationId);
+          if (acceptedIndex >= 0) this.acceptedPromptMessages.splice(acceptedIndex, 1);
+          this.removeWorkerConsumedMessage(consumed, true);
           this.touch();
         }, () => {
-          this.publishQueuedUserMessage(queuedStart);
+          const operationId = optionalRuntimeString(event.operationId, 128);
+          if (operationId !== undefined) this.consumedQueueItemIds.set(operationId, consumed.queued.queueItemId);
           this.appendEvent("queue.changed", {
             steering: this.state.pendingSteering,
             followUp: this.state.pendingFollowUp,
@@ -3341,13 +3340,11 @@ export class ManagedInstance {
       this.shutdownRequestedAt = undefined;
       this.nextEventSequence = 1;
       this.eventLog.length = 0;
+      this.activeConversationEvents.length = 0;
       this.agentStartCount = 0;
       this.agentSettledCount = 0;
-      this.assistantMessageSequence = 0;
-      this.currentAssistantMessageId = undefined;
-      this.currentUserMessageId = undefined;
-      this.announcedToolCalls.clear();
       this.acceptedPromptMessages.length = 0;
+      this.consumedQueueItemIds.clear();
       this.pendingQueueMessages.length = 0;
       this.inFlightQueueMessages.length = 0;
       this.runtimeSteeringHashes = [];
@@ -3429,8 +3426,6 @@ export class ManagedInstance {
           this.extensionCommandInitiator = undefined;
         }
         this.agentStartCount += 1;
-        this.currentAssistantMessageId = undefined;
-        this.announcedToolCalls.clear();
         this.lastAssistantOutcome = undefined;
         this.state.execution = "running";
         this.state.lastError = undefined;
@@ -3443,6 +3438,10 @@ export class ManagedInstance {
       }
 
       case "agent_settled":
+        this.lastAssistantOutcome = {
+          stopReason: optionalRuntimeString(event.stopReason, 128),
+          errorMessage: optionalRuntimeString(event.error, 2_048),
+        };
         this.handleAgentSettled();
         break;
 
@@ -3458,90 +3457,13 @@ export class ManagedInstance {
         break;
       }
 
-      case "message_start":
-        this.handleMessageStart(event);
+      case "dock_queue_consumed":
+        this.handleWorkerQueueConsumed(event);
         break;
 
-      case "message_update":
-        this.handleMessageUpdate(event);
+      case "dock_conversation_frame":
+        this.appendWorkerConversationFrame(event);
         break;
-
-      case "message_end":
-        this.handleMessageEnd(event);
-        break;
-
-      case "tool_execution_start": {
-        const toolCallId = boundedRuntimeString(event.toolCallId, 128, "unknown");
-        const projected = projectJsonObject(event.args);
-        if (this.announcedToolCalls.has(toolCallId)) {
-          this.appendEvent("tool.args_updated", {
-            toolCallId,
-            args: projected.value,
-            ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
-          });
-        } else {
-          this.announcedToolCalls.add(toolCallId);
-          this.appendEvent("tool.started", {
-            toolCallId,
-            toolName: boundedRuntimeString(event.toolName, 256, "unknown"),
-            args: projected.value,
-            ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
-          });
-        }
-        break;
-      }
-
-      case "tool_execution_update": {
-        const toolCallId = boundedRuntimeString(event.toolCallId, 128, "unknown");
-        const toolName = boundedRuntimeString(event.toolName, 256, "unknown");
-        if (!this.announcedToolCalls.has(toolCallId)) {
-          this.announcedToolCalls.add(toolCallId);
-          this.appendEvent("tool.started", {
-            toolCallId,
-            toolName,
-            args: {},
-          });
-        }
-        const partialResult = recordValue(event.partialResult);
-        const resultProjection = projectRuntimeToolResult(
-          toolName,
-          partialResult?.content,
-          false,
-          partialResult?.presentation,
-          partialResult?.details,
-        );
-        this.appendEvent("tool.output_updated", {
-          toolCallId,
-          text: resultProjection.text,
-          ...(resultProjection.presentation === undefined ? {} : { presentation: resultProjection.presentation }),
-        });
-        break;
-      }
-
-      case "tool_execution_end": {
-        const toolCallId = boundedRuntimeString(event.toolCallId, 128, "unknown");
-        const toolName = boundedRuntimeString(event.toolName, 256, "unknown");
-        const isError = event.isError === true;
-        const result = recordValue(event.result);
-        const resultProjection = projectRuntimeToolResult(
-          toolName,
-          result?.content,
-          isError,
-          result?.presentation,
-          result?.details,
-        );
-        const projected = projectJsonObject({ content: result?.content });
-        this.appendEvent("tool.completed", {
-          toolCallId,
-          toolName,
-          isError,
-          text: resultProjection.text,
-          ...(resultProjection.presentation === undefined ? {} : { presentation: resultProjection.presentation }),
-          ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
-        });
-        this.announcedToolCalls.delete(toolCallId);
-        break;
-      }
 
       case "auto_retry_start":
         this.state.execution = "running";
@@ -3716,26 +3638,14 @@ export class ManagedInstance {
     }
   }
 
-  private queuedUserMessageStart(event: AgentEvent): QueuedUserMessageStart | undefined {
-    const message = recordValue(event.message);
-    if (!message || stringValue(message.role) !== "user") return undefined;
-    const consumedText = runtimeUserMessageText(message.content);
-    const consumedHash = runtimeMessageHash(consumedText);
-    const eligible = (item: PendingQueueMessage): boolean => item.phase === "runtime_queued"
-      || item.phase === "fresh_in_flight"
-      || item.phase === "effect_unknown";
-    const tracked = this.trackedQueueMessages();
-    const queueCandidates = [
-      ...tracked.filter((item) => item.delivery === "steer" && eligible(item)),
-      ...tracked.filter((item) => item.delivery === "followUp" && eligible(item)),
-    ];
-    const queued = queueCandidates.find((item) => item.runtimeTextHash === consumedHash)
-      ?? queueCandidates.find((item) => (item.originalText ?? item.text) === consumedText)
-      ?? queueCandidates.find((item) => item.text === consumedText);
-    return queued ? { queued, consumedText } : undefined;
+  private workerConsumedQueueMessage(event: AgentEvent): QueuedUserMessageStart | undefined {
+    const operationId = optionalRuntimeString(event.operationId, 128);
+    if (operationId === undefined) return undefined;
+    const queued = this.trackedQueueMessages().find((item) => item.operationId === operationId);
+    return queued === undefined ? undefined : { queued };
   }
 
-  private removeQueuedUserMessage(start: QueuedUserMessageStart, updatePendingCount: boolean): void {
+  private removeWorkerConsumedMessage(start: QueuedUserMessageStart, updatePendingCount: boolean): void {
     const pendingIndex = this.pendingQueueMessages.indexOf(start.queued);
     if (pendingIndex >= 0) this.pendingQueueMessages.splice(pendingIndex, 1);
     const inFlightIndex = this.inFlightQueueMessages.indexOf(start.queued);
@@ -3744,136 +3654,40 @@ export class ManagedInstance {
       if (start.queued.delivery === "steer") this.state.pendingSteering = Math.max(0, this.state.pendingSteering - 1);
       else this.state.pendingFollowUp = Math.max(0, this.state.pendingFollowUp - 1);
     }
-    this.currentUserMessageId = `user-${start.queued.operationId}`;
   }
 
-  private publishQueuedUserMessage(start: QueuedUserMessageStart): void {
-    this.appendEvent("message.submitted", {
-      operationId: start.queued.operationId,
-      messageId: this.currentUserMessageId ?? `user-${start.queued.operationId}`,
-      role: "user",
-      text: safeWireText(start.consumedText || start.queued.text, MAX_PENDING_QUEUE_TEXT_CHARS),
-      ...(start.queued.images === undefined ? {} : { images: cloneInputImages(start.queued.images) }),
-      delivery: start.queued.delivery,
-      queueItemId: start.queued.queueItemId,
-    });
+  private handleWorkerQueueConsumed(event: AgentEvent): void {
+    const operationId = optionalRuntimeString(event.operationId, 128);
+    if (operationId === undefined) return;
+    const acceptedIndex = this.acceptedPromptMessages.findIndex((candidate) => candidate.operationId === operationId);
+    if (acceptedIndex >= 0) this.acceptedPromptMessages.splice(acceptedIndex, 1);
+    const start = this.workerConsumedQueueMessage(event);
+    if (!start) return;
+    const updatePendingCount = this.pendingQueueMessages.includes(start.queued)
+      && (start.queued.phase === "fresh_in_flight" || start.queued.phase === "effect_unknown");
+    this.consumedQueueItemIds.set(operationId, start.queued.queueItemId);
+    this.removeWorkerConsumedMessage(start, updatePendingCount);
+    if (updatePendingCount) {
+      this.appendEvent("queue.changed", {
+        steering: this.state.pendingSteering,
+        followUp: this.state.pendingFollowUp,
+        total: this.state.pendingSteering + this.state.pendingFollowUp,
+      });
+      this.appendStateEvent("deferred_message_submitted");
+    }
   }
 
-  private handleMessageStart(event: AgentEvent): void {
-    const queuedStart = this.queuedUserMessageStart(event);
-    if (queuedStart) {
-      const updatePendingCount = this.pendingQueueMessages.includes(queuedStart.queued)
-        && (queuedStart.queued.phase === "fresh_in_flight" || queuedStart.queued.phase === "effect_unknown");
-      this.removeQueuedUserMessage(queuedStart, updatePendingCount);
-      this.publishQueuedUserMessage(queuedStart);
-      if (updatePendingCount) {
-        this.appendEvent("queue.changed", {
-          steering: this.state.pendingSteering,
-          followUp: this.state.pendingFollowUp,
-          total: this.state.pendingSteering + this.state.pendingFollowUp,
-        });
-        this.appendStateEvent("deferred_message_submitted");
-      }
+  private appendWorkerConversationFrame(event: AgentEvent): void {
+    const frame = event.frame as ConversationFrame | undefined;
+    if (!frame || !isConversationFrameType(frame.type)) throw new Error("Worker returned an invalid conversation frame");
+    if (frame.type === "message.submitted" && frame.data.delivery !== "prompt") {
+      const queueItemId = this.consumedQueueItemIds.get(frame.data.operationId);
+      if (queueItemId === undefined) throw new Error("Worker submitted a queued message without a Host queue identity");
+      this.consumedQueueItemIds.delete(frame.data.operationId);
+      this.appendEvent(frame.type, { ...cloneJson(frame.data), queueItemId });
       return;
     }
-
-    const message = recordValue(event.message);
-    if (!message || stringValue(message.role) !== "user") return;
-    const consumedText = runtimeUserMessageText(message.content);
-    const activeOperationId = this.state.activeCommandId;
-    const promptIndex = activeOperationId === undefined
-      ? 0
-      : this.acceptedPromptMessages.findIndex((candidate) => candidate.operationId === activeOperationId);
-    const accepted = promptIndex >= 0 ? this.acceptedPromptMessages.splice(promptIndex, 1)[0] : undefined;
-    const operationId = accepted?.operationId ?? activeOperationId ?? "runtime-initiated";
-    this.currentUserMessageId = `user-${operationId}`;
-    this.appendEvent("message.submitted", {
-      operationId,
-      messageId: this.currentUserMessageId,
-      role: "user",
-      text: safeWireText(consumedText || accepted?.text || "", MAX_PENDING_QUEUE_TEXT_CHARS),
-      ...(accepted?.images === undefined ? {} : { images: cloneInputImages(accepted.images) }),
-      delivery: "prompt",
-    });
-  }
-
-  private handleMessageUpdate(event: AgentEvent): void {
-    const update = recordValue(event.assistantMessageEvent);
-    if (!update) return;
-    const updateType = stringValue(update.type);
-    if (updateType === "start") {
-      this.ensureAssistantMessageId();
-      return;
-    }
-    if (updateType === "text_delta" || updateType === "thinking_delta") {
-      this.appendEvent("message.delta", {
-        messageId: this.ensureAssistantMessageId(),
-        block: updateType === "text_delta" ? "text" : "thinking",
-        delta: boundedRuntimeString(update.delta, 8_000, ""),
-      });
-      return;
-    }
-    if (updateType !== "toolcall_start" && updateType !== "toolcall_delta" && updateType !== "toolcall_end") return;
-    this.ensureAssistantMessageId();
-    const index = nonNegativeNumber(update.contentIndex);
-    const partial = recordValue(update.partial);
-    const content = Array.isArray(partial?.content) ? partial.content : [];
-    const partialToolCall = recordValue(content[index]);
-    const finalToolCall = recordValue(update.toolCall);
-    const toolCall = finalToolCall ?? partialToolCall;
-    const rawId = stringValue(toolCall?.id);
-    if (!rawId) return;
-    const toolCallId = boundedRuntimeString(rawId, 128, "unknown");
-    const projected = projectJsonObject(toolCall?.arguments ?? {});
-    if (!this.announcedToolCalls.has(toolCallId)) {
-      this.announcedToolCalls.add(toolCallId);
-      this.appendEvent("tool.started", {
-        toolCallId,
-        toolName: boundedRuntimeString(toolCall?.name, 256, "tool"),
-        args: projected.value,
-        ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
-      });
-    } else {
-      this.appendEvent("tool.args_updated", {
-        toolCallId,
-        args: projected.value,
-        ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
-      });
-    }
-  }
-
-  private handleMessageEnd(event: AgentEvent): void {
-    const message = recordValue(event.message);
-    if (!message) return;
-    const role = stringValue(message.role);
-    let messageId: string;
-    if (role === "assistant") {
-      messageId = this.ensureAssistantMessageId();
-      this.lastAssistantOutcome = {
-        stopReason: optionalRuntimeString(message.stopReason, 128),
-        errorMessage: optionalRuntimeString(message.errorMessage, 2_048),
-      };
-    } else if (role === "user" && this.currentUserMessageId) {
-      messageId = this.currentUserMessageId;
-    } else if (role === "toolResult") {
-      messageId = `tool-result-${boundedRuntimeString(message.toolCallId, 128, "unknown")}`;
-    } else {
-      messageId = `message-${this.runtimeGenerationValue}-${++this.assistantMessageSequence}`;
-    }
-    this.appendEvent("message.completed", {
-      messageId,
-      role: messageRole(role),
-      content: projectContentBlocks(message.content),
-      stopReason: optionalRuntimeString(message.stopReason, 128),
-      error: optionalRuntimeString(message.errorMessage, 2_048),
-    });
-    if (role === "assistant") this.currentAssistantMessageId = undefined;
-    if (role === "user") this.currentUserMessageId = undefined;
-  }
-
-  private ensureAssistantMessageId(): string {
-    this.currentAssistantMessageId ??= `assistant-${this.runtimeGenerationValue}-${++this.assistantMessageSequence}`;
-    return this.currentAssistantMessageId;
+    this.appendEvent(frame.type, cloneJson(frame.data) as EventDataMap[typeof frame.type]);
   }
 
   private appendStateEvent(reason: string, occurredAt?: string): void {
@@ -3907,6 +3721,7 @@ export class ManagedInstance {
       type,
       data,
     } as DockEvent;
+    this.captureActiveConversationEvent(event);
     this.eventLog.push(event);
     if (this.eventLog.length > this.eventCapacity) this.eventLog.shift();
     if (this.catalogPort && this.committedSnapshotValue) {
@@ -3924,6 +3739,40 @@ export class ManagedInstance {
       }
     }
     return event;
+  }
+
+  private captureActiveConversationEvent(event: DockEvent): void {
+    if (!isConversationFrame(event)) return;
+    const copy = cloneDockEvent(event);
+    const previous = this.activeConversationEvents.at(-1);
+    if (previous?.type === "message.delta" && copy.type === "message.delta"
+      && previous.data.messageId === copy.data.messageId
+      && previous.data.block === copy.data.block
+      && previous.data.delta.length + copy.data.delta.length <= 8_000) {
+      previous.data.delta += copy.data.delta;
+      previous.sequence = copy.sequence;
+      previous.occurredAt = copy.occurredAt;
+      return;
+    }
+    if ((copy.type === "tool.args_updated" || copy.type === "tool.output_updated")) {
+      const superseded = this.activeConversationEvents.findLastIndex((candidate) => (
+        candidate.type === copy.type && candidate.data.toolCallId === copy.data.toolCallId
+      ));
+      if (superseded >= 0) this.activeConversationEvents.splice(superseded, 1);
+    }
+    this.activeConversationEvents.push(copy);
+  }
+
+  private installConversationCheckpoint(event: AgentEvent): void {
+    if (!Array.isArray(event.history)) throw new Error("Worker conversation checkpoint is missing its authoritative history");
+    const history = event.history.map((entry) => projectAgentHistoryEntry(entry as AgentHistoryEntry));
+    this.historyValue = history;
+    this.historyRevisionValue += 1;
+  }
+
+  private releasePersistedConversation(sequence: number): void {
+    const retained = this.activeConversationEvents.filter((event) => event.sequence > sequence);
+    this.activeConversationEvents.splice(0, this.activeConversationEvents.length, ...retained);
   }
 
   private touch(timestamp = this.timestamp()): void {
@@ -4074,190 +3923,67 @@ function selectClearedQueueMessages(
 }
 
 function conversationBootstrapEvents(
-  events: DockEvent[],
-  history: HistoryEntryDto[],
+  activeEvents: readonly DockEvent[],
+  replayEvents: readonly DockEvent[],
   instance: InstanceSnapshot,
-  truncated: boolean,
-  runtimeAgentActive: boolean,
 ): DockEvent[] {
-  let conversation: DockEvent[] = [];
-  if (instance.execution === "running" && (instance.activeCommandId !== undefined || runtimeAgentActive)) {
-    // Extension-triggered turns (for example a post-compaction continuation)
-    // are Host-owned runs without a client command ID. Their closed run.started
-    // identity is still stable and must recover the unresolved tail on attach.
-    const activeOperationId = instance.activeCommandId ?? "runtime-initiated";
-    let start = events.findLastIndex((event) => event.type === "run.started" && event.data.operationId === activeOperationId);
-    if (start < 0) {
-      start = events.findLastIndex((event) => event.type === "message.submitted" && event.data.operationId === activeOperationId);
-    }
-    // A truncated ring contains only events newer than its evicted prefix. If the
-    // snapshot still identifies an active run, every retained frame is part of
-    // that run's live era even when its start marker has fallen out.
-    if (start >= 0 || truncated) {
-      conversation = reconcileConversationEventsWithHistory(start < 0 ? events : events.slice(start), history, true);
-    }
-  }
-
+  const conversation = activeEvents
+    .filter((event) => event.runtimeGeneration === instance.runtimeGeneration)
+    .map(cloneDockEvent);
   const activeInteractionId = instance.activeInteraction?.id;
-  const interaction = activeInteractionId === undefined ? undefined : events.findLast((event) => event.type === "interaction.requested"
-    && event.data.interactionId === activeInteractionId);
+  const interaction = activeInteractionId === undefined ? undefined : replayEvents.findLast((event) => (
+    event.type === "interaction.requested" && event.data.interactionId === activeInteractionId
+  ));
   if (interaction === undefined || conversation.some((event) => event.sequence === interaction.sequence)) return conversation;
-  return [...conversation, interaction].sort((left, right) => left.runtimeGeneration - right.runtimeGeneration || left.sequence - right.sequence);
+  return [...conversation, cloneDockEvent(interaction)].sort((left, right) => (
+    left.runtimeGeneration - right.runtimeGeneration || left.sequence - right.sequence
+  ));
 }
 
-/** Remove only conversation frames proven durable in the supplied branch history. */
-export function reconcileConversationEventsWithHistory(events: DockEvent[], history: readonly HistoryEntryDto[], activeTail = false): DockEvent[] {
-  const comparableHistory = activeTail ? historySuffixCoveredByEvents(events, history) : history;
-  const counts = new Map<string, number>();
-  for (const entry of comparableHistory) {
-    const fingerprint = historyFingerprint(entry.role, entry.content);
-    counts.set(fingerprint, (counts.get(fingerprint) ?? 0) + 1);
-  }
-  const coveredMessages = new Set<string>();
-  const coveredTools = new Set<string>();
-  const consume = (fingerprint: string): boolean => {
-    const count = counts.get(fingerprint) ?? 0;
-    if (count < 1) return false;
-    if (count === 1) counts.delete(fingerprint); else counts.set(fingerprint, count - 1);
-    return true;
-  };
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]!;
-    if (event.type === "message.completed") {
-      if (event.data.role === "user" || coveredMessages.has(event.data.messageId)) continue;
-      if (consume(historyFingerprint(event.data.role, event.data.content))) coveredMessages.add(event.data.messageId);
-    } else if (event.type === "message.submitted") {
-      if (coveredMessages.has(event.data.messageId)) continue;
-      const content: ContentBlockDto[] = [
-        { type: "text", text: event.data.text },
-        ...(event.data.images ?? []).map((image) => ({ type: "image" as const, mimeType: image.mimeType })),
-      ];
-      if (consume(historyFingerprint("user", content))) coveredMessages.add(event.data.messageId);
-    } else if (event.type === "tool.completed") {
-      const content: ContentBlockDto[] = [{
-        type: "tool_result",
-        toolCallId: event.data.toolCallId,
-        toolName: event.data.toolName,
-        text: event.data.text,
-        isError: event.data.isError,
-      }];
-      if (consume(historyFingerprint("tool", content))) coveredTools.add(event.data.toolCallId);
-    }
-  }
-  return events.filter((event) => {
-    if (event.type === "message.submitted" || event.type === "message.delta" || event.type === "message.completed") {
-      return !coveredMessages.has(event.data.messageId);
-    }
-    if (event.type === "tool.started" || event.type === "tool.args_updated" || event.type === "tool.output_updated" || event.type === "tool.completed") {
-      return !coveredTools.has(event.data.toolCallId);
-    }
-    return true;
-  });
+function isConversationFrameType(type: string): type is ConversationFrame["type"] {
+  return type === "message.submitted"
+    || type === "message.delta"
+    || type === "message.completed"
+    || type === "tool.started"
+    || type === "tool.args_updated"
+    || type === "tool.output_updated"
+    || type === "tool.completed";
 }
 
-function historySuffixCoveredByEvents(events: DockEvent[], history: readonly HistoryEntryDto[]): readonly HistoryEntryDto[] {
-  const submitted = events.find((event): event is Extract<DockEvent, { type: "message.submitted" }> => event.type === "message.submitted");
-  if (!submitted) return history;
-
-  const eventFingerprints = new Map<string, string>();
-  const toolFingerprints = new Map<string, string>();
-  for (const event of events) {
-    if (event.type === "message.submitted") {
-      eventFingerprints.set(event.data.messageId, historyFingerprint("user", [
-        { type: "text", text: event.data.text },
-        ...(event.data.images ?? []).map((image) => ({ type: "image" as const, mimeType: image.mimeType })),
-      ]));
-    } else if (event.type === "message.completed" && !eventFingerprints.has(event.data.messageId)) {
-      eventFingerprints.set(event.data.messageId, historyFingerprint(event.data.role, event.data.content));
-    } else if (event.type === "tool.completed") {
-      toolFingerprints.set(event.data.toolCallId, historyFingerprint("tool", [{
-        type: "tool_result",
-        toolCallId: event.data.toolCallId,
-        toolName: event.data.toolName,
-        text: event.data.text,
-        isError: event.data.isError,
-      }]));
-    }
-  }
-
-  const available = new Map<string, number>();
-  for (const fingerprint of [...eventFingerprints.values(), ...toolFingerprints.values()]) {
-    available.set(fingerprint, (available.get(fingerprint) ?? 0) + 1);
-  }
-  const anchor = eventFingerprints.get(submitted.data.messageId);
-  if (!anchor) return [];
-  for (let start = history.length - 1; start >= 0; start -= 1) {
-    if (historyFingerprint(history[start]!.role, history[start]!.content) !== anchor) continue;
-    const remaining = new Map(available);
-    let covered = true;
-    for (const entry of history.slice(start)) {
-      const fingerprint = historyFingerprint(entry.role, entry.content);
-      const count = remaining.get(fingerprint) ?? 0;
-      if (count < 1) { covered = false; break; }
-      if (count === 1) remaining.delete(fingerprint); else remaining.set(fingerprint, count - 1);
-    }
-    if (covered) return history.slice(start);
-  }
-  return [];
-}
-
-function historyFingerprint(role: HistoryEntryDto["role"], content: ContentBlockDto[]): string {
-  const normalized = content.map((block) => {
-    if (block.type === "tool_call") return { type: block.type, toolCallId: block.toolCallId, toolName: block.toolName, args: block.args };
-    if (block.type === "tool_result") return { type: block.type, toolCallId: block.toolCallId, toolName: block.toolName, text: block.text, isError: block.isError };
-    return block;
-  });
-  return JSON.stringify({ role, content: normalized });
+function isConversationFrame(event: DockEvent): event is Extract<DockEvent, {
+  type: "message.submitted" | "message.delta" | "message.completed"
+    | "tool.started" | "tool.args_updated" | "tool.output_updated" | "tool.completed";
+}> {
+  return event.type === "message.submitted"
+    || event.type === "message.delta"
+    || event.type === "message.completed"
+    || event.type === "tool.started"
+    || event.type === "tool.args_updated"
+    || event.type === "tool.output_updated"
+    || event.type === "tool.completed";
 }
 
 function refreshesHistory(event: AgentEvent): boolean {
-  return event.type === "entry_appended"
-    || event.type === "message_end"
-    || event.type === "session_info_changed"
-    || event.type === "compaction_end"
+  return event.type === "session_info_changed"
     || event.type === "dock_session_replaced";
 }
 
 function refreshesMetrics(event: AgentEvent): boolean {
-  return event.type === "entry_appended"
-    || event.type === "message_end"
-    || event.type === "tool_execution_end"
+  return event.type === "conversation_checkpoint"
     || event.type === "agent_settled"
     || event.type === "compaction_end"
     || event.type === "dock_session_replaced";
 }
 
 function projectAgentHistoryEntry(entry: AgentHistoryEntry): HistoryEntryDto {
-  const role = historyRole(entry.role);
-  const summaryKind = entry.summaryKind
-    ?? (entry.role === "compactionSummary" ? "compaction" : entry.role === "branchSummary" ? "branch" : undefined);
-  const entryId = boundedRuntimeString(entry.entryId, 128, "unknown-entry");
-  let content: ContentBlockDto[];
-  if (role === "tool") {
-    const toolName = boundedRuntimeString(entry.toolName, 256, "tool");
-    const isError = entry.isError === true;
-    const resultProjection = projectRuntimeToolResult(toolName, entry.content, isError, entry.toolPresentation);
-    content = [{
-      type: "tool_result",
-      toolCallId: boundedRuntimeString(entry.toolCallId, 128, `tool-${entryId}`),
-      toolName,
-      text: resultProjection.text,
-      isError,
-      ...(resultProjection.presentation === undefined ? {} : { presentation: resultProjection.presentation }),
-    }];
-  } else {
-    content = projectContentBlocks(entry.content);
+  if (entry.recordId.length < 1 || entry.recordId.length > 128 || entry.entryId.length < 1 || entry.entryId.length > 128) {
+    throw new Error("Runtime returned an invalid conversation record identity");
   }
-  return {
-    entryId,
-    ...(entry.parentId === undefined ? {} : { parentId: boundedRuntimeString(entry.parentId, 128, "unknown-parent") }),
-    role,
-    ...(summaryKind === undefined ? {} : { summaryKind }),
-    ...(isIsoTimestamp(entry.timestamp) ? { timestamp: entry.timestamp } : {}),
-    content,
-    ...(entry.stopReason === undefined ? {} : { stopReason: boundedRuntimeString(entry.stopReason, 128, "unknown") }),
-    ...(entry.error === undefined ? {} : { error: safeWireText(entry.error, 2_048) }),
-  };
+  if (entry.parentId !== undefined && (entry.parentId.length < 1 || entry.parentId.length > 128)) {
+    throw new Error("Runtime returned an invalid conversation parent identity");
+  }
+  if (entry.content.length > 200) throw new Error("Runtime returned too many conversation content blocks");
+  return cloneJson(entry);
 }
 
 function projectConversationHistoryPreview(entry: AgentHistoryEntry): HistoryEntryDto {
@@ -4345,13 +4071,6 @@ function projectRuntimeConversationChunk(chunk: AgentConversationContentChunk): 
     kind: chunk.kind,
     description: chunk.description,
   };
-}
-
-function historyRole(value: string): HistoryEntryDto["role"] {
-  if (value === "user") return "user";
-  if (value === "tool" || value === "toolResult") return "tool";
-  if (value === "system" || value === "bashExecution" || value === "custom" || value === "branchSummary" || value === "compactionSummary") return "system";
-  return "assistant";
 }
 
 function projectRuntimeMetrics(value: AgentSessionMetrics): SessionMetricsDto {
@@ -4458,13 +4177,6 @@ function compactionReason(value: unknown): "manual" | "threshold" | "overflow" {
   return value === "threshold" || value === "overflow" ? value : "manual";
 }
 
-function messageRole(value: unknown): "user" | "assistant" | "tool" | "system" {
-  if (value === "user" || value === "system") return value;
-  if (value === "tool" || value === "toolResult") return "tool";
-  if (value === "bashExecution" || value === "custom" || value === "branchSummary" || value === "compactionSummary") return "system";
-  return "assistant";
-}
-
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
@@ -4479,61 +4191,6 @@ function extractText(content: unknown): string | undefined {
     .map((block) => stringValue(block.text) ?? "")
     .join("");
   return text.length > 0 ? text : undefined;
-}
-
-function projectContentBlocks(content: unknown): ContentBlockDto[] {
-  if (typeof content === "string") {
-    const text = sliceWithoutMarker(content, 8_000);
-    return text.length > 0 ? [{ type: "text", text }] : [];
-  }
-  if (!Array.isArray(content)) return [];
-  const blocks: ContentBlockDto[] = [];
-  const maxBytes = 512_000;
-  let bytes = 2;
-  const append = (candidate: ContentBlockDto): boolean => {
-    const candidateBytes = Buffer.byteLength(JSON.stringify(candidate), "utf8") + (blocks.length > 0 ? 1 : 0);
-    if (bytes + candidateBytes > maxBytes) return false;
-    blocks.push(candidate);
-    bytes += candidateBytes;
-    return true;
-  };
-  for (const item of content.slice(0, 200)) {
-    const block = recordValue(item);
-    if (!block) continue;
-    let candidate: ContentBlockDto | undefined;
-    if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
-      candidate = { type: "text", text: sliceWithoutMarker(block.text, 8_000) };
-    } else if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking.length > 0) {
-      candidate = { type: "thinking", text: sliceWithoutMarker(block.thinking, 8_000) };
-    } else if ((block.type === "toolCall" || block.type === "tool_call") && typeof block.name === "string") {
-      const projected = projectJsonObject(block.arguments);
-      candidate = {
-        type: "tool_call",
-        toolCallId: boundedRuntimeString(block.id, 128, "unknown"),
-        toolName: boundedRuntimeString(block.name, 256, "unknown"),
-        args: projected.value,
-        ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
-      };
-    } else if (block.type === "toolResult" || block.type === "tool_result") {
-      const projected = projectJsonObject({ content: block.content });
-      const toolName = boundedRuntimeString(block.toolName ?? block.name, 256, "unknown");
-      const isError = block.isError === true;
-      const resultProjection = projectRuntimeToolResult(toolName, block.content, isError, block.presentation, block.details);
-      candidate = {
-        type: "tool_result",
-        toolCallId: boundedRuntimeString(block.toolCallId ?? block.id, 128, "unknown"),
-        toolName,
-        text: resultProjection.text,
-        isError,
-        ...(resultProjection.presentation === undefined ? {} : { presentation: resultProjection.presentation }),
-        ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
-      };
-    } else if (block.type === "image" && typeof block.mimeType === "string") {
-      candidate = { type: "image", mimeType: boundedRuntimeString(block.mimeType, 256, "image/unknown") };
-    }
-    if (candidate && !append(candidate)) break;
-  }
-  return blocks;
 }
 
 function sliceWithoutMarker(value: string, limit: number): string {
@@ -4683,17 +4340,3 @@ export function projectJsonObject(input: unknown): { value: JsonObject; omittedF
 function escapeJsonPointer(value: string): string { return value.replace(/~/g, "~0").replace(/\//g, "~1"); }
 function isIsoTimestamp(value: string | undefined): value is string { return value !== undefined && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value; }
 function isJsonObject(value: JsonValue | undefined): value is JsonObject { return value !== undefined && value !== null && typeof value === "object" && !Array.isArray(value); }
-function projectRuntimeToolResult(
-  toolName: string,
-  content: unknown,
-  isError: boolean,
-  projectedPresentation?: unknown,
-  rawDetails?: unknown,
-): { text: string; presentation?: BuiltInToolPresentation } {
-  const text = extractText(content) ?? "";
-  const presentation = projectedPresentation === undefined
-    ? projectBuiltInToolPresentation(toolName, text, rawDetails, isError)
-    : validateBuiltInToolPresentation(toolName, projectedPresentation, isError)
-      ?? projectBuiltInToolPresentation(toolName, text, rawDetails, isError);
-  return boundToolResultText(text, isError, presentation);
-}

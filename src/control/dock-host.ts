@@ -818,16 +818,16 @@ function createBoundedHistoryResult(source:HistoryResult,requestId:string,hostEp
   let entries=source.entries;
   while(entries.length>0){
     const hasEarlier=source.hasEarlier||entries.length<source.entries.length;
-    const candidate:HistoryResult={entries,hasEarlier,...(hasEarlier&&entries[0]?{nextBeforeEntryId:entries[0].entryId}:{}),instance:source.instance};
+    const candidate:HistoryResult={historyRevision:source.historyRevision,entries,hasEarlier,...(hasEarlier&&entries[0]?{nextBeforeEntryId:entries[0].entryId}:{}),instance:source.instance};
     if(encodedSize(successResponse(requestId,hostEpoch,candidate))<=MAX_CONTROL_LINE_BYTES)return candidate;
     if(entries.length===1){
       entries=[slimHistoryEntry(entries[0]!)];
-      const slim:HistoryResult={entries,hasEarlier,...(hasEarlier?{nextBeforeEntryId:entries[0]!.entryId}:{}),instance:source.instance};
+      const slim:HistoryResult={historyRevision:source.historyRevision,entries,hasEarlier,...(hasEarlier?{nextBeforeEntryId:entries[0]!.entryId}:{}),instance:source.instance};
       return slim;
     }
     entries=entries.slice(1);
   }
-  return {entries:[],hasEarlier:false,instance:source.instance};
+  return {historyRevision:source.historyRevision,entries:[],hasEarlier:false,instance:source.instance};
 }
 function slimHistoryEntry(entry:HistoryResult["entries"][number]):HistoryResult["entries"][number] {
   const first=entry.content[0];
@@ -846,7 +846,7 @@ function createBoundedReadResult(projection:AttachProjection,requestId:string):I
   let earliest=events.length>0&&truncated?{...source.earliest,sequence:events[0]!.sequence}:source.earliest;
   while(true){
     const page={events,earliest,latest:source.latest,truncated,epochChanged:projection.epochChanged,generationChanged:projection.generationChanged};
-    const result:InstanceReadResult={instance:projection.instance,page,recentHistory:history,historyTruncated,pendingMessages:projection.pendingMessages};
+    const result:InstanceReadResult={instance:projection.instance,page,recentHistory:history,historyRevision:projection.historyRevision,historyTruncated,pendingMessages:projection.pendingMessages};
     const hostEpoch=projection.instance.ownerHostEpoch??source.latest.hostEpoch;
     if(encodedSize(successResponse(requestId,hostEpoch,result))<=MAX_CONTROL_LINE_BYTES)return result;
     if(history.length>1){history=history.slice(1);historyTruncated=true;continue;}

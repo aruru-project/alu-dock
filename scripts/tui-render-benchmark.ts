@@ -37,13 +37,19 @@ function longConversation(): DockConversation {
   const history: HistoryEntryDto[] = [];
   for (let index = 0; index < 100; index += 1) {
     history.push({
+      recordId: `user-${index}`,
       entryId: `user-${index}`,
-      role: "user",
+      kind: "message",
+      source: "user",
+      visibility: "conversation",
       content: [{ type: "text", text: `request ${index}: verify the current implementation boundary` }],
     });
     history.push({
+      recordId: `assistant-${index}`,
       entryId: `assistant-${index}`,
-      role: "assistant",
+      kind: "message",
+      source: "assistant",
+      visibility: "conversation",
       content: [
         { type: "thinking", text: `Checking invariant ${index}` },
         { type: "text", text: markdown },

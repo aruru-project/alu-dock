@@ -5,7 +5,7 @@ import type { AgentEvent, AgentInvokeOptions, AgentRequest, AgentWorkerConnectio
 import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
 import { PiWorkerProcess, type PiWorkerInitOptions, type WorkerProcessTimeouts } from "./worker-process.js";
 import {
-  ORDINARY_REVERSE_WORKER_CAPABILITIES, OrderedWorkerSender, WorkerFrameReceiver, decodeWorkerError, encodeWorkerError,
+  ORDINARY_REVERSE_WORKER_CAPABILITIES, OrderedWorkerSender, WorkerFrameReceiver, decodeWorkerError, encodeWorkerError, validateAgentWorkerResult,
   type DockCapability, type ReverseWorkerCapability, type UiCapability, type WorkerEnvelope, type WorkerIdentity,
 } from "./worker-protocol.js";
 
@@ -164,6 +164,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     if (envelope.kind === "response") {
       const pending = this.pending.get(envelope.callId); if (!pending) return;
       if (envelope.state) this.applyState(envelope.state);
+      if (envelope.ok) validateAgentWorkerResult(pending.label, envelope.result);
       this.pending.delete(envelope.callId); if (pending.timer) clearTimeout(pending.timer);
       if (envelope.ok) pending.resolve(envelope.result);
       else pending.reject(decodeWorkerError(envelope.error));

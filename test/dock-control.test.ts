@@ -29,6 +29,23 @@ interface Harness {
   sessions: Map<string, DelayedAgentWorkerConnection>;
 }
 
+function agentRecord(
+  entryId: string,
+  source: AgentHistoryEntry["source"],
+  content: AgentHistoryEntry["content"],
+  overrides: Partial<AgentHistoryEntry> = {},
+): AgentHistoryEntry {
+  return {
+    recordId: entryId,
+    entryId,
+    kind: "message",
+    source,
+    visibility: "conversation",
+    content,
+    ...overrides,
+  };
+}
+
 class NoRunAgentWorkerConnection extends DelayedAgentWorkerConnection {
   override prompt(text: string, options?: AgentPromptOptions): Promise<void> {
     this.promptCalls += 1;
@@ -1198,25 +1215,18 @@ test("SSH TUI model picker filters input while complete history flows into nativ
   let runtime: DelayedAgentWorkerConnection | undefined;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
     runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
-    runtime.history = Array.from({ length: 450 }, (_, index) => ({
-      entryId: `history-${index}`,
-      role: index % 2 === 0 ? "user" as const : "assistant" as const,
-      content: [{ type: "text" as const, text: `historical line ${index}` }],
-    }));
+    runtime.history = Array.from({ length: 450 }, (_, index) => agentRecord(
+      `history-${index}`,
+      index % 2 === 0 ? "user" : "assistant",
+      [{ type: "text", text: `historical line ${index}` }],
+    ));
     runtime.history.push(
-      {
-        entryId: "history-tool-call",
-        role: "assistant",
-        content: [{ type: "toolCall", id: "history-tool", name: "read", arguments: { path: "/tmp/demo" } }],
-      },
-      {
-        entryId: "history-tool-result",
-        role: "tool",
+      agentRecord("history-tool-call", "assistant", [{ type: "tool_call", toolCallId: "history-tool", toolName: "read", args: { path: "/tmp/demo" } }]),
+      agentRecord("history-tool-result", "tool", [{ type: "tool_result", toolCallId: "history-tool", toolName: "read", isError: false, text: "expanded tool detail\nsecond detail line" }], {
         toolCallId: "history-tool",
         toolName: "read",
         isError: false,
-        content: "expanded tool detail\nsecond detail line",
-      },
+      }),
     );
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime, initialHistory: runtime.getHistory() });
   }, () => "pty-ux-instance");
@@ -1481,7 +1491,7 @@ test("SSH TUI recovers a dropped event stream from its accepted cursor without r
   assert.equal((await client.status(created.id)).lifecycle, "active");
 });
 
-test("SSH TUI blocks an already-open model picker when stream recovery has a replay gap", async (context) => {
+test("SSH TUI resets from authoritative bootstrap and restores control when stream recovery has a replay gap", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
   await harness.host.start();
@@ -1505,10 +1515,10 @@ test("SSH TUI blocks an already-open model picker when stream recovery has a rep
   const output = Buffer.from(pty.output, "base64").toString("utf8");
   assert.equal(pty.timedOut, false, output.slice(-4_000));
   assert.equal(pty.status, 0, output.slice(-4_000));
-  assert.match(output, /Live updates are still unavailable/);
-  assert.match(output, /Model update was not sent/);
-  assert.doesNotMatch(output, /Model changed to fixture\/local/);
-  assert.equal(runtime.modelMutationCalls, modelMutationsBeforeDrop);
+  assert.match(output, /conversation view \(active\/running\)/);
+  assert.match(output, /Model changed to fixture\/local/);
+  assert.doesNotMatch(output, /Model update was not sent/);
+  assert.equal(runtime.modelMutationCalls, modelMutationsBeforeDrop + 1);
   assert.equal((await client.status(created.id)).lifecycle, "active");
 });
 
@@ -1886,7 +1896,7 @@ test("a runtime-driven post-compaction continuation starts while every client is
     requireTuiProjection: true,
     conversationBootstrap: true,
   });
-  assert.ok(replay.initial.page.events.some((event) => event.type === "run.started"));
+  assert.equal(replay.initial.page.events.some((event) => event.type === "run.started"), false, "snapshot state owns run lifecycle during a fresh bootstrap");
   assert.ok(replay.initial.page.events.some((event) => event.type === "tool.started" && event.data.toolCallId === "offline-tool"));
   replay.close();
   await replay.done;
@@ -1974,6 +1984,42 @@ test("abort runtime ambiguity stays operation-scoped without faulting the catalo
       && !error.message.includes("AUTH_TOKEN"),
   );
   assert.equal((await client.hostInfo()).state, "ready");
+});
+
+test("fresh conversation bootstrap switches atomically from active frames to persisted records at a Worker checkpoint", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "conversation-checkpoint");
+  const runtime = harness.sessions.get(created.id)!;
+
+  runtime.emit({
+    type: "message_update",
+    assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "same visible text", partial: { role: "assistant", content: [] } },
+  });
+  const active = await client.streamEvents(created.id, {
+    onEvent: () => {},
+    requireTuiProjection: true,
+    conversationBootstrap: true,
+  });
+  assert.deepEqual(active.initial.recentHistory, [], "Host history remains at the last Worker persistence boundary during a turn");
+  assert.ok(active.initial.page.events.some((event) => event.type === "message.submitted" && event.data.text === "deterministic delayed task"));
+  assert.ok(active.initial.page.events.some((event) => event.type === "message.delta" && event.data.delta === "same visible text"));
+  active.close();
+  await active.done;
+
+  runtime.settle("same visible text");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const persisted = await client.streamEvents(created.id, {
+    onEvent: () => {},
+    requireTuiProjection: true,
+    conversationBootstrap: true,
+  });
+  assert.deepEqual(persisted.initial.recentHistory.map((entry) => entry.source), ["user", "assistant"]);
+  assert.deepEqual(persisted.initial.page.events, [], "checkpoint release is producer-driven and does not wait for a client ACK");
+  persisted.close();
+  await persisted.done;
 });
 
 test("a reconnected client can start a fresh prompt on an idle instance", async (context) => {
@@ -2281,11 +2327,13 @@ test("tui projection exposes stable paged history and attach history while prese
   const created = await client.create(harness.directory, "history");
   const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   runtime.history = [
-    { entryId: "h1", timestamp: "2020-01-01T00:00:00.000Z", role: "user", content: "older question" },
-    { entryId: "h2", parentId: "h1", timestamp: "2020-01-01T00:00:01.000Z", role: "assistant", content: [{ type: "thinking", text: "plan" }, { type: "text", text: "older answer" }], stopReason: "stop" },
-    { entryId: "h3", parentId: "h2", timestamp: "2020-01-01T00:00:02.000Z", role: "toolResult", toolCallId: "tool-h3", toolName: "show_image", isError: false, content: [{ type: "text", text: "data:image/png;base64,AAAA" }] },
+    agentRecord("h1", "user", [{ type: "text", text: "older question" }], { timestamp: "2020-01-01T00:00:00.000Z" }),
+    agentRecord("h2", "assistant", [{ type: "thinking", text: "plan" }, { type: "text", text: "older answer" }], { parentId: "h1", timestamp: "2020-01-01T00:00:01.000Z", stopReason: "stop" }),
+    agentRecord("h3", "tool", [{ type: "tool_result", toolCallId: "tool-h3", toolName: "show_image", isError: false, text: "data:image/png;base64,AAAA" }], {
+      parentId: "h2", timestamp: "2020-01-01T00:00:02.000Z", toolCallId: "tool-h3", toolName: "show_image", isError: false,
+    }),
   ];
-  runtime.emit({ type: "entry_appended", entry: { id: "h3" } });
+  runtime.emit({ type: "conversation_checkpoint" });
   const immediate = await harness.registry.get(created.id).getHistoryPage(undefined, 2);
   assert.deepEqual(immediate.entries.map((entry) => entry.entryId), ["h2", "h3"]);
 
@@ -2297,6 +2345,7 @@ test("tui projection exposes stable paged history and attach history while prese
   const earlier = await client.history(created.id, latest.nextBeforeEntryId, 2);
   assert.deepEqual(earlier.entries.map((entry) => entry.entryId), ["h1"]);
   assert.equal(earlier.hasEarlier, false);
+  assert.equal(earlier.historyRevision, latest.historyRevision);
   await assert.rejects(
     client.history(created.id, "not-on-branch", 2),
     (error: unknown) => error instanceof ControlClientError && error.code === "invalid_cursor",
@@ -2309,13 +2358,22 @@ test("tui projection exposes stable paged history and attach history while prese
   attachResult.close();
   await attachResult.done;
 
-  runtime.history = Array.from({ length: 200 }, (_, index) => ({
-    entryId: `large-${index}`,
-    timestamp: `2020-01-01T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z`,
-    role: "user",
-    content: "x".repeat(8_000),
-  }));
-  runtime.emit({ type: "entry_appended", entry: { id: "large-199" } });
+  runtime.history = [
+    agentRecord("other-1", "user", [{ type: "text", text: "different branch" }]),
+    agentRecord("h2", "assistant", [{ type: "text", text: "different continuation" }]),
+    agentRecord("h3", "tool", [{ type: "tool_result", toolCallId: "tool-h3", toolName: "show_image", isError: false, text: "different result" }]),
+  ];
+  runtime.emit({ type: "conversation_checkpoint" });
+  const changedDuringScan = await client.history(created.id, latest.nextBeforeEntryId, 2);
+  assert.notEqual(changedDuringScan.historyRevision, latest.historyRevision);
+
+  runtime.history = Array.from({ length: 200 }, (_, index) => agentRecord(
+    `large-${index}`,
+    "user",
+    [{ type: "text", text: "x".repeat(8_000) }],
+    { timestamp: `2020-01-01T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z` },
+  ));
+  runtime.emit({ type: "conversation_checkpoint" });
   const bounded = await client.streamEvents(created.id, { onEvent: () => {}, requireTuiProjection: true });
   assert.equal(bounded.initial.historyTruncated, true);
   assert.ok(bounded.initial.recentHistory.length > 0 && bounded.initial.recentHistory.length < 200);
@@ -2332,9 +2390,9 @@ test("conversation content survives fresh clients through revision-bound Protoco
   const created = await client.create(harness.directory, "conversation-content");
   const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   runtime.history = [
-    { entryId: "h1", role: "user", content: "one" },
-    { entryId: "h2", parentId: "h1", role: "assistant", content: "legacy preview" },
-    { entryId: "h3", parentId: "h2", role: "assistant", content: "legacy preview" },
+    agentRecord("h1", "user", [{ type: "text", text: "one" }]),
+    agentRecord("h2", "assistant", [{ type: "text", text: "legacy preview" }], { parentId: "h1" }),
+    agentRecord("h3", "assistant", [{ type: "text", text: "legacy preview" }], { parentId: "h2" }),
   ];
   const fullText = `${"long".repeat(10_000)}😀done`;
   const imageData = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB";
@@ -2344,7 +2402,7 @@ test("conversation content survives fresh clients through revision-bound Protoco
     { blockIndex: 1, type: "tool_call", toolCallId: "call-1", toolName: "search", argumentsJson: "{\"query\":\"complete\"}", offset: 0, blockComplete: true },
     { blockIndex: 2, type: "image", mimeType: "image/png", data: imageData, offset: 0, blockComplete: true },
   ]);
-  runtime.emit({ type: "entry_appended", entry: { id: "h3" } });
+  runtime.emit({ type: "conversation_checkpoint" });
 
   const latest = await client.conversationHistory(created.id, undefined, 2);
   assert.equal(latest.instance.runtimeGeneration, created.runtimeGeneration);

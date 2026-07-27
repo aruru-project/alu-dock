@@ -16,7 +16,7 @@ import {
 import { ControlClientError, DockClient, type EventSubscription, type OperationSubscription } from "../control/dock-client.js";
 import type { InteractionResponse } from "../core/extension-ui-broker.js";
 import type { CommandDto, SettingDto, SettingUpdate } from "../core/config-projection.js";
-import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot, PendingMessageDto, SessionDto, TreeNodeDto } from "../core/managed-instance.js";
+import type { DeliveryMode, DockEvent, EventCursor, HistoryEntryDto, InstanceSnapshot, PendingMessageDto, SessionDto, TreeNodeDto } from "../core/managed-instance.js";
 import type {
   AgentModelInfo,
   ThinkingLevel,
@@ -283,6 +283,7 @@ export async function runDockTui(
   const initialHistory = await drainFullHistory(
     initialProjection.id,
     initialGeneration,
+    subscription.initial.historyRevision,
     subscription.initial.recentHistory,
     subscription.initial.historyTruncated,
     (beforeEntryId) => client.history(initialProjection.id, beforeEntryId, HISTORY_PAGE_SIZE),
@@ -298,11 +299,9 @@ export async function runDockTui(
     initialGeneration,
   )) {
     const historyEntries = initialHistory.ok ? initialHistory.value.entries : subscription.initial.recentHistory;
-    const boundary = initialHistory.ok
-      ? (initialHistory.value.bootstrapBoundary ?? initialProjection)
-      : initialProjection;
+    const boundary = initialProjection;
     const buffered = initialBufferedEvents;
-    const reconciled = reconcileFlowingEvents(historyEntries, subscription.initial.page.events, buffered);
+    const reconciled = reconcileFlowingEvents(subscription.initial.page.events, buffered);
     instance = boundary;
     pendingQueue.reset(subscription.initial.pendingMessages);
     for (const event of buffered) {
@@ -1660,6 +1659,7 @@ export async function runDockTui(
       const full = await drainFullHistory(
         instance.id,
         generation,
+        projection.historyRevision,
         projection.recentHistory,
         projection.historyTruncated,
         (beforeEntryId) => client.history(instance.id, beforeEntryId, HISTORY_PAGE_SIZE),
@@ -1672,10 +1672,8 @@ export async function runDockTui(
       replacementBufferedEvents = [];
       replacementHistoryGeneration = undefined;
       const historyEntries = full.ok ? full.value.entries : projection.recentHistory;
-      const historyBoundary = full.ok
-        ? (full.value.bootstrapBoundary ?? projection.instance)
-        : projection.instance;
-      reconciled = reconcileFlowingEvents(historyEntries, projection.page.events, buffered);
+      const historyBoundary = projection.instance;
+      reconciled = reconcileFlowingEvents(projection.page.events, buffered);
       instance = historyBoundary;
       pendingQueue.reset(projection.pendingMessages);
       for (const event of buffered) {
@@ -1693,7 +1691,7 @@ export async function runDockTui(
       const buffered = replacementBufferedEvents;
       replacementBufferedEvents = [];
       replacementHistoryGeneration = undefined;
-      reconciled = reconcileFlowingEvents([], [], buffered);
+      reconciled = reconcileFlowingEvents([], buffered);
       conversation.addNotice(`Replacement history unavailable: ${errorText(projectionLoad.reason)}`, true);
       conversation.applyReplay(reconciled, false);
       conversation.setToolsExpanded(instance.toolsExpanded);
@@ -1732,6 +1730,7 @@ export async function runDockTui(
       const full = await drainFullHistory(
         instance.id,
         generation,
+        projection.initial.historyRevision,
         projection.initial.recentHistory,
         projection.initial.historyTruncated,
         (beforeEntryId) => client.history(instance.id, beforeEntryId, HISTORY_PAGE_SIZE),
@@ -1748,14 +1747,14 @@ export async function runDockTui(
     conversation.reset();
     if (!loaded.ok) {
       conversation.addNotice(`Navigated branch history unavailable: ${errorText(loaded.error)}`, true);
-      conversation.applyReplay(reconcileFlowingEvents([], [], buffered), false);
+      conversation.applyReplay(reconcileFlowingEvents([], buffered), false);
       conversation.setToolsExpanded(instance.toolsExpanded);
       tui.requestRender();
       return;
     }
     const { projection, full } = loaded.value;
-    const boundary = full.bootstrapBoundary ?? projection.instance;
-    const reconciled = reconcileFlowingEvents(full.entries, projection.page.events, buffered);
+    const boundary = projection.instance;
+    const reconciled = reconcileFlowingEvents(projection.page.events, buffered);
     instance = boundary;
     for (const event of buffered) {
       if (event.runtimeGeneration !== generation || event.sequence <= boundary.eventCursor.sequence) continue;
@@ -2037,20 +2036,18 @@ export async function runDockTui(
       const sameDomain = authoritative.id === cursor.instanceId
         && authoritative.runtimeGeneration === cursor.runtimeGeneration
         && authoritative.eventCursor.hostEpoch === cursor.hostEpoch;
-      if (authoritative.lifecycle !== "active" || !sameDomain) {
+      if (authoritative.lifecycle !== "active") {
         instance = authoritative;
         status.update(instance);
         refreshEditorSubmit();
         runActivity = activityFromSnapshot(instance);
         activity.setActivity(runActivity);
-        const truth = authoritative.lifecycle === "active"
-          ? "The work changed while this window was disconnected"
-          : `The work is now ${authoritative.lifecycle}`;
-        conversation.addNotice(`${truth}; this window remains read-only. No command was resent; press Ctrl+D and open the work again.`, true);
+        conversation.addNotice(`The work is now ${authoritative.lifecycle}; this window remains read-only. No command was resent; press Ctrl+D and open the work again.`, true);
         tui.requestRender();
         return;
       }
 
+      const forceFreshBootstrap = !sameDomain;
       let next: EventSubscription | undefined;
       let candidateReady = false;
       const candidateBufferedEvents: DockEvent[] = [];
@@ -2059,14 +2056,40 @@ export async function runDockTui(
         else candidateBufferedEvents.push(event);
       };
       try {
-        next = await client.streamEvents(instance.id, {
-          since: cursor,
-          onEvent: onCandidateEvent,
-          requireTuiProjection: true,
-        });
-        if (next.initial.page.epochChanged || next.initial.page.generationChanged || next.initial.page.truncated) {
-          throw new ControlClientError("event_replay_gap", "Saved updates no longer cover a complete view; reopen the work to refresh it");
+        if (!forceFreshBootstrap) {
+          next = await client.streamEvents(instance.id, {
+            since: cursor,
+            onEvent: onCandidateEvent,
+            requireTuiProjection: true,
+          });
         }
+        const continuityLost = forceFreshBootstrap
+          || next!.initial.page.epochChanged
+          || next!.initial.page.generationChanged
+          || next!.initial.page.truncated;
+        let rebuiltHistory: HistoryEntryDto[] | undefined;
+        if (continuityLost) {
+          if (next) {
+            next.close();
+            await next.done.catch(() => {});
+          }
+          candidateBufferedEvents.length = 0;
+          next = await client.streamEvents(instance.id, {
+            onEvent: onCandidateEvent,
+            requireTuiProjection: true,
+            conversationBootstrap: true,
+          });
+          const rebuilt = await drainFullHistory(
+            next.initial.instance.id,
+            next.initial.instance.runtimeGeneration,
+            next.initial.historyRevision,
+            next.initial.recentHistory,
+            next.initial.historyTruncated,
+            (beforeEntryId) => client.history(next!.initial.instance.id, beforeEntryId, HISTORY_PAGE_SIZE),
+          );
+          rebuiltHistory = rebuilt.entries;
+        }
+        if (next === undefined) throw new ControlClientError("connection_closed", "Live-update recovery did not establish a stream");
         if (next.initial.instance.lifecycle !== "active") {
           instance = next.initial.instance;
           detachTruth = "not_active";
@@ -2078,7 +2101,15 @@ export async function runDockTui(
           await next.done.catch(() => {});
           return;
         }
-        for (const event of next.initial.page.events) onEvent(event);
+        if (rebuiltHistory === undefined) {
+          for (const event of next.initial.page.events) onEvent(event);
+        } else {
+          instance = next.initial.instance;
+          pendingQueue.reset(next.initial.pendingMessages);
+          conversation.applyHistory(rebuiltHistory, false);
+          conversation.applyBootstrapReplay(next.initial.page.events);
+          conversation.setToolsExpanded(instance.toolsExpanded);
+        }
         instance = next.initial.instance;
         lastEventGeneration = next.initial.page.latest.runtimeGeneration;
         lastEventSequence = next.initial.page.latest.sequence;
@@ -2088,7 +2119,9 @@ export async function runDockTui(
         runActivity = activityFromReplay(instance, next.initial.page.events);
         activity.setActivity(runActivity);
         detachTruth = instance.lifecycle === "active" ? "host_owned" : "not_active";
-        conversation.addNotice(`Live updates resumed; the work kept running (${instance.lifecycle}/${instance.execution}). No command was resent.`);
+        conversation.addNotice(rebuiltHistory === undefined
+          ? `Live updates resumed; the work kept running (${instance.lifecycle}/${instance.execution}). No command was resent.`
+          : `Live updates resumed from a fresh conversation view (${instance.lifecycle}/${instance.execution}). No command was resent.`);
         subscription = next;
         eventStreamConnected = true;
         candidateReady = true;

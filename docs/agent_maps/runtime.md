@@ -53,6 +53,10 @@ Protocol V2 定义 Dock 的业务语义。Host 与 Worker 之间的私有通信�
 
 Pi runtime、Pi session、extension runner、component 和 Pi SDK object 全部留在 Worker。Pi adapter 只在 Worker 内使用 Pi API，并把 Pi 的行为转换成 Dock 协议。
 
+Conversation 的持久语义也在 adapter 内完成。Pi adapter 把当前 branch entry 投影成 canonical persisted record，显式保留 message、tool result、custom/custom message、bash execution、compaction/branch summary、model/thinking/session/label record 及其 visibility/metadata；Host 不读取 Pi role 或 Pi session 私有 shape。大型内容的 record 只承载有界 preview，完整内容由 conversation history/content 的 revision、content ref 和 chunk 提供。
+
+实时事件与持久 record 不需要共享 identity。在线客户端在 `message_update`/tool event 上原位更新组件，完成后直接保留；重建时才从持久 record 重新生成。Adapter 在一个 turn、run、compaction 或独立持久写入形成安全边界后发出私有 `conversation_checkpoint`。Checkpoint 携带该边界的精确权威 branch history snapshot，表示它之前的 conversation frame 都已由这份 snapshot 表达；Host 原子安装 snapshot 并释放 active buffer，不能在稍后读取一个可能已经前进的 history 来猜测边界。Checkpoint 不等待任何客户端确认。
+
 Pi 是当前成熟基底。真实工作需要且 Pi 已经具备的能力，应完整接入 Dock；不能因为某个客户端尚未实现、跨进程不方便或未来 Agent 可能不同而降低能力。
 
 ## Extension UI

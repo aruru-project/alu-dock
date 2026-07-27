@@ -85,7 +85,7 @@ Web 需要区分：
 {"kind":"request","version":2,"requestId":"read-id","type":"instance.read","params":{"instanceId":"instance-id","replay":"conversation_bootstrap"}}
 ```
 
-Read result 包含 `instance`、`page`、`recentHistory`、`historyTruncated` 和 `pendingMessages`。它是普通 response，不在该连接继续推送 event。
+Read result 包含 `instance`、`page`、`recentHistory`、`historyTruncated` 和 `pendingMessages`。它是普通 response，不在该连接继续推送 event。`recentHistory` 是当前 branch 的 canonical persisted records；conversation bootstrap 的 `page.events` 只包含 persistence checkpoint 尚未覆盖的 active message/tool frames（以及当前 interaction），不是最近 event log 的历史叠层。客户端先投影 records，再按 sequence 应用 active frames。
 
 实时跟随请求中的 `since` 必须是完整 cursor：
 
@@ -95,7 +95,9 @@ Read result 包含 `instance`、`page`、`recentHistory`、`historyTruncated` �
 
 Follow result 只包含 `page`。Read 和 follow 之间发生的事件会出现在这个初始 event page 中，处理完后再消费后续 event frame。
 
-重连时先用最后接受的 cursor 和 `replay: "event_log"` 执行 `instance.read`，再从新的 `page.latest` follow；若 `truncated`、`epochChanged` 或 `generationChanged` 表明无法连续恢复，则重新读取 snapshot 与 conversation bootstrap。
+重连时若页面仍保有本地 conversation，先用最后接受的 cursor 和 `replay: "event_log"` 执行 `instance.read`，再从新的 `page.latest` follow；这条连续路径不得重新应用 history。若 `truncated`、`epochChanged` 或 `generationChanged` 表明无法连续恢复，或浏览器已经丢失本地画面，则清空旧 conversation，重新读取 snapshot 与 conversation bootstrap。不要把旧页面、较新的 latest history page 和较早 seed 拼在一起。`instance.read` seed 与 `session.history` page 的 `historyRevision` 必须在一次 scan 内保持一致；改变时丢弃 scan 并重新 bootstrap。
+
+Event overlap 只按完整 cursor identity（`runtimeGeneration + sequence`）去重。不得按 role、text、thinking、tool arguments/result、custom details 或其 hash 合并；相同内容可以合法出现多次。Client 不发送 conversation ACK，reload/F5 直接重新 bootstrap。
 
 Read、follow 或 Extension UI 操作连接断开都不表示 runtime 失败，也不停止 instance。
 
@@ -115,7 +117,9 @@ Mutation 发送后发生 timeout、断线或 correlation error 时，结果可�
 
 ## Conversation
 
-`instance.read` 的 conversation bootstrap 和普通 history 可以提供快速 preview；完整内容通过 conversation history/content 分页读取。Entry 的 `contentRef` 用于继续读取 text、thinking、tool call/result 和 structured image block。
+`instance.read` 的 conversation bootstrap 和普通 history 可以提供快速 preview；完整内容通过 conversation history/content 分页读取。每个 persisted record 使用 `recordId`、原生/合成 `entryId`、`kind`、`source`、`visibility`、`content` 和可选 metadata。客户端按这些字段处理 `message`、`custom_message`、`bash_execution`、`compaction_summary`、`branch_summary` 与 metadata records，不从 system text 反推 Agent 私有 role。Entry 的 `contentRef` 用于继续读取 text、thinking、tool call/result 和 structured image block。
+
+Live `messageId/toolCallId` 只用于当前 event lifecycle；客户端不需要也不应尝试把它们认领成 persisted `recordId/entryId`。在线 completion 原位收尾并保留，fresh rebuild 才从 persisted records 生成组件。
 
 Client 必须保持同一次读取的 revision、content ref、instance 和 generation 一致。Session、branch 或 generation 变化后，旧 cursor/ref 失效并重新开始。
 

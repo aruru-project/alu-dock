@@ -567,19 +567,31 @@ export class DockConversation implements Component {
       text: string,
       complete = true,
     ): ConversationEntry => {
-      const piece = pieceCounts.get(source.entryId) ?? 0;
-      pieceCounts.set(source.entryId, piece + 1);
-      const entry = this.createEntry(`history:${source.entryId}:${piece}`, kind, text, complete);
+      const piece = pieceCounts.get(source.recordId) ?? 0;
+      pieceCounts.set(source.recordId, piece + 1);
+      const entry = this.createEntry(`history:${source.recordId}:${piece}`, kind, text, complete);
       projectedEntries.push(entry);
       return entry;
     };
 
     for (const source of entries) {
+      if (source.visibility === "hidden") continue;
       const text = contentText(source.content, "text");
-      if (source.role === "user") {
+      if (source.visibility === "metadata") {
+        const metadataText = source.kind === "model_change"
+          ? `Model changed to ${source.provider ?? "unknown"}/${source.modelId ?? "unknown"}`
+          : source.kind === "thinking_level_change"
+            ? `Thinking level changed to ${source.thinkingLevel ?? "unknown"}`
+            : source.kind === "session_info" && source.name
+              ? `Session named ${source.name}`
+              : undefined;
+        if (metadataText) addProjected(source, "system", metadataText);
+        continue;
+      }
+      if (source.kind === "message" && source.source === "user") {
         const projected = userMessageText(text ?? "", source.content.filter((block) => block.type === "image"));
         if (projected.length > 0) addProjected(source, "user", projected);
-      } else if (source.role === "assistant") {
+      } else if (source.kind === "message" && source.source === "assistant") {
         for (const block of source.content) {
           if (block.type === "thinking") {
             if (block.text.length > 0) addProjected(source, "thinking", block.text);
@@ -604,7 +616,7 @@ export class DockConversation implements Component {
           projectToolState(tool, "done");
         }
         if (source.error) addProjected(source, "error", source.error);
-      } else if (source.role === "tool") {
+      } else if (source.kind === "message" && source.source === "tool") {
         for (const block of source.content) {
           if (block.type !== "tool_result") continue;
           const tool: ToolProjection = projectedTools.get(block.toolCallId) ?? (() => {
@@ -628,7 +640,9 @@ export class DockConversation implements Component {
         const projected = text ?? source.error;
         if (projected !== undefined && projected.length > 0) {
           const entry = addProjected(source, source.error ? "error" : "system", projected);
-          entry.summaryKind = source.summaryKind;
+          entry.summaryKind = source.kind === "compaction_summary" ? "compaction"
+            : source.kind === "branch_summary" ? "branch"
+              : undefined;
         }
       }
     }

@@ -234,6 +234,7 @@ export interface InstanceReadResult {
   instance: InstanceSnapshot;
   page: EventPage & { epochChanged: boolean; generationChanged: boolean };
   recentHistory: HistoryEntryDto[];
+  historyRevision: number;
   historyTruncated: boolean;
   pendingMessages: PendingMessageDto[];
 }
@@ -262,7 +263,7 @@ export interface SessionInventoryResult {
   diagnostics: Array<{ message: string; path?: string }>;
   diagnosticsTruncated: boolean;
 }
-export interface HistoryResult { entries: HistoryEntryDto[]; hasEarlier: boolean; nextBeforeEntryId?: string; instance: InstanceSnapshot }
+export interface HistoryResult { historyRevision: number; entries: HistoryEntryDto[]; hasEarlier: boolean; nextBeforeEntryId?: string; instance: InstanceSnapshot }
 export type ConversationHistoryResult = ConversationHistoryPageDto;
 export type ConversationContentResult = ConversationContentPageDto;
 export interface SessionReplacementResult { cancelled: boolean; instance: InstanceSnapshot }
@@ -724,7 +725,7 @@ export function parseListResult(input: unknown): ListResult {
 }
 export function parseStatusResult(input: unknown): StatusResult { const value = object(input, "get result"); exact(value, ["instance"]); return { instance: parseInstance(value.instance, "instance") }; }
 export function parseInstanceReadResult(input: unknown): InstanceReadResult {
-  const value = object(input, "instance read result"); exact(value, ["instance", "page", "recentHistory", "historyTruncated", "pendingMessages"]);
+  const value = object(input, "instance read result"); exact(value, ["instance", "page", "recentHistory", "historyRevision", "historyTruncated", "pendingMessages"]);
   const instance = parseInstance(value.instance, "instance");
   const page = parseEventPage(value.page, instance.id, instance.runtimeGeneration);
   assertCursorDomain(page.earliest, instance, "page.earliest"); assertCursorDomain(page.latest, instance, "page.latest");
@@ -736,7 +737,7 @@ export function parseInstanceReadResult(input: unknown): InstanceReadResult {
   if (pendingMessages.reduce((total, item) => total + imagePathCharacters(item.images), 0) > MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS) throw validation("invalid_response", "pendingMessages image descriptors exceed the aggregate queue limit");
   const firstFollowUp = pendingMessages.findIndex((item) => item.delivery === "followUp");
   if (firstFollowUp >= 0 && pendingMessages.slice(firstFollowUp).some((item) => item.delivery === "steer")) throw validation("invalid_response", "pendingMessages are not in consumption order");
-  return { instance, page, recentHistory: history, historyTruncated: boolean(value.historyTruncated, "historyTruncated"), pendingMessages };
+  return { instance, page, recentHistory: history, historyRevision: positive(value.historyRevision, "historyRevision"), historyTruncated: boolean(value.historyTruncated, "historyTruncated"), pendingMessages };
 }
 export function parseFollowResult(input: unknown): FollowResult {
   const value = object(input, "follow result"); exact(value, ["page"]);
@@ -934,7 +935,7 @@ function parseSessionDtos(input: unknown): SessionDto[] {
 }
 
 export function parseHistoryResult(input: unknown): HistoryResult {
-  const value = object(input, "history result"); exact(value, ["entries", "hasEarlier", "nextBeforeEntryId", "instance"]);
+  const value = object(input, "history result"); exact(value, ["historyRevision", "entries", "hasEarlier", "nextBeforeEntryId", "instance"]);
   const entries = array(value.entries, "entries", MAX_HISTORY_ITEMS).map((item, index) => parseHistoryEntry(item, `entries[${index}]`));
   const ids = entries.map((entry) => entry.entryId);
   if (new Set(ids).size !== ids.length) throw validation("invalid_response", "history entry IDs must be unique");
@@ -942,7 +943,7 @@ export function parseHistoryResult(input: unknown): HistoryResult {
   const nextBeforeEntryId = optionalString(value.nextBeforeEntryId, "nextBeforeEntryId", 128);
   if (hasEarlier !== (nextBeforeEntryId !== undefined)) throw validation("invalid_response", "history pagination cursor is inconsistent");
   if (nextBeforeEntryId !== undefined && entries[0]?.entryId !== nextBeforeEntryId) throw validation("invalid_response", "history cursor must identify the first returned entry");
-  return { entries, hasEarlier, nextBeforeEntryId, instance: parseInstance(value.instance, "instance") };
+  return { historyRevision: positive(value.historyRevision, "historyRevision"), entries, hasEarlier, nextBeforeEntryId, instance: parseInstance(value.instance, "instance") };
 }
 
 export function parseConversationHistoryResult(input: unknown): ConversationHistoryResult {
@@ -1469,16 +1470,52 @@ function parseContent(input: unknown, field: string): ContentBlockDto[] {
   });
 }
 function parseHistoryEntry(input: unknown, field: string): HistoryEntryDto {
-  const entry = object(input, field); exact(entry, ["entryId", "parentId", "role", "summaryKind", "timestamp", "content", "stopReason", "error"]);
+  const entry = object(input, field);
+  exact(entry, [
+    "recordId", "entryId", "parentId", "kind", "source", "visibility", "timestamp", "content",
+    "stopReason", "error", "toolCallId", "toolName", "isError", "customType", "display", "metadata",
+    "metadataOmittedFields", "command", "exitCode", "cancelled", "truncated", "fullOutputPath", "excludeFromContext",
+    "firstKeptEntryId", "tokensBefore", "fromEntryId", "targetEntryId", "label", "provider", "modelId",
+    "thinkingLevel", "name",
+  ]);
+  const exitCode = entry.exitCode === undefined
+    ? undefined
+    : typeof entry.exitCode === "number" && Number.isSafeInteger(entry.exitCode)
+      ? entry.exitCode
+      : (() => { throw validation("invalid_response", `${field}.exitCode must be a safe integer`); })();
   return {
+    recordId: id(entry.recordId, `${field}.recordId`),
     entryId: id(entry.entryId, `${field}.entryId`),
     parentId: optionalString(entry.parentId, `${field}.parentId`, 128),
-    role: enumeration(entry.role, `${field}.role`, ["user", "assistant", "tool", "system"]),
-    summaryKind: entry.summaryKind === undefined ? undefined : enumeration(entry.summaryKind, `${field}.summaryKind`, ["compaction", "branch"] as const),
+    kind: enumeration(entry.kind, `${field}.kind`, ["message", "custom_message", "bash_execution", "compaction_summary", "branch_summary", "custom", "model_change", "thinking_level_change", "session_info", "label"]),
+    source: enumeration(entry.source, `${field}.source`, ["user", "assistant", "tool", "system", "extension", "runtime"]),
+    visibility: enumeration(entry.visibility, `${field}.visibility`, ["conversation", "metadata", "hidden"]),
     timestamp: entry.timestamp === undefined ? undefined : timestamp(entry.timestamp, `${field}.timestamp`),
     content: parseContent(entry.content, `${field}.content`),
     stopReason: optionalString(entry.stopReason, `${field}.stopReason`, 128),
     error: optionalString(entry.error, `${field}.error`, MAX_MESSAGE),
+    toolCallId: optionalString(entry.toolCallId, `${field}.toolCallId`, 128),
+    toolName: optionalString(entry.toolName, `${field}.toolName`, 256),
+    isError: optionalBoolean(entry.isError, `${field}.isError`, "invalid_response"),
+    customType: optionalString(entry.customType, `${field}.customType`, 256),
+    display: optionalBoolean(entry.display, `${field}.display`, "invalid_response"),
+    metadata: entry.metadata === undefined ? undefined : parseJsonValue(entry.metadata, `${field}.metadata`, 0),
+    metadataOmittedFields: omitted(entry.metadataOmittedFields, `${field}.metadataOmittedFields`),
+    command: optionalString(entry.command, `${field}.command`, MAX_TEXT),
+    exitCode,
+    cancelled: optionalBoolean(entry.cancelled, `${field}.cancelled`, "invalid_response"),
+    truncated: optionalBoolean(entry.truncated, `${field}.truncated`, "invalid_response"),
+    fullOutputPath: optionalString(entry.fullOutputPath, `${field}.fullOutputPath`, MAX_CONTROL_CWD_CHARS),
+    excludeFromContext: optionalBoolean(entry.excludeFromContext, `${field}.excludeFromContext`, "invalid_response"),
+    firstKeptEntryId: optionalString(entry.firstKeptEntryId, `${field}.firstKeptEntryId`, 128),
+    tokensBefore: entry.tokensBefore === undefined ? undefined : unsigned(entry.tokensBefore, `${field}.tokensBefore`),
+    fromEntryId: optionalString(entry.fromEntryId, `${field}.fromEntryId`, 128),
+    targetEntryId: optionalString(entry.targetEntryId, `${field}.targetEntryId`, 128),
+    label: optionalString(entry.label, `${field}.label`, 256),
+    provider: optionalString(entry.provider, `${field}.provider`, 256),
+    modelId: optionalString(entry.modelId, `${field}.modelId`, 512),
+    thinkingLevel: optionalString(entry.thinkingLevel, `${field}.thinkingLevel`, 64),
+    name: optionalString(entry.name, `${field}.name`, 256),
   };
 }
 

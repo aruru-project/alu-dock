@@ -3,11 +3,11 @@ import type {
   HistoryEntryDto,
   InstanceSnapshot,
 } from "../core/instance-dto.js";
-import { reconcileConversationEventsWithHistory } from "../core/managed-instance.js";
 
 export const HISTORY_PAGE_SIZE = 200;
 
 export interface FullHistoryPage {
+  historyRevision: number;
   entries: HistoryEntryDto[];
   hasEarlier: boolean;
   nextBeforeEntryId?: string;
@@ -16,14 +16,13 @@ export interface FullHistoryPage {
 
 export interface FullHistoryResult {
   entries: HistoryEntryDto[];
-  /** Present only when an empty seed required a latest-page bootstrap. */
-  bootstrapBoundary?: InstanceSnapshot;
 }
 
 /** Drain a reverse-paged branch into one oldest-to-newest, gap-free projection. */
 export async function drainFullHistory(
   instanceId: string,
   generation: number,
+  historyRevision: number,
   seed: readonly HistoryEntryDto[],
   seedHasEarlier: boolean,
   load: (beforeEntryId?: string) => Promise<FullHistoryPage>,
@@ -31,19 +30,7 @@ export async function drainFullHistory(
   let newest = deduplicate(seed);
   let hasEarlier = seedHasEarlier;
   let before = newest[0]?.entryId;
-  let bootstrapBoundary: InstanceSnapshot | undefined;
-
-  // Only an empty seed may establish a newer live-event boundary. Pages loaded
-  // before a nonempty attach/projection tail are historical data and must not
-  // advance that tail's original reconciliation cursor.
-  if (hasEarlier && !before) {
-    const latest = await load(undefined);
-    assertPageIdentity(latest, instanceId, generation);
-    newest = deduplicate(latest.entries);
-    hasEarlier = latest.hasEarlier;
-    before = latest.nextBeforeEntryId ?? newest[0]?.entryId;
-    bootstrapBoundary = latest.instance;
-  }
+  if (hasEarlier && !before) throw new Error("History page is incomplete without a continuation entry");
 
   const seenEntryIds = new Set(newest.map((entry) => entry.entryId));
   const newestFirstSegments: HistoryEntryDto[][] = [newest];
@@ -52,7 +39,7 @@ export async function drainFullHistory(
     if (!before || seenCursors.has(before)) throw new Error("History cursor did not advance");
     seenCursors.add(before);
     const page = await load(before);
-    assertPageIdentity(page, instanceId, generation);
+    assertPageIdentity(page, instanceId, generation, historyRevision);
     const older = deduplicate(page.entries).filter((entry) => {
       if (seenEntryIds.has(entry.entryId)) return false;
       seenEntryIds.add(entry.entryId);
@@ -67,37 +54,32 @@ export async function drainFullHistory(
     before = next;
   }
 
-  return {
-    entries: newestFirstSegments.reverse().flat(),
-    ...(bootstrapBoundary === undefined ? {} : { bootstrapBoundary }),
-  };
+  return { entries: newestFirstSegments.reverse().flat() };
 }
 
 /**
- * Merge a coherent attach bootstrap with events observed while older history
- * pages were loading. Persisted message/tool frames are removed by content
- * identity; unresolved frames and non-durable live feedback remain exactly once.
+ * Join the Host's active bootstrap with events which arrived while older
+ * history pages were loading. The bootstrap contains only frames not yet
+ * released into persisted history, so overlap is removed solely by event
+ * identity; conversation content is never compared.
  */
 export function reconcileFlowingEvents(
-  history: readonly HistoryEntryDto[],
   bootstrapEvents: readonly DockEvent[],
   bufferedEvents: readonly DockEvent[],
 ): DockEvent[] {
   const candidates = new Map<string, DockEvent>();
-  for (const event of bootstrapEvents) {
-    if (isConversationFrame(event)) candidates.set(eventKey(event), event);
-  }
+  for (const event of bootstrapEvents) candidates.set(eventKey(event), event);
   for (const event of bufferedEvents) candidates.set(eventKey(event), event);
-  const ordered = [...candidates.values()].sort((left, right) => (
+  return [...candidates.values()].sort((left, right) => (
     left.runtimeGeneration - right.runtimeGeneration || left.sequence - right.sequence
   ));
-  return reconcileConversationEventsWithHistory(ordered, history, true);
 }
 
-function assertPageIdentity(page: FullHistoryPage, instanceId: string, generation: number): void {
+function assertPageIdentity(page: FullHistoryPage, instanceId: string, generation: number, historyRevision: number): void {
   if (page.instance.id !== instanceId || page.instance.runtimeGeneration !== generation) {
     throw new Error("Session changed while history was loading");
   }
+  if (page.historyRevision !== historyRevision) throw new Error("History changed while history was loading");
 }
 
 function deduplicate(entries: readonly HistoryEntryDto[]): HistoryEntryDto[] {
@@ -113,14 +95,4 @@ function deduplicate(entries: readonly HistoryEntryDto[]): HistoryEntryDto[] {
 
 function eventKey(event: DockEvent): string {
   return `${event.runtimeGeneration}:${event.sequence}`;
-}
-
-function isConversationFrame(event: DockEvent): boolean {
-  return event.type === "message.submitted"
-    || event.type === "message.delta"
-    || event.type === "message.completed"
-    || event.type === "tool.started"
-    || event.type === "tool.args_updated"
-    || event.type === "tool.output_updated"
-    || event.type === "tool.completed";
 }

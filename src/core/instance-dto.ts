@@ -48,17 +48,61 @@ export interface PendingMessageDto {
   images?: ImagePathDto[];
   acceptedAt: string;
 }
-export interface HistoryEntryDto {
+export type ConversationRecordKind =
+  | "message"
+  | "custom_message"
+  | "bash_execution"
+  | "compaction_summary"
+  | "branch_summary"
+  | "custom"
+  | "model_change"
+  | "thinking_level_change"
+  | "session_info"
+  | "label";
+export type ConversationRecordSource = "user" | "assistant" | "tool" | "system" | "extension" | "runtime";
+export type ConversationRecordVisibility = "conversation" | "metadata" | "hidden";
+
+/** One authoritative persisted conversation/session record produced by the Worker adapter. */
+export interface ConversationRecordDto {
+  recordId: string;
+  /** Stable branch-position identity: native when available, otherwise synthesized by the Worker adapter. */
   entryId: string;
   parentId?: string;
-  role: "user" | "assistant" | "tool" | "system";
-  summaryKind?: "compaction" | "branch";
+  kind: ConversationRecordKind;
+  source: ConversationRecordSource;
+  visibility: ConversationRecordVisibility;
   timestamp?: string;
   content: ContentBlockDto[];
   stopReason?: string;
   error?: string;
+  toolCallId?: string;
+  toolName?: string;
+  isError?: boolean;
+  customType?: string;
+  display?: boolean;
+  metadata?: JsonValue;
+  metadataOmittedFields?: string[];
+  command?: string;
+  exitCode?: number;
+  cancelled?: boolean;
+  truncated?: boolean;
+  fullOutputPath?: string;
+  excludeFromContext?: boolean;
+  firstKeptEntryId?: string;
+  tokensBefore?: number;
+  fromEntryId?: string;
+  targetEntryId?: string;
+  label?: string;
+  provider?: string;
+  modelId?: string;
+  thinkingLevel?: string;
+  name?: string;
 }
+
+/** Paginated session history and conversation history expose the same canonical record. */
+export type HistoryEntryDto = ConversationRecordDto;
 export interface HistoryPageDto {
+  historyRevision: number;
   entries: HistoryEntryDto[];
   hasEarlier: boolean;
   nextBeforeEntryId?: string;
@@ -193,6 +237,18 @@ export interface EventDataMap {
   "extension.error": { source?: string; event?: string; error: string };
 }
 
+export type ConversationFrameType =
+  | "message.submitted"
+  | "message.delta"
+  | "message.completed"
+  | "tool.started"
+  | "tool.args_updated"
+  | "tool.output_updated"
+  | "tool.completed";
+export type ConversationFrame = {
+  [K in ConversationFrameType]: { type: K; data: EventDataMap[K] }
+}[ConversationFrameType];
+
 export interface EventCursor {
   hostEpoch: string;
   instanceId: string;
@@ -251,6 +307,7 @@ export interface AttachProjection {
   instance: InstanceSnapshot;
   page: EventPage;
   recentHistory: HistoryEntryDto[];
+  historyRevision: number;
   historyTruncated: boolean;
   pendingMessages: PendingMessageDto[];
   replaySince: number;

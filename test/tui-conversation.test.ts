@@ -5,7 +5,7 @@ import { CombinedAutocompleteProvider, TUI, visibleWidth, type Terminal } from "
 
 import type { SettingDto } from "../src/core/config-projection.js";
 import { projectDisplayEditDiff } from "../src/core/edit-diff-projection.js";
-import type { DockEvent, InstanceSnapshot } from "../src/core/managed-instance.js";
+import type { DockEvent, HistoryEntryDto, InstanceSnapshot } from "../src/core/managed-instance.js";
 import { DockActivityLine, DockConversation, DockStatusLine, DockWorkMetadata } from "../src/tui/conversation.js";
 import { commandCatalog, formatWorkStatus, workHelpText } from "../src/tui/dock-tui.js";
 import { PendingQueueTray } from "../src/tui/pending-queue.js";
@@ -47,6 +47,23 @@ function event(sequence: number, type: DockEvent["type"], data: Record<string, u
     type,
     data,
   } as DockEvent;
+}
+
+function historyRecord(
+  entryId: string,
+  source: HistoryEntryDto["source"],
+  content: HistoryEntryDto["content"],
+  overrides: Partial<HistoryEntryDto> = {},
+): HistoryEntryDto {
+  return {
+    recordId: entryId,
+    entryId,
+    kind: "message",
+    source,
+    visibility: "conversation",
+    content,
+    ...overrides,
+  };
 }
 
 function snapshot(): InstanceSnapshot {
@@ -154,11 +171,9 @@ test("conversation renders live and historical user image metadata without blank
   assert.deepEqual(live.snapshot(), [{ kind: "user", text: "[Image 1 · image/png]", complete: true }]);
 
   const historical = new DockConversation();
-  historical.applyHistory([{
-    entryId: "historical-image",
-    role: "user",
-    content: [{ type: "text", text: "caption" }, { type: "image", mimeType: "image/webp" }],
-  }], false);
+  historical.applyHistory([
+    historyRecord("historical-image", "user", [{ type: "text", text: "caption" }, { type: "image", mimeType: "image/webp" }]),
+  ], false);
   assert.deepEqual(historical.snapshot(), [{ kind: "user", text: "caption\n\n[Image 1 · image/webp]", complete: true }]);
 });
 
@@ -166,7 +181,7 @@ test("conversation reset replaces old session history", () => {
   const conversation = new DockConversation();
   conversation.addNotice("old session");
   conversation.reset();
-  conversation.applyHistory([{ entryId: "new", role: "assistant", content: [{ type: "text", text: "new session" }] }], false);
+  conversation.applyHistory([historyRecord("new", "assistant", [{ type: "text", text: "new session" }])], false);
   assert.deepEqual(conversation.snapshot(), [{ kind: "assistant", text: "new session", complete: true }]);
 });
 
@@ -239,22 +254,9 @@ test("collapsed multi-hunk edit previews prioritize actual changes over surround
 test("compaction summaries have a readable folded surface and expand explicitly", () => {
   const conversation = new DockConversation();
   conversation.applyHistory([
-    {
-      entryId: "compact-1",
-      role: "system",
-      summaryKind: "compaction",
-      content: [{ type: "text", text: "## Goal\n\nKeep the release safe.\n\n## Constraints\n\nDo not replay mutations.\n\nEND OF SUMMARY" }],
-    },
-    {
-      entryId: "assistant-after-summary",
-      role: "assistant",
-      content: [{ type: "tool_call", toolCallId: "later-tool", toolName: "read", args: { path: "/tmp/later" } }],
-    },
-    {
-      entryId: "tool-after-summary",
-      role: "tool",
-      content: [{ type: "tool_result", toolCallId: "later-tool", toolName: "read", text: "later result", isError: false }],
-    },
+    historyRecord("compact-1", "runtime", [{ type: "text", text: "## Goal\n\nKeep the release safe.\n\n## Constraints\n\nDo not replay mutations.\n\nEND OF SUMMARY" }], { kind: "compaction_summary" }),
+    historyRecord("assistant-after-summary", "assistant", [{ type: "tool_call", toolCallId: "later-tool", toolName: "read", args: { path: "/tmp/later" } }]),
+    historyRecord("tool-after-summary", "tool", [{ type: "tool_result", toolCallId: "later-tool", toolName: "read", text: "later result", isError: false }]),
   ], false);
 
   const folded = conversation.render(43).filter((line) => line.trim().length > 0);
@@ -269,7 +271,7 @@ test("compaction summaries have a readable folded surface and expand explicitly"
   assert.deepEqual(conversation.toggleLatestDetailExpanded(), { expanded: false, name: "compaction" });
 
   const ordinary = new DockConversation();
-  ordinary.applyHistory([{ entryId: "system-1", role: "system", content: [{ type: "text", text: "ordinary system text" }] }], false);
+  ordinary.applyHistory([historyRecord("system-1", "system", [{ type: "text", text: "ordinary system text" }])], false);
   assert.equal(ordinary.toggleLatestDetailExpanded(), undefined);
 });
 
@@ -533,11 +535,9 @@ test("built-in presentations keep decision-critical tail, limits, continuation, 
     const live = new DockConversation();
     live.apply(event(1, "tool.completed", { toolCallId: `call-${toolName}`, toolName, isError: false, text, presentation }));
     const history = new DockConversation();
-    history.applyHistory([{
-      entryId: `history-${toolName}`,
-      role: "tool",
-      content: [{ type: "tool_result", toolCallId: `call-${toolName}`, toolName, text, isError: false, presentation: presentation as never }],
-    }], false);
+    history.applyHistory([
+      historyRecord(`history-${toolName}`, "tool", [{ type: "tool_result", toolCallId: `call-${toolName}`, toolName, text, isError: false, presentation: presentation as never }]),
+    ], false);
     assert.deepEqual(history.render(100), live.render(100), `${toolName} live/history rendering diverged`);
     return live.render(100).join("\n");
   };

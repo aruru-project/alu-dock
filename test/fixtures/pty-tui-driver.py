@@ -329,12 +329,12 @@ def main() -> int:
                     with open(ready_file + ".picker", "w", encoding="utf-8") as marker:
                         marker.write("picker\n")
                     disconnect_deadline = time.monotonic() + 8
-                    while b"Live updates are still unavailable" not in output and time.monotonic() < disconnect_deadline:
+                    while b"fresh conversation view" not in output and time.monotonic() < disconnect_deadline:
                         if read_available(fd, output, 0.05) < 0:
                             break
                 os.write(fd, b"local\r")
                 selected_deadline = time.monotonic() + 4
-                selected_marker = b"Model update was not sent" if action == "model-disconnect" else b"Model changed to fixture/local"
+                selected_marker = b"Model changed to fixture/local"
                 while selected_marker not in output and time.monotonic() < selected_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break

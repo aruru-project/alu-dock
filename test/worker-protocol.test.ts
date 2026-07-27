@@ -6,6 +6,7 @@ import {
   OrderedWorkerSender,
   WorkerFrameReceiver,
   parseWorkerEnvelope,
+  validateAgentWorkerResult,
   validateUiCapabilityResult,
   type WorkerFrame,
   type WorkerIdentity,
@@ -63,6 +64,36 @@ test("private worker protocol chunks and reassembles one ordered bounded result"
 
 
 
+test("private Worker conversation boundary accepts checkpoints and canonical persisted records", () => {
+  assert.equal(parseWorkerEnvelope({
+    kind: "event", event: { type: "conversation_checkpoint", history: [] }, state: STATE,
+  }).kind, "event");
+  assert.equal(parseWorkerEnvelope({
+    kind: "event",
+    event: { type: "dock_conversation_frame", frame: { type: "message.delta", data: { messageId: "assistant-1", block: "text", delta: "hello" } } },
+    state: STATE,
+  }).kind, "event");
+  assert.throws(() => parseWorkerEnvelope({
+    kind: "event", event: { type: "conversation_checkpoint", history: [], injected: true }, state: STATE,
+  }), /unknown field/i);
+  validateAgentWorkerResult("session.history", [{
+    recordId: "record-1",
+    entryId: "record-1",
+    kind: "custom_message",
+    source: "extension",
+    visibility: "conversation",
+    content: [{ type: "text", text: "visible extension output" }],
+    customType: "fixture",
+    display: true,
+    metadata: { accepted: true },
+  }]);
+  assert.throws(() => validateAgentWorkerResult("session.history", [{
+    entryId: "legacy",
+    role: "assistant",
+    content: "legacy private shape",
+  }]), /unknown field|record id/i);
+});
+
 test("private worker protocol rejects malformed generic requests, events, state, and generation fences", () => {
   assert.throws(() => parseWorkerEnvelope({
     kind: "event",
@@ -83,7 +114,7 @@ test("private worker protocol rejects malformed generic requests, events, state,
   })), /must be boolean/i);
   assert.throws(() => parseWorkerEnvelope({
     kind: "event", event: { type: "message_end", message: { role: "assistant", content: [], injected: true } }, state: STATE,
-  }), /unknown field/i);
+  }), /event type|unknown field/i);
   assert.throws(() => parseWorkerEnvelope({
     kind: "event", event: { type: "agent_start" }, state: { ...STATE, injected: true },
   }), /unknown field/i);

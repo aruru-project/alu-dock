@@ -7,13 +7,24 @@ import type {
   SettingUpdate,
   ToolDto,
 } from "./config-projection.js";
-import type { BuiltInToolPresentation } from "./tool-result-presentation.js";
+import type { ConversationRecordDto } from "./instance-dto.js";
 import type { ControlRequest } from "../control/protocol.js";
 
 export interface AgentEvent {
   type: string;
   [key: string]: unknown;
 }
+
+/**
+ * Worker-owned persistence boundary. Its `history` is the exact authoritative
+ * branch snapshot which represents every conversation frame published before
+ * the checkpoint. Host atomically installs that snapshot and releases those
+ * active frames without inspecting Agent content or waiting for a client ACK.
+ */
+export type AgentConversationCheckpoint = AgentEvent & {
+  type: "conversation_checkpoint";
+  history: ConversationRecordDto[];
+};
 
 export interface AgentImagePath {
   path: string;
@@ -51,21 +62,7 @@ export interface AgentSessionMetrics {
   context?: { tokens: number | null; contextWindow: number; percent: number | null };
 }
 
-export interface AgentHistoryEntry {
-  entryId: string;
-  parentId?: string;
-  timestamp?: string;
-  role: string;
-  summaryKind?: "compaction" | "branch";
-  content: unknown;
-  stopReason?: string;
-  error?: string;
-  toolCallId?: string;
-  toolName?: string;
-  /** Closed, typed presentation projection of a stock built-in tool result. */
-  toolPresentation?: BuiltInToolPresentation;
-  isError?: boolean;
-}
+export type AgentHistoryEntry = ConversationRecordDto;
 
 export class AgentConversationCursorError extends Error {
   constructor(message = "Conversation continuation is stale") {

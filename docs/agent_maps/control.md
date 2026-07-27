@@ -72,9 +72,16 @@ Worker 接受副作用前失联和接受后失联是不同结果。Host 必须�
 
 ## Read、follow 与 Extension UI 操作
 
-`instance.read` 返回当前 snapshot、conversation bootstrap、Queue 与读取边界。`instance.follow` 从该边界开始补齐后续事件并持续跟随；无法确认连续性时，客户端重新读取权威视图。
+`instance.read` 返回当前 snapshot、conversation bootstrap、Queue 与读取边界。conversation bootstrap 由同一边界下的两部分组成：
 
-任意数量的客户端可以同时读取和跟随。观察连接中断不等于 Agent runtime 失败，也不结束 instance。
+- `recentHistory`：Worker 产生的当前分支权威持久 record；
+- `page.events`：尚未被 Worker persistence checkpoint 接住的 active conversation frame，以及仍在等待的 interaction。
+
+持久 record 使用通用的 `recordId / kind / source / visibility / content / metadata` shape。Worker adapter 保留 Agent 的 message、tool、custom message、bash、compaction/branch summary 和 session metadata 语义；Host 不把它们压成 role，也不按文本或 tool 内容猜测 live frame 是否已经持久化。
+
+`instance.follow` 从 read boundary 开始补齐后续事件并持续跟随。保有本地画面且 cursor 连续时，客户端只消费 `event_log` replay 和 follow；不重新拉取历史。event ring 截断、Host epoch 改变、runtime generation 改变或本地状态丢失时，客户端丢弃旧 conversation，重新读取完整 bootstrap。不得把两次 history 读取边界拼成一个会话。普通 `session.history` page 与 bootstrap seed 都携带 Host `historyRevision`；分页中 revision 改变时客户端必须放弃该次 scan 并重新 bootstrap。
+
+active frame 的释放完全由 Worker persistence checkpoint 驱动。Host 只按 generation、sequence 和 checkpoint 机械暂存/释放，不等待客户端 ACK，不维护接收名单，也不做内容 fingerprint、认亲或去重。任意数量的客户端可以同时读取和跟随；观察连接中断不等于 Agent runtime 失败，也不结束 instance。
 
 Extension UI 操作使用独立连接，同一 instance 同时只有一个。新连接立即接手，旧操作连接结束但它的普通 follow 不受影响；等待中的 interaction 属于 runtime generation，不因接手或断线而被回答或取消。
 

@@ -99,6 +99,30 @@ function validEvent(type = "message.delta", data: Record<string, unknown> = { me
   return { scope: "instance", sequence: 1, instanceId: "i1", runtimeGeneration: 1, occurredAt: "2026-07-14T00:00:00.000Z", type, data };
 }
 
+test("Protocol V2 history exposes only canonical persisted conversation records", () => {
+  const record = {
+    recordId: "entry-1",
+    entryId: "entry-1",
+    kind: "custom_message",
+    source: "extension",
+    visibility: "conversation",
+    content: [{ type: "text", text: "extension output" }],
+    customType: "fixture",
+    display: true,
+    metadata: { status: "ready" },
+  };
+  const parsed = parseHistoryResult({ historyRevision: 1, entries: [record], hasEarlier: false, instance: validSnapshot() });
+  assert.equal(parsed.entries[0]?.recordId, "entry-1");
+  assert.equal(parsed.entries[0]?.source, "extension");
+  assert.deepEqual(parsed.entries[0]?.metadata, { status: "ready" });
+  assert.throws(() => parseHistoryResult({
+    historyRevision: 1,
+    entries: [{ entryId: "legacy", role: "assistant", content: [{ type: "text", text: "legacy" }] }],
+    hasEarlier: false,
+    instance: validSnapshot(),
+  }), /Unexpected field|recordId/u);
+});
+
 
 
 

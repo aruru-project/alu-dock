@@ -265,37 +265,28 @@ export function parseWorkerEnvelope(raw: unknown): WorkerEnvelope {
 function validateWorkerAgentEvent(event: Record<string, unknown>): void {
   const type = oneOf(event.type, [
     "agent_start", "agent_end", "agent_settled", "turn_start", "turn_end",
-    "message_start", "message_update", "message_end",
-    "tool_execution_start", "tool_execution_update", "tool_execution_end",
-    "queue_update", "compaction_start", "compaction_end", "entry_appended",
+    "queue_update", "compaction_start", "compaction_end", "conversation_checkpoint",
     "session_info_changed", "thinking_level_changed", "auto_retry_start", "auto_retry_end",
     "summarization_retry_scheduled", "summarization_retry_attempt_start", "summarization_retry_finished",
     "dock_session_replaced", "dock_runtime_error", "dock_runtime_lost",
-    "dock_extension_error", "dock_git_branch_changed",
+    "dock_extension_error", "dock_git_branch_changed", "dock_conversation_frame", "dock_queue_consumed",
   ] as const, "Worker runtime event type");
   switch (type) {
-    case "agent_start": case "agent_settled": case "turn_start": case "summarization_retry_finished":
+    case "agent_start": case "turn_start": case "summarization_retry_finished":
       exactKeys(event, ["type"], `Worker ${type} event`); return;
+    case "agent_settled":
+      exactKeys(event, ["type", "stopReason", "error"], "Worker agent-settled event");
+      optionalString(event.stopReason, 128); optionalString(event.error, 2_048); return;
+    case "conversation_checkpoint":
+      exactKeys(event, ["type", "history"], "Worker conversation checkpoint");
+      if (!Array.isArray(event.history) || event.history.length > 100_000) throw new Error("Worker checkpoint history is invalid");
+      for (const entry of event.history) validateWorkerHistoryEntry(entry);
+      return;
     case "agent_end":
       exactKeys(event, ["type", "willRetry"], "Worker agent-end event");
       if (typeof event.willRetry !== "boolean") throw new Error("Worker agent-end event is invalid"); return;
     case "turn_end":
       exactKeys(event, ["type"], "Worker turn-end event"); return;
-    case "message_start": case "message_end":
-      exactKeys(event, ["type", "message"], `Worker ${type} event`); validatePrivateMessage(event.message); return;
-    case "message_update":
-      exactKeys(event, ["type", "assistantMessageEvent"], "Worker message-update event");
-      validateAssistantUpdate(event.assistantMessageEvent); return;
-    case "tool_execution_start":
-      exactKeys(event, ["type", "toolCallId", "toolName", "args"], "Worker tool-start event");
-      boundedString(event.toolCallId, 128, "Tool call id"); boundedString(event.toolName, 256, "Tool name"); record(event.args, "Tool arguments"); return;
-    case "tool_execution_update":
-      exactKeys(event, ["type", "toolCallId", "toolName", "partialResult"], "Worker tool-update event");
-      boundedString(event.toolCallId, 128, "Tool call id"); boundedString(event.toolName, 256, "Tool name"); validatePrivateToolResult(event.partialResult); return;
-    case "tool_execution_end":
-      exactKeys(event, ["type", "toolCallId", "toolName", "result", "isError"], "Worker tool-end event");
-      boundedString(event.toolCallId, 128, "Tool call id"); boundedString(event.toolName, 256, "Tool name"); validatePrivateToolResult(event.result);
-      if (typeof event.isError !== "boolean") throw new Error("Tool error flag is invalid"); return;
     case "compaction_start":
       exactKeys(event, ["type", "reason"], "Worker compaction-start event"); oneOf(event.reason, ["manual", "threshold", "overflow"], "Compaction reason"); return;
     case "compaction_end":
@@ -303,8 +294,10 @@ function validateWorkerAgentEvent(event: Record<string, unknown>): void {
       oneOf(event.reason, ["manual", "threshold", "overflow"], "Compaction reason");
       if (typeof event.aborted !== "boolean" || typeof event.willRetry !== "boolean") throw new Error("Compaction event flags are invalid");
       optionalString(event.errorMessage, 2_048); return;
-    case "entry_appended":
-      exactKeys(event, ["type"], "Worker entry-appended event"); return;
+    case "dock_conversation_frame":
+      exactKeys(event, ["type", "frame"], "Worker conversation-frame event"); validateConversationFrame(event.frame); return;
+    case "dock_queue_consumed":
+      exactKeys(event, ["type", "operationId"], "Worker queue-consumed event"); boundedString(event.operationId, 128, "Worker queue operation id"); return;
     case "thinking_level_changed":
       exactKeys(event, ["type", "level"], "Worker thinking event"); oneOf(event.level, ["off", "minimal", "low", "medium", "high", "xhigh", "max"], "Thinking level"); return;
     case "auto_retry_start": case "summarization_retry_scheduled":
@@ -350,69 +343,47 @@ function validateWorkerAgentEvent(event: Record<string, unknown>): void {
   }
 }
 
-function validatePrivateMessage(raw: unknown): void {
-  const message = record(raw, "Worker message");
-  exactKeys(message, ["role", "content", "stopReason", "errorMessage", "toolCallId"], "Worker message");
-  const role = oneOf(message.role, ["user", "assistant", "toolResult", "bashExecution", "custom", "branchSummary", "compactionSummary", "system"], "Worker message role");
-  if (role === "toolResult") validatePrivateToolContent(message.content); else validatePrivateContent(message.content);
-  optionalString(message.stopReason, 128); optionalString(message.errorMessage, 2_048); optionalString(message.toolCallId, 128);
-}
-
-function validatePrivateContent(raw: unknown): void {
-  if (typeof raw === "string") { boundedString(raw, 256_000, "Worker message content", true); return; }
-  if (!Array.isArray(raw) || raw.length > 201) throw new Error("Worker message content is invalid");
-  for (const item of raw) {
-    const block = record(item, "Worker content block");
-    const type = oneOf(block.type, ["text", "thinking", "image", "toolCall"], "Worker content block type");
-    if (type === "text") {
-      exactKeys(block, ["type", "text"], "Worker text block"); boundedString(block.text, 8_000, "Worker text", true);
-    } else if (type === "thinking") {
-      exactKeys(block, ["type", "thinking"], "Worker thinking block"); boundedString(block.thinking, 8_000, "Worker thinking", true);
-    } else if (type === "image") {
-      exactKeys(block, ["type", "mimeType"], "Worker image block"); validateImageMimeType(block.mimeType, "Worker image MIME type");
-    } else {
-      validatePrivateToolCall(block);
-    }
+function validateConversationFrame(raw: unknown): void {
+  const frame = record(raw, "Worker conversation frame");
+  exactKeys(frame, ["type", "data"], "Worker conversation frame");
+  const type = oneOf(frame.type, [
+    "message.submitted", "message.delta", "message.completed",
+    "tool.started", "tool.args_updated", "tool.output_updated", "tool.completed",
+  ], "Worker conversation frame type");
+  const data = record(frame.data, `Worker ${type} data`);
+  if (type === "message.submitted") {
+    exactKeys(data, ["operationId", "messageId", "role", "text", "images", "delivery", "queueItemId"], "Worker submitted-message data");
+    boundedString(data.operationId, 128, "Message operation id"); boundedString(data.messageId, 128, "Message id");
+    if (data.role !== "user") throw new Error("Submitted message role is invalid");
+    boundedString(data.text, 256_000, "Submitted message text", true);
+    if (data.images !== undefined) validateImagePaths(data.images);
+    oneOf(data.delivery, ["prompt", "steer", "followUp"], "Message delivery"); optionalString(data.queueItemId, 128);
+    return;
   }
-}
-
-function validatePrivateToolContent(raw: unknown): void {
-  if (typeof raw === "string") { boundedString(raw, 256_000, "Worker tool content", true); return; }
-  if (!Array.isArray(raw) || raw.length > 200) throw new Error("Worker tool content is invalid");
-  for (const item of raw) {
-    const block = record(item, "Worker tool content block");
-    const type = oneOf(block.type, ["text", "image"], "Worker tool content block type");
-    if (type === "text") { exactKeys(block, ["type", "text"], "Worker tool text block"); boundedString(block.text, 256_000, "Worker tool text", true); }
-    else { exactKeys(block, ["type", "mimeType"], "Worker tool image block"); validateImageMimeType(block.mimeType, "Worker tool image MIME type"); }
+  if (type === "message.delta") {
+    exactKeys(data, ["messageId", "block", "delta"], "Worker message-delta data");
+    boundedString(data.messageId, 128, "Message id"); oneOf(data.block, ["text", "thinking"], "Message block"); boundedString(data.delta, 8_000, "Message delta", true); return;
   }
-}
-
-function validatePrivateToolCall(raw: unknown): void {
-  const call = record(raw, "Worker tool call");
-  exactKeys(call, ["type", "id", "name", "arguments"], "Worker tool call");
-  if (call.type !== "toolCall") throw new Error("Worker tool call type is invalid");
-  boundedString(call.id, 128, "Worker tool-call id"); boundedString(call.name, 256, "Worker tool-call name");
-  record(call.arguments, "Worker tool-call arguments");
-}
-
-function validateAssistantUpdate(raw: unknown): void {
-  const update = record(raw, "Worker assistant update");
-  exactKeys(update, ["type", "contentIndex", "delta", "partial", "toolCall"], "Worker assistant update");
-  oneOf(update.type, ["start", "text_start", "text_delta", "text_end", "thinking_start", "thinking_delta", "thinking_end", "toolcall_start", "toolcall_delta", "toolcall_end", "done", "error"], "Worker assistant update type");
-  if (update.contentIndex !== undefined) nonNegativeInteger(update.contentIndex, "Worker assistant content index");
-  optionalString(update.delta, 8_000);
-  if (update.partial !== undefined) {
-    const partial = record(update.partial, "Worker assistant partial");
-    exactKeys(partial, ["content"], "Worker assistant partial"); validatePrivateContent(partial.content);
+  if (type === "message.completed") {
+    exactKeys(data, ["messageId", "role", "content", "stopReason", "error"], "Worker completed-message data");
+    boundedString(data.messageId, 128, "Message id"); oneOf(data.role, ["user", "assistant", "tool", "system"], "Completed message role");
+    validateDockContent(data.content); optionalString(data.stopReason, 128); optionalString(data.error, 2_048); return;
   }
-  if (update.toolCall !== undefined) validatePrivateToolCall(update.toolCall);
-}
-
-function validatePrivateToolResult(raw: unknown): void {
-  const result = record(raw, "Worker tool result");
-  exactKeys(result, ["content", "presentation"], "Worker tool result");
-  validatePrivateToolContent(result.content);
-  if (result.presentation !== undefined) validateToolPresentation(result.presentation);
+  if (type === "tool.started" || type === "tool.args_updated") {
+    exactKeys(data, type === "tool.started" ? ["toolCallId", "toolName", "args", "omittedFields"] : ["toolCallId", "args", "omittedFields"], `Worker ${type} data`);
+    boundedString(data.toolCallId, 128, "Tool call id"); if (type === "tool.started") boundedString(data.toolName, 256, "Tool name");
+    record(data.args, "Tool arguments"); validateJsonValue(data.args); if (data.omittedFields !== undefined) stringArray(data.omittedFields, 200, 2_048, "Tool omissions"); return;
+  }
+  if (type === "tool.output_updated") {
+    exactKeys(data, ["toolCallId", "text", "presentation"], "Worker tool-output data");
+    boundedString(data.toolCallId, 128, "Tool call id"); boundedString(data.text, 256_000, "Tool output", true);
+    if (data.presentation !== undefined) validateToolPresentation(data.presentation); return;
+  }
+  exactKeys(data, ["toolCallId", "toolName", "text", "isError", "presentation", "omittedFields"], "Worker completed-tool data");
+  boundedString(data.toolCallId, 128, "Tool call id"); boundedString(data.toolName, 256, "Tool name"); boundedString(data.text, 256_000, "Tool output", true);
+  if (typeof data.isError !== "boolean") throw new Error("Tool error flag is invalid");
+  if (data.presentation !== undefined) validateToolPresentation(data.presentation);
+  if (data.omittedFields !== undefined) stringArray(data.omittedFields, 200, 2_048, "Tool omissions");
 }
 
 function validateToolPresentation(raw: unknown): void {
@@ -441,6 +412,19 @@ function validateToolNotice(raw: unknown): void {
   } else if (code === "full_output_saved") {
     exactKeys(notice, ["code", "path"], "Worker output-path notice"); boundedString(notice.path, 4_096, "Worker output path");
   } else exactKeys(notice, ["code"], "Worker host-projection notice");
+}
+
+export function validateAgentWorkerResult(label: string, raw: unknown): void {
+  if (label === "session.history") {
+    if (!Array.isArray(raw) || raw.length > 100_000) throw new Error("Worker session history is invalid");
+    for (const entry of raw) validateWorkerHistoryEntry(entry);
+    return;
+  }
+  if (label === "conversation.history") {
+    validateConversationHistoryPage(raw);
+    return;
+  }
+  if (label === "conversation.content") validateConversationContentPage(raw);
 }
 
 function validateConversationHistoryPage(raw: unknown): void {
@@ -499,16 +483,71 @@ function validateConversationContentPage(raw: unknown): void {
 }
 
 function validateWorkerHistoryEntry(raw: unknown): void {
-  const entry = record(raw, "Worker history entry");
-  exactKeys(entry, ["entryId", "parentId", "timestamp", "role", "summaryKind", "content", "stopReason", "error", "toolCallId", "toolName", "toolPresentation", "isError"], "Worker history entry");
-  boundedString(entry.entryId, 128, "History entry id");
-  oneOf(entry.role, ["user", "assistant", "tool", "toolResult", "system", "bashExecution", "custom", "branchSummary", "compactionSummary"], "History role");
-  if (entry.summaryKind !== undefined) oneOf(entry.summaryKind, ["compaction", "branch"], "History summary kind");
-  if (entry.role === "tool" || entry.role === "toolResult") validatePrivateToolContent(entry.content); else validatePrivateContent(entry.content);
-  optionalString(entry.parentId, 128); optionalString(entry.timestamp, 128); optionalString(entry.stopReason, 128);
-  optionalString(entry.error, 2_048); optionalString(entry.toolCallId, 128); optionalString(entry.toolName, 256);
-  if (entry.toolPresentation !== undefined) validateToolPresentation(entry.toolPresentation);
-  if (entry.isError !== undefined && typeof entry.isError !== "boolean") throw new Error("History error flag is invalid");
+  const entry = record(raw, "Worker conversation record");
+  exactKeys(entry, [
+    "recordId", "entryId", "parentId", "kind", "source", "visibility", "timestamp", "content",
+    "stopReason", "error", "toolCallId", "toolName", "isError", "customType", "display", "metadata",
+    "metadataOmittedFields", "command", "exitCode", "cancelled", "truncated", "fullOutputPath", "excludeFromContext",
+    "firstKeptEntryId", "tokensBefore", "fromEntryId", "targetEntryId", "label", "provider", "modelId",
+    "thinkingLevel", "name",
+  ], "Worker conversation record");
+  boundedString(entry.recordId, 128, "Conversation record id");
+  boundedString(entry.entryId, 128, "Conversation entry id");
+  optionalString(entry.parentId, 128);
+  oneOf(entry.kind, ["message", "custom_message", "bash_execution", "compaction_summary", "branch_summary", "custom", "model_change", "thinking_level_change", "session_info", "label"], "Conversation record kind");
+  oneOf(entry.source, ["user", "assistant", "tool", "system", "extension", "runtime"], "Conversation record source");
+  oneOf(entry.visibility, ["conversation", "metadata", "hidden"], "Conversation visibility");
+  if (entry.timestamp !== undefined) {
+    const value = boundedString(entry.timestamp, 128, "Conversation timestamp");
+    if (!Number.isFinite(Date.parse(value)) || new Date(value).toISOString() !== value) throw new Error("Conversation timestamp is invalid");
+  }
+  validateDockContent(entry.content);
+  optionalString(entry.stopReason, 128); optionalString(entry.error, 2_048);
+  optionalString(entry.toolCallId, 128); optionalString(entry.toolName, 256);
+  if (entry.isError !== undefined && typeof entry.isError !== "boolean") throw new Error("Conversation error flag is invalid");
+  optionalString(entry.customType, 256);
+  if (entry.display !== undefined && typeof entry.display !== "boolean") throw new Error("Conversation display flag is invalid");
+  if (entry.metadata !== undefined) validateJsonValue(entry.metadata);
+  if (entry.metadataOmittedFields !== undefined) stringArray(entry.metadataOmittedFields, 200, 2_048, "Conversation metadata omissions");
+  optionalString(entry.command, 8_000);
+  if (entry.exitCode !== undefined && (!Number.isSafeInteger(entry.exitCode) || typeof entry.exitCode !== "number")) throw new Error("Conversation exit code is invalid");
+  for (const key of ["cancelled", "truncated", "excludeFromContext"] as const) {
+    if (entry[key] !== undefined && typeof entry[key] !== "boolean") throw new Error(`Conversation ${key} flag is invalid`);
+  }
+  optionalString(entry.fullOutputPath, 16_384); optionalString(entry.firstKeptEntryId, 128);
+  optionalNonNegativeInteger(entry.tokensBefore, "Conversation pre-compaction tokens");
+  optionalString(entry.fromEntryId, 128); optionalString(entry.targetEntryId, 128); optionalString(entry.label, 256);
+  optionalString(entry.provider, 256); optionalString(entry.modelId, 512); optionalString(entry.thinkingLevel, 64); optionalString(entry.name, 256);
+}
+
+function validateDockContent(raw: unknown): void {
+  if (!Array.isArray(raw) || raw.length > 200) throw new Error("Worker conversation content is invalid");
+  for (const item of raw) {
+    const block = record(item, "Worker conversation content block");
+    const type = oneOf(block.type, ["text", "thinking", "image", "tool_call", "tool_result", "omitted"], "Conversation content type");
+    if (type === "text" || type === "thinking") {
+      exactKeys(block, ["type", "text"], "Conversation text block");
+      boundedString(block.text, 8_000, "Conversation text", true);
+    } else if (type === "image") {
+      exactKeys(block, ["type", "mimeType"], "Conversation image block");
+      validateImageMimeType(block.mimeType, "Conversation image MIME type");
+    } else if (type === "tool_call") {
+      exactKeys(block, ["type", "toolCallId", "toolName", "args", "omittedFields"], "Conversation tool-call block");
+      boundedString(block.toolCallId, 128, "Conversation tool-call id"); boundedString(block.toolName, 256, "Conversation tool-call name");
+      validateJsonValue(block.args);
+      if (block.omittedFields !== undefined) stringArray(block.omittedFields, 200, 2_048, "Conversation tool-call omissions");
+    } else if (type === "tool_result") {
+      exactKeys(block, ["type", "toolCallId", "toolName", "text", "isError", "presentation", "omittedFields"], "Conversation tool-result block");
+      boundedString(block.toolCallId, 128, "Conversation tool-result id"); boundedString(block.toolName, 256, "Conversation tool-result name");
+      boundedString(block.text, 256_000, "Conversation tool-result text", true);
+      if (typeof block.isError !== "boolean") throw new Error("Conversation tool-result error flag is invalid");
+      if (block.presentation !== undefined) validateToolPresentation(block.presentation);
+      if (block.omittedFields !== undefined) stringArray(block.omittedFields, 200, 2_048, "Conversation tool-result omissions");
+    } else {
+      exactKeys(block, ["type", "kind", "description"], "Conversation omitted block");
+      oneOf(block.kind, ["image", "binary"], "Conversation omitted kind"); boundedString(block.description, 2_048, "Conversation omission description");
+    }
+  }
 }
 
 export function validateUiCapabilityArgs(capability: WorkerCapability, raw: unknown): void {

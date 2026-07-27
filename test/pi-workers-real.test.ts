@@ -11,6 +11,92 @@ import { RuntimeEffectUnknownError } from "../src/core/managed-instance.js";
 import { PiWorkerProcess } from "../src/pi/worker-process.js";
 import { OrderedWorkerSender, WorkerFrameReceiver, type WorkerIdentity } from "../src/pi/worker-protocol.js";
 
+const ZERO_USAGE = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  totalTokens: 0,
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
+
+test("real Pi Worker projects persisted session entries into canonical conversation records", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-dock-conversation-records-"));
+  const cwd = join(root, "cwd");
+  const sessionDir = join(root, "sessions");
+  await Promise.all([mkdir(cwd), mkdir(sessionDir)]);
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const manager = SessionManager.create(cwd, sessionDir);
+  type SessionMessage = Parameters<SessionManager["appendMessage"]>[0];
+  manager.appendMessage({ role: "user", content: [{ type: "text", text: "question" }], timestamp: 1 } as SessionMessage);
+  manager.appendMessage({
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "plan" },
+      { type: "text", text: "answer" },
+      { type: "toolCall", id: "call-1", name: "read", arguments: { path: "src/index.ts" } },
+    ],
+    api: "openai-responses", provider: "fixture", model: "fixture", usage: ZERO_USAGE,
+    stopReason: "toolUse", timestamp: 2,
+  } as SessionMessage);
+  manager.appendMessage({
+    role: "toolResult", toolCallId: "call-1", toolName: "read",
+    content: [{ type: "text", text: "file contents" }], isError: false, details: { status: "complete" }, timestamp: 3,
+  } as SessionMessage);
+  manager.appendMessage({
+    role: "bashExecution", command: "printf ok", output: "ok", exitCode: 0,
+    cancelled: false, truncated: false, timestamp: 4,
+  } as SessionMessage);
+  manager.appendCustomMessageEntry("visible-extension", [{ type: "text", text: "extension says hi" }], true, { decision: "keep" });
+  manager.appendCustomMessageEntry("hidden-extension", "private state", false, { secret: true });
+  manager.appendCustomEntry("extension-state", { count: 2 });
+  manager.appendModelChange("fixture", "model-2");
+  manager.appendThinkingLevelChange("high");
+  manager.appendSessionInfo("Canonical records");
+  manager.appendLabelChange(manager.getLeafId()!, "checkpoint");
+
+  const sessionFile = manager.getSessionFile();
+  assert.ok(sessionFile);
+  const instance = await createPiInstance({
+    id: "canonical-records", hostEpoch: "canonical-records-host", creationOperationId: "canonical-records-create",
+    cwd, agentDir: join(root, "agent"), sessionDir, sessionFile,
+    projectTrusted: false, tools: [],
+  });
+  try {
+    const records = (await instance.getHistoryPage(undefined, 200)).entries;
+    assert.ok(records.length >= 10);
+    assert.ok(records.every((record) => record.recordId === record.entryId));
+    assert.deepEqual(records.slice(0, 4).map((record) => [record.kind, record.source, record.visibility]), [
+      ["message", "user", "conversation"],
+      ["message", "assistant", "conversation"],
+      ["message", "tool", "conversation"],
+      ["bash_execution", "runtime", "conversation"],
+    ]);
+    const assistant = records.find((record) => record.source === "assistant");
+    assert.ok(assistant?.content.some((block) => block.type === "thinking" && block.text === "plan"));
+    assert.ok(assistant?.content.some((block) => block.type === "tool_call" && block.toolCallId === "call-1"));
+    const tool = records.find((record) => record.source === "tool");
+    const toolResult = tool?.content.find((block) => block.type === "tool_result");
+    assert.equal(toolResult?.type === "tool_result" ? toolResult.toolCallId : undefined, "call-1");
+    assert.equal(toolResult?.type === "tool_result" ? toolResult.text : undefined, "file contents");
+    assert.equal(toolResult?.type === "tool_result" ? toolResult.isError : undefined, false);
+    assert.deepEqual(tool?.metadata, { status: "complete" });
+    const visible = records.find((record) => record.customType === "visible-extension");
+    assert.equal(visible?.kind, "custom_message");
+    assert.equal(visible?.visibility, "conversation");
+    assert.deepEqual(visible?.metadata, { decision: "keep" });
+    assert.equal(records.find((record) => record.customType === "hidden-extension")?.visibility, "hidden");
+    assert.equal(records.find((record) => record.customType === "extension-state")?.visibility, "metadata");
+    assert.equal(records.find((record) => record.kind === "model_change")?.modelId, "model-2");
+    assert.equal(records.find((record) => record.kind === "thinking_level_change")?.thinkingLevel, "high");
+    assert.equal(records.find((record) => record.kind === "session_info")?.name, "Canonical records");
+    assert.equal(records.find((record) => record.kind === "label")?.label, "checkpoint");
+  } finally {
+    await instance.disposeUnpublished();
+  }
+});
+
 test("real no-model Pi gate isolates two Dock instances in distinct workers and fences one worker loss", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-dock-two-workers-"));
   context.after(() => rm(root, { recursive: true, force: true }));

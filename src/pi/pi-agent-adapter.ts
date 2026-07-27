@@ -29,6 +29,10 @@ import {
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
   MAX_INPUT_IMAGES,
+  type ContentBlockDto,
+  type ConversationFrame,
+  type ImagePathDto,
+  type JsonValue,
 } from "../core/instance-dto.js";
 import { projectBuiltInToolPresentation } from "../core/tool-result-presentation.js";
 import type { PiExtensionUiPort } from "./pi-extension-ui-adapter.js";
@@ -169,6 +173,7 @@ interface Binding {
   gitBranchObserver?: GitBranchObserverPort;
   buffered: AgentEvent[];
   bufferEvents: boolean;
+  conversation: PiConversationProjector;
 }
 
 /** In-Worker Pi adapter around the SDK's mutable AgentSessionRuntime. */
@@ -271,18 +276,27 @@ export class PiAgentAdapter {
   async dispatch(request: AgentRequest, context?: AgentInvokeContext, preflightResult?: (success: boolean) => void): Promise<unknown> {
     switch (request.type) {
       case "command.submit": {
-        const { delivery: requestedDelivery, message, images } = request.params;
+        const { operationId, delivery: requestedDelivery, message, images } = request.params;
         const delivery = requestedDelivery === "auto" ? (this.isStreaming ? "followUp" : "prompt") : requestedDelivery;
-        if (context?.type === "force_queue") {
-          if (delivery === "prompt") throw new Error("Forced Agent queue delivery requires steer or followUp");
-          return this.queueMessage(message, delivery, images);
+        const binding = this.requireActive();
+        const input = this.classifyInput(message) === "prompt"
+          ? binding.conversation.trackInput({ operationId, text: message, delivery, images })
+          : undefined;
+        try {
+          if (context?.type === "force_queue") {
+            if (delivery === "prompt") throw new Error("Forced Agent queue delivery requires steer or followUp");
+            return await this.queueMessage(message, delivery, images);
+          }
+          return await this.prompt(message, {
+            source: "rpc",
+            ...(delivery === "prompt" ? {} : { streamingBehavior: delivery }),
+            ...(images === undefined ? {} : { images }),
+            preflightResult,
+          });
+        } catch (error) {
+          if (input !== undefined) binding.conversation.cancelInput(input);
+          throw error;
         }
-        return this.prompt(message, {
-          source: "rpc",
-          ...(delivery === "prompt" ? {} : { streamingBehavior: delivery }),
-          ...(images === undefined ? {} : { images }),
-          preflightResult,
-        });
       }
       case "command.abort": await this.abort(); return null;
       case "queue.dequeue": return this.clearQueue();
@@ -619,8 +633,8 @@ export class PiAgentAdapter {
     return { revision: state.revision, contentRef, chunks, complete: false, nextCursor };
   }
 
-  private conversationEntries(): Array<{ source: SessionEntry; projected: AgentHistoryEntry }> {
-    const branch = this.requireActive().session.sessionManager.getBranch();
+  private conversationEntries(binding: Binding = this.requireActive()): Array<{ source: SessionEntry; projected: AgentHistoryEntry }> {
+    const branch = binding.session.sessionManager.getBranch();
     return buildContextEntries(branch).flatMap((source) => {
       const projected = projectHistoryEntry(source);
       return projected === undefined ? [] : [{ source, projected }];
@@ -980,12 +994,30 @@ export class PiAgentAdapter {
   private async stageCandidate(session: AgentSession): Promise<void> {
     if (this.staged) throw new Error("Runtime attempted more than one candidate rebind");
     const token = { active: true };
-    const binding: Binding = { token, session, services: this.options.runtime.services, cwd: this.options.runtime.services.cwd, unsubscribe: () => {}, buffered: [], bufferEvents: true };
+    const binding: Binding = {
+      token,
+      session,
+      services: this.options.runtime.services,
+      cwd: this.options.runtime.services.cwd,
+      unsubscribe: () => {},
+      buffered: [],
+      bufferEvents: true,
+      conversation: new PiConversationProjector(),
+    };
     binding.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
       if (!token.active) return;
-      for (const projected of projectAgentSessionEvents(event)) {
-        if (this.active === binding && !binding.bufferEvents) this.publish(projected);
-        else binding.buffered.push(projected);
+      const projectedEvents = projectAgentSessionEvents(event);
+      const source = event as unknown as Record<string, unknown>;
+      const message = isRecord(source.message) ? source.message : undefined;
+      if (source.type === "message_end" && message?.role === "custom" && !session.isStreaming) {
+        projectedEvents.push({ type: "conversation_checkpoint" });
+      }
+      for (const projected of projectedEvents.flatMap((item) => binding.conversation.project(item))) {
+        const outbound = projected.type === "conversation_checkpoint"
+          ? { ...projected, history: this.conversationEntries(binding).map(({ projected: record }) => record) }
+          : projected;
+        if (this.active === binding && !binding.bufferEvents) this.publish(outbound);
+        else binding.buffered.push(outbound);
       }
     });
     this.staged = binding;
@@ -1201,9 +1233,9 @@ function safeRequiredText(value: unknown, limit: number, fallback: string): stri
   return safeOptionalText(value, limit) ?? fallback;
 }
 
-function projectAgentSessionEvents(event: AgentSessionEvent): AgentEvent[] {
+export function projectAgentSessionEvents(event: AgentSessionEvent): AgentEvent[] {
   const source = event as unknown as Record<string, unknown>;
-  if (source.type === "agent_message_delta" && isRecord(source.assistantMessageEvent)) {
+  if (source.type === "message_update" && isRecord(source.assistantMessageEvent)) {
     const update = source.assistantMessageEvent;
     if ((update.type === "text_delta" || update.type === "thinking_delta") && typeof update.delta === "string" && update.delta.length > 8_000) {
       const projected: AgentEvent[] = [];
@@ -1216,7 +1248,12 @@ function projectAgentSessionEvents(event: AgentSessionEvent): AgentEvent[] {
       return projected;
     }
   }
-  return [projectAgentSessionEvent(source)];
+  if (source.type === "entry_appended") return [{ type: "conversation_checkpoint" }];
+  const projected = projectAgentSessionEvent(source);
+  if (source.type === "turn_end" || source.type === "agent_settled" || source.type === "compaction_end") {
+    return [projected, { type: "conversation_checkpoint" }];
+  }
+  return [projected];
 }
 
 function projectAgentSessionEvent(event: AgentSessionEvent | Record<string, unknown>): AgentEvent {
@@ -1341,8 +1378,244 @@ function toolResultText(content: unknown): string | undefined {
   return parts.length > 0 ? parts.join("") : undefined;
 }
 
-function projectHistoryEntry(entry: SessionEntry): AgentHistoryEntry | undefined {
+interface PiConversationInput {
+  operationId: string;
+  text: string;
+  delivery: "prompt" | "steer" | "followUp";
+  images?: ImagePathDto[];
+}
+
+export class PiConversationProjector {
+  private readonly inputs: PiConversationInput[] = [];
+  private readonly announcedToolCalls = new Set<string>();
+  private readonly completedToolCalls = new Set<string>();
+  private messageSequence = 0;
+  private currentUserMessageId: string | undefined;
+  private currentAssistantMessageId: string | undefined;
+  private lastAssistantOutcome: { stopReason?: string; error?: string } | undefined;
+
+  trackInput(input: PiConversationInput): PiConversationInput {
+    const tracked = structuredClone(input);
+    this.inputs.push(tracked);
+    return tracked;
+  }
+
+  cancelInput(input: PiConversationInput): void {
+    const index = this.inputs.indexOf(input);
+    if (index >= 0) this.inputs.splice(index, 1);
+  }
+
+  project(event: AgentEvent): AgentEvent[] {
+    if (event.type === "agent_start") {
+      this.currentUserMessageId = undefined;
+      this.currentAssistantMessageId = undefined;
+      this.announcedToolCalls.clear();
+      this.completedToolCalls.clear();
+      this.lastAssistantOutcome = undefined;
+      return [event];
+    }
+    if (event.type === "agent_settled") {
+      const outcome = this.lastAssistantOutcome;
+      this.lastAssistantOutcome = undefined;
+      return [{
+        type: "agent_settled",
+        ...(outcome?.stopReason === undefined ? {} : { stopReason: outcome.stopReason }),
+        ...(outcome?.error === undefined ? {} : { error: outcome.error }),
+      }];
+    }
+    if (event.type === "message_start") return this.projectMessageStart(event);
+    if (event.type === "message_update") return this.projectMessageUpdate(event);
+    if (event.type === "message_end") return this.projectMessageEnd(event);
+    if (event.type === "tool_execution_start") return this.projectToolStart(event);
+    if (event.type === "tool_execution_update") return this.projectToolUpdate(event);
+    if (event.type === "tool_execution_end") return this.projectToolEnd(event);
+    return [event];
+  }
+
+  private projectMessageStart(event: AgentEvent): AgentEvent[] {
+    const message = isRecord(event.message) ? event.message : undefined;
+    if (message?.role !== "user") {
+      if (message?.role === "assistant") this.ensureAssistantMessageId();
+      return [];
+    }
+    const consumedText = toolResultText(message.content) ?? "";
+    const inputIndex = this.inputs.findIndex((candidate) => candidate.text === consumedText || candidate.text.startsWith(consumedText));
+    const input = inputIndex < 0 ? undefined : this.inputs.splice(inputIndex, 1)[0];
+    const operationId = input?.operationId ?? "runtime-initiated";
+    this.currentUserMessageId = input === undefined
+      ? `user-runtime-${++this.messageSequence}`
+      : `user-${input.operationId}`;
+    const data = {
+      operationId,
+      messageId: this.currentUserMessageId,
+      role: "user" as const,
+      text: boundedContentString(input?.text || consumedText, 256_000),
+      ...(input?.images === undefined ? {} : { images: structuredClone(input.images) }),
+      delivery: input?.delivery ?? "prompt",
+    };
+    return [
+      ...(input === undefined ? [] : [{ type: "dock_queue_consumed", operationId: input.operationId }]),
+      this.frame({ type: "message.submitted", data }),
+    ];
+  }
+
+  private projectMessageUpdate(event: AgentEvent): AgentEvent[] {
+    const update = isRecord(event.assistantMessageEvent) ? event.assistantMessageEvent : undefined;
+    if (!update) return [];
+    if (update.type === "start") {
+      this.ensureAssistantMessageId();
+      return [];
+    }
+    if ((update.type === "text_delta" || update.type === "thinking_delta") && typeof update.delta === "string" && update.delta.length > 0) {
+      return [this.frame({
+        type: "message.delta",
+        data: {
+          messageId: this.ensureAssistantMessageId(),
+          block: update.type === "text_delta" ? "text" : "thinking",
+          delta: boundedContentString(update.delta, 8_000),
+        },
+      })];
+    }
+    if (update.type !== "toolcall_start" && update.type !== "toolcall_delta" && update.type !== "toolcall_end") return [];
+    this.ensureAssistantMessageId();
+    const index = typeof update.contentIndex === "number" && Number.isSafeInteger(update.contentIndex) && update.contentIndex >= 0
+      ? update.contentIndex
+      : 0;
+    const partial = isRecord(update.partial) ? update.partial : undefined;
+    const partialContent = Array.isArray(partial?.content) ? partial.content : [];
+    const partialToolCall = isRecord(partialContent[index]) ? partialContent[index] : undefined;
+    const finalToolCall = isRecord(update.toolCall) ? update.toolCall : undefined;
+    const toolCall = finalToolCall ?? partialToolCall;
+    const rawId = typeof toolCall?.id === "string" ? toolCall.id : undefined;
+    if (!rawId) return [];
+    const toolCallId = safeRequiredText(rawId, 128, "unknown");
+    const toolName = safeRequiredText(toolCall?.name, 256, "tool");
+    const args = projectJsonObject(toolCall?.arguments ?? {});
+    if (!this.announcedToolCalls.has(toolCallId)) {
+      this.announcedToolCalls.add(toolCallId);
+      return [this.frame({ type: "tool.started", data: {
+        toolCallId,
+        toolName,
+        args: args.value,
+        ...(args.omittedFields.length === 0 ? {} : { omittedFields: args.omittedFields }),
+      } })];
+    }
+    return [this.frame({ type: "tool.args_updated", data: {
+      toolCallId,
+      args: args.value,
+      ...(args.omittedFields.length === 0 ? {} : { omittedFields: args.omittedFields }),
+    } })];
+  }
+
+  private projectMessageEnd(event: AgentEvent): AgentEvent[] {
+    const message = isRecord(event.message) ? event.message : undefined;
+    if (!message) return [];
+    const role = typeof message.role === "string" ? message.role : "system";
+    if (role === "toolResult") {
+      const toolCallId = safeRequiredText(message.toolCallId, 128, "unknown");
+      if (this.completedToolCalls.delete(toolCallId)) return [];
+    }
+    let messageId: string;
+    let dockRole: "user" | "assistant" | "tool" | "system";
+    if (role === "assistant") {
+      messageId = this.ensureAssistantMessageId();
+      dockRole = "assistant";
+      this.lastAssistantOutcome = {
+        ...(typeof message.stopReason === "string" ? { stopReason: boundedString(message.stopReason, 128, "unknown") } : {}),
+        ...(typeof message.errorMessage === "string" ? { error: boundedContentString(message.errorMessage, 2_048) } : {}),
+      };
+    } else if (role === "user") {
+      messageId = this.currentUserMessageId ?? `user-runtime-${++this.messageSequence}`;
+      dockRole = "user";
+    } else if (role === "toolResult") {
+      messageId = `tool-result-${safeRequiredText(message.toolCallId, 128, "unknown")}`;
+      dockRole = "tool";
+    } else {
+      messageId = `message-${++this.messageSequence}`;
+      dockRole = "system";
+    }
+    const projected = this.frame({ type: "message.completed", data: {
+      messageId,
+      role: dockRole,
+      content: projectDockContent(message.content),
+      ...(typeof message.stopReason === "string" ? { stopReason: boundedString(message.stopReason, 128, "unknown") } : {}),
+      ...(typeof message.errorMessage === "string" ? { error: boundedContentString(message.errorMessage, 2_048) } : {}),
+    } });
+    if (role === "assistant") this.currentAssistantMessageId = undefined;
+    if (role === "user") this.currentUserMessageId = undefined;
+    return [projected];
+  }
+
+  private projectToolStart(event: AgentEvent): AgentEvent[] {
+    const toolCallId = safeRequiredText(event.toolCallId, 128, "unknown");
+    const toolName = safeRequiredText(event.toolName, 256, "tool");
+    const args = projectJsonObject(event.args ?? {});
+    if (this.announcedToolCalls.has(toolCallId)) {
+      return [this.frame({ type: "tool.args_updated", data: {
+        toolCallId,
+        args: args.value,
+        ...(args.omittedFields.length === 0 ? {} : { omittedFields: args.omittedFields }),
+      } })];
+    }
+    this.announcedToolCalls.add(toolCallId);
+    return [this.frame({ type: "tool.started", data: {
+      toolCallId,
+      toolName,
+      args: args.value,
+      ...(args.omittedFields.length === 0 ? {} : { omittedFields: args.omittedFields }),
+    } })];
+  }
+
+  private projectToolUpdate(event: AgentEvent): AgentEvent[] {
+    const toolCallId = safeRequiredText(event.toolCallId, 128, "unknown");
+    const toolName = safeRequiredText(event.toolName, 256, "tool");
+    const result = isRecord(event.partialResult) ? event.partialResult : undefined;
+    const text = boundedContentString(toolResultText(result?.content), 256_000);
+    const frames: AgentEvent[] = [];
+    if (!this.announcedToolCalls.has(toolCallId)) {
+      this.announcedToolCalls.add(toolCallId);
+      frames.push(this.frame({ type: "tool.started", data: { toolCallId, toolName, args: {} } }));
+    }
+    frames.push(this.frame({ type: "tool.output_updated", data: {
+      toolCallId,
+      text,
+      ...(result?.presentation === undefined ? {} : { presentation: result.presentation as never }),
+    } }));
+    return frames;
+  }
+
+  private projectToolEnd(event: AgentEvent): AgentEvent[] {
+    const toolCallId = safeRequiredText(event.toolCallId, 128, "unknown");
+    const toolName = safeRequiredText(event.toolName, 256, "tool");
+    const result = isRecord(event.result) ? event.result : undefined;
+    const isError = event.isError === true;
+    const text = boundedContentString(toolResultText(result?.content), 256_000);
+    const projected = projectJsonObject({ content: result?.content });
+    this.announcedToolCalls.delete(toolCallId);
+    this.completedToolCalls.add(toolCallId);
+    return [this.frame({ type: "tool.completed", data: {
+      toolCallId,
+      toolName,
+      text,
+      isError,
+      ...(result?.presentation === undefined ? {} : { presentation: result.presentation as never }),
+      ...(projected.omittedFields.length === 0 ? {} : { omittedFields: projected.omittedFields }),
+    } })];
+  }
+
+  private ensureAssistantMessageId(): string {
+    this.currentAssistantMessageId ??= `assistant-${++this.messageSequence}`;
+    return this.currentAssistantMessageId;
+  }
+
+  private frame(frame: ConversationFrame): AgentEvent {
+    return { type: "dock_conversation_frame", frame };
+  }
+}
+
+function projectHistoryEntry(entry: SessionEntry): AgentHistoryEntry {
   const base = {
+    recordId: entry.id,
     entryId: entry.id,
     ...(entry.parentId === null ? {} : { parentId: entry.parentId }),
     timestamp: entry.timestamp,
@@ -1350,46 +1623,207 @@ function projectHistoryEntry(entry: SessionEntry): AgentHistoryEntry | undefined
   if (entry.type === "message") {
     const message = entry.message as unknown as Record<string, unknown>;
     const role = typeof message.role === "string" ? message.role : "system";
-    if (role === "custom" && message.display === false) return undefined;
-    const toolName = typeof message.toolName === "string" ? message.toolName : undefined;
-    const isError = message.isError === true;
-    const toolPresentation = role === "toolResult"
-      ? projectBuiltInToolPresentation(toolName, toolResultText(message.content), message.details, isError)
-      : undefined;
-    let content: unknown = role === "toolResult"
-      ? projectPrivateToolContent(message.content)
-      : projectPrivateContent(message.content);
+    if (role === "toolResult") {
+      const toolCallId = safeRequiredText(message.toolCallId, 128, `tool-${entry.id}`);
+      const toolName = safeRequiredText(message.toolName, 256, "tool");
+      const isError = message.isError === true;
+      const text = boundedContentString(toolResultText(message.content), 256_000);
+      const presentation = projectBuiltInToolPresentation(toolName, text, message.details, isError);
+      return {
+        ...base,
+        kind: "message",
+        source: "tool",
+        visibility: "conversation",
+        content: [{
+          type: "tool_result",
+          toolCallId,
+          toolName,
+          text,
+          isError,
+          ...(presentation === undefined ? {} : { presentation }),
+        }],
+        toolCallId,
+        toolName,
+        isError,
+        ...projectRecordMetadata(message.details),
+      };
+    }
     if (role === "bashExecution") {
       const command = boundedContentString(message.command, 8_000);
       const output = boundedContentString(message.output, 256_000);
-      content = command.length > 0 ? `! ${command}${output ? `\n${output}` : ""}` : output;
-    } else if (role === "branchSummary" || role === "compactionSummary") {
-      content = boundedContentString(message.summary, 256_000);
+      return {
+        ...base,
+        kind: "bash_execution",
+        source: "runtime",
+        visibility: "conversation",
+        content: command.length > 0 || output.length > 0
+          ? [{ type: "text", text: boundedContentString(command.length > 0 ? `! ${command}${output ? `\n${output}` : ""}` : output, 8_000) }]
+          : [],
+        command,
+        ...(typeof message.exitCode === "number" && Number.isSafeInteger(message.exitCode) ? { exitCode: message.exitCode } : {}),
+        ...(typeof message.cancelled === "boolean" ? { cancelled: message.cancelled } : {}),
+        ...(typeof message.truncated === "boolean" ? { truncated: message.truncated } : {}),
+        ...(typeof message.fullOutputPath === "string" ? { fullOutputPath: boundedString(message.fullOutputPath, 16_384, "") } : {}),
+        ...(typeof message.excludeFromContext === "boolean" ? { excludeFromContext: message.excludeFromContext } : {}),
+      };
     }
+    if (role === "branchSummary") {
+      const summary = boundedContentString(message.summary, 8_000);
+      return {
+        ...base,
+        kind: "branch_summary",
+        source: "runtime",
+        visibility: "conversation",
+        content: summary ? [{ type: "text", text: summary }] : [],
+        ...(typeof message.fromId === "string" ? { fromEntryId: safeRequiredText(message.fromId, 128, "unknown") } : {}),
+      };
+    }
+    if (role === "compactionSummary") {
+      const summary = boundedContentString(message.summary, 8_000);
+      return {
+        ...base,
+        kind: "compaction_summary",
+        source: "runtime",
+        visibility: "conversation",
+        content: summary ? [{ type: "text", text: summary }] : [],
+        ...(typeof message.tokensBefore === "number" && Number.isSafeInteger(message.tokensBefore) && message.tokensBefore >= 0 ? { tokensBefore: message.tokensBefore } : {}),
+      };
+    }
+    const custom = role === "custom";
     return {
       ...base,
-      role,
-      ...(role === "compactionSummary" ? { summaryKind: "compaction" as const } : {}),
-      ...(role === "branchSummary" ? { summaryKind: "branch" as const } : {}),
-      content,
-      ...(typeof message.stopReason === "string" ? { stopReason: message.stopReason } : {}),
-      ...(typeof message.errorMessage === "string" ? { error: message.errorMessage } : {}),
-      ...(typeof message.toolCallId === "string" ? { toolCallId: message.toolCallId } : {}),
-      ...(toolName === undefined ? {} : { toolName }),
-      ...(toolPresentation === undefined ? {} : { toolPresentation }),
-      ...(typeof message.isError === "boolean" ? { isError: message.isError } : {}),
+      kind: custom ? "custom_message" : "message",
+      source: custom ? "extension" : role === "user" ? "user" : role === "assistant" ? "assistant" : "system",
+      visibility: custom && message.display === false ? "hidden" : "conversation",
+      content: projectDockContent(message.content),
+      ...(typeof message.stopReason === "string" ? { stopReason: boundedString(message.stopReason, 128, "unknown") } : {}),
+      ...(typeof message.errorMessage === "string" ? { error: boundedContentString(message.errorMessage, 2_048) } : {}),
+      ...(custom && typeof message.customType === "string" ? { customType: boundedString(message.customType, 256, "custom") } : {}),
+      ...(custom && typeof message.display === "boolean" ? { display: message.display } : {}),
+      ...projectRecordMetadata(message.details),
     };
   }
   if (entry.type === "custom_message") {
-    if (!entry.display) return undefined;
-    return { ...base, role: "system", content: projectPrivateContent(entry.content) };
+    return {
+      ...base,
+      kind: "custom_message",
+      source: "extension",
+      visibility: entry.display ? "conversation" : "hidden",
+      content: projectDockContent(entry.content),
+      customType: boundedString(entry.customType, 256, "custom"),
+      display: entry.display,
+      ...projectRecordMetadata(entry.details),
+    };
   }
-  if (entry.type === "thinking_level_change") return { ...base, role: "system", content: `Thinking level changed to ${entry.thinkingLevel}` };
-  if (entry.type === "model_change") return { ...base, role: "system", content: `Model changed to ${entry.provider}/${entry.modelId}` };
-  if (entry.type === "compaction") return { ...base, role: "system", summaryKind: "compaction", content: entry.summary };
-  if (entry.type === "branch_summary") return { ...base, role: "system", summaryKind: "branch", content: entry.summary };
-  if (entry.type === "session_info" && entry.name) return { ...base, role: "system", content: `Session named ${entry.name}` };
-  return undefined;
+  if (entry.type === "custom") {
+    return {
+      ...base,
+      kind: "custom",
+      source: "extension",
+      visibility: "metadata",
+      content: [],
+      customType: boundedString(entry.customType, 256, "custom"),
+      ...projectRecordMetadata(entry.data),
+    };
+  }
+  if (entry.type === "thinking_level_change") {
+    return { ...base, kind: "thinking_level_change", source: "runtime", visibility: "metadata", content: [], thinkingLevel: boundedString(entry.thinkingLevel, 64, "off") };
+  }
+  if (entry.type === "model_change") {
+    return {
+      ...base,
+      kind: "model_change",
+      source: "runtime",
+      visibility: "metadata",
+      content: [],
+      provider: boundedString(entry.provider, 256, "unknown"),
+      modelId: boundedString(entry.modelId, 512, "unknown"),
+    };
+  }
+  if (entry.type === "compaction") {
+    return {
+      ...base,
+      kind: "compaction_summary",
+      source: "runtime",
+      visibility: "conversation",
+      content: entry.summary ? [{ type: "text", text: boundedContentString(entry.summary, 8_000) }] : [],
+      firstKeptEntryId: boundedString(entry.firstKeptEntryId, 128, "unknown"),
+      tokensBefore: Math.max(0, Math.floor(entry.tokensBefore)),
+      ...projectRecordMetadata(entry.details),
+    };
+  }
+  if (entry.type === "branch_summary") {
+    return {
+      ...base,
+      kind: "branch_summary",
+      source: "runtime",
+      visibility: "conversation",
+      content: entry.summary ? [{ type: "text", text: boundedContentString(entry.summary, 8_000) }] : [],
+      fromEntryId: boundedString(entry.fromId, 128, "unknown"),
+      ...projectRecordMetadata(entry.details),
+    };
+  }
+  if (entry.type === "session_info") {
+    return {
+      ...base,
+      kind: "session_info",
+      source: "runtime",
+      visibility: "metadata",
+      content: [],
+      ...(entry.name === undefined ? {} : { name: boundedString(entry.name, 256, "") }),
+    };
+  }
+  return {
+    ...base,
+    kind: "label",
+    source: "runtime",
+    visibility: "metadata",
+    content: [],
+    targetEntryId: boundedString(entry.targetId, 128, "unknown"),
+    ...(entry.label === undefined ? {} : { label: boundedString(entry.label, 256, "") }),
+  };
+}
+
+function projectDockContent(content: unknown): ContentBlockDto[] {
+  if (typeof content === "string") return content.length > 0 ? [{ type: "text", text: boundedContentString(content, 8_000) }] : [];
+  if (!Array.isArray(content)) return [];
+  const blocks: ContentBlockDto[] = [];
+  let bytes = 2;
+  for (const item of content.slice(0, 200)) {
+    if (!isRecord(item)) continue;
+    let block: ContentBlockDto | undefined;
+    if (item.type === "text" && typeof item.text === "string") block = { type: "text", text: boundedContentString(item.text, 8_000) };
+    else if (item.type === "thinking" && typeof item.thinking === "string") block = { type: "thinking", text: boundedContentString(item.thinking, 8_000) };
+    else if (item.type === "image") block = { type: "image", mimeType: safeImageMimeType(item.mimeType) };
+    else if ((item.type === "toolCall" || item.type === "tool_call") && typeof item.name === "string") {
+      const projected = projectJsonObject(item.arguments);
+      block = {
+        type: "tool_call",
+        toolCallId: safeRequiredText(item.id, 128, "unknown"),
+        toolName: safeRequiredText(item.name, 256, "tool"),
+        args: projected.value,
+        ...(projected.omittedFields.length > 0 ? { omittedFields: projected.omittedFields } : {}),
+      };
+    }
+    if (block === undefined) continue;
+    const blockBytes = Buffer.byteLength(JSON.stringify(block), "utf8") + (blocks.length > 0 ? 1 : 0);
+    if (bytes + blockBytes > 512_000) break;
+    blocks.push(block);
+    bytes += blockBytes;
+  }
+  return blocks;
+}
+
+function projectRecordMetadata(value: unknown): { metadata?: JsonValue; metadataOmittedFields?: string[] } {
+  if (value === undefined) return {};
+  const projected = projectJsonObject({ value });
+  const metadata = projected.value.value;
+  return {
+    ...(metadata === undefined ? {} : { metadata }),
+    ...(projected.omittedFields.length === 0 ? {} : {
+      metadataOmittedFields: projected.omittedFields.map((path) => path === "/value" ? "/" : path.replace(/^\/value/u, "")),
+    }),
+  };
 }
 
 type ConversationTextSourceBlock = { type: "text" | "thinking"; text: string };
