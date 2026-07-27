@@ -854,7 +854,8 @@ export class PiAgentAdapter {
       binding.bufferEvents = true;
       this.options.extensionUiBroker?.beginGenerationChange("reload");
       try {
-        await binding.services.modelRuntime.reloadConfig();
+        // Match Pi's /reload path. ModelRuntime.reloadConfig() also refreshes
+        // remote catalogs, which made resource reload depend on pi.dev (card #222).
         let seamCalls = 0;
         await binding.session.reload({
           beforeSessionStart: () => {
