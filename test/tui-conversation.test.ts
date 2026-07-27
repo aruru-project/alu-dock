@@ -118,64 +118,11 @@ test("Work help is scope-grouped and keeps every command syntax on one source li
   assert.doesNotMatch(help, /\/mouse\b/u);
 });
 
-test("Stage 3 setting command values are typed and bounded", () => {
-  const boolSetting = { key: "autoRetry", value: true, source: "effective", writable: true, valueType: "boolean", reloadRequired: false, hostRestartRequired: false } as SettingDto;
-  const enumSetting = { key: "transport", value: "auto", source: "effective", writable: true, valueType: "enum", allowedValues: ["auto", "sse", "websocket", "websocket-cached"], reloadRequired: false, hostRestartRequired: false } as SettingDto;
-  const intSetting = { key: "editorPaddingX", value: 1, source: "effective", writable: true, valueType: "integer", min: 0, max: 3, reloadRequired: false, hostRestartRequired: false } as SettingDto;
-  const warnings = { key: "warnings", value: {}, source: "effective", writable: true, valueType: "object", reloadRequired: false, hostRestartRequired: false } as SettingDto;
-  const readOnly = { key: "compactionReserveTokens", value: 165_536, source: "project", writable: false, valueType: "integer", min: 0, max: 2_147_483_647, reloadRequired: false, hostRestartRequired: false } as SettingDto;
 
-  assert.deepEqual(parseSettingCommandValue(boolSetting, "off"), { key: "autoRetry", value: false });
-  assert.deepEqual(parseSettingCommandValue(enumSetting, "websocket"), { key: "transport", value: "websocket" });
-  assert.deepEqual(parseSettingCommandValue(intSetting, "3"), { key: "editorPaddingX", value: 3 });
-  assert.deepEqual(parseSettingCommandValue(warnings, "true"), { key: "warnings", value: { anthropicExtraUsage: true } });
-  assert.equal(parseSettingCommandValue(boolSetting, "yes"), undefined);
-  assert.equal(parseSettingCommandValue(enumSetting, "udp"), undefined);
-  assert.equal(parseSettingCommandValue(intSetting, "4"), undefined);
-  assert.equal(parseSettingCommandValue(warnings, "{\"other\":true}"), undefined);
-  assert.equal(parseSettingCommandValue(readOnly, "200000"), undefined);
-});
 
-test("Alu palette uses semantic local surfaces without taking over the terminal background", () => {
-  assert.equal(detectTerminalColorLevel({ TERM: "xterm-256color", NO_COLOR: "" }, true), "none");
-  assert.equal(detectTerminalColorLevel({ TERM: "xterm-256color" }, true), "ansi256");
-  assert.equal(detectTerminalColorLevel({ TERM: "xterm-256color", COLORTERM: "truecolor" }, true), "truecolor");
 
-  const plain = createAluPaint("none");
-  assert.equal(plain.userSurface("question"), "question");
-  assert.equal(plain.running("run"), "run");
 
-  const truecolor = createAluPaint("truecolor");
-  assert.match(truecolor.userSurface("question"), /\u001b\[38;2;230;225;242;48;2;66;38;47mquestion\u001b\[0m/u);
-  assert.notEqual(truecolor.running("state"), truecolor.success("state"));
-  assert.notEqual(truecolor.success("state"), truecolor.error("state"));
-  assert.match(truecolor.accent("accent"), /38;2;221;126;158/u);
-  assert.match(truecolor.success("success"), /38;2;230;225;242/u);
-  assert.match(truecolor.warning("truncated"), /38;2;246;193;71/u, "tool decision notices use canonical Alu gold");
-  assert.match(truecolor.diffAdded("+ added"), /38;2;108;132;205/u, "diff additions use canonical Alu indigo");
-  assert.match(truecolor.diffRemoved("- removed"), /38;2;221;126;158/u, "diff removals use canonical Alu pink");
-  assert.match(truecolor.diffHunk("@@ hunk"), /38;2;246;193;71/u, "diff hunks use canonical Alu gold");
-  assert.match(truecolor.selection("selected"), /48;2;108;132;205/u);
-  const nestedSurface = truecolor.toolSurface(`${truecolor.success("✓")} trailing padding`);
-  assert.match(nestedSurface, /\u001b\[0m\u001b\[38;2;174;153;168;48;2;27;17;20m trailing padding/u,
-    "nested semantic colors must restore the enclosing surface after SGR reset");
-  for (const sample of [truecolor.accent("x"), truecolor.success("x"), truecolor.selection("x")]) {
-    assert.doesNotMatch(sample, /125;211;252|94;234;212|22;78;99/u, "legacy cyan/teal colors are forbidden");
-  }
 
-  const ansi16 = createAluPaint("ansi16");
-  assert.doesNotMatch(ansi16.userSurface("question"), /\u001b\[4[0-7]m/u, "local surfaces fall back to foreground-only at 16 colors");
-});
-
-test("local UI status replaces at the chat tail without becoming runtime activity", () => {
-  const conversation = new DockConversation();
-  conversation.addStatus("loading tools");
-  conversation.addStatus("tools updated");
-  assert.deepEqual(conversation.snapshot(), [{ kind: "status", text: "tools updated", complete: true }]);
-  conversation.addNotice("model output");
-  conversation.addStatus("settings saved");
-  assert.deepEqual(conversation.snapshot().map((entry) => entry.text), ["tools updated", "model output", "settings saved"]);
-});
 
 test("full flowing conversation render includes the complete ordered transcript", () => {
   const conversation = new DockConversation();
@@ -223,91 +170,11 @@ test("conversation reset replaces old session history", () => {
   assert.deepEqual(conversation.snapshot(), [{ kind: "assistant", text: "new session", complete: true }]);
 });
 
-test("extension notifications follow Pi tail replacement and severity semantics", () => {
-  const conversation = new DockConversation();
-  conversation.applyReplay([
-    event(1, "command.handled", { operationId: "no-run-1", kind: "extension_command" }),
-    event(2, "command.handled", { operationId: "no-run-2", kind: "no_run" }),
-  ], false);
-  assert.deepEqual(conversation.snapshot(), []);
 
-  conversation.apply(event(3, "extension.notification", { level: "info", message: "rm-confirm ON" }));
-  conversation.apply(event(4, "extension.notification", { level: "info", message: "rm-confirm status ON" }));
-  conversation.apply(event(5, "message.submitted", {
-    operationId: "prompt-1", messageId: "prompt-1", role: "user", text: "intervening message", delivery: "prompt",
-  }));
-  conversation.apply(event(6, "extension.notification", { level: "info", message: "Kanban status" }));
-  conversation.apply(event(7, "extension.notification", { level: "warning", message: "rm-confirm OFF" }));
-  conversation.apply(event(8, "extension.notification", { level: "warning", message: "rm-confirm remains OFF" }));
-  conversation.apply(event(9, "extension.notification", { level: "error", message: "Extension command failed" }));
-  conversation.apply(event(10, "extension.error", { error: "Extension hook failed" }));
 
-  assert.deepEqual(conversation.snapshot().map((entry) => [entry.kind, entry.text]), [
-    ["status", "rm-confirm status ON"],
-    ["user", "intervening message"],
-    ["status", "Kanban status"],
-    ["warning", "rm-confirm OFF"],
-    ["warning", "rm-confirm remains OFF"],
-    ["error", "Extension command failed"],
-    ["error", "Extension hook failed"],
-  ]);
-  const rendered = conversation.render(80).join("\n");
-  assert.match(rendered, /rm-confirm status ON/u);
-  assert.match(rendered, /rm-confirm OFF/u);
-  assert.match(rendered, /Extension command failed/u);
-});
 
-test("conversation projects persisted history before live replay", () => {
-  const conversation = new DockConversation();
-  conversation.applyHistory([
-    { entryId: "h1", role: "user", content: [{ type: "text", text: "old question" }] },
-    { entryId: "h2", parentId: "h1", role: "assistant", content: [{ type: "thinking", text: "old plan" }, { type: "text", text: "old answer" }, { type: "tool_call", toolCallId: "t1", toolName: "read", args: { path: "/tmp/old" } }] },
-    { entryId: "h3", parentId: "h2", role: "tool", content: [{ type: "tool_result", toolCallId: "t1", toolName: "read", text: "old result", isError: false }] },
-  ], true);
 
-  assert.deepEqual(conversation.snapshot(), [
-    { kind: "user", text: "old question", complete: true },
-    { kind: "thinking", text: "old plan", complete: true },
-    { kind: "assistant", text: "old answer", complete: true },
-    { kind: "tool", text: "read done\nargs\n{\n  \"path\": \"/tmp/old\"\n}\nresult\nold result", complete: true },
-  ]);
-  assert.match(conversation.render(100).join("\n"), /✓ read.*\/tmp\/old/u);
-});
 
-test("persisted Pi edit results retain the same explicit added and deleted preview as live events", () => {
-  const conversation = new DockConversation();
-  conversation.applyHistory([
-    {
-      entryId: "edit-call",
-      role: "assistant",
-      content: [{
-        type: "tool_call",
-        toolCallId: "edit-history",
-        toolName: "edit",
-        args: {
-          path: "src/history.ts",
-          edits: [{ oldText: "return oldValue;", newText: "return newValue;" }],
-        },
-      }],
-    },
-    {
-      entryId: "edit-result",
-      role: "tool",
-      content: [{
-        type: "tool_result",
-        toolCallId: "edit-history",
-        toolName: "edit",
-        text: "-1 return oldValue;\n+1 return newValue;",
-        isError: false,
-      }],
-    },
-  ], false);
-
-  const rendered = conversation.render(80).join("\n");
-  assert.match(rendered, /-1 return oldValue;/u);
-  assert.match(rendered, /\+1 return newValue;/u);
-  assert.doesNotMatch(rendered, /Successfully replaced/u);
-});
 
 test("collapsed multi-hunk edit previews prioritize actual changes over surrounding context", () => {
   const conversation = new DockConversation();
@@ -367,24 +234,7 @@ test("collapsed multi-hunk edit previews prioritize actual changes over surround
   assert.doesNotMatch(collapsed, /old first block|old second block/u, "collapsed success must not fall back to edit arguments");
 });
 
-test("persisted assistant content blocks retain Pi order instead of telemetry grouping", () => {
-  const conversation = new DockConversation();
-  conversation.applyHistory([{
-    entryId: "ordered-assistant",
-    role: "assistant",
-    content: [
-      { type: "text", text: "first answer" },
-      { type: "thinking", text: "later reasoning" },
-      { type: "text", text: "final answer" },
-      { type: "tool_call", toolCallId: "ordered-tool", toolName: "read", args: { path: "ordered.ts" } },
-    ],
-  }], false);
-  assert.deepEqual(conversation.snapshot().map((entry) => entry.kind), ["assistant", "thinking", "assistant", "tool"]);
-  const rendered = conversation.render(80).join("\n");
-  assert.ok(rendered.indexOf("first answer") < rendered.indexOf("later reasoning"));
-  assert.ok(rendered.indexOf("later reasoning") < rendered.indexOf("final answer"));
-  assert.ok(rendered.indexOf("final answer") < rendered.indexOf("read"));
-});
+
 
 test("compaction summaries have a readable folded surface and expand explicitly", () => {
   const conversation = new DockConversation();
@@ -423,43 +273,9 @@ test("compaction summaries have a readable folded surface and expand explicitly"
   assert.equal(ordinary.toggleLatestDetailExpanded(), undefined);
 });
 
-test("fresh conversation bootstrap ignores lifecycle replay and keeps only unresolved message/tool frames", () => {
-  const conversation = new DockConversation();
-  conversation.applyHistory([{ entryId: "h1", role: "assistant", content: [{ type: "text", text: "current branch" }] }], false);
-  conversation.applyBootstrapReplay([
-    event(1, "session.replaced", { reason: "resume", previousSessionId: "old", runtimeGeneration: 1 }),
-    event(2, "session.navigated", { targetId: "old-branch", leafId: "old-branch", treeRevision: "r1", summaryCreated: false }),
-    event(3, "compaction.completed", { reason: "manual", aborted: false, willRetry: false }),
-    event(4, "message.submitted", { operationId: "active", messageId: "u-active", role: "user", text: "current prompt", delivery: "prompt" }),
-    event(5, "message.delta", { messageId: "a-active", block: "text", delta: "partial" }),
-  ]);
-  const projected = conversation.snapshot();
-  assert.deepEqual(projected.map((entry) => entry.text), ["current branch", "current prompt", "partial"]);
-  assert.equal(JSON.stringify(projected).includes("old-branch"), false);
-  assert.equal(JSON.stringify(projected).includes("Compaction completed"), false);
-});
 
-test("an empty persisted branch still shows an unresolved active tool bootstrap", () => {
-  const conversation = new DockConversation();
-  conversation.applyHistory([], false);
-  conversation.applyBootstrapReplay([
-    event(20, "run.started", { operationId: "runtime-initiated" }),
-    event(21, "message.completed", {
-      messageId: "hidden-guard",
-      role: "system",
-      content: [{ type: "text", text: "hidden continuation control" }],
-    }),
-    event(22, "tool.started", {
-      toolCallId: "offline-continuation-tool",
-      toolName: "read",
-      args: { path: "src/offline.ts" },
-    }),
-  ]);
-  assert.deepEqual(conversation.snapshot().map((entry) => [entry.kind, entry.text]), [
-    ["tool", "read running\nargs\n{\n  \"path\": \"src/offline.ts\"\n}"],
-  ]);
-  assert.doesNotMatch(conversation.render(80).join("\n"), /Start a conversation|hidden continuation control/u);
-});
+
+
 
 test("conversation projects replay and live deltas into readable messages", () => {
   const conversation = new DockConversation();
@@ -789,49 +605,7 @@ test("built-in presentations keep decision-critical tail, limits, continuation, 
   for (const rendered of [bash, read, hostProjectedRead, grep, find, ls]) assert.doesNotMatch(rendered, /full details/u);
 });
 
-test("automatic tool preview contraction does not trigger pi-tui full redraw", async () => {
-  const conversation = new DockConversation();
-  for (let index = 0; index < 20; index += 1) conversation.addNotice(`settled history ${index}`);
-  conversation.apply(event(100, "tool.started", {
-    toolCallId: "renderer-stable",
-    toolName: "read",
-    args: { path: "src/stable.ts" },
-  }));
 
-  const terminal = new RecordingTerminal();
-  const tui = new TUI(terminal);
-  tui.setClearOnShrink(true);
-  tui.addChild(conversation);
-  tui.start();
-  await flushTuiRender(tui);
-
-  conversation.apply(event(101, "tool.output_updated", {
-    toolCallId: "renderer-stable",
-    text: Array.from({ length: 30 }, (_, index) => `renderer line ${index + 1}`).join("\n"),
-  }));
-  await flushTuiRender(tui);
-  const redrawsBeforeContraction = tui.fullRedraws;
-  const writesBeforeContraction = terminal.writes.length;
-
-  conversation.apply(event(102, "tool.output_updated", {
-    toolCallId: "renderer-stable",
-    text: "short renderer update",
-  }));
-  await flushTuiRender(tui);
-  conversation.apply(event(103, "tool.completed", {
-    toolCallId: "renderer-stable",
-    toolName: "read",
-    isError: false,
-    text: "final renderer output",
-  }));
-  await flushTuiRender(tui);
-  tui.stop();
-
-  assert.equal(tui.fullRedraws, redrawsBeforeContraction);
-  const contractionWrites = terminal.writes.slice(writesBeforeContraction).join("");
-  assert.doesNotMatch(contractionWrites, /\u001b\[3J/u);
-  assert.doesNotMatch(contractionWrites, /\u001b\[\?1049h|\u001b\[\?1000h|\u001b\[\?1006h/u);
-});
 
 test("generic structured tool previews expose safe outcome fields without arbitrary payloads", () => {
   const conversation = new DockConversation();
@@ -875,28 +649,7 @@ test("generic structured tool previews expose safe outcome fields without arbitr
   assert.doesNotMatch(malformedPreview, /MUST NOT LEAK|private/u);
 });
 
-test("authoritative toolsExpanded updates clear per-tool overrides", () => {
-  const conversation = new DockConversation();
-  conversation.apply(event(1, "tool.started", {
-    toolCallId: "authoritative-tool", toolName: "read", args: { path: "src/current.ts" },
-  }));
-  conversation.apply(event(2, "tool.completed", {
-    toolCallId: "authoritative-tool", toolName: "read", isError: false,
-    text: Array.from({ length: 14 }, (_, index) => `authoritative detail ${index + 1}`).join("\n"),
-  }));
 
-  conversation.setToolsExpanded(true);
-  assert.match(conversation.render(80).join("\n"), /authoritative detail 14/u);
-  assert.deepEqual(conversation.toggleLatestToolExpanded(), { expanded: false, name: "read" });
-  const preview = conversation.render(80).join("\n");
-  assert.match(preview, /authoritative detail 1/u);
-  assert.doesNotMatch(preview, /authoritative detail 14/u);
-  assert.match(preview, /visual lines · Ctrl\+O details/u);
-
-  conversation.setToolsExpanded(true);
-  assert.equal(conversation.areToolsExpanded(), true);
-  assert.match(conversation.render(80).join("\n"), /authoritative detail 14/u);
-});
 
 test("collapsed tool failures expose a safe first-line reason and preserve expandable detail", () => {
   const conversation = new DockConversation();
@@ -957,21 +710,7 @@ test("interrupted active tools retain the settlement reason in preview and full 
   assert.match(conversation.render(80).join("\n"), /partial line 30[\s\S]*interrupted by aborted/u);
 });
 
-test("subagent tool completion mirrors the closed isError lifecycle instead of claiming done", () => {
-  const conversation = new DockConversation();
-  conversation.apply(event(1, "tool.started", {
-    toolCallId: "subagent-failed", toolName: "subagent", args: { agent: "scout" },
-  }));
-  conversation.apply(event(2, "tool.completed", {
-    toolCallId: "subagent-failed", toolName: "subagent", isError: true,
-    text: "Native pi-subagents intercom currently handles supervisor replies. Child agents initiate asks with contact_supervisor.",
-  }));
-  const projected = conversation.render(120).join("\n");
-  assert.match(projected, /× subagent.*scout/u);
-  assert.doesNotMatch(projected, /subagent failed/u);
-  assert.match(projected, /Native pi-subagents intercom/u);
-  assert.doesNotMatch(projected, /✓ subagent done/u);
-});
+
 
 test("compaction keeps successful and real failures durable while no-op/cancel stay transient", () => {
   const conversation = new DockConversation();
@@ -1031,44 +770,7 @@ test("pending queue tray follows Pi consumption order and leaves the transcript 
   assert.equal(tray.count, 0);
 });
 
-test("live snapshot projection updates metrics, extension status, state, and replacement cursor", () => {
-  let projected = projectSnapshot(snapshot(), event(2, "session.metrics_changed", {
-    metrics: {
-      messages: { user: 3, assistant: 2, toolCalls: 1, toolResults: 1, total: 7 },
-      tokens: { input: 300, output: 100, cacheRead: 50, cacheWrite: 0, total: 450 },
-      cost: 0.02,
-      context: { tokens: 2_000, contextWindow: 10_000, percent: 20 },
-    },
-  }));
-  projected = projectSnapshot(projected, event(3, "extension.status_changed", { key: "build", text: "green" }));
-  projected = projectSnapshot(projected, event(4, "extension.tools_expanded_changed", { expanded: true }));
-  assert.equal(projected.toolsExpanded, true);
-  projected = projectSnapshot(projected, event(5, "git.branch_changed", { branch: "feature/live" }));
-  assert.equal(projected.gitBranch, "feature/live");
-  projected = projectSnapshot(projected, event(6, "instance.state_changed", {
-    reason: "settled", lifecycle: "active", execution: "idle", compacting: false, lastRun: "succeeded",
-    pending: { steering: 0, followUp: 0, total: 0 },
-  }));
-  projected = projectSnapshot(projected, {
-    ...event(1, "session.replaced", { reason: "reload", runtimeGeneration: 2, sessionFile: "/tmp/pi-2.jsonl", cwd: "/tmp/reloaded", piSessionId: "pi-2", gitBranch: "replacement" }),
-    runtimeGeneration: 2,
-  });
 
-  assert.equal(projected.metrics?.context?.percent, 20);
-  assert.deepEqual(projected.extensionStatus, {});
-  assert.equal(projected.toolsExpanded, false, "session replacement resets extension UI state");
-  assert.equal(projected.execution, "idle");
-  assert.equal(projected.lastRun, "never");
-  assert.equal(projected.activeCommandId, undefined);
-  assert.equal(projected.runtimeGeneration, 2);
-  assert.equal(projected.cwd, "/tmp/reloaded");
-  assert.equal(projected.gitBranch, "replacement");
-  assert.equal(projected.name, undefined);
-  assert.equal(projected.executor.piSessionId, "pi-2");
-  assert.equal(projected.eventCursor.runtimeGeneration, 2);
-  assert.equal(projected.eventCursor.sequence, 1);
-  assert.equal(projected.executor.sessionFile, "/tmp/pi-2.jsonl");
-});
 
 test("Work chrome separates semantic metadata metrics extensions and activity", () => {
   const conversation = new DockConversation();

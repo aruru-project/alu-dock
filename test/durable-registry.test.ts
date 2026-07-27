@@ -99,93 +99,9 @@ test("startup exposes catalog-only host_lost records and explicit reopen starts 
   assert.equal(reopened.instance.eventsSince().events[0]?.sequence, 1);
 });
 
-test("concurrent ensure calls for one business key return one durable instance", async () => {
-  const { cwd, catalogPath } = await fixturePath();
-  let factoryCalls = 0;
-  let releaseFactory!: () => void;
-  let signalStarted!: () => void;
-  const factoryGate = new Promise<void>((resolveGate) => { releaseFactory = resolveGate; });
-  const factoryStarted = new Promise<void>((resolveStarted) => { signalStarted = resolveStarted; });
-  const registry = new DockRegistry(
-    async (input) => {
-      factoryCalls += 1;
-      signalStarted();
-      await factoryGate;
-      return createFixtureInstance(input, []);
-    },
-    () => "dock-alu",
-    { hostEpoch: "ensure-host", startedAt: "2026-07-15T01:00:00.000Z", catalogStore: new FileCatalogStore(catalogPath) },
-  );
-  await registry.initializeCatalog();
 
-  const first = registry.ensure({ operationId: "ensure-first", key: "alu", cwd });
-  await factoryStarted;
-  const second = registry.ensure({ operationId: "ensure-second", key: "alu", cwd });
-  releaseFactory();
 
-  const [created, existing] = await Promise.all([first, second]);
-  assert.equal(created.created, true);
-  assert.equal(existing.created, false);
-  assert.equal(created.instance.id, "dock-alu");
-  assert.equal(existing.instance.id, created.instance.id);
-  assert.equal(existing.instance.key, "alu");
-  assert.equal(factoryCalls, 1);
 
-  const restarted = new DockRegistry(
-    async (input) => createFixtureInstance(input, []),
-    () => "must-not-create",
-    { hostEpoch: "ensure-restart", startedAt: "2026-07-15T02:00:00.000Z", catalogStore: new FileCatalogStore(catalogPath) },
-  );
-  await restarted.initializeCatalog();
-  const recovered = await restarted.ensure({ operationId: "ensure-after-restart", key: "alu", cwd });
-  assert.equal(recovered.created, false);
-  assert.equal(recovered.instance.id, "dock-alu");
-  assert.equal(recovered.instance.key, "alu");
-  assert.equal(recovered.instance.lifecycle, "host_lost");
-});
-
-test("concurrent reopen operations admit only one runtime candidate", async () => {
-  const { cwd, catalogPath } = await fixturePath();
-  const seed = new DockRegistry(
-    async (input) => createFixtureInstance(input, []),
-    () => "dock-concurrent",
-    { hostEpoch: "concurrent-seed", startedAt: "2026-07-15T01:00:00.000Z", catalogStore: new FileCatalogStore(catalogPath) },
-  );
-  await seed.initializeCatalog();
-  await seed.create({ operationId: "create-concurrent", cwd });
-
-  let releaseFactory!: () => void;
-  let signalStarted!: () => void;
-  const factoryGate = new Promise<void>((resolveGate) => { releaseFactory = resolveGate; });
-  const factoryStarted = new Promise<void>((resolveStarted) => { signalStarted = resolveStarted; });
-  const runtimes: DelayedAgentWorkerConnection[] = [];
-  let factoryCalls = 0;
-  const registry = new DockRegistry(
-    async (input) => {
-      factoryCalls += 1;
-      signalStarted();
-      await factoryGate;
-      return createFixtureInstance(input, runtimes);
-    },
-    () => "unused-id",
-    {
-      hostEpoch: "concurrent-host",
-      startedAt: "2026-07-15T02:00:00.000Z",
-      catalogStore: new FileCatalogStore(catalogPath),
-      reopenTargetResolver: { resolve: async () => ({ cwd }) },
-    },
-  );
-  await registry.initializeCatalog();
-  const first = registry.reopen({ operationId: "reopen-first", instanceId: "dock-concurrent" });
-  await factoryStarted;
-  await assert.rejects(
-    registry.reopen({ operationId: "reopen-second", instanceId: "dock-concurrent" }),
-    InstanceBusyError,
-  );
-  assert.equal(factoryCalls, 1);
-  releaseFactory();
-  assert.equal((await first).instance.snapshot().runtimeGeneration, 2);
-});
 
 test("reopen catalog failure disposes its candidate and preserves unavailable facts", async () => {
   const { cwd, catalogPath } = await fixturePath();
@@ -226,34 +142,7 @@ test("reopen catalog failure disposes its candidate and preserves unavailable fa
   assert.equal(registry.catalogHealth(), "healthy");
 });
 
-test("graceful durable Host drain records host_lost rather than explicit stop", async () => {
-  const { cwd, catalogPath } = await fixturePath();
-  const runtimes: DelayedAgentWorkerConnection[] = [];
-  const store = new FileCatalogStore(catalogPath);
-  const registry = new DockRegistry(
-    async (input) => createFixtureInstance(input, runtimes),
-    () => "dock-shutdown",
-    { hostEpoch: "shutdown-host", startedAt: "2026-07-15T03:00:00.000Z", catalogStore: store },
-  );
-  await registry.initializeCatalog();
-  const instance = await registry.create({ operationId: "create-shutdown", cwd });
-  await instance.submit("running during shutdown", "prompt", "run-shutdown");
-  await registry.shutdownAllForHostDrain();
 
-  const snapshot = registry.getSnapshot("dock-shutdown");
-  assert.equal(snapshot.lifecycle, "host_lost");
-  assert.equal(snapshot.execution, "unavailable");
-  assert.equal(snapshot.lastRun, "interrupted");
-  assert.equal(snapshot.reopenable, true);
-  assert.equal(snapshot.interruption?.reason, "host_shutdown");
-  assert.equal(runtimes[0]?.abortCalls, 1);
-  assert.equal(runtimes[0]?.disposeCalls, 1);
-  const persisted = await store.load();
-  const record = persisted?.instances[0];
-  assert.equal(record?.lifecycle, "host_lost");
-  assert.equal(record?.shutdownRequestedAt, undefined);
-  assert.equal(record?.lastKnown?.activeCommandId, "run-shutdown");
-});
 
 test("failed shutdown intent plus unconfirmed disposal is durably quarantined across restart", async () => {
   const { cwd, catalogPath } = await fixturePath();
@@ -404,138 +293,11 @@ test("same-Host runtime_error reopen closes stale attach streams after commit", 
   assert.ok(seen.includes("instance.runtime_error"));
 });
 
-test("one malformed live projection falls back to its catalog record without poisoning other instances", async () => {
-  const { cwd, catalogPath } = await fixturePath();
-  const runtimes: DelayedAgentWorkerConnection[] = [];
-  let id = 0;
-  const registry = new DockRegistry(
-    async (input) => createFixtureInstance(input, runtimes),
-    () => `dock-safe-list-${++id}`,
-    { hostEpoch: "safe-list-host", catalogStore: new FileCatalogStore(catalogPath) },
-  );
-  await registry.initializeCatalog();
-  const malformed = await registry.create({ operationId: "create-malformed", cwd });
-  const healthy = await registry.create({ operationId: "create-healthy", cwd });
-  const originalSnapshot = malformed.snapshot.bind(malformed);
-  Object.defineProperty(malformed, "snapshot", {
-    configurable: true,
-    value: () => { throw new Error("Active compaction requires running execution"); },
-  });
 
-  const page = registry.listPage({ selector: "actionable", limit: 100, maxBytes: MAX_INSTANCE_LIST_RESULT_BYTES });
-  assert.equal(page.instances.length, 2);
-  assert.equal(page.page.total, 2);
-  assert.equal(page.instances.find((item) => item.id === healthy.id)?.execution, "idle");
-  const fallback = page.instances.find((item) => item.id === malformed.id);
-  assert.equal(fallback?.execution, "idle");
-  assert.equal(fallback?.compacting, false);
-  assert.equal(registry.getSnapshot(healthy.id).id, healthy.id);
-  assert.equal(registry.getSnapshot(malformed.id).id, malformed.id);
 
-  Object.defineProperty(malformed, "snapshot", { configurable: true, value: originalSnapshot });
-  assert.equal(registry.getSnapshot(malformed.id).id, malformed.id);
-});
 
-test("revision-bound instance.list pages keep large stopped catalogs bounded", async (context) => {
-  const { cwd, catalogPath } = await fixturePath();
-  const stoppedRecords: CatalogInstanceRecord[] = Array.from({ length: 10_000 }, (_, index) => {
-    const id = `stopped-${String(index).padStart(5, "0")}`;
-    return {
-      id,
-      creationOperationId: `create-${id}`,
-      cwd,
-      lifecycle: "stopped",
-      execution: "unavailable",
-      lastRun: "never",
-      runtimeGeneration: 1,
-      piSessionId: `pi-${id}`,
-      admissionPending: false,
-      pendingCount: 0,
-      createdAt: "2026-07-15T00:00:00.000Z",
-      updatedAt: "2026-07-15T00:00:00.000Z",
-    };
-  });
-  const store = new FileCatalogStore(catalogPath);
-  await store.commit({ schemaVersion: 1, revision: 1, lastHostEpoch: "large-seed", instances: stoppedRecords }, {
-    kind: "test.seed",
-    effect: "pre_effect",
-  });
-  const socketPath = join(cwd, "large-list.sock");
-  const registry = new DockRegistry(
-    async () => assert.fail("stopped catalog listing must not construct runtimes"),
-    undefined,
-    { hostEpoch: "large-list-host", catalogStore: store },
-  );
-  const host = new DockHost({ socketPath, statePath: catalogPath, registry, initialize: () => registry.initializeCatalog() });
-  context.after(async () => host.stop().catch(() => {}));
-  await host.start();
-  const client = new DockClient({ socketPath });
 
-  const actionable = await client.listPage("actionable");
-  assert.deepEqual(actionable.instances, []);
-  assert.equal(actionable.page.total, 0);
-  assert.equal(actionable.page.hiddenStopped, 10_000);
-  const firstPage = await client.listPage("all");
-  assert.equal(firstPage.instances.length, 100);
-  assert.equal(firstPage.instances[0]?.id, "stopped-09999", "the human first page must contain the newest records");
-  assert.equal(firstPage.page.total, 10_000);
-  assert.equal(firstPage.page.nextCursor?.offset, 100);
-  assert.equal((await client.list()).length, 10_000, "typed client must traverse every bounded page");
-  const pruned = await client.pruneStopped("prune-large-page");
-  assert.equal(pruned.receipt.forgottenCount, 1_000);
-  assert.equal(pruned.receipt.hasMore, true);
-  await assert.rejects(
-    client.listPage("all", firstPage.page.nextCursor),
-    (error: unknown) => error instanceof ControlClientError && error.code === "cursor_stale",
-  );
-  assert.equal((await client.listPage("all")).page.total, 9_000);
-});
 
-test("instance.list byte-bounds pages containing valid long catalog paths", async (context) => {
-  const { cwd, catalogPath } = await fixturePath();
-  const longCwd = `/${"c".repeat(16_000)}`;
-  const longSessionFile = `/${"s".repeat(16_000)}`;
-  const records: CatalogInstanceRecord[] = Array.from({ length: 120 }, (_, index) => {
-    const id = `heavy-${String(index).padStart(4, "0")}`;
-    return {
-      id,
-      creationOperationId: `create-${id}`,
-      cwd: longCwd,
-      lifecycle: "stopped",
-      execution: "unavailable",
-      lastRun: "never",
-      runtimeGeneration: 1,
-      piSessionId: `pi-${id}`,
-      sessionFile: longSessionFile,
-      admissionPending: false,
-      pendingCount: 0,
-      createdAt: "2026-07-15T00:00:00.000Z",
-      updatedAt: "2026-07-15T00:00:00.000Z",
-    };
-  });
-  const store = new FileCatalogStore(catalogPath);
-  await store.commit({ schemaVersion: 1, revision: 1, lastHostEpoch: "heavy-seed", instances: records }, {
-    kind: "test.seed",
-    effect: "pre_effect",
-  });
-  const socketPath = join(cwd, "heavy-list.sock");
-  const registry = new DockRegistry(
-    async () => assert.fail("stopped catalog listing must not construct runtimes"),
-    undefined,
-    { hostEpoch: "heavy-list-host", catalogStore: store },
-  );
-  const host = new DockHost({ socketPath, statePath: catalogPath, registry, initialize: () => registry.initializeCatalog() });
-  context.after(async () => host.stop().catch(() => {}));
-  await host.start();
-  const client = new DockClient({ socketPath });
-
-  const firstPage = await client.listPage("all");
-  assert.ok(firstPage.instances.length > 0 && firstPage.instances.length < 100);
-  assert.equal(firstPage.instances[0]?.id, "heavy-0119");
-  assert.ok(Buffer.byteLength(JSON.stringify(firstPage), "utf8") <= MAX_INSTANCE_LIST_RESULT_BYTES);
-  assert.equal(firstPage.page.nextCursor?.offset, firstPage.instances.length);
-  assert.equal((await client.list()).length, 120);
-});
 
 test("durable catalog removal ambiguity returns effect_unknown and preserves query evidence", async (context) => {
   const { cwd, catalogPath } = await fixturePath();

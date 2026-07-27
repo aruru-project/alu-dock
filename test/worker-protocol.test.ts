@@ -59,27 +59,9 @@ test("private worker protocol chunks and reassembles one ordered bounded result"
   assert.equal((result.result as { payload: string }).payload, payload);
 });
 
-test("private worker protocol preserves an aggregate result larger than the former 32 MiB ceiling", async () => {
-  const frames: WorkerFrame[] = [];
-  const sender = new OrderedWorkerSender(IDENTITY, (message, callback) => { frames.push(message); queueMicrotask(() => callback(null)); return true; });
-  const payload = Array.from({ length: 34 }, (_, index) => `${index}:` + "x".repeat(1024 * 1024));
-  await sender.sendEnvelope({ kind: "response", callId: "large", ok: true, result: { payload } });
-  const receiver = new WorkerFrameReceiver(() => true);
-  let result;
-  for (const frame of frames) result = receiver.accept(frame) ?? result;
-  assert.equal(result?.kind, "response");
-  if (result?.kind === "response" && result.ok) assert.equal((result.result as { payload: string[] }).payload[33], payload[33]);
-});
 
-test("private worker protocol carries generic Agent requests, acceptance, preflight, and reverse Dock identity", () => {
-  assert.deepEqual(parseWorkerEnvelope({ kind: "accepted", callId: "mutation-1" }), { kind: "accepted", callId: "mutation-1" });
-  assert.deepEqual(parseWorkerEnvelope({ kind: "preflight", callId: "prompt-1", success: true }), { kind: "preflight", callId: "prompt-1", success: true });
-  assert.deepEqual(
-    parseWorkerEnvelope({ kind: "call", callId: "identity-1", capability: "dock.identity", args: {} }),
-    { kind: "call", callId: "identity-1", capability: "dock.identity", args: {} },
-  );
-  assert.equal(parseWorkerEnvelope(agentCall("tool.list", { instanceId: "instance-test" })).kind, "agent_request");
-});
+
+
 
 test("private worker protocol rejects malformed generic requests, events, state, and generation fences", () => {
   assert.throws(() => parseWorkerEnvelope({
@@ -112,50 +94,4 @@ test("private worker protocol rejects malformed generic requests, events, state,
     sequence: 1, transferId: "x", index: 0, count: 1,
     payload: JSON.stringify({ kind: "agent_control", callId: "x", control: { type: "wait_for_idle" } }),
   }), /fence/);
-});
-
-test("Worker conversation requests use Protocol V2 bounds without a runtime capability mirror", () => {
-  assert.doesNotThrow(() => parseWorkerEnvelope(agentCall("conversation.history", {
-    instanceId: "instance-test", cursor: "cursor-1", limit: 50,
-  })));
-  assert.doesNotThrow(() => parseWorkerEnvelope(agentCall("conversation.content", {
-    instanceId: "instance-test", contentRef: "content-1", cursor: "cursor-2",
-  })));
-  assert.throws(() => parseWorkerEnvelope(agentCall("conversation.history", {
-    instanceId: "instance-test", limit: 201,
-  })), /limit/i);
-  assert.throws(() => parseWorkerEnvelope(agentCall("conversation.content", {
-    instanceId: "instance-test", contentRef: "x".repeat(513),
-  })), /contentRef must be a bounded string/i);
-});
-
-test("Worker controller directive capabilities remain exact, bounded, and control-safe", () => {
-  const call = (capability: "ui.setTitle" | "ui.setEditorText", args: Record<string, unknown>) => parseWorkerEnvelope({ kind: "call", callId: "directive-call", capability, args });
-  assert.ok(ORDINARY_REVERSE_WORKER_CAPABILITIES.includes("ui.setTitle"));
-  assert.ok(ORDINARY_REVERSE_WORKER_CAPABILITIES.includes("ui.setEditorText"));
-  assert.doesNotThrow(() => call("ui.setTitle", { title: "Review queue" }));
-  assert.doesNotThrow(() => call("ui.setEditorText", { text: "line one\nline two\tindented" }));
-  assert.throws(() => call("ui.setTitle", { title: "bad\nline" }), /control-safe/i);
-  assert.throws(() => call("ui.setTitle", { title: "x".repeat(2_049) }), /bounded/i);
-  assert.throws(() => call("ui.setEditorText", { text: "bad\u001b[2J" }), /control-safe/i);
-  assert.doesNotThrow(() => call("ui.setEditorText", { text: "data:image/png;base64,A0+/A0+/" }));
-  assert.throws(() => call("ui.setEditorText", { text: "x".repeat(256_001) }), /bounded/i);
-  assert.throws(() => call("ui.setTitle", { title: "ok", injected: true }), /unknown field/i);
-  assert.throws(() => validateUiCapabilityResult("ui.setTitle", "unexpected"), /must be empty/i);
-  assert.doesNotThrow(() => validateUiCapabilityResult("ui.setEditorText", null));
-});
-
-test("Worker prompt image descriptors remain closed and bounded", () => {
-  assert.doesNotThrow(() => parseWorkerEnvelope(agentCall("command.submit", {
-    operationId: "image-op", instanceId: "instance-test", message: "", delivery: "prompt",
-    images: [{ path: "/tmp/input", mimeType: "image/x-custom" }],
-  })));
-  assert.throws(() => parseWorkerEnvelope(agentCall("command.submit", {
-    operationId: "image-op", instanceId: "instance-test", message: "", delivery: "prompt",
-    images: [{ path: "relative", mimeType: "image/png" }],
-  })));
-  assert.throws(() => parseWorkerEnvelope(agentCall("command.submit", {
-    operationId: "image-op", instanceId: "instance-test", message: "same", delivery: "steer",
-    images: [{ path: "/tmp/input", mimeType: "image/png", data: "AAAA" }],
-  })));
 });

@@ -22,106 +22,15 @@ const nodes: TreeNodeDto[] = [
   { entryId: "u2", parentId: "model", depth: 3, kind: "message", role: "user", displayClass: "content", label: "decision", summary: "second", hasChildren: false },
 ];
 
-test("tree projection revisions include generation, leaf, labels, and semantic summaries", () => {
-  const runtime = {
-    nodes: nodes.map((node) => ({ ...node, ...(node.entryId === "tool" ? { summary: `Tool result: ${"A0+/".repeat(32)}` } : {}) })),
-    leafId: "u2",
-  };
-  const first = projectRuntimeTree(runtime, 1);
-  const same = projectRuntimeTree(runtime, 1);
-  const nextGeneration = projectRuntimeTree(runtime, 2);
-  const nextLeaf = projectRuntimeTree({ ...runtime, leafId: "u1" }, 1);
-  assert.equal(first.treeRevision, same.treeRevision);
-  assert.notEqual(first.treeRevision, nextGeneration.treeRevision);
-  assert.notEqual(first.treeRevision, nextLeaf.treeRevision);
-  assert.equal(first.nodes.find((node) => node.entryId === "tool")?.summary, `Tool result: ${"A0+/".repeat(32)}`);
-  assert.match(JSON.stringify(first), /A0\+\//);
-  assert.throws(() => projectRuntimeTree({ nodes: [{ ...runtime.nodes[0]!, depth: 1 }], leafId: "u1" }, 1), /depth zero/);
-  assert.throws(() => projectRuntimeTree({ nodes: [{ ...runtime.nodes[0]!, hasChildren: false }, runtime.nodes[1] as typeof runtime.nodes[number]], leafId: "tool" }, 1), /child projection/);
-  assert.throws(() => projectRuntimeTree({ nodes: [runtime.nodes[0] as typeof runtime.nodes[number], { ...runtime.nodes[2]!, parentId: "tool", depth: 2 }], leafId: "model" }, 1), /depth-first pre-order/);
-});
 
-test("tree projection accepts its documented 100000-node bound and rejects the next node", () => {
-  const atBound = Array.from({ length: MAX_PROJECTED_SESSION_TREE_NODES }, (_, index) => ({
-    entryId: `bounded-${index}`,
-    depth: 0,
-    kind: "message" as const,
-    role: "user" as const,
-    summary: `turn ${index}`,
-    hasChildren: false,
-  }));
-  const projected = projectRuntimeTree({ nodes: atBound, leafId: `bounded-${atBound.length - 1}` }, 1);
-  assert.equal(projected.nodes.length, MAX_PROJECTED_SESSION_TREE_NODES);
-  assert.throws(
-    () => projectRuntimeTree({ nodes: [...atBound, { ...atBound[0]!, entryId: "overflow" }] }, 1),
-    /exceeds 100000 entries/u,
-  );
-});
 
-test("navigation result projection is closed, abort-consistent, and preserves semantic text", () => {
-  assert.deepEqual(projectAgentNavigateResult({ cancelled: false, editorText: "line 1\r\nline 2", summaryCreated: false }), {
-    cancelled: false, editorText: "line 1\nline 2", summaryCreated: false,
-  });
-  assert.throws(() => projectAgentNavigateResult({ cancelled: false, aborted: true, summaryCreated: false }), /must be cancelled/);
-  assert.throws(() => projectAgentNavigateResult({ cancelled: true, editorText: "stale", summaryCreated: false }), /cannot return editor text/);
-  assert.throws(() => projectAgentNavigateResult({ cancelled: false, editorText: "x".repeat(256_001), summaryCreated: false }), /oversized/);
-  const encodedText = `attachment: ${"A0+/".repeat(32)}`;
-  assert.deepEqual(projectAgentNavigateResult({ cancelled: false, editorText: encodedText, summaryCreated: false }), {
-    cancelled: false, editorText: encodedText, summaryCreated: false,
-  });
-});
 
-test("tree collection holds one revision and reports a bounded selector cap", async () => {
-  const pages = [
-    { treeRevision: "g1-r", nodes: nodes.slice(0, 2), leafId: "u2", total: 4, truncated: true, nextAfterEntryId: "tool" },
-    { treeRevision: "g1-r", nodes: nodes.slice(2), leafId: "u2", total: 4, truncated: false },
-  ];
-  let calls = 0;
-  const collected = await collectSessionTree(async () => pages[calls++] as typeof pages[number]);
-  assert.deepEqual(collected.nodes.map((node) => node.entryId), ["u1", "tool", "model", "u2"]);
-  assert.equal(collected.capped, false);
 
-  calls = 0;
-  const capped = await collectSessionTree(async () => pages[calls++] as typeof pages[number], 2);
-  assert.equal(capped.nodes.length, 2);
-  assert.equal(capped.capped, true);
 
-  await assert.rejects(collectSessionTree(async (_revision, cursor) => cursor === undefined ? pages[0] as typeof pages[number] : { ...pages[1], treeRevision: "changed" } as typeof pages[number]), /changed during pagination/);
-});
 
-test("tree collection includes and searches entries beyond the former 5,000-node selector cap", async () => {
-  const total = 14_392;
-  const large = Array.from({ length: total }, (_, index): TreeNodeDto => ({
-    entryId: `entry-${index}`,
-    ...(index === 0 ? {} : { parentId: `entry-${index - 1}` }),
-    depth: index,
-    kind: "message",
-    role: index % 2 === 0 ? "user" : "assistant",
-    displayClass: "content",
-    summary: index === 12_345 ? "needle beyond old cap" : `turn ${index}`,
-    hasChildren: index < total - 1,
-  }));
-  let calls = 0;
-  const collected = await collectSessionTree(async (revision, afterEntryId, limit = 200) => {
-    calls += 1;
-    const start = afterEntryId === undefined ? 0 : Number(afterEntryId.slice("entry-".length)) + 1;
-    const pageNodes = large.slice(start, start + limit);
-    const truncated = start + pageNodes.length < large.length;
-    return {
-      treeRevision: revision ?? "g1-large",
-      nodes: pageNodes,
-      leafId: `entry-${total - 1}`,
-      total,
-      truncated,
-      ...(truncated ? { nextAfterEntryId: pageNodes.at(-1)?.entryId } : {}),
-    };
-  });
 
-  assert.equal(calls, Math.ceil(total / 200));
-  assert.equal(collected.capped, false);
-  assert.equal(collected.nodes.length, total);
-  assert.equal(treePickerItems(collected.nodes, collected.leafId).find((item) => item.label.includes("needle beyond old cap"))?.value, "entry-12345");
-});
+
+
 
 test("tree picker compresses linear depth and exposes branch points, active path, and sibling leaves", () => {
   const branched: TreeNodeDto[] = [

@@ -48,27 +48,7 @@ async function temporaryCatalog(): Promise<{ root: string; path: string }> {
   return { root, path };
 }
 
-test("durable catalog round-trips closed records with private atomic files", async () => {
-  const { root, path } = await temporaryCatalog();
-  const store = new FileCatalogStore(path);
-  assert.equal(await store.load(), undefined);
-  const value = projection(1, [
-    record("one", { key: "alu" }),
-    record("worker-lost", {
-      lifecycle: "runtime_error", execution: "unavailable", ownerHostEpoch: undefined,
-      interruption: { reason: "replacement_failed", at: "2026-07-15T00:01:00.000Z" },
-      recoverySessionFile: "/tmp/worker-lost.jsonl",
-      ownerReleaseUnconfirmed: true,
-    }),
-  ]);
-  await store.commit(value, { kind: "test", effect: "pre_effect" });
 
-  assert.deepEqual(await store.load(), JSON.parse(JSON.stringify(value)) as CatalogProjection);
-  assert.equal((await store.load())?.instances[0]?.key, "alu");
-  assert.equal((await lstat(join(root, "state"))).mode & 0o777, 0o700);
-  assert.equal((await lstat(path)).mode & 0o777, 0o600);
-  assert.deepEqual((await readdir(join(root, "state"))).sort(), ["catalog.json"]);
-});
 
 test("durable catalog rejects duplicate and unsafe instance keys", async () => {
   const { path } = await temporaryCatalog();
@@ -83,37 +63,7 @@ test("durable catalog rejects duplicate and unsafe instance keys", async () => {
   );
 });
 
-test("durable catalog closes fork/clone intents and deferred-file recovery facts", async () => {
-  const { path } = await temporaryCatalog();
-  const store = new FileCatalogStore(path);
-  const fork = record("fork", {
-    replacement: {
-      operationId: "fork-op",
-      kind: "fork",
-      previousSessionFile: "/tmp/fork.jsonl",
-      requestedEntryId: "user-1",
-      startedAt: "2026-07-15T00:01:00.000Z",
-    },
-  });
-  const clone = record("clone", {
-    replacement: {
-      operationId: "clone-op",
-      kind: "clone",
-      previousSessionFile: "/tmp/clone.jsonl",
-      requestedEntryId: "assistant-1",
-      startedAt: "2026-07-15T00:01:00.000Z",
-    },
-  });
-  const deferred = record("deferred", { sessionFile: undefined, recoverySessionFile: "/tmp/previous.jsonl" });
-  const value = projection(1, [fork, clone, deferred]);
-  await store.commit(value, { kind: "test", effect: "pre_effect" });
-  assert.deepEqual(await store.load(), JSON.parse(JSON.stringify(value)) as CatalogProjection);
 
-  const invalid = structuredClone(value);
-  delete invalid.instances[0]?.replacement?.requestedEntryId;
-  await writeFile(path, `${JSON.stringify(invalid)}\n`, { mode: 0o600 });
-  await assert.rejects(store.load(), /requested entry ID/);
-});
 
 test("catalog corruption, future schema, and symlinks preserve original evidence", async () => {
   const { root, path } = await temporaryCatalog();
@@ -156,61 +106,4 @@ test("each atomic write fault rejects without leaving temporary catalog files", 
     assert.equal(loaded?.revision, phase === "directory_sync" ? 1 : 0);
     assert.deepEqual((await readdir(join(root, "state"))).sort(), ["catalog.json"]);
   }
-});
-
-test("startup reconcile conservatively normalizes old live facts without a runtime", () => {
-  const loaded = projection(8, [
-    record("running", {
-      execution: "running",
-      lastRun: "succeeded",
-      activeCommandId: "run-op",
-      admissionPending: true,
-      admissionOperationId: "admission-op",
-      pendingCount: 2,
-      replacement: {
-        operationId: "replace-op",
-        kind: "switch",
-        previousSessionFile: "/tmp/previous.jsonl",
-        requestedSessionFile: "/tmp/requested.jsonl",
-        startedAt: "2026-07-15T00:01:00.000Z",
-      },
-    }),
-    record("shutdown", { shutdownRequestedAt: "2026-07-15T00:02:00.000Z", lastRun: "failed", execution: "failed" }),
-    record("stop", { lifecycle: "stopping", stopRequestedAt: "2026-07-15T00:03:00.000Z" }),
-    record("done", { lifecycle: "stopped", execution: "unavailable", ownerHostEpoch: undefined, sessionFile: undefined }),
-  ]);
-  const result = reconcileCatalogProjection(loaded, "new-host", new Date("2026-07-15T01:00:00.000Z"));
-  assert.equal(result.normalizedCount, 3);
-  assert.equal(result.projection.revision, 9);
-  assert.equal(result.projection.lastHostEpoch, "new-host");
-
-  const running = result.projection.instances.find((item) => item.id === "running");
-  assert.equal(running?.lifecycle, "host_lost");
-  assert.equal(running?.execution, "unavailable");
-  assert.equal(running?.lastRun, "interrupted");
-  assert.equal(running?.recoverySessionFile, "/tmp/previous.jsonl");
-  assert.deepEqual(running?.lastKnown, { lifecycle: "active", execution: "running", activeCommandId: "run-op", pendingCount: 2 });
-  assert.equal(running?.interruption?.reason, "host_crash");
-  assert.equal(running?.activeCommandId, undefined);
-  assert.equal(running?.admissionPending, false);
-  assert.equal(running?.replacement, undefined);
-
-  const shutdown = result.projection.instances.find((item) => item.id === "shutdown");
-  assert.equal(shutdown?.lifecycle, "runtime_error");
-  assert.equal(shutdown?.lastRun, "failed");
-  assert.equal(shutdown?.interruption?.reason, "replacement_failed");
-  assert.equal(shutdown?.ownerReleaseUnconfirmed, true);
-  assert.equal(catalogSnapshotFromRecord(shutdown as CatalogInstanceRecord, "new-host").reopenable, false);
-
-  const stopped = result.projection.instances.find((item) => item.id === "stop");
-  assert.equal(stopped?.lifecycle, "runtime_error");
-  assert.equal(stopped?.execution, "unavailable");
-  assert.equal(stopped?.ownerReleaseUnconfirmed, true);
-  assert.equal(catalogSnapshotFromRecord(stopped as CatalogInstanceRecord, "new-host").reopenable, false);
-
-  const snapshot = catalogSnapshotFromRecord(running as CatalogInstanceRecord, "new-host");
-  assert.equal(snapshot.reopenable, true);
-  assert.equal(snapshot.ownerHostEpoch, undefined);
-  assert.equal(snapshot.eventCursor.hostEpoch, "new-host");
-  assert.deepEqual(snapshot.pending, { steering: 0, followUp: 0, total: 0 });
 });

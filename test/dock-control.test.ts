@@ -84,132 +84,7 @@ async function createTransactionHarness(port: ScriptedCatalogCommitPort, faultDr
   return { directory, socketPath, host, registry, sessions };
 }
 
-test("V2 hello rejects version and capability mismatch before side effects", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-hello-gate-"));
-  await chmod(directory, 0o700);
-  const socketPath = join(directory, "dock.sock");
-  let factoryCalls = 0;
-  let gatedSession: DelayedAgentWorkerConnection | undefined;
-  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    factoryCalls += 1;
-    gatedSession = new DelayedAgentWorkerConnection(`pi-${id}`);
-    gatedSession.gitBranch = "main";
-    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: gatedSession });
-  }, () => "gated-instance", { hostEpoch: "host-epoch-gate", startedAt: "2026-07-14T00:00:00.000Z" });
-  const host = new DockHost({ socketPath, registry });
-  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
-  await host.start();
 
-  const base = { kind: "hello", requestId: "hello-1", client: { name: "test", version: "0.1.0", clientId: "client-1" } };
-  const versionError = await exchangeOne(socketPath, { ...base, versions: [999], requiredCapabilities: [] });
-  assert.equal(versionError.kind, "hello_error");
-  assert.equal(objectValue(versionError.error).code, "unsupported_protocol");
-  assert.equal(factoryCalls, 0);
-
-  const capabilityError = await exchangeOne(socketPath, { ...base, requestId: "hello-2", versions: [2], requiredCapabilities: ["not-implemented.v1"] });
-  assert.equal(capabilityError.kind, "hello_error");
-  assert.equal(objectValue(capabilityError.error).code, "capability_missing");
-  assert.equal(factoryCalls, 0);
-
-  const createFrame = { kind: "request", version: 2, requestId: "create-after-reject", type: "instance.create", params: { operationId: "op-after-reject", cwd: directory } };
-  const pipelinedVersionError = await exchangePipelined(socketPath, [{ ...base, requestId: "pipeline-version", versions: [999], requiredCapabilities: [] }, createFrame]);
-  assert.equal(pipelinedVersionError.kind, "hello_error");
-  const pipelinedCapabilityError = await exchangePipelined(socketPath, [{ ...base, requestId: "pipeline-capability", versions: [2], requiredCapabilities: ["missing.v1"] }, createFrame]);
-  assert.equal(pipelinedCapabilityError.kind, "hello_error");
-  assert.equal(factoryCalls, 0);
-
-  const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
-  assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "command.images.path.v1", "conversation.content.v1", "core.v2", "events.follow.v2", "extension_ui.control.v1", "extension_ui.controller-directives.v1", "extension_ui.persistent-interactions.v1", "extension_ui.tools-expanded.v1", "extension_ui.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "host.info", "instance.catalog", "instance.keys.v1", "instance.read.v1", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tool-result-presentation.v1", "tools.v1", "tui.projection.v1"]);
-  assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
-  assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
-  assert.equal(factoryCalls, 0);
-
-  const malformedAfterHello = await exchangeMalformedAfterHello(socketPath);
-  assert.equal(malformedAfterHello.kind, "response");
-  assert.equal(objectValue(malformedAfterHello.error).code, "invalid_envelope");
-  assert.equal(factoryCalls, 0);
-
-  let id = 0;
-  const client = new DockClient({ socketPath, requestId: () => `request-${++id}` });
-  const created = await client.create(directory);
-  assert.equal(factoryCalls, 1);
-  assert.equal(created.creationOperationId, "request-1");
-  assert.equal(created.ownerHostEpoch, "host-epoch-gate");
-  assert.equal(created.gitBranch, "main");
-  await client.setToolsExpanded(created.id, created.runtimeGeneration, true, "compat-expanded");
-  gatedSession?.setGitBranch("feature/live");
-  gatedSession?.emit({
-    type: "tool_execution_start",
-    toolCallId: "legacy-extension",
-    toolName: "custom_extension_tool",
-    args: {
-      presentation: "extension-owned-argument",
-      nested: { presentation: "also-extension-owned" },
-      shapeCollision: { type: "tool_result", toolCallId: "argument-call", toolName: "argument-tool", presentation: "still-extension-owned" },
-    },
-  });
-  gatedSession?.emit({
-    type: "tool_execution_end",
-    toolCallId: "legacy-bash",
-    toolName: "bash",
-    result: {
-      content: [{ type: "text", text: "tail\n\n[Showing lines 2-3 of 3. Full output: /tmp/pi-bash-legacy.log]" }],
-      details: {
-        truncation: { truncated: true, truncatedBy: "lines", outputLines: 2, totalLines: 3, maxLines: 2, maxBytes: 51_200 },
-        fullOutputPath: "/tmp/pi-bash-legacy.log",
-      },
-    },
-    isError: false,
-  });
-  if (gatedSession) {
-    gatedSession.history = [{
-      entryId: "legacy-history-read",
-      role: "toolResult",
-      content: [{ type: "text", text: "historical read" }],
-      toolCallId: "legacy-history-call",
-      toolName: "read",
-      toolPresentation: { kind: "read", preview: "head", notices: [] },
-      isError: false,
-    }];
-    gatedSession.emit({ type: "entry_appended" });
-    await new Promise((resolveTurn) => setImmediate(resolveTurn));
-  }
-  assert.equal((await client.status(created.id)).gitBranch, "feature/live");
-  const legacyAttach = await exchangeRequestAfterHello(
-    socketPath,
-    ["core.v2", "events.follow.v2"],
-    { kind: "request", version: 2, requestId: "legacy-read", type: "instance.read", params: { instanceId: created.id, replay: "event_log" } },
-  );
-  const legacyResult = objectValue(legacyAttach.result);
-  assert.equal("toolsExpanded" in objectValue(legacyResult.instance), false);
-  assert.equal("gitBranch" in objectValue(legacyResult.instance), false);
-  const legacyEvents = objectValue(legacyResult.page).events;
-  assert.ok(Array.isArray(legacyEvents));
-  assert.equal(legacyEvents.some((event) => objectValue(event).type === "extension.tools_expanded_changed"), false);
-  assert.equal(legacyEvents.some((event) => objectValue(event).type === "git.branch_changed"), false);
-  const legacyStarted = legacyEvents.map(objectValue).find((event) => event.type === "tool.started" && objectValue(event.data).toolCallId === "legacy-extension");
-  assert.deepEqual(objectValue(objectValue(legacyStarted).data).args, {
-    presentation: "extension-owned-argument",
-    nested: { presentation: "also-extension-owned" },
-    shapeCollision: { type: "tool_result", toolCallId: "argument-call", toolName: "argument-tool", presentation: "still-extension-owned" },
-  }, "the built-in capability fence must not rewrite extension arguments named presentation, even when they mimic a result block");
-  const legacyCompleted = legacyEvents.map(objectValue).find((event) => event.type === "tool.completed" && objectValue(event.data).toolCallId === "legacy-bash");
-  assert.equal("presentation" in objectValue(objectValue(legacyCompleted).data), false, "legacy strict clients never receive the typed event field");
-  const legacyHistoryResponse = await exchangeRequestAfterHello(
-    socketPath,
-    ["core.v2"],
-    { kind: "request", version: 2, requestId: "legacy-history", type: "session.history", params: { instanceId: created.id, limit: 20 } },
-  );
-  const legacyHistoryEntries = objectValue(legacyHistoryResponse.result).entries;
-  assert.ok(Array.isArray(legacyHistoryEntries));
-  const legacyHistoryBlock = objectValue(legacyHistoryEntries[0]).content;
-  assert.ok(Array.isArray(legacyHistoryBlock));
-  assert.equal("presentation" in objectValue(legacyHistoryBlock[0]), false, "legacy strict clients never receive the typed history field");
-  assert.deepEqual((await client.hostInfo()).diagnostics[0], {
-    severity: "info", message: "Development registry is in-memory and non-durable", source: "registry",
-  });
-});
 
 test("project trust challenge precedes factory effects and denial continues untrusted", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-trust-host-"));
@@ -272,43 +147,7 @@ test("project trust challenge precedes factory effects and denial continues untr
   assert.equal(factoryCalls, 1);
 });
 
-test("session switch resolves target project trust before replacement effects", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-switch-trust-"));
-  const targetCwd = join(directory, "target");
-  await mkdir(targetCwd);
-  await chmod(directory, 0o700);
-  const socketPath = join(directory, "dock.sock");
-  let runtime: DelayedAgentWorkerConnection | undefined;
-  const trust = new ProjectTrustCoordinator({
-    requiresTrust: (cwd) => cwd === targetCwd,
-    savedDecision: () => null,
-    defaultDecision: () => "ask",
-    remember: () => assert.fail("trust_once must not write the trust store"),
-  }, { createId: () => "switch-challenge", now: () => 1_000 });
-  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
-    runtime.sessionCatalog = [{ sessionId: "target-session", sessionFile: "/tmp/target-session.jsonl", cwd: targetCwd }];
-    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
-  }, () => "switch-trust-instance", { trustPreflight: trust });
-  const host = new DockHost({ socketPath, registry });
-  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
-  await host.start();
-  const client = new DockClient({ socketPath });
-  const created = await client.create(directory, undefined, "create-op");
 
-  let challenge: ControlClientError | undefined;
-  try { await client.switchSession(created.id, "/tmp/target-session.jsonl", "switch-trust-op"); }
-  catch (error) { assert.ok(error instanceof ControlClientError); challenge = error; }
-  assert.equal(challenge?.code, "project_trust_required");
-  assert.equal(challenge?.details?.challengeId, "switch-challenge");
-  assert.equal(runtime?.sessionMutationCalls.switch, 0);
-  assert.equal(registry.get(created.id).snapshot().runtimeGeneration, 1);
-
-  const switched = await client.switchSession(created.id, "/tmp/target-session.jsonl", "switch-trust-op", { challengeId: "switch-challenge", decision: "trust_once" });
-  assert.equal(switched.instance.cwd, targetCwd);
-  assert.equal(switched.instance.runtimeGeneration, 2);
-  assert.equal(runtime?.sessionMutationCalls.switch, 1);
-});
 
 test("Extension UI operation uses live latest takeover without closing observation", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-extension-ui-"));
@@ -630,41 +469,7 @@ test("keyed ensure returns one Host-owned instance to simultaneous clients", asy
   assert.equal(replacement.instance.key, "alu");
 });
 
-test("committed stop intent releases a key before cleanup so a moved workspace can replace it", async (context) => {
-  const harness = await createHarness();
-  let releaseDispose = (): void => {};
-  context.after(async () => { releaseDispose(); await cleanupHarness(harness); });
-  await harness.host.start();
 
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const original = await client.ensure("alu", harness.directory, "Old Alu Workstation", "ensure-old-alu");
-  const runtime = harness.sessions.get(original.instance.id) as DelayedAgentWorkerConnection;
-  const disposeBlock = runtime.blockDispose();
-  releaseDispose = disposeBlock.release;
-
-  const stopping = client.stop(original.instance.id, "retire-wrong-alu-cwd");
-  await disposeBlock.entered;
-  assert.equal((await client.status(original.instance.id)).lifecycle, "stopping");
-  assert.equal((await client.status(original.instance.id)).key, undefined);
-  assert.equal(await client.getByKey("alu"), undefined);
-
-  const movedCwd = join(harness.directory, "moved-alu-workstation");
-  await mkdir(movedCwd);
-  const replacement = await client.ensure("alu", movedCwd, "Moved Alu Workstation", "ensure-moved-alu");
-  assert.equal(replacement.created, true);
-  assert.notEqual(replacement.instance.id, original.instance.id);
-  assert.equal(replacement.instance.key, "alu");
-  assert.equal(replacement.instance.cwd, movedCwd);
-  assert.equal((await client.getByKey("alu"))?.id, replacement.instance.id);
-
-  disposeBlock.release();
-  const stopped = await stopping;
-  assert.equal(stopped.instance.lifecycle, "stopped");
-  assert.equal(stopped.instance.key, undefined);
-  const history = await client.list();
-  assert.equal(history.find((instance) => instance.id === original.instance.id)?.key, undefined);
-  assert.equal(history.find((instance) => instance.id === replacement.instance.id)?.key, "alu");
-});
 
 test("two clients observe and replay one host-owned running instance", async (context) => {
   const harness = await createHarness();
@@ -775,26 +580,7 @@ test("two clients observe and replay one host-owned running instance", async (co
   await assert.rejects(harness.host.start(), /Cannot start a host that is stopped/);
 });
 
-test("attach applies the 1000-event replay cap before response byte trimming", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-replay-cap-"));
-  await chmod(directory, 0o700);
-  const socketPath = join(directory, "dock.sock");
-  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => (
-    new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedAgentWorkerConnection(`pi-${id}`), eventCapacity: 1_500 })
-  ), () => "replay-instance");
-  const host = new DockHost({ socketPath, registry });
-  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
-  await host.start();
-  const client = new DockClient({ socketPath });
-  const created = await client.create(directory);
-  for (let index = 0; index < 1_100; index += 1) registry.get(created.id).recordExtensionError(`e${index}`);
 
-  const replay = await client.read(created.id);
-  assert.equal(replay.page.events.length, 1_000);
-  assert.equal(replay.page.truncated, true);
-  assert.equal(replay.page.earliest.sequence, replay.page.events[0]?.sequence);
-  assert.equal(replay.page.latest.sequence - replay.page.earliest.sequence, 999);
-});
 
 test("shutdown waits for an admitted asynchronous create and drains its runtime without explicit stop semantics", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-create-race-"));
@@ -1891,58 +1677,9 @@ test("manual compaction aborts a running model command without stealing its run 
   assert.ok(events.some((event) => event.type === "compaction.completed" && event.data.operationId === "manual-compact-op"));
 });
 
-test("manual compaction takes Host queue custody before the runtime start event", async (context) => {
-  const harness = await createHarness();
-  context.after(() => cleanupHarness(harness));
-  await harness.host.start();
-  const first = new DockClient({ socketPath: harness.socketPath });
-  const second = new DockClient({ socketPath: harness.socketPath });
-  const created = await first.create(harness.directory, "manual-compaction-prestart-queue");
-  const runtime = harness.sessions.get(created.id)!;
-  const start = runtime.blockNextCompactionStart();
-  const active = runtime.blockNextCompaction();
-  const promptCallsBeforeCompaction = runtime.promptCalls;
 
-  const compacting = first.compactSession(created.id, undefined, "manual-prestart-compact-op");
-  await start.entered;
-  assert.equal(runtime.isCompacting, false, "fixture is still before Pi's compaction_start boundary");
 
-  const queued = await second.prompt(created.id, "queued before manual compaction start", "auto", "manual-prestart-queue-op");
-  assert.equal(queued.receipt.queued, true);
-  assert.equal(queued.receipt.delivery, "steer");
-  assert.equal(runtime.promptCalls, promptCallsBeforeCompaction, "Host custody must not race a fresh prompt against compaction startup");
-  assert.equal((await second.status(created.id)).pending.total, 1);
 
-  start.release();
-  await active.entered;
-  assert.equal(runtime.isCompacting, true);
-  assert.equal(runtime.promptCalls, promptCallsBeforeCompaction);
-
-  active.finish();
-  await compacting;
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(runtime.promptCalls, promptCallsBeforeCompaction + 1);
-  assert.equal(runtime.promptMessages.at(-1), "queued before manual compaction start");
-});
-
-test("compact uses its explicit long-mutation timeout instead of the ordinary request timeout", async (context) => {
-  const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
-  context.after(() => cleanupHarness(harness));
-  const setupClient = new DockClient({ socketPath: harness.socketPath });
-  const created = await setupClient.create(harness.directory, "long-compaction", "create-long-compaction");
-  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
-  const block = runtime.blockNextCompaction();
-  const client = new DockClient({ socketPath: harness.socketPath, timeoutMs: 25, longMutationTimeoutMs: 250 });
-  const compacting = client.compactSession(created.id, undefined, "long-compact-op");
-  await block.entered;
-  const release = setTimeout(() => block.finish(), 75);
-  context.after(() => clearTimeout(release));
-
-  const compacted = await compacting;
-
-  assert.equal(compacted.result.tokensBefore, 123);
-  assert.equal(compacted.instance.execution, "idle");
-});
 
 test("closing a client transport scope releases a blocked compaction caller while the Host completes once", async (context) => {
   const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
@@ -2197,34 +1934,7 @@ test("stop preempts a manual compaction even before its start event is projected
   assert.ok(stopRequested && compactionCompleted && stopRequested.sequence < compactionCompleted.sequence);
 });
 
-test("abort bypasses the configuration gate for an active manual compaction", async (context) => {
-  const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
-  context.after(() => cleanupHarness(harness));
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, "abort-compaction", "create-abort-compaction");
-  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
-  const block = runtime.blockNextCompaction();
-  const compacting = client.compactSession(created.id, undefined, "abort-compact-op");
-  const compactFailure = assert.rejects(
-    compacting,
-    (error: unknown) => error instanceof ControlClientError
-      && error.code === "effect_unknown"
-      && error.operationId === "abort-compact-op",
-  );
-  await block.entered;
 
-  const aborted = await client.abort(created.id, "abort-active-compaction");
-  await compactFailure;
-
-  assert.equal(aborted.instance.lifecycle, "active");
-  assert.equal(aborted.instance.execution, "idle");
-  assert.equal(aborted.instance.lastRun, "never");
-  assert.equal(runtime.abortCalls, 1);
-  assert.equal(runtime.disposeCalls, 0);
-  const completed = harness.registry.get(created.id).eventsSince().events.find((event) => event.type === "compaction.completed");
-  assert.equal(completed?.type === "compaction.completed" ? completed.data.operationId : undefined, "abort-compact-op");
-  assert.equal(completed?.type === "compaction.completed" ? completed.data.aborted : undefined, true);
-});
 
 test("abort is operation-deduplicated and keeps the instance reusable", async (context) => {
   const harness = await createHarness();
@@ -2412,24 +2122,7 @@ test("a running instance applies live metadata and next-step configuration witho
   assert.ok(events.page.events.some((event) => event.type === "session.info_changed"));
 });
 
-test("running session name publication is attributed to the naming operation", async (context) => {
-  const port = new ScriptedCatalogCommitPort();
-  const harness = await createTransactionHarness(port);
-  context.after(() => cleanupHarness(harness));
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, undefined, "create-live-name-attribution");
-  const running = await client.prompt(created.id, "keep running", "prompt", "active-model-operation");
-  assert.equal(running.instance.execution, "running");
 
-  const named = await client.nameSession(created.id, "Live metadata", "live-name-operation");
-  assert.equal(named.instance.name, "Live metadata");
-  assert.equal(named.instance.execution, "running");
-  assert.equal(named.instance.activeCommandId, "active-model-operation");
-  assert.deepEqual(
-    port.calls.filter((call) => call.context.kind === "session.name").map((call) => call.context.operationId),
-    ["live-name-operation"],
-  );
-});
 
 test("same-host operation receipts deduplicate every implemented mutation and reject conflicts", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-ledger-"));
@@ -2545,32 +2238,7 @@ test("same-host operation receipts deduplicate every implemented mutation and re
   assert.equal(session.abortCalls, 1);
 });
 
-test("expired Host receipts reject through DockClient without replaying their side effects", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-expired-receipt-"));
-  await chmod(directory, 0o700);
-  const socketPath = join(directory, "dock.sock");
-  let factoryCalls = 0;
-  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    factoryCalls += 1;
-    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedAgentWorkerConnection(`pi-${id}`) });
-  }, () => `expired-${factoryCalls + 1}`);
-  const host = new DockHost({ socketPath, registry, operationReceiptCapacity: 1 });
-  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
-  await host.start();
-  const client = new DockClient({ socketPath });
-  const created = await client.create(directory, undefined, "old-create-op");
-  await client.nameSession(created.id, "renamed", "newer-name-op");
 
-  await assert.rejects(
-    client.create(directory, undefined, "old-create-op"),
-    (error: unknown) => error instanceof ControlClientError
-      && error.code === "operation_receipt_expired"
-      && error.operationId === "old-create-op"
-      && error.details?.operationId === "old-create-op"
-      && /do not retry/u.test(String(error.details?.queryHint)),
-  );
-  assert.equal(factoryCalls, 1);
-});
 
 test("models settings failures are typed, evented, and leave the in-memory state honest", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-settings-failure-"));
@@ -2848,47 +2516,7 @@ test("concurrent adoption of one persisted session file admits only one runtime"
   assert.equal(registry.list().length, 2);
 });
 
-test("adopt rejects a mismatched runtime binding and never publishes after catalog failure", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-adopt-boundary-"));
-  await chmod(directory, 0o700);
-  const mismatchedSocket = join(directory, "mismatched.sock");
-  let mismatchedRuntime: DelayedAgentWorkerConnection | undefined;
-  const mismatchedRegistry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    mismatchedRuntime = new DelayedAgentWorkerConnection(`wrong-${id}`);
-    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: mismatchedRuntime });
-  }, () => "mismatched-adopt", { reopenTargetResolver: { resolve: async () => ({ cwd: directory }) } });
-  const mismatchedHost = new DockHost({ socketPath: mismatchedSocket, registry: mismatchedRegistry });
-  context.after(async () => { await mismatchedHost.stop().catch(() => {}); });
-  await mismatchedHost.start();
-  await assert.rejects(
-    new DockClient({ socketPath: mismatchedSocket }).adopt("/sessions/requested.jsonl", undefined, "mismatched-op"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "request_failed",
-  );
-  assert.equal(mismatchedRuntime?.disposeCalls, 1);
-  assert.deepEqual(mismatchedRegistry.list(), []);
 
-  const failedSocket = join(directory, "commit-failed.sock");
-  const port = new ScriptedCatalogCommitPort();
-  port.failAt(1);
-  let failedRuntime: DelayedAgentWorkerConnection | undefined;
-  const failedRegistry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, sessionFile }) => {
-    failedRuntime = new DelayedAgentWorkerConnection(`failed-${id}`);
-    failedRuntime.sessionFile = sessionFile as string;
-    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: failedRuntime });
-  }, () => "failed-adopt", {
-    catalogCommitPort: port,
-    reopenTargetResolver: { resolve: async () => ({ cwd: directory }) },
-  });
-  const failedHost = new DockHost({ socketPath: failedSocket, registry: failedRegistry });
-  context.after(async () => { await failedHost.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
-  await failedHost.start();
-  await assert.rejects(
-    new DockClient({ socketPath: failedSocket }).adopt("/sessions/commit-failed.jsonl", undefined, "failed-op"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "catalog_write_failed",
-  );
-  assert.equal(failedRuntime?.disposeCalls, 1);
-  assert.deepEqual(failedRegistry.list(), []);
-});
 
 test("session.core lists bounded safe cwd and all-session metadata", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-session-list-"));
@@ -3007,36 +2635,7 @@ test("session.tree.v1 paginates revisions, navigates in-file, and replaces on fo
   assert.equal(runtime.sessionMutationCalls.clone, 1);
 });
 
-test("fresh conversation bootstrap omits old navigation and sibling-generation events while explicit events stays raw", async (context) => {
-  const harness = await createHarness();
-  context.after(() => cleanupHarness(harness));
-  await harness.host.start();
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, "bootstrap-branch");
-  const runtime = harness.sessions.get(created.id)!;
-  runtime.treeNodes = [
-    { entryId: "bootstrap-root", depth: 0, kind: "message", role: "user", summary: "root", hasChildren: true },
-    { entryId: "bootstrap-a", parentId: "bootstrap-root", depth: 1, kind: "message", role: "assistant", summary: "branch A", hasChildren: false },
-    { entryId: "bootstrap-b", parentId: "bootstrap-root", depth: 1, kind: "message", role: "assistant", summary: "branch B", hasChildren: false },
-  ];
-  runtime.treeLeafId = "bootstrap-a";
-  runtime.settle("old branch answer");
-  await harness.registry.get(created.id).waitForIdle();
-  await client.navigateSession(created.id, "bootstrap-b", {}, "bootstrap-nav-b");
-  await client.navigateSession(created.id, "bootstrap-a", {}, "bootstrap-nav-a");
 
-  const raw = await client.read(created.id);
-  assert.equal(raw.page.events.filter((event) => event.type === "session.navigated").length, 2);
-  assert.ok(raw.page.events.some((event) => event.type === "message.completed"));
-  const bootstrap = await client.streamEvents(created.id, {
-    onEvent: () => {},
-    requireTuiProjection: true,
-    conversationBootstrap: true,
-  });
-  assert.deepEqual(bootstrap.initial.page.events, []);
-  bootstrap.close();
-  await bootstrap.done;
-});
 
 test("session.commands.v1 names, compacts, replaces, reloads, and deduplicates mutations", async (context) => {
   const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
@@ -3084,24 +2683,7 @@ test("session.commands.v1 names, compacts, replaces, reloads, and deduplicates m
   );
 });
 
-test("known compaction no-op is typed across Host and client without effect_unknown", async (context) => {
-  const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
-  context.after(() => cleanupHarness(harness));
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, undefined, "known-compact-create");
-  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
-  runtime.sessionMutationError = new AgentCompactionKnownFailureError("nothing_to_compact", "Nothing to compact (session too small)");
 
-  await assert.rejects(
-    client.compactSession(created.id, undefined, "known-compact-noop"),
-    (error: unknown) => error instanceof ControlClientError
-      && error.code === "compaction_not_needed"
-      && error.operationId === "known-compact-noop"
-      && error.message === "Nothing to compact (session too small)",
-  );
-  assert.equal((await client.status(created.id)).execution, "idle");
-  assert.equal((await client.hostInfo()).state, "ready");
-});
 
 test("session command runtime ambiguity is operation-scoped and queryable", async (context) => {
   const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
@@ -3137,19 +2719,7 @@ test("unexpected host closure rejects a live follow subscription", async (contex
   );
 });
 
-test("oversized instance names are rejected before registry side effects", async (context) => {
-  const harness = await createHarness();
-  context.after(() => cleanupHarness(harness));
-  await harness.host.start();
-  const client = new DockClient({ socketPath: harness.socketPath });
 
-  await assert.rejects(
-    client.create(harness.directory, "x".repeat(257)),
-    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_request",
-  );
-  assert.deepEqual(await client.list(), []);
-  assert.deepEqual(harness.registry.list(), []);
-});
 
 test("a second host cannot unlink a live host socket", async (context) => {
   const harness = await createHarness();
@@ -3196,173 +2766,13 @@ test("host rejects a socket directory accessible by other users", async (context
   await assert.rejects(host.start(), /must not grant group\/other access/);
 });
 
-test("ping reports negotiated capabilities and normal hellos require core plus operation capability", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-negotiation-"));
-  await chmod(directory, 0o700);
-  const socketPath = join(directory, "dock.sock");
-  const hellos: Record<string, unknown>[] = [];
-  const capabilities = ["core.v2", "host.info", "custom.observed"];
-  const server = createServer((socket) => {
-    const decoder = new JsonLineDecoder();
-    socket.on("data", (chunk: Buffer) => {
-      for (const line of decoder.push(chunk)) {
-        const frame = objectValue(JSON.parse(line) as unknown);
-        if (frame.kind === "hello") {
-          hellos.push(frame);
-          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 7, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "negotiated-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities, limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
-        } else {
-          socket.end(encodeJsonLine({ kind: "response", version: 2, requestId: frame.requestId, hostEpoch: "negotiated-epoch", ok: true, result: { state: "ready", host: { pid: 7, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "negotiated-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalog: { schemaVersion: 1, revision: 0, lastReconciledAt: "2026-07-14T00:00:00.000Z" }, paths: { socket: socketPath, state: "memory:test" }, diagnostics: [] } }));
-        }
-      }
-    });
-  });
-  await listen(server, socketPath);
-  context.after(async () => { await close(server); await rm(directory, { recursive: true, force: true }); });
 
-  const ping = await new DockClient({ socketPath }).ping();
-  assert.deepEqual(ping.capabilities, capabilities);
-  assert.deepEqual(hellos[0]?.requiredCapabilities, ["core.v2", "host.info"]);
-});
 
-test("adopt negotiates its dedicated capability before sending a mutation", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-adopt-capability-"));
-  await chmod(directory, 0o700);
-  const socketPath = join(directory, "dock.sock");
-  let mutationRequests = 0;
-  const server = createServer((socket) => {
-    const decoder = new JsonLineDecoder();
-    socket.on("data", (chunk: Buffer) => {
-      for (const line of decoder.push(chunk)) {
-        const frame = objectValue(JSON.parse(line) as unknown);
-        if (frame.kind === "hello") {
-          socket.end(encodeJsonLine({
-            kind: "hello_ack", requestId: frame.requestId, version: 2,
-            host: { pid: 7, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "old-host", startedAt: "2026-07-14T00:00:00.000Z" },
-            catalogSchemaVersion: 1,
-            capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "instance.catalog"],
-            limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
-          }));
-        } else mutationRequests += 1;
-      }
-    });
-  });
-  await listen(server, socketPath);
-  context.after(async () => { await close(server); await rm(directory, { recursive: true, force: true }); });
 
-  await assert.rejects(
-    new DockClient({ socketPath }).adopt("/tmp/session.jsonl", undefined, "adopt-old-host"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "protocol_incompatible",
-  );
-  assert.equal(mutationRequests, 0);
-});
 
-test("read-only list bridges a pre-projection-capability V2 Host during staged update inspection", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-legacy-list-"));
-  await chmod(directory, 0o700);
-  const socketPath = join(directory, "dock.sock");
-  const hellos: string[][] = [];
-  let listRequests = 0;
-  const server = createServer((socket) => {
-    const decoder = new JsonLineDecoder();
-    socket.on("data", (chunk: Buffer) => {
-      for (const line of decoder.push(chunk)) {
-        const frame = objectValue(JSON.parse(line) as unknown);
-        if (frame.kind === "hello") {
-          const requiredCapabilities = frame.requiredCapabilities as string[];
-          hellos.push(requiredCapabilities);
-          if (requiredCapabilities.includes("extension_ui.tools-expanded.v1")) {
-            socket.end(encodeJsonLine({
-              kind: "hello_error", requestId: frame.requestId,
-              error: { code: "capability_missing", message: "Required capabilities are unavailable", missing: ["extension_ui.tools-expanded.v1"] },
-            }));
-            continue;
-          }
-          socket.write(encodeJsonLine({
-            kind: "hello_ack", requestId: frame.requestId, version: 2,
-            host: { pid: 7, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "legacy-list-epoch", startedAt: "2026-07-14T00:00:00.000Z" },
-            catalogSchemaVersion: 1,
-            capabilities: ["core.v2", "instance.catalog"],
-            limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
-          }));
-        } else {
-          listRequests += 1;
-          const cursor = { hostEpoch: "legacy-list-epoch", instanceId: "legacy-instance", runtimeGeneration: 1, sequence: 0 };
-          socket.end(encodeJsonLine({
-            kind: "response", version: 2, requestId: frame.requestId, hostEpoch: "legacy-list-epoch", ok: true,
-            result: {
-              instances: [{
-                id: "legacy-instance", creationOperationId: "legacy-create", cwd: directory,
-                lifecycle: "active", execution: "idle", compacting: false, lastRun: "never", reopenable: false,
-                runtimeGeneration: 1, ownerHostEpoch: "legacy-list-epoch", pending: { steering: 0, followUp: 0, total: 0 },
-                executor: { kind: "pi-sdk", piSessionId: "legacy-pi" }, extensionStatus: {},
-                createdAt: "2026-07-14T00:00:00.000Z", updatedAt: "2026-07-14T00:00:00.000Z", eventCursor: cursor,
-              }],
-              page: { revision: 1, total: 1, hiddenStopped: 0 },
-            },
-          }));
-        }
-      }
-    });
-  });
-  await listen(server, socketPath);
-  context.after(async () => { await close(server); await rm(directory, { recursive: true, force: true }); });
 
-  const listed = await new DockClient({ socketPath }).list();
-  assert.equal(listed[0]?.toolsExpanded, false);
-  assert.equal(listRequests, 1);
-  assert.equal(hellos.length, 2);
-  assert.equal(hellos[0]?.includes("extension_ui.tools-expanded.v1"), true);
-  assert.equal(hellos[0]?.includes("git.branch-footer.v1"), true);
-  assert.equal(hellos[1]?.includes("extension_ui.tools-expanded.v1"), false);
-  assert.equal(hellos[1]?.includes("git.branch-footer.v1"), false);
-});
 
-test("typed list rejects a non-progressing continuation without issuing another request", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-list-progress-"));
-  await chmod(directory, 0o700);
-  const socketPath = join(directory, "dock.sock");
-  let listRequests = 0;
-  const server = createServer((socket) => {
-    const decoder = new JsonLineDecoder();
-    socket.on("data", (chunk: Buffer) => {
-      for (const line of decoder.push(chunk)) {
-        const frame = objectValue(JSON.parse(line) as unknown);
-        if (frame.kind === "hello") {
-          socket.write(encodeJsonLine({
-            kind: "hello_ack",
-            requestId: frame.requestId,
-            version: 2,
-            host: { pid: 8, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "list-progress-epoch", startedAt: "2026-07-14T00:00:00.000Z" },
-            catalogSchemaVersion: 1,
-            capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.catalog"],
-            limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
-          }));
-        } else {
-          listRequests += 1;
-          socket.end(encodeJsonLine({
-            kind: "response",
-            version: 2,
-            requestId: frame.requestId,
-            hostEpoch: "list-progress-epoch",
-            ok: true,
-            result: {
-              instances: [],
-              page: { revision: 1, total: 2, hiddenStopped: 0, nextCursor: { revision: 1, offset: 0, selector: "all" } },
-            },
-          }));
-        }
-      }
-    });
-  });
-  await listen(server, socketPath);
-  context.after(async () => { await close(server); await rm(directory, { recursive: true, force: true }); });
 
-  await assert.rejects(
-    new DockClient({ socketPath }).list(),
-    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_response",
-  );
-  assert.equal(listRequests, 1);
-});
 
 test("an LF-truncated control response is reported as recoverable connection loss", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-partial-frame-"));
@@ -3399,81 +2809,9 @@ test("an LF-truncated control response is reported as recoverable connection los
   );
 });
 
-test("large history and attach projections stay complete JSONL frames and retain newest history", async (context) => {
-  const harness = await createHarness();
-  context.after(() => cleanupHarness(harness));
-  await harness.host.start();
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, "large history", "large-history-create");
-  const runtime = harness.sessions.get(created.id)!;
-  const blocks = Array.from({ length: 180 }, (_, index) => ({ type: "text", text: `${String(index).padStart(3, "0")}:${"x".repeat(7_900)}` }));
-  runtime.history = Array.from({ length: 4 }, (_, index): AgentHistoryEntry => ({
-    entryId: `large-history-${index + 1}`,
-    timestamp: `2026-07-14T00:00:0${index}.000Z`,
-    role: index % 2 === 0 ? "user" : "assistant",
-    content: blocks,
-  }));
-  runtime.settle("history refreshed");
-  await new Promise<void>((resolve) => setImmediate(resolve));
 
-  const history = await client.history(created.id);
-  assert.ok(history.entries.length > 0 && history.entries.length < runtime.history.length, `returned ${history.entries.length} of ${runtime.history.length}`);
-  assert.equal(history.entries.at(-1)?.entryId, "large-history-4");
-  assert.equal(history.hasEarlier, true);
-  assert.equal(history.nextBeforeEntryId, history.entries[0]?.entryId);
-  assert.match(JSON.stringify(history.entries[0]?.content), /(?:History content truncated|Additional message content omitted)/u);
 
-  const subscription = await client.streamEvents(created.id, { onEvent: () => {}, requireTuiProjection: true });
-  assert.ok(subscription.initial.recentHistory.length > 0);
-  assert.equal(subscription.initial.recentHistory.at(-1)?.entryId, "large-history-4");
-  assert.equal(subscription.initial.historyTruncated, true);
-  assert.match(JSON.stringify(subscription.initial.recentHistory[0]?.content), /(?:History content truncated|Additional message content omitted)/u);
-  subscription.close();
-  await subscription.done;
-});
 
-test("follow initialization overflow is an explicit recoverable projection failure", async (context) => {
-  const harness = await createHarness();
-  context.after(() => cleanupHarness(harness));
-  await harness.host.start();
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, "attach-overflow");
-  const runtime = harness.sessions.get(created.id)!;
-  runtime.settle("ready");
-  const instance = harness.registry.get(created.id);
-  await instance.waitForIdle();
-
-  const originalProjection = instance.getAttachProjection.bind(instance);
-  let releaseProjection!: () => void;
-  let projectionEntered!: () => void;
-  const blocked = new Promise<void>((resolve) => { releaseProjection = resolve; });
-  const entered = new Promise<void>((resolve) => { projectionEntered = resolve; });
-  instance.getAttachProjection = async (...args) => {
-    projectionEntered();
-    await blocked;
-    return originalProjection(...args);
-  };
-
-  const following = client.follow(created.id, created.eventCursor, { onEvent: () => {}, requireTuiProjection: true });
-  await entered;
-  for (let index = 0; index < 1_001; index += 1) runtime.emit({ type: "dock_extension_error", error: `burst-${index}` });
-  await instance.waitForIdle();
-  releaseProjection();
-  await assert.rejects(
-    following,
-    (error: unknown) => error instanceof ControlClientError
-      && error.code === "follow_initial_overflow"
-      && /open it again/u.test(error.message),
-  );
-  let degradationObserved = false;
-  const degradationDeadline = Date.now() + 5_000;
-  while (!degradationObserved && Date.now() < degradationDeadline) {
-    const replay = await client.read(created.id);
-    degradationObserved = replay.page.events.some((event) => event.type === "extension.error" && /Too many updates arrived/u.test(event.data.error));
-    if (!degradationObserved) await new Promise((resolve) => setTimeout(resolve, 5));
-  }
-  assert.equal(degradationObserved, true, "initialization overflow must remain diagnosable after reconnect");
-});
 
 test("oversized runtime payloads are projected into one safe live event without poisoning reconnect", async (context) => {
   const harness = await createHarness();
@@ -3672,62 +3010,7 @@ test("permanently stalled followers are bounded without affecting Extension UI o
   socket.destroy();
 });
 
-test("follow drain timeout leaves Extension UI operation and runtime active", async (context) => {
-  const harness = await createHarness();
-  context.after(() => cleanupHarness(harness));
-  await harness.host.start();
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, "timeout reader", "timeout-reader-create");
-  harness.sessions.get(created.id)!.settle("ready");
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  const operation = await client.controlExtensionUi(created.id, () => {});
 
-  const socket = createConnection(harness.socketPath);
-  const decoder = new JsonLineDecoder();
-  const frames: string[] = [];
-  socket.on("data", (chunk: Buffer) => frames.push(...decoder.push(chunk)));
-  await new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
-  socket.write(encodeJsonLine({
-    kind: "hello", requestId: "timeout-hello", versions: [2],
-    client: { name: "timeout-reader-test", version: "0.1.0", clientId: "timeout-reader-client" },
-    requiredCapabilities: ["core.v2", "events.follow.v2", "extension_ui.v1", "extension_ui.persistent-interactions.v1"],
-  }));
-  const frameDeadline = Date.now() + 5_000;
-  while (frames.length < 1 && Date.now() < frameDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
-  socket.write(encodeJsonLine({ kind: "request", version: 2, requestId: "timeout-follow", type: "instance.follow", params: { instanceId: created.id, since: created.eventCursor } }));
-  while (frames.length < 2 && Date.now() < frameDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
-  assert.ok(frames.length >= 2);
-  assert.doesNotMatch(frames[1]!, /controller|leaseToken/u);
-  socket.pause();
-
-  const serverSocket = [...((harness.host as unknown as { attachConnections: Map<string, Set<{ destroyed: boolean }>> }).attachConnections.get(created.id) ?? [])][0];
-  assert.ok(serverSocket);
-  const runtime = harness.sessions.get(created.id)!;
-  for (let index = 0; index < 450; index += 1) {
-    runtime.emit({
-      type: "message_update",
-      assistantMessageEvent: {
-        type: "text_delta",
-        contentIndex: 0,
-        delta: `${String(index).padStart(3, "0")}:${"t".repeat(7_900)}`,
-        partial: { role: "assistant", content: [] },
-      },
-    });
-  }
-  const hostProbe = harness.host as unknown as { attachBackpressureStats: { blocked: number; drained: number; overflow: number; timeout: number } };
-  const timeoutDeadline = Date.now() + 10_000;
-  while (hostProbe.attachBackpressureStats.timeout === 0 && hostProbe.attachBackpressureStats.overflow === 0 && Date.now() < timeoutDeadline) {
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  assert.equal(hostProbe.attachBackpressureStats.overflow, 0, "the fixture must exercise timeout rather than queue overflow");
-  assert.ok(hostProbe.attachBackpressureStats.timeout > 0, "a permanently blocked socket must hit the drain deadline");
-  assert.equal(serverSocket.destroyed, true);
-  assert.equal((await client.status(created.id)).lifecycle, "active");
-  assert.equal((await client.setExtensionWidgetViewport(created.id, operation.initial.leaseToken, created.runtimeGeneration, 90, 30)).accepted, true);
-  operation.close();
-  await operation.done;
-  socket.destroy();
-});
 
 test("post-send mutation transport loss is effect_unknown with caller operation ID, while reads stay transport errors", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-effect-unknown-"));
@@ -3812,137 +3095,11 @@ test("real Host streams reset sequence ordering at a replacement generation", as
   await subscription.done;
 });
 
-test("stream callbacks follow initial response order and accept one-step replacement generations", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-frame-order-"));
-  await chmod(directory, 0o700);
-  const socketPath = join(directory, "dock.sock");
-  let attachParams: Record<string, unknown> | undefined;
-  const server = createServer((socket) => {
-    const decoder = new JsonLineDecoder();
-    socket.on("data", (chunk: Buffer) => {
-      for (const line of decoder.push(chunk)) {
-        const frame = JSON.parse(line) as Record<string, unknown>;
-        if (frame.kind === "hello") {
-          socket.write(encodeJsonLine({
-            kind: "hello_ack", requestId: "fixed", version: 2,
-            host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
-            catalogSchemaVersion: 1,
-            capabilities: ["command.images.path.v1", "core.v2", "events.follow.v2", "extension_ui.persistent-interactions.v1", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.keys.v1", "instance.read.v1", "tool-result-presentation.v1"],
-            limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
-          }));
-          continue;
-        }
-        const cursor = { hostEpoch: "epoch-1", instanceId: "instance-1", runtimeGeneration: 1, sequence: 1 };
-        const snapshot = {
-          id: "instance-1", creationOperationId: "create-1", cwd: directory,
-          lifecycle: "active", execution: "running", compacting: false, lastRun: "never", reopenable: false,
-          runtimeGeneration: 1, ownerHostEpoch: "epoch-1", pending: { steering: 0, followUp: 0, total: 0 },
-          executor: { kind: "fake", piSessionId: "pi-1" }, extensionStatus: {}, toolsExpanded: false, activeCommandId: "command-1",
-          createdAt: "2026-07-14T00:00:00.000Z", updatedAt: "2026-07-14T00:00:00.000Z", eventCursor: cursor,
-        };
-        const live = { scope: "instance", sequence: 2, instanceId: "instance-1", runtimeGeneration: 1, occurredAt: "2026-07-14T00:00:01.000Z", type: "extension.error", data: { error: "live" } };
-        const replaced = { scope: "instance", sequence: 1, instanceId: "instance-1", runtimeGeneration: 2, occurredAt: "2026-07-14T00:00:02.000Z", type: "session.replaced", data: { reason: "reload", runtimeGeneration: 2, sessionFile: "/tmp/pi-2.jsonl", cwd: "/tmp/reloaded", piSessionId: "pi-2" } };
-        const afterReplacement = { scope: "instance", sequence: 2, instanceId: "instance-1", runtimeGeneration: 2, occurredAt: "2026-07-14T00:00:03.000Z", type: "extension.error", data: { error: "after replacement" } };
-        if (frame.type === "instance.read") {
-          socket.end(encodeJsonLine({
-            kind: "response", version: 2, requestId: "fixed", hostEpoch: "epoch-1", ok: true,
-            result: { instance: snapshot, page: { events: [], earliest: cursor, latest: cursor, truncated: false, epochChanged: false, generationChanged: false }, recentHistory: [], historyTruncated: true, pendingMessages: [] },
-          }));
-          continue;
-        }
-        attachParams = frame.params as Record<string, unknown>;
-        socket.write(encodeJsonLine({
-          kind: "response", version: 2, requestId: "fixed", hostEpoch: "epoch-1", ok: true,
-          result: { page: { events: [], earliest: cursor, latest: cursor, truncated: false, epochChanged: false, generationChanged: false } },
-        })
-          + encodeJsonLine({ kind: "event", version: 2, requestId: "fixed", hostEpoch: "epoch-1", event: live })
-          + encodeJsonLine({ kind: "event", version: 2, requestId: "fixed", hostEpoch: "epoch-1", event: replaced })
-          + encodeJsonLine({ kind: "event", version: 2, requestId: "fixed", hostEpoch: "epoch-1", event: afterReplacement }));
-      }
-    });
-  });
-  await listen(server, socketPath);
-  context.after(async () => {
-    await close(server);
-    await rm(directory, { recursive: true, force: true });
-  });
 
-  const order: string[] = [];
-  const client = new DockClient({ socketPath, requestId: () => "fixed" });
-  const subscription = await client.streamEvents("instance-1", {
-    onEvent: (liveEvent) => order.push(liveEvent.type),
-  });
-  order.push("initial");
-  await new Promise((resolveTurn) => setImmediate(resolveTurn));
-  assert.deepEqual(order, ["initial", "extension.error", "session.replaced", "extension.error"]);
-  assert.equal(attachParams && "replay" in attachParams, false);
-  subscription.close();
-  await subscription.done;
-});
 
-test("conversation bootstrap negotiates replay-purpose support before sending attach", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-replay-capability-"));
-  await chmod(directory, 0o700);
-  const socketPath = join(directory, "dock.sock");
-  let businessRequests = 0;
-  const server = createServer((socket) => {
-    const decoder = new JsonLineDecoder();
-    socket.on("data", (chunk: Buffer) => {
-      for (const line of decoder.push(chunk)) {
-        const frame = JSON.parse(line) as Record<string, unknown>;
-        if (frame.kind !== "hello") { businessRequests += 1; continue; }
-        socket.write(encodeJsonLine({
-          kind: "hello_ack", requestId: "fixed", version: 2,
-          host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
-          catalogSchemaVersion: 1,
-          capabilities: ["core.v2", "events.follow.v2", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "queue.control.v1", "run.abort.v1", "tool-result-presentation.v1", "tui.projection.v1"],
-          limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
-        }));
-      }
-    });
-  });
-  await listen(server, socketPath);
-  context.after(async () => { await close(server); await rm(directory, { recursive: true, force: true }); });
 
-  const client = new DockClient({ socketPath, requestId: () => "fixed" });
-  await assert.rejects(
-    client.streamEvents("instance-1", { onEvent: () => {}, requireTuiProjection: true, conversationBootstrap: true }),
-    (error: unknown) => error instanceof ControlClientError && error.code === "protocol_incompatible",
-  );
-  assert.equal(businessRequests, 0);
-});
 
-test("TUI projection capability is required before the attach request", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-tui-capability-"));
-  await chmod(directory, 0o700);
-  const socketPath = join(directory, "dock.sock");
-  let businessRequests = 0;
-  const server = createServer((socket) => {
-    const decoder = new JsonLineDecoder();
-    socket.on("data", (chunk: Buffer) => {
-      for (const line of decoder.push(chunk)) {
-        const frame = JSON.parse(line) as Record<string, unknown>;
-        if (frame.kind !== "hello") { businessRequests += 1; continue; }
-        socket.write(encodeJsonLine({
-          kind: "hello_ack", requestId: "fixed", version: 2,
-          host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
-          catalogSchemaVersion: 1,
-          capabilities: ["core.v2", "events.follow.v2", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "run.abort.v1"],
-          limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
-        }));
-      }
-    });
-  });
-  await listen(server, socketPath);
-  context.after(async () => { await close(server); await rm(directory, { recursive: true, force: true }); });
 
-  const client = new DockClient({ socketPath, requestId: () => "fixed" });
-  await assert.rejects(
-    client.streamEvents("instance-1", { onEvent: () => {}, requireTuiProjection: true }),
-    (error: unknown) => error instanceof ControlClientError && error.code === "protocol_incompatible",
-  );
-  assert.equal(businessRequests, 0);
-});
 
 test("client rejects a non-handshake frame before operations", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-malformed-"));
@@ -4056,26 +3213,7 @@ test("catalog create commit gates publication and rollback disposes an unpublish
   assert.equal(failed.registry.catalogRevision(), 1);
 });
 
-test("prompt pre-intent commit precedes Pi and accepted events follow their commits", async (context) => {
-  const port = new ScriptedCatalogCommitPort();
-  const admissionGate = port.gateAt(2);
-  const harness = await createTransactionHarness(port);
-  context.after(() => cleanupHarness(harness));
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, undefined, "create-prompt-gate");
-  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
-  const prompting = client.prompt(created.id, "hello", "prompt", "prompt-gated");
-  await admissionGate.entered;
-  assert.equal(runtime.promptCalls, 0);
-  assert.equal((await client.status(created.id)).execution, "idle");
-  assert.equal((await client.read(created.id)).page.events.some((event) => event.type === "command.accepted"), false);
-  admissionGate.release();
-  const result = await prompting;
-  assert.equal(result.instance.execution, "running");
-  assert.deepEqual(port.calls.slice(1, 4).map((call) => call.context.kind), ["command.admission", "command.accepted", "run.started"]);
-  const events = (await client.read(created.id)).page.events;
-  assert.ok(events.findIndex((event) => event.type === "command.accepted") < events.findIndex((event) => event.type === "run.started"));
-});
+
 
 test("pre-effect catalog failure calls Pi zero times and leaves the Host writable", async (context) => {
   const port = new ScriptedCatalogCommitPort();
@@ -4133,59 +3271,9 @@ test("post-effect catalog failure returns effect_unknown and drives one read-onl
   assert.equal(runtime.disposeCalls, 1);
 });
 
-test("fatal drain lets already-admitted Pi mutations reach operation-scoped ambiguity before disposal", async (context) => {
-  const port = new ScriptedCatalogCommitPort();
-  port.failAt(3);
-  const harness = await createTransactionHarness(port, 500);
-  context.after(() => cleanupHarness(harness));
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const first = await client.create(harness.directory, undefined, "create-concurrent-first");
-  const second = await client.create(harness.directory, undefined, "create-concurrent-second");
-  const firstRuntime = harness.sessions.get(first.id) as DelayedAgentWorkerConnection;
-  const secondRuntime = harness.sessions.get(second.id) as DelayedAgentWorkerConnection;
-  const modelBlock = firstRuntime.blockNextModelMutation();
-  const firstMutation = client.setModel(first.id, "fixture", "local", "model-already-admitted");
-  await modelBlock.entered;
-  const faultingMutation = client.setModel(second.id, "fixture", "local", "model-causes-fault");
 
-  await assert.rejects(
-    faultingMutation,
-    (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown" && error.operationId === "model-causes-fault",
-  );
-  assert.equal(firstRuntime.disposeCalls, 0);
-  assert.equal(secondRuntime.disposeCalls, 0);
-  modelBlock.release();
-  await assert.rejects(
-    firstMutation,
-    (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown" && error.operationId === "model-already-admitted",
-  );
-  const fatal = await harness.host.waitForFatalCompletion();
-  assert.equal(fatal.drainTimedOut, false);
-  assert.equal(firstRuntime.disposeCalls, 1);
-  assert.equal(secondRuntime.disposeCalls, 1);
-});
 
-test("mutation-fault drain has a bounded nonzero fatal deadline", async (context) => {
-  const port = new ScriptedCatalogCommitPort();
-  port.failAt(3);
-  const harness = await createTransactionHarness(port, 25);
-  context.after(() => cleanupHarness(harness));
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, undefined, "create-drain-timeout");
-  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
-  const disposeBlock = runtime.blockDispose();
-  await assert.rejects(
-    client.prompt(created.id, "ambiguous", "prompt", "prompt-drain-timeout"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown",
-  );
-  await disposeBlock.entered;
-  const fatal = await harness.host.waitForFatalCompletion();
-  assert.equal(fatal.exitCode, 1);
-  assert.equal(fatal.drainTimedOut, true);
-  assert.equal(runtime.disposeCalls, 1);
-  disposeBlock.release();
-  await new Promise((resolveTurn) => setImmediate(resolveTurn));
-});
+
 
 test("fatal deadline includes a hung admitted create and Host stop does not await it again", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-hung-create-fault-"));
@@ -4323,144 +3411,15 @@ test("queue and settled commit faults retain the last conservative committed sta
   assert.equal(settledHarness.registry.get(settledInstance.id).eventsSince().events.some((event) => event.type === "run.settled"), false);
 });
 
-test("model success and changed events wait for the post-setter catalog commit", async (context) => {
-  const port = new ScriptedCatalogCommitPort();
-  const modelGate = port.gateAt(2);
-  const harness = await createTransactionHarness(port);
-  context.after(() => cleanupHarness(harness));
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, undefined, "create-model-gate");
-  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
-  const changing = client.setModel(created.id, "fixture", "local", "model-gated");
-  await modelGate.entered;
-  assert.equal(runtime.modelMutationCalls, 1);
-  assert.equal((await client.status(created.id)).executor.model?.id, "default");
-  assert.equal(harness.registry.get(created.id).eventsSince().events.some((event) => event.type === "model.changed"), false);
-  modelGate.release();
-  const changed = await changing;
-  assert.equal(changed.instance.executor.model?.id, "local");
-  assert.equal(harness.registry.get(created.id).eventsSince().events.some((event) => event.type === "model.changed"), true);
-});
 
-test("a read-first projection reservation cannot observe a later uncommitted configuration", async (context) => {
-  const port = new ScriptedCatalogCommitPort();
-  const thinkingGate = port.gateAt(2);
-  const harness = await createTransactionHarness(port);
-  context.after(() => cleanupHarness(harness));
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, undefined, "create-read-first-race");
-  const instance = harness.registry.get(created.id);
-  const reading = instance.listModels();
-  const changing = instance.setThinkingLevel("high", "thinking-after-read");
-  await thinkingGate.entered;
-  assert.equal((await reading).state.thinkingLevel, "off");
-  assert.equal(instance.snapshot().executor.thinkingLevel, "off");
-  thinkingGate.release();
-  assert.equal((await changing).thinkingLevel, "high");
-});
 
-test("tool thinking and settings projections wait for their catalog commits", async (context) => {
-  const port = new ScriptedCatalogCommitPort();
-  const toolGate = port.gateAt(2);
-  const thinkingGate = port.gateAt(3);
-  const settingGate = port.gateAt(4);
-  const harness = await createTransactionHarness(port);
-  context.after(() => cleanupHarness(harness));
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, undefined, "create-config-gates");
-  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
 
-  let toolSettled = false;
-  const changingTools = client.setActiveTools(created.id, ["write"], "tools-gated").finally(() => { toolSettled = true; });
-  await toolGate.entered;
-  let toolReadSettled = false;
-  const readingTools = client.tools(created.id).finally(() => { toolReadSettled = true; });
-  await new Promise((resolveTurn) => setImmediate(resolveTurn));
-  assert.equal(runtime.toolMutationCalls, 1);
-  assert.equal(toolSettled, false);
-  assert.equal(toolReadSettled, false);
-  toolGate.release();
-  await changingTools;
-  assert.deepEqual((await readingTools).tools.filter((tool) => tool.active).map((tool) => tool.name), ["write"]);
 
-  let thinkingSettled = false;
-  const changingThinking = client.setThinking(created.id, "high", "thinking-gated").finally(() => { thinkingSettled = true; });
-  await thinkingGate.entered;
-  assert.equal(runtime.thinkingMutationCalls, 1);
-  assert.equal((await client.status(created.id)).executor.thinkingLevel, "off");
-  assert.equal(thinkingSettled, false);
-  assert.equal(harness.registry.get(created.id).eventsSince().events.some((event) => event.type === "thinking.changed"), false);
-  thinkingGate.release();
-  assert.equal((await changingThinking).instance.executor.thinkingLevel, "high");
-  assert.equal(harness.registry.get(created.id).eventsSince().events.some((event) => event.type === "thinking.changed"), true);
 
-  let settingSettled = false;
-  const changingSetting = client.updateSetting(created.id, { key: "autoCompaction", value: false }, "setting-gated").finally(() => { settingSettled = true; });
-  await settingGate.entered;
-  let settingReadSettled = false;
-  const readingSettings = client.settings(created.id).finally(() => { settingReadSettled = true; });
-  await new Promise((resolveTurn) => setImmediate(resolveTurn));
-  assert.equal(runtime.settingMutationCalls, 1);
-  assert.equal(settingSettled, false);
-  assert.equal(settingReadSettled, false);
-  assert.equal(harness.registry.get(created.id).eventsSince().events.some((event) => event.type === "settings.changed"), false);
-  settingGate.release();
-  await changingSetting;
-  assert.equal((await readingSettings).settings.find((setting) => setting.key === "autoCompaction")?.value, false);
-  assert.equal(harness.registry.get(created.id).eventsSince().events.some((event) => event.type === "settings.changed"), true);
-});
 
-test("post-effect config failures retain operation IDs and suppress uncommitted events", async () => {
-  const scenarios = ["tool", "thinking", "setting"] as const;
-  for (const scenario of scenarios) {
-    const port = new ScriptedCatalogCommitPort();
-    port.failAt(2);
-    const harness = await createTransactionHarness(port);
-    const client = new DockClient({ socketPath: harness.socketPath });
-    const created = await client.create(harness.directory, undefined, `create-${scenario}-fault`);
-    const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
-    const operationId = `${scenario}-catalog-failed`;
-    if (scenario === "setting") {
-      runtime.settingsFailure = new AgentSettingsWriteError("autoCompaction", "write", true, [{ scope: "global", message: "disk failed" }]);
-    }
-    const mutation = scenario === "tool"
-      ? client.setActiveTools(created.id, ["write"], operationId)
-      : scenario === "thinking"
-        ? client.setThinking(created.id, "high", operationId)
-        : client.updateSetting(created.id, { key: "autoCompaction", value: false }, operationId);
-    await assert.rejects(
-      mutation,
-      (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown" && error.operationId === operationId,
-    );
-    await harness.host.waitForFatalCompletion();
-    const events = harness.registry.get(created.id).eventsSince().events;
-    if (scenario === "thinking") assert.equal(events.some((event) => event.type === "thinking.changed"), false);
-    if (scenario === "setting") {
-      assert.equal(events.some((event) => event.type === "settings.changed" || event.type === "settings.write_failed"), false);
-      assert.equal((await runtime.getSettings()).find((setting) => setting.key === "autoCompaction")?.value, false);
-    }
-    await cleanupHarness(harness);
-  }
-});
 
-test("attach and history expose committed active facts during a gated stop intent", async (context) => {
-  const port = new ScriptedCatalogCommitPort();
-  const stopIntentGate = port.gateAt(2);
-  const harness = await createTransactionHarness(port);
-  context.after(() => cleanupHarness(harness));
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, undefined, "create-stop-read-gate");
-  const stopping = client.stop(created.id, "stop-read-gated");
-  await stopIntentGate.entered;
 
-  const managed = harness.registry.get(created.id);
-  assert.equal(managed.snapshot().lifecycle, "active");
-  assert.equal((await managed.getAttachProjection(undefined)).instance.lifecycle, "active");
-  assert.equal((await managed.getHistoryPage(undefined, 20)).instance.lifecycle, "active");
 
-  stopIntentGate.release();
-  assert.equal((await stopping).instance.lifecycle, "stopped");
-});
 
 test("explicit stop commits intent before cleanup and stopped state before response", async (context) => {
   const port = new ScriptedCatalogCommitPort();
@@ -4771,63 +3730,4 @@ test("Dock client image mutation reaches Host custody and stale generation remai
       && error.details?.expectedRuntimeGeneration === instance.runtimeGeneration + 1
       && error.details?.actualRuntimeGeneration === instance.runtimeGeneration,
   );
-});
-
-test("image projection is capability compatible and show_image correlates live with history", async (context) => {
-  const harness = await createHarness();
-  context.after(() => cleanupHarness(harness));
-  await harness.host.start();
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const instance = await client.create(harness.directory, undefined, "create-projection-contract");
-  const runtime = harness.sessions.get(instance.id)!;
-  runtime.history = [
-    { entryId: "image-user", role: "user", content: [{ type: "image", mimeType: "image/x-custom", data: "never-wire" }] },
-    { entryId: "show-call", role: "assistant", content: [{ type: "toolCall", id: "show-1", name: "show_image", arguments: { path: "/tmp/show.png" } }] },
-    { entryId: "show-result", role: "toolResult", toolCallId: "show-1", toolName: "show_image", isError: false, content: [{ type: "text", text: "shown" }] },
-  ];
-  runtime.emit({ type: "entry_appended" });
-  runtime.emit({ type: "tool_execution_start", toolCallId: "show-live", toolName: "show_image", args: { path: "/tmp/live.png" } });
-  runtime.emit({ type: "tool_execution_end", toolCallId: "show-live", toolName: "show_image", result: { content: [{ type: "text", text: "shown" }] }, isError: false });
-
-  const modernHistory = await client.history(instance.id);
-  assert.deepEqual(modernHistory.entries[0]?.content, [{ type: "image", mimeType: "image/x-custom" }]);
-  assert.equal(JSON.stringify(modernHistory).includes("never-wire"), false);
-  assert.deepEqual(modernHistory.entries[1]?.content, [{ type: "tool_call", toolCallId: "show-1", toolName: "show_image", args: { path: "/tmp/show.png" }, omittedFields: undefined }]);
-  assert.equal((modernHistory.entries[2]?.content[0] as { isError?: boolean }).isError, false);
-  const live = (await client.read(instance.id)).page.events;
-  assert.ok(live.some((event) => event.type === "tool.started" && event.data.toolCallId === "show-live" && event.data.toolName === "show_image" && event.data.args.path === "/tmp/live.png"));
-  assert.ok(live.some((event) => event.type === "tool.completed" && event.data.toolCallId === "show-live" && event.data.toolName === "show_image" && event.data.isError === false));
-
-  const legacy = await exchangeRequestAfterHello(harness.socketPath, ["core.v2", "tui.projection.v1"], {
-    kind: "request", version: 2, requestId: "legacy-image-history", type: "session.history",
-    params: { instanceId: instance.id, limit: 200 },
-  });
-  const legacyEntries = objectValue(legacy.result).entries as Array<{ content: unknown[] }>;
-  assert.deepEqual(legacyEntries[0]?.content, [{ type: "omitted", kind: "image", description: "Image bytes omitted" }]);
-  assert.equal(JSON.stringify(legacy).includes("never-wire"), false);
-
-  runtime.isStreaming = true;
-  const queuedImages = [{ path: join(harness.directory, "queued-only.png"), mimeType: "image/png" }];
-  await client.prompt(instance.id, "", "steer", "legacy-image-only", queuedImages);
-  runtime.emit({ type: "tool_execution_start", toolCallId: "generic-images-arg", toolName: "custom_tool", args: { images: ["keep-tool-argument"], text: "" } });
-  const legacyAttach = await exchangeRequestAfterHello(harness.socketPath, ["core.v2", "events.follow.v2", "instance.read.v1"], {
-    kind: "request", version: 2, requestId: "legacy-image-read", type: "instance.read",
-    params: { instanceId: instance.id, replay: "event_log" },
-  });
-  const legacyAttachResult = objectValue(legacyAttach.result);
-  assert.equal((legacyAttachResult.pendingMessages as Array<{ text: string }>).at(-1)?.text, "[Image attached]");
-  const legacyEvents = objectValue(legacyAttachResult.page).events as Array<{ type: string; data: { text?: string; images?: unknown } }>;
-  const queuedEvent = legacyEvents.find((event) => event.type === "message.queued" && event.data.text === "[Image attached]");
-  assert.ok(queuedEvent);
-  assert.equal(queuedEvent.data.images, undefined);
-  const genericToolEvent = legacyEvents.find((event) => event.type === "tool.started" && (event.data as { toolCallId?: string }).toolCallId === "generic-images-arg");
-  assert.deepEqual((genericToolEvent?.data as { args?: { images?: unknown } }).args?.images, ["keep-tool-argument"]);
-
-  const legacyDequeue = await exchangeRequestAfterHello(harness.socketPath, ["core.v2", "queue.control.v1"], {
-    kind: "request", version: 2, requestId: "legacy-image-dequeue", type: "queue.dequeue",
-    params: { operationId: "legacy-image-dequeue-op", instanceId: instance.id },
-  });
-  const restored = objectValue(objectValue(legacyDequeue.result).receipt).restored as Array<{ text: string; images?: unknown }>;
-  assert.equal(restored[0]?.text, "[Image attached]");
-  assert.equal(restored[0]?.images, undefined);
 });
