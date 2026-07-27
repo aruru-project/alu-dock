@@ -2723,20 +2723,25 @@ export class ManagedInstance {
     const kind = options.kind ?? "general";
     this.catalogPort?.assertWritable();
     this.assertActive();
-    const controlMutationPending = this.configurationPending
-      || this.commandAbortPending
-      || this.queueMutationPending
-      || this.pendingAdmission !== undefined
-      || this.compactionActive;
-    const queuedWorkPending = this.pendingQueueMessages.length > 0
-      || this.inFlightQueueMessages.length > 0
-      || this.state.pendingSteering + this.state.pendingFollowUp > 0;
-    const activeRun = this.state.execution === "running" || this.agentState().isStreaming;
-    if (
-      controlMutationPending
-      || (admission !== "live" && queuedWorkPending)
-      || (admission === "idle" && activeRun)
-    ) {
+    const agentState = this.agentState();
+    const blockers: string[] = [];
+    if (this.configurationPending) blockers.push(`configurationPending:${this.configurationKind ?? "unknown"}`);
+    if (this.commandAbortPending) blockers.push("commandAbortPending");
+    if (this.queueMutationPending) blockers.push("queueMutationPending");
+    if (this.pendingAdmission !== undefined) blockers.push(`pendingAdmission:waitBeforeStop=${this.pendingAdmission.waitBeforeStop}`);
+    if (this.compactionActive) blockers.push("compactionActive");
+    if (admission !== "live") {
+      if (this.pendingQueueMessages.length > 0) blockers.push(`pendingQueueMessages=${this.pendingQueueMessages.length}`);
+      if (this.inFlightQueueMessages.length > 0) blockers.push(`inFlightQueueMessages=${this.inFlightQueueMessages.length}`);
+      if (this.state.pendingSteering > 0) blockers.push(`pendingSteering=${this.state.pendingSteering}`);
+      if (this.state.pendingFollowUp > 0) blockers.push(`pendingFollowUp=${this.state.pendingFollowUp}`);
+    }
+    if (admission === "idle") {
+      if (this.state.execution === "running") blockers.push("execution=running");
+      if (agentState.isStreaming) blockers.push("agentState.isStreaming=true");
+    }
+    if (blockers.length > 0) {
+      console.error(`[alu-dock instance_busy] instance=${this.id} generation=${this.runtimeGenerationValue} action=${JSON.stringify(action)} admission=${admission} blockers=${blockers.join(",")}`);
       throw new InstanceBusyError(this.id, action);
     }
     this.configurationPending = true;
