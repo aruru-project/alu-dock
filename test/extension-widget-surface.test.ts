@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { visibleWidth } from "@earendil-works/pi-tui";
 import type { DockEvent } from "../src/core/instance-dto.js";
 import { ExtensionWidgetSurface } from "../src/tui/extension-widget-surface.js";
 
@@ -43,4 +44,17 @@ test("extension widget surface mounts keyed widgets at the requested placement",
   above.apply(cleared);
   below.apply(cleared);
   assert.deepEqual(below.render(80), []);
+});
+
+test("extension widget surface clamps stale Worker lines after a live terminal shrink", () => {
+  let reportedWidth = 0;
+  const surface = new ExtensionWidgetSurface("aboveEditor", (width) => { reportedWidth = width; });
+  surface.apply(widgetEvent(1, "async-jobs", [
+    ` async subagent parallel · background${" ".repeat(283)}`,
+    ` ◦ parallel · 0/1 done · 0ms${" ".repeat(292)}`,
+  ], "aboveEditor"));
+
+  const narrowed = surface.render(252);
+  assert.equal(reportedWidth, 252);
+  assert.deepEqual(narrowed.map(visibleWidth), [252, 252]);
 });

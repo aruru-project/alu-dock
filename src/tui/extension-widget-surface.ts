@@ -1,4 +1,4 @@
-import type { Component } from "@earendil-works/pi-tui";
+import { truncateToWidth, type Component } from "@earendil-works/pi-tui";
 
 import type { DockEvent } from "../core/instance-dto.js";
 
@@ -29,7 +29,10 @@ export class ExtensionWidgetSurface implements Component {
   invalidate(): void {}
 
   render(width: number): string[] {
-    this.reportViewport(Math.max(1, width));
-    return [...this.widgets.values()].flatMap((lines) => lines);
+    const safeWidth = Math.max(1, width);
+    this.reportViewport(safeWidth);
+    return [...this.widgets.values()].flatMap((lines) => (
+      lines.map((line) => truncateToWidth(line, safeWidth))
+    ));
   }
 }
