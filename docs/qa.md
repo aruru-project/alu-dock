@@ -70,7 +70,7 @@ git diff --check
 
 ### Protocol 与 Host
 
-验证真实 Protocol V2 hello、request/response、attach/event、mutation identity 和 reconnect，不绕过 Host 直接调用内部对象来证明客户端流程。
+验证真实 Protocol V2 hello、request/response、`instance.read`、`instance.follow`、`interaction.control` 接手、mutation identity 和 reconnect，不绕过 Host 直接调用内部对象来证明客户端流程。
 
 ### Worker 与 Agent adapter
 

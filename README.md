@@ -19,10 +19,10 @@ Hub / Work / Web / future clients
 ## 当前能力
 
 - 长期 Host 与 durable instance catalog；
-- instance 创建、继续、attach、停止、reopen、adopt、forget；
+- instance 创建、继续、打开、停止、reopen、adopt、forget；
 - 多个相互隔离的 Agent Worker；
 - Session Work TUI 的 conversation、tools、Queue、model、settings、tree、compaction 和 Extension UI；
-- Protocol V2 的 snapshot、event follow、cursor reconnect 和 mutation operation identity；
+- Protocol V2 的权威读取、实时跟随、断线恢复和操作去重；
 - Rails/Web 后端可使用的本机 Unix socket 接口；
 - 显式 `systemd --user` service 管理。
 

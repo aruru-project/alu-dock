@@ -60,7 +60,7 @@ Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 
 - Agent 原生 session identity：当前 Worker 内的会话；
 - `runtimeGeneration`：instance 内一次 runtime/session generation；
 - `operationId`：一次调用者 mutation 意图；
-- event cursor：一次 attach/reconnect 的观察位置。
+- event cursor：一次 read/follow reconnect 的观察位置。
 
 客户端不能用 name、cwd、Agent session ID 或文件路径代替 Dock instance identity。
 
