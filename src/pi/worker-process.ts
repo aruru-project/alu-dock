@@ -87,13 +87,17 @@ export class PiWorkerProcess {
     // The direct Worker may already have exited while extension descendants
     // remain in its detached process group. Always signal and verify the group.
     signalGroup(pid, child, "SIGTERM");
-    const termClosed = await waitForClose(child, this.timeouts.termMs).then(() => true, () => false);
-    const termGroupGone = await waitForGroupGone(pid, this.timeouts.termMs).then(() => true, () => false);
-    if (termClosed && termGroupGone) return;
+    const [termExited, termGroupGone] = await Promise.all([
+      waitForExit(child, this.timeouts.termMs).then(() => true, () => false),
+      waitForGroupGone(pid, this.timeouts.termMs).then(() => true, () => false),
+    ]);
+    if (termExited && termGroupGone) return;
 
     signalGroup(pid, child, "SIGKILL");
-    await waitForClose(child, this.timeouts.termMs);
-    await waitForGroupGone(pid, this.timeouts.termMs);
+    await Promise.all([
+      waitForExit(child, this.timeouts.termMs),
+      waitForGroupGone(pid, this.timeouts.termMs),
+    ]);
   }
 }
 
@@ -119,7 +123,7 @@ function processGroupExists(pid: number): boolean {
   }
 }
 
-function waitForClose(child: ChildProcess, timeoutMs: number): Promise<void> {
+function waitForExit(child: ChildProcess, timeoutMs: number): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
   return new Promise<void>((resolve, reject) => {
     const done = (): void => { cleanup(); resolve(); };
@@ -127,8 +131,15 @@ function waitForClose(child: ChildProcess, timeoutMs: number): Promise<void> {
       cleanup();
       reject(new Error("Pi worker did not exit before the process deadline"));
     }, timeoutMs);
-    const cleanup = (): void => { clearTimeout(timer); child.off("close", done); };
-    // Register before rechecking exitCode to close the check/listen race.
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      child.off("exit", done);
+      child.off("close", done);
+    };
+    // `close` may never follow `exit` when the IPC channel is disconnected and
+    // stderr is inherited. Process ownership is released at `exit`; group
+    // verification below independently proves that descendants are gone.
+    child.once("exit", done);
     child.once("close", done);
     if (child.exitCode !== null || child.signalCode !== null) queueMicrotask(done);
   });
