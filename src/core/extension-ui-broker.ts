@@ -14,9 +14,7 @@ export interface ExtensionDialogOptions {
   timeout?: number;
 }
 
-export type ControllerClaim =
-  | { status: "acquired"; leaseToken: string; controllerId: string }
-  | { status: "unavailable" };
+export interface ControllerClaim { status: "acquired"; leaseToken: string; controllerId: string }
 
 export interface InteractionResult {
   interactionId: string;
@@ -75,10 +73,12 @@ type DialogInput =
   | { method: "input"; title: string; placeholder?: string }
   | { method: "editor"; title: string; prefill?: string };
 
+type PendingInteractionRequest = Omit<EventDataMap["interaction.requested"], "controllerId">;
+
 interface PendingDialog {
   id: string;
   method: DialogMethod;
-  request: EventDataMap["interaction.requested"];
+  request: PendingInteractionRequest;
   defaultValue: DialogValue;
   resolve: (value: DialogValue) => void;
   reject: (error: Error) => void;
@@ -182,7 +182,7 @@ export class ExtensionUiBroker {
 
   claimController(): Promise<ControllerClaim> {
     return this.serialize(async () => {
-      if (this.suspended || this.controller) return { status: "unavailable" };
+      if (this.suspended) throw new Error("Extension UI is changing sessions");
       const token = this.createId();
       let controllerId = this.createId();
       while (controllerId === token) controllerId = this.createId();
@@ -192,8 +192,9 @@ export class ExtensionUiBroker {
         generation: this.generation(),
       };
       this.controller = lease;
+      this.widgetViewport = undefined;
       this.projectionChanged();
-      if (this.active) await this.emit("interaction.requested", this.active.request);
+      if (this.active) await this.emitInteractionRequest(this.active.request);
       else await this.activateNextDialog();
       return { status: "acquired", leaseToken: lease.token, controllerId: lease.controllerId };
     });
@@ -296,7 +297,7 @@ export class ExtensionUiBroker {
     let projectedChars = safeTitle.length;
     for (const original of options) {
       if (typeof original !== "string" || original.length > MAX_TEXT_CHARS) {
-        const message = "Extension select options must be bounded strings";
+        const message = "Extension select options are too large";
         this.recordError(message);
         return Promise.reject(new ExtensionUiRequestError(message));
       }
@@ -308,7 +309,7 @@ export class ExtensionUiBroker {
       }
       projectedChars += wire.length;
       if (projectedChars > MAX_EDITOR_CHARS) {
-        const message = "Extension select payload exceeds the bounded interaction surface";
+        const message = "Extension select content is too large";
         this.recordError(message);
         return Promise.reject(new ExtensionUiRequestError(message));
       }
@@ -431,7 +432,7 @@ export class ExtensionUiBroker {
       return;
     }
     if (!Array.isArray(lines) || lines.length > MAX_LINES) {
-      this.recordError("Extension widget lines exceed the bounded declarative surface");
+      this.recordError("Extension widget has too many lines");
       return;
     }
     if (!this.widgets.has(safeKey) && this.widgets.size >= MAX_WIDGET_KEYS) {
@@ -440,7 +441,7 @@ export class ExtensionUiBroker {
     }
     const projected = lines.map((line) => safeLine(line, MAX_TEXT_CHARS));
     if (projected.reduce((total, line) => total + line.length, 0) > MAX_EDITOR_CHARS) {
-      this.recordError("Extension widget payload exceeds the bounded declarative surface");
+      this.recordError("Extension widget content is too large");
       return;
     }
     const actualPlacement = placement === "belowEditor" ? "belowEditor" : "aboveEditor";
@@ -513,7 +514,7 @@ export class ExtensionUiBroker {
       interactionId,
       issuedAt: new Date(issuedAtMs).toISOString(),
       ...(expiresAtMs === undefined ? {} : { expiresAt: new Date(expiresAtMs).toISOString() }),
-    } as EventDataMap["interaction.requested"];
+    } as PendingInteractionRequest;
 
     let resolveDialog!: (value: DialogValue) => void;
     let rejectDialog!: (error: Error) => void;
@@ -580,7 +581,7 @@ export class ExtensionUiBroker {
       }
       this.active = dialog;
       this.projectionChanged();
-      await this.emit("interaction.requested", dialog.request);
+      await this.emitInteractionRequest(dialog.request);
       return;
     }
   }
@@ -723,6 +724,15 @@ export class ExtensionUiBroker {
     void this.emit("extension.error", { error: safeLine(error, MAX_TITLE_CHARS) });
   }
 
+  private emitInteractionRequest(request: PendingInteractionRequest): Promise<void> {
+    const controller = this.controller;
+    if (!controller) return Promise.resolve();
+    return this.emit("interaction.requested", {
+      ...request,
+      controllerId: controller.controllerId,
+    } as EventDataMap["interaction.requested"]);
+  }
+
   private emitControllerDirective<T extends "extension.title_set" | "extension.editor_text_set">(
     type: T,
     data: EventDataMap[T],
@@ -766,7 +776,7 @@ export class InteractionExpiredError extends Error {
 }
 export class InteractionWrongLeaseError extends Error {
   readonly code = "interaction_wrong_lease";
-  constructor(readonly interactionId: string) { super(`Interaction ${interactionId} belongs to another controller lease`); this.name = "InteractionWrongLeaseError"; }
+  constructor(readonly interactionId: string) { super("This question is now being handled in another open window"); this.name = "InteractionWrongLeaseError"; }
 }
 export class InteractionInvalidResponseError extends Error {
   readonly code = "interaction_invalid_response";

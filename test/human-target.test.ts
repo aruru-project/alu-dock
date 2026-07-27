@@ -50,8 +50,8 @@ test("Hub keeps a stable game-style root menu and separates current work from Hi
   const entries = buildDockHubEntries([activeOther, stopped, recoverable], [], "/project", undefined, 0, false, false);
   assert.deepEqual(entries.map((entry) => entry.label), ["New", "Continue · 2", "History · 1", "Pi Sessions", "Leave Hub"]);
   assert.doesNotMatch(JSON.stringify(entries), /recover|old|other/u, "root menu must not flatten catalog records");
-  assert.equal(instanceActionSummary(recoverable), "Reopen or Forget");
-  assert.doesNotMatch(instanceActionSummary(recoverable), /Attach/u);
+  assert.equal(instanceActionSummary(recoverable), "Recover or Forget");
+  assert.doesNotMatch(instanceActionSummary(recoverable), /Attach|Reopen/u);
   assert.equal(instanceActionSummary(stopped), "History record");
 });
 

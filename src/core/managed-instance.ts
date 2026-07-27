@@ -302,7 +302,7 @@ export class InstanceBusyError extends Error {
 
 export class StaleRuntimeGenerationError extends Error {
   constructor(readonly expected: number, readonly actual: number) {
-    super(`Runtime generation changed from expected ${expected} to ${actual}`);
+    super("This work changed while the request was being prepared; try again");
     this.name = "StaleRuntimeGenerationError";
   }
 }

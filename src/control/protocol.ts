@@ -78,6 +78,9 @@ export const TOOLS_EXPANDED_CAPABILITY = "extension_ui.tools-expanded.v1" as con
 export const EXTENSION_WIDGET_CAPABILITY = "extension_ui.widgets.v1" as const;
 export const CONTROLLER_DIRECTIVES_CAPABILITY = "extension_ui.controller-directives.v1" as const;
 export const PERSISTENT_INTERACTIONS_CAPABILITY = "extension_ui.persistent-interactions.v1" as const;
+export const INSTANCE_READ_CAPABILITY = "instance.read.v1" as const;
+export const EVENTS_FOLLOW_CAPABILITY = "events.follow.v2" as const;
+export const EXTENSION_UI_CONTROL_CAPABILITY = "extension_ui.control.v1" as const;
 export const GIT_BRANCH_CAPABILITY = "git.branch-footer.v1" as const;
 export const TOOL_RESULT_PRESENTATION_CAPABILITY = "tool-result-presentation.v1" as const;
 export const IMAGE_INPUT_CAPABILITY = "command.images.path.v1" as const;
@@ -90,8 +93,9 @@ export const IMPLEMENTED_CAPABILITIES = [
   CONVERSATION_CONTENT_CAPABILITY,
   "core.v2",
   IMAGE_INPUT_CAPABILITY,
-  "events.follow",
-  "events.replay-purpose.v1",
+  EVENTS_FOLLOW_CAPABILITY,
+  INSTANCE_READ_CAPABILITY,
+  EXTENSION_UI_CONTROL_CAPABILITY,
   TOOLS_EXPANDED_CAPABILITY,
   EXTENSION_WIDGET_CAPABILITY,
   CONTROLLER_DIRECTIVES_CAPABILITY,
@@ -165,7 +169,9 @@ export type ControlRequest =
   | Request<"instance.list", { selector: "actionable" | "all"; cursor?: InstanceListCursor; limit: number }>
   | Request<"instance.get_by_key", { key: string }>
   | Request<"instance.get", { instanceId: string }>
-  | Request<"instance.attach", { instanceId: string; since?: EventCursor; follow: boolean; controller: "claim" | "observe"; replay?: "event_log" | "conversation_bootstrap" }>
+  | Request<"instance.read", { instanceId: string; since?: EventCursor; replay: "event_log" | "conversation_bootstrap" }>
+  | Request<"instance.follow", { instanceId: string; since: EventCursor }>
+  | Request<"interaction.control", { instanceId: string }>
   | Request<"instance.stop", { operationId: string; instanceId: string }>
   | Request<"instance.forget", { operationId: string; instanceId: string }>
   | Request<"catalog.prune", { operationId: string; selector: "stopped" }>
@@ -224,16 +230,15 @@ export interface ListResult {
   page: { revision: number; total: number; hiddenStopped: number; nextCursor?: InstanceListCursor };
 }
 export interface StatusResult { instance: InstanceSnapshot }
-export interface AttachInitialDto {
+export interface InstanceReadResult {
   instance: InstanceSnapshot;
   page: EventPage & { epochChanged: boolean; generationChanged: boolean };
   recentHistory: HistoryEntryDto[];
   historyTruncated: boolean;
   pendingMessages: PendingMessageDto[];
-  controller: { status: "acquired"; leaseToken: string; controllerId: string } | { status: "observing" | "unavailable" };
-  following: boolean;
 }
-export type EventsResult = AttachInitialDto;
+export interface FollowResult { page: EventPage & { epochChanged: boolean; generationChanged: boolean } }
+export interface ExtensionUiControlResult { instanceId: string; runtimeGeneration: number; leaseToken: string; controllerId: string }
 export interface InteractionRespondResult { interactionId: string; state: "resolved" | "already_resolved" }
 export interface WidgetViewportResult { accepted: true }
 export interface ToolsExpandedResult { instance: InstanceSnapshot }
@@ -289,10 +294,13 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "extension.tools_expanded.set") return TOOLS_EXPANDED_CAPABILITY;
   if (type === "extension.widget_viewport.set") return EXTENSION_WIDGET_CAPABILITY;
   if (type === "interaction.respond") return "extension_ui.v1";
+  if (type === "interaction.control") return EXTENSION_UI_CONTROL_CAPABILITY;
   if (type === "instance.reopen") return "session.reopen";
   if (type === "instance.adopt") return "session.adopt.v1";
   if (type === "instance.ensure" || type === "instance.get_by_key") return INSTANCE_KEYS_CAPABILITY;
-  if (type.startsWith("instance.")) return type === "instance.attach" ? "events.follow" : "instance.catalog";
+  if (type === "instance.read") return INSTANCE_READ_CAPABILITY;
+  if (type === "instance.follow") return EVENTS_FOLLOW_CAPABILITY;
+  if (type.startsWith("instance.")) return "instance.catalog";
   if (type === "command.abort") return "run.abort.v1";
   if (type === "queue.dequeue") return "queue.control.v1";
   if (type === "session.history") return "tui.projection.v1";
@@ -309,7 +317,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
 export function requiredCapabilities(capability: Capability): string[] {
   return [...new Set<Capability>([
     "core.v2",
-    ...(capability === "events.replay-purpose.v1" ? ["events.follow" as const] : []),
+    ...(capability === EVENTS_FOLLOW_CAPABILITY ? [INSTANCE_READ_CAPABILITY] : []),
     ...(capabilityProjectsInstanceSnapshot(capability) ? [TOOLS_EXPANDED_CAPABILITY, GIT_BRANCH_CAPABILITY, INSTANCE_KEYS_CAPABILITY] : []),
     ...(capabilityProjectsToolResults(capability) ? [TOOL_RESULT_PRESENTATION_CAPABILITY] : []),
     capability,
@@ -317,8 +325,8 @@ export function requiredCapabilities(capability: Capability): string[] {
 }
 
 function capabilityProjectsToolResults(capability: Capability): boolean {
-  return capability === "events.follow"
-    || capability === "events.replay-purpose.v1"
+  return capability === EVENTS_FOLLOW_CAPABILITY
+    || capability === INSTANCE_READ_CAPABILITY
     || capability === "tui.projection.v1"
     || capability === TOOL_RESULT_PRESENTATION_CAPABILITY;
 }
@@ -328,8 +336,8 @@ function capabilityProjectsInstanceSnapshot(capability: Capability): boolean {
     || capability === GIT_BRANCH_CAPABILITY
     || capability === INSTANCE_KEYS_CAPABILITY
     || capability === CONVERSATION_CONTENT_CAPABILITY
-    || capability === "events.follow"
-    || capability === "events.replay-purpose.v1"
+    || capability === EVENTS_FOLLOW_CAPABILITY
+    || capability === INSTANCE_READ_CAPABILITY
     || capability === "instance.catalog"
     || capability === "models.v1"
     || capability === "queue.control.v1"
@@ -483,16 +491,18 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { key } };
     }
     case "instance.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
-    case "instance.attach": {
-      exact(params, ["instanceId", "since", "follow", "controller", "replay"], "invalid_request");
-      const follow = boolean(params.follow, "params.follow", "invalid_request");
-      const controller = enumeration(params.controller, "params.controller", ["claim", "observe"], "invalid_request");
-      const replay = params.replay === undefined ? undefined : enumeration(params.replay, "params.replay", ["event_log", "conversation_bootstrap"], "invalid_request");
+    case "instance.read": {
+      exact(params, ["instanceId", "since", "replay"], "invalid_request");
+      const replay = enumeration(params.replay, "params.replay", ["event_log", "conversation_bootstrap"], "invalid_request");
       const since = params.since === undefined ? undefined : parseCursor(params.since, "params.since", "invalid_request");
-      if (controller === "claim" && !follow) throw validation("invalid_request", "controller claim requires a follow attach stream");
-      if (replay === "conversation_bootstrap" && (since !== undefined || !follow)) throw validation("invalid_request", "conversation bootstrap requires a fresh follow stream without a cursor");
-      return { ...base, type, params: { instanceId: instanceId(), since, follow, controller, ...(replay === undefined ? {} : { replay }) } };
+      if (replay === "conversation_bootstrap" && since !== undefined) throw validation("invalid_request", "conversation bootstrap requires a fresh read");
+      return { ...base, type, params: { instanceId: instanceId(), since, replay } };
     }
+    case "instance.follow": {
+      exact(params, ["instanceId", "since"], "invalid_request");
+      return { ...base, type, params: { instanceId: instanceId(), since: parseCursor(params.since, "params.since", "invalid_request") } };
+    }
+    case "interaction.control": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "instance.stop": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "instance.forget": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "catalog.prune": exact(params, ["operationId", "selector"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), selector: enumeration(params.selector, "params.selector", ["stopped"], "invalid_request") } };
@@ -713,20 +723,11 @@ export function parseListResult(input: unknown): ListResult {
   return { instances, page: { revision, total, hiddenStopped, nextCursor } };
 }
 export function parseStatusResult(input: unknown): StatusResult { const value = object(input, "get result"); exact(value, ["instance"]); return { instance: parseInstance(value.instance, "instance") }; }
-export function parseEventsResult(input: unknown): EventsResult {
-  const value = object(input, "attach result"); exact(value, ["instance", "page", "recentHistory", "historyTruncated", "pendingMessages", "controller", "following"]);
+export function parseInstanceReadResult(input: unknown): InstanceReadResult {
+  const value = object(input, "instance read result"); exact(value, ["instance", "page", "recentHistory", "historyTruncated", "pendingMessages"]);
   const instance = parseInstance(value.instance, "instance");
-  const page = object(value.page, "page"); exact(page, ["events", "earliest", "latest", "truncated", "epochChanged", "generationChanged"]);
-  const earliest = parseCursor(page.earliest, "page.earliest");
-  const latest = parseCursor(page.latest, "page.latest");
-  assertCursorDomain(earliest, instance, "page.earliest"); assertCursorDomain(latest, instance, "page.latest");
-  if (earliest.sequence > latest.sequence) throw validation("invalid_response", "page.earliest cannot follow page.latest");
-  const events = array(page.events, "page.events", MAX_REPLAY_EVENTS).map((item, index) => parseDockEvent(item, `page.events[${index}]`));
-  let previous = -1;
-  for (const event of events) {
-    if (event.instanceId !== instance.id || event.runtimeGeneration !== instance.runtimeGeneration || event.sequence <= previous || event.sequence > latest.sequence) throw validation("invalid_response", "Replay event cursor domain/order is invalid");
-    previous = event.sequence;
-  }
+  const page = parseEventPage(value.page, instance.id, instance.runtimeGeneration);
+  assertCursorDomain(page.earliest, instance, "page.earliest"); assertCursorDomain(page.latest, instance, "page.latest");
   const history = array(value.recentHistory, "recentHistory", MAX_HISTORY_ITEMS).map((item, index) => parseHistoryEntry(item, `recentHistory[${index}]`));
   if (new Set(history.map((entry) => entry.entryId)).size !== history.length) throw validation("invalid_response", "recentHistory entry IDs must be unique");
   const pendingMessages = array(value.pendingMessages, "pendingMessages", MAX_PENDING_QUEUE_ITEMS).map((item, index) => parsePendingMessage(item, `pendingMessages[${index}]`));
@@ -735,14 +736,36 @@ export function parseEventsResult(input: unknown): EventsResult {
   if (pendingMessages.reduce((total, item) => total + imagePathCharacters(item.images), 0) > MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS) throw validation("invalid_response", "pendingMessages image descriptors exceed the aggregate queue limit");
   const firstFollowUp = pendingMessages.findIndex((item) => item.delivery === "followUp");
   if (firstFollowUp >= 0 && pendingMessages.slice(firstFollowUp).some((item) => item.delivery === "steer")) throw validation("invalid_response", "pendingMessages are not in consumption order");
-  const controller = object(value.controller, "controller");
-  const controllerStatus = enumeration(controller.status, "controller.status", ["acquired", "observing", "unavailable"]);
-  if (controllerStatus === "acquired") {
-    exact(controller, ["status", "leaseToken", "controllerId"]);
-    return { instance, page: { events, earliest, latest, truncated: boolean(page.truncated, "page.truncated"), epochChanged: boolean(page.epochChanged, "page.epochChanged"), generationChanged: boolean(page.generationChanged, "page.generationChanged") }, recentHistory: history, historyTruncated: boolean(value.historyTruncated, "historyTruncated"), pendingMessages, controller: { status: controllerStatus, leaseToken: id(controller.leaseToken, "controller.leaseToken"), controllerId: id(controller.controllerId, "controller.controllerId") }, following: boolean(value.following, "following") };
+  return { instance, page, recentHistory: history, historyTruncated: boolean(value.historyTruncated, "historyTruncated"), pendingMessages };
+}
+export function parseFollowResult(input: unknown): FollowResult {
+  const value = object(input, "follow result"); exact(value, ["page"]);
+  const rawPage = object(value.page, "page");
+  const earliest = parseCursor(rawPage.earliest, "page.earliest");
+  return { page: parseEventPage(value.page, earliest.instanceId, earliest.runtimeGeneration) };
+}
+export function parseExtensionUiControlResult(input: unknown): ExtensionUiControlResult {
+  const value = object(input, "extension UI operation result"); exact(value, ["instanceId", "runtimeGeneration", "leaseToken", "controllerId"]);
+  return {
+    instanceId: id(value.instanceId, "instanceId"),
+    runtimeGeneration: positive(value.runtimeGeneration, "runtimeGeneration"),
+    leaseToken: id(value.leaseToken, "leaseToken"),
+    controllerId: id(value.controllerId, "controllerId"),
+  };
+}
+function parseEventPage(input: unknown, instanceId: string, runtimeGeneration: number): FollowResult["page"] {
+  const page = object(input, "page"); exact(page, ["events", "earliest", "latest", "truncated", "epochChanged", "generationChanged"]);
+  const earliest = parseCursor(page.earliest, "page.earliest");
+  const latest = parseCursor(page.latest, "page.latest");
+  if (earliest.instanceId !== instanceId || latest.instanceId !== instanceId || earliest.runtimeGeneration !== runtimeGeneration || latest.runtimeGeneration !== runtimeGeneration || earliest.hostEpoch !== latest.hostEpoch) throw validation("invalid_response", "Update page belongs to another work state");
+  if (earliest.sequence > latest.sequence) throw validation("invalid_response", "page.earliest cannot follow page.latest");
+  const events = array(page.events, "page.events", MAX_REPLAY_EVENTS).map((item, index) => parseDockEvent(item, `page.events[${index}]`));
+  let previous = -1;
+  for (const event of events) {
+    if (event.instanceId !== instanceId || event.runtimeGeneration !== runtimeGeneration || event.sequence <= previous || event.sequence > latest.sequence) throw validation("invalid_response", "Saved updates are out of order or belong to another work state");
+    previous = event.sequence;
   }
-  exact(controller, ["status"]);
-  return { instance, page: { events, earliest, latest, truncated: boolean(page.truncated, "page.truncated"), epochChanged: boolean(page.epochChanged, "page.epochChanged"), generationChanged: boolean(page.generationChanged, "page.generationChanged") }, recentHistory: history, historyTruncated: boolean(value.historyTruncated, "historyTruncated"), pendingMessages, controller: { status: controllerStatus }, following: boolean(value.following, "following") };
+  return { events, earliest, latest, truncated: boolean(page.truncated, "page.truncated"), epochChanged: boolean(page.epochChanged, "page.epochChanged"), generationChanged: boolean(page.generationChanged, "page.generationChanged") };
 }
 export function parseInteractionRespondResult(input: unknown): InteractionRespondResult {
   const value = object(input, "interaction response result");
@@ -1478,15 +1501,16 @@ function parseInteractionResponse(input: unknown, field: string, code = "invalid
 
 function parseDialogRequest(data: Record<string, unknown>, field: string): EventDataMap["interaction.requested"] {
   const method = enumeration(data.method, `${field}.method`, ["select", "confirm", "input", "editor"]);
+  const controllerId = id(data.controllerId, `${field}.controllerId`);
   const interactionId = id(data.interactionId, `${field}.interactionId`);
   const title = payloadFreeString(data.title, `${field}.title`, MAX_MESSAGE);
   const issuedAt = timestamp(data.issuedAt, `${field}.issuedAt`);
   const expiresAt = data.expiresAt === undefined ? undefined : timestamp(data.expiresAt, `${field}.expiresAt`);
   const lifetime = expiresAt === undefined ? {} : { expiresAt };
-  if (method === "select") { exact(data, ["interactionId", "method", "title", "options", "issuedAt", "expiresAt"]); return { interactionId, method, title, options: payloadFreeStrings(data.options, `${field}.options`, 200, MAX_TEXT), issuedAt, ...lifetime }; }
-  if (method === "confirm") { exact(data, ["interactionId", "method", "title", "message", "issuedAt", "expiresAt"]); return { interactionId, method, title, message: payloadFreeString(data.message, `${field}.message`, MAX_TEXT), issuedAt, ...lifetime }; }
-  if (method === "input") { exact(data, ["interactionId", "method", "title", "placeholder", "issuedAt", "expiresAt"]); return { interactionId, method, title, ...(data.placeholder === undefined ? {} : { placeholder: payloadFreeString(data.placeholder, `${field}.placeholder`, MAX_TEXT) }), issuedAt, ...lifetime }; }
-  exact(data, ["interactionId", "method", "title", "prefill", "issuedAt", "expiresAt"]); return { interactionId, method, title, ...(data.prefill === undefined ? {} : { prefill: payloadFreeString(data.prefill, `${field}.prefill`, MAX_PROMPT_CHARS) }), issuedAt, ...lifetime };
+  if (method === "select") { exact(data, ["controllerId", "interactionId", "method", "title", "options", "issuedAt", "expiresAt"]); return { controllerId, interactionId, method, title, options: payloadFreeStrings(data.options, `${field}.options`, 200, MAX_TEXT), issuedAt, ...lifetime }; }
+  if (method === "confirm") { exact(data, ["controllerId", "interactionId", "method", "title", "message", "issuedAt", "expiresAt"]); return { controllerId, interactionId, method, title, message: payloadFreeString(data.message, `${field}.message`, MAX_TEXT), issuedAt, ...lifetime }; }
+  if (method === "input") { exact(data, ["controllerId", "interactionId", "method", "title", "placeholder", "issuedAt", "expiresAt"]); return { controllerId, interactionId, method, title, ...(data.placeholder === undefined ? {} : { placeholder: payloadFreeString(data.placeholder, `${field}.placeholder`, MAX_TEXT) }), issuedAt, ...lifetime }; }
+  exact(data, ["controllerId", "interactionId", "method", "title", "prefill", "issuedAt", "expiresAt"]); return { controllerId, interactionId, method, title, ...(data.prefill === undefined ? {} : { prefill: payloadFreeString(data.prefill, `${field}.prefill`, MAX_PROMPT_CHARS) }), issuedAt, ...lifetime };
 }
 
 function payloadFreeString(input: unknown, field: string, max: number, code = "invalid_response"): string {

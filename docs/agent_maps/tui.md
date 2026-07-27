@@ -22,11 +22,11 @@ Hub 使用 alternate screen；进入 Work 或离开前恢复 shell screen。Inst
 
 ## Session Work
 
-Work 的主要对象是一个已 attach 的 Dock instance。它负责：
+Work 的主要对象是一个已打开的 Dock instance。它负责：
 
 - conversation、thinking、tool、compaction 与 Agent activity 的显示；
 - prompt、Queue、model、settings、session/tree 与 Extension UI 的交互；
-- attach、event follow、cursor reconnect 与 controller lease；
+- 读取当前视图、跟随实时更新，以及独立恢复 Extension UI 操作连接；
 - editor、viewport、focus、搜索和本地 modal 状态。
 
 Work 使用可流动的 main buffer 和终端原生 scrollback/selection。Detach 只断开客户端，不停止 Host 中的 instance。
@@ -54,9 +54,9 @@ Extension component 在 Worker 运行。Work TUI 只实现 Dock 已定义的 int
 
 - 显示 Worker 提供的内容或 frame；
 - 把按键、viewport 和用户回答发回；
-- 根据 Host controller/generation 状态恢复或关闭界面。
+- 根据 Host 提供的当前操作者和会话状态恢复或关闭界面。
 
-Detach、reconnect 或暂时没有 controller 不等于用户拒绝。WebUI 是否实现同一 surface 与 Work TUI 无关。
+关闭窗口、重连或暂时不能操作不等于用户拒绝。新的操作入口接手时，旧 Work 仍继续显示实时更新和接受普通消息；等待中的 Extension UI 不会因此被取消。WebUI 是否实现同一 surface 与 Work TUI 无关。
 
 ## 视觉实现
 

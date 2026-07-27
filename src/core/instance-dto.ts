@@ -178,10 +178,10 @@ export interface EventDataMap {
   "settings.changed": SettingsChangedData;
   "settings.write_failed": { key: keyof SettingValueMap | "model" | "thinking"; error: string };
   "interaction.requested":
-    | { interactionId: string; method: "select"; title: string; options: string[]; issuedAt: string; expiresAt?: string }
-    | { interactionId: string; method: "confirm"; title: string; message: string; issuedAt: string; expiresAt?: string }
-    | { interactionId: string; method: "input"; title: string; placeholder?: string; issuedAt: string; expiresAt?: string }
-    | { interactionId: string; method: "editor"; title: string; prefill?: string; issuedAt: string; expiresAt?: string };
+    | { controllerId: string; interactionId: string; method: "select"; title: string; options: string[]; issuedAt: string; expiresAt?: string }
+    | { controllerId: string; interactionId: string; method: "confirm"; title: string; message: string; issuedAt: string; expiresAt?: string }
+    | { controllerId: string; interactionId: string; method: "input"; title: string; placeholder?: string; issuedAt: string; expiresAt?: string }
+    | { controllerId: string; interactionId: string; method: "editor"; title: string; prefill?: string; issuedAt: string; expiresAt?: string };
   "interaction.resolved": { interactionId: string; method: "select" | "confirm" | "input" | "editor" };
   "interaction.cancelled": { interactionId: string; method: "select" | "confirm" | "input" | "editor"; reason: "user" | "timeout" | "signal" | "detach" | "replacement" | "host_draining" | "overflow" };
   "extension.notification": { message: string; level: "info" | "warning" | "error" };

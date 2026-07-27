@@ -120,7 +120,7 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
 
   const ack = await exchangeOne(socketPath, { ...base, requestId: "hello-3", versions: [2], requiredCapabilities: ["core.v2"] });
   assert.equal(ack.kind, "hello_ack");
-  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "command.images.path.v1", "conversation.content.v1", "core.v2", "events.follow", "events.replay-purpose.v1", "extension_ui.controller-directives.v1", "extension_ui.persistent-interactions.v1", "extension_ui.tools-expanded.v1", "extension_ui.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "host.info", "instance.catalog", "instance.keys.v1", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tool-result-presentation.v1", "tools.v1", "tui.projection.v1"]);
+  assert.deepEqual(ack.capabilities, ["catalog.maintenance.v1", "catalog.v1", "command.images.path.v1", "conversation.content.v1", "core.v2", "events.follow.v2", "extension_ui.control.v1", "extension_ui.controller-directives.v1", "extension_ui.persistent-interactions.v1", "extension_ui.tools-expanded.v1", "extension_ui.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "host.info", "instance.catalog", "instance.keys.v1", "instance.read.v1", "models.v1", "projection.completeness.v1", "queue.control.v1", "resources.v1", "run.abort.v1", "service.managed.v1", "session.adopt.v1", "session.commands.v1", "session.core", "session.inventory-diagnostics.v1", "session.inventory.v1", "session.reopen", "session.tree.v1", "settings.v1", "tool-result-presentation.v1", "tools.v1", "tui.projection.v1"]);
   assert.equal(objectValue(ack.host).hostEpoch, "host-epoch-gate");
   assert.equal(objectValue(ack.limits).maxLineBytes, 1024 * 1024);
   assert.equal(factoryCalls, 0);
@@ -178,8 +178,8 @@ test("V2 hello rejects version and capability mismatch before side effects", asy
   assert.equal((await client.status(created.id)).gitBranch, "feature/live");
   const legacyAttach = await exchangeRequestAfterHello(
     socketPath,
-    ["core.v2", "events.follow"],
-    { kind: "request", version: 2, requestId: "legacy-attach", type: "instance.attach", params: { instanceId: created.id, follow: false, controller: "observe" } },
+    ["core.v2", "events.follow.v2"],
+    { kind: "request", version: 2, requestId: "legacy-read", type: "instance.read", params: { instanceId: created.id, replay: "event_log" } },
   );
   const legacyResult = objectValue(legacyAttach.result);
   assert.equal("toolsExpanded" in objectValue(legacyResult.instance), false);
@@ -310,7 +310,7 @@ test("session switch resolves target project trust before replacement effects", 
   assert.equal(runtime?.sessionMutationCalls.switch, 1);
 });
 
-test("extension UI lease preserves dialogs across detach and re-presents them to the next controller", async (context) => {
+test("Extension UI operation uses live latest takeover without closing observation", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-extension-ui-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
@@ -327,188 +327,87 @@ test("extension UI lease preserves dialogs across detach and re-presents them to
   const host = new DockHost({ socketPath, registry });
   context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
   await host.start();
-  const client = new DockClient({ socketPath });
-  const instance = await client.create(directory, "extension-ui");
-  const legacyClaim = await exchangeRequestAfterHello(socketPath, ["core.v2", "events.follow", "extension_ui.v1"], {
-    kind: "request",
-    version: 2,
-    requestId: "legacy-controller-claim",
-    type: "instance.attach",
-    params: { instanceId: instance.id, follow: true, controller: "claim" },
-  });
-  assert.equal(legacyClaim.ok, false);
-  assert.equal(objectValue(legacyClaim.error).code, "capability_missing");
-  const claimController = broker.claimController.bind(broker);
-  let injectClaimHandoff = true;
-  let replaceDuringClaim = false;
-  broker.claimController = async () => {
-    const claim = await claimController();
-    if (claim.status === "acquired" && replaceDuringClaim) {
-      replaceDuringClaim = false;
-      await registry.get(instance.id).newSession("attach-claim-generation-race");
-    }
-    if (claim.status === "acquired" && injectClaimHandoff) {
-      injectClaimHandoff = false;
-      broker.setTitle("claim-handoff title");
-      broker.setEditorText("claim-handoff draft");
-      await new Promise<void>((resolve) => setImmediate(resolve));
-    }
-    return claim;
-  };
-  const liveEvents: DockEvent[] = [];
-  let resolveRequested!: (event: Extract<DockEvent, { type: "interaction.requested" }>) => void;
-  let requestedPromise = new Promise<Extract<DockEvent, { type: "interaction.requested" }>>((resolve) => { resolveRequested = resolve; });
-  const controller = await client.streamEvents(instance.id, {
-    claimController: true,
+  const clientA = new DockClient({ socketPath });
+  const clientB = new DockClient({ socketPath });
+  const instance = await clientA.create(directory, "extension-ui");
+
+  const observedA: DockEvent[] = [];
+  const followerA = await clientA.streamEvents(instance.id, {
+    onEvent: (event) => { observedA.push(event); },
     requireTuiProjection: true,
-    onEvent: (event) => {
-      liveEvents.push(event);
-      if (event.type === "interaction.requested") resolveRequested(event);
-    },
   });
-  assert.equal(controller.initial.controller.status, "acquired");
-  if (controller.initial.controller.status !== "acquired") return;
-  const leaseToken = controller.initial.controller.leaseToken;
-  const controllerId = controller.initial.controller.controllerId;
-  assert.notEqual(leaseToken, controllerId);
-  assert.equal(controller.initial.page.events.some((event) => event.type === "extension.title_set"
-    && event.data.controllerId === controllerId
-    && event.data.title === "claim-handoff title"), true);
-  assert.equal(controller.initial.page.events.some((event) => event.type === "extension.editor_text_set"
-    && event.data.controllerId === controllerId
-    && event.data.text === "claim-handoff draft"), true);
-  assert.deepEqual(
-    await client.setExtensionWidgetViewport(instance.id, leaseToken, instance.runtimeGeneration, 96, 32),
-    { accepted: true },
+  const managed = registry.get(instance.id);
+  const isInteractionControllerCurrent = managed.isInteractionControllerCurrent.bind(managed);
+  let invalidateFirstClaim = true;
+  managed.isInteractionControllerCurrent = (leaseToken, runtimeGeneration) => {
+    if (invalidateFirstClaim) {
+      invalidateFirstClaim = false;
+      return false;
+    }
+    return isInteractionControllerCurrent(leaseToken, runtimeGeneration);
+  };
+  await assert.rejects(
+    clientA.controlExtensionUi(instance.id, () => {}),
+    (error: unknown) => error instanceof ControlClientError && error.code === "interaction_unavailable",
   );
+  const operationEventsA: DockEvent[] = [];
+  const operationA = await clientA.controlExtensionUi(instance.id, (event) => { operationEventsA.push(event); });
+  assert.notEqual(operationA.initial.leaseToken, operationA.initial.controllerId);
+  await clientA.setExtensionWidgetViewport(instance.id, operationA.initial.leaseToken, instance.runtimeGeneration, 96, 32);
   assert.deepEqual(widgetViewport, { width: 96, height: 32 });
-  await assert.rejects(
-    client.respondInteraction(instance.id, leaseToken, "not-sent", { method: "input", value: "A0+/".repeat(32) }, "semantic-text-response"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "interaction_not_found",
-  );
-  await assert.rejects(
-    client.respondInteraction(instance.id, leaseToken, "not-sent", { method: "editor", value: "x".repeat(256_001) }, "oversized-response"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_request",
-  );
 
-  const observerEvents: DockEvent[] = [];
-  const observer = await new DockClient({ socketPath }).streamEvents(instance.id, {
-    claimController: true,
-    onEvent: (event) => { observerEvents.push(event); },
-  });
-  assert.equal(observer.initial.controller.status, "unavailable");
-  broker.setTitle("Controller-only title");
-  broker.setEditorText("controller-only draft\nsecond line");
+  broker.setTitle("Operator A title");
+  broker.setEditorText("Operator A draft");
   const directiveDeadline = Date.now() + 2_000;
-  while (liveEvents.filter((event) => event.type === "extension.title_set" || event.type === "extension.editor_text_set").length < 2
+  while (operationEventsA.filter((event) => event.type === "extension.title_set" || event.type === "extension.editor_text_set").length < 2
     && Date.now() < directiveDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
-  assert.equal(liveEvents.some((event) => event.type === "extension.title_set"
-    && event.data.controllerId === controllerId
-    && event.data.title === "Controller-only title"), true);
-  assert.equal(liveEvents.some((event) => event.type === "extension.editor_text_set"
-    && event.data.controllerId === controllerId
-    && event.data.text === "controller-only draft\nsecond line"), true);
-  assert.equal(observerEvents.some((event) => event.type === "extension.title_set" || event.type === "extension.editor_text_set"), false);
-  const oldClientReplay = await client.events(instance.id);
-  assert.equal(oldClientReplay.page.events.some((event) => event.type === "extension.title_set" || event.type === "extension.editor_text_set"), false);
-  observer.close();
-  await observer.done;
+  assert.equal(operationEventsA.some((event) => event.type === "extension.title_set" && event.data.controllerId === operationA.initial.controllerId), true);
+  assert.equal(observedA.some((event) => event.type === "extension.title_set" || event.type === "extension.editor_text_set"), false);
+  assert.equal((await clientA.read(instance.id)).page.events.some((event) => event.type === "extension.title_set" || event.type === "extension.editor_text_set"), false);
 
-  const confirmed = broker.confirm("Delete?", "This cannot be undone");
-  const requested = await requestedPromise;
-  assert.equal(requested.data.method, "confirm");
+  const pending = broker.confirm("Delete?", "This cannot be undone");
+  const requestDeadline = Date.now() + 2_000;
+  while (!operationEventsA.some((event) => event.type === "interaction.requested") && Date.now() < requestDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  const requestA = operationEventsA.find((event): event is Extract<DockEvent, { type: "interaction.requested" }> => event.type === "interaction.requested");
+  assert.ok(requestA);
+  assert.equal(requestA.data.controllerId, operationA.initial.controllerId);
+  assert.equal(observedA.some((event) => event.type === "interaction.requested"), false);
+
+  const operationEventsB: DockEvent[] = [];
+  const operationB = await clientB.controlExtensionUi(instance.id, (event) => { operationEventsB.push(event); });
+  await operationA.done;
+  assert.notEqual(operationB.initial.leaseToken, operationA.initial.leaseToken);
+  assert.notEqual(operationB.initial.controllerId, operationA.initial.controllerId);
+  const takeoverDeadline = Date.now() + 2_000;
+  while (!operationEventsB.some((event) => event.type === "interaction.requested") && Date.now() < takeoverDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  const requestB = operationEventsB.find((event): event is Extract<DockEvent, { type: "interaction.requested" }> => event.type === "interaction.requested");
+  assert.ok(requestB);
+  assert.equal(requestB.data.interactionId, requestA.data.interactionId, "the same pending interaction survives takeover");
+  assert.equal(requestB.data.controllerId, operationB.initial.controllerId);
   await assert.rejects(
-    client.respondInteraction(instance.id, "wrong-lease", requested.data.interactionId, { method: "confirm", confirmed: true }),
+    clientA.respondInteraction(instance.id, operationA.initial.leaseToken, requestA.data.interactionId, { method: "confirm", confirmed: true }),
     (error: unknown) => error instanceof ControlClientError && error.code === "interaction_wrong_lease",
   );
   assert.deepEqual(
-    await client.respondInteraction(instance.id, leaseToken, requested.data.interactionId, { method: "confirm", confirmed: true }, "respond-1"),
-    { interactionId: requested.data.interactionId, state: "resolved" },
+    await clientB.respondInteraction(instance.id, operationB.initial.leaseToken, requestB.data.interactionId, { method: "confirm", confirmed: true }, "respond-after-takeover"),
+    { interactionId: requestB.data.interactionId, state: "resolved" },
   );
-  assert.equal(await confirmed, true);
-  assert.deepEqual(
-    await client.respondInteraction(instance.id, leaseToken, requested.data.interactionId, { method: "confirm", confirmed: true }, "respond-2"),
-    { interactionId: requested.data.interactionId, state: "already_resolved" },
+  assert.equal(await pending, true);
+
+  broker.notify("observation remains live");
+  const observationDeadline = Date.now() + 2_000;
+  while (!observedA.some((event) => event.type === "extension.notification" && event.data.message === "observation remains live")
+    && Date.now() < observationDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(observedA.some((event) => event.type === "interaction.resolved" && event.data.interactionId === requestA.data.interactionId), true);
+  assert.equal(observedA.some((event) => event.type === "extension.notification" && event.data.message === "observation remains live"), true, "A's follower remains open after B takes operation authority");
+
+  await assert.rejects(
+    clientB.respondInteraction(instance.id, operationB.initial.leaseToken, "not-sent", { method: "editor", value: "x".repeat(256_001) }, "oversized-response"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_request",
   );
-
-  requestedPromise = new Promise((resolve) => { resolveRequested = resolve; });
-  let inputSettled = false;
-  const input = broker.input("Name", "optional").then((value) => { inputSettled = true; return value; });
-  const inputRequest = await requestedPromise;
-  assert.equal(inputRequest.data.method, "input");
-  assert.equal(inputRequest.data.expiresAt, undefined);
-  controller.close();
-  await controller.done;
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(inputSettled, false);
-  broker.setTitle("dropped while detached");
-  broker.setEditorText("dropped while detached");
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  const replay = await client.events(instance.id);
-  assert.equal(replay.instance.activeInteraction?.id, inputRequest.data.interactionId);
-  assert.equal(replay.page.events.some((event) => event.type === "interaction.cancelled" && event.data.interactionId === inputRequest.data.interactionId), false);
-  assert.equal(replay.page.events.some((event) => event.type === "extension.title_set" || event.type === "extension.editor_text_set"), false);
-
-  const freshEvents: DockEvent[] = [];
-  const freshController = await client.streamEvents(instance.id, {
-    claimController: true,
-    requireTuiProjection: true,
-    conversationBootstrap: true,
-    onEvent: (event) => { freshEvents.push(event); },
-  });
-  assert.equal(freshController.initial.controller.status, "acquired");
-  if (freshController.initial.controller.status === "acquired") {
-    const freshLeaseToken = freshController.initial.controller.leaseToken;
-    const freshControllerId = freshController.initial.controller.controllerId;
-    assert.notEqual(freshControllerId, controllerId);
-    const rePresented = freshController.initial.page.events.find((event) => event.type === "interaction.requested" && event.data.interactionId === inputRequest.data.interactionId);
-    assert.equal(rePresented?.type, "interaction.requested");
-    assert.equal(rePresented?.data.method, "input");
-    assert.equal(rePresented?.data.expiresAt, undefined);
-    assert.equal(freshController.initial.page.events.some((event) => event.type === "extension.title_set" || event.type === "extension.editor_text_set"), false);
-    await client.respondInteraction(instance.id, freshLeaseToken, inputRequest.data.interactionId, { method: "input", value: "reattached value" }, "respond-after-reattach");
-    assert.equal(await input, "reattached value");
-    broker.setTitle("fresh controller title");
-    const freshDeadline = Date.now() + 2_000;
-    while (!freshEvents.some((event) => event.type === "extension.title_set")
-      && Date.now() < freshDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
-    assert.equal(freshEvents.some((event) => event.type === "extension.title_set"
-      && event.data.controllerId === freshControllerId
-      && event.data.title === "fresh controller title"), true);
-  }
-  freshController.close();
-  await freshController.done;
-
-  let detachedSettled = false;
-  const detachedConfirmation = broker.confirm("No controller", "wait for attach").then((value) => { detachedSettled = true; return value; });
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(detachedSettled, false);
-  const finalController = await client.streamEvents(instance.id, { claimController: true, onEvent: () => {} });
-  assert.equal(finalController.initial.controller.status, "acquired");
-  if (finalController.initial.controller.status === "acquired") {
-    const pendingInteractionId = finalController.initial.instance.activeInteraction?.id;
-    const pendingRequest = finalController.initial.page.events.find((event) => event.type === "interaction.requested"
-      && event.data.interactionId === pendingInteractionId);
-    assert.ok(pendingRequest && pendingRequest.type === "interaction.requested" && pendingRequest.data.method === "confirm");
-    await client.respondInteraction(instance.id, finalController.initial.controller.leaseToken, pendingRequest.data.interactionId, { method: "confirm", confirmed: true }, "respond-no-controller");
-    assert.equal(await detachedConfirmation, true);
-  }
-  finalController.close();
-  await finalController.done;
-
-  replaceDuringClaim = true;
-  const raceController = await client.streamEvents(instance.id, { claimController: true, onEvent: () => {} });
-  assert.equal(raceController.initial.instance.runtimeGeneration, 2);
-  assert.equal(raceController.initial.controller.status, "acquired");
-  if (raceController.initial.controller.status === "acquired") {
-    assert.equal(registry.get(instance.id).isInteractionControllerCurrent(
-      raceController.initial.controller.leaseToken,
-      raceController.initial.instance.runtimeGeneration,
-    ), true);
-  }
-  raceController.close();
-  await raceController.done;
-  assert.ok(liveEvents.some((event) => event.type === "interaction.resolved"));
+  operationB.close();
+  followerA.close();
+  await Promise.all([operationB.done, followerA.done]);
 
   const hostDrainInteraction = broker.confirm("Host drain", "Do not synthesize a denial.")
     .then((value) => ({ status: "resolved" as const, value }), (error: unknown) => ({ status: "rejected" as const, error }));
@@ -576,6 +475,16 @@ test("SSH TUI restores a pending extension interaction from a fresh attach boots
   await host.start();
   const client = new DockClient({ socketPath });
   const instance = await client.create(directory, "extension-fresh-attach");
+  const managed = registry.get(instance.id);
+  const claimInteractionController = managed.claimInteractionController.bind(managed);
+  let rejectFirstClaim = true;
+  managed.claimInteractionController = () => {
+    if (rejectFirstClaim) {
+      rejectFirstClaim = false;
+      return Promise.reject(new Error("fixture operation path interruption"));
+    }
+    return claimInteractionController();
+  };
   const confirmation = broker.confirm("Fresh attach confirm", "Restore this pending question.");
   await new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -784,26 +693,26 @@ test("two clients observe and replay one host-owned running instance", async (co
   assert.equal(listed[0]?.id, created.id);
   assert.equal((await clientB.status(created.id)).execution, "running");
 
-  const initial = await clientB.events(created.id);
+  const initial = await clientB.read(created.id);
   assert.ok(initial.page.events.some((event) => event.type === "command.accepted"));
   const cursor = initial.page.latest;
 
-  const oldEpoch = await clientB.events(created.id, { ...initial.page.latest, hostEpoch: "previous-host" });
+  const oldEpoch = await clientB.read(created.id, { ...initial.page.latest, hostEpoch: "previous-host" });
   assert.equal(oldEpoch.page.epochChanged, true);
   assert.equal(oldEpoch.page.generationChanged, false);
   assert.ok(oldEpoch.page.events.some((event) => event.type === "instance.created"));
 
-  const oldGeneration = await clientB.events(created.id, { ...initial.page.latest, runtimeGeneration: 99 });
+  const oldGeneration = await clientB.read(created.id, { ...initial.page.latest, runtimeGeneration: 99 });
   assert.equal(oldGeneration.page.epochChanged, false);
   assert.equal(oldGeneration.page.generationChanged, true);
   await assert.rejects(
-    clientB.events(created.id, { ...initial.page.latest, instanceId: "another-instance" }),
+    clientB.read(created.id, { ...initial.page.latest, instanceId: "another-instance" }),
     (error: unknown) => error instanceof ControlClientError && error.code === "invalid_cursor",
   );
 
   harness.sessions.get(created.id)?.settle("fake done");
   await harness.registry.get(created.id).waitForIdle();
-  const replay = await clientB.events(created.id, cursor);
+  const replay = await clientB.read(created.id, cursor);
   assert.ok(replay.page.events.some((event) => event.type === "run.settled"));
   assert.equal(replay.instance.lastRun, "succeeded");
 
@@ -847,7 +756,7 @@ test("two clients observe and replay one host-owned running instance", async (co
   for (let index = 0; index < 600; index += 1) {
     harness.registry.get(created.id).recordExtensionError("x".repeat(8_000));
   }
-  const boundedReplay = await clientB.events(created.id);
+  const boundedReplay = await clientB.read(created.id);
   assert.equal(boundedReplay.page.truncated, true);
   assert.ok(boundedReplay.page.events.length <= 500);
   assert.equal(boundedReplay.page.latest.sequence, harness.registry.get(created.id).snapshot().eventCursor.sequence);
@@ -880,7 +789,7 @@ test("attach applies the 1000-event replay cap before response byte trimming", a
   const created = await client.create(directory);
   for (let index = 0; index < 1_100; index += 1) registry.get(created.id).recordExtensionError(`e${index}`);
 
-  const replay = await client.events(created.id);
+  const replay = await client.read(created.id);
   assert.equal(replay.page.events.length, 1_000);
   assert.equal(replay.page.truncated, true);
   assert.equal(replay.page.earliest.sequence, replay.page.events[0]?.sequence);
@@ -1147,7 +1056,7 @@ test("Hub Continue opens current work and History continues a stopped saved sess
   assert.equal(continuePty.timedOut, false, continueOutput.slice(-2_000));
   assert.equal(continuePty.status, 0, continueOutput.slice(-2_000));
   assert.match(continueOutput, /Current Dock work/u);
-  assert.match(continueOutput, /Attach Session Work/u);
+  assert.match(continueOutput, /Open Work/u);
   assert.match(continueOutput, /cache /u);
   assert.doesNotMatch(continueOutput, /NIGHT CONSOLE/u);
   assert.equal((await continueClient.status(current.id)).lifecycle, "active");
@@ -1162,7 +1071,7 @@ test("Hub Continue opens current work and History continues a stopped saved sess
   assert.equal(mouseContinuePty.timedOut, false, mouseContinueOutput.slice(-2_000));
   assert.equal(mouseContinuePty.status, 0, mouseContinueOutput.slice(-2_000));
   assert.match(mouseContinueOutput, /Current Dock work/u);
-  assert.match(mouseContinueOutput, /Attach Session Work/u);
+  assert.match(mouseContinueOutput, /Open Work/u);
   assert.match(mouseContinueOutput, /cache /u);
   assertHubPresentation(mouseContinueOutput, "cache ");
 
@@ -1373,7 +1282,7 @@ test("SSH TUI keeps repeated no-run completion facts out of live and replayed co
   const status = await client.status(created.id);
   assert.equal(status.execution, "idle");
   assert.equal(status.lastRun, "never");
-  const events = (await client.events(created.id)).page.events;
+  const events = (await client.read(created.id)).page.events;
   assert.equal(events.filter((event) => event.type === "command.handled").length, 2);
   assert.equal(events.some((event) => event.type === "run.started"), false);
 });
@@ -1775,11 +1684,10 @@ test("SSH TUI recovers a dropped event stream from its accepted cursor without r
   const output = Buffer.from(pty.output, "base64").toString("utf8");
   assert.equal(pty.timedOut, false, output.slice(-3_000));
   assert.equal(pty.status, 0, output.slice(-3_000));
-  assert.match(output, /Event stream interrupted; checking/);
-  assert.match(output, /authoritative Host state\. No command was/);
-  assert.match(output, /Event stream reconnected; the instance/);
-  assert.match(output, /remained Host-owned \(active\/running\)/);
-  assert.match(output, /command was resent/);
+  assert.match(output, /Live updates were interrupted\. Checking/);
+  assert.match(output, /current work state; no command was/);
+  assert.match(output, /Live updates resumed; the work kept/);
+  assert.match(output, /running \(active\/running\)\. No command was/);
   assert.match(output, /Status: running/);
   assert.doesNotMatch(output, /Host connection lost/);
   assert.equal(runtime.promptCalls, promptCallsBeforeDrop);
@@ -1811,7 +1719,7 @@ test("SSH TUI blocks an already-open model picker when stream recovery has a rep
   const output = Buffer.from(pty.output, "base64").toString("utf8");
   assert.equal(pty.timedOut, false, output.slice(-4_000));
   assert.equal(pty.status, 0, output.slice(-4_000));
-  assert.match(output, /Event stream remains disconnected/);
+  assert.match(output, /Live updates are still unavailable/);
   assert.match(output, /Model update was not sent/);
   assert.doesNotMatch(output, /Model changed to fixture\/local/);
   assert.equal(runtime.modelMutationCalls, modelMutationsBeforeDrop);
@@ -1865,10 +1773,10 @@ test("SSH TUI reports true Host loss as unknown and never replays the running co
   const output = Buffer.from(pty.output, "base64").toString("utf8");
   assert.equal(pty.timedOut, false, output.slice(-2_000));
   assert.equal(pty.status, 0, output.slice(-2_000));
-  assert.match(output, /Control connection unavailable; this/);
-  assert.match(output, /instance's current status is unknown/);
-  assert.match(output, /No command was/);
-  assert.match(output, /replayed\./);
+  assert.match(output, /Alu Dock is unavailable, so this/);
+  assert.match(output, /current state is unknown/);
+  assert.match(output, /no command was/);
+  assert.match(output, /resent\./);
   assert.doesNotMatch(output, /Host connection lost/);
   assert.match(output, /Detached from pty-host-loss/);
   assert.match(output, /current Host ownership\/status is unknown and no stop is claimed/);
@@ -1977,7 +1885,7 @@ test("manual compaction aborts a running model command without stealing its run 
   const compacted = await client.compactSession(created.id, undefined, "manual-compact-op");
   assert.equal(compacted.instance.execution, "idle");
   assert.equal(compacted.instance.lastRun, "aborted");
-  const events = (await client.events(created.id)).page.events;
+  const events = (await client.read(created.id)).page.events;
   const settled = events.find((event) => event.type === "run.settled");
   assert.equal(settled?.type === "run.settled" ? settled.data.operationId : undefined, originalCommandId);
   assert.ok(events.some((event) => event.type === "compaction.completed" && event.data.operationId === "manual-compact-op"));
@@ -2387,7 +2295,7 @@ test("a reconnected client can start a fresh prompt on an idle instance", async 
   const cursor = accepted.instance.eventCursor;
   sessions.get(created.id)?.settle("finished");
   await registry.get(created.id).waitForIdle();
-  const replay = await new DockClient({ socketPath }).events(created.id, cursor);
+  const replay = await new DockClient({ socketPath }).read(created.id, cursor);
   assert.ok(replay.page.events.some((event) => event.type === "run.settled"));
   assert.equal(replay.instance.lastRun, "succeeded");
 });
@@ -2498,7 +2406,7 @@ test("a running instance applies live metadata and next-step configuration witho
     await assert.rejects(mutation, (error: unknown) => error instanceof ControlClientError && error.code === "instance_busy");
   }
 
-  const events = await client.events(created.id);
+  const events = await client.read(created.id);
   assert.ok(events.page.events.some((event) => event.type === "model.changed"));
   assert.ok(events.page.events.some((event) => event.type === "thinking.changed"));
   assert.ok(events.page.events.some((event) => event.type === "session.info_changed"));
@@ -2586,7 +2494,7 @@ test("same-host operation receipts deduplicate every implemented mutation and re
     "newer-tools-expanded",
   );
   assert.equal(collapsedExpansion.instance.toolsExpanded, false);
-  const expansionEvents = (await firstClient.events(firstInstance.id)).page.events
+  const expansionEvents = (await firstClient.read(firstInstance.id)).page.events
     .filter((event) => event.type === "extension.tools_expanded_changed");
   assert.deepEqual(expansionEvents.map((event) => event.data.expanded), [true, true, false]);
 
@@ -2685,7 +2593,7 @@ test("models settings failures are typed, evented, and leave the in-memory state
     (error: unknown) => error instanceof ControlClientError && error.code === "settings_write_failed" && /disk write failed/.test(error.message),
   );
   assert.deepEqual((await client.status(created.id)).executor.model, { provider: "fixture", id: "local" });
-  const events = await client.events(created.id);
+  const events = await client.read(created.id);
   assert.ok(events.page.events.some((event) => event.type === "settings.write_failed" && event.data.key === "model"));
 
   (session as DelayedAgentWorkerConnection).settingsFailure = undefined;
@@ -2726,7 +2634,7 @@ test("tui projection exposes stable paged history and attach history while prese
     (error: unknown) => error instanceof ControlClientError && error.code === "invalid_cursor",
   );
 
-  const attached = await client.events(created.id);
+  const attached = await client.read(created.id);
   assert.deepEqual(attached.page.events.length > 0, true);
   const attachResult = await client.streamEvents(created.id, { onEvent: () => {}, requireTuiProjection: true });
   assert.deepEqual(attachResult.initial.recentHistory.map((entry) => entry.entryId), ["h1", "h2", "h3"]);
@@ -3061,7 +2969,7 @@ test("session.tree.v1 paginates revisions, navigates in-file, and replaces on fo
   assert.equal(abortReceipt.instance.execution, "idle");
   assert.equal(runtime.treeLeafId, "tree-a2");
   assert.equal(port.calls.length, commitsBeforeInvalidTargets);
-  assert.equal((await client.events(created.id)).page.events.some((event) => event.type === "session.navigated"), false);
+  assert.equal((await client.read(created.id)).page.events.some((event) => event.type === "session.navigated"), false);
 
   const beforeFile = created.executor.sessionFile;
   const navigated = await client.navigateSession(created.id, "tree-u2", {}, "navigate-tree");
@@ -3074,7 +2982,7 @@ test("session.tree.v1 paginates revisions, navigates in-file, and replaces on fo
     client.tree(created.id, first.treeRevision, first.nextAfterEntryId, 2),
     (error: unknown) => error instanceof ControlClientError && error.code === "invalid_cursor",
   );
-  assert.equal((await client.events(created.id)).page.events.some((event) => event.type === "session.navigated" && event.data.targetId === "tree-u2"), true);
+  assert.equal((await client.read(created.id)).page.events.some((event) => event.type === "session.navigated" && event.data.targetId === "tree-u2"), true);
 
   const forked = await client.forkSession(created.id, "tree-u2", "fork-tree");
   assert.equal(forked.cancelled, false);
@@ -3117,7 +3025,7 @@ test("fresh conversation bootstrap omits old navigation and sibling-generation e
   await client.navigateSession(created.id, "bootstrap-b", {}, "bootstrap-nav-b");
   await client.navigateSession(created.id, "bootstrap-a", {}, "bootstrap-nav-a");
 
-  const raw = await client.events(created.id);
+  const raw = await client.read(created.id);
   assert.equal(raw.page.events.filter((event) => event.type === "session.navigated").length, 2);
   assert.ok(raw.page.events.some((event) => event.type === "message.completed"));
   const bootstrap = await client.streamEvents(created.id, {
@@ -3460,7 +3368,7 @@ test("an LF-truncated control response is reported as recoverable connection los
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-partial-frame-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  const capabilities = ["command.images.path.v1", "core.v2", "events.follow", "extension_ui.persistent-interactions.v1", "extension_ui.tools-expanded.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "instance.catalog", "instance.keys.v1", "queue.control.v1", "run.abort.v1", "tool-result-presentation.v1", "tui.projection.v1"];
+  const capabilities = ["command.images.path.v1", "core.v2", "events.follow.v2", "extension_ui.persistent-interactions.v1", "extension_ui.tools-expanded.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "instance.catalog", "instance.keys.v1", "instance.read.v1", "queue.control.v1", "run.abort.v1", "tool-result-presentation.v1", "tui.projection.v1"];
   const server = createServer((socket) => {
     const decoder = new JsonLineDecoder();
     socket.on("data", (chunk: Buffer) => {
@@ -3524,7 +3432,7 @@ test("large history and attach projections stay complete JSONL frames and retain
   await subscription.done;
 });
 
-test("attach initialization overflow is an explicit recoverable projection failure", async (context) => {
+test("follow initialization overflow is an explicit recoverable projection failure", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
   await harness.host.start();
@@ -3546,22 +3454,22 @@ test("attach initialization overflow is an explicit recoverable projection failu
     return originalProjection(...args);
   };
 
-  const attaching = client.streamEvents(created.id, { onEvent: () => {}, requireTuiProjection: true });
+  const following = client.follow(created.id, created.eventCursor, { onEvent: () => {}, requireTuiProjection: true });
   await entered;
   for (let index = 0; index < 1_001; index += 1) runtime.emit({ type: "dock_extension_error", error: `burst-${index}` });
   await instance.waitForIdle();
   releaseProjection();
   await assert.rejects(
-    attaching,
+    following,
     (error: unknown) => error instanceof ControlClientError
-      && error.code === "attach_initial_overflow"
-      && /reconnect/u.test(error.message),
+      && error.code === "follow_initial_overflow"
+      && /open it again/u.test(error.message),
   );
   let degradationObserved = false;
   const degradationDeadline = Date.now() + 5_000;
   while (!degradationObserved && Date.now() < degradationDeadline) {
-    const replay = await client.events(created.id);
-    degradationObserved = replay.page.events.some((event) => event.type === "extension.error" && /bounded event handoff queue/u.test(event.data.error));
+    const replay = await client.read(created.id);
+    degradationObserved = replay.page.events.some((event) => event.type === "extension.error" && /Too many updates arrived/u.test(event.data.error));
     if (!degradationObserved) await new Promise((resolve) => setTimeout(resolve, 5));
   }
   assert.equal(degradationObserved, true, "initialization overflow must remain diagnosable after reconnect");
@@ -3646,7 +3554,7 @@ test("slow attach readers drain bounded live-event backpressure without losing t
   socket.write(encodeJsonLine({
     kind: "hello", requestId: "slow-hello", versions: [2],
     client: { name: "slow-reader-test", version: "0.1.0", clientId: "slow-reader-client" },
-    requiredCapabilities: ["core.v2", "events.follow"],
+    requiredCapabilities: ["core.v2", "events.follow.v2"],
   }));
   const waitForFrames = async (count: number): Promise<void> => {
     const deadline = Date.now() + 5_000;
@@ -3654,7 +3562,7 @@ test("slow attach readers drain bounded live-event backpressure without losing t
     assert.ok(frames.length >= count, `expected ${count} frames, received ${frames.length}`);
   };
   await waitForFrames(1);
-  socket.write(encodeJsonLine({ kind: "request", version: 2, requestId: "slow-attach", type: "instance.attach", params: { instanceId: created.id, follow: true, controller: "observe" } }));
+  socket.write(encodeJsonLine({ kind: "request", version: 2, requestId: "slow-follow", type: "instance.follow", params: { instanceId: created.id, since: created.eventCursor } }));
   await waitForFrames(2);
   socket.pause();
 
@@ -3703,7 +3611,7 @@ test("slow attach readers drain bounded live-event backpressure without losing t
   for (const frame of frames) assert.doesNotThrow(() => JSON.parse(frame));
 });
 
-test("permanently stalled attach readers are bounded and can reconnect without affecting the runtime", async (context) => {
+test("permanently stalled followers are bounded without affecting Extension UI operation", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
   await harness.host.start();
@@ -3711,6 +3619,7 @@ test("permanently stalled attach readers are bounded and can reconnect without a
   const created = await client.create(harness.directory, "stalled reader", "stalled-reader-create");
   harness.sessions.get(created.id)!.settle("ready");
   await new Promise<void>((resolve) => setImmediate(resolve));
+  const operation = await client.controlExtensionUi(created.id, () => {});
 
   const socket = createConnection(harness.socketPath);
   const decoder = new JsonLineDecoder();
@@ -3720,14 +3629,14 @@ test("permanently stalled attach readers are bounded and can reconnect without a
   socket.write(encodeJsonLine({
     kind: "hello", requestId: "stalled-hello", versions: [2],
     client: { name: "stalled-reader-test", version: "0.1.0", clientId: "stalled-reader-client" },
-    requiredCapabilities: ["core.v2", "events.follow", "extension_ui.v1", "extension_ui.persistent-interactions.v1"],
+    requiredCapabilities: ["core.v2", "events.follow.v2", "extension_ui.v1", "extension_ui.persistent-interactions.v1"],
   }));
   const frameDeadline = Date.now() + 5_000;
   while (frames.length < 1 && Date.now() < frameDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
-  socket.write(encodeJsonLine({ kind: "request", version: 2, requestId: "stalled-attach", type: "instance.attach", params: { instanceId: created.id, follow: true, controller: "claim" } }));
+  socket.write(encodeJsonLine({ kind: "request", version: 2, requestId: "stalled-follow", type: "instance.follow", params: { instanceId: created.id, since: created.eventCursor } }));
   while (frames.length < 2 && Date.now() < frameDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.ok(frames.length >= 2);
-  assert.match(frames[1]!, /"controller":\{"status":"acquired"/u);
+  assert.doesNotMatch(frames[1]!, /controller|leaseToken/u);
   socket.pause();
 
   const serverSocket = [...((harness.host as unknown as { attachConnections: Map<string, Set<{ destroyed: boolean }>> }).attachConnections.get(created.id) ?? [])][0];
@@ -3752,18 +3661,18 @@ test("permanently stalled attach readers are bounded and can reconnect without a
   assert.ok(hostProbe.attachBackpressureStats.overflow > 0, "the fixture must fill the bounded application queue");
   assert.equal(serverSocket.destroyed, true, "the bounded application queue must abort a permanently stalled stream");
   assert.equal((await client.status(created.id)).lifecycle, "active");
-  const reclaimedController = await harness.registry.get(created.id).claimInteractionController();
-  assert.equal(reclaimedController.status, "acquired", "overflow cleanup must release the disconnected controller");
-  if (reclaimedController.status === "acquired") await harness.registry.get(created.id).releaseInteractionController(reclaimedController.leaseToken, "detach");
+  assert.equal((await client.setExtensionWidgetViewport(created.id, operation.initial.leaseToken, created.runtimeGeneration, 90, 30)).accepted, true);
 
   const recovered = await client.streamEvents(created.id, { onEvent: () => {}, requireTuiProjection: true });
   assert.equal(recovered.initial.instance.lifecycle, "active");
   recovered.close();
   await recovered.done;
+  operation.close();
+  await operation.done;
   socket.destroy();
 });
 
-test("attach drain timeout aborts the stalled stream, releases its controller, and leaves the runtime active", async (context) => {
+test("follow drain timeout leaves Extension UI operation and runtime active", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
   await harness.host.start();
@@ -3771,6 +3680,7 @@ test("attach drain timeout aborts the stalled stream, releases its controller, a
   const created = await client.create(harness.directory, "timeout reader", "timeout-reader-create");
   harness.sessions.get(created.id)!.settle("ready");
   await new Promise<void>((resolve) => setImmediate(resolve));
+  const operation = await client.controlExtensionUi(created.id, () => {});
 
   const socket = createConnection(harness.socketPath);
   const decoder = new JsonLineDecoder();
@@ -3780,14 +3690,14 @@ test("attach drain timeout aborts the stalled stream, releases its controller, a
   socket.write(encodeJsonLine({
     kind: "hello", requestId: "timeout-hello", versions: [2],
     client: { name: "timeout-reader-test", version: "0.1.0", clientId: "timeout-reader-client" },
-    requiredCapabilities: ["core.v2", "events.follow", "extension_ui.v1", "extension_ui.persistent-interactions.v1"],
+    requiredCapabilities: ["core.v2", "events.follow.v2", "extension_ui.v1", "extension_ui.persistent-interactions.v1"],
   }));
   const frameDeadline = Date.now() + 5_000;
   while (frames.length < 1 && Date.now() < frameDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
-  socket.write(encodeJsonLine({ kind: "request", version: 2, requestId: "timeout-attach", type: "instance.attach", params: { instanceId: created.id, follow: true, controller: "claim" } }));
+  socket.write(encodeJsonLine({ kind: "request", version: 2, requestId: "timeout-follow", type: "instance.follow", params: { instanceId: created.id, since: created.eventCursor } }));
   while (frames.length < 2 && Date.now() < frameDeadline) await new Promise((resolve) => setTimeout(resolve, 5));
   assert.ok(frames.length >= 2);
-  assert.match(frames[1]!, /"controller":\{"status":"acquired"/u);
+  assert.doesNotMatch(frames[1]!, /controller|leaseToken/u);
   socket.pause();
 
   const serverSocket = [...((harness.host as unknown as { attachConnections: Map<string, Set<{ destroyed: boolean }>> }).attachConnections.get(created.id) ?? [])][0];
@@ -3813,9 +3723,9 @@ test("attach drain timeout aborts the stalled stream, releases its controller, a
   assert.ok(hostProbe.attachBackpressureStats.timeout > 0, "a permanently blocked socket must hit the drain deadline");
   assert.equal(serverSocket.destroyed, true);
   assert.equal((await client.status(created.id)).lifecycle, "active");
-  const reclaimedController = await harness.registry.get(created.id).claimInteractionController();
-  assert.equal(reclaimedController.status, "acquired", "timeout cleanup must release the disconnected controller");
-  if (reclaimedController.status === "acquired") await harness.registry.get(created.id).releaseInteractionController(reclaimedController.leaseToken, "detach");
+  assert.equal((await client.setExtensionWidgetViewport(created.id, operation.initial.leaseToken, created.runtimeGeneration, 90, 30)).accepted, true);
+  operation.close();
+  await operation.done;
   socket.destroy();
 });
 
@@ -3917,12 +3827,11 @@ test("stream callbacks follow initial response order and accept one-step replace
             kind: "hello_ack", requestId: "fixed", version: 2,
             host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
             catalogSchemaVersion: 1,
-            capabilities: ["command.images.path.v1", "core.v2", "events.follow", "extension_ui.persistent-interactions.v1", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.keys.v1", "tool-result-presentation.v1"],
+            capabilities: ["command.images.path.v1", "core.v2", "events.follow.v2", "extension_ui.persistent-interactions.v1", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.keys.v1", "instance.read.v1", "tool-result-presentation.v1"],
             limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
           }));
           continue;
         }
-        attachParams = frame.params as Record<string, unknown>;
         const cursor = { hostEpoch: "epoch-1", instanceId: "instance-1", runtimeGeneration: 1, sequence: 1 };
         const snapshot = {
           id: "instance-1", creationOperationId: "create-1", cwd: directory,
@@ -3934,9 +3843,17 @@ test("stream callbacks follow initial response order and accept one-step replace
         const live = { scope: "instance", sequence: 2, instanceId: "instance-1", runtimeGeneration: 1, occurredAt: "2026-07-14T00:00:01.000Z", type: "extension.error", data: { error: "live" } };
         const replaced = { scope: "instance", sequence: 1, instanceId: "instance-1", runtimeGeneration: 2, occurredAt: "2026-07-14T00:00:02.000Z", type: "session.replaced", data: { reason: "reload", runtimeGeneration: 2, sessionFile: "/tmp/pi-2.jsonl", cwd: "/tmp/reloaded", piSessionId: "pi-2" } };
         const afterReplacement = { scope: "instance", sequence: 2, instanceId: "instance-1", runtimeGeneration: 2, occurredAt: "2026-07-14T00:00:03.000Z", type: "extension.error", data: { error: "after replacement" } };
+        if (frame.type === "instance.read") {
+          socket.end(encodeJsonLine({
+            kind: "response", version: 2, requestId: "fixed", hostEpoch: "epoch-1", ok: true,
+            result: { instance: snapshot, page: { events: [], earliest: cursor, latest: cursor, truncated: false, epochChanged: false, generationChanged: false }, recentHistory: [], historyTruncated: true, pendingMessages: [] },
+          }));
+          continue;
+        }
+        attachParams = frame.params as Record<string, unknown>;
         socket.write(encodeJsonLine({
           kind: "response", version: 2, requestId: "fixed", hostEpoch: "epoch-1", ok: true,
-          result: { instance: snapshot, page: { events: [], earliest: cursor, latest: cursor, truncated: false, epochChanged: false, generationChanged: false }, recentHistory: [], historyTruncated: true, pendingMessages: [], controller: { status: "observing" }, following: true },
+          result: { page: { events: [], earliest: cursor, latest: cursor, truncated: false, epochChanged: false, generationChanged: false } },
         })
           + encodeJsonLine({ kind: "event", version: 2, requestId: "fixed", hostEpoch: "epoch-1", event: live })
           + encodeJsonLine({ kind: "event", version: 2, requestId: "fixed", hostEpoch: "epoch-1", event: replaced })
@@ -3978,7 +3895,7 @@ test("conversation bootstrap negotiates replay-purpose support before sending at
           kind: "hello_ack", requestId: "fixed", version: 2,
           host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
           catalogSchemaVersion: 1,
-          capabilities: ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "queue.control.v1", "run.abort.v1", "tool-result-presentation.v1", "tui.projection.v1"],
+          capabilities: ["core.v2", "events.follow.v2", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "queue.control.v1", "run.abort.v1", "tool-result-presentation.v1", "tui.projection.v1"],
           limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
         }));
       }
@@ -4010,7 +3927,7 @@ test("TUI projection capability is required before the attach request", async (c
           kind: "hello_ack", requestId: "fixed", version: 2,
           host: { pid: 1, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "epoch-1", startedAt: "2026-07-14T00:00:00.000Z" },
           catalogSchemaVersion: 1,
-          capabilities: ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "run.abort.v1"],
+          capabilities: ["core.v2", "events.follow.v2", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "run.abort.v1"],
           limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
         }));
       }
@@ -4151,12 +4068,12 @@ test("prompt pre-intent commit precedes Pi and accepted events follow their comm
   await admissionGate.entered;
   assert.equal(runtime.promptCalls, 0);
   assert.equal((await client.status(created.id)).execution, "idle");
-  assert.equal((await client.events(created.id)).page.events.some((event) => event.type === "command.accepted"), false);
+  assert.equal((await client.read(created.id)).page.events.some((event) => event.type === "command.accepted"), false);
   admissionGate.release();
   const result = await prompting;
   assert.equal(result.instance.execution, "running");
   assert.deepEqual(port.calls.slice(1, 4).map((call) => call.context.kind), ["command.admission", "command.accepted", "run.started"]);
-  const events = (await client.events(created.id)).page.events;
+  const events = (await client.read(created.id)).page.events;
   assert.ok(events.findIndex((event) => event.type === "command.accepted") < events.findIndex((event) => event.type === "run.started"));
 });
 
@@ -4877,7 +4794,7 @@ test("image projection is capability compatible and show_image correlates live w
   assert.equal(JSON.stringify(modernHistory).includes("never-wire"), false);
   assert.deepEqual(modernHistory.entries[1]?.content, [{ type: "tool_call", toolCallId: "show-1", toolName: "show_image", args: { path: "/tmp/show.png" }, omittedFields: undefined }]);
   assert.equal((modernHistory.entries[2]?.content[0] as { isError?: boolean }).isError, false);
-  const live = (await client.events(instance.id)).page.events;
+  const live = (await client.read(instance.id)).page.events;
   assert.ok(live.some((event) => event.type === "tool.started" && event.data.toolCallId === "show-live" && event.data.toolName === "show_image" && event.data.args.path === "/tmp/live.png"));
   assert.ok(live.some((event) => event.type === "tool.completed" && event.data.toolCallId === "show-live" && event.data.toolName === "show_image" && event.data.isError === false));
 
@@ -4893,9 +4810,9 @@ test("image projection is capability compatible and show_image correlates live w
   const queuedImages = [{ path: join(harness.directory, "queued-only.png"), mimeType: "image/png" }];
   await client.prompt(instance.id, "", "steer", "legacy-image-only", queuedImages);
   runtime.emit({ type: "tool_execution_start", toolCallId: "generic-images-arg", toolName: "custom_tool", args: { images: ["keep-tool-argument"], text: "" } });
-  const legacyAttach = await exchangeRequestAfterHello(harness.socketPath, ["core.v2", "events.follow", "events.replay-purpose.v1"], {
-    kind: "request", version: 2, requestId: "legacy-image-attach", type: "instance.attach",
-    params: { instanceId: instance.id, follow: false, controller: "observe", replay: "event_log" },
+  const legacyAttach = await exchangeRequestAfterHello(harness.socketPath, ["core.v2", "events.follow.v2", "instance.read.v1"], {
+    kind: "request", version: 2, requestId: "legacy-image-read", type: "instance.read",
+    params: { instanceId: instance.id, replay: "event_log" },
   });
   const legacyAttachResult = objectValue(legacyAttach.result);
   assert.equal((legacyAttachResult.pendingMessages as Array<{ text: string }>).at(-1)?.text, "[Image attached]");

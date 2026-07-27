@@ -142,7 +142,7 @@ export function buildDockHubEntries(
     {
       value: CONTINUE,
       label: `Continue · ${continuable}`,
-      description: continuable > 0 ? "Attach or reopen current Dock work" : "No active or reopenable Dock instances",
+      description: continuable > 0 ? "Open current Dock work" : "No current Dock work",
     },
     {
       value: HISTORY,
@@ -161,9 +161,9 @@ export function buildDockHubEntries(
 }
 
 export function instanceActionSummary(instance: InstanceSnapshot): string {
-  if (instance.lifecycle === "active") return "Attach or Stop";
-  if ((instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error") && instance.reopenable) return "Reopen or Forget";
-  if (instance.lifecycle === "stopping") return "stop in progress; Attach unavailable";
+  if (instance.lifecycle === "active") return "Open or Stop";
+  if ((instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error") && instance.reopenable) return "Recover or Forget";
+  if (instance.lifecycle === "stopping") return "stop in progress; Open unavailable";
   if (instance.lifecycle === "stopped") return "History record";
   return "runtime unavailable; Forget only";
 }
@@ -185,7 +185,7 @@ async function chooseContinueAction(
     entries.push({
       value: MORE_INSTANCES,
       label: `… ${ordered.length - visible.length} more current Dock instance(s)`,
-      description: "Use aludock list to inspect the bounded human catalog",
+      description: "Use aludock list to inspect the full catalog",
     });
   }
   entries.push({ value: BACK, label: "Back to Hub", description: "no change" });
@@ -220,7 +220,7 @@ async function chooseHistoryAction(
     entries.push({
       value: MORE_INSTANCES,
       label: `… ${ordered.length - visible.length} more history record(s)`,
-      description: "Use aludock list --all to inspect the bounded human catalog",
+      description: "Use aludock list --all to inspect the full catalog",
     });
   }
   entries.push({ value: BACK, label: "Back to Hub", description: "no change" });
@@ -304,10 +304,10 @@ async function chooseInstanceAction(
   const shortId = uniqueInstanceIdPrefix(instance, universe);
   const entries: DockHubEntry[] = [];
   if (instance.lifecycle === "active") {
-    entries.push({ value: "attach", label: "Attach Session Work", description: "connect this client; Host keeps runtime ownership" });
-    entries.push({ value: "stop", label: "Stop instance", description: "dispose the live runtime; this is not detach" });
+    entries.push({ value: "attach", label: "Open Work", description: "view and continue this work here" });
+    entries.push({ value: "stop", label: "Stop work", description: "stop the running work; closing this window does not stop it" });
   } else if ((instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error") && instance.reopenable) {
-    entries.push({ value: "reopen", label: "Reopen persisted context", description: "start a fresh runtime generation with no prompt/effect replay" });
+    entries.push({ value: "reopen", label: "Recover saved work", description: "continue from its saved context without resending messages" });
     entries.push({ value: "forget", label: "Forget Dock record", description: "keep the Pi session file" });
   }
   entries.push({ value: BACK, label: "Back to Continue", description: "no change" });
@@ -352,7 +352,7 @@ async function chooseSessionAction(
   }));
   const omitted = Math.max(0, total - visible.length);
   if (omitted > 0 || truncated) {
-    entries.push({ value: MORE_SESSIONS, label: `… ${omitted} more persisted session(s)`, description: "older entries are omitted from this bounded Hub view" });
+    entries.push({ value: MORE_SESSIONS, label: `… ${omitted} more persisted session(s)`, description: "older entries are not shown here" });
   }
   entries.push({ value: BACK, label: "Back to Hub", description: "no change" });
   const selected = await selectMenu(
@@ -370,9 +370,9 @@ async function chooseSessionAction(
   const actionEntries: DockHubEntry[] = [];
   for (const instance of linked) {
     if (instance.lifecycle === "active") {
-      actionEntries.push({ value: `attach:${instance.id}`, label: `Attach ${displayName(instance)}`, description: "this Pi session already has a live Dock runtime" });
+      actionEntries.push({ value: `attach:${instance.id}`, label: `Open ${displayName(instance)}`, description: "this work is already running in Alu Dock" });
     } else if ((instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error") && instance.reopenable) {
-      actionEntries.push({ value: `resume:${instance.id}`, label: `Resume ${displayName(instance)}`, description: "reopen its Dock identity with a new runtime generation" });
+      actionEntries.push({ value: `resume:${instance.id}`, label: `Resume ${displayName(instance)}`, description: "recover this Dock work from its saved context" });
     }
   }
   const hasLiveReference = linked.some((instance) => instance.lifecycle === "active" || instance.lifecycle === "stopping");

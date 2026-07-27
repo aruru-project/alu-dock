@@ -27,7 +27,7 @@ Host 自己处理：
 - instance create、ensure、list、get、stop、reopen、forget；
 - catalog、project trust 与 persisted-session inventory；
 - Worker lifecycle、runtime kind 与 generation；
-- Queue、operation、controller 与 attach/reconnect。
+- Queue、operation、Extension UI 操作权与 read/follow reconnect。
 
 这些状态属于 Dock，不交给 Agent runtime 决定。
 
@@ -44,7 +44,8 @@ Host 不为这些能力维护第二套 Agent 实现，也不重复投影 Worker 
 1. 客户端先发送 hello，并协商版本与 capabilities；
 2. hello 成功后发送业务 request；
 3. 普通 request 返回一个 response；
-4. attach/follow request 在初始 response 后持续接收 event。
+4. `instance.read` 读取当前权威视图，`instance.follow` 在初始 response 后持续接收 event；
+5. Extension UI 操作使用独立连接，并与读取、实时跟随分别恢复。
 
 Request、response 和 event 使用 closed JSON-safe shape。单 frame 可以有传输上限，但业务内容不能因此永久截断；大型 conversation 使用分页和 chunk 继续读取。
 
@@ -69,11 +70,13 @@ Host 对 mutation 负责 admission、operation 去重和结果归属。客户端
 
 Worker 接受副作用前失联和接受后失联是不同结果。Host 必须保留这个区别，不能把可能已经执行的 mutation 当成普通失败重试。
 
-## Attach 与 reconnect
+## Read、follow 与 Extension UI 操作
 
-Attach 返回当前 snapshot 和初始事件，然后可以持续 follow。客户端保存已接受的 cursor；断线后只有在 Host、instance、generation 和 replay 连续性都能确认时继续增量，否则重新读取权威 snapshot 与 conversation。
+`instance.read` 返回当前 snapshot、conversation bootstrap、Queue 与读取边界。`instance.follow` 从该边界开始补齐后续事件并持续跟随；无法确认连续性时，客户端重新读取权威视图。
 
-观察连接中断不等于 Agent runtime 失败，也不结束 instance。
+任意数量的客户端可以同时读取和跟随。观察连接中断不等于 Agent runtime 失败，也不结束 instance。
+
+Extension UI 操作使用独立连接，同一 instance 同时只有一个。新连接立即接手，旧操作连接结束但它的普通 follow 不受影响；等待中的 interaction 属于 runtime generation，不因接手或断线而被回答或取消。
 
 ## Capabilities
 

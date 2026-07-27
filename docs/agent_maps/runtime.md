@@ -29,7 +29,7 @@ Host 负责：
 
 - instance、catalog 与 runtime kind；
 - Worker 创建、停止、replacement 与 generation；
-- admission、Queue、operation 与 controller；
+- admission、Queue、operation 与 Extension UI 操作权；
 - 把请求和事件路由到正确的客户端与 Worker。
 
 Worker 负责：
@@ -39,7 +39,7 @@ Worker 负责：
 - Agent 的 conversation、model、settings、tree、compaction 等实际机制；
 - 把 Agent 行为转换成 Dock 的 command、event 和 result。
 
-Host 可以因为 instance、generation、operation、controller 或 lifecycle 不正确而拒绝请求，但不重新解释 Agent 内容，也不为 Agent 的每个方法建立本地代理。
+Host 可以因为 instance、generation、operation、Extension UI 操作权或 lifecycle 不正确而拒绝请求，但不重新解释 Agent 内容，也不为 Agent 的每个方法建立本地代理。
 
 ## Worker 通信
 
@@ -57,7 +57,7 @@ Pi 是当前成熟基底。真实工作需要且 Pi 已经具备的能力，应�
 
 ## Extension UI
 
-Extension component 和 Promise 留在 Worker。Worker 负责 component render、input、invalidate 与完成回调；Host 负责 controller、generation 和路由；TUI 或 WebUI 负责各自支持的显示与输入。
+Extension component 和 Promise 留在 Worker。Worker 负责 component render、input、invalidate 与完成回调；Host 负责 generation、当前操作者和定向路由；TUI 或 WebUI 负责各自支持的显示与输入。读取和实时跟随不取得操作权；新的操作连接会立即替换旧连接，但不会取消 Worker 中等待的 interaction。
 
 某个客户端没有实现一种 Extension UI，只影响该客户端，不影响 extension runtime、Agent 或其他客户端，也不能产生假的用户回答。
 

@@ -71,12 +71,12 @@ test("extension UI dialogs wait without a controller and activate on the first c
   assert.equal(events.filter((event) => event.type === "extension.error").length, 3);
 });
 
-test("one lease serializes dialogs and validates method-specific responses", async () => {
+test("the latest lease serializes dialogs and validates method-specific responses", async () => {
   const { broker, events } = harness();
+  const firstClaim = await broker.claimController();
+  assert.deepEqual(firstClaim, { status: "acquired", leaseToken: "id-1", controllerId: "id-2" });
   const claim = await broker.claimController();
-  assert.deepEqual(claim, { status: "acquired", leaseToken: "id-1", controllerId: "id-2" });
-  assert.deepEqual(await broker.claimController(), { status: "unavailable" });
-  if (claim.status !== "acquired") return;
+  assert.deepEqual(claim, { status: "acquired", leaseToken: "id-3", controllerId: "id-4" });
 
   const selected = broker.select("Pick\u001b[2J", ["A\u001b[2J", "B"]);
   const confirmed = broker.confirm("Proceed?", "Apply it?");
@@ -248,7 +248,7 @@ test("notifications, statuses, widgets, and overflow remain closed and bounded",
   assert.equal(events.some((event) => event.type === "extension.notification" && (event.data as { message?: string }).message === "hello[2J"), true);
   assert.equal(events.some((event) => event.type === "extension.widget_changed" && (event.data as { placement?: string }).placement === "belowEditor"), true);
   assert.equal(events.some((event) => event.type === "extension.widget_changed" && (event.data as { key?: string }).key === "oversized"), false);
-  assert.equal(events.some((event) => event.type === "extension.error" && /widget payload exceeds/u.test(String((event.data as { error?: string }).error))), true);
+  assert.equal(events.some((event) => event.type === "extension.error" && /widget content is too large/u.test(String((event.data as { error?: string }).error))), true);
   assert.equal(JSON.stringify(events).includes("data:image/png;base64"), true);
   assert.equal(JSON.stringify(events).includes(rawBase64), true);
 

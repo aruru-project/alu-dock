@@ -15,8 +15,10 @@ import {
   TOOL_RESULT_PRESENTATION_CAPABILITY,
   TOOLS_EXPANDED_CAPABILITY,
   EXTENSION_WIDGET_CAPABILITY,
-  CONTROLLER_DIRECTIVES_CAPABILITY,
   PERSISTENT_INTERACTIONS_CAPABILITY,
+  INSTANCE_READ_CAPABILITY,
+  EVENTS_FOLLOW_CAPABILITY,
+  EXTENSION_UI_CONTROL_CAPABILITY,
   IMAGE_INPUT_CAPABILITY,
   INSTANCE_KEYS_CAPABILITY,
   CONVERSATION_CONTENT_CAPABILITY,
@@ -30,7 +32,9 @@ import {
   parseControlResponse,
   parseCreateResult,
   parseEnsureResult,
-  parseEventsResult,
+  parseInstanceReadResult,
+  parseFollowResult,
+  parseExtensionUiControlResult,
   parseForgetResult,
   parseHelloReply,
   parseHostInfoResult,
@@ -70,7 +74,9 @@ import {
   type ModelConfigurationResult,
   type ThinkingConfigurationResult,
   type EnsureResult,
-  type EventsResult,
+  type InstanceReadResult,
+  type FollowResult,
+  type ExtensionUiControlResult,
   type ForgetResult,
   type HelloAck,
   type HostInfoResult,
@@ -115,7 +121,9 @@ const LONG_MUTATION_TYPES = new Set<ControlRequest["type"]>([
   "session.navigate", "session.fork", "session.clone",
 ]);
 
-export interface EventSubscription { initial:EventsResult; close:()=>void; done:Promise<void> }
+export interface EventSubscription { initial:InstanceReadResult; close:()=>void; done:Promise<void> }
+export interface FollowSubscription { initial:FollowResult; close:()=>void; done:Promise<void> }
+export interface OperationSubscription { initial:ExtensionUiControlResult; close:()=>void; done:Promise<void> }
 export interface DockClientOptions { socketPath:string; timeoutMs?:number; longMutationTimeoutMs?:number; requestId?:()=>string; clientId?:string }
 export class ControlClientError extends Error {
   constructor(readonly code:string,message:string,readonly operationId?:string,readonly details?:import("../core/managed-instance.js").JsonObject){super(message);this.name="ControlClientError";}
@@ -182,7 +190,7 @@ export class DockClient {
   forget(instanceId:string,operationId=this.createRequestId()):Promise<ForgetResult>{return this.request("instance.forget",{operationId,instanceId},"catalog.maintenance.v1",parseForgetResult);}
   pruneStopped(operationId=this.createRequestId()):Promise<PruneResult>{return this.request("catalog.prune",{operationId,selector:"stopped"},"catalog.maintenance.v1",parsePruneResult);}
   reopen(instanceId:string,operationId=this.createRequestId(),sessionFile?:string,trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<ReopenResult>{return this.request("instance.reopen",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.reopen",parseReopenResult);}
-  events(instanceId:string,since?:EventCursor):Promise<EventsResult>{return this.request("instance.attach",{instanceId,since,follow:false,controller:"observe",replay:"event_log"},["events.replay-purpose.v1",IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY],parseEventsResult);}
+  read(instanceId:string,since?:EventCursor,replay:"event_log"|"conversation_bootstrap"="event_log"):Promise<InstanceReadResult>{return this.request("instance.read",{instanceId,since,replay},[INSTANCE_READ_CAPABILITY,IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY],parseInstanceReadResult);}
   prompt(instanceId:string,message:string,delivery:DeliveryMode="auto",operationId=this.createRequestId(),images?:ImagePathDto[]):Promise<PromptResult>{return this.request("command.submit",{operationId,instanceId,message,...(images===undefined?{}:{images}),delivery},images===undefined?"session.core":["session.core",IMAGE_INPUT_CAPABILITY],parsePromptResult);}
   respondInteraction(instanceId:string,leaseToken:string,interactionId:string,response:InteractionResponse,operationId=this.createRequestId()):Promise<InteractionRespondResult>{if("value" in response){const limit=response.method==="select"?8_000:256_000;if(response.value.length>limit)return Promise.reject(new ControlClientError("invalid_request",`Interaction ${response.method} response exceeds ${limit} characters`,operationId));}return this.request("interaction.respond",{operationId,instanceId,leaseToken,interactionId,response},["extension_ui.v1",PERSISTENT_INTERACTIONS_CAPABILITY],parseInteractionRespondResult);}
   setToolsExpanded(instanceId:string,expectedRuntimeGeneration:number,expanded:boolean,operationId=this.createRequestId()):Promise<{instance:InstanceSnapshot}>{return this.request("extension.tools_expanded.set",{operationId,instanceId,expectedRuntimeGeneration,expanded},TOOLS_EXPANDED_CAPABILITY,parseStatusResult);}
@@ -214,39 +222,91 @@ export class DockClient {
   cloneSession(instanceId:string,entryId:string,operationId=this.createRequestId()):Promise<SessionCloneResult>{return this.request("session.clone",{operationId,instanceId,entryId},"session.tree.v1",parseSessionCloneResult);}
   stop(instanceId:string,operationId=this.createRequestId()):Promise<StopResult>{return this.request("instance.stop",{operationId,instanceId},"instance.catalog",parseStopResult,undefined,this.longMutationTimeoutMs);}
 
-  async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;claimController?:boolean;conversationBootstrap?:boolean}):Promise<EventSubscription>{
-    const since=options.since;const helloId=this.createRequestId(),requestId=this.createRequestId();
-    const replay = options.conversationBootstrap ? "conversation_bootstrap" : since === undefined ? undefined : "event_log";
-    const streamCapabilities:string[]=options.requireTuiProjection?["core.v2",TOOLS_EXPANDED_CAPABILITY,EXTENSION_WIDGET_CAPABILITY,GIT_BRANCH_CAPABILITY,INSTANCE_KEYS_CAPABILITY,TOOL_RESULT_PRESENTATION_CAPABILITY,IMAGE_INPUT_CAPABILITY,"events.follow","queue.control.v1","run.abort.v1","tui.projection.v1"]:requiredCapabilities("events.follow");
-    if(!streamCapabilities.includes(IMAGE_INPUT_CAPABILITY))streamCapabilities.push(IMAGE_INPUT_CAPABILITY);
-    if(!streamCapabilities.includes(PERSISTENT_INTERACTIONS_CAPABILITY))streamCapabilities.push(PERSISTENT_INTERACTIONS_CAPABILITY);
-    if(replay!==undefined&&!streamCapabilities.includes("events.replay-purpose.v1"))streamCapabilities.push("events.replay-purpose.v1");
-    if(options.claimController){
-      if(!streamCapabilities.includes("extension_ui.v1"))streamCapabilities.push("extension_ui.v1");
-      if(!streamCapabilities.includes(CONTROLLER_DIRECTIVES_CAPABILITY))streamCapabilities.push(CONTROLLER_DIRECTIVES_CAPABILITY);
-    }
-    const request:ControlRequest={kind:"request",version:2,requestId,type:"instance.attach",params:{instanceId,since,follow:true,controller:options.claimController?"claim":"observe",...(replay===undefined?{}:{replay})}};
+  async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;conversationBootstrap?:boolean}):Promise<EventSubscription>{
+    const replay=options.conversationBootstrap?"conversation_bootstrap":"event_log";
+    const initial=await this.read(instanceId,options.since,replay);
+    const requested=options.since;
+    const followSince=requested
+      && !initial.page.epochChanged
+      && !initial.page.generationChanged
+      && requested.instanceId===initial.page.latest.instanceId
+      && requested.runtimeGeneration===initial.page.latest.runtimeGeneration
+      && requested.hostEpoch===initial.page.latest.hostEpoch
+      && requested.sequence>initial.page.latest.sequence
+      ? requested
+      : initial.page.latest;
+    const follow=await this.follow(instanceId,followSince,{onEvent:options.onEvent,requireTuiProjection:options.requireTuiProjection});
+    return {initial,close:follow.close,done:follow.done};
+  }
+
+  follow(instanceId:string,since:EventCursor,options:{onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean}):Promise<FollowSubscription>{
+    const capabilities:Capability[]=options.requireTuiProjection
+      ? [EVENTS_FOLLOW_CAPABILITY,TOOLS_EXPANDED_CAPABILITY,EXTENSION_WIDGET_CAPABILITY,GIT_BRANCH_CAPABILITY,INSTANCE_KEYS_CAPABILITY,TOOL_RESULT_PRESENTATION_CAPABILITY,IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY,"queue.control.v1","run.abort.v1","tui.projection.v1"]
+      : [EVENTS_FOLLOW_CAPABILITY,IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY];
+    return this.openEventStream({
+      request:{kind:"request",version:2,requestId:this.createRequestId(),type:"instance.follow",params:{instanceId,since}},
+      capabilities,
+      parseInitial:parseFollowResult,
+      initialCursor:(result)=>result.page.latest,
+      initialEvents:(result)=>result.page.events,
+      onEvent:options.onEvent,
+      cleanEnd:false,
+      validateInitial:(result,hostEpoch)=>{
+        if(result.page.earliest.hostEpoch!==hostEpoch||result.page.latest.hostEpoch!==hostEpoch||result.page.latest.instanceId!==instanceId)throw new ProtocolValidationError("invalid_response","Live updates do not match this work");
+      },
+    });
+  }
+
+  controlExtensionUi(instanceId:string,onEvent:(event:Extract<DockEvent,{type:"interaction.requested"|"extension.title_set"|"extension.editor_text_set"}>)=>void):Promise<OperationSubscription>{
+    type OperationEvent=Extract<DockEvent,{type:"interaction.requested"|"extension.title_set"|"extension.editor_text_set"}>;
+    return this.openEventStream({
+      request:{kind:"request",version:2,requestId:this.createRequestId(),type:"interaction.control",params:{instanceId}},
+      capabilities:[EXTENSION_UI_CONTROL_CAPABILITY,"extension_ui.v1",PERSISTENT_INTERACTIONS_CAPABILITY],
+      parseInitial:parseExtensionUiControlResult,
+      initialCursor:(result)=>({hostEpoch:"",instanceId:result.instanceId,runtimeGeneration:result.runtimeGeneration,sequence:0}),
+      initialEvents:()=>[],
+      onEvent:(event)=>{
+        if(!isOperationEvent(event))throw new ProtocolValidationError("invalid_response","Extension UI operation stream received an untargeted event");
+        onEvent(event as OperationEvent);
+      },
+      cleanEnd:true,
+      validateInitial:(result)=>{if(result.instanceId!==instanceId)throw new ProtocolValidationError("invalid_response","Extension UI operation result belongs to another instance");},
+    });
+  }
+
+  private openEventStream<T>(options:{
+    request:Extract<ControlRequest,{type:"instance.follow"|"interaction.control"}>;
+    capabilities:readonly Capability[];
+    parseInitial:Parser<T>;
+    initialCursor:(result:T)=>EventCursor;
+    initialEvents:(result:T)=>DockEvent[];
+    onEvent:(event:DockEvent)=>void;
+    validateInitial:(result:T,hostEpoch:string)=>void;
+    cleanEnd:boolean;
+  }):Promise<{initial:T;close:()=>void;done:Promise<void>}>{
+    const helloId=this.createRequestId(),requestId=options.request.requestId;
+    const streamCapabilities=[...new Set(options.capabilities.flatMap((item)=>requiredCapabilities(item)))];
     const socket=this.openSocket(),decoder=new JsonLineDecoder();let phase:"hello"|"response"|"events"="hello",hostEpoch="",initialSettled=false,doneSettled=false,closeRequested=false,callbacksReady=false,pending:DockEvent[]=[],runtimeGeneration:number|undefined,lastSequence=-1;
-    let resolveInitial!:(x:EventSubscription)=>void,rejectInitial!:(e:unknown)=>void,resolveDone!:()=>void,rejectDone!:(e:unknown)=>void;
-    const done=new Promise<void>((r,j)=>{resolveDone=r;rejectDone=j;});void done.catch(()=>{});const initial=new Promise<EventSubscription>((r,j)=>{resolveInitial=r;rejectInitial=j;});
+    let resolveInitial!:(x:{initial:T;close:()=>void;done:Promise<void>})=>void,rejectInitial!:(e:unknown)=>void,resolveDone!:()=>void,rejectDone!:(e:unknown)=>void;
+    const done=new Promise<void>((r,j)=>{resolveDone=r;rejectDone=j;});void done.catch(()=>{});const initial=new Promise<{initial:T;close:()=>void;done:Promise<void>}>((r,j)=>{resolveInitial=r;rejectInitial=j;});
     const settleDone=(e?:unknown)=>{if(doneSettled)return;doneSettled=true;e===undefined?resolveDone():rejectDone(e);};
     const fail=(e:unknown)=>{clearTimeout(timeout);const error=normalizeClientError(e);if(!initialSettled){initialSettled=true;rejectInitial(error);}pending=[];settleDone(error);socket.destroy();};
     const timeout=setTimeout(()=>fail(new ControlClientError("timeout",`Control request timed out after ${this.timeoutMs}ms`)),this.timeoutMs);
+    const dispatchQueued=()=>{if(closeRequested||doneSettled)return;callbacksReady=true;const queued=pending;pending=[];for(const event of queued){try{options.onEvent(event);}catch(e){fail(e);return;}}};
     const consume=(line:string)=>{if(!line)return;let raw:unknown;try{raw=JSON.parse(line);}catch{fail(new ControlClientError("invalid_response","Host returned invalid JSON"));return;}try{
-      if(phase==="hello"){const ack=parseHelloReply(raw,helloId);hostEpoch=ack.host.hostEpoch;for(const required of streamCapabilities){if(!ack.capabilities.includes(required))throw new ProtocolValidationError("protocol_incompatible",`Host lacks ${required}`);}phase="response";socket.write(encodeJsonLine(request));return;}
-      if(phase==="response"){const response=parseControlResponse(raw,requestId,hostEpoch);if(!response.ok){fail(new ControlClientError(response.error.code,response.error.message));return;}const result=parseEventsResult(response.result);if(result.instance.id!==instanceId||result.page.earliest.hostEpoch!==hostEpoch||result.page.latest.hostEpoch!==hostEpoch||(result.instance.ownerHostEpoch!==undefined&&result.instance.ownerHostEpoch!==hostEpoch))throw new ProtocolValidationError("invalid_response","Attach result does not match negotiated cursor domain");runtimeGeneration=result.instance.runtimeGeneration;lastSequence=result.page.latest.sequence;phase="events";clearTimeout(timeout);initialSettled=true;resolveInitial({initial:result,close:()=>{closeRequested=true;pending=[];socket.destroy();},done});setImmediate(()=>{if(closeRequested||doneSettled)return;callbacksReady=true;const queued=pending;pending=[];for(const event of queued){try{options.onEvent(event);}catch(e){fail(e);return;}}});return;}
+      if(phase==="hello"){const ack=parseHelloReply(raw,helloId);hostEpoch=ack.host.hostEpoch;for(const required of streamCapabilities){if(!ack.capabilities.includes(required))throw new ProtocolValidationError("protocol_incompatible",`Host lacks ${required}`);}phase="response";socket.write(encodeJsonLine(options.request));return;}
+      if(phase==="response"){const response=parseControlResponse(raw,requestId,hostEpoch);if(!response.ok){fail(new ControlClientError(response.error.code,response.error.message));return;}const result=options.parseInitial(response.result);options.validateInitial(result,hostEpoch);const cursor=options.initialCursor(result);runtimeGeneration=cursor.runtimeGeneration;lastSequence=cursor.sequence;phase="events";clearTimeout(timeout);pending.push(...options.initialEvents(result));initialSettled=true;resolveInitial({initial:result,close:()=>{closeRequested=true;pending=[];socket.destroy();},done});setImmediate(dispatchQueued);return;}
       const event=parseControlEventEnvelope(raw,requestId,hostEpoch).event;
-      if(event.instanceId!==instanceId)throw new ProtocolValidationError("invalid_response","Live event cursor domain/order is invalid");
+      if(event.instanceId!==options.request.params.instanceId)throw new ProtocolValidationError("invalid_response","Live event belongs to another instance");
       if(event.runtimeGeneration!==runtimeGeneration){
-        const nextGeneration=runtimeGeneration===undefined?undefined:runtimeGeneration+1;
-        if(event.type!=="session.replaced"||event.runtimeGeneration!==nextGeneration||event.sequence!==1||event.data.runtimeGeneration!==event.runtimeGeneration)throw new ProtocolValidationError("invalid_response","Live event generation rollover is invalid");
+        if(options.request.type==="instance.follow"){const nextGeneration=runtimeGeneration===undefined?undefined:runtimeGeneration+1;if(event.type!=="session.replaced"||event.runtimeGeneration!==nextGeneration||event.sequence!==1||event.data.runtimeGeneration!==event.runtimeGeneration)throw new ProtocolValidationError("invalid_response","Live updates changed unexpectedly");}
         runtimeGeneration=event.runtimeGeneration;lastSequence=0;
       }
-      if(event.sequence<=lastSequence)throw new ProtocolValidationError("invalid_response","Live event cursor domain/order is invalid");
+      if(event.sequence<=lastSequence)throw new ProtocolValidationError("invalid_response","Live updates arrived out of order");
       lastSequence=event.sequence;
-      if(!callbacksReady){if(pending.length>=MAX_PENDING_STREAM_EVENTS)throw new ControlClientError("event_handoff_overflow","More than 1000 events arrived during attach handoff; reconnect from the last accepted cursor");pending.push(event);}else options.onEvent(event);
+      if(!callbacksReady){if(pending.length>=MAX_PENDING_STREAM_EVENTS)throw new ControlClientError("event_handoff_overflow","More than 1000 events arrived during stream handoff; reconnect from the last accepted update position");pending.push(event);}else options.onEvent(event);
     }catch(e){fail(e);}};
-    socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,streamCapabilities))));socket.on("data",(chunk:Buffer)=>{try{for(const line of decoder.push(chunk))consume(line);}catch(e){fail(e);}});socket.once("end",()=>{try{decoder.finish();}catch(e){fail(e);}});socket.once("error",e=>fail(transportError(e)));socket.once("close",hadError=>{clearTimeout(timeout);if(!initialSettled){const e=new ControlClientError("connection_closed","Host closed before responding");initialSettled=true;rejectInitial(e);settleDone(e);}else if(!doneSettled){closeRequested?settleDone():settleDone(new ControlClientError("connection_closed",hadError?"Event stream closed after a transport error":"Host closed the event stream unexpectedly"));}});
+    socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,streamCapabilities))));socket.on("data",(chunk:Buffer)=>{try{for(const line of decoder.push(chunk))consume(line);}catch(e){fail(e);}});socket.once("end",()=>{try{decoder.finish();}catch(e){fail(e);}});socket.once("error",e=>fail(transportError(e)));socket.once("close",hadError=>{clearTimeout(timeout);if(!initialSettled){const e=new ControlClientError("connection_closed","Host closed before responding");initialSettled=true;rejectInitial(e);settleDone(e);}else if(!doneSettled){if(closeRequested||options.cleanEnd&&!hadError)settleDone();else settleDone(new ControlClientError("connection_closed",hadError?"Stream closed after a transport error":"Host closed the stream unexpectedly"));}});
     return initial;
   }
 
@@ -355,9 +415,9 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
     const requested=params as Extract<ControlRequest,{type:"instance.ensure"|"instance.get_by_key"}>["params"];
     if(snapshots[0]&&snapshots[0].key!==requested.key)throw new ProtocolValidationError("invalid_response","Result does not match requested instance key");
   }
-  if(type==="instance.attach"){
+  if(type==="instance.read"||type==="instance.follow"){
     const page=record.page as {earliest?:EventCursor;latest?:EventCursor}|undefined;
-    if(!page||page.earliest?.hostEpoch!==hostEpoch||page.latest?.hostEpoch!==hostEpoch)throw new ProtocolValidationError("invalid_response","Attach cursors do not match negotiated Host epoch");
+    if(!page||page.earliest?.hostEpoch!==hostEpoch||page.latest?.hostEpoch!==hostEpoch)throw new ProtocolValidationError("invalid_response","Update positions do not match this connection");
   }
   if(type==="instance.list"){
     const requested=params as Extract<ControlRequest,{type:"instance.list"}>["params"];
@@ -418,5 +478,6 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
     if(type==="instance.reopen"&&record.operationId!==params.operationId)throw new ProtocolValidationError("invalid_response","Reopen operationId does not match request operationId");
   }
 }
+function isOperationEvent(event:DockEvent):event is Extract<DockEvent,{type:"interaction.requested"|"extension.title_set"|"extension.editor_text_set"}>{return event.type==="interaction.requested"||event.type==="extension.title_set"||event.type==="extension.editor_text_set";}
 function normalizeClientError(e:unknown):ControlClientError{if(e instanceof ControlClientError)return e;if(e instanceof JsonLineError&&e.code==="incomplete_record")return new ControlClientError("connection_closed","Host connection closed during a control response; reconnect to recover current state");if(e instanceof ProtocolValidationError)return new ControlClientError(e.code==="unsupported_protocol"?"protocol_incompatible":e.code,e.message);if(e instanceof Error)return new ControlClientError("invalid_response",e.message);return new ControlClientError("invalid_response",String(e));}
 function transportError(e:Error):ControlClientError{const code=(e as NodeJS.ErrnoException).code;return new ControlClientError("connection_error",`${code?`${code}: `:""}${e.message}`);}

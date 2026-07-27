@@ -160,7 +160,7 @@ def main() -> int:
                     y = hub_item_y(40, 120, 0, 2)
                     os.write(fd, f"\x1b[<0;30;{y}M".encode("ascii"))
                 action_deadline = time.monotonic() + 5
-                while b"Attach Session Work" not in output and time.monotonic() < action_deadline:
+                while b"Open Work" not in output and time.monotonic() < action_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 if action == "hub-continue":
@@ -329,7 +329,7 @@ def main() -> int:
                     with open(ready_file + ".picker", "w", encoding="utf-8") as marker:
                         marker.write("picker\n")
                     disconnect_deadline = time.monotonic() + 8
-                    while b"Event stream remains disconnected" not in output and time.monotonic() < disconnect_deadline:
+                    while b"Live updates are still unavailable" not in output and time.monotonic() < disconnect_deadline:
                         if read_available(fd, output, 0.05) < 0:
                             break
                 os.write(fd, b"local\r")

@@ -1135,5 +1135,5 @@ test("Work chrome separates semantic metadata metrics extensions and activity", 
   assert.match(diagnostics, /Work cwd: \/work\/customer\/project \(feature\/live\)/u);
   assert.match(diagnostics, /Dock ID: dock-1/u);
   assert.match(diagnostics, /Pi session ID: pi-1/u);
-  assert.match(diagnostics, /Runtime generation: 1/u);
+  assert.match(diagnostics, /Work revision: 1/u);
 });

@@ -10,7 +10,9 @@ import {
   parseControlRequest,
   parseControlResponse,
   parseEnsureResult,
-  parseEventsResult,
+  parseInstanceReadResult,
+  parseFollowResult,
+  parseExtensionUiControlResult,
   parseForgetResult,
   parseHostInfoResult,
   parseHistoryResult,
@@ -43,6 +45,9 @@ import {
   ProtocolValidationError,
   CONTROLLER_DIRECTIVES_CAPABILITY,
   PERSISTENT_INTERACTIONS_CAPABILITY,
+  INSTANCE_READ_CAPABILITY,
+  EVENTS_FOLLOW_CAPABILITY,
+  EXTENSION_UI_CONTROL_CAPABILITY,
   INSTANCE_KEYS_CAPABILITY,
   CONVERSATION_CONTENT_CAPABILITY,
   implementedCapabilities,
@@ -278,41 +283,25 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   assert.throws(() => parseControlRequest({ ...base, type: "host.info", params: { extra: true } }), /Unexpected field/);
   assert.throws(() => parseControlRequest({
     ...base,
-    type: "instance.attach",
-    params: { instanceId: "i1", follow: false, controller: "observe", since: { hostEpoch: "e1", instanceId: "i1", runtimeGeneration: 1, sequence: -1 } },
+    type: "instance.follow",
+    params: { instanceId: "i1", since: { hostEpoch: "e1", instanceId: "i1", runtimeGeneration: 1, sequence: -1 } },
   }), (error: unknown) => error instanceof ProtocolValidationError && error.code === "invalid_request");
+  assert.throws(() => parseControlRequest({ ...base, type: "instance.follow", params: { instanceId: "i1" } }), /params\.since/);
+  assert.deepEqual(parseControlRequest({
+    ...base,
+    type: "instance.read",
+    params: { instanceId: "i1", replay: "event_log" },
+  }).params, { instanceId: "i1", since: undefined, replay: "event_log" });
+  assert.deepEqual(parseControlRequest({
+    ...base,
+    type: "interaction.control",
+    params: { instanceId: "i1" },
+  }).params, { instanceId: "i1" });
   assert.throws(() => parseControlRequest({
     ...base,
-    type: "instance.attach",
-    params: { instanceId: "i1", follow: false, controller: "observe", since: 4 },
-  }), (error: unknown) => error instanceof ProtocolValidationError && error.code === "invalid_request");
-  assert.throws(() => parseControlRequest({
-    ...base,
-    type: "instance.attach",
-    params: { instanceId: "i1", follow: false, controller: "claim" },
-  }), /requires a follow attach stream/);
-  const legacyAttach = parseControlRequest({
-    ...base,
-    type: "instance.attach",
-    params: { instanceId: "i1", follow: true, controller: "observe" },
-  });
-  assert.equal(legacyAttach.type === "instance.attach" && "replay" in legacyAttach.params, false);
-  const conversationAttach = parseControlRequest({
-    ...base,
-    type: "instance.attach",
-    params: { instanceId: "i1", follow: true, controller: "observe", replay: "conversation_bootstrap" },
-  });
-  assert.equal(conversationAttach.type === "instance.attach" ? conversationAttach.params.replay : undefined, "conversation_bootstrap");
-  assert.throws(() => parseControlRequest({
-    ...base,
-    type: "instance.attach",
-    params: { instanceId: "i1", follow: false, controller: "observe", replay: "conversation_bootstrap" },
-  }), /requires a fresh follow stream/);
-  assert.throws(() => parseControlRequest({
-    ...base,
-    type: "instance.attach",
-    params: { instanceId: "i1", since: { hostEpoch: "e1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, follow: true, controller: "observe", replay: "conversation_bootstrap" },
-  }), /without a cursor/);
+    type: "instance.read",
+    params: { instanceId: "i1", since: { hostEpoch: "e1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, replay: "conversation_bootstrap" },
+  }), /requires a fresh read/);
   assert.throws(() => parseControlRequest({
     ...base,
     type: "command.submit",
@@ -364,7 +353,10 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   assert.equal(capabilityForRequest("session.inventory"), "session.inventory.v1");
   assert.equal(capabilityForRequest("extension.tools_expanded.set"), "extension_ui.tools-expanded.v1");
   assert.equal(capabilityForRequest("extension.widget_viewport.set"), "extension_ui.widgets.v1");
-  assert.deepEqual(requiredCapabilities("events.replay-purpose.v1"), ["core.v2", "events.follow", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.keys.v1", "tool-result-presentation.v1", "events.replay-purpose.v1"]);
+  assert.equal(capabilityForRequest("instance.read"), INSTANCE_READ_CAPABILITY);
+  assert.equal(capabilityForRequest("instance.follow"), EVENTS_FOLLOW_CAPABILITY);
+  assert.equal(capabilityForRequest("interaction.control"), EXTENSION_UI_CONTROL_CAPABILITY);
+  assert.deepEqual(requiredCapabilities(EVENTS_FOLLOW_CAPABILITY), ["core.v2", INSTANCE_READ_CAPABILITY, "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.keys.v1", "tool-result-presentation.v1", EVENTS_FOLLOW_CAPABILITY]);
 
   const ensured = parseControlRequest({
     ...base,
@@ -612,28 +604,23 @@ test("Stage 4 interaction requests, responses, and controller leases are closed"
   });
   assert.throws(() => parseInteractionRespondResult({ interactionId: "dialog-1", state: "resolved", extra: true }), /Unexpected field/);
 
-  const attach = parseEventsResult({
+  const read = parseInstanceReadResult({
     instance: validSnapshot(),
     page: { events: [], earliest: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, latest: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, truncated: false, epochChanged: false, generationChanged: false },
-    recentHistory: [], historyTruncated: false, pendingMessages: [], controller: { status: "acquired", leaseToken: "lease-1", controllerId: "controller-1" }, following: true,
+    recentHistory: [], historyTruncated: false, pendingMessages: [],
   });
-  assert.deepEqual(attach.controller, { status: "acquired", leaseToken: "lease-1", controllerId: "controller-1" });
+  assert.equal(read.instance.id, "i1");
+  assert.equal(parseFollowResult({ page: read.page }).page.latest.sequence, 1);
+  assert.deepEqual(parseExtensionUiControlResult({ instanceId: "i1", runtimeGeneration: 1, leaseToken: "lease-1", controllerId: "controller-1" }), { instanceId: "i1", runtimeGeneration: 1, leaseToken: "lease-1", controllerId: "controller-1" });
   const persistentRequest = parseControlEventEnvelope({
     kind: "event", version: 2, requestId: "stream-1", hostEpoch: "epoch-1",
-    event: validEvent("interaction.requested", { interactionId: "dialog-1", method: "confirm", title: "Delete", message: "Proceed?", issuedAt: "2026-01-01T00:00:00.000Z" }),
+    event: validEvent("interaction.requested", { controllerId: "controller-1", interactionId: "dialog-1", method: "confirm", title: "Delete", message: "Proceed?", issuedAt: "2026-01-01T00:00:00.000Z" }),
   }, "stream-1", "epoch-1").event;
   assert.ok(persistentRequest.type === "interaction.requested");
   assert.equal(persistentRequest.data.expiresAt, undefined);
   const persistentSnapshot = parseStatusResult({ instance: { ...validSnapshot(), activeInteraction: { id: "dialog-1", method: "confirm" } } }).instance;
   assert.deepEqual(persistentSnapshot.activeInteraction, { id: "dialog-1", method: "confirm" });
-  assert.throws(() => parseEventsResult({
-    ...attach,
-    controller: { status: "acquired" },
-  }), /leaseToken|controllerId/);
-  assert.throws(() => parseEventsResult({
-    ...attach,
-    controller: { status: "acquired", leaseToken: "lease-1" },
-  }), /controllerId/);
+  assert.throws(() => parseExtensionUiControlResult({ instanceId: "i1", runtimeGeneration: 1, leaseToken: "lease-1" }), /controllerId/);
   const dataUriNotification = parseControlEventEnvelope({
     kind: "event", version: 2, requestId: "stream-1", hostEpoch: "epoch-1",
     event: validEvent("extension.notification", { message: "data:image/png;base64,A0+/", level: "info" }),
@@ -1016,15 +1003,15 @@ test("response, snapshot, replay, and event parsers reject open or inconsistent 
   assert.throws(() => parseControlEventEnvelope(envelope(validEvent("message.delta", { messageId: "m1", block: "text", delta: "x", extra: true })), "attach-1", "epoch-1"), /Unexpected field/);
   assert.throws(() => parseControlEventEnvelope(envelope(validEvent("future.unknown", {})), "attach-1", "epoch-1"), /Unsupported event type/);
 
-  assert.throws(() => parseEventsResult({
+  assert.throws(() => parseInstanceReadResult({
     instance: validSnapshot(),
     page: { events: [validEvent()], earliest: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, latest: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, truncated: false, epochChanged: false, generationChanged: false },
-    recentHistory: [], historyTruncated: true, pendingMessages: [], controller: { status: "observing" }, following: false, extra: true,
+    recentHistory: [], historyTruncated: true, pendingMessages: [], extra: true,
   }), /Unexpected field/);
-  assert.throws(() => parseEventsResult({
+  assert.throws(() => parseInstanceReadResult({
     instance: validSnapshot(),
     page: { events: [{ ...validEvent(), instanceId: "other" }], earliest: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, latest: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 }, truncated: false, epochChanged: false, generationChanged: false },
-    recentHistory: [], historyTruncated: true, pendingMessages: [], controller: { status: "observing" }, following: false,
-  }), /cursor domain\/order/);
+    recentHistory: [], historyTruncated: true, pendingMessages: [],
+  }), /out of order|another work state/);
   assert.throws(() => parseControlEventEnvelope(envelope(validEvent("settings.changed", { key: "unknown", value: true, reloadRequired: false, hostRestartRequired: false })), "attach-1", "epoch-1"), /Unsupported setting key/);
 });

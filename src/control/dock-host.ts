@@ -64,7 +64,8 @@ import {
   type ControlEventEnvelope,
   type ControlRequest,
   type ControlResponse,
-  type EventsResult,
+  type FollowResult,
+  type InstanceReadResult,
   type HelloError,
   type HistoryResult,
   parseClientHello,
@@ -75,6 +76,7 @@ import {
   INSTANCE_KEYS_CAPABILITY,
   CONTROLLER_DIRECTIVES_CAPABILITY,
   PERSISTENT_INTERACTIONS_CAPABILITY,
+  EXTENSION_UI_CONTROL_CAPABILITY,
   TOOL_RESULT_PRESENTATION_CAPABILITY,
   TOOLS_EXPANDED_CAPABILITY,
 } from "./protocol.js";
@@ -86,7 +88,7 @@ const MAX_SESSION_INVENTORY_ITEMS = 2_000;
 const MAX_ATTACH_EVENT_QUEUE = 1_000;
 const MAX_ATTACH_EVENT_QUEUE_BYTES = 4 * MAX_CONTROL_LINE_BYTES;
 const ATTACH_DRAIN_TIMEOUT_MS = 5_000;
-const ATTACH_INITIAL_OVERFLOW_MESSAGE = "Attach initialization exceeded the bounded event handoff queue; reconnect to obtain an authoritative fresh projection";
+const ATTACH_INITIAL_OVERFLOW_MESSAGE = "Too many updates arrived while opening this work; open it again to refresh the view";
 
 type HostState = "new" | "starting" | "running" | "mutation_faulted" | "draining" | "stopping" | "stopped";
 type WriteOutcome = "written" | "backpressured" | "failed" | "too_large";
@@ -129,6 +131,7 @@ export class DockHost {
   private readonly connections = new Set<Socket>();
   private readonly connectionRequirements = new WeakMap<Socket, ReadonlySet<string>>();
   private readonly attachConnections = new Map<string, Set<Socket>>();
+  private readonly interactionConnections = new Map<string, Socket>();
   private readonly attachBackpressureStats = { blocked: 0, drained: 0, overflow: 0, timeout: 0 };
   private readonly inFlightDispatches = new Set<Promise<void>>();
   private readonly operationLedger: OperationLedger;
@@ -259,6 +262,7 @@ export class DockHost {
       this.unsubscribeCatalogRemoval?.();
       this.unsubscribeCatalogRemoval = undefined;
       this.attachConnections.clear();
+      this.interactionConnections.clear();
       this.socketIdentity = undefined;
       this.state = "stopped";
     }
@@ -447,7 +451,14 @@ export class DockHost {
       })); return;
       case "instance.get_by_key": this.sendSuccessAndEnd(socket,request.requestId,{instance:this.registry.getSnapshotByKey(request.params.key)??null}); return;
       case "instance.get": this.sendSuccessAndEnd(socket,request.requestId,{instance:this.registry.getSnapshot(request.params.instanceId)}); return;
-      case "instance.attach": await this.attachEventStream(request,socket,setEventUnsubscribe); return;
+      case "instance.read": {
+        const instance=this.registry.get(request.params.instanceId);
+        if(request.params.since&&request.params.since.instanceId!==instance.id)throw new ProtocolValidationError("invalid_cursor","The saved update position belongs to another work");
+        const projection=await instance.getAttachProjection(request.params.since,MAX_HISTORY_ITEMS,request.params.replay);
+        this.sendSuccessAndEnd(socket,request.requestId,createBoundedReadResult(projection,request.requestId)); return;
+      }
+      case "instance.follow": await this.followEventStream(request,socket,setEventUnsubscribe); return;
+      case "interaction.control": await this.controlExtensionUi(request,socket,setEventUnsubscribe); return;
       case "instance.forget": {
         const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, async () => {
           const forgotten = await this.registry.forget(request.params.operationId, request.params.instanceId);
@@ -565,14 +576,12 @@ export class DockHost {
     }
   }
 
-  private async attachEventStream(request: Extract<ControlRequest,{type:"instance.attach"}>,socket:Socket,setEventUnsubscribe:(unsubscribe:()=>void)=>void):Promise<void> {
+  private async followEventStream(request: Extract<ControlRequest,{type:"instance.follow"}>,socket:Socket,setEventUnsubscribe:(unsubscribe:()=>void)=>void):Promise<void> {
     const instance=this.registry.get(request.params.instanceId);
     const requirements=this.connectionRequirements.get(socket);
-    if(request.params.controller==="claim"&&requirements?.has(PERSISTENT_INTERACTIONS_CAPABILITY)!==true)throw new ProtocolValidationError("capability_missing",`Capability ${PERSISTENT_INTERACTIONS_CAPABILITY} is required to claim the interaction controller`);
     this.trackAttachStream(instance.id, socket);
     const cursor=request.params.since;
-    if(cursor && cursor.instanceId!==instance.id) throw new ProtocolValidationError("invalid_cursor","Cursor belongs to another instance");
-    const follow=request.params.follow;
+    if(cursor.instanceId!==instance.id) throw new ProtocolValidationError("invalid_cursor","The saved update position belongs to another work");
     const projectionCapabilities:ClientProjectionCapabilities={
       toolsExpanded: requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,
       gitBranch: requirements?.has(GIT_BRANCH_CAPABILITY)===true,
@@ -586,24 +595,12 @@ export class DockHost {
     let initializing=true,pending:QueuedEvent[]=[]; let pendingBytes=0,initializationOverflow=false;
     let lastGeneration=instance.runtimeGeneration,lastAccepted=0; let unsubscribe=()=>{};
     let liveQueue:QueuedEvent[]=[]; let liveQueueBytes=0,waitingForDrain=false;
-    let controller:ControllerClaim|{status:"observing"}=request.params.controller==="observe"?{status:"observing"}:{status:"unavailable"};
-    let controllerReleased=false,subscriptionClosed=false;
-    const releaseController=():void=>{
-      if(controllerReleased||controller.status!=="acquired")return;
-      controllerReleased=true;
-      void instance.releaseInteractionController(controller.leaseToken,"detach");
-    };
+    let subscriptionClosed=false;
     const clearQueues=():void=>{pending=[];pendingBytes=0;liveQueue=[];liveQueueBytes=0;};
-    const closeSubscription=():void=>{if(subscriptionClosed)return;subscriptionClosed=true;unsubscribe();releaseController();clearQueues();};
+    const closeSubscription=():void=>{if(subscriptionClosed)return;subscriptionClosed=true;unsubscribe();clearQueues();};
     const abortBackpressuredStream=():void=>{closeSubscription();if(!socket.destroyed)socket.destroy();};
     const boundedEvent=(event:DockEvent):QueuedEvent|undefined=>{
-      const directiveControllerId=initializing&&isControllerDirective(event)
-        ? event.data.controllerId
-        : undefined;
-      const sizingCapabilities=directiveControllerId===undefined
-        ? projectionCapabilities
-        : {...projectionCapabilities,controllerId:directiveControllerId};
-      const bytes=eventFrameSize(request.requestId,this.hostEpoch,event,sizingCapabilities);
+      const bytes=eventFrameSize(request.requestId,this.hostEpoch,event,projectionCapabilities);
       if(bytes===0)return undefined;
       if(!Number.isFinite(bytes)||bytes>MAX_CONTROL_LINE_BYTES){closeSubscription();socket.destroy();return undefined;}
       return {event,bytes};
@@ -619,15 +616,12 @@ export class DockHost {
         const outcome=writeEvent(socket,request.requestId,this.hostEpoch,queued.event,projectionCapabilities);
         if(outcome==="written")continue;
         if(outcome==="backpressured"){
-          this.attachBackpressureStats.blocked+=1;
-          waitingForDrain=true;
+          this.attachBackpressureStats.blocked+=1;waitingForDrain=true;
           void waitForSocketDrain(socket,ATTACH_DRAIN_TIMEOUT_MS).then((drained)=>{
             if(subscriptionClosed)return;
             if(!drained){this.attachBackpressureStats.timeout+=1;abortBackpressuredStream();return;}
-            this.attachBackpressureStats.drained+=1;
-            waitingForDrain=false;flushLiveQueue();
-          });
-          return;
+            this.attachBackpressureStats.drained+=1;waitingForDrain=false;flushLiveQueue();
+          });return;
         }
         closeSubscription();socket.destroy();return;
       }
@@ -639,92 +633,84 @@ export class DockHost {
         lastGeneration=event.runtimeGeneration;lastAccepted=0;
       }
       if(event.sequence<=lastAccepted)return true;
-      const queued=boundedEvent(event);
-      if(subscriptionClosed)return false;
-      lastAccepted=event.sequence;
-      if(!queued)return true;
-      if(waitingForDrain||liveQueue.length>0){
-        const nextBytes=appendBounded(liveQueue,queued,liveQueueBytes);
-        if(nextBytes===undefined){this.attachBackpressureStats.overflow+=1;abortBackpressuredStream();return false;}
-        liveQueueBytes=nextBytes;return true;
-      }
+      const queued=boundedEvent(event);if(subscriptionClosed)return false;lastAccepted=event.sequence;if(!queued)return true;
+      if(waitingForDrain||liveQueue.length>0){const nextBytes=appendBounded(liveQueue,queued,liveQueueBytes);if(nextBytes===undefined){this.attachBackpressureStats.overflow+=1;abortBackpressuredStream();return false;}liveQueueBytes=nextBytes;return true;}
       const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event,projectionCapabilities);
       if(outcome==="written")return true;
       if(outcome==="backpressured"){
-        this.attachBackpressureStats.blocked+=1;
-        waitingForDrain=true;
-        void waitForSocketDrain(socket,ATTACH_DRAIN_TIMEOUT_MS).then((drained)=>{
-          if(subscriptionClosed)return;
-          if(!drained){this.attachBackpressureStats.timeout+=1;abortBackpressuredStream();return;}
-          this.attachBackpressureStats.drained+=1;
-          waitingForDrain=false;flushLiveQueue();
-        });
-        return true;
+        this.attachBackpressureStats.blocked+=1;waitingForDrain=true;
+        void waitForSocketDrain(socket,ATTACH_DRAIN_TIMEOUT_MS).then((drained)=>{if(subscriptionClosed)return;if(!drained){this.attachBackpressureStats.timeout+=1;abortBackpressuredStream();return;}this.attachBackpressureStats.drained+=1;waitingForDrain=false;flushLiveQueue();});return true;
       }
       closeSubscription();socket.destroy();return false;
     };
     unsubscribe=instance.subscribe(event=>{
-      if(initializing){
-        const queued=boundedEvent(event);
-        if(subscriptionClosed||!queued)return;
-        const nextBytes=appendBounded(pending,queued,pendingBytes);
-        if(nextBytes===undefined){
-          this.attachBackpressureStats.overflow+=1;
-          initializationOverflow=true;
-          void instance.reportControlDegradation(ATTACH_INITIAL_OVERFLOW_MESSAGE).catch(()=>{});
-          closeSubscription();return;
-        }
-        pendingBytes=nextBytes;return;
-      }
+      if(initializing){const queued=boundedEvent(event);if(subscriptionClosed||!queued)return;const nextBytes=appendBounded(pending,queued,pendingBytes);if(nextBytes===undefined){this.attachBackpressureStats.overflow+=1;initializationOverflow=true;void instance.reportControlDegradation(ATTACH_INITIAL_OVERFLOW_MESSAGE).catch(()=>{});closeSubscription();return;}pendingBytes=nextBytes;return;}
       sendLiveEvent(event);
     });
-    if(subscriptionClosed)unsubscribe();
-    setEventUnsubscribe(closeSubscription);
+    if(subscriptionClosed)unsubscribe();setEventUnsubscribe(closeSubscription);
     let projection!:AttachProjection;
-    try{
-      if(follow&&request.params.controller==="claim"){
-        for(let attempt=0;attempt<3;attempt+=1){
-          controller=await instance.claimInteractionController();
-          controllerReleased=false;
-          projectionCapabilities.controllerId=controller.status==="acquired"?controller.controllerId:undefined;
-          projection=await instance.getAttachProjection(cursor,MAX_HISTORY_ITEMS,request.params.replay??"legacy_history_overlay");
-          if(controller.status!=="acquired"||instance.isInteractionControllerCurrent(controller.leaseToken,projection.instance.runtimeGeneration))break;
-          await instance.releaseInteractionController(controller.leaseToken,"detach");
-          controller={status:"unavailable"};
-          projectionCapabilities.controllerId=undefined;
-        }
-      }else{
-        projection=await instance.getAttachProjection(cursor,MAX_HISTORY_ITEMS,request.params.replay??"legacy_history_overlay");
-      }
-    }catch(error){initializing=false;clearQueues();closeSubscription();throw error;}
+    try{projection=await instance.getAttachProjection(cursor,1,"event_log");}
+    catch(error){initializing=false;clearQueues();closeSubscription();throw error;}
     if(subscriptionClosed){
-      releaseController();initializing=false;clearQueues();
-      if(initializationOverflow)this.sendErrorAndEnd(socket,"attach_initial_overflow",ATTACH_INITIAL_OVERFLOW_MESSAGE,request.requestId);
+      initializing=false;clearQueues();
+      if(initializationOverflow&&!socket.destroyed)this.sendErrorAndEnd(socket,"follow_initial_overflow",ATTACH_INITIAL_OVERFLOW_MESSAGE,request.requestId);
       return;
     }
     if(socket.destroyed){closeSubscription();return;}
-    if(subscriptionClosed){
-      releaseController();initializing=false;clearQueues();
-      if(initializationOverflow)this.sendErrorAndEnd(socket,"attach_initial_overflow",ATTACH_INITIAL_OVERFLOW_MESSAGE,request.requestId);
-      return;
-    }
-    const result=createBoundedEventsResult(projection,follow,request.requestId,controller);
+    const result=createBoundedFollowResult(projection,request.requestId);
     const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,projectForClient(result,projectionCapabilities)));
     if(responseOutcome==="backpressured"){
-      this.attachBackpressureStats.blocked+=1;
-      const drained=await waitForSocketDrain(socket,ATTACH_DRAIN_TIMEOUT_MS);
+      this.attachBackpressureStats.blocked+=1;const drained=await waitForSocketDrain(socket,ATTACH_DRAIN_TIMEOUT_MS);
       if(!drained){this.attachBackpressureStats.timeout+=1;initializing=false;clearQueues();abortBackpressuredStream();return;}
       this.attachBackpressureStats.drained+=1;
-      if(subscriptionClosed){initializing=false;clearQueues();abortBackpressuredStream();return;}
-    }else if(responseOutcome!=="written"){
-      initializing=false;clearQueues();if(responseOutcome==="too_large"){closeSubscription();this.sendErrorAndEnd(socket,"response_too_large","Attach response exceeds the JSONL record limit",request.requestId);}else closeSubscription();return;
-    }
-    lastGeneration=result.instance.runtimeGeneration;lastAccepted=Math.max(projection.replaySince,result.page.latest.sequence);
+    }else if(responseOutcome!=="written"){initializing=false;clearQueues();closeSubscription();return;}
+    lastGeneration=result.page.latest.runtimeGeneration;lastAccepted=Math.max(projection.replaySince,result.page.latest.sequence);
     initializing=false;
-    const handoff=pending.sort((a,b)=>a.event.runtimeGeneration-b.event.runtimeGeneration||a.event.sequence-b.event.sequence);
-    pending=[];pendingBytes=0;
+    const handoff=pending.sort((a,b)=>a.event.runtimeGeneration-b.event.runtimeGeneration||a.event.sequence-b.event.sequence);pending=[];pendingBytes=0;
     for(const queued of handoff){if(!sendLiveEvent(queued.event))return;}
-    if(!follow){closeSubscription();socket.end();}
+  }
+
+  private async controlExtensionUi(request: Extract<ControlRequest,{type:"interaction.control"}>,socket:Socket,setEventUnsubscribe:(unsubscribe:()=>void)=>void):Promise<void> {
+    const instance=this.registry.get(request.params.instanceId);
+    const requirements=this.connectionRequirements.get(socket);
+    if(requirements?.has(EXTENSION_UI_CONTROL_CAPABILITY)!==true)throw new ProtocolValidationError("capability_missing","This client cannot operate Extension UI");
+    let closed=false,unsubscribe=()=>{};let claim:ControllerClaim|undefined;let ready=false;const pending:DockEvent[]=[];
+    const close=():void=>{
+      if(closed)return;closed=true;unsubscribe();
+      const current=this.interactionConnections.get(instance.id);if(current===socket)this.interactionConnections.delete(instance.id);
+      if(claim)void instance.releaseInteractionController(claim.leaseToken,"detach");
+      pending.length=0;
+    };
+    setEventUnsubscribe(close);
+    unsubscribe=instance.subscribe((event)=>{
+      if(event.type==="session.replaced"||event.type==="instance.stopped"||event.type==="instance.runtime_error"){close();if(!socket.destroyed)socket.end();return;}
+      if(!isControllerTargetedEvent(event))return;
+      if(!claim){if(pending.length<MAX_ATTACH_EVENT_QUEUE)pending.push(event);else{close();socket.destroy();}return;}
+      if(event.data.controllerId!==claim.controllerId)return;
+      if(!ready){if(pending.length<MAX_ATTACH_EVENT_QUEUE)pending.push(event);else{close();socket.destroy();}return;}
+      const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event,controllerEventProjectionCapabilities(claim.controllerId));
+      if(outcome!=="written"){close();socket.destroy();}
+    });
+    try{claim=await instance.claimInteractionController();}
+    catch(error){close();throw error;}
+    if(closed||socket.destroyed){close();return;}
+    const controlGeneration=instance.runtimeGeneration;
+    if(!instance.isInteractionControllerCurrent(claim.leaseToken,controlGeneration)){
+      close();
+      throw new ProtocolValidationError("interaction_unavailable","Extension UI is changing; try again");
+    }
+    const previous=this.interactionConnections.get(instance.id);
+    this.interactionConnections.set(instance.id,socket);
+    if(previous&&!previous.destroyed)previous.end();
+    const result={instanceId:instance.id,runtimeGeneration:controlGeneration,leaseToken:claim.leaseToken,controllerId:claim.controllerId};
+    const outcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,result));
+    if(outcome!=="written"){close();socket.destroy();return;}
+    ready=true;
+    for(const event of pending.splice(0)){
+      if(!isControllerTargetedEvent(event)||event.data.controllerId!==claim.controllerId)continue;
+      const written=writeEvent(socket,request.requestId,this.hostEpoch,event,controllerEventProjectionCapabilities(claim.controllerId));
+      if(written!=="written"){close();socket.destroy();return;}
+    }
   }
 
   private trackAttachStream(instanceId: string, socket: Socket): void {
@@ -759,7 +745,9 @@ function isMutationRequest(type: ControlRequest["type"]): boolean {
     && type !== "instance.list"
     && type !== "instance.get_by_key"
     && type !== "instance.get"
-    && type !== "instance.attach"
+    && type !== "instance.read"
+    && type !== "instance.follow"
+    && type !== "interaction.control"
     && type !== "extension.widget_viewport.set"
     && type !== "model.list"
     && type !== "tool.list"
@@ -849,7 +837,7 @@ function slimHistoryEntry(entry:HistoryResult["entries"][number]):HistoryResult[
   if(first?.type==="thinking")return {...entry,content:[{type:"thinking",text:marker}]};
   return {...entry,content:[{type:"text",text:marker}]};
 }
-function createBoundedEventsResult(projection:AttachProjection,following:boolean,requestId:string,controller:ControllerClaim|{status:"observing"}):EventsResult {
+function createBoundedReadResult(projection:AttachProjection,requestId:string):InstanceReadResult {
   const source=projection.page;
   let events=source.events;
   let truncated=source.truncated;
@@ -860,18 +848,25 @@ function createBoundedEventsResult(projection:AttachProjection,following:boolean
   let earliest=events.length>0&&truncated?{...source.earliest,sequence:events[0]!.sequence}:source.earliest;
   while(true){
     const page={events,earliest,latest:source.latest,truncated,epochChanged:projection.epochChanged,generationChanged:projection.generationChanged};
-    const result:EventsResult={instance:projection.instance,page,recentHistory:history,historyTruncated,pendingMessages:projection.pendingMessages,controller,following};
+    const result:InstanceReadResult={instance:projection.instance,page,recentHistory:history,historyTruncated,pendingMessages:projection.pendingMessages};
     const hostEpoch=projection.instance.ownerHostEpoch??source.latest.hostEpoch;
     if(encodedSize(successResponse(requestId,hostEpoch,result))<=MAX_CONTROL_LINE_BYTES)return result;
     if(history.length>1){history=history.slice(1);historyTruncated=true;continue;}
     if(history.length===1&&!historySlimmed){history=[slimHistoryEntry(history[0]!)];historyTruncated=true;historySlimmed=true;continue;}
     if(history.length===1){history=[];historyTruncated=true;continue;}
-    if(events.length>0){
-      events=events.slice(1);truncated=true;
-      earliest={...source.latest,sequence:events[0]?.sequence??source.latest.sequence};
-      continue;
-    }
+    if(events.length>0){events=events.slice(1);truncated=true;earliest={...source.latest,sequence:events[0]?.sequence??source.latest.sequence};continue;}
     return result;
+  }
+}
+function createBoundedFollowResult(projection:AttachProjection,requestId:string):FollowResult {
+  const source=projection.page;let events=source.events;let truncated=source.truncated;
+  if(events.length>MAX_REPLAY_EVENTS){events=events.slice(-MAX_REPLAY_EVENTS);truncated=true;}
+  let earliest=events.length>0&&truncated?{...source.earliest,sequence:events[0]!.sequence}:source.earliest;
+  while(true){
+    const result:FollowResult={page:{events,earliest,latest:source.latest,truncated,epochChanged:projection.epochChanged,generationChanged:projection.generationChanged}};
+    if(encodedSize(successResponse(requestId,source.latest.hostEpoch,result))<=MAX_CONTROL_LINE_BYTES)return result;
+    if(events.length===0)return result;
+    events=events.slice(1);truncated=true;earliest={...source.latest,sequence:events[0]?.sequence??source.latest.sequence};
   }
 }
 interface ClientProjectionCapabilities {
@@ -883,6 +878,19 @@ interface ClientProjectionCapabilities {
   controllerDirectives: boolean;
   persistentInteractions: boolean;
   controllerId?: string;
+}
+
+function controllerEventProjectionCapabilities(controllerId: string): ClientProjectionCapabilities {
+  return {
+    toolsExpanded: false,
+    gitBranch: false,
+    instanceKeys: false,
+    toolPresentation: false,
+    images: true,
+    controllerDirectives: true,
+    persistentInteractions: true,
+    controllerId,
+  };
 }
 
 type ClientProjectionContext = "root" | "generic" | "event" | "pending-message" | "submitted-message" | "tool-event-data" | "message-data" | "history-entry" | "content-block";
@@ -909,7 +917,7 @@ function projectForClient(
     && typeof source.earliest === "object"
     && source.latest !== null
     && typeof source.latest === "object";
-  const isAttachProjection = context === "root"
+  const isReadProjection = context === "root"
     && Array.isArray(source.recentHistory)
     && typeof source.historyTruncated === "boolean"
     && source.instance !== null
@@ -936,12 +944,6 @@ function projectForClient(
     if (isSnapshot && key === "gitBranch" && !capabilities.gitBranch) continue;
     if (isSnapshot && key === "key" && !capabilities.instanceKeys) continue;
     if (isSnapshot && key === "activeInteraction" && !capabilities.persistentInteractions) continue;
-    if (isAttachProjection && key === "controller" && !capabilities.controllerDirectives && child !== null && typeof child === "object" && !Array.isArray(child)) {
-      const legacyController = { ...(child as Record<string, unknown>) };
-      delete legacyController.controllerId;
-      projected[key] = projectForClient(legacyController, capabilities, "generic");
-      continue;
-    }
     if (key === "presentation" && !capabilities.toolPresentation && (context === "tool-event-data" || isToolResultBlock)) continue;
     if (key === "images" && !capabilities.images && imageInputContext) continue;
     if (key === "text" && legacyImageOnlyText) {
@@ -962,8 +964,8 @@ function projectForClient(
     }
     let childContext: ClientProjectionContext = "generic";
     if (context === "root" && key === "page") childContext = "root";
-    if (isAttachProjection && key === "recentHistory") childContext = "history-entry";
-    if (isAttachProjection && key === "pendingMessages") childContext = "pending-message";
+    if (isReadProjection && key === "recentHistory") childContext = "history-entry";
+    if (isReadProjection && key === "pendingMessages") childContext = "pending-message";
     if (isHistoryPage && key === "entries") childContext = "history-entry";
     if ((key === "restored" || key === "inFlight") && Array.isArray(child) && Array.isArray(source.restored) && Array.isArray(source.inFlight)) childContext = "pending-message";
     if (context === "event" && key === "data") {
@@ -987,11 +989,18 @@ function isControllerDirective(value: unknown): value is Extract<DockEvent, { ty
   return type === "extension.title_set" || type === "extension.editor_text_set";
 }
 
+function isControllerTargetedEvent(value: unknown): value is Extract<DockEvent, { type: "interaction.requested" | "extension.title_set" | "extension.editor_text_set" }> {
+  if (value === null || typeof value !== "object") return false;
+  return (value as { type?: unknown }).type === "interaction.requested" || isControllerDirective(value);
+}
+
 function isUnsupportedProjectionEvent(value: unknown, capabilities: ClientProjectionCapabilities): boolean {
   if (value === null || typeof value !== "object") return false;
   const type = (value as { type?: unknown }).type;
-  if (isControllerDirective(value)) {
-    return !capabilities.controllerDirectives || value.data.controllerId !== capabilities.controllerId;
+  if (isControllerTargetedEvent(value)) {
+    return capabilities.controllerId === undefined
+      || (isControllerDirective(value) && !capabilities.controllerDirectives)
+      || value.data.controllerId !== capabilities.controllerId;
   }
   return (!capabilities.toolsExpanded && type === "extension.tools_expanded_changed")
     || (!capabilities.gitBranch && type === "git.branch_changed")

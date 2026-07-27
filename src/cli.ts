@@ -312,7 +312,7 @@ async function showEvents(client: DockClient, args: string[]): Promise<void> {
   }
 
   if (!follow) {
-    const result = await client.events(instanceId, cursor);
+    const result = await client.read(instanceId, cursor);
     writeJson({ kind: "events", ...result, following: false });
     return;
   }

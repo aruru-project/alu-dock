@@ -13,7 +13,7 @@ import {
   type AutocompleteSuggestions,
 } from "@earendil-works/pi-tui";
 
-import { ControlClientError, DockClient, type EventSubscription } from "../control/dock-client.js";
+import { ControlClientError, DockClient, type EventSubscription, type OperationSubscription } from "../control/dock-client.js";
 import type { InteractionResponse } from "../core/extension-ui-broker.js";
 import type { CommandDto, SettingDto, SettingUpdate } from "../core/config-projection.js";
 import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot, PendingMessageDto, SessionDto, TreeNodeDto } from "../core/managed-instance.js";
@@ -94,6 +94,7 @@ export async function runDockTui(
   let submittingFeedbackVisible = false;
   activity.setActivity(runActivity);
   let subscription: EventSubscription | undefined;
+  let operationSubscription: OperationSubscription | undefined;
   let controllerLeaseToken: string | undefined;
   let controllerId: string | undefined;
   let pendingEditorDirective: { controllerId: string; runtimeGeneration: number; text: string } | undefined;
@@ -101,7 +102,9 @@ export async function runDockTui(
   let activeExtensionDialog: { interactionId: string; closeFromHost: () => void } | undefined;
   let lastEventGeneration = instance.runtimeGeneration;
   let lastEventSequence = instance.eventCursor.sequence;
-  let controllerReattach: Promise<void> | undefined;
+  let operationAcquire: Promise<void> | undefined;
+  let operationRetryTimer: NodeJS.Timeout | undefined;
+  let operationRetryDelayMs = 250;
   let eventStreamRecovery: Promise<void> | undefined;
   let deferredEventStreamFailure: { watched: EventSubscription; error: unknown } | undefined;
   let eventStreamConnected = true;
@@ -148,7 +151,7 @@ export async function runDockTui(
   const requireCoherentControl = (action: string): boolean => {
     if (eventStreamConnected && instance.lifecycle === "active") return true;
     refreshEditorSubmit();
-    conversation.addNotice(`${action} was not sent because this TUI does not have a coherent event stream. Ctrl+D and reattach if recovery does not complete.`, true);
+    conversation.addNotice(`${action} was not sent because live updates are unavailable. Wait for reconnection, or press Ctrl+D and open this work again.`, true);
     tui.requestRender();
     return false;
   };
@@ -189,10 +192,6 @@ export async function runDockTui(
     }
   };
 
-  const applyInitialControllerDirectives = (events: DockEvent[]): void => {
-    for (const event of events) applyControllerDirective(event);
-  };
-
   const onEvent = (event: DockEvent): void => {
     if (event.runtimeGeneration < lastEventGeneration) return;
     if (event.runtimeGeneration === lastEventGeneration && event.sequence <= lastEventSequence) return;
@@ -212,9 +211,11 @@ export async function runDockTui(
     if (runActivity.phase !== "submitting" || submittingFeedbackVisible) activity.setActivity(runActivity);
     if (event.type === "session.replaced") {
       activeExtensionDialog?.closeFromHost();
+      operationSubscription?.close();
+      operationSubscription = undefined;
       clearControllerRouting();
-      status.setController("unavailable");
-      void reacquireController({ ...instance.eventCursor });
+      status.setController("read-only");
+      void acquireExtensionUiOperation();
       navigationHistoryToken = undefined;
       navigationBufferedEvents = [];
       initialHistoryLoading = false;
@@ -269,17 +270,10 @@ export async function runDockTui(
     }
   };
 
-  subscription = await client.streamEvents(instance.id, { onEvent, requireTuiProjection: true, claimController: true, conversationBootstrap: true });
+  subscription = await client.streamEvents(instance.id, { onEvent, requireTuiProjection: true, conversationBootstrap: true });
   const initialProjection = subscription.initial.instance;
   instance = initialProjection;
-  controllerLeaseToken = subscription.initial.controller.status === "acquired"
-    ? subscription.initial.controller.leaseToken
-    : undefined;
-  controllerId = subscription.initial.controller.status === "acquired"
-    ? subscription.initial.controller.controllerId
-    : undefined;
-  status.setController(subscription.initial.controller.status);
-  applyInitialControllerDirectives(subscription.initial.page.events);
+  status.setController("read-only");
   if (lastEventGeneration < subscription.initial.page.latest.runtimeGeneration
     || (lastEventGeneration === subscription.initial.page.latest.runtimeGeneration && lastEventSequence < subscription.initial.page.latest.sequence)) {
     lastEventGeneration = subscription.initial.page.latest.runtimeGeneration;
@@ -345,61 +339,77 @@ export async function runDockTui(
     });
   }
 
-  function reacquireController(since: EventCursor): Promise<void> {
-    if (controllerReattach) return controllerReattach;
-    const previous = subscription;
-    if (!previous) return Promise.resolve();
+  function scheduleExtensionUiOperationRetry(): void {
+    if (exiting || operationSubscription || operationRetryTimer || instance.lifecycle !== "active") return;
+    const delay = operationRetryDelayMs;
+    operationRetryDelayMs = Math.min(5_000, operationRetryDelayMs * 2);
+    operationRetryTimer = setTimeout(() => {
+      operationRetryTimer = undefined;
+      void acquireExtensionUiOperation();
+    }, delay);
+    operationRetryTimer.unref();
+  }
+
+  function acquireExtensionUiOperation(): Promise<void> {
+    if (exiting || operationSubscription) return Promise.resolve();
+    if (operationAcquire) return operationAcquire;
+    if (operationRetryTimer) {
+      clearTimeout(operationRetryTimer);
+      operationRetryTimer = undefined;
+    }
     const task = (async () => {
-      const candidateBufferedEvents: DockEvent[] = [];
-      let candidateReady = false;
-      const onCandidateEvent = (event: DockEvent): void => {
-        if (candidateReady) onEvent(event);
-        else candidateBufferedEvents.push(event);
-      };
       try {
-        const next = await client.streamEvents(instance.id, {
-          since,
-          onEvent: onCandidateEvent,
-          requireTuiProjection: true,
-          claimController: true,
+        const next = await client.controlExtensionUi(instance.id, (event) => {
+          if (event.type === "interaction.requested") void handleExtensionInteraction(event);
+          else applyControllerDirective(event);
         });
-        if (exiting || subscription !== previous) {
+        if (exiting) {
           next.close();
           await next.done.catch(() => {});
           return;
         }
-        subscription = next;
-        controllerLeaseToken = next.initial.controller.status === "acquired"
-          ? next.initial.controller.leaseToken
-          : undefined;
-        controllerId = next.initial.controller.status === "acquired"
-          ? next.initial.controller.controllerId
-          : undefined;
-        status.setController(next.initial.controller.status);
-        watchEventSubscription(next);
-        for (const event of next.initial.page.events) onEvent(event);
-        candidateReady = true;
-        for (const event of candidateBufferedEvents) onEvent(event);
-        candidateBufferedEvents.length = 0;
-        const pendingInteraction = [...next.initial.page.events].reverse().find((event) => event.type === "interaction.requested"
-          && event.data.interactionId === next.initial.instance.activeInteraction?.id);
-        if (pendingInteraction?.type === "interaction.requested" && !activeExtensionDialog) void handleExtensionInteraction(pendingInteraction);
-        pendingQueue.reset(next.initial.pendingMessages);
-        previous.close();
+        operationSubscription = next;
+        operationRetryDelayMs = 250;
+        controllerLeaseToken = next.initial.leaseToken;
+        controllerId = next.initial.controllerId;
+        status.setController("operator");
+        watchOperationSubscription(next);
         tui.requestRender();
       } catch (error) {
         if (exiting) return;
+        activeExtensionDialog?.closeFromHost();
         clearControllerRouting();
-        status.setController("unavailable");
-        conversation.addNotice(`Controller reattach failed: ${errorText(error)}`, true);
+        status.setController("read-only");
         tui.requestRender();
+        if (!(error instanceof ControlClientError && ["instance_not_found", "instance_not_active", "protocol_incompatible"].includes(error.code))) {
+          scheduleExtensionUiOperationRetry();
+        }
       }
     })();
     const tracked = task.finally(() => {
-      if (controllerReattach === tracked) controllerReattach = undefined;
+      if (operationAcquire === tracked) operationAcquire = undefined;
     });
-    controllerReattach = tracked;
+    operationAcquire = tracked;
     return tracked;
+  }
+
+  function watchOperationSubscription(watched: OperationSubscription): void {
+    void watched.done.then(() => {
+      if (exiting || operationSubscription !== watched) return;
+      operationSubscription = undefined;
+      activeExtensionDialog?.closeFromHost();
+      clearControllerRouting();
+      status.setController("read-only");
+      tui.requestRender();
+    }).catch(() => {
+      if (exiting || operationSubscription !== watched) return;
+      operationSubscription = undefined;
+      activeExtensionDialog?.closeFromHost();
+      clearControllerRouting();
+      status.setController("read-only");
+      tui.requestRender();
+      scheduleExtensionUiOperationRetry();
+    });
   }
 
   const [settingsLoad, commandsLoad] = await Promise.allSettled([
@@ -410,7 +420,7 @@ export async function runDockTui(
   else conversation.addNotice(`Settings unavailable: ${errorText(settingsLoad.reason)}`, true);
   if (commandsLoad.status === "fulfilled") {
     commands = commandsLoad.value.commands;
-    if (commandsLoad.value.truncated) conversation.addNotice(`Command catalog is bounded: showing ${commands.length} of ${commandsLoad.value.total}.`, true);
+    if (commandsLoad.value.truncated) conversation.addNotice(`Showing ${commands.length} of ${commandsLoad.value.total} commands.`, true);
   } else conversation.addNotice(`Command catalog unavailable: ${errorText(commandsLoad.reason)}`, true);
 
   editor = new Editor(tui, editorTheme, {
@@ -438,11 +448,12 @@ export async function runDockTui(
     if (!text) return;
     if (!eventStreamConnected) {
       refreshEditorSubmit();
-      conversation.addNotice("Control input was not sent because the event stream is not coherent. Ctrl+D and reattach if recovery does not complete.", true);
+      conversation.addNotice("Input was not sent because live updates are unavailable. Wait for reconnection, or press Ctrl+D and open this work again.", true);
       tui.requestRender();
       return;
     }
     editor.addToHistory(text);
+    void acquireExtensionUiOperation();
     void handleInput(text);
   };
 
@@ -840,26 +851,28 @@ export async function runDockTui(
   async function handleExtensionInteraction(event: Extract<DockEvent, { type: "interaction.requested" }>): Promise<void> {
     const leaseToken = controllerLeaseToken;
     if (!leaseToken) {
-      conversation.addNotice("Extension interaction is awaiting its controller; this client is observing.");
+      conversation.addNotice("This question is being handled in another open window.");
       tui.requestRender();
       return;
     }
     if (activeExtensionDialog) {
-      conversation.addNotice("A second extension interaction arrived while a dialog is active; it will remain Host-queued.", true);
+      conversation.addNotice("Another extension question is waiting and will appear after this one.", true);
       tui.requestRender();
       return;
     }
 
     const outcome = await presentExtensionDialog(event.data);
     if (outcome.fromHost || outcome.response === undefined) return;
-    if (!requireCoherentControl("Extension interaction response")) return;
     try {
       await client.respondInteraction(instance.id, leaseToken, event.data.interactionId, outcome.response);
     } catch (error) {
       if (error instanceof ControlClientError && (error.code === "interaction_expired" || error.code === "interaction_not_found")) return;
       if (error instanceof ControlClientError && error.code === "interaction_wrong_lease") {
         clearControllerRouting();
-        status.setController("unavailable");
+        status.setController("read-only");
+        conversation.addNotice("This question is now being handled in another open window.");
+        tui.requestRender();
+        return;
       }
       showError(error);
       // A failed response transport is not a user cancellation. Query the
@@ -874,7 +887,7 @@ export async function runDockTui(
           queueMicrotask(() => { void handleExtensionInteraction(event); });
         }
       } catch (statusError) {
-        conversation.addNotice(`Interaction status is unknown; the runtime remains blocked until a controller reattaches. ${errorText(statusError)}`, true);
+        conversation.addNotice(`The answer could not be confirmed. The question is still waiting; open this work again to continue. ${errorText(statusError)}`, true);
       }
       tui.requestRender();
     }
@@ -1975,7 +1988,7 @@ export async function runDockTui(
 
   function watchEventSubscription(watched: EventSubscription): void {
     void watched.done.then(() => {
-      recoverEventSubscription(watched, new ControlClientError("connection_closed", "Host ended the event stream"));
+      recoverEventSubscription(watched, new ControlClientError("connection_closed", "Alu Dock stopped live updates"));
     }).catch((error: unknown) => {
       recoverEventSubscription(watched, error);
     });
@@ -1993,17 +2006,14 @@ export async function runDockTui(
       runtimeGeneration: lastEventGeneration,
       sequence: lastEventSequence,
     };
-    activeExtensionDialog?.closeFromHost();
-    clearControllerRouting();
-    status.setController("unavailable");
     eventStreamConnected = false;
     refreshEditorSubmit();
     terminal.setProgress(false);
     status.setConnection("disconnected");
-    runActivity = disconnectedActivity("checking event stream · task status unknown");
+    runActivity = disconnectedActivity("checking live updates · task status unknown");
     activity.setActivity(runActivity);
     detachTruth = "status_unknown";
-    conversation.addNotice("Event stream interrupted; checking authoritative Host state. No command was replayed.", true);
+    conversation.addNotice("Live updates were interrupted. Checking the current work state; no command was resent.", true);
     tui.requestRender();
 
     const recovery = (async () => {
@@ -2015,9 +2025,9 @@ export async function runDockTui(
         status.setConnection("lost");
         runActivity = disconnectedActivity("control unavailable · status unknown · Ctrl+D detach");
         activity.setActivity(runActivity);
-        conversation.addNotice("Control connection unavailable; this instance's current status is unknown. This TUI remains read-only; Ctrl+D and reattach after checking the Host.", true);
-        conversation.addNotice(`Event stream: ${errorText(streamError)}`, true);
-        conversation.addNotice(`Status probe: ${errorText(statusError)}`, true);
+        conversation.addNotice("Alu Dock is unavailable, so this work's current state is unknown. This window remains read-only; press Ctrl+D and open it again after Dock recovers.", true);
+        conversation.addNotice(`Live updates: ${errorText(streamError)}`, true);
+        conversation.addNotice(`Status check: ${errorText(statusError)}`, true);
         tui.requestRender();
         return;
       }
@@ -2034,9 +2044,9 @@ export async function runDockTui(
         runActivity = activityFromSnapshot(instance);
         activity.setActivity(runActivity);
         const truth = authoritative.lifecycle === "active"
-          ? "The runtime ownership or generation changed"
-          : `Authoritative instance state is ${authoritative.lifecycle}`;
-        conversation.addNotice(`${truth}; this TUI remains read-only. No command was replayed; Ctrl+D and attach again for a coherent view.`, true);
+          ? "The work changed while this window was disconnected"
+          : `The work is now ${authoritative.lifecycle}`;
+        conversation.addNotice(`${truth}; this window remains read-only. No command was resent; press Ctrl+D and open the work again.`, true);
         tui.requestRender();
         return;
       }
@@ -2053,10 +2063,9 @@ export async function runDockTui(
           since: cursor,
           onEvent: onCandidateEvent,
           requireTuiProjection: true,
-          claimController: true,
         });
         if (next.initial.page.epochChanged || next.initial.page.generationChanged || next.initial.page.truncated) {
-          throw new ControlClientError("event_replay_gap", "The event replay cursor can no longer produce a complete incremental view");
+          throw new ControlClientError("event_replay_gap", "Saved updates no longer cover a complete view; reopen the work to refresh it");
         }
         if (next.initial.instance.lifecycle !== "active") {
           instance = next.initial.instance;
@@ -2069,13 +2078,6 @@ export async function runDockTui(
           await next.done.catch(() => {});
           return;
         }
-        controllerLeaseToken = next.initial.controller.status === "acquired"
-          ? next.initial.controller.leaseToken
-          : undefined;
-        controllerId = next.initial.controller.status === "acquired"
-          ? next.initial.controller.controllerId
-          : undefined;
-        status.setController(next.initial.controller.status);
         for (const event of next.initial.page.events) onEvent(event);
         instance = next.initial.instance;
         lastEventGeneration = next.initial.page.latest.runtimeGeneration;
@@ -2086,7 +2088,7 @@ export async function runDockTui(
         runActivity = activityFromReplay(instance, next.initial.page.events);
         activity.setActivity(runActivity);
         detachTruth = instance.lifecycle === "active" ? "host_owned" : "not_active";
-        conversation.addNotice(`Event stream reconnected; the instance remained Host-owned (${instance.lifecycle}/${instance.execution}). No command was resent.`);
+        conversation.addNotice(`Live updates resumed; the work kept running (${instance.lifecycle}/${instance.execution}). No command was resent.`);
         subscription = next;
         eventStreamConnected = true;
         candidateReady = true;
@@ -2102,9 +2104,9 @@ export async function runDockTui(
           await next.done.catch(() => {});
         }
         if (exiting || subscription !== watched) return;
-        runActivity = disconnectedActivity("event stream interrupted · task still running · Ctrl+D detach");
+        runActivity = disconnectedActivity("live updates interrupted · task still running · Ctrl+D detach");
         activity.setActivity(runActivity);
-        conversation.addNotice(`Event stream remains disconnected; current authoritative instance status is ${instance.lifecycle}/${instance.execution}. This TUI remains read-only; Ctrl+D and attach again.`, true);
+        conversation.addNotice(`Live updates are still unavailable; the current work state is ${instance.lifecycle}/${instance.execution}. This window remains read-only; press Ctrl+D and open it again.`, true);
         conversation.addNotice(`Reconnect: ${errorText(reconnectError)}`, true);
         tui.requestRender();
       }
@@ -2122,15 +2124,14 @@ export async function runDockTui(
   }
   watchEventSubscription(subscription);
 
-  const initialInteraction = subscription === undefined ? undefined : [...subscription.initial.page.events].reverse().find((event) => event.type === "interaction.requested"
-    && event.data.interactionId === subscription?.initial.instance.activeInteraction?.id);
   tui.start();
+  void acquireExtensionUiOperation();
   activityPulse.setEnabled(true);
-  if (initialInteraction?.type === "interaction.requested") void handleExtensionInteraction(initialInteraction);
   updateTerminalProgress();
   const reason = await exit;
 
   activityPulse.stop();
+  if (operationRetryTimer) clearTimeout(operationRetryTimer);
   activeExtensionDialog?.closeFromHost();
   clearControllerRouting();
   removeInputListener();
@@ -2139,11 +2140,13 @@ export async function runDockTui(
   // Detach is a local control action. Close every client transport immediately;
   // sent mutations remain Host-owned and may complete after this process exits.
   subscription.close();
+  operationSubscription?.close();
   client.closeActiveConnections();
   await Promise.all([
-    controllerReattach?.catch(() => {}),
+    operationAcquire?.catch(() => {}),
     eventStreamRecovery?.catch(() => {}),
     subscription.done.catch(() => {}),
+    operationSubscription?.done.catch(() => {}),
   ]);
   terminal.setProgress(false);
   await terminal.drainInput(200, 30).catch(() => {});
@@ -2189,7 +2192,7 @@ export function formatWorkStatus(snapshot: InstanceSnapshot): string {
     `Model: ${model} · thinking ${terminalSafe(snapshot.executor.thinkingLevel ?? "off")}`,
     `Dock ID: ${terminalSafe(snapshot.id)}`,
     `Pi session ID: ${terminalSafe(snapshot.executor.piSessionId)}`,
-    `Runtime generation: ${snapshot.runtimeGeneration}`,
+    `Work revision: ${snapshot.runtimeGeneration}`,
   ].join("\n");
 }
 
