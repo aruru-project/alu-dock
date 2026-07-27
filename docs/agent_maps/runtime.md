@@ -53,6 +53,10 @@ Protocol V2 定义 Dock 的业务语义。Host 与 Worker 之间的私有通信�
 
 Pi runtime、Pi session、extension runner、component 和 Pi SDK object 全部留在 Worker。Pi adapter 只在 Worker 内使用 Pi API，并把 Pi 的行为转换成 Dock 协议。
 
+消息提交的实际 delivery 也由 adapter 在 Pi 真正接收输入时确定。调用者的 `auto / prompt / steer / followUp` 原样到达 Worker；Pi 完成 input hook 并再次检查运行状态后，Worker 的私有 preflight result 报告这次实际采用的 `prompt / steer / followUp`。Host 只按这个结果提交 receipt 和 Queue 状态，不根据自己稍早看到的 `isStreaming` 再猜一次。`operationId` 贯穿直接执行和排队执行；只有确实进入 Queue 的消息才创建 `queueItemId`，也只有实际消费 Queue item 时才产生 queue-consumed lifecycle。Queue provenance 与最终 delivery 分开保存：compaction 期间由 Host 保管的 Queue item 可能在 Pi 恢复空闲后以 fresh prompt 启动，但它仍消费原来的真实 Queue identity；普通 direct prompt 则不会产生 queue-consumed。
+
+Conversation projector 使用同一个实际 delivery 生成 `message.submitted`。Canonical conversation frame 不以 Host 的辅助 Queue identity 为发布前提：即使 Queue 关联异常，已经被 Worker 接受的用户消息也必须先出现在 conversation，不能被内部错误替代。
+
 Conversation 的持久语义也在 adapter 内完成。Pi adapter 把当前 branch entry 投影成 canonical persisted record，显式保留 message、tool result、custom/custom message、bash execution、compaction/branch summary、model/thinking/session/label record 及其 visibility/metadata；Host 不读取 Pi role 或 Pi session 私有 shape。大型内容的 record 只承载有界 preview，完整内容由 conversation history/content 的 revision、content ref 和 chunk 提供。
 
 实时事件与持久 record 不需要共享 identity。在线客户端在 `message_update`/tool event 上原位更新组件，完成后直接保留；重建时才从持久 record 重新生成。Adapter 在一个 turn、run、compaction 或独立持久写入形成安全边界后发出私有 `conversation_checkpoint`。Checkpoint 携带该边界的精确权威 branch history snapshot，表示它之前的 conversation frame 都已由这份 snapshot 表达；Host 原子安装 snapshot 并释放 active buffer，不能在稍后读取一个可能已经前进的 history 来猜测边界。Checkpoint 不等待任何客户端确认。

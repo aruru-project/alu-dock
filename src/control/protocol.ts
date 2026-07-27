@@ -1377,7 +1377,6 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
       exact(data, ["operationId", "messageId", "role", "text", "images", "delivery", "queueItemId"]);
       const delivery = enumeration(data.delivery, "delivery", ["prompt", "steer", "followUp"]);
       const queueItemId = optionalText("queueItemId", 128);
-      if ((delivery === "prompt") === (queueItemId !== undefined)) throw validation("invalid_response", "message.submitted queueItemId does not match delivery");
       return { operationId: text("operationId", 128), messageId: text("messageId", 128), role: enumeration(data.role, "role", ["user"]), text: boundedString(data.text, `${field}.text`, MAX_PROMPT_CHARS), ...(data.images === undefined ? {} : { images: parseImagePaths(data.images, `${field}.images`) }), delivery, queueItemId };
     }
     case "message.delta": exact(data, ["messageId", "block", "delta"]); return { messageId: text("messageId", 128), block: enumeration(data.block, "block", ["text", "thinking"]), delta: boundedString(data.delta, `${field}.delta`, MAX_TEXT) };

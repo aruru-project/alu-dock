@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { ExtensionUiBroker } from "../core/extension-ui-broker.js";
-import type { AgentEvent, AgentInvokeOptions, AgentRequest, AgentWorkerConnection as AgentWorkerConnectionPort, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
+import type { AgentCommandPreflightResult, AgentEvent, AgentInvokeOptions, AgentRequest, AgentWorkerConnection as AgentWorkerConnectionPort, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
 import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
 import { PiWorkerProcess, type PiWorkerInitOptions, type WorkerProcessTimeouts } from "./worker-process.js";
 import {
@@ -14,7 +14,7 @@ interface PendingCall {
   resolve(value: unknown): void;
   reject(error: unknown): void;
   timer?: NodeJS.Timeout;
-  preflight?: (success: boolean) => void;
+  preflight?: (result: AgentCommandPreflightResult) => void;
   accepted: boolean;
   generation: number;
 }
@@ -131,7 +131,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     envelope: Extract<WorkerEnvelope, { kind: "agent_request" | "agent_control" | "call" }>,
     label: string,
     deadline: "request" | "mutation" | "control" | "shutdown" | "none",
-    preflight?: (success: boolean) => void,
+    preflight?: (result: AgentCommandPreflightResult) => void,
   ): Promise<unknown> {
     if (this.unavailable) return Promise.reject(new AgentWorkerUnavailableError("Pi worker is unavailable"));
     const callId = `host-${++this.nextCall}`;
@@ -160,7 +160,12 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
       return;
     }
     if (envelope.kind === "accepted") { const pending = this.pending.get(envelope.callId); if (pending) pending.accepted = true; return; }
-    if (envelope.kind === "preflight") { this.pending.get(envelope.callId)?.preflight?.(envelope.success); return; }
+    if (envelope.kind === "preflight") {
+      this.pending.get(envelope.callId)?.preflight?.(envelope.success
+        ? { success: true, delivery: envelope.delivery }
+        : { success: false });
+      return;
+    }
     if (envelope.kind === "response") {
       const pending = this.pending.get(envelope.callId); if (!pending) return;
       if (envelope.state) this.applyState(envelope.state);

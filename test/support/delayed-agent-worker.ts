@@ -80,7 +80,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   };
 
   private readonly listeners = new Set<(event: AgentEvent) => void>();
-  private readonly conversationInputs: Array<{ operationId: string; text: string; delivery: "prompt" | "steer" | "followUp"; images?: ImagePathDto[] }> = [];
+  private readonly conversationInputs: Array<{ operationId: string; text: string; delivery: "prompt" | "steer" | "followUp"; fromQueue: boolean; images?: ImagePathDto[] }> = [];
   private readonly conversationToolCalls = new Set<string>();
   private readonly conversationCompletedToolCalls = new Set<string>();
   private conversationMessageSequence = 0;
@@ -91,6 +91,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   private readonly steeringQueue: string[] = [];
   private readonly followUpQueue: string[] = [];
   private currentRun: Deferred<void> | undefined;
+  private nextPromptPreflightBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
   private disposeBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
   private modelMutationBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
   private nextCompactionStartBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
@@ -144,19 +145,34 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     const p = request.params as Record<string, any>;
     switch (request.type) {
       case "command.submit": {
-        const delivery = p.delivery === "steer" || p.delivery === "followUp" ? p.delivery : "prompt";
-        this.conversationInputs.push({
-          operationId: p.operationId,
-          text: p.message,
+        const requestedDelivery = p.delivery as "auto" | "prompt" | "steer" | "followUp";
+        const delivery = requestedDelivery === "auto" ? (this.isStreaming ? "steer" : "prompt") : requestedDelivery;
+        const inputKind = this.classifyInput(p.message);
+        const tracked = inputKind === "prompt" ? {
+          operationId: p.operationId as string,
+          text: p.message as string,
           delivery,
+          fromQueue: options?.context?.type === "force_queue" || options?.context?.type === "host_queue",
           ...(p.images === undefined ? {} : { images: structuredClone(p.images) }),
-        });
+        } : undefined;
+        if (tracked !== undefined) this.conversationInputs.push(tracked);
         return options?.context?.type === "force_queue"
           ? this.queueMessage(p.message, delivery === "prompt" ? "followUp" : delivery)
           : this.prompt(p.message, {
             ...(delivery === "prompt" ? {} : { streamingBehavior: delivery }),
             ...(p.images === undefined ? {} : { images: p.images }),
-            preflightResult: options?.preflightResult,
+            preflightResult: (success) => {
+              if (!success) {
+                options?.preflightResult?.({ success: false });
+                return;
+              }
+              const actualDelivery = this.isStreaming ? delivery : "prompt";
+              if (tracked !== undefined) {
+                tracked.delivery = actualDelivery;
+                tracked.fromQueue ||= actualDelivery !== "prompt";
+              }
+              options?.preflightResult?.({ success: true, delivery: actualDelivery });
+            },
           });
       }
       case "command.abort": return this.abort();
@@ -212,29 +228,35 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     return this.extensionCommands.has(commandName) ? "extension_command" : "prompt";
   }
 
-  prompt(text: string, options?: AgentPromptOptions): Promise<void> {
+  async prompt(text: string, options?: AgentPromptOptions): Promise<void> {
     this.promptCalls += 1;
     this.promptMessages.push(text);
     this.promptOptions.push(options === undefined ? undefined : structuredClone({ ...options, preflightResult: undefined }));
     if (this.classifyInput(text) === "extension_command") {
       options?.preflightResult?.(true);
-      return Promise.resolve();
+      return;
+    }
+    const preflightBlock = this.nextPromptPreflightBlock;
+    this.nextPromptPreflightBlock = undefined;
+    if (preflightBlock) {
+      preflightBlock.entered.resolve();
+      await preflightBlock.release.promise;
     }
     if (this.isStreaming && options?.streamingBehavior) {
       if (options.streamingBehavior === "steer") this.steeringQueue.push(text);
       else this.followUpQueue.push(text);
       this.emitQueue();
       options.preflightResult?.(true);
-      return Promise.resolve();
+      return;
     }
-    if (this.isStreaming) return Promise.reject(new Error("fake runtime already streaming"));
+    if (this.isStreaming) throw new Error("fake runtime already streaming");
 
     options?.preflightResult?.(true);
     this.currentRun = new Deferred<void>();
     this.isStreaming = true;
     this.emit({ type: "agent_start" });
     this.emitUserMessage(text);
-    return this.currentRun.promise;
+    await this.currentRun.promise;
   }
 
   queueMessage(text: string, delivery: "steer" | "followUp"): Promise<void> {
@@ -541,6 +563,19 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     await this.currentRun?.promise;
   }
 
+  becomeIdleBeforeHostSettlement(): void {
+    const run = this.currentRun;
+    this.currentRun = undefined;
+    this.isStreaming = false;
+    run?.resolve();
+  }
+
+  blockNextPromptBeforePreflight(): { entered: Promise<void>; release: () => void } {
+    const block = { entered: new Deferred<void>(), release: new Deferred<void>() };
+    this.nextPromptPreflightBlock = block;
+    return { entered: block.entered.promise, release: () => block.release.resolve() };
+  }
+
   blockDispose(): { entered: Promise<void>; release: () => void } {
     const block = { entered: new Deferred<void>(), release: new Deferred<void>() };
     this.disposeBlock = block;
@@ -720,7 +755,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       const operationId = input?.operationId ?? "runtime-initiated";
       this.conversationUserMessageId = input === undefined ? `fixture-user-${++this.conversationMessageSequence}` : `user-${operationId}`;
       return [
-        ...(input === undefined ? [] : [{ type: "dock_queue_consumed", operationId }]),
+        ...(input?.fromQueue === true ? [{ type: "dock_queue_consumed", operationId }] : []),
         fixtureFrame({ type: "message.submitted", data: {
           operationId,
           messageId: this.conversationUserMessageId,

@@ -320,10 +320,15 @@ export interface AgentWorkerState {
 /** Host-resolved facts carried only on the private invoke envelope. */
 export type AgentInvokeContext =
   | { type: "session_switch"; canonicalCwd: string; projectTrusted: boolean }
-  | { type: "force_queue" };
+  | { type: "force_queue" }
+  | { type: "host_queue" };
+
+export type AgentCommandPreflightResult =
+  | { success: false }
+  | { success: true; delivery: "prompt" | "steer" | "followUp" };
 
 export interface AgentInvokeOptions {
-  preflightResult?: (success: boolean) => void;
+  preflightResult?: (result: AgentCommandPreflightResult) => void;
   context?: AgentInvokeContext;
 }
 

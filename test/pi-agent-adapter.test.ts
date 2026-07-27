@@ -37,14 +37,22 @@ test("Pi adapter emits explicit Worker-owned persistence checkpoints", () => {
 
 test("Pi live events become canonical conversation frames before crossing the Worker boundary", () => {
   const projector = new PiConversationProjector();
-  const tracked = projector.trackInput({ operationId: "operation-1", text: "hello", delivery: "prompt" });
+  const tracked = projector.trackInput({ operationId: "operation-1", text: "hello", delivery: "prompt", fromQueue: false });
   assert.deepEqual(projector.project({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "hello" }] } } as never), [
-    { type: "dock_queue_consumed", operationId: "operation-1" },
     { type: "dock_conversation_frame", frame: { type: "message.submitted", data: {
       operationId: "operation-1", messageId: "user-operation-1", role: "user", text: "hello", delivery: "prompt",
     } } },
   ]);
   projector.cancelInput(tracked); // already consumed; cancellation is deliberately harmless
+
+  const queuedProjector = new PiConversationProjector();
+  queuedProjector.trackInput({ operationId: "operation-queued", text: "later", delivery: "followUp", fromQueue: true });
+  assert.deepEqual(queuedProjector.project({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "later" }] } } as never), [
+    { type: "dock_queue_consumed", operationId: "operation-queued" },
+    { type: "dock_conversation_frame", frame: { type: "message.submitted", data: {
+      operationId: "operation-queued", messageId: "user-operation-queued", role: "user", text: "later", delivery: "followUp",
+    } } },
+  ]);
 
   assert.deepEqual(projector.project({
     type: "message_update",

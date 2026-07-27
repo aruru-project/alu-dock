@@ -44,6 +44,7 @@ import {
 } from "../core/agent-worker.js";
 import type {
   ClearedAgentQueue,
+  AgentCommandPreflightResult,
   AgentCompactionResult,
   AgentConversationContentChunk,
   AgentConversationContentPage,
@@ -273,15 +274,28 @@ export class PiAgentAdapter {
     return () => this.subscribers.delete(listener);
   }
 
-  async dispatch(request: AgentRequest, context?: AgentInvokeContext, preflightResult?: (success: boolean) => void): Promise<unknown> {
+  async dispatch(request: AgentRequest, context?: AgentInvokeContext, preflightResult?: (result: AgentCommandPreflightResult) => void): Promise<unknown> {
     switch (request.type) {
       case "command.submit": {
         const { operationId, delivery: requestedDelivery, message, images } = request.params;
-        const delivery = requestedDelivery === "auto" ? (this.isStreaming ? "followUp" : "prompt") : requestedDelivery;
+        const delivery = requestedDelivery === "auto" ? (this.isStreaming ? "steer" : "prompt") : requestedDelivery;
         const binding = this.requireActive();
+        const hostQueued = context?.type === "force_queue" || context?.type === "host_queue";
         const input = this.classifyInput(message) === "prompt"
-          ? binding.conversation.trackInput({ operationId, text: message, delivery, images })
+          ? binding.conversation.trackInput({ operationId, text: message, delivery, fromQueue: hostQueued, images })
           : undefined;
+        const reportPreflight = (success: boolean): void => {
+          if (!success) {
+            preflightResult?.({ success: false });
+            return;
+          }
+          const actualDelivery = binding.session.isStreaming ? delivery : "prompt";
+          if (input !== undefined) {
+            input.delivery = actualDelivery;
+            input.fromQueue ||= actualDelivery !== "prompt";
+          }
+          preflightResult?.({ success: true, delivery: actualDelivery });
+        };
         try {
           if (context?.type === "force_queue") {
             if (delivery === "prompt") throw new Error("Forced Agent queue delivery requires steer or followUp");
@@ -291,7 +305,7 @@ export class PiAgentAdapter {
             source: "rpc",
             ...(delivery === "prompt" ? {} : { streamingBehavior: delivery }),
             ...(images === undefined ? {} : { images }),
-            preflightResult,
+            preflightResult: reportPreflight,
           });
         } catch (error) {
           if (input !== undefined) binding.conversation.cancelInput(input);
@@ -1382,6 +1396,7 @@ interface PiConversationInput {
   operationId: string;
   text: string;
   delivery: "prompt" | "steer" | "followUp";
+  fromQueue: boolean;
   images?: ImagePathDto[];
 }
 
@@ -1454,7 +1469,7 @@ export class PiConversationProjector {
       delivery: input?.delivery ?? "prompt",
     };
     return [
-      ...(input === undefined ? [] : [{ type: "dock_queue_consumed", operationId: input.operationId }]),
+      ...(input?.fromQueue === true ? [{ type: "dock_queue_consumed", operationId: input.operationId }] : []),
       this.frame({ type: "message.submitted", data }),
     ];
   }

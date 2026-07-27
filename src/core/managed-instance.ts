@@ -38,6 +38,7 @@ import type {
 export type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingKey, SettingUpdate, SettingValueMap, SourceDto, ToolDto } from "./config-projection.js";
 import type {
   ClearedAgentQueue,
+  AgentCommandPreflightResult,
   AgentCompactionResult,
   AgentInvokeOptions,
   AgentRequest,
@@ -1283,17 +1284,13 @@ export class ManagedInstance {
     if (compacting || manualCompactionPending || hostQueueCustody) return this.submitCompactionDeferred(message, delivery, operationId, inputImages);
     if (this.configurationPending) throw new InstanceBusyError(this.id, "submitting a prompt");
 
-    // A queued compaction_end may leave the catalog projection momentarily
-    // running+compacting after Pi has already become idle. Do not route that
-    // bounded transition window back through streamingBehavior.
-    const running = this.agentState().isStreaming || (this.state.execution === "running" && !this.state.compacting);
-    const resolvedDelivery = resolveDelivery(delivery, running);
-    const streamingBehavior = resolvedDelivery === "steer" || resolvedDelivery === "followUp"
-      ? resolvedDelivery
-      : undefined;
-    if (streamingBehavior !== undefined && !this.canQueueMessage(message, inputImages)) throw new QueueCapacityError();
-    let actualDelivery = resolvedDelivery;
-    let actuallyQueued = streamingBehavior !== undefined;
+    if (delivery !== "auto") {
+      const running = this.agentState().isStreaming || (this.state.execution === "running" && !this.state.compacting);
+      resolveDelivery(delivery, running);
+    }
+    if (delivery !== "prompt" && !this.canQueueMessage(message, inputImages)) throw new QueueCapacityError();
+    let actualDelivery: "prompt" | "steer" | "followUp" = "prompt";
+    let actuallyQueued = false;
     const commandId = operationId;
     const agentStartsBeforeCommand = this.agentStartCount;
     const agentSettlesBeforeCommand = this.agentSettledCount;
@@ -1370,9 +1367,9 @@ export class ManagedInstance {
       release();
     };
 
-    const onPreflight = (success: boolean): void => {
+    const onPreflight = (result: AgentCommandPreflightResult): void => {
       if (preflightStatus !== "pending" || this.pendingAdmission?.token !== admissionToken) return;
-      if (!success) {
+      if (!result.success) {
         preflightStatus = "rejected";
         return;
       }
@@ -1383,12 +1380,10 @@ export class ManagedInstance {
       }
 
       preflightStatus = "accepted";
-      // Pi re-checks isStreaming only after asynchronous extension input hooks.
-      // Queue and fresh-prompt events are serialized behind this accepted commit.
+      actualDelivery = result.delivery;
+      actuallyQueued = actualDelivery !== "prompt";
       let precedingAgentEvents = Promise.resolve();
-      if (streamingBehavior !== undefined && !this.agentState().isStreaming) {
-        actualDelivery = "prompt";
-        actuallyQueued = false;
+      if (!actuallyQueued) {
         // Events buffered while asynchronous input hooks were running belong
         // to the run that just settled. Commit them before assigning the fresh
         // prompt's operation ID so the old settlement cannot clear the new run.
@@ -1509,7 +1504,7 @@ export class ManagedInstance {
         operationId: commandId,
         message,
         ...(inputImages.length === 0 ? {} : { images: cloneInputImages(inputImages) }),
-        delivery: streamingBehavior ?? "prompt",
+        delivery,
       }, { preflightResult: onPreflight });
     } catch (error) {
       await rejectBeforeRun(error, "prompt_threw_before_preflight");
@@ -1517,9 +1512,7 @@ export class ManagedInstance {
     }
 
     const observedPromise = runtimePromise.then(async () => {
-      // Defensive fallback for adapters that resolve without invoking the typed
-      // preflight callback. The official Pi adapter always invokes it.
-      if (preflightStatus === "pending") onPreflight(true);
+      if (preflightStatus === "pending") throw new Error("Worker resolved message submission without reporting actual delivery");
       await preflightTransition;
       if (
         preflightStatus === "accepted"
@@ -1852,21 +1845,20 @@ export class ManagedInstance {
     let resolveFreshStart!: () => void;
     const freshStart = new Promise<void>((resolve) => { resolveFreshStart = resolve; });
 
-    const onPreflight = (success: boolean): void => {
+    const onPreflight = (result: AgentCommandPreflightResult): void => {
       if (preflightStatus !== "pending") return;
-      if (!success || this.hostDrainActive || this.runtimeGenerationValue !== generation || this.state.lifecycle !== "active") {
+      if (!result.success || this.hostDrainActive || this.runtimeGenerationValue !== generation || this.state.lifecycle !== "active") {
         preflightStatus = "rejected";
         if (item.phase === "dispatching") item.phase = "host_deferred";
         resolvePreflight(false);
         return;
       }
       preflightStatus = "accepted";
-      if (this.agentState().isStreaming) {
-        // Pi has accepted the item into its per-session queue. Its queue_update
-        // event remains authoritative for counts and text-hash reconciliation.
+      if (result.delivery !== "prompt") {
+        item.delivery = result.delivery;
         item.phase = "runtime_queued";
       } else {
-        // Pi will start this first post-compaction item as a fresh prompt.
+        // Pi starts this first post-compaction item as a fresh prompt.
         freshDispatch = true;
         item.phase = "fresh_in_flight";
         this.nextAgentStartOperationId = item.operationId;
@@ -1882,15 +1874,15 @@ export class ManagedInstance {
         message: item.originalText ?? item.text,
         ...(item.images === undefined ? {} : { images: cloneInputImages(item.images) }),
         delivery: item.delivery,
-      }, { preflightResult: onPreflight });
+      }, { context: { type: "host_queue" }, preflightResult: onPreflight });
     } catch (error) {
-      onPreflight(false);
+      onPreflight({ success: false });
       await this.reportDeferredDispatchFailure(item, error, generation);
       return false;
     }
 
     const observed = runtimePromise.then(async () => {
-      if (preflightStatus === "pending") onPreflight(true);
+      if (preflightStatus === "pending") throw new Error("Worker resolved deferred submission without reporting actual delivery");
       await this.transitionTail;
       if (
         item.phase === "fresh_in_flight"
@@ -1929,7 +1921,7 @@ export class ManagedInstance {
       }
     }).catch(async (error: unknown) => {
       if (preflightStatus === "pending") {
-        onPreflight(false);
+        onPreflight({ success: false });
         await this.reportDeferredDispatchFailure(item, error, generation);
         return;
       }
@@ -3680,11 +3672,14 @@ export class ManagedInstance {
   private appendWorkerConversationFrame(event: AgentEvent): void {
     const frame = event.frame as ConversationFrame | undefined;
     if (!frame || !isConversationFrameType(frame.type)) throw new Error("Worker returned an invalid conversation frame");
-    if (frame.type === "message.submitted" && frame.data.delivery !== "prompt") {
+    if (frame.type === "message.submitted") {
+      this.discardAcceptedPrompt(frame.data.operationId);
       const queueItemId = this.consumedQueueItemIds.get(frame.data.operationId);
-      if (queueItemId === undefined) throw new Error("Worker submitted a queued message without a Host queue identity");
       this.consumedQueueItemIds.delete(frame.data.operationId);
-      this.appendEvent(frame.type, { ...cloneJson(frame.data), queueItemId });
+      this.appendEvent(frame.type, {
+        ...cloneJson(frame.data),
+        ...(queueItemId === undefined ? {} : { queueItemId }),
+      });
       return;
     }
     this.appendEvent(frame.type, cloneJson(frame.data) as EventDataMap[typeof frame.type]);

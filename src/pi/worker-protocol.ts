@@ -8,7 +8,7 @@ import {
   AgentSettingsWriteError,
   AgentUnknownToolError,
 } from "../core/agent-worker.js";
-import type { AgentInvokeContext, AgentRequest, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
+import type { AgentCommandPreflightResult, AgentInvokeContext, AgentRequest, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
 import { parseControlRequest } from "../control/protocol.js";
 import {
   MAX_IMAGE_MIME_TYPE_CHARS,
@@ -78,7 +78,7 @@ export type WorkerEnvelope =
   | { kind: "response"; callId: string; ok: true; result: unknown; state?: AgentWorkerState }
   | { kind: "response"; callId: string; ok: false; error: WorkerErrorDto; state?: AgentWorkerState }
   | { kind: "event"; event: Record<string, unknown>; state: AgentWorkerState }
-  | { kind: "preflight"; callId: string; success: boolean }
+  | ({ kind: "preflight"; callId: string } & AgentCommandPreflightResult)
   | { kind: "fatal"; error: WorkerErrorDto };
 
 export type IpcSend = (message: WorkerFrame, callback: (error: Error | null) => void) => boolean;
@@ -214,8 +214,9 @@ export function parseWorkerEnvelope(raw: unknown): WorkerEnvelope {
       if ((request.type === "session.switch") !== (context?.type === "session_switch")) {
         throw new Error("Worker session switch request requires resolved Host invoke context");
       }
-      if (context?.type === "force_queue" && (request.type !== "command.submit" || request.params.delivery === "prompt")) {
-        throw new Error("Worker forced queue context requires a steer or followUp command submission");
+      if ((context?.type === "force_queue" || context?.type === "host_queue")
+        && (request.type !== "command.submit" || request.params.delivery === "prompt")) {
+        throw new Error("Worker Host queue context requires a steer or followUp command submission");
       }
       return { kind, callId: boundedString(value.callId, 128, "Worker call ID"), request: request as AgentRequest, ...(context === undefined ? {} : { context }) };
     }
@@ -251,10 +252,21 @@ export function parseWorkerEnvelope(raw: unknown): WorkerEnvelope {
       validateWorkerAgentEvent(event);
       return { kind, event, state: parseAgentWorkerState(value.state) };
     }
-    case "preflight":
-      exactKeys(value, ["kind", "callId", "success"], "Worker preflight envelope");
+    case "preflight": {
+      exactKeys(value, ["kind", "callId", "success", "delivery"], "Worker preflight envelope");
       if (typeof value.success !== "boolean") throw new Error("Worker preflight status is invalid");
-      return { kind, callId: boundedString(value.callId, 128, "Worker call ID"), success: value.success };
+      const callId = boundedString(value.callId, 128, "Worker call ID");
+      if (!value.success) {
+        if (value.delivery !== undefined) throw new Error("Rejected Worker preflight cannot declare delivery");
+        return { kind, callId, success: false };
+      }
+      return {
+        kind,
+        callId,
+        success: true,
+        delivery: oneOf(value.delivery, ["prompt", "steer", "followUp"] as const, "Worker actual delivery"),
+      };
+    }
     case "fatal":
       exactKeys(value, ["kind", "error"], "Worker fatal envelope");
       return { kind, error: parseWorkerError(value.error) };
@@ -789,9 +801,9 @@ function parseAgentWorkerState(raw: unknown): AgentWorkerState {
 
 function parseAgentInvokeContext(raw: unknown): AgentInvokeContext {
   const value = record(raw, "Worker Agent invoke context");
-  if (value.type === "force_queue") {
+  if (value.type === "force_queue" || value.type === "host_queue") {
     exactKeys(value, ["type"], "Worker Agent invoke context");
-    return { type: "force_queue" };
+    return { type: value.type };
   }
   exactKeys(value, ["type", "canonicalCwd", "projectTrusted"], "Worker Agent invoke context");
   if (value.type !== "session_switch" || typeof value.projectTrusted !== "boolean") throw new Error("Worker Agent invoke context is invalid");

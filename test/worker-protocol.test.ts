@@ -64,6 +64,28 @@ test("private worker protocol chunks and reassembles one ordered bounded result"
 
 
 
+test("private Worker admission reports the delivery actually chosen by the Agent", () => {
+  assert.deepEqual(parseWorkerEnvelope({
+    kind: "preflight", callId: "call-1", success: true, delivery: "prompt",
+  }), { kind: "preflight", callId: "call-1", success: true, delivery: "prompt" });
+  assert.deepEqual(parseWorkerEnvelope({
+    kind: "preflight", callId: "call-2", success: false,
+  }), { kind: "preflight", callId: "call-2", success: false });
+  assert.throws(() => parseWorkerEnvelope({
+    kind: "preflight", callId: "call-3", success: true,
+  }), /delivery/i);
+  assert.throws(() => parseWorkerEnvelope({
+    kind: "preflight", callId: "call-4", success: false, delivery: "steer",
+  }), /cannot declare delivery/i);
+  const hostQueued = parseWorkerEnvelope(agentCall("command.submit", {
+    operationId: "op", instanceId: "instance-test", message: "queued", delivery: "steer",
+  }, { context: { type: "host_queue" } }));
+  assert.equal(hostQueued.kind === "agent_request" ? hostQueued.context?.type : undefined, "host_queue");
+  assert.throws(() => parseWorkerEnvelope(agentCall("command.submit", {
+    operationId: "op", instanceId: "instance-test", message: "direct", delivery: "prompt",
+  }, { context: { type: "host_queue" } })), /Host queue context/i);
+});
+
 test("private Worker conversation boundary accepts checkpoints and canonical persisted records", () => {
   assert.equal(parseWorkerEnvelope({
     kind: "event", event: { type: "conversation_checkpoint", history: [] }, state: STATE,

@@ -153,7 +153,7 @@ async function runWorker(): Promise<void> {
         : envelope.kind === "agent_control" && envelope.control.type === "dispose";
       if (accepted) await sender.sendEnvelope({ kind: "accepted", callId: envelope.callId });
       const result = envelope.kind === "agent_request"
-        ? await runtime!.dispatch(envelope.request, envelope.context, (success) => { void sender.sendEnvelope({ kind: "preflight", callId: envelope.callId, success }); })
+        ? await runtime!.dispatch(envelope.request, envelope.context, (result) => { void sender.sendEnvelope({ kind: "preflight", callId: envelope.callId, ...result }); })
         : envelope.kind === "agent_control"
           ? await runtime!.control(envelope.control)
           : dispatchHostUi(ui, envelope.capability as UiCapability, envelope.args as Record<string, unknown>);

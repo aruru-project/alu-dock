@@ -1766,11 +1766,17 @@ test("the same Work can queue input during manual compaction and detach without 
   assert.match(output, /steer next/u, "manual compaction must leave the Work editor able to submit into Queue");
   assert.equal(runtime.promptCalls, promptCallsBeforeCompaction);
   assert.equal((await client.status(created.id)).pending.total, 1, "queued text remains Host-owned after TUI detach");
-
   block.finish();
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(runtime.promptCalls, promptCallsBeforeCompaction + 1);
   assert.equal(runtime.promptMessages.at(-1), "manual queue survives");
+  const consumedProjection = await client.read(created.id, undefined, "conversation_bootstrap");
+  assert.equal(consumedProjection.pendingMessages.length, 0);
+  const submitted = consumedProjection.page.events.find((event) => (
+    event.type === "message.submitted" && event.data.text === "manual queue survives"
+  ));
+  assert.equal(submitted?.type === "message.submitted" ? submitted.data.delivery : undefined, "prompt");
+  assert.ok(submitted?.type === "message.submitted" && submitted.data.queueItemId);
 });
 
 test("Sol-style compaction keeps a concurrent cross-client prompt visible and hands it to the hidden continuation once", async (context) => {
@@ -2020,6 +2026,75 @@ test("fresh conversation bootstrap switches atomically from active frames to per
   assert.deepEqual(persisted.initial.page.events, [], "checkpoint release is producer-driven and does not wait for a client ACK");
   persisted.close();
   await persisted.done;
+});
+
+test("a message submitted as abort settles stays visible and is not mistaken for Queue work", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "abort-boundary-message");
+  const runtime = harness.sessions.get(created.id)!;
+
+  // The submission reaches Pi while its old run still appears active. During
+  // asynchronous input handling, Esc finishes that run before Pi's final
+  // delivery check. The old implementation labeled this as queued and then
+  // dropped the accepted user frame because Host had no matching Queue item.
+  const preflight = runtime.blockNextPromptBeforePreflight();
+  const acceptedPromise = client.prompt(created.id, "message after Esc", "auto", "after-esc-operation");
+  await preflight.entered;
+  runtime.becomeIdleBeforeHostSettlement();
+  preflight.release();
+  const accepted = await acceptedPromise;
+  assert.equal(accepted.receipt.delivery, "prompt");
+  assert.equal(accepted.receipt.queued, false);
+
+  const projection = await client.read(created.id, undefined, "conversation_bootstrap");
+  const submitted = projection.page.events.filter((event) => (
+    event.type === "message.submitted" && event.data.operationId === "after-esc-operation"
+  ));
+  assert.equal(submitted.length, 1);
+  assert.equal(submitted[0]?.type === "message.submitted" ? submitted[0].data.text : undefined, "message after Esc");
+  assert.equal(submitted[0]?.type === "message.submitted" ? submitted[0].data.delivery : undefined, "prompt");
+  assert.equal(submitted[0]?.type === "message.submitted" ? submitted[0].data.queueItemId : undefined, undefined);
+  assert.equal(projection.pendingMessages.length, 0);
+  assert.equal(projection.page.events.some((event) => event.type === "instance.error"), false);
+
+  runtime.settle("received safely");
+  await harness.registry.get(created.id).waitForIdle();
+});
+
+test("a canonical queued message is still published when auxiliary Queue identity is missing", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "missing-queue-identity");
+  const runtime = harness.sessions.get(created.id)!;
+
+  runtime.emit({
+    type: "dock_conversation_frame",
+    frame: { type: "message.submitted", data: {
+      operationId: "worker-accepted-operation",
+      messageId: "worker-accepted-message",
+      role: "user",
+      text: "accepted by Worker",
+      delivery: "steer",
+    } },
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  const projection = await client.read(created.id, undefined, "conversation_bootstrap");
+  const submitted = projection.page.events.filter((event) => (
+    event.type === "message.submitted" && event.data.operationId === "worker-accepted-operation"
+  ));
+  assert.equal(submitted.length, 1);
+  assert.equal(submitted[0]?.type === "message.submitted" ? submitted[0].data.text : undefined, "accepted by Worker");
+  assert.equal(submitted[0]?.type === "message.submitted" ? submitted[0].data.queueItemId : undefined, undefined);
+  assert.equal(projection.page.events.some((event) => event.type === "instance.error"), false);
+
+  runtime.settle();
+  await harness.registry.get(created.id).waitForIdle();
 });
 
 test("a reconnected client can start a fresh prompt on an idle instance", async (context) => {
