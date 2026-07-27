@@ -4266,8 +4266,8 @@ function projectConversationHistoryPreview(entry: AgentHistoryEntry): HistoryEnt
   let remaining = 4_000;
   for (const block of projected.content.slice(0, 16)) {
     if (block.type === "text" || block.type === "thinking") {
-      const text = truncate(block.text, remaining) ?? "";
-      content.push({ type: block.type, text });
+      const text = sliceWithoutMarker(block.text, remaining);
+      if (text.length > 0) content.push({ type: block.type, text });
       remaining = Math.max(0, remaining - text.length);
     } else if (block.type === "tool_call") {
       content.push({
@@ -4278,7 +4278,7 @@ function projectConversationHistoryPreview(entry: AgentHistoryEntry): HistoryEnt
         omittedFields: ["/"],
       });
     } else if (block.type === "tool_result") {
-      const text = truncate(block.text, remaining) ?? "";
+      const text = sliceWithoutMarker(block.text, remaining);
       const { presentation: _presentation, ...metadata } = block;
       content.push({ ...metadata, text });
       remaining = Math.max(0, remaining - text.length);
@@ -4343,7 +4343,7 @@ function projectRuntimeConversationChunk(chunk: AgentConversationContentChunk): 
     blockIndex: nonNegativeNumber(chunk.blockIndex),
     type: "omitted",
     kind: chunk.kind,
-    description: boundedRuntimeString(chunk.description, 2_048, "Content omitted"),
+    description: chunk.description,
   };
 }
 
@@ -4483,29 +4483,28 @@ function extractText(content: unknown): string | undefined {
 
 function projectContentBlocks(content: unknown): ContentBlockDto[] {
   if (typeof content === "string") {
-    return [{ type: "text", text: truncate(content, 8_000) ?? "" }];
+    const text = sliceWithoutMarker(content, 8_000);
+    return text.length > 0 ? [{ type: "text", text }] : [];
   }
   if (!Array.isArray(content)) return [];
   const blocks: ContentBlockDto[] = [];
   const maxBytes = 512_000;
   let bytes = 2;
-  const append = (candidate: ContentBlockDto, useOmissionReserve = false): boolean => {
+  const append = (candidate: ContentBlockDto): boolean => {
     const candidateBytes = Buffer.byteLength(JSON.stringify(candidate), "utf8") + (blocks.length > 0 ? 1 : 0);
-    const limit = useOmissionReserve ? maxBytes : maxBytes - 256;
-    if (bytes + candidateBytes > limit) return false;
+    if (bytes + candidateBytes > maxBytes) return false;
     blocks.push(candidate);
     bytes += candidateBytes;
     return true;
   };
-  let bounded = true;
   for (const item of content.slice(0, 200)) {
     const block = recordValue(item);
     if (!block) continue;
     let candidate: ContentBlockDto | undefined;
-    if (block.type === "text" && typeof block.text === "string") {
-      candidate = { type: "text", text: truncate(block.text, 8_000) ?? "" };
-    } else if (block.type === "thinking" && typeof block.thinking === "string") {
-      candidate = { type: "thinking", text: truncate(block.thinking, 8_000) ?? "" };
+    if (block.type === "text" && typeof block.text === "string" && block.text.length > 0) {
+      candidate = { type: "text", text: sliceWithoutMarker(block.text, 8_000) };
+    } else if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking.length > 0) {
+      candidate = { type: "thinking", text: sliceWithoutMarker(block.thinking, 8_000) };
     } else if ((block.type === "toolCall" || block.type === "tool_call") && typeof block.name === "string") {
       const projected = projectJsonObject(block.arguments);
       candidate = {
@@ -4532,12 +4531,14 @@ function projectContentBlocks(content: unknown): ContentBlockDto[] {
     } else if (block.type === "image" && typeof block.mimeType === "string") {
       candidate = { type: "image", mimeType: boundedRuntimeString(block.mimeType, 256, "image/unknown") };
     }
-    if (candidate && !append(candidate)) { bounded = false; break; }
-  }
-  if (!bounded || content.length > 200) {
-    append({ type: "text", text: "[Additional message content omitted to fit the bounded control event]" }, true);
+    if (candidate && !append(candidate)) break;
   }
   return blocks;
+}
+
+function sliceWithoutMarker(value: string, limit: number): string {
+  if (value.length <= limit) return value;
+  return value.slice(0, unicodeSafeSliceEnd(value, limit));
 }
 
 function truncate(value: string | undefined, limit: number): string | undefined {

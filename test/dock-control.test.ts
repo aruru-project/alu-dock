@@ -2845,7 +2845,6 @@ test("oversized runtime payloads are projected into one safe live event without 
   const completed = seen.find((event) => event.type === "message.completed");
   assert.ok(completed);
   assert.ok(Buffer.byteLength(JSON.stringify(completed), "utf8") < 1024 * 1024);
-  assert.match(JSON.stringify(completed), /Additional message content omitted/u);
   subscription.close();
   await subscription.done;
 
@@ -2857,7 +2856,6 @@ test("oversized runtime payloads are projected into one safe live event without 
   const replayedCompleted = reconnected.initial.page.events.find((event) => event.type === "message.completed");
   assert.ok(replayedCompleted);
   assert.ok(Buffer.byteLength(JSON.stringify(replayedCompleted), "utf8") < 1024 * 1024);
-  assert.match(JSON.stringify(replayedCompleted), /Additional message content omitted/u);
   assert.ok(reconnected.initial.page.events.some((event) => event.type === "extension.error" && event.data.error === "stream still alive"));
   reconnected.close();
   await reconnected.done;

@@ -1116,6 +1116,17 @@ function boundedString(value: unknown, limit: number, fallback: string): string 
   return `${value.slice(0, end)}…`;
 }
 
+function boundedContentString(value: unknown, limit: number): string {
+  if (typeof value !== "string" || value.length === 0) return "";
+  if (value.length <= limit) return value;
+  return value.slice(0, unicodeSafeEnd(value, limit));
+}
+
+function optionalContentString(value: unknown, limit: number): string | undefined {
+  const content = boundedContentString(value, limit);
+  return content.length > 0 ? content : undefined;
+}
+
 interface PiImageContent { type: "image"; data: string; mimeType: string }
 
 function safeImageMimeType(value: unknown): string {
@@ -1231,7 +1242,7 @@ function projectAgentSessionEvent(event: AgentSessionEvent | Record<string, unkn
     const result = isRecord(source[resultKey]) ? source[resultKey] as Record<string, unknown> : undefined;
     const toolName = typeof source.toolName === "string" ? source.toolName : undefined;
     const isError = type === "tool_execution_end" && source.isError === true;
-    const contentText = safeOptionalText(toolResultText(result?.content), 256_000);
+    const contentText = optionalContentString(toolResultText(result?.content), 256_000);
     const content = projectPrivateToolContent(result?.content);
     const presentation = projectBuiltInToolPresentation(toolName, contentText, result?.details, isError);
     return {
@@ -1281,29 +1292,29 @@ function projectAssistantMessageEvent(update: Record<string, unknown>): Record<s
 }
 
 function projectPrivateContent(content: unknown): unknown {
-  if (typeof content === "string") return safeRequiredText(content, 256_000, "Content unavailable");
+  if (typeof content === "string") return boundedContentString(content, 256_000);
   if (!Array.isArray(content)) return [];
   const blocks: Record<string, unknown>[] = [];
   for (const item of content.slice(0, 200)) {
     if (!isRecord(item)) continue;
-    if (item.type === "text") blocks.push({ type: "text", text: item.text === "" ? "" : safeRequiredText(item.text, 8_000, "Content unavailable") });
-    else if (item.type === "thinking") {
-      const thinking = safeOptionalText(item.thinking, 8_000);
+    if (item.type === "text" && typeof item.text === "string" && item.text.length > 0) {
+      blocks.push({ type: "text", text: boundedContentString(item.text, 8_000) });
+    } else if (item.type === "thinking") {
+      const thinking = optionalContentString(item.thinking, 8_000);
       if (thinking !== undefined) blocks.push({ type: "thinking", thinking });
     }
     else if (item.type === "toolCall" || item.type === "tool_call") blocks.push(projectPrivateToolCall(item));
     else if (item.type === "image") blocks.push({ type: "image", mimeType: safeImageMimeType(item.mimeType) });
   }
-  if (content.length > 200) blocks.push({ type: "text", text: "[Additional content omitted]" });
   return blocks;
 }
 
 function projectPrivateToolContent(content: unknown): unknown {
-  if (typeof content === "string") return boundedString(content, 256_000, "");
+  if (typeof content === "string") return boundedContentString(content, 256_000);
   if (!Array.isArray(content)) return [];
   return content.slice(0, 200).flatMap((item): Record<string, unknown>[] => {
     if (!isRecord(item)) return [];
-    if (item.type === "text" && typeof item.text === "string") return [{ type: "text", text: boundedString(item.text, 256_000, "") }];
+    if (item.type === "text" && typeof item.text === "string") return [{ type: "text", text: boundedContentString(item.text, 256_000) }];
     if (item.type === "image") return [{ type: "image", mimeType: safeImageMimeType(item.mimeType) }];
     return [];
   });
@@ -1348,11 +1359,11 @@ function projectHistoryEntry(entry: SessionEntry): AgentHistoryEntry | undefined
       ? projectPrivateToolContent(message.content)
       : projectPrivateContent(message.content);
     if (role === "bashExecution") {
-      const command = typeof message.command === "string" ? boundedString(message.command, 8_000, "") : "";
-      const output = typeof message.output === "string" ? boundedString(message.output, 256_000, "") : "";
-      content = `! ${command}${output ? `\n${output}` : ""}`;
+      const command = boundedContentString(message.command, 8_000);
+      const output = boundedContentString(message.output, 256_000);
+      content = command.length > 0 ? `! ${command}${output ? `\n${output}` : ""}` : output;
     } else if (role === "branchSummary" || role === "compactionSummary") {
-      content = typeof message.summary === "string" ? boundedString(message.summary, 256_000, "") : "";
+      content = boundedContentString(message.summary, 256_000);
     }
     return {
       ...base,
@@ -1391,14 +1402,17 @@ type ConversationSourceBlock =
 
 function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryEntry): ConversationSourceBlock[] {
   const omitted = (kind: "image" | "binary", description: string): ConversationOmittedSourceBlock => ({ type: "omitted", kind, description });
-  const text = (type: "text" | "thinking", value: unknown): ConversationTextSourceBlock => ({
-    type,
-    text: typeof value === "string" ? value : "",
-  });
-  if (entry.type === "compaction" || entry.type === "branch_summary") return [text("text", entry.summary)];
+  const text = (type: "text" | "thinking", value: unknown): ConversationTextSourceBlock | undefined => (
+    typeof value === "string" && value.length > 0 ? { type, text: value } : undefined
+  );
+  const textBlocks = (type: "text" | "thinking", value: unknown): ConversationSourceBlock[] => {
+    const block = text(type, value);
+    return block === undefined ? [] : [block];
+  };
+  if (entry.type === "compaction" || entry.type === "branch_summary") return textBlocks("text", entry.summary);
   if (entry.type === "thinking_level_change" || entry.type === "model_change" || entry.type === "session_info") {
     const value = typeof projected.content === "string" ? projected.content : String(projected.content ?? "");
-    return [text("text", value)];
+    return textBlocks("text", value);
   }
   const content = entry.type === "custom_message"
     ? entry.content
@@ -1411,9 +1425,9 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
     if (role === "bashExecution") {
       const command = typeof message.command === "string" ? message.command : "";
       const output = typeof message.output === "string" ? message.output : "";
-      return [text("text", `! ${command}${output ? `\n${output}` : ""}`)];
+      return textBlocks("text", command.length > 0 ? `! ${command}${output ? `\n${output}` : ""}` : output);
     }
-    if (role === "branchSummary" || role === "compactionSummary") return [text("text", message.summary)];
+    if (role === "branchSummary" || role === "compactionSummary") return textBlocks("text", message.summary);
     if (role === "toolResult") {
       const toolCallId = typeof message.toolCallId === "string" ? boundedString(message.toolCallId, 128, "unknown") : "unknown";
       const toolName = typeof message.toolName === "string" ? boundedString(message.toolName, 256, "tool") : "tool";
@@ -1423,16 +1437,15 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
         if (!isRecord(item)) return [];
         if (item.type === "image") return [{ type: "image", mimeType: safeImageMimeType(item.mimeType), data: typeof item.data === "string" ? item.data : "" }];
         if (item.type !== "text") return [];
-        const value = text("text", item.text);
-        return [{ type: "tool_result", toolCallId, toolName, text: value.text, isError }];
+        return [{ type: "tool_result", toolCallId, toolName, text: typeof item.text === "string" ? item.text : "", isError }];
       });
     }
   }
   const items = typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content : [];
   return items.flatMap((item): ConversationSourceBlock[] => {
     if (!isRecord(item)) return [];
-    if (item.type === "text") return [text("text", item.text)];
-    if (item.type === "thinking") return [text("thinking", item.thinking)];
+    if (item.type === "text") return textBlocks("text", item.text);
+    if (item.type === "thinking") return textBlocks("thinking", item.thinking);
     if (item.type === "image") return [{ type: "image", mimeType: safeImageMimeType(item.mimeType), data: typeof item.data === "string" ? item.data : "" }];
     if ((item.type === "toolCall" || item.type === "tool_call") && typeof item.name === "string") {
       try {

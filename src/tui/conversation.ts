@@ -141,9 +141,11 @@ export class DockConversation implements Component {
 
   apply(event: DockEvent): void {
     switch (event.type) {
-      case "message.submitted":
-        this.add("user", userMessageText(event.data.text, event.data.images ?? []));
+      case "message.submitted": {
+        const text = userMessageText(event.data.text, event.data.images ?? []);
+        if (text.length > 0) this.add("user", text);
         break;
+      }
 
       case "message.delta": {
         const delta = event.data.delta;
@@ -169,8 +171,9 @@ export class DockConversation implements Component {
         const thinking = contentText(event.data.content, "thinking");
         let changed = false;
         if (!this.hideThinking && (this.currentThinking || thinking)) {
-          const entry = this.currentThinking ?? this.add("thinking", "", false);
-          if (thinking !== undefined) entry.text = safeTerminalText(thinking);
+          const completed = thinking === undefined ? undefined : safeTerminalText(thinking);
+          const entry = this.currentThinking ?? this.add("thinking", completed ?? "", false);
+          if (completed !== undefined && completed.length >= entry.text.length) entry.text = completed;
           entry.complete = true;
           this.touchEntry(entry);
           changed = true;
@@ -179,9 +182,10 @@ export class DockConversation implements Component {
 
         // Failed transport attempts can complete without assistant text. Retry
         // events own intermediate noise and run.settled owns the final error.
-        const entry = this.currentAssistant ?? (text ? this.add("assistant", "", false) : undefined);
+        const completed = text === undefined ? undefined : safeTerminalText(text);
+        const entry = this.currentAssistant ?? (completed ? this.add("assistant", completed, false) : undefined);
         if (entry) {
-          if (text !== undefined) entry.text = safeTerminalText(text);
+          if (completed !== undefined && completed.length >= entry.text.length) entry.text = completed;
           entry.complete = true;
           this.touchEntry(entry);
           changed = true;
@@ -458,15 +462,18 @@ export class DockConversation implements Component {
       const fullWidthSurface = entry.kind === "user" || entry.toolCallId !== undefined || entry.summaryKind === "compaction";
       const entryWidth = fullWidthSurface ? width : contentWidth;
       const entryIndent = fullWidthSurface ? "" : indent;
-      for (const line of this.renderEntry(entry, entryWidth)) {
+      const rendered = this.renderEntry(entry, entryWidth);
+      if (rendered.length === 0) continue;
+      for (const line of rendered) {
         // Every entry renderer is width-bounded. Avoid rescanning all cached
         // history rows on each live delta merely to truncate them a second time.
         lines.push(`${entryIndent}${line}`);
       }
       lines.push("");
     }
-    this.renderCache = { width, revision: this.revisionValue, lines };
-    return lines;
+    const visible = lines.length > 0 ? lines : [paint.muted("  Start a conversation below.")];
+    this.renderCache = { width, revision: this.revisionValue, lines: visible };
+    return visible;
   }
 
   /** Plain projection used by deterministic tests and non-TTY validation. */
@@ -520,27 +527,30 @@ export class DockConversation implements Component {
     } else if (entry.summaryKind === "compaction") {
       lines = renderCompactionSummary(entry.text, width, expanded);
     } else if (entry.kind === "user") {
-      lines = renderUserSurface(entry.text.length > 0 ? entry.text : "…", width, this.outputPadding);
+      lines = entry.text.length > 0 ? renderUserSurface(entry.text, width, this.outputPadding) : [];
     } else if (entry.kind === "assistant" || entry.kind === "thinking") {
-      const text = entry.text.length > 0 ? entry.text : "…";
-      const innerWidth = entry.kind === "thinking" ? Math.max(1, width - 2) : width;
-      const markdown = new Markdown(
-        text,
-        0,
-        0,
-        markdownTheme,
-        entry.kind === "thinking" ? { color: paint.thinking, italic: true } : undefined,
-      );
-      const content = markdown.render(innerWidth);
-      lines = entry.kind === "thinking"
-        ? content.map((line) => `  ${paint.thinking(line)}`)
-        : content;
+      if (entry.text.length === 0) {
+        lines = [];
+      } else {
+        const innerWidth = entry.kind === "thinking" ? Math.max(1, width - 2) : width;
+        const markdown = new Markdown(
+          entry.text,
+          0,
+          0,
+          markdownTheme,
+          entry.kind === "thinking" ? { color: paint.thinking, italic: true } : undefined,
+        );
+        const content = markdown.render(innerWidth);
+        lines = entry.kind === "thinking"
+          ? content.map((line) => `  ${paint.thinking(line)}`)
+          : content;
+      }
     } else if (entry.kind === "error") {
       lines = renderNotice(entry.text.length > 0 ? entry.text : "Unknown error", width, "error");
     } else if (entry.kind === "warning") {
       lines = renderNotice(entry.text.length > 0 ? entry.text : "Warning", width, "warning");
     } else {
-      lines = renderNotice(entry.text.length > 0 ? entry.text : "…", width, "info");
+      lines = entry.text.length > 0 ? renderNotice(entry.text, width, "info") : [];
     }
 
     entry.renderCache = { width, revision: entry.renderRevision, expanded, lines };
@@ -568,22 +578,15 @@ export class DockConversation implements Component {
       const text = contentText(source.content, "text");
       if (source.role === "user") {
         const projected = userMessageText(text ?? "", source.content.filter((block) => block.type === "image"));
-        addProjected(source, "user", projected || historyOmissions(source));
+        if (projected.length > 0) addProjected(source, "user", projected);
       } else if (source.role === "assistant") {
-        let visibleBlock = false;
         for (const block of source.content) {
           if (block.type === "thinking") {
-            if (block.text.length > 0) {
-              addProjected(source, "thinking", block.text);
-              visibleBlock = true;
-            }
+            if (block.text.length > 0) addProjected(source, "thinking", block.text);
             continue;
           }
           if (block.type === "text") {
-            if (block.text.length > 0) {
-              addProjected(source, "assistant", block.text);
-              visibleBlock = true;
-            }
+            if (block.text.length > 0) addProjected(source, "assistant", block.text);
             continue;
           }
           if (block.type !== "tool_call") continue;
@@ -599,9 +602,7 @@ export class DockConversation implements Component {
           };
           projectedTools.set(block.toolCallId, tool);
           projectToolState(tool, "done");
-          visibleBlock = true;
         }
-        if (!visibleBlock && !source.error) addProjected(source, "assistant", historyOmissions(source));
         if (source.error) addProjected(source, "error", source.error);
       } else if (source.role === "tool") {
         for (const block of source.content) {
@@ -624,8 +625,11 @@ export class DockConversation implements Component {
           projectedTools.delete(block.toolCallId);
         }
       } else {
-        const entry = addProjected(source, source.error ? "error" : "system", text || historyOmissions(source) || source.error || "Session event");
-        entry.summaryKind = source.summaryKind;
+        const projected = text ?? source.error;
+        if (projected !== undefined && projected.length > 0) {
+          const entry = addProjected(source, source.error ? "error" : "system", projected);
+          entry.summaryKind = source.summaryKind;
+        }
       }
     }
     return projectedEntries;
@@ -846,6 +850,7 @@ function renderUserSurface(text: string, width: number, outputPadding: number): 
 }
 
 function renderCompactionSummary(text: string, width: number, expanded: boolean): string[] {
+  if (text.length === 0) return [];
   const bodyWidth = Math.max(1, width - 2);
   const lines = [
     paint.bold(paint.warning(expanded ? "[compaction · expanded]" : "[compaction]")),
@@ -856,7 +861,7 @@ function renderCompactionSummary(text: string, width: number, expanded: boolean)
     lines.push(...wrapPlainText("Alt+O expands it; messages below are the retained context.", bodyWidth).map(paint.muted));
   } else {
     lines.push(paint.muted("Alt+O collapse"), "");
-    const markdown = new Markdown(text.length > 0 ? text : "Summary unavailable", 0, 0, markdownTheme);
+    const markdown = new Markdown(text, 0, 0, markdownTheme);
     lines.push(...markdown.render(bodyWidth));
   }
   return renderSemanticSurface(lines, width, paint.compactionSurface);
@@ -1233,13 +1238,6 @@ function userMessageText(text: string, images: readonly { mimeType: string }[]):
   const imageLines = images.map((image, index) => `[Image ${index + 1} · ${image.mimeType}]`);
   if (text.length === 0) return imageLines.join("\n");
   return imageLines.length === 0 ? text : `${text}\n\n${imageLines.join("\n")}`;
-}
-
-function historyOmissions(entry: HistoryEntryDto): string {
-  return entry.content
-    .filter((block): block is Extract<HistoryEntryDto["content"][number], { type: "omitted" }> => block.type === "omitted")
-    .map((block) => block.description)
-    .join("\n");
 }
 
 function toolBaseName(toolName: string): string {

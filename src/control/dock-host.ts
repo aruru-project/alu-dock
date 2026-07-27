@@ -830,12 +830,10 @@ function createBoundedHistoryResult(source:HistoryResult,requestId:string,hostEp
   return {entries:[],hasEarlier:false,instance:source.instance};
 }
 function slimHistoryEntry(entry:HistoryResult["entries"][number]):HistoryResult["entries"][number] {
-  const marker="[History content truncated to fit the control response]";
   const first=entry.content[0];
-  if(first?.type==="tool_result")return {...entry,content:[{...first,text:marker,omittedFields:[...(first.omittedFields??[]),"/content"]}]};
-  if(first?.type==="tool_call")return {...entry,content:[{...first,args:{},omittedFields:[...(first.omittedFields??[]),"/arguments"]},{type:"text",text:marker}]};
-  if(first?.type==="thinking")return {...entry,content:[{type:"thinking",text:marker}]};
-  return {...entry,content:[{type:"text",text:marker}]};
+  if(first?.type==="tool_result")return {...entry,content:[{...first,text:"",omittedFields:[...(first.omittedFields??[]),"/content"]}]};
+  if(first?.type==="tool_call")return {...entry,content:[{...first,args:{},omittedFields:[...(first.omittedFields??[]),"/arguments"]}]};
+  return {...entry,content:[]};
 }
 function createBoundedReadResult(projection:AttachProjection,requestId:string):InstanceReadResult {
   const source=projection.page;
