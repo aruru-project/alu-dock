@@ -1414,7 +1414,15 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "interaction.requested": return parseDialogRequest(data, field);
     case "interaction.resolved": exact(data, ["interactionId", "method"]); return { interactionId: text("interactionId", 128), method: enumeration(data.method, "method", ["select", "confirm", "input", "editor"]) };
     case "interaction.cancelled": exact(data, ["interactionId", "method", "reason"]); return { interactionId: text("interactionId", 128), method: enumeration(data.method, "method", ["select", "confirm", "input", "editor"]), reason: enumeration(data.reason, "reason", ["user", "timeout", "signal", "detach", "replacement", "host_draining", "overflow"]) };
-    case "extension.notification": exact(data, ["message", "level"]); return { message: payloadFreeString(data.message, `${field}.message`, MAX_TEXT), level: enumeration(data.level, "level", ["info", "warning", "error"]) };
+    case "extension.notification": {
+      exact(data, ["message", "level", "operationId"]);
+      const operationId = optionalText("operationId", 128);
+      return {
+        message: payloadFreeString(data.message, `${field}.message`, MAX_TEXT),
+        level: enumeration(data.level, "level", ["info", "warning", "error"]),
+        ...(operationId === undefined ? {} : { operationId }),
+      };
+    }
     case "extension.title_set": {
       exact(data, ["controllerId", "title"]);
       const title = payloadFreeBoundedString(data.title, `${field}.title`, 2_048);
@@ -1629,7 +1637,14 @@ function thinkingLevels(input: unknown): ThinkingLevel[] { return array(input, "
 export class ProtocolValidationError extends Error { constructor(readonly code: string, message: string) { super(message); this.name = "ProtocolValidationError"; } }
 function validation(code: string, message: string): ProtocolValidationError { return new ProtocolValidationError(code, message); }
 function object(input: unknown, field: string, code = "invalid_response"): Record<string, unknown> { if (input === null || typeof input !== "object" || Array.isArray(input)) throw validation(code, `${field} must be a JSON object`); return input as Record<string, unknown>; }
-function exact(value: Record<string, unknown>, keys: readonly string[], code = "invalid_response"): void { const allowed = new Set(keys); const unexpected = Object.keys(value).find((key) => !allowed.has(key)); if (unexpected) throw validation(code, `Unexpected field: ${unexpected}`); }
+function exact(value: Record<string, unknown>, keys: readonly string[], code = "invalid_response"): void {
+  // Client and hello input stays closed. Host responses/events are additive:
+  // readers validate the fields they understand and ignore future optional ones.
+  if (code === "invalid_response") return;
+  const allowed = new Set(keys);
+  const unexpected = Object.keys(value).find((key) => !allowed.has(key));
+  if (unexpected) throw validation(code, `Unexpected field: ${unexpected}`);
+}
 function boundedString(input: unknown, field: string, max = MAX_CONTROL_CWD_CHARS, code = "invalid_response"): string { if (typeof input !== "string" || input.length > max) throw validation(code, `${field} must be a bounded string`); return input; }
 function string(input: unknown, field: string, max = MAX_CONTROL_CWD_CHARS, code = "invalid_response"): string { const value=boundedString(input,field,max,code); if(value.length===0)throw validation(code,`${field} must be a bounded non-empty string`); return value; }
 function id(input: unknown, field: string, code = "invalid_response"): string { return string(input, field, 128, code); }

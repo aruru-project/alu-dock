@@ -4,8 +4,60 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { DockClient } from "../src/control/dock-client.js";
+import { DockHost } from "../src/control/dock-host.js";
+import { DockRegistry } from "../src/control/dock-registry.js";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
 import type { DockEvent } from "../src/core/managed-instance.js";
+
+test("Protocol V2 follows command-origin and passive notifications from a real Pi Worker", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-dock-command-notification-"));
+  const agentDir = join(root, "agent");
+  const sessionDir = join(root, "sessions");
+  const socketPath = join(root, "dock.sock");
+  await mkdir(join(agentDir, "extensions"), { recursive: true });
+  await mkdir(sessionDir, { recursive: true });
+  await chmod(root, 0o700);
+  await writeFile(join(agentDir, "extensions", "notification-fixture.ts"), `
+export default function (pi) {
+  pi.registerCommand("notification-fixture", {
+    handler: async (_args, ctx) => {
+      await Promise.resolve();
+      ctx.ui.notify("command notification", "info");
+      setTimeout(() => ctx.ui.notify("passive notification", "info"), 0);
+    },
+  });
+}
+`, "utf8");
+
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, name }) => createPiInstance({
+    id, creationOperationId, hostEpoch, cwd, name, agentDir, sessionDir, projectTrusted: true,
+  }), () => "notification-instance");
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(root, { recursive: true, force: true }); });
+  await host.start();
+
+  const client = new DockClient({ socketPath });
+  const instance = await client.create(process.cwd(), "notification-origin", "create-notification-instance");
+  const events: DockEvent[] = [];
+  const follower = await client.streamEvents(instance.id, { onEvent: (event) => { events.push(event); } });
+  try {
+    const result = await client.prompt(instance.id, "/notification-fixture", "auto", "notification-operation");
+    assert.equal(result.receipt.kind, "extension_command");
+    for (let attempt = 0; attempt < 200 && !events.some((event) => event.type === "extension.notification" && event.data.message === "passive notification"); attempt += 1) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+    }
+    const notifications = events.filter((event): event is Extract<DockEvent, { type: "extension.notification" }> => event.type === "extension.notification");
+    assert.deepEqual(notifications.map((event) => [event.data.message, event.data.operationId]), [
+      ["command notification", "notification-operation"],
+      ["passive notification", undefined],
+    ]);
+    assert.equal(events.some((event) => event.type === "command.handled" && event.data.operationId === "notification-operation"), true);
+  } finally {
+    follower.close();
+    await follower.done;
+  }
+});
 
 test("real Pi extension command brokers UI and completes without a model run", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-dock-real-extension-ui-"));
@@ -27,6 +79,7 @@ export default function (pi) {
       ctx.ui.notify("fixture body\\u001b[2J", "info");
       const confirmed = await ctx.ui.confirm("Approve fixture", "This stays local.");
       ctx.ui.notify(confirmed ? "fixture approved" : "fixture denied", confirmed ? "info" : "error");
+      setTimeout(() => ctx.ui.notify("fixture passive", "info"), 0);
     },
   });
   pi.registerCommand("invalid-ui", {
@@ -94,10 +147,19 @@ export default function (pi) {
     assert.equal(events.some((event) => event.type === "extension.editor_text_set"
       && event.data.controllerId === claim.controllerId
       && event.data.text === "fixture draft\nsecond line"), true);
+    for (let attempt = 0; attempt < 100 && !events.some((event) => event.type === "extension.notification" && event.data.message === "fixture passive"); attempt += 1) {
+      await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+    }
     const notifications = events
-      .filter((event): event is Extract<DockEvent, { type: "extension.notification" }> => event.type === "extension.notification")
-      .map((event) => event.data.message);
-    assert.deepEqual(notifications, ["fixture body[2J", "fixture approved"]);
+      .filter((event): event is Extract<DockEvent, { type: "extension.notification" }> => event.type === "extension.notification");
+    assert.deepEqual(
+      notifications.map((event) => [event.data.message, event.data.operationId]),
+      [
+        ["fixture body[2J", "real-extension-command"],
+        ["fixture approved", "real-extension-command"],
+        ["fixture passive", undefined],
+      ],
+    );
     const widget = events.find((event) => event.type === "extension.widget_changed" && event.data.key === "fixture");
     assert.equal(widget?.type, "extension.widget_changed");
     if (widget?.type === "extension.widget_changed") assert.deepEqual(widget.data.lines, ["worker widget"]);

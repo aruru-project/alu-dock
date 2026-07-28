@@ -47,7 +47,7 @@ Host 不为这些能力维护第二套 Agent 实现，也不重复投影 Worker 
 4. `instance.read` 读取当前权威视图，`instance.follow` 在初始 response 后持续接收 event；
 5. Extension UI 操作使用独立连接，并与读取、实时跟随分别恢复。
 
-Request、response 和 event 使用 closed JSON-safe shape。单 frame 可以有传输上限，但业务内容不能因此永久截断；大型 conversation 使用分页和 chunk 继续读取。
+Client 发给 Host 的 hello/request 使用 closed JSON-safe shape，未知字段会被拒绝。Host 发给 Client 的 response/event 仍严格校验已知字段、版本、类型和边界，但 Client 必须忽略新增的未知可选字段；只有删除字段、改变既有语义或新增无法忽略的类型时才需要 capability 或协议版本。单 frame 可以有传输上限，但业务内容不能因此永久截断；大型 conversation 使用分页和 chunk 继续读取。
 
 Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 TUI 或 Web 客户端重写。
 

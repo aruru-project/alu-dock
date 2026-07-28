@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from "node:async_hooks";
+
 import type {
   ExtensionDialogOptions,
   ExtensionWidgetRenderer,
@@ -23,8 +25,17 @@ export class WorkerExtensionUiEndpoint implements PiExtensionUiLifecyclePort {
   private rendererGeneration = 0;
   private generation = 0;
   private toolsExpanded = false;
+  private readonly notificationOrigin = new AsyncLocalStorage<{ operationId: string; active: boolean }>();
 
   constructor(private readonly call: WorkerUiCall) {}
+
+  async withCommandNotificationOrigin<T>(operationId: string, execute: () => Promise<T>): Promise<T> {
+    const origin = { operationId, active: true };
+    return this.notificationOrigin.run(origin, async () => {
+      try { return await execute(); }
+      finally { origin.active = false; }
+    });
+  }
 
   bindWidgetRenderer(renderer: ExtensionWidgetRenderer): void {
     this.renderer?.reset();
@@ -72,7 +83,12 @@ export class WorkerExtensionUiEndpoint implements PiExtensionUiLifecyclePort {
   }
 
   notify(message: string, level: "info" | "warning" | "error" = "info"): void {
-    this.fire("ui.notify", { message, level });
+    const origin = this.notificationOrigin.getStore();
+    this.fire("ui.notify", {
+      message,
+      level,
+      ...(origin?.active === true ? { operationId: origin.operationId } : {}),
+    });
   }
 
   setTitle(title: string): void { this.fire("ui.setTitle", { title }); }

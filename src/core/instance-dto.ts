@@ -228,7 +228,7 @@ export interface EventDataMap {
     | { controllerId: string; interactionId: string; method: "editor"; title: string; prefill?: string; issuedAt: string; expiresAt?: string };
   "interaction.resolved": { interactionId: string; method: "select" | "confirm" | "input" | "editor" };
   "interaction.cancelled": { interactionId: string; method: "select" | "confirm" | "input" | "editor"; reason: "user" | "timeout" | "signal" | "detach" | "replacement" | "host_draining" | "overflow" };
-  "extension.notification": { message: string; level: "info" | "warning" | "error" };
+  "extension.notification": { message: string; level: "info" | "warning" | "error"; operationId?: string };
   "extension.title_set": { controllerId: string; title: string };
   "extension.editor_text_set": { controllerId: string; text: string };
   "extension.status_changed": { key: string; text?: string };

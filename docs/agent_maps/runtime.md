@@ -69,6 +69,8 @@ Extension component 和 Promise 留在 Worker。Worker 负责 component render�
 
 某个客户端没有实现一种 Extension UI，只影响该客户端，不影响 extension runtime、Agent 或其他客户端，也不能产生假的用户回答。
 
+Extension command 仍通过完整 Agent input 语义执行，不另建第二条命令通道。Worker 在执行前确认当前输入确实命中已注册的 Extension command，并只在该 handler 尚未结束时，把同一次提交已有的 `operationId` 附到 `extension.notification`。它只表达来源关联：通知仍不是 conversation record。handler 返回后遗留的 timer、后台任务以及其他被动 Extension 通知不携带该 ID；Host 不按文本、时间或命令名称猜测来源。
+
 ## 新增 Agent 或能力
 
 新增使用现有 Dock 能力的 Agent时，只增加 Worker adapter 和 runtime kind 注册，不修改 Pi adapter和不相关客户端。

@@ -152,11 +152,22 @@ async function runWorker(): Promise<void> {
       const accepted = envelope.kind === "agent_request" ? isAcceptedRequest(envelope.request.type)
         : envelope.kind === "agent_control" && envelope.control.type === "dispose";
       if (accepted) await sender.sendEnvelope({ kind: "accepted", callId: envelope.callId });
-      const result = envelope.kind === "agent_request"
-        ? await runtime!.dispatch(envelope.request, envelope.context, (result) => { void sender.sendEnvelope({ kind: "preflight", callId: envelope.callId, ...result }); })
-        : envelope.kind === "agent_control"
-          ? await runtime!.control(envelope.control)
-          : dispatchHostUi(ui, envelope.capability as UiCapability, envelope.args as Record<string, unknown>);
+      let result: unknown;
+      if (envelope.kind === "agent_request") {
+        const dispatchAgentRequest = (): Promise<unknown> => runtime!.dispatch(
+          envelope.request,
+          envelope.context,
+          (preflight) => { void sender.sendEnvelope({ kind: "preflight", callId: envelope.callId, ...preflight }); },
+        );
+        result = envelope.request.type === "command.submit"
+          && runtime!.classifyInput(envelope.request.params.message) === "extension_command"
+          ? await ui.withCommandNotificationOrigin(envelope.request.params.operationId, dispatchAgentRequest)
+          : await dispatchAgentRequest();
+      } else if (envelope.kind === "agent_control") {
+        result = await runtime!.control(envelope.control);
+      } else {
+        result = dispatchHostUi(ui, envelope.capability as UiCapability, envelope.args as Record<string, unknown>);
+      }
       const disposed = envelope.kind === "agent_control" && envelope.control.type === "dispose";
       await sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: true, result, ...(disposed ? {} : { state: captureState(runtime!) }) });
       if (disposed) setTimeout(() => process.exit(0), 0);

@@ -38,7 +38,7 @@ Protocol V2 使用本机 Unix stream socket 和 UTF-8 JSONL。每个连接的流
 {"kind":"request","version":2,"requestId":"request-id","type":"host.info","params":{}}
 ```
 
-客户端必须校验 response 的 request ID、Protocol version 和 Host epoch。单条 JSONL 有 frame 上限；大型 conversation 通过分页和 chunk 传输，不能把 frame 上限误当成内容上限。
+客户端必须校验 response 的 request ID、Protocol version、Host epoch 和自己使用的已知字段。Client→Host 的 hello/request 是 closed shape；Host→Client 的 response/event 可以增加未知可选字段，客户端应忽略它们，而不是让连接失败。字段删除、既有字段类型或语义改变、以及未知 event type 仍是不兼容变化。单条 JSONL 有 frame 上限；大型 conversation 通过分页和 chunk 传输，不能把 frame 上限误当成内容上限。
 
 Wire shape、capability 名称和 bounds 的代码真相在：
 
@@ -180,6 +180,8 @@ Web 应用通常由后端接收浏览器上传、保存为受控本机文件，�
 客户端使用当前 `leaseToken + interactionId` 发送 `interaction.respond`。只有 Host 明确确认 response 后，才能关闭交互状态；传输结果未知时先重新查询权威状态，不自动重发。
 
 客户端可以只实现自己真正支持的 Extension UI capability。没有实现某个 custom surface，不影响 Worker、Pi extension 或其他客户端；但客户端不能返回假的默认答案。
+
+已注册的 Extension command 继续使用 `command.submit`。如果 command handler 在执行期间调用 `ui.notify`，对应的 `extension.notification` 会携带该提交已有的 `operationId`；客户端可以把它与自己发起的命令关联并选择显示位置。没有 `operationId` 的 notification 是被动通知。这个字段不是订阅 token，也不会把 notification 变成 Conversation、Run 或 Queue 内容；handler 返回后的后台通知不再带该 ID。
 
 ## Project trust
 

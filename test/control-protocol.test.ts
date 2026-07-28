@@ -99,6 +99,32 @@ function validEvent(type = "message.delta", data: Record<string, unknown> = { me
   return { scope: "instance", sequence: 1, instanceId: "i1", runtimeGeneration: 1, occurredAt: "2026-07-14T00:00:00.000Z", type, data };
 }
 
+test("Protocol V2 clients accept additive Host response and event fields", () => {
+  assert.equal(parseControlResponse({
+    kind: "response", version: 2, requestId: "response-1", hostEpoch: "epoch-1", ok: true,
+    result: { accepted: true }, futureEnvelopeField: true,
+  }, "response-1", "epoch-1").ok, true);
+
+  const parsed = parseControlEventEnvelope({
+    kind: "event", version: 2, requestId: "follow-1", hostEpoch: "epoch-1", futureEnvelopeField: true,
+    event: {
+      ...validEvent("extension.notification", {
+        message: "command output", level: "info", operationId: "operation-1", futureDataField: true,
+      }),
+      futureEventField: true,
+    },
+  }, "follow-1", "epoch-1");
+  assert.equal(parsed.event.type, "extension.notification");
+  if (parsed.event.type === "extension.notification") {
+    assert.deepEqual(parsed.event.data, { message: "command output", level: "info", operationId: "operation-1" });
+  }
+
+  assert.equal(parseStatusResult({
+    instance: { ...validSnapshot(), futureSnapshotField: true },
+    futureResultField: true,
+  }).instance.id, "i1");
+});
+
 test("Protocol V2 history exposes only canonical persisted conversation records", () => {
   const record = {
     recordId: "entry-1",

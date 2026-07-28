@@ -347,10 +347,11 @@ export class ExtensionUiBroker {
     }, undefined);
   }
 
-  notify(message: string, level: "info" | "warning" | "error" = "info"): void {
+  notify(message: string, level: "info" | "warning" | "error" = "info", operationId?: string): void {
     void this.emit("extension.notification", {
       message: safeText(message, MAX_TEXT_CHARS),
       level: level === "warning" || level === "error" ? level : "info",
+      ...(operationId === undefined ? {} : { operationId }),
     });
   }
 
