@@ -114,6 +114,25 @@ test("private Worker conversation boundary accepts checkpoints and canonical per
     role: "assistant",
     content: "legacy private shape",
   }]), /unknown field|record id/i);
+
+  const oversizedConversationEntries = Array.from({ length: 70 }, (_, index) => ({
+    entry: {
+      recordId: `record-${index}`,
+      entryId: `record-${index}`,
+      kind: "message",
+      source: "user",
+      visibility: "conversation",
+      content: [{ type: "text", text: "x".repeat(8_000) }],
+    },
+    contentRef: `revision:record-${index}`,
+    contentComplete: false,
+    totalBlocks: 1,
+  }));
+  assert.throws(() => validateAgentWorkerResult("conversation.history", {
+    revision: "revision",
+    entries: oversizedConversationEntries,
+    hasEarlier: false,
+  }), /byte limit/i);
 });
 
 test("private worker protocol rejects malformed generic requests, events, state, and generation fences", () => {

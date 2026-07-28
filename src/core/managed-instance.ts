@@ -63,6 +63,7 @@ import type {
   AgentTreeSnapshot,
   ThinkingLevel,
 } from "./agent-worker.js";
+import { sliceSemanticHistory } from "./history-pagination.js";
 import {
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
@@ -150,6 +151,7 @@ export {
   MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS,
   MAX_PENDING_QUEUE_ITEMS,
   MAX_PENDING_QUEUE_TEXT_CHARS,
+  MAX_SEMANTIC_HISTORY_PAGE_ITEMS,
 } from "./instance-dto.js";
 import { projectAgentNavigateResult, projectRuntimeTree, type ProjectedSessionTree } from "./session-tree.js";
 
@@ -2654,19 +2656,18 @@ export class ManagedInstance {
     if (beforeTimestamp !== undefined) {
       source = source.filter((entry) => entry.timestamp === undefined || entry.timestamp < beforeTimestamp);
     }
-    let end = source.length;
+    let requestedEnd = source.length;
     if (beforeEntryId !== undefined) {
-      end = source.findIndex((entry) => entry.entryId === beforeEntryId);
-      if (end < 0) throw new InvalidHistoryCursorError(beforeEntryId);
+      requestedEnd = source.findIndex((entry) => entry.entryId === beforeEntryId);
+      if (requestedEnd < 0) throw new InvalidHistoryCursorError(beforeEntryId);
     }
-    const boundedLimit = Math.max(1, Math.min(200, Math.floor(limit)));
-    const start = Math.max(0, end - boundedLimit);
-    const entries = cloneJson(source.slice(start, end));
+    const page = sliceSemanticHistory(source, requestedEnd, Math.max(1, Math.min(200, Math.floor(limit))));
+    const entries = cloneJson(source.slice(page.start, page.end));
     return {
       historyRevision: this.historyRevisionValue,
       entries,
-      hasEarlier: start > 0,
-      ...(start > 0 && entries[0] ? { nextBeforeEntryId: entries[0].entryId } : {}),
+      hasEarlier: page.hasEarlier,
+      ...(page.hasEarlier && entries[0] ? { nextBeforeEntryId: entries[0].entryId } : {}),
     };
   }
 

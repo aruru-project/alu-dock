@@ -57,7 +57,7 @@ Pi runtime、Pi session、extension runner、component 和 Pi SDK object 全部�
 
 Conversation projector 使用同一个实际 delivery 生成 `message.submitted`。Canonical conversation frame 不以 Host 的辅助 Queue identity 为发布前提：即使 Queue 关联异常，已经被 Worker 接受的用户消息也必须先出现在 conversation，不能被内部错误替代。
 
-Conversation 的持久语义也在 adapter 内完成。Pi adapter 把当前 branch entry 投影成 canonical persisted record，显式保留 message、tool result、custom/custom message、bash execution、compaction/branch summary、model/thinking/session/label record 及其 visibility/metadata；Host 不读取 Pi role 或 Pi session 私有 shape。大型内容的 record 只承载有界 preview，完整内容由 conversation history/content 的 revision、content ref 和 chunk 提供。
+Conversation 的持久语义也在 adapter 内完成。Pi adapter 把当前 branch entry 投影成 canonical persisted record，显式保留 message、tool result、custom/custom message、bash execution、compaction/branch summary、model/thinking/session/label record 及其 visibility/metadata；Host 不读取 Pi role 或 Pi session 私有 shape。大型内容的 record 只承载有界 preview，完整内容由 conversation history/content 的 revision、content ref 和 chunk 提供。Adapter 与 Host 的 history 分页都以 canonical `toolCallId` 形成完整语义单元，不能把 Assistant tool call 与已有的对应 results 拆页；这不增加另一套 owner identity。Worker 私有协议还限制整个 conversation history page 的传输字节数；adapter 应先去除可由 content ref 读取的 preview，而不是拆开语义单元。
 
 实时事件与持久 record 不需要共享 identity。在线客户端在 `message_update`/tool event 上原位更新组件，完成后直接保留；重建时才从持久 record 重新生成。Adapter 在一个 turn、run、compaction 或独立持久写入形成安全边界后发出私有 `conversation_checkpoint`。Checkpoint 携带该边界的精确权威 branch history snapshot，表示它之前的 conversation frame 都已由这份 snapshot 表达；Host 原子安装 snapshot 并释放 active buffer，不能在稍后读取一个可能已经前进的 history 来猜测边界。Checkpoint 不等待任何客户端确认。
 

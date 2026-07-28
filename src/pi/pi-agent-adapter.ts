@@ -29,11 +29,13 @@ import {
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
   MAX_INPUT_IMAGES,
+  MAX_SEMANTIC_HISTORY_PAGE_BYTES,
   type ContentBlockDto,
   type ConversationFrame,
   type ImagePathDto,
   type JsonValue,
 } from "../core/instance-dto.js";
+import { sliceSemanticHistory, slimSemanticHistoryEntry } from "../core/history-pagination.js";
 import { projectBuiltInToolPresentation } from "../core/tool-result-presentation.js";
 import type { PiExtensionUiPort } from "./pi-extension-ui-adapter.js";
 import {
@@ -569,18 +571,32 @@ export class PiAgentAdapter {
       if (!continuation || continuation.revision !== state.revision) throw new AgentConversationCursorError("Conversation history cursor is stale");
       end = continuation.end;
     }
-    const start = Math.max(0, end - boundedLimit);
-    const entries = state.entries.slice(start, end).map(({ source, projected }) => ({
+    const page = sliceSemanticHistory(state.entries.map(({ projected }) => projected), end, boundedLimit);
+    let entries = state.entries.slice(page.start, page.end).map(({ source, projected }) => ({
       entry: projected,
       contentRef: conversationContentRef(state.revision, source.id),
       contentComplete: conversationPreviewIsComplete(source, projected),
       totalBlocks: conversationBlockCount(source),
     }));
-    if (start === 0) return { revision: state.revision, entries, hasEarlier: false };
-    const nextCursor = randomUUID();
-    this.conversationHistoryCursors.set(nextCursor, { revision: state.revision, end: start });
-    trimTokenMap(this.conversationHistoryCursors);
-    return { revision: state.revision, entries, hasEarlier: true, nextCursor };
+    const nextCursor = page.hasEarlier ? randomUUID() : undefined;
+    const result = (): AgentConversationHistoryPage => ({
+      revision: state.revision,
+      entries,
+      hasEarlier: page.hasEarlier,
+      ...(nextCursor === undefined ? {} : { nextCursor }),
+    });
+    if (Buffer.byteLength(JSON.stringify(result()), "utf8") > MAX_SEMANTIC_HISTORY_PAGE_BYTES) {
+      entries = entries.map((item) => ({ ...item, entry: slimSemanticHistoryEntry(item.entry) }));
+    }
+    const bounded = result();
+    if (Buffer.byteLength(JSON.stringify(bounded), "utf8") > MAX_SEMANTIC_HISTORY_PAGE_BYTES) {
+      throw new Error("A complete conversation section is too large to return in one history page");
+    }
+    if (nextCursor !== undefined) {
+      this.conversationHistoryCursors.set(nextCursor, { revision: state.revision, end: page.start });
+      trimTokenMap(this.conversationHistoryCursors);
+    }
+    return bounded;
   }
 
   async getConversationContent(contentRef: string, cursor?: string): Promise<AgentConversationContentPage> {

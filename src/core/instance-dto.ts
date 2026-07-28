@@ -30,6 +30,9 @@ export type ContentBlockDto =
   | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; presentation?: BuiltInToolPresentation; omittedFields?: string[] }
   | { type: "omitted"; kind: "image" | "binary"; description: string };
 
+export const MAX_SEMANTIC_HISTORY_PAGE_ITEMS = 100_000;
+/** Leaves room for the Protocol V2 response envelope under its 1 MiB line cap. */
+export const MAX_SEMANTIC_HISTORY_PAGE_BYTES = 512 * 1_024;
 export const MAX_PENDING_QUEUE_ITEMS = 64;
 export const MAX_PENDING_QUEUE_TEXT_CHARS = 256_000;
 export const MAX_INPUT_IMAGES = 10;

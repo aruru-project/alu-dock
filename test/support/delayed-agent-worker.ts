@@ -25,6 +25,7 @@ import type {
 import { AgentConversationCursorError, AgentSettingsWriteError } from "../../src/core/agent-worker.js";
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, SettingValueMap, ToolDto } from "../../src/core/config-projection.js";
 import { SETTING_DEFINITIONS, SETTING_KEYS } from "../../src/core/config-projection.js";
+import { sliceSemanticHistory } from "../../src/core/history-pagination.js";
 import type { ConversationFrame, ImagePathDto, JsonObject } from "../../src/core/instance-dto.js";
 
 class Deferred<T> {
@@ -284,8 +285,8 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   async getConversationHistory(cursor?: string, limit = 50): Promise<AgentConversationHistoryPage> {
     const end = cursor === undefined ? this.history.length : Number.parseInt(cursor, 10);
     if (!Number.isSafeInteger(end) || end < 0 || end > this.history.length) throw new AgentConversationCursorError();
-    const start = Math.max(0, end - Math.max(1, Math.min(200, Math.floor(limit))));
-    const entries = this.history.slice(start, end).map((entry) => ({
+    const page = sliceSemanticHistory(this.history, end, Math.max(1, Math.min(200, Math.floor(limit))));
+    const entries = this.history.slice(page.start, page.end).map((entry) => ({
       entry: structuredClone(entry),
       contentRef: `fixture-${entry.entryId}`,
       contentComplete: false,
@@ -294,8 +295,8 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     return {
       revision: this.conversationRevision,
       entries,
-      hasEarlier: start > 0,
-      ...(start > 0 ? { nextCursor: String(start) } : {}),
+      hasEarlier: page.hasEarlier,
+      ...(page.hasEarlier ? { nextCursor: String(page.start) } : {}),
     };
   }
 

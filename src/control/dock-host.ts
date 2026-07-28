@@ -36,6 +36,7 @@ import {
   type JsonObject,
 } from "../core/managed-instance.js";
 import { AgentCompactionKnownFailureError, AgentConversationCursorError, AgentInvalidSettingValueError, AgentModelNotFoundError, AgentSettingsWriteError, AgentUnavailableBeforeEffectError, AgentUnknownToolError } from "../core/agent-worker.js";
+import { dropOldestSemanticHistoryRange, slimSemanticHistoryEntry } from "../core/history-pagination.js";
 import type { SessionInventory } from "../core/session-inventory.js";
 import {
   CatalogListCursorStaleError,
@@ -816,24 +817,17 @@ function boundedSessionInventory(
 function successResponse(requestId:string,hostEpoch:string,result:unknown):ControlResponse { return {kind:"response",version:2,requestId,hostEpoch,ok:true,result}; }
 function createBoundedHistoryResult(source:HistoryResult,requestId:string,hostEpoch:string):HistoryResult {
   let entries=source.entries;
+  let slimmed=false;
   while(entries.length>0){
     const hasEarlier=source.hasEarlier||entries.length<source.entries.length;
     const candidate:HistoryResult={historyRevision:source.historyRevision,entries,hasEarlier,...(hasEarlier&&entries[0]?{nextBeforeEntryId:entries[0].entryId}:{}),instance:source.instance};
     if(encodedSize(successResponse(requestId,hostEpoch,candidate))<=MAX_CONTROL_LINE_BYTES)return candidate;
-    if(entries.length===1){
-      entries=[slimHistoryEntry(entries[0]!)];
-      const slim:HistoryResult={historyRevision:source.historyRevision,entries,hasEarlier,...(hasEarlier?{nextBeforeEntryId:entries[0]!.entryId}:{}),instance:source.instance};
-      return slim;
-    }
-    entries=entries.slice(1);
+    const reduced=dropOldestSemanticHistoryRange(entries);
+    if(reduced.length>0){entries=reduced;continue;}
+    if(!slimmed){entries=entries.map(slimSemanticHistoryEntry);slimmed=true;continue;}
+    throw new Error("A complete conversation section is too large to return in one history page");
   }
   return {historyRevision:source.historyRevision,entries:[],hasEarlier:false,instance:source.instance};
-}
-function slimHistoryEntry(entry:HistoryResult["entries"][number]):HistoryResult["entries"][number] {
-  const first=entry.content[0];
-  if(first?.type==="tool_result")return {...entry,content:[{...first,text:"",omittedFields:[...(first.omittedFields??[]),"/content"]}]};
-  if(first?.type==="tool_call")return {...entry,content:[{...first,args:{},omittedFields:[...(first.omittedFields??[]),"/arguments"]}]};
-  return {...entry,content:[]};
 }
 function createBoundedReadResult(projection:AttachProjection,requestId:string):InstanceReadResult {
   const source=projection.page;
@@ -849,9 +843,12 @@ function createBoundedReadResult(projection:AttachProjection,requestId:string):I
     const result:InstanceReadResult={instance:projection.instance,page,recentHistory:history,historyRevision:projection.historyRevision,historyTruncated,pendingMessages:projection.pendingMessages};
     const hostEpoch=projection.instance.ownerHostEpoch??source.latest.hostEpoch;
     if(encodedSize(successResponse(requestId,hostEpoch,result))<=MAX_CONTROL_LINE_BYTES)return result;
-    if(history.length>1){history=history.slice(1);historyTruncated=true;continue;}
-    if(history.length===1&&!historySlimmed){history=[slimHistoryEntry(history[0]!)];historyTruncated=true;historySlimmed=true;continue;}
-    if(history.length===1){history=[];historyTruncated=true;continue;}
+    if(history.length>0){
+      const reduced=dropOldestSemanticHistoryRange(history);
+      if(reduced.length>0){history=reduced;historyTruncated=true;continue;}
+      if(!historySlimmed){history=history.map(slimSemanticHistoryEntry);historyTruncated=true;historySlimmed=true;continue;}
+      history=[];historyTruncated=true;continue;
+    }
     if(events.length>0){events=events.slice(1);truncated=true;earliest={...source.latest,sequence:events[0]?.sequence??source.latest.sequence};continue;}
     return result;
   }

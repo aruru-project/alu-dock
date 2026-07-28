@@ -111,7 +111,7 @@ Follow result 只包含 `page`。Read 和 follow 之间发生的事件会出现�
 
 此时应清空旧 conversation，重新读取 snapshot 和 conversation bootstrap。不要拿旧画面、一次较新的 latest history page 和一次较早的 seed 拼成“看似完整”的会话。
 
-一次 history scan 必须始终使用同一个 `historyRevision`。`instance.read` seed 和后续 `session.history` page 的 revision 不一致时，放弃整次 scan 并重新 bootstrap。
+一次 history scan 必须始终使用同一个 `historyRevision`。`instance.read` seed 和后续 `session.history` page 的 revision 不一致时，放弃整次 scan 并重新 bootstrap。History page 不会拆开 persisted Assistant tool call 与已经存在的对应 tool results；`limit` 是目标 record 数，完整工具语义单元可以使实际条目数超过 limit。客户端继续使用既有 `toolCallId` 关联，不需要额外的 persisted owner identity。
 
 Event overlap 只按完整事件身份（`runtimeGeneration + sequence`）处理。不得按 role、text、thinking、tool arguments/result、custom details 或它们的 hash 合并；完全相同的内容也可能是两次真实发生的事实。
 

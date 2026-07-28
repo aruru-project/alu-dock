@@ -2403,7 +2403,11 @@ test("tui projection exposes stable paged history and attach history while prese
   const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   runtime.history = [
     agentRecord("h1", "user", [{ type: "text", text: "older question" }], { timestamp: "2020-01-01T00:00:00.000Z" }),
-    agentRecord("h2", "assistant", [{ type: "thinking", text: "plan" }, { type: "text", text: "older answer" }], { parentId: "h1", timestamp: "2020-01-01T00:00:01.000Z", stopReason: "stop" }),
+    agentRecord("h2", "assistant", [
+      { type: "thinking", text: "plan" },
+      { type: "tool_call", toolCallId: "tool-h3", toolName: "show_image", args: { path: "/tmp/demo.png" } },
+      { type: "text", text: "older answer" },
+    ], { parentId: "h1", timestamp: "2020-01-01T00:00:01.000Z", stopReason: "stop" }),
     agentRecord("h3", "tool", [{ type: "tool_result", toolCallId: "tool-h3", toolName: "show_image", isError: false, text: "data:image/png;base64,AAAA" }], {
       parentId: "h2", timestamp: "2020-01-01T00:00:02.000Z", toolCallId: "tool-h3", toolName: "show_image", isError: false,
     }),
@@ -2412,11 +2416,15 @@ test("tui projection exposes stable paged history and attach history while prese
   const immediate = await harness.registry.get(created.id).getHistoryPage(undefined, 2);
   assert.deepEqual(immediate.entries.map((entry) => entry.entryId), ["h2", "h3"]);
 
-  const latest = await client.history(created.id, undefined, 2);
-  assert.deepEqual(latest.entries.map((entry) => entry.entryId), ["h2", "h3"]);
+  const latest = await client.history(created.id, undefined, 1);
+  assert.deepEqual(latest.entries.map((entry) => entry.entryId), ["h2", "h3"], "a requested record limit cannot split one tool exchange");
   assert.equal(latest.hasEarlier, true);
   assert.equal(latest.nextBeforeEntryId, "h2");
   assert.equal(JSON.stringify(latest).includes("data:image"), true);
+  const conversationLatest = await client.conversationHistory(created.id, undefined, 1);
+  assert.deepEqual(conversationLatest.entries.map((item) => item.entry.entryId), ["h2", "h3"]);
+  assert.equal(conversationLatest.hasEarlier, true);
+
   const earlier = await client.history(created.id, latest.nextBeforeEntryId, 2);
   assert.deepEqual(earlier.entries.map((entry) => entry.entryId), ["h1"]);
   assert.equal(earlier.hasEarlier, false);
@@ -2435,26 +2443,50 @@ test("tui projection exposes stable paged history and attach history while prese
 
   runtime.history = [
     agentRecord("other-1", "user", [{ type: "text", text: "different branch" }]),
-    agentRecord("h2", "assistant", [{ type: "text", text: "different continuation" }]),
+    agentRecord("h2", "assistant", [
+      { type: "text", text: "different continuation" },
+      { type: "tool_call", toolCallId: "tool-h3", toolName: "show_image", args: { path: "/tmp/other.png" } },
+    ]),
     agentRecord("h3", "tool", [{ type: "tool_result", toolCallId: "tool-h3", toolName: "show_image", isError: false, text: "different result" }]),
   ];
   runtime.emit({ type: "conversation_checkpoint" });
   const changedDuringScan = await client.history(created.id, latest.nextBeforeEntryId, 2);
   assert.notEqual(changedDuringScan.historyRevision, latest.historyRevision);
 
-  runtime.history = Array.from({ length: 200 }, (_, index) => agentRecord(
-    `large-${index}`,
-    "user",
-    [{ type: "text", text: "x".repeat(8_000) }],
-    { timestamp: `2020-01-01T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z` },
-  ));
+  const largeDisplayDiff = "+changed\n".repeat(28_440);
+  const largeToolPresentation = { kind: "edit" as const, preview: "head-tail" as const, notices: [], displayDiff: largeDisplayDiff };
+  runtime.history = [
+    ...Array.from({ length: 198 }, (_, index) => agentRecord(
+      `large-${index}`,
+      "user",
+      [{ type: "text", text: "x".repeat(8_000) }],
+      { timestamp: `2020-01-01T00:${String(Math.floor(index / 60)).padStart(2, "0")}:${String(index % 60).padStart(2, "0")}.000Z` },
+    )),
+    agentRecord("large-tool-call", "assistant", [
+      { type: "tool_call", toolCallId: "large-tool-1", toolName: "edit", args: { path: "/tmp/large-1" } },
+      { type: "tool_call", toolCallId: "large-tool-2", toolName: "edit", args: { path: "/tmp/large-2" } },
+    ]),
+    agentRecord("large-tool-result-1", "tool", [
+      { type: "tool_result", toolCallId: "large-tool-1", toolName: "edit", isError: false, text: "large result".repeat(20_000), presentation: largeToolPresentation },
+    ], { toolCallId: "large-tool-1", toolName: "edit", isError: false }),
+    agentRecord("large-tool-result-2", "tool", [
+      { type: "tool_result", toolCallId: "large-tool-2", toolName: "edit", isError: false, text: "large result".repeat(20_000), presentation: largeToolPresentation },
+    ], { toolCallId: "large-tool-2", toolName: "edit", isError: false }),
+  ];
   runtime.emit({ type: "conversation_checkpoint" });
   const bounded = await client.streamEvents(created.id, { onEvent: () => {}, requireTuiProjection: true });
   assert.equal(bounded.initial.historyTruncated, true);
   assert.ok(bounded.initial.recentHistory.length > 0 && bounded.initial.recentHistory.length < 200);
+  assert.deepEqual(bounded.initial.recentHistory.slice(-3).map((entry) => entry.entryId), ["large-tool-call", "large-tool-result-1", "large-tool-result-2"]);
+  assert.ok(bounded.initial.recentHistory.slice(-2).every((entry) => entry.content[0]?.type === "tool_result" && entry.content[0].presentation === undefined));
   assert.ok(bounded.initial.page.events.length > 0, "paged history must be trimmed before recent events");
   bounded.close();
   await bounded.done;
+
+  const boundedPage = await client.history(created.id, undefined, 200);
+  assert.deepEqual(boundedPage.entries.slice(-3).map((entry) => entry.entryId), ["large-tool-call", "large-tool-result-1", "large-tool-result-2"]);
+  assert.ok(boundedPage.entries.slice(-2).every((entry) => entry.content[0]?.type === "tool_result" && entry.content[0].presentation === undefined));
+  assert.equal(boundedPage.hasEarlier, true);
 });
 
 test("conversation content survives fresh clients through revision-bound Protocol V2 pages", async (context) => {

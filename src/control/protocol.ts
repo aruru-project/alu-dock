@@ -10,6 +10,7 @@ import {
   MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS,
   MAX_PENDING_QUEUE_ITEMS,
   MAX_PENDING_QUEUE_TEXT_CHARS,
+  MAX_SEMANTIC_HISTORY_PAGE_ITEMS,
 } from "../core/managed-instance.js";
 import type {
   CommandReceipt,
@@ -729,7 +730,7 @@ export function parseInstanceReadResult(input: unknown): InstanceReadResult {
   const instance = parseInstance(value.instance, "instance");
   const page = parseEventPage(value.page, instance.id, instance.runtimeGeneration);
   assertCursorDomain(page.earliest, instance, "page.earliest"); assertCursorDomain(page.latest, instance, "page.latest");
-  const history = array(value.recentHistory, "recentHistory", MAX_HISTORY_ITEMS).map((item, index) => parseHistoryEntry(item, `recentHistory[${index}]`));
+  const history = array(value.recentHistory, "recentHistory", MAX_SEMANTIC_HISTORY_PAGE_ITEMS).map((item, index) => parseHistoryEntry(item, `recentHistory[${index}]`));
   if (new Set(history.map((entry) => entry.entryId)).size !== history.length) throw validation("invalid_response", "recentHistory entry IDs must be unique");
   const pendingMessages = array(value.pendingMessages, "pendingMessages", MAX_PENDING_QUEUE_ITEMS).map((item, index) => parsePendingMessage(item, `pendingMessages[${index}]`));
   if (new Set(pendingMessages.map((item) => item.queueItemId)).size !== pendingMessages.length) throw validation("invalid_response", "pendingMessages queue item IDs must be unique");
@@ -936,7 +937,7 @@ function parseSessionDtos(input: unknown): SessionDto[] {
 
 export function parseHistoryResult(input: unknown): HistoryResult {
   const value = object(input, "history result"); exact(value, ["historyRevision", "entries", "hasEarlier", "nextBeforeEntryId", "instance"]);
-  const entries = array(value.entries, "entries", MAX_HISTORY_ITEMS).map((item, index) => parseHistoryEntry(item, `entries[${index}]`));
+  const entries = array(value.entries, "entries", MAX_SEMANTIC_HISTORY_PAGE_ITEMS).map((item, index) => parseHistoryEntry(item, `entries[${index}]`));
   const ids = entries.map((entry) => entry.entryId);
   if (new Set(ids).size !== ids.length) throw validation("invalid_response", "history entry IDs must be unique");
   const hasEarlier = boolean(value.hasEarlier, "hasEarlier");
@@ -950,7 +951,7 @@ export function parseConversationHistoryResult(input: unknown): ConversationHist
   const value = object(input, "conversation history result");
   exact(value, ["instance", "revision", "entries", "hasEarlier", "nextCursor"]);
   const revision = string(value.revision, "revision", 128);
-  const entries = array(value.entries, "entries", MAX_CONVERSATION_HISTORY_ITEMS).map((item, index) => {
+  const entries = array(value.entries, "entries", MAX_SEMANTIC_HISTORY_PAGE_ITEMS).map((item, index) => {
     const entry = object(item, `entries[${index}]`);
     exact(entry, ["entry", "contentRef", "contentComplete", "totalBlocks"]);
     const totalBlocks = unsigned(entry.totalBlocks, `entries[${index}].totalBlocks`);

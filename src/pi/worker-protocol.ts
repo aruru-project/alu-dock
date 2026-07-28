@@ -14,6 +14,8 @@ import {
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
   MAX_INPUT_IMAGES,
+  MAX_SEMANTIC_HISTORY_PAGE_BYTES,
+  MAX_SEMANTIC_HISTORY_PAGE_ITEMS,
 } from "../core/instance-dto.js";
 import {
   SETTING_DEFINITIONS,
@@ -443,7 +445,8 @@ function validateConversationHistoryPage(raw: unknown): void {
   const page = record(raw, "Conversation history page");
   exactKeys(page, ["revision", "entries", "hasEarlier", "nextCursor"], "Conversation history page");
   boundedString(page.revision, 128, "Conversation revision");
-  if (!Array.isArray(page.entries) || page.entries.length > 200) throw new Error("Conversation history entries are invalid");
+  if (!Array.isArray(page.entries) || page.entries.length > MAX_SEMANTIC_HISTORY_PAGE_ITEMS) throw new Error("Conversation history entries are invalid");
+  if (Buffer.byteLength(JSON.stringify(page), "utf8") > MAX_SEMANTIC_HISTORY_PAGE_BYTES) throw new Error("Conversation history page exceeds its byte limit");
   for (const item of page.entries) {
     const value = record(item, "Conversation history item");
     exactKeys(value, ["entry", "contentRef", "contentComplete", "totalBlocks"], "Conversation history item");
