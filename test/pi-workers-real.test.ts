@@ -190,6 +190,29 @@ export default function () {
   }
 });
 
+test("accepted abort may outlive its old control deadline without killing a healthy Worker (July 28 incident)", async () => {
+  let workerPid = 0;
+  const instance = await createPiInstance({
+    id: "slow-abort", hostEpoch: "slow-abort-host", creationOperationId: "slow-abort-create",
+    cwd: process.cwd(), agentDir: join(tmpdir(), "slow-abort-agent"), projectTrusted: false, tools: [],
+    workerEntry: fileURLToPath(new URL("./fixtures/slow-abort-pi-worker.js", import.meta.url)),
+    workerTimeouts: { controlMs: 30, termMs: 200 },
+    onWorkerSpawn: (pid) => { workerPid = pid; },
+  });
+  try {
+    const startedAt = Date.now();
+    await instance.abort("slow-abort-operation");
+
+    assert.ok(Date.now() - startedAt >= 100, "the fixture must exceed the former control deadline");
+    assert.equal(instance.snapshot().lifecycle, "active");
+    assert.equal(processExists(workerPid), true);
+    assert.deepEqual(await instance.getSettings(), [], "the Worker transport must remain reusable after abort");
+  } finally {
+    await instance.disposeUnpublished();
+  }
+  assert.equal(processExists(workerPid), false);
+});
+
 test("accepted Worker mutation loss is effect_unknown only after process reap and is never replayed", async () => {
   let workerPid = 0;
   const instance = await createPiInstance({

@@ -304,8 +304,10 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
 
 function isReplacementRequest(label: string): boolean { return label === "session.new" || label === "session.switch" || label === "session.fork" || label === "session.clone" || label === "session.reload"; }
 function deadlineForRequest(type: AgentRequest["type"]): "request" | "mutation" | "control" | "none" {
-  if (type === "command.abort" || type === "queue.dequeue") return "control";
-  if (["command.submit", "session.navigate", "session.compact"].includes(type)) return "none";
+  if (type === "queue.dequeue") return "control";
+  // Pi abort waits for the Agent to become idle. Queued input may legally start
+  // another turn first, so abort completion is not a Worker liveness signal.
+  if (["command.submit", "command.abort", "session.navigate", "session.compact"].includes(type)) return "none";
   if (["model.list", "tool.list", "settings.get", "resource.get", "command.catalog", "session.history", "conversation.history", "conversation.content", "session.list", "session.tree"].includes(type)) return "request";
   return "mutation";
 }
