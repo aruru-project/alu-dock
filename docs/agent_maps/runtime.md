@@ -63,7 +63,7 @@ Conversation 的持久语义也在 adapter 内完成。Pi adapter 把当前 bran
 
 Pi 是当前成熟基底。真实工作需要且 Pi 已经具备的能力，应完整接入 Dock；不能因为某个客户端尚未实现、跨进程不方便或未来 Agent 可能不同而降低能力。
 
-Pi 的 abort 会等待 Agent 回到 idle；如果客户端没有先恢复 Queue，已排队输入可以在当前输出终止后合法启动下一轮，因此 abort 的完成时间不是 Worker 存活探针。Host 不因 abort 尚未返回而切断 Worker。需要像 Pi TUI 一样把排队文本恢复到输入框的客户端，应先调用既有 Queue dequeue，再在确认没有正在进入 Pi 消费的消息后 abort；Host 不替客户端合并这两个不同意图。
+Pi 的 abort 会等待 Agent 回到 idle；如果客户端没有先恢复 Queue，已排队输入可以在当前输出终止后合法启动下一轮，因此 abort 的完成时间不是 Worker 存活探针。Host 不因 abort 尚未返回而切断 Worker。需要像 Pi TUI 一样把排队文本恢复到输入框的客户端，应先调用既有 Queue dequeue，再在确认没有正在进入 Pi 消费的消息后 abort；Host 不替客户端合并这两个不同意图。Compaction 只是运行中的暂停边界：completed 后 Pi 自己的 retry、extension/guard continuation 仍按原生顺序继续，Host-deferred Queue 在第一个合法时机自动交付，不能抢断 continuation，也不依赖任何客户端在线。
 
 ## Extension UI
 

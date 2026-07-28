@@ -1779,6 +1779,39 @@ test("the same Work can queue input during manual compaction and detach without 
   assert.ok(submitted?.type === "message.submitted" && submitted.data.queueItemId);
 });
 
+test("a completed compaction edge drains Host Queue even when the Worker state snapshot is stale", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "stale-compaction-state");
+  const runtime = harness.sessions.get(created.id)!;
+
+  runtime.isCompacting = true;
+  runtime.emit({ type: "compaction_start", reason: "threshold" });
+  const queued = await client.prompt(created.id, "drain after completed edge", "auto", "stale-state-queued-operation");
+  assert.equal(queued.receipt.queued, true);
+  const callsBeforeCompletion = runtime.promptCalls;
+
+  // Pi publishes compaction_end before its finally block clears the controller,
+  // so the state snapshot on this authoritative event can still say true.
+  runtime.emit({
+    type: "compaction_end",
+    reason: "threshold",
+    aborted: false,
+    willRetry: false,
+    result: { summary: "done", firstKeptEntryId: "kept", tokensBefore: 10 },
+  });
+  for (let attempt = 0; attempt < 20 && runtime.promptCalls === callsBeforeCompletion; attempt += 1) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
+  assert.equal(runtime.promptCalls, callsBeforeCompletion + 1);
+  assert.equal(runtime.promptMessages.at(-1), "drain after completed edge");
+  assert.deepEqual((await client.read(created.id, undefined, "conversation_bootstrap")).pendingMessages.map((item) => item.operationId), ["stale-state-queued-operation"]);
+  runtime.isCompacting = false;
+});
+
 test("Sol-style compaction keeps a concurrent cross-client prompt visible and hands it to the hidden continuation once", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));

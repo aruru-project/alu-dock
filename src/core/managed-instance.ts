@@ -403,7 +403,7 @@ export class ManagedInstance {
   private stopRequestedWhileRunning = false;
   private compactionActive = false;
   /** Synchronous runtime-edge truth closes the gap before catalog projection catches up. */
-  private runtimeCompactingObserved = false;
+  private runtimeCompactingObserved: boolean | undefined;
   private compactionQueueDrainTask: Promise<void> | undefined;
   private compactionQueueDrainGeneration: number | undefined;
   private nextAgentStartOperationId: string | undefined;
@@ -1604,7 +1604,7 @@ export class ManagedInstance {
   }
 
   private runtimeCompactionInProgress(): boolean {
-    return this.runtimeCompactingObserved || this.agentState().isCompacting;
+    return this.runtimeCompactingObserved ?? this.agentState().isCompacting;
   }
 
   private manualCompactionAdmissionActive(): boolean {
@@ -2918,9 +2918,9 @@ export class ManagedInstance {
 
   private dispatchAgentEvent(event: AgentEvent): void {
     if (this.hostDrainActive) return;
-    // Pi's auto-compaction emits start before isCompacting becomes observable,
-    // so capture the lifecycle edge synchronously rather than waiting for the
-    // catalog transition. End clears it before new admissions are routed.
+    // Lifecycle edges are authoritative once observed. Pi publishes
+    // compaction_end before its finally block clears isCompacting, so the
+    // completed edge must not be reversed by that stale state snapshot.
     if (event.type === "compaction_start") this.runtimeCompactingObserved = true;
     else if (event.type === "compaction_end") this.runtimeCompactingObserved = false;
     if (event.type === "agent_start" && this.nextAgentStartOperationId !== undefined) {
@@ -3089,7 +3089,7 @@ export class ManagedInstance {
         this.runtimeFollowUpHashes = [];
         this.lastAssistantOutcome = undefined;
         this.extensionCommandInitiator = undefined;
-        this.runtimeCompactingObserved = false;
+        this.runtimeCompactingObserved = undefined;
         this.clearDeferredStartAttribution();
         this.finishCompactionBoundary();
         this.state.execution = "idle";
@@ -3349,7 +3349,7 @@ export class ManagedInstance {
       this.runtimeFollowUpHashes = [];
       this.lastAssistantOutcome = undefined;
       this.extensionCommandInitiator = undefined;
-      this.runtimeCompactingObserved = false;
+      this.runtimeCompactingObserved = undefined;
       this.clearDeferredStartAttribution();
       this.finishCompactionBoundary();
       this.state.execution = "idle";
