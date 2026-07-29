@@ -2,18 +2,28 @@ import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-a
 
 import {
   MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE,
+  MAX_OBSERVATION_CURSOR_CHARS,
+  MAX_OBSERVATION_MESSAGE_LIMIT,
   OBSERVATION_DATA_NOTICE,
+  type ObservationMessageType,
   type ObservationNotification,
   type ObservationRequest,
   type ObservationResult,
 } from "../core/instance-observation.js";
+import { renderObservationNotification, renderObservationResult } from "./dock-observation-client.js";
 
 export const DOCK_OBSERVATION_TOOL_NAMES = ["dock_inspect", "dock_watch", "dock_cancel_watch"] as const;
 const DOCK_OBSERVATION_EXTENSION_PATH = "<inline:alu-dock-observation>";
 const TOOL_NAMES = new Set<string>(DOCK_OBSERVATION_TOOL_NAMES);
-const OPTIONAL_TARGET_SCHEMA = {
+const INSPECT_SCHEMA = {
   type: "object",
-  properties: { target: { type: "string", minLength: 1, maxLength: 256 } },
+  properties: {
+    target: { type: "string", minLength: 1, maxLength: 256 },
+    includeHistory: { type: "boolean" },
+    limit: { type: "integer", minimum: 1, maximum: MAX_OBSERVATION_MESSAGE_LIMIT },
+    types: { type: "array", minItems: 1, maxItems: 3, uniqueItems: true, items: { type: "string", enum: ["user", "assistant", "other"] } },
+    cursor: { type: "string", minLength: 1, maxLength: MAX_OBSERVATION_CURSOR_CHARS },
+  },
   additionalProperties: false,
 };
 const REQUIRED_TARGET_SCHEMA = {
@@ -39,6 +49,9 @@ export class DockObservationBridge {
   private enabledValue: boolean;
   private readonly pendingNotifications = new Map<string, ObservationNotification>();
   private readonly deliveredWatchIds = new Set<string>();
+  private readonly suppressedWatchIds = new Set<string>();
+  private readonly fencedNotifications = new Map<string, ObservationNotification>();
+  private deliveryFenceDepth = 0;
 
   constructor(initiallyEnabled: boolean, private readonly port: DockObservationCallPort) {
     this.enabledValue = initiallyEnabled;
@@ -49,30 +62,62 @@ export class DockObservationBridge {
   attach(api: ExtensionAPI): () => void {
     this.api = api;
     this.applyToolVisibility(api);
-    for (const [watchId, notification] of this.pendingNotifications) {
-      try {
-        this.sendNotification(api, notification);
-        this.pendingNotifications.delete(watchId);
-      } catch { /* Keep the one-shot completion for the next binding rather than fail reload. */ }
-    }
+    if (this.enabledValue && this.deliveryFenceDepth === 0) this.flushPendingNotifications();
     return () => { if (this.api === api) this.api = undefined; };
   }
 
   async configure(action: "on" | "off" | "status"): Promise<boolean> {
-    const result = await this.port.configure(action);
-    this.enabledValue = result.enabled;
-    if (!result.enabled) this.pendingNotifications.clear();
-    if (this.api) this.applyToolVisibility(this.api);
-    return result.enabled;
+    const previous = this.enabledValue;
+    const fenced = action === "off";
+    if (fenced) {
+      this.beginDeliveryFence();
+      this.enabledValue = false;
+      if (this.api) this.applyToolVisibility(this.api);
+    }
+    try {
+      const result = await this.port.configure(action);
+      this.enabledValue = result.enabled;
+      if (!result.enabled) this.suppressEveryPendingNotification();
+      if (this.api) this.applyToolVisibility(this.api);
+      return result.enabled;
+    } catch (error) {
+      this.enabledValue = previous;
+      if (this.api) this.applyToolVisibility(this.api);
+      throw error;
+    } finally {
+      if (fenced) this.endDeliveryFence();
+    }
   }
 
-  observe(request: ObservationRequest): Promise<ObservationResult> {
-    if (!this.enabledValue) return Promise.reject(new Error("Dock observation is off. Use /dock-observe on first."));
+  async observe(request: ObservationRequest): Promise<ObservationResult> {
+    if (!this.enabledValue) throw new Error("Dock observation is off. Use /dock-observe on first.");
+    if (request.type === "cancel") {
+      this.beginDeliveryFence();
+      try {
+        const result = await this.port.observe(request);
+        if (result.type === "cancel") {
+          if (request.watchId === undefined) this.suppressEveryPendingNotification();
+          else this.suppressAndRemove(request.watchId);
+          for (const watchId of result.cancelledWatchIds) this.suppressAndRemove(watchId);
+        }
+        return result;
+      } finally {
+        this.endDeliveryFence();
+      }
+    }
     return this.port.observe(request);
   }
 
   deliver(notification: ObservationNotification): void {
-    if (!this.enabledValue || this.deliveredWatchIds.has(notification.watchId)) return;
+    if (this.suppressedWatchIds.has(notification.watchId) || this.deliveredWatchIds.has(notification.watchId)) return;
+    if (this.deliveryFenceDepth > 0) {
+      this.addBounded(this.fencedNotifications, notification);
+      return;
+    }
+    if (!this.enabledValue) {
+      this.suppressAndRemove(notification.watchId);
+      return;
+    }
     if (!this.api) {
       if (!this.pendingNotifications.has(notification.watchId)
         && this.pendingNotifications.size >= MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE) {
@@ -84,16 +129,67 @@ export class DockObservationBridge {
     this.sendNotification(this.api, notification);
   }
 
+  private flushPendingNotifications(): void {
+    const api = this.api;
+    if (!api || !this.enabledValue || this.deliveryFenceDepth > 0) return;
+    for (const [watchId, notification] of this.pendingNotifications) {
+      try {
+        this.sendNotification(api, notification);
+        this.pendingNotifications.delete(watchId);
+      } catch { /* Keep the one-shot completion for the next binding rather than fail reload. */ }
+    }
+  }
+
+  private beginDeliveryFence(): void {
+    this.deliveryFenceDepth += 1;
+  }
+
+  private endDeliveryFence(): void {
+    this.deliveryFenceDepth -= 1;
+    if (this.deliveryFenceDepth !== 0) return;
+    const buffered = [...this.fencedNotifications.values()];
+    this.fencedNotifications.clear();
+    for (const notification of buffered) this.deliver(notification);
+    this.flushPendingNotifications();
+  }
+
+  private suppressEveryPendingNotification(): void {
+    for (const watchId of this.pendingNotifications.keys()) this.suppress(watchId);
+    for (const watchId of this.fencedNotifications.keys()) this.suppress(watchId);
+    this.pendingNotifications.clear();
+    this.fencedNotifications.clear();
+  }
+
+  private suppressAndRemove(watchId: string): void {
+    this.suppress(watchId);
+    this.pendingNotifications.delete(watchId);
+    this.fencedNotifications.delete(watchId);
+  }
+
+  private addBounded(target: Map<string, ObservationNotification>, notification: ObservationNotification): void {
+    if (!target.has(notification.watchId) && target.size >= MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE) {
+      throw new Error("Dock observation completion queue is full");
+    }
+    target.set(notification.watchId, notification);
+  }
+
   private sendNotification(api: ExtensionAPI, notification: ObservationNotification): void {
     api.sendMessage({
       customType: "dock-observation",
-      content: `${OBSERVATION_DATA_NOTICE}\n${JSON.stringify(notification)}`,
+      content: renderObservationNotification(notification),
       display: true,
       details: notification,
     }, { triggerTurn: true, deliverAs: "followUp" });
     this.deliveredWatchIds.add(notification.watchId);
     while (this.deliveredWatchIds.size > MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE) {
       this.deliveredWatchIds.delete(this.deliveredWatchIds.values().next().value!);
+    }
+  }
+
+  private suppress(watchId: string): void {
+    this.suppressedWatchIds.add(watchId);
+    while (this.suppressedWatchIds.size > MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE) {
+      this.suppressedWatchIds.delete(this.suppressedWatchIds.values().next().value!);
     }
   }
 
@@ -109,10 +205,21 @@ export function dockObservationExtension(bridge: DockObservationBridge): Extensi
       name: "dock_inspect",
       label: "Inspect Dock siblings",
       description: `List sibling instances or inspect one sibling's bounded current activity. ${OBSERVATION_DATA_NOTICE}`,
-      parameters: OPTIONAL_TARGET_SCHEMA,
-      execute: async (_toolCallId: string, params: { target?: string }) => toolResult(await bridge.observe(
-        params.target === undefined ? { type: "list" } : { type: "inspect", target: params.target },
-      )),
+      parameters: INSPECT_SCHEMA,
+      execute: async (_toolCallId: string, params: { target?: string; includeHistory?: boolean; limit?: number; types?: ObservationMessageType[]; cursor?: string }) => {
+        if (params.target === undefined) {
+          if (params.limit !== undefined || params.types !== undefined || params.cursor !== undefined) throw new Error("dock_inspect requires target when limit, types, or cursor is used");
+          return toolResult(await bridge.observe({ type: "list", ...(params.includeHistory === undefined ? {} : { includeHistory: params.includeHistory }) }));
+        }
+        if (params.includeHistory !== undefined) throw new Error("dock_inspect includeHistory is only valid when listing siblings without target");
+        return toolResult(await bridge.observe({
+          type: "inspect",
+          target: params.target,
+          ...(params.limit === undefined ? {} : { limit: params.limit }),
+          ...(params.types === undefined ? {} : { types: params.types }),
+          ...(params.cursor === undefined ? {} : { cursor: params.cursor }),
+        }));
+      },
     } as never);
     pi.registerTool({
       name: "dock_watch",
@@ -159,8 +266,5 @@ export function dockObservationExtension(bridge: DockObservationBridge): Extensi
 }
 
 function toolResult(value: ObservationResult): { content: Array<{ type: "text"; text: string }>; details: ObservationResult } {
-  return {
-    content: [{ type: "text", text: `${OBSERVATION_DATA_NOTICE}\n${JSON.stringify(value)}` }],
-    details: value,
-  };
+  return { content: [{ type: "text", text: renderObservationResult(value) }], details: value };
 }

@@ -91,9 +91,9 @@ Extension UI 操作使用独立连接，同一 instance 同时只有一个。新
 
 只读跨实例观察是 Host-owned control capability。授权绑定发起 `instanceId`、默认关闭并持久化在 catalog；Host 从 authenticated Worker connection 取得 caller identity，每次 list/inspect/watch/cancel 都重新校验授权，并永远排除 caller 自己。目标不是授权白名单：主人把能力交给一个来源实例后，它可以读取任意 sibling，但不能向 sibling 提交消息、停止任务或回答 interaction。
 
-观察状态复用 instance snapshot 的 canonical lifecycle/execution fact；`executionChangedAt` 与当前 running 区间的 `runStartedAt` 是权威时钟，不能用会被 Queue/settings 等变化刷新的 `updatedAt` 猜运行时长。最近活动直接携带有界的 canonical conversation record 与 live event，不生成 Host 摘要；整个 sibling payload 标记为 `untrusted_cross_instance`。
+观察状态复用 instance snapshot 的 canonical lifecycle/execution fact；`executionChangedAt` 与当前 running 区间的 `runStartedAt` 是权威时钟，不能用会被 Queue/settings 等变化刷新的 `updatedAt` 猜运行时长。Host-side `InstanceObservationService` 是隔离的 Agent BFF：它通过与 Protocol V2 相同的 instance/history query boundary 读取 canonical facts，默认只列 live sibling，并按普通 `types + limit + cursor` 语义返回清洗后的 conversation message page。它不把 TUI attach DTO、live transport event 或 Host 内部对象暴露给 Worker，也不生成 Host 摘要。
 
-watch 是 Host 内存中的一次性 subscription，不轮询、不占模型 turn。目标已经 idle/stopped/error 时调用同步返回当前结果；否则 Host 订阅 `ManagedInstance`，首次进入 terminal state 后删除 watch，再向当前来源 Worker 投递 completion。来源/目标 session generation replacement 不改变 stable instance watch；来源 stop/forget、授权关闭会清理，目标 forget 按 unavailable 完成。watch 不跨 Host restart 恢复或补发。
+watch 是 Host 内存中的一次性 subscription，不轮询、不占模型 turn。目标已经 idle/stopped/error 时调用同步返回当前结果；否则 Host 订阅 instance state，固定首次 terminal transition 的状态后删除 watch，再向当前来源 Worker 投递仅含 target/reason/time 的 completion。来源/目标 session generation replacement 不改变 stable instance watch；来源 stop/forget、授权关闭会清理，目标 forget 按 unavailable 完成。cancel/off 与 completion delivery 在来源实例栅栏内排序；取消确认后，尚未交付的 completion 不能再次唤醒。watch 不跨 Host restart 恢复或补发。
 
 ## Capabilities
 

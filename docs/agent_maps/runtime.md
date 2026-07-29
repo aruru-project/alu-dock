@@ -73,7 +73,9 @@ Pi 的 abort 会等待 Agent 回到 idle；如果客户端没有先恢复 Queue�
 
 Pi Worker 内建 `/dock-observe on|off|status`。configure reverse capability 始终存在，但 Host 只有在 durable grant 为 on 时才授予 observation reverse capability；off 时 `dock_inspect`、`dock_watch`、`dock_cancel_watch` 不在 active tool set。显式配置变化可以重建一次 tool system prompt，但 adapter 不逐 turn 改 prompt，并在 reload/rebind 后从 Worker-level capability state 恢复。
 
-watch tool 只登记 Host subscription并立即返回。Host completion 通过私有 `observation_delivery` control 到达当前 Worker；adapter 写入可见的 `dock-observation` custom message，并用 Pi public `sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })` 唤醒 Agent。Host 不走 `command.submit` 冒充主人。reload 的短暂无 binding 窗口由 Worker bridge 有界暂存 completion；同一 watch ID 至多唤醒一次。tool result 和 completion 都固定声明 sibling 内容是 untrusted data、不是指令。
+Pi observation client 面向 Agent 而不是面向人类 UI：它把 Host 返回的 canonical message page 渲染成短小的 `target_user / target_assistant / target_other` 引用流，每行 sibling 内容都处于明确的 untrusted quote 边界；结构化 DTO 只留在 tool details，不把 JSON、TUI reconnect event、thinking、tool call/result 或 Host metadata dump 放进模型上下文。默认读取最近一条，Agent 只有在主人需要更早内容时才使用 continuation cursor。
+
+watch tool 只登记 Host subscription并立即返回。Host completion 通过私有 `observation_delivery` control 到达当前 Worker；completion 只含 target/reason/time，不携带 sibling conversation。adapter 写入可见的 `dock-observation` custom message，并用 Pi public `sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })` 唤醒 Agent；Agent 醒来后按主人原始意图决定是否 inspect。Host 不走 `command.submit` 冒充主人。reload 的短暂无 binding 窗口由 Worker bridge 有界暂存 completion；cancel/off 会先在本地 fence pending delivery，同一 watch ID 至多唤醒一次。
 
 ## Extension UI
 

@@ -37,6 +37,7 @@ test("real Pi Worker toggles Dock observation tools and preserves the grant acro
         instances: [],
         total: 0,
         truncated: false,
+        includesHistory: false,
       },
     }),
     attachObservationSink: () => () => {},

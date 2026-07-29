@@ -19,7 +19,12 @@ import {
 } from "../core/instance-dto.js";
 import {
   CROSS_INSTANCE_TRUST,
+  MAX_OBSERVATION_CURSOR_CHARS,
+  MAX_OBSERVATION_LIST_ITEMS,
+  MAX_OBSERVATION_MESSAGE_LIMIT,
+  MAX_OBSERVATION_MESSAGE_TEXT_CHARS,
   OBSERVATION_DATA_NOTICE,
+  type ObservationMessageType,
   type ObservationNotification,
   type ObservationRequest,
 } from "../core/instance-observation.js";
@@ -856,14 +861,32 @@ function parseCapability(raw: unknown): WorkerCapability {
 function parseObservationRequest(raw: unknown): ObservationRequest {
   const value = record(raw, "Observation request");
   const type = oneOf(value.type, ["list", "inspect", "watch", "cancel"] as const, "Observation request type");
-  if (type === "list") { exactKeys(value, ["type"], "Observation request"); return { type }; }
+  if (type === "list") {
+    exactKeys(value, ["type", "includeHistory"], "Observation request");
+    if (value.includeHistory !== undefined && typeof value.includeHistory !== "boolean") throw new Error("Observation history selection must be boolean");
+    return { type, ...(value.includeHistory === undefined ? {} : { includeHistory: value.includeHistory }) };
+  }
   if (type === "cancel") {
     exactKeys(value, ["type", "watchId"], "Observation request");
     const watchId = optionalString(value.watchId, 128);
     return { type, ...(watchId === undefined ? {} : { watchId }) };
   }
-  exactKeys(value, ["type", "target"], "Observation request");
-  return { type, target: boundedString(value.target, 256, "Observation target") };
+  const target = boundedString(value.target, 256, "Observation target");
+  if (type === "watch") { exactKeys(value, ["type", "target"], "Observation request"); return { type, target }; }
+  exactKeys(value, ["type", "target", "limit", "types", "cursor"], "Observation request");
+  let limit: number | undefined;
+  if (value.limit !== undefined) {
+    limit = positiveInteger(value.limit, "Observation message limit");
+    if (limit > MAX_OBSERVATION_MESSAGE_LIMIT) throw new Error("Observation message limit exceeds the supported bound");
+  }
+  let types: ObservationMessageType[] | undefined;
+  if (value.types !== undefined) {
+    if (!Array.isArray(value.types) || value.types.length < 1 || value.types.length > 3) throw new Error("Observation message types are invalid");
+    types = value.types.map((item) => oneOf(item, ["user", "assistant", "other"] as const, "Observation message type"));
+    if (new Set(types).size !== types.length) throw new Error("Observation message types must be unique");
+  }
+  const cursor = optionalString(value.cursor, MAX_OBSERVATION_CURSOR_CHARS);
+  return { type, target, ...(limit === undefined ? {} : { limit }), ...(types === undefined ? {} : { types }), ...(cursor === undefined ? {} : { cursor }) };
 }
 
 function parseObservationResult(raw: unknown): void {
@@ -882,44 +905,57 @@ function parseObservationResult(raw: unknown): void {
 }
 
 function validateObservationList(raw: unknown): void {
-  const value = record(raw, "Observation list"); exactKeys(value, ["trust", "observedAt", "instances", "total", "truncated"], "Observation list");
+  const value = record(raw, "Observation list"); exactKeys(value, ["trust", "observedAt", "instances", "total", "truncated", "includesHistory"], "Observation list");
   if (value.trust !== CROSS_INSTANCE_TRUST) throw new Error("Observation trust marker is invalid"); timestampString(value.observedAt, "Observation timestamp");
-  if (!Array.isArray(value.instances) || value.instances.length > 200) throw new Error("Observation instances are invalid");
+  if (!Array.isArray(value.instances) || value.instances.length > MAX_OBSERVATION_LIST_ITEMS) throw new Error("Observation instances are invalid");
   for (const item of value.instances) validateObservedStatus(item);
   nonNegativeInteger(value.total, "Observation instance total");
   if (typeof value.truncated !== "boolean" || value.truncated !== (value.instances.length < (value.total as number))) throw new Error("Observation list truncation is invalid");
+  if (typeof value.includesHistory !== "boolean") throw new Error("Observation history selection is invalid");
 }
 
 function validateObservation(raw: unknown): void {
-  const value = record(raw, "Instance observation"); exactKeys(value, ["trust", "observedAt", "status", "activity"], "Instance observation");
+  const value = record(raw, "Instance observation"); exactKeys(value, ["trust", "observedAt", "status", "conversation"], "Instance observation");
   if (value.trust !== CROSS_INSTANCE_TRUST) throw new Error("Observation trust marker is invalid"); timestampString(value.observedAt, "Observation timestamp"); validateObservedStatus(value.status);
-  if (value.activity !== undefined) {
-    const activity = record(value.activity, "Observation activity"); exactKeys(activity, ["historyRevision", "records", "liveEvents"], "Observation activity");
-    positiveInteger(activity.historyRevision, "Observation history revision");
-    if (!Array.isArray(activity.records) || activity.records.length > 200 || !Array.isArray(activity.liveEvents) || activity.liveEvents.length > 200) throw new Error("Observation activity is invalid");
-    validateJsonValue(activity.records); validateJsonValue(activity.liveEvents);
+  if (value.conversation !== undefined) {
+    const conversation = record(value.conversation, "Observation conversation"); exactKeys(conversation, ["messages", "hasEarlier", "nextCursor", "truncated"], "Observation conversation");
+    if (!Array.isArray(conversation.messages) || conversation.messages.length > MAX_OBSERVATION_MESSAGE_LIMIT) throw new Error("Observation messages are invalid");
+    let anyTruncated = false;
+    for (const item of conversation.messages) {
+      const message = record(item, "Observation message"); exactKeys(message, ["type", "text", "timestamp", "truncated"], "Observation message");
+      oneOf(message.type, ["user", "assistant", "other"] as const, "Observation message type");
+      boundedString(message.text, MAX_OBSERVATION_MESSAGE_TEXT_CHARS + 32, "Observation message text");
+      if (message.timestamp !== undefined) timestampString(message.timestamp, "Observation message timestamp");
+      if (typeof message.truncated !== "boolean") throw new Error("Observation message truncation is invalid");
+      anyTruncated ||= message.truncated;
+    }
+    if (typeof conversation.hasEarlier !== "boolean") throw new Error("Observation pagination state is invalid");
+    const nextCursor = optionalString(conversation.nextCursor, MAX_OBSERVATION_CURSOR_CHARS);
+    if (conversation.hasEarlier !== (nextCursor !== undefined)) throw new Error("Observation pagination cursor is inconsistent");
+    if (typeof conversation.truncated !== "boolean" || conversation.truncated !== anyTruncated) throw new Error("Observation conversation truncation is inconsistent");
   }
 }
 
 function validateObservedStatus(raw: unknown): void {
-  const value = record(raw, "Observed instance status"); exactKeys(value, ["id", "key", "name", "lifecycle", "execution", "executionChangedAt", "runStartedAt", "runtimeGeneration"], "Observed instance status");
-  boundedString(value.id, 128, "Observed instance ID"); optionalString(value.key, 128); optionalString(value.name, 256);
+  const value = record(raw, "Observed instance status"); exactKeys(value, ["id", "key", "name", "cwd", "lifecycle", "execution", "compacting", "executionChangedAt", "runStartedAt", "runtimeGeneration", "lastError"], "Observed instance status");
+  boundedString(value.id, 128, "Observed instance ID"); optionalString(value.key, 128); optionalString(value.name, 256); boundedString(value.cwd, 16_384, "Observed workspace");
   oneOf(value.lifecycle, ["active", "stopping", "stopped", "host_lost", "runtime_error"], "Observed lifecycle"); oneOf(value.execution, ["idle", "running", "failed", "unavailable"], "Observed execution");
-  timestampString(value.executionChangedAt, "Observed execution timestamp"); if (value.runStartedAt !== undefined) timestampString(value.runStartedAt, "Observed run timestamp"); positiveInteger(value.runtimeGeneration, "Observed generation");
+  if (typeof value.compacting !== "boolean") throw new Error("Observed compacting state is invalid");
+  timestampString(value.executionChangedAt, "Observed execution timestamp"); if (value.runStartedAt !== undefined) timestampString(value.runStartedAt, "Observed run timestamp"); positiveInteger(value.runtimeGeneration, "Observed generation"); optionalString(value.lastError, 2_000);
 }
 
 function validateWatchReceipt(raw: unknown): void {
-  const value = record(raw, "Observation watch receipt"); exactKeys(value, ["watchId", "targetInstanceId", "registeredAt"], "Observation watch receipt");
-  boundedString(value.watchId, 128, "Observation watch ID"); boundedString(value.targetInstanceId, 128, "Observation target ID"); timestampString(value.registeredAt, "Observation registration timestamp");
+  const value = record(raw, "Observation watch receipt"); exactKeys(value, ["watchId", "target", "registeredAt"], "Observation watch receipt");
+  boundedString(value.watchId, 128, "Observation watch ID"); validateObservedStatus(value.target); timestampString(value.registeredAt, "Observation registration timestamp");
 }
 
 function parseObservationNotification(raw: unknown): ObservationNotification {
-  const value = record(raw, "Observation notification"); exactKeys(value, ["trust", "notice", "watchId", "firedAt", "reason", "observation"], "Observation notification");
+  const value = record(raw, "Observation notification"); exactKeys(value, ["trust", "notice", "watchId", "firedAt", "reason", "target"], "Observation notification");
   if (value.trust !== CROSS_INSTANCE_TRUST || value.notice !== OBSERVATION_DATA_NOTICE) throw new Error("Observation notification trust marker is invalid");
   const watchId = boundedString(value.watchId, 128, "Observation watch ID"); const firedAt = timestampString(value.firedAt, "Observation fired timestamp");
   const reason = oneOf(value.reason, ["idle", "stopped", "host_lost", "runtime_error", "execution_failed", "execution_unavailable"] as const, "Observation terminal reason");
-  validateObservation(value.observation);
-  return { trust: CROSS_INSTANCE_TRUST, notice: OBSERVATION_DATA_NOTICE, watchId, firedAt, reason, observation: value.observation as ObservationNotification["observation"] };
+  validateObservedStatus(value.target);
+  return { trust: CROSS_INSTANCE_TRUST, notice: OBSERVATION_DATA_NOTICE, watchId, firedAt, reason, target: value.target as ObservationNotification["target"] };
 }
 
 function timestampString(raw: unknown, label: string): string {
