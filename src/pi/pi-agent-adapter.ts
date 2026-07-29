@@ -23,6 +23,8 @@ import {
   type SourceInfo,
 } from "@earendil-works/pi-coding-agent";
 
+import { dockObservationExtension, type DockObservationBridge } from "./dock-observation-extension.js";
+
 import {
   MAX_IMAGE_AGGREGATE_BYTES,
   MAX_IMAGE_BYTES,
@@ -164,6 +166,7 @@ export interface CreatePiAgentAdapterOptions {
   extensionUiContextPortFactory?: () => PiExtensionUiPort;
   setProcessCwd?: (cwd: string) => void;
   sessionManager?: SessionManager;
+  dockObservationBridge?: DockObservationBridge;
 }
 
 interface BindingToken { active: boolean }
@@ -349,6 +352,7 @@ export class PiAgentAdapter {
       case "activate": this.activateInitial(); return null;
       case "resolve_session_target": return this.resolveSessionTarget(request.sessionFile);
       case "wait_for_idle": await this.waitForIdle(); return null;
+      case "observation_delivery": throw new Error("Observation delivery must be handled by the Worker bridge");
       case "dispose": await this.dispose(); return null;
     }
   }
@@ -2400,7 +2404,10 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
       agentDir,
       settingsManager,
       resourceLoaderOptions: {
-        extensionFactories: [{ name: "alu-dock-tool-result-normalizer", factory: piToolResultNormalizerExtension }],
+        extensionFactories: [
+          { name: "alu-dock-tool-result-normalizer", factory: piToolResultNormalizerExtension },
+          ...(options.dockObservationBridge === undefined ? [] : [{ name: "alu-dock-observation", factory: dockObservationExtension(options.dockObservationBridge) }]),
+        ],
       },
     });
     const result = await createAgentSessionFromServices({

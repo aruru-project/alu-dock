@@ -45,6 +45,7 @@ function snapshot(sequence = 1, overrides: Partial<InstanceSnapshot> = {}): Inst
     updatedAt: "2026-07-19T00:00:00.000Z",
     eventCursor: { hostEpoch: "epoch-1", instanceId: "dock-1", runtimeGeneration: 1, sequence },
     ...overrides,
+    executionChangedAt: overrides.executionChangedAt ?? "2026-07-19T00:00:00.000Z",
   };
 }
 

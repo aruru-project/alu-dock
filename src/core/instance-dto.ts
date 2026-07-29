@@ -284,6 +284,10 @@ export interface InstanceSnapshot {
   lastError?: string;
   createdAt: string;
   updatedAt: string;
+  /** Authoritative start of the current execution state. */
+  executionChangedAt: string;
+  /** Authoritative start of the current continuous running interval. */
+  runStartedAt?: string;
   eventCursor: EventCursor;
 }
 

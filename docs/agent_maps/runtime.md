@@ -65,6 +65,10 @@ Pi 是当前成熟基底。真实工作需要且 Pi 已经具备的能力，应�
 
 Pi 的 abort 会等待 Agent 回到 idle；如果客户端没有先恢复 Queue，已排队输入可以在当前输出终止后合法启动下一轮，因此 abort 的完成时间不是 Worker 存活探针。Host 不因 abort 尚未返回而切断 Worker。需要像 Pi TUI 一样把排队文本恢复到输入框的客户端，应先调用既有 Queue dequeue，再在确认没有正在进入 Pi 消费的消息后 abort；Host 不替客户端合并这两个不同意图。Compaction 只是运行中的暂停边界：completed 后 Pi 自己的 retry、extension/guard continuation 仍按原生顺序继续，Host-deferred Queue 在第一个合法时机自动交付，不能抢断 continuation，也不依赖任何客户端在线。
 
+Pi Worker 内建 `/dock-observe on|off|status`。configure reverse capability 始终存在，但 Host 只有在 durable grant 为 on 时才授予 observation reverse capability；off 时 `dock_inspect`、`dock_watch`、`dock_cancel_watch` 不在 active tool set。显式配置变化可以重建一次 tool system prompt，但 adapter 不逐 turn 改 prompt，并在 reload/rebind 后从 Worker-level capability state 恢复。
+
+watch tool 只登记 Host subscription并立即返回。Host completion 通过私有 `observation_delivery` control 到达当前 Worker；adapter 写入可见的 `dock-observation` custom message，并用 Pi public `sendMessage(..., { triggerTurn: true, deliverAs: "followUp" })` 唤醒 Agent。Host 不走 `command.submit` 冒充主人。reload 的短暂无 binding 窗口由 Worker bridge 有界暂存 completion；同一 watch ID 至多唤醒一次。tool result 和 completion 都固定声明 sibling 内容是 untrusted data、不是指令。
+
 ## Extension UI
 
 Extension component 和 Promise 留在 Worker。Worker 负责 component render、input、invalidate 与完成回调；Host 负责 generation、当前操作者和定向路由；TUI 或 WebUI 负责各自支持的显示与输入。读取和实时跟随不取得操作权；新的操作连接会立即替换旧连接，但不会取消 Worker 中等待的 interaction。

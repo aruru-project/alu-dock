@@ -18,6 +18,12 @@ import {
   MAX_SEMANTIC_HISTORY_PAGE_ITEMS,
 } from "../core/instance-dto.js";
 import {
+  CROSS_INSTANCE_TRUST,
+  OBSERVATION_DATA_NOTICE,
+  type ObservationNotification,
+  type ObservationRequest,
+} from "../core/instance-observation.js";
+import {
   SETTING_DEFINITIONS,
   SETTING_KEYS,
   type SettingKey,
@@ -41,10 +47,10 @@ export type UiCapability =
   | "ui.notify" | "ui.setTitle" | "ui.setEditorText" | "ui.setStatus" | "ui.setWidget" | "ui.widgetError"
   | "ui.unsupported" | "ui.setToolsExpanded" | "ui.cancel" | "ui.viewport" | "ui.reset" | "ui.generationBegin";
 
-export type DockCapability = "dock.identity";
+export type DockCapability = "dock.identity" | "dock.observation.configure" | "dock.observation";
 export type ReverseWorkerCapability = DockCapability | Exclude<UiCapability, "ui.viewport" | "ui.reset">;
 export const ORDINARY_REVERSE_WORKER_CAPABILITIES: readonly ReverseWorkerCapability[] = [
-  "dock.identity",
+  "dock.identity", "dock.observation.configure", "dock.observation",
   "ui.select", "ui.confirm", "ui.input", "ui.editor", "ui.notify", "ui.setTitle", "ui.setEditorText", "ui.setStatus",
   "ui.setWidget", "ui.widgetError", "ui.unsupported", "ui.setToolsExpanded", "ui.cancel", "ui.generationBegin",
 ];
@@ -570,6 +576,8 @@ export function validateUiCapabilityArgs(capability: WorkerCapability, raw: unkn
   const keys = (...allowed: string[]): void => exactKeys(args, allowed, `${capability} arguments`);
   switch (capability) {
     case "dock.identity": keys(); return;
+    case "dock.observation.configure": keys("enabled", "operationId"); if (typeof args.enabled !== "boolean") throw new Error("Observation enabled flag is invalid"); boundedString(args.operationId, 128, "Observation operation ID"); return;
+    case "dock.observation": keys("request"); parseObservationRequest(args.request); return;
     case "ui.select": keys("title", "options", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); stringArray(args.options, 256, 16_000, "Dialog options"); validateDialogOptions(args.optionsMeta); return;
     case "ui.confirm": keys("title", "message", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); boundedString(args.message, 16_000, "Dialog message", true); validateDialogOptions(args.optionsMeta); return;
     case "ui.input": keys("title", "placeholder", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); optionalString(args.placeholder, 4_096); validateDialogOptions(args.optionsMeta); return;
@@ -586,6 +594,17 @@ export function validateUiCapabilityArgs(capability: WorkerCapability, raw: unkn
     case "ui.viewport": keys("width", "height"); positiveInteger(args.width, "Widget width"); positiveInteger(args.height, "Widget height"); return;
     case "ui.reset": case "ui.generationBegin": keys(); return;
   }
+}
+
+export function validateDockCapabilityResult(capability: DockCapability, result: unknown): void {
+  if (capability === "dock.identity") return;
+  if (capability === "dock.observation.configure") {
+    const value = record(result, "Observation configure result");
+    exactKeys(value, ["enabled"], "Observation configure result");
+    if (typeof value.enabled !== "boolean") throw new Error("Observation configure result is invalid");
+    return;
+  }
+  parseObservationResult(result);
 }
 
 export function validateUiCapabilityResult(capability: UiCapability, result: unknown): void {
@@ -817,8 +836,9 @@ function parseAgentInvokeContext(raw: unknown): AgentInvokeContext {
 
 function parseAgentWorkerControl(raw: unknown): AgentWorkerControl {
   const value = record(raw, "Worker Agent control");
-  const type = oneOf(value.type, ["activate", "resolve_session_target", "wait_for_idle", "dispose"], "Worker Agent control type");
+  const type = oneOf(value.type, ["activate", "resolve_session_target", "wait_for_idle", "observation_delivery", "dispose"], "Worker Agent control type");
   if (type === "resolve_session_target") { exactKeys(value, ["type", "sessionFile"], "Worker Agent control"); return { type, sessionFile: boundedString(value.sessionFile, 16_384, "Session file") }; }
+  if (type === "observation_delivery") { exactKeys(value, ["type", "notification"], "Worker Agent control"); return { type, notification: parseObservationNotification(value.notification) }; }
   exactKeys(value, ["type"], "Worker Agent control"); return { type };
 }
 
@@ -829,8 +849,81 @@ function isAgentRequest(type: string): type is AgentRequest["type"] {
 function parseCapability(raw: unknown): WorkerCapability {
   return oneOf(raw, [
     "ui.select", "ui.confirm", "ui.input", "ui.editor", "ui.notify", "ui.setTitle", "ui.setEditorText", "ui.setStatus", "ui.setWidget", "ui.widgetError", "ui.unsupported", "ui.setToolsExpanded", "ui.cancel", "ui.viewport", "ui.reset", "ui.generationBegin",
-    "dock.identity",
+    "dock.identity", "dock.observation.configure", "dock.observation",
   ] as const, "Worker capability");
+}
+
+function parseObservationRequest(raw: unknown): ObservationRequest {
+  const value = record(raw, "Observation request");
+  const type = oneOf(value.type, ["list", "inspect", "watch", "cancel"] as const, "Observation request type");
+  if (type === "list") { exactKeys(value, ["type"], "Observation request"); return { type }; }
+  if (type === "cancel") {
+    exactKeys(value, ["type", "watchId"], "Observation request");
+    const watchId = optionalString(value.watchId, 128);
+    return { type, ...(watchId === undefined ? {} : { watchId }) };
+  }
+  exactKeys(value, ["type", "target"], "Observation request");
+  return { type, target: boundedString(value.target, 256, "Observation target") };
+}
+
+function parseObservationResult(raw: unknown): void {
+  const value = record(raw, "Observation result");
+  const type = oneOf(value.type, ["list", "inspect", "watch", "cancel"] as const, "Observation result type");
+  if (type === "list") { exactKeys(value, ["type", "result"], "Observation result"); validateObservationList(value.result); return; }
+  if (type === "inspect") { exactKeys(value, ["type", "result"], "Observation result"); validateObservation(value.result); return; }
+  if (type === "cancel") {
+    exactKeys(value, ["type", "cancelledWatchIds"], "Observation result");
+    stringArray(value.cancelledWatchIds, 10_000, 128, "Cancelled observation watches"); return;
+  }
+  exactKeys(value, ["type", "status", "receipt", "completion"], "Observation result");
+  const status = oneOf(value.status, ["watching", "completed"] as const, "Observation watch status");
+  if (status === "watching") { if (value.completion !== undefined) throw new Error("Watching result cannot contain completion"); validateWatchReceipt(value.receipt); }
+  else { if (value.receipt !== undefined) throw new Error("Completed result cannot contain receipt"); parseObservationNotification(value.completion); }
+}
+
+function validateObservationList(raw: unknown): void {
+  const value = record(raw, "Observation list"); exactKeys(value, ["trust", "observedAt", "instances", "total", "truncated"], "Observation list");
+  if (value.trust !== CROSS_INSTANCE_TRUST) throw new Error("Observation trust marker is invalid"); timestampString(value.observedAt, "Observation timestamp");
+  if (!Array.isArray(value.instances) || value.instances.length > 200) throw new Error("Observation instances are invalid");
+  for (const item of value.instances) validateObservedStatus(item);
+  nonNegativeInteger(value.total, "Observation instance total");
+  if (typeof value.truncated !== "boolean" || value.truncated !== (value.instances.length < (value.total as number))) throw new Error("Observation list truncation is invalid");
+}
+
+function validateObservation(raw: unknown): void {
+  const value = record(raw, "Instance observation"); exactKeys(value, ["trust", "observedAt", "status", "activity"], "Instance observation");
+  if (value.trust !== CROSS_INSTANCE_TRUST) throw new Error("Observation trust marker is invalid"); timestampString(value.observedAt, "Observation timestamp"); validateObservedStatus(value.status);
+  if (value.activity !== undefined) {
+    const activity = record(value.activity, "Observation activity"); exactKeys(activity, ["historyRevision", "records", "liveEvents"], "Observation activity");
+    positiveInteger(activity.historyRevision, "Observation history revision");
+    if (!Array.isArray(activity.records) || activity.records.length > 200 || !Array.isArray(activity.liveEvents) || activity.liveEvents.length > 200) throw new Error("Observation activity is invalid");
+    validateJsonValue(activity.records); validateJsonValue(activity.liveEvents);
+  }
+}
+
+function validateObservedStatus(raw: unknown): void {
+  const value = record(raw, "Observed instance status"); exactKeys(value, ["id", "key", "name", "lifecycle", "execution", "executionChangedAt", "runStartedAt", "runtimeGeneration"], "Observed instance status");
+  boundedString(value.id, 128, "Observed instance ID"); optionalString(value.key, 128); optionalString(value.name, 256);
+  oneOf(value.lifecycle, ["active", "stopping", "stopped", "host_lost", "runtime_error"], "Observed lifecycle"); oneOf(value.execution, ["idle", "running", "failed", "unavailable"], "Observed execution");
+  timestampString(value.executionChangedAt, "Observed execution timestamp"); if (value.runStartedAt !== undefined) timestampString(value.runStartedAt, "Observed run timestamp"); positiveInteger(value.runtimeGeneration, "Observed generation");
+}
+
+function validateWatchReceipt(raw: unknown): void {
+  const value = record(raw, "Observation watch receipt"); exactKeys(value, ["watchId", "targetInstanceId", "registeredAt"], "Observation watch receipt");
+  boundedString(value.watchId, 128, "Observation watch ID"); boundedString(value.targetInstanceId, 128, "Observation target ID"); timestampString(value.registeredAt, "Observation registration timestamp");
+}
+
+function parseObservationNotification(raw: unknown): ObservationNotification {
+  const value = record(raw, "Observation notification"); exactKeys(value, ["trust", "notice", "watchId", "firedAt", "reason", "observation"], "Observation notification");
+  if (value.trust !== CROSS_INSTANCE_TRUST || value.notice !== OBSERVATION_DATA_NOTICE) throw new Error("Observation notification trust marker is invalid");
+  const watchId = boundedString(value.watchId, 128, "Observation watch ID"); const firedAt = timestampString(value.firedAt, "Observation fired timestamp");
+  const reason = oneOf(value.reason, ["idle", "stopped", "host_lost", "runtime_error", "execution_failed", "execution_unavailable"] as const, "Observation terminal reason");
+  validateObservation(value.observation);
+  return { trust: CROSS_INSTANCE_TRUST, notice: OBSERVATION_DATA_NOTICE, watchId, firedAt, reason, observation: value.observation as ObservationNotification["observation"] };
+}
+
+function timestampString(raw: unknown, label: string): string {
+  const value = boundedString(raw, 128, label); if (!Number.isFinite(Date.parse(value))) throw new Error(`${label} is invalid`); return value;
 }
 
 function validatePromptOptions(raw: unknown): void {

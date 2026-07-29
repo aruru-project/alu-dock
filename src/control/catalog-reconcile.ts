@@ -42,6 +42,7 @@ export function reconcileCatalogProjection(
         ...structuredClone(record),
         lifecycle: record.lifecycle,
         execution: "unavailable",
+        executionChangedAt: record.execution === "unavailable" ? (record.executionChangedAt ?? record.createdAt) : timestamp,
         lastRun: record.lastRun,
         admissionPending: false,
         pendingCount: 0,
@@ -53,6 +54,7 @@ export function reconcileCatalogProjection(
       delete normalized.replacement;
       delete normalized.stopRequestedAt;
       delete normalized.shutdownRequestedAt;
+      delete normalized.runStartedAt;
       if (record.lifecycle === "runtime_error" && normalized.interruption === undefined) {
         normalized.interruption = { reason: "replacement_failed", at: record.updatedAt };
       }
@@ -62,6 +64,7 @@ export function reconcileCatalogProjection(
       ...structuredClone(record),
       lifecycle: "stopped",
       execution: "unavailable",
+      executionChangedAt: record.execution === "unavailable" ? (record.executionChangedAt ?? record.createdAt) : timestamp,
       admissionPending: false,
       pendingCount: 0,
     };
@@ -74,6 +77,7 @@ export function reconcileCatalogProjection(
     delete stopped.interruption;
     delete stopped.stopRequestedAt;
     delete stopped.shutdownRequestedAt;
+    delete stopped.runStartedAt;
     return stopped;
   }).sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id));
 
@@ -122,6 +126,8 @@ export function catalogSnapshotFromRecord(
     ...(record.lastError === undefined ? {} : { lastError: record.lastError }),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+    executionChangedAt: record.executionChangedAt ?? record.createdAt,
+    ...(record.runStartedAt === undefined ? {} : { runStartedAt: record.runStartedAt }),
     eventCursor: {
       hostEpoch: record.ownerHostEpoch ?? currentHostEpoch,
       instanceId: record.id,
@@ -161,6 +167,7 @@ function normalizePriorLiveRecord(
     ...structuredClone(record),
     lifecycle: ownerReleaseUnconfirmed ? "runtime_error" : "host_lost",
     execution: "unavailable",
+    executionChangedAt: updatedAt,
     lastRun: busy ? "interrupted" : record.lastRun,
     admissionPending: false,
     pendingCount: 0,
@@ -187,5 +194,6 @@ function normalizePriorLiveRecord(
   delete normalized.replacement;
   delete normalized.stopRequestedAt;
   delete normalized.shutdownRequestedAt;
+  delete normalized.runStartedAt;
   return normalized;
 }

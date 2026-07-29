@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 
 import { createPiAgentAdapter, type PiAgentAdapter } from "./pi-agent-adapter.js";
@@ -10,6 +11,7 @@ import {
   decodeWorkerError,
   encodeWorkerError,
   parseWorkerIdentity,
+  validateDockCapabilityResult,
   validateUiCapabilityResult,
   type DockCapability,
   type ReverseWorkerCapability,
@@ -19,6 +21,8 @@ import {
 } from "./worker-protocol.js";
 import type { PiWorkerInitOptions } from "./worker-process.js";
 import type { AgentRequest, AgentWorkerState } from "../core/agent-worker.js";
+import type { ObservationResult } from "../core/instance-observation.js";
+import { DockObservationBridge } from "./dock-observation-extension.js";
 
 interface PendingHostCall {
   capability: UiCapability | DockCapability;
@@ -48,6 +52,7 @@ async function runWorker(): Promise<void> {
   let runtime: PiAgentAdapter | undefined;
   let shutdownPromise: Promise<void> | undefined;
   let hostCapabilities = new Set<ReverseWorkerCapability>(["dock.identity"]);
+  let observationBridge: DockObservationBridge | undefined;
 
   const callHost = (capability: UiCapability | DockCapability, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> => {
     const callId = `child-${++nextHostCall}`;
@@ -93,6 +98,23 @@ async function runWorker(): Promise<void> {
   // channel before constructing Pi resources or loading extensions.
   const dockContext = await callHost("dock.identity", {});
   hostCapabilities = verifyDockContext(dockContext, identity, generation);
+  observationBridge = new DockObservationBridge(hostCapabilities.has("dock.observation"), {
+    configure: async (action) => {
+      if (action === "status") return { enabled: observationBridge!.enabled };
+      const capability: DockCapability = "dock.observation.configure";
+      const result = await callHost(capability, { enabled: action === "on", operationId: randomUUID() });
+      validateDockCapabilityResult(capability, result);
+      const enabled = (result as { enabled: boolean }).enabled;
+      if (enabled) hostCapabilities.add("dock.observation"); else hostCapabilities.delete("dock.observation");
+      return { enabled };
+    },
+    observe: async (request) => {
+      const capability: DockCapability = "dock.observation";
+      const result = await callHost(capability, { request });
+      validateDockCapabilityResult(capability, result);
+      return result as ObservationResult;
+    },
+  });
 
   const sessionPath = init.sessionFile ? resolve(init.sessionFile) : undefined;
   const reopened = sessionPath
@@ -110,6 +132,7 @@ async function runWorker(): Promise<void> {
     extensionUiContextPortFactory: () => ui.createGenerationPort(),
     setProcessCwd: (cwd) => process.chdir(cwd),
     ...(reopened === undefined ? {} : { sessionManager: reopened.manager }),
+    dockObservationBridge: observationBridge,
   });
   if (init.initialName !== undefined && !reopened) runtime.currentSession().setSessionName(init.initialName);
   runtime.subscribe((event) => {
@@ -140,6 +163,7 @@ async function runWorker(): Promise<void> {
       hostCalls.delete(envelope.callId);
       if (envelope.ok) {
         if (pending.capability.startsWith("ui.")) validateUiCapabilityResult(pending.capability as UiCapability, envelope.result);
+        else validateDockCapabilityResult(pending.capability as DockCapability, envelope.result);
         pending.resolve(envelope.result);
       } else pending.reject(decodeWorkerError(envelope.error));
       return;
@@ -150,7 +174,8 @@ async function runWorker(): Promise<void> {
         throw new Error("Worker Agent request instance identity mismatch");
       }
       const accepted = envelope.kind === "agent_request" ? isAcceptedRequest(envelope.request.type)
-        : envelope.kind === "agent_control" && envelope.control.type === "dispose";
+        : envelope.kind === "agent_control"
+          && (envelope.control.type === "dispose" || envelope.control.type === "observation_delivery");
       if (accepted) await sender.sendEnvelope({ kind: "accepted", callId: envelope.callId });
       let result: unknown;
       if (envelope.kind === "agent_request") {
@@ -164,7 +189,10 @@ async function runWorker(): Promise<void> {
           ? await ui.withCommandNotificationOrigin(envelope.request.params.operationId, dispatchAgentRequest)
           : await dispatchAgentRequest();
       } else if (envelope.kind === "agent_control") {
-        result = await runtime!.control(envelope.control);
+        if (envelope.control.type === "observation_delivery") {
+          observationBridge!.deliver(envelope.control.notification);
+          result = null;
+        } else result = await runtime!.control(envelope.control);
       } else {
         result = dispatchHostUi(ui, envelope.capability as UiCapability, envelope.args as Record<string, unknown>);
       }

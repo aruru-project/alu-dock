@@ -11,6 +11,7 @@ import {
 import { ExtensionUiBroker } from "../core/extension-ui-broker.js";
 import { ManagedInstance } from "../core/managed-instance.js";
 import type { AgentHistoryEntry, AgentRequest } from "../core/agent-worker.js";
+import type { InstanceObservationHostPort } from "../core/instance-observation.js";
 import { ProjectTrustCoordinator } from "../control/project-trust.js";
 import { PI_SDK_VERSION } from "../version.js";
 import { resolvePiReopenTarget } from "./pi-session-target.js";
@@ -38,6 +39,8 @@ export interface CreatePiInstanceOptions {
   workerEntry?: string;
   workerTimeouts?: Partial<WorkerProcessTimeouts>;
   onWorkerSpawn?: (pid: number) => void;
+  observationHostPort?: InstanceObservationHostPort;
+  observationGrant?: boolean;
 }
 
 /** Construct the Host state machine around one independent Pi worker after trust. */
@@ -47,6 +50,8 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
   const instanceId = options.id ?? randomUUID();
   const hostEpoch = options.hostEpoch ?? randomUUID();
   const extensionUiBroker = new ExtensionUiBroker();
+  const observationHostPort = options.observationHostPort ?? unavailableObservationHostPort;
+  const observationGrant = options.observationGrant ?? false;
   const created = await AgentWorkerConnection.create({
     identity: {
       hostEpoch,
@@ -64,6 +69,8 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
       ...(options.name === undefined || options.sessionFile !== undefined ? {} : { initialName: options.name }),
     },
     extensionUiBroker,
+    observationHostPort,
+    initialObservationGrant: observationGrant,
     ...(options.workerEntry === undefined ? {} : { workerEntry: options.workerEntry }),
     ...(options.workerTimeouts === undefined ? {} : { workerTimeouts: options.workerTimeouts }),
     ...(options.onWorkerSpawn === undefined ? {} : { onWorkerSpawn: options.onWorkerSpawn }),
@@ -97,6 +104,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
       reopenedFrom: options.reopenedFrom,
       extensionUiBroker,
       initialHistory,
+      observationGrant,
     });
     await runtime.control({ type: "activate" });
     instance.synchronizeModelState();
@@ -108,6 +116,13 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
     throw error;
   }
 }
+
+const unavailableObservationHostPort: InstanceObservationHostPort = {
+  observationGrant: () => false,
+  configureObservation: async () => { throw new Error("Dock observation requires a managed Registry instance"); },
+  observe: async () => { throw new Error("Dock observation requires a managed Registry instance"); },
+  attachObservationSink: () => () => {},
+};
 
 export { resolvePiReopenTarget } from "./pi-session-target.js";
 

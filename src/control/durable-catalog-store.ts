@@ -139,7 +139,7 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
   const value = object(input, field);
   exact(value, [
     "id", "creationOperationId", "key", "name", "cwd", "lifecycle", "execution", "lastRun",
-    "runtimeGeneration", "ownerHostEpoch", "piSessionId", "sessionFile", "model",
+    "observationGrant", "executionChangedAt", "runStartedAt", "runtimeGeneration", "ownerHostEpoch", "piSessionId", "sessionFile", "model",
     "thinkingLevel", "activeCommandId", "admissionPending", "admissionOperationId",
     "pendingCount", "replacement", "recoverySessionFile", "lastKnown", "interruption",
     "stopRequestedAt", "shutdownRequestedAt", "ownerReleaseUnconfirmed", "lastError", "createdAt", "updatedAt",
@@ -162,6 +162,13 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
     lifecycle: enumeration(value.lifecycle, `${field}.lifecycle`, ["active", "stopping", "stopped", "host_lost", "runtime_error"]),
     execution: enumeration(value.execution, `${field}.execution`, ["idle", "running", "failed", "unavailable"]),
     lastRun: enumeration(value.lastRun, `${field}.lastRun`, ["never", "succeeded", "failed", "aborted", "interrupted"]),
+    observationGrant: value.observationGrant === undefined ? false : boolean(value.observationGrant, `${field}.observationGrant`),
+    executionChangedAt: value.executionChangedAt === undefined
+      ? timestamp(value.createdAt, `${field}.createdAt`)
+      : timestamp(value.executionChangedAt, `${field}.executionChangedAt`),
+    ...(value.runStartedAt === undefined
+      ? (value.execution === "running" ? { runStartedAt: timestamp(value.createdAt, `${field}.createdAt`) } : {})
+      : { runStartedAt: timestamp(value.runStartedAt, `${field}.runStartedAt`) }),
     runtimeGeneration: positive(value.runtimeGeneration, `${field}.runtimeGeneration`),
     ...(value.ownerHostEpoch === undefined ? {} : { ownerHostEpoch: text(value.ownerHostEpoch, `${field}.ownerHostEpoch`, 128) }),
     piSessionId: text(value.piSessionId, `${field}.piSessionId`, 128),

@@ -151,7 +151,7 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
     const resources = await instance.getResources();
     assert.ok(resources.resources.some((resource) => resource.kind === "extension" && resource.name.includes("stage3-fixture")));
     const commands = parseCommandsResult(await instance.getCommands()).commands;
-    assert.deepEqual(commands.map((command) => command.name), ["fixture-a", "fixture-a-long", "fixture-b", "fixture-b-long"]);
+    assert.deepEqual(commands.map((command) => command.name), ["dock-observe", "fixture-a", "fixture-a-long", "fixture-b", "fixture-b-long"]);
 
     await instance.stop("real-stop");
     const lifecycle = (await readFile(lifecycleLog, "utf8")).trim().split("\n");

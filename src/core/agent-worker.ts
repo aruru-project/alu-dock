@@ -9,6 +9,7 @@ import type {
 } from "./config-projection.js";
 import type { ConversationRecordDto } from "./instance-dto.js";
 import type { ControlRequest } from "../control/protocol.js";
+import type { ObservationNotification } from "./instance-observation.js";
 
 export interface AgentEvent {
   type: string;
@@ -302,6 +303,7 @@ export type AgentWorkerControl =
   | { type: "activate" }
   | { type: "resolve_session_target"; sessionFile: string }
   | { type: "wait_for_idle" }
+  | { type: "observation_delivery"; notification: ObservationNotification }
   | { type: "dispose" };
 
 /** Minimal current-generation metadata needed by Host authority and snapshots. */

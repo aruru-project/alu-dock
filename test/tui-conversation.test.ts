@@ -95,6 +95,8 @@ function snapshot(): InstanceSnapshot {
     },
     createdAt: "2026-07-14T00:00:00.000Z",
     updatedAt: "2026-07-14T00:00:00.000Z",
+    executionChangedAt: "2026-07-14T00:00:00.000Z",
+    runStartedAt: "2026-07-14T00:00:00.000Z",
     eventCursor: { hostEpoch: "epoch-1", instanceId: "dock-1", runtimeGeneration: 1, sequence: 1 },
   };
 }

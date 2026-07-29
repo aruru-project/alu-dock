@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { ExtensionUiBroker } from "../core/extension-ui-broker.js";
+import type { InstanceObservationHostPort, ObservationRequest } from "../core/instance-observation.js";
 import type { AgentCommandPreflightResult, AgentEvent, AgentInvokeOptions, AgentRequest, AgentWorkerConnection as AgentWorkerConnectionPort, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
 import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
 import { PiWorkerProcess, type PiWorkerInitOptions, type WorkerProcessTimeouts } from "./worker-process.js";
@@ -26,6 +27,8 @@ export interface CreateAgentWorkerConnectionOptions {
   workerEntry?: string;
   workerTimeouts?: Partial<WorkerProcessTimeouts>;
   onWorkerSpawn?: (pid: number) => void;
+  observationHostPort: InstanceObservationHostPort;
+  initialObservationGrant: boolean;
 }
 
 export class AgentWorkerUnavailableError extends AgentUnavailableBeforeEffectError {
@@ -55,6 +58,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
   private constructor(private readonly options: CreateAgentWorkerConnectionOptions, identity: WorkerIdentity) {
     this.identity = identity;
     this.expectedGeneration = identity.runtimeGeneration;
+    if (!options.initialObservationGrant) this.reverseCapabilities.delete("dock.observation");
     this.process = new PiWorkerProcess({ identity, init: options.init, entry: options.workerEntry, timeouts: options.workerTimeouts, onSpawn: options.onWorkerSpawn });
     this.sender = new OrderedWorkerSender(identity, (message, callback) => this.process.child.send(message, callback));
     this.receiver = new WorkerFrameReceiver((received) => this.acceptIdentity(received, identity));
@@ -192,8 +196,8 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
       await this.sender.sendEnvelope({ kind: "response", callId: envelope.callId, ok: false, error: encodeWorkerError(new Error(`Worker capability is not authorized: ${envelope.capability}`)) }).catch((error) => this.failTransport(error));
       return;
     }
-    if (envelope.kind === "call" && envelope.capability === "dock.identity") {
-      await this.handleDockCall(envelope.callId, envelope.capability);
+    if (envelope.kind === "call" && envelope.capability.startsWith("dock.")) {
+      await this.handleDockCall(envelope.callId, envelope.capability as DockCapability, envelope.args as Record<string, unknown>);
       return;
     }
     if (envelope.kind === "call" && envelope.capability.startsWith("ui.")) {
@@ -203,17 +207,25 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     if (envelope.kind === "fatal") this.failTransport(decodeWorkerError(envelope.error));
   }
 
-  private async handleDockCall(callId: string, capability: DockCapability): Promise<void> {
-    if (capability !== "dock.identity") return;
-    await this.sender.sendEnvelope({
-      kind: "response",
-      callId,
-      ok: true,
-      result: {
-        identity: { ...this.identity, runtimeGeneration: this.expectedGeneration },
-        capabilities: [...this.reverseCapabilities],
-      },
-    }).catch((error) => this.failTransport(error));
+  private async handleDockCall(callId: string, capability: DockCapability, args: Record<string, unknown>): Promise<void> {
+    try {
+      let result: unknown;
+      if (capability === "dock.identity") {
+        result = {
+          identity: { ...this.identity, runtimeGeneration: this.expectedGeneration },
+          capabilities: [...this.reverseCapabilities],
+        };
+      } else if (capability === "dock.observation.configure") {
+        result = await this.options.observationHostPort.configureObservation(this.identity.instanceId, args.enabled as boolean, args.operationId as string);
+        if ((result as { enabled: boolean }).enabled) this.reverseCapabilities.add("dock.observation");
+        else this.reverseCapabilities.delete("dock.observation");
+      } else {
+        result = await this.options.observationHostPort.observe(this.identity.instanceId, args.request as ObservationRequest);
+      }
+      await this.sender.sendEnvelope({ kind: "response", callId, ok: true, result });
+    } catch (error) {
+      await this.sender.sendEnvelope({ kind: "response", callId, ok: false, error: encodeWorkerError(error) }).catch(() => {});
+    }
   }
 
   private async handleUiCall(callId: string, capability: UiCapability, args: Record<string, unknown>): Promise<void> {

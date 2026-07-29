@@ -48,7 +48,16 @@ async function temporaryCatalog(): Promise<{ root: string; path: string }> {
   return { root, path };
 }
 
-
+test("legacy catalog records default observation off and normalize execution timing", async () => {
+  const { path } = await temporaryCatalog();
+  const store = new FileCatalogStore(path);
+  await store.commit(projection(1, [record("legacy")]), { kind: "legacy-fixture", effect: "pre_effect" });
+  const loaded = await store.load();
+  const legacy = loaded?.instances[0];
+  assert.equal(legacy?.observationGrant, false);
+  assert.equal(legacy?.executionChangedAt, "2026-07-15T00:00:00.000Z");
+  assert.equal(legacy?.runStartedAt, undefined);
+});
 
 test("durable catalog rejects duplicate and unsafe instance keys", async () => {
   const { path } = await temporaryCatalog();

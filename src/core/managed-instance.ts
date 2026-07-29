@@ -154,6 +154,7 @@ export {
   MAX_SEMANTIC_HISTORY_PAGE_ITEMS,
 } from "./instance-dto.js";
 import { projectAgentNavigateResult, projectRuntimeTree, type ProjectedSessionTree } from "./session-tree.js";
+import type { ObservationNotification } from "./instance-observation.js";
 
 export interface BoundedCollectionProjection<T> {
   items: T[];
@@ -187,6 +188,7 @@ export interface ManagedInstanceOptions {
   reopenedFrom?: "host_lost" | "runtime_error";
   extensionUiBroker?: ExtensionUiBroker;
   initialHistory?: AgentHistoryEntry[];
+  observationGrant?: boolean;
 }
 
 interface AssistantOutcome {
@@ -254,6 +256,10 @@ interface WorkingCheckpoint {
   stopRequestedAt: string | undefined;
   shutdownRequestedAt: string | undefined;
   ownerReleaseUnconfirmed: boolean;
+  observationGrant: boolean;
+  executionChangedAt: string;
+  runStartedAt: string | undefined;
+  timedExecution: InstanceExecution;
 }
 
 export class InstanceNotActiveError extends Error {
@@ -371,6 +377,10 @@ export class ManagedInstance {
   private stopRequestedAt: string | undefined;
   private shutdownRequestedAt: string | undefined;
   private ownerReleaseUnconfirmed = false;
+  private observationGrantValue = false;
+  private executionChangedAtValue!: string;
+  private runStartedAtValue: string | undefined;
+  private timedExecutionValue: InstanceExecution = "idle";
   private transitionTail: Promise<void> = Promise.resolve();
   private historyRefreshTail: Promise<void> = Promise.resolve();
   private treeProjectionCache: { projection: ProjectedSessionTree; indexByEntryId: Map<string, number> } | undefined;
@@ -452,6 +462,7 @@ export class ManagedInstance {
     this.now = options.now ?? (() => new Date());
     this.createCommandId = options.commandId ?? randomUUID;
     this.extensionUi = options.extensionUiBroker ?? new ExtensionUiBroker(this.now, this.createCommandId);
+    this.observationGrantValue = options.observationGrant ?? false;
 
     const initializedAt = this.timestamp();
     this.createdAt = options.createdAt ?? initializedAt;
@@ -460,6 +471,8 @@ export class ManagedInstance {
     if (!Number.isSafeInteger(initialGeneration) || initialGeneration < 1) throw new Error("Initial runtime generation must be positive");
     this.runtimeGenerationValue = initialGeneration;
     this.publishedRuntimeGenerationValue = initialGeneration;
+    this.executionChangedAtValue = initialUpdatedAt;
+    this.timedExecutionValue = "idle";
     this.state = {
       lifecycle: "active",
       execution: "idle",
@@ -542,6 +555,9 @@ export class ManagedInstance {
       lifecycle: snapshot.lifecycle,
       execution: snapshot.execution,
       lastRun: snapshot.lastRun,
+      observationGrant: this.observationGrantValue,
+      executionChangedAt: snapshot.executionChangedAt,
+      ...(snapshot.runStartedAt === undefined ? {} : { runStartedAt: snapshot.runStartedAt }),
       runtimeGeneration: snapshot.runtimeGeneration,
       ...(snapshot.ownerHostEpoch === undefined ? {} : { ownerHostEpoch: snapshot.ownerHostEpoch }),
       piSessionId: snapshot.executor.piSessionId,
@@ -574,6 +590,21 @@ export class ManagedInstance {
 
   markCatalogCommitted(): void {
     this.committedSnapshotValue = this.workingSnapshot();
+  }
+
+  observationGrant(): boolean { return this.observationGrantValue; }
+
+  async setObservationGrant(enabled: boolean, operationId: string): Promise<void> {
+    if (typeof enabled !== "boolean") throw new Error("Observation grant must be boolean");
+    if (enabled === this.observationGrantValue) return;
+    await this.enqueueTransition(() => this.commitCatalogTransition(
+      { kind: "instance.observation_configure", effect: "pre_effect", operationId, instanceId: this.id },
+      () => { this.observationGrantValue = enabled; this.touch(); },
+    ));
+  }
+
+  deliverObservation(notification: ObservationNotification): Promise<void> {
+    return this.session.control({ type: "observation_delivery", notification }).then(() => undefined);
   }
 
   async disposeUnpublished(): Promise<void> {
@@ -741,6 +772,8 @@ export class ManagedInstance {
       lastError: this.state.lastError,
       createdAt: this.createdAt,
       updatedAt: this.state.updatedAt,
+      executionChangedAt: this.executionChangedAtValue,
+      ...(this.runStartedAtValue === undefined ? {} : { runStartedAt: this.runStartedAtValue }),
       eventCursor: this.cursor(this.nextEventSequence - 1),
     };
   }
@@ -2588,6 +2621,10 @@ export class ManagedInstance {
       stopRequestedAt: this.stopRequestedAt,
       shutdownRequestedAt: this.shutdownRequestedAt,
       ownerReleaseUnconfirmed: this.ownerReleaseUnconfirmed,
+      observationGrant: this.observationGrantValue,
+      executionChangedAt: this.executionChangedAtValue,
+      runStartedAt: this.runStartedAtValue,
+      timedExecution: this.timedExecutionValue,
     };
   }
 
@@ -2615,6 +2652,10 @@ export class ManagedInstance {
     this.stopRequestedAt = checkpoint.stopRequestedAt;
     this.shutdownRequestedAt = checkpoint.shutdownRequestedAt;
     this.ownerReleaseUnconfirmed = checkpoint.ownerReleaseUnconfirmed;
+    this.observationGrantValue = checkpoint.observationGrant;
+    this.executionChangedAtValue = checkpoint.executionChangedAt;
+    this.runStartedAtValue = checkpoint.runStartedAt;
+    this.timedExecutionValue = checkpoint.timedExecution;
   }
 
   private runtimeDurableSessionFile(): string | undefined {
@@ -3777,6 +3818,11 @@ export class ManagedInstance {
   }
 
   private touch(timestamp = this.timestamp()): void {
+    if (this.state.execution !== this.timedExecutionValue) {
+      this.timedExecutionValue = this.state.execution;
+      this.executionChangedAtValue = timestamp;
+      this.runStartedAtValue = this.state.execution === "running" ? timestamp : undefined;
+    }
     if (timestamp >= this.state.updatedAt) this.state.updatedAt = timestamp;
   }
 

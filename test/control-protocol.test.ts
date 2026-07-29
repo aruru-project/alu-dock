@@ -88,7 +88,7 @@ function validSnapshot(): Record<string, unknown> {
     runtimeGeneration: 1, ownerHostEpoch: "epoch-1",
     pending: { steering: 0, followUp: 0, total: 0 },
     executor: { kind: "fixture", piSessionId: "pi-1" }, extensionStatus: {}, toolsExpanded: false,
-    createdAt: "2026-07-14T00:00:00.000Z", updatedAt: "2026-07-14T00:00:00.000Z",
+    createdAt: "2026-07-14T00:00:00.000Z", updatedAt: "2026-07-14T00:00:00.000Z", executionChangedAt: "2026-07-14T00:00:00.000Z",
     eventCursor: { hostEpoch: "epoch-1", instanceId: "i1", runtimeGeneration: 1, sequence: 1 },
   };
 }

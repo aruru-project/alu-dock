@@ -87,6 +87,14 @@ active frame 的释放完全由 Worker persistence checkpoint 驱动。Host 只�
 
 Extension UI 操作使用独立连接，同一 instance 同时只有一个。新连接立即接手，旧操作连接结束但它的普通 follow 不受影响；等待中的 interaction 属于 runtime generation，不因接手或断线而被回答或取消。
 
+## Agent 观察兄弟实例
+
+只读跨实例观察是 Host-owned control capability。授权绑定发起 `instanceId`、默认关闭并持久化在 catalog；Host 从 authenticated Worker connection 取得 caller identity，每次 list/inspect/watch/cancel 都重新校验授权，并永远排除 caller 自己。目标不是授权白名单：主人把能力交给一个来源实例后，它可以读取任意 sibling，但不能向 sibling 提交消息、停止任务或回答 interaction。
+
+观察状态复用 instance snapshot 的 canonical lifecycle/execution fact；`executionChangedAt` 与当前 running 区间的 `runStartedAt` 是权威时钟，不能用会被 Queue/settings 等变化刷新的 `updatedAt` 猜运行时长。最近活动直接携带有界的 canonical conversation record 与 live event，不生成 Host 摘要；整个 sibling payload 标记为 `untrusted_cross_instance`。
+
+watch 是 Host 内存中的一次性 subscription，不轮询、不占模型 turn。目标已经 idle/stopped/error 时调用同步返回当前结果；否则 Host 订阅 `ManagedInstance`，首次进入 terminal state 后删除 watch，再向当前来源 Worker 投递 completion。来源/目标 session generation replacement 不改变 stable instance watch；来源 stop/forget、授权关闭会清理，目标 forget 按 unavailable 完成。watch 不跨 Host restart 恢复或补发。
+
 ## Capabilities
 
 Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力。
