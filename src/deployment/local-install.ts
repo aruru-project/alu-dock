@@ -17,7 +17,6 @@ export interface AluDockUnitOptions {
   nodePath: string;
   cliPath: string;
   homePath: string;
-  environment?: NodeJS.ProcessEnv;
 }
 
 export function localInstallLayout(home: string, installRoot = join(home, ".local", "share", "alu-dock")): LocalInstallLayout {
@@ -45,9 +44,8 @@ export function renderAluDockUnit(options: AluDockUnitOptions): string {
   assertSafeAbsolutePath(options.nodePath, "Node");
   assertSafeAbsolutePath(options.cliPath, "CLI");
   assertSafeAbsolutePath(options.homePath, "Home");
-  const executablePath = managedExecutablePath(options.nodePath, options.homePath, options.environment?.PATH);
-  const developerEnvironment = renderDeveloperEnvironment(options.homePath, options.environment);
-  const execStart = managedExecStart(options.nodePath, options.cliPath, options.homePath);
+  const executablePath = managedExecutablePath(options.nodePath, options.homePath);
+  const homePath = resolve(options.homePath);
   return `${ALU_DOCK_GENERATED_MARKER}
 [Unit]
 Description=Alu Dock managed Pi SDK host
@@ -57,11 +55,11 @@ StartLimitBurst=5
 
 [Service]
 Type=exec
-ExecStart=${execStart}
+ExecStart=${systemdQuote(resolve(options.nodePath))} ${systemdQuote(resolve(options.cliPath))} serve --managed
 Environment=${ALU_DOCK_MANAGED_ENV}=1
 Environment=ALU_DOCK_SOCKET=
 Environment=NODE_ENV=production
-${developerEnvironment}
+Environment=${systemdQuote(`HOME=${homePath}`)}
 Environment=${systemdQuote(`PATH=${executablePath}`)}
 Restart=on-failure
 RestartSec=2s
@@ -140,24 +138,10 @@ export function assertLocalInstallAllowed(instances: readonly LocalInstallInstan
   );
 }
 
-function managedExecStart(nodePath: string, cliPath: string, homePath: string): string {
-  const environmentFile = join(resolve(homePath), ".config", "alu-kanban", "env");
-  const command = `if [[ -e ${shellSingleQuote(environmentFile)} ]]; then source ${shellSingleQuote(environmentFile)} || exit $?; fi; exec ${shellSingleQuote(resolve(nodePath))} ${shellSingleQuote(resolve(cliPath))} serve --managed`;
-  return `${systemdQuote("/usr/bin/zsh")} -c ${systemdQuote(command)}`;
-}
-
-function managedExecutablePath(nodePath: string, homePath: string, inheritedPath?: string): string {
+function managedExecutablePath(nodePath: string, homePath: string): string {
   const home = resolve(homePath);
-  const inheritedEntries = (inheritedPath ?? "").split(":").filter((entry) => entry.startsWith("/"));
-  const rvmRoot = join(home, ".rvm");
-  const inheritedRvmEntries = inheritedEntries.filter((entry) => entry.startsWith(`${rvmRoot}/`));
   const entries = [
     dirname(resolve(nodePath)),
-    ...inheritedRvmEntries,
-    join(rvmRoot, "wrappers", "default"),
-    join(rvmRoot, "bin"),
-    ...inheritedEntries,
-    join(home, ".cargo", "bin"),
     join(home, ".local", "bin"),
     "/usr/local/sbin",
     "/usr/local/bin",
@@ -174,34 +158,8 @@ function managedExecutablePath(nodePath: string, homePath: string, inheritedPath
   return unique.join(":");
 }
 
-function renderDeveloperEnvironment(homePath: string, environment?: NodeJS.ProcessEnv): string {
-  const home = resolve(homePath);
-  const entries: Array<[string, string | undefined]> = [
-    ["HOME", home],
-    ["NVM_DIR", environment?.NVM_DIR ?? join(home, ".nvm")],
-    ["GEM_HOME", environment?.GEM_HOME],
-    ["GEM_PATH", environment?.GEM_PATH],
-    ["MY_RUBY_HOME", environment?.MY_RUBY_HOME],
-    ["RUBY_VERSION", environment?.RUBY_VERSION],
-  ];
-  return entries.flatMap(([name, value]) => {
-    if (!value) return [];
-    assertSafeEnvironmentValue(value, name);
-    return [`Environment=${systemdQuote(`${name}=${value}`)}`];
-  }).join("\n");
-}
-
-function assertSafeEnvironmentValue(value: string, label: string): void {
-  if (/[\n\r\0]/u.test(value)) throw new Error(`${label} must be a safe environment value`);
-}
-
 function assertSafeAbsolutePath(path: string, label: string): void {
   if (!path.startsWith("/") || path.includes("\n") || path.includes("\r") || path.includes("\0")) throw new Error(`${label} path must be a safe absolute path`);
-}
-
-function shellSingleQuote(value: string): string {
-  assertSafeEnvironmentValue(value, "Shell argument");
-  return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 function systemdQuote(value: string): string {

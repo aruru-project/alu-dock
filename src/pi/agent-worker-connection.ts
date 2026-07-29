@@ -5,6 +5,7 @@ import type { InstanceObservationHostPort, ObservationRequest } from "../core/in
 import type { AgentCommandPreflightResult, AgentEvent, AgentInvokeOptions, AgentRequest, AgentWorkerConnection as AgentWorkerConnectionPort, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
 import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
 import { PiWorkerProcess, type PiWorkerInitOptions, type WorkerProcessTimeouts } from "./worker-process.js";
+import { captureWorkspaceShellEnvironment } from "./workspace-shell-environment.js";
 import {
   ORDINARY_REVERSE_WORKER_CAPABILITIES, OrderedWorkerSender, WorkerFrameReceiver, decodeWorkerError, encodeWorkerError, validateAgentWorkerResult,
   type DockCapability, type ReverseWorkerCapability, type UiCapability, type WorkerEnvelope, type WorkerIdentity,
@@ -26,6 +27,8 @@ export interface CreateAgentWorkerConnectionOptions {
   extensionUiBroker: ExtensionUiBroker;
   workerEntry?: string;
   workerTimeouts?: Partial<WorkerProcessTimeouts>;
+  /** Test-only deterministic environment seam; production captures the workspace login shell. */
+  workerEnvironment?: NodeJS.ProcessEnv;
   onWorkerSpawn?: (pid: number) => void;
   observationHostPort: InstanceObservationHostPort;
   initialObservationGrant: boolean;
@@ -55,11 +58,22 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
   private rejectReady!: (error: unknown) => void;
   private expectedGeneration: number;
 
-  private constructor(private readonly options: CreateAgentWorkerConnectionOptions, identity: WorkerIdentity) {
+  private constructor(
+    private readonly options: CreateAgentWorkerConnectionOptions,
+    identity: WorkerIdentity,
+    workerEnvironment: NodeJS.ProcessEnv,
+  ) {
     this.identity = identity;
     this.expectedGeneration = identity.runtimeGeneration;
     if (!options.initialObservationGrant) this.reverseCapabilities.delete("dock.observation");
-    this.process = new PiWorkerProcess({ identity, init: options.init, entry: options.workerEntry, timeouts: options.workerTimeouts, onSpawn: options.onWorkerSpawn });
+    this.process = new PiWorkerProcess({
+      identity,
+      init: options.init,
+      environment: workerEnvironment,
+      entry: options.workerEntry,
+      timeouts: options.workerTimeouts,
+      onSpawn: options.onWorkerSpawn,
+    });
     this.sender = new OrderedWorkerSender(identity, (message, callback) => this.process.child.send(message, callback));
     this.receiver = new WorkerFrameReceiver((received) => this.acceptIdentity(received, identity));
     this.readyPromise = new Promise((resolve, reject) => { this.resolveReady = resolve; this.rejectReady = reject; });
@@ -80,7 +94,10 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
 
   static async create(options: CreateAgentWorkerConnectionOptions): Promise<{ session: AgentWorkerConnection; diagnostics: string[]; modelFallbackMessage?: string; persistedName?: string; pid: number }> {
     const identity = { ...options.identity, workerIncarnation: randomUUID() };
-    const session = new AgentWorkerConnection(options, identity);
+    const workerEnvironment = options.workerEnvironment === undefined
+      ? await captureWorkspaceShellEnvironment(options.init.cwd)
+      : { ...options.workerEnvironment };
+    const session = new AgentWorkerConnection(options, identity, workerEnvironment);
     const startup = session.process.timeouts.startupMs;
     let timer: NodeJS.Timeout | undefined;
     try {

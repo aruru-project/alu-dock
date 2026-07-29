@@ -100,6 +100,7 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
         sessionDir,
         projectTrusted: true,
         name: "stage3-real",
+        workerEnvironment: { ...process.env },
         workerTimeouts: { mutationMs: 10_000 },
       });
     } finally {

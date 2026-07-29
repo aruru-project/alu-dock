@@ -38,6 +38,8 @@ export interface CreatePiInstanceOptions {
   /** Test-only process seam; production always uses the default worker entry. */
   workerEntry?: string;
   workerTimeouts?: Partial<WorkerProcessTimeouts>;
+  /** Test-only deterministic environment seam; production captures the workspace login shell. */
+  workerEnvironment?: NodeJS.ProcessEnv;
   onWorkerSpawn?: (pid: number) => void;
   observationHostPort?: InstanceObservationHostPort;
   observationGrant?: boolean;
@@ -73,6 +75,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
     initialObservationGrant: observationGrant,
     ...(options.workerEntry === undefined ? {} : { workerEntry: options.workerEntry }),
     ...(options.workerTimeouts === undefined ? {} : { workerTimeouts: options.workerTimeouts }),
+    ...(options.workerEnvironment === undefined ? {} : { workerEnvironment: options.workerEnvironment }),
     ...(options.onWorkerSpawn === undefined ? {} : { onWorkerSpawn: options.onWorkerSpawn }),
   });
   const runtime = created.session;

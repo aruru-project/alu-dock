@@ -37,6 +37,7 @@ export const DEFAULT_WORKER_TIMEOUTS: WorkerProcessTimeouts = {
 export interface PiWorkerProcessOptions {
   identity: WorkerIdentity;
   init: PiWorkerInitOptions;
+  environment: NodeJS.ProcessEnv;
   entry?: string;
   timeouts?: Partial<WorkerProcessTimeouts>;
   onSpawn?: (pid: number) => void;
@@ -58,7 +59,7 @@ export class PiWorkerProcess {
       // --input-type) into the managed runtime process.
       execArgv: [],
       env: {
-        ...process.env,
+        ...definedEnvironment(options.environment),
         ALU_DOCK_PI_WORKER: "1",
         ALU_DOCK_WORKER_IDENTITY: JSON.stringify(options.identity),
         ALU_DOCK_WORKER_INIT: JSON.stringify(options.init),
@@ -99,6 +100,12 @@ export class PiWorkerProcess {
       waitForGroupGone(pid, this.timeouts.termMs),
     ]);
   }
+}
+
+function definedEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(environment).filter((entry): entry is [string, string] => entry[1] !== undefined),
+  );
 }
 
 function signalGroup(pid: number, child: ChildProcess, signal: NodeJS.Signals): void {

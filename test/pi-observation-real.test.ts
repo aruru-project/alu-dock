@@ -53,6 +53,7 @@ test("real Pi Worker toggles Dock observation tools and preserves the grant acro
         projectTrusted: true,
         observationHostPort,
         observationGrant: false,
+        workerEnvironment: { ...process.env },
         workerTimeouts: { mutationMs: 10_000 },
       });
     } finally {

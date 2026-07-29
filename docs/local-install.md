@@ -10,7 +10,7 @@ Alu Dock 使用一个本机 npm 安装和一个 `systemd --user` Host Service。
 ~/.config/systemd/user/alu-dock.service
 ```
 
-Host 和 Worker 从安装包自己的依赖加载 Agent runtime，不调用 `$PATH` 中的全局 Pi。生成的 user unit 保留安装者的可执行 `PATH`（包括 NVM、RVM、uv 等开发工具）；存在 `~/.config/alu-kanban/env` 时会在 Host 启动前 source，但不会把其中的私密值写进 unit。更新 Alu Dock 不删除 catalog 或 Agent session 文件。
+Host 和 Worker 从安装包自己的依赖加载 Agent runtime，不调用 `$PATH` 中的全局 Pi。生成的 user unit 只保存 Host 启动所需的固定 Node、CLI、HOME 和最小可执行 PATH，不固化安装命令当时的语言版本、npm PATH 或开发环境，也不替 Extension source 凭据文件。每个 Worker 在启动时从用户登录 shell 和自己的 workspace 独立取得开发环境。更新 Alu Dock 不删除 catalog 或 Agent session 文件。
 
 ## 安装或更新
 

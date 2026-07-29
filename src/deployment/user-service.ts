@@ -186,7 +186,6 @@ export class UserServiceManager {
       nodePath: resolve(this.options.nodePath),
       cliPath: resolve(this.options.cliPath),
       homePath: resolve(this.options.home ?? homedir()),
-      environment: process.env,
     });
     const temporary = `${this.unitFile}.tmp-${process.pid}-${randomUUID()}`;
     try {

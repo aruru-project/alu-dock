@@ -41,6 +41,12 @@ Worker 负责：
 
 Host 可以因为 instance、generation、operation、Extension UI 操作权或 lifecycle 不正确而拒绝请求，但不重新解释 Agent 内容，也不为 Agent 的每个方法建立本地代理。
 
+## Worker 环境
+
+Host 与 Worker 不共享整套环境变量。Managed Host 只保留 service 自身的固定运行环境；创建 Worker 时，Dock 从当前用户的交互式登录 shell 初始化用户环境，随后进入该 Worker 的 workspace，让 RVM 等目录 hook 完成项目选择，再捕获导出的环境启动 Worker。Host 的 `NODE_ENV`、systemd runtime/state、npm lifecycle 和 Dock 管理环境不得因此进入项目开发环境。
+
+每个 Worker 独立捕获一次，Host 不修改自己的 `process.env`，也不在 local install 时固化某个项目的语言版本或 PATH。Worker 只在捕获结果之上显式加入 identity、IPC 和 bootstrap 所需的 Dock 私有变量。普通 Bash 命令自行 `cd` 到其他目录时不重新捕获；新的 Worker（包括 reopen）重新按其初始 workspace 捕获。
+
 ## Worker 通信
 
 Protocol V2 定义 Dock 的业务语义。Host 与 Worker 之间的私有通信只补充进程所需的信息，例如 Worker identity、generation、调用关联、接收确认、分帧和背压。

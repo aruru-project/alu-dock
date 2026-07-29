@@ -316,6 +316,7 @@ export default function (pi) {
   const orphan = new PiWorkerProcess({
     identity: orphanIdentity,
     init: { cwd: process.cwd(), agentDir, sessionDir: join(root, "orphan-sessions"), projectTrusted: true, tools: [] },
+    environment: { ...process.env },
   });
   const orphanReceiver = new WorkerFrameReceiver(() => true);
   const orphanSender = new OrderedWorkerSender(orphanIdentity, (message, callback) => orphan.child.send(message, callback));

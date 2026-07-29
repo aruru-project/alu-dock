@@ -53,6 +53,7 @@ test("real Protocol reload completes when remote model catalogs are unavailable 
       agentDir,
       sessionDir,
       tools: [],
+      workerEnvironment: { ...process.env },
       workerTimeouts: { mutationMs: 1_500, termMs: 300 },
     }),
     () => "reload-real-instance",

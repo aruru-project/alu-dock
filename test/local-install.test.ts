@@ -100,29 +100,14 @@ test("generated user unit runs the fixed installed CLI with private state", () =
     nodePath: "/opt/node/bin/node",
     cliPath: "/home/tester/.local/share/alu-dock/node_modules/alu-dock/dist/src/cli.js",
     homePath: "/home/tester",
-    environment: {
-      PATH: "/home/tester/.rvm/gems/ruby-3.1.3/bin:/home/tester/.rvm/rubies/ruby-3.1.3/bin:/home/tester/bin:/usr/bin",
-      GEM_HOME: "/home/tester/.rvm/gems/ruby-3.1.3",
-      GEM_PATH: "/home/tester/.rvm/gems/ruby-3.1.3:/home/tester/.rvm/gems/ruby-3.1.3@global",
-      MY_RUBY_HOME: "/home/tester/.rvm/rubies/ruby-3.1.3",
-      RUBY_VERSION: "ruby-3.1.3",
-      NVM_DIR: "/home/tester/.nvm",
-    },
   });
   for (const expected of [
     ALU_DOCK_GENERATED_MARKER,
     "Type=exec",
-    'ExecStart="/usr/bin/zsh" -c',
-    "source '/home/tester/.config/alu-kanban/env'",
-    "exec '/opt/node/bin/node' '/home/tester/.local/share/alu-dock/node_modules/alu-dock/dist/src/cli.js' serve --managed",
+    'ExecStart="/opt/node/bin/node" "/home/tester/.local/share/alu-dock/node_modules/alu-dock/dist/src/cli.js" serve --managed',
     "Environment=ALU_DOCK_MANAGED=1",
     'Environment="HOME=/home/tester"',
-    'Environment="NVM_DIR=/home/tester/.nvm"',
-    'Environment="GEM_HOME=/home/tester/.rvm/gems/ruby-3.1.3"',
-    'Environment="GEM_PATH=/home/tester/.rvm/gems/ruby-3.1.3:/home/tester/.rvm/gems/ruby-3.1.3@global"',
-    'Environment="MY_RUBY_HOME=/home/tester/.rvm/rubies/ruby-3.1.3"',
-    'Environment="RUBY_VERSION=ruby-3.1.3"',
-    'Environment="PATH=/opt/node/bin:/home/tester/.rvm/gems/ruby-3.1.3/bin:/home/tester/.rvm/rubies/ruby-3.1.3/bin:/home/tester/.rvm/wrappers/default:/home/tester/.rvm/bin:/home/tester/bin:/usr/bin:/home/tester/.cargo/bin:/home/tester/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin:/bin"',
+    'Environment="PATH=/opt/node/bin:/home/tester/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"',
     "Restart=on-failure",
     "RuntimeDirectory=alu-dock",
     "RuntimeDirectoryMode=0700",
@@ -132,6 +117,7 @@ test("generated user unit runs the fixed installed CLI with private state", () =
     "UMask=0077",
     "StandardOutput=journal",
   ]) assert.match(unit, new RegExp(expected.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")));
+  assert.doesNotMatch(unit, /(?:GEM_HOME|GEM_PATH|MY_RUBY_HOME|RUBY_VERSION|NVM_DIR|node_modules\/.bin|alu-kanban\/env)/u);
   assert.match(renderAluDockUnit({ nodePath: "/opt/node%pin/bin/node", cliPath: "/srv/alu%dock/cli.js", homePath: "/home/tester" }), /node%%pin.*alu%%dock/u);
   assert.throws(
     () => renderAluDockUnit({ nodePath: "/opt/node:evil/bin/node", cliPath: "/srv/alu/cli.js", homePath: "/home/tester" }),

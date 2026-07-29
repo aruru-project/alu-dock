@@ -25,6 +25,8 @@ Managed Host 启动时：
 
 Startup 不自动恢复或重放旧 prompt、Queue、interaction、Promise 或 tool effect。
 
+Host unit 只定义 service 自己的固定 Node、CLI、HOME、最小 PATH 和 managed runtime 变量。安装器不得把执行安装时的 PATH、RVM/NVM 选择、npm lifecycle 环境或 Extension 凭据复制进 unit；这些既不是 Host 配置，也不能成为所有 Worker 的全局开发环境。
+
 ## Worker lifecycle
 
 Host 为每个 active instance 创建独立 Worker，并负责：
