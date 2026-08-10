@@ -1687,9 +1687,71 @@ test("manual compaction aborts a running model command without stealing its run 
   assert.ok(events.some((event) => event.type === "compaction.completed" && event.data.operationId === "manual-compact-op"));
 });
 
+test("fresh read and follow remain available while manual compaction is pending", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const controller = new DockClient({ socketPath: harness.socketPath });
+  const created = await controller.create(harness.directory, "manual-compaction-observer", "create-manual-compaction-observer");
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
+  const block = runtime.blockNextCompaction();
+  let blockFinished = false;
+  let subscription: Awaited<ReturnType<DockClient["streamEvents"]>> | undefined;
+  const compacting = controller.compactSession(created.id, undefined, "manual-compaction-observer-op");
 
+  try {
+    await block.entered;
+    const compactionStartDeadline = Date.now() + 2_000;
+    let compactingSnapshot = await controller.status(created.id);
+    while (!compactingSnapshot.compacting && Date.now() < compactionStartDeadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      compactingSnapshot = await controller.status(created.id);
+    }
+    assert.equal(compactingSnapshot.compacting, true);
 
+    const liveEvents: DockEvent[] = [];
+    const observer = new DockClient({ socketPath: harness.socketPath, timeoutMs: 2_000 });
+    const [projection, attached] = await Promise.all([
+      observer.read(created.id, undefined, "conversation_bootstrap"),
+      observer.streamEvents(created.id, {
+        onEvent: (event) => liveEvents.push(event),
+        requireTuiProjection: true,
+        conversationBootstrap: true,
+      }),
+    ]);
+    subscription = attached;
 
+    assert.equal(runtime.isCompacting, true);
+    assert.equal(projection.instance.compacting, true);
+    assert.equal(projection.instance.execution, "running");
+    assert.equal(attached.initial.instance.compacting, true);
+    assert.equal(attached.initial.instance.runtimeGeneration, created.runtimeGeneration);
+
+    const queued = await observer.prompt(created.id, "queued during observed manual compaction", "auto", "manual-compaction-observer-queue");
+    assert.equal(queued.receipt.queued, true);
+    assert.deepEqual(
+      (await observer.read(created.id, undefined, "conversation_bootstrap")).pendingMessages.map((item) => item.operationId),
+      ["manual-compaction-observer-queue"],
+    );
+
+    block.finish();
+    blockFinished = true;
+    const result = await compacting;
+    assert.equal(result.result.summary, "fixture summary");
+    const deadline = Date.now() + 2_000;
+    while (!liveEvents.some((event) => event.type === "compaction.completed") && Date.now() < deadline) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
+    assert.ok(liveEvents.some((event) => event.type === "compaction.completed" && event.data.operationId === "manual-compaction-observer-op"));
+    assert.equal((await observer.status(created.id)).lifecycle, "active");
+    assert.equal(runtime.sessionMutationCalls.compact, 1);
+  } finally {
+    subscription?.close();
+    if (subscription) await subscription.done;
+    if (!blockFinished) block.finish();
+    await compacting.catch(() => {});
+  }
+});
 
 test("closing a client transport scope releases a blocked compaction caller while the Host completes once", async (context) => {
   const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());

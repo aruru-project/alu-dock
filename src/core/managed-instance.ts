@@ -426,6 +426,8 @@ export class ManagedInstance {
   private resolveCompactionStarted: ((started: boolean) => void) | undefined;
   private configurationPending = false;
   private configurationKind: "general" | "navigation" | "compaction" | undefined;
+  /** The current configuration keeps Host-owned committed observation readable while its runtime effect is pending. */
+  private configurationAllowsCommittedReads = false;
   private configurationBoundary: Promise<void> | undefined;
   private resolveConfigurationBoundary: (() => void) | undefined;
   private navigationStartedBoundary: Promise<void> | undefined;
@@ -1200,7 +1202,11 @@ export class ManagedInstance {
   }
 
   async compactSession(operationId: string, customInstructions?: string): Promise<SessionCompactionDto> {
-    await this.beginConfiguration("compacting the session", { admission: "run_preempting", kind: "compaction" });
+    await this.beginConfiguration("compacting the session", {
+      admission: "run_preempting",
+      kind: "compaction",
+      committedProjectionReads: "available",
+    });
     let runtimeCalled = false;
     try {
       this.compactionRequestOperationId = operationId;
@@ -2730,6 +2736,17 @@ export class ManagedInstance {
 
   private async withCommittedProjectionRead<T>(read: () => T): Promise<T> {
     const historyBoundary = this.historyRefreshTail;
+    const readableConfiguration = this.configurationAllowsCommittedReads
+      ? this.configurationBoundary
+      : undefined;
+    if (readableConfiguration !== undefined) {
+      await historyBoundary;
+      if (this.configurationAllowsCommittedReads && this.configurationBoundary === readableConfiguration) {
+        const lifecycle = this.snapshot().lifecycle;
+        if (lifecycle !== "active") throw new InstanceNotActiveError(this.id, lifecycle);
+        return read();
+      }
+    }
     const reservation = this.reserveProjectionGate();
     try {
       await reservation.entered;
@@ -2759,6 +2776,7 @@ export class ManagedInstance {
     options: {
       admission?: "idle" | "live" | "run_preempting";
       kind?: "general" | "navigation" | "compaction";
+      committedProjectionReads?: "isolated" | "available";
     } = {},
   ): Promise<void> {
     const admission = options.admission ?? "idle";
@@ -2788,6 +2806,7 @@ export class ManagedInstance {
     }
     this.configurationPending = true;
     this.configurationKind = kind;
+    this.configurationAllowsCommittedReads = options.committedProjectionReads === "available";
     this.configurationBoundary = new Promise<void>((resolve) => { this.resolveConfigurationBoundary = resolve; });
     if (kind === "navigation") {
       this.navigationStartedBoundary = new Promise<void>((resolve) => { this.resolveNavigationStarted = resolve; });
@@ -2809,6 +2828,7 @@ export class ManagedInstance {
   private endConfiguration(): void {
     const endedManualCompaction = this.configurationKind === "compaction";
     this.configurationPending = false;
+    this.configurationAllowsCommittedReads = false;
     if (this.configurationKind === "navigation") {
       this.resolveNavigationStarted?.();
       this.resolveNavigationStarted = undefined;
