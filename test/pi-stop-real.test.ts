@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { chmod, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { DockClient } from "../src/control/dock-client.js";
+import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
@@ -35,6 +35,9 @@ test("real Protocol stop returns immediately after an idle Pi worker exits (card
   try {
     await host.start();
     const created = await client.create(cwd, "stop real", "stop-real-create");
+    const sessionFile = created.executor.sessionFile;
+    assert.ok(sessionFile);
+    await writeFile(sessionFile, "Pi session evidence\n");
 
     const startedAt = performance.now();
     const result = await client.stop(created.id, "stop-real-operation");
@@ -44,6 +47,11 @@ test("real Protocol stop returns immediately after an idle Pi worker exits (card
     assert.equal(result.instance.execution, "unavailable");
     assert.ok(elapsedMs < 1_000, `stop took ${Math.round(elapsedMs)}ms; expected it to return within one second`);
     assert.equal(processExists(workerPid), false, "stop must reap the Pi worker before reporting stopped");
+    assert.equal(await readFile(sessionFile, "utf8"), "Pi session evidence\n", "stop must preserve the Pi session file");
+    await assert.rejects(
+      client.status(created.id),
+      (error: unknown) => error instanceof ControlClientError && error.code === "not_found",
+    );
   } finally {
     client.closeActiveConnections();
     await host.stop().catch(() => {});

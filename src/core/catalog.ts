@@ -85,6 +85,7 @@ export interface CatalogStore extends CatalogCommitPort {
 export interface InstanceCatalogMutationPort {
   assertWritable(): void;
   commit(record: CatalogInstanceRecord, context: CatalogMutationContext): Promise<void>;
+  retire(context: CatalogMutationContext): Promise<void>;
 }
 
 export class CatalogWriteError extends Error {

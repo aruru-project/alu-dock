@@ -2509,6 +2509,7 @@ export class ManagedInstance {
         this.appendEvent("instance.stopped", { cleanupErrors });
         this.appendStateEvent("stopped");
       },
+      { retire: true },
     ));
 
     const receipt: StopReceipt = {
@@ -2561,6 +2562,7 @@ export class ManagedInstance {
     context: CatalogMutationContext,
     mutate: () => void,
     publish: () => void = () => {},
+    options: { retire?: boolean } = {},
   ): Promise<void> {
     if (this.hostDrainActive) {
       this.catalogPort?.assertWritable();
@@ -2572,7 +2574,10 @@ export class ManagedInstance {
       mutate();
       this.assertWorkingStateInvariant();
       this.refreshDurableSessionFile();
-      if (this.catalogPort) await this.catalogPort.commit(this.catalogRecord(), context);
+      if (this.catalogPort) {
+        if (options.retire) await this.catalogPort.retire(context);
+        else await this.catalogPort.commit(this.catalogRecord(), context);
+      }
     } catch (error) {
       if (context.effect !== "post_effect") this.restoreWorkingCheckpoint(checkpoint);
       throw error;

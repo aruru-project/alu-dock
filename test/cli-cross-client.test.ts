@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { DockClient } from "../src/control/dock-client.js";
+import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 
 interface ChildMessage {
   type?: string;
@@ -102,23 +102,20 @@ test("independent CLI processes reconnect to one delayed host-owned instance", {
 
     const firstStop = await runCliText(socketPath, ["stop", "cross-client"]);
     assert.match(firstStop, /^Stopped /u);
-    assert.equal((await new DockClient({ socketPath }).status(instanceId)).lastRun, "aborted");
-    const secondStop = await runCliText(socketPath, ["stop", instanceId]);
-    assert.match(secondStop, /^Already stopped /u);
+    await assert.rejects(
+      new DockClient({ socketPath }).status(instanceId),
+      (error: unknown) => error instanceof ControlClientError && error.code === "not_found",
+    );
+    assert.match(await runCliFailure(socketPath, ["stop", instanceId]), /No Dock instance matches/u);
 
     const actionableAfterStop = await runCliText(socketPath, ["list"]);
     assert.match(actionableAfterStop, /No actionable Alu Dock instances/u);
-    assert.match(actionableAfterStop, /1 stopped hidden/u);
+    assert.doesNotMatch(actionableAfterStop, /stopped hidden/u);
     assert.doesNotMatch(actionableAfterStop, new RegExp(instanceId.slice(0, 8), "u"));
     const fullAfterStop = await runCliText(socketPath, ["list", "--all"]);
-    assert.match(fullAfterStop, new RegExp(instanceId.slice(0, 8), "u"));
-    assert.match(fullAfterStop, /stopped\/unavailable/u);
+    assert.match(fullAfterStop, /No Alu Dock instances/u);
+    assert.doesNotMatch(fullAfterStop, new RegExp(instanceId.slice(0, 8), "u"));
     assert.match(await runCliFailure(socketPath, ["list", "--stopped"]), /list accepts only --all/u);
-
-    const forgotten = await runCliText(socketPath, ["forget", instanceId]);
-    assert.match(forgotten, /Forgot Dock record/u);
-    assert.match(forgotten, /Pi session files were not deleted/u);
-    assert.deepEqual(await new DockClient({ socketPath }).list(), []);
 
     await runCli(socketPath, ["create", "--cwd", directory, "--name", "duplicate"]);
     await runCli(socketPath, ["create", "--cwd", directory, "--name", "duplicate"]);

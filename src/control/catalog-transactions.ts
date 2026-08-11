@@ -73,6 +73,12 @@ export class CatalogTransactionCoordinator {
         if (record.id !== instanceId) return Promise.reject(new Error("Instance catalog port identity mismatch"));
         return this.replace(record, { ...context, instanceId });
       },
+      retire: async (context) => {
+        const removed = await this.remove(instanceId, { ...context, instanceId }, (record) => {
+          if (record.lifecycle !== "stopping") throw new Error("Only a stopping instance can retire from the catalog");
+        });
+        if (!removed) throw new Error(`Catalog instance is not committed: ${instanceId}`);
+      },
     };
   }
 

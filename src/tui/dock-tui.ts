@@ -1995,6 +1995,17 @@ export async function runDockTui(
 
   function recoverEventSubscription(watched: EventSubscription, streamError: unknown): void {
     if (exiting || subscription !== watched) return;
+    if (instance.lifecycle === "stopped") {
+      eventStreamConnected = false;
+      refreshEditorSubmit();
+      terminal.setProgress(false);
+      status.setConnection("disconnected");
+      runActivity = activityFromSnapshot(instance);
+      activity.setActivity(runActivity);
+      detachTruth = "not_active";
+      tui.requestRender();
+      return;
+    }
     if (eventStreamRecovery) {
       deferredEventStreamFailure = { watched, error: streamError };
       return;

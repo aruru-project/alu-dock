@@ -523,7 +523,7 @@ export class DockHost {
         this.sendSuccessAndEnd(socket, request.requestId, { accepted: true }); return;
       }
       case "instance.stop": {
-        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const receipt=await instance.stop(request.params.operationId);return {receipt:{operationId:receipt.operationId,alreadyStopped:receipt.alreadyStopped,cleanupErrors:receipt.cleanupErrors},instance:instance.snapshot()};});
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const stopped=await this.registry.stop(request.params.instanceId,request.params.operationId);return {receipt:{operationId:stopped.receipt.operationId,alreadyStopped:stopped.receipt.alreadyStopped,cleanupErrors:stopped.receipt.cleanupErrors},instance:stopped.instance};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
       case "command.submit": {

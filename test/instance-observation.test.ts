@@ -49,7 +49,7 @@ async function waitFor(predicate: () => boolean, message: string): Promise<void>
 
 test("instance observation is source-authorized, excludes self, watches once, and cancels", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "alu-dock-observation-"));
-  const ids = ["source-instance", "target-instance", "history-instance"];
+  const ids = ["source-instance", "target-instance"];
   const runtimes: DelayedAgentWorkerConnection[] = [];
   const registry = new DockRegistry(
     async (input) => fixtureInstance(input, runtimes),
@@ -59,8 +59,6 @@ test("instance observation is source-authorized, excludes self, watches once, an
   const source = await registry.create({ operationId: "create-source", cwd, name: "Alu" });
   const ensured = await registry.ensure({ operationId: "create-target", cwd, key: "sol", name: "Sol" });
   const target = registry.get(ensured.instance.id);
-  const history = await registry.create({ operationId: "create-history", cwd, name: "Old work" });
-  await history.stop("stop-history");
 
   assert.equal(registry.observationGrant(source.id), false);
   await assert.rejects(registry.observe(source.id, { type: "list" }), /not granted/u);

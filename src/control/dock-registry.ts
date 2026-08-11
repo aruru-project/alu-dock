@@ -9,7 +9,7 @@ import {
   validateInstanceKey,
 } from "../core/catalog.js";
 import type { InstanceObservationHostPort, ObservationDeliverySink, ObservationRequest, ObservationResult } from "../core/instance-observation.js";
-import { InstanceBusyError, type InstanceLifecycle, type ManagedInstance, type InstanceSnapshot } from "../core/managed-instance.js";
+import { InstanceBusyError, type InstanceLifecycle, type ManagedInstance, type InstanceSnapshot, type StopReceipt } from "../core/managed-instance.js";
 import { CatalogTransactionCoordinator, type CatalogFault, type CatalogHealth } from "./catalog-transactions.js";
 import { InstanceObservationService } from "./instance-observation-service.js";
 import {
@@ -519,6 +519,20 @@ export class DockRegistry implements InstanceObservationHostPort {
     throw new InstanceNotFoundError(instanceId);
   }
 
+  async stop(instanceId: string, operationId: string): Promise<{ receipt: StopReceipt; instance: InstanceSnapshot }> {
+    const instance = this.get(instanceId);
+    const receipt = await instance.stop(operationId);
+    const snapshot = instance.snapshot();
+    if (this.instances.get(instanceId) === instance) {
+      this.instances.delete(instanceId);
+      this.notifyCatalogRemoval([instanceId]);
+      void this.cleanupObservationForForgottenTargets([instanceId]).catch(() => {
+        // Post-retirement in-memory cleanup cannot roll back the stopped receipt.
+      });
+    }
+    return { receipt, instance: snapshot };
+  }
+
   getSnapshot(instanceId: string): InstanceSnapshot {
     this.assertCatalogReady();
     return this.safeSnapshot(this.catalogRecord(instanceId));
@@ -695,7 +709,7 @@ export class DockRegistry implements InstanceObservationHostPort {
   }
 
   async stopAll(): Promise<void> {
-    await Promise.allSettled([...this.instances.values()].map((instance) => instance.stop()));
+    await Promise.allSettled([...this.instances.keys()].map((instanceId) => this.stop(instanceId, randomUUID())));
   }
 
   beginMutationDrain(): void { this.catalog.beginDraining(); }

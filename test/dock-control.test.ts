@@ -844,7 +844,7 @@ test("-c continues the newest current-directory instance and creates one when no
   assert.equal(emptyHarness.registry.list().length, 1);
 });
 
-test("Hub Continue opens current work and History continues a stopped saved session", async (context) => {
+test("Hub Continue opens current work", async (context) => {
   const continueHarness = await createHarness();
   context.after(() => cleanupHarness(continueHarness));
   await continueHarness.host.start();
@@ -877,51 +877,6 @@ test("Hub Continue opens current work and History continues a stopped saved sess
   assert.match(mouseContinueOutput, /Open Work/u);
   assert.match(mouseContinueOutput, /cache /u);
   assertHubPresentation(mouseContinueOutput, "cache ");
-
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-hub-history-"));
-  await chmod(directory, 0o700);
-  const socketPath = join(directory, "dock.sock");
-  let sequence = 0;
-  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd, name, sessionFile }) => {
-    const runtime = new DelayedAgentWorkerConnection(`history-${id}`);
-    if (sessionFile) runtime.sessionFile = sessionFile;
-    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, name, session: runtime });
-  }, () => `history-${++sequence}`, { reopenTargetResolver: { resolve: async () => ({ cwd: directory }) } });
-  const host = new DockHost({ socketPath, registry });
-  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
-  await host.start();
-  const client = new DockClient({ socketPath });
-  const stopped = await client.create(directory, "saved-work");
-  await client.stop(stopped.id);
-
-  const historyPty = await runPtyTui([
-    process.execPath,
-    join(process.cwd(), "dist/src/cli.js"),
-    "--socket", socketPath,
-  ], "hub-history");
-  const historyOutput = Buffer.from(historyPty.output, "base64").toString("utf8");
-  assert.equal(historyPty.timedOut, false, historyOutput.slice(-2_000));
-  assert.equal(historyPty.status, 0, historyOutput.slice(-2_000));
-  assert.match(historyOutput, /Past Dock records/u);
-  assert.match(historyOutput, /Continue saved session/u);
-  assert.match(historyOutput, /Forget history record/u);
-  assert.match(historyOutput, /keep the Pi session file/u);
-  assert.match(historyOutput, /Adopting persisted Pi session/u);
-  assert.match(historyOutput, /cache /u);
-  assert.doesNotMatch(historyOutput, /NIGHT CONSOLE/u);
-  assert.deepEqual(registry.list().map((instance) => instance.lifecycle).sort(), ["active", "stopped"]);
-
-  const forgetPty = await runPtyTui([
-    process.execPath,
-    join(process.cwd(), "dist/src/cli.js"),
-    "--socket", socketPath,
-  ], "hub-history-forget");
-  const forgetOutput = Buffer.from(forgetPty.output, "base64").toString("utf8");
-  assert.equal(forgetPty.timedOut, false, forgetOutput.slice(-2_000));
-  assert.equal(forgetPty.status, 0, forgetOutput.slice(-2_000));
-  assert.match(forgetOutput, /Forgot History record/u);
-  assert.match(forgetOutput, /Pi session files were not deleted/u);
-  assert.deepEqual(registry.list().map((instance) => instance.lifecycle), ["active"]);
 });
 
 test("SSH TUI replays, resizes, handles input, and detaches without stopping", async (context) => {
@@ -1633,17 +1588,21 @@ test("a second client can steer, queue follow-up, and stop idempotently", async 
   assert.equal(dequeued.instance.execution, "running");
   assert.equal(runtime.abortCalls, 0);
 
-  const firstStop = await controller.stop(created.id);
+  const firstStop = await controller.stop(created.id, "retire-stopped-work");
   assert.equal(firstStop.receipt.alreadyStopped, false);
   assert.equal(firstStop.instance.lifecycle, "stopped");
   assert.equal(firstStop.instance.lastRun, "aborted");
   assert.equal(firstStop.instance.pending.total, 0);
 
-  const secondStop = await controller.stop(created.id);
-  assert.equal(secondStop.receipt.alreadyStopped, true);
+  assert.deepEqual(await controller.stop(created.id, "retire-stopped-work"), firstStop);
+  await assert.rejects(
+    controller.status(created.id),
+    (error: unknown) => error instanceof ControlClientError && error.code === "not_found",
+  );
+  assert.equal((await controller.list("all")).some((instance) => instance.id === created.id), false);
   await assert.rejects(
     controller.prompt(created.id, "too late"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "instance_not_active",
+    (error: unknown) => error instanceof ControlClientError && error.code === "not_found",
   );
 });
 
@@ -2010,6 +1969,7 @@ test("stop preempts a manual compaction even before its start event is projected
   context.after(() => cleanupHarness(harness));
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "blocked-compaction", "create-blocked-compaction");
+  const managed = harness.registry.get(created.id);
   const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   const startBlock = runtime.blockNextCompactionStart();
   runtime.blockNextCompaction();
@@ -2037,7 +1997,7 @@ test("stop preempts a manual compaction even before its start event is projected
   assert.equal(stopped.instance.executor.sessionFile, created.executor.sessionFile);
   assert.equal(runtime.abortCalls, 1);
   assert.equal(runtime.disposeCalls, 1);
-  const events = harness.registry.get(created.id).eventsSince().events;
+  const events = managed.eventsSince().events;
   const stopRequested = events.find((event) => event.type === "instance.state_changed" && event.data.reason === "stop_requested");
   const compactionCompleted = events.find((event) => event.type === "compaction.completed");
   assert.equal(compactionCompleted?.type === "compaction.completed" ? compactionCompleted.data.operationId : undefined, "blocked-compact-op");
@@ -3679,7 +3639,7 @@ test("queue and settled commit faults retain the last conservative committed sta
 
 
 
-test("explicit stop commits intent before cleanup and stopped state before response", async (context) => {
+test("explicit stop commits intent before cleanup and retires the record before response", async (context) => {
   const port = new ScriptedCatalogCommitPort();
   const intentGate = port.gateAt(2);
   const finalGate = port.gateAt(4);
@@ -3687,6 +3647,7 @@ test("explicit stop commits intent before cleanup and stopped state before respo
   context.after(() => cleanupHarness(harness));
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, undefined, "create-stop-gate");
+  const managed = harness.registry.get(created.id);
   const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   const stopping = client.stop(created.id, "stop-gated");
   await intentGate.entered;
@@ -3697,12 +3658,13 @@ test("explicit stop commits intent before cleanup and stopped state before respo
   await finalGate.entered;
   assert.equal(runtime.abortCalls, 1);
   assert.equal(runtime.disposeCalls, 1);
-  assert.equal(harness.registry.get(created.id).snapshot().lifecycle, "stopping");
-  assert.equal(harness.registry.get(created.id).eventsSince().events.some((event) => event.type === "instance.stopped"), false);
+  assert.equal(managed.snapshot().lifecycle, "stopping");
+  assert.equal(managed.eventsSince().events.some((event) => event.type === "instance.stopped"), false);
   finalGate.release();
   const stopped = await stopping;
   assert.equal(stopped.instance.lifecycle, "stopped");
-  assert.equal(harness.registry.get(created.id).eventsSince().events.some((event) => event.type === "instance.stopped"), true);
+  assert.equal(managed.eventsSince().events.some((event) => event.type === "instance.stopped"), true);
+  await assert.rejects(client.status(created.id), (error: unknown) => error instanceof ControlClientError && error.code === "not_found");
 });
 
 test("stop commit failures distinguish pre-cleanup rollback from post-cleanup ambiguity", async (context) => {
