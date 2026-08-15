@@ -80,6 +80,7 @@ function instance(id: string, name: string, overrides: Partial<InstanceSnapshot>
     updatedAt: "2026-07-14T00:00:00.000Z",
     eventCursor: { hostEpoch: "epoch", instanceId: id, runtimeGeneration: 1, sequence: 0 },
     ...overrides,
+    displayName: overrides.displayName ?? name,
     compacting: overrides.compacting ?? false,
     executionChangedAt: overrides.executionChangedAt ?? "2026-07-14T00:00:00.000Z",
   };

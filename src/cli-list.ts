@@ -90,8 +90,7 @@ function renderInstance(
   const generation = `g${Math.max(1, Math.floor(instance.runtimeGeneration))}`;
   const base = `${stateIcon(instance)} ${id} ${state} ${generation}`;
   const tags = decisionTags(instance);
-  const sessionName = terminalSafe(instance.name || "(unnamed)");
-  const safeName = instance.key === undefined ? sessionName : `[${terminalSafe(instance.key)}] ${sessionName}`;
+  const safeName = instance.displayName;
   const available = Math.max(1, width - terminalDisplayWidth(base) - 1);
   const tagText = tags.length > 0 ? ` · ${tags.join(" · ")}` : "";
   const includeTags = terminalDisplayWidth(tagText) + 8 <= available;

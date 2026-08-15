@@ -164,7 +164,7 @@ export async function runDockTui(
       terminal.setTitle(terminalSafe(directive.title));
       return;
     }
-    terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
+    terminal.setTitle(`Alu Dock · ${instance.displayName}`);
   };
 
   const clearControllerRouting = (): void => {
@@ -224,7 +224,7 @@ export async function runDockTui(
       replacementBufferedEvents = [event];
       conversation.reset();
       conversation.addNotice("Loading replacement session history…");
-      terminal.setTitle(`Alu Dock · ${terminalSafe(instance.name || instance.id.slice(0, 8))}`);
+      terminal.setTitle(`Alu Dock · ${instance.displayName}`);
       void refreshReplacementProjection(event.runtimeGeneration);
     } else if (event.type === "session.navigated") {
       const token = `${event.runtimeGeneration}:${event.sequence}`;

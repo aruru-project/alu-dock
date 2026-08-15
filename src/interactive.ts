@@ -255,7 +255,7 @@ async function askProjectTrust(cwd: string): Promise<ProjectTrustChoice> {
 }
 
 function displayName(instance: InstanceSnapshot): string {
-  return instance.name ? `${terminalSafe(instance.name)} (${instance.id.slice(0, 8)})` : instance.id.slice(0, 8);
+  return instance.displayName;
 }
 
 function terminalSafe(value: string): string {

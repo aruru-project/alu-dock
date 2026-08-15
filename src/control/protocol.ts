@@ -1,4 +1,5 @@
 import type { InteractionResponse } from "../core/extension-ui-broker.js";
+import { MAX_INSTANCE_DISPLAY_NAME_CHARS } from "../core/instance-display-name.js";
 import {
   validateBuiltInToolPresentation,
   type BuiltInToolPresentation,
@@ -86,6 +87,7 @@ export const GIT_BRANCH_CAPABILITY = "git.branch-footer.v1" as const;
 export const TOOL_RESULT_PRESENTATION_CAPABILITY = "tool-result-presentation.v1" as const;
 export const IMAGE_INPUT_CAPABILITY = "command.images.path.v1" as const;
 export const INSTANCE_KEYS_CAPABILITY = "instance.keys.v1" as const;
+export const INSTANCE_DISPLAY_NAME_CAPABILITY = "instance.display-name.v1" as const;
 export const CONVERSATION_CONTENT_CAPABILITY = "conversation.content.v1" as const;
 
 export const IMPLEMENTED_CAPABILITIES = [
@@ -107,6 +109,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "host.info",
   "instance.catalog",
   INSTANCE_KEYS_CAPABILITY,
+  INSTANCE_DISPLAY_NAME_CAPABILITY,
   "models.v1",
   "projection.completeness.v1",
   "queue.control.v1",
@@ -320,7 +323,7 @@ export function requiredCapabilities(capability: Capability): string[] {
   return [...new Set<Capability>([
     "core.v2",
     ...(capability === EVENTS_FOLLOW_CAPABILITY ? [INSTANCE_READ_CAPABILITY] : []),
-    ...(capabilityProjectsInstanceSnapshot(capability) ? [TOOLS_EXPANDED_CAPABILITY, GIT_BRANCH_CAPABILITY, INSTANCE_KEYS_CAPABILITY] : []),
+    ...(capabilityProjectsInstanceSnapshot(capability) ? [TOOLS_EXPANDED_CAPABILITY, GIT_BRANCH_CAPABILITY, INSTANCE_KEYS_CAPABILITY, INSTANCE_DISPLAY_NAME_CAPABILITY] : []),
     ...(capabilityProjectsToolResults(capability) ? [TOOL_RESULT_PRESENTATION_CAPABILITY] : []),
     capability,
   ])];
@@ -337,6 +340,7 @@ function capabilityProjectsInstanceSnapshot(capability: Capability): boolean {
   return capability === TOOLS_EXPANDED_CAPABILITY
     || capability === GIT_BRANCH_CAPABILITY
     || capability === INSTANCE_KEYS_CAPABILITY
+    || capability === INSTANCE_DISPLAY_NAME_CAPABILITY
     || capability === CONVERSATION_CONTENT_CAPABILITY
     || capability === EVENTS_FOLLOW_CAPABILITY
     || capability === INSTANCE_READ_CAPABILITY
@@ -1323,9 +1327,9 @@ function parseMetrics(input: unknown, field: string): NonNullable<InstanceSnapsh
   return result;
 }
 function parseInstance(input: unknown, field: string): InstanceSnapshot {
-  const value = object(input, field); exact(value, ["id", "creationOperationId", "key", "name", "cwd", "gitBranch", "lifecycle", "execution", "compacting", "lastRun", "reopenable", "runtimeGeneration", "ownerHostEpoch", "interruption", "pending", "executor", "metrics", "extensionStatus", "toolsExpanded", "activeInteraction", "activeCommandId", "lastError", "createdAt", "updatedAt", "executionChangedAt", "runStartedAt", "eventCursor"]);
+  const value = object(input, field); exact(value, ["id", "creationOperationId", "key", "name", "displayName", "cwd", "gitBranch", "lifecycle", "execution", "compacting", "lastRun", "reopenable", "runtimeGeneration", "ownerHostEpoch", "interruption", "pending", "executor", "metrics", "extensionStatus", "toolsExpanded", "activeInteraction", "activeCommandId", "lastError", "createdAt", "updatedAt", "executionChangedAt", "runStartedAt", "eventCursor"]);
   const snapshot: InstanceSnapshot = {
-    id: id(value.id, `${field}.id`), creationOperationId: id(value.creationOperationId, `${field}.creationOperationId`), key: optionalString(value.key, `${field}.key`, MAX_INSTANCE_KEY_CHARS), name: optionalString(value.name, `${field}.name`, MAX_INSTANCE_NAME_CHARS), cwd: string(value.cwd, `${field}.cwd`, MAX_CONTROL_CWD_CHARS), gitBranch: value.gitBranch === undefined ? undefined : gitBranch(value.gitBranch, `${field}.gitBranch`),
+    id: id(value.id, `${field}.id`), creationOperationId: id(value.creationOperationId, `${field}.creationOperationId`), key: optionalString(value.key, `${field}.key`, MAX_INSTANCE_KEY_CHARS), name: optionalString(value.name, `${field}.name`, MAX_INSTANCE_NAME_CHARS), displayName: instanceDisplayName(value.displayName, `${field}.displayName`), cwd: string(value.cwd, `${field}.cwd`, MAX_CONTROL_CWD_CHARS), gitBranch: value.gitBranch === undefined ? undefined : gitBranch(value.gitBranch, `${field}.gitBranch`),
     lifecycle: enumeration(value.lifecycle, `${field}.lifecycle`, ["active", "stopping", "stopped", "host_lost", "runtime_error"]), execution: enumeration(value.execution, `${field}.execution`, ["idle", "running", "failed", "unavailable"]), compacting: boolean(value.compacting, `${field}.compacting`), lastRun: enumeration(value.lastRun, `${field}.lastRun`, ["never", "succeeded", "failed", "aborted", "interrupted"]), reopenable: boolean(value.reopenable, `${field}.reopenable`), runtimeGeneration: positive(value.runtimeGeneration, `${field}.runtimeGeneration`), ownerHostEpoch: optionalString(value.ownerHostEpoch, `${field}.ownerHostEpoch`, 128), pending: parsePending(value.pending, `${field}.pending`), executor: parseExecutor(value.executor, `${field}.executor`), metrics: value.metrics === undefined ? undefined : parseMetrics(value.metrics, `${field}.metrics`), extensionStatus: {}, toolsExpanded: boolean(value.toolsExpanded, `${field}.toolsExpanded`), activeCommandId: optionalString(value.activeCommandId, `${field}.activeCommandId`, 128), lastError: optionalString(value.lastError, `${field}.lastError`, MAX_MESSAGE), createdAt: timestamp(value.createdAt, `${field}.createdAt`), updatedAt: timestamp(value.updatedAt, `${field}.updatedAt`), executionChangedAt: timestamp(value.executionChangedAt, `${field}.executionChangedAt`), ...(value.runStartedAt === undefined ? {} : { runStartedAt: timestamp(value.runStartedAt, `${field}.runStartedAt`) }), eventCursor: parseCursor(value.eventCursor, `${field}.eventCursor`),
   };
   if (value.interruption !== undefined) { const interruption = object(value.interruption, `${field}.interruption`); exact(interruption, ["reason", "at"]); snapshot.interruption = { reason: enumeration(interruption.reason, "interruption.reason", ["host_crash", "host_shutdown", "replacement_failed"]), at: timestamp(interruption.at, "interruption.at") }; }
@@ -1360,7 +1364,7 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
   const optionalText = (key: string, max = MAX_TEXT): string | undefined => optionalString(data[key], `${field}.${key}`, max);
   const levels = (key: string): ThinkingLevel[] => thinkingLevels(data[key]);
   switch (type) {
-    case "instance.created": exact(data, ["cwd", "name", "executor"]); return { cwd: text("cwd", MAX_CONTROL_CWD_CHARS), name: optionalText("name", MAX_INSTANCE_NAME_CHARS), executor: parseExecutor(data.executor, `${field}.executor`) };
+    case "instance.created": exact(data, ["cwd", "name", "displayName", "executor"]); return { cwd: text("cwd", MAX_CONTROL_CWD_CHARS), name: optionalText("name", MAX_INSTANCE_NAME_CHARS), displayName: instanceDisplayName(data.displayName, `${field}.displayName`), executor: parseExecutor(data.executor, `${field}.executor`) };
     case "instance.state_changed": exact(data, ["reason", "lifecycle", "execution", "compacting", "lastRun", "pending", "activeCommandId", "lastError"]); { const result = { reason: text("reason", MAX_MESSAGE), lifecycle: enumeration(data.lifecycle, "lifecycle", ["active", "stopping", "stopped", "host_lost", "runtime_error"]), execution: enumeration(data.execution, "execution", ["idle", "running", "failed", "unavailable"]), compacting: boolean(data.compacting, "compacting"), lastRun: enumeration(data.lastRun, "lastRun", ["never", "succeeded", "failed", "aborted", "interrupted"]), pending: parsePending(data.pending, `${field}.pending`), activeCommandId: optionalText("activeCommandId", 128), lastError: optionalText("lastError", MAX_MESSAGE) }; if (result.activeCommandId && result.execution !== "running") throw validation("invalid_response", "state event activeCommandId requires running"); if (result.compacting && result.execution !== "running") throw validation("invalid_response", "state event compacting requires running"); return result; }
     case "instance.reopened": exact(data, ["previousLifecycle", "sessionFile", "runtimeGeneration"]); return { previousLifecycle: enumeration(data.previousLifecycle, "previousLifecycle", ["host_lost", "runtime_error"]), sessionFile: text("sessionFile", MAX_CONTROL_CWD_CHARS), runtimeGeneration: positive(data.runtimeGeneration, "runtimeGeneration") };
     case "instance.stopped": exact(data, ["cleanupErrors"]); return { cleanupErrors: strings(data.cleanupErrors, "cleanupErrors", 100, MAX_MESSAGE) };
@@ -1402,9 +1406,9 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "queue.cleared": exact(data, ["steering", "followUp", "total", "queueItemIds", "reason"]); return { ...parsePending({ steering: data.steering, followUp: data.followUp, total: data.total }, field), queueItemIds: strings(data.queueItemIds, `${field}.queueItemIds`, MAX_PENDING_QUEUE_ITEMS, 128), reason: enumeration(data.reason, `${field}.reason`, ["dequeued", "abort", "stop", "replacement", "host_draining"]) };
     case "compaction.started": exact(data, ["reason", "operationId"]); return { reason: enumeration(data.reason, "reason", ["manual", "threshold", "overflow"]), operationId: optionalText("operationId", 128) };
     case "compaction.completed": exact(data, ["reason", "operationId", "aborted", "willRetry", "error"]); return { reason: enumeration(data.reason, "reason", ["manual", "threshold", "overflow"]), operationId: optionalText("operationId", 128), aborted: boolean(data.aborted, "aborted"), willRetry: boolean(data.willRetry, "willRetry"), error: optionalText("error", MAX_MESSAGE) };
-    case "session.replaced": exact(data, ["reason", "previousSessionFile", "sessionFile", "runtimeGeneration", "cwd", "piSessionId", "name", "gitBranch"]); return { reason: enumeration(data.reason, "reason", ["new", "resume", "fork", "reload"]), previousSessionFile: optionalText("previousSessionFile", MAX_CONTROL_CWD_CHARS), sessionFile: optionalText("sessionFile", MAX_CONTROL_CWD_CHARS), runtimeGeneration: positive(data.runtimeGeneration, "runtimeGeneration"), cwd: text("cwd", MAX_CONTROL_CWD_CHARS), piSessionId: text("piSessionId", 128), name: optionalText("name", MAX_INSTANCE_NAME_CHARS), gitBranch: data.gitBranch === undefined ? undefined : gitBranch(data.gitBranch, `${field}.gitBranch`) };
+    case "session.replaced": exact(data, ["reason", "previousSessionFile", "sessionFile", "runtimeGeneration", "cwd", "piSessionId", "name", "displayName", "gitBranch"]); return { reason: enumeration(data.reason, "reason", ["new", "resume", "fork", "reload"]), previousSessionFile: optionalText("previousSessionFile", MAX_CONTROL_CWD_CHARS), sessionFile: optionalText("sessionFile", MAX_CONTROL_CWD_CHARS), runtimeGeneration: positive(data.runtimeGeneration, "runtimeGeneration"), cwd: text("cwd", MAX_CONTROL_CWD_CHARS), piSessionId: text("piSessionId", 128), name: optionalText("name", MAX_INSTANCE_NAME_CHARS), displayName: instanceDisplayName(data.displayName, `${field}.displayName`), gitBranch: data.gitBranch === undefined ? undefined : gitBranch(data.gitBranch, `${field}.gitBranch`) };
     case "session.navigated": exact(data, ["targetId", "leafId", "treeRevision", "summaryCreated"]); return { targetId: text("targetId", 128), leafId: optionalText("leafId", 128), treeRevision: text("treeRevision", 128), summaryCreated: boolean(data.summaryCreated, "summaryCreated") };
-    case "session.info_changed": exact(data, ["name"]); return { name: optionalText("name", MAX_INSTANCE_NAME_CHARS) };
+    case "session.info_changed": exact(data, ["name", "displayName"]); return { name: optionalText("name", MAX_INSTANCE_NAME_CHARS), displayName: instanceDisplayName(data.displayName, `${field}.displayName`) };
     case "session.metrics_changed": exact(data, ["metrics"]); return { metrics: parseMetrics(data.metrics, `${field}.metrics`) };
     case "git.branch_changed": exact(data, ["branch"]); return data.branch === undefined ? {} : { branch: gitBranch(data.branch, `${field}.branch`) };
     case "model.changed": exact(data, ["provider", "id", "thinkingLevel", "availableThinkingLevels"]); return { provider: text("provider", MAX_MODEL_PROVIDER_CHARS), id: text("id", MAX_MODEL_ID_CHARS), thinkingLevel: enumeration(data.thinkingLevel, "thinkingLevel", THINKING_LEVELS), availableThinkingLevels: levels("availableThinkingLevels") };
@@ -1574,6 +1578,14 @@ function extensionKey(input: unknown, field: string): string {
   const key = payloadFreeString(input, field, 128);
   if (key === "__proto__" || key === "prototype" || key === "constructor") throw validation("invalid_response", `${field} is unsafe`);
   return key;
+}
+
+function instanceDisplayName(input: unknown, field: string): string {
+  const value = string(input, field, MAX_INSTANCE_DISPLAY_NAME_CHARS);
+  if (!/^[\p{L}\p{M}\p{N}_-]+(?: [\p{L}\p{M}\p{N}_-]+)*$/u.test(value)) {
+    throw validation("invalid_response", `${field} must be a canonical safe display name`);
+  }
+  return value;
 }
 
 function gitBranch(input: unknown, field: string): string {

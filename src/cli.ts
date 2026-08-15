@@ -609,12 +609,7 @@ function writeJson(value: unknown): void {
 }
 
 function displayInstance(instance: InstanceSnapshot): string {
-  const name = instance.name
-    ?.replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ")
-    .replace(/[\u202a-\u202e\u2066-\u2069\ufeff]/gu, " ")
-    .replace(/\s+/gu, " ")
-    .trim();
-  return name ? `${name} (${instance.id})` : instance.id;
+  return instance.displayName;
 }
 
 function isMachineInvocation(args: readonly string[]): boolean {

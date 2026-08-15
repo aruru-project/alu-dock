@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { createConnection, type Socket } from "node:net";
 import { resolve } from "node:path";
 import type { InteractionResponse } from "../core/extension-ui-broker.js";
+import { projectInstanceDisplayName } from "../core/instance-display-name.js";
 import type { DeliveryMode, DockEvent, EventCursor, ImagePathDto, InstanceSnapshot } from "../core/managed-instance.js";
 import type { ThinkingLevel } from "../core/agent-worker.js";
 import type { SettingUpdate } from "../core/config-projection.js";
@@ -21,6 +22,7 @@ import {
   EXTENSION_UI_CONTROL_CAPABILITY,
   IMAGE_INPUT_CAPABILITY,
   INSTANCE_KEYS_CAPABILITY,
+  INSTANCE_DISPLAY_NAME_CAPABILITY,
   CONVERSATION_CONTENT_CAPABILITY,
   type Capability,
   type ClientHello,
@@ -180,7 +182,7 @@ export class DockClient {
       if (!(error instanceof ControlClientError)
         || (error.code !== "capability_missing"
           && (error.code !== "protocol_incompatible"
-            || (![TOOLS_EXPANDED_CAPABILITY, GIT_BRANCH_CAPABILITY, INSTANCE_KEYS_CAPABILITY].some((capability) => error.message.includes(capability)))))) throw error;
+            || (![TOOLS_EXPANDED_CAPABILITY, GIT_BRANCH_CAPABILITY, INSTANCE_KEYS_CAPABILITY, INSTANCE_DISPLAY_NAME_CAPABILITY].some((capability) => error.message.includes(capability)))))) throw error;
       // Safe read-only bridge used by staged releases to inspect the previous
       // Host before apply. No request was sent when capability negotiation failed.
       return this.request("instance.list", params, "instance.catalog", parseLegacyListResult, undefined, this.timeoutFor("instance.list"), true);
@@ -316,7 +318,7 @@ export class DockClient {
   private request<TType extends ControlRequest["type"],T>(type:TType,params:Params<TType>,capability:Capability|readonly Capability[],parse:Parser<T>,onHello?:(ack:HelloAck)=>void,requestTimeoutMs=this.timeoutFor(type),legacySnapshotCompatibility=false):Promise<T>{
     const helloId=this.createRequestId();
     const requestCapabilities=[...new Set((Array.isArray(capability)?capability:[capability]).flatMap((item)=>requiredCapabilities(item)))]
-      .filter((item) => !legacySnapshotCompatibility || (item !== TOOLS_EXPANDED_CAPABILITY && item !== GIT_BRANCH_CAPABILITY && item !== INSTANCE_KEYS_CAPABILITY));
+      .filter((item) => !legacySnapshotCompatibility || (item !== TOOLS_EXPANDED_CAPABILITY && item !== GIT_BRANCH_CAPABILITY && item !== INSTANCE_KEYS_CAPABILITY && item !== INSTANCE_DISPLAY_NAME_CAPABILITY));
     const requestId=this.createRequestId();
     const request={kind:"request",version:2,requestId,type,params} as Extract<ControlRequest,{type:TType}>;
     const operationId = "operationId" in params && typeof params.operationId === "string" ? params.operationId : undefined;
@@ -394,7 +396,19 @@ function parseLegacyListResult(input: unknown): ListResult {
     instances: source.instances.map((instance) => {
       if (instance === null || typeof instance !== "object" || Array.isArray(instance)) return instance;
       const snapshot = instance as Record<string, unknown>;
-      return "toolsExpanded" in snapshot ? snapshot : { ...snapshot, toolsExpanded: false };
+      return {
+        ...snapshot,
+        ...(typeof snapshot.displayName === "string" ? {} : {
+          // This adapter is only for a staged read from the immediately previous
+          // Host. Normal clients consume the Host-owned projection directly.
+          displayName: projectInstanceDisplayName({
+            name: typeof snapshot.name === "string" ? snapshot.name : undefined,
+            key: typeof snapshot.key === "string" ? snapshot.key : undefined,
+            cwd: typeof snapshot.cwd === "string" ? snapshot.cwd : "",
+          }),
+        }),
+        ...(typeof snapshot.toolsExpanded === "boolean" ? {} : { toolsExpanded: false }),
+      };
     }),
   });
 }

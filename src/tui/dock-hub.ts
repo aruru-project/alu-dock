@@ -12,7 +12,6 @@ import { resolve } from "node:path";
 
 import type { DockClient } from "../control/dock-client.js";
 import type { InstanceSnapshot, SessionDto } from "../core/managed-instance.js";
-import { uniqueInstanceIdPrefix } from "../human-target.js";
 import { AluHubBrand } from "./alu-mascot.js";
 import { mouseTrackingSequences, parseTerminalMouseEvent } from "./mouse-input.js";
 import { paint, selectListTheme } from "./theme.js";
@@ -178,7 +177,7 @@ async function chooseContinueAction(
   const visible = ordered.slice(0, MAX_HUB_INSTANCES);
   const entries: DockHubEntry[] = visible.map((instance) => ({
     value: `instance:${instance.id}`,
-    label: `${stateIcon(instance)} ${instanceDisplayLabel(instance, "(unnamed)")} [${uniqueInstanceIdPrefix(instance, instances)}]`,
+    label: `${stateIcon(instance)} ${displayName(instance)}`,
     description: `${terminalSafe(instance.cwd)} · ${instance.lifecycle}/${instance.execution} · ${instanceActionSummary(instance)}`,
   }));
   if (ordered.length > visible.length) {
@@ -198,7 +197,7 @@ async function chooseContinueAction(
   );
   if (!selected || selected === BACK || selected === MORE_INSTANCES) return undefined;
   const instance = instances.find((candidate) => candidate.id === selected.slice("instance:".length));
-  return instance ? chooseInstanceAction(terminal, client, instance, instances) : undefined;
+  return instance ? chooseInstanceAction(terminal, client, instance) : undefined;
 }
 
 async function chooseHistoryAction(
@@ -213,7 +212,7 @@ async function chooseHistoryAction(
   const visible = ordered.slice(0, MAX_HUB_INSTANCES);
   const entries: DockHubEntry[] = visible.map((instance) => ({
     value: `history:${instance.id}`,
-    label: `${instanceDisplayLabel(instance, "(unnamed)")} [${uniqueInstanceIdPrefix(instance, instances)}]`,
+    label: displayName(instance),
     description: `${terminalSafe(instance.cwd)} · ${instance.lifecycle} · ${instance.executor.sessionFile ? "saved Pi session" : "no saved Pi session"} · ${instance.updatedAt}`,
   }));
   if (ordered.length > visible.length) {
@@ -242,7 +241,6 @@ async function chooseHistoryRecordAction(
   record: InstanceSnapshot,
   instances: readonly InstanceSnapshot[],
 ): Promise<DockHubAction | undefined> {
-  const shortId = uniqueInstanceIdPrefix(record, instances);
   const sessionFile = record.lifecycle === "stopped" ? record.executor.sessionFile : undefined;
   const linked = sessionFile
     ? instances
@@ -268,7 +266,7 @@ async function chooseHistoryRecordAction(
   entries.push({ value: BACK, label: "Back to History", description: "no change" });
   const selected = await selectMenu(
     terminal,
-    `${instanceDisplayLabel(record, "Dock history")} [${shortId}]`,
+    displayName(record),
     `${terminalSafe(record.cwd)} · ${record.lifecycle}`,
     entries,
     "↑↓ choose · Enter confirm · Esc back",
@@ -276,7 +274,7 @@ async function chooseHistoryRecordAction(
   if (!selected || selected === BACK) return undefined;
   if (selected === "forget") {
     await client.forget(record.id);
-    terminal.write(`Forgot History record ${shortId}; Pi session files were not deleted.\n`);
+    terminal.write(`Forgot History record ${displayName(record)}; Pi session files were not deleted.\n`);
     return undefined;
   }
 
@@ -299,9 +297,7 @@ async function chooseInstanceAction(
   terminal: HubProcessTerminal,
   client: DockClient,
   instance: InstanceSnapshot,
-  universe: readonly InstanceSnapshot[],
 ): Promise<DockHubAction | undefined> {
-  const shortId = uniqueInstanceIdPrefix(instance, universe);
   const entries: DockHubEntry[] = [];
   if (instance.lifecycle === "active") {
     entries.push({ value: "attach", label: "Open Work", description: "view and continue this work here" });
@@ -313,7 +309,7 @@ async function chooseInstanceAction(
   entries.push({ value: BACK, label: "Back to Continue", description: "no change" });
   const selected = await selectMenu(
     terminal,
-    `${instanceDisplayLabel(instance, "Dock instance")} [${shortId}]`,
+    displayName(instance),
     `${instance.lifecycle}/${instance.execution} · ${terminalSafe(instance.cwd)}`,
     entries,
     "↑↓ choose · Enter confirm · Esc back",
@@ -328,7 +324,7 @@ async function chooseInstanceAction(
   }
   if (selected === "forget") {
     await client.forget(instance.id);
-    terminal.write(`Forgot Dock record ${shortId}; Pi session files were not deleted.\n`);
+    terminal.write(`Forgot Dock record ${displayName(instance)}; Pi session files were not deleted.\n`);
   }
   return undefined;
 }
@@ -708,14 +704,8 @@ function terminalSafe(value: string): string {
     .trim() || "—";
 }
 
-function instanceDisplayLabel(instance: InstanceSnapshot, fallback: string): string {
-  const name = terminalSafe(instance.name || fallback);
-  return instance.key === undefined ? name : `[${terminalSafe(instance.key)}] ${name}`;
-}
-
 function displayName(instance: InstanceSnapshot): string {
-  const identity = instance.name ? `${terminalSafe(instance.name)} (${instance.id.slice(0, 8)})` : instance.id.slice(0, 8);
-  return instance.key === undefined ? identity : `[${terminalSafe(instance.key)}] ${identity}`;
+  return instance.displayName;
 }
 
 function errorMessage(error: unknown): string {

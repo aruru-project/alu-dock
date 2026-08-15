@@ -75,6 +75,7 @@ import {
   GIT_BRANCH_CAPABILITY,
   IMAGE_INPUT_CAPABILITY,
   INSTANCE_KEYS_CAPABILITY,
+  INSTANCE_DISPLAY_NAME_CAPABILITY,
   CONTROLLER_DIRECTIVES_CAPABILITY,
   PERSISTENT_INTERACTIONS_CAPABILITY,
   EXTENSION_UI_CONTROL_CAPABILITY,
@@ -587,6 +588,7 @@ export class DockHost {
       toolsExpanded: requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,
       gitBranch: requirements?.has(GIT_BRANCH_CAPABILITY)===true,
       instanceKeys: requirements?.has(INSTANCE_KEYS_CAPABILITY)===true,
+      instanceDisplayName: requirements?.has(INSTANCE_DISPLAY_NAME_CAPABILITY)===true,
       toolPresentation: requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,
       images: requirements?.has(IMAGE_INPUT_CAPABILITY)===true,
       controllerDirectives: requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true,
@@ -731,7 +733,7 @@ export class DockHost {
     for (const socket of streams) socket.destroy();
   }
 
-  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const requirements=this.connectionRequirements.get(socket);const projected=projectForClient(result,{toolsExpanded:requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,gitBranch:requirements?.has(GIT_BRANCH_CAPABILITY)===true,instanceKeys:requirements?.has(INSTANCE_KEYS_CAPABILITY)===true,toolPresentation:requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,images:requirements?.has(IMAGE_INPUT_CAPABILITY)===true,controllerDirectives:requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true,persistentInteractions:requirements?.has(PERSISTENT_INTERACTIONS_CAPABILITY)===true});const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,projected));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
+  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const requirements=this.connectionRequirements.get(socket);const projected=projectForClient(result,{toolsExpanded:requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,gitBranch:requirements?.has(GIT_BRANCH_CAPABILITY)===true,instanceKeys:requirements?.has(INSTANCE_KEYS_CAPABILITY)===true,instanceDisplayName:requirements?.has(INSTANCE_DISPLAY_NAME_CAPABILITY)===true,toolPresentation:requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,images:requirements?.has(IMAGE_INPUT_CAPABILITY)===true,controllerDirectives:requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true,persistentInteractions:requirements?.has(PERSISTENT_INTERACTIONS_CAPABILITY)===true});const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,projected));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
   private sendErrorAndEnd(socket:Socket,code:string,message:string,requestId:string,details?:JsonObject,retryable=false):void { if(socket.destroyed||socket.writableEnded)return;const response:ControlResponse={kind:"response",version:2,requestId,hostEpoch:this.hostEpoch,ok:false,error:{code,message:truncateMessage(message),retryable,...(details===undefined?{}:{details})}};if(endEnvelope(socket,response)==="too_large")socket.destroy(); }
   private sendHelloError(socket:Socket,requestId:string,code:HelloError["error"]["code"],message:string,details:{hostVersions?:number[];missing?:string[];retryAfterMs?:number}={}):void { if(socket.destroyed||socket.writableEnded)return;const envelope:HelloError={kind:"hello_error",requestId,error:{code,message:truncateMessage(message),...details}};try{socket.end(encodeJsonLine(envelope));}catch{socket.destroy();} }
 }
@@ -868,6 +870,7 @@ interface ClientProjectionCapabilities {
   toolsExpanded: boolean;
   gitBranch: boolean;
   instanceKeys: boolean;
+  instanceDisplayName: boolean;
   toolPresentation: boolean;
   images: boolean;
   controllerDirectives: boolean;
@@ -880,6 +883,7 @@ function controllerEventProjectionCapabilities(controllerId: string): ClientProj
     toolsExpanded: false,
     gitBranch: false,
     instanceKeys: false,
+    instanceDisplayName: false,
     toolPresentation: false,
     images: true,
     controllerDirectives: true,
@@ -938,6 +942,7 @@ function projectForClient(
     if (isSnapshot && key === "toolsExpanded" && !capabilities.toolsExpanded) continue;
     if (isSnapshot && key === "gitBranch" && !capabilities.gitBranch) continue;
     if (isSnapshot && key === "key" && !capabilities.instanceKeys) continue;
+    if (isSnapshot && key === "displayName" && !capabilities.instanceDisplayName) continue;
     if (isSnapshot && key === "activeInteraction" && !capabilities.persistentInteractions) continue;
     if (key === "presentation" && !capabilities.toolPresentation && (context === "tool-event-data" || isToolResultBlock)) continue;
     if (key === "images" && !capabilities.images && imageInputContext) continue;
@@ -951,11 +956,17 @@ function projectForClient(
         .map((event) => projectForClient(event, capabilities, "event"));
       continue;
     }
-    if (eventType === "session.replaced" && key === "data" && !capabilities.gitBranch && child !== null && typeof child === "object" && !Array.isArray(child)) {
-      const data = { ...(child as Record<string, unknown>) };
-      delete data.gitBranch;
-      projected[key] = projectForClient(data, capabilities, "generic");
-      continue;
+    if (key === "data" && child !== null && typeof child === "object" && !Array.isArray(child)) {
+      const hidesGitBranch = eventType === "session.replaced" && !capabilities.gitBranch;
+      const hidesDisplayName = !capabilities.instanceDisplayName
+        && (eventType === "instance.created" || eventType === "session.replaced" || eventType === "session.info_changed");
+      if (hidesGitBranch || hidesDisplayName) {
+        const data = { ...(child as Record<string, unknown>) };
+        if (hidesGitBranch) delete data.gitBranch;
+        if (hidesDisplayName) delete data.displayName;
+        projected[key] = projectForClient(data, capabilities, "generic");
+        continue;
+      }
     }
     let childContext: ClientProjectionContext = "generic";
     if (context === "root" && key === "page") childContext = "root";

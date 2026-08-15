@@ -7,6 +7,7 @@ import {
   selectHumanInstanceList,
   terminalDisplayWidth,
 } from "../src/cli-list.js";
+import { projectInstanceDisplayName } from "../src/core/instance-display-name.js";
 import type { InstanceSnapshot } from "../src/core/managed-instance.js";
 
 test("human list has an actionable empty state", () => {
@@ -64,8 +65,8 @@ test("human list orders decision-relevant state and omits machine-only snapshot 
   assert.ok(output.indexOf(idle.id.slice(0, 8)) < output.indexOf(recoverable.id.slice(0, 8)));
   assert.ok(output.indexOf(recoverable.id.slice(0, 8)) < output.indexOf(stopped.id.slice(0, 8)));
   for (const expected of [
-    "active [2J run", "active/running", "g7", "openai-codex/gpt-test", "pending 2",
-    "host_lost/unavailable", "reopenable", "/workspace/project-1", "[alu] idle",
+    "active 2J run", "active/running", "g7", "openai-codex/gpt-test", "pending 2",
+    "host_lost/unavailable", "reopenable", "/workspace/project-1", "idle",
   ]) assert.match(output, new RegExp(escapeRegExp(expected), "u"));
   assert.doesNotMatch(output, /\u001b/u);
   for (const secret of [
@@ -159,6 +160,11 @@ function instance(index: number, overrides: Partial<InstanceSnapshot> = {}): Ins
       sequence: 999_999,
     },
     ...overrides,
+    displayName: overrides.displayName ?? projectInstanceDisplayName({
+      name: overrides.name ?? `instance ${index}`,
+      key: overrides.key,
+      cwd: overrides.cwd ?? `/workspace/project-${index}`,
+    }),
     compacting: overrides.compacting ?? false,
     executionChangedAt: overrides.executionChangedAt ?? "2026-01-01T00:00:00.000Z",
   };

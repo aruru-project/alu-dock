@@ -18,7 +18,7 @@ Work TUI ─────── Protocol V2 ──────── Host session
 
 Hub 的主要对象是 Dock instance。它提供 New、Continue、History、persisted sessions 和 Leave 等入口，但打开 Hub 本身不创建 runtime。
 
-Hub 使用 alternate screen；进入 Work 或离开前恢复 shell screen。Instance lifecycle 和 persisted-session inventory 来自 Host，不由 TUI 自己扫描 runtime。
+Hub 使用 alternate screen；进入 Work 或离开前恢复 shell screen。Instance lifecycle 和 persisted-session inventory 来自 Host，不由 TUI 自己扫描 runtime。Hub 直接渲染 Protocol V2 的 `displayName`；缺少 session name/key 时的 cwd fallback 与安全清洗由 Host 统一完成，Hub 不再把短 instance ID 当作默认名称。
 
 ## Session Work
 

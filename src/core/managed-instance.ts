@@ -64,6 +64,7 @@ import type {
   ThinkingLevel,
 } from "./agent-worker.js";
 import { sliceSemanticHistory } from "./history-pagination.js";
+import { projectInstanceDisplayName } from "./instance-display-name.js";
 import {
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
@@ -510,6 +511,7 @@ export class ManagedInstance {
       this.appendEvent("instance.created", {
         cwd: this.cwd,
         name: this.name,
+        displayName: this.projectedDisplayName(),
         executor: this.executorIdentity,
       });
     }
@@ -741,12 +743,17 @@ export class ManagedInstance {
     await this.disposeRuntimeOnce();
   }
 
+  private projectedDisplayName(): string {
+    return projectInstanceDisplayName({ name: this.name, key: this.key, cwd: this.cwd });
+  }
+
   private workingSnapshot(): InstanceSnapshot {
     return {
       id: this.id,
       creationOperationId: this.creationOperationId,
       key: this.key,
       name: this.name,
+      displayName: this.projectedDisplayName(),
       cwd: this.cwd,
       gitBranch: this.gitBranchValue,
       lifecycle: this.state.lifecycle,
@@ -3179,7 +3186,7 @@ export class ManagedInstance {
         this.nextEventSequence = 1;
         this.eventLog.length = 0;
         this.activeConversationEvents.length = 0;
-        this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue, gitBranch: this.gitBranchValue });
+        this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue, displayName: this.projectedDisplayName(), gitBranch: this.gitBranchValue });
         if (replacedQueue.total > 0) this.appendEvent("queue.cleared", { ...replacedQueue, reason: "replacement" });
       });
       void this.extensionUi.completeGenerationChange();
@@ -3190,7 +3197,7 @@ export class ManagedInstance {
       await this.commitCatalogTransition(context("session.name"), () => {
         this.nameValue = name;
         this.touch();
-      }, () => this.appendEvent("session.info_changed", { name }));
+      }, () => this.appendEvent("session.info_changed", { name, displayName: this.projectedDisplayName() }));
       return;
     }
     if (event.type === "dock_runtime_error" || event.type === "dock_runtime_lost") {
@@ -3434,7 +3441,7 @@ export class ManagedInstance {
       this.recoverySessionFile = this.durableSessionFileValue === undefined ? previousDurableSessionFile : undefined;
       this.applyModelState(this.agentState().modelState);
       this.touch();
-      this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue, gitBranch: this.gitBranchValue });
+      this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue, displayName: this.projectedDisplayName(), gitBranch: this.gitBranchValue });
       if (replacedQueue.total > 0) this.appendEvent("queue.cleared", { ...replacedQueue, reason: "replacement" });
       void this.extensionUi.completeGenerationChange();
       return;
@@ -3443,7 +3450,7 @@ export class ManagedInstance {
       const name = optionalRuntimeString(event.name, 256);
       this.nameValue = name;
       this.touch();
-      this.appendEvent("session.info_changed", { name });
+      this.appendEvent("session.info_changed", { name, displayName: this.projectedDisplayName() });
       return;
     }
     if (event.type === "dock_runtime_error" || event.type === "dock_runtime_lost") {

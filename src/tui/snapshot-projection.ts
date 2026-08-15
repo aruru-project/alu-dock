@@ -25,13 +25,14 @@ export function projectSnapshot(snapshot: InstanceSnapshot, event: DockEvent): I
     return { ...snapshot, extensionStatus, updatedAt: event.occurredAt, eventCursor: advanceCursor(snapshot, event) };
   }
   if (event.type === "session.info_changed") {
-    return { ...snapshot, name: event.data.name, updatedAt: event.occurredAt, eventCursor: advanceCursor(snapshot, event) };
+    return { ...snapshot, name: event.data.name, displayName: event.data.displayName, updatedAt: event.occurredAt, eventCursor: advanceCursor(snapshot, event) };
   }
   if (event.type === "session.replaced") {
     return {
       ...snapshot,
       cwd: event.data.cwd,
       name: event.data.name,
+      displayName: event.data.displayName,
       gitBranch: event.data.gitBranch,
       execution: "idle",
       compacting: false,

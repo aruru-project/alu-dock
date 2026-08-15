@@ -69,16 +69,9 @@ export function uniqueInstanceIdPrefix(
 }
 
 function displayName(instance: InstanceSnapshot): string {
-  return terminalSafe(instance.name ?? "") || instance.id.slice(0, 8);
+  return instance.displayName;
 }
 
-function terminalSafe(value: string): string {
-  return value
-    .replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ")
-    .replace(/[\u202a-\u202e\u2066-\u2069\ufeff]/gu, " ")
-    .replace(/\s+/gu, " ")
-    .trim();
-}
 
 function quote(value: string): string {
   return JSON.stringify(value);

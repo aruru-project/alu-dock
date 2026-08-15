@@ -71,6 +71,7 @@ function snapshot(): InstanceSnapshot {
     id: "dock-1",
     creationOperationId: "create-1",
     name: "demo",
+    displayName: "demo",
     cwd: "/tmp/demo",
     lifecycle: "active",
     execution: "running",

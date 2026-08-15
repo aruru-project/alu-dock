@@ -189,7 +189,7 @@ export type SettingsChangedData = {
 }[keyof SettingValueMap];
 
 export interface EventDataMap {
-  "instance.created": { cwd: string; name?: string; executor: ExecutorIdentity };
+  "instance.created": { cwd: string; name?: string; displayName: string; executor: ExecutorIdentity };
   "instance.state_changed": { reason: string; lifecycle: InstanceLifecycle; execution: InstanceExecution; compacting: boolean; lastRun: LastRunResult; pending: PendingDto; activeCommandId?: string; lastError?: string };
   "instance.reopened": { previousLifecycle: "host_lost" | "runtime_error"; sessionFile: string; runtimeGeneration: number };
   "instance.stopped": { cleanupErrors: string[] };
@@ -214,9 +214,9 @@ export interface EventDataMap {
   "queue.cleared": PendingDto & { queueItemIds: string[]; reason: "dequeued" | "abort" | "stop" | "replacement" | "host_draining" };
   "compaction.started": { reason: "manual" | "threshold" | "overflow"; operationId?: string };
   "compaction.completed": { reason: "manual" | "threshold" | "overflow"; operationId?: string; aborted: boolean; willRetry: boolean; error?: string };
-  "session.replaced": { reason: "new" | "resume" | "fork" | "reload"; previousSessionFile?: string; sessionFile?: string; runtimeGeneration: number; cwd: string; piSessionId: string; name?: string; gitBranch?: string };
+  "session.replaced": { reason: "new" | "resume" | "fork" | "reload"; previousSessionFile?: string; sessionFile?: string; runtimeGeneration: number; cwd: string; piSessionId: string; name?: string; displayName: string; gitBranch?: string };
   "session.navigated": { targetId: string; leafId?: string; treeRevision: string; summaryCreated: boolean };
-  "session.info_changed": { name?: string };
+  "session.info_changed": { name?: string; displayName: string };
   "session.metrics_changed": { metrics: SessionMetricsDto };
   "git.branch_changed": { branch?: string };
   "model.changed": { provider: string; id: string; thinkingLevel: ThinkingLevel; availableThinkingLevels: ThinkingLevel[] };
@@ -263,7 +263,10 @@ export interface InstanceSnapshot {
   id: string;
   creationOperationId: string;
   key?: string;
+  /** Current Agent session name; it is not a stable Dock instance identity. */
   name?: string;
+  /** Canonical safe label for human-facing Dock instance lists. */
+  displayName: string;
   cwd: string;
   gitBranch?: string;
   lifecycle: InstanceLifecycle;

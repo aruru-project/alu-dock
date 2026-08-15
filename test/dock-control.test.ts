@@ -479,6 +479,7 @@ test("keyed ensure returns one Host-owned instance to simultaneous clients", asy
   );
   const legacyInstances = objectValue(legacy.result).instances as Array<Record<string, unknown>>;
   assert.equal("key" in (legacyInstances[0] ?? {}), false);
+  assert.equal("displayName" in (legacyInstances[0] ?? {}), false);
 
   harness.sessions.get(first.instance.id)?.settle("ready for replacement");
   await harness.registry.get(first.instance.id).waitForIdle();
@@ -849,7 +850,8 @@ test("Hub Continue opens current work", async (context) => {
   context.after(() => cleanupHarness(continueHarness));
   await continueHarness.host.start();
   const continueClient = new DockClient({ socketPath: continueHarness.socketPath });
-  const current = await continueClient.create(process.cwd(), "current-work");
+  const current = await continueClient.create(process.cwd());
+  assert.equal(current.displayName, "alu_dock");
   const continuePty = await runPtyTui([
     process.execPath,
     join(process.cwd(), "dist/src/cli.js"),
@@ -860,6 +862,8 @@ test("Hub Continue opens current work", async (context) => {
   assert.equal(continuePty.status, 0, continueOutput.slice(-2_000));
   assert.match(continueOutput, /Current Dock work/u);
   assert.match(continueOutput, /Open Work/u);
+  assert.match(continueOutput, /alu_dock/u);
+  assert.equal(continueOutput.includes(current.id), false);
   assert.match(continueOutput, /cache /u);
   assert.doesNotMatch(continueOutput, /NIGHT CONSOLE/u);
   assert.equal((await continueClient.status(current.id)).lifecycle, "active");
@@ -2234,6 +2238,7 @@ test("a running instance applies live metadata and next-step configuration witho
     assert.equal(snapshot.pending.total, 1);
   }
   assert.equal(liveName.instance.name, "Still running");
+  assert.equal(liveName.instance.displayName, "Still running");
   assert.deepEqual(liveTools.tools.filter((tool) => tool.active).map((tool) => tool.name), ["read", "write"]);
 
   const liveSettingUpdates: SettingUpdate[] = [
@@ -2295,7 +2300,7 @@ test("a running instance applies live metadata and next-step configuration witho
   const events = await client.read(created.id);
   assert.ok(events.page.events.some((event) => event.type === "model.changed"));
   assert.ok(events.page.events.some((event) => event.type === "thinking.changed"));
-  assert.ok(events.page.events.some((event) => event.type === "session.info_changed"));
+  assert.ok(events.page.events.some((event) => event.type === "session.info_changed" && event.data.displayName === "Still running"));
 });
 
 
@@ -2994,11 +2999,87 @@ test("host rejects a socket directory accessible by other users", async (context
 
 
 
+test("staged list compatibility derives the new display projection from the previous Host response", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-legacy-display-name-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  let hellos = 0;
+  let requests = 0;
+  const server = createServer((socket) => {
+    const decoder = new JsonLineDecoder();
+    socket.on("data", (chunk: Buffer) => {
+      for (const line of decoder.push(chunk)) {
+        const frame = objectValue(JSON.parse(line) as unknown);
+        if (frame.kind === "hello") {
+          hellos += 1;
+          const required = frame.requiredCapabilities as string[];
+          if (required.includes("instance.display-name.v1")) {
+            socket.end(encodeJsonLine({
+              kind: "hello_error",
+              requestId: frame.requestId,
+              error: { code: "capability_missing", message: "Missing capability instance.display-name.v1", missing: ["instance.display-name.v1"] },
+            }));
+            continue;
+          }
+          socket.write(encodeJsonLine({
+            kind: "hello_ack",
+            requestId: frame.requestId,
+            version: 2,
+            host: { pid: 8, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "legacy-display-epoch", startedAt: "2026-07-14T00:00:00.000Z" },
+            catalogSchemaVersion: 1,
+            capabilities: ["core.v2", "instance.catalog"],
+            limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
+          }));
+          continue;
+        }
+        requests += 1;
+        socket.end(encodeJsonLine({
+          kind: "response",
+          version: 2,
+          requestId: frame.requestId,
+          hostEpoch: "legacy-display-epoch",
+          ok: true,
+          result: {
+            instances: [{
+              id: "legacy-instance",
+              creationOperationId: "legacy-create",
+              cwd: "/workspace/legacy.project",
+              lifecycle: "active",
+              execution: "idle",
+              compacting: false,
+              lastRun: "never",
+              reopenable: false,
+              runtimeGeneration: 1,
+              ownerHostEpoch: "legacy-display-epoch",
+              pending: { steering: 0, followUp: 0, total: 0 },
+              executor: { kind: "fixture", piSessionId: "legacy-pi" },
+              extensionStatus: {},
+              createdAt: "2026-07-14T00:00:00.000Z",
+              updatedAt: "2026-07-14T00:00:00.000Z",
+              executionChangedAt: "2026-07-14T00:00:00.000Z",
+              eventCursor: { hostEpoch: "legacy-display-epoch", instanceId: "legacy-instance", runtimeGeneration: 1, sequence: 1 },
+            }],
+            page: { revision: 1, total: 1, hiddenStopped: 0 },
+          },
+        }));
+      }
+    });
+  });
+  await listen(server, socketPath);
+  context.after(async () => { await close(server); await rm(directory, { recursive: true, force: true }); });
+
+  const instances = await new DockClient({ socketPath }).list();
+  assert.equal(instances[0]?.displayName, "legacy project");
+  assert.equal(instances[0]?.toolsExpanded, false);
+  assert.equal(hellos, 2);
+  assert.equal(requests, 1);
+});
+
 test("an LF-truncated control response is reported as recoverable connection loss", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-partial-frame-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
-  const capabilities = ["command.images.path.v1", "core.v2", "events.follow.v2", "extension_ui.persistent-interactions.v1", "extension_ui.tools-expanded.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "instance.catalog", "instance.keys.v1", "instance.read.v1", "queue.control.v1", "run.abort.v1", "tool-result-presentation.v1", "tui.projection.v1"];
+  const capabilities = ["command.images.path.v1", "core.v2", "events.follow.v2", "extension_ui.persistent-interactions.v1", "extension_ui.tools-expanded.v1", "extension_ui.widgets.v1", "git.branch-footer.v1", "instance.catalog", "instance.display-name.v1", "instance.keys.v1", "instance.read.v1", "queue.control.v1", "run.abort.v1", "tool-result-presentation.v1", "tui.projection.v1"];
   const server = createServer((socket) => {
     const decoder = new JsonLineDecoder();
     socket.on("data", (chunk: Buffer) => {
@@ -3240,7 +3321,7 @@ test("post-send mutation transport loss is effect_unknown with caller operation 
       for (const line of decoder.push(chunk)) {
         const frame = objectValue(JSON.parse(line) as unknown);
         if (frame.kind === "hello") {
-          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 8, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "effect-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.catalog", "instance.keys.v1"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
+          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 8, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "effect-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.catalog", "instance.display-name.v1", "instance.keys.v1"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
         } else socket.destroy();
       }
     });
@@ -3266,7 +3347,7 @@ test("post-send mutation timeout is effect_unknown and is not retried", async (c
       for (const line of decoder.push(chunk)) {
         const frame = objectValue(JSON.parse(line) as unknown);
         if (frame.kind === "hello") {
-          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 9, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "timeout-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.catalog", "instance.keys.v1"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
+          socket.write(encodeJsonLine({ kind: "hello_ack", requestId: frame.requestId, version: 2, host: { pid: 9, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "timeout-epoch", startedAt: "2026-07-14T00:00:00.000Z" }, catalogSchemaVersion: 1, capabilities: ["core.v2", "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.catalog", "instance.display-name.v1", "instance.keys.v1"], limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 } }));
         } else requests += 1;
       }
     });

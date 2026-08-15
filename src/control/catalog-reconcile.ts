@@ -3,6 +3,7 @@ import {
   type CatalogProjection,
   validateCatalogProjection,
 } from "../core/catalog.js";
+import { projectInstanceDisplayName } from "../core/instance-display-name.js";
 import type { InstanceSnapshot } from "../core/managed-instance.js";
 import { PI_SDK_VERSION } from "../version.js";
 
@@ -102,6 +103,7 @@ export function catalogSnapshotFromRecord(
     creationOperationId: record.creationOperationId,
     ...(record.key === undefined ? {} : { key: record.key }),
     ...(record.name === undefined ? {} : { name: record.name }),
+    displayName: projectInstanceDisplayName(record),
     cwd: record.cwd,
     lifecycle: record.lifecycle,
     execution: record.execution,

@@ -62,7 +62,7 @@ Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 
 - `operationId`：一次调用者 mutation 意图；
 - event cursor：一次 read/follow reconnect 的观察位置。
 
-客户端不能用 name、cwd、Agent session ID 或文件路径代替 Dock instance identity。
+客户端不能用 name、cwd、Agent session ID 或文件路径代替 Dock instance identity。Snapshot 中可选的 `name` 是当前 Agent session name，不是稳定的 Dock 实例名称。`instance.display-name.v1` 提供始终存在的 `displayName`：Host 统一按 `name → key → cwd fallback → Work` 生成安全的人类展示标签；其中 cwd fallback 只保留 ASCII 字母、数字、空格、下划线和横杠，最长 20 个字符，任意异常都降级而不能使 snapshot/list 失败。`displayName` 不持久化为 session name，不参与 TARGET、key 或 instance identity；客户端只负责渲染，操作仍使用 `instanceId`。
 
 ## Mutation
 

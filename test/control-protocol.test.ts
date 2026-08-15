@@ -49,6 +49,7 @@ import {
   EVENTS_FOLLOW_CAPABILITY,
   EXTENSION_UI_CONTROL_CAPABILITY,
   INSTANCE_KEYS_CAPABILITY,
+  INSTANCE_DISPLAY_NAME_CAPABILITY,
   CONVERSATION_CONTENT_CAPABILITY,
   implementedCapabilities,
   requiredCapabilities,
@@ -83,7 +84,7 @@ test("V2 hello is closed, bounded, and rejects duplicate capabilities", () => {
 
 function validSnapshot(): Record<string, unknown> {
   return {
-    id: "i1", creationOperationId: "op-create", key: "alu", cwd: "/tmp/project",
+    id: "i1", creationOperationId: "op-create", key: "alu", displayName: "alu", cwd: "/tmp/project",
     lifecycle: "active", execution: "idle", compacting: false, lastRun: "never", reopenable: false,
     runtimeGeneration: 1, ownerHostEpoch: "epoch-1",
     pending: { steering: 0, followUp: 0, total: 0 },
@@ -123,6 +124,9 @@ test("Protocol V2 clients accept additive Host response and event fields", () =>
     instance: { ...validSnapshot(), futureSnapshotField: true },
     futureResultField: true,
   }).instance.id, "i1");
+  assert.throws(() => parseStatusResult({
+    instance: { ...validSnapshot(), displayName: "<unsafe>\nlabel" },
+  }), /canonical safe display name/u);
 });
 
 test("Protocol V2 history exposes only canonical persisted conversation records", () => {
@@ -241,7 +245,7 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   assert.equal(capabilityForRequest("instance.read"), INSTANCE_READ_CAPABILITY);
   assert.equal(capabilityForRequest("instance.follow"), EVENTS_FOLLOW_CAPABILITY);
   assert.equal(capabilityForRequest("interaction.control"), EXTENSION_UI_CONTROL_CAPABILITY);
-  assert.deepEqual(requiredCapabilities(EVENTS_FOLLOW_CAPABILITY), ["core.v2", INSTANCE_READ_CAPABILITY, "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.keys.v1", "tool-result-presentation.v1", EVENTS_FOLLOW_CAPABILITY]);
+  assert.deepEqual(requiredCapabilities(EVENTS_FOLLOW_CAPABILITY), ["core.v2", INSTANCE_READ_CAPABILITY, "extension_ui.tools-expanded.v1", "git.branch-footer.v1", "instance.keys.v1", INSTANCE_DISPLAY_NAME_CAPABILITY, "tool-result-presentation.v1", EVENTS_FOLLOW_CAPABILITY]);
 
   const ensured = parseControlRequest({
     ...base,

@@ -65,7 +65,7 @@ Wire shape、capability 名称和 bounds 的代码真相在：
 - `operationId`：一次 mutation 意图；
 - event cursor：read/follow 和重连的位置。
 
-不要用 instance name、cwd、Agent session ID 或文件路径代替 `instanceId`。
+不要用 instance name、cwd、Agent session ID 或文件路径代替 `instanceId`。Snapshot 的可选 `name` 表示当前 Agent session name；协商 `instance.display-name.v1` 后，始终存在的 `displayName` 是 Dock 已经清洗和兜底的人类展示标签。实例列表直接渲染 `displayName`，点击、连接和 mutation 仍传 `instanceId`，客户端不要再自行实现 `name/key/id` fallback。
 
 ## 建立并跟随一个 Work
 
