@@ -11,7 +11,7 @@ if (process.env.ALU_DOCK_PI_WORKER === "1" && typeof process.send === "function"
 
 async function run(): Promise<void> {
   const identity = parseWorkerIdentity(JSON.parse(process.env.ALU_DOCK_WORKER_IDENTITY ?? "null"));
-  const sender = new OrderedWorkerSender(identity, (message, callback) => process.send!(message, callback));
+  const sender = new OrderedWorkerSender(identity, (message, callback) => process.send!(message, undefined, undefined, callback));
   const receiver = new WorkerFrameReceiver((candidate) => candidate.hostEpoch === identity.hostEpoch
     && candidate.instanceId === identity.instanceId
     && candidate.runtimeGeneration === identity.runtimeGeneration

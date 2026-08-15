@@ -43,7 +43,7 @@ async function runWorker(): Promise<void> {
   const init = parseInit(parseEnvJson("ALU_DOCK_WORKER_INIT"));
   let generation = identity.runtimeGeneration;
   let hostGenerationSeen = generation;
-  const sender = new OrderedWorkerSender(identity, (message, callback) => process.send!(message, callback));
+  const sender = new OrderedWorkerSender(identity, (message, callback) => process.send!(message, undefined, undefined, callback));
   const receiver = new WorkerFrameReceiver((received) => sameWorker(received, identity)
     && (received.runtimeGeneration === generation
       || (received.runtimeGeneration === generation - 1 && hostGenerationSeen < generation)));

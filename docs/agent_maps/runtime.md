@@ -91,6 +91,10 @@ Extension command 仍通过完整 Agent input 语义执行，不另建第二条�
 
 Agent 出现新的真实能力时，在 Protocol V2 定义一次，由提供该能力的 Worker adapter 产生，再由需要它的客户端实现。Host 只有在这项能力确实增加新的控制或生命周期规则时才需要变化。
 
+## Pi SDK 升级
+
+频繁的 Pi 版本升级使用独立的[兼容性准入门](../pi-sdk-upgrades.md)，不混入普通测试套件。
+
 ## 代码范围
 
 - `src/pi/`：当前 Pi Worker、Pi adapter 与 Worker 进程实现。
