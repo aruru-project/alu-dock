@@ -850,8 +850,10 @@ test("Hub Continue opens current work", async (context) => {
   context.after(() => cleanupHarness(continueHarness));
   await continueHarness.host.start();
   const continueClient = new DockClient({ socketPath: continueHarness.socketPath });
-  const current = await continueClient.create(process.cwd());
-  assert.equal(current.displayName, "alu_dock");
+  const displayCwd = join(continueHarness.directory, "display.project");
+  await mkdir(displayCwd);
+  const current = await continueClient.create(displayCwd);
+  assert.equal(current.displayName, "display project");
   const continuePty = await runPtyTui([
     process.execPath,
     join(process.cwd(), "dist/src/cli.js"),
@@ -862,7 +864,7 @@ test("Hub Continue opens current work", async (context) => {
   assert.equal(continuePty.status, 0, continueOutput.slice(-2_000));
   assert.match(continueOutput, /Current Dock work/u);
   assert.match(continueOutput, /Open Work/u);
-  assert.match(continueOutput, /alu_dock/u);
+  assert.match(continueOutput, /display project/u);
   assert.equal(continueOutput.includes(current.id), false);
   assert.match(continueOutput, /cache /u);
   assert.doesNotMatch(continueOutput, /NIGHT CONSOLE/u);

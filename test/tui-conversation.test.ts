@@ -443,7 +443,7 @@ test("long Pi edit diffs remain available and never fall back to raw edit argume
 test("collapsed tool rows identify common operations without exposing arbitrary payload fields", () => {
   const conversation = new DockConversation();
   const calls = [
-    { name: "read", args: { path: "/home/luziyi/workshop/alu_dock/src/tui/conversation.ts", offset: 10, limit: 5 }, result: "source" },
+    { name: "read", args: { path: "/workspace/sample-project/src/tui/conversation.ts", offset: 10, limit: 5 }, result: "source" },
     { name: "bash", args: { command: "npm run check\nnpm test" }, result: "ok" },
     { name: "edit", args: { path: "src/tui/theme.ts", edits: [{ oldText: "a", newText: "b" }, { oldText: "c", newText: "d" }] }, result: "updated" },
     { name: "write", args: { path: "README.md", content: "one\ntwo\nthree" }, result: "written" },
