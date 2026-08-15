@@ -2,7 +2,7 @@ import {
   ProcessTerminal,
   SelectList,
   Text,
-  TUI,
+  TuiMainScreen,
   type SelectItem,
 } from "@earendil-works/pi-tui";
 
@@ -15,7 +15,7 @@ export async function selectInstance(
   instances: InstanceSnapshot[],
 ): Promise<InstanceSnapshot | "new" | undefined> {
   const terminal = new ProcessTerminal();
-  const tui = new TUI(terminal, process.env.PI_HARDWARE_CURSOR === "1");
+  const tui = new TuiMainScreen(terminal, process.env.PI_HARDWARE_CURSOR === "1");
   const byId = new Map(instances.map((instance) => [instance.id, instance]));
   const items: SelectItem[] = [
     ...instances.map((instance) => ({

@@ -7,7 +7,7 @@ import {
   Key,
   matchesKey,
   ProcessTerminal,
-  TUI,
+  TuiMainScreen,
   type AutocompleteItem,
   type AutocompleteProvider,
   type AutocompleteSuggestions,
@@ -80,7 +80,7 @@ export async function runDockTui(
   assertInteractiveTerminal();
 
   const terminal = new ProcessTerminal();
-  const tui = new TUI(terminal, process.env.PI_HARDWARE_CURSOR === "1");
+  const tui = new TuiMainScreen(terminal, process.env.PI_HARDWARE_CURSOR === "1");
   const conversation = new DockConversation();
   const pendingQueue = new PendingQueueTray();
   const activity = new DockActivityLine();

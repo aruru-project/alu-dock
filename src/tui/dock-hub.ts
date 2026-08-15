@@ -2,7 +2,7 @@ import {
   ProcessTerminal,
   SelectList,
   Text,
-  TUI,
+  TuiMainScreen,
   truncateToWidth,
   visibleWidth,
   type Component,
@@ -398,7 +398,7 @@ async function selectMenu(
   entries: readonly DockHubEntry[],
   hint: string,
 ): Promise<string | undefined> {
-  const tui = new TUI(terminal, process.env.PI_HARDWARE_CURSOR === "1");
+  const tui = new TuiMainScreen(terminal, process.env.PI_HARDWARE_CURSOR === "1");
   const items: SelectItem[] = entries.map((entry) => ({
     value: entry.value,
     label: terminalSafe(entry.label),
