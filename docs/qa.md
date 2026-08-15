@@ -74,7 +74,13 @@ git diff --check
 
 ### Worker 与 Agent adapter
 
-验证 Worker 是独立 OS 进程，Host/Worker identity 正确，单个 Worker loss 不影响其他 instance，并且 Agent adapter 使用真实 public API。Real Pi gate 不调用模型。
+验证 Worker 是独立 OS 进程，Host/Worker identity 正确，单个 Worker loss 不影响其他 instance，并且 Agent adapter 使用真实 public API。普通 Real Pi gate 不访问外部模型。
+
+### Pi SDK 升级门
+
+升级同一 cohort 的 Pi 依赖、lockfile 或 `PI_SDK_VERSION` 时，单独运行 `npm run test:sdk-upgrade`。这个 `.compat.ts` 场景不由普通 `npm test` 执行；它通过真实 Dock/Host/独立 Worker/Pi public SDK 链路连接本机确定性 provider transport，验证升级所需的最小产品合同，不使用真实凭据或外部模型。
+
+门禁失败后按受影响能力定向检查 changelog/source 和相关现有测试，不把 compaction、Extension UI、tree 等全量能力默认复制进升级门。维护流程和失败解释见 [`pi-sdk-upgrades.md`](pi-sdk-upgrades.md)。
 
 ### TUI
 

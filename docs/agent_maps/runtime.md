@@ -93,7 +93,7 @@ Agent 出现新的真实能力时，在 Protocol V2 定义一次，由提供该�
 
 ## Pi SDK 升级
 
-频繁的 Pi 版本升级使用独立的[兼容性准入门](../pi-sdk-upgrades.md)，不混入普通测试套件。
+频繁的 Pi 版本升级使用独立的[兼容性准入门](../pi-sdk-upgrades.md)，不混入普通测试套件。入口是 `npm run test:sdk-upgrade`，场景实现在 `test/pi-sdk-compat/`；它经过真实 Dock/Worker/Pi public SDK 边界，但只连接本机确定性 transport，不访问外部模型。
 
 ## 代码范围
 
