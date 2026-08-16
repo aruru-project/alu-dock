@@ -45,6 +45,36 @@ Wire shape、capability 名称和 bounds 的代码真相在：
 - `src/control/protocol.ts`
 - `src/control/dock-client.ts`
 
+### Unix socket 与远程 TLS 端口
+
+本机 Unix socket 和网络 TLS 端口只是 Protocol V2 的两种 transport，不是两套 API：
+
+```text
+local client ── private Unix socket ─┐
+                                     ├─ hello / request / response / event · Protocol V2
+paired client ── mutual TLS port ────┘
+```
+
+当前 TypeScript `DockClient` 负责本机 Unix socket。独立的 Android、Web backend 或桌面客户端可以实现 TLS transport，但在证书 admission 之后必须复用本文其余部分定义的同一套 hello、capabilities、request、response、read/follow 和 operation 语义。不得把 Pairing、Settings 或证书管理增加为 Protocol V2 request。
+
+远程客户端必须长期保存自己生成的 RSA 2048-bit 或更强证书与私钥，并在每次 TLS handshake 中发送该证书。配对后还必须保存 Host 的完整 leaf certificate DER，之后在发送任何应用数据前做精确匹配。地址、域名和端口只负责找到 Host，不参与信任；切换 LAN 地址、外网域名或 NAT 映射端口不触发重新配对。
+
+### 首次配对
+
+配对入口默认不存在。用户必须先在 Host 本机运行 `aludock`，进入 Pairing 并显式打开五分钟窗口。窗口外，无证书或未知证书连接都会快速关闭；远程客户端不能开启、延长或查询这个本机管理状态。
+
+客户端配对流程如下：
+
+1. 本地生成并持久化客户端证书、私钥、随机四位 PIN 和 16-byte `clientNonce`；PIN 只显示给用户，绝不能发送给 Host，也不能发送其 hash/verifier。
+2. 使用客户端证书建立 TLS。此时 Host 证书只是 provisional candidate；保存本次看到的完整 DER，并在本次 pairing transaction 的所有后续重连中精确匹配。
+3. 发送一条 `pairing.begin.v1`，包含安全设备名和 `clientNonce`。收到 `pairing.pending.v1` 后关闭连接并按 `retryAfterMs` 使用新的短 TLS 连接发送 `pairing.poll.v1`。
+4. 用户在本机 Hub 选中该设备并输入客户端屏幕上的 PIN。随后 poll 返回 `pairing.srp-challenge.v1`。
+5. 使用 `fast-srp-hap`/HomeKit 参数（3072-bit group、SHA-512、identity `Pair-Setup`）完成 `pairing.srp-proof.v1` 与 `pairing.srp-confirmed.v1`。错误 PIN 必须终止本次 transaction，不能自动尝试下一个 PIN。
+6. 用确认出的 64-byte SRP key 完成 `pairing.client-identity.v1` / `pairing.server-identity.v1`。两条 identity record 使用 domain-separated HKDF-SHA-512、ChaCha20-Poly1305 和 RSA-PSS/SHA-256，签名内容绑定 pairing ID、clientNonce、双方完整证书与角色。字段、canonical framing、labels 和 nonce 的代码真相在 `src/control/remote-pairing.ts`；其他语言实现必须逐字匹配，并以 Dock 的 pairing contract tests 做互操作验证。
+7. 验证 server identity 后持久化 exact Host certificate。重新建立一条同时发送客户端证书、精确 pin Host 证书的 TLS 连接，并发送正常 Protocol V2 hello。只有这次连接成功，客户端 UI 才报告配对完成。
+
+`pairing.begin`、poll、SRP proof 和 identity exchange 都各自使用一条 request/response TLS 连接；Host 返回 response 后立即关闭。客户端不得期待 long poll、keep-alive、follow 或等待用户输入的连接。重复发送完全相同的 SRP proof 可获得同一 confirmation，用于恢复丢失的 response；其他跳步、重放或字段变化都会使 transaction 失败。Host 成功提交但最终 response 丢失时，客户端使用 provisional Host pin 尝试正常双向 TLS/Protocol V2 连接来确认结果，不重新生成证书或自动开启另一场配对。
+
 当前读取、跟随和操作连接分别使用：
 
 - `instance.read` / `instance.read.v1`

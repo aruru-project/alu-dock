@@ -24,6 +24,7 @@ Hub / Work / Web / future clients
 - Session Work TUI 的 conversation、tools、Queue、model、settings、tree、compaction 和 Extension UI；
 - Protocol V2 的权威读取、实时跟随、断线恢复和操作去重；
 - Rails/Web 后端可使用的本机 Unix socket 接口；
+- 默认关闭、由本机 Hub 配置和配对的 mutual-TLS 网络入口；
 - 显式 `systemd --user` service 管理。
 
 ## 快速开始
@@ -58,6 +59,18 @@ aludock service logs --lines 200
 ```
 
 `forget` 和 `prune` 只删除 Dock catalog record，不删除 Agent session 文件。
+
+## 远程访问
+
+本机运行 `aludock` 后：
+
+1. 在 **Settings** 选择网络端口并启用 Remote Access；
+2. 在 **Pairing** 显式打开五分钟配对窗口；
+3. 从远程客户端发起配对；
+4. 在 Pairing 中选择设备，输入客户端屏幕显示的四位 PIN；
+5. 配对成功后，客户端使用双方长期证书连接同一套 Protocol V2。
+
+私有 Unix socket 不使用 TLS 或配对，并继续按原方式工作。网络地址和端口不是设备身份；同一客户端和 Host 保留原证书时，切换局域网地址、域名或 NAT 映射不要求重新配对。Pairing、Settings 和吊销只能在 Host 本机 Hub 操作，远程 Protocol V2 客户端不能调用。
 
 ## 从源码运行
 

@@ -11,6 +11,7 @@ import { DockRegistry } from "./control/dock-registry.js";
 import { FileCatalogStore, defaultCatalogPath } from "./control/durable-catalog-store.js";
 import type { ProjectTrustChoice } from "./control/project-trust.js";
 import { defaultSocketPath, managedSocketPath } from "./control/socket-path.js";
+import { RemoteAccessState, remoteAccessStateRoot } from "./control/remote-access-state.js";
 import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot } from "./core/managed-instance.js";
 import { requireHumanTarget } from "./human-target.js";
 import { UserServiceManager } from "./deployment/user-service.js";
@@ -184,6 +185,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       registry,
       initialize: () => registry.initializeCatalog(),
       sessionInventory,
+      remoteAccessState: new RemoteAccessState(remoteAccessStateRoot(catalogPath as string)),
     });
   } else {
     registry = new DockRegistry(

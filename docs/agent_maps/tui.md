@@ -7,16 +7,20 @@ Alu Dock 的 SSH 界面由两个客户端 surface 组成：
 - **Hub**：创建、继续和管理 Dock instance；
 - **Session Work**：连接一个 instance，与当前 Agent session 交互。
 
-它们都通过 DockClient 和 Protocol V2 使用 Host Service，不持有 Agent runtime，也不读取 Agent 私有 session 文件。
+Hub 和 Work 的 Agent 工作能力都通过 DockClient 和 Protocol V2 使用 Host Service，不持有 Agent runtime，也不读取 Agent 私有 session 文件。只有 Hub 中的本机 service-management 页面例外：Remote Settings 与 Pairing 直接读写当前用户的私有 Host state，由 managed Host 观察并应用；它们不经过 DockClient，也不形成可供远程调用的管理协议。
 
 ```text
-Hub TUI ──────── Protocol V2 ──────── Host control
-Work TUI ─────── Protocol V2 ──────── Host session gateway ── Worker
+Hub / Work ───── Protocol V2 ──────── Host control/session gateway ── Worker
+Hub Settings/Pairing ── local private state ── managed Host TLS ingress
 ```
 
 ## Hub
 
-Hub 的主要对象是 Dock instance。它提供 New、Continue、History、persisted sessions 和 Leave 等入口，但打开 Hub 本身不创建 runtime。
+Hub 的主要对象是 Dock instance。它提供 New、Continue、History、persisted sessions、Settings、Pairing 和 Leave 等入口，但打开 Hub 本身不创建 runtime。
+
+Settings 管理默认关闭的远程访问开关和端口，并显示 Host 是否已经开始监听。Pairing 默认关闭；用户必须在本机明确确认“Open Pairing Window”，才会在五分钟内显示此后到达的设备请求。一次只能把用户选中的一个设备推进到 PIN/证书证明；成功、证明失败、手动关闭、超时或 Host 重启都会关闭窗口并清除 provisional 请求。
+
+Pairing 中用户选择设备、输入客户端显示的四位 PIN 并明确确认，也可以查看和吊销既有设备。列表项来自 Host 保存的短期 metadata，不对应等待中的 socket；客户端请求已经响应并关闭。主界面只显示窗口是否开放、设备名、时间、当前结果和下一步动作，不展示证书 fingerprint、pairing ID、SRP、内部 revision 或其他实现状态。已完成的设备信任持久保留，直到用户撤销。
 
 Hub 使用 alternate screen；进入 Work 或离开前恢复 shell screen。Instance lifecycle 和 persisted-session inventory 来自 Host，不由 TUI 自己扫描 runtime。Hub 直接渲染 Protocol V2 的 `displayName`；缺少 session name/key 时的 cwd fallback 与安全清洗由 Host 统一完成，Hub 不再把短 instance ID 当作默认名称。
 
@@ -69,7 +73,7 @@ Alu Dock 的主题、布局和组件由 `src/tui/` 内的实现负责。顶层�
 ## 代码范围
 
 - `src/interactive.ts`：CLI 到 Hub/Work 的组合入口。
-- `src/tui/dock-hub.ts`：Hub。
+- `src/tui/dock-hub.ts`：Hub，以及本机 Settings/Pairing 交互。
 - `src/tui/workspace-browser.ts`：Dock New 目录列表、搜索、直接路径与大列表导航。
 - `src/tui/dock-tui.ts`：Session Work composition 与输入。
 - `src/tui/conversation.ts`：conversation rendering。

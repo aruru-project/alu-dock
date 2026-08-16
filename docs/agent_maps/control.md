@@ -40,13 +40,28 @@ Host 不为这些能力维护第二套 Agent 实现，也不重复投影 Worker 
 
 ## Protocol V2
 
-连接使用本机私有 Unix socket 和 JSONL：
+Protocol V2 的记录使用 UTF-8 JSONL，可以承载在两种不同 transport 上：
+
+- **私有 Unix socket**：本机客户端按既有路径直接连接；文件系统所有权和 mode 是 admission，不使用 TLS、客户端证书或配对。
+- **远程 TLS 端口**：默认关闭；启用后绑定所有网络接口。TLS admission 成功的可信客户端进入与 Unix socket 完全相同的 Host request handler，不存在远程专用 DTO、业务路由或兼容层。
+
+Transport admission 完成以后，两条路径的 Protocol V2 行为一致：
 
 1. 客户端先发送 hello，并协商版本与 capabilities；
 2. hello 成功后发送业务 request；
 3. 普通 request 返回一个 response；
 4. `instance.read` 读取当前权威视图，`instance.follow` 在初始 response 后持续接收 event；
 5. Extension UI 操作使用独立连接，并与读取、实时跟随分别恢复。
+
+TLS peer 必须在握手时提供 X.509 客户端证书并证明持有私钥。Host 只把与持久信任记录中 leaf certificate DER 完全相同的连接交给 Protocol V2。无证书或未知证书永远不能发送 hello，也不能调用任何 Protocol V2 request。
+
+配对不是 Protocol V2，也不是远程管理 API。只有用户在本机 Hub 的 Pairing 页面显式打开五分钟窗口时，同一个 TLS 端口才临时允许未知证书发送 `pairing.*.v1` bootstrap。每条未知连接只接收一条有界 request、返回一条 response，然后立即关闭；人工确认只推进 Host 中有期限、有数量上限的 pairing transaction，不保留 socket、stream、callback 或等待中的网络 Promise。TLS handshake、首帧和 response close 分别有 5 秒、2 秒和 1 秒边界；用户批准后的完整证明最多持续 60 秒。
+
+客户端首请求只携带 TLS 客户端证书、设备名和随机数，绝不发送 PIN 或可离线枚举的 PIN verifier。用户在本机选择明确请求并输入客户端显示的四位 PIN。PIN 阶段采用 HomeKit Pair Setup 使用的 SRP-6a 3072-bit/SHA-512 参数；确认出的 session key 再按 HomeKit 的 domain-separated HKDF、ChaCha20-Poly1305 和签名交换形状，绑定 server-generated pairing ID、双方完整证书、本次随机数和双方私钥证明。事务顺序同时遵循 Moonlight/Sunshine 的经验：候选证书保持 provisional、阶段严格单调、全部验证后才原子写入客户端信任，客户端最后以精确 Host certificate pin 建立新的 TLS/Protocol V2 连接再提交 Host 信任。
+
+远程地址不属于身份。已配对客户端可以从新的 IP、域名或映射端口连接同一个 Host，只要双方仍使用原来的证书。每次连接仍执行完整 TLS handshake；session resumption 被关闭，不能替代证书检查。吊销删除精确客户端证书信任，并由 Host 关闭该证书的现有远程连接。
+
+Remote Settings、开启/关闭配对窗口、待配对请求、PIN 确认、trusted device 列表和吊销是本机 `aludock` Hub 的 service-management surface。它们不属于 Protocol V2，不通过 Unix socket 或 TLS 暴露，也不在 DockClient、CLI JSON API 或额外 admin socket 中提供。远程客户端只能使用临时 pairing bootstrap 和配对后的 Protocol V2；它不能远程开启或延长配对窗口。
 
 Client 发给 Host 的 hello/request 使用 closed JSON-safe shape，未知字段会被拒绝。Host 发给 Client 的 response/event 仍严格校验已知字段、版本、类型和边界，但 Client 必须忽略新增的未知可选字段；只有删除字段、改变既有语义或新增无法忽略的类型时才需要 capability 或协议版本。单 frame 可以有传输上限，但业务内容不能因此永久截断；大型 conversation 使用分页和 chunk 继续读取。
 
@@ -58,7 +73,9 @@ Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 
 
 以下身份用途不同：
 
-- `hostEpoch`：一次 Host 进程域；
+- Host TLS certificate：跨 Host 进程长期保持的远程 Host identity；
+- trusted client certificate：一个已配对远程设备的精确 leaf certificate identity；
+- `hostEpoch`：一次 Host 进程域，不是 TLS identity；
 - `instanceId`：Dock 工作实例；
 - Agent 原生 session identity：当前 Worker 内的会话；
 - `runtimeGeneration`：instance 内一次 runtime/session generation；
@@ -118,6 +135,9 @@ Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力
 - `src/control/operation-ledger.ts`：Host epoch 内的 mutation identity。
 - `src/control/catalog-*.ts`：durable catalog transaction 与 recovery。
 - `src/control/json-lines.ts`：JSONL framing。
+- `src/control/remote-access-state.ts`：Host TLS identity、listener settings、pairing 与 certificate trust 的私有持久状态。
+- `src/control/remote-access-server.ts`：TLS admission、pairing bootstrap、listener reconfiguration 与 revocation。
+- `src/control/remote-pairing.ts`：客户端可复用的 pairing wire types，以及 SRP、identity encryption 和 certificate proof helpers。
 - `src/control/workspace-browser.ts`：Host 文件系统目录浏览与可恢复错误。
 
 新增功能时先判断它属于 Host control 还是 Agent session。不要把 Agent session 能力塞进 catalog/Managed state，也不要为同一 Protocol V2 shape 在 Worker、Host 和客户端分别维护重复定义。

@@ -11,8 +11,17 @@ import {
 import { resolve } from "node:path";
 
 import type { DockClient } from "../control/dock-client.js";
+import type {
+  PairingWindow,
+  PendingPairing,
+  RemoteAccessSettings,
+  RemoteAccessState,
+  RemoteAccessStatus,
+  TrustedClient,
+} from "../control/remote-access-state.js";
 import type { InstanceSnapshot, SessionDto } from "../core/managed-instance.js";
 import { AluHubBrand } from "./alu-mascot.js";
+import { ExtensionTextDialog } from "./extension-text-dialog.js";
 import { mouseTrackingSequences, parseTerminalMouseEvent } from "./mouse-input.js";
 import { paint, selectListTheme } from "./theme.js";
 import {
@@ -25,6 +34,8 @@ const NEW_INSTANCE = "hub:new";
 const CONTINUE = "hub:continue";
 const HISTORY = "hub:history";
 const SESSION_INVENTORY = "hub:sessions";
+const REMOTE_SETTINGS = "hub:remote-settings";
+const PAIRING = "hub:pairing";
 const EXIT_HUB = "hub:exit";
 const MORE_INSTANCES = "hub:instances-more";
 const MORE_SESSIONS = "hub:sessions-more";
@@ -48,7 +59,7 @@ export interface DockHubEntry {
 }
 
 /** Read-only construction: entering the Hub lists state but never creates a runtime. */
-export async function runDockHub(client: DockClient, cwd: string): Promise<DockHubAction> {
+export async function runDockHub(client: DockClient, cwd: string, remoteAccessState: RemoteAccessState): Promise<DockHubAction> {
   const terminal = new HubProcessTerminal();
   const contextCwd = resolve(cwd);
   let sessions: SessionDto[] = [];
@@ -127,6 +138,14 @@ export async function runDockHub(client: DockClient, cwd: string): Promise<DockH
         if (signalRequested) return { kind: "exit" };
         if (sessionAction) return sessionAction;
       }
+      if (selected === REMOTE_SETTINGS) {
+        await chooseRemoteAccessSettings(terminal, remoteAccessState);
+        if (signalRequested) return { kind: "exit" };
+      }
+      if (selected === PAIRING) {
+        await choosePairingAction(terminal, remoteAccessState);
+        if (signalRequested) return { kind: "exit" };
+      }
     }
   } finally {
     terminal.leaveHubPresentation();
@@ -165,6 +184,8 @@ export function buildDockHubEntries(
         : "Pi Sessions",
       description: inventoryWarning ?? `Browse all saved Pi sessions${inventoryTruncated ? " · more available" : ""}`,
     },
+    { value: REMOTE_SETTINGS, label: "Settings", description: "Configure remote access" },
+    { value: PAIRING, label: "Pairing", description: "Approve devices and revoke access" },
     { value: EXIT_HUB, label: "Leave Hub", description: "Return to the shell" },
   ];
 }
@@ -399,6 +420,377 @@ async function chooseSessionAction(
   const instance = instances.find((candidate) => candidate.id === action.slice(separator + 1));
   if (!instance) return undefined;
   return action.startsWith("attach:") ? { kind: "attach", instance } : { kind: "reopen", instance };
+}
+
+async function chooseRemoteAccessSettings(
+  terminal: HubProcessTerminal,
+  state: RemoteAccessState,
+): Promise<void> {
+  let notice: string | undefined;
+  while (true) {
+    let settings: RemoteAccessSettings;
+    let status: RemoteAccessStatus | undefined;
+    try {
+      [settings, status] = await Promise.all([state.readSettings(), state.readStatus()]);
+    } catch {
+      await showLocalAdminUnavailable(terminal, "Settings");
+      return;
+    }
+    const selected = await selectMenu(
+      terminal,
+      "Remote Access Settings",
+      notice ?? remoteAccessStatusSummary(settings, status),
+      [
+        {
+          value: "toggle",
+          label: settings.enabled ? "Disable Remote Access" : "Enable Remote Access",
+          description: settings.enabled
+            ? "Stop network connections; paired devices stay trusted"
+            : `Listen on all network interfaces using port ${settings.port}`,
+        },
+        {
+          value: "port",
+          label: `Port · ${settings.port}`,
+          description: "Change the network port used by remote clients",
+        },
+        { value: "refresh", label: "Refresh status", description: "Read the latest remote access status" },
+        { value: BACK, label: "Back to Hub", description: "no change" },
+      ],
+      "↑↓ choose · Enter change · Esc back",
+    );
+    if (!selected || selected === BACK) return;
+    notice = undefined;
+    if (selected === "refresh") continue;
+    if (selected === "toggle") {
+      try {
+        await state.writeSettings({ enabled: !settings.enabled, port: settings.port });
+        notice = settings.enabled
+          ? "Remote access is being disabled."
+          : `Remote access is being enabled on port ${settings.port}.`;
+      } catch {
+        notice = "The setting could not be saved. Check the local Alu Dock state directory permissions, then try again.";
+      }
+      continue;
+    }
+    const value = await promptHubText(
+      terminal,
+      "Remote access port",
+      `Current port: ${settings.port} · enter a port from 1 to 65535`,
+    );
+    if (value === undefined) continue;
+    const trimmed = value.trim();
+    const port = /^\d{1,5}$/u.test(trimmed) ? Number(trimmed) : 0;
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+      notice = "Port must be a whole number from 1 to 65535. Choose Port to try again.";
+      continue;
+    }
+    try {
+      await state.writeSettings({ enabled: settings.enabled, port });
+      notice = settings.enabled
+        ? `Port ${port} was saved. The Host is moving remote access to the new port.`
+        : `Port ${port} was saved and will be used when remote access is enabled.`;
+    } catch {
+      notice = "The port could not be saved. Check the local Alu Dock state directory permissions, then try again.";
+    }
+  }
+}
+
+async function choosePairingAction(
+  terminal: HubProcessTerminal,
+  state: RemoteAccessState,
+): Promise<void> {
+  let notice: string | undefined;
+  while (true) {
+    let pending: PendingPairing[];
+    let trusted: TrustedClient[];
+    let pairingWindow: PairingWindow | undefined;
+    let settings: RemoteAccessSettings;
+    let status: RemoteAccessStatus | undefined;
+    try {
+      [pending, trusted, pairingWindow, settings, status] = await Promise.all([
+        state.listPending(),
+        state.listTrusted(),
+        state.readPairingWindow(),
+        state.readSettings(),
+        state.readStatus(),
+      ]);
+    } catch {
+      await showLocalAdminUnavailable(terminal, "Pairing");
+      return;
+    }
+    const windowOpen = pairingWindow !== undefined && Date.parse(pairingWindow.expiresAt) > Date.now();
+    pending = windowOpen && pairingWindow
+      ? pending.filter((request) => request.windowId === pairingWindow.id && Date.parse(request.expiresAt) > Date.now())
+      : [];
+    pending.sort((left, right) => right.requestedAt.localeCompare(left.requestedAt) || left.id.localeCompare(right.id));
+    trusted.sort((left, right) => right.pairedAt.localeCompare(left.pairedAt) || left.fingerprint.localeCompare(right.fingerprint));
+    const entries: DockHubEntry[] = [
+      windowOpen && pairingWindow
+        ? {
+          value: "close-window",
+          label: "Close Pairing",
+          description: `Stop accepting new devices · closes automatically ${friendlyTime(pairingWindow.expiresAt)}`,
+        }
+        : {
+          value: "open-window",
+          label: "Open Pairing for 5 Minutes",
+          description: settings.enabled
+            ? "Temporarily allow new devices to request pairing"
+            : "Enable Remote Access in Settings first",
+        },
+      ...pending.map((request) => ({
+        value: `pending:${request.id}`,
+        label: `Waiting · ${request.deviceName}`,
+        description: `Requested ${friendlyTime(request.requestedAt)}`,
+      })),
+      ...trusted.map((client) => ({
+        value: `trusted:${client.fingerprint}`,
+        label: `Trusted · ${client.deviceName}`,
+        description: `Paired ${friendlyTime(client.pairedAt)}`,
+      })),
+      { value: "refresh", label: "Refresh", description: "Look for new pairing requests and trust changes" },
+      { value: BACK, label: "Back to Hub", description: "no change" },
+    ];
+    const listening = status?.state === "listening" && status.configRevision === settings.revision;
+    const summary = windowOpen && pairingWindow
+      ? `Pairing is open · ${pending.length} waiting · ${trusted.length} trusted`
+      : `Pairing is closed · ${trusted.length} trusted`;
+    const selected = await selectMenu(
+      terminal,
+      "Pairing",
+      notice ?? summary,
+      entries,
+      "↑↓ choose · Enter manage · Esc back",
+    );
+    if (!selected || selected === BACK) return;
+    notice = undefined;
+    if (selected === "refresh") continue;
+    if (selected === "open-window") {
+      if (!settings.enabled) {
+        notice = "Remote Access is off. Enable it in Settings before opening Pairing.";
+        continue;
+      }
+      if (!listening) {
+        notice = "Remote Access is not listening yet. Check Settings, then try again.";
+        continue;
+      }
+      const confirmed = await confirmOpenPairingWindow(terminal);
+      if (!confirmed) continue;
+      try {
+        const opened = await state.openPairingWindow();
+        notice = `Pairing is open until ${friendlyTime(opened.expiresAt)}. Start pairing on the client now.`;
+      } catch {
+        notice = "Pairing could not be opened. Check the local Alu Dock state directory permissions, then try again.";
+      }
+      continue;
+    }
+    if (selected === "close-window") {
+      try {
+        const closed = await state.closePairingWindow(pairingWindow?.id);
+        notice = closed
+          ? "Pairing is closed. Waiting requests were discarded."
+          : "Pairing was already closing. Refresh to see whether the device finished or needs to be revoked.";
+      } catch {
+        notice = "Pairing could not be closed. Check the local Alu Dock state directory permissions, then try again.";
+      }
+      continue;
+    }
+    if (selected.startsWith("pending:")) {
+      const request = pending.find((candidate) => candidate.id === selected.slice("pending:".length));
+      if (request) notice = await approvePendingPairing(terminal, state, request);
+      continue;
+    }
+    if (selected.startsWith("trusted:")) {
+      const client = trusted.find((candidate) => candidate.fingerprint === selected.slice("trusted:".length));
+      if (client) notice = await revokeTrustedClient(terminal, state, client);
+    }
+  }
+}
+
+async function confirmOpenPairingWindow(terminal: HubProcessTerminal): Promise<boolean> {
+  const selected = await selectMenu(
+    terminal,
+    "Open Pairing?",
+    "Only continue while you are pairing a device in your possession",
+    [
+      { value: "confirm", label: "Open Pairing Window", description: "accept pairing requests for five minutes or until one device succeeds" },
+      { value: BACK, label: "Cancel", description: "keep pairing closed" },
+    ],
+    "↑↓ choose · Enter confirm · Esc cancel",
+  );
+  return selected === "confirm";
+}
+
+async function approvePendingPairing(
+  terminal: HubProcessTerminal,
+  state: RemoteAccessState,
+  request: PendingPairing,
+): Promise<string | undefined> {
+  const action = await selectMenu(
+    terminal,
+    request.deviceName,
+    "Enter the four-digit PIN shown on this device",
+    [
+      { value: "pin", label: "Enter Pairing PIN", description: "Continue only if you recognize this device" },
+      { value: BACK, label: "Back to Pairing", description: "leave the request waiting" },
+    ],
+    "↑↓ choose · Enter continue · Esc back",
+  );
+  if (action !== "pin") return undefined;
+  const pin = await promptHubText(
+    terminal,
+    `Pair ${request.deviceName}`,
+    "Enter the four-digit PIN displayed by the client",
+  );
+  if (pin === undefined) return undefined;
+  if (!/^\d{4}$/u.test(pin.trim())) return "Pairing PIN must contain exactly four digits. Select the waiting device to try again.";
+  const confirmation = await selectMenu(
+    terminal,
+    `Pair ${request.deviceName}?`,
+    "Allow this device to connect remotely",
+    [
+      { value: "confirm", label: "Confirm Pairing", description: "The device must prove that it has the same PIN" },
+      { value: BACK, label: "Cancel", description: "leave the request waiting" },
+    ],
+    "↑↓ choose · Enter confirm · Esc cancel",
+  );
+  if (confirmation !== "confirm") return undefined;
+  try {
+    await state.approvePairing(request.id, pin.trim());
+    return `PIN confirmed for ${request.deviceName}. Keep the device open while it finishes pairing.`;
+  } catch {
+    return `${request.deviceName} is no longer waiting. Start pairing again on the device if needed.`;
+  }
+}
+
+async function revokeTrustedClient(
+  terminal: HubProcessTerminal,
+  state: RemoteAccessState,
+  client: TrustedClient,
+): Promise<string | undefined> {
+  const action = await selectMenu(
+    terminal,
+    client.deviceName,
+    `Paired ${friendlyTime(client.pairedAt)}`,
+    [
+      { value: "revoke", label: "Revoke Access", description: "Disconnect this device and require pairing again" },
+      { value: BACK, label: "Back to Pairing", description: "keep this device trusted" },
+    ],
+    "↑↓ choose · Enter continue · Esc back",
+  );
+  if (action !== "revoke") return undefined;
+  const confirmation = await selectMenu(
+    terminal,
+    `Revoke ${client.deviceName}?`,
+    "This device will need a new PIN pairing before it can connect again",
+    [
+      { value: "confirm", label: "Revoke This Device", description: "disconnect it and remove access" },
+      { value: BACK, label: "Cancel", description: "keep this device trusted" },
+    ],
+    "↑↓ choose · Enter revoke · Esc cancel",
+  );
+  if (confirmation !== "confirm") return undefined;
+  try {
+    const removed = await state.revokeClient(client.fingerprint);
+    return removed
+      ? `Trust was revoked for ${client.deviceName}. Its remote connections are being closed.`
+      : `${client.deviceName} was already removed from trusted devices.`;
+  } catch {
+    return `Trust for ${client.deviceName} could not be changed. Check the local Alu Dock state directory permissions, then try again.`;
+  }
+}
+
+async function showLocalAdminUnavailable(terminal: HubProcessTerminal, title: string): Promise<void> {
+  await selectMenu(
+    terminal,
+    title,
+    "Local remote-access state could not be read. Check that the Alu Dock state directory is owned by you and private.",
+    [{ value: BACK, label: "Back to Hub", description: "return without changing anything" }],
+    "Enter or Esc · back",
+  );
+}
+
+async function promptHubText(
+  terminal: HubProcessTerminal,
+  title: string,
+  placeholder: string,
+  prefill?: string,
+): Promise<string | undefined> {
+  const tui = new TuiMainScreen(terminal, process.env.PI_HARDWARE_CURSOR === "1");
+  const dialog = new ExtensionTextDialog({
+    mode: "input",
+    title,
+    placeholder,
+    ...(prefill === undefined ? {} : { prefill }),
+    requestRender: () => tui.requestRender(),
+    tui,
+    maxRows: () => Math.max(6, terminal.rows - 4),
+  });
+  const layout = new HubMenuLayout(
+    new AluHubBrand(),
+    new Text("", 0, 0),
+    dialog,
+    new Text("", 0, 0),
+    () => terminal.rows,
+  );
+  let settled = false;
+  let started = false;
+  let signalReceived = false;
+  let resolveValue!: (value: string | undefined) => void;
+  const value = new Promise<string | undefined>((resolveValuePromise) => { resolveValue = resolveValuePromise; });
+  const finish = (result: string | undefined): void => {
+    if (settled) return;
+    settled = true;
+    resolveValue(result);
+  };
+  const onSignal = (): void => {
+    signalReceived = true;
+    finish(undefined);
+  };
+  dialog.onSubmit = finish;
+  dialog.onCancel = () => finish(undefined);
+  const removeMouseListener = tui.addInputListener((data) => (
+    parseTerminalMouseEvent(data) ? { consume: true } : undefined
+  ));
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+  tui.addChild(layout);
+  tui.setFocus(dialog);
+  try {
+    terminal.clearScreen();
+    tui.start();
+    started = true;
+    return await value;
+  } finally {
+    removeMouseListener();
+    if (started && !signalReceived) await terminal.drainInput(200, 30).catch(() => {});
+    tui.stop();
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+  }
+}
+
+function remoteAccessStatusSummary(settings: RemoteAccessSettings, status: RemoteAccessStatus | undefined): string {
+  if (!status) {
+    return settings.enabled
+      ? `Remote access is enabled on port ${settings.port}; waiting for the Host`
+      : `Remote access is off · saved port ${settings.port}`;
+  }
+  if (status.state === "stopped") return "The Host is stopped. Start the Alu Dock service to apply these settings.";
+  if (status.configRevision !== settings.revision) {
+    return `${settings.enabled ? "Enabled" : "Disabled"} on port ${settings.port} · the Host is applying this change`;
+  }
+  if (status.state === "listening") return `Listening on all network interfaces · port ${status.activePort ?? settings.port}`;
+  if (status.state === "disabled") return `Remote access is off · saved port ${settings.port}`;
+  if (status.message?.includes("EADDRINUSE") || status.message?.includes("address already in use")) {
+    return `Port ${settings.port} is already in use. Choose another port or free it, then Refresh.`;
+  }
+  return "Remote access could not start. Check the Alu Dock service log or change the setting, then Refresh.";
+}
+
+function friendlyTime(value: string): string {
+  const date = new Date(value);
+  return Number.isFinite(date.getTime()) ? date.toLocaleString() : "unknown time";
 }
 
 async function chooseWorkspaceDirectory(

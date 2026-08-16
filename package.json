@@ -30,6 +30,9 @@
   "dependencies": {
     "@earendil-works/pi-coding-agent": "0.84.2",
     "@earendil-works/pi-tui": "0.84.2",
+    "@peculiar/x509": "2.0.0",
+    "fast-srp-hap": "2.0.4",
+    "reflect-metadata": "0.2.2",
     "undici": "8.9.0"
   },
   "devDependencies": {

@@ -5,6 +5,7 @@ export * from "./control/dock-registry.js";
 export * from "./control/json-lines.js";
 export * from "./control/protocol.js";
 export * from "./control/project-trust.js";
+export * from "./control/remote-pairing.js";
 export * from "./control/socket-path.js";
 export * from "./core/catalog.js";
 export {

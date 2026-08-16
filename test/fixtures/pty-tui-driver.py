@@ -81,7 +81,7 @@ def main() -> int:
     status = 1
     try:
         action = os.environ.get("ALU_DOCK_PTY_ACTION", "detach")
-        hub_actions = ("hub-exit", "hub-click-leave", "hub-narrow", "hub-signal", "hub-signal-inventory", "hub-new", "hub-continue", "hub-mouse-continue", "hub-history", "hub-history-forget", "hub-adopt")
+        hub_actions = ("hub-exit", "hub-click-leave", "hub-narrow", "hub-signal", "hub-signal-inventory", "hub-new", "hub-continue", "hub-mouse-continue", "hub-history", "hub-history-forget", "hub-adopt", "hub-remote-settings", "hub-pairing-open", "hub-pairing", "hub-revoke")
         startup_marker = b"Alu Dock Hub" if action in hub_actions else b"cache "
         set_size(fd, 24, 80)
         deadline = time.monotonic() + 12
@@ -118,7 +118,7 @@ def main() -> int:
                         pass
                 os.write(fd, b"\x03" if action == "hub-narrow" else b"\x1b")  # Keyboard leave without mutation.
             elif action == "hub-click-leave":
-                y = hub_item_y(40, 120, 4, 5)
+                y = hub_item_y(40, 120, 6, 7)
                 os.write(fd, f"\x1b[<0;30;{y}M".encode("ascii"))
             elif action == "hub-signal":
                 os.kill(pid, signal.SIGTERM)
@@ -231,6 +231,129 @@ def main() -> int:
                 while b"cache " not in output and time.monotonic() < work_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
+            elif action == "hub-remote-settings":
+                port = os.environ.get("ALU_DOCK_PTY_PORT", "9999").encode("ascii")
+                for _ in range(4):
+                    write_input(fd, output, b"\x1b[B")  # Settings is fifth.
+                settings_start = len(output)
+                os.write(fd, b"\r")
+                settings_deadline = time.monotonic() + 5
+                while b"Remote Access Settings" not in output[settings_start:] and time.monotonic() < settings_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                write_input(fd, output, b"\x1b[B")  # Port is second.
+                prompt_start = len(output)
+                os.write(fd, b"\r")
+                prompt_deadline = time.monotonic() + 5
+                while b"Remote access port" not in output[prompt_start:] and time.monotonic() < prompt_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, port + b"\r")
+                saved_marker = b"Port \xc2\xb7 " + port
+                saved_deadline = time.monotonic() + 5
+                while saved_marker not in output[prompt_start:] and time.monotonic() < saved_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\r")  # Enable Remote Access is the fresh menu default.
+                enabled_deadline = time.monotonic() + 5
+                while b"Remote access is being enabled" not in output and time.monotonic() < enabled_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\x1b")
+                time.sleep(0.3)
+                while read_available(fd, output, 0.01) > 0:
+                    pass
+                os.write(fd, b"\x1b")
+            elif action == "hub-pairing-open":
+                for _ in range(5):
+                    write_input(fd, output, b"\x1b[B")  # Pairing is sixth.
+                pairing_start = len(output)
+                os.write(fd, b"\r")
+                pairing_deadline = time.monotonic() + 5
+                while b"Pairing is closed" not in output[pairing_start:] and time.monotonic() < pairing_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\r")  # Open Pairing for 5 Minutes is the default.
+                confirm_deadline = time.monotonic() + 5
+                while b"Open Pairing Window" not in output[pairing_start:] and time.monotonic() < confirm_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\r")
+                opened_deadline = time.monotonic() + 5
+                while b"Pairing is open until" not in output[pairing_start:] and time.monotonic() < opened_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\x1b")
+                time.sleep(0.3)
+                while read_available(fd, output, 0.01) > 0:
+                    pass
+                os.write(fd, b"\x1b")
+            elif action == "hub-pairing":
+                pin = os.environ.get("ALU_DOCK_PTY_PIN", "0000").encode("ascii")
+                for _ in range(5):
+                    write_input(fd, output, b"\x1b[B")  # Pairing is sixth.
+                pairing_start = len(output)
+                os.write(fd, b"\r")
+                pairing_deadline = time.monotonic() + 5
+                while b"1 waiting" not in output[pairing_start:] and time.monotonic() < pairing_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                write_input(fd, output, b"\x1b[B")  # Close Pairing is first; waiting device is second.
+                os.write(fd, b"\r")
+                detail_deadline = time.monotonic() + 5
+                while b"Enter Pairing PIN" not in output[pairing_start:] and time.monotonic() < detail_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\r")
+                pin_deadline = time.monotonic() + 5
+                while b"four-digit PIN displayed" not in output[pairing_start:] and time.monotonic() < pin_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, pin + b"\r")
+                confirm_deadline = time.monotonic() + 5
+                while b"Confirm Pairing" not in output[pairing_start:] and time.monotonic() < confirm_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\r")
+                approved_deadline = time.monotonic() + 5
+                while b"PIN confirmed for" not in output[pairing_start:] and time.monotonic() < approved_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\x1b")
+                time.sleep(0.3)
+                while read_available(fd, output, 0.01) > 0:
+                    pass
+                os.write(fd, b"\x1b")
+            elif action == "hub-revoke":
+                for _ in range(5):
+                    write_input(fd, output, b"\x1b[B")  # Pairing is sixth.
+                revoke_start = len(output)
+                os.write(fd, b"\r")
+                trusted_deadline = time.monotonic() + 5
+                while b"1 trusted" not in output[revoke_start:] and time.monotonic() < trusted_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                write_input(fd, output, b"\x1b[B")  # Open Pairing is first; trusted device is second.
+                os.write(fd, b"\r")
+                detail_deadline = time.monotonic() + 5
+                while b"Revoke Access" not in output[revoke_start:] and time.monotonic() < detail_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\r")
+                confirm_deadline = time.monotonic() + 5
+                while b"Revoke This Device" not in output[revoke_start:] and time.monotonic() < confirm_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\r")
+                revoked_deadline = time.monotonic() + 5
+                while b"Trust was revoked for" not in output[revoke_start:] and time.monotonic() < revoked_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\x1b")
+                time.sleep(0.3)
+                while read_available(fd, output, 0.01) > 0:
+                    pass
+                os.write(fd, b"\x1b")
             elif action == "work-responsive":
                 time.sleep(0.08)
                 while read_available(fd, output, 0.01) > 0:
@@ -575,7 +698,7 @@ def main() -> int:
                 os.write(fd, b"\x0f")  # Ctrl+O: collapse/expand tool output.
                 time.sleep(0.1)
                 read_available(fd, output, 0.05)
-            if action not in ("hub-exit", "hub-click-leave", "hub-signal", "hub-signal-inventory", "hub-history-forget"):
+            if action not in ("hub-exit", "hub-click-leave", "hub-signal", "hub-signal-inventory", "hub-history-forget", "hub-remote-settings", "hub-pairing-open", "hub-pairing", "hub-revoke"):
                 os.write(fd, b"\x04")  # Ctrl+D: detach without stopping.
 
         exit_deadline = time.monotonic() + 8

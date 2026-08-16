@@ -49,6 +49,8 @@ import {
 } from "./dock-registry.js";
 import { OperationConflictError, OperationLedger, OperationReceiptExpiredError } from "./operation-ledger.js";
 import { ProjectTrustChallengeError, ProjectTrustRequiredError } from "./project-trust.js";
+import { RemoteAccessServer } from "./remote-access-server.js";
+import type { RemoteAccessState } from "./remote-access-state.js";
 import { encodeJsonLine, JsonLineDecoder, JsonLineError } from "./json-lines.js";
 import {
   FileSystemWorkspaceBrowser,
@@ -122,6 +124,7 @@ export interface DockHostOptions {
   initialize?: () => Promise<void>;
   sessionInventory?: SessionInventory;
   workspaceBrowser?: WorkspaceBrowser;
+  remoteAccessState?: RemoteAccessState;
 }
 
 export class DockHost {
@@ -147,6 +150,7 @@ export class DockHost {
   private readonly initialize: (() => Promise<void>) | undefined;
   private readonly sessionInventory: SessionInventory;
   private readonly workspaceBrowser: WorkspaceBrowser;
+  private readonly remoteAccess: RemoteAccessServer | undefined;
   private faultDrainPromise: Promise<void> | undefined;
   private unsubscribeMutationFault: (() => void) | undefined;
   private unsubscribeRuntimeReopened: (() => void) | undefined;
@@ -168,6 +172,12 @@ export class DockHost {
     this.initialize = options.initialize;
     this.sessionInventory = options.sessionInventory ?? { list: async () => ({ sessions: [], incomplete: false, diagnostics: [] }) };
     this.workspaceBrowser = options.workspaceBrowser ?? new FileSystemWorkspaceBrowser();
+    this.remoteAccess = options.remoteAccessState
+      ? new RemoteAccessServer({
+        state: options.remoteAccessState,
+        acceptProtocolSocket: (socket) => this.handleConnection(socket),
+      })
+      : undefined;
     this.faultStartedPromise = new Promise((resolveFaultStarted) => { this.resolveFaultStarted = resolveFaultStarted; });
     this.fatalPromise = new Promise((resolveFatal) => { this.resolveFatal = resolveFatal; });
   }
@@ -222,6 +232,7 @@ export class DockHost {
         this.unsubscribeCatalogRemoval = this.registry.onCatalogRecordsRemoved((instanceIds) => {
           for (const instanceId of instanceIds) this.closeStaleAttachStreams(instanceId);
         });
+        await this.remoteAccess?.start();
       }
     } catch (error) {
       if (server) await closeServer(server);
@@ -240,6 +251,7 @@ export class DockHost {
       const server = this.server;
       this.server = undefined;
       const closePromise = server ? closeServer(server) : Promise.resolve();
+      await this.remoteAccess?.stop();
       await this.registry.cancelInteractionsForHostDrain();
       for (const socket of this.connections) socket.destroy();
       this.connections.clear();

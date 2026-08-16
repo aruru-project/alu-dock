@@ -3,8 +3,10 @@ import { resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 
 import { ControlClientError, DockClient } from "./control/dock-client.js";
+import { defaultCatalogPath } from "./control/durable-catalog-store.js";
 import { ensureHost } from "./control/ensure-host.js";
 import type { ProjectTrustChoice } from "./control/project-trust.js";
+import { RemoteAccessState, remoteAccessStateRoot } from "./control/remote-access-state.js";
 import type { InstanceSnapshot, SessionDto } from "./core/managed-instance.js";
 import { requireHumanTarget } from "./human-target.js";
 import { runDockHub, type DockHubAction } from "./tui/dock-hub.js";
@@ -33,7 +35,8 @@ export async function openDock(options: OpenDockOptions): Promise<void> {
 
   let instance: InstanceSnapshot | undefined;
   if (options.mode === "hub") {
-    const action = await runDockHub(client, cwd);
+    const remoteAccessState = new RemoteAccessState(remoteAccessStateRoot(defaultCatalogPath()));
+    const action = await runDockHub(client, cwd, remoteAccessState);
     instance = await executeHubAction(client, action);
   } else {
     instance = await resolveWorkInstance(client, {
