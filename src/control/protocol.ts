@@ -64,6 +64,8 @@ export const MAX_REPLAY_EVENTS = 1_000;
 export const MAX_HISTORY_ITEMS = 200;
 export const MAX_CONVERSATION_HISTORY_ITEMS = 50;
 export const MAX_INSTANCE_LIST_ITEMS = 100;
+export const MAX_WORKSPACE_LIST_ITEMS = 200;
+export const MAX_WORKSPACE_ENTRY_NAME_CHARS = 1_024;
 // Leave ample room for the response envelope under MAX_CONTROL_LINE_BYTES.
 export const MAX_INSTANCE_LIST_RESULT_BYTES = 768 * 1_024;
 export const MAX_CATALOG_PRUNE_ITEMS = 1_000;
@@ -89,6 +91,7 @@ export const IMAGE_INPUT_CAPABILITY = "command.images.path.v1" as const;
 export const INSTANCE_KEYS_CAPABILITY = "instance.keys.v1" as const;
 export const INSTANCE_DISPLAY_NAME_CAPABILITY = "instance.display-name.v1" as const;
 export const CONVERSATION_CONTENT_CAPABILITY = "conversation.content.v1" as const;
+export const WORKSPACE_LIST_CAPABILITY = "workspace.list.v1" as const;
 
 export const IMPLEMENTED_CAPABILITIES = [
   "catalog.maintenance.v1",
@@ -126,6 +129,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "settings.v1",
   "tools.v1",
   "tui.projection.v1",
+  WORKSPACE_LIST_CAPABILITY,
 ] as const;
 export type Capability = typeof IMPLEMENTED_CAPABILITIES[number];
 
@@ -208,7 +212,8 @@ export type ControlRequest =
   | Request<"session.tree", { instanceId: string; treeRevision?: string; afterEntryId?: string; limit: number }>
   | Request<"session.navigate", { operationId: string; instanceId: string; targetId: string; summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }>
   | Request<"session.fork", { operationId: string; instanceId: string; entryId: string }>
-  | Request<"session.clone", { operationId: string; instanceId: string; entryId: string }>;
+  | Request<"session.clone", { operationId: string; instanceId: string; entryId: string }>
+  | Request<"workspace.list", { path: string; cursor?: WorkspaceListCursor; limit: number }>;
 
 export interface ControlError { code: string; message: string; retryable: boolean; details?: JsonObject }
 export type ControlResponse =
@@ -232,6 +237,21 @@ export interface InstanceListCursor { revision: number; offset: number; selector
 export interface ListResult {
   instances: InstanceSnapshot[];
   page: { revision: number; total: number; hiddenStopped: number; nextCursor?: InstanceListCursor };
+}
+export interface WorkspaceListCursor { revision: string; offset: number }
+export interface WorkspaceDirectoryEntry {
+  name: string;
+  kind: "directory" | "symlink";
+  hidden: boolean;
+}
+export interface WorkspaceListResult {
+  path: string;
+  parent?: string;
+  revision: string;
+  entries: WorkspaceDirectoryEntry[];
+  total: number;
+  truncated: boolean;
+  nextCursor?: WorkspaceListCursor;
 }
 export interface StatusResult { instance: InstanceSnapshot }
 export interface InstanceReadResult {
@@ -310,6 +330,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "queue.dequeue") return "queue.control.v1";
   if (type === "session.history") return "tui.projection.v1";
   if (type === "conversation.history" || type === "conversation.content") return CONVERSATION_CONTENT_CAPABILITY;
+  if (type === "workspace.list") return WORKSPACE_LIST_CAPABILITY;
   if (type === "session.inventory") return "session.inventory.v1";
   if (type === "session.tree" || type === "session.navigate" || type === "session.fork" || type === "session.clone") return "session.tree.v1";
   if (type === "command.submit" || type === "session.list") return "session.core";
@@ -632,6 +653,15 @@ export function parseControlRequest(input: unknown): ControlRequest {
       exact(params, ["operationId", "instanceId", "entryId"], "invalid_request");
       return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), entryId: id(params.entryId, "params.entryId", "invalid_request") } };
     }
+    case "workspace.list": {
+      exact(params, ["path", "cursor", "limit"], "invalid_request");
+      const path = string(params.path, "params.path", MAX_CONTROL_CWD_CHARS, "invalid_request");
+      if (!path.startsWith("/")) throw validation("invalid_request", "params.path must be absolute");
+      const limit = positive(params.limit, "params.limit", "invalid_request");
+      if (limit > MAX_WORKSPACE_LIST_ITEMS) throw validation("invalid_request", `params.limit must not exceed ${MAX_WORKSPACE_LIST_ITEMS}`);
+      const cursor = params.cursor === undefined ? undefined : parseWorkspaceListCursor(params.cursor, "params.cursor", "invalid_request");
+      return { ...base, type, params: { path, cursor, limit } };
+    }
     default: throw validation("unknown_request", `Unknown request type: ${type}`);
   }
 }
@@ -727,6 +757,29 @@ export function parseListResult(input: unknown): ListResult {
     throw validation("invalid_response", "List next cursor is inconsistent with its page");
   }
   return { instances, page: { revision, total, hiddenStopped, nextCursor } };
+}
+export function parseWorkspaceListResult(input: unknown): WorkspaceListResult {
+  const value = object(input, "workspace list result");
+  exact(value, ["path", "parent", "revision", "entries", "total", "truncated", "nextCursor"]);
+  const path = string(value.path, "path", MAX_CONTROL_CWD_CHARS);
+  if (!path.startsWith("/")) throw validation("invalid_response", "Workspace path must be absolute");
+  const parent = optionalString(value.parent, "parent", MAX_CONTROL_CWD_CHARS);
+  if (parent !== undefined && !parent.startsWith("/")) throw validation("invalid_response", "Workspace parent must be absolute");
+  const revision = string(value.revision, "revision", 128);
+  const entries = array(value.entries, "entries", MAX_WORKSPACE_LIST_ITEMS).map((item, index) => {
+    const entry = object(item, `entries[${index}]`);
+    exact(entry, ["name", "kind", "hidden"]);
+    return {
+      name: string(entry.name, `entries[${index}].name`, MAX_WORKSPACE_ENTRY_NAME_CHARS),
+      kind: enumeration(entry.kind, `entries[${index}].kind`, ["directory", "symlink"]),
+      hidden: boolean(entry.hidden, `entries[${index}].hidden`),
+    };
+  });
+  const total = unsigned(value.total, "total");
+  const truncated = boolean(value.truncated, "truncated");
+  const nextCursor = value.nextCursor === undefined ? undefined : parseWorkspaceListCursor(value.nextCursor, "nextCursor");
+  if (truncated !== (nextCursor !== undefined)) throw validation("invalid_response", "Workspace continuation metadata is inconsistent");
+  return { path, parent, revision, entries, total, truncated, nextCursor };
 }
 export function parseStatusResult(input: unknown): StatusResult { const value = object(input, "get result"); exact(value, ["instance"]); return { instance: parseInstance(value.instance, "instance") }; }
 export function parseInstanceReadResult(input: unknown): InstanceReadResult {
@@ -1259,6 +1312,13 @@ function parseInstanceListCursor(input: unknown, field: string, code = "invalid_
     revision: unsigned(cursor.revision, `${field}.revision`, code),
     offset: unsigned(cursor.offset, `${field}.offset`, code),
     selector: enumeration(cursor.selector, `${field}.selector`, ["actionable", "all"], code),
+  };
+}
+function parseWorkspaceListCursor(input: unknown, field: string, code = "invalid_response"): WorkspaceListCursor {
+  const cursor = object(input, field, code); exact(cursor, ["revision", "offset"], code);
+  return {
+    revision: string(cursor.revision, `${field}.revision`, 128, code),
+    offset: unsigned(cursor.offset, `${field}.offset`, code),
   };
 }
 function parseExecutor(input: unknown, field: string): ExecutorIdentity {

@@ -37,6 +37,7 @@ import {
   parseSessionForkResult,
   parseSessionCloneResult,
   parseStatusResult,
+  parseWorkspaceListResult,
   parseToolsResult,
   parseSettingsResult,
   parseSettingUpdateResult,
@@ -51,6 +52,7 @@ import {
   INSTANCE_KEYS_CAPABILITY,
   INSTANCE_DISPLAY_NAME_CAPABILITY,
   CONVERSATION_CONTENT_CAPABILITY,
+  WORKSPACE_LIST_CAPABILITY,
   implementedCapabilities,
   requiredCapabilities,
 } from "../src/control/protocol.js";
@@ -219,6 +221,13 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
     ...base, type: "session.list", params: { instanceId: "i1", scope: "all" },
   });
   assert.throws(() => parseControlRequest({ ...base, type: "session.list", params: { instanceId: "i1", scope: "project" } }), /unsupported value/);
+  assert.deepEqual(parseControlRequest({
+    ...base,
+    type: "workspace.list",
+    params: { path: "/work/project", cursor: { revision: "listing-1", offset: 200 }, limit: 200 },
+  }).params, { path: "/work/project", cursor: { revision: "listing-1", offset: 200 }, limit: 200 });
+  assert.throws(() => parseControlRequest({ ...base, type: "workspace.list", params: { path: "relative", limit: 200 } }), /must be absolute/u);
+  assert.throws(() => parseControlRequest({ ...base, type: "workspace.list", params: { path: "/work", limit: 201 } }), /must not exceed 200/u);
   assert.deepEqual(parseControlRequest({ ...base, type: "command.abort", params: { operationId: "abort-op", instanceId: "i1" } }).params, { operationId: "abort-op", instanceId: "i1" });
   assert.throws(() => parseControlRequest({ ...base, type: "command.abort", params: { operationId: "abort-op", instanceId: "i1", force: true } }), /Unexpected field/);
   assert.deepEqual(parseControlRequest({ ...base, type: "queue.dequeue", params: { operationId: "dequeue-op", instanceId: "i1" } }).params, { operationId: "dequeue-op", instanceId: "i1" });
@@ -239,6 +248,7 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   assert.equal(capabilityForRequest("instance.get_by_key"), INSTANCE_KEYS_CAPABILITY);
   assert.equal(capabilityForRequest("conversation.history"), CONVERSATION_CONTENT_CAPABILITY);
   assert.equal(capabilityForRequest("conversation.content"), CONVERSATION_CONTENT_CAPABILITY);
+  assert.equal(capabilityForRequest("workspace.list"), WORKSPACE_LIST_CAPABILITY);
   assert.equal(capabilityForRequest("session.inventory"), "session.inventory.v1");
   assert.equal(capabilityForRequest("extension.tools_expanded.set"), "extension_ui.tools-expanded.v1");
   assert.equal(capabilityForRequest("extension.widget_viewport.set"), "extension_ui.widgets.v1");
@@ -311,6 +321,28 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
     type: "instance.create",
     params: { operationId: "create-1", cwd: "/tmp/project", trustChallengeId: "challenge-1", projectTrustDecision: "allow" },
   }), /unsupported value/);
+});
+
+test("workspace list results preserve canonical navigation and continuation facts", () => {
+  const parsed = parseWorkspaceListResult({
+    path: "/work/project",
+    parent: "/work",
+    revision: "listing-1",
+    entries: [
+      { name: ".hidden", kind: "directory", hidden: true },
+      { name: "linked", kind: "symlink", hidden: false },
+    ],
+    total: 3,
+    truncated: true,
+    nextCursor: { revision: "listing-1", offset: 2 },
+  });
+  assert.equal(parsed.path, "/work/project");
+  assert.deepEqual(parsed.entries.map((entry) => [entry.name, entry.kind, entry.hidden]), [
+    [".hidden", "directory", true],
+    ["linked", "symlink", false],
+  ]);
+  assert.deepEqual(parsed.nextCursor, { revision: "listing-1", offset: 2 });
+  assert.throws(() => parseWorkspaceListResult({ ...parsed, truncated: false }), /continuation metadata/u);
 });
 
 

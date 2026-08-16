@@ -24,6 +24,8 @@ import {
   INSTANCE_KEYS_CAPABILITY,
   INSTANCE_DISPLAY_NAME_CAPABILITY,
   CONVERSATION_CONTENT_CAPABILITY,
+  WORKSPACE_LIST_CAPABILITY,
+  MAX_WORKSPACE_LIST_ITEMS,
   type Capability,
   type ClientHello,
   type ControlRequest,
@@ -65,6 +67,7 @@ import {
   parseSessionCloneResult,
   parseStatusResult,
   parseStopResult,
+  parseWorkspaceListResult,
   parseToolsResult,
   parseSettingsResult,
   parseSettingUpdateResult,
@@ -88,6 +91,8 @@ import {
   type InteractionRespondResult,
   type WidgetViewportResult,
   type InstanceListCursor,
+  type WorkspaceListCursor,
+  type WorkspaceListResult,
   type KeyLookupResult,
   type ListResult,
   type ModelsResult,
@@ -212,6 +217,7 @@ export class DockClient {
   async conversationHistory(instanceId:string,cursor?:string,limit=50):Promise<ConversationHistoryResult>{const result=await this.request("conversation.history",{instanceId,cursor,limit},CONVERSATION_CONTENT_CAPABILITY,parseConversationHistoryResult);if(result.instance.id!==instanceId)throw new ControlClientError("invalid_response","Conversation history result belongs to another instance");return result;}
   async conversationContent(instanceId:string,contentRef:string,cursor?:string):Promise<ConversationContentResult>{const result=await this.request("conversation.content",{instanceId,contentRef,cursor},CONVERSATION_CONTENT_CAPABILITY,parseConversationContentResult);if(result.instanceId!==instanceId||result.contentRef!==contentRef)throw new ControlClientError("invalid_response","Conversation content result belongs to another request");return result;}
   sessionInventory(cwd:string,scope:"cwd"|"all"="cwd"):Promise<SessionInventoryResult>{return this.request("session.inventory",{cwd,scope},["session.inventory.v1","session.inventory-diagnostics.v1"],parseSessionInventoryResult);}
+  workspaceList(path:string,cursor?:WorkspaceListCursor,limit=MAX_WORKSPACE_LIST_ITEMS):Promise<WorkspaceListResult>{return this.request("workspace.list",{path,cursor,limit},WORKSPACE_LIST_CAPABILITY,parseWorkspaceListResult);}
   sessions(instanceId:string,scope:"cwd"|"all"):Promise<SessionsResult>{return this.request("session.list",{instanceId,scope},["session.core","projection.completeness.v1"],parseSessionsResult);}
   switchSession(instanceId:string,sessionFile:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<SessionReplacementResult>{return this.request("session.switch",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.commands.v1",parseSessionReplacementResult);}
   newSession(instanceId:string,parentSession?:string,operationId=this.createRequestId()):Promise<SessionReplacementResult>{return this.request("session.new",{operationId,instanceId,parentSession},"session.commands.v1",parseSessionReplacementResult);}

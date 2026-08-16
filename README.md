@@ -19,7 +19,7 @@ Hub / Work / Web / future clients
 ## 当前能力
 
 - 长期 Host 与 durable instance catalog；
-- instance 创建、继续、打开、停止、reopen、adopt、forget；
+- instance 创建前的工作目录浏览，以及继续、打开、停止、reopen、adopt、forget；
 - 多个相互隔离的 Agent Worker；
 - Session Work TUI 的 conversation、tools、Queue、model、settings、tree、compaction 和 Extension UI；
 - Protocol V2 的权威读取、实时跟随、断线恢复和操作去重；
@@ -34,7 +34,7 @@ Hub / Work / Web / future clients
 npm run install:local
 aludock service status
 
-aludock                       # Dock Hub
+aludock                       # Dock Hub；New 可先浏览并确认工作目录
 aludock -c                    # 继续当前项目；没有则 New
 aludock new --cwd "$PWD" --name demo
 aludock attach TARGET

@@ -15,6 +15,7 @@ import type { InstanceSnapshot, SessionDto } from "../core/managed-instance.js";
 import { AluHubBrand } from "./alu-mascot.js";
 import { mouseTrackingSequences, parseTerminalMouseEvent } from "./mouse-input.js";
 import { paint, selectListTheme } from "./theme.js";
+import { collectWorkspaceDirectory, WorkspaceBrowserSurface } from "./workspace-browser.js";
 
 const NEW_INSTANCE = "hub:new";
 const CONTINUE = "hub:continue";
@@ -32,7 +33,7 @@ const LEAVE_ALTERNATE_SCREEN = "\u001b[?1049l";
 export type DockHubAction =
   | { kind: "attach"; instance: InstanceSnapshot }
   | { kind: "reopen"; instance: InstanceSnapshot }
-  | { kind: "new" }
+  | { kind: "new"; cwd: string }
   | { kind: "adopt"; session: SessionDto }
   | { kind: "exit" };
 
@@ -83,7 +84,12 @@ export async function runDockHub(client: DockClient, cwd: string): Promise<DockH
         "↑↓ choose · Enter open · Esc leave Hub",
       );
       if (signalRequested || !selected || selected === EXIT_HUB) return { kind: "exit" };
-      if (selected === NEW_INSTANCE) return { kind: "new" };
+      if (selected === NEW_INSTANCE) {
+        const selectedCwd = await chooseWorkspaceDirectory(terminal, client, contextCwd);
+        if (signalRequested) return { kind: "exit" };
+        if (selectedCwd !== undefined) return { kind: "new", cwd: selectedCwd };
+        continue;
+      }
       if (selected === CONTINUE) {
         const action = await chooseContinueAction(terminal, client, instances, contextCwd);
         if (signalRequested) return { kind: "exit" };
@@ -137,7 +143,7 @@ export function buildDockHubEntries(
   const continuable = instances.filter(isContinuable).length;
   const history = instances.filter(isHistoryRecord).length;
   return [
-    { value: NEW_INSTANCE, label: "New", description: `Create a Dock instance in ${terminalSafe(cwd)}` },
+    { value: NEW_INSTANCE, label: "New", description: `Choose a working directory · starts in ${terminalSafe(cwd)}` },
     {
       value: CONTINUE,
       label: `Continue · ${continuable}`,
@@ -389,6 +395,84 @@ async function chooseSessionAction(
   const instance = instances.find((candidate) => candidate.id === action.slice(separator + 1));
   if (!instance) return undefined;
   return action.startsWith("attach:") ? { kind: "attach", instance } : { kind: "reopen", instance };
+}
+
+async function chooseWorkspaceDirectory(
+  terminal: HubProcessTerminal,
+  client: DockClient,
+  initialPath: string,
+): Promise<string | undefined> {
+  const tui = new TuiMainScreen(terminal, process.env.PI_HARDWARE_CURSOR === "1");
+  const surface = new WorkspaceBrowserSurface({
+    initialPath,
+    terminalRows: () => terminal.rows,
+    requestRender: () => tui.requestRender(),
+  });
+  const layout = new HubMenuLayout(
+    new AluHubBrand(),
+    new Text("", 0, 0),
+    surface,
+    new Text("", 0, 0),
+    () => terminal.rows,
+  );
+  let settled = false;
+  let started = false;
+  let signalReceived = false;
+  let loadVersion = 0;
+  let resolveSelection!: (selection: string | undefined) => void;
+  const selection = new Promise<string | undefined>((resolveSelectionPromise) => { resolveSelection = resolveSelectionPromise; });
+  const finish = (value: string | undefined): void => {
+    if (settled) return;
+    settled = true;
+    loadVersion += 1;
+    resolveSelection(value);
+  };
+  const loadPath = (path: string): void => {
+    const version = ++loadVersion;
+    surface.setLoading();
+    void collectWorkspaceDirectory((cursor, limit) => client.workspaceList(path, cursor, limit))
+      .then((listing) => {
+        if (settled || version !== loadVersion) return;
+        surface.replaceDirectory(listing);
+      })
+      .catch((error: unknown) => {
+        if (settled || version !== loadVersion) return;
+        surface.setError(errorMessage(error));
+      });
+  };
+  surface.onOpenPath = loadPath;
+  surface.onConfirm = finish;
+  surface.onCancel = () => finish(undefined);
+  const onSignal = (): void => {
+    signalReceived = true;
+    finish(undefined);
+  };
+  const removeMouseListener = tui.addInputListener((data) => {
+    const event = parseTerminalMouseEvent(data);
+    if (!event) return undefined;
+    if (event.kind === "wheel") {
+      surface.handleInput(event.direction === "up" ? "\u001b[A" : "\u001b[B");
+      tui.requestRender();
+    }
+    return { consume: true };
+  });
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+  tui.addChild(layout);
+  tui.setFocus(surface);
+  try {
+    terminal.clearScreen();
+    tui.start();
+    started = true;
+    loadPath(initialPath);
+    return await selection;
+  } finally {
+    removeMouseListener();
+    if (started && !signalReceived) await terminal.drainInput(200, 30).catch(() => {});
+    tui.stop();
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
+  }
 }
 
 async function selectMenu(

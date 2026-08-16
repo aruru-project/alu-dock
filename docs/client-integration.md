@@ -117,9 +117,15 @@ Event overlap 只按完整事件身份（`runtimeGeneration + sequence`）处理
 
 客户端不发送 conversation ACK。页面刷新、进程重启或本地状态丢失时，直接重新 bootstrap。Read、follow 或 Extension UI 操作连接断开，都不表示 Agent runtime 失败，也不会停止 instance。
 
+## 创建前浏览工作目录
+
+需要让用户选择 cwd 的客户端使用 `workspace.list.v1`，不自行扫描目录，也不为某种界面增加专用接口。`workspace.list` 接收 Host 文件系统中的绝对 `path` 以及可选分页 cursor，返回规范 `path`、可选 `parent`、目录条目和继续读取所需事实。客户端可以用键盘列表、点击列表或自己的视觉组件呈现同一份结果。
+
+浏览范围就是 Dock Host 运行用户已有的文件系统权限。目录不可读、已经消失或符号链接不可用时，Host 返回可恢复错误；客户端显示错误并允许修改路径。浏览不会读取文件正文、改变进程 cwd 或授予 project trust。用户确认后仍调用 `instance.create(cwd)`。
+
 ## Instance 与 Agent session
 
-Host control 提供 instance create、ensure、list、get/get-by-key、read、follow、stop、reopen、adopt、forget、catalog prune 和 persisted-session inventory。
+Host control 提供 workspace list、instance create、ensure、list、get/get-by-key、read、follow、stop、reopen、adopt、forget、catalog prune 和 persisted-session inventory。
 
 Agent session 能力包括 prompt、abort、Queue、conversation、model、thinking、tools、settings、resources、session replacement、tree、compaction 和 Extension UI。实际可用能力以 hello capability negotiation 为准。
 

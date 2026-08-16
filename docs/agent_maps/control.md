@@ -25,6 +25,7 @@ Protocol V2 不暴露 Worker endpoint、Agent runtime object 或 Agent 私有存
 Host 自己处理：
 
 - instance create、ensure、list、get、stop、reopen、forget；
+- 创建前的只读 workspace 目录浏览；
 - catalog、project trust 与 persisted-session inventory；
 - Worker lifecycle、runtime kind 与 generation；
 - Queue、operation、Extension UI 操作权与 read/follow reconnect。
@@ -50,6 +51,8 @@ Host 不为这些能力维护第二套 Agent 实现，也不重复投影 Worker 
 Client 发给 Host 的 hello/request 使用 closed JSON-safe shape，未知字段会被拒绝。Host 发给 Client 的 response/event 仍严格校验已知字段、版本、类型和边界，但 Client 必须忽略新增的未知可选字段；只有删除字段、改变既有语义或新增无法忽略的类型时才需要 capability 或协议版本。单 frame 可以有传输上限，但业务内容不能因此永久截断；大型 conversation 使用分页和 chunk 继续读取。
 
 Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 TUI 或 Web 客户端重写。
+
+`workspace.list.v1` 是创建实例前唯一的目录发现能力。客户端明确传入 Host 文件系统中的绝对路径；Host 返回规范当前路径、上级路径、目录/目录符号链接和分页事实。它只使用 Host 运行用户已有的文件系统权限，不设置额外根目录或白名单，不读取文件正文、不执行 shell，也不改变任何 Host 或 Worker 的进程 cwd。目录选择完成后仍由 `instance.create(cwd)` 执行既有校验和 project trust；浏览本身不产生信任。
 
 ## 身份
 
@@ -115,5 +118,6 @@ Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力
 - `src/control/operation-ledger.ts`：Host epoch 内的 mutation identity。
 - `src/control/catalog-*.ts`：durable catalog transaction 与 recovery。
 - `src/control/json-lines.ts`：JSONL framing。
+- `src/control/workspace-browser.ts`：Host 文件系统目录浏览与可恢复错误。
 
 新增功能时先判断它属于 Host control 还是 Agent session。不要把 Agent session 能力塞进 catalog/Managed state，也不要为同一 Protocol V2 shape 在 Worker、Host 和客户端分别维护重复定义。

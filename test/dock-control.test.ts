@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { createConnection, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -80,6 +80,55 @@ async function cleanupHarness(harness: Harness): Promise<void> {
   await harness.host.stop().catch(() => {});
   await rm(harness.directory, { recursive: true, force: true });
 }
+
+test("workspace.list browses the Host filesystem without creating a Dock instance", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-workspace-list-"));
+  await chmod(directory, 0o700);
+  const socketPath = join(directory, "dock.sock");
+  const target = join(directory, "target");
+  await Promise.all([
+    mkdir(join(directory, ".hidden")),
+    mkdir(join(directory, "regular")),
+    mkdir(target),
+    writeFile(join(directory, "plain.txt"), "not a folder\n", "utf8"),
+  ]);
+  await Promise.all([
+    symlink(target, join(directory, "linked"), "dir"),
+    symlink(join(directory, "missing"), join(directory, "broken"), "dir"),
+  ]);
+  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => (
+    new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedAgentWorkerConnection(`pi-${id}`) })
+  ));
+  const host = new DockHost({ socketPath, registry });
+  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
+  await host.start();
+  const client = new DockClient({ socketPath });
+
+  const entries = [];
+  let page = await client.workspaceList(directory, undefined, 2);
+  const canonicalRoot = await realpath(directory);
+  assert.equal(page.path, canonicalRoot);
+  assert.equal(page.parent, join(canonicalRoot, ".."));
+  entries.push(...page.entries);
+  while (page.nextCursor) {
+    page = await client.workspaceList(directory, page.nextCursor, 2);
+    entries.push(...page.entries);
+  }
+  assert.deepEqual(entries.map((entry) => entry.name), [".hidden", "broken", "linked", "regular", "target"]);
+  assert.equal(entries.find((entry) => entry.name === ".hidden")?.hidden, true);
+  assert.equal(entries.find((entry) => entry.name === "linked")?.kind, "symlink");
+  assert.equal(entries.some((entry) => entry.name === "plain.txt"), false);
+
+  assert.equal((await client.workspaceList(join(directory, "linked"))).path, await realpath(target));
+  assert.equal((await client.workspaceList(join(directory, ".hidden"))).path, await realpath(join(directory, ".hidden")));
+  await assert.rejects(
+    client.workspaceList(join(directory, "missing")),
+    (error: unknown) => error instanceof ControlClientError
+      && error.code === "workspace_not_found"
+      && /does not exist/u.test(error.message),
+  );
+  assert.deepEqual(registry.list(), []);
+});
 
 async function createTransactionHarness(port: ScriptedCatalogCommitPort, faultDrainTimeoutMs = 2_000): Promise<Harness> {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-transaction-"));
@@ -753,18 +802,22 @@ test("Hub signal restores the shell immediately while Pi session inventory is st
   assert.doesNotMatch(output.slice(leave + "\u001b[?1049l".length, marker), /\u001b\[[0-?]*[ -/]*[@-~]/u);
 });
 
-test("Hub New and persisted-session Adopt explicitly enter Session Work", async (context) => {
+test("Hub New browses and confirms a cwd before entering Session Work, while persisted-session Adopt remains available", async (context) => {
   const newHarness = await createHarness();
   context.after(() => cleanupHarness(newHarness));
+  const selectedCwd = join(newHarness.directory, "selected-workspace");
+  await mkdir(selectedCwd);
   await newHarness.host.start();
   const newPty = await runPtyTui([
     process.execPath,
     join(process.cwd(), "dist/src/cli.js"),
     "--socket", newHarness.socketPath,
-  ], "hub-new");
+  ], "hub-new", undefined, newHarness.directory);
   const newOutput = Buffer.from(newPty.output, "base64").toString("utf8");
   assert.equal(newPty.timedOut, false, newOutput.slice(-2_000));
   assert.equal(newPty.status, 0, newOutput.slice(-2_000));
+  assert.match(newOutput, /Choose a working directory/u);
+  assert.match(newOutput, /selected-workspace/u);
   assert.match(newOutput, /Creating a Pi session/u);
   assert.match(newOutput, /cache /u);
   assert.doesNotMatch(newOutput, /NIGHT CONSOLE/u);
@@ -773,6 +826,7 @@ test("Hub New and persisted-session Adopt explicitly enter Session Work", async 
   const restoredNew = newOutput.indexOf("\u001b[?1049l");
   assert.doesNotMatch(newOutput.slice(restoredNew + 1), /\u001b\[\?1049h|\u001b\[\?1000h|\u001b\[\?1006h/u, "Work must remain on the main buffer with native mouse");
   assert.equal(newHarness.registry.list().length, 1);
+  assert.equal(newHarness.registry.list()[0]?.cwd, await realpath(selectedCwd));
 
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-hub-adopt-"));
   await chmod(directory, 0o700);
@@ -3808,11 +3862,12 @@ async function runPtyTui(
   command: string[],
   action: "detach" | "work-responsive" | "hub-exit" | "hub-click-leave" | "hub-narrow" | "hub-signal" | "hub-signal-inventory" | "hub-new" | "hub-continue" | "hub-mouse-continue" | "hub-history" | "hub-history-forget" | "hub-adopt" | "editor" | "abort" | "queue-restore" | "queue-inflight" | "queue-abort" | "transport-close" | "stream-recover" | "external-stop" | "compact-detach" | "compact-queue" | "stage3" | "stage6" | "tree-branch-roundtrip" | "model-search" | "model-disconnect" | "history-flow" | "history-live-flow" | "flow-frame-stability" | "tool-fold" | "activity-stability" | "activity-streaming" | "command-handled" | "work-native-mouse" | "extension-dialogs" | "extension-replacement" | "extension-pending-attach" | "extension-response-retry" = "detach",
   readyFile?: string,
+  workingDirectory = process.cwd(),
 ): Promise<PtyTuiResult> {
   return new Promise((resolveRun, rejectRun) => {
     const driver = join(process.cwd(), "test/fixtures/pty-tui-driver.py");
     const child = spawn("python3", [driver, ...command], {
-      cwd: process.cwd(),
+      cwd: workingDirectory,
       env: { ...process.env, ALU_DOCK_PTY_ACTION: action, ...(readyFile ? { ALU_DOCK_PTY_READY_FILE: readyFile } : {}) },
       stdio: ["ignore", "pipe", "pipe"],
     });

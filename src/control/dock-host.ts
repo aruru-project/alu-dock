@@ -50,6 +50,11 @@ import {
 import { OperationConflictError, OperationLedger, OperationReceiptExpiredError } from "./operation-ledger.js";
 import { ProjectTrustChallengeError, ProjectTrustRequiredError } from "./project-trust.js";
 import { encodeJsonLine, JsonLineDecoder, JsonLineError } from "./json-lines.js";
+import {
+  FileSystemWorkspaceBrowser,
+  WorkspaceBrowseError,
+  type WorkspaceBrowser,
+} from "./workspace-browser.js";
 import { executeSessionCommand, isSessionCommandRequest } from "./session-command-service.js";
 import {
   capabilityForRequest,
@@ -116,6 +121,7 @@ export interface DockHostOptions {
   operationReceiptCapacity?: number;
   initialize?: () => Promise<void>;
   sessionInventory?: SessionInventory;
+  workspaceBrowser?: WorkspaceBrowser;
 }
 
 export class DockHost {
@@ -140,6 +146,7 @@ export class DockHost {
   private readonly faultDrainTimeoutMs: number;
   private readonly initialize: (() => Promise<void>) | undefined;
   private readonly sessionInventory: SessionInventory;
+  private readonly workspaceBrowser: WorkspaceBrowser;
   private faultDrainPromise: Promise<void> | undefined;
   private unsubscribeMutationFault: (() => void) | undefined;
   private unsubscribeRuntimeReopened: (() => void) | undefined;
@@ -160,6 +167,7 @@ export class DockHost {
     this.faultDrainTimeoutMs = Math.max(1, options.faultDrainTimeoutMs ?? 5_000);
     this.initialize = options.initialize;
     this.sessionInventory = options.sessionInventory ?? { list: async () => ({ sessions: [], incomplete: false, diagnostics: [] }) };
+    this.workspaceBrowser = options.workspaceBrowser ?? new FileSystemWorkspaceBrowser();
     this.faultStartedPromise = new Promise((resolveFaultStarted) => { this.resolveFaultStarted = resolveFaultStarted; });
     this.fatalPromise = new Promise((resolveFatal) => { this.resolveFatal = resolveFatal; });
   }
@@ -575,6 +583,10 @@ export class DockHost {
       }
       case "session.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listSessions(request.params.scope); this.sendSuccessAndEnd(socket,request.requestId,{sessions:result.sessions,...collectionCompleteness(result,clientRequirements)}); return; }
       case "session.tree": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getTreePage(request.params.treeRevision,request.params.afterEntryId,request.params.limit)); return; }
+      case "workspace.list": {
+        this.sendSuccessAndEnd(socket, request.requestId, await this.workspaceBrowser.list(request.params));
+        return;
+      }
     }
   }
 
@@ -762,7 +774,8 @@ function isMutationRequest(type: ControlRequest["type"]): boolean {
     && type !== "conversation.content"
     && type !== "session.inventory"
     && type !== "session.list"
-    && type !== "session.tree";
+    && type !== "session.tree"
+    && type !== "workspace.list";
 }
 
 function collectionCompleteness(
@@ -1126,6 +1139,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
     return { code: error.code, message: error.message };
   }
   if (error instanceof ProtocolValidationError) return { code: error.code, message: error.message };
+  if (error instanceof WorkspaceBrowseError) return { code: error.code, message: error.message, retryable: error.retryable };
   if (error instanceof CatalogListCursorStaleError) return { code: "cursor_stale", message: error.message, retryable: true };
   if (error instanceof InstanceNotFoundError) return { code: "not_found", message: error.message };
   if (error instanceof InstanceForgetRejectedError) return { code: "instance_not_terminal", message: error.message };

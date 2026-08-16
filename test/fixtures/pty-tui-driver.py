@@ -140,6 +140,16 @@ def main() -> int:
                     signal_restore_ms = (time.monotonic() - signal_sent) * 1000
             elif action == "hub-new":
                 os.write(fd, b"\r")  # Hub defaults to New.
+                browser_deadline = time.monotonic() + 5
+                while (b"Choose a working directory" not in output or b"Use this directory" not in output) and time.monotonic() < browser_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                write_input(fd, output, b"selected-workspace")  # Filter the complete folder list.
+                os.write(fd, b"\r")  # Enter the matching child folder.
+                time.sleep(0.2)
+                while read_available(fd, output, 0.01) > 0:
+                    pass
+                os.write(fd, b"\r")  # Confirm Use this directory.
                 work_deadline = time.monotonic() + 8
                 while b"cache " not in output and time.monotonic() < work_deadline:
                     if read_available(fd, output, 0.05) < 0:

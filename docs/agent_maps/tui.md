@@ -20,6 +20,8 @@ Hub 的主要对象是 Dock instance。它提供 New、Continue、History、pers
 
 Hub 使用 alternate screen；进入 Work 或离开前恢复 shell screen。Instance lifecycle 和 persisted-session inventory 来自 Host，不由 TUI 自己扫描 runtime。Hub 直接渲染 Protocol V2 的 `displayName`；缺少 session name/key 时的 cwd fallback 与安全清洗由 Host 统一完成，Hub 不再把短 instance ID 当作默认名称。
 
+Hub 的 Dock New 从启动 `aludock` 时的当前目录打开 workspace 列表，经 `workspace.list.v1` 返回上级和子目录后再确认 cwd。列表支持搜索、分页/跳页、直接输入路径和隐藏目录切换；隐藏目录默认不显示，但直接输入隐藏路径仍可进入。目录符号链接带标记并按 Host 返回的规范目标继续浏览。取消选择返回 Hub，不创建半成品 instance；确认后才调用 `instance.create(cwd)`。直接执行 `aludock new --cwd ...` 的既有入口不经过 Hub 选择器。
+
 ## Session Work
 
 Work 的主要对象是一个已打开的 Dock instance。它负责：
@@ -68,6 +70,7 @@ Alu Dock 的主题、布局和组件由 `src/tui/` 内的实现负责。顶层�
 
 - `src/interactive.ts`：CLI 到 Hub/Work 的组合入口。
 - `src/tui/dock-hub.ts`：Hub。
+- `src/tui/workspace-browser.ts`：Dock New 目录列表、搜索、直接路径与大列表导航。
 - `src/tui/dock-tui.ts`：Session Work composition 与输入。
 - `src/tui/conversation.ts`：conversation rendering。
 - `src/tui/snapshot-projection.ts`：Protocol event 到客户端本地 view state。

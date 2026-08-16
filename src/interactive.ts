@@ -34,7 +34,7 @@ export async function openDock(options: OpenDockOptions): Promise<void> {
   let instance: InstanceSnapshot | undefined;
   if (options.mode === "hub") {
     const action = await runDockHub(client, cwd);
-    instance = await executeHubAction(client, action, cwd);
+    instance = await executeHubAction(client, action);
   } else {
     instance = await resolveWorkInstance(client, {
       mode: options.mode,
@@ -73,11 +73,10 @@ export async function openDock(options: OpenDockOptions): Promise<void> {
 async function executeHubAction(
   client: DockClient,
   action: DockHubAction,
-  cwd: string,
 ): Promise<InstanceSnapshot | undefined> {
   if (action.kind === "exit") return undefined;
   if (action.kind === "attach") return assertAttachable(action.instance);
-  if (action.kind === "new") return createWithNotice(client, cwd);
+  if (action.kind === "new") return createWithNotice(client, action.cwd);
   if (action.kind === "reopen") return reopenWithNotice(client, action.instance);
   return adoptWithNotice(client, action.session);
 }

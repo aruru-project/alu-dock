@@ -19,6 +19,7 @@ import { ExtensionTextDialog } from "../src/tui/extension-text-dialog.js";
 import { formatWorkStatus, pickerContentRowBudget, shouldApplyInitialHistory, snapshotIsNotOlder } from "../src/tui/dock-tui.js";
 import { SessionTreeSurface } from "../src/tui/session-tree-surface.js";
 import { FixedActionDialog, WorkModalFrame } from "../src/tui/work-modal.js";
+import { WorkspaceBrowserSurface } from "../src/tui/workspace-browser.js";
 import { projectSnapshot } from "../src/tui/snapshot-projection.js";
 import type { TreeNodeDto } from "../src/core/instance-dto.js";
 
@@ -111,6 +112,39 @@ test("searchable picker accepts typed filtering while preserving IME focus propa
   picker.onCancel = () => { cancelled = true; };
   picker.handleInput("\u001b");
   assert.equal(cancelled, true);
+});
+
+test("workspace browser hides dot folders by default while direct paths remain reachable", () => {
+  let opened: string | undefined;
+  const surface = new WorkspaceBrowserSurface({
+    initialPath: "/work",
+    terminalRows: () => 24,
+    requestRender: () => {},
+  });
+  surface.onOpenPath = (path) => { opened = path; };
+  surface.replaceDirectory({
+    path: "/work",
+    parent: "/",
+    revision: "workspace-1",
+    entries: [
+      { name: ".secret", kind: "directory", hidden: true },
+      { name: "project", kind: "directory", hidden: false },
+      { name: "shared", kind: "symlink", hidden: false },
+    ],
+    total: 3,
+    truncated: false,
+  });
+  surface.focused = true;
+
+  assert.doesNotMatch(surface.render(80).join("\n"), /\.secret/u);
+  surface.handleInput("\u001bh"); // Alt+H
+  assert.match(surface.render(80).join("\n"), /\.secret/u);
+  surface.handleInput("\u001bh");
+  surface.handleInput("\x0c"); // Ctrl+L
+  assert.equal(surface.enteringPath, true);
+  surface.handleInput(".secret");
+  surface.handleInput("\r");
+  assert.equal(opened, "/work/.secret");
 });
 
 test("resized 80x24 searchable Work modals retain selection, position, and footer inside their row budget", () => {
