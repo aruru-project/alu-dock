@@ -11,6 +11,7 @@ import {
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
+import { ControlClientError } from "../control/dock-client.js";
 import {
   MAX_WORKSPACE_LIST_ITEMS,
   type WorkspaceDirectoryEntry,
@@ -125,7 +126,7 @@ export class WorkspaceBrowserSurface extends Container implements Focusable {
 
   setError(message: string): void {
     this.busy = false;
-    this.error = safeLine(message) || "Could not open that folder. Try another path.";
+    this.error = safeLine(message) || "Couldn't open this directory.";
     this.syncInputFocus();
     this.options.requestRender();
   }
@@ -321,8 +322,19 @@ export class WorkspaceBrowserSurface extends Container implements Focusable {
   }
 }
 
+export function workspaceBrowserErrorMessage(error: unknown): string {
+  if (!(error instanceof ControlClientError)) return "Couldn't load this directory. Try again.";
+  if (error.code === "workspace_changed") return "This directory changed. Open it again.";
+  if (error.code === "workspace_not_found") return "This directory no longer exists.";
+  if (error.code === "workspace_not_directory") return "That path is not a directory.";
+  if (error.code === "workspace_permission_denied") return "You don't have permission to open this directory.";
+  if (error.code === "workspace_too_large") return "There are too many entries here. Use Ctrl+L to open a more specific path.";
+  if (error.code === "workspace_unavailable") return "This directory can't be opened.";
+  return "Couldn't load this directory. Try again.";
+}
+
 export function resolveWorkspacePathInput(input: string, currentPath: string): string {
-  if (input.includes("\0")) throw new Error("A folder path cannot contain a null character.");
+  if (input.includes("\0")) throw new Error("That path isn't valid.");
   if (input === "~") return homedir();
   if (input.startsWith("~/")) return resolve(homedir(), input.slice(2));
   return resolve(currentPath, input);

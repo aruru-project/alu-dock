@@ -125,7 +125,7 @@ test("workspace.list browses the Host filesystem without creating a Dock instanc
     client.workspaceList(join(directory, "missing")),
     (error: unknown) => error instanceof ControlClientError
       && error.code === "workspace_not_found"
-      && /does not exist/u.test(error.message),
+      && /no longer exists/u.test(error.message),
   );
   assert.deepEqual(registry.list(), []);
 });

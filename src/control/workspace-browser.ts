@@ -65,7 +65,7 @@ export class FileSystemWorkspaceBrowser implements WorkspaceBrowser {
     if (offset > snapshot.entries.length) {
       throw new WorkspaceBrowseError(
         "workspace_changed",
-        "This folder changed while it was loading. Refresh it and try again.",
+        "This directory changed. Try again.",
         true,
       );
     }
@@ -97,7 +97,7 @@ export class FileSystemWorkspaceBrowser implements WorkspaceBrowser {
     if (expectedRevision !== undefined && scanned.revision !== expectedRevision) {
       throw new WorkspaceBrowseError(
         "workspace_changed",
-        "This folder changed while it was loading. Refresh it and try again.",
+        "This directory changed. Try again.",
         true,
       );
     }
@@ -137,7 +137,7 @@ async function scanDirectory(path: string, initialFingerprint: string): Promise<
       if (entries.length > MAX_BROWSABLE_DIRECTORIES) {
         throw new WorkspaceBrowseError(
           "workspace_too_large",
-          "This folder contains too many folders to browse at once. Enter the path you want directly.",
+          `There are too many directories in ${safePath(path)} to show. Choose a more specific path.`,
         );
       }
     }
@@ -149,7 +149,7 @@ async function scanDirectory(path: string, initialFingerprint: string): Promise<
   if (finalFingerprint !== initialFingerprint) {
     throw new WorkspaceBrowseError(
       "workspace_changed",
-      "This folder changed while it was loading. Refresh it and try again.",
+      "This directory changed. Try again.",
       true,
     );
   }
@@ -191,7 +191,7 @@ async function canonicalDirectory(path: string): Promise<string> {
   if (!stats.isDirectory()) {
     throw new WorkspaceBrowseError(
       "workspace_not_directory",
-      `${safePath(path)} is not a folder. Enter a folder path and try again.`,
+      `${safePath(path)} is not a directory.`,
     );
   }
   return canonical;
@@ -212,30 +212,30 @@ function mapFileSystemError(error: unknown, path: string): WorkspaceBrowseError 
   if (code === "EACCES" || code === "EPERM") {
     return new WorkspaceBrowseError(
       "workspace_permission_denied",
-      `You do not have permission to open ${displayPath}. Choose another folder or enter a different path.`,
+      `You don't have permission to open ${displayPath}.`,
     );
   }
   if (code === "ENOENT") {
     return new WorkspaceBrowseError(
       "workspace_not_found",
-      `${displayPath} does not exist. Check the path or choose another folder.`,
+      `${displayPath} no longer exists.`,
     );
   }
   if (code === "ENOTDIR") {
     return new WorkspaceBrowseError(
       "workspace_not_directory",
-      `${displayPath} is not a folder. Enter a folder path and try again.`,
+      `${displayPath} is not a directory.`,
     );
   }
   if (code === "ELOOP") {
     return new WorkspaceBrowseError(
       "workspace_unavailable",
-      `${displayPath} contains a symbolic-link loop. Choose another folder.`,
+      `${displayPath} contains a symbolic-link loop.`,
     );
   }
   return new WorkspaceBrowseError(
     "workspace_unavailable",
-    `Could not open ${displayPath}. Try again or choose another folder.`,
+    `${displayPath} can't be opened.`,
     true,
   );
 }

@@ -15,7 +15,11 @@ import type { InstanceSnapshot, SessionDto } from "../core/managed-instance.js";
 import { AluHubBrand } from "./alu-mascot.js";
 import { mouseTrackingSequences, parseTerminalMouseEvent } from "./mouse-input.js";
 import { paint, selectListTheme } from "./theme.js";
-import { collectWorkspaceDirectory, WorkspaceBrowserSurface } from "./workspace-browser.js";
+import {
+  collectWorkspaceDirectory,
+  workspaceBrowserErrorMessage,
+  WorkspaceBrowserSurface,
+} from "./workspace-browser.js";
 
 const NEW_INSTANCE = "hub:new";
 const CONTINUE = "hub:continue";
@@ -437,7 +441,7 @@ async function chooseWorkspaceDirectory(
       })
       .catch((error: unknown) => {
         if (settled || version !== loadVersion) return;
-        surface.setError(errorMessage(error));
+        surface.setError(workspaceBrowserErrorMessage(error));
       });
   };
   surface.onOpenPath = loadPath;
