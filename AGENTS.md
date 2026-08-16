@@ -35,6 +35,7 @@ Hub TUI / Work TUI / Rails-WebUI / future clients
 - **Host** 管理 instance、catalog、operation、Queue、controller、generation 与 Worker 生命周期，并把 Agent 会话流量路由到正确的 Worker。Host 不重新实现 Agent runtime，也不改写 Agent 内容。
 - **Worker** 持有完整 Agent runtime、session、tools、extensions、components、callbacks 与 Promise。Agent adapter 在这里完成 Agent 与 Dock 协议之间的转换。
 - **客户端** 各自实现所需界面。一个客户端尚未支持某项能力，不影响 Agent、其他客户端或已经工作的能力。
+- **本项目范围仅限 Dock 本身**：Host、Worker，以及本项目内部的 Hub TUI 和 Work TUI。其他第三方实现全部通过 Protocol V2 对接并由各自项目维护，禁止跨项目修改其他项目代码。
 - 新增使用既有能力的 Agent，主要增加 Worker adapter 和 runtime 注册；新增真正的 Agent 能力时，在 Protocol V2 定义一次，再由需要它的客户端实现。
 - 同一能力只保留一个 Dock 协议定义。不得通过逐方法 proxy、重复 DTO、重复 projection 或兼容壳在 Host 与 Worker 间模拟本地 runtime 对象。
 
