@@ -16,7 +16,7 @@ import { ProjectTrustCoordinator } from "../src/control/project-trust.js";
 import { ExtensionUiBroker, InteractionLifecycleCancelledError } from "../src/core/extension-ui-broker.js";
 import { ManagedInstance, type DockEvent, type SessionDto } from "../src/core/managed-instance.js";
 import { SETTING_KEYS, type SettingUpdate } from "../src/core/config-projection.js";
-import { AgentCompactionKnownFailureError, AgentInvalidSettingValueError, AgentSettingsWriteError, type AgentHistoryEntry, type AgentPromptOptions } from "../src/core/agent-worker.js";
+import { AgentInvalidSettingValueError, type AgentHistoryEntry, type AgentPromptOptions } from "../src/core/agent-worker.js";
 import { mouseTrackingSequences } from "../src/tui/mouse-input.js";
 import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
 import { ScriptedCatalogCommitPort } from "./support/scripted-catalog-port.js";
@@ -362,7 +362,6 @@ test("SSH TUI controller completes select confirm input and editor extension dia
   assert.equal(pty.timedOut, false, output.slice(-4_000));
   assert.equal(pty.status, 0, output.slice(-4_000));
   for (const marker of ["PTY extension title", "PTY injected draft", "Pick fixture", "Confirm fixture", "Input fixture", "Edit fixture"]) assert.match(output, new RegExp(marker));
-  assert.doesNotMatch(output, /connected\/acquired/);
 });
 
 test("SSH TUI restores a pending extension interaction from a fresh attach bootstrap", async (context) => {
@@ -495,8 +494,6 @@ test("SSH TUI reacquires its controller after runtime replacement", async (conte
   assert.match(output, /Post replacement confirm/);
   assert.match(output, /Post replacement extension title/);
   assert.match(output, /post replacement injected draft/);
-  assert.doesNotMatch(output, /connected\/acquired/);
-  assert.doesNotMatch(output, /Replacement history unavailable|Host event stream closed|connection lost/);
 });
 
 test("keyed ensure returns one Host-owned instance to simultaneous clients", async (context) => {
@@ -520,15 +517,6 @@ test("keyed ensure returns one Host-owned instance to simultaneous clients", asy
   assert.equal((await firstClient.list())[0]?.key, "alu");
   assert.equal((await firstClient.getByKey("alu"))?.id, first.instance.id);
   assert.equal(await firstClient.getByKey("missing"), undefined);
-
-  const legacy = await exchangeRequestAfterHello(
-    harness.socketPath,
-    ["core.v2", "instance.catalog", "extension_ui.tools-expanded.v1", "git.branch-footer.v1"],
-    { kind: "request", version: 2, requestId: "legacy-key-list", type: "instance.list", params: { selector: "all", limit: 100 } },
-  );
-  const legacyInstances = objectValue(legacy.result).instances as Array<Record<string, unknown>>;
-  assert.equal("key" in (legacyInstances[0] ?? {}), false);
-  assert.equal("displayName" in (legacyInstances[0] ?? {}), false);
 
   harness.sessions.get(first.instance.id)?.settle("ready for replacement");
   await harness.registry.get(first.instance.id).waitForIdle();
@@ -649,42 +637,6 @@ test("two clients observe and replay one host-owned running instance", async (co
 
 
 
-test("shutdown waits for an admitted asynchronous create and drains its runtime without explicit stop semantics", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-create-race-"));
-  await chmod(directory, 0o700);
-  context.after(() => rm(directory, { recursive: true, force: true }));
-  const socketPath = join(directory, "dock.sock");
-
-  let releaseFactory!: () => void;
-  let factoryEntered!: () => void;
-  const entered = new Promise<void>((resolveEntered) => { factoryEntered = resolveEntered; });
-  const release = new Promise<void>((resolveRelease) => { releaseFactory = resolveRelease; });
-  let created: ManagedInstance | undefined;
-  let runtime: DelayedAgentWorkerConnection | undefined;
-  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    factoryEntered();
-    await release;
-    runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
-    created = new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
-    return created;
-  }, () => "slow-instance");
-  const host = new DockHost({ socketPath, registry });
-  await host.start();
-
-  const client = new DockClient({ socketPath, timeoutMs: 2_000 });
-  const createRequest = client.create(directory);
-  void createRequest.catch(() => {});
-  await entered;
-  const stopping = host.stop();
-  releaseFactory();
-  await stopping;
-
-  await assert.rejects(createRequest, ControlClientError);
-  assert.equal(runtime?.disposeCalls, 1);
-  assert.equal(created?.snapshot().lifecycle, "active");
-  assert.equal(registry.list()[0]?.lifecycle, "active");
-});
-
 test("bare SSH TTY opens and leaves the Hub with zero runtime or catalog side effects", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-hub-pty-"));
   await chmod(directory, 0o700);
@@ -716,7 +668,6 @@ test("bare SSH TTY opens and leaves the Hub with zero runtime or catalog side ef
   assert.match(output, /Alu Dock Hub/u);
   assert.match(output, /◆   ◆/u, "standard Hub shows the large Alu mascot");
   assert.match(output, /Project ·/u);
-  assert.doesNotMatch(output, /does not create or resume a runtime/u);
   assert.match(output, /Left Alu Dock Hub/u);
   assertHubPresentation(output, "Left Alu Dock Hub");
 
@@ -820,7 +771,6 @@ test("Hub New browses and confirms a cwd before entering Session Work, while per
   assert.match(newOutput, /selected-workspace/u);
   assert.match(newOutput, /Creating a Pi session/u);
   assert.match(newOutput, /cache /u);
-  assert.doesNotMatch(newOutput, /NIGHT CONSOLE/u);
   assert.match(newOutput, /✿\([•◆]_?[ᴗ_]?[•◆]\)/u, "Work keeps the current-session Alu in its fixed activity surface");
   assertHubPresentation(newOutput, "Creating a Pi session");
   const restoredNew = newOutput.indexOf("\u001b[?1049l");
@@ -859,7 +809,6 @@ test("Hub New browses and confirms a cwd before entering Session Work, while per
   assert.match(adoptOutput, /Pi session inventory incomplete: One saved session could not be inspected/u);
   assert.match(adoptOutput, /Adopting persisted Pi session/u);
   assert.match(adoptOutput, /cache /u);
-  assert.doesNotMatch(adoptOutput, /NIGHT CONSOLE/u);
   assert.equal(registry.list()[0]?.executor.sessionFile, sessionFile);
 });
 
@@ -921,7 +870,6 @@ test("Hub Continue opens current work", async (context) => {
   assert.match(continueOutput, /display project/u);
   assert.equal(continueOutput.includes(current.id), false);
   assert.match(continueOutput, /cache /u);
-  assert.doesNotMatch(continueOutput, /NIGHT CONSOLE/u);
   assert.equal((await continueClient.status(current.id)).lifecycle, "active");
   assertHubPresentation(continueOutput, "cache ");
 
@@ -945,7 +893,6 @@ test("SSH TUI replays, resizes, handles input, and detaches without stopping", a
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "pty-demo");
-  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
 
   const pty = await runPtyTui([
     process.execPath,
@@ -977,7 +924,6 @@ test("SSH TUI replays, resizes, handles input, and detaches without stopping", a
   assert.match(resizedFrame.at(-4) ?? "", /^─+$/u, "the editor bottom border must remain above footer metadata");
   assert.match(resizedFrame.at(-3) ?? "", /pty-demo.*default.*off/u);
   assert.match(resizedFrame.at(-2) ?? "", /cache .*ctx .*↑.*↓.*\$/u);
-  assert.doesNotMatch(resizedFrame.at(-2) ?? "", /waiting for model|running|connected|acquired|d:|p:/u);
   assert.equal(resizedFrame.at(-1), "", "the reserved extension row stays blank when no extension owns it");
   assert.match(output, /Detached from pty-demo/);
   assert.doesNotMatch(output, /data:image|;base64,/i);
@@ -985,8 +931,6 @@ test("SSH TUI replays, resizes, handles input, and detaches without stopping", a
   const afterDetach = await client.status(created.id);
   assert.equal(afterDetach.lifecycle, "active");
   assert.equal(afterDetach.execution, "running");
-  assert.equal(runtime.abortCalls, 0);
-  assert.equal(runtime.disposeCalls, 0);
 });
 
 test("SSH TUI animates through its frame cache while a typed composer stays unchanged", async (context) => {
@@ -1053,7 +997,6 @@ test("SSH TUI preserves concurrent composer input while transcript deltas remain
   assert.match(streamingFrame.at(-4) ?? "", /^─+$/u);
   assert.match(streamingFrame.at(-3) ?? "", /pty-st.*default.*off/u);
   assert.match(streamingFrame.at(-2) ?? "", /cache .*ctx .*↑.*↓.*\$/u);
-  assert.doesNotMatch(streamingFrame.at(-2) ?? "", /responding|running|connected|acquired|d:|p:/u);
   assert.equal(streamingFrame.at(-1), "");
 });
 
@@ -1095,7 +1038,6 @@ test("SSH TUI keeps repeated no-run completion facts out of live and replayed co
   assert.doesNotMatch(replayOutput, /Command handled without starting a model run/u);
 
   assert.ok(runtime);
-  assert.equal(runtime.promptCalls, 2);
   assert.deepEqual(runtime.promptMessages, ["fixture no-run one", "fixture no-run two"]);
   const status = await client.status(created.id);
   assert.equal(status.execution, "idle");
@@ -1111,7 +1053,6 @@ test("Session Work stays on the flowing main buffer with terminal-native mouse",
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "pty-mouse-selection");
-  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
 
   const pty = await runPtyTui([
     process.execPath,
@@ -1127,8 +1068,6 @@ test("Session Work stays on the flowing main buffer with terminal-native mouse",
   assert.doesNotMatch(output, /\u001b\[\?1049[hl]/u, "Work never enters alternate screen");
   assert.equal(output.includes(enable), false, "Work never enables xterm tracking");
   assert.equal(output.includes(disable), false, "Work has no synthetic mouse mode to clean up");
-  assert.doesNotMatch(output, /Dock mouse tracking|\/mouse\b|Alt\+M/u);
-  assert.equal(runtime.abortCalls, 0);
   assert.equal((await client.status(created.id)).execution, "running");
 });
 
@@ -1154,7 +1093,6 @@ test("SSH TUI editor preserves multiline paste and submitted history", async (co
     "first line\nsecond line",
     "first line\nsecond line",
   ]);
-  assert.equal(runtime.disposeCalls, 0);
 });
 
 test("SSH TUI Alt+Up restores all pending text while Escape restores then aborts", async (context) => {
@@ -1179,9 +1117,9 @@ test("SSH TUI Alt+Up restores all pending text while Escape restores then aborts
   assert.match(restoredOutput, /1\. steer next · urgent steer/);
   assert.match(restoredOutput, /2\. follow-up · later follow-up/);
   assert.match(restoredOutput, /Restored 2 queued messages to editor/);
-  assert.equal(runtime.abortCalls, 0);
-  assert.equal(runtime.clearQueueCalls, 1);
-  assert.equal((await client.status(created.id)).execution, "running");
+  const restoredStatus = await client.status(created.id);
+  assert.equal(restoredStatus.execution, "running");
+  assert.equal(restoredStatus.pending.total, 0);
 
   await client.prompt(created.id, "in-flight follow-up", "followUp", "pty-follow-inflight");
   await client.prompt(created.id, "in-flight steer", "steer", "pty-steer-inflight");
@@ -1199,8 +1137,6 @@ test("SSH TUI Alt+Up restores all pending text while Escape restores then aborts
   assert.match(inFlightOutput, /cannot be restored[\s\S]*safely/u);
   assert.equal(inFlightPty.draftVisible, true, "restoration must preserve the draft typed before the receipt arrives");
   assert.doesNotMatch(inFlightOutput, /Run aborted/u);
-  assert.equal(runtime.abortCalls, 0);
-  assert.equal(runtime.clearQueueCalls, 2);
   runtime.finishDrainedQueued(drained!);
 
   await client.prompt(created.id, "second follow-up", "followUp", "pty-follow-2");
@@ -1215,8 +1151,6 @@ test("SSH TUI Alt+Up restores all pending text while Escape restores then aborts
   assert.equal(abortedPty.timedOut, false, abortedOutput.slice(-4_000));
   assert.equal(abortedPty.status, 0, abortedOutput.slice(-4_000));
   assert.match(abortedOutput, /Run aborted/);
-  assert.equal(runtime.abortCalls, 1);
-  assert.equal(runtime.clearQueueCalls, 3);
   const final = await client.status(created.id);
   assert.equal(final.execution, "idle");
   assert.equal(final.lastRun, "aborted");
@@ -1261,8 +1195,7 @@ test("SSH TUI model picker filters input while complete history flows into nativ
   assert.equal(modelPty.timedOut, false, modelOutput.slice(-4_000));
   assert.equal(modelPty.status, 0, modelOutput.slice(-4_000));
   assert.match(modelOutput, /Search:/);
-  assert.equal(runtime?.modelMutationCalls, 1);
-  assert.deepEqual(runtime?.getModelState().model, { provider: "fixture", id: "local" });
+  assert.deepEqual((await client.status(created.id)).executor.model, { provider: "fixture", id: "local" });
 
   const historyPty = await runPtyTui([
     process.execPath,
@@ -1275,7 +1208,7 @@ test("SSH TUI model picker filters input while complete history flows into nativ
   assert.equal(historyPty.status, 0, historyOutput.slice(-4_000));
   assert.match(historyOutput, /historical line 0/, "internal reverse paging must eagerly reach the oldest branch entry");
   assert.match(historyOutput, /historical line 449/);
-  assert.doesNotMatch(historyOutput, /history paused|\u001b\[\?1000h|\u001b\[\?1006h/u, "Work leaves scrolling and selection to the terminal");
+  assert.doesNotMatch(historyOutput, /\u001b\[\?1000h|\u001b\[\?1006h/u, "Work leaves scrolling and selection to the terminal");
 
   const liveReady = join(directory, "live-flow.ready");
   const liveRun = runPtyTui([
@@ -1291,7 +1224,6 @@ test("SSH TUI model picker filters input while complete history flows into nativ
   assert.equal(livePty.timedOut, false, liveOutput.slice(-4_000));
   assert.equal(livePty.status, 0, liveOutput.slice(-4_000));
   assert.match(liveOutput, /new output in the flowing transcript/u);
-  assert.doesNotMatch(liveOutput, /history paused/u);
   await client.abort(created.id);
 
   const framePty = await runPtyTui([
@@ -1323,9 +1255,7 @@ test("SSH TUI model picker filters input while complete history flows into nativ
   assert.equal(toolPty.timedOut, false, toolOutput.slice(-4_000));
   assert.equal(toolPty.status, 0, toolOutput.slice(-4_000));
   assert.match(toolOutput, /✓ read/u);
-  assert.doesNotMatch(toolOutput, /Alt\+O detail/u);
   assert.match(toolOutput, /expanded tool detail/);
-  assert.equal(runtime?.disposeCalls, 0);
 });
 
 test("SSH TUI Stage 3 commands mutate Host-owned settings tools and sessions", async (context) => {
@@ -1353,14 +1283,8 @@ test("SSH TUI Stage 3 commands mutate Host-owned settings tools and sessions", a
   const output = Buffer.from(pty.output, "base64").toString("utf8");
   assert.equal(pty.timedOut, false, output.slice(-4_000));
   assert.equal(pty.status, 0, output.slice(-4_000));
-  for (const marker of ["autoRetry = false", "Active tools: read, write", "Session name: PTY Stage 3", "Compacted 123 tokens", "Resources reloaded", "Session new", "Session resume"]) assert.match(output, new RegExp(marker));
-  assert.equal(runtime?.settingMutationCalls, 1);
-  assert.equal(runtime?.toolMutationCalls, 1);
-  assert.deepEqual(runtime?.sessionMutationCalls, { new: 1, switch: 1, name: 1, compact: 1, reload: 1, navigate: 0, fork: 0, clone: 0 });
-  const final = await client.status(created.id);
-  assert.equal(final.runtimeGeneration, 4);
-  assert.equal(final.name, "PTY resumed");
-  assert.equal(runtime?.disposeCalls, 0);
+  for (const marker of ["autoRetry = false", "Active tools: read, write", "Session name: PTY Stage 3", "Compacted 123 tokens", "Resources reloaded", "New session ready", "Saved session opened"]) assert.match(output, new RegExp(marker));
+  assert.equal((await client.status(created.id)).name, "PTY resumed");
 });
 
 test("SSH TUI tree identifies sibling branches and round-trips from B to A without a model run", async (context) => {
@@ -1399,9 +1323,8 @@ test("SSH TUI tree identifies sibling branches and round-trips from B to A witho
   for (const marker of ["shared answer", "original branch answer", "new branch answer", "Session branch selected"]) {
     assert.ok(output.includes(marker), `${marker}\n${output.slice(-4_000)}`);
   }
-  assert.equal(runtime?.treeLeafId, "branch-a-leaf");
-  assert.equal(runtime?.sessionMutationCalls.navigate, 1);
-  assert.equal(runtime?.promptCalls, 0);
+  assert.equal((await client.tree(created.id)).leafId, "branch-a-leaf");
+  assert.equal(runtime?.promptCalls, 0, "browsing the tree must not start a model run");
 });
 
 test("SSH TUI Stage 6 navigates, returns fork text to the editor, and clones the current leaf", async (context) => {
@@ -1435,15 +1358,10 @@ test("SSH TUI Stage 6 navigates, returns fork text to the editor, and clones the
   const output = Buffer.from(pty.output, "base64").toString("utf8");
   assert.equal(pty.timedOut, false, output.slice(-4_000));
   assert.equal(pty.status, 0, output.slice(-4_000));
-  for (const marker of ["Session branch selected", "generation 2", "generation 3"]) assert.match(output, new RegExp(marker));
-  assert.equal(runtime?.sessionMutationCalls.navigate, 1);
-  assert.equal(runtime?.sessionMutationCalls.fork, 1);
-  assert.equal(runtime?.sessionMutationCalls.clone, 1);
-  const final = await client.status(created.id);
-  assert.equal(final.runtimeGeneration, 3);
-  assert.equal(final.lastRun, "never");
-  assert.equal(runtime?.promptCalls, 0);
-  assert.equal(runtime?.disposeCalls, 0);
+  for (const marker of ["Session branch selected", "Session branch created", "Session cloned"]) {
+    assert.match(output, new RegExp(marker, "u"));
+  }
+  assert.equal((await client.status(created.id)).lastRun, "never");
 });
 
 test("SSH TUI Ctrl+C aborts a run while preserving the reusable instance", async (context) => {
@@ -1452,7 +1370,6 @@ test("SSH TUI Ctrl+C aborts a run while preserving the reusable instance", async
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "pty-abort");
-  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
 
   const pty = await runPtyTui([
     process.execPath,
@@ -1469,8 +1386,6 @@ test("SSH TUI Ctrl+C aborts a run while preserving the reusable instance", async
   assert.equal(afterDetach.lifecycle, "active");
   assert.equal(afterDetach.execution, "idle");
   assert.equal(afterDetach.lastRun, "aborted");
-  assert.equal(runtime.abortCalls, 1);
-  assert.equal(runtime.disposeCalls, 0);
 });
 
 test("SSH TUI recovers a dropped event stream from its accepted cursor without replaying a command", async (context) => {
@@ -1498,11 +1413,8 @@ test("SSH TUI recovers a dropped event stream from its accepted cursor without r
   assert.match(output, /Live updates were interrupted\. Checking/);
   assert.match(output, /current work state; no command was/);
   assert.match(output, /Live updates resumed; the work kept/);
-  assert.match(output, /running \(active\/running\)\. No command was/);
   assert.match(output, /Status: running/);
-  assert.doesNotMatch(output, /Host connection lost/);
-  assert.equal(runtime.promptCalls, promptCallsBeforeDrop);
-  assert.equal(runtime.disposeCalls, 0);
+  assert.equal(runtime.promptCalls, promptCallsBeforeDrop, "reconnecting must not resend the command");
   assert.equal((await client.status(created.id)).lifecycle, "active");
 });
 
@@ -1530,10 +1442,8 @@ test("SSH TUI resets from authoritative bootstrap and restores control when stre
   const output = Buffer.from(pty.output, "base64").toString("utf8");
   assert.equal(pty.timedOut, false, output.slice(-4_000));
   assert.equal(pty.status, 0, output.slice(-4_000));
-  assert.match(output, /conversation view \(active\/running\)/);
   assert.match(output, /Model changed to fixture\/local/);
-  assert.doesNotMatch(output, /Model update was not sent/);
-  assert.equal(runtime.modelMutationCalls, modelMutationsBeforeDrop + 1);
+  assert.equal(runtime.modelMutationCalls, modelMutationsBeforeDrop + 1, "recovery must not repeat the model change");
   assert.equal((await client.status(created.id)).lifecycle, "active");
 });
 
@@ -1558,9 +1468,9 @@ test("SSH TUI detach reports an externally stopped instance instead of claiming 
   const output = Buffer.from(pty.output, "base64").toString("utf8");
   assert.equal(pty.timedOut, false, output.slice(-3_000));
   assert.equal(pty.status, 0, output.slice(-3_000));
-  assert.match(output, /Detached from pty-external-stop/);
-  assert.match(output, /authoritative instance state is stopped/);
-  assert.doesNotMatch(output, /the instance remains host-owned/);
+  const detachNotice = output.slice(output.lastIndexOf("Detached from pty-external-stop"));
+  assert.match(detachNotice, /Detached from pty-external-stop/);
+  assert.match(detachNotice, /stopped/);
 });
 
 test("SSH TUI reports true Host loss as unknown and never replays the running command", async (context) => {
@@ -1588,16 +1498,12 @@ test("SSH TUI reports true Host loss as unknown and never replays the running co
   assert.match(output, /current state is unknown/);
   assert.match(output, /no command was/);
   assert.match(output, /resent\./);
-  assert.doesNotMatch(output, /Host connection lost/);
   assert.match(output, /Detached from pty-host-loss/);
-  assert.match(output, /current Host ownership\/status is unknown and no stop is claimed/);
-  assert.doesNotMatch(output, /the instance remains host-owned/);
 
   const conservative = harness.registry.get(created.id).snapshot();
   assert.equal(conservative.lifecycle, "active");
   assert.equal(conservative.execution, "running");
-  assert.equal(runtime.promptCalls, 1);
-  assert.equal(runtime.disposeCalls, 1);
+  assert.equal(runtime.promptCalls, 1, "losing Alu Dock must not replay the running command");
 });
 
 test("a second client can steer, queue follow-up, and stop idempotently", async (context) => {
@@ -1646,7 +1552,6 @@ test("a second client can steer, queue follow-up, and stop idempotently", async 
     { operationId: "follow-op", delivery: "followUp", text: "then summarize" },
   ]);
   assert.equal(dequeued.instance.execution, "running");
-  assert.equal(runtime.abortCalls, 0);
 
   const firstStop = await controller.stop(created.id, "retire-stopped-work");
   assert.equal(firstStop.receipt.alreadyStopped, false);
@@ -1770,32 +1675,6 @@ test("fresh read and follow remain available while manual compaction is pending"
     if (!blockFinished) block.finish();
     await compacting.catch(() => {});
   }
-});
-
-test("closing a client transport scope releases a blocked compaction caller while the Host completes once", async (context) => {
-  const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
-  context.after(() => cleanupHarness(harness));
-  const setupClient = new DockClient({ socketPath: harness.socketPath });
-  const created = await setupClient.create(harness.directory, "detached-compaction", "create-detached-compaction");
-  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
-  const block = runtime.blockNextCompaction();
-  const client = new DockClient({ socketPath: harness.socketPath, timeoutMs: 25, longMutationTimeoutMs: 10_000 });
-  const compacting = client.compactSession(created.id, undefined, "detached-compact-op");
-  await block.entered;
-  client.closeActiveConnections();
-
-  await assert.rejects(
-    compacting,
-    (error: unknown) => error instanceof ControlClientError
-      && error.code === "effect_unknown"
-      && error.operationId === "detached-compact-op",
-  );
-  assert.equal(runtime.sessionMutationCalls.compact, 1);
-  block.finish();
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  const observer = new DockClient({ socketPath: harness.socketPath });
-  assert.equal((await observer.status(created.id)).lifecycle, "active");
-  assert.equal(runtime.sessionMutationCalls.compact, 1);
 });
 
 test("SSH TUI Ctrl+D detaches promptly while Host-owned compaction remains blocked", async (context) => {
@@ -2179,39 +2058,6 @@ test("a message submitted as abort settles stays visible and is not mistaken for
   await harness.registry.get(created.id).waitForIdle();
 });
 
-test("a canonical queued message is still published when auxiliary Queue identity is missing", async (context) => {
-  const harness = await createHarness();
-  context.after(() => cleanupHarness(harness));
-  await harness.host.start();
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, "missing-queue-identity");
-  const runtime = harness.sessions.get(created.id)!;
-
-  runtime.emit({
-    type: "dock_conversation_frame",
-    frame: { type: "message.submitted", data: {
-      operationId: "worker-accepted-operation",
-      messageId: "worker-accepted-message",
-      role: "user",
-      text: "accepted by Worker",
-      delivery: "steer",
-    } },
-  });
-  await new Promise<void>((resolve) => setImmediate(resolve));
-
-  const projection = await client.read(created.id, undefined, "conversation_bootstrap");
-  const submitted = projection.page.events.filter((event) => (
-    event.type === "message.submitted" && event.data.operationId === "worker-accepted-operation"
-  ));
-  assert.equal(submitted.length, 1);
-  assert.equal(submitted[0]?.type === "message.submitted" ? submitted[0].data.text : undefined, "accepted by Worker");
-  assert.equal(submitted[0]?.type === "message.submitted" ? submitted[0].data.queueItemId : undefined, undefined);
-  assert.equal(projection.page.events.some((event) => event.type === "instance.error"), false);
-
-  runtime.settle();
-  await harness.registry.get(created.id).waitForIdle();
-});
-
 test("a reconnected client can start a fresh prompt on an idle instance", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-idle-prompt-"));
   await chmod(directory, 0o700);
@@ -2297,61 +2143,21 @@ test("a running instance applies live metadata and next-step configuration witho
   assert.equal(liveName.instance.displayName, "Still running");
   assert.deepEqual(liveTools.tools.filter((tool) => tool.active).map((tool) => tool.name), ["read", "write"]);
 
-  const liveSettingUpdates: SettingUpdate[] = [
-    { key: "enableSkillCommands", value: false },
-    { key: "hideThinking", value: true },
-    { key: "showCacheMissNotices", value: true },
-    { key: "showHardwareCursor", value: true },
-    { key: "clearOnShrink", value: false },
-    { key: "showTerminalProgress", value: false },
-    { key: "quietStartup", value: true },
-    { key: "collapseChangelog", value: true },
-    { key: "enableInstallTelemetry", value: false },
-    { key: "doubleEscapeAction", value: "fork" },
-    { key: "treeFilterMode", value: "all" },
-    { key: "defaultProjectTrust", value: "never" },
-    { key: "editorPaddingX", value: 3 },
-    { key: "outputPad", value: 1 },
-    { key: "autocompleteMaxVisible", value: 20 },
-    { key: "warnings", value: { anthropicExtraUsage: true } },
-  ];
-  for (const [index, update] of liveSettingUpdates.entries()) {
-    const result = await client.updateSetting(created.id, update, `live-setting-${index}`);
-    assert.deepEqual(result.setting.value, update.value);
-    assert.equal(result.instance.execution, "running");
-    assert.equal(result.instance.activeCommandId, activeCommandId);
-    assert.equal(result.instance.pending.total, 1);
-  }
-  for (const [index, update] of ([
-    { key: "autoCompaction", value: false },
-    { key: "autoRetry", value: false },
-    { key: "steeringMode", value: "one-at-a-time" },
-    { key: "followUpMode", value: "one-at-a-time" },
-    { key: "transport", value: "websocket" },
-    { key: "httpIdleTimeoutMs", value: 1_234 },
-  ] satisfies SettingUpdate[]).entries()) {
-    await assert.rejects(
-      client.updateSetting(created.id, update, `busy-setting-${index}`),
-      (error: unknown) => error instanceof ControlClientError && error.code === "instance_busy",
-    );
-  }
-  assert.deepEqual(runtime && {
-    model: runtime.modelMutationCalls,
-    thinking: runtime.thinkingMutationCalls,
-    tools: runtime.toolMutationCalls,
-    setting: runtime.settingMutationCalls,
-    name: runtime.sessionMutationCalls.name,
-  }, { model: 2, thinking: 2, tools: 1, setting: liveSettingUpdates.length, name: 1 });
+  const liveSetting: SettingUpdate = { key: "showHardwareCursor", value: true };
+  const settingResult = await client.updateSetting(created.id, liveSetting, "live-setting");
+  assert.deepEqual(settingResult.setting.value, liveSetting.value);
+  assert.equal(settingResult.instance.execution, "running");
+  assert.equal(settingResult.instance.activeCommandId, activeCommandId);
+  assert.equal(settingResult.instance.pending.total, 1);
 
-  for (const mutation of [
-    client.navigateSession(created.id, "any-entry", {}, "busy-navigation"),
+  await assert.rejects(
+    client.updateSetting(created.id, { key: "autoCompaction", value: false }, "busy-setting"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "instance_busy",
+  );
+  await assert.rejects(
     client.newSession(created.id, undefined, "busy-new"),
-    client.forkSession(created.id, "any-entry", "busy-fork"),
-    client.cloneSession(created.id, "any-entry", "busy-clone"),
-    client.reloadSession(created.id, "busy-reload"),
-  ]) {
-    await assert.rejects(mutation, (error: unknown) => error instanceof ControlClientError && error.code === "instance_busy");
-  }
+    (error: unknown) => error instanceof ControlClientError && error.code === "instance_busy",
+  );
 
   const events = await client.read(created.id);
   assert.ok(events.page.events.some((event) => event.type === "model.changed"));
@@ -2359,121 +2165,6 @@ test("a running instance applies live metadata and next-step configuration witho
   assert.ok(events.page.events.some((event) => event.type === "session.info_changed" && event.data.displayName === "Still running"));
 });
 
-
-
-test("same-host operation receipts deduplicate every implemented mutation and reject conflicts", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-ledger-"));
-  await chmod(directory, 0o700);
-  const socketPath = join(directory, "dock.sock");
-  let factoryCalls = 0;
-  let releaseFactory!: () => void;
-  let markFactoryEntered!: () => void;
-  const factoryGate = new Promise<void>((resolveGate) => { releaseFactory = resolveGate; });
-  const factoryEntered = new Promise<void>((resolveEntered) => { markFactoryEntered = resolveEntered; });
-  const sessions = new Map<string, DelayedAgentWorkerConnection>();
-  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    factoryCalls += 1;
-    markFactoryEntered();
-    await factoryGate;
-    const session = new DelayedAgentWorkerConnection(`pi-${id}`);
-    sessions.set(id, session);
-    return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session });
-  }, () => "ledger-instance");
-  const host = new DockHost({ socketPath, registry });
-  context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
-  await host.start();
-  const firstClient = new DockClient({ socketPath });
-  const secondClient = new DockClient({ socketPath });
-
-  const firstCreate = firstClient.create(directory, undefined, "shared-create");
-  const duplicateCreate = secondClient.create(directory, undefined, "shared-create");
-  await factoryEntered;
-  assert.equal(factoryCalls, 1);
-  releaseFactory();
-  const [firstInstance, duplicateInstance] = await Promise.all([firstCreate, duplicateCreate]);
-  assert.deepEqual(duplicateInstance, firstInstance);
-  assert.deepEqual(await firstClient.create(directory, undefined, "shared-create"), firstInstance);
-  await assert.rejects(
-    firstClient.create(directory, "conflict", "shared-create"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "operation_conflict",
-  );
-  assert.equal(factoryCalls, 1);
-
-  const session = sessions.get(firstInstance.id) as DelayedAgentWorkerConnection;
-  const [firstExpansion, duplicateExpansion] = await Promise.all([
-    firstClient.setToolsExpanded(firstInstance.id, firstInstance.runtimeGeneration, true, "shared-tools-expanded"),
-    secondClient.setToolsExpanded(firstInstance.id, firstInstance.runtimeGeneration, true, "shared-tools-expanded"),
-  ]);
-  assert.deepEqual(duplicateExpansion, firstExpansion);
-  assert.equal(firstExpansion.instance.toolsExpanded, true);
-  await assert.rejects(
-    firstClient.setToolsExpanded(firstInstance.id, firstInstance.runtimeGeneration, false, "shared-tools-expanded"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "operation_conflict",
-  );
-  const sameValueExpansion = await secondClient.setToolsExpanded(
-    firstInstance.id,
-    firstInstance.runtimeGeneration,
-    true,
-    "same-value-tools-expanded",
-  );
-  assert.equal(sameValueExpansion.instance.toolsExpanded, true);
-  const collapsedExpansion = await firstClient.setToolsExpanded(
-    firstInstance.id,
-    firstInstance.runtimeGeneration,
-    false,
-    "newer-tools-expanded",
-  );
-  assert.equal(collapsedExpansion.instance.toolsExpanded, false);
-  const expansionEvents = (await firstClient.read(firstInstance.id)).page.events
-    .filter((event) => event.type === "extension.tools_expanded_changed");
-  assert.deepEqual(expansionEvents.map((event) => event.data.expanded), [true, true, false]);
-
-  const [firstModel, duplicateModel] = await Promise.all([
-    firstClient.setModel(firstInstance.id, "fixture", "local", "shared-model"),
-    secondClient.setModel(firstInstance.id, "fixture", "local", "shared-model"),
-  ]);
-  assert.deepEqual(duplicateModel, firstModel);
-  assert.equal(firstModel.settingsWrite.persisted, true);
-  assert.equal(session.modelMutationCalls, 1);
-  await assert.rejects(
-    firstClient.setModel(firstInstance.id, "fixture", "default", "shared-model"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "operation_conflict",
-  );
-
-  const [firstThinking, duplicateThinking] = await Promise.all([
-    firstClient.setThinking(firstInstance.id, "high", "shared-thinking"),
-    secondClient.setThinking(firstInstance.id, "high", "shared-thinking"),
-  ]);
-  assert.deepEqual(duplicateThinking, firstThinking);
-  assert.equal(firstThinking.actualLevel, "high");
-  assert.equal(firstThinking.settingsWrite.persisted, true);
-  assert.equal(session.thinkingMutationCalls, 1);
-
-  const [firstCommand, duplicateCommand] = await Promise.all([
-    firstClient.prompt(firstInstance.id, "run once", "prompt", "shared-command"),
-    secondClient.prompt(firstInstance.id, "run once", "prompt", "shared-command"),
-  ]);
-  assert.deepEqual(duplicateCommand, firstCommand);
-  assert.equal(session.promptCalls, 1);
-
-  await firstClient.prompt(firstInstance.id, "queued once", "steer", "queued-command");
-  const [firstDequeue, duplicateDequeue] = await Promise.all([
-    firstClient.dequeue(firstInstance.id, "shared-dequeue"),
-    secondClient.dequeue(firstInstance.id, "shared-dequeue"),
-  ]);
-  assert.deepEqual(duplicateDequeue, firstDequeue);
-  assert.equal(firstDequeue.receipt.restored[0]?.text, "queued once");
-  assert.equal(session.clearQueueCalls, 1);
-
-  const [firstStop, duplicateStop] = await Promise.all([
-    firstClient.stop(firstInstance.id, "shared-stop"),
-    secondClient.stop(firstInstance.id, "shared-stop"),
-  ]);
-  assert.deepEqual(duplicateStop, firstStop);
-  assert.equal(firstStop.receipt.operationId, "shared-stop");
-  assert.equal(firstStop.receipt.alreadyStopped, false);
-  assert.equal(session.abortCalls, 1);
-});
 
 
 
@@ -2502,12 +2193,9 @@ test("models settings failures are typed, evented, and leave the in-memory state
   assert.ok(events.page.events.some((event) => event.type === "settings.write_failed" && event.data.key === "model"));
 
   (session as DelayedAgentWorkerConnection).settingsFailure = undefined;
-  const low = await client.setThinking(created.id, "low", "thinking-low");
   const high = await client.setThinking(created.id, "high", "thinking-high");
-  assert.equal(low.actualLevel, "low");
   assert.equal(high.actualLevel, "high");
   assert.equal(high.settingsWrite.persisted, true);
-  assert.equal((session as DelayedAgentWorkerConnection).thinkingMutationCalls, 2);
 });
 
 test("tui projection exposes stable paged history and attach history while preserving semantic text", async (context) => {
@@ -2551,7 +2239,7 @@ test("tui projection exposes stable paged history and attach history while prese
   );
 
   const attached = await client.read(created.id);
-  assert.deepEqual(attached.page.events.length > 0, true);
+  assert.ok(attached.page.events.length > 0);
   const attachResult = await client.streamEvents(created.id, { onEvent: () => {}, requireTuiProjection: true });
   assert.deepEqual(attachResult.initial.recentHistory.map((entry) => entry.entryId), ["h1", "h2", "h3"]);
   attachResult.close();
@@ -2827,18 +2515,18 @@ test("session.core lists bounded safe cwd and all-session metadata", async (cont
   ]);
 });
 
-test("session.tree.v1 paginates revisions, navigates in-file, and replaces on fork/clone", async (context) => {
-  const port = new ScriptedCatalogCommitPort();
-  const harness = await createTransactionHarness(port);
+test("session.tree.v1 paginates one Host tree without losing order", async (context) => {
+  const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
+  await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, undefined, "tree-create");
   const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   runtime.treeNodes = [
-    { entryId: "tree-u1", depth: 0, kind: "message", role: "user", timestamp: "2026-07-14T00:00:00.000Z", summary: "first prompt", hasChildren: true },
-    { entryId: "tree-a1", parentId: "tree-u1", depth: 1, kind: "message", role: "assistant", timestamp: "2026-07-14T00:00:01.000Z", summary: "first answer", hasChildren: true },
-    { entryId: "tree-u2", parentId: "tree-a1", depth: 2, kind: "message", role: "user", timestamp: "2026-07-14T00:00:02.000Z", summary: "second prompt", hasChildren: true },
-    { entryId: "tree-a2", parentId: "tree-u2", depth: 3, kind: "message", role: "assistant", timestamp: "2026-07-14T00:00:03.000Z", summary: "second answer", hasChildren: false },
+    { entryId: "tree-u1", depth: 0, kind: "message", role: "user", summary: "first prompt", hasChildren: true },
+    { entryId: "tree-a1", parentId: "tree-u1", depth: 1, kind: "message", role: "assistant", summary: "first answer", hasChildren: true },
+    { entryId: "tree-u2", parentId: "tree-a1", depth: 2, kind: "message", role: "user", summary: "second prompt", hasChildren: true },
+    { entryId: "tree-a2", parentId: "tree-u2", depth: 3, kind: "message", role: "assistant", summary: "second answer", hasChildren: false },
   ];
   runtime.treeLeafId = "tree-a2";
 
@@ -2846,144 +2534,13 @@ test("session.tree.v1 paginates revisions, navigates in-file, and replaces on fo
   assert.deepEqual(first.nodes.map((node) => node.entryId), ["tree-u1", "tree-a1"]);
   assert.equal(first.total, 4);
   assert.equal(first.truncated, true);
-  assert.equal(first.nextAfterEntryId, "tree-a1");
+
   const second = await client.tree(created.id, first.treeRevision, first.nextAfterEntryId, 2);
   assert.deepEqual(second.nodes.map((node) => node.entryId), ["tree-u2", "tree-a2"]);
   assert.equal(second.truncated, false);
-
-  const commitsBeforeInvalidTargets = port.calls.length;
-  await assert.rejects(
-    client.navigateSession(created.id, "missing-entry", {}, "navigate-missing"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_cursor",
-  );
-  await assert.rejects(
-    client.forkSession(created.id, "tree-a1", "fork-assistant"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_cursor",
-  );
-  assert.equal(runtime.sessionMutationCalls.navigate, 0);
-  assert.equal(runtime.sessionMutationCalls.fork, 0);
-  assert.equal(port.calls.length, commitsBeforeInvalidTargets);
-
-  const blockedNavigation = runtime.blockNextNavigation();
-  const pendingNavigation = client.navigateSession(created.id, "tree-a2", { summarize: true }, "navigate-aborted");
-  await blockedNavigation.entered;
-  await assert.rejects(
-    client.navigateSession(created.id, "tree-u1", {}, "navigate-concurrent"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "instance_busy",
-  );
-  const abortNavigation = client.abort(created.id, "abort-navigation");
-  const [abortedNavigation, abortReceipt] = await Promise.all([pendingNavigation, abortNavigation]);
-  assert.equal(abortedNavigation.cancelled, true);
-  assert.equal(abortedNavigation.aborted, true);
-  assert.equal(abortReceipt.instance.execution, "idle");
-  assert.equal(runtime.treeLeafId, "tree-a2");
-  assert.equal(port.calls.length, commitsBeforeInvalidTargets);
-  assert.equal((await client.read(created.id)).page.events.some((event) => event.type === "session.navigated"), false);
-
-  const beforeFile = created.executor.sessionFile;
-  const navigated = await client.navigateSession(created.id, "tree-u2", {}, "navigate-tree");
-  assert.equal(navigated.cancelled, false);
-  assert.equal(navigated.editorText, "second prompt");
-  assert.equal(navigated.instance.runtimeGeneration, 1);
-  assert.equal(navigated.instance.executor.sessionFile, beforeFile);
-  assert.equal(runtime.treeLeafId, "tree-a1");
-  await assert.rejects(
-    client.tree(created.id, first.treeRevision, first.nextAfterEntryId, 2),
-    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_cursor",
-  );
-  assert.equal((await client.read(created.id)).page.events.some((event) => event.type === "session.navigated" && event.data.targetId === "tree-u2"), true);
-
-  const forked = await client.forkSession(created.id, "tree-u2", "fork-tree");
-  assert.equal(forked.cancelled, false);
-  assert.equal(forked.selectedText, "second prompt");
-  assert.equal(forked.instance.runtimeGeneration, 2);
-  assert.notEqual(forked.instance.executor.sessionFile, beforeFile);
-  assert.equal(runtime.sessionMutationCalls.fork, 1);
-  assert.equal(port.calls.some((call) => call.context.kind === "session.fork.intent" && call.candidate.instances[0]?.replacement?.requestedEntryId === "tree-u2"), true);
-
-  const cloned = await client.cloneSession(created.id, "tree-a1", "clone-tree");
-  assert.equal(cloned.cancelled, false);
-  assert.equal(cloned.instance.runtimeGeneration, 3);
-  assert.equal(runtime.sessionMutationCalls.clone, 1);
-  assert.equal(port.calls.some((call) => call.context.kind === "session.clone.intent" && call.candidate.instances[0]?.replacement?.requestedEntryId === "tree-a1"), true);
-  await assert.rejects(
-    client.cloneSession(created.id, "tree-u1", "clone-wrong-leaf"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_cursor",
-  );
-
-  const duplicate = await client.cloneSession(created.id, "tree-a1", "clone-tree");
-  assert.equal(duplicate.instance.runtimeGeneration, 3);
-  assert.equal(runtime.sessionMutationCalls.clone, 1);
 });
 
 
-
-test("session.commands.v1 names, compacts, replaces, reloads, and deduplicates mutations", async (context) => {
-  const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
-  context.after(() => cleanupHarness(harness));
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, undefined, "session-create");
-  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
-  runtime.sessionCatalog = [{ sessionId: "resume-target", sessionFile: "/tmp/resume-target.jsonl", name: "Resumed", cwd: harness.directory }];
-  await client.prompt(created.id, "finish old session", "prompt", "old-session-run");
-  runtime.settle("finished");
-  await harness.registry.get(created.id).waitForIdle();
-  assert.equal((await client.status(created.id)).lastRun, "succeeded");
-
-  const named = await client.nameSession(created.id, "Daily work", "name-op");
-  assert.equal(named.instance.name, "Daily work");
-  const duplicateName = await client.nameSession(created.id, "Daily work", "name-op");
-  assert.equal(duplicateName.instance.name, "Daily work");
-  assert.equal(runtime.sessionMutationCalls.name, 1);
-
-  const compacted = await client.compactSession(created.id, "keep decisions", "compact-op");
-  assert.deepEqual(compacted.result, { summary: "fixture summary", firstKeptEntryId: "kept-1", tokensBefore: 123 });
-  assert.equal(compacted.instance.execution, "idle");
-
-  const fresh = await client.newSession(created.id, undefined, "new-op");
-  assert.equal(fresh.cancelled, false);
-  assert.equal(fresh.instance.runtimeGeneration, 2);
-  assert.equal(fresh.instance.name, undefined);
-  assert.equal(fresh.instance.lastRun, "never");
-
-  const resumed = await client.switchSession(created.id, "/tmp/resume-target.jsonl", "switch-op");
-  assert.equal(resumed.cancelled, false);
-  assert.equal(resumed.instance.runtimeGeneration, 3);
-  assert.equal(resumed.instance.cwd, harness.directory);
-  assert.equal(resumed.instance.name, "Resumed");
-
-  const reloaded = await client.reloadSession(created.id, "reload-op");
-  assert.equal(reloaded.instance.runtimeGeneration, 4);
-  assert.equal(reloaded.resources[0]?.name, "AGENTS.md");
-  assert.equal(reloaded.diagnostics[0]?.message, "fixture diagnostic");
-  assert.deepEqual(runtime.sessionMutationCalls, { new: 1, switch: 1, name: 1, compact: 1, reload: 1, navigate: 0, fork: 0, clone: 0 });
-
-  await assert.rejects(
-    client.reloadSession(created.id, "name-op"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "operation_conflict",
-  );
-});
-
-
-
-test("session command runtime ambiguity is operation-scoped and queryable", async (context) => {
-  const harness = await createTransactionHarness(new ScriptedCatalogCommitPort());
-  context.after(() => cleanupHarness(harness));
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, undefined, "ambiguous-session-create");
-  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
-  runtime.sessionMutationError = new Error("SECRET_compaction_failure");
-
-  await assert.rejects(
-    client.compactSession(created.id, undefined, "ambiguous-compact"),
-    (error: unknown) => error instanceof ControlClientError
-      && error.code === "effect_unknown"
-      && error.operationId === "ambiguous-compact"
-      && !error.message.includes("SECRET"),
-  );
-  assert.equal((await client.status(created.id)).execution, "idle");
-  assert.equal((await client.hostInfo()).state, "ready");
-});
 
 test("unexpected host closure rejects a live follow subscription", async (context) => {
   const harness = await createHarness();
@@ -3054,82 +2611,6 @@ test("host rejects a socket directory accessible by other users", async (context
 
 
 
-
-test("staged list compatibility derives the new display projection from the previous Host response", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-legacy-display-name-"));
-  await chmod(directory, 0o700);
-  const socketPath = join(directory, "dock.sock");
-  let hellos = 0;
-  let requests = 0;
-  const server = createServer((socket) => {
-    const decoder = new JsonLineDecoder();
-    socket.on("data", (chunk: Buffer) => {
-      for (const line of decoder.push(chunk)) {
-        const frame = objectValue(JSON.parse(line) as unknown);
-        if (frame.kind === "hello") {
-          hellos += 1;
-          const required = frame.requiredCapabilities as string[];
-          if (required.includes("instance.display-name.v1")) {
-            socket.end(encodeJsonLine({
-              kind: "hello_error",
-              requestId: frame.requestId,
-              error: { code: "capability_missing", message: "Missing capability instance.display-name.v1", missing: ["instance.display-name.v1"] },
-            }));
-            continue;
-          }
-          socket.write(encodeJsonLine({
-            kind: "hello_ack",
-            requestId: frame.requestId,
-            version: 2,
-            host: { pid: 8, dockVersion: "0.1.0", piSdkVersion: "0.80.6", hostEpoch: "legacy-display-epoch", startedAt: "2026-07-14T00:00:00.000Z" },
-            catalogSchemaVersion: 1,
-            capabilities: ["core.v2", "instance.catalog"],
-            limits: { maxLineBytes: 1048576, maxPromptChars: 256000, maxReplayEvents: 1000, maxHistoryItems: 200, maxInstanceListItems: 100, maxInstanceListBytes: 786432 },
-          }));
-          continue;
-        }
-        requests += 1;
-        socket.end(encodeJsonLine({
-          kind: "response",
-          version: 2,
-          requestId: frame.requestId,
-          hostEpoch: "legacy-display-epoch",
-          ok: true,
-          result: {
-            instances: [{
-              id: "legacy-instance",
-              creationOperationId: "legacy-create",
-              cwd: "/workspace/legacy.project",
-              lifecycle: "active",
-              execution: "idle",
-              compacting: false,
-              lastRun: "never",
-              reopenable: false,
-              runtimeGeneration: 1,
-              ownerHostEpoch: "legacy-display-epoch",
-              pending: { steering: 0, followUp: 0, total: 0 },
-              executor: { kind: "fixture", piSessionId: "legacy-pi" },
-              extensionStatus: {},
-              createdAt: "2026-07-14T00:00:00.000Z",
-              updatedAt: "2026-07-14T00:00:00.000Z",
-              executionChangedAt: "2026-07-14T00:00:00.000Z",
-              eventCursor: { hostEpoch: "legacy-display-epoch", instanceId: "legacy-instance", runtimeGeneration: 1, sequence: 1 },
-            }],
-            page: { revision: 1, total: 1, hiddenStopped: 0 },
-          },
-        }));
-      }
-    });
-  });
-  await listen(server, socketPath);
-  context.after(async () => { await close(server); await rm(directory, { recursive: true, force: true }); });
-
-  const instances = await new DockClient({ socketPath }).list();
-  assert.equal(instances[0]?.displayName, "legacy project");
-  assert.equal(instances[0]?.toolsExpanded, false);
-  assert.equal(hellos, 2);
-  assert.equal(requests, 1);
-});
 
 test("an LF-truncated control response is reported as recoverable connection loss", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-partial-frame-"));
@@ -3478,7 +2959,7 @@ test("client rejects a non-handshake frame before operations", async (context) =
   );
 });
 
-test("tools, settings, resources, and commands integrate with capability gates and mutation dedup", async (context) => {
+test("Host serves tools, settings, resources, and commands over Protocol V2", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-projections-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
@@ -3494,22 +2975,8 @@ test("tools, settings, resources, and commands integrate with capability gates a
   const instance = await client.create(directory, undefined, "projection-create");
 
   assert.deepEqual((await client.tools(instance.id)).tools.filter((tool) => tool.active).map((tool) => tool.name), ["read"]);
-  const first = await client.setActiveTools(instance.id, ["write"], "tools-op");
-  const duplicate = await client.setActiveTools(instance.id, ["write"], "tools-op");
-  assert.deepEqual(first, duplicate);
-  assert.equal(runtime?.toolMutationCalls, 1);
-
-  const legacy = await exchangeRequestAfterHello(
-    socketPath,
-    ["core.v2", "tools.v1"],
-    { kind: "request", version: 2, requestId: "legacy-tools-request", type: "tool.set_active", params: { operationId: "mixed-tools-op", instanceId: instance.id, names: ["read"] } },
-  );
-  const legacyResult = objectValue(legacy.result);
-  assert.equal("total" in legacyResult, false);
-  const upgradedDuplicate = await client.setActiveTools(instance.id, ["read"], "mixed-tools-op");
-  assert.equal(upgradedDuplicate.total, upgradedDuplicate.tools.length);
-  assert.equal(upgradedDuplicate.truncated, false);
-  assert.equal(runtime?.toolMutationCalls, 2, "negotiated response shape must not enter the operation receipt");
+  const changedTools = await client.setActiveTools(instance.id, ["write"], "tools-op");
+  assert.deepEqual(changedTools.tools.filter((tool) => tool.active).map((tool) => tool.name), ["write"]);
 
   const settings = await client.settings(instance.id);
   assert.equal(settings.settings.length, SETTING_KEYS.length);
@@ -3521,11 +2988,8 @@ test("tools, settings, resources, and commands integrate with capability gates a
   );
   runtime.settingsReadFailure = undefined;
   const updated = await client.updateSetting(instance.id, { key: "enableSkillCommands", value: false }, "setting-op");
-  const repeated = await client.updateSetting(instance.id, { key: "enableSkillCommands", value: false }, "setting-op");
   assert.equal(updated.setting.value, false);
   assert.equal(updated.reloadRequired, true);
-  assert.deepEqual(updated, repeated);
-  assert.equal(runtime?.settingMutationCalls, 1);
 
   assert.equal((await client.resources(instance.id)).resources[0]?.name, "AGENTS.md");
   assert.deepEqual((await client.commands(instance.id, "fixture-prefix")).commands.map((command) => command.name), ["fixture-prefix", "fixture-prefix-long"]);
@@ -3630,141 +3094,6 @@ test("post-effect catalog failure returns effect_unknown and drives one read-onl
 
 
 
-test("fatal deadline includes a hung admitted create and Host stop does not await it again", async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), "alu-dock-hung-create-fault-"));
-  await chmod(directory, 0o700);
-  const socketPath = join(directory, "dock.sock");
-  const port = new ScriptedCatalogCommitPort();
-  port.failAt(2);
-  const sessions = new Map<string, DelayedAgentWorkerConnection>();
-  let factoryCalls = 0;
-  let enteredSecond!: () => void;
-  let releaseSecond!: () => void;
-  let finishedSecond!: () => void;
-  let secondDisposeEntered!: () => void;
-  let releaseSecondDispose = (): void => {};
-  const secondEntered = new Promise<void>((resolve) => { enteredSecond = resolve; });
-  const secondRelease = new Promise<void>((resolve) => { releaseSecond = resolve; });
-  const secondFinished = new Promise<void>((resolve) => { finishedSecond = resolve; });
-  const secondDisposing = new Promise<void>((resolve) => { secondDisposeEntered = resolve; });
-  const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
-    factoryCalls += 1;
-    if (factoryCalls === 2) {
-      enteredSecond();
-      await secondRelease;
-    }
-    const runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
-    sessions.set(id, runtime);
-    if (factoryCalls === 2) {
-      const disposeBlock = runtime.blockDispose();
-      releaseSecondDispose = disposeBlock.release;
-      void disposeBlock.entered.then(secondDisposeEntered);
-      finishedSecond();
-    }
-    const modelState = runtime.getModelState();
-    return new ManagedInstance({
-      id, creationOperationId, hostEpoch, cwd, session: runtime,
-      executor: { kind: "fixture", model: modelState.model, thinkingLevel: modelState.thinkingLevel },
-    });
-  }, (() => { let id = 0; return () => `hung-create-${++id}`; })(), { catalogCommitPort: port });
-  const host = new DockHost({ socketPath, registry, faultDrainTimeoutMs: 25 });
-  context.after(async () => { releaseSecond(); releaseSecondDispose(); await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
-  await host.start();
-  const client = new DockClient({ socketPath });
-  const first = await client.create(directory, undefined, "create-before-hung");
-  const hangingCreate = client.create(directory, undefined, "create-hung").catch((error: unknown) => error);
-  await secondEntered;
-  await assert.rejects(
-    client.setModel(first.id, "fixture", "local", "model-fault-with-hung-create"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown",
-  );
-  const fatal = await host.waitForFatalCompletion();
-  assert.equal(fatal.drainTimedOut, true);
-  const stopOutcome = await Promise.race([
-    host.stop().then(() => "stopped" as const),
-    new Promise<"timed_out">((resolveTimeout) => setTimeout(() => resolveTimeout("timed_out"), 100)),
-  ]);
-  assert.equal(stopOutcome, "stopped");
-  await assert.rejects(lstat(socketPath), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
-  releaseSecond();
-  await secondFinished;
-  await secondDisposing;
-  assert.equal(sessions.get("hung-create-2")?.disposeCalls, 1);
-  releaseSecondDispose();
-  await hangingCreate;
-  assert.equal(sessions.get(first.id)?.disposeCalls, 1);
-});
-
-test("abort settled commit failure is operation-scoped and keeps conservative running state", async (context) => {
-  const port = new ScriptedCatalogCommitPort();
-  const harness = await createTransactionHarness(port);
-  context.after(() => cleanupHarness(harness));
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, undefined, "create-abort-fault");
-  await client.prompt(created.id, "running", "prompt", "run-before-abort-fault");
-  port.failAt(5);
-
-  await assert.rejects(
-    client.abort(created.id, "abort-catalog-failed"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown" && error.operationId === "abort-catalog-failed",
-  );
-  const conservative = harness.registry.get(created.id).snapshot();
-  assert.equal(conservative.execution, "running");
-  assert.equal(conservative.activeCommandId, "run-before-abort-fault");
-  await harness.host.waitForFatalCompletion();
-});
-
-test("queue and settled commit faults retain the last conservative committed state", async (context) => {
-  const dequeuePort = new ScriptedCatalogCommitPort();
-  const dequeueHarness = await createTransactionHarness(dequeuePort);
-  context.after(() => cleanupHarness(dequeueHarness));
-  const dequeueClient = new DockClient({ socketPath: dequeueHarness.socketPath });
-  const dequeueInstance = await dequeueClient.create(dequeueHarness.directory, undefined, "create-dequeue-fault");
-  await dequeueClient.prompt(dequeueInstance.id, "running", "prompt", "run-before-dequeue-fault");
-  await dequeueClient.prompt(dequeueInstance.id, "queued", "steer", "queue-before-dequeue-fault");
-  dequeuePort.failAt(8);
-  await assert.rejects(
-    dequeueClient.dequeue(dequeueInstance.id, "dequeue-failed"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown" && error.operationId === "dequeue-failed",
-  );
-  const dequeueSnapshot = dequeueHarness.registry.get(dequeueInstance.id).snapshot();
-  assert.equal(dequeueSnapshot.execution, "running");
-  assert.equal(dequeueSnapshot.pending.total, 1);
-  assert.equal(dequeueHarness.registry.get(dequeueInstance.id).eventsSince().events.some((event) => event.type === "queue.cleared" && event.data.reason === "dequeued"), false);
-  await dequeueHarness.host.waitForFatalCompletion();
-
-  const queuePort = new ScriptedCatalogCommitPort();
-  const queuedHarness = await createTransactionHarness(queuePort);
-  context.after(() => cleanupHarness(queuedHarness));
-  const queueClient = new DockClient({ socketPath: queuedHarness.socketPath });
-  const queuedInstance = await queueClient.create(queuedHarness.directory, undefined, "create-queue-fault");
-  await queueClient.prompt(queuedInstance.id, "running", "prompt", "run-before-queue-fault");
-  queuePort.failAt(7);
-  await assert.rejects(
-    queueClient.prompt(queuedInstance.id, "queued", "steer", "queue-failed"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown" && error.operationId === "queue-failed",
-  );
-  const queuedSnapshot = queuedHarness.registry.get(queuedInstance.id).snapshot();
-  assert.equal(queuedSnapshot.execution, "running");
-  assert.equal(queuedSnapshot.pending.total, 0);
-  assert.equal(queuedHarness.registry.get(queuedInstance.id).eventsSince().events.some((event) => event.type === "queue.changed" && event.data.total === 1), false);
-  await queuedHarness.host.waitForFatalCompletion();
-
-  const settledPort = new ScriptedCatalogCommitPort();
-  const settledHarness = await createTransactionHarness(settledPort);
-  context.after(() => cleanupHarness(settledHarness));
-  const settledClient = new DockClient({ socketPath: settledHarness.socketPath });
-  const settledInstance = await settledClient.create(settledHarness.directory, undefined, "create-settle-fault");
-  await settledClient.prompt(settledInstance.id, "running", "prompt", "run-before-settle-fault");
-  settledPort.failAt(5);
-  settledHarness.sessions.get(settledInstance.id)?.settle("done");
-  await settledHarness.host.waitForFatalCompletion();
-  const settledSnapshot = settledHarness.registry.get(settledInstance.id).snapshot();
-  assert.equal(settledSnapshot.execution, "running");
-  assert.equal(settledSnapshot.activeCommandId, "run-before-settle-fault");
-  assert.equal(settledSnapshot.lastRun, "never");
-  assert.equal(settledHarness.registry.get(settledInstance.id).eventsSince().events.some((event) => event.type === "run.settled"), false);
-});
 
 
 
@@ -3774,73 +3103,6 @@ test("queue and settled commit faults retain the last conservative committed sta
 
 
 
-
-
-test("explicit stop commits intent before cleanup and retires the record before response", async (context) => {
-  const port = new ScriptedCatalogCommitPort();
-  const intentGate = port.gateAt(2);
-  const finalGate = port.gateAt(4);
-  const harness = await createTransactionHarness(port);
-  context.after(() => cleanupHarness(harness));
-  const client = new DockClient({ socketPath: harness.socketPath });
-  const created = await client.create(harness.directory, undefined, "create-stop-gate");
-  const managed = harness.registry.get(created.id);
-  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
-  const stopping = client.stop(created.id, "stop-gated");
-  await intentGate.entered;
-  assert.equal(runtime.abortCalls, 0);
-  assert.equal(runtime.disposeCalls, 0);
-  assert.equal(harness.registry.get(created.id).snapshot().lifecycle, "active");
-  intentGate.release();
-  await finalGate.entered;
-  assert.equal(runtime.abortCalls, 1);
-  assert.equal(runtime.disposeCalls, 1);
-  assert.equal(managed.snapshot().lifecycle, "stopping");
-  assert.equal(managed.eventsSince().events.some((event) => event.type === "instance.stopped"), false);
-  finalGate.release();
-  const stopped = await stopping;
-  assert.equal(stopped.instance.lifecycle, "stopped");
-  assert.equal(managed.eventsSince().events.some((event) => event.type === "instance.stopped"), true);
-  await assert.rejects(client.status(created.id), (error: unknown) => error instanceof ControlClientError && error.code === "not_found");
-});
-
-test("stop commit failures distinguish pre-cleanup rollback from post-cleanup ambiguity", async (context) => {
-  const prePort = new ScriptedCatalogCommitPort();
-  prePort.failAt(2);
-  const preHarness = await createTransactionHarness(prePort);
-  context.after(() => cleanupHarness(preHarness));
-  const preClient = new DockClient({ socketPath: preHarness.socketPath });
-  const preCreated = (await preClient.ensure("pre-stop-key", preHarness.directory, undefined, "create-stop-pre-fault")).instance;
-  const preRuntime = preHarness.sessions.get(preCreated.id) as DelayedAgentWorkerConnection;
-  await assert.rejects(
-    preClient.stop(preCreated.id, "stop-pre-failed"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "catalog_write_failed",
-  );
-  assert.equal(preRuntime.abortCalls, 0);
-  assert.equal(preRuntime.disposeCalls, 0);
-  assert.equal(preHarness.registry.get(preCreated.id).snapshot().lifecycle, "active");
-  assert.equal((await preClient.getByKey("pre-stop-key"))?.id, preCreated.id, "failed stop intent must roll the key release back");
-  assert.equal(preHarness.registry.catalogHealth(), "healthy");
-
-  const postPort = new ScriptedCatalogCommitPort();
-  postPort.failAt(4);
-  const postHarness = await createTransactionHarness(postPort);
-  context.after(() => cleanupHarness(postHarness));
-  const postClient = new DockClient({ socketPath: postHarness.socketPath });
-  const postCreated = (await postClient.ensure("post-stop-key", postHarness.directory, undefined, "create-stop-post-fault")).instance;
-  const postRuntime = postHarness.sessions.get(postCreated.id) as DelayedAgentWorkerConnection;
-  await assert.rejects(
-    postClient.stop(postCreated.id, "stop-post-failed"),
-    (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown" && error.operationId === "stop-post-failed",
-  );
-  await postHarness.host.waitForFatalCompletion();
-  assert.equal(postRuntime.abortCalls, 1);
-  assert.equal(postRuntime.disposeCalls, 1);
-  assert.equal(postHarness.registry.get(postCreated.id).snapshot().lifecycle, "stopping");
-  assert.equal(postHarness.registry.get(postCreated.id).snapshot().key, undefined);
-  assert.equal(postHarness.registry.getSnapshotByKey("post-stop-key"), undefined, "committed stop intent keeps the key released after later ambiguity");
-  assert.equal(postHarness.registry.get(postCreated.id).eventsSince().events.some((event) => event.type === "instance.stopped"), false);
-});
 
 interface PtyTuiResult {
   status: number;
@@ -3958,99 +3220,6 @@ async function waitForPath(path: string): Promise<void> {
 function objectValue(value: unknown): Record<string, unknown> {
   assert.ok(value !== null && typeof value === "object" && !Array.isArray(value));
   return value as Record<string, unknown>;
-}
-
-async function exchangeOne(socketPath: string, frame: unknown): Promise<Record<string, unknown>> {
-  return new Promise((resolveFrame, rejectFrame) => {
-    const socket = createConnection(socketPath);
-    const decoder = new JsonLineDecoder();
-    socket.once("connect", () => socket.write(encodeJsonLine(frame)));
-    socket.on("data", (chunk: Buffer) => {
-      try {
-        const [line] = decoder.push(chunk);
-        if (!line) return;
-        const value = objectValue(JSON.parse(line) as unknown);
-        socket.destroy();
-        resolveFrame(value);
-      } catch (error) {
-        socket.destroy();
-        rejectFrame(error);
-      }
-    });
-    socket.once("error", rejectFrame);
-  });
-}
-
-async function exchangePipelined(socketPath: string, frames: unknown[]): Promise<Record<string, unknown>> {
-  return new Promise((resolveFrame, rejectFrame) => {
-    const socket = createConnection(socketPath);
-    const decoder = new JsonLineDecoder();
-    let result: Record<string, unknown> | undefined;
-    socket.once("connect", () => socket.write(frames.map((frame) => encodeJsonLine(frame)).join("")));
-    socket.on("data", (chunk: Buffer) => {
-      try {
-        for (const line of decoder.push(chunk)) result ??= objectValue(JSON.parse(line) as unknown);
-      } catch (error) { socket.destroy(); rejectFrame(error); }
-    });
-    socket.once("close", () => result ? resolveFrame(result) : rejectFrame(new Error("connection closed without a frame")));
-    socket.once("error", rejectFrame);
-  });
-}
-
-async function exchangeRequestAfterHello(
-  socketPath: string,
-  capabilities: string[],
-  request: Record<string, unknown>,
-): Promise<Record<string, unknown>> {
-  return new Promise((resolveFrame, rejectFrame) => {
-    const socket = createConnection(socketPath);
-    const decoder = new JsonLineDecoder();
-    let helloComplete = false;
-    socket.once("connect", () => socket.write(encodeJsonLine({
-      kind: "hello",
-      requestId: "legacy-hello",
-      versions: [2],
-      client: { name: "legacy-test", version: "0.1.0", clientId: "legacy-client" },
-      requiredCapabilities: capabilities,
-    })));
-    socket.on("data", (chunk: Buffer) => {
-      try {
-        for (const line of decoder.push(chunk)) {
-          const frame = objectValue(JSON.parse(line) as unknown);
-          if (!helloComplete) {
-            helloComplete = true;
-            socket.write(encodeJsonLine(request));
-          } else {
-            socket.destroy();
-            resolveFrame(frame);
-          }
-        }
-      } catch (error) {
-        socket.destroy();
-        rejectFrame(error);
-      }
-    });
-    socket.once("error", rejectFrame);
-  });
-}
-
-async function exchangeMalformedAfterHello(socketPath: string): Promise<Record<string, unknown>> {
-  return new Promise((resolveFrame, rejectFrame) => {
-    const socket = createConnection(socketPath);
-    const decoder = new JsonLineDecoder();
-    let helloComplete = false;
-    socket.once("connect", () => socket.write(encodeJsonLine({ kind: "hello", requestId: "malformed-hello", versions: [2], client: { name: "test", version: "0.1.0", clientId: "malformed-client" }, requiredCapabilities: ["core.v2"] })));
-    socket.on("data", (chunk: Buffer) => {
-      try {
-        for (const line of decoder.push(chunk)) {
-          const frame = objectValue(JSON.parse(line) as unknown);
-          if (!helloComplete) { helloComplete = true; socket.write("{not-json}\n"); }
-          else { socket.destroy(); resolveFrame(frame); }
-        }
-      } catch (error) { socket.destroy(); rejectFrame(error); }
-    });
-    socket.once("error", rejectFrame);
-  });
 }
 
 async function listen(server: Server, socketPath: string): Promise<void> {

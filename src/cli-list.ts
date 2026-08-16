@@ -1,7 +1,7 @@
 import type { InstanceSnapshot } from "./core/managed-instance.js";
 import { uniqueInstanceIdPrefix } from "./human-target.js";
 
-export const MAX_HUMAN_LIST_INSTANCES = 100;
+const MAX_HUMAN_LIST_INSTANCES = 100;
 const DEFAULT_WIDTH = 80;
 const MIN_WIDTH = 20;
 const MAX_WIDTH = 160;

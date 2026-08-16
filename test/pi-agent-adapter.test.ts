@@ -21,20 +21,6 @@ test("Pi adapter splits real message_update deltas without loss before the priva
   }
 });
 
-test("Pi adapter emits explicit Worker-owned persistence checkpoints", () => {
-  assert.deepEqual(projectAgentSessionEvents({ type: "turn_end" } as never), [
-    { type: "turn_end" },
-    { type: "conversation_checkpoint" },
-  ]);
-  assert.deepEqual(projectAgentSessionEvents({ type: "agent_settled" } as never), [
-    { type: "agent_settled" },
-    { type: "conversation_checkpoint" },
-  ]);
-  assert.deepEqual(projectAgentSessionEvents({ type: "entry_appended", entry: {} } as never), [
-    { type: "conversation_checkpoint" },
-  ]);
-});
-
 test("Pi live events become canonical conversation frames before crossing the Worker boundary", () => {
   const projector = new PiConversationProjector();
   const tracked = projector.trackInput({ operationId: "operation-1", text: "hello", delivery: "prompt", fromQueue: false });

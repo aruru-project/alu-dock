@@ -3143,7 +3143,9 @@ export class ManagedInstance {
       const sessionFile = optionalRuntimeString(event.sessionFile, 16_384);
       const cwd = optionalRuntimeString(event.cwd, 16_384);
       const name = optionalRuntimeString(event.name, 256);
-      const reason = event.reason === "resume" || event.reason === "reload" || event.reason === "fork" ? event.reason : "new";
+      const reason = this.replacementIntent?.kind === "clone"
+        ? "clone"
+        : event.reason === "resume" || event.reason === "reload" || event.reason === "fork" ? event.reason : "new";
       const previousDurableSessionFile = this.replacementIntent?.previousSessionFile ?? previousSessionFile;
       await this.commitCatalogTransition(context("session.replaced"), () => {
         this.runtimeGenerationValue += 1;
@@ -3400,7 +3402,9 @@ export class ManagedInstance {
       const sessionFile = optionalRuntimeString(event.sessionFile, 16_384);
       const cwd = optionalRuntimeString(event.cwd, 16_384);
       const name = optionalRuntimeString(event.name, 256);
-      const reason = event.reason === "resume" || event.reason === "reload" || event.reason === "fork" ? event.reason : "new";
+      const reason = this.replacementIntent?.kind === "clone"
+        ? "clone"
+        : event.reason === "resume" || event.reason === "reload" || event.reason === "fork" ? event.reason : "new";
       const previousDurableSessionFile = this.replacementIntent?.previousSessionFile ?? previousSessionFile;
       this.runtimeGenerationValue += 1;
       this.publishedRuntimeGenerationValue = this.runtimeGenerationValue;

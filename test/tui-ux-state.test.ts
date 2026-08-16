@@ -3,37 +3,16 @@ import test from "node:test";
 
 import { visibleWidth, type TUI } from "@earendil-works/pi-tui";
 
-import type { DockEvent, InstanceSnapshot } from "../src/core/managed-instance.js";
-import {
-  abortingActivity,
-  activityFromReplay,
-  activityFromSnapshot,
-  reduceRunActivity,
-  submittingActivity,
-} from "../src/tui/run-activity.js";
-import { ActivityPulseController } from "../src/tui/activity-pulse.js";
-import { DockActivityLine, DockWorkMetadata } from "../src/tui/conversation.js";
+import type { InstanceSnapshot } from "../src/core/managed-instance.js";
+import { DockWorkMetadata } from "../src/tui/conversation.js";
 import { filterSearchableItems } from "../src/tui/search-filter.js";
 import { SearchablePicker } from "../src/tui/searchable-picker.js";
 import { ExtensionTextDialog } from "../src/tui/extension-text-dialog.js";
-import { formatWorkStatus, pickerContentRowBudget, shouldApplyInitialHistory, snapshotIsNotOlder } from "../src/tui/dock-tui.js";
+import { formatWorkStatus, pickerContentRowBudget } from "../src/tui/dock-tui.js";
 import { SessionTreeSurface } from "../src/tui/session-tree-surface.js";
 import { FixedActionDialog, WorkModalFrame } from "../src/tui/work-modal.js";
 import { WorkspaceBrowserSurface } from "../src/tui/workspace-browser.js";
-import { projectSnapshot } from "../src/tui/snapshot-projection.js";
 import type { TreeNodeDto } from "../src/core/instance-dto.js";
-
-function event(sequence: number, type: DockEvent["type"], data: Record<string, unknown>): DockEvent {
-  return {
-    scope: "instance",
-    sequence,
-    instanceId: "dock-1",
-    runtimeGeneration: 1,
-    occurredAt: "2026-07-15T00:00:00.000Z",
-    type,
-    data,
-  } as DockEvent;
-}
 
 function snapshot(overrides: Partial<InstanceSnapshot> = {}): InstanceSnapshot {
   return {
@@ -85,7 +64,7 @@ test("model search ranks name provider and id matches and supports fuzzy subsequ
   assert.deepEqual(filterSearchableItems(models, "missing"), []);
 });
 
-test("searchable picker accepts typed filtering while preserving IME focus propagation", () => {
+test("searchable picker filters typed input and sanitizes display text", () => {
   const picker = new SearchablePicker([
     { value: "fixture/default", label: "Fixture Default" },
     { value: "fixture/local", label: "Fixture\u001b[2J Local", description: "Local\nmodel" },

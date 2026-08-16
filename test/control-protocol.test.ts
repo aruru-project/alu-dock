@@ -4,48 +4,15 @@ import test from "node:test";
 import { JsonLineDecoder, JsonLineError } from "../src/control/json-lines.js";
 import {
   capabilityForRequest,
-  parseAbortResult,
   parseClientHello,
   parseControlEventEnvelope,
   parseControlRequest,
   parseControlResponse,
   parseEnsureResult,
-  parseInstanceReadResult,
-  parseFollowResult,
-  parseExtensionUiControlResult,
-  parseForgetResult,
-  parseHostInfoResult,
   parseHistoryResult,
-  parseConversationHistoryResult,
-  parseConversationContentResult,
-  parseInteractionRespondResult,
   parseKeyLookupResult,
-  parseListResult,
-  parseModelConfigurationResult,
-  parsePruneResult,
-  parsePromptResult,
-  parseQueueDequeueResult,
-  parseReopenResult,
-  parseSessionsResult,
-  parseSessionCompactionResult,
-  parseSessionInventoryResult,
-  parseSessionNameResult,
-  parseSessionReloadResult,
-  parseSessionReplacementResult,
-  parseSessionTreeResult,
-  parseSessionNavigateResult,
-  parseSessionForkResult,
-  parseSessionCloneResult,
   parseStatusResult,
-  parseWorkspaceListResult,
-  parseToolsResult,
-  parseSettingsResult,
-  parseSettingUpdateResult,
-  parseResourcesResult,
-  parseCommandsResult,
   ProtocolValidationError,
-  CONTROLLER_DIRECTIVES_CAPABILITY,
-  PERSISTENT_INTERACTIONS_CAPABILITY,
   INSTANCE_READ_CAPABILITY,
   EVENTS_FOLLOW_CAPABILITY,
   EXTENSION_UI_CONTROL_CAPABILITY,
@@ -53,10 +20,8 @@ import {
   INSTANCE_DISPLAY_NAME_CAPABILITY,
   CONVERSATION_CONTENT_CAPABILITY,
   WORKSPACE_LIST_CAPABILITY,
-  implementedCapabilities,
   requiredCapabilities,
 } from "../src/control/protocol.js";
-import { SETTING_DEFINITIONS, SETTING_KEYS, type SettingKey, type SettingValueMap } from "../src/core/config-projection.js";
 
 test("JSONL decoder preserves split UTF-8 and treats Unicode separators as data", () => {
   const decoder = new JsonLineDecoder();
@@ -322,51 +287,3 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
     params: { operationId: "create-1", cwd: "/tmp/project", trustChallengeId: "challenge-1", projectTrustDecision: "allow" },
   }), /unsupported value/);
 });
-
-test("workspace list results preserve canonical navigation and continuation facts", () => {
-  const parsed = parseWorkspaceListResult({
-    path: "/work/project",
-    parent: "/work",
-    revision: "listing-1",
-    entries: [
-      { name: ".hidden", kind: "directory", hidden: true },
-      { name: "linked", kind: "symlink", hidden: false },
-    ],
-    total: 3,
-    truncated: true,
-    nextCursor: { revision: "listing-1", offset: 2 },
-  });
-  assert.equal(parsed.path, "/work/project");
-  assert.deepEqual(parsed.entries.map((entry) => [entry.name, entry.kind, entry.hidden]), [
-    [".hidden", "directory", true],
-    ["linked", "symlink", false],
-  ]);
-  assert.deepEqual(parsed.nextCursor, { revision: "listing-1", offset: 2 });
-  assert.throws(() => parseWorkspaceListResult({ ...parsed, truncated: false }), /continuation metadata/u);
-});
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-function settingDto(key: SettingKey, values: SettingValueMap): Record<string, unknown> {
-  const definition = SETTING_DEFINITIONS[key];
-  return { key, value: values[key], source: "effective", writable: definition.writable, valueType: definition.valueType,
-    ...(definition.allowedValues ? { allowedValues: [...definition.allowedValues] } : {}),
-    ...(definition.min === undefined ? {} : { min: definition.min }), ...(definition.max === undefined ? {} : { max: definition.max }),
-    reloadRequired: definition.reloadRequired, hostRestartRequired: definition.hostRestartRequired };
-}

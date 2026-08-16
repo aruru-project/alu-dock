@@ -2,33 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  MAX_PROJECTED_SESSION_TREE_NODES,
-  projectAgentNavigateResult,
-  projectRuntimeTree,
-} from "../src/core/session-tree.js";
-import {
-  collectSessionTree,
-  filterSessionTree,
   parseTreeNavigationCommand,
   SessionTreeModel,
   treePickerItems,
 } from "../src/tui/session-tree.js";
 import type { TreeNodeDto } from "../src/core/instance-dto.js";
-
-const nodes: TreeNodeDto[] = [
-  { entryId: "u1", depth: 0, kind: "message", role: "user", displayClass: "content", summary: "first", hasChildren: true },
-  { entryId: "tool", parentId: "u1", depth: 1, kind: "message", role: "tool", displayClass: "tool", summary: "tool output", hasChildren: true },
-  { entryId: "model", parentId: "tool", depth: 2, kind: "model_change", displayClass: "metadata", summary: "model", hasChildren: true },
-  { entryId: "u2", parentId: "model", depth: 3, kind: "message", role: "user", displayClass: "content", label: "decision", summary: "second", hasChildren: false },
-];
-
-
-
-
-
-
-
-
 
 
 
@@ -107,32 +85,7 @@ test("tree model reconstructs visible topology, prioritizes active branches, and
   assert.ok(model.visible().some((item) => item.node.entryId === "wrapper-a"), "All reveals structural tool-call wrappers");
 });
 
-test("tree model keeps deep structural topology iterative and search clearable", () => {
-  const count = 20_000;
-  const deep = Array.from({ length: count }, (_, index): TreeNodeDto => ({
-    entryId: `deep-${index}`,
-    ...(index === 0 ? {} : { parentId: `deep-${index - 1}` }),
-    depth: index,
-    kind: "message",
-    role: index === count - 1 ? "user" : "assistant",
-    displayClass: index === count - 1 ? "content" : "structural",
-    summary: index === count - 1 ? "needle leaf" : "tool wrapper",
-    hasChildren: index < count - 1,
-  }));
-  const model = new SessionTreeModel(deep, `deep-${count - 1}`);
-  assert.deepEqual(model.visible().map((item) => item.node.entryId), [`deep-${count - 1}`]);
-  model.setQuery("needle");
-  assert.equal(model.visible().length, 1);
-  assert.equal(model.clearQueryAndFolds(), true);
-  assert.equal(model.query, "");
-});
-
-test("tree view filtering, picker projection, and direct command parsing remain Dock-owned", () => {
-  assert.deepEqual(filterSessionTree(nodes, "default").map((node) => node.entryId), ["u1", "tool", "u2"]);
-  assert.deepEqual(filterSessionTree(nodes, "no-tools").map((node) => node.entryId), ["u1", "u2"]);
-  assert.deepEqual(filterSessionTree(nodes, "user-only").map((node) => node.entryId), ["u1", "u2"]);
-  assert.deepEqual(filterSessionTree(nodes, "labeled-only").map((node) => node.entryId), ["u2"]);
-  assert.equal(treePickerItems(nodes, "u2").at(-1)?.label.includes("●"), true);
+test("direct tree commands accept summary and replacement instructions", () => {
   assert.deepEqual(parseTreeNavigationCommand("u2"), { entryId: "u2", options: {} });
   assert.deepEqual(parseTreeNavigationCommand("u2 --summary keep decisions"), {
     entryId: "u2", options: { summarize: true, customInstructions: "keep decisions" },

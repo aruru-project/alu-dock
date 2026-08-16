@@ -214,7 +214,7 @@ export interface EventDataMap {
   "queue.cleared": PendingDto & { queueItemIds: string[]; reason: "dequeued" | "abort" | "stop" | "replacement" | "host_draining" };
   "compaction.started": { reason: "manual" | "threshold" | "overflow"; operationId?: string };
   "compaction.completed": { reason: "manual" | "threshold" | "overflow"; operationId?: string; aborted: boolean; willRetry: boolean; error?: string };
-  "session.replaced": { reason: "new" | "resume" | "fork" | "reload"; previousSessionFile?: string; sessionFile?: string; runtimeGeneration: number; cwd: string; piSessionId: string; name?: string; displayName: string; gitBranch?: string };
+  "session.replaced": { reason: "new" | "resume" | "fork" | "clone" | "reload"; previousSessionFile?: string; sessionFile?: string; runtimeGeneration: number; cwd: string; piSessionId: string; name?: string; displayName: string; gitBranch?: string };
   "session.navigated": { targetId: string; leafId?: string; treeRevision: string; summaryCreated: boolean };
   "session.info_changed": { name?: string; displayName: string };
   "session.metrics_changed": { metrics: SessionMetricsDto };

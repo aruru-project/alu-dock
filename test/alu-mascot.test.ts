@@ -3,11 +3,8 @@ import test from "node:test";
 
 import type { Component } from "@earendil-works/pi-tui";
 
-import { AluHubBrand, mascotVisibleWidth, renderHubAlu, renderWorkAlu } from "../src/tui/alu-mascot.js";
-import { HubBlinkController, HubMenuLayout, HubProcessTerminal, visibleHubItemIndices } from "../src/tui/dock-hub.js";
-
-const CONTROL_PATTERN = /\u001b\](?:[^\u0007]|\u001b(?!\\))*(?:\u0007|\u001b\\)|\u001b\[(?:[0-?]*[ -/]*)?[@-~]/gu;
-
+import { AluHubBrand } from "../src/tui/alu-mascot.js";
+import { HubMenuLayout, HubProcessTerminal, visibleHubItemIndices } from "../src/tui/dock-hub.js";
 
 
 test("fullscreen Hub keeps responsive brand geometry and deterministic item hitboxes", () => {

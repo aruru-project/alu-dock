@@ -324,14 +324,23 @@ export class DockConversation implements Component {
           this.updateTool(tool, "failed");
           tool.entry.toolErrorSummary = interruption;
         }
-        this.add("system", `Session ${event.data.reason} · generation ${event.data.runtimeGeneration}.`);
+        const replacementNotice = event.data.reason === "new"
+          ? "New session ready."
+          : event.data.reason === "resume"
+            ? "Saved session opened."
+            : event.data.reason === "reload"
+              ? "Session resources reloaded."
+              : event.data.reason === "clone"
+                ? "Session cloned."
+                : "Session branch created.";
+        this.add("system", replacementNotice);
         this.currentAssistant = undefined;
         this.currentThinking = undefined;
         this.tools.clear();
         break;
 
       case "session.navigated":
-        this.add("system", `Session branch selected${event.data.summaryCreated ? " with summary" : ""} · ${event.data.targetId}.`);
+        this.add("system", `Session branch selected${event.data.summaryCreated ? " with summary" : ""}.`);
         break;
 
       case "command.handled":

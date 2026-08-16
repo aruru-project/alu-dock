@@ -36,12 +36,11 @@ test("failed or uncertain submission recovery preserves delivery intent and conc
   assert.equal(prependSubmissionRecoveryText("draft", "redirect", "steer"), "/steer redirect\n\ndraft");
   assert.equal(prependSubmissionRecoveryText("", "fresh", "prompt"), "fresh");
 
-  assert.deepEqual(submissionRecovery("draft", "uncertain", "auto", true, "operation-123"), {
-    draft: "uncertain\n\ndraft",
-    notice: "Submission outcome is uncertain for operation operation-123. The text was restored locally; inspect current session/queue state before any manual resend.",
-  });
-  assert.deepEqual(submissionRecovery("", "rejected", "followUp", false, "operation-456"), {
-    draft: "/follow rejected",
-    notice: "Submission was not admitted; its text was restored to the editor.",
-  });
+  const uncertain = submissionRecovery("draft", "uncertain", "auto", true, "operation-123");
+  assert.equal(uncertain.draft, "uncertain\n\ndraft");
+  assert.match(uncertain.notice, /outcome is uncertain.*text was restored/su);
+
+  const rejected = submissionRecovery("", "rejected", "followUp", false, "operation-456");
+  assert.equal(rejected.draft, "/follow rejected");
+  assert.match(rejected.notice, /not admitted.*restored to the editor/su);
 });

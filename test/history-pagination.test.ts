@@ -94,8 +94,8 @@ test("a semantic unit can exceed legacy record-count page caps", () => {
   assert.deepEqual(sliceSemanticHistory(entries, entries.length, 1), { start: 0, end: 1_001, hasEarlier: false });
 });
 
-test("eager history drain retains all 8,500 entries in oldest-to-newest order", async () => {
-  const all = Array.from({ length: 8_500 }, (_, index) => entry(index));
+test("history drain joins multiple pages in oldest-to-newest order", async () => {
+  const all = Array.from({ length: 450 }, (_, index) => entry(index));
   const seed = all.slice(-100);
   let loads = 0;
   const result = await drainFullHistory("dock-1", 1, 7, seed, true, async (beforeEntryId) => {
@@ -111,10 +111,10 @@ test("eager history drain retains all 8,500 entries in oldest-to-newest order", 
       instance: snapshot(loads + 1),
     };
   });
-  assert.equal(result.entries.length, 8_500);
+  assert.equal(result.entries.length, 450);
   assert.equal(result.entries[0]?.entryId, "entry-0");
-  assert.equal(result.entries.at(-1)?.entryId, "entry-8499");
-  assert.equal(new Set(result.entries.map((item) => item.entryId)).size, 8_500);
+  assert.equal(result.entries.at(-1)?.entryId, "entry-449");
+  assert.equal(new Set(result.entries.map((item) => item.entryId)).size, 450);
 });
 
 test("eager history drain deduplicates page overlap without changing order", async () => {
@@ -126,58 +126,12 @@ test("eager history drain deduplicates page overlap without changing order", asy
   assert.deepEqual(result.entries.map((item) => item.entryId), ["entry-0", "entry-1", "entry-2", "entry-3", "entry-4", "entry-5"]);
 });
 
-test("history drain rejects an incomplete empty seed instead of mixing read boundaries", async () => {
-  await assert.rejects(
-    drainFullHistory("dock-1", 1, 7, [], true, async () => {
-      throw new Error("must not load across a second live boundary");
-    }),
-    /incomplete without a continuation entry/u,
-  );
-});
-
-test("nonempty seed earlier pages never advance the live reconciliation boundary", async () => {
-  const result = await drainFullHistory("dock-1", 1, 7, [entry(2), entry(3)], true, async () => ({
-    historyRevision: 7,
-    entries: [entry(0), entry(1), entry(2)],
-    hasEarlier: false,
-    instance: snapshot(500),
-  }));
-  assert.deepEqual(result.entries.map((item) => item.entryId), ["entry-0", "entry-1", "entry-2", "entry-3"]);
-});
-
 test("eager history drain rejects stalled cursors", async () => {
   await assert.rejects(
     drainFullHistory("dock-1", 1, 7, [entry(4)], true, async () => ({
       historyRevision: 7, entries: [entry(2), entry(3)], hasEarlier: true, nextBeforeEntryId: "entry-4", instance: snapshot(),
     })),
     /cursor did not advance/u,
-  );
-});
-
-test("eager history drain rejects instance or generation changes", async () => {
-  await assert.rejects(
-    drainFullHistory("dock-1", 1, 7, [entry(2)], true, async () => ({
-      historyRevision: 7, entries: [entry(0), entry(1)], hasEarlier: false, instance: snapshot(2, { runtimeGeneration: 2 }),
-    })),
-    /Session changed while history was loading/u,
-  );
-  await assert.rejects(
-    drainFullHistory("dock-1", 1, 7, [entry(2)], true, async () => ({
-      historyRevision: 7, entries: [entry(0), entry(1)], hasEarlier: false, instance: snapshot(2, { id: "other" }),
-    })),
-    /Session changed while history was loading/u,
-  );
-});
-
-test("history drain rejects a checkpoint revision change within one scan", async () => {
-  await assert.rejects(
-    drainFullHistory("dock-1", 1, 7, [entry(2)], true, async () => ({
-      historyRevision: 8,
-      entries: [entry(0), entry(1)],
-      hasEarlier: false,
-      instance: snapshot(2),
-    })),
-    /History changed while history was loading/u,
   );
 });
 

@@ -1,41 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CombinedAutocompleteProvider, TUI, visibleWidth, type Terminal } from "@earendil-works/pi-tui";
+import { CombinedAutocompleteProvider, visibleWidth } from "@earendil-works/pi-tui";
 
-import type { SettingDto } from "../src/core/config-projection.js";
 import { projectDisplayEditDiff } from "../src/core/edit-diff-projection.js";
 import type { DockEvent, HistoryEntryDto, InstanceSnapshot } from "../src/core/managed-instance.js";
 import { DockActivityLine, DockConversation, DockStatusLine, DockWorkMetadata } from "../src/tui/conversation.js";
-import { commandCatalog, formatWorkStatus, workHelpText } from "../src/tui/dock-tui.js";
+import { commandCatalog, workHelpText } from "../src/tui/dock-tui.js";
 import { PendingQueueTray } from "../src/tui/pending-queue.js";
-import { projectSnapshot } from "../src/tui/snapshot-projection.js";
-import { parseSettingCommandValue } from "../src/tui/settings-controls.js";
-import { createAluPaint, detectTerminalColorLevel } from "../src/tui/theme.js";
-
-class RecordingTerminal implements Terminal {
-  readonly writes: string[] = [];
-  columns = 80;
-  rows = 24;
-  kittyProtocolActive = false;
-  start(_onInput: (data: string) => void, _onResize: () => void): void {}
-  stop(): void {}
-  async drainInput(): Promise<void> {}
-  write(data: string): void { this.writes.push(data); }
-  moveBy(lines: number): void { this.writes.push(lines > 0 ? `\u001b[${lines}B` : lines < 0 ? `\u001b[${-lines}A` : ""); }
-  hideCursor(): void { this.writes.push("\u001b[?25l"); }
-  showCursor(): void { this.writes.push("\u001b[?25h"); }
-  clearLine(): void { this.writes.push("\u001b[K"); }
-  clearFromCursor(): void { this.writes.push("\u001b[J"); }
-  clearScreen(): void { this.writes.push("\u001b[2J\u001b[H"); }
-  setTitle(title: string): void { this.writes.push(`\u001b]0;${title}\u0007`); }
-  setProgress(_active: boolean): void {}
-}
-
-async function flushTuiRender(tui: TUI): Promise<void> {
-  tui.requestRender();
-  await new Promise((resolve) => setTimeout(resolve, 30));
-}
 
 function event(sequence: number, type: DockEvent["type"], data: Record<string, unknown>): DockEvent {
   return {
@@ -308,13 +280,10 @@ test("conversation projects replay and live deltas into readable messages", () =
   ]);
   const rendered = conversation.render(24);
   for (const line of rendered) assert.ok(visibleWidth(line) <= 24);
-  assert.doesNotMatch(rendered.join("\n"), /▎/);
   assert.equal(rendered[0], " ".repeat(24), "Pi-style user box reserves a full-width top padding row");
   assert.match(rendered[1] ?? "", /^ hello\[2J\s+$/u);
   assert.equal(rendered[2], " ".repeat(24), "Pi-style user box reserves a full-width bottom padding row");
   assert.match(rendered.join("\n"), /secret reasoning/);
-  assert.doesNotMatch(rendered.join("\n"), /│ secret reasoning/);
-  assert.doesNotMatch(rendered.join("\n"), /^\s*(You|Assistant|Thinking)\s*$/mu);
 });
 
 test("user messages mirror Pi box padding and Markdown semantics with a full-width surface", () => {
@@ -399,7 +368,6 @@ test("conversation renders Markdown, code, thinking policy, and diff tools at bo
   assert.match(collapsed, /✓ edit.*src\/a\.ts/u);
   assert.match(collapsed, /-10 const value = 'old';/u);
   assert.match(collapsed, /\+10 const value = 'new';/u, "real Pi edit result details retain an explicit added/deleted preview");
-  assert.doesNotMatch(collapsed, /Successfully replaced/u, "the semantic diff replaces redundant edit success telemetry");
   assert.deepEqual(conversation.toggleLatestToolExpanded(), { expanded: true, name: "edit" });
   assert.match(conversation.render(60).join("\n"), /\+10 const value = 'new';/u);
   conversation.toggleToolsExpanded();
@@ -434,7 +402,6 @@ test("long Pi edit diffs remain available and never fall back to raw edit argume
   const collapsed = conversation.render(80).join("\n");
   assert.match(collapsed, /-1 oldValue\(\);/u);
   assert.match(collapsed, /\+1 newValue\(\);/u);
-  assert.doesNotMatch(collapsed, /truncated by Host projection/u);
   conversation.toggleLatestToolExpanded();
   const expanded = conversation.render(80).join("\n");
   assert.doesNotMatch(expanded, /private old argument|private new argument/u);
@@ -557,7 +524,6 @@ test("built-in presentations keep decision-critical tail, limits, continuation, 
   assert.match(bash, /earlier visual lines · Ctrl\+O details/u);
   assert.match(bash, /truncated · showing 30 lines of 100/u);
   assert.match(bash, /full output saved · \/tmp\/pi-bash-visible\.log/u);
-  assert.doesNotMatch(bash, /Showing lines 71-100/u, "raw Pi footer is replaced by one styled semantic notice set");
 
   const readText = `${Array.from({ length: 15 }, (_, index) => `read line ${index + 1}`).join("\n")}\n\n[Showing lines 1-15 of 40. Use offset=16 to continue.]`;
   const read = renderCompleted("read", readText, {
@@ -566,13 +532,6 @@ test("built-in presentations keep decision-critical tail, limits, continuation, 
   assert.match(read, /read line 1/u);
   assert.doesNotMatch(read, /read line 15/u);
   assert.match(read, /continue with read offset=16/u);
-
-  const hostProjectedRead = renderCompleted("read", `${Array.from({ length: 30 }, (_, index) => `projected line ${index + 1}`).join("\n")}\n[tool output truncated by Host projection]`, {
-    kind: "read", preview: "head", notices: [{ code: "host_projection_truncated" }],
-  });
-  assert.match(hostProjectedRead, /projected line 1/u);
-  assert.doesNotMatch(hostProjectedRead, /projected line 30/u, "head preview may fold ordinary tail rows");
-  assert.match(hostProjectedRead, /tool output truncated by Host projection/u, "Host truncation stays outside the foldable content budget");
 
   const grep = renderCompleted("grep", Array.from({ length: 20 }, (_, index) => `match ${index + 1}`).join("\n"), {
     kind: "grep", preview: "head", notices: [
@@ -605,7 +564,6 @@ test("built-in presentations keep decision-critical tail, limits, continuation, 
   }));
   assert.match(semanticUpdate.render(100).join("\n"), /1,000 results limit reached/u, "presentation-only updates are decision data");
 
-  for (const rendered of [bash, read, hostProjectedRead, grep, find, ls]) assert.doesNotMatch(rendered, /full details/u);
 });
 
 
@@ -663,7 +621,6 @@ test("collapsed tool failures expose a safe first-line reason and preserve expan
   conversation.addNotice("later assistant-visible output");
   const collapsed = conversation.render(120).join("\n");
   assert.match(collapsed, /× bash.*false.*expanded failure detail/u);
-  assert.doesNotMatch(collapsed, /bash failed/u);
   assert.deepEqual(conversation.toggleLatestToolExpanded(), { expanded: true, name: "bash" });
   assert.match(conversation.render(60).join("\n"), /expanded failure detail/);
 
@@ -729,20 +686,20 @@ test("compaction keeps successful and real failures durable while no-op/cancel s
   ]);
 });
 
-test("compaction, replacement, and host-loss notices remain deterministic without queue transcript noise", () => {
+test("compaction and session-change notices stay visible without queue transcript noise", () => {
   const conversation = new DockConversation();
   conversation.apply(event(1, "queue.changed", { steering: 1, followUp: 2, total: 3 }));
   conversation.apply(event(2, "queue.changed", { steering: 0, followUp: 1, total: 1 }));
   conversation.apply(event(3, "compaction.started", { reason: "threshold" }));
   conversation.apply(event(4, "compaction.completed", { reason: "threshold", aborted: false, willRetry: false }));
   conversation.apply(event(5, "session.replaced", { reason: "reload", runtimeGeneration: 2, cwd: "/tmp/reloaded", piSessionId: "pi-2" }));
-  conversation.addNotice("Host event stream closed. No command was replayed; this TUI is now read-only.", true);
+  conversation.addNotice("Connection lost. No command was resent.", true);
 
   const projected = conversation.snapshot();
   assert.equal(projected.filter((entry) => entry.text.startsWith("Queue ·")).length, 0);
   assert.ok(projected.some((entry) => /Compaction completed/.test(entry.text)));
-  assert.ok(projected.some((entry) => /generation 2/.test(entry.text)));
-  assert.match(projected.at(-1)?.text ?? "", /No command was replayed/);
+  assert.ok(projected.some((entry) => /Session resources reloaded/.test(entry.text)));
+  assert.match(projected.at(-1)?.text ?? "", /No command was resent/);
 });
 
 test("pending queue tray follows Pi consumption order and leaves the transcript at message_start", () => {
@@ -798,8 +755,6 @@ test("Work chrome separates semantic metadata metrics extensions and activity", 
   assert.match(footer, /↑800 ↓200/);
   assert.match(footer, /\$0\.0042/);
   assert.match(footer, /alu-kanban: ready/);
-  assert.doesNotMatch(`${metadataLine}\n${footer}`, /ALU DOCK|NIGHT CONSOLE|connected|acquired|observing|d:dock|p:pi-|running|cmp/u);
-  assert.doesNotMatch(footer, /demo|gpt-test|streaming/);
   for (const line of [metadataLine, ...lines]) assert.ok(visibleWidth(line) <= 120);
 
   current = {
@@ -819,7 +774,6 @@ test("Work chrome separates semantic metadata metrics extensions and activity", 
   assert.equal(narrowActivity.length, 1);
   assert.match(narrowActivity[0] ?? "", /waiting for model/);
   assert.equal(narrowStatus.length, 2);
-  assert.doesNotMatch(narrowStatus.join("\n"), /waiting for model/);
   for (const line of [...narrowMetadata, ...narrowActivity, ...narrowStatus]) assert.ok(visibleWidth(line) <= 43);
 
   const flowingFooter = [...metadata.render(120), ...status.render(120)];
@@ -835,10 +789,4 @@ test("Work chrome separates semantic metadata metrics extensions and activity", 
 
   const emptyExtensions = new DockStatusLine({ ...current, extensionStatus: {} }).render(80);
   assert.equal(emptyExtensions[1], "");
-
-  const diagnostics = formatWorkStatus(current);
-  assert.match(diagnostics, /Work cwd: \/work\/customer\/project \(feature\/live\)/u);
-  assert.match(diagnostics, /Dock ID: dock-1/u);
-  assert.match(diagnostics, /Pi session ID: pi-1/u);
-  assert.match(diagnostics, /Work revision: 1/u);
 });

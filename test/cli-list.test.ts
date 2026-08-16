@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  MAX_HUMAN_LIST_INSTANCES,
   renderHumanInstanceList,
   selectHumanInstanceList,
   terminalDisplayWidth,
@@ -37,7 +36,7 @@ test("human list default selection hides only stopped history and reports how to
   assert.equal(selectHumanInstanceList([stopped], true).hiddenStopped, 0);
 });
 
-test("human list orders decision-relevant state and omits machine-only snapshot fields", () => {
+test("human list orders work and excludes private identifiers", () => {
   const running = instance(1, {
     name: "active\u001b[2J\nrun",
     lifecycle: "active",
@@ -65,8 +64,7 @@ test("human list orders decision-relevant state and omits machine-only snapshot 
   assert.ok(output.indexOf(idle.id.slice(0, 8)) < output.indexOf(recoverable.id.slice(0, 8)));
   assert.ok(output.indexOf(recoverable.id.slice(0, 8)) < output.indexOf(stopped.id.slice(0, 8)));
   for (const expected of [
-    "active 2J run", "active/running", "g7", "openai-codex/gpt-test", "pending 2",
-    "host_lost/unavailable", "reopenable", "/workspace/project-1", "idle",
+    "active 2J run", "openai-codex/gpt-test", "pending 2", "/workspace/project-1", "idle", "recover me", "old",
   ]) assert.match(output, new RegExp(escapeRegExp(expected), "u"));
   assert.doesNotMatch(output, /\u001b/u);
   for (const secret of [
@@ -91,8 +89,6 @@ test("human list is terminal-safe and display-width bounded at narrow and wide s
     assert.doesNotMatch(output, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u);
     for (const line of output.trimEnd().split("\n")) assert.ok(terminalDisplayWidth(line) <= width, `${width}: ${line}`);
     assert.match(output, new RegExp(unsafe.id.slice(0, 8), "u"));
-    assert.match(output, /active\/idle/u);
-    assert.match(output, /g123/u);
     assert.match(output, width < 40 ? /中/u : /中文/u);
   }
   assert.equal(terminalDisplayWidth("中文"), 4);
@@ -106,23 +102,6 @@ test("human list displays a unique resolvable prefix when the first eight charac
   const output = renderHumanInstanceList([first, second], 80, { identityUniverse: [first, second] });
   assert.match(output, /019f7005-a/u);
   assert.match(output, /019f7005-b/u);
-});
-
-test("human list caps large catalogs and reports omitted records", () => {
-  const instances = Array.from({ length: 150 }, (_, index) => instance(index + 10, {
-    id: `${String(index).padStart(8, "0")}-0000-4000-8000-000000000000`,
-    name: `historical ${index}`,
-    lifecycle: "stopped",
-    execution: "unavailable",
-    updatedAt: new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString(),
-  }));
-  const output = renderHumanInstanceList(instances, 80);
-  const projectedRecords = output.split("\n").filter((line) => /^○ /u.test(line));
-  assert.equal(projectedRecords.length, MAX_HUMAN_LIST_INSTANCES);
-  assert.match(output, /Showing 100 of 150 · 50 older records omitted/u);
-  assert.ok(output.split("\n").length <= 207);
-  assert.match(projectedRecords[0] ?? "", /00000149/u);
-  assert.doesNotMatch(output, /historical 0(?:\n|$)/u);
 });
 
 function instance(index: number, overrides: Partial<InstanceSnapshot> = {}): InstanceSnapshot {

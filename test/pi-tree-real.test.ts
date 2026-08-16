@@ -161,7 +161,7 @@ test("real Pi navigates in-file, forks before a user message, and clones the cur
     const cloneEvents = instance.eventsSince().events;
     const replacement = cloneEvents[0];
     assert.ok(replacement?.type === "session.replaced");
-    assert.equal(replacement.data.reason, "fork");
+    assert.equal(replacement.data.reason, "clone");
     assert.equal(cloneEvents.some((event) => event.type === "run.started"), false);
     assert.equal(cloneSnapshot.metrics?.tokens.total, 0);
     assert.equal(cloneSnapshot.metrics?.cost, 0);

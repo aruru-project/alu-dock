@@ -528,15 +528,19 @@ def main() -> int:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\x03")  # Clear selected editor text.
+                fork_start = len(output)
                 os.write(fd, b"/fork tree-u2\r")
                 fork_deadline = time.monotonic() + 5
-                while b"generation 2" not in output and time.monotonic() < fork_deadline:
+                while b"Session branch created" not in output[fork_start:] and time.monotonic() < fork_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
+                time.sleep(0.1)  # Let the replacement command restore editor focus.
+                read_available(fd, output, 0.02)
                 os.write(fd, b"\x03")  # Clear fork-selected editor text.
+                clone_start = len(output)
                 os.write(fd, b"/clone\r")
                 clone_deadline = time.monotonic() + 5
-                while b"generation 3" not in output and time.monotonic() < clone_deadline:
+                while b"Session cloned" not in output[clone_start:] and time.monotonic() < clone_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
             elif action in ("compact-detach", "compact-queue"):
@@ -558,8 +562,8 @@ def main() -> int:
                     (b"/name PTY Stage 3\r", b"Session name: PTY Stage 3"),
                     (b"/compact\r", b"Compacted 123 tokens"),
                     (b"/reload\r", b"Resources reloaded"),
-                    (b"/new\r", b"Session new"),
-                    (b"/resume /tmp/pty-resume.jsonl\r", b"Session resume"),
+                    (b"/new\r", b"New session ready"),
+                    (b"/resume /tmp/pty-resume.jsonl\r", b"Saved session opened"),
                 ]
                 for command, marker in steps:
                     os.write(fd, command)

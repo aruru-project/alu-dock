@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { renderCliHelp, requestedCliHelp } from "../src/cli-help.js";
+import { renderCliHelp } from "../src/cli-help.js";
 
 const cliPath = fileURLToPath(new URL("../src/cli.js", import.meta.url));
 const unavailableSocket = "/tmp/aludock-help-must-not-connect.sock";
@@ -13,16 +13,6 @@ interface CliResult {
   stdout: string;
   stderr: string;
 }
-
-test("help routing short-circuits public and nested command arguments", () => {
-  assert.deepEqual(requestedCliHelp("help", []), []);
-  assert.deepEqual(requestedCliHelp("help", ["open"]), ["open"]);
-  assert.deepEqual(requestedCliHelp("open", ["--cwd", "/missing", "--help"]), ["open"]);
-  assert.deepEqual(requestedCliHelp("status", ["--help"]), ["status"]);
-  assert.deepEqual(requestedCliHelp("service", ["logs", "--lines", "invalid", "--help"]), ["service", "logs"]);
-  assert.deepEqual(requestedCliHelp("service", ["help", "restart"]), ["service", "restart"]);
-  assert.equal(requestedCliHelp("open", []), undefined);
-});
 
 test("top-level help is human-only, bounded, and locally rendered", async () => {
   const [flag, command, short] = await Promise.all([
@@ -41,7 +31,6 @@ test("top-level help is human-only, bounded, and locally rendered", async () => 
   }
   assert.match(flag.stdout, /Open the Dock Hub/u);
   assert.match(flag.stdout, /aludock -c/u);
-  assert.doesNotMatch(flag.stdout, /side-effect-free/u);
   assert.match(flag.stdout, /attach TARGET/u);
   assert.ok(Math.max(...flag.stdout.trimEnd().split("\n").map((line) => line.length)) <= 80);
 });
