@@ -160,7 +160,7 @@ Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力
 - Agent 提供但客户端未实现的能力，只在该客户端不可用；
 - 新 Agent 实现现有能力时，不修改 Protocol V2 和其他客户端；
 - 真正的新 Agent 能力在 Protocol V2 定义一次，再由需要它的客户端实现；
-- capability negotiation 不能成为删除内容或降低其他客户端能力的理由。
+- capability negotiation 不能成为删除内容或降低其他客户端能力的理由；也不得要求客户端预先声明 capability 才能使用已存在的能力。capability 是客户端对 Host 的 fail-fast 功能探测，不是客户端向 Host 的准入申报；不为尚不存在的客户端预埋兼容门或多形状响应。
 
 ## 代码范围
 

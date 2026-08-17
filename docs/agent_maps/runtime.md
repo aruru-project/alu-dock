@@ -117,6 +117,6 @@ Agent 出现新的真实能力时，在 Protocol V2 定义一次，由提供该�
 - `skills/dock-attachments/`：随包发布的 Agent 使用说明。
 - `src/control/`：Host control、Worker supervision 与 session routing。
 - `src/core/`：Dock 自己的协议数据与跨实现概念，不依赖 Pi runtime。
-- `src/tui/`：SSH 客户端，不持有 Agent runtime。
+- `src/tui/`：本机终端客户端（通常经 SSH 使用），不持有 Agent runtime。
 
 具体实现应服从以上边界。任何普通 Agent 能力如果需要在多个层次重复定义和投影，应先修正边界，而不是继续增加转发代码。

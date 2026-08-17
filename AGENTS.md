@@ -37,7 +37,8 @@ Hub TUI / Work TUI / Rails-WebUI / future clients
 - **客户端** 各自实现所需界面。一个客户端尚未支持某项能力，不影响 Agent、其他客户端或已经工作的能力。
 - **本项目范围仅限 Dock 本身**：Host、Worker，以及本项目内部的 Hub TUI 和 Work TUI。其他第三方实现全部通过 Protocol V2 对接并由各自项目维护，禁止跨项目修改其他项目代码。
 - 新增使用既有能力的 Agent，主要增加 Worker adapter 和 runtime 注册；新增真正的 Agent 能力时，在 Protocol V2 定义一次，再由需要它的客户端实现。
-- 同一能力只保留一个 Dock 协议定义。不得通过逐方法 proxy、重复 DTO、重复 projection 或兼容壳在 Host 与 Worker 间模拟本地 runtime 对象。
+- 同一能力只保留一个 Dock 协议定义。任意两层之间（Worker↔Host、Host↔客户端）都不得用逐方法 proxy、重复 DTO、重复 projection 或兼容壳模拟对端。新增能力沿唯一路径：Worker adapter 产出 Protocol V2 结果体 → `protocol.ts` 定义一次 parser → Worker 边界与客户端复用它 → Host 只合并自己的事实。
+- 界限常量（字节、条目、字符上限）只在产出端定义一次，第二处出现同一数值按缺陷处理。没有调用方的代码和只写不读的状态发现即删，不等专项清理。
 
 ## 工程入口
 

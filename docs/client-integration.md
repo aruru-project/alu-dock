@@ -1,6 +1,6 @@
 # Client 接入 Protocol V2
 
-本文说明客户端怎样接入 Alu Dock。这里的客户端不特指 Web：它可以是 TUI、Web backend、桌面程序或其他本机进程。只要遵守 Protocol V2，它们使用的是同一套 instance、conversation、event 和 operation 语义。
+本文说明客户端怎样接入 Alu Dock。这里的客户端不特指 Web：它可以是 TUI、Web backend、桌面程序或已配对的远程客户端。只要遵守 Protocol V2，它们使用的是同一套 instance、conversation、event 和 operation 语义。
 
 浏览器不能直接连接 Dock。Web 应用需要由本机后端代为连接：
 
@@ -17,7 +17,7 @@ TUI / desktop / other local client ─────────┼── Protocol
 
 ## 连接方式
 
-Protocol V2 使用本机 Unix stream socket 和 UTF-8 JSONL。每个连接的流程是：
+Protocol V2 使用 UTF-8 JSONL；transport 是私有 Unix socket，或已配对的 mutual-TLS 端口（见下文「Unix socket 与远程 TLS 端口」）。每个连接的流程是：
 
 1. 发送 hello，协商版本和 capabilities；
 2. hello 成功后发送一个业务 request；
