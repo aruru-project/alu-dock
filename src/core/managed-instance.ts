@@ -259,7 +259,6 @@ interface WorkingCheckpoint {
   lastAssistantOutcome: AssistantOutcome | undefined;
   stopRequestedWhileRunning: boolean;
   catalogAdmissionOperationId: string | undefined;
-  extensionCommandInitiator: { operationId: string; runtimeGeneration: number; agentStartCount: number } | undefined;
   replacementIntent: CatalogInstanceRecord["replacement"];
   durableSessionFile: string | undefined;
   recoverySessionFile: string | undefined;
@@ -421,7 +420,6 @@ export class ManagedInstance {
   private runtimeFollowUpHashes: string[] = [];
   private lastAssistantOutcome: AssistantOutcome | undefined;
   private pendingAdmission: PendingAdmission | undefined;
-  private extensionCommandInitiator: { operationId: string; runtimeGeneration: number; agentStartCount: number } | undefined;
   private stopRequestedWhileRunning = false;
   private compactionActive = false;
   /** Synchronous runtime-edge truth closes the gap before catalog projection catches up. */
@@ -2049,9 +2047,6 @@ export class ManagedInstance {
       const runtimeGeneration = this.runtimeGenerationValue;
       const agentStartsBeforeCommand = this.agentStartCount;
       const parentRunning = this.state.execution === "running" || this.agentState().isStreaming;
-      if (!parentRunning) {
-        this.extensionCommandInitiator = { operationId: commandId, runtimeGeneration, agentStartCount: agentStartsBeforeCommand };
-      }
 
       let runtimePromise: Promise<void>;
       try {
@@ -2065,7 +2060,6 @@ export class ManagedInstance {
         if (this.runtimeGenerationValue !== runtimeGeneration || this.state.lifecycle !== "active") return;
         const commandStartedRun = this.agentStartCount > agentStartsBeforeCommand
           || (!parentRunning && this.agentState().isStreaming);
-        if (this.extensionCommandInitiator?.operationId === commandId) this.extensionCommandInitiator = undefined;
         if (commandStartedRun) return;
         await this.enqueueTransition(() => this.commitCatalogTransition(
           { kind: "command.handled", effect: "post_effect", operationId: commandId, instanceId: this.id },
@@ -2077,7 +2071,6 @@ export class ManagedInstance {
         ));
       }).catch(async (error: unknown) => {
         if (this.runtimeGenerationValue !== runtimeGeneration || this.state.lifecycle !== "active") return;
-        if (this.extensionCommandInitiator?.operationId === commandId) this.extensionCommandInitiator = undefined;
         if (this.catalogPort) {
           try { this.catalogPort.assertWritable(); } catch { return; }
         }
@@ -2600,7 +2593,6 @@ export class ManagedInstance {
       lastAssistantOutcome: this.lastAssistantOutcome ? { ...this.lastAssistantOutcome } : undefined,
       stopRequestedWhileRunning: this.stopRequestedWhileRunning,
       catalogAdmissionOperationId: this.catalogAdmissionOperationId,
-      extensionCommandInitiator: this.extensionCommandInitiator ? { ...this.extensionCommandInitiator } : undefined,
       replacementIntent: this.replacementIntent ? cloneJson(this.replacementIntent) : undefined,
       durableSessionFile: this.durableSessionFileValue,
       recoverySessionFile: this.recoverySessionFile,
@@ -2631,7 +2623,6 @@ export class ManagedInstance {
     this.lastAssistantOutcome = checkpoint.lastAssistantOutcome;
     this.stopRequestedWhileRunning = checkpoint.stopRequestedWhileRunning;
     this.catalogAdmissionOperationId = checkpoint.catalogAdmissionOperationId;
-    this.extensionCommandInitiator = checkpoint.extensionCommandInitiator;
     this.replacementIntent = checkpoint.replacementIntent;
     this.durableSessionFileValue = checkpoint.durableSessionFile;
     this.recoverySessionFile = checkpoint.recoverySessionFile;
@@ -3194,7 +3185,6 @@ export class ManagedInstance {
             this.runtimeSteeringHashes = [];
             this.runtimeFollowUpHashes = [];
             this.lastAssistantOutcome = undefined;
-            this.extensionCommandInitiator = undefined;
             this.runtimeCompactingObserved = undefined;
             this.clearDeferredStartAttribution();
             this.finishCompactionBoundary();
@@ -3279,21 +3269,12 @@ export class ManagedInstance {
       }
       case "agent_start": {
         const carriedOperationId = optionalRuntimeString(event.operationId, 128);
-        const extensionInitiatorOperationId = this.extensionCommandInitiator?.runtimeGeneration === this.runtimeGenerationValue
-          && this.extensionCommandInitiator.agentStartCount === this.agentStartCount
-          ? this.extensionCommandInitiator.operationId
-          : undefined;
         return {
           kind: "run.started",
           durable: true,
           operationId: this.resolveAgentEventOperationId(event),
           mutate: () => {
-            if (carriedOperationId !== undefined) {
-              this.state.activeCommandId = carriedOperationId;
-            } else if (extensionInitiatorOperationId !== undefined) {
-              this.state.activeCommandId = extensionInitiatorOperationId;
-              this.extensionCommandInitiator = undefined;
-            }
+            if (carriedOperationId !== undefined) this.state.activeCommandId = carriedOperationId;
             this.agentStartCount += 1;
             this.lastAssistantOutcome = undefined;
             this.state.execution = "running";
@@ -3459,16 +3440,10 @@ export class ManagedInstance {
   }
 
   private resolveAgentEventOperationId(event: AgentEvent): string | undefined {
-    const extensionInitiatorOperationId = event.type === "agent_start"
-      && this.extensionCommandInitiator?.runtimeGeneration === this.runtimeGenerationValue
-      && this.extensionCommandInitiator.agentStartCount === this.agentStartCount
-      ? this.extensionCommandInitiator.operationId
-      : undefined;
     const carriedOperationId = optionalRuntimeString(event.operationId, 128);
     return carriedOperationId
       ?? this.catalogAdmissionOperationId
       ?? (event.type === "agent_settled" ? this.state.activeCommandId : undefined)
-      ?? extensionInitiatorOperationId
       ?? this.compactionOperationId
       ?? this.compactionRequestOperationId
       ?? (event.type === "session_info_changed" ? this.sessionNameOperationId : undefined)

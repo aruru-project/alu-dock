@@ -217,6 +217,7 @@ export class PiAgentAdapter {
   private conversationScope = randomUUID();
   private sessionNameOperationId: string | undefined;
   private manualCompactionOperationId: string | undefined;
+  private extensionCommandOperationId: string | undefined;
   private readonly conversationHistoryCursors = new Map<string, { revision: string; end: number }>();
   private readonly conversationContentCursors = new Map<string, { revision: string; contentRef: string; blockIndex: number; offset: number }>();
 
@@ -304,7 +305,8 @@ export class PiAgentAdapter {
         const hostQueued = context?.type === "force_queue" || context?.type === "host_queue";
         const attachments = context !== undefined && context.type !== "session_switch" ? context.attachments : undefined;
         const runtimeMessage = attachments === undefined ? message : appendDockAttachmentContext(message, attachments, this.options.attachmentContextKey);
-        const input = this.classifyInput(message) === "prompt"
+        const inputKind = this.classifyInput(message);
+        const input = inputKind === "prompt"
           ? binding.conversation.trackInput({ operationId, text: message, runtimeText: runtimeMessage, delivery, fromQueue: hostQueued, images, attachments })
           : undefined;
         const reportPreflight = (success: boolean): void => {
@@ -324,12 +326,19 @@ export class PiAgentAdapter {
             if (delivery === "prompt") throw new Error("Forced Agent queue delivery requires steer or followUp");
             return await this.queueMessage(runtimeMessage, delivery, images);
           }
-          return await this.prompt(runtimeMessage, {
+          const prompt = (): Promise<void> => this.prompt(runtimeMessage, {
             source: "rpc",
             ...(delivery === "prompt" ? {} : { streamingBehavior: delivery }),
             ...(images === undefined ? {} : { images }),
             preflightResult: reportPreflight,
           });
+          if (inputKind !== "extension_command") return await prompt();
+          this.extensionCommandOperationId = operationId;
+          try {
+            return await prompt();
+          } finally {
+            if (this.extensionCommandOperationId === operationId) this.extensionCommandOperationId = undefined;
+          }
         } catch (error) {
           if (input !== undefined) binding.conversation.cancelInput(input);
           throw error;
@@ -1174,16 +1183,16 @@ export class PiAgentAdapter {
 
   private attributeLifecycleEvent(binding: Binding, event: AgentEvent): AgentEvent {
     if (event.type === "agent_start") {
-      const operationId = binding.conversation.nextInputOperationId();
+      const operationId = binding.conversation.nextInputOperationId() ?? this.extensionCommandOperationId;
       binding.runOperationId = operationId;
       return operationId === undefined ? event : { ...event, operationId };
     }
     if (event.type === "agent_settled") {
       return binding.runOperationId === undefined ? event : { ...event, operationId: binding.runOperationId };
     }
-    if ((event.type === "compaction_start" || event.type === "compaction_end")
-      && event.reason === "manual" && this.manualCompactionOperationId !== undefined) {
-      return { ...event, operationId: this.manualCompactionOperationId };
+    if (event.type === "compaction_start" || event.type === "compaction_end") {
+      const operationId = this.manualCompactionOperationId ?? binding.runOperationId ?? this.extensionCommandOperationId;
+      return operationId === undefined ? event : { ...event, operationId };
     }
     if (event.type === "session_info_changed" && this.sessionNameOperationId !== undefined) {
       return { ...event, operationId: this.sessionNameOperationId };
