@@ -237,7 +237,7 @@ Host 独立计数并计算 SHA-256。只有 declared/received size 和 client/Ho
 }
 ```
 
-`status` 只有 `stored | reused`。相同 content digest 永久复用最先成功的 `fileId` 和 metadata，因此 response name 可能不是本次 header name。`name` 只用于显示；Host 保留 Unicode、空格、扩展名和常见标点，neutralize separator/NUL/control，并为不同内容的同名文件添加序号。客户端只能保存和显示 `AttachmentDto`，绝不能期待 absolute Host path。
+`status` 只有 `stored | reused`，表示本次是否创建底层 content bytes。相同 content digest 只保存一份，但 display metadata 是独立的：不同的清洗后 name 或 media type 会得到不同 `fileId` 和各自的 `AttachmentDto`，完全相同的 digest/name/media type 可以复用既有逻辑附件。因此 `reused` 仍可能伴随一个新的 `fileId`。`name` 只用于显示；Host 保留 Unicode、空格、扩展名和常见标点，只 neutralize separator/NUL/control；物理文件重名不会给公开 name 添加序号。客户端必须保存 Host 返回的 DTO，不能从 `status` 推断 identity，也绝不能期待 absolute Host path。
 
 Upload header 的 `operationId` 遵守普通 mutation identity。相同 ID 和相同 header 的并发/重连可以直接收到进行中或已完成 receipt，此时 Host 不发送 readiness，客户端不得发送 body；同一 ID 换 header 会得到 `operation_conflict`。发送 `attachment_complete` 后 transport 失败属于结果未知：先以同一 operation/header 重连恢复；如果 Host 已不保留 receipt，可用新 operation 重新发送相同 bytes，content digest 会返回 `reused`。发送 body 前失败可以安全修复连接后重试同一 operation。
 

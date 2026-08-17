@@ -19,6 +19,7 @@ import type { AttachmentStorageState } from "./attachment-storage-state.js";
 
 const INTERNAL_DIRECTORY = ".alu-dock";
 const MANIFEST_DIRECTORY = "manifests";
+const ATTACHMENT_DIRECTORY = "attachments";
 const TEMP_DIRECTORY = "tmp";
 const FILE_DIRECTORY = "files";
 const MAX_MANIFEST_BYTES = 16 * 1024;
@@ -26,10 +27,21 @@ const MAX_STORAGE_NAME_BYTES = 240;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const FILE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
-interface AttachmentManifest {
+interface ContentManifest {
+  schemaVersion: 2;
+  sha256: string;
+  sizeBytes: number;
+  storageName: string;
+}
+
+interface AttachmentMetadataManifest {
   schemaVersion: 1;
   attachment: AttachmentDto;
-  storageName: string;
+}
+
+interface AttachmentRecord {
+  attachment: AttachmentDto;
+  content: ContentManifest;
 }
 
 export interface BeginAttachmentUpload {
@@ -151,11 +163,14 @@ export class AttachmentStore {
   root: string;
   private internal: string;
   private manifests: string;
+  private attachments: string;
   private temporary: string;
   private files: string;
   private initialized = false;
   private initializePromise: Promise<void> | undefined;
-  private readonly byFileId = new Map<string, AttachmentManifest>();
+  private readonly contentByDigest = new Map<string, ContentManifest>();
+  private readonly byFileId = new Map<string, AttachmentRecord>();
+  private readonly byIdentity = new Map<string, AttachmentRecord>();
   private readonly commitTails = new Map<string, Promise<void>>();
 
   constructor(root: string) {
@@ -163,6 +178,7 @@ export class AttachmentStore {
     this.root = resolve(root);
     this.internal = join(this.root, INTERNAL_DIRECTORY);
     this.manifests = join(this.internal, MANIFEST_DIRECTORY);
+    this.attachments = join(this.internal, ATTACHMENT_DIRECTORY);
     this.temporary = join(this.internal, TEMP_DIRECTORY);
     this.files = join(this.root, FILE_DIRECTORY);
   }
@@ -184,83 +200,76 @@ export class AttachmentStore {
   async get(fileId: string): Promise<AttachmentDto> {
     await this.initialize();
     validateFileId(fileId);
-    const manifest = this.byFileId.get(fileId);
-    if (!manifest) throw new AttachmentNotFoundError(fileId);
-    await this.assertStoredFile(manifest, true);
-    return structuredClone(manifest.attachment);
+    const record = this.byFileId.get(fileId);
+    if (!record) throw new AttachmentNotFoundError(fileId);
+    await this.assertStoredFile(record.content, fileId, true);
+    return structuredClone(record.attachment);
   }
 
   async list(): Promise<AttachmentDto[]> {
     await this.initialize();
     return [...this.byFileId.values()]
-      .map((manifest) => structuredClone(manifest.attachment))
+      .map((record) => structuredClone(record.attachment))
       .sort((left, right) => right.storedAt.localeCompare(left.storedAt) || left.fileId.localeCompare(right.fileId));
   }
 
   async resolve(fileId: string): Promise<{ attachment: AttachmentDto; path: string }> {
     await this.initialize();
     validateFileId(fileId);
-    const manifest = this.byFileId.get(fileId);
-    if (!manifest) throw new AttachmentNotFoundError(fileId);
-    const path = await this.assertStoredFile(manifest, true);
-    return { attachment: structuredClone(manifest.attachment), path };
+    const record = this.byFileId.get(fileId);
+    if (!record) throw new AttachmentNotFoundError(fileId);
+    const path = await this.assertStoredFile(record.content, fileId, true);
+    return { attachment: structuredClone(record.attachment), path };
   }
 
   async commit(path: string, input: BeginAttachmentUpload, actualSha256: string): Promise<AttachmentUploadResult> {
     return this.withDigestLock(actualSha256, async () => {
-      const existing = await this.readManifestByDigest(actualSha256);
-      if (existing) {
-        const storedPath = join(this.files, existing.storageName);
-        let valid = false;
+      const displayName = safeAttachmentName(input.name);
+      let content = await this.readContentByDigest(actualSha256);
+      let status: AttachmentUploadResult["status"] = "reused";
+      if (content) {
+        await this.acceptOrRepairContent(path, content, input.sizeBytes);
+      } else {
+        const storageName = await this.publishContent(path, displayName);
+        const candidate: ContentManifest = {
+          schemaVersion: 2,
+          sha256: actualSha256,
+          sizeBytes: input.sizeBytes,
+          storageName,
+        };
+        const candidatePath = join(this.files, storageName);
         try {
-          const details = await lstat(storedPath);
-          valid = details.isFile() && !details.isSymbolicLink() && details.size === existing.attachment.sizeBytes
-            && await hashFile(storedPath) === existing.attachment.sha256;
+          if (await this.publishContentManifest(candidate)) {
+            content = candidate;
+            this.contentByDigest.set(actualSha256, content);
+            status = "stored";
+          } else {
+            const winner = await this.readContentByDigest(actualSha256);
+            if (!winner) throw new Error("Concurrent attachment commit did not publish a readable content manifest");
+            await this.acceptOrRepairContent(candidatePath, winner, input.sizeBytes);
+            content = winner;
+          }
         } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          await unlink(candidatePath).catch(() => {});
+          throw error;
         }
-        if (valid) await unlink(path);
-        else {
-          await rename(path, storedPath);
-          await chmod(storedPath, 0o600);
-          await syncDirectory(this.files);
-        }
-        return { attachment: structuredClone(existing.attachment), status: "reused" };
       }
 
-      const name = safeAttachmentName(input.name);
-      const storageName = await this.publishContent(path, name);
+      const identity = attachmentIdentity(actualSha256, displayName, input.mediaType);
+      const existing = this.byIdentity.get(identity);
+      if (existing) return { attachment: structuredClone(existing.attachment), status: "reused" };
+
       const attachment: AttachmentDto = {
         fileId: randomUUID(),
-        name: storageName,
+        name: displayName,
         sizeBytes: input.sizeBytes,
         ...(input.mediaType === undefined ? {} : { mediaType: input.mediaType }),
         sha256: actualSha256,
         storedAt: new Date().toISOString(),
       };
-      const manifest: AttachmentManifest = { schemaVersion: 1, attachment, storageName };
-      const manifestPath = join(this.manifests, `${actualSha256}.json`);
-      const temporaryManifest = join(this.temporary, `manifest-${randomUUID()}.json`);
-      try {
-        await writeNewJson(temporaryManifest, manifest);
-        try {
-          await link(temporaryManifest, manifestPath);
-        } catch (error) {
-          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-          await unlink(join(this.files, storageName)).catch(() => {});
-          const winner = await this.readManifestByDigest(actualSha256);
-          if (!winner) throw new Error("Concurrent attachment commit did not publish a readable manifest");
-          return { attachment: structuredClone(winner.attachment), status: "reused" };
-        }
-        await syncDirectory(this.manifests);
-        this.byFileId.set(attachment.fileId, manifest);
-        return { attachment: structuredClone(attachment), status: "stored" };
-      } catch (error) {
-        await unlink(join(this.files, storageName)).catch(() => {});
-        throw error;
-      } finally {
-        await unlink(temporaryManifest).catch(() => {});
-      }
+      await this.publishAttachmentManifest({ schemaVersion: 1, attachment });
+      this.registerAttachment(attachment, content);
+      return { attachment: structuredClone(attachment), status };
     });
   }
 
@@ -275,25 +284,35 @@ export class AttachmentStore {
       this.root = canonicalRoot;
       this.internal = join(this.root, INTERNAL_DIRECTORY);
       this.manifests = join(this.internal, MANIFEST_DIRECTORY);
+      this.attachments = join(this.internal, ATTACHMENT_DIRECTORY);
       this.temporary = join(this.internal, TEMP_DIRECTORY);
       this.files = join(this.root, FILE_DIRECTORY);
     }
     await mkdir(this.internal, { recursive: true, mode: 0o700 });
     await mkdir(this.manifests, { recursive: true, mode: 0o700 });
+    await mkdir(this.attachments, { recursive: true, mode: 0o700 });
     await mkdir(this.temporary, { recursive: true, mode: 0o700 });
     await mkdir(this.files, { recursive: true, mode: 0o700 });
-    await Promise.all([this.internal, this.manifests, this.temporary, this.files].map(assertManagedDirectory));
-    await Promise.all([this.internal, this.manifests, this.temporary, this.files].map((path) => chmod(path, 0o700)));
+    const managed = [this.internal, this.manifests, this.attachments, this.temporary, this.files];
+    await Promise.all(managed.map(assertManagedDirectory));
+    await Promise.all(managed.map((path) => chmod(path, 0o700)));
 
     for (const name of await readdir(this.temporary)) await unlink(join(this.temporary, name)).catch(() => {});
     const referenced = new Set<string>();
     for (const name of await readdir(this.manifests)) {
-      if (!SHA256.test(name.slice(0, -5)) || !name.endsWith(".json")) throw new Error("Attachment store contains an invalid manifest name");
-      const manifest = await readManifest(join(this.manifests, name));
-      if (`${manifest.attachment.sha256}.json` !== name) throw new Error("Attachment manifest digest does not match its name");
-      if (this.byFileId.has(manifest.attachment.fileId)) throw new Error("Attachment store contains a duplicate file ID");
-      this.byFileId.set(manifest.attachment.fileId, manifest);
-      referenced.add(manifest.storageName);
+      if (!name.endsWith(".json") || !SHA256.test(name.slice(0, -5))) throw new Error("Attachment store contains an invalid content manifest name");
+      const content = await readContentManifest(join(this.manifests, name));
+      if (`${content.sha256}.json` !== name) throw new Error("Attachment content manifest digest does not match its name");
+      this.registerContent(content);
+      referenced.add(content.storageName);
+    }
+    for (const name of await readdir(this.attachments)) {
+      if (!name.endsWith(".json") || !FILE_ID.test(name.slice(0, -5))) throw new Error("Attachment store contains an invalid attachment manifest name");
+      const manifest = await readAttachmentManifest(join(this.attachments, name));
+      if (`${manifest.attachment.fileId}.json` !== name) throw new Error("Attachment metadata manifest ID does not match its name");
+      const content = this.contentByDigest.get(manifest.attachment.sha256);
+      if (!content || content.sizeBytes !== manifest.attachment.sizeBytes) throw new Error("Attachment metadata refers to unavailable content");
+      this.registerAttachment(manifest.attachment, content);
     }
     for (const name of await readdir(this.files)) {
       if (!referenced.has(name)) await unlink(join(this.files, name)).catch(() => {});
@@ -306,43 +325,148 @@ export class AttachmentStore {
     const stem = extension.length > 0 && extension !== requestedName ? requestedName.slice(0, -extension.length) : requestedName;
     for (let number = 1; number < 100_000; number += 1) {
       const candidate = number === 1 ? requestedName : clampStorageName(`${stem} (${number})${extension}`);
+      const destination = join(this.files, candidate);
+      let published = false;
       try {
-        await link(temporaryPath, join(this.files, candidate));
-        await chmod(join(this.files, candidate), 0o600);
+        await link(temporaryPath, destination);
+        published = true;
+        await chmod(destination, 0o600);
         await syncDirectory(this.files);
         await unlink(temporaryPath);
         return candidate;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        if (!published && (error as NodeJS.ErrnoException).code === "EEXIST") continue;
+        if (published) {
+          await unlink(destination).catch(() => {});
+          await syncDirectory(this.files).catch(() => {});
+        }
+        throw error;
       }
     }
     throw new Error("Attachment filename collision limit was reached");
   }
 
-  private async readManifestByDigest(sha256: string): Promise<AttachmentManifest | undefined> {
+  private async readContentByDigest(sha256: string): Promise<ContentManifest | undefined> {
+    const cached = this.contentByDigest.get(sha256);
+    if (cached) return cached;
     try {
-      const manifest = await readManifest(join(this.manifests, `${sha256}.json`));
-      this.byFileId.set(manifest.attachment.fileId, manifest);
-      return manifest;
+      const content = await readContentManifest(join(this.manifests, `${sha256}.json`));
+      if (content.sha256 !== sha256) throw new Error("Attachment content manifest digest is inconsistent");
+      this.registerContent(content);
+      return content;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
       throw error;
     }
   }
 
-  private async assertStoredFile(manifest: AttachmentManifest, verifyHash: boolean): Promise<string> {
-    const path = join(this.files, manifest.storageName);
+  private async publishContentManifest(manifest: ContentManifest): Promise<boolean> {
+    const temporary = join(this.temporary, `content-${randomUUID()}.json`);
+    const destination = join(this.manifests, `${manifest.sha256}.json`);
+    let published = false;
+    try {
+      await writeNewJson(temporary, manifest);
+      try { await link(temporary, destination); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
+        throw error;
+      }
+      published = true;
+      await syncDirectory(this.manifests);
+      return true;
+    } catch (error) {
+      if (published) {
+        await unlink(destination).catch(() => {});
+        await syncDirectory(this.manifests).catch(() => {});
+      }
+      throw error;
+    } finally { await unlink(temporary).catch(() => {}); }
+  }
+
+  private async publishAttachmentManifest(manifest: AttachmentMetadataManifest): Promise<void> {
+    const temporary = join(this.temporary, `attachment-${randomUUID()}.json`);
+    const destination = join(this.attachments, `${manifest.attachment.fileId}.json`);
+    let published = false;
+    try {
+      await writeNewJson(temporary, manifest);
+      try { await link(temporary, destination); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EEXIST") throw new Error("Attachment file ID collision");
+        throw error;
+      }
+      published = true;
+      await syncDirectory(this.attachments);
+    } catch (error) {
+      if (published) {
+        await unlink(destination).catch(() => {});
+        await syncDirectory(this.attachments).catch(() => {});
+      }
+      throw error;
+    } finally { await unlink(temporary).catch(() => {}); }
+  }
+
+  private async acceptOrRepairContent(provisionalPath: string, content: ContentManifest, expectedSizeBytes: number): Promise<void> {
+    if (content.sizeBytes !== expectedSizeBytes) throw new AttachmentIntegrityError("Attachment content manifest size is inconsistent");
+    const storedPath = join(this.files, content.storageName);
+    let valid = false;
+    try {
+      const details = await lstat(storedPath);
+      valid = details.isFile() && !details.isSymbolicLink() && details.size === content.sizeBytes
+        && await hashFile(storedPath) === content.sha256;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (valid) {
+      if (resolve(provisionalPath) !== resolve(storedPath)) await unlink(provisionalPath);
+      return;
+    }
+    if (resolve(provisionalPath) === resolve(storedPath)) throw new AttachmentIntegrityError("Attachment content could not be repaired in place");
+    await rename(provisionalPath, storedPath);
+    await chmod(storedPath, 0o600);
+    await syncDirectory(this.files);
+  }
+
+  private registerContent(content: ContentManifest): void {
+    const existing = this.contentByDigest.get(content.sha256);
+    if (existing && (existing.sizeBytes !== content.sizeBytes || existing.storageName !== content.storageName)) {
+      throw new Error("Attachment store contains conflicting content manifests");
+    }
+    this.contentByDigest.set(content.sha256, content);
+  }
+
+  private registerAttachment(attachment: AttachmentDto, content: ContentManifest): void {
+    if (attachment.sha256 !== content.sha256 || attachment.sizeBytes !== content.sizeBytes) {
+      throw new Error("Attachment metadata does not match its stored content");
+    }
+    const existingId = this.byFileId.get(attachment.fileId);
+    if (existingId) {
+      if (!sameAttachment(existingId.attachment, attachment)) throw new Error("Attachment store contains a duplicate file ID");
+      return;
+    }
+    const identity = attachmentIdentity(attachment.sha256, attachment.name, attachment.mediaType);
+    const existingIdentity = this.byIdentity.get(identity);
+    const record = { attachment, content };
+    this.byFileId.set(attachment.fileId, record);
+    if (!existingIdentity
+      || attachment.storedAt.localeCompare(existingIdentity.attachment.storedAt) < 0
+      || (attachment.storedAt === existingIdentity.attachment.storedAt && attachment.fileId.localeCompare(existingIdentity.attachment.fileId) < 0)) {
+      this.byIdentity.set(identity, record);
+    }
+  }
+
+  private async assertStoredFile(content: ContentManifest, fileId: string, verifyHash: boolean): Promise<string> {
+    const path = join(this.files, content.storageName);
     let details;
     try { details = await lstat(path); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new AttachmentNotFoundError(manifest.attachment.fileId);
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new AttachmentNotFoundError(fileId);
       throw error;
     }
-    if (!details.isFile() || details.isSymbolicLink() || details.size !== manifest.attachment.sizeBytes) {
-      throw new AttachmentIntegrityError(`Attachment ${manifest.attachment.fileId} no longer matches its stored metadata`);
+    if (!details.isFile() || details.isSymbolicLink() || details.size !== content.sizeBytes) {
+      throw new AttachmentIntegrityError(`Attachment ${fileId} no longer matches its stored metadata`);
     }
-    if (verifyHash && await hashFile(path) !== manifest.attachment.sha256) {
-      throw new AttachmentIntegrityError(`Attachment ${manifest.attachment.fileId} no longer matches its stored digest`);
+    if (verifyHash && await hashFile(path) !== content.sha256) {
+      throw new AttachmentIntegrityError(`Attachment ${fileId} no longer matches its stored digest`);
     }
     const canonical = await realpath(path);
     if (!canonical.startsWith(`${this.files}/`)) throw new AttachmentIntegrityError("Attachment resolved outside its managed store");
@@ -487,20 +611,49 @@ function clampStorageName(name: string): string {
   return `${result || "attachment"}${usableExtension}`;
 }
 
-async function readManifest(path: string): Promise<AttachmentManifest> {
-  const details = await lstat(path);
-  if (!details.isFile() || details.isSymbolicLink() || details.size > MAX_MANIFEST_BYTES) throw new Error("Attachment manifest is not a bounded regular file");
-  return parseManifest(JSON.parse(await readFile(path, "utf8")) as unknown);
+function attachmentIdentity(sha256: string, name: string, mediaType: string | undefined): string {
+  return JSON.stringify([sha256, name, mediaType ?? null]);
 }
 
-function parseManifest(raw: unknown): AttachmentManifest {
-  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Attachment manifest is invalid");
+function sameAttachment(left: AttachmentDto, right: AttachmentDto): boolean {
+  return left.fileId === right.fileId
+    && left.name === right.name
+    && left.sizeBytes === right.sizeBytes
+    && left.mediaType === right.mediaType
+    && left.sha256 === right.sha256
+    && left.storedAt === right.storedAt;
+}
+
+async function readContentManifest(path: string): Promise<ContentManifest> {
+  return parseContentManifest(await readBoundedManifest(path));
+}
+
+async function readAttachmentManifest(path: string): Promise<AttachmentMetadataManifest> {
+  const raw = await readBoundedManifest(path);
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Attachment metadata manifest is invalid");
   const value = raw as Record<string, unknown>;
-  exactKeys(value, ["schemaVersion", "attachment", "storageName"]);
-  if (value.schemaVersion !== 1 || typeof value.storageName !== "string" || safeAttachmentName(value.storageName) !== value.storageName) throw new Error("Attachment manifest metadata is invalid");
-  const attachment = parseAttachment(value.attachment);
-  if (attachment.name !== value.storageName) throw new Error("Attachment manifest name is inconsistent");
-  return { schemaVersion: 1, attachment, storageName: value.storageName };
+  exactKeys(value, ["schemaVersion", "attachment"]);
+  if (value.schemaVersion !== 1) throw new Error("Attachment metadata manifest version is unsupported");
+  return { schemaVersion: 1, attachment: parseAttachment(value.attachment) };
+}
+
+async function readBoundedManifest(path: string): Promise<unknown> {
+  const details = await lstat(path);
+  if (!details.isFile() || details.isSymbolicLink() || details.size > MAX_MANIFEST_BYTES) throw new Error("Attachment manifest is not a bounded regular file");
+  return JSON.parse(await readFile(path, "utf8")) as unknown;
+}
+
+function parseContentManifest(raw: unknown): ContentManifest {
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Attachment content manifest is invalid");
+  const value = raw as Record<string, unknown>;
+  exactKeys(value, ["schemaVersion", "sha256", "sizeBytes", "storageName"]);
+  if (value.schemaVersion !== 2
+    || typeof value.sha256 !== "string" || !SHA256.test(value.sha256)
+    || !Number.isSafeInteger(value.sizeBytes) || (value.sizeBytes as number) < 0 || (value.sizeBytes as number) > MAX_ATTACHMENT_BYTES
+    || typeof value.storageName !== "string" || safeAttachmentName(value.storageName) !== value.storageName) {
+    throw new Error("Attachment content manifest metadata is invalid");
+  }
+  return { schemaVersion: 2, sha256: value.sha256, sizeBytes: value.sizeBytes as number, storageName: value.storageName };
 }
 
 function parseAttachment(raw: unknown): AttachmentDto {
@@ -512,7 +665,7 @@ function parseAttachment(raw: unknown): AttachmentDto {
   if (!Number.isSafeInteger(value.sizeBytes) || (value.sizeBytes as number) < 0 || (value.sizeBytes as number) > MAX_ATTACHMENT_BYTES) throw new Error("Attachment metadata size is invalid");
   if (typeof value.sha256 !== "string" || !SHA256.test(value.sha256)) throw new Error("Attachment metadata digest is invalid");
   if (typeof value.storedAt !== "string" || !Number.isFinite(Date.parse(value.storedAt))) throw new Error("Attachment metadata timestamp is invalid");
-  if (value.mediaType !== undefined && (typeof value.mediaType !== "string" || value.mediaType.length < 1 || value.mediaType.length > MAX_ATTACHMENT_MEDIA_TYPE_CHARS)) throw new Error("Attachment metadata media type is invalid");
+  if (value.mediaType !== undefined && (typeof value.mediaType !== "string" || value.mediaType.length < 1 || value.mediaType.length > MAX_ATTACHMENT_MEDIA_TYPE_CHARS || /[\u0000-\u001f\u007f-\u009f]/u.test(value.mediaType))) throw new Error("Attachment metadata media type is invalid");
   return {
     fileId: value.fileId as string,
     name: value.name,

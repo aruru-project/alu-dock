@@ -86,7 +86,7 @@ interface AttachmentDto {
 }
 ```
 
-`fileId` 是 opaque identity；Protocol V2 response、Queue、event 和 conversation 不得出现 Host absolute path。人类文件名保留 Unicode、空格、扩展名和常见标点，只替换 path separator、NUL/control，并在不同内容同名时添加自然序号。相同 SHA-256 内容只保留一份，最先提交成功的 display metadata 成为 canonical receipt；结果用 `status: "stored" | "reused"` 表示本次是否创建内容。
+`fileId` 是 opaque logical-attachment identity；Protocol V2 response、Queue、event 和 conversation 不得出现 Host absolute path。人类文件名保留 Unicode、空格、扩展名和常见标点，只替换 path separator、NUL/control。内容与展示 metadata 分开持久化：相同 SHA-256 bytes 只保存一份，但不同的清洗后名称或 media type 拥有独立 `fileId` 和 `AttachmentDto`；完全相同的 digest/name/media type 可复用既有逻辑附件。不同内容即使同名也保持各自的原显示名，物理存储碰撞不会改写公开 metadata。结果用 `status: "stored" | "reused"` 表示本次是否创建底层内容，而不是是否创建新的逻辑附件。
 
 上传最大 decoded size 是 `536870912` bytes（512 MiB）。客户端先计算并声明 size 与 lowercase SHA-256，Host 在写 provisional file 时独立计数和 hash，只有 size/digest 完全相同才 fsync、原子发布内容和 manifest。失败、断开和 Host restart 会清理 provisional file；成功附件没有自动到期。已发布文件在 Agent resolve 时再次检查 regular-file、size、digest 与 managed-directory containment。
 
@@ -113,7 +113,7 @@ Host 对 socket input 串行处理、pause/resume backpressure，并以 60 秒 i
 - Agent 原生 session identity：当前 Worker 内的会话；
 - `runtimeGeneration`：instance 内一次 runtime/session generation；
 - `operationId`：一次调用者 mutation 意图；
-- attachment `fileId`：Host 文件内容 receipt 的 opaque identity，不是路径；
+- attachment `fileId`：Host logical attachment metadata 的 opaque identity；多个 `fileId` 可以引用同一份 content bytes，它不是路径；
 - event cursor：一次 read/follow reconnect 的观察位置。
 
 客户端不能用 name、cwd、Agent session ID 或文件路径代替 Dock instance identity。Snapshot 中可选的 `name` 是当前 Agent session name，不是稳定的 Dock 实例名称。`instance.display-name.v1` 提供始终存在的 `displayName`：Host 统一按 `name → key → cwd fallback → Work` 生成安全的人类展示标签；其中 cwd fallback 只保留 ASCII 字母、数字、空格、下划线和横杠，最长 20 个字符，任意异常都降级而不能使 snapshot/list 失败。`displayName` 不持久化为 session name，不参与 TARGET、key 或 instance identity；客户端只负责渲染，操作仍使用 `instanceId`。
@@ -126,7 +126,7 @@ Host 对 mutation 负责 admission、operation 去重和结果归属。客户端
 
 Worker 接受副作用前失联和接受后失联是不同结果。Host 必须保留这个区别，不能把可能已经执行的 mutation 当成普通失败重试。
 
-附件上传的 `operationId` 在 header admission 时保留；同一参数的并发、completed 或 response-loss 重试共享 receipt，不重新执行 body effect，不同参数冲突。内容 SHA-256 另提供跨 operation 的永久去重，不把 endpoint、文件名或客户端路径当 identity。
+附件上传的 `operationId` 在 header admission 时保留；同一参数的并发、completed 或 response-loss 重试共享 receipt，不重新执行 body effect，不同参数冲突。内容 SHA-256 另提供跨 operation 的永久 bytes 去重，不把 endpoint、文件名或客户端路径当 content identity；清洗后的 name/media type 只参与 logical attachment identity。
 
 消息提交中，Host 的 admission result 使用 Worker 报告的实际 delivery。`operationId` 是直接 prompt 与 Queue message 共用的提交身份；`queueItemId` 只属于确实等待过的 Queue item。一个 Host-deferred Queue item 可以在 Agent 恢复空闲后以 `prompt` delivery 被消费，此时 `message.submitted` 仍保留它真实的历史 Queue identity；普通 direct prompt 没有该 identity。若辅助关联异常，Host 省略这个可选 identity，而不是伪造一个或丢掉 canonical message。Host 不根据 catalog 中稍早的 running 状态替 Agent 决定最终 delivery。因此用户看到的状态必须始终可判定为未接受、Queue 中等待，或已经被 Agent 消费并出现在 conversation，不能两边都没有。
 

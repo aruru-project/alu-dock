@@ -47,7 +47,7 @@ test("Hosts without attachment storage do not advertise attachments.v1", async (
   }
 });
 
-test("Protocol V2 streams hash-verified attachments and durably reuses identical content", async () => {
+test("Protocol V2 separates logical attachment metadata from deduplicated content", async () => {
   const root = await mkdtemp(join(tmpdir(), "alu-attachment-control-"));
   await chmod(root, 0o700);
   const socketPath = join(root, "dock.sock");
@@ -83,14 +83,29 @@ test("Protocol V2 streams hash-verified attachments and durably reuses identical
 
     const duplicate = await client.uploadAttachment(source("another-name.dat", bytes), "upload-two");
     assert.equal(duplicate.status, "reused");
-    assert.deepEqual(duplicate.attachment, first.attachment);
+    assert.notEqual(duplicate.attachment.fileId, first.attachment.fileId);
+    assert.equal(duplicate.attachment.name, "another-name.dat");
+    assert.equal(duplicate.attachment.mediaType, undefined);
+    const duplicateResolved = await service.accessAttachments("instance-a", { type: "resolve", fileId: duplicate.attachment.fileId });
+    assert.equal(duplicateResolved.type, "resolve");
+    if (duplicateResolved.type !== "resolve") throw new Error("unexpected list result");
+    assert.equal(duplicateResolved.path, resolved.path, "logical attachments with identical bytes share one stored file");
+
+    const exactRepeat = await client.uploadAttachment(source("another-name.dat", bytes), "upload-three");
+    assert.equal(exactRepeat.status, "reused");
+    assert.deepEqual(exactRepeat.attachment, duplicate.attachment, "identical logical metadata remains stable across uploads");
+
+    const typedAlias = await client.uploadAttachment(source("another-name.dat", bytes, "text/plain"), "upload-four");
+    assert.equal(typedAlias.status, "reused");
+    assert.notEqual(typedAlias.attachment.fileId, duplicate.attachment.fileId);
+    assert.equal(typedAlias.attachment.mediaType, "text/plain");
 
     await assert.rejects(client.uploadAttachment({
       name: "partial.bin", sizeBytes: 20, sha256: createHash("sha256").update(Buffer.alloc(20)).digest("hex"),
       async *open() { yield Buffer.alloc(5); throw new Error("source disconnected"); },
     }, "upload-partial"), /source disconnected/u);
     const afterDisconnect = await service.accessAttachments("instance-b", { type: "list" });
-    assert.equal(afterDisconnect.type === "list" ? afterDisconnect.total : -1, 1);
+    assert.equal(afterDisconnect.type === "list" ? afterDisconnect.total : -1, 3);
     await new Promise((resolve) => setTimeout(resolve, 20));
     const recoveredPartial = await client.uploadAttachment(source("partial.bin", Buffer.alloc(20)), "upload-partial");
     assert.equal(recoveredPartial.status, "stored", "a pre-completion disconnect must leave the operation retryable");
@@ -99,7 +114,9 @@ test("Protocol V2 streams hash-verified attachments and durably reuses identical
     const listed = await restarted.accessAttachments("instance-b", { type: "list" });
     assert.equal(listed.type, "list");
     if (listed.type !== "list") throw new Error("unexpected resolve result");
-    assert.deepEqual(new Set(listed.attachments.map((attachment) => attachment.fileId)), new Set([first.attachment.fileId, recoveredPartial.attachment.fileId]));
+    assert.deepEqual(new Set(listed.attachments.map((attachment) => attachment.fileId)), new Set([
+      first.attachment.fileId, duplicate.attachment.fileId, typedAlias.attachment.fileId, recoveredPartial.attachment.fileId,
+    ]));
   } finally {
     await host.stop();
     await rm(root, { recursive: true, force: true });
@@ -148,7 +165,7 @@ test("attachment DTOs survive Host Queue, live events, and Worker-native convers
   }
 });
 
-test("concurrent identical uploads share one durable identity and different bytes get human collision suffixes", async () => {
+test("concurrent uploads separate logical metadata while deduplicating content", async () => {
   const root = await mkdtemp(join(tmpdir(), "alu-attachment-race-"));
   const state = new AttachmentStorageState(join(root, "state"), join(root, "files"));
   const service = new AttachmentService(state);
@@ -160,15 +177,21 @@ test("concurrent identical uploads share one durable identity and different byte
     await Promise.all([left.write(bytes), right.write(bytes)]);
     const results = await Promise.all([left.complete(), right.complete()]);
     assert.deepEqual(results.map((result) => result.status).sort(), ["reused", "stored"]);
-    assert.equal(results[0]!.attachment.fileId, results[1]!.attachment.fileId);
-    const winningName = results[0]!.attachment.name;
-    assert.ok(winningName === "same name.txt" || winningName === "different display.txt");
+    assert.notEqual(results[0]!.attachment.fileId, results[1]!.attachment.fileId);
+    assert.deepEqual(new Set(results.map((result) => result.attachment.name)), new Set(["same name.txt", "different display.txt"]));
+    const resolvedAliases = await Promise.all(results.map((result) => service.accessAttachments("instance", { type: "resolve", fileId: result.attachment.fileId })));
+    assert.ok(resolvedAliases.every((result) => result.type === "resolve"));
+    assert.equal((resolvedAliases[0] as { path: string }).path, (resolvedAliases[1] as { path: string }).path);
 
     const other = Buffer.from("different bytes");
-    const otherSink = await service.beginUpload({ name: winningName, sizeBytes: other.length, sha256: createHash("sha256").update(other).digest("hex") });
+    const otherSink = await service.beginUpload({ name: "same name.txt", sizeBytes: other.length, sha256: createHash("sha256").update(other).digest("hex") });
     await otherSink.write(other);
     const otherResult = await otherSink.complete();
-    assert.equal(otherResult.attachment.name, winningName.replace(/(\.[^.]+)?$/u, " (2)$1"));
+    assert.equal(otherResult.attachment.name, "same name.txt", "display metadata is independent of physical filename collisions");
+    const otherResolved = await service.accessAttachments("instance", { type: "resolve", fileId: otherResult.attachment.fileId });
+    assert.equal(otherResolved.type, "resolve");
+    if (otherResolved.type !== "resolve") throw new Error("unexpected list result");
+    assert.notEqual(otherResolved.path, (resolvedAliases[0] as { path: string }).path);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
