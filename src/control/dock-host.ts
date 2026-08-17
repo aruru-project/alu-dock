@@ -783,7 +783,6 @@ export class DockHost {
       instanceDisplayName: requirements?.has(INSTANCE_DISPLAY_NAME_CAPABILITY)===true,
       toolPresentation: requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,
       images: requirements?.has(IMAGE_INPUT_CAPABILITY)===true,
-      attachments: requirements?.has(ATTACHMENTS_CAPABILITY)===true,
       controllerDirectives: requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true,
       persistentInteractions: requirements?.has(PERSISTENT_INTERACTIONS_CAPABILITY)===true,
     };
@@ -926,7 +925,7 @@ export class DockHost {
     for (const socket of streams) socket.destroy();
   }
 
-  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const requirements=this.connectionRequirements.get(socket);const projected=projectForClient(result,{toolsExpanded:requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,gitBranch:requirements?.has(GIT_BRANCH_CAPABILITY)===true,instanceKeys:requirements?.has(INSTANCE_KEYS_CAPABILITY)===true,instanceDisplayName:requirements?.has(INSTANCE_DISPLAY_NAME_CAPABILITY)===true,toolPresentation:requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,images:requirements?.has(IMAGE_INPUT_CAPABILITY)===true,attachments:requirements?.has(ATTACHMENTS_CAPABILITY)===true,controllerDirectives:requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true,persistentInteractions:requirements?.has(PERSISTENT_INTERACTIONS_CAPABILITY)===true});const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,projected));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
+  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const requirements=this.connectionRequirements.get(socket);const projected=projectForClient(result,{toolsExpanded:requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,gitBranch:requirements?.has(GIT_BRANCH_CAPABILITY)===true,instanceKeys:requirements?.has(INSTANCE_KEYS_CAPABILITY)===true,instanceDisplayName:requirements?.has(INSTANCE_DISPLAY_NAME_CAPABILITY)===true,toolPresentation:requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,images:requirements?.has(IMAGE_INPUT_CAPABILITY)===true,controllerDirectives:requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true,persistentInteractions:requirements?.has(PERSISTENT_INTERACTIONS_CAPABILITY)===true});const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,projected));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
   private sendErrorAndEnd(socket:Socket,code:string,message:string,requestId:string,details?:JsonObject,retryable=false):void { if(socket.destroyed||socket.writableEnded)return;const response:ControlResponse={kind:"response",version:2,requestId,hostEpoch:this.hostEpoch,ok:false,error:{code,message:truncateMessage(message),retryable,...(details===undefined?{}:{details})}};if(endEnvelope(socket,response)==="too_large")socket.destroy(); }
   private sendHelloError(socket:Socket,requestId:string,code:HelloError["error"]["code"],message:string,details:{hostVersions?:number[];missing?:string[];retryAfterMs?:number}={}):void { if(socket.destroyed||socket.writableEnded)return;const envelope:HelloError={kind:"hello_error",requestId,error:{code,message:truncateMessage(message),...details}};try{socket.end(encodeJsonLine(envelope));}catch{socket.destroy();} }
 }
@@ -1067,7 +1066,6 @@ interface ClientProjectionCapabilities {
   instanceDisplayName: boolean;
   toolPresentation: boolean;
   images: boolean;
-  attachments: boolean;
   controllerDirectives: boolean;
   persistentInteractions: boolean;
   controllerId?: string;
@@ -1081,7 +1079,6 @@ function controllerEventProjectionCapabilities(controllerId: string): ClientProj
     instanceDisplayName: false,
     toolPresentation: false,
     images: true,
-    attachments: true,
     controllerDirectives: true,
     persistentInteractions: true,
     controllerId,
@@ -1133,17 +1130,6 @@ function projectForClient(
     && source.text === ""
     && Array.isArray(source.images)
     && source.images.length > 0;
-  const legacyAttachmentOnlyText = !capabilities.attachments
-    && imageInputContext
-    && source.text === ""
-    && Array.isArray(source.attachments)
-    && source.attachments.length > 0;
-  const legacyAttachmentOnlyContent = !capabilities.attachments
-    && ((context === "message-data" && source.role === "user") || (context === "history-entry" && source.source === "user"))
-    && Array.isArray(source.content)
-    && source.content.length === 0
-    && Array.isArray(source.attachments)
-    && source.attachments.length > 0;
   const projected: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(source)) {
     if (isSnapshot && key === "toolsExpanded" && !capabilities.toolsExpanded) continue;
@@ -1153,13 +1139,8 @@ function projectForClient(
     if (isSnapshot && key === "activeInteraction" && !capabilities.persistentInteractions) continue;
     if (key === "presentation" && !capabilities.toolPresentation && (context === "tool-event-data" || isToolResultBlock)) continue;
     if (key === "images" && !capabilities.images && imageInputContext) continue;
-    if (key === "attachments" && !capabilities.attachments) continue;
-    if (key === "text" && (legacyImageOnlyText || legacyAttachmentOnlyText)) {
-      projected[key] = legacyImageOnlyText ? "[Image attached]" : "[Attachment attached]";
-      continue;
-    }
-    if (key === "content" && legacyAttachmentOnlyContent) {
-      projected[key] = [{ type: "text", text: "[Attachment attached]" }];
+    if (key === "text" && legacyImageOnlyText) {
+      projected[key] = "[Image attached]";
       continue;
     }
     if (isEventPage && key === "events" && Array.isArray(child)) {

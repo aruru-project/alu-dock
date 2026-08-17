@@ -123,7 +123,7 @@ test("Protocol V2 separates logical attachment metadata from deduplicated conten
   }
 });
 
-test("attachment DTOs survive Host Queue, live events, and Worker-native conversation checkpoints", async () => {
+test("attachment DTOs remain canonical across Queue, events, and conversation without passive projection negotiation", async () => {
   const root = await mkdtemp(join(tmpdir(), "alu-attachment-command-"));
   const socketPath = join(root, "dock.sock");
   const state = new AttachmentStorageState(join(root, "state"), join(root, "attachments"));
@@ -159,6 +159,14 @@ test("attachment DTOs survive Host Queue, live events, and Worker-native convers
     const queuedRecord = history.entries.map((entry) => entry.entry).find((entry) => entry.source === "user" && entry.content.some((block) => block.type === "text" && block.text === "inspect queued file"));
     assert.deepEqual(queuedRecord?.attachments, [uploaded.attachment]);
     assert.doesNotMatch(JSON.stringify(history), /\/files\//u);
+
+    await registry.get(instance.id).waitForIdle();
+    await client.prompt(instance.id, "start dequeue run", "prompt", "dequeue-run");
+    await client.prompt(instance.id, "restore queued file", "steer", "dequeue-attachment", undefined, [uploaded.attachment.fileId]);
+    const restored = await client.dequeue(instance.id, "dequeue-shared-queue");
+    assert.deepEqual(restored.receipt.restored[0]?.attachments, [uploaded.attachment]);
+    assert.equal((await client.read(instance.id)).pendingMessages.length, 0);
+    worker?.settle("dequeue done");
   } finally {
     await host.stop();
     await rm(root, { recursive: true, force: true });

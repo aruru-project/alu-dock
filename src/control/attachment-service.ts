@@ -28,7 +28,7 @@ const SHA256 = /^[a-f0-9]{64}$/u;
 const FILE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 
 interface ContentManifest {
-  schemaVersion: 2;
+  schemaVersion: 1;
   sha256: string;
   sizeBytes: number;
   storageName: string;
@@ -232,7 +232,7 @@ export class AttachmentStore {
       } else {
         const storageName = await this.publishContent(path, displayName);
         const candidate: ContentManifest = {
-          schemaVersion: 2,
+          schemaVersion: 1,
           sha256: actualSha256,
           sizeBytes: input.sizeBytes,
           storageName,
@@ -647,13 +647,13 @@ function parseContentManifest(raw: unknown): ContentManifest {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Attachment content manifest is invalid");
   const value = raw as Record<string, unknown>;
   exactKeys(value, ["schemaVersion", "sha256", "sizeBytes", "storageName"]);
-  if (value.schemaVersion !== 2
+  if (value.schemaVersion !== 1
     || typeof value.sha256 !== "string" || !SHA256.test(value.sha256)
     || !Number.isSafeInteger(value.sizeBytes) || (value.sizeBytes as number) < 0 || (value.sizeBytes as number) > MAX_ATTACHMENT_BYTES
     || typeof value.storageName !== "string" || safeAttachmentName(value.storageName) !== value.storageName) {
     throw new Error("Attachment content manifest metadata is invalid");
   }
-  return { schemaVersion: 2, sha256: value.sha256, sizeBytes: value.sizeBytes as number, storageName: value.storageName };
+  return { schemaVersion: 1, sha256: value.sha256, sizeBytes: value.sizeBytes as number, storageName: value.storageName };
 }
 
 function parseAttachment(raw: unknown): AttachmentDto {

@@ -346,17 +346,13 @@ export class DockClient {
   forget(instanceId:string,operationId=this.createRequestId()):Promise<ForgetResult>{return this.request("instance.forget",{operationId,instanceId},"catalog.maintenance.v1",parseForgetResult);}
   pruneStopped(operationId=this.createRequestId()):Promise<PruneResult>{return this.request("catalog.prune",{operationId,selector:"stopped"},"catalog.maintenance.v1",parsePruneResult);}
   reopen(instanceId:string,operationId=this.createRequestId(),sessionFile?:string,trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<ReopenResult>{return this.request("instance.reopen",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.reopen",parseReopenResult);}
-  async read(instanceId:string,since?:EventCursor,replay:"event_log"|"conversation_bootstrap"="event_log"):Promise<InstanceReadResult>{
-    const params={instanceId,since,replay};
-    try{return await this.request("instance.read",params,[INSTANCE_READ_CAPABILITY,IMAGE_INPUT_CAPABILITY,ATTACHMENTS_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY],parseInstanceReadResult);}
-    catch(error){if(!isMissingCapability(error,ATTACHMENTS_CAPABILITY))throw error;return this.request("instance.read",params,[INSTANCE_READ_CAPABILITY,IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY],parseInstanceReadResult);}
-  }
+  read(instanceId:string,since?:EventCursor,replay:"event_log"|"conversation_bootstrap"="event_log"):Promise<InstanceReadResult>{return this.request("instance.read",{instanceId,since,replay},[INSTANCE_READ_CAPABILITY,IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY],parseInstanceReadResult);}
   prompt(instanceId:string,message:string,delivery:DeliveryMode="auto",operationId=this.createRequestId(),images?:ImagePathDto[],attachments?:string[]):Promise<PromptResult>{return this.request("command.submit",{operationId,instanceId,message,...(images===undefined?{}:{images}),...(attachments===undefined?{}:{attachments}),delivery},["session.core",...(images===undefined?[]:[IMAGE_INPUT_CAPABILITY]),...(attachments===undefined?[]:[ATTACHMENTS_CAPABILITY])],parsePromptResult);}
   respondInteraction(instanceId:string,leaseToken:string,interactionId:string,response:InteractionResponse,operationId=this.createRequestId()):Promise<InteractionRespondResult>{if("value" in response){const limit=response.method==="select"?8_000:256_000;if(response.value.length>limit)return Promise.reject(new ControlClientError("invalid_request",`Interaction ${response.method} response exceeds ${limit} characters`,operationId));}return this.request("interaction.respond",{operationId,instanceId,leaseToken,interactionId,response},["extension_ui.v1",PERSISTENT_INTERACTIONS_CAPABILITY],parseInteractionRespondResult);}
   setToolsExpanded(instanceId:string,expectedRuntimeGeneration:number,expanded:boolean,operationId=this.createRequestId()):Promise<{instance:InstanceSnapshot}>{return this.request("extension.tools_expanded.set",{operationId,instanceId,expectedRuntimeGeneration,expanded},TOOLS_EXPANDED_CAPABILITY,parseStatusResult);}
   setExtensionWidgetViewport(instanceId:string,leaseToken:string,expectedRuntimeGeneration:number,width:number,height:number):Promise<WidgetViewportResult>{return this.request("extension.widget_viewport.set",{instanceId,leaseToken,expectedRuntimeGeneration,width,height},EXTENSION_WIDGET_CAPABILITY,parseWidgetViewportResult);}
   abort(instanceId:string,operationId=this.createRequestId()):Promise<AbortResult>{return this.request("command.abort",{operationId,instanceId},"run.abort.v1",parseAbortResult,undefined,this.longMutationTimeoutMs);}
-  async dequeue(instanceId:string,operationId=this.createRequestId()):Promise<QueueDequeueResult>{const params={operationId,instanceId};try{return await this.request("queue.dequeue",params,["queue.control.v1",IMAGE_INPUT_CAPABILITY,ATTACHMENTS_CAPABILITY],parseQueueDequeueResult);}catch(error){if(!isMissingCapability(error,ATTACHMENTS_CAPABILITY))throw error;return this.request("queue.dequeue",params,["queue.control.v1",IMAGE_INPUT_CAPABILITY],parseQueueDequeueResult);}}
+  dequeue(instanceId:string,operationId=this.createRequestId()):Promise<QueueDequeueResult>{return this.request("queue.dequeue",{operationId,instanceId},["queue.control.v1",IMAGE_INPUT_CAPABILITY],parseQueueDequeueResult);}
   models(instanceId:string):Promise<ModelsResult>{return this.request("model.list",{instanceId},["models.v1","projection.completeness.v1"],parseModelsResult);}
   setModel(instanceId:string,provider:string,modelId:string,operationId=this.createRequestId()):Promise<ModelConfigurationResult>{return this.request("model.set",{operationId,instanceId,provider,modelId},"models.v1",parseModelConfigurationResult);}
   setThinking(instanceId:string,level:ThinkingLevel,operationId=this.createRequestId()):Promise<ThinkingConfigurationResult>{return this.request("thinking.set",{operationId,instanceId,level},"models.v1",parseThinkingConfigurationResult);}
@@ -366,8 +362,8 @@ export class DockClient {
   updateSetting(instanceId:string,update:SettingUpdate,operationId=this.createRequestId()):Promise<SettingUpdateResult>{return this.request("settings.update",{operationId,instanceId,update},"settings.v1",parseSettingUpdateResult);}
   resources(instanceId:string):Promise<ResourcesResult>{return this.request("resource.get",{instanceId},["resources.v1","projection.completeness.v1"],parseResourcesResult);}
   commands(instanceId:string,prefix?:string):Promise<CommandsResult>{return this.request("command.catalog",{instanceId,prefix},["resources.v1","projection.completeness.v1"],parseCommandsResult);}
-  async history(instanceId:string,beforeEntryId?:string,limit=200):Promise<HistoryResult>{const params={instanceId,beforeEntryId,limit};try{return await this.request("session.history",params,["tui.projection.v1",IMAGE_INPUT_CAPABILITY,ATTACHMENTS_CAPABILITY],parseHistoryResult);}catch(error){if(!isMissingCapability(error,ATTACHMENTS_CAPABILITY))throw error;return this.request("session.history",params,["tui.projection.v1",IMAGE_INPUT_CAPABILITY],parseHistoryResult);}}
-  async conversationHistory(instanceId:string,cursor?:string,limit=50):Promise<ConversationHistoryResult>{const params={instanceId,cursor,limit};let result:ConversationHistoryResult;try{result=await this.request("conversation.history",params,[CONVERSATION_CONTENT_CAPABILITY,ATTACHMENTS_CAPABILITY],parseConversationHistoryResult);}catch(error){if(!isMissingCapability(error,ATTACHMENTS_CAPABILITY))throw error;result=await this.request("conversation.history",params,CONVERSATION_CONTENT_CAPABILITY,parseConversationHistoryResult);}if(result.instance.id!==instanceId)throw new ControlClientError("invalid_response","Conversation history result belongs to another instance");return result;}
+  history(instanceId:string,beforeEntryId?:string,limit=200):Promise<HistoryResult>{return this.request("session.history",{instanceId,beforeEntryId,limit},["tui.projection.v1",IMAGE_INPUT_CAPABILITY],parseHistoryResult);}
+  async conversationHistory(instanceId:string,cursor?:string,limit=50):Promise<ConversationHistoryResult>{const result=await this.request("conversation.history",{instanceId,cursor,limit},CONVERSATION_CONTENT_CAPABILITY,parseConversationHistoryResult);if(result.instance.id!==instanceId)throw new ControlClientError("invalid_response","Conversation history result belongs to another instance");return result;}
   async conversationContent(instanceId:string,contentRef:string,cursor?:string):Promise<ConversationContentResult>{const result=await this.request("conversation.content",{instanceId,contentRef,cursor},CONVERSATION_CONTENT_CAPABILITY,parseConversationContentResult);if(result.instanceId!==instanceId||result.contentRef!==contentRef)throw new ControlClientError("invalid_response","Conversation content result belongs to another request");return result;}
   sessionInventory(cwd:string,scope:"cwd"|"all"="cwd"):Promise<SessionInventoryResult>{return this.request("session.inventory",{cwd,scope},["session.inventory.v1","session.inventory-diagnostics.v1"],parseSessionInventoryResult);}
   workspaceList(path:string,cursor?:WorkspaceListCursor,limit=MAX_WORKSPACE_LIST_ITEMS):Promise<WorkspaceListResult>{return this.request("workspace.list",{path,cursor,limit},WORKSPACE_LIST_CAPABILITY,parseWorkspaceListResult);}
@@ -400,12 +396,11 @@ export class DockClient {
     return {initial,close:follow.close,done:follow.done};
   }
 
-  async follow(instanceId:string,since:EventCursor,options:{onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean}):Promise<FollowSubscription>{
-    const open=(includeAttachments:boolean):Promise<FollowSubscription>=>{
-      const capabilities:Capability[]=options.requireTuiProjection
-        ? [EVENTS_FOLLOW_CAPABILITY,TOOLS_EXPANDED_CAPABILITY,EXTENSION_WIDGET_CAPABILITY,GIT_BRANCH_CAPABILITY,INSTANCE_KEYS_CAPABILITY,TOOL_RESULT_PRESENTATION_CAPABILITY,IMAGE_INPUT_CAPABILITY,...(includeAttachments?[ATTACHMENTS_CAPABILITY]:[]),PERSISTENT_INTERACTIONS_CAPABILITY,"queue.control.v1","run.abort.v1","tui.projection.v1"]
-        : [EVENTS_FOLLOW_CAPABILITY,IMAGE_INPUT_CAPABILITY,...(includeAttachments?[ATTACHMENTS_CAPABILITY]:[]),PERSISTENT_INTERACTIONS_CAPABILITY];
-      return this.openEventStream({
+  follow(instanceId:string,since:EventCursor,options:{onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean}):Promise<FollowSubscription>{
+    const capabilities:Capability[]=options.requireTuiProjection
+      ? [EVENTS_FOLLOW_CAPABILITY,TOOLS_EXPANDED_CAPABILITY,EXTENSION_WIDGET_CAPABILITY,GIT_BRANCH_CAPABILITY,INSTANCE_KEYS_CAPABILITY,TOOL_RESULT_PRESENTATION_CAPABILITY,IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY,"queue.control.v1","run.abort.v1","tui.projection.v1"]
+      : [EVENTS_FOLLOW_CAPABILITY,IMAGE_INPUT_CAPABILITY,PERSISTENT_INTERACTIONS_CAPABILITY];
+    return this.openEventStream({
       request:{kind:"request",version:2,requestId:this.createRequestId(),type:"instance.follow",params:{instanceId,since}},
       capabilities,
       parseInitial:parseFollowResult,
@@ -416,9 +411,7 @@ export class DockClient {
       validateInitial:(result,hostEpoch)=>{
         if(result.page.earliest.hostEpoch!==hostEpoch||result.page.latest.hostEpoch!==hostEpoch||result.page.latest.instanceId!==instanceId)throw new ProtocolValidationError("invalid_response","Live updates do not match this work");
       },
-      });
-    };
-    try{return await open(true);}catch(error){if(!isMissingCapability(error,ATTACHMENTS_CAPABILITY))throw error;return open(false);}
+    });
   }
 
   controlExtensionUi(instanceId:string,onEvent:(event:Extract<DockEvent,{type:"interaction.requested"|"extension.title_set"|"extension.editor_text_set"}>)=>void):Promise<OperationSubscription>{
@@ -656,6 +649,5 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
 }
 function isOperationEvent(event:DockEvent):event is Extract<DockEvent,{type:"interaction.requested"|"extension.title_set"|"extension.editor_text_set"}>{return event.type==="interaction.requested"||event.type==="extension.title_set"||event.type==="extension.editor_text_set";}
 function waitForUploadDrain(socket:Socket,operationId:string):Promise<void>{if(socket.destroyed||socket.writableEnded)return Promise.reject(new ControlClientError("connection_closed","Attachment upload connection closed during backpressure",operationId));return new Promise((resolveDrain,rejectDrain)=>{const cleanup=():void=>{socket.off("drain",onDrain);socket.off("close",onClose);socket.off("error",onError);};const onDrain=():void=>{cleanup();resolveDrain();};const onClose=():void=>{cleanup();rejectDrain(new ControlClientError("connection_closed","Attachment upload connection closed during backpressure",operationId));};const onError=(error:Error):void=>{cleanup();rejectDrain(transportError(error));};socket.once("drain",onDrain);socket.once("close",onClose);socket.once("error",onError);});}
-function isMissingCapability(error:unknown,capability:string):boolean{return error instanceof ControlClientError&&(error.code==="capability_missing"||(error.code==="protocol_incompatible"&&error.message.includes(capability)));}
 function normalizeClientError(e:unknown):ControlClientError{if(e instanceof ControlClientError)return e;if(e instanceof JsonLineError&&e.code==="incomplete_record")return new ControlClientError("connection_closed","Host connection closed during a control response; reconnect to recover current state");if(e instanceof ProtocolValidationError)return new ControlClientError(e.code==="unsupported_protocol"?"protocol_incompatible":e.code,e.message);if(e instanceof Error)return new ControlClientError("invalid_response",e.message);return new ControlClientError("invalid_response",String(e));}
 function transportError(e:Error):ControlClientError{const code=(e as NodeJS.ErrnoException).code;return new ControlClientError("connection_error",`${code?`${code}: `:""}${e.message}`);}

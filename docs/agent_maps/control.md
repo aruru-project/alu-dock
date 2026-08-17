@@ -100,7 +100,7 @@ interface AttachmentDto {
 
 Host 对 socket input 串行处理、pause/resume backpressure，并以 60 秒 idle deadline 约束未完成 body。`operationId` 仍遵守同一 Host epoch 的 mutation identity：相同 header 重试共享进行中或已完成 receipt，不重复请求 body；同一 ID 换参数得到 `operation_conflict`。若 complete 后 response 丢失，客户端保留结果未知并以相同 operation/header 恢复；receipt 已淘汰时也可用新 operation 重传相同 bytes，content digest 会安全复用。普通 request 的一请求一响应规则不因此变成通用 streaming RPC。
 
-`command.submit` 只携带结构化 opaque `attachments: fileId[]`。Host 在 admission 时解析为 canonical DTO，再与 message 一起进入 direct prompt、Host Queue、runtime Queue、`message.submitted`、`message.completed` 和 persisted conversation。文件 bytes 始终留在 Host store，不进入 catalog、event JSONL 或 `MAX_WORKER_TRANSFER_BYTES` IPC。
+`command.submit` 只携带结构化 opaque `attachments: fileId[]`。Host 在 admission 时解析为 canonical DTO，再与 message 一起进入 direct prompt、Host Queue、runtime Queue、`message.submitted`、`message.completed` 和 persisted conversation。文件 bytes 始终留在 Host store，不进入 catalog、event JSONL 或 `MAX_WORKER_TRANSFER_BYTES` IPC。`attachments.v1` 只约束 `attachment.upload` 以及实际携带 attachment IDs 的 `command.submit` input；一旦消息被接受，attachment metadata 就是 canonical message 的可选组成部分，随 read、follow、history 和 `queue.dequeue` 原样返回。无需显示附件的客户端直接忽略该可选字段，不需要 attachment projection 协商、兼容重试或 Queue 特判。
 
 ## 身份
 

@@ -82,7 +82,7 @@ paired client ── mutual TLS port ────┘
 - `instance.follow` / `events.follow.v2`
 - `interaction.control` / `extension_ui.control.v1`
 
-`events.follow.v2` 依赖 `instance.read.v1`。回答 Extension UI 还需要 `extension_ui.v1` 和 `extension_ui.persistent-interactions.v1`。Snapshot、图片、`attachments.v1` 和其他投影能力按客户端实际需要协商，不要宣称自己支持尚未实现的 capability。Unix socket 与 mTLS 上的 attachment wire 完全相同。
+`events.follow.v2` 依赖 `instance.read.v1`。回答 Extension UI 还需要 `extension_ui.v1` 和 `extension_ui.persistent-interactions.v1`。Snapshot、图片和其他投影能力按客户端实际需要协商，不要宣称自己支持尚未实现的 capability。`attachments.v1` 只用于发起 attachment upload 或提交 attachment IDs，不是读取消息的 projection 开关；read、follow、history 和 Queue response 中的可选 attachment metadata 始终属于 canonical message，不显示附件的客户端直接忽略。Unix socket 与 mTLS 上的 attachment wire 完全相同。
 
 ## 需要分清的身份
 
@@ -247,7 +247,7 @@ Upload header 的 `operationId` 遵守普通 mutation identity。相同 ID 和�
 {"kind":"request","version":2,"requestId":"prompt-request","type":"command.submit","params":{"operationId":"prompt-operation","instanceId":"instance-id","message":"请检查附件","attachments":["123e4567-e89b-42d3-a456-426614174000"],"delivery":"auto"}}
 ```
 
-每个 command 最多 32 个 unique `fileId`。Host 在接受命令前解析全部 ID；任一 missing/corrupt ID 使整个提交失败。Canonical `AttachmentDto[]` 会出现在 pending Queue、`message.queued`、`message.submitted`、user `message.completed` 和 persisted user conversation record 中。客户端用同一 attachment card renderer 处理这些位置，并继续按 event identity/revision 去重；它不自行从 message text 恢复附件。
+每个 command 最多 32 个 unique `fileId`。Host 在接受命令前解析全部 ID；任一 missing/corrupt ID 使整个提交失败。Canonical `AttachmentDto[]` 会出现在 pending Queue、`message.queued`、`message.submitted`、user `message.completed` 和 persisted user conversation record 中，也会由 `queue.dequeue` 随完整 queued message 返回。实现附件展示的客户端用同一 attachment card renderer 处理这些位置，并继续按 event identity/revision 去重；它不自行从 message text 恢复附件。无需附件 UI 的客户端照常显示文本并忽略可选 attachment metadata，Host 不为它删字段、降级重试或改变共享 Queue 语义。
 
 Agent 通过 Host reverse capability 和 `dock_attachment_resolve` 获取私有路径。外部 Protocol V2 conversation 会固定遮蔽 resolve tool 的 path；客户端没有、也不需要 attachment path API。如果文件需要在网页下载或预览，那是另一项明确的产品能力，不能从 metadata 猜 Host path。
 
