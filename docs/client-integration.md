@@ -82,7 +82,9 @@ paired client ── mutual TLS port ────┘
 - `instance.follow` / `events.follow.v2`
 - `interaction.control` / `extension_ui.control.v1`
 
-`events.follow.v2` 依赖 `instance.read.v1`。回答 Extension UI 还需要 `extension_ui.v1` 和 `extension_ui.persistent-interactions.v1`。Snapshot、图片和其他投影能力按客户端实际需要协商，不要宣称自己支持尚未实现的 capability。`attachments.v1` 只用于发起 attachment upload 或提交 attachment IDs，不是读取消息的 projection 开关；read、follow、history 和 Queue response 中的可选 attachment metadata 始终属于 canonical message，不显示附件的客户端直接忽略。Unix socket 与 mTLS 上的 attachment wire 完全相同。
+`events.follow.v2` 依赖 `instance.read.v1`。回答 Extension UI 还需要 Host 提供 `extension_ui.v1` 与 `extension_ui.control.v1`。
+
+hello 的 `requiredCapabilities` 是 fail-fast 功能探测：Host 缺少任何一项就拒绝连接并列出缺失项，让客户端在第一步就发现 Host 过旧，而不是运行到一半失败。它不是响应内容开关：Host 对所有客户端返回同一份 canonical response，不按客户端声明裁剪、改写或降级字段。图片、附件、`presentation`、`displayName`、`gitBranch`、`toolsExpanded`、`activeInteraction` 等可选字段是否出现只取决于事实本身（例如没有 git repo 就没有 `gitBranch`），与客户端声明无关；不渲染某个字段的客户端直接忽略它。`attachments.v1` 只用于发起 attachment upload 或提交 attachment IDs。Unix socket 与 mTLS 上的 wire 完全相同。
 
 ## 需要分清的身份
 
@@ -96,7 +98,7 @@ paired client ── mutual TLS port ────┘
 - `operationId`：一次 mutation 意图；
 - event cursor：read/follow 和重连的位置。
 
-不要用 instance name、cwd、Agent session ID 或文件路径代替 `instanceId`。Snapshot 的可选 `name` 表示当前 Agent session name；协商 `instance.display-name.v1` 后，始终存在的 `displayName` 是 Dock 已经清洗和兜底的人类展示标签。实例列表直接渲染 `displayName`，点击、连接和 mutation 仍传 `instanceId`，客户端不要再自行实现 `name/key/id` fallback。
+不要用 instance name、cwd、Agent session ID 或文件路径代替 `instanceId`。Snapshot 的可选 `name` 表示当前 Agent session name；始终存在的 `displayName` 是 Dock 已经清洗和兜底的人类展示标签。实例列表直接渲染 `displayName`，点击、连接和 mutation 仍传 `instanceId`，客户端不要再自行实现 `name/key/id` fallback。
 
 ## 建立并跟随一个 Work
 

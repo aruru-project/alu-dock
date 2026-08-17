@@ -143,7 +143,6 @@ export class DockHost {
   private startPromise: Promise<void> | undefined;
   private stopPromise: Promise<void> | undefined;
   private readonly connections = new Set<Socket>();
-  private readonly connectionRequirements = new WeakMap<Socket, ReadonlySet<string>>();
   private readonly attachConnections = new Map<string, Set<Socket>>();
   private readonly interactionConnections = new Map<string, Socket>();
   private readonly attachBackpressureStats = { blocked: 0, drained: 0, overflow: 0, timeout: 0 };
@@ -344,7 +343,6 @@ export class DockHost {
     this.connections.add(socket);
     const decoder = new JsonLineDecoder();
     let helloSeen = false;
-    let clientRequirements = new Set<string>();
     let requestSeen = false;
     let attachmentRequest = false;
     let currentRequestId = "unknown";
@@ -387,7 +385,6 @@ export class DockHost {
     const cleanup = (): void => {
       eventUnsubscribe?.();
       eventUnsubscribe = undefined;
-      this.connectionRequirements.delete(socket);
       this.connections.delete(socket);
       void abortUpload();
     };
@@ -427,8 +424,6 @@ export class DockHost {
           return;
         }
         helloSeen = true;
-        clientRequirements = new Set(hello.requiredCapabilities);
-        this.connectionRequirements.set(socket, clientRequirements);
         if (this.state !== "running" && this.state !== "mutation_faulted") {
           terminal = true;
           this.sendHelloError(socket, hello.requestId, this.state === "draining" || this.state === "stopping" || this.state === "stopped" ? "host_draining" : "host_starting", "Alu Dock host is not ready");
@@ -529,7 +524,7 @@ export class DockHost {
       }
 
       let task!: Promise<void>;
-      task = this.dispatch(request, socket, (unsubscribe) => { eventUnsubscribe = unsubscribe; }, clientRequirements)
+      task = this.dispatch(request, socket, (unsubscribe) => { eventUnsubscribe = unsubscribe; })
         .catch((error: unknown) => {
           const operationId = mutationOperationId(request);
           const normalized = operationId !== undefined
@@ -567,7 +562,6 @@ export class DockHost {
     request: ControlRequest,
     socket: Socket,
     setEventUnsubscribe: (unsubscribe: () => void) => void,
-    clientRequirements: ReadonlySet<string>,
   ): Promise<void> {
     if (isSessionCommandRequest(request)) {
       const result = await executeSessionCommand(request, this.registry, this.operationLedger);
