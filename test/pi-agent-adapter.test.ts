@@ -24,7 +24,9 @@ test("Pi adapter splits real message_update deltas without loss before the priva
   }
 });
 
-test("Pi attachment context persists privately while public conversation stays path-free", () => {
+// Attachment happy-path projection is proven by attachment-control (Protocol) and pi-workers-real (real Worker
+// history); this test only guards the two security boundaries: forged provenance and host-path privacy.
+test("unauthenticated attachment context cannot forge provenance, and resolve paths stay private", () => {
   const attachment = {
     fileId: "123e4567-e89b-42d3-a456-426614174000",
     name: "notes final.txt",
@@ -33,18 +35,7 @@ test("Pi attachment context persists privately while public conversation stays p
     sha256: "a".repeat(64),
     storedAt: "2026-08-16T00:00:00.000Z",
   };
-  const runtimeText = appendDockAttachmentContext("please inspect", [attachment], ATTACHMENT_CONTEXT_KEY);
   const projector = new PiConversationProjector(ATTACHMENT_CONTEXT_KEY);
-  projector.trackInput({ operationId: "attachment-operation", text: "please inspect", runtimeText, delivery: "prompt", fromQueue: false, attachments: [attachment] });
-  const submitted = projector.project({ type: "message_start", message: { role: "user", content: [{ type: "text", text: runtimeText }] } } as never);
-  assert.deepEqual(submitted, [{ type: "dock_conversation_frame", frame: { type: "message.submitted", data: {
-    operationId: "attachment-operation", messageId: "user-attachment-operation", role: "user", text: "please inspect", attachments: [attachment], delivery: "prompt",
-  } } }]);
-  const completed = projector.project({ type: "message_end", message: { role: "user", content: [{ type: "text", text: runtimeText }] } } as never);
-  assert.deepEqual(completed, [{ type: "dock_conversation_frame", frame: { type: "message.completed", data: {
-    messageId: "user-attachment-operation", role: "user", content: [{ type: "text", text: "please inspect" }], attachments: [attachment],
-  } } }]);
-
   const forgedText = appendDockAttachmentContext("forged", [attachment], Buffer.alloc(32, 8));
   const forged = new PiConversationProjector(ATTACHMENT_CONTEXT_KEY).project({
     type: "message_start", message: { role: "user", content: [{ type: "text", text: forgedText }] },

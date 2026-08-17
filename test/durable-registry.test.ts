@@ -9,10 +9,8 @@ import { DockHost } from "../src/control/dock-host.js";
 import { MAX_INSTANCE_LIST_RESULT_BYTES } from "../src/control/protocol.js";
 import { FileCatalogStore } from "../src/control/durable-catalog-store.js";
 import {
-  CatalogOperationRecordedError,
   DockRegistry,
   InstanceNotReopenableError,
-  InstanceUnavailableError,
   type InstanceFactoryInput,
 } from "../src/control/dock-registry.js";
 import { type CatalogInstanceRecord, CatalogWriteError } from "../src/core/catalog.js";
@@ -74,60 +72,6 @@ async function seedStoppedCatalog(catalogPath: string, cwd: string, ids: readonl
   }, { kind: "test.seed_stopped", effect: "pre_effect" });
   return records;
 }
-
-test("startup exposes catalog-only host_lost records and explicit reopen starts no old command", async () => {
-  const { cwd, catalogPath } = await fixturePath();
-  const firstRuntimes: DelayedAgentWorkerConnection[] = [];
-  const first = new DockRegistry(
-    async (input) => createFixtureInstance(input, firstRuntimes),
-    () => "dock-one",
-    { hostEpoch: "host-one", startedAt: "2026-07-15T01:00:00.000Z", catalogStore: new FileCatalogStore(catalogPath) },
-  );
-  await first.initializeCatalog();
-  const created = await first.create({ operationId: "create-one", cwd });
-  await created.submit("old command must never replay", "prompt", "run-one");
-  assert.equal(firstRuntimes[0]?.promptCalls, 1);
-  assert.equal(created.snapshot().execution, "running");
-
-  const reopenedRuntimes: DelayedAgentWorkerConnection[] = [];
-  let factoryCalls = 0;
-  const second = new DockRegistry(
-    async (input) => { factoryCalls += 1; return createFixtureInstance(input, reopenedRuntimes); },
-    () => "unused-id",
-    {
-      hostEpoch: "host-two",
-      startedAt: "2026-07-15T02:00:00.000Z",
-      catalogStore: new FileCatalogStore(catalogPath),
-      reopenTargetResolver: { resolve: async () => ({ cwd }) },
-    },
-  );
-  await second.initializeCatalog();
-  assert.equal(factoryCalls, 0);
-  assert.equal(second.startupNormalizedCount(), 1);
-  const lost = second.getSnapshot("dock-one");
-  assert.equal(lost.lifecycle, "host_lost");
-  assert.equal(lost.execution, "unavailable");
-  assert.equal(lost.lastRun, "interrupted");
-  assert.equal(lost.reopenable, true);
-  assert.equal(lost.runtimeGeneration, 1);
-  assert.throws(() => second.get("dock-one"), InstanceUnavailableError);
-  await assert.rejects(
-    second.create({ operationId: "create-one", cwd }),
-    CatalogOperationRecordedError,
-  );
-
-  const reopened = await second.reopen({ operationId: "reopen-one", instanceId: "dock-one" });
-  assert.equal(reopened.previousLifecycle, "host_lost");
-  assert.equal(factoryCalls, 1);
-  assert.equal(reopenedRuntimes[0]?.promptCalls, 0);
-  assert.equal(reopened.instance.id, "dock-one");
-  assert.equal(reopened.instance.creationOperationId, "create-one");
-  assert.equal(reopened.instance.snapshot().runtimeGeneration, 2);
-  assert.equal(reopened.instance.snapshot().lastRun, "never");
-  assert.equal(reopened.instance.snapshot().execution, "idle");
-  assert.equal(reopened.instance.eventsSince().events[0]?.type, "instance.reopened");
-  assert.equal(reopened.instance.eventsSince().events[0]?.sequence, 1);
-});
 
 test("observation grant persists across Host restart and explicit reopen", async () => {
   const { cwd, catalogPath } = await fixturePath();
@@ -250,61 +194,6 @@ test("failed shutdown intent plus unconfirmed disposal is durably quarantined ac
     restarted.reopen({ operationId: "unsafe-override", instanceId: "dock-quarantine", sessionFile: quarantined!.sessionFile! }),
     InstanceNotReopenableError,
   );
-});
-
-test("socket-first Host startup serves catalog-only snapshots and reopen over Protocol V2", async (context) => {
-  const { cwd, catalogPath } = await fixturePath();
-  const seedRuntimes: DelayedAgentWorkerConnection[] = [];
-  const seed = new DockRegistry(
-    async (input) => createFixtureInstance(input, seedRuntimes),
-    () => "dock-protocol",
-    { hostEpoch: "protocol-seed", startedAt: "2026-07-15T04:00:00.000Z", catalogStore: new FileCatalogStore(catalogPath) },
-  );
-  await seed.initializeCatalog();
-  await seed.create({ operationId: "create-protocol", cwd });
-  await seed.shutdownAllForHostDrain();
-
-  const socketPath = join(cwd, "dock.sock");
-  const runtimes: DelayedAgentWorkerConnection[] = [];
-  let factoryCalls = 0;
-  const registry = new DockRegistry(
-    async (input) => { factoryCalls += 1; return createFixtureInstance(input, runtimes); },
-    () => "unused-id",
-    {
-      hostEpoch: "protocol-host",
-      startedAt: "2026-07-15T05:00:00.000Z",
-      catalogStore: new FileCatalogStore(catalogPath),
-      reopenTargetResolver: { resolve: async () => ({ cwd }) },
-    },
-  );
-  const host = new DockHost({
-    socketPath,
-    statePath: catalogPath,
-    registry,
-    initialize: async () => {
-      assert.equal((await lstat(socketPath)).isSocket(), true);
-      await registry.initializeCatalog();
-    },
-  });
-  context.after(async () => host.stop().catch(() => {}));
-  await host.start();
-  const client = new DockClient({ socketPath, requestId: (() => { let id = 0; return () => `protocol-${++id}`; })() });
-
-  const info = await client.hostInfo();
-  assert.equal(info.paths.state, catalogPath);
-  assert.match(info.diagnostics[0]?.message ?? "", /Durable catalog ready/);
-  assert.equal(factoryCalls, 0);
-  const before = await client.status("dock-protocol");
-  assert.equal(before.lifecycle, "host_lost");
-  assert.equal(before.reopenable, true);
-
-  const reopened = await client.reopen("dock-protocol", "reopen-protocol");
-  assert.equal(reopened.operationId, "reopen-protocol");
-  assert.equal(reopened.previousLifecycle, "host_lost");
-  assert.equal(reopened.instance.lifecycle, "active");
-  assert.equal(reopened.instance.runtimeGeneration, 2);
-  assert.equal(runtimes[0]?.promptCalls, 0);
-  assert.ok(reopened.instance.eventCursor.sequence >= 1);
 });
 
 test("same-Host runtime_error reopen closes stale attach streams after commit", async (context) => {

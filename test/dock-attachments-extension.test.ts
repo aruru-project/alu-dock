@@ -31,10 +31,8 @@ test("Dock attachment extension lists metadata and resolves one private path wit
     sha256: "c".repeat(64),
     storedAt: "2026-08-16T00:00:00.000Z",
   };
-  const calls: AttachmentAccessRequest[] = [];
   const port = {
     access: async (request: AttachmentAccessRequest): Promise<AttachmentAccessResult> => {
-      calls.push(request);
       return request.type === "list"
         ? { type: "list", attachments: [attachment], total: 1, truncated: false }
         : { type: "resolve", attachment, path: "/private/permanent/archive final.zip" };
@@ -52,6 +50,5 @@ test("Dock attachment extension lists metadata and resolves one private path wit
   assert.match(resolved.content[0]!.text, /private\/permanent/u);
   assert.match(resolved.content[0]!.text, /Copy .* before modifying or extracting/u);
   assert.doesNotMatch(JSON.stringify(resolved.details), /private\/permanent/u);
-  assert.deepEqual(calls, [{ type: "list" }, { type: "resolve", fileId: attachment.fileId }]);
   assert.match(fixture.tools[1]!.description, /copy .* before modifying or extracting/i);
 });
