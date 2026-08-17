@@ -53,6 +53,8 @@ Protocol V2 定义 Dock 的业务语义。Host 与 Worker 之间的私有通信�
 
 同一项能力不能分别维护一套 RuntimeSession 方法、Worker capability、Host projection 和客户端 DTO。Worker 返回 Dock 已定义的结果和事件，Host 验证归属后转发。
 
+事件分两类，边界不同。conversation frame（message/tool 事件）已经是 Protocol V2 词汇，Host 逐字转发，只补队列关联；生命周期信号（agent_start、queue_update、compaction 等）是 Worker 向 Host 权威提供的输入，Host 从中导出携带自身事实（operation 归属、合并队列计数、catalog 提交顺序）的 Dock event——这是权威在工作，不是重复投影，不要把它改成 Worker 直发。每个信号在 ManagedInstance 中只有一张转换表，durable 与非 durable 路径共用；不得按持久化模式分叉第二份。
+
 客户端不直接连接 Worker。这样 Worker replacement、旧 generation 隔离、controller 与 reconnect 仍由 Host 统一处理。
 
 ## Pi adapter
