@@ -171,6 +171,17 @@ export {
 import { projectAgentNavigateResult, projectRuntimeTree, type ProjectedSessionTree } from "./session-tree.js";
 import type { ObservationNotification } from "./instance-observation.js";
 
+interface AgentEventTransition {
+  kind: string;
+  durable: boolean;
+  operationId?: string;
+  before?: () => void;
+  mutate: () => void;
+  publish: () => void;
+  cleanup?: () => void;
+  settle?: () => void;
+}
+
 export interface ManagedInstanceOptions {
   id?: string;
   key?: string;
@@ -3077,6 +3088,386 @@ export class ManagedInstance {
       this.applyGitBranchChanged(event.branch);
       return;
     }
+    if (event.type === "dock_queue_consumed") {
+      const consumed = this.workerConsumedQueueMessage(event);
+      const needsPendingCommit = consumed !== undefined
+        && (consumed.queued.phase === "fresh_in_flight" || consumed.queued.phase === "effect_unknown");
+      if (!needsPendingCommit || consumed === undefined) {
+        this.handleAgentEvent(event);
+        return;
+      }
+      await this.commitCatalogTransition(this.agentEventCatalogContext(event, "queue.consumed"), () => {
+        const operationId = optionalRuntimeString(event.operationId, 128);
+        const acceptedIndex = operationId === undefined ? -1 : this.acceptedPromptMessages.findIndex((candidate) => candidate.operationId === operationId);
+        if (acceptedIndex >= 0) this.acceptedPromptMessages.splice(acceptedIndex, 1);
+        this.removeWorkerConsumedMessage(consumed, true);
+        this.touch();
+      }, () => {
+        const operationId = optionalRuntimeString(event.operationId, 128);
+        if (operationId !== undefined) this.consumedQueueItemIds.set(operationId, consumed.queued.queueItemId);
+        this.appendEvent("queue.changed", {
+          steering: this.state.pendingSteering,
+          followUp: this.state.pendingFollowUp,
+          total: this.state.pendingSteering + this.state.pendingFollowUp,
+        });
+        this.appendStateEvent("deferred_message_submitted");
+      });
+      this.scheduleCompactionQueueDrain(false);
+      return;
+    }
+    const transition = this.agentEventTransition(event);
+    if (transition === undefined) {
+      this.handleAgentEvent(event);
+      return;
+    }
+    transition.before?.();
+    if (!transition.durable) {
+      transition.mutate();
+      transition.publish();
+      transition.cleanup?.();
+      transition.settle?.();
+      return;
+    }
+    try {
+      await this.commitCatalogTransition(this.agentEventCatalogContext(event, transition.kind, transition.operationId), transition.mutate, transition.publish);
+    } finally {
+      transition.cleanup?.();
+    }
+    transition.settle?.();
+  }
+
+  private handleAgentEvent(event: AgentEvent): void {
+    if (this.state.lifecycle === "stopped") return;
+    if (event.type === "dock_git_branch_changed") {
+      this.applyGitBranchChanged(event.branch);
+      return;
+    }
+    if (event.type === "dock_extension_error") {
+      this.recordExtensionError(event.error);
+      return;
+    }
+    if (event.type === "dock_conversation_frame") {
+      this.appendWorkerConversationFrame(event);
+      return;
+    }
+    if (event.type === "dock_queue_consumed") {
+      this.handleWorkerQueueConsumed(event);
+      return;
+    }
+    const transition = this.agentEventTransition(event);
+    if (transition === undefined) return;
+    transition.before?.();
+    transition.mutate();
+    transition.publish();
+    transition.cleanup?.();
+    transition.settle?.();
+  }
+
+  /**
+   * Runtime lifecycle signals are joint facts: the Worker supplies the signal,
+   * the Host supplies operation attribution, queue merging and durable-commit
+   * ordering. Each signal has exactly one transition here; the catalog path
+   * wraps it in a commit while the in-memory path runs it directly. Never
+   * fork per-mode copies of this logic again.
+   */
+  private agentEventTransition(event: AgentEvent): AgentEventTransition | undefined {
+    switch (event.type) {
+      case "dock_session_replaced": {
+        const replacedQueue = removedQueueProjection(this.trackedQueueMessages(), this.state);
+        const previousSessionFile = optionalRuntimeString(event.previousSessionFile, 16_384);
+        const sessionFile = optionalRuntimeString(event.sessionFile, 16_384);
+        const cwd = optionalRuntimeString(event.cwd, 16_384);
+        const name = optionalRuntimeString(event.name, 256);
+        const reason = this.replacementIntent?.kind === "clone"
+          ? "clone"
+          : event.reason === "resume" || event.reason === "reload" || event.reason === "fork" ? event.reason : "new";
+        const previousDurableSessionFile = this.replacementIntent?.previousSessionFile ?? previousSessionFile;
+        return {
+          kind: "session.replaced",
+          durable: true,
+          operationId: this.resolveAgentEventOperationId(event),
+          before: () => this.extensionUi.beginGenerationChange(),
+          mutate: () => {
+            this.runtimeGenerationValue += 1;
+            this.replacementIntent = undefined;
+            this.recoverySessionFile = undefined;
+            this.lastKnownValue = undefined;
+            this.interruptionValue = undefined;
+            this.shutdownRequestedAt = undefined;
+            this.agentStartCount = 0;
+            this.agentSettledCount = 0;
+            this.acceptedPromptMessages.length = 0;
+            this.consumedQueueItemIds.clear();
+            this.pendingQueueMessages.length = 0;
+            this.inFlightQueueMessages.length = 0;
+            this.runtimeSteeringHashes = [];
+            this.runtimeFollowUpHashes = [];
+            this.lastAssistantOutcome = undefined;
+            this.extensionCommandInitiator = undefined;
+            this.runtimeCompactingObserved = undefined;
+            this.clearDeferredStartAttribution();
+            this.finishCompactionBoundary();
+            this.state.execution = "idle";
+            this.state.compacting = false;
+            this.state.lastRun = "never";
+            this.state.activeCommandId = undefined;
+            this.state.lastError = undefined;
+            this.state.pendingSteering = 0;
+            this.state.pendingFollowUp = 0;
+            if (cwd !== undefined) this.cwdValue = cwd;
+            this.nameValue = name;
+            this.gitBranchValue = projectGitBranch(event.gitBranch ?? this.agentState().gitBranch);
+            this.executorIdentity.piSessionId = truncate(this.agentState().sessionId, 128) ?? "unknown";
+            this.executorIdentity.sessionFile = truncate(this.agentState().sessionFile, 16_384);
+            this.durableSessionFileValue = this.runtimeDurableSessionFile();
+            this.recoverySessionFile = this.durableSessionFileValue === undefined ? previousDurableSessionFile : undefined;
+            this.applyModelState(this.agentState().modelState);
+            this.touch();
+          },
+          publish: () => {
+            this.publishedRuntimeGenerationValue = this.runtimeGenerationValue;
+            this.nextEventSequence = 1;
+            this.eventLog.length = 0;
+            this.activeConversationEvents.length = 0;
+            this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue, displayName: this.projectedDisplayName(), gitBranch: this.gitBranchValue });
+            if (replacedQueue.total > 0) this.appendEvent("queue.cleared", { ...replacedQueue, reason: "replacement" });
+          },
+          settle: () => void this.extensionUi.completeGenerationChange(),
+        };
+      }
+      case "session_info_changed": {
+        const name = optionalRuntimeString(event.name, 256);
+        return {
+          kind: "session.name",
+          durable: true,
+          operationId: this.resolveAgentEventOperationId(event),
+          mutate: () => {
+            this.nameValue = name;
+            this.touch();
+          },
+          publish: () => this.appendEvent("session.info_changed", { name, displayName: this.projectedDisplayName() }),
+        };
+      }
+      case "dock_runtime_error":
+      case "dock_runtime_lost": {
+        const runtimeLost = event.type === "dock_runtime_lost";
+        const error = boundedRuntimeString(event.error, 2_048, runtimeLost ? "Runtime worker was lost" : "Runtime replacement failed");
+        const recoverySessionFile = optionalRuntimeString(event.recoverySessionFile, 16_384)
+          ?? this.replacementIntent?.previousSessionFile
+          ?? this.durableSessionFileValue;
+        const lastKnown = this.currentLastKnownState();
+        return {
+          kind: "session.runtime_error",
+          durable: true,
+          operationId: this.resolveAgentEventOperationId(event),
+          before: () => void this.extensionUi.failGenerationChange(),
+          mutate: () => {
+            this.replacementIntent = undefined;
+            this.recoverySessionFile = recoverySessionFile;
+            this.lastKnownValue = lastKnown;
+            this.interruptionValue = { reason: "replacement_failed", at: this.timestamp() };
+            this.state.lifecycle = "runtime_error";
+            this.state.execution = "unavailable";
+            this.state.compacting = false;
+            this.state.activeCommandId = undefined;
+            this.state.pendingSteering = 0;
+            this.state.pendingFollowUp = 0;
+            this.state.lastError = error;
+            this.touch();
+          },
+          publish: () => {
+            this.appendEvent("instance.runtime_error", {
+              operationId: boundedRuntimeString(event.operationId, 128, "runtime-internal"),
+              kind: runtimeLost ? "create" : event.kind === "reload" || event.kind === "switch" || event.kind === "fork" || event.kind === "clone" ? event.kind : "new",
+              error,
+              recoverySessionFile,
+            });
+            this.appendStateEvent(runtimeLost ? "runtime_worker_lost" : "runtime_replacement_failed");
+          },
+        };
+      }
+      case "agent_start": {
+        const deferredOperationId = optionalRuntimeString(event.dockOperationId, 128);
+        const extensionInitiatorOperationId = this.extensionCommandInitiator?.runtimeGeneration === this.runtimeGenerationValue
+          && this.extensionCommandInitiator.agentStartCount === this.agentStartCount
+          ? this.extensionCommandInitiator.operationId
+          : undefined;
+        return {
+          kind: "run.started",
+          durable: true,
+          operationId: this.resolveAgentEventOperationId(event),
+          mutate: () => {
+            if (deferredOperationId !== undefined) {
+              this.state.activeCommandId = deferredOperationId;
+            } else if (extensionInitiatorOperationId !== undefined) {
+              this.state.activeCommandId = extensionInitiatorOperationId;
+              this.extensionCommandInitiator = undefined;
+            }
+            this.agentStartCount += 1;
+            this.lastAssistantOutcome = undefined;
+            this.state.execution = "running";
+            this.state.lastError = undefined;
+            this.touch();
+          },
+          publish: () => {
+            this.appendEvent("run.started", { operationId: this.state.activeCommandId ?? "runtime-initiated" });
+            this.appendStateEvent("agent_start");
+          },
+        };
+      }
+      case "agent_settled": {
+        this.lastAssistantOutcome = {
+          stopReason: optionalRuntimeString(event.stopReason, 128),
+          errorMessage: optionalRuntimeString(event.error, 2_048),
+        };
+        const outcome = this.lastAssistantOutcome;
+        const operationId = this.resolveAgentEventOperationId(event);
+        let result: Exclude<LastRunResult, "never"> = "failed";
+        return {
+          kind: "run.settled",
+          durable: true,
+          operationId,
+          mutate: () => {
+            this.agentSettledCount += 1;
+            if (outcome?.stopReason === "error") {
+              result = "failed";
+              this.state.execution = "failed";
+              this.state.lastError = outcome.errorMessage ?? "Pi run failed";
+            } else if (outcome?.stopReason === "aborted" || this.stopRequestedWhileRunning) {
+              result = "aborted";
+              this.state.execution = "idle";
+              this.state.lastError = undefined;
+            } else if (!outcome) {
+              result = "failed";
+              this.state.execution = "failed";
+              this.state.lastError = "Pi run settled without an assistant outcome";
+            } else {
+              result = "succeeded";
+              this.state.execution = "idle";
+              this.state.lastError = undefined;
+            }
+            // Pi awaits extension agent_settled handlers before publishing its own
+            // agent_settled event. An extension-triggered compact() can therefore
+            // publish compaction_start first. Settling the completed agent run must
+            // not make that still-active compaction look idle.
+            if (this.compactionActive) this.state.execution = "running";
+            this.state.lastRun = result;
+            this.state.activeCommandId = undefined;
+            this.touch();
+          },
+          publish: () => {
+            this.appendEvent("run.settled", {
+              operationId,
+              result,
+              stopReason: outcome?.stopReason,
+              error: outcome?.errorMessage,
+            });
+            this.appendStateEvent("agent_settled");
+          },
+        };
+      }
+      case "queue_update": {
+        const steering = stringArray(event.steering);
+        const followUp = stringArray(event.followUp);
+        this.synchronizePendingRuntimeQueue(steering, followUp);
+        const pending = this.mergedRuntimePendingCounts(steering.length, followUp.length);
+        return {
+          kind: "queue.changed",
+          durable: true,
+          operationId: this.resolveAgentEventOperationId(event),
+          mutate: () => {
+            this.state.pendingSteering = pending.steering;
+            this.state.pendingFollowUp = pending.followUp;
+            this.touch();
+          },
+          publish: () => void this.appendEvent("queue.changed", pending),
+        };
+      }
+      case "auto_retry_start":
+        return {
+          kind: "run.retry_started",
+          durable: true,
+          operationId: this.resolveAgentEventOperationId(event),
+          mutate: () => {
+            this.state.execution = "running";
+            this.touch();
+          },
+          publish: () => void this.appendEvent("run.retry_started", {
+            attempt: nonNegativeNumber(event.attempt),
+            maxAttempts: nonNegativeNumber(event.maxAttempts),
+            delayMs: nonNegativeNumber(event.delayMs),
+            error: boundedRuntimeString(event.errorMessage, 2_048, "Unknown retry error"),
+          }),
+        };
+      case "auto_retry_end":
+        return {
+          kind: "run.retry_completed",
+          durable: false,
+          mutate: () => {},
+          publish: () => void this.appendEvent("run.retry_completed", {
+            success: event.success === true,
+            attempt: nonNegativeNumber(event.attempt),
+            error: optionalRuntimeString(event.finalError, 2_048),
+          }),
+        };
+      case "compaction_start": {
+        const operationId = this.resolveAgentEventOperationId(event);
+        return {
+          kind: "compaction.started",
+          durable: true,
+          operationId,
+          mutate: () => {
+            this.startCompactionBoundary(operationId);
+            this.state.execution = "running";
+            this.state.compacting = true;
+            this.touch();
+          },
+          publish: () => void this.appendEvent("compaction.started", {
+            reason: compactionReason(event.reason),
+            ...(operationId === undefined ? {} : { operationId }),
+          }),
+        };
+      }
+      case "compaction_end": {
+        const operationId = this.resolveAgentEventOperationId(event);
+        return {
+          kind: "compaction.completed",
+          durable: true,
+          operationId,
+          mutate: () => {
+            if (this.state.activeCommandId === undefined && event.willRetry !== true) this.state.execution = "idle";
+            this.state.compacting = false;
+            this.touch();
+          },
+          publish: () => {
+            this.appendEvent("compaction.completed", {
+              reason: compactionReason(event.reason),
+              ...(operationId === undefined ? {} : { operationId }),
+              aborted: event.aborted === true,
+              willRetry: event.willRetry === true,
+              error: optionalRuntimeString(event.errorMessage, 2_048),
+            });
+            this.appendStateEvent("compaction_completed");
+          },
+          cleanup: () => this.finishCompactionBoundary(),
+          settle: () => this.scheduleCompactionQueueDrain(event.willRetry === true),
+        };
+      }
+      default:
+        return undefined;
+    }
+  }
+
+  private agentEventCatalogContext(event: AgentEvent, kind: string, operationId = this.resolveAgentEventOperationId(event)): CatalogMutationContext {
+    return {
+      kind,
+      effect: "post_effect",
+      ...(operationId === undefined ? {} : { operationId }),
+      instanceId: this.id,
+    };
+  }
+
+  private resolveAgentEventOperationId(event: AgentEvent): string | undefined {
     const extensionInitiatorOperationId = event.type === "agent_start"
       && this.extensionCommandInitiator?.runtimeGeneration === this.runtimeGenerationValue
       && this.extensionCommandInitiator.agentStartCount === this.agentStartCount
@@ -3085,7 +3476,7 @@ export class ManagedInstance {
     const deferredOperationId = event.type === "agent_start"
       ? optionalRuntimeString(event.dockOperationId, 128)
       : undefined;
-    const operationId = this.catalogAdmissionOperationId
+    return this.catalogAdmissionOperationId
       ?? (event.type === "agent_settled" ? this.state.activeCommandId : undefined)
       ?? deferredOperationId
       ?? extensionInitiatorOperationId
@@ -3096,505 +3487,6 @@ export class ManagedInstance {
       ?? this.replacementIntent?.operationId
       ?? this.state.activeCommandId
       ?? this.receiptBoundaryOperationId;
-    const context = (kind: string): CatalogMutationContext => ({
-      kind,
-      effect: "post_effect",
-      ...(operationId === undefined ? {} : { operationId }),
-      instanceId: this.id,
-    });
-    if (event.type === "dock_session_replaced") {
-      this.extensionUi.beginGenerationChange();
-      const replacedQueue = removedQueueProjection(this.trackedQueueMessages(), this.state);
-      const previousSessionFile = optionalRuntimeString(event.previousSessionFile, 16_384);
-      const sessionFile = optionalRuntimeString(event.sessionFile, 16_384);
-      const cwd = optionalRuntimeString(event.cwd, 16_384);
-      const name = optionalRuntimeString(event.name, 256);
-      const reason = this.replacementIntent?.kind === "clone"
-        ? "clone"
-        : event.reason === "resume" || event.reason === "reload" || event.reason === "fork" ? event.reason : "new";
-      const previousDurableSessionFile = this.replacementIntent?.previousSessionFile ?? previousSessionFile;
-      await this.commitCatalogTransition(context("session.replaced"), () => {
-        this.runtimeGenerationValue += 1;
-        this.replacementIntent = undefined;
-        this.recoverySessionFile = undefined;
-        this.lastKnownValue = undefined;
-        this.interruptionValue = undefined;
-        this.shutdownRequestedAt = undefined;
-        this.agentStartCount = 0;
-        this.agentSettledCount = 0;
-        this.acceptedPromptMessages.length = 0;
-        this.consumedQueueItemIds.clear();
-        this.pendingQueueMessages.length = 0;
-        this.inFlightQueueMessages.length = 0;
-        this.runtimeSteeringHashes = [];
-        this.runtimeFollowUpHashes = [];
-        this.lastAssistantOutcome = undefined;
-        this.extensionCommandInitiator = undefined;
-        this.runtimeCompactingObserved = undefined;
-        this.clearDeferredStartAttribution();
-        this.finishCompactionBoundary();
-        this.state.execution = "idle";
-        this.state.compacting = false;
-        this.state.lastRun = "never";
-        this.state.activeCommandId = undefined;
-        this.state.lastError = undefined;
-        this.state.pendingSteering = 0;
-        this.state.pendingFollowUp = 0;
-        if (cwd !== undefined) this.cwdValue = cwd;
-        this.nameValue = name;
-        this.gitBranchValue = projectGitBranch(event.gitBranch ?? this.agentState().gitBranch);
-        this.executorIdentity.piSessionId = truncate(this.agentState().sessionId, 128) ?? "unknown";
-        this.executorIdentity.sessionFile = truncate(this.agentState().sessionFile, 16_384);
-        this.durableSessionFileValue = this.runtimeDurableSessionFile();
-        this.recoverySessionFile = this.durableSessionFileValue === undefined ? previousDurableSessionFile : undefined;
-        this.applyModelState(this.agentState().modelState);
-        this.touch();
-      }, () => {
-        this.publishedRuntimeGenerationValue = this.runtimeGenerationValue;
-        this.nextEventSequence = 1;
-        this.eventLog.length = 0;
-        this.activeConversationEvents.length = 0;
-        this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue, displayName: this.projectedDisplayName(), gitBranch: this.gitBranchValue });
-        if (replacedQueue.total > 0) this.appendEvent("queue.cleared", { ...replacedQueue, reason: "replacement" });
-      });
-      void this.extensionUi.completeGenerationChange();
-      return;
-    }
-    if (event.type === "session_info_changed") {
-      const name = optionalRuntimeString(event.name, 256);
-      await this.commitCatalogTransition(context("session.name"), () => {
-        this.nameValue = name;
-        this.touch();
-      }, () => this.appendEvent("session.info_changed", { name, displayName: this.projectedDisplayName() }));
-      return;
-    }
-    if (event.type === "dock_runtime_error" || event.type === "dock_runtime_lost") {
-      void this.extensionUi.failGenerationChange();
-      const runtimeLost = event.type === "dock_runtime_lost";
-      const error = boundedRuntimeString(event.error, 2_048, runtimeLost ? "Runtime worker was lost" : "Runtime replacement failed");
-      const recoverySessionFile = optionalRuntimeString(event.recoverySessionFile, 16_384)
-        ?? this.replacementIntent?.previousSessionFile
-        ?? this.durableSessionFileValue;
-      const lastKnown = this.currentLastKnownState();
-      await this.commitCatalogTransition(context("session.runtime_error"), () => {
-        this.replacementIntent = undefined;
-        this.recoverySessionFile = recoverySessionFile;
-        this.lastKnownValue = lastKnown;
-        this.interruptionValue = { reason: "replacement_failed", at: this.timestamp() };
-        this.state.lifecycle = "runtime_error";
-        this.state.execution = "unavailable";
-        this.state.compacting = false;
-        this.state.activeCommandId = undefined;
-        this.state.pendingSteering = 0;
-        this.state.pendingFollowUp = 0;
-        this.state.lastError = error;
-        this.touch();
-      }, () => {
-        this.appendEvent("instance.runtime_error", {
-          operationId: boundedRuntimeString(event.operationId, 128, "runtime-internal"),
-          kind: runtimeLost ? "create" : event.kind === "reload" || event.kind === "switch" || event.kind === "fork" || event.kind === "clone" ? event.kind : "new",
-          error,
-          recoverySessionFile,
-        });
-        this.appendStateEvent(runtimeLost ? "runtime_worker_lost" : "runtime_replacement_failed");
-      });
-      return;
-    }
-    switch (event.type) {
-      case "agent_start":
-        await this.commitCatalogTransition(context("run.started"), () => {
-          if (deferredOperationId !== undefined) {
-            this.state.activeCommandId = deferredOperationId;
-          } else if (extensionInitiatorOperationId !== undefined) {
-            this.state.activeCommandId = extensionInitiatorOperationId;
-            this.extensionCommandInitiator = undefined;
-          }
-          this.agentStartCount += 1;
-          this.lastAssistantOutcome = undefined;
-          this.state.execution = "running";
-          this.state.lastError = undefined;
-          this.touch();
-        }, () => {
-          this.appendEvent("run.started", { operationId: this.state.activeCommandId ?? "runtime-initiated" });
-          this.appendStateEvent("agent_start");
-        });
-        return;
-      case "agent_settled":
-        this.lastAssistantOutcome = {
-          stopReason: optionalRuntimeString(event.stopReason, 128),
-          errorMessage: optionalRuntimeString(event.error, 2_048),
-        };
-        await this.commitAgentSettled(context("run.settled"));
-        return;
-      case "dock_queue_consumed": {
-        const consumed = this.workerConsumedQueueMessage(event);
-        const needsPendingCommit = consumed !== undefined
-          && (consumed.queued.phase === "fresh_in_flight" || consumed.queued.phase === "effect_unknown");
-        if (!needsPendingCommit || consumed === undefined) {
-          this.handleAgentEvent(event);
-          return;
-        }
-        await this.commitCatalogTransition(context("queue.consumed"), () => {
-          const operationId = optionalRuntimeString(event.operationId, 128);
-          const acceptedIndex = operationId === undefined ? -1 : this.acceptedPromptMessages.findIndex((candidate) => candidate.operationId === operationId);
-          if (acceptedIndex >= 0) this.acceptedPromptMessages.splice(acceptedIndex, 1);
-          this.removeWorkerConsumedMessage(consumed, true);
-          this.touch();
-        }, () => {
-          const operationId = optionalRuntimeString(event.operationId, 128);
-          if (operationId !== undefined) this.consumedQueueItemIds.set(operationId, consumed.queued.queueItemId);
-          this.appendEvent("queue.changed", {
-            steering: this.state.pendingSteering,
-            followUp: this.state.pendingFollowUp,
-            total: this.state.pendingSteering + this.state.pendingFollowUp,
-          });
-          this.appendStateEvent("deferred_message_submitted");
-        });
-        this.scheduleCompactionQueueDrain(false);
-        return;
-      }
-      case "queue_update": {
-        const steering = stringArray(event.steering);
-        const followUp = stringArray(event.followUp);
-        this.synchronizePendingRuntimeQueue(steering, followUp);
-        const pending = this.mergedRuntimePendingCounts(steering.length, followUp.length);
-        await this.commitCatalogTransition(context("queue.changed"), () => {
-          this.state.pendingSteering = pending.steering;
-          this.state.pendingFollowUp = pending.followUp;
-          this.touch();
-        }, () => this.appendEvent("queue.changed", pending));
-        return;
-      }
-      case "auto_retry_start":
-        await this.commitCatalogTransition(context("run.retry_started"), () => {
-          this.state.execution = "running";
-          this.touch();
-        }, () => this.appendEvent("run.retry_started", {
-          attempt: nonNegativeNumber(event.attempt),
-          maxAttempts: nonNegativeNumber(event.maxAttempts),
-          delayMs: nonNegativeNumber(event.delayMs),
-          error: boundedRuntimeString(event.errorMessage, 2_048, "Unknown retry error"),
-        }));
-        return;
-      case "compaction_start":
-        await this.commitCatalogTransition(context("compaction.started"), () => {
-          this.startCompactionBoundary(operationId);
-          this.state.execution = "running";
-          this.state.compacting = true;
-          this.touch();
-        }, () => this.appendEvent("compaction.started", {
-          reason: compactionReason(event.reason),
-          ...(operationId === undefined ? {} : { operationId }),
-        }));
-        return;
-      case "compaction_end": {
-        try {
-          await this.commitCatalogTransition(context("compaction.completed"), () => {
-            if (this.state.activeCommandId === undefined && event.willRetry !== true) this.state.execution = "idle";
-            this.state.compacting = false;
-            this.touch();
-          }, () => {
-            this.appendEvent("compaction.completed", {
-              reason: compactionReason(event.reason),
-              ...(operationId === undefined ? {} : { operationId }),
-              aborted: event.aborted === true,
-              willRetry: event.willRetry === true,
-              error: optionalRuntimeString(event.errorMessage, 2_048),
-            });
-            this.appendStateEvent("compaction_completed");
-          });
-        } finally {
-          this.finishCompactionBoundary();
-        }
-        this.scheduleCompactionQueueDrain(event.willRetry === true);
-        return;
-      }
-      default:
-        this.handleAgentEvent(event);
-    }
-  }
-
-  private async commitAgentSettled(context: CatalogMutationContext): Promise<void> {
-    const outcome = this.lastAssistantOutcome;
-    let result: Exclude<LastRunResult, "never"> = "failed";
-    await this.commitCatalogTransition(context, () => {
-      this.agentSettledCount += 1;
-      if (outcome?.stopReason === "error") {
-        result = "failed";
-        this.state.execution = "failed";
-        this.state.lastError = outcome.errorMessage ?? "Pi run failed";
-      } else if (outcome?.stopReason === "aborted" || this.stopRequestedWhileRunning) {
-        result = "aborted";
-        this.state.execution = "idle";
-        this.state.lastError = undefined;
-      } else if (!outcome) {
-        result = "failed";
-        this.state.execution = "failed";
-        this.state.lastError = "Pi run settled without an assistant outcome";
-      } else {
-        result = "succeeded";
-        this.state.execution = "idle";
-        this.state.lastError = undefined;
-      }
-      // Pi awaits extension agent_settled handlers before publishing its own
-      // agent_settled event. An extension-triggered compact() can therefore
-      // publish compaction_start first. Settling the completed agent run must
-      // not make that still-active compaction look idle.
-      if (this.compactionActive) this.state.execution = "running";
-      this.state.lastRun = result;
-      this.state.activeCommandId = undefined;
-      this.touch();
-    }, () => {
-      this.appendEvent("run.settled", {
-        operationId: context.operationId,
-        result,
-        stopReason: outcome?.stopReason,
-        error: outcome?.errorMessage,
-      });
-      this.appendStateEvent("agent_settled");
-    });
-  }
-
-  private handleAgentEvent(event: AgentEvent): void {
-    if (this.state.lifecycle === "stopped") return;
-    if (event.type === "dock_git_branch_changed") {
-      this.applyGitBranchChanged(event.branch);
-      return;
-    }
-    if (event.type === "dock_session_replaced") {
-      this.extensionUi.beginGenerationChange();
-      const replacedQueue = removedQueueProjection(this.trackedQueueMessages(), this.state);
-      const previousSessionFile = optionalRuntimeString(event.previousSessionFile, 16_384);
-      const sessionFile = optionalRuntimeString(event.sessionFile, 16_384);
-      const cwd = optionalRuntimeString(event.cwd, 16_384);
-      const name = optionalRuntimeString(event.name, 256);
-      const reason = this.replacementIntent?.kind === "clone"
-        ? "clone"
-        : event.reason === "resume" || event.reason === "reload" || event.reason === "fork" ? event.reason : "new";
-      const previousDurableSessionFile = this.replacementIntent?.previousSessionFile ?? previousSessionFile;
-      this.runtimeGenerationValue += 1;
-      this.publishedRuntimeGenerationValue = this.runtimeGenerationValue;
-      this.replacementIntent = undefined;
-      this.recoverySessionFile = undefined;
-      this.lastKnownValue = undefined;
-      this.interruptionValue = undefined;
-      this.shutdownRequestedAt = undefined;
-      this.nextEventSequence = 1;
-      this.eventLog.length = 0;
-      this.activeConversationEvents.length = 0;
-      this.agentStartCount = 0;
-      this.agentSettledCount = 0;
-      this.acceptedPromptMessages.length = 0;
-      this.consumedQueueItemIds.clear();
-      this.pendingQueueMessages.length = 0;
-      this.inFlightQueueMessages.length = 0;
-      this.runtimeSteeringHashes = [];
-      this.runtimeFollowUpHashes = [];
-      this.lastAssistantOutcome = undefined;
-      this.extensionCommandInitiator = undefined;
-      this.runtimeCompactingObserved = undefined;
-      this.clearDeferredStartAttribution();
-      this.finishCompactionBoundary();
-      this.state.execution = "idle";
-      this.state.compacting = false;
-      this.state.lastRun = "never";
-      this.state.activeCommandId = undefined;
-      this.state.lastError = undefined;
-      this.state.pendingSteering = 0;
-      this.state.pendingFollowUp = 0;
-      if (cwd !== undefined) this.cwdValue = cwd;
-      this.nameValue = name;
-      this.gitBranchValue = projectGitBranch(event.gitBranch ?? this.agentState().gitBranch);
-      this.executorIdentity.piSessionId = truncate(this.agentState().sessionId, 128) ?? "unknown";
-      this.executorIdentity.sessionFile = truncate(this.agentState().sessionFile, 16_384);
-      this.durableSessionFileValue = this.runtimeDurableSessionFile();
-      this.recoverySessionFile = this.durableSessionFileValue === undefined ? previousDurableSessionFile : undefined;
-      this.applyModelState(this.agentState().modelState);
-      this.touch();
-      this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue, displayName: this.projectedDisplayName(), gitBranch: this.gitBranchValue });
-      if (replacedQueue.total > 0) this.appendEvent("queue.cleared", { ...replacedQueue, reason: "replacement" });
-      void this.extensionUi.completeGenerationChange();
-      return;
-    }
-    if (event.type === "session_info_changed") {
-      const name = optionalRuntimeString(event.name, 256);
-      this.nameValue = name;
-      this.touch();
-      this.appendEvent("session.info_changed", { name, displayName: this.projectedDisplayName() });
-      return;
-    }
-    if (event.type === "dock_runtime_error" || event.type === "dock_runtime_lost") {
-      void this.extensionUi.failGenerationChange();
-      const runtimeLost = event.type === "dock_runtime_lost";
-      this.lastKnownValue = this.currentLastKnownState();
-      this.interruptionValue = { reason: "replacement_failed", at: this.timestamp() };
-      this.recoverySessionFile = optionalRuntimeString(event.recoverySessionFile, 16_384)
-        ?? this.replacementIntent?.previousSessionFile
-        ?? this.durableSessionFileValue;
-      this.replacementIntent = undefined;
-      this.state.lifecycle = "runtime_error";
-      this.state.execution = "unavailable";
-      this.state.compacting = false;
-      this.state.activeCommandId = undefined;
-      this.state.pendingSteering = 0;
-      this.state.pendingFollowUp = 0;
-      this.state.lastError = boundedRuntimeString(event.error, 2_048, runtimeLost ? "Runtime worker was lost" : "Runtime replacement failed");
-      this.touch();
-      this.appendEvent("instance.runtime_error", {
-        operationId: boundedRuntimeString(event.operationId, 128, "runtime-internal"),
-        kind: runtimeLost ? "create" : event.kind === "reload" || event.kind === "switch" || event.kind === "fork" || event.kind === "clone" ? event.kind : "new",
-        error: this.state.lastError,
-        recoverySessionFile: this.recoverySessionFile,
-      });
-      this.appendStateEvent(runtimeLost ? "runtime_worker_lost" : "runtime_replacement_failed");
-      return;
-    }
-    if (event.type === "dock_extension_error") {
-      this.recordExtensionError(event.error);
-      return;
-    }
-    switch (event.type) {
-      case "agent_start": {
-        const deferredOperationId = optionalRuntimeString(event.dockOperationId, 128);
-        const extensionInitiatorOperationId = this.extensionCommandInitiator?.runtimeGeneration === this.runtimeGenerationValue
-          && this.extensionCommandInitiator.agentStartCount === this.agentStartCount
-          ? this.extensionCommandInitiator.operationId
-          : undefined;
-        if (deferredOperationId !== undefined) {
-          this.state.activeCommandId = deferredOperationId;
-        } else if (extensionInitiatorOperationId !== undefined) {
-          this.state.activeCommandId = extensionInitiatorOperationId;
-          this.extensionCommandInitiator = undefined;
-        }
-        this.agentStartCount += 1;
-        this.lastAssistantOutcome = undefined;
-        this.state.execution = "running";
-        this.state.lastError = undefined;
-        this.touch();
-        this.appendEvent("run.started", {
-          operationId: this.state.activeCommandId ?? "runtime-initiated",
-        });
-        this.appendStateEvent("agent_start");
-        break;
-      }
-
-      case "agent_settled":
-        this.lastAssistantOutcome = {
-          stopReason: optionalRuntimeString(event.stopReason, 128),
-          errorMessage: optionalRuntimeString(event.error, 2_048),
-        };
-        this.handleAgentSettled();
-        break;
-
-      case "queue_update": {
-        const steering = stringArray(event.steering);
-        const followUp = stringArray(event.followUp);
-        this.synchronizePendingRuntimeQueue(steering, followUp);
-        const pending = this.mergedRuntimePendingCounts(steering.length, followUp.length);
-        this.state.pendingSteering = pending.steering;
-        this.state.pendingFollowUp = pending.followUp;
-        this.touch();
-        this.appendEvent("queue.changed", pending);
-        break;
-      }
-
-      case "dock_queue_consumed":
-        this.handleWorkerQueueConsumed(event);
-        break;
-
-      case "dock_conversation_frame":
-        this.appendWorkerConversationFrame(event);
-        break;
-
-      case "auto_retry_start":
-        this.state.execution = "running";
-        this.touch();
-        this.appendEvent("run.retry_started", {
-          attempt: nonNegativeNumber(event.attempt),
-          maxAttempts: nonNegativeNumber(event.maxAttempts),
-          delayMs: nonNegativeNumber(event.delayMs),
-          error: boundedRuntimeString(event.errorMessage, 2_048, "Unknown retry error"),
-        });
-        break;
-
-      case "auto_retry_end":
-        this.appendEvent("run.retry_completed", {
-          success: event.success === true,
-          attempt: nonNegativeNumber(event.attempt),
-          error: optionalRuntimeString(event.finalError, 2_048),
-        });
-        break;
-
-      case "compaction_start":
-        this.startCompactionBoundary(this.receiptBoundaryOperationId);
-        this.state.execution = "running";
-        this.state.compacting = true;
-        this.touch();
-        this.appendEvent("compaction.started", {
-          reason: compactionReason(event.reason),
-          ...(this.receiptBoundaryOperationId === undefined ? {} : { operationId: this.receiptBoundaryOperationId }),
-        });
-        break;
-
-      case "compaction_end":
-        if (this.state.activeCommandId === undefined && event.willRetry !== true) this.state.execution = "idle";
-        this.state.compacting = false;
-        this.touch();
-        this.appendEvent("compaction.completed", {
-          reason: compactionReason(event.reason),
-          ...(this.receiptBoundaryOperationId === undefined ? {} : { operationId: this.receiptBoundaryOperationId }),
-          aborted: event.aborted === true,
-          willRetry: event.willRetry === true,
-          error: optionalRuntimeString(event.errorMessage, 2_048),
-        });
-        this.appendStateEvent("compaction_completed");
-        this.finishCompactionBoundary();
-        this.scheduleCompactionQueueDrain(event.willRetry === true);
-        break;
-
-      default:
-        break;
-    }
-  }
-
-  private handleAgentSettled(): void {
-    this.agentSettledCount += 1;
-    const outcome = this.lastAssistantOutcome;
-    const operationId = this.state.activeCommandId ?? this.receiptBoundaryOperationId;
-    let result: Exclude<LastRunResult, "never">;
-
-    if (outcome?.stopReason === "error") {
-      result = "failed";
-      this.state.execution = "failed";
-      this.state.lastError = outcome.errorMessage ?? "Pi run failed";
-    } else if (outcome?.stopReason === "aborted" || this.stopRequestedWhileRunning) {
-      result = "aborted";
-      this.state.execution = "idle";
-      this.state.lastError = undefined;
-    } else if (!outcome) {
-      result = "failed";
-      this.state.execution = "failed";
-      this.state.lastError = "Pi run settled without an assistant outcome";
-    } else {
-      result = "succeeded";
-      this.state.execution = "idle";
-      this.state.lastError = undefined;
-    }
-
-    // Extension-triggered compaction_start may precede Pi's externally
-    // published agent_settled event even though the extension hook is named
-    // agent_settled. Preserve the active compaction boundary.
-    if (this.compactionActive) this.state.execution = "running";
-    this.state.lastRun = result;
-    this.state.activeCommandId = undefined;
-    this.touch();
-    this.appendEvent("run.settled", {
-      operationId,
-      result,
-      stopReason: outcome?.stopReason,
-      error: outcome?.errorMessage,
-    });
-    this.appendStateEvent("agent_settled");
   }
 
   private startCompactionBoundary(operationId?: string): void {
