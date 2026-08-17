@@ -95,7 +95,7 @@ hello 的 `requiredCapabilities` 是 fail-fast 功能探测：Host 缺少任何�
 - optional instance key：业务入口到 instance 的稳定映射；
 - Agent session identity：当前 Worker 内的原生 session；
 - `runtimeGeneration`：instance 内当前 runtime/session generation；
-- `operationId`：一次 mutation 意图；
+- `operationId`：一次 mutation 意图，也是后续异步事件回到发起界面区域的关联锚点；
 - event cursor：read/follow 和重连的位置。
 
 不要用 instance name、cwd、Agent session ID 或文件路径代替 `instanceId`。Snapshot 的可选 `name` 表示当前 Agent session name；始终存在的 `displayName` 是 Dock 已经清洗和兜底的人类展示标签。实例列表直接渲染 `displayName`，点击、连接和 mutation 仍传 `instanceId`，客户端不要再自行实现 `name/key/id` fallback。
@@ -167,6 +167,8 @@ Agent session replacement 会保留 `instanceId`，但推进 `runtimeGeneration`
 ## Mutation
 
 每个新的 mutation 意图都使用新的 `operationId`。在同一个 Host epoch 中，重复 ID 只能表示同一个意图，不能换一组参数继续使用。
+
+`operationId` 同时是异步渲染的关联锚点。由某次 mutation 引发的后续事件携带发起者的 `operationId`：`message.submitted`、`run.started`、`run.settled`、`compaction.started/completed`，以及执行期间的 `extension.notification`。Web 这类界面用它把异步更新定位回发起控件的显示区域：提交时本地记住 ID，事件到达时按 ID 收敛对应区域，而不是按文本或时间猜归属。这个关联由 Host 权威解析——包括 deferred 队列消费和 extension 发起的 run，Worker 不知道客户端的 operation 身份；runtime 自主发起、无外部 mutation 的 run 以 `runtime-initiated` 标记。它是关联字段，不是展示文本；界面不应把 ID 本身渲染给用户。
 
 Mutation 发出后如果发生 timeout、断线或 correlation error，结果可能未知。客户端不能自动生成新的 operation 并重放；应先查询 instance、conversation 和 events。Worker 在接受副作用之前失联，与接受之后失联，会得到不同错误。`effect_unknown` 明确表示副作用可能已经发生。
 
