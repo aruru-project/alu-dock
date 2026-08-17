@@ -24,8 +24,11 @@ import type {
 } from "../../src/core/agent-worker.js";
 import { AgentConversationCursorError, AgentSettingsWriteError } from "../../src/core/agent-worker.js";
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, SettingValueMap, ToolDto } from "../../src/core/config-projection.js";
+// SETTING_DEFINITIONS/SETTING_KEYS are the frozen Dock protocol setting schema (protocol.ts imports the
+// same constants and the client parser rejects any worker that omits a canonical key), not Pi internals.
+// Nothing else from src may be imported here: this fake must not reuse production algorithms or
+// projections, or tests stop proving anything about the real adapter.
 import { SETTING_DEFINITIONS, SETTING_KEYS } from "../../src/core/config-projection.js";
-import { sliceSemanticHistory } from "../../src/core/history-pagination.js";
 import type { AttachmentDto, ConversationFrame, ImagePathDto, JsonObject } from "../../src/core/instance-dto.js";
 
 class Deferred<T> {
@@ -295,7 +298,9 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   async getConversationHistory(cursor?: string, limit = 50): Promise<AgentConversationHistoryPage> {
     const end = cursor === undefined ? this.history.length : Number.parseInt(cursor, 10);
     if (!Number.isSafeInteger(end) || end < 0 || end > this.history.length) throw new AgentConversationCursorError();
-    const page = sliceSemanticHistory(this.history, end, Math.max(1, Math.min(200, Math.floor(limit))));
+    // Deliberately naive windowing. Semantic tool-pairing is the real adapter's behavior; it is unit-tested
+    // in history-pagination.test.ts and exercised against real Pi in the pi-*-real gates.
+    const page = { start: Math.max(0, end - Math.max(1, Math.min(200, Math.floor(limit)))), end, hasEarlier: end - Math.max(1, Math.min(200, Math.floor(limit))) > 0 };
     const entries = this.history.slice(page.start, page.end).map((entry) => ({
       entry: structuredClone(entry),
       contentRef: `fixture-${entry.entryId}`,
