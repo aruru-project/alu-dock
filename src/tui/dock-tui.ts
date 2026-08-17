@@ -14,6 +14,7 @@ import {
 } from "@earendil-works/pi-tui";
 
 import { ControlClientError, DockClient, type EventSubscription, type OperationSubscription } from "../control/dock-client.js";
+import { humanInstanceStatus } from "../core/instance-display-name.js";
 import type { InteractionResponse } from "../core/extension-ui-broker.js";
 import type { CommandDto, SettingDto, SettingUpdate } from "../core/config-projection.js";
 import type { DeliveryMode, DockEvent, EventCursor, HistoryEntryDto, InstanceSnapshot, PendingMessageDto, SessionDto, TreeNodeDto } from "../core/managed-instance.js";
@@ -769,7 +770,7 @@ export async function runDockTui(
       const catalog = await client.models(instance.id);
       instance = catalog.instance;
       status.update(instance);
-      if (catalog.truncated) conversation.addNotice(`Model catalog is bounded: showing ${catalog.models.length} of ${catalog.total}.`, true);
+      if (catalog.truncated) conversation.addNotice(`Showing ${catalog.models.length} of ${catalog.total} models.`, true);
       const selected = await showModelPicker(catalog.models);
       if (selected) await switchModel(selected.provider, selected.id);
       else showStatus("model unchanged");
@@ -1079,7 +1080,7 @@ export async function runDockTui(
     try {
       const catalog = await client.tools(instance.id);
       let tools = catalog.tools;
-      if (catalog.truncated) conversation.addNotice(`Tool catalog is bounded: showing ${tools.length} of ${catalog.total}.`, true);
+      if (catalog.truncated) conversation.addNotice(`Showing ${tools.length} of ${catalog.total} tools.`, true);
       while (true) {
         const selected = await showChoicePicker(
           "Active tools",
@@ -1095,7 +1096,7 @@ export async function runDockTui(
         instance = result.instance;
         status.update(instance);
         tools = result.tools;
-        if (result.truncated) conversation.addNotice(`Tool catalog is bounded: showing ${tools.length} of ${result.total}.`, true);
+        if (result.truncated) conversation.addNotice(`Showing ${tools.length} of ${result.total} tools.`, true);
         showStatus(`tool ${selected} toggled`);
       }
       showStatus("tools updated");
@@ -1119,7 +1120,7 @@ export async function runDockTui(
       instance = result.instance;
       status.update(instance);
       conversation.addNotice(`Active tools: ${result.tools.filter((tool) => tool.active).map((tool) => tool.name).join(", ") || "none"}.`);
-      if (result.truncated) conversation.addNotice(`Tool catalog is bounded: showing ${result.tools.length} of ${result.total}.`, true);
+      if (result.truncated) conversation.addNotice(`Showing ${result.tools.length} of ${result.total} tools.`, true);
       showStatus("tools updated");
     } catch (error) { showError(error); }
     finally { restoreEditorSubmit(); tui.requestRender(); }
@@ -1181,7 +1182,7 @@ export async function runDockTui(
       picker.setSelectedValue(tree.leafId);
       picker.setEmptyText("The current Pi session tree has no matching entries");
       picker.setBody(tree.capped
-        ? `Loaded ${tree.nodes.length.toLocaleString()} of ${tree.total.toLocaleString()} bounded entries`
+        ? `Loaded ${tree.nodes.length.toLocaleString()} of ${tree.total.toLocaleString()} entries`
         : undefined);
     }).catch(() => {
       if (!active) return;
@@ -1580,7 +1581,7 @@ export async function runDockTui(
       for (const diagnostic of result.diagnostics) conversation.addNotice(`${diagnostic.severity}: ${diagnostic.message}`, diagnostic.severity === "error");
       showStatus(`reloaded ${result.resources.length} resources`);
       if (result.resourcesTruncated || result.diagnosticsTruncated) {
-        conversation.addNotice(`Reload projection is bounded: ${result.resources.length}/${result.resourceTotal} resources · ${result.diagnostics.length}/${result.diagnosticTotal} diagnostics.`, true);
+        conversation.addNotice(`Showing ${result.resources.length} of ${result.resourceTotal} resources · ${result.diagnostics.length} of ${result.diagnosticTotal} diagnostics.`, true);
       }
     } catch (error) { showError(error); }
     finally { restoreEditorSubmit(); tui.requestRender(); }
@@ -1599,7 +1600,7 @@ export async function runDockTui(
       if (resource) conversation.addNotice(`${resource.kind} ${resource.name}${resource.path ? ` · ${resource.path}` : ""}`);
       showStatus(`${result.resources.length} resources · ${result.diagnostics.length} diagnostics`);
       if (result.resourcesTruncated || result.diagnosticsTruncated) {
-        conversation.addNotice(`Resource projection is bounded: ${result.resources.length}/${result.resourceTotal} resources · ${result.diagnostics.length}/${result.diagnosticTotal} diagnostics.`, true);
+        conversation.addNotice(`Showing ${result.resources.length} of ${result.resourceTotal} resources · ${result.diagnostics.length} of ${result.diagnosticTotal} diagnostics.`, true);
       }
     } catch (error) { showError(error); }
     finally { restoreEditorSubmit(); tui.setFocus(editor); tui.requestRender(); }
@@ -1705,14 +1706,14 @@ export async function runDockTui(
       restoreTerminalTitle();
       conversation.applyHistory(historyEntries, false);
       conversation.applyReplay(reconciled, false);
-      if (!full.ok) conversation.addNotice(`Replacement history unavailable: ${errorText(full.error)}`, true);
+      if (!full.ok) conversation.addNotice(`History didn't reload: ${errorText(full.error)}. Run /reload to try again.`, true);
       conversation.setToolsExpanded(instance.toolsExpanded);
     } else {
       const buffered = replacementBufferedEvents;
       replacementBufferedEvents = [];
       replacementHistoryGeneration = undefined;
       reconciled = reconcileFlowingEvents([], buffered);
-      conversation.addNotice(`Replacement history unavailable: ${errorText(projectionLoad.reason)}`, true);
+      conversation.addNotice(`History didn't reload: ${errorText(projectionLoad.reason)}. Run /reload to try again.`, true);
       conversation.applyReplay(reconciled, false);
       conversation.setToolsExpanded(instance.toolsExpanded);
     }
@@ -1721,12 +1722,12 @@ export async function runDockTui(
       settings = settingsLoad.value.settings;
       for (const setting of settings) applyLiveSetting(setting.key, setting.value);
     } else {
-      conversation.addNotice(`Replacement settings unavailable: ${errorText(settingsLoad.reason)}`, true);
+      conversation.addNotice(`Settings didn't reload: ${errorText(settingsLoad.reason)}. Run /reload to try again.`, true);
     }
     if (commandsLoad.status === "fulfilled") {
       commands = commandsLoad.value.commands;
-      if (commandsLoad.value.truncated) conversation.addNotice(`Replacement command catalog is bounded: showing ${commands.length} of ${commandsLoad.value.total}.`, true);
-    } else conversation.addNotice(`Replacement command catalog unavailable: ${errorText(commandsLoad.reason)}`, true);
+      if (commandsLoad.value.truncated) conversation.addNotice(`Showing ${commands.length} of ${commandsLoad.value.total} commands.`, true);
+    } else conversation.addNotice(`Commands didn't reload: ${errorText(commandsLoad.reason)}. Run /reload to try again.`, true);
     rebuildAutocomplete();
     if (instance.execution === "running" || instance.compacting) {
       runActivity = activityFromReplay(instance, reconciled);
@@ -1857,7 +1858,7 @@ export async function runDockTui(
   function showError(error: unknown): void {
     if (exiting) return;
     const message = error instanceof ControlClientError
-      ? `${error.code}: ${error.message}`
+      ? humanControlErrorText(error)
       : errorText(error);
     conversation.addNotice(message, true);
     tui.requestRender();
@@ -2245,18 +2246,73 @@ function terminalSafe(value: string): string {
   return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
 }
 
+/** Answer "what happened" and "what can I do now" for Dock errors; raw codes and Host messages may carry internal identifiers. */
+function humanControlErrorText(error: ControlClientError): string {
+  switch (error.code) {
+    case "not_found":
+    case "instance_not_found":
+      return "This work no longer exists on the Dock. Head back to the Hub to pick another one.";
+    case "instance_host_lost":
+      return "The Dock lost contact with this work's agent. Reopen it from the Hub to continue from its saved session.";
+    case "instance_runtime_error":
+      return "This work's agent crashed. Reopen it from the Hub to continue from its saved session.";
+    case "instance_not_active":
+      return "This work is not running anymore. Reopen it from the Hub to continue.";
+    case "instance_not_terminal":
+      return "This work is still live, so its record can't be forgotten. Stop it first if you want it gone.";
+    case "instance_not_reopenable":
+      return "This work has no saved session to reopen. Start a new one from the Hub instead.";
+    case "cursor_stale":
+      return "The Dock's work list changed while reading it. Run the command again.";
+    case "invalid_cursor":
+      return "Couldn't pick up reading where this view left off. Close and reopen it to reload.";
+    case "stale_runtime_generation":
+      return "This work was reloaded since this window last looked. Try the command again.";
+    case "admission_pending":
+      return "The previous command is still being accepted. Give it a moment, then try again.";
+    case "instance_busy":
+      return "This work is busy with another request. Try again in a moment.";
+    case "queue_capacity":
+      return "The queue for this work is full. Let the current run finish before adding more.";
+    case "effect_unknown":
+      return "The Dock can't tell whether that command took effect. Check the conversation before sending it again.";
+    case "mutation_faulted":
+      return "That change failed partway through. Check the current state before retrying.";
+    case "operation_conflict":
+      return "That command was already submitted once. Check the conversation before sending it again.";
+    case "operation_receipt_expired":
+      return "The Dock can no longer confirm that earlier command. Check the conversation before retrying.";
+    case "runtime_unavailable":
+      return "The agent isn't running, so nothing was sent. Reopen this work from the Hub if it doesn't recover.";
+    case "compaction_failed":
+      return "Compaction failed. The conversation is unchanged; you can keep working or try again.";
+    case "interaction_not_found":
+    case "interaction_expired":
+      return "That question already closed. The latest state is in the conversation.";
+    case "interaction_wrong_lease":
+      return "Another window answered this question first.";
+    case "interaction_invalid_response":
+      return "That answer wasn't accepted. Try answering again.";
+    case "catalog_write_failed":
+    case "catalog_corrupt":
+      return "The Dock couldn't save its records — the Pi session file itself is safe. Check disk space and try again.";
+    case "connection_closed":
+      return "Lost the connection to the Dock. Press Ctrl+D to detach; the work keeps its state.";
+    default:
+      return error.message;
+  }
+}
+
 export function formatWorkStatus(snapshot: InstanceSnapshot): string {
   const model = snapshot.executor.model
     ? `${terminalSafe(snapshot.executor.model.provider)}/${terminalSafe(snapshot.executor.model.id)}`
     : "none";
   return [
-    `Status: ${snapshot.lifecycle === "active" ? snapshot.execution : snapshot.lifecycle}`,
+    `Status: ${humanInstanceStatus(snapshot.lifecycle, snapshot.execution)}`,
     `Session: ${terminalSafe(snapshot.name || "(unnamed)")}${snapshot.key === undefined ? "" : ` [${terminalSafe(snapshot.key)}]`}`,
     `Work cwd: ${terminalSafe(snapshot.cwd)}${snapshot.gitBranch === undefined ? "" : ` (${terminalSafe(snapshot.gitBranch)})`}`,
     `Model: ${model} · thinking ${terminalSafe(snapshot.executor.thinkingLevel ?? "off")}`,
-    `Dock ID: ${terminalSafe(snapshot.id)}`,
-    `Pi session ID: ${terminalSafe(snapshot.executor.piSessionId)}`,
-    `Work revision: ${snapshot.runtimeGeneration}`,
+    `Saved session: ${snapshot.executor.sessionFile === undefined ? "not saved yet" : terminalSafe(snapshot.executor.sessionFile)}`,
   ].join("\n");
 }
 

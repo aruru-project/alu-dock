@@ -1,5 +1,7 @@
 import { basename } from "node:path";
 
+import type { InstanceExecution, InstanceLifecycle } from "./instance-dto.js";
+
 export const MAX_INSTANCE_DISPLAY_NAME_CHARS = 256;
 export const MAX_CWD_FALLBACK_DISPLAY_NAME_CHARS = 20;
 
@@ -23,6 +25,20 @@ export function projectInstanceDisplayName(source: InstanceDisplayNameSource): s
   const key = safeLabel(source.key, MAX_INSTANCE_DISPLAY_NAME_CHARS, SAFE_EXPLICIT_CHARACTER);
   if (key) return key;
   return cwdFallback(source.cwd);
+}
+
+/** One human status phrase per instance; UI must not surface raw lifecycle/execution enum values. */
+export function humanInstanceStatus(lifecycle: InstanceLifecycle, execution: InstanceExecution): string {
+  if (lifecycle === "active") {
+    if (execution === "running") return "running";
+    if (execution === "failed") return "run failed";
+    if (execution === "unavailable") return "not responding";
+    return "idle";
+  }
+  if (lifecycle === "stopping") return "stopping";
+  if (lifecycle === "stopped") return "stopped";
+  if (lifecycle === "host_lost") return "agent lost";
+  return "agent crashed";
 }
 
 function cwdFallback(cwd: string): string {

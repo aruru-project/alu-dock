@@ -21,6 +21,7 @@ import type {
   TrustedClient,
 } from "../control/remote-access-state.js";
 import type { InstanceSnapshot, SessionDto } from "../core/managed-instance.js";
+import { humanInstanceStatus } from "../core/instance-display-name.js";
 import { AluHubBrand } from "./alu-mascot.js";
 import { ExtensionTextDialog } from "./extension-text-dialog.js";
 import { mouseTrackingSequences, parseTerminalMouseEvent } from "./mouse-input.js";
@@ -196,7 +197,7 @@ export function instanceActionSummary(instance: InstanceSnapshot): string {
   if ((instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error") && instance.reopenable) return "Recover or Forget";
   if (instance.lifecycle === "stopping") return "stop in progress; Open unavailable";
   if (instance.lifecycle === "stopped") return "History record";
-  return "runtime unavailable; Forget only";
+  return "not recoverable; Forget only";
 }
 
 async function chooseContinueAction(
@@ -210,7 +211,7 @@ async function chooseContinueAction(
   const entries: DockHubEntry[] = visible.map((instance) => ({
     value: `instance:${instance.id}`,
     label: `${stateIcon(instance)} ${displayName(instance)}`,
-    description: `${terminalSafe(instance.cwd)} · ${instance.lifecycle}/${instance.execution} · ${instanceActionSummary(instance)}`,
+    description: `${terminalSafe(instance.cwd)} · ${humanInstanceStatus(instance.lifecycle, instance.execution)} · ${instanceActionSummary(instance)}`,
   }));
   if (ordered.length > visible.length) {
     entries.push({
@@ -245,7 +246,7 @@ async function chooseHistoryAction(
   const entries: DockHubEntry[] = visible.map((instance) => ({
     value: `history:${instance.id}`,
     label: displayName(instance),
-    description: `${terminalSafe(instance.cwd)} · ${instance.lifecycle} · ${instance.executor.sessionFile ? "saved Pi session" : "no saved Pi session"} · ${instance.updatedAt}`,
+    description: `${terminalSafe(instance.cwd)} · ${humanInstanceStatus(instance.lifecycle, instance.execution)} · ${instance.executor.sessionFile ? "saved Pi session" : "no saved Pi session"} · ${instance.updatedAt}`,
   }));
   if (ordered.length > visible.length) {
     entries.push({
@@ -342,7 +343,7 @@ async function chooseInstanceAction(
   const selected = await selectMenu(
     terminal,
     displayName(instance),
-    `${instance.lifecycle}/${instance.execution} · ${terminalSafe(instance.cwd)}`,
+    `${humanInstanceStatus(instance.lifecycle, instance.execution)} · ${terminalSafe(instance.cwd)}`,
     entries,
     "↑↓ choose · Enter confirm · Esc back",
   );

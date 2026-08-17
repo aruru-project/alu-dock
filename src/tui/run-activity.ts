@@ -22,8 +22,8 @@ const READY: RunActivityState = { phase: "idle", label: "ready" };
 
 export function activityFromSnapshot(snapshot: InstanceSnapshot): RunActivityState {
   if (snapshot.lifecycle === "stopped") return { phase: "disconnected", label: "stopped" };
-  if (snapshot.lifecycle === "host_lost") return { phase: "disconnected", label: "host lost" };
-  if (snapshot.lifecycle === "runtime_error") return { phase: "error", label: "runtime error" };
+  if (snapshot.lifecycle === "host_lost") return { phase: "disconnected", label: "agent lost" };
+  if (snapshot.lifecycle === "runtime_error") return { phase: "error", label: "agent crashed" };
   if (snapshot.compacting) return { phase: "compaction", label: "compacting context" };
   if (snapshot.execution === "running") return { phase: "waiting", label: "waiting for model" };
   if (snapshot.execution === "failed") return { phase: "error", label: "run failed" };
@@ -155,7 +155,7 @@ export function reduceRunActivity(
       return { phase: "disconnected", label: "stopped" };
 
     case "instance.runtime_error":
-      return { phase: "error", label: "runtime error" };
+      return { phase: "error", label: "agent crashed" };
 
     case "instance.error":
     case "settings.write_failed":

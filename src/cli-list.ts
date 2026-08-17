@@ -1,5 +1,6 @@
 import type { InstanceSnapshot } from "./core/managed-instance.js";
 import { uniqueInstanceIdPrefix } from "./human-target.js";
+import { humanInstanceStatus } from "./core/instance-display-name.js";
 
 const MAX_HUMAN_LIST_INSTANCES = 100;
 const DEFAULT_WIDTH = 80;
@@ -86,9 +87,8 @@ function renderInstance(
   width: number,
 ): [string, string] {
   const id = terminalSafe(uniqueInstanceIdPrefix(instance, identityUniverse));
-  const state = terminalSafe(`${instance.lifecycle}/${instance.execution}`);
-  const generation = `g${Math.max(1, Math.floor(instance.runtimeGeneration))}`;
-  const base = `${stateIcon(instance)} ${id} ${state} ${generation}`;
+  const state = terminalSafe(humanInstanceStatus(instance.lifecycle, instance.execution));
+  const base = `${stateIcon(instance)} ${id} ${state}`;
   const tags = decisionTags(instance);
   const safeName = instance.displayName;
   const available = Math.max(1, width - terminalDisplayWidth(base) - 1);
