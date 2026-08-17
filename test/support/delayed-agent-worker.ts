@@ -29,7 +29,7 @@ import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate,
 // Nothing else from src may be imported here: this fake must not reuse production algorithms or
 // projections, or tests stop proving anything about the real adapter.
 import { SETTING_DEFINITIONS, SETTING_KEYS } from "../../src/core/config-projection.js";
-import type { AttachmentDto, ConversationFrame, ImagePathDto, JsonObject } from "../../src/core/instance-dto.js";
+import type { AttachmentDto, ConversationFrame, ImagePathDto } from "../../src/core/instance-dto.js";
 
 class Deferred<T> {
   readonly promise: Promise<T>;
@@ -86,14 +86,8 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
 
   private readonly listeners = new Set<(event: AgentEvent) => void>();
   private readonly conversationInputs: Array<{ operationId: string; text: string; delivery: "prompt" | "steer" | "followUp"; fromQueue: boolean; images?: ImagePathDto[]; attachments?: AttachmentDto[] }> = [];
-  private readonly conversationToolCalls = new Set<string>();
-  private readonly conversationCompletedToolCalls = new Set<string>();
   private conversationMessageSequence = 0;
-  private conversationUserMessageId: string | undefined;
-  private conversationUserAttachments: AttachmentDto[] | undefined;
-  private conversationLastUserAttachments: AttachmentDto[] | undefined;
   private conversationAssistantMessageId: string | undefined;
-  private conversationOutcome: { stopReason?: string; error?: string } | undefined;
   private historyEntrySequence = 0;
   private readonly steeringQueue: string[] = [];
   private readonly followUpQueue: string[] = [];
@@ -268,6 +262,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     options?.preflightResult?.(true);
     this.currentRun = new Deferred<void>();
     this.isStreaming = true;
+    this.startConversationTurn();
     this.emit({ type: "agent_start" });
     this.emitUserMessage(text);
     await this.currentRun.promise;
@@ -474,6 +469,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     const result = { summary: "fixture summary", firstKeptEntryId: "kept-1", tokensBefore: 123 };
     this.isCompacting = false;
     this.emit({ type: "compaction_end", reason: "manual", result, aborted: false, willRetry: false });
+    this.emit({ type: "conversation_checkpoint", history: this.getHistory() });
     if (this.sessionMutationError) throw this.sessionMutationError;
     return result;
   }
@@ -495,6 +491,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
         if (this.activeCompactionBlock === block) {
           this.isCompacting = false;
           this.emit({ type: "compaction_end", reason: "manual", result, aborted: false, willRetry: false });
+          this.emit({ type: "conversation_checkpoint", history: this.getHistory() });
         }
         block.result.resolve(result);
       },
@@ -575,6 +572,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     if (this.isCompacting) {
       this.isCompacting = false;
       this.emit({ type: "compaction_end", reason: "manual", result: undefined, aborted: true, willRetry: false });
+      this.emit({ type: "conversation_checkpoint", history: this.getHistory() });
       const block = this.activeCompactionBlock;
       this.activeCompactionBlock = undefined;
       block?.result.reject(new Error("Compaction cancelled"));
@@ -637,13 +635,26 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   settle(text = "done", stopReason = "stop"): void {
     if (!this.currentRun || !this.isStreaming) return;
     const run = this.currentRun;
-    this.emit({
-      type: "message_end",
-      message: {
-        role: "assistant",
-        content: [{ type: "text", text }],
-        stopReason,
-      },
+    const messageId = this.fixtureAssistantMessageId();
+    this.emit(fixtureFrame({ type: "message.completed", data: {
+      messageId,
+      role: "assistant",
+      content: [{ type: "text", text }],
+      stopReason,
+    } }));
+    this.conversationAssistantMessageId = undefined;
+    const parentId = this.history.at(-1)?.entryId;
+    const entryId = `fixture-entry-${++this.historyEntrySequence}`;
+    this.history.push({
+      recordId: entryId,
+      entryId,
+      ...(parentId === undefined ? {} : { parentId }),
+      timestamp: new Date().toISOString(),
+      kind: "message",
+      source: "assistant",
+      visibility: "conversation",
+      content: [{ type: "text", text }],
+      stopReason,
     });
     this.isStreaming = false;
     this.emit({ type: "agent_end", messages: [], willRetry: false });
@@ -657,7 +668,8 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       this.emit({ type: "compaction_start", reason: "manual" });
       continuation.compactionStarted.resolve();
     }
-    this.emit({ type: "agent_settled" });
+    this.emit({ type: "agent_settled", stopReason });
+    this.emit({ type: "conversation_checkpoint", history: this.getHistory() });
     run.resolve();
     if (continuation) {
       void (async () => {
@@ -670,23 +682,36 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
           aborted: false,
           willRetry: false,
         });
+        this.emit({ type: "conversation_checkpoint", history: this.getHistory() });
         await Promise.resolve();
         this.isStreaming = true;
+        this.startConversationTurn();
         this.emit({ type: "agent_start" });
-        const hidden = {
-          role: "custom",
+        const hiddenMessageId = `fixture-message-${++this.conversationMessageSequence}`;
+        this.emit(fixtureFrame({ type: "message.completed", data: {
+          messageId: hiddenMessageId,
+          role: "system",
+          content: [{ type: "text", text: "hidden continuation" }],
+        } }));
+        const hiddenParentId = this.history.at(-1)?.entryId;
+        const hiddenEntryId = `fixture-entry-${++this.historyEntrySequence}`;
+        this.history.push({
+          recordId: hiddenEntryId,
+          entryId: hiddenEntryId,
+          ...(hiddenParentId === undefined ? {} : { parentId: hiddenParentId }),
+          timestamp: new Date().toISOString(),
+          kind: "custom_message",
+          source: "extension",
+          visibility: "hidden",
+          content: [{ type: "text", text: "hidden continuation" }],
           customType: "sol-mid-turn-guard",
-          content: "hidden continuation",
           display: false,
-        };
-        this.emit({ type: "message_start", message: hidden });
-        this.emit({ type: "message_end", message: hidden });
-        this.emit({
-          type: "tool_execution_start",
+        });
+        this.emit(fixtureFrame({ type: "tool.started", data: {
           toolCallId: continuation.toolCallId,
           toolName: continuation.toolName,
           args: { path: "src/offline.ts" },
-        });
+        } }));
         continuation.continuationStarted.resolve();
       })();
     }
@@ -714,190 +739,14 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   }
 
   emit(event: AgentEvent): void {
-    const projectedEvents = this.projectConversationEvents(event).map((projected) => (
-      projected.type === "conversation_checkpoint" && !Array.isArray(projected.history)
-        ? { ...projected, history: this.getHistory() }
-        : projected
-    ));
-    for (const projected of projectedEvents) {
-      for (const listener of this.listeners) listener(projected);
-    }
-    if (event.type === "message_end" && event.message !== null && typeof event.message === "object" && !Array.isArray(event.message)) {
-      const message = event.message as Record<string, unknown>;
-      const role = typeof message.role === "string" ? message.role : "system";
-      if (role === "user" || role === "assistant" || role === "toolResult" || role === "custom") {
-        const parentId = this.history.at(-1)?.entryId;
-        const entryId = `fixture-entry-${++this.historyEntrySequence}`;
-        this.history.push({
-          recordId: entryId,
-          entryId,
-          ...(parentId === undefined ? {} : { parentId }),
-          timestamp: new Date().toISOString(),
-          kind: role === "custom" ? "custom_message" : "message",
-          source: role === "toolResult" ? "tool" : role === "custom" ? "extension" : role,
-          visibility: role === "custom" && message.display === false ? "hidden" : "conversation",
-          content: projectFixtureMessageContent(message),
-          ...(role === "custom" && typeof message.customType === "string" ? { customType: message.customType } : {}),
-          ...(role === "custom" && typeof message.display === "boolean" ? { display: message.display } : {}),
-          ...(typeof message.stopReason === "string" ? { stopReason: message.stopReason } : {}),
-          ...(typeof message.errorMessage === "string" ? { error: message.errorMessage } : {}),
-          ...(typeof message.toolCallId === "string" ? { toolCallId: message.toolCallId } : {}),
-          ...(typeof message.toolName === "string" ? { toolName: message.toolName } : {}),
-          ...(typeof message.isError === "boolean" ? { isError: message.isError } : {}),
-          ...(role !== "user" || this.conversationLastUserAttachments === undefined ? {} : { attachments: structuredClone(this.conversationLastUserAttachments) }),
-        });
-        if (role === "user") this.conversationLastUserAttachments = undefined;
-      }
-    }
-    if (event.type === "turn_end" || event.type === "agent_settled" || event.type === "compaction_end" || event.type === "entry_appended") {
-      this.emit({ type: "conversation_checkpoint" });
-    }
+    const outbound = event.type === "conversation_checkpoint" && !Array.isArray(event.history)
+      ? { ...event, history: this.getHistory() }
+      : event;
+    for (const listener of this.listeners) listener(outbound);
   }
 
-  private projectConversationEvents(event: AgentEvent): AgentEvent[] {
-    if (event.type === "conversation_checkpoint" || event.type === "dock_conversation_frame" || event.type === "dock_queue_consumed") return [event];
-    if (event.type === "agent_start") {
-      this.conversationUserMessageId = undefined;
-      this.conversationUserAttachments = undefined;
-      this.conversationAssistantMessageId = undefined;
-      this.conversationToolCalls.clear();
-      this.conversationCompletedToolCalls.clear();
-      this.conversationOutcome = undefined;
-      return [event];
-    }
-    if (event.type === "agent_settled") {
-      const outcome = this.conversationOutcome;
-      this.conversationOutcome = undefined;
-      return [{ type: "agent_settled", ...outcome }];
-    }
-    const message = event.message !== null && typeof event.message === "object" && !Array.isArray(event.message)
-      ? event.message as Record<string, unknown>
-      : undefined;
-    if (event.type === "message_start") {
-      if (message?.role === "assistant") this.fixtureAssistantMessageId();
-      if (message?.role !== "user") return [];
-      const text = fixtureMessageText(message.content);
-      const inputIndex = this.conversationInputs.findIndex((candidate) => candidate.text === text);
-      const input = inputIndex < 0 ? undefined : this.conversationInputs.splice(inputIndex, 1)[0];
-      const operationId = input?.operationId ?? "runtime-initiated";
-      this.conversationUserMessageId = input === undefined ? `fixture-user-${++this.conversationMessageSequence}` : `user-${operationId}`;
-      this.conversationUserAttachments = structuredClone(input?.attachments);
-      return [
-        ...(input?.fromQueue === true ? [{ type: "dock_queue_consumed", operationId }] : []),
-        fixtureFrame({ type: "message.submitted", data: {
-          operationId,
-          messageId: this.conversationUserMessageId,
-          role: "user",
-          text: text || input?.text || "",
-          ...(input?.images === undefined ? {} : { images: structuredClone(input.images) }),
-          ...(input?.attachments === undefined ? {} : { attachments: structuredClone(input.attachments) }),
-          delivery: input?.delivery ?? "prompt",
-        } }),
-      ];
-    }
-    if (event.type === "message_update") {
-      const update = event.assistantMessageEvent !== null && typeof event.assistantMessageEvent === "object" && !Array.isArray(event.assistantMessageEvent)
-        ? event.assistantMessageEvent as Record<string, unknown>
-        : undefined;
-      if (!update) return [];
-      if ((update.type === "text_delta" || update.type === "thinking_delta") && typeof update.delta === "string") {
-        return [fixtureFrame({ type: "message.delta", data: {
-          messageId: this.fixtureAssistantMessageId(),
-          block: update.type === "text_delta" ? "text" : "thinking",
-          delta: update.delta,
-        } })];
-      }
-      if (update.type !== "toolcall_start" && update.type !== "toolcall_delta" && update.type !== "toolcall_end") return [];
-      const partial = update.partial !== null && typeof update.partial === "object" && !Array.isArray(update.partial)
-        ? update.partial as Record<string, unknown>
-        : undefined;
-      const index = typeof update.contentIndex === "number" ? update.contentIndex : 0;
-      const content = Array.isArray(partial?.content) ? partial.content : [];
-      const partialCall = content[index] !== null && typeof content[index] === "object" && !Array.isArray(content[index])
-        ? content[index] as Record<string, unknown>
-        : undefined;
-      const finalCall = update.toolCall !== null && typeof update.toolCall === "object" && !Array.isArray(update.toolCall)
-        ? update.toolCall as Record<string, unknown>
-        : undefined;
-      const call = finalCall ?? partialCall;
-      if (typeof call?.id !== "string") return [];
-      const args = fixtureJsonObject(call.arguments);
-      if (!this.conversationToolCalls.has(call.id)) {
-        this.conversationToolCalls.add(call.id);
-        return [fixtureFrame({ type: "tool.started", data: { toolCallId: call.id, toolName: typeof call.name === "string" ? call.name : "tool", args } })];
-      }
-      return [fixtureFrame({ type: "tool.args_updated", data: { toolCallId: call.id, args } })];
-    }
-    if (event.type === "message_end" && message) {
-      const role = typeof message.role === "string" ? message.role : "system";
-      if (role === "toolResult" && this.conversationCompletedToolCalls.delete(String(message.toolCallId ?? "unknown"))) return [];
-      const messageId = role === "assistant" ? this.fixtureAssistantMessageId()
-        : role === "user" ? this.conversationUserMessageId ?? `fixture-user-${++this.conversationMessageSequence}`
-          : role === "toolResult" ? `tool-result-${String(message.toolCallId ?? "unknown")}`
-            : `fixture-message-${++this.conversationMessageSequence}`;
-      if (role === "assistant") this.conversationOutcome = {
-        ...(typeof message.stopReason === "string" ? { stopReason: message.stopReason } : {}),
-        ...(typeof message.errorMessage === "string" ? { error: message.errorMessage } : {}),
-      };
-      const projected = fixtureFrame({ type: "message.completed", data: {
-        messageId,
-        role: role === "assistant" || role === "user" ? role : role === "toolResult" ? "tool" : "system",
-        content: projectFixtureMessageContent(message),
-        ...(role !== "user" || this.conversationUserAttachments === undefined ? {} : { attachments: structuredClone(this.conversationUserAttachments) }),
-        ...(typeof message.stopReason === "string" ? { stopReason: message.stopReason } : {}),
-        ...(typeof message.errorMessage === "string" ? { error: message.errorMessage } : {}),
-      } });
-      if (role === "assistant") this.conversationAssistantMessageId = undefined;
-      if (role === "user") {
-        this.conversationLastUserAttachments = this.conversationUserAttachments;
-        this.conversationUserAttachments = undefined;
-        this.conversationUserMessageId = undefined;
-      }
-      return [projected];
-    }
-    if (event.type === "tool_execution_start") {
-      const toolCallId = String(event.toolCallId ?? "unknown");
-      const toolName = String(event.toolName ?? "tool");
-      const args = fixtureJsonObject(event.args);
-      if (this.conversationToolCalls.has(toolCallId)) return [fixtureFrame({ type: "tool.args_updated", data: { toolCallId, args } })];
-      this.conversationToolCalls.add(toolCallId);
-      return [fixtureFrame({ type: "tool.started", data: { toolCallId, toolName, args } })];
-    }
-    if (event.type === "tool_execution_update") {
-      const toolCallId = String(event.toolCallId ?? "unknown");
-      const toolName = String(event.toolName ?? "tool");
-      const result = event.partialResult !== null && typeof event.partialResult === "object" && !Array.isArray(event.partialResult)
-        ? event.partialResult as Record<string, unknown>
-        : undefined;
-      const frames: AgentEvent[] = [];
-      if (!this.conversationToolCalls.has(toolCallId)) {
-        this.conversationToolCalls.add(toolCallId);
-        frames.push(fixtureFrame({ type: "tool.started", data: { toolCallId, toolName, args: {} } }));
-      }
-      frames.push(fixtureFrame({ type: "tool.output_updated", data: {
-        toolCallId,
-        text: fixtureMessageText(result?.content),
-        ...(result?.presentation === undefined ? {} : { presentation: result.presentation as never }),
-      } }));
-      return frames;
-    }
-    if (event.type === "tool_execution_end") {
-      const toolCallId = String(event.toolCallId ?? "unknown");
-      const toolName = String(event.toolName ?? "tool");
-      const result = event.result !== null && typeof event.result === "object" && !Array.isArray(event.result)
-        ? event.result as Record<string, unknown>
-        : undefined;
-      this.conversationToolCalls.delete(toolCallId);
-      this.conversationCompletedToolCalls.add(toolCallId);
-      return [fixtureFrame({ type: "tool.completed", data: {
-        toolCallId,
-        toolName,
-        text: fixtureMessageText(result?.content),
-        isError: event.isError === true,
-        ...(result?.presentation === undefined ? {} : { presentation: result.presentation as never }),
-      } })];
-    }
-    return [event];
+  private startConversationTurn(): void {
+    this.conversationAssistantMessageId = undefined;
   }
 
   private fixtureAssistantMessageId(): string {
@@ -914,9 +763,39 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   }
 
   private emitUserMessage(text: string): void {
-    const message = { role: "user", content: [{ type: "text", text }] };
-    this.emit({ type: "message_start", message });
-    this.emit({ type: "message_end", message });
+    const inputIndex = this.conversationInputs.findIndex((candidate) => candidate.text === text);
+    const input = inputIndex < 0 ? undefined : this.conversationInputs.splice(inputIndex, 1)[0];
+    const operationId = input?.operationId ?? "runtime-initiated";
+    const messageId = input === undefined ? `fixture-user-${++this.conversationMessageSequence}` : `user-${operationId}`;
+    if (input?.fromQueue === true) this.emit({ type: "dock_queue_consumed", operationId });
+    this.emit(fixtureFrame({ type: "message.submitted", data: {
+      operationId,
+      messageId,
+      role: "user",
+      text: text || input?.text || "",
+      ...(input?.images === undefined ? {} : { images: structuredClone(input.images) }),
+      ...(input?.attachments === undefined ? {} : { attachments: structuredClone(input.attachments) }),
+      delivery: input?.delivery ?? "prompt",
+    } }));
+    this.emit(fixtureFrame({ type: "message.completed", data: {
+      messageId,
+      role: "user",
+      content: [{ type: "text", text }],
+      ...(input?.attachments === undefined ? {} : { attachments: structuredClone(input.attachments) }),
+    } }));
+    const parentId = this.history.at(-1)?.entryId;
+    const entryId = `fixture-entry-${++this.historyEntrySequence}`;
+    this.history.push({
+      recordId: entryId,
+      entryId,
+      ...(parentId === undefined ? {} : { parentId }),
+      timestamp: new Date().toISOString(),
+      kind: "message",
+      source: "user",
+      visibility: "conversation",
+      content: [{ type: "text", text }],
+      ...(input?.attachments === undefined ? {} : { attachments: structuredClone(input.attachments) }),
+    });
   }
 
   private throwSettingsFailure(setting: import("../../src/core/config-projection.js").SettingKey | "model" | "thinking"): void {
@@ -934,54 +813,3 @@ function fixtureFrame(frame: ConversationFrame): AgentEvent {
   return { type: "dock_conversation_frame", frame };
 }
 
-function fixtureMessageText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content.flatMap((item) => (
-    item && typeof item === "object" && !Array.isArray(item) && (item as Record<string, unknown>).type === "text"
-      ? [String((item as Record<string, unknown>).text ?? "")]
-      : []
-  )).join("");
-}
-
-function fixtureJsonObject(value: unknown): JsonObject {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
-  try {
-    if (Buffer.byteLength(JSON.stringify(value), "utf8") > 64_000) return {};
-    return structuredClone(value) as JsonObject;
-  } catch {
-    return {};
-  }
-}
-
-function projectFixtureMessageContent(message: Record<string, unknown>): AgentHistoryEntry["content"] {
-  const items = typeof message.content === "string"
-    ? [{ type: "text", text: message.content }]
-    : Array.isArray(message.content) ? message.content : [];
-  if (message.role === "toolResult") {
-    const text = items.flatMap((item) => (
-      item && typeof item === "object" && !Array.isArray(item) && (item as Record<string, unknown>).type === "text"
-        ? [String((item as Record<string, unknown>).text ?? "")]
-        : []
-    )).join("");
-    return [{
-      type: "tool_result",
-      toolCallId: typeof message.toolCallId === "string" ? message.toolCallId : "fixture-tool",
-      toolName: typeof message.toolName === "string" ? message.toolName : "tool",
-      text,
-      isError: message.isError === true,
-    }];
-  }
-  return items.flatMap((item): AgentHistoryEntry["content"] => {
-    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
-    const block = item as Record<string, unknown>;
-    if (block.type === "text" && typeof block.text === "string") return [{ type: "text", text: block.text }];
-    if (block.type === "thinking" && typeof block.thinking === "string") return [{ type: "thinking", text: block.thinking }];
-    if (block.type === "image") return [{ type: "image", mimeType: typeof block.mimeType === "string" ? block.mimeType : "image/unknown" }];
-    if (block.type === "toolCall" && typeof block.id === "string" && typeof block.name === "string") {
-      const args = fixtureJsonObject(block.arguments);
-      return [{ type: "tool_call", toolCallId: block.id, toolName: block.name, args }];
-    }
-    return [];
-  });
-}

@@ -978,12 +978,10 @@ test("SSH TUI preserves concurrent composer input while transcript deltas remain
   await waitForPath(readyFile);
   for (let index = 0; index < 50; index += 1) {
     runtime.emit({
-      type: "message_update",
-      assistantMessageEvent: {
-        type: "text_delta",
-        contentIndex: 0,
-        delta: String(index % 10),
-        partial: { role: "assistant", content: [] },
+      type: "dock_conversation_frame",
+      frame: {
+        type: "message.delta",
+        data: { messageId: "fixture-assistant-1", block: "text", delta: String(index % 10) },
       },
     });
     await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
@@ -1919,8 +1917,11 @@ test("fresh conversation bootstrap switches atomically from active frames to per
   const runtime = harness.sessions.get(created.id)!;
 
   runtime.emit({
-    type: "message_update",
-    assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "same visible text", partial: { role: "assistant", content: [] } },
+    type: "dock_conversation_frame",
+    frame: {
+      type: "message.delta",
+      data: { messageId: "fixture-assistant-1", block: "text", delta: "same visible text" },
+    },
   });
   const active = await client.streamEvents(created.id, {
     onEvent: () => {},
@@ -2614,12 +2615,10 @@ test("slow attach readers drain bounded live-event backpressure without losing t
   const runtime = harness.sessions.get(created.id)!;
   for (let index = 0; index < 180; index += 1) {
     runtime.emit({
-      type: "message_update",
-      assistantMessageEvent: {
-        type: "text_delta",
-        contentIndex: 0,
-        delta: `${String(index).padStart(3, "0")}:${"q".repeat(7_900)}`,
-        partial: { role: "assistant", content: [] },
+      type: "dock_conversation_frame",
+      frame: {
+        type: "message.delta",
+        data: { messageId: "fixture-assistant-1", block: "text", delta: `${String(index).padStart(3, "0")}:${"q".repeat(7_900)}` },
       },
     });
   }
@@ -2689,12 +2688,10 @@ test("permanently stalled followers are bounded without affecting Extension UI o
   const runtime = harness.sessions.get(created.id)!;
   for (let index = 0; index < 800; index += 1) {
     runtime.emit({
-      type: "message_update",
-      assistantMessageEvent: {
-        type: "text_delta",
-        contentIndex: 0,
-        delta: `${String(index).padStart(3, "0")}:${"z".repeat(7_900)}`,
-        partial: { role: "assistant", content: [] },
+      type: "dock_conversation_frame",
+      frame: {
+        type: "message.delta",
+        data: { messageId: "fixture-assistant-1", block: "text", delta: `${String(index).padStart(3, "0")}:${"z".repeat(7_900)}` },
       },
     });
   }
