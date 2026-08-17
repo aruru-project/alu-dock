@@ -707,7 +707,7 @@ export class DockHost {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const receipt=await instance.dequeue(request.params.operationId);return {receipt,instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
-      case "model.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listModels(); this.sendSuccessAndEnd(socket,request.requestId,{models:result.models,availableThinkingLevels:result.state.availableThinkingLevels,instance:instance.snapshot(),...collectionCompleteness(result)}); return; }
+      case "model.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listModels(); this.sendSuccessAndEnd(socket,request.requestId,{...result,instance:instance.snapshot()}); return; }
       case "model.set": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);await instance.selectModel(request.params.provider,request.params.modelId,request.params.operationId);return {instance:instance.snapshot(),settingsWrite:{persisted:true as const}};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
@@ -716,10 +716,10 @@ export class DockHost {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const state=await instance.setThinkingLevel(request.params.level,request.params.operationId);return {actualLevel:state.thinkingLevel,availableThinkingLevels:state.availableThinkingLevels,instance:instance.snapshot(),settingsWrite:{persisted:true as const}};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
-      case "tool.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listTools(); this.sendSuccessAndEnd(socket,request.requestId,{tools:result.tools,instance:instance.snapshot(),...collectionCompleteness(result)}); return; }
+      case "tool.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listTools(); this.sendSuccessAndEnd(socket,request.requestId,{...result,instance:instance.snapshot()}); return; }
       case "tool.set_active": {
-        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const tools=await instance.setActiveTools(request.params.names,request.params.operationId);return {tools:tools.tools,instance:instance.snapshot(),total:tools.total,truncated:tools.truncated};});
-        this.sendSuccessAndEnd(socket,request.requestId,{tools:result.tools,instance:result.instance,...collectionCompleteness(result)}); return;
+        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const tools=await instance.setActiveTools(request.params.names,request.params.operationId);return {...tools,instance:instance.snapshot()};});
+        this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
       case "settings.get": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{settings:await instance.getSettings()}); return; }
       case "settings.update": {
@@ -727,7 +727,7 @@ export class DockHost {
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
       case "resource.get": { const instance=this.registry.get(request.params.instanceId); const result=await instance.getResources(); this.sendSuccessAndEnd(socket,request.requestId,result); return; }
-      case "command.catalog": { const instance=this.registry.get(request.params.instanceId); const result=await instance.getCommands(request.params.prefix); this.sendSuccessAndEnd(socket,request.requestId,{commands:result.commands,...collectionCompleteness(result)}); return; }
+      case "command.catalog": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getCommands(request.params.prefix)); return; }
       case "session.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getHistoryPage(request.params.beforeEntryId,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,createBoundedHistoryResult(page,request.requestId,this.hostEpoch)); return; }
       case "conversation.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getConversationHistory(request.params.cursor,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
       case "conversation.content": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getConversationContent(request.params.contentRef,request.params.cursor); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
@@ -736,7 +736,7 @@ export class DockHost {
         this.sendSuccessAndEnd(socket, request.requestId, boundedSessionInventory(inventory, request.params));
         return;
       }
-      case "session.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listSessions(request.params.scope); this.sendSuccessAndEnd(socket,request.requestId,{sessions:result.sessions,...collectionCompleteness(result)}); return; }
+      case "session.list": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.listSessions(request.params.scope)); return; }
       case "session.tree": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getTreePage(request.params.treeRevision,request.params.afterEntryId,request.params.limit)); return; }
       case "workspace.list": {
         this.sendSuccessAndEnd(socket, request.requestId, await this.workspaceBrowser.list(request.params));
@@ -918,12 +918,6 @@ function isMutationRequest(type: ControlRequest["type"]): boolean {
     && type !== "session.list"
     && type !== "session.tree"
     && type !== "workspace.list";
-}
-
-function collectionCompleteness(
-  result: { total: number; truncated: boolean },
-): { total: number; truncated: boolean } {
-  return { total: result.total, truncated: result.truncated };
 }
 
 function boundedSessionInventory(

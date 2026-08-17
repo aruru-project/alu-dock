@@ -280,11 +280,43 @@ export class AgentSettingsWriteError extends Error {
   }
 }
 
-/** Agent projections reused by Protocol V2 results. */
+/**
+ * Worker-produced Protocol V2 result bodies. The Worker adapter is the single
+ * projection point; the Host only adds its own facts (instance snapshot,
+ * instanceId, runtimeGeneration) and never rebuilds these DTOs.
+ */
 export interface AgentToolProjection {
   tools: ToolDto[];
   total: number;
   truncated: boolean;
+}
+
+export interface AgentModelListBody {
+  models: AgentModelInfo[];
+  availableThinkingLevels: ThinkingLevel[];
+  total: number;
+  truncated: boolean;
+}
+
+export interface AgentSessionListBody {
+  sessions: AgentSessionInfo[];
+  total: number;
+  truncated: boolean;
+}
+
+export interface AgentCommandCatalogBody {
+  commands: CommandDto[];
+  total: number;
+  truncated: boolean;
+}
+
+export interface AgentResourceProjectionBody {
+  resources: ResourceDto[];
+  diagnostics: DiagnosticDto[];
+  resourceTotal: number;
+  resourcesTruncated: boolean;
+  diagnosticTotal: number;
+  diagnosticsTruncated: boolean;
 }
 
 export type AgentRequestType =

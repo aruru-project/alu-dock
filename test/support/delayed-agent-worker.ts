@@ -195,7 +195,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       case "settings.get": return this.getSettings();
       case "settings.update": return this.updateSetting(p.update);
       case "resource.get": return this.getResources();
-      case "command.catalog": return this.getCommands();
+      case "command.catalog": return this.getCommands(p.prefix);
       case "session.history": await Promise.resolve(); return this.getHistory();
       case "conversation.history": return this.getConversationHistory(p.cursor, p.limit);
       case "conversation.content": return this.getConversationContent(p.contentRef, p.cursor);
@@ -280,17 +280,19 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     return Promise.resolve();
   }
 
-  async listModels(): Promise<AgentModelInfo[]> {
-    return [
+  async listModels(): Promise<{ models: AgentModelInfo[]; availableThinkingLevels: string[]; total: number; truncated: boolean }> {
+    const models = [
       { provider: "fixture", id: "default", name: "Fixture Default", reasoning: true },
       { provider: "fixture", id: "local", name: "Fixture Local", reasoning: true },
     ];
+    return { models, availableThinkingLevels: ["off", "low", "high"], total: models.length, truncated: false };
   }
 
-  async listSessions(scope: "cwd" | "all"): Promise<AgentSessionInfo[]> {
-    return this.sessionCatalog
+  async listSessions(scope: "cwd" | "all"): Promise<{ sessions: AgentSessionInfo[]; total: number; truncated: boolean }> {
+    const sessions = this.sessionCatalog
       .filter((session) => scope === "all" || session.cwd === "/fixture/cwd")
       .map((session) => ({ ...session }));
+    return { sessions, total: sessions.length, truncated: false };
   }
 
   getHistory(): AgentHistoryEntry[] { return structuredClone(this.history); }
@@ -356,11 +358,12 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     };
   }
 
-  async listTools(): Promise<ToolDto[]> {
-    return ["read", "write"].map((name) => ({ name, description: `${name} fixture`, active: this.activeTools.has(name), source: { kind: "built-in" as const }, parameterSchema: { type: "object" } }));
+  async listTools(): Promise<{ tools: ToolDto[]; total: number; truncated: boolean }> {
+    const tools = ["read", "write"].map((name) => ({ name, description: `${name} fixture`, active: this.activeTools.has(name), source: { kind: "built-in" as const }, parameterSchema: { type: "object" } }));
+    return { tools, total: tools.length, truncated: false };
   }
 
-  async setActiveTools(names: string[]): Promise<ToolDto[]> {
+  async setActiveTools(names: string[]): Promise<{ tools: ToolDto[]; total: number; truncated: boolean }> {
     this.toolMutationCalls += 1;
     if (names.some((name) => name !== "read" && name !== "write")) throw new Error("Unknown tool");
     this.activeTools = new Set(names);
@@ -385,16 +388,21 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     return (await this.getSettings()).find((setting) => setting.key === update.key) as SettingDto;
   }
 
-  async getResources(): Promise<{ resources: ResourceDto[]; diagnostics: DiagnosticDto[] }> {
-    return { resources: [{ kind: "context", name: "AGENTS.md", path: "/fixture/AGENTS.md" }], diagnostics: [{ severity: "warning", message: "fixture diagnostic" }] };
+  async getResources(): Promise<{ resources: ResourceDto[]; diagnostics: DiagnosticDto[]; resourceTotal: number; resourcesTruncated: boolean; diagnosticTotal: number; diagnosticsTruncated: boolean }> {
+    return {
+      resources: [{ kind: "context", name: "AGENTS.md", path: "/fixture/AGENTS.md" }],
+      diagnostics: [{ severity: "warning", message: "fixture diagnostic" }],
+      resourceTotal: 1, resourcesTruncated: false, diagnosticTotal: 1, diagnosticsTruncated: false,
+    };
   }
 
-  async getCommands(): Promise<CommandDto[]> {
+  async getCommands(prefix?: string): Promise<{ commands: CommandDto[]; total: number; truncated: boolean }> {
     const source = { kind: "extension" as const, path: "/fixture/ext.ts" };
-    return [
+    const commands = [
       { name: "fixture-prefix", description: "prefix fixture command", source, argumentCompletions: true },
       { name: "fixture-prefix-long", description: "long prefix fixture command", source, argumentCompletions: false },
-    ];
+    ].filter((command) => prefix === undefined || command.name.startsWith(prefix));
+    return { commands, total: commands.length, truncated: false };
   }
 
   async resolveSessionTarget(sessionFile: string): Promise<{ canonicalCwd: string }> {

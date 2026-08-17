@@ -1031,11 +1031,19 @@ export function parsePruneResult(input: unknown): PruneResult {
     piSessionFilesDeleted: 0,
   } };
 }
-export function parseModelsResult(input: unknown): ModelsResult {
-  const value = object(input, "models result"); exact(value, ["models", "availableThinkingLevels", "instance", "total", "truncated"]);
+function modelListFields(value: Record<string, unknown>): Omit<ModelsResult, "instance"> {
   const models = array(value.models, "models", MAX_COLLECTION).map((item, index) => { const model = object(item, `models[${index}]`); exact(model, ["provider", "id", "name", "reasoning", "contextWindow"]); return { provider: string(model.provider, "provider", MAX_MODEL_PROVIDER_CHARS), id: string(model.id, "id", MAX_MODEL_ID_CHARS), name: string(model.name, "name", 256), reasoning: boolean(model.reasoning, "reasoning"), contextWindow: model.contextWindow === undefined ? undefined : positive(model.contextWindow, "contextWindow") }; });
   const completeness = parseCollectionCompleteness(value, models.length);
-  return { models, availableThinkingLevels: thinkingLevels(value.availableThinkingLevels), instance: parseInstance(value.instance, "instance"), ...completeness };
+  return { models, availableThinkingLevels: thinkingLevels(value.availableThinkingLevels), ...completeness };
+}
+/** Worker-produced model.list body; the Host adds only its own instance snapshot. */
+export function parseModelListBody(input: unknown): Omit<ModelsResult, "instance"> {
+  const value = object(input, "models result"); exact(value, ["models", "availableThinkingLevels", "total", "truncated"]);
+  return modelListFields(value);
+}
+export function parseModelsResult(input: unknown): ModelsResult {
+  const value = object(input, "models result"); exact(value, ["models", "availableThinkingLevels", "instance", "total", "truncated"]);
+  return { ...modelListFields(value), instance: parseInstance(value.instance, "instance") };
 }
 export function parseModelConfigurationResult(input: unknown): ModelConfigurationResult {
   const value = object(input, "model configuration result"); exact(value, ["instance", "settingsWrite"]);
@@ -1112,9 +1120,21 @@ export function parseHistoryResult(input: unknown): HistoryResult {
   return { historyRevision: positive(value.historyRevision, "historyRevision"), entries, hasEarlier, nextBeforeEntryId, instance: parseInstance(value.instance, "instance") };
 }
 
+/** Worker-produced conversation.history body; the Host adds only its own instance snapshot. */
+export function parseConversationHistoryBody(input: unknown): Omit<ConversationHistoryResult, "instance"> {
+  const value = object(input, "conversation history page");
+  exact(value, ["revision", "entries", "hasEarlier", "nextCursor"]);
+  return conversationHistoryFields(value);
+}
 export function parseConversationHistoryResult(input: unknown): ConversationHistoryResult {
   const value = object(input, "conversation history result");
   exact(value, ["instance", "revision", "entries", "hasEarlier", "nextCursor"]);
+  return {
+    instance: parseActiveSessionInstance(value.instance, "Conversation history"),
+    ...conversationHistoryFields(value),
+  };
+}
+function conversationHistoryFields(value: Record<string, unknown>): Omit<ConversationHistoryResult, "instance"> {
   const revision = string(value.revision, "revision", 128);
   const entries = array(value.entries, "entries", MAX_SEMANTIC_HISTORY_PAGE_ITEMS).map((item, index) => {
     const entry = object(item, `entries[${index}]`);
@@ -1137,7 +1157,6 @@ export function parseConversationHistoryResult(input: unknown): ConversationHist
   if (hasEarlier !== (nextCursor !== undefined)) throw validation("invalid_response", "conversation history pagination cursor is inconsistent");
   if (hasEarlier && entries.length === 0) throw validation("invalid_response", "a continued conversation history page cannot be empty");
   return {
-    instance: parseActiveSessionInstance(value.instance, "Conversation history"),
     revision,
     entries,
     hasEarlier,
@@ -1145,17 +1164,28 @@ export function parseConversationHistoryResult(input: unknown): ConversationHist
   };
 }
 
+/** Worker-produced conversation.content body; the Host adds only instanceId and runtimeGeneration. */
+export function parseConversationContentBody(input: unknown): Omit<ConversationContentResult, "instanceId" | "runtimeGeneration"> {
+  const value = object(input, "conversation content page");
+  exact(value, ["revision", "contentRef", "chunks", "complete", "nextCursor"]);
+  return conversationContentFields(value);
+}
 export function parseConversationContentResult(input: unknown): ConversationContentResult {
   const value = object(input, "conversation content result");
   exact(value, ["instanceId", "runtimeGeneration", "revision", "contentRef", "chunks", "complete", "nextCursor"]);
+  return {
+    instanceId: id(value.instanceId, "instanceId"),
+    runtimeGeneration: positive(value.runtimeGeneration, "runtimeGeneration"),
+    ...conversationContentFields(value),
+  };
+}
+function conversationContentFields(value: Record<string, unknown>): Omit<ConversationContentResult, "instanceId" | "runtimeGeneration"> {
   const chunks = array(value.chunks, "chunks", 64).map((item, index) => parseConversationContentChunk(item, `chunks[${index}]`));
   const complete = boolean(value.complete, "complete");
   const nextCursor = optionalString(value.nextCursor, "nextCursor", 128);
   if (complete === (nextCursor !== undefined)) throw validation("invalid_response", "conversation content pagination cursor is inconsistent");
   if (!complete && chunks.length === 0) throw validation("invalid_response", "an incomplete conversation content page cannot be empty");
   return {
-    instanceId: id(value.instanceId, "instanceId"),
-    runtimeGeneration: positive(value.runtimeGeneration, "runtimeGeneration"),
     revision: string(value.revision, "revision", 128),
     contentRef: string(value.contentRef, "contentRef", 128),
     chunks,
@@ -1340,17 +1370,29 @@ function parseActiveSessionInstance(input: unknown, operation: string): Instance
   return instance;
 }
 
-export function parseToolsResult(input: unknown): ToolsResult {
-  const value = object(input, "tools result"); exact(value, ["tools", "instance", "total", "truncated"]);
+function toolListFields(value: Record<string, unknown>): Omit<ToolsResult, "instance"> {
   const tools = array(value.tools, "tools", MAX_COLLECTION).map((item, index) => parseTool(item, `tools[${index}]`));
   assertSorted(tools, "tools", compareToolDtos);
-  return { tools, instance: parseInstance(value.instance, "instance"), ...parseCollectionCompleteness(value, tools.length) };
+  return { tools, ...parseCollectionCompleteness(value, tools.length) };
+}
+/** Worker-produced tool.list / tool.set_active body; the Host adds only its own instance snapshot. */
+export function parseToolListBody(input: unknown): Omit<ToolsResult, "instance"> {
+  const value = object(input, "tools result"); exact(value, ["tools", "total", "truncated"]);
+  return toolListFields(value);
+}
+export function parseToolsResult(input: unknown): ToolsResult {
+  const value = object(input, "tools result"); exact(value, ["tools", "instance", "total", "truncated"]);
+  return { ...toolListFields(value), instance: parseInstance(value.instance, "instance") };
+}
+/** The canonical full setting list; Worker settings.get bodies and wire results share it. */
+export function parseSettingDtos(input: unknown): SettingDto[] {
+  const settings = array(input, "settings", SETTING_KEYS.length).map((item, index) => parseSettingDto(item, `settings[${index}]`));
+  if (settings.length !== SETTING_KEYS.length || settings.some((setting, index) => setting.key !== SETTING_KEYS[index])) throw validation("invalid_response", `settings must contain all ${SETTING_KEYS.length} keys in canonical order`);
+  return settings;
 }
 export function parseSettingsResult(input: unknown): SettingsResult {
   const value = object(input, "settings result"); exact(value, ["settings"]);
-  const settings = array(value.settings, "settings", SETTING_KEYS.length).map((item, index) => parseSettingDto(item, `settings[${index}]`));
-  if (settings.length !== SETTING_KEYS.length || settings.some((setting, index) => setting.key !== SETTING_KEYS[index])) throw validation("invalid_response", `settings must contain all ${SETTING_KEYS.length} keys in canonical order`);
-  return { settings };
+  return { settings: parseSettingDtos(value.settings) };
 }
 export function parseSettingUpdateResult(input: unknown): SettingUpdateResult {
   const value = object(input, "setting update result"); exact(value, ["setting", "instance", "reloadRequired", "hostRestartRequired"]);
@@ -1660,7 +1702,8 @@ function parseContent(input: unknown, field: string): ContentBlockDto[] {
     exact(block, ["type", "kind", "description"]); return { type, kind: enumeration(block.kind, "kind", ["image", "binary"]), description: string(block.description, "description", MAX_MESSAGE) };
   });
 }
-function parseHistoryEntry(input: unknown, field: string): HistoryEntryDto {
+/** Canonical persisted conversation record; Worker checkpoint/history validation shares it. */
+export function parseHistoryEntry(input: unknown, field: string): HistoryEntryDto {
   const entry = object(input, field);
   exact(entry, [
     "recordId", "entryId", "parentId", "kind", "source", "visibility", "timestamp", "content", "attachments",
@@ -1809,7 +1852,7 @@ function parseResource(input: unknown, field: string): ResourceDto { const value
 function parseSource(input: unknown, field: string): import("../core/config-projection.js").SourceDto { const value = object(input, field); exact(value, ["kind", "path", "package"]); const kind=enumeration(value.kind, `${field}.kind`, ["built-in", "extension", "skill", "prompt"]); if(kind==="built-in"&&(value.path!==undefined||value.package!==undefined))throw validation("invalid_response",`${field} built-in source cannot carry path or package`); return { kind, ...(value.path === undefined ? {} : { path: string(value.path, `${field}.path`, MAX_CONTROL_CWD_CHARS) }), ...(value.package === undefined ? {} : { package: string(value.package, `${field}.package`, 256) }) }; }
 function parseDiagnostic(input: unknown, field: string): DiagnosticDto { const value = object(input, field); exact(value, ["severity", "message", "source"]); return { severity: enumeration(value.severity, `${field}.severity`, ["info", "warning", "error"]), message: string(value.message, `${field}.message`, MAX_MESSAGE), ...(value.source === undefined ? {} : { source: string(value.source, `${field}.source`, 256) }) }; }
 function parseCommand(input: unknown, field: string): CommandDto { const value = object(input, field); exact(value, ["name", "description", "source", "argumentCompletions"]); return { name: string(value.name, `${field}.name`, 256), ...(value.description === undefined ? {} : { description: boundedString(value.description, `${field}.description`, MAX_MESSAGE) }), source: parseSource(value.source, `${field}.source`), argumentCompletions: boolean(value.argumentCompletions, `${field}.argumentCompletions`) }; }
-function parseSettingDto(input: unknown, field: string): SettingDto {
+export function parseSettingDto(input: unknown, field: string): SettingDto {
   const value = object(input, field); exact(value, ["key", "value", "source", "writable", "valueType", "allowedValues", "min", "max", "reloadRequired", "hostRestartRequired"]);
   const key = settingKey(value.key); const definition = SETTING_DEFINITIONS[key];
   const source = enumeration(value.source, `${field}.source`, ["global", "project", "effective"]);

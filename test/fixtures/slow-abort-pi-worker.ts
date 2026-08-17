@@ -1,4 +1,5 @@
 import type { AgentWorkerState } from "../../src/core/agent-worker.js";
+import { SETTING_DEFINITIONS, SETTING_KEYS } from "../../src/core/config-projection.js";
 import {
   OrderedWorkerSender,
   WorkerFrameReceiver,
@@ -47,7 +48,7 @@ async function run(): Promise<void> {
         return;
       }
       if (envelope.request.type === "settings.get") {
-        void respond(envelope.callId, []);
+        void respond(envelope.callId, canonicalSettings());
         return;
       }
       void respond(envelope.callId, null);
@@ -89,4 +90,22 @@ const IDLE_STATE: AgentWorkerState = { ...BASE_STATE, isStreaming: false };
 
 if (process.env.ALU_DOCK_PI_WORKER === "1" && typeof process.send === "function") {
   void run().catch(() => process.exit(1));
+}
+
+/** Any conforming worker must serve the canonical Dock setting schema; values are irrelevant here. */
+function canonicalSettings(): unknown[] {
+  return SETTING_KEYS.map((key) => {
+    const definition = SETTING_DEFINITIONS[key];
+    const value = definition.valueType === "boolean" ? false
+      : definition.valueType === "integer" ? (definition.min ?? 0)
+        : definition.valueType === "enum" ? definition.allowedValues?.[0]
+          : {};
+    return {
+      key, value, source: "effective", writable: definition.writable, valueType: definition.valueType,
+      ...(definition.allowedValues ? { allowedValues: [...definition.allowedValues] } : {}),
+      ...(definition.min === undefined ? {} : { min: definition.min }),
+      ...(definition.max === undefined ? {} : { max: definition.max }),
+      reloadRequired: definition.reloadRequired, hostRestartRequired: definition.hostRestartRequired,
+    };
+  });
 }

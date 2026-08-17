@@ -231,7 +231,7 @@ test("accepted abort may outlive its old control deadline without killing a heal
     assert.ok(Date.now() - startedAt >= 100, "the fixture must exceed the former control deadline");
     assert.equal(instance.snapshot().lifecycle, "active");
     assert.equal(processExists(workerPid), true);
-    assert.deepEqual(await instance.getSettings(), [], "the Worker transport must remain reusable after abort");
+    assert.ok((await instance.getSettings()).length > 0, "the Worker transport must remain reusable after abort");
   } finally {
     await instance.disposeUnpublished();
   }

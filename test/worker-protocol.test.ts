@@ -115,7 +115,7 @@ test("private Worker conversation boundary accepts checkpoints and canonical per
     entryId: "legacy",
     role: "assistant",
     content: "legacy private shape",
-  }]), /unknown field|record id/i);
+  }]), /unknown field|recordId/i);
 
   const oversizedConversationEntries = Array.from({ length: 70 }, (_, index) => ({
     entry: {

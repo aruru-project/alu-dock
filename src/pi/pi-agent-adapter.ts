@@ -65,10 +65,13 @@ import type {
   AgentForkResult,
   AgentHistoryEntry,
   AgentImagePath,
+  AgentCommandCatalogBody,
   AgentInputKind,
   AgentInvokeContext,
-  AgentModelInfo,
+  AgentModelListBody,
   AgentModelState,
+  AgentResourceProjectionBody,
+  AgentSessionListBody,
   AgentNavigateOptions,
   AgentNavigateResult,
   AgentPromptOptions,
@@ -339,7 +342,7 @@ export class PiAgentAdapter {
       case "settings.get": return this.getSettings();
       case "settings.update": return this.updateSetting(request.params.update);
       case "resource.get": return this.getResources();
-      case "command.catalog": return this.getCommands();
+      case "command.catalog": return this.getCommands(request.params.prefix);
       case "session.history": return this.getHistory();
       case "conversation.history": return this.getConversationHistory(request.params.cursor, request.params.limit);
       case "conversation.content": return this.getConversationContent(request.params.contentRef, request.params.cursor);
@@ -405,11 +408,21 @@ export class PiAgentAdapter {
     });
   }
 
-  async listModels(): Promise<AgentModelInfo[]> {
-    const models = await this.requireActive().services.modelRuntime.getAvailable();
-    return models.map((model) => ({
-      provider: model.provider, id: model.id, name: model.name, reasoning: model.reasoning,
+  async listModels(): Promise<AgentModelListBody> {
+    const binding = this.requireActive();
+    const models = (await binding.services.modelRuntime.getAvailable()).map((model) => ({
+      provider: boundedString(model.provider, 256, "unknown"),
+      id: boundedString(model.id, 512, "unknown"),
+      name: boundedString(model.name, 256, "unknown"),
+      reasoning: model.reasoning,
     })).sort((left, right) => left.provider.localeCompare(right.provider) || left.name.localeCompare(right.name));
+    const projected = capJsonItems(models, 600_000);
+    return {
+      models: projected,
+      availableThinkingLevels: [...binding.session.getAvailableThinkingLevels()],
+      total: models.length,
+      truncated: projected.length < models.length,
+    };
   }
 
   async listTools(): Promise<AgentToolProjection> {
@@ -455,14 +468,7 @@ export class PiAgentAdapter {
     return projectPiSetting(binding.services.settingsManager, key);
   }
 
-  async getResources(): Promise<{
-    resources: ResourceDto[];
-    diagnostics: DiagnosticDto[];
-    resourceTotal: number;
-    resourcesTruncated: boolean;
-    diagnosticTotal: number;
-    diagnosticsTruncated: boolean;
-  }> {
+  async getResources(): Promise<AgentResourceProjectionBody> {
     const binding = this.requireActive();
     const loader = binding.services.resourceLoader;
     const extensions = loader.getExtensions();
@@ -518,7 +524,7 @@ export class PiAgentAdapter {
     };
   }
 
-  async getCommands(): Promise<CommandDto[]> {
+  async getCommands(prefix?: string): Promise<AgentCommandCatalogBody> {
     const binding = this.requireActive();
     const loader = binding.services.resourceLoader;
     const commands: CommandDto[] = [];
@@ -558,20 +564,28 @@ export class PiAgentAdapter {
         });
       }
     }
-    return commands.sort(compareCommandDtos);
+    const filtered = commands.sort(compareCommandDtos)
+      .filter((command) => prefix === undefined || command.name.startsWith(prefix));
+    const projected = capJsonItems(filtered, 600_000);
+    return { commands: projected, total: filtered.length, truncated: projected.length < filtered.length };
   }
 
-  async listSessions(scope: "cwd" | "all"): Promise<AgentSessionInfo[]> {
+  async listSessions(scope: "cwd" | "all"): Promise<AgentSessionListBody> {
     const binding = this.requireActive();
     const manager = binding.session.sessionManager;
     const catalog = this.options.sessionCatalog ?? DEFAULT_SESSION_CATALOG;
-    const sessions = scope === "cwd"
+    const source = scope === "cwd"
       ? await catalog.list(manager.getCwd(), manager.getSessionDir())
       : manager.usesDefaultSessionDir() ? await catalog.listAll() : await catalog.listAll(manager.getSessionDir());
-    return sessions.map((info) => ({
-      sessionId: info.id, sessionFile: info.path, ...(info.name === undefined ? {} : { name: info.name }), cwd: info.cwd,
+    const sessions = source.map((info) => ({
+      sessionId: boundedString(info.id, 128, "unknown"),
+      sessionFile: boundedString(info.path, 16_384, ""),
+      ...(info.name === undefined ? {} : { name: boundedString(info.name, 256, "") }),
+      cwd: boundedString(info.cwd, 16_384, ""),
       ...(validDate(info.modified) ? { updatedAt: info.modified.toISOString() } : {}),
     }));
+    const projected = capJsonItems(sessions, 600_000);
+    return { sessions: projected, total: sessions.length, truncated: projected.length < sessions.length };
   }
 
   getHistory(): AgentHistoryEntry[] {
@@ -589,7 +603,7 @@ export class PiAgentAdapter {
     }
     const page = sliceSemanticHistory(state.entries.map(({ projected }) => projected), end, boundedLimit);
     let entries = state.entries.slice(page.start, page.end).map(({ source, projected }) => ({
-      entry: projected,
+      entry: previewConversationEntry(projected),
       contentRef: conversationContentRef(state.revision, source.id),
       contentComplete: conversationPreviewIsComplete(source, projected),
       totalBlocks: conversationBlockCount(source, this.options.attachmentContextKey),
@@ -2404,6 +2418,33 @@ function projectSource(source: SourceInfo, kind: SourceDto["kind"]): SourceDto {
     ...(path ? { path } : {}),
     ...(packageName ? { package: packageName } : {}),
   };
+}
+
+/**
+ * conversation.history entries carry bounded previews; complete content is read
+ * through conversation.content refs. This is the only preview projection point.
+ */
+function previewConversationEntry(entry: AgentHistoryEntry): AgentHistoryEntry {
+  const content: AgentHistoryEntry["content"] = [];
+  let remaining = 4_000;
+  for (const block of entry.content.slice(0, 16)) {
+    if (block.type === "text" || block.type === "thinking") {
+      const text = block.text.length <= remaining ? block.text : block.text.slice(0, unicodeSafeEnd(block.text, remaining));
+      if (text.length > 0) content.push({ type: block.type, text });
+      remaining = Math.max(0, remaining - text.length);
+    } else if (block.type === "tool_call") {
+      content.push({ type: "tool_call", toolCallId: block.toolCallId, toolName: block.toolName, args: {}, omittedFields: ["/"] });
+    } else if (block.type === "tool_result") {
+      const text = block.text.length <= remaining ? block.text : block.text.slice(0, unicodeSafeEnd(block.text, remaining));
+      const { presentation: _presentation, ...metadata } = block;
+      content.push({ ...metadata, text });
+      remaining = Math.max(0, remaining - text.length);
+    } else {
+      content.push(block);
+    }
+    if (remaining === 0) break;
+  }
+  return { ...entry, content };
 }
 
 function capJsonItems<T>(items: T[], maxBytes: number): T[] {

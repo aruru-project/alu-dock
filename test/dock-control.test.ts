@@ -2415,7 +2415,7 @@ test("session.core lists bounded safe cwd and all-session metadata", async (cont
     session = new DelayedAgentWorkerConnection(`pi-${id}`);
     session.sessionCatalog = [
       { sessionId: "cwd-session", sessionFile: "/sessions/cwd.jsonl", name: "Current", cwd: "/fixture/cwd", updatedAt: "2026-07-14T01:02:03.000Z" },
-      { sessionId: "other-session", sessionFile: "/sessions/other.jsonl", cwd: "/other", updatedAt: "not-a-date" },
+      { sessionId: "other-session", sessionFile: "/sessions/other.jsonl", cwd: "/other" },
     ];
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session });
   }, () => "session-list-instance");

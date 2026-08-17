@@ -9,7 +9,20 @@ import {
   AgentUnknownToolError,
 } from "../core/agent-worker.js";
 import type { AgentCommandPreflightResult, AgentInvokeContext, AgentRequest, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
-import { parseAttachmentDto, parseControlRequest } from "../control/protocol.js";
+import {
+  parseAttachmentDto,
+  parseCommandsResult,
+  parseControlRequest,
+  parseConversationContentBody,
+  parseConversationHistoryBody,
+  parseHistoryEntry,
+  parseModelListBody,
+  parseResourcesResult,
+  parseSessionsResult,
+  parseSettingDto,
+  parseSettingDtos,
+  parseToolListBody,
+} from "../control/protocol.js";
 import {
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
@@ -309,7 +322,7 @@ function validateWorkerAgentEvent(event: Record<string, unknown>): void {
     case "conversation_checkpoint":
       exactKeys(event, ["type", "history"], "Worker conversation checkpoint");
       if (!Array.isArray(event.history) || event.history.length > 100_000) throw new Error("Worker checkpoint history is invalid");
-      for (const entry of event.history) validateWorkerHistoryEntry(entry);
+      event.history.forEach((entry, index) => parseHistoryEntry(entry, `Worker checkpoint history[${index}]`));
       return;
     case "agent_end":
       exactKeys(event, ["type", "willRetry"], "Worker agent-end event");
@@ -444,112 +457,37 @@ function validateToolNotice(raw: unknown): void {
   } else exactKeys(notice, ["code"], "Worker host-projection notice");
 }
 
+/**
+ * Worker results for public capabilities are validated with the same Protocol V2 body
+ * parsers the TypeScript client uses. Only transport byte bounds are private here;
+ * result shapes have exactly one definition in control/protocol.ts.
+ */
 export function validateAgentWorkerResult(label: string, raw: unknown): void {
-  if (label === "session.history") {
-    if (!Array.isArray(raw) || raw.length > 100_000) throw new Error("Worker session history is invalid");
-    for (const entry of raw) validateWorkerHistoryEntry(entry);
-    return;
-  }
-  if (label === "conversation.history") {
-    validateConversationHistoryPage(raw);
-    return;
-  }
-  if (label === "conversation.content") validateConversationContentPage(raw);
-}
-
-function validateConversationHistoryPage(raw: unknown): void {
-  const page = record(raw, "Conversation history page");
-  exactKeys(page, ["revision", "entries", "hasEarlier", "nextCursor"], "Conversation history page");
-  boundedString(page.revision, 128, "Conversation revision");
-  if (!Array.isArray(page.entries) || page.entries.length > MAX_SEMANTIC_HISTORY_PAGE_ITEMS) throw new Error("Conversation history entries are invalid");
-  if (Buffer.byteLength(JSON.stringify(page), "utf8") > MAX_SEMANTIC_HISTORY_PAGE_BYTES) throw new Error("Conversation history page exceeds its byte limit");
-  for (const item of page.entries) {
-    const value = record(item, "Conversation history item");
-    exactKeys(value, ["entry", "contentRef", "contentComplete", "totalBlocks"], "Conversation history item");
-    validateWorkerHistoryEntry(value.entry);
-    boundedString(value.contentRef, 128, "Conversation content reference");
-    if (typeof value.contentComplete !== "boolean") throw new Error("Conversation content completeness is invalid");
-    nonNegativeInteger(value.totalBlocks, "Conversation block count");
-  }
-  if (typeof page.hasEarlier !== "boolean") throw new Error("Conversation history completeness is invalid");
-  optionalString(page.nextCursor, 128);
-  if (page.hasEarlier !== (page.nextCursor !== undefined)) throw new Error("Conversation history continuation is inconsistent");
-}
-
-function validateConversationContentPage(raw: unknown): void {
-  if (Buffer.byteLength(JSON.stringify(raw), "utf8") > 512 * 1024) throw new Error("Conversation content page exceeds the Worker capability bound");
-  const page = record(raw, "Conversation content page");
-  exactKeys(page, ["revision", "contentRef", "chunks", "complete", "nextCursor"], "Conversation content page");
-  boundedString(page.revision, 128, "Conversation revision");
-  boundedString(page.contentRef, 128, "Conversation content reference");
-  if (!Array.isArray(page.chunks) || page.chunks.length > 64) throw new Error("Conversation content chunks are invalid");
-  for (const item of page.chunks) {
-    const chunk = record(item, "Conversation content chunk");
-    const type = oneOf(chunk.type, ["text", "thinking", "image", "tool_call", "tool_result", "omitted"], "Conversation content chunk type");
-    nonNegativeInteger(chunk.blockIndex, "Conversation block index");
-    if (type === "text" || type === "thinking") {
-      exactKeys(chunk, ["blockIndex", "type", "text", "offset", "blockComplete"], "Conversation text chunk");
-      boundedString(chunk.text, 32_000, "Conversation text chunk", true); nonNegativeInteger(chunk.offset, "Conversation text offset");
-      if (typeof chunk.blockComplete !== "boolean") throw new Error("Conversation block completeness is invalid");
-    } else if (type === "image") {
-      exactKeys(chunk, ["blockIndex", "type", "mimeType", "data", "offset", "blockComplete"], "Conversation image chunk");
-      validateImageMimeType(chunk.mimeType, "Conversation image MIME type"); boundedString(chunk.data, 32_000, "Conversation image data", true);
-      nonNegativeInteger(chunk.offset, "Conversation image offset"); if (typeof chunk.blockComplete !== "boolean") throw new Error("Conversation image completeness is invalid");
-    } else if (type === "tool_call") {
-      exactKeys(chunk, ["blockIndex", "type", "toolCallId", "toolName", "argumentsJson", "offset", "blockComplete"], "Conversation tool-call chunk");
-      boundedString(chunk.toolCallId, 128, "Conversation tool-call id"); boundedString(chunk.toolName, 256, "Conversation tool-call name"); boundedString(chunk.argumentsJson, 32_000, "Conversation tool-call arguments", true);
-      nonNegativeInteger(chunk.offset, "Conversation tool-call offset"); if (typeof chunk.blockComplete !== "boolean") throw new Error("Conversation tool-call completeness is invalid");
-    } else if (type === "tool_result") {
-      exactKeys(chunk, ["blockIndex", "type", "toolCallId", "toolName", "text", "offset", "blockComplete", "isError", "omittedFields"], "Conversation tool-result chunk");
-      boundedString(chunk.toolCallId, 128, "Conversation tool-result id"); boundedString(chunk.toolName, 256, "Conversation tool-result name"); boundedString(chunk.text, 32_000, "Conversation tool-result text", true);
-      nonNegativeInteger(chunk.offset, "Conversation tool-result offset"); if (typeof chunk.blockComplete !== "boolean" || typeof chunk.isError !== "boolean") throw new Error("Conversation tool-result flags are invalid");
-      if (chunk.omittedFields !== undefined) stringArray(chunk.omittedFields, 200, 2_048, "Conversation omitted fields");
-    } else {
-      exactKeys(chunk, ["blockIndex", "type", "kind", "description"], "Conversation omitted chunk"); oneOf(chunk.kind, ["image", "binary"], "Conversation omission kind"); boundedString(chunk.description, 2_048, "Conversation omission description");
+  switch (label) {
+    case "session.history": {
+      if (!Array.isArray(raw) || raw.length > 100_000) throw new Error("Worker session history is invalid");
+      raw.forEach((entry, index) => parseHistoryEntry(entry, `Worker history[${index}]`));
+      return;
     }
+    case "conversation.history": {
+      if (Buffer.byteLength(JSON.stringify(raw), "utf8") > MAX_SEMANTIC_HISTORY_PAGE_BYTES) throw new Error("Conversation history page exceeds its byte limit");
+      parseConversationHistoryBody(raw);
+      return;
+    }
+    case "conversation.content": {
+      if (Buffer.byteLength(JSON.stringify(raw), "utf8") > 512 * 1024) throw new Error("Conversation content page exceeds the Worker capability bound");
+      parseConversationContentBody(raw);
+      return;
+    }
+    case "model.list": parseModelListBody(raw); return;
+    case "tool.list": case "tool.set_active": parseToolListBody(raw); return;
+    case "settings.get": parseSettingDtos(raw); return;
+    case "settings.update": parseSettingDto(raw, "Worker setting"); return;
+    case "resource.get": parseResourcesResult(raw); return;
+    case "command.catalog": parseCommandsResult(raw); return;
+    case "session.list": parseSessionsResult(raw); return;
+    default: return;
   }
-  if (typeof page.complete !== "boolean") throw new Error("Conversation page completeness is invalid");
-  optionalString(page.nextCursor, 128);
-  if (page.complete === (page.nextCursor !== undefined)) throw new Error("Conversation content continuation is inconsistent");
-}
-
-function validateWorkerHistoryEntry(raw: unknown): void {
-  const entry = record(raw, "Worker conversation record");
-  exactKeys(entry, [
-    "recordId", "entryId", "parentId", "kind", "source", "visibility", "timestamp", "content", "attachments",
-    "stopReason", "error", "toolCallId", "toolName", "isError", "customType", "display", "metadata",
-    "metadataOmittedFields", "command", "exitCode", "cancelled", "truncated", "fullOutputPath", "excludeFromContext",
-    "firstKeptEntryId", "tokensBefore", "fromEntryId", "targetEntryId", "label", "provider", "modelId",
-    "thinkingLevel", "name",
-  ], "Worker conversation record");
-  boundedString(entry.recordId, 128, "Conversation record id");
-  boundedString(entry.entryId, 128, "Conversation entry id");
-  optionalString(entry.parentId, 128);
-  oneOf(entry.kind, ["message", "custom_message", "bash_execution", "compaction_summary", "branch_summary", "custom", "model_change", "thinking_level_change", "session_info", "label"], "Conversation record kind");
-  oneOf(entry.source, ["user", "assistant", "tool", "system", "extension", "runtime"], "Conversation record source");
-  oneOf(entry.visibility, ["conversation", "metadata", "hidden"], "Conversation visibility");
-  if (entry.timestamp !== undefined) {
-    const value = boundedString(entry.timestamp, 128, "Conversation timestamp");
-    if (!Number.isFinite(Date.parse(value)) || new Date(value).toISOString() !== value) throw new Error("Conversation timestamp is invalid");
-  }
-  validateDockContent(entry.content);
-  if (entry.attachments !== undefined) validateAttachmentDtos(entry.attachments, "Conversation attachments");
-  optionalString(entry.stopReason, 128); optionalString(entry.error, 2_048);
-  optionalString(entry.toolCallId, 128); optionalString(entry.toolName, 256);
-  if (entry.isError !== undefined && typeof entry.isError !== "boolean") throw new Error("Conversation error flag is invalid");
-  optionalString(entry.customType, 256);
-  if (entry.display !== undefined && typeof entry.display !== "boolean") throw new Error("Conversation display flag is invalid");
-  if (entry.metadata !== undefined) validateJsonValue(entry.metadata);
-  if (entry.metadataOmittedFields !== undefined) stringArray(entry.metadataOmittedFields, 200, 2_048, "Conversation metadata omissions");
-  optionalString(entry.command, 8_000);
-  if (entry.exitCode !== undefined && (!Number.isSafeInteger(entry.exitCode) || typeof entry.exitCode !== "number")) throw new Error("Conversation exit code is invalid");
-  for (const key of ["cancelled", "truncated", "excludeFromContext"] as const) {
-    if (entry[key] !== undefined && typeof entry[key] !== "boolean") throw new Error(`Conversation ${key} flag is invalid`);
-  }
-  optionalString(entry.fullOutputPath, 16_384); optionalString(entry.firstKeptEntryId, 128);
-  optionalNonNegativeInteger(entry.tokensBefore, "Conversation pre-compaction tokens");
-  optionalString(entry.fromEntryId, 128); optionalString(entry.targetEntryId, 128); optionalString(entry.label, 256);
-  optionalString(entry.provider, 256); optionalString(entry.modelId, 512); optionalString(entry.thinkingLevel, 64); optionalString(entry.name, 256);
 }
 
 function validateAttachmentDtos(raw: unknown, label: string): void {

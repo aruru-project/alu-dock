@@ -50,7 +50,11 @@ import type {
   AgentHistoryEntry,
   AgentInputKind,
   AgentModelInfo,
+  AgentCommandCatalogBody,
+  AgentModelListBody,
   AgentModelState,
+  AgentResourceProjectionBody,
+  AgentSessionListBody,
   AgentNavigateOptions,
   AgentNavigateResult,
   AgentProjectTrust,
@@ -166,21 +170,6 @@ export {
 } from "./instance-dto.js";
 import { projectAgentNavigateResult, projectRuntimeTree, type ProjectedSessionTree } from "./session-tree.js";
 import type { ObservationNotification } from "./instance-observation.js";
-
-export interface BoundedCollectionProjection<T> {
-  items: T[];
-  total: number;
-  truncated: boolean;
-}
-
-export interface ManagedResourceProjection {
-  resources: ResourceDto[];
-  diagnostics: DiagnosticDto[];
-  resourceTotal: number;
-  resourcesTruncated: boolean;
-  diagnosticTotal: number;
-  diagnosticsTruncated: boolean;
-}
 
 export interface ManagedInstanceOptions {
   id?: string;
@@ -886,31 +875,12 @@ export class ManagedInstance {
     this.applyModelState(this.agentState().modelState);
   }
 
-  async listModels(): Promise<{ models: AgentModelInfo[]; state: AgentModelState; total: number; truncated: boolean }> {
-    return this.withProjectionRead(async () => {
-      const source = (await this.invokeAgent<AgentModelInfo[]>("model.list", {})).map((model) => ({
-        ...model,
-        provider: truncate(model.provider, 256) ?? "unknown",
-        id: truncate(model.id, 512) ?? "unknown",
-        name: truncate(model.name, 256) ?? "unknown",
-      }));
-      const projected = boundedCollectionProjection(source);
-      return { models: projected.items, state: this.agentState().modelState, total: projected.total, truncated: projected.truncated };
-    });
+  async listModels(): Promise<AgentModelListBody> {
+    return this.withProjectionRead(() => this.invokeAgent<AgentModelListBody>("model.list", {}));
   }
 
-  async listSessions(scope: "cwd" | "all"): Promise<{ sessions: SessionDto[]; total: number; truncated: boolean }> {
-    return this.withProjectionRead(async () => {
-      const source = (await this.invokeAgent<AgentSessionInfo[]>("session.list", { scope })).map((session) => ({
-        sessionId: truncate(session.sessionId, 128) ?? "unknown",
-        sessionFile: truncate(session.sessionFile, 16_384) ?? "",
-        ...(session.name === undefined ? {} : { name: truncate(session.name, 256) ?? "" }),
-        cwd: truncate(session.cwd, 16_384) ?? "",
-        ...(isIsoTimestamp(session.updatedAt) ? { updatedAt: session.updatedAt } : {}),
-      }));
-      const projected = boundedCollectionProjection(source);
-      return { sessions: projected.items, total: projected.total, truncated: projected.truncated };
-    });
+  async listSessions(scope: "cwd" | "all"): Promise<AgentSessionListBody> {
+    return this.withProjectionRead(() => this.invokeAgent<AgentSessionListBody>("session.list", { scope }));
   }
 
   async getHistoryPage(beforeEntryId: string | undefined, limit: number): Promise<HistoryPageDto & { instance: InstanceSnapshot }> {
@@ -923,18 +893,7 @@ export class ManagedInstance {
       const generation = this.runtimeGenerationValue;
       const page = await this.invokeAgent<AgentConversationHistoryPage>("conversation.history", { ...(cursor === undefined ? {} : { cursor }), limit });
       if (generation !== this.runtimeGenerationValue) throw new StaleRuntimeGenerationError(generation, this.runtimeGenerationValue);
-      return {
-        instance: this.snapshot(),
-        revision: boundedRuntimeString(page.revision, 128, "unknown-revision"),
-        entries: page.entries.map((item) => ({
-          entry: projectConversationHistoryPreview(item.entry),
-          contentRef: boundedRuntimeString(item.contentRef, 128, "unknown-content"),
-          contentComplete: item.contentComplete,
-          totalBlocks: Math.max(0, Math.floor(item.totalBlocks)),
-        })),
-        hasEarlier: page.hasEarlier,
-        ...(page.nextCursor === undefined ? {} : { nextCursor: boundedRuntimeString(page.nextCursor, 128, "unknown-cursor") }),
-      };
+      return { instance: this.snapshot(), ...cloneJson(page) };
     });
   }
 
@@ -944,17 +903,7 @@ export class ManagedInstance {
       const generation = this.runtimeGenerationValue;
       const page = await this.invokeAgent<AgentConversationContentPage>("conversation.content", { contentRef, ...(cursor === undefined ? {} : { cursor }) });
       if (generation !== this.runtimeGenerationValue) throw new StaleRuntimeGenerationError(generation, this.runtimeGenerationValue);
-      const chunks = page.chunks.map(projectRuntimeConversationChunk);
-      if (Buffer.byteLength(JSON.stringify(chunks), "utf8") > 512 * 1024) throw new Error("Runtime returned an oversized conversation content page");
-      return {
-        instanceId: this.id,
-        runtimeGeneration: generation,
-        revision: boundedRuntimeString(page.revision, 128, "unknown-revision"),
-        contentRef: boundedRuntimeString(page.contentRef, 128, "unknown-content"),
-        chunks,
-        complete: page.complete,
-        ...(page.nextCursor === undefined ? {} : { nextCursor: boundedRuntimeString(page.nextCursor, 128, "unknown-cursor") }),
-      };
+      return { instanceId: this.id, runtimeGeneration: generation, ...cloneJson(page) };
     });
   }
 
@@ -1068,14 +1017,14 @@ export class ManagedInstance {
     });
   }
 
-  async listTools(): Promise<{ tools: ToolDto[]; total: number; truncated: boolean }> {
-    return this.withProjectionRead(async () => boundedAgentToolProjection(await this.invokeAgent<ToolDto[] | AgentToolProjection>("tool.list", {})));
+  async listTools(): Promise<AgentToolProjection> {
+    return this.withProjectionRead(() => this.invokeAgent<AgentToolProjection>("tool.list", {}));
   }
 
-  async setActiveTools(names: string[], operationId = this.createCommandId()): Promise<{ tools: ToolDto[]; total: number; truncated: boolean }> {
+  async setActiveTools(names: string[], operationId = this.createCommandId()): Promise<AgentToolProjection> {
     await this.beginConfiguration("changing active tools", { admission: "live" });
     try {
-      const projected = boundedAgentToolProjection(await this.invokeAgent<ToolDto[] | AgentToolProjection>("tool.set_active", { operationId, names: [...names] }));
+      const projected = await this.invokeAgent<AgentToolProjection>("tool.set_active", { operationId, names: [...names] });
       await this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "tool.set_active", effect: "post_effect", operationId, instanceId: this.id },
         () => this.touch(),
@@ -1127,31 +1076,12 @@ export class ManagedInstance {
     }
   }
 
-  async getResources(): Promise<ManagedResourceProjection> {
-    return this.withProjectionRead(async () => {
-      const result = cloneJson(await this.invokeAgent<{ resources: ResourceDto[]; diagnostics: DiagnosticDto[]; resourceTotal?: number; resourcesTruncated?: boolean; diagnosticTotal?: number; diagnosticsTruncated?: boolean }>("resource.get", {}));
-      const resources = boundedCollectionProjection(result.resources, 350_000);
-      const diagnostics = boundedCollectionProjection(result.diagnostics, 200_000);
-      const resourceTotal = result.resourceTotal ?? resources.total;
-      const diagnosticTotal = result.diagnosticTotal ?? diagnostics.total;
-      return {
-        resources: resources.items,
-        diagnostics: diagnostics.items,
-        resourceTotal,
-        resourcesTruncated: result.resourcesTruncated === true || resources.truncated || resources.items.length < resourceTotal,
-        diagnosticTotal,
-        diagnosticsTruncated: result.diagnosticsTruncated === true || diagnostics.truncated || diagnostics.items.length < diagnosticTotal,
-      };
-    });
+  async getResources(): Promise<AgentResourceProjectionBody> {
+    return this.withProjectionRead(() => this.invokeAgent<AgentResourceProjectionBody>("resource.get", {}));
   }
 
-  async getCommands(prefix?: string): Promise<{ commands: CommandDto[]; total: number; truncated: boolean }> {
-    return this.withProjectionRead(async () => {
-      const commands = cloneJson(await this.invokeAgent<CommandDto[]>("command.catalog", {}))
-        .filter((command) => prefix === undefined || command.name.startsWith(prefix));
-      const projected = boundedCollectionProjection(commands);
-      return { commands: projected.items, total: projected.total, truncated: projected.truncated };
-    });
+  async getCommands(prefix?: string): Promise<AgentCommandCatalogBody> {
+    return this.withProjectionRead(() => this.invokeAgent<AgentCommandCatalogBody>("command.catalog", prefix === undefined ? {} : { prefix }));
   }
 
   async resolveSessionTarget(sessionFile: string): Promise<AgentSessionTarget> {
@@ -4130,93 +4060,6 @@ function projectAgentHistoryEntry(entry: AgentHistoryEntry): HistoryEntryDto {
   return projected;
 }
 
-function projectConversationHistoryPreview(entry: AgentHistoryEntry): HistoryEntryDto {
-  const projected = projectAgentHistoryEntry(entry);
-  const content: ContentBlockDto[] = [];
-  let remaining = 4_000;
-  for (const block of projected.content.slice(0, 16)) {
-    if (block.type === "text" || block.type === "thinking") {
-      const text = sliceWithoutMarker(block.text, remaining);
-      if (text.length > 0) content.push({ type: block.type, text });
-      remaining = Math.max(0, remaining - text.length);
-    } else if (block.type === "tool_call") {
-      content.push({
-        type: "tool_call",
-        toolCallId: block.toolCallId,
-        toolName: block.toolName,
-        args: {},
-        omittedFields: ["/"],
-      });
-    } else if (block.type === "tool_result") {
-      const text = sliceWithoutMarker(block.text, remaining);
-      const { presentation: _presentation, ...metadata } = block;
-      content.push({ ...metadata, text });
-      remaining = Math.max(0, remaining - text.length);
-    } else {
-      content.push(block);
-    }
-    if (remaining === 0) break;
-  }
-  return { ...projected, content };
-}
-
-function projectRuntimeConversationChunk(chunk: AgentConversationContentChunk): ConversationContentChunkDto {
-  if (chunk.type === "text" || chunk.type === "thinking") {
-    if (chunk.text.length > 32_000) throw new Error("Runtime returned oversized conversation text content");
-    return {
-      blockIndex: nonNegativeNumber(chunk.blockIndex),
-      type: chunk.type,
-      text: chunk.text,
-      offset: nonNegativeNumber(chunk.offset),
-      blockComplete: chunk.blockComplete,
-    };
-  }
-  if (chunk.type === "image") {
-    if (chunk.data.length > 32_000) throw new Error("Runtime returned oversized conversation image content");
-    return {
-      blockIndex: nonNegativeNumber(chunk.blockIndex),
-      type: "image",
-      mimeType: boundedRuntimeString(chunk.mimeType, 256, "image/unknown"),
-      data: chunk.data,
-      offset: nonNegativeNumber(chunk.offset),
-      blockComplete: chunk.blockComplete,
-    };
-  }
-  if (chunk.type === "tool_call") {
-    if (chunk.argumentsJson.length > 32_000) throw new Error("Runtime returned oversized conversation tool arguments");
-    return {
-      blockIndex: nonNegativeNumber(chunk.blockIndex),
-      type: "tool_call",
-      toolCallId: boundedRuntimeString(chunk.toolCallId, 128, "unknown"),
-      toolName: boundedRuntimeString(chunk.toolName, 256, "tool"),
-      argumentsJson: chunk.argumentsJson,
-      offset: nonNegativeNumber(chunk.offset),
-      blockComplete: chunk.blockComplete,
-    };
-  }
-  if (chunk.type === "tool_result") {
-    if (chunk.text.length > 32_000) throw new Error("Runtime returned oversized conversation tool content");
-    return {
-      blockIndex: nonNegativeNumber(chunk.blockIndex),
-      type: "tool_result",
-      toolCallId: boundedRuntimeString(chunk.toolCallId, 128, "unknown"),
-      toolName: boundedRuntimeString(chunk.toolName, 256, "tool"),
-      text: chunk.text,
-      offset: nonNegativeNumber(chunk.offset),
-      blockComplete: chunk.blockComplete,
-      isError: chunk.isError,
-      ...(chunk.omittedFields === undefined ? {} : { omittedFields: [...chunk.omittedFields] }),
-    };
-  }
-  if (chunk.type !== "omitted") throw new Error("Runtime returned an unsupported conversation chunk");
-  return {
-    blockIndex: nonNegativeNumber(chunk.blockIndex),
-    type: "omitted",
-    kind: chunk.kind,
-    description: chunk.description,
-  };
-}
-
 function projectRuntimeMetrics(value: AgentSessionMetrics): SessionMetricsDto {
   const context = value.context;
   return {
@@ -4266,33 +4109,6 @@ function settingAdmission(key: SettingKey): "idle" | "live" {
   return RUN_SENSITIVE_SETTING_KEYS.has(key) ? "idle" : "live";
 }
 
-function boundedAgentToolProjection(source: ToolDto[] | AgentToolProjection): { tools: ToolDto[]; total: number; truncated: boolean } {
-  const runtime = Array.isArray(source)
-    ? { tools: source, total: source.length, truncated: false }
-    : source;
-  if (!Number.isSafeInteger(runtime.total) || runtime.total < runtime.tools.length || runtime.truncated !== (runtime.tools.length < runtime.total)) {
-    throw new Error("Runtime returned inconsistent tool completeness metadata");
-  }
-  const projected = boundedCollectionProjection(runtime.tools);
-  return {
-    tools: cloneJson(projected.items),
-    total: runtime.total,
-    truncated: runtime.truncated || projected.items.length < runtime.total,
-  };
-}
-
-function boundedCollectionProjection<T>(source: readonly T[], maxBytes = 600_000): BoundedCollectionProjection<T> {
-  const items: T[] = [];
-  let bytes = 2;
-  for (const item of source.slice(0, 2_000)) {
-    const itemBytes = Buffer.byteLength(JSON.stringify(item), "utf8") + (items.length > 0 ? 1 : 0);
-    if (bytes + itemBytes > maxBytes) break;
-    items.push(item);
-    bytes += itemBytes;
-  }
-  return { items, total: source.length, truncated: items.length < source.length };
-}
-
 function projectCompactionResult(result: AgentCompactionResult): SessionCompactionDto {
   if (typeof result.summary !== "string" || typeof result.firstKeptEntryId !== "string" || result.firstKeptEntryId.length === 0 || result.firstKeptEntryId.length > 128 || !Number.isSafeInteger(result.tokensBefore) || result.tokensBefore < 0) {
     throw new Error("Pi returned an invalid compaction result");
@@ -4323,11 +4139,6 @@ function compactionReason(value: unknown): "manual" | "threshold" | "overflow" {
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-}
-
-function sliceWithoutMarker(value: string, limit: number): string {
-  if (value.length <= limit) return value;
-  return value.slice(0, unicodeSafeSliceEnd(value, limit));
 }
 
 function truncate(value: string | undefined, limit: number): string | undefined {
@@ -4470,5 +4281,4 @@ export function projectJsonObject(input: unknown): { value: JsonObject; omittedF
 }
 
 function escapeJsonPointer(value: string): string { return value.replace(/~/g, "~0").replace(/\//g, "~1"); }
-function isIsoTimestamp(value: string | undefined): value is string { return value !== undefined && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value; }
 function isJsonObject(value: JsonValue | undefined): value is JsonObject { return value !== undefined && value !== null && typeof value === "object" && !Array.isArray(value); }
