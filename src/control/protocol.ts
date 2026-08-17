@@ -1266,15 +1266,18 @@ export function parseSessionNameResult(input: unknown): SessionNameResult {
   if (instance.lifecycle !== "active") throw validation("invalid_response", "Session name success requires an active instance");
   return { instance };
 }
+export function parseCompactionBody(input: unknown): SessionCompactionResult["result"] {
+  const result = object(input, "result"); exact(result, ["summary", "firstKeptEntryId", "tokensBefore"]);
+  return {
+    summary: boundedString(result.summary, "result.summary", MAX_TEXT),
+    firstKeptEntryId: id(result.firstKeptEntryId, "result.firstKeptEntryId"),
+    tokensBefore: unsigned(result.tokensBefore, "result.tokensBefore"),
+  };
+}
 export function parseSessionCompactionResult(input: unknown): SessionCompactionResult {
   const value = object(input, "session compaction result"); exact(value, ["result", "instance"]);
-  const result = object(value.result, "result"); exact(result, ["summary", "firstKeptEntryId", "tokensBefore"]);
   return {
-    result: {
-      summary: boundedString(result.summary, "result.summary", MAX_TEXT),
-      firstKeptEntryId: id(result.firstKeptEntryId, "result.firstKeptEntryId"),
-      tokensBefore: unsigned(result.tokensBefore, "result.tokensBefore"),
-    },
+    result: parseCompactionBody(value.result),
     instance: parseActiveSessionInstance(value.instance, "Session compaction"),
   };
 }

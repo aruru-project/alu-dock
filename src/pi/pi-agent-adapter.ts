@@ -903,7 +903,7 @@ export class PiAgentAdapter {
       try {
         const result = await session.compact(customInstructions);
         return {
-          summary: result.summary,
+          summary: boundedString(result.summary, 8_000, ""),
           firstKeptEntryId: result.firstKeptEntryId,
           tokensBefore: result.tokensBefore,
         };

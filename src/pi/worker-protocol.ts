@@ -16,6 +16,7 @@ import {
   parseConversationContentBody,
   parseConversationHistoryBody,
   parseHistoryEntry,
+  parseCompactionBody,
   parseModelListBody,
   parseResourcesResult,
   parseSessionsResult,
@@ -480,6 +481,7 @@ export function validateAgentWorkerResult(label: string, raw: unknown): void {
       return;
     }
     case "model.list": parseModelListBody(raw); return;
+    case "session.compact": parseCompactionBody(raw); return;
     case "tool.list": case "tool.set_active": parseToolListBody(raw); return;
     case "settings.get": parseSettingDtos(raw); return;
     case "settings.update": parseSettingDto(raw, "Worker setting"); return;

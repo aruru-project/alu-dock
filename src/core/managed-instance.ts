@@ -1160,7 +1160,7 @@ export class ManagedInstance {
       this.compactionRequestOperationId = operationId;
       this.receiptBoundaryOperationId = operationId;
       runtimeCalled = true;
-      const result = projectCompactionResult(await this.invokeAgent<AgentCompactionResult>("session.compact", { operationId, ...(customInstructions === undefined ? {} : { customInstructions }) }));
+      const result = await this.invokeAgent<AgentCompactionResult>("session.compact", { operationId, ...(customInstructions === undefined ? {} : { customInstructions }) });
       await this.closeRuntimeOperationBoundary(operationId);
       return result;
     } catch (error) {
@@ -4107,17 +4107,6 @@ function settingAdmission(key: SettingKey): "idle" | "live" {
   // startup/reload, and trust defaults only affect this/next client or a future
   // boundary.
   return RUN_SENSITIVE_SETTING_KEYS.has(key) ? "idle" : "live";
-}
-
-function projectCompactionResult(result: AgentCompactionResult): SessionCompactionDto {
-  if (typeof result.summary !== "string" || typeof result.firstKeptEntryId !== "string" || result.firstKeptEntryId.length === 0 || result.firstKeptEntryId.length > 128 || !Number.isSafeInteger(result.tokensBefore) || result.tokensBefore < 0) {
-    throw new Error("Pi returned an invalid compaction result");
-  }
-  return {
-    summary: safeWireText(result.summary, 8_000),
-    firstKeptEntryId: result.firstKeptEntryId,
-    tokensBefore: result.tokensBefore,
-  };
 }
 
 function isKnownMutationBoundaryError(error: unknown): boolean {
