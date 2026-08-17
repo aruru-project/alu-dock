@@ -28,11 +28,7 @@ import {
   type ObservationNotification,
   type ObservationRequest,
 } from "../core/instance-observation.js";
-import {
-  SETTING_DEFINITIONS,
-  SETTING_KEYS,
-  type SettingKey,
-} from "../core/config-projection.js";
+import type { SettingKey } from "../core/config-projection.js";
 
 export const PI_WORKER_PROTOCOL = "alu-dock-pi-worker";
 export const PI_WORKER_PROTOCOL_VERSION = 1;
@@ -674,132 +670,6 @@ export function decodeWorkerError(error: WorkerErrorDto): Error {
   }
 }
 
-function validateTool(raw: unknown): void {
-  const tool = record(raw, "Worker tool");
-  exactKeys(tool, ["name", "description", "active", "source", "parameterSchema"], "Worker tool");
-  boundedString(tool.name, 256, "Tool name"); boundedString(tool.description, 16_000, "Tool description", true);
-  if (typeof tool.active !== "boolean") throw new Error("Tool active flag is invalid");
-  if (tool.source !== undefined) validateSource(tool.source);
-  if (tool.parameterSchema !== undefined) record(tool.parameterSchema, "Tool parameter schema");
-}
-
-function validateSource(raw: unknown): void {
-  const source = record(raw, "Worker source");
-  exactKeys(source, ["kind", "path", "package"], "Worker source");
-  oneOf(source.kind, ["built-in", "extension", "skill", "prompt"], "Worker source kind");
-  optionalString(source.path, 16_384); optionalString(source.package, 512);
-}
-
-function validateCommand(raw: unknown): void {
-  const command = record(raw, "Worker command");
-  exactKeys(command, ["name", "description", "source", "argumentCompletions"], "Worker command");
-  boundedString(command.name, 256, "Command name"); optionalString(command.description, 16_000); validateSource(command.source);
-  if (typeof command.argumentCompletions !== "boolean") throw new Error("Command completion flag is invalid");
-}
-
-function validateResource(raw: unknown): void {
-  const resource = record(raw, "Worker resource");
-  exactKeys(resource, ["kind", "name", "path", "source"], "Worker resource");
-  oneOf(resource.kind, ["extension", "skill", "prompt", "context"], "Worker resource kind");
-  boundedString(resource.name, 512, "Resource name"); optionalString(resource.path, 16_384); if (resource.source !== undefined) validateSource(resource.source);
-}
-
-function validateDiagnostic(raw: unknown): void {
-  const diagnostic = record(raw, "Worker diagnostic");
-  exactKeys(diagnostic, ["severity", "message", "source"], "Worker diagnostic");
-  oneOf(diagnostic.severity, ["info", "warning", "error"], "Diagnostic severity"); boundedString(diagnostic.message, 2_048, "Diagnostic message", true); optionalString(diagnostic.source, 16_384);
-}
-
-function validateSetting(raw: unknown): void {
-  const setting = record(raw, "Worker setting");
-  exactKeys(setting, ["key", "value", "source", "writable", "valueType", "allowedValues", "min", "max", "reloadRequired", "hostRestartRequired"], "Worker setting");
-  const key = oneOf(setting.key, SETTING_KEYS, "Setting key") as SettingKey;
-  validateSettingValue(key, setting.value);
-  if (typeof setting.writable !== "boolean" || typeof setting.reloadRequired !== "boolean" || typeof setting.hostRestartRequired !== "boolean") {
-    throw new Error("Worker setting flags are invalid");
-  }
-  oneOf(setting.source, ["effective", "global", "project"], "Setting source");
-  oneOf(setting.valueType, ["boolean", "enum", "integer", "object"], "Setting value type");
-  if (setting.allowedValues !== undefined) {
-    if (!Array.isArray(setting.allowedValues) || setting.allowedValues.length > 64) throw new Error("Setting allowed values are invalid");
-    for (const value of setting.allowedValues) if (typeof value !== "string" && typeof value !== "number" && typeof value !== "boolean") throw new Error("Setting allowed value is invalid");
-  }
-  optionalFiniteNumber(setting.min, "Setting minimum"); optionalFiniteNumber(setting.max, "Setting maximum");
-}
-
-function validateSettingUpdate(raw: unknown): void {
-  const update = record(raw, "Setting update");
-  exactKeys(update, ["key", "value"], "Setting update");
-  const key = oneOf(update.key, SETTING_KEYS, "Setting update key") as SettingKey;
-  if (!SETTING_DEFINITIONS[key].writable) throw new Error("Setting is read-only");
-  validateSettingValue(key, update.value);
-}
-
-function validateSettingValue(key: SettingKey, value: unknown): void {
-  const definition = SETTING_DEFINITIONS[key];
-  if (definition.valueType === "boolean") {
-    if (typeof value !== "boolean") throw new Error(`Setting ${key} value is invalid`);
-    return;
-  }
-  if (definition.valueType === "integer") {
-    if (!Number.isSafeInteger(value) || (value as number) < (definition.min ?? 0) || (value as number) > (definition.max ?? Number.MAX_SAFE_INTEGER)) throw new Error(`Setting ${key} value is invalid`);
-    return;
-  }
-  if (definition.valueType === "enum") {
-    if (typeof value !== "string" || !definition.allowedValues?.includes(value)) throw new Error(`Setting ${key} value is invalid`);
-    return;
-  }
-  const objectValue = record(value, `Setting ${key} value`);
-  exactKeys(objectValue, ["anthropicExtraUsage"], `Setting ${key} value`);
-  optionalBoolean(objectValue.anthropicExtraUsage, `Setting ${key} warning flag`);
-}
-
-function validateModelState(raw: unknown, label: string): void {
-  const state = record(raw, label);
-  exactKeys(state, ["model", "thinkingLevel", "availableThinkingLevels"], label);
-  oneOf(state.thinkingLevel, ["off", "minimal", "low", "medium", "high", "xhigh", "max"], `${label} thinking level`);
-  if (!Array.isArray(state.availableThinkingLevels) || state.availableThinkingLevels.length > 7) throw new Error(`${label} thinking levels are invalid`);
-  for (const level of state.availableThinkingLevels) oneOf(level, ["off", "minimal", "low", "medium", "high", "xhigh", "max"], `${label} thinking level`);
-  if (state.model !== undefined) {
-    const model = record(state.model, `${label} model`); exactKeys(model, ["provider", "id"], `${label} model`);
-    boundedString(model.provider, 256, "Model provider"); boundedString(model.id, 512, "Model id");
-  }
-}
-
-function validateMetrics(raw: unknown): void {
-  const metrics = record(raw, "Worker metrics"); exactKeys(metrics, ["messages", "tokens", "cost", "context"], "Worker metrics");
-  const messages = record(metrics.messages, "Worker message metrics"); exactKeys(messages, ["user", "assistant", "toolCalls", "toolResults", "total"], "Worker message metrics");
-  for (const key of ["user", "assistant", "toolCalls", "toolResults", "total"]) nonNegativeInteger(messages[key], `Message metric ${key}`);
-  const tokens = record(metrics.tokens, "Worker token metrics"); exactKeys(tokens, ["input", "output", "cacheRead", "cacheWrite", "total"], "Worker token metrics");
-  for (const key of ["input", "output", "cacheRead", "cacheWrite", "total"]) nonNegativeInteger(tokens[key], `Token metric ${key}`);
-  if (typeof metrics.cost !== "number" || !Number.isFinite(metrics.cost) || metrics.cost < 0) throw new Error("Worker cost metric is invalid");
-  if (metrics.context !== undefined) {
-    const context = record(metrics.context, "Worker context metrics"); exactKeys(context, ["tokens", "contextWindow", "percent"], "Worker context metrics");
-    if (context.tokens !== null) nonNegativeInteger(context.tokens, "Context tokens");
-    positiveInteger(context.contextWindow, "Context window");
-    if (context.percent !== null && (typeof context.percent !== "number" || !Number.isFinite(context.percent) || context.percent < 0)) throw new Error("Context percent is invalid");
-  }
-}
-
-function validateTree(raw: unknown): void {
-  const tree = record(raw, "Worker tree"); exactKeys(tree, ["nodes", "leafId"], "Worker tree");
-  if (!Array.isArray(tree.nodes) || tree.nodes.length > 100_000) throw new Error("Worker tree nodes are invalid");
-  optionalString(tree.leafId, 128);
-  for (const item of tree.nodes) {
-    const node = record(item, "Worker tree node");
-    exactKeys(node, ["entryId", "parentId", "depth", "kind", "role", "displayClass", "state", "label", "labelTimestamp", "timestamp", "summary", "hasChildren"], "Worker tree node");
-    boundedString(node.entryId, 128, "Tree entry id"); optionalString(node.parentId, 128);
-    nonNegativeInteger(node.depth, "Tree depth");
-    oneOf(node.kind, ["message", "thinking_level_change", "model_change", "compaction", "branch_summary", "custom", "custom_message", "label", "session_info"], "Tree node kind");
-    if (node.role !== undefined) oneOf(node.role, ["user", "assistant", "tool", "system"], "Tree node role");
-    if (node.displayClass !== undefined) oneOf(node.displayClass, ["content", "tool", "metadata", "structural"], "Tree display class");
-    if (node.state !== undefined) oneOf(node.state, ["error", "aborted"], "Tree state");
-    boundedString(node.summary, 8_000, "Tree node summary", true);
-    if (typeof node.hasChildren !== "boolean") throw new Error("Tree child flag is invalid");
-    optionalString(node.timestamp, 128); optionalString(node.label, 256); optionalString(node.labelTimestamp, 128);
-  }
-}
-
 function parseWorkerError(raw: unknown): WorkerErrorDto {
   const value = record(raw, "Worker error");
   exactKeys(value, ["code", "name", "message", "details"], "Worker error");
@@ -1020,14 +890,6 @@ function parseObservationNotification(raw: unknown): ObservationNotification {
 
 function timestampString(raw: unknown, label: string): string {
   const value = boundedString(raw, 128, label); if (!Number.isFinite(Date.parse(value))) throw new Error(`${label} is invalid`); return value;
-}
-
-function validatePromptOptions(raw: unknown): void {
-  const value = record(raw, "Prompt options");
-  exactKeys(value, ["streamingBehavior", "images", "source"], "Prompt options");
-  if (value.streamingBehavior !== undefined) oneOf(value.streamingBehavior, ["steer", "followUp"], "Prompt streaming behavior");
-  if (value.images !== undefined) validateImagePaths(value.images);
-  if (value.source !== undefined) oneOf(value.source, ["interactive", "rpc", "extension"], "Prompt source");
 }
 
 function validateImageMimeType(raw: unknown, field: string): string {

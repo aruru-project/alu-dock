@@ -4000,18 +4000,6 @@ function runtimeMessageHash(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
 
-function runtimeUserMessageText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return "";
-  return content
-    .map((block) => {
-      const value = recordValue(block);
-      return value?.type === "text" && typeof value.text === "string" ? value.text : "";
-    })
-    .filter((text) => text.length > 0)
-    .join("\n");
-}
-
 function removedQueueProjection(
   pending: readonly PendingQueueMessage[],
   state: MutableState,
@@ -4335,18 +4323,6 @@ function compactionReason(value: unknown): "manual" | "threshold" | "overflow" {
 
 function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-}
-
-function extractText(content: unknown): string | undefined {
-  if (typeof content === "string") return content;
-  if (!Array.isArray(content)) return undefined;
-  const text = content
-    .map((block) => recordValue(block))
-    .filter((block): block is Record<string, unknown> => block !== undefined)
-    .filter((block) => block.type === "text")
-    .map((block) => stringValue(block.text) ?? "")
-    .join("");
-  return text.length > 0 ? text : undefined;
 }
 
 function sliceWithoutMarker(value: string, limit: number): string {

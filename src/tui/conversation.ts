@@ -1234,13 +1234,6 @@ function activityPainter(phase: RunActivityState["phase"]): (text: string) => st
   return paint.running;
 }
 
-function statePainter(state: string): (text: string) => string {
-  if (/failed|error|lost|unavailable|stopped/u.test(state)) return paint.error;
-  if (state === "running") return paint.running;
-  if (state === "idle") return paint.success;
-  return paint.muted;
-}
-
 function formatCount(value: number | null): string {
   if (value === null) return "?";
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m`;
@@ -1504,4 +1497,3 @@ function renderDockDiff(text: string): string[] {
 }
 
 function visibleIndentWidth(indent: string): number { return indent.length; }
-function shortId(id: string): string { return id.slice(0, 8); }
