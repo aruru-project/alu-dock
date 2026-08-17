@@ -297,6 +297,9 @@ test("local pairing window admits an exact certificate to the existing Protocol 
   trusted.write(encodeJsonLine(hello("trusted-hello")));
   const ack = record(await trustedReader.next());
   assert.equal(ack.kind, "hello_ack");
+  // Regression: on 2026-08-17 clients reported that trusted links were cut after five idle seconds.
+  await new Promise((resolveDelay) => setTimeout(resolveDelay, 5_250));
+  assert.equal(trusted.destroyed, false, "a trusted Protocol V2 connection must remain open while idle");
   trusted.write(encodeJsonLine({ kind: "request", version: 2, requestId: "host-info", type: "host.info", params: {} }));
   const response = record(await trustedReader.next());
   assert.equal(response.kind, "response");

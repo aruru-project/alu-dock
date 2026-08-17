@@ -249,10 +249,10 @@ export class RemoteAccessServer {
   }
 
   private async handleSecureConnection(socket: TLSSocket): Promise<void> {
+    this.clearTransportHandshakeTimeout(socket);
     this.allRemoteSockets.add(socket);
     socket.once("close", () => this.allRemoteSockets.delete(socket));
     socket.on("error", () => {});
-    socket.setTimeout(0);
     if (socket.isSessionReused()) {
       socket.destroy();
       return;
@@ -680,6 +680,20 @@ export class RemoteAccessServer {
     } catch {
       clearTimeout(forceClose);
       socket.destroy();
+    }
+  }
+
+  private clearTransportHandshakeTimeout(socket: TLSSocket): void {
+    for (const transport of this.transportSockets) {
+      if (
+        transport.remoteAddress === socket.remoteAddress
+        && transport.remotePort === socket.remotePort
+        && transport.localAddress === socket.localAddress
+        && transport.localPort === socket.localPort
+      ) {
+        transport.setTimeout(0);
+        return;
+      }
     }
   }
 
