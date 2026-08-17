@@ -8,6 +8,8 @@ import { humanListWidth, renderHumanInstanceList, selectHumanInstanceList } from
 import { ControlClientError, DockClient } from "./control/dock-client.js";
 import { DockHost } from "./control/dock-host.js";
 import { DockRegistry } from "./control/dock-registry.js";
+import { AttachmentService } from "./control/attachment-service.js";
+import { AttachmentStorageState, attachmentStorageStateRoot } from "./control/attachment-storage-state.js";
 import { FileCatalogStore, defaultCatalogPath } from "./control/durable-catalog-store.js";
 import type { ProjectTrustChoice } from "./control/project-trust.js";
 import { defaultSocketPath, managedSocketPath } from "./control/socket-path.js";
@@ -170,6 +172,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   let host: DockHost;
   if (mode === "managed") {
     const store = new FileCatalogStore(catalogPath as string);
+    const attachmentService = new AttachmentService(new AttachmentStorageState(attachmentStorageStateRoot(catalogPath as string)));
     registry = new DockRegistry(
       (input) => createPiInstance(input),
       undefined,
@@ -177,6 +180,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
         trustPreflight,
         catalogStore: store,
         reopenTargetResolver: { resolve: resolvePiReopenTarget },
+        attachmentHostPort: attachmentService,
       },
     );
     host = new DockHost({
@@ -186,6 +190,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       initialize: () => registry.initializeCatalog(),
       sessionInventory,
       remoteAccessState: new RemoteAccessState(remoteAccessStateRoot(catalogPath as string)),
+      attachmentService,
     });
   } else {
     registry = new DockRegistry(

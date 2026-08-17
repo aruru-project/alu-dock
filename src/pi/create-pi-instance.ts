@@ -12,6 +12,7 @@ import { ExtensionUiBroker } from "../core/extension-ui-broker.js";
 import { ManagedInstance } from "../core/managed-instance.js";
 import type { AgentHistoryEntry, AgentRequest } from "../core/agent-worker.js";
 import type { InstanceObservationHostPort } from "../core/instance-observation.js";
+import type { InstanceAttachmentHostPort } from "../core/instance-attachments.js";
 import { ProjectTrustCoordinator } from "../control/project-trust.js";
 import { PI_SDK_VERSION } from "../version.js";
 import { resolvePiReopenTarget } from "./pi-session-target.js";
@@ -42,6 +43,7 @@ export interface CreatePiInstanceOptions {
   workerEnvironment?: NodeJS.ProcessEnv;
   onWorkerSpawn?: (pid: number) => void;
   observationHostPort?: InstanceObservationHostPort;
+  attachmentHostPort?: InstanceAttachmentHostPort;
   observationGrant?: boolean;
 }
 
@@ -53,6 +55,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
   const hostEpoch = options.hostEpoch ?? randomUUID();
   const extensionUiBroker = new ExtensionUiBroker();
   const observationHostPort = options.observationHostPort ?? unavailableObservationHostPort;
+  const attachmentHostPort = options.attachmentHostPort ?? unavailableAttachmentHostPort;
   const observationGrant = options.observationGrant ?? false;
   const created = await AgentWorkerConnection.create({
     identity: {
@@ -72,6 +75,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
     },
     extensionUiBroker,
     observationHostPort,
+    attachmentHostPort,
     initialObservationGrant: observationGrant,
     ...(options.workerEntry === undefined ? {} : { workerEntry: options.workerEntry }),
     ...(options.workerTimeouts === undefined ? {} : { workerTimeouts: options.workerTimeouts }),
@@ -119,6 +123,13 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
     throw error;
   }
 }
+
+const unavailableAttachmentHostPort: InstanceAttachmentHostPort = {
+  accessAttachments: async (_sourceInstanceId, request) => {
+    if (request.type === "list") return { type: "list", attachments: [], total: 0, truncated: false };
+    throw new Error("Dock attachments require a managed Registry instance");
+  },
+};
 
 const unavailableObservationHostPort: InstanceObservationHostPort = {
   observationGrant: () => false,

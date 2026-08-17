@@ -7,6 +7,7 @@ import { defaultCatalogPath } from "./control/durable-catalog-store.js";
 import { ensureHost } from "./control/ensure-host.js";
 import type { ProjectTrustChoice } from "./control/project-trust.js";
 import { RemoteAccessState, remoteAccessStateRoot } from "./control/remote-access-state.js";
+import { AttachmentStorageState, attachmentStorageStateRoot } from "./control/attachment-storage-state.js";
 import type { InstanceSnapshot, SessionDto } from "./core/managed-instance.js";
 import { requireHumanTarget } from "./human-target.js";
 import { runDockHub, type DockHubAction } from "./tui/dock-hub.js";
@@ -35,8 +36,10 @@ export async function openDock(options: OpenDockOptions): Promise<void> {
 
   let instance: InstanceSnapshot | undefined;
   if (options.mode === "hub") {
-    const remoteAccessState = new RemoteAccessState(remoteAccessStateRoot(defaultCatalogPath()));
-    const action = await runDockHub(client, cwd, remoteAccessState);
+    const catalogPath = defaultCatalogPath();
+    const remoteAccessState = new RemoteAccessState(remoteAccessStateRoot(catalogPath));
+    const attachmentStorageState = new AttachmentStorageState(attachmentStorageStateRoot(catalogPath));
+    const action = await runDockHub(client, cwd, remoteAccessState, attachmentStorageState);
     instance = await executeHubAction(client, action);
   } else {
     instance = await resolveWorkInstance(client, {

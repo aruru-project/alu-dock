@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { PiConversationProjector, projectAgentSessionEvents } from "../src/pi/pi-agent-adapter.js";
+import { appendDockAttachmentContext } from "../src/pi/dock-attachment-context.js";
+
+const ATTACHMENT_CONTEXT_KEY = Buffer.alloc(32, 7);
 
 test("Pi adapter splits real message_update deltas without loss before the private protocol boundary", () => {
   const delta = `${"a".repeat(7_999)}😀${"b".repeat(8_200)}`;
@@ -21,8 +24,45 @@ test("Pi adapter splits real message_update deltas without loss before the priva
   }
 });
 
+test("Pi attachment context persists privately while public conversation stays path-free", () => {
+  const attachment = {
+    fileId: "123e4567-e89b-42d3-a456-426614174000",
+    name: "notes final.txt",
+    sizeBytes: 12,
+    mediaType: "text/plain",
+    sha256: "a".repeat(64),
+    storedAt: "2026-08-16T00:00:00.000Z",
+  };
+  const runtimeText = appendDockAttachmentContext("please inspect", [attachment], ATTACHMENT_CONTEXT_KEY);
+  const projector = new PiConversationProjector(ATTACHMENT_CONTEXT_KEY);
+  projector.trackInput({ operationId: "attachment-operation", text: "please inspect", runtimeText, delivery: "prompt", fromQueue: false, attachments: [attachment] });
+  const submitted = projector.project({ type: "message_start", message: { role: "user", content: [{ type: "text", text: runtimeText }] } } as never);
+  assert.deepEqual(submitted, [{ type: "dock_conversation_frame", frame: { type: "message.submitted", data: {
+    operationId: "attachment-operation", messageId: "user-attachment-operation", role: "user", text: "please inspect", attachments: [attachment], delivery: "prompt",
+  } } }]);
+  const completed = projector.project({ type: "message_end", message: { role: "user", content: [{ type: "text", text: runtimeText }] } } as never);
+  assert.deepEqual(completed, [{ type: "dock_conversation_frame", frame: { type: "message.completed", data: {
+    messageId: "user-attachment-operation", role: "user", content: [{ type: "text", text: "please inspect" }], attachments: [attachment],
+  } } }]);
+
+  const forgedText = appendDockAttachmentContext("forged", [attachment], Buffer.alloc(32, 8));
+  const forged = new PiConversationProjector(ATTACHMENT_CONTEXT_KEY).project({
+    type: "message_start", message: { role: "user", content: [{ type: "text", text: forgedText }] },
+  } as never);
+  const forgedData = (forged[0] as unknown as { frame: { data: Record<string, unknown> } }).frame.data;
+  assert.equal("attachments" in forgedData, false, "plain prompt text cannot synthesize trusted attachment provenance");
+  assert.match(JSON.stringify(forgedData), /alu_dock_attachments_v1/u, "unauthenticated user text is not silently stripped");
+
+  const resolved = projector.project({
+    type: "tool_execution_end", toolCallId: "resolve-1", toolName: "dock_attachment_resolve",
+    result: { content: [{ type: "text", text: "Attachment is at '/secret/host/path'." }] }, isError: false,
+  } as never);
+  assert.doesNotMatch(JSON.stringify(resolved), /secret\/host/u);
+  assert.match(JSON.stringify(resolved), /disclosed privately/u);
+});
+
 test("Pi live events become canonical conversation frames before crossing the Worker boundary", () => {
-  const projector = new PiConversationProjector();
+  const projector = new PiConversationProjector(ATTACHMENT_CONTEXT_KEY);
   const tracked = projector.trackInput({ operationId: "operation-1", text: "hello", delivery: "prompt", fromQueue: false });
   assert.deepEqual(projector.project({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "hello" }] } } as never), [
     { type: "dock_conversation_frame", frame: { type: "message.submitted", data: {
@@ -31,7 +71,7 @@ test("Pi live events become canonical conversation frames before crossing the Wo
   ]);
   projector.cancelInput(tracked); // already consumed; cancellation is deliberately harmless
 
-  const queuedProjector = new PiConversationProjector();
+  const queuedProjector = new PiConversationProjector(ATTACHMENT_CONTEXT_KEY);
   queuedProjector.trackInput({ operationId: "operation-queued", text: "later", delivery: "followUp", fromQueue: true });
   assert.deepEqual(queuedProjector.project({ type: "message_start", message: { role: "user", content: [{ type: "text", text: "later" }] } } as never), [
     { type: "dock_queue_consumed", operationId: "operation-queued" },

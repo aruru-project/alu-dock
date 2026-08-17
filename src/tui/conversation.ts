@@ -15,6 +15,7 @@ import {
   type ToolResultNotice,
 } from "../core/tool-result-presentation.js";
 import type { DockEvent, HistoryEntryDto, InstanceSnapshot, JsonObject, JsonValue } from "../core/managed-instance.js";
+import type { AttachmentDto } from "../core/instance-attachments.js";
 import { renderWorkAlu } from "./alu-mascot.js";
 import { knownCompactionFeedback } from "./compaction-feedback.js";
 import type { RunActivityState } from "./run-activity.js";
@@ -142,7 +143,7 @@ export class DockConversation implements Component {
   apply(event: DockEvent): void {
     switch (event.type) {
       case "message.submitted": {
-        const text = userMessageText(event.data.text, event.data.images ?? []);
+        const text = userMessageText(event.data.text, event.data.images ?? [], event.data.attachments ?? []);
         if (text.length > 0) this.add("user", text);
         break;
       }
@@ -598,7 +599,7 @@ export class DockConversation implements Component {
         continue;
       }
       if (source.kind === "message" && source.source === "user") {
-        const projected = userMessageText(text ?? "", source.content.filter((block) => block.type === "image"));
+        const projected = userMessageText(text ?? "", source.content.filter((block) => block.type === "image"), source.attachments ?? []);
         if (projected.length > 0) addProjected(source, "user", projected);
       } else if (source.kind === "message" && source.source === "assistant") {
         for (const block of source.content) {
@@ -1257,10 +1258,18 @@ function contentText(value: unknown, type: "text" | "thinking"): string | undefi
   return text || undefined;
 }
 
-function userMessageText(text: string, images: readonly { mimeType: string }[]): string {
+function userMessageText(text: string, images: readonly { mimeType: string }[], attachments: readonly AttachmentDto[]): string {
   const imageLines = images.map((image, index) => `[Image ${index + 1} · ${image.mimeType}]`);
-  if (text.length === 0) return imageLines.join("\n");
-  return imageLines.length === 0 ? text : `${text}\n\n${imageLines.join("\n")}`;
+  const attachmentLines = attachments.map((attachment) => `[Attachment · ${attachment.name} · ${formatBytes(attachment.sizeBytes)}${attachment.mediaType ? ` · ${attachment.mediaType}` : ""}]`);
+  const lines = [...imageLines, ...attachmentLines];
+  if (text.length === 0) return lines.join("\n");
+  return lines.length === 0 ? text : `${text}\n\n${lines.join("\n")}`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_024 * 1_024) return `${(bytes / 1_024).toFixed(bytes < 10 * 1_024 ? 1 : 0)} KiB`;
+  return `${(bytes / (1_024 * 1_024)).toFixed(bytes < 10 * 1_024 * 1_024 ? 1 : 0)} MiB`;
 }
 
 function toolBaseName(toolName: string): string {

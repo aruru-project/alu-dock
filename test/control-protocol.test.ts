@@ -4,6 +4,9 @@ import test from "node:test";
 import { JsonLineDecoder, JsonLineError } from "../src/control/json-lines.js";
 import {
   capabilityForRequest,
+  parseAttachmentDto,
+  parseAttachmentUploadFrame,
+  parseAttachmentUploadResult,
   parseClientHello,
   parseControlEventEnvelope,
   parseControlRequest,
@@ -20,6 +23,7 @@ import {
   INSTANCE_DISPLAY_NAME_CAPABILITY,
   CONVERSATION_CONTENT_CAPABILITY,
   WORKSPACE_LIST_CAPABILITY,
+  ATTACHMENTS_CAPABILITY,
   requiredCapabilities,
 } from "../src/control/protocol.js";
 
@@ -129,6 +133,32 @@ test("Protocol V2 history exposes only canonical persisted conversation records"
 
 
 
+
+test("attachment upload frames and path-free DTOs are closed and bounded", () => {
+  const request = parseControlRequest({
+    kind: "request", version: 2, requestId: "upload-request", type: "attachment.upload",
+    params: { operationId: "upload-op", name: "文档 final.bin", sizeBytes: 3, mediaType: "application/octet-stream", sha256: "a".repeat(64) },
+  });
+  assert.equal(request.type, "attachment.upload");
+  assert.equal(capabilityForRequest(request.type), ATTACHMENTS_CAPABILITY);
+  assert.deepEqual(parseAttachmentUploadFrame({ kind: "attachment_chunk", version: 2, requestId: "upload-request", index: 0, data: Buffer.from("abc").toString("base64") }, "upload-request"), {
+    kind: "attachment_chunk", version: 2, requestId: "upload-request", index: 0, data: "YWJj",
+  });
+  assert.deepEqual(parseAttachmentUploadFrame({ kind: "attachment_complete", version: 2, requestId: "upload-request", chunks: 1 }, "upload-request"), {
+    kind: "attachment_complete", version: 2, requestId: "upload-request", chunks: 1,
+  });
+  assert.throws(() => parseAttachmentUploadFrame({ kind: "attachment_chunk", version: 2, requestId: "upload-request", index: 0, data: "YQ" }, "upload-request"), /canonical base64/u);
+  assert.throws(() => parseControlRequest({ kind: "request", version: 2, requestId: "upload-request", type: "attachment.upload", params: { operationId: "upload-op", name: "x", sizeBytes: 536_870_913, sha256: "a".repeat(64) } }), /must not exceed/u);
+
+  const attachment = {
+    fileId: "123e4567-e89b-42d3-a456-426614174000", name: "文档 final.bin", sizeBytes: 3,
+    mediaType: "application/octet-stream", sha256: "a".repeat(64), storedAt: "2026-08-16T00:00:00.000Z",
+  };
+  assert.deepEqual(parseAttachmentDto(attachment), attachment);
+  assert.deepEqual(parseAttachmentUploadResult({ attachment, status: "stored" }), { attachment, status: "stored" });
+  assert.equal("path" in parseAttachmentDto({ ...attachment, path: "/private/store" }), false);
+  assert.throws(() => parseAttachmentUploadResult({ attachment, status: "cached" }), /unsupported value/u);
+});
 
 test("V2 requests reject unsupported versions, unknown fields, invalid cursors, and invalid enums", () => {
   assert.throws(

@@ -112,6 +112,9 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
     assert.equal(instance.snapshot().metrics?.context?.contextWindow, 111_111);
     const updated = await instance.updateSetting({ key: "autoRetry", value: false }, "real-setting");
     assert.equal(updated.value, false);
+    const initialTools = await instance.listTools();
+    assert.ok(initialTools.tools.some((tool) => tool.name === "dock_attachment_list"));
+    assert.ok(initialTools.tools.some((tool) => tool.name === "dock_attachment_resolve"));
     assert.ok((await instance.setActiveTools(["read"], "real-tools")).tools.find((tool) => tool.name === "read")?.active);
 
     assert.equal((await instance.switchSession("real-resume-1", targetFile, { canonicalCwd: cwd, projectTrusted: true })).cancelled, false);
@@ -151,8 +154,9 @@ test("real Pi Stage 3 round-trips temporary session files without a model call",
     assert.deepEqual(persistedSettings.compaction, { enabled: true, reserveTokens: 100, keepRecentTokens: 100 });
     const resources = await instance.getResources();
     assert.ok(resources.resources.some((resource) => resource.kind === "extension" && resource.name.includes("stage3-fixture")));
+    assert.ok(resources.resources.some((resource) => resource.kind === "skill" && resource.name === "dock-attachments"));
     const commands = parseCommandsResult(await instance.getCommands()).commands;
-    assert.deepEqual(commands.map((command) => command.name), ["dock-observe", "fixture-a", "fixture-a-long", "fixture-b", "fixture-b-long"]);
+    assert.deepEqual(commands.map((command) => command.name), ["dock-observe", "fixture-a", "fixture-a-long", "fixture-b", "fixture-b-long", "skill:dock-attachments"]);
 
     await instance.stop("real-stop");
     const lifecycle = (await readFile(lifecycleLog, "utf8")).trim().split("\n");

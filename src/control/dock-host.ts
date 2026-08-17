@@ -36,6 +36,7 @@ import {
   type JsonObject,
 } from "../core/managed-instance.js";
 import { AgentCompactionKnownFailureError, AgentConversationCursorError, AgentInvalidSettingValueError, AgentModelNotFoundError, AgentSettingsWriteError, AgentUnavailableBeforeEffectError, AgentUnknownToolError } from "../core/agent-worker.js";
+import { MAX_ATTACHMENT_CHUNK_BYTES, type AttachmentUploadResult } from "../core/instance-attachments.js";
 import { dropOldestSemanticHistoryRange, slimSemanticHistoryEntry } from "../core/history-pagination.js";
 import type { SessionInventory } from "../core/session-inventory.js";
 import {
@@ -47,7 +48,7 @@ import {
   InstanceNotReopenableError,
   InstanceUnavailableError,
 } from "./dock-registry.js";
-import { OperationConflictError, OperationLedger, OperationReceiptExpiredError } from "./operation-ledger.js";
+import { OperationConflictError, OperationLedger, OperationReceiptExpiredError, type DeferredOperation } from "./operation-ledger.js";
 import { ProjectTrustChallengeError, ProjectTrustRequiredError } from "./project-trust.js";
 import { RemoteAccessServer } from "./remote-access-server.js";
 import type { RemoteAccessState } from "./remote-access-state.js";
@@ -59,6 +60,14 @@ import {
 } from "./workspace-browser.js";
 import { executeSessionCommand, isSessionCommandRequest } from "./session-command-service.js";
 import {
+  AttachmentIntegrityError,
+  AttachmentNotFoundError,
+  AttachmentUnavailableError,
+  type AttachmentService,
+  type AttachmentUploadSink,
+} from "./attachment-service.js";
+import {
+  ATTACHMENTS_CAPABILITY,
   capabilityForRequest,
   CONTROL_PROTOCOL_VERSION,
   createHelloAck,
@@ -76,6 +85,7 @@ import {
   type InstanceReadResult,
   type HelloError,
   type HistoryResult,
+  parseAttachmentUploadFrame,
   parseClientHello,
   parseControlRequest,
   ProtocolValidationError,
@@ -97,6 +107,7 @@ const MAX_SESSION_INVENTORY_ITEMS = 2_000;
 const MAX_ATTACH_EVENT_QUEUE = 1_000;
 const MAX_ATTACH_EVENT_QUEUE_BYTES = 4 * MAX_CONTROL_LINE_BYTES;
 const ATTACH_DRAIN_TIMEOUT_MS = 5_000;
+const ATTACHMENT_UPLOAD_IDLE_TIMEOUT_MS = 60_000;
 const ATTACH_INITIAL_OVERFLOW_MESSAGE = "Too many updates arrived while opening this work; open it again to refresh the view";
 
 type HostState = "new" | "starting" | "running" | "mutation_faulted" | "draining" | "stopping" | "stopped";
@@ -125,6 +136,7 @@ export interface DockHostOptions {
   sessionInventory?: SessionInventory;
   workspaceBrowser?: WorkspaceBrowser;
   remoteAccessState?: RemoteAccessState;
+  attachmentService?: AttachmentService;
 }
 
 export class DockHost {
@@ -151,6 +163,8 @@ export class DockHost {
   private readonly sessionInventory: SessionInventory;
   private readonly workspaceBrowser: WorkspaceBrowser;
   private readonly remoteAccess: RemoteAccessServer | undefined;
+  private readonly attachmentService: AttachmentService | undefined;
+  private readonly capabilities: ReadonlySet<string>;
   private faultDrainPromise: Promise<void> | undefined;
   private unsubscribeMutationFault: (() => void) | undefined;
   private unsubscribeRuntimeReopened: (() => void) | undefined;
@@ -172,6 +186,10 @@ export class DockHost {
     this.initialize = options.initialize;
     this.sessionInventory = options.sessionInventory ?? { list: async () => ({ sessions: [], incomplete: false, diagnostics: [] }) };
     this.workspaceBrowser = options.workspaceBrowser ?? new FileSystemWorkspaceBrowser();
+    this.attachmentService = options.attachmentService;
+    const capabilities = new Set(implementedCapabilities());
+    if (this.attachmentService === undefined) capabilities.delete(ATTACHMENTS_CAPABILITY);
+    this.capabilities = capabilities;
     this.remoteAccess = options.remoteAccessState
       ? new RemoteAccessServer({
         state: options.remoteAccessState,
@@ -337,27 +355,86 @@ export class DockHost {
     let helloSeen = false;
     let clientRequirements = new Set<string>();
     let requestSeen = false;
+    let attachmentRequest = false;
+    let currentRequestId = "unknown";
     let terminal = false;
     let eventUnsubscribe: (() => void) | undefined;
-    const cleanup = (): void => { eventUnsubscribe?.(); eventUnsubscribe = undefined; this.connectionRequirements.delete(socket); this.connections.delete(socket); };
+    let upload: {
+      request: Extract<ControlRequest, { type: "attachment.upload" }>;
+      sink: AttachmentUploadSink;
+      operation: Extract<DeferredOperation<AttachmentUploadResult>, { admitted: true }>;
+      nextIndex: number;
+    } | undefined;
+    let uploadCompleting = false;
+    let uploadAbortPromise: Promise<void> | undefined;
+    let finishUploadTracking: (() => void) | undefined;
+    let uploadIdleTimer: NodeJS.Timeout | undefined;
+    let processing = Promise.resolve();
+
+    const finishUpload = (): void => {
+      if (uploadIdleTimer) clearTimeout(uploadIdleTimer);
+      uploadIdleTimer = undefined;
+      const finish = finishUploadTracking;
+      finishUploadTracking = undefined;
+      finish?.();
+    };
+    const abortUpload = (reason: unknown = new Error("Attachment upload ended before completion")): Promise<void> => {
+      if (uploadCompleting) return Promise.resolve();
+      if (uploadAbortPromise) return uploadAbortPromise;
+      const active = upload;
+      upload = undefined;
+      uploadAbortPromise = (async () => {
+        if (active) {
+          await active.sink.abort().catch(() => {});
+          active.operation.abandon(reason);
+          void active.operation.promise.catch(() => {});
+        }
+        finishUpload();
+      })();
+      return uploadAbortPromise;
+    };
+    const cleanup = (): void => {
+      eventUnsubscribe?.();
+      eventUnsubscribe = undefined;
+      this.connectionRequirements.delete(socket);
+      this.connections.delete(socket);
+      void abortUpload();
+    };
     socket.once("close", cleanup);
     socket.once("error", () => {});
 
-    const consumeLine = (line: string): void => {
+    const armUploadIdleTimer = (): void => {
+      if (uploadIdleTimer) clearTimeout(uploadIdleTimer);
+      uploadIdleTimer = setTimeout(() => { void fail(new ProtocolValidationError("attachment_timeout", "Attachment upload was idle for too long")); }, ATTACHMENT_UPLOAD_IDLE_TIMEOUT_MS);
+      uploadIdleTimer.unref();
+    };
+    const fail = async (error: unknown, requestId = upload?.request.requestId ?? currentRequestId): Promise<void> => {
+      if (terminal) return;
+      terminal = true;
+      await abortUpload(error);
+      const mapped = mapControlError(error);
+      const safe: { code: string; message: string; retryable?: boolean; details?: JsonObject } = attachmentRequest && mapped.code === "request_failed"
+        ? { code: "attachment_upload_failed", message: "Attachment storage could not complete the upload", retryable: false }
+        : mapped;
+      if (helloSeen) this.sendErrorAndEnd(socket, safe.code, safe.message, requestId, safe.details, safe.retryable);
+      else this.sendHelloError(socket, requestId, "invalid_hello", mapped.message);
+    };
+
+    const consumeLine = async (line: string): Promise<void> => {
       if (terminal || line.length === 0) return;
       let raw: unknown;
       try { raw = JSON.parse(line) as unknown; }
-      catch {
-        terminal = true;
-        if (helloSeen) this.sendErrorAndEnd(socket, "invalid_envelope", "Request is not valid JSON", "unknown");
-        else this.sendHelloError(socket, "unknown", "invalid_hello", "Hello is not valid JSON");
-        return;
-      }
+      catch { await fail(new ProtocolValidationError("invalid_envelope", helloSeen ? "Request is not valid JSON" : "Hello is not valid JSON"), helloSeen ? upload?.request.requestId ?? "unknown" : "unknown"); return; }
 
       if (!helloSeen) {
         let hello;
         try { hello = parseClientHello(raw); }
-        catch (error) { const mapped = mapControlError(error); terminal = true; this.sendHelloError(socket, extractRequestId(line), "invalid_hello", mapped.message); return; }
+        catch (error) {
+          terminal = true;
+          const mapped = mapControlError(error);
+          this.sendHelloError(socket, extractRequestId(line), "invalid_hello", mapped.message);
+          return;
+        }
         helloSeen = true;
         clientRequirements = new Set(hello.requiredCapabilities);
         this.connectionRequirements.set(socket, clientRequirements);
@@ -371,28 +448,95 @@ export class DockHost {
           this.sendHelloError(socket, hello.requestId, "unsupported_protocol", "No supported protocol version overlap", { hostVersions: [2] });
           return;
         }
-        const available = new Set(implementedCapabilities());
-        const missing = hello.requiredCapabilities.filter((capability) => !available.has(capability));
+        const missing = hello.requiredCapabilities.filter((capability) => !this.capabilities.has(capability));
         if (missing.length > 0) {
           terminal = true;
           this.sendHelloError(socket, hello.requestId, "capability_missing", "Required capabilities are unavailable", { missing: [...missing].sort() });
           return;
         }
-        const outcome = writeEnvelope(socket, createHelloAck(hello.requestId, defaultHostIdentity(this.hostEpoch, this.startedAt)));
+        const outcome = writeEnvelope(socket, createHelloAck(hello.requestId, defaultHostIdentity(this.hostEpoch, this.startedAt), [...this.capabilities]));
         if (outcome !== "written") socket.destroy();
         return;
       }
 
-      if (requestSeen) { terminal = true; this.sendErrorAndEnd(socket, "multiple_requests", "Only one request is allowed after hello", "unknown"); return; }
-      requestSeen = true;
-      let request: ControlRequest;
-      try { request = parseControlRequest(raw); }
-      catch (error) { const mapped = mapControlError(error); terminal = true; this.sendErrorAndEnd(socket, mapped.code, mapped.message, extractRequestId(line)); return; }
-      if (this.state !== "running" && this.state !== "mutation_faulted") { terminal = true; this.sendErrorAndEnd(socket, "host_draining", "Alu Dock host is not accepting requests", request.requestId); return; }
-      if (this.state === "mutation_faulted" && isMutationRequest(request.type)) { terminal = true; this.sendErrorAndEnd(socket, "mutation_faulted", "Alu Dock catalog is mutation-faulted; query state and wait for Host restart", request.requestId); return; }
-      if (!implementedCapabilities().includes(capabilityForRequest(request.type))) {
-        terminal = true; this.sendErrorAndEnd(socket, "capability_missing", `Capability ${capabilityForRequest(request.type)} is unavailable`, request.requestId); return;
+      if (upload) {
+        const frame = parseAttachmentUploadFrame(raw, upload.request.requestId);
+        if (frame.kind === "attachment_chunk") {
+          if (frame.index !== upload.nextIndex) throw new ProtocolValidationError("invalid_request", `Attachment chunk index ${frame.index} is out of order`);
+          await upload.sink.write(Buffer.from(frame.data, "base64"));
+          upload.nextIndex += 1;
+          armUploadIdleTimer();
+          return;
+        }
+        if (frame.chunks !== upload.nextIndex) throw new ProtocolValidationError("invalid_request", "Attachment completion chunk count is inconsistent");
+        const active = upload;
+        upload = undefined;
+        uploadCompleting = true;
+        if (uploadIdleTimer) clearTimeout(uploadIdleTimer);
+        uploadIdleTimer = undefined;
+        try {
+          const result = await active.sink.complete();
+          active.operation.resolve(result);
+          terminal = true;
+          this.sendSuccessAndEnd(socket, active.request.requestId, await active.operation.promise);
+        } catch (error) {
+          active.operation.abandon(error);
+          await active.operation.promise.catch(() => {});
+          throw error;
+        } finally {
+          uploadCompleting = false;
+          finishUpload();
+        }
+        return;
       }
+
+      if (requestSeen) throw new ProtocolValidationError("multiple_requests", "Only one request is allowed after hello");
+      requestSeen = true;
+      currentRequestId = extractRequestId(line);
+      const request = parseControlRequest(raw);
+      currentRequestId = request.requestId;
+      if (this.state !== "running" && this.state !== "mutation_faulted") throw new ProtocolValidationError("host_draining", "Alu Dock host is not accepting requests");
+      if (this.state === "mutation_faulted" && isMutationRequest(request.type)) throw new ProtocolValidationError("mutation_faulted", "Alu Dock catalog is mutation-faulted; query state and wait for Host restart");
+      if (!this.capabilities.has(capabilityForRequest(request.type))) throw new ProtocolValidationError("capability_missing", `Capability ${capabilityForRequest(request.type)} is unavailable`);
+
+      if (request.type === "attachment.upload") {
+        attachmentRequest = true;
+        if (!this.attachmentService) throw new ProtocolValidationError("capability_missing", "Attachment upload is unavailable");
+        const operation = this.operationLedger.defer<AttachmentUploadResult>(request.params.operationId, request.type, request.params);
+        if (!operation.admitted) {
+          const result = await operation.promise;
+          terminal = true;
+          this.sendSuccessAndEnd(socket, request.requestId, result);
+          return;
+        }
+        let sink: AttachmentUploadSink;
+        try {
+          sink = await this.attachmentService.beginUpload(request.params);
+        } catch (error) {
+          operation.abandon(error);
+          await operation.promise.catch(() => {});
+          throw error;
+        }
+        upload = { request, sink, operation, nextIndex: 0 };
+        let resolveUpload!: () => void;
+        const tracked = new Promise<void>((resolve) => { resolveUpload = resolve; });
+        finishUploadTracking = () => {
+          this.inFlightDispatches.delete(tracked);
+          resolveUpload();
+        };
+        this.inFlightDispatches.add(tracked);
+        const outcome = writeEnvelope(socket, {
+          kind: "attachment_upload_ready",
+          version: 2,
+          requestId: request.requestId,
+          hostEpoch: this.hostEpoch,
+          maxChunkBytes: MAX_ATTACHMENT_CHUNK_BYTES,
+        });
+        if (outcome !== "written") throw new Error("Attachment upload readiness could not be delivered");
+        armUploadIdleTimer();
+        return;
+      }
+
       let task!: Promise<void>;
       task = this.dispatch(request, socket, (unsubscribe) => { eventUnsubscribe = unsubscribe; }, clientRequirements)
         .catch((error: unknown) => {
@@ -408,9 +552,24 @@ export class DockHost {
         })
         .finally(() => this.inFlightDispatches.delete(task));
       this.inFlightDispatches.add(task);
+      await task;
     };
-    socket.on("data", (chunk: Buffer) => { try { for (const line of decoder.push(chunk)) { consumeLine(line); if (terminal) break; } } catch (error) { const mapped=mapControlError(error); terminal=true; if(helloSeen)this.sendErrorAndEnd(socket,mapped.code,mapped.message,"unknown");else this.sendHelloError(socket,"unknown","invalid_hello",mapped.message); } });
-    socket.on("end", () => { try { decoder.finish(); } catch (error) { const mapped=mapControlError(error); this.sendErrorAndEnd(socket,mapped.code,mapped.message,"unknown"); } });
+
+    socket.on("data", (chunk: Buffer) => {
+      socket.pause();
+      processing = processing.then(async () => {
+        for (const line of decoder.push(chunk)) {
+          await consumeLine(line);
+          if (terminal) break;
+        }
+      }).catch((error) => fail(error)).finally(() => { if (!terminal && !socket.destroyed) socket.resume(); });
+    });
+    socket.on("end", () => {
+      processing = processing.then(async () => {
+        decoder.finish();
+        if (upload) throw new ProtocolValidationError("incomplete_record", "Attachment upload ended before completion");
+      }).catch((error) => fail(error));
+    });
   }
 
   private async dispatch(
@@ -549,8 +708,17 @@ export class DockHost {
       }
       case "command.submit": {
         if (request.params.images !== undefined && !this.connectionRequirements.get(socket)?.has(IMAGE_INPUT_CAPABILITY)) throw new ProtocolValidationError("capability_missing", `Capability ${IMAGE_INPUT_CAPABILITY} is required for image input`);
-        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const receipt=await instance.submit(request.params.message,request.params.delivery,request.params.operationId,request.params.images);return {receipt,instance:instance.snapshot()};});
-        this.sendSuccessAndEnd(socket,request.requestId,result); return;
+        if (request.params.attachments !== undefined && !this.connectionRequirements.get(socket)?.has(ATTACHMENTS_CAPABILITY)) throw new ProtocolValidationError("capability_missing", `Capability ${ATTACHMENTS_CAPABILITY} is required for attachment input`);
+        const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, async () => {
+          const instance = this.registry.get(request.params.instanceId);
+          const attachments = request.params.attachments === undefined
+            ? undefined
+            : await this.attachmentService?.getMany(request.params.attachments);
+          if (request.params.attachments !== undefined && attachments === undefined) throw new ProtocolValidationError("capability_missing", "Attachment storage is unavailable");
+          const receipt = await instance.submit(request.params.message, request.params.delivery, request.params.operationId, request.params.images, attachments);
+          return { receipt, instance: instance.snapshot() };
+        });
+        this.sendSuccessAndEnd(socket, request.requestId, result); return;
       }
       case "command.abort": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);await instance.abort(request.params.operationId);return {instance:instance.snapshot()};});
@@ -615,6 +783,7 @@ export class DockHost {
       instanceDisplayName: requirements?.has(INSTANCE_DISPLAY_NAME_CAPABILITY)===true,
       toolPresentation: requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,
       images: requirements?.has(IMAGE_INPUT_CAPABILITY)===true,
+      attachments: requirements?.has(ATTACHMENTS_CAPABILITY)===true,
       controllerDirectives: requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true,
       persistentInteractions: requirements?.has(PERSISTENT_INTERACTIONS_CAPABILITY)===true,
     };
@@ -757,7 +926,7 @@ export class DockHost {
     for (const socket of streams) socket.destroy();
   }
 
-  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const requirements=this.connectionRequirements.get(socket);const projected=projectForClient(result,{toolsExpanded:requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,gitBranch:requirements?.has(GIT_BRANCH_CAPABILITY)===true,instanceKeys:requirements?.has(INSTANCE_KEYS_CAPABILITY)===true,instanceDisplayName:requirements?.has(INSTANCE_DISPLAY_NAME_CAPABILITY)===true,toolPresentation:requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,images:requirements?.has(IMAGE_INPUT_CAPABILITY)===true,controllerDirectives:requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true,persistentInteractions:requirements?.has(PERSISTENT_INTERACTIONS_CAPABILITY)===true});const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,projected));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
+  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const requirements=this.connectionRequirements.get(socket);const projected=projectForClient(result,{toolsExpanded:requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,gitBranch:requirements?.has(GIT_BRANCH_CAPABILITY)===true,instanceKeys:requirements?.has(INSTANCE_KEYS_CAPABILITY)===true,instanceDisplayName:requirements?.has(INSTANCE_DISPLAY_NAME_CAPABILITY)===true,toolPresentation:requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,images:requirements?.has(IMAGE_INPUT_CAPABILITY)===true,attachments:requirements?.has(ATTACHMENTS_CAPABILITY)===true,controllerDirectives:requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true,persistentInteractions:requirements?.has(PERSISTENT_INTERACTIONS_CAPABILITY)===true});const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,projected));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
   private sendErrorAndEnd(socket:Socket,code:string,message:string,requestId:string,details?:JsonObject,retryable=false):void { if(socket.destroyed||socket.writableEnded)return;const response:ControlResponse={kind:"response",version:2,requestId,hostEpoch:this.hostEpoch,ok:false,error:{code,message:truncateMessage(message),retryable,...(details===undefined?{}:{details})}};if(endEnvelope(socket,response)==="too_large")socket.destroy(); }
   private sendHelloError(socket:Socket,requestId:string,code:HelloError["error"]["code"],message:string,details:{hostVersions?:number[];missing?:string[];retryAfterMs?:number}={}):void { if(socket.destroyed||socket.writableEnded)return;const envelope:HelloError={kind:"hello_error",requestId,error:{code,message:truncateMessage(message),...details}};try{socket.end(encodeJsonLine(envelope));}catch{socket.destroy();} }
 }
@@ -898,6 +1067,7 @@ interface ClientProjectionCapabilities {
   instanceDisplayName: boolean;
   toolPresentation: boolean;
   images: boolean;
+  attachments: boolean;
   controllerDirectives: boolean;
   persistentInteractions: boolean;
   controllerId?: string;
@@ -911,6 +1081,7 @@ function controllerEventProjectionCapabilities(controllerId: string): ClientProj
     instanceDisplayName: false,
     toolPresentation: false,
     images: true,
+    attachments: true,
     controllerDirectives: true,
     persistentInteractions: true,
     controllerId,
@@ -962,6 +1133,17 @@ function projectForClient(
     && source.text === ""
     && Array.isArray(source.images)
     && source.images.length > 0;
+  const legacyAttachmentOnlyText = !capabilities.attachments
+    && imageInputContext
+    && source.text === ""
+    && Array.isArray(source.attachments)
+    && source.attachments.length > 0;
+  const legacyAttachmentOnlyContent = !capabilities.attachments
+    && ((context === "message-data" && source.role === "user") || (context === "history-entry" && source.source === "user"))
+    && Array.isArray(source.content)
+    && source.content.length === 0
+    && Array.isArray(source.attachments)
+    && source.attachments.length > 0;
   const projected: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(source)) {
     if (isSnapshot && key === "toolsExpanded" && !capabilities.toolsExpanded) continue;
@@ -971,8 +1153,13 @@ function projectForClient(
     if (isSnapshot && key === "activeInteraction" && !capabilities.persistentInteractions) continue;
     if (key === "presentation" && !capabilities.toolPresentation && (context === "tool-event-data" || isToolResultBlock)) continue;
     if (key === "images" && !capabilities.images && imageInputContext) continue;
-    if (key === "text" && legacyImageOnlyText) {
-      projected[key] = "[Image attached]";
+    if (key === "attachments" && !capabilities.attachments) continue;
+    if (key === "text" && (legacyImageOnlyText || legacyAttachmentOnlyText)) {
+      projected[key] = legacyImageOnlyText ? "[Image attached]" : "[Attachment attached]";
+      continue;
+    }
+    if (key === "content" && legacyAttachmentOnlyContent) {
+      projected[key] = [{ type: "text", text: "[Attachment attached]" }];
       continue;
     }
     if (isEventPage && key === "events" && Array.isArray(child)) {
@@ -1150,6 +1337,9 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof ProjectTrustChallengeError) {
     return { code: error.code, message: error.message };
   }
+  if (error instanceof AttachmentNotFoundError) return { code: error.code, message: error.message };
+  if (error instanceof AttachmentIntegrityError) return { code: error.code, message: error.message };
+  if (error instanceof AttachmentUnavailableError) return { code: error.code, message: error.message };
   if (error instanceof ProtocolValidationError) return { code: error.code, message: error.message };
   if (error instanceof WorkspaceBrowseError) return { code: error.code, message: error.message, retryable: error.retryable };
   if (error instanceof CatalogListCursorStaleError) return { code: "cursor_stale", message: error.message, retryable: true };

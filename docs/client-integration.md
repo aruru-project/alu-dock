@@ -13,7 +13,7 @@ TUI / desktop / other local client ─────────┼── Protocol
                                          Agent Worker
 ```
 
-客户端负责自己的界面、鉴权、上传、本地显示状态和用户反馈。Dock 负责 instance、Agent session、operation、Queue、Extension UI 操作权和 Worker lifecycle。客户端不读取 Agent 私有 session 文件，也不接触 Worker IPC 或 runtime object。
+客户端负责自己的界面、前端鉴权、选择/预哈希文件、本地显示状态和用户反馈。Dock Host 负责 Protocol V2 attachment upload 与永久 bytes；此外还负责 instance、Agent session、operation、Queue、Extension UI 操作权和 Worker lifecycle。客户端不读取 Agent 私有 session 文件，也不接触 Worker IPC 或 runtime object。
 
 ## 连接方式
 
@@ -22,9 +22,10 @@ Protocol V2 使用本机 Unix stream socket 和 UTF-8 JSONL。每个连接的流
 1. 发送 hello，协商版本和 capabilities；
 2. hello 成功后发送一个业务 request；
 3. 普通 request 收到一个 response 后结束；
-4. `instance.follow` 和 `interaction.control` 在初始 response 后继续接收 event。
+4. `attachment.upload` 在一个 header request 后发送专用多记录 body，再收到一个 terminal response；
+5. `instance.follow` 和 `interaction.control` 在初始 response 后继续接收 event。
 
-读取、实时跟随和 Extension UI 操作使用三条独立连接。不要在一条连接上发送多个业务 request，也不要把这三种用途重新合成一条长连接。
+读取、实时跟随、attachment upload 和 Extension UI 操作使用独立连接。不要在一条连接上发送多个业务 request，也不要把这些用途重新合成一条长连接。Upload body 是 `attachment.upload` 的专用 framing，不是可复用的通用 streaming RPC。
 
 示例 hello：
 
@@ -81,7 +82,7 @@ paired client ── mutual TLS port ────┘
 - `instance.follow` / `events.follow.v2`
 - `interaction.control` / `extension_ui.control.v1`
 
-`events.follow.v2` 依赖 `instance.read.v1`。回答 Extension UI 还需要 `extension_ui.v1` 和 `extension_ui.persistent-interactions.v1`。Snapshot、图片和其他投影能力按客户端实际需要协商，不要宣称自己支持尚未实现的 capability。
+`events.follow.v2` 依赖 `instance.read.v1`。回答 Extension UI 还需要 `extension_ui.v1` 和 `extension_ui.persistent-interactions.v1`。Snapshot、图片、`attachments.v1` 和其他投影能力按客户端实际需要协商，不要宣称自己支持尚未实现的 capability。Unix socket 与 mTLS 上的 attachment wire 完全相同。
 
 ## 需要分清的身份
 
@@ -197,6 +198,59 @@ Data URI、base64 和长文本都是普通内容。客户端根据结构处理 i
 
 Web 应用通常由后端接收浏览器上传、保存为受控本机文件，再向 Dock 提交 path descriptor；浏览器本身不能把自己的文件路径交给 Dock。
 
+## 附件
+
+附件由 Host 永久保存，所有文件类型使用同一机制。它不是图片 loader、S3-style object service 或某个 Web/TUI 的临时上传目录。Host 不扫描、转换、强制 MIME、自动提取或设置 TTL；最大 decoded file size 是 **536,870,912 bytes（512 MiB / 0.5 GiB）**。本机 Unix socket 与配对后的 mTLS client 使用同一个由 Host 本机 Settings 配置的 storage directory。
+
+客户端应使用一个新的、独立的 authenticated Protocol V2 connection，并在 hello 中要求 `attachments.v1`。先本地读取文件，计算确切 `sizeBytes` 与 lowercase SHA-256；之后发送 header：
+
+```json
+{"kind":"request","version":2,"requestId":"upload-request","type":"attachment.upload","params":{"operationId":"upload-operation","name":"报告 final.pdf","sizeBytes":123456,"mediaType":"application/pdf","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}
+```
+
+新的 operation 收到 readiness：
+
+```json
+{"kind":"attachment_upload_ready","version":2,"requestId":"upload-request","hostEpoch":"host-epoch","maxChunkBytes":524288}
+```
+
+按顺序发送从 0 开始的 canonical-base64 chunks。每块 decoded bytes 不得超过 `maxChunkBytes`；当前 512 KiB 上限让 encoded JSONL frame 保持在 1 MiB control record limit 内。客户端必须对 socket backpressure 停止读取 source，而不是把 512 MiB 全部放进内存。
+
+```json
+{"kind":"attachment_chunk","version":2,"requestId":"upload-request","index":0,"data":"...canonical base64..."}
+{"kind":"attachment_complete","version":2,"requestId":"upload-request","chunks":1}
+```
+
+Host 独立计数并计算 SHA-256。只有 declared/received size 和 client/Host digest 都一致才原子发布；断开、超时或验证失败不会创建 metadata。完成 response 的 result 是：
+
+```json
+{
+  "attachment": {
+    "fileId": "123e4567-e89b-42d3-a456-426614174000",
+    "name": "报告 final.pdf",
+    "sizeBytes": 123456,
+    "mediaType": "application/pdf",
+    "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "storedAt": "2026-08-16T00:00:00.000Z"
+  },
+  "status": "stored"
+}
+```
+
+`status` 只有 `stored | reused`。相同 content digest 永久复用最先成功的 `fileId` 和 metadata，因此 response name 可能不是本次 header name。`name` 只用于显示；Host 保留 Unicode、空格、扩展名和常见标点，neutralize separator/NUL/control，并为不同内容的同名文件添加序号。客户端只能保存和显示 `AttachmentDto`，绝不能期待 absolute Host path。
+
+Upload header 的 `operationId` 遵守普通 mutation identity。相同 ID 和相同 header 的并发/重连可以直接收到进行中或已完成 receipt，此时 Host 不发送 readiness，客户端不得发送 body；同一 ID 换 header 会得到 `operation_conflict`。发送 `attachment_complete` 后 transport 失败属于结果未知：先以同一 operation/header 重连恢复；如果 Host 已不保留 receipt，可用新 operation 重新发送相同 bytes，content digest 会返回 `reused`。发送 body 前失败可以安全修复连接后重试同一 operation。
+
+提交给 Agent 时不发送 path，也不把文件名拼到 prompt：
+
+```json
+{"kind":"request","version":2,"requestId":"prompt-request","type":"command.submit","params":{"operationId":"prompt-operation","instanceId":"instance-id","message":"请检查附件","attachments":["123e4567-e89b-42d3-a456-426614174000"],"delivery":"auto"}}
+```
+
+每个 command 最多 32 个 unique `fileId`。Host 在接受命令前解析全部 ID；任一 missing/corrupt ID 使整个提交失败。Canonical `AttachmentDto[]` 会出现在 pending Queue、`message.queued`、`message.submitted`、user `message.completed` 和 persisted user conversation record 中。客户端用同一 attachment card renderer 处理这些位置，并继续按 event identity/revision 去重；它不自行从 message text 恢复附件。
+
+Agent 通过 Host reverse capability 和 `dock_attachment_resolve` 获取私有路径。外部 Protocol V2 conversation 会固定遮蔽 resolve tool 的 path；客户端没有、也不需要 attachment path API。如果文件需要在网页下载或预览，那是另一项明确的产品能力，不能从 metadata 猜 Host path。
+
 ## Extension UI
 
 只读的 `instance.read` 和 `instance.follow` 不取得 Extension UI 操作权。客户端只有在确实准备处理 interaction 时，才另开 `interaction.control` 连接。
@@ -231,7 +285,7 @@ Create、实际创建新 instance 的 ensure、adopt、reopen 或跨项目 sessi
 
 ## Web 平台补充
 
-Web backend 负责浏览器鉴权、HTTP/WebSocket、上传、页面状态和用户可见反馈。浏览器只连接 Web backend，不接触 Dock socket。`leaseToken`、本机文件路径和其他本机凭证不能发送给浏览器。
+Web backend 负责浏览器鉴权、HTTP/WebSocket ingress、逐块读取与预哈希、页面状态和用户可见反馈。浏览器只连接 Web backend，不接触 Dock socket；backend 再用上述 Protocol V2 upload stream 把 bytes 交给 Host，不长期建立第二份应用私有附件库。`leaseToken`、Host attachment path 和其他本机凭证不能发送给浏览器；浏览器只接收 path-free `AttachmentDto`。
 
 浏览器 reload/F5 会丢失本地 conversation，因此按 fresh bootstrap 处理。某个浏览器页面不支持某项 capability，只是这个客户端的能力边界，不影响 Dock 或其他客户端。
 

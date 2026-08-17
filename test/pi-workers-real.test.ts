@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
+import { appendDockAttachmentContext } from "../src/pi/dock-attachment-context.js";
 import { RuntimeEffectUnknownError } from "../src/core/managed-instance.js";
 import { PiWorkerProcess } from "../src/pi/worker-process.js";
 import { OrderedWorkerSender, WorkerFrameReceiver, type WorkerIdentity } from "../src/pi/worker-protocol.js";
@@ -24,7 +25,10 @@ test("real Pi Worker projects persisted session entries into canonical conversat
   const root = await mkdtemp(join(tmpdir(), "alu-dock-conversation-records-"));
   const cwd = join(root, "cwd");
   const sessionDir = join(root, "sessions");
-  await Promise.all([mkdir(cwd), mkdir(sessionDir)]);
+  const agentDir = join(root, "agent");
+  const attachmentContextKey = Buffer.alloc(32, 7);
+  await Promise.all([mkdir(cwd), mkdir(sessionDir), mkdir(agentDir)]);
+  await writeFile(join(agentDir, ".alu-dock-attachment-context-key"), `${attachmentContextKey.toString("base64")}\n`, { mode: 0o600 });
   context.after(() => rm(root, { recursive: true, force: true }));
 
   const manager = SessionManager.create(cwd, sessionDir);
@@ -48,6 +52,16 @@ test("real Pi Worker projects persisted session entries into canonical conversat
     role: "bashExecution", command: "printf ok", output: "ok", exitCode: 0,
     cancelled: false, truncated: false, timestamp: 4,
   } as SessionMessage);
+  const attachment = {
+    fileId: "123e4567-e89b-42d3-a456-426614174000", name: "private notes.txt", sizeBytes: 12,
+    mediaType: "text/plain", sha256: "a".repeat(64), storedAt: "2026-08-16T00:00:00.000Z",
+  };
+  manager.appendMessage({ role: "user", content: [{ type: "text", text: appendDockAttachmentContext("attachment question", [attachment], attachmentContextKey) }], timestamp: 5 } as SessionMessage);
+  manager.appendMessage({
+    role: "toolResult", toolCallId: "attachment-resolve", toolName: "dock_attachment_resolve",
+    content: [{ type: "text", text: "Attachment is available at '/private/host/attachments/private notes.txt'." }],
+    isError: false, details: { type: "resolve", attachment }, timestamp: 6,
+  } as SessionMessage);
   manager.appendCustomMessageEntry("visible-extension", [{ type: "text", text: "extension says hi" }], true, { decision: "keep" });
   manager.appendCustomMessageEntry("hidden-extension", "private state", false, { secret: true });
   manager.appendCustomEntry("extension-state", { count: 2 });
@@ -60,7 +74,7 @@ test("real Pi Worker projects persisted session entries into canonical conversat
   assert.ok(sessionFile);
   const instance = await createPiInstance({
     id: "canonical-records", hostEpoch: "canonical-records-host", creationOperationId: "canonical-records-create",
-    cwd, agentDir: join(root, "agent"), sessionDir, sessionFile,
+    cwd, agentDir, sessionDir, sessionFile,
     projectTrusted: false, tools: [],
   });
   try {
@@ -92,6 +106,17 @@ test("real Pi Worker projects persisted session entries into canonical conversat
     assert.equal(records.find((record) => record.kind === "thinking_level_change")?.thinkingLevel, "high");
     assert.equal(records.find((record) => record.kind === "session_info")?.name, "Canonical records");
     assert.equal(records.find((record) => record.kind === "label")?.label, "checkpoint");
+    const attachmentUser = records.find((record) => record.source === "user" && record.attachments !== undefined);
+    assert.deepEqual(attachmentUser?.attachments, [attachment]);
+    assert.deepEqual(attachmentUser?.content, [{ type: "text", text: "attachment question" }]);
+    const attachmentTool = records.find((record) => record.toolName === "dock_attachment_resolve");
+    assert.doesNotMatch(JSON.stringify(attachmentTool), /private\/host/u);
+
+    const conversation = await instance.getConversationHistory(undefined, 50);
+    for (const item of conversation.entries.filter(({ entry }) => entry.recordId === attachmentUser?.recordId || entry.recordId === attachmentTool?.recordId)) {
+      const content = await instance.getConversationContent(item.contentRef);
+      assert.doesNotMatch(JSON.stringify(content), /private\/host|alu_dock_attachments_v1/u);
+    }
   } finally {
     await instance.disposeUnpublished();
   }

@@ -1,3 +1,5 @@
+export * from "./control/attachment-service.js";
+export * from "./control/attachment-storage-state.js";
 export * from "./control/catalog-transactions.js";
 export * from "./control/dock-client.js";
 export * from "./control/dock-host.js";
@@ -8,6 +10,7 @@ export * from "./control/project-trust.js";
 export * from "./control/remote-pairing.js";
 export * from "./control/socket-path.js";
 export * from "./core/catalog.js";
+export * from "./core/instance-attachments.js";
 export {
   SETTING_DEFINITIONS,
   SETTING_KEYS,

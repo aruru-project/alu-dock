@@ -7,18 +7,18 @@ Alu Dock 的 SSH 界面由两个客户端 surface 组成：
 - **Hub**：创建、继续和管理 Dock instance；
 - **Session Work**：连接一个 instance，与当前 Agent session 交互。
 
-Hub 和 Work 的 Agent 工作能力都通过 DockClient 和 Protocol V2 使用 Host Service，不持有 Agent runtime，也不读取 Agent 私有 session 文件。只有 Hub 中的本机 service-management 页面例外：Remote Settings 与 Pairing 直接读写当前用户的私有 Host state，由 managed Host 观察并应用；它们不经过 DockClient，也不形成可供远程调用的管理协议。
+Hub 和 Work 的 Agent 工作能力都通过 DockClient 和 Protocol V2 使用 Host Service，不持有 Agent runtime，也不读取 Agent 私有 session 文件。只有 Hub 中的本机 service-management 页面例外：Remote Settings、attachment storage directory 与 Pairing 直接读写当前用户的私有 Host state，由 managed Host 观察并应用；它们不经过 DockClient，也不形成可供远程调用的管理协议。
 
 ```text
 Hub / Work ───── Protocol V2 ──────── Host control/session gateway ── Worker
-Hub Settings/Pairing ── local private state ── managed Host TLS ingress
+Hub Settings/Pairing ── local private state ── managed Host network/storage authority
 ```
 
 ## Hub
 
 Hub 的主要对象是 Dock instance。它提供 New、Continue、History、persisted sessions、Settings、Pairing 和 Leave 等入口，但打开 Hub 本身不创建 runtime。
 
-Settings 管理默认关闭的远程访问开关和端口，并显示 Host 是否已经开始监听。Pairing 默认关闭；用户必须在本机明确确认“Open Pairing Window”，才会在五分钟内显示此后到达的设备请求。一次只能把用户选中的一个设备推进到 PIN/证书证明；成功、证明失败、手动关闭、超时或 Host 重启都会关闭窗口并清除 provisional 请求。
+Settings 管理默认关闭的远程访问开关、端口和永久 attachment directory，并显示 Host 是否已经开始监听。目录输入必须是 Host 上的绝对路径；设置归 Host storage authority，TUI 不保存上传 bytes，也不向远程 API 暴露设置。已有附件时页面拒绝直接切换到另一空目录，避免让既有 `fileId` 静默失效。Pairing 默认关闭；用户必须在本机明确确认“Open Pairing Window”，才会在五分钟内显示此后到达的设备请求。一次只能把用户选中的一个设备推进到 PIN/证书证明；成功、证明失败、手动关闭、超时或 Host 重启都会关闭窗口并清除 provisional 请求。
 
 Pairing 中用户选择设备、输入客户端显示的四位 PIN 并明确确认，也可以查看和吊销既有设备。列表项来自 Host 保存的短期 metadata，不对应等待中的 socket；客户端请求已经响应并关闭。主界面只显示窗口是否开放、设备名、时间、当前结果和下一步动作，不展示证书 fingerprint、pairing ID、SRP、内部 revision 或其他实现状态。已完成的设备信任持久保留，直到用户撤销。
 
@@ -54,7 +54,7 @@ Conversation 按 Agent 的真实 record kind、source、visibility 和 content s
 
 History record 和 live event 不做文本匹配或身份认领。在线的 completed component 直接留在本地画面；未来 fresh bootstrap 才用持久 record 替代它。Bootstrap 与加载期间的 event overlap 只按 `(runtimeGeneration, sequence)` 去重；内容相同的两个 turn 或 tool result 仍是两个事实。generation、Host epoch、ring continuity 或本地状态不一致时，必须 reset 后 bootstrap，不能混合两个边界补洞。历史分页也固定在 bootstrap 的 `historyRevision`；中途 checkpoint 改变 revision 时放弃该次 scan，不能将新旧 branch snapshot 拼接。
 
-Thinking、tool call/result、custom message、image、bash、compaction/branch summary 和普通文本是不同内容结构。TUI 可以按 visibility 隐藏 record、折叠或做 preview，但不能修改底层语义；需要完整内容时继续通过 Protocol V2 获取。
+Thinking、tool call/result、custom message、image、attachment、bash、compaction/branch summary 和普通文本是不同内容结构。用户消息中的 attachment card 使用 Protocol V2 `AttachmentDto` 显示清洗后的名称、大小和可选 media type；TUI 不接收或推导 Host storage path。Queue、live event 和 fresh history bootstrap 使用同一 metadata，不把文件名拼进 prompt 文本来猜附件。Queue dequeue 恢复到 editor 时，Work 在本地 draft state 保留 opaque IDs，并在下一次提交继续使用 structured attachments；`/attachments` 可查看、`/attachments clear` 可明确移除，不能静默丢失或转写成普通 prompt 字符串。TUI 可以按 visibility 隐藏 record、折叠或做 preview，但不能修改底层语义；需要完整内容时继续通过 Protocol V2 获取。
 
 ## Extension UI
 

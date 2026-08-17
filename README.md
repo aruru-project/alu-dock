@@ -25,6 +25,7 @@ Hub / Work / Web / future clients
 - Protocol V2 的权威读取、实时跟随、断线恢复和操作去重；
 - Rails/Web 后端可使用的本机 Unix socket 接口；
 - 默认关闭、由本机 Hub 配置和配对的 mutual-TLS 网络入口；
+- Unix socket 与 mTLS 共用的永久、hash-verified attachment upload 和 Agent 文件工具；
 - 显式 `systemd --user` service 管理。
 
 ## 快速开始
@@ -71,6 +72,12 @@ aludock service logs --lines 200
 5. 配对成功后，客户端使用双方长期证书连接同一套 Protocol V2。
 
 私有 Unix socket 不使用 TLS 或配对，并继续按原方式工作。网络地址和端口不是设备身份；同一客户端和 Host 保留原证书时，切换局域网地址、域名或 NAT 映射不要求重新配对。Pairing、Settings 和吊销只能在 Host 本机 Hub 操作，远程 Protocol V2 客户端不能调用。
+
+## 文件附件
+
+Hub **Settings → Attachment directory** 配置 Host 上的永久 storage root；默认是 `${XDG_DATA_HOME:-~/.local/share}/alu-dock/attachments`。本机和已配对客户端都通过 `attachments.v1` 分块上传，最大 512 MiB，声明 size/SHA-256 后由 Host 独立验证并按内容复用。客户端只收到 opaque `fileId`、名称、大小、可选 media type、digest 和存储时间，永远不收到 Host path。
+
+`command.submit` 用 structured file IDs 关联附件；Queue、live conversation 和 history 显示同一 metadata。Pi 通过内建 `dock_attachment_list` / `dock_attachment_resolve` 工具按需访问，并在修改或解压前先复制永久原件。详细 wire contract 见[客户端接入文档](docs/client-integration.md#附件)。
 
 ## 从源码运行
 

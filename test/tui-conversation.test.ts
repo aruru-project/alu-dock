@@ -133,7 +133,7 @@ test("full flowing conversation render includes the complete ordered transcript"
   assert.match(rendered, /live entry 250/u);
 });
 
-test("conversation renders live and historical user image metadata without blank turns", () => {
+test("conversation renders live and historical image and attachment metadata without blank turns", () => {
   const live = new DockConversation();
   live.apply(event(1, "message.submitted", {
     operationId: "image-only",
@@ -150,6 +150,24 @@ test("conversation renders live and historical user image metadata without blank
     historyRecord("historical-image", "user", [{ type: "text", text: "caption" }, { type: "image", mimeType: "image/webp" }]),
   ], false);
   assert.deepEqual(historical.snapshot(), [{ kind: "user", text: "caption\n\n[Image 1 · image/webp]", complete: true }]);
+
+  const attachment = {
+    fileId: "123e4567-e89b-42d3-a456-426614174000", name: "报告 final.pdf", sizeBytes: 1_572_864,
+    mediaType: "application/pdf", sha256: "a".repeat(64), storedAt: "2026-08-16T00:00:00.000Z",
+  };
+  const attachmentConversation = new DockConversation();
+  attachmentConversation.apply(event(2, "message.submitted", {
+    operationId: "attachment-only", messageId: "attachment-only", role: "user", text: "",
+    attachments: [attachment], delivery: "prompt",
+  }));
+  assert.deepEqual(attachmentConversation.snapshot(), [{
+    kind: "user", text: "[Attachment · 报告 final.pdf · 1.5 MiB · application/pdf]", complete: true,
+  }]);
+  const historicalAttachment = new DockConversation();
+  historicalAttachment.applyHistory([historyRecord("historical-attachment", "user", [{ type: "text", text: "inspect" }], { attachments: [attachment] })], false);
+  assert.deepEqual(historicalAttachment.snapshot(), [{
+    kind: "user", text: "inspect\n\n[Attachment · 报告 final.pdf · 1.5 MiB · application/pdf]", complete: true,
+  }]);
 });
 
 test("conversation reset replaces old session history", () => {
@@ -728,6 +746,15 @@ test("pending queue tray follows Pi consumption order and leaves the transcript 
     steering: 0, followUp: 1, total: 1, queueItemIds: ["follow-1"], reason: "dequeued",
   }));
   assert.equal(tray.count, 0);
+  tray.apply(event(5, "message.queued", {
+    queueItemId: "attachment-1", operationId: "op-attachment", delivery: "followUp", text: "",
+    attachments: [{
+      fileId: "123e4567-e89b-42d3-a456-426614174000", name: "notes final.txt", sizeBytes: 2_048,
+      sha256: "a".repeat(64), storedAt: "2026-08-16T00:00:00.000Z",
+    }],
+    acceptedAt: "2026-07-14T00:00:03.000Z",
+  }));
+  assert.match(tray.render(80).join("\n"), /attachment: notes final\.txt \(2\.0 KiB\)/u);
 });
 
 

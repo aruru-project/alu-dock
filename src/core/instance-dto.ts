@@ -1,4 +1,6 @@
 import type { DiagnosticDto, ResourceDto, SettingValueMap } from "./config-projection.js";
+import type { AttachmentDto } from "./instance-attachments.js";
+export type { AttachmentDto } from "./instance-attachments.js";
 import type { AgentSessionMetrics, ThinkingLevel } from "./agent-worker.js";
 import type { BuiltInToolPresentation } from "./tool-result-presentation.js";
 
@@ -39,6 +41,7 @@ export const MAX_INPUT_IMAGES = 10;
 export const MAX_IMAGE_PATH_CHARS = 16_384;
 export const MAX_IMAGE_MIME_TYPE_CHARS = 256;
 export const MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS = 512_000;
+export const MAX_PENDING_QUEUE_ATTACHMENT_DESCRIPTOR_CHARS = 512_000;
 export const MAX_IMAGE_BYTES = 20 * 1_024 * 1_024;
 export const MAX_IMAGE_AGGREGATE_BYTES = 80 * 1_024 * 1_024;
 
@@ -49,6 +52,7 @@ export interface PendingMessageDto {
   delivery: "steer" | "followUp";
   text: string;
   images?: ImagePathDto[];
+  attachments?: AttachmentDto[];
   acceptedAt: string;
 }
 export type ConversationRecordKind =
@@ -76,6 +80,7 @@ export interface ConversationRecordDto {
   visibility: ConversationRecordVisibility;
   timestamp?: string;
   content: ContentBlockDto[];
+  attachments?: AttachmentDto[];
   stopReason?: string;
   error?: string;
   toolCallId?: string;
@@ -203,9 +208,9 @@ export interface EventDataMap {
   "run.retry_completed": { success: boolean; attempt: number; error?: string };
   "run.settled": { operationId?: string; result: LastRunResult; stopReason?: string; error?: string };
   "message.queued": PendingMessageDto;
-  "message.submitted": { operationId: string; messageId: string; role: "user"; text: string; images?: ImagePathDto[]; delivery: "prompt" | "steer" | "followUp"; queueItemId?: string };
+  "message.submitted": { operationId: string; messageId: string; role: "user"; text: string; images?: ImagePathDto[]; attachments?: AttachmentDto[]; delivery: "prompt" | "steer" | "followUp"; queueItemId?: string };
   "message.delta": { messageId: string; block: "text" | "thinking"; delta: string };
-  "message.completed": { messageId: string; role: "user" | "assistant" | "tool" | "system"; content: ContentBlockDto[]; stopReason?: string; error?: string };
+  "message.completed": { messageId: string; role: "user" | "assistant" | "tool" | "system"; content: ContentBlockDto[]; attachments?: AttachmentDto[]; stopReason?: string; error?: string };
   "tool.started": { toolCallId: string; toolName: string; args: JsonObject; omittedFields?: string[] };
   "tool.args_updated": { toolCallId: string; args: JsonObject; omittedFields?: string[] };
   "tool.output_updated": { toolCallId: string; text: string; presentation?: BuiltInToolPresentation };

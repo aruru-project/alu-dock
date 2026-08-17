@@ -2937,6 +2937,33 @@ test("real Host streams reset sequence ordering at a replacement generation", as
 
 
 
+test("Host correlates malformed post-hello requests with their supplied request ID", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const socket = createConnection(harness.socketPath);
+  const decoder = new JsonLineDecoder();
+  const frames: Array<Record<string, unknown>> = [];
+  socket.on("data", (chunk: Buffer) => {
+    for (const line of decoder.push(chunk)) frames.push(JSON.parse(line) as Record<string, unknown>);
+  });
+  await new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
+  socket.write(encodeJsonLine({
+    kind: "hello", requestId: "correlation-hello", versions: [2],
+    client: { name: "correlation-test", version: "0.1.0", clientId: "correlation-client" },
+    requiredCapabilities: ["core.v2"],
+  }));
+  const deadline = Date.now() + 5_000;
+  while (frames.length < 1 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(frames[0]?.kind, "hello_ack");
+  socket.write(encodeJsonLine({ kind: "request", version: 2, requestId: "malformed-correlated", type: "instance.get", params: {} }));
+  while (frames.length < 2 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(frames[1]?.kind, "response");
+  assert.equal(frames[1]?.requestId, "malformed-correlated");
+  assert.equal((frames[1]?.error as { code?: unknown } | undefined)?.code, "invalid_request");
+  socket.destroy();
+});
+
 test("client rejects a non-handshake frame before operations", async (context) => {
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-malformed-"));
   await chmod(directory, 0o700);

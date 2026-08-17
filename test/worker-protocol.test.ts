@@ -137,6 +137,34 @@ test("private Worker conversation boundary accepts checkpoints and canonical per
   }), /byte limit/i);
 });
 
+test("private Worker attachment calls are closed and keep paths on resolve only", () => {
+  const attachment = {
+    fileId: "123e4567-e89b-42d3-a456-426614174000",
+    name: "report final.pdf",
+    sizeBytes: 42,
+    mediaType: "application/pdf",
+    sha256: "b".repeat(64),
+    storedAt: "2026-08-16T00:00:00.000Z",
+  };
+  assert.ok(ORDINARY_REVERSE_WORKER_CAPABILITIES.includes("dock.attachments"));
+  validateUiCapabilityArgs("dock.attachments", { request: { type: "list" } });
+  validateUiCapabilityArgs("dock.attachments", { request: { type: "resolve", fileId: attachment.fileId } });
+  assert.throws(() => validateUiCapabilityArgs("dock.attachments", { request: { type: "resolve", fileId: attachment.fileId, sourceInstanceId: "forged" } }), /unknown field/i);
+  validateDockCapabilityResult("dock.attachments", { type: "list", attachments: [attachment], total: 1, truncated: false });
+  assert.throws(() => validateDockCapabilityResult("dock.attachments", { type: "list", attachments: [{ ...attachment, path: "/forged" }], total: 1, truncated: false }), /unknown field/i);
+  validateDockCapabilityResult("dock.attachments", { type: "resolve", attachment, path: "/private/store/report final.pdf" });
+  assert.throws(() => validateDockCapabilityResult("dock.attachments", { type: "resolve", attachment, path: "relative.pdf" }), /absolute/i);
+  assert.throws(() => validateDockCapabilityResult("dock.attachments", { type: "list", attachments: [attachment], total: 2, truncated: false }), /completeness/i);
+
+  const requestWithContext = parseWorkerEnvelope(agentCall("command.submit", {
+    operationId: "attachment-op", instanceId: "instance-test", message: "inspect", attachments: [attachment.fileId], delivery: "prompt",
+  }, { context: { type: "command", attachments: [attachment] } }));
+  assert.equal(requestWithContext.kind === "agent_request" ? requestWithContext.context?.type : undefined, "command");
+  assert.throws(() => parseWorkerEnvelope(agentCall("command.submit", {
+    operationId: "attachment-op", instanceId: "instance-test", message: "inspect", attachments: [attachment.fileId], delivery: "prompt",
+  })), /does not match/i);
+});
+
 test("private Worker observation calls are closed, source-bound, and validate bounded results", () => {
   validateUiCapabilityArgs("dock.observation.configure", { enabled: true, operationId: "grant-one" });
   assert.throws(() => validateUiCapabilityArgs("dock.observation.configure", {

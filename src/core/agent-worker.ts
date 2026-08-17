@@ -8,6 +8,7 @@ import type {
   ToolDto,
 } from "./config-projection.js";
 import type { ConversationRecordDto } from "./instance-dto.js";
+import type { AttachmentDto } from "./instance-attachments.js";
 import type { ControlRequest } from "../control/protocol.js";
 import type { ObservationNotification } from "./instance-observation.js";
 
@@ -322,8 +323,9 @@ export interface AgentWorkerState {
 /** Host-resolved facts carried only on the private invoke envelope. */
 export type AgentInvokeContext =
   | { type: "session_switch"; canonicalCwd: string; projectTrusted: boolean }
-  | { type: "force_queue" }
-  | { type: "host_queue" };
+  | { type: "command"; attachments: AttachmentDto[] }
+  | { type: "force_queue"; attachments?: AttachmentDto[] }
+  | { type: "host_queue"; attachments?: AttachmentDto[] };
 
 export type AgentCommandPreflightResult =
   | { success: false }

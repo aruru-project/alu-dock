@@ -71,6 +71,22 @@ Pi 是当前成熟基底。真实工作需要且 Pi 已经具备的能力，应�
 
 Pi 的 abort 会等待 Agent 回到 idle；如果客户端没有先恢复 Queue，已排队输入可以在当前输出终止后合法启动下一轮，因此 abort 的完成时间不是 Worker 存活探针。Host 不因 abort 尚未返回而切断 Worker。需要像 Pi TUI 一样把排队文本恢复到输入框的客户端，应先调用既有 Queue dequeue，再在确认没有正在进入 Pi 消费的消息后 abort；Host 不替客户端合并这两个不同意图。Compaction 只是运行中的暂停边界：completed 后 Pi 自己的 retry、extension/guard continuation 仍按原生顺序继续，Host-deferred Queue 在第一个合法时机自动交付，不能抢断 continuation，也不依赖任何客户端在线。
 
+### Agent-facing Host capability pattern
+
+Agent 需要访问 Host-owned 事实时，复用 observation 已建立的 reverse-capability 形状，而不是增加 Worker 直连、把 Host object proxy 进 runtime，或建立通用任意 RPC：
+
+1. `src/core/` 定义一项 capability-specific HostPort 与 Dock 已有 DTO；
+2. Registry 在创建/reopen Worker 时注入 HostPort；
+3. `AgentWorkerConnection` 只从已认证连接上下文取得 `sourceInstanceId`，并继续使用 host epoch、runtime generation、worker incarnation 和 ordered private envelope fencing；Worker request 不能自行声明 caller identity；
+4. Worker bootstrap 只在 Host 授予对应 `dock.*` capability 时建立一个小型 bridge；
+5. Agent adapter 用 inline extension/tool 或其他 runtime-native API 暴露能力，需要长期使用说明时随包装载 bundled Skill。
+
+每项能力保留自己的 closed request/result、bounds 和授权规则。不要把 observation 的 grant/watch 语义套给其他能力，也不要把这个 pattern 扩张成第二套 Protocol V2。公开业务 DTO 仍只在 Protocol V2 定义一次；private envelope 只验证 source binding、路径等 Host-private fact 和跨进程边界。
+
+`dock.attachments` 是这个 pattern 的第二个实现，而且始终随 managed Worker 提供。`command.submit` 的 full attachment metadata 通过 private invoke context 与公开 file IDs 做逐项一致性检查；Pi adapter 把一个明确的 untrusted metadata block 放进原生 prompt，同时在 live/history projection 中恢复干净文本和 `AttachmentDto[]`。该内部 block 由 Worker 使用 agent state 中持久、`0600` 的随机 key 做 HMAC 认证；普通 prompt 即使复制相同文本形状也不能伪造 attachment provenance，认证失败的文本不会被静默剥离。Host path 不进入 invoke context、Queue 或 conversation。
+
+Pi inline extension 提供 `dock_attachment_list` 和 `dock_attachment_resolve`。list 只返回 path-free metadata；resolve 通过当前 authenticated Worker 的 reverse call 让 Host 检查文件后，把一个 absolute path 只交给 Agent tool result。外部 conversation projector 对 resolve tool text 做固定 redaction，structured details 也不含 path。Bundled `dock-attachments` Skill 指导 Agent 在修改、转换或解压前，把原文件复制到 workspace 或临时目录并保留永久原件；文件名、media type 和内容一律是不可信数据。它不把任意文件塞进 Pi 的 image-only loader，也不假装提供 UID 之外的沙箱。
+
 Pi Worker 内建 `/dock-observe on|off|status`。configure reverse capability 始终存在，但 Host 只有在 durable grant 为 on 时才授予 observation reverse capability；off 时 `dock_inspect`、`dock_watch`、`dock_cancel_watch` 不在 active tool set。显式配置变化可以重建一次 tool system prompt，但 adapter 不逐 turn 改 prompt，并在 reload/rebind 后从 Worker-level capability state 恢复。
 
 Pi observation client 面向 Agent 而不是面向人类 UI：它把 Host 返回的 canonical message page 渲染成短小的 `target_user / target_assistant / target_other` 引用流，每行 sibling 内容都处于明确的 untrusted quote 边界；结构化 DTO 只留在 tool details，不把 JSON、TUI reconnect event、thinking、tool call/result 或 Host metadata dump 放进模型上下文。默认读取最近一条，Agent 只有在主人需要更早内容时才使用 continuation cursor。
@@ -97,7 +113,8 @@ Agent 出现新的真实能力时，在 Protocol V2 定义一次，由提供该�
 
 ## 代码范围
 
-- `src/pi/`：当前 Pi Worker、Pi adapter 与 Worker 进程实现。
+- `src/pi/`：当前 Pi Worker、Pi adapter、Dock capability extensions 与 Worker 进程实现。
+- `skills/dock-attachments/`：随包发布的 Agent 使用说明。
 - `src/control/`：Host control、Worker supervision 与 session routing。
 - `src/core/`：Dock 自己的协议数据与跨实现概念，不依赖 Pi runtime。
 - `src/tui/`：SSH 客户端，不持有 Agent runtime。

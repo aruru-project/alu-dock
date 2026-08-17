@@ -52,13 +52,26 @@ export class PendingQueueTray implements Component {
       const text = item.text
         .replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/gu, "")
         .replace(/\s+/gu, " ")
-        .trim() || "(empty)";
-      return truncateToWidth(`${prefix}${paint.primary(text)}`, width);
+        .trim();
+      const attachments = item.attachments ?? [];
+      const attachmentSummary = attachments.length === 0
+        ? ""
+        : attachments.length === 1
+          ? `attachment: ${attachments[0]!.name} (${formatBytes(attachments[0]!.sizeBytes)})`
+          : `${attachments.length} attachments · ${attachments[0]!.name}`;
+      const summary = [text, attachmentSummary].filter((part) => part.length > 0).join(" · ") || "(empty)";
+      return truncateToWidth(`${prefix}${paint.primary(summary)}`, width);
     });
     const hidden = this.items.length - visible.length;
     if (hidden > 0) lines.push(truncateToWidth(paint.queue(`  ↳ +${hidden} more pending`), width));
     return lines;
   }
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_024 * 1_024) return `${(bytes / 1_024).toFixed(bytes < 10 * 1_024 ? 1 : 0)} KiB`;
+  return `${(bytes / (1_024 * 1_024)).toFixed(bytes < 10 * 1_024 * 1_024 ? 1 : 0)} MiB`;
 }
 
 function ordered(items: PendingMessageDto[]): PendingMessageDto[] {

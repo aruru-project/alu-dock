@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { randomBytes, X509Certificate } from "node:crypto";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { createHash, randomBytes, X509Certificate } from "node:crypto";
+import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import { createConnection as createNetConnection, createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,8 @@ import { connect, type TLSSocket } from "node:tls";
 import test from "node:test";
 
 import { DockClient } from "../src/control/dock-client.js";
+import { AttachmentService } from "../src/control/attachment-service.js";
+import { AttachmentStorageState } from "../src/control/attachment-storage-state.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
 import { encodeJsonLine } from "../src/control/json-lines.js";
@@ -133,10 +135,12 @@ test("local pairing window admits an exact certificate to the existing Protocol 
   const clientIdentity = await clientIdentityState.ensureHostIdentity();
   const clientCertificate = new X509Certificate(clientIdentity.certificatePem);
   const port = await reservePort();
+  const configuredAttachmentDirectory = join(directory, "Hub configured attachments");
+  const attachmentService = new AttachmentService(new AttachmentStorageState(join(stateHome, "alu-dock"), join(directory, "attachments")));
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => (
     new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedAgentWorkerConnection(`pi-${id}`) })
-  ));
-  const host = new DockHost({ socketPath, registry, remoteAccessState: state });
+  ), undefined, { attachmentHostPort: attachmentService });
+  const host = new DockHost({ socketPath, registry, remoteAccessState: state, attachmentService });
   context.after(async () => {
     await host.stop().catch(() => {});
     await rm(directory, { recursive: true, force: true });
@@ -149,6 +153,9 @@ test("local pairing window admits an exact certificate to the existing Protocol 
   assert.match(settingsPty.output, /Remote Access Settings/u);
   assert.match(settingsPty.output, /Remote access is being enabled/u);
   await waitFor(async () => (await state.readStatus())?.state === "listening");
+  const attachmentSettingsPty = await runHubPty(socketPath, "hub-attachment-settings", stateHome, { ALU_DOCK_PTY_ATTACHMENT_DIR: configuredAttachmentDirectory });
+  assertPty(attachmentSettingsPty);
+  assert.match(attachmentSettingsPty.output, /Attachment directory saved:/u);
 
   const handshakeStart = Date.now();
   const stalledHandshake = createNetConnection({ host: "::1", port });
@@ -295,6 +302,33 @@ test("local pairing window admits an exact certificate to the existing Protocol 
   assert.equal(response.kind, "response");
   assert.equal(record(response.result).state, "ready");
   trusted.destroy();
+
+  const uploadBytes = Buffer.from("remote attachment bytes");
+  const uploadDigest = createHash("sha256").update(uploadBytes).digest("hex");
+  const upload = await openTls("::1", port, clientIdentity, hostCertificateRaw);
+  const uploadReader = new LineReader(upload);
+  upload.write(encodeJsonLine({ ...record(hello("upload-hello")), requiredCapabilities: ["attachments.v1"] }));
+  assert.equal(record(await uploadReader.next()).kind, "hello_ack");
+  upload.write(encodeJsonLine({ kind: "request", version: 2, requestId: "remote-upload", type: "attachment.upload", params: {
+    operationId: "remote-upload-operation", name: "remote file.bin", sizeBytes: uploadBytes.length, sha256: uploadDigest,
+  } }));
+  assert.equal(record(await uploadReader.next()).kind, "attachment_upload_ready");
+  upload.write(encodeJsonLine({ kind: "attachment_chunk", version: 2, requestId: "remote-upload", index: 0, data: uploadBytes.toString("base64") }));
+  upload.write(encodeJsonLine({ kind: "attachment_complete", version: 2, requestId: "remote-upload", chunks: 1 }));
+  const uploadResponse = record(await uploadReader.next());
+  assert.equal(uploadResponse.kind, "response");
+  assert.equal(uploadResponse.ok, true);
+  const uploadResult = record(uploadResponse.result);
+  assert.equal(uploadResult.status, "stored");
+  const uploadedAttachment = record(uploadResult.attachment);
+  assert.equal(uploadedAttachment.sha256, uploadDigest);
+  const resolvedUpload = await attachmentService.accessAttachments("remote-instance", { type: "resolve", fileId: uploadedAttachment.fileId as string });
+  assert.equal(resolvedUpload.type, "resolve");
+  if (resolvedUpload.type === "resolve") {
+    assert.ok(resolvedUpload.path.startsWith(`${configuredAttachmentDirectory}/`));
+    assert.deepEqual(await readFile(resolvedUpload.path), uploadBytes);
+  }
+  upload.destroy();
 
   const held = await openTls("::1", port, clientIdentity, hostCertificateRaw);
   const heldReader = new LineReader(held);
@@ -490,7 +524,7 @@ async function pairingRequest(
 
 async function runHubPty(
   socketPath: string,
-  action: "hub-remote-settings" | "hub-pairing-open" | "hub-pairing" | "hub-revoke",
+  action: "hub-remote-settings" | "hub-attachment-settings" | "hub-pairing-open" | "hub-pairing" | "hub-revoke",
   stateHome: string,
   environment: Record<string, string> = {},
 ): Promise<HubPtyResult> {

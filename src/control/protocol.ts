@@ -1,4 +1,14 @@
 import type { InteractionResponse } from "../core/extension-ui-broker.js";
+import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENT_CHUNK_BYTES,
+  MAX_ATTACHMENT_FILE_ID_CHARS,
+  MAX_ATTACHMENT_IDS_PER_COMMAND,
+  MAX_ATTACHMENT_MEDIA_TYPE_CHARS,
+  MAX_ATTACHMENT_NAME_CHARS,
+  type AttachmentDto,
+  type AttachmentUploadResult,
+} from "../core/instance-attachments.js";
 import { MAX_INSTANCE_DISPLAY_NAME_CHARS } from "../core/instance-display-name.js";
 import {
   validateBuiltInToolPresentation,
@@ -8,6 +18,7 @@ import {
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
   MAX_INPUT_IMAGES,
+  MAX_PENDING_QUEUE_ATTACHMENT_DESCRIPTOR_CHARS,
   MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS,
   MAX_PENDING_QUEUE_ITEMS,
   MAX_PENDING_QUEUE_TEXT_CHARS,
@@ -92,8 +103,10 @@ export const INSTANCE_KEYS_CAPABILITY = "instance.keys.v1" as const;
 export const INSTANCE_DISPLAY_NAME_CAPABILITY = "instance.display-name.v1" as const;
 export const CONVERSATION_CONTENT_CAPABILITY = "conversation.content.v1" as const;
 export const WORKSPACE_LIST_CAPABILITY = "workspace.list.v1" as const;
+export const ATTACHMENTS_CAPABILITY = "attachments.v1" as const;
 
 export const IMPLEMENTED_CAPABILITIES = [
+  ATTACHMENTS_CAPABILITY,
   "catalog.maintenance.v1",
   "catalog.v1",
   CONVERSATION_CONTENT_CAPABILITY,
@@ -171,6 +184,7 @@ export type HelloError = {
 type Request<T extends string, P> = { kind: "request"; version: 2; requestId: string; type: T; params: P };
 export type ControlRequest =
   | Request<"host.info", Record<string, never>>
+  | Request<"attachment.upload", { operationId: string; name: string; sizeBytes: number; mediaType?: string; sha256: string }>
   | Request<"instance.create", { operationId: string; cwd: string; name?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.ensure", { operationId: string; key: string; cwd: string; name?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.adopt", { operationId: string; sessionFile: string; name?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
@@ -187,7 +201,7 @@ export type ControlRequest =
   | Request<"interaction.respond", { operationId: string; instanceId: string; leaseToken: string; interactionId: string; response: InteractionResponse }>
   | Request<"extension.tools_expanded.set", { operationId: string; instanceId: string; expectedRuntimeGeneration: number; expanded: boolean }>
   | Request<"extension.widget_viewport.set", { instanceId: string; leaseToken: string; expectedRuntimeGeneration: number; width: number; height: number }>
-  | Request<"command.submit", { operationId: string; instanceId: string; message: string; images?: ImagePathDto[]; delivery: DeliveryMode }>
+  | Request<"command.submit", { operationId: string; instanceId: string; message: string; images?: ImagePathDto[]; attachments?: string[]; delivery: DeliveryMode }>
   | Request<"command.abort", { operationId: string; instanceId: string }>
   | Request<"queue.dequeue", { operationId: string; instanceId: string }>
   | Request<"model.list", { instanceId: string }>
@@ -220,6 +234,28 @@ export type ControlResponse =
   | { kind: "response"; version: 2; requestId: string; hostEpoch: string; ok: true; result: unknown }
   | { kind: "response"; version: 2; requestId: string; hostEpoch: string; ok: false; error: ControlError };
 export interface ControlEventEnvelope { kind: "event"; version: 2; requestId: string; hostEpoch: string; event: DockEvent }
+
+export interface AttachmentUploadReady {
+  kind: "attachment_upload_ready";
+  version: 2;
+  requestId: string;
+  hostEpoch: string;
+  maxChunkBytes: number;
+}
+export interface AttachmentUploadChunk {
+  kind: "attachment_chunk";
+  version: 2;
+  requestId: string;
+  index: number;
+  data: string;
+}
+export interface AttachmentUploadComplete {
+  kind: "attachment_complete";
+  version: 2;
+  requestId: string;
+  chunks: number;
+}
+export type AttachmentUploadFrame = AttachmentUploadChunk | AttachmentUploadComplete;
 
 export interface HostInfoResult {
   state: "ready" | "mutation_faulted" | "draining";
@@ -310,11 +346,13 @@ export interface ResourcesResult {
   diagnosticsTruncated: boolean;
 }
 export interface CommandsResult { commands: CommandDto[]; total: number; truncated: boolean }
+export type { AttachmentDto, AttachmentUploadResult };
 export type ConfigurationResult = ModelConfigurationResult | ThinkingConfigurationResult | SettingUpdateResult;
 
 export function implementedCapabilities(): string[] { return [...IMPLEMENTED_CAPABILITIES].sort(); }
 export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "host.info") return "host.info";
+  if (type === "attachment.upload") return ATTACHMENTS_CAPABILITY;
   if (type === "instance.forget" || type === "catalog.prune") return "catalog.maintenance.v1";
   if (type === "extension.tools_expanded.set") return TOOLS_EXPANDED_CAPABILITY;
   if (type === "extension.widget_viewport.set") return EXTENSION_WIDGET_CAPABILITY;
@@ -378,14 +416,14 @@ function capabilityProjectsInstanceSnapshot(capability: Capability): boolean {
     || capability === "tools.v1"
     || capability === "tui.projection.v1";
 }
-export function createHelloAck(requestId: string, host: HostIdentity): HelloAck {
+export function createHelloAck(requestId: string, host: HostIdentity, capabilities = implementedCapabilities()): HelloAck {
   return {
     kind: "hello_ack",
     requestId,
     version: 2,
     host,
     catalogSchemaVersion: CATALOG_SCHEMA_VERSION,
-    capabilities: implementedCapabilities(),
+    capabilities: [...capabilities].sort(),
     limits: { maxLineBytes: MAX_CONTROL_LINE_BYTES, maxPromptChars: MAX_PROMPT_CHARS, maxReplayEvents: MAX_REPLAY_EVENTS, maxHistoryItems: MAX_HISTORY_ITEMS, maxInstanceListItems: MAX_INSTANCE_LIST_ITEMS, maxInstanceListBytes: MAX_INSTANCE_LIST_RESULT_BYTES },
   };
 }
@@ -470,6 +508,18 @@ export function parseControlRequest(input: unknown): ControlRequest {
   const operationId = (): string => string(params.operationId, "params.operationId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
   switch (type) {
     case "host.info": exact(params, [], "invalid_request"); return { ...base, type, params: {} };
+    case "attachment.upload": {
+      exact(params, ["operationId", "name", "sizeBytes", "mediaType", "sha256"], "invalid_request");
+      const name = boundedString(params.name, "params.name", MAX_ATTACHMENT_NAME_CHARS, "invalid_request");
+      if (name.length === 0) throw validation("invalid_request", "params.name must not be empty");
+      const sizeBytes = unsigned(params.sizeBytes, "params.sizeBytes", "invalid_request");
+      if (sizeBytes > MAX_ATTACHMENT_BYTES) throw validation("invalid_request", `params.sizeBytes must not exceed ${MAX_ATTACHMENT_BYTES}`);
+      const mediaType = optionalString(params.mediaType, "params.mediaType", MAX_ATTACHMENT_MEDIA_TYPE_CHARS, "invalid_request");
+      if (mediaType !== undefined && (mediaType.length === 0 || /[\u0000-\u001f\u007f-\u009f]/u.test(mediaType))) throw validation("invalid_request", "params.mediaType must be nonempty and control-free");
+      const sha256 = string(params.sha256, "params.sha256", 64, "invalid_request");
+      if (!/^[a-f0-9]{64}$/u.test(sha256)) throw validation("invalid_request", "params.sha256 must be 64 lowercase hexadecimal characters");
+      return { ...base, type, params: { operationId: operationId(), name, sizeBytes, ...(mediaType === undefined ? {} : { mediaType }), sha256 } };
+    }
     case "instance.create": {
       exact(params, ["operationId", "cwd", "name", "trustChallengeId", "projectTrustDecision"], "invalid_request");
       const trustChallengeId = optionalString(params.trustChallengeId, "params.trustChallengeId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
@@ -574,11 +624,15 @@ export function parseControlRequest(input: unknown): ControlRequest {
       } };
     }
     case "command.submit": {
-      exact(params, ["operationId", "instanceId", "message", "images", "delivery"], "invalid_request");
+      exact(params, ["operationId", "instanceId", "message", "images", "attachments", "delivery"], "invalid_request");
       const message = boundedString(params.message, "params.message", MAX_PROMPT_CHARS, "invalid_request");
       const images = params.images === undefined ? undefined : parseImagePaths(params.images, "params.images", "invalid_request");
-      if (message.trim().length === 0 && (images === undefined || images.length === 0)) throw validation("invalid_request", "command.submit requires message text or at least one image");
-      return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), message, ...(images === undefined ? {} : { images }), delivery: enumeration(params.delivery, "params.delivery", ["auto", "prompt", "steer", "followUp"], "invalid_request") } };
+      const attachments = params.attachments === undefined
+        ? undefined
+        : strings(params.attachments, "params.attachments", MAX_ATTACHMENT_IDS_PER_COMMAND, MAX_ATTACHMENT_FILE_ID_CHARS, "invalid_request");
+      if (attachments !== undefined && (attachments.length === 0 || new Set(attachments).size !== attachments.length)) throw validation("invalid_request", "params.attachments must be a nonempty unique fileId array");
+      if (message.trim().length === 0 && (images === undefined || images.length === 0) && attachments === undefined) throw validation("invalid_request", "command.submit requires message text, an image, or an attachment");
+      return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), message, ...(images === undefined ? {} : { images }), ...(attachments === undefined ? {} : { attachments }), delivery: enumeration(params.delivery, "params.delivery", ["auto", "prompt", "steer", "followUp"], "invalid_request") } };
     }
     case "command.abort": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
     case "queue.dequeue": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
@@ -666,6 +720,34 @@ export function parseControlRequest(input: unknown): ControlRequest {
   }
 }
 
+export function parseAttachmentUploadReady(input: unknown, requestId: string, hostEpoch: string): AttachmentUploadReady {
+  const value = object(input, "attachment upload readiness");
+  exact(value, ["kind", "version", "requestId", "hostEpoch", "maxChunkBytes"]);
+  if (value.kind !== "attachment_upload_ready" || value.version !== 2 || value.requestId !== requestId || value.hostEpoch !== hostEpoch) {
+    throw validation("invalid_response", "Invalid attachment upload readiness envelope");
+  }
+  const maxChunkBytes = positive(value.maxChunkBytes, "maxChunkBytes");
+  if (maxChunkBytes > MAX_ATTACHMENT_CHUNK_BYTES) throw validation("invalid_response", "Host attachment chunk limit is unsupported");
+  return { kind: "attachment_upload_ready", version: 2, requestId, hostEpoch, maxChunkBytes };
+}
+
+export function parseAttachmentUploadFrame(input: unknown, requestId: string): AttachmentUploadFrame {
+  const value = object(input, "attachment upload frame", "invalid_request");
+  if (value.kind === "attachment_chunk") {
+    exact(value, ["kind", "version", "requestId", "index", "data"], "invalid_request");
+    if (value.version !== 2 || value.requestId !== requestId) throw validation("invalid_request", "Attachment chunk does not match its upload request");
+    const index = unsigned(value.index, "attachment chunk index", "invalid_request");
+    const data = string(value.data, "attachment chunk data", Math.ceil(MAX_ATTACHMENT_CHUNK_BYTES / 3) * 4, "invalid_request");
+    if (data.length === 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(data)) throw validation("invalid_request", "Attachment chunk is not canonical base64");
+    const decoded = Buffer.from(data, "base64");
+    if (decoded.byteLength < 1 || decoded.byteLength > MAX_ATTACHMENT_CHUNK_BYTES || decoded.toString("base64") !== data) throw validation("invalid_request", "Attachment chunk exceeds the decoded-byte limit or is not canonical base64");
+    return { kind: "attachment_chunk", version: 2, requestId, index, data };
+  }
+  exact(value, ["kind", "version", "requestId", "chunks"], "invalid_request");
+  if (value.kind !== "attachment_complete" || value.version !== 2 || value.requestId !== requestId) throw validation("invalid_request", "Invalid attachment completion frame");
+  return { kind: "attachment_complete", version: 2, requestId, chunks: unsigned(value.chunks, "attachment chunk count", "invalid_request") };
+}
+
 export function parseControlResponse(input: unknown, requestId: string, hostEpoch: string): ControlResponse {
   const value = object(input, "response");
   if (value.kind !== "response" || value.version !== 2 || value.requestId !== requestId || value.hostEpoch !== hostEpoch || typeof value.ok !== "boolean") throw validation("invalid_response", "Invalid Protocol V2 response envelope");
@@ -735,6 +817,31 @@ export function parseHostInfoResult(input: unknown): HostInfoResult {
   if (schemaVersion !== CATALOG_SCHEMA_VERSION) throw validation("invalid_response", "Host info catalog schema is incompatible");
   return { state: enumeration(value.state, "state", ["ready", "mutation_faulted", "draining"]), host: parseHost(value.host, "host"), catalog: { schemaVersion, revision: unsigned(catalog.revision, "catalog.revision"), lastReconciledAt: timestamp(catalog.lastReconciledAt, "catalog.lastReconciledAt") }, paths: { socket: string(paths.socket, "paths.socket", MAX_CONTROL_CWD_CHARS), state: string(paths.state, "paths.state", MAX_CONTROL_CWD_CHARS) }, diagnostics };
 }
+export function parseAttachmentDto(input: unknown, field = "attachment"): AttachmentDto {
+  const value = object(input, field);
+  exact(value, ["fileId", "name", "sizeBytes", "mediaType", "sha256", "storedAt"]);
+  const fileId = string(value.fileId, `${field}.fileId`, MAX_ATTACHMENT_FILE_ID_CHARS);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u.test(fileId)) throw validation("invalid_response", `${field}.fileId must be an opaque UUID`);
+  const name = string(value.name, `${field}.name`, MAX_ATTACHMENT_NAME_CHARS);
+  if (name.length === 0 || /[\/\\\u0000-\u001f\u007f-\u009f]/u.test(name)) throw validation("invalid_response", `${field}.name is not a safe display name`);
+  const sizeBytes = unsigned(value.sizeBytes, `${field}.sizeBytes`);
+  if (sizeBytes > MAX_ATTACHMENT_BYTES) throw validation("invalid_response", `${field}.sizeBytes exceeds the attachment limit`);
+  const mediaType = optionalString(value.mediaType, `${field}.mediaType`, MAX_ATTACHMENT_MEDIA_TYPE_CHARS);
+  if (mediaType !== undefined && (mediaType.length === 0 || /[\u0000-\u001f\u007f-\u009f]/u.test(mediaType))) throw validation("invalid_response", `${field}.mediaType is invalid`);
+  const sha256 = string(value.sha256, `${field}.sha256`, 64);
+  if (!/^[a-f0-9]{64}$/u.test(sha256)) throw validation("invalid_response", `${field}.sha256 is invalid`);
+  return { fileId, name, sizeBytes, ...(mediaType === undefined ? {} : { mediaType }), sha256, storedAt: timestamp(value.storedAt, `${field}.storedAt`) };
+}
+
+export function parseAttachmentUploadResult(input: unknown): AttachmentUploadResult {
+  const value = object(input, "attachment upload result");
+  exact(value, ["attachment", "status"]);
+  return {
+    attachment: parseAttachmentDto(value.attachment),
+    status: enumeration(value.status, "status", ["stored", "reused"]),
+  };
+}
+
 export function parseCreateResult(input: unknown): CreateResult { const value = object(input, "create result"); exact(value, ["instance"]); return { instance: parseInstance(value.instance, "instance") }; }
 export function parseEnsureResult(input: unknown): EnsureResult {
   const value = object(input, "ensure result"); exact(value, ["created", "instance"]);
@@ -793,6 +900,7 @@ export function parseInstanceReadResult(input: unknown): InstanceReadResult {
   if (new Set(pendingMessages.map((item) => item.queueItemId)).size !== pendingMessages.length) throw validation("invalid_response", "pendingMessages queue item IDs must be unique");
   if (pendingMessages.reduce((total, item) => total + item.text.length, 0) > MAX_PENDING_QUEUE_TEXT_CHARS) throw validation("invalid_response", "pendingMessages text exceeds the aggregate queue limit");
   if (pendingMessages.reduce((total, item) => total + imagePathCharacters(item.images), 0) > MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS) throw validation("invalid_response", "pendingMessages image descriptors exceed the aggregate queue limit");
+  if (pendingMessages.reduce((total, item) => total + attachmentCharacters(item.attachments), 0) > MAX_PENDING_QUEUE_ATTACHMENT_DESCRIPTOR_CHARS) throw validation("invalid_response", "pendingMessages attachment descriptors exceed the aggregate queue limit");
   const firstFollowUp = pendingMessages.findIndex((item) => item.delivery === "followUp");
   if (firstFollowUp >= 0 && pendingMessages.slice(firstFollowUp).some((item) => item.delivery === "steer")) throw validation("invalid_response", "pendingMessages are not in consumption order");
   return { instance, page, recentHistory: history, historyRevision: positive(value.historyRevision, "historyRevision"), historyTruncated: boolean(value.historyTruncated, "historyTruncated"), pendingMessages };
@@ -1346,11 +1454,18 @@ function parseImagePaths(input: unknown, field: string, code = "invalid_response
   return images;
 }
 
+function parseAttachmentDtos(input: unknown, field: string): AttachmentDto[] {
+  const attachments = array(input, field, MAX_ATTACHMENT_IDS_PER_COMMAND).map((item, index) => parseAttachmentDto(item, `${field}[${index}]`));
+  if (attachments.length === 0 || new Set(attachments.map((attachment) => attachment.fileId)).size !== attachments.length) throw validation("invalid_response", `${field} must be nonempty and contain unique file IDs`);
+  return attachments;
+}
+
 function parsePendingMessage(input: unknown, field: string): PendingMessageDto {
-  const item = object(input, field); exact(item, ["queueItemId", "operationId", "delivery", "text", "images", "acceptedAt"]);
+  const item = object(input, field); exact(item, ["queueItemId", "operationId", "delivery", "text", "images", "attachments", "acceptedAt"]);
   const text = boundedString(item.text, `${field}.text`, MAX_PROMPT_CHARS);
   const images = item.images === undefined ? undefined : parseImagePaths(item.images, `${field}.images`);
-  if (text.length === 0 && (images === undefined || images.length === 0)) throw validation("invalid_response", `${field} requires text or at least one image`);
+  const attachments = item.attachments === undefined ? undefined : parseAttachmentDtos(item.attachments, `${field}.attachments`);
+  if (text.length === 0 && (images === undefined || images.length === 0) && attachments === undefined) throw validation("invalid_response", `${field} requires text, an image, or an attachment`);
   if (/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u.test(text)) throw validation("invalid_response", `${field}.text contains terminal control characters`);
   return {
     queueItemId: id(item.queueItemId, `${field}.queueItemId`),
@@ -1358,11 +1473,15 @@ function parsePendingMessage(input: unknown, field: string): PendingMessageDto {
     delivery: enumeration(item.delivery, `${field}.delivery`, ["steer", "followUp"]),
     text,
     ...(images === undefined ? {} : { images }),
+    ...(attachments === undefined ? {} : { attachments }),
     acceptedAt: timestamp(item.acceptedAt, `${field}.acceptedAt`),
   };
 }
 function imagePathCharacters(images: readonly ImagePathDto[] | undefined): number {
   return (images ?? []).reduce((total, image) => total + image.path.length + image.mimeType.length, 0);
+}
+function attachmentCharacters(attachments: readonly AttachmentDto[] | undefined): number {
+  return (attachments ?? []).reduce((total, attachment) => total + attachment.fileId.length + attachment.name.length + attachment.sha256.length + attachment.storedAt.length + (attachment.mediaType?.length ?? 0) + 32, 0);
 }
 
 function parsePending(input: unknown, field: string): InstanceSnapshot["pending"] {
@@ -1439,13 +1558,13 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "run.settled": exact(data, ["operationId", "result", "stopReason", "error"]); return { operationId: optionalText("operationId", 128), result: enumeration(data.result, "result", ["never", "succeeded", "failed", "aborted", "interrupted"]), stopReason: optionalText("stopReason", 128), error: optionalText("error", MAX_MESSAGE) };
     case "message.queued": return parsePendingMessage(data, field);
     case "message.submitted": {
-      exact(data, ["operationId", "messageId", "role", "text", "images", "delivery", "queueItemId"]);
+      exact(data, ["operationId", "messageId", "role", "text", "images", "attachments", "delivery", "queueItemId"]);
       const delivery = enumeration(data.delivery, "delivery", ["prompt", "steer", "followUp"]);
       const queueItemId = optionalText("queueItemId", 128);
-      return { operationId: text("operationId", 128), messageId: text("messageId", 128), role: enumeration(data.role, "role", ["user"]), text: boundedString(data.text, `${field}.text`, MAX_PROMPT_CHARS), ...(data.images === undefined ? {} : { images: parseImagePaths(data.images, `${field}.images`) }), delivery, queueItemId };
+      return { operationId: text("operationId", 128), messageId: text("messageId", 128), role: enumeration(data.role, "role", ["user"]), text: boundedString(data.text, `${field}.text`, MAX_PROMPT_CHARS), ...(data.images === undefined ? {} : { images: parseImagePaths(data.images, `${field}.images`) }), ...(data.attachments === undefined ? {} : { attachments: parseAttachmentDtos(data.attachments, `${field}.attachments`) }), delivery, queueItemId };
     }
     case "message.delta": exact(data, ["messageId", "block", "delta"]); return { messageId: text("messageId", 128), block: enumeration(data.block, "block", ["text", "thinking"]), delta: boundedString(data.delta, `${field}.delta`, MAX_TEXT) };
-    case "message.completed": exact(data, ["messageId", "role", "content", "stopReason", "error"]); return { messageId: text("messageId", 128), role: enumeration(data.role, "role", ["user", "assistant", "tool", "system"]), content: parseContent(data.content, `${field}.content`), stopReason: optionalText("stopReason", 128), error: optionalText("error", MAX_MESSAGE) };
+    case "message.completed": exact(data, ["messageId", "role", "content", "attachments", "stopReason", "error"]); return { messageId: text("messageId", 128), role: enumeration(data.role, "role", ["user", "assistant", "tool", "system"]), content: parseContent(data.content, `${field}.content`), ...(data.attachments === undefined ? {} : { attachments: parseAttachmentDtos(data.attachments, `${field}.attachments`) }), stopReason: optionalText("stopReason", 128), error: optionalText("error", MAX_MESSAGE) };
     case "tool.started": exact(data, ["toolCallId", "toolName", "args", "omittedFields"]); return toolArgs(data, field, true);
     case "tool.args_updated": exact(data, ["toolCallId", "args", "omittedFields"]); return toolArgs(data, field, false);
     case "tool.output_updated": {
@@ -1544,7 +1663,7 @@ function parseContent(input: unknown, field: string): ContentBlockDto[] {
 function parseHistoryEntry(input: unknown, field: string): HistoryEntryDto {
   const entry = object(input, field);
   exact(entry, [
-    "recordId", "entryId", "parentId", "kind", "source", "visibility", "timestamp", "content",
+    "recordId", "entryId", "parentId", "kind", "source", "visibility", "timestamp", "content", "attachments",
     "stopReason", "error", "toolCallId", "toolName", "isError", "customType", "display", "metadata",
     "metadataOmittedFields", "command", "exitCode", "cancelled", "truncated", "fullOutputPath", "excludeFromContext",
     "firstKeptEntryId", "tokensBefore", "fromEntryId", "targetEntryId", "label", "provider", "modelId",
@@ -1564,6 +1683,7 @@ function parseHistoryEntry(input: unknown, field: string): HistoryEntryDto {
     visibility: enumeration(entry.visibility, `${field}.visibility`, ["conversation", "metadata", "hidden"]),
     timestamp: entry.timestamp === undefined ? undefined : timestamp(entry.timestamp, `${field}.timestamp`),
     content: parseContent(entry.content, `${field}.content`),
+    attachments: entry.attachments === undefined ? undefined : parseAttachmentDtos(entry.attachments, `${field}.attachments`),
     stopReason: optionalString(entry.stopReason, `${field}.stopReason`, 128),
     error: optionalString(entry.error, `${field}.error`, MAX_MESSAGE),
     toolCallId: optionalString(entry.toolCallId, `${field}.toolCallId`, 128),

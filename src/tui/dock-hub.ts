@@ -11,6 +11,7 @@ import {
 import { resolve } from "node:path";
 
 import type { DockClient } from "../control/dock-client.js";
+import type { AttachmentStorageSettings, AttachmentStorageState } from "../control/attachment-storage-state.js";
 import type {
   PairingWindow,
   PendingPairing,
@@ -59,7 +60,7 @@ export interface DockHubEntry {
 }
 
 /** Read-only construction: entering the Hub lists state but never creates a runtime. */
-export async function runDockHub(client: DockClient, cwd: string, remoteAccessState: RemoteAccessState): Promise<DockHubAction> {
+export async function runDockHub(client: DockClient, cwd: string, remoteAccessState: RemoteAccessState, attachmentStorageState: AttachmentStorageState): Promise<DockHubAction> {
   const terminal = new HubProcessTerminal();
   const contextCwd = resolve(cwd);
   let sessions: SessionDto[] = [];
@@ -139,7 +140,7 @@ export async function runDockHub(client: DockClient, cwd: string, remoteAccessSt
         if (sessionAction) return sessionAction;
       }
       if (selected === REMOTE_SETTINGS) {
-        await chooseRemoteAccessSettings(terminal, remoteAccessState);
+        await chooseRemoteAccessSettings(terminal, remoteAccessState, attachmentStorageState);
         if (signalRequested) return { kind: "exit" };
       }
       if (selected === PAIRING) {
@@ -184,7 +185,7 @@ export function buildDockHubEntries(
         : "Pi Sessions",
       description: inventoryWarning ?? `Browse all saved Pi sessions${inventoryTruncated ? " · more available" : ""}`,
     },
-    { value: REMOTE_SETTINGS, label: "Settings", description: "Configure remote access" },
+    { value: REMOTE_SETTINGS, label: "Settings", description: "Configure remote access and attachment storage" },
     { value: PAIRING, label: "Pairing", description: "Approve devices and revoke access" },
     { value: EXIT_HUB, label: "Leave Hub", description: "Return to the shell" },
   ];
@@ -425,13 +426,15 @@ async function chooseSessionAction(
 async function chooseRemoteAccessSettings(
   terminal: HubProcessTerminal,
   state: RemoteAccessState,
+  attachmentState: AttachmentStorageState,
 ): Promise<void> {
   let notice: string | undefined;
   while (true) {
     let settings: RemoteAccessSettings;
     let status: RemoteAccessStatus | undefined;
+    let attachmentSettings: AttachmentStorageSettings;
     try {
-      [settings, status] = await Promise.all([state.readSettings(), state.readStatus()]);
+      [settings, status, attachmentSettings] = await Promise.all([state.readSettings(), state.readStatus(), attachmentState.readSettings()]);
     } catch {
       await showLocalAdminUnavailable(terminal, "Settings");
       return;
@@ -453,7 +456,12 @@ async function chooseRemoteAccessSettings(
           label: `Port · ${settings.port}`,
           description: "Change the network port used by remote clients",
         },
-        { value: "refresh", label: "Refresh status", description: "Read the latest remote access status" },
+        {
+          value: "attachments",
+          label: "Attachment directory",
+          description: terminalSafe(attachmentSettings.directory),
+        },
+        { value: "refresh", label: "Refresh status", description: "Read the latest Host settings and remote access status" },
         { value: BACK, label: "Back to Hub", description: "no change" },
       ],
       "↑↓ choose · Enter change · Esc back",
@@ -469,6 +477,21 @@ async function chooseRemoteAccessSettings(
           : `Remote access is being enabled on port ${settings.port}.`;
       } catch {
         notice = "The setting could not be saved. Check the local Alu Dock state directory permissions, then try again.";
+      }
+      continue;
+    }
+    if (selected === "attachments") {
+      const value = await promptHubText(
+        terminal,
+        "Attachment directory",
+        `Current directory: ${terminalSafe(attachmentSettings.directory)} · enter an absolute permanent path`,
+      );
+      if (value === undefined) continue;
+      try {
+        const saved = await attachmentState.writeDirectory(value.trim());
+        notice = `Attachment directory saved: ${terminalSafe(saved.directory)}`;
+      } catch (error) {
+        notice = `Attachment directory was not changed: ${terminalSafe(errorMessage(error))}`;
       }
       continue;
     }

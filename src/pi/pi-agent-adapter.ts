@@ -1,7 +1,8 @@
-import { createHash, randomUUID } from "node:crypto";
-import { lstatSync, realpathSync } from "node:fs";
-import { open, realpath } from "node:fs/promises";
-import { basename, resolve } from "node:path";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { constants as fsConstants, existsSync, lstatSync, realpathSync } from "node:fs";
+import { mkdir, open, realpath } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   type AgentSession,
@@ -24,6 +25,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 
 import { dockObservationExtension, type DockObservationBridge } from "./dock-observation-extension.js";
+import {
+  dockAttachmentsExtension,
+  redactDockAttachmentToolResult,
+  type DockAttachmentCallPort,
+} from "./dock-attachments-extension.js";
+import { appendDockAttachmentContext, extractDockAttachmentContext } from "./dock-attachment-context.js";
 
 import {
   MAX_IMAGE_AGGREGATE_BYTES,
@@ -32,6 +39,7 @@ import {
   MAX_IMAGE_PATH_CHARS,
   MAX_INPUT_IMAGES,
   MAX_SEMANTIC_HISTORY_PAGE_BYTES,
+  type AttachmentDto,
   type ContentBlockDto,
   type ConversationFrame,
   type ImagePathDto,
@@ -153,6 +161,7 @@ export interface PiAgentAdapterOptions {
     onChange: (branch: string | undefined) => void,
   ) => Promise<GitBranchObserverPort>;
   configureNetwork?: (settingsManager: AgentSessionServices["settingsManager"]) => void;
+  attachmentContextKey: Uint8Array;
 }
 
 export interface CreatePiAgentAdapterOptions {
@@ -167,6 +176,7 @@ export interface CreatePiAgentAdapterOptions {
   setProcessCwd?: (cwd: string) => void;
   sessionManager?: SessionManager;
   dockObservationBridge?: DockObservationBridge;
+  dockAttachmentPort?: DockAttachmentCallPort;
 }
 
 interface BindingToken { active: boolean }
@@ -286,8 +296,10 @@ export class PiAgentAdapter {
         const delivery = requestedDelivery === "auto" ? (this.isStreaming ? "steer" : "prompt") : requestedDelivery;
         const binding = this.requireActive();
         const hostQueued = context?.type === "force_queue" || context?.type === "host_queue";
+        const attachments = context !== undefined && context.type !== "session_switch" ? context.attachments : undefined;
+        const runtimeMessage = attachments === undefined ? message : appendDockAttachmentContext(message, attachments, this.options.attachmentContextKey);
         const input = this.classifyInput(message) === "prompt"
-          ? binding.conversation.trackInput({ operationId, text: message, delivery, fromQueue: hostQueued, images })
+          ? binding.conversation.trackInput({ operationId, text: message, runtimeText: runtimeMessage, delivery, fromQueue: hostQueued, images, attachments })
           : undefined;
         const reportPreflight = (success: boolean): void => {
           if (!success) {
@@ -304,9 +316,9 @@ export class PiAgentAdapter {
         try {
           if (context?.type === "force_queue") {
             if (delivery === "prompt") throw new Error("Forced Agent queue delivery requires steer or followUp");
-            return await this.queueMessage(message, delivery, images);
+            return await this.queueMessage(runtimeMessage, delivery, images);
           }
-          return await this.prompt(message, {
+          return await this.prompt(runtimeMessage, {
             source: "rpc",
             ...(delivery === "prompt" ? {} : { streamingBehavior: delivery }),
             ...(images === undefined ? {} : { images }),
@@ -580,7 +592,7 @@ export class PiAgentAdapter {
       entry: projected,
       contentRef: conversationContentRef(state.revision, source.id),
       contentComplete: conversationPreviewIsComplete(source, projected),
-      totalBlocks: conversationBlockCount(source),
+      totalBlocks: conversationBlockCount(source, this.options.attachmentContextKey),
     }));
     const nextCursor = page.hasEarlier ? randomUUID() : undefined;
     const result = (): AgentConversationHistoryPage => ({
@@ -617,7 +629,7 @@ export class PiAgentAdapter {
     }
     const selected = state.entries.find(({ source }) => conversationContentRef(state.revision, source.id) === contentRef);
     if (!selected) throw new AgentConversationCursorError("Conversation content reference is stale");
-    const blocks = conversationContentBlocks(selected.source, selected.projected);
+    const blocks = conversationContentBlocks(selected.source, selected.projected, this.options.attachmentContextKey);
     const chunks: AgentConversationContentChunk[] = [];
     let chars = 0;
     while (blockIndex < blocks.length && chunks.length < 64 && chars < 64_000) {
@@ -670,7 +682,7 @@ export class PiAgentAdapter {
   private conversationEntries(binding: Binding = this.requireActive()): Array<{ source: SessionEntry; projected: AgentHistoryEntry }> {
     const branch = binding.session.sessionManager.getBranch();
     return buildContextEntries(branch).flatMap((source) => {
-      const projected = projectHistoryEntry(source);
+      const projected = projectHistoryEntry(source, this.options.attachmentContextKey);
       return projected === undefined ? [] : [{ source, projected }];
     });
   }
@@ -704,7 +716,7 @@ export class PiAgentAdapter {
     for (let index = roots.length - 1; index >= 0; index -= 1) stack.push({ node: roots[index] as SessionTreeNode, depth: 0 });
     while (stack.length > 0) {
       const current = stack.pop() as { node: SessionTreeNode; parentId?: string; depth: number };
-      projectTreeNode(current.node, current.parentId, current.depth, nodes, toolCalls);
+      projectTreeNode(current.node, current.parentId, current.depth, nodes, toolCalls, this.options.attachmentContextKey);
       for (let index = current.node.children.length - 1; index >= 0; index -= 1) {
         stack.push({ node: current.node.children[index] as SessionTreeNode, parentId: current.node.entry.id, depth: current.depth + 1 });
       }
@@ -1036,7 +1048,7 @@ export class PiAgentAdapter {
       unsubscribe: () => {},
       buffered: [],
       bufferEvents: true,
-      conversation: new PiConversationProjector(),
+      conversation: new PiConversationProjector(this.options.attachmentContextKey),
     };
     binding.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
       if (!token.active) return;
@@ -1415,17 +1427,22 @@ function toolResultText(content: unknown): string | undefined {
 interface PiConversationInput {
   operationId: string;
   text: string;
+  runtimeText?: string;
   delivery: "prompt" | "steer" | "followUp";
   fromQueue: boolean;
   images?: ImagePathDto[];
+  attachments?: AttachmentDto[];
 }
 
 export class PiConversationProjector {
   private readonly inputs: PiConversationInput[] = [];
+
+  constructor(private readonly attachmentContextKey: Uint8Array) {}
   private readonly announcedToolCalls = new Set<string>();
   private readonly completedToolCalls = new Set<string>();
   private messageSequence = 0;
   private currentUserMessageId: string | undefined;
+  private currentUserAttachments: AttachmentDto[] | undefined;
   private currentAssistantMessageId: string | undefined;
   private lastAssistantOutcome: { stopReason?: string; error?: string } | undefined;
 
@@ -1443,6 +1460,7 @@ export class PiConversationProjector {
   project(event: AgentEvent): AgentEvent[] {
     if (event.type === "agent_start") {
       this.currentUserMessageId = undefined;
+      this.currentUserAttachments = undefined;
       this.currentAssistantMessageId = undefined;
       this.announcedToolCalls.clear();
       this.completedToolCalls.clear();
@@ -1474,18 +1492,21 @@ export class PiConversationProjector {
       return [];
     }
     const consumedText = toolResultText(message.content) ?? "";
-    const inputIndex = this.inputs.findIndex((candidate) => candidate.text === consumedText || candidate.text.startsWith(consumedText));
+    const extracted = extractDockAttachmentContext(consumedText, this.attachmentContextKey);
+    const inputIndex = this.inputs.findIndex((candidate) => (candidate.runtimeText ?? candidate.text) === consumedText || candidate.text === extracted.text);
     const input = inputIndex < 0 ? undefined : this.inputs.splice(inputIndex, 1)[0];
     const operationId = input?.operationId ?? "runtime-initiated";
     this.currentUserMessageId = input === undefined
       ? `user-runtime-${++this.messageSequence}`
       : `user-${input.operationId}`;
+    this.currentUserAttachments = structuredClone(input?.attachments ?? extracted.attachments);
     const data = {
       operationId,
       messageId: this.currentUserMessageId,
       role: "user" as const,
-      text: boundedContentString(input?.text || consumedText, 256_000),
+      text: boundedContentString(input?.text || extracted.text, 256_000),
       ...(input?.images === undefined ? {} : { images: structuredClone(input.images) }),
+      ...(this.currentUserAttachments === undefined ? {} : { attachments: structuredClone(this.currentUserAttachments) }),
       delivery: input?.delivery ?? "prompt",
     };
     return [
@@ -1569,15 +1590,17 @@ export class PiConversationProjector {
       messageId = `message-${++this.messageSequence}`;
       dockRole = "system";
     }
+    const userProjection = role === "user" ? projectDockUserContent(message.content, this.attachmentContextKey) : undefined;
     const projected = this.frame({ type: "message.completed", data: {
       messageId,
       role: dockRole,
-      content: projectDockContent(message.content),
+      content: userProjection?.content ?? projectDockContent(message.content),
+      ...(role !== "user" || (this.currentUserAttachments ?? userProjection?.attachments) === undefined ? {} : { attachments: structuredClone(this.currentUserAttachments ?? userProjection?.attachments) }),
       ...(typeof message.stopReason === "string" ? { stopReason: boundedString(message.stopReason, 128, "unknown") } : {}),
       ...(typeof message.errorMessage === "string" ? { error: boundedContentString(message.errorMessage, 2_048) } : {}),
     } });
     if (role === "assistant") this.currentAssistantMessageId = undefined;
-    if (role === "user") this.currentUserMessageId = undefined;
+    if (role === "user") { this.currentUserMessageId = undefined; this.currentUserAttachments = undefined; }
     return [projected];
   }
 
@@ -1605,7 +1628,7 @@ export class PiConversationProjector {
     const toolCallId = safeRequiredText(event.toolCallId, 128, "unknown");
     const toolName = safeRequiredText(event.toolName, 256, "tool");
     const result = isRecord(event.partialResult) ? event.partialResult : undefined;
-    const text = boundedContentString(toolResultText(result?.content), 256_000);
+    const text = boundedContentString(redactDockAttachmentToolResult(toolName, toolResultText(result?.content) ?? ""), 256_000);
     const frames: AgentEvent[] = [];
     if (!this.announcedToolCalls.has(toolCallId)) {
       this.announcedToolCalls.add(toolCallId);
@@ -1624,7 +1647,7 @@ export class PiConversationProjector {
     const toolName = safeRequiredText(event.toolName, 256, "tool");
     const result = isRecord(event.result) ? event.result : undefined;
     const isError = event.isError === true;
-    const text = boundedContentString(toolResultText(result?.content), 256_000);
+    const text = boundedContentString(redactDockAttachmentToolResult(toolName, toolResultText(result?.content) ?? ""), 256_000);
     const projected = projectJsonObject({ content: result?.content });
     this.announcedToolCalls.delete(toolCallId);
     this.completedToolCalls.add(toolCallId);
@@ -1648,7 +1671,7 @@ export class PiConversationProjector {
   }
 }
 
-function projectHistoryEntry(entry: SessionEntry): AgentHistoryEntry {
+function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Array): AgentHistoryEntry {
   const base = {
     recordId: entry.id,
     entryId: entry.id,
@@ -1662,7 +1685,7 @@ function projectHistoryEntry(entry: SessionEntry): AgentHistoryEntry {
       const toolCallId = safeRequiredText(message.toolCallId, 128, `tool-${entry.id}`);
       const toolName = safeRequiredText(message.toolName, 256, "tool");
       const isError = message.isError === true;
-      const text = boundedContentString(toolResultText(message.content), 256_000);
+      const text = boundedContentString(redactDockAttachmentToolResult(toolName, toolResultText(message.content) ?? ""), 256_000);
       const presentation = projectBuiltInToolPresentation(toolName, text, message.details, isError);
       return {
         ...base,
@@ -1725,12 +1748,14 @@ function projectHistoryEntry(entry: SessionEntry): AgentHistoryEntry {
       };
     }
     const custom = role === "custom";
+    const userProjection = role === "user" ? projectDockUserContent(message.content, attachmentContextKey) : undefined;
     return {
       ...base,
       kind: custom ? "custom_message" : "message",
       source: custom ? "extension" : role === "user" ? "user" : role === "assistant" ? "assistant" : "system",
       visibility: custom && message.display === false ? "hidden" : "conversation",
-      content: projectDockContent(message.content),
+      content: userProjection?.content ?? projectDockContent(message.content),
+      ...(userProjection?.attachments === undefined ? {} : { attachments: userProjection.attachments }),
       ...(typeof message.stopReason === "string" ? { stopReason: boundedString(message.stopReason, 128, "unknown") } : {}),
       ...(typeof message.errorMessage === "string" ? { error: boundedContentString(message.errorMessage, 2_048) } : {}),
       ...(custom && typeof message.customType === "string" ? { customType: boundedString(message.customType, 256, "custom") } : {}),
@@ -1819,6 +1844,23 @@ function projectHistoryEntry(entry: SessionEntry): AgentHistoryEntry {
   };
 }
 
+function projectDockUserContent(content: unknown, attachmentContextKey: Uint8Array): { content: ContentBlockDto[]; attachments?: AttachmentDto[] } {
+  if (typeof content === "string") {
+    const extracted = extractDockAttachmentContext(content, attachmentContextKey);
+    return { content: projectDockContent(extracted.text), ...(extracted.attachments === undefined ? {} : { attachments: extracted.attachments }) };
+  }
+  if (!Array.isArray(content)) return { content: projectDockContent(content) };
+  let attachments: AttachmentDto[] | undefined;
+  const visible = content.map((item) => {
+    if (!isRecord(item) || item.type !== "text" || typeof item.text !== "string") return item;
+    const extracted = extractDockAttachmentContext(item.text, attachmentContextKey);
+    if (extracted.attachments === undefined) return item;
+    attachments = extracted.attachments;
+    return { ...item, text: extracted.text };
+  });
+  return { content: projectDockContent(visible), ...(attachments === undefined ? {} : { attachments }) };
+}
+
 function projectDockContent(content: unknown): ContentBlockDto[] {
   if (typeof content === "string") return content.length > 0 ? [{ type: "text", text: boundedContentString(content, 8_000) }] : [];
   if (!Array.isArray(content)) return [];
@@ -1870,7 +1912,7 @@ type ConversationSourceBlock =
   | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; omittedFields?: string[] }
   | ConversationOmittedSourceBlock;
 
-function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryEntry): ConversationSourceBlock[] {
+function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryEntry, attachmentContextKey: Uint8Array): ConversationSourceBlock[] {
   const omitted = (kind: "image" | "binary", description: string): ConversationOmittedSourceBlock => ({ type: "omitted", kind, description });
   const text = (type: "text" | "thinking", value: unknown): ConversationTextSourceBlock | undefined => (
     typeof value === "string" && value.length > 0 ? { type, text: value } : undefined
@@ -1884,7 +1926,7 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
     const value = typeof projected.content === "string" ? projected.content : String(projected.content ?? "");
     return textBlocks("text", value);
   }
-  const content = entry.type === "custom_message"
+  let content = entry.type === "custom_message"
     ? entry.content
     : entry.type === "message"
       ? (entry.message as unknown as Record<string, unknown>).content
@@ -1907,9 +1949,16 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
         if (!isRecord(item)) return [];
         if (item.type === "image") return [{ type: "image", mimeType: safeImageMimeType(item.mimeType), data: typeof item.data === "string" ? item.data : "" }];
         if (item.type !== "text") return [];
-        return [{ type: "tool_result", toolCallId, toolName, text: typeof item.text === "string" ? item.text : "", isError }];
+        return [{
+          type: "tool_result",
+          toolCallId,
+          toolName,
+          text: redactDockAttachmentToolResult(toolName, typeof item.text === "string" ? item.text : ""),
+          isError,
+        }];
       });
     }
+    if (role === "user") content = stripDockAttachmentContext(content, attachmentContextKey);
   }
   const items = typeof content === "string" ? [{ type: "text", text: content }] : Array.isArray(content) ? content : [];
   return items.flatMap((item): ConversationSourceBlock[] => {
@@ -1934,9 +1983,19 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
   });
 }
 
-function conversationBlockCount(entry: SessionEntry): number {
-  const projected = projectHistoryEntry(entry);
-  return projected === undefined ? 0 : conversationContentBlocks(entry, projected).length;
+function stripDockAttachmentContext(content: unknown, attachmentContextKey: Uint8Array): unknown {
+  if (typeof content === "string") return extractDockAttachmentContext(content, attachmentContextKey).text;
+  if (!Array.isArray(content)) return content;
+  return content.map((item) => (
+    isRecord(item) && item.type === "text" && typeof item.text === "string"
+      ? { ...item, text: extractDockAttachmentContext(item.text, attachmentContextKey).text }
+      : item
+  ));
+}
+
+function conversationBlockCount(entry: SessionEntry, attachmentContextKey: Uint8Array): number {
+  const projected = projectHistoryEntry(entry, attachmentContextKey);
+  return projected === undefined ? 0 : conversationContentBlocks(entry, projected, attachmentContextKey).length;
 }
 
 function conversationPreviewIsComplete(_entry: SessionEntry, _projected: AgentHistoryEntry): boolean {
@@ -1992,6 +2051,7 @@ function projectTreeNode(
   depth: number,
   output: AgentTreeNode[],
   toolCalls: ReadonlyMap<string, TreeToolCall>,
+  attachmentContextKey: Uint8Array,
 ): void {
   if (output.length >= 100_000) throw new Error("Pi session tree exceeds 100000 entries");
   const entry = node.entry;
@@ -2014,12 +2074,12 @@ function projectTreeNode(
     ...(node.label === undefined ? {} : { label: treeLine(node.label, 256, "Session label omitted") }),
     ...(node.labelTimestamp === undefined ? {} : { labelTimestamp: node.labelTimestamp }),
     timestamp: entry.timestamp,
-    summary: projectTreeSummary(entry, toolCalls),
+    summary: projectTreeSummary(entry, toolCalls, attachmentContextKey),
     hasChildren: node.children.length > 0,
   });
 }
 
-function projectTreeSummary(entry: SessionEntry, toolCalls: ReadonlyMap<string, TreeToolCall>): string {
+function projectTreeSummary(entry: SessionEntry, toolCalls: ReadonlyMap<string, TreeToolCall>, attachmentContextKey: Uint8Array): string {
   switch (entry.type) {
     case "message": {
       const message = entry.message as unknown as Record<string, unknown>;
@@ -2035,7 +2095,8 @@ function projectTreeSummary(entry: SessionEntry, toolCalls: ReadonlyMap<string, 
         return treeLine(message.errorMessage, 2_048, "Assistant error");
       }
       if (message.role === "assistant" && message.stopReason === "aborted") return "(aborted)";
-      return treeLine(contentText(message.content), 2_048, `${treeMessageRole(message.role)} message`);
+      const summaryText = contentText(message.content);
+      return treeLine(message.role === "user" && summaryText !== undefined ? extractDockAttachmentContext(summaryText, attachmentContextKey).text : summaryText, 2_048, `${treeMessageRole(message.role)} message`);
     }
     case "thinking_level_change": return treeLine(`Thinking level: ${entry.thinkingLevel}`, 2_048, "Thinking level change");
     case "model_change": return treeLine(`Model: ${entry.provider}/${entry.modelId}`, 2_048, "Model change");
@@ -2386,6 +2447,7 @@ function syncAgentRuntimeSettings(session: AgentSession, settingsManager: Settin
 }
 
 export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions): Promise<PiAgentAdapter> {
+  const attachmentContextKey = await loadAttachmentContextKey(options.agentDir);
   const uiContext = options.extensionUiBroker && !options.extensionUiContextPortFactory
     ? createPiExtensionUiContext(options.extensionUiBroker)
     : undefined;
@@ -2407,7 +2469,9 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
         extensionFactories: [
           { name: "alu-dock-tool-result-normalizer", factory: piToolResultNormalizerExtension },
           ...(options.dockObservationBridge === undefined ? [] : [{ name: "alu-dock-observation", factory: dockObservationExtension(options.dockObservationBridge) }]),
+          ...(options.dockAttachmentPort === undefined ? [] : [{ name: "alu-dock-attachments", factory: dockAttachmentsExtension(options.dockAttachmentPort) }]),
         ],
+        ...(options.dockAttachmentPort === undefined ? {} : { additionalSkillPaths: [dockAttachmentSkillPath()] }),
       },
     });
     const result = await createAgentSessionFromServices({
@@ -2430,8 +2494,53 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     setProjectTrust: (cwd, trusted) => trustByCwd.set(cwd, trusted),
     configureNetwork: configurePiNetwork,
     initialProcessCwd: options.cwd,
+    attachmentContextKey,
     ...(options.setProcessCwd === undefined ? {} : { setProcessCwd: options.setProcessCwd }),
   });
+}
+
+async function loadAttachmentContextKey(agentDir: string): Promise<Buffer> {
+  await mkdir(agentDir, { recursive: true, mode: 0o700 });
+  const keyPath = join(agentDir, ".alu-dock-attachment-context-key");
+  for (;;) {
+    try {
+      const handle = await open(keyPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      try {
+        const details = await handle.stat();
+        const getuid = process.getuid;
+        if (!details.isFile() || (typeof getuid === "function" && details.uid !== getuid())) {
+          throw new Error("Dock attachment context key is not a regular user-owned file");
+        }
+        await handle.chmod(0o600);
+        const encoded = (await handle.readFile("utf8")).trim();
+        const key = Buffer.from(encoded, "base64");
+        if (key.length !== 32 || key.toString("base64") !== encoded) throw new Error("Dock attachment context key is invalid");
+        return key;
+      } finally { await handle.close(); }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const key = randomBytes(32);
+    try {
+      const handle = await open(keyPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+      try {
+        await handle.writeFile(`${key.toString("base64")}\n`, "utf8");
+        await handle.sync();
+      } finally { await handle.close(); }
+      return key;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+  }
+}
+
+function dockAttachmentSkillPath(): string {
+  const moduleDirectory = dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    resolve(moduleDirectory, "../../skills/dock-attachments/SKILL.md"),
+    resolve(moduleDirectory, "../../../skills/dock-attachments/SKILL.md"),
+  ];
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]!;
 }
 
 function compactionFailureReason(message: string): "nothing_to_compact" | "already_compacted" | "cancelled" | "failed" {

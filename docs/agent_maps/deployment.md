@@ -10,7 +10,8 @@ systemd --user
 Dock Host Service
       ├── private Unix socket
       ├── optional mutual-TLS network port
-      ├── durable catalog
+      ├── durable catalog + private Host settings
+      ├── permanent attachment store
       └── supervised Agent Workers
 ```
 
@@ -35,6 +36,14 @@ Host unit 只定义 service 自己的固定 Node、CLI、HOME、最小 PATH 和 
 网络端口始终提供 Host TLS certificate。已配对客户端必须发送精确受信任证书，才会进入同一个 Protocol V2 handler。Pairing 页面打开的五分钟窗口只在该端口上临时增加 unknown-certificate pairing bootstrap；它不会开启新的管理端口，也不会把 Settings、吊销或配对窗口控制暴露给网络。窗口成功、失败、超时、关闭、Host restart 或 remote listener disable 时，所有 provisional pairing state 都被清理；已配对证书信任保留。
 
 部署方负责防火墙、NAT 和端口映射。映射外部地址或端口不会改变 Host/client certificate identity，也不需要重新配对。未知连接仍会消耗一次 TCP/TLS handshake，因此公网部署应保留系统防火墙和常规连接速率保护；应用内部的 handshake deadline、连接上限、request/body 上限和 pairing transaction 上限是最后一道边界，不是 DDoS 清洗服务。
+
+## 永久附件目录
+
+Managed Host 创建一个 `AttachmentService`，同时注入 Protocol V2 ingress 和 Registry 的 Worker reverse capability。默认目录是 `${XDG_DATA_HOME:-~/.local/share}/alu-dock/attachments`；实际绝对路径保存在 Host private state 的 `attachment-storage.json`，只能从本机 Hub Settings 修改。Unix socket 和 mTLS 不各自拥有 store，远程 endpoint 或证书变化也不迁移文件。
+
+Store 的公开内容在 `files/`，文件名经过最小安全清洗并保持可读；`.alu-dock/manifests/` 保存 digest/fileId metadata，`.alu-dock/tmp/` 只保存未完成上传。目录和文件分别固定为 user-private mode，managed 子目录不能是 symlink。Startup 删除 tmp 和没有 manifest 引用的 provisional content，但不删除 successful attachment。没有 TTL、自动 GC 或 quota。
+
+已经有 manifest 时 Settings 拒绝直接改变目录。管理员若要迁移，必须在 Host 停止后整体移动目录（包括 hidden `.alu-dock/` 与 `files/`），确认 owner/mode 与完整内容；重新启动后先在 Hub Settings 指向新 canonical path，再允许任何客户端上传，不能只复制可见文件。普通安装、升级、restart、remote listener change 或 client revocation 都不移动或删除附件。
 
 ## Worker lifecycle
 
@@ -84,6 +93,7 @@ aludock service uninstall
 - `scripts/install-local.ts`：本地打包与安装入口。
 - `src/control/dock-host.ts`：Host socket 与 shutdown。
 - `src/control/durable-catalog-store.ts`：durable catalog。
+- `src/control/attachment-storage-state.ts`、`attachment-service.ts`：Host-private directory setting 与 permanent attachment store。
 - `src/control/catalog-reconcile.ts`：Host startup recovery。
 - `src/pi/worker-process.ts`：Worker process supervision。
 - `src/pi/pi-worker-entry.ts`：当前 Pi Worker 入口和 Host-loss shutdown。

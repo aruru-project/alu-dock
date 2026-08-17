@@ -9,6 +9,7 @@ import {
   validateInstanceKey,
 } from "../core/catalog.js";
 import type { InstanceObservationHostPort, ObservationDeliverySink, ObservationRequest, ObservationResult } from "../core/instance-observation.js";
+import type { InstanceAttachmentHostPort } from "../core/instance-attachments.js";
 import { InstanceBusyError, type InstanceLifecycle, type ManagedInstance, type InstanceSnapshot, type StopReceipt } from "../core/managed-instance.js";
 import { CatalogTransactionCoordinator, type CatalogFault, type CatalogHealth } from "./catalog-transactions.js";
 import { InstanceObservationService } from "./instance-observation-service.js";
@@ -36,6 +37,7 @@ export interface InstanceFactoryInput {
   createdAt?: string;
   reopenedFrom?: "host_lost" | "runtime_error";
   observationHostPort: InstanceObservationHostPort;
+  attachmentHostPort: InstanceAttachmentHostPort;
   observationGrant: boolean;
 }
 
@@ -138,6 +140,7 @@ export class DockRegistry implements InstanceObservationHostPort {
   private readonly runtimeReopenListeners = new Set<(instanceId: string) => void>();
   private readonly catalogRemovalListeners = new Set<(instanceIds: readonly string[]) => void>();
   private readonly observationService: InstanceObservationService;
+  private readonly attachmentHostPort: InstanceAttachmentHostPort;
   private readonly instanceObservationSubscriptions = new Map<string, () => void>();
   private readonly instanceObservationSinkDetachments = new Map<string, () => void>();
   private catalogReady: boolean;
@@ -154,6 +157,7 @@ export class DockRegistry implements InstanceObservationHostPort {
       catalogCommitPort?: CatalogCommitPort;
       catalogStore?: CatalogStore;
       reopenTargetResolver?: ReopenTargetResolver;
+      attachmentHostPort?: InstanceAttachmentHostPort;
     } = {},
   ) {
     if (options.catalogCommitPort && options.catalogStore) throw new Error("Configure either catalogCommitPort or catalogStore, not both");
@@ -165,6 +169,7 @@ export class DockRegistry implements InstanceObservationHostPort {
     this.catalogStore = options.catalogStore;
     this.catalogReady = options.catalogStore === undefined;
     this.catalog = new CatalogTransactionCoordinator(options.catalogStore ?? options.catalogCommitPort, this.hostEpoch);
+    this.attachmentHostPort = options.attachmentHostPort ?? unavailableAttachmentHostPort;
     this.observationService = new InstanceObservationService({
       listSnapshots: () => this.list(),
       getSnapshot: (instanceId) => this.getSnapshot(instanceId),
@@ -257,7 +262,7 @@ export class DockRegistry implements InstanceObservationHostPort {
     if (this.instances.has(id) || this.catalog.current().instances.some((record) => record.id === id)) {
       throw new Error(`Generated duplicate instance identity: ${id}`);
     }
-    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, observationHostPort: this, observationGrant: false });
+    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, observationHostPort: this, attachmentHostPort: this.attachmentHostPort, observationGrant: false });
     if (
       instance.id !== id
       || instance.creationOperationId !== input.operationId
@@ -324,6 +329,7 @@ export class DockRegistry implements InstanceObservationHostPort {
       projectTrusted: trust.projectTrusted,
       sessionFile,
       observationHostPort: this,
+      attachmentHostPort: this.attachmentHostPort,
       observationGrant: false,
     });
     if (
@@ -429,6 +435,7 @@ export class DockRegistry implements InstanceObservationHostPort {
       createdAt: record.createdAt,
       reopenedFrom: previousLifecycle,
       observationHostPort: this,
+      attachmentHostPort: this.attachmentHostPort,
       observationGrant: record.observationGrant ?? false,
     });
     if (
@@ -751,6 +758,13 @@ export class DockRegistry implements InstanceObservationHostPort {
     if (!this.catalogReady) throw new Error("Durable catalog startup reconciliation has not completed");
   }
 }
+
+const unavailableAttachmentHostPort: InstanceAttachmentHostPort = {
+  accessAttachments: async (_sourceInstanceId, request) => {
+    if (request.type === "list") return { type: "list", attachments: [], total: 0, truncated: false };
+    throw new Error("Dock attachments require managed Host storage");
+  },
+};
 
 async function canonicalDirectory(path: string): Promise<string> {
   const lexical = resolve(path);

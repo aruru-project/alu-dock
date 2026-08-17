@@ -22,7 +22,9 @@ import {
 import type { PiWorkerInitOptions } from "./worker-process.js";
 import type { AgentRequest, AgentWorkerState } from "../core/agent-worker.js";
 import type { ObservationResult } from "../core/instance-observation.js";
+import type { AttachmentAccessRequest, AttachmentAccessResult } from "../core/instance-attachments.js";
 import { DockObservationBridge } from "./dock-observation-extension.js";
+import type { DockAttachmentCallPort } from "./dock-attachments-extension.js";
 
 interface PendingHostCall {
   capability: UiCapability | DockCapability;
@@ -53,6 +55,7 @@ async function runWorker(): Promise<void> {
   let shutdownPromise: Promise<void> | undefined;
   let hostCapabilities = new Set<ReverseWorkerCapability>(["dock.identity"]);
   let observationBridge: DockObservationBridge | undefined;
+  let attachmentPort: DockAttachmentCallPort | undefined;
 
   const callHost = (capability: UiCapability | DockCapability, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> => {
     const callId = `child-${++nextHostCall}`;
@@ -98,6 +101,14 @@ async function runWorker(): Promise<void> {
   // channel before constructing Pi resources or loading extensions.
   const dockContext = await callHost("dock.identity", {});
   hostCapabilities = verifyDockContext(dockContext, identity, generation);
+  attachmentPort = hostCapabilities.has("dock.attachments") ? {
+    access: async (request: AttachmentAccessRequest) => {
+      const capability: DockCapability = "dock.attachments";
+      const result = await callHost(capability, { request });
+      validateDockCapabilityResult(capability, result);
+      return result as AttachmentAccessResult;
+    },
+  } : undefined;
   observationBridge = new DockObservationBridge(hostCapabilities.has("dock.observation"), {
     configure: async (action) => {
       if (action === "status") return { enabled: observationBridge!.enabled };
@@ -133,6 +144,7 @@ async function runWorker(): Promise<void> {
     setProcessCwd: (cwd) => process.chdir(cwd),
     ...(reopened === undefined ? {} : { sessionManager: reopened.manager }),
     dockObservationBridge: observationBridge,
+    ...(attachmentPort === undefined ? {} : { dockAttachmentPort: attachmentPort }),
   });
   if (init.initialName !== undefined && !reopened) runtime.currentSession().setSessionName(init.initialName);
   runtime.subscribe((event) => {

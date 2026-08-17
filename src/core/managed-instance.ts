@@ -66,15 +66,24 @@ import type {
 import { sliceSemanticHistory } from "./history-pagination.js";
 import { projectInstanceDisplayName } from "./instance-display-name.js";
 import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENT_FILE_ID_CHARS,
+  MAX_ATTACHMENT_IDS_PER_COMMAND,
+  MAX_ATTACHMENT_MEDIA_TYPE_CHARS,
+  MAX_ATTACHMENT_NAME_CHARS,
+} from "./instance-attachments.js";
+import {
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
   MAX_INPUT_IMAGES,
+  MAX_PENDING_QUEUE_ATTACHMENT_DESCRIPTOR_CHARS,
   MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS,
   MAX_PENDING_QUEUE_ITEMS,
   MAX_PENDING_QUEUE_TEXT_CHARS,
 } from "./instance-dto.js";
 import type {
   AttachProjection,
+  AttachmentDto,
   CommandReceipt,
   ContentBlockDto,
   ConversationFrame,
@@ -149,6 +158,7 @@ export {
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
   MAX_INPUT_IMAGES,
+  MAX_PENDING_QUEUE_ATTACHMENT_DESCRIPTOR_CHARS,
   MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS,
   MAX_PENDING_QUEUE_ITEMS,
   MAX_PENDING_QUEUE_TEXT_CHARS,
@@ -208,6 +218,7 @@ interface AcceptedPromptMessage {
   operationId: string;
   text: string;
   images?: ImagePathDto[];
+  attachments?: AttachmentDto[];
 }
 
 interface QueuedUserMessageStart {
@@ -1310,33 +1321,40 @@ export class ManagedInstance {
     }
   }
 
-  async submit(message: string, delivery: DeliveryMode = "auto", operationId = this.createCommandId(), images?: readonly ImagePathDto[]): Promise<CommandReceipt> {
+  async submit(
+    message: string,
+    delivery: DeliveryMode = "auto",
+    operationId = this.createCommandId(),
+    images?: readonly ImagePathDto[],
+    attachments?: readonly AttachmentDto[],
+  ): Promise<CommandReceipt> {
     this.assertActive();
     if (this.pendingAdmission) throw new InstanceAdmissionPendingError(this.id);
     const inputImages = cloneInputImages(images);
-    if (message.trim().length === 0 && inputImages.length === 0) {
-      throw new Error("Prompt message or image must be provided");
+    const inputAttachments = cloneInputAttachments(attachments);
+    if (message.trim().length === 0 && inputImages.length === 0 && inputAttachments.length === 0) {
+      throw new Error("Prompt message, image, or attachment must be provided");
     }
 
     const compacting = this.runtimeCompactionInProgress();
     const manualCompactionPending = this.manualCompactionAdmissionActive();
     const hostQueueCustody = this.hostQueueCustodyActive();
     if (this.classifyAgentInput(message) === "extension_command") {
-      if (inputImages.length > 0) throw new Error("Registered extension commands do not accept image attachments");
+      if (inputImages.length > 0 || inputAttachments.length > 0) throw new Error("Registered extension commands do not accept attachments");
       if (this.commandAbortPending || this.queueMutationPending || (this.configurationPending && !compacting)) {
         throw new InstanceBusyError(this.id, "submitting an extension command");
       }
       return this.submitExtensionCommand(message, operationId);
     }
     if (this.commandAbortPending || this.queueMutationPending) throw new InstanceBusyError(this.id, "submitting a prompt");
-    if (compacting || manualCompactionPending || hostQueueCustody) return this.submitCompactionDeferred(message, delivery, operationId, inputImages);
+    if (compacting || manualCompactionPending || hostQueueCustody) return this.submitCompactionDeferred(message, delivery, operationId, inputImages, inputAttachments);
     if (this.configurationPending) throw new InstanceBusyError(this.id, "submitting a prompt");
 
     if (delivery !== "auto") {
       const running = this.agentState().isStreaming || (this.state.execution === "running" && !this.state.compacting);
       resolveDelivery(delivery, running);
     }
-    if (delivery !== "prompt" && !this.canQueueMessage(message, inputImages)) throw new QueueCapacityError();
+    if (delivery !== "prompt" && !this.canQueueMessage(message, inputImages, inputAttachments)) throw new QueueCapacityError();
     let actualDelivery: "prompt" | "steer" | "followUp" = "prompt";
     let actuallyQueued = false;
     const commandId = operationId;
@@ -1447,6 +1465,7 @@ export class ManagedInstance {
           delivery: actualDelivery === "followUp" ? "followUp" : "steer",
           text: safeWireText(message, MAX_PENDING_QUEUE_TEXT_CHARS),
           ...(inputImages.length === 0 ? {} : { images: cloneInputImages(inputImages) }),
+          ...(inputAttachments.length === 0 ? {} : { attachments: cloneInputAttachments(inputAttachments) }),
           acceptedAt,
           phase: "runtime_queued",
         }
@@ -1454,7 +1473,12 @@ export class ManagedInstance {
       if (pendingMessage) {
         this.pendingQueueMessages.push(pendingMessage);
         this.assignPendingRuntimeHashes(pendingMessage.delivery, pendingMessage.delivery === "steer" ? this.runtimeSteeringHashes : this.runtimeFollowUpHashes);
-      } else this.acceptedPromptMessages.push({ operationId: commandId, text: message, ...(inputImages.length === 0 ? {} : { images: cloneInputImages(inputImages) }) });
+      } else this.acceptedPromptMessages.push({
+        operationId: commandId,
+        text: message,
+        ...(inputImages.length === 0 ? {} : { images: cloneInputImages(inputImages) }),
+        ...(inputAttachments.length === 0 ? {} : { attachments: cloneInputAttachments(inputAttachments) }),
+      });
       const acceptedTransition = this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "command.accepted", effect: "post_effect", operationId: commandId, instanceId: this.id },
         () => {
@@ -1528,14 +1552,14 @@ export class ManagedInstance {
       try {
         const rerouted = resolveDelivery(delivery, true);
         if (rerouted === "prompt") throw new InvalidDeliveryModeError(rerouted, true);
-        if (!this.canQueueMessage(message, inputImages)) throw new QueueCapacityError();
+        if (!this.canQueueMessage(message, inputImages, inputAttachments)) throw new QueueCapacityError();
         deferredDelivery = rerouted;
       } catch (error) {
         await rejectBeforeRun(error, "compaction_started_during_admission");
         return receiptPromise;
       }
       try {
-        const receipt = await this.completeCompactionDeferredAdmission(message, deferredDelivery, commandId, inputImages);
+        const receipt = await this.completeCompactionDeferredAdmission(message, deferredDelivery, commandId, inputImages, inputAttachments);
         release();
         return receipt;
       } catch (error) {
@@ -1552,8 +1576,12 @@ export class ManagedInstance {
         operationId: commandId,
         message,
         ...(inputImages.length === 0 ? {} : { images: cloneInputImages(inputImages) }),
+        ...(inputAttachments.length === 0 ? {} : { attachments: inputAttachments.map((attachment) => attachment.fileId) }),
         delivery,
-      }, { preflightResult: onPreflight });
+      }, {
+        ...(inputAttachments.length === 0 ? {} : { context: { type: "command", attachments: cloneInputAttachments(inputAttachments) } as const }),
+        preflightResult: onPreflight,
+      });
     } catch (error) {
       await rejectBeforeRun(error, "prompt_threw_before_preflight");
       return receiptPromise;
@@ -1688,10 +1716,11 @@ export class ManagedInstance {
     delivery: DeliveryMode,
     operationId: string,
     images: readonly ImagePathDto[],
+    attachments: readonly AttachmentDto[],
   ): Promise<CommandReceipt> {
     const resolvedDelivery = resolveDelivery(delivery, true);
     if (resolvedDelivery === "prompt") throw new InvalidDeliveryModeError(resolvedDelivery, true);
-    if (!this.canQueueMessage(message, images)) throw new QueueCapacityError();
+    if (!this.canQueueMessage(message, images, attachments)) throw new QueueCapacityError();
 
     const admissionToken = {};
     let releaseAdmission!: () => void;
@@ -1704,7 +1733,7 @@ export class ManagedInstance {
         { kind: "command.admission", effect: "pre_effect", operationId, instanceId: this.id },
         () => {},
       ));
-      return await this.completeCompactionDeferredAdmission(message, resolvedDelivery, operationId, images);
+      return await this.completeCompactionDeferredAdmission(message, resolvedDelivery, operationId, images, attachments);
     } catch (error) {
       this.catalogAdmissionOperationId = undefined;
       await this.flushAdmissionAgentEvents().catch(() => {});
@@ -1722,6 +1751,7 @@ export class ManagedInstance {
     resolvedDelivery: "steer" | "followUp",
     operationId: string,
     images: readonly ImagePathDto[],
+    attachments: readonly AttachmentDto[],
   ): Promise<CommandReceipt> {
     const acceptedAt = this.timestamp();
     const pendingMessage: PendingQueueMessage = {
@@ -1730,6 +1760,7 @@ export class ManagedInstance {
       delivery: resolvedDelivery,
       text: safeWireText(message, MAX_PENDING_QUEUE_TEXT_CHARS),
       ...(images.length === 0 ? {} : { images: cloneInputImages(images) }),
+      ...(attachments.length === 0 ? {} : { attachments: cloneInputAttachments(attachments) }),
       acceptedAt,
       phase: "host_deferred",
       originalText: message,
@@ -1866,8 +1897,9 @@ export class ManagedInstance {
           operationId: item.operationId,
           message: item.originalText ?? item.text,
           ...(item.images === undefined ? {} : { images: cloneInputImages(item.images) }),
+          ...(item.attachments === undefined ? {} : { attachments: item.attachments.map((attachment) => attachment.fileId) }),
           delivery: item.delivery,
-        }, { context: { type: "force_queue" } });
+        }, { context: { type: "force_queue", ...(item.attachments === undefined ? {} : { attachments: cloneInputAttachments(item.attachments) }) } });
         item.phase = "runtime_queued";
         await this.transitionTail;
         return true;
@@ -1921,8 +1953,12 @@ export class ManagedInstance {
         operationId: item.operationId,
         message: item.originalText ?? item.text,
         ...(item.images === undefined ? {} : { images: cloneInputImages(item.images) }),
+        ...(item.attachments === undefined ? {} : { attachments: item.attachments.map((attachment) => attachment.fileId) }),
         delivery: item.delivery,
-      }, { context: { type: "host_queue" }, preflightResult: onPreflight });
+      }, {
+        context: { type: "host_queue", ...(item.attachments === undefined ? {} : { attachments: cloneInputAttachments(item.attachments) }) },
+        preflightResult: onPreflight,
+      });
     } catch (error) {
       onPreflight({ success: false });
       await this.reportDeferredDispatchFailure(item, error, generation);
@@ -3652,7 +3688,7 @@ export class ManagedInstance {
     return pendingMessageProjection(this.pendingQueueMessages);
   }
 
-  private canQueueMessage(message: string, images: readonly ImagePathDto[] = []): boolean {
+  private canQueueMessage(message: string, images: readonly ImagePathDto[] = [], attachments: readonly AttachmentDto[] = []): boolean {
     const tracked = this.trackedQueueMessages();
     const projectedCount = Math.max(
       tracked.length,
@@ -3666,9 +3702,14 @@ export class ManagedInstance {
       (total, item) => total + imageDescriptorCharacters(item.images),
       0,
     ) + imageDescriptorCharacters(images);
+    const projectedAttachmentCharacters = tracked.reduce(
+      (total, item) => total + attachmentDescriptorCharacters(item.attachments),
+      0,
+    ) + attachmentDescriptorCharacters(attachments);
     return projectedCount <= MAX_PENDING_QUEUE_ITEMS
       && projectedCharacters <= MAX_PENDING_QUEUE_TEXT_CHARS
-      && projectedImageCharacters <= MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS;
+      && projectedImageCharacters <= MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS
+      && projectedAttachmentCharacters <= MAX_PENDING_QUEUE_ATTACHMENT_DESCRIPTOR_CHARS;
   }
 
   private discardAcceptedPrompt(operationId: string): void {
@@ -3926,6 +3967,35 @@ function imageDescriptorCharacters(images: readonly ImagePathDto[] | undefined):
   return (images ?? []).reduce((total, image) => total + image.path.length + image.mimeType.length, 0);
 }
 
+function cloneInputAttachments(attachments: readonly AttachmentDto[] | undefined): AttachmentDto[] {
+  if (attachments === undefined) return [];
+  if (!Array.isArray(attachments) || attachments.length > MAX_ATTACHMENT_IDS_PER_COMMAND) throw new Error(`Prompt attachments must contain at most ${MAX_ATTACHMENT_IDS_PER_COMMAND} items`);
+  const result = attachments.map((attachment) => {
+    if (!attachment || typeof attachment.fileId !== "string" || attachment.fileId.length > MAX_ATTACHMENT_FILE_ID_CHARS || !/^[0-9a-f-]+$/u.test(attachment.fileId)) throw new Error("Prompt attachment fileId is invalid");
+    if (typeof attachment.name !== "string" || attachment.name.length < 1 || attachment.name.length > MAX_ATTACHMENT_NAME_CHARS || /[\/\\\u0000-\u001f\u007f-\u009f]/u.test(attachment.name)) throw new Error("Prompt attachment name is invalid");
+    if (!Number.isSafeInteger(attachment.sizeBytes) || attachment.sizeBytes < 0 || attachment.sizeBytes > MAX_ATTACHMENT_BYTES) throw new Error("Prompt attachment size is invalid");
+    if (attachment.mediaType !== undefined && (typeof attachment.mediaType !== "string" || attachment.mediaType.length < 1 || attachment.mediaType.length > MAX_ATTACHMENT_MEDIA_TYPE_CHARS || /[\u0000-\u001f\u007f-\u009f]/u.test(attachment.mediaType))) throw new Error("Prompt attachment media type is invalid");
+    if (typeof attachment.sha256 !== "string" || !/^[a-f0-9]{64}$/u.test(attachment.sha256)) throw new Error("Prompt attachment SHA-256 is invalid");
+    if (typeof attachment.storedAt !== "string" || !Number.isFinite(Date.parse(attachment.storedAt))) throw new Error("Prompt attachment timestamp is invalid");
+    return {
+      fileId: attachment.fileId,
+      name: attachment.name,
+      sizeBytes: attachment.sizeBytes,
+      ...(attachment.mediaType === undefined ? {} : { mediaType: attachment.mediaType }),
+      sha256: attachment.sha256,
+      storedAt: attachment.storedAt,
+    };
+  });
+  if (new Set(result.map((attachment) => attachment.fileId)).size !== result.length) throw new Error("Prompt attachments must be unique");
+  return result;
+}
+
+function attachmentDescriptorCharacters(attachments: readonly AttachmentDto[] | undefined): number {
+  return (attachments ?? []).reduce((total, attachment) => total
+    + attachment.fileId.length + attachment.name.length + attachment.sha256.length
+    + attachment.storedAt.length + (attachment.mediaType?.length ?? 0) + 32, 0);
+}
+
 function runtimeMessageHash(text: string): string {
   return createHash("sha256").update(text).digest("hex");
 }
@@ -3960,6 +4030,7 @@ function pendingMessageProjection(pending: readonly PendingQueueMessage[]): Pend
     delivery: item.delivery,
     text: item.text,
     ...(item.images === undefined ? {} : { images: cloneInputImages(item.images) }),
+    ...(item.attachments === undefined ? {} : { attachments: cloneInputAttachments(item.attachments) }),
     acceptedAt: item.acceptedAt,
   })));
 }
@@ -4066,7 +4137,9 @@ function projectAgentHistoryEntry(entry: AgentHistoryEntry): HistoryEntryDto {
     throw new Error("Runtime returned an invalid conversation parent identity");
   }
   if (entry.content.length > 200) throw new Error("Runtime returned too many conversation content blocks");
-  return cloneJson(entry);
+  const projected = cloneJson(entry);
+  if (entry.attachments !== undefined) projected.attachments = cloneInputAttachments(entry.attachments);
+  return projected;
 }
 
 function projectConversationHistoryPreview(entry: AgentHistoryEntry): HistoryEntryDto {

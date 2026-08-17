@@ -24,6 +24,10 @@ interface LedgerEntry<T = unknown> {
   settled: boolean;
 }
 
+export type DeferredOperation<T> =
+  | { admitted: false; promise: Promise<T> }
+  | { admitted: true; promise: Promise<T>; resolve(value: T | PromiseLike<T>): void; reject(error: unknown): void; abandon(error: unknown): void };
+
 /**
  * Same-Host mutation receipt ledger. Live operations are never evicted. Full
  * settled results are bounded, while compact retired identities remain for the
@@ -42,24 +46,41 @@ export class OperationLedger {
   }
 
   run<T>(operationId: string, mutationType: string, params: unknown, execute: () => Promise<T> | T): Promise<T> {
+    const deferred = this.defer<T>(operationId, mutationType, params);
+    if (deferred.admitted) {
+      // Start after the entry is visible to a concurrent duplicate, including
+      // requests decoded from the same I/O turn.
+      void Promise.resolve().then(execute).then(deferred.resolve, deferred.reject);
+    }
+    return deferred.promise;
+  }
+
+  /** Reserve an operation whose effect is completed by a multi-record protocol body. */
+  defer<T>(operationId: string, mutationType: string, params: unknown): DeferredOperation<T> {
     const fingerprint = stableFingerprint(mutationType, params);
     const existing = this.entries.get(operationId);
     if (existing) {
       if (existing.fingerprint !== fingerprint) {
-        return Promise.reject(new OperationConflictError(operationId));
+        return { admitted: false, promise: Promise.reject(new OperationConflictError(operationId)) };
       }
-      return existing.promise as Promise<T>;
+      return { admitted: false, promise: existing.promise as Promise<T> };
     }
     const retiredFingerprint = this.retired.get(operationId);
     if (retiredFingerprint !== undefined) {
-      return Promise.reject(retiredFingerprint === fingerprint
-        ? new OperationReceiptExpiredError(operationId)
-        : new OperationConflictError(operationId));
+      return {
+        admitted: false,
+        promise: Promise.reject(retiredFingerprint === fingerprint
+          ? new OperationReceiptExpiredError(operationId)
+          : new OperationConflictError(operationId)),
+      };
     }
 
-    // The continuation starts on a microtask, after the entry is visible to a
-    // concurrent duplicate, including requests decoded from the same I/O turn.
-    const promise = Promise.resolve().then(execute);
+    let resolveOperation!: (value: T | PromiseLike<T>) => void;
+    let rejectOperation!: (error: unknown) => void;
+    const promise = new Promise<T>((resolve, reject) => {
+      resolveOperation = resolve;
+      rejectOperation = reject;
+    });
     const entry: LedgerEntry<T> = { fingerprint, promise, settled: false };
     this.entries.set(operationId, entry);
     void promise.then(
@@ -70,7 +91,16 @@ export class OperationLedger {
         else this.markSettled(operationId, entry);
       },
     );
-    return promise;
+    return {
+      admitted: true,
+      promise,
+      resolve: resolveOperation,
+      reject: rejectOperation,
+      abandon: (error: unknown) => {
+        if (this.entries.get(operationId) === entry) this.entries.delete(operationId);
+        rejectOperation(error);
+      },
+    };
   }
 
   private markSettled(operationId: string, entry: LedgerEntry): void {

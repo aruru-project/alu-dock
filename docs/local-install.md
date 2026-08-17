@@ -14,6 +14,8 @@ Host 和 Worker 从安装包自己的依赖加载 Agent runtime，不调用 `$PA
 
 默认持久状态位于 `~/.local/state/alu-dock/`；managed service 使用 systemd 提供的同一用户私有 `STATE_DIRECTORY`。`remote-access/identity.json` 是长期 Host TLS identity，`remote-access/trusted/` 是已配对客户端证书。迁移或备份 Host 时必须把这两者作为一个私有状态单元处理；删除或丢失 Host identity 会使客户端已有的 Host pin 失效并需要重新配对。Settings 中关闭网络监听、更新程序或普通 service restart 都不会轮换证书或删除 trust。
 
+Attachment directory 设置保存在同一 private state 下的 `attachment-storage.json`。默认 bytes 位于 `~/.local/share/alu-dock/attachments/`（或 `$XDG_DATA_HOME/alu-dock/attachments/`），也可以在本机 Hub Settings 改为其他绝对永久路径。备份或迁移必须整体保存 `files/` 和 hidden `.alu-dock/` manifests；只备份其中一边会使 opaque `fileId` 无法恢复。Successful attachments 不随 update、service uninstall/restart、catalog forget/prune、remote disable 或 device revocation 删除。
+
 ## 安装或更新
 
 从要安装的工作区执行：
@@ -45,7 +47,7 @@ aludock service logs [--lines N] [--follow]
 aludock service uninstall
 ```
 
-普通 `aludock`、`-c`、`new` 和 `attach` 只连接已有 Host，不会安装、启动或重启 service。`uninstall` 只删除 Alu Dock 生成的 unit，不删除 catalog 或 Agent sessions。
+普通 `aludock`、`-c`、`new` 和 `attach` 只连接已有 Host，不会安装、启动或重启 service。`uninstall` 只删除 Alu Dock 生成的 unit，不删除 catalog、Agent sessions、attachment settings 或 stored attachments。
 
 需要跨 logout 常驻时，由用户显式启用 linger：
 

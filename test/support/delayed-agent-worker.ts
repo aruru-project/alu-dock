@@ -26,7 +26,7 @@ import { AgentConversationCursorError, AgentSettingsWriteError } from "../../src
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, SettingValueMap, ToolDto } from "../../src/core/config-projection.js";
 import { SETTING_DEFINITIONS, SETTING_KEYS } from "../../src/core/config-projection.js";
 import { sliceSemanticHistory } from "../../src/core/history-pagination.js";
-import type { ConversationFrame, ImagePathDto, JsonObject } from "../../src/core/instance-dto.js";
+import type { AttachmentDto, ConversationFrame, ImagePathDto, JsonObject } from "../../src/core/instance-dto.js";
 
 class Deferred<T> {
   readonly promise: Promise<T>;
@@ -82,11 +82,13 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   };
 
   private readonly listeners = new Set<(event: AgentEvent) => void>();
-  private readonly conversationInputs: Array<{ operationId: string; text: string; delivery: "prompt" | "steer" | "followUp"; fromQueue: boolean; images?: ImagePathDto[] }> = [];
+  private readonly conversationInputs: Array<{ operationId: string; text: string; delivery: "prompt" | "steer" | "followUp"; fromQueue: boolean; images?: ImagePathDto[]; attachments?: AttachmentDto[] }> = [];
   private readonly conversationToolCalls = new Set<string>();
   private readonly conversationCompletedToolCalls = new Set<string>();
   private conversationMessageSequence = 0;
   private conversationUserMessageId: string | undefined;
+  private conversationUserAttachments: AttachmentDto[] | undefined;
+  private conversationLastUserAttachments: AttachmentDto[] | undefined;
   private conversationAssistantMessageId: string | undefined;
   private conversationOutcome: { stopReason?: string; error?: string } | undefined;
   private historyEntrySequence = 0;
@@ -156,6 +158,9 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
           delivery,
           fromQueue: options?.context?.type === "force_queue" || options?.context?.type === "host_queue",
           ...(p.images === undefined ? {} : { images: structuredClone(p.images) }),
+          ...(options?.context !== undefined && options.context.type !== "session_switch" && options.context.attachments !== undefined
+            ? { attachments: structuredClone(options.context.attachments) }
+            : {}),
         } : undefined;
         if (tracked !== undefined) this.conversationInputs.push(tracked);
         return options?.context?.type === "force_queue"
@@ -726,7 +731,9 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
           ...(typeof message.toolCallId === "string" ? { toolCallId: message.toolCallId } : {}),
           ...(typeof message.toolName === "string" ? { toolName: message.toolName } : {}),
           ...(typeof message.isError === "boolean" ? { isError: message.isError } : {}),
+          ...(role !== "user" || this.conversationLastUserAttachments === undefined ? {} : { attachments: structuredClone(this.conversationLastUserAttachments) }),
         });
+        if (role === "user") this.conversationLastUserAttachments = undefined;
       }
     }
     if (event.type === "turn_end" || event.type === "agent_settled" || event.type === "compaction_end" || event.type === "entry_appended") {
@@ -738,6 +745,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     if (event.type === "conversation_checkpoint" || event.type === "dock_conversation_frame" || event.type === "dock_queue_consumed") return [event];
     if (event.type === "agent_start") {
       this.conversationUserMessageId = undefined;
+      this.conversationUserAttachments = undefined;
       this.conversationAssistantMessageId = undefined;
       this.conversationToolCalls.clear();
       this.conversationCompletedToolCalls.clear();
@@ -760,6 +768,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       const input = inputIndex < 0 ? undefined : this.conversationInputs.splice(inputIndex, 1)[0];
       const operationId = input?.operationId ?? "runtime-initiated";
       this.conversationUserMessageId = input === undefined ? `fixture-user-${++this.conversationMessageSequence}` : `user-${operationId}`;
+      this.conversationUserAttachments = structuredClone(input?.attachments);
       return [
         ...(input?.fromQueue === true ? [{ type: "dock_queue_consumed", operationId }] : []),
         fixtureFrame({ type: "message.submitted", data: {
@@ -768,6 +777,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
           role: "user",
           text: text || input?.text || "",
           ...(input?.images === undefined ? {} : { images: structuredClone(input.images) }),
+          ...(input?.attachments === undefined ? {} : { attachments: structuredClone(input.attachments) }),
           delivery: input?.delivery ?? "prompt",
         } }),
       ];
@@ -820,11 +830,16 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
         messageId,
         role: role === "assistant" || role === "user" ? role : role === "toolResult" ? "tool" : "system",
         content: projectFixtureMessageContent(message),
+        ...(role !== "user" || this.conversationUserAttachments === undefined ? {} : { attachments: structuredClone(this.conversationUserAttachments) }),
         ...(typeof message.stopReason === "string" ? { stopReason: message.stopReason } : {}),
         ...(typeof message.errorMessage === "string" ? { error: message.errorMessage } : {}),
       } });
       if (role === "assistant") this.conversationAssistantMessageId = undefined;
-      if (role === "user") this.conversationUserMessageId = undefined;
+      if (role === "user") {
+        this.conversationLastUserAttachments = this.conversationUserAttachments;
+        this.conversationUserAttachments = undefined;
+        this.conversationUserMessageId = undefined;
+      }
       return [projected];
     }
     if (event.type === "tool_execution_start") {

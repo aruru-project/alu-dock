@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { ExtensionUiBroker } from "../core/extension-ui-broker.js";
 import type { InstanceObservationHostPort, ObservationRequest } from "../core/instance-observation.js";
+import type { AttachmentAccessRequest, InstanceAttachmentHostPort } from "../core/instance-attachments.js";
 import type { AgentCommandPreflightResult, AgentEvent, AgentInvokeOptions, AgentRequest, AgentWorkerConnection as AgentWorkerConnectionPort, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
 import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
 import { PiWorkerProcess, type PiWorkerInitOptions, type WorkerProcessTimeouts } from "./worker-process.js";
@@ -31,6 +32,7 @@ export interface CreateAgentWorkerConnectionOptions {
   workerEnvironment?: NodeJS.ProcessEnv;
   onWorkerSpawn?: (pid: number) => void;
   observationHostPort: InstanceObservationHostPort;
+  attachmentHostPort: InstanceAttachmentHostPort;
   initialObservationGrant: boolean;
 }
 
@@ -236,8 +238,10 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
         result = await this.options.observationHostPort.configureObservation(this.identity.instanceId, args.enabled as boolean, args.operationId as string);
         if ((result as { enabled: boolean }).enabled) this.reverseCapabilities.add("dock.observation");
         else this.reverseCapabilities.delete("dock.observation");
-      } else {
+      } else if (capability === "dock.observation") {
         result = await this.options.observationHostPort.observe(this.identity.instanceId, args.request as ObservationRequest);
+      } else {
+        result = await this.options.attachmentHostPort.accessAttachments(this.identity.instanceId, args.request as AttachmentAccessRequest);
       }
       await this.sender.sendEnvelope({ kind: "response", callId, ok: true, result });
     } catch (error) {

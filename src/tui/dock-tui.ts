@@ -111,6 +111,7 @@ export async function runDockTui(
   let submitBlockDepth = 0;
   let detachTruth: DockTuiResult["detachTruth"] = initialInstance.lifecycle === "active" ? "host_owned" : "not_active";
   let cleanupErrors: string[] | undefined;
+  let draftAttachmentIds: string[] = [];
   let editor!: Editor;
   let settings: SettingDto[] = [];
   let commands: CommandDto[] = [];
@@ -599,6 +600,18 @@ export async function runDockTui(
       await refreshStatus();
       return;
     }
+    if (text === "/attachments" || text === "/attachments clear") {
+      if (text.endsWith(" clear")) {
+        draftAttachmentIds = [];
+        conversation.addNotice("Restored attachment references cleared.");
+      } else {
+        conversation.addNotice(draftAttachmentIds.length === 0
+          ? "No attachment references are waiting with this editor draft."
+          : `${draftAttachmentIds.length} restored attachment reference${draftAttachmentIds.length === 1 ? " is" : "s are"} waiting with the next submission.`);
+      }
+      tui.requestRender();
+      return;
+    }
     if (text === "/abort") {
       await abortRun();
       return;
@@ -653,7 +666,9 @@ export async function runDockTui(
     feedbackTimer.unref?.();
     try {
       if (!requireCoherentControl("Message submission")) return;
-      const result = await client.prompt(instance.id, message, delivery, operationId);
+      const attachments = draftAttachmentIds.length === 0 ? undefined : [...draftAttachmentIds];
+      const result = await client.prompt(instance.id, message, delivery, operationId, undefined, attachments);
+      if (attachments !== undefined) draftAttachmentIds = [];
       instance = result.instance;
       status.update(instance);
       // A successful admission receipt is not a model run. The stream's
@@ -687,6 +702,11 @@ export async function runDockTui(
   function restoreMessagesToEditor(messages: readonly PendingMessageDto[]): void {
     if (messages.length === 0) return;
     editor.setText(prependRestoredQueueText(editor.getText(), messages));
+    const restoredAttachments = messages.flatMap((message) => message.attachments ?? []);
+    draftAttachmentIds = [...new Set([...draftAttachmentIds, ...restoredAttachments.map((attachment) => attachment.fileId)])];
+    if (restoredAttachments.length > 0) {
+      conversation.addNotice(`${draftAttachmentIds.length} attachment reference${draftAttachmentIds.length === 1 ? " was" : "s were"} restored with the editor draft and will stay structured on its next submission. Use /attachments clear to remove them.`);
+    }
   }
 
   async function restoreQueue(): Promise<boolean> {

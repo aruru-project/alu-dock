@@ -49,7 +49,7 @@ Transport admission 完成以后，两条路径的 Protocol V2 行为一致：
 
 1. 客户端先发送 hello，并协商版本与 capabilities；
 2. hello 成功后发送业务 request；
-3. 普通 request 返回一个 response；
+3. 普通 request 返回一个 response；`attachment.upload` 是唯一的有界多记录 request body，完成后仍只返回一个 terminal response；
 4. `instance.read` 读取当前权威视图，`instance.follow` 在初始 response 后持续接收 event；
 5. Extension UI 操作使用独立连接，并与读取、实时跟随分别恢复。
 
@@ -61,13 +61,46 @@ TLS peer 必须在握手时提供 X.509 客户端证书并证明持有私钥。H
 
 远程地址不属于身份。已配对客户端可以从新的 IP、域名或映射端口连接同一个 Host，只要双方仍使用原来的证书。每次连接仍执行完整 TLS handshake；session resumption 被关闭，不能替代证书检查。吊销删除精确客户端证书信任，并由 Host 关闭该证书的现有远程连接。
 
-Remote Settings、开启/关闭配对窗口、待配对请求、PIN 确认、trusted device 列表和吊销是本机 `aludock` Hub 的 service-management surface。它们不属于 Protocol V2，不通过 Unix socket 或 TLS 暴露，也不在 DockClient、CLI JSON API 或额外 admin socket 中提供。远程客户端只能使用临时 pairing bootstrap 和配对后的 Protocol V2；它不能远程开启或延长配对窗口。
+Remote Settings、attachment storage directory、开启/关闭配对窗口、待配对请求、PIN 确认、trusted device 列表和吊销是本机 `aludock` Hub 的 service-management surface。它们不属于 Protocol V2，不通过 Unix socket 或 TLS 暴露，也不在 DockClient、CLI JSON API 或额外 admin socket 中提供。远程客户端只能使用临时 pairing bootstrap 和配对后的 Protocol V2；它不能远程改变 Host 设置、开启或延长配对窗口。
 
 Client 发给 Host 的 hello/request 使用 closed JSON-safe shape，未知字段会被拒绝。Host 发给 Client 的 response/event 仍严格校验已知字段、版本、类型和边界，但 Client 必须忽略新增的未知可选字段；只有删除字段、改变既有语义或新增无法忽略的类型时才需要 capability 或协议版本。单 frame 可以有传输上限，但业务内容不能因此永久截断；大型 conversation 使用分页和 chunk 继续读取。
 
 Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 TUI 或 Web 客户端重写。
 
 `workspace.list.v1` 是创建实例前唯一的目录发现能力。客户端明确传入 Host 文件系统中的绝对路径；Host 返回规范当前路径、上级路径、目录/目录符号链接和分页事实。它只使用 Host 运行用户已有的文件系统权限，不设置额外根目录或白名单，不读取文件正文、不执行 shell，也不改变任何 Host 或 Worker 的进程 cwd。目录选择完成后仍由 `instance.create(cwd)` 执行既有校验和 project trust；浏览本身不产生信任。
+
+## 附件存储与上传
+
+附件是 Host-owned、单用户、永久文件，不属于 durable catalog、Worker DTO 中的字节载荷或某个 TUI 的私有目录。Hub Settings 在本机私有 state 中配置一个绝对 storage directory；Unix socket 和已配对 mTLS 客户端共享它。Settings change 与 active upload 使用跨进程 claim/lease 协调：有 upload 尚未 complete/abort 时拒绝改目录，避免成功 receipt 指向旧 root。首次提交后目录不能直接改到另一处；需要迁移时先整体移动 `files/` 与 `.alu-dock/` store，再修改配置。Host 不做病毒扫描、格式转换、MIME 强制、自动解压、TTL、GC、quota、per-device/per-instance ACL 或引用计数。
+
+`attachments.v1` 的公开 metadata 始终使用同一个 path-free shape：
+
+```ts
+interface AttachmentDto {
+  fileId: string;
+  name: string;
+  sizeBytes: number;
+  mediaType?: string;
+  sha256: string;
+  storedAt: string;
+}
+```
+
+`fileId` 是 opaque identity；Protocol V2 response、Queue、event 和 conversation 不得出现 Host absolute path。人类文件名保留 Unicode、空格、扩展名和常见标点，只替换 path separator、NUL/control，并在不同内容同名时添加自然序号。相同 SHA-256 内容只保留一份，最先提交成功的 display metadata 成为 canonical receipt；结果用 `status: "stored" | "reused"` 表示本次是否创建内容。
+
+上传最大 decoded size 是 `536870912` bytes（512 MiB）。客户端先计算并声明 size 与 lowercase SHA-256，Host 在写 provisional file 时独立计数和 hash，只有 size/digest 完全相同才 fsync、原子发布内容和 manifest。失败、断开和 Host restart 会清理 provisional file；成功附件没有自动到期。已发布文件在 Agent resolve 时再次检查 regular-file、size、digest 与 managed-directory containment。
+
+`attachment.upload` 使用普通 authenticated Protocol V2 hello，并要求 `attachments.v1`。其专用连接顺序是：
+
+1. 发送一个 upload header request：`operationId + name + sizeBytes + optional mediaType + sha256`；
+2. Host 返回 `attachment_upload_ready` 与 `maxChunkBytes`，或者直接返回同一 operation 的既有 terminal receipt；
+3. 客户端按从 0 开始的连续 index 发送 canonical-base64 `attachment_chunk`；decoded chunk 不超过 Host 宣告值，当前上限 512 KiB，因此每条 JSONL 仍小于 1 MiB control-line bound；
+4. 客户端发送一个 `attachment_complete`，其 `chunks` 必须等于已发送数量；
+5. Host 只返回一个普通 terminal `response` 并关闭连接。
+
+Host 对 socket input 串行处理、pause/resume backpressure，并以 60 秒 idle deadline 约束未完成 body。`operationId` 仍遵守同一 Host epoch 的 mutation identity：相同 header 重试共享进行中或已完成 receipt，不重复请求 body；同一 ID 换参数得到 `operation_conflict`。若 complete 后 response 丢失，客户端保留结果未知并以相同 operation/header 恢复；receipt 已淘汰时也可用新 operation 重传相同 bytes，content digest 会安全复用。普通 request 的一请求一响应规则不因此变成通用 streaming RPC。
+
+`command.submit` 只携带结构化 opaque `attachments: fileId[]`。Host 在 admission 时解析为 canonical DTO，再与 message 一起进入 direct prompt、Host Queue、runtime Queue、`message.submitted`、`message.completed` 和 persisted conversation。文件 bytes 始终留在 Host store，不进入 catalog、event JSONL 或 `MAX_WORKER_TRANSFER_BYTES` IPC。
 
 ## 身份
 
@@ -80,6 +113,7 @@ Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 
 - Agent 原生 session identity：当前 Worker 内的会话；
 - `runtimeGeneration`：instance 内一次 runtime/session generation；
 - `operationId`：一次调用者 mutation 意图；
+- attachment `fileId`：Host 文件内容 receipt 的 opaque identity，不是路径；
 - event cursor：一次 read/follow reconnect 的观察位置。
 
 客户端不能用 name、cwd、Agent session ID 或文件路径代替 Dock instance identity。Snapshot 中可选的 `name` 是当前 Agent session name，不是稳定的 Dock 实例名称。`instance.display-name.v1` 提供始终存在的 `displayName`：Host 统一按 `name → key → cwd fallback → Work` 生成安全的人类展示标签；其中 cwd fallback 只保留 ASCII 字母、数字、空格、下划线和横杠，最长 20 个字符，任意异常都降级而不能使 snapshot/list 失败。`displayName` 不持久化为 session name，不参与 TARGET、key 或 instance identity；客户端只负责渲染，操作仍使用 `instanceId`。
@@ -91,6 +125,8 @@ Host 对 mutation 负责 admission、operation 去重和结果归属。客户端
 显式 stop 先持久化 stopping intent，再清理 Worker；完成提交直接把 instance 从 catalog 退役，同时向调用者和已连接客户端发布最终 stopped 状态。Agent 自己的持久 session 不属于 Dock catalog，stop 不删除它。Host shutdown、Host loss 和可恢复 runtime error 不是显式 stop，必须继续保留 reopen 所需的 catalog 记录。
 
 Worker 接受副作用前失联和接受后失联是不同结果。Host 必须保留这个区别，不能把可能已经执行的 mutation 当成普通失败重试。
+
+附件上传的 `operationId` 在 header admission 时保留；同一参数的并发、completed 或 response-loss 重试共享 receipt，不重新执行 body effect，不同参数冲突。内容 SHA-256 另提供跨 operation 的永久去重，不把 endpoint、文件名或客户端路径当 identity。
 
 消息提交中，Host 的 admission result 使用 Worker 报告的实际 delivery。`operationId` 是直接 prompt 与 Queue message 共用的提交身份；`queueItemId` 只属于确实等待过的 Queue item。一个 Host-deferred Queue item 可以在 Agent 恢复空闲后以 `prompt` delivery 被消费，此时 `message.submitted` 仍保留它真实的历史 Queue identity；普通 direct prompt 没有该 identity。若辅助关联异常，Host 省略这个可选 identity，而不是伪造一个或丢掉 canonical message。Host 不根据 catalog 中稍早的 running 状态替 Agent 决定最终 delivery。因此用户看到的状态必须始终可判定为未接受、Queue 中等待，或已经被 Agent 消费并出现在 conversation，不能两边都没有。
 
@@ -138,6 +174,8 @@ Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力
 - `src/control/remote-access-state.ts`：Host TLS identity、listener settings、pairing 与 certificate trust 的私有持久状态。
 - `src/control/remote-access-server.ts`：TLS admission、pairing bootstrap、listener reconfiguration 与 revocation。
 - `src/control/remote-pairing.ts`：客户端可复用的 pairing wire types，以及 SRP、identity encryption 和 certificate proof helpers。
+- `src/control/attachment-storage-state.ts`：本机 storage directory 设置。
+- `src/control/attachment-service.ts`：stream sink、hash verification、manifest、dedupe 与 Agent path resolution。
 - `src/control/workspace-browser.ts`：Host 文件系统目录浏览与可恢复错误。
 
 新增功能时先判断它属于 Host control 还是 Agent session。不要把 Agent session 能力塞进 catalog/Managed state，也不要为同一 Protocol V2 shape 在 Worker、Host 和客户端分别维护重复定义。

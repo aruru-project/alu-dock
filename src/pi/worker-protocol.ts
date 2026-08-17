@@ -9,7 +9,7 @@ import {
   AgentUnknownToolError,
 } from "../core/agent-worker.js";
 import type { AgentCommandPreflightResult, AgentInvokeContext, AgentRequest, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
-import { parseControlRequest } from "../control/protocol.js";
+import { parseAttachmentDto, parseControlRequest } from "../control/protocol.js";
 import {
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
@@ -52,10 +52,10 @@ export type UiCapability =
   | "ui.notify" | "ui.setTitle" | "ui.setEditorText" | "ui.setStatus" | "ui.setWidget" | "ui.widgetError"
   | "ui.unsupported" | "ui.setToolsExpanded" | "ui.cancel" | "ui.viewport" | "ui.reset" | "ui.generationBegin";
 
-export type DockCapability = "dock.identity" | "dock.observation.configure" | "dock.observation";
+export type DockCapability = "dock.identity" | "dock.observation.configure" | "dock.observation" | "dock.attachments";
 export type ReverseWorkerCapability = DockCapability | Exclude<UiCapability, "ui.viewport" | "ui.reset">;
 export const ORDINARY_REVERSE_WORKER_CAPABILITIES: readonly ReverseWorkerCapability[] = [
-  "dock.identity", "dock.observation.configure", "dock.observation",
+  "dock.identity", "dock.observation.configure", "dock.observation", "dock.attachments",
   "ui.select", "ui.confirm", "ui.input", "ui.editor", "ui.notify", "ui.setTitle", "ui.setEditorText", "ui.setStatus",
   "ui.setWidget", "ui.widgetError", "ui.unsupported", "ui.setToolsExpanded", "ui.cancel", "ui.generationBegin",
 ];
@@ -231,6 +231,14 @@ export function parseWorkerEnvelope(raw: unknown): WorkerEnvelope {
         && (request.type !== "command.submit" || request.params.delivery === "prompt")) {
         throw new Error("Worker Host queue context requires a steer or followUp command submission");
       }
+      if (context?.type === "command" && request.type !== "command.submit") throw new Error("Worker command context requires command.submit");
+      if (request.type === "command.submit") {
+        const requestedIds = request.params.attachments ?? [];
+        const contextAttachments = context !== undefined && context.type !== "session_switch" ? context.attachments ?? [] : [];
+        if (requestedIds.length !== contextAttachments.length || requestedIds.some((fileId, index) => contextAttachments[index]?.fileId !== fileId)) {
+          throw new Error("Worker attachment context does not match command attachment IDs");
+        }
+      }
       return { kind, callId: boundedString(value.callId, 128, "Worker call ID"), request: request as AgentRequest, ...(context === undefined ? {} : { context }) };
     }
     case "agent_control": {
@@ -377,11 +385,12 @@ function validateConversationFrame(raw: unknown): void {
   ], "Worker conversation frame type");
   const data = record(frame.data, `Worker ${type} data`);
   if (type === "message.submitted") {
-    exactKeys(data, ["operationId", "messageId", "role", "text", "images", "delivery", "queueItemId"], "Worker submitted-message data");
+    exactKeys(data, ["operationId", "messageId", "role", "text", "images", "attachments", "delivery", "queueItemId"], "Worker submitted-message data");
     boundedString(data.operationId, 128, "Message operation id"); boundedString(data.messageId, 128, "Message id");
     if (data.role !== "user") throw new Error("Submitted message role is invalid");
     boundedString(data.text, 256_000, "Submitted message text", true);
     if (data.images !== undefined) validateImagePaths(data.images);
+    if (data.attachments !== undefined) validateAttachmentDtos(data.attachments, "Submitted attachments");
     oneOf(data.delivery, ["prompt", "steer", "followUp"], "Message delivery"); optionalString(data.queueItemId, 128);
     return;
   }
@@ -390,9 +399,9 @@ function validateConversationFrame(raw: unknown): void {
     boundedString(data.messageId, 128, "Message id"); oneOf(data.block, ["text", "thinking"], "Message block"); boundedString(data.delta, 8_000, "Message delta", true); return;
   }
   if (type === "message.completed") {
-    exactKeys(data, ["messageId", "role", "content", "stopReason", "error"], "Worker completed-message data");
+    exactKeys(data, ["messageId", "role", "content", "attachments", "stopReason", "error"], "Worker completed-message data");
     boundedString(data.messageId, 128, "Message id"); oneOf(data.role, ["user", "assistant", "tool", "system"], "Completed message role");
-    validateDockContent(data.content); optionalString(data.stopReason, 128); optionalString(data.error, 2_048); return;
+    validateDockContent(data.content); if (data.attachments !== undefined) validateAttachmentDtos(data.attachments, "Completed-message attachments"); optionalString(data.stopReason, 128); optionalString(data.error, 2_048); return;
   }
   if (type === "tool.started" || type === "tool.args_updated") {
     exactKeys(data, type === "tool.started" ? ["toolCallId", "toolName", "args", "omittedFields"] : ["toolCallId", "args", "omittedFields"], `Worker ${type} data`);
@@ -511,7 +520,7 @@ function validateConversationContentPage(raw: unknown): void {
 function validateWorkerHistoryEntry(raw: unknown): void {
   const entry = record(raw, "Worker conversation record");
   exactKeys(entry, [
-    "recordId", "entryId", "parentId", "kind", "source", "visibility", "timestamp", "content",
+    "recordId", "entryId", "parentId", "kind", "source", "visibility", "timestamp", "content", "attachments",
     "stopReason", "error", "toolCallId", "toolName", "isError", "customType", "display", "metadata",
     "metadataOmittedFields", "command", "exitCode", "cancelled", "truncated", "fullOutputPath", "excludeFromContext",
     "firstKeptEntryId", "tokensBefore", "fromEntryId", "targetEntryId", "label", "provider", "modelId",
@@ -528,6 +537,7 @@ function validateWorkerHistoryEntry(raw: unknown): void {
     if (!Number.isFinite(Date.parse(value)) || new Date(value).toISOString() !== value) throw new Error("Conversation timestamp is invalid");
   }
   validateDockContent(entry.content);
+  if (entry.attachments !== undefined) validateAttachmentDtos(entry.attachments, "Conversation attachments");
   optionalString(entry.stopReason, 128); optionalString(entry.error, 2_048);
   optionalString(entry.toolCallId, 128); optionalString(entry.toolName, 256);
   if (entry.isError !== undefined && typeof entry.isError !== "boolean") throw new Error("Conversation error flag is invalid");
@@ -544,6 +554,12 @@ function validateWorkerHistoryEntry(raw: unknown): void {
   optionalNonNegativeInteger(entry.tokensBefore, "Conversation pre-compaction tokens");
   optionalString(entry.fromEntryId, 128); optionalString(entry.targetEntryId, 128); optionalString(entry.label, 256);
   optionalString(entry.provider, 256); optionalString(entry.modelId, 512); optionalString(entry.thinkingLevel, 64); optionalString(entry.name, 256);
+}
+
+function validateAttachmentDtos(raw: unknown, label: string): void {
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > 32) throw new Error(`${label} must be a nonempty bounded array`);
+  const attachments = raw.map((item, index) => parseWorkerAttachmentDto(item, `${label}[${index}]`));
+  if (new Set(attachments.map((attachment) => attachment.fileId)).size !== attachments.length) throw new Error(`${label} contains duplicate file IDs`);
 }
 
 function validateDockContent(raw: unknown): void {
@@ -583,6 +599,7 @@ export function validateUiCapabilityArgs(capability: WorkerCapability, raw: unkn
     case "dock.identity": keys(); return;
     case "dock.observation.configure": keys("enabled", "operationId"); if (typeof args.enabled !== "boolean") throw new Error("Observation enabled flag is invalid"); boundedString(args.operationId, 128, "Observation operation ID"); return;
     case "dock.observation": keys("request"); parseObservationRequest(args.request); return;
+    case "dock.attachments": keys("request"); parseAttachmentAccessRequest(args.request); return;
     case "ui.select": keys("title", "options", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); stringArray(args.options, 256, 16_000, "Dialog options"); validateDialogOptions(args.optionsMeta); return;
     case "ui.confirm": keys("title", "message", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); boundedString(args.message, 16_000, "Dialog message", true); validateDialogOptions(args.optionsMeta); return;
     case "ui.input": keys("title", "placeholder", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); optionalString(args.placeholder, 4_096); validateDialogOptions(args.optionsMeta); return;
@@ -603,6 +620,7 @@ export function validateUiCapabilityArgs(capability: WorkerCapability, raw: unkn
 
 export function validateDockCapabilityResult(capability: DockCapability, result: unknown): void {
   if (capability === "dock.identity") return;
+  if (capability === "dock.attachments") { parseAttachmentAccessResult(result); return; }
   if (capability === "dock.observation.configure") {
     const value = record(result, "Observation configure result");
     exactKeys(value, ["enabled"], "Observation configure result");
@@ -828,9 +846,19 @@ function parseAgentWorkerState(raw: unknown): AgentWorkerState {
 
 function parseAgentInvokeContext(raw: unknown): AgentInvokeContext {
   const value = record(raw, "Worker Agent invoke context");
-  if (value.type === "force_queue" || value.type === "host_queue") {
-    exactKeys(value, ["type"], "Worker Agent invoke context");
-    return { type: value.type };
+  if (value.type === "command" || value.type === "force_queue" || value.type === "host_queue") {
+    exactKeys(value, ["type", "attachments"], "Worker Agent invoke context");
+    if (value.attachments !== undefined && (!Array.isArray(value.attachments) || value.attachments.length > 32)) throw new Error("Worker attachments must be a bounded array");
+    const attachments = value.attachments === undefined
+      ? undefined
+      : (value.attachments as unknown[]).map((item, index) => parseWorkerAttachmentDto(item, `Worker attachments[${index}]`));
+    if (attachments !== undefined && (attachments.length === 0 || new Set(attachments.map((attachment) => attachment.fileId)).size !== attachments.length)) throw new Error("Worker attachments must be nonempty and unique");
+    if (value.type === "command") {
+      if (attachments === undefined) throw new Error("Worker command context requires attachments");
+      return { type: "command", attachments };
+    }
+    if (value.type === "force_queue") return { type: "force_queue", ...(attachments === undefined ? {} : { attachments }) };
+    return { type: "host_queue", ...(attachments === undefined ? {} : { attachments }) };
   }
   exactKeys(value, ["type", "canonicalCwd", "projectTrusted"], "Worker Agent invoke context");
   if (value.type !== "session_switch" || typeof value.projectTrusted !== "boolean") throw new Error("Worker Agent invoke context is invalid");
@@ -854,8 +882,40 @@ function isAgentRequest(type: string): type is AgentRequest["type"] {
 function parseCapability(raw: unknown): WorkerCapability {
   return oneOf(raw, [
     "ui.select", "ui.confirm", "ui.input", "ui.editor", "ui.notify", "ui.setTitle", "ui.setEditorText", "ui.setStatus", "ui.setWidget", "ui.widgetError", "ui.unsupported", "ui.setToolsExpanded", "ui.cancel", "ui.viewport", "ui.reset", "ui.generationBegin",
-    "dock.identity", "dock.observation.configure", "dock.observation",
+    "dock.identity", "dock.observation.configure", "dock.observation", "dock.attachments",
   ] as const, "Worker capability");
+}
+
+function parseAttachmentAccessRequest(raw: unknown): { type: "list" } | { type: "resolve"; fileId: string } {
+  const value = record(raw, "Attachment access request");
+  if (value.type === "list") { exactKeys(value, ["type"], "Attachment access request"); return { type: "list" }; }
+  exactKeys(value, ["type", "fileId"], "Attachment access request");
+  if (value.type !== "resolve") throw new Error("Attachment access request type is invalid");
+  return { type: "resolve", fileId: boundedString(value.fileId, 128, "Attachment file ID") };
+}
+
+function parseAttachmentAccessResult(raw: unknown): unknown {
+  const value = record(raw, "Attachment access result");
+  if (value.type === "list") {
+    exactKeys(value, ["type", "attachments", "total", "truncated"], "Attachment list result");
+    if (!Array.isArray(value.attachments) || value.attachments.length > 200) throw new Error("Attachment list result is too large");
+    const attachments = value.attachments.map((item, index) => parseWorkerAttachmentDto(item, `Attachment list[${index}]`));
+    if (new Set(attachments.map((attachment) => attachment.fileId)).size !== attachments.length) throw new Error("Attachment list contains duplicate file IDs");
+    const total = nonNegativeInteger(value.total, "Attachment list total");
+    if (total < attachments.length || (value.truncated !== (total > attachments.length))) throw new Error("Attachment list completeness is invalid");
+    return { type: "list", attachments, total, truncated: value.truncated };
+  }
+  exactKeys(value, ["type", "attachment", "path"], "Attachment resolve result");
+  if (value.type !== "resolve") throw new Error("Attachment access result type is invalid");
+  const path = boundedString(value.path, 16_384, "Attachment resolved path");
+  if (!path.startsWith("/") || /[\u0000-\u001f\u007f-\u009f]/u.test(path)) throw new Error("Attachment resolved path must be absolute and control-free");
+  return { type: "resolve", attachment: parseWorkerAttachmentDto(value.attachment, "Resolved attachment"), path };
+}
+
+function parseWorkerAttachmentDto(raw: unknown, label: string): ReturnType<typeof parseAttachmentDto> {
+  const value = record(raw, label);
+  exactKeys(value, ["fileId", "name", "sizeBytes", "mediaType", "sha256", "storedAt"], label);
+  return parseAttachmentDto(value, label);
 }
 
 function parseObservationRequest(raw: unknown): ObservationRequest {
