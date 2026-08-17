@@ -89,15 +89,6 @@ import {
   parseClientHello,
   parseControlRequest,
   ProtocolValidationError,
-  GIT_BRANCH_CAPABILITY,
-  IMAGE_INPUT_CAPABILITY,
-  INSTANCE_KEYS_CAPABILITY,
-  INSTANCE_DISPLAY_NAME_CAPABILITY,
-  CONTROLLER_DIRECTIVES_CAPABILITY,
-  PERSISTENT_INTERACTIONS_CAPABILITY,
-  EXTENSION_UI_CONTROL_CAPABILITY,
-  TOOL_RESULT_PRESENTATION_CAPABILITY,
-  TOOLS_EXPANDED_CAPABILITY,
 } from "./protocol.js";
 
 const MAX_SOCKET_WRITE_BUFFER = MAX_CONTROL_LINE_BYTES;
@@ -580,16 +571,7 @@ export class DockHost {
   ): Promise<void> {
     if (isSessionCommandRequest(request)) {
       const result = await executeSessionCommand(request, this.registry, this.operationLedger);
-      if (request.type === "session.reload" && !clientRequirements.has("projection.completeness.v1")) {
-        const projected = result as { instance: unknown; resources: unknown; diagnostics: unknown };
-        this.sendSuccessAndEnd(socket, request.requestId, {
-          instance: projected.instance,
-          resources: projected.resources,
-          diagnostics: projected.diagnostics,
-        });
-      } else {
-        this.sendSuccessAndEnd(socket, request.requestId, result);
-      }
+      this.sendSuccessAndEnd(socket, request.requestId, result);
       return;
     }
     switch (request.type) {
@@ -679,7 +661,6 @@ export class DockHost {
         this.sendSuccessAndEnd(socket, request.requestId, result); return;
       }
       case "interaction.respond": {
-        if (!clientRequirements.has(PERSISTENT_INTERACTIONS_CAPABILITY)) throw new ProtocolValidationError("capability_missing", `Capability ${PERSISTENT_INTERACTIONS_CAPABILITY} is required for interaction responses`);
         const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, async () => {
           const instance = this.registry.get(request.params.instanceId);
           return instance.respondInteraction(request.params.leaseToken, request.params.interactionId, request.params.response);
@@ -707,8 +688,6 @@ export class DockHost {
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
       case "command.submit": {
-        if (request.params.images !== undefined && !this.connectionRequirements.get(socket)?.has(IMAGE_INPUT_CAPABILITY)) throw new ProtocolValidationError("capability_missing", `Capability ${IMAGE_INPUT_CAPABILITY} is required for image input`);
-        if (request.params.attachments !== undefined && !this.connectionRequirements.get(socket)?.has(ATTACHMENTS_CAPABILITY)) throw new ProtocolValidationError("capability_missing", `Capability ${ATTACHMENTS_CAPABILITY} is required for attachment input`);
         const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, async () => {
           const instance = this.registry.get(request.params.instanceId);
           const attachments = request.params.attachments === undefined
@@ -728,7 +707,7 @@ export class DockHost {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const receipt=await instance.dequeue(request.params.operationId);return {receipt,instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
-      case "model.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listModels(); this.sendSuccessAndEnd(socket,request.requestId,{models:result.models,availableThinkingLevels:result.state.availableThinkingLevels,instance:instance.snapshot(),...collectionCompleteness(result,clientRequirements)}); return; }
+      case "model.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listModels(); this.sendSuccessAndEnd(socket,request.requestId,{models:result.models,availableThinkingLevels:result.state.availableThinkingLevels,instance:instance.snapshot(),...collectionCompleteness(result)}); return; }
       case "model.set": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);await instance.selectModel(request.params.provider,request.params.modelId,request.params.operationId);return {instance:instance.snapshot(),settingsWrite:{persisted:true as const}};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
@@ -737,31 +716,27 @@ export class DockHost {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const state=await instance.setThinkingLevel(request.params.level,request.params.operationId);return {actualLevel:state.thinkingLevel,availableThinkingLevels:state.availableThinkingLevels,instance:instance.snapshot(),settingsWrite:{persisted:true as const}};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
-      case "tool.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listTools(); this.sendSuccessAndEnd(socket,request.requestId,{tools:result.tools,instance:instance.snapshot(),...collectionCompleteness(result,clientRequirements)}); return; }
+      case "tool.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listTools(); this.sendSuccessAndEnd(socket,request.requestId,{tools:result.tools,instance:instance.snapshot(),...collectionCompleteness(result)}); return; }
       case "tool.set_active": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const tools=await instance.setActiveTools(request.params.names,request.params.operationId);return {tools:tools.tools,instance:instance.snapshot(),total:tools.total,truncated:tools.truncated};});
-        this.sendSuccessAndEnd(socket,request.requestId,{tools:result.tools,instance:result.instance,...collectionCompleteness(result,clientRequirements)}); return;
+        this.sendSuccessAndEnd(socket,request.requestId,{tools:result.tools,instance:result.instance,...collectionCompleteness(result)}); return;
       }
       case "settings.get": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,{settings:await instance.getSettings()}); return; }
       case "settings.update": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=this.registry.get(request.params.instanceId);const setting=await instance.updateSetting(request.params.update,request.params.operationId);return {setting,instance:instance.snapshot(),reloadRequired:setting.reloadRequired,hostRestartRequired:setting.hostRestartRequired};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
-      case "resource.get": { const instance=this.registry.get(request.params.instanceId); const result=await instance.getResources(); this.sendSuccessAndEnd(socket,request.requestId,clientRequirements.has("projection.completeness.v1")?result:{resources:result.resources,diagnostics:result.diagnostics}); return; }
-      case "command.catalog": { const instance=this.registry.get(request.params.instanceId); const result=await instance.getCommands(request.params.prefix); this.sendSuccessAndEnd(socket,request.requestId,{commands:result.commands,...collectionCompleteness(result,clientRequirements)}); return; }
+      case "resource.get": { const instance=this.registry.get(request.params.instanceId); const result=await instance.getResources(); this.sendSuccessAndEnd(socket,request.requestId,result); return; }
+      case "command.catalog": { const instance=this.registry.get(request.params.instanceId); const result=await instance.getCommands(request.params.prefix); this.sendSuccessAndEnd(socket,request.requestId,{commands:result.commands,...collectionCompleteness(result)}); return; }
       case "session.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getHistoryPage(request.params.beforeEntryId,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,createBoundedHistoryResult(page,request.requestId,this.hostEpoch)); return; }
       case "conversation.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getConversationHistory(request.params.cursor,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
       case "conversation.content": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getConversationContent(request.params.contentRef,request.params.cursor); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
       case "session.inventory": {
         const inventory = await this.sessionInventory.list(request.params.cwd, request.params.scope);
-        this.sendSuccessAndEnd(socket, request.requestId, boundedSessionInventory(
-          inventory,
-          request.params,
-          clientRequirements.has("session.inventory-diagnostics.v1"),
-        ));
+        this.sendSuccessAndEnd(socket, request.requestId, boundedSessionInventory(inventory, request.params));
         return;
       }
-      case "session.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listSessions(request.params.scope); this.sendSuccessAndEnd(socket,request.requestId,{sessions:result.sessions,...collectionCompleteness(result,clientRequirements)}); return; }
+      case "session.list": { const instance=this.registry.get(request.params.instanceId); const result=await instance.listSessions(request.params.scope); this.sendSuccessAndEnd(socket,request.requestId,{sessions:result.sessions,...collectionCompleteness(result)}); return; }
       case "session.tree": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getTreePage(request.params.treeRevision,request.params.afterEntryId,request.params.limit)); return; }
       case "workspace.list": {
         this.sendSuccessAndEnd(socket, request.requestId, await this.workspaceBrowser.list(request.params));
@@ -772,20 +747,9 @@ export class DockHost {
 
   private async followEventStream(request: Extract<ControlRequest,{type:"instance.follow"}>,socket:Socket,setEventUnsubscribe:(unsubscribe:()=>void)=>void):Promise<void> {
     const instance=this.registry.get(request.params.instanceId);
-    const requirements=this.connectionRequirements.get(socket);
     this.trackAttachStream(instance.id, socket);
     const cursor=request.params.since;
     if(cursor.instanceId!==instance.id) throw new ProtocolValidationError("invalid_cursor","The saved update position belongs to another work");
-    const projectionCapabilities:ClientProjectionCapabilities={
-      toolsExpanded: requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,
-      gitBranch: requirements?.has(GIT_BRANCH_CAPABILITY)===true,
-      instanceKeys: requirements?.has(INSTANCE_KEYS_CAPABILITY)===true,
-      instanceDisplayName: requirements?.has(INSTANCE_DISPLAY_NAME_CAPABILITY)===true,
-      toolPresentation: requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,
-      images: requirements?.has(IMAGE_INPUT_CAPABILITY)===true,
-      controllerDirectives: requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true,
-      persistentInteractions: requirements?.has(PERSISTENT_INTERACTIONS_CAPABILITY)===true,
-    };
     type QueuedEvent = { event: DockEvent; bytes: number };
     let initializing=true,pending:QueuedEvent[]=[]; let pendingBytes=0,initializationOverflow=false;
     let lastGeneration=instance.runtimeGeneration,lastAccepted=0; let unsubscribe=()=>{};
@@ -795,7 +759,7 @@ export class DockHost {
     const closeSubscription=():void=>{if(subscriptionClosed)return;subscriptionClosed=true;unsubscribe();clearQueues();};
     const abortBackpressuredStream=():void=>{closeSubscription();if(!socket.destroyed)socket.destroy();};
     const boundedEvent=(event:DockEvent):QueuedEvent|undefined=>{
-      const bytes=eventFrameSize(request.requestId,this.hostEpoch,event,projectionCapabilities);
+      const bytes=eventFrameSize(request.requestId,this.hostEpoch,event,undefined);
       if(bytes===0)return undefined;
       if(!Number.isFinite(bytes)||bytes>MAX_CONTROL_LINE_BYTES){closeSubscription();socket.destroy();return undefined;}
       return {event,bytes};
@@ -808,7 +772,7 @@ export class DockHost {
       if(subscriptionClosed||waitingForDrain)return;
       while(liveQueue.length>0){
         const queued=liveQueue.shift() as QueuedEvent;liveQueueBytes-=queued.bytes;
-        const outcome=writeEvent(socket,request.requestId,this.hostEpoch,queued.event,projectionCapabilities);
+        const outcome=writeEvent(socket,request.requestId,this.hostEpoch,queued.event,undefined);
         if(outcome==="written")continue;
         if(outcome==="backpressured"){
           this.attachBackpressureStats.blocked+=1;waitingForDrain=true;
@@ -830,7 +794,7 @@ export class DockHost {
       if(event.sequence<=lastAccepted)return true;
       const queued=boundedEvent(event);if(subscriptionClosed)return false;lastAccepted=event.sequence;if(!queued)return true;
       if(waitingForDrain||liveQueue.length>0){const nextBytes=appendBounded(liveQueue,queued,liveQueueBytes);if(nextBytes===undefined){this.attachBackpressureStats.overflow+=1;abortBackpressuredStream();return false;}liveQueueBytes=nextBytes;return true;}
-      const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event,projectionCapabilities);
+      const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event,undefined);
       if(outcome==="written")return true;
       if(outcome==="backpressured"){
         this.attachBackpressureStats.blocked+=1;waitingForDrain=true;
@@ -853,7 +817,7 @@ export class DockHost {
     }
     if(socket.destroyed){closeSubscription();return;}
     const result=createBoundedFollowResult(projection,request.requestId);
-    const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,projectForClient(result,projectionCapabilities)));
+    const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,result));
     if(responseOutcome==="backpressured"){
       this.attachBackpressureStats.blocked+=1;const drained=await waitForSocketDrain(socket,ATTACH_DRAIN_TIMEOUT_MS);
       if(!drained){this.attachBackpressureStats.timeout+=1;initializing=false;clearQueues();abortBackpressuredStream();return;}
@@ -867,9 +831,7 @@ export class DockHost {
 
   private async controlExtensionUi(request: Extract<ControlRequest,{type:"interaction.control"}>,socket:Socket,setEventUnsubscribe:(unsubscribe:()=>void)=>void):Promise<void> {
     const instance=this.registry.get(request.params.instanceId);
-    const requirements=this.connectionRequirements.get(socket);
-    if(requirements?.has(EXTENSION_UI_CONTROL_CAPABILITY)!==true)throw new ProtocolValidationError("capability_missing","This client cannot operate Extension UI");
-    let closed=false,unsubscribe=()=>{};let claim:ControllerClaim|undefined;let ready=false;const pending:DockEvent[]=[];
+        let closed=false,unsubscribe=()=>{};let claim:ControllerClaim|undefined;let ready=false;const pending:DockEvent[]=[];
     const close=():void=>{
       if(closed)return;closed=true;unsubscribe();
       const current=this.interactionConnections.get(instance.id);if(current===socket)this.interactionConnections.delete(instance.id);
@@ -883,7 +845,7 @@ export class DockHost {
       if(!claim){if(pending.length<MAX_ATTACH_EVENT_QUEUE)pending.push(event);else{close();socket.destroy();}return;}
       if(event.data.controllerId!==claim.controllerId)return;
       if(!ready){if(pending.length<MAX_ATTACH_EVENT_QUEUE)pending.push(event);else{close();socket.destroy();}return;}
-      const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event,controllerEventProjectionCapabilities(claim.controllerId));
+      const outcome=writeEvent(socket,request.requestId,this.hostEpoch,event,claim.controllerId);
       if(outcome!=="written"){close();socket.destroy();}
     });
     try{claim=await instance.claimInteractionController();}
@@ -903,7 +865,7 @@ export class DockHost {
     ready=true;
     for(const event of pending.splice(0)){
       if(!isControllerTargetedEvent(event)||event.data.controllerId!==claim.controllerId)continue;
-      const written=writeEvent(socket,request.requestId,this.hostEpoch,event,controllerEventProjectionCapabilities(claim.controllerId));
+      const written=writeEvent(socket,request.requestId,this.hostEpoch,event,claim.controllerId);
       if(written!=="written"){close();socket.destroy();return;}
     }
   }
@@ -925,7 +887,7 @@ export class DockHost {
     for (const socket of streams) socket.destroy();
   }
 
-  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const requirements=this.connectionRequirements.get(socket);const projected=projectForClient(result,{toolsExpanded:requirements?.has(TOOLS_EXPANDED_CAPABILITY)===true,gitBranch:requirements?.has(GIT_BRANCH_CAPABILITY)===true,instanceKeys:requirements?.has(INSTANCE_KEYS_CAPABILITY)===true,instanceDisplayName:requirements?.has(INSTANCE_DISPLAY_NAME_CAPABILITY)===true,toolPresentation:requirements?.has(TOOL_RESULT_PRESENTATION_CAPABILITY)===true,images:requirements?.has(IMAGE_INPUT_CAPABILITY)===true,controllerDirectives:requirements?.has(CONTROLLER_DIRECTIVES_CAPABILITY)===true,persistentInteractions:requirements?.has(PERSISTENT_INTERACTIONS_CAPABILITY)===true});const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,projected));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
+  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,result));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
   private sendErrorAndEnd(socket:Socket,code:string,message:string,requestId:string,details?:JsonObject,retryable=false):void { if(socket.destroyed||socket.writableEnded)return;const response:ControlResponse={kind:"response",version:2,requestId,hostEpoch:this.hostEpoch,ok:false,error:{code,message:truncateMessage(message),retryable,...(details===undefined?{}:{details})}};if(endEnvelope(socket,response)==="too_large")socket.destroy(); }
   private sendHelloError(socket:Socket,requestId:string,code:HelloError["error"]["code"],message:string,details:{hostVersions?:number[];missing?:string[];retryAfterMs?:number}={}):void { if(socket.destroyed||socket.writableEnded)return;const envelope:HelloError={kind:"hello_error",requestId,error:{code,message:truncateMessage(message),...details}};try{socket.end(encodeJsonLine(envelope));}catch{socket.destroy();} }
 }
@@ -960,17 +922,13 @@ function isMutationRequest(type: ControlRequest["type"]): boolean {
 
 function collectionCompleteness(
   result: { total: number; truncated: boolean },
-  clientRequirements: ReadonlySet<string>,
-): { total: number; truncated: boolean } | Record<string, never> {
-  return clientRequirements.has("projection.completeness.v1")
-    ? { total: result.total, truncated: result.truncated }
-    : {};
+): { total: number; truncated: boolean } {
+  return { total: result.total, truncated: result.truncated };
 }
 
 function boundedSessionInventory(
   source: Awaited<ReturnType<SessionInventory["list"]>>,
   query: { cwd: string; scope: "cwd" | "all" },
-  includeDiagnostics: boolean,
 ): {
   sessions: Awaited<ReturnType<SessionInventory["list"]>>["sessions"];
   query: { cwd: string; scope: "cwd" | "all" };
@@ -1001,11 +959,9 @@ function boundedSessionInventory(
     query: { ...query },
     total: source.sessions.length,
     truncated: sessions.length < source.sessions.length,
-    ...(includeDiagnostics ? {
-      incomplete: source.incomplete,
-      diagnostics,
-      diagnosticsTruncated: source.diagnosticsTruncated === true || diagnostics.length < source.diagnostics.length,
-    } : {}),
+    incomplete: source.incomplete,
+    diagnostics,
+    diagnosticsTruncated: source.diagnosticsTruncated === true || diagnostics.length < source.diagnostics.length,
   };
 }
 
@@ -1026,7 +982,8 @@ function createBoundedHistoryResult(source:HistoryResult,requestId:string,hostEp
 }
 function createBoundedReadResult(projection:AttachProjection,requestId:string):InstanceReadResult {
   const source=projection.page;
-  let events=source.events;
+  // Controller-targeted events are delivered on the Extension UI operation stream only.
+  let events=source.events.filter((event)=>!eventHiddenFromStream(event,undefined));
   let truncated=source.truncated;
   let history=projection.recentHistory;
   let historyTruncated=projection.historyTruncated;
@@ -1049,7 +1006,10 @@ function createBoundedReadResult(projection:AttachProjection,requestId:string):I
   }
 }
 function createBoundedFollowResult(projection:AttachProjection,requestId:string):FollowResult {
-  const source=projection.page;let events=source.events;let truncated=source.truncated;
+  const source=projection.page;
+  // Controller-targeted events are delivered on the Extension UI operation stream only.
+  let events=source.events.filter((event)=>!eventHiddenFromStream(event,undefined));
+  let truncated=source.truncated;
   if(events.length>MAX_REPLAY_EVENTS){events=events.slice(-MAX_REPLAY_EVENTS);truncated=true;}
   let earliest=events.length>0&&truncated?{...source.earliest,sequence:events[0]!.sequence}:source.earliest;
   while(true){
@@ -1059,129 +1019,6 @@ function createBoundedFollowResult(projection:AttachProjection,requestId:string)
     events=events.slice(1);truncated=true;earliest={...source.latest,sequence:events[0]?.sequence??source.latest.sequence};
   }
 }
-interface ClientProjectionCapabilities {
-  toolsExpanded: boolean;
-  gitBranch: boolean;
-  instanceKeys: boolean;
-  instanceDisplayName: boolean;
-  toolPresentation: boolean;
-  images: boolean;
-  controllerDirectives: boolean;
-  persistentInteractions: boolean;
-  controllerId?: string;
-}
-
-function controllerEventProjectionCapabilities(controllerId: string): ClientProjectionCapabilities {
-  return {
-    toolsExpanded: false,
-    gitBranch: false,
-    instanceKeys: false,
-    instanceDisplayName: false,
-    toolPresentation: false,
-    images: true,
-    controllerDirectives: true,
-    persistentInteractions: true,
-    controllerId,
-  };
-}
-
-type ClientProjectionContext = "root" | "generic" | "event" | "pending-message" | "submitted-message" | "tool-event-data" | "message-data" | "history-entry" | "content-block";
-
-function projectForClient(
-  value: unknown,
-  capabilities: ClientProjectionCapabilities,
-  context: ClientProjectionContext = "root",
-): unknown {
-  if (value === null || typeof value !== "object") return value;
-  if (Array.isArray(value)) return value.map((item) => projectForClient(item, capabilities, context));
-
-  const source = value as Record<string, unknown>;
-  const isSnapshot = typeof source.id === "string"
-    && typeof source.lifecycle === "string"
-    && typeof source.runtimeGeneration === "number"
-    && source.eventCursor !== null
-    && typeof source.eventCursor === "object"
-    && source.extensionStatus !== null
-    && typeof source.extensionStatus === "object";
-  const isEventPage = context === "root"
-    && Array.isArray(source.events)
-    && source.earliest !== null
-    && typeof source.earliest === "object"
-    && source.latest !== null
-    && typeof source.latest === "object";
-  const isReadProjection = context === "root"
-    && Array.isArray(source.recentHistory)
-    && typeof source.historyTruncated === "boolean"
-    && source.instance !== null
-    && typeof source.instance === "object";
-  const isHistoryPage = context === "root"
-    && Array.isArray(source.entries)
-    && typeof source.hasEarlier === "boolean"
-    && source.instance !== null
-    && typeof source.instance === "object";
-  const eventType = context === "event" && typeof source.type === "string" ? source.type : undefined;
-  const isToolResultBlock = context === "content-block"
-    && source.type === "tool_result"
-    && typeof source.toolCallId === "string"
-    && typeof source.toolName === "string";
-  const imageInputContext = context === "pending-message" || context === "submitted-message";
-  const legacyImageOnlyText = !capabilities.images
-    && imageInputContext
-    && source.text === ""
-    && Array.isArray(source.images)
-    && source.images.length > 0;
-  const projected: Record<string, unknown> = {};
-  for (const [key, child] of Object.entries(source)) {
-    if (isSnapshot && key === "toolsExpanded" && !capabilities.toolsExpanded) continue;
-    if (isSnapshot && key === "gitBranch" && !capabilities.gitBranch) continue;
-    if (isSnapshot && key === "key" && !capabilities.instanceKeys) continue;
-    if (isSnapshot && key === "displayName" && !capabilities.instanceDisplayName) continue;
-    if (isSnapshot && key === "activeInteraction" && !capabilities.persistentInteractions) continue;
-    if (key === "presentation" && !capabilities.toolPresentation && (context === "tool-event-data" || isToolResultBlock)) continue;
-    if (key === "images" && !capabilities.images && imageInputContext) continue;
-    if (key === "text" && legacyImageOnlyText) {
-      projected[key] = "[Image attached]";
-      continue;
-    }
-    if (isEventPage && key === "events" && Array.isArray(child)) {
-      projected[key] = child
-        .filter((event) => !isUnsupportedProjectionEvent(event, capabilities))
-        .map((event) => projectForClient(event, capabilities, "event"));
-      continue;
-    }
-    if (key === "data" && child !== null && typeof child === "object" && !Array.isArray(child)) {
-      const hidesGitBranch = eventType === "session.replaced" && !capabilities.gitBranch;
-      const hidesDisplayName = !capabilities.instanceDisplayName
-        && (eventType === "instance.created" || eventType === "session.replaced" || eventType === "session.info_changed");
-      if (hidesGitBranch || hidesDisplayName) {
-        const data = { ...(child as Record<string, unknown>) };
-        if (hidesGitBranch) delete data.gitBranch;
-        if (hidesDisplayName) delete data.displayName;
-        projected[key] = projectForClient(data, capabilities, "generic");
-        continue;
-      }
-    }
-    let childContext: ClientProjectionContext = "generic";
-    if (context === "root" && key === "page") childContext = "root";
-    if (isReadProjection && key === "recentHistory") childContext = "history-entry";
-    if (isReadProjection && key === "pendingMessages") childContext = "pending-message";
-    if (isHistoryPage && key === "entries") childContext = "history-entry";
-    if ((key === "restored" || key === "inFlight") && Array.isArray(child) && Array.isArray(source.restored) && Array.isArray(source.inFlight)) childContext = "pending-message";
-    if (context === "event" && key === "data") {
-      if (eventType === "message.queued") childContext = "pending-message";
-      if (eventType === "message.submitted") childContext = "submitted-message";
-      if (eventType === "tool.output_updated" || eventType === "tool.completed") childContext = "tool-event-data";
-      if (eventType === "message.completed") childContext = "message-data";
-    }
-    if ((context === "message-data" || context === "history-entry") && key === "content") childContext = "content-block";
-    if (context === "content-block" && source.type === "image" && !capabilities.images) {
-      return { type: "omitted", kind: "image", description: "Image bytes omitted" };
-    }
-    projected[key] = projectForClient(child, capabilities, childContext);
-  }
-  return projected;
-}
-
 function isControllerDirective(value: unknown): value is Extract<DockEvent, { type: "extension.title_set" | "extension.editor_text_set" }> {
   if (value === null || typeof value !== "object") return false;
   const type = (value as { type?: unknown }).type;
@@ -1193,32 +1030,28 @@ function isControllerTargetedEvent(value: unknown): value is Extract<DockEvent, 
   return (value as { type?: unknown }).type === "interaction.requested" || isControllerDirective(value);
 }
 
-function isUnsupportedProjectionEvent(value: unknown, capabilities: ClientProjectionCapabilities): boolean {
-  if (value === null || typeof value !== "object") return false;
-  const type = (value as { type?: unknown }).type;
-  if (isControllerTargetedEvent(value)) {
-    return capabilities.controllerId === undefined
-      || (isControllerDirective(value) && !capabilities.controllerDirectives)
-      || value.data.controllerId !== capabilities.controllerId;
-  }
-  return (!capabilities.toolsExpanded && type === "extension.tools_expanded_changed")
-    || (!capabilities.gitBranch && type === "git.branch_changed")
-    || (!capabilities.persistentInteractions && (type === "interaction.requested" || type === "interaction.resolved" || type === "interaction.cancelled"));
+/**
+ * Controller-targeted events (pending interactions and controller directives) are routed
+ * only to the connection holding the matching Extension UI controller claim. This is Host
+ * routing authority, not a capability projection: every other event reaches every stream.
+ */
+function eventHiddenFromStream(event: DockEvent, controllerId: string | undefined): boolean {
+  if (!isControllerTargetedEvent(event)) return false;
+  return controllerId === undefined || event.data.controllerId !== controllerId;
 }
 
-function controlEventEnvelope(requestId:string,hostEpoch:string,event:DockEvent,capabilities:ClientProjectionCapabilities):ControlEventEnvelope|undefined {
-  if (isUnsupportedProjectionEvent(event, capabilities)) return undefined;
-  const projectedEvent=projectForClient(event,capabilities,"event") as DockEvent;
-  return {kind:"event",version:2,requestId,hostEpoch,event:projectedEvent};
+function controlEventEnvelope(requestId:string,hostEpoch:string,event:DockEvent,controllerId:string|undefined):ControlEventEnvelope|undefined {
+  if (eventHiddenFromStream(event, controllerId)) return undefined;
+  return {kind:"event",version:2,requestId,hostEpoch,event};
 }
 
-function eventFrameSize(requestId:string,hostEpoch:string,event:DockEvent,capabilities:ClientProjectionCapabilities):number {
-  const envelope=controlEventEnvelope(requestId,hostEpoch,event,capabilities);
+function eventFrameSize(requestId:string,hostEpoch:string,event:DockEvent,controllerId:string|undefined):number {
+  const envelope=controlEventEnvelope(requestId,hostEpoch,event,controllerId);
   return envelope===undefined?0:encodedSize(envelope);
 }
 
-function writeEvent(socket:Socket,requestId:string,hostEpoch:string,event:DockEvent,capabilities:ClientProjectionCapabilities):WriteOutcome {
-  const envelope=controlEventEnvelope(requestId,hostEpoch,event,capabilities);
+function writeEvent(socket:Socket,requestId:string,hostEpoch:string,event:DockEvent,controllerId:string|undefined):WriteOutcome {
+  const envelope=controlEventEnvelope(requestId,hostEpoch,event,controllerId);
   return envelope===undefined?"written":writeEnvelope(socket,envelope);
 }
 
