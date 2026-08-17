@@ -88,6 +88,23 @@ test("private Worker admission reports the delivery actually chosen by the Agent
   }, { context: { type: "host_queue" } })), /Host queue context/i);
 });
 
+test("private Worker lifecycle signals accept carried operation attribution", () => {
+  const events = [
+    { type: "agent_start", operationId: "prompt-op" },
+    { type: "agent_settled", stopReason: "stop", operationId: "prompt-op" },
+    { type: "compaction_start", reason: "manual", operationId: "compact-op" },
+    { type: "compaction_end", reason: "manual", aborted: false, willRetry: false, operationId: "compact-op" },
+    { type: "session_info_changed", name: "Named", operationId: "name-op" },
+    { type: "dock_session_replaced", reason: "new", sessionFile: "/tmp/next.jsonl", operationId: "new-op" },
+  ];
+  for (const event of events) {
+    assert.equal(parseWorkerEnvelope({ kind: "event", event, state: STATE }).kind, "event");
+  }
+  assert.throws(() => parseWorkerEnvelope({
+    kind: "event", event: { type: "agent_start", operationId: "x".repeat(129) }, state: STATE,
+  }), /bounded string/i);
+});
+
 test("private Worker conversation boundary accepts checkpoints and canonical persisted records", () => {
   assert.equal(parseWorkerEnvelope({
     kind: "event", event: { type: "conversation_checkpoint", history: [] }, state: STATE,

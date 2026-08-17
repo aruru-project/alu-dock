@@ -428,7 +428,6 @@ export class ManagedInstance {
   private runtimeCompactingObserved: boolean | undefined;
   private compactionQueueDrainTask: Promise<void> | undefined;
   private compactionQueueDrainGeneration: number | undefined;
-  private nextAgentStartOperationId: string | undefined;
   private nextAgentStartBoundary: { operationId: string; resolve: () => void } | undefined;
   private compactionRequestOperationId: string | undefined;
   private compactionOperationId: string | undefined;
@@ -1641,7 +1640,6 @@ export class ManagedInstance {
   }
 
   private clearDeferredStartAttribution(): void {
-    this.nextAgentStartOperationId = undefined;
     const boundary = this.nextAgentStartBoundary;
     this.nextAgentStartBoundary = undefined;
     boundary?.resolve();
@@ -1882,7 +1880,6 @@ export class ManagedInstance {
         // Pi starts this first post-compaction item as a fresh prompt.
         freshDispatch = true;
         item.phase = "fresh_in_flight";
-        this.nextAgentStartOperationId = item.operationId;
         this.nextAgentStartBoundary = { operationId: item.operationId, resolve: resolveFreshStart };
       }
       resolvePreflight(true);
@@ -1915,7 +1912,6 @@ export class ManagedInstance {
         && this.agentStartCount === agentStartsBefore
         && !this.agentState().isStreaming
       ) {
-        if (this.nextAgentStartOperationId === item.operationId) this.nextAgentStartOperationId = undefined;
         if (this.nextAgentStartBoundary?.operationId === item.operationId) {
           this.nextAgentStartBoundary = undefined;
           resolveFreshStart();
@@ -1954,9 +1950,6 @@ export class ManagedInstance {
       // in-flight and never retry automatically or advance later FIFO items
       // past an ambiguous dispatch.
       dispatchMayContinue = false;
-      if (this.nextAgentStartOperationId === item.operationId && !this.agentState().isStreaming) {
-        this.nextAgentStartOperationId = undefined;
-      }
       if (this.nextAgentStartBoundary?.operationId === item.operationId) {
         this.nextAgentStartBoundary = undefined;
         resolveFreshStart();
@@ -2973,11 +2966,9 @@ export class ManagedInstance {
     // completed edge must not be reversed by that stale state snapshot.
     if (event.type === "compaction_start") this.runtimeCompactingObserved = true;
     else if (event.type === "compaction_end") this.runtimeCompactingObserved = false;
-    if (event.type === "agent_start" && this.nextAgentStartOperationId !== undefined) {
-      const operationId = this.nextAgentStartOperationId;
-      event = { ...event, dockOperationId: operationId };
-      this.nextAgentStartOperationId = undefined;
-      if (this.nextAgentStartBoundary?.operationId === operationId) {
+    if (event.type === "agent_start") {
+      const operationId = optionalRuntimeString(event.operationId, 128);
+      if (operationId !== undefined && this.nextAgentStartBoundary?.operationId === operationId) {
         const boundary = this.nextAgentStartBoundary;
         this.nextAgentStartBoundary = undefined;
         boundary.resolve();
@@ -3164,9 +3155,9 @@ export class ManagedInstance {
   }
 
   /**
-   * Runtime lifecycle signals are joint facts: the Worker supplies the signal,
-   * the Host supplies operation attribution, queue merging and durable-commit
-   * ordering. Each signal has exactly one transition here; the catalog path
+   * Runtime lifecycle signals are joint facts: the Worker supplies the signal
+   * and any carried causal operation; the Host applies fallback attribution,
+   * queue merging and durable-commit ordering. Each signal has exactly one transition here; the catalog path
    * wraps it in a commit while the in-memory path runs it directly. Never
    * fork per-mode copies of this logic again.
    */
@@ -3287,7 +3278,7 @@ export class ManagedInstance {
         };
       }
       case "agent_start": {
-        const deferredOperationId = optionalRuntimeString(event.dockOperationId, 128);
+        const carriedOperationId = optionalRuntimeString(event.operationId, 128);
         const extensionInitiatorOperationId = this.extensionCommandInitiator?.runtimeGeneration === this.runtimeGenerationValue
           && this.extensionCommandInitiator.agentStartCount === this.agentStartCount
           ? this.extensionCommandInitiator.operationId
@@ -3297,8 +3288,8 @@ export class ManagedInstance {
           durable: true,
           operationId: this.resolveAgentEventOperationId(event),
           mutate: () => {
-            if (deferredOperationId !== undefined) {
-              this.state.activeCommandId = deferredOperationId;
+            if (carriedOperationId !== undefined) {
+              this.state.activeCommandId = carriedOperationId;
             } else if (extensionInitiatorOperationId !== undefined) {
               this.state.activeCommandId = extensionInitiatorOperationId;
               this.extensionCommandInitiator = undefined;
@@ -3473,12 +3464,10 @@ export class ManagedInstance {
       && this.extensionCommandInitiator.agentStartCount === this.agentStartCount
       ? this.extensionCommandInitiator.operationId
       : undefined;
-    const deferredOperationId = event.type === "agent_start"
-      ? optionalRuntimeString(event.dockOperationId, 128)
-      : undefined;
-    return this.catalogAdmissionOperationId
+    const carriedOperationId = optionalRuntimeString(event.operationId, 128);
+    return carriedOperationId
+      ?? this.catalogAdmissionOperationId
       ?? (event.type === "agent_settled" ? this.state.activeCommandId : undefined)
-      ?? deferredOperationId
       ?? extensionInitiatorOperationId
       ?? this.compactionOperationId
       ?? this.compactionRequestOperationId

@@ -105,7 +105,7 @@ test("Pi live events become canonical conversation frames before crossing the Wo
       messageId: "assistant-1", role: "assistant", content: [{ type: "text", text: "world" }], stopReason: "stop",
     } },
   }]);
-  assert.deepEqual(projector.project({ type: "agent_settled" } as never), [
-    { type: "agent_settled", stopReason: "stop" },
+  assert.deepEqual(projector.project({ type: "agent_settled", operationId: "operation-1" } as never), [
+    { type: "agent_settled", operationId: "operation-1", stopReason: "stop" },
   ]);
 });

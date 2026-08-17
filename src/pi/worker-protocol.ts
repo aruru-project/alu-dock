@@ -315,11 +315,13 @@ function validateWorkerAgentEvent(event: Record<string, unknown>): void {
     "dock_extension_error", "dock_git_branch_changed", "dock_conversation_frame", "dock_queue_consumed",
   ] as const, "Worker runtime event type");
   switch (type) {
-    case "agent_start": case "turn_start": case "summarization_retry_finished":
+    case "agent_start":
+      exactKeys(event, ["type", "operationId"], "Worker agent-start event"); optionalString(event.operationId, 128); return;
+    case "turn_start": case "summarization_retry_finished":
       exactKeys(event, ["type"], `Worker ${type} event`); return;
     case "agent_settled":
-      exactKeys(event, ["type", "stopReason", "error"], "Worker agent-settled event");
-      optionalString(event.stopReason, 128); optionalString(event.error, 2_048); return;
+      exactKeys(event, ["type", "stopReason", "error", "operationId"], "Worker agent-settled event");
+      optionalString(event.stopReason, 128); optionalString(event.error, 2_048); optionalString(event.operationId, 128); return;
     case "conversation_checkpoint":
       exactKeys(event, ["type", "history"], "Worker conversation checkpoint");
       if (!Array.isArray(event.history) || event.history.length > 100_000) throw new Error("Worker checkpoint history is invalid");
@@ -331,12 +333,12 @@ function validateWorkerAgentEvent(event: Record<string, unknown>): void {
     case "turn_end":
       exactKeys(event, ["type"], "Worker turn-end event"); return;
     case "compaction_start":
-      exactKeys(event, ["type", "reason"], "Worker compaction-start event"); oneOf(event.reason, ["manual", "threshold", "overflow"], "Compaction reason"); return;
+      exactKeys(event, ["type", "reason", "operationId"], "Worker compaction-start event"); oneOf(event.reason, ["manual", "threshold", "overflow"], "Compaction reason"); optionalString(event.operationId, 128); return;
     case "compaction_end":
-      exactKeys(event, ["type", "reason", "aborted", "willRetry", "errorMessage"], "Worker compaction-end event");
+      exactKeys(event, ["type", "reason", "aborted", "willRetry", "errorMessage", "operationId"], "Worker compaction-end event");
       oneOf(event.reason, ["manual", "threshold", "overflow"], "Compaction reason");
       if (typeof event.aborted !== "boolean" || typeof event.willRetry !== "boolean") throw new Error("Compaction event flags are invalid");
-      optionalString(event.errorMessage, 2_048); return;
+      optionalString(event.errorMessage, 2_048); optionalString(event.operationId, 128); return;
     case "dock_conversation_frame":
       exactKeys(event, ["type", "frame"], "Worker conversation-frame event"); validateConversationFrame(event.frame); return;
     case "dock_queue_consumed":
@@ -354,10 +356,10 @@ function validateWorkerAgentEvent(event: Record<string, unknown>): void {
       oneOf(event.source, ["branchSummary", "compaction"], "Summarization source");
       if (event.reason !== undefined) oneOf(event.reason, ["manual", "threshold", "overflow"], "Summarization reason"); return;
     case "dock_session_replaced":
-      exactKeys(event, ["type", "reason", "previousSessionFile", "sessionFile", "cwd", "name", "gitBranch"], "Worker replacement event");
+      exactKeys(event, ["type", "reason", "previousSessionFile", "sessionFile", "cwd", "name", "gitBranch", "operationId"], "Worker replacement event");
       oneOf(event.reason, ["new", "resume", "fork", "clone", "reload"], "Worker replacement reason");
       optionalString(event.previousSessionFile, 16_384); optionalString(event.sessionFile, 16_384);
-      optionalString(event.cwd, 16_384); optionalString(event.name, 256); optionalString(event.gitBranch, 256);
+      optionalString(event.cwd, 16_384); optionalString(event.name, 256); optionalString(event.gitBranch, 256); optionalString(event.operationId, 128);
       return;
     case "dock_runtime_error":
       exactKeys(event, ["type", "operationId", "kind", "error", "recoverySessionFile"], "Worker runtime-error event");
@@ -375,7 +377,7 @@ function validateWorkerAgentEvent(event: Record<string, unknown>): void {
     case "dock_git_branch_changed":
       exactKeys(event, ["type", "branch"], "Worker Git event"); optionalString(event.branch, 256); return;
     case "session_info_changed":
-      exactKeys(event, ["type", "name"], "Worker session-info event"); optionalString(event.name, 256); return;
+      exactKeys(event, ["type", "name", "operationId"], "Worker session-info event"); optionalString(event.name, 256); optionalString(event.operationId, 128); return;
     case "queue_update":
       exactKeys(event, ["type", "steering", "followUp"], "Worker queue event");
       stringArray(event.steering, 1_000, 256_000, "Worker steering queue");

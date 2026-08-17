@@ -193,6 +193,7 @@ interface Binding {
   buffered: AgentEvent[];
   bufferEvents: boolean;
   conversation: PiConversationProjector;
+  runOperationId?: string;
 }
 
 /** In-Worker Pi adapter around the SDK's mutable AgentSessionRuntime. */
@@ -214,6 +215,8 @@ export class PiAgentAdapter {
   private processCwdValue: string | undefined;
   private conversationRevisionValue: string | undefined;
   private conversationScope = randomUUID();
+  private sessionNameOperationId: string | undefined;
+  private manualCompactionOperationId: string | undefined;
   private readonly conversationHistoryCursors = new Map<string, { revision: string; end: number }>();
   private readonly conversationContentCursors = new Map<string, { revision: string; contentRef: string; blockIndex: number; offset: number }>();
 
@@ -352,8 +355,8 @@ export class PiAgentAdapter {
         return this.switchSession(request.params.operationId, request.params.sessionFile, context);
       }
       case "session.new": return this.newSession(request.params.operationId, request.params.parentSession);
-      case "session.name": return this.setSessionName(request.params.name);
-      case "session.compact": return this.compact(request.params.customInstructions);
+      case "session.name": return this.setSessionName(request.params.operationId, request.params.name);
+      case "session.compact": return this.compact(request.params.operationId, request.params.customInstructions);
       case "session.reload": return this.reload(request.params.operationId);
       case "session.tree": return this.getTree();
       case "session.navigate": return this.navigateTree(request.params.targetId, request.params);
@@ -800,7 +803,12 @@ export class PiAgentAdapter {
     };
   }
 
-  clearQueue(): ClearedAgentQueue { return this.requireActive().session.clearQueue(); }
+  clearQueue(): ClearedAgentQueue {
+    const binding = this.requireActive();
+    const cleared = binding.session.clearQueue();
+    binding.conversation.clearQueuedInputs(cleared);
+    return cleared;
+  }
   async abort(): Promise<void> {
     const session = this.active?.session;
     if (!session) return;
@@ -886,13 +894,18 @@ export class PiAgentAdapter {
     });
   }
 
-  setSessionName(name: string): string | undefined {
+  setSessionName(operationId: string, name: string): string | undefined {
     const session = this.requireActive().session;
-    session.setSessionName(name);
-    return session.sessionManager.getSessionName();
+    this.sessionNameOperationId = operationId;
+    try {
+      session.setSessionName(name);
+      return session.sessionManager.getSessionName();
+    } finally {
+      if (this.sessionNameOperationId === operationId) this.sessionNameOperationId = undefined;
+    }
   }
 
-  compact(customInstructions?: string): Promise<AgentCompactionResult> {
+  compact(operationId: string, customInstructions?: string): Promise<AgentCompactionResult> {
     return this.serialize(async () => {
       const session = this.requireActive().session;
       const previousCompactionIds = new Set(
@@ -900,6 +913,7 @@ export class PiAgentAdapter {
           .filter((entry) => entry.type === "compaction")
           .map((entry) => entry.id),
       );
+      this.manualCompactionOperationId = operationId;
       try {
         const result = await session.compact(customInstructions);
         return {
@@ -914,6 +928,8 @@ export class PiAgentAdapter {
         const message = error instanceof Error ? error.message : String(error);
         const reason = error instanceof Error && error.name === "AbortError" ? "cancelled" : compactionFailureReason(message);
         throw new AgentCompactionKnownFailureError(reason, message);
+      } finally {
+        if (this.manualCompactionOperationId === operationId) this.manualCompactionOperationId = undefined;
       }
     });
   }
@@ -944,7 +960,7 @@ export class PiAgentAdapter {
         if (seamCalls !== 1) throw new Error(`Reload rebind seam ran ${seamCalls} times`);
         await this.options.commitReplacement?.({ operationId, kind: "reload", previousSessionFile, sessionFile: binding.session.sessionFile });
         binding.bufferEvents = false;
-        this.publishReplacement("reload", previousSessionFile, binding.session.sessionFile);
+        this.publishReplacement(operationId, "reload", previousSessionFile, binding.session.sessionFile);
         this.publishReplacementBuffer(buffered);
         return { cancelled: false };
       } catch (error) {
@@ -1006,7 +1022,7 @@ export class PiAgentAdapter {
       }
       if (!this.rebindEntered || !this.staged) throw new Error("Runtime replacement completed without exactly one rebind");
       await this.options.commitReplacement?.({ operationId, kind, previousSessionFile, sessionFile: this.staged.session.sessionFile });
-      this.promoteStaged(kind, previousSessionFile);
+      this.promoteStaged(operationId, kind, previousSessionFile);
       return result;
     } catch (error) {
       if (!this.replacementInvalidated) {
@@ -1066,7 +1082,8 @@ export class PiAgentAdapter {
     };
     binding.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
       if (!token.active) return;
-      const projectedEvents = projectAgentSessionEvents(event);
+      const projectedEvents = projectAgentSessionEvents(event)
+        .map((projected) => this.attributeLifecycleEvent(binding, projected));
       const source = event as unknown as Record<string, unknown>;
       const message = isRecord(source.message) ? source.message : undefined;
       if (source.type === "message_end" && message?.role === "custom" && !session.isStreaming) {
@@ -1079,6 +1096,7 @@ export class PiAgentAdapter {
         if (this.active === binding && !binding.bufferEvents) this.publish(outbound);
         else binding.buffered.push(outbound);
       }
+      if (event.type === "agent_settled") binding.runOperationId = undefined;
     });
     this.staged = binding;
     const previousProcessCwd = this.processCwdValue;
@@ -1121,7 +1139,7 @@ export class PiAgentAdapter {
     // and explicitly activates the initial binding.
   }
 
-  private promoteStaged(kind: "new" | "switch" | "fork" | "clone", previousSessionFile?: string): void {
+  private promoteStaged(operationId: string, kind: "new" | "switch" | "fork" | "clone", previousSessionFile?: string): void {
     const binding = this.staged;
     if (!binding) throw new Error("Replacement runtime binding was not staged");
     this.staged = undefined;
@@ -1129,7 +1147,7 @@ export class PiAgentAdapter {
     const events = binding.buffered;
     binding.buffered = [];
     binding.bufferEvents = false;
-    this.publishReplacement(kind, previousSessionFile, binding.session.sessionFile);
+    this.publishReplacement(operationId, kind, previousSessionFile, binding.session.sessionFile);
     this.publishReplacementBuffer(events);
   }
 
@@ -1141,9 +1159,10 @@ export class PiAgentAdapter {
     }
   }
 
-  private publishReplacement(kind: ReplacementKind, previousSessionFile?: string, sessionFile?: string): void {
+  private publishReplacement(operationId: string, kind: ReplacementKind, previousSessionFile?: string, sessionFile?: string): void {
     this.publish({
       type: "dock_session_replaced",
+      operationId,
       reason: kind === "switch" ? "resume" : kind === "clone" ? "fork" : kind,
       previousSessionFile,
       sessionFile,
@@ -1151,6 +1170,25 @@ export class PiAgentAdapter {
       name: this.active?.session.sessionManager.getSessionName(),
       gitBranch: this.active?.gitBranchObserver?.branch,
     });
+  }
+
+  private attributeLifecycleEvent(binding: Binding, event: AgentEvent): AgentEvent {
+    if (event.type === "agent_start") {
+      const operationId = binding.conversation.nextInputOperationId();
+      binding.runOperationId = operationId;
+      return operationId === undefined ? event : { ...event, operationId };
+    }
+    if (event.type === "agent_settled") {
+      return binding.runOperationId === undefined ? event : { ...event, operationId: binding.runOperationId };
+    }
+    if ((event.type === "compaction_start" || event.type === "compaction_end")
+      && event.reason === "manual" && this.manualCompactionOperationId !== undefined) {
+      return { ...event, operationId: this.manualCompactionOperationId };
+    }
+    if (event.type === "session_info_changed" && this.sessionNameOperationId !== undefined) {
+      return { ...event, operationId: this.sessionNameOperationId };
+    }
+    return event;
   }
 
   private invalidateBindingsSynchronously(): void {
@@ -1471,6 +1509,21 @@ export class PiConversationProjector {
     if (index >= 0) this.inputs.splice(index, 1);
   }
 
+  nextInputOperationId(): string | undefined {
+    return this.inputs[0]?.operationId;
+  }
+
+  clearQueuedInputs(cleared: ClearedAgentQueue): void {
+    const remove = (delivery: "steer" | "followUp", texts: readonly string[]): void => {
+      for (const text of texts) {
+        const index = this.inputs.findIndex((input) => input.delivery === delivery && (input.runtimeText ?? input.text) === text);
+        if (index >= 0) this.inputs.splice(index, 1);
+      }
+    };
+    remove("steer", cleared.steering);
+    remove("followUp", cleared.followUp);
+  }
+
   project(event: AgentEvent): AgentEvent[] {
     if (event.type === "agent_start") {
       this.currentUserMessageId = undefined;
@@ -1486,6 +1539,7 @@ export class PiConversationProjector {
       this.lastAssistantOutcome = undefined;
       return [{
         type: "agent_settled",
+        ...(typeof event.operationId === "string" ? { operationId: event.operationId } : {}),
         ...(outcome?.stopReason === undefined ? {} : { stopReason: outcome.stopReason }),
         ...(outcome?.error === undefined ? {} : { error: outcome.error }),
       }];

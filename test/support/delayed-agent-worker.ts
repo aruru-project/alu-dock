@@ -92,6 +92,8 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   private readonly steeringQueue: string[] = [];
   private readonly followUpQueue: string[] = [];
   private currentRun: Deferred<void> | undefined;
+  private currentRunOperationId: string | undefined;
+  private manualCompactionOperationId: string | undefined;
   private nextPromptPreflightBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
   private disposeBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
   private modelMutationBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
@@ -177,7 +179,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
               }
               options?.preflightResult?.({ success: true, delivery: actualDelivery });
             },
-          });
+          }, p.operationId);
       }
       case "command.abort": return this.abort();
       case "queue.dequeue": return this.clearQueue();
@@ -196,9 +198,9 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       case "session.list": return this.listSessions(p.scope);
       case "session.switch": return this.switchSession(p.operationId, p.sessionFile);
       case "session.new": return this.newSession(p.operationId, p.parentSession);
-      case "session.name": return this.setSessionName(p.name);
-      case "session.compact": return this.compact();
-      case "session.reload": return this.reload();
+      case "session.name": return this.setSessionName(p.operationId, p.name);
+      case "session.compact": return this.compact(p.operationId);
+      case "session.reload": return this.reload(p.operationId);
       case "session.tree": return this.getTree();
       case "session.navigate": return this.navigateTree(p.targetId, p);
       case "session.fork": return this.fork(p.operationId, p.entryId, "before", "fork");
@@ -236,7 +238,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     return this.extensionCommands.has(commandName) ? "extension_command" : "prompt";
   }
 
-  async prompt(text: string, options?: AgentPromptOptions): Promise<void> {
+  async prompt(text: string, options?: AgentPromptOptions, operationId?: string): Promise<void> {
     this.promptCalls += 1;
     this.promptMessages.push(text);
     this.promptOptions.push(options === undefined ? undefined : structuredClone({ ...options, preflightResult: undefined }));
@@ -261,9 +263,10 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
 
     options?.preflightResult?.(true);
     this.currentRun = new Deferred<void>();
+    this.currentRunOperationId = operationId;
     this.isStreaming = true;
     this.startConversationTurn();
-    this.emit({ type: "agent_start" });
+    this.emit({ type: "agent_start", ...(operationId === undefined ? {} : { operationId }) });
     this.emitUserMessage(text);
     await this.currentRun.promise;
   }
@@ -404,29 +407,29 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     return { canonicalCwd: this.sessionCatalog.find((session) => session.sessionFile === sessionFile)?.cwd ?? "/fixture/cwd" };
   }
 
-  async newSession(_operationId: string, _parentSession?: string): Promise<{ cancelled: boolean }> {
+  async newSession(operationId: string, _parentSession?: string): Promise<{ cancelled: boolean }> {
     this.sessionMutationCalls.new += 1;
     const previousSessionFile = this.sessionFile;
     this.sessionId = `fixture-new-${this.sessionMutationCalls.new}`;
     this.sessionFile = `/tmp/${this.sessionId}.jsonl`;
     this.sessionName = undefined;
     this.history = [];
-    this.emit({ type: "dock_session_replaced", reason: "new", previousSessionFile, sessionFile: this.sessionFile, cwd: "/fixture/cwd", name: this.sessionName });
+    this.emit({ type: "dock_session_replaced", operationId, reason: "new", previousSessionFile, sessionFile: this.sessionFile, cwd: "/fixture/cwd", name: this.sessionName });
     return { cancelled: false };
   }
 
-  async switchSession(_operationId: string, sessionFile: string): Promise<{ cancelled: boolean }> {
+  async switchSession(operationId: string, sessionFile: string): Promise<{ cancelled: boolean }> {
     this.sessionMutationCalls.switch += 1;
     const previousSessionFile = this.sessionFile;
     const target = this.sessionCatalog.find((session) => session.sessionFile === sessionFile);
     this.sessionFile = sessionFile;
     this.sessionId = target?.sessionId ?? `fixture-resume-${this.sessionMutationCalls.switch}`;
     this.sessionName = target?.name;
-    this.emit({ type: "dock_session_replaced", reason: "resume", previousSessionFile, sessionFile, cwd: target?.cwd ?? "/fixture/cwd", name: this.sessionName });
+    this.emit({ type: "dock_session_replaced", operationId, reason: "resume", previousSessionFile, sessionFile, cwd: target?.cwd ?? "/fixture/cwd", name: this.sessionName });
     return { cancelled: false };
   }
 
-  async fork(_operationId: string, entryId: string, position: "before" | "at", kind: "fork" | "clone"): Promise<{ cancelled: boolean; selectedText?: string }> {
+  async fork(operationId: string, entryId: string, position: "before" | "at", kind: "fork" | "clone"): Promise<{ cancelled: boolean; selectedText?: string }> {
     this.sessionMutationCalls[kind] += 1;
     const target = this.treeNodes.find((node) => node.entryId === entryId);
     if (!target || (position === "before" && target.role !== "user")) throw new Error("Invalid fixture fork entry");
@@ -435,20 +438,21 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     this.sessionId = `fixture-${kind}-${this.sessionMutationCalls[kind]}`;
     this.sessionFile = `/tmp/${this.sessionId}.jsonl`;
     this.treeLeafId = position === "before" ? target.parentId : entryId;
-    this.emit({ type: "dock_session_replaced", reason: "fork", previousSessionFile, sessionFile: this.sessionFile, cwd: "/fixture/cwd", name: this.sessionName });
+    this.emit({ type: "dock_session_replaced", operationId, reason: "fork", previousSessionFile, sessionFile: this.sessionFile, cwd: "/fixture/cwd", name: this.sessionName });
     return { cancelled: false, ...(position === "before" ? { selectedText: target.summary } : {}) };
   }
 
-  setSessionName(name: string): string | undefined {
+  setSessionName(operationId: string, name: string): string | undefined {
     this.sessionMutationCalls.name += 1;
     const actual = name.trim() || undefined;
     this.sessionName = actual;
-    this.emit({ type: "session_info_changed", name: actual });
+    this.emit({ type: "session_info_changed", name: actual, operationId });
     return actual;
   }
 
-  async compact(): Promise<AgentCompactionResult> {
+  async compact(operationId: string): Promise<AgentCompactionResult> {
     this.sessionMutationCalls.compact += 1;
+    this.manualCompactionOperationId = operationId;
     if (this.isStreaming) this.settle("aborted for compaction", "aborted");
     const startBlock = this.nextCompactionStartBlock;
     this.nextCompactionStartBlock = undefined;
@@ -457,19 +461,23 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       await startBlock.release.promise;
     }
     this.isCompacting = true;
-    this.emit({ type: "compaction_start", reason: "manual" });
+    this.emit({ type: "compaction_start", reason: "manual", operationId });
     const block = this.nextCompactionBlock;
     this.nextCompactionBlock = undefined;
     if (block) {
       this.activeCompactionBlock = block;
       block.entered.resolve();
       try { return await block.result.promise; }
-      finally { if (this.activeCompactionBlock === block) this.activeCompactionBlock = undefined; }
+      finally {
+        if (this.activeCompactionBlock === block) this.activeCompactionBlock = undefined;
+        if (this.manualCompactionOperationId === operationId) this.manualCompactionOperationId = undefined;
+      }
     }
     const result = { summary: "fixture summary", firstKeptEntryId: "kept-1", tokensBefore: 123 };
     this.isCompacting = false;
-    this.emit({ type: "compaction_end", reason: "manual", result, aborted: false, willRetry: false });
+    this.emit({ type: "compaction_end", reason: "manual", result, aborted: false, willRetry: false, operationId });
     this.emit({ type: "conversation_checkpoint", history: this.getHistory() });
+    this.manualCompactionOperationId = undefined;
     if (this.sessionMutationError) throw this.sessionMutationError;
     return result;
   }
@@ -490,7 +498,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       finish: (result = { summary: "fixture summary", firstKeptEntryId: "kept-1", tokensBefore: 123 }) => {
         if (this.activeCompactionBlock === block) {
           this.isCompacting = false;
-          this.emit({ type: "compaction_end", reason: "manual", result, aborted: false, willRetry: false });
+          this.emit({ type: "compaction_end", reason: "manual", result, aborted: false, willRetry: false, operationId: this.manualCompactionOperationId });
           this.emit({ type: "conversation_checkpoint", history: this.getHistory() });
         }
         block.result.resolve(result);
@@ -498,9 +506,9 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     };
   }
 
-  async reload(): Promise<{ cancelled: boolean }> {
+  async reload(operationId: string): Promise<{ cancelled: boolean }> {
     this.sessionMutationCalls.reload += 1;
-    this.emit({ type: "dock_session_replaced", reason: "reload", previousSessionFile: this.sessionFile, sessionFile: this.sessionFile, cwd: "/fixture/cwd", name: this.sessionName });
+    this.emit({ type: "dock_session_replaced", operationId, reason: "reload", previousSessionFile: this.sessionFile, sessionFile: this.sessionFile, cwd: "/fixture/cwd", name: this.sessionName });
     return { cancelled: false };
   }
 
@@ -558,6 +566,12 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     };
     this.steeringQueue.length = 0;
     this.followUpQueue.length = 0;
+    for (const [delivery, texts] of [["steer", cleared.steering], ["followUp", cleared.followUp]] as const) {
+      for (const text of texts) {
+        const index = this.conversationInputs.findIndex((input) => input.delivery === delivery && input.text === text);
+        if (index >= 0) this.conversationInputs.splice(index, 1);
+      }
+    }
     this.emitQueue();
     return cleared;
   }
@@ -571,7 +585,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     }
     if (this.isCompacting) {
       this.isCompacting = false;
-      this.emit({ type: "compaction_end", reason: "manual", result: undefined, aborted: true, willRetry: false });
+      this.emit({ type: "compaction_end", reason: "manual", result: undefined, aborted: true, willRetry: false, operationId: this.manualCompactionOperationId });
       this.emit({ type: "conversation_checkpoint", history: this.getHistory() });
       const block = this.activeCompactionBlock;
       this.activeCompactionBlock = undefined;
@@ -668,7 +682,8 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       this.emit({ type: "compaction_start", reason: "manual" });
       continuation.compactionStarted.resolve();
     }
-    this.emit({ type: "agent_settled", stopReason });
+    this.emit({ type: "agent_settled", stopReason, ...(this.currentRunOperationId === undefined ? {} : { operationId: this.currentRunOperationId }) });
+    this.currentRunOperationId = undefined;
     this.emit({ type: "conversation_checkpoint", history: this.getHistory() });
     run.resolve();
     if (continuation) {
