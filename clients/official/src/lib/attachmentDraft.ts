@@ -1,0 +1,37 @@
+import type { AttachmentDto, QueueItem } from './types'
+
+export function attachmentsAfterSubmit(
+  current: AttachmentDto[],
+  capturedFileIds: readonly string[],
+  succeeded: boolean,
+): AttachmentDto[] {
+  if (!succeeded) return current
+  const captured = new Set(capturedFileIds)
+  return current.filter((item) => !captured.has(item.fileId))
+}
+
+export function appendRestoredQueue(
+  currentText: string,
+  currentAttachments: AttachmentDto[],
+  restored: QueueItem[],
+  inFlight: QueueItem[],
+) {
+  const restoredText = restored.map((item) => item.text).filter((text) => text.length > 0).join('\n\n')
+  const text = restoredText ? [currentText, restoredText].filter(Boolean).join('\n\n') : currentText
+  const attachments = [...currentAttachments]
+  const seen = new Set(attachments.map((item) => item.fileId))
+  for (const item of restored) {
+    for (const attachment of item.attachments) {
+      if (!seen.has(attachment.fileId)) {
+        attachments.push(attachment)
+        seen.add(attachment.fileId)
+      }
+    }
+  }
+  return {
+    text,
+    attachments,
+    restoredImageCount: restored.reduce((total, item) => total + item.imageCount, 0),
+    inFlightCount: inFlight.length,
+  }
+}

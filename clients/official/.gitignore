@@ -1,0 +1,17 @@
+/target/
+/src-tauri/target/
+/node_modules/
+/dist/
+/.pi-subagents/
+**/*.rs.bk
+.env
+.env.*
+!.env.example
+
+# Never commit pairing identities or private keys.
+identity/
+*-identity/
+*.key
+*.pem
+*.p12
+*.pfx

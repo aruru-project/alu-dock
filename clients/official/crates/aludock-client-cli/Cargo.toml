@@ -1,0 +1,16 @@
+[package]
+name = "aludock-client-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "aludock-client"
+path = "src/main.rs"
+
+[dependencies]
+aludock-client-core = { path = "../aludock-client-core" }
+anyhow.workspace = true
+clap.workspace = true
+tokio.workspace = true

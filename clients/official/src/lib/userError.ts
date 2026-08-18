@@ -1,0 +1,23 @@
+const SAFE_ERROR_CODES = new Set([
+  'invalid_endpoint', 'pairing_timeout', 'finalization_pending', 'pairing_invalid',
+  'pairing_closed', 'busy', 'wrong_pin', 'expired', 'not_found', 'invalid_request',
+  'host_certificate_mismatch', 'attachment_too_large', 'attachment_source_changed',
+  'attachment_upload_cancelled', 'connection_failed', 'registry_conflict', 'profile_conflict',
+  'host_not_found', 'host_already_saved', 'local_storage_unavailable', 'host_lifecycle_unavailable',
+])
+
+export function userErrorMessage(cause: unknown, fallback = '操作没有完成。请刷新状态后重试。') {
+  if (cause && typeof cause === 'object') {
+    const code = 'code' in cause ? String(cause.code || '') : ''
+    if (code === 'protocol_error' || code === 'client_error') return '收到的状态无法验证。请刷新后重试；未保存不可信的更改。'
+    if (code === 'effect_unknown' || ('outcomeUnknown' in cause && cause.outcomeUnknown === true)) return '还无法确认刚才的操作是否完成。请刷新状态后确认，不要重复提交。'
+    if (code === 'instance_host_lost') return '这个 Work 的运行连接已经中断。请从工作列表继续，或刷新状态。'
+    if (code === 'host_unreachable') return '无法连接这台 AluDock。请检查电脑状态、网络和保存的地址，然后重试。'
+    if ('message' in cause && (!code || SAFE_ERROR_CODES.has(code))) {
+      const message = String(cause.message || '').trim()
+      if (message) return message
+    }
+    return fallback
+  }
+  return fallback
+}
