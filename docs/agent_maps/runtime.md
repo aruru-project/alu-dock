@@ -51,6 +51,8 @@ Host 与 Worker 不共享整套环境变量。Managed Host 只保留 service 自
 
 Protocol V2 定义 Dock 的业务语义。Host 与 Worker 之间的私有通信只补充进程所需的信息，例如 Worker identity、generation、调用关联、接收确认、分帧和背压。
 
+Pi adapter 直接从 `SessionManager.getTree()` 产生 Protocol V2 的 compact `{nodes, leafId?}` 完整 snapshot，并复用 `protocol.ts` 的唯一 parser/type；raw Session entry、完整 message/tool content 不跨 Worker 边界。navigate/fork/clone 的 target membership 与 Pi 原生目标规则也在 adapter 内校验，Host 不为此读取或维护 Tree index。既有 generic Worker envelope chunking 原样承载这个结果；公开 `response_transfer` 是之后 Host→client 的透明 transport framing，不是 Worker tree chunking。
+
 同一项能力不能分别维护一套 RuntimeSession 方法、Worker capability、Host projection 和客户端 DTO。Worker 返回 Dock 已定义的结果和事件，Host 验证归属后转发。
 
 事件分两类，边界不同。conversation frame（message/tool 事件）已经是 Protocol V2 词汇，Host 逐字转发，只补队列关联；生命周期信号（agent_start、queue_update、compaction 等）是 Worker 向 Host 权威提供的输入，Host 从中导出携带自身事实（operation 归属、合并队列计数、catalog 提交顺序）的 Dock event——这是权威在工作，不是重复投影，不要把它改成 Worker 直发。每个信号在 ManagedInstance 中只有一张转换表，durable 与非 durable 路径共用；不得按持久化模式分叉第二份。

@@ -23,7 +23,7 @@ import {
 
 const READY_TIMEOUT_MS = 15_000;
 const READY_POLL_MS = 100;
-const MANAGED_HOST_CAPABILITIES = ["catalog.maintenance.v1", "catalog.v1", "service.managed.v1", "session.reopen", "session.tree.v1"] as const;
+const MANAGED_HOST_CAPABILITIES = ["catalog.maintenance.v1", "catalog.v1", "service.managed.v1", "session.reopen", "session.tree.v2"] as const;
 
 export interface ServiceCommandResult {
   status: number;

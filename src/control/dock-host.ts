@@ -26,7 +26,6 @@ import {
   InstanceBusyError,
   InstanceNotActiveError,
   InvalidHistoryCursorError,
-  InvalidTreeCursorError,
   InvalidDeliveryModeError,
   QueueCapacityError,
   RuntimeEffectUnknownError,
@@ -35,9 +34,10 @@ import {
   type DockEvent,
   type JsonObject,
 } from "../core/managed-instance.js";
-import { AgentCompactionKnownFailureError, AgentConversationCursorError, AgentInvalidSettingValueError, AgentModelNotFoundError, AgentSettingsWriteError, AgentUnavailableBeforeEffectError, AgentUnknownToolError } from "../core/agent-worker.js";
+import { AgentCompactionKnownFailureError, AgentConversationCursorError, AgentInvalidSettingValueError, AgentInvalidTreeTargetError, AgentModelNotFoundError, AgentSettingsWriteError, AgentUnavailableBeforeEffectError, AgentUnknownToolError } from "../core/agent-worker.js";
 import { PublishedFileUnavailableError } from "../core/published-file.js";
 import { MAX_ATTACHMENT_CHUNK_BYTES, type AttachmentUploadResult } from "../core/instance-attachments.js";
+import { MAX_DOCK_TRANSFER_BYTES, MAX_RESPONSE_TRANSFER_CHUNK_BYTES } from "../core/transport-bounds.js";
 import { dropOldestSemanticHistoryRange, slimSemanticHistoryEntry } from "../core/history-pagination.js";
 import type { SessionInventory } from "../core/session-inventory.js";
 import {
@@ -98,7 +98,7 @@ const MAX_SESSION_INVENTORY_DIAGNOSTIC_BYTES = 64 * 1_024;
 const MAX_SESSION_INVENTORY_ITEMS = 2_000;
 const MAX_ATTACH_EVENT_QUEUE = 1_000;
 const MAX_ATTACH_EVENT_QUEUE_BYTES = 4 * MAX_CONTROL_LINE_BYTES;
-const ATTACH_DRAIN_TIMEOUT_MS = 5_000;
+const SOCKET_DRAIN_TIMEOUT_MS = 5_000;
 const ATTACHMENT_UPLOAD_IDLE_TIMEOUT_MS = 60_000;
 const ATTACH_INITIAL_OVERFLOW_MESSAGE = "Too many updates arrived while opening this work; open it again to refresh the view";
 
@@ -733,7 +733,7 @@ export class DockHost {
         return;
       }
       case "session.list": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.listSessions(request.params.scope)); return; }
-      case "session.tree": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getTreePage(request.params.treeRevision,request.params.afterEntryId,request.params.limit)); return; }
+      case "session.tree": { const instance=this.registry.get(request.params.instanceId); await this.sendTreeSuccessAndEnd(socket,request.requestId,await instance.getTree()); return; }
       case "workspace.list": {
         this.sendSuccessAndEnd(socket, request.requestId, await this.workspaceBrowser.list(request.params));
         return;
@@ -772,7 +772,7 @@ export class DockHost {
         if(outcome==="written")continue;
         if(outcome==="backpressured"){
           this.attachBackpressureStats.blocked+=1;waitingForDrain=true;
-          void waitForSocketDrain(socket,ATTACH_DRAIN_TIMEOUT_MS).then((drained)=>{
+          void waitForSocketDrain(socket,SOCKET_DRAIN_TIMEOUT_MS).then((drained)=>{
             if(subscriptionClosed)return;
             if(!drained){this.attachBackpressureStats.timeout+=1;abortBackpressuredStream();return;}
             this.attachBackpressureStats.drained+=1;waitingForDrain=false;flushLiveQueue();
@@ -794,7 +794,7 @@ export class DockHost {
       if(outcome==="written")return true;
       if(outcome==="backpressured"){
         this.attachBackpressureStats.blocked+=1;waitingForDrain=true;
-        void waitForSocketDrain(socket,ATTACH_DRAIN_TIMEOUT_MS).then((drained)=>{if(subscriptionClosed)return;if(!drained){this.attachBackpressureStats.timeout+=1;abortBackpressuredStream();return;}this.attachBackpressureStats.drained+=1;waitingForDrain=false;flushLiveQueue();});return true;
+        void waitForSocketDrain(socket,SOCKET_DRAIN_TIMEOUT_MS).then((drained)=>{if(subscriptionClosed)return;if(!drained){this.attachBackpressureStats.timeout+=1;abortBackpressuredStream();return;}this.attachBackpressureStats.drained+=1;waitingForDrain=false;flushLiveQueue();});return true;
       }
       closeSubscription();socket.destroy();return false;
     };
@@ -815,7 +815,7 @@ export class DockHost {
     const result=createBoundedFollowResult(projection,request.requestId);
     const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,result));
     if(responseOutcome==="backpressured"){
-      this.attachBackpressureStats.blocked+=1;const drained=await waitForSocketDrain(socket,ATTACH_DRAIN_TIMEOUT_MS);
+      this.attachBackpressureStats.blocked+=1;const drained=await waitForSocketDrain(socket,SOCKET_DRAIN_TIMEOUT_MS);
       if(!drained){this.attachBackpressureStats.timeout+=1;initializing=false;clearQueues();abortBackpressuredStream();return;}
       this.attachBackpressureStats.drained+=1;
     }else if(responseOutcome!=="written"){initializing=false;clearQueues();closeSubscription();return;}
@@ -881,6 +881,29 @@ export class DockHost {
     if (!streams) return;
     this.attachConnections.delete(instanceId);
     for (const socket of streams) socket.destroy();
+  }
+
+  private async sendTreeSuccessAndEnd(socket: Socket, requestId: string, result: unknown): Promise<void> {
+    if (socket.destroyed || socket.writableEnded) return;
+    let bytes: Buffer;
+    try { bytes = Buffer.from(JSON.stringify(successResponse(requestId, this.hostEpoch, result)), "utf8"); }
+    catch { this.sendErrorAndEnd(socket, "invalid_response", "Session tree could not be encoded", requestId); return; }
+    if (bytes.byteLength > MAX_DOCK_TRANSFER_BYTES) {
+      this.sendErrorAndEnd(socket, "response_too_large", "Session tree exceeds the transport safety bound", requestId);
+      return;
+    }
+    const count = Math.max(1, Math.ceil(bytes.byteLength / MAX_RESPONSE_TRANSFER_CHUNK_BYTES));
+    for (let index = 0; index < count; index += 1) {
+      const data = bytes.subarray(index * MAX_RESPONSE_TRANSFER_CHUNK_BYTES, Math.min(bytes.byteLength, (index + 1) * MAX_RESPONSE_TRANSFER_CHUNK_BYTES)).toString("base64");
+      const outcome = writeEnvelope(socket, { kind: "response_transfer", version: 2, requestId, hostEpoch: this.hostEpoch, index, count, data });
+      if (outcome === "backpressured") {
+        if (!await waitForSocketDrain(socket, SOCKET_DRAIN_TIMEOUT_MS)) { socket.destroy(); return; }
+      } else if (outcome !== "written") {
+        socket.destroy();
+        return;
+      }
+    }
+    if (!socket.destroyed && !socket.writableEnded) socket.end();
   }
 
   private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,result));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
@@ -1162,7 +1185,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof AgentConversationCursorError) return { code: "invalid_cursor", message: error.message };
   if (error instanceof PublishedFileUnavailableError) return { code: error.code, message: error.message };
   if (error instanceof StaleRuntimeGenerationError) return { code: "stale_runtime_generation", message: error.message, details: { expectedRuntimeGeneration: error.expected, actualRuntimeGeneration: error.actual } };
-  if (error instanceof InvalidTreeCursorError) return { code: "invalid_cursor", message: error.message };
+  if (error instanceof AgentInvalidTreeTargetError) return { code: "invalid_tree_target", message: error.message };
   if (error instanceof InteractionNotFoundError) return { code: error.code, message: error.message };
   if (error instanceof InteractionExpiredError) return { code: error.code, message: error.message };
   if (error instanceof InteractionWrongLeaseError) return { code: error.code, message: error.message };

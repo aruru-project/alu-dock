@@ -2,6 +2,7 @@ import {
   AgentCompactionKnownFailureError,
   AgentConversationCursorError,
   AgentInvalidSettingValueError,
+  AgentInvalidTreeTargetError,
   AgentModelNotFoundError,
   AgentQueueEffectUnknownError,
   AgentQueueRejectedBeforeEffectError,
@@ -25,6 +26,7 @@ import {
   parseSessionsResult,
   parseSettingDto,
   parseSettingDtos,
+  parseSessionTreeResult,
   parseToolListBody,
 } from "../control/protocol.js";
 import {
@@ -46,11 +48,12 @@ import {
   type ObservationRequest,
 } from "../core/instance-observation.js";
 import type { SettingKey } from "../core/config-projection.js";
+import { MAX_DOCK_TRANSFER_BYTES } from "../core/transport-bounds.js";
 
 export const PI_WORKER_PROTOCOL = "alu-dock-pi-worker";
 export const PI_WORKER_PROTOCOL_VERSION = 1;
 export const MAX_WORKER_CHUNK_CHARS = 96_000;
-export const MAX_WORKER_TRANSFER_BYTES = 256 * 1024 * 1024;
+export const MAX_WORKER_TRANSFER_BYTES = MAX_DOCK_TRANSFER_BYTES;
 export const MAX_WORKER_TRANSFER_CHUNKS = 4_096;
 
 export interface WorkerIdentity {
@@ -89,7 +92,7 @@ export interface WorkerErrorDto {
   code:
     | "compaction_known_failure" | "queue_rejected" | "queue_effect_unknown"
     | "unknown_tool" | "model_not_found" | "invalid_setting" | "settings_write"
-    | "conversation_cursor" | "file_unavailable" | "runtime_error";
+    | "conversation_cursor" | "file_unavailable" | "invalid_tree_target" | "runtime_error";
   name: string;
   message: string;
   details?: Record<string, unknown>;
@@ -498,6 +501,7 @@ export function validateAgentWorkerResult(label: string, raw: unknown): void {
     case "resource.get": parseResourcesResult(raw); return;
     case "command.catalog": parseCommandsResult(raw); return;
     case "session.list": parseSessionsResult(raw); return;
+    case "session.tree": parseSessionTreeResult(raw); return;
     default: return;
   }
 }
@@ -591,6 +595,7 @@ export function encodeWorkerError(error: unknown): WorkerErrorDto {
   if (error instanceof AgentCompactionKnownFailureError) return { ...base, code: "compaction_known_failure", details: { reason: error.reason } };
   if (error instanceof AgentConversationCursorError) return { ...base, code: "conversation_cursor" };
   if (error instanceof PublishedFileUnavailableError) return { ...base, code: "file_unavailable" };
+  if (error instanceof AgentInvalidTreeTargetError) return { ...base, code: "invalid_tree_target" };
   if (error instanceof AgentQueueRejectedBeforeEffectError) return { ...base, code: "queue_rejected" };
   if (error instanceof AgentQueueEffectUnknownError) return { ...base, code: "queue_effect_unknown" };
   if (error instanceof AgentUnknownToolError) return { ...base, code: "unknown_tool", details: { toolName: error.toolName } };
@@ -605,6 +610,7 @@ export function decodeWorkerError(error: WorkerErrorDto): Error {
     case "compaction_known_failure": return new AgentCompactionKnownFailureError(oneOfValue(error.details?.reason, ["nothing_to_compact", "already_compacted", "cancelled", "failed"], "failed"), error.message);
     case "conversation_cursor": return new AgentConversationCursorError(error.message);
     case "file_unavailable": return new PublishedFileUnavailableError(error.message);
+    case "invalid_tree_target": return new AgentInvalidTreeTargetError(error.message);
     case "queue_rejected": return new AgentQueueRejectedBeforeEffectError(new Error(error.message));
     case "queue_effect_unknown": return new AgentQueueEffectUnknownError(new Error(error.message));
     case "unknown_tool": return new AgentUnknownToolError(typeof error.details?.toolName === "string" ? error.details.toolName : "unknown");
@@ -626,14 +632,14 @@ export function decodeWorkerError(error: WorkerErrorDto): Error {
 function parseWorkerError(raw: unknown): WorkerErrorDto {
   const value = record(raw, "Worker error");
   exactKeys(value, ["code", "name", "message", "details"], "Worker error");
-  const code = oneOf(value.code, ["compaction_known_failure", "queue_rejected", "queue_effect_unknown", "unknown_tool", "model_not_found", "invalid_setting", "settings_write", "conversation_cursor", "file_unavailable", "runtime_error"] as const, "Worker error code");
+  const code = oneOf(value.code, ["compaction_known_failure", "queue_rejected", "queue_effect_unknown", "unknown_tool", "model_not_found", "invalid_setting", "settings_write", "conversation_cursor", "file_unavailable", "invalid_tree_target", "runtime_error"] as const, "Worker error code");
   const details = value.details === undefined ? undefined : record(value.details, "Worker error details");
   validateWorkerErrorDetails(code, details);
   return { code, name: boundedString(value.name, 128, "Worker error name"), message: boundedString(value.message, 2_048, "Worker error message", true), ...(details === undefined ? {} : { details }) };
 }
 
 function validateWorkerErrorDetails(code: WorkerErrorDto["code"], details: Record<string, unknown> | undefined): void {
-  if (code === "runtime_error" || code === "conversation_cursor" || code === "file_unavailable" || code === "queue_rejected" || code === "queue_effect_unknown") {
+  if (code === "runtime_error" || code === "conversation_cursor" || code === "file_unavailable" || code === "invalid_tree_target" || code === "queue_rejected" || code === "queue_effect_unknown") {
     if (details !== undefined && Object.keys(details).length > 0) throw new Error(`${code} details are invalid`);
     return;
   }
@@ -887,7 +893,6 @@ function validateJsonValue(root: unknown): void {
       continue;
     }
     if (Array.isArray(value)) {
-      if (value.length > 100_000) throw new Error("Worker IPC JSON array exceeds bounds");
       for (const item of value) stack.push({ value: item, depth: depth + 1 });
       continue;
     }

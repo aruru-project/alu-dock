@@ -12,6 +12,11 @@ import {
 import { MAX_INSTANCE_DISPLAY_NAME_CHARS } from "../core/instance-display-name.js";
 import { MAX_CONVERSATION_CHUNK_CHARS } from "../core/instance-dto.js";
 import {
+  MAX_DOCK_TRANSFER_BYTES,
+  MAX_RESPONSE_TRANSFER_CHUNK_BYTES,
+  MAX_RESPONSE_TRANSFER_CHUNKS,
+} from "../core/transport-bounds.js";
+import {
   MAX_PUBLISHED_FILE_BYTES,
   MAX_PUBLISHED_FILE_CHUNK_BYTES,
   MAX_PUBLISHED_FILE_REF_CHARS,
@@ -149,7 +154,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "session.inventory.v1",
   "session.inventory-diagnostics.v1",
   "session.reopen",
-  "session.tree.v1",
+  "session.tree.v2",
   "settings.v1",
   "tools.v1",
   "tui.projection.v1",
@@ -235,7 +240,7 @@ export type ControlRequest =
   | Request<"session.name", { operationId: string; instanceId: string; name: string }>
   | Request<"session.compact", { operationId: string; instanceId: string; customInstructions?: string }>
   | Request<"session.reload", { operationId: string; instanceId: string }>
-  | Request<"session.tree", { instanceId: string; treeRevision?: string; afterEntryId?: string; limit: number }>
+  | Request<"session.tree", { instanceId: string }>
   | Request<"session.navigate", { operationId: string; instanceId: string; targetId: string; summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }>
   | Request<"session.fork", { operationId: string; instanceId: string; entryId: string }>
   | Request<"session.clone", { operationId: string; instanceId: string; entryId: string }>
@@ -245,6 +250,15 @@ export interface ControlError { code: string; message: string; retryable: boolea
 export type ControlResponse =
   | { kind: "response"; version: 2; requestId: string; hostEpoch: string; ok: true; result: unknown }
   | { kind: "response"; version: 2; requestId: string; hostEpoch: string; ok: false; error: ControlError };
+export interface ResponseTransferFrame {
+  kind: "response_transfer";
+  version: 2;
+  requestId: string;
+  hostEpoch: string;
+  index: number;
+  count: number;
+  data: string;
+}
 export interface ControlEventEnvelope { kind: "event"; version: 2; requestId: string; hostEpoch: string; event: DockEvent }
 
 export interface AttachmentUploadReady {
@@ -343,7 +357,7 @@ export interface SessionReplacementResult { cancelled: boolean; instance: Instan
 export interface SessionNameResult { instance: InstanceSnapshot }
 export interface SessionCompactionResult { result: { summary: string; firstKeptEntryId: string; tokensBefore: number }; instance: InstanceSnapshot }
 export interface SessionReloadResult extends ResourcesResult { instance: InstanceSnapshot }
-export interface SessionTreeResult { treeRevision: string; nodes: TreeNodeDto[]; leafId?: string; total: number; truncated: boolean; nextAfterEntryId?: string }
+export interface SessionTreeResult { nodes: TreeNodeDto[]; leafId?: string }
 export interface SessionNavigateResult { cancelled: boolean; aborted?: boolean; editorText?: string; instance: InstanceSnapshot }
 export interface SessionForkResult { cancelled: boolean; selectedText?: string; instance: InstanceSnapshot }
 export interface SessionCloneResult { cancelled: boolean; instance: InstanceSnapshot }
@@ -384,7 +398,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "file.read") return PUBLISHED_FILES_CAPABILITY;
   if (type === "workspace.list") return WORKSPACE_LIST_CAPABILITY;
   if (type === "session.inventory") return "session.inventory.v1";
-  if (type === "session.tree" || type === "session.navigate" || type === "session.fork" || type === "session.clone") return "session.tree.v1";
+  if (type === "session.tree" || type === "session.navigate" || type === "session.fork" || type === "session.clone") return "session.tree.v2";
   if (type === "command.submit" || type === "session.list") return "session.core";
   if (type.startsWith("session.")) return "session.commands.v1";
   if (type.startsWith("tool.")) return "tools.v1";
@@ -425,7 +439,7 @@ function capabilityProjectsInstanceSnapshot(capability: Capability): boolean {
     || capability === "session.commands.v1"
     || capability === "session.core"
     || capability === "session.reopen"
-    || capability === "session.tree.v1"
+    || capability === "session.tree.v2"
     || capability === "settings.v1"
     || capability === "tools.v1"
     || capability === "tui.projection.v1";
@@ -701,14 +715,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
     case "session.name": exact(params, ["operationId", "instanceId", "name"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), name: boundedString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request") } };
     case "session.compact": exact(params, ["operationId", "instanceId", "customInstructions"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), customInstructions: optionalString(params.customInstructions, "params.customInstructions", MAX_PROMPT_CHARS, "invalid_request") } };
     case "session.reload": exact(params, ["operationId", "instanceId"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId() } };
-    case "session.tree": {
-      exact(params, ["instanceId", "treeRevision", "afterEntryId", "limit"], "invalid_request");
-      if (!Number.isSafeInteger(params.limit) || (params.limit as number) < 1 || (params.limit as number) > MAX_HISTORY_ITEMS) throw validation("invalid_request", `params.limit must be between 1 and ${MAX_HISTORY_ITEMS}`);
-      const treeRevision = optionalString(params.treeRevision, "params.treeRevision", 128, "invalid_request");
-      const afterEntryId = optionalString(params.afterEntryId, "params.afterEntryId", 128, "invalid_request");
-      if ((treeRevision === undefined) !== (afterEntryId === undefined)) throw validation("invalid_request", "Tree continuation requires both treeRevision and afterEntryId");
-      return { ...base, type, params: { instanceId: instanceId(), treeRevision, afterEntryId, limit: params.limit as number } };
-    }
+    case "session.tree": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "session.navigate": {
       exact(params, ["operationId", "instanceId", "targetId", "summarize", "customInstructions", "replaceInstructions", "label"], "invalid_request");
       const summarize = optionalBoolean(params.summarize, "params.summarize", "invalid_request");
@@ -766,6 +773,28 @@ export function parseAttachmentUploadFrame(input: unknown, requestId: string): A
   exact(value, ["kind", "version", "requestId", "chunks"], "invalid_request");
   if (value.kind !== "attachment_complete" || value.version !== 2 || value.requestId !== requestId) throw validation("invalid_request", "Invalid attachment completion frame");
   return { kind: "attachment_complete", version: 2, requestId, chunks: unsigned(value.chunks, "attachment chunk count", "invalid_request") };
+}
+
+export function parseResponseTransferFrame(input: unknown, requestId: string, hostEpoch: string): ResponseTransferFrame {
+  const value = object(input, "response transfer frame");
+  exact(value, ["kind", "version", "requestId", "hostEpoch", "index", "count", "data"]);
+  if (value.kind !== "response_transfer" || value.version !== 2 || value.requestId !== requestId || value.hostEpoch !== hostEpoch) {
+    throw validation("invalid_response", "Response transfer identity does not match the request");
+  }
+  const index = unsigned(value.index, "response transfer index");
+  const count = positive(value.count, "response transfer count");
+  if (count > MAX_RESPONSE_TRANSFER_CHUNKS || index >= count) throw validation("invalid_response", "Response transfer index or count is outside its bound");
+  const data = canonicalBase64(value.data, "response transfer data", MAX_RESPONSE_TRANSFER_CHUNK_BYTES);
+  if (data.length === 0) throw validation("invalid_response", "Response transfer chunks cannot be empty");
+  return { kind: "response_transfer", version: 2, requestId, hostEpoch, index, count, data };
+}
+
+export function decodeResponseTransfer(chunks: readonly string[]): unknown {
+  const bytes = chunks.map((data) => Buffer.from(data, "base64"));
+  const total = bytes.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+  if (total > MAX_DOCK_TRANSFER_BYTES) throw validation("invalid_response", "Response transfer exceeds its aggregate bound");
+  try { return JSON.parse(Buffer.concat(bytes, total).toString("utf8")); }
+  catch { throw validation("invalid_response", "Response transfer does not contain a valid response"); }
 }
 
 export function parseControlResponse(input: unknown, requestId: string, hostEpoch: string): ControlResponse {
@@ -1349,20 +1378,31 @@ export function parseSessionReloadResult(input: unknown): SessionReloadResult {
 
 export function parseSessionTreeResult(input: unknown): SessionTreeResult {
   const value = object(input, "session tree result");
-  exact(value, ["treeRevision", "nodes", "leafId", "total", "truncated", "nextAfterEntryId"]);
-  const treeRevision = id(value.treeRevision, "treeRevision");
-  const nodes = array(value.nodes, "nodes", MAX_HISTORY_ITEMS).map((item, index) => parseTreeNode(item, `nodes[${index}]`));
-  if (new Set(nodes.map((node) => node.entryId)).size !== nodes.length) throw validation("invalid_response", "Tree page entry IDs must be unique");
+  exact(value, ["nodes", "leafId"]);
+  if (!Array.isArray(value.nodes)) throw validation("invalid_response", "nodes must be an array");
+  const nodes = value.nodes.map((item, index) => parseTreeNode(item, `nodes[${index}]`));
+  const ids = new Set<string>();
+  const ancestors: string[] = [];
+  for (const node of nodes) {
+    if (ids.has(node.entryId)) throw validation("invalid_response", "Tree entry IDs must be unique");
+    if (node.parentId === undefined) {
+      if (node.depth !== 0) throw validation("invalid_response", "Tree roots must have depth zero");
+    } else if (node.depth < 1 || ancestors[node.depth - 1] !== node.parentId) {
+      throw validation("invalid_response", "Tree nodes must use stable depth-first pre-order");
+    }
+    ancestors.length = node.depth;
+    ancestors.push(node.entryId);
+    ids.add(node.entryId);
+  }
+  for (let index = 0; index < nodes.length; index += 1) {
+    const node = nodes[index]!;
+    const next = nodes[index + 1];
+    const expectedChildren = next !== undefined && next.depth === node.depth + 1 && next.parentId === node.entryId;
+    if (node.hasChildren !== expectedChildren) throw validation("invalid_response", "Tree child topology is inconsistent");
+  }
   const leafId = optionalString(value.leafId, "leafId", 128);
-  const total = unsigned(value.total, "total");
-  if (total > 100_000) throw validation("invalid_response", "Tree total exceeds 100000 entries");
-  if (total < nodes.length) throw validation("invalid_response", "Tree total cannot be smaller than the returned page");
-  const truncated = boolean(value.truncated, "truncated");
-  const nextAfterEntryId = optionalString(value.nextAfterEntryId, "nextAfterEntryId", 128);
-  if (truncated !== (nextAfterEntryId !== undefined)) throw validation("invalid_response", "Tree pagination cursor is inconsistent");
-  if (nextAfterEntryId !== undefined && nodes.at(-1)?.entryId !== nextAfterEntryId) throw validation("invalid_response", "Tree cursor must identify the last returned entry");
-  if (truncated && nodes.length === 0) throw validation("invalid_response", "A truncated tree page cannot be empty");
-  return { treeRevision, nodes, ...(leafId === undefined ? {} : { leafId }), total, truncated, ...(nextAfterEntryId === undefined ? {} : { nextAfterEntryId }) };
+  if (leafId !== undefined && !ids.has(leafId)) throw validation("invalid_response", "Tree leaf does not belong to the snapshot");
+  return { nodes, ...(leafId === undefined ? {} : { leafId }) };
 }
 
 export function parseSessionNavigateResult(input: unknown): SessionNavigateResult {
@@ -1403,7 +1443,6 @@ function parseTreeNode(input: unknown, field: string): TreeNodeDto {
   if (role === "tool" && displayClass !== "tool") throw validation("invalid_response", `${field} tool display class invariant failed`);
   if (state !== undefined && role !== "assistant" && role !== "tool") throw validation("invalid_response", `${field} state invariant failed`);
   const depth = unsigned(node.depth, `${field}.depth`);
-  if (depth > 100_000) throw validation("invalid_response", `${field}.depth exceeds 100000`);
   return {
     entryId: id(node.entryId, `${field}.entryId`),
     ...(node.parentId === undefined ? {} : { parentId: id(node.parentId, `${field}.parentId`) }),
@@ -1687,7 +1726,7 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "compaction.started": exact(data, ["reason", "operationId"]); return { reason: enumeration(data.reason, "reason", ["manual", "threshold", "overflow"]), operationId: optionalText("operationId", 128) };
     case "compaction.completed": exact(data, ["reason", "operationId", "aborted", "willRetry", "error"]); return { reason: enumeration(data.reason, "reason", ["manual", "threshold", "overflow"]), operationId: optionalText("operationId", 128), aborted: boolean(data.aborted, "aborted"), willRetry: boolean(data.willRetry, "willRetry"), error: optionalText("error", MAX_MESSAGE) };
     case "session.replaced": exact(data, ["reason", "previousSessionFile", "sessionFile", "runtimeGeneration", "cwd", "piSessionId", "name", "displayName", "gitBranch"]); return { reason: enumeration(data.reason, "reason", ["new", "resume", "fork", "clone", "reload"]), previousSessionFile: optionalText("previousSessionFile", MAX_CONTROL_CWD_CHARS), sessionFile: optionalText("sessionFile", MAX_CONTROL_CWD_CHARS), runtimeGeneration: positive(data.runtimeGeneration, "runtimeGeneration"), cwd: text("cwd", MAX_CONTROL_CWD_CHARS), piSessionId: text("piSessionId", 128), name: optionalText("name", MAX_INSTANCE_NAME_CHARS), displayName: instanceDisplayName(data.displayName, `${field}.displayName`), gitBranch: data.gitBranch === undefined ? undefined : gitBranch(data.gitBranch, `${field}.gitBranch`) };
-    case "session.navigated": exact(data, ["targetId", "leafId", "treeRevision", "summaryCreated"]); return { targetId: text("targetId", 128), leafId: optionalText("leafId", 128), treeRevision: text("treeRevision", 128), summaryCreated: boolean(data.summaryCreated, "summaryCreated") };
+    case "session.navigated": exact(data, ["targetId", "leafId", "summaryCreated"]); return { targetId: text("targetId", 128), leafId: optionalText("leafId", 128), summaryCreated: boolean(data.summaryCreated, "summaryCreated") };
     case "session.info_changed": exact(data, ["name", "displayName"]); return { name: optionalText("name", MAX_INSTANCE_NAME_CHARS), displayName: instanceDisplayName(data.displayName, `${field}.displayName`) };
     case "session.metrics_changed": exact(data, ["metrics"]); return { metrics: parseMetrics(data.metrics, `${field}.metrics`) };
     case "git.branch_changed": exact(data, ["branch"]); return data.branch === undefined ? {} : { branch: gitBranch(data.branch, `${field}.branch`) };

@@ -177,14 +177,6 @@ export interface TreeNodeDto {
   summary: string;
   hasChildren: boolean;
 }
-export interface TreePageDto {
-  treeRevision: string;
-  nodes: TreeNodeDto[];
-  leafId?: string;
-  total: number;
-  truncated: boolean;
-  nextAfterEntryId?: string;
-}
 export type SessionMetricsDto = AgentSessionMetrics;
 export interface SessionDto { sessionId: string; sessionFile: string; name?: string; cwd: string; updatedAt?: string }
 export interface SessionCompactionDto { summary: string; firstKeptEntryId: string; tokensBefore: number }
@@ -224,7 +216,7 @@ export interface EventDataMap {
   "compaction.started": { reason: "manual" | "threshold" | "overflow"; operationId?: string };
   "compaction.completed": { reason: "manual" | "threshold" | "overflow"; operationId?: string; aborted: boolean; willRetry: boolean; error?: string };
   "session.replaced": { reason: "new" | "resume" | "fork" | "clone" | "reload"; previousSessionFile?: string; sessionFile?: string; runtimeGeneration: number; cwd: string; piSessionId: string; name?: string; displayName: string; gitBranch?: string };
-  "session.navigated": { targetId: string; leafId?: string; treeRevision: string; summaryCreated: boolean };
+  "session.navigated": { targetId: string; leafId?: string; summaryCreated: boolean };
   "session.info_changed": { name?: string; displayName: string };
   "session.metrics_changed": { metrics: SessionMetricsDto };
   "git.branch_changed": { branch?: string };

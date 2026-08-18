@@ -1274,12 +1274,12 @@ test("SSH TUI tree identifies sibling branches and round-trips from B to A witho
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
     runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
     runtime.treeNodes = [
-      { entryId: "branch-root", depth: 0, kind: "message", role: "user", summary: "initial task", hasChildren: true },
-      { entryId: "branch-point", parentId: "branch-root", depth: 1, kind: "message", role: "assistant", summary: "shared answer", hasChildren: true },
-      { entryId: "branch-a-user", parentId: "branch-point", depth: 2, kind: "message", role: "user", summary: "original branch prompt", hasChildren: true },
-      { entryId: "branch-a-leaf", parentId: "branch-a-user", depth: 3, kind: "message", role: "assistant", summary: "original branch answer", hasChildren: false },
-      { entryId: "branch-b-user", parentId: "branch-point", depth: 2, kind: "message", role: "user", summary: "new branch prompt", hasChildren: true },
-      { entryId: "branch-b-leaf", parentId: "branch-b-user", depth: 3, kind: "message", role: "assistant", summary: "new branch answer", hasChildren: false },
+      { entryId: "branch-root", depth: 0, kind: "message", role: "user", displayClass: "content", summary: "initial task", hasChildren: true },
+      { entryId: "branch-point", parentId: "branch-root", depth: 1, kind: "message", role: "assistant", displayClass: "content", summary: "shared answer", hasChildren: true },
+      { entryId: "branch-a-user", parentId: "branch-point", depth: 2, kind: "message", role: "user", displayClass: "content", summary: "original branch prompt", hasChildren: true },
+      { entryId: "branch-a-leaf", parentId: "branch-a-user", depth: 3, kind: "message", role: "assistant", displayClass: "content", summary: "original branch answer", hasChildren: false },
+      { entryId: "branch-b-user", parentId: "branch-point", depth: 2, kind: "message", role: "user", displayClass: "content", summary: "new branch prompt", hasChildren: true },
+      { entryId: "branch-b-leaf", parentId: "branch-b-user", depth: 3, kind: "message", role: "assistant", displayClass: "content", summary: "new branch answer", hasChildren: false },
     ];
     runtime.treeLeafId = "branch-b-leaf";
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
@@ -1314,10 +1314,10 @@ test("SSH TUI Stage 6 navigates, returns fork text to the editor, and clones the
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
     runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
     runtime.treeNodes = [
-      { entryId: "tree-u1", depth: 0, kind: "message", role: "user", summary: "first prompt", hasChildren: true },
-      { entryId: "tree-a1", parentId: "tree-u1", depth: 1, kind: "message", role: "assistant", summary: "first answer", hasChildren: true },
-      { entryId: "tree-u2", parentId: "tree-a1", depth: 2, kind: "message", role: "user", summary: "second prompt", hasChildren: true },
-      { entryId: "tree-a2", parentId: "tree-u2", depth: 3, kind: "message", role: "assistant", summary: "second answer", hasChildren: false },
+      { entryId: "tree-u1", depth: 0, kind: "message", role: "user", displayClass: "content", summary: "first prompt", hasChildren: true },
+      { entryId: "tree-a1", parentId: "tree-u1", depth: 1, kind: "message", role: "assistant", displayClass: "content", summary: "first answer", hasChildren: true },
+      { entryId: "tree-u2", parentId: "tree-a1", depth: 2, kind: "message", role: "user", displayClass: "content", summary: "second prompt", hasChildren: true },
+      { entryId: "tree-a2", parentId: "tree-u2", depth: 3, kind: "message", role: "assistant", displayClass: "content", summary: "second answer", hasChildren: false },
     ];
     runtime.treeLeafId = "tree-a2";
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
@@ -2472,31 +2472,55 @@ test("session.core lists bounded safe cwd and all-session metadata", async (cont
   ]);
 });
 
-test("session.tree.v1 paginates one Host tree without losing order", async (context) => {
+test("one public tree call returns a complete Pi snapshot larger than one control frame", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, undefined, "tree-create");
   const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
-  runtime.treeNodes = [
-    { entryId: "tree-u1", depth: 0, kind: "message", role: "user", summary: "first prompt", hasChildren: true },
-    { entryId: "tree-a1", parentId: "tree-u1", depth: 1, kind: "message", role: "assistant", summary: "first answer", hasChildren: true },
-    { entryId: "tree-u2", parentId: "tree-a1", depth: 2, kind: "message", role: "user", summary: "second prompt", hasChildren: true },
-    { entryId: "tree-a2", parentId: "tree-u2", depth: 3, kind: "message", role: "assistant", summary: "second answer", hasChildren: false },
-  ];
-  runtime.treeLeafId = "tree-a2";
+  runtime.treeNodes = Array.from({ length: 800 }, (_, index) => ({
+    entryId: `tree-${index}`,
+    ...(index === 0 ? {} : { parentId: `tree-${index - 1}` }),
+    depth: index,
+    kind: "message" as const,
+    role: index % 2 === 0 ? "user" as const : "assistant" as const,
+    displayClass: "content" as const,
+    summary: `${index}: ${"complete compact tree ".repeat(75)}`,
+    hasChildren: index < 799,
+  }));
+  runtime.treeLeafId = "tree-799";
 
-  const first = await client.tree(created.id, undefined, undefined, 2);
-  assert.deepEqual(first.nodes.map((node) => node.entryId), ["tree-u1", "tree-a1"]);
-  assert.equal(first.total, 4);
-  assert.equal(first.truncated, true);
-
-  const second = await client.tree(created.id, first.treeRevision, first.nextAfterEntryId, 2);
-  assert.deepEqual(second.nodes.map((node) => node.entryId), ["tree-u2", "tree-a2"]);
-  assert.equal(second.truncated, false);
+  const tree = await client.tree(created.id);
+  assert.equal(tree.nodes.length, 800);
+  assert.equal(tree.nodes[0]?.entryId, "tree-0");
+  assert.equal(tree.nodes.at(-1)?.entryId, "tree-799");
+  assert.equal(tree.leafId, "tree-799");
+  assert.equal(runtime.treeReadCalls, 1);
 });
 
+test("a Tree point that disappeared is rejected without changing the session", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, undefined, "tree-target-create");
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
+  runtime.treeNodes = [
+    { entryId: "tree-root", depth: 0, kind: "message", role: "user", displayClass: "content", summary: "root", hasChildren: true },
+    { entryId: "tree-leaf", parentId: "tree-root", depth: 1, kind: "message", role: "assistant", displayClass: "content", summary: "leaf", hasChildren: false },
+  ];
+  runtime.treeLeafId = "tree-leaf";
+  runtime.settle("ready");
+  await harness.registry.get(created.id).waitForIdle();
+
+  await assert.rejects(
+    client.navigateSession(created.id, "point-that-disappeared", {}, "tree-target-operation"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "invalid_tree_target",
+  );
+  assert.equal((await client.tree(created.id)).leafId, "tree-leaf");
+  assert.equal((await client.status(created.id)).runtimeGeneration, created.runtimeGeneration);
+});
 
 
 test("unexpected host closure rejects a live follow subscription", async (context) => {

@@ -115,26 +115,27 @@ test("real Pi navigates in-file, forks before a user message, and clones the cur
   try {
     const initial = instance.snapshot();
     const initialMessages = initial.metrics?.messages.total;
-    const first = await instance.getTreePage(undefined, undefined, 2);
-    assert.ok(first.total >= 4);
-    assert.deepEqual(first.nodes.map((node) => [node.entryId, node.depth, node.role]), [
+    const first = await instance.getTree();
+    assert.deepEqual(first.nodes.filter((node) => node.kind === "message").map((node) => [node.entryId, node.depth, node.role]), [
       ["u1", 0, "user"],
       ["a1", 1, "assistant"],
+      ["u2", 2, "user"],
+      ["a2", 3, "assistant"],
     ]);
-    assert.ok(first.leafId);
-    assert.equal(first.truncated, true);
-    const second = await instance.getTreePage(first.treeRevision, first.nextAfterEntryId, 2);
-    assert.deepEqual(second.nodes.map((node) => node.entryId), ["u2", "a2"]);
+    assert.ok(first.nodes.every((node) => node.summary.length > 0 && typeof node.hasChildren === "boolean"));
+    assert.equal(first.leafId, first.nodes.at(-1)?.entryId);
 
     const navigated = await instance.navigateSession("navigate-real-tree", "u2");
-    assert.deepEqual(navigated, { cancelled: false, editorText: "second prompt", summaryCreated: false });
+    assert.equal(navigated.cancelled, false);
+    assert.equal(navigated.editorText, "second prompt");
+    assert.equal(navigated.summaryCreated, false);
     const afterNavigate = instance.snapshot();
     assert.equal(afterNavigate.runtimeGeneration, 1);
     assert.equal(afterNavigate.executor.sessionFile, sessionFile);
     assert.equal(afterNavigate.lastRun, "never");
     assert.equal(afterNavigate.metrics?.messages.total, initialMessages);
     assert.equal(instance.eventsSince().events.some((event) => event.type === "run.started"), false);
-    await assert.rejects(instance.getTreePage(first.treeRevision, first.nextAfterEntryId, 2), /Session tree changed/);
+    assert.equal((await instance.getTree()).leafId, "a1");
 
     const forked = await instance.forkSession("fork-real-tree", "u2");
     assert.deepEqual(forked, { cancelled: false, selectedText: "second prompt" });
@@ -145,7 +146,7 @@ test("real Pi navigates in-file, forks before a user message, and clones the cur
     assert.equal(forkSnapshot.lastRun, "never");
     const forkHeader = JSON.parse((await readFile(forkFile, "utf8")).split("\n")[0] as string) as Record<string, unknown>;
     assert.equal(forkHeader.parentSession, sessionFile);
-    const forkTree = await instance.getTreePage(undefined, undefined, 200);
+    const forkTree = await instance.getTree();
     assert.deepEqual(forkTree.nodes.filter((node) => node.kind === "message").map((node) => node.entryId), ["u1", "a1"]);
     assert.ok(forkTree.leafId);
 

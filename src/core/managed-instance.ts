@@ -19,6 +19,7 @@ import {
 } from "./extension-ui-broker.js";
 import {
   AgentCompactionKnownFailureError,
+  AgentInvalidTreeTargetError,
   AgentMutationEffectUnknownError,
   AgentQueueRejectedBeforeEffectError,
   AgentSettingsWriteError,
@@ -64,7 +65,6 @@ import type {
   AgentSessionMetrics,
   AgentToolProjection,
   AgentSessionTarget,
-  AgentTreeSnapshot,
   ThinkingLevel,
 } from "./agent-worker.js";
 import { sliceSemanticHistory } from "./history-pagination.js";
@@ -119,7 +119,6 @@ import type {
   SettingsChangedData,
   StopReceipt,
   TreeNodeDto,
-  TreePageDto,
 } from "./instance-dto.js";
 export type {
   AttachProjection,
@@ -155,7 +154,6 @@ export type {
   SettingsChangedData,
   StopReceipt,
   TreeNodeDto,
-  TreePageDto,
 } from "./instance-dto.js";
 export {
   MAX_IMAGE_AGGREGATE_BYTES,
@@ -169,7 +167,8 @@ export {
   MAX_PENDING_QUEUE_TEXT_CHARS,
   MAX_SEMANTIC_HISTORY_PAGE_ITEMS,
 } from "./instance-dto.js";
-import { projectAgentNavigateResult, projectRuntimeTree, type ProjectedSessionTree } from "./session-tree.js";
+import { projectAgentNavigateResult } from "./session-tree.js";
+import type { SessionTreeResult } from "../control/protocol.js";
 import type { ObservationNotification } from "./instance-observation.js";
 
 interface AgentEventTransition {
@@ -326,13 +325,6 @@ export class InvalidHistoryCursorError extends Error {
   }
 }
 
-export class InvalidTreeCursorError extends Error {
-  constructor(message = "Session tree changed; restart pagination from the first page") {
-    super(message);
-    this.name = "InvalidTreeCursorError";
-  }
-}
-
 export class RuntimeEffectUnknownError extends Error {
   readonly queryHint = "Query the instance snapshot before any retry";
 
@@ -395,7 +387,6 @@ export class ManagedInstance {
   private timedExecutionValue: InstanceExecution = "idle";
   private transitionTail: Promise<void> = Promise.resolve();
   private historyRefreshTail: Promise<void> = Promise.resolve();
-  private treeProjectionCache: { projection: ProjectedSessionTree; indexByEntryId: Map<string, number> } | undefined;
   private hostDrainActive = false;
   private hostDrainPromise: Promise<void> | undefined;
   private runtimeQueueClearAttempted = false;
@@ -926,37 +917,8 @@ export class ManagedInstance {
     });
   }
 
-  async getTreePage(
-    treeRevision: string | undefined,
-    afterEntryId: string | undefined,
-    limit: number,
-  ): Promise<TreePageDto> {
-    return this.withProjectionRead(async () => {
-      if ((treeRevision === undefined) !== (afterEntryId === undefined)) {
-        throw new InvalidTreeCursorError("Tree continuation requires both treeRevision and afterEntryId");
-      }
-      const tree = treeRevision === undefined || this.treeProjectionCache === undefined
-        ? await this.refreshTreeProjectionFromAgent()
-        : this.currentTreeProjection();
-      if (treeRevision !== undefined && treeRevision !== tree.treeRevision) throw new InvalidTreeCursorError();
-      let start = 0;
-      if (afterEntryId !== undefined) {
-        const index = this.treeProjectionCache?.indexByEntryId.get(afterEntryId);
-        if (index === undefined) throw new InvalidTreeCursorError("Tree continuation entry does not belong to this revision");
-        start = index + 1;
-      }
-      const boundedLimit = Math.max(1, Math.min(200, Math.floor(limit)));
-      const nodes = cloneJson(tree.nodes.slice(start, start + boundedLimit));
-      const truncated = start + nodes.length < tree.nodes.length;
-      return {
-        treeRevision: tree.treeRevision,
-        nodes,
-        ...(tree.leafId === undefined ? {} : { leafId: tree.leafId }),
-        total: tree.nodes.length,
-        truncated,
-        ...(truncated && nodes.length > 0 ? { nextAfterEntryId: nodes[nodes.length - 1]?.entryId } : {}),
-      };
-    });
+  async getTree(): Promise<SessionTreeResult> {
+    return this.withProjectionRead(async () => cloneJson(await this.invokeAgent<SessionTreeResult>("session.tree", {})));
   }
 
   async navigateSession(
@@ -969,21 +931,15 @@ export class ManagedInstance {
     try {
       await this.beginConfiguration("navigating the session tree", { kind: "navigation" });
       configurationStarted = true;
-      if (!(await this.refreshTreeProjectionFromAgent()).nodes.some((node) => node.entryId === targetId)) {
-        throw new InvalidTreeCursorError("Navigation target does not belong to the current session tree");
-      }
       this.receiptBoundaryOperationId = operationId;
       runtimeCalled = true;
       const pending = this.invokeAgent<AgentNavigateResult>("session.navigate", { operationId, targetId, ...cloneJson(options) });
       this.resolveNavigationStarted?.();
       const result = projectAgentNavigateResult(await pending);
       await this.closeRuntimeOperationBoundary(operationId);
-      if (!result.cancelled) {
-        await this.refreshHistory();
-        await this.refreshTreeProjectionFromAgent();
-      }
-      if (result.cancelled) return result;
-      const tree = this.currentTreeProjection();
+      const { leafId, ...navigationResult } = result;
+      if (!result.cancelled) await this.refreshHistory();
+      if (result.cancelled) return navigationResult;
       await this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "session.navigate", effect: "post_effect", operationId, instanceId: this.id },
         () => this.touch(),
@@ -991,13 +947,12 @@ export class ManagedInstance {
           this.refreshMetrics();
           this.appendEvent("session.navigated", {
             targetId,
-            ...(tree.leafId === undefined ? {} : { leafId: tree.leafId }),
-            treeRevision: tree.treeRevision,
+            ...(leafId === undefined ? {} : { leafId }),
             summaryCreated: result.summaryCreated,
           });
         },
       ));
-      return result;
+      return navigationResult;
     } catch (error) {
       await this.closeRuntimeOperationBoundary(operationId).catch(() => {});
       if (runtimeCalled && !isKnownMutationBoundaryError(error)) throw new RuntimeEffectUnknownError(operationId, error);
@@ -1130,21 +1085,13 @@ export class ManagedInstance {
   async forkSession(operationId: string, entryId: string): Promise<AgentForkResult> {
     return this.replaceRuntime("forking session", operationId, "fork", { requestedEntryId: entryId }, async () => (
       this.invokeAgent<AgentForkResult>("session.fork", { operationId, entryId })
-    ), async () => {
-      const target = (await this.refreshTreeProjectionFromAgent()).nodes.find((node) => node.entryId === entryId);
-      if (target?.kind !== "message" || target.role !== "user") {
-        throw new InvalidTreeCursorError("Fork target must be a user message in the current session tree");
-      }
-    });
+    ));
   }
 
   async cloneSession(operationId: string, entryId: string): Promise<AgentReplacementResult> {
     return this.replaceRuntime("cloning session", operationId, "clone", { requestedEntryId: entryId }, async () => {
       const result = await this.invokeAgent<AgentForkResult>("session.clone", { operationId, entryId });
       return { cancelled: result.cancelled };
-    }, async () => {
-      const tree = await this.refreshTreeProjectionFromAgent();
-      if (tree.leafId !== entryId) throw new InvalidTreeCursorError("Clone entry must be the current session leaf");
     });
   }
 
@@ -2662,26 +2609,6 @@ export class ManagedInstance {
     if (this.replacementIntent === undefined) this.recoverySessionFile = undefined;
   }
 
-  private currentTreeProjection(): ProjectedSessionTree {
-    return this.treeProjectionCache?.projection ?? this.storeTreeProjection({ nodes: [] });
-  }
-
-  private async refreshTreeProjectionFromAgent(): Promise<ProjectedSessionTree> {
-    const generation = this.runtimeGenerationValue;
-    const tree = await this.invokeAgent<AgentTreeSnapshot>("session.tree", { limit: 200 });
-    if (generation !== this.runtimeGenerationValue) throw new StaleRuntimeGenerationError(generation, this.runtimeGenerationValue);
-    return this.storeTreeProjection(tree);
-  }
-
-  private storeTreeProjection(tree: AgentTreeSnapshot): ProjectedSessionTree {
-    const projection = projectRuntimeTree(tree, this.runtimeGenerationValue);
-    this.treeProjectionCache = {
-      projection,
-      indexByEntryId: new Map(projection.nodes.map((node, index) => [node.entryId, index])),
-    };
-    return projection;
-  }
-
   private buildHistoryPage(beforeEntryId: string | undefined, limit: number, beforeTimestamp?: string): HistoryPageDto {
     let source = this.historyValue;
     if (beforeTimestamp !== undefined) {
@@ -3052,7 +2979,6 @@ export class ManagedInstance {
   }
 
   private async refreshHistory(): Promise<void> {
-    this.treeProjectionCache = undefined;
     const history = await this.invokeAgent<AgentHistoryEntry[]>("session.history", { limit: 200 });
     this.historyValue = history.map(projectAgentHistoryEntry);
     this.historyRevisionValue += 1;
@@ -3982,7 +3908,8 @@ function isKnownMutationBoundaryError(error: unknown): boolean {
     || error instanceof MutationFaultedError
     || error instanceof RuntimeEffectUnknownError
     || error instanceof AgentUnavailableBeforeEffectError
-    || error instanceof AgentCompactionKnownFailureError;
+    || error instanceof AgentCompactionKnownFailureError
+    || error instanceof AgentInvalidTreeTargetError;
 }
 
 function nonNegativeNumber(value: unknown): number {

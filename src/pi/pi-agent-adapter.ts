@@ -46,6 +46,7 @@ import {
   type ImagePathDto,
   type JsonValue,
   type PublishedFileDto,
+  type TreeNodeDto,
   MAX_CONVERSATION_CHUNK_CHARS,
 } from "../core/instance-dto.js";
 import { sliceSemanticHistory, slimSemanticHistoryEntry } from "../core/history-pagination.js";
@@ -54,6 +55,7 @@ import type { PiExtensionUiPort } from "./pi-extension-ui-adapter.js";
 import {
   AgentCompactionKnownFailureError,
   AgentConversationCursorError,
+  AgentInvalidTreeTargetError,
   AgentQueueEffectUnknownError,
   AgentQueueRejectedBeforeEffectError,
 } from "../core/agent-worker.js";
@@ -85,8 +87,6 @@ import type {
   AgentSessionTarget,
   ThinkingLevel,
   AgentToolProjection,
-  AgentTreeNode,
-  AgentTreeSnapshot,
 } from "../core/agent-worker.js";
 import type {
   CommandDto,
@@ -105,6 +105,7 @@ import {
   compareToolDtos,
 } from "../core/config-projection.js";
 import { projectJsonObject } from "../core/managed-instance.js";
+import { parseSessionTreeResult, type SessionTreeResult } from "../control/protocol.js";
 import { AgentModelNotFoundError, AgentSettingsWriteError, AgentUnknownToolError } from "../core/agent-worker.js";
 import { configurePiNetwork } from "./configure-pi-network.js";
 import { GitBranchObserver, type GitBranchObserverPort } from "./git-branch-observer.js";
@@ -375,7 +376,12 @@ export class PiAgentAdapter {
       case "session.compact": return this.compact(request.params.operationId, request.params.customInstructions);
       case "session.reload": return this.reload(request.params.operationId);
       case "session.tree": return this.getTree();
-      case "session.navigate": return this.navigateTree(request.params.targetId, request.params);
+      case "session.navigate": return this.navigateTree(request.params.targetId, {
+        ...(request.params.summarize === undefined ? {} : { summarize: request.params.summarize }),
+        ...(request.params.customInstructions === undefined ? {} : { customInstructions: request.params.customInstructions }),
+        ...(request.params.replaceInstructions === undefined ? {} : { replaceInstructions: request.params.replaceInstructions }),
+        ...(request.params.label === undefined ? {} : { label: request.params.label }),
+      });
       case "session.fork": return this.fork(request.params.operationId, request.params.entryId, "before", "fork");
       case "session.clone": return this.fork(request.params.operationId, request.params.entryId, "at", "clone");
     }
@@ -742,9 +748,9 @@ export class PiAgentAdapter {
     return { revision, entries };
   }
 
-  getTree(): AgentTreeSnapshot {
+  getTree(): SessionTreeResult {
     const manager = this.requireActive().session.sessionManager;
-    const nodes: AgentTreeNode[] = [];
+    const nodes: TreeNodeDto[] = [];
     const roots = manager.getTree();
     const toolCalls = collectTreeToolCalls(roots);
     const stack: Array<{ node: SessionTreeNode; parentId?: string; depth: number }> = [];
@@ -757,17 +763,21 @@ export class PiAgentAdapter {
       }
     }
     const leafId = manager.getLeafId() ?? undefined;
-    return { nodes, ...(leafId === undefined ? {} : { leafId }) };
+    return parseSessionTreeResult({ nodes, ...(leafId === undefined ? {} : { leafId }) });
   }
 
   navigateTree(targetId: string, options: AgentNavigateOptions = {}): Promise<AgentNavigateResult> {
     if (this.treeNavigation) return Promise.reject(new Error("A session tree navigation is already active"));
     const navigation = this.serialize(async () => {
-      const result = await this.requireActive().session.navigateTree(targetId, options);
+      const session = this.requireActive().session;
+      if (!session.sessionManager.getEntry(targetId)) throw new AgentInvalidTreeTargetError("Navigation target does not belong to the current session tree");
+      const result = await session.navigateTree(targetId, options);
+      const leafId = session.sessionManager.getLeafId() ?? undefined;
       return {
         cancelled: result.cancelled,
         ...(result.aborted === undefined ? {} : { aborted: result.aborted }),
         ...(result.editorText === undefined ? {} : { editorText: safeSelectedText(result.editorText) }),
+        ...(result.cancelled || leafId === undefined ? {} : { leafId }),
         summaryCreated: result.summaryEntry !== undefined,
       };
     });
@@ -893,14 +903,14 @@ export class PiAgentAdapter {
     return this.serialize(() => {
       const binding = this.requireActive();
       if (kind === "clone" && binding.session.sessionManager.getLeafId() !== entryId) {
-        throw new Error("Clone entry must be the current session leaf");
+        throw new AgentInvalidTreeTargetError("Clone entry must be the current session leaf");
       }
       if (position === "before") {
         const selected = binding.session.getUserMessagesForForking().find((entry) => entry.entryId === entryId);
-        if (!selected) throw new Error("Fork-before requires a user message entry");
+        if (!selected) throw new AgentInvalidTreeTargetError("Fork target must be a user message in the current session tree");
         safeSelectedText(selected.text);
       } else if (!binding.session.sessionManager.getEntry(entryId)) {
-        throw new Error("Fork entry does not belong to the current session tree");
+        throw new AgentInvalidTreeTargetError("Clone entry does not belong to the current session tree");
       }
       return this.replace(operationId, kind, async () => {
         const result = await this.options.runtime.fork(entryId, { position });
@@ -2166,11 +2176,10 @@ function projectTreeNode(
   node: SessionTreeNode,
   parentId: string | undefined,
   depth: number,
-  output: AgentTreeNode[],
+  output: TreeNodeDto[],
   toolCalls: ReadonlyMap<string, TreeToolCall>,
   attachmentContextKey: Uint8Array,
 ): void {
-  if (output.length >= 100_000) throw new Error("Pi session tree exceeds 100000 entries");
   const entry = node.entry;
   const kind = entry.type;
   if (!["message", "thinking_level_change", "model_change", "compaction", "branch_summary", "custom", "custom_message", "label", "session_info"].includes(kind)) {
@@ -2184,12 +2193,11 @@ function projectTreeNode(
     entryId: entry.id,
     ...(parentId === undefined ? {} : { parentId }),
     depth,
-    kind: kind as AgentTreeNode["kind"],
+    kind: kind as TreeNodeDto["kind"],
     ...(role === undefined ? {} : { role }),
     displayClass,
     ...(state === undefined ? {} : { state }),
     ...(node.label === undefined ? {} : { label: treeLine(node.label, 256, "Session label omitted") }),
-    ...(node.labelTimestamp === undefined ? {} : { labelTimestamp: node.labelTimestamp }),
     timestamp: entry.timestamp,
     summary: projectTreeSummary(entry, toolCalls, attachmentContextKey),
     hasChildren: node.children.length > 0,
@@ -2232,7 +2240,7 @@ function treeMessageRole(value: unknown): "user" | "assistant" | "tool" | "syste
   return "system";
 }
 
-function treeMessageState(message: Record<string, unknown>): AgentTreeNode["state"] {
+function treeMessageState(message: Record<string, unknown>): TreeNodeDto["state"] {
   if (message.role === "assistant") {
     if (message.stopReason === "aborted") return "aborted";
     if (message.stopReason === "error" || typeof message.errorMessage === "string") return "error";
@@ -2243,9 +2251,9 @@ function treeMessageState(message: Record<string, unknown>): AgentTreeNode["stat
 
 function treeDisplayClass(
   entry: SessionEntry,
-  role: AgentTreeNode["role"],
-  state: AgentTreeNode["state"],
-): NonNullable<AgentTreeNode["displayClass"]> {
+  role: TreeNodeDto["role"],
+  state: TreeNodeDto["state"],
+): TreeNodeDto["displayClass"] {
   if (entry.type === "message") {
     const message = entry.message as unknown as Record<string, unknown>;
     if (role === "tool") return "tool";

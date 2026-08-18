@@ -40,6 +40,8 @@ import {
   parseThinkingConfigurationResult,
   parseControlEventEnvelope,
   parseControlResponse,
+  parseResponseTransferFrame,
+  decodeResponseTransfer,
   parseCreateResult,
   parseEnsureResult,
   parseInstanceReadResult,
@@ -365,10 +367,10 @@ export class DockClient {
   nameSession(instanceId:string,name:string,operationId=this.createRequestId()):Promise<SessionNameResult>{return this.request("session.name",{operationId,instanceId,name},"session.commands.v1",parseSessionNameResult);}
   compactSession(instanceId:string,customInstructions?:string,operationId=this.createRequestId()):Promise<SessionCompactionResult>{return this.request("session.compact",{operationId,instanceId,customInstructions},"session.commands.v1",parseSessionCompactionResult,undefined,this.longMutationTimeoutMs);}
   reloadSession(instanceId:string,operationId=this.createRequestId()):Promise<SessionReloadResult>{return this.request("session.reload",{operationId,instanceId},["session.commands.v1","projection.completeness.v1"],parseSessionReloadResult,undefined,this.longMutationTimeoutMs);}
-  tree(instanceId:string,treeRevision?:string,afterEntryId?:string,limit=200):Promise<SessionTreeResult>{return this.request("session.tree",{instanceId,treeRevision,afterEntryId,limit},"session.tree.v1",parseSessionTreeResult);}
-  navigateSession(instanceId:string,targetId:string,options:{summarize?:boolean;customInstructions?:string;replaceInstructions?:boolean;label?:string}={},operationId=this.createRequestId()):Promise<SessionNavigateResult>{return this.request("session.navigate",{operationId,instanceId,targetId,...options},"session.tree.v1",parseSessionNavigateResult);}
-  forkSession(instanceId:string,entryId:string,operationId=this.createRequestId()):Promise<SessionForkResult>{return this.request("session.fork",{operationId,instanceId,entryId},"session.tree.v1",parseSessionForkResult);}
-  cloneSession(instanceId:string,entryId:string,operationId=this.createRequestId()):Promise<SessionCloneResult>{return this.request("session.clone",{operationId,instanceId,entryId},"session.tree.v1",parseSessionCloneResult);}
+  tree(instanceId:string):Promise<SessionTreeResult>{return this.request("session.tree",{instanceId},"session.tree.v2",parseSessionTreeResult);}
+  navigateSession(instanceId:string,targetId:string,options:{summarize?:boolean;customInstructions?:string;replaceInstructions?:boolean;label?:string}={},operationId=this.createRequestId()):Promise<SessionNavigateResult>{return this.request("session.navigate",{operationId,instanceId,targetId,...options},"session.tree.v2",parseSessionNavigateResult);}
+  forkSession(instanceId:string,entryId:string,operationId=this.createRequestId()):Promise<SessionForkResult>{return this.request("session.fork",{operationId,instanceId,entryId},"session.tree.v2",parseSessionForkResult);}
+  cloneSession(instanceId:string,entryId:string,operationId=this.createRequestId()):Promise<SessionCloneResult>{return this.request("session.clone",{operationId,instanceId,entryId},"session.tree.v2",parseSessionCloneResult);}
   stop(instanceId:string,operationId=this.createRequestId()):Promise<StopResult>{return this.request("instance.stop",{operationId,instanceId},"instance.catalog",parseStopResult,undefined,this.longMutationTimeoutMs);}
 
   async streamEvents(instanceId:string,options:{since?:EventCursor;onEvent:(event:DockEvent)=>void;requireTuiProjection?:boolean;conversationBootstrap?:boolean}):Promise<EventSubscription>{
@@ -475,10 +477,13 @@ export class DockClient {
       let hostEpoch="";
       let settled=false;
       let requestSent=false;
-      const timeout=setTimeout(()=>{
+      let responseTransfer:{count:number;chunks:string[]}|undefined;
+      let timeout:NodeJS.Timeout;
+      const onTimeout=():void=>{
         if(requestSent&&operationId) finish(new ControlClientError("effect_unknown",`Operation ${operationId} timed out after it was sent; query current state before retrying`,operationId));
         else finish(new ControlClientError("timeout",`Control request timed out after ${requestTimeoutMs}ms`));
-      },requestTimeoutMs);
+      };
+      const resetTimeout=():void=>{clearTimeout(timeout);timeout=setTimeout(onTimeout,requestTimeoutMs);};
       const finish=(error?:unknown,result?:T):void=>{
         if(settled)return;
         settled=true;
@@ -492,6 +497,7 @@ export class DockClient {
           finish(new ControlClientError("effect_unknown",`Transport failed after operation ${operationId} was sent; query current state before retrying`,operationId));
         }else finish(error);
       };
+      timeout=setTimeout(onTimeout,requestTimeoutMs);
       const consume=(line:string):void=>{
         if(!line)return;
         let raw:unknown;
@@ -509,7 +515,23 @@ export class DockClient {
             requestSent=true;
             return;
           }
+          if(raw!==null&&typeof raw==="object"&&(raw as {kind?:unknown}).kind==="response_transfer"){
+            if(type!=="session.tree")throw new ProtocolValidationError("invalid_response","This request cannot use response transfer framing");
+            const frame=parseResponseTransferFrame(raw,requestId,hostEpoch);
+            resetTimeout();
+            if(responseTransfer===undefined){
+              if(frame.index!==0)throw new ProtocolValidationError("invalid_response","Response transfer did not begin with chunk zero");
+              responseTransfer={count:frame.count,chunks:[]};
+            }
+            if(frame.count!==responseTransfer.count||frame.index!==responseTransfer.chunks.length)throw new ProtocolValidationError("invalid_response","Response transfer chunks are inconsistent or out of order");
+            responseTransfer.chunks.push(frame.data);
+            if(responseTransfer.chunks.length<responseTransfer.count)return;
+            raw=decodeResponseTransfer(responseTransfer.chunks);
+          }else if(responseTransfer!==undefined){
+            throw new ProtocolValidationError("invalid_response","Response transfer ended before all chunks arrived");
+          }
           const response=parseControlResponse(raw,requestId,hostEpoch);
+          if(responseTransfer!==undefined&&!response.ok)throw new ProtocolValidationError("invalid_response","Transferred responses must be successful");
           if(!response.ok)finish(new ControlClientError(response.error.code,response.error.message,operationId,response.error.details));
           else {
             const result=parse(response.result);
@@ -595,10 +617,6 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
     const requested=(params as Extract<ControlRequest,{type:"session.inventory"}>["params"]);
     const inventory=record as unknown as SessionInventoryResult;
     if(inventory.query.cwd!==requested.cwd||inventory.query.scope!==requested.scope)throw new ProtocolValidationError("invalid_response","Session inventory query does not match the request");
-  }
-  if(type==="session.tree"){
-    const requested=(params as Extract<ControlRequest,{type:"session.tree"}>["params"]);
-    if(requested.treeRevision!==undefined&&record.treeRevision!==requested.treeRevision)throw new ProtocolValidationError("invalid_response","Tree continuation revision does not match the request");
   }
   if(type==="command.catalog"&&typeof (params as Extract<ControlRequest,{type:"command.catalog"}>["params"]).prefix==="string"){
     const prefix=(params as Extract<ControlRequest,{type:"command.catalog"}>["params"]).prefix as string;

@@ -3,10 +3,9 @@ import {
   InstanceAdmissionPendingError,
   InstanceBusyError,
   InstanceNotActiveError,
-  InvalidTreeCursorError,
   RuntimeEffectUnknownError,
 } from "../core/managed-instance.js";
-import { AgentCompactionKnownFailureError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
+import { AgentCompactionKnownFailureError, AgentInvalidTreeTargetError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
 import type { DockRegistry } from "./dock-registry.js";
 import type { OperationLedger } from "./operation-ledger.js";
 import type { ControlRequest } from "./protocol.js";
@@ -130,7 +129,7 @@ async function runtimeMutation<T>(operationId: string, mutate: () => Promise<T>)
       || error instanceof InstanceNotActiveError
       || error instanceof InstanceBusyError
       || error instanceof InstanceAdmissionPendingError
-      || error instanceof InvalidTreeCursorError
+      || error instanceof AgentInvalidTreeTargetError
     ) throw error;
     throw new RuntimeEffectUnknownError(operationId, error);
   }

@@ -21,7 +21,7 @@ Protocol V2 使用 UTF-8 JSONL；transport 是私有 Unix socket，或已配对�
 
 1. 发送 hello，协商版本和 capabilities；
 2. hello 成功后发送一个业务 request；
-3. 普通 request 收到一个 response 后结束；
+3. 普通 request 收到一个 response 后结束；`session.tree.v2` 成功时先透明重组有界 `response_transfer` records，再得到这一个逻辑 response；
 4. `attachment.upload` 在一个 header request 后发送专用多记录 body，再收到一个 terminal response；
 5. `instance.follow` 和 `interaction.control` 在初始 response 后继续接收 event。
 
@@ -40,6 +40,10 @@ Protocol V2 使用 UTF-8 JSONL；transport 是私有 Unix socket，或已配对�
 ```
 
 客户端必须校验 response 的 request ID、Protocol version、Host epoch 和自己使用的已知字段。Client→Host 的 hello/request 是 closed shape；Host→Client 的 response/event 可以增加未知可选字段，客户端应忽略它们，而不是让连接失败。字段删除、既有字段类型或语义改变、以及未知 event type 仍是不兼容变化。单条 JSONL 有 frame 上限；大型 conversation 通过分页和 chunk 传输，不能把 frame 上限误当成内容上限。
+
+`session.tree.v2` 请求固定为 `{instanceId}`，一次逻辑调用返回当前 Pi Session Tree 的完整 compact `{nodes, leafId?}`。compact node 只有 ID/parent/depth、kind/role/displayClass/state、可选 label/timestamp、summary 和 hasChildren；绝不包含 raw Session JSONL、完整 message 或 tool content。客户端不发送 revision、cursor 或 limit，也不拼接 Tree pages。
+
+成功的 Tree response 在 wire 上始终由一组 `response_transfer` JSONL records 承载，即使内容只需一块。record 包含 `version:2 + requestId + hostEpoch + zero-based index + stable count + canonical-base64 data`；data 是正常成功 `ControlResponse` UTF-8 bytes 的 opaque slice。transport 必须验证 identity、连续顺序、count、canonical base64、decoded chunk bound 和 aggregate bound，全部收齐后再解析原 `ControlResponse`；每个合法 frame 刷新读取 idle deadline，断线、超时或缺块都不能返回 partial Tree。错误仍是普通 `response`，其他 request 也不能使用该 framing。Tree 打开后若目标已随 Session 变化而消失，操作返回 `invalid_tree_target`，客户端应重新打开 Tree 让用户选择，而不是沿用旧节点。该 invisible bounded framing 在 Unix socket 与 mTLS 上一致，只是 Tree success 的 transport 细节，不是通用 streaming RPC，业务/UI 层不应看到 frame。
 
 Wire shape、capability 名称和 bounds 的代码真相在：
 

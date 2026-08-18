@@ -37,6 +37,8 @@ Work 的主要对象是一个已打开的 Dock instance。它负责：
 
 Work 使用可流动的 main buffer 和终端原生 scrollback/selection。Detach 只断开客户端，不停止 Host 中的 instance。
 
+Pi Session Tree UI 只做一次逻辑 `session.tree.v2` 调用并得到完整 compact snapshot。搜索、过滤、active-first 顺序和折叠都在这份完整拓扑上本地完成；TUI 不收集业务分页、不维护 revision，也没有 partial/capped Tree 状态。大型 response 的 bounded transport framing 由 DockClient 透明重组，UI 看不到 frame。
+
 ## 状态归属
 
 Host/Worker 提供的事实包括：

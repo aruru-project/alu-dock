@@ -74,6 +74,13 @@ export class AgentConversationCursorError extends Error {
   }
 }
 
+export class AgentInvalidTreeTargetError extends Error {
+  constructor(message = "Session tree target is no longer available") {
+    super(message);
+    this.name = "AgentInvalidTreeTargetError";
+  }
+}
+
 export type AgentConversationContentChunk =
   | { blockIndex: number; type: "text" | "thinking"; text: string; offset: number; blockComplete: boolean }
   | { blockIndex: number; type: "image"; mimeType: string; data: string; offset: number; blockComplete: boolean }
@@ -124,38 +131,6 @@ export interface AgentForkResult extends AgentReplacementResult {
   selectedText?: string;
 }
 
-export type AgentTreeNodeKind =
-  | "message"
-  | "thinking_level_change"
-  | "model_change"
-  | "compaction"
-  | "branch_summary"
-  | "custom"
-  | "custom_message"
-  | "label"
-  | "session_info";
-
-export interface AgentTreeNode {
-  entryId: string;
-  parentId?: string;
-  depth: number;
-  kind: AgentTreeNodeKind;
-  role?: "user" | "assistant" | "tool" | "system";
-  displayClass?: "content" | "tool" | "metadata" | "structural";
-  state?: "error" | "aborted";
-  label?: string;
-  /** Included only in Host-side revision material; never projected to clients. */
-  labelTimestamp?: string;
-  timestamp?: string;
-  summary: string;
-  hasChildren: boolean;
-}
-
-export interface AgentTreeSnapshot {
-  nodes: AgentTreeNode[];
-  leafId?: string;
-}
-
 export interface AgentNavigateOptions {
   summarize?: boolean;
   customInstructions?: string;
@@ -167,6 +142,7 @@ export interface AgentNavigateResult {
   cancelled: boolean;
   aborted?: boolean;
   editorText?: string;
+  leafId?: string;
   summaryCreated: boolean;
 }
 

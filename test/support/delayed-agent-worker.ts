@@ -19,17 +19,16 @@ import type {
   AgentSessionInfo,
   AgentSessionMetrics,
   ThinkingLevel,
-  AgentTreeNode,
-  AgentTreeSnapshot,
 } from "../../src/core/agent-worker.js";
-import { AgentConversationCursorError, AgentSettingsWriteError } from "../../src/core/agent-worker.js";
+import { AgentConversationCursorError, AgentInvalidTreeTargetError, AgentSettingsWriteError } from "../../src/core/agent-worker.js";
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, SettingValueMap, ToolDto } from "../../src/core/config-projection.js";
 // SETTING_DEFINITIONS/SETTING_KEYS are the frozen Dock protocol setting schema (protocol.ts imports the
 // same constants and the client parser rejects any worker that omits a canonical key), not Pi internals.
 // Nothing else from src may be imported here: this fake must not reuse production algorithms or
 // projections, or tests stop proving anything about the real adapter.
 import { SETTING_DEFINITIONS, SETTING_KEYS } from "../../src/core/config-projection.js";
-import type { AttachmentDto, ConversationFrame, ImagePathDto } from "../../src/core/instance-dto.js";
+import type { AttachmentDto, ConversationFrame, ImagePathDto, TreeNodeDto } from "../../src/core/instance-dto.js";
+import type { SessionTreeResult } from "../../src/control/protocol.js";
 
 class Deferred<T> {
   readonly promise: Promise<T>;
@@ -75,7 +74,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   conversationRevision = "fixture-conversation-revision";
   readonly conversationContent = new Map<string, AgentConversationContentChunk[]>();
   publishedFileRead?: (fileRef: string, offset?: number) => Promise<unknown>;
-  treeNodes: AgentTreeNode[] = [];
+  treeNodes: TreeNodeDto[] = [];
   treeLeafId: string | undefined;
   treeReadCalls = 0;
   navigationResult: AgentNavigateResult | undefined;
@@ -332,7 +331,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     };
   }
 
-  getTree(): AgentTreeSnapshot {
+  getTree(): SessionTreeResult {
     this.treeReadCalls += 1;
     return {
       nodes: structuredClone(this.treeNodes),
@@ -343,7 +342,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   async navigateTree(targetId: string, _options: AgentNavigateOptions = {}): Promise<AgentNavigateResult> {
     this.sessionMutationCalls.navigate += 1;
     const target = this.treeNodes.find((node) => node.entryId === targetId);
-    if (!target) throw new Error(`Unknown tree entry: ${targetId}`);
+    if (!target) throw new AgentInvalidTreeTargetError(`Unknown tree entry: ${targetId}`);
     if (this.navigationResult) return structuredClone(this.navigationResult);
     const block = this.nextNavigationBlock;
     this.nextNavigationBlock = undefined;
@@ -357,6 +356,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     return {
       cancelled: false,
       ...(target.role === "user" ? { editorText: target.summary } : {}),
+      ...(this.treeLeafId === undefined ? {} : { leafId: this.treeLeafId }),
       summaryCreated: false,
     };
   }
@@ -437,8 +437,8 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   async fork(operationId: string, entryId: string, position: "before" | "at", kind: "fork" | "clone"): Promise<{ cancelled: boolean; selectedText?: string }> {
     this.sessionMutationCalls[kind] += 1;
     const target = this.treeNodes.find((node) => node.entryId === entryId);
-    if (!target || (position === "before" && target.role !== "user")) throw new Error("Invalid fixture fork entry");
-    if (kind === "clone" && this.treeLeafId !== entryId) throw new Error("Clone entry must be the current session leaf");
+    if (!target || (position === "before" && target.role !== "user")) throw new AgentInvalidTreeTargetError("Invalid fixture fork entry");
+    if (kind === "clone" && this.treeLeafId !== entryId) throw new AgentInvalidTreeTargetError("Clone entry must be the current session leaf");
     const previousSessionFile = this.sessionFile;
     this.sessionId = `fixture-${kind}-${this.sessionMutationCalls[kind]}`;
     this.sessionFile = `/tmp/${this.sessionId}.jsonl`;

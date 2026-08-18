@@ -49,7 +49,7 @@ Transport admission 完成以后，两条路径的 Protocol V2 行为一致：
 
 1. 客户端先发送 hello，并协商版本与 capabilities；
 2. hello 成功后发送业务 request；
-3. 普通 request 返回一个 response；`attachment.upload` 是唯一的有界多记录 request body，完成后仍只返回一个 terminal response；
+3. 普通 request 返回一个 response；`session.tree.v2` 成功时改用透明的有界 response-transfer records 重组同一个逻辑 response；`attachment.upload` 是唯一的有界多记录 request body，完成后仍只返回一个 terminal response；
 4. `instance.read` 读取当前权威视图，`instance.follow` 在初始 response 后持续接收 event；
 5. Extension UI 操作使用独立连接，并与读取、实时跟随分别恢复。
 
@@ -64,6 +64,10 @@ TLS peer 必须在握手时提供 X.509 客户端证书并证明持有私钥。H
 Remote Settings、attachment storage directory、开启/关闭配对窗口、待配对请求、PIN 确认、trusted device 列表和吊销是本机 `aludock` Hub 的 service-management surface。它们不属于 Protocol V2，不通过 Unix socket 或 TLS 暴露，也不在 DockClient、CLI JSON API 或额外 admin socket 中提供。远程客户端只能使用临时 pairing bootstrap 和配对后的 Protocol V2；它不能远程改变 Host 设置、开启或延长配对窗口。
 
 Client 发给 Host 的 hello/request 使用 closed JSON-safe shape，未知字段会被拒绝。Host 发给 Client 的 response/event 仍严格校验已知字段、版本、类型和边界，但 Client 必须忽略新增的未知可选字段；只有删除字段、改变既有语义或新增无法忽略的类型时才需要 capability 或协议版本。单 frame 可以有传输上限，但业务内容不能因此永久截断；大型 conversation 使用分页和 chunk 继续读取。
+
+`session.tree.v2` 专指当前 Pi Session Tree。请求只有 `{instanceId}`，一次逻辑调用返回一个完整 compact snapshot `{nodes, leafId?}`；node 只含 ID、拓扑、kind/role、展示标签、时间、摘要和 children fact，不含 Pi JSONL entry、完整 message 或 tool content。Host 不缓存、分页、revision 或解释树拓扑，只做 lifecycle、admission、generation fencing 和路由。
+
+完整 Tree response 即使只有一块，也使用 transport-only `response_transfer` records。每块是普通成功 `ControlResponse` UTF-8 序列化后的 opaque canonical-base64 byte slice；DockClient 检查同一 request/Host identity、从零连续 index、稳定 count、单块和 aggregate transport bounds，收齐后才解析原 response。缺块或越界没有 partial result。该 framing 在 Unix 与 mTLS Protocol V2 上相同，只承载成功的 `session.tree.v2` response；错误仍是一条普通 response，也不形成通用 streaming RPC。
 
 Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 TUI 或 Web 客户端重写。
 

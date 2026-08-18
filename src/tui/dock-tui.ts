@@ -41,7 +41,6 @@ import {
 import { SearchablePicker } from "./searchable-picker.js";
 import { projectSnapshot } from "./snapshot-projection.js";
 import {
-  collectSessionTree,
   isTreeFilterMode,
   parseTreeNavigationCommand,
   treePickerItems,
@@ -1146,8 +1145,8 @@ export async function runDockTui(
     finally { restoreEditorSubmit(); tui.setFocus(editor); tui.requestRender(); }
   }
 
-  async function loadSessionTree(): Promise<{ nodes: TreeNodeDto[]; leafId?: string; total: number; revision: string; capped: boolean }> {
-    return collectSessionTree((revision, cursor, limit) => client.tree(instance.id, revision, cursor, limit));
+  async function loadSessionTree(): Promise<{ nodes: TreeNodeDto[]; leafId?: string }> {
+    return client.tree(instance.id);
   }
 
   async function chooseTreeListNode(
@@ -1181,9 +1180,7 @@ export async function runDockTui(
       picker.replaceItems(treePickerItems(candidates, tree.leafId, tree.nodes));
       picker.setSelectedValue(tree.leafId);
       picker.setEmptyText("The current Pi session tree has no matching entries");
-      picker.setBody(tree.capped
-        ? `Loaded ${tree.nodes.length.toLocaleString()} of ${tree.total.toLocaleString()} entries`
-        : undefined);
+      picker.setBody(undefined);
     }).catch(() => {
       if (!active) return;
       picker.setEmptyText("Session tree unavailable");
@@ -1371,7 +1368,7 @@ export async function runDockTui(
     showStatus("finding current leaf");
     tui.requestRender();
     try {
-      const tree = await client.tree(instance.id, undefined, undefined, 1);
+      const tree = await client.tree(instance.id);
       if (!tree.leafId) {
         conversation.addNotice("The current session has no leaf to clone.", true);
         showStatus("clone unavailable");
@@ -2266,6 +2263,8 @@ function humanControlErrorText(error: ControlClientError): string {
       return "The Dock's work list changed while reading it. Run the command again.";
     case "invalid_cursor":
       return "Couldn't pick up reading where this view left off. Close and reopen it to reload.";
+    case "invalid_tree_target":
+      return "That point is no longer available in this session. Reopen the tree and choose another point.";
     case "stale_runtime_generation":
       return "This work was reloaded since this window last looked. Try the command again.";
     case "admission_pending":
