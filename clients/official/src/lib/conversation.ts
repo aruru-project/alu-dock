@@ -5,12 +5,15 @@ import type {
   ConversationItem,
   ConversationProcessItem,
   ConversationRecord,
+  PublishedFileDto,
 } from './types'
 type ToolItem = Extract<ConversationProcessItem, { kind: 'tool' }>
+type ImageItem = Extract<ConversationProcessItem, { kind: 'image' }>
 interface ToolProjection {
   item: ToolItem
   argsText?: string
   outputText?: string
+  image?: ImageItem
   omitted: Set<string>
 }
 interface RecordGroup {
@@ -18,11 +21,17 @@ interface RecordGroup {
   records: ConversationRecord[]
 }
 
-export function projectConversation(bootstrap: ConversationBootstrap): ConversationItem[] {
+export interface ConversationProjectionOptions {
+  compact?: boolean
+}
+
+export function projectConversation(bootstrap: ConversationBootstrap, options: ConversationProjectionOptions = {}): ConversationItem[] {
+  const processIsVisible = options.compact !== true
   const items = projectRecordGroups(bootstrap.records)
   const messageItems = new Map<string, ConversationItem>()
   const toolItems = new Map<string, ToolProjection>()
   const toolOwners = new Map<string, string>()
+  const imageItems = new Map<string, ImageItem>()
   let activityVisible = bootstrap.instance.execution === 'running'
   let activityId = `activity-${bootstrap.instance.id}`
 
@@ -49,10 +58,10 @@ export function projectConversation(bootstrap: ConversationBootstrap): Conversat
         break
       }
       case 'message.delta': {
-        activityVisible = false
         const messageId = String(data.messageId || `message-${event.sequence}`)
         const groupId = `live-message:${messageId}`
         const block = data.block === 'thinking' ? 'thinking' : 'text'
+        if (processIsVisible || block === 'text') activityVisible = false
         const delta = String(data.delta || '')
         let item = messageItems.get(`${messageId}:${block}`)
         if (!item) {
@@ -82,17 +91,19 @@ export function projectConversation(bootstrap: ConversationBootstrap): Conversat
           break
         }
 
-        activityVisible = false
         if (data.role === 'tool') {
-          for (const block of blocks) applyLiveToolBlock(block, `live-tool-staging`, toolItems, toolOwners, items)
+          if (processIsVisible || blocks.some(compactVisibleBlock)) activityVisible = false
+          blocks.forEach((block, index) => applyLiveContentBlock(block, `live-tool-staging`, `live-${messageId}-content-${index}`, toolItems, toolOwners, imageItems, items))
           break
         }
 
         if (data.role !== 'assistant') {
+          if (processIsVisible || Boolean(data.error)) activityVisible = false
           if (text) items.push({ id: `live-${messageId}`, kind: 'notice', tone: data.error ? 'error' : 'info', text })
           break
         }
 
+        if (processIsVisible || blocks.some(compactVisibleBlock) || Boolean(data.error)) activityVisible = false
         const groupId = `live-message:${messageId}`
         const textItem = messageItems.get(`${messageId}:text`)
         if (textItem?.kind === 'assistant') {
@@ -112,7 +123,7 @@ export function projectConversation(bootstrap: ConversationBootstrap): Conversat
           items.push(item)
           messageItems.set(`${messageId}:thinking`, item)
         }
-        for (const block of blocks) applyLiveToolBlock(block, groupId, toolItems, toolOwners, items, time)
+        blocks.forEach((block, index) => applyLiveContentBlock(block, groupId, `live-${messageId}-content-${index}`, toolItems, toolOwners, imageItems, items, time))
         if (typeof data.error === 'string' && data.error) {
           items.push({ id: `live-${messageId}-error`, kind: 'notice', groupId, tone: 'error', text: data.error, groupTime: time })
         }
@@ -122,19 +133,31 @@ export function projectConversation(bootstrap: ConversationBootstrap): Conversat
       case 'tool.args_updated':
       case 'tool.output_updated':
       case 'tool.completed': {
-        activityVisible = false
         const toolCallId = String(data.toolCallId || `tool-${event.sequence}`)
         const groupId = toolOwners.get(toolCallId) || 'live-tool-staging'
         const tool = ensureTool(toolItems, items, toolCallId, String(data.toolName || 'tool'), groupId, `live-tool-${toolCallId}`)
         if (data.toolName) tool.item.name = String(data.toolName)
-        if (data.args !== undefined) tool.argsText = JSON.stringify(data.args, null, 2)
-        if (typeof data.text === 'string') tool.outputText = data.text
+        if (data.args !== undefined && tool.item.name !== 'show_image') tool.argsText = JSON.stringify(data.args, null, 2)
+        if (typeof data.text === 'string' && tool.item.name !== 'show_image') tool.outputText = data.text
         addOmitted(tool, data.omittedFields)
+        tool.item.groupTime ||= time
+        const eventContent = Array.isArray(data.content) ? (data.content as ContentBlock[]) : []
+        eventContent.forEach((block, index) => {
+          if (block.type === 'image') {
+            const image = ensureContentImage(block, `live-tool-${toolCallId}-content-${index}`, groupId, items, imageItems)
+            image.groupTime ||= time
+          }
+        })
+        const publishedFile = publishedFileFrom(data.publishedFile)
+        if (processIsVisible || eventContent.some(compactVisibleBlock) || publishedFile) activityVisible = false
+        if (publishedFile) ensurePublishedImage(tool, publishedFile, items, imageItems)
+        if (tool.item.name === 'show_image' && (typeof data.text === 'string' || publishedFile)) {
+          tool.outputText = safeShowImageOutput(Boolean(data.isError), publishedFile)
+        }
         if (event.eventType === 'tool.completed') {
           tool.item.status = data.isError ? 'error' : 'done'
           tool.item.summary = data.isError ? '工具调用失败' : '工具调用完成'
         }
-        tool.item.groupTime ||= time
         renderToolDetail(tool)
         break
       }
@@ -238,23 +261,24 @@ function projectPanel(group: RecordGroup, title: string, panelClass: string, fol
 function projectRecordContent(group: RecordGroup) {
   const parts: ConversationProcessItem[] = []
   const tools = new Map<string, ToolProjection>()
+  const images = new Map<string, ImageItem>()
   for (const record of group.records) {
-    record.content.forEach((block, index) => appendBlock(block, `${record.recordId}-${index}`, group.key, parts, tools))
+    record.content.forEach((block, index) => appendBlock(block, `${record.recordId}-${index}`, group.key, parts, tools, images))
     if (record.error) parts.push({ id: `${record.recordId}-error`, kind: 'notice', groupId: group.key, tone: 'error', text: record.error })
   }
   return parts
 }
 
-function appendBlock(block: ContentBlock, id: string, groupId: string, output: ConversationProcessItem[], tools: Map<string, ToolProjection>) {
+function appendBlock(block: ContentBlock, id: string, groupId: string, output: ConversationProcessItem[], tools: Map<string, ToolProjection>, images: Map<string, ImageItem>) {
   if (block.type === 'text') {
     output.push({ id, kind: 'assistant', groupId, text: block.text, time: '' })
   } else if (block.type === 'thinking') {
     output.push({ id, kind: 'thinking', groupId, title: '思考过程', text: block.text })
   } else if (block.type === 'image') {
-    output.push({ id, kind: 'image', groupId, mimeType: block.mimeType })
+    ensureContentImage(block, id, groupId, output, images)
   } else if (block.type === 'tool_call') {
     const tool = ensureTool(tools, output, block.toolCallId, block.toolName, groupId, id)
-    tool.argsText = JSON.stringify(block.args, null, 2)
+    if (block.toolName !== 'show_image') tool.argsText = JSON.stringify(block.args, null, 2)
     addOmitted(tool, block.omittedFields)
     renderToolDetail(tool)
   } else if (block.type === 'tool_result') {
@@ -262,35 +286,50 @@ function appendBlock(block: ContentBlock, id: string, groupId: string, output: C
     tool.item.name = block.toolName || tool.item.name
     tool.item.status = block.isError ? 'error' : 'done'
     tool.item.summary = block.isError ? '工具调用失败' : '工具调用完成'
-    tool.outputText = block.text
+    const publishedFile = publishedFileFrom(block.publishedFile)
+    tool.outputText = block.toolName === 'show_image' ? safeShowImageOutput(block.isError, publishedFile) : block.text
     addOmitted(tool, block.omittedFields)
+    if (publishedFile) ensurePublishedImage(tool, publishedFile, output, images)
     renderToolDetail(tool)
   } else if (block.type === 'omitted') {
     output.push({ id, kind: 'notice', groupId, tone: 'info', text: block.description || `${block.kind} 未载入` })
   }
 }
 
-function applyLiveToolBlock(
+function applyLiveContentBlock(
   block: ContentBlock,
   groupId: string,
+  id: string,
   tools: Map<string, ToolProjection>,
   owners: Map<string, string>,
+  images: Map<string, ImageItem>,
   output: ConversationItem[],
   groupTime = '',
 ) {
+  if (block.type === 'image') {
+    const image = ensureContentImage(block, id, groupId, output, images)
+    image.groupTime ||= groupTime
+    return
+  }
   if (block.type !== 'tool_call' && block.type !== 'tool_result') return
   owners.set(block.toolCallId, groupId)
   const tool = ensureTool(tools, output, block.toolCallId, block.toolName, groupId, `live-tool-${block.toolCallId}`)
   tool.item.groupId = groupId
   tool.item.groupTime ||= groupTime
+  if (tool.image) {
+    tool.image.groupId = groupId
+    tool.image.groupTime ||= groupTime
+  }
   if (block.type === 'tool_call') {
     tool.item.name = block.toolName || tool.item.name
-    tool.argsText = JSON.stringify(block.args, null, 2)
+    if (block.toolName !== 'show_image') tool.argsText = JSON.stringify(block.args, null, 2)
   } else {
     tool.item.name = block.toolName || tool.item.name
     tool.item.status = block.isError ? 'error' : 'done'
     tool.item.summary = block.isError ? '工具调用失败' : '工具调用完成'
-    tool.outputText = block.text
+    const publishedFile = publishedFileFrom(block.publishedFile)
+    tool.outputText = block.toolName === 'show_image' ? safeShowImageOutput(block.isError, publishedFile) : block.text
+    if (publishedFile) ensurePublishedImage(tool, publishedFile, output, images)
   }
   addOmitted(tool, block.omittedFields)
   renderToolDetail(tool)
@@ -313,6 +352,84 @@ function ensureTool(
   return tool
 }
 
+function ensureContentImage(
+  block: Extract<ContentBlock, { type: 'image' }>,
+  id: string,
+  groupId: string,
+  output: Array<ConversationItem | ConversationProcessItem>,
+  images: Map<string, ImageItem>,
+): ImageItem {
+  const contentRef = typeof block.contentRef === 'string' && block.contentRef ? block.contentRef : undefined
+  const data = typeof block.data === 'string' && block.data ? block.data : undefined
+  const imageKey = contentRef ? `conversation:${contentRef}` : `inline:${id}`
+  let item = images.get(imageKey)
+  if (!item) {
+    item = {
+      id,
+      kind: 'image',
+      groupId,
+      imageKey,
+      mimeType: block.mimeType,
+      source: contentRef
+        ? { type: 'conversation', contentRef, mimeType: block.mimeType }
+        : data
+          ? { type: 'inline', data, mimeType: block.mimeType }
+          : undefined,
+    }
+    images.set(imageKey, item)
+    output.push(item)
+  } else {
+    item.groupId = groupId
+  }
+  return item
+}
+
+function ensurePublishedImage(
+  tool: ToolProjection,
+  file: PublishedFileDto,
+  output: Array<ConversationItem | ConversationProcessItem>,
+  images: Map<string, ImageItem>,
+): ImageItem {
+  const imageKey = `published:${file.fileRef}`
+  let item = images.get(imageKey)
+  if (!item) {
+    item = {
+      id: `${tool.item.id}-image`,
+      kind: 'image',
+      groupId: tool.item.groupId,
+      imageKey,
+      mimeType: file.mediaType || '',
+      name: file.name,
+      sizeBytes: file.sizeBytes,
+      source: { type: 'published', file },
+      groupTime: tool.item.groupTime,
+    }
+    images.set(imageKey, item)
+    output.push(item)
+  } else {
+    item.groupId = tool.item.groupId
+    item.groupTime ||= tool.item.groupTime
+  }
+  tool.image = item
+  return item
+}
+
+function safeShowImageOutput(isError: boolean, publishedFile?: PublishedFileDto) {
+  if (isError) return '图片没有成功发布。'
+  return publishedFile ? '图片结果已生成。' : '这张图片已不可用，请让阿露重新发布。'
+}
+
+function publishedFileFrom(value: unknown): PublishedFileDto | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const file = value as Partial<PublishedFileDto>
+  if (file.presentation !== 'image'
+    || typeof file.fileRef !== 'string' || !file.fileRef || file.fileRef.length > 128
+    || typeof file.name !== 'string' || !file.name || file.name.length > 1024
+    || !Number.isSafeInteger(file.sizeBytes) || Number(file.sizeBytes) < 1 || Number(file.sizeBytes) > 512 * 1024 * 1024
+    || (file.mediaType !== undefined && (typeof file.mediaType !== 'string' || !file.mediaType || file.mediaType.length > 256))) return undefined
+  return file as PublishedFileDto
+}
+
 function addOmitted(tool: ToolProjection, value: unknown) {
   if (!Array.isArray(value)) return
   for (const field of value) if (typeof field === 'string' && field) tool.omitted.add(field)
@@ -324,6 +441,12 @@ function renderToolDetail(tool: ToolProjection) {
   if (tool.outputText !== undefined) sections.push(`结果\n${tool.outputText}`)
   if (tool.omitted.size) sections.push(`未载入内容\n${[...tool.omitted].join('\n')}`)
   tool.item.detail = sections.join('\n\n')
+}
+
+function compactVisibleBlock(block: ContentBlock) {
+  return (block.type === 'text' && Boolean(block.text))
+    || block.type === 'image'
+    || (block.type === 'tool_result' && Boolean(publishedFileFrom(block.publishedFile)))
 }
 
 function blockText(blocks: ContentBlock[], type: 'text' | 'thinking') {

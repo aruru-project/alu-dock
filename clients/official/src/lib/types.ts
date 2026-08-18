@@ -92,6 +92,7 @@ export interface HostContext {
 export interface HostCatalogEntry {
   hostId: string
   displayName: string
+  deviceName: string
   endpointSummary: string
   addedAt: string
   profile: HostConnectionProfile
@@ -156,11 +157,19 @@ export interface WorkspacePage {
   truncated: boolean
 }
 
+export interface PublishedFileDto {
+  presentation: 'image'
+  fileRef: string
+  name: string
+  sizeBytes: number
+  mediaType?: string
+}
+
 export type ContentBlock =
   | { type: 'text' | 'thinking'; text: string }
-  | { type: 'image'; mimeType: string }
+  | { type: 'image'; mimeType: string; contentRef?: string; data?: string }
   | { type: 'tool_call'; toolCallId: string; toolName: string; args: unknown; omittedFields?: string[] }
-  | { type: 'tool_result'; toolCallId: string; toolName: string; text: string; isError: boolean; omittedFields?: string[] }
+  | { type: 'tool_result'; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; omittedFields?: string[] }
   | { type: 'omitted'; kind: string; description: string }
 
 export interface AttachmentDto {
@@ -297,24 +306,20 @@ export interface SessionReloadResult extends ResourcesResult { instance: Work }
 export type TreeNodeKind = 'message' | 'thinking_level_change' | 'model_change' | 'compaction' | 'branch_summary' | 'custom' | 'custom_message' | 'label' | 'session_info'
 export interface TreeNode {
   entryId: string
-  parentId?: string
+  parentId?: string | null
   depth: number
   kind: TreeNodeKind
-  role?: 'user' | 'assistant' | 'tool' | 'system'
+  role?: 'user' | 'assistant' | 'tool' | 'system' | null
   displayClass: 'content' | 'tool' | 'metadata' | 'structural'
-  state?: 'error' | 'aborted'
-  label?: string
-  timestamp?: string
+  state?: 'error' | 'aborted' | null
+  label?: string | null
+  timestamp?: string | null
   summary: string
   hasChildren: boolean
 }
-export interface SessionTreePage {
-  treeRevision: string
+export interface SessionTree {
   nodes: TreeNode[]
-  leafId?: string
-  total: number
-  truncated: boolean
-  nextAfterEntryId?: string
+  leafId?: string | null
 }
 export interface SessionNavigateResult { cancelled: boolean; aborted?: boolean; editorText?: string; instance: Work }
 export interface SessionForkResult { cancelled: boolean; selectedText?: string; instance: Work }
@@ -386,11 +391,22 @@ export interface ResourcesResult {
   diagnosticsTruncated: boolean
 }
 
+export type ConversationImageSource =
+  | { type: 'conversation'; contentRef: string; mimeType: string }
+  | { type: 'inline'; data: string; mimeType: string }
+  | { type: 'published'; file: PublishedFileDto }
+
+export interface ConversationImageResource {
+  state: 'idle' | 'loading' | 'ready' | 'error'
+  url?: string
+  message?: string
+}
+
 export type ConversationProcessItem =
   | { id: string; kind: 'assistant'; groupId: string; text: string; time: string; groupTime?: string }
   | { id: string; kind: 'thinking'; groupId: string; title: string; text: string; open?: boolean; groupTime?: string }
   | { id: string; kind: 'tool'; groupId: string; name: string; summary: string; status: 'running' | 'done' | 'error'; detail?: string; groupTime?: string }
-  | { id: string; kind: 'image'; groupId: string; mimeType: string; groupTime?: string }
+  | { id: string; kind: 'image'; groupId: string; imageKey: string; mimeType: string; name?: string; sizeBytes?: number; source?: ConversationImageSource; groupTime?: string }
   | { id: string; kind: 'notice'; groupId?: string; tone: 'info' | 'warning' | 'error'; text: string; groupTime?: string }
 
 export type ConversationItem =

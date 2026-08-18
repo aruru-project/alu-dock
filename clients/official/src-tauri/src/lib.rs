@@ -1,5 +1,7 @@
 use std::{
     collections::HashMap,
+    fs::{self, OpenOptions},
+    io::Write,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -15,19 +17,25 @@ use aludock_client_core::{
     HostConnectionProfile, HostRegistry, HostRegistrySnapshot, IdentityStore, ImagePath,
     InstanceCatalog, InstanceSelector, InstanceSnapshot, InteractionMethod, InteractionRequest,
     InteractionResponse, ModelsResult, NavigateOptions, PairingProgress, PendingMessage,
-    ProjectTrustDecision, QueueDequeueResult, ReadReplay, ResourceInfo, ResourcesResult,
-    SessionCompactionResult, SessionForkResult, SessionHistoryPage, SessionNameResult,
-    SessionNavigateResult, SessionReloadResult, SessionReplacementResult, SessionScope,
-    SessionTreePage, SettingUpdate, SettingUpdateResult, SettingsResult, SourceInfo, StopResult,
-    SubmitResult, ThinkingLevel, ToolInfo, ToolsResult, WorkspacePage, delete_endpoint,
+    ProjectTrustDecision, PublishedFileDto, QueueDequeueResult, ReadReplay, ResourceInfo,
+    ResourcesResult, SessionCompactionResult, SessionForkResult, SessionHistoryPage,
+    SessionNameResult, SessionNavigateResult, SessionReloadResult, SessionReplacementResult,
+    SessionScope, SessionTree, SettingUpdate, SettingUpdateResult, SettingsResult, SourceInfo,
+    StopResult, SubmitResult, ThinkingLevel, ToolInfo, ToolsResult, WorkspacePage, delete_endpoint,
     host_info_for_profile, probe_host_endpoint, record_endpoint_test, reorder_endpoints,
     save_unverified_endpoint, save_verified_endpoint, saved_endpoint_for_test,
-    set_connection_policy as update_connection_policy, set_endpoint_enabled, validate_host_id,
+    set_connection_policy as update_connection_policy, set_endpoint_enabled, validate_device_name,
+    validate_host_id,
 };
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{Emitter, Manager};
+use tauri::{
+    Emitter, Manager,
+    ipc::{InvokeBody, Request, Response},
+};
 use tauri_plugin_dialog::DialogExt;
+
+const MAX_RENDERABLE_IMAGE_BYTES: u64 = 64 * 1_024 * 1_024;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,6 +53,7 @@ struct BootstrapPayload {
 struct HostCatalogEntry {
     host_id: String,
     display_name: String,
+    device_name: String,
     endpoint_summary: String,
     added_at: String,
     profile: HostConnectionProfile,
@@ -196,6 +205,7 @@ struct AttachmentState {
 
 struct NativeAttachment {
     path: PathBuf,
+    temporary: bool,
     host_id: String,
     selection_generation: u64,
     work_id: String,
@@ -209,6 +219,14 @@ struct NativeAttachment {
 struct AttachmentAttempt {
     id: String,
     cancellation: AttachmentUploadCancellation,
+}
+
+impl Drop for NativeAttachment {
+    fn drop(&mut self) {
+        if self.temporary {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
 }
 
 impl AttachmentState {
@@ -949,9 +967,16 @@ fn catalog_from_snapshot(
             })
             .map(|endpoint| format!("{}:{}", endpoint.endpoint.host(), endpoint.endpoint.port()))
             .unwrap_or_else(|| "没有已保存地址".into());
+        let device_name = store
+            .load_pairing()
+            .map_err(CommandError::from)?
+            .metadata
+            .device_name;
+        validate_device_name(&device_name).map_err(CommandError::from)?;
         hosts.push(HostCatalogEntry {
             host_id: record.host_id.clone(),
             display_name: profile.display_name.clone(),
+            device_name,
             endpoint_summary,
             added_at: record.added_at.clone(),
             profile,
@@ -1051,6 +1076,13 @@ fn invalidate_host_lifecycle(
             registry_revision,
         },
     );
+}
+
+#[tauri::command]
+fn system_device_name() -> Option<String> {
+    let name = hostname::get().ok()?.into_string().ok()?;
+    let name = name.trim().to_owned();
+    validate_device_name(&name).ok().map(|_| name)
 }
 
 #[tauri::command]
@@ -1686,6 +1718,112 @@ async fn conversation_history(
         instance: page.instance,
         host_epoch,
     })
+}
+
+#[tauri::command]
+async fn conversation_image(
+    runtime: tauri::State<'_, HostRuntimeState>,
+    host_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    content_ref: String,
+    mime_type: String,
+) -> Result<Response, CommandError> {
+    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let image = dock_client(&store)?
+        .read_conversation_image(&instance_id, &content_ref, &mime_type)
+        .await
+        .map_err(CommandError::from)?;
+    resolve_host(&runtime, &host_id, selection_generation)?;
+    if image.host_epoch != expected_host_epoch
+        || image.runtime_generation != expected_runtime_generation
+        || image.mime_type != mime_type
+    {
+        return Err(CommandError::from(ClientError::Protocol(
+            "conversation image belonged to an obsolete Work state".into(),
+        )));
+    }
+    validate_renderable_image(&image.bytes, Some(&mime_type))?;
+    Ok(Response::new(image.bytes))
+}
+
+#[tauri::command]
+async fn published_image(
+    runtime: tauri::State<'_, HostRuntimeState>,
+    host_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    file: PublishedFileDto,
+) -> Result<Response, CommandError> {
+    if file.size_bytes > MAX_RENDERABLE_IMAGE_BYTES {
+        return Err(image_error(
+            "image_too_large",
+            "这张图片太大，当前设备无法安全预览。",
+        ));
+    }
+    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let image = dock_client(&store)?
+        .read_published_file(&instance_id, &file)
+        .await
+        .map_err(CommandError::from)?;
+    resolve_host(&runtime, &host_id, selection_generation)?;
+    if image.host_epoch != expected_host_epoch
+        || image.runtime_generation != expected_runtime_generation
+        || image.file != file
+    {
+        return Err(CommandError::from(ClientError::Protocol(
+            "published image belonged to an obsolete Work state".into(),
+        )));
+    }
+    validate_renderable_image(&image.bytes, file.media_type.as_deref())?;
+    Ok(Response::new(image.bytes))
+}
+
+fn validate_renderable_image(
+    bytes: &[u8],
+    declared_mime_type: Option<&str>,
+) -> Result<(), CommandError> {
+    let detected = raster_image_mime_type(bytes).ok_or_else(|| {
+        image_error(
+            "unsupported_image",
+            "图片内容不是可安全显示的 PNG、JPEG、GIF 或 WebP 格式。",
+        )
+    })?;
+    if declared_mime_type.is_some_and(|value| value != detected) {
+        return Err(image_error(
+            "unsupported_image",
+            "图片标注的格式与实际内容不一致，未进行显示。",
+        ));
+    }
+    Ok(())
+}
+
+fn raster_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else {
+        None
+    }
+}
+
+fn image_error(code: &str, message: &str) -> CommandError {
+    CommandError {
+        code: code.into(),
+        message: message.into(),
+        details: None,
+        outcome_unknown: false,
+        operation_id: None,
+    }
 }
 
 fn project_pending_message(item: PendingMessage) -> ProjectedQueueItem {
@@ -2372,6 +2510,153 @@ fn ensure_attachment_scope(
 
 type PreparedAttachment = (String, SelectedAttachment, NativeAttachment);
 
+#[allow(clippy::too_many_arguments)]
+fn prepare_native_attachment(
+    path: PathBuf,
+    temporary: bool,
+    host_id: String,
+    selection_generation: u64,
+    work_id: String,
+    name: String,
+    size_bytes: u64,
+    media_type: Option<String>,
+) -> PreparedAttachment {
+    let token = uuid::Uuid::new_v4().to_string();
+    (
+        token.clone(),
+        SelectedAttachment {
+            token,
+            name: name.clone(),
+            size_bytes,
+            media_type: media_type.clone(),
+        },
+        NativeAttachment {
+            path,
+            temporary,
+            host_id,
+            selection_generation,
+            work_id,
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            name,
+            size_bytes,
+            media_type,
+            active_attempt: None,
+        },
+    )
+}
+
+fn request_header(request: &Request<'_>, name: &str) -> Result<String, CommandError> {
+    request
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .ok_or_else(|| {
+            attachment_command_error(
+                "invalid_clipboard_image",
+                "无法读取粘贴图片的上下文，请重新粘贴。",
+            )
+        })
+}
+
+fn request_image_bytes(request: &Request<'_>) -> Result<Vec<u8>, CommandError> {
+    let bytes = match request.body() {
+        InvokeBody::Raw(bytes) => bytes.clone(),
+        InvokeBody::Json(Value::Array(values)) => values
+            .iter()
+            .map(|value| {
+                value
+                    .as_u64()
+                    .filter(|value| *value <= u8::MAX as u64)
+                    .map(|value| value as u8)
+                    .ok_or_else(|| {
+                        attachment_command_error(
+                            "invalid_clipboard_image",
+                            "剪贴板中的图片数据无效，请重新复制。",
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => {
+            return Err(attachment_command_error(
+                "invalid_clipboard_image",
+                "剪贴板中的图片数据无效，请重新复制。",
+            ));
+        }
+    };
+    if bytes.is_empty() || bytes.len() as u64 > MAX_RENDERABLE_IMAGE_BYTES {
+        return Err(attachment_command_error(
+            "clipboard_image_too_large",
+            "粘贴的图片过大，无法作为附件。请改用附件按钮选择原文件。",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn prepare_clipboard_image(
+    bytes: Vec<u8>,
+    host_id: String,
+    selection_generation: u64,
+    work_id: String,
+    image_index: usize,
+) -> Result<PreparedAttachment, CommandError> {
+    let media_type = raster_image_mime_type(&bytes).ok_or_else(|| {
+        attachment_command_error(
+            "unsupported_clipboard_image",
+            "剪贴板图片不是可用的 PNG、JPEG、GIF 或 WebP 格式。",
+        )
+    })?;
+    let extension = match media_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => unreachable!(),
+    };
+    let name = if image_index <= 1 {
+        format!("粘贴的图片.{extension}")
+    } else {
+        format!("粘贴的图片-{image_index}.{extension}")
+    };
+    let path = std::env::temp_dir().join(format!(
+        "aludock-client-clipboard-{}.{}",
+        uuid::Uuid::new_v4(),
+        extension
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path).map_err(|_| {
+        attachment_command_error(
+            "clipboard_image_unavailable",
+            "无法暂存粘贴的图片，请重试或使用附件按钮。",
+        )
+    })?;
+    if file.write_all(&bytes).and_then(|_| file.flush()).is_err() {
+        let _ = fs::remove_file(&path);
+        return Err(attachment_command_error(
+            "clipboard_image_unavailable",
+            "无法暂存粘贴的图片，请重试或使用附件按钮。",
+        ));
+    }
+    drop(file);
+    Ok(prepare_native_attachment(
+        path,
+        true,
+        host_id,
+        selection_generation,
+        work_id,
+        name,
+        bytes.len() as u64,
+        Some(media_type.to_owned()),
+    ))
+}
+
 fn publish_selected_attachments(
     lifecycle: &Mutex<RuntimeLifecycle>,
     state: &AttachmentState,
@@ -2475,27 +2760,15 @@ async fn pick_attachments(
             .ok_or_else(|| attachment_command_error("invalid_attachment_name", "附件名称无效。"))?
             .to_owned();
         let media_type = mime_guess::from_path(&path).first_raw().map(str::to_owned);
-        let token = uuid::Uuid::new_v4().to_string();
-        let selected = SelectedAttachment {
-            token: token.clone(),
-            name: name.clone(),
-            size_bytes: metadata.len(),
-            media_type: media_type.clone(),
-        };
-        prepared.push((
-            token,
-            selected,
-            NativeAttachment {
-                path,
-                host_id: host_id.clone(),
-                selection_generation,
-                work_id: work_id.clone(),
-                operation_id: uuid::Uuid::new_v4().to_string(),
-                name,
-                size_bytes: metadata.len(),
-                media_type,
-                active_attempt: None,
-            },
+        prepared.push(prepare_native_attachment(
+            path,
+            false,
+            host_id.clone(),
+            selection_generation,
+            work_id.clone(),
+            name,
+            metadata.len(),
+            media_type,
         ));
     }
 
@@ -2507,6 +2780,127 @@ async fn pick_attachments(
         &work_id,
         prepared,
     )
+}
+
+#[tauri::command]
+async fn stage_clipboard_image(
+    runtime: tauri::State<'_, HostRuntimeState>,
+    state: tauri::State<'_, AttachmentState>,
+    request: Request<'_>,
+) -> Result<SelectedAttachment, CommandError> {
+    let host_id = request_header(&request, "x-aludock-host-id")?;
+    let selection_generation = request_header(&request, "x-aludock-selection-generation")?
+        .parse::<u64>()
+        .map_err(|_| {
+            attachment_command_error(
+                "invalid_clipboard_image",
+                "无法读取粘贴图片的上下文，请重新粘贴。",
+            )
+        })?;
+    let work_id = request_header(&request, "x-aludock-work-id")?;
+    let image_index = request_header(&request, "x-aludock-image-index")?
+        .parse::<usize>()
+        .ok()
+        .filter(|index| (1..=MAX_SELECTED_ATTACHMENTS).contains(index))
+        .ok_or_else(|| {
+            attachment_command_error(
+                "invalid_clipboard_image",
+                "无法读取粘贴图片的上下文，请重新粘贴。",
+            )
+        })?;
+    drop(resolve_host(&runtime, &host_id, selection_generation)?);
+    let bytes = request_image_bytes(&request)?;
+    let prepared_host = host_id.clone();
+    let prepared_work = work_id.clone();
+    let prepared = tokio::task::spawn_blocking(move || {
+        prepare_clipboard_image(
+            bytes,
+            prepared_host,
+            selection_generation,
+            prepared_work,
+            image_index,
+        )
+    })
+    .await
+    .map_err(|_| lifecycle_error())??;
+    publish_selected_attachments(
+        runtime.lifecycle.as_ref(),
+        &state,
+        &host_id,
+        selection_generation,
+        &work_id,
+        vec![prepared],
+    )?
+    .into_iter()
+    .next()
+    .ok_or_else(lifecycle_error)
+}
+
+#[tauri::command]
+async fn attachment_preview(
+    runtime: tauri::State<'_, HostRuntimeState>,
+    state: tauri::State<'_, AttachmentState>,
+    host_id: String,
+    selection_generation: u64,
+    work_id: String,
+    token: String,
+) -> Result<Response, CommandError> {
+    drop(resolve_host(&runtime, &host_id, selection_generation)?);
+    let (path, operation_id, size_bytes, media_type) = {
+        let entries = state.entries.lock().map_err(|_| lifecycle_error())?;
+        let entry = entries.get(&token).ok_or_else(|| {
+            attachment_command_error(
+                "attachment_preview_unavailable",
+                "这个附件已无法预览，请重新选择。",
+            )
+        })?;
+        ensure_attachment_scope(entry, &host_id, selection_generation, &work_id)?;
+        if entry.size_bytes > MAX_RENDERABLE_IMAGE_BYTES {
+            return Err(attachment_command_error(
+                "attachment_preview_too_large",
+                "这个图片附件太大，无法预览，但仍可发送。",
+            ));
+        }
+        (
+            entry.path.clone(),
+            entry.operation_id.clone(),
+            entry.size_bytes,
+            entry.media_type.clone(),
+        )
+    };
+    let bytes = tokio::task::spawn_blocking(move || fs::read(path))
+        .await
+        .map_err(|_| lifecycle_error())?
+        .map_err(|_| {
+            attachment_command_error(
+                "attachment_preview_unavailable",
+                "无法读取这个图片附件，但仍可发送。",
+            )
+        })?;
+    if bytes.len() as u64 != size_bytes {
+        return Err(attachment_command_error(
+            "attachment_source_changed",
+            "附件源文件发生了变化，请重新选择。",
+        ));
+    }
+    validate_renderable_image(&bytes, media_type.as_deref())?;
+    drop(resolve_host(&runtime, &host_id, selection_generation)?);
+    let entries = state.entries.lock().map_err(|_| lifecycle_error())?;
+    let entry = entries.get(&token).ok_or_else(|| {
+        attachment_command_error(
+            "attachment_preview_unavailable",
+            "这个附件已无法预览，请重新选择。",
+        )
+    })?;
+    ensure_attachment_scope(entry, &host_id, selection_generation, &work_id)?;
+    if entry.operation_id != operation_id {
+        return Err(attachment_command_error(
+            "attachment_preview_unavailable",
+            "这个附件已无法预览，请重新选择。",
+        ));
+    }
+    drop(entries);
+    Ok(Response::new(bytes))
 }
 
 #[tauri::command]
@@ -3793,11 +4187,18 @@ async fn session_tree(
     instance_id: String,
     expected_host_epoch: String,
     expected_runtime_generation: u64,
-    tree_revision: Option<String>,
-    after_entry_id: Option<String>,
-) -> Result<SessionTreePage, CommandError> {
+) -> Result<SessionTree, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
     let client = dock_client(&store)?;
+    let (tree, host_epoch) = client
+        .session_tree(&instance_id)
+        .await
+        .map_err(CommandError::from)?;
+    if host_epoch != expected_host_epoch {
+        return Err(CommandError::from(ClientError::Protocol(
+            "stale Session Tree was discarded".into(),
+        )));
+    }
     verify_session_scope(
         &client,
         &instance_id,
@@ -3805,22 +4206,7 @@ async fn session_tree(
         expected_runtime_generation,
     )
     .await?;
-    let (page, host_epoch) = client
-        .session_tree(
-            &instance_id,
-            tree_revision.as_deref(),
-            after_entry_id.as_deref(),
-            200,
-        )
-        .await
-        .map_err(CommandError::from)?;
-    let expected_prefix = format!("g{expected_runtime_generation}-");
-    if host_epoch != expected_host_epoch || !page.tree_revision.starts_with(&expected_prefix) {
-        return Err(CommandError::from(ClientError::Protocol(
-            "stale Session Tree page was discarded".into(),
-        )));
-    }
-    Ok(page)
+    Ok(tree)
 }
 
 #[tauri::command]
@@ -3926,15 +4312,6 @@ async fn clone_session(
         expected_runtime_generation,
     )
     .await?;
-    let (tree, tree_host_epoch) = client
-        .session_tree(&instance_id, None, None, 1)
-        .await
-        .map_err(CommandError::from)?;
-    if tree_host_epoch != expected_host_epoch || tree.leaf_id.as_deref() != Some(&entry_id) {
-        return Err(CommandError::from(ClientError::Protocol(
-            "Clone requires the current Session Tree leaf".into(),
-        )));
-    }
     let result = client
         .clone_session(&instance_id, &entry_id, Some(&operation_id))
         .await
@@ -4021,6 +4398,7 @@ pub fn run() {
         .manage(AttachmentState::default())
         .manage(RestoredImageState::default())
         .invoke_handler(tauri::generate_handler![
+            system_device_name,
             get_host_catalog,
             set_active_host,
             remove_local_host,
@@ -4031,6 +4409,8 @@ pub fn run() {
             bootstrap,
             conversation_bootstrap,
             conversation_history,
+            conversation_image,
+            published_image,
             start_conversation_follow,
             acquire_extension_control,
             release_extension_control,
@@ -4038,6 +4418,8 @@ pub fn run() {
             set_extension_widget_viewport,
             set_extension_tools_expanded,
             pick_attachments,
+            stage_clipboard_image,
+            attachment_preview,
             upload_attachment,
             cancel_attachment_upload,
             remove_attachment,
@@ -4089,6 +4471,19 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn remote_media_must_be_a_matching_safe_raster_image() {
+        assert!(validate_renderable_image(b"\x89PNG\r\n\x1a\nbody", Some("image/png")).is_ok());
+        assert!(
+            validate_renderable_image(
+                b"<svg xmlns='http://www.w3.org/2000/svg'/>",
+                Some("image/svg+xml")
+            )
+            .is_err()
+        );
+        assert!(validate_renderable_image(b"GIF89abody", Some("image/png")).is_err());
+    }
 
     fn endpoint_runtime(name: &str) -> (PathBuf, HostRuntimeState, String) {
         let path = std::env::temp_dir().join(format!(
@@ -4258,6 +4653,7 @@ mod tests {
             },
             NativeAttachment {
                 path: PathBuf::from("/native/stale.png"),
+                temporary: false,
                 host_id: host_id.clone(),
                 selection_generation: 7,
                 work_id: "work".into(),
@@ -4440,9 +4836,30 @@ mod tests {
     }
 
     #[test]
+    fn pasted_image_becomes_a_path_free_attachment_and_removes_its_temporary_file() {
+        let prepared = prepare_clipboard_image(
+            b"\x89PNG\r\n\x1a\npasted".to_vec(),
+            "host-a".into(),
+            7,
+            "work-a".into(),
+            1,
+        )
+        .unwrap();
+        let path = prepared.2.path.clone();
+        assert!(path.is_file());
+        assert_eq!(prepared.1.name, "粘贴的图片.png");
+        assert_eq!(prepared.1.media_type.as_deref(), Some("image/png"));
+        let json = serde_json::to_string(&prepared.1).unwrap();
+        assert!(!json.contains(&path.to_string_lossy().to_string()));
+        drop(prepared);
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn attachment_tokens_are_context_scoped_and_serialization_is_path_free() {
         let entry = NativeAttachment {
             path: PathBuf::from("/home/private/secret.txt"),
+            temporary: false,
             host_id: "host-a".into(),
             selection_generation: 7,
             work_id: "work-a".into(),

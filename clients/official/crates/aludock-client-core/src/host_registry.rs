@@ -13,7 +13,8 @@ use uuid::Uuid;
 
 use crate::{
     ClientError, Endpoint, IdentityStore, PairingOutcome, PairingProgress, Result, host_id,
-    pairing::pair_with_host_guard, protocol::probe_stored_pairing,
+    pairing::{pair_with_host_guard, validate_device_name},
+    protocol::probe_stored_pairing,
 };
 
 const REGISTRY_DIRECTORY: &str = "host-registry";
@@ -378,9 +379,7 @@ impl HostRegistry {
         endpoint: Endpoint,
         device_name: &str,
     ) -> Result<PairingTransaction> {
-        if device_name.trim().is_empty() {
-            return Err(invalid("pairing device name must not be empty"));
-        }
+        validate_device_name(device_name)?;
         if let Some(transaction) = self.matching_transaction(&endpoint, device_name, None)? {
             return Ok(transaction);
         }
@@ -401,9 +400,7 @@ impl HostRegistry {
             .lock()
             .map_err(|_| invalid("Host replacement lock is unavailable"))?;
         validate_host_id(expected_host_id)?;
-        if device_name.trim().is_empty() {
-            return Err(invalid("pairing device name must not be empty"));
-        }
+        validate_device_name(device_name)?;
         if let Some(transaction) =
             self.matching_transaction(&endpoint, device_name, Some(expected_host_id))?
         {

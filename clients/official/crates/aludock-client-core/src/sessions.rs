@@ -5,8 +5,10 @@ use uuid::Uuid;
 
 use crate::{
     ClientError, DiagnosticInfo, DockClient, HistoryRecord, InstanceLifecycle, InstanceSnapshot,
-    ProjectTrustDecision, ResourceInfo, Result,
+    ProjectTrustDecision, PublishedFileDto, ResourceInfo, Result, wire::decode_canonical_base64,
 };
+
+pub const MAX_CONVERSATION_IMAGE_BYTES: usize = 20 * 1_024 * 1_024;
 
 const CONVERSATION_CAPABILITIES: &[&str] = &[
     "core.v2",
@@ -40,7 +42,7 @@ const SESSION_TREE_CAPABILITIES: &[&str] = &[
     "git.branch-footer.v1",
     "instance.keys.v1",
     "instance.display-name.v1",
-    "session.tree.v1",
+    "session.tree.v2",
 ];
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -109,8 +111,7 @@ pub struct SessionHistoryPage {
 #[serde(
     tag = "type",
     rename_all = "snake_case",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
+    rename_all_fields = "camelCase"
 )]
 pub enum ConversationContentChunk {
     Text {
@@ -148,6 +149,7 @@ pub enum ConversationContentChunk {
         offset: usize,
         block_complete: bool,
         is_error: bool,
+        published_file: Option<PublishedFileDto>,
         omitted_fields: Option<Vec<String>>,
     },
     Omitted {
@@ -178,6 +180,14 @@ pub struct CompleteConversationPage {
     pub next_cursor: Option<String>,
     pub instance: InstanceSnapshot,
     pub host_epoch: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConversationImageBytes {
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+    pub host_epoch: String,
+    pub runtime_generation: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -339,7 +349,7 @@ pub enum TreeNodeState {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(rename_all = "camelCase")]
 pub struct TreeNode {
     pub entry_id: String,
     pub parent_id: Option<String>,
@@ -355,25 +365,16 @@ pub struct TreeNode {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SessionTreePage {
-    pub tree_revision: String,
+#[serde(rename_all = "camelCase")]
+pub struct SessionTree {
     pub nodes: Vec<TreeNode>,
     pub leaf_id: Option<String>,
-    pub total: usize,
-    pub truncated: bool,
-    pub next_after_entry_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TreeParams<'a> {
     instance_id: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tree_revision: Option<&'a str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    after_entry_id: Option<&'a str>,
-    limit: u16,
 }
 
 #[derive(Debug, Serialize)]
@@ -498,6 +499,94 @@ impl DockClient {
             .await?;
         validate_content_page(&page, instance_id, content_ref)?;
         Ok((page, epoch))
+    }
+
+    pub async fn read_conversation_image(
+        &self,
+        instance_id: &str,
+        content_ref: &str,
+        expected_mime_type: &str,
+    ) -> Result<ConversationImageBytes> {
+        if !valid_image_mime_type(expected_mime_type) {
+            return Err(protocol("conversation image MIME type was invalid"));
+        }
+        let mut cursor: Option<String> = None;
+        let mut seen = HashSet::new();
+        let mut encoded = String::new();
+        let mut host_epoch: Option<String> = None;
+        let mut runtime_generation: Option<u64> = None;
+        let mut revision: Option<String> = None;
+
+        loop {
+            let (page, epoch) = self
+                .conversation_content(instance_id, content_ref, cursor.as_deref())
+                .await?;
+            if host_epoch.as_ref().is_some_and(|value| value != &epoch)
+                || runtime_generation.is_some_and(|value| value != page.runtime_generation)
+                || revision
+                    .as_ref()
+                    .is_some_and(|value| value != &page.revision)
+            {
+                return Err(protocol(
+                    "conversation image changed while it was being downloaded",
+                ));
+            }
+            host_epoch.get_or_insert(epoch);
+            runtime_generation.get_or_insert(page.runtime_generation);
+            revision.get_or_insert(page.revision.clone());
+
+            if page.chunks.len() != 1 {
+                return Err(protocol(
+                    "conversation image reference returned an unexpected content shape",
+                ));
+            }
+            let chunk = page.chunks.into_iter().next().expect("one image chunk");
+            let ConversationContentChunk::Image {
+                block_index,
+                mime_type,
+                data,
+                offset,
+                block_complete,
+            } = chunk
+            else {
+                return Err(protocol(
+                    "conversation image reference returned a non-image block",
+                ));
+            };
+            if block_index != 0
+                || mime_type != expected_mime_type
+                || offset != encoded.encode_utf16().count()
+                || block_complete != page.complete
+            {
+                return Err(protocol("conversation image pagination was inconsistent"));
+            }
+            if encoded.len().saturating_add(data.len())
+                > MAX_CONVERSATION_IMAGE_BYTES.div_ceil(3) * 4
+            {
+                return Err(protocol("conversation image exceeded its protocol bound"));
+            }
+            encoded.push_str(&data);
+            if page.complete {
+                let bytes = decode_canonical_base64(
+                    &encoded,
+                    MAX_CONVERSATION_IMAGE_BYTES,
+                    "conversation image data",
+                )?;
+                return Ok(ConversationImageBytes {
+                    mime_type,
+                    bytes,
+                    host_epoch: host_epoch.unwrap_or_default(),
+                    runtime_generation: runtime_generation.unwrap_or_default(),
+                });
+            }
+            let next = page
+                .next_cursor
+                .ok_or_else(|| protocol("conversation image continuation was missing"))?;
+            if !seen.insert(next.clone()) {
+                return Err(protocol("conversation image cursor repeated"));
+            }
+            cursor = Some(next);
+        }
     }
 
     pub async fn complete_conversation_page(
@@ -767,31 +856,17 @@ impl DockClient {
         Ok(result)
     }
 
-    pub async fn session_tree(
-        &self,
-        instance_id: &str,
-        tree_revision: Option<&str>,
-        after_entry_id: Option<&str>,
-        limit: u16,
-    ) -> Result<(SessionTreePage, String)> {
-        if (tree_revision.is_some() != after_entry_id.is_some()) || limit == 0 || limit > 200 {
-            return Err(protocol("session tree continuation or limit was invalid"));
-        }
-        let (page, host_epoch): (SessionTreePage, String) = self
+    pub async fn session_tree(&self, instance_id: &str) -> Result<(SessionTree, String)> {
+        let (tree, host_epoch): (SessionTree, String) = self
             .request_with_host_epoch(
                 "session.tree",
-                &TreeParams {
-                    instance_id,
-                    tree_revision,
-                    after_entry_id,
-                    limit,
-                },
+                &TreeParams { instance_id },
                 SESSION_TREE_CAPABILITIES,
                 None,
             )
             .await?;
-        validate_tree_page(&page, tree_revision, after_entry_id)?;
-        Ok((page, host_epoch))
+        validate_tree(&tree)?;
+        Ok((tree, host_epoch))
     }
 
     pub async fn navigate_session(
@@ -1020,44 +1095,56 @@ fn validate_mutation_snapshot(
     Ok(())
 }
 
-fn validate_tree_page(
-    page: &SessionTreePage,
-    requested_revision: Option<&str>,
-    after: Option<&str>,
-) -> Result<()> {
-    if page.tree_revision.is_empty()
-        || page.tree_revision.len() > 128
-        || requested_revision.is_some_and(|value| value != page.tree_revision)
-        || page.nodes.len() > page.total
-        || page.truncated != page.next_after_entry_id.is_some()
-        || page.truncated && page.nodes.is_empty()
-        || after.is_some_and(|entry| {
-            page.nodes
-                .first()
-                .is_some_and(|node| node.entry_id == entry)
-        })
-    {
-        return Err(protocol("session tree page invariants failed"));
-    }
-    let mut ids = HashSet::new();
-    for node in &page.nodes {
+fn validate_tree(tree: &SessionTree) -> Result<()> {
+    let mut ids = HashSet::with_capacity(tree.nodes.len());
+    let mut ancestors: Vec<&str> = Vec::new();
+    for node in &tree.nodes {
+        let role_is_stateful = matches!(
+            node.role,
+            Some(TreeNodeRole::Assistant | TreeNodeRole::Tool)
+        );
         if node.entry_id.is_empty()
             || node.entry_id.len() > 128
+            || node
+                .parent_id
+                .as_ref()
+                .is_some_and(|parent| parent.is_empty() || parent.len() > 128)
             || node.depth > 100_000
             || !ids.insert(&node.entry_id)
             || (node.kind == TreeNodeKind::Message) != node.role.is_some()
             || (node.role == Some(TreeNodeRole::Tool)
                 && node.display_class != TreeDisplayClass::Tool)
+            || (node.state.is_some() && !role_is_stateful)
         {
             return Err(protocol("session tree node invariants failed"));
         }
+        match node.parent_id.as_deref() {
+            None if node.depth == 0 => {}
+            Some(parent)
+                if node.depth > 0 && ancestors.get(node.depth - 1).copied() == Some(parent) => {}
+            _ => {
+                return Err(protocol(
+                    "session tree was not stable depth-first pre-order",
+                ));
+            }
+        }
+        ancestors.truncate(node.depth);
+        ancestors.push(&node.entry_id);
     }
-    if let Some(next) = &page.next_after_entry_id
-        && page.nodes.last().is_none_or(|node| &node.entry_id != next)
+    for (index, node) in tree.nodes.iter().enumerate() {
+        let expected_children = tree.nodes.get(index + 1).is_some_and(|next| {
+            next.depth == node.depth + 1 && next.parent_id.as_deref() == Some(&node.entry_id)
+        });
+        if node.has_children != expected_children {
+            return Err(protocol("session tree child topology was inconsistent"));
+        }
+    }
+    if tree
+        .leaf_id
+        .as_ref()
+        .is_some_and(|leaf_id| !ids.contains(leaf_id))
     {
-        return Err(protocol(
-            "session tree cursor did not identify the final returned node",
-        ));
+        return Err(protocol("session tree leaf did not belong to the snapshot"));
     }
     Ok(())
 }
@@ -1092,6 +1179,7 @@ enum PartialBlock {
         data: String,
         complete: bool,
         is_error: bool,
+        published_file: Option<PublishedFileDto>,
         omitted: Vec<String>,
     },
     Omitted {
@@ -1155,6 +1243,7 @@ impl ContentAssembler {
                 offset,
                 block_complete,
                 is_error,
+                published_file,
                 omitted_fields,
                 ..
             } => self.push_tool_result(
@@ -1165,6 +1254,7 @@ impl ContentAssembler {
                 offset,
                 block_complete,
                 is_error,
+                published_file,
                 omitted_fields.unwrap_or_default(),
             )?,
             ConversationContentChunk::Omitted {
@@ -1218,6 +1308,9 @@ impl ContentAssembler {
         offset: usize,
         done: bool,
     ) -> Result<()> {
+        if !valid_image_mime_type(&mime) {
+            return Err(protocol("conversation image MIME type was invalid"));
+        }
         let block = self
             .blocks
             .entry(index)
@@ -1232,6 +1325,11 @@ impl ContentAssembler {
                 data,
                 complete,
             } if *expected == mime && !*complete && utf16_len(data) == offset => {
+                if data.len().saturating_add(text.len())
+                    > MAX_CONVERSATION_IMAGE_BYTES.div_ceil(3) * 4
+                {
+                    return Err(protocol("conversation image exceeded its protocol bound"));
+                }
                 data.push_str(&text);
                 *complete = done;
                 if done {
@@ -1291,6 +1389,7 @@ impl ContentAssembler {
         offset: usize,
         done: bool,
         is_error: bool,
+        published_file: Option<PublishedFileDto>,
         omitted: Vec<String>,
     ) -> Result<()> {
         let block = self
@@ -1302,6 +1401,7 @@ impl ContentAssembler {
                 data: String::new(),
                 complete: false,
                 is_error,
+                published_file: published_file.clone(),
                 omitted: omitted.clone(),
             });
         match block {
@@ -1311,10 +1411,12 @@ impl ContentAssembler {
                 data,
                 complete,
                 is_error: expected_error,
+                published_file: expected_published_file,
                 omitted: expected_omitted,
             } if *expected_id == id
                 && *expected_name == name
                 && *expected_error == is_error
+                && *expected_published_file == published_file
                 && *expected_omitted == omitted
                 && !*complete
                 && utf16_len(data) == offset =>
@@ -1355,9 +1457,20 @@ impl ContentAssembler {
                 } => crate::ContentBlock::Thinking { text: data },
                 PartialBlock::Image {
                     mime,
+                    data,
                     complete: true,
-                    ..
-                } => crate::ContentBlock::Image { mime_type: mime },
+                } => {
+                    decode_canonical_base64(
+                        &data,
+                        MAX_CONVERSATION_IMAGE_BYTES,
+                        "conversation image data",
+                    )?;
+                    crate::ContentBlock::Image {
+                        mime_type: mime,
+                        content_ref: None,
+                        data: Some(data),
+                    }
+                }
                 PartialBlock::ToolCall {
                     id,
                     name,
@@ -1376,12 +1489,14 @@ impl ContentAssembler {
                     data,
                     complete: true,
                     is_error,
+                    published_file,
                     omitted,
                 } => crate::ContentBlock::ToolResult {
                     tool_call_id: id,
                     tool_name: name,
                     text: data,
                     is_error,
+                    published_file,
                     presentation: None,
                     omitted_fields: omitted,
                 },
@@ -1402,6 +1517,21 @@ impl ContentAssembler {
 fn utf16_len(value: &str) -> usize {
     value.encode_utf16().count()
 }
+fn valid_image_mime_type(value: &str) -> bool {
+    let Some(subtype) = value.strip_prefix("image/") else {
+        return false;
+    };
+    !subtype.is_empty()
+        && value.len() <= 256
+        && subtype.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-'
+                )
+        })
+}
+
 fn protocol(message: &str) -> ClientError {
     ClientError::Protocol(message.into())
 }
@@ -1464,6 +1594,34 @@ mod tests {
     }
 
     #[test]
+    fn content_assembler_preserves_complete_image_bytes() {
+        let mut assembler = ContentAssembler::default();
+        assembler
+            .push(ConversationContentChunk::Image {
+                block_index: 0,
+                mime_type: "image/png".into(),
+                data: "aGVs".into(),
+                offset: 0,
+                block_complete: false,
+            })
+            .unwrap();
+        assembler
+            .push(ConversationContentChunk::Image {
+                block_index: 0,
+                mime_type: "image/png".into(),
+                data: "bG8=".into(),
+                offset: 4,
+                block_complete: true,
+            })
+            .unwrap();
+        assert!(matches!(
+            &assembler.finish(1).unwrap()[0],
+            crate::ContentBlock::Image { mime_type, data: Some(data), .. }
+                if mime_type == "image/png" && data == "aGVsbG8="
+        ));
+    }
+
+    #[test]
     fn content_assembler_builds_complete_typed_blocks() {
         let mut assembler = ContentAssembler::default();
         assembler
@@ -1492,28 +1650,50 @@ mod tests {
     }
 
     #[test]
-    fn tree_page_requires_cursor_to_match_last_node() {
-        let page = SessionTreePage {
-            tree_revision: "revision".into(),
-            nodes: vec![TreeNode {
-                entry_id: "one".into(),
-                parent_id: None,
-                depth: 0,
-                kind: TreeNodeKind::Message,
-                role: Some(TreeNodeRole::User),
-                display_class: TreeDisplayClass::Content,
-                state: None,
-                label: None,
-                timestamp: None,
-                summary: "hi".into(),
-                has_children: false,
-            }],
-            leaf_id: Some("one".into()),
-            total: 2,
-            truncated: true,
-            next_after_entry_id: Some("other".into()),
+    fn complete_tree_requires_one_consistent_depth_first_snapshot() {
+        let root = TreeNode {
+            entry_id: "root".into(),
+            parent_id: None,
+            depth: 0,
+            kind: TreeNodeKind::Message,
+            role: Some(TreeNodeRole::User),
+            display_class: TreeDisplayClass::Content,
+            state: None,
+            label: None,
+            timestamp: None,
+            summary: "start".into(),
+            has_children: true,
         };
-        assert!(validate_tree_page(&page, None, None).is_err());
+        let child = TreeNode {
+            entry_id: "child".into(),
+            parent_id: Some("root".into()),
+            depth: 1,
+            kind: TreeNodeKind::Message,
+            role: Some(TreeNodeRole::Assistant),
+            display_class: TreeDisplayClass::Content,
+            state: None,
+            label: None,
+            timestamp: None,
+            summary: "reply".into(),
+            has_children: false,
+        };
+        let tree = SessionTree {
+            nodes: vec![root.clone(), child.clone()],
+            leaf_id: Some("child".into()),
+        };
+        assert!(validate_tree(&tree).is_ok());
+
+        let invalid = SessionTree {
+            nodes: vec![
+                TreeNode {
+                    has_children: false,
+                    ..root
+                },
+                child,
+            ],
+            leaf_id: Some("missing".into()),
+        };
+        assert!(validate_tree(&invalid).is_err());
     }
 
     #[test]
@@ -1546,15 +1726,23 @@ mod tests {
             "text": "ok",
             "offset": 0,
             "blockComplete": true,
-            "isError": false
+            "isError": false,
+            "publishedFile": {
+                "presentation": "image",
+                "fileRef": "file-1",
+                "name": "result.png",
+                "sizeBytes": 5,
+                "mediaType": "image/png"
+            }
         });
         assert!(matches!(
             serde_json::from_value::<ConversationContentChunk>(value).unwrap(),
             ConversationContentChunk::ToolResult {
                 block_index: 2,
                 block_complete: true,
+                published_file: Some(PublishedFileDto { file_ref, .. }),
                 ..
-            }
+            } if file_ref == "file-1"
         ));
     }
 }

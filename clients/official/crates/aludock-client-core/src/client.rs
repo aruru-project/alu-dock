@@ -1,14 +1,26 @@
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncRead, BufReader},
+    time::timeout,
+};
 use uuid::Uuid;
 
 use crate::{
     ClientError, ClientIdentity, Endpoint, HostConnectionProfile, IdentityStore, PairingMetadata,
     Result,
     tls::{ConnectedTls, connect_tls, read_json_line, write_json_line},
+    wire::decode_canonical_base64,
 };
 
 const MAX_CONTROL_LINE_BYTES: usize = 1024 * 1024;
+const MAX_DOCK_TRANSFER_BYTES: usize = 256 * 1024 * 1024;
+const MAX_RESPONSE_TRANSFER_CHUNK_BYTES: usize = 512 * 1024;
+const MAX_RESPONSE_TRANSFER_CHUNKS: usize =
+    MAX_DOCK_TRANSFER_BYTES.div_ceil(MAX_RESPONSE_TRANSFER_CHUNK_BYTES);
+const RESPONSE_TRANSFER_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const CATALOG_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Clone)]
@@ -134,11 +146,21 @@ impl DockClient {
         if let Err(error) = write_json_line(&mut connection.stream, &request).await {
             return Err(ambiguous_if_mutation(error, operation_id));
         }
-        let response: ResponseEnvelope =
-            match read_json_line(&mut connection.stream, maximum_line_bytes(&hello)).await {
-                Ok(response) => response,
-                Err(error) => return Err(ambiguous_if_mutation(error, operation_id)),
-            };
+        let response = if request_type == "session.tree" {
+            read_response_envelope(
+                &mut connection.stream,
+                maximum_line_bytes(&hello),
+                &request_id,
+                &hello.host.host_epoch,
+            )
+            .await
+        } else {
+            read_json_line(&mut connection.stream, maximum_line_bytes(&hello)).await
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => return Err(ambiguous_if_mutation(error, operation_id)),
+        };
         validate_response_envelope(&response, &request_id, &hello.host.host_epoch)
             .map_err(|error| ambiguous_if_mutation(error, operation_id))?;
         let result = response_result(response, request_type, operation_id)?;
@@ -232,6 +254,143 @@ impl DockClient {
         let hello = validate_hello(reply, &request_id, required_capabilities)?;
         Ok((connection, hello))
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ResponseTransferFrame {
+    kind: String,
+    version: u8,
+    request_id: String,
+    host_epoch: String,
+    index: usize,
+    count: usize,
+    data: String,
+}
+
+async fn read_response_envelope<R: AsyncRead + Unpin>(
+    stream: &mut R,
+    maximum_line_bytes: usize,
+    request_id: &str,
+    host_epoch: &str,
+) -> Result<ResponseEnvelope> {
+    let mut reader = BufReader::new(stream);
+    let first: Value = read_response_line(&mut reader, maximum_line_bytes).await?;
+    if first.get("kind").and_then(Value::as_str) != Some("response_transfer") {
+        let response: ResponseEnvelope = serde_json::from_value(first).map_err(|error| {
+            ClientError::Protocol(format!("invalid response envelope: {error}"))
+        })?;
+        if response.ok {
+            return Err(protocol(
+                "session tree success did not use response transfer framing",
+            ));
+        }
+        return Ok(response);
+    }
+    let mut expected_count = None;
+    let mut next_index = 0_usize;
+    let mut bytes = Vec::new();
+    let mut raw = first;
+    loop {
+        let frame: ResponseTransferFrame = serde_json::from_value(raw)
+            .map_err(|error| protocol(format!("invalid response transfer frame: {error}")))?;
+        if frame.kind != "response_transfer"
+            || frame.version != 2
+            || frame.request_id != request_id
+            || frame.host_epoch != host_epoch
+            || frame.count == 0
+            || frame.count > MAX_RESPONSE_TRANSFER_CHUNKS
+            || frame.index >= frame.count
+        {
+            return Err(protocol(
+                "response transfer identity, version, index, or count was invalid",
+            ));
+        }
+        if expected_count.is_none() && frame.index != 0 {
+            return Err(protocol("response transfer did not begin with chunk zero"));
+        }
+        let count = *expected_count.get_or_insert(frame.count);
+        if frame.count != count || frame.index != next_index {
+            return Err(protocol(
+                "response transfer chunks were inconsistent or out of order",
+            ));
+        }
+        let chunk = decode_canonical_base64(
+            &frame.data,
+            MAX_RESPONSE_TRANSFER_CHUNK_BYTES,
+            "response transfer data",
+        )?;
+        let aggregate = bytes
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| protocol("response transfer size overflowed"))?;
+        if aggregate > MAX_DOCK_TRANSFER_BYTES {
+            return Err(protocol("response transfer exceeded its aggregate bound"));
+        }
+        bytes.extend_from_slice(&chunk);
+        next_index += 1;
+        if next_index == count {
+            break;
+        }
+        raw = read_response_line(&mut reader, maximum_line_bytes).await?;
+        if raw.get("kind").and_then(Value::as_str) != Some("response_transfer") {
+            return Err(protocol(
+                "response transfer ended before all chunks arrived",
+            ));
+        }
+    }
+
+    let response: ResponseEnvelope = serde_json::from_slice(&bytes)
+        .map_err(|error| protocol(format!("response transfer was not valid JSON: {error}")))?;
+    if !response.ok {
+        return Err(protocol(
+            "response transfer contained an unsuccessful response",
+        ));
+    }
+    Ok(response)
+}
+
+async fn read_response_line<T: DeserializeOwned, R: AsyncRead + Unpin>(
+    reader: &mut BufReader<R>,
+    maximum_bytes: usize,
+) -> Result<T> {
+    let line = timeout(RESPONSE_TRANSFER_IDLE_TIMEOUT, async {
+        let mut bytes = Vec::new();
+        loop {
+            let available = reader.fill_buf().await?;
+            if available.is_empty() {
+                return Err(ClientError::Protocol(
+                    "TLS connection closed before a complete JSONL response".into(),
+                ));
+            }
+            if let Some(newline) = available.iter().position(|byte| *byte == b'\n') {
+                if bytes.len().saturating_add(newline) >= maximum_bytes {
+                    return Err(protocol(format!(
+                        "JSONL response exceeded {maximum_bytes} bytes"
+                    )));
+                }
+                bytes.extend_from_slice(&available[..newline]);
+                reader.consume(newline + 1);
+                break;
+            }
+            if bytes.len().saturating_add(available.len()) >= maximum_bytes {
+                return Err(protocol(format!(
+                    "JSONL response exceeded {maximum_bytes} bytes"
+                )));
+            }
+            let consumed = available.len();
+            bytes.extend_from_slice(available);
+            reader.consume(consumed);
+        }
+        serde_json::from_slice(&bytes).map_err(ClientError::from)
+    })
+    .await
+    .map_err(|_| protocol("timed out while receiving a response transfer"))??;
+    Ok(line)
+}
+
+fn protocol(message: impl Into<String>) -> ClientError {
+    ClientError::Protocol(message.into())
 }
 
 pub(crate) struct ProtocolEventStream {
@@ -504,6 +663,8 @@ struct RemoteError {
 
 #[cfg(test)]
 mod tests {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+
     use super::*;
 
     fn hello_ack(catalog_schema_version: u64) -> HelloAck {
@@ -549,6 +710,70 @@ mod tests {
         );
         assert!(
             validate_hello(HelloReply::Ack(hello_ack(2)), "hello-request", &["core.v2"]).is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn tree_success_requires_complete_transfer_before_business_parsing() {
+        let logical = serde_json::json!({
+            "kind": "response",
+            "version": 2,
+            "requestId": "tree-request",
+            "hostEpoch": "epoch",
+            "ok": true,
+            "result": {
+                "nodes": [{
+                    "entryId": "root",
+                    "depth": 0,
+                    "kind": "message",
+                    "role": "user",
+                    "displayClass": "content",
+                    "summary": "hello",
+                    "hasChildren": false
+                }],
+                "leafId": "root"
+            }
+        });
+        let bytes = serde_json::to_vec(&logical).unwrap();
+        let chunks = bytes.chunks(48).collect::<Vec<_>>();
+        let (mut client, mut host) = tokio::io::duplex(16 * 1024);
+        for (index, chunk) in chunks.iter().enumerate() {
+            write_json_line(
+                &mut host,
+                &serde_json::json!({
+                    "kind": "response_transfer",
+                    "version": 2,
+                    "requestId": "tree-request",
+                    "hostEpoch": "epoch",
+                    "index": index,
+                    "count": chunks.len(),
+                    "data": STANDARD.encode(chunk),
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        drop(host);
+
+        let response =
+            read_response_envelope(&mut client, MAX_CONTROL_LINE_BYTES, "tree-request", "epoch")
+                .await
+                .unwrap();
+        validate_response_envelope(&response, "tree-request", "epoch").unwrap();
+        assert_eq!(
+            response.result.unwrap()["leafId"],
+            "root",
+            "the caller receives one complete logical Tree instead of transport chunks"
+        );
+
+        let (mut client, mut host) = tokio::io::duplex(4 * 1024);
+        write_json_line(&mut host, &logical).await.unwrap();
+        drop(host);
+        assert!(
+            read_response_envelope(&mut client, MAX_CONTROL_LINE_BYTES, "tree-request", "epoch",)
+                .await
+                .is_err(),
+            "an ordinary success response cannot bypass mandatory Tree transfer framing"
         );
     }
 

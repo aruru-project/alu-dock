@@ -14,6 +14,7 @@ import type {
   InteractionMethod,
   InteractionResponse,
   ModelsResult,
+  PublishedFileDto,
   QueueDequeueResult,
   ResourcesResult,
   SelectedAttachment,
@@ -24,7 +25,7 @@ import type {
   SessionNavigateResult,
   SessionReloadResult,
   SessionReplacementResult,
-  SessionTreePage,
+  SessionTree,
   SettingKey,
   SettingsResult,
   SettingUpdateResult,
@@ -37,6 +38,11 @@ import type {
 } from './types'
 
 export const isTauri = '__TAURI_INTERNALS__' in window
+
+export async function getSystemDeviceName(): Promise<string | null> {
+  if (isTauri) return invoke<string | null>('system_device_name')
+  return null
+}
 
 export async function getHostCatalog(): Promise<HostCatalog> {
   if (isTauri) return invoke<HostCatalog>('get_host_catalog')
@@ -176,6 +182,24 @@ export async function setExtensionToolsExpanded(instanceId: string, expectedHost
 export async function pickAttachments(workId: string, context: HostContext): Promise<SelectedAttachment[]> {
   if (isTauri) return invoke('pick_attachments', { ...context, workId })
   throw new Error('浏览器设计预览不会读取本机文件')
+}
+
+export async function stageClipboardImage(workId: string, bytes: Uint8Array, imageIndex: number, context: HostContext): Promise<SelectedAttachment> {
+  if (!isTauri) throw new Error('浏览器设计预览不会读取剪贴板图片')
+  return invoke<SelectedAttachment>('stage_clipboard_image', bytes, {
+    headers: {
+      'x-aludock-host-id': context.hostId,
+      'x-aludock-selection-generation': String(context.selectionGeneration),
+      'x-aludock-work-id': workId,
+      'x-aludock-image-index': String(imageIndex),
+    },
+  })
+}
+
+export async function loadAttachmentPreviewBytes(workId: string, token: string, context: HostContext): Promise<Uint8Array> {
+  if (!isTauri) throw new Error('浏览器设计预览不会读取本机附件')
+  const value = await invoke<ArrayBuffer | Uint8Array | number[]>('attachment_preview', { ...context, workId, token })
+  return binaryBytes(value)
 }
 
 export async function uploadAttachment(workId: string, token: string, context: HostContext): Promise<AttachmentUploadResult> {
@@ -337,6 +361,42 @@ export async function loadConversationHistory(
   return { records: [], historyRevision: expectedHistoryRevision, hasEarlier: false, instance: previewBootstrap.works[0]!, hostEpoch: 'browser-preview' }
 }
 
+export async function loadConversationImageBytes(
+  instanceId: string,
+  expectedHostEpoch: string,
+  expectedRuntimeGeneration: number,
+  contentRef: string,
+  mimeType: string,
+  context: HostContext,
+): Promise<Uint8Array> {
+  if (!isTauri) throw new Error('浏览器设计预览不会读取远程图片')
+  const value = await invoke<ArrayBuffer | Uint8Array | number[]>('conversation_image', {
+    ...context, instanceId, expectedHostEpoch, expectedRuntimeGeneration, contentRef, mimeType,
+  })
+  return binaryBytes(value)
+}
+
+export async function loadPublishedImageBytes(
+  instanceId: string,
+  expectedHostEpoch: string,
+  expectedRuntimeGeneration: number,
+  file: PublishedFileDto,
+  context: HostContext,
+): Promise<Uint8Array> {
+  if (!isTauri) throw new Error('浏览器设计预览不会读取远程图片')
+  const value = await invoke<ArrayBuffer | Uint8Array | number[]>('published_image', {
+    ...context, instanceId, expectedHostEpoch, expectedRuntimeGeneration, file,
+  })
+  return binaryBytes(value)
+}
+
+function binaryBytes(value: ArrayBuffer | Uint8Array | number[]): Uint8Array {
+  if (value instanceof Uint8Array) return value
+  if (value instanceof ArrayBuffer) return new Uint8Array(value)
+  if (Array.isArray(value) && value.every((item) => Number.isInteger(item) && item >= 0 && item <= 255)) return Uint8Array.from(value)
+  throw new Error('图片数据格式无效。')
+}
+
 export interface SessionContext extends HostContext {
   instanceId: string
   expectedHostEpoch: string
@@ -373,13 +433,13 @@ export async function reloadSession(context: SessionContext, operationId: string
   if (isTauri) return invoke('reload_session', { ...context, operationId })
   throw new Error('浏览器设计预览不会 Reload Session')
 }
-export async function loadSessionTree(context: SessionContext, treeRevision?: string, afterEntryId?: string): Promise<SessionTreePage> {
-  if (isTauri) return invoke('session_tree', { ...context, treeRevision: treeRevision ?? null, afterEntryId: afterEntryId ?? null })
+export async function loadSessionTree(context: SessionContext): Promise<SessionTree> {
+  if (isTauri) return invoke('session_tree', { ...context })
   await delay(100)
   return previewTree
 }
-export async function navigateSession(context: SessionContext, targetId: string, summarize: boolean, customInstructions: string | undefined, operationId: string): Promise<SessionNavigateResult> {
-  if (isTauri) return invoke('navigate_session', { ...context, targetId, summarize, customInstructions: customInstructions || null, operationId })
+export async function navigateSession(context: SessionContext, targetId: string, summarize: boolean, operationId: string): Promise<SessionNavigateResult> {
+  if (isTauri) return invoke('navigate_session', { ...context, targetId, summarize, customInstructions: null, operationId })
   throw new Error('浏览器设计预览不会切换 Tree 节点')
 }
 export async function forkSession(context: SessionContext, entryId: string, operationId: string): Promise<SessionForkResult> {
@@ -492,8 +552,8 @@ function previewSessions(context: SessionContext): SessionListResult {
     runtimeGeneration: context.expectedRuntimeGeneration,
   }
 }
-const previewTree: SessionTreePage = {
-  treeRevision: 'g1-browser-preview', total: 5, truncated: false, leafId: 'assistant-2',
+const previewTree: SessionTree = {
+  leafId: 'assistant-2',
   nodes: [
     { entryId: 'user-1', depth: 0, kind: 'message', role: 'user', displayClass: 'content', summary: '确认 Protocol V2 的会话边界', hasChildren: true, timestamp: now },
     { entryId: 'assistant-1', parentId: 'user-1', depth: 1, kind: 'message', role: 'assistant', displayClass: 'content', summary: '完成协议与关联校验', hasChildren: true, timestamp: now },
@@ -545,6 +605,7 @@ const previewCatalog: HostCatalog = {
   hosts: [{
     hostId: previewBootstrap.hostId,
     displayName: previewBootstrap.host.profile.displayName,
+    deviceName: '浏览器预览设备',
     endpointSummary: '192.168.1.20:33781',
     addedAt: now,
     profile: previewBootstrap.host.profile,

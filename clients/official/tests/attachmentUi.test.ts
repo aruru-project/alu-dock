@@ -3,6 +3,7 @@ import { appendRestoredQueue, attachmentsAfterSubmit } from '../src/lib/attachme
 import { projectConversation } from '../src/lib/conversation.ts'
 import { draftAfterSubmit } from '../src/lib/uiBoundaries.ts'
 import { decodeLocalUiState } from '../src/lib/localState.ts'
+import { persistDeviceNamePreference, readDeviceNamePreference, resolveDeviceName } from '../src/lib/deviceName.ts'
 import type { AttachmentDto, ConversationBootstrap, QueueItem } from '../src/lib/types.ts'
 
 const attachment: AttachmentDto = {
@@ -72,6 +73,18 @@ const attachment: AttachmentDto = {
   const projected = projectConversation(bootstrap).filter((item) => item.kind === 'user')
   assert.equal(projected.length, 2)
   assert.deepEqual(projected.map((item) => item.kind === 'user' ? item.attachments : undefined), [[attachment], [attachment]])
+}
+
+{
+  const values = new Map<string, string>()
+  const storage = {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, value) },
+  }
+  assert.equal(persistDeviceNamePreference(storage, 'NUC14'), true)
+  const restoredAfterAuthorizationWasRevoked = readDeviceNamePreference(storage)
+  assert.equal(resolveDeviceName(restoredAfterAuthorizationWasRevoked, 'AluDock Client', 'system-hostname'), 'NUC14')
+  assert.equal(resolveDeviceName(null, 'host-b-name', 'stale-host-a-name'), 'host-b-name')
 }
 
 console.log('attachment UI state tests passed')

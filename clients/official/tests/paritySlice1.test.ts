@@ -29,6 +29,17 @@ const waitingProjection = projectConversation(bootstrap(runningProjectionState, 
 assert.equal(waitingProjection.some((item) => item.kind === 'activity'), true, 'an accepted run shows the WebConsole Assistant activity row')
 const respondingProjection = projectConversation(bootstrap(runningProjectionState, [event(1, 'run.started', {}), event(2, 'message.delta', { messageId: 'reply', block: 'text', delta: '开始回复' })]))
 assert.equal(respondingProjection.some((item) => item.kind === 'activity'), false, 'the spinner yields to the first visible Assistant output')
+const compactThinkingProjection = projectConversation(bootstrap(runningProjectionState, [
+  event(1, 'run.started', {}),
+  event(2, 'message.delta', { messageId: 'reply', block: 'thinking', delta: '检查图片内容' }),
+]), { compact: true })
+assert.equal(compactThinkingProjection.some((item) => item.kind === 'activity'), true, '简洁模式隐藏思考时仍显示正在处理状态')
+const compactReadImageProjection = projectConversation(bootstrap(runningProjectionState, [
+  event(1, 'run.started', {}),
+  event(2, 'message.completed', { messageId: 'tool-result', role: 'tool', content: [{ type: 'image', mimeType: 'image/png', contentRef: 'read-image' }] }),
+]), { compact: true })
+assert.equal(compactReadImageProjection.some((item) => item.kind === 'image'), true, 'read 返回的图片在简洁模式仍是可见对话内容')
+assert.equal(compactReadImageProjection.some((item) => item.kind === 'activity'), false, 'read 图片出现后正在处理状态让位给图片')
 
 const groupedBootstrap = bootstrap(state, [])
 groupedBootstrap.records = [
@@ -53,6 +64,39 @@ assert.ok(callText?.kind === 'assistant' && callTool?.kind === 'tool' && afterTe
 assert.equal(callText.groupId, callTool.groupId, 'a tool result stays inside the assistant record that formally owns its toolCallId')
 assert.notEqual(callText.groupId, afterText.groupId, 'a later assistant record keeps its own WebConsole message row')
 assert.match(callTool.detail || '', /参数[\s\S]*结果/)
+
+const publishedFile = { presentation: 'image' as const, fileRef: 'file-1', name: 'result.png', sizeBytes: 5, mediaType: 'image/png' }
+const imageBootstrap = bootstrap(state, [])
+imageBootstrap.records = [
+  {
+    recordId: 'assistant-image-call', entryId: 'entry-image-call', kind: 'message', source: 'assistant', visibility: 'conversation',
+    content: [{ type: 'tool_call', toolCallId: 'show-1', toolName: 'show_image', args: { path: '/private/generated/result.png' } }],
+  },
+  {
+    recordId: 'published-image-result', entryId: 'entry-image-result', kind: 'message', source: 'tool', visibility: 'conversation', toolCallId: 'show-1',
+    content: [{ type: 'tool_result', toolCallId: 'show-1', toolName: 'show_image', text: 'Published /private/generated/result.png', isError: false, publishedFile }],
+  },
+  {
+    recordId: 'native-image', entryId: 'entry-native-image', kind: 'message', source: 'assistant', visibility: 'conversation',
+    content: [{ type: 'image', mimeType: 'image/png', contentRef: 'image-1' }],
+  },
+]
+const imageProjection = projectConversation(imageBootstrap)
+const publishedImage = imageProjection.find((item) => item.kind === 'image' && item.source?.type === 'published')
+const nativeImage = imageProjection.find((item) => item.kind === 'image' && item.source?.type === 'conversation')
+const showImageTool = imageProjection.find((item) => item.kind === 'tool' && item.name === 'show_image')
+assert.ok(publishedImage?.kind === 'image' && publishedImage.source?.type === 'published' && showImageTool?.kind === 'tool')
+assert.deepEqual(publishedImage.source.file, publishedFile, 'path-free published metadata reaches the image renderer unchanged')
+assert.equal(publishedImage.groupId, showImageTool.groupId, 'show_image remains in its formally owned Assistant group')
+assert.doesNotMatch(showImageTool.detail || '', /private|generated|result\.png/, 'the Host-local show_image source path is not displayed')
+assert.ok(nativeImage?.kind === 'image' && nativeImage.source?.type === 'conversation' && nativeImage.source.contentRef === 'image-1')
+
+const livePublished = projectConversation(bootstrap(state, [
+  event(10, 'tool.output_updated', { toolCallId: 'show-live', text: 'published', publishedFile }),
+  event(11, 'tool.completed', { toolCallId: 'show-live', toolName: 'show_image', text: 'published', isError: false, publishedFile }),
+]))
+assert.equal(livePublished.filter((item) => item.kind === 'image' && item.source?.type === 'published').length, 1, 'live updates do not duplicate the same published image')
+
 const genericTimestampBootstrap = bootstrap(state, [])
 genericTimestampBootstrap.records = [{
   recordId: 'user-with-timestamp', entryId: 'entry-user', kind: 'message', source: 'user', visibility: 'conversation', timestamp: '2026-08-18T02:19:06Z',
@@ -132,6 +176,7 @@ assert.equal(outputIsNearBottom(1_000, 701, 300), true, 'new output follows whil
 assert.equal(outputIsNearBottom(1_000, 500, 300), false, 'intentional history scrolling is not stolen by new output')
 assert.doesNotMatch(userErrorMessage({ code: 'protocol_error', message: 'generation 4 cursor 8 failed' }), /generation|cursor|4|8/, 'protocol bookkeeping never becomes user-facing error text')
 assert.doesNotMatch(userErrorMessage({ code: 'instance_host_lost', message: 'Instance 123e4567-e89b is host_lost' }), /123e4567|host_lost/)
+assert.match(userErrorMessage({ code: 'invalid_tree_target', message: 'Entry abc no longer exists' }), /重新打开 Session Tree/, 'a stale Tree choice tells the user how to recover without exposing the missing entry')
 
 assert.equal(draftAfterSubmit('original', 'original', false), 'original', 'failed/effect-unknown admission preserves draft')
 assert.equal(draftAfterSubmit('typed while sending', 'original', true), 'typed while sending', 'successful admission preserves concurrent typing')

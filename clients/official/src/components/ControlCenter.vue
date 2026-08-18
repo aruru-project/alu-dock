@@ -159,7 +159,7 @@ watch(commandSelections, (items) => {
   commandSelectedIndex.value = Math.max(0, Math.min(commandSelectedIndex.value, items.length - 1))
 })
 
-watch(() => [app.activeHostId, props.work.id], () => {
+watch([() => app.activeHostId, () => props.work.id], () => {
   commands.value = null
   commandCatalogState.value = 'loading'
   models.value = null

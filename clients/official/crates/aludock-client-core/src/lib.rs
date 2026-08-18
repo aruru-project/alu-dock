@@ -12,10 +12,12 @@ mod identity;
 mod instances;
 mod pairing;
 mod protocol;
+mod published_files;
 mod sessions;
 mod srp;
 mod storage;
 mod tls;
+mod wire;
 
 pub use actions::{
     DeliveryMode, QueueDequeueReceipt, QueueDequeueResult, SubmitReceipt, SubmitResult,
@@ -62,14 +64,17 @@ pub use instances::{
     ProjectTrustDecision, ReopenResult, StopReceipt, StopResult, WorkspaceCursor, WorkspaceEntry,
     WorkspaceEntryKind, WorkspacePage,
 };
-pub use pairing::{PairingOutcome, PairingProgress, pair};
+pub use pairing::{PairingOutcome, PairingProgress, pair, validate_device_name};
 pub use protocol::{HostIdentity, HostInfo, host_info, host_info_for_profile};
+pub use published_files::{
+    MAX_PUBLISHED_FILE_BYTES, MAX_PUBLISHED_FILE_CHUNK_BYTES, PublishedFileBytes, PublishedFileDto,
+};
 pub use sessions::{
     CompleteConversationPage, ConversationContentChunk, ConversationContentPage,
-    ConversationHistoryEntry, ConversationHistoryPage, NavigateOptions, SessionCompaction,
-    SessionCompactionResult, SessionForkResult, SessionHistoryPage, SessionInfo, SessionListResult,
-    SessionNameResult, SessionNavigateResult, SessionReloadResult, SessionReplacementResult,
-    SessionScope, SessionTreePage, TreeDisplayClass, TreeNode, TreeNodeKind, TreeNodeRole,
-    TreeNodeState,
+    ConversationHistoryEntry, ConversationHistoryPage, ConversationImageBytes,
+    MAX_CONVERSATION_IMAGE_BYTES, NavigateOptions, SessionCompaction, SessionCompactionResult,
+    SessionForkResult, SessionHistoryPage, SessionInfo, SessionListResult, SessionNameResult,
+    SessionNavigateResult, SessionReloadResult, SessionReplacementResult, SessionScope,
+    SessionTree, TreeDisplayClass, TreeNode, TreeNodeKind, TreeNodeRole, TreeNodeState,
 };
 pub use storage::{IdentityStore, PairingMetadata, PendingPairing, StoredPairing};

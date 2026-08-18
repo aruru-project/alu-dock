@@ -409,12 +409,12 @@ fn validate_pairing_id(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_device_name(value: &str) -> Result<()> {
+pub fn validate_device_name(value: &str) -> Result<()> {
     let forbidden = value.chars().any(|character| {
         character.is_control()
             || matches!(character, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
     });
-    if value.is_empty() || value.chars().count() > 128 || forbidden {
+    if value.trim().is_empty() || value.chars().count() > 128 || forbidden {
         return Err(ClientError::InvalidPairing(
             "device name must be a safe non-empty name of at most 128 characters".into(),
         ));

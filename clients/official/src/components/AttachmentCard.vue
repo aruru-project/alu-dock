@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertCircle, CheckCircle2, File, LoaderCircle, RotateCcw, X } from '@lucide/vue'
+import { AlertCircle, CheckCircle2, File, Image, LoaderCircle, RotateCcw, X } from '@lucide/vue'
 
 const props = withDefaults(defineProps<{
   name: string
@@ -12,8 +12,9 @@ const props = withDefaults(defineProps<{
   retryable?: boolean
   cancellable?: boolean
   compact?: boolean
-}>(), { state: 'ready', progress: 0, removable: false, retryable: false, cancellable: false, compact: false })
-const emit = defineEmits<{ remove: []; retry: []; cancel: [] }>()
+  previewable?: boolean
+}>(), { state: 'ready', progress: 0, removable: false, retryable: false, cancellable: false, compact: false, previewable: false })
+const emit = defineEmits<{ remove: []; retry: []; cancel: []; preview: [] }>()
 
 function bytes(value: number) {
   if (value < 1024) return `${value} B`
@@ -32,21 +33,31 @@ function stateText() {
 </script>
 
 <template>
-  <article class="attachment-card" :class="[`is-${state}`, { compact }]" :aria-label="`附件 ${name}，${stateText()}`">
-    <div class="attachment-icon" aria-hidden="true">
-      <LoaderCircle v-if="['hashing', 'uploading', 'finalizing'].includes(state)" :size="17" class="spinning" />
-      <AlertCircle v-else-if="state === 'error'" :size="17" />
-      <CheckCircle2 v-else-if="state === 'ready'" :size="17" />
-      <File v-else :size="17" />
-    </div>
-    <div class="attachment-copy">
-      <strong :title="name">{{ name }}</strong>
-      <span>{{ bytes(sizeBytes) }}<template v-if="mediaType"> · {{ mediaType }}</template></span>
-      <div v-if="['hashing', 'uploading', 'finalizing'].includes(state)" class="attachment-progress" role="progressbar" :aria-valuenow="Math.round(progress * 100)" aria-valuemin="0" aria-valuemax="100" :aria-label="`${name} ${stateText()}`">
-        <i :style="{ width: `${Math.max(3, Math.min(100, progress * 100))}%` }" />
+  <article class="attachment-card" :class="[`is-${state}`, { compact, 'is-previewable': previewable }]" :aria-label="`附件 ${name}，${stateText()}`">
+    <component
+      :is="previewable ? 'button' : 'div'"
+      class="attachment-preview-trigger"
+      :type="previewable ? 'button' : undefined"
+      :aria-label="previewable ? `预览图片附件 ${name}` : undefined"
+      :title="previewable ? `点击预览 ${name}` : undefined"
+      @click="previewable && emit('preview')"
+    >
+      <div class="attachment-icon" aria-hidden="true">
+        <LoaderCircle v-if="['hashing', 'uploading', 'finalizing'].includes(state)" :size="17" class="spinning" />
+        <AlertCircle v-else-if="state === 'error'" :size="17" />
+        <Image v-else-if="previewable" :size="17" />
+        <CheckCircle2 v-else-if="state === 'ready'" :size="17" />
+        <File v-else :size="17" />
       </div>
-      <small v-else-if="state === 'error'">{{ stateText() }}</small>
-    </div>
+      <div class="attachment-copy">
+        <strong :title="name">{{ name }}</strong>
+        <span>{{ bytes(sizeBytes) }}<template v-if="mediaType"> · {{ mediaType }}</template></span>
+        <div v-if="['hashing', 'uploading', 'finalizing'].includes(state)" class="attachment-progress" role="progressbar" :aria-valuenow="Math.round(progress * 100)" aria-valuemin="0" aria-valuemax="100" :aria-label="`${name} ${stateText()}`">
+          <i :style="{ width: `${Math.max(3, Math.min(100, progress * 100))}%` }" />
+        </div>
+        <small v-else-if="state === 'error'">{{ stateText() }}</small>
+      </div>
+    </component>
     <div v-if="retryable || cancellable || removable" class="attachment-actions">
       <button v-if="retryable" type="button" :aria-label="`重试上传 ${name}`" :title="`重试上传 ${name}`" @click="emit('retry')"><RotateCcw :size="15" /></button>
       <button v-if="cancellable" type="button" :aria-label="`取消上传 ${name}`" :title="`取消上传 ${name}`" @click="emit('cancel')"><X :size="15" /></button>

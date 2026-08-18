@@ -4,8 +4,8 @@ use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 use serde_json::Value;
 
 use crate::{
-    AttachmentDto, ClientError, DockClient, EventCursor, InstanceSnapshot, Result,
-    attachments::MAX_ATTACHMENTS_PER_MESSAGE, client::ProtocolEventStream,
+    AttachmentDto, ClientError, DockClient, EventCursor, InstanceSnapshot, PublishedFileDto,
+    Result, attachments::MAX_ATTACHMENTS_PER_MESSAGE, client::ProtocolEventStream,
 };
 
 const FOLLOW_CAPABILITIES: &[&str] = &[
@@ -155,6 +155,10 @@ pub enum ContentBlock {
     Image {
         #[serde(rename = "mimeType")]
         mime_type: String,
+        #[serde(rename = "contentRef", skip_serializing_if = "Option::is_none")]
+        content_ref: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        data: Option<String>,
     },
     ToolCall {
         #[serde(rename = "toolCallId")]
@@ -173,6 +177,8 @@ pub enum ContentBlock {
         text: String,
         #[serde(rename = "isError")]
         is_error: bool,
+        #[serde(rename = "publishedFile", skip_serializing_if = "Option::is_none")]
+        published_file: Option<PublishedFileDto>,
         presentation: Option<Value>,
         #[serde(rename = "omittedFields", default)]
         omitted_fields: Vec<String>,

@@ -1385,6 +1385,32 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 .ui-dialog-filter-count { color: var(--alu-text-faint); font-size: 8px; font-variant-numeric: tabular-nums; }
 .ui-dialog-filter.is-active .ui-dialog-filter-count { color: currentColor; opacity: 0.72; }
 
+.alu-tree-guidance {
+  display: flex;
+  min-height: 34px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 14px;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--alu-border);
+  color: var(--alu-text-faint);
+  font-size: 9px;
+}
+.alu-tree-guidance > span:first-child { color: var(--alu-text-muted); }
+.alu-tree-guidance kbd {
+  min-width: 17px;
+  padding: 1px 4px;
+  border: 1px solid var(--alu-border-light);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  background: var(--alu-surface);
+  color: var(--alu-text-dim);
+  font: inherit;
+  text-align: center;
+}
+.alu-tree-guidance button { margin-left: auto; color: var(--alu-blue); font-size: inherit; }
+.alu-tree-guidance button:hover { color: var(--alu-text); }
+
 .ui-dialog-options {
   min-height: 0;
   flex: 1 1 auto;
@@ -1414,6 +1440,40 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 .ui-dialog-option.is-current.is-selected { border-color: var(--alu-pink-border); }
 .ui-dialog-option-marker { padding-top: 1px; color: var(--alu-text-faint); text-align: center; }
 .ui-dialog-option.is-current .ui-dialog-option-marker { color: var(--alu-pink); }
+.alu-tree-options { overflow: auto; }
+.alu-tree-option {
+  grid-template-columns: max-content minmax(0, 1fr);
+  padding-left: 12px;
+}
+.alu-tree-option.is-active-path:not(.is-current) .alu-tree-path-marker { color: var(--alu-blue); }
+.alu-tree-marker {
+  display: inline-flex;
+  min-width: 22px;
+  align-items: flex-start;
+  padding-top: 0;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 17px;
+  text-align: left;
+  white-space: pre;
+}
+.alu-tree-prefix { color: color-mix(in srgb, var(--alu-text-faint) 72%, transparent); }
+.alu-tree-disclosure,
+.alu-tree-disclosure-placeholder {
+  display: inline-block;
+  width: 14px;
+  flex: 0 0 14px;
+  text-align: center;
+}
+.alu-tree-disclosure {
+  border-radius: 3px;
+  color: var(--alu-blue);
+  cursor: pointer;
+  pointer-events: auto;
+}
+.alu-tree-disclosure:hover { background: var(--alu-blue-bg); color: var(--alu-text); }
+.alu-tree-path-marker { display: inline-block; width: 12px; flex: 0 0 12px; text-align: center; }
+.alu-tree-branch-badge { border-color: var(--alu-blue-border); color: var(--alu-blue); letter-spacing: 0; }
 .ui-dialog-option-content { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
 .ui-dialog-option-top { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
 .ui-dialog-option-label { overflow: hidden; color: var(--alu-text); font-size: 12px; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
@@ -1438,6 +1498,9 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 }
 .ui-dialog-actions[hidden] { display: none; }
 .ui-dialog-selection-summary { min-width: 0; flex: 1; overflow: hidden; color: var(--alu-text-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.alu-tree-actions .ui-dialog-selection-summary { display: flex; flex-direction: column; gap: 2px; }
+.alu-tree-actions .ui-dialog-selection-summary span { color: var(--alu-text-faint); font-size: 8px; letter-spacing: 0.08em; }
+.alu-tree-actions .ui-dialog-selection-summary strong { overflow: hidden; color: var(--alu-text-dim); font-weight: 500; text-overflow: ellipsis; }
 .ui-dialog-action-btn { min-height: 36px; }
 
 .ui-dialog-btn {
@@ -2246,6 +2309,8 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   .ui-dialog-search-wrap { padding: 10px 12px; }
   .ui-dialog-filters { padding: 8px 10px; }
   .ui-dialog-filter { min-height: 38px; padding: 7px 11px; }
+  .alu-tree-guidance { padding: 7px 10px; }
+  .alu-tree-guidance > span:nth-child(2) { display: none; }
   .ui-dialog-options { padding: 4px; }
   .ui-dialog-option {
     min-height: 54px;

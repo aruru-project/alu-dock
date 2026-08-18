@@ -1,13 +1,22 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import type { ConversationProcessItem } from '../lib/types'
+import type { ConversationImageResource, ConversationProcessItem } from '../lib/types'
+import ConversationImage from './ConversationImage.vue'
+
+type ImagePart = Extract<ConversationProcessItem, { kind: 'image' }>
 
 const props = defineProps<{
   parts: ConversationProcessItem[]
   renderMarkdown: (text: string) => string
   toolOpen: (id: string) => boolean
+  imageResource: (part: ImagePart) => ConversationImageResource
 }>()
-const emit = defineEmits<{ toolToggle: [id: string, event: Event] }>()
+const emit = defineEmits<{
+  toolToggle: [id: string, event: Event]
+  imageRequest: [part: ImagePart]
+  imagePreview: [part: ImagePart]
+  imageFailed: [part: ImagePart]
+}>()
 const orderedParts = computed(() => [
   ...props.parts.filter((part) => part.kind === 'thinking'),
   ...props.parts.filter((part) => part.kind !== 'thinking'),
@@ -27,7 +36,7 @@ const orderedParts = computed(() => [
         <pre class="tool-output msg-tool-output">{{ part.detail }}</pre>
       </details>
     </div>
-    <div v-else-if="part.kind === 'image'" class="msg-user-image-missing" :data-conversation-id="part.id">[附件 · {{ part.mimeType }}]</div>
+    <ConversationImage v-else-if="part.kind === 'image'" :part="part" :resource="imageResource(part)" @request="emit('imageRequest', $event)" @preview="emit('imagePreview', $event)" @failed="emit('imageFailed', $event)" />
     <div v-else :class="[part.tone === 'error' ? 'msg-error' : part.tone === 'warning' ? 'msg-warning' : 'msg-notice', { 'alu-hideable': part.tone === 'info' }]" :data-conversation-id="part.id">{{ part.text }}</div>
   </template>
 </template>

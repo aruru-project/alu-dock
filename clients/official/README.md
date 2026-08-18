@@ -1,6 +1,6 @@
 # AluDock Client
 
-Android-first、跨平台就绪的 AluDock 图形客户端。应用使用 Tauri 2 + Vue 3，共享 WebView 表现层；配对、mTLS、Protocol V2 和状态投影位于独立 Rust core，可供 Android、Windows 与 Linux 共用。
+跨平台就绪的 AluDock 图形客户端。应用使用 Tauri 2 + Vue 3，共享 WebView 表现层；配对、mTLS、Protocol V2 和状态投影位于独立 Rust core，可供 Windows、Linux 与后续 Android 客户端共用。
 
 ## 当前能力
 
@@ -10,7 +10,7 @@ Android-first、跨平台就绪的 AluDock 图形客户端。应用使用 Tauri 
 - 配对最终响应丢失后的 mTLS 恢复
 - version 1 多 Host 本地 registry：revision CAS、崩溃恢复 intent、每 Host 独立 identity / pin / 连接档案，以及旧单 Host identity 的无损自动迁移
 - Protocol V2 `hello`、Work / workspace、command catalog、Model / Thinking、Tools、Settings 与 resource projection
-- `instance.read` conversation bootstrap、`conversation.history` / `conversation.content` 完整早期记录分页、完整 cursor 校验与 `instance.follow` 实时事件流
+- `instance.read` conversation bootstrap、`conversation.history` / `conversation.content` 完整早期记录分页、完整 cursor 校验与 `instance.follow` 实时事件流；协议图片与已发布图片通过受限二进制 IPC 安全显示
 - 文本 `command.submit`、安全门控的 `command.abort`，以及独立确认的 `instance.stop`（停止共享 Work、当前运行与全部已获准 Queue 项目；mutation 结果未知时只协调、不自动重放）
 - 图形化多 Host 配对：首次引导与“连接新的 AluDock”共用地址 / 端口、客户端四位码、进度、取消和最终 pinned Protocol V2 确认；只有验证完成的 Host 才会加入并激活
 - Sunshine + Moonlight 式单 Host 多地址档案：局域网 / VPN / 广域网 / 手动地址按语义分层回退，同类地址保持用户排序；只有启用且 exact-pin 验证成功的地址会参与自动连接
@@ -21,14 +21,15 @@ Android-first、跨平台就绪的 AluDock 图形客户端。应用使用 Tauri 
 - 真实 Command Center：按来源分组搜索、明确运行按钮与参数输入
 - 顶栏 Model / Thinking 选择器，以及可搜索 Tools toggles 和类型化 Settings controls
 - Control Center 项目状态：只读资源投影按来源分组、搜索、诊断、总计、截断提示与显式刷新
-- 自动增高并可展开的 Composer，支持 Linux 原生多选、直接流式上传、进度/取消/重试、附件草稿与 metadata-only 卡片
+- 自动增高并可展开的 Composer，支持桌面原生多选、剪贴板图片粘贴、直接流式上传、进度/取消/重试、附件草稿，以及可点击的安全图片预览
 - 图形 Session 管理：New / Resume / Rename / Compact / Reload，resume 使用 Host epoch 与 Work scoped opaque token，WebView 不接触 sessionFile
-- 可分页、展开、搜索和筛选的触控 Session Tree，支持 Navigate / Summary / Fork / Clone，并保留返回的 Composer 文本
+- 完整快照驱动的触控 Session Tree：本地展开、搜索、筛选与窗口渲染，支持 Navigate / Summary / Fork / Clone，并保留返回的 Composer 文本
 - 完整 Extension UI：状态、通知/错误、上下 Composer keyed widgets、select / confirm / input / editor 交互、title / editor directives，以及字符格 viewport 回报
 - Extension UI 使用独立长连接和用户明确的“处理交互 / 释放控制权”操作；仅查看 Work 不会抢走另一客户端的 controller
 - controller leaseToken/controllerId 只保存在 Rust/Tauri；WebView 仅接触代次绑定的 opaque handle，并在未知 mutation 结果时锁定并要求权威重协调
 - `toolsExpanded` 使用 snapshot/event/mutation 权威状态，同值事件也会重置每个工具的本地展开覆写；它与“详细/简洁”显示模式相互独立
 - 深空蓝 / 樱花粉 / 冰蓝的响应式应用壳、Work 抽屉与目录浏览器
+- Tauri 桌面快捷键：`Ctrl/Cmd+K` 命令中心、`Alt+↑` 取回 Queue、`Ctrl+J` Composer 换行；浏览器设计预览不截获系统快捷键
 - 320px–桌面宽度的同一套触控友好界面
 
 Rust core、开发 CLI 与 Tauri/Vue 图形界面均已支持多 Host 的添加、列出、明确切换和本地删除。授权被 Dock 撤销后，连接失败页可直接对同一张 Host 证书重新配对并替换旧客户端凭据，无需操作身份目录。图形界面的所有 Dock 请求都携带捕获的 Host ID 与选择代次；不同 Host 即使复用相同 Work ID，本地草稿、选择和异步结果也保持隔离。Android 工程仍在继续接入。界面不会把浏览器设计 fixture 冒充真实 Dock 数据，预览模式下也不能提交 mutation。Extension 文本始终按不可信纯文本渲染，不作为 HTML 注入。
@@ -61,6 +62,8 @@ pnpm build
 # standalone Tauri host（需要对应平台系统库）
 (cd src-tauri && cargo check && cargo test && cargo clippy --all-targets -- -D warnings)
 ```
+
+Windows CI 使用 [`.github/workflows/windows-build.yml`](./.github/workflows/windows-build.yml) 在真实 `windows-latest` runner 上执行 Rust、Tauri 与前端测试，并生成未签名的 MSI / NSIS 测试安装包。工作流不注入或打包任何配对身份；正式分发前仍需完成 Windows 私钥 ACL 与代码签名。
 
 Linux 桌面运行 Tauri 前还需要 Ubuntu 开发包：
 
@@ -123,3 +126,7 @@ target/debug/aludock-client --identity-dir ROOT remove-host-local HOST_ID --conf
 ## 只读参考边界
 
 客户端会参考 AluDock 协议与 Alubot Admin WebConsole 的成熟交互，但不会在开发本项目时修改这些仓库，也不会在运行时依赖它们的源码路径。需要 Dock 或其他项目变化的事项单独提出需求。
+
+## License
+
+本项目按使用者选择，以 [Apache License 2.0](./LICENSE-APACHE) 或 [MIT License](./LICENSE-MIT) 授权。

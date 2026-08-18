@@ -27,11 +27,15 @@ import {
   forgetWork,
   isTauri,
   getSettings,
+  getSystemDeviceName,
   listModels,
   listTools,
   listWorkspace,
   loadConversation,
+  loadAttachmentPreviewBytes,
   loadConversationHistory,
+  loadConversationImageBytes,
+  loadPublishedImageBytes,
   pickAttachments,
   renameHostProfile,
   removeAttachment,
@@ -39,6 +43,7 @@ import {
   reopenWork,
   resumePairing,
   discardPairing,
+  stageClipboardImage,
   startConversationFollow,
   startPairing,
   stopWork,
@@ -55,6 +60,14 @@ import {
 import type { CreateWorkContinuation } from './lib/bridge'
 import { projectConversation } from './lib/conversation'
 import { appendRestoredQueue, attachmentsAfterSubmit } from './lib/attachmentDraft'
+import {
+  DEVICE_NAME_FALLBACK,
+  browserDeviceNameStorage,
+  normalizeDeviceName,
+  persistDeviceNamePreference,
+  readDeviceNamePreference,
+  resolveDeviceName,
+} from './lib/deviceName'
 import { userErrorMessage as errorMessage } from './lib/userError'
 import { captureHostResult, hostResultMatches } from './lib/hostResult'
 import { reduceLiveEvent } from './lib/liveReducer'
@@ -71,7 +84,7 @@ import {
   stopCanStart,
   stoppedResultIsCorrelated,
 } from './lib/uiBoundaries'
-import type { AttachmentDto, AttachmentUploadProgress, ConnectionKind, ConversationBootstrap, ConversationItem, ConversationProcessItem, HostConnectionProfile, HostContext, HostEndpoint, ProjectedEvent, QueueItem, SelectedAttachment, Work, WorkspacePage } from './lib/types'
+import type { AttachmentDto, AttachmentUploadProgress, ConnectionKind, ConversationBootstrap, ConversationImageResource, ConversationItem, ConversationProcessItem, HostConnectionProfile, HostContext, HostEndpoint, ProjectedEvent, QueueItem, SelectedAttachment, Work, WorkspacePage } from './lib/types'
 import AttachmentCard from './components/AttachmentCard.vue'
 import ControlCenter, { type ControlMutationDomain, type ControlSection } from './components/ControlCenter.vue'
 import ConversationProcessParts from './components/ConversationProcessParts.vue'
@@ -80,6 +93,8 @@ import { useAppStore } from './stores/app'
 import { useExtensionUiStore } from './stores/extension-ui'
 
 marked.use({ breaks: true, gfm: true })
+
+const commandShortcutLabel = /Macintosh|Mac OS X/.test(navigator.userAgent) ? '⌘K' : 'Ctrl+K'
 
 const MARKDOWN_SANITIZE_CONFIG = {
   USE_PROFILES: { html: true },
@@ -106,6 +121,7 @@ const confirmDialog = ref<{ title: string; body: string; resolve: (confirmed: bo
 const hostSettingsOpen = ref(false)
 const addingHost = ref(false)
 const output = ref<HTMLElement | null>(null)
+const outputAwayFromBottom = ref(false)
 const composerTextarea = ref<HTMLTextAreaElement | null>(null)
 const composerExpanded = ref(false)
 const workspace = ref<WorkspacePage | null>(null)
@@ -117,6 +133,16 @@ const creatingWork = ref(false)
 const trustContinuation = ref<CreateWorkContinuation | null>(null)
 const reopenTrustContinuation = ref<CreateWorkContinuation | null>(null)
 const realConversation = ref<ConversationItem[]>([])
+type ConversationImagePart = Extract<ConversationProcessItem, { kind: 'image' }>
+type ImagePreview =
+  | { kind: 'conversation'; imageKey: string; url: string; name: string }
+  | { kind: 'attachment'; attachmentKey: string; url: string; name: string }
+type AttachmentPreviewResource = { url: string; mediaType: string }
+const imageResources = ref<Record<string, ConversationImageResource>>({})
+const attachmentPreviews = ref<Record<string, AttachmentPreviewResource>>({})
+const imagePreview = ref<ImagePreview | null>(null)
+let imageDomainKey = ''
+let imageLoadEpoch = 0
 const conversationLoading = ref(false)
 const conversationError = ref<string | null>(null)
 const historyTruncated = ref(false)
@@ -151,7 +177,9 @@ const followConnected = ref(false)
 const activeFollowSubscription = ref('')
 const pairHost = ref('')
 const pairPort = ref<number | null>(null)
-const pairDeviceName = ref('AluDock Client')
+const deviceNameStorage = browserDeviceNameStorage()
+const pairDeviceName = ref(readDeviceNamePreference(deviceNameStorage) ?? DEVICE_NAME_FALLBACK)
+const pairDeviceNameTouched = ref(false)
 const pairingTransactionId = ref('')
 const pairingStage = ref('idle')
 const pairingPin = ref('')
@@ -281,7 +309,7 @@ const unresolvedControlDomain = computed<ControlMutationDomain | undefined>(() =
   const domain = unresolvedDomain.value
   return domain && domain !== 'work' ? domain : undefined
 })
-const modalOpen = computed(() => directoryOpen.value || commandOpen.value || hostSettingsOpen.value || composerExpanded.value || !!confirmDialog.value)
+const modalOpen = computed(() => directoryOpen.value || commandOpen.value || hostSettingsOpen.value || composerExpanded.value || !!confirmDialog.value || !!imagePreview.value)
 const modelLabel = computed(() => {
   const model = selected.value?.executor.model
   return model ? `${model.provider}/${model.id}` : '—'
@@ -310,6 +338,9 @@ const connectionLabel = computed(() => {
 
 watch(draft, () => void nextTick(resizeComposer))
 watch(composerExpanded, () => void nextTick(resizeComposer))
+watch(detailMode, () => {
+  if (conversationState.value) applyConversationProjection(conversationState.value)
+})
 watch(() => extensionUi.toolsResetRevision, () => { toolExpansionOverrides.value = {} })
 watch(() => extensionUi.controller?.handle, (handle) => {
   if (!handle) restoreDocumentTitle()
@@ -362,6 +393,8 @@ watch(
       uploadDrafts.value = []
       queueNotice.value = ''
       queueOpen.value = false
+      resetConversationImages()
+      resetAttachmentPreviews()
     }
     if (hostIdentityChanged) restoredImageCounts.value = {}
     transientHostBoundary = hostId && generation != null ? { hostId, selectionGeneration: generation } : null
@@ -376,6 +409,7 @@ watch(
 
 onMounted(async () => {
   window.addEventListener('keydown', handleGlobalModalKeydown, true)
+  window.addEventListener('keydown', handleDesktopShortcut)
   if (isTauri) {
     unlisteners.push(
       await listen<{ hostId: string; selectionGeneration: number; instanceId: string; subscriptionId: string; event: ProjectedEvent }>('aludock://conversation-event', async ({ payload }) => {
@@ -419,11 +453,13 @@ onMounted(async () => {
     )
   }
   await app.load()
+  await initializePairDeviceName()
   if (!app.needsPairing) app.workDrawerOpen = !app.selectedWork
 })
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleGlobalModalKeydown, true)
+  window.removeEventListener('keydown', handleDesktopShortcut)
   unlisteners.forEach((unlisten) => unlisten())
   window.clearTimeout(reconnectTimer)
   for (const timer of followConnectionTimers.values()) window.clearTimeout(timer)
@@ -432,6 +468,8 @@ onUnmounted(() => {
   pendingFollowEvents.clear()
   if (projectionFrame) window.cancelAnimationFrame(projectionFrame)
   if (outputScrollFrame) window.cancelAnimationFrame(outputScrollFrame)
+  resetConversationImages()
+  resetAttachmentPreviews()
   void extensionUi.clear()
 })
 
@@ -507,8 +545,31 @@ async function confirmRestoredImagesBeforeHostTransition() {
   return !hasRestoredImageDrafts.value || await askConfirm('切换 Host？', '切换会移除尚未发送的已取回附件。')
 }
 
+async function initializePairDeviceName() {
+  const preferred = readDeviceNamePreference(deviceNameStorage)
+  const paired = app.activeHost?.deviceName
+  let system: string | null = null
+  if (!preferred && !paired) {
+    try { system = await getSystemDeviceName() } catch { /* the editable fallback remains available */ }
+  }
+  const resolved = resolveDeviceName(preferred, paired, system)
+  if (pairDeviceNameTouched.value) return
+  pairDeviceName.value = resolved
+}
+
+function rememberPairDeviceName() {
+  pairDeviceNameTouched.value = true
+  persistDeviceNamePreference(deviceNameStorage, pairDeviceName.value)
+}
+
 async function beginPairing(replacementHostId?: string) {
   if (!isTauri || contextTransitionBusy.value || !pairHost.value.trim() || !pairPort.value || pairPort.value < 1 || pairingStage.value === 'connecting') return
+  const deviceName = normalizeDeviceName(pairDeviceName.value)
+  if (!deviceName) {
+    pairingError.value = '请填写这台设备在 AluDock 中显示的名称。'
+    return
+  }
+  pairDeviceName.value = deviceName
   if (!replacementHostId && !await confirmRestoredImagesBeforeHostTransition()) return
   pairingTransactionId.value = ''
   pairingStage.value = 'connecting'
@@ -519,7 +580,7 @@ async function beginPairing(replacementHostId?: string) {
     pairingTransactionId.value = await startPairing(
       pairHost.value.trim(),
       pairPort.value,
-      pairDeviceName.value.trim() || 'AluDock Client',
+      deviceName,
       replacementHostId,
     )
   } catch (cause) {
@@ -576,6 +637,7 @@ function closeModal() {
   commandOpen.value = false
   hostSettingsOpen.value = false
   composerExpanded.value = false
+  imagePreview.value = null
 }
 
 function handleGlobalModalKeydown(event: KeyboardEvent) {
@@ -584,6 +646,47 @@ function handleGlobalModalKeydown(event: KeyboardEvent) {
   event.stopPropagation()
   if (confirmDialog.value) settleConfirm(false)
   else closeModal()
+}
+
+function handleDesktopShortcut(event: KeyboardEvent) {
+  if (!isTauri || event.defaultPrevented || event.isComposing || event.repeat || modalOpen.value) return
+  const key = event.key.toLowerCase()
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && key === 'k') {
+    if (!selected.value) return
+    event.preventDefault()
+    openControlCenter('commands')
+    return
+  }
+  if (event.altKey && !event.ctrlKey && !event.metaKey && !event.shiftKey && event.key === 'ArrowUp') {
+    if (!selected.value || selected.value.lifecycle !== 'active') return
+    event.preventDefault()
+    void restoreQueue()
+  }
+}
+
+function handleModalWheel(event: WheelEvent) {
+  const surface = modalSurface.value
+  if (!surface || event.ctrlKey) return
+  event.preventDefault()
+  event.stopPropagation()
+  const isScrollable = (element: HTMLElement) => {
+    const overflow = window.getComputedStyle(element).overflowY
+    return ['auto', 'scroll', 'overlay'].includes(overflow) && element.scrollHeight > element.clientHeight + 1
+  }
+  let scroller = event.target instanceof HTMLElement ? event.target : null
+  while (scroller && scroller !== surface && !isScrollable(scroller)) scroller = scroller.parentElement
+  if (!scroller || !surface.contains(scroller) || !isScrollable(scroller)) {
+    scroller = [...surface.querySelectorAll<HTMLElement>('*')]
+      .filter((element) => element.offsetParent !== null && isScrollable(element))
+      .sort((left, right) => right.clientHeight - left.clientHeight)[0] ?? null
+  }
+  if (!scroller) return
+  const scale = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+    ? 16
+    : event.deltaMode === WheelEvent.DOM_DELTA_PAGE
+      ? scroller.clientHeight
+      : 1
+  scroller.scrollTop += event.deltaY * scale
 }
 
 function handleModalKeydown(event: KeyboardEvent) {
@@ -673,6 +776,11 @@ function openHostSettings() {
 }
 
 function showHostPairingForm() {
+  pairDeviceName.value = resolveDeviceName(
+    readDeviceNamePreference(deviceNameStorage),
+    app.activeHost?.deviceName,
+    pairDeviceName.value,
+  )
   addingHost.value = true
   endpointFormOpen.value = false
 }
@@ -695,6 +803,11 @@ async function rePairActiveHost() {
 
   rePairing.value = true
   try {
+    pairDeviceName.value = resolveDeviceName(
+      readDeviceNamePreference(deviceNameStorage),
+      host.deviceName,
+      pairDeviceName.value,
+    )
     pairHost.value = endpoint.endpoint.host
     pairPort.value = endpoint.endpoint.port
     pairingStage.value = 'idle'
@@ -902,6 +1015,134 @@ function testStatusLabel(endpoint: HostEndpoint) {
   return `上次手动测试 ${timestamp} · ${test.reason}`
 }
 
+function setAttachmentPreview(key: string, resource: AttachmentPreviewResource) {
+  const previous = attachmentPreviews.value[key]
+  if (previous?.url && previous.url !== resource.url) URL.revokeObjectURL(previous.url)
+  attachmentPreviews.value = { ...attachmentPreviews.value, [key]: resource }
+}
+
+function removeAttachmentPreview(key: string) {
+  const resource = attachmentPreviews.value[key]
+  if (!resource) return
+  URL.revokeObjectURL(resource.url)
+  const next = { ...attachmentPreviews.value }
+  delete next[key]
+  attachmentPreviews.value = next
+  if (imagePreview.value?.kind === 'attachment' && imagePreview.value.attachmentKey === key) imagePreview.value = null
+}
+
+function moveAttachmentPreview(from: string, to: string) {
+  const resource = attachmentPreviews.value[from]
+  if (!resource || from === to) return
+  const next = { ...attachmentPreviews.value }
+  delete next[from]
+  const replaced = next[to]
+  if (replaced?.url !== resource.url) URL.revokeObjectURL(replaced.url)
+  next[to] = resource
+  attachmentPreviews.value = next
+  if (imagePreview.value?.kind === 'attachment' && imagePreview.value.attachmentKey === from) {
+    imagePreview.value = { ...imagePreview.value, attachmentKey: to }
+  }
+}
+
+function resetAttachmentPreviews() {
+  for (const resource of Object.values(attachmentPreviews.value)) URL.revokeObjectURL(resource.url)
+  attachmentPreviews.value = {}
+  if (imagePreview.value?.kind === 'attachment') imagePreview.value = null
+}
+
+function openAttachmentPreview(key: string, name: string) {
+  const resource = attachmentPreviews.value[key]
+  if (!resource) return
+  rememberModalTrigger()
+  imagePreview.value = {
+    kind: 'attachment',
+    attachmentKey: key,
+    url: resource.url,
+    name: name.replace(/[\\/]/g, '_'),
+  }
+}
+
+function attachmentCanPreview(mediaType?: string) {
+  return !!mediaType && ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(mediaType)
+}
+
+async function prepareAttachmentPreview(item: UploadDraft, workId: string, context: HostContext) {
+  if (!attachmentCanPreview(item.mediaType) || attachmentPreviews.value[item.token]) return
+  try {
+    const bytes = await loadAttachmentPreviewBytes(workId, item.token, context)
+    if (!app.contextMatches(context) || selected.value?.id !== workId || !uploadDrafts.value.some((candidate) => candidate.token === item.token)) return
+    const detectedMediaType = detectedRasterMimeType(bytes)
+    if (!detectedMediaType || detectedMediaType !== item.mediaType) return
+    const blobBytes = new Uint8Array(bytes.byteLength)
+    blobBytes.set(bytes)
+    setAttachmentPreview(item.token, {
+      mediaType: detectedMediaType,
+      url: URL.createObjectURL(new Blob([blobBytes.buffer], { type: detectedMediaType })),
+    })
+  } catch {
+    // A source may still be uploaded as an ordinary file when local raster preview is unavailable.
+  }
+}
+
+async function startAttachmentUploadWithPreview(item: UploadDraft, workId: string, context: HostContext) {
+  await prepareAttachmentPreview(item, workId, context)
+  if (!app.contextMatches(context) || selected.value?.id !== workId || !uploadDrafts.value.some((candidate) => candidate.token === item.token)) return
+  await startAttachmentUpload(item)
+}
+
+async function handleComposerPaste(event: ClipboardEvent) {
+  if (!isTauri) return
+  const images = [...(event.clipboardData?.items ?? [])]
+    .filter((item) => item.kind === 'file' && item.type.startsWith('image/'))
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => file !== null)
+  if (!images.length) return
+  event.preventDefault()
+  const work = selected.value
+  if (!work || work.lifecycle !== 'active' || pairingInProgress.value || attachmentPicking.value) {
+    submissionError.value = '当前暂时不能添加剪贴板图片，请稍后重试。'
+    return
+  }
+  const available = 32 - draftAttachments.value.length - uploadDrafts.value.length
+  if (images.length > available) {
+    submissionError.value = available > 0 ? `本条消息还可以添加 ${available} 个附件。` : '一条消息最多可附加 32 个文件。'
+    return
+  }
+  const context = hostContext()
+  const staged: UploadDraft[] = []
+  attachmentPicking.value = true
+  submissionError.value = null
+  try {
+    for (const [index, file] of images.entries()) {
+      const bytes = new Uint8Array(await file.arrayBuffer())
+      const mediaType = detectedRasterMimeType(bytes)
+      if (!mediaType) throw new Error('剪贴板图片不是可用的 PNG、JPEG、GIF 或 WebP 格式。')
+      const selectedAttachment = await stageClipboardImage(work.id, bytes, index + 1, context)
+      const draftItem: UploadDraft = { ...selectedAttachment, state: 'hashing', progress: 0 }
+      staged.push(draftItem)
+      if (!app.contextMatches(context) || selected.value?.id !== work.id) throw new Error('stale_attachment_context')
+      if (selectedAttachment.mediaType !== mediaType) throw new Error('剪贴板图片格式校验失败，请重新复制。')
+      const blobBytes = new Uint8Array(bytes.byteLength)
+      blobBytes.set(bytes)
+      setAttachmentPreview(draftItem.token, {
+        mediaType,
+        url: URL.createObjectURL(new Blob([blobBytes.buffer], { type: mediaType })),
+      })
+    }
+    uploadDrafts.value.push(...staged)
+    for (const item of staged) void startAttachmentUpload(item)
+  } catch (cause) {
+    for (const item of staged) {
+      removeAttachmentPreview(item.token)
+      void removeAttachment(work.id, item.token, context).catch(() => undefined)
+    }
+    if (app.contextMatches(context) && selected.value?.id === work.id) submissionError.value = errorMessage(cause)
+  } finally {
+    attachmentPicking.value = false
+  }
+}
+
 async function chooseAttachments() {
   const work = selected.value
   if (!work || !isTauri || work.lifecycle !== 'active' || pairingInProgress.value || attachmentPicking.value) return
@@ -928,7 +1169,7 @@ async function chooseAttachments() {
     }
     const drafts = picked.map<UploadDraft>((item) => ({ ...item, state: 'hashing', progress: 0 }))
     uploadDrafts.value.push(...drafts)
-    for (const item of drafts) void startAttachmentUpload(item)
+    for (const item of drafts) void startAttachmentUploadWithPreview(item, work.id, context)
   } catch (cause) {
     submissionError.value = errorMessage(cause)
   } finally {
@@ -946,6 +1187,7 @@ async function startAttachmentUpload(item: UploadDraft) {
   try {
     const result = await uploadAttachment(work.id, item.token, context)
     if (!app.contextMatches(context) || selected.value?.id !== work.id) return
+    moveAttachmentPreview(item.token, result.attachment.fileId)
     uploadDrafts.value = uploadDrafts.value.filter((candidate) => candidate.token !== item.token)
     if (!draftAttachments.value.some((candidate) => candidate.fileId === result.attachment.fileId)) {
       draftAttachments.value = [...draftAttachments.value, result.attachment]
@@ -967,11 +1209,13 @@ async function removeUpload(item: UploadDraft) {
   const work = selected.value
   if (!work) return
   uploadDrafts.value = uploadDrafts.value.filter((candidate) => candidate.token !== item.token)
+  removeAttachmentPreview(item.token)
   try { await removeAttachment(work.id, item.token, hostContext()) } catch { /* already cleared by a context change */ }
 }
 
 function removeUploaded(fileId: string) {
   draftAttachments.value = draftAttachments.value.filter((item) => item.fileId !== fileId)
+  removeAttachmentPreview(fileId)
 }
 
 async function clearQueueImages() {
@@ -992,7 +1236,7 @@ async function clearQueueImages() {
 
 async function restoreQueue(): Promise<boolean> {
   const work = selected.value
-  if (!work || pairingInProgress.value || clearingRestoredImages.value || queueRestoring.value || submitting.value) return false
+  if (!work || pairingInProgress.value || attachmentPicking.value || clearingRestoredImages.value || queueRestoring.value || submitting.value) return false
   queueRestoring.value = true
   submissionError.value = null
   queueNotice.value = ''
@@ -1171,11 +1415,179 @@ function showAgentActivity(workId: string) {
 
 function handleOutputScroll() {
   const surface = output.value
-  if (surface) autoFollowOutput = outputIsNearBottom(surface.scrollHeight, surface.scrollTop, surface.clientHeight)
+  if (!surface) return
+  autoFollowOutput = outputIsNearBottom(surface.scrollHeight, surface.scrollTop, surface.clientHeight)
+  outputAwayFromBottom.value = !autoFollowOutput
 }
 
 function handleOutputMediaLoad(event: Event) {
   if (event.target instanceof HTMLImageElement) scrollOutputToBottom()
+}
+
+const idleImageResource: ConversationImageResource = { state: 'idle' }
+
+function imageResource(part: ConversationImagePart): ConversationImageResource {
+  return imageResources.value[part.imageKey] ?? idleImageResource
+}
+
+function setImageResource(imageKey: string, resource: ConversationImageResource) {
+  const previous = imageResources.value[imageKey]
+  if (previous?.url && previous.url !== resource.url) URL.revokeObjectURL(previous.url)
+  imageResources.value = { ...imageResources.value, [imageKey]: resource }
+}
+
+function resetConversationImages() {
+  imageLoadEpoch += 1
+  for (const resource of Object.values(imageResources.value)) {
+    if (resource.url) URL.revokeObjectURL(resource.url)
+  }
+  imageResources.value = {}
+  if (imagePreview.value?.kind === 'conversation') imagePreview.value = null
+  imageDomainKey = ''
+}
+
+function syncImageDomain(context: HostContext, workId: string, hostEpoch: string, runtimeGeneration: number) {
+  const next = JSON.stringify([context.hostId, context.selectionGeneration, workId, hostEpoch, runtimeGeneration])
+  if (imageDomainKey && imageDomainKey !== next) resetConversationImages()
+  imageDomainKey = next
+}
+
+function pruneImageResources(items: ConversationItem[]) {
+  const active = new Set<string>()
+  for (const item of items) {
+    if (item.kind === 'image') active.add(item.imageKey)
+    else if (item.kind === 'record') {
+      for (const part of item.parts) if (part.kind === 'image') active.add(part.imageKey)
+    }
+  }
+  const next = { ...imageResources.value }
+  let changed = false
+  for (const [key, resource] of Object.entries(next)) {
+    if (active.has(key)) continue
+    if (resource.url) URL.revokeObjectURL(resource.url)
+    delete next[key]
+    changed = true
+    if (imagePreview.value?.kind === 'conversation' && imagePreview.value.imageKey === key) imagePreview.value = null
+  }
+  if (changed) imageResources.value = next
+}
+
+function applyConversationProjection(state: ConversationBootstrap) {
+  const projected = projectConversation(state, { compact: !detailMode.value })
+  realConversation.value = projected
+  pruneImageResources(projected)
+}
+
+function conversationHasImage(imageKey: string) {
+  return realConversation.value.some((item) => item.kind === 'image'
+    ? item.imageKey === imageKey
+    : item.kind === 'record' && item.parts.some((part) => part.kind === 'image' && part.imageKey === imageKey))
+}
+
+async function requestConversationImage(part: ConversationImagePart) {
+  const source = part.source
+  const state = conversationState.value
+  const work = selected.value
+  if (!source || !state || !work || imageResource(part).state === 'loading' || imageResource(part).state === 'ready') return
+  const capturedHost = hostContext()
+  const expectedEpoch = state.cursor.hostEpoch
+  const expectedGeneration = state.cursor.runtimeGeneration
+  const loadEpoch = imageLoadEpoch
+  setImageResource(part.imageKey, { state: 'loading' })
+  try {
+    let bytes: Uint8Array
+    let mediaType = part.mimeType
+    if (source.type === 'conversation') {
+      bytes = await loadConversationImageBytes(work.id, expectedEpoch, expectedGeneration, source.contentRef, source.mimeType, capturedHost)
+      mediaType = source.mimeType
+    } else if (source.type === 'published') {
+      bytes = await loadPublishedImageBytes(work.id, expectedEpoch, expectedGeneration, source.file, capturedHost)
+      mediaType = source.file.mediaType || ''
+    } else {
+      bytes = decodeInlineImage(source.data, source.mimeType)
+      mediaType = source.mimeType
+    }
+    if (loadEpoch !== imageLoadEpoch
+      || !app.contextMatches(capturedHost)
+      || selected.value?.id !== work.id
+      || conversationState.value?.cursor.hostEpoch !== expectedEpoch
+      || conversationState.value?.cursor.runtimeGeneration !== expectedGeneration
+      || !conversationHasImage(part.imageKey)) return
+    const detectedMediaType = detectedRasterMimeType(bytes)
+    if (!detectedMediaType || (mediaType && mediaType !== detectedMediaType)) throw new Error('图片数据格式无效。')
+    mediaType = detectedMediaType
+    const blobBytes = new Uint8Array(bytes.byteLength)
+    blobBytes.set(bytes)
+    const url = URL.createObjectURL(new Blob([blobBytes.buffer], { type: mediaType }))
+    setImageResource(part.imageKey, { state: 'ready', url })
+  } catch (cause) {
+    if (loadEpoch !== imageLoadEpoch || !app.contextMatches(capturedHost) || selected.value?.id !== work.id || !conversationHasImage(part.imageKey)) return
+    setImageResource(part.imageKey, { state: 'error', message: imageLoadMessage(cause) })
+  }
+}
+
+function decodeInlineImage(data: string, mimeType: string): Uint8Array {
+  if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(mimeType)
+    || data.length > Math.ceil((20 * 1024 * 1024) / 3) * 4
+    || data.length % 4 !== 0
+    || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) throw new Error('图片数据格式无效。')
+  let decoded = ''
+  try { decoded = window.atob(data) } catch { throw new Error('图片数据格式无效。') }
+  if (window.btoa(decoded) !== data) throw new Error('图片数据格式无效。')
+  const bytes = new Uint8Array(decoded.length)
+  for (let index = 0; index < decoded.length; index += 1) bytes[index] = decoded.charCodeAt(index)
+  if (detectedRasterMimeType(bytes) !== mimeType) throw new Error('图片数据格式无效。')
+  return bytes
+}
+
+function detectedRasterMimeType(bytes: Uint8Array): string {
+  if (bytes.length >= 8 && [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((value, index) => bytes[index] === value)) return 'image/png'
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
+  const header = bytes.length >= 6 ? String.fromCharCode(...bytes.subarray(0, 6)) : ''
+  if (header === 'GIF87a' || header === 'GIF89a') return 'image/gif'
+  if (bytes.length >= 12
+    && String.fromCharCode(...bytes.subarray(0, 4)) === 'RIFF'
+    && String.fromCharCode(...bytes.subarray(8, 12)) === 'WEBP') return 'image/webp'
+  return ''
+}
+
+function markConversationImageFailed(part: ConversationImagePart) {
+  if (imageResource(part).state !== 'ready') return
+  setImageResource(part.imageKey, { state: 'error', message: '图片内容无法解码，请重新读取。' })
+  if (imagePreview.value?.kind === 'conversation' && imagePreview.value.imageKey === part.imageKey) imagePreview.value = null
+}
+
+function markPreviewImageFailed() {
+  const preview = imagePreview.value
+  if (!preview) return
+  if (preview.kind === 'conversation') {
+    const resource = imageResources.value[preview.imageKey]
+    if (resource?.state === 'ready') setImageResource(preview.imageKey, { state: 'error', message: '图片内容无法解码，请重新读取。' })
+  } else {
+    removeAttachmentPreview(preview.attachmentKey)
+    submissionError.value = '这个图片附件无法预览，原附件仍保持不变。'
+  }
+  imagePreview.value = null
+}
+
+function imageLoadMessage(cause: unknown) {
+  const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
+  if (code === 'file_unavailable') return '图片已经失效，请让阿露重新发布。'
+  if (code === 'image_too_large') return '图片过大，当前设备无法安全预览。'
+  if (code === 'unsupported_image') return '图片格式无法安全显示。'
+  return errorMessage(cause, '图片暂时无法读取，请稍后重试。')
+}
+
+function openImagePreview(part: ConversationImagePart) {
+  const resource = imageResource(part)
+  if (resource.state !== 'ready' || !resource.url) return
+  rememberModalTrigger()
+  imagePreview.value = {
+    kind: 'conversation',
+    imageKey: part.imageKey,
+    url: resource.url,
+    name: (part.name || 'aludock-image').replace(/[\\/]/g, '_'),
+  }
 }
 
 function scrollOutputToBottom(force = false) {
@@ -1187,6 +1599,7 @@ function scrollOutputToBottom(force = false) {
     if (!surface) return
     surface.scrollTop = surface.scrollHeight
     autoFollowOutput = true
+    outputAwayFromBottom.value = false
   })
 }
 
@@ -1195,7 +1608,7 @@ function scheduleConversationProjection() {
   projectionFrame = window.requestAnimationFrame(() => {
     projectionFrame = 0
     if (conversationState.value) {
-      realConversation.value = projectConversation(conversationState.value)
+      applyConversationProjection(conversationState.value)
       scrollOutputToBottom()
     }
   })
@@ -1303,8 +1716,9 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
 
     const bufferedFollowStatus: FollowConnectionStatus | undefined = followActivation.activate(subscriptionId)
     app.applyWorkSnapshot(bootstrap.instance, capturedHost)
+    syncImageDomain(capturedHost, instanceId, bootstrap.cursor.hostEpoch, bootstrap.cursor.runtimeGeneration)
     conversationState.value = bootstrap
-    realConversation.value = projectConversation(bootstrap)
+    applyConversationProjection(bootstrap)
     scrollOutputToBottom(true)
     historyTruncated.value = bootstrap.historyTruncated
     historyBeforeEntryId.value = bootstrap.historyBeforeEntryId ?? null
@@ -1390,7 +1804,7 @@ async function loadEarlierHistory() {
     state.records = [...page.records, ...state.records]
     historyBeforeEntryId.value = page.nextBeforeEntryId ?? null
     historyTruncated.value = page.hasEarlier
-    realConversation.value = projectConversation(state)
+    applyConversationProjection(state)
     await nextTick()
     if (surface) {
       const nextAnchor = anchorId ? [...surface.querySelectorAll<HTMLElement>('[data-conversation-id]')].find((element) => element.dataset.conversationId === anchorId) : undefined
@@ -1564,6 +1978,27 @@ function resizeComposer() {
   textarea.style.height = `${Math.min(textarea.scrollHeight, limit)}px`
 }
 
+function handleComposerKeydown(event: KeyboardEvent, expanded = false) {
+  if (event.isComposing) return
+  const textarea = event.currentTarget as HTMLTextAreaElement
+  if (isTauri && event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && (event.key.toLowerCase() === 'j' || event.code === 'KeyJ')) {
+    event.preventDefault()
+    const start = textarea.selectionStart ?? textarea.value.length
+    const end = textarea.selectionEnd ?? start
+    textarea.setRangeText('\n', start, end, 'end')
+    draft.value = textarea.value
+    void nextTick(() => {
+      textarea.focus()
+      if (!expanded) resizeComposer()
+    })
+    return
+  }
+  if (!expanded && event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    event.preventDefault()
+    void submit()
+  }
+}
+
 function applyExtensionTitle(title: string) {
   document.title = title
 }
@@ -1694,19 +2129,19 @@ function handleOutputClick(event: MouseEvent) {
             <section v-if="recoverablePairings.length" class="pairing-recovery" aria-label="可恢复配对">
               <strong>可恢复的配对</strong><small>地址和设备名称已安全保存，不需要重新输入。</small>
               <article v-for="transaction in recoverablePairings" :key="transaction.transactionId">
-                <span><b>{{ transaction.deviceName || 'AluDock Client' }}</b><code>{{ transaction.host && transaction.port ? `${transaction.host}:${transaction.port}` : '旧版配对信息' }}</code></span>
+                <span><b>{{ transaction.deviceName || DEVICE_NAME_FALLBACK }}</b><code>{{ transaction.host && transaction.port ? `${transaction.host}:${transaction.port}` : '旧版配对信息' }}</code></span>
                 <div><button v-if="pairingTransactionId === transaction.transactionId && !['idle', 'failed', 'cancelled', 'completed'].includes(pairingStage)" type="button" class="button secondary" @click="stopPairing">取消</button><button v-else type="button" class="button secondary" :disabled="!transaction.recoverable" @click="resumeRecoveredPairing(transaction.transactionId)">恢复</button><button type="button" class="button secondary" :disabled="pairingTransactionId === transaction.transactionId && !['idle', 'failed', 'cancelled', 'completed'].includes(pairingStage)" @click="discardRecoveredPairing(transaction.transactionId)">丢弃</button></div>
               </article>
             </section>
             <label><span>IP 地址或域名</span><input v-model="pairHost" autocomplete="off" spellcheck="false" placeholder="例如 192.168.1.20 或 dock.example.com" :disabled="!['idle', 'failed', 'cancelled'].includes(pairingStage)" /></label>
             <label><span>端口</span><input v-model.number="pairPort" type="number" inputmode="numeric" min="1" max="65535" placeholder="从电脑端 AluDock 查看" :disabled="!['idle', 'failed', 'cancelled'].includes(pairingStage)" /></label>
-            <label><span>这台设备的名称</span><input v-model="pairDeviceName" maxlength="128" placeholder="例如 我的手机" :disabled="!['idle', 'failed', 'cancelled'].includes(pairingStage)" /></label>
+            <label><span>这台设备的名称</span><input v-model="pairDeviceName" maxlength="128" required autocomplete="off" placeholder="例如 NUC14 或我的 MacBook" :disabled="!['idle', 'failed', 'cancelled'].includes(pairingStage)" @input="rememberPairDeviceName" /><small class="pairing-field-hint">显示在电脑端；修改后会在重新配对时沿用。</small></label>
             <div v-if="pairingPin" class="pairing-pin"><small>请在电脑上的 AluDock 中输入</small><strong>{{ pairingPin }}</strong><span>不要把配对码发给其他人</span></div>
             <div v-if="pairingMessage" class="pairing-progress"><span class="alu-spinner" />{{ pairingMessage }}</div>
             <div v-if="pairingError" class="directory-error">{{ pairingError }}</div>
             <div class="pairing-actions">
               <button v-if="!['idle', 'failed', 'cancelled', 'completed'].includes(pairingStage)" type="button" class="button secondary" @click="stopPairing">取消</button>
-              <button v-else type="submit" class="button primary" :disabled="!pairHost.trim() || !pairPort">{{ pairingStage === 'failed' ? '重新尝试' : '开始配对' }}</button>
+              <button v-else type="submit" class="button primary" :disabled="!pairHost.trim() || !pairPort || !pairDeviceName.trim()">{{ pairingStage === 'failed' ? '重新尝试' : '开始配对' }}</button>
             </div>
           </form>
           <ol class="pairing-guide">
@@ -1783,7 +2218,7 @@ function handleOutputClick(event: MouseEvent) {
             <article v-if="row.kind === 'user'" class="msg-user" :data-conversation-id="row.id" :aria-label="`你的消息 ${row.time}`">
               <div class="msg-user-bubble">
                 <div class="msg-user-top"><span class="msg-user-prefix">&gt;</span><span v-if="row.text" class="msg-user-text">{{ row.text }}</span></div>
-                <div v-if="row.attachments?.length" class="message-attachments"><AttachmentCard v-for="attachment in row.attachments" :key="attachment.fileId" compact :name="attachment.name" :size-bytes="attachment.sizeBytes" :media-type="attachment.mediaType" /></div>
+                <div v-if="row.attachments?.length" class="message-attachments"><AttachmentCard v-for="attachment in row.attachments" :key="attachment.fileId" compact :name="attachment.name" :size-bytes="attachment.sizeBytes" :media-type="attachment.mediaType" :previewable="!!attachmentPreviews[attachment.fileId]" @preview="openAttachmentPreview(attachment.fileId, attachment.name)" /></div>
                 <div class="msg-timestamp">{{ row.time }}</div>
               </div>
             </article>
@@ -1791,7 +2226,7 @@ function handleOutputClick(event: MouseEvent) {
             <article v-else-if="row.kind === 'assistant-group'" class="alu-msg-assistant-row" :data-conversation-id="row.id" :aria-label="`阿露回复 ${row.time}`">
               <img src="./assets/console_icon_small.png" alt="阿露" class="alu-msg-avatar" />
               <div class="alu-msg-assistant-content">
-                <div class="alu-msg-assistant-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :tool-open="toolDetailOpen" @tool-toggle="rememberToolDetail" /></div>
+                <div class="alu-msg-assistant-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div>
                 <div v-if="row.time" class="msg-assistant-timestamp">{{ row.time }}</div>
               </div>
             </article>
@@ -1801,9 +2236,9 @@ function handleOutputClick(event: MouseEvent) {
               <div class="alu-msg-assistant-content"><div class="alu-msg-assistant-body"><div class="alu-agent-activity" role="status" aria-label="正在处理" title="正在处理"><span class="alu-agent-activity-spinner" aria-hidden="true" /></div></div></div>
             </article>
 
-            <details v-else-if="row.kind === 'record' && row.folded" class="alu-record-panel alu-hideable" :class="row.panelClass" :data-conversation-id="row.id"><summary>{{ row.title }}</summary><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :tool-open="toolDetailOpen" @tool-toggle="rememberToolDetail" /></div></details>
+            <details v-else-if="row.kind === 'record' && row.folded" class="alu-record-panel alu-hideable" :class="row.panelClass" :data-conversation-id="row.id"><summary>{{ row.title }}</summary><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></details>
 
-            <section v-else-if="row.kind === 'record'" class="alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id"><div class="alu-record-title alu-hideable">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :tool-open="toolDetailOpen" @tool-toggle="rememberToolDetail" /></div></section>
+            <section v-else-if="row.kind === 'record'" class="alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id"><div class="alu-record-title alu-hideable">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></section>
 
             <div v-else class="alu-live-notice-row alu-hideable" :data-conversation-id="row.id"><div :class="row.tone === 'error' ? 'msg-error' : row.tone === 'warning' ? 'msg-warning' : 'msg-notice'">{{ row.text }}</div></div>
           </template>
@@ -1817,21 +2252,22 @@ function handleOutputClick(event: MouseEvent) {
     </main>
 
     <section v-if="selected && selected.lifecycle === 'active'" class="alu-input-section" aria-label="消息编辑器">
+      <button v-if="outputAwayFromBottom" type="button" class="alu-scroll-bottom" aria-label="滚动到最新消息" @click="scrollOutputToBottom(true)"><span aria-hidden="true">↓</span>滚到底部</button>
       <ExtensionUiSurface :work="selected" :reconcile-interaction="reconcileExtensionInteraction" @editor-text="applyExtensionEditorText" @title="applyExtensionTitle">
         <div v-if="submissionError" class="alu-composer-error"><span>{{ submissionError }}</span><button v-if="mutationOutcomeUnknown" @click="reconcileMutationOutcome()">刷新并确认</button></div>
         <div v-if="queueNotice" class="alu-composer-notice" role="status">{{ queueNotice }}<button type="button" @click="queueNotice = ''">×</button></div>
         <div v-if="selected.pending.total" class="alu-queue-tray">
           <span class="alu-queue-title">Queue · {{ selected.pending.total }}</span>
           <span class="alu-queue-preview">{{ queueItems.map(item => item.text.trim() || (item.imageCount || item.attachments.length ? '[附件]' : '')).filter(Boolean).join(' · ') }}</span>
-          <button type="button" class="alu-queue-restore" :disabled="!isTauri || queueRestoring || submitting" @click="restoreQueue">{{ queueRestoring ? '取回中…' : '取回' }}</button>
+          <button type="button" class="alu-queue-restore" title="取回 Queue（Alt+↑）" aria-keyshortcuts="Alt+ArrowUp" :disabled="!isTauri || attachmentPicking || queueRestoring || submitting" @click="restoreQueue">{{ queueRestoring ? '取回中…' : '取回' }}</button>
         </div>
         <div v-if="uploadDrafts.length || draftAttachments.length || restoredImageCount" class="alu-native-attachments" aria-label="已选附件">
-          <AttachmentCard v-for="item in uploadDrafts" :key="item.token" :name="item.name" :size-bytes="item.sizeBytes" :media-type="item.mediaType" :state="item.state" :progress="item.progress" :message="item.error" :retryable="item.state === 'error'" :cancellable="item.state !== 'error'" :removable="item.state === 'error'" @retry="startAttachmentUpload(item)" @cancel="cancelUpload(item)" @remove="removeUpload(item)" />
-          <AttachmentCard v-for="attachment in draftAttachments" :key="attachment.fileId" :name="attachment.name" :size-bytes="attachment.sizeBytes" :media-type="attachment.mediaType" removable @remove="removeUploaded(attachment.fileId)" />
+          <AttachmentCard v-for="item in uploadDrafts" :key="item.token" :name="item.name" :size-bytes="item.sizeBytes" :media-type="item.mediaType" :state="item.state" :progress="item.progress" :message="item.error" :retryable="item.state === 'error'" :cancellable="item.state !== 'error'" :removable="item.state === 'error'" :previewable="!!attachmentPreviews[item.token]" @preview="openAttachmentPreview(item.token, item.name)" @retry="startAttachmentUpload(item)" @cancel="cancelUpload(item)" @remove="removeUpload(item)" />
+          <AttachmentCard v-for="attachment in draftAttachments" :key="attachment.fileId" :name="attachment.name" :size-bytes="attachment.sizeBytes" :media-type="attachment.mediaType" :previewable="!!attachmentPreviews[attachment.fileId]" removable @preview="openAttachmentPreview(attachment.fileId, attachment.name)" @remove="removeUploaded(attachment.fileId)" />
           <div v-if="restoredImageCount" class="alu-restored-images"><span>已取回 {{ restoredImageCount }} 个附件</span><button type="button" :disabled="clearingRestoredImages" @click="clearQueueImages">{{ clearingRestoredImages ? '移除中…' : '移除' }}</button></div>
         </div>
         <form class="alu-input-wrap" @submit.prevent="submit">
-          <textarea ref="composerTextarea" v-model="draft" rows="1" :disabled="conversationLoading" placeholder="输入消息…" @input="resizeComposer" @keydown.enter.exact.prevent="submit" />
+          <textarea ref="composerTextarea" v-model="draft" rows="1" :disabled="conversationLoading" placeholder="输入消息…" title="Enter 发送 · Shift+Enter / Ctrl+J 换行" aria-keyshortcuts="Control+J" @input="resizeComposer" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event)" />
           <button type="button" class="alu-composer-expand" title="展开编辑" aria-label="展开编辑" :disabled="conversationLoading" @click="rememberModalTrigger(); composerExpanded = true">↗</button>
           <button class="alu-send-btn" type="submit" :disabled="(!draft.trim() && !draftAttachments.length && !restoredImageCount) || !isTauri || conversationLoading || submitting || queueRestoring || attachmentPicking || mutationOutcomeUnknown || uploadDrafts.length > 0">{{ submitting ? '发送中…' : '发送' }}</button>
         </form>
@@ -1849,7 +2285,7 @@ function handleOutputClick(event: MouseEvent) {
           <div class="alu-bar-sep" />
           <button class="alu-bar-btn" title="刷新" @click="refreshCurrent">↻<span class="sm-inline">刷新</span></button>
           <button class="alu-bar-btn" :class="{ 'alu-bar-btn-toggle-active': !detailMode }" title="切换显示模式" @click="detailMode = !detailMode"><span>▤</span><span>{{ detailMode ? '详细' : '简洁' }}</span></button>
-          <button class="alu-bar-btn" @click="openControlCenter('commands')"><kbd>⌘K</kbd><span class="sm-inline">命令</span></button>
+          <button class="alu-bar-btn" :title="`打开命令中心（${commandShortcutLabel}）`" aria-keyshortcuts="Control+K Meta+K" @click="openControlCenter('commands')"><kbd>{{ commandShortcutLabel }}</kbd><span class="sm-inline">命令</span></button>
           <button class="alu-bar-btn alu-bar-btn-abort" :disabled="!isTauri || aborting || mutationOutcomeUnknown || selected.execution !== 'running'" @click="abortCurrentRun">⏹<span class="sm-inline">{{ aborting ? '中止中' : '中止' }}</span></button>
         </div>
       </div>
@@ -1886,11 +2322,21 @@ function handleOutputClick(event: MouseEvent) {
     </aside>
 
     <Transition name="fade">
-      <div v-if="composerExpanded" class="ui-dialog-overlay" role="presentation" @keydown="handleModalKeydown">
-        <section ref="modalSurface" class="ui-dialog-box ui-dialog-box-composer ui-dialog-size-wide" role="dialog" aria-modal="true" aria-labelledby="expanded-composer-title" tabindex="-1">
+      <div v-if="imagePreview" class="alu-image-preview-overlay" role="presentation" @click.self="closeModal" @keydown="handleModalKeydown" @wheel.prevent.stop>
+        <section ref="modalSurface" class="alu-image-preview" role="dialog" aria-modal="true" aria-label="图片预览" tabindex="-1" @wheel="handleModalWheel">
+          <button type="button" class="alu-image-preview-close" aria-label="关闭图片预览" data-modal-initial @click="closeModal">×</button>
+          <img :src="imagePreview.url" :alt="imagePreview.name" @error="markPreviewImageFailed" />
+          <footer><span>{{ imagePreview.name }}</span><a :href="imagePreview.url" :download="imagePreview.name">下载</a></footer>
+        </section>
+      </div>
+    </Transition>
+
+    <Transition name="fade">
+      <div v-if="composerExpanded" class="ui-dialog-overlay" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
+        <section ref="modalSurface" class="ui-dialog-box ui-dialog-box-composer ui-dialog-size-wide" role="dialog" aria-modal="true" aria-labelledby="expanded-composer-title" tabindex="-1" @wheel="handleModalWheel">
           <header class="ui-dialog-header"><div id="expanded-composer-title" class="ui-dialog-title">编辑消息</div></header>
           <button class="ui-dialog-close" aria-label="关闭" @click="composerExpanded = false">×</button>
-          <textarea v-model="draft" class="ui-dialog-composer-editor" rows="12" placeholder="输入多行消息…" />
+          <textarea v-model="draft" class="ui-dialog-composer-editor" rows="12" placeholder="输入多行消息…" title="Ctrl+J 换行" aria-keyshortcuts="Control+J" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event, true)" />
           <footer class="ui-dialog-actions ui-dialog-composer-footer">
             <span class="ui-dialog-composer-attachments">{{ draftAttachments.length + restoredImageCount ? `已附加 ${draftAttachments.length + restoredImageCount} 个文件` : '未附加文件' }}</span>
             <span v-if="submissionError" class="ui-dialog-composer-status">未发送，内容已保留。</span>
@@ -1901,8 +2347,8 @@ function handleOutputClick(event: MouseEvent) {
     </Transition>
 
     <Transition name="fade">
-      <div v-if="commandOpen && selected" :class="controlSection === 'commands' ? 'cmd-palette-overlay' : 'ui-dialog-overlay'" role="presentation" @keydown="handleModalKeydown">
-        <section ref="modalSurface" :class="controlSection === 'commands' ? 'cmd-palette-box' : controlDialogClasses(controlSection)" role="dialog" aria-modal="true" tabindex="-1" :aria-label="controlDialogTitle(controlSection)">
+      <div v-if="commandOpen && selected" :class="controlSection === 'commands' ? 'cmd-palette-overlay' : 'ui-dialog-overlay'" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
+        <section ref="modalSurface" :class="controlSection === 'commands' ? 'cmd-palette-box' : controlDialogClasses(controlSection)" role="dialog" aria-modal="true" tabindex="-1" :aria-label="controlDialogTitle(controlSection)" @wheel="handleModalWheel">
           <template v-if="controlSection !== 'commands'"><header class="ui-dialog-header"><div class="ui-dialog-title">{{ controlTitleOverride || controlDialogTitle(controlSection) }}</div><div v-if="controlBodyOverride || (!controlTitleOverride && controlDialogBody(controlSection))" class="ui-dialog-body">{{ controlBodyOverride || controlDialogBody(controlSection) }}</div></header><button class="ui-dialog-close" aria-label="关闭" @click="closeModal">×</button></template>
           <ControlCenter
             ref="controlCenterRef"
@@ -1928,8 +2374,8 @@ function handleOutputClick(event: MouseEvent) {
     </Transition>
 
     <Transition name="fade">
-      <div v-if="directoryOpen || hostSettingsOpen" :class="directoryOpen ? 'ui-dialog-overlay' : 'modal-layer'" role="presentation" @keydown="handleModalKeydown">
-        <section ref="modalSurface" :class="directoryOpen ? ['ui-dialog-box', 'ui-dialog-size-wide'] : 'host-settings-surface'" role="dialog" aria-modal="true" tabindex="-1" :aria-labelledby="directoryOpen ? 'directory-title' : 'host-settings-title'">
+      <div v-if="directoryOpen || hostSettingsOpen" :class="directoryOpen ? 'ui-dialog-overlay' : 'modal-layer'" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
+        <section ref="modalSurface" :class="directoryOpen ? ['ui-dialog-box', 'ui-dialog-size-wide'] : 'host-settings-surface'" role="dialog" aria-modal="true" tabindex="-1" :aria-labelledby="directoryOpen ? 'directory-title' : 'host-settings-title'" @wheel="handleModalWheel">
           <template v-if="directoryOpen"><header class="ui-dialog-header"><div id="directory-title" class="ui-dialog-title">选择工作目录</div><div class="ui-dialog-body">{{ workspace?.path || workspacePath }}{{ workspace ? `\n${workspace.truncated ? `显示前 ${workspace.entries.length} / ${workspace.total} 个目录` : `${workspace.total} 个子目录`}` : '' }}</div></header><button class="ui-dialog-close" aria-label="关闭" @click="closeModal">×</button></template>
           <header v-else class="host-settings-header">
             <div class="host-settings-heading"><img src="./assets/aludock-icon.png" alt="" /><div><h2 id="host-settings-title">Host 设置</h2><p>{{ app.payload?.host.profile.displayName || '管理已配对的 AluDock' }}</p></div></div>
@@ -1968,7 +2414,7 @@ function handleOutputClick(event: MouseEvent) {
             <section v-if="recoverablePairings.length" class="pairing-card pairing-recovery" aria-label="可恢复配对">
               <div class="pairing-card-title"><RotateCcw :size="18" /><div><strong>可恢复的配对</strong><small>继续时直接使用已保存地址，不需要重新输入。</small></div></div>
               <article v-for="transaction in recoverablePairings" :key="transaction.transactionId">
-                <span><b>{{ transaction.deviceName || 'AluDock Client' }}</b><code>{{ transaction.host && transaction.port ? `${transaction.host}:${transaction.port}` : '旧版配对信息' }}</code></span>
+                <span><b>{{ transaction.deviceName || DEVICE_NAME_FALLBACK }}</b><code>{{ transaction.host && transaction.port ? `${transaction.host}:${transaction.port}` : '旧版配对信息' }}</code></span>
                 <div><button v-if="pairingTransactionId === transaction.transactionId && !['idle', 'failed', 'cancelled', 'completed'].includes(pairingStage)" type="button" class="button secondary" @click="stopPairing">取消</button><button v-else type="button" class="button secondary" :disabled="contextTransitionBusy || !transaction.recoverable" @click="resumeRecoveredPairing(transaction.transactionId)">恢复</button><button type="button" class="button secondary" :disabled="contextTransitionBusy || (pairingTransactionId === transaction.transactionId && !['idle', 'failed', 'cancelled', 'completed'].includes(pairingStage))" @click="discardRecoveredPairing(transaction.transactionId)">丢弃</button></div>
               </article>
             </section>
@@ -1976,11 +2422,11 @@ function handleOutputClick(event: MouseEvent) {
               <div class="pairing-card-title"><Link :size="18" /><div><strong>连接新的 AluDock</strong><small>配对验证完成后才会加入列表并激活</small></div><button type="button" class="host-inline-close" aria-label="收起配对表单" @click="addingHost = false"><X :size="15" /></button></div>
               <label><span>IP 地址或域名</span><input v-model="pairHost" autocomplete="off" spellcheck="false" placeholder="192.168.1.20 或 dock.example.com" :disabled="!['idle', 'failed', 'cancelled'].includes(pairingStage)" /></label>
               <label><span>端口</span><input v-model.number="pairPort" type="number" min="1" max="65535" /></label>
-              <label><span>这台设备的名称</span><input v-model="pairDeviceName" maxlength="128" /></label>
+              <label><span>这台设备的名称</span><input v-model="pairDeviceName" maxlength="128" required autocomplete="off" placeholder="例如 NUC14 或我的 MacBook" @input="rememberPairDeviceName" /><small class="pairing-field-hint">显示在电脑端；修改后会在重新配对时沿用。</small></label>
               <div v-if="pairingPin" class="pairing-pin"><small>请在电脑上的 AluDock 中输入</small><strong>{{ pairingPin }}</strong></div>
               <div v-if="pairingMessage" class="pairing-progress">{{ pairingMessage }}</div>
               <div v-if="pairingError" class="directory-error">{{ pairingError }}</div>
-              <div class="pairing-actions"><button v-if="!['idle', 'failed', 'cancelled', 'completed'].includes(pairingStage)" type="button" class="button secondary" @click="stopPairing">停止等待</button><button v-else class="button primary" :disabled="contextTransitionBusy || !pairHost.trim() || !pairPort">开始配对</button></div>
+              <div class="pairing-actions"><button v-if="!['idle', 'failed', 'cancelled', 'completed'].includes(pairingStage)" type="button" class="button secondary" @click="stopPairing">停止等待</button><button v-else class="button primary" :disabled="contextTransitionBusy || !pairHost.trim() || !pairPort || !pairDeviceName.trim()">开始配对</button></div>
             </form>
             <form class="host-profile-form" @submit.prevent="saveHostDisplayName">
               <div><strong>Host 名称</strong><small>仅修改这台已配对 Host 在客户端中的显示名称，不会改变地址或配对身份。</small></div>
@@ -2034,8 +2480,8 @@ function handleOutputClick(event: MouseEvent) {
     </Transition>
 
     <Transition name="fade">
-      <div v-if="confirmDialog" class="ui-dialog-overlay" role="presentation" @keydown="handleModalKeydown">
-        <section ref="modalSurface" class="ui-dialog-box ui-dialog-box-confirm" role="dialog" aria-modal="true" tabindex="-1" :aria-label="confirmDialog.title">
+      <div v-if="confirmDialog" class="ui-dialog-overlay" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
+        <section ref="modalSurface" class="ui-dialog-box ui-dialog-box-confirm" role="dialog" aria-modal="true" tabindex="-1" :aria-label="confirmDialog.title" @wheel="handleModalWheel">
           <header class="ui-dialog-header"><div class="ui-dialog-title">{{ confirmDialog.title }}</div><div v-if="confirmDialog.body" class="ui-dialog-body">{{ confirmDialog.body }}</div></header>
           <div class="ui-dialog-btn-row"><button class="ui-dialog-btn" @click="settleConfirm(false)">取消</button><button class="ui-dialog-btn ui-dialog-btn-primary" data-modal-initial @click="settleConfirm(true)">确认</button></div>
         </section>
