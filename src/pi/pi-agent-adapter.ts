@@ -46,6 +46,7 @@ import {
   type ImagePathDto,
   type JsonValue,
   type PublishedFileDto,
+  MAX_CONVERSATION_CHUNK_CHARS,
 } from "../core/instance-dto.js";
 import { sliceSemanticHistory, slimSemanticHistoryEntry } from "../core/history-pagination.js";
 import { projectBuiltInToolPresentation } from "../core/tool-result-presentation.js";
@@ -110,7 +111,7 @@ import { GitBranchObserver, type GitBranchObserverPort } from "./git-branch-obse
 import { createPiExtensionUiContext } from "./pi-extension-ui-adapter.js";
 import { piToolResultNormalizerExtension } from "./pi-tool-result-normalizer.js";
 import { TransientFileRegistry } from "./transient-file-registry.js";
-import { ownCanonicalShowImage, publishedFileFailureFromDetails, publishedFileFromDetails, redactShowImageResult, showImageExtension } from "./show-image-extension.js";
+import { ownCanonicalShowImage, publishedFileFailureFromDetails, publishedFileFromDetails, redactShowImageResult, showImageExtension, SHOW_IMAGE_UNAVAILABLE_MESSAGE } from "./show-image-extension.js";
 import {
   applyPiSetting,
   assertPiSettingUpdate,
@@ -670,7 +671,7 @@ export class PiAgentAdapter {
       const block = blocks[blockIndex]!;
       if (block.type === "text" || block.type === "thinking") {
         const remaining = Math.max(1, 64_000 - chars);
-        const end = unicodeSafeEnd(block.text, Math.min(block.text.length, offset + Math.min(32_000, remaining)));
+        const end = unicodeSafeEnd(block.text, Math.min(block.text.length, offset + Math.min(MAX_CONVERSATION_CHUNK_CHARS, remaining)));
         const text = block.text.slice(offset, end);
         const blockComplete = end >= block.text.length;
         chunks.push({ blockIndex, type: block.type, text, offset, blockComplete });
@@ -678,7 +679,7 @@ export class PiAgentAdapter {
         if (blockComplete) { blockIndex += 1; offset = 0; } else { offset = end; break; }
       } else if (block.type === "image") {
         const remaining = Math.max(1, 64_000 - chars);
-        const end = unicodeSafeEnd(block.data, Math.min(block.data.length, offset + Math.min(32_000, remaining)));
+        const end = unicodeSafeEnd(block.data, Math.min(block.data.length, offset + Math.min(MAX_CONVERSATION_CHUNK_CHARS, remaining)));
         const data = block.data.slice(offset, end);
         const blockComplete = end >= block.data.length;
         chunks.push({ ...block, blockIndex, data, offset, blockComplete });
@@ -686,7 +687,7 @@ export class PiAgentAdapter {
         if (blockComplete) { blockIndex += 1; offset = 0; } else { offset = end; break; }
       } else if (block.type === "tool_call") {
         const remaining = Math.max(1, 64_000 - chars);
-        const end = unicodeSafeEnd(block.argumentsJson, Math.min(block.argumentsJson.length, offset + Math.min(32_000, remaining)));
+        const end = unicodeSafeEnd(block.argumentsJson, Math.min(block.argumentsJson.length, offset + Math.min(MAX_CONVERSATION_CHUNK_CHARS, remaining)));
         const argumentsJson = block.argumentsJson.slice(offset, end);
         const blockComplete = end >= block.argumentsJson.length;
         chunks.push({ ...block, blockIndex, argumentsJson, offset, blockComplete });
@@ -694,7 +695,7 @@ export class PiAgentAdapter {
         if (blockComplete) { blockIndex += 1; offset = 0; } else { offset = end; break; }
       } else if (block.type === "tool_result") {
         const remaining = Math.max(1, 64_000 - chars);
-        const end = unicodeSafeEnd(block.text, Math.min(block.text.length, offset + Math.min(32_000, remaining)));
+        const end = unicodeSafeEnd(block.text, Math.min(block.text.length, offset + Math.min(MAX_CONVERSATION_CHUNK_CHARS, remaining)));
         const text = block.text.slice(offset, end);
         const blockComplete = end >= block.text.length;
         chunks.push({ ...block, blockIndex, text, offset, blockComplete });
@@ -2068,7 +2069,7 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
           type: "tool_result",
           toolCallId,
           toolName,
-          text: toolName === "show_image" ? projectedToolResult?.text ?? "This image is no longer available. Ask the Agent to publish it again." : redactDockAttachmentToolResult(toolName, typeof item.text === "string" ? item.text : ""),
+          text: toolName === "show_image" ? projectedToolResult?.text ?? SHOW_IMAGE_UNAVAILABLE_MESSAGE : redactDockAttachmentToolResult(toolName, typeof item.text === "string" ? item.text : ""),
           isError,
           ...(projectedToolResult?.type !== "tool_result" || projectedToolResult.publishedFile === undefined ? {} : { publishedFile: projectedToolResult.publishedFile }),
         }];

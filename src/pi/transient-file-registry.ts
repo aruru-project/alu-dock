@@ -4,6 +4,7 @@ import { open, realpath, stat } from "node:fs/promises";
 import { basename, extname, isAbsolute, resolve } from "node:path";
 
 import { AgentConversationCursorError, type AgentConversationContentPage } from "../core/agent-worker.js";
+import { MAX_CONVERSATION_CHUNK_CHARS } from "../core/instance-dto.js";
 import {
   MAX_PUBLISHED_FILE_BYTES,
   MAX_PUBLISHED_FILE_CHUNK_BYTES,
@@ -55,8 +56,12 @@ export class TransientFileRegistry {
   }
 
   owns(file: PublishedFileDto): boolean {
-    const entry = this.files.get(file.fileRef);
-    return entry !== undefined && JSON.stringify(entry.dto) === JSON.stringify(file);
+    const dto = this.files.get(file.fileRef)?.dto;
+    return dto !== undefined
+      && dto.presentation === file.presentation
+      && dto.name === file.name
+      && dto.sizeBytes === file.sizeBytes
+      && dto.mediaType === file.mediaType;
   }
 
   registerImage(data: string, mimeType: string): string {
@@ -89,7 +94,7 @@ export class TransientFileRegistry {
       if (!continuation || continuation.contentRef !== contentRef) throw new AgentConversationCursorError("This image continuation has expired. Reload the conversation and try again.");
       offset = continuation.offset;
     }
-    const end = Math.min(image.data.length, offset + 32_000);
+    const end = Math.min(image.data.length, offset + MAX_CONVERSATION_CHUNK_CHARS);
     if (end <= offset) throw new PublishedFileUnavailableError();
     const blockComplete = end === image.data.length;
     const chunks = [{ blockIndex: 0, type: "image" as const, mimeType: image.mimeType, data: image.data.slice(offset, end), offset, blockComplete }];
@@ -118,7 +123,6 @@ export class TransientFileRegistry {
       }
       if (read !== count || read === 0) throw new PublishedFileUnavailableError();
       assertUnchanged(entry, await handle.stat());
-      assertUnchanged(entry, await stat(entry.path));
       const nextOffset = offset + read;
       const complete = nextOffset === info.size;
       return { file: structuredClone(entry.dto), offset, data: bytes.toString("base64"), complete, ...(complete ? {} : { nextOffset }) };

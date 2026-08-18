@@ -10,6 +10,7 @@ import {
   type AttachmentUploadResult,
 } from "../core/instance-attachments.js";
 import { MAX_INSTANCE_DISPLAY_NAME_CHARS } from "../core/instance-display-name.js";
+import { MAX_CONVERSATION_CHUNK_CHARS } from "../core/instance-dto.js";
 import {
   MAX_PUBLISHED_FILE_BYTES,
   MAX_PUBLISHED_FILE_CHUNK_BYTES,
@@ -1252,7 +1253,7 @@ function parseConversationContentChunk(input: unknown, field: string): Conversat
     return {
       blockIndex,
       type,
-      text: payloadFreeBoundedString(chunk.text, `${field}.text`, 32_000),
+      text: payloadFreeBoundedString(chunk.text, `${field}.text`, MAX_CONVERSATION_CHUNK_CHARS),
       offset: unsigned(chunk.offset, `${field}.offset`),
       blockComplete: boolean(chunk.blockComplete, `${field}.blockComplete`),
     };
@@ -1263,7 +1264,7 @@ function parseConversationContentChunk(input: unknown, field: string): Conversat
       blockIndex,
       type,
       mimeType: imageMimeType(chunk.mimeType, `${field}.mimeType`),
-      data: boundedString(chunk.data, `${field}.data`, 32_000),
+      data: boundedString(chunk.data, `${field}.data`, MAX_CONVERSATION_CHUNK_CHARS),
       offset: unsigned(chunk.offset, `${field}.offset`),
       blockComplete: boolean(chunk.blockComplete, `${field}.blockComplete`),
     };
@@ -1275,7 +1276,7 @@ function parseConversationContentChunk(input: unknown, field: string): Conversat
       type,
       toolCallId: id(chunk.toolCallId, `${field}.toolCallId`),
       toolName: string(chunk.toolName, `${field}.toolName`, 256),
-      argumentsJson: payloadFreeBoundedString(chunk.argumentsJson, `${field}.argumentsJson`, 32_000),
+      argumentsJson: payloadFreeBoundedString(chunk.argumentsJson, `${field}.argumentsJson`, MAX_CONVERSATION_CHUNK_CHARS),
       offset: unsigned(chunk.offset, `${field}.offset`),
       blockComplete: boolean(chunk.blockComplete, `${field}.blockComplete`),
     };
@@ -1288,7 +1289,7 @@ function parseConversationContentChunk(input: unknown, field: string): Conversat
       type,
       toolCallId: id(chunk.toolCallId, `${field}.toolCallId`),
       toolName: string(chunk.toolName, `${field}.toolName`, 256),
-      text: payloadFreeBoundedString(chunk.text, `${field}.text`, 32_000),
+      text: payloadFreeBoundedString(chunk.text, `${field}.text`, MAX_CONVERSATION_CHUNK_CHARS),
       offset: unsigned(chunk.offset, `${field}.offset`),
       blockComplete: boolean(chunk.blockComplete, `${field}.blockComplete`),
       isError: boolean(chunk.isError, `${field}.isError`),

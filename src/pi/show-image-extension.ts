@@ -7,6 +7,7 @@ export const SHOW_IMAGE_TOOL_NAME = "show_image";
 export const SHOW_IMAGE_EXTENSION_PATH = "<inline:alu-dock-show-image>";
 export const PUBLISHED_FILE_DETAIL_KEY = "aluDockPublishedFile";
 export const PUBLISHED_FILE_FAILURE_DETAIL_KEY = "aluDockPublishedFileFailure";
+export const SHOW_IMAGE_UNAVAILABLE_MESSAGE = "This image came from an older session and is no longer available. Ask the Agent to publish it again.";
 
 const PARAMETERS = {
   type: "object",
@@ -76,5 +77,5 @@ export function publishedFileFailureFromDetails(details: unknown, registry: Tran
 
 export function redactShowImageResult(toolName: string | undefined, text: string, publishedFile?: PublishedFileDto, failureMessage?: string): string {
   if (toolName !== SHOW_IMAGE_TOOL_NAME || publishedFile !== undefined) return text;
-  return failureMessage ?? "This image came from an older session and is no longer available. Ask the Agent to publish it again.";
+  return failureMessage ?? SHOW_IMAGE_UNAVAILABLE_MESSAGE;
 }
