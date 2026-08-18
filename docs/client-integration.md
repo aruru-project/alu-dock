@@ -198,9 +198,11 @@ Data URI、base64 和长文本都是普通内容。客户端根据结构处理 i
 
 图片 prompt 使用 Host 和 Worker 同一 UID 能读取的本机绝对路径 descriptor。上传、图库、缩略图和远端传输属于客户端平台自己的职责。
 
-进入 Agent session 后，structured image content 通过 conversation content 分页恢复。`show_image` 使用已有的 tool call/result 和 `toolCallId + args.path` 关联，不需要新增 Dock media 协议。
+进入 Agent session 后，Pi 原生 structured image content 在普通 event/history 中只携带 MIME type 与 opaque `contentRef`，完整 bytes 由客户端显式调用 `conversation.content` 分页恢复。
 
-Web 应用通常由后端接收浏览器上传、保存为受控本机文件，再向 Dock 提交 path descriptor；浏览器本身不能把自己的文件路径交给 Dock。
+Dock 内建的 `show_image` 只负责把本机文件发布给用户界面显示，不把图片注入模型 context（模型要看图时使用 `read`）。成功的 tool result 在 live、history preview 与 `conversation.content` 的完整 tool-result block 中携带同一个 path-free `publishedFile`：`presentation: "image" + fileRef + name + sizeBytes + optional mediaType`。客户端使用 authenticated `file.read` 按 offset 获取最多 256 KiB 的 base64 chunk；文件被删除、改写、session replacement 或 Worker dispose 后返回 `file_unavailable`，界面应提示用户让 Agent 重新发布。`toolCallId` 只用于 tool 关联，客户端不得从 tool text/path 猜 metadata，也不得把 `fileRef` 当路径。
+
+Web 应用通常由后端接收浏览器上传、保存为受控本机文件，再向 Dock 提交 path descriptor；浏览器本身不能把自己的文件路径交给 Dock。Unix socket 与 mTLS 使用完全相同的 `file.read` route。
 
 ## 附件
 

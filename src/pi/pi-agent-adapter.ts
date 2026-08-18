@@ -27,6 +27,7 @@ import {
 import { dockObservationExtension, type DockObservationBridge } from "./dock-observation-extension.js";
 import {
   dockAttachmentsExtension,
+  DOCK_ATTACHMENT_RESOLVE_TOOL,
   redactDockAttachmentToolResult,
   type DockAttachmentCallPort,
 } from "./dock-attachments-extension.js";
@@ -44,6 +45,7 @@ import {
   type ConversationFrame,
   type ImagePathDto,
   type JsonValue,
+  type PublishedFileDto,
 } from "../core/instance-dto.js";
 import { sliceSemanticHistory, slimSemanticHistoryEntry } from "../core/history-pagination.js";
 import { projectBuiltInToolPresentation } from "../core/tool-result-presentation.js";
@@ -107,6 +109,8 @@ import { configurePiNetwork } from "./configure-pi-network.js";
 import { GitBranchObserver, type GitBranchObserverPort } from "./git-branch-observer.js";
 import { createPiExtensionUiContext } from "./pi-extension-ui-adapter.js";
 import { piToolResultNormalizerExtension } from "./pi-tool-result-normalizer.js";
+import { TransientFileRegistry } from "./transient-file-registry.js";
+import { ownCanonicalShowImage, publishedFileFailureFromDetails, publishedFileFromDetails, redactShowImageResult, showImageExtension } from "./show-image-extension.js";
 import {
   applyPiSetting,
   assertPiSettingUpdate,
@@ -165,6 +169,7 @@ export interface PiAgentAdapterOptions {
   ) => Promise<GitBranchObserverPort>;
   configureNetwork?: (settingsManager: AgentSessionServices["settingsManager"]) => void;
   attachmentContextKey: Uint8Array;
+  publishedFiles: TransientFileRegistry;
 }
 
 export interface CreatePiAgentAdapterOptions {
@@ -358,6 +363,7 @@ export class PiAgentAdapter {
       case "session.history": return this.getHistory();
       case "conversation.history": return this.getConversationHistory(request.params.cursor, request.params.limit);
       case "conversation.content": return this.getConversationContent(request.params.contentRef, request.params.cursor);
+      case "file.read": return this.options.publishedFiles.read(request.params.fileRef, request.params.offset);
       case "session.list": return this.listSessions(request.params.scope);
       case "session.switch": {
         if (context?.type !== "session_switch") throw new Error("Session switch requires resolved Host trust context");
@@ -642,6 +648,8 @@ export class PiAgentAdapter {
   }
 
   async getConversationContent(contentRef: string, cursor?: string): Promise<AgentConversationContentPage> {
+    const nativeImage = this.options.publishedFiles.readImageContent(contentRef, cursor);
+    if (nativeImage !== undefined) return nativeImage;
     const state = this.conversationState();
     let blockIndex = 0;
     let offset = 0;
@@ -708,7 +716,7 @@ export class PiAgentAdapter {
   private conversationEntries(binding: Binding = this.requireActive()): Array<{ source: SessionEntry; projected: AgentHistoryEntry }> {
     const branch = binding.session.sessionManager.getBranch();
     return buildContextEntries(branch).flatMap((source) => {
-      const projected = projectHistoryEntry(source, this.options.attachmentContextKey);
+      const projected = projectHistoryEntry(source, this.options.attachmentContextKey, this.options.publishedFiles);
       return projected === undefined ? [] : [{ source, projected }];
     });
   }
@@ -1091,7 +1099,7 @@ export class PiAgentAdapter {
     };
     binding.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
       if (!token.active) return;
-      const projectedEvents = projectAgentSessionEvents(event)
+      const projectedEvents = projectAgentSessionEvents(event, this.options.publishedFiles)
         .map((projected) => this.attributeLifecycleEvent(binding, projected));
       const source = event as unknown as Record<string, unknown>;
       const message = isRecord(source.message) ? source.message : undefined;
@@ -1201,6 +1209,7 @@ export class PiAgentAdapter {
   }
 
   private invalidateBindingsSynchronously(): void {
+    this.options.publishedFiles.clear();
     this.conversationScope = randomUUID();
     this.conversationRevisionValue = undefined;
     this.conversationHistoryCursors.clear();
@@ -1340,7 +1349,7 @@ function safeRequiredText(value: unknown, limit: number, fallback: string): stri
   return safeOptionalText(value, limit) ?? fallback;
 }
 
-export function projectAgentSessionEvents(event: AgentSessionEvent): AgentEvent[] {
+export function projectAgentSessionEvents(event: AgentSessionEvent, publishedFiles?: TransientFileRegistry): AgentEvent[] {
   const source = event as unknown as Record<string, unknown>;
   if (source.type === "message_update" && isRecord(source.assistantMessageEvent)) {
     const update = source.assistantMessageEvent;
@@ -1349,27 +1358,27 @@ export function projectAgentSessionEvents(event: AgentSessionEvent): AgentEvent[
       let offset = 0;
       while (offset < update.delta.length) {
         const end = unicodeSafeEnd(update.delta, Math.min(update.delta.length, offset + 8_000));
-        projected.push(projectAgentSessionEvent({ ...source, assistantMessageEvent: { ...update, delta: update.delta.slice(offset, end) } }));
+        projected.push(projectAgentSessionEvent({ ...source, assistantMessageEvent: { ...update, delta: update.delta.slice(offset, end) } }, publishedFiles));
         offset = end;
       }
       return projected;
     }
   }
   if (source.type === "entry_appended") return [{ type: "conversation_checkpoint" }];
-  const projected = projectAgentSessionEvent(source);
+  const projected = projectAgentSessionEvent(source, publishedFiles);
   if (source.type === "turn_end" || source.type === "agent_settled" || source.type === "compaction_end") {
     return [projected, { type: "conversation_checkpoint" }];
   }
   return [projected];
 }
 
-function projectAgentSessionEvent(event: AgentSessionEvent | Record<string, unknown>): AgentEvent {
+function projectAgentSessionEvent(event: AgentSessionEvent | Record<string, unknown>, publishedFiles?: TransientFileRegistry): AgentEvent {
   const source = event as unknown as Record<string, unknown>;
   const type = typeof source.type === "string" ? source.type : "unknown";
   if (type === "agent_end") return { type, willRetry: source.willRetry === true };
   if (type === "turn_end" || type === "entry_appended") return { type };
   if ((type === "message_start" || type === "message_end") && isRecord(source.message)) {
-    return { type, message: projectRuntimeMessage(source.message) };
+    return { type, message: projectRuntimeMessage(source.message, publishedFiles) };
   }
   if (type === "message_update" && isRecord(source.assistantMessageEvent)) {
     return { type, assistantMessageEvent: projectAssistantMessageEvent(source.assistantMessageEvent) };
@@ -1388,13 +1397,15 @@ function projectAgentSessionEvent(event: AgentSessionEvent | Record<string, unkn
     const toolName = typeof source.toolName === "string" ? source.toolName : undefined;
     const isError = type === "tool_execution_end" && source.isError === true;
     const contentText = optionalContentString(toolResultText(result?.content), 256_000);
-    const content = projectPrivateToolContent(result?.content);
+    const content = projectPrivateToolContent(result?.content, publishedFiles);
+    const publishedFile = publishedFiles === undefined ? undefined : publishedFileFromDetails(result?.details, publishedFiles);
+    const showImageError = publishedFiles === undefined ? undefined : publishedFileFailureFromDetails(result?.details, publishedFiles);
     const presentation = projectBuiltInToolPresentation(toolName, contentText, result?.details, isError);
     return {
       type,
       toolCallId: safeRequiredText(source.toolCallId, 128, "unknown"),
       toolName: safeRequiredText(source.toolName, 256, "tool"),
-      [resultKey]: { content, ...(presentation === undefined ? {} : { presentation }) },
+      [resultKey]: { content, ...(publishedFile === undefined ? {} : { publishedFile }), ...(showImageError === undefined ? {} : { showImageError }), ...(presentation === undefined ? {} : { presentation }) },
       ...(type === "tool_execution_end" ? { isError } : {}),
     };
   }
@@ -1410,11 +1421,11 @@ function projectAgentSessionEvent(event: AgentSessionEvent | Record<string, unkn
   return source as AgentEvent;
 }
 
-function projectRuntimeMessage(message: Record<string, unknown>): Record<string, unknown> {
+function projectRuntimeMessage(message: Record<string, unknown>, publishedFiles?: TransientFileRegistry): Record<string, unknown> {
   const role = safeRequiredText(message.role, 64, "system");
   const projected: Record<string, unknown> = {
     role,
-    content: role === "toolResult" ? projectPrivateToolContent(message.content) : projectPrivateContent(message.content),
+    content: role === "toolResult" ? projectPrivateToolContent(message.content, publishedFiles) : projectPrivateContent(message.content, publishedFiles),
   };
   const stopReason = safeOptionalText(message.stopReason, 128);
   const errorMessage = safeOptionalText(message.errorMessage, 2_048);
@@ -1436,7 +1447,7 @@ function projectAssistantMessageEvent(update: Record<string, unknown>): Record<s
   return projected;
 }
 
-function projectPrivateContent(content: unknown): unknown {
+function projectPrivateContent(content: unknown, publishedFiles?: TransientFileRegistry): unknown {
   if (typeof content === "string") return boundedContentString(content, 256_000);
   if (!Array.isArray(content)) return [];
   const blocks: Record<string, unknown>[] = [];
@@ -1449,18 +1460,26 @@ function projectPrivateContent(content: unknown): unknown {
       if (thinking !== undefined) blocks.push({ type: "thinking", thinking });
     }
     else if (item.type === "toolCall" || item.type === "tool_call") blocks.push(projectPrivateToolCall(item));
-    else if (item.type === "image") blocks.push({ type: "image", mimeType: safeImageMimeType(item.mimeType) });
+    else if (item.type === "image") {
+      const mimeType = safeImageMimeType(item.mimeType);
+      const contentRef = publishedFiles !== undefined && typeof item.data === "string" ? publishedFiles.registerImage(item.data, mimeType) : undefined;
+      blocks.push({ type: "image", mimeType, ...(contentRef === undefined ? {} : { contentRef }) });
+    }
   }
   return blocks;
 }
 
-function projectPrivateToolContent(content: unknown): unknown {
+function projectPrivateToolContent(content: unknown, publishedFiles?: TransientFileRegistry): unknown {
   if (typeof content === "string") return boundedContentString(content, 256_000);
   if (!Array.isArray(content)) return [];
   return content.slice(0, 200).flatMap((item): Record<string, unknown>[] => {
     if (!isRecord(item)) return [];
     if (item.type === "text" && typeof item.text === "string") return [{ type: "text", text: boundedContentString(item.text, 256_000) }];
-    if (item.type === "image") return [{ type: "image", mimeType: safeImageMimeType(item.mimeType) }];
+    if (item.type === "image") {
+      const mimeType = safeImageMimeType(item.mimeType);
+      const contentRef = publishedFiles !== undefined && typeof item.data === "string" ? publishedFiles.registerImage(item.data, mimeType) : undefined;
+      return [{ type: "image", mimeType, ...(contentRef === undefined ? {} : { contentRef }) }];
+    }
     return [];
   });
 }
@@ -1705,7 +1724,9 @@ export class PiConversationProjector {
     const toolCallId = safeRequiredText(event.toolCallId, 128, "unknown");
     const toolName = safeRequiredText(event.toolName, 256, "tool");
     const result = isRecord(event.partialResult) ? event.partialResult : undefined;
-    const text = boundedContentString(redactDockAttachmentToolResult(toolName, toolResultText(result?.content) ?? ""), 256_000);
+    const publishedFile = result?.publishedFile as never;
+    const showImageError = typeof result?.showImageError === "string" ? result.showImageError : undefined;
+    const text = boundedContentString(redactShowImageResult(toolName, redactDockAttachmentToolResult(toolName, toolResultText(result?.content) ?? ""), publishedFile, showImageError), 256_000);
     const frames: AgentEvent[] = [];
     if (!this.announcedToolCalls.has(toolCallId)) {
       this.announcedToolCalls.add(toolCallId);
@@ -1714,6 +1735,8 @@ export class PiConversationProjector {
     frames.push(this.frame({ type: "tool.output_updated", data: {
       toolCallId,
       text,
+      ...(Array.isArray(result?.content) ? { content: projectPublicToolContent(toolName, result.content, text) } : {}),
+      ...(publishedFile === undefined ? {} : { publishedFile }),
       ...(result?.presentation === undefined ? {} : { presentation: result.presentation as never }),
     } }));
     return frames;
@@ -1724,7 +1747,9 @@ export class PiConversationProjector {
     const toolName = safeRequiredText(event.toolName, 256, "tool");
     const result = isRecord(event.result) ? event.result : undefined;
     const isError = event.isError === true;
-    const text = boundedContentString(redactDockAttachmentToolResult(toolName, toolResultText(result?.content) ?? ""), 256_000);
+    const publishedFile = result?.publishedFile as never;
+    const showImageError = typeof result?.showImageError === "string" ? result.showImageError : undefined;
+    const text = boundedContentString(redactShowImageResult(toolName, redactDockAttachmentToolResult(toolName, toolResultText(result?.content) ?? ""), publishedFile, showImageError), 256_000);
     const projected = projectJsonObject({ content: result?.content });
     this.announcedToolCalls.delete(toolCallId);
     this.completedToolCalls.add(toolCallId);
@@ -1733,6 +1758,8 @@ export class PiConversationProjector {
       toolName,
       text,
       isError,
+      ...(Array.isArray(result?.content) ? { content: projectPublicToolContent(toolName, result.content, text) } : {}),
+      ...(publishedFile === undefined ? {} : { publishedFile }),
       ...(result?.presentation === undefined ? {} : { presentation: result.presentation as never }),
       ...(projected.omittedFields.length === 0 ? {} : { omittedFields: projected.omittedFields }),
     } })];
@@ -1748,7 +1775,7 @@ export class PiConversationProjector {
   }
 }
 
-function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Array): AgentHistoryEntry {
+function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Array, publishedFiles?: TransientFileRegistry): AgentHistoryEntry {
   const base = {
     recordId: entry.id,
     entryId: entry.id,
@@ -1762,7 +1789,9 @@ function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Arr
       const toolCallId = safeRequiredText(message.toolCallId, 128, `tool-${entry.id}`);
       const toolName = safeRequiredText(message.toolName, 256, "tool");
       const isError = message.isError === true;
-      const text = boundedContentString(redactDockAttachmentToolResult(toolName, toolResultText(message.content) ?? ""), 256_000);
+      const publishedFile = publishedFiles === undefined ? undefined : publishedFileFromDetails(message.details, publishedFiles);
+      const showImageError = publishedFiles === undefined ? undefined : publishedFileFailureFromDetails(message.details, publishedFiles);
+      const text = boundedContentString(redactShowImageResult(toolName, redactDockAttachmentToolResult(toolName, toolResultText(message.content) ?? ""), publishedFile, showImageError), 256_000);
       const presentation = projectBuiltInToolPresentation(toolName, text, message.details, isError);
       return {
         ...base,
@@ -1775,12 +1804,13 @@ function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Arr
           toolName,
           text,
           isError,
+          ...(publishedFile === undefined ? {} : { publishedFile }),
           ...(presentation === undefined ? {} : { presentation }),
         }],
         toolCallId,
         toolName,
         isError,
-        ...projectRecordMetadata(message.details),
+        ...(toolName === "show_image" ? {} : projectRecordMetadata(message.details)),
       };
     }
     if (role === "bashExecution") {
@@ -1938,6 +1968,13 @@ function projectDockUserContent(content: unknown, attachmentContextKey: Uint8Arr
   return { content: projectDockContent(visible), ...(attachments === undefined ? {} : { attachments }) };
 }
 
+function projectPublicToolContent(toolName: string, content: unknown, redactedText: string): ContentBlockDto[] {
+  if (toolName === "show_image" || toolName === DOCK_ATTACHMENT_RESOLVE_TOOL) {
+    return redactedText.length === 0 ? [] : [{ type: "text", text: redactedText }];
+  }
+  return projectDockContent(content);
+}
+
 function projectDockContent(content: unknown): ContentBlockDto[] {
   if (typeof content === "string") return content.length > 0 ? [{ type: "text", text: boundedContentString(content, 8_000) }] : [];
   if (!Array.isArray(content)) return [];
@@ -1948,7 +1985,7 @@ function projectDockContent(content: unknown): ContentBlockDto[] {
     let block: ContentBlockDto | undefined;
     if (item.type === "text" && typeof item.text === "string") block = { type: "text", text: boundedContentString(item.text, 8_000) };
     else if (item.type === "thinking" && typeof item.thinking === "string") block = { type: "thinking", text: boundedContentString(item.thinking, 8_000) };
-    else if (item.type === "image") block = { type: "image", mimeType: safeImageMimeType(item.mimeType) };
+    else if (item.type === "image") block = { type: "image", mimeType: safeImageMimeType(item.mimeType), ...(typeof item.contentRef === "string" ? { contentRef: safeRequiredText(item.contentRef, 128, "unknown") } : {}) };
     else if ((item.type === "toolCall" || item.type === "tool_call") && typeof item.name === "string") {
       const projected = projectJsonObject(item.arguments);
       block = {
@@ -1986,7 +2023,7 @@ type ConversationSourceBlock =
   | ConversationTextSourceBlock
   | { type: "image"; mimeType: string; data: string }
   | { type: "tool_call"; toolCallId: string; toolName: string; argumentsJson: string }
-  | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; omittedFields?: string[] }
+  | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; omittedFields?: string[] }
   | ConversationOmittedSourceBlock;
 
 function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryEntry, attachmentContextKey: Uint8Array): ConversationSourceBlock[] {
@@ -2022,6 +2059,7 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
       const toolName = typeof message.toolName === "string" ? boundedString(message.toolName, 256, "tool") : "tool";
       const isError = message.isError === true;
       const items = typeof message.content === "string" ? [{ type: "text", text: message.content }] : Array.isArray(message.content) ? message.content : [];
+      const projectedToolResult = projected.content.find((block) => block.type === "tool_result");
       return items.flatMap((item): ConversationSourceBlock[] => {
         if (!isRecord(item)) return [];
         if (item.type === "image") return [{ type: "image", mimeType: safeImageMimeType(item.mimeType), data: typeof item.data === "string" ? item.data : "" }];
@@ -2030,8 +2068,9 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
           type: "tool_result",
           toolCallId,
           toolName,
-          text: redactDockAttachmentToolResult(toolName, typeof item.text === "string" ? item.text : ""),
+          text: toolName === "show_image" ? projectedToolResult?.text ?? "This image is no longer available. Ask the Agent to publish it again." : redactDockAttachmentToolResult(toolName, typeof item.text === "string" ? item.text : ""),
           isError,
+          ...(projectedToolResult?.type !== "tool_result" || projectedToolResult.publishedFile === undefined ? {} : { publishedFile: projectedToolResult.publishedFile }),
         }];
       });
     }
@@ -2552,6 +2591,7 @@ function syncAgentRuntimeSettings(session: AgentSession, settingsManager: Settin
 
 export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions): Promise<PiAgentAdapter> {
   const attachmentContextKey = await loadAttachmentContextKey(options.agentDir);
+  const publishedFiles = new TransientFileRegistry();
   const uiContext = options.extensionUiBroker && !options.extensionUiContextPortFactory
     ? createPiExtensionUiContext(options.extensionUiBroker)
     : undefined;
@@ -2572,9 +2612,11 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
       resourceLoaderOptions: {
         extensionFactories: [
           { name: "alu-dock-tool-result-normalizer", factory: piToolResultNormalizerExtension },
+          { name: "alu-dock-show-image", factory: showImageExtension(publishedFiles) },
           ...(options.dockObservationBridge === undefined ? [] : [{ name: "alu-dock-observation", factory: dockObservationExtension(options.dockObservationBridge) }]),
           ...(options.dockAttachmentPort === undefined ? [] : [{ name: "alu-dock-attachments", factory: dockAttachmentsExtension(options.dockAttachmentPort) }]),
         ],
+        extensionsOverride: ownCanonicalShowImage,
         ...(options.dockAttachmentPort === undefined ? {} : { additionalSkillPaths: [dockAttachmentSkillPath()] }),
       },
     });
@@ -2599,6 +2641,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     configureNetwork: configurePiNetwork,
     initialProcessCwd: options.cwd,
     attachmentContextKey,
+    publishedFiles,
     ...(options.setProcessCwd === undefined ? {} : { setProcessCwd: options.setProcessCwd }),
   });
 }

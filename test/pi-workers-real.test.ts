@@ -62,6 +62,11 @@ test("real Pi Worker projects persisted session entries into canonical conversat
     content: [{ type: "text", text: "Attachment is available at '/private/host/attachments/private notes.txt'." }],
     isError: false, details: { type: "resolve", attachment }, timestamp: 6,
   } as SessionMessage);
+  manager.appendMessage({
+    role: "toolResult", toolCallId: "legacy-show", toolName: "show_image",
+    content: [{ type: "text", text: "/private/legacy-show.png" }], isError: false,
+    details: { path: "/private/legacy-show.png", base64: "cHJpdmF0ZQ==" }, timestamp: 7,
+  } as SessionMessage);
   manager.appendCustomMessageEntry("visible-extension", [{ type: "text", text: "extension says hi" }], true, { decision: "keep" });
   manager.appendCustomMessageEntry("hidden-extension", "private state", false, { secret: true });
   manager.appendCustomEntry("extension-state", { count: 2 });
@@ -111,11 +116,14 @@ test("real Pi Worker projects persisted session entries into canonical conversat
     assert.deepEqual(attachmentUser?.content, [{ type: "text", text: "attachment question" }]);
     const attachmentTool = records.find((record) => record.toolName === "dock_attachment_resolve");
     assert.doesNotMatch(JSON.stringify(attachmentTool), /private\/host/u);
+    const legacyShowImage = records.find((record) => record.toolName === "show_image");
+    assert.match(JSON.stringify(legacyShowImage), /older session/u);
+    assert.doesNotMatch(JSON.stringify(legacyShowImage), /private\/legacy-show|cHJpdmF0ZQ|"metadata"/u);
 
     const conversation = await instance.getConversationHistory(undefined, 50);
-    for (const item of conversation.entries.filter(({ entry }) => entry.recordId === attachmentUser?.recordId || entry.recordId === attachmentTool?.recordId)) {
+    for (const item of conversation.entries.filter(({ entry }) => entry.recordId === attachmentUser?.recordId || entry.recordId === attachmentTool?.recordId || entry.recordId === legacyShowImage?.recordId)) {
       const content = await instance.getConversationContent(item.contentRef);
-      assert.doesNotMatch(JSON.stringify(content), /private\/host|alu_dock_attachments_v1/u);
+      assert.doesNotMatch(JSON.stringify(content), /private\/host|private\/legacy-show|cHJpdmF0ZQ|alu_dock_attachments_v1/u);
     }
   } finally {
     await instance.disposeUnpublished();

@@ -8,6 +8,7 @@ import {
   AgentSettingsWriteError,
   AgentUnknownToolError,
 } from "../core/agent-worker.js";
+import { PublishedFileUnavailableError } from "../core/published-file.js";
 import type { AgentCommandPreflightResult, AgentInvokeContext, AgentRequest, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
 import {
   parseAttachmentDto,
@@ -15,9 +16,11 @@ import {
   parseControlRequest,
   parseConversationContentBody,
   parseConversationHistoryBody,
+  parseFileReadBody,
   parseHistoryEntry,
   parseCompactionBody,
   parseModelListBody,
+  parsePublishedFileDto,
   parseResourcesResult,
   parseSessionsResult,
   parseSettingDto,
@@ -86,7 +89,7 @@ export interface WorkerErrorDto {
   code:
     | "compaction_known_failure" | "queue_rejected" | "queue_effect_unknown"
     | "unknown_tool" | "model_not_found" | "invalid_setting" | "settings_write"
-    | "conversation_cursor" | "runtime_error";
+    | "conversation_cursor" | "file_unavailable" | "runtime_error";
   name: string;
   message: string;
   details?: Record<string, unknown>;
@@ -421,13 +424,17 @@ function validateConversationFrame(raw: unknown): void {
     record(data.args, "Tool arguments"); validateJsonValue(data.args); if (data.omittedFields !== undefined) stringArray(data.omittedFields, 200, 2_048, "Tool omissions"); return;
   }
   if (type === "tool.output_updated") {
-    exactKeys(data, ["toolCallId", "text", "presentation"], "Worker tool-output data");
+    exactKeys(data, ["toolCallId", "text", "content", "publishedFile", "presentation"], "Worker tool-output data");
     boundedString(data.toolCallId, 128, "Tool call id"); boundedString(data.text, 256_000, "Tool output", true);
+    if (data.content !== undefined) validateDockContent(data.content);
+    if (data.publishedFile !== undefined) parsePublishedFileDto(data.publishedFile, "Worker published file");
     if (data.presentation !== undefined) validateToolPresentation(data.presentation); return;
   }
-  exactKeys(data, ["toolCallId", "toolName", "text", "isError", "presentation", "omittedFields"], "Worker completed-tool data");
+  exactKeys(data, ["toolCallId", "toolName", "text", "isError", "content", "publishedFile", "presentation", "omittedFields"], "Worker completed-tool data");
   boundedString(data.toolCallId, 128, "Tool call id"); boundedString(data.toolName, 256, "Tool name"); boundedString(data.text, 256_000, "Tool output", true);
   if (typeof data.isError !== "boolean") throw new Error("Tool error flag is invalid");
+  if (data.content !== undefined) validateDockContent(data.content);
+  if (data.publishedFile !== undefined) parsePublishedFileDto(data.publishedFile, "Worker published file");
   if (data.presentation !== undefined) validateToolPresentation(data.presentation);
   if (data.omittedFields !== undefined) stringArray(data.omittedFields, 200, 2_048, "Tool omissions");
 }
@@ -482,6 +489,7 @@ export function validateAgentWorkerResult(label: string, raw: unknown): void {
       parseConversationContentBody(raw);
       return;
     }
+    case "file.read": parseFileReadBody(raw); return;
     case "model.list": parseModelListBody(raw); return;
     case "session.compact": parseCompactionBody(raw); return;
     case "tool.list": case "tool.set_active": parseToolListBody(raw); return;
@@ -509,18 +517,19 @@ function validateDockContent(raw: unknown): void {
       exactKeys(block, ["type", "text"], "Conversation text block");
       boundedString(block.text, 8_000, "Conversation text", true);
     } else if (type === "image") {
-      exactKeys(block, ["type", "mimeType"], "Conversation image block");
-      validateImageMimeType(block.mimeType, "Conversation image MIME type");
+      exactKeys(block, ["type", "mimeType", "contentRef"], "Conversation image block");
+      validateImageMimeType(block.mimeType, "Conversation image MIME type"); optionalString(block.contentRef, 128);
     } else if (type === "tool_call") {
       exactKeys(block, ["type", "toolCallId", "toolName", "args", "omittedFields"], "Conversation tool-call block");
       boundedString(block.toolCallId, 128, "Conversation tool-call id"); boundedString(block.toolName, 256, "Conversation tool-call name");
       validateJsonValue(block.args);
       if (block.omittedFields !== undefined) stringArray(block.omittedFields, 200, 2_048, "Conversation tool-call omissions");
     } else if (type === "tool_result") {
-      exactKeys(block, ["type", "toolCallId", "toolName", "text", "isError", "presentation", "omittedFields"], "Conversation tool-result block");
+      exactKeys(block, ["type", "toolCallId", "toolName", "text", "isError", "publishedFile", "presentation", "omittedFields"], "Conversation tool-result block");
       boundedString(block.toolCallId, 128, "Conversation tool-result id"); boundedString(block.toolName, 256, "Conversation tool-result name");
       boundedString(block.text, 256_000, "Conversation tool-result text", true);
       if (typeof block.isError !== "boolean") throw new Error("Conversation tool-result error flag is invalid");
+      if (block.publishedFile !== undefined) parsePublishedFileDto(block.publishedFile, "Worker conversation published file");
       if (block.presentation !== undefined) validateToolPresentation(block.presentation);
       if (block.omittedFields !== undefined) stringArray(block.omittedFields, 200, 2_048, "Conversation tool-result omissions");
     } else {
@@ -581,6 +590,7 @@ export function encodeWorkerError(error: unknown): WorkerErrorDto {
   const base = { name: error instanceof Error ? error.name : "Error", message: boundedErrorMessage(error) };
   if (error instanceof AgentCompactionKnownFailureError) return { ...base, code: "compaction_known_failure", details: { reason: error.reason } };
   if (error instanceof AgentConversationCursorError) return { ...base, code: "conversation_cursor" };
+  if (error instanceof PublishedFileUnavailableError) return { ...base, code: "file_unavailable" };
   if (error instanceof AgentQueueRejectedBeforeEffectError) return { ...base, code: "queue_rejected" };
   if (error instanceof AgentQueueEffectUnknownError) return { ...base, code: "queue_effect_unknown" };
   if (error instanceof AgentUnknownToolError) return { ...base, code: "unknown_tool", details: { toolName: error.toolName } };
@@ -594,6 +604,7 @@ export function decodeWorkerError(error: WorkerErrorDto): Error {
   switch (error.code) {
     case "compaction_known_failure": return new AgentCompactionKnownFailureError(oneOfValue(error.details?.reason, ["nothing_to_compact", "already_compacted", "cancelled", "failed"], "failed"), error.message);
     case "conversation_cursor": return new AgentConversationCursorError(error.message);
+    case "file_unavailable": return new PublishedFileUnavailableError(error.message);
     case "queue_rejected": return new AgentQueueRejectedBeforeEffectError(new Error(error.message));
     case "queue_effect_unknown": return new AgentQueueEffectUnknownError(new Error(error.message));
     case "unknown_tool": return new AgentUnknownToolError(typeof error.details?.toolName === "string" ? error.details.toolName : "unknown");
@@ -615,14 +626,14 @@ export function decodeWorkerError(error: WorkerErrorDto): Error {
 function parseWorkerError(raw: unknown): WorkerErrorDto {
   const value = record(raw, "Worker error");
   exactKeys(value, ["code", "name", "message", "details"], "Worker error");
-  const code = oneOf(value.code, ["compaction_known_failure", "queue_rejected", "queue_effect_unknown", "unknown_tool", "model_not_found", "invalid_setting", "settings_write", "conversation_cursor", "runtime_error"] as const, "Worker error code");
+  const code = oneOf(value.code, ["compaction_known_failure", "queue_rejected", "queue_effect_unknown", "unknown_tool", "model_not_found", "invalid_setting", "settings_write", "conversation_cursor", "file_unavailable", "runtime_error"] as const, "Worker error code");
   const details = value.details === undefined ? undefined : record(value.details, "Worker error details");
   validateWorkerErrorDetails(code, details);
   return { code, name: boundedString(value.name, 128, "Worker error name"), message: boundedString(value.message, 2_048, "Worker error message", true), ...(details === undefined ? {} : { details }) };
 }
 
 function validateWorkerErrorDetails(code: WorkerErrorDto["code"], details: Record<string, unknown> | undefined): void {
-  if (code === "runtime_error" || code === "conversation_cursor" || code === "queue_rejected" || code === "queue_effect_unknown") {
+  if (code === "runtime_error" || code === "conversation_cursor" || code === "file_unavailable" || code === "queue_rejected" || code === "queue_effect_unknown") {
     if (details !== undefined && Object.keys(details).length > 0) throw new Error(`${code} details are invalid`);
     return;
   }
@@ -688,7 +699,7 @@ function parseAgentWorkerControl(raw: unknown): AgentWorkerControl {
 }
 
 function isAgentRequest(type: string): type is AgentRequest["type"] {
-  return ["command.submit", "command.abort", "queue.dequeue", "model.list", "model.set", "thinking.set", "tool.list", "tool.set_active", "settings.get", "settings.update", "resource.get", "command.catalog", "session.history", "conversation.history", "conversation.content", "session.list", "session.switch", "session.new", "session.name", "session.compact", "session.reload", "session.tree", "session.navigate", "session.fork", "session.clone"].includes(type);
+  return ["command.submit", "command.abort", "queue.dequeue", "model.list", "model.set", "thinking.set", "tool.list", "tool.set_active", "settings.get", "settings.update", "resource.get", "command.catalog", "session.history", "conversation.history", "conversation.content", "file.read", "session.list", "session.switch", "session.new", "session.name", "session.compact", "session.reload", "session.tree", "session.navigate", "session.fork", "session.clone"].includes(type);
 }
 
 function parseCapability(raw: unknown): WorkerCapability {

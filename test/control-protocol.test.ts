@@ -11,8 +11,11 @@ import {
   parseControlEventEnvelope,
   parseControlRequest,
   parseControlResponse,
+  parseConversationContentBody,
   parseEnsureResult,
   parseHistoryResult,
+  parseFileReadBody,
+  parseFileReadResult,
   parseKeyLookupResult,
   parseStatusResult,
   ProtocolValidationError,
@@ -158,6 +161,21 @@ test("attachment upload frames and path-free DTOs are closed and bounded", () =>
   assert.deepEqual(parseAttachmentUploadResult({ attachment, status: "stored" }), { attachment, status: "stored" });
   assert.equal("path" in parseAttachmentDto({ ...attachment, path: "/private/store" }), false);
   assert.throws(() => parseAttachmentUploadResult({ attachment, status: "cached" }), /unsupported value/u);
+});
+
+test("published file pages require exact byte continuity and the requested offset", () => {
+  const file = { presentation: "image" as const, fileRef: "file-1", name: "display.png", sizeBytes: 5, mediaType: "image/png" };
+  assert.deepEqual(parseFileReadBody({ file, offset: 0, data: "YWJj", complete: false, nextOffset: 3 }), { file, offset: 0, data: "YWJj", complete: false, nextOffset: 3 });
+  assert.deepEqual(parseFileReadBody({ file, offset: 3, data: "ZGU=", complete: true }), { file, offset: 3, data: "ZGU=", complete: true });
+  assert.throws(() => parseFileReadBody({ file, offset: 0, data: "YWJj", complete: false, nextOffset: 4 }), /pagination is inconsistent/u);
+  assert.throws(() => parseFileReadBody({ file, offset: 3, data: "ZGU=", complete: false, nextOffset: 5 }), /pagination is inconsistent/u);
+  assert.throws(() => parseFileReadBody({ file, offset: 5, data: "", complete: true }), /non-empty|pagination is inconsistent/u);
+  assert.throws(() => parseFileReadResult({ instanceId: "i1", runtimeGeneration: 1, file, offset: 1, data: "Yg==", complete: false, nextOffset: 2 }, 0), /does not match the request/u);
+  const hydrated = parseConversationContentBody({
+    revision: "revision-1", contentRef: "content-1", complete: true,
+    chunks: [{ blockIndex: 0, type: "tool_result", toolCallId: "call-1", toolName: "show_image", text: "Published display.png for display.", offset: 0, blockComplete: true, isError: false, publishedFile: file }],
+  });
+  assert.deepEqual(hydrated.chunks[0]?.type === "tool_result" ? hydrated.chunks[0].publishedFile : undefined, file);
 });
 
 test("V2 requests reject unsupported versions, unknown fields, invalid cursors, and invalid enums", () => {

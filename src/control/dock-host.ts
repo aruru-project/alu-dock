@@ -36,6 +36,7 @@ import {
   type JsonObject,
 } from "../core/managed-instance.js";
 import { AgentCompactionKnownFailureError, AgentConversationCursorError, AgentInvalidSettingValueError, AgentModelNotFoundError, AgentSettingsWriteError, AgentUnavailableBeforeEffectError, AgentUnknownToolError } from "../core/agent-worker.js";
+import { PublishedFileUnavailableError } from "../core/published-file.js";
 import { MAX_ATTACHMENT_CHUNK_BYTES, type AttachmentUploadResult } from "../core/instance-attachments.js";
 import { dropOldestSemanticHistoryRange, slimSemanticHistoryEntry } from "../core/history-pagination.js";
 import type { SessionInventory } from "../core/session-inventory.js";
@@ -725,6 +726,7 @@ export class DockHost {
       case "session.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getHistoryPage(request.params.beforeEntryId,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,createBoundedHistoryResult(page,request.requestId,this.hostEpoch)); return; }
       case "conversation.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getConversationHistory(request.params.cursor,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
       case "conversation.content": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getConversationContent(request.params.contentRef,request.params.cursor); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
+      case "file.read": { const instance=this.registry.get(request.params.instanceId); const page=await instance.readPublishedFile(request.params.fileRef,request.params.offset); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
       case "session.inventory": {
         const inventory = await this.sessionInventory.list(request.params.cwd, request.params.scope);
         this.sendSuccessAndEnd(socket, request.requestId, boundedSessionInventory(inventory, request.params));
@@ -908,6 +910,7 @@ function isMutationRequest(type: ControlRequest["type"]): boolean {
     && type !== "session.history"
     && type !== "conversation.history"
     && type !== "conversation.content"
+    && type !== "file.read"
     && type !== "session.inventory"
     && type !== "session.list"
     && type !== "session.tree"
@@ -1157,6 +1160,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof CatalogOperationRecordedError) return { code: "operation_conflict", message: error.message };
   if (error instanceof InvalidHistoryCursorError) return { code: "invalid_cursor", message: error.message };
   if (error instanceof AgentConversationCursorError) return { code: "invalid_cursor", message: error.message };
+  if (error instanceof PublishedFileUnavailableError) return { code: error.code, message: error.message };
   if (error instanceof StaleRuntimeGenerationError) return { code: "stale_runtime_generation", message: error.message, details: { expectedRuntimeGeneration: error.expected, actualRuntimeGeneration: error.actual } };
   if (error instanceof InvalidTreeCursorError) return { code: "invalid_cursor", message: error.message };
   if (error instanceof InteractionNotFoundError) return { code: error.code, message: error.message };

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { createConnection, createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,7 @@ import { ExtensionUiBroker, InteractionLifecycleCancelledError } from "../src/co
 import { ManagedInstance, type DockEvent, type SessionDto } from "../src/core/managed-instance.js";
 import type { SettingUpdate } from "../src/core/config-projection.js";
 import { AgentInvalidSettingValueError, type AgentHistoryEntry, type AgentPromptOptions } from "../src/core/agent-worker.js";
+import { TransientFileRegistry } from "../src/pi/transient-file-registry.js";
 import { mouseTrackingSequences } from "../src/tui/mouse-input.js";
 import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
 import { ScriptedCatalogCommitPort } from "./support/scripted-catalog-port.js";
@@ -2262,6 +2263,42 @@ test("conversation content survives fresh clients through revision-bound Protoco
     freshClient.conversationContent(created.id, contentRef),
     (error: unknown) => error instanceof ControlClientError && error.code === "invalid_cursor",
   );
+});
+
+test("a Protocol V2 client displays path-free published metadata and reads the file until it disappears", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "published-file");
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
+  const sourcePath = join(harness.directory, "display.png");
+  const bytes = Buffer.alloc(300_000, 0x5a);
+  await writeFile(sourcePath, bytes);
+  const registry = new TransientFileRegistry();
+  const published = await registry.publish(sourcePath);
+  runtime.publishedFileRead = (fileRef, offset) => registry.read(fileRef, offset);
+  runtime.history = [agentRecord("published-result", "tool", [{
+    type: "tool_result", toolCallId: "show-1", toolName: "show_image", text: "Published display.png for display.", isError: false, publishedFile: published,
+  }], { toolCallId: "show-1", toolName: "show_image", isError: false })];
+  runtime.emit({ type: "conversation_checkpoint" });
+
+  const read = await client.read(created.id);
+  const wireMetadata = JSON.stringify(read.recentHistory[0]);
+  assert.equal(wireMetadata.includes(harness.directory), false);
+  assert.equal(wireMetadata.includes("base64"), false);
+  assert.deepEqual((read.recentHistory[0]!.content[0] as { publishedFile?: unknown }).publishedFile, published);
+
+  const first = await client.readFile(created.id, published.fileRef);
+  assert.equal(first.complete, false);
+  assert.equal(Buffer.from(first.data, "base64").length, 262_144);
+  const second = await client.readFile(created.id, published.fileRef, first.nextOffset);
+  assert.equal(second.complete, true);
+  assert.deepEqual(Buffer.concat([Buffer.from(first.data, "base64"), Buffer.from(second.data, "base64")]), bytes);
+
+  await unlink(sourcePath);
+  await assert.rejects(client.readFile(created.id, published.fileRef), (error: unknown) =>
+    error instanceof ControlClientError && error.code === "file_unavailable" && /publish it again/iu.test(error.message));
 });
 
 test("Hub session inventory is runtime-free and adoption publishes one managed instance", async (context) => {

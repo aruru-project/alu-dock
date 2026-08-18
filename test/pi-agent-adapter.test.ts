@@ -1,10 +1,35 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { AgentConversationCursorError } from "../src/core/agent-worker.js";
 import { PiConversationProjector, projectAgentSessionEvents } from "../src/pi/pi-agent-adapter.js";
 import { appendDockAttachmentContext } from "../src/pi/dock-attachment-context.js";
+import { TransientFileRegistry } from "../src/pi/transient-file-registry.js";
 
 const ATTACHMENT_CONTEXT_KEY = Buffer.alloc(32, 7);
+
+test("a live tool-result image uses a stable opaque conversation content reference without event bytes", () => {
+  const registry = new TransientFileRegistry();
+  const imageData = "a".repeat(70_000);
+  const projected = projectAgentSessionEvents({
+    type: "tool_execution_end", toolCallId: "image-call", toolName: "read",
+    result: { content: [{ type: "image", mimeType: "image/png", data: imageData }] }, isError: false,
+  } as never, registry);
+  const frames = projected.flatMap((event) => new PiConversationProjector(ATTACHMENT_CONTEXT_KEY).project(event));
+  const serialized = JSON.stringify(frames);
+  assert.equal(serialized.includes(imageData), false);
+  const data = (frames[0] as unknown as { frame: { data: { content: Array<{ contentRef?: string }> } } }).frame.data;
+  const contentRef = data.content[0]!.contentRef!;
+  assert.match(contentRef, /^image-/u);
+  const first = registry.readImageContent(contentRef)!;
+  assert.equal(first.complete, false);
+  assert.throws(() => registry.readImageContent(contentRef, "expired-cursor"), AgentConversationCursorError);
+  registry.registerImage("later-entry", "image/png");
+  const second = registry.readImageContent(contentRef, first.nextCursor)!;
+  const third = registry.readImageContent(contentRef, second.nextCursor)!;
+  assert.equal([first, second, third].flatMap((page) => page.chunks).map((chunk) => chunk.type === "image" ? chunk.data : "").join(""), imageData);
+  assert.ok([first, second, third].every((page) => page.revision === contentRef));
+});
 
 test("Pi adapter splits real message_update deltas without loss before the private protocol boundary", () => {
   const delta = `${"a".repeat(7_999)}😀${"b".repeat(8_200)}`;
@@ -89,7 +114,7 @@ test("Pi live events become canonical conversation frames before crossing the Wo
     result: { content: [{ type: "text", text: "file" }] }, isError: false,
   } as never), [{
     type: "dock_conversation_frame",
-    frame: { type: "tool.completed", data: { toolCallId: "call-1", toolName: "read", text: "file", isError: false } },
+    frame: { type: "tool.completed", data: { toolCallId: "call-1", toolName: "read", text: "file", isError: false, content: [{ type: "text", text: "file" }] } },
   }]);
   assert.deepEqual(projector.project({
     type: "message_end",

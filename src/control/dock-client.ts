@@ -27,6 +27,7 @@ import {
   INSTANCE_KEYS_CAPABILITY,
   INSTANCE_DISPLAY_NAME_CAPABILITY,
   CONVERSATION_CONTENT_CAPABILITY,
+  PUBLISHED_FILES_CAPABILITY,
   WORKSPACE_LIST_CAPABILITY,
   MAX_WORKSPACE_LIST_ITEMS,
   type Capability,
@@ -50,6 +51,7 @@ import {
   parseHistoryResult,
   parseConversationHistoryResult,
   parseConversationContentResult,
+  parseFileReadResult,
   parseInteractionRespondResult,
   parseKeyLookupResult,
   parseWidgetViewportResult,
@@ -93,6 +95,7 @@ import {
   type HistoryResult,
   type ConversationHistoryResult,
   type ConversationContentResult,
+  type FileReadResult,
   type InteractionRespondResult,
   type WidgetViewportResult,
   type InstanceListCursor,
@@ -353,6 +356,7 @@ export class DockClient {
   history(instanceId:string,beforeEntryId?:string,limit=200):Promise<HistoryResult>{return this.request("session.history",{instanceId,beforeEntryId,limit},["tui.projection.v1",IMAGE_INPUT_CAPABILITY],parseHistoryResult);}
   async conversationHistory(instanceId:string,cursor?:string,limit=50):Promise<ConversationHistoryResult>{const result=await this.request("conversation.history",{instanceId,cursor,limit},CONVERSATION_CONTENT_CAPABILITY,parseConversationHistoryResult);if(result.instance.id!==instanceId)throw new ControlClientError("invalid_response","Conversation history result belongs to another instance");return result;}
   async conversationContent(instanceId:string,contentRef:string,cursor?:string):Promise<ConversationContentResult>{const result=await this.request("conversation.content",{instanceId,contentRef,cursor},CONVERSATION_CONTENT_CAPABILITY,parseConversationContentResult);if(result.instanceId!==instanceId||result.contentRef!==contentRef)throw new ControlClientError("invalid_response","Conversation content result belongs to another request");return result;}
+  async readFile(instanceId:string,fileRef:string,offset?:number):Promise<FileReadResult>{const requestedOffset=offset??0;const result=await this.request("file.read",{instanceId,fileRef,offset},PUBLISHED_FILES_CAPABILITY,(input)=>parseFileReadResult(input,requestedOffset));if(result.instanceId!==instanceId||result.file.fileRef!==fileRef||result.offset!==requestedOffset)throw new ControlClientError("invalid_response","Published file result belongs to another request");return result;}
   sessionInventory(cwd:string,scope:"cwd"|"all"="cwd"):Promise<SessionInventoryResult>{return this.request("session.inventory",{cwd,scope},["session.inventory.v1","session.inventory-diagnostics.v1"],parseSessionInventoryResult);}
   workspaceList(path:string,cursor?:WorkspaceListCursor,limit=MAX_WORKSPACE_LIST_ITEMS):Promise<WorkspaceListResult>{return this.request("workspace.list",{path,cursor,limit},WORKSPACE_LIST_CAPABILITY,parseWorkspaceListResult);}
   sessions(instanceId:string,scope:"cwd"|"all"):Promise<SessionsResult>{return this.request("session.list",{instanceId,scope},["session.core","projection.completeness.v1"],parseSessionsResult);}

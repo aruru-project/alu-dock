@@ -3,6 +3,8 @@ import type { AttachmentDto } from "./instance-attachments.js";
 export type { AttachmentDto } from "./instance-attachments.js";
 import type { AgentSessionMetrics, ThinkingLevel } from "./agent-worker.js";
 import type { BuiltInToolPresentation } from "./tool-result-presentation.js";
+import type { PublishedFileDto } from "./published-file.js";
+export type { PublishedFileDto } from "./published-file.js";
 
 export type InstanceLifecycle = "active" | "stopping" | "stopped" | "host_lost" | "runtime_error";
 export type InstanceExecution = "idle" | "running" | "failed" | "unavailable";
@@ -27,9 +29,9 @@ export interface ImagePathDto { path: string; mimeType: string }
 export type ContentBlockDto =
   | { type: "text"; text: string }
   | { type: "thinking"; text: string }
-  | { type: "image"; mimeType: string }
+  | { type: "image"; mimeType: string; contentRef?: string }
   | { type: "tool_call"; toolCallId: string; toolName: string; args: JsonObject; omittedFields?: string[] }
-  | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; presentation?: BuiltInToolPresentation; omittedFields?: string[] }
+  | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; presentation?: BuiltInToolPresentation; omittedFields?: string[] }
   | { type: "omitted"; kind: "image" | "binary"; description: string };
 
 export const MAX_SEMANTIC_HISTORY_PAGE_ITEMS = 100_000;
@@ -120,7 +122,7 @@ export type ConversationContentChunkDto =
   | { blockIndex: number; type: "text" | "thinking"; text: string; offset: number; blockComplete: boolean }
   | { blockIndex: number; type: "image"; mimeType: string; data: string; offset: number; blockComplete: boolean }
   | { blockIndex: number; type: "tool_call"; toolCallId: string; toolName: string; argumentsJson: string; offset: number; blockComplete: boolean }
-  | { blockIndex: number; type: "tool_result"; toolCallId: string; toolName: string; text: string; offset: number; blockComplete: boolean; isError: boolean; omittedFields?: string[] }
+  | { blockIndex: number; type: "tool_result"; toolCallId: string; toolName: string; text: string; offset: number; blockComplete: boolean; isError: boolean; publishedFile?: PublishedFileDto; omittedFields?: string[] }
   | { blockIndex: number; type: "omitted"; kind: "image" | "binary"; description: string };
 
 export interface ConversationHistoryEntryDto {
@@ -213,8 +215,8 @@ export interface EventDataMap {
   "message.completed": { messageId: string; role: "user" | "assistant" | "tool" | "system"; content: ContentBlockDto[]; attachments?: AttachmentDto[]; stopReason?: string; error?: string };
   "tool.started": { toolCallId: string; toolName: string; args: JsonObject; omittedFields?: string[] };
   "tool.args_updated": { toolCallId: string; args: JsonObject; omittedFields?: string[] };
-  "tool.output_updated": { toolCallId: string; text: string; presentation?: BuiltInToolPresentation };
-  "tool.completed": { toolCallId: string; toolName: string; text: string; isError: boolean; presentation?: BuiltInToolPresentation; omittedFields?: string[] };
+  "tool.output_updated": { toolCallId: string; text: string; content?: ContentBlockDto[]; publishedFile?: PublishedFileDto; presentation?: BuiltInToolPresentation };
+  "tool.completed": { toolCallId: string; toolName: string; text: string; isError: boolean; content?: ContentBlockDto[]; publishedFile?: PublishedFileDto; presentation?: BuiltInToolPresentation; omittedFields?: string[] };
   "queue.changed": PendingDto;
   "queue.cleared": PendingDto & { queueItemIds: string[]; reason: "dequeued" | "abort" | "stop" | "replacement" | "host_draining" };
   "compaction.started": { reason: "manual" | "threshold" | "overflow"; operationId?: string };

@@ -102,6 +102,12 @@ Host 对 socket input 串行处理、pause/resume backpressure，并以 60 秒 i
 
 `command.submit` 只携带结构化 opaque `attachments: fileId[]`。Host 在 admission 时解析为 canonical DTO，再与 message 一起进入 direct prompt、Host Queue、runtime Queue、`message.submitted`、`message.completed` 和 persisted conversation。文件 bytes 始终留在 Host store，不进入 catalog、event JSONL 或 `MAX_WORKER_TRANSFER_BYTES` IPC。`attachments.v1` 只约束 `attachment.upload` 以及实际携带 attachment IDs 的 `command.submit` input；一旦消息被接受，attachment metadata 就是 canonical message 的可选组成部分，随 read、follow、history 和 `queue.dequeue` 原样返回。无需显示附件的客户端直接忽略该可选字段，不需要 attachment projection 协商、兼容重试或 Queue 特判。
 
+## Published files 与读取
+
+`published-files.v1` 提供 authenticated `file.read`。公开 `PublishedFileDto` 固定为 `presentation: "image" + fileRef + name + sizeBytes + optional mediaType`，不含 Worker path；客户端按 `presentation` 决定显示意图，不从 tool name、文件扩展名或文本猜测。Host 只校验 instance/lifecycle 并把同一 Protocol V2 request 路由到当前 generation 的 Worker，Unix socket 与 mTLS 共用这条 route；Host 不维护 registry 或 media store。
+
+`file.read` 使用明确的 `fileRef + offset`，每页 decoded bytes 最多 256 KiB。response 的 `offset` 必须等于请求 offset，`nextOffset` 必须精确等于本页末尾；complete page 必须恰好到达 `sizeBytes`。registry 只在 Worker 当前 session/generation 内存活，session replacement、dispose、handle 淘汰、源文件删除或改写都返回 `file_unavailable`，客户端应让用户要求 Agent 重新发布，而不是重试任意 path。
+
 ## 身份
 
 以下身份用途不同：

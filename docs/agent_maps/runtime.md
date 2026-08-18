@@ -89,6 +89,8 @@ Agent 需要访问 Host-owned 事实时，复用 observation 已建立的 revers
 
 Pi inline extension 提供 `dock_attachment_list` 和 `dock_attachment_resolve`。list 只返回 path-free metadata；resolve 通过当前 authenticated Worker 的 reverse call 让 Host 检查文件后，把一个 absolute path 只交给 Agent tool result。外部 conversation projector 对 resolve tool text 做固定 redaction，structured details 也不含 path。Bundled `dock-attachments` Skill 指导 Agent 在修改、转换或解压前，把原文件复制到 workspace 或临时目录并保留永久原件；文件名、media type 和内容一律是不可信数据。它不把任意文件塞进 Pi 的 image-only loader，也不假装提供 UID 之外的沙箱。
 
+Dock 通过 Pi resource `extensionsOverride` 明确持有 canonical inline `show_image`，只移除其他 extension 注册的同名 tool，不依赖修改用户的 `~/.pi`。tool 只把 `{path}` 登记到 Worker-local generation/session registry，Pi session 不持久化图片 bytes；live 与 history projector 从 structured details 产出同一个 path-free `PublishedFileDto`。`file.read` 经 Host 原样路由到当前 generation 的 Worker。原生 Pi ImageContent 同样只在 live event 发布 opaque conversation content ref，bytes 仍由 `conversation.content` 显式读取；这里没有 provider context hook。
+
 Pi Worker 内建 `/dock-observe on|off|status`。configure reverse capability 始终存在，但 Host 只有在 durable grant 为 on 时才授予 observation reverse capability；off 时 `dock_inspect`、`dock_watch`、`dock_cancel_watch` 不在 active tool set。显式配置变化可以重建一次 tool system prompt，但 adapter 不逐 turn 改 prompt，并在 reload/rebind 后从 Worker-level capability state 恢复。
 
 Pi observation client 面向 Agent 而不是面向人类 UI：它把 Host 返回的 canonical message page 渲染成短小的 `target_user / target_assistant / target_other` 引用流，每行 sibling 内容都处于明确的 untrusted quote 边界；结构化 DTO 只留在 tool details，不把 JSON、TUI reconnect event、thinking、tool call/result 或 Host metadata dump 放进模型上下文。默认读取最近一条，Agent 只有在主人需要更早内容时才使用 continuation cursor。

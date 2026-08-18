@@ -11,6 +11,7 @@ import type { ConversationRecordDto } from "./instance-dto.js";
 import type { AttachmentDto } from "./instance-attachments.js";
 import type { ControlRequest } from "../control/protocol.js";
 import type { ObservationNotification } from "./instance-observation.js";
+import type { PublishedFileDto } from "./published-file.js";
 
 export interface AgentEvent {
   type: string;
@@ -77,7 +78,7 @@ export type AgentConversationContentChunk =
   | { blockIndex: number; type: "text" | "thinking"; text: string; offset: number; blockComplete: boolean }
   | { blockIndex: number; type: "image"; mimeType: string; data: string; offset: number; blockComplete: boolean }
   | { blockIndex: number; type: "tool_call"; toolCallId: string; toolName: string; argumentsJson: string; offset: number; blockComplete: boolean }
-  | { blockIndex: number; type: "tool_result"; toolCallId: string; toolName: string; text: string; offset: number; blockComplete: boolean; isError: boolean; omittedFields?: string[] }
+  | { blockIndex: number; type: "tool_result"; toolCallId: string; toolName: string; text: string; offset: number; blockComplete: boolean; isError: boolean; publishedFile?: PublishedFileDto; omittedFields?: string[] }
   | { blockIndex: number; type: "omitted"; kind: "image" | "binary"; description: string };
 
 export interface AgentConversationHistoryEntry {
@@ -324,7 +325,7 @@ export type AgentRequestType =
   | "model.list" | "model.set" | "thinking.set"
   | "tool.list" | "tool.set_active" | "settings.get" | "settings.update"
   | "resource.get" | "command.catalog" | "session.history"
-  | "conversation.history" | "conversation.content" | "session.list"
+  | "conversation.history" | "conversation.content" | "file.read" | "session.list"
   | "session.switch" | "session.new" | "session.name" | "session.compact"
   | "session.reload" | "session.tree" | "session.navigate" | "session.fork" | "session.clone";
 

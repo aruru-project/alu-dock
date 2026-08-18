@@ -69,6 +69,7 @@ import type {
 } from "./agent-worker.js";
 import { sliceSemanticHistory } from "./history-pagination.js";
 import { projectInstanceDisplayName } from "./instance-display-name.js";
+import type { PublishedFileReadPage } from "./published-file.js";
 import {
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENT_FILE_ID_CHARS,
@@ -910,6 +911,16 @@ export class ManagedInstance {
       this.assertActive();
       const generation = this.runtimeGenerationValue;
       const page = await this.invokeAgent<AgentConversationContentPage>("conversation.content", { contentRef, ...(cursor === undefined ? {} : { cursor }) });
+      if (generation !== this.runtimeGenerationValue) throw new StaleRuntimeGenerationError(generation, this.runtimeGenerationValue);
+      return { instanceId: this.id, runtimeGeneration: generation, ...cloneJson(page) };
+    });
+  }
+
+  async readPublishedFile(fileRef: string, offset?: number): Promise<PublishedFileReadPage & { instanceId: string; runtimeGeneration: number }> {
+    return this.withProjectionRead(async () => {
+      this.assertActive();
+      const generation = this.runtimeGenerationValue;
+      const page = await this.invokeAgent<PublishedFileReadPage>("file.read", { fileRef, ...(offset === undefined ? {} : { offset }) });
       if (generation !== this.runtimeGenerationValue) throw new StaleRuntimeGenerationError(generation, this.runtimeGenerationValue);
       return { instanceId: this.id, runtimeGeneration: generation, ...cloneJson(page) };
     });

@@ -11,6 +11,14 @@ import {
 } from "../core/instance-attachments.js";
 import { MAX_INSTANCE_DISPLAY_NAME_CHARS } from "../core/instance-display-name.js";
 import {
+  MAX_PUBLISHED_FILE_BYTES,
+  MAX_PUBLISHED_FILE_CHUNK_BYTES,
+  MAX_PUBLISHED_FILE_REF_CHARS,
+  validatedPublishedFileDto,
+  type PublishedFileDto,
+  type PublishedFileReadPage,
+} from "../core/published-file.js";
+import {
   validateBuiltInToolPresentation,
   type BuiltInToolPresentation,
 } from "../core/tool-result-presentation.js";
@@ -104,9 +112,11 @@ export const INSTANCE_DISPLAY_NAME_CAPABILITY = "instance.display-name.v1" as co
 export const CONVERSATION_CONTENT_CAPABILITY = "conversation.content.v1" as const;
 export const WORKSPACE_LIST_CAPABILITY = "workspace.list.v1" as const;
 export const ATTACHMENTS_CAPABILITY = "attachments.v1" as const;
+export const PUBLISHED_FILES_CAPABILITY = "published-files.v1" as const;
 
 export const IMPLEMENTED_CAPABILITIES = [
   ATTACHMENTS_CAPABILITY,
+  PUBLISHED_FILES_CAPABILITY,
   "catalog.maintenance.v1",
   "catalog.v1",
   CONVERSATION_CONTENT_CAPABILITY,
@@ -216,6 +226,7 @@ export type ControlRequest =
   | Request<"session.history", { instanceId: string; beforeEntryId?: string; limit: number }>
   | Request<"conversation.history", { instanceId: string; cursor?: string; limit: number }>
   | Request<"conversation.content", { instanceId: string; contentRef: string; cursor?: string }>
+  | Request<"file.read", { instanceId: string; fileRef: string; offset?: number }>
   | Request<"session.inventory", { cwd: string; scope: "cwd" | "all" }>
   | Request<"session.list", { instanceId: string; scope: "cwd" | "all" }>
   | Request<"session.switch", { operationId: string; instanceId: string; sessionFile: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
@@ -326,6 +337,7 @@ export interface SessionInventoryResult {
 export interface HistoryResult { historyRevision: number; entries: HistoryEntryDto[]; hasEarlier: boolean; nextBeforeEntryId?: string; instance: InstanceSnapshot }
 export type ConversationHistoryResult = ConversationHistoryPageDto;
 export type ConversationContentResult = ConversationContentPageDto;
+export type FileReadResult = PublishedFileReadPage & { instanceId: string; runtimeGeneration: number };
 export interface SessionReplacementResult { cancelled: boolean; instance: InstanceSnapshot }
 export interface SessionNameResult { instance: InstanceSnapshot }
 export interface SessionCompactionResult { result: { summary: string; firstKeptEntryId: string; tokensBefore: number }; instance: InstanceSnapshot }
@@ -368,6 +380,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "queue.dequeue") return "queue.control.v1";
   if (type === "session.history") return "tui.projection.v1";
   if (type === "conversation.history" || type === "conversation.content") return CONVERSATION_CONTENT_CAPABILITY;
+  if (type === "file.read") return PUBLISHED_FILES_CAPABILITY;
   if (type === "workspace.list") return WORKSPACE_LIST_CAPABILITY;
   if (type === "session.inventory") return "session.inventory.v1";
   if (type === "session.tree" || type === "session.navigate" || type === "session.fork" || type === "session.clone") return "session.tree.v1";
@@ -662,6 +675,12 @@ export function parseControlRequest(input: unknown): ControlRequest {
         contentRef: string(params.contentRef, "params.contentRef", 128, "invalid_request"),
         cursor: optionalString(params.cursor, "params.cursor", 128, "invalid_request"),
       } };
+    }
+    case "file.read": {
+      exact(params, ["instanceId", "fileRef", "offset"], "invalid_request");
+      const offset = params.offset === undefined ? undefined : unsigned(params.offset, "params.offset", "invalid_request");
+      if (offset !== undefined && offset > MAX_PUBLISHED_FILE_BYTES) throw validation("invalid_request", "params.offset exceeds the published-file bound");
+      return { ...base, type, params: { instanceId: instanceId(), fileRef: string(params.fileRef, "params.fileRef", MAX_PUBLISHED_FILE_REF_CHARS, "invalid_request"), offset } };
     }
     case "session.inventory": {
       exact(params, ["cwd", "scope"], "invalid_request");
@@ -1179,6 +1198,36 @@ export function parseConversationContentResult(input: unknown): ConversationCont
     ...conversationContentFields(value),
   };
 }
+
+export function parseFileReadBody(input: unknown): PublishedFileReadPage {
+  const value = object(input, "published file page");
+  exact(value, ["file", "offset", "data", "complete", "nextOffset"]);
+  const file = parsePublishedFileDto(value.file, "file");
+  const offset = unsigned(value.offset, "offset");
+  const data = canonicalBase64(value.data, "data", MAX_PUBLISHED_FILE_CHUNK_BYTES);
+  const decodedBytes = Buffer.from(data, "base64").length;
+  const complete = boolean(value.complete, "complete");
+  const nextOffset = value.nextOffset === undefined ? undefined : unsigned(value.nextOffset, "nextOffset");
+  const end = offset + decodedBytes;
+  if (decodedBytes === 0 || offset >= file.sizeBytes || end > file.sizeBytes
+    || (complete && (nextOffset !== undefined || end !== file.sizeBytes))
+    || (!complete && (nextOffset !== end || end >= file.sizeBytes))) throw validation("invalid_response", "published file pagination is inconsistent");
+  return { file, offset, data, complete, ...(nextOffset === undefined ? {} : { nextOffset }) };
+}
+
+export function parseFileReadResult(input: unknown, expectedOffset?: number): FileReadResult {
+  const value = object(input, "published file result");
+  exact(value, ["instanceId", "runtimeGeneration", "file", "offset", "data", "complete", "nextOffset"]);
+  const result = { instanceId: id(value.instanceId, "instanceId"), runtimeGeneration: positive(value.runtimeGeneration, "runtimeGeneration"), ...parseFileReadBody({ file: value.file, offset: value.offset, data: value.data, complete: value.complete, nextOffset: value.nextOffset }) };
+  if (expectedOffset !== undefined && result.offset !== expectedOffset) throw validation("invalid_response", "published file response offset does not match the request");
+  return result;
+}
+
+export function parsePublishedFileDto(input: unknown, field = "publishedFile"): PublishedFileDto {
+  const published = validatedPublishedFileDto(input);
+  if (published === undefined) throw validation("invalid_response", `${field} is not valid published-file metadata`);
+  return published;
+}
 function conversationContentFields(value: Record<string, unknown>): Omit<ConversationContentResult, "instanceId" | "runtimeGeneration"> {
   const chunks = array(value.chunks, "chunks", 64).map((item, index) => parseConversationContentChunk(item, `chunks[${index}]`));
   const complete = boolean(value.complete, "complete");
@@ -1232,7 +1281,8 @@ function parseConversationContentChunk(input: unknown, field: string): Conversat
     };
   }
   if (type === "tool_result") {
-    exact(chunk, ["blockIndex", "type", "toolCallId", "toolName", "text", "offset", "blockComplete", "isError", "omittedFields"]);
+    exact(chunk, ["blockIndex", "type", "toolCallId", "toolName", "text", "offset", "blockComplete", "isError", "publishedFile", "omittedFields"]);
+    const publishedFile = chunk.publishedFile === undefined ? undefined : parsePublishedFileDto(chunk.publishedFile, `${field}.publishedFile`);
     return {
       blockIndex,
       type,
@@ -1242,6 +1292,7 @@ function parseConversationContentChunk(input: unknown, field: string): Conversat
       offset: unsigned(chunk.offset, `${field}.offset`),
       blockComplete: boolean(chunk.blockComplete, `${field}.blockComplete`),
       isError: boolean(chunk.isError, `${field}.isError`),
+      ...(publishedFile === undefined ? {} : { publishedFile }),
       omittedFields: omitted(chunk.omittedFields, `${field}.omittedFields`),
     };
   }
@@ -1613,18 +1664,22 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     case "tool.started": exact(data, ["toolCallId", "toolName", "args", "omittedFields"]); return toolArgs(data, field, true);
     case "tool.args_updated": exact(data, ["toolCallId", "args", "omittedFields"]); return toolArgs(data, field, false);
     case "tool.output_updated": {
-      exact(data, ["toolCallId", "text", "presentation"]);
+      exact(data, ["toolCallId", "text", "content", "publishedFile", "presentation"]);
       const resultText = boundedString(data.text, `${field}.text`, MAX_TOOL_RESULT_TEXT);
+      const content = data.content === undefined ? undefined : parseContent(data.content, `${field}.content`);
+      const publishedFile = data.publishedFile === undefined ? undefined : parsePublishedFileDto(data.publishedFile, `${field}.publishedFile`);
       const presentation = data.presentation === undefined ? undefined : parseToolPresentation(data.presentation, `${field}.presentation`, undefined, false);
-      return { toolCallId: text("toolCallId", 128), text: resultText, ...(presentation === undefined ? {} : { presentation }) };
+      return { toolCallId: text("toolCallId", 128), text: resultText, ...(content === undefined ? {} : { content }), ...(publishedFile === undefined ? {} : { publishedFile }), ...(presentation === undefined ? {} : { presentation }) };
     }
     case "tool.completed": {
-      exact(data, ["toolCallId", "toolName", "text", "isError", "presentation", "omittedFields"]);
+      exact(data, ["toolCallId", "toolName", "text", "isError", "content", "publishedFile", "presentation", "omittedFields"]);
       const toolName = text("toolName", 256);
       const isError = boolean(data.isError, "isError");
       const resultText = boundedString(data.text, `${field}.text`, MAX_TOOL_RESULT_TEXT);
+      const content = data.content === undefined ? undefined : parseContent(data.content, `${field}.content`);
+      const publishedFile = data.publishedFile === undefined ? undefined : parsePublishedFileDto(data.publishedFile, `${field}.publishedFile`);
       const presentation = data.presentation === undefined ? undefined : parseToolPresentation(data.presentation, `${field}.presentation`, toolName, isError);
-      return { toolCallId: text("toolCallId", 128), toolName, text: resultText, isError, ...(presentation === undefined ? {} : { presentation }), omittedFields: omitted(data.omittedFields, "omittedFields") };
+      return { toolCallId: text("toolCallId", 128), toolName, text: resultText, isError, ...(content === undefined ? {} : { content }), ...(publishedFile === undefined ? {} : { publishedFile }), ...(presentation === undefined ? {} : { presentation }), omittedFields: omitted(data.omittedFields, "omittedFields") };
     }
     case "queue.changed": exact(data, ["steering", "followUp", "total"]); return parsePending(data, field);
     case "queue.cleared": exact(data, ["steering", "followUp", "total", "queueItemIds", "reason"]); return { ...parsePending({ steering: data.steering, followUp: data.followUp, total: data.total }, field), queueItemIds: strings(data.queueItemIds, `${field}.queueItemIds`, MAX_PENDING_QUEUE_ITEMS, 128), reason: enumeration(data.reason, `${field}.reason`, ["dequeued", "abort", "stop", "replacement", "host_draining"]) };
@@ -1692,15 +1747,16 @@ function parseContent(input: unknown, field: string): ContentBlockDto[] {
   return array(input, field, MAX_JSON_ARRAY).map((item, index) => {
     const block = object(item, `${field}[${index}]`); const type = enumeration(block.type, `${field}[${index}].type`, ["text", "thinking", "image", "tool_call", "tool_result", "omitted"]);
     if (type === "text" || type === "thinking") { exact(block, ["type", "text"]); return { type, text: boundedString(block.text, `${field}[${index}].text`, MAX_TEXT) }; }
-    if (type === "image") { exact(block, ["type", "mimeType"]); const mimeType = string(block.mimeType, `${field}[${index}].mimeType`, MAX_IMAGE_MIME_TYPE_CHARS); if (!/^image\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/u.test(mimeType)) throw validation("invalid_response", `${field}[${index}].mimeType must be image/*`); return { type, mimeType }; }
+    if (type === "image") { exact(block, ["type", "mimeType", "contentRef"]); const mimeType = string(block.mimeType, `${field}[${index}].mimeType`, MAX_IMAGE_MIME_TYPE_CHARS); if (!/^image\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/u.test(mimeType)) throw validation("invalid_response", `${field}[${index}].mimeType must be image/*`); return { type, mimeType, ...(block.contentRef === undefined ? {} : { contentRef: string(block.contentRef, `${field}[${index}].contentRef`, 128) }) }; }
     if (type === "tool_call") { exact(block, ["type", "toolCallId", "toolName", "args", "omittedFields"]); return { type, toolCallId: id(block.toolCallId, "toolCallId"), toolName: string(block.toolName, "toolName", 256), args: parseJsonObject(block.args, "args"), omittedFields: omitted(block.omittedFields, "omittedFields") }; }
     if (type === "tool_result") {
-      exact(block, ["type", "toolCallId", "toolName", "text", "isError", "presentation", "omittedFields"]);
+      exact(block, ["type", "toolCallId", "toolName", "text", "isError", "publishedFile", "presentation", "omittedFields"]);
       const toolName = string(block.toolName, "toolName", 256);
       const isError = boolean(block.isError, "isError");
       const resultText = boundedString(block.text, "text", MAX_TOOL_RESULT_TEXT);
+      const publishedFile = block.publishedFile === undefined ? undefined : parsePublishedFileDto(block.publishedFile, `${field}[${index}].publishedFile`);
       const presentation = block.presentation === undefined ? undefined : parseToolPresentation(block.presentation, `${field}[${index}].presentation`, toolName, isError);
-      return { type, toolCallId: id(block.toolCallId, "toolCallId"), toolName, text: resultText, isError, ...(presentation === undefined ? {} : { presentation }), omittedFields: omitted(block.omittedFields, "omittedFields") };
+      return { type, toolCallId: id(block.toolCallId, "toolCallId"), toolName, text: resultText, isError, ...(publishedFile === undefined ? {} : { publishedFile }), ...(presentation === undefined ? {} : { presentation }), omittedFields: omitted(block.omittedFields, "omittedFields") };
     }
     exact(block, ["type", "kind", "description"]); return { type, kind: enumeration(block.kind, "kind", ["image", "binary"]), description: string(block.description, "description", MAX_MESSAGE) };
   });
@@ -1891,6 +1947,7 @@ function optionalString(input: unknown, field: string, max = MAX_CONTROL_CWD_CHA
 function boolean(input: unknown, field: string, code = "invalid_response"): boolean { if (typeof input !== "boolean") throw validation(code, `${field} must be boolean`); return input; }
 function optionalBoolean(input: unknown, field: string, code: string): boolean | undefined { return input === undefined ? undefined : boolean(input, field, code); }
 function unsigned(input: unknown, field: string, code = "invalid_response"): number { if (!Number.isSafeInteger(input) || (input as number) < 0) throw validation(code, `${field} must be a non-negative safe integer`); return input as number; }
+function canonicalBase64(input: unknown, field: string, maxDecodedBytes: number): string { const value = string(input, field, Math.ceil(maxDecodedBytes / 3) * 4 + 4); const bytes = Buffer.from(value, "base64"); if (bytes.length > maxDecodedBytes || bytes.toString("base64") !== value) throw validation("invalid_response", `${field} must be canonical bounded base64`); return value; }
 function positive(input: unknown, field: string, code = "invalid_response"): number { const value = unsigned(input, field, code); if (value === 0) throw validation(code, `${field} must be positive`); return value; }
 function finiteNumber(input: unknown, field: string): number { if (typeof input !== "number" || !Number.isFinite(input)) throw validation("invalid_response", `${field} must be finite`); return input; }
 function nullableUnsigned(input: unknown, field: string): number | null { return input === null ? null : unsigned(input, field); }
