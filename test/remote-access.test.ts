@@ -544,6 +544,7 @@ async function runHubPty(
         ...process.env,
         STATE_DIRECTORY: "",
         XDG_STATE_HOME: stateHome,
+        XDG_DATA_HOME: join(stateHome, "data"),
         ALU_DOCK_PTY_ACTION: action,
         ...environment,
       },
