@@ -70,7 +70,7 @@ cargo fmt --all -- --check
 pnpm tauri build --no-bundle --ci
 ```
 
-`main` 分支上的 [Windows build](./.github/workflows/windows-build.yml) 会运行测试，并生成可直接运行的 `.exe` 文件。
+该命令直接生成可运行的 `.exe`，不创建安装程序。
 
 ### Android
 
@@ -88,6 +88,30 @@ pnpm tauri android build --debug --apk --target aarch64 --ci
 ```
 
 连接真机后，可以使用 `adb install` 安装 APK，使用 `adb logcat` 查看日志。构建 x86_64 模拟器版本时，请安装 `x86_64-linux-android` Rust target，并将构建目标改为 `x86_64`。
+
+## 发布
+
+普通提交不会触发打包。只有推送与项目版本一致的 `v` 标签时，[Release workflow](./.github/workflows/release.yml) 才会运行测试、构建三个平台，并创建 GitHub Release：
+
+- Windows x86_64：可直接运行的 `.exe`
+- Linux x86_64：包含可执行文件的 `.zip`
+- Android ARM64：签名后的 `.apk`
+- 三个平台文件的 `SHA256SUMS.txt`
+
+发布前需要让 `package.json`、工作区 `Cargo.toml`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json` 使用同一版本。Android 签名还需要在 GitHub 仓库中配置以下 Secrets：
+
+- `ANDROID_KEYSTORE_BASE64`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+
+`ANDROID_KEYSTORE_BASE64` 保存签名 keystore 文件的 Base64 内容；keystore 本身不放入仓库。确认版本和提交后推送标签：
+
+```bash
+VERSION=$(node -p "require('./package.json').version")
+git tag -a "v$VERSION" -m "AluDock $VERSION"
+git push origin "v$VERSION"
+```
 
 ## 协议调试工具
 
