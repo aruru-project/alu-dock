@@ -70,6 +70,7 @@ import type {
 import { sliceSemanticHistory } from "./history-pagination.js";
 import { projectInstanceDisplayName } from "./instance-display-name.js";
 import type { PublishedFileReadPage } from "./published-file.js";
+import { InstanceDeliverables, type DeliverableDto } from "./instance-deliverables.js";
 import {
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENT_FILE_ID_CHARS,
@@ -382,6 +383,7 @@ export class ManagedInstance {
   private shutdownRequestedAt: string | undefined;
   private ownerReleaseUnconfirmed = false;
   private dockToolsEnabledValue = false;
+  private readonly deliverables = new InstanceDeliverables();
   private executionChangedAtValue!: string;
   private runStartedAtValue: string | undefined;
   private timedExecutionValue: InstanceExecution = "idle";
@@ -597,6 +599,15 @@ export class ManagedInstance {
   }
 
   dockToolsEnabled(): boolean { return this.dockToolsEnabledValue; }
+
+  registerDeliverable(path: string): Promise<DeliverableDto> {
+    return this.enqueueTransition(async () => {
+      this.assertActive();
+      return this.deliverables.register(path);
+    });
+  }
+  listDeliverables(): DeliverableDto[] { return this.deliverables.list(); }
+  openDeliverable(deliveryRef: string): ReturnType<InstanceDeliverables["open"]> { return this.deliverables.open(deliveryRef); }
 
   async setDockToolsEnabled(enabled: boolean, operationId: string): Promise<void> {
     if (typeof enabled !== "boolean") throw new Error("Dock tools switch must be boolean");
@@ -2298,6 +2309,7 @@ export class ManagedInstance {
         () => {
           this.stopRequestedWhileRunning = this.state.execution === "running" || this.agentState().isStreaming;
           this.stopRequestedAt = requestedAt;
+          this.deliverables.clear();
           // A committed explicit stop retires this instance from its business
           // entry immediately. Cleanup continues by instance ID and must not
           // block a fresh keyed instance in a corrected or moved workspace.

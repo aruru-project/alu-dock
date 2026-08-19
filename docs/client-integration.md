@@ -23,7 +23,8 @@ Protocol V2 使用 UTF-8 JSONL；transport 是私有 Unix socket，或已配对�
 2. hello 成功后发送一个业务 request；
 3. 普通 request 收到一个 response 后结束；`session.tree.v2` 成功时先透明重组有界 `response_transfer` records，再得到这一个逻辑 response；
 4. `attachment.upload` 在一个 header request 后发送专用多记录 body，再收到一个 terminal response；
-5. `instance.follow` 和 `interaction.control` 在初始 response 后继续接收 event。
+5. `deliverable.download` 使用自己的 ready/chunk/complete-or-error 下载 records，不复用 `response_transfer`。
+6. `instance.follow` 和 `interaction.control` 在初始 response 后继续接收 event。
 
 读取、实时跟随、attachment upload 和 Extension UI 操作使用独立连接。不要在一条连接上发送多个业务 request，也不要把这些用途重新合成一条长连接。Upload body 是 `attachment.upload` 的专用 framing，不是可复用的通用 streaming RPC。
 
@@ -207,6 +208,14 @@ Data URI、base64 和长文本都是普通内容。客户端根据结构处理 i
 Dock 内建的 `show_image` 只负责把本机文件发布给用户界面显示，不把图片注入模型 context（模型要看图时使用 `read`）。成功的 tool result 在 live、history preview 与 `conversation.content` 的完整 tool-result block 中携带同一个 path-free `publishedFile`：`presentation: "image" + fileRef + name + sizeBytes + optional mediaType`。客户端使用 authenticated `file.read` 按 offset 获取最多 256 KiB 的 base64 chunk；文件被删除、改写、session replacement 或 Worker dispose 后返回 `file_unavailable`，界面应提示用户让 Agent 重新发布。`toolCallId` 只用于 tool 关联，客户端不得从 tool text/path 猜 metadata，也不得把 `fileRef` 当路径。
 
 Web 应用通常由后端接收浏览器上传、保存为受控本机文件，再向 Dock 提交 path descriptor；浏览器本身不能把自己的文件路径交给 Dock。Unix socket 与 mTLS 使用完全相同的 `file.read` route。
+
+## Instance 临时交付文件
+
+要求 `instance.deliverables.v1`。`deliverable.list {instanceId}` 返回 path-free tray：每项 `DeliverableDto` 只有 opaque `deliveryRef`、显示 `name` 和 `sizeBytes`。它是 Agent 通过 owner-enabled `dock_deliver_file({path})` 登记的 Host 内存状态，不是 attachment storage：Host 不复制、不上传、不持久化，source 改写/删除、instance stop 或 Host restart 后可能不可用。单文件最大 **104857600 bytes（100 MiB，含边界）**；没有 delete、claim、TTL、ack 或 management request。
+
+下载必须另开一个 authenticated Protocol V2 connection，发送 `deliverable.download {instanceId,deliveryRef}`。ready 前失败是普通 response error；ready 包含同一 DTO，之后是 zero-based contiguous `deliverable_download_chunk`（canonical base64），最后是 `deliverable_download_complete {chunks,sizeBytes,sha256}`。ready 后 source 消失、改变或 read 失败时收到 `deliverable_download_error`，sink 必须丢弃 provisional result。客户端逐块写 sink、独立计算 SHA-256，并验证每帧的 request/Host/instance/ref identity、index、总字节数和 lowercase terminal digest 后才提交成功；不得在内存缓存完整 100 MiB。断线是普通 failed read，不是 mutation `effect_unknown`，不要求 resume。
+
+这与 `show_image` 的 `published-files.v1/file.read` 不同：后者仍是 inline image、Worker session/generation scoped。临时交付的 bytes 由 Host 直接流向客户端，不经 Worker、不使用 attachment store，也不复用 Tree `response_transfer`。没有新 Dock event；客户端可在 initial/open/run 边界重新 list。
 
 ## 附件
 

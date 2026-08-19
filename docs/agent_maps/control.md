@@ -110,9 +110,17 @@ Host 对 socket input 串行处理、pause/resume backpressure，并以 60 秒 i
 
 ## Published files 与读取
 
-`published-files.v1` 提供 authenticated `file.read`。公开 `PublishedFileDto` 固定为 `presentation: "image" + fileRef + name + sizeBytes + optional mediaType`，不含 Worker path；客户端按 `presentation` 决定显示意图，不从 tool name、文件扩展名或文本猜测。Host 只校验 instance/lifecycle 并把同一 Protocol V2 request 路由到当前 generation 的 Worker，Unix socket 与 mTLS 共用这条 route；Host 不维护 registry 或 media store。
+`published-files.v1` 提供 authenticated `file.read`。公开 `PublishedFileDto` 固定为 `presentation: "image" + fileRef + name + sizeBytes + optional mediaType`，不含 Worker path；客户端按 `presentation` 决定显示意图，不从 tool name、文件扩展名或文本猜测。Host 只校验 instance/lifecycle 并把同一 Protocol V2 request 路由到当前 generation 的 Worker，Unix socket 与 mTLS 共用这条 route；这条 `show_image` 路径不在 Host 维护 registry 或 media store。
 
 `file.read` 使用明确的 `fileRef + offset`，每页 decoded bytes 最多 256 KiB。response 的 `offset` 必须等于请求 offset，`nextOffset` 必须精确等于本页末尾；complete page 必须恰好到达 `sizeBytes`。registry 只在 Worker 当前 session/generation 内存活，session replacement、dispose、handle 淘汰、源文件删除或改写都返回 `file_unavailable`，客户端应让用户要求 Agent 重新发布，而不是重试任意 path。
+
+## Instance 临时交付文件
+
+`instance.deliverables.v1` 与 `show_image` 分离。Agent 在 owner-enabled Dock tools 中调用 closed `dock_deliver_file({path})`；Host 从 authenticated Worker connection 推导 source instance，绝不接受 Worker 提供 instance/session/generation identity。当前 `ManagedInstance` 只在内存登记 canonical source path、`dev/ino/size/mtime/ctime` 和 opaque `deliveryRef`，不读取全文、不 hash、不复制、不上传、不创建 data file，也不写 catalog/session。登记跨 Pi session reload/new/switch/replacement 保留，instance stop 清空；Host restart/reopen 可以丢失。每个 instance 的登记集合有 producer-owned safety bound，满时拒绝新登记而不淘汰正常条目；没有 delete、claim、TTL、ack 或管理 API。
+
+公开 `DeliverableDto` 只有 `deliveryRef + name + sizeBytes`，不含 path。任意 readable regular file 可登记到 **104857600 bytes（100 MiB，含边界）**。客户端用 `deliverable.list {instanceId}` 读取 instance tray；下载在一个独立连接发送 `deliverable.download {instanceId,deliveryRef}`。Host 在 ready 前的失败是普通 error；ready 后发送从零连续的 canonical-base64 chunk records，最后发送 `chunks + sizeBytes + lowercase SHA-256` complete。若 source 在 ready 后消失、改变或读取失败，Host 发送专用 terminal error，客户端丢弃结果。Host 按需 open 并在流前后核对登记的文件身份，以 socket backpressure 发送且边发边算 SHA-256，不经 Worker、不写 Host disk、不复用 attachment storage 或 session-tree `response_transfer`。
+
+DockClient 的下载 API 把 chunk 逐块交给 sink/callback并独立计算 SHA-256，不缓存完整 100 MiB；只有 request/Host/ref identity、连续 index、总字节数和 terminal digest 全部匹配才返回成功。transport failure 是普通失败读取，不是 `effect_unknown`。客户端可在 initial/open/run 边界刷新 list；没有新的 Dock event 或 TUI surface。
 
 ## 身份
 
@@ -190,6 +198,8 @@ Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力
 - `src/control/remote-pairing.ts`：客户端可复用的 pairing wire types，以及 SRP、identity encryption 和 certificate proof helpers。
 - `src/control/attachment-storage-state.ts`：本机 storage directory 设置。
 - `src/control/attachment-service.ts`：stream sink、hash verification、manifest、dedupe 与 Agent path resolution。
+- `src/core/instance-deliverables.ts`：instance-lifetime 临时交付 registry、path-free DTO 与 producer bounds。
+- `src/core/source-file.ts`：`show_image` 与临时交付共用的 source canonicalize/stat/open/unchanged check。
 - `src/control/workspace-browser.ts`：Host 文件系统目录浏览与可恢复错误。
 
 新增功能时先判断它属于 Host control 还是 Agent session。不要把 Agent session 能力塞进 catalog/Managed state，也不要为同一 Protocol V2 shape 在 Worker、Host 和客户端分别维护重复定义。

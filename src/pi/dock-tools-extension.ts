@@ -9,6 +9,7 @@ import {
   type DockToolsRequest,
   type DockToolsResult,
 } from "../core/dock-tools.js";
+import { MAX_SOURCE_FILE_PATH_CHARS } from "../core/source-file.js";
 import {
   MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE,
   MAX_OBSERVATION_CURSOR_CHARS,
@@ -24,6 +25,7 @@ export const DOCK_TOOL_NAMES = [
   "dock_inspect",
   "dock_watch",
   "dock_cancel_watch",
+  "dock_deliver_file",
   "dock_create",
   "dock_send",
 ] as const;
@@ -54,6 +56,12 @@ const REQUIRED_TARGET_SCHEMA = {
 const OPTIONAL_WATCH_SCHEMA = {
   type: "object",
   properties: { watchId: { type: "string", minLength: 1, maxLength: 128 } },
+  additionalProperties: false,
+};
+const DELIVER_SCHEMA = {
+  type: "object",
+  properties: { path: { type: "string", minLength: 1, maxLength: MAX_SOURCE_FILE_PATH_CHARS } },
+  required: ["path"],
   additionalProperties: false,
 };
 const CREATE_SCHEMA = {
@@ -272,6 +280,13 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
       description: "Cancel one source-owned watch, or all watches when watchId is omitted.",
       parameters: OPTIONAL_WATCH_SCHEMA,
       execute: async (_toolCallId: string, params: { watchId?: string }) => toolResult(await bridge.invoke({ type: "cancel", ...(params.watchId === undefined ? {} : { watchId: params.watchId }) })),
+    } as never);
+    pi.registerTool({
+      name: "dock_deliver_file",
+      label: "Deliver a temporary file",
+      description: "Register an absolute local file path for temporary download by the user. The file must remain unchanged and available.",
+      parameters: DELIVER_SCHEMA,
+      execute: async (_toolCallId: string, params: { path: string }) => toolResult(await bridge.invoke({ type: "deliver", path: params.path })),
     } as never);
     pi.registerTool({
       name: "dock_create",

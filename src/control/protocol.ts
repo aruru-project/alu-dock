@@ -10,6 +10,13 @@ import {
   type AttachmentUploadResult,
 } from "../core/instance-attachments.js";
 import { MAX_INSTANCE_DISPLAY_NAME_CHARS } from "../core/instance-display-name.js";
+import {
+  MAX_DELIVERABLE_CHUNK_BYTES,
+  MAX_DELIVERY_REF_CHARS,
+  MAX_TEMPORARY_DELIVERABLES_PER_INSTANCE,
+  parseDeliverableDto,
+  type DeliverableDto,
+} from "../core/instance-deliverables.js";
 import { MAX_CONVERSATION_CHUNK_CHARS } from "../core/instance-dto.js";
 import {
   MAX_DOCK_TRANSFER_BYTES,
@@ -119,9 +126,11 @@ export const CONVERSATION_CONTENT_CAPABILITY = "conversation.content.v1" as cons
 export const WORKSPACE_LIST_CAPABILITY = "workspace.list.v1" as const;
 export const ATTACHMENTS_CAPABILITY = "attachments.v1" as const;
 export const PUBLISHED_FILES_CAPABILITY = "published-files.v1" as const;
+export const INSTANCE_DELIVERABLES_CAPABILITY = "instance.deliverables.v1" as const;
 
 export const IMPLEMENTED_CAPABILITIES = [
   ATTACHMENTS_CAPABILITY,
+  INSTANCE_DELIVERABLES_CAPABILITY,
   PUBLISHED_FILES_CAPABILITY,
   "catalog.maintenance.v1",
   "catalog.v1",
@@ -207,6 +216,8 @@ export type ControlRequest =
   | Request<"instance.list", { selector: "actionable" | "all"; cursor?: InstanceListCursor; limit: number }>
   | Request<"instance.get_by_key", { key: string }>
   | Request<"instance.get", { instanceId: string }>
+  | Request<"deliverable.list", { instanceId: string }>
+  | Request<"deliverable.download", { instanceId: string; deliveryRef: string }>
   | Request<"instance.read", { instanceId: string; since?: EventCursor; replay: "event_log" | "conversation_bootstrap" }>
   | Request<"instance.follow", { instanceId: string; since: EventCursor }>
   | Request<"interaction.control", { instanceId: string }>
@@ -260,6 +271,13 @@ export interface ResponseTransferFrame {
   data: string;
 }
 export interface ControlEventEnvelope { kind: "event"; version: 2; requestId: string; hostEpoch: string; event: DockEvent }
+
+interface DeliverableDownloadIdentity { version: 2; requestId: string; hostEpoch: string; instanceId: string; deliveryRef: string }
+export interface DeliverableDownloadReady extends DeliverableDownloadIdentity { kind: "deliverable_download_ready"; deliverable: DeliverableDto }
+export interface DeliverableDownloadChunk extends DeliverableDownloadIdentity { kind: "deliverable_download_chunk"; index: number; data: string }
+export interface DeliverableDownloadComplete extends DeliverableDownloadIdentity { kind: "deliverable_download_complete"; chunks: number; sizeBytes: number; sha256: string }
+export interface DeliverableDownloadError extends DeliverableDownloadIdentity { kind: "deliverable_download_error"; error: { code: "file_unavailable"; message: string } }
+export type DeliverableDownloadFrame = DeliverableDownloadReady | DeliverableDownloadChunk | DeliverableDownloadComplete | DeliverableDownloadError;
 
 export interface AttachmentUploadReady {
   kind: "attachment_upload_ready";
@@ -316,6 +334,7 @@ export interface WorkspaceListResult {
   nextCursor?: WorkspaceListCursor;
 }
 export interface StatusResult { instance: InstanceSnapshot }
+export interface DeliverableListResult { instanceId: string; deliverables: DeliverableDto[] }
 export interface InstanceReadResult {
   instance: InstanceSnapshot;
   page: EventPage & { epochChanged: boolean; generationChanged: boolean };
@@ -373,13 +392,14 @@ export interface ResourcesResult {
   diagnosticsTruncated: boolean;
 }
 export interface CommandsResult { commands: CommandDto[]; total: number; truncated: boolean }
-export type { AttachmentDto, AttachmentUploadResult };
+export type { AttachmentDto, AttachmentUploadResult, DeliverableDto };
 export type ConfigurationResult = ModelConfigurationResult | ThinkingConfigurationResult | SettingUpdateResult;
 
 export function implementedCapabilities(): string[] { return [...IMPLEMENTED_CAPABILITIES].sort(); }
 export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "host.info") return "host.info";
   if (type === "attachment.upload") return ATTACHMENTS_CAPABILITY;
+  if (type === "deliverable.list" || type === "deliverable.download") return INSTANCE_DELIVERABLES_CAPABILITY;
   if (type === "instance.forget" || type === "catalog.prune") return "catalog.maintenance.v1";
   if (type === "extension.tools_expanded.set") return TOOLS_EXPANDED_CAPABILITY;
   if (type === "extension.widget_viewport.set") return EXTENSION_WIDGET_CAPABILITY;
@@ -596,6 +616,11 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { key } };
     }
     case "instance.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
+    case "deliverable.list": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
+    case "deliverable.download": {
+      exact(params, ["instanceId", "deliveryRef"], "invalid_request");
+      return { ...base, type, params: { instanceId: instanceId(), deliveryRef: string(params.deliveryRef, "params.deliveryRef", MAX_DELIVERY_REF_CHARS, "invalid_request") } };
+    }
     case "instance.read": {
       exact(params, ["instanceId", "since", "replay"], "invalid_request");
       const replay = enumeration(params.replay, "params.replay", ["event_log", "conversation_bootstrap"], "invalid_request");
@@ -745,6 +770,54 @@ export function parseControlRequest(input: unknown): ControlRequest {
     }
     default: throw validation("unknown_request", `Unknown request type: ${type}`);
   }
+}
+
+export function parseDeliverableListResult(input: unknown): DeliverableListResult {
+  const value = object(input, "deliverable list result");
+  exact(value, ["instanceId", "deliverables"]);
+  const items = array(value.deliverables, "deliverables", MAX_TEMPORARY_DELIVERABLES_PER_INSTANCE).map((item, index) => {
+    try { return parseDeliverableDto(item, `deliverables[${index}]`, { allowUnknownFields: true }); }
+    catch (error) { throw validation("invalid_response", error instanceof Error ? error.message : "Invalid deliverable metadata"); }
+  });
+  if (new Set(items.map((item) => item.deliveryRef)).size !== items.length) throw validation("invalid_response", "Deliverable list contains duplicate references");
+  return { instanceId: id(value.instanceId, "instanceId"), deliverables: items };
+}
+
+export function parseDeliverableDownloadFrame(input: unknown, expected: { requestId: string; hostEpoch: string; instanceId: string; deliveryRef: string }): DeliverableDownloadFrame {
+  const value = object(input, "deliverable download frame");
+  const identity = (): DeliverableDownloadIdentity => {
+    if (value.version !== 2 || value.requestId !== expected.requestId || value.hostEpoch !== expected.hostEpoch
+      || value.instanceId !== expected.instanceId || value.deliveryRef !== expected.deliveryRef) {
+      throw validation("invalid_response", "Deliverable download frame identity does not match the request");
+    }
+    return { version: 2, ...expected };
+  };
+  if (value.kind === "deliverable_download_ready") {
+    exact(value, ["kind", "version", "requestId", "hostEpoch", "instanceId", "deliveryRef", "deliverable"]);
+    let deliverable: DeliverableDto;
+    try { deliverable = parseDeliverableDto(value.deliverable, "deliverable", { allowUnknownFields: true }); }
+    catch (error) { throw validation("invalid_response", error instanceof Error ? error.message : "Invalid deliverable metadata"); }
+    if (deliverable.deliveryRef !== expected.deliveryRef) throw validation("invalid_response", "Deliverable readiness metadata does not match the request");
+    return { kind: "deliverable_download_ready", ...identity(), deliverable };
+  }
+  if (value.kind === "deliverable_download_chunk") {
+    exact(value, ["kind", "version", "requestId", "hostEpoch", "instanceId", "deliveryRef", "index", "data"]);
+    const data = canonicalBase64(value.data, "deliverable chunk data", MAX_DELIVERABLE_CHUNK_BYTES);
+    if (data.length === 0) throw validation("invalid_response", "Deliverable chunks cannot be empty");
+    return { kind: "deliverable_download_chunk", ...identity(), index: unsigned(value.index, "deliverable chunk index"), data };
+  }
+  if (value.kind === "deliverable_download_complete") {
+    exact(value, ["kind", "version", "requestId", "hostEpoch", "instanceId", "deliveryRef", "chunks", "sizeBytes", "sha256"]);
+    const sha256 = string(value.sha256, "deliverable SHA-256", 64);
+    if (!/^[a-f0-9]{64}$/u.test(sha256)) throw validation("invalid_response", "Deliverable SHA-256 must be lowercase hexadecimal");
+    return { kind: "deliverable_download_complete", ...identity(), chunks: unsigned(value.chunks, "deliverable chunk count"), sizeBytes: unsigned(value.sizeBytes, "deliverable byte count"), sha256 };
+  }
+  exact(value, ["kind", "version", "requestId", "hostEpoch", "instanceId", "deliveryRef", "error"]);
+  if (value.kind !== "deliverable_download_error") throw validation("invalid_response", "Unknown deliverable download frame");
+  const error = object(value.error, "deliverable download error");
+  exact(error, ["code", "message"]);
+  if (error.code !== "file_unavailable") throw validation("invalid_response", "Deliverable terminal error code is invalid");
+  return { kind: "deliverable_download_error", ...identity(), error: { code: "file_unavailable", message: string(error.message, "deliverable download error message", MAX_MESSAGE) } };
 }
 
 export function parseAttachmentUploadReady(input: unknown, requestId: string, hostEpoch: string): AttachmentUploadReady {

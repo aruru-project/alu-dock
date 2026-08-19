@@ -81,7 +81,9 @@ Hub **Settings → Attachment directory** 配置 Host 上的永久 storage root�
 
 ## Agent-facing Dock tools
 
-每个 Pi instance 可用 `/dock-tools on|off|status` 单独控制跨实例工具，默认关闭且新实例不继承。开启后提供 `dock_list`、`dock_inspect`、`dock_watch`、`dock_cancel_watch`、`dock_create`、`dock_send` 和对应 bundled Skill。`dock_list` 只列短状态；conversation 由 target 必填的 inspect 按需读取。`dock_send` 走普通 Queue/`command.submit`，目标会看到明确的来源 instance 包装，不会把消息伪装成主人输入。
+每个 Pi instance 可用 `/dock-tools on|off|status` 单独控制跨实例工具，默认关闭且新实例不继承。开启后提供 `dock_list`、`dock_inspect`、`dock_watch`、`dock_cancel_watch`、`dock_deliver_file`、`dock_create`、`dock_send` 和对应 bundled Skill。`dock_list` 只列短状态；conversation 由 target 必填的 inspect 按需读取。`dock_send` 走普通 Queue/`command.submit`，目标会看到明确的来源 instance 包装，不会把消息伪装成主人输入。
+
+`dock_deliver_file({path})` 把当前 instance 的一个绝对路径登记为临时交付，不复制、上传或持久化文件。客户端通过 `instance.deliverables.v1` 列表和专用下载流取得最多 100 MiB 的任意普通文件，并在 terminal frame 上独立核对字节数和 SHA-256。登记跨 Pi session reload/replacement 保留，但 source 改写/删除、instance stop 或 Host restart 后不可用；没有 delete、TTL、claim 或管理界面。`show_image` 仍是独立的 session-scoped inline 图片能力。
 
 ## 从源码运行
 

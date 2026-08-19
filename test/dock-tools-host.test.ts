@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, rm, truncate, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { DockClient, ControlClientError } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry, type InstanceFactoryInput } from "../src/control/dock-registry.js";
 import { ManagedInstance } from "../src/core/managed-instance.js";
@@ -94,4 +95,77 @@ test("Dock tools create peers off and send visibly attributed messages through c
   runtimes[1]!.settle("done");
   await waitFor(() => target.snapshot().execution === "idle", "target did not settle");
   await registry.stopAll();
+});
+
+test("Agent-delivered files remain listed across reload, stream exact bytes, and disappear when unavailable or stopped", async () => {
+  const root = await mkdtemp(join(tmpdir(), "alu-dock-deliverable-flow-"));
+  const cwd = await mkdtemp(join(root, "work-"));
+  const otherCwd = await mkdtemp(join(root, "other-"));
+  const socketPath = join(root, "dock.sock");
+  const sourcePath = join(root, "result data.bin");
+  const bytes = Buffer.from([0, 1, 2, 3, 255, 10, 20]);
+  await writeFile(sourcePath, bytes);
+  const runtimes: DelayedAgentWorkerConnection[] = [];
+  const ids = ["source-instance", "other-instance"];
+  const registry = new DockRegistry(async (input) => fixtureInstance(input, runtimes), () => ids.shift()!, { hostEpoch: "deliverable-host" });
+  const host = new DockHost({ socketPath, registry });
+  await host.start();
+  const client = new DockClient({ socketPath });
+  try {
+    const source = await client.create(cwd, "Source", "create-source");
+    const managed = registry.get(source.id);
+    await registry.configureDockTools(source.id, true, "tools-on");
+    const registered = await registry.invokeDockTool(source.id, { type: "deliver", path: sourcePath });
+    assert.equal(registered.type, "deliver");
+    if (registered.type !== "deliver") assert.fail("expected deliver result");
+    assert.deepEqual(registered.deliverable, { deliveryRef: registered.deliverable.deliveryRef, name: "result data.bin", sizeBytes: 7 });
+    assert.equal("path" in registered.deliverable, false);
+
+    assert.deepEqual(await client.listDeliverables(source.id), [registered.deliverable]);
+    const other = await client.create(otherCwd, "Other", "create-other");
+    await assert.rejects(client.downloadDeliverable(other.id, registered.deliverable.deliveryRef, () => {}), (error: unknown) => error instanceof ControlClientError && error.code === "file_unavailable");
+    await client.reloadSession(source.id, "reload-source");
+    assert.deepEqual(await client.listDeliverables(source.id), [registered.deliverable]);
+
+    const received: Buffer[] = [];
+    const downloaded = await client.downloadDeliverable(source.id, registered.deliverable.deliveryRef, (chunk) => { received.push(Buffer.from(chunk)); });
+    assert.deepEqual(Buffer.concat(received), bytes);
+    assert.equal(downloaded.sizeBytes, bytes.byteLength);
+    assert.match(downloaded.sha256, /^[a-f0-9]{64}$/u);
+
+    await writeFile(sourcePath, Buffer.from("changed"));
+    await assert.rejects(client.downloadDeliverable(source.id, registered.deliverable.deliveryRef, () => {}), (error: unknown) => error instanceof ControlClientError && error.code === "file_unavailable");
+
+    await client.stop(source.id, "stop-source");
+    assert.deepEqual(managed.listDeliverables(), []);
+    await assert.rejects(client.downloadDeliverable(source.id, registered.deliverable.deliveryRef, () => {}), (error: unknown) => error instanceof ControlClientError && (error.code === "file_unavailable" || error.code === "not_found"));
+  } finally {
+    client.closeActiveConnections();
+    await host.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("temporary delivery accepts exactly 100 MiB and rejects the next byte without transferring content", async () => {
+  const root = await mkdtemp(join(tmpdir(), "alu-dock-deliverable-boundary-"));
+  const cwd = await mkdtemp(join(root, "work-"));
+  const acceptedPath = join(root, "accepted.bin");
+  const rejectedPath = join(root, "rejected.bin");
+  await writeFile(acceptedPath, "");
+  await writeFile(rejectedPath, "");
+  await truncate(acceptedPath, 104_857_600);
+  await truncate(rejectedPath, 104_857_601);
+  const runtimes: DelayedAgentWorkerConnection[] = [];
+  const registry = new DockRegistry(async (input) => fixtureInstance(input, runtimes), () => "boundary-instance", { hostEpoch: "boundary-host" });
+  try {
+    const source = await registry.create({ operationId: "create-source", cwd });
+    await registry.configureDockTools(source.id, true, "tools-on");
+    const accepted = await registry.invokeDockTool(source.id, { type: "deliver", path: acceptedPath });
+    assert.equal(accepted.type, "deliver");
+    if (accepted.type === "deliver") assert.equal(accepted.deliverable.sizeBytes, 104_857_600);
+    await assert.rejects(registry.invokeDockTool(source.id, { type: "deliver", path: rejectedPath }), /exceeds Dock's temporary delivery limit.*Remind the user/iu);
+  } finally {
+    await registry.stopAll();
+    await rm(root, { recursive: true, force: true });
+  }
 });

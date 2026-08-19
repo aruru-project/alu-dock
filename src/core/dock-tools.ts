@@ -1,4 +1,5 @@
 import type { CommandReceipt } from "./instance-dto.js";
+import type { DeliverableDto } from "./instance-deliverables.js";
 import type {
   ObservationDeliverySink,
   ObservationRequest,
@@ -13,11 +14,13 @@ export const MAX_DOCK_TOOL_MESSAGE_CHARS = 254_000;
 
 export type DockToolsRequest =
   | ObservationRequest
+  | { type: "deliver"; path: string }
   | { type: "create"; operationId: string; cwd: string; name?: string }
   | { type: "send"; operationId: string; target: string; message: string };
 
 export type DockToolsResult =
   | ObservationResult
+  | { type: "deliver"; deliverable: DeliverableDto }
   | { type: "create"; instance: ObservedInstanceStatus }
   | {
     type: "send";

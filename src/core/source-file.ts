@@ -1,0 +1,64 @@
+import { constants as fsConstants, type Stats } from "node:fs";
+import { access, open, realpath, stat, type FileHandle } from "node:fs/promises";
+import { isAbsolute, resolve } from "node:path";
+
+export const MAX_SOURCE_FILE_PATH_CHARS = 16_384;
+
+export interface SourceFileIdentity {
+  path: string;
+  dev: number;
+  ino: number;
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+}
+
+export type SourceFileFailureReason = "invalid_path" | "unavailable" | "not_regular" | "too_large" | "changed";
+
+export class SourceFileError extends Error {
+  constructor(readonly reason: SourceFileFailureReason, message: string) {
+    super(message);
+    this.name = "SourceFileError";
+  }
+}
+
+export async function inspectSourceFile(path: string, options: { maxPathChars: number; maxBytes: number }): Promise<SourceFileIdentity> {
+  if (typeof path !== "string" || path.length < 1 || path.length > options.maxPathChars || !isAbsolute(path)) {
+    throw new SourceFileError("invalid_path", "Source file path must be absolute");
+  }
+  try {
+    const canonical = await realpath(resolve(path));
+    const info = await stat(canonical);
+    if (!info.isFile()) throw new SourceFileError("not_regular", "Source must be a regular file");
+    if (info.size > options.maxBytes) throw new SourceFileError("too_large", "Source file exceeds the supported size");
+    await access(canonical, fsConstants.R_OK);
+    return identity(canonical, info);
+  } catch (error) {
+    if (error instanceof SourceFileError) throw error;
+    throw new SourceFileError("unavailable", "Source file is unavailable");
+  }
+}
+
+export async function openUnchangedSource(source: SourceFileIdentity): Promise<FileHandle> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(source.path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    assertUnchangedSource(source, await handle.stat());
+    return handle;
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    if (error instanceof SourceFileError) throw error;
+    throw new SourceFileError("unavailable", "Source file is unavailable");
+  }
+}
+
+export function assertUnchangedSource(source: SourceFileIdentity, info: Stats): void {
+  if (!info.isFile() || info.dev !== source.dev || info.ino !== source.ino || info.size !== source.size
+    || info.mtimeMs !== source.mtimeMs || info.ctimeMs !== source.ctimeMs) {
+    throw new SourceFileError("changed", "Source file changed");
+  }
+}
+
+function identity(path: string, info: Stats): SourceFileIdentity {
+  return { path, dev: info.dev, ino: info.ino, size: info.size, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs };
+}

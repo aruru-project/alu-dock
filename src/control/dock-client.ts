@@ -4,6 +4,7 @@ import { stat } from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { basename, resolve } from "node:path";
 import type { InteractionResponse } from "../core/extension-ui-broker.js";
+import type { DeliverableDto } from "../core/instance-deliverables.js";
 import type { DeliveryMode, DockEvent, EventCursor, ImagePathDto, InstanceSnapshot } from "../core/managed-instance.js";
 import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_CHUNK_BYTES, type AttachmentUploadResult } from "../core/instance-attachments.js";
 import type { ThinkingLevel } from "../core/agent-worker.js";
@@ -28,6 +29,7 @@ import {
   INSTANCE_DISPLAY_NAME_CAPABILITY,
   CONVERSATION_CONTENT_CAPABILITY,
   PUBLISHED_FILES_CAPABILITY,
+  INSTANCE_DELIVERABLES_CAPABILITY,
   WORKSPACE_LIST_CAPABILITY,
   MAX_WORKSPACE_LIST_ITEMS,
   type Capability,
@@ -36,6 +38,8 @@ import {
   parseAbortResult,
   parseAttachmentUploadReady,
   parseAttachmentUploadResult,
+  parseDeliverableDownloadFrame,
+  parseDeliverableListResult,
   parseModelConfigurationResult,
   parseThinkingConfigurationResult,
   parseControlEventEnvelope,
@@ -142,6 +146,12 @@ export interface EventSubscription { initial:InstanceReadResult; close:()=>void;
 export interface FollowSubscription { initial:FollowResult; close:()=>void; done:Promise<void> }
 export interface OperationSubscription { initial:ExtensionUiControlResult; close:()=>void; done:Promise<void> }
 export interface DockClientOptions { socketPath:string; timeoutMs?:number; longMutationTimeoutMs?:number; requestId?:()=>string; clientId?:string }
+export interface DeliverableDownloadResult {
+  deliverable: DeliverableDto;
+  chunks: number;
+  sizeBytes: number;
+  sha256: string;
+}
 export interface AttachmentUploadSource {
   name: string;
   sizeBytes: number;
@@ -359,6 +369,65 @@ export class DockClient {
   async conversationHistory(instanceId:string,cursor?:string,limit=50):Promise<ConversationHistoryResult>{const result=await this.request("conversation.history",{instanceId,cursor,limit},CONVERSATION_CONTENT_CAPABILITY,parseConversationHistoryResult);if(result.instance.id!==instanceId)throw new ControlClientError("invalid_response","Conversation history result belongs to another instance");return result;}
   async conversationContent(instanceId:string,contentRef:string,cursor?:string):Promise<ConversationContentResult>{const result=await this.request("conversation.content",{instanceId,contentRef,cursor},CONVERSATION_CONTENT_CAPABILITY,parseConversationContentResult);if(result.instanceId!==instanceId||result.contentRef!==contentRef)throw new ControlClientError("invalid_response","Conversation content result belongs to another request");return result;}
   async readFile(instanceId:string,fileRef:string,offset?:number):Promise<FileReadResult>{const requestedOffset=offset??0;const result=await this.request("file.read",{instanceId,fileRef,offset},PUBLISHED_FILES_CAPABILITY,(input)=>parseFileReadResult(input,requestedOffset));if(result.instanceId!==instanceId||result.file.fileRef!==fileRef||result.offset!==requestedOffset)throw new ControlClientError("invalid_response","Published file result belongs to another request");return result;}
+  async listDeliverables(instanceId:string):Promise<DeliverableDto[]>{const result=await this.request("deliverable.list",{instanceId},INSTANCE_DELIVERABLES_CAPABILITY,parseDeliverableListResult);if(result.instanceId!==instanceId)throw new ControlClientError("invalid_response","Temporary file list belongs to another work");return result.deliverables;}
+
+  downloadDeliverable(instanceId:string,deliveryRef:string,onChunk:(chunk:Uint8Array)=>void|Promise<void>):Promise<DeliverableDownloadResult>{
+    const helloId=this.createRequestId(),requestId=this.createRequestId();
+    const capabilities=requiredCapabilities(INSTANCE_DELIVERABLES_CAPABILITY);
+    const request:Extract<ControlRequest,{type:"deliverable.download"}>={kind:"request",version:2,requestId,type:"deliverable.download",params:{instanceId,deliveryRef}};
+    return new Promise<DeliverableDownloadResult>((resolveDownload,rejectDownload)=>{
+      const socket=this.openSocket(),decoder=new JsonLineDecoder();
+      let phase:"hello"|"ready"|"stream"|"complete"="hello",hostEpoch="",settled=false,requestSent=false;
+      let deliverable:DeliverableDto|undefined,index=0,sizeBytes=0,completion:DeliverableDownloadResult|undefined;
+      const hash=createHash("sha256");
+      let timeout:NodeJS.Timeout;
+      const finish=(error?:unknown,result?:DeliverableDownloadResult):void=>{if(settled)return;settled=true;clearTimeout(timeout);socket.destroy();error===undefined?resolveDownload(result as DeliverableDownloadResult):rejectDownload(normalizeClientError(error));};
+      const resetTimeout=():void=>{clearTimeout(timeout);timeout=setTimeout(()=>finish(new ControlClientError("timeout",`Temporary file download timed out after ${this.longMutationTimeoutMs}ms`)),this.longMutationTimeoutMs);};
+      const identity=()=>({requestId,hostEpoch,instanceId,deliveryRef});
+      const consume=async(line:string):Promise<void>=>{
+        if(!line||settled)return;
+        let raw:unknown;try{raw=JSON.parse(line);}catch{throw new ControlClientError("invalid_response","Host returned invalid JSON during temporary file download");}
+        if(phase==="hello"){
+          const ack=parseHelloReply(raw,helloId);hostEpoch=ack.host.hostEpoch;
+          for(const required of capabilities)if(!ack.capabilities.includes(required))throw new ProtocolValidationError("protocol_incompatible",`Host lacks ${required}`);
+          phase="ready";requestSent=true;socket.write(encodeJsonLine(request));resetTimeout();return;
+        }
+        if(phase==="complete")throw new ProtocolValidationError("invalid_response","Temporary file download sent data after completion");
+        if(phase==="ready"&&raw!==null&&typeof raw==="object"&&(raw as {kind?:unknown}).kind==="response"){
+          const response=parseControlResponse(raw,requestId,hostEpoch);
+          if(!response.ok)throw new ControlClientError(response.error.code,response.error.message,undefined,response.error.details);
+          throw new ProtocolValidationError("invalid_response","Temporary file download returned an ordinary success response");
+        }
+        const frame=parseDeliverableDownloadFrame(raw,identity());resetTimeout();
+        if(phase==="ready"){
+          if(frame.kind!=="deliverable_download_ready")throw new ProtocolValidationError("invalid_response","Temporary file download did not begin with readiness");
+          deliverable=frame.deliverable;phase="stream";return;
+        }
+        if(frame.kind==="deliverable_download_error")throw new ControlClientError(frame.error.code,frame.error.message);
+        if(frame.kind==="deliverable_download_ready")throw new ProtocolValidationError("invalid_response","Host repeated temporary file download readiness");
+        if(frame.kind==="deliverable_download_chunk"){
+          if(frame.index!==index)throw new ProtocolValidationError("invalid_response","Temporary file chunks arrived out of order");
+          const bytes=Buffer.from(frame.data,"base64");
+          if(!deliverable||sizeBytes+bytes.byteLength>deliverable.sizeBytes)throw new ProtocolValidationError("invalid_response","Temporary file bytes exceed the declared size");
+          hash.update(bytes);await onChunk(bytes);sizeBytes+=bytes.byteLength;index+=1;return;
+        }
+        if(!deliverable||frame.chunks!==index||frame.sizeBytes!==sizeBytes||sizeBytes!==deliverable.sizeBytes)throw new ProtocolValidationError("invalid_response","Temporary file completion counts do not match received bytes");
+        const digest=hash.digest("hex");
+        if(frame.sha256!==digest)throw new ProtocolValidationError("invalid_response","Temporary file SHA-256 verification failed");
+        completion={deliverable,chunks:index,sizeBytes,sha256:digest};phase="complete";
+      };
+      let processing=Promise.resolve();resetTimeout();
+      socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,capabilities))));
+      socket.on("data",(chunk:Buffer)=>{socket.pause();processing=processing.then(async()=>{for(const line of decoder.push(chunk))await consume(line);}).catch(finish).finally(()=>{if(!settled&&!socket.destroyed)socket.resume();});});
+      socket.once("end",()=>{processing=processing.then(()=>{
+        decoder.finish();
+        if(!completion)throw new ControlClientError("connection_closed","Host ended before the temporary file download completed");
+        finish(undefined,completion);
+      }).catch(finish);});
+      socket.once("error",error=>finish(transportError(error)));
+      socket.once("close",()=>{void processing.then(()=>{if(!settled)finish(new ControlClientError("connection_closed",requestSent?"Host closed before the temporary file download completed":"Host closed before responding"));});});
+    });
+  }
   sessionInventory(cwd:string,scope:"cwd"|"all"="cwd"):Promise<SessionInventoryResult>{return this.request("session.inventory",{cwd,scope},["session.inventory.v1","session.inventory-diagnostics.v1"],parseSessionInventoryResult);}
   workspaceList(path:string,cursor?:WorkspaceListCursor,limit=MAX_WORKSPACE_LIST_ITEMS):Promise<WorkspaceListResult>{return this.request("workspace.list",{path,cursor,limit},WORKSPACE_LIST_CAPABILITY,parseWorkspaceListResult);}
   sessions(instanceId:string,scope:"cwd"|"all"):Promise<SessionsResult>{return this.request("session.list",{instanceId,scope},["session.core","projection.completeness.v1"],parseSessionsResult);}

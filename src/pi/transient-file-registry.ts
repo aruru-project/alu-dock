@@ -1,7 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
-import { open, realpath, stat } from "node:fs/promises";
-import { basename, extname, isAbsolute, resolve } from "node:path";
+import { basename, extname } from "node:path";
 
 import { AgentConversationCursorError, type AgentConversationContentPage } from "../core/agent-worker.js";
 import { MAX_CONVERSATION_CHUNK_CHARS } from "../core/instance-dto.js";
@@ -14,8 +12,9 @@ import {
   type PublishedFileDto,
   type PublishedFileReadPage,
 } from "../core/published-file.js";
+import { assertUnchangedSource, inspectSourceFile, MAX_SOURCE_FILE_PATH_CHARS, openUnchangedSource, SourceFileError, type SourceFileIdentity } from "../core/source-file.js";
 
-interface FileEntry { dto: PublishedFileDto; path: string; dev: number; ino: number; mtimeMs: number; ctimeMs: number }
+interface FileEntry { dto: PublishedFileDto; source: SourceFileIdentity }
 interface ImageEntry { mimeType: string; data: string }
 interface ImageCursor { contentRef: string; offset: number }
 interface FailureEntry { message: string }
@@ -28,29 +27,25 @@ export class TransientFileRegistry {
   private readonly failures = new Map<string, FailureEntry>();
 
   async publish(path: string): Promise<PublishedFileDto> {
-    if (typeof path !== "string" || path.length < 1 || path.length > 16_384 || !isAbsolute(path)) {
-      throw new PublishedFileUnavailableError("The image path must be absolute. Create the image as a local PNG, JPEG, GIF, or WebP file and publish it again.");
-    }
     try {
-      const canonical = await realpath(resolve(path));
-      const mediaType = imageMediaType(canonical);
+      const source = await inspectSourceFile(path, { maxPathChars: MAX_SOURCE_FILE_PATH_CHARS, maxBytes: MAX_PUBLISHED_FILE_BYTES });
+      const mediaType = imageMediaType(source.path);
       if (mediaType === undefined) throw new PublishedFileUnavailableError("This image format cannot be published. Use PNG, JPEG, GIF, or WebP and try again.");
-      const info = await stat(canonical);
-      if (!info.isFile() || info.size < 1 || info.size > MAX_PUBLISHED_FILE_BYTES) {
-        throw new PublishedFileUnavailableError("The image file cannot be published at this size. Create a smaller local image and try again.");
-      }
+      if (source.size < 1) throw new PublishedFileUnavailableError("The image file cannot be published at this size. Create a smaller local image and try again.");
       const dto: PublishedFileDto = {
         presentation: "image",
         fileRef: `file-${randomUUID()}`,
-        name: safeName(basename(canonical)),
-        sizeBytes: info.size,
+        name: safeName(basename(source.path)),
+        sizeBytes: source.size,
         mediaType,
       };
-      this.files.set(dto.fileRef, { dto, path: canonical, dev: info.dev, ino: info.ino, mtimeMs: info.mtimeMs, ctimeMs: info.ctimeMs });
+      this.files.set(dto.fileRef, { dto, source });
       trim(this.files);
       return structuredClone(dto);
     } catch (error) {
       if (error instanceof PublishedFileUnavailableError) throw error;
+      if (error instanceof SourceFileError && error.reason === "invalid_path") throw new PublishedFileUnavailableError("The image path must be absolute. Create the image as a local PNG, JPEG, GIF, or WebP file and publish it again.");
+      if (error instanceof SourceFileError && error.reason === "too_large") throw new PublishedFileUnavailableError("The image file cannot be published at this size. Create a smaller local image and try again.");
       throw new PublishedFileUnavailableError("The image file is missing or cannot be read. Create it again and publish the new file.");
     }
   }
@@ -108,11 +103,10 @@ export class TransientFileRegistry {
   async read(fileRef: string, offset = 0): Promise<PublishedFileReadPage> {
     const entry = this.files.get(fileRef);
     if (!entry || !Number.isSafeInteger(offset) || offset < 0 || offset >= entry.dto.sizeBytes) throw new PublishedFileUnavailableError();
-    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    let handle: Awaited<ReturnType<typeof openUnchangedSource>> | undefined;
     try {
-      handle = await open(entry.path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+      handle = await openUnchangedSource(entry.source);
       const info = await handle.stat();
-      assertUnchanged(entry, info);
       const count = Math.min(MAX_PUBLISHED_FILE_CHUNK_BYTES, info.size - offset);
       const bytes = Buffer.allocUnsafe(count);
       let read = 0;
@@ -122,12 +116,15 @@ export class TransientFileRegistry {
         read += result.bytesRead;
       }
       if (read !== count || read === 0) throw new PublishedFileUnavailableError();
-      assertUnchanged(entry, await handle.stat());
+      assertUnchangedSource(entry.source, await handle.stat());
       const nextOffset = offset + read;
       const complete = nextOffset === info.size;
       return { file: structuredClone(entry.dto), offset, data: bytes.toString("base64"), complete, ...(complete ? {} : { nextOffset }) };
     } catch (error) {
       if (error instanceof PublishedFileUnavailableError) throw error;
+      if (error instanceof SourceFileError && error.reason === "changed") {
+        throw new PublishedFileUnavailableError("The published file has changed and is no longer available. Ask the Agent to publish it again.");
+      }
       throw new PublishedFileUnavailableError();
     } finally { await handle?.close().catch(() => {}); }
   }
@@ -135,12 +132,6 @@ export class TransientFileRegistry {
   clear(): void { this.files.clear(); this.images.clear(); this.imageCursors.clear(); this.failures.clear(); }
 }
 
-function assertUnchanged(entry: FileEntry, info: Awaited<ReturnType<typeof stat>>): void {
-  if (!info.isFile() || info.dev !== entry.dev || info.ino !== entry.ino || info.size !== entry.dto.sizeBytes
-    || info.mtimeMs !== entry.mtimeMs || info.ctimeMs !== entry.ctimeMs) {
-    throw new PublishedFileUnavailableError("The published file has changed and is no longer available. Ask the Agent to publish it again.");
-  }
-}
 function trim<T>(entries: Map<string, T>): void { while (entries.size > MAX_TRANSIENT_FILE_HANDLES) entries.delete(entries.keys().next().value as string); }
 function safeName(value: string): string { const cleaned = value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ").trim(); return (cleaned || "published-file").slice(0, MAX_PUBLISHED_FILE_NAME_CHARS); }
 function imageMediaType(path: string): string | undefined {

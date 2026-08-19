@@ -194,6 +194,8 @@ test("private Worker Dock tools calls are closed, source-bound, and validate bou
   assert.throws(() => validateUiCapabilityArgs("dock.tools", {
     request: { type: "watch", target: "sol", injected: true },
   }), /unknown field/i);
+  validateUiCapabilityArgs("dock.tools", { request: { type: "deliver", path: "/work/result.bin" } });
+  assert.throws(() => validateUiCapabilityArgs("dock.tools", { request: { type: "deliver", path: "/work/result.bin", instanceId: "other" } }), /unknown field/i);
   validateUiCapabilityArgs("dock.tools", { request: { type: "create", operationId: "create-one", cwd: "/work/new", name: "Fresh Work" } });
   assert.throws(() => validateUiCapabilityArgs("dock.tools", { request: { type: "create", operationId: "create-one", cwd: "relative" } }), /absolute/i);
   validateUiCapabilityArgs("dock.tools", { request: { type: "send", operationId: "send-one", target: "sol", message: "Please report." } });
@@ -233,6 +235,10 @@ test("private Worker Dock tools calls are closed, source-bound, and validate bou
     runtimeGeneration: 1,
   };
   validateDockCapabilityResult("dock.tools", { type: "create", instance: target });
+  validateDockCapabilityResult("dock.tools", {
+    type: "deliver",
+    deliverable: { deliveryRef: "delivery-one", name: "result.bin", sizeBytes: 7 },
+  });
   validateDockCapabilityResult("dock.tools", {
     type: "send",
     target,

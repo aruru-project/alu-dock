@@ -508,6 +508,9 @@ export class DockRegistry implements DockToolsHostPort {
       return this.observationService.observe(sourceInstanceId, request);
     }
     this.assertDockToolsSource(sourceInstanceId);
+    if (request.type === "deliver") {
+      return { type: "deliver", deliverable: await this.get(sourceInstanceId).registerDeliverable(request.path) };
+    }
     const mutations = this.dockToolsMutationPort;
     if (!mutations) throw new Error("Dock tools are not connected to the Host mutation service");
     if (request.type === "create") {

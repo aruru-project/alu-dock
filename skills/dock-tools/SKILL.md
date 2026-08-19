@@ -1,11 +1,11 @@
 ---
 name: dock-tools
-description: Use the owner-enabled Dock tools to list, inspect, watch, create, or message sibling Dock work.
+description: Use owner-enabled Dock tools to deliver completed files or work with sibling Dock instances.
 ---
 
 # Dock tools
 
-Use these tools only for the owner’s requested cross-instance work. Dock tools are an official local-workstation convenience, not a separate orchestration system.
+Use these tools only for Dock work the owner requested, including temporary file delivery and explicit cross-instance work. Dock tools are an official local-workstation convenience, not a separate orchestration system.
 
 ## Find and read work
 
@@ -17,6 +17,12 @@ Use these tools only for the owner’s requested cross-instance work. Dock tools
 ## Wait without polling
 
 Use `dock_watch` when the owner wants to know when a running sibling becomes idle, stops, or errors. The one-shot completion wakes this Agent. Inspect the target after the wake only when the owner asked for a result. Use `dock_cancel_watch` to cancel one watch or all watches created by this source.
+
+## Deliver a completed file
+
+Use `dock_deliver_file` with an absolute local path when the owner needs to download a completed file. Dock registers the source temporarily without copying or persisting it. The source must remain unchanged and readable until download, and files must be no larger than 100 MiB. If delivery fails because the file exceeds Dock's temporary delivery limit, remind the owner that the file was too large to deliver.
+
+Turning Dock tools off prevents new registrations but does not remove files already offered. Temporary deliveries disappear when the work stops or Dock restarts; there is no delete, expiry, or management operation.
 
 ## Create and message work
 

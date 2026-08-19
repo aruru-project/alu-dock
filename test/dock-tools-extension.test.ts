@@ -67,7 +67,7 @@ const notification: ObservationNotification = {
   },
 };
 
-test("Dock tools extension exposes the six tools only while enabled and survives reload delivery", async () => {
+test("Dock tools extension exposes all owner-enabled tools only while enabled and survives reload delivery", async () => {
   let enabled = false;
   const calls: unknown[] = [];
   const listResult: ObservationResult = {

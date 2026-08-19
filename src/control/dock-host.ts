@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
 import {
@@ -36,6 +37,7 @@ import {
 } from "../core/managed-instance.js";
 import { AgentCompactionKnownFailureError, AgentConversationCursorError, AgentInvalidSettingValueError, AgentInvalidTreeTargetError, AgentModelNotFoundError, AgentSettingsWriteError, AgentUnavailableBeforeEffectError, AgentUnknownToolError } from "../core/agent-worker.js";
 import { PublishedFileUnavailableError } from "../core/published-file.js";
+import { DeliverableUnavailableError, MAX_DELIVERABLE_CHUNK_BYTES } from "../core/instance-deliverables.js";
 import { MAX_ATTACHMENT_CHUNK_BYTES, type AttachmentUploadResult } from "../core/instance-attachments.js";
 import { MAX_DOCK_TRANSFER_BYTES, MAX_RESPONSE_TRANSFER_CHUNK_BYTES } from "../core/transport-bounds.js";
 import { dropOldestSemanticHistoryRange, slimSemanticHistoryEntry } from "../core/history-pagination.js";
@@ -634,6 +636,11 @@ export class DockHost {
       })); return;
       case "instance.get_by_key": this.sendSuccessAndEnd(socket,request.requestId,{instance:this.registry.getSnapshotByKey(request.params.key)??null}); return;
       case "instance.get": this.sendSuccessAndEnd(socket,request.requestId,{instance:this.registry.getSnapshot(request.params.instanceId)}); return;
+      case "deliverable.list": {
+        const instance = this.registry.get(request.params.instanceId);
+        this.sendSuccessAndEnd(socket, request.requestId, { instanceId: instance.id, deliverables: instance.listDeliverables() }); return;
+      }
+      case "deliverable.download": await this.streamDeliverableDownload(request, socket); return;
       case "instance.read": {
         const instance=this.registry.get(request.params.instanceId);
         if(request.params.since&&request.params.since.instanceId!==instance.id)throw new ProtocolValidationError("invalid_cursor","The saved update position belongs to another work");
@@ -900,6 +907,66 @@ export class DockHost {
     for (const socket of streams) socket.destroy();
   }
 
+  private async streamDeliverableDownload(request: Extract<ControlRequest, { type: "deliverable.download" }>, socket: Socket): Promise<void> {
+    const { instanceId, deliveryRef } = request.params;
+    const opened = await this.registry.get(instanceId).openDeliverable(deliveryRef);
+    let ready = false;
+    try {
+      const readiness = writeEnvelope(socket, {
+        kind: "deliverable_download_ready", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
+        instanceId, deliveryRef, deliverable: opened.dto,
+      });
+      if (readiness === "backpressured") {
+        if (!await waitForSocketDrain(socket, SOCKET_DRAIN_TIMEOUT_MS)) { socket.destroy(); return; }
+      } else if (readiness !== "written") { socket.destroy(); return; }
+      ready = true;
+      const hash = createHash("sha256");
+      let sizeBytes = 0;
+      let chunks = 0;
+      while (sizeBytes < opened.dto.sizeBytes) {
+        const count = Math.min(MAX_DELIVERABLE_CHUNK_BYTES, opened.dto.sizeBytes - sizeBytes);
+        const buffer = Buffer.allocUnsafe(count);
+        let offset = 0;
+        while (offset < count) {
+          const read = await opened.handle.read(buffer, offset, count - offset, null);
+          if (read.bytesRead === 0) throw new DeliverableUnavailableError();
+          offset += read.bytesRead;
+        }
+        hash.update(buffer);
+        const outcome = writeEnvelope(socket, {
+          kind: "deliverable_download_chunk", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
+          instanceId, deliveryRef, index: chunks, data: buffer.toString("base64"),
+        });
+        if (outcome === "backpressured") {
+          if (!await waitForSocketDrain(socket, SOCKET_DRAIN_TIMEOUT_MS)) { socket.destroy(); return; }
+        } else if (outcome !== "written") { socket.destroy(); return; }
+        sizeBytes += buffer.byteLength;
+        chunks += 1;
+      }
+      await opened.verify();
+      if (socket.destroyed || socket.writableEnded) return;
+      const complete = {
+        kind: "deliverable_download_complete", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
+        instanceId, deliveryRef, chunks, sizeBytes, sha256: hash.digest("hex"),
+      };
+      const outcome = writeEnvelope(socket, complete);
+      if (outcome === "backpressured" && !await waitForSocketDrain(socket, SOCKET_DRAIN_TIMEOUT_MS)) { socket.destroy(); return; }
+      if (!socket.destroyed && !socket.writableEnded) socket.end();
+    } catch {
+      if (ready && !socket.destroyed && !socket.writableEnded) {
+        endRawEnvelope(socket, {
+          kind: "deliverable_download_error", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
+          instanceId, deliveryRef,
+          error: { code: "file_unavailable", message: "This file is no longer available. Ask the Agent to deliver it again." },
+        });
+        return;
+      }
+      throw new DeliverableUnavailableError();
+    } finally {
+      await opened.handle.close().catch(() => {});
+    }
+  }
+
   private async sendTreeSuccessAndEnd(socket: Socket, requestId: string, result: unknown): Promise<void> {
     if (socket.destroyed || socket.writableEnded) return;
     let bytes: Buffer;
@@ -939,6 +1006,8 @@ function isMutationRequest(type: ControlRequest["type"]): boolean {
     && type !== "instance.get_by_key"
     && type !== "instance.get"
     && type !== "instance.read"
+    && type !== "deliverable.list"
+    && type !== "deliverable.download"
     && type !== "instance.follow"
     && type !== "interaction.control"
     && type !== "extension.widget_viewport.set"
@@ -1105,6 +1174,14 @@ function writeEnvelope(socket: Socket, envelope: unknown): WriteOutcome {
   }
 }
 
+function endRawEnvelope(socket: Socket, envelope: unknown): WriteOutcome {
+  if (socket.destroyed || socket.writableEnded) return "failed";
+  let encoded: string;
+  try { encoded = encodeJsonLine(envelope); } catch { socket.destroy(); return "failed"; }
+  if (Buffer.byteLength(encoded, "utf8") > MAX_CONTROL_LINE_BYTES) return "too_large";
+  try { socket.end(encoded); return "written"; } catch { socket.destroy(); return "failed"; }
+}
+
 function endEnvelope(socket: Socket, envelope: ControlResponse): WriteOutcome {
   if (socket.destroyed || socket.writableEnded) return "failed";
   let encoded: string;
@@ -1201,6 +1278,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof InvalidHistoryCursorError) return { code: "invalid_cursor", message: error.message };
   if (error instanceof AgentConversationCursorError) return { code: "invalid_cursor", message: error.message };
   if (error instanceof PublishedFileUnavailableError) return { code: error.code, message: error.message };
+  if (error instanceof DeliverableUnavailableError) return { code: error.code, message: error.message };
   if (error instanceof StaleRuntimeGenerationError) return { code: "stale_runtime_generation", message: error.message, details: { expectedRuntimeGeneration: error.expected, actualRuntimeGeneration: error.actual } };
   if (error instanceof AgentInvalidTreeTargetError) return { code: "invalid_tree_target", message: error.message };
   if (error instanceof InteractionNotFoundError) return { code: error.code, message: error.message };

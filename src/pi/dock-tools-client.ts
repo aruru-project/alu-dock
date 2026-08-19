@@ -12,6 +12,9 @@ const MAX_MODEL_VISIBLE_OBSERVATION_CHARS = 12_000;
 
 /** Agent-facing client projection. Structured Host DTOs stay in tool details, never in model-visible text. */
 export function renderDockToolsResult(result: DockToolsResult): string {
+  if (result.type === "deliver") {
+    return `Made ${inline(result.deliverable.name)} available for temporary download (${result.deliverable.sizeBytes} bytes). The source file must remain unchanged and available.`;
+  }
   if (result.type === "create") {
     return `Created ${identity(result.instance)} in ${inline(result.instance.cwd, 180)}. Dock tools are off in the new instance until the owner enables them there.`;
   }

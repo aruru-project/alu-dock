@@ -55,6 +55,8 @@ import {
   MAX_DOCK_TOOL_TARGET_CHARS,
   type DockToolsRequest,
 } from "../core/dock-tools.js";
+import { parseDeliverableDto } from "../core/instance-deliverables.js";
+import { MAX_SOURCE_FILE_PATH_CHARS } from "../core/source-file.js";
 import { MAX_DOCK_TRANSFER_BYTES } from "../core/transport-bounds.js";
 
 export const PI_WORKER_PROTOCOL = "alu-dock-pi-worker";
@@ -759,6 +761,12 @@ function parseWorkerAttachmentDto(raw: unknown, label: string): ReturnType<typeo
 function parseDockToolsRequest(raw: unknown): DockToolsRequest {
   const value = record(raw, "Dock tools request");
   if (["list", "inspect", "watch", "cancel"].includes(String(value.type))) return parseObservationRequest(value);
+  if (value.type === "deliver") {
+    exactKeys(value, ["type", "path"], "Dock deliver request");
+    const path = boundedString(value.path, MAX_SOURCE_FILE_PATH_CHARS, "Dock deliver path");
+    if (!path.startsWith("/")) throw new Error("Dock deliver path must be absolute");
+    return { type: "deliver", path };
+  }
   if (value.type === "create") {
     exactKeys(value, ["type", "operationId", "cwd", "name"], "Dock create request");
     const cwd = boundedString(value.cwd, MAX_DOCK_TOOL_CWD_CHARS, "Dock create cwd");
@@ -816,6 +824,11 @@ function parseDockToolsResult(raw: unknown): void {
   const value = record(raw, "Dock tools result");
   if (["list", "inspect", "watch", "cancel"].includes(String(value.type))) {
     parseObservationResult(value);
+    return;
+  }
+  if (value.type === "deliver") {
+    exactKeys(value, ["type", "deliverable"], "Dock deliver result");
+    parseDeliverableDto(value.deliverable, "Dock deliverable");
     return;
   }
   if (value.type === "create") {
