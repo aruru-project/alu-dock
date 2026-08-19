@@ -10,6 +10,7 @@ import {
   type AgentSessionRuntime,
   type AgentSessionServices,
   type CreateAgentSessionRuntimeFactory,
+  type ExtensionCommandContextActions,
   type ExtensionUIContext,
   type PromptOptions,
   SessionManager,
@@ -24,7 +25,7 @@ import {
   type SourceInfo,
 } from "@earendil-works/pi-coding-agent";
 
-import { dockObservationExtension, type DockObservationBridge } from "./dock-observation-extension.js";
+import { dockToolsExtension, type DockToolsBridge } from "./dock-tools-extension.js";
 import {
   dockAttachmentsExtension,
   DOCK_ATTACHMENT_RESOLVE_TOOL,
@@ -185,7 +186,7 @@ export interface CreatePiAgentAdapterOptions {
   extensionUiContextPortFactory?: () => PiExtensionUiPort;
   setProcessCwd?: (cwd: string) => void;
   sessionManager?: SessionManager;
-  dockObservationBridge?: DockObservationBridge;
+  dockToolsBridge?: DockToolsBridge;
   dockAttachmentPort?: DockAttachmentCallPort;
 }
 
@@ -1132,11 +1133,16 @@ export class PiAgentAdapter {
       this.options.setProcessCwd?.(binding.cwd);
       this.processCwdValue = binding.cwd;
       const uiContext = this.options.uiContextFactory?.() ?? this.options.uiContext;
-      await session.bindExtensions({ uiContext, mode: uiContext ? "rpc" : "print", onError: (error) => {
-        if (!token.active) return;
-        const event = { type: "dock_extension_error", error: boundedErrorMessage(error) };
-        if (this.active === binding && !binding.bufferEvents) this.publish(event); else binding.buffered.push(event);
-      } });
+      await session.bindExtensions({
+        uiContext,
+        mode: uiContext ? "rpc" : "print",
+        commandContextActions: this.extensionCommandContextActions(session, binding.services),
+        onError: (error) => {
+          if (!token.active) return;
+          const event = { type: "dock_extension_error", error: boundedErrorMessage(error) };
+          if (this.active === binding && !binding.bufferEvents) this.publish(event); else binding.buffered.push(event);
+        },
+      });
       const publishBranch = (branch: string | undefined): void => {
         if (!token.active) return;
         const event: AgentEvent = { type: "dock_git_branch_changed", branch };
@@ -1156,6 +1162,34 @@ export class PiAgentAdapter {
       }
       throw error;
     }
+  }
+
+  private extensionCommandContextActions(session: AgentSession, services: AgentSessionServices): ExtensionCommandContextActions {
+    const unavailable = async (): Promise<never> => {
+      throw new Error("This extension session-management action is unavailable through Dock");
+    };
+    return {
+      waitForIdle: () => session.waitForIdle(),
+      newSession: unavailable,
+      fork: unavailable,
+      navigateTree: unavailable,
+      switchSession: unavailable,
+      reload: async () => {
+        this.options.extensionUiBroker?.beginGenerationChange("reload");
+        try {
+          await session.reload({
+            beforeSessionStart: () => {
+              refreshSessionModelReferences(session, services);
+              syncAgentRuntimeSettings(session, services.settingsManager);
+              this.options.configureNetwork?.(services.settingsManager);
+            },
+          });
+        } catch (error) {
+          await this.options.extensionUiBroker?.failGenerationChange();
+          throw error;
+        }
+      },
+    };
   }
 
   private promoteInitial(): void {
@@ -2622,11 +2656,21 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
         extensionFactories: [
           { name: "alu-dock-tool-result-normalizer", factory: piToolResultNormalizerExtension },
           { name: "alu-dock-show-image", factory: showImageExtension(publishedFiles) },
-          ...(options.dockObservationBridge === undefined ? [] : [{ name: "alu-dock-observation", factory: dockObservationExtension(options.dockObservationBridge) }]),
+          ...(options.dockToolsBridge === undefined ? [] : [{ name: "alu-dock-tools", factory: dockToolsExtension(options.dockToolsBridge) }]),
           ...(options.dockAttachmentPort === undefined ? [] : [{ name: "alu-dock-attachments", factory: dockAttachmentsExtension(options.dockAttachmentPort) }]),
         ],
         extensionsOverride: ownCanonicalShowImage,
-        ...(options.dockAttachmentPort === undefined ? {} : { additionalSkillPaths: [dockAttachmentSkillPath()] }),
+        ...((options.dockAttachmentPort === undefined && options.dockToolsBridge === undefined) ? {} : {
+          additionalSkillPaths: [
+            ...(options.dockAttachmentPort === undefined ? [] : [dockAttachmentSkillPath()]),
+            ...(options.dockToolsBridge === undefined ? [] : [dockToolsSkillPath()]),
+          ],
+          ...(options.dockToolsBridge === undefined ? {} : {
+            skillsOverride: (base) => options.dockToolsBridge!.enabled
+              ? base
+              : { ...base, skills: base.skills.filter((skill) => skill.name !== "dock-tools") },
+          }),
+        }),
       },
     });
     const result = await createAgentSessionFromServices({
@@ -2691,10 +2735,18 @@ async function loadAttachmentContextKey(agentDir: string): Promise<Buffer> {
 }
 
 function dockAttachmentSkillPath(): string {
+  return bundledDockSkillPath("dock-attachments");
+}
+
+function dockToolsSkillPath(): string {
+  return bundledDockSkillPath("dock-tools");
+}
+
+function bundledDockSkillPath(name: string): string {
   const moduleDirectory = dirname(fileURLToPath(import.meta.url));
   const candidates = [
-    resolve(moduleDirectory, "../../skills/dock-attachments/SKILL.md"),
-    resolve(moduleDirectory, "../../../skills/dock-attachments/SKILL.md"),
+    resolve(moduleDirectory, `../../skills/${name}/SKILL.md`),
+    resolve(moduleDirectory, `../../../skills/${name}/SKILL.md`),
   ];
   return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]!;
 }

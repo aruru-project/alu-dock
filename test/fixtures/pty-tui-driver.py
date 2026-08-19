@@ -2,6 +2,7 @@
 """Run a command in a real PTY, resize it, toggle tools, then detach."""
 
 import base64
+import datetime
 import errno
 import fcntl
 import json
@@ -81,7 +82,7 @@ def main() -> int:
     status = 1
     try:
         action = os.environ.get("ALU_DOCK_PTY_ACTION", "detach")
-        hub_actions = ("hub-exit", "hub-click-leave", "hub-narrow", "hub-signal", "hub-signal-inventory", "hub-new", "hub-continue", "hub-mouse-continue", "hub-history", "hub-history-forget", "hub-adopt", "hub-remote-settings", "hub-attachment-settings", "hub-pairing-open", "hub-pairing", "hub-revoke")
+        hub_actions = ("hub-exit", "hub-click-leave", "hub-narrow", "hub-signal", "hub-signal-inventory", "hub-new", "hub-continue", "hub-mouse-continue", "hub-history", "hub-history-forget", "hub-adopt", "hub-remote-settings", "hub-attachment-settings", "hub-pairing-open", "hub-devices-auto-update", "hub-pairing", "hub-revoke")
         startup_marker = b"Alu Dock Hub" if action in hub_actions else b"cache "
         set_size(fd, 24, 80)
         deadline = time.monotonic() + 12
@@ -238,20 +239,18 @@ def main() -> int:
                 settings_start = len(output)
                 os.write(fd, b"\r")
                 settings_deadline = time.monotonic() + 5
-                while b"Remote Access Settings" not in output[settings_start:] and time.monotonic() < settings_deadline:
+                while b"Choose where Dock keeps attachments" not in output[settings_start:] and time.monotonic() < settings_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
-                write_input(fd, output, b"\x1b[B")
-                write_input(fd, output, b"\x1b[B")  # Attachment directory is third.
                 prompt_start = len(output)
-                os.write(fd, b"\r")
+                os.write(fd, b"\r")  # Attachment directory is the only setting.
                 prompt_deadline = time.monotonic() + 5
                 while b"Current directory:" not in output[prompt_start:] and time.monotonic() < prompt_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, directory + b"\r")
                 saved_deadline = time.monotonic() + 5
-                while b"Attachment directory saved:" not in output[prompt_start:] and time.monotonic() < saved_deadline:
+                while b"keep new attachments" not in output[prompt_start:] and time.monotonic() < saved_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\x1b")
@@ -259,15 +258,16 @@ def main() -> int:
                 os.write(fd, b"\x1b")
             elif action == "hub-remote-settings":
                 port = os.environ.get("ALU_DOCK_PTY_PORT", "9999").encode("ascii")
-                for _ in range(4):
-                    write_input(fd, output, b"\x1b[B")  # Settings is fifth.
-                settings_start = len(output)
+                for _ in range(5):
+                    write_input(fd, output, b"\x1b[B")  # Devices is sixth.
+                devices_start = len(output)
                 os.write(fd, b"\r")
-                settings_deadline = time.monotonic() + 5
-                while b"Remote Access Settings" not in output[settings_start:] and time.monotonic() < settings_deadline:
+                devices_deadline = time.monotonic() + 5
+                while b"Remote access is off" not in output[devices_start:] and time.monotonic() < devices_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
-                write_input(fd, output, b"\x1b[B")  # Port is second.
+                write_input(fd, output, b"\x1b[B")
+                write_input(fd, output, b"\x1b[B")  # Port is third while remote access is off.
                 prompt_start = len(output)
                 os.write(fd, b"\r")
                 prompt_deadline = time.monotonic() + 5
@@ -280,9 +280,10 @@ def main() -> int:
                 while saved_marker not in output[prompt_start:] and time.monotonic() < saved_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
-                os.write(fd, b"\r")  # Enable Remote Access is the fresh menu default.
+                write_input(fd, output, b"\x1b[B")  # Remote Access is second on the fresh Devices view.
+                os.write(fd, b"\r")
                 enabled_deadline = time.monotonic() + 5
-                while b"Remote access is being enabled" not in output and time.monotonic() < enabled_deadline:
+                while b"Remote Access \xc2\xb7 On" not in output[devices_start:] and time.monotonic() < enabled_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\x1b")
@@ -292,21 +293,61 @@ def main() -> int:
                 os.write(fd, b"\x1b")
             elif action == "hub-pairing-open":
                 for _ in range(5):
-                    write_input(fd, output, b"\x1b[B")  # Pairing is sixth.
-                pairing_start = len(output)
+                    write_input(fd, output, b"\x1b[B")  # Devices is sixth.
+                devices_start = len(output)
                 os.write(fd, b"\r")
-                pairing_deadline = time.monotonic() + 5
-                while b"Pairing is closed" not in output[pairing_start:] and time.monotonic() < pairing_deadline:
+                devices_deadline = time.monotonic() + 5
+                while b"Connect a New Device" not in output[devices_start:] and time.monotonic() < devices_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
-                os.write(fd, b"\r")  # Open Pairing for 5 Minutes is the default.
+                os.write(fd, b"\r")
                 confirm_deadline = time.monotonic() + 5
-                while b"Open Pairing Window" not in output[pairing_start:] and time.monotonic() < confirm_deadline:
+                while b"Connect a New Device?" not in output[devices_start:] and time.monotonic() < confirm_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
-                os.write(fd, b"\r")
+                os.write(fd, b"\r")  # Start Waiting confirms the five-minute window.
                 opened_deadline = time.monotonic() + 5
-                while b"Pairing is open until" not in output[pairing_start:] and time.monotonic() < opened_deadline:
+                while b"Waiting for your device" not in output[devices_start:] and time.monotonic() < opened_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\x1b")
+                time.sleep(0.3)
+                while read_available(fd, output, 0.01) > 0:
+                    pass
+                os.write(fd, b"\x1b")
+            elif action == "hub-devices-auto-update":
+                pending_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+                for _ in range(5):
+                    write_input(fd, output, b"\x1b[B")  # Devices is sixth.
+                devices_start = len(output)
+                os.write(fd, b"\r")
+                devices_deadline = time.monotonic() + 5
+                while b"Waiting for your device" not in output[devices_start:] and time.monotonic() < devices_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                remote_root = os.path.join(os.environ["XDG_STATE_HOME"], "alu-dock", "remote-access")
+                with open(os.path.join(remote_root, "pairing-window.json"), "r", encoding="utf-8") as window_file:
+                    window = json.load(window_file)
+                pending_root = os.path.join(remote_root, "pending")
+                os.makedirs(pending_root, mode=0o700, exist_ok=True)
+                requested_at = datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
+                pending = {
+                    "schemaVersion": 1,
+                    "id": pending_id,
+                    "windowId": window["id"],
+                    "deviceName": "Bedroom phone",
+                    "fingerprint": "ab" * 32,
+                    "requestedAt": requested_at,
+                    "expiresAt": window["expiresAt"],
+                }
+                pending_path = os.path.join(pending_root, pending_id + ".json")
+                temporary_path = pending_path + ".tmp"
+                descriptor = os.open(temporary_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(descriptor, "w", encoding="utf-8") as pending_file:
+                    json.dump(pending, pending_file)
+                os.replace(temporary_path, pending_path)
+                appeared_deadline = time.monotonic() + 5
+                while b"Bedroom phone" not in output[devices_start:] and time.monotonic() < appeared_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\x1b")
@@ -317,32 +358,21 @@ def main() -> int:
             elif action == "hub-pairing":
                 pin = os.environ.get("ALU_DOCK_PTY_PIN", "0000").encode("ascii")
                 for _ in range(5):
-                    write_input(fd, output, b"\x1b[B")  # Pairing is sixth.
-                pairing_start = len(output)
+                    write_input(fd, output, b"\x1b[B")  # Devices is sixth.
+                devices_start = len(output)
                 os.write(fd, b"\r")
-                pairing_deadline = time.monotonic() + 5
-                while b"1 waiting" not in output[pairing_start:] and time.monotonic() < pairing_deadline:
+                waiting_deadline = time.monotonic() + 5
+                while b"Ready to connect" not in output[devices_start:] and time.monotonic() < waiting_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
-                write_input(fd, output, b"\x1b[B")  # Close Pairing is first; waiting device is second.
-                os.write(fd, b"\r")
-                detail_deadline = time.monotonic() + 5
-                while b"Enter Pairing PIN" not in output[pairing_start:] and time.monotonic() < detail_deadline:
-                    if read_available(fd, output, 0.05) < 0:
-                        break
-                os.write(fd, b"\r")
+                os.write(fd, b"\r")  # A newly waiting device is selected automatically.
                 pin_deadline = time.monotonic() + 5
-                while b"four-digit PIN displayed" not in output[pairing_start:] and time.monotonic() < pin_deadline:
+                while b"Type the 4-digit PIN" not in output[devices_start:] and time.monotonic() < pin_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
-                os.write(fd, pin + b"\r")
-                confirm_deadline = time.monotonic() + 5
-                while b"Confirm Pairing" not in output[pairing_start:] and time.monotonic() < confirm_deadline:
-                    if read_available(fd, output, 0.05) < 0:
-                        break
-                os.write(fd, b"\r")
+                os.write(fd, pin + b"\r")  # Enter submits the final approval.
                 approved_deadline = time.monotonic() + 5
-                while b"PIN confirmed for" not in output[pairing_start:] and time.monotonic() < approved_deadline:
+                while b"Just a moment" not in output[devices_start:] and time.monotonic() < approved_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\x1b")
@@ -352,27 +382,28 @@ def main() -> int:
                 os.write(fd, b"\x1b")
             elif action == "hub-revoke":
                 for _ in range(5):
-                    write_input(fd, output, b"\x1b[B")  # Pairing is sixth.
+                    write_input(fd, output, b"\x1b[B")  # Devices is sixth.
                 revoke_start = len(output)
                 os.write(fd, b"\r")
+                devices_deadline = time.monotonic() + 5
+                while b"is all set" not in output[revoke_start:] and b"Can connect remotely" not in output[revoke_start:] and time.monotonic() < devices_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                if b"is all set" in output[revoke_start:]:
+                    os.write(fd, b"\r")  # Acknowledge the completed connection with Done.
                 trusted_deadline = time.monotonic() + 5
-                while b"1 trusted" not in output[revoke_start:] and time.monotonic() < trusted_deadline:
+                while b"Can connect remotely" not in output[revoke_start:] and time.monotonic() < trusted_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
-                write_input(fd, output, b"\x1b[B")  # Open Pairing is first; trusted device is second.
-                os.write(fd, b"\r")
-                detail_deadline = time.monotonic() + 5
-                while b"Revoke Access" not in output[revoke_start:] and time.monotonic() < detail_deadline:
-                    if read_available(fd, output, 0.05) < 0:
-                        break
+                write_input(fd, output, b"\x1b[B")  # Connect is first; paired device is second.
                 os.write(fd, b"\r")
                 confirm_deadline = time.monotonic() + 5
-                while b"Revoke This Device" not in output[revoke_start:] and time.monotonic() < confirm_deadline:
+                while b"Remove Living room tablet?" not in output[revoke_start:] and time.monotonic() < confirm_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\r")
-                revoked_deadline = time.monotonic() + 5
-                while b"Trust was revoked for" not in output[revoke_start:] and time.monotonic() < revoked_deadline:
+                removed_deadline = time.monotonic() + 5
+                while b"has been removed" not in output[revoke_start:] and time.monotonic() < removed_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\x1b")
@@ -724,7 +755,7 @@ def main() -> int:
                 os.write(fd, b"\x0f")  # Ctrl+O: collapse/expand tool output.
                 time.sleep(0.1)
                 read_available(fd, output, 0.05)
-            if action not in ("hub-exit", "hub-click-leave", "hub-signal", "hub-signal-inventory", "hub-history-forget", "hub-remote-settings", "hub-attachment-settings", "hub-pairing-open", "hub-pairing", "hub-revoke"):
+            if action not in ("hub-exit", "hub-click-leave", "hub-signal", "hub-signal-inventory", "hub-history-forget", "hub-remote-settings", "hub-attachment-settings", "hub-pairing-open", "hub-devices-auto-update", "hub-pairing", "hub-revoke"):
                 os.write(fd, b"\x04")  # Ctrl+D: detach without stopping.
 
         exit_deadline = time.monotonic() + 8

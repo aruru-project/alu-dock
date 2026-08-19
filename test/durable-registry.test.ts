@@ -40,7 +40,7 @@ function createFixtureInstance(
     initialRuntimeGeneration: input.initialRuntimeGeneration,
     createdAt: input.createdAt,
     reopenedFrom: input.reopenedFrom,
-    observationGrant: input.observationGrant,
+    dockToolsEnabled: input.dockToolsEnabled,
   });
 }
 
@@ -54,7 +54,7 @@ async function seedStoppedCatalog(catalogPath: string, cwd: string, ids: readonl
     lifecycle: "stopped",
     execution: "unavailable",
     lastRun: "aborted",
-    observationGrant: false,
+    dockToolsEnabled: false,
     executionChangedAt: timestamp,
     runtimeGeneration: 1,
     piSessionId: `pi-${id}`,
@@ -73,18 +73,18 @@ async function seedStoppedCatalog(catalogPath: string, cwd: string, ids: readonl
   return records;
 }
 
-test("observation grant persists across Host restart and explicit reopen", async () => {
+test("Dock tools switch persists across Host restart and explicit reopen", async () => {
   const { cwd, catalogPath } = await fixturePath();
   const firstRuntimes: DelayedAgentWorkerConnection[] = [];
   const first = new DockRegistry(
     async (input) => createFixtureInstance(input, firstRuntimes),
-    () => "dock-observer",
+    () => "dock-toolsr",
     { hostEpoch: "observer-host-one", startedAt: "2026-07-15T01:00:00.000Z", catalogStore: new FileCatalogStore(catalogPath) },
   );
   await first.initializeCatalog();
   const source = await first.create({ operationId: "create-observer", cwd });
-  await first.configureObservation(source.id, true, "grant-observation");
-  assert.equal(first.observationGrant(source.id), true);
+  await first.configureDockTools(source.id, true, "dock-tools-on");
+  assert.equal(first.dockToolsEnabled(source.id), true);
 
   let reopenInput: InstanceFactoryInput | undefined;
   const reopenedRuntimes: DelayedAgentWorkerConnection[] = [];
@@ -99,10 +99,10 @@ test("observation grant persists across Host restart and explicit reopen", async
     },
   );
   await second.initializeCatalog();
-  assert.equal(second.observationGrant(source.id), true);
+  assert.equal(second.dockToolsEnabled(source.id), true);
   await second.reopen({ operationId: "reopen-observer", instanceId: source.id });
-  assert.equal(reopenInput?.observationGrant, true);
-  assert.equal(second.get(source.id).observationGrant(), true);
+  assert.equal(reopenInput?.dockToolsEnabled, true);
+  assert.equal(second.get(source.id).dockToolsEnabled(), true);
 });
 
 test("reopen catalog failure disposes its candidate and preserves unavailable facts", async () => {

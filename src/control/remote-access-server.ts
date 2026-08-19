@@ -284,12 +284,12 @@ export class RemoteAccessServer {
     }
 
     if (!this.currentPairingWindow()) {
-      this.endPairingResponse(socket, pairingError("pairing_closed", "Open Pairing on the Dock Host, then try again"));
+      this.endPairingResponse(socket, pairingError("pairing_closed", "Open Devices on the Dock Host and choose Connect a New Device, then try again"));
       return;
     }
     const sourceKey = socket.remoteAddress ?? "unknown";
     if (!this.allowPairingRequest(fingerprint, sourceKey)) {
-      this.endPairingResponse(socket, pairingError("busy", "Pairing is busy; try again shortly", PAIRING_RETRY_AFTER_MS));
+      this.endPairingResponse(socket, pairingError("busy", "Another device connection is in progress; try again shortly", PAIRING_RETRY_AFTER_MS));
       return;
     }
     this.readPairingRequest(socket, fingerprint, sourceKey, certificate);
@@ -346,7 +346,7 @@ export class RemoteAccessServer {
         let task!: Promise<void>;
         task = this.processPairingRequest(request, fingerprint, sourceKey, certificate)
           .then((response) => this.endPairingResponse(socket, response))
-          .catch(() => this.endPairingResponse(socket, pairingError("internal_error", "Pairing could not continue; try again")))
+          .catch(() => this.endPairingResponse(socket, pairingError("internal_error", "The device connection could not continue; try again")))
           .finally(() => this.inFlightPairingRequests.delete(task));
         this.inFlightPairingRequests.add(task);
       } catch {
@@ -367,7 +367,7 @@ export class RemoteAccessServer {
     certificate: X509Certificate,
   ): Promise<PairingServerRecord> {
     const window = this.currentPairingWindow();
-    if (!window) return pairingError("pairing_closed", "Open Pairing on the Dock Host, then try again");
+    if (!window) return pairingError("pairing_closed", "Open Devices on the Dock Host and choose Connect a New Device, then try again");
 
     if (request.type === "pairing.begin.v1") {
       assertPairingCertificate(certificate);
@@ -379,7 +379,7 @@ export class RemoteAccessServer {
         }
         return pairingError("busy", "This device already has a waiting pairing request", PAIRING_RETRY_AFTER_MS);
       }
-      if (this.pending.size >= MAX_PENDING_PAIRINGS) return pairingError("busy", "Pairing is busy; try again shortly", PAIRING_RETRY_AFTER_MS);
+      if (this.pending.size >= MAX_PENDING_PAIRINGS) return pairingError("busy", "Another device connection is in progress; try again shortly", PAIRING_RETRY_AFTER_MS);
       const sourcePending = [...this.pending.values()].filter((session) => session.sourceKey === sourceKey && !session.closed).length;
       if (sourcePending >= MAX_PENDING_PAIRINGS_PER_SOURCE) return pairingError("busy", "Too many devices are waiting from this network; try again shortly", PAIRING_RETRY_AFTER_MS);
 
@@ -442,13 +442,13 @@ export class RemoteAccessServer {
       const digest = pairingRequestDigest(request);
       if (session.phase === "waiting_for_identity" && session.acceptedSrpDigest && session.serverSrpProof) {
         if (!sameBytes(digest, session.acceptedSrpDigest)) {
-          await this.failApprovedPairing(session);
+          await this.failApprovedPairing(session, "The device sent an unexpected connection step. Start pairing again on the device.");
           return pairingError("invalid_request", "Pairing steps arrived out of order; start again");
         }
         return { type: "pairing.srp-confirmed.v1", pairingId: session.id, proof: base64(session.serverSrpProof) };
       }
       if (session.phase !== "waiting_for_srp_proof" || !session.srp) {
-        await this.failApprovedPairing(session);
+        await this.failApprovedPairing(session, "The device sent an unexpected connection step. Start pairing again on the device.");
         return pairingError("invalid_request", "Pairing steps arrived out of order; start again");
       }
       try {
@@ -460,13 +460,13 @@ export class RemoteAccessServer {
         session.phase = "waiting_for_identity";
         return { type: "pairing.srp-confirmed.v1", pairingId: session.id, proof: base64(completed.serverProof) };
       } catch {
-        await this.failApprovedPairing(session);
-        return pairingError("wrong_pin", "The PIN did not match; open Pairing on the Dock Host and try again");
+        await this.failApprovedPairing(session, "That PIN did not match. Start pairing again on the device and try the new PIN.");
+        return pairingError("wrong_pin", "The PIN did not match; start a new connection from Devices on the Dock Host");
       }
     }
 
     if (session.phase !== "waiting_for_identity" || !session.sessionKey) {
-      await this.failApprovedPairing(session);
+      await this.failApprovedPairing(session, "The device sent an unexpected connection step. Start pairing again on the device.");
       return pairingError("invalid_request", "Pairing steps arrived out of order; start again");
     }
     const identity = this.identity;
@@ -483,7 +483,7 @@ export class RemoteAccessServer {
       authTag: request.authTag,
     });
     if (!verified) {
-      await this.failApprovedPairing(session);
+      await this.failApprovedPairing(session, "I couldn’t verify this device. Start pairing again on the device and we’ll try once more.");
       return pairingError("invalid_request", "The device identity could not be verified; start again");
     }
 
@@ -498,8 +498,8 @@ export class RemoteAccessServer {
         pairedAt: new Date().toISOString(),
       });
       if (!committed) {
-        await this.failApprovedPairing(session);
-        return pairingError("pairing_closed", "Pairing was closed before the device could be saved");
+        await this.failApprovedPairing(session, "The connection closed before I could save this device. Start pairing again to retry.");
+        return pairingError("pairing_closed", "The connection window closed before the device could be saved");
       }
       await this.completePairing(session);
       return {
@@ -510,7 +510,7 @@ export class RemoteAccessServer {
       };
     } catch (error) {
       await this.options.state.revokeClient(session.fingerprint).catch(() => false);
-      if (!session.closed) await this.failApprovedPairing(session);
+      if (!session.closed) await this.failApprovedPairing(session, "I couldn’t save this device. Start pairing again to retry.");
       throw error;
     }
   }
@@ -547,6 +547,12 @@ export class RemoteAccessServer {
       session.srp = createPairingSrpServer(pin);
       session.phase = "waiting_for_srp_proof";
       this.activePairingId = session.id;
+      await this.options.state.writePairingProgress({
+        schemaVersion: 1,
+        status: "checking",
+        deviceName: session.deviceName,
+        updatedAt: new Date().toISOString(),
+      }).catch(() => {});
       const proofDeadline = Math.min(Date.parse(window.expiresAt), Date.now() + PAIRING_PROOF_TIMEOUT_MS);
       session.expiresAt = proofDeadline;
       if (session.timeout) clearTimeout(session.timeout);
@@ -624,17 +630,31 @@ export class RemoteAccessServer {
 
   private async expireSession(session: PairingSession): Promise<void> {
     if (session.closed) return;
-    if (session.id === this.activePairingId) await this.closePairingWindow();
-    else await this.removeSession(session);
+    if (session.id === this.activePairingId) {
+      await this.failApprovedPairing(session, "The device took too long to finish connecting. Start pairing again when you’re ready.");
+    } else await this.removeSession(session);
   }
 
-  private async failApprovedPairing(session: PairingSession): Promise<void> {
+  private async failApprovedPairing(session: PairingSession, message: string): Promise<void> {
+    await this.options.state.writePairingProgress({
+      schemaVersion: 1,
+      status: "failed",
+      deviceName: session.deviceName,
+      message,
+      updatedAt: new Date().toISOString(),
+    }).catch(() => {});
     if (session.id === this.activePairingId) await this.closePairingWindow();
     else await this.removeSession(session);
   }
 
   private async completePairing(session: PairingSession): Promise<void> {
     const windowId = session.windowId;
+    await this.options.state.writePairingProgress({
+      schemaVersion: 1,
+      status: "connected",
+      deviceName: session.deviceName,
+      updatedAt: new Date().toISOString(),
+    }).catch(() => {});
     this.activeWindow = undefined;
     this.activePairingId = undefined;
     await this.clearPairingSessions();

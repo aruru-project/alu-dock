@@ -150,12 +150,12 @@ test("local pairing window admits an exact certificate to the existing Protocol 
 
   const settingsPty = await runHubPty(socketPath, "hub-remote-settings", stateHome, { ALU_DOCK_PTY_PORT: String(port) });
   assertPty(settingsPty);
-  assert.match(settingsPty.output, /Remote Access Settings/u);
-  assert.match(settingsPty.output, /Remote access is being enabled/u);
+  assert.match(settingsPty.output, /Devices/u);
+  assert.match(settingsPty.output, /Remote Access · On/u);
   await waitFor(async () => (await state.readStatus())?.state === "listening");
   const attachmentSettingsPty = await runHubPty(socketPath, "hub-attachment-settings", stateHome, { ALU_DOCK_PTY_ATTACHMENT_DIR: configuredAttachmentDirectory });
   assertPty(attachmentSettingsPty);
-  assert.match(attachmentSettingsPty.output, /Attachment directory saved:/u);
+  assert.match(attachmentSettingsPty.output, /keep new attachments/u);
 
   const handshakeStart = Date.now();
   const stalledHandshake = createNetConnection({ host: "::1", port });
@@ -182,12 +182,18 @@ test("local pairing window admits an exact certificate to the existing Protocol 
 
   const openPty = await runHubPty(socketPath, "hub-pairing-open", stateHome);
   assertPty(openPty);
-  assert.match(openPty.output, /Open Pairing Window/u);
-  assert.match(openPty.output, /Pairing is open until/u);
+  assert.match(openPty.output, /Connect a New Device\?/u);
+  assert.match(openPty.output, /Waiting for your device/u);
   await waitFor(async () => {
     const pairingWindow = await state.readPairingWindow();
     return pairingWindow !== undefined && Date.parse(pairingWindow.expiresAt) > Date.now();
   });
+
+  const autoUpdatePty = await runHubPty(socketPath, "hub-devices-auto-update", stateHome);
+  assertPty(autoUpdatePty);
+  assert.match(autoUpdatePty.output, /Bedroom phone/u, "a device published while Devices is visible must appear without a keypress");
+  assert.doesNotMatch(autoUpdatePty.output, /Refresh/u);
+  await state.removePending("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
 
   const idleUnknown = await openTls("::1", port, clientIdentity);
   const idleStarted = Date.now();
@@ -226,8 +232,9 @@ test("local pairing window admits an exact certificate to the existing Protocol 
 
   const pairingPty = await runHubPty(socketPath, "hub-pairing", stateHome, { ALU_DOCK_PTY_PIN: pin });
   assertPty(pairingPty);
-  assert.match(pairingPty.output, /Enter Pairing PIN/u);
-  assert.match(pairingPty.output, /PIN confirmed for Living room tablet/u);
+  assert.match(pairingPty.output, /Type the 4-digit PIN/u);
+  assert.match(pairingPty.output, /Just a moment/u);
+  assert.doesNotMatch(pairingPty.output, /Enter Pairing PIN|Confirm Pairing/u);
 
   let challenge: Record<string, unknown> | undefined;
   await waitFor(async () => {
@@ -288,6 +295,7 @@ test("local pairing window admits an exact certificate to the existing Protocol 
   sessionKey.fill(0);
 
   await waitFor(async () => (await state.trustedClient(clientIdentity.fingerprint)) !== undefined);
+  assert.deepEqual((await state.readPairingProgress())?.status, "connected");
   assert.equal(await state.readPairingWindow(), undefined, "a successful pairing must close its local window");
   assert.equal((await state.listPending()).length, 0);
 
@@ -340,8 +348,9 @@ test("local pairing window admits an exact certificate to the existing Protocol 
   const heldClosed = new Promise<void>((resolveClosed) => held.once("close", () => resolveClosed()));
   const revokePty = await runHubPty(socketPath, "hub-revoke", stateHome);
   assertPty(revokePty);
-  assert.match(revokePty.output, /Revoke This Device/u);
-  assert.match(revokePty.output, /Trust was revoked for Living room tablet/u);
+  assert.match(revokePty.output, /Remove Living room tablet\?/u);
+  assert.match(revokePty.output, /Living room tablet has been removed/u);
+  assert.doesNotMatch(revokePty.output, /Revoke Access|Revoke This Device/u);
   await Promise.race([
     heldClosed,
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error("revoked TLS connection remained open")), 2_000)),
@@ -527,7 +536,7 @@ async function pairingRequest(
 
 async function runHubPty(
   socketPath: string,
-  action: "hub-remote-settings" | "hub-attachment-settings" | "hub-pairing-open" | "hub-pairing" | "hub-revoke",
+  action: "hub-remote-settings" | "hub-attachment-settings" | "hub-pairing-open" | "hub-devices-auto-update" | "hub-pairing" | "hub-revoke",
   stateHome: string,
   environment: Record<string, string> = {},
 ): Promise<HubPtyResult> {

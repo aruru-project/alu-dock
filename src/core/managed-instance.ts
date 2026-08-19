@@ -199,7 +199,7 @@ export interface ManagedInstanceOptions {
   reopenedFrom?: "host_lost" | "runtime_error";
   extensionUiBroker?: ExtensionUiBroker;
   initialHistory?: AgentHistoryEntry[];
-  observationGrant?: boolean;
+  dockToolsEnabled?: boolean;
 }
 
 interface AssistantOutcome {
@@ -267,7 +267,7 @@ interface WorkingCheckpoint {
   stopRequestedAt: string | undefined;
   shutdownRequestedAt: string | undefined;
   ownerReleaseUnconfirmed: boolean;
-  observationGrant: boolean;
+  dockToolsEnabled: boolean;
   executionChangedAt: string;
   runStartedAt: string | undefined;
   timedExecution: InstanceExecution;
@@ -381,7 +381,7 @@ export class ManagedInstance {
   private stopRequestedAt: string | undefined;
   private shutdownRequestedAt: string | undefined;
   private ownerReleaseUnconfirmed = false;
-  private observationGrantValue = false;
+  private dockToolsEnabledValue = false;
   private executionChangedAtValue!: string;
   private runStartedAtValue: string | undefined;
   private timedExecutionValue: InstanceExecution = "idle";
@@ -465,7 +465,7 @@ export class ManagedInstance {
     this.now = options.now ?? (() => new Date());
     this.createCommandId = options.commandId ?? randomUUID;
     this.extensionUi = options.extensionUiBroker ?? new ExtensionUiBroker(this.now, this.createCommandId);
-    this.observationGrantValue = options.observationGrant ?? false;
+    this.dockToolsEnabledValue = options.dockToolsEnabled ?? false;
 
     const initializedAt = this.timestamp();
     this.createdAt = options.createdAt ?? initializedAt;
@@ -559,7 +559,7 @@ export class ManagedInstance {
       lifecycle: snapshot.lifecycle,
       execution: snapshot.execution,
       lastRun: snapshot.lastRun,
-      observationGrant: this.observationGrantValue,
+      dockToolsEnabled: this.dockToolsEnabledValue,
       executionChangedAt: snapshot.executionChangedAt,
       ...(snapshot.runStartedAt === undefined ? {} : { runStartedAt: snapshot.runStartedAt }),
       runtimeGeneration: snapshot.runtimeGeneration,
@@ -596,14 +596,14 @@ export class ManagedInstance {
     this.committedSnapshotValue = this.workingSnapshot();
   }
 
-  observationGrant(): boolean { return this.observationGrantValue; }
+  dockToolsEnabled(): boolean { return this.dockToolsEnabledValue; }
 
-  async setObservationGrant(enabled: boolean, operationId: string): Promise<void> {
-    if (typeof enabled !== "boolean") throw new Error("Observation grant must be boolean");
-    if (enabled === this.observationGrantValue) return;
+  async setDockToolsEnabled(enabled: boolean, operationId: string): Promise<void> {
+    if (typeof enabled !== "boolean") throw new Error("Dock tools switch must be boolean");
+    if (enabled === this.dockToolsEnabledValue) return;
     await this.enqueueTransition(() => this.commitCatalogTransition(
-      { kind: "instance.observation_configure", effect: "pre_effect", operationId, instanceId: this.id },
-      () => { this.observationGrantValue = enabled; this.touch(); },
+      { kind: "instance.dock_tools_configure", effect: "pre_effect", operationId, instanceId: this.id },
+      () => { this.dockToolsEnabledValue = enabled; this.touch(); },
     ));
   }
 
@@ -2559,7 +2559,7 @@ export class ManagedInstance {
       stopRequestedAt: this.stopRequestedAt,
       shutdownRequestedAt: this.shutdownRequestedAt,
       ownerReleaseUnconfirmed: this.ownerReleaseUnconfirmed,
-      observationGrant: this.observationGrantValue,
+      dockToolsEnabled: this.dockToolsEnabledValue,
       executionChangedAt: this.executionChangedAtValue,
       runStartedAt: this.runStartedAtValue,
       timedExecution: this.timedExecutionValue,
@@ -2589,7 +2589,7 @@ export class ManagedInstance {
     this.stopRequestedAt = checkpoint.stopRequestedAt;
     this.shutdownRequestedAt = checkpoint.shutdownRequestedAt;
     this.ownerReleaseUnconfirmed = checkpoint.ownerReleaseUnconfirmed;
-    this.observationGrantValue = checkpoint.observationGrant;
+    this.dockToolsEnabledValue = checkpoint.dockToolsEnabled;
     this.executionChangedAtValue = checkpoint.executionChangedAt;
     this.runStartedAtValue = checkpoint.runStartedAt;
     this.timedExecutionValue = checkpoint.timedExecution;

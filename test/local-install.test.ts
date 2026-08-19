@@ -38,6 +38,7 @@ test("npm package excludes tests, fixtures, and development scripts", () => {
   assert.ok(paths.includes("dist/src/cli.js"));
   assert.ok(paths.includes("package.json"));
   assert.ok(paths.includes("skills/dock-attachments/SKILL.md"));
+  assert.ok(paths.includes("skills/dock-tools/SKILL.md"));
   assert.ok(paths.every((path) => path === "package.json" || path === "README.md" || path.startsWith("dist/src/") || path.startsWith("docs/") || path.startsWith("skills/")), paths.join("\n"));
   assert.equal(paths.some((path) => path.startsWith("dist/test/") || path.startsWith("dist/scripts/") || path.startsWith("test/")), false);
 });

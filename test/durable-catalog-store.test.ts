@@ -48,13 +48,16 @@ async function temporaryCatalog(): Promise<{ root: string; path: string }> {
   return { root, path };
 }
 
-test("legacy catalog records default observation off and normalize execution timing", async () => {
+test("legacy observation grants reset to Dock tools off and normalize execution timing", async () => {
   const { path } = await temporaryCatalog();
   const store = new FileCatalogStore(path);
   await store.commit(projection(1, [record("legacy")]), { kind: "legacy-fixture", effect: "pre_effect" });
+  const legacyProjection = JSON.parse(await readFile(path, "utf8")) as { instances: Array<Record<string, unknown>> };
+  legacyProjection.instances[0]!.observationGrant = true;
+  await writeFile(path, JSON.stringify(legacyProjection), { mode: 0o600 });
   const loaded = await store.load();
   const legacy = loaded?.instances[0];
-  assert.equal(legacy?.observationGrant, false);
+  assert.equal(legacy?.dockToolsEnabled, false);
   assert.equal(legacy?.executionChangedAt, "2026-07-15T00:00:00.000Z");
   assert.equal(legacy?.runStartedAt, undefined);
 });

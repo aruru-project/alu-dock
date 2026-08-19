@@ -60,6 +60,7 @@ import {
   type WorkspaceBrowser,
 } from "./workspace-browser.js";
 import { executeSessionCommand, isSessionCommandRequest } from "./session-command-service.js";
+import { InstanceMutationService } from "./instance-mutation-service.js";
 import {
   AttachmentIntegrityError,
   AttachmentNotFoundError,
@@ -149,6 +150,7 @@ export class DockHost {
   private readonly attachBackpressureStats = { blocked: 0, drained: 0, overflow: 0, timeout: 0 };
   private readonly inFlightDispatches = new Set<Promise<void>>();
   private readonly operationLedger: OperationLedger;
+  private readonly instanceMutations: InstanceMutationService;
   private readonly faultDrainTimeoutMs: number;
   private readonly initialize: (() => Promise<void>) | undefined;
   private readonly sessionInventory: SessionInventory;
@@ -173,6 +175,29 @@ export class DockHost {
     this.hostEpoch = options.registry.hostEpoch;
     this.startedAt = options.registry.startedAt;
     this.operationLedger = new OperationLedger(options.operationReceiptCapacity);
+    this.instanceMutations = new InstanceMutationService(this.registry, this.operationLedger, options.attachmentService);
+    this.registry.bindDockToolsMutationPort({
+      create: async (input) => {
+        const result = await this.instanceMutations.create(input);
+        return { instance: this.registry.observationStatus(result.instance.id) };
+      },
+      send: async (input) => {
+        const result = await this.instanceMutations.submit({
+          operationId: input.operationId,
+          instanceId: input.instanceId,
+          message: input.message,
+          delivery: "auto",
+        });
+        return {
+          target: this.registry.observationStatus(result.instance.id),
+          receipt: {
+            delivery: result.receipt.delivery,
+            queued: result.receipt.queued,
+            acceptedAt: result.receipt.acceptedAt,
+          },
+        };
+      },
+    });
     this.faultDrainTimeoutMs = Math.max(1, options.faultDrainTimeoutMs ?? 5_000);
     this.initialize = options.initialize;
     this.sessionInventory = options.sessionInventory ?? { list: async () => ({ sessions: [], incomplete: false, diagnostics: [] }) };
@@ -585,8 +610,8 @@ export class DockHost {
         }); return;
       }
       case "instance.create": {
-        const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=await this.registry.create({operationId:request.params.operationId,cwd:request.params.cwd,name:request.params.name,trustChallengeId:request.params.trustChallengeId,projectTrustDecision:request.params.projectTrustDecision});return {instance:instance.snapshot()};});
-        this.sendSuccessAndEnd(socket,request.requestId,result); return;
+        const result = await this.instanceMutations.create(request.params);
+        this.sendSuccessAndEnd(socket, request.requestId, result); return;
       }
       case "instance.ensure": {
         const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, () => this.registry.ensure({
@@ -683,15 +708,7 @@ export class DockHost {
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
       case "command.submit": {
-        const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, async () => {
-          const instance = this.registry.get(request.params.instanceId);
-          const attachments = request.params.attachments === undefined
-            ? undefined
-            : await this.attachmentService?.getMany(request.params.attachments);
-          if (request.params.attachments !== undefined && attachments === undefined) throw new ProtocolValidationError("capability_missing", "Attachment storage is unavailable");
-          const receipt = await instance.submit(request.params.message, request.params.delivery, request.params.operationId, request.params.images, attachments);
-          return { receipt, instance: instance.snapshot() };
-        });
+        const result = await this.instanceMutations.submit(request.params);
         this.sendSuccessAndEnd(socket, request.requestId, result); return;
       }
       case "command.abort": {

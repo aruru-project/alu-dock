@@ -48,6 +48,13 @@ import {
   type ObservationRequest,
 } from "../core/instance-observation.js";
 import type { SettingKey } from "../core/config-projection.js";
+import {
+  MAX_DOCK_TOOL_CWD_CHARS,
+  MAX_DOCK_TOOL_MESSAGE_CHARS,
+  MAX_DOCK_TOOL_NAME_CHARS,
+  MAX_DOCK_TOOL_TARGET_CHARS,
+  type DockToolsRequest,
+} from "../core/dock-tools.js";
 import { MAX_DOCK_TRANSFER_BYTES } from "../core/transport-bounds.js";
 
 export const PI_WORKER_PROTOCOL = "alu-dock-pi-worker";
@@ -68,10 +75,10 @@ export type UiCapability =
   | "ui.notify" | "ui.setTitle" | "ui.setEditorText" | "ui.setStatus" | "ui.setWidget" | "ui.widgetError"
   | "ui.unsupported" | "ui.setToolsExpanded" | "ui.cancel" | "ui.viewport" | "ui.reset" | "ui.generationBegin";
 
-export type DockCapability = "dock.identity" | "dock.observation.configure" | "dock.observation" | "dock.attachments";
+export type DockCapability = "dock.identity" | "dock.tools.configure" | "dock.tools" | "dock.attachments";
 export type ReverseWorkerCapability = DockCapability | Exclude<UiCapability, "ui.viewport" | "ui.reset">;
 export const ORDINARY_REVERSE_WORKER_CAPABILITIES: readonly ReverseWorkerCapability[] = [
-  "dock.identity", "dock.observation.configure", "dock.observation", "dock.attachments",
+  "dock.identity", "dock.tools.configure", "dock.tools", "dock.attachments",
   "ui.select", "ui.confirm", "ui.input", "ui.editor", "ui.notify", "ui.setTitle", "ui.setEditorText", "ui.setStatus",
   "ui.setWidget", "ui.widgetError", "ui.unsupported", "ui.setToolsExpanded", "ui.cancel", "ui.generationBegin",
 ];
@@ -548,8 +555,8 @@ export function validateUiCapabilityArgs(capability: WorkerCapability, raw: unkn
   const keys = (...allowed: string[]): void => exactKeys(args, allowed, `${capability} arguments`);
   switch (capability) {
     case "dock.identity": keys(); return;
-    case "dock.observation.configure": keys("enabled", "operationId"); if (typeof args.enabled !== "boolean") throw new Error("Observation enabled flag is invalid"); boundedString(args.operationId, 128, "Observation operation ID"); return;
-    case "dock.observation": keys("request"); parseObservationRequest(args.request); return;
+    case "dock.tools.configure": keys("enabled", "operationId"); if (typeof args.enabled !== "boolean") throw new Error("Dock tools enabled flag is invalid"); boundedString(args.operationId, 128, "Dock tools operation ID"); return;
+    case "dock.tools": keys("request"); parseDockToolsRequest(args.request); return;
     case "dock.attachments": keys("request"); parseAttachmentAccessRequest(args.request); return;
     case "ui.select": keys("title", "options", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); stringArray(args.options, 256, 16_000, "Dialog options"); validateDialogOptions(args.optionsMeta); return;
     case "ui.confirm": keys("title", "message", "optionsMeta"); boundedString(args.title, 4_096, "Dialog title", true); boundedString(args.message, 16_000, "Dialog message", true); validateDialogOptions(args.optionsMeta); return;
@@ -572,13 +579,13 @@ export function validateUiCapabilityArgs(capability: WorkerCapability, raw: unkn
 export function validateDockCapabilityResult(capability: DockCapability, result: unknown): void {
   if (capability === "dock.identity") return;
   if (capability === "dock.attachments") { parseAttachmentAccessResult(result); return; }
-  if (capability === "dock.observation.configure") {
-    const value = record(result, "Observation configure result");
-    exactKeys(value, ["enabled"], "Observation configure result");
-    if (typeof value.enabled !== "boolean") throw new Error("Observation configure result is invalid");
+  if (capability === "dock.tools.configure") {
+    const value = record(result, "Dock tools configure result");
+    exactKeys(value, ["enabled"], "Dock tools configure result");
+    if (typeof value.enabled !== "boolean") throw new Error("Dock tools configure result is invalid");
     return;
   }
-  parseObservationResult(result);
+  parseDockToolsResult(result);
 }
 
 export function validateUiCapabilityResult(capability: UiCapability, result: unknown): void {
@@ -711,7 +718,7 @@ function isAgentRequest(type: string): type is AgentRequest["type"] {
 function parseCapability(raw: unknown): WorkerCapability {
   return oneOf(raw, [
     "ui.select", "ui.confirm", "ui.input", "ui.editor", "ui.notify", "ui.setTitle", "ui.setEditorText", "ui.setStatus", "ui.setWidget", "ui.widgetError", "ui.unsupported", "ui.setToolsExpanded", "ui.cancel", "ui.viewport", "ui.reset", "ui.generationBegin",
-    "dock.identity", "dock.observation.configure", "dock.observation", "dock.attachments",
+    "dock.identity", "dock.tools.configure", "dock.tools", "dock.attachments",
   ] as const, "Worker capability");
 }
 
@@ -747,6 +754,31 @@ function parseWorkerAttachmentDto(raw: unknown, label: string): ReturnType<typeo
   return parseAttachmentDto(value, label);
 }
 
+function parseDockToolsRequest(raw: unknown): DockToolsRequest {
+  const value = record(raw, "Dock tools request");
+  if (["list", "inspect", "watch", "cancel"].includes(String(value.type))) return parseObservationRequest(value);
+  if (value.type === "create") {
+    exactKeys(value, ["type", "operationId", "cwd", "name"], "Dock create request");
+    const cwd = boundedString(value.cwd, MAX_DOCK_TOOL_CWD_CHARS, "Dock create cwd");
+    if (!cwd.startsWith("/")) throw new Error("Dock create cwd must be absolute");
+    const name = value.name === undefined ? undefined : boundedString(value.name, MAX_DOCK_TOOL_NAME_CHARS, "Dock create name");
+    return {
+      type: "create",
+      operationId: boundedString(value.operationId, 128, "Dock create operation ID"),
+      cwd,
+      ...(name === undefined ? {} : { name }),
+    };
+  }
+  exactKeys(value, ["type", "operationId", "target", "message"], "Dock send request");
+  if (value.type !== "send") throw new Error("Dock tools request type is invalid");
+  return {
+    type: "send",
+    operationId: boundedString(value.operationId, 128, "Dock send operation ID"),
+    target: boundedString(value.target, MAX_DOCK_TOOL_TARGET_CHARS, "Dock send target"),
+    message: boundedString(value.message, MAX_DOCK_TOOL_MESSAGE_CHARS, "Dock send message"),
+  };
+}
+
 function parseObservationRequest(raw: unknown): ObservationRequest {
   const value = record(raw, "Observation request");
   const type = oneOf(value.type, ["list", "inspect", "watch", "cancel"] as const, "Observation request type");
@@ -760,7 +792,7 @@ function parseObservationRequest(raw: unknown): ObservationRequest {
     const watchId = optionalString(value.watchId, 128);
     return { type, ...(watchId === undefined ? {} : { watchId }) };
   }
-  const target = boundedString(value.target, 256, "Observation target");
+  const target = boundedString(value.target, MAX_DOCK_TOOL_TARGET_CHARS, "Observation target");
   if (type === "watch") { exactKeys(value, ["type", "target"], "Observation request"); return { type, target }; }
   exactKeys(value, ["type", "target", "limit", "types", "cursor"], "Observation request");
   let limit: number | undefined;
@@ -776,6 +808,27 @@ function parseObservationRequest(raw: unknown): ObservationRequest {
   }
   const cursor = optionalString(value.cursor, MAX_OBSERVATION_CURSOR_CHARS);
   return { type, target, ...(limit === undefined ? {} : { limit }), ...(types === undefined ? {} : { types }), ...(cursor === undefined ? {} : { cursor }) };
+}
+
+function parseDockToolsResult(raw: unknown): void {
+  const value = record(raw, "Dock tools result");
+  if (["list", "inspect", "watch", "cancel"].includes(String(value.type))) {
+    parseObservationResult(value);
+    return;
+  }
+  if (value.type === "create") {
+    exactKeys(value, ["type", "instance"], "Dock create result");
+    validateObservedStatus(value.instance);
+    return;
+  }
+  exactKeys(value, ["type", "target", "receipt"], "Dock send result");
+  if (value.type !== "send") throw new Error("Dock tools result type is invalid");
+  validateObservedStatus(value.target);
+  const receipt = record(value.receipt, "Dock send receipt");
+  exactKeys(receipt, ["delivery", "queued", "acceptedAt"], "Dock send receipt");
+  oneOf(receipt.delivery, ["prompt", "steer", "followUp"], "Dock send delivery");
+  if (typeof receipt.queued !== "boolean") throw new Error("Dock send queued flag is invalid");
+  timestampString(receipt.acceptedAt, "Dock send acceptance time");
 }
 
 function parseObservationResult(raw: unknown): void {

@@ -21,9 +21,9 @@ import {
 } from "./worker-protocol.js";
 import type { PiWorkerInitOptions } from "./worker-process.js";
 import type { AgentRequest, AgentWorkerState } from "../core/agent-worker.js";
-import type { ObservationResult } from "../core/instance-observation.js";
+import type { DockToolsResult } from "../core/dock-tools.js";
 import type { AttachmentAccessRequest, AttachmentAccessResult } from "../core/instance-attachments.js";
-import { DockObservationBridge } from "./dock-observation-extension.js";
+import { DockToolsBridge } from "./dock-tools-extension.js";
 import type { DockAttachmentCallPort } from "./dock-attachments-extension.js";
 
 interface PendingHostCall {
@@ -54,7 +54,7 @@ async function runWorker(): Promise<void> {
   let runtime: PiAgentAdapter | undefined;
   let shutdownPromise: Promise<void> | undefined;
   let hostCapabilities = new Set<ReverseWorkerCapability>(["dock.identity"]);
-  let observationBridge: DockObservationBridge | undefined;
+  let dockToolsBridge: DockToolsBridge | undefined;
   let attachmentPort: DockAttachmentCallPort | undefined;
 
   const callHost = (capability: UiCapability | DockCapability, args: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> => {
@@ -109,21 +109,21 @@ async function runWorker(): Promise<void> {
       return result as AttachmentAccessResult;
     },
   } : undefined;
-  observationBridge = new DockObservationBridge(hostCapabilities.has("dock.observation"), {
+  dockToolsBridge = new DockToolsBridge(hostCapabilities.has("dock.tools"), {
     configure: async (action) => {
-      if (action === "status") return { enabled: observationBridge!.enabled };
-      const capability: DockCapability = "dock.observation.configure";
+      if (action === "status") return { enabled: dockToolsBridge!.enabled };
+      const capability: DockCapability = "dock.tools.configure";
       const result = await callHost(capability, { enabled: action === "on", operationId: randomUUID() });
       validateDockCapabilityResult(capability, result);
       const enabled = (result as { enabled: boolean }).enabled;
-      if (enabled) hostCapabilities.add("dock.observation"); else hostCapabilities.delete("dock.observation");
+      if (enabled) hostCapabilities.add("dock.tools"); else hostCapabilities.delete("dock.tools");
       return { enabled };
     },
-    observe: async (request) => {
-      const capability: DockCapability = "dock.observation";
+    invoke: async (request) => {
+      const capability: DockCapability = "dock.tools";
       const result = await callHost(capability, { request });
       validateDockCapabilityResult(capability, result);
-      return result as ObservationResult;
+      return result as DockToolsResult;
     },
   });
 
@@ -143,7 +143,7 @@ async function runWorker(): Promise<void> {
     extensionUiContextPortFactory: () => ui.createGenerationPort(),
     setProcessCwd: (cwd) => process.chdir(cwd),
     ...(reopened === undefined ? {} : { sessionManager: reopened.manager }),
-    dockObservationBridge: observationBridge,
+    dockToolsBridge,
     ...(attachmentPort === undefined ? {} : { dockAttachmentPort: attachmentPort }),
   });
   if (init.initialName !== undefined && !reopened) runtime.currentSession().setSessionName(init.initialName);
@@ -202,7 +202,7 @@ async function runWorker(): Promise<void> {
           : await dispatchAgentRequest();
       } else if (envelope.kind === "agent_control") {
         if (envelope.control.type === "observation_delivery") {
-          observationBridge!.deliver(envelope.control.notification);
+          dockToolsBridge!.deliver(envelope.control.notification);
           result = null;
         } else result = await runtime!.control(envelope.control);
       } else {

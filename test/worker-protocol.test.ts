@@ -182,17 +182,24 @@ test("private Worker attachment calls are closed and keep paths on resolve only"
   })), /does not match/i);
 });
 
-test("private Worker observation calls are closed, source-bound, and validate bounded results", () => {
-  validateUiCapabilityArgs("dock.observation.configure", { enabled: true, operationId: "grant-one" });
-  assert.throws(() => validateUiCapabilityArgs("dock.observation.configure", {
+test("private Worker Dock tools calls are closed, source-bound, and validate bounded results", () => {
+  validateUiCapabilityArgs("dock.tools.configure", { enabled: true, operationId: "grant-one" });
+  assert.throws(() => validateUiCapabilityArgs("dock.tools.configure", {
     enabled: true, operationId: "grant-one", sourceInstanceId: "forged",
   }), /unknown field/i);
-  validateUiCapabilityArgs("dock.observation", { request: { type: "inspect", target: "sol", limit: 3, types: ["user", "assistant"], cursor: "cursor-one" } });
-  assert.throws(() => validateUiCapabilityArgs("dock.observation", {
+  validateUiCapabilityArgs("dock.tools", { request: { type: "list" } });
+  validateUiCapabilityArgs("dock.tools", { request: { type: "list", includeHistory: true } });
+  validateUiCapabilityArgs("dock.tools", { request: { type: "inspect", target: "sol", limit: 3, types: ["user", "assistant"], cursor: "cursor-one" } });
+  assert.throws(() => validateUiCapabilityArgs("dock.tools", { request: { type: "inspect", limit: 3 } }), /target/i);
+  assert.throws(() => validateUiCapabilityArgs("dock.tools", {
     request: { type: "watch", target: "sol", injected: true },
   }), /unknown field/i);
+  validateUiCapabilityArgs("dock.tools", { request: { type: "create", operationId: "create-one", cwd: "/work/new", name: "Fresh Work" } });
+  assert.throws(() => validateUiCapabilityArgs("dock.tools", { request: { type: "create", operationId: "create-one", cwd: "relative" } }), /absolute/i);
+  validateUiCapabilityArgs("dock.tools", { request: { type: "send", operationId: "send-one", target: "sol", message: "Please report." } });
+  assert.throws(() => validateUiCapabilityArgs("dock.tools", { request: { type: "send", operationId: "send-one", target: "sol", message: "" } }), /bounded string/i);
 
-  validateDockCapabilityResult("dock.observation", {
+  validateDockCapabilityResult("dock.tools", {
     type: "list",
     result: {
       trust: "untrusted_cross_instance",
@@ -203,7 +210,7 @@ test("private Worker observation calls are closed, source-bound, and validate bo
       includesHistory: false,
     },
   });
-  assert.throws(() => validateDockCapabilityResult("dock.observation", {
+  assert.throws(() => validateDockCapabilityResult("dock.tools", {
     type: "list",
     result: {
       trust: "untrusted_cross_instance",
@@ -225,7 +232,19 @@ test("private Worker observation calls are closed, source-bound, and validate bo
     executionChangedAt: "2026-07-28T20:00:00.000Z",
     runtimeGeneration: 1,
   };
-  validateDockCapabilityResult("dock.observation", {
+  validateDockCapabilityResult("dock.tools", { type: "create", instance: target });
+  validateDockCapabilityResult("dock.tools", {
+    type: "send",
+    target,
+    receipt: { delivery: "prompt", queued: false, acceptedAt: "2026-07-28T20:00:00.000Z" },
+  });
+  assert.throws(() => validateDockCapabilityResult("dock.tools", {
+    type: "send",
+    target,
+    receipt: { delivery: "auto", queued: false, acceptedAt: "2026-07-28T20:00:00.000Z" },
+  }), /delivery/i);
+
+  validateDockCapabilityResult("dock.tools", {
     type: "inspect",
     result: {
       trust: "untrusted_cross_instance",
@@ -239,7 +258,7 @@ test("private Worker observation calls are closed, source-bound, and validate bo
       },
     },
   });
-  assert.throws(() => validateDockCapabilityResult("dock.observation", {
+  assert.throws(() => validateDockCapabilityResult("dock.tools", {
     type: "inspect",
     result: {
       trust: "untrusted_cross_instance",

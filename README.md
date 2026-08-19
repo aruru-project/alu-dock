@@ -65,19 +65,23 @@ aludock service logs --lines 200
 
 本机运行 `aludock` 后：
 
-1. 在 **Settings** 选择网络端口并启用 Remote Access；
-2. 在 **Pairing** 显式打开五分钟配对窗口；
-3. 从远程客户端发起配对；
-4. 在 Pairing 中选择设备，输入客户端屏幕显示的四位 PIN；
-5. 配对成功后，客户端使用双方长期证书连接同一套 Protocol V2。
+1. 进入 **Devices**，选择端口并打开 Remote Access；
+2. 选择 **Connect a New Device**，在本机确认五分钟连接窗口；
+3. 从远程客户端发起配对；Devices 会自动显示请求；
+4. 选择设备并输入客户端屏幕显示的四位 PIN，Enter 即提交；
+5. 成功后客户端使用双方长期证书连接同一套 Protocol V2，设备留在 Devices 中供查看或移除。
 
-私有 Unix socket 不使用 TLS 或配对，并继续按原方式工作。网络地址和端口不是设备身份；同一客户端和 Host 保留原证书时，切换局域网地址、域名或 NAT 映射不要求重新配对。Pairing、Settings 和吊销只能在 Host 本机 Hub 操作，远程 Protocol V2 客户端不能调用。
+私有 Unix socket 不使用 TLS 或配对，并继续按原方式工作。网络地址和端口不是设备身份；同一客户端和 Host 保留原证书时，切换局域网地址、域名或 NAT 映射不要求重新配对。Devices 中的远程开关、连接窗口和设备移除只能在 Host 本机 Hub 操作，远程 Protocol V2 客户端不能调用。
 
 ## 文件附件
 
 Hub **Settings → Attachment directory** 配置 Host 上的永久 storage root；默认是 `${XDG_DATA_HOME:-~/.local/share}/alu-dock/attachments`。本机和已配对客户端都通过 `attachments.v1` 分块上传，最大 512 MiB，声明 size/SHA-256 后由 Host 独立验证并按内容复用。客户端只收到 opaque `fileId`、名称、大小、可选 media type、digest 和存储时间，永远不收到 Host path。
 
 `command.submit` 用 structured file IDs 关联附件；Queue、live conversation 和 history 显示同一 metadata。Pi 通过内建 `dock_attachment_list` / `dock_attachment_resolve` 工具按需访问，并在修改或解压前先复制永久原件。详细 wire contract 见[客户端接入文档](docs/client-integration.md#附件)。
+
+## Agent-facing Dock tools
+
+每个 Pi instance 可用 `/dock-tools on|off|status` 单独控制跨实例工具，默认关闭且新实例不继承。开启后提供 `dock_list`、`dock_inspect`、`dock_watch`、`dock_cancel_watch`、`dock_create`、`dock_send` 和对应 bundled Skill。`dock_list` 只列短状态；conversation 由 target 必填的 inspect 按需读取。`dock_send` 走普通 Queue/`command.submit`，目标会看到明确的来源 instance 包装，不会把消息伪装成主人输入。
 
 ## 从源码运行
 

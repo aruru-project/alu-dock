@@ -360,7 +360,7 @@ export class InstanceObservationService {
     return [...cancelled];
   }
 
-  private resolveTarget(sourceInstanceId: string, selector: string): InstanceSnapshot {
+  resolveTarget(sourceInstanceId: string, selector: string): InstanceSnapshot {
     const candidates = this.port.listSnapshots();
     const exactId = candidates.find((item) => item.id === selector);
     if (exactId) return this.assertNotSelf(sourceInstanceId, exactId);
@@ -413,7 +413,7 @@ export class InstanceObservationService {
   }
 }
 
-function observationStatus(snapshot: InstanceSnapshot): ObservedInstanceStatus {
+export function observationStatus(snapshot: InstanceSnapshot): ObservedInstanceStatus {
   return {
     id: snapshot.id,
     ...(snapshot.key === undefined ? {} : { key: snapshot.key }),

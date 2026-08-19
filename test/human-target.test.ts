@@ -48,7 +48,7 @@ test("Hub root exposes fixed actions with separate current and history counts", 
     cwd: "/project", lifecycle: "stopped", execution: "unavailable", ownerHostEpoch: undefined,
   });
   const entries = buildDockHubEntries([activeOther, stopped, recoverable], [], "/project", undefined, 0, false, false);
-  assert.deepEqual(entries.map((entry) => entry.label), ["New", "Continue · 2", "History · 1", "Pi Sessions", "Settings", "Pairing", "Leave Hub"]);
+  assert.deepEqual(entries.map((entry) => entry.label), ["New", "Continue · 2", "History · 1", "Pi Sessions", "Settings", "Devices", "Leave Hub"]);
 });
 
 function resolvedId(result: ReturnType<typeof resolveHumanTarget>): string {

@@ -139,7 +139,7 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
   const value = object(input, field);
   exact(value, [
     "id", "creationOperationId", "key", "name", "cwd", "lifecycle", "execution", "lastRun",
-    "observationGrant", "executionChangedAt", "runStartedAt", "runtimeGeneration", "ownerHostEpoch", "piSessionId", "sessionFile", "model",
+    "observationGrant", "dockToolsEnabled", "executionChangedAt", "runStartedAt", "runtimeGeneration", "ownerHostEpoch", "piSessionId", "sessionFile", "model",
     "thinkingLevel", "activeCommandId", "admissionPending", "admissionOperationId",
     "pendingCount", "replacement", "recoverySessionFile", "lastKnown", "interruption",
     "stopRequestedAt", "shutdownRequestedAt", "ownerReleaseUnconfirmed", "lastError", "createdAt", "updatedAt",
@@ -162,7 +162,8 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
     lifecycle: enumeration(value.lifecycle, `${field}.lifecycle`, ["active", "stopping", "stopped", "host_lost", "runtime_error"]),
     execution: enumeration(value.execution, `${field}.execution`, ["idle", "running", "failed", "unavailable"]),
     lastRun: enumeration(value.lastRun, `${field}.lastRun`, ["never", "succeeded", "failed", "aborted", "interrupted"]),
-    observationGrant: value.observationGrant === undefined ? false : boolean(value.observationGrant, `${field}.observationGrant`),
+    // The old read-only observation grant intentionally resets off when the broader Dock tools switch first appears.
+    dockToolsEnabled: value.dockToolsEnabled === undefined ? false : boolean(value.dockToolsEnabled, `${field}.dockToolsEnabled`),
     executionChangedAt: value.executionChangedAt === undefined
       ? timestamp(value.createdAt, `${field}.createdAt`)
       : timestamp(value.executionChangedAt, `${field}.executionChangedAt`),

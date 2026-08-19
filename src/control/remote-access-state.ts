@@ -66,6 +66,11 @@ export interface TrustedClient {
   pairedAt: string;
 }
 
+export type PairingProgress =
+  | { schemaVersion: 1; status: "checking"; deviceName: string; updatedAt: string }
+  | { schemaVersion: 1; status: "connected"; deviceName: string; updatedAt: string }
+  | { schemaVersion: 1; status: "failed"; deviceName: string; message: string; updatedAt: string };
+
 export function remoteAccessStateRoot(catalogPath: string): string {
   return join(dirname(resolve(catalogPath)), "remote-access");
 }
@@ -98,6 +103,7 @@ export class RemoteAccessState {
       clearRegularFiles(this.pendingDirectory),
       clearRegularFiles(this.approvalDirectory),
       unlink(join(this.root, "pairing-window.json")).catch(ignoreMissing),
+      unlink(join(this.root, "pairing-progress.json")).catch(ignoreMissing),
       clearClosingPairingWindows(this.root),
     ]);
   }
@@ -113,6 +119,7 @@ export class RemoteAccessState {
       expiresAt: expiresAt.toISOString(),
     });
     await writePrivateJson(join(this.root, "pairing-window.json"), window);
+    await this.clearPairingProgress();
     await removePairingRecords(
       this.pendingDirectory,
       this.approvalDirectory,
@@ -125,6 +132,22 @@ export class RemoteAccessState {
     await this.initialize();
     const value = await readPrivateJsonIfPresent(join(this.root, "pairing-window.json"));
     return value === undefined ? undefined : parsePairingWindow(value);
+  }
+
+  async readPairingProgress(): Promise<PairingProgress | undefined> {
+    await this.initialize();
+    const value = await readPrivateJsonIfPresent(join(this.root, "pairing-progress.json"));
+    return value === undefined ? undefined : parsePairingProgress(value);
+  }
+
+  async writePairingProgress(progress: PairingProgress): Promise<void> {
+    await this.initialize();
+    await writePrivateJson(join(this.root, "pairing-progress.json"), parsePairingProgress(progress));
+  }
+
+  async clearPairingProgress(): Promise<void> {
+    await this.initialize();
+    await unlink(join(this.root, "pairing-progress.json")).catch(ignoreMissing);
   }
 
   async closePairingWindow(expectedId?: string): Promise<boolean> {
@@ -356,6 +379,21 @@ function parsePairingWindow(input: unknown): PairingWindow {
   const expiresAt = Date.parse(value.expiresAt);
   if (!Number.isFinite(openedAt) || !Number.isFinite(expiresAt) || expiresAt <= openedAt || expiresAt - openedAt > PAIRING_WINDOW_MS) throw new Error("Pairing window time is invalid");
   return value as unknown as PairingWindow;
+}
+
+function parsePairingProgress(input: unknown): PairingProgress {
+  const value = object(input, "pairing progress");
+  exact(value, ["schemaVersion", "status", "deviceName", "message", "updatedAt"], "pairing progress");
+  if (value.schemaVersion !== 1 || !["checking", "connected", "failed"].includes(String(value.status))) throw new Error("Pairing progress is invalid");
+  if (typeof value.deviceName !== "string") throw new Error("Pairing progress device name is invalid");
+  assertDeviceName(value.deviceName);
+  if (typeof value.updatedAt !== "string" || !Number.isFinite(Date.parse(value.updatedAt))) throw new Error("Pairing progress time is invalid");
+  if (value.status === "failed") {
+    if (typeof value.message !== "string" || value.message.length < 1 || value.message.length > 2_048) throw new Error("Pairing progress message is invalid");
+    return { schemaVersion: 1, status: "failed", deviceName: value.deviceName, message: value.message, updatedAt: value.updatedAt };
+  }
+  if (value.message !== undefined) throw new Error("Pairing progress message is only valid after failure");
+  return { schemaVersion: 1, status: value.status, deviceName: value.deviceName, updatedAt: value.updatedAt } as PairingProgress;
 }
 
 function parsePending(input: unknown): PendingPairing {

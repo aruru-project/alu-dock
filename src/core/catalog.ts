@@ -40,8 +40,8 @@ export interface CatalogInstanceRecord {
   lifecycle: InstanceLifecycle;
   execution: InstanceExecution;
   lastRun: LastRunResult;
-  /** Durable, source-instance-scoped grant. Missing legacy records normalize to false. */
-  observationGrant?: boolean;
+  /** Durable switch that advertises Agent-facing Dock tools to this instance. */
+  dockToolsEnabled?: boolean;
   executionChangedAt?: string;
   runStartedAt?: string;
   runtimeGeneration: number;
@@ -169,7 +169,7 @@ export function validateCatalogRecord(record: CatalogInstanceRecord): void {
   if (record.admissionOperationId !== undefined) requiredBoundedText(record.admissionOperationId, 128, "Catalog admission operation ID");
   if (!["never", "succeeded", "failed", "aborted", "interrupted"].includes(record.lastRun)) throw new Error("Catalog last-run result is invalid");
   if (!Number.isSafeInteger(record.runtimeGeneration) || record.runtimeGeneration < 1) throw new Error("Catalog runtime generation must be positive");
-  if (record.observationGrant !== undefined && typeof record.observationGrant !== "boolean") throw new Error("Catalog observation grant must be boolean");
+  if (record.dockToolsEnabled !== undefined && typeof record.dockToolsEnabled !== "boolean") throw new Error("Catalog Dock tools switch must be boolean");
   timestamp(record.createdAt, "Catalog createdAt");
   timestamp(record.updatedAt, "Catalog updatedAt");
   if (record.executionChangedAt !== undefined) timestamp(record.executionChangedAt, "Catalog executionChangedAt");

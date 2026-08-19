@@ -94,10 +94,3 @@ export type ObservationResult =
   | { type: "cancel"; cancelledWatchIds: string[] };
 
 export type ObservationDeliverySink = (notification: ObservationNotification) => Promise<void>;
-
-export interface InstanceObservationHostPort {
-  observationGrant(sourceInstanceId: string): boolean;
-  configureObservation(sourceInstanceId: string, enabled: boolean, operationId: string): Promise<{ enabled: boolean }>;
-  observe(sourceInstanceId: string, request: ObservationRequest): Promise<ObservationResult>;
-  attachObservationSink(sourceInstanceId: string, sink: ObservationDeliverySink): () => void;
-}

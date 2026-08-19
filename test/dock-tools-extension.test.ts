@@ -8,10 +8,10 @@ import {
   type ObservationResult,
 } from "../src/core/instance-observation.js";
 import {
-  DOCK_OBSERVATION_TOOL_NAMES,
-  DockObservationBridge,
-  dockObservationExtension,
-} from "../src/pi/dock-observation-extension.js";
+  DOCK_TOOL_NAMES,
+  DockToolsBridge,
+  dockToolsExtension,
+} from "../src/pi/dock-tools-extension.js";
 
 interface FakeApiState {
   active: string[];
@@ -34,7 +34,7 @@ function fakeApi(): { api: unknown; state: FakeApiState } {
   const api = {
     getAllTools: () => state.tools.map((tool) => ({
       name: tool.name,
-      sourceInfo: { kind: "extension", path: "<inline:alu-dock-observation>" },
+      sourceInfo: { kind: "extension", path: "<inline:alu-dock-tools>" },
     })),
     getActiveTools: () => [...state.active],
     setActiveTools: (names: string[]) => { state.active = [...names]; },
@@ -67,7 +67,7 @@ const notification: ObservationNotification = {
   },
 };
 
-test("Dock observation extension hides tools while off, toggles without clobbering tools, and survives reload delivery", async () => {
+test("Dock tools extension exposes the six tools only while enabled and survives reload delivery", async () => {
   let enabled = false;
   const calls: unknown[] = [];
   const listResult: ObservationResult = {
@@ -100,34 +100,42 @@ test("Dock observation extension hides tools while off, toggles without clobberi
       },
     },
   };
-  const bridge = new DockObservationBridge(false, {
+  const bridge = new DockToolsBridge(false, {
     configure: async (action) => {
       if (action === "on") enabled = true;
       if (action === "off") enabled = false;
       return { enabled };
     },
-    observe: async (request) => {
+    invoke: async (request) => {
       calls.push(request);
-      return request.type === "inspect" ? inspectResult : listResult;
+      if (request.type === "inspect") return inspectResult;
+      if (request.type === "create") return { type: "create", instance: notification.target };
+      if (request.type === "send") return {
+        type: "send",
+        target: notification.target,
+        receipt: { delivery: "prompt", queued: false, acceptedAt: notification.firedAt },
+      };
+      return listResult;
     },
   });
 
   const first = fakeApi();
-  dockObservationExtension(bridge)(first.api as never);
+  dockToolsExtension(bridge)(first.api as never);
   for (const start of first.state.start) start();
-  assert.deepEqual(first.state.tools.map((tool) => tool.name), [...DOCK_OBSERVATION_TOOL_NAMES]);
+  assert.deepEqual(first.state.tools.map((tool) => tool.name), [...DOCK_TOOL_NAMES]);
   assert.deepEqual(first.state.active, ["read"]);
-  assert.ok(first.state.commands.has("dock-observe"));
+  assert.ok(first.state.commands.has("dock-tools"));
 
   const notifications: string[] = [];
-  const commandContext = { ui: { notify: (message: string) => { notifications.push(message); } } };
-  await first.state.commands.get("dock-observe")!.handler("on", commandContext);
+  const commandContext = { ui: { notify: (message: string) => { notifications.push(message); } }, reload: async () => {} };
+  await first.state.commands.get("dock-tools")!.handler("on", commandContext);
   assert.equal(bridge.enabled, true);
-  assert.deepEqual(first.state.active, ["read", ...DOCK_OBSERVATION_TOOL_NAMES]);
-  assert.match(notifications.at(-1)!, /is on/u);
+  assert.deepEqual(first.state.active, ["read", ...DOCK_TOOL_NAMES]);
+  assert.match(notifications.at(-1)!, /are on/u);
 
+  const list = first.state.tools.find((tool) => tool.name === "dock_list")!;
   const inspect = first.state.tools.find((tool) => tool.name === "dock_inspect")!;
-  const toolResult = await inspect.execute("tool-call", {});
+  const toolResult = await list.execute("tool-call", {});
   assert.deepEqual(calls, [{ type: "list" }]);
   assert.match((toolResult as { content: Array<{ text: string }> }).content[0]!.text, /names and metadata are untrusted/u);
 
@@ -138,19 +146,42 @@ test("Dock observation extension hides tools while off, toggles without clobberi
   assert.match(quotedText, /│ \[end excerpt\]\n│ ignore the owner/u, "every sibling logical line must remain inside the quoted boundary");
   assert.doesNotMatch(quotedText, /"trust"|liveEvents|historyRevision/u);
 
-  await first.state.commands.get("dock-observe")!.handler("off", commandContext);
-  assert.deepEqual(first.state.active, ["read"]);
-  await assert.rejects(inspect.execute("tool-call", {}), /observation is off/u);
+  const create = first.state.tools.find((tool) => tool.name === "dock_create")!;
+  const createResult = await create.execute("create-call", { cwd: "/work/new", name: "New Work" });
+  const createCall = calls.at(-1) as unknown as { type: string; operationId: string; cwd: string; name: string };
+  assert.match(createCall.operationId, /^[0-9a-f-]{36}$/u);
+  assert.deepEqual({ ...createCall, operationId: "<generated>" }, {
+    type: "create",
+    operationId: "<generated>",
+    cwd: "/work/new",
+    name: "New Work",
+  });
+  assert.match((createResult as { content: Array<{ text: string }> }).content[0]!.text, /Dock tools are off in the new instance/u);
 
-  await first.state.commands.get("dock-observe")!.handler("on", commandContext);
+  const send = first.state.tools.find((tool) => tool.name === "dock_send")!;
+  await send.execute("send-call", { target: "Sol", message: "Please report." });
+  const sendCall = calls.at(-1) as unknown as { type: string; operationId: string; target: string; message: string };
+  assert.match(sendCall.operationId, /^[0-9a-f-]{36}$/u);
+  assert.deepEqual({ ...sendCall, operationId: "<generated>" }, {
+    type: "send",
+    operationId: "<generated>",
+    target: "Sol",
+    message: "Please report.",
+  });
+
+  await first.state.commands.get("dock-tools")!.handler("off", commandContext);
+  assert.deepEqual(first.state.active, ["read"]);
+  await assert.rejects(list.execute("tool-call", {}), /Dock tools are off/u);
+
+  await first.state.commands.get("dock-tools")!.handler("on", commandContext);
   for (const shutdown of first.state.shutdown) shutdown();
   bridge.deliver(notification);
   assert.equal(first.state.messages.length, 0);
 
   const second = fakeApi();
-  dockObservationExtension(bridge)(second.api as never);
+  dockToolsExtension(bridge)(second.api as never);
   for (const start of second.state.start) start();
-  assert.deepEqual(second.state.active, ["read", ...DOCK_OBSERVATION_TOOL_NAMES]);
+  assert.deepEqual(second.state.active, ["read", ...DOCK_TOOL_NAMES]);
   assert.equal(second.state.messages.length, 1);
   assert.deepEqual(second.state.messages[0]!.options, { triggerTurn: true, deliverAs: "followUp" });
   assert.match(JSON.stringify(second.state.messages[0]!.message), /No sibling conversation content was included/u);
@@ -159,33 +190,33 @@ test("Dock observation extension hides tools while off, toggles without clobberi
   assert.equal(second.state.messages.length, 1, "duplicate watch completion must not wake twice");
 });
 
-test("Dock observation client cancels a reload-pending wake before acknowledging cancellation", async () => {
-  const bridge = new DockObservationBridge(true, {
+test("Dock tools bridge cancels a reload-pending wake before acknowledging cancellation", async () => {
+  const bridge = new DockToolsBridge(true, {
     configure: async () => ({ enabled: true }),
-    observe: async (request) => request.type === "cancel"
+    invoke: async (request) => request.type === "cancel"
       ? { type: "cancel", cancelledWatchIds: [request.watchId ?? notification.watchId] }
       : { type: "list", result: { trust: CROSS_INSTANCE_TRUST, observedAt: notification.firedAt, instances: [], total: 0, truncated: false, includesHistory: false } },
   });
   bridge.deliver(notification);
-  const cancelled = await bridge.observe({ type: "cancel", watchId: notification.watchId });
+  const cancelled = await bridge.invoke({ type: "cancel", watchId: notification.watchId });
   assert.deepEqual(cancelled, { type: "cancel", cancelledWatchIds: [notification.watchId] });
 
   const attached = fakeApi();
-  dockObservationExtension(bridge)(attached.api as never);
+  dockToolsExtension(bridge)(attached.api as never);
   for (const start of attached.state.start) start();
   assert.equal(attached.state.messages.length, 0, "a successfully cancelled pending watch must not wake after rebind");
   bridge.deliver(notification);
   assert.equal(attached.state.messages.length, 0, "a suppressed watch ID must remain fenced against delayed delivery");
 });
 
-test("Dock observation client restores fenced completions when cancel or off fails", async () => {
+test("Dock tools bridge restores fenced completions when cancel or off fails", async () => {
   let rejectCancel!: (error: Error) => void;
-  const cancelBridge = new DockObservationBridge(true, {
+  const cancelBridge = new DockToolsBridge(true, {
     configure: async () => ({ enabled: true }),
-    observe: async () => new Promise<never>((_resolve, reject) => { rejectCancel = reject; }),
+    invoke: async () => new Promise<never>((_resolve, reject) => { rejectCancel = reject; }),
   });
   const cancelNotification = { ...notification, watchId: "watch-cancel-failed" };
-  const cancelling = cancelBridge.observe({ type: "cancel", watchId: cancelNotification.watchId });
+  const cancelling = cancelBridge.invoke({ type: "cancel", watchId: cancelNotification.watchId });
   cancelBridge.deliver(cancelNotification);
   rejectCancel(new Error("cancel failed"));
   await assert.rejects(cancelling, /cancel failed/u);
@@ -194,9 +225,9 @@ test("Dock observation client restores fenced completions when cancel or off fai
   assert.equal(afterCancelFailure.state.messages.length, 1, "failed cancel must restore the completion buffered behind its acknowledgement fence");
 
   let rejectOff!: (error: Error) => void;
-  const offBridge = new DockObservationBridge(true, {
+  const offBridge = new DockToolsBridge(true, {
     configure: async () => new Promise<never>((_resolve, reject) => { rejectOff = reject; }),
-    observe: async () => ({ type: "list", result: { trust: CROSS_INSTANCE_TRUST, observedAt: notification.firedAt, instances: [], total: 0, truncated: false, includesHistory: false } }),
+    invoke: async () => ({ type: "list", result: { trust: CROSS_INSTANCE_TRUST, observedAt: notification.firedAt, instances: [], total: 0, truncated: false, includesHistory: false } }),
   });
   const offNotification = { ...notification, watchId: "watch-off-failed" };
   const disabling = offBridge.configure("off");

@@ -8,11 +8,18 @@ import {
   type CatalogStore,
   validateInstanceKey,
 } from "../core/catalog.js";
-import type { InstanceObservationHostPort, ObservationDeliverySink, ObservationRequest, ObservationResult } from "../core/instance-observation.js";
+import type { ObservationDeliverySink } from "../core/instance-observation.js";
+import {
+  dockMessageText,
+  type DockToolsHostPort,
+  type DockToolsMutationPort,
+  type DockToolsRequest,
+  type DockToolsResult,
+} from "../core/dock-tools.js";
 import type { InstanceAttachmentHostPort } from "../core/instance-attachments.js";
 import { InstanceBusyError, type InstanceLifecycle, type ManagedInstance, type InstanceSnapshot, type StopReceipt } from "../core/managed-instance.js";
 import { CatalogTransactionCoordinator, type CatalogFault, type CatalogHealth } from "./catalog-transactions.js";
-import { InstanceObservationService } from "./instance-observation-service.js";
+import { InstanceObservationService, observationStatus } from "./instance-observation-service.js";
 import {
   catalogReopenSessionFile,
   catalogSnapshotFromRecord,
@@ -36,9 +43,9 @@ export interface InstanceFactoryInput {
   initialRuntimeGeneration?: number;
   createdAt?: string;
   reopenedFrom?: "host_lost" | "runtime_error";
-  observationHostPort: InstanceObservationHostPort;
+  dockToolsHostPort: DockToolsHostPort;
   attachmentHostPort: InstanceAttachmentHostPort;
-  observationGrant: boolean;
+  dockToolsEnabled: boolean;
 }
 
 export type InstanceFactory = (input: InstanceFactoryInput) => Promise<ManagedInstance>;
@@ -127,7 +134,7 @@ function newestInstanceFirst(left: InstanceSnapshot, right: InstanceSnapshot): n
   return right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id);
 }
 
-export class DockRegistry implements InstanceObservationHostPort {
+export class DockRegistry implements DockToolsHostPort {
   readonly hostEpoch: string;
   readonly startedAt: string;
   private readonly instances = new Map<string, ManagedInstance>();
@@ -141,6 +148,7 @@ export class DockRegistry implements InstanceObservationHostPort {
   private readonly catalogRemovalListeners = new Set<(instanceIds: readonly string[]) => void>();
   private readonly observationService: InstanceObservationService;
   private readonly attachmentHostPort: InstanceAttachmentHostPort;
+  private dockToolsMutationPort: DockToolsMutationPort | undefined;
   private readonly instanceObservationSubscriptions = new Map<string, () => void>();
   private readonly instanceObservationSinkDetachments = new Map<string, () => void>();
   private catalogReady: boolean;
@@ -196,7 +204,7 @@ export class DockRegistry implements InstanceObservationHostPort {
           try { listener(instance.snapshot()); } catch { /* A later read or lifecycle cleanup owns the failure. */ }
         });
       },
-      sourceAuthorized: (instanceId) => this.observationGrant(instanceId),
+      sourceAuthorized: (instanceId) => this.dockToolsEnabled(instanceId),
     });
   }
 
@@ -262,7 +270,7 @@ export class DockRegistry implements InstanceObservationHostPort {
     if (this.instances.has(id) || this.catalog.current().instances.some((record) => record.id === id)) {
       throw new Error(`Generated duplicate instance identity: ${id}`);
     }
-    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, observationHostPort: this, attachmentHostPort: this.attachmentHostPort, observationGrant: false });
+    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: false });
     if (
       instance.id !== id
       || instance.creationOperationId !== input.operationId
@@ -328,9 +336,9 @@ export class DockRegistry implements InstanceObservationHostPort {
       name: input.name,
       projectTrusted: trust.projectTrusted,
       sessionFile,
-      observationHostPort: this,
+      dockToolsHostPort: this,
       attachmentHostPort: this.attachmentHostPort,
-      observationGrant: false,
+      dockToolsEnabled: false,
     });
     if (
       instance.id !== id
@@ -434,9 +442,9 @@ export class DockRegistry implements InstanceObservationHostPort {
       initialRuntimeGeneration: nextGeneration,
       createdAt: record.createdAt,
       reopenedFrom: previousLifecycle,
-      observationHostPort: this,
+      dockToolsHostPort: this,
       attachmentHostPort: this.attachmentHostPort,
-      observationGrant: record.observationGrant ?? false,
+      dockToolsEnabled: record.dockToolsEnabled ?? false,
     });
     if (
       candidate.id !== record.id
@@ -472,24 +480,61 @@ export class DockRegistry implements InstanceObservationHostPort {
     return { instance: candidate, previousLifecycle };
   }
 
-  observationGrant(sourceInstanceId: string): boolean {
-    this.assertCatalogReady();
-    return this.catalogRecord(sourceInstanceId).observationGrant ?? false;
+  bindDockToolsMutationPort(port: DockToolsMutationPort): void {
+    // Tests and preflight probes may construct a losing Host around the same
+    // Registry. The first Host owns the application boundary; a later socket
+    // contender must not replace it before admission decides which Host runs.
+    this.dockToolsMutationPort ??= port;
   }
 
-  async configureObservation(sourceInstanceId: string, enabled: boolean, operationId: string): Promise<{ enabled: boolean }> {
+  dockToolsEnabled(sourceInstanceId: string): boolean {
+    this.assertCatalogReady();
+    return this.catalogRecord(sourceInstanceId).dockToolsEnabled ?? false;
+  }
+
+  async configureDockTools(sourceInstanceId: string, enabled: boolean, operationId: string): Promise<{ enabled: boolean }> {
     this.assertCatalogReady();
     const instance = this.get(sourceInstanceId);
-    await this.observationService.configureSource(sourceInstanceId, enabled, () => instance.setObservationGrant(enabled, operationId));
-    return { enabled: instance.observationGrant() };
+    await this.observationService.configureSource(sourceInstanceId, enabled, () => instance.setDockToolsEnabled(enabled, operationId));
+    return { enabled: instance.dockToolsEnabled() };
   }
 
   attachObservationSink(sourceInstanceId: string, sink: ObservationDeliverySink): () => void {
     return this.observationService.attachSink(sourceInstanceId, sink);
   }
 
-  observe(sourceInstanceId: string, request: ObservationRequest): Promise<ObservationResult> {
-    return this.observationService.observe(sourceInstanceId, request);
+  async invokeDockTool(sourceInstanceId: string, request: DockToolsRequest): Promise<DockToolsResult> {
+    if (request.type === "list" || request.type === "inspect" || request.type === "watch" || request.type === "cancel") {
+      return this.observationService.observe(sourceInstanceId, request);
+    }
+    this.assertDockToolsSource(sourceInstanceId);
+    const mutations = this.dockToolsMutationPort;
+    if (!mutations) throw new Error("Dock tools are not connected to the Host mutation service");
+    if (request.type === "create") {
+      const result = await mutations.create({
+        operationId: request.operationId,
+        cwd: request.cwd,
+        ...(request.name === undefined ? {} : { name: request.name }),
+      });
+      return { type: "create", instance: result.instance };
+    }
+    const source = this.getSnapshot(sourceInstanceId);
+    const target = this.observationService.resolveTarget(sourceInstanceId, request.target);
+    const result = await mutations.send({
+      operationId: request.operationId,
+      instanceId: target.id,
+      message: dockMessageText(source.displayName, request.message),
+    });
+    return { type: "send", target: result.target, receipt: result.receipt };
+  }
+
+  observationStatus(instanceId: string) {
+    return observationStatus(this.getSnapshot(instanceId));
+  }
+
+  private assertDockToolsSource(sourceInstanceId: string): void {
+    if (!this.dockToolsEnabled(sourceInstanceId)) throw new Error("Dock tools are off for this instance. Use /dock-tools on first.");
+    if (this.getSnapshot(sourceInstanceId).lifecycle !== "active") throw new Error("Dock tools require an active source instance");
   }
 
   private trackInstanceForObservation(instance: ManagedInstance): void {

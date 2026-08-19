@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { ExtensionUiBroker } from "../core/extension-ui-broker.js";
-import type { InstanceObservationHostPort, ObservationRequest } from "../core/instance-observation.js";
+import type { DockToolsHostPort, DockToolsRequest } from "../core/dock-tools.js";
 import type { AttachmentAccessRequest, InstanceAttachmentHostPort } from "../core/instance-attachments.js";
 import type { AgentCommandPreflightResult, AgentEvent, AgentInvokeOptions, AgentRequest, AgentWorkerConnection as AgentWorkerConnectionPort, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
 import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
@@ -31,9 +31,9 @@ export interface CreateAgentWorkerConnectionOptions {
   /** Test-only deterministic environment seam; production captures the workspace login shell. */
   workerEnvironment?: NodeJS.ProcessEnv;
   onWorkerSpawn?: (pid: number) => void;
-  observationHostPort: InstanceObservationHostPort;
+  dockToolsHostPort: DockToolsHostPort;
   attachmentHostPort: InstanceAttachmentHostPort;
-  initialObservationGrant: boolean;
+  initialDockToolsEnabled: boolean;
 }
 
 export class AgentWorkerUnavailableError extends AgentUnavailableBeforeEffectError {
@@ -67,7 +67,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
   ) {
     this.identity = identity;
     this.expectedGeneration = identity.runtimeGeneration;
-    if (!options.initialObservationGrant) this.reverseCapabilities.delete("dock.observation");
+    if (!options.initialDockToolsEnabled) this.reverseCapabilities.delete("dock.tools");
     this.process = new PiWorkerProcess({
       identity,
       init: options.init,
@@ -234,12 +234,12 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
           identity: { ...this.identity, runtimeGeneration: this.expectedGeneration },
           capabilities: [...this.reverseCapabilities],
         };
-      } else if (capability === "dock.observation.configure") {
-        result = await this.options.observationHostPort.configureObservation(this.identity.instanceId, args.enabled as boolean, args.operationId as string);
-        if ((result as { enabled: boolean }).enabled) this.reverseCapabilities.add("dock.observation");
-        else this.reverseCapabilities.delete("dock.observation");
-      } else if (capability === "dock.observation") {
-        result = await this.options.observationHostPort.observe(this.identity.instanceId, args.request as ObservationRequest);
+      } else if (capability === "dock.tools.configure") {
+        result = await this.options.dockToolsHostPort.configureDockTools(this.identity.instanceId, args.enabled as boolean, args.operationId as string);
+        if ((result as { enabled: boolean }).enabled) this.reverseCapabilities.add("dock.tools");
+        else this.reverseCapabilities.delete("dock.tools");
+      } else if (capability === "dock.tools") {
+        result = await this.options.dockToolsHostPort.invokeDockTool(this.identity.instanceId, args.request as DockToolsRequest);
       } else {
         result = await this.options.attachmentHostPort.accessAttachments(this.identity.instanceId, args.request as AttachmentAccessRequest);
       }

@@ -11,7 +11,7 @@ import {
 import { ExtensionUiBroker } from "../core/extension-ui-broker.js";
 import { ManagedInstance } from "../core/managed-instance.js";
 import type { AgentHistoryEntry, AgentRequest } from "../core/agent-worker.js";
-import type { InstanceObservationHostPort } from "../core/instance-observation.js";
+import type { DockToolsHostPort } from "../core/dock-tools.js";
 import type { InstanceAttachmentHostPort } from "../core/instance-attachments.js";
 import { ProjectTrustCoordinator } from "../control/project-trust.js";
 import { PI_SDK_VERSION } from "../version.js";
@@ -42,9 +42,9 @@ export interface CreatePiInstanceOptions {
   /** Test-only deterministic environment seam; production captures the workspace login shell. */
   workerEnvironment?: NodeJS.ProcessEnv;
   onWorkerSpawn?: (pid: number) => void;
-  observationHostPort?: InstanceObservationHostPort;
+  dockToolsHostPort?: DockToolsHostPort;
   attachmentHostPort?: InstanceAttachmentHostPort;
-  observationGrant?: boolean;
+  dockToolsEnabled?: boolean;
 }
 
 /** Construct the Host state machine around one independent Pi worker after trust. */
@@ -54,9 +54,9 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
   const instanceId = options.id ?? randomUUID();
   const hostEpoch = options.hostEpoch ?? randomUUID();
   const extensionUiBroker = new ExtensionUiBroker();
-  const observationHostPort = options.observationHostPort ?? unavailableObservationHostPort;
+  const dockToolsHostPort = options.dockToolsHostPort ?? unavailableDockToolsHostPort;
   const attachmentHostPort = options.attachmentHostPort ?? unavailableAttachmentHostPort;
-  const observationGrant = options.observationGrant ?? false;
+  const dockToolsEnabled = options.dockToolsEnabled ?? false;
   const created = await AgentWorkerConnection.create({
     identity: {
       hostEpoch,
@@ -74,9 +74,9 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
       ...(options.name === undefined || options.sessionFile !== undefined ? {} : { initialName: options.name }),
     },
     extensionUiBroker,
-    observationHostPort,
+    dockToolsHostPort,
     attachmentHostPort,
-    initialObservationGrant: observationGrant,
+    initialDockToolsEnabled: dockToolsEnabled,
     ...(options.workerEntry === undefined ? {} : { workerEntry: options.workerEntry }),
     ...(options.workerTimeouts === undefined ? {} : { workerTimeouts: options.workerTimeouts }),
     ...(options.workerEnvironment === undefined ? {} : { workerEnvironment: options.workerEnvironment }),
@@ -111,7 +111,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
       reopenedFrom: options.reopenedFrom,
       extensionUiBroker,
       initialHistory,
-      observationGrant,
+      dockToolsEnabled,
     });
     await runtime.control({ type: "activate" });
     instance.synchronizeModelState();
@@ -131,10 +131,10 @@ const unavailableAttachmentHostPort: InstanceAttachmentHostPort = {
   },
 };
 
-const unavailableObservationHostPort: InstanceObservationHostPort = {
-  observationGrant: () => false,
-  configureObservation: async () => { throw new Error("Dock observation requires a managed Registry instance"); },
-  observe: async () => { throw new Error("Dock observation requires a managed Registry instance"); },
+const unavailableDockToolsHostPort: DockToolsHostPort = {
+  dockToolsEnabled: () => false,
+  configureDockTools: async () => { throw new Error("Dock tools require a managed Registry instance"); },
+  invokeDockTool: async () => { throw new Error("Dock tools require a managed Registry instance"); },
   attachObservationSink: () => () => {},
 };
 

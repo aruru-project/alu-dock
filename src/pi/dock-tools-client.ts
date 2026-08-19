@@ -6,10 +6,21 @@ import {
   type ObservationResult,
   type ObservedInstanceStatus,
 } from "../core/instance-observation.js";
+import type { DockToolsResult } from "../core/dock-tools.js";
 
 const MAX_MODEL_VISIBLE_OBSERVATION_CHARS = 12_000;
 
 /** Agent-facing client projection. Structured Host DTOs stay in tool details, never in model-visible text. */
+export function renderDockToolsResult(result: DockToolsResult): string {
+  if (result.type === "create") {
+    return `Created ${identity(result.instance)} in ${inline(result.instance.cwd, 180)}. Dock tools are off in the new instance until the owner enables them there.`;
+  }
+  if (result.type === "send") {
+    return `Sent a Dock message to ${identity(result.target)}${result.receipt.queued ? "; it is waiting in that instance’s Queue" : ""}. The target receives it as a user message with the source instance wrapper.`;
+  }
+  return renderObservationResult(result);
+}
+
 export function renderObservationResult(result: ObservationResult): string {
   if (result.type === "list") {
     const scope = result.result.includesHistory ? "all catalog records" : "live siblings";

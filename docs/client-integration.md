@@ -60,13 +60,13 @@ local client ── private Unix socket ─┐
 paired client ── mutual TLS port ────┘
 ```
 
-当前 TypeScript `DockClient` 负责本机 Unix socket。独立的 Android、Web backend 或桌面客户端可以实现 TLS transport，但在证书 admission 之后必须复用本文其余部分定义的同一套 hello、capabilities、request、response、read/follow 和 operation 语义。不得把 Pairing、Settings 或证书管理增加为 Protocol V2 request。
+当前 TypeScript `DockClient` 负责本机 Unix socket。独立的 Android、Web backend 或桌面客户端可以实现 TLS transport，但在证书 admission 之后必须复用本文其余部分定义的同一套 hello、capabilities、request、response、read/follow 和 operation 语义。不得把 Devices、Settings 或证书管理增加为 Protocol V2 request。
 
 远程客户端必须长期保存自己生成的 RSA 2048-bit 或更强证书与私钥，并在每次 TLS handshake 中发送该证书。配对后还必须保存 Host 的完整 leaf certificate DER，之后在发送任何应用数据前做精确匹配。地址、域名和端口只负责找到 Host，不参与信任；切换 LAN 地址、外网域名或 NAT 映射端口不触发重新配对。
 
 ### 首次配对
 
-配对入口默认不存在。用户必须先在 Host 本机运行 `aludock`，进入 Pairing 并显式打开五分钟窗口。窗口外，无证书或未知证书连接都会快速关闭；远程客户端不能开启、延长或查询这个本机管理状态。
+配对入口默认不存在。用户必须先在 Host 本机运行 `aludock`，进入 Devices 并显式确认五分钟连接窗口。窗口外，无证书或未知证书连接都会快速关闭；远程客户端不能开启、延长或查询这个本机管理状态。
 
 客户端配对流程如下：
 
