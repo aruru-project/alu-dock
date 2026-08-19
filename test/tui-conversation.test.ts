@@ -168,6 +168,19 @@ test("conversation renders live and historical image and attachment metadata wit
   assert.deepEqual(historicalAttachment.snapshot(), [{
     kind: "user", text: "inspect\n\n[Attachment · 报告 final.pdf · 1.5 MiB · application/pdf]", complete: true,
   }]);
+
+  const imageAttachment = {
+    fileId: "223e4567-e89b-42d3-a456-426614174000", name: "photo.png", sizeBytes: 68,
+    mediaType: "image/png", sha256: "b".repeat(64), storedAt: "2026-08-19T00:00:00.000Z",
+  };
+  const linkedImage = new DockConversation();
+  linkedImage.applyHistory([historyRecord("linked-image", "user", [
+    { type: "text", text: "look" },
+    { type: "image", mimeType: "image/png", fileId: imageAttachment.fileId },
+  ], { attachments: [imageAttachment] })], false);
+  assert.deepEqual(linkedImage.snapshot(), [{
+    kind: "user", text: "look\n\n[Attachment · photo.png · 68 B · image/png]", complete: true,
+  }]);
 });
 
 test("conversation reset replaces old session history", () => {

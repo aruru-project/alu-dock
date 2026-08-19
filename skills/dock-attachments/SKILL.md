@@ -7,6 +7,8 @@ description: Use files uploaded to Alu Dock through opaque file IDs. Use when a 
 
 Uploaded files are permanent Host-owned originals. A command may include an `alu_dock_attachments_v1` metadata block with one or more opaque `fileId` values.
 
+Image attachments included with the current chat message are already provided as native visual input. Do not resolve or read one merely to see it. Resolve it only when the original file is needed for copying, conversion, OCR, or another file-based tool.
+
 1. Use `dock_attachment_list` when the intended file or file ID is unclear.
 2. Use `dock_attachment_resolve` with the exact `fileId` to obtain a Host-local path.
 3. **Before modifying, converting, unpacking, or extracting the file, copy it into the current workspace or a fresh temporary directory.** Quote the resolved path safely. Preserve the stored original.

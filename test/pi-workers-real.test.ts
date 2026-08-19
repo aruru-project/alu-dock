@@ -57,6 +57,19 @@ test("real Pi Worker projects persisted session entries into canonical conversat
     mediaType: "text/plain", sha256: "a".repeat(64), storedAt: "2026-08-16T00:00:00.000Z",
   };
   manager.appendMessage({ role: "user", content: [{ type: "text", text: appendDockAttachmentContext("attachment question", [attachment], attachmentContextKey) }], timestamp: 5 } as SessionMessage);
+  const imageAttachment = {
+    fileId: "223e4567-e89b-42d3-a456-426614174000", name: "camera.png", sizeBytes: 19,
+    mediaType: "image/png", sha256: "52143c1adc509dc364626e36d0c2cd944b44c17283cfe1d90780a960a69ad795",
+    storedAt: "2026-08-19T00:00:00.000Z",
+  };
+  manager.appendMessage({
+    role: "user",
+    content: [
+      { type: "text", text: appendDockAttachmentContext("image question", [imageAttachment], attachmentContextKey) },
+      { type: "image", data: "Zml4dHVyZS1pbWFnZS1ieXRlcw==", mimeType: "image/png" },
+    ],
+    timestamp: 6,
+  } as SessionMessage);
   manager.appendMessage({
     role: "toolResult", toolCallId: "attachment-resolve", toolName: "dock_attachment_resolve",
     content: [{ type: "text", text: "Attachment is available at '/private/host/attachments/private notes.txt'." }],
@@ -114,6 +127,12 @@ test("real Pi Worker projects persisted session entries into canonical conversat
     const attachmentUser = records.find((record) => record.source === "user" && record.attachments !== undefined);
     assert.deepEqual(attachmentUser?.attachments, [attachment]);
     assert.deepEqual(attachmentUser?.content, [{ type: "text", text: "attachment question" }]);
+    const imageUser = records.find((record) => record.source === "user" && record.attachments?.[0]?.fileId === imageAttachment.fileId);
+    assert.deepEqual(imageUser?.attachments, [imageAttachment]);
+    assert.deepEqual(imageUser?.content, [
+      { type: "text", text: "image question" },
+      { type: "image", mimeType: "image/png", fileId: imageAttachment.fileId },
+    ]);
     const attachmentTool = records.find((record) => record.toolName === "dock_attachment_resolve");
     assert.doesNotMatch(JSON.stringify(attachmentTool), /private\/host/u);
     const legacyShowImage = records.find((record) => record.toolName === "show_image");

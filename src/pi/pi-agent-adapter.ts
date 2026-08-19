@@ -173,6 +173,7 @@ export interface PiAgentAdapterOptions {
   configureNetwork?: (settingsManager: AgentSessionServices["settingsManager"]) => void;
   attachmentContextKey: Uint8Array;
   publishedFiles: TransientFileRegistry;
+  dockAttachmentPort?: DockAttachmentCallPort;
 }
 
 export interface CreatePiAgentAdapterOptions {
@@ -312,6 +313,8 @@ export class PiAgentAdapter {
         const binding = this.requireActive();
         const hostQueued = context?.type === "force_queue" || context?.type === "host_queue";
         const attachments = context !== undefined && context.type !== "session_switch" ? context.attachments : undefined;
+        const attachmentImages = await resolveAttachmentImages(attachments, this.options.dockAttachmentPort);
+        const runtimeImages = attachmentImages === undefined ? images : [...(images ?? []), ...attachmentImages];
         const runtimeMessage = attachments === undefined ? message : appendDockAttachmentContext(message, attachments, this.options.attachmentContextKey);
         const inputKind = this.classifyInput(message);
         const input = inputKind === "prompt"
@@ -332,12 +335,12 @@ export class PiAgentAdapter {
         try {
           if (context?.type === "force_queue") {
             if (delivery === "prompt") throw new Error("Forced Agent queue delivery requires steer or followUp");
-            return await this.queueMessage(runtimeMessage, delivery, images);
+            return await this.queueMessage(runtimeMessage, delivery, runtimeImages);
           }
           const prompt = (): Promise<void> => this.prompt(runtimeMessage, {
             source: "rpc",
             ...(delivery === "prompt" ? {} : { streamingBehavior: delivery }),
-            ...(images === undefined ? {} : { images }),
+            ...(runtimeImages === undefined ? {} : { images: runtimeImages }),
             preflightResult: reportPreflight,
           });
           if (inputKind !== "extension_command") return await prompt();
@@ -1323,12 +1326,34 @@ function optionalContentString(value: unknown, limit: number): string | undefine
 
 interface PiImageContent { type: "image"; data: string; mimeType: string }
 
+async function resolveAttachmentImages(
+  attachments: readonly AttachmentDto[] | undefined,
+  port: DockAttachmentCallPort | undefined,
+): Promise<AgentImagePath[] | undefined> {
+  const images = (attachments ?? []).filter((attachment) => safeImageMimeType(attachment.mediaType) === attachment.mediaType);
+  if (images.length === 0) return undefined;
+  if (!port) throw new Error("This image attachment can’t be opened right now. Re-upload it and try again.");
+  return Promise.all(images.map(async (attachment) => {
+    const resolved = await port.access({ type: "resolve", fileId: attachment.fileId });
+    if (resolved.type !== "resolve" || resolved.attachment.fileId !== attachment.fileId) {
+      throw new Error(`The image attachment ${attachment.name} is no longer available. Re-upload it and try again.`);
+    }
+    return { path: resolved.path, mimeType: attachment.mediaType! };
+  }));
+}
+
 function safeImageMimeType(value: unknown): string {
   return typeof value === "string"
     && value.length <= MAX_IMAGE_MIME_TYPE_CHARS
     && /^image\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/u.test(value)
     ? value
     : "image/unknown";
+}
+
+function imageBase64Sha256(data: string): string | undefined {
+  if (data.length === 0 || data.length > Math.ceil(MAX_IMAGE_BYTES * 4 / 3) + 4) return undefined;
+  try { return createHash("sha256").update(Buffer.from(data, "base64")).digest("hex"); }
+  catch { return undefined; }
 }
 
 async function loadPiImages(images: readonly AgentImagePath[] | undefined): Promise<PiImageContent[] | undefined> {
@@ -1507,8 +1532,15 @@ function projectPrivateContent(content: unknown, publishedFiles?: TransientFileR
     else if (item.type === "toolCall" || item.type === "tool_call") blocks.push(projectPrivateToolCall(item));
     else if (item.type === "image") {
       const mimeType = safeImageMimeType(item.mimeType);
-      const contentRef = publishedFiles !== undefined && typeof item.data === "string" ? publishedFiles.registerImage(item.data, mimeType) : undefined;
-      blocks.push({ type: "image", mimeType, ...(contentRef === undefined ? {} : { contentRef }) });
+      const imageData = typeof item.data === "string" ? item.data : undefined;
+      const contentRef = publishedFiles !== undefined && imageData !== undefined ? publishedFiles.registerImage(imageData, mimeType) : undefined;
+      const sha256 = imageData === undefined ? undefined : imageBase64Sha256(imageData);
+      blocks.push({
+        type: "image",
+        mimeType,
+        ...(contentRef === undefined ? {} : { contentRef }),
+        ...(sha256 === undefined ? {} : { sha256 }),
+      });
     }
   }
   return blocks;
@@ -2010,7 +2042,7 @@ function projectDockUserContent(content: unknown, attachmentContextKey: Uint8Arr
     attachments = extracted.attachments;
     return { ...item, text: extracted.text };
   });
-  return { content: projectDockContent(visible), ...(attachments === undefined ? {} : { attachments }) };
+  return { content: projectDockContent(visible, attachments), ...(attachments === undefined ? {} : { attachments }) };
 }
 
 function projectPublicToolContent(toolName: string, content: unknown, redactedText: string): ContentBlockDto[] {
@@ -2020,9 +2052,17 @@ function projectPublicToolContent(toolName: string, content: unknown, redactedTe
   return projectDockContent(content);
 }
 
-function projectDockContent(content: unknown): ContentBlockDto[] {
+function projectDockContent(content: unknown, attachments?: readonly AttachmentDto[]): ContentBlockDto[] {
   if (typeof content === "string") return content.length > 0 ? [{ type: "text", text: boundedContentString(content, 8_000) }] : [];
   if (!Array.isArray(content)) return [];
+  const imageAttachments = new Map<string, AttachmentDto[]>();
+  for (const attachment of attachments ?? []) {
+    if (safeImageMimeType(attachment.mediaType) !== attachment.mediaType) continue;
+    const key = `${attachment.sha256}\u0000${attachment.mediaType}`;
+    const matches = imageAttachments.get(key) ?? [];
+    matches.push(attachment);
+    imageAttachments.set(key, matches);
+  }
   const blocks: ContentBlockDto[] = [];
   let bytes = 2;
   for (const item of content.slice(0, 200)) {
@@ -2030,7 +2070,20 @@ function projectDockContent(content: unknown): ContentBlockDto[] {
     let block: ContentBlockDto | undefined;
     if (item.type === "text" && typeof item.text === "string") block = { type: "text", text: boundedContentString(item.text, 8_000) };
     else if (item.type === "thinking" && typeof item.thinking === "string") block = { type: "thinking", text: boundedContentString(item.thinking, 8_000) };
-    else if (item.type === "image") block = { type: "image", mimeType: safeImageMimeType(item.mimeType), ...(typeof item.contentRef === "string" ? { contentRef: safeRequiredText(item.contentRef, 128, "unknown") } : {}) };
+    else if (item.type === "image") {
+      const mimeType = safeImageMimeType(item.mimeType);
+      const sha256 = typeof item.sha256 === "string" && /^[a-f0-9]{64}$/u.test(item.sha256)
+        ? item.sha256
+        : typeof item.data === "string" ? imageBase64Sha256(item.data) : undefined;
+      const matches = sha256 === undefined ? undefined : imageAttachments.get(`${sha256}\u0000${mimeType}`);
+      const fileId = matches?.shift()?.fileId;
+      block = {
+        type: "image",
+        mimeType,
+        ...(typeof item.contentRef === "string" ? { contentRef: safeRequiredText(item.contentRef, 128, "unknown") } : {}),
+        ...(fileId === undefined ? {} : { fileId }),
+      };
+    }
     else if ((item.type === "toolCall" || item.type === "tool_call") && typeof item.name === "string") {
       const projected = projectJsonObject(item.arguments);
       block = {
@@ -2695,6 +2748,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
     initialProcessCwd: options.cwd,
     attachmentContextKey,
     publishedFiles,
+    ...(options.dockAttachmentPort === undefined ? {} : { dockAttachmentPort: options.dockAttachmentPort }),
     ...(options.setProcessCwd === undefined ? {} : { setProcessCwd: options.setProcessCwd }),
   });
 }

@@ -1251,8 +1251,10 @@ function contentText(value: unknown, type: "text" | "thinking"): string | undefi
   return text || undefined;
 }
 
-function userMessageText(text: string, images: readonly { mimeType: string }[], attachments: readonly AttachmentDto[]): string {
-  const imageLines = images.map((image, index) => `[Image ${index + 1} · ${image.mimeType}]`);
+function userMessageText(text: string, images: readonly { mimeType: string; fileId?: string }[], attachments: readonly AttachmentDto[]): string {
+  const imageLines = images
+    .filter((image) => image.fileId === undefined)
+    .map((image, index) => `[Image ${index + 1} · ${image.mimeType}]`);
   const attachmentLines = attachments.map((attachment) => `[Attachment · ${attachment.name} · ${formatBytes(attachment.sizeBytes)}${attachment.mediaType ? ` · ${attachment.mediaType}` : ""}]`);
   const lines = [...imageLines, ...attachmentLines];
   if (text.length === 0) return lines.join("\n");

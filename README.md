@@ -75,7 +75,7 @@ aludock service logs --lines 200
 
 ## 文件附件
 
-Hub **Settings → Attachment directory** 配置 Host 上的永久 storage root；默认是 `${XDG_DATA_HOME:-~/.local/share}/alu-dock/attachments`。本机和已配对客户端都通过 `attachments.v1` 分块上传，最大 512 MiB，声明 size/SHA-256 后由 Host 独立验证并按内容复用。客户端只收到 opaque `fileId`、名称、大小、可选 media type、digest 和存储时间，永远不收到 Host path。
+Hub **Settings → Attachment directory** 配置 Host 上的永久 storage root；默认是 `${XDG_DATA_HOME:-~/.local/share}/alu-dock/attachments`。本机和已配对客户端都通过 `attachments.v1` 分块上传，最大 512 MiB，声明 size/SHA-256 后由 Host 独立验证并按内容复用。客户端只收到 opaque `fileId`、名称、大小、可选 media type、digest 和存储时间，永远不收到 Host path。聊天消息中的 `image/*` attachment 会在保留永久附件身份的同时自动成为 Agent 原生图片输入；模型能力由 Agent runtime 处理，图片 block 以 `fileId` 关联原附件。
 
 `command.submit` 用 structured file IDs 关联附件；Queue、live conversation 和 history 显示同一 metadata。Pi 通过内建 `dock_attachment_list` / `dock_attachment_resolve` 工具按需访问，并在修改或解压前先复制永久原件。详细 wire contract 见[客户端接入文档](docs/client-integration.md#附件)。
 

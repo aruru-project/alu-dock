@@ -29,7 +29,7 @@ export interface ImagePathDto { path: string; mimeType: string }
 export type ContentBlockDto =
   | { type: "text"; text: string }
   | { type: "thinking"; text: string }
-  | { type: "image"; mimeType: string; contentRef?: string }
+  | { type: "image"; mimeType: string; contentRef?: string; fileId?: string }
   | { type: "tool_call"; toolCallId: string; toolName: string; args: JsonObject; omittedFields?: string[] }
   | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; presentation?: BuiltInToolPresentation; omittedFields?: string[] }
   | { type: "omitted"; kind: "image" | "binary"; description: string };

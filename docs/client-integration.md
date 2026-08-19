@@ -200,9 +200,9 @@ Data URI、base64 和长文本都是普通内容。客户端根据结构处理 i
 
 ## 图片
 
-图片 prompt 使用 Host 和 Worker 同一 UID 能读取的本机绝对路径 descriptor。上传、图库、缩略图和远端传输属于客户端平台自己的职责。
+图片 prompt 可以来自 Host/Worker 同一 UID 可读的本机绝对路径 descriptor，也可以来自聊天消息中已经上传的 `image/*` attachment。远程客户端不提交自己的本机路径：它只上传附件并在 `command.submit.attachments` 中引用 fileId，Dock 在 Agent 私有边界 resolve 后自动加入同一条原生图片输入。
 
-进入 Agent session 后，Pi 原生 structured image content 在普通 event/history 中只携带 MIME type 与 opaque `contentRef`，完整 bytes 由客户端显式调用 `conversation.content` 分页恢复。
+进入 Agent session 后，Pi 原生 structured image content 在普通 event/history 中携带 MIME type、可选 opaque `contentRef`，以及图片来自聊天附件时的可选 `fileId`。完整 bytes 由客户端显式调用 `conversation.content` 分页恢复；`fileId` 关联同一消息的 canonical `AttachmentDto`，不替代 image block 或 attachment。客户端可以据此只显示一个附件缩略图，但不得删除底层任一事实。
 
 Dock 内建的 `show_image` 只负责把本机文件发布给用户界面显示，不把图片注入模型 context（模型要看图时使用 `read`）。成功的 tool result 在 live、history preview 与 `conversation.content` 的完整 tool-result block 中携带同一个 path-free `publishedFile`：`presentation: "image" + fileRef + name + sizeBytes + optional mediaType`。客户端使用 authenticated `file.read` 按 offset 获取最多 256 KiB 的 base64 chunk；文件被删除、改写、session replacement 或 Worker dispose 后返回 `file_unavailable`，界面应提示用户让 Agent 重新发布。`toolCallId` 只用于 tool 关联，客户端不得从 tool text/path 猜 metadata，也不得把 `fileRef` 当路径。
 
@@ -210,7 +210,7 @@ Web 应用通常由后端接收浏览器上传、保存为受控本机文件，�
 
 ## 附件
 
-附件由 Host 永久保存，所有文件类型使用同一机制。它不是图片 loader、S3-style object service 或某个 Web/TUI 的临时上传目录。Host 不扫描、转换、强制 MIME、自动提取或设置 TTL；最大 decoded file size 是 **536,870,912 bytes（512 MiB / 0.5 GiB）**。本机 Unix socket 与配对后的 mTLS client 使用同一个由 Host 本机 Settings 配置的 storage directory。
+附件由 Host 永久保存，所有文件类型使用同一机制。它不是 S3-style object service 或某个 Web/TUI 的临时上传目录。Host 不扫描、转换、强制 MIME、自动提取或设置 TTL；最大 decoded file size 是 **536,870,912 bytes（512 MiB / 0.5 GiB）**。本机 Unix socket 与配对后的 mTLS client 使用同一个由 Host 本机 Settings 配置的 storage directory。聊天消息中的 `image/*` attachment 仍使用同一永久附件机制，同时由 Agent adapter 作为原生视觉输入交给 runtime。
 
 客户端应使用一个新的、独立的 authenticated Protocol V2 connection，并在 hello 中要求 `attachments.v1`。先本地读取文件，计算确切 `sizeBytes` 与 lowercase SHA-256；之后发送 header：
 
@@ -259,7 +259,9 @@ Upload header 的 `operationId` 遵守普通 mutation identity。相同 ID 和�
 
 每个 command 最多 32 个 unique `fileId`。Host 在接受命令前解析全部 ID；任一 missing/corrupt ID 使整个提交失败。Canonical `AttachmentDto[]` 会出现在 pending Queue、`message.queued`、`message.submitted`、user `message.completed` 和 persisted user conversation record 中，也会由 `queue.dequeue` 随完整 queued message 返回。实现附件展示的客户端用同一 attachment card renderer 处理这些位置，并继续按 event identity/revision 去重；它不自行从 message text 恢复附件。无需附件 UI 的客户端照常显示文本并忽略可选 attachment metadata，Host 不为它删字段、降级重试或改变共享 Queue 语义。
 
-Agent 通过 Host reverse capability 和 `dock_attachment_resolve` 获取私有路径。外部 Protocol V2 conversation 会固定遮蔽 resolve tool 的 path；客户端没有、也不需要 attachment path API。如果文件需要在网页下载或预览，那是另一项明确的产品能力，不能从 metadata 猜 Host path。
+如果 attachment 的 canonical media type 是 `image/*`，客户端仍只提交 fileId。Agent adapter 会自动把它加入原生 image input，同时保留已认证附件上下文；Agent 不需要先调用 read 才能看到图片。Pi/其他 Agent runtime 决定当前模型如何处理视觉能力，Dock 不做 model/provider capability 判断。之后的 user image block 通过 `fileId` 指向同一附件；两项都属于预期协议事实，是否合并显示是客户端职责。
+
+Agent 通过 Host reverse capability 和 `dock_attachment_resolve` 获取私有路径。图片附件已经作为视觉输入时，resolve 只在 Agent 还需要原始文件路径进行复制、转换、OCR 或其他工具处理时使用。外部 Protocol V2 conversation 会固定遮蔽 resolve tool 的 path；客户端没有、也不需要 attachment path API。如果文件需要在网页下载或预览，那是另一项明确的产品能力，不能从 metadata 猜 Host path。
 
 ## Extension UI
 

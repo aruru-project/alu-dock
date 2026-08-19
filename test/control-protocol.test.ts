@@ -115,10 +115,21 @@ test("Protocol V2 history exposes only canonical persisted conversation records"
     display: true,
     metadata: { status: "ready" },
   };
-  const parsed = parseHistoryResult({ historyRevision: 1, entries: [record], hasEarlier: false, instance: validSnapshot() });
+  const imageAttachment = {
+    fileId: "123e4567-e89b-42d3-a456-426614174000", name: "photo.png", sizeBytes: 19,
+    mediaType: "image/png", sha256: "a".repeat(64), storedAt: "2026-08-19T00:00:00.000Z",
+  };
+  const imageRecord = {
+    recordId: "entry-2", entryId: "entry-2", kind: "message", source: "user", visibility: "conversation",
+    content: [{ type: "image", mimeType: "image/png", fileId: imageAttachment.fileId }],
+    attachments: [imageAttachment],
+  };
+  const parsed = parseHistoryResult({ historyRevision: 1, entries: [record, imageRecord], hasEarlier: false, instance: validSnapshot() });
   assert.equal(parsed.entries[0]?.recordId, "entry-1");
   assert.equal(parsed.entries[0]?.source, "extension");
   assert.deepEqual(parsed.entries[0]?.metadata, { status: "ready" });
+  assert.deepEqual(parsed.entries[1]?.content, imageRecord.content);
+  assert.deepEqual(parsed.entries[1]?.attachments, [imageAttachment]);
   assert.throws(() => parseHistoryResult({
     historyRevision: 1,
     entries: [{ entryId: "legacy", role: "assistant", content: [{ type: "text", text: "legacy" }] }],

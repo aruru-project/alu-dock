@@ -1787,7 +1787,17 @@ function parseContent(input: unknown, field: string): ContentBlockDto[] {
   return array(input, field, MAX_JSON_ARRAY).map((item, index) => {
     const block = object(item, `${field}[${index}]`); const type = enumeration(block.type, `${field}[${index}].type`, ["text", "thinking", "image", "tool_call", "tool_result", "omitted"]);
     if (type === "text" || type === "thinking") { exact(block, ["type", "text"]); return { type, text: boundedString(block.text, `${field}[${index}].text`, MAX_TEXT) }; }
-    if (type === "image") { exact(block, ["type", "mimeType", "contentRef"]); const mimeType = string(block.mimeType, `${field}[${index}].mimeType`, MAX_IMAGE_MIME_TYPE_CHARS); if (!/^image\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/u.test(mimeType)) throw validation("invalid_response", `${field}[${index}].mimeType must be image/*`); return { type, mimeType, ...(block.contentRef === undefined ? {} : { contentRef: string(block.contentRef, `${field}[${index}].contentRef`, 128) }) }; }
+    if (type === "image") {
+      exact(block, ["type", "mimeType", "contentRef", "fileId"]);
+      const mimeType = string(block.mimeType, `${field}[${index}].mimeType`, MAX_IMAGE_MIME_TYPE_CHARS);
+      if (!/^image\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/u.test(mimeType)) throw validation("invalid_response", `${field}[${index}].mimeType must be image/*`);
+      return {
+        type,
+        mimeType,
+        ...(block.contentRef === undefined ? {} : { contentRef: string(block.contentRef, `${field}[${index}].contentRef`, 128) }),
+        ...(block.fileId === undefined ? {} : { fileId: id(block.fileId, `${field}[${index}].fileId`) }),
+      };
+    }
     if (type === "tool_call") { exact(block, ["type", "toolCallId", "toolName", "args", "omittedFields"]); return { type, toolCallId: id(block.toolCallId, "toolCallId"), toolName: string(block.toolName, "toolName", 256), args: parseJsonObject(block.args, "args"), omittedFields: omitted(block.omittedFields, "omittedFields") }; }
     if (type === "tool_result") {
       exact(block, ["type", "toolCallId", "toolName", "text", "isError", "publishedFile", "presentation", "omittedFields"]);

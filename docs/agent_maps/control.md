@@ -106,6 +106,8 @@ Host 对 socket input 串行处理、pause/resume backpressure，并以 60 秒 i
 
 `command.submit` 只携带结构化 opaque `attachments: fileId[]`。Host 在 admission 时解析为 canonical DTO，再与 message 一起进入 direct prompt、Host Queue、runtime Queue、`message.submitted`、`message.completed` 和 persisted conversation。文件 bytes 始终留在 Host store，不进入 catalog、event JSONL 或 `MAX_WORKER_TRANSFER_BYTES` IPC。`attachments.v1` 只约束 `attachment.upload` 以及实际携带 attachment IDs 的 `command.submit` input；一旦消息被接受，attachment metadata 就是 canonical message 的可选组成部分，随 read、follow、history 和 `queue.dequeue` 原样返回。无需显示附件的客户端直接忽略该可选字段，不需要 attachment projection 协商、兼容重试或 Queue 特判。
 
+聊天消息中 media type 为 `image/*` 的附件同时具有两项 canonical 语义：它仍是可 resolve、下载和交给工具的永久 attachment，并由 Agent adapter 通过私有 resolve path 加入同一条 Agent 请求的原生 image input。Dock 不按当前模型判断视觉能力，也不要求客户端增加 image mode 或让 Agent 先 read；模型能力与旁路处理由 Agent runtime 决定。持久和 live user content 中对应 image block 使用可选 `fileId` 关联同一 `AttachmentDto`。两项事实都保留，客户端按关联决定展示一次还是分别展示；Host 不为了 UI 去重而删除其中一项。
+
 ## Published files 与读取
 
 `published-files.v1` 提供 authenticated `file.read`。公开 `PublishedFileDto` 固定为 `presentation: "image" + fileRef + name + sizeBytes + optional mediaType`，不含 Worker path；客户端按 `presentation` 决定显示意图，不从 tool name、文件扩展名或文本猜测。Host 只校验 instance/lifecycle 并把同一 Protocol V2 request 路由到当前 generation 的 Worker，Unix socket 与 mTLS 共用这条 route；Host 不维护 registry 或 media store。

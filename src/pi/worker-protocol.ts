@@ -528,8 +528,10 @@ function validateDockContent(raw: unknown): void {
       exactKeys(block, ["type", "text"], "Conversation text block");
       boundedString(block.text, 8_000, "Conversation text", true);
     } else if (type === "image") {
-      exactKeys(block, ["type", "mimeType", "contentRef"], "Conversation image block");
-      validateImageMimeType(block.mimeType, "Conversation image MIME type"); optionalString(block.contentRef, 128);
+      exactKeys(block, ["type", "mimeType", "contentRef", "fileId"], "Conversation image block");
+      validateImageMimeType(block.mimeType, "Conversation image MIME type");
+      optionalString(block.contentRef, 128);
+      optionalString(block.fileId, 128);
     } else if (type === "tool_call") {
       exactKeys(block, ["type", "toolCallId", "toolName", "args", "omittedFields"], "Conversation tool-call block");
       boundedString(block.toolCallId, 128, "Conversation tool-call id"); boundedString(block.toolName, 256, "Conversation tool-call name");

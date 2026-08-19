@@ -60,7 +60,7 @@ Conversation 按 Agent 的真实 record kind、source、visibility 和 content s
 
 History record 和 live event 不做文本匹配或身份认领。在线的 completed component 直接留在本地画面；未来 fresh bootstrap 才用持久 record 替代它。Bootstrap 与加载期间的 event overlap 只按 `(runtimeGeneration, sequence)` 去重；内容相同的两个 turn 或 tool result 仍是两个事实。generation、Host epoch、ring continuity 或本地状态不一致时，必须 reset 后 bootstrap，不能混合两个边界补洞。历史分页也固定在 bootstrap 的 `historyRevision`；中途 checkpoint 改变 revision 时放弃该次 scan，不能将新旧 branch snapshot 拼接。
 
-Thinking、tool call/result、custom message、image、attachment、bash、compaction/branch summary 和普通文本是不同内容结构。用户消息中的 attachment card 使用 Protocol V2 `AttachmentDto` 显示清洗后的名称、大小和可选 media type；TUI 不接收或推导 Host storage path。Queue、live event 和 fresh history bootstrap 使用同一 metadata，不把文件名拼进 prompt 文本来猜附件。Queue dequeue 恢复到 editor 时，Work 在本地 draft state 保留 opaque IDs，并在下一次提交继续使用 structured attachments；`/attachments` 可查看、`/attachments clear` 可明确移除，不能静默丢失或转写成普通 prompt 字符串。TUI 可以按 visibility 隐藏 record、折叠或做 preview，但不能修改底层语义；需要完整内容时继续通过 Protocol V2 获取。
+Thinking、tool call/result、custom message、image、attachment、bash、compaction/branch summary 和普通文本是不同内容结构。用户消息中的 attachment card 使用 Protocol V2 `AttachmentDto` 显示清洗后的名称、大小和可选 media type；TUI 不接收或推导 Host storage path。聊天图片附件同时产生 image block 与 attachment，image block 的 `fileId` 指向同一 DTO；两项协议事实都保留，TUI 作为客户端只渲染 attachment 行而不再增加重复的 image 占位。Queue、live event 和 fresh history bootstrap 使用同一 metadata，不把文件名拼进 prompt 文本来猜附件。Queue dequeue 恢复到 editor 时，Work 在本地 draft state 保留 opaque IDs，并在下一次提交继续使用 structured attachments；`/attachments` 可查看、`/attachments clear` 可明确移除，不能静默丢失或转写成普通 prompt 字符串。TUI 可以按 visibility 隐藏 record、折叠或做 preview，但不能修改底层语义；需要完整内容时继续通过 Protocol V2 获取。
 
 ## Extension UI
 
