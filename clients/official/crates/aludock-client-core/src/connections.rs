@@ -740,10 +740,16 @@ fn assert_private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn sync_directory(path: &Path) -> Result<()> {
     fs::File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(|source| storage_error(path, source))
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn storage_error(path: &Path, source: std::io::Error) -> ClientError {
