@@ -70,7 +70,7 @@ jobs:
           workspaces: |
             . -> target
             src-tauri -> target
-          cache-on-failure: true
+          cache-on-failure: false
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile --prefer-offline
