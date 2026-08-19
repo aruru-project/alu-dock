@@ -4,6 +4,7 @@ mod client;
 mod config;
 mod connections;
 mod conversation;
+mod deliverables;
 mod endpoint;
 mod error;
 mod extension_ui;
@@ -44,6 +45,11 @@ pub use connections::{
 pub use conversation::{
     ContentBlock, DockEvent, EventPage, FollowStream, HistoryRecord, ImagePath, InstanceReadResult,
     PendingMessage, ReadReplay,
+};
+pub use deliverables::{
+    DeliverableDownloadProgress, DeliverableDownloadResult, DeliverableDto,
+    MAX_DELIVERABLE_CHUNK_BYTES, MAX_TEMPORARY_DELIVERABLE_BYTES,
+    MAX_TEMPORARY_DELIVERABLES_PER_INSTANCE,
 };
 pub use endpoint::Endpoint;
 pub use error::{ClientError, Result};

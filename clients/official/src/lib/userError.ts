@@ -4,6 +4,10 @@ const SAFE_ERROR_CODES = new Set([
   'host_certificate_mismatch', 'attachment_too_large', 'attachment_source_changed',
   'attachment_upload_cancelled', 'connection_failed', 'registry_conflict', 'profile_conflict',
   'host_not_found', 'host_already_saved', 'local_storage_unavailable', 'host_lifecycle_unavailable',
+  'file_unavailable', 'deliverable_connection_failed', 'deliverable_list_failed', 'deliverable_verification_failed',
+  'deliverable_write_failed', 'deliverable_commit_failed', 'deliverable_cleanup_failed', 'deliverable_picker_failed',
+  'deliverable_location_unsupported', 'deliverable_location_unavailable',
+  'saved_file_unavailable', 'saved_file_open_failed',
 ])
 
 export function userErrorMessage(cause: unknown, fallback = '操作没有完成。请刷新状态后重试。') {

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { AlertCircle, CheckCircle2, File, LoaderCircle, RotateCcw, X } from '@lucide/vue'
+import { formatFileSize } from '../lib/fileSize'
 
 const props = withDefaults(defineProps<{
   name: string
@@ -16,11 +17,6 @@ const props = withDefaults(defineProps<{
 }>(), { state: 'ready', progress: 0, removable: false, retryable: false, cancellable: false, compact: false })
 const emit = defineEmits<{ remove: []; retry: []; cancel: []; preview: [] }>()
 
-function bytes(value: number) {
-  if (value < 1024) return `${value} B`
-  if (value < 1024 ** 2) return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KiB`
-  return `${(value / 1024 ** 2).toFixed(value < 10 * 1024 ** 2 ? 1 : 0)} MiB`
-}
 function stateText() {
   if (props.message) return props.message
   if (props.state === 'hashing') return '正在准备'
@@ -51,7 +47,7 @@ function stateText() {
       </div>
       <div class="attachment-copy">
         <strong :title="name">{{ name }}</strong>
-        <span>{{ bytes(sizeBytes) }}<template v-if="mediaType"> · {{ mediaType }}</template></span>
+        <span>{{ formatFileSize(sizeBytes) }}<template v-if="mediaType"> · {{ mediaType }}</template></span>
         <div v-if="['hashing', 'uploading', 'finalizing'].includes(state)" class="attachment-progress" role="progressbar" :aria-valuenow="Math.round(progress * 100)" aria-valuemin="0" aria-valuemax="100" :aria-label="`${name} ${stateText()}`">
           <i :style="{ width: `${Math.max(3, Math.min(100, progress * 100))}%` }" />
         </div>

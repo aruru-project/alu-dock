@@ -6,6 +6,8 @@ import type {
   ConnectionKind,
   ConversationBootstrap,
   ConversationHistoryPage,
+  DeliverableDto,
+  DeliverableSaveResult,
   EndpointTestResult,
   ExtensionControllerBinding,
   HostCatalog,
@@ -16,6 +18,7 @@ import type {
   ModelsResult,
   PublishedFileDto,
   QueueDequeueResult,
+  SavedDeliverableLocation,
   ResourcesResult,
   SelectedAttachment,
   SessionCompactionResult,
@@ -405,6 +408,28 @@ export async function loadPublishedImageBytes(
     ...context, instanceId, expectedHostEpoch, expectedRuntimeGeneration, file,
   })
   return binaryBytes(value)
+}
+
+export async function listDeliverables(instanceId: string, context: HostContext): Promise<DeliverableDto[]> {
+  if (isTauri) return invoke<DeliverableDto[]>('list_deliverables', { ...context, instanceId })
+  return [
+    { deliveryRef: 'preview-delivery-1', name: 'AluDock_0.1.0_x64-portable.exe', sizeBytes: 17_951_232 },
+    { deliveryRef: 'preview-delivery-2', name: '发布说明.txt', sizeBytes: 4_812 },
+  ]
+}
+
+export async function downloadDeliverable(
+  instanceId: string,
+  deliverable: DeliverableDto,
+  context: HostContext,
+): Promise<DeliverableSaveResult> {
+  if (isTauri) return invoke<DeliverableSaveResult>('download_deliverable', { ...context, instanceId, deliverable })
+  throw new Error('浏览器预览无法下载文件。请在 AluDock 客户端中操作。')
+}
+
+export async function openSavedDeliverable(location: SavedDeliverableLocation): Promise<void> {
+  if (isTauri) return invoke<void>('open_saved_deliverable', { location })
+  throw new Error('浏览器预览无法打开设备上的文件。请在 AluDock 客户端中操作。')
 }
 
 function binaryBytes(value: ArrayBuffer | Uint8Array | number[]): Uint8Array {

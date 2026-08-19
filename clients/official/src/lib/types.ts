@@ -174,6 +174,29 @@ export interface PublishedFileDto {
   mediaType?: string
 }
 
+export interface DeliverableDto {
+  deliveryRef: string
+  name: string
+  sizeBytes: number
+}
+
+export interface SavedDeliverableLocation {
+  kind: 'path' | 'uri'
+  value: string
+  label: string
+}
+
+export type DeliverableSaveResult =
+  | { status: 'cancelled' }
+  | { status: 'saved'; deliverable: DeliverableDto; location: SavedDeliverableLocation; sha256: string }
+
+export interface DeliverableDownloadProgress extends HostContext {
+  instanceId: string
+  deliveryRef: string
+  bytesReceived: number
+  totalBytes: number
+}
+
 export type ContentBlock =
   | { type: 'text' | 'thinking'; text: string }
   | { type: 'image'; mimeType: string; contentRef?: string; data?: string; fileId?: string }

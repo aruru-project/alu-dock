@@ -5,6 +5,7 @@ import { marked } from 'marked'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
+  FileDown,
   Globe2,
   Link,
   Monitor,
@@ -26,10 +27,12 @@ import {
   compactSession,
   createWork,
   dequeueMessages,
+  downloadDeliverable,
   forgetWork,
   isTauri,
   getSettings,
   getSystemDeviceName,
+  listDeliverables,
   listModels,
   listSessions,
   listTools,
@@ -40,6 +43,7 @@ import {
   loadConversationHistory,
   loadConversationImageBytes,
   loadPublishedImageBytes,
+  openSavedDeliverable,
   pickAttachments,
   renameHostProfile,
   removeAttachment,
@@ -89,8 +93,19 @@ import {
   stopCanStart,
   stoppedResultIsCorrelated,
 } from './lib/uiBoundaries'
-import type { AttachmentDto, AttachmentUploadProgress, ConnectionKind, ConversationBootstrap, ConversationImageResource, ConversationItem, ConversationProcessItem, HostConnectionProfile, HostContext, HostEndpoint, ProjectedEvent, QueueItem, SelectedAttachment, Work, WorkspacePage } from './lib/types'
+import type { AttachmentDto, AttachmentUploadProgress, ConnectionKind, ConversationBootstrap, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, HostConnectionProfile, HostContext, HostEndpoint, ProjectedEvent, QueueItem, SelectedAttachment, Work, WorkspacePage } from './lib/types'
+import {
+  clearDownloadHistory,
+  deliveryHistoryKey,
+  downloadedDelivery,
+  downloadedItemMatches,
+  persistDownloadHistory,
+  readDownloadHistory,
+  recordDownloadedDelivery,
+  type DownloadedDeliverable,
+} from './lib/downloadHistory'
 import AttachmentCard from './components/AttachmentCard.vue'
+import DeliveryTray from './components/DeliveryTray.vue'
 import ControlCenter, { type ControlMutationDomain, type ControlSection } from './components/ControlCenter.vue'
 import ConversationProcessParts from './components/ConversationProcessParts.vue'
 import ExtensionUiSurface from './components/ExtensionUiSurface.vue'
@@ -164,6 +179,19 @@ const compactionErrors = ref<Record<string, string>>({})
 const queueOpen = ref(false)
 const queueRestoring = ref(false)
 const queueNotice = ref('')
+const deliveryOpen = ref(false)
+const deliverables = ref<DeliverableDto[]>([])
+const deliveryLoading = ref(false)
+const deliveryError = ref('')
+const deliveryNotice = ref('')
+const downloadingDeliveries = ref<Set<string>>(new Set())
+const deliveryProgress = ref<Record<string, number>>({})
+const openingDeliveryKey = ref('')
+const downloadHistoryStorage = (() => {
+  try { return window.localStorage } catch { return null }
+})()
+const downloadHistory = ref(readDownloadHistory(downloadHistoryStorage))
+let deliveryLoadEpoch = 0
 const restoredImageCounts = ref<Record<string, number>>({})
 const clearingRestoredImages = ref(false)
 const attachmentPicking = ref(false)
@@ -180,6 +208,7 @@ type ControlCenterHandle = {
 }
 const unresolvedMutations = ref<Map<string, string>>(new Map())
 const controlCenterRef = ref<ControlCenterHandle | null>(null)
+const deliveryTrayRef = ref<{ focusClear: () => void } | null>(null)
 const modalSurface = ref<HTMLElement | null>(null)
 let modalTrigger: HTMLElement | null = null
 const conversationState = ref<ConversationBootstrap | null>(null)
@@ -280,6 +309,28 @@ const conversationRows = computed<ConversationRow[]>(() => {
 })
 const queueItems = computed(() => isTauri ? conversationState.value?.queue ?? [] : previewQueue)
 const selected = computed(() => app.selectedWork)
+const currentDeliverableRows = computed(() => {
+  const context = app.hostContext
+  const instanceId = selected.value?.id
+  if (!context || !instanceId) return []
+  return deliverables.value.map((deliverable) => {
+    const key = deliveryHistoryKey(context.hostId, instanceId, deliverable.deliveryRef)
+    return {
+      deliverable,
+      downloaded: downloadedDelivery(downloadHistory.value, context.hostId, instanceId, deliverable.deliveryRef),
+      downloading: downloadingDeliveries.value.has(key),
+      progress: deliveryProgress.value[key] ?? 0,
+    }
+  })
+})
+const olderDownloadHistory = computed(() => {
+  const context = app.hostContext
+  const instanceId = selected.value?.id
+  if (!context || !instanceId) return downloadHistory.value.items
+  return downloadHistory.value.items.filter((item) => !deliverables.value.some((deliverable) =>
+    downloadedItemMatches(item, context.hostId, instanceId, deliverable)))
+})
+const pendingDeliverableCount = computed(() => currentDeliverableRows.value.filter((row) => !row.downloaded).length)
 function restoredImageKey(context: HostContext, workId: string) {
   return JSON.stringify([context.hostId, workId])
 }
@@ -322,7 +373,7 @@ const unresolvedControlDomain = computed<ControlMutationDomain | undefined>(() =
   const domain = unresolvedDomain.value
   return domain && domain !== 'work' ? domain : undefined
 })
-const modalOpen = computed(() => directoryOpen.value || commandOpen.value || hostSettingsOpen.value || composerExpanded.value || !!confirmDialog.value || !!imagePreview.value)
+const modalOpen = computed(() => deliveryOpen.value || directoryOpen.value || commandOpen.value || hostSettingsOpen.value || composerExpanded.value || !!confirmDialog.value || !!imagePreview.value)
 const modelLabel = computed(() => {
   const model = selected.value?.executor.model
   return model ? `${model.provider}/${model.id}` : '—'
@@ -372,6 +423,7 @@ watch(() => Boolean(app.payload && !app.needsPairing && !selected.value), (showL
   if (showList) app.workDrawerOpen = true
 })
 watch(() => app.workDrawerOpen, (open, wasOpen) => {
+  if (open) deliveryOpen.value = false
   if (open && !wasOpen) void app.refreshWorksQuietly()
 })
 watch([
@@ -385,6 +437,14 @@ watch([
   const work = selected.value
   if (context && work) commandConsole.bindContext(context.hostId, context.selectionGeneration, work)
 }, { immediate: true })
+watch(
+  () => [app.activeHostId, app.hostContext?.selectionGeneration, selected.value?.id, selected.value?.execution] as const,
+  (current, previous) => {
+    if (!previous) return
+    const sameWork = current[0] === previous[0] && current[1] === previous[1] && current[2] === previous[2]
+    if (sameWork && previous[3] === 'running' && current[3] !== 'running') void refreshDeliverables()
+  },
+)
 watch(confirmDialog, async (dialog) => {
   if (!dialog) return
   await nextTick()
@@ -436,6 +496,11 @@ watch(
     transientContext = hostId && generation != null && id ? { hostId, selectionGeneration: generation, workId: id } : null
     ++conversationLoadEpoch
     ++historyLoadEpoch
+    ++deliveryLoadEpoch
+    deliverables.value = []
+    deliveryError.value = ''
+    deliveryNotice.value = ''
+    if (id) void refreshDeliverables()
     if (isTauri && windowFocused.value && id) void loadSelectedConversation(id)
     else if (!id) void extensionUi.clear()
     void nextTick(resizeComposer)
@@ -474,6 +539,14 @@ onMounted(async () => {
         if (!item) return
         item.state = payload.phase
         item.progress = payload.totalBytes > 0 ? payload.bytesProcessed / payload.totalBytes : payload.phase === 'finalizing' ? 1 : 0
+      }),
+      await listen<DeliverableDownloadProgress>('aludock://deliverable-progress', ({ payload }) => {
+        const key = deliveryHistoryKey(payload.hostId, payload.instanceId, payload.deliveryRef)
+        if (!downloadingDeliveries.value.has(key)) return
+        deliveryProgress.value = {
+          ...deliveryProgress.value,
+          [key]: payload.totalBytes > 0 ? Math.min(1, payload.bytesReceived / payload.totalBytes) : 0,
+        }
       }),
       await listen<{ transactionId: string; stage: string; pin?: string; message?: string; error?: { message: string }; hostId?: string; registryRevision?: number; selectionGeneration?: number }>('aludock://pairing-status', ({ payload }) => {
         if (pairingTransactionId.value && payload.transactionId !== pairingTransactionId.value) return
@@ -566,6 +639,113 @@ async function forgetFromList(work: Work) {
   if (contextTransitionBusy.value) return
   app.selectWork(work.id)
   await forgetSelectedWork()
+}
+
+function openDeliveryTray() {
+  rememberModalTrigger()
+  app.workDrawerOpen = false
+  deliveryOpen.value = true
+  deliveryNotice.value = ''
+  void refreshDeliverables()
+}
+
+async function refreshDeliverables() {
+  const context = app.hostContext
+  const instanceId = selected.value?.id
+  if (!context || !instanceId) {
+    deliverables.value = []
+    deliveryLoading.value = false
+    return
+  }
+  const epoch = ++deliveryLoadEpoch
+  deliveryLoading.value = true
+  deliveryError.value = ''
+  try {
+    const items = await listDeliverables(instanceId, context)
+    if (epoch !== deliveryLoadEpoch || !app.contextMatches(context) || selected.value?.id !== instanceId) return
+    deliverables.value = items
+  } catch (cause) {
+    if (epoch !== deliveryLoadEpoch || !app.contextMatches(context) || selected.value?.id !== instanceId) return
+    deliveryError.value = errorMessage(cause, '无法加载当前 Work 的文件。请检查连接后重试。')
+  } finally {
+    if (epoch === deliveryLoadEpoch) deliveryLoading.value = false
+  }
+}
+
+async function saveDeliverable(deliverable: DeliverableDto) {
+  const context = app.hostContext
+  const work = selected.value
+  if (!context || !work) return
+  const existing = downloadedDelivery(downloadHistory.value, context.hostId, work.id, deliverable.deliveryRef)
+  if (existing) {
+    await openDownloadedDeliverable(existing)
+    return
+  }
+  const key = deliveryHistoryKey(context.hostId, work.id, deliverable.deliveryRef)
+  if (downloadingDeliveries.value.has(key)) return
+  downloadingDeliveries.value = new Set(downloadingDeliveries.value).add(key)
+  deliveryProgress.value = { ...deliveryProgress.value, [key]: 0 }
+  deliveryError.value = ''
+  deliveryNotice.value = ''
+  try {
+    const result = await downloadDeliverable(work.id, deliverable, context)
+    if (result.status === 'cancelled') return
+    const next = recordDownloadedDelivery(downloadHistory.value, {
+      hostId: context.hostId,
+      instanceId: work.id,
+      deliveryRef: result.deliverable.deliveryRef,
+      name: result.deliverable.name,
+      sizeBytes: result.deliverable.sizeBytes,
+      savedLocation: result.location,
+      downloadedAt: new Date().toISOString(),
+      sha256: result.sha256,
+      workName: work.displayName,
+    })
+    const persisted = persistDownloadHistory(downloadHistoryStorage, next)
+    downloadHistory.value = next
+    if (persisted) deliveryNotice.value = `“${result.deliverable.name}”已保存。`
+    else deliveryError.value = '文件已保存，但下载记录未能更新。下次打开客户端时可能仍显示“下载”。'
+  } catch (cause) {
+    deliveryError.value = errorMessage(cause, '文件没有下载完成，请重试。')
+  } finally {
+    const pending = new Set(downloadingDeliveries.value)
+    pending.delete(key)
+    downloadingDeliveries.value = pending
+    const progress = { ...deliveryProgress.value }
+    delete progress[key]
+    deliveryProgress.value = progress
+  }
+}
+
+async function openDownloadedDeliverable(item: DownloadedDeliverable) {
+  const key = deliveryHistoryKey(item.hostId, item.instanceId, item.deliveryRef)
+  if (openingDeliveryKey.value) return
+  openingDeliveryKey.value = key
+  deliveryError.value = ''
+  deliveryNotice.value = ''
+  try {
+    await openSavedDeliverable(item.savedLocation)
+  } catch (cause) {
+    deliveryError.value = errorMessage(cause, '找不到已保存的文件，或当前无法打开。请在设备的文件管理器中查找。')
+  } finally {
+    if (openingDeliveryKey.value === key) openingDeliveryKey.value = ''
+  }
+}
+
+async function clearLocalDownloadHistory() {
+  if (!downloadHistory.value.items.length) return
+  const confirmed = await askConfirm('要清空下载记录吗？', '')
+  await nextTick()
+  deliveryTrayRef.value?.focusClear()
+  if (!confirmed) return
+  const next = clearDownloadHistory()
+  if (!persistDownloadHistory(downloadHistoryStorage, next)) {
+    deliveryError.value = '下载记录未能清空，请重试。'
+    return
+  }
+  downloadHistory.value = next
+  deliveryError.value = ''
+  deliveryNotice.value = '下载记录已清空。'
 }
 
 function askConfirm(title: string, body = ''): Promise<boolean> {
@@ -671,6 +851,7 @@ function rememberModalTrigger() {
 }
 
 function closeModal() {
+  deliveryOpen.value = false
   directoryOpen.value = false
   commandOpen.value = false
   hostSettingsOpen.value = false
@@ -2376,6 +2557,10 @@ function handleOutputClick(event: MouseEvent) {
           <span class="alu-nav-stat-pill" :class="{ 'text-token-warn': contextPercent != null && contextPercent > 70 && contextPercent <= 90, 'text-token-danger': contextPercent != null && contextPercent > 90 }"><span>{{ formatContextUsage(selected?.metrics?.context) }}</span></span>
           <span class="alu-nav-stat-pill"><span>${{ Number(selected?.metrics?.cost || 0).toFixed(2) }}</span></span>
         </div>
+        <button type="button" class="alu-nav-files" aria-label="打开文件列表" :aria-expanded="deliveryOpen" @click="openDeliveryTray">
+          <FileDown :size="17" />
+          <span v-if="pendingDeliverableCount" class="alu-nav-files-badge">{{ pendingDeliverableCount > 99 ? '99+' : pendingDeliverableCount }}</span>
+        </button>
         <button class="alu-nav-hamburger" aria-label="打开工作列表" @click="app.workDrawerOpen = true">☰</button>
       </div>
     </nav>
@@ -2567,6 +2752,24 @@ function handleOutputClick(event: MouseEvent) {
         </div>
       </div>
     </section>
+
+    <DeliveryTray
+      ref="deliveryTrayRef"
+      :open="deliveryOpen"
+      :loading="deliveryLoading"
+      :error="deliveryError"
+      :notice="deliveryNotice"
+      :current-work-name="selected?.displayName || ''"
+      :current="currentDeliverableRows"
+      :history="olderDownloadHistory"
+      :history-count="downloadHistory.items.length"
+      :opening-key="openingDeliveryKey"
+      @close="deliveryOpen = false"
+      @refresh="refreshDeliverables"
+      @download="saveDeliverable"
+      @open-saved="openDownloadedDeliverable"
+      @clear="clearLocalDownloadHistory"
+    />
 
     <button class="alu-sidebar-overlay" :class="{ open: app.workDrawerOpen }" :aria-hidden="!app.workDrawerOpen" :tabindex="app.workDrawerOpen ? 0 : -1" aria-label="关闭工作列表" @click="app.workDrawerOpen = false" />
     <aside class="alu-sidebar" :class="{ open: app.workDrawerOpen }" :aria-hidden="!app.workDrawerOpen" :inert="!app.workDrawerOpen || undefined" aria-label="工作列表">
