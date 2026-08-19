@@ -8,6 +8,7 @@ mod deliverables;
 mod endpoint;
 mod error;
 mod extension_ui;
+mod fs_publish;
 mod host_registry;
 mod identity;
 mod instances;

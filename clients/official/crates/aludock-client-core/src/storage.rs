@@ -421,23 +421,14 @@ impl IdentityStore {
         let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
         self.write_new_private_file(&temporary, bytes)?;
         if !replace {
-            match fs::hard_link(&temporary, path) {
-                Ok(()) => {
-                    fs::remove_file(&temporary)
-                        .map_err(|source| storage_error(&temporary, source))?;
-                    return sync_directory(&self.root);
-                }
-                Err(source) => {
-                    let _ = fs::remove_file(&temporary);
-                    if source.kind() == std::io::ErrorKind::AlreadyExists {
-                        return Err(ClientError::InvalidPairing(format!(
-                            "identity state already exists: {}",
-                            path.display()
-                        )));
-                    }
-                    return Err(storage_error(path, source));
-                }
-            }
+            return match crate::fs_publish::publish_new_file(&temporary, path) {
+                Ok(true) => sync_directory(&self.root),
+                Ok(false) => Err(ClientError::InvalidPairing(format!(
+                    "identity state already exists: {}",
+                    path.display()
+                ))),
+                Err(source) => Err(storage_error(path, source)),
+            };
         }
         fs::rename(&temporary, path).map_err(|source| storage_error(path, source))?;
         sync_directory(&self.root)

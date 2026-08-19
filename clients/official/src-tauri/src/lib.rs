@@ -719,9 +719,11 @@ impl RuntimeLifecycle {
 }
 
 impl HostRuntimeState {
-    fn open() -> Result<Self, ClientError> {
+    fn open(application_data_dir: Option<PathBuf>) -> Result<Self, ClientError> {
         let registry = if let Some(path) = std::env::var_os("ALUDOCK_CLIENT_IDENTITY_DIR") {
             HostRegistry::open(PathBuf::from(path))?
+        } else if let Some(path) = application_data_dir {
+            HostRegistry::open(path.join("identity"))?
         } else {
             HostRegistry::platform_default()?
         };
@@ -1151,6 +1153,9 @@ fn invalidate_host_lifecycle(
 fn system_device_name() -> Option<String> {
     let name = hostname::get().ok()?.into_string().ok()?;
     let name = name.trim().to_owned();
+    if name.eq_ignore_ascii_case("localhost") || name.eq_ignore_ascii_case("localhost.localdomain") {
+        return None;
+    }
     validate_device_name(&name).ok().map(|_| name)
 }
 
@@ -3310,12 +3315,14 @@ fn open_saved_deliverable(
                 )
             })?;
             #[cfg(any(target_os = "android", target_os = "ios"))]
-            app.opener().open_path(path, None::<&str>).map_err(|_| {
-                deliverable_command_error(
-                    "saved_file_open_failed",
-                    SAVED_FILE_UNAVAILABLE_MESSAGE,
-                )
-            })?;
+            app.opener()
+                .open_path(location.value, None::<&str>)
+                .map_err(|_| {
+                    deliverable_command_error(
+                        "saved_file_open_failed",
+                        SAVED_FILE_UNAVAILABLE_MESSAGE,
+                    )
+                })?;
             Ok(())
         }
         "uri" => app
@@ -5029,12 +5036,18 @@ fn parse_trust_decision(value: &str) -> Result<ProjectTrustDecision, CommandErro
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let runtime = HostRuntimeState::open().expect("could not open the AluDock Host registry");
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
-        .manage(runtime)
+        .setup(|app| {
+            #[cfg(mobile)]
+            let application_data_dir = Some(app.path().app_local_data_dir()?);
+            #[cfg(not(mobile))]
+            let application_data_dir = None;
+            app.manage(HostRuntimeState::open(application_data_dir)?);
+            Ok(())
+        })
         .manage(FollowState::default())
         .manage(ExtensionControlState::default())
         .manage(PairingTaskState::default())

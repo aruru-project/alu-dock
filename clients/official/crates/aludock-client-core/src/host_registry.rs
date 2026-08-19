@@ -785,20 +785,13 @@ impl HostRegistry {
         let final_path = directory.join(format!("registry-{:020}.json", snapshot.revision));
         let temporary = directory.join(format!(".{}.tmp", Uuid::new_v4()));
         write_new_private_file(&temporary, &serde_json::to_vec_pretty(snapshot)?)?;
-        match fs::hard_link(&temporary, &final_path) {
-            Ok(()) => {
-                fs::remove_file(&temporary).map_err(|source| storage_error(&temporary, source))?;
+        match crate::fs_publish::publish_new_file(&temporary, &final_path) {
+            Ok(true) => {
                 sync_directory(&directory)?;
                 Ok(true)
             }
-            Err(source) if source.kind() == std::io::ErrorKind::AlreadyExists => {
-                fs::remove_file(&temporary).map_err(|error| storage_error(&temporary, error))?;
-                Ok(false)
-            }
-            Err(source) => {
-                let _ = fs::remove_file(&temporary);
-                Err(storage_error(&final_path, source))
-            }
+            Ok(false) => Ok(false),
+            Err(source) => Err(storage_error(&final_path, source)),
         }
     }
 
