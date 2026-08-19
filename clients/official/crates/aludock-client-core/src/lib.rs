@@ -17,6 +17,8 @@ mod sessions;
 mod srp;
 mod storage;
 mod tls;
+#[cfg(windows)]
+mod windows_security;
 mod wire;
 
 pub use actions::{

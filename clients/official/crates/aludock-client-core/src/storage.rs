@@ -512,35 +512,34 @@ impl IdentityStore {
     }
 
     fn ensure_private_directory(&self) -> Result<()> {
-        fs::create_dir_all(&self.root).map_err(|source| storage_error(&self.root, source))?;
-        set_private_directory_permissions(&self.root)?;
-        let metadata =
-            fs::symlink_metadata(&self.root).map_err(|source| storage_error(&self.root, source))?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(ClientError::InvalidPairing(format!(
-                "identity path is not a real directory: {}",
-                self.root.display()
-            )));
+        match fs::symlink_metadata(&self.root) {
+            Ok(metadata) => assert_real_private_directory(&self.root, &metadata, "identity path")?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir_all(&self.root)
+                    .map_err(|source| storage_error(&self.root, source))?;
+                let metadata = fs::symlink_metadata(&self.root)
+                    .map_err(|source| storage_error(&self.root, source))?;
+                assert_real_private_directory(&self.root, &metadata, "identity path")?;
+            }
+            Err(source) => return Err(storage_error(&self.root, source)),
         }
-        Ok(())
+        set_private_directory_permissions(&self.root)
     }
 
     fn ensure_state_directory(&self) -> Result<()> {
         let path = self.state_directory();
-        if !path.exists() {
-            fs::create_dir(&path).map_err(|source| storage_error(&path, source))?;
-            sync_directory(&self.root)?;
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) => assert_real_private_directory(&path, &metadata, "identity state path")?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&path).map_err(|source| storage_error(&path, source))?;
+                sync_directory(&self.root)?;
+                let metadata =
+                    fs::symlink_metadata(&path).map_err(|source| storage_error(&path, source))?;
+                assert_real_private_directory(&path, &metadata, "identity state path")?;
+            }
+            Err(source) => return Err(storage_error(&path, source)),
         }
-        set_private_directory_permissions(&path)?;
-        let metadata =
-            fs::symlink_metadata(&path).map_err(|source| storage_error(&path, source))?;
-        if !metadata.is_dir() || metadata.file_type().is_symlink() {
-            return Err(ClientError::InvalidPairing(format!(
-                "identity state path is not a real directory: {}",
-                path.display()
-            )));
-        }
-        Ok(())
+        set_private_directory_permissions(&path)
     }
 
     fn state_directory(&self) -> PathBuf {
@@ -554,6 +553,16 @@ impl IdentityStore {
                 "identity state is not a regular file: {}",
                 path.display()
             )));
+        }
+        #[cfg(windows)]
+        {
+            let parent = path.parent().ok_or_else(|| {
+                ClientError::InvalidPairing("identity state has no parent directory".into())
+            })?;
+            crate::windows_security::secure_directory(parent)
+                .map_err(|source| storage_error(parent, source))?;
+            crate::windows_security::secure_file(path)
+                .map_err(|source| storage_error(path, source))?;
         }
         assert_private_file_permissions(path, &metadata)?;
         fs::read(path).map_err(|source| storage_error(path, source))
@@ -635,6 +644,16 @@ fn validate_manifest_generation(schema_version: u32, generation: &str) -> Result
     Ok(())
 }
 
+fn assert_real_private_directory(path: &Path, metadata: &fs::Metadata, label: &str) -> Result<()> {
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(ClientError::InvalidPairing(format!(
+            "{label} is not a real directory: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
 fn storage_error(path: &Path, source: std::io::Error) -> ClientError {
     ClientError::Storage {
         path: path.display().to_string(),
@@ -661,7 +680,12 @@ fn set_private_directory_permissions(path: &Path) -> Result<()> {
         .map_err(|source| storage_error(path, source))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn set_private_directory_permissions(path: &Path) -> Result<()> {
+    crate::windows_security::secure_directory(path).map_err(|source| storage_error(path, source))
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn set_private_directory_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
@@ -673,7 +697,12 @@ fn set_private_file_permissions(path: &Path) -> Result<()> {
         .map_err(|source| storage_error(path, source))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn set_private_file_permissions(path: &Path) -> Result<()> {
+    crate::windows_security::secure_file(path).map_err(|source| storage_error(path, source))
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn set_private_file_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
@@ -690,7 +719,12 @@ fn assert_private_file_permissions(path: &Path, metadata: &fs::Metadata) -> Resu
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn assert_private_file_permissions(path: &Path, _metadata: &fs::Metadata) -> Result<()> {
+    crate::windows_security::assert_private_file(path).map_err(|source| storage_error(path, source))
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn assert_private_file_permissions(_path: &Path, _metadata: &fs::Metadata) -> Result<()> {
     Ok(())
 }

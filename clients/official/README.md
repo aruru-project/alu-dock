@@ -63,7 +63,7 @@ pnpm build
 (cd src-tauri && cargo check && cargo test && cargo clippy --all-targets -- -D warnings)
 ```
 
-Windows CI 使用 [`.github/workflows/windows-build.yml`](./.github/workflows/windows-build.yml) 在真实 `windows-latest` runner 上执行 Rust、Tauri 与前端测试，并生成未签名的 MSI / NSIS 测试安装包。工作流不注入或打包任何配对身份；正式分发前仍需完成 Windows 私钥 ACL 与代码签名。
+Windows CI 使用 [`.github/workflows/windows-build.yml`](./.github/workflows/windows-build.yml) 在真实 `windows-latest` runner 上执行 Rust（包括原生 ACL 测试）、Tauri 与前端测试，并生成未签名的 MSI / NSIS 测试安装包。工作流不注入或打包任何配对身份；未签名安装包仅供测试，正式分发仍需代码签名与 Windows 实机验收。
 
 Linux 桌面运行 Tauri 前还需要 Ubuntu 开发包：
 
@@ -119,7 +119,7 @@ target/debug/aludock-client --identity-dir ROOT remove-host-local HOST_ID --conf
 
 ## 凭据要求
 
-客户端数据根目录包含 registry、每 Host 的客户端私钥/证书、Host leaf 证书 pin 及元数据。不得将它复制到 WebView、日志、APK 资源或 Git 仓库。Unix 下目录使用 `0700`、文件使用 `0600`；Android 正式版使用应用私有沙箱。
+客户端数据根目录包含 registry、每 Host 的客户端私钥/证书、Host leaf 证书 pin 及元数据。不得将它复制到 WebView、日志、APK 资源或 Git 仓库。Unix 下目录使用 `0700`、文件使用 `0600`；Windows 使用受保护且不继承的 DACL，只授予当前用户与 `SYSTEM` 完全控制，拒绝 reparse point，并在读取旧状态时收紧 ACL；Android 正式版使用应用私有沙箱。
 
 开发身份只用于当前开发客户端。正式发布时，每台设备应生成并配对独立身份。
 

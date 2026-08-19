@@ -1878,6 +1878,15 @@ fn read_private_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     if !metadata.is_file() || metadata.file_type().is_symlink() {
         return Err(invalid("registry state is not a regular file"));
     }
+    #[cfg(windows)]
+    {
+        let parent = path
+            .parent()
+            .ok_or_else(|| invalid("registry state has no parent directory"))?;
+        crate::windows_security::secure_directory(parent)
+            .map_err(|source| storage_error(parent, source))?;
+        crate::windows_security::secure_file(path).map_err(|source| storage_error(path, source))?;
+    }
     serde_json::from_slice(&fs::read(path).map_err(|source| storage_error(path, source))?)
         .map_err(ClientError::from)
 }
@@ -1897,7 +1906,7 @@ fn write_new_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
         .map_err(|source| storage_error(path, source))?;
     file.sync_all()
         .map_err(|source| storage_error(path, source))?;
-    Ok(())
+    set_private_file_permissions(path)
 }
 
 fn remove_file_sync(path: &Path, parent: &Path) -> Result<()> {
@@ -1944,8 +1953,28 @@ fn set_private_directory_permissions(path: &Path) -> Result<()> {
         .map_err(|source| storage_error(path, source))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn set_private_directory_permissions(path: &Path) -> Result<()> {
+    crate::windows_security::secure_directory(path).map_err(|source| storage_error(path, source))
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn set_private_directory_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_private_file_permissions(path: &Path) -> Result<()> {
+    crate::windows_security::secure_file(path).map_err(|source| storage_error(path, source))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn set_private_file_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 

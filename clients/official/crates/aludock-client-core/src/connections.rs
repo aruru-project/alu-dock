@@ -606,6 +606,18 @@ fn load_latest_profile(
         if name.starts_with('.') || !name.ends_with(".json") {
             continue;
         }
+        let metadata =
+            fs::symlink_metadata(&path).map_err(|source| storage_error(&path, source))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(ClientError::InvalidPairing(
+                "Host connection profile is not a regular file".into(),
+            ));
+        }
+        #[cfg(windows)]
+        {
+            crate::windows_security::secure_file(&path)
+                .map_err(|source| storage_error(&path, source))?;
+        }
         let bytes = fs::read(&path).map_err(|source| storage_error(&path, source))?;
         let profile: HostConnectionProfile = serde_json::from_slice(&bytes)?;
         profile.validate(expected_host_id)?;
@@ -678,7 +690,26 @@ fn safe_label(value: &str, maximum: usize) -> bool {
 }
 
 fn ensure_private_directory(path: &Path) -> Result<()> {
-    fs::create_dir_all(path).map_err(|source| storage_error(path, source))?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(ClientError::InvalidPairing(
+                    "Host profile path is not a real directory".into(),
+                ));
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(path).map_err(|source| storage_error(path, source))?;
+            let metadata =
+                fs::symlink_metadata(path).map_err(|source| storage_error(path, source))?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(ClientError::InvalidPairing(
+                    "Host profile path is not a real directory".into(),
+                ));
+            }
+        }
+        Err(source) => return Err(storage_error(path, source)),
+    }
     set_private_directory_permissions(path)?;
     assert_private_directory(path)
 }
@@ -697,7 +728,8 @@ fn write_new_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
     file.write_all(bytes)
         .map_err(|source| storage_error(path, source))?;
     file.sync_all()
-        .map_err(|source| storage_error(path, source))
+        .map_err(|source| storage_error(path, source))?;
+    set_private_file_permissions(path)
 }
 
 #[cfg(unix)]
@@ -707,8 +739,28 @@ fn set_private_directory_permissions(path: &Path) -> Result<()> {
         .map_err(|source| storage_error(path, source))
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn set_private_directory_permissions(path: &Path) -> Result<()> {
+    crate::windows_security::secure_directory(path).map_err(|source| storage_error(path, source))
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn set_private_directory_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_private_file_permissions(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_private_file_permissions(path: &Path) -> Result<()> {
+    crate::windows_security::secure_file(path).map_err(|source| storage_error(path, source))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn set_private_file_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -728,7 +780,21 @@ fn assert_private_directory(path: &Path) -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn assert_private_directory(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path).map_err(|source| storage_error(path, source))?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ClientError::InvalidPairing(format!(
+            "Host profile path is not a directory: {}",
+            path.display()
+        )));
+    }
+    crate::windows_security::secure_directory(path)
+        .and_then(|()| crate::windows_security::assert_private_directory(path))
+        .map_err(|source| storage_error(path, source))
+}
+
+#[cfg(all(not(unix), not(windows)))]
 fn assert_private_directory(path: &Path) -> Result<()> {
     let metadata = fs::symlink_metadata(path).map_err(|source| storage_error(path, source))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
