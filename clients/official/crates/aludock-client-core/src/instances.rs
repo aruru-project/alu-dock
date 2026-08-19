@@ -355,12 +355,22 @@ pub struct ForgetResult {
 
 impl DockClient {
     pub async fn list_instances(&self, selector: InstanceSelector) -> Result<InstanceCatalog> {
+        self.list_instances_with_host_epoch(selector)
+            .await
+            .map(|(catalog, _)| catalog)
+    }
+
+    pub async fn list_instances_with_host_epoch(
+        &self,
+        selector: InstanceSelector,
+    ) -> Result<(InstanceCatalog, String)> {
         let mut cursor = None;
         let mut instances = Vec::new();
         let mut scan_identity = None;
+        let mut scan_host_epoch: Option<String> = None;
         loop {
-            let result: InstanceListResult = self
-                .request(
+            let (result, host_epoch): (InstanceListResult, String) = self
+                .request_with_host_epoch(
                     "instance.list",
                     &InstanceListParams {
                         selector,
@@ -371,6 +381,14 @@ impl DockClient {
                     None,
                 )
                 .await?;
+            if let Some(expected) = &scan_host_epoch
+                && expected != &host_epoch
+            {
+                return Err(ClientError::Protocol(
+                    "Host epoch changed during instance catalog pagination".into(),
+                ));
+            }
+            scan_host_epoch = Some(host_epoch);
             for instance in &result.instances {
                 instance.validate()?;
             }
@@ -395,11 +413,16 @@ impl DockClient {
                         "instance catalog page count did not match total".into(),
                     ));
                 }
-                return Ok(InstanceCatalog {
-                    instances,
-                    total: result.page.total,
-                    hidden_stopped: result.page.hidden_stopped,
-                });
+                return Ok((
+                    InstanceCatalog {
+                        instances,
+                        total: result.page.total,
+                        hidden_stopped: result.page.hidden_stopped,
+                    },
+                    scan_host_epoch.ok_or_else(|| {
+                        ClientError::Protocol("instance catalog omitted its Host epoch".into())
+                    })?,
+                ));
             }
         }
     }

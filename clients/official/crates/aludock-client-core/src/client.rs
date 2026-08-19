@@ -21,6 +21,8 @@ const MAX_RESPONSE_TRANSFER_CHUNK_BYTES: usize = 512 * 1024;
 const MAX_RESPONSE_TRANSFER_CHUNKS: usize =
     MAX_DOCK_TRANSFER_BYTES.div_ceil(MAX_RESPONSE_TRANSFER_CHUNK_BYTES);
 const RESPONSE_TRANSFER_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+const CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
+const LONG_MUTATION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(600);
 const CATALOG_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Clone)]
@@ -146,17 +148,22 @@ impl DockClient {
         if let Err(error) = write_json_line(&mut connection.stream, &request).await {
             return Err(ambiguous_if_mutation(error, operation_id));
         }
-        let response = if request_type == "session.tree" {
-            read_response_envelope(
-                &mut connection.stream,
-                maximum_line_bytes(&hello),
-                &request_id,
-                &hello.host.host_epoch,
-            )
-            .await
-        } else {
-            read_json_line(&mut connection.stream, maximum_line_bytes(&hello)).await
-        };
+        let response = timeout(response_timeout_for(request_type), async {
+            if request_type == "session.tree" {
+                read_response_envelope(
+                    &mut connection.stream,
+                    maximum_line_bytes(&hello),
+                    &request_id,
+                    &hello.host.host_epoch,
+                )
+                .await
+            } else {
+                read_json_line(&mut connection.stream, maximum_line_bytes(&hello)).await
+            }
+        })
+        .await
+        .map_err(|_| ClientError::Protocol("control response timed out".into()))
+        .and_then(|response| response);
         let response = match response {
             Ok(response) => response,
             Err(error) => return Err(ambiguous_if_mutation(error, operation_id)),
@@ -191,8 +198,12 @@ impl DockClient {
         )
         .await?;
         let maximum_bytes = maximum_line_bytes(&hello);
-        let response: ResponseEnvelope =
-            read_json_line(&mut connection.stream, maximum_bytes).await?;
+        let response: ResponseEnvelope = timeout(
+            CONTROL_RESPONSE_TIMEOUT,
+            read_json_line(&mut connection.stream, maximum_bytes),
+        )
+        .await
+        .map_err(|_| ClientError::Protocol("control response timed out".into()))??;
         validate_response_envelope(&response, &request_id, &hello.host.host_epoch)?;
         let result = response_result(response, request_type, None)?;
         Ok((
@@ -249,8 +260,12 @@ impl DockClient {
             },
         )
         .await?;
-        let reply: HelloReply =
-            read_json_line(&mut connection.stream, MAX_CONTROL_LINE_BYTES).await?;
+        let reply: HelloReply = timeout(
+            CONTROL_RESPONSE_TIMEOUT,
+            read_json_line(&mut connection.stream, MAX_CONTROL_LINE_BYTES),
+        )
+        .await
+        .map_err(|_| ClientError::Protocol("Host hello timed out".into()))??;
         let hello = validate_hello(reply, &request_id, required_capabilities)?;
         Ok((connection, hello))
     }
@@ -501,6 +516,16 @@ pub(crate) fn response_result<R: DeserializeOwned>(
             operation_id,
         )
     })
+}
+
+fn response_timeout_for(request_type: &str) -> Duration {
+    match request_type {
+        "instance.create" | "instance.ensure" | "instance.adopt" | "instance.reopen"
+        | "instance.stop" | "command.abort" | "session.switch" | "session.new"
+        | "session.compact" | "session.reload" | "session.navigate" | "session.fork"
+        | "session.clone" => LONG_MUTATION_RESPONSE_TIMEOUT,
+        _ => CONTROL_RESPONSE_TIMEOUT,
+    }
 }
 
 fn ambiguous_if_mutation(error: ClientError, operation_id: Option<&str>) -> ClientError {
@@ -790,6 +815,18 @@ mod tests {
             ClientError::EffectUnknown { operation_id, .. }
                 if operation_id == "original-operation"
         ));
+    }
+
+    #[test]
+    fn response_waits_are_bounded_by_the_reference_client_deadlines() {
+        assert_eq!(
+            response_timeout_for("instance.list"),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            response_timeout_for("instance.reopen"),
+            Duration::from_secs(600)
+        );
     }
 
     #[test]

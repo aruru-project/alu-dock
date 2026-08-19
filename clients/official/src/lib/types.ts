@@ -142,6 +142,15 @@ export interface BootstrapPayload {
   hiddenStopped: number
 }
 
+export interface WorkCatalog {
+  hostId: string
+  selectionGeneration: number
+  hostEpoch: string
+  instances: Work[]
+  total: number
+  hiddenStopped: number
+}
+
 export interface WorkspaceEntry {
   name: string
   kind: 'directory' | 'symlink'

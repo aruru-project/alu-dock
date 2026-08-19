@@ -490,6 +490,8 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 .alu-live-notice-row > * {
   flex: 0 1 auto;
   max-width: 100%;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .alu-record-panel {
@@ -1149,25 +1151,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 /* ═══════════════════════════════════════════════════════
    Sidebar
    ═══════════════════════════════════════════════════════ */
-
-.alu-sidebar {
-  transform: translateX(-100%);
-  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-  box-shadow: 4px 0 24px rgba(0, 0, 0, 0.5);
-  z-index: 50;
-}
-.alu-sidebar.open { transform: translateX(0); }
-
-.alu-sidebar-overlay {
-  opacity: 0;
-  pointer-events: none;
-  transition: opacity 0.25s ease;
-  z-index: 49;
-}
-.alu-sidebar-overlay.open {
-  opacity: 1;
-  pointer-events: auto;
-}
 
 .alu-session-row {
   border-bottom: 1px solid var(--alu-border);

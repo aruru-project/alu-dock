@@ -10,6 +10,20 @@ export function attachmentsAfterSubmit(
   return current.filter((item) => !captured.has(item.fileId))
 }
 
+export function moveAttachmentPreviewResource<T extends { url: string }>(
+  current: Record<string, T>,
+  from: string,
+  to: string,
+): { resources: Record<string, T>; moved?: T; replaced?: T } {
+  const moved = current[from]
+  if (!moved || from === to) return { resources: current }
+  const resources = { ...current }
+  delete resources[from]
+  const replaced = resources[to]
+  resources[to] = moved
+  return { resources, moved, replaced }
+}
+
 export function appendRestoredQueue(
   currentText: string,
   currentAttachments: AttachmentDto[],

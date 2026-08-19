@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
-import { AlertTriangle, ChevronRight, RefreshCw, X } from '@lucide/vue'
+import { AlertTriangle, ChevronRight, RefreshCw } from '@lucide/vue'
 import {
   acquireExtensionControl,
   isTauri,
@@ -139,7 +139,11 @@ async function acquire() {
 async function release() {
   const handle = extension.controller?.handle
   if (!handle) return
-  if (!await extension.releaseController(handle, 'detached')) return
+  acquiringError.value = ''
+  if (!await extension.releaseController(handle, 'detached')) {
+    acquiringError.value = '暂时无法退出操作面板，请重试。'
+    return
+  }
   if (!unknownInteractionId) {
     extension.hideControllerRequest()
     resetResponse()
@@ -295,12 +299,6 @@ function isUnknown(cause: unknown) { return !!cause && typeof cause === 'object'
         <summary>{{ widget.key }}<ChevronRight :size="14" /></summary>
         <pre>{{ widget.lines.join('\n') }}</pre>
       </details>
-    </div>
-
-    <div v-if="extension.feedback.length" class="extension-feedback" aria-live="polite">
-      <div v-for="item in extension.feedback" :key="item.id" :data-tone="item.tone">
-        <span>{{ item.message }}</span><button aria-label="关闭通知" @click="extension.dismissFeedback(item.id)"><X :size="13" /></button>
-      </div>
     </div>
 
     <Teleport to="body">

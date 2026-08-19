@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { bootstrap, getHostCatalog, removeLocalHost, setActiveHost } from '../lib/bridge'
+import { bootstrap, getHostCatalog, removeLocalHost, setActiveHost, workCatalog } from '../lib/bridge'
 import {
   emptyLocalUiState,
   migrateLocalUiState,
@@ -23,6 +23,7 @@ export const useAppStore = defineStore('app', () => {
   const storage = browserStorage()
   let localStateInitialized = false
   let loadEpoch = 0
+  let workCatalogRefreshEpoch = 0
 
   const activeHostId = computed(() => catalog.value?.activeHostId ?? null)
   const activeHost = computed(() => catalog.value?.hosts.find((host) => host.hostId === activeHostId.value) ?? null)
@@ -50,6 +51,7 @@ export const useAppStore = defineStore('app', () => {
 
   async function load() {
     const epoch = ++loadEpoch
+    ++workCatalogRefreshEpoch
     loading.value = true
     error.value = null
     hostUnreachable.value = false
@@ -72,6 +74,7 @@ export const useAppStore = defineStore('app', () => {
   }
 
   async function loadActive(epoch = ++loadEpoch) {
+    ++workCatalogRefreshEpoch
     const context = hostContext.value
     if (!context) return
     const captured = { ...context }
@@ -109,6 +112,7 @@ export const useAppStore = defineStore('app', () => {
   async function switchHost(hostId: string) {
     if (!catalog.value || hostId === catalog.value.activeHostId) return
     const epoch = ++loadEpoch
+    ++workCatalogRefreshEpoch
     loading.value = true
     error.value = null
     hostUnreachable.value = false
@@ -129,6 +133,7 @@ export const useAppStore = defineStore('app', () => {
   async function removeHost(hostId: string) {
     if (!catalog.value) return
     const epoch = ++loadEpoch
+    ++workCatalogRefreshEpoch
     loading.value = true
     try {
       const next = await removeLocalHost(hostId, catalog.value.revision)
@@ -144,6 +149,38 @@ export const useAppStore = defineStore('app', () => {
       if (epoch === loadEpoch) error.value = humanError(cause)
     } finally {
       if (epoch === loadEpoch) loading.value = false
+    }
+  }
+
+  async function refreshWorksQuietly() {
+    const context = hostContext.value
+    const currentPayload = payload.value
+    if (!context || !currentPayload || currentPayload.hostId !== context.hostId) return false
+    const captured = { ...context }
+    const hostEpoch = currentPayload.host.hostEpoch
+    const refreshEpoch = ++workCatalogRefreshEpoch
+    try {
+      const next = await workCatalog(captured)
+      if (refreshEpoch !== workCatalogRefreshEpoch || !contextMatches(captured)) return false
+      const target = payload.value
+      if (!target || target.hostId !== captured.hostId || target.host.hostEpoch !== hostEpoch) return false
+      if (next.hostId !== captured.hostId || next.selectionGeneration !== captured.selectionGeneration || next.hostEpoch !== hostEpoch) return false
+      next.instances = next.instances.map((incoming) => {
+        const current = target.works.find((work) => work.id === incoming.id)
+        return current && snapshotIsNewer(current, incoming) ? current : incoming
+      })
+      target.works = next.instances
+      target.total = next.total
+      target.hiddenStopped = next.hiddenStopped
+      if (selectedWorkId.value && !selectedWork.value) {
+        selectedWorkId.value = null
+        const host = localUiState.value.hosts[captured.hostId]
+        if (host) host.selectedWorkId = null
+        saveLocalState()
+      }
+      return true
+    } catch {
+      return false
     }
   }
 
@@ -249,7 +286,7 @@ export const useAppStore = defineStore('app', () => {
   return {
     catalog, activeHostId, activeHost, hostContext, payload, works, selectedWork, selectedWorkId,
     currentDraft, currentAttachments, detailMode, loading, error, hostUnreachable, needsPairing, workDrawerOpen,
-    load, loadActive, switchHost, removeHost, contextMatches, applyHostProfile, applyWorkSnapshot, selectWork,
+    load, loadActive, refreshWorksQuietly, switchHost, removeHost, contextMatches, applyHostProfile, applyWorkSnapshot, selectWork,
     setCurrentDraft, setCurrentAttachments, setDetailMode,
   }
 })

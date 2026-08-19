@@ -1,13 +1,29 @@
 import { strict as assert } from 'node:assert'
 import { computed, nextTick, ref, watch } from 'vue'
+import { createPinia, setActivePinia } from 'pinia'
 import { projectConversation } from '../src/lib/conversation.ts'
 import { reduceLiveEvent, type LiveProjectionState } from '../src/lib/liveReducer.ts'
 import { conversationBoundaryKey, conversationSwapIsCorrelated, draftAfterSubmit, FollowActivationCoordinator, formatContextUsage, formatTokenCount, outputIsNearBottom, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../src/lib/uiBoundaries.ts'
 import { userErrorMessage } from '../src/lib/userError.ts'
 import type { ConversationBootstrap, ProjectedEvent, Work } from '../src/lib/types.ts'
+import { useCommandConsoleStore } from '../src/stores/command-console.ts'
 
 const work = makeWork()
 let state: LiveProjectionState = { hostId: 'host-a', selectionGeneration: 4, hostEpoch: 'epoch-a', instance: work, queue: [], sequence: 0 }
+
+setActivePinia(createPinia())
+const commandConsole = useCommandConsoleStore()
+commandConsole.bindContext('host-a', 4, work)
+commandConsole.beginOperation('command-operation', 'dock-tools', 'summary')
+assert.equal(commandConsole.handleDockEvent(event(1, 'extension.notification', { operationId: 'ordinary-operation', message: 'not this command' })).matched, false)
+assert.equal(commandConsole.handleDockEvent(event(2, 'extension.notification', { operationId: 'command-operation', message: '完整命令输出，不进入主要对话。' })).matched, true)
+commandConsole.handleDockEvent(event(3, 'command.handled', { operationId: 'command-operation' }))
+assert.equal(commandConsole.hasActiveOperation, false)
+assert.deepEqual(commandConsole.entries.map((entry) => entry.text), ['/dock-tools summary', '完整命令输出，不进入主要对话。'])
+commandConsole.bindContext('host-a', 4, work)
+assert.equal(commandConsole.entries.length, 2, 'closing and reopening Command Center in the same Work preserves command history')
+commandConsole.bindContext('host-a', 5, work)
+assert.equal(commandConsole.entries.length, 0, 'a Host-selection boundary cannot inherit another conversation command history')
 
 state = applied(state, event(1, 'run.started', {}))
 assert.equal(state.instance.execution, 'running', 'run.started enables Abort-facing running state')
@@ -127,6 +143,13 @@ const stale = reduceLiveEvent(queueState, { hostId: 'host-a', selectionGeneratio
 assert.equal(stale.kind, 'ignored', 'older generation cannot enter current projection')
 const replacement = reduceLiveEvent(queueState, { hostId: 'host-a', selectionGeneration: 4, instanceId: 'work-1', event: event(1, 'session.replaced', { runtimeGeneration: 2 }, 2) })
 assert.equal(replacement.kind, 'rebuild', 'replacement generation triggers correlated rebuild rather than merge')
+
+const liveNotices = projectConversation(bootstrap(state, [
+  event(6, 'extension.notification', { level: 'info', message: '这是一条完整且不可手动关闭的 Extension 通知。' }),
+  event(7, 'resources.reloaded', { resources: [{ uri: 'one' }, { uri: 'two' }], diagnostics: [] }),
+]))
+assert.equal(liveNotices.some((item) => item.kind === 'notice' && item.text === '这是一条完整且不可手动关闭的 Extension 通知。'), true)
+assert.equal(liveNotices.some((item) => item.kind === 'notice' && item.text === '资源已重新加载（2）'), true)
 
 const aborted = projectConversation(bootstrap(state, [event(8, 'run.settled', { result: 'aborted' })]))
 assert.equal(aborted.some((item) => item.kind === 'notice' && item.tone === 'warning' && item.text.includes('中止')), true)

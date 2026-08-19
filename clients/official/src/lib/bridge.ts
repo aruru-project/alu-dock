@@ -34,6 +34,7 @@ import type {
   ThinkingLevel,
   ToolsResult,
   Work,
+  WorkCatalog,
   WorkspacePage,
 } from './types'
 
@@ -143,6 +144,18 @@ export async function bootstrap(context: HostContext): Promise<BootstrapPayload>
   return previewBootstrap
 }
 
+export async function workCatalog(context: HostContext): Promise<WorkCatalog> {
+  if (isTauri) return invoke<WorkCatalog>('work_catalog', { ...context })
+  return {
+    hostId: previewBootstrap.hostId,
+    selectionGeneration: previewBootstrap.selectionGeneration,
+    hostEpoch: previewBootstrap.host.hostEpoch,
+    instances: previewBootstrap.works,
+    total: previewBootstrap.total,
+    hiddenStopped: previewBootstrap.hiddenStopped,
+  }
+}
+
 export async function startConversationFollow(
   instanceId: string,
   subscriptionId: string,
@@ -250,8 +263,8 @@ export async function commandCatalog(instanceId: string, context: HostContext): 
   return previewCommands
 }
 
-export async function runCatalogCommand(instanceId: string, name: string, argumentsText: string, context: HostContext): Promise<{ receipt: { queued: boolean; delivery: string }; instance: Work }> {
-  if (isTauri) return invoke('run_catalog_command', { ...context, instanceId, name, arguments: argumentsText })
+export async function runCatalogCommand(instanceId: string, name: string, argumentsText: string, operationId: string, context: HostContext): Promise<{ receipt: { operationId: string; kind: 'prompt' | 'extension_command'; queued: boolean; delivery: string }; instance: Work }> {
+  if (isTauri) return invoke('run_catalog_command', { ...context, instanceId, name, arguments: argumentsText, operationId })
   throw new Error('浏览器设计预览不会运行命令')
 }
 

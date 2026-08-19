@@ -161,6 +161,54 @@ export function projectConversation(bootstrap: ConversationBootstrap, options: C
         renderToolDetail(tool)
         break
       }
+      case 'extension.notification': {
+        const message = stringValue(data.message)
+        if (message) appendLiveNotice(items, event, notificationTone(data.level), message)
+        break
+      }
+      case 'extension.error': {
+        const message = stringValue(data.error)
+        if (message) appendLiveNotice(items, event, 'error', message)
+        break
+      }
+      case 'resources.reloaded': {
+        const count = Array.isArray(data.resources) ? data.resources.length : 0
+        appendLiveNotice(items, event, 'info', `资源已重新加载（${count}）`)
+        break
+      }
+      case 'settings.write_failed': {
+        const message = stringValue(data.error)
+        if (message) appendLiveNotice(items, event, 'error', `${stringValue(data.key) ? `${stringValue(data.key)}：` : ''}${message}`)
+        break
+      }
+      case 'run.retry_started': {
+        const attempt = Number(data.attempt)
+        const maximum = Number(data.maxAttempts)
+        const prefix = Number.isFinite(attempt) && Number.isFinite(maximum) ? `正在重试（${attempt}/${maximum}）` : '正在重试'
+        appendLiveNotice(items, event, 'info', `${prefix}${stringValue(data.error) ? `：${stringValue(data.error)}` : '…'}`)
+        break
+      }
+      case 'run.retry_completed': {
+        const succeeded = data.success === true
+        appendLiveNotice(items, event, succeeded ? 'info' : 'error', succeeded ? '重试已恢复。' : stringValue(data.error) || '重试没有成功。')
+        break
+      }
+      case 'compaction.started':
+        appendLiveNotice(items, event, 'info', `正在压缩上下文${stringValue(data.reason) ? `（${stringValue(data.reason)}）` : ''}…`)
+        break
+      case 'compaction.completed':
+        appendLiveNotice(items, event, data.error ? 'error' : 'info', stringValue(data.error) || (data.aborted ? '上下文压缩已取消。' : '上下文压缩完成。'))
+        break
+      case 'instance.stopped':
+        appendLiveNotice(items, event, Array.isArray(data.cleanupErrors) && data.cleanupErrors.length ? 'error' : 'info', 'Work 已停止。')
+        break
+      case 'instance.runtime_error':
+      case 'instance.error':
+      case 'command.rejected': {
+        const message = stringValue(data.error) || stringValue(data.reason)
+        if (message) appendLiveNotice(items, event, 'error', message)
+        break
+      }
       case 'run.settled': {
         activityVisible = false
         const result = typeof data.result === 'string' ? data.result : ''
@@ -461,6 +509,23 @@ function attachmentArray(value: unknown): AttachmentDto[] {
     return typeof candidate.fileId === 'string' && typeof candidate.name === 'string'
       && typeof candidate.sizeBytes === 'number' && typeof candidate.sha256 === 'string' && typeof candidate.storedAt === 'string'
   })
+}
+
+function appendLiveNotice(
+  output: ConversationItem[],
+  event: ConversationBootstrap['activeEvents'][number],
+  tone: 'info' | 'warning' | 'error',
+  text: string,
+) {
+  output.push({ id: `live-notice-${event.sequence}`, kind: 'notice', tone, text })
+}
+
+function notificationTone(value: unknown): 'info' | 'warning' | 'error' {
+  return value === 'error' ? 'error' : value === 'warning' ? 'warning' : 'info'
+}
+
+function stringValue(value: unknown) {
+  return typeof value === 'string' ? value : ''
 }
 
 function shortTime(value?: string) {

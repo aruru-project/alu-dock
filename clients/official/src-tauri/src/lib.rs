@@ -48,6 +48,17 @@ struct BootstrapPayload {
     hidden_stopped: u64,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkCatalogPayload {
+    host_id: String,
+    selection_generation: u64,
+    host_epoch: String,
+    instances: Vec<InstanceSnapshot>,
+    total: u64,
+    hidden_stopped: u64,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HostCatalogEntry {
@@ -1577,14 +1588,20 @@ async fn bootstrap(
     let client =
         DockClient::from_connection_profile_preferred(&store, &profile, &active_endpoint_id)
             .map_err(CommandError::from)?;
+    let (catalog, catalog_host_epoch) = client
+        .list_instances_with_host_epoch(InstanceSelector::All)
+        .await
+        .map_err(CommandError::from)?;
+    if catalog_host_epoch != info.host.host_epoch {
+        return Err(CommandError::from(ClientError::Protocol(
+            "Host epoch changed while bootstrapping the instance catalog".into(),
+        )));
+    }
     let InstanceCatalog {
         instances,
         total,
         hidden_stopped,
-    } = client
-        .list_instances(InstanceSelector::All)
-        .await
-        .map_err(CommandError::from)?;
+    } = catalog;
     Ok(BootstrapPayload {
         host_id,
         selection_generation,
@@ -1600,6 +1617,27 @@ async fn bootstrap(
         works: instances,
         total,
         hidden_stopped,
+    })
+}
+
+#[tauri::command]
+async fn work_catalog(
+    runtime: tauri::State<'_, HostRuntimeState>,
+    host_id: String,
+    selection_generation: u64,
+) -> Result<WorkCatalogPayload, CommandError> {
+    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let (catalog, host_epoch) = dock_client(&store)?
+        .list_instances_with_host_epoch(InstanceSelector::All)
+        .await
+        .map_err(CommandError::from)?;
+    Ok(WorkCatalogPayload {
+        host_id,
+        selection_generation,
+        host_epoch,
+        instances: catalog.instances,
+        total: catalog.total,
+        hidden_stopped: catalog.hidden_stopped,
     })
 }
 
@@ -3245,6 +3283,7 @@ async fn run_catalog_command(
     instance_id: String,
     name: String,
     arguments: String,
+    operation_id: String,
 ) -> Result<SubmitResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
     let client = dock_client(&store)?;
@@ -3274,7 +3313,12 @@ async fn run_catalog_command(
         format!("/{name} {arguments}")
     };
     client
-        .submit_message(&instance_id, &message, DeliveryMode::Auto, None)
+        .submit_message(
+            &instance_id,
+            &message,
+            DeliveryMode::Auto,
+            Some(&operation_id),
+        )
         .await
         .map_err(CommandError::from)
 }
@@ -4407,6 +4451,7 @@ pub fn run() {
             cancel_pairing,
             discard_pairing,
             bootstrap,
+            work_catalog,
             conversation_bootstrap,
             conversation_history,
             conversation_image,

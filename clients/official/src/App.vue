@@ -59,7 +59,7 @@ import {
 } from './lib/bridge'
 import type { CreateWorkContinuation } from './lib/bridge'
 import { projectConversation } from './lib/conversation'
-import { appendRestoredQueue, attachmentsAfterSubmit } from './lib/attachmentDraft'
+import { appendRestoredQueue, attachmentsAfterSubmit, moveAttachmentPreviewResource } from './lib/attachmentDraft'
 import {
   DEVICE_NAME_FALLBACK,
   browserDeviceNameStorage,
@@ -90,6 +90,7 @@ import ControlCenter, { type ControlMutationDomain, type ControlSection } from '
 import ConversationProcessParts from './components/ConversationProcessParts.vue'
 import ExtensionUiSurface from './components/ExtensionUiSurface.vue'
 import { useAppStore } from './stores/app'
+import { useCommandConsoleStore } from './stores/command-console'
 import { useExtensionUiStore } from './stores/extension-ui'
 
 marked.use({ breaks: true, gfm: true })
@@ -107,6 +108,7 @@ const MARKDOWN_SANITIZE_CONFIG = {
 }
 
 const app = useAppStore()
+const commandConsole = useCommandConsoleStore()
 const extensionUi = useExtensionUiStore()
 const draft = computed({ get: () => app.currentDraft, set: (value: string) => app.setCurrentDraft(value) })
 const draftAttachments = computed({ get: () => app.currentAttachments, set: (value: AttachmentDto[]) => app.setCurrentAttachments(value) })
@@ -132,6 +134,7 @@ const workspaceError = ref<string | null>(null)
 const creatingWork = ref(false)
 const trustContinuation = ref<CreateWorkContinuation | null>(null)
 const reopenTrustContinuation = ref<CreateWorkContinuation | null>(null)
+const reconcilingReopenWorkId = ref('')
 const realConversation = ref<ConversationItem[]>([])
 type ConversationImagePart = Extract<ConversationProcessItem, { kind: 'image' }>
 type ImagePreview =
@@ -351,6 +354,20 @@ watch(() => selected.value?.displayName, () => {
 watch(() => Boolean(app.payload && !app.needsPairing && !selected.value), (showList) => {
   if (showList) app.workDrawerOpen = true
 })
+watch(() => app.workDrawerOpen, (open, wasOpen) => {
+  if (open && !wasOpen) void app.refreshWorksQuietly()
+})
+watch([
+  () => app.activeHostId,
+  () => app.hostContext?.selectionGeneration,
+  () => selected.value?.id,
+  () => selected.value?.ownerHostEpoch,
+  () => selected.value?.runtimeGeneration,
+], () => {
+  const context = app.hostContext
+  const work = selected.value
+  if (context && work) commandConsole.bindContext(context.hostId, context.selectionGeneration, work)
+}, { immediate: true })
 watch(confirmDialog, async (dialog) => {
   if (!dialog) return
   await nextTick()
@@ -1032,14 +1049,10 @@ function removeAttachmentPreview(key: string) {
 }
 
 function moveAttachmentPreview(from: string, to: string) {
-  const resource = attachmentPreviews.value[from]
-  if (!resource || from === to) return
-  const next = { ...attachmentPreviews.value }
-  delete next[from]
-  const replaced = next[to]
-  if (replaced?.url !== resource.url) URL.revokeObjectURL(replaced.url)
-  next[to] = resource
-  attachmentPreviews.value = next
+  const moved = moveAttachmentPreviewResource(attachmentPreviews.value, from, to)
+  if (!moved.moved) return
+  if (moved.replaced && moved.replaced.url !== moved.moved.url) URL.revokeObjectURL(moved.replaced.url)
+  attachmentPreviews.value = moved.resources
   if (imagePreview.value?.kind === 'attachment' && imagePreview.value.attachmentKey === from) {
     imagePreview.value = { ...imagePreview.value, attachmentKey: to }
   }
@@ -1360,32 +1373,58 @@ async function stopSelectedWork() {
 
 async function reopenSelectedWork(continuation?: CreateWorkContinuation) {
   const work = selected.value
-  if (!isTauri || contextTransitionBusy.value || !work || !work.reopenable || workMutating.value) return
+  if (!isTauri || contextTransitionBusy.value || !work || !work.reopenable || workMutating.value || mutationOutcomeUnknown.value) return
+  const capturedHost = hostContext()
+  const previousGeneration = work.runtimeGeneration
   workMutating.value = true
   submissionError.value = null
   try {
-    const capturedHost = hostContext()
     const snapshot = await reopenWork(work.id, capturedHost, continuation)
     if (!app.contextMatches(capturedHost)) return
     app.applyWorkSnapshot(snapshot, capturedHost)
     reopenTrustContinuation.value = null
-    await app.load()
-    await loadSelectedConversation(work.id)
+    void app.refreshWorksQuietly()
+    void loadSelectedConversation(work.id)
   } catch (cause) {
-    const failure = cause as { code?: string; message?: string; details?: Record<string, unknown>; operationId?: string }
+    const failure = cause as { code?: string; message?: string; details?: Record<string, unknown>; operationId?: string; outcomeUnknown?: boolean }
     if (failure?.code === 'project_trust_required') {
       const operationId = String(failure.details?.operationId || failure.operationId || '')
       const trustChallengeId = String(failure.details?.challengeId || '')
       if (operationId && trustChallengeId) {
         reopenTrustContinuation.value = { operationId, trustChallengeId, projectTrustDecision: 'trust_once' }
       } else submissionError.value = 'Dock 请求确认项目信任，但没有返回完整的确认信息。'
-    } else {
+    } else if (failure?.outcomeUnknown === true) {
       markUnknownOutcome(cause, 'work', work.id)
+      reconcilingReopenWorkId.value = work.id
+      submissionError.value = 'Dock 已收到继续请求，正在确认 Work 的实际状态…'
+      void reconcileReopenOutcome(work.id, previousGeneration, capturedHost)
+    } else {
       submissionError.value = errorMessage(cause)
     }
   } finally {
     workMutating.value = false
   }
+}
+
+async function reconcileReopenOutcome(workId: string, previousGeneration: number, context: HostContext) {
+  if (!await app.refreshWorksQuietly() || !app.contextMatches(context)) {
+    submissionError.value = '暂时无法确认 Work 的实际状态；连接恢复后会继续以 Dock 状态为准。'
+    return
+  }
+  const current = app.works.find((work) => work.id === workId)
+  if (!current || current.lifecycle !== 'active' || current.runtimeGeneration <= previousGeneration) {
+    submissionError.value = 'Dock 尚未确认 Work 已继续；为避免重复启动，当前不会再次发送请求。'
+    return
+  }
+  const key = mutationKey(workId, 'work')
+  const next = new Map(unresolvedMutations.value)
+  next.delete(key)
+  unresolvedMutations.value = next
+  submissionError.value = null
+  reopenTrustContinuation.value = null
+  reconcilingReopenWorkId.value = ''
+  app.applyWorkSnapshot(current, context)
+  void loadSelectedConversation(workId, true)
 }
 
 async function forgetSelectedWork() {
@@ -1641,8 +1680,13 @@ async function applyFollowEvent(payload: { hostId: string; selectionGeneration: 
     void loadSelectedConversation(payload.instanceId, true)
     return
   }
-  state.activeEvents.push(payload.event)
-  if (reduced.conversationChanged || payload.event.eventType === 'run.started') scheduleConversationProjection()
+  const commandRoute = commandConsole.handleDockEvent(payload.event)
+  const commandOnlyNotification = payload.event.eventType === 'extension.notification'
+    && commandRoute.matched
+    && payload.event.data.level !== 'warning'
+    && payload.event.data.level !== 'error'
+  if (!commandOnlyNotification) state.activeEvents.push(payload.event)
+  if ((reduced.conversationChanged && !commandOnlyNotification) || payload.event.eventType === 'run.started') scheduleConversationProjection()
 }
 
 function handleActiveFollowStatus(payload: {
@@ -2190,7 +2234,7 @@ function handleOutputClick(event: MouseEvent) {
           <dl class="alu-work-state-meta"><div><dt>Workspace</dt><dd>{{ selected.cwd }}</dd></div></dl>
           <div v-if="selected.lastError" class="alu-work-state-error">{{ selected.lastError }}</div>
           <div class="alu-work-state-actions">
-            <button v-if="selected.reopenable" class="alu-work-state-primary" :disabled="workMutating" @click="reopenSelectedWork()">{{ inactiveState(selected).action }}</button>
+            <button v-if="selected.reopenable" class="alu-work-state-primary" :disabled="workMutating || mutationOutcomeUnknown" @click="reopenSelectedWork()">{{ workMutating ? '正在继续…' : inactiveState(selected).action }}</button>
             <button class="alu-work-state-secondary" @click="app.workDrawerOpen = true">查看工作列表</button>
             <button class="alu-work-state-secondary" @click="app.load">刷新状态</button>
           </div>
@@ -2254,7 +2298,7 @@ function handleOutputClick(event: MouseEvent) {
     <section v-if="selected && selected.lifecycle === 'active'" class="alu-input-section" aria-label="消息编辑器">
       <button v-if="outputAwayFromBottom" type="button" class="alu-scroll-bottom" aria-label="滚动到最新消息" @click="scrollOutputToBottom(true)"><span aria-hidden="true">↓</span>滚到底部</button>
       <ExtensionUiSurface :work="selected" :reconcile-interaction="reconcileExtensionInteraction" @editor-text="applyExtensionEditorText" @title="applyExtensionTitle">
-        <div v-if="submissionError" class="alu-composer-error"><span>{{ submissionError }}</span><button v-if="mutationOutcomeUnknown" @click="reconcileMutationOutcome()">刷新并确认</button></div>
+        <div v-if="submissionError" class="alu-composer-error"><span>{{ submissionError }}</span><button v-if="mutationOutcomeUnknown && reconcilingReopenWorkId !== selected.id" @click="reconcileMutationOutcome()">刷新并确认</button></div>
         <div v-if="queueNotice" class="alu-composer-notice" role="status">{{ queueNotice }}<button type="button" @click="queueNotice = ''">×</button></div>
         <div v-if="selected.pending.total" class="alu-queue-tray">
           <span class="alu-queue-title">Queue · {{ selected.pending.total }}</span>
@@ -2291,7 +2335,7 @@ function handleOutputClick(event: MouseEvent) {
       </div>
     </section>
 
-    <button v-if="app.workDrawerOpen" class="alu-sidebar-overlay open" aria-label="关闭工作列表" @click="app.workDrawerOpen = false" />
+    <button class="alu-sidebar-overlay" :class="{ open: app.workDrawerOpen }" :aria-hidden="!app.workDrawerOpen" :tabindex="app.workDrawerOpen ? 0 : -1" aria-label="关闭工作列表" @click="app.workDrawerOpen = false" />
     <aside class="alu-sidebar" :class="{ open: app.workDrawerOpen }" :aria-hidden="!app.workDrawerOpen" :inert="!app.workDrawerOpen || undefined" aria-label="工作列表">
       <div class="alu-sidebar-head">
         <img src="./assets/console_icon_small.png" class="alu-sidebar-avatar" alt="阿露" />
@@ -2308,7 +2352,7 @@ function handleOutputClick(event: MouseEvent) {
               <span class="alu-instance-copy"><span class="alu-instance-name">{{ work.displayName }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span></span>
               <span class="alu-instance-meta">{{ sidebarState(work) }}</span>
             </button>
-            <button v-if="work.reopenable && work.lifecycle !== 'active'" class="alu-instance-action" :disabled="!isTauri" @click="reopenFromList(work)">继续</button>
+            <button v-if="work.reopenable && work.lifecycle !== 'active'" class="alu-instance-action" :disabled="!isTauri || workMutating || mutationOutcomeUnknown" @click="reopenFromList(work)">{{ workMutating && selected?.id === work.id ? '正在继续…' : '继续' }}</button>
             <button v-else-if="group === 'history'" class="alu-instance-action is-muted" :disabled="!isTauri" @click="forgetFromList(work)">移除</button>
           </div>
         </section>

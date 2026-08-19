@@ -5,18 +5,13 @@
 .extension-attention span { flex: 1; }
 .extension-attention button, .extension-control-strip button, .extension-inline-error button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; color: var(--c-ice); cursor: pointer; background: var(--c-space-850); border: 1px solid var(--c-line); border-radius: 6px; }
 .extension-inline-error { color: #f8a0a0; background: rgb(248 113 113 / .05); border-color: rgb(248 113 113 / .2); }
-.extension-widgets { display: grid; gap: 6px; }
-.extension-widgets details { overflow: hidden; background: rgb(14 32 45 / .48); border: 1px solid rgb(126 200 224 / .17); border-radius: 8px; }
-.extension-widgets summary { display: flex; min-height: 34px; align-items: center; justify-content: space-between; padding: 6px 10px; color: var(--c-ice); font-size: 10px; cursor: pointer; list-style: none; }
+.extension-widgets { display: grid; gap: 8px; }
+.extension-widgets details { overflow: hidden; background: rgb(14 32 45 / .48); border: 1px solid rgb(126 200 224 / .17); border-radius: 10px; }
+.extension-widgets summary { display: flex; min-height: 42px; align-items: center; justify-content: space-between; padding: 8px 12px; color: var(--c-ice); font-size: 12px; cursor: pointer; list-style: none; }
 .extension-widgets summary::-webkit-details-marker { display: none; }
 .extension-widgets summary svg { transition: transform 160ms; }
 .extension-widgets details[open] summary svg { transform: rotate(90deg); }
-.extension-widgets pre { max-height: 34dvh; margin: 0; padding: 8px 10px 11px; overflow: auto; color: var(--c-text-1); font: 11px/1.55 ui-monospace, monospace; overflow-wrap: anywhere; white-space: pre-wrap; border-top: 1px solid rgb(126 200 224 / .1); }
-.extension-feedback { display: grid; gap: 4px; }
-.extension-feedback > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 9px; color: var(--c-text-2); font: 10px/1.45 var(--font-reading); background: rgb(126 200 224 / .05); border-left: 2px solid var(--c-ice); border-radius: 5px; }
-.extension-feedback > div[data-tone='warning'] { color: #f6cf79; border-color: var(--c-amber); }
-.extension-feedback > div[data-tone='error'] { color: #f8a0a0; border-color: var(--c-danger); }
-.extension-feedback button { display: grid; flex: 0 0 auto; padding: 3px; color: currentColor; cursor: pointer; background: none; border: 0; place-items: center; }
+.extension-widgets pre { max-height: 42dvh; margin: 0; padding: 10px 12px 13px; overflow: auto; color: var(--c-text-1); font: 12px/1.65 ui-monospace, monospace; overflow-wrap: anywhere; white-space: pre-wrap; border-top: 1px solid rgb(126 200 224 / .1); }
 .extension-dialog-layer { position: fixed; z-index: 80; inset: 0; display: grid; padding: 18px; background: rgb(3 6 13 / .7); backdrop-filter: blur(8px); place-items: center; }
 .extension-dialog { display: grid; width: min(620px, 100%); max-height: min(82dvh, 760px); gap: 13px; padding: 18px; overflow: hidden; background: var(--c-space-925); border: 1px solid var(--c-line); border-radius: 15px; box-shadow: var(--shadow-panel); }
 .extension-dialog header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }

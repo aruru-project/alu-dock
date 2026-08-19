@@ -12,7 +12,6 @@ import type {
 } from '../lib/types'
 
 export interface ExtensionWidget { key: string; lines: string[]; placement: 'aboveEditor' | 'belowEditor' }
-export interface ExtensionFeedback { id: string; tone: 'info' | 'warning' | 'error'; message: string; operationId?: string }
 
 export const useExtensionUiStore = defineStore('extension-ui', () => {
   const hostId = ref('')
@@ -31,7 +30,6 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
   const activeRequest = ref<InteractionRequest | undefined>()
   const controller = ref<ExtensionControllerBinding | undefined>()
   const controllerState = ref<'detached' | 'acquiring' | 'attached' | 'disconnected'>('detached')
-  const feedback = ref<ExtensionFeedback[]>([])
   let lifecycleRevision = 0
   let uncertainRequest: { instanceId: string; hostEpoch: string; runtimeGeneration: number; interactionId: string } | undefined
 
@@ -87,7 +85,6 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     if (!uncertainMatches) uncertainRequest = undefined
     aboveWidgets.value = {}
     belowWidgets.value = {}
-    feedback.value = []
     for (const event of projection.extensionUi.events) reduceEvent(event)
     lastSequence.value = cursor.sequence
     return true
@@ -114,7 +111,6 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
       activeSummary.value = undefined
       activeRequest.value = undefined
     }
-    feedback.value = []
     controllerState.value = 'detached'
     return true
   }
@@ -199,12 +195,6 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
           uncertainRequest = undefined
         }
         break
-      case 'extension.notification':
-        pushFeedback(data.level === 'error' ? 'error' : data.level === 'warning' ? 'warning' : 'info', stringValue(data.message), stringValue(data.operationId))
-        break
-      case 'extension.error':
-        pushFeedback('error', stringValue(data.error) || '这项操作遇到了问题，请重试。')
-        break
     }
   }
 
@@ -250,9 +240,6 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     try {
       await releaseExtensionControl(handle, binding)
     } catch {
-      if (controller.value?.handle === handle) {
-        pushFeedback('error', '暂时无法结束这项操作，请重试。')
-      }
       return false
     }
     controllerEnded(handle, state, markLifecycle)
@@ -306,20 +293,14 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     }
   }
 
-  function pushFeedback(tone: ExtensionFeedback['tone'], message: string, operationId?: string) {
-    if (!message) return
-    feedback.value = [...feedback.value.slice(-4), { id: crypto.randomUUID(), tone, message, operationId: operationId || undefined }]
-  }
-  function dismissFeedback(id: string) { feedback.value = feedback.value.filter((item) => item.id !== id) }
-
   return {
     hostId, selectionGeneration, instanceId, hostEpoch, runtimeGeneration, subscriptionId, lastSequence,
     status, aboveWidgets, belowWidgets, toolsExpanded, toolsResetRevision,
-    activeSummary, activeRequest, controller, controllerState, feedback,
+    activeSummary, activeRequest, controller, controllerState,
     hasAttention, isCurrent, bootstrap, clear, applyLive, beginAcquire,
     attachController, failAcquire, controllerEnded, releaseController, applyControllerEvent,
     markInteractionUnknown, clearInteractionUnknown, hideControllerRequest, resolveLocally,
-    applyAuthoritativeSnapshot, dismissFeedback,
+    applyAuthoritativeSnapshot,
   }
 })
 

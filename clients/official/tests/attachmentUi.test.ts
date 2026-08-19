@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { appendRestoredQueue, attachmentsAfterSubmit } from '../src/lib/attachmentDraft.ts'
+import { appendRestoredQueue, attachmentsAfterSubmit, moveAttachmentPreviewResource } from '../src/lib/attachmentDraft.ts'
 import { projectConversation } from '../src/lib/conversation.ts'
 import { draftAfterSubmit } from '../src/lib/uiBoundaries.ts'
 import { decodeLocalUiState } from '../src/lib/localState.ts'
@@ -73,6 +73,19 @@ const attachment: AttachmentDto = {
   const projected = projectConversation(bootstrap).filter((item) => item.kind === 'user')
   assert.equal(projected.length, 2)
   assert.deepEqual(projected.map((item) => item.kind === 'user' ? item.attachments : undefined), [[attachment], [attachment]])
+}
+
+{
+  const localPreview = { url: 'blob:local', mediaType: 'image/png' }
+  const migrated = moveAttachmentPreviewResource({ 'local-token': localPreview }, 'local-token', attachment.fileId)
+  assert.equal(migrated.moved, localPreview)
+  assert.equal(migrated.replaced, undefined, 'a successful first upload has no destination preview to dereference')
+  assert.deepEqual(migrated.resources, { [attachment.fileId]: localPreview })
+
+  const oldRemotePreview = { url: 'blob:old', mediaType: 'image/png' }
+  const replaced = moveAttachmentPreviewResource({ 'local-token': localPreview, [attachment.fileId]: oldRemotePreview }, 'local-token', attachment.fileId)
+  assert.equal(replaced.replaced, oldRemotePreview, 'only a real replaced preview is returned for URL revocation')
+  assert.deepEqual(replaced.resources, { [attachment.fileId]: localPreview })
 }
 
 {

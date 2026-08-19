@@ -16,6 +16,7 @@ import { captureHostResult, hostResultMatches } from '../lib/hostResult'
 import { userErrorMessage as errorMessage } from '../lib/userError'
 import SessionManager from './SessionManager.vue'
 import { useAppStore } from '../stores/app'
+import { useCommandConsoleStore } from '../stores/command-console'
 import type {
   CommandsResult,
   HostContext,
@@ -38,6 +39,7 @@ export type ControlMutationDomain = 'conversation' | 'sessions' | 'tree' | 'mode
 
 const props = defineProps<{ work: Work; section: ControlSection; preview: boolean; outcomeUnknown: boolean; unknownDomain?: ControlMutationDomain; hasDraft: boolean }>()
 const app = useAppStore()
+const commandConsole = useCommandConsoleStore()
 function hostContext() {
   if (!app.hostContext) throw new Error('当前没有选择 Host。')
   return { ...app.hostContext }
@@ -90,7 +92,6 @@ const settingDraft = ref('')
 const selectedCommandName = ref('')
 const commandRunnerOpen = ref(false)
 const commandArguments = ref('')
-const commandStatus = ref('')
 const commandSelectedIndex = ref(0)
 const commands = ref<CommandsResult | null>(null)
 const commandCatalogState = ref<'loading' | 'ready' | 'truncated' | 'failed'>('loading')
@@ -159,7 +160,14 @@ watch(commandSelections, (items) => {
   commandSelectedIndex.value = Math.max(0, Math.min(commandSelectedIndex.value, items.length - 1))
 })
 
-watch([() => app.activeHostId, () => props.work.id], () => {
+watch([
+  () => app.activeHostId,
+  () => app.hostContext?.selectionGeneration,
+  () => props.work.id,
+  () => props.work.ownerHostEpoch,
+  () => props.work.runtimeGeneration,
+], () => {
+  if (app.hostContext) commandConsole.bindContext(app.hostContext.hostId, app.hostContext.selectionGeneration, props.work)
   commands.value = null
   commandCatalogState.value = 'loading'
   models.value = null
@@ -167,10 +175,9 @@ watch([() => app.activeHostId, () => props.work.id], () => {
   resources.value = null
   settings.value = null
   selectedCommandName.value = ''
-  commandStatus.value = ''
   error.value = ''
   void loadSection(props.section)
-})
+}, { immediate: true })
 watch(() => props.section, (section) => {
   selectedSettingKey.value = ''
   void loadSection(section)
@@ -227,7 +234,6 @@ function handleCommandKeydown(event: KeyboardEvent) {
 function openCommandRunner(name: string) {
   selectedCommandName.value = name
   commandArguments.value = ''
-  commandStatus.value = ''
   commandRunnerOpen.value = true
 }
 
@@ -326,16 +332,18 @@ async function loadSection(section: ControlSection, force = false): Promise<bool
 
 async function runSelectedCommand() {
   const command = selectedCommand.value
-  if (!command || props.preview || pending.value || props.outcomeUnknown) return
+  if (!command || props.preview || pending.value || props.outcomeUnknown || commandConsole.hasActiveOperation) return
+  const operationId = crypto.randomUUID()
   pending.value = `command:${command.name}`
   error.value = ''
-  commandStatus.value = ''
+  commandConsole.beginOperation(operationId, command.name, commandArguments.value)
   try {
-    const result = await currentHostCall((context) => runCatalogCommand(props.work.id, command.name, commandArguments.value, context))
+    const result = await currentHostCall((context) => runCatalogCommand(props.work.id, command.name, commandArguments.value, operationId, context))
     emit('snapshot', result.instance)
-    commandStatus.value = result.receipt.queued ? '命令已由 Dock 接收并进入 Queue。后续输出会回到主对话。' : '命令已由 Dock 接收。后续输出会回到主对话。'
+    commandConsole.receiveReceipt(operationId, result.receipt)
   } catch (cause) {
-    mutationFailure(cause, 'conversation')
+    commandConsole.failOperation(operationId, errorMessage(cause))
+    if (cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true) emit('unknown', cause, 'conversation')
   } finally {
     pending.value = ''
   }
@@ -522,11 +530,14 @@ function sourceLabel(kind: string) {
       </template>
 
       <template v-else-if="selectedCommand">
-        <div class="cmd-center-header"><button class="cmd-center-back" aria-label="返回命令列表" :disabled="!!pending" @click="commandRunnerOpen = false">←</button><div class="cmd-center-identity"><strong>/{{ selectedCommand.name }}</strong><span>{{ sourceLabel(selectedCommand.source.kind) }}</span></div><button class="cmd-palette-close" aria-label="关闭" @click="$emit('close')">×</button></div>
+        <div class="cmd-center-header"><button class="cmd-center-back" aria-label="返回命令列表" :disabled="!!pending || commandConsole.hasActiveOperation" @click="commandRunnerOpen = false">←</button><div class="cmd-center-identity"><strong>/{{ selectedCommand.name }}</strong><span>{{ sourceLabel(selectedCommand.source.kind) }}</span></div><button class="cmd-palette-close" aria-label="关闭" @click="$emit('close')">×</button></div>
         <div class="cmd-center-description">{{ selectedCommand.description || 'Dock 未提供此命令的说明。' }}</div>
-        <form class="cmd-center-command-form" @submit.prevent="runSelectedCommand"><span class="cmd-center-command-prefix">/{{ selectedCommand.name }}</span><input v-model="commandArguments" class="cmd-center-args" placeholder="参数（可留空）" autocomplete="off" spellcheck="false" /><button class="cmd-center-run" :disabled="preview || !!pending || outcomeUnknown">{{ pending ? '运行中…' : '运行' }}</button></form>
-        <div class="cmd-center-output" role="log" aria-live="polite"><div v-if="commandStatus" class="cmd-center-entry cmd-center-entry-status"><span class="cmd-center-entry-marker">·</span><div class="cmd-center-entry-text">{{ commandStatus }}</div></div><div v-else class="cmd-center-output-empty">命令结果会显示在这里，不会进入主要对话。</div></div>
-        <div class="cmd-palette-footer cmd-center-footer">{{ pending ? '命令正在执行；关闭面板不会取消。' : 'Enter 运行 · Tab 保持网页焦点导航 · Esc 关闭' }}</div>
+        <form class="cmd-center-command-form" @submit.prevent="runSelectedCommand"><span class="cmd-center-command-prefix">/{{ selectedCommand.name }}</span><input v-model="commandArguments" class="cmd-center-args" placeholder="参数（可留空）" autocomplete="off" spellcheck="false" /><button class="cmd-center-run" :disabled="preview || !!pending || outcomeUnknown || commandConsole.hasActiveOperation">{{ pending || commandConsole.hasActiveOperation ? '运行中…' : '运行' }}</button></form>
+        <div class="cmd-center-output" role="log" aria-live="polite">
+          <div v-for="entry in commandConsole.entries" :key="entry.id" class="cmd-center-entry" :class="[`cmd-center-entry-${entry.kind}`, entry.level ? `is-${entry.level}` : '']"><span class="cmd-center-entry-marker">{{ entry.kind === 'command' ? '›' : entry.kind === 'status' ? '·' : entry.level === 'error' ? '!' : entry.level === 'warning' ? '△' : '│' }}</span><div class="cmd-center-entry-text">{{ entry.text }}</div></div>
+          <div v-if="!commandConsole.entries.length" class="cmd-center-output-empty">命令结果会显示在这里，不会进入主要对话。</div>
+        </div>
+        <div class="cmd-palette-footer cmd-center-footer">{{ pending || commandConsole.hasActiveOperation ? '命令正在执行；关闭面板不会取消。' : 'Enter 运行 · Tab 保持网页焦点导航 · Esc 关闭' }}</div>
       </template>
     </template>
 
