@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   Globe2,
   Link,
@@ -22,6 +23,7 @@ import {
   cancelAttachmentUpload,
   clearRestoredImages,
   cancelPairing,
+  compactSession,
   createWork,
   dequeueMessages,
   forgetWork,
@@ -29,8 +31,10 @@ import {
   getSettings,
   getSystemDeviceName,
   listModels,
+  listSessions,
   listTools,
   listWorkspace,
+  loadSessionTree,
   loadConversation,
   loadAttachmentPreviewBytes,
   loadConversationHistory,
@@ -46,6 +50,7 @@ import {
   stageClipboardImage,
   startConversationFollow,
   startPairing,
+  stopConversationFollow,
   stopWork,
   submitMessage,
   uploadAttachment,
@@ -57,7 +62,7 @@ import {
   testHostEndpoint,
   verifyHostEndpoint,
 } from './lib/bridge'
-import type { CreateWorkContinuation } from './lib/bridge'
+import type { CreateWorkContinuation, SessionContext } from './lib/bridge'
 import { projectConversation } from './lib/conversation'
 import { appendRestoredQueue, attachmentsAfterSubmit, moveAttachmentPreviewResource } from './lib/attachmentDraft'
 import {
@@ -154,6 +159,8 @@ const historyLoading = ref(false)
 const historyError = ref<string | null>(null)
 const submitting = ref(false)
 const aborting = ref(false)
+const compactionWorkIds = ref<Set<string>>(new Set())
+const compactionErrors = ref<Record<string, string>>({})
 const queueOpen = ref(false)
 const queueRestoring = ref(false)
 const queueNotice = ref('')
@@ -176,8 +183,11 @@ const controlCenterRef = ref<ControlCenterHandle | null>(null)
 const modalSurface = ref<HTMLElement | null>(null)
 let modalTrigger: HTMLElement | null = null
 const conversationState = ref<ConversationBootstrap | null>(null)
+const windowFocused = ref(!isTauri)
 const followConnected = ref(false)
-const activeFollowSubscription = ref('')
+type ActiveFollow = HostContext & { instanceId: string; subscriptionId: string }
+const activeFollow = ref<ActiveFollow | null>(null)
+const activeFollowSubscription = computed(() => activeFollow.value?.subscriptionId ?? '')
 const pairHost = ref('')
 const pairPort = ref<number | null>(null)
 const deviceNameStorage = browserDeviceNameStorage()
@@ -318,6 +328,13 @@ const modelLabel = computed(() => {
   return model ? `${model.provider}/${model.id}` : '—'
 })
 const contextPercent = computed(() => selected.value?.metrics?.context?.percent)
+const selectedCompactionPending = computed(() => !!selected.value && compactionWorkIds.value.has(selected.value.id))
+const currentCompactionError = computed(() => {
+  const hostId = app.activeHostId
+  const workId = selected.value?.id
+  return hostId && workId ? compactionErrors.value[compactionErrorKey(hostId, workId)] ?? null : null
+})
+const visibleComposerError = computed(() => submissionError.value || currentCompactionError.value)
 const recoverablePairings = computed(() => app.catalog?.pairingTransactions ?? [])
 function hostContext() {
   const context = app.hostContext
@@ -410,6 +427,7 @@ watch(
       uploadDrafts.value = []
       queueNotice.value = ''
       queueOpen.value = false
+      submissionError.value = null
       resetConversationImages()
       resetAttachmentPreviews()
     }
@@ -418,7 +436,7 @@ watch(
     transientContext = hostId && generation != null && id ? { hostId, selectionGeneration: generation, workId: id } : null
     ++conversationLoadEpoch
     ++historyLoadEpoch
-    if (isTauri && id) void loadSelectedConversation(id)
+    if (isTauri && windowFocused.value && id) void loadSelectedConversation(id)
     else if (!id) void extensionUi.clear()
     void nextTick(resizeComposer)
   },
@@ -428,6 +446,9 @@ onMounted(async () => {
   window.addEventListener('keydown', handleGlobalModalKeydown, true)
   window.addEventListener('keydown', handleDesktopShortcut)
   if (isTauri) {
+    const appWindow = getCurrentWindow()
+    unlisteners.push(await appWindow.onFocusChanged(({ payload }) => { void handleWindowFocusChanged(payload) }))
+    windowFocused.value = await appWindow.isFocused()
     unlisteners.push(
       await listen<{ hostId: string; selectionGeneration: number; instanceId: string; subscriptionId: string; event: ProjectedEvent }>('aludock://conversation-event', async ({ payload }) => {
         if (!app.contextMatches(payload) || payload.instanceId !== selected.value?.id) return
@@ -774,7 +795,8 @@ function openControlCenter(section: ControlSection) {
 
 function applyControlSnapshot(snapshot: Work) {
   app.applyWorkSnapshot(snapshot)
-  extensionUi.applyAuthoritativeSnapshot(snapshot)
+  const authoritative = app.works.find((work) => work.id === snapshot.id) ?? snapshot
+  extensionUi.applyAuthoritativeSnapshot(authoritative)
 }
 
 function openHostSettings() {
@@ -1330,8 +1352,15 @@ async function abortCurrentRun() {
     const snapshot = await abortRun(work.id, capturedHost)
     if (!app.contextMatches(capturedHost)) return
     app.applyWorkSnapshot(snapshot, capturedHost)
-    await app.load()
-    await loadSelectedConversation(work.id)
+    const authoritative = app.works.find((item) => item.id === snapshot.id) ?? snapshot
+    extensionUi.applyAuthoritativeSnapshot(authoritative)
+    const state = conversationState.value
+    if (state?.instance.id === work.id
+      && state.cursor.hostEpoch === authoritative.ownerHostEpoch
+      && state.cursor.runtimeGeneration === authoritative.runtimeGeneration) {
+      state.instance = authoritative
+      applyConversationProjection(state)
+    }
   } catch (cause) {
     markUnknownOutcome(cause, 'conversation', work.id)
     submissionError.value = errorMessage(cause)
@@ -1357,7 +1386,7 @@ async function stopSelectedWork() {
       conversationState.value.queue = []
     }
     followConnected.value = false
-    activeFollowSubscription.value = ''
+    activeFollow.value = null
     await extensionUi.clear()
     const cleanupErrors = result.receipt.cleanupErrors ?? []
     submissionError.value = cleanupErrors.length
@@ -1383,8 +1412,7 @@ async function reopenSelectedWork(continuation?: CreateWorkContinuation) {
     if (!app.contextMatches(capturedHost)) return
     app.applyWorkSnapshot(snapshot, capturedHost)
     reopenTrustContinuation.value = null
-    void app.refreshWorksQuietly()
-    void loadSelectedConversation(work.id)
+    void loadSelectedConversation(work.id, true)
   } catch (cause) {
     const failure = cause as { code?: string; message?: string; details?: Record<string, unknown>; operationId?: string; outcomeUnknown?: boolean }
     if (failure?.code === 'project_trust_required') {
@@ -1437,7 +1465,8 @@ async function forgetSelectedWork() {
     const capturedHost = hostContext()
     await forgetWork(work.id, capturedHost)
     if (!app.contextMatches(capturedHost)) return
-    await app.load()
+    app.removeWorkSnapshot(work.id, capturedHost)
+    void app.refreshWorksQuietly()
   } catch (cause) {
     markUnknownOutcome(cause, 'work', work.id)
     submissionError.value = errorMessage(cause)
@@ -1491,13 +1520,17 @@ function syncImageDomain(context: HostContext, workId: string, hostEpoch: string
   imageDomainKey = next
 }
 
+function itemImages(item: ConversationItem): ConversationImagePart[] {
+  if (item.kind === 'image') return [item]
+  if (item.kind === 'user') return item.images ?? []
+  if (item.kind === 'record') return item.parts.filter((part): part is ConversationImagePart => part.kind === 'image')
+  return []
+}
+
 function pruneImageResources(items: ConversationItem[]) {
   const active = new Set<string>()
   for (const item of items) {
-    if (item.kind === 'image') active.add(item.imageKey)
-    else if (item.kind === 'record') {
-      for (const part of item.parts) if (part.kind === 'image') active.add(part.imageKey)
-    }
+    for (const image of itemImages(item)) active.add(image.imageKey)
   }
   const next = { ...imageResources.value }
   let changed = false
@@ -1518,9 +1551,7 @@ function applyConversationProjection(state: ConversationBootstrap) {
 }
 
 function conversationHasImage(imageKey: string) {
-  return realConversation.value.some((item) => item.kind === 'image'
-    ? item.imageKey === imageKey
-    : item.kind === 'record' && item.parts.some((part) => part.kind === 'image' && part.imageKey === imageKey))
+  return realConversation.value.some((item) => itemImages(item).some((image) => image.imageKey === imageKey))
 }
 
 async function requestConversationImage(part: ConversationImagePart) {
@@ -1674,6 +1705,9 @@ async function applyFollowEvent(payload: { hostId: string; selectionGeneration: 
   state.queue = reduced.state.queue
   state.cursor.sequence = reduced.state.sequence
   app.applyWorkSnapshot(state.instance, payload)
+  if (payload.event.eventType === 'compaction.started' || payload.event.eventType === 'compaction.completed') {
+    setCompactionError(payload.hostId, payload.instanceId)
+  }
   if (reduced.configChanged) controlCenterRef.value?.applyLiveEvent(payload.event)
   if (!await extensionUi.applyLive(payload.instanceId, payload.subscriptionId, payload.event)) {
     followConnected.value = false
@@ -1681,12 +1715,120 @@ async function applyFollowEvent(payload: { hostId: string; selectionGeneration: 
     return
   }
   const commandRoute = commandConsole.handleDockEvent(payload.event)
-  const commandOnlyNotification = payload.event.eventType === 'extension.notification'
-    && commandRoute.matched
-    && payload.event.data.level !== 'warning'
-    && payload.event.data.level !== 'error'
+  const commandOnlyNotification = payload.event.eventType === 'extension.notification' && commandRoute.matched
   if (!commandOnlyNotification) state.activeEvents.push(payload.event)
   if ((reduced.conversationChanged && !commandOnlyNotification) || payload.event.eventType === 'run.started') scheduleConversationProjection()
+}
+
+async function resumeConversationFollow(instanceId: string): Promise<boolean> {
+  const state = conversationState.value
+  const work = selected.value
+  if (!state || !work || work.id !== instanceId || work.lifecycle !== 'active' || state.instance.id !== instanceId) return false
+  const epoch = ++conversationLoadEpoch
+  const capturedHost = hostContext()
+  const cursor = { ...state.cursor }
+  if (cursor.instanceId !== instanceId
+    || cursor.hostEpoch !== app.payload?.host.hostEpoch
+    || cursor.runtimeGeneration !== state.instance.runtimeGeneration) return false
+
+  const subscriptionId = crypto.randomUUID()
+  pendingFollowEvents.set(subscriptionId, [])
+  const connected = waitForFollowConnection(subscriptionId)
+  try {
+    await startConversationFollow(instanceId, subscriptionId, cursor, capturedHost)
+    await connected
+    if (!windowFocused.value
+      || !app.contextMatches(capturedHost)
+      || epoch !== conversationLoadEpoch
+      || selected.value?.id !== instanceId
+      || conversationState.value !== state
+      || state.cursor.sequence !== cursor.sequence) return false
+    if (!extensionUi.resumeFollow(capturedHost, subscriptionId, cursor)) return false
+
+    const bufferedFollowStatus = followActivation.activate(subscriptionId)
+    activeFollow.value = { ...capturedHost, instanceId, subscriptionId }
+    followConnected.value = true
+    conversationError.value = null
+    if (bufferedFollowStatus) handleActiveFollowStatus({ instanceId, subscriptionId, ...bufferedFollowStatus })
+    const buffered = pendingFollowEvents.get(subscriptionId) ?? []
+    pendingFollowEvents.delete(subscriptionId)
+    for (const event of buffered) {
+      await applyFollowEvent({ ...capturedHost, instanceId, subscriptionId, event })
+      if (activeFollowSubscription.value !== subscriptionId) break
+    }
+    return activeFollowSubscription.value === subscriptionId
+  } catch (cause) {
+    if (epoch === conversationLoadEpoch && selected.value?.id === instanceId) conversationError.value = errorMessage(cause)
+    return false
+  } finally {
+    clearFollowConnectionTimer(subscriptionId)
+    followActivation.cancel(subscriptionId, new Error('连接恢复已结束。'))
+    pendingFollowEvents.delete(subscriptionId)
+    if (activeFollowSubscription.value !== subscriptionId) {
+      try {
+        await stopConversationFollow(instanceId, subscriptionId, capturedHost)
+      } catch (cause) {
+        console.error('Failed to stop an inactive resumed Follow subscription.', cause)
+      }
+    }
+  }
+}
+
+async function reattachConversationFollow(instanceId: string) {
+  if (!windowFocused.value || selected.value?.id !== instanceId) return
+  if (activeFollow.value) await detachConversationFollow()
+  if (!windowFocused.value || selected.value?.id !== instanceId) return
+  if (!await resumeConversationFollow(instanceId)
+    && windowFocused.value
+    && selected.value?.id === instanceId) await loadSelectedConversation(instanceId, true)
+}
+
+async function handleWindowFocusChanged(focused: boolean) {
+  if (focused === windowFocused.value) return
+  windowFocused.value = focused
+  if (!focused) {
+    await detachConversationFollow()
+    return
+  }
+  const work = selected.value
+  if (work?.lifecycle === 'active') await reattachConversationFollow(work.id)
+}
+
+async function detachConversationFollow() {
+  const followed = activeFollow.value
+  const controllerHandle = extensionUi.controller?.handle
+  activeFollow.value = null
+  followConnected.value = false
+  ++conversationLoadEpoch
+  ++historyLoadEpoch
+  conversationLoading.value = false
+  historyLoading.value = false
+  window.clearTimeout(reconnectTimer)
+  reconnectTimer = 0
+  for (const timer of followConnectionTimers.values()) window.clearTimeout(timer)
+  followConnectionTimers.clear()
+  followActivation.cancelAll(new Error('窗口已进入后台。'))
+  pendingFollowEvents.clear()
+
+  const releases: Promise<unknown>[] = []
+  if (followed) releases.push(stopConversationFollow(followed.instanceId, followed.subscriptionId, followed))
+  if (controllerHandle) {
+    extensionUi.suspendController(controllerHandle)
+    releases.push(extensionUi.releaseController(controllerHandle, 'detached').then((released) => {
+      if (!released) extensionUi.controllerEnded(controllerHandle, 'disconnected')
+    }))
+  }
+  await Promise.allSettled(releases)
+}
+
+function scheduleConversationReconnect(instanceId: string) {
+  window.clearTimeout(reconnectTimer)
+  reconnectTimer = window.setTimeout(() => {
+    reconnectTimer = 0
+    if (windowFocused.value && selected.value?.id === instanceId && selected.value.lifecycle === 'active') {
+      void reattachConversationFollow(instanceId)
+    }
+  }, 1500)
 }
 
 function handleActiveFollowStatus(payload: {
@@ -1701,10 +1843,7 @@ function handleActiveFollowStatus(payload: {
   if (payload.state === 'resync_required') {
     void loadSelectedConversation(payload.instanceId, true)
   } else if (payload.state === 'disconnected') {
-    window.clearTimeout(reconnectTimer)
-    reconnectTimer = window.setTimeout(() => {
-      if (selected.value?.id === payload.instanceId && payload.subscriptionId === activeFollowSubscription.value) void loadSelectedConversation(payload.instanceId, true)
-    }, 1500)
+    if (payload.subscriptionId === activeFollowSubscription.value) scheduleConversationReconnect(payload.instanceId)
   }
 }
 
@@ -1727,6 +1866,7 @@ function clearFollowConnectionTimer(subscriptionId: string) {
 }
 
 async function loadSelectedConversation(instanceId: string, preserveUntilSwap = false): Promise<boolean> {
+  if (isTauri && !windowFocused.value) return false
   const epoch = ++conversationLoadEpoch
   ++historyLoadEpoch
   const work = app.works.find((item) => item.id === instanceId)
@@ -1742,8 +1882,9 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
   if (!work || work.lifecycle !== 'active') return false
   conversationLoading.value = true
   let subscriptionId = ''
+  let capturedHost: HostContext | null = null
   try {
-    const capturedHost = hostContext()
+    capturedHost = hostContext()
     const bootstrap = await loadConversation(instanceId, capturedHost)
     if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
     if (!conversationSwapIsCorrelated(capturedHost, instanceId, bootstrap, true)) throw new Error('对话状态已经变化，请重新载入。')
@@ -1752,7 +1893,13 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
     subscriptionId = crypto.randomUUID()
     pendingFollowEvents.set(subscriptionId, [])
     const connected = waitForFollowConnection(subscriptionId)
+    const replacedFollow = activeFollow.value
     await startConversationFollow(instanceId, subscriptionId, bootstrap.cursor, capturedHost)
+    // Tauri owns one Follow task and aborts the previous task when this command is accepted.
+    if (replacedFollow && activeFollow.value?.subscriptionId === replacedFollow.subscriptionId) {
+      activeFollow.value = null
+      followConnected.value = false
+    }
     await connected
     if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
     if (!await extensionUi.bootstrap(capturedHost, subscriptionId, bootstrap)) return false
@@ -1767,7 +1914,7 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
     historyTruncated.value = bootstrap.historyTruncated
     historyBeforeEntryId.value = bootstrap.historyBeforeEntryId ?? null
     historyError.value = null
-    activeFollowSubscription.value = subscriptionId
+    activeFollow.value = { ...capturedHost, instanceId, subscriptionId }
     followConnected.value = true
     conversationError.value = null
     if (bufferedFollowStatus) handleActiveFollowStatus({ instanceId, subscriptionId, ...bufferedFollowStatus })
@@ -1779,13 +1926,23 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
     }
     return true
   } catch (cause) {
-    if (epoch === conversationLoadEpoch && selected.value?.id === instanceId) conversationError.value = errorMessage(cause)
+    if (epoch === conversationLoadEpoch && selected.value?.id === instanceId) {
+      conversationError.value = errorMessage(cause)
+      if (windowFocused.value) scheduleConversationReconnect(instanceId)
+    }
     return false
   } finally {
     if (subscriptionId) {
       clearFollowConnectionTimer(subscriptionId)
       followActivation.cancel(subscriptionId, new Error('连接载入已结束。'))
       pendingFollowEvents.delete(subscriptionId)
+      if (capturedHost && activeFollowSubscription.value !== subscriptionId) {
+        try {
+          await stopConversationFollow(instanceId, subscriptionId, capturedHost)
+        } catch (cause) {
+          console.error('Failed to stop an inactive Follow subscription.', cause)
+        }
+      }
     }
     if (epoch === conversationLoadEpoch && selected.value?.id === instanceId) conversationLoading.value = false
   }
@@ -1866,11 +2023,70 @@ async function loadEarlierHistory() {
   }
 }
 
+function compactionErrorKey(hostId: string, workId: string) {
+  return JSON.stringify([hostId, workId])
+}
+
+function setCompactionError(hostId: string, workId: string, message?: string) {
+  const key = compactionErrorKey(hostId, workId)
+  const next = { ...compactionErrors.value }
+  if (message) next[key] = message
+  else delete next[key]
+  compactionErrors.value = next
+}
+
+function setCompactionPending(workId: string, pending: boolean) {
+  const next = new Set(compactionWorkIds.value)
+  if (pending) next.add(workId)
+  else next.delete(workId)
+  compactionWorkIds.value = next
+}
+
+async function startCompaction(customInstructions?: string) {
+  const work = selected.value
+  if (!isTauri || !work || mutationOutcomeUnknown.value || compactionWorkIds.value.has(work.id) || work.compacting) return
+  const capturedHost = hostContext()
+  const scope: SessionContext = {
+    ...capturedHost,
+    instanceId: work.id,
+    expectedHostEpoch: work.ownerHostEpoch ?? '',
+    expectedRuntimeGeneration: work.runtimeGeneration,
+  }
+  closeModal()
+  setCompactionPending(work.id, true)
+  setCompactionError(capturedHost.hostId, work.id)
+  submissionError.value = null
+  try {
+    const correlated = captureHostResult(capturedHost, await compactSession(
+      scope,
+      customInstructions?.trim() || undefined,
+      crypto.randomUUID(),
+    ))
+    if (!hostResultMatches(correlated, app.hostContext)) return
+    const result = correlated.result
+    app.applyWorkSnapshot(result.instance, capturedHost)
+    const authoritative = app.works.find((item) => item.id === result.instance.id) ?? result.instance
+    extensionUi.applyAuthoritativeSnapshot(authoritative)
+    if (selected.value?.id === work.id) await resyncSession(authoritative)
+  } catch (cause) {
+    markUnknownOutcome(cause, 'sessions', work.id)
+    const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
+    const matchingFollow = followConnected.value
+      && activeFollow.value?.hostId === capturedHost.hostId
+      && activeFollow.value.selectionGeneration === capturedHost.selectionGeneration
+      && activeFollow.value.instanceId === work.id
+    const reportedByConversation = matchingFollow
+      && ['compaction_cancelled', 'compaction_not_needed', 'compaction_failed'].includes(code)
+    if (!reportedByConversation) setCompactionError(capturedHost.hostId, work.id, errorMessage(cause))
+  } finally {
+    setCompactionPending(work.id, false)
+  }
+}
+
 async function resyncSession(snapshot: Work, returnedDraft?: string) {
   app.applyWorkSnapshot(snapshot)
   if (returnedDraft) draft.value = draft.value ? `${draft.value}\n${returnedDraft}` : returnedDraft
-  const reconciled = await loadSelectedConversation(snapshot.id, true)
-  if (reconciled) await app.load()
+  if (selected.value?.id === snapshot.id) await loadSelectedConversation(snapshot.id, true)
 }
 
 async function openDirectory() {
@@ -1905,8 +2121,9 @@ async function createSelectedWork(continuation?: CreateWorkContinuation) {
     const capturedHost = hostContext()
     const work = await createWork(workspace.value.path, capturedHost, undefined, continuation)
     if (!app.contextMatches(capturedHost)) return
-    await app.load()
+    app.applyWorkSnapshot(work, capturedHost)
     app.selectWork(work.id)
+    void app.refreshWorksQuietly()
     directoryOpen.value = false
     trustContinuation.value = null
   } catch (cause) {
@@ -1973,6 +2190,7 @@ async function reconcileMutationOutcome(requestedDomain?: MutationDomain) {
     } else if ((domain === 'sessions' || domain === 'tree') && workId !== 'global') {
       await app.load()
       if (app.error || selected.value?.id !== workId) throw new Error('无法取得修改后的权威 Work 状态。')
+      if (domain === 'sessions' && selected.value?.compacting) throw new Error('上下文仍在压缩；完成后再刷新确认。')
       await nextTick()
       const projection = await reconcileControlProjection(domain, workId)
       const conversation = await loadSelectedConversation(workId, true)
@@ -1986,6 +2204,7 @@ async function reconcileMutationOutcome(requestedDomain?: MutationDomain) {
     next.delete(key)
     unresolvedMutations.value = next
     submissionError.value = null
+    if (domain === 'sessions' && workId !== 'global' && app.activeHostId) setCompactionError(app.activeHostId, workId)
   } catch (cause) {
     submissionError.value = errorMessage(cause)
   }
@@ -2005,6 +2224,19 @@ async function reconcileControlProjection(domain: ControlMutationDomain, workId:
   }
   if (domain === 'settings') {
     await currentHostCall((context) => getSettings(workId, context))
+    return true
+  }
+  if (domain === 'sessions' || domain === 'tree') {
+    const work = app.works.find((item) => item.id === workId)
+    if (!work) return false
+    const sessionContext = (context: HostContext): SessionContext => ({
+      ...context,
+      instanceId: work.id,
+      expectedHostEpoch: work.ownerHostEpoch ?? '',
+      expectedRuntimeGeneration: work.runtimeGeneration,
+    })
+    if (domain === 'sessions') await currentHostCall((context) => listSessions(sessionContext(context), 'cwd'))
+    else await currentHostCall((context) => loadSessionTree(sessionContext(context)))
     return true
   }
   return false
@@ -2262,7 +2494,8 @@ function handleOutputClick(event: MouseEvent) {
             <article v-if="row.kind === 'user'" class="msg-user" :data-conversation-id="row.id" :aria-label="`你的消息 ${row.time}`">
               <div class="msg-user-bubble">
                 <div class="msg-user-top"><span class="msg-user-prefix">&gt;</span><span v-if="row.text" class="msg-user-text">{{ row.text }}</span></div>
-                <div v-if="row.attachments?.length" class="message-attachments"><AttachmentCard v-for="attachment in row.attachments" :key="attachment.fileId" compact :name="attachment.name" :size-bytes="attachment.sizeBytes" :media-type="attachment.mediaType" :previewable="!!attachmentPreviews[attachment.fileId]" @preview="openAttachmentPreview(attachment.fileId, attachment.name)" /></div>
+                <div v-if="row.images?.length" class="msg-user-images"><ConversationProcessParts :parts="row.images" :render-markdown="renderMarkdown" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div>
+                <div v-if="row.attachments?.length" class="message-attachments"><AttachmentCard v-for="attachment in row.attachments" :key="attachment.fileId" compact :name="attachment.name" :size-bytes="attachment.sizeBytes" :media-type="attachment.mediaType" :preview-url="attachmentPreviews[attachment.fileId]?.url" @preview="openAttachmentPreview(attachment.fileId, attachment.name)" /></div>
                 <div class="msg-timestamp">{{ row.time }}</div>
               </div>
             </article>
@@ -2284,7 +2517,7 @@ function handleOutputClick(event: MouseEvent) {
 
             <section v-else-if="row.kind === 'record'" class="alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id"><div class="alu-record-title alu-hideable">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></section>
 
-            <div v-else class="alu-live-notice-row alu-hideable" :data-conversation-id="row.id"><div :class="row.tone === 'error' ? 'msg-error' : row.tone === 'warning' ? 'msg-warning' : 'msg-notice'">{{ row.text }}</div></div>
+            <div v-else class="alu-live-notice-row" :class="{ 'alu-hideable': row.tone === 'info' }" :data-conversation-id="row.id"><div :class="row.tone === 'error' ? 'msg-error' : row.tone === 'warning' ? 'msg-warning' : 'msg-notice'">{{ row.text }}</div></div>
           </template>
         </div>
       </template>
@@ -2298,7 +2531,7 @@ function handleOutputClick(event: MouseEvent) {
     <section v-if="selected && selected.lifecycle === 'active'" class="alu-input-section" aria-label="消息编辑器">
       <button v-if="outputAwayFromBottom" type="button" class="alu-scroll-bottom" aria-label="滚动到最新消息" @click="scrollOutputToBottom(true)"><span aria-hidden="true">↓</span>滚到底部</button>
       <ExtensionUiSurface :work="selected" :reconcile-interaction="reconcileExtensionInteraction" @editor-text="applyExtensionEditorText" @title="applyExtensionTitle">
-        <div v-if="submissionError" class="alu-composer-error"><span>{{ submissionError }}</span><button v-if="mutationOutcomeUnknown && reconcilingReopenWorkId !== selected.id" @click="reconcileMutationOutcome()">刷新并确认</button></div>
+        <div v-if="visibleComposerError" class="alu-composer-error"><span>{{ visibleComposerError }}</span><button v-if="mutationOutcomeUnknown && reconcilingReopenWorkId !== selected.id" @click="reconcileMutationOutcome()">刷新并确认</button></div>
         <div v-if="queueNotice" class="alu-composer-notice" role="status">{{ queueNotice }}<button type="button" @click="queueNotice = ''">×</button></div>
         <div v-if="selected.pending.total" class="alu-queue-tray">
           <span class="alu-queue-title">Queue · {{ selected.pending.total }}</span>
@@ -2306,8 +2539,8 @@ function handleOutputClick(event: MouseEvent) {
           <button type="button" class="alu-queue-restore" title="取回 Queue（Alt+↑）" aria-keyshortcuts="Alt+ArrowUp" :disabled="!isTauri || attachmentPicking || queueRestoring || submitting" @click="restoreQueue">{{ queueRestoring ? '取回中…' : '取回' }}</button>
         </div>
         <div v-if="uploadDrafts.length || draftAttachments.length || restoredImageCount" class="alu-native-attachments" aria-label="已选附件">
-          <AttachmentCard v-for="item in uploadDrafts" :key="item.token" :name="item.name" :size-bytes="item.sizeBytes" :media-type="item.mediaType" :state="item.state" :progress="item.progress" :message="item.error" :retryable="item.state === 'error'" :cancellable="item.state !== 'error'" :removable="item.state === 'error'" :previewable="!!attachmentPreviews[item.token]" @preview="openAttachmentPreview(item.token, item.name)" @retry="startAttachmentUpload(item)" @cancel="cancelUpload(item)" @remove="removeUpload(item)" />
-          <AttachmentCard v-for="attachment in draftAttachments" :key="attachment.fileId" :name="attachment.name" :size-bytes="attachment.sizeBytes" :media-type="attachment.mediaType" :previewable="!!attachmentPreviews[attachment.fileId]" removable @preview="openAttachmentPreview(attachment.fileId, attachment.name)" @remove="removeUploaded(attachment.fileId)" />
+          <AttachmentCard v-for="item in uploadDrafts" :key="item.token" :name="item.name" :size-bytes="item.sizeBytes" :media-type="item.mediaType" :state="item.state" :progress="item.progress" :message="item.error" :retryable="item.state === 'error'" :cancellable="item.state !== 'error'" :removable="item.state === 'error'" :preview-url="attachmentPreviews[item.token]?.url" @preview="openAttachmentPreview(item.token, item.name)" @retry="startAttachmentUpload(item)" @cancel="cancelUpload(item)" @remove="removeUpload(item)" />
+          <AttachmentCard v-for="attachment in draftAttachments" :key="attachment.fileId" :name="attachment.name" :size-bytes="attachment.sizeBytes" :media-type="attachment.mediaType" :preview-url="attachmentPreviews[attachment.fileId]?.url" removable @preview="openAttachmentPreview(attachment.fileId, attachment.name)" @remove="removeUploaded(attachment.fileId)" />
           <div v-if="restoredImageCount" class="alu-restored-images"><span>已取回 {{ restoredImageCount }} 个附件</span><button type="button" :disabled="clearingRestoredImages" @click="clearQueueImages">{{ clearingRestoredImages ? '移除中…' : '移除' }}</button></div>
         </div>
         <form class="alu-input-wrap" @submit.prevent="submit">
@@ -2402,11 +2635,13 @@ function handleOutputClick(event: MouseEvent) {
             :outcome-unknown="mutationOutcomeUnknown"
             :unknown-domain="unresolvedControlDomain"
             :has-draft="!!draft.trim()"
+            :compaction-pending="selectedCompactionPending"
             @section="controlSection = $event"
             @snapshot="applyControlSnapshot"
             @unknown="markControlUnknown"
             @reconcile="reconcileMutationOutcome"
             @resync="resyncSession"
+            @compact="startCompaction"
             @close="closeModal"
             @stop="closeModal(); stopSelectedWork()"
             @restore-queue="closeModal(); restoreQueue()"

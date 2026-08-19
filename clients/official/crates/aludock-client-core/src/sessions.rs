@@ -1469,6 +1469,7 @@ impl ContentAssembler {
                         mime_type: mime,
                         content_ref: None,
                         data: Some(data),
+                        file_id: None,
                     }
                 }
                 PartialBlock::ToolCall {

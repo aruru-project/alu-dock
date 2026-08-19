@@ -82,8 +82,20 @@ assert.notEqual(callText.groupId, afterText.groupId, 'a later assistant record k
 assert.match(callTool.detail || '', /参数[\s\S]*结果/)
 
 const publishedFile = { presentation: 'image' as const, fileRef: 'file-1', name: 'result.png', sizeBytes: 5, mediaType: 'image/png' }
+const linkedImageAttachment = { fileId: 'attachment-image-1', name: '课堂截图.png', sizeBytes: 2048, mediaType: 'image/png', sha256: 'a'.repeat(64), storedAt: '2026-08-19T04:55:43Z' }
+const textAttachment = { fileId: 'attachment-text-1', name: '说明.txt', sizeBytes: 32, mediaType: 'text/plain', sha256: 'b'.repeat(64), storedAt: '2026-08-19T04:55:43Z' }
+const historicalUserText = '请看这张图\n--\n[img:#496|path=/host/private/image.png]\n--\n[2026-08-19 12:55:43 周三]'
+const liveUserImageText = '[img:#497|path=/host/private/live.png]\n--\n[2026-08-19 13:01:02 周三]'
 const imageBootstrap = bootstrap(state, [])
 imageBootstrap.records = [
+  {
+    recordId: 'native-user-image', entryId: 'entry-native-user-image', kind: 'message', source: 'user', visibility: 'conversation', timestamp: '2026-08-19T04:55:43Z',
+    content: [
+      { type: 'text', text: historicalUserText },
+      { type: 'image', mimeType: 'image/png', contentRef: 'user-image-1', fileId: linkedImageAttachment.fileId },
+    ],
+    attachments: [linkedImageAttachment, textAttachment],
+  },
   {
     recordId: 'assistant-image-call', entryId: 'entry-image-call', kind: 'message', source: 'assistant', visibility: 'conversation',
     content: [{ type: 'tool_call', toolCallId: 'show-1', toolName: 'show_image', args: { path: '/private/generated/result.png' } }],
@@ -106,6 +118,32 @@ assert.deepEqual(publishedImage.source.file, publishedFile, 'path-free published
 assert.equal(publishedImage.groupId, showImageTool.groupId, 'show_image remains in its formally owned Assistant group')
 assert.doesNotMatch(showImageTool.detail || '', /private|generated|result\.png/, 'the Host-local show_image source path is not displayed')
 assert.ok(nativeImage?.kind === 'image' && nativeImage.source?.type === 'conversation' && nativeImage.source.contentRef === 'image-1')
+const historicalUserImage = imageProjection.find((item) => item.kind === 'user')
+assert.ok(historicalUserImage?.kind === 'user')
+assert.equal(historicalUserImage.text, historicalUserText, '通用客户端原样显示 Dock 记录的用户消息')
+assert.equal(historicalUserImage.images?.[0]?.source?.type, 'conversation', '重新打开对话仍显示用户发送的图片')
+assert.equal(historicalUserImage.images?.[0]?.name, '课堂截图.png')
+assert.deepEqual(historicalUserImage.attachments?.map((attachment) => attachment.fileId), [textAttachment.fileId], '已显示的图片不再重复显示为附件卡')
+
+const liveUserImage = projectConversation(bootstrap(state, [
+  event(8, 'message.submitted', {
+    messageId: 'user-live-image',
+    text: liveUserImageText,
+    attachments: [linkedImageAttachment],
+  }),
+  event(9, 'message.completed', {
+    messageId: 'user-live-image', role: 'user',
+    content: [
+      { type: 'text', text: liveUserImageText },
+      { type: 'image', mimeType: 'image/png', contentRef: 'user-image-live', fileId: linkedImageAttachment.fileId },
+    ],
+    attachments: [linkedImageAttachment],
+  }),
+])).find((item) => item.kind === 'user')
+assert.ok(liveUserImage?.kind === 'user')
+assert.equal(liveUserImage.text, liveUserImageText, '实时消息同样保留 Dock 的完整正文')
+assert.equal(liveUserImage.images?.[0]?.source?.type, 'conversation', '发送完成后立即显示图片，不必刷新对话')
+assert.equal(liveUserImage.attachments, undefined, '实时消息不会把同一张图片再显示成附件卡')
 
 const livePublished = projectConversation(bootstrap(state, [
   event(10, 'tool.output_updated', { toolCallId: 'show-live', text: 'published', publishedFile }),
@@ -158,6 +196,11 @@ let compactionState = applied(state, event(4, 'compaction.started', {}))
 compactionState = applied(compactionState, event(5, 'run.settled', { result: 'succeeded' }))
 assert.equal(compactionState.instance.compacting, true, 'older run settlement preserves a newer compaction boundary')
 assert.equal(compactionState.instance.execution, 'running', 'older run settlement preserves compaction execution')
+const cancelledCompaction = projectConversation(bootstrap(state, [
+  event(6, 'compaction.started', { reason: 'manual' }),
+  event(7, 'compaction.completed', { reason: 'manual', aborted: true, willRetry: false }),
+]), { compact: true })
+assert.equal(cancelledCompaction.some((item) => item.kind === 'notice' && item.tone === 'warning' && item.text.includes('取消')), true, '用户中止上下文压缩后，简洁模式仍显示终止结果')
 
 for (const terminalState of ['disconnected', 'resync_required'] as const) {
   const coordinator = new FollowActivationCoordinator()

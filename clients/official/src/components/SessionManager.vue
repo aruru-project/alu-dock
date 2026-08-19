@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import {
-  cloneSession, compactSession, forkSession, listSessions, loadSessionTree, nameSession,
+  cloneSession, forkSession, listSessions, loadSessionTree, nameSession,
   navigateSession, newSession, reloadSession, switchSession,
   type SessionContext, type SessionTrustContinuation,
 } from '../lib/bridge'
@@ -17,12 +17,13 @@ import type { ResourcesResult, SessionInfo, SessionTree, Work } from '../lib/typ
 import { useAppStore } from '../stores/app'
 
 type SessionMode = 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session'
-const props = defineProps<{ work: Work; mode: SessionMode; preview: boolean; outcomeUnknown: boolean; hasDraft: boolean }>()
+const props = defineProps<{ work: Work; mode: SessionMode; preview: boolean; outcomeUnknown: boolean; hasDraft: boolean; compactionPending: boolean }>()
 const app = useAppStore()
 const emit = defineEmits<{
   snapshot: [work: Work]
   unknown: [cause: unknown, domain: 'sessions' | 'tree']
   resync: [work: Work, draftText?: string]
+  compact: [customInstructions?: string]
   title: [title: string, body?: string]
   close: []
 }>()
@@ -335,11 +336,9 @@ async function rename() {
   try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => nameSession(scope, renameDraft.value, operationId())); emit('snapshot', result.instance); status.value = 'Session 名称已更新。'; await loadSessionList() }
   catch (cause) { mutationFailure(cause, 'sessions') } finally { pending.value = '' }
 }
-async function compact() {
-  if (props.preview || pending.value || props.outcomeUnknown) return
-  pending.value = 'compact'; error.value = ''
-  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => compactSession(scope, compactDraft.value.trim() || undefined, operationId())); emit('snapshot', result.instance); status.value = `已压缩：${result.result.summary} · 压缩前 ${result.result.tokensBefore.toLocaleString()} tokens`; compactDraft.value = ''; emit('resync', result.instance) }
-  catch (cause) { mutationFailure(cause, 'sessions') } finally { pending.value = '' }
+function compact() {
+  if (props.preview || pending.value || props.outcomeUnknown || props.compactionPending || props.work.compacting) return
+  emit('compact', compactDraft.value.trim() || undefined)
 }
 async function reload() {
   if (props.preview || pending.value || props.outcomeUnknown) return
@@ -420,8 +419,9 @@ function time(value?: string | null) { return treeNodeTime(value) }
     </section>
 
     <section v-else-if="mode === 'compact-session'" class="alu-session-form">
-      <textarea v-model="compactDraft" class="ui-dialog-editor" rows="6" placeholder="自定义说明（可选）" />
-      <div class="ui-dialog-form-footer"><button class="ui-dialog-btn" @click="$emit('close')">取消</button><button class="ui-dialog-btn ui-dialog-btn-primary" :disabled="preview || !!pending || outcomeUnknown" @click="compact">{{ pending === 'compact' ? '正在提交…' : '确认' }}</button></div>
+      <div v-if="compactionPending || work.compacting" class="alu-dialog-status">上下文正在压缩；进度与结果会显示在对话中。</div>
+      <textarea v-model="compactDraft" class="ui-dialog-editor" rows="6" placeholder="自定义说明（可选）" :disabled="compactionPending || work.compacting" />
+      <div class="ui-dialog-form-footer"><button class="ui-dialog-btn" @click="$emit('close')">取消</button><button class="ui-dialog-btn ui-dialog-btn-primary" :disabled="preview || !!pending || outcomeUnknown || compactionPending || work.compacting" @click="compact">{{ compactionPending || work.compacting ? '压缩中…' : '开始压缩' }}</button></div>
     </section>
 
     <section v-else-if="mode === 'reload-session'" class="alu-session-action-state alu-confirm-state">

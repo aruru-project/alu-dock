@@ -164,6 +164,10 @@ export async function startConversationFollow(
   if (isTauri) await invoke('start_conversation_follow', { ...context, instanceId, subscriptionId, cursor })
 }
 
+export async function stopConversationFollow(instanceId: string, subscriptionId: string, context: HostContext): Promise<boolean> {
+  return isTauri ? invoke('stop_conversation_follow', { ...context, instanceId, subscriptionId }) : false
+}
+
 export async function acquireExtensionControl(instanceId: string, expectedHostEpoch: string, expectedRuntimeGeneration: number, context: HostContext): Promise<ExtensionControllerBinding> {
   if (isTauri) return invoke<ExtensionControllerBinding>('acquire_extension_control', { ...context, instanceId, expectedHostEpoch, expectedRuntimeGeneration })
   throw new Error('浏览器设计预览不会取得 Extension UI 控制权')

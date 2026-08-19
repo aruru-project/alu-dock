@@ -176,7 +176,7 @@ export interface PublishedFileDto {
 
 export type ContentBlock =
   | { type: 'text' | 'thinking'; text: string }
-  | { type: 'image'; mimeType: string; contentRef?: string; data?: string }
+  | { type: 'image'; mimeType: string; contentRef?: string; data?: string; fileId?: string }
   | { type: 'tool_call'; toolCallId: string; toolName: string; args: unknown; omittedFields?: string[] }
   | { type: 'tool_result'; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; omittedFields?: string[] }
   | { type: 'omitted'; kind: string; description: string }
@@ -419,7 +419,7 @@ export type ConversationProcessItem =
   | { id: string; kind: 'notice'; groupId?: string; tone: 'info' | 'warning' | 'error'; text: string; groupTime?: string }
 
 export type ConversationItem =
-  | { id: string; kind: 'user'; text: string; time: string; attachments?: AttachmentDto[] }
+  | { id: string; kind: 'user'; text: string; time: string; attachments?: AttachmentDto[]; images?: Array<Extract<ConversationProcessItem, { kind: 'image' }>> }
   | { id: string; kind: 'activity' }
   | ConversationProcessItem
   | { id: string; kind: 'record'; title: string; panelClass: string; folded: boolean; parts: ConversationProcessItem[] }

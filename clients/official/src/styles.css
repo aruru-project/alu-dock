@@ -357,6 +357,9 @@ button.attachment-preview-trigger { margin: -4px; padding: 4px; cursor: zoom-in;
 button.attachment-preview-trigger:hover { background: rgb(126 200 224 / .07); }
 button.attachment-preview-trigger:focus-visible { outline: 2px solid var(--c-ice); outline-offset: 1px; }
 .attachment-icon { display: grid; width: 32px; height: 32px; flex: 0 0 auto; color: var(--c-ice); background: var(--c-ice-soft); border-radius: 9px; place-items: center; }
+.attachment-icon.has-thumbnail { width: 42px; height: 42px; overflow: hidden; background: #090b12; }
+.attachment-card.compact .attachment-icon.has-thumbnail { width: 36px; height: 36px; }
+.attachment-thumbnail { display: block; width: 100%; height: 100%; object-fit: cover; }
 .attachment-card.is-error .attachment-icon { color: var(--c-danger); background: rgb(248 113 113 / .08); }
 .attachment-copy { min-width: 0; flex: 1; }
 .attachment-copy strong { display: block; overflow: hidden; font-size: 11px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
@@ -1181,6 +1184,13 @@ button { margin: 0; padding: 0; border: 0; background: transparent; color: inher
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.msg-user-images .alu-conversation-image {
+  width: min(320px, 100%);
+  margin: 0;
+  border-color: var(--alu-user-border);
+  box-shadow: none;
+}
+.msg-user-images .alu-conversation-image-open img { max-height: 320px; }
 .alu-image-preview-overlay {
   position: fixed;
   inset: 0;

@@ -496,6 +496,31 @@ struct FollowTask {
     subscription_id: String,
 }
 
+impl FollowState {
+    fn abort_matching(
+        &self,
+        host_id: &str,
+        selection_generation: u64,
+        instance_id: &str,
+        subscription_id: Option<&str>,
+    ) -> Result<bool, CommandError> {
+        let mut guard = self.task.lock().map_err(|_| follow_state_error())?;
+        let matches = guard.as_ref().is_some_and(|task| {
+            task.host_id == host_id
+                && task.selection_generation == selection_generation
+                && task.instance_id == instance_id
+                && subscription_id.map_or(true, |value| task.subscription_id == value)
+        });
+        if !matches {
+            return Ok(false);
+        }
+        if let Some(task) = guard.take() {
+            task.handle.abort();
+        }
+        Ok(true)
+    }
+}
+
 #[derive(Clone, Default)]
 struct ExtensionControlState {
     inner: Arc<Mutex<ExtensionControlInner>>,
@@ -1949,6 +1974,32 @@ fn strip_image_paths(mut data: Value) -> Value {
     data
 }
 
+fn follow_state_error() -> CommandError {
+    CommandError {
+        code: "follow_state_unavailable".into(),
+        message: "实时连接状态暂时不可用".into(),
+        details: None,
+        outcome_unknown: false,
+        operation_id: None,
+    }
+}
+
+#[tauri::command]
+fn stop_conversation_follow(
+    state: tauri::State<'_, FollowState>,
+    host_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    subscription_id: String,
+) -> Result<bool, CommandError> {
+    state.abort_matching(
+        &host_id,
+        selection_generation,
+        &instance_id,
+        Some(&subscription_id),
+    )
+}
+
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn start_conversation_follow(
@@ -1965,13 +2016,7 @@ async fn start_conversation_follow(
     let client = dock_client(&store)?;
     let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
     ensure_host_selection(&lifecycle, &host_id, selection_generation)?;
-    let mut guard = state.task.lock().map_err(|_| CommandError {
-        code: "follow_state_unavailable".into(),
-        message: "实时连接状态暂时不可用".into(),
-        details: None,
-        outcome_unknown: false,
-        operation_id: None,
-    })?;
+    let mut guard = state.task.lock().map_err(|_| follow_state_error())?;
     if let Some(task) = guard.take() {
         task.handle.abort();
     }
@@ -3210,17 +3255,7 @@ fn detach_work_runtime(
     selection_generation: u64,
     instance_id: &str,
 ) {
-    if let Ok(mut guard) = follow.task.lock()
-        && guard.as_ref().is_some_and(|task| {
-            task.host_id == host_id
-                && task.selection_generation == selection_generation
-                && task.instance_id == instance_id
-                && !task.subscription_id.is_empty()
-        })
-        && let Some(task) = guard.take()
-    {
-        task.handle.abort();
-    }
+    let _ = follow.abort_matching(host_id, selection_generation, instance_id, None);
     if let Ok(mut guard) = extension.inner.lock()
         && guard.binding.as_ref().is_some_and(|binding| {
             binding.host_id == host_id
@@ -4457,6 +4492,7 @@ pub fn run() {
             conversation_image,
             published_image,
             start_conversation_follow,
+            stop_conversation_follow,
             acquire_extension_control,
             release_extension_control,
             respond_extension_interaction,
@@ -4834,6 +4870,27 @@ mod tests {
             concurrent
         );
         fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn stale_background_detach_keeps_the_new_foreground_follow() {
+        let state = FollowState::default();
+        *state.task.lock().unwrap() = Some(FollowTask {
+            handle: tauri::async_runtime::spawn(std::future::pending()),
+            host_id: "host-a".into(),
+            selection_generation: 3,
+            instance_id: "work-a".into(),
+            subscription_id: "foreground-new".into(),
+        });
+
+        assert!(!state
+            .abort_matching("host-a", 3, "work-a", Some("background-old"))
+            .unwrap());
+        assert!(state.task.lock().unwrap().is_some());
+        assert!(state
+            .abort_matching("host-a", 3, "work-a", Some("foreground-new"))
+            .unwrap());
+        assert!(state.task.lock().unwrap().is_none());
     }
 
     #[test]

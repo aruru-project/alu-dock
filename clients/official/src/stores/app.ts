@@ -243,6 +243,23 @@ export const useAppStore = defineStore('app', () => {
     payload.value.works[index] = snapshot
   }
 
+  function removeWorkSnapshot(instanceId: string, context = hostContext.value) {
+    if (!payload.value || !context || !contextMatches(context) || payload.value.hostId !== context.hostId) return false
+    const index = payload.value.works.findIndex((work) => work.id === instanceId)
+    if (index < 0) return false
+    payload.value.works.splice(index, 1)
+    payload.value.total = Math.max(0, payload.value.total - 1)
+    const host = localUiState.value.hosts[context.hostId]
+    if (host) {
+      delete host.drafts[instanceId]
+      delete host.attachments[instanceId]
+      if (host.selectedWorkId === instanceId) host.selectedWorkId = null
+    }
+    if (selectedWorkId.value === instanceId) selectedWorkId.value = null
+    saveLocalState()
+    return true
+  }
+
   function selectWork(id: string) {
     selectedWorkId.value = id
     const hostId = localUiState.value.activeHostId
@@ -286,7 +303,7 @@ export const useAppStore = defineStore('app', () => {
   return {
     catalog, activeHostId, activeHost, hostContext, payload, works, selectedWork, selectedWorkId,
     currentDraft, currentAttachments, detailMode, loading, error, hostUnreachable, needsPairing, workDrawerOpen,
-    load, loadActive, refreshWorksQuietly, switchHost, removeHost, contextMatches, applyHostProfile, applyWorkSnapshot, selectWork,
+    load, loadActive, refreshWorksQuietly, switchHost, removeHost, contextMatches, applyHostProfile, applyWorkSnapshot, removeWorkSnapshot, selectWork,
     setCurrentDraft, setCurrentAttachments, setDetailMode,
   }
 })

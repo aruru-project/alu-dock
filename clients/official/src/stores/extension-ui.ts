@@ -56,7 +56,11 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
       || binding.instanceId !== cursor.instanceId
       || binding.hostEpoch !== cursor.hostEpoch
       || binding.runtimeGeneration !== cursor.runtimeGeneration)) {
-      if (!await releaseController(binding.handle, 'detached', false)) return false
+      suspendController(binding.handle, false)
+      if (!await releaseController(binding.handle, 'detached', false)) {
+        controllerEnded(binding.handle, 'disconnected', false)
+        return false
+      }
     }
     if (revision !== lifecycleRevision) return false
     const sameGeneration = previousIdentity.hostId === host.hostId
@@ -90,10 +94,34 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     return true
   }
 
+  function resumeFollow(
+    host: { hostId: string; selectionGeneration: number },
+    subscription: string,
+    cursor: ConversationBootstrap['cursor'],
+  ): boolean {
+    if (hostId.value !== host.hostId
+      || selectionGeneration.value !== host.selectionGeneration
+      || instanceId.value !== cursor.instanceId
+      || hostEpoch.value !== cursor.hostEpoch
+      || runtimeGeneration.value !== cursor.runtimeGeneration
+      || lastSequence.value !== cursor.sequence
+      || controller.value) return false
+    lifecycleRevision++
+    subscriptionId.value = subscription
+    controllerState.value = 'detached'
+    return true
+  }
+
   async function clear(): Promise<boolean> {
     const revision = ++lifecycleRevision
     const handle = controller.value?.handle
-    if (handle && !await releaseController(handle, 'detached', false)) return false
+    if (handle) {
+      suspendController(handle, false)
+      if (!await releaseController(handle, 'detached', false)) {
+        controllerEnded(handle, 'disconnected', false)
+        return false
+      }
+    }
     if (revision !== lifecycleRevision) return false
     hostId.value = ''
     selectionGeneration.value = 0
@@ -129,7 +157,13 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     if (event.eventType === 'session.replaced') {
       const revision = ++lifecycleRevision
       const handle = controller.value?.handle
-      if (handle && !await releaseController(handle, 'disconnected', false)) return false
+      if (handle) {
+        suspendController(handle, false)
+        if (!await releaseController(handle, 'disconnected', false)) {
+          controllerEnded(handle, 'disconnected', false)
+          return false
+        }
+      }
       if (revision !== lifecycleRevision
         || instance !== instanceId.value
         || subscription !== subscriptionId.value
@@ -212,6 +246,13 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
   function failAcquire(state: 'detached' | 'disconnected' = 'disconnected') {
     if (!controller.value) controllerState.value = state
   }
+  function suspendController(handle: string, markLifecycle = true): boolean {
+    if (controller.value?.handle !== handle) return false
+    if (markLifecycle) lifecycleRevision++
+    controllerState.value = 'detached'
+    return true
+  }
+
   function controllerEnded(
     handle: string,
     state: 'detached' | 'disconnected' = 'disconnected',
@@ -247,7 +288,7 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
   }
 
   function applyControllerEvent(emission: ExtensionControllerEmission): { title?: string; editorText?: string } | null {
-    if (!controller.value || emission.handle !== controller.value.handle || !bindingMatches(emission)) return null
+    if (controllerState.value !== 'attached' || !controller.value || emission.handle !== controller.value.handle || !bindingMatches(emission)) return null
     const data = emission.event.data
     if (emission.event.eventType === 'interaction.requested') {
       const request = parseRequest(data)
@@ -297,8 +338,8 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     hostId, selectionGeneration, instanceId, hostEpoch, runtimeGeneration, subscriptionId, lastSequence,
     status, aboveWidgets, belowWidgets, toolsExpanded, toolsResetRevision,
     activeSummary, activeRequest, controller, controllerState,
-    hasAttention, isCurrent, bootstrap, clear, applyLive, beginAcquire,
-    attachController, failAcquire, controllerEnded, releaseController, applyControllerEvent,
+    hasAttention, isCurrent, bootstrap, resumeFollow, clear, applyLive, beginAcquire,
+    attachController, failAcquire, suspendController, controllerEnded, releaseController, applyControllerEvent,
     markInteractionUnknown, clearInteractionUnknown, hideControllerRequest, resolveLocally,
     applyAuthoritativeSnapshot,
   }

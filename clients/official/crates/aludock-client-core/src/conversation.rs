@@ -159,6 +159,8 @@ pub enum ContentBlock {
         content_ref: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         data: Option<String>,
+        #[serde(rename = "fileId", skip_serializing_if = "Option::is_none")]
+        file_id: Option<String>,
     },
     ToolCall {
         #[serde(rename = "toolCallId")]
@@ -399,6 +401,18 @@ impl DockClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_block_preserves_its_attachment_relation() {
+        let block: ContentBlock = serde_json::from_value(serde_json::json!({
+            "type": "image",
+            "mimeType": "image/png",
+            "contentRef": "content-1",
+            "fileId": "file-1"
+        }))
+        .unwrap();
+        assert_eq!(serde_json::to_value(block).unwrap()["fileId"], "file-1");
+    }
 
     #[test]
     fn pending_message_preserves_canonical_attachment_projection() {

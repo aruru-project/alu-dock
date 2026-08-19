@@ -37,7 +37,7 @@ import type {
 export type ControlSection = 'commands' | 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session' | 'models' | 'thinking' | 'tools' | 'resources' | 'settings'
 export type ControlMutationDomain = 'conversation' | 'sessions' | 'tree' | 'models' | 'tools' | 'settings'
 
-const props = defineProps<{ work: Work; section: ControlSection; preview: boolean; outcomeUnknown: boolean; unknownDomain?: ControlMutationDomain; hasDraft: boolean }>()
+const props = defineProps<{ work: Work; section: ControlSection; preview: boolean; outcomeUnknown: boolean; unknownDomain?: ControlMutationDomain; hasDraft: boolean; compactionPending: boolean }>()
 const app = useAppStore()
 const commandConsole = useCommandConsoleStore()
 function hostContext() {
@@ -56,6 +56,7 @@ const emit = defineEmits<{
   reconcile: [domain: ControlMutationDomain]
   section: [section: ControlSection]
   resync: [work: Work, draftText?: string]
+  compact: [customInstructions?: string]
   close: []
   stop: []
   restoreQueue: []
@@ -203,6 +204,10 @@ function forwardSessionSnapshot(work: Work) {
 function forwardSessionResync(work: Work, draftText?: string) {
   emit('resync', work, draftText)
   emit('close')
+}
+
+function forwardSessionCompact(customInstructions?: string) {
+  emit('compact', customInstructions)
 }
 
 function activateStatic(item: typeof staticCommands[number]) {
@@ -549,9 +554,11 @@ function sourceLabel(kind: string) {
       :preview="preview"
       :outcome-unknown="outcomeUnknown"
       :has-draft="hasDraft"
+      :compaction-pending="compactionPending"
       @snapshot="forwardSessionSnapshot"
       @unknown="forwardSessionUnknown"
       @resync="forwardSessionResync"
+      @compact="forwardSessionCompact"
       @title="forwardSessionTitle"
       @close="$emit('close')"
     />

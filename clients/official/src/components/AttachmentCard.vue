@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { AlertCircle, CheckCircle2, File, Image, LoaderCircle, RotateCcw, X } from '@lucide/vue'
+import { AlertCircle, CheckCircle2, File, LoaderCircle, RotateCcw, X } from '@lucide/vue'
 
 const props = withDefaults(defineProps<{
   name: string
@@ -12,8 +12,8 @@ const props = withDefaults(defineProps<{
   retryable?: boolean
   cancellable?: boolean
   compact?: boolean
-  previewable?: boolean
-}>(), { state: 'ready', progress: 0, removable: false, retryable: false, cancellable: false, compact: false, previewable: false })
+  previewUrl?: string
+}>(), { state: 'ready', progress: 0, removable: false, retryable: false, cancellable: false, compact: false })
 const emit = defineEmits<{ remove: []; retry: []; cancel: []; preview: [] }>()
 
 function bytes(value: number) {
@@ -33,19 +33,19 @@ function stateText() {
 </script>
 
 <template>
-  <article class="attachment-card" :class="[`is-${state}`, { compact, 'is-previewable': previewable }]" :aria-label="`附件 ${name}，${stateText()}`">
+  <article class="attachment-card" :class="[`is-${state}`, { compact, 'is-previewable': previewUrl }]" :aria-label="`附件 ${name}，${stateText()}`">
     <component
-      :is="previewable ? 'button' : 'div'"
+      :is="previewUrl ? 'button' : 'div'"
       class="attachment-preview-trigger"
-      :type="previewable ? 'button' : undefined"
-      :aria-label="previewable ? `预览图片附件 ${name}` : undefined"
-      :title="previewable ? `点击预览 ${name}` : undefined"
-      @click="previewable && emit('preview')"
+      :type="previewUrl ? 'button' : undefined"
+      :aria-label="previewUrl ? `预览图片附件 ${name}` : undefined"
+      :title="previewUrl ? `点击预览 ${name}` : undefined"
+      @click="previewUrl && emit('preview')"
     >
-      <div class="attachment-icon" aria-hidden="true">
-        <LoaderCircle v-if="['hashing', 'uploading', 'finalizing'].includes(state)" :size="17" class="spinning" />
+      <div class="attachment-icon" :class="{ 'has-thumbnail': previewUrl }" aria-hidden="true">
+        <img v-if="previewUrl" class="attachment-thumbnail" :src="previewUrl" alt="" />
+        <LoaderCircle v-else-if="['hashing', 'uploading', 'finalizing'].includes(state)" :size="17" class="spinning" />
         <AlertCircle v-else-if="state === 'error'" :size="17" />
-        <Image v-else-if="previewable" :size="17" />
         <CheckCircle2 v-else-if="state === 'ready'" :size="17" />
         <File v-else :size="17" />
       </div>

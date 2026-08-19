@@ -81,12 +81,16 @@ export function projectConversation(bootstrap: ConversationBootstrap, options: C
         const thinking = blockText(blocks, 'thinking')
         if (data.role === 'user') {
           const existing = messageItems.get(messageId)
-          const attachments = attachmentArray(data.attachments)
+          const user = projectUserMessage(blocks, attachmentArray(data.attachments), `live-${messageId}`, time)
           if (existing?.kind === 'user') {
-            if (text) existing.text = text
-            if (attachments.length) existing.attachments = attachments
-          } else if (text || attachments.length) {
-            items.push({ id: `live-${messageId}`, kind: 'user', text, time, attachments })
+            existing.text = user.text
+            existing.time = user.time
+            existing.attachments = user.attachments
+            existing.images = user.images
+          } else if (user.text || user.attachments?.length || user.images?.length) {
+            const item: ConversationItem = { id: `live-${messageId}`, kind: 'user', ...user }
+            items.push(item)
+            messageItems.set(messageId, item)
           }
           break
         }
@@ -197,7 +201,7 @@ export function projectConversation(bootstrap: ConversationBootstrap, options: C
         appendLiveNotice(items, event, 'info', `正在压缩上下文${stringValue(data.reason) ? `（${stringValue(data.reason)}）` : ''}…`)
         break
       case 'compaction.completed':
-        appendLiveNotice(items, event, data.error ? 'error' : 'info', stringValue(data.error) || (data.aborted ? '上下文压缩已取消。' : '上下文压缩完成。'))
+        appendLiveNotice(items, event, data.error ? 'error' : data.aborted ? 'warning' : 'info', stringValue(data.error) || (data.aborted ? '上下文压缩已取消。' : '上下文压缩完成。'))
         break
       case 'instance.stopped':
         appendLiveNotice(items, event, Array.isArray(data.cleanupErrors) && data.cleanupErrors.length ? 'error' : 'info', 'Work 已停止。')
@@ -267,7 +271,7 @@ function projectGroup(group: RecordGroup, output: ConversationItem[]) {
   const first = group.records[0]
   if (!first) return
   if (first.kind === 'message' && first.source === 'user' && group.records.length === 1) {
-    output.push({ id: first.recordId, kind: 'user', text: blockText(first.content, 'text'), time: shortTime(first.timestamp), attachments: first.attachments })
+    output.push({ id: first.recordId, kind: 'user', ...projectUserMessage(first.content, first.attachments ?? [], first.recordId, shortTime(first.timestamp)) })
     return
   }
   if (first.kind === 'compaction_summary' || first.kind === 'branch_summary') {
@@ -489,6 +493,30 @@ function renderToolDetail(tool: ToolProjection) {
   if (tool.outputText !== undefined) sections.push(`结果\n${tool.outputText}`)
   if (tool.omitted.size) sections.push(`未载入内容\n${[...tool.omitted].join('\n')}`)
   tool.item.detail = sections.join('\n\n')
+}
+
+function projectUserMessage(blocks: ContentBlock[], attachments: AttachmentDto[], id: string, time: string) {
+  const projected: Array<ConversationItem | ConversationProcessItem> = []
+  const imageMap = new Map<string, ImageItem>()
+  const attachmentsById = new Map(attachments.map((attachment) => [attachment.fileId, attachment]))
+  const linkedFileIds = new Set<string>()
+  blocks.forEach((block, index) => {
+    if (block.type !== 'image') return
+    const image = ensureContentImage(block, `${id}-image-${index}`, `user:${id}`, projected, imageMap)
+    const attachment = block.fileId ? attachmentsById.get(block.fileId) : undefined
+    if (!attachment) return
+    linkedFileIds.add(attachment.fileId)
+    image.name = attachment.name
+    image.sizeBytes = attachment.sizeBytes
+  })
+  const images = projected.filter((item): item is ImageItem => item.kind === 'image')
+  const visibleAttachments = attachments.filter((attachment) => !linkedFileIds.has(attachment.fileId))
+  return {
+    text: blockText(blocks, 'text'),
+    time,
+    ...(visibleAttachments.length ? { attachments: visibleAttachments } : {}),
+    ...(images.length ? { images } : {}),
+  }
 }
 
 function compactVisibleBlock(block: ContentBlock) {
