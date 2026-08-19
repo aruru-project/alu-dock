@@ -251,7 +251,7 @@ fn open_security_handle(
     directory: bool,
     write_owner: bool,
 ) -> io::Result<OwnedHandle> {
-    let path_wide = wide_null(path.as_os_str());
+    let path_wide = wide_path(path)?;
     let desired_access = READ_CONTROL | WRITE_DAC | if write_owner { WRITE_OWNER } else { 0 };
     let flags = FILE_FLAG_OPEN_REPARSE_POINT
         | if directory {
@@ -332,6 +332,35 @@ unsafe fn sid_to_string(sid: *mut c_void) -> io::Result<String> {
     Ok(String::from_utf16_lossy(unsafe {
         std::slice::from_raw_parts(value.0 as *const u16, length)
     }))
+}
+
+fn wide_path(path: &Path) -> io::Result<Vec<u16>> {
+    let absolute = std::path::absolute(path)?;
+    let mut value: Vec<u16> = absolute.as_os_str().encode_wide().collect();
+    for unit in &mut value {
+        if *unit == b'/' as u16 {
+            *unit = b'\\' as u16;
+        }
+    }
+
+    const SEPARATOR: u16 = b'\\' as u16;
+    const QUESTION: u16 = b'?' as u16;
+    const DOT: u16 = b'.' as u16;
+    let mut extended = if value.starts_with(&[SEPARATOR, SEPARATOR, QUESTION, SEPARATOR])
+        || value.starts_with(&[SEPARATOR, SEPARATOR, DOT, SEPARATOR])
+    {
+        value
+    } else if value.starts_with(&[SEPARATOR, SEPARATOR]) {
+        let mut result: Vec<u16> = r"\\?\UNC\".encode_utf16().collect();
+        result.extend_from_slice(&value[2..]);
+        result
+    } else {
+        let mut result: Vec<u16> = r"\\?\".encode_utf16().collect();
+        result.extend(value);
+        result
+    };
+    extended.push(0);
+    Ok(extended)
 }
 
 fn wide_null(value: &OsStr) -> Vec<u16> {
