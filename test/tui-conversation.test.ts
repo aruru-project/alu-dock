@@ -191,6 +191,15 @@ test("conversation reset replaces old session history", () => {
   assert.deepEqual(conversation.snapshot(), [{ kind: "assistant", text: "new session", complete: true }]);
 });
 
+test("fresh TUI recovery keeps extension command feedback visible", () => {
+  const conversation = new DockConversation();
+  conversation.applyBootstrapReplay([
+    event(1, "extension.notification", { level: "warning", message: "rm confirmation is off", operationId: "rm-off" }),
+  ]);
+  assert.deepEqual(conversation.snapshot(), [{ kind: "warning", text: "rm confirmation is off", complete: true }]);
+  assert.match(conversation.render(80).join("\n"), /rm confirmation is off/u);
+});
+
 
 
 
@@ -599,7 +608,7 @@ test("built-in presentations keep decision-critical tail, limits, continuation, 
 
 
 
-test("generic structured tool previews expose safe outcome fields without arbitrary payloads", () => {
+test("generic tool previews summarize JSON without hiding bracketed text results", () => {
   const conversation = new DockConversation();
   conversation.apply(event(1, "tool.started", {
     toolCallId: "kanban-safe-preview",
@@ -639,6 +648,22 @@ test("generic structured tool previews expose safe outcome fields without arbitr
   const malformedPreview = malformed.render(80).join("\n");
   assert.match(malformedPreview, /structured result truncated or unavailable/u);
   assert.doesNotMatch(malformedPreview, /MUST NOT LEAK|private/u);
+
+  const dockList = new DockConversation();
+  dockList.apply(event(5, "tool.started", {
+    toolCallId: "dock-list-preview",
+    toolName: "dock_list",
+    args: {},
+  }));
+  dockList.apply(event(6, "tool.completed", {
+    toolCallId: "dock-list-preview",
+    toolName: "dock_list",
+    isError: false,
+    text: "[Dock sibling list · live siblings]\n- Alu Work · active/idle",
+  }));
+  const dockListPreview = dockList.render(80).join("\n");
+  assert.match(dockListPreview, /Dock sibling list · live siblings/u);
+  assert.doesNotMatch(dockListPreview, /structured result truncated or unavailable/u);
 });
 
 

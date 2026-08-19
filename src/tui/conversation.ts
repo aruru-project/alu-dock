@@ -126,9 +126,9 @@ export class DockConversation implements Component {
   }
 
   applyBootstrapReplay(events: DockEvent[]): void {
-    // Fresh attach already has branch-scoped persisted history. Only unresolved
-    // message/tool frames from the current Host-owned run may extend it; control
-    // and lifecycle events are state recovery, never durable conversation.
+    // Fresh attach already has branch-scoped persisted history. Unresolved
+    // message/tool frames and extension feedback may extend it; other control
+    // and lifecycle events are state recovery, never conversation content.
     for (const event of events) {
       if (event.type === "message.submitted"
         || event.type === "message.delta"
@@ -136,7 +136,9 @@ export class DockConversation implements Component {
         || event.type === "tool.started"
         || event.type === "tool.args_updated"
         || event.type === "tool.output_updated"
-        || event.type === "tool.completed") this.apply(event);
+        || event.type === "tool.completed"
+        || event.type === "extension.notification"
+        || event.type === "extension.error") this.apply(event);
     }
   }
 
@@ -1051,8 +1053,21 @@ function isChangedDiffLine(line: string): boolean {
 }
 
 function looksLikeStructuredJson(text: string): boolean {
-  const first = text.trimStart()[0];
-  return first === "{" || first === "[";
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith("{")) return true;
+  if (!trimmed.startsWith("[")) return false;
+  const arrayBody = trimmed.slice(1).trimStart();
+  const firstItem = arrayBody[0];
+  return firstItem === undefined
+    || firstItem === "]"
+    || firstItem === "{"
+    || firstItem === "["
+    || firstItem === '"'
+    || firstItem === "-"
+    || /[0-9]/u.test(firstItem)
+    || arrayBody.startsWith("true")
+    || arrayBody.startsWith("false")
+    || arrayBody.startsWith("null");
 }
 
 function summarizeStructuredToolResult(text: string): string[] | undefined {
