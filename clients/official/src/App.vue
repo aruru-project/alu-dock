@@ -178,7 +178,8 @@ const compactionWorkIds = ref<Set<string>>(new Set())
 const compactionErrors = ref<Record<string, string>>({})
 const queueOpen = ref(false)
 const queueRestoring = ref(false)
-const queueNotice = ref('')
+const queueNotice = ref<{ text: string } | null>(null)
+let queueNoticeTimer = 0
 const deliveryOpen = ref(false)
 const deliverables = ref<DeliverableDto[]>([])
 const deliveryLoading = ref(false)
@@ -251,6 +252,23 @@ let historyLoadEpoch = 0
 const followActivation = new FollowActivationCoordinator()
 const followConnectionTimers = new Map<string, number>()
 const pendingFollowEvents = new Map<string, ProjectedEvent[]>()
+
+function clearQueueNotice() {
+  window.clearTimeout(queueNoticeTimer)
+  queueNoticeTimer = 0
+  queueNotice.value = null
+}
+
+function showQueueNotice(text: string, transient = true) {
+  clearQueueNotice()
+  const notice = { text }
+  queueNotice.value = notice
+  if (!transient) return
+  queueNoticeTimer = window.setTimeout(() => {
+    if (queueNotice.value === notice) queueNotice.value = null
+    queueNoticeTimer = 0
+  }, 3_500)
+}
 
 const previewConversation: ConversationItem[] = [
   { id: 'u1', kind: 'user', text: '请结合这份发布检查清单确认 Linux 客户端。', time: '19:38', attachments: [{ fileId: '45c6f7e8-9462-4fde-8ab9-1829dff71234', name: 'Linux 发布检查清单.pdf', sizeBytes: 248320, mediaType: 'application/pdf', sha256: 'a'.repeat(64), storedAt: '2026-08-17T08:00:00.000Z' }] },
@@ -485,7 +503,7 @@ watch(
     if (contextChanged) {
       for (const item of uploadDrafts.value) void removeAttachment(previous.workId, item.token, previous).catch(() => undefined)
       uploadDrafts.value = []
-      queueNotice.value = ''
+      clearQueueNotice()
       queueOpen.value = false
       submissionError.value = null
       resetConversationImages()
@@ -573,6 +591,7 @@ onUnmounted(() => {
   window.removeEventListener('keydown', handleDesktopShortcut)
   unlisteners.forEach((unlisten) => unlisten())
   window.clearTimeout(reconnectTimer)
+  clearQueueNotice()
   for (const timer of followConnectionTimers.values()) window.clearTimeout(timer)
   followConnectionTimers.clear()
   followActivation.cancelAll(new Error('界面已关闭。'))
@@ -1455,7 +1474,7 @@ async function restoreQueue(): Promise<boolean> {
   if (!work || pairingInProgress.value || attachmentPicking.value || clearingRestoredImages.value || queueRestoring.value || submitting.value) return false
   queueRestoring.value = true
   submissionError.value = null
-  queueNotice.value = ''
+  clearQueueNotice()
   try {
     const context = hostContext()
     const result = await dequeueMessages(work.id, context)
@@ -1471,13 +1490,13 @@ async function restoreQueue(): Promise<boolean> {
     }
     queueOpen.value = false
     if (restored.inFlightCount) {
-      queueNotice.value = `${restored.inFlightCount} 条消息可能已经开始执行，没有放回编辑器。请先查看对话，避免重复发送。`
+      showQueueNotice(`${restored.inFlightCount} 条消息可能已经开始执行，没有放回编辑器。请先查看对话，避免重复发送。`, false)
       return false
     }
     const batches = Math.ceil(draftAttachments.value.length / 32)
-    queueNotice.value = result.receipt.restored.length
+    showQueueNotice(result.receipt.restored.length
       ? `已取回 ${result.receipt.restored.length} 条消息。${batches > 1 ? ` 附件将分 ${batches} 批发送。` : ''}`
-      : 'Queue 中没有可取回的消息。'
+      : 'Queue 中没有可取回的消息。')
     return true
   } catch (cause) {
     markUnknownOutcome(cause, 'conversation', work.id)
@@ -1504,7 +1523,7 @@ async function submit(): Promise<boolean> {
     draftAttachments.value = attachmentsAfterSubmit(draftAttachments.value, capturedAttachments.map((item) => item.fileId), true)
     restoredImageCount.value = 0
     if (!result.receipt.queued) showAgentActivity(work.id)
-    if (draftAttachments.value.length) queueNotice.value = `已发送一批附件；还有 ${draftAttachments.value.length} 个保留在编辑器中。`
+    if (draftAttachments.value.length) showQueueNotice(`已发送一批附件；还有 ${draftAttachments.value.length} 个保留在编辑器中。`)
     if (!followConnected.value) void loadSelectedConversation(work.id, true)
     await nextTick()
     scrollOutputToBottom(true)
@@ -2081,20 +2100,18 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
       activeFollow.value = null
       followConnected.value = false
     }
+    if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
+    // A fresh selection has no useful surface to preserve. Once Follow accepts
+    // the exact bootstrap cursor, its catch-up events are buffered below, so
+    // the already-authoritative history can be shown during the handshake.
+    if (!preserveUntilSwap) publishConversationBootstrap(capturedHost, bootstrap)
     await connected
     if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
     if (!await extensionUi.bootstrap(capturedHost, subscriptionId, bootstrap)) return false
     if (!conversationSwapIsCorrelated(capturedHost, instanceId, bootstrap, true)) return false
 
     const bufferedFollowStatus: FollowConnectionStatus | undefined = followActivation.activate(subscriptionId)
-    app.applyWorkSnapshot(bootstrap.instance, capturedHost)
-    syncImageDomain(capturedHost, instanceId, bootstrap.cursor.hostEpoch, bootstrap.cursor.runtimeGeneration)
-    conversationState.value = bootstrap
-    applyConversationProjection(bootstrap)
-    scrollOutputToBottom(true)
-    historyTruncated.value = bootstrap.historyTruncated
-    historyBeforeEntryId.value = bootstrap.historyBeforeEntryId ?? null
-    historyError.value = null
+    if (preserveUntilSwap) publishConversationBootstrap(capturedHost, bootstrap)
     activeFollow.value = { ...capturedHost, instanceId, subscriptionId }
     followConnected.value = true
     conversationError.value = null
@@ -2127,6 +2144,17 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
     }
     if (epoch === conversationLoadEpoch && selected.value?.id === instanceId) conversationLoading.value = false
   }
+}
+
+function publishConversationBootstrap(context: HostContext, bootstrap: ConversationBootstrap) {
+  app.applyWorkSnapshot(bootstrap.instance, context)
+  syncImageDomain(context, bootstrap.instance.id, bootstrap.cursor.hostEpoch, bootstrap.cursor.runtimeGeneration)
+  conversationState.value = bootstrap
+  applyConversationProjection(bootstrap)
+  scrollOutputToBottom(true)
+  historyTruncated.value = bootstrap.historyTruncated
+  historyBeforeEntryId.value = bootstrap.historyBeforeEntryId ?? null
+  historyError.value = null
 }
 
 async function refreshCurrent() {
@@ -2569,7 +2597,7 @@ function handleOutputClick(event: MouseEvent) {
       <div v-if="!isTauri" class="alu-preview-notice">
         浏览器预览 · 操作不会提交
       </div>
-      <div v-else-if="selected && conversationState && (!followConnected || conversationError)" class="alu-recovery-notice" role="status">
+      <div v-else-if="selected && conversationState && (conversationError || (!conversationLoading && !followConnected))" class="alu-recovery-notice" role="status">
         <span>{{ conversationError ? `连接恢复失败：${conversationError}` : '连接已中断；当前对话已保留，正在重试…' }}</span>
         <button :disabled="conversationLoading" @click="loadSelectedConversation(selected.id, true)"><RefreshCw :size="13" />{{ conversationLoading ? '恢复中' : '重试' }}</button>
       </div>
@@ -2717,7 +2745,7 @@ function handleOutputClick(event: MouseEvent) {
       <button v-if="outputAwayFromBottom" type="button" class="alu-scroll-bottom" aria-label="滚动到最新消息" @click="scrollOutputToBottom(true)"><span aria-hidden="true">↓</span>滚到底部</button>
       <ExtensionUiSurface :work="selected" :reconcile-interaction="reconcileExtensionInteraction" @editor-text="applyExtensionEditorText" @title="applyExtensionTitle">
         <div v-if="visibleComposerError" class="alu-composer-error"><span>{{ visibleComposerError }}</span><button v-if="mutationOutcomeUnknown && reconcilingReopenWorkId !== selected.id" @click="reconcileMutationOutcome()">刷新并确认</button></div>
-        <div v-if="queueNotice" class="alu-composer-notice" role="status">{{ queueNotice }}<button type="button" @click="queueNotice = ''">×</button></div>
+        <div v-if="queueNotice" class="alu-composer-notice" role="status">{{ queueNotice.text }}</div>
         <div v-if="selected.pending.total" class="alu-queue-tray">
           <span class="alu-queue-title">Queue · {{ selected.pending.total }}</span>
           <span class="alu-queue-preview">{{ queueItems.map(item => item.text.trim() || (item.imageCount || item.attachments.length ? '[附件]' : '')).filter(Boolean).join(' · ') }}</span>
