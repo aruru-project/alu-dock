@@ -708,9 +708,6 @@ kbd { padding: 1px 4px; color: var(--c-text-3); font: 9px 'JetBrains Mono'; back
   .conversation { padding: 18px 20px 30px; }
   .user-bubble { max-width: 82%; }
   .welcome-state > img { width: min(35vw, 250px); }
-  .pairing-layout { grid-template-columns: 1fr; }
-  .pairing-guide { display: grid; grid-template-columns: repeat(3, 1fr); }
-  .pairing-guide li + li { border-top: 0; border-left: 1px solid var(--c-line-soft); }
 }
 
 @media (max-width: 599px) {
@@ -736,11 +733,6 @@ kbd { padding: 1px 4px; color: var(--c-text-3); font: 9px 'JetBrains Mono'; back
   .semantic-block { margin-left: 41px; }
   .tool-summary { display: none; }
   .welcome-state { min-height: 100%; gap: 8px; padding: 12px; }
-  .pairing-onboarding { padding-top: 6px; }
-  .pairing-intro > img { width: 74px; height: 86px; }
-  .pairing-layout { grid-template-columns: 1fr; }
-  .pairing-guide { display: block; }
-  .pairing-guide li + li { border-top: 1px solid var(--c-line-soft); border-left: 0; }
   .welcome-state > img { width: 39vw; max-height: 60%; opacity: .88; }
   .welcome-state h1 { font-size: 21px; }
   .composer-stack { padding-inline: 8px; }
@@ -932,7 +924,6 @@ button { margin: 0; padding: 0; border: 0; background: transparent; color: inher
 .delivery-tray-footer button { display: inline-flex; min-height: 36px; align-items: center; gap: 7px; padding: 0 11px; color: var(--alu-rose); border: 1px solid var(--alu-rose-border); border-radius: 8px; background: var(--alu-rose-bg); font: 700 12px var(--font-reading); cursor: pointer; }
 
 @media (max-width: 640px) {
-  .delivery-tray { width: min(100%, 390px); max-width: 100vw; }
   .delivery-tray-head { min-height: 68px; }
   .delivery-tray-body { padding: 12px 10px; }
   .delivery-row { min-height: 76px; gap: 8px; padding: 10px; }
@@ -947,10 +938,8 @@ button { margin: 0; padding: 0; border: 0; background: transparent; color: inher
 .ui-dialog-close { border: 0; background: transparent; }
 
 @media (max-width: 640px) {
-  .sm-inline { display: none; }
   .alu-scroll-bottom { top: -42px; right: 12px; min-height: 30px; padding: 0 10px; }
   .alu-native-attachments { max-height: 140px; }
-  .alu-status-label { display: none; }
 }
 
 .control-center-port { position: relative; display: flex; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow: hidden; }
@@ -1369,255 +1358,11 @@ button { margin: 0; padding: 0; border: 0; background: transparent; color: inher
   left: var(--aludock-inset-left);
 }
 
-/* Phones, tablets and unfolded foldables use the same touch-first information
-   hierarchy. Width within this range changes measure, not available features. */
 @media screen and (max-width: 1000px) {
-  :root {
-    --alu-nav-height: 56px;
-    --alu-bar-height: 48px;
-  }
-
-  body.alu-terminal-body {
-    position: fixed;
-    inset: 0;
-    overflow: hidden;
-    overscroll-behavior: none;
-  }
-
-  .alu-navbar {
-    height: var(--alu-nav-height);
-    min-height: var(--alu-nav-height);
-    flex-wrap: nowrap;
-    gap: 6px;
-    padding: 0 clamp(10px, 2.4vw, 20px);
-  }
-  .alu-navbar-left {
-    width: auto;
-    min-width: 0;
-    flex: 1 1 auto;
-    padding: 0;
-  }
-  .alu-navbar-avatar,
-  .alu-nav-workspace,
-  .alu-nav-sep,
-  .alu-nav-git-branch,
-  .alu-navbar-breadcrumb-arrow,
-  .alu-nav-selector,
-  .alu-nav-stats {
-    display: none;
-  }
-  .alu-navbar-breadcrumb {
-    width: 100%;
-    min-width: 0;
-    height: 44px;
-    margin: 0;
-    padding: 0 4px;
-  }
-  .alu-nav-session {
-    display: block;
-    min-width: 0;
-    max-width: none;
-    overflow: hidden;
-    color: var(--alu-text);
-    font: 650 14px/1.2 var(--font-reading);
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .alu-navbar-right {
-    width: auto;
-    min-width: 0;
-    flex: 0 0 auto;
-    justify-content: flex-end;
-    gap: 4px;
-    padding: 0;
-  }
-  .alu-nav-files,
-  .alu-nav-hamburger {
-    position: relative;
-    top: auto;
-    right: auto;
-    width: 44px;
-    height: 44px;
-    border-radius: 11px;
-  }
-
-  .alu-output {
-    width: 100%;
-    padding: 18px clamp(14px, 4vw, 34px) 30px;
-    overscroll-behavior: contain;
-  }
-  .conversation-flow,
-  .pairing-onboarding,
-  .alu-work-state {
-    width: min(100%, 760px);
-    margin-inline: auto;
-  }
-
-  .alu-msg-avatar { display: none; }
-  .alu-msg-assistant-row {
-    width: 100%;
-    gap: 0;
-    margin: 18px 0;
-  }
-  .alu-msg-assistant-content {
-    width: 100%;
-    max-width: none;
-  }
-  .alu-msg-assistant-body {
-    width: 100%;
-    max-width: none;
-    padding: 0;
-    overflow: visible;
-    border: 0;
-    border-radius: 0;
-    background: transparent;
-  }
-  .alu-msg-assistant-body > .msg-assistant {
-    margin: 0 0 7px;
-    padding: 12px 14px;
-    border: 1px solid #253050;
-    border-radius: 3px 14px 14px 14px;
-    background: rgba(20, 30, 52, .82);
-  }
-  .alu-msg-assistant-body > .msg-thinking,
-  .alu-msg-assistant-body > .msg-toolcall {
-    min-width: 0;
-    margin: 0 0 6px;
-    padding: 8px 11px;
-    border: 1px solid var(--alu-border);
-    border-left: 2px solid var(--alu-blue-border);
-    border-radius: 3px 10px 10px 3px;
-    background: color-mix(in srgb, var(--alu-bg-raised) 78%, transparent);
-  }
-  .alu-msg-assistant-body > .msg-toolcall { border-left-color: var(--alu-amber); }
-  .alu-msg-assistant-body > .msg-toolcall .tool-name {
-    display: block;
-    overflow: hidden;
-    line-height: 1.6;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .alu-msg-assistant-body > .msg-toolcall details summary {
-    min-height: 32px;
-    display: flex;
-    align-items: center;
-  }
-  .alu-msg-assistant-body .think-content {
-    max-height: min(28dvh, 220px);
-    overflow: auto;
-    overscroll-behavior: contain;
-  }
-  .alu-msg-assistant-row.is-agent-active .alu-msg-assistant-body {
-    display: grid;
-    width: 44px;
-    height: 44px;
-    padding: 0;
-    border: 1px solid var(--alu-border);
-    border-radius: 12px;
-    background: var(--alu-bg-raised);
-    place-items: center;
-  }
-  .msg-tool-output {
-    max-height: min(34dvh, 280px);
-    padding: 8px 10px;
-    font-size: 10px;
-    line-height: 1.55;
-  }
-  .msg-user {
-    margin: 18px 0;
-  }
-  .msg-user-bubble {
-    max-width: min(86%, 620px);
-    padding: 11px 13px 8px;
-    border-radius: 14px 14px 3px 14px;
-  }
-  .alu-live-notice-row,
-  .alu-record-panel {
-    max-width: 100%;
-    margin-right: 0;
-    margin-left: 0;
-  }
-  .msg-text table {
-    display: block;
-    max-width: 100%;
-    overflow-x: auto;
-  }
-  .code-block-pre { padding: 11px 12px; }
-
-  .alu-input-section {
-    padding: 0 clamp(10px, 3vw, 24px);
-  }
-  .alu-input-section .extension-ui-surface,
-  .alu-input-section > .alu-bottom-bar {
-    width: min(100%, 760px);
-    margin-inline: auto;
-  }
-  .alu-input-wrap {
-    min-height: 58px;
-    gap: 7px;
-    margin: 8px 0 0;
-    padding: 6px 7px 6px 13px;
-    border-width: 1px;
-    border-radius: 15px;
-  }
-  .alu-input-wrap textarea {
-    min-height: 44px;
-    max-height: min(30dvh, 180px);
-    padding: 10px 0 8px;
-    font-family: var(--font-reading);
-    font-size: 15px;
-  }
-  .alu-composer-expand {
-    min-width: 44px;
-    width: 44px;
-    height: 44px;
-    padding: 0;
-    border-radius: 11px;
-  }
-  .alu-send-btn {
-    min-width: 64px;
-    height: 44px;
-    padding: 0 14px;
-    border-radius: 11px;
-    font-size: 13px;
-  }
-  .alu-bar-session-action,
-  .alu-status-label,
-  .alu-bottom-bar .sm-inline,
-  .alu-bottom-bar kbd {
-    display: none;
-  }
-  .alu-bottom-bar {
-    height: var(--alu-bar-height);
-    min-height: var(--alu-bar-height);
-    flex-wrap: nowrap;
-    gap: 4px;
-    padding: 2px 0;
-  }
-  .alu-bottom-bar-left,
-  .alu-bottom-bar-right {
-    min-width: 0;
-    flex-wrap: nowrap;
-    gap: 2px;
-  }
-  .alu-bottom-bar-right { margin-left: auto; }
-  .alu-bar-btn {
-    min-width: 42px;
-    min-height: 42px;
-    justify-content: center;
-    padding: 0 7px;
-    border-radius: 9px;
-  }
-  .alu-bar-btn-toggle-active { color: var(--alu-blue); }
-  .alu-bar-btn[aria-keyshortcuts="Control+K Meta+K"]::before {
-    content: '⌘';
-    font-size: 17px;
-    line-height: 1;
-  }
-  .alu-bar-sep { margin: 0 1px; }
-
   .pairing-onboarding {
+    width: min(100%, 760px);
     min-height: auto;
+    margin-inline: auto;
     padding: 8px 0 28px;
   }
   .pairing-intro {
@@ -1659,27 +1404,6 @@ button { margin: 0; padding: 0; border: 0; background: transparent; color: inher
     border-left: 1px solid var(--c-line-soft);
   }
 
-  .ui-dialog-overlay,
-  .cmd-palette-overlay {
-    align-items: flex-end;
-    padding: 0;
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
-  }
-  .ui-dialog-box,
-  .ui-dialog-size-wide,
-  .ui-dialog-size-tree,
-  .cmd-palette-box {
-    width: 100%;
-    height: auto;
-    max-height: 92%;
-    border-right: 0;
-    border-bottom: 0;
-    border-left: 0;
-    border-radius: 18px 18px 0 0;
-  }
-  .ui-dialog-size-wide,
-  .ui-dialog-size-tree { height: 92%; }
   .alu-sidebar,
   .delivery-tray {
     width: min(390px, 100%);
@@ -1688,10 +1412,6 @@ button { margin: 0; padding: 0; border: 0; background: transparent; color: inher
 }
 
 @media screen and (max-width: 600px) {
-  .alu-output { padding: 12px 12px 24px; }
-  .alu-nav-session { font-size: 13px; }
-  .msg-user-bubble { max-width: 92%; }
-
   .pairing-intro {
     align-items: flex-start;
     gap: 10px;
@@ -1715,8 +1435,4 @@ button { margin: 0; padding: 0; border: 0; background: transparent; color: inher
   }
   .pairing-actions { align-items: stretch; flex-direction: column-reverse; }
   .pairing-actions .button { width: 100%; }
-
-  .alu-input-section { padding-inline: 8px; }
-  .alu-bottom-bar-right { gap: 0; }
-  .alu-bar-btn { min-width: 40px; padding-inline: 5px; }
 }

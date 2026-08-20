@@ -2072,143 +2072,266 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 .alu-toolbar-btn-cmd:hover { color: var(--alu-pink); border-color: var(--alu-pink-border); background: var(--alu-pink-bg); }
 
 /* ═══════════════════════════════════════════════════════
-   响应式 — 移动端 (≤ 640px)
+   响应式 — 通用窄窗口
    ═══════════════════════════════════════════════════════ */
 
-@media (max-width: 640px) {
-
-  /* 导航栏 */
+@media screen and (max-width: 1000px) {
   :root {
-    --alu-nav-height: 54px;
+    --alu-nav-height: 56px;
+    --alu-bar-height: 48px;
+  }
+
+  body.alu-terminal-body {
+    position: fixed;
+    inset: 0;
+    overflow: hidden;
+    overscroll-behavior: none;
   }
 
   .alu-navbar {
-    padding: 0 10px;
+    height: var(--alu-nav-height);
+    min-height: var(--alu-nav-height);
+    flex-wrap: nowrap;
     gap: 6px;
+    padding: 0 clamp(10px, 2.4vw, 20px);
   }
-
-  /* 移动端隐藏头像，腾出空间 */
-  .alu-navbar-avatar {
-    display: none;
-  }
-
-  /* 面包屑缩小 */
-  .alu-nav-workspace {
-    font-size: 12px;
-  }
-  .alu-nav-sep,
-  .alu-nav-session {
-    font-size: 12px;
-  }
-  .alu-nav-session {
-    max-width: 80px;
-  }
-  .alu-navbar-breadcrumb { padding: 5px 7px; margin-left: -7px; }
-  .alu-nav-git-branch,
-  .alu-navbar-breadcrumb-arrow { display: none; }
-
-  /* 选择器按钮：移动端去掉 label，只留 icon + value，无 min-width */
-  .alu-nav-selector {
+  .alu-navbar-left {
+    width: auto;
     min-width: 0;
-    padding: 5px 8px 5px 7px;
-    gap: 4px;
-    font-size: 11px;
+    flex: 1 1 auto;
+    padding: 0;
   }
-  .alu-nav-selector-label {
+  .alu-navbar-avatar,
+  .alu-nav-workspace,
+  .alu-nav-sep,
+  .alu-nav-git-branch,
+  .alu-navbar-breadcrumb-arrow,
+  .alu-nav-selector,
+  .alu-nav-stats {
     display: none;
   }
-  .alu-nav-selector-value {
-    font-size: 11px;
-    max-width: 64px;
+  .alu-navbar-breadcrumb {
+    width: 100%;
+    min-width: 0;
+    height: 44px;
+    margin: 0;
+    padding: 0 4px;
+  }
+  .alu-nav-session {
+    display: block;
+    min-width: 0;
+    max-width: none;
     overflow: hidden;
+    color: var(--alu-text);
+    font: 650 14px/1.2 var(--font-reading);
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .alu-nav-selector-model .alu-nav-selector-value {
-    font-size: 0;
+  .alu-navbar-right {
+    width: auto;
+    min-width: 0;
+    flex: 0 0 auto;
+    justify-content: flex-end;
+    gap: 4px;
+    padding: 0;
   }
-  .alu-nav-selector-model .alu-nav-selector-value::before {
-    content: attr(data-provider);
-    font-size: 11px;
-  }
-  .alu-nav-selector-arrow {
-    font-size: 9px;
+  .alu-nav-files,
+  .alu-nav-hamburger {
+    position: relative;
+    top: auto;
+    right: auto;
+    width: 44px;
+    height: 44px;
+    border-radius: 11px;
   }
 
-  /* 汉堡按钮 */
-  .alu-nav-stats {
-    gap: 4px;
+  .alu-output {
+    width: 100%;
+    padding: 18px clamp(14px, 4vw, 34px) 30px;
+    overscroll-behavior: contain;
+  }
+  .conversation-flow,
+  .alu-work-state {
+    width: min(100%, 760px);
+    margin-inline: auto;
+  }
+  .alu-msg-avatar { display: none; }
+  .alu-msg-assistant-row {
+    width: 100%;
+    gap: 0;
+    margin: 18px 0;
+  }
+  .alu-msg-assistant-content {
+    width: 100%;
+    max-width: none;
+  }
+  .alu-msg-assistant-body {
+    width: 100%;
+    max-width: none;
+    padding: 0;
+    overflow: visible;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+  }
+  .alu-msg-assistant-body > .msg-assistant {
+    margin: 0 0 7px;
+    padding: 12px 14px;
+    border: 1px solid #253050;
+    border-radius: 3px 14px 14px 14px;
+    background: rgba(20, 30, 52, .82);
+  }
+  .alu-msg-assistant-body > .msg-thinking {
+    min-width: 0;
+    margin: 0 0 6px;
+    padding: 8px 11px;
+    border: 1px solid var(--alu-border);
+    border-left: 2px solid var(--alu-blue-border);
+    border-radius: 3px 10px 10px 3px;
+    background: color-mix(in srgb, var(--alu-bg-raised) 78%, transparent);
+  }
+  .alu-msg-assistant-body > .msg-toolcall {
+    width: 100%;
+    margin: 0 0 6px;
+  }
+  .alu-msg-assistant-body .think-content {
+    max-height: min(28dvh, 220px);
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
+  .alu-msg-assistant-row.is-agent-active .alu-msg-assistant-body {
+    display: grid;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border: 1px solid var(--alu-border);
+    border-radius: 12px;
+    background: var(--alu-bg-raised);
+    place-items: center;
+  }
+  .msg-tool-output {
+    max-height: min(34dvh, 280px);
+    padding: 8px 10px;
+    font-size: 10px;
+    line-height: 1.55;
+  }
+  .msg-user { margin: 18px 0; }
+  .msg-user-bubble {
+    max-width: min(86%, 620px);
+    padding: 11px 13px 8px;
+    border-radius: 14px 14px 3px 14px;
+  }
+  .alu-live-notice-row,
+  .alu-record-panel {
+    max-width: 100%;
+    margin-right: 0;
     margin-left: 0;
   }
-
-  .alu-nav-stat-pill {
-    padding: 4px 6px;
-    font-size: 10px;
+  .msg-text table {
+    display: block;
+    max-width: 100%;
+    overflow-x: auto;
   }
+  .code-block-pre { padding: 11px 12px; }
 
-  /* 移动端优先保留上下文和费用，输入/输出统计隐藏 */
-  .alu-nav-stat-pill:nth-child(1),
-  .alu-nav-stat-pill:nth-child(2) {
-    display: none;
+  .alu-input-section { padding: 0 clamp(10px, 3vw, 24px); }
+  .alu-input-section .extension-ui-surface,
+  .alu-input-section > .alu-bottom-bar {
+    width: min(100%, 760px);
+    margin-inline: auto;
   }
-
-  .alu-nav-hamburger {
-    width: 34px;
-    height: 34px;
+  .alu-input-wrap {
+    min-height: 58px;
+    gap: 7px;
+    margin: 8px 0 0;
+    padding: 6px 7px 6px 13px;
+    border-width: 1px;
+    border-radius: 15px;
+  }
+  .alu-input-wrap textarea {
+    min-height: 44px;
+    max-height: min(30dvh, 180px);
+    padding: 10px 0 8px;
+    font-family: var(--font-reading);
     font-size: 15px;
   }
-
-  /* ── 极窄屏（≤ 470px，如 iPhone SE）：navbar 换两行 ── */
-  @media (max-width: 470px) {
-    :root { --alu-nav-height: auto; }
-
-    .alu-navbar {
-      height: auto;
-      flex-wrap: wrap;
-      padding: 6px 10px 4px;
-      row-gap: 2px;
-    }
-
-    /* 第一行：面包屑 + 汉堡；第二行留给运行身份与统计。 */
-    .alu-navbar-left {
-      flex: 0 0 100%;
-      width: 100%;
-      padding-right: 42px;
-    }
-    .alu-nav-session {
-      max-width: none;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      flex: 1;
-      min-width: 0;
-    }
-
-    /* 第二行：Model、Thinking、Context、Cost。 */
-    .alu-navbar-right {
-      flex: 0 0 100%;
-      width: 100%;
-      justify-content: flex-start;
-      padding-bottom: 4px;
-    }
-    .alu-nav-selector-model {
-      flex: 1 1 auto;
-      min-width: 0;
-    }
-    .alu-nav-selector-model .alu-nav-selector-value {
-      max-width: none;
-    }
-    .alu-nav-hamburger {
-      position: absolute;
-      top: 6px;
-      right: 10px;
-    }
+  .alu-composer-expand {
+    min-width: 44px;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    border-radius: 11px;
   }
-
-  /* 输出区 padding 缩小 */
-  .alu-output {
-    padding: 14px 14px 28px;
+  .alu-send-btn {
+    min-width: 64px;
+    height: 44px;
+    padding: 0 14px;
+    border-radius: 11px;
+    font-size: 13px;
   }
+  .alu-bar-session-action,
+  .alu-status-label,
+  .alu-bottom-bar .sm-inline,
+  .alu-bottom-bar kbd {
+    display: none;
+  }
+  .alu-bottom-bar {
+    height: var(--alu-bar-height);
+    min-height: var(--alu-bar-height);
+    flex-wrap: nowrap;
+    gap: 4px;
+    padding: 2px 0;
+  }
+  .alu-bottom-bar-left,
+  .alu-bottom-bar-right {
+    min-width: 0;
+    flex-wrap: nowrap;
+    gap: 2px;
+  }
+  .alu-bottom-bar-right { margin-left: auto; }
+  .alu-bar-btn {
+    min-width: 42px;
+    min-height: 42px;
+    justify-content: center;
+    padding: 0 7px;
+    border-radius: 9px;
+  }
+  .alu-bar-btn-toggle-active { color: var(--alu-blue); }
+  .alu-bar-btn[aria-keyshortcuts="Control+K Meta+K"]::before {
+    content: '⌘';
+    font-size: 17px;
+    line-height: 1;
+  }
+  .alu-bar-sep { margin: 0 1px; }
+
+  .ui-dialog-overlay,
+  .cmd-palette-overlay {
+    align-items: flex-end;
+    padding: 0;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  .ui-dialog-box,
+  .ui-dialog-size-wide,
+  .ui-dialog-size-tree,
+  .cmd-palette-box {
+    width: 100%;
+    height: auto;
+    max-height: 92%;
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 18px 18px 0 0;
+  }
+  .ui-dialog-size-wide,
+  .ui-dialog-size-tree { height: 92%; }
+}
+
+@media screen and (max-width: 600px) {
+  .alu-output { padding: 12px 12px 24px; }
+  .alu-nav-session { font-size: 13px; }
+  .msg-user-bubble { max-width: 92%; }
+
   .alu-work-state {
     place-items: start stretch;
     padding: 18px 0 28px;
@@ -2225,115 +2348,22 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
     align-items: stretch;
     margin-top: 22px;
   }
-  .alu-work-state-primary {
-    flex: 1 0 100%;
-  }
-  .alu-work-state-secondary {
-    flex: 1 1 0;
-  }
+  .alu-work-state-primary { flex: 1 0 100%; }
+  .alu-work-state-secondary { flex: 1 1 0; }
 
-  /* 消息头像：移动端隐藏 */
-  .alu-msg-avatar {
-    display: none;
-  }
-  .alu-live-notice-row {
-    margin-left: 0;
-    max-width: 100%;
-  }
+  .alu-input-section { padding-inline: 8px; }
+  .alu-bottom-bar-right { gap: 0; }
+  .alu-bar-btn { min-width: 40px; padding-inline: 5px; }
 
-  /* 消息行间距缩小 */
-  .alu-msg-assistant-row {
-    gap: 9px;
-    margin: 14px 0;
-  }
-  .alu-msg-assistant-body {
-    padding: 10px 12px;
-  }
-  .msg-user {
-    margin: 14px 0;
-  }
-  .msg-user-bubble {
-    max-width: 90%;
-    padding: 10px 12px 8px;
-  }
-
-  /* 输入区 */
-  .alu-input-section {
-    padding: 0 10px;
-  }
-  .alu-input-wrap {
-    margin: 10px 0 0;
-    padding: 9px 8px 9px 14px;
-    border-radius: 16px;
-    gap: 8px;
-  }
-  .alu-send-btn {
-    padding: 8px 16px;
-    font-size: 13px;
-    border-radius: 11px;
-  }
-  .alu-composer-expand { width: 40px; height: 40px; }
-
-  /* Resume/Tree 在移动端统一从 Command Center 进入。 */
-  .alu-bar-session-action {
-    display: none;
-  }
-
-  /* 底部工具栏：可横向滚动，隐藏状态区时间 */
-  .alu-bottom-bar {
-    height: auto;
-    min-height: var(--alu-bar-height);
-    padding: 4px 2px;
-    flex-wrap: wrap;
-    gap: 4px;
-  }
-  .alu-bottom-bar-left {
-    overflow-x: auto;
-    -webkit-overflow-scrolling: touch;
-    scrollbar-width: none;
-    flex-wrap: nowrap;
-  }
-  .alu-bottom-bar-left::-webkit-scrollbar {
-    display: none;
-  }
-  .alu-bottom-bar-right {
-    flex-shrink: 0;
-    gap: 5px;
-  }
-  .alu-bar-btn {
-    min-height: 38px;
-    padding: 7px 9px;
-  }
-  .alu-status-time {
-    display: none;
-  }
-
-  /* 代码块 */
-  .code-block-pre {
-    padding: 10px 12px;
-    font-size: 12px;
-  }
-  .code-block-pre code {
-    font-size: 12px;
-  }
-
-  /* 弹窗：独立应用中使用稳定的底部工作面，不依赖浏览器返回/下拉手势 */
-  .ui-dialog-overlay {
-    align-items: flex-end;
-    padding: 0;
+  .ui-dialog-overlay,
+  .cmd-palette-overlay {
     background: rgba(4, 6, 14, 0.92);
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
   }
   .ui-dialog-box,
   .ui-dialog-size-wide,
-  .ui-dialog-size-tree {
-    width: 100%;
-    height: auto;
+  .ui-dialog-size-tree,
+  .cmd-palette-box {
     max-height: 92dvh;
-    border-right: none;
-    border-bottom: none;
-    border-left: none;
     border-radius: 17px 17px 0 0;
     padding-bottom: env(safe-area-inset-bottom, 0px);
   }
@@ -2353,11 +2383,20 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
     padding-bottom: 9px;
     padding-left: calc(8px + var(--option-indent));
   }
-  .ui-dialog-option-detail { display: block; }
-  .ui-dialog-option-meta { display: block; margin-top: 2px; }
-  .ui-dialog-actions { flex-wrap: wrap; justify-content: stretch; padding: 8px 10px; }
+  .ui-dialog-option-detail,
+  .ui-dialog-option-meta { display: block; }
+  .ui-dialog-option-meta { margin-top: 2px; }
+  .ui-dialog-actions {
+    flex-wrap: wrap;
+    justify-content: stretch;
+    padding: 8px 10px;
+  }
   .ui-dialog-selection-summary { flex: 1 0 100%; }
-  .ui-dialog-action-btn { min-height: 44px; flex: 1 1 calc(50% - 4px); text-align: center; }
+  .ui-dialog-action-btn {
+    min-height: 44px;
+    flex: 1 1 calc(50% - 4px);
+    text-align: center;
+  }
   .ui-dialog-close { width: 40px; height: 40px; top: 8px; right: 8px; }
   .ui-dialog-btn { min-height: 44px; }
   .ui-dialog-input,
@@ -2370,22 +2409,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   .alu-project-status-badges { grid-column: 2; justify-content: flex-start; }
   .alu-project-status-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 
-  .cmd-palette-overlay {
-    align-items: flex-end;
-    padding: 0;
-    background: rgba(4, 6, 14, 0.92);
-    backdrop-filter: none;
-    -webkit-backdrop-filter: none;
-  }
-  .cmd-palette-box {
-    width: 100%;
-    max-height: 92dvh;
-    border-right: none;
-    border-bottom: none;
-    border-left: none;
-    border-radius: 17px 17px 0 0;
-    padding-bottom: env(safe-area-inset-bottom, 0px);
-  }
   .cmd-palette-search-wrap { min-height: 56px; padding: 8px 10px 8px 12px; }
   .cmd-palette-kbd { display: none; }
   .cmd-palette-close { width: 40px; height: 40px; }
@@ -2600,7 +2623,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 @media (max-width: 640px) {
   .alu-queue-preview { max-width: 48vw; }
   .alu-instance-link { padding-top: 10px; padding-bottom: 10px; }
-  .ui-dialog-close { width: 40px; height: 40px; top: 8px; right: 8px; }
 }
 
 /* Large monitors enlarge navigation and command controls without changing the
