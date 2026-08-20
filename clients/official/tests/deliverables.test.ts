@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import {
-  clearDownloadHistory,
   downloadedDelivery,
+  pastDownloadedDeliveries,
   persistDownloadHistory,
   readDownloadHistory,
   recordDownloadedDelivery,
+  removeDownloadedDeliveries,
 } from '../src/lib/downloadHistory.ts'
 
 const values = new Map<string, string>()
@@ -32,8 +33,19 @@ assert.equal(downloadedDelivery(afterRestart, 'host-a', 'work-a', 'delivery-1')?
 assert.equal(downloadedDelivery(afterRestart, 'host-a', 'work-a', 'delivery-2'), undefined, 'a new delivery item remains downloadable even when it represents the same file')
 assert.equal(downloadedDelivery(afterRestart, 'host-a', 'work-b', 'delivery-1'), undefined, 'download receipts stay scoped to their Work')
 
-const cleared = clearDownloadHistory()
+const past = {
+  ...first,
+  instanceId: 'work-b',
+  deliveryRef: 'delivery-old',
+  name: 'older-report.zip',
+  downloadedAt: '2026-08-18T11:00:00.000Z',
+}
+const withPast = recordDownloadedDelivery(afterRestart, past)
+const visiblePastWhileCurrentWorkLoads = pastDownloadedDeliveries(withPast, 'host-a', 'work-a', [], false)
+assert.deepEqual(visiblePastWhileCurrentWorkLoads.map((item) => item.deliveryRef), ['delivery-old'])
+const cleared = removeDownloadedDeliveries(withPast, visiblePastWhileCurrentWorkLoads)
 assert.equal(persistDownloadHistory(storage, cleared), true)
-assert.deepEqual(readDownloadHistory(storage).items, [])
+assert.equal(downloadedDelivery(readDownloadHistory(storage), 'host-a', 'work-a', 'delivery-1')?.name, 'report.zip', 'clearing past downloads keeps the current Work receipt available')
+assert.equal(downloadedDelivery(readDownloadHistory(storage), 'host-a', 'work-b', 'delivery-old'), undefined)
 
-console.log('downloaded delivery history remains local until the user clears it')
+console.log('download receipts preserve the current Work while past records are cleared')

@@ -95,13 +95,13 @@ import {
 } from './lib/uiBoundaries'
 import type { AttachmentDto, AttachmentUploadProgress, ConnectionKind, ConversationBootstrap, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, HostConnectionProfile, HostContext, HostEndpoint, ProjectedEvent, QueueItem, SelectedAttachment, Work, WorkspacePage } from './lib/types'
 import {
-  clearDownloadHistory,
   deliveryHistoryKey,
   downloadedDelivery,
-  downloadedItemMatches,
+  pastDownloadedDeliveries,
   persistDownloadHistory,
   readDownloadHistory,
   recordDownloadedDelivery,
+  removeDownloadedDeliveries,
   type DownloadedDeliverable,
 } from './lib/downloadHistory'
 import AttachmentCard from './components/AttachmentCard.vue'
@@ -178,13 +178,13 @@ const compactionWorkIds = ref<Set<string>>(new Set())
 const compactionErrors = ref<Record<string, string>>({})
 const queueOpen = ref(false)
 const queueRestoring = ref(false)
-const queueNotice = ref<{ text: string } | null>(null)
+const queueNotice = ref('')
 let queueNoticeTimer = 0
 const deliveryOpen = ref(false)
 const deliverables = ref<DeliverableDto[]>([])
 const deliveryLoading = ref(false)
+const deliveryListLoaded = ref(false)
 const deliveryError = ref('')
-const deliveryNotice = ref('')
 const downloadingDeliveries = ref<Set<string>>(new Set())
 const deliveryProgress = ref<Record<string, number>>({})
 const openingDeliveryKey = ref('')
@@ -209,7 +209,7 @@ type ControlCenterHandle = {
 }
 const unresolvedMutations = ref<Map<string, string>>(new Map())
 const controlCenterRef = ref<ControlCenterHandle | null>(null)
-const deliveryTrayRef = ref<{ focusClear: () => void } | null>(null)
+const deliveryTrayRef = ref<{ focusClear: () => void; focusClose: () => void } | null>(null)
 const modalSurface = ref<HTMLElement | null>(null)
 let modalTrigger: HTMLElement | null = null
 const conversationState = ref<ConversationBootstrap | null>(null)
@@ -256,16 +256,14 @@ const pendingFollowEvents = new Map<string, ProjectedEvent[]>()
 function clearQueueNotice() {
   window.clearTimeout(queueNoticeTimer)
   queueNoticeTimer = 0
-  queueNotice.value = null
+  queueNotice.value = ''
 }
 
-function showQueueNotice(text: string, transient = true) {
+function showQueueNotice(text: string) {
   clearQueueNotice()
-  const notice = { text }
-  queueNotice.value = notice
-  if (!transient) return
+  queueNotice.value = text
   queueNoticeTimer = window.setTimeout(() => {
-    if (queueNotice.value === notice) queueNotice.value = null
+    queueNotice.value = ''
     queueNoticeTimer = 0
   }, 3_500)
 }
@@ -345,8 +343,13 @@ const olderDownloadHistory = computed(() => {
   const context = app.hostContext
   const instanceId = selected.value?.id
   if (!context || !instanceId) return downloadHistory.value.items
-  return downloadHistory.value.items.filter((item) => !deliverables.value.some((deliverable) =>
-    downloadedItemMatches(item, context.hostId, instanceId, deliverable)))
+  return pastDownloadedDeliveries(
+    downloadHistory.value,
+    context.hostId,
+    instanceId,
+    deliverables.value,
+    deliveryListLoaded.value,
+  )
 })
 const pendingDeliverableCount = computed(() => currentDeliverableRows.value.filter((row) => !row.downloaded).length)
 function restoredImageKey(context: HostContext, workId: string) {
@@ -516,8 +519,8 @@ watch(
     ++historyLoadEpoch
     ++deliveryLoadEpoch
     deliverables.value = []
+    deliveryListLoaded.value = false
     deliveryError.value = ''
-    deliveryNotice.value = ''
     if (id) void refreshDeliverables()
     if (isTauri && windowFocused.value && id) void loadSelectedConversation(id)
     else if (!id) void extensionUi.clear()
@@ -664,7 +667,6 @@ function openDeliveryTray() {
   rememberModalTrigger()
   app.workDrawerOpen = false
   deliveryOpen.value = true
-  deliveryNotice.value = ''
   void refreshDeliverables()
 }
 
@@ -674,6 +676,7 @@ async function refreshDeliverables() {
   if (!context || !instanceId) {
     deliverables.value = []
     deliveryLoading.value = false
+    deliveryListLoaded.value = false
     return
   }
   const epoch = ++deliveryLoadEpoch
@@ -683,6 +686,7 @@ async function refreshDeliverables() {
     const items = await listDeliverables(instanceId, context)
     if (epoch !== deliveryLoadEpoch || !app.contextMatches(context) || selected.value?.id !== instanceId) return
     deliverables.value = items
+    deliveryListLoaded.value = true
   } catch (cause) {
     if (epoch !== deliveryLoadEpoch || !app.contextMatches(context) || selected.value?.id !== instanceId) return
     deliveryError.value = errorMessage(cause, '无法加载当前 Work 的文件。请检查连接后重试。')
@@ -691,12 +695,12 @@ async function refreshDeliverables() {
   }
 }
 
-async function saveDeliverable(deliverable: DeliverableDto) {
+async function saveDeliverable(deliverable: DeliverableDto, redownload = false) {
   const context = app.hostContext
   const work = selected.value
   if (!context || !work) return
   const existing = downloadedDelivery(downloadHistory.value, context.hostId, work.id, deliverable.deliveryRef)
-  if (existing) {
+  if (existing && !redownload) {
     await openDownloadedDeliverable(existing)
     return
   }
@@ -705,7 +709,6 @@ async function saveDeliverable(deliverable: DeliverableDto) {
   downloadingDeliveries.value = new Set(downloadingDeliveries.value).add(key)
   deliveryProgress.value = { ...deliveryProgress.value, [key]: 0 }
   deliveryError.value = ''
-  deliveryNotice.value = ''
   try {
     const result = await downloadDeliverable(work.id, deliverable, context)
     if (result.status === 'cancelled') return
@@ -722,8 +725,7 @@ async function saveDeliverable(deliverable: DeliverableDto) {
     })
     const persisted = persistDownloadHistory(downloadHistoryStorage, next)
     downloadHistory.value = next
-    if (persisted) deliveryNotice.value = `“${result.deliverable.name}”已保存。`
-    else deliveryError.value = '文件已保存，但下载记录未能更新。下次打开客户端时可能仍显示“下载”。'
+    if (!persisted) deliveryError.value = '文件已保存，但下载记录未能更新。下次打开客户端时可能仍显示“下载”。'
   } catch (cause) {
     deliveryError.value = errorMessage(cause, '文件没有下载完成，请重试。')
   } finally {
@@ -741,7 +743,6 @@ async function openDownloadedDeliverable(item: DownloadedDeliverable) {
   if (openingDeliveryKey.value) return
   openingDeliveryKey.value = key
   deliveryError.value = ''
-  deliveryNotice.value = ''
   try {
     await openSavedDeliverable(item.savedLocation)
   } catch (cause) {
@@ -755,19 +756,23 @@ async function openDownloadedDeliverable(item: DownloadedDeliverable) {
 }
 
 async function clearLocalDownloadHistory() {
-  if (!downloadHistory.value.items.length) return
-  const confirmed = await askConfirm('要清空下载记录吗？', '')
+  if (!olderDownloadHistory.value.length) return
+  const confirmed = await askConfirm('清空过去的下载记录？', '这些记录将从列表移除。已保存的文件保留在原位置。')
   await nextTick()
-  deliveryTrayRef.value?.focusClear()
-  if (!confirmed) return
-  const next = clearDownloadHistory()
+  if (!confirmed) {
+    deliveryTrayRef.value?.focusClear()
+    return
+  }
+  const next = removeDownloadedDeliveries(downloadHistory.value, olderDownloadHistory.value)
   if (!persistDownloadHistory(downloadHistoryStorage, next)) {
     deliveryError.value = '下载记录未能清空，请重试。'
+    deliveryTrayRef.value?.focusClear()
     return
   }
   downloadHistory.value = next
   deliveryError.value = ''
-  deliveryNotice.value = '下载记录已清空。'
+  await nextTick()
+  deliveryTrayRef.value?.focusClose()
 }
 
 function askConfirm(title: string, body = ''): Promise<boolean> {
@@ -1482,7 +1487,7 @@ async function restoreQueue(): Promise<boolean> {
     const context = hostContext()
     const result = await dequeueMessages(work.id, context)
     if (!app.contextMatches(context) || selected.value?.id !== work.id || result.receipt.instanceId !== work.id || result.instance.id !== work.id) return false
-    const restored = appendRestoredQueue(draft.value, draftAttachments.value, result.receipt.restored, result.receipt.inFlight)
+    const restored = appendRestoredQueue(draft.value, draftAttachments.value, result.receipt.restored)
     draft.value = restored.text
     draftAttachments.value = restored.attachments
     restoredImageCount.value += restored.restoredImageCount
@@ -1492,14 +1497,9 @@ async function restoreQueue(): Promise<boolean> {
       conversationState.value.queue = []
     }
     queueOpen.value = false
-    if (restored.inFlightCount) {
-      showQueueNotice(`${restored.inFlightCount} 条消息可能已经开始执行，没有放回编辑器。请先查看对话，避免重复发送。`, false)
-      return false
-    }
-    const batches = Math.ceil(draftAttachments.value.length / 32)
     showQueueNotice(result.receipt.restored.length
-      ? `已取回 ${result.receipt.restored.length} 条消息。${batches > 1 ? ` 附件将分 ${batches} 批发送。` : ''}`
-      : 'Queue 中没有可取回的消息。')
+      ? `已取回 ${result.receipt.restored.length} 条消息。`
+      : '没有可取回的消息。')
     return true
   } catch (cause) {
     markUnknownOutcome(cause, 'conversation', work.id)
@@ -2748,7 +2748,7 @@ function handleOutputClick(event: MouseEvent) {
       <button v-if="outputAwayFromBottom" type="button" class="alu-scroll-bottom" aria-label="滚动到最新消息" @click="scrollOutputToBottom(true)"><span aria-hidden="true">↓</span>滚到底部</button>
       <ExtensionUiSurface :work="selected" :reconcile-interaction="reconcileExtensionInteraction" @editor-text="applyExtensionEditorText" @title="applyExtensionTitle">
         <div v-if="visibleComposerError" class="alu-composer-error"><span>{{ visibleComposerError }}</span><button v-if="mutationOutcomeUnknown && reconcilingReopenWorkId !== selected.id" @click="reconcileMutationOutcome()">刷新并确认</button></div>
-        <div v-if="queueNotice" class="alu-composer-notice" role="status">{{ queueNotice.text }}</div>
+        <div v-if="queueNotice" class="alu-composer-notice" role="status">{{ queueNotice }}</div>
         <div v-if="selected.pending.total" class="alu-queue-tray">
           <span class="alu-queue-title">Queue · {{ selected.pending.total }}</span>
           <span class="alu-queue-preview">{{ queueItems.map(item => item.text.trim() || (item.imageCount || item.attachments.length ? '[附件]' : '')).filter(Boolean).join(' · ') }}</span>
@@ -2789,15 +2789,14 @@ function handleOutputClick(event: MouseEvent) {
       :open="deliveryOpen"
       :loading="deliveryLoading"
       :error="deliveryError"
-      :notice="deliveryNotice"
       :current-work-name="selected?.displayName || ''"
       :current="currentDeliverableRows"
       :history="olderDownloadHistory"
-      :history-count="downloadHistory.items.length"
       :opening-key="openingDeliveryKey"
       @close="deliveryOpen = false"
       @refresh="refreshDeliverables"
       @download="saveDeliverable"
+      @redownload="(deliverable) => saveDeliverable(deliverable, true)"
       @open-saved="openDownloadedDeliverable"
       @clear="clearLocalDownloadHistory"
     />

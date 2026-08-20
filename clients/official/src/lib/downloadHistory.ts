@@ -54,8 +54,17 @@ export function recordDownloadedDelivery(
   }
 }
 
-export function clearDownloadHistory(): DownloadHistory {
-  return emptyDownloadHistory()
+export function removeDownloadedDeliveries(
+  history: DownloadHistory,
+  items: readonly DownloadedDeliverable[],
+): DownloadHistory {
+  const removed = new Set(items.map((item) => deliveryHistoryKey(item.hostId, item.instanceId, item.deliveryRef)))
+  return {
+    schemaVersion: DOWNLOAD_HISTORY_SCHEMA_VERSION,
+    items: history.items
+      .filter((item) => !removed.has(deliveryHistoryKey(item.hostId, item.instanceId, item.deliveryRef)))
+      .map(cloneItem),
+  }
 }
 
 export function readDownloadHistory(storage: Storage | null): DownloadHistory {
@@ -95,6 +104,20 @@ export function decodeDownloadHistory(serialized: string | null): DownloadHistor
   } catch {
     return null
   }
+}
+
+export function pastDownloadedDeliveries(
+  history: DownloadHistory,
+  hostId: string,
+  instanceId: string,
+  deliverables: readonly DeliverableDto[],
+  currentListLoaded: boolean,
+): DownloadedDeliverable[] {
+  if (!currentListLoaded) {
+    return history.items.filter((item) => item.hostId !== hostId || item.instanceId !== instanceId)
+  }
+  return history.items.filter((item) => !deliverables.some((deliverable) =>
+    downloadedItemMatches(item, hostId, instanceId, deliverable)))
 }
 
 export function downloadedItemMatches(
