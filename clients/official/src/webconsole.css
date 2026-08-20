@@ -148,8 +148,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   gap: 12px;
   position: relative;
   z-index: 10;
-  min-width: 0;
-  max-width: 100%;
   flex-shrink: 0;
 }
 
@@ -231,8 +229,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 
 .alu-navbar-right {
   display: flex;
-  min-width: 0;
-  max-width: 100%;
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
@@ -332,8 +328,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
    ═══════════════════════════════════════════════════════ */
 
 .alu-output {
-  min-width: 0;
-  max-width: 100%;
   padding: 28px 56px 40px;
 }
 
@@ -741,8 +735,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 .alu-input-section {
   position: relative;
   z-index: 10;
-  min-width: 0;
-  max-width: 100%;
   background: var(--alu-nav-bg);
   border-top: 1px solid var(--alu-nav-border);
   flex-shrink: 0;
@@ -1065,8 +1057,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 
 .alu-bottom-bar {
   display: flex;
-  min-width: 0;
-  max-width: 100%;
   align-items: center;
   justify-content: space-between;
   padding: 0 4px;
@@ -2085,7 +2075,7 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
    响应式 — 通用窄窗口
    ═══════════════════════════════════════════════════════ */
 
-@media screen and (max-width: 1199px) {
+@media screen and (max-width: 1000px) {
   :root {
     --alu-nav-height: 56px;
     --alu-bar-height: 48px;
