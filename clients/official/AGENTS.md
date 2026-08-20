@@ -25,12 +25,14 @@ Do not put SDK, NDK, or JDK installation paths in tracked files or documentation
 
 ## Windows artifact delivery
 
-A successful `--no-bundle` Windows build does not prove that the executable is a standalone artifact. Before delivering any Windows package:
+The supported Windows deliverable is the native MSVC build produced by the Windows release job. Do not substitute a Linux `x86_64-pc-windows-gnu` cross-build when the user asks for a normal Windows package: WebView2 links its loader statically for MSVC, while the GNU target imports `WebView2Loader.dll` and produces a different multi-file runtime shape.
 
-- Inspect the executable's imported DLLs and the target output directory instead of copying only the `.exe`.
-- Include every required non-system sidecar beside the executable in the archive. In particular, GNU Debug builds require the generated `WebView2Loader.dll` in the same directory as the `.exe`.
-- Inspect the final archive listing and confirm that the executable and its sidecars have the intended Windows architecture.
-- Describe a Linux cross-build as compilation evidence only. Call the package runnable only after a Windows launch smoke test.
+Before delivering any Windows package:
+
+- Build with the same native MSVC target and packaging shape as `.github/workflows/release.yml`, unless the user explicitly requests a GNU diagnostic build.
+- Inspect the executable's imported DLLs and the target output directory instead of assuming that `--no-bundle` produced a standalone file.
+- Include every required non-system sidecar when a requested target actually has one, then inspect the final archive listing and confirm that all files have the intended Windows architecture.
+- Describe a Linux cross-build as compilation evidence only, not as the normal Windows artifact. Call a package runnable only after a Windows launch smoke test.
 
 ## Verification
 
