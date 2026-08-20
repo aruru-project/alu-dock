@@ -2533,8 +2533,18 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   transition: border-color 0.15s, background 0.15s;
 }
 .alu-new-work-btn:hover { border-color: var(--alu-pink); background: color-mix(in srgb, var(--alu-pink-bg) 72%, var(--alu-hover)); }
-.alu-sidebar-refresh { color: var(--alu-text-muted); padding: 4px 7px; border-radius: 6px; }
-.alu-sidebar-refresh:hover { color: var(--alu-text); background: var(--alu-hover); }
+.alu-sidebar-refresh,
+.alu-sidebar-close {
+  display: grid;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  place-items: center;
+  color: var(--alu-text-muted);
+  border-radius: 9px;
+}
+.alu-sidebar-refresh:hover,
+.alu-sidebar-close:hover { color: var(--alu-text); background: var(--alu-hover); }
 .alu-instance-group { padding: 8px 7px 4px; }
 .alu-instance-group-title {
   display: flex;

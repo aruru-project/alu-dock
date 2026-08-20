@@ -2825,6 +2825,7 @@ function handleOutputClick(event: MouseEvent) {
         <img src="./assets/console_icon_small.png" class="alu-sidebar-avatar" alt="阿露" />
         <div class="alu-sidebar-title">Alu WebConsole</div>
         <button class="alu-sidebar-refresh" title="刷新" :disabled="contextTransitionBusy" @click="app.load">↻</button>
+        <button class="alu-sidebar-close" aria-label="关闭工作列表" @click="app.workDrawerOpen = false"><X :size="18" /></button>
       </div>
       <div class="alu-sidebar-actions"><button class="alu-new-work-btn" :disabled="contextTransitionBusy" @click="openDirectory">＋ 新建工作</button></div>
       <div class="alu-instance-list">

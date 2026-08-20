@@ -39,6 +39,7 @@ class MainActivity : TauriActivity() {
   }
 
   override fun onWebViewCreate(webView: WebView) {
+    webView.setBackgroundColor(getColor(R.color.aludock_background))
     this.webView = webView
     insetsBridge.onWebViewAvailable()
   }
