@@ -1358,7 +1358,7 @@ button { margin: 0; padding: 0; border: 0; background: transparent; color: inher
   left: var(--aludock-inset-left);
 }
 
-@media screen and (max-width: 1000px) {
+@media screen and (max-width: 1199px) {
   .pairing-onboarding {
     width: min(100%, 760px);
     min-height: auto;
