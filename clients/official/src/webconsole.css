@@ -630,14 +630,58 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 }
 
 /* ── Tool calls ── */
-.msg-toolcall { font-size: 12px; }
+.msg-toolcall {
+  width: min(900px, 100%);
+  margin: 8px 0;
+  overflow: hidden;
+  color: var(--alu-text-dim);
+  font-size: 12px;
+  background: color-mix(in srgb, var(--alu-amber) 4%, var(--alu-bg));
+  border: 1px solid color-mix(in srgb, var(--alu-amber) 24%, var(--alu-border));
+  border-radius: 8px;
+}
+.tool-call-header {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 11px;
+}
+.tool-name {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  overflow-wrap: anywhere;
+  color: var(--alu-amber);
+  font-weight: 600;
+}
+.tool-status {
+  flex: 0 0 auto;
+  color: var(--alu-text-muted);
+  font-size: 10px;
+}
+.tool-status[data-status='running'] { color: var(--alu-blue); }
+.tool-status[data-status='error'] { color: var(--alu-rose); }
+.msg-toolcall details { border-top: 1px solid color-mix(in srgb, var(--alu-amber) 14%, var(--alu-border)); }
 .msg-toolcall details summary {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 11px;
   color: var(--alu-text-muted);
   font-size: 11px;
   cursor: pointer;
+  list-style: none;
 }
-.msg-toolcall details summary:hover { color: var(--alu-text-dim); }
-.tool-name { color: var(--alu-amber); }
+.msg-toolcall details summary::-webkit-details-marker { display: none; }
+.msg-toolcall details summary:hover { color: var(--alu-text); background: color-mix(in srgb, var(--alu-amber) 5%, transparent); }
+.tool-disclosure { color: var(--alu-amber); font-size: 18px; line-height: 1; transition: transform .18s ease; }
+.msg-toolcall details[open] .tool-disclosure { transform: rotate(90deg); }
+.msg-toolcall.is-error { border-color: var(--alu-rose-border); }
 
 /* ── 简洁显示模式：隐藏过程块（thinking / tool call / notice / error）── */
 .alu-compact-mode .alu-hideable {
@@ -650,19 +694,22 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   display: none !important;
 }
 .msg-tool-output {
-  color: var(--alu-text-muted);
-  background: var(--alu-bg);
-  padding: 5px 10px;
-  border-radius: 4px;
-  margin: 3px 0;
-  max-height: 360px;
-  max-height: min(42dvh, 360px);
+  max-height: min(54vh, 520px);
+  padding: 10px 12px;
+  margin: 0;
   overflow: auto;
-  overscroll-behavior: contain;
-  white-space: pre-wrap;
-  word-break: break-all;
+  color: var(--alu-text-muted);
   font-size: 11px;
-  border: 1px solid var(--alu-border);
+  line-height: 1.58;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  background: color-mix(in srgb, var(--alu-bg) 92%, black);
+  border: 0;
+  border-top: 1px solid var(--alu-border);
+  border-radius: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--alu-border-light) transparent;
 }
 
 /* ── show_image 工具：内联图片 ── */
@@ -2023,39 +2070,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 .alu-toolbar-btn-danger { border-color: var(--alu-rose-border); background: var(--alu-rose-bg); color: var(--alu-rose-dim); }
 .alu-toolbar-btn-danger:hover { background: #261a1e; color: var(--alu-rose); border-color: #4a2830; }
 .alu-toolbar-btn-cmd:hover { color: var(--alu-pink); border-color: var(--alu-pink-border); background: var(--alu-pink-bg); }
-
-/* ═══════════════════════════════════════════════════════
-   响应式 — 平板与折叠屏
-   ═══════════════════════════════════════════════════════ */
-
-@media (min-width: 641px) and (max-width: 960px) {
-  .alu-navbar { padding: 0 10px; gap: 6px; }
-  .alu-navbar-avatar { display: none; }
-  .alu-navbar-breadcrumb { min-width: 0; padding: 5px 7px; margin-left: -7px; }
-  .alu-nav-workspace, .alu-nav-sep, .alu-nav-session { font-size: 12px; }
-  .alu-nav-session { min-width: 0; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .alu-nav-git-branch, .alu-navbar-breadcrumb-arrow { display: none; }
-  .alu-navbar-right { min-width: 0; gap: 6px; }
-  .alu-nav-selector { min-width: 0; padding: 5px 8px 5px 7px; gap: 4px; font-size: 11px; }
-  .alu-nav-selector-label { display: none; }
-  .alu-nav-selector-value { max-width: 150px; overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-  .alu-nav-stats { gap: 4px; margin-left: 0; }
-  .alu-nav-stat-pill { padding: 4px 6px; font-size: 10px; }
-  .alu-nav-stat-pill:nth-child(1), .alu-nav-stat-pill:nth-child(2) { display: none; }
-  .alu-nav-hamburger { width: 34px; height: 34px; font-size: 15px; }
-}
-
-@media (min-width: 641px) and (max-width: 760px) {
-  :root { --alu-nav-height: auto; }
-  .alu-navbar { height: auto; flex-wrap: wrap; padding: 6px 10px 4px; row-gap: 2px; }
-  .alu-navbar-left { flex: 0 0 100%; width: 100%; padding-right: 82px; }
-  .alu-nav-session { max-width: none; flex: 1; }
-  .alu-navbar-right { flex: 0 0 100%; width: 100%; justify-content: flex-start; padding-right: 82px; padding-bottom: 4px; }
-  .alu-nav-selector-model { flex: 1 1 auto; }
-  .alu-nav-selector-model .alu-nav-selector-value { max-width: none; }
-  .alu-navbar .alu-nav-files { position: absolute; top: 6px; right: 52px; }
-  .alu-nav-hamburger { position: absolute; top: 6px; right: 10px; }
-}
 
 /* ═══════════════════════════════════════════════════════
    响应式 — 移动端 (≤ 640px)
