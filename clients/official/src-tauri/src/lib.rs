@@ -13,20 +13,19 @@ use aludock_client_core::{
     AttachmentDto, AttachmentUploadCancellation, AttachmentUploadPhase, AttachmentUploadResult,
     ClientError, CommandInfo, CommandsResult, ConnectionKind, ConnectionPolicy,
     ControllerEventData, DeliverableDownloadProgress, DeliverableDto, DeliveryMode, DiagnosticInfo,
-    DockClient, Endpoint, EndpointState,
-    EndpointTestResult, EventCursor, ExtensionControllerLease, ExtensionEvent, HistoryRecord,
-    HostConnectionProfile, HostRegistry, HostRegistrySnapshot, IdentityStore, ImagePath,
-    InstanceCatalog, InstanceSelector, InstanceSnapshot, InteractionMethod, InteractionRequest,
-    InteractionResponse, ModelsResult, NavigateOptions, PairingProgress, PendingMessage,
-    ProjectTrustDecision, PublishedFileDto, QueueDequeueResult, ReadReplay, ResourceInfo,
-    ResourcesResult, SessionCompactionResult, SessionForkResult, SessionHistoryPage,
-    SessionNameResult, SessionNavigateResult, SessionReloadResult, SessionReplacementResult,
-    SessionScope, SessionTree, SettingUpdate, SettingUpdateResult, SettingsResult, SourceInfo,
-    StopResult, SubmitResult, ThinkingLevel, ToolInfo, ToolsResult, WorkspacePage, delete_endpoint,
-    host_info_for_profile, probe_host_endpoint, record_endpoint_test, reorder_endpoints,
-    save_unverified_endpoint, save_verified_endpoint, saved_endpoint_for_test,
-    set_connection_policy as update_connection_policy, set_endpoint_enabled, validate_device_name,
-    validate_host_id,
+    DockClient, Endpoint, EndpointState, EndpointTestResult, EventCursor, ExtensionControllerLease,
+    ExtensionEvent, HistoryRecord, HostConnectionProfile, HostRegistry, HostRegistrySnapshot,
+    IdentityStore, ImagePath, InstanceCatalog, InstanceSelector, InstanceSnapshot,
+    InteractionMethod, InteractionRequest, InteractionResponse, ModelsResult, NavigateOptions,
+    PairingProgress, PendingMessage, ProjectTrustDecision, PublishedFileDto, QueueDequeueResult,
+    ReadReplay, ResourceInfo, ResourcesResult, SessionCompactionResult, SessionForkResult,
+    SessionHistoryPage, SessionNameResult, SessionNavigateResult, SessionReloadResult,
+    SessionReplacementResult, SessionScope, SessionTree, SettingUpdate, SettingUpdateResult,
+    SettingsResult, SourceInfo, StopResult, SubmitResult, ThinkingLevel, ToolInfo, ToolsResult,
+    WorkspacePage, delete_endpoint, host_info_for_profile, probe_host_endpoint,
+    record_endpoint_test, reorder_endpoints, save_unverified_endpoint, save_verified_endpoint,
+    saved_endpoint_for_test, set_connection_policy as update_connection_policy,
+    set_endpoint_enabled, validate_device_name, validate_host_id,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -232,7 +231,11 @@ struct SavedDeliverableLocation {
 }
 
 #[derive(Serialize)]
-#[serde(tag = "status", rename_all = "snake_case", rename_all_fields = "camelCase")]
+#[serde(
+    tag = "status",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
 enum DeliverableSaveResult {
     Cancelled,
     Saved {
@@ -1153,7 +1156,8 @@ fn invalidate_host_lifecycle(
 fn system_device_name() -> Option<String> {
     let name = hostname::get().ok()?.into_string().ok()?;
     let name = name.trim().to_owned();
-    if name.eq_ignore_ascii_case("localhost") || name.eq_ignore_ascii_case("localhost.localdomain") {
+    if name.eq_ignore_ascii_case("localhost") || name.eq_ignore_ascii_case("localhost.localdomain")
+    {
         return None;
     }
     validate_device_name(&name).ok().map(|_| name)
@@ -2842,10 +2846,9 @@ fn deliverable_list_error(error: ClientError) -> CommandError {
 
 fn deliverable_client_error(error: ClientError) -> CommandError {
     match error {
-        ClientError::Host { code, .. } if code == "file_unavailable" => deliverable_command_error(
-            "file_unavailable",
-            "这个文件已无法下载。请让阿露重新发送。",
-        ),
+        ClientError::Host { code, .. } if code == "file_unavailable" => {
+            deliverable_command_error("file_unavailable", "这个文件已无法下载。请让阿露重新发送。")
+        }
         ClientError::Tls(_) | ClientError::MissingHostCertificate => deliverable_command_error(
             "deliverable_connection_failed",
             "下载中断了。请检查网络后重试。",
@@ -2912,10 +2915,7 @@ fn delivery_staging_path(
             "无法使用这个保存位置。请检查存储权限后重试。",
         )
     })?;
-    Ok(directory.join(format!(
-        ".aludock-download-{}.part",
-        uuid::Uuid::new_v4()
-    )))
+    Ok(directory.join(format!(".aludock-download-{}.part", uuid::Uuid::new_v4())))
 }
 
 fn create_delivery_staging_file(path: &PathBuf) -> Result<std::fs::File, CommandError> {
@@ -2946,22 +2946,30 @@ async fn pick_deliverable_destination(
             let _ = sender.send(destination);
         });
     receiver.await.map_err(|_| {
-        deliverable_command_error(
-            "deliverable_picker_failed",
-            "无法选择保存位置。请重试。",
-        )
+        deliverable_command_error("deliverable_picker_failed", "无法选择保存位置。请重试。")
     })
 }
 
 #[cfg(windows)]
-fn replace_file_atomically(source: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
+fn replace_file_atomically(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
     };
 
-    let source = source.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
-    let destination = destination.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
     let moved = unsafe {
         MoveFileExW(
             source.as_ptr(),
@@ -2977,7 +2985,10 @@ fn replace_file_atomically(source: &std::path::Path, destination: &std::path::Pa
 }
 
 #[cfg(not(windows))]
-fn replace_file_atomically(source: &std::path::Path, destination: &std::path::Path) -> std::io::Result<()> {
+fn replace_file_atomically(
+    source: &std::path::Path,
+    destination: &std::path::Path,
+) -> std::io::Result<()> {
     std::fs::rename(source, destination)
 }
 
@@ -2989,12 +3000,12 @@ fn commit_staged_to_path(
         return replace_file_atomically(staging_path, destination);
     }
     let parent = destination.parent().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "destination has no parent")
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "destination has no parent",
+        )
     })?;
-    let sibling = parent.join(format!(
-        ".aludock-download-{}.part",
-        uuid::Uuid::new_v4()
-    ));
+    let sibling = parent.join(format!(".aludock-download-{}.part", uuid::Uuid::new_v4()));
     let copy_result = (|| {
         let mut source = std::fs::File::open(staging_path)?;
         let mut options = OpenOptions::new();
@@ -3038,10 +3049,7 @@ fn copy_staged_to_uri(
 }
 
 #[cfg(target_os = "android")]
-async fn discard_partial_uri(
-    app: &tauri::AppHandle,
-    destination: &FilePath,
-) -> Result<(), String> {
+async fn discard_partial_uri(app: &tauri::AppHandle, destination: &FilePath) -> Result<(), String> {
     use jni::objects::{JObject, JValue};
 
     let FilePath::Url(url) = destination else {
@@ -3085,7 +3093,9 @@ async fn discard_partial_uri(
                     })();
                     let outcome = match result {
                         Ok(true) => Ok(()),
-                        Ok(false) => Err("the document provider did not remove the partial file".into()),
+                        Ok(false) => {
+                            Err("the document provider did not remove the partial file".into())
+                        }
                         Err(error) => Err(error.to_string()),
                     };
                     let _ = sender.send(outcome);
@@ -3296,10 +3306,7 @@ fn open_saved_deliverable(
         "path" => {
             let path = PathBuf::from(&location.value);
             let metadata = fs::metadata(&path).map_err(|_| {
-                deliverable_command_error(
-                    "saved_file_unavailable",
-                    SAVED_FILE_UNAVAILABLE_MESSAGE,
-                )
+                deliverable_command_error("saved_file_unavailable", SAVED_FILE_UNAVAILABLE_MESSAGE)
             })?;
             if !metadata.is_file() {
                 return Err(deliverable_command_error(
@@ -3309,10 +3316,7 @@ fn open_saved_deliverable(
             }
             #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
             app.opener().reveal_item_in_dir(path).map_err(|_| {
-                deliverable_command_error(
-                    "saved_file_open_failed",
-                    SAVED_FILE_UNAVAILABLE_MESSAGE,
-                )
+                deliverable_command_error("saved_file_open_failed", SAVED_FILE_UNAVAILABLE_MESSAGE)
             })?;
             #[cfg(any(target_os = "android", target_os = "ios"))]
             app.opener()
@@ -3329,10 +3333,7 @@ fn open_saved_deliverable(
             .opener()
             .open_url(location.value, None::<&str>)
             .map_err(|_| {
-                deliverable_command_error(
-                    "saved_file_unavailable",
-                    SAVED_FILE_UNAVAILABLE_MESSAGE,
-                )
+                deliverable_command_error("saved_file_unavailable", SAVED_FILE_UNAVAILABLE_MESSAGE)
             }),
         _ => Err(deliverable_command_error(
             "saved_file_unavailable",
@@ -5487,13 +5488,17 @@ mod tests {
             subscription_id: "foreground-new".into(),
         });
 
-        assert!(!state
-            .abort_matching("host-a", 3, "work-a", Some("background-old"))
-            .unwrap());
+        assert!(
+            !state
+                .abort_matching("host-a", 3, "work-a", Some("background-old"))
+                .unwrap()
+        );
         assert!(state.task.lock().unwrap().is_some());
-        assert!(state
-            .abort_matching("host-a", 3, "work-a", Some("foreground-new"))
-            .unwrap());
+        assert!(
+            state
+                .abort_matching("host-a", 3, "work-a", Some("foreground-new"))
+                .unwrap()
+        );
         assert!(state.task.lock().unwrap().is_none());
     }
 

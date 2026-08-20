@@ -23,15 +23,32 @@ runs:
       with:
         node-version: ${{ inputs.node-version }}
 
-    - name: Install pnpm and Rust
+    - name: Activate pnpm
       env:
         PNPM_VERSION: ${{ inputs.pnpm-version }}
-        RUST_VERSION: ${{ inputs.rust-version }}
-        RUST_TARGET: ${{ inputs.rust-target }}
       shell: bash
       run: |
         corepack enable
         corepack prepare "pnpm@$PNPM_VERSION" --activate
+
+    - name: Locate the pnpm store
+      id: pnpm-store
+      shell: bash
+      run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+    - name: Restore the pnpm package cache
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5
+      with:
+        path: ${{ steps.pnpm-store.outputs.path }}
+        key: ${{ runner.os }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}
+        restore-keys: ${{ runner.os }}-pnpm-
+
+    - name: Install Rust
+      env:
+        RUST_VERSION: ${{ inputs.rust-version }}
+        RUST_TARGET: ${{ inputs.rust-target }}
+      shell: bash
+      run: |
         rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt
         rustup override set "$RUST_VERSION"
         if [[ -n "$RUST_TARGET" ]]; then
