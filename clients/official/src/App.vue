@@ -95,6 +95,7 @@ import {
   stoppedResultIsCorrelated,
   workPresence,
 } from './lib/uiBoundaries'
+import { applySlashCompletion, catalogSourceLabel, filterCatalogCommands, slashCommandQuery } from './lib/commandSuggest'
 import type { AttachmentDto, AttachmentUploadProgress, ConnectionKind, ConversationBootstrap, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, HostConnectionProfile, HostContext, HostEndpoint, ProjectedEvent, QueueItem, SelectedAttachment, Work, WorkspacePage } from './lib/types'
 import {
   deliveryHistoryKey,
@@ -112,6 +113,7 @@ import ControlCenter, { type ControlMutationDomain, type ControlSection } from '
 import ConversationProcessParts from './components/ConversationProcessParts.vue'
 import ExtensionUiSurface from './components/ExtensionUiSurface.vue'
 import { useAppStore } from './stores/app'
+import { useCommandCatalogStore } from './stores/command-catalog'
 import { useCommandConsoleStore } from './stores/command-console'
 import { useExtensionUiStore } from './stores/extension-ui'
 
@@ -132,6 +134,7 @@ const MARKDOWN_SANITIZE_CONFIG = {
 }
 
 const app = useAppStore()
+const commandCatalogStore = useCommandCatalogStore()
 const commandConsole = useCommandConsoleStore()
 const extensionUi = useExtensionUiStore()
 const draft = computed({ get: () => app.currentDraft, set: (value: string) => app.setCurrentDraft(value) })
@@ -425,6 +428,70 @@ const connectionLabel = computed(() => {
 
 watch(draft, () => void nextTick(resizeComposer))
 watch(composerExpanded, () => void nextTick(resizeComposer))
+
+/* ── 输入框斜杠命令建议 ────────────────────────────────
+ * pi 只展开位于消息最开头的 /command，因此建议仅在整段草稿
+ * 就是一个未完成命令 token 时出现；补全后尾部空格进入参数输入。
+ */
+const suggestIndex = ref(0)
+const suggestDismissedFor = ref('')
+const slashQuery = computed(() => slashCommandQuery(draft.value))
+const suggestItems = computed(() => slashQuery.value === null ? [] : filterCatalogCommands(commandCatalogStore.commands, slashQuery.value).slice(0, 8))
+const suggestOpen = computed(() => !!selected.value
+  && selected.value.lifecycle === 'active'
+  && !conversationLoading.value
+  && !composerExpanded.value
+  && slashQuery.value !== null
+  && suggestDismissedFor.value !== draft.value)
+watch(slashQuery, (query) => {
+  suggestIndex.value = 0
+  if (query !== null) ensureCommandCatalog()
+})
+watch(suggestItems, (items) => {
+  suggestIndex.value = Math.max(0, Math.min(suggestIndex.value, items.length - 1))
+})
+watch(suggestIndex, async () => {
+  await nextTick()
+  document.getElementById(`cmd-suggest-${suggestIndex.value}`)?.scrollIntoView({ block: 'nearest' })
+})
+
+function ensureCommandCatalog() {
+  if (!selected.value) return
+  try {
+    void commandCatalogStore.ensure(selected.value, requireHostContext(app))
+  } catch {
+    // Host 上下文不可用时建议列表保持空，不打扰输入
+  }
+}
+
+function completeSuggest(name?: string) {
+  const picked = name ?? suggestItems.value[suggestIndex.value]?.name
+  if (!picked) return
+  draft.value = applySlashCompletion(picked)
+  suggestIndex.value = 0
+  void nextTick(() => {
+    const textarea = composerTextarea.value
+    if (!textarea) return
+    textarea.focus()
+    textarea.setSelectionRange(textarea.value.length, textarea.value.length)
+  })
+}
+
+/** 命令面板里选中 prompt/skill 命令：它们本质是发一条消息，填回输入框交回对话。
+ *  焦点走 modal 关闭时的 trigger 归位通道，避免和归位逻辑抢时序。 */
+function prefillSlashCommand(name: string) {
+  draft.value = applySlashCompletion(name)
+  modalTrigger = composerTextarea.value
+  commandOpen.value = false
+  void nextTick(() => {
+    const textarea = composerTextarea.value
+    if (!textarea) return
+    window.setTimeout(() => {
+      textarea.focus()
+      textarea.setSelectionRange(textarea.value.length, textarea.value.length)
+    }, 0)
+  })
+}
 watch(detailMode, () => {
   if (conversationState.value) applyConversationProjection(conversationState.value)
 })
@@ -506,6 +573,7 @@ watch(
       submissionError.value = null
       resetConversationImages()
       resetAttachmentPreviews()
+      commandCatalogStore.invalidate()
     }
     if (hostIdentityChanged) restoredImageCounts.value = {}
     transientHostBoundary = hostId && generation != null ? { hostId, selectionGeneration: generation } : null
@@ -917,6 +985,16 @@ function handleModalWheel(event: WheelEvent) {
       ? scroller.clientHeight
       : 1
   scroller.scrollTop += event.deltaY * scale
+}
+
+/** 命令面板点背景不关闭（防止写一半的命令误点丢失），但给一个明确的"收到但不关"反馈。 */
+function pulseCommandPalette() {
+  if (controlSection.value !== 'commands') return
+  const box = modalSurface.value
+  if (!box) return
+  box.classList.remove('cmd-palette-attention')
+  void box.offsetWidth
+  box.classList.add('cmd-palette-attention')
 }
 
 function handleModalKeydown(event: KeyboardEvent) {
@@ -1904,6 +1982,7 @@ async function applyFollowEvent(payload: { hostId: string; selectionGeneration: 
     setCompactionError(payload.hostId, payload.instanceId)
   }
   if (payload.event.eventType === 'compaction.completed') void mergeCompactionSummary(payload.instanceId)
+  if (payload.event.eventType === 'resources.reloaded') commandCatalogStore.invalidate()
   if (reduced.configChanged) controlCenterRef.value?.applyLiveEvent(payload.event)
   if (!await extensionUi.applyLive(payload.instanceId, payload.subscriptionId, payload.event)) {
     followConnected.value = false
@@ -2502,6 +2581,31 @@ function resizeComposer() {
 function handleComposerKeydown(event: KeyboardEvent, expanded = false) {
   if (event.isComposing) return
   const textarea = event.currentTarget as HTMLTextAreaElement
+  if (!expanded && suggestOpen.value) {
+    if (event.key === 'ArrowDown') {
+      event.preventDefault()
+      suggestIndex.value = Math.min(suggestIndex.value + 1, suggestItems.value.length - 1)
+      return
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault()
+      suggestIndex.value = Math.max(suggestIndex.value - 1, 0)
+      return
+    }
+    if (event.key === 'Enter' || event.key === 'Tab') {
+      if (suggestItems.value.length) {
+        event.preventDefault()
+        completeSuggest()
+        return
+      }
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault()
+      event.stopPropagation()
+      suggestDismissedFor.value = draft.value
+      return
+    }
+  }
   if (isTauri && event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && (event.key.toLowerCase() === 'j' || event.code === 'KeyJ')) {
     event.preventDefault()
     const start = textarea.selectionStart ?? textarea.value.length
@@ -2793,6 +2897,15 @@ function handleOutputClick(event: MouseEvent) {
           <div v-if="restoredImageCount" class="alu-restored-images"><span>已取回 {{ restoredImageCount }} 个附件</span><button type="button" :disabled="clearingRestoredImages" @click="clearQueueImages">{{ clearingRestoredImages ? '移除中…' : '移除' }}</button></div>
         </div>
         <form class="alu-input-wrap" @submit.prevent="submit">
+          <div v-if="suggestOpen" class="cmd-suggest" role="listbox" aria-label="命令建议">
+            <button v-for="(item, index) in suggestItems" :key="`${item.source.kind}:${item.name}`" :id="`cmd-suggest-${index}`" type="button" class="cmd-suggest-item" :class="{ selected: suggestIndex === index }" role="option" :aria-selected="suggestIndex === index" @mouseenter="suggestIndex = index" @mousedown.prevent @click="completeSuggest(item.name)">
+              <span class="cmd-suggest-name">/{{ item.name }}</span>
+              <span class="cmd-suggest-desc">{{ item.description || 'Dock 未提供说明' }}</span>
+              <span class="cmd-suggest-kind">{{ catalogSourceLabel(item.source.kind) }}</span>
+            </button>
+            <div v-if="!suggestItems.length && commandCatalogStore.state === 'loading'" class="cmd-suggest-hint">正在读取命令…</div>
+            <div v-else-if="!suggestItems.length && slashQuery" class="cmd-suggest-hint">无匹配命令</div>
+          </div>
           <textarea ref="composerTextarea" v-model="draft" rows="1" :disabled="conversationLoading" placeholder="输入消息…" title="Enter 发送 · Shift+Enter / Ctrl+J 换行" aria-keyshortcuts="Control+J" @input="resizeComposer" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event)" />
           <button type="button" class="alu-composer-expand" title="展开编辑" aria-label="展开编辑" :disabled="conversationLoading" @click="rememberModalTrigger(); composerExpanded = true">↗</button>
           <button class="alu-send-btn" type="submit" :disabled="(!draft.trim() && !draftAttachments.length && !restoredImageCount) || !isTauri || conversationLoading || submitting || queueRestoring || attachmentPicking || workMutating || mutationOutcomeUnknown || uploadDrafts.length > 0">{{ submitting ? '发送中…' : '发送' }}</button>
@@ -2891,7 +3004,7 @@ function handleOutputClick(event: MouseEvent) {
     </Transition>
 
     <Transition name="fade">
-      <div v-if="commandOpen && selected" :class="controlSection === 'commands' ? 'cmd-palette-overlay' : 'ui-dialog-overlay'" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
+      <div v-if="commandOpen && selected" :class="controlSection === 'commands' ? 'cmd-palette-overlay' : 'ui-dialog-overlay'" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop @click.self="pulseCommandPalette">
         <section ref="modalSurface" :class="controlSection === 'commands' ? 'cmd-palette-box' : controlDialogClasses(controlSection)" role="dialog" aria-modal="true" tabindex="-1" :aria-label="controlDialogTitle(controlSection)" @wheel="handleModalWheel">
           <template v-if="controlSection !== 'commands'"><header class="ui-dialog-header"><div class="ui-dialog-title">{{ controlTitleOverride || controlDialogTitle(controlSection) }}</div><div v-if="controlBodyOverride || (!controlTitleOverride && controlDialogBody(controlSection))" class="ui-dialog-body">{{ controlBodyOverride || controlDialogBody(controlSection) }}</div></header><button class="ui-dialog-close" aria-label="关闭" @click="closeModal">×</button></template>
           <ControlCenter
@@ -2904,6 +3017,7 @@ function handleOutputClick(event: MouseEvent) {
             :has-draft="!!draft.trim()"
             :compaction-pending="selectedCompactionPending"
             @section="controlSection = $event"
+            @prefill="prefillSlashCommand"
             @snapshot="applyControlSnapshot"
             @unknown="markControlUnknown"
             @reconcile="reconcileMutationOutcome"

@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, ref, watch } from 'vue'
 import {
-  commandCatalog,
   getResources,
   getSettings,
   listModels,
@@ -14,12 +13,14 @@ import {
 } from '../lib/bridge'
 import { currentHostCall, requireHostContext } from '../lib/hostResult'
 import { userErrorMessage as errorMessage } from '../lib/userError'
+import { catalogSourceLabel, commandGoesToComposer, filterCatalogCommands } from '../lib/commandSuggest'
 import { workPresence } from '../lib/uiBoundaries'
 import SessionManager from './SessionManager.vue'
 import { useAppStore } from '../stores/app'
+import { useCommandCatalogStore } from '../stores/command-catalog'
 import { useCommandConsoleStore } from '../stores/command-console'
 import type {
-  CommandsResult,
+  CommandInfo,
   ModelInfo,
   ModelsResult,
   ProjectedEvent,
@@ -39,6 +40,7 @@ export type ControlMutationDomain = 'conversation' | 'sessions' | 'tree' | 'mode
 
 const props = defineProps<{ work: Work; section: ControlSection; preview: boolean; outcomeUnknown: boolean; unknownDomain?: ControlMutationDomain; hasDraft: boolean; compactionPending: boolean }>()
 const app = useAppStore()
+const catalog = useCommandCatalogStore()
 const commandConsole = useCommandConsoleStore()
 const presence = computed(() => workPresence(props.work))
 const emit = defineEmits<{
@@ -46,6 +48,7 @@ const emit = defineEmits<{
   unknown: [cause: unknown, domain: ControlMutationDomain]
   reconcile: [domain: ControlMutationDomain]
   section: [section: ControlSection]
+  prefill: [name: string]
   resync: [work: Work, draftText?: string]
   compact: [customInstructions?: string]
   close: []
@@ -58,20 +61,20 @@ const emit = defineEmits<{
 const sessionManager = ref<InstanceType<typeof SessionManager> | null>(null)
 
 const staticCommands = [
-  { id: 'session_new', glyph: '+', label: 'New Session', description: '开始一段全新的上下文', section: 'new-session' },
-  { id: 'stop', glyph: '■', label: 'Stop Work', description: '停止整个 Work；执行前需要确认', action: 'stop' },
-  { id: 'resume', glyph: '↪', label: 'Resume Session', description: '从保存的 Session 继续', section: 'sessions' },
-  { id: 'tree', glyph: '⑂', label: 'Session Tree', description: '浏览、切换或分叉当前会话树', section: 'tree' },
-  { id: 'model', glyph: '◈', label: 'Set Model', description: '切换当前模型', section: 'models' },
-  { id: 'thinking', glyph: '◇', label: 'Set Thinking', description: '调整思考等级', section: 'thinking' },
-  { id: 'name', glyph: '✎', label: 'Rename Session', description: '修改当前 Session 名称', section: 'rename-session' },
-  { id: 'compact', glyph: '⚡', label: 'Compact Context', description: '手动压缩当前上下文', section: 'compact-session' },
-  { id: 'reload', glyph: '↻', label: 'Reload Session', description: '重新载入 Pi 资源与 Session', section: 'reload-session' },
-  { id: 'dequeue', glyph: '↩', label: 'Restore Queue', description: '把尚未执行的消息取回输入框', action: 'restoreQueue' },
-  { id: 'tools', glyph: '⚙', label: 'Active Tools', description: '查看或切换可用工具', section: 'tools' },
-  { id: 'settings', glyph: '⌘', label: 'Settings', description: '查看或修改 Pi 设置', section: 'settings' },
-  { id: 'state', glyph: 'ℹ', label: 'Project Status', description: '查看 Work、Git、Session 与已加载能力', section: 'resources' },
-  { id: 'resources', glyph: '▤', label: 'Loaded Resources', description: '打开 Project Status 的资源与诊断', section: 'resources' },
+  { id: 'session_new', glyph: '+', label: 'New Session', keywords: '新建会话 work', description: '开始一段全新的上下文', section: 'new-session' },
+  { id: 'stop', glyph: '■', label: 'Stop Work', keywords: '停止工作 instance', description: '停止整个 Work；执行前需要确认', action: 'stop' },
+  { id: 'resume', glyph: '↪', label: 'Resume Session', keywords: '恢复会话 pi session', description: '从保存的 Session 继续', section: 'sessions' },
+  { id: 'tree', glyph: '⑂', label: 'Session Tree', keywords: '会话树 navigate fork clone', description: '浏览、切换或分叉当前会话树', section: 'tree' },
+  { id: 'model', glyph: '◈', label: 'Set Model', keywords: '切换模型', description: '切换当前模型', section: 'models' },
+  { id: 'thinking', glyph: '◇', label: 'Set Thinking', keywords: '思考等级', description: '调整思考等级', section: 'thinking' },
+  { id: 'name', glyph: '✎', label: 'Rename Session', keywords: '重命名会话', description: '修改当前 Session 名称', section: 'rename-session' },
+  { id: 'compact', glyph: '⚡', label: 'Compact Context', keywords: '压缩上下文', description: '手动压缩当前上下文', section: 'compact-session' },
+  { id: 'reload', glyph: '↻', label: 'Reload Session', keywords: '重新加载 resources', description: '重新载入 Pi 资源与 Session', section: 'reload-session' },
+  { id: 'dequeue', glyph: '↩', label: 'Restore Queue', keywords: '取回排队消息', description: '把尚未执行的消息取回输入框', action: 'restoreQueue' },
+  { id: 'tools', glyph: '⚙', label: 'Active Tools', keywords: '启用工具', description: '查看或切换可用工具', section: 'tools' },
+  { id: 'settings', glyph: '⌘', label: 'Settings', keywords: '设置', description: '查看或修改 Pi 设置', section: 'settings' },
+  { id: 'state', glyph: 'ℹ', label: 'Project Status', keywords: '当前状态 git branch', description: '查看 Work、Git、Session 与已加载能力', section: 'resources' },
+  { id: 'resources', glyph: '▤', label: 'Loaded Resources', keywords: '资源 diagnostics skill context', description: '打开 Project Status 的资源与诊断', section: 'resources' },
 ] as const
 
 const commandSearch = ref('')
@@ -85,8 +88,8 @@ const selectedCommandName = ref('')
 const commandRunnerOpen = ref(false)
 const commandArguments = ref('')
 const commandSelectedIndex = ref(0)
-const commands = ref<CommandsResult | null>(null)
-const commandCatalogState = ref<'loading' | 'ready' | 'truncated' | 'failed'>('loading')
+const commandSearchInput = ref<HTMLInputElement | null>(null)
+const commandArgsInput = ref<HTMLInputElement | null>(null)
 const models = ref<ModelsResult | null>(null)
 const tools = ref<ToolsResult | null>(null)
 const resources = ref<ResourcesResult | null>(null)
@@ -96,28 +99,24 @@ const pending = ref('')
 const error = ref('')
 let loadEpoch = 0
 
-const selectedCommand = computed(() => commands.value?.commands.find((item) => item.name === selectedCommandName.value) ?? null)
+const selectedCommand = computed(() => catalog.commands.find((item) => item.name === selectedCommandName.value) ?? null)
 const selectedSetting = computed(() => settings.value?.settings.find((item) => item.key === selectedSettingKey.value) ?? null)
 const sessionMode = computed(() => props.section as 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session')
 const filteredStaticCommands = computed(() => {
   const query = commandSearch.value.trim().toLowerCase()
-  return staticCommands.filter((item) => !query || `${item.id} ${item.label} ${item.description}`.toLowerCase().includes(query))
+  return staticCommands.filter((item) => !query || `${item.id} ${item.label} ${item.keywords} ${item.description}`.toLowerCase().includes(query))
 })
-const filteredCommands = computed(() => {
-  const query = commandSearch.value.trim().toLowerCase()
-  return (commands.value?.commands ?? [])
-    .filter((item) => !['stop', 'resume', 'tree'].includes(item.name))
-    .filter((item) => !query || `${item.name} ${item.description ?? ''} ${item.source.kind} ${item.source.package ?? ''}`.toLowerCase().includes(query))
-})
+const catalogCommands = computed(() => catalog.commands.filter((item) => !['stop', 'resume', 'tree'].includes(item.name)))
+const filteredCommands = computed(() => filterCatalogCommands(catalogCommands.value, commandSearch.value))
 const commandSelections = computed(() => [
   ...filteredStaticCommands.value.map((item) => ({ kind: 'static' as const, item })),
   ...filteredCommands.value.map((item) => ({ kind: 'catalog' as const, item })),
 ])
 const commandFooter = computed(() => {
-  const count = (commands.value?.commands ?? []).filter((item) => !['stop', 'resume', 'tree'].includes(item.name)).length
-  if (commandCatalogState.value === 'loading') return '正在同步当前 Session 的 Extension、Skill 和 Prompt 命令…'
-  if (commandCatalogState.value === 'truncated') return `显示 ${count} 个 Pi 命令（目录未完整返回）`
-  if (commandCatalogState.value === 'failed') return 'Pi 命令目录暂时不可用 · WebConsole 命令仍可使用'
+  const count = catalogCommands.value.length
+  if (catalog.state === 'idle' || catalog.state === 'loading') return '正在同步当前 Session 的 Extension、Skill 和 Prompt 命令…'
+  if (catalog.state === 'truncated') return `显示 ${count} 个 Pi 命令（目录未完整返回）`
+  if (catalog.state === 'failed') return 'Pi 命令目录暂时不可用 · WebConsole 命令仍可使用'
   return `${count} 个 Pi 命令 · 点击选择 · ↑↓ 移动`
 })
 const filteredModels = computed(() => {
@@ -151,6 +150,10 @@ watch(commandSearch, () => { commandSelectedIndex.value = 0 })
 watch(commandSelections, (items) => {
   commandSelectedIndex.value = Math.max(0, Math.min(commandSelectedIndex.value, items.length - 1))
 })
+watch(commandSelectedIndex, async () => {
+  await nextTick()
+  document.getElementById(`cmd-opt-${commandSelectedIndex.value}`)?.scrollIntoView({ block: 'nearest' })
+})
 
 watch([
   () => app.activeHostId,
@@ -160,8 +163,6 @@ watch([
   () => props.work.runtimeGeneration,
 ], () => {
   if (app.hostContext) commandConsole.bindContext(app.hostContext.hostId, app.hostContext.selectionGeneration, props.work)
-  commands.value = null
-  commandCatalogState.value = 'loading'
   models.value = null
   tools.value = null
   resources.value = null
@@ -211,7 +212,17 @@ function activateCommandIndex(index = commandSelectedIndex.value) {
   const selected = commandSelections.value[index]
   if (!selected) return
   if (selected.kind === 'static') activateStatic(selected.item)
-  else openCommandRunner(selected.item.name)
+  else activateCatalogCommand(selected.item)
+}
+
+/** prompt/skill 命令的本质是发一条消息：草稿空着时直接填进输入框交回对话；
+ *  草稿有内容时不覆盖用户文本，留在面板走运行表单。extension 命令有独立输出，始终走运行表单。 */
+function activateCatalogCommand(item: CommandInfo) {
+  if (commandGoesToComposer(item) && !props.hasDraft) {
+    emit('prefill', item.name)
+    return
+  }
+  openCommandRunner(item.name)
 }
 
 function handleCommandKeydown(event: KeyboardEvent) {
@@ -231,6 +242,12 @@ function openCommandRunner(name: string) {
   selectedCommandName.value = name
   commandArguments.value = ''
   commandRunnerOpen.value = true
+  void nextTick(() => commandArgsInput.value?.focus())
+}
+
+function backToCatalog() {
+  commandRunnerOpen.value = false
+  void nextTick(() => commandSearchInput.value?.focus())
 }
 
 async function reconcileDomain(domain: ControlMutationDomain): Promise<boolean> {
@@ -264,7 +281,7 @@ defineExpose({ reconcileDomain, applyLiveEvent })
 async function loadSection(section: ControlSection, force = false): Promise<boolean> {
   if (['sessions', 'tree', 'new-session', 'rename-session', 'compact-session', 'reload-session'].includes(section)) return true
   const dataExists = section === 'commands'
-    ? commands.value
+    ? catalog.result
     : section === 'models' || section === 'thinking'
       ? models.value
       : section === 'tools'
@@ -279,10 +296,8 @@ async function loadSection(section: ControlSection, force = false): Promise<bool
   error.value = ''
   try {
     if (section === 'commands') {
-      const result = await currentHostCall(app, (context) => commandCatalog(workId, context))
+      await catalog.ensure(props.work, requireHostContext(app), force)
       if (epoch !== loadEpoch || props.work.id !== workId) return false
-      commands.value = result
-      commandCatalogState.value = result.truncated ? 'truncated' : 'ready'
     } else if (section === 'models' || section === 'thinking') {
       const result = await currentHostCall(app, (context) => listModels(workId, context))
       if (epoch !== loadEpoch || props.work.id !== workId) return false
@@ -316,8 +331,7 @@ async function loadSection(section: ControlSection, force = false): Promise<bool
   } catch (cause) {
     if (epoch === loadEpoch && props.work.id === workId) {
       if (section === 'commands') {
-        commands.value = { commands: [], total: 0, truncated: false }
-        commandCatalogState.value = 'failed'
+        catalog.invalidate()
       } else error.value = errorMessage(cause)
     }
     return false
@@ -481,10 +495,6 @@ function isCurrentModel(model: ModelInfo) {
   return current?.provider === model.provider && current.id === model.id
 }
 
-function sourceLabel(kind: string) {
-  return ({ 'built-in': 'WebConsole', extension: 'Extension', skill: 'Skill', prompt: 'Prompt' } as Record<string, string>)[kind] ?? kind
-}
-
 </script>
 
 <template>
@@ -497,37 +507,37 @@ function sourceLabel(kind: string) {
       <template v-if="!commandRunnerOpen">
         <div class="cmd-palette-search-wrap">
           <span class="cmd-palette-search-icon">⌙</span>
-          <input v-model="commandSearch" class="cmd-palette-input" placeholder="搜索 WebConsole、Extension、Skill 和 Prompt 命令…" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="cmd-palette-list" autofocus @keydown="handleCommandKeydown" />
+          <input ref="commandSearchInput" v-model="commandSearch" class="cmd-palette-input" placeholder="搜索 WebConsole、Extension、Skill 和 Prompt 命令…" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="cmd-palette-list" :aria-activedescendant="commandSelections.length ? `cmd-opt-${commandSelectedIndex}` : undefined" autofocus @keydown="handleCommandKeydown" />
           <kbd class="cmd-palette-kbd">ESC</kbd>
           <button class="cmd-palette-close" aria-label="关闭" @click="$emit('close')">×</button>
         </div>
         <div id="cmd-palette-list" class="cmd-palette-list" role="listbox">
           <div v-if="filteredStaticCommands.length" class="cmd-palette-group">WebConsole</div>
-          <button v-for="(item, index) in filteredStaticCommands" :key="item.id" class="cmd-palette-item" :class="{ selected: commandSelectedIndex === index }" role="option" :aria-selected="commandSelectedIndex === index" @mouseenter="commandSelectedIndex = index" @click="activateStatic(item)">
+          <button v-for="(item, index) in filteredStaticCommands" :key="item.id" :id="`cmd-opt-${index}`" class="cmd-palette-item" :class="{ selected: commandSelectedIndex === index }" role="option" :aria-selected="commandSelectedIndex === index" @mouseenter="commandSelectedIndex = index" @click="activateStatic(item)">
             <span class="cmd-palette-item-icon">{{ item.glyph }}</span>
             <span class="cmd-palette-item-copy"><span class="cmd-palette-item-top"><span class="cmd-palette-item-label">{{ item.label }}</span></span><span class="cmd-palette-item-desc">{{ item.description }}</span></span>
           </button>
           <template v-if="filteredCommands.length">
             <div class="cmd-palette-group">Pi Commands</div>
-            <button v-for="(item, index) in filteredCommands" :key="`${item.source.kind}:${item.name}`" class="cmd-palette-item" :class="{ selected: commandSelectedIndex === filteredStaticCommands.length + index }" role="option" :aria-selected="commandSelectedIndex === filteredStaticCommands.length + index" @mouseenter="commandSelectedIndex = filteredStaticCommands.length + index" @click="openCommandRunner(item.name)">
+            <button v-for="(item, index) in filteredCommands" :key="`${item.source.kind}:${item.name}`" :id="`cmd-opt-${filteredStaticCommands.length + index}`" class="cmd-palette-item" :class="{ selected: commandSelectedIndex === filteredStaticCommands.length + index }" role="option" :aria-selected="commandSelectedIndex === filteredStaticCommands.length + index" @mouseenter="commandSelectedIndex = filteredStaticCommands.length + index" @click="activateCatalogCommand(item)">
               <span class="cmd-palette-item-icon">›</span>
-              <span class="cmd-palette-item-copy"><span class="cmd-palette-item-top"><span class="cmd-palette-item-label">/{{ item.name }}</span><span class="cmd-palette-item-hint">{{ sourceLabel(item.source.kind) }}</span></span><span class="cmd-palette-item-desc">{{ item.description || 'Dock 未提供说明' }}</span></span>
+              <span class="cmd-palette-item-copy"><span class="cmd-palette-item-top"><span class="cmd-palette-item-label">/{{ item.name }}</span><span class="cmd-palette-item-hint">{{ catalogSourceLabel(item.source.kind) }}</span></span><span class="cmd-palette-item-desc">{{ item.description || 'Dock 未提供说明' }}</span></span>
             </button>
           </template>
-          <div v-if="!filteredStaticCommands.length && !filteredCommands.length" class="cmd-palette-empty">{{ commandCatalogState === 'loading' ? '正在读取命令…' : '无匹配命令' }}</div>
+          <div v-if="!filteredStaticCommands.length && !filteredCommands.length" class="cmd-palette-empty">{{ catalog.state === 'idle' || catalog.state === 'loading' ? '正在读取命令…' : '无匹配命令' }}</div>
         </div>
         <div class="cmd-palette-footer">{{ commandFooter }}</div>
       </template>
 
       <template v-else-if="selectedCommand">
-        <div class="cmd-center-header"><button class="cmd-center-back" aria-label="返回命令列表" :disabled="!!pending || commandConsole.hasActiveOperation" @click="commandRunnerOpen = false">←</button><div class="cmd-center-identity"><strong>/{{ selectedCommand.name }}</strong><span>{{ sourceLabel(selectedCommand.source.kind) }}</span></div><button class="cmd-palette-close" aria-label="关闭" @click="$emit('close')">×</button></div>
+        <div class="cmd-center-header"><button class="cmd-center-back" aria-label="返回命令列表" :disabled="!!pending || commandConsole.hasActiveOperation" @click="backToCatalog">←</button><div class="cmd-center-identity"><strong>/{{ selectedCommand.name }}</strong><span>{{ catalogSourceLabel(selectedCommand.source.kind) }}</span></div><button class="cmd-palette-close" aria-label="关闭" @click="$emit('close')">×</button></div>
         <div class="cmd-center-description">{{ selectedCommand.description || 'Dock 未提供此命令的说明。' }}</div>
-        <form class="cmd-center-command-form" @submit.prevent="runSelectedCommand"><span class="cmd-center-command-prefix">/{{ selectedCommand.name }}</span><input v-model="commandArguments" class="cmd-center-args" placeholder="参数（可留空）" autocomplete="off" spellcheck="false" /><button class="cmd-center-run" :disabled="preview || !!pending || outcomeUnknown || commandConsole.hasActiveOperation">{{ pending || commandConsole.hasActiveOperation ? '运行中…' : '运行' }}</button></form>
+        <form class="cmd-center-command-form" @submit.prevent="runSelectedCommand"><span class="cmd-center-command-prefix">/{{ selectedCommand.name }}</span><input ref="commandArgsInput" v-model="commandArguments" class="cmd-center-args" placeholder="参数（可留空）" autocomplete="off" spellcheck="false" /><button class="cmd-center-run" :disabled="preview || !!pending || outcomeUnknown || commandConsole.hasActiveOperation">{{ pending || commandConsole.hasActiveOperation ? '运行中…' : '运行' }}</button></form>
         <div class="cmd-center-output" role="log" aria-live="polite">
           <div v-for="entry in commandConsole.entries" :key="entry.id" class="cmd-center-entry" :class="[`cmd-center-entry-${entry.kind}`, entry.level ? `is-${entry.level}` : '']"><span class="cmd-center-entry-marker">{{ entry.kind === 'command' ? '›' : entry.kind === 'status' ? '·' : entry.level === 'error' ? '!' : entry.level === 'warning' ? '△' : '│' }}</span><div class="cmd-center-entry-text">{{ entry.text }}</div></div>
           <div v-if="!commandConsole.entries.length" class="cmd-center-output-empty">命令结果只显示在这里。</div>
         </div>
-        <div class="cmd-palette-footer cmd-center-footer">{{ pending || commandConsole.hasActiveOperation ? '命令正在执行，关闭面板后仍继续运行。' : 'Enter 运行 · Tab 保持网页焦点导航 · Esc 关闭' }}</div>
+        <div class="cmd-palette-footer cmd-center-footer">{{ pending || commandConsole.hasActiveOperation ? '命令正在执行，关闭面板后仍继续运行。' : 'Enter 运行 · Esc 关闭' }}</div>
       </template>
     </template>
 
