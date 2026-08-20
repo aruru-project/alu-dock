@@ -21,6 +21,7 @@ import { TransientFileRegistry } from "../src/pi/transient-file-registry.js";
 import { mouseTrackingSequences } from "../src/tui/mouse-input.js";
 import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
 import { ScriptedCatalogCommitPort } from "./support/scripted-catalog-port.js";
+import { ptyUserEnvironment } from "./support/pty-user-environment.js";
 
 interface Harness {
   directory: string;
@@ -3021,44 +3022,53 @@ async function runPtyTui(
   readyFile?: string,
   workingDirectory = process.cwd(),
 ): Promise<PtyTuiResult> {
-  return new Promise((resolveRun, rejectRun) => {
-    const driver = join(process.cwd(), "test/fixtures/pty-tui-driver.py");
-    const child = spawn("python3", [driver, ...command], {
-      cwd: workingDirectory,
-      env: { ...process.env, ALU_DOCK_PTY_ACTION: action, ...(readyFile ? { ALU_DOCK_PTY_READY_FILE: readyFile } : {}) },
-      stdio: ["ignore", "pipe", "pipe"],
+  const environmentRoot = await mkdtemp(join(tmpdir(), "alu-dock-pty-user-"));
+  try {
+    const environment = await ptyUserEnvironment(environmentRoot, {
+      ALU_DOCK_PTY_ACTION: action,
+      ...(readyFile ? { ALU_DOCK_PTY_READY_FILE: readyFile } : {}),
     });
-    const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
-    child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-    child.once("error", rejectRun);
-    child.once("close", (code) => {
-      if (code !== 0) {
-        rejectRun(new Error(`PTY driver failed (${code ?? "signal"}): ${Buffer.concat(stderr).toString("utf8")}`));
-        return;
-      }
-      try {
-        const parsed = JSON.parse(Buffer.concat(stdout).toString("utf8")) as Partial<PtyTuiResult>;
-        assert.equal(typeof parsed.status, "number");
-        assert.equal(typeof parsed.timedOut, "boolean");
-        assert.equal(typeof parsed.resizedBytes, "number");
-        assert.equal(typeof parsed.stableRenderBatches, "number");
-        assert.equal(typeof parsed.stableOutputBytes, "number");
-        assert.equal(typeof parsed.stableDraftRewrites, "number");
-        assert.equal(typeof parsed.localizedActivityBatches, "number");
-        assert.equal(typeof parsed.startupMouseEnableCount, "number");
-        assert.equal(typeof parsed.signalRestoreMs, "number");
-        assert.equal(typeof parsed.navigationScrollbackClearCount, "number");
-        assert.equal(typeof parsed.navigationRenderBatches, "number");
-        assert.equal(typeof parsed.draftVisible, "boolean");
-        assert.equal(typeof parsed.output, "string");
-        resolveRun(parsed as PtyTuiResult);
-      } catch (error) {
-        rejectRun(new Error(`Invalid PTY driver result: ${Buffer.concat(stdout).toString("utf8")}\n${Buffer.concat(stderr).toString("utf8")}`, { cause: error }));
-      }
+    return await new Promise((resolveRun, rejectRun) => {
+      const driver = join(process.cwd(), "test/fixtures/pty-tui-driver.py");
+      const child = spawn("python3", [driver, ...command], {
+        cwd: workingDirectory,
+        env: environment,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      const stdout: Buffer[] = [];
+      const stderr: Buffer[] = [];
+      child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
+      child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
+      child.once("error", rejectRun);
+      child.once("close", (code) => {
+        if (code !== 0) {
+          rejectRun(new Error(`PTY driver failed (${code ?? "signal"}): ${Buffer.concat(stderr).toString("utf8")}`));
+          return;
+        }
+        try {
+          const parsed = JSON.parse(Buffer.concat(stdout).toString("utf8")) as Partial<PtyTuiResult>;
+          assert.equal(typeof parsed.status, "number");
+          assert.equal(typeof parsed.timedOut, "boolean");
+          assert.equal(typeof parsed.resizedBytes, "number");
+          assert.equal(typeof parsed.stableRenderBatches, "number");
+          assert.equal(typeof parsed.stableOutputBytes, "number");
+          assert.equal(typeof parsed.stableDraftRewrites, "number");
+          assert.equal(typeof parsed.localizedActivityBatches, "number");
+          assert.equal(typeof parsed.startupMouseEnableCount, "number");
+          assert.equal(typeof parsed.signalRestoreMs, "number");
+          assert.equal(typeof parsed.navigationScrollbackClearCount, "number");
+          assert.equal(typeof parsed.navigationRenderBatches, "number");
+          assert.equal(typeof parsed.draftVisible, "boolean");
+          assert.equal(typeof parsed.output, "string");
+          resolveRun(parsed as PtyTuiResult);
+        } catch (error) {
+          rejectRun(new Error(`Invalid PTY driver result: ${Buffer.concat(stdout).toString("utf8")}\n${Buffer.concat(stderr).toString("utf8")}`, { cause: error }));
+        }
+      });
     });
-  });
+  } finally {
+    await rm(environmentRoot, { recursive: true, force: true });
+  }
 }
 
 function assertHubPresentation(output: string, mainScreenMarker: string): void {

@@ -26,6 +26,7 @@ import {
 import { RemoteAccessState, type TrustedClient } from "../src/control/remote-access-state.js";
 import { ManagedInstance } from "../src/core/managed-instance.js";
 import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
+import { ptyUserEnvironment } from "./support/pty-user-environment.js";
 
 class BarrierRemoteAccessState extends RemoteAccessState {
   private barrier: { started: () => void; wait: Promise<void> } | undefined;
@@ -148,12 +149,12 @@ test("local pairing window admits an exact certificate to the existing Protocol 
   await host.start();
   await waitFor(async () => (await state.readStatus())?.state === "disabled");
 
-  const settingsPty = await runHubPty(socketPath, "hub-remote-settings", stateHome, { ALU_DOCK_PTY_PORT: String(port) });
+  const settingsPty = await runHubPty(socketPath, "hub-remote-settings", directory, { ALU_DOCK_PTY_PORT: String(port) });
   assertPty(settingsPty);
   assert.match(settingsPty.output, /Devices/u);
   assert.match(settingsPty.output, /Remote Access · On/u);
   await waitFor(async () => (await state.readStatus())?.state === "listening");
-  const attachmentSettingsPty = await runHubPty(socketPath, "hub-attachment-settings", stateHome, { ALU_DOCK_PTY_ATTACHMENT_DIR: configuredAttachmentDirectory });
+  const attachmentSettingsPty = await runHubPty(socketPath, "hub-attachment-settings", directory, { ALU_DOCK_PTY_ATTACHMENT_DIR: configuredAttachmentDirectory });
   assertPty(attachmentSettingsPty);
   assert.match(attachmentSettingsPty.output, /keep new attachments/u);
 
@@ -180,7 +181,7 @@ test("local pairing window admits an exact certificate to the existing Protocol 
   assert.equal(closed.response.code, "pairing_closed");
   assert.equal("host" in closed.response, false, "an unknown certificate must never receive Protocol V2 Host data");
 
-  const openPty = await runHubPty(socketPath, "hub-pairing-open", stateHome);
+  const openPty = await runHubPty(socketPath, "hub-pairing-open", directory);
   assertPty(openPty);
   assert.match(openPty.output, /Connect a New Device\?/u);
   assert.match(openPty.output, /Waiting for your device/u);
@@ -189,7 +190,7 @@ test("local pairing window admits an exact certificate to the existing Protocol 
     return pairingWindow !== undefined && Date.parse(pairingWindow.expiresAt) > Date.now();
   });
 
-  const autoUpdatePty = await runHubPty(socketPath, "hub-devices-auto-update", stateHome);
+  const autoUpdatePty = await runHubPty(socketPath, "hub-devices-auto-update", directory);
   assertPty(autoUpdatePty);
   assert.match(autoUpdatePty.output, /Bedroom phone/u, "a device published while Devices is visible must appear without a keypress");
   assert.doesNotMatch(autoUpdatePty.output, /Refresh/u);
@@ -230,7 +231,7 @@ test("local pairing window admits an exact certificate to the existing Protocol 
   }, hostCertificateRaw);
   assert.equal(stillPending.response.type, "pairing.pending.v1");
 
-  const pairingPty = await runHubPty(socketPath, "hub-pairing", stateHome, { ALU_DOCK_PTY_PIN: pin });
+  const pairingPty = await runHubPty(socketPath, "hub-pairing", directory, { ALU_DOCK_PTY_PIN: pin });
   assertPty(pairingPty);
   assert.match(pairingPty.output, /Type the 4-digit PIN/u);
   assert.match(pairingPty.output, /Just a moment/u);
@@ -346,7 +347,7 @@ test("local pairing window admits an exact certificate to the existing Protocol 
   held.write(encodeJsonLine(hello("held-hello")));
   assert.equal(record(await heldReader.next()).kind, "hello_ack");
   const heldClosed = new Promise<void>((resolveClosed) => held.once("close", () => resolveClosed()));
-  const revokePty = await runHubPty(socketPath, "hub-revoke", stateHome);
+  const revokePty = await runHubPty(socketPath, "hub-revoke", directory);
   assertPty(revokePty);
   assert.match(revokePty.output, /Remove Living room tablet\?/u);
   assert.match(revokePty.output, /Living room tablet has been removed/u);
@@ -537,9 +538,13 @@ async function pairingRequest(
 async function runHubPty(
   socketPath: string,
   action: "hub-remote-settings" | "hub-attachment-settings" | "hub-pairing-open" | "hub-devices-auto-update" | "hub-pairing" | "hub-revoke",
-  stateHome: string,
-  environment: Record<string, string> = {},
+  environmentRoot: string,
+  overrides: Record<string, string> = {},
 ): Promise<HubPtyResult> {
+  const environment = await ptyUserEnvironment(environmentRoot, {
+    ALU_DOCK_PTY_ACTION: action,
+    ...overrides,
+  });
   return new Promise((resolveRun, rejectRun) => {
     const driver = join(process.cwd(), "test/fixtures/pty-tui-driver.py");
     const child = spawn("python3", [
@@ -549,14 +554,7 @@ async function runHubPty(
       "--socket",
       socketPath,
     ], {
-      env: {
-        ...process.env,
-        STATE_DIRECTORY: "",
-        XDG_STATE_HOME: stateHome,
-        XDG_DATA_HOME: join(stateHome, "data"),
-        ALU_DOCK_PTY_ACTION: action,
-        ...environment,
-      },
+      env: environment,
       stdio: ["ignore", "pipe", "pipe"],
     });
     const stdout: Buffer[] = [];
