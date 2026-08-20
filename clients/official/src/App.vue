@@ -375,6 +375,7 @@ const restoredImageCount = computed({
 const pairingInProgress = computed(() => !['idle', 'failed', 'cancelled', 'completed'].includes(pairingStage.value))
 const hasRestoredImageDrafts = computed(() => Object.values(restoredImageCounts.value).some((count) => count > 0))
 const contextTransitionBusy = computed(() => pairingInProgress.value
+  || workMutating.value
   || attachmentPicking.value
   || clearingRestoredImages.value
   || queueRestoring.value
@@ -1514,7 +1515,7 @@ async function submit(): Promise<boolean> {
   const work = selected.value
   const captured = draft.value
   const capturedAttachments = draftAttachments.value.slice(0, 32).map((item) => ({ ...item }))
-  if (!work || (!captured.trim() && !capturedAttachments.length && !restoredImageCount.value) || !isTauri || pairingInProgress.value || clearingRestoredImages.value || submitting.value || queueRestoring.value || attachmentPicking.value || uploadDrafts.value.length > 0) return false
+  if (!work || workMutating.value || (!captured.trim() && !capturedAttachments.length && !restoredImageCount.value) || !isTauri || pairingInProgress.value || clearingRestoredImages.value || submitting.value || queueRestoring.value || attachmentPicking.value || uploadDrafts.value.length > 0) return false
   submitting.value = true
   submissionError.value = null
   try {
@@ -1546,7 +1547,7 @@ async function submitExpanded() {
 
 async function abortCurrentRun() {
   const work = selected.value
-  if (!work || work.execution !== 'running' || aborting.value) return
+  if (!work || work.execution !== 'running' || aborting.value || workMutating.value) return
   if (work.pending.total > 0 && !await restoreQueue()) return
   aborting.value = true
   submissionError.value = null
@@ -1574,23 +1575,29 @@ async function abortCurrentRun() {
 
 async function stopSelectedWork() {
   const work = selected.value
-  if (!isTauri || contextTransitionBusy.value || !stopCanStart(work, workMutating.value, mutationOutcomeUnknown.value) || !work) return
+  const capturedHost = app.hostContext
+  if (!isTauri || contextTransitionBusy.value || !capturedHost || !stopCanStart(work, workMutating.value, mutationOutcomeUnknown.value) || !work) return
   if (!await askConfirm('停止当前工作？')) return
+  if (!app.contextMatches(capturedHost) || selected.value?.id !== work.id || selected.value.lifecycle !== 'active') return
   workMutating.value = true
   submissionError.value = null
   try {
-    const capturedHost = hostContext()
     const result = await stopWork(work.id, capturedHost)
     if (!app.contextMatches(capturedHost)) return
     if (!stoppedResultIsCorrelated(result, work.id)) throw { outcomeUnknown: true, message: '停止结果没有证明对应 Work 已停止。' }
     app.applyWorkSnapshot(result.instance, capturedHost)
-    if (conversationState.value?.instance.id === work.id) {
-      conversationState.value.instance = result.instance
-      conversationState.value.queue = []
+    if (selected.value?.id === work.id) {
+      if (conversationState.value?.instance.id === work.id) {
+        conversationState.value.instance = result.instance
+        conversationState.value.queue = []
+      }
+      window.clearTimeout(reconnectTimer)
+      reconnectTimer = 0
+      conversationError.value = null
+      followConnected.value = false
+      activeFollow.value = null
+      await extensionUi.clear()
     }
-    followConnected.value = false
-    activeFollow.value = null
-    await extensionUi.clear()
     const cleanupErrors = result.receipt.cleanupErrors ?? []
     submissionError.value = cleanupErrors.length
       ? 'Work 已停止，但部分清理工作没有完成。刷新后可以确认当前状态。'
@@ -2041,6 +2048,13 @@ function handleActiveFollowStatus(payload: {
   message?: string
 }) {
   if (payload.subscriptionId !== activeFollowSubscription.value) return
+  if (selected.value?.id === payload.instanceId && selected.value.lifecycle !== 'active') {
+    window.clearTimeout(reconnectTimer)
+    reconnectTimer = 0
+    followConnected.value = false
+    conversationError.value = null
+    return
+  }
   followConnected.value = payload.state === 'connected'
   if (payload.message) conversationError.value = payload.message
   if (payload.state === 'resync_required') {
@@ -2600,7 +2614,7 @@ function handleOutputClick(event: MouseEvent) {
       <div v-if="!isTauri" class="alu-preview-notice">
         浏览器预览 · 操作不会提交
       </div>
-      <div v-else-if="selected && conversationState && (conversationError || (!conversationLoading && !followConnected))" class="alu-recovery-notice" role="status">
+      <div v-else-if="selected && selected.lifecycle === 'active' && conversationState && (conversationError || (!conversationLoading && !followConnected))" class="alu-recovery-notice" role="status">
         <span>{{ conversationError ? `连接恢复失败：${conversationError}` : '连接已中断；当前对话已保留，正在重试…' }}</span>
         <button :disabled="conversationLoading" @click="loadSelectedConversation(selected.id, true)"><RefreshCw :size="13" />{{ conversationLoading ? '恢复中' : '重试' }}</button>
       </div>
@@ -2762,7 +2776,7 @@ function handleOutputClick(event: MouseEvent) {
         <form class="alu-input-wrap" @submit.prevent="submit">
           <textarea ref="composerTextarea" v-model="draft" rows="1" :disabled="conversationLoading" placeholder="输入消息…" title="Enter 发送 · Shift+Enter / Ctrl+J 换行" aria-keyshortcuts="Control+J" @input="resizeComposer" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event)" />
           <button type="button" class="alu-composer-expand" title="展开编辑" aria-label="展开编辑" :disabled="conversationLoading" @click="rememberModalTrigger(); composerExpanded = true">↗</button>
-          <button class="alu-send-btn" type="submit" :disabled="(!draft.trim() && !draftAttachments.length && !restoredImageCount) || !isTauri || conversationLoading || submitting || queueRestoring || attachmentPicking || mutationOutcomeUnknown || uploadDrafts.length > 0">{{ submitting ? '发送中…' : '发送' }}</button>
+          <button class="alu-send-btn" type="submit" :disabled="(!draft.trim() && !draftAttachments.length && !restoredImageCount) || !isTauri || conversationLoading || submitting || queueRestoring || attachmentPicking || workMutating || mutationOutcomeUnknown || uploadDrafts.length > 0">{{ submitting ? '发送中…' : '发送' }}</button>
         </form>
       </ExtensionUiSurface>
 
@@ -2779,7 +2793,7 @@ function handleOutputClick(event: MouseEvent) {
           <button class="alu-bar-btn" title="刷新" @click="refreshCurrent">↻<span class="sm-inline">刷新</span></button>
           <button class="alu-bar-btn" :class="{ 'alu-bar-btn-toggle-active': !detailMode }" title="切换显示模式" @click="detailMode = !detailMode"><span>▤</span><span>{{ detailMode ? '详细' : '简洁' }}</span></button>
           <button class="alu-bar-btn" :title="`打开命令中心（${commandShortcutLabel}）`" aria-keyshortcuts="Control+K Meta+K" @click="openControlCenter('commands')"><kbd>{{ commandShortcutLabel }}</kbd><span class="sm-inline">命令</span></button>
-          <button class="alu-bar-btn alu-bar-btn-abort" :disabled="!isTauri || aborting || mutationOutcomeUnknown || selected.execution !== 'running'" @click="abortCurrentRun">⏹<span class="sm-inline">{{ aborting ? '中止中' : '中止' }}</span></button>
+          <button class="alu-bar-btn alu-bar-btn-abort" :disabled="!isTauri || aborting || workMutating || mutationOutcomeUnknown || selected.execution !== 'running'" @click="abortCurrentRun">⏹<span class="sm-inline">{{ aborting ? '中止中' : '中止' }}</span></button>
         </div>
       </div>
     </section>

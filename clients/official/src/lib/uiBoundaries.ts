@@ -119,7 +119,7 @@ export function stopConfirmationText(work: Work): string {
 }
 
 export function stopCanStart(work: Work | null, workMutating: boolean, outcomeUnknown: boolean): boolean {
-  return !!work && (work.lifecycle === 'active' || work.lifecycle === 'stopping') && !workMutating && !outcomeUnknown
+  return !!work && work.lifecycle === 'active' && !workMutating && !outcomeUnknown
 }
 
 export function stoppedResultIsCorrelated(result: StopResult, instanceId: string): boolean {
