@@ -436,7 +436,7 @@ function binaryBytes(value: ArrayBuffer | Uint8Array | number[]): Uint8Array {
   if (value instanceof Uint8Array) return value
   if (value instanceof ArrayBuffer) return new Uint8Array(value)
   if (Array.isArray(value) && value.every((item) => Number.isInteger(item) && item >= 0 && item <= 255)) return Uint8Array.from(value)
-  throw new Error('图片数据格式无效。')
+  throw new Error('图片内容无法解码，请重新读取。')
 }
 
 export interface SessionContext extends HostContext {

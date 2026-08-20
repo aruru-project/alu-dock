@@ -25,11 +25,11 @@ use crate::{
     tls::{read_json_line, write_json_line},
 };
 
-const MAX_ATTACHMENT_BYTES: u64 = 512 * 1024 * 1024;
+pub const MAX_ATTACHMENT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_CHUNK_BYTES: u64 = 512 * 1024;
 const MAX_ATTACHMENT_NAME_CHARS: usize = 1_024;
 const MAX_ATTACHMENT_MEDIA_TYPE_CHARS: usize = 512;
-pub(crate) const MAX_ATTACHMENTS_PER_MESSAGE: usize = 32;
+pub const MAX_ATTACHMENTS_PER_MESSAGE: usize = 32;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
 const REQUIRED_CAPABILITIES: &[&str] = &["core.v2", "attachments.v1"];
 

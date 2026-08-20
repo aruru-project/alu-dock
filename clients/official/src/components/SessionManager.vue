@@ -302,7 +302,7 @@ function handleTreeNodeKeydown(event: KeyboardEvent) {
 function operationId() { return crypto.randomUUID() }
 
 async function createNew() {
-  if (props.preview) { status.value = '浏览器预览不会创建 Session。'; return }
+  if (props.preview) { status.value = '浏览器预览仅作演示。'; return }
   if (pending.value || props.outcomeUnknown) return
   pending.value = 'new'; error.value = ''; status.value = ''
   try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => newSession(scope, operationId())); if (!result.cancelled) emit('resync', result.instance); else status.value = 'Extension 已取消新建 Session。' }
@@ -325,7 +325,7 @@ async function resumeSelected(continuation?: SessionTrustContinuation) {
       const challenge = String(failure.details?.challengeId ?? '')
       const reported = String(failure.details?.operationId ?? '')
       if (challenge && reported === attempt.operationId) trust.value = { token: selected.token, operationId: attempt.operationId, trustChallengeId: challenge }
-      else error.value = 'Dock 的信任继续信息与当前操作不匹配。'
+      else error.value = 'Dock 返回的信任确认与当前操作对不上。请重试；若反复出现，请检查客户端和 Dock 版本。'
     } else mutationFailure(cause, 'sessions')
   } finally { pending.value = '' }
 }

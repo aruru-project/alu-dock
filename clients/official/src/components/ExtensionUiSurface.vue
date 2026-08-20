@@ -11,6 +11,7 @@ import {
 } from '../lib/bridge'
 import type { ExtensionControllerEmission, ExtensionControllerStatus, InteractionResponse, Work } from '../lib/types'
 import { userErrorMessage as errorMessage } from '../lib/userError'
+import { requireHostContext } from '../lib/hostResult'
 import { useExtensionUiStore, type ExtensionWidget } from '../stores/extension-ui'
 import { useAppStore } from '../stores/app'
 
@@ -18,10 +19,6 @@ const props = defineProps<{ work: Work | null; reconcileInteraction: () => Promi
 const emit = defineEmits<{ editorText: [text: string]; title: [title: string] }>()
 const extension = useExtensionUiStore()
 const app = useAppStore()
-function hostContext() {
-  if (!app.hostContext) throw new Error('当前没有选择 Host。')
-  return { ...app.hostContext }
-}
 const root = ref<HTMLElement | null>(null)
 const dialog = ref<HTMLElement | null>(null)
 const acquiringError = ref('')
@@ -113,7 +110,7 @@ async function acquire() {
   extension.beginAcquire()
   acquiringError.value = ''
   try {
-    const binding = await acquireExtensionControl(work.id, work.ownerHostEpoch, work.runtimeGeneration, hostContext())
+    const binding = await acquireExtensionControl(work.id, work.ownerHostEpoch, work.runtimeGeneration, requireHostContext(app))
     if (!app.contextMatches(binding) || !props.work || props.work.id !== binding.instanceId || props.work.ownerHostEpoch !== binding.hostEpoch || props.work.runtimeGeneration !== binding.runtimeGeneration) {
       await releaseExtensionControl(binding.handle, binding)
       pendingControllerEmissions.delete(binding.handle)
@@ -165,7 +162,7 @@ async function respond(cancelled = false) {
   phase.value = 'submitting'
   responseError.value = ''
   try {
-    const capturedHost = hostContext()
+    const capturedHost = requireHostContext(app)
     await respondExtensionInteraction(handle, current.interactionId, response, cancelled, capturedHost)
     if (!app.contextMatches(capturedHost)) return
     extension.resolveLocally(current.interactionId)
@@ -175,7 +172,7 @@ async function respond(cancelled = false) {
       phase.value = 'unknown'
       unknownInteractionId = current.interactionId
       extension.markInteractionUnknown(current.interactionId)
-      responseError.value = '还无法确认这次回答是否送达。不会自动重试；请刷新确认。'
+      responseError.value = '还无法确认这次回答是否送达。请刷新确认，不要重复提交。'
     } else {
       phase.value = 'idle'
       responseError.value = errorMessage(cause)
@@ -192,7 +189,7 @@ async function reconcile() {
   const refreshed = await props.reconcileInteraction()
   if (!refreshed) {
     phase.value = 'unknown'
-    responseError.value = '暂时无法确认结果；为避免重复提交，回答仍保持锁定。'
+    responseError.value = '暂时无法确认这次回答的结果。请刷新确认，不要重复提交。'
     return
   }
   if (extension.activeSummary?.id !== interactionId) {
@@ -209,7 +206,7 @@ async function reconcile() {
   await acquire()
   if (unknownInteractionId) {
     phase.value = 'unknown'
-    responseError.value = '尚未重新收到这项操作；回答仍保持锁定。'
+    responseError.value = '还没有重新收到这项操作。请稍后再次刷新确认，不要重复提交。'
   }
 }
 
@@ -262,7 +259,7 @@ async function sendViewport() {
   const lineHeight = editor ? Number.parseFloat(getComputedStyle(editor).lineHeight) || 18 : 18
   const width = Math.max(1, Math.min(10_000, Math.floor(surface.clientWidth / cellWidth)))
   const height = Math.max(1, Math.min(10_000, Math.floor((editor?.clientHeight ?? lineHeight) / lineHeight)))
-  try { await reportExtensionViewport(handle, width, height, hostContext()) } catch { /* next resize/reacquire reports current truth */ }
+  try { await reportExtensionViewport(handle, width, height, requireHostContext(app)) } catch { /* next resize/reacquire reports current truth */ }
 }
 
 function isUnknown(cause: unknown) { return !!cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true }

@@ -123,7 +123,7 @@ function dateLabel(value: string) {
       <div class="delivery-tray-mark" aria-hidden="true"><FileDown :size="18" /></div>
       <div>
         <h2 id="delivery-tray-title">文件</h2>
-        <p>查看阿露提供的文件</p>
+        <p>查看当前 Work 交付的文件</p>
       </div>
       <button type="button" title="刷新当前 Work 的文件" aria-label="刷新当前 Work 的文件" :disabled="loading || !currentWorkName" @click="emit('refresh')">
         <RefreshCw :size="16" :class="{ spinning: loading }" />

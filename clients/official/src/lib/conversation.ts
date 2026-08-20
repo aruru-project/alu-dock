@@ -468,7 +468,7 @@ function ensurePublishedImage(
 
 function safeShowImageOutput(isError: boolean, publishedFile?: PublishedFileDto) {
   if (isError) return '图片没有成功发布。'
-  return publishedFile ? '图片结果已生成。' : '这张图片已不可用，请让阿露重新发布。'
+  return publishedFile ? '图片结果已生成。' : '这张图片已不可用，请让 Agent 重新发布。'
 }
 
 function publishedFileFrom(value: unknown): PublishedFileDto | undefined {

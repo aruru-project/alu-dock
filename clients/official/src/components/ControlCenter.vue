@@ -12,14 +12,14 @@ import {
   setThinking,
   updateSetting,
 } from '../lib/bridge'
-import { captureHostResult, hostResultMatches } from '../lib/hostResult'
+import { currentHostCall, requireHostContext } from '../lib/hostResult'
 import { userErrorMessage as errorMessage } from '../lib/userError'
+import { workLifecycleLabel } from '../lib/uiBoundaries'
 import SessionManager from './SessionManager.vue'
 import { useAppStore } from '../stores/app'
 import { useCommandConsoleStore } from '../stores/command-console'
 import type {
   CommandsResult,
-  HostContext,
   ModelInfo,
   ModelsResult,
   ProjectedEvent,
@@ -40,16 +40,6 @@ export type ControlMutationDomain = 'conversation' | 'sessions' | 'tree' | 'mode
 const props = defineProps<{ work: Work; section: ControlSection; preview: boolean; outcomeUnknown: boolean; unknownDomain?: ControlMutationDomain; hasDraft: boolean; compactionPending: boolean }>()
 const app = useAppStore()
 const commandConsole = useCommandConsoleStore()
-function hostContext() {
-  if (!app.hostContext) throw new Error('当前没有选择 Host。')
-  return { ...app.hostContext }
-}
-async function currentHostCall<T>(operation: (context: HostContext) => Promise<T>): Promise<T> {
-  const context = hostContext()
-  const correlated = captureHostResult(context, await operation(context))
-  if (!hostResultMatches(correlated, app.hostContext)) throw new Error('Host 选择已改变；旧结果已丢弃。')
-  return correlated.result
-}
 const emit = defineEmits<{
   snapshot: [work: Work]
   unknown: [cause: unknown, domain: ControlMutationDomain]
@@ -288,12 +278,12 @@ async function loadSection(section: ControlSection, force = false): Promise<bool
   error.value = ''
   try {
     if (section === 'commands') {
-      const result = await currentHostCall((context) => commandCatalog(workId, context))
+      const result = await currentHostCall(app, (context) => commandCatalog(workId, context))
       if (epoch !== loadEpoch || props.work.id !== workId) return false
       commands.value = result
       commandCatalogState.value = result.truncated ? 'truncated' : 'ready'
     } else if (section === 'models' || section === 'thinking') {
-      const result = await currentHostCall((context) => listModels(workId, context))
+      const result = await currentHostCall(app, (context) => listModels(workId, context))
       if (epoch !== loadEpoch || props.work.id !== workId) return false
       models.value = result
       emit('snapshot', result.instance)
@@ -303,21 +293,21 @@ async function loadSection(section: ControlSection, force = false): Promise<bool
         emit('title', '选择 Model', [`当前：${currentLabel}`, result.truncated ? `显示 ${result.models.length}/${result.total} 项` : ''].filter(Boolean).join('\n'))
       }
     } else if (section === 'tools') {
-      const result = await currentHostCall((context) => listTools(workId, context))
+      const result = await currentHostCall(app, (context) => listTools(workId, context))
       if (epoch !== loadEpoch || props.work.id !== workId) return false
       tools.value = result
       emit('snapshot', result.instance)
     } else if (section === 'resources') {
       const [resourceResult, toolResult] = await Promise.all([
-        currentHostCall((context) => getResources(workId, context)),
-        currentHostCall((context) => listTools(workId, context)),
+        currentHostCall(app, (context) => getResources(workId, context)),
+        currentHostCall(app, (context) => listTools(workId, context)),
       ])
       if (epoch !== loadEpoch || props.work.id !== workId) return false
       resources.value = resourceResult
       tools.value = toolResult
       emit('snapshot', toolResult.instance)
     } else {
-      const result = await currentHostCall((context) => getSettings(workId, context))
+      const result = await currentHostCall(app, (context) => getSettings(workId, context))
       if (epoch !== loadEpoch || props.work.id !== workId) return false
       settings.value = result
     }
@@ -343,7 +333,7 @@ async function runSelectedCommand() {
   error.value = ''
   commandConsole.beginOperation(operationId, command.name, commandArguments.value)
   try {
-    const result = await currentHostCall((context) => runCatalogCommand(props.work.id, command.name, commandArguments.value, operationId, context))
+    const result = await currentHostCall(app, (context) => runCatalogCommand(props.work.id, command.name, commandArguments.value, operationId, context))
     emit('snapshot', result.instance)
     commandConsole.receiveReceipt(operationId, result.receipt)
   } catch (cause) {
@@ -359,7 +349,7 @@ async function chooseModel(model: ModelInfo) {
   pending.value = `model:${model.provider}/${model.id}`
   error.value = ''
   try {
-    const snapshot = await currentHostCall((context) => setModel(props.work.id, model.provider, model.id, context))
+    const snapshot = await currentHostCall(app, (context) => setModel(props.work.id, model.provider, model.id, context))
     emit('snapshot', snapshot)
     if (models.value) models.value.instance = snapshot
     emit('close')
@@ -375,7 +365,7 @@ async function chooseThinking(level: ThinkingLevel) {
   pending.value = `thinking:${level}`
   error.value = ''
   try {
-    const snapshot = await currentHostCall((context) => setThinking(props.work.id, level, context))
+    const snapshot = await currentHostCall(app, (context) => setThinking(props.work.id, level, context))
     emit('snapshot', snapshot)
     if (models.value) models.value.instance = snapshot
     emit('close')
@@ -392,7 +382,7 @@ async function toggleTool(tool: ToolInfo) {
   pending.value = `tool:${tool.name}`
   error.value = ''
   try {
-    const result = await currentHostCall((context) => setActiveTools(props.work.id, names, context))
+    const result = await currentHostCall(app, (context) => setActiveTools(props.work.id, names, context))
     tools.value = result
     emit('snapshot', result.instance)
     emit('close')
@@ -443,7 +433,7 @@ async function saveSetting(setting: SettingInfo, value: SettingValue) {
   pending.value = `setting:${setting.key}`
   error.value = ''
   try {
-    const result = await currentHostCall((context) => updateSetting(props.work.id, setting.key, value, context))
+    const result = await currentHostCall(app, (context) => updateSetting(props.work.id, setting.key, value, context))
     const index = settings.value.settings.findIndex((item) => item.key === result.setting.key)
     if (index >= 0) settings.value.settings[index] = result.setting
     emit('snapshot', result.instance)
@@ -481,9 +471,6 @@ function contextLabel(work: Work) {
   return `${formatProjectTokens(context.tokens)}/${formatProjectTokens(context.contextWindow)} · ${context.percent == null ? '—' : `${context.percent.toFixed(1)}%`}`
 }
 
-function lifecycleLabel(value: Work['lifecycle']) {
-  return ({ active: '运行中', stopping: '正在停止', stopped: '已停止', host_lost: '连接已中断', runtime_error: '运行故障' } as Record<Work['lifecycle'], string>)[value]
-}
 function executionLabel(value: Work['execution']) {
   return ({ idle: '空闲', running: '运行中', failed: '运行失败', unavailable: '已停止' } as Record<Work['execution'], string>)[value]
 }
@@ -540,9 +527,9 @@ function sourceLabel(kind: string) {
         <form class="cmd-center-command-form" @submit.prevent="runSelectedCommand"><span class="cmd-center-command-prefix">/{{ selectedCommand.name }}</span><input v-model="commandArguments" class="cmd-center-args" placeholder="参数（可留空）" autocomplete="off" spellcheck="false" /><button class="cmd-center-run" :disabled="preview || !!pending || outcomeUnknown || commandConsole.hasActiveOperation">{{ pending || commandConsole.hasActiveOperation ? '运行中…' : '运行' }}</button></form>
         <div class="cmd-center-output" role="log" aria-live="polite">
           <div v-for="entry in commandConsole.entries" :key="entry.id" class="cmd-center-entry" :class="[`cmd-center-entry-${entry.kind}`, entry.level ? `is-${entry.level}` : '']"><span class="cmd-center-entry-marker">{{ entry.kind === 'command' ? '›' : entry.kind === 'status' ? '·' : entry.level === 'error' ? '!' : entry.level === 'warning' ? '△' : '│' }}</span><div class="cmd-center-entry-text">{{ entry.text }}</div></div>
-          <div v-if="!commandConsole.entries.length" class="cmd-center-output-empty">命令结果会显示在这里，不会进入主要对话。</div>
+          <div v-if="!commandConsole.entries.length" class="cmd-center-output-empty">命令结果只显示在这里。</div>
         </div>
-        <div class="cmd-palette-footer cmd-center-footer">{{ pending || commandConsole.hasActiveOperation ? '命令正在执行；关闭面板不会取消。' : 'Enter 运行 · Tab 保持网页焦点导航 · Esc 关闭' }}</div>
+        <div class="cmd-palette-footer cmd-center-footer">{{ pending || commandConsole.hasActiveOperation ? '命令正在执行，关闭面板后仍继续运行。' : 'Enter 运行 · Tab 保持网页焦点导航 · Esc 关闭' }}</div>
       </template>
     </template>
 
@@ -583,7 +570,7 @@ function sourceLabel(kind: string) {
       <section class="alu-project-status-identity">
         <span class="alu-project-status-signal" :class="`is-${work.lifecycle}`" />
         <div class="alu-project-status-identity-copy"><strong>{{ work.name || work.key || '未命名 Work' }}</strong><span>{{ work.cwd || '—' }}</span></div>
-        <div class="alu-project-status-badges"><span class="alu-project-status-badge">{{ lifecycleLabel(work.lifecycle) }}</span><span class="alu-project-status-badge" :class="{ 'is-running': work.execution === 'running' }">{{ executionLabel(work.execution) }}</span><span v-if="work.gitBranch" class="alu-project-status-badge is-branch"> {{ work.gitBranch }}</span></div>
+        <div class="alu-project-status-badges"><span class="alu-project-status-badge">{{ workLifecycleLabel(work.lifecycle) }}</span><span class="alu-project-status-badge" :class="{ 'is-running': work.execution === 'running' }">{{ executionLabel(work.execution) }}</span><span v-if="work.gitBranch" class="alu-project-status-badge is-branch"> {{ work.gitBranch }}</span></div>
       </section>
       <section class="alu-project-status-section">
         <h3>Session</h3>

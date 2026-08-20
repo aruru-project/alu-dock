@@ -78,7 +78,7 @@ import {
   resolveDeviceName,
 } from './lib/deviceName'
 import { userErrorMessage as errorMessage } from './lib/userError'
-import { captureHostResult, hostResultMatches } from './lib/hostResult'
+import { captureHostResult, currentHostCall, hostResultMatches, requireHostContext } from './lib/hostResult'
 import { reduceLiveEvent } from './lib/liveReducer'
 import {
   conversationBoundaryKey,
@@ -91,7 +91,9 @@ import {
   type FollowConnectionState,
   type FollowConnectionStatus,
   stopCanStart,
+  stopConfirmationText,
   stoppedResultIsCorrelated,
+  workLifecycleLabel,
 } from './lib/uiBoundaries'
 import type { AttachmentDto, AttachmentUploadProgress, ConnectionKind, ConversationBootstrap, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, HostConnectionProfile, HostContext, HostEndpoint, ProjectedEvent, QueueItem, SelectedAttachment, Work, WorkspacePage } from './lib/types'
 import {
@@ -222,6 +224,7 @@ const activeFollow = ref<ActiveFollow | null>(null)
 const activeFollowSubscription = computed(() => activeFollow.value?.subscriptionId ?? '')
 const pairHost = ref('')
 const pairPort = ref<number | null>(null)
+const MAX_MESSAGE_ATTACHMENTS = 32
 const deviceNameStorage = browserDeviceNameStorage()
 const pairDeviceName = ref(readDeviceNamePreference(deviceNameStorage) ?? DEVICE_NAME_FALLBACK)
 const pairDeviceNameTouched = ref(false)
@@ -411,17 +414,6 @@ const currentCompactionError = computed(() => {
 })
 const visibleComposerError = computed(() => submissionError.value || currentCompactionError.value)
 const recoverablePairings = computed(() => app.catalog?.pairingTransactions ?? [])
-function hostContext() {
-  const context = app.hostContext
-  if (!context) throw new Error('当前没有选择 Host。')
-  return { ...context }
-}
-async function currentHostCall<T>(operation: (context: HostContext) => Promise<T>): Promise<T> {
-  const context = hostContext()
-  const correlated = captureHostResult(context, await operation(context))
-  if (!hostResultMatches(correlated, app.hostContext)) throw new Error('Host 选择已改变；旧结果已丢弃。')
-  return correlated.result
-}
 
 const connectionLabel = computed(() => {
   if (!isTauri) return '浏览器预览'
@@ -616,18 +608,6 @@ function inactiveState(work: Work) {
   if (work.lifecycle === 'stopping') return { label: '正在停止', message: 'Dock 正在结束这个 Work，请稍后刷新状态。', action: '' }
   if (work.lifecycle === 'stopped') return { label: 'Work 已停止', message: '这是一个已经结束的历史 Work。', action: '' }
   return { label: 'Work 当前不可用', message: '当前无法连接这个 Work。', action: '' }
-}
-
-function workState(work: Work) {
-  if (work.lifecycle === 'host_lost') return '可继续'
-  if (work.lifecycle === 'runtime_error') return '运行故障'
-  if (work.lifecycle === 'stopped') return '已停止'
-  if (work.execution === 'running') return '工作中'
-  return '空闲'
-}
-
-function sidebarState(work: Work) {
-  return ({ active: '运行中', stopping: '正在停止', stopped: '已停止', host_lost: '连接已中断', runtime_error: '工作出现故障' } as const)[work.lifecycle] ?? '状态已更新'
 }
 
 function workGroup(work: Work) {
@@ -967,7 +947,7 @@ function handleModalKeydown(event: KeyboardEvent) {
 function controlDialogTitle(section: ControlSection) {
   return ({
     commands: '命令中心', sessions: '恢复 Session', tree: 'Session Tree', 'new-session': 'New Session',
-    'rename-session': '会话名称', 'compact-session': 'Compact Context', 'reload-session': 'Reload Session？',
+    'rename-session': '会话名称', 'compact-session': 'Compact Context', 'reload-session': 'Reload Session',
     models: '选择 Model', thinking: 'Thinking Level', tools: 'Active Tools', resources: 'Project Status', settings: 'Settings',
   } as Record<ControlSection, string>)[section]
 }
@@ -1082,7 +1062,7 @@ async function switchSavedHost(hostId: string) {
 async function removeSavedHost(hostId: string, displayName: string) {
   if (!isTauri || contextTransitionBusy.value) return
   const imageWarning = hasRestoredImageDrafts.value && hostId === app.activeHostId ? '\n\n已取回但尚未发送的附件也会从本机草稿中移除。' : ''
-  const body = `这会删除此设备保存的配对凭据和连接地址。它不会在 Host 上撤销此设备的访问权限；如需撤销，请在电脑上的 AluDock 管理界面完成。以后从此设备连接需要重新配对。${imageWarning}`
+  const body = `这会删除此设备保存的配对凭据和连接地址。这台 Host 上此设备的访问权限保持不变；如需撤销，请在电脑上的 AluDock 管理界面完成。以后从此设备连接需要重新配对。${imageWarning}`
   if (!await askConfirm(`从此设备删除“${displayName}”？`, body)) return
   await extensionUi.clear()
   await app.removeHost(hostId)
@@ -1101,7 +1081,7 @@ async function saveHostDisplayName() {
   hostNameSaving.value = true
   try {
     const revision = activeProfile().revision
-    const profile = await currentHostCall((context) => renameHostProfile(displayName, revision, context))
+    const profile = await currentHostCall(app, (context) => renameHostProfile(displayName, revision, context))
     applyProfile(profile)
     hostDisplayName.value = profile.displayName
     hostNameSaved.value = true
@@ -1119,7 +1099,7 @@ function activeProfile(): HostConnectionProfile {
 }
 
 function applyProfile(profile: HostConnectionProfile) {
-  app.applyHostProfile(profile, hostContext())
+  app.applyHostProfile(profile, requireHostContext(app))
 }
 
 function clearEndpointForm() {
@@ -1136,7 +1116,7 @@ async function addHostEndpoint() {
   endpointCanSaveDraft.value = false
   try {
     const revision = activeProfile().revision
-    const profile = await currentHostCall((context) => verifyHostEndpoint(
+    const profile = await currentHostCall(app, (context) => verifyHostEndpoint(
       endpointHost.value.trim(),
       endpointPort.value!,
       endpointLabel.value.trim() || '连接地址',
@@ -1163,7 +1143,7 @@ async function saveEndpointDraft() {
   endpointError.value = ''
   try {
     const revision = activeProfile().revision
-    const profile = await currentHostCall((context) => saveUnverifiedHostEndpoint(
+    const profile = await currentHostCall(app, (context) => saveUnverifiedHostEndpoint(
       endpointHost.value.trim(),
       endpointPort.value!,
       endpointLabel.value.trim() || '连接地址',
@@ -1184,7 +1164,7 @@ async function chooseConnectionPolicy(mode: 'automatic' | 'fixed', endpointId?: 
   endpointError.value = ''
   try {
     const revision = activeProfile().revision
-    applyProfile(await currentHostCall((context) => setConnectionPolicy(mode, revision, context, endpointId)))
+    applyProfile(await currentHostCall(app, (context) => setConnectionPolicy(mode, revision, context, endpointId)))
   } catch (cause) {
     endpointError.value = errorMessage(cause)
   }
@@ -1196,7 +1176,7 @@ async function testEndpoint(endpoint: HostEndpoint) {
   endpointError.value = ''
   try {
     const revision = activeProfile().revision
-    const result = await currentHostCall((context) => testHostEndpoint(endpoint.id, revision, context))
+    const result = await currentHostCall(app, (context) => testHostEndpoint(endpoint.id, revision, context))
     applyProfile(result.profile)
   } catch (cause) {
     endpointError.value = errorMessage(cause)
@@ -1211,7 +1191,7 @@ async function toggleEndpoint(endpoint: HostEndpoint) {
   endpointError.value = ''
   try {
     const revision = activeProfile().revision
-    applyProfile(await currentHostCall((context) => setHostEndpointEnabled(endpoint.id, endpoint.state === 'disabled', revision, context)))
+    applyProfile(await currentHostCall(app, (context) => setHostEndpointEnabled(endpoint.id, endpoint.state === 'disabled', revision, context)))
   } catch (cause) {
     endpointError.value = errorMessage(cause)
   } finally {
@@ -1230,7 +1210,7 @@ async function moveEndpoint(endpointId: string, offset: -1 | 1) {
   endpointMutatingId.value = endpointId
   endpointError.value = ''
   try {
-    applyProfile(await currentHostCall((context) => reorderHostEndpoints(ids, profile.revision, context)))
+    applyProfile(await currentHostCall(app, (context) => reorderHostEndpoints(ids, profile.revision, context)))
   } catch (cause) {
     endpointError.value = errorMessage(cause)
   } finally {
@@ -1243,7 +1223,7 @@ async function removeEndpoint(endpointId: string, label: string) {
   endpointError.value = ''
   try {
     const revision = activeProfile().revision
-    applyProfile(await currentHostCall((context) => deleteHostEndpoint(endpointId, revision, context)))
+    applyProfile(await currentHostCall(app, (context) => deleteHostEndpoint(endpointId, revision, context)))
   } catch (cause) {
     endpointError.value = errorMessage(cause)
   }
@@ -1254,8 +1234,8 @@ function endpointKindLabel(kind: ConnectionKind) {
 }
 
 function endpointStateLabel(endpoint: HostEndpoint) {
-  if (endpoint.state === 'draft_unverified') return '待验证草稿 · 不会自动连接'
-  if (endpoint.state === 'disabled') return '已停用 · 不会自动连接'
+  if (endpoint.state === 'draft_unverified') return '待验证草稿'
+  if (endpoint.state === 'disabled') return '已停用'
   return endpoint.id === app.payload?.host.activeEndpointId ? '启动时通过此地址连接' : '身份已验证'
 }
 
@@ -1351,12 +1331,12 @@ async function handleComposerPaste(event: ClipboardEvent) {
     submissionError.value = '当前暂时不能添加剪贴板图片，请稍后重试。'
     return
   }
-  const available = 32 - draftAttachments.value.length - uploadDrafts.value.length
+  const available = MAX_MESSAGE_ATTACHMENTS - draftAttachments.value.length - uploadDrafts.value.length
   if (images.length > available) {
-    submissionError.value = available > 0 ? `本条消息还可以添加 ${available} 个附件。` : '一条消息最多可附加 32 个文件。'
+    submissionError.value = available > 0 ? `本条消息还可以添加 ${available} 个附件。` : `一条消息最多可附加 ${MAX_MESSAGE_ATTACHMENTS} 个文件。`
     return
   }
-  const context = hostContext()
+  const context = requireHostContext(app)
   const staged: UploadDraft[] = []
   attachmentPicking.value = true
   submissionError.value = null
@@ -1393,17 +1373,17 @@ async function handleComposerPaste(event: ClipboardEvent) {
 async function chooseAttachments() {
   const work = selected.value
   if (!work || !isTauri || work.lifecycle !== 'active' || pairingInProgress.value || attachmentPicking.value) return
-  const available = 32 - draftAttachments.value.length - uploadDrafts.value.length
+  const available = MAX_MESSAGE_ATTACHMENTS - draftAttachments.value.length - uploadDrafts.value.length
   if (available <= 0) {
-    submissionError.value = draftAttachments.value.length > 32
+    submissionError.value = draftAttachments.value.length > MAX_MESSAGE_ATTACHMENTS
       ? 'Queue 取回的附件需要分批发送，发完一批后才能继续添加。'
-      : '一条消息最多可附加 32 个文件。'
+      : `一条消息最多可附加 ${MAX_MESSAGE_ATTACHMENTS} 个文件。`
     return
   }
   submissionError.value = null
   attachmentPicking.value = true
   try {
-    const context = hostContext()
+    const context = requireHostContext(app)
     const picked = await pickAttachments(work.id, context)
     if (!app.contextMatches(context) || selected.value?.id !== work.id) {
       for (const item of picked) void removeAttachment(work.id, item.token, context).catch(() => undefined)
@@ -1427,7 +1407,7 @@ async function chooseAttachments() {
 async function startAttachmentUpload(item: UploadDraft) {
   const work = selected.value
   if (!work) return
-  const context = hostContext()
+  const context = requireHostContext(app)
   item.state = 'hashing'
   item.progress = 0
   item.error = undefined
@@ -1449,7 +1429,7 @@ async function startAttachmentUpload(item: UploadDraft) {
 async function cancelUpload(item: UploadDraft) {
   const work = selected.value
   if (!work) return
-  try { await cancelAttachmentUpload(work.id, item.token, hostContext()) } catch { /* completion will report its final state */ }
+  try { await cancelAttachmentUpload(work.id, item.token, requireHostContext(app)) } catch { /* completion will report its final state */ }
 }
 
 async function removeUpload(item: UploadDraft) {
@@ -1457,7 +1437,7 @@ async function removeUpload(item: UploadDraft) {
   if (!work) return
   uploadDrafts.value = uploadDrafts.value.filter((candidate) => candidate.token !== item.token)
   removeAttachmentPreview(item.token)
-  try { await removeAttachment(work.id, item.token, hostContext()) } catch { /* already cleared by a context change */ }
+  try { await removeAttachment(work.id, item.token, requireHostContext(app)) } catch { /* already cleared by a context change */ }
 }
 
 function removeUploaded(fileId: string) {
@@ -1468,7 +1448,7 @@ function removeUploaded(fileId: string) {
 async function clearQueueImages() {
   const work = selected.value
   if (!work || pairingInProgress.value || clearingRestoredImages.value || submitting.value || queueRestoring.value) return
-  const context = hostContext()
+  const context = requireHostContext(app)
   clearingRestoredImages.value = true
   try {
     await clearRestoredImages(work.id, context)
@@ -1488,7 +1468,7 @@ async function restoreQueue(): Promise<boolean> {
   submissionError.value = null
   clearQueueNotice()
   try {
-    const context = hostContext()
+    const context = requireHostContext(app)
     const result = await dequeueMessages(work.id, context)
     if (!app.contextMatches(context) || selected.value?.id !== work.id || result.receipt.instanceId !== work.id || result.instance.id !== work.id) return false
     const restored = appendRestoredQueue(draft.value, draftAttachments.value, result.receipt.restored)
@@ -1517,12 +1497,12 @@ async function restoreQueue(): Promise<boolean> {
 async function submit(): Promise<boolean> {
   const work = selected.value
   const captured = draft.value
-  const capturedAttachments = draftAttachments.value.slice(0, 32).map((item) => ({ ...item }))
+  const capturedAttachments = draftAttachments.value.slice(0, MAX_MESSAGE_ATTACHMENTS).map((item) => ({ ...item }))
   if (!work || workMutating.value || (!captured.trim() && !capturedAttachments.length && !restoredImageCount.value) || !isTauri || pairingInProgress.value || clearingRestoredImages.value || submitting.value || queueRestoring.value || attachmentPicking.value || uploadDrafts.value.length > 0) return false
   submitting.value = true
   submissionError.value = null
   try {
-    const capturedHost = hostContext()
+    const capturedHost = requireHostContext(app)
     const result = await submitMessage(work.id, captured, capturedAttachments.map((item) => item.fileId), capturedHost)
     if (!app.contextMatches(capturedHost)) return false
     app.applyWorkSnapshot(result.instance, capturedHost)
@@ -1555,7 +1535,7 @@ async function abortCurrentRun() {
   aborting.value = true
   submissionError.value = null
   try {
-    const capturedHost = hostContext()
+    const capturedHost = requireHostContext(app)
     const snapshot = await abortRun(work.id, capturedHost)
     if (!app.contextMatches(capturedHost)) return
     app.applyWorkSnapshot(snapshot, capturedHost)
@@ -1580,7 +1560,7 @@ async function stopSelectedWork() {
   const work = selected.value
   const capturedHost = app.hostContext
   if (!isTauri || contextTransitionBusy.value || !capturedHost || !stopCanStart(work, workMutating.value, mutationOutcomeUnknown.value) || !work) return
-  if (!await askConfirm('停止当前工作？')) return
+  if (!await askConfirm('停止当前工作？', stopConfirmationText(work))) return
   if (!app.contextMatches(capturedHost) || selected.value?.id !== work.id || selected.value.lifecycle !== 'active') return
   workMutating.value = true
   submissionError.value = null
@@ -1616,7 +1596,7 @@ async function stopSelectedWork() {
 async function reopenSelectedWork(continuation?: CreateWorkContinuation) {
   const work = selected.value
   if (!isTauri || contextTransitionBusy.value || !work || !work.reopenable || workMutating.value || mutationOutcomeUnknown.value) return
-  const capturedHost = hostContext()
+  const capturedHost = requireHostContext(app)
   const previousGeneration = work.runtimeGeneration
   workMutating.value = true
   submissionError.value = null
@@ -1633,7 +1613,7 @@ async function reopenSelectedWork(continuation?: CreateWorkContinuation) {
       const trustChallengeId = String(failure.details?.challengeId || '')
       if (operationId && trustChallengeId) {
         reopenTrustContinuation.value = { operationId, trustChallengeId, projectTrustDecision: 'trust_once' }
-      } else submissionError.value = 'Dock 请求确认项目信任，但没有返回完整的确认信息。'
+      } else submissionError.value = 'Dock 要求确认项目信任，但确认信息不完整。请重试；若反复出现，请检查客户端和 Dock 版本。'
     } else if (failure?.outcomeUnknown === true) {
       markUnknownOutcome(cause, 'work', work.id)
       reconcilingReopenWorkId.value = work.id
@@ -1654,7 +1634,7 @@ async function reconcileReopenOutcome(workId: string, previousGeneration: number
   }
   const current = app.works.find((work) => work.id === workId)
   if (!current || current.lifecycle !== 'active' || current.runtimeGeneration <= previousGeneration) {
-    submissionError.value = 'Dock 尚未确认 Work 已继续；为避免重复启动，当前不会再次发送请求。'
+    submissionError.value = '还无法确认 Work 是否已继续。请刷新状态后确认，不要重复操作。'
     return
   }
   const key = mutationKey(workId, 'work')
@@ -1675,7 +1655,7 @@ async function forgetSelectedWork() {
   workMutating.value = true
   submissionError.value = null
   try {
-    const capturedHost = hostContext()
+    const capturedHost = requireHostContext(app)
     await forgetWork(work.id, capturedHost)
     if (!app.contextMatches(capturedHost)) return
     app.removeWorkSnapshot(work.id, capturedHost)
@@ -1774,7 +1754,7 @@ async function requestConversationImage(part: ConversationImagePart) {
   const state = conversationState.value
   const work = selected.value
   if (!source || !state || !work || imageResource(part).state === 'loading' || imageResource(part).state === 'ready') return
-  const capturedHost = hostContext()
+  const capturedHost = requireHostContext(app)
   const expectedEpoch = state.cursor.hostEpoch
   const expectedGeneration = state.cursor.runtimeGeneration
   const loadEpoch = imageLoadEpoch
@@ -1799,7 +1779,7 @@ async function requestConversationImage(part: ConversationImagePart) {
       || conversationState.value?.cursor.runtimeGeneration !== expectedGeneration
       || !conversationHasImage(part.imageKey)) return
     const detectedMediaType = detectedRasterMimeType(bytes)
-    if (!detectedMediaType || (mediaType && mediaType !== detectedMediaType)) throw new Error('图片数据格式无效。')
+    if (!detectedMediaType || (mediaType && mediaType !== detectedMediaType)) throw new Error('图片内容无法解码，请重新读取。')
     mediaType = detectedMediaType
     const blobBytes = new Uint8Array(bytes.byteLength)
     blobBytes.set(bytes)
@@ -1815,13 +1795,13 @@ function decodeInlineImage(data: string, mimeType: string): Uint8Array {
   if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(mimeType)
     || data.length > Math.ceil((20 * 1024 * 1024) / 3) * 4
     || data.length % 4 !== 0
-    || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) throw new Error('图片数据格式无效。')
+    || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) throw new Error('图片内容无法解码，请重新读取。')
   let decoded = ''
-  try { decoded = window.atob(data) } catch { throw new Error('图片数据格式无效。') }
-  if (window.btoa(decoded) !== data) throw new Error('图片数据格式无效。')
+  try { decoded = window.atob(data) } catch { throw new Error('图片内容无法解码，请重新读取。') }
+  if (window.btoa(decoded) !== data) throw new Error('图片内容无法解码，请重新读取。')
   const bytes = new Uint8Array(decoded.length)
   for (let index = 0; index < decoded.length; index += 1) bytes[index] = decoded.charCodeAt(index)
-  if (detectedRasterMimeType(bytes) !== mimeType) throw new Error('图片数据格式无效。')
+  if (detectedRasterMimeType(bytes) !== mimeType) throw new Error('图片内容无法解码，请重新读取。')
   return bytes
 }
 
@@ -1857,7 +1837,7 @@ function markPreviewImageFailed() {
 
 function imageLoadMessage(cause: unknown) {
   const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
-  if (code === 'file_unavailable') return '图片已经失效，请让阿露重新发布。'
+  if (code === 'file_unavailable') return '图片已经失效，请让 Agent 重新发布。'
   if (code === 'image_too_large') return '图片过大，当前设备无法安全预览。'
   if (code === 'unsupported_image') return '图片格式无法安全显示。'
   return errorMessage(cause, '图片暂时无法读取，请稍后重试。')
@@ -1940,7 +1920,7 @@ async function resumeConversationFollow(instanceId: string): Promise<boolean> {
   const work = selected.value
   if (!state || !work || work.id !== instanceId || work.lifecycle !== 'active' || state.instance.id !== instanceId) return false
   const epoch = ++conversationLoadEpoch
-  const capturedHost = hostContext()
+  const capturedHost = requireHostContext(app)
   const cursor = { ...state.cursor }
   if (cursor.instanceId !== instanceId
     || cursor.hostEpoch !== app.payload?.host.hostEpoch
@@ -2106,7 +2086,7 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
   let subscriptionId = ''
   let capturedHost: HostContext | null = null
   try {
-    capturedHost = hostContext()
+    capturedHost = requireHostContext(app)
     const bootstrap = await loadConversation(instanceId, capturedHost)
     if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
     if (!conversationSwapIsCorrelated(capturedHost, instanceId, bootstrap, true)) throw new Error('对话状态已经变化，请重新载入。')
@@ -2210,7 +2190,7 @@ async function loadEarlierHistory() {
   historyLoading.value = true
   historyError.value = null
   try {
-    const capturedHost = hostContext()
+    const capturedHost = requireHostContext(app)
     const page = await loadConversationHistory(
       work.id,
       beforeEntryId,
@@ -2276,7 +2256,7 @@ function setCompactionPending(workId: string, pending: boolean) {
 async function startCompaction(customInstructions?: string) {
   const work = selected.value
   if (!isTauri || !work || mutationOutcomeUnknown.value || compactionWorkIds.value.has(work.id) || work.compacting) return
-  const capturedHost = hostContext()
+  const capturedHost = requireHostContext(app)
   const scope: SessionContext = {
     ...capturedHost,
     instanceId: work.id,
@@ -2335,7 +2315,7 @@ async function browse(path: string) {
   workspaceSearch.value = ''
   workspaceError.value = null
   try {
-    workspace.value = await currentHostCall((context) => listWorkspace(path, context))
+    workspace.value = await currentHostCall(app, (context) => listWorkspace(path, context))
     workspacePath.value = workspace.value.path
   } catch (cause) {
     workspaceError.value = errorMessage(cause)
@@ -2349,7 +2329,7 @@ async function createSelectedWork(continuation?: CreateWorkContinuation) {
   creatingWork.value = true
   workspaceError.value = null
   try {
-    const capturedHost = hostContext()
+    const capturedHost = requireHostContext(app)
     const work = await createWork(workspace.value.path, capturedHost, undefined, continuation)
     if (!app.contextMatches(capturedHost)) return
     app.applyWorkSnapshot(work, capturedHost)
@@ -2369,7 +2349,7 @@ async function createSelectedWork(continuation?: CreateWorkContinuation) {
           projectTrustDecision: 'trust_once',
         }
       } else {
-        workspaceError.value = 'Dock 请求确认项目信任，但没有返回完整的确认信息。'
+        workspaceError.value = 'Dock 要求确认项目信任，但确认信息不完整。请重试；若反复出现，请检查客户端和 Dock 版本。'
       }
     } else {
       markUnknownOutcome(cause, 'work', 'global')
@@ -2420,7 +2400,7 @@ async function reconcileMutationOutcome(requestedDomain?: MutationDomain) {
       reconciled = await reconcileControlProjection('settings', workId)
     } else if ((domain === 'sessions' || domain === 'tree') && workId !== 'global') {
       await app.load()
-      if (app.error || selected.value?.id !== workId) throw new Error('无法取得修改后的权威 Work 状态。')
+      if (app.error || selected.value?.id !== workId) throw new Error('暂时无法确认修改后的 Work 状态，请稍后重试。')
       if (domain === 'sessions' && selected.value?.compacting) throw new Error('上下文仍在压缩；完成后再刷新确认。')
       await nextTick()
       const projection = await reconcileControlProjection(domain, workId)
@@ -2430,7 +2410,7 @@ async function reconcileMutationOutcome(requestedDomain?: MutationDomain) {
       await app.load()
       reconciled = !app.error
     }
-    if (!reconciled) throw new Error('权威状态尚未成功刷新；结果未知的操作仍保持锁定。')
+    if (!reconciled) throw new Error('还无法确认刚才的修改是否生效。请再次刷新确认，不要重复提交。')
     const next = new Map(unresolvedMutations.value)
     next.delete(key)
     unresolvedMutations.value = next
@@ -2444,17 +2424,17 @@ async function reconcileMutationOutcome(requestedDomain?: MutationDomain) {
 async function reconcileControlProjection(domain: ControlMutationDomain, workId: string): Promise<boolean> {
   if (controlCenterRef.value && domain !== 'conversation') return controlCenterRef.value.reconcileDomain(domain)
   if (domain === 'models') {
-    const result = await currentHostCall((context) => listModels(workId, context))
+    const result = await currentHostCall(app, (context) => listModels(workId, context))
     app.applyWorkSnapshot(result.instance)
     return true
   }
   if (domain === 'tools') {
-    const result = await currentHostCall((context) => listTools(workId, context))
+    const result = await currentHostCall(app, (context) => listTools(workId, context))
     app.applyWorkSnapshot(result.instance)
     return true
   }
   if (domain === 'settings') {
-    await currentHostCall((context) => getSettings(workId, context))
+    await currentHostCall(app, (context) => getSettings(workId, context))
     return true
   }
   if (domain === 'sessions' || domain === 'tree') {
@@ -2466,8 +2446,8 @@ async function reconcileControlProjection(domain: ControlMutationDomain, workId:
       expectedHostEpoch: work.ownerHostEpoch ?? '',
       expectedRuntimeGeneration: work.runtimeGeneration,
     })
-    if (domain === 'sessions') await currentHostCall((context) => listSessions(sessionContext(context), 'cwd'))
-    else await currentHostCall((context) => loadSessionTree(sessionContext(context)))
+    if (domain === 'sessions') await currentHostCall(app, (context) => listSessions(sessionContext(context), 'cwd'))
+    else await currentHostCall(app, (context) => loadSessionTree(sessionContext(context)))
     return true
   }
   return false
@@ -2528,7 +2508,7 @@ async function toggleAllToolDetails() {
   toolsExpandedMutating.value = true
   submissionError.value = null
   try {
-    const capturedHost = hostContext()
+    const capturedHost = requireHostContext(app)
     const snapshot = await setExtensionToolsExpanded(work.id, work.ownerHostEpoch, work.runtimeGeneration, !extensionUi.toolsExpanded, capturedHost)
     if (!app.contextMatches(capturedHost)) return
     app.applyWorkSnapshot(snapshot, capturedHost)
@@ -2578,7 +2558,7 @@ function handleOutputClick(event: MouseEvent) {
   <div class="alu-client-shell" :class="{ 'alu-compact-mode': !detailMode }">
     <nav class="alu-navbar select-none">
       <div class="alu-navbar-left">
-        <img src="./assets/console_icon_small.png" class="alu-navbar-avatar session-dot" alt="阿露" />
+        <img src="./assets/console_icon_small.png" class="alu-navbar-avatar session-dot" alt="AluDock" />
         <button type="button" class="alu-navbar-breadcrumb" title="查看 Project Status" aria-label="查看 Project Status" :disabled="!selected" @click="openControlCenter('resources')">
           <span v-if="!app.needsPairing" class="alu-nav-workspace">{{ selected ? selected.cwd.split('/').filter(Boolean).slice(-2).join('/') : 'AluDock' }}</span>
           <span v-if="!app.needsPairing" class="alu-nav-sep">/</span>
@@ -2617,7 +2597,7 @@ function handleOutputClick(event: MouseEvent) {
 
     <main ref="output" class="alu-output" aria-label="当前 Session 对话" @scroll.passive="handleOutputScroll" @load.capture="handleOutputMediaLoad" @click="handleOutputClick">
       <div v-if="!isTauri" class="alu-preview-notice">
-        浏览器预览 · 操作不会提交
+        浏览器预览 · 仅作演示
       </div>
       <div v-else-if="selected && selected.lifecycle === 'active' && conversationState && (conversationError || (!conversationLoading && !followConnected))" class="alu-recovery-notice" role="status">
         <span>{{ conversationError ? `连接恢复失败：${conversationError}` : '连接已中断；当前对话已保留，正在重试…' }}</span>
@@ -2631,7 +2611,7 @@ function handleOutputClick(event: MouseEvent) {
 
       <div v-else-if="app.needsPairing" class="pairing-onboarding">
         <div class="pairing-intro">
-          <img src="./assets/new_logo_small.png" alt="阿露" />
+          <img src="./assets/new_logo_small.png" alt="AluDock" />
           <div><span class="eyebrow">WELCOME TO ALUDOCK</span><h1>连接你的 AluDock</h1><p>先在电脑上的 AluDock 中打开五分钟配对窗口，再在这里输入电脑地址和端口。</p></div>
         </div>
         <div class="pairing-layout">
@@ -2667,7 +2647,7 @@ function handleOutputClick(event: MouseEvent) {
         <WifiOff :size="28" />
         <h1>无法连接“{{ app.activeHost?.displayName || 'Host' }}”</h1>
         <p>{{ app.error }}</p>
-        <p v-if="app.hostUnreachable">已保存的配对仍保留，并且没有自动选择其他 Host。</p>
+        <p v-if="app.hostUnreachable">已保存的配对仍保留。</p>
         <div v-if="app.activeHost && app.hostUnreachable" class="re-pair-prompt">
           <span class="re-pair-icon"><RotateCcw :size="19" /></span>
           <div>
@@ -2689,7 +2669,7 @@ function handleOutputClick(event: MouseEvent) {
       </div>
 
       <div v-else-if="!selected" class="alu-welcome">
-        <img src="./assets/new_logo_small.png" alt="阿露" />
+        <img src="./assets/new_logo_small.png" alt="AluDock" />
         <div class="alu-welcome-text">{{ app.works.length ? '请从工作列表选择一个 Work' : '没有可用的 Work' }}</div>
       </div>
 
@@ -2709,13 +2689,13 @@ function handleOutputClick(event: MouseEvent) {
       </div>
 
       <div v-else-if="conversationLoading && !conversationState" class="alu-welcome" aria-live="polite">
-        <img src="./assets/new_logo_small.png" alt="阿露" />
+        <img src="./assets/new_logo_small.png" alt="AluDock" />
         <div class="alu-welcome-text">正在连接 {{ selected.displayName }}…</div>
       </div>
 
       <div v-else-if="conversationError && !conversationState" class="alu-welcome alu-welcome-error">
-        <img src="./assets/new_logo_small.png" alt="阿露" />
-        <div class="alu-welcome-text">对话暂时没有载入。你可以重新尝试，当前 Work 不会停止。</div>
+        <img src="./assets/new_logo_small.png" alt="AluDock" />
+        <div class="alu-welcome-text">对话暂时没有载入。当前 Work 继续运行。</div>
         <button v-if="selected" class="ui-dialog-btn" @click="loadSelectedConversation(selected.id)">重新载入</button>
       </div>
 
@@ -2735,8 +2715,8 @@ function handleOutputClick(event: MouseEvent) {
               </div>
             </article>
 
-            <article v-else-if="row.kind === 'assistant-group'" class="alu-msg-assistant-row" :data-conversation-id="row.id" :aria-label="`阿露回复 ${row.time}`">
-              <img src="./assets/console_icon_small.png" alt="阿露" class="alu-msg-avatar" />
+            <article v-else-if="row.kind === 'assistant-group'" class="alu-msg-assistant-row" :data-conversation-id="row.id" :aria-label="`Agent 回复 ${row.time}`">
+              <img src="./assets/console_icon_small.png" alt="Agent" class="alu-msg-avatar" />
               <div class="alu-msg-assistant-content">
                 <div class="alu-msg-assistant-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div>
                 <div v-if="row.time" class="msg-assistant-timestamp">{{ row.time }}</div>
@@ -2744,7 +2724,7 @@ function handleOutputClick(event: MouseEvent) {
             </article>
 
             <article v-else-if="row.kind === 'activity'" class="alu-msg-assistant-row is-agent-active" :data-conversation-id="row.id">
-              <img src="./assets/console_icon_small.png" alt="阿露" class="alu-msg-avatar" />
+              <img src="./assets/console_icon_small.png" alt="Agent" class="alu-msg-avatar" />
               <div class="alu-msg-assistant-content"><div class="alu-msg-assistant-body"><div class="alu-agent-activity" role="status" aria-label="正在处理" title="正在处理"><span class="alu-agent-activity-spinner" aria-hidden="true" /></div></div></div>
             </article>
 
@@ -2758,7 +2738,7 @@ function handleOutputClick(event: MouseEvent) {
       </template>
 
       <div v-else class="alu-welcome">
-        <img src="./assets/new_logo_small.png" alt="阿露" />
+        <img src="./assets/new_logo_small.png" alt="AluDock" />
         <div class="alu-welcome-text">「{{ selected.name || 'New session' }}」准备好了。</div>
       </div>
     </main>
@@ -2789,7 +2769,7 @@ function handleOutputClick(event: MouseEvent) {
         <div class="alu-bottom-bar-left">
           <button class="alu-bar-btn alu-bar-session-action" title="恢复 Session" aria-label="恢复 Session" @click="openControlCenter('sessions')">↪<span>恢复</span></button>
           <button class="alu-bar-btn alu-bar-session-action" title="打开 Session Tree" aria-label="打开 Session Tree" @click="openControlCenter('tree')">⑂<span>Tree</span></button>
-          <button class="alu-bar-btn" title="添加附件" :disabled="!isTauri || attachmentPicking || draftAttachments.length + uploadDrafts.length >= 32" @click="chooseAttachments">📎<span class="sm-inline">附件</span></button>
+          <button class="alu-bar-btn" title="添加附件" :disabled="!isTauri || attachmentPicking || draftAttachments.length + uploadDrafts.length >= MAX_MESSAGE_ATTACHMENTS" @click="chooseAttachments">📎<span class="sm-inline">附件</span></button>
         </div>
         <div class="alu-bottom-bar-right">
           <span class="alu-status-dot" :class="{ connecting: !followConnected && !conversationError, error: !!conversationError }" />
@@ -2823,8 +2803,8 @@ function handleOutputClick(event: MouseEvent) {
     <button class="alu-sidebar-overlay" :class="{ open: app.workDrawerOpen }" :aria-hidden="!app.workDrawerOpen" :tabindex="app.workDrawerOpen ? 0 : -1" aria-label="关闭工作列表" @click="app.workDrawerOpen = false" />
     <aside class="alu-sidebar" :class="{ open: app.workDrawerOpen }" :aria-hidden="!app.workDrawerOpen" :inert="!app.workDrawerOpen || undefined" aria-label="工作列表">
       <div class="alu-sidebar-head">
-        <img src="./assets/console_icon_small.png" class="alu-sidebar-avatar" alt="阿露" />
-        <div class="alu-sidebar-title">Alu WebConsole</div>
+        <img src="./assets/console_icon_small.png" class="alu-sidebar-avatar" alt="AluDock" />
+        <div class="alu-sidebar-title">AluDock Client</div>
         <button class="alu-sidebar-refresh" title="刷新" :disabled="contextTransitionBusy" @click="app.load">↻</button>
         <button class="alu-sidebar-close" aria-label="关闭工作列表" @click="app.workDrawerOpen = false"><X :size="18" /></button>
       </div>
@@ -2836,7 +2816,7 @@ function handleOutputClick(event: MouseEvent) {
             <button class="alu-instance-link" :disabled="contextTransitionBusy && work.id !== selected?.id" @click="selectWork(work.id)">
               <span class="alu-instance-state" :class="`is-${work.lifecycle}`" />
               <span class="alu-instance-copy"><span class="alu-instance-name">{{ work.displayName }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span></span>
-              <span class="alu-instance-meta">{{ sidebarState(work) }}</span>
+              <span class="alu-instance-meta">{{ workLifecycleLabel(work.lifecycle) }}</span>
             </button>
             <button v-if="work.reopenable && work.lifecycle !== 'active'" class="alu-instance-action" :disabled="!isTauri || workMutating || mutationOutcomeUnknown" @click="reopenFromList(work)">{{ workMutating && selected?.id === work.id ? '正在继续…' : '继续' }}</button>
             <button v-else-if="group === 'history'" class="alu-instance-action is-muted" :disabled="!isTauri" @click="forgetFromList(work)">移除</button>
@@ -3001,8 +2981,8 @@ function handleOutputClick(event: MouseEvent) {
                 <label><span>端口</span><input v-model.number="endpointPort" type="number" inputmode="numeric" min="1" max="65535" placeholder="端口" /></label>
               </div>
               <div v-if="endpointError" class="directory-error">{{ endpointError }}</div>
-              <div v-if="endpointCanSaveDraft" class="endpoint-draft-offer"><span>当前网络无法完成验证。可先保存为明确的待验证草稿；它不会被自动尝试。</span><button type="button" class="button secondary" :disabled="endpointSaving" @click="saveEndpointDraft">保存为待验证草稿</button></div>
-              <footer><span><ShieldCheck :size="14" />不会覆盖原配对；身份不符不会提升为已验证</span><button class="button primary" :disabled="!endpointHost.trim() || !endpointPort || endpointSaving">{{ endpointSaving ? '正在验证…' : '验证并添加' }}</button></footer>
+              <div v-if="endpointCanSaveDraft" class="endpoint-draft-offer"><span>当前网络无法完成验证。可先保存为待验证草稿；验证通过后才会参与自动连接。</span><button type="button" class="button secondary" :disabled="endpointSaving" @click="saveEndpointDraft">保存为待验证草稿</button></div>
+              <footer><span><ShieldCheck :size="14" />原配对保持不变</span><button class="button primary" :disabled="!endpointHost.trim() || !endpointPort || endpointSaving">{{ endpointSaving ? '正在验证…' : '验证并添加' }}</button></footer>
             </form>
             </div>
           </div>

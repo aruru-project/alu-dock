@@ -69,7 +69,7 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
     operation.completed = true
     append({
       kind: 'status',
-      text: receipt.queued ? '已加入 Agent Queue。' : '已交给 Agent，后续内容显示在主要对话。',
+      text: receipt.queued ? '已加入 Queue。' : '已交给 Agent，后续内容显示在主要对话。',
       operationId,
     })
     finish(operationId)

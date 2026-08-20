@@ -28,7 +28,7 @@ pub use actions::{
 };
 pub use attachments::{
     AttachmentDto, AttachmentUploadCancellation, AttachmentUploadPhase, AttachmentUploadProgress,
-    AttachmentUploadResult, AttachmentUploadStatus,
+    AttachmentUploadResult, AttachmentUploadStatus, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_MESSAGE,
 };
 pub use client::DockClient;
 pub use config::{

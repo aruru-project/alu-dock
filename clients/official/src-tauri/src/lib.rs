@@ -18,6 +18,7 @@ use std::io::Read;
 
 #[cfg(any(target_os = "windows", test))]
 use aludock_client_core::InstanceExecution;
+use aludock_client_core::{MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_MESSAGE};
 use aludock_client_core::{
     AttachmentDto, AttachmentUploadCancellation, AttachmentUploadPhase, AttachmentUploadResult,
     ClientError, CommandInfo, CommandsResult, ConnectionKind, ConnectionPolicy,
@@ -1074,7 +1075,7 @@ impl From<ClientError> for CommandError {
                 maximum_bytes,
             } => Self {
                 code: "attachment_too_large".into(),
-                message: "附件超过 512 MiB 大小限制。".into(),
+                message: msg_attachment_too_large(),
                 details: Some(serde_json::json!({
                     "sizeBytes": size_bytes,
                     "maximumBytes": maximum_bytes,
@@ -2827,8 +2828,22 @@ async fn set_extension_tools_expanded(
     Ok(snapshot)
 }
 
-const MAX_SELECTED_ATTACHMENTS: usize = 32;
-const MAX_SELECTED_ATTACHMENT_BYTES: u64 = 512 * 1024 * 1024;
+
+const MSG_ATTACHMENT_SOURCE_UNAVAILABLE: &str = "无法读取所选附件。";
+#[cfg(target_os = "android")]
+const MSG_ATTACHMENT_STAGE_FAILED: &str = "无法暂存所选附件。";
+const MSG_ATTACHMENT_NOT_PLAIN_FILE: &str = "只能选择本机普通文件。";
+fn msg_attachment_too_large() -> String {
+    format!("附件超过 {} MiB 大小限制。", MAX_ATTACHMENT_BYTES / 1024 / 1024)
+}
+fn msg_attachment_selection_full() -> String {
+    format!("每个工作最多选择 {} 个待上传附件。", MAX_ATTACHMENTS_PER_MESSAGE)
+}
+const MSG_PASTE_CONTEXT_LOST: &str = "无法读取粘贴图片的上下文，请重新粘贴。";
+const MSG_CLIPBOARD_IMAGE_INVALID: &str = "剪贴板中的图片数据无效，请重新复制。";
+const MSG_PASTE_STAGE_FAILED: &str = "无法暂存粘贴的图片，请重试或使用附件按钮。";
+const MSG_ATTACHMENT_PREVIEW_LOST: &str = "这个附件已无法预览，请重新选择。";
+const MSG_ATTACHMENT_SOURCE_CHANGED: &str = "附件源文件发生了变化，请重新选择。";
 
 fn attachment_command_error(code: &str, message: &str) -> CommandError {
     CommandError {
@@ -2926,17 +2941,17 @@ async fn describe_android_picked_file(
     let FilePath::Url(url) = file else {
         return Err(attachment_command_error(
             "invalid_attachment_source",
-            "只能选择本机普通文件。",
+            MSG_ATTACHMENT_NOT_PLAIN_FILE,
         ));
     };
     if url.scheme() != "content" {
         return Err(attachment_command_error(
             "invalid_attachment_source",
-            "只能选择本机普通文件。",
+            MSG_ATTACHMENT_NOT_PLAIN_FILE,
         ));
     }
     let webview = app.get_webview_window("main").ok_or_else(|| {
-        attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
+        attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
     })?;
     let uri = url.to_string();
     let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -2961,21 +2976,21 @@ async fn describe_android_picked_file(
                 });
         })
         .map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
+            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
         })?;
     let description = tokio::time::timeout(std::time::Duration::from_secs(10), receiver)
         .await
         .map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
+            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
         })?
         .map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
+            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
         })?
         .map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
+            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
         })?;
     serde_json::from_str(&description).map_err(|_| {
-        attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
+        attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
     })
 }
 
@@ -2998,7 +3013,7 @@ async fn stage_android_picked_file(
         .path()
         .app_cache_dir()
         .map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
+            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
         })?
         .join("attachment-staging");
     let staging_path =
@@ -3007,12 +3022,12 @@ async fn stage_android_picked_file(
     let copied_path = staging_path.clone();
     let size_bytes = tokio::task::spawn_blocking(move || {
         fs::create_dir_all(&staging_directory).map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", "无法暂存所选附件。")
+            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_STAGE_FAILED)
         })?;
         let mut source_options = PluginOpenOptions::new();
         source_options.read(true);
         let mut source = staging_app.fs().open(file, source_options).map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
+            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
         })?;
         let mut target_options = OpenOptions::new();
         target_options.write(true).create_new(true);
@@ -3022,12 +3037,12 @@ async fn stage_android_picked_file(
             target_options.mode(0o600);
         }
         let mut target = target_options.open(&copied_path).map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", "无法暂存所选附件。")
+            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_STAGE_FAILED)
         })?;
         let copied = match copy_bounded_attachment(
             &mut source,
             &mut target,
-            MAX_SELECTED_ATTACHMENT_BYTES,
+            MAX_ATTACHMENT_BYTES,
         ) {
             Ok(copied) => copied,
             Err(_) => {
@@ -3035,16 +3050,16 @@ async fn stage_android_picked_file(
                 let _ = fs::remove_file(&copied_path);
                 return Err(attachment_command_error(
                     "attachment_source_unavailable",
-                    "无法读取所选附件。",
+                    MSG_ATTACHMENT_SOURCE_UNAVAILABLE,
                 ));
             }
         };
-        if copied > MAX_SELECTED_ATTACHMENT_BYTES {
+        if copied > MAX_ATTACHMENT_BYTES {
             drop(target);
             let _ = fs::remove_file(&copied_path);
             return Err(attachment_command_error(
                 "attachment_too_large",
-                "附件超过 512 MiB 大小限制。",
+                &msg_attachment_too_large(),
             ));
         }
         if target.flush().is_err() {
@@ -3052,7 +3067,7 @@ async fn stage_android_picked_file(
             let _ = fs::remove_file(&copied_path);
             return Err(attachment_command_error(
                 "attachment_source_unavailable",
-                "无法暂存所选附件。",
+                MSG_ATTACHMENT_STAGE_FAILED,
             ));
         }
         Ok(copied)
@@ -3107,7 +3122,7 @@ fn request_header(request: &Request<'_>, name: &str) -> Result<String, CommandEr
         .ok_or_else(|| {
             attachment_command_error(
                 "invalid_clipboard_image",
-                "无法读取粘贴图片的上下文，请重新粘贴。",
+                MSG_PASTE_CONTEXT_LOST,
             )
         })
 }
@@ -3125,7 +3140,7 @@ fn request_image_bytes(request: &Request<'_>) -> Result<Vec<u8>, CommandError> {
                     .ok_or_else(|| {
                         attachment_command_error(
                             "invalid_clipboard_image",
-                            "剪贴板中的图片数据无效，请重新复制。",
+                            MSG_CLIPBOARD_IMAGE_INVALID,
                         )
                     })
             })
@@ -3133,7 +3148,7 @@ fn request_image_bytes(request: &Request<'_>) -> Result<Vec<u8>, CommandError> {
         _ => {
             return Err(attachment_command_error(
                 "invalid_clipboard_image",
-                "剪贴板中的图片数据无效，请重新复制。",
+                MSG_CLIPBOARD_IMAGE_INVALID,
             ));
         }
     };
@@ -3186,14 +3201,14 @@ fn prepare_clipboard_image(
     let mut file = options.open(&path).map_err(|_| {
         attachment_command_error(
             "clipboard_image_unavailable",
-            "无法暂存粘贴的图片，请重试或使用附件按钮。",
+            MSG_PASTE_STAGE_FAILED,
         )
     })?;
     if file.write_all(&bytes).and_then(|_| file.flush()).is_err() {
         let _ = fs::remove_file(&path);
         return Err(attachment_command_error(
             "clipboard_image_unavailable",
-            "无法暂存粘贴的图片，请重试或使用附件按钮。",
+            MSG_PASTE_STAGE_FAILED,
         ));
     }
     drop(file);
@@ -3226,10 +3241,10 @@ fn publish_selected_attachments(
         .values()
         .filter(|entry| attachment_scope_matches(entry, host_id, selection_generation, work_id))
         .count();
-    if prepared.len() > MAX_SELECTED_ATTACHMENTS.saturating_sub(current) {
+    if prepared.len() > MAX_ATTACHMENTS_PER_MESSAGE.saturating_sub(current) {
         return Err(attachment_command_error(
             "attachment_limit_exceeded",
-            "每个工作最多选择 32 个待上传附件。",
+            &msg_attachment_selection_full(),
         ));
     }
     let mut selected = Vec::with_capacity(prepared.len());
@@ -3274,7 +3289,7 @@ fn deliverable_list_error(error: ClientError) -> CommandError {
 fn deliverable_client_error(error: ClientError) -> CommandError {
     match error {
         ClientError::Host { code, .. } if code == "file_unavailable" => {
-            deliverable_command_error("file_unavailable", "这个文件已无法下载。请让阿露重新发送。")
+            deliverable_command_error("file_unavailable", "这个文件已无法下载。请让 Agent 重新发送。")
         }
         ClientError::Tls(_) | ClientError::MissingHostCertificate => deliverable_command_error(
             "deliverable_connection_failed",
@@ -3799,10 +3814,10 @@ async fn pick_attachments(
         .values()
         .filter(|entry| attachment_scope_matches(entry, &host_id, selection_generation, &work_id))
         .count();
-    if existing >= MAX_SELECTED_ATTACHMENTS {
+    if existing >= MAX_ATTACHMENTS_PER_MESSAGE {
         return Err(attachment_command_error(
             "attachment_limit_exceeded",
-            "每个工作最多选择 32 个待上传附件。",
+            &msg_attachment_selection_full(),
         ));
     }
 
@@ -3816,10 +3831,10 @@ async fn pick_attachments(
     else {
         return Ok(Vec::new());
     };
-    if files.len() > MAX_SELECTED_ATTACHMENTS - existing {
+    if files.len() > MAX_ATTACHMENTS_PER_MESSAGE - existing {
         return Err(attachment_command_error(
             "attachment_limit_exceeded",
-            "每个工作最多选择 32 个待上传附件。",
+            &msg_attachment_selection_full(),
         ));
     }
 
@@ -3829,18 +3844,18 @@ async fn pick_attachments(
         let (path, temporary, name, size_bytes, media_type) = match local_path {
             Ok(path) => {
                 let metadata = std::fs::symlink_metadata(&path).map_err(|_| {
-                    attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
+                    attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
                 })?;
                 if !metadata.file_type().is_file() {
                     return Err(attachment_command_error(
                         "invalid_attachment_source",
-                        "只能选择本机普通文件。",
+                        MSG_ATTACHMENT_NOT_PLAIN_FILE,
                     ));
                 }
-                if metadata.len() > MAX_SELECTED_ATTACHMENT_BYTES {
+                if metadata.len() > MAX_ATTACHMENT_BYTES {
                     return Err(attachment_command_error(
                         "attachment_too_large",
-                        "附件超过 512 MiB 大小限制。",
+                        &msg_attachment_too_large(),
                     ));
                 }
                 let name = path
@@ -3865,7 +3880,7 @@ async fn pick_attachments(
                 {
                     return Err(attachment_command_error(
                         "invalid_attachment_source",
-                        "只能选择本机普通文件。",
+                        MSG_ATTACHMENT_NOT_PLAIN_FILE,
                     ));
                 }
             }
@@ -3904,18 +3919,18 @@ async fn stage_clipboard_image(
         .map_err(|_| {
             attachment_command_error(
                 "invalid_clipboard_image",
-                "无法读取粘贴图片的上下文，请重新粘贴。",
+                MSG_PASTE_CONTEXT_LOST,
             )
         })?;
     let work_id = request_header(&request, "x-aludock-work-id")?;
     let image_index = request_header(&request, "x-aludock-image-index")?
         .parse::<usize>()
         .ok()
-        .filter(|index| (1..=MAX_SELECTED_ATTACHMENTS).contains(index))
+        .filter(|index| (1..=MAX_ATTACHMENTS_PER_MESSAGE).contains(index))
         .ok_or_else(|| {
             attachment_command_error(
                 "invalid_clipboard_image",
-                "无法读取粘贴图片的上下文，请重新粘贴。",
+                MSG_PASTE_CONTEXT_LOST,
             )
         })?;
     drop(resolve_host(&runtime, &host_id, selection_generation)?);
@@ -3961,7 +3976,7 @@ async fn attachment_preview(
         let entry = entries.get(&token).ok_or_else(|| {
             attachment_command_error(
                 "attachment_preview_unavailable",
-                "这个附件已无法预览，请重新选择。",
+                MSG_ATTACHMENT_PREVIEW_LOST,
             )
         })?;
         ensure_attachment_scope(entry, &host_id, selection_generation, &work_id)?;
@@ -3990,7 +4005,7 @@ async fn attachment_preview(
     if bytes.len() as u64 != size_bytes {
         return Err(attachment_command_error(
             "attachment_source_changed",
-            "附件源文件发生了变化，请重新选择。",
+            MSG_ATTACHMENT_SOURCE_CHANGED,
         ));
     }
     validate_renderable_image(&bytes, media_type.as_deref())?;
@@ -3999,14 +4014,14 @@ async fn attachment_preview(
     let entry = entries.get(&token).ok_or_else(|| {
         attachment_command_error(
             "attachment_preview_unavailable",
-            "这个附件已无法预览，请重新选择。",
+            MSG_ATTACHMENT_PREVIEW_LOST,
         )
     })?;
     ensure_attachment_scope(entry, &host_id, selection_generation, &work_id)?;
     if entry.operation_id != operation_id {
         return Err(attachment_command_error(
             "attachment_preview_unavailable",
-            "这个附件已无法预览，请重新选择。",
+            MSG_ATTACHMENT_PREVIEW_LOST,
         ));
     }
     drop(entries);
@@ -4038,12 +4053,12 @@ async fn upload_attachment(
             ));
         }
         let metadata = std::fs::symlink_metadata(&entry.path).map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
+            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
         })?;
         if !metadata.file_type().is_file() || metadata.len() != entry.size_bytes {
             return Err(attachment_command_error(
                 "attachment_source_changed",
-                "附件源文件发生了变化，请重新选择。",
+                MSG_ATTACHMENT_SOURCE_CHANGED,
             ));
         }
         let cancellation = AttachmentUploadCancellation::new();
