@@ -3543,19 +3543,32 @@ fn open_saved_deliverable(
     match location.kind.as_str() {
         "path" => {
             let path = PathBuf::from(&location.value);
-            let metadata = fs::metadata(&path).map_err(|_| {
-                deliverable_command_error("saved_file_unavailable", SAVED_FILE_UNAVAILABLE_MESSAGE)
-            })?;
-            if !metadata.is_file() {
-                return Err(deliverable_command_error(
-                    "saved_file_unavailable",
-                    SAVED_FILE_UNAVAILABLE_MESSAGE,
-                ));
-            }
             #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-            app.opener().reveal_item_in_dir(path).map_err(|_| {
-                deliverable_command_error("saved_file_open_failed", SAVED_FILE_UNAVAILABLE_MESSAGE)
-            })?;
+            {
+                let directory =
+                    path.parent()
+                        .filter(|parent| parent.is_dir())
+                        .ok_or_else(|| {
+                            deliverable_command_error(
+                                "saved_location_unavailable",
+                                "保存位置已不可用。请重新下载文件并选择保存位置。",
+                            )
+                        })?;
+                let directory = directory.to_str().ok_or_else(|| {
+                    deliverable_command_error(
+                        "saved_location_unsupported",
+                        "无法使用这个保存位置。请重新下载文件并选择其他位置。",
+                    )
+                })?;
+                app.opener()
+                    .open_path(directory, None::<&str>)
+                    .map_err(|_| {
+                        deliverable_command_error(
+                            "saved_location_open_failed",
+                            "暂时无法打开保存位置。请稍后重试。",
+                        )
+                    })?;
+            }
             #[cfg(any(target_os = "android", target_os = "ios"))]
             app.opener()
                 .open_path(location.value, None::<&str>)

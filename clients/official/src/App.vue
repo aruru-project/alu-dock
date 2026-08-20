@@ -745,7 +745,10 @@ async function openDownloadedDeliverable(item: DownloadedDeliverable) {
   try {
     await openSavedDeliverable(item.savedLocation)
   } catch (cause) {
-    deliveryError.value = errorMessage(cause, '找不到已保存的文件，或当前无法打开。请在设备的文件管理器中查找。')
+    const fallback = item.savedLocation.kind === 'path'
+      ? '暂时无法打开保存位置。请稍后重试。'
+      : '暂时无法打开这个文件。请稍后重试。'
+    deliveryError.value = errorMessage(cause, fallback)
   } finally {
     if (openingDeliveryKey.value === key) openingDeliveryKey.value = ''
   }
