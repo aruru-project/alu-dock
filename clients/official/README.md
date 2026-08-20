@@ -75,11 +75,21 @@ pnpm tauri build --no-bundle --ci
 
 ### Android 构建
 
-准备 JDK 17、Android SDK 36 和 Android NDK，并安装目标架构的 Rust 标准库：
+准备 JDK 17、Android SDK 36 和 Android NDK。将示例配置复制为本机配置，填写各工具的实际安装位置：
+
+```bash
+cp .env.android.example .env.android.local
+pnpm android doctor
+pnpm android setup
+```
+
+本机路径只保存在 `.env.android.local` 中。`setup` 会为 Android Studio 同步本地 SDK 配置。
+
+安装目标架构的 Rust 标准库并构建 ARM64 APK：
 
 ```bash
 rustup target add aarch64-linux-android
-pnpm tauri android build --debug --apk --target aarch64 --ci
+pnpm android build --debug --apk --target aarch64 --ci
 ```
 
 构建 x86_64 模拟器版本时，将 Rust target 和构建目标改为 `x86_64-linux-android` 与 `x86_64`。

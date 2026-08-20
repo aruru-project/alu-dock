@@ -7,6 +7,7 @@
 .env
 .env.*
 !.env.example
+!.env.android.example
 
 # Local release signing material.
 /.release-secrets/
