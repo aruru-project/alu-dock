@@ -105,7 +105,7 @@ pnpm tauri android build --debug --apk --target aarch64 --ci
 - `ANDROID_KEY_ALIAS`
 - `ANDROID_KEY_PASSWORD`
 
-`ANDROID_KEYSTORE_BASE64` 保存签名 keystore 文件的 Base64 内容；keystore 本身不放入仓库。确认版本和提交后推送标签：
+本地 keystore 放在已被 Git 忽略的 `.release-secrets/android/` 目录中。`ANDROID_KEYSTORE_BASE64` 保存该文件的 Base64 内容；keystore 本身不放入仓库。确认版本和提交后推送标签：
 
 ```bash
 VERSION=$(node -p "require('./package.json').version")

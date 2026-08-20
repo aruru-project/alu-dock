@@ -8,6 +8,9 @@
 .env.*
 !.env.example
 
+# Local release signing material.
+/.release-secrets/
+
 # Never commit pairing identities or private keys.
 identity/
 *-identity/
