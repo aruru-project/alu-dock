@@ -23,6 +23,15 @@ The entrypoint loads the machine configuration and then the worktree override, s
 
 Do not put SDK, NDK, or JDK installation paths in tracked files or documentation. Do not put signing keys or passwords in `.env.android.local`; release signing remains separate.
 
+## Windows artifact delivery
+
+A successful `--no-bundle` Windows build does not prove that the executable is a standalone artifact. Before delivering any Windows package:
+
+- Inspect the executable's imported DLLs and the target output directory instead of copying only the `.exe`.
+- Include every required non-system sidecar beside the executable in the archive. In particular, GNU Debug builds require the generated `WebView2Loader.dll` in the same directory as the `.exe`.
+- Inspect the final archive listing and confirm that the executable and its sidecars have the intended Windows architecture.
+- Describe a Linux cross-build as compilation evidence only. Call the package runnable only after a Windows launch smoke test.
+
 ## Verification
 
 Run the checks that exercise the changed behavior. Do not add tests that only assert implementation details, duplicate an existing proof, or freeze hypothetical restrictions.
