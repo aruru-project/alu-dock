@@ -77,28 +77,6 @@ jobs:
           PY
           echo "source_sha=$(git rev-list -n 1 "$RELEASE_TAG")" >> "$GITHUB_OUTPUT"
 
-      - name: Check Android signing secrets
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        shell: bash
-        run: |
-          missing=0
-          for name in \
-            ANDROID_KEYSTORE_BASE64 \
-            ANDROID_KEYSTORE_PASSWORD \
-            ANDROID_KEY_ALIAS \
-            ANDROID_KEY_PASSWORD
-          do
-            if [[ -z "${!name:-}" ]]; then
-              echo "::error::Missing repository secret: $name"
-              missing=1
-            fi
-          done
-          exit "$missing"
-
   linux:
     name: Build Linux ZIP
     needs: prepare
@@ -218,8 +196,31 @@ jobs:
     needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    environment: AndroidBuild
 
     steps:
+      - name: Check Android signing secrets
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        shell: bash
+        run: |
+          missing=0
+          for name in \
+            ANDROID_KEYSTORE_BASE64 \
+            ANDROID_KEYSTORE_PASSWORD \
+            ANDROID_KEY_ALIAS \
+            ANDROID_KEY_PASSWORD
+          do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing AndroidBuild secret: $name"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
       - name: Check out release source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -264,12 +265,12 @@ jobs:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
         shell: bash
         run: |
-          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/aludock-release.jks"
-          chmod 0600 "$RUNNER_TEMP/aludock-release.jks"
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/aludock-release.p12"
+          chmod 0600 "$RUNNER_TEMP/aludock-release.p12"
 
       - name: Build the signed ARM64 APK
         env:
-          ALUDOCK_ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/aludock-release.jks
+          ALUDOCK_ANDROID_KEYSTORE_PATH: ${{ runner.temp }}/aludock-release.p12
           ALUDOCK_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ALUDOCK_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ALUDOCK_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
@@ -309,7 +310,7 @@ jobs:
       - name: Remove the Android signing key
         if: always()
         shell: bash
-        run: rm -f "$RUNNER_TEMP/aludock-release.jks"
+        run: rm -f "$RUNNER_TEMP/aludock-release.p12"
 
   publish:
     name: Publish GitHub release
