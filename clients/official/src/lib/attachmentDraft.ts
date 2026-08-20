@@ -28,7 +28,6 @@ export function appendRestoredQueue(
   currentText: string,
   currentAttachments: AttachmentDto[],
   restored: QueueItem[],
-  inFlight: QueueItem[],
 ) {
   const restoredText = restored.map((item) => item.text).filter((text) => text.length > 0).join('\n\n')
   const text = restoredText ? [currentText, restoredText].filter(Boolean).join('\n\n') : currentText
@@ -46,6 +45,5 @@ export function appendRestoredQueue(
     text,
     attachments,
     restoredImageCount: restored.reduce((total, item) => total + item.imageCount, 0),
-    inFlightCount: inFlight.length,
   }
 }

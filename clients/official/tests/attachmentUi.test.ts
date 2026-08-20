@@ -55,13 +55,10 @@ const attachment: AttachmentDto = {
 
 {
   const restoredItem: QueueItem = { queueItemId: 'q1', delivery: 'followUp', text: 'queued text', attachments: [attachment], imageCount: 2, acceptedAt: '2026-08-17T00:00:00.000Z' }
-  const inFlight: QueueItem = { queueItemId: 'q2', delivery: 'steer', text: 'must not return', attachments: [{ ...attachment, fileId: '7aa2aed0-d5d4-4ee3-acaf-223ef2043374' }], imageCount: 1, acceptedAt: '2026-08-17T00:00:01.000Z' }
-  const result = appendRestoredQueue('new typing', [], [restoredItem], [inFlight])
+  const result = appendRestoredQueue('new typing', [], [restoredItem])
   assert.equal(result.text, 'new typing\n\nqueued text')
   assert.deepEqual(result.attachments, [attachment])
   assert.equal(result.restoredImageCount, 2)
-  assert.equal(result.inFlightCount, 1)
-  assert.ok(!result.text.includes('must not return'))
 }
 
 {

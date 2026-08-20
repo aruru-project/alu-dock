@@ -257,6 +257,7 @@ assert.equal(conversationSwapIsCorrelated({ hostId: 'host-a', selectionGeneratio
 assert.equal(stopCanStart(work, false, false), true)
 assert.equal(stopCanStart(work, true, false), false, 'pending mutation locks Stop')
 assert.equal(stopCanStart(work, false, true), false, 'EffectUnknown locks Stop without replay')
+assert.equal(stopCanStart({ ...work, lifecycle: 'stopping' }, false, false), false, 'a Work already stopping cannot start Stop again')
 const confirmation = stopConfirmationText(work)
 assert.match(confirmation, /共享 Work/)
 assert.match(confirmation, /当前运行/)

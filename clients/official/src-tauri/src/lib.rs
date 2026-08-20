@@ -1,3 +1,7 @@
+#[cfg(any(target_os = "windows", test))]
+use std::time::Duration;
+#[cfg(target_os = "windows")]
+use std::time::Instant;
 use std::{
     collections::HashMap,
     fs::{self, OpenOptions},
@@ -9,6 +13,8 @@ use std::{
     },
 };
 
+#[cfg(any(target_os = "windows", test))]
+use aludock_client_core::InstanceExecution;
 use aludock_client_core::{
     AttachmentDto, AttachmentUploadCancellation, AttachmentUploadPhase, AttachmentUploadResult,
     ClientError, CommandInfo, CommandsResult, ConnectionKind, ConnectionPolicy,
@@ -35,9 +41,15 @@ use tauri::{
 };
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_fs::{FsExt, OpenOptions as PluginOpenOptions};
+#[cfg(target_os = "windows")]
+use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
 const MAX_RENDERABLE_IMAGE_BYTES: u64 = 64 * 1_024 * 1_024;
+#[cfg(any(target_os = "windows", test))]
+const AWAY_NOTIFICATION_GRACE: Duration = Duration::from_secs(60);
+#[cfg(target_os = "windows")]
+const AWAY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -739,6 +751,232 @@ impl HostRuntimeState {
             })),
         })
     }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AwayCatalogContext {
+    host_id: String,
+    selection_generation: u64,
+    host_epoch: String,
+}
+
+#[cfg(target_os = "windows")]
+struct AwayCatalogSnapshot {
+    context: AwayCatalogContext,
+    instances: Vec<AwayInstanceState>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AwayInstanceState {
+    instance_id: String,
+    display_name: String,
+    execution: InstanceExecution,
+}
+
+#[cfg(any(target_os = "windows", test))]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct AwayCompletion {
+    instance_id: String,
+    display_name: String,
+}
+
+#[cfg(any(target_os = "windows", test))]
+struct AwayCompletionTracker {
+    executions: HashMap<String, InstanceExecution>,
+    pending: HashMap<String, String>,
+}
+
+#[cfg(any(target_os = "windows", test))]
+impl AwayCompletionTracker {
+    fn from_instances(instances: &[AwayInstanceState]) -> Self {
+        Self {
+            executions: instances
+                .iter()
+                .map(|instance| (instance.instance_id.clone(), instance.execution))
+                .collect(),
+            pending: HashMap::new(),
+        }
+    }
+
+    fn observe(&mut self, instances: &[AwayInstanceState]) {
+        for instance in instances {
+            let previous = self
+                .executions
+                .insert(instance.instance_id.clone(), instance.execution);
+            if previous == Some(InstanceExecution::Running)
+                && instance.execution == InstanceExecution::Idle
+            {
+                self.pending
+                    .insert(instance.instance_id.clone(), instance.display_name.clone());
+            }
+        }
+    }
+
+    fn take_ready(&mut self, away_for: Duration) -> Vec<AwayCompletion> {
+        if away_for < AWAY_NOTIFICATION_GRACE {
+            return Vec::new();
+        }
+        let mut completions = self
+            .pending
+            .drain()
+            .map(|(instance_id, display_name)| AwayCompletion {
+                instance_id,
+                display_name,
+            })
+            .collect::<Vec<_>>();
+        completions.sort_by(|left, right| left.display_name.cmp(&right.display_name));
+        completions
+    }
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Default)]
+struct AwayMonitorState {
+    task: Arc<Mutex<Option<AwayMonitorTask>>>,
+}
+
+#[cfg(target_os = "windows")]
+struct AwayMonitorTask {
+    handle: tauri::async_runtime::JoinHandle<()>,
+    cancelled: Arc<AtomicBool>,
+}
+
+#[cfg(target_os = "windows")]
+impl AwayMonitorState {
+    fn start(&self, app: tauri::AppHandle, runtime: HostRuntimeState) {
+        let Ok(mut guard) = self.task.lock() else {
+            return;
+        };
+        if let Some(previous) = guard.take() {
+            previous.cancelled.store(true, Ordering::Release);
+            previous.handle.abort();
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let task_cancelled = cancelled.clone();
+        let handle = tauri::async_runtime::spawn(async move {
+            monitor_while_away(app, runtime, task_cancelled).await;
+        });
+        *guard = Some(AwayMonitorTask { handle, cancelled });
+    }
+
+    fn stop(&self) {
+        let Ok(mut guard) = self.task.lock() else {
+            return;
+        };
+        if let Some(task) = guard.take() {
+            task.cancelled.store(true, Ordering::Release);
+            task.handle.abort();
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+async fn read_away_catalog(
+    runtime: &HostRuntimeState,
+) -> Result<Option<AwayCatalogSnapshot>, CommandError> {
+    let (host_id, selection_generation) = {
+        let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
+        let Some(host_id) = lifecycle.active_host_id.clone() else {
+            return Ok(None);
+        };
+        (host_id, lifecycle.selection_generation)
+    };
+    let store = resolve_host(runtime, &host_id, selection_generation)?;
+    let (catalog, host_epoch) = dock_client(&store)?
+        .list_instances_with_host_epoch(InstanceSelector::All)
+        .await
+        .map_err(CommandError::from)?;
+    {
+        let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
+        ensure_host_selection(&lifecycle, &host_id, selection_generation)?;
+    }
+    Ok(Some(AwayCatalogSnapshot {
+        context: AwayCatalogContext {
+            host_id,
+            selection_generation,
+            host_epoch,
+        },
+        instances: catalog
+            .instances
+            .into_iter()
+            .map(|instance| AwayInstanceState {
+                instance_id: instance.id,
+                display_name: instance.display_name,
+                execution: instance.execution,
+            })
+            .collect(),
+    }))
+}
+
+#[cfg(target_os = "windows")]
+async fn monitor_while_away(
+    app: tauri::AppHandle,
+    runtime: HostRuntimeState,
+    cancelled: Arc<AtomicBool>,
+) {
+    let started_at = Instant::now();
+    let mut context: Option<AwayCatalogContext> = None;
+    let mut tracker: Option<AwayCompletionTracker> = None;
+
+    loop {
+        if cancelled.load(Ordering::Acquire) {
+            return;
+        }
+        if let Ok(snapshot) = read_away_catalog(&runtime).await {
+            match snapshot {
+                Some(snapshot) if context.as_ref() == Some(&snapshot.context) => {
+                    if let Some(tracker) = tracker.as_mut() {
+                        tracker.observe(&snapshot.instances);
+                    }
+                }
+                Some(snapshot) => {
+                    tracker = Some(AwayCompletionTracker::from_instances(&snapshot.instances));
+                    context = Some(snapshot.context);
+                }
+                None => {
+                    tracker = None;
+                    context = None;
+                }
+            }
+        }
+
+        if !cancelled.load(Ordering::Acquire)
+            && let Some(tracker) = tracker.as_mut()
+        {
+            show_away_completions(&app, tracker.take_ready(started_at.elapsed()));
+        }
+        tokio::time::sleep(AWAY_POLL_INTERVAL).await;
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn show_away_completions(app: &tauri::AppHandle, completions: Vec<AwayCompletion>) {
+    if completions.is_empty() {
+        return;
+    }
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    if window.is_focused().unwrap_or(false) {
+        return;
+    }
+    for completion in completions {
+        let display_name = completion.display_name.trim();
+        let subject = if display_name.is_empty() {
+            "一个 Work"
+        } else {
+            display_name
+        };
+        let _ = app
+            .notification()
+            .builder()
+            .title("Work 正在等待你")
+            .body(format!("“{subject}”本轮运行已结束，打开 AluDock 查看"))
+            .show();
+    }
+    let _ = window.request_user_attention(Some(tauri::UserAttentionType::Informational));
 }
 
 impl From<ClientError> for CommandError {
@@ -3305,19 +3543,32 @@ fn open_saved_deliverable(
     match location.kind.as_str() {
         "path" => {
             let path = PathBuf::from(&location.value);
-            let metadata = fs::metadata(&path).map_err(|_| {
-                deliverable_command_error("saved_file_unavailable", SAVED_FILE_UNAVAILABLE_MESSAGE)
-            })?;
-            if !metadata.is_file() {
-                return Err(deliverable_command_error(
-                    "saved_file_unavailable",
-                    SAVED_FILE_UNAVAILABLE_MESSAGE,
-                ));
-            }
             #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-            app.opener().reveal_item_in_dir(path).map_err(|_| {
-                deliverable_command_error("saved_file_open_failed", SAVED_FILE_UNAVAILABLE_MESSAGE)
-            })?;
+            {
+                let directory =
+                    path.parent()
+                        .filter(|parent| parent.is_dir())
+                        .ok_or_else(|| {
+                            deliverable_command_error(
+                                "saved_location_unavailable",
+                                "保存位置已不可用。请重新下载文件并选择保存位置。",
+                            )
+                        })?;
+                let directory = directory.to_str().ok_or_else(|| {
+                    deliverable_command_error(
+                        "saved_location_unsupported",
+                        "无法使用这个保存位置。请重新下载文件并选择其他位置。",
+                    )
+                })?;
+                app.opener()
+                    .open_path(directory, None::<&str>)
+                    .map_err(|_| {
+                        deliverable_command_error(
+                            "saved_location_open_failed",
+                            "暂时无法打开保存位置。请稍后重试。",
+                        )
+                    })?;
+            }
             #[cfg(any(target_os = "android", target_os = "ios"))]
             app.opener()
                 .open_path(location.value, None::<&str>)
@@ -5037,10 +5288,30 @@ fn parse_trust_decision(value: &str) -> Result<ProjectTrustDecision, CommandErro
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_opener::init());
+    #[cfg(target_os = "windows")]
+    let builder = builder
+        .plugin(tauri_plugin_notification::init())
+        .manage(AwayMonitorState::default())
+        .on_window_event(|window, event| {
+            if window.label() == "main"
+                && let tauri::WindowEvent::Focused(focused) = event
+            {
+                let monitor = window.state::<AwayMonitorState>();
+                if *focused {
+                    monitor.stop();
+                    let _ = window.request_user_attention(None);
+                } else {
+                    let runtime = window.state::<HostRuntimeState>().inner().clone();
+                    monitor.start(window.app_handle().clone(), runtime);
+                }
+            }
+        });
+
+    builder
         .setup(|app| {
             #[cfg(mobile)]
             let application_data_dir = Some(app.path().app_local_data_dir()?);
@@ -5156,6 +5427,30 @@ mod tests {
         commit_staged_to_path(&completed, &destination).unwrap();
         assert_eq!(fs::read(&destination).unwrap(), b"verified");
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn work_finishing_during_the_first_away_minute_notifies_after_the_grace_period() {
+        let mut tracker = AwayCompletionTracker::from_instances(&[AwayInstanceState {
+            instance_id: "work-a".into(),
+            display_name: "Windows 客户端".into(),
+            execution: InstanceExecution::Running,
+        }]);
+
+        tracker.observe(&[AwayInstanceState {
+            instance_id: "work-a".into(),
+            display_name: "Windows 客户端".into(),
+            execution: InstanceExecution::Idle,
+        }]);
+
+        assert!(tracker.take_ready(Duration::from_secs(59)).is_empty());
+        assert_eq!(
+            tracker.take_ready(Duration::from_secs(60)),
+            vec![AwayCompletion {
+                instance_id: "work-a".into(),
+                display_name: "Windows 客户端".into(),
+            }]
+        );
     }
 
     #[test]

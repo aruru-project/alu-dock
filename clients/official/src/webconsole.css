@@ -630,14 +630,58 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 }
 
 /* ── Tool calls ── */
-.msg-toolcall { font-size: 12px; }
+.msg-toolcall {
+  width: min(900px, 100%);
+  margin: 8px 0;
+  overflow: hidden;
+  color: var(--alu-text-dim);
+  font-size: 12px;
+  background: color-mix(in srgb, var(--alu-amber) 4%, var(--alu-bg));
+  border: 1px solid color-mix(in srgb, var(--alu-amber) 24%, var(--alu-border));
+  border-radius: 8px;
+}
+.tool-call-header {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 11px;
+}
+.tool-name {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+  overflow-wrap: anywhere;
+  color: var(--alu-amber);
+  font-weight: 600;
+}
+.tool-status {
+  flex: 0 0 auto;
+  color: var(--alu-text-muted);
+  font-size: 10px;
+}
+.tool-status[data-status='running'] { color: var(--alu-blue); }
+.tool-status[data-status='error'] { color: var(--alu-rose); }
+.msg-toolcall details { border-top: 1px solid color-mix(in srgb, var(--alu-amber) 14%, var(--alu-border)); }
 .msg-toolcall details summary {
+  display: flex;
+  min-height: 32px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 11px;
   color: var(--alu-text-muted);
   font-size: 11px;
   cursor: pointer;
+  list-style: none;
 }
-.msg-toolcall details summary:hover { color: var(--alu-text-dim); }
-.tool-name { color: var(--alu-amber); }
+.msg-toolcall details summary::-webkit-details-marker { display: none; }
+.msg-toolcall details summary:hover { color: var(--alu-text); background: color-mix(in srgb, var(--alu-amber) 5%, transparent); }
+.tool-disclosure { color: var(--alu-amber); font-size: 18px; line-height: 1; transition: transform .18s ease; }
+.msg-toolcall details[open] .tool-disclosure { transform: rotate(90deg); }
+.msg-toolcall.is-error { border-color: var(--alu-rose-border); }
 
 /* ── 简洁显示模式：隐藏过程块（thinking / tool call / notice / error）── */
 .alu-compact-mode .alu-hideable {
@@ -650,15 +694,22 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   display: none !important;
 }
 .msg-tool-output {
+  max-height: min(54vh, 520px);
+  padding: 10px 12px;
+  margin: 0;
+  overflow: auto;
   color: var(--alu-text-muted);
-  background: var(--alu-bg);
-  padding: 5px 10px;
-  border-radius: 4px;
-  margin: 3px 0;
-  white-space: pre-wrap;
-  word-break: break-all;
   font-size: 11px;
-  border: 1px solid var(--alu-border);
+  line-height: 1.58;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  background: color-mix(in srgb, var(--alu-bg) 92%, black);
+  border: 0;
+  border-top: 1px solid var(--alu-border);
+  border-radius: 0;
+  scrollbar-width: thin;
+  scrollbar-color: var(--alu-border-light) transparent;
 }
 
 /* ── show_image 工具：内联图片 ── */

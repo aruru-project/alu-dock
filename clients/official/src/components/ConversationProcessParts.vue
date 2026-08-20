@@ -30,10 +30,13 @@ const orderedParts = computed(() => [
     </details>
     <div v-else-if="part.kind === 'assistant'" class="msg-assistant msg-text" :data-conversation-id="part.id" v-html="renderMarkdown(part.text)" />
     <div v-else-if="part.kind === 'tool'" class="msg-toolcall alu-hideable" :class="{ 'is-error': part.status === 'error' }" :data-conversation-id="part.id">
-      <span class="tool-name">⚙ {{ part.name }}</span>
+      <div class="tool-call-header">
+        <span class="tool-name"><span aria-hidden="true">⚙</span>{{ part.name }}</span>
+        <span class="tool-status" :data-status="part.status">{{ part.summary }}</span>
+      </div>
       <details :open="toolOpen(part.id)" @toggle="emit('toolToggle', part.id, $event)">
-        <summary>{{ part.status === 'error' ? '失败' : '结果' }}</summary>
-        <pre class="tool-output msg-tool-output">{{ part.detail }}</pre>
+        <summary><span>参数与结果</span><span class="tool-disclosure" aria-hidden="true">›</span></summary>
+        <pre v-if="toolOpen(part.id)" class="tool-output msg-tool-output">{{ part.detail }}</pre>
       </details>
     </div>
     <ConversationImage v-else-if="part.kind === 'image'" :part="part" :resource="imageResource(part)" @request="emit('imageRequest', $event)" @preview="emit('imagePreview', $event)" @failed="emit('imageFailed', $event)" />
