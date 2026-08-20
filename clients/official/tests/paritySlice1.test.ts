@@ -243,6 +243,7 @@ assert.equal(outputIsNearBottom(1_000, 500, 300), false, 'intentional history sc
 assert.doesNotMatch(userErrorMessage({ code: 'protocol_error', message: 'generation 4 cursor 8 failed' }), /generation|cursor|4|8/, 'protocol bookkeeping never becomes user-facing error text')
 assert.doesNotMatch(userErrorMessage({ code: 'instance_host_lost', message: 'Instance 123e4567-e89b is host_lost' }), /123e4567|host_lost/)
 assert.match(userErrorMessage({ code: 'invalid_tree_target', message: 'Entry abc no longer exists' }), /重新打开 Session Tree/, 'a stale Tree choice tells the user how to recover without exposing the missing entry')
+assert.equal(userErrorMessage({ code: 'attachment_source_unavailable', message: '无法读取所选附件。' }), '无法读取所选附件。', 'attachment picker failures keep their actionable native message')
 
 assert.equal(draftAfterSubmit('original', 'original', false), 'original', 'failed/effect-unknown admission preserves draft')
 assert.equal(draftAfterSubmit('typed while sending', 'original', true), 'typed while sending', 'successful admission preserves concurrent typing')

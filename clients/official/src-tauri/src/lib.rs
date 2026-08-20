@@ -9,6 +9,9 @@ use std::{
     },
 };
 
+#[cfg(target_os = "android")]
+use std::io::Read;
+
 use aludock_client_core::{
     AttachmentDto, AttachmentUploadCancellation, AttachmentUploadPhase, AttachmentUploadResult,
     ClientError, CommandInfo, CommandsResult, ConnectionKind, ConnectionPolicy,
@@ -2635,6 +2638,199 @@ fn ensure_attachment_scope(
 
 type PreparedAttachment = (String, SelectedAttachment, NativeAttachment);
 
+fn valid_attachment_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.chars().count() <= 1_024
+        && !name.chars().any(char::is_control)
+}
+
+#[cfg(target_os = "android")]
+fn normalized_media_type(value: Option<&str>) -> Option<String> {
+    value
+        .and_then(|value| value.parse::<mime_guess::Mime>().ok())
+        .map(|value| value.essence_str().to_owned())
+}
+
+#[cfg(target_os = "android")]
+fn fallback_attachment_name(media_type: Option<&str>) -> String {
+    let extension = media_type
+        .and_then(mime_guess::get_mime_extensions_str)
+        .and_then(|extensions| extensions.first())
+        .copied();
+    match extension {
+        Some(extension) => format!("附件-{}.{}", uuid::Uuid::new_v4(), extension),
+        None => format!("附件-{}", uuid::Uuid::new_v4()),
+    }
+}
+
+#[cfg(target_os = "android")]
+fn copy_bounded_attachment(
+    source: &mut impl Read,
+    target: &mut impl Write,
+    maximum_bytes: u64,
+) -> std::io::Result<u64> {
+    std::io::copy(&mut source.take(maximum_bytes.saturating_add(1)), target)
+}
+
+#[cfg(target_os = "android")]
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AndroidPickedFileMetadata {
+    name: Option<String>,
+    media_type: Option<String>,
+}
+
+#[cfg(target_os = "android")]
+async fn describe_android_picked_file(
+    app: &tauri::AppHandle,
+    file: &FilePath,
+) -> Result<AndroidPickedFileMetadata, CommandError> {
+    use jni::objects::{JObject, JString, JValue};
+
+    let FilePath::Url(url) = file else {
+        return Err(attachment_command_error(
+            "invalid_attachment_source",
+            "只能选择本机普通文件。",
+        ));
+    };
+    if url.scheme() != "content" {
+        return Err(attachment_command_error(
+            "invalid_attachment_source",
+            "只能选择本机普通文件。",
+        ));
+    }
+    let webview = app.get_webview_window("main").ok_or_else(|| {
+        attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
+    })?;
+    let uri = url.to_string();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    webview
+        .with_webview(move |platform_webview| {
+            platform_webview
+                .jni_handle()
+                .exec(move |env, activity, _webview| {
+                    let result = (|| -> jni::errors::Result<String> {
+                        let uri = JObject::from(env.new_string(uri)?);
+                        let description = env
+                            .call_method(
+                                activity,
+                                "describePickedFile",
+                                "(Ljava/lang/String;)Ljava/lang/String;",
+                                &[JValue::Object(&uri)],
+                            )?
+                            .l()?;
+                        Ok(env.get_string(&JString::from(description))?.into())
+                    })();
+                    let _ = sender.send(result.map_err(|error| error.to_string()));
+                });
+        })
+        .map_err(|_| {
+            attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
+        })?;
+    let description = tokio::time::timeout(std::time::Duration::from_secs(10), receiver)
+        .await
+        .map_err(|_| {
+            attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
+        })?
+        .map_err(|_| {
+            attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
+        })?
+        .map_err(|_| {
+            attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
+        })?;
+    serde_json::from_str(&description).map_err(|_| {
+        attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
+    })
+}
+
+#[cfg(target_os = "android")]
+async fn stage_android_picked_file(
+    app: &tauri::AppHandle,
+    file: FilePath,
+) -> Result<(PathBuf, String, u64, Option<String>), CommandError> {
+    let description = describe_android_picked_file(app, &file).await?;
+    let media_type = normalized_media_type(description.media_type.as_deref());
+    let name = description
+        .name
+        .as_deref()
+        .filter(|name| valid_attachment_name(name))
+        .map(str::to_owned)
+        .unwrap_or_else(|| fallback_attachment_name(media_type.as_deref()));
+    let media_type = media_type.or_else(|| {
+        mime_guess::from_path(&name)
+            .first_raw()
+            .map(str::to_owned)
+    });
+    let staging_directory = app
+        .path()
+        .app_cache_dir()
+        .map_err(|_| {
+            attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
+        })?
+        .join("attachment-staging");
+    let staging_path = staging_directory.join(format!(
+        "aludock-selection-{}.part",
+        uuid::Uuid::new_v4()
+    ));
+    let staging_app = app.clone();
+    let copied_path = staging_path.clone();
+    let size_bytes = tokio::task::spawn_blocking(move || {
+        fs::create_dir_all(&staging_directory).map_err(|_| {
+            attachment_command_error("attachment_source_unavailable", "无法暂存所选附件。")
+        })?;
+        let mut source_options = PluginOpenOptions::new();
+        source_options.read(true);
+        let mut source = staging_app.fs().open(file, source_options).map_err(|_| {
+            attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
+        })?;
+        let mut target_options = OpenOptions::new();
+        target_options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            target_options.mode(0o600);
+        }
+        let mut target = target_options.open(&copied_path).map_err(|_| {
+            attachment_command_error("attachment_source_unavailable", "无法暂存所选附件。")
+        })?;
+        let copied = match copy_bounded_attachment(
+            &mut source,
+            &mut target,
+            MAX_SELECTED_ATTACHMENT_BYTES,
+        ) {
+            Ok(copied) => copied,
+            Err(_) => {
+                drop(target);
+                let _ = fs::remove_file(&copied_path);
+                return Err(attachment_command_error(
+                    "attachment_source_unavailable",
+                    "无法读取所选附件。",
+                ));
+            }
+        };
+        if copied > MAX_SELECTED_ATTACHMENT_BYTES {
+            drop(target);
+            let _ = fs::remove_file(&copied_path);
+            return Err(attachment_command_error(
+                "attachment_too_large",
+                "附件超过 512 MiB 大小限制。",
+            ));
+        }
+        if target.flush().is_err() {
+            drop(target);
+            let _ = fs::remove_file(&copied_path);
+            return Err(attachment_command_error(
+                "attachment_source_unavailable",
+                "无法暂存所选附件。",
+            ));
+        }
+        Ok(copied)
+    })
+    .await
+    .map_err(|_| lifecycle_error())??;
+    Ok((staging_path, name, size_bytes, media_type))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn prepare_native_attachment(
     path: PathBuf,
@@ -3385,43 +3581,62 @@ async fn pick_attachments(
 
     let mut prepared = Vec::with_capacity(files.len());
     for file in files {
-        let path = file.into_path().map_err(|_| {
-            attachment_command_error("invalid_attachment_source", "只能选择本机普通文件。")
-        })?;
-        let metadata = std::fs::symlink_metadata(&path).map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
-        })?;
-        if !metadata.file_type().is_file() {
-            return Err(attachment_command_error(
-                "invalid_attachment_source",
-                "只能选择本机普通文件。",
-            ));
-        }
-        if metadata.len() > MAX_SELECTED_ATTACHMENT_BYTES {
-            return Err(attachment_command_error(
-                "attachment_too_large",
-                "附件超过 512 MiB 大小限制。",
-            ));
-        }
-        let name = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| {
-                !name.is_empty()
-                    && name.chars().count() <= 1_024
-                    && !name.chars().any(char::is_control)
-            })
-            .ok_or_else(|| attachment_command_error("invalid_attachment_name", "附件名称无效。"))?
-            .to_owned();
-        let media_type = mime_guess::from_path(&path).first_raw().map(str::to_owned);
+        let local_path = file.clone().into_path();
+        let (path, temporary, name, size_bytes, media_type) = match local_path {
+            Ok(path) => {
+                let metadata = std::fs::symlink_metadata(&path).map_err(|_| {
+                    attachment_command_error(
+                        "attachment_source_unavailable",
+                        "无法读取所选附件。",
+                    )
+                })?;
+                if !metadata.file_type().is_file() {
+                    return Err(attachment_command_error(
+                        "invalid_attachment_source",
+                        "只能选择本机普通文件。",
+                    ));
+                }
+                if metadata.len() > MAX_SELECTED_ATTACHMENT_BYTES {
+                    return Err(attachment_command_error(
+                        "attachment_too_large",
+                        "附件超过 512 MiB 大小限制。",
+                    ));
+                }
+                let name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .filter(|name| valid_attachment_name(name))
+                    .ok_or_else(|| {
+                        attachment_command_error("invalid_attachment_name", "附件名称无效。")
+                    })?
+                    .to_owned();
+                let media_type = mime_guess::from_path(&path).first_raw().map(str::to_owned);
+                (path, false, name, metadata.len(), media_type)
+            }
+            Err(_) => {
+                #[cfg(target_os = "android")]
+                {
+                    let (path, name, size_bytes, media_type) =
+                        stage_android_picked_file(&app, file).await?;
+                    (path, true, name, size_bytes, media_type)
+                }
+                #[cfg(not(target_os = "android"))]
+                {
+                    return Err(attachment_command_error(
+                        "invalid_attachment_source",
+                        "只能选择本机普通文件。",
+                    ));
+                }
+            }
+        };
         prepared.push(prepare_native_attachment(
             path,
-            false,
+            temporary,
             host_id.clone(),
             selection_generation,
             work_id.clone(),
             name,
-            metadata.len(),
+            size_bytes,
             media_type,
         ));
     }
@@ -5564,6 +5779,12 @@ mod tests {
         assert!(!json.contains(&path.to_string_lossy().to_string()));
         drop(prepared);
         assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn desktop_attachment_names_keep_legal_backslashes() {
+        assert!(valid_attachment_name(r"report\final.txt"));
     }
 
     #[test]

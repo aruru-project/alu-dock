@@ -6,6 +6,7 @@ import android.os.Handler
 import android.os.Looper
 import android.webkit.WebView
 import androidx.activity.SystemBarStyle
+import androidx.annotation.Keep
 import androidx.activity.enableEdgeToEdge
 
 class MainActivity : TauriActivity() {
@@ -41,6 +42,10 @@ class MainActivity : TauriActivity() {
     this.webView = webView
     insetsBridge.onWebViewAvailable()
   }
+
+  @Keep
+  fun describePickedFile(uriText: String): String =
+    AndroidPickedFileBridge.describe(this, uriText)
 
   override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
     super.onConfigurationChanged(newConfig)
