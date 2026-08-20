@@ -7,6 +7,7 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import {
   delimiter,
   dirname,
@@ -19,6 +20,18 @@ import { parseEnv } from "node:util";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const localEnvironmentPath = join(repositoryRoot, ".env.android.local");
+const machineConfigurationRoot = process.env.XDG_CONFIG_HOME
+  ? process.env.XDG_CONFIG_HOME
+  : process.platform === "win32" && process.env.APPDATA
+    ? process.env.APPDATA
+    : process.platform === "darwin"
+      ? join(homedir(), "Library", "Application Support")
+      : join(homedir(), ".config");
+const machineEnvironmentPath = join(
+  machineConfigurationRoot,
+  "aludock-client",
+  "android.env",
+);
 const localPropertiesPath = join(
   repositoryRoot,
   "src-tauri",
@@ -27,18 +40,23 @@ const localPropertiesPath = join(
   "local.properties",
 );
 
-function loadLocalEnvironment() {
-  if (!existsSync(localEnvironmentPath)) {
-    return {};
+function loadConfiguredEnvironment() {
+  const values = {};
+  const sources = [];
+  for (const path of [machineEnvironmentPath, localEnvironmentPath]) {
+    if (!existsSync(path)) {
+      continue;
+    }
+    try {
+      Object.assign(values, parseEnv(readFileSync(path, "utf8")));
+      sources.push(path);
+    } catch (error) {
+      throw new Error(
+        `无法读取 ${path}：${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
-
-  try {
-    return parseEnv(readFileSync(localEnvironmentPath, "utf8"));
-  } catch (error) {
-    throw new Error(
-      `无法读取 ${localEnvironmentPath}：${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
+  return { sources, values };
 }
 
 function firstConfigured(localEnvironment, names) {
@@ -87,13 +105,13 @@ function readProperty(path, propertyName) {
 }
 
 function resolveAndroidEnvironment() {
-  const localEnvironment = loadLocalEnvironment();
-  const javaHome = firstConfigured(localEnvironment, ["JAVA_HOME"]);
-  const androidHome = firstConfigured(localEnvironment, [
+  const configuredEnvironment = loadConfiguredEnvironment();
+  const javaHome = firstConfigured(configuredEnvironment.values, ["JAVA_HOME"]);
+  const androidHome = firstConfigured(configuredEnvironment.values, [
     "ANDROID_HOME",
     "ANDROID_SDK_ROOT",
   ]);
-  const ndkHome = firstConfigured(localEnvironment, [
+  const ndkHome = firstConfigured(configuredEnvironment.values, [
     "NDK_HOME",
     "ANDROID_NDK_HOME",
   ]);
@@ -117,9 +135,9 @@ function resolveAndroidEnvironment() {
   }
 
   if (errors.length > 0) {
-    const setupHint = existsSync(localEnvironmentPath)
-      ? `请检查 ${localEnvironmentPath}`
-      : "请复制 .env.android.example 为 .env.android.local，并填写本机路径";
+    const setupHint = configuredEnvironment.sources.length > 0
+      ? `请检查 ${configuredEnvironment.sources.join("、")}`
+      : "请复制 .env.android.example 为 .env.android.local，或写入 pnpm android config-path 显示的本机配置位置";
     throw new Error(`${errors.join("\n")}\n${setupHint}`);
   }
 
@@ -145,9 +163,10 @@ function resolveAndroidEnvironment() {
     environment,
     javaHome,
     ndkHome,
-    source: existsSync(localEnvironmentPath)
-      ? ".env.android.local"
-      : "当前进程的环境变量",
+    source:
+      configuredEnvironment.sources.length > 0
+        ? configuredEnvironment.sources.join("、")
+        : "当前进程的环境变量",
   };
 }
 
@@ -192,14 +211,21 @@ function syncLocalProperties(androidHome) {
   console.log(`已更新 ${localPropertiesPath}`);
 }
 
+function showConfigurationPaths() {
+  console.log(`本机共享配置：${machineEnvironmentPath}`);
+  console.log(`当前工作区覆盖：${localEnvironmentPath}`);
+}
+
 function showUsage() {
   console.log(`用法：
+  pnpm android config-path
   pnpm android doctor
   pnpm android setup
   pnpm android <Tauri Android 子命令及参数>
 
 示例：
   pnpm android build --debug --apk --target aarch64 --ci`);
+  showConfigurationPaths();
 }
 
 function runTauriAndroid(args, environment) {
@@ -224,6 +250,10 @@ try {
   const [command, ...args] = process.argv.slice(2);
   if (!command) {
     showUsage();
+    process.exit(0);
+  }
+  if (command === "config-path") {
+    showConfigurationPaths();
     process.exit(0);
   }
 

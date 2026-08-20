@@ -8,17 +8,18 @@
 
 ## Android environment
 
-Machine-specific Android paths belong in `.env.android.local`. Copy `.env.android.example`, fill in absolute paths, and never commit the local file.
+Machine-specific Android paths belong in an untracked environment file. `pnpm android config-path` shows the machine-wide file shared by worktrees and the optional `.env.android.local` override for the current checkout. Both use the format in `.env.android.example`; never commit either local configuration.
 
 Use the project entrypoint instead of invoking `tauri android` directly:
 
 ```bash
+pnpm android config-path
 pnpm android doctor
 pnpm android setup
 pnpm android build --debug --apk --target aarch64 --ci
 ```
 
-The entrypoint loads the local paths, supplies the Android environment to Tauri and Gradle, and keeps the ignored Android `local.properties` in sync. CI may provide the same variables directly.
+The entrypoint loads the machine configuration and then the worktree override, supplies the Android environment to Tauri and Gradle, and keeps the ignored Android `local.properties` in sync. CI may provide the same variables directly.
 
 Do not put SDK, NDK, or JDK installation paths in tracked files or documentation. Do not put signing keys or passwords in `.env.android.local`; release signing remains separate.
 

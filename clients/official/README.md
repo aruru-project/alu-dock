@@ -75,15 +75,15 @@ pnpm tauri build --no-bundle --ci
 
 ### Android 构建
 
-准备 JDK 17、Android SDK 36 和 Android NDK。将示例配置复制为本机配置，填写各工具的实际安装位置：
+准备 JDK 17、Android SDK 36 和 Android NDK。配置文件沿用 `.env.android.example` 的格式；`config-path` 会显示跨工作区共享的本机配置位置，以及当前工作区可用的 `.env.android.local` 覆盖文件：
 
 ```bash
-cp .env.android.example .env.android.local
+pnpm android config-path
 pnpm android doctor
 pnpm android setup
 ```
 
-本机路径只保存在 `.env.android.local` 中。`setup` 会为 Android Studio 同步本地 SDK 配置。
+工具的实际安装位置只保存在这些本机配置中。`setup` 会为 Android Studio 同步本地 SDK 配置。
 
 安装目标架构的 Rust 标准库并构建 ARM64 APK：
 
