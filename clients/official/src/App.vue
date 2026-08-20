@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import DOMPurify from 'dompurify'
 import { marked } from 'marked'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
@@ -67,7 +67,7 @@ import {
   verifyHostEndpoint,
 } from './lib/bridge'
 import type { CreateWorkContinuation, SessionContext } from './lib/bridge'
-import { projectConversation } from './lib/conversation'
+import { foldLiveDelta, liveDeltaKey, liveProjectionTargetKey, projectConversation } from './lib/conversation'
 import { appendRestoredQueue, attachmentsAfterSubmit, moveAttachmentPreviewResource } from './lib/attachmentDraft'
 import {
   DEVICE_NAME_FALLBACK,
@@ -537,7 +537,8 @@ watch(controlSection, async () => {
   if (!commandOpen.value) return
   await nextTick()
   const surface = modalSurface.value
-  const initial = surface?.querySelector<HTMLElement>('[autofocus], input:not(:disabled), textarea:not(:disabled), button:not(:disabled)')
+  const initial = surface?.querySelector<HTMLElement>('[autofocus], input:not(:disabled), textarea:not(:disabled)')
+    ?? surface?.querySelector<HTMLElement>('button:not(:disabled)')
   if (initial) initial.focus()
   else surface?.focus()
 })
@@ -545,7 +546,8 @@ watch(modalOpen, async (open, wasOpen) => {
   if (open && !wasOpen) {
     await nextTick()
     const surface = modalSurface.value
-    const initial = surface?.querySelector<HTMLElement>('[data-modal-initial], [autofocus], input:not(:disabled), textarea:not(:disabled), button:not(:disabled)')
+    const initial = surface?.querySelector<HTMLElement>('[data-modal-initial], [autofocus], input:not(:disabled), textarea:not(:disabled)')
+      ?? surface?.querySelector<HTMLElement>('button:not(:disabled)')
     if (initial) initial.focus()
     else surface?.focus()
   } else if (!open && wasOpen) {
@@ -1820,7 +1822,46 @@ function pruneImageResources(items: ConversationItem[]) {
 function applyConversationProjection(state: ConversationBootstrap) {
   const projected = projectConversation(state, { compact: !detailMode.value })
   realConversation.value = projected
+  const targets = new Map<string, ConversationItem>()
+  for (const item of realConversation.value) {
+    const key = liveProjectionTargetKey(item)
+    if (key) targets.set(key, item)
+  }
+  liveTextTargets = targets
   pruneImageResources(projected)
+}
+
+/* ── 流式增量补丁 ──
+ * delta 折叠状态与正在流式的条目都绑定在 conversationState 的身份上：
+ * 会话重载/换 Work 会换新 state 对象，缓存自动随之作废。 */
+const liveStreamCaches = new WeakMap<ConversationBootstrap, { fold: Map<string, ProjectedEvent>; streaming: Set<string> }>()
+let liveTextTargets = new Map<string, ConversationItem>()
+
+function liveStreamCache(state: ConversationBootstrap) {
+  let cache = liveStreamCaches.get(state)
+  if (!cache) {
+    cache = { fold: new Map(), streaming: reactive(new Set<string>()) }
+    liveStreamCaches.set(state, cache)
+  }
+  return cache
+}
+
+const EMPTY_STREAMING: Set<string> = new Set()
+const streamingPartIds = computed<Set<string>>(() => conversationState.value ? liveStreamCache(conversationState.value).streaming : EMPTY_STREAMING)
+
+/** 把文本/思考 delta 直接追加到已投影条目（O(delta)），并维持底部跟随；
+ *  条目尚未投影（首包 delta）时返回 false，交给整段重投影建立条目。 */
+function applyLiveDeltaToProjection(state: ConversationBootstrap, event: ProjectedEvent): boolean {
+  const key = liveDeltaKey(event.data)
+  if (!key) return false
+  const target = liveTextTargets.get(key)
+  if (!target || (target.kind !== 'assistant' && target.kind !== 'thinking')) return false
+  const delta = typeof event.data.delta === 'string' ? event.data.delta : ''
+  if (!delta) return true
+  target.text += delta
+  liveStreamCache(state).streaming.add(target.id)
+  scrollOutputToBottom()
+  return true
 }
 
 function conversationHasImage(imageKey: string) {
@@ -1991,8 +2032,24 @@ async function applyFollowEvent(payload: { hostId: string; selectionGeneration: 
   }
   const commandRoute = commandConsole.handleDockEvent(payload.event)
   const commandOnlyNotification = payload.event.eventType === 'extension.notification' && commandRoute.matched
-  if (!commandOnlyNotification) state.activeEvents.push(payload.event)
-  if ((reduced.conversationChanged && !commandOnlyNotification) || payload.event.eventType === 'run.started') scheduleConversationProjection()
+  if (commandOnlyNotification) return
+  if (payload.event.eventType === 'message.delta') {
+    foldLiveDelta(state.activeEvents, liveStreamCache(state).fold, payload.event)
+    if (!applyLiveDeltaToProjection(state, payload.event)) scheduleConversationProjection()
+    return
+  }
+  if (payload.event.eventType === 'message.completed') {
+    const messageId = typeof payload.event.data.messageId === 'string' ? payload.event.data.messageId : ''
+    if (messageId) {
+      const cache = liveStreamCache(state)
+      cache.streaming.delete(`live-${messageId}`)
+      cache.streaming.delete(`live-${messageId}-thinking`)
+    }
+  } else if (payload.event.eventType === 'run.settled') {
+    liveStreamCache(state).streaming.clear()
+  }
+  state.activeEvents.push(payload.event)
+  if (reduced.conversationChanged || payload.event.eventType === 'run.started') scheduleConversationProjection()
 }
 
 async function resumeConversationFollow(instanceId: string): Promise<boolean> {
@@ -2847,7 +2904,7 @@ function handleOutputClick(event: MouseEvent) {
             <article v-if="row.kind === 'user'" class="msg-user" :data-conversation-id="row.id" :aria-label="`你的消息 ${row.time}`">
               <div class="msg-user-bubble">
                 <div class="msg-user-top"><span class="msg-user-prefix">&gt;</span><span v-if="row.text" class="msg-user-text">{{ row.text }}</span></div>
-                <div v-if="row.images?.length" class="msg-user-images"><ConversationProcessParts :parts="row.images" :render-markdown="renderMarkdown" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div>
+                <div v-if="row.images?.length" class="msg-user-images"><ConversationProcessParts :parts="row.images" :render-markdown="renderMarkdown" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div>
                 <div v-if="row.attachments?.length" class="message-attachments"><AttachmentCard v-for="attachment in row.attachments" :key="attachment.fileId" compact :name="attachment.name" :size-bytes="attachment.sizeBytes" :media-type="attachment.mediaType" :preview-url="attachmentPreviews[attachment.fileId]?.url" @preview="openAttachmentPreview(attachment.fileId, attachment.name)" /></div>
                 <div class="msg-timestamp">{{ row.time }}</div>
               </div>
@@ -2856,7 +2913,7 @@ function handleOutputClick(event: MouseEvent) {
             <article v-else-if="row.kind === 'assistant-group'" class="alu-msg-assistant-row" :data-conversation-id="row.id" :aria-label="`Agent 回复 ${row.time}`">
               <img src="./assets/console_icon_small.png" alt="Agent" class="alu-msg-avatar" />
               <div class="alu-msg-assistant-content">
-                <div class="alu-msg-assistant-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div>
+                <div class="alu-msg-assistant-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div>
                 <div v-if="row.time" class="msg-assistant-timestamp">{{ row.time }}</div>
               </div>
             </article>
@@ -2866,9 +2923,9 @@ function handleOutputClick(event: MouseEvent) {
               <div class="alu-msg-assistant-content"><div class="alu-msg-assistant-body"><div class="alu-agent-activity" role="status" aria-label="正在处理" title="正在处理"><span class="alu-agent-activity-spinner" aria-hidden="true" /></div></div></div>
             </article>
 
-            <details v-else-if="row.kind === 'record' && row.folded" class="alu-record-panel alu-hideable" :class="row.panelClass" :data-conversation-id="row.id"><summary>{{ row.title }}</summary><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></details>
+            <details v-else-if="row.kind === 'record' && row.folded" class="alu-record-panel alu-hideable" :class="row.panelClass" :data-conversation-id="row.id"><summary>{{ row.title }}</summary><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></details>
 
-            <section v-else-if="row.kind === 'record'" class="alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id"><div class="alu-record-title alu-hideable">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></section>
+            <section v-else-if="row.kind === 'record'" class="alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id"><div class="alu-record-title alu-hideable">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></section>
 
             <div v-else class="alu-live-notice-row" :class="{ 'alu-hideable': row.tone === 'info' }" :data-conversation-id="row.id"><div :class="row.tone === 'error' ? 'msg-error' : row.tone === 'warning' ? 'msg-warning' : 'msg-notice'">{{ row.text }}</div></div>
           </template>

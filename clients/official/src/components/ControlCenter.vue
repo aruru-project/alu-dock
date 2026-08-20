@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
+import { Brain, ChevronRight, Cpu, GitFork, History, Info, LayoutList, Pencil, Plus, RotateCw, Search, Settings, Square, Undo2, Wrench, Zap } from '@lucide/vue'
 import {
   getResources,
   getSettings,
@@ -13,7 +14,7 @@ import {
 } from '../lib/bridge'
 import { currentHostCall, requireHostContext } from '../lib/hostResult'
 import { userErrorMessage as errorMessage } from '../lib/userError'
-import { catalogSourceLabel, commandGoesToComposer, filterCatalogCommands } from '../lib/commandSuggest'
+import { catalogSourceLabel, commandGoesToComposer, filterCatalogCommands, subsequenceScore } from '../lib/commandSuggest'
 import { workPresence } from '../lib/uiBoundaries'
 import SessionManager from './SessionManager.vue'
 import { useAppStore } from '../stores/app'
@@ -61,20 +62,20 @@ const emit = defineEmits<{
 const sessionManager = ref<InstanceType<typeof SessionManager> | null>(null)
 
 const staticCommands = [
-  { id: 'session_new', glyph: '+', label: 'New Session', keywords: '新建会话 work', description: '开始一段全新的上下文', section: 'new-session' },
-  { id: 'stop', glyph: '■', label: 'Stop Work', keywords: '停止工作 instance', description: '停止整个 Work；执行前需要确认', action: 'stop' },
-  { id: 'resume', glyph: '↪', label: 'Resume Session', keywords: '恢复会话 pi session', description: '从保存的 Session 继续', section: 'sessions' },
-  { id: 'tree', glyph: '⑂', label: 'Session Tree', keywords: '会话树 navigate fork clone', description: '浏览、切换或分叉当前会话树', section: 'tree' },
-  { id: 'model', glyph: '◈', label: 'Set Model', keywords: '切换模型', description: '切换当前模型', section: 'models' },
-  { id: 'thinking', glyph: '◇', label: 'Set Thinking', keywords: '思考等级', description: '调整思考等级', section: 'thinking' },
-  { id: 'name', glyph: '✎', label: 'Rename Session', keywords: '重命名会话', description: '修改当前 Session 名称', section: 'rename-session' },
-  { id: 'compact', glyph: '⚡', label: 'Compact Context', keywords: '压缩上下文', description: '手动压缩当前上下文', section: 'compact-session' },
-  { id: 'reload', glyph: '↻', label: 'Reload Session', keywords: '重新加载 resources', description: '重新载入 Pi 资源与 Session', section: 'reload-session' },
-  { id: 'dequeue', glyph: '↩', label: 'Restore Queue', keywords: '取回排队消息', description: '把尚未执行的消息取回输入框', action: 'restoreQueue' },
-  { id: 'tools', glyph: '⚙', label: 'Active Tools', keywords: '启用工具', description: '查看或切换可用工具', section: 'tools' },
-  { id: 'settings', glyph: '⌘', label: 'Settings', keywords: '设置', description: '查看或修改 Pi 设置', section: 'settings' },
-  { id: 'state', glyph: 'ℹ', label: 'Project Status', keywords: '当前状态 git branch', description: '查看 Work、Git、Session 与已加载能力', section: 'resources' },
-  { id: 'resources', glyph: '▤', label: 'Loaded Resources', keywords: '资源 diagnostics skill context', description: '打开 Project Status 的资源与诊断', section: 'resources' },
+  { id: 'session_new', icon: Plus, label: 'New Session', keywords: '新建会话 work', description: '开始一段全新的上下文', section: 'new-session' },
+  { id: 'stop', icon: Square, label: 'Stop Work', keywords: '停止工作 instance', description: '停止整个 Work；执行前需要确认', action: 'stop' },
+  { id: 'resume', icon: History, label: 'Resume Session', keywords: '恢复会话 pi session', description: '从保存的 Session 继续', section: 'sessions' },
+  { id: 'tree', icon: GitFork, label: 'Session Tree', keywords: '会话树 navigate fork clone', description: '浏览、切换或分叉当前会话树', section: 'tree' },
+  { id: 'model', icon: Cpu, label: 'Set Model', keywords: '切换模型', description: '切换当前模型', section: 'models' },
+  { id: 'thinking', icon: Brain, label: 'Set Thinking', keywords: '思考等级', description: '调整思考等级', section: 'thinking' },
+  { id: 'name', icon: Pencil, label: 'Rename Session', keywords: '重命名会话', description: '修改当前 Session 名称', section: 'rename-session' },
+  { id: 'compact', icon: Zap, label: 'Compact Context', keywords: '压缩上下文', description: '手动压缩当前上下文', section: 'compact-session' },
+  { id: 'reload', icon: RotateCw, label: 'Reload Session', keywords: '重新加载 resources', description: '重新载入 Pi 资源与 Session', section: 'reload-session' },
+  { id: 'dequeue', icon: Undo2, label: 'Restore Queue', keywords: '取回排队消息', description: '把尚未执行的消息取回输入框', action: 'restoreQueue' },
+  { id: 'tools', icon: Wrench, label: 'Active Tools', keywords: '启用工具', description: '查看或切换可用工具', section: 'tools' },
+  { id: 'settings', icon: Settings, label: 'Settings', keywords: '设置', description: '查看或修改 Pi 设置', section: 'settings' },
+  { id: 'state', icon: Info, label: 'Project Status', keywords: '当前状态 git branch', description: '查看 Work、Git、Session 与已加载能力', section: 'resources' },
+  { id: 'resources', icon: LayoutList, label: 'Loaded Resources', keywords: '资源 diagnostics skill context', description: '打开 Project Status 的资源与诊断', section: 'resources' },
 ] as const
 
 const commandSearch = ref('')
@@ -104,7 +105,11 @@ const selectedSetting = computed(() => settings.value?.settings.find((item) => i
 const sessionMode = computed(() => props.section as 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session')
 const filteredStaticCommands = computed(() => {
   const query = commandSearch.value.trim().toLowerCase()
-  return staticCommands.filter((item) => !query || `${item.id} ${item.label} ${item.keywords} ${item.description}`.toLowerCase().includes(query))
+  if (!query) return [...staticCommands]
+  return staticCommands.filter((item) => {
+    if (`${item.id} ${item.label} ${item.keywords} ${item.description}`.toLowerCase().includes(query)) return true
+    return subsequenceScore(query, item.label.toLowerCase()) !== null || subsequenceScore(query, item.id.toLowerCase()) !== null
+  })
 })
 const catalogCommands = computed(() => catalog.commands.filter((item) => !['stop', 'resume', 'tree'].includes(item.name)))
 const filteredCommands = computed(() => filterCatalogCommands(catalogCommands.value, commandSearch.value))
@@ -155,6 +160,15 @@ watch(commandSelectedIndex, async () => {
   document.getElementById(`cmd-opt-${commandSelectedIndex.value}`)?.scrollIntoView({ block: 'nearest' })
 })
 
+/** 子面板（Model/Thinking/Tools/Settings）共用一组键盘游标：方向键移动、Enter 激活、跟随滚动。 */
+const optionCursor = ref(0)
+const thinkingPanel = ref<HTMLElement | null>(null)
+watch([filteredModels, filteredTools, filteredSettings], () => { optionCursor.value = 0 })
+watch(optionCursor, async () => {
+  await nextTick()
+  document.getElementById(`cc-opt-${optionCursor.value}`)?.scrollIntoView({ block: 'nearest' })
+})
+
 watch([
   () => app.activeHostId,
   () => app.hostContext?.selectionGeneration,
@@ -173,7 +187,9 @@ watch([
 }, { immediate: true })
 watch(() => props.section, (section) => {
   selectedSettingKey.value = ''
+  optionCursor.value = 0
   void loadSection(section)
+  if (section === 'thinking') void nextTick(() => thinkingPanel.value?.focus())
 }, { immediate: true })
 
 function reconcileControl() {
@@ -223,6 +239,21 @@ function activateCatalogCommand(item: CommandInfo) {
     return
   }
   openCommandRunner(item.name)
+}
+
+/** 子面板键盘处理：方向键移动游标、Enter 激活当前项。 */
+function handleOptionKeydown<T>(event: KeyboardEvent, items: readonly T[], activate: (item: T) => void) {
+  if (event.key === 'ArrowDown') {
+    event.preventDefault()
+    optionCursor.value = Math.min(optionCursor.value + 1, items.length - 1)
+  } else if (event.key === 'ArrowUp') {
+    event.preventDefault()
+    optionCursor.value = Math.max(optionCursor.value - 1, 0)
+  } else if (event.key === 'Enter') {
+    event.preventDefault()
+    const item = items[optionCursor.value]
+    if (item) activate(item)
+  }
 }
 
 function handleCommandKeydown(event: KeyboardEvent) {
@@ -506,7 +537,7 @@ function isCurrentModel(model: ModelInfo) {
     <template v-if="section === 'commands'">
       <template v-if="!commandRunnerOpen">
         <div class="cmd-palette-search-wrap">
-          <span class="cmd-palette-search-icon">⌙</span>
+          <span class="cmd-palette-search-icon"><Search :size="15" /></span>
           <input ref="commandSearchInput" v-model="commandSearch" class="cmd-palette-input" placeholder="搜索 WebConsole、Extension、Skill 和 Prompt 命令…" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="cmd-palette-list" :aria-activedescendant="commandSelections.length ? `cmd-opt-${commandSelectedIndex}` : undefined" autofocus @keydown="handleCommandKeydown" />
           <kbd class="cmd-palette-kbd">ESC</kbd>
           <button class="cmd-palette-close" aria-label="关闭" @click="$emit('close')">×</button>
@@ -514,13 +545,13 @@ function isCurrentModel(model: ModelInfo) {
         <div id="cmd-palette-list" class="cmd-palette-list" role="listbox">
           <div v-if="filteredStaticCommands.length" class="cmd-palette-group">WebConsole</div>
           <button v-for="(item, index) in filteredStaticCommands" :key="item.id" :id="`cmd-opt-${index}`" class="cmd-palette-item" :class="{ selected: commandSelectedIndex === index }" role="option" :aria-selected="commandSelectedIndex === index" @mouseenter="commandSelectedIndex = index" @click="activateStatic(item)">
-            <span class="cmd-palette-item-icon">{{ item.glyph }}</span>
+            <span class="cmd-palette-item-icon"><component :is="item.icon" :size="13" /></span>
             <span class="cmd-palette-item-copy"><span class="cmd-palette-item-top"><span class="cmd-palette-item-label">{{ item.label }}</span></span><span class="cmd-palette-item-desc">{{ item.description }}</span></span>
           </button>
           <template v-if="filteredCommands.length">
             <div class="cmd-palette-group">Pi Commands</div>
             <button v-for="(item, index) in filteredCommands" :key="`${item.source.kind}:${item.name}`" :id="`cmd-opt-${filteredStaticCommands.length + index}`" class="cmd-palette-item" :class="{ selected: commandSelectedIndex === filteredStaticCommands.length + index }" role="option" :aria-selected="commandSelectedIndex === filteredStaticCommands.length + index" @mouseenter="commandSelectedIndex = filteredStaticCommands.length + index" @click="activateCatalogCommand(item)">
-              <span class="cmd-palette-item-icon">›</span>
+              <span class="cmd-palette-item-icon"><ChevronRight :size="13" /></span>
               <span class="cmd-palette-item-copy"><span class="cmd-palette-item-top"><span class="cmd-palette-item-label">/{{ item.name }}</span><span class="cmd-palette-item-hint">{{ catalogSourceLabel(item.source.kind) }}</span></span><span class="cmd-palette-item-desc">{{ item.description || 'Dock 未提供说明' }}</span></span>
             </button>
           </template>
@@ -559,19 +590,19 @@ function isCurrentModel(model: ModelInfo) {
     />
 
     <section v-else-if="section === 'models'" class="alu-select-panel">
-      <div class="ui-dialog-search-wrap"><input v-model="modelSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" /></div>
+      <div class="ui-dialog-search-wrap"><input v-model="modelSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" @keydown="handleOptionKeydown($event, filteredModels, chooseModel)" /></div>
       <div class="ui-dialog-options">
-        <button v-for="model in filteredModels" :key="`${model.provider}/${model.id}`" class="ui-dialog-option" :class="{ 'is-current': isCurrentModel(model) }" :disabled="preview || !!pending || outcomeUnknown" @click="chooseModel(model)"><span class="ui-dialog-option-marker">{{ isCurrentModel(model) ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ model.provider }}/{{ model.id }}</span><span v-if="isCurrentModel(model)" class="ui-dialog-option-badge">CURRENT</span></span><span v-if="model.name && model.name !== model.id" class="ui-dialog-option-detail"><span>{{ model.name }}</span></span></span></button>
+        <button v-for="(model, index) in filteredModels" :key="`${model.provider}/${model.id}`" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': isCurrentModel(model), 'is-cursor': optionCursor === index }" :disabled="preview || !!pending || outcomeUnknown" @click="chooseModel(model)"><span class="ui-dialog-option-marker">{{ isCurrentModel(model) ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ model.provider }}/{{ model.id }}</span><span v-if="isCurrentModel(model)" class="ui-dialog-option-badge">CURRENT</span></span><span v-if="model.name && model.name !== model.id" class="ui-dialog-option-detail"><span>{{ model.name }}</span></span></span></button>
         <div v-if="models && !filteredModels.length" class="ui-dialog-empty">没有匹配项</div>
       </div>
     </section>
 
-    <section v-else-if="section === 'thinking'" class="alu-select-panel"><div class="ui-dialog-options"><button v-for="level in models?.availableThinkingLevels ?? []" :key="level" class="ui-dialog-option" :class="{ 'is-current': work.executor.thinkingLevel === level }" :disabled="preview || !!pending || outcomeUnknown" @click="chooseThinking(level)"><span class="ui-dialog-option-marker">{{ work.executor.thinkingLevel === level ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ level }}</span><span v-if="work.executor.thinkingLevel === level" class="ui-dialog-option-badge">CURRENT</span></span></span></button></div></section>
+    <section v-else-if="section === 'thinking'" ref="thinkingPanel" class="alu-select-panel" tabindex="-1" @keydown="handleOptionKeydown($event, models?.availableThinkingLevels ?? [], chooseThinking)"><div class="ui-dialog-options"><button v-for="(level, index) in models?.availableThinkingLevels ?? []" :key="level" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': work.executor.thinkingLevel === level, 'is-cursor': optionCursor === index }" :disabled="preview || !!pending || outcomeUnknown" @click="chooseThinking(level)"><span class="ui-dialog-option-marker">{{ work.executor.thinkingLevel === level ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ level }}</span><span v-if="work.executor.thinkingLevel === level" class="ui-dialog-option-badge">CURRENT</span></span></span></button></div></section>
 
     <section v-else-if="section === 'tools'" class="alu-select-panel">
-      <div class="ui-dialog-search-wrap"><input v-model="toolSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" /></div>
+      <div class="ui-dialog-search-wrap"><input v-model="toolSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" @keydown="handleOptionKeydown($event, filteredTools, toggleTool)" /></div>
       <div v-if="tools?.truncated" class="alu-project-status-note">工具列表未完整返回，暂时不能切换工具。</div>
-      <div class="ui-dialog-options"><button v-for="tool in filteredTools" :key="tool.name" class="ui-dialog-option" :class="{ 'is-current': tool.active }" :disabled="preview || !!pending || outcomeUnknown || !!tools?.truncated" @click="toggleTool(tool)"><span class="ui-dialog-option-marker">{{ tool.active ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ tool.name }}</span><span v-if="tool.active" class="ui-dialog-option-badge">ACTIVE</span></span><span class="ui-dialog-option-detail"><span>{{ tool.description }}</span></span></span></button></div>
+      <div class="ui-dialog-options"><button v-for="(tool, index) in filteredTools" :key="tool.name" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': tool.active, 'is-cursor': optionCursor === index }" :disabled="preview || !!pending || outcomeUnknown || !!tools?.truncated" @click="toggleTool(tool)"><span class="ui-dialog-option-marker">{{ tool.active ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ tool.name }}</span><span v-if="tool.active" class="ui-dialog-option-badge">ACTIVE</span></span><span class="ui-dialog-option-detail"><span>{{ tool.description }}</span></span></span></button></div>
     </section>
 
     <section v-else-if="section === 'resources'" class="alu-project-status">
@@ -599,9 +630,9 @@ function isCurrentModel(model: ModelInfo) {
     </section>
 
     <section v-else-if="!selectedSetting" class="alu-select-panel">
-      <div class="ui-dialog-search-wrap"><input v-model="settingsSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" /></div>
+      <div class="ui-dialog-search-wrap"><input v-model="settingsSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" @keydown="handleOptionKeydown($event, filteredSettings, openSetting)" /></div>
       <div class="ui-dialog-options">
-        <button v-for="setting in filteredSettings" :key="setting.key" class="ui-dialog-option" @click="openSetting(setting)">
+        <button v-for="(setting, index) in filteredSettings" :key="setting.key" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-cursor': optionCursor === index }" @click="openSetting(setting)">
           <span class="ui-dialog-option-marker">•</span>
           <span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ setting.key }}</span><span class="ui-dialog-option-badge">{{ setting.writable ? 'EDITABLE' : 'READ ONLY' }}</span></span><span class="ui-dialog-option-detail"><span>{{ settingValueDescription(setting) }}</span></span></span>
         </button>

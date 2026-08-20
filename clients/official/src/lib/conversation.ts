@@ -5,6 +5,7 @@ import type {
   ConversationItem,
   ConversationProcessItem,
   ConversationRecord,
+  ProjectedEvent,
   PublishedFileDto,
 } from './types'
 type ToolItem = Extract<ConversationProcessItem, { kind: 'tool' }>
@@ -23,6 +24,47 @@ interface RecordGroup {
 
 export interface ConversationProjectionOptions {
   compact?: boolean
+}
+
+/* ── 流式增量补丁 ─────────────────────────────────────
+ * message.delta 一次运行可以产生上千个事件。它们全部堆在 activeEvents 里，
+ * 每个事件都触发整段会话重投影（重放全部 activeEvents）会让成本随流式长度平方膨胀。
+ * 这里提供两个配套机制：折叠（foldLiveDelta）让 activeEvents 按消息数增长；
+ * 定位键（liveDeltaKey / liveProjectionTargetKey）让调用方可以把 delta 直接
+ * 追加到已投影的条目上，只为首包 delta 做整段重投影。
+ */
+
+/** delta 事件的归并键，与 projector 里 messageItems 的键方案一致（messageId:block）。 */
+export function liveDeltaKey(data: Record<string, unknown>): string | null {
+  const messageId = typeof data.messageId === 'string' ? data.messageId : ''
+  if (!messageId) return null
+  return `${messageId}:${data.block === 'thinking' ? 'thinking' : 'text'}`
+}
+
+/** 把同一 messageId:block 的 delta 折叠进已入队的第一个事件；回放结果与逐条回放完全一致
+ * （文本是追加语义，message.completed 是整体替换语义，折叠都不改变最终投影）。
+ *  返回 true 表示折叠进了既有事件（activeEvents 未变长）。 */
+export function foldLiveDelta(events: ProjectedEvent[], foldMap: Map<string, ProjectedEvent>, event: ProjectedEvent): boolean {
+  const key = liveDeltaKey(event.data)
+  if (!key) return false
+  const previous = foldMap.get(key)
+  if (!previous) {
+    foldMap.set(key, event)
+    events.push(event)
+    return false
+  }
+  previous.data = { ...previous.data, delta: `${typeof previous.data.delta === 'string' ? previous.data.delta : ''}${typeof event.data.delta === 'string' ? event.data.delta : ''}` }
+  return true
+}
+
+/** 已投影条目对应的 delta 键；只有 live 分组的 assistant/thinking 条目可被增量追加，其余返回 null。 */
+export function liveProjectionTargetKey(item: ConversationItem): string | null {
+  if (item.kind !== 'assistant' && item.kind !== 'thinking') return null
+  const groupId = item.groupId
+  if (!groupId || !groupId.startsWith('live-message:')) return null
+  const messageId = groupId.slice('live-message:'.length)
+  if (item.kind === 'thinking') return item.id === `live-${messageId}-thinking` ? `${messageId}:thinking` : null
+  return item.id === `live-${messageId}` ? `${messageId}:text` : null
 }
 
 export function projectConversation(bootstrap: ConversationBootstrap, options: ConversationProjectionOptions = {}): ConversationItem[] {

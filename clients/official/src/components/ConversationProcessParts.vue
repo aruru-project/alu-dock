@@ -10,6 +10,9 @@ const props = defineProps<{
   renderMarkdown: (text: string) => string
   toolOpen: (id: string) => boolean
   imageResource: (part: ImagePart) => ConversationImageResource
+  /** 正在流式增长的条目 id：这些条目按纯文本渲染，等 message.completed 后再做 markdown 排版，
+   *  避免每个 token 都对全文跑一遍 marked + DOMPurify。 */
+  streamingParts?: Set<string>
 }>()
 const emit = defineEmits<{
   toolToggle: [id: string, event: Event]
@@ -28,6 +31,7 @@ const orderedParts = computed(() => [
     <details v-if="part.kind === 'thinking'" class="msg-thinking alu-hideable" :open="part.open" :data-conversation-id="part.id">
       <summary>thinking...</summary><div class="think-content">{{ part.text }}</div>
     </details>
+    <div v-else-if="part.kind === 'assistant' && streamingParts?.has(part.id)" class="msg-assistant msg-text is-streaming" :data-conversation-id="part.id">{{ part.text }}</div>
     <div v-else-if="part.kind === 'assistant'" class="msg-assistant msg-text" :data-conversation-id="part.id" v-html="renderMarkdown(part.text)" />
     <div v-else-if="part.kind === 'tool'" class="msg-toolcall alu-hideable" :class="{ 'is-error': part.status === 'error' }" :data-conversation-id="part.id">
       <div class="tool-call-header">

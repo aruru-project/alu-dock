@@ -17,26 +17,39 @@ export function slashCommandQuery(text: string): string | null {
   return token
 }
 
-function rank(command: CommandInfo, query: string): number {
-  const name = command.name.toLowerCase()
-  if (!query) return 2
-  if (name.startsWith(query)) return 0
-  if (name.includes(query)) return 1
-  return 2
+/** 子序列模糊匹配（"sm" 命中 "Set Model"）：命中返回跨度罚分（越小越好），未命中返回 null。 */
+export function subsequenceScore(query: string, text: string): number | null {
+  if (!query) return 0
+  let qi = 0
+  let spanStart = -1
+  let spanEnd = -1
+  for (let ti = 0; ti < text.length && qi < query.length; ti++) {
+    if (text[ti] === query[qi]) {
+      if (spanStart < 0) spanStart = ti
+      spanEnd = ti
+      qi++
+    }
+  }
+  if (qi < query.length) return null
+  return (spanEnd - spanStart + 1) * 10 + spanStart
 }
 
-/** 名称优先（前缀 > 包含），其次描述/来源；名称命中永远排在描述命中前面。 */
+/** 名称优先（前缀 > 包含 > 模糊子序列），其次描述/来源；名称命中永远排在描述命中前面。 */
 export function filterCatalogCommands(commands: CommandInfo[], rawQuery: string): CommandInfo[] {
   const query = rawQuery.trim().toLowerCase()
-  const matched = commands.filter((command) => {
-    if (!query) return true
-    return `${command.name} ${command.description ?? ''} ${command.source.kind} ${command.source.package ?? ''}`
-      .toLowerCase()
-      .includes(query)
+  const matched = commands.flatMap((command, index) => {
+    if (!query) return [{ command, index, rank: 2, fuzzy: 0 }]
+    const name = command.name.toLowerCase()
+    if (name.startsWith(query)) return [{ command, index, rank: 0, fuzzy: 0 }]
+    if (name.includes(query)) return [{ command, index, rank: 1, fuzzy: 0 }]
+    const fuzzy = subsequenceScore(query, name)
+    if (fuzzy !== null) return [{ command, index, rank: 2, fuzzy }]
+    const fields = `${command.description ?? ''} ${command.source.kind} ${command.source.package ?? ''}`.toLowerCase()
+    if (fields.includes(query)) return [{ command, index, rank: 3, fuzzy: 0 }]
+    return []
   })
   return matched
-    .map((command, index) => ({ command, index, rank: rank(command, query) }))
-    .sort((a, b) => a.rank - b.rank || a.index - b.index)
+    .sort((a, b) => a.rank - b.rank || a.fuzzy - b.fuzzy || a.index - b.index)
     .map((entry) => entry.command)
 }
 
