@@ -14,7 +14,7 @@ import {
 } from '../lib/bridge'
 import { currentHostCall, requireHostContext } from '../lib/hostResult'
 import { userErrorMessage as errorMessage } from '../lib/userError'
-import { workLifecycleLabel } from '../lib/uiBoundaries'
+import { workPresence } from '../lib/uiBoundaries'
 import SessionManager from './SessionManager.vue'
 import { useAppStore } from '../stores/app'
 import { useCommandConsoleStore } from '../stores/command-console'
@@ -40,6 +40,7 @@ export type ControlMutationDomain = 'conversation' | 'sessions' | 'tree' | 'mode
 const props = defineProps<{ work: Work; section: ControlSection; preview: boolean; outcomeUnknown: boolean; unknownDomain?: ControlMutationDomain; hasDraft: boolean; compactionPending: boolean }>()
 const app = useAppStore()
 const commandConsole = useCommandConsoleStore()
+const presence = computed(() => workPresence(props.work))
 const emit = defineEmits<{
   snapshot: [work: Work]
   unknown: [cause: unknown, domain: ControlMutationDomain]
@@ -471,9 +472,6 @@ function contextLabel(work: Work) {
   return `${formatProjectTokens(context.tokens)}/${formatProjectTokens(context.contextWindow)} · ${context.percent == null ? '—' : `${context.percent.toFixed(1)}%`}`
 }
 
-function executionLabel(value: Work['execution']) {
-  return ({ idle: '空闲', running: '运行中', failed: '运行失败', unavailable: '已停止' } as Record<Work['execution'], string>)[value]
-}
 function runLabel(value: string) {
   return ({ never: '尚未运行', succeeded: '已完成', failed: '失败', aborted: '已中止', interrupted: '已打断' } as Record<string, string>)[value] ?? '状态已更新'
 }
@@ -568,9 +566,9 @@ function sourceLabel(kind: string) {
 
     <section v-else-if="section === 'resources'" class="alu-project-status">
       <section class="alu-project-status-identity">
-        <span class="alu-project-status-signal" :class="`is-${work.lifecycle}`" />
+        <span class="alu-project-status-signal" :class="`is-${presence.tone}`" />
         <div class="alu-project-status-identity-copy"><strong>{{ work.name || work.key || '未命名 Work' }}</strong><span>{{ work.cwd || '—' }}</span></div>
-        <div class="alu-project-status-badges"><span class="alu-project-status-badge">{{ workLifecycleLabel(work.lifecycle) }}</span><span class="alu-project-status-badge" :class="{ 'is-running': work.execution === 'running' }">{{ executionLabel(work.execution) }}</span><span v-if="work.gitBranch" class="alu-project-status-badge is-branch"> {{ work.gitBranch }}</span></div>
+        <div class="alu-project-status-badges"><span class="alu-project-status-badge" :class="{ 'is-running': presence.tone === 'running' }">{{ presence.label }}</span><span v-if="work.gitBranch" class="alu-project-status-badge is-branch"> {{ work.gitBranch }}</span></div>
       </section>
       <section class="alu-project-status-section">
         <h3>Session</h3>

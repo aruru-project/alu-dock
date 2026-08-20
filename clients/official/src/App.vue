@@ -93,7 +93,7 @@ import {
   stopCanStart,
   stopConfirmationText,
   stoppedResultIsCorrelated,
-  workLifecycleLabel,
+  workPresence,
 } from './lib/uiBoundaries'
 import type { AttachmentDto, AttachmentUploadProgress, ConnectionKind, ConversationBootstrap, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, HostConnectionProfile, HostContext, HostEndpoint, ProjectedEvent, QueueItem, SelectedAttachment, Work, WorkspacePage } from './lib/types'
 import {
@@ -1903,6 +1903,7 @@ async function applyFollowEvent(payload: { hostId: string; selectionGeneration: 
   if (payload.event.eventType === 'compaction.started' || payload.event.eventType === 'compaction.completed') {
     setCompactionError(payload.hostId, payload.instanceId)
   }
+  if (payload.event.eventType === 'compaction.completed') void mergeCompactionSummary(payload.instanceId)
   if (reduced.configChanged) controlCenterRef.value?.applyLiveEvent(payload.event)
   if (!await extensionUi.applyLive(payload.instanceId, payload.subscriptionId, payload.event)) {
     followConnected.value = false
@@ -2065,6 +2066,39 @@ function clearFollowConnectionTimer(subscriptionId: string) {
   const timer = followConnectionTimers.get(subscriptionId)
   if (timer !== undefined) window.clearTimeout(timer)
   followConnectionTimers.delete(subscriptionId)
+}
+
+/** 压缩落盘后（Dock 在 compaction_end 同步写入 conversation checkpoint），把持久化的
+ *  上下文摘要记录并入当前视图；不重载会话、不打断 follow、不移动滚动位置。 */
+async function mergeCompactionSummary(instanceId: string) {
+  const state = conversationState.value
+  if (!state || selected.value?.id !== instanceId || state.instance.id !== instanceId) return
+  const epoch = conversationLoadEpoch
+  let capturedHost: HostContext
+  try {
+    capturedHost = requireHostContext(app)
+  } catch {
+    return
+  }
+  try {
+    const bootstrap = await loadConversation(instanceId, capturedHost)
+    if (epoch !== conversationLoadEpoch || conversationState.value !== state || selected.value?.id !== instanceId) return
+    if (bootstrap.cursor.instanceId !== instanceId
+      || bootstrap.cursor.hostEpoch !== state.cursor.hostEpoch
+      || bootstrap.cursor.runtimeGeneration !== state.cursor.runtimeGeneration) return
+    const existing = new Set(state.records.map((record) => record.entryId))
+    const fresh = bootstrap.records.filter((record) => !existing.has(record.entryId)
+      && (record.kind === 'compaction_summary' || record.kind === 'branch_summary'))
+    if (!fresh.length) return
+    const surface = output.value
+    const stickToBottom = !!surface && outputIsNearBottom(surface.scrollHeight, surface.scrollTop, surface.clientHeight)
+    state.records = [...state.records, ...fresh]
+    if (bootstrap.historyRevision > state.historyRevision) state.historyRevision = bootstrap.historyRevision
+    applyConversationProjection(state)
+    if (stickToBottom) scrollOutputToBottom()
+  } catch {
+    // 摘要取不到不打断当前会话；下次整页载入时会随历史一起出现。
+  }
 }
 
 async function loadSelectedConversation(instanceId: string, preserveUntilSwap = false): Promise<boolean> {
@@ -2814,9 +2848,9 @@ function handleOutputClick(event: MouseEvent) {
           <div class="alu-instance-group-title">{{ group === 'current' ? '当前工作' : group === 'continue' ? '可以继续' : '历史工作' }}<span>{{ groupedWorks[group].length }}</span></div>
           <div v-for="work in groupedWorks[group]" :key="work.id" class="alu-instance-row" :class="{ 'is-selected': work.id === selected?.id }">
             <button class="alu-instance-link" :disabled="contextTransitionBusy && work.id !== selected?.id" @click="selectWork(work.id)">
-              <span class="alu-instance-state" :class="`is-${work.lifecycle}`" />
+              <span class="alu-instance-state" :class="`is-${workPresence(work).tone}`" />
               <span class="alu-instance-copy"><span class="alu-instance-name">{{ work.displayName }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span></span>
-              <span class="alu-instance-meta">{{ workLifecycleLabel(work.lifecycle) }}</span>
+              <span class="alu-instance-meta">{{ workPresence(work).label }}</span>
             </button>
             <button v-if="work.reopenable && work.lifecycle !== 'active'" class="alu-instance-action" :disabled="!isTauri || workMutating || mutationOutcomeUnknown" @click="reopenFromList(work)">{{ workMutating && selected?.id === work.id ? '正在继续…' : '继续' }}</button>
             <button v-else-if="group === 'history'" class="alu-instance-action is-muted" :disabled="!isTauri" @click="forgetFromList(work)">移除</button>

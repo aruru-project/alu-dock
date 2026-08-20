@@ -114,14 +114,29 @@ export function conversationSwapIsCorrelated(
     && context.hostId.length > 0
 }
 
-export function workLifecycleLabel(value: Work['lifecycle']): string {
-  return ({
-    active: '运行中',
-    stopping: '正在停止',
-    stopped: '已停止',
-    host_lost: '连接已中断',
-    runtime_error: '运行故障',
-  } as Record<Work['lifecycle'], string>)[value]
+export type WorkPresenceTone =
+  | 'running' | 'idle' | 'waiting' | 'compacting'
+  | 'failed' | 'stopping' | 'stopped' | 'lost' | 'error'
+
+/**
+ * Dock 权威实例语义（humanInstanceStatus + activityFromSnapshot）：lifecycle 只说明
+ * 实例是否存在；agent 是否在做事要看 execution / compacting / activeInteraction。
+ * 列表与状态面板的灯和文案只能从这里取，不得再各自从 lifecycle 拼。
+ */
+export function workPresence(
+  work: Pick<Work, 'lifecycle' | 'execution' | 'compacting' | 'activeInteraction'>,
+): { tone: WorkPresenceTone; label: string } {
+  if (work.lifecycle === 'stopped') return { tone: 'stopped', label: '已停止' }
+  if (work.lifecycle === 'host_lost') return { tone: 'lost', label: '连接已中断' }
+  if (work.lifecycle === 'runtime_error') return { tone: 'error', label: '运行故障' }
+  if (work.lifecycle === 'stopping') return { tone: 'stopping', label: '正在停止' }
+  if (work.compacting) return { tone: 'compacting', label: '压缩中' }
+  if (work.execution === 'running') {
+    return work.activeInteraction ? { tone: 'waiting', label: '等待确认' } : { tone: 'running', label: '运行中' }
+  }
+  if (work.execution === 'failed') return { tone: 'failed', label: '运行失败' }
+  if (work.execution === 'unavailable') return { tone: 'failed', label: '无响应' }
+  return { tone: 'idle', label: '空闲' }
 }
 
 export function stopConfirmationText(work: Work): string {
