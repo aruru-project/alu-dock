@@ -12,7 +12,10 @@ import { dirname, join, relative, resolve } from "node:path";
 
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-import type { SessionDto } from "../core/instance-dto.js";
+import {
+  MAX_SESSION_FIRST_USER_MESSAGE_CHARS,
+  type SessionDto,
+} from "../core/instance-dto.js";
 import type {
   SessionInventory,
   SessionInventoryDiagnostic,
@@ -27,6 +30,8 @@ const NAME_LINE_BYTES = 64 * 1024;
 const NAME_SCAN_CHUNK_BYTES = 1024 * 1024;
 const SCAN_CONCURRENCY = 4;
 const SESSION_INFO_TOKEN = Buffer.from('"session_info"', "utf8");
+const FIRST_MESSAGE_SCAN_CHUNK_BYTES = 256 * 1024;
+const MAX_FIRST_MESSAGE_LINE_BYTES = 1024 * 1024;
 const MAX_INVENTORY_DIAGNOSTICS = 100;
 
 interface SessionInventoryCacheRecord {
@@ -38,6 +43,8 @@ interface SessionInventoryCacheRecord {
   sessionId: string;
   cwd: string;
   name: string | null;
+  /** In-memory only: session content is never copied into the durable metadata cache. */
+  firstUserMessage?: string | null;
 }
 
 interface SessionInventoryCacheFile {
@@ -153,7 +160,9 @@ class PiSessionMetadataIndex {
 
   private async saveCache(): Promise<boolean> {
     if (!this.cachePath) return true;
-    const records = [...this.records.values()].sort((left, right) => left.path.localeCompare(right.path));
+    const records = [...this.records.values()]
+      .sort((left, right) => left.path.localeCompare(right.path))
+      .map(({ firstUserMessage: _firstUserMessage, ...record }) => record);
     const cache: SessionInventoryCacheFile = {
       schemaVersion: CACHE_SCHEMA_VERSION,
       sessionsRoot: this.sessionsRoot,
@@ -195,6 +204,7 @@ async function refreshRecord(
       && previous.ino === info.ino
       && previous.size === info.size
       && previous.mtimeMs === info.mtimeMs
+      && previous.firstUserMessage !== undefined
     ) return { record: previous };
 
     const header = await readSessionHeader(handle, info.size);
@@ -210,6 +220,9 @@ async function refreshRecord(
       appendOnly ? Math.max(0, previous.size - NAME_LINE_BYTES) : 0,
       info.size,
     );
+    const firstUserMessage = appendOnly && previous.firstUserMessage
+      ? previous.firstUserMessage
+      : await findFirstUserMessage(handle, info.size);
     return { record: {
       path: resolve(path),
       dev: info.dev,
@@ -219,6 +232,7 @@ async function refreshRecord(
       sessionId: header.sessionId,
       cwd: header.cwd,
       name: nameResult.found ? (nameResult.name ?? null) : (appendOnly ? previous.name : null),
+      firstUserMessage: firstUserMessage ?? null,
     } };
   } catch (error) {
     return { diagnostic: inventoryDiagnostic(path, `Persisted session could not be read: ${errorText(error)}`) };
@@ -245,6 +259,66 @@ async function readSessionHeader(
     const cwd = boundedText(value.cwd, 16_384);
     if (sessionId.length === 0) return undefined;
     return { sessionId, cwd };
+  } catch {
+    return undefined;
+  }
+}
+
+async function findFirstUserMessage(
+  handle: Awaited<ReturnType<typeof open>>,
+  fileSize: number,
+): Promise<string | undefined> {
+  let cursor = 0;
+  let parts: Buffer[] = [];
+  let lineBytes = 0;
+  let lineOversized = false;
+  while (cursor < fileSize) {
+    const chunk = Buffer.allocUnsafe(Math.min(FIRST_MESSAGE_SCAN_CHUNK_BYTES, fileSize - cursor));
+    const { bytesRead } = await handle.read(chunk, 0, chunk.length, cursor);
+    if (bytesRead < 1) break;
+    cursor += bytesRead;
+    let start = 0;
+    for (let index = 0; index < bytesRead; index += 1) {
+      if (chunk[index] !== 0x0a) continue;
+      const segment = chunk.subarray(start, index);
+      if (!lineOversized && lineBytes + segment.length <= MAX_FIRST_MESSAGE_LINE_BYTES) {
+        parts.push(segment);
+        lineBytes += segment.length;
+        const firstUserMessage = firstUserMessageFromLine(Buffer.concat(parts, lineBytes));
+        if (firstUserMessage) return firstUserMessage;
+      }
+      parts = [];
+      lineBytes = 0;
+      lineOversized = false;
+      start = index + 1;
+    }
+    const tail = chunk.subarray(start, bytesRead);
+    if (!lineOversized) {
+      if (lineBytes + tail.length <= MAX_FIRST_MESSAGE_LINE_BYTES) {
+        parts.push(tail);
+        lineBytes += tail.length;
+      } else {
+        parts = [];
+        lineBytes = 0;
+        lineOversized = true;
+      }
+    }
+  }
+  if (!lineOversized && lineBytes > 0) return firstUserMessageFromLine(Buffer.concat(parts, lineBytes));
+  return undefined;
+}
+
+function firstUserMessageFromLine(line: Buffer): string | undefined {
+  try {
+    const entry = JSON.parse(line.toString("utf8")) as unknown;
+    if (!isRecord(entry) || entry.type !== "message" || !isRecord(entry.message) || entry.message.role !== "user") return undefined;
+    const content = entry.message.content;
+    const text = typeof content === "string"
+      ? content
+      : Array.isArray(content)
+        ? content.flatMap((block) => isRecord(block) && block.type === "text" && typeof block.text === "string" ? [block.text] : []).join(" ")
+        : "";
+    return boundedOptionalText(text.replace(/\s+/gu, " "), MAX_SESSION_FIRST_USER_MESSAGE_CHARS);
   } catch {
     return undefined;
   }
@@ -352,6 +426,7 @@ function projectSession(record: SessionInventoryCacheRecord): SessionDto {
     sessionId: record.sessionId,
     sessionFile: record.path.slice(0, 16_384),
     ...(record.name === null ? {} : { name: record.name }),
+    ...(record.firstUserMessage ? { firstUserMessage: record.firstUserMessage } : {}),
     cwd: record.cwd,
     updatedAt: new Date(record.mtimeMs).toISOString(),
   };

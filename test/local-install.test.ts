@@ -82,10 +82,14 @@ test("local install explains the explicit active-work replacement override", () 
     { id: "active-id", name: "active-name", lifecycle: "active", execution: "running" },
     { id: "stopping-id", lifecycle: "stopping", execution: "running" },
   ] as const;
-  assert.throws(
-    () => assertLocalInstallAllowed(instances),
-    /active-name \(active-id\).*stopping-id.*npm run install:local -- --replace-active.*interrupts active runs/su,
-  );
+  let message = "";
+  assert.throws(() => assertLocalInstallAllowed(instances), (error: unknown) => {
+    assert.ok(error instanceof Error);
+    message = error.message;
+    return true;
+  });
+  assert.match(message, /active-name \(responding\).*Unnamed work \(finishing\).*npm run install:local -- --replace-active.*interrupts current responses/su);
+  assert.doesNotMatch(message, /active-id|stopping-id/u);
   assert.doesNotThrow(() => assertLocalInstallAllowed(instances, true));
   assert.deepEqual(parseLocalInstallArguments([]), { replaceActive: false });
   assert.deepEqual(parseLocalInstallArguments(["--replace-active"]), { replaceActive: true });

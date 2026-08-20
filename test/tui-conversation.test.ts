@@ -82,7 +82,7 @@ test("autocomplete combines Dock and projected extension skill and prompt comman
     { name: "unsafe\u001b[2J", description: "safe value", source: { kind: "extension" }, argumentCompletions: false },
     { name: "stop", description: "untrusted override", source: { kind: "extension" }, argumentCompletions: false },
   ]);
-  assert.equal(catalog.find((command) => command.name === "stop")?.description, "stop and dispose the instance");
+  assert.equal(catalog.find((command) => command.name === "stop")?.description, "end this work and remove it from Dock");
   assert.equal(catalog.find((command) => command.name === "extension-do")?.description, "Do[2J work");
   assert.ok(catalog.some((command) => command.name === "unsafe[2J"));
   assert.equal(catalog.some((command) => command.name.includes("\u001b")), false);
@@ -98,14 +98,14 @@ test("autocomplete combines Dock and projected extension skill and prompt comman
 
 test("Work help is scope-grouped and keeps every command syntax on one source line", () => {
   const help = workHelpText();
-  assert.match(help, /^SESSION$/mu);
-  assert.match(help, /^RUNTIME$/mu);
-  assert.match(help, /^CLIENT$/mu);
-  assert.match(help, /^EXTENSION$/mu);
+  assert.match(help, /^CONVERSATION$/mu);
+  assert.match(help, /^PI$/mu);
+  assert.match(help, /^WORK$/mu);
+  assert.match(help, /^DETAILS$/mu);
   for (const line of help.split("\n")) assert.ok(visibleWidth(line) <= 72, line);
-  assert.ok(help.indexOf("SESSION") < help.indexOf("RUNTIME"));
-  assert.ok(help.indexOf("RUNTIME") < help.indexOf("CLIENT"));
-  assert.ok(help.indexOf("CLIENT") < help.indexOf("EXTENSION"));
+  assert.ok(help.indexOf("CONVERSATION") < help.indexOf("PI"));
+  assert.ok(help.indexOf("PI") < help.indexOf("WORK"));
+  assert.ok(help.indexOf("WORK") < help.indexOf("DETAILS"));
   for (const command of ["config", "install", "login"]) assert.match(help, new RegExp(`/${command}\\b`, "u"));
   assert.doesNotMatch(help, /\/mouse\b/u);
 });

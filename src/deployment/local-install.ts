@@ -126,16 +126,33 @@ export function assertLocalInstallAllowed(instances: readonly LocalInstallInstan
   const blocking = localInstallBlockingInstances(instances);
   if (blocking.length === 0 || replaceActive) return;
   const labels = blocking.map((instance) => {
-    const label = instance.name ? `${instance.name} (${instance.id})` : instance.id;
-    const state = instance.compacting ? "compacting" : instance.lifecycle === "stopping" ? "stopping" : instance.execution;
-    return `${label} [${state}]`;
+    const label = safeLocalInstallName(instance.name);
+    return `${label} (${localInstallBlockingReason(instance)})`;
   });
   throw new Error(
-    `Local install refused while ${blocking.length} Dock instance(s) have active work: ${labels.join(", ")}.\n`
-    + "Wait for them to become idle, stop them, or explicitly replace the Host:\n"
+    `Update paused because ${blocking.length} work item${blocking.length === 1 ? " still needs" : "s still need"} Alu Dock: ${labels.join(", ")}.\n`
+    + "Finish or stop the listed work before updating. To replace Alu Dock anyway, run:\n"
     + "  npm run install:local -- --replace-active\n"
-    + "Replacing the Host interrupts active runs, Queue items, interactions, and in-flight tool effects.",
+    + "Replacing Alu Dock interrupts current responses, waiting messages, and tool actions in progress.",
   );
+}
+
+function safeLocalInstallName(name: string | undefined): string {
+  return name
+    ?.replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim() || "Unnamed work";
+}
+
+function localInstallBlockingReason(instance: LocalInstallInstanceState): string {
+  if (instance.compacting) return "preparing its conversation";
+  if (instance.lifecycle === "stopping") return "finishing";
+  if (instance.execution === "running") return "responding";
+  if (instance.execution === "unavailable") return "waiting to reconnect";
+  if ((instance.pending?.total ?? 0) > 0) return "has waiting messages";
+  if (instance.activeInteraction !== undefined) return "waiting for an answer";
+  if (instance.activeCommandId !== undefined) return "finishing a command";
+  return "still active";
 }
 
 function managedExecutablePath(nodePath: string, homePath: string): string {

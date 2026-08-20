@@ -33,7 +33,7 @@ test("independent CLI processes reconnect to one delayed host-owned instance", {
     assert.equal((await lstat(socketPath)).mode & 0o777, 0o600);
 
     const emptyList = await runCliText(socketPath, ["list"]);
-    assert.match(emptyList, /No actionable Alu Dock instances/u);
+    assert.match(emptyList, /No work is ready to continue/u);
     assert.match(emptyList, /aludock new/u);
 
     // Client A creates the instance and exits immediately after the response.
@@ -48,7 +48,7 @@ test("independent CLI processes reconnect to one delayed host-owned instance", {
     assert.equal(instances.length, 1);
     assert.equal(instances[0]?.id, instanceId);
     const humanList = await runCliText(socketPath, ["list"]);
-    assert.match(humanList, new RegExp(instanceId.slice(0, 8), "u"));
+    assert.doesNotMatch(humanList, new RegExp(instanceId.slice(0, 8), "u"));
     assert.match(humanList, /cross-client/u);
     assert.match(humanList, /no model/u);
     assert.match(humanList, new RegExp(escapeRegExp(directory), "u"));
@@ -102,24 +102,24 @@ test("independent CLI processes reconnect to one delayed host-owned instance", {
       new DockClient({ socketPath }).status(instanceId),
       (error: unknown) => error instanceof ControlClientError && error.code === "not_found",
     );
-    assert.match(await runCliFailure(socketPath, ["stop", instanceId]), /No Dock instance matches/u);
+    assert.match(await runCliFailure(socketPath, ["stop", instanceId]), /No work named/u);
 
     const actionableAfterStop = await runCliText(socketPath, ["list"]);
-    assert.match(actionableAfterStop, /No actionable Alu Dock instances/u);
-    assert.doesNotMatch(actionableAfterStop, /stopped hidden/u);
+    assert.match(actionableAfterStop, /No work is ready to continue/u);
+    assert.doesNotMatch(actionableAfterStop, /in History hidden/u);
     assert.doesNotMatch(actionableAfterStop, new RegExp(instanceId.slice(0, 8), "u"));
     const fullAfterStop = await runCliText(socketPath, ["list", "--all"]);
-    assert.match(fullAfterStop, /No Alu Dock instances/u);
+    assert.match(fullAfterStop, /No work in Alu Dock/u);
     assert.doesNotMatch(fullAfterStop, new RegExp(instanceId.slice(0, 8), "u"));
     assert.match(await runCliFailure(socketPath, ["list", "--stopped"]), /list accepts only --all/u);
 
     await runCli(socketPath, ["create", "--cwd", directory, "--name", "duplicate"]);
     await runCli(socketPath, ["create", "--cwd", directory, "--name", "duplicate"]);
     const ambiguousName = await runCliFailure(socketPath, ["status", "duplicate"]);
-    assert.match(ambiguousName, /^Alu Dock: TARGET .* is ambiguous/u);
+    assert.match(ambiguousName, /^Alu Dock: Several work items match/u);
     assert.doesNotMatch(ambiguousName, /^\s*\{/u);
     const ambiguousPrefix = await runCliFailure(socketPath, ["status", "fixture-instance-"]);
-    assert.match(ambiguousPrefix, /longer ID prefix or the full ID/u);
+    assert.match(ambiguousPrefix, /choose by project and recent activity/u);
 
     const stoppedMessage = waitForMessage(child, (message) => message.type === "stopped");
     const exited = waitForExit(child);

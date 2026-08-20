@@ -17,7 +17,10 @@ import {
   parseDeliverableDto,
   type DeliverableDto,
 } from "../core/instance-deliverables.js";
-import { MAX_CONVERSATION_CHUNK_CHARS } from "../core/instance-dto.js";
+import {
+  MAX_CONVERSATION_CHUNK_CHARS,
+  MAX_SESSION_FIRST_USER_MESSAGE_CHARS,
+} from "../core/instance-dto.js";
 import {
   MAX_DOCK_TRANSFER_BYTES,
   MAX_RESPONSE_TRANSFER_CHUNK_BYTES,
@@ -1216,11 +1219,14 @@ export function parseSessionInventoryResult(input: unknown): SessionInventoryRes
 
 function parseSessionDtos(input: unknown): SessionDto[] {
   const sessions = array(input, "sessions", MAX_COLLECTION).map((item, index) => {
-    const session = object(item, `sessions[${index}]`); exact(session, ["sessionId", "sessionFile", "name", "cwd", "updatedAt"]);
+    const session = object(item, `sessions[${index}]`); exact(session, ["sessionId", "sessionFile", "name", "firstUserMessage", "cwd", "updatedAt"]);
     return {
       sessionId: id(session.sessionId, `sessions[${index}].sessionId`),
       sessionFile: string(session.sessionFile, `sessions[${index}].sessionFile`, MAX_CONTROL_CWD_CHARS),
       name: optionalString(session.name, `sessions[${index}].name`, MAX_INSTANCE_NAME_CHARS),
+      ...(session.firstUserMessage === undefined ? {} : {
+        firstUserMessage: string(session.firstUserMessage, `sessions[${index}].firstUserMessage`, MAX_SESSION_FIRST_USER_MESSAGE_CHARS),
+      }),
       cwd: string(session.cwd, `sessions[${index}].cwd`, MAX_CONTROL_CWD_CHARS),
       updatedAt: session.updatedAt === undefined ? undefined : timestamp(session.updatedAt, `sessions[${index}].updatedAt`),
     };

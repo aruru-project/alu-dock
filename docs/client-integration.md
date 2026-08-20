@@ -163,7 +163,7 @@ Event overlap 只按完整事件身份（`runtimeGeneration + sequence`）处理
 
 ## Instance 与 Agent session
 
-Host control 提供 workspace list、instance create、ensure、list、get/get-by-key、read、follow、stop、reopen、adopt、forget、catalog prune 和 persisted-session inventory。
+Host control 提供 workspace list、instance create、ensure、list、get/get-by-key、read、follow、stop、reopen、adopt、forget、catalog prune 和 persisted-session inventory。Inventory 的 session 可带有界 `firstUserMessage`，供客户端在没有 session name 时显示可辨认摘要；这是 Host→Client 的可选新增字段，不使用它的客户端按通用规则忽略。`sessionFile` 和 tree `entryId` 仍是客户端选中后提交的协议值，不应直接作为人类选择界面的标题或命令参数。
 
 Agent session 能力包括 prompt、abort、Queue、conversation、model、thinking、tools、settings、resources、session replacement、tree、compaction 和 Extension UI。实际可用能力以 hello capability negotiation 为准。
 

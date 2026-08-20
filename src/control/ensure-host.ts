@@ -17,7 +17,7 @@ export class ServiceUnavailableError extends Error {
   readonly code = "service_unavailable";
 
   constructor() {
-    super("Managed Alu Dock service is unavailable; run `aludock service status`, `aludock service start`, or `journalctl --user -u alu-dock.service -n 200 --no-pager`");
+    super("Alu Dock is not available. Run `aludock service start`; if it does not start, run `aludock service logs --lines 200`.");
     this.name = "ServiceUnavailableError";
   }
 }

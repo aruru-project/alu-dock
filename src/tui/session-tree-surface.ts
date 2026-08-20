@@ -60,7 +60,7 @@ export class SessionTreeSurface extends Container implements Focusable {
     this.options.requestRender();
   }
 
-  setLoadFailure(message = "Could not load the session tree"): void {
+  setLoadFailure(message = "The session tree could not be loaded · press Esc to return"): void {
     this.model = undefined;
     this.failed = true;
     this.loadingText = message;

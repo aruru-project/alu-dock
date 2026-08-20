@@ -178,7 +178,16 @@ export interface TreeNodeDto {
   hasChildren: boolean;
 }
 export type SessionMetricsDto = AgentSessionMetrics;
-export interface SessionDto { sessionId: string; sessionFile: string; name?: string; cwd: string; updatedAt?: string }
+export const MAX_SESSION_FIRST_USER_MESSAGE_CHARS = 512;
+export interface SessionDto {
+  sessionId: string;
+  sessionFile: string;
+  name?: string;
+  /** Optional immutable preview for human session pickers; clients may ignore it. */
+  firstUserMessage?: string;
+  cwd: string;
+  updatedAt?: string;
+}
 export interface SessionCompactionDto { summary: string; firstKeptEntryId: string; tokensBefore: number }
 export type SettingsChangedData = {
   [K in keyof SettingValueMap]: {

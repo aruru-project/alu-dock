@@ -33,12 +33,11 @@ export function submissionRecovery(
   message: string,
   delivery: DeliveryMode,
   effectUnknown: boolean,
-  operationId: string,
 ): { draft: string; notice: string } {
   return {
     draft: prependSubmissionRecoveryText(currentDraft, message, delivery),
     notice: effectUnknown
-      ? `Submission outcome is uncertain for operation ${operationId}. The text was restored locally; inspect current session/queue state before any manual resend.`
-      : "Submission was not admitted; its text was restored to the editor.",
+      ? "This message may already have been sent. Its text is back in the editor; check the conversation before deciding whether to send it again."
+      : "The message could not be sent. Its text is back in the editor so you can try again.",
   };
 }

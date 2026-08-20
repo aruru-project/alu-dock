@@ -19,7 +19,7 @@ interface CommandResult { stdout: string; stderr: string }
 
 async function main(): Promise<void> {
   if (process.env.ALU_DOCK_MANAGED === "1") {
-    throw new Error("Detach first, then run npm run install:local from the outer shell.");
+    throw new Error("Leave Work with Ctrl+D, then run `npm run install:local` from the shell.");
   }
 
   const options = parseLocalInstallArguments(process.argv.slice(2));
@@ -46,11 +46,10 @@ async function main(): Promise<void> {
     await installUserExecutable(layout.userExecutable, layout.packageExecutable, home, layout.root);
 
     await requireInstallAllowed(options.replaceActive);
-    process.stdout.write("Restarting alu-dock.service…\n");
-    const service = run(process.execPath, [layout.cliPath, "service", "install", "--now"], projectRoot);
-    const status = parseServiceStatus(service.stdout);
-    const commit = run("git", ["rev-parse", "--short=12", "HEAD"], projectRoot).stdout.trim();
-    process.stdout.write(`Ready · PID ${status.mainPid} · working tree at ${commit}\n`);
+    process.stdout.write("Starting the updated Alu Dock service…\n");
+    const service = run(process.execPath, [layout.cliPath, "service", "install", "--now", "--json"], projectRoot);
+    parseServiceStatus(service.stdout);
+    process.stdout.write("Alu Dock is installed and ready. Run `aludock` to open the Hub.\n");
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
@@ -68,8 +67,7 @@ async function requireInstallAllowed(replaceActive: boolean): Promise<void> {
     if (error instanceof ControlClientError && localInstallInspectionMayAssumeHostAbsent(hostReached, error.code)) return;
     if (error instanceof ControlClientError) {
       throw new Error(
-        `Local install could not verify that the Dock has no active work: ${error.message}\n`
-        + "Retry when the Host is responsive, or explicitly replace it:\n"
+        "The update could not check whether work is still active. Wait for Alu Dock to reconnect and try again, or replace it explicitly:\n"
         + "  npm run install:local -- --replace-active",
       );
     }
@@ -106,14 +104,17 @@ async function installUserExecutable(userExecutable: string, packageExecutable: 
   }
 }
 
-function parseServiceStatus(output: string): { mainPid: number } {
+function parseServiceStatus(output: string): void {
   const line = output.trim().split("\n").at(-1);
-  if (!line) throw new Error("Service install returned no status");
-  const parsed = JSON.parse(line) as { ready?: unknown; mainPid?: unknown };
-  if (parsed.ready !== true || !Number.isSafeInteger(parsed.mainPid) || Number(parsed.mainPid) <= 1) {
-    throw new Error("Service install did not report a ready managed Host");
+  let parsed: { ready?: unknown; mainPid?: unknown } | undefined;
+  try {
+    parsed = line ? JSON.parse(line) as { ready?: unknown; mainPid?: unknown } : undefined;
+  } catch {
+    parsed = undefined;
   }
-  return { mainPid: Number(parsed.mainPid) };
+  if (!parsed || parsed.ready !== true || !Number.isSafeInteger(parsed.mainPid) || Number(parsed.mainPid) <= 1) {
+    throw new Error("The update finished, but Alu Dock readiness could not be confirmed. Run `aludock service status`, then check service logs if needed.");
+  }
 }
 
 function runNpm(args: string[], cwd: string): CommandResult {

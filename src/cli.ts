@@ -15,8 +15,14 @@ import type { ProjectTrustChoice } from "./control/project-trust.js";
 import { defaultSocketPath, managedSocketPath } from "./control/socket-path.js";
 import { RemoteAccessState, remoteAccessStateRoot } from "./control/remote-access-state.js";
 import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot } from "./core/managed-instance.js";
+import { humanControlErrorText } from "./human-control-error.js";
 import { requireHumanTarget } from "./human-target.js";
-import { UserServiceManager } from "./deployment/user-service.js";
+import { UserServiceManager, type UserServiceStatus } from "./deployment/user-service.js";
+import {
+  renderHumanServiceStatus,
+  renderHumanServiceUninstall,
+  type HumanServiceAction,
+} from "./service-output.js";
 
 const HOST_SHUTDOWN_TIMEOUT_MS = 12_000;
 
@@ -75,7 +81,6 @@ async function main(): Promise<void> {
         mode: includeStopped ? "all" : "actionable",
         hiddenStopped: selection.hiddenStopped,
         totalInstances: selection.instances.length,
-        identityUniverse: all,
       }));
       return;
     }
@@ -87,7 +92,6 @@ async function main(): Promise<void> {
       process.stdout.write(renderHumanInstanceList([instance], humanListWidth(process.stdout.columns), {
         mode: "all",
         totalInstances: 1,
-        identityUniverse: all,
       }));
       return;
     }
@@ -122,8 +126,8 @@ async function main(): Promise<void> {
     case "forget": {
       const target = requiredPositional(parsed.commandArgs, "forget requires TARGET");
       const instance = requireHumanTarget(await client.list("all"), target);
-      const result = await client.forget(instance.id);
-      process.stdout.write(`Forgot Dock record ${result.receipt.forgottenId}. Pi session files were not deleted.\n`);
+      await client.forget(instance.id);
+      process.stdout.write(`Removed ${displayInstance(instance)} from Dock history. Any saved Pi session and project files remain in place.\n`);
       return;
     }
 
@@ -132,8 +136,11 @@ async function main(): Promise<void> {
         throw new Error("prune requires exactly --stopped");
       }
       const result = await client.pruneStopped();
-      process.stdout.write(`Pruned ${result.receipt.forgottenCount} stopped Dock record${result.receipt.forgottenCount === 1 ? "" : "s"}. Pi session files were not deleted.\n`);
-      if (result.receipt.hasMore) process.stdout.write("More stopped records remain; run aludock prune --stopped again.\n");
+      const count = result.receipt.forgottenCount;
+      process.stdout.write(count === 0
+        ? "Dock history is already clear of ended work.\n"
+        : `Removed ${count} ended work item${count === 1 ? "" : "s"} from Dock history. Any saved Pi sessions and project files remain in place.\n`);
+      if (result.receipt.hasMore) process.stdout.write("More ended work is still in History; run `aludock prune --stopped` again.\n");
       return;
     }
 
@@ -246,7 +253,12 @@ async function manageService(socketPath: string, socketExplicit: boolean, args: 
     cliPath: resolve(entryPath),
     socketPath,
   });
-  const [action = "status", ...rest] = args;
+  const { json, rest: serviceArgs } = parseServiceOutputOption(args);
+  const [action = "status", ...rest] = serviceArgs;
+  const writeStatus = (statusAction: HumanServiceAction, status: UserServiceStatus): void => {
+    if (json) writeJson({ kind: "service", action: statusAction, ...status });
+    else process.stdout.write(renderHumanServiceStatus(statusAction, status));
+  };
   switch (action) {
     case "install": {
       let now = false;
@@ -254,26 +266,27 @@ async function manageService(socketPath: string, socketExplicit: boolean, args: 
         if (argument === "--now") now = true;
         else throw new Error(`Unknown service install argument: ${argument}`);
       }
-      writeJson({ kind: "service", action, ...(await manager.install(now)) });
+      writeStatus(action, await manager.install(now));
       return;
     }
     case "start":
       requireNoArgs(rest, "service start");
-      writeJson({ kind: "service", action, ...(await manager.start()) });
+      writeStatus(action, await manager.start());
       return;
     case "stop":
       requireNoArgs(rest, "service stop");
-      writeJson({ kind: "service", action, ...(await manager.stop()) });
+      writeStatus(action, await manager.stop());
       return;
     case "restart":
       requireNoArgs(rest, "service restart");
-      writeJson({ kind: "service", action, ...(await manager.restart()) });
+      writeStatus(action, await manager.restart());
       return;
     case "status":
       requireNoArgs(rest, "service status");
-      writeJson({ kind: "service", action, ...(await manager.status()) });
+      writeStatus(action, await manager.status());
       return;
     case "logs": {
+      if (json) throw new Error("service logs does not support --json");
       let lines = 200;
       let follow = false;
       for (let index = 0; index < rest.length; index += 1) {
@@ -289,10 +302,13 @@ async function manageService(socketPath: string, socketExplicit: boolean, args: 
       if (result.status !== 0) process.exitCode = result.status;
       return;
     }
-    case "uninstall":
+    case "uninstall": {
       requireNoArgs(rest, "service uninstall");
-      writeJson({ kind: "service", action, ...(await manager.uninstall()) });
+      const result = await manager.uninstall();
+      if (json) writeJson({ kind: "service", action, ...result });
+      else process.stdout.write(renderHumanServiceUninstall(result.removed));
       return;
+    }
     default:
       throw new Error("service requires install, start, stop, restart, status, logs, or uninstall");
   }
@@ -424,7 +440,7 @@ function parseInteractiveArgs(
       throw new Error(`Unknown ${command} argument: ${arg}`);
     } else if (command === "open" || command === "attach") {
       if (target !== undefined) throw new Error(`${command} accepts exactly one TARGET`);
-      if (arg === undefined || arg.trim().length === 0) throw new Error(`${command} TARGET must be non-empty`);
+      if (arg === undefined || arg.trim().length === 0) throw new Error(`${command} needs a work name; run \`aludock\` to choose work in the Hub`);
       target = arg;
     } else {
       throw new Error(`${command} does not accept TARGET`);
@@ -432,7 +448,7 @@ function parseInteractiveArgs(
   }
   if (command === "hub" && args.length > 0) throw new Error("The bare Dock Hub does not accept arguments");
   if (command === "continue" && args.length > 0) throw new Error("continue does not accept arguments; it uses the current directory");
-  if (command === "attach" && target === undefined) throw new Error("attach requires TARGET; use a full ID, displayed unique prefix, or unique exact name");
+  if (command === "attach" && target === undefined) throw new Error("attach requires a work name; run `aludock` to choose unnamed or duplicate work in the Hub");
   if (forceNew && target !== undefined) throw new Error(`${command} cannot combine TARGET with --new`);
   return { mode: command, cwd, name, target, forceNew };
 }
@@ -594,6 +610,20 @@ function requireNoArgs(args: string[], command: string): void {
   if (args.length > 0) throw new Error(`${command} does not accept arguments`);
 }
 
+function parseServiceOutputOption(args: readonly string[]): { json: boolean; rest: string[] } {
+  let json = false;
+  const rest: string[] = [];
+  for (const argument of args) {
+    if (argument !== "--json") {
+      rest.push(argument);
+      continue;
+    }
+    if (json) throw new Error("service accepts --json only once");
+    json = true;
+  }
+  return { json, rest };
+}
+
 function waitForSignal(): Promise<NodeJS.Signals> {
   return new Promise((resolveSignal) => {
     let settled = false;
@@ -629,7 +659,8 @@ function isMachineInvocation(args: readonly string[]): boolean {
     command = args[index];
     break;
   }
-  return command === "serve"
+  return (command === "service" && args.includes("--json"))
+    || command === "serve"
     || command === "ping"
     || command === "create"
     || command === "reopen"
@@ -643,7 +674,8 @@ function errorMessage(error: unknown): string {
 
 main().catch((error: unknown) => {
   if (!isMachineInvocation(process.argv.slice(2))) {
-    process.stderr.write(`Alu Dock: ${errorMessage(error)}\n`);
+    const message = error instanceof ControlClientError ? humanControlErrorText(error) : errorMessage(error);
+    process.stderr.write(`Alu Dock: ${message}\n`);
     process.exitCode = 1;
     return;
   }

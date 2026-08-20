@@ -807,8 +807,8 @@ test("Hub New browses and confirms a cwd before entering Session Work, while per
   const adoptOutput = Buffer.from(adoptPty.output, "base64").toString("utf8");
   assert.equal(adoptPty.timedOut, false, adoptOutput.slice(-2_000));
   assert.equal(adoptPty.status, 0, adoptOutput.slice(-2_000));
-  assert.match(adoptOutput, /Pi session inventory incomplete: One saved session could not be inspected/u);
-  assert.match(adoptOutput, /Adopting persisted Pi session/u);
+  assert.match(adoptOutput, /Some saved Pi sessions could not be checked/u);
+  assert.match(adoptOutput, /Opening saved Pi work for Hub session/u);
   assert.match(adoptOutput, /cache /u);
   assert.equal(registry.list()[0]?.executor.sessionFile, sessionFile);
 });
@@ -2051,6 +2051,7 @@ test("a running instance applies live metadata and next-step configuration witho
 
   const accepted = await client.prompt(created.id, "start");
   assert.equal(accepted.instance.execution, "running");
+  assert.equal(accepted.instance.displayName, "start");
   const activeCommandId = accepted.instance.activeCommandId;
   assert.ok(activeCommandId);
   const queued = await client.prompt(created.id, "use this next", "steer");
@@ -2309,7 +2310,7 @@ test("Hub session inventory is runtime-free and adoption publishes one managed i
   let factoryCalls = 0;
   let inventoryCalls = 0;
   let inventoryIncomplete = false;
-  let inventorySessions: SessionDto[] = [{ sessionId: "orphan", sessionFile, name: "Orphan", cwd: directory, updatedAt: "2026-07-14T01:02:03.000Z" }];
+  let inventorySessions: SessionDto[] = [{ sessionId: "orphan", sessionFile, name: "Orphan", firstUserMessage: "Plan release", cwd: directory, updatedAt: "2026-07-14T01:02:03.000Z" }];
   const trust = new ProjectTrustCoordinator({
     requiresTrust: () => true,
     savedDecision: () => null,
@@ -2349,7 +2350,7 @@ test("Hub session inventory is runtime-free and adoption publishes one managed i
   const client = new DockClient({ socketPath });
 
   assert.deepEqual((await client.sessionInventory(directory, "all")).sessions, [{
-    sessionId: "orphan", sessionFile, name: "Orphan", cwd: directory, updatedAt: "2026-07-14T01:02:03.000Z",
+    sessionId: "orphan", sessionFile, name: "Orphan", firstUserMessage: "Plan release", cwd: directory, updatedAt: "2026-07-14T01:02:03.000Z",
   }]);
   assert.equal(inventoryCalls, 1);
   assert.equal(factoryCalls, 0, "inventory must not construct a runtime");

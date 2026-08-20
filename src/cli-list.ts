@@ -1,6 +1,6 @@
 import type { InstanceSnapshot } from "./core/managed-instance.js";
-import { uniqueInstanceIdPrefix } from "./human-target.js";
 import { humanInstanceStatus } from "./core/instance-display-name.js";
+import { humanRelativeTime } from "./human-time.js";
 
 const MAX_HUMAN_LIST_INSTANCES = 100;
 const DEFAULT_WIDTH = 80;
@@ -17,7 +17,6 @@ export interface HumanInstanceListRenderOptions {
   mode?: "actionable" | "all";
   hiddenStopped?: number;
   totalInstances?: number;
-  identityUniverse?: readonly InstanceSnapshot[];
 }
 
 /** Keep the typed catalog complete; only the public human default hides history. */
@@ -44,30 +43,24 @@ export function renderHumanInstanceList(
   const totalInstances = Math.max(instances.length, Math.floor(options.totalInstances ?? instances.length));
   if (instances.length === 0) {
     if (mode === "actionable" && hiddenStopped > 0) {
-      return `${fit("No actionable Alu Dock instances.", width)}\n${fit(`${hiddenStopped} stopped hidden · aludock list --all`, width)}\n${fit("Start one: aludock new", width)}\n`;
+      return `${fit("No work is ready to continue.", width)}\n${fit(`${hiddenStopped} in History · aludock list --all`, width)}\n${fit("Start work: aludock new", width)}\n`;
     }
-    return `${fit(mode === "actionable" ? "No actionable Alu Dock instances." : "No Alu Dock instances.", width)}\n${fit("Start one: aludock new", width)}\n`;
+    return `${fit(mode === "actionable" ? "No work is ready to continue." : "No work in Alu Dock.", width)}\n${fit("Start work: aludock new", width)}\n`;
   }
 
   const ordered = [...instances].sort(compareInstances);
-  const identityUniverse = options.identityUniverse ?? instances;
   const visible = ordered.slice(0, MAX_HUMAN_LIST_INSTANCES);
   const heading = mode === "actionable"
-    ? `Alu Dock actionable · ${totalInstances}${hiddenStopped > 0 ? ` · ${hiddenStopped} stopped hidden` : ""}`
-    : `Alu Dock instances · ${totalInstances} · all records`;
+    ? `Alu Dock work · ${totalInstances}${hiddenStopped > 0 ? ` · ${hiddenStopped} in History hidden` : ""}`
+    : `Alu Dock work · ${totalInstances} · current and History`;
   const lines = [fit(heading, width), ""];
-  for (const instance of visible) lines.push(...renderInstance(instance, identityUniverse, width));
+  for (const instance of visible) lines.push(...renderInstance(instance, width));
   const omitted = totalInstances - visible.length;
   if (omitted > 0) {
-    lines.push("", fit(`Showing ${visible.length} of ${totalInstances} · ${omitted} older records omitted`, width));
+    lines.push("", fit(`Showing ${visible.length} of ${totalInstances} · ${omitted} older work item${omitted === 1 ? "" : "s"} not shown`, width));
   }
   if (mode === "actionable" && hiddenStopped > 0) lines.push("", fit("History: aludock list --all", width));
-  lines.push("", fit(
-    width >= 60
-      ? "Next: aludock attach TARGET · aludock status TARGET · aludock stop TARGET"
-      : "Next: aludock attach TARGET",
-    width,
-  ));
+  lines.push("", fit("Open the Hub to choose work: aludock", width));
   return `${lines.join("\n")}\n`;
 }
 
@@ -81,42 +74,24 @@ export function terminalDisplayWidth(value: string): number {
   return width;
 }
 
-function renderInstance(
-  instance: InstanceSnapshot,
-  identityUniverse: readonly InstanceSnapshot[],
-  width: number,
-): [string, string] {
-  const id = terminalSafe(uniqueInstanceIdPrefix(instance, identityUniverse));
+function renderInstance(instance: InstanceSnapshot, width: number): [string, string] {
   const state = terminalSafe(humanInstanceStatus(instance.lifecycle, instance.execution));
-  const base = `${stateIcon(instance)} ${id} ${state}`;
-  const tags = decisionTags(instance);
-  const safeName = instance.displayName;
-  const available = Math.max(1, width - terminalDisplayWidth(base) - 1);
-  const tagText = tags.length > 0 ? ` · ${tags.join(" · ")}` : "";
-  const includeTags = terminalDisplayWidth(tagText) + 8 <= available;
-  const nameBudget = Math.max(1, available - (includeTags ? terminalDisplayWidth(tagText) : 0));
-  const first = fit(`${base} ${truncateDisplay(safeName, nameBudget)}${includeTags ? tagText : ""}`, width);
+  const safeName = terminalSafe(instance.displayName);
+  const tags = [state, ...decisionTags(instance)];
+  const first = fit(`${stateIcon(instance)} ${safeName} · ${tags.join(" · ")}`, width);
 
   const model = terminalSafe(instance.executor.model
     ? `${instance.executor.model.provider}/${instance.executor.model.id}`
-    : "no model");
-  const cwd = terminalSafe(instance.cwd || "(no cwd)");
-  const bodyWidth = Math.max(1, width - 2);
-  const separator = " · ";
-  if (bodyWidth <= terminalDisplayWidth(separator) + 2) {
-    return [first, fit(`  ${truncateDisplay(model, bodyWidth)}`, width)];
-  }
-  const availableBody = bodyWidth - terminalDisplayWidth(separator);
-  const modelBudget = Math.max(1, Math.min(Math.floor(availableBody * 0.42), availableBody - 1));
-  const cwdBudget = Math.max(1, availableBody - modelBudget);
-  const second = fit(`  ${truncateDisplay(model, modelBudget)}${separator}${truncateDisplay(cwd, cwdBudget)}`, width);
+    : "no model selected");
+  const cwd = terminalSafe(instance.cwd || "(project unavailable)");
+  const second = fit(`  ${humanRelativeTime(instance.updatedAt)} · ${cwd} · ${model}`, width);
   return [first, second];
 }
 
 function decisionTags(instance: InstanceSnapshot): string[] {
   const tags: string[] = [];
-  if (instance.pending.total > 0) tags.push(`pending ${instance.pending.total}`);
-  if (instance.reopenable && (instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error")) tags.push("reopenable");
+  if (instance.pending.total > 0) tags.push(`${instance.pending.total} waiting`);
+  if (instance.reopenable && (instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error")) tags.push("saved session ready");
   return tags;
 }
 

@@ -9,6 +9,7 @@ import type { ProjectTrustChoice } from "./control/project-trust.js";
 import { RemoteAccessState, remoteAccessStateRoot } from "./control/remote-access-state.js";
 import { AttachmentStorageState, attachmentStorageStateRoot } from "./control/attachment-storage-state.js";
 import type { InstanceSnapshot, SessionDto } from "./core/managed-instance.js";
+import { humanInstanceStatus } from "./core/instance-display-name.js";
 import { requireHumanTarget } from "./human-target.js";
 import { runDockHub, type DockHubAction } from "./tui/dock-hub.js";
 import { runDockTui } from "./tui/dock-tui.js";
@@ -51,27 +52,27 @@ export async function openDock(options: OpenDockOptions): Promise<void> {
     });
   }
   if (!instance) {
-    process.stdout.write(options.mode === "hub" ? "Left Alu Dock Hub.\n" : "No instance opened.\n");
+    process.stdout.write(options.mode === "hub" ? "Left Alu Dock Hub.\n" : "No work opened.\n");
     return;
   }
 
   const result = await runDockTui(client, instance);
   if (result.reason === "stopped") {
-    const cleanup = result.cleanupErrors?.length
-      ? ` Cleanup warnings: ${result.cleanupErrors.join("; ")}`
+    const followUp = result.cleanupErrors?.length
+      ? " Run `aludock` and check the Hub if it still appears active."
       : "";
-    process.stdout.write(`Stopped ${displayName(result.instance)}.${cleanup}\n`);
+    process.stdout.write(`Stopped ${displayName(result.instance)}.${followUp}\n`);
   } else if (result.detachTruth === "host_owned") {
     process.stdout.write(
-      `Detached from ${displayName(result.instance)}; the instance remains host-owned. Run aludock to return to the Hub.\n`,
+      `Left ${displayName(result.instance)}. The work is still running; run \`aludock\` to return to it from the Hub.\n`,
     );
   } else if (result.detachTruth === "not_active") {
     process.stdout.write(
-      `Detached from ${displayName(result.instance)}; authoritative instance state is ${result.instance.lifecycle}. Run aludock to return to the Hub.\n`,
+      `Left ${displayName(result.instance)}. It is ${humanInstanceStatus(result.instance.lifecycle, result.instance.execution)}; run \`aludock\` to choose what to do next.\n`,
     );
   } else {
     process.stdout.write(
-      `Detached from ${displayName(result.instance)}; current Host ownership/status is unknown and no stop is claimed. Check aludock service status, then run aludock.\n`,
+      `Left ${displayName(result.instance)}, but its current status could not be checked. Run \`aludock service status\`, then return to the Hub with \`aludock\`.\n`,
     );
   }
 }
@@ -115,10 +116,10 @@ async function resolveWorkInstance(
     if ((instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error") && instance.reopenable) {
       return reopenWithNotice(client, instance);
     }
-    throw new Error(lifecycleActionError(instance, "open"));
+    throw new Error(lifecycleActionError(instance));
   }
 
-  if (options.mode === "attach") throw new Error("attach requires TARGET; use a full ID, displayed unique prefix, or unique exact name");
+  if (options.mode === "attach") throw new Error("attach requires a work name; run `aludock` to choose unnamed or duplicate work in the Hub");
 
   // Explicit `aludock open` keeps the legacy project smart-entry. Bare
   // `aludock` never reaches this path and therefore cannot create/reopen.
@@ -142,20 +143,17 @@ function isContinuable(instance: InstanceSnapshot): boolean {
 
 function assertAttachable(instance: InstanceSnapshot): InstanceSnapshot {
   if (instance.lifecycle === "active") return instance;
-  throw new Error(lifecycleActionError(instance, "attach"));
+  throw new Error(lifecycleActionError(instance));
 }
 
-function lifecycleActionError(
-  instance: InstanceSnapshot,
-  action: "attach" | "open",
-): string {
+function lifecycleActionError(instance: InstanceSnapshot): string {
   const identity = displayName(instance);
   if ((instance.lifecycle === "host_lost" || instance.lifecycle === "runtime_error") && instance.reopenable) {
-    return `${identity} is ${instance.lifecycle} and cannot be attached without a runtime. Use \`aludock open ${instance.id}\` to reopen it, or choose Resume in the Hub.`;
+    return `${identity} was interrupted. Open the Hub and choose Resume to continue from its saved session.`;
   }
-  if (instance.lifecycle === "stopping") return `${identity} is stopping; wait for a terminal state before choosing another action.`;
-  if (instance.lifecycle === "stopped") return `${identity} is stopped history and cannot be ${action === "attach" ? "attached" : "opened"}. Adopt its Pi session from the Hub or create a new instance.`;
-  return `${identity} is ${instance.lifecycle} and has no reopenable runtime context.`;
+  if (instance.lifecycle === "stopping") return `${identity} is finishing. Wait a moment, then run \`aludock\` to check it again.`;
+  if (instance.lifecycle === "stopped") return `${identity} has ended. Open the Hub to recover its saved Pi work, or start new work.`;
+  return `${identity} is ${humanInstanceStatus(instance.lifecycle, instance.execution)}. Run \`aludock\` and choose another work.`;
 }
 
 async function createWithNotice(
@@ -163,7 +161,7 @@ async function createWithNotice(
   cwd: string,
   name?: string,
 ): Promise<InstanceSnapshot> {
-  process.stdout.write(`Creating a Pi session for ${cwd}…\n`);
+  process.stdout.write(`Creating a Pi session for ${terminalSafe(cwd)}…\n`);
   const operationId = randomUUID();
   try {
     return await client.create(cwd, name, operationId);
@@ -182,7 +180,7 @@ async function adoptWithNotice(
   client: DockClient,
   session: SessionDto,
 ): Promise<InstanceSnapshot> {
-  process.stdout.write(`Adopting persisted Pi session ${session.sessionFile}…\n`);
+  process.stdout.write(`Opening saved Pi work for ${terminalSafe(session.name?.trim() || session.cwd)}…\n`);
   const operationId = randomUUID();
   try {
     return (await client.adopt(session.sessionFile, session.name, operationId)).instance;
@@ -201,8 +199,8 @@ async function reopenWithNotice(
   client: DockClient,
   record: InstanceSnapshot,
 ): Promise<InstanceSnapshot> {
-  if (!record.reopenable) throw new Error(`Instance ${record.id} is ${record.lifecycle} and has no session context to reopen`);
-  process.stdout.write(`Reopening ${displayName(record)} from its persisted Pi session context…\n`);
+  if (!record.reopenable) throw new Error(`${displayName(record)} has no saved session to reopen. Run \`aludock\` and start new work instead.`);
+  process.stdout.write(`Reopening ${displayName(record)} from its saved session…\n`);
   const operationId = randomUUID();
   try {
     return (await client.reopen(record.id, operationId)).instance;
@@ -231,14 +229,14 @@ function projectTrustChallenge(
     || challengeOperationId !== operationId
     || typeof cwd !== "string"
   ) {
-    throw new Error("Host returned an invalid project trust challenge");
+    throw new Error("That project trust choice expired. Try opening the work again.");
   }
   return { challengeId, cwd };
 }
 
 async function askProjectTrust(cwd: string): Promise<ProjectTrustChoice> {
   process.stdout.write(
-    `Project-local Pi resources were found in ${cwd}.\n`
+    `Project-local Pi resources were found in ${terminalSafe(cwd)}.\n`
       + "  1) Trust once\n"
       + "  2) Trust and remember\n"
       + "  3) Do not trust once (continue without project resources)\n"
@@ -257,6 +255,13 @@ async function askProjectTrust(cwd: string): Promise<ProjectTrustChoice> {
   } finally {
     prompt.close();
   }
+}
+
+function terminalSafe(value: string): string {
+  return value
+    .replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim() || "—";
 }
 
 function displayName(instance: InstanceSnapshot): string {

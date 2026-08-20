@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { InstanceSnapshot } from "../src/core/managed-instance.js";
-import { resolveHumanTarget, uniqueInstanceIdPrefix } from "../src/human-target.js";
+import { resolveHumanTarget } from "../src/human-target.js";
 import { buildDockHubEntries } from "../src/tui/dock-hub.js";
 
 test("human TARGET resolves exact IDs, unique prefixes, and unique exact names", () => {
@@ -28,15 +28,6 @@ test("human TARGET fails closed when an exact name conflicts with an ID prefix",
   assert.equal(mixed.kind, "ambiguous");
   const duplicate = resolveHumanTarget([duplicateName, duplicateNameTwo], "same");
   assert.equal(duplicate.kind, "ambiguous");
-});
-
-test("displayed instance prefixes expand until unique across ID and exact-name candidates", () => {
-  const first = instance("019f7005-aaaa-4000-8000-000000000001", "one");
-  const second = instance("019f7005-bbbb-4000-8000-000000000002", "two");
-  const nameConflict = instance("other-id-cccc-4000-8000-000000000003", "019f7005-a");
-  const universe = [first, second, nameConflict];
-  assert.equal(uniqueInstanceIdPrefix(first, universe), "019f7005-aa");
-  assert.equal(resolvedId(resolveHumanTarget(universe, uniqueInstanceIdPrefix(first, universe))), first.id);
 });
 
 test("Hub root exposes fixed actions with separate current and history counts", () => {

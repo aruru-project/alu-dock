@@ -188,12 +188,12 @@ def main() -> int:
                 write_input(fd, output, b"\x1b[B")  # History is third.
                 os.write(fd, b"\r")
                 history_deadline = time.monotonic() + 5
-                while b"Past Dock records" not in output and time.monotonic() < history_deadline:
+                while b"Past work" not in output and time.monotonic() < history_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\r")  # Select the newest stopped record.
                 action_deadline = time.monotonic() + 5
-                while b"Forget history record" not in output and time.monotonic() < action_deadline:
+                while b"Remove from History" not in output and time.monotonic() < action_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 if action == "hub-history":
@@ -206,11 +206,11 @@ def main() -> int:
                     write_input(fd, output, b"\x1b[B")  # Forget is below Continue.
                     os.write(fd, b"\r")
                     forget_deadline = time.monotonic() + 5
-                    while b"Forgot History record" not in output and time.monotonic() < forget_deadline:
+                    while (b"Removed " not in output or b" from History" not in output) and time.monotonic() < forget_deadline:
                         if read_available(fd, output, 0.05) < 0:
                             break
                     empty_deadline = time.monotonic() + 5
-                    while b"No Dock history" not in output and time.monotonic() < empty_deadline:
+                    while b"No past work" not in output and time.monotonic() < empty_deadline:
                         if read_available(fd, output, 0.05) < 0:
                             break
                     os.write(fd, b"\x1b")
@@ -219,12 +219,12 @@ def main() -> int:
                     write_input(fd, output, b"\x1b[B")  # Pi Sessions is fourth.
                 os.write(fd, b"\r")
                 inventory_deadline = time.monotonic() + 5
-                while b"Pi session inventory incomplete" not in output and time.monotonic() < inventory_deadline:
+                while b"Some saved Pi sessions could not be checked" not in output and time.monotonic() < inventory_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\r")  # Select the only persisted session.
                 adopt_deadline = time.monotonic() + 5
-                while b"Adopt as a new Dock instance" not in output and time.monotonic() < adopt_deadline:
+                while b"Open as new work" not in output and time.monotonic() < adopt_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\r")
@@ -702,14 +702,29 @@ def main() -> int:
                     if read_available(fd, output, 0.05) < 0:
                         break
             elif action == "stage6":
-                os.write(fd, b"/tree tree-u2\r")
+                os.write(fd, b"/tree\r")
+                tree_picker_deadline = time.monotonic() + 5
+                while b"Navigate session tree" not in output and time.monotonic() < tree_picker_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"second prompt\r")
+                tree_action_deadline = time.monotonic() + 5
+                while b"Branch action" not in output and time.monotonic() < tree_action_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\r")
                 tree_deadline = time.monotonic() + 5
                 while b"Session branch selected" not in output and time.monotonic() < tree_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\x03")  # Clear selected editor text.
                 fork_start = len(output)
-                os.write(fd, b"/fork tree-u2\r")
+                os.write(fd, b"/fork\r")
+                fork_picker_deadline = time.monotonic() + 5
+                while b"Start from an earlier prompt" not in output[fork_start:] and time.monotonic() < fork_picker_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"second prompt\r")
                 fork_deadline = time.monotonic() + 5
                 while b"Session branch created" not in output[fork_start:] and time.monotonic() < fork_deadline:
                     if read_available(fd, output, 0.05) < 0:

@@ -38,7 +38,7 @@ export function abortingActivity(): RunActivityState {
   return { phase: "aborting", label: "aborting" };
 }
 
-export function disconnectedActivity(label = "host stream closed"): RunActivityState {
+export function disconnectedActivity(label = "connection interrupted"): RunActivityState {
   return { phase: "disconnected", label };
 }
 
@@ -122,7 +122,7 @@ export function reduceRunActivity(
     case "run.retry_completed":
       return event.data.success
         ? activityFromSnapshot(snapshot)
-        : { phase: "error", label: "retry failed" };
+        : { phase: "error", label: "retry stopped · review the conversation" };
 
     case "compaction.started":
       return { phase: "compaction", label: "compacting context" };
@@ -131,7 +131,7 @@ export function reduceRunActivity(
       return activityFromSnapshot(snapshot);
 
     case "interaction.requested":
-      return { phase: "interaction", label: `waiting for ${event.data.method}` };
+      return { phase: "interaction", label: "waiting for your answer" };
 
     case "interaction.resolved":
     case "interaction.cancelled":

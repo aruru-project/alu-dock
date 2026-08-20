@@ -68,14 +68,14 @@ test("every public human command supports equivalent local help forms", async ()
 test("interactive command grammar keeps bare Hub, continue, new, and attach intents distinct", async () => {
   const missingTarget = await runCli(["attach"]);
   assert.equal(missingTarget.code, 1);
-  assert.match(missingTarget.stderr, /^Alu Dock: attach requires TARGET/u);
+  assert.match(missingTarget.stderr, /^Alu Dock: attach requires a work name/u);
   assert.doesNotMatch(missingTarget.stderr, /^\s*\{/u);
 
   for (const [command, target] of [["open", ""], ["attach", "   "]] as const) {
     const blankTarget = await runCli([command, target]);
     assert.equal(blankTarget.code, 1);
     assert.equal(blankTarget.stdout, "");
-    assert.match(blankTarget.stderr, new RegExp(`^Alu Dock: ${command} TARGET must be non-empty`, "u"));
+    assert.match(blankTarget.stderr, new RegExp(`^Alu Dock: ${command} needs a work name`, "u"));
   }
 
   const continueTarget = await runCli(["-c", "target"]);
@@ -117,7 +117,7 @@ test("service help is explorable without constructing a service manager", async 
 
   const serviceHelp = renderCliHelp(["service"]);
   assert.match(serviceHelp, /npm run install:local/u);
-  assert.match(serviceHelp, /refuses active Dock instances/u);
+  assert.match(serviceHelp, /Finish or stop active work before updating/u);
 
   const ignoredInvalidOption = await runCli(["service", "logs", "--lines", "not-a-number", "--help"]);
   assertHelpSuccess(ignoredInvalidOption);

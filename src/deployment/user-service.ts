@@ -48,6 +48,7 @@ export interface UserServiceStatus {
   activeState: string;
   subState: string;
   unitFileState: string;
+  installed: boolean;
   mainPid: number;
   ready: boolean;
   hostEpoch?: string;
@@ -135,21 +136,23 @@ export class UserServiceManager {
   }
 
   async status(): Promise<UserServiceStatus> {
+    const installed = await lstatIfPresent(this.unitFile) !== undefined;
     const properties = this.unitProperties();
     const mainPid = positivePid(properties.MainPID);
     const ping = await this.tryProbe();
     const ready = ping !== undefined && mainPid > 0 && ping.pid === mainPid && hasManagedHostCapabilities(ping);
     const diagnostics: string[] = [];
-    if (properties.ActiveState === "active" && !ready) diagnostics.push("Unit is active but Protocol V2 hello/MainPID readiness is not established");
-    if (properties.ActiveState !== "active") diagnostics.push(`Unit is ${properties.ActiveState || "unknown"}/${properties.SubState || "unknown"}`);
+    if (properties.ActiveState === "active" && !ready) diagnostics.push("The service is running, but Alu Dock is not ready yet. Run `aludock service logs --lines 200` for details.");
+    if (properties.ActiveState !== "active") diagnostics.push("Alu Dock is not running. Run `aludock service start`; check service logs if it does not start.");
     const linger = this.lingerState();
-    if (linger !== "yes") diagnostics.push("User linger is not enabled; Alu Dock does not modify login policy automatically");
+    if (linger !== "yes") diagnostics.push("Alu Dock may stop after you log out. Ask your system administrator to enable user lingering if it should stay available.");
     return {
       unit: ALU_DOCK_UNIT_NAME,
       unitFile: this.unitFile,
       activeState: properties.ActiveState || "unknown",
       subState: properties.SubState || "unknown",
       unitFileState: properties.UnitFileState || "unknown",
+      installed,
       mainPid,
       ready,
       ...(ping === undefined ? {} : { hostEpoch: ping.hostEpoch }),
@@ -168,19 +171,19 @@ export class UserServiceManager {
 
   private async requireGeneratedUnit(): Promise<void> {
     const info = await lstatIfPresent(this.unitFile);
-    if (!info) throw new Error(`Alu Dock service is not installed: ${this.unitFile}`);
-    if (!info.isFile() || info.isSymbolicLink()) throw new Error(`Refusing to manage non-regular unit file: ${this.unitFile}`);
+    if (!info) throw new Error("Alu Dock is not installed for this user. Run `aludock service install` first.");
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error(`The service setup at ${this.unitFile} is not a regular file, so Alu Dock left it unchanged. Review that path and try again.`);
     const existing = await readFile(this.unitFile, "utf8");
-    if (!isAluDockGeneratedContent(existing)) throw new Error(`Refusing to manage non-generated unit file: ${this.unitFile}`);
+    if (!isAluDockGeneratedContent(existing)) throw new Error(`The service setup at ${this.unitFile} was not created by Alu Dock, so it was left unchanged. Review that file before trying again.`);
   }
 
   private async writeUnit(): Promise<void> {
     await mkdir(dirname(this.unitFile), { recursive: true, mode: 0o755 });
     const existingInfo = await lstatIfPresent(this.unitFile);
     if (existingInfo) {
-      if (!existingInfo.isFile() || existingInfo.isSymbolicLink()) throw new Error(`Refusing to overwrite non-regular unit file: ${this.unitFile}`);
+      if (!existingInfo.isFile() || existingInfo.isSymbolicLink()) throw new Error(`The service setup at ${this.unitFile} is not a regular file, so Alu Dock left it unchanged. Review that path and try again.`);
       const existing = await readFile(this.unitFile, "utf8");
-      if (!isAluDockGeneratedContent(existing)) throw new Error(`Refusing to overwrite non-generated unit file: ${this.unitFile}`);
+      if (!isAluDockGeneratedContent(existing)) throw new Error(`The service setup at ${this.unitFile} was not created by Alu Dock, so it was left unchanged. Review that file before trying again.`);
     }
     const content = renderAluDockUnit({
       nodePath: resolve(this.options.nodePath),
@@ -199,19 +202,19 @@ export class UserServiceManager {
 
   private async waitForReady(previousEpoch?: string): Promise<PingResult> {
     const deadline = Date.now() + this.timeoutMs;
-    let last = "Protocol V2 hello unavailable";
     while (Date.now() < deadline) {
       const ping = await this.tryProbe();
       const mainPid = positivePid(this.unitProperties().MainPID);
-      if (!ping) last = "Protocol V2 hello unavailable";
-      else if (mainPid !== ping.pid) last = `hello PID ${ping.pid} does not match unit MainPID ${mainPid}`;
-      else if (!hasManagedHostCapabilities(ping)) last = "Host does not advertise the complete managed catalog/reopen capability set";
-      else if (previousEpoch !== undefined && ping.hostEpoch === previousEpoch) last = "hostEpoch did not change after restart";
-      else return ping;
+      if (
+        ping
+        && mainPid === ping.pid
+        && hasManagedHostCapabilities(ping)
+        && (previousEpoch === undefined || ping.hostEpoch !== previousEpoch)
+      ) return ping;
       await this.sleep(READY_POLL_MS);
     }
-    const journal = this.run("journalctl", ["--user", "-u", ALU_DOCK_UNIT_NAME, "-n", "80", "--no-pager"], { allowFailure: true });
-    throw new Error(`Alu Dock service did not become ready within ${this.timeoutMs}ms: ${last}; journal: ${(journal.stdout || journal.stderr).slice(-4_000)}`);
+    const seconds = Math.max(1, Math.ceil(this.timeoutMs / 1_000));
+    throw new Error(`Alu Dock did not become ready within ${seconds} second${seconds === 1 ? "" : "s"}. Run \`aludock service logs --lines 200\` for details, then try again.`);
   }
 
   private async tryProbe(): Promise<PingResult | undefined> {
@@ -244,10 +247,27 @@ export class UserServiceManager {
   }
 
   private systemctl(args: string[], allowFailure = false): ServiceCommandResult {
-    const result = this.run("systemctl", ["--user", ...args], { allowFailure });
-    if (result.status !== 0 && !allowFailure) throw new Error(`systemctl --user ${args.join(" ")} failed: ${(result.stderr || result.stdout).slice(-4_000)}`);
+    let result: ServiceCommandResult;
+    try {
+      result = this.run("systemctl", ["--user", ...args], { allowFailure: true });
+    } catch {
+      throw new Error(`Alu Dock could not ${serviceActionText(args)}. Make sure user services are available, then try again.`);
+    }
+    if (result.status !== 0 && !allowFailure) {
+      throw new Error(`Alu Dock could not ${serviceActionText(args)}. Run \`aludock service logs --lines 200\` for details, then try again.`);
+    }
     return result;
   }
+}
+
+function serviceActionText(args: readonly string[]): string {
+  const action = args.find((argument) => !argument.startsWith("-"));
+  if (action === "start") return "start the service";
+  if (action === "stop") return "stop the service";
+  if (action === "restart") return "restart the service";
+  if (action === "enable") return "install the service for this user";
+  if (action === "daemon-reload") return "refresh the service setup";
+  return "update the service";
 }
 
 function runCommand(executable: string, args: string[], options: ServiceCommandOptions = {}): ServiceCommandResult {

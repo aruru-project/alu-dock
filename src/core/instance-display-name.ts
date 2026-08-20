@@ -10,7 +10,7 @@ const SAFE_CWD_CHARACTER = /[A-Za-z0-9_-]/u;
 
 export interface InstanceDisplayNameSource {
   name?: string;
-  key?: string;
+  firstUserMessage?: string;
   cwd: string;
 }
 
@@ -22,8 +22,8 @@ export interface InstanceDisplayNameSource {
 export function projectInstanceDisplayName(source: InstanceDisplayNameSource): string {
   const name = safeLabel(source.name, MAX_INSTANCE_DISPLAY_NAME_CHARS, SAFE_EXPLICIT_CHARACTER);
   if (name) return name;
-  const key = safeLabel(source.key, MAX_INSTANCE_DISPLAY_NAME_CHARS, SAFE_EXPLICIT_CHARACTER);
-  if (key) return key;
+  const firstUserMessage = safeLabel(source.firstUserMessage, MAX_INSTANCE_DISPLAY_NAME_CHARS, SAFE_EXPLICIT_CHARACTER);
+  if (firstUserMessage) return firstUserMessage;
   return cwdFallback(source.cwd);
 }
 
@@ -37,8 +37,8 @@ export function humanInstanceStatus(lifecycle: InstanceLifecycle, execution: Ins
   }
   if (lifecycle === "stopping") return "stopping";
   if (lifecycle === "stopped") return "stopped";
-  if (lifecycle === "host_lost") return "agent lost";
-  return "agent crashed";
+  if (lifecycle === "host_lost") return "interrupted";
+  return "could not continue";
 }
 
 function cwdFallback(cwd: string): string {

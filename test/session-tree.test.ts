@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  parseTreeNavigationCommand,
   SessionTreeModel,
   treePickerItems,
 } from "../src/tui/session-tree.js";
@@ -10,7 +9,7 @@ import type { TreeNodeDto } from "../src/core/instance-dto.js";
 
 
 
-test("tree picker compresses linear depth and exposes branch points, active path, and sibling leaves", () => {
+test("tree picker compresses linear depth and describes branches without exposing IDs", () => {
   const branched: TreeNodeDto[] = [
     { entryId: "root", depth: 0, kind: "message", role: "user", displayClass: "content", summary: "start task", hasChildren: true },
     ...Array.from({ length: 12 }, (_, index): TreeNodeDto => ({
@@ -34,18 +33,18 @@ test("tree picker compresses linear depth and exposes branch points, active path
   const branchA = items.find((item) => item.value === "leaf-a")!;
   const branchB = items.find((item) => item.value === "leaf-b")!;
   assert.ok((longLinear.label.match(/│/gu) ?? []).length <= 1, "raw depth must not drive indentation");
-  assert.match(longLinear.description, /branch point · 2 paths/u);
+  assert.match(longLinear.description, /conversation splits here · 2 paths/u);
   assert.match(branchA.label, /○ Alu · original branch answer/u);
-  assert.match(branchA.description, /sibling branch leaf/u);
+  assert.match(branchA.description, /other branch ends here/u);
   assert.match(branchB.label, /● Alu · new branch answer/u);
-  assert.match(branchB.description, /current leaf/u);
+  assert.match(branchB.description, /current point/u);
   assert.doesNotMatch(items.map((item) => `${item.label} ${item.description}`).join("\n"), /leaf-a|leaf-b/u, "internal IDs stay searchable values, not primary copy");
 
   const cappedParent = treePickerItems([
     { entryId: "capped-parent", depth: 4, kind: "message", role: "assistant", displayClass: "content", summary: "children outside selector cap", hasChildren: true },
   ]).at(0)!;
   assert.doesNotMatch(cappedParent.label, /○/u);
-  assert.doesNotMatch(cappedParent.description, /sibling branch leaf/u);
+  assert.doesNotMatch(cappedParent.description, /other branch ends here/u);
 });
 
 test("tree model reconstructs visible topology, prioritizes active branches, and navigates segments", () => {
@@ -83,16 +82,4 @@ test("tree model reconstructs visible topology, prioritizes active branches, and
   assert.equal(model.filterMode, "labeled-only");
   model.setFilter("all");
   assert.ok(model.visible().some((item) => item.node.entryId === "wrapper-a"), "All reveals structural tool-call wrappers");
-});
-
-test("direct tree commands accept summary and replacement instructions", () => {
-  assert.deepEqual(parseTreeNavigationCommand("u2"), { entryId: "u2", options: {} });
-  assert.deepEqual(parseTreeNavigationCommand("u2 --summary keep decisions"), {
-    entryId: "u2", options: { summarize: true, customInstructions: "keep decisions" },
-  });
-  assert.deepEqual(parseTreeNavigationCommand("u2 --replace preserve files"), {
-    entryId: "u2", options: { summarize: true, customInstructions: "preserve files", replaceInstructions: true },
-  });
-  assert.equal(parseTreeNavigationCommand("u2 --replace"), undefined);
-  assert.equal(parseTreeNavigationCommand("u2 --unknown"), undefined);
 });

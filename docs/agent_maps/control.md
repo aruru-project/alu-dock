@@ -30,7 +30,7 @@ Host 自己处理：
 - Worker lifecycle、runtime kind 与 generation；
 - Queue、operation、Extension UI 操作权与 read/follow reconnect。
 
-这些状态属于 Dock，不交给 Agent runtime 决定。
+这些状态属于 Dock，不交给 Agent runtime 决定。Persisted-session inventory 的 response 可附带有界 `firstUserMessage`，供人类选择器在无 session name 时展示；它是可忽略的新增 response 字段，不改变 session file 作为采用目标的语义。
 
 ### Session gateway
 

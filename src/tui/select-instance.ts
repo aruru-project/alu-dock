@@ -6,6 +6,7 @@ import {
   type SelectItem,
 } from "@earendil-works/pi-tui";
 
+import { humanInstanceStatus } from "../core/instance-display-name.js";
 import type { InstanceSnapshot } from "../core/managed-instance.js";
 import { paint, selectListTheme } from "./theme.js";
 
@@ -21,13 +22,13 @@ export async function selectInstance(
     ...instances.map((instance) => ({
       value: instance.id,
       label: instance.displayName,
-      description: `${instance.lifecycle}/${instance.execution}${instance.reopenable ? " · reopen context" : ""} · ${instance.executor.model?.id ?? "no model"}`,
+      description: `${humanInstanceStatus(instance.lifecycle, instance.execution)}${instance.reopenable && instance.lifecycle !== "active" ? " · saved session available" : ""} · ${instance.executor.model?.id ?? "no model selected"}`,
     })),
-    { value: NEW_INSTANCE, label: "+ New instance", description: "create in this directory" },
+    { value: NEW_INSTANCE, label: "+ New work", description: "start in this directory" },
   ];
   const list = new SelectList(items, Math.min(items.length, 10), selectListTheme);
   const heading = new Text(
-    `${paint.bold(paint.accent("Alu Dock"))}\n${paint.muted("Choose an active instance or create a new one")}`,
+    `${paint.bold(paint.accent("Alu Dock"))}\n${paint.muted("Choose work to open, or start new work")}`,
     1,
     1,
   );

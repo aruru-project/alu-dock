@@ -23,6 +23,9 @@ import type {
   ThinkingLevel,
 } from "../core/agent-worker.js";
 import type { ProjectTrustChoice } from "../control/project-trust.js";
+import { humanControlErrorText, humanErrorText } from "../human-control-error.js";
+import { humanRelativeTime } from "../human-time.js";
+import { sessionDisplayName } from "../session-display.js";
 import { ActivityPulseController } from "./activity-pulse.js";
 import { DockActivityLine, DockConversation, DockStatusLine, DockWorkMetadata } from "./conversation.js";
 import { ExtensionTextDialog } from "./extension-text-dialog.js";
@@ -42,7 +45,6 @@ import { SearchablePicker } from "./searchable-picker.js";
 import { projectSnapshot } from "./snapshot-projection.js";
 import {
   isTreeFilterMode,
-  parseTreeNavigationCommand,
   treePickerItems,
 } from "./session-tree.js";
 import { SessionTreeSurface } from "./session-tree-surface.js";
@@ -149,10 +151,10 @@ export async function runDockTui(
     submitBlockDepth = Math.max(0, submitBlockDepth - 1);
     refreshEditorSubmit();
   };
-  const requireCoherentControl = (action: string): boolean => {
+  const requireCoherentControl = (): boolean => {
     if (eventStreamConnected && instance.lifecycle === "active") return true;
     refreshEditorSubmit();
-    conversation.addNotice(`${action} was not sent because live updates are unavailable. Wait for reconnection, or press Ctrl+D and open this work again.`, true);
+    conversation.addNotice("The connection is interrupted, so this action could not be completed. Press Ctrl+D to leave Work, then run `aludock` and try again.", true);
     tui.requestRender();
     return false;
   };
@@ -312,7 +314,7 @@ export async function runDockTui(
     for (const event of reconciled) pendingQueue.apply(event);
     conversation.applyHistory(historyEntries, false);
     conversation.applyReplay(reconciled, false);
-    if (!initialHistory.ok) conversation.addNotice(`Earlier session history unavailable: ${errorText(initialHistory.error)}`, true);
+    if (!initialHistory.ok) conversation.addNotice("Some earlier messages could not be loaded. You can keep working from the messages shown here, or run /reload to try again.", true);
     conversation.setToolsExpanded(instance.toolsExpanded);
     status.update(instance);
     runActivity = activityFromReplay(instance, reconciled);
@@ -417,11 +419,11 @@ export async function runDockTui(
     client.commands(instance.id),
   ]);
   if (settingsLoad.status === "fulfilled") settings = settingsLoad.value.settings;
-  else conversation.addNotice(`Settings unavailable: ${errorText(settingsLoad.reason)}`, true);
+  else conversation.addNotice("Settings could not be loaded. Run /reload to try again.", true);
   if (commandsLoad.status === "fulfilled") {
     commands = commandsLoad.value.commands;
     if (commandsLoad.value.truncated) conversation.addNotice(`Showing ${commands.length} of ${commandsLoad.value.total} commands.`, true);
-  } else conversation.addNotice(`Command catalog unavailable: ${errorText(commandsLoad.reason)}`, true);
+  } else conversation.addNotice("Commands could not be loaded. Run /reload to try again.", true);
 
   editor = new Editor(tui, editorTheme, {
     paddingX: numericSetting(settings, "editorPaddingX", 1),
@@ -448,7 +450,7 @@ export async function runDockTui(
     if (!text) return;
     if (!eventStreamConnected) {
       refreshEditorSubmit();
-      conversation.addNotice("Input was not sent because live updates are unavailable. Wait for reconnection, or press Ctrl+D and open this work again.", true);
+      conversation.addNotice("Live updates are interrupted, so this message is still in the editor. Wait for this window to reconnect, or press Ctrl+D and reopen the work from the Hub.", true);
       tui.requestRender();
       return;
     }
@@ -523,13 +525,8 @@ export async function runDockTui(
       await chooseTreeNavigation();
       return;
     }
-    const treeTarget = commandMessage(text, "/tree");
-    if (treeTarget !== undefined) {
-      await navigateTreeFromCommand(treeTarget);
-      return;
-    }
     if (text.startsWith("/tree")) {
-      conversation.addNotice("Usage: /tree [ENTRY_ID [--summary [INSTRUCTIONS] | --replace INSTRUCTIONS]]", true);
+      conversation.addNotice("Run /tree, then search for and choose a conversation point.", true);
       tui.requestRender();
       return;
     }
@@ -537,13 +534,8 @@ export async function runDockTui(
       await chooseForkTarget();
       return;
     }
-    const forkTarget = commandMessage(text, "/fork");
-    if (forkTarget !== undefined) {
-      await forkSession(forkTarget);
-      return;
-    }
     if (text.startsWith("/fork")) {
-      conversation.addNotice("Usage: /fork [USER_ENTRY_ID]", true);
+      conversation.addNotice("Run /fork, then search for and choose an earlier prompt.", true);
       tui.requestRender();
       return;
     }
@@ -556,21 +548,28 @@ export async function runDockTui(
       tui.requestRender();
       return;
     }
-    if (text === "/new" || text.startsWith("/new ")) {
-      await createNewSession(commandMessage(text, "/new"));
+    if (text === "/new") {
+      await createNewSession();
+      return;
+    }
+    if (text.startsWith("/new")) {
+      conversation.addNotice("Usage: /new", true);
+      tui.requestRender();
       return;
     }
     if (text === "/resume") {
       await chooseSession();
       return;
     }
-    const resumeTarget = commandMessage(text, "/resume");
-    if (resumeTarget !== undefined) {
-      await resumeSession(resumeTarget);
+    if (text.startsWith("/resume")) {
+      conversation.addNotice("Run /resume, then search for and choose saved Pi work.", true);
+      tui.requestRender();
       return;
     }
     if (text === "/name") {
-      conversation.addNotice(`Current session name: ${terminalSafe(instance.name ?? "(none)")}. Usage: /name NAME; use /name - to clear.`);
+      conversation.addNotice(instance.name
+        ? `Current session name: ${terminalSafe(instance.name)}. Usage: /name NAME; use /name - to clear.`
+        : "This session does not have a name yet. Usage: /name NAME.");
       tui.requestRender();
       return;
     }
@@ -592,7 +591,7 @@ export async function runDockTui(
       return;
     }
     if (["/install", "/config", "/login"].some((command) => text === command || text.startsWith(`${command} `))) {
-      conversation.addNotice(`Run \`pi ${text.slice(1)}\` in a separate shell; package/config/login ownership remains with the Pi CLI.`);
+      conversation.addNotice(`Open another shell and run \`pi ${text.slice(1)}\` there.`);
       tui.requestRender();
       return;
     }
@@ -603,11 +602,11 @@ export async function runDockTui(
     if (text === "/attachments" || text === "/attachments clear") {
       if (text.endsWith(" clear")) {
         draftAttachmentIds = [];
-        conversation.addNotice("Restored attachment references cleared.");
+        conversation.addNotice("Attachments removed from the editor draft.");
       } else {
         conversation.addNotice(draftAttachmentIds.length === 0
-          ? "No attachment references are waiting with this editor draft."
-          : `${draftAttachmentIds.length} restored attachment reference${draftAttachmentIds.length === 1 ? " is" : "s are"} waiting with the next submission.`);
+          ? "The editor draft has no attachments."
+          : `${draftAttachmentIds.length} attachment${draftAttachmentIds.length === 1 ? " is" : "s are"} ready to send with the editor draft.`);
       }
       tui.requestRender();
       return;
@@ -622,7 +621,7 @@ export async function runDockTui(
       activity.setActivity(runActivity);
       tui.requestRender();
       try {
-        if (!requireCoherentControl("Stop")) { restoreEditorSubmit(); return; }
+        if (!requireCoherentControl()) { restoreEditorSubmit(); return; }
         const result = await client.stop(instance.id);
         instance = result.instance;
         status.update(instance);
@@ -665,7 +664,7 @@ export async function runDockTui(
     }, SUBMITTING_FEEDBACK_DELAY_MS);
     feedbackTimer.unref?.();
     try {
-      if (!requireCoherentControl("Message submission")) return;
+      if (!requireCoherentControl()) return;
       const attachments = draftAttachmentIds.length === 0 ? undefined : [...draftAttachmentIds];
       const result = await client.prompt(instance.id, message, delivery, operationId, undefined, attachments);
       if (attachments !== undefined) draftAttachmentIds = [];
@@ -682,7 +681,6 @@ export async function runDockTui(
         message,
         delivery,
         effectUnknown,
-        effectUnknown ? error.operationId ?? operationId : operationId,
       );
       editor.setText(recovery.draft);
       showError(error);
@@ -705,15 +703,15 @@ export async function runDockTui(
     const restoredAttachments = messages.flatMap((message) => message.attachments ?? []);
     draftAttachmentIds = [...new Set([...draftAttachmentIds, ...restoredAttachments.map((attachment) => attachment.fileId)])];
     if (restoredAttachments.length > 0) {
-      conversation.addNotice(`${draftAttachmentIds.length} attachment reference${draftAttachmentIds.length === 1 ? " was" : "s were"} restored with the editor draft and will stay structured on its next submission. Use /attachments clear to remove them.`);
+      conversation.addNotice(`${draftAttachmentIds.length} attachment${draftAttachmentIds.length === 1 ? " is" : "s are"} back with the editor draft and ready for its next submission. Use /attachments clear to remove them.`);
     }
   }
 
   async function restoreQueue(): Promise<boolean> {
     blockEditorSubmit();
-    showStatus("restoring queued messages");
+    showStatus("returning waiting messages to the editor");
     try {
-      if (!requireCoherentControl("Queue restoration")) return false;
+      if (!requireCoherentControl()) return false;
       const result = await client.dequeue(instance.id);
       instance = result.instance;
       status.update(instance);
@@ -721,12 +719,12 @@ export async function runDockTui(
       restoreMessagesToEditor(result.receipt.restored);
       if (result.receipt.inFlight.length > 0) {
         const count = result.receipt.inFlight.length;
-        conversation.addNotice(`${count} queued message${count === 1 ? " is" : "s are"} already entering Pi consumption and cannot be restored safely; the run was not aborted.`, true);
+        conversation.addNotice(`${count} waiting message${count === 1 ? " is" : "s are"} already moving into the conversation. Let ${count === 1 ? "it" : "them"} finish before stopping the run.`, true);
         return false;
       }
       showStatus(result.receipt.restored.length > 0
-        ? `Restored ${result.receipt.restored.length} queued message${result.receipt.restored.length === 1 ? "" : "s"} to editor`
-        : "queue empty");
+        ? `Returned ${result.receipt.restored.length} waiting message${result.receipt.restored.length === 1 ? "" : "s"} to the editor`
+        : "No waiting messages to return");
       return true;
     } catch (error) {
       showError(error);
@@ -748,7 +746,7 @@ export async function runDockTui(
     tui.requestRender();
     try {
       if ((instance.pending.total > 0 || pendingQueue.count > 0) && !await restoreQueue()) return;
-      if (!requireCoherentControl("Run abort")) return;
+      if (!requireCoherentControl()) return;
       const result = await client.abort(instance.id);
       instance = result.instance;
       status.update(instance);
@@ -784,7 +782,7 @@ export async function runDockTui(
 
   async function showModelPicker(models: AgentModelInfo[]): Promise<AgentModelInfo | undefined> {
     if (models.length === 0) {
-      conversation.addNotice("Pi reported no models with configured authentication.", true);
+      conversation.addNotice("No models are available with the current sign-ins. Open another shell and run `pi /login`, then try again.", true);
       return undefined;
     }
     const byKey = new Map(models.map((model) => [`${model.provider}/${model.id}`, model]));
@@ -902,11 +900,11 @@ export async function runDockTui(
         instance = authoritative;
         status.update(instance);
         if (authoritative.activeInteraction?.id === event.data.interactionId && controllerLeaseToken === leaseToken) {
-          conversation.addNotice("The interaction response was not confirmed by the Host; the same question remains pending.", true);
+          conversation.addNotice("Your answer could not be confirmed, so the question is still waiting. Answer it again when it reappears.", true);
           queueMicrotask(() => { void handleExtensionInteraction(event); });
         }
-      } catch (statusError) {
-        conversation.addNotice(`The answer could not be confirmed. The question is still waiting; open this work again to continue. ${errorText(statusError)}`, true);
+      } catch {
+        conversation.addNotice("Your answer could not be confirmed, and the question is still waiting. Reopen this work from the Hub to continue.", true);
       }
       tui.requestRender();
     }
@@ -991,7 +989,7 @@ export async function runDockTui(
         settings.map((setting) => ({
           value: setting.key,
           label: setting.key,
-          description: `${formatSettingValue(setting.value)} · ${setting.source}${setting.writable ? "" : " · read-only"}${setting.reloadRequired ? " · reload" : ""}${setting.hostRestartRequired ? " · host restart" : ""}`,
+          description: `${formatSettingValue(setting.value)} · ${setting.source}${setting.writable ? "" : " · read-only"}${setting.reloadRequired ? " · reload" : ""}${setting.hostRestartRequired ? " · restart Alu Dock" : ""}`,
         })),
       );
       if (!key) { showStatus("settings unchanged"); return; }
@@ -1057,13 +1055,13 @@ export async function runDockTui(
     showStatus(`setting ${update.key}`);
     tui.requestRender();
     try {
-      if (!requireCoherentControl("Setting update")) return;
+      if (!requireCoherentControl()) return;
       const result = await client.updateSetting(instance.id, update);
       instance = result.instance;
       status.update(instance);
       settings = settings.map((setting) => setting.key === result.setting.key ? result.setting : setting);
       applyLiveSetting(result.setting.key, result.setting.value);
-      const boundary = result.hostRestartRequired ? " · Host restart required" : result.reloadRequired ? " · run /reload" : "";
+      const boundary = result.hostRestartRequired ? " · restart Alu Dock from another shell" : result.reloadRequired ? " · run /reload" : "";
       conversation.addNotice(`${result.setting.key} = ${formatSettingValue(result.setting.value)}${boundary}`);
       showStatus(`setting ${result.setting.key} saved`);
       rebuildAutocomplete();
@@ -1090,7 +1088,7 @@ export async function runDockTui(
         if (selected === undefined) break;
         const active = new Set(tools.filter((tool) => tool.active).map((tool) => tool.name));
         if (active.has(selected)) active.delete(selected); else active.add(selected);
-        if (!requireCoherentControl("Tool update")) return;
+        if (!requireCoherentControl()) return;
         const result = await client.setActiveTools(instance.id, [...active].sort());
         instance = result.instance;
         status.update(instance);
@@ -1114,7 +1112,7 @@ export async function runDockTui(
     showStatus("updating tools");
     tui.requestRender();
     try {
-      if (!requireCoherentControl("Tool update")) return;
+      if (!requireCoherentControl()) return;
       const result = await client.setActiveTools(instance.id, names);
       instance = result.instance;
       status.update(instance);
@@ -1157,7 +1155,7 @@ export async function runDockTui(
     const picker = new SearchablePicker([], {
       title: terminalSafe(titleText),
       body: "Loading the complete session tree…",
-      footer: "type text/id/label · ↑↓ move · ←→/PgUp/PgDn page · Enter select · Esc cancel",
+      footer: "type text or label · ↑↓ move · ←→/PgUp/PgDn page · Enter select · Esc cancel",
       maxVisible: 14,
       maxRows: () => pickerContentRowBudget(terminal.rows),
       pageNavigation: true,
@@ -1240,12 +1238,12 @@ export async function runDockTui(
         const targetRole = target.role ?? target.kind;
         const action = await showFixedActions("Branch action", [
           `Target: ${target.label ? `[${target.label}] ` : ""}${target.summary}`,
-          `${targetRole} · ${target.entryId}${leafId ? ` · current leaf ${leafId}` : ""}`,
+          `Selected point · ${targetRole}`,
         ], [
-          { value: "navigate", label: "Navigate directly", description: "Switch to this branch point without model summarization." },
-          { value: "summary", label: "Navigate with summary", description: "Ask Pi to summarize the abandoned branch before switching." },
-          { value: "custom", label: "Summary with additional instructions", description: "Add guidance while keeping Pi's branch-summary behavior." },
-          { value: "replace", label: "Summary with replacement instructions", description: "Replace Pi's default branch-summary instructions." },
+          { value: "navigate", label: "Navigate directly", description: "Continue from this point now." },
+          { value: "summary", label: "Navigate with summary", description: "Ask Pi to summarize the branch before continuing here." },
+          { value: "custom", label: "Summary with additional instructions", description: "Add your own guidance to Pi's summary." },
+          { value: "replace", label: "Summary with replacement instructions", description: "Use only your instructions for the summary." },
         ], "navigate");
         if (!action) continue;
         const options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {};
@@ -1285,16 +1283,6 @@ export async function runDockTui(
     }
   }
 
-  async function navigateTreeFromCommand(target: string): Promise<void> {
-    const parsed = parseTreeNavigationCommand(target);
-    if (!parsed) {
-      conversation.addNotice("Usage: /tree ENTRY_ID [--summary [INSTRUCTIONS] | --replace INSTRUCTIONS]", true);
-      tui.requestRender();
-      return;
-    }
-    await navigateTree(parsed.entryId, parsed.options);
-  }
-
   async function navigateTree(
     targetId: string,
     options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
@@ -1306,12 +1294,12 @@ export async function runDockTui(
     tui.requestRender();
     const draftWasEmpty = editor.getText().length === 0;
     try {
-      if (!requireCoherentControl("Tree navigation")) return;
+      if (!requireCoherentControl()) return;
       const result = await client.navigateSession(instance.id, targetId, options);
       instance = result.instance;
       status.update(instance);
       if (result.editorText !== undefined && draftWasEmpty && editor.getText().length === 0) editor.setText(result.editorText);
-      showStatus(result.cancelled ? result.aborted || treeNavigationAbortRequested ? "navigation aborted" : "navigation cancelled by extension" : "branch selected");
+      showStatus(result.cancelled ? result.aborted || treeNavigationAbortRequested ? "navigation stopped" : "navigation cancelled · current branch kept" : "branch selected");
     } catch (error) { showError(error); }
     finally {
       treeNavigationPending = false;
@@ -1329,7 +1317,7 @@ export async function runDockTui(
     showStatus("aborting branch navigation");
     tui.requestRender();
     try {
-      if (!requireCoherentControl("Tree navigation abort")) return;
+      if (!requireCoherentControl()) return;
       await client.abort(instance.id);
     }
     catch (error) { showError(error); }
@@ -1341,7 +1329,7 @@ export async function runDockTui(
     showStatus("loading fork targets");
     tui.requestRender();
     try {
-      const target = await chooseTreeListNode("Fork before user message", (node) => node.kind === "message" && node.role === "user");
+      const target = await chooseTreeListNode("Start from an earlier prompt", (node) => node.kind === "message" && node.role === "user");
       if (target) await forkSession(target.entryId);
       else showStatus("fork cancelled");
     } catch (error) { showError(error); }
@@ -1353,33 +1341,33 @@ export async function runDockTui(
     showStatus("forking session");
     tui.requestRender();
     try {
-      if (!requireCoherentControl("Session fork")) return;
+      if (!requireCoherentControl()) return;
       const result = await client.forkSession(instance.id, entryId);
       instance = result.instance;
       status.update(instance);
       if (result.selectedText !== undefined) editor.setText(result.selectedText);
-      showStatus(result.cancelled ? "fork cancelled by extension" : "fork ready · edit and submit selected prompt");
+      showStatus(result.cancelled ? "fork cancelled · current session kept" : "fork ready · edit and submit selected prompt");
     } catch (error) { showError(error); }
     finally { restoreEditorSubmit(); tui.setFocus(editor); tui.requestRender(); }
   }
 
   async function cloneSession(): Promise<void> {
     blockEditorSubmit();
-    showStatus("finding current leaf");
+    showStatus("finding the current conversation point");
     tui.requestRender();
     try {
       const tree = await client.tree(instance.id);
       if (!tree.leafId) {
-        conversation.addNotice("The current session has no leaf to clone.", true);
-        showStatus("clone unavailable");
+        conversation.addNotice("This session has no current point to clone. Choose another session or start a new one.", true);
+        showStatus("choose a session with messages to clone");
         return;
       }
-      if (!requireCoherentControl("Session clone")) return;
+      if (!requireCoherentControl()) return;
       const result = await client.cloneSession(instance.id, tree.leafId);
       instance = result.instance;
       status.update(instance);
       if (!result.cancelled) editor.setText("");
-      showStatus(result.cancelled ? "clone cancelled by extension" : "session cloned");
+      showStatus(result.cancelled ? "clone cancelled · current session kept" : "session cloned");
     } catch (error) { showError(error); }
     finally { restoreEditorSubmit(); tui.setFocus(editor); tui.requestRender(); }
   }
@@ -1410,11 +1398,11 @@ export async function runDockTui(
 
   async function chooseSession(): Promise<void> {
     blockEditorSubmit();
-    showStatus("loading sessions");
+    showStatus("loading saved sessions");
     tui.requestRender();
     try {
       const target = await showSessionInventoryPicker();
-      if (!target) { showStatus("session unchanged"); return; }
+      if (!target) { showStatus("current session kept"); return; }
       await resumeSession(target.sessionFile);
     } catch (error) { showError(error); }
     finally { restoreEditorSubmit(); tui.setFocus(editor); tui.requestRender(); }
@@ -1424,7 +1412,7 @@ export async function runDockTui(
     const sessionsByValue = new Map<string, SessionDto>();
     const picker = new SearchablePicker([], {
       title: "Resume Pi session",
-      body: "Loading persisted Pi sessions…",
+      body: "Loading saved Pi sessions…",
       maxVisible: 14,
       maxRows: () => pickerContentRowBudget(terminal.rows),
       requestRender: () => tui.requestRender(),
@@ -1448,21 +1436,21 @@ export async function runDockTui(
         sessionsByValue.set(value, session);
         return {
           value,
-          label: session.name ?? session.sessionId,
-          description: `${session.cwd}${session.sessionFile === instance.executor.sessionFile ? " · current" : ""}${session.updatedAt ? ` · ${session.updatedAt}` : ""}`,
+          label: sessionDisplayName(session),
+          description: `${session.cwd}${session.sessionFile === instance.executor.sessionFile ? " · current" : ""}${session.updatedAt ? ` · ${humanRelativeTime(session.updatedAt)}` : ""}`,
         };
       });
       picker.replaceItems(items);
-      picker.setEmptyText(inventory.incomplete ? "No readable persisted Pi sessions found" : "No persisted Pi sessions found");
+      picker.setEmptyText(inventory.incomplete ? "No saved Pi sessions are ready to open" : "No saved Pi sessions found");
       const inventoryNotices = [
-        ...(inventory.truncated ? [`Showing ${sessions.length.toLocaleString()} of ${inventory.total.toLocaleString()} persisted sessions`] : []),
-        ...(inventory.incomplete ? [`Inventory incomplete: ${inventory.diagnostics[0]?.message ?? "one or more saved sessions could not be inspected"}${inventory.diagnosticsTruncated ? " · more diagnostics omitted" : ""}`] : []),
+        ...(inventory.truncated ? [`Showing ${sessions.length.toLocaleString()} of ${inventory.total.toLocaleString()} saved sessions`] : []),
+        ...(inventory.incomplete ? ["Some saved Pi sessions could not be checked. Check service logs for details."] : []),
       ];
       picker.setBody(inventoryNotices.length > 0 ? inventoryNotices.join(" · ") : undefined);
     }).catch(() => {
       if (!active) return;
-      picker.setEmptyText("Session inventory unavailable");
-      picker.setBody("Could not load persisted Pi sessions. Press Esc to return.");
+      picker.setEmptyText("Saved Pi sessions could not be loaded");
+      picker.setBody("Press Esc to return, then try again. Check service logs if the problem continues.");
     });
 
     try {
@@ -1482,43 +1470,43 @@ export async function runDockTui(
     try {
       let result;
       try {
-        if (!requireCoherentControl("Session resume")) return;
+        if (!requireCoherentControl()) return;
         result = await client.switchSession(instance.id, sessionFile, operationId);
       } catch (error) {
         const challenge = projectTrustChallenge(error, operationId);
         if (!challenge) throw error;
         const decision = await chooseProjectTrust(challenge.cwd);
         if (!decision) { showStatus("resume cancelled"); return; }
-        if (!requireCoherentControl("Session resume")) return;
+        if (!requireCoherentControl()) return;
         result = await client.switchSession(instance.id, sessionFile, operationId, { challengeId: challenge.challengeId, decision });
       }
       instance = result.instance;
       status.update(instance);
-      showStatus(result.cancelled ? "resume cancelled by extension" : "session resumed");
+      showStatus(result.cancelled ? "resume cancelled · current session kept" : "session resumed");
     } catch (error) { showError(error); }
     finally { restoreEditorSubmit(); tui.setFocus(editor); tui.requestRender(); }
   }
 
   async function chooseProjectTrust(cwd: string): Promise<ProjectTrustChoice | undefined> {
     const selected = await showFixedActions("Project-local Pi resources", [cwd], [
-      { value: "trust_once", label: "Trust once", description: "Load project resources for this operation." },
+      { value: "trust_once", label: "Trust once", description: "Load project resources for this action." },
       { value: "trust_and_remember", label: "Trust and remember", description: "Load project resources and persist this decision." },
       { value: "deny_once", label: "Do not trust once", description: "Continue without project resources." },
-      { value: "deny_and_remember", label: "Do not trust and remember", description: "Continue without project resources and persist this decision." },
+      { value: "deny_and_remember", label: "Do not trust and remember", description: "Continue without project resources and remember this choice." }
     ]);
     return isProjectTrustChoice(selected) ? selected : undefined;
   }
 
-  async function createNewSession(parentSession?: string): Promise<void> {
+  async function createNewSession(): Promise<void> {
     blockEditorSubmit();
     showStatus("creating session");
     tui.requestRender();
     try {
-      if (!requireCoherentControl("New session")) return;
-      const result = await client.newSession(instance.id, parentSession);
+      if (!requireCoherentControl()) return;
+      const result = await client.newSession(instance.id);
       instance = result.instance;
       status.update(instance);
-      showStatus(result.cancelled ? "new session cancelled by extension" : "new session ready");
+      showStatus(result.cancelled ? "new session cancelled · current session kept" : "new session ready");
     } catch (error) { showError(error); }
     finally { restoreEditorSubmit(); tui.requestRender(); }
   }
@@ -1528,7 +1516,7 @@ export async function runDockTui(
     showStatus("naming session");
     tui.requestRender();
     try {
-      if (!requireCoherentControl("Session name update")) return;
+      if (!requireCoherentControl()) return;
       const result = await client.nameSession(instance.id, name);
       instance = result.instance;
       status.update(instance);
@@ -1543,11 +1531,11 @@ export async function runDockTui(
   async function compactSession(customInstructions?: string): Promise<void> {
     tui.requestRender();
     try {
-      if (!requireCoherentControl("Compaction")) return;
+      if (!requireCoherentControl()) return;
       const result = await client.compactSession(instance.id, customInstructions);
       instance = result.instance;
       status.update(instance);
-      conversation.addNotice(`Compacted ${result.result.tokensBefore.toLocaleString()} tokens · kept from ${result.result.firstKeptEntryId}.`);
+      conversation.addNotice(`Compacted ${result.result.tokensBefore.toLocaleString()} tokens. The conversation is ready to continue.`);
       runActivity = activityFromSnapshot(instance);
       activity.setActivity(runActivity);
     } catch (error) {
@@ -1571,7 +1559,7 @@ export async function runDockTui(
     showStatus("reloading resources");
     tui.requestRender();
     try {
-      if (!requireCoherentControl("Session reload")) return;
+      if (!requireCoherentControl()) return;
       const result = await client.reloadSession(instance.id);
       instance = result.instance;
       status.update(instance);
@@ -1608,7 +1596,7 @@ export async function runDockTui(
     showStatus(`switching to ${provider}/${modelId}`);
     tui.requestRender();
     try {
-      if (!requireCoherentControl("Model update")) return;
+      if (!requireCoherentControl()) return;
       const result = await client.setModel(instance.id, provider, modelId);
       instance = result.instance;
       status.update(instance);
@@ -1626,7 +1614,7 @@ export async function runDockTui(
     showStatus(`thinking ${level}`);
     tui.requestRender();
     try {
-      if (!requireCoherentControl("Thinking update")) return;
+      if (!requireCoherentControl()) return;
       const result = await client.setThinking(instance.id, level);
       instance = result.instance;
       status.update(instance);
@@ -1703,14 +1691,14 @@ export async function runDockTui(
       restoreTerminalTitle();
       conversation.applyHistory(historyEntries, false);
       conversation.applyReplay(reconciled, false);
-      if (!full.ok) conversation.addNotice(`History didn't reload: ${errorText(full.error)}. Run /reload to try again.`, true);
+      if (!full.ok) conversation.addNotice("Some earlier messages could not be reloaded. The messages shown here are ready to use; run /reload to try again.", true);
       conversation.setToolsExpanded(instance.toolsExpanded);
     } else {
       const buffered = replacementBufferedEvents;
       replacementBufferedEvents = [];
       replacementHistoryGeneration = undefined;
       reconciled = reconcileFlowingEvents([], buffered);
-      conversation.addNotice(`History didn't reload: ${errorText(projectionLoad.reason)}. Run /reload to try again.`, true);
+      conversation.addNotice("Conversation history could not be reloaded. Run /reload to try again.", true);
       conversation.applyReplay(reconciled, false);
       conversation.setToolsExpanded(instance.toolsExpanded);
     }
@@ -1719,12 +1707,12 @@ export async function runDockTui(
       settings = settingsLoad.value.settings;
       for (const setting of settings) applyLiveSetting(setting.key, setting.value);
     } else {
-      conversation.addNotice(`Settings didn't reload: ${errorText(settingsLoad.reason)}. Run /reload to try again.`, true);
+      conversation.addNotice("Settings could not be reloaded. Run /reload to try again.", true);
     }
     if (commandsLoad.status === "fulfilled") {
       commands = commandsLoad.value.commands;
       if (commandsLoad.value.truncated) conversation.addNotice(`Showing ${commands.length} of ${commandsLoad.value.total} commands.`, true);
-    } else conversation.addNotice(`Commands didn't reload: ${errorText(commandsLoad.reason)}. Run /reload to try again.`, true);
+    } else conversation.addNotice("Commands could not be reloaded. Run /reload to try again.", true);
     rebuildAutocomplete();
     if (instance.execution === "running" || instance.compacting) {
       runActivity = activityFromReplay(instance, reconciled);
@@ -1764,7 +1752,7 @@ export async function runDockTui(
     navigationHistoryToken = undefined;
     conversation.reset();
     if (!loaded.ok) {
-      conversation.addNotice(`Navigated branch history unavailable: ${errorText(loaded.error)}`, true);
+      conversation.addNotice("The selected branch could not be loaded. Reopen the tree and choose it again.", true);
       conversation.applyReplay(reconcileFlowingEvents([], buffered), false);
       conversation.setToolsExpanded(instance.toolsExpanded);
       tui.requestRender();
@@ -1856,7 +1844,7 @@ export async function runDockTui(
     if (exiting) return;
     const message = error instanceof ControlClientError
       ? humanControlErrorText(error)
-      : errorText(error);
+      : humanErrorText(error);
     conversation.addNotice(message, true);
     tui.requestRender();
   }
@@ -1886,7 +1874,7 @@ export async function runDockTui(
     const expectedRuntimeGeneration = instance.runtimeGeneration;
     const expanded = !instance.toolsExpanded;
     try {
-      if (!requireCoherentControl("Tool detail update")) return;
+      if (!requireCoherentControl()) return;
       const result = await client.setToolsExpanded(instance.id, expectedRuntimeGeneration, expanded, randomUUID());
       if (result.instance.runtimeGeneration !== expectedRuntimeGeneration) return;
       if (snapshotIsNotOlder(result.instance, instance)) {
@@ -1935,7 +1923,7 @@ export async function runDockTui(
     }
     if (matchesKey(data, "ctrl+o")) {
       if (eventStreamConnected) void toggleAuthoritativeToolsExpanded();
-      else showStatus("control unavailable · Ctrl+D detach");
+      else showStatus("connection interrupted · Ctrl+D leaves Work");
       return { consume: true };
     }
     if (matchesKey(data, Key.alt("up"))) {
@@ -1955,12 +1943,12 @@ export async function runDockTui(
       if (editor.isShowingAutocomplete()) return undefined;
       if (treeNavigationPending) {
         if (eventStreamConnected) void abortTreeNavigation();
-        else showStatus("control unavailable · navigation was not aborted");
+        else showStatus("reconnect before cancelling navigation");
         return { consume: true };
       }
       if (instance.execution === "running") {
         if (eventStreamConnected) void abortRun();
-        else showStatus("control unavailable · run was not aborted");
+        else showStatus("reconnect before stopping the run");
         return { consume: true };
       }
       if (editor.getText().length === 0 && !editor.disableSubmit) {
@@ -1982,13 +1970,13 @@ export async function runDockTui(
     if (matchesKey(data, "ctrl+c")) {
       if (treeNavigationPending) {
         if (eventStreamConnected) void abortTreeNavigation();
-        else showStatus("control unavailable · navigation was not aborted");
+        else showStatus("reconnect before cancelling navigation");
       } else if (editor.getText().length > 0) {
         editor.setText("");
         showStatus("input cleared");
       } else if (instance.execution === "running") {
         if (eventStreamConnected) void abortRun();
-        else showStatus("control unavailable · run was not aborted");
+        else showStatus("reconnect before stopping the run");
       } else {
         showStatus("Ctrl+D detaches");
       }
@@ -2038,24 +2026,22 @@ export async function runDockTui(
     refreshEditorSubmit();
     terminal.setProgress(false);
     status.setConnection("disconnected");
-    runActivity = disconnectedActivity("checking live updates · task status unknown");
+    runActivity = disconnectedActivity("checking connection · work status pending");
     activity.setActivity(runActivity);
     detachTruth = "status_unknown";
-    conversation.addNotice("Live updates were interrupted. Checking the current work state; no command was resent.", true);
+    conversation.addNotice("Live updates were interrupted. Checking whether the work is still running.", true);
     tui.requestRender();
 
     const recovery = (async () => {
       let authoritative: InstanceSnapshot;
       try {
         authoritative = await client.status(instance.id);
-      } catch (statusError) {
+      } catch {
         if (exiting || subscription !== watched) return;
         status.setConnection("lost");
-        runActivity = disconnectedActivity("control unavailable · status unknown · Ctrl+D detach");
+        runActivity = disconnectedActivity("reconnection failed · Ctrl+D leaves Work");
         activity.setActivity(runActivity);
-        conversation.addNotice("Alu Dock is unavailable, so this work's current state is unknown. This window remains read-only; press Ctrl+D and open it again after Dock recovers.", true);
-        conversation.addNotice(`Live updates: ${errorText(streamError)}`, true);
-        conversation.addNotice(`Status check: ${errorText(statusError)}`, true);
+        conversation.addNotice("The connection could not be restored. Press Ctrl+D to leave Work, then run `aludock` to reopen it.", true);
         tui.requestRender();
         return;
       }
@@ -2071,7 +2057,7 @@ export async function runDockTui(
         refreshEditorSubmit();
         runActivity = activityFromSnapshot(instance);
         activity.setActivity(runActivity);
-        conversation.addNotice(`The work is now ${authoritative.lifecycle}; this window remains read-only. No command was resent; press Ctrl+D and open the work again.`, true);
+        conversation.addNotice(`This work is ${humanInstanceStatus(authoritative.lifecycle, authoritative.execution)}. Press Ctrl+D to leave Work, then run \`aludock\` to choose what to do next.`, true);
         tui.requestRender();
         return;
       }
@@ -2149,8 +2135,8 @@ export async function runDockTui(
         activity.setActivity(runActivity);
         detachTruth = instance.lifecycle === "active" ? "host_owned" : "not_active";
         conversation.addNotice(rebuiltHistory === undefined
-          ? `Live updates resumed; the work kept running (${instance.lifecycle}/${instance.execution}). No command was resent.`
-          : `Live updates resumed from a fresh conversation view (${instance.lifecycle}/${instance.execution}). No command was resent.`);
+          ? "Live updates resumed. This work is ready to continue."
+          : "Live updates resumed with a refreshed conversation. This work is ready to continue.");
         subscription = next;
         eventStreamConnected = true;
         candidateReady = true;
@@ -2160,16 +2146,15 @@ export async function runDockTui(
         watchEventSubscription(next);
         updateTerminalProgress();
         tui.requestRender();
-      } catch (reconnectError) {
+      } catch {
         if (next) {
           next.close();
           await next.done.catch(() => {});
         }
         if (exiting || subscription !== watched) return;
-        runActivity = disconnectedActivity("live updates interrupted · task still running · Ctrl+D detach");
+        runActivity = disconnectedActivity("reconnection failed · Ctrl+D leaves Work");
         activity.setActivity(runActivity);
-        conversation.addNotice(`Live updates are still unavailable; the current work state is ${instance.lifecycle}/${instance.execution}. This window remains read-only; press Ctrl+D and open it again.`, true);
-        conversation.addNotice(`Reconnect: ${errorText(reconnectError)}`, true);
+        conversation.addNotice("The connection could not be restored. Press Ctrl+D to leave Work, then run `aludock` to reopen it.", true);
         tui.requestRender();
       }
     })();
@@ -2243,65 +2228,6 @@ function terminalSafe(value: string): string {
   return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
 }
 
-/** Answer "what happened" and "what can I do now" for Dock errors; raw codes and Host messages may carry internal identifiers. */
-function humanControlErrorText(error: ControlClientError): string {
-  switch (error.code) {
-    case "not_found":
-    case "instance_not_found":
-      return "This work no longer exists on the Dock. Head back to the Hub to pick another one.";
-    case "instance_host_lost":
-      return "The Dock lost contact with this work's agent. Reopen it from the Hub to continue from its saved session.";
-    case "instance_runtime_error":
-      return "This work's agent crashed. Reopen it from the Hub to continue from its saved session.";
-    case "instance_not_active":
-      return "This work is not running anymore. Reopen it from the Hub to continue.";
-    case "instance_not_terminal":
-      return "This work is still live, so its record can't be forgotten. Stop it first if you want it gone.";
-    case "instance_not_reopenable":
-      return "This work has no saved session to reopen. Start a new one from the Hub instead.";
-    case "cursor_stale":
-      return "The Dock's work list changed while reading it. Run the command again.";
-    case "invalid_cursor":
-      return "Couldn't pick up reading where this view left off. Close and reopen it to reload.";
-    case "invalid_tree_target":
-      return "That point is no longer available in this session. Reopen the tree and choose another point.";
-    case "stale_runtime_generation":
-      return "This work was reloaded since this window last looked. Try the command again.";
-    case "admission_pending":
-      return "The previous command is still being accepted. Give it a moment, then try again.";
-    case "instance_busy":
-      return "This work is busy with another request. Try again in a moment.";
-    case "queue_capacity":
-      return "The queue for this work is full. Let the current run finish before adding more.";
-    case "effect_unknown":
-      return "The Dock can't tell whether that command took effect. Check the conversation before sending it again.";
-    case "mutation_faulted":
-      return "That change failed partway through. Check the current state before retrying.";
-    case "operation_conflict":
-      return "That command was already submitted once. Check the conversation before sending it again.";
-    case "operation_receipt_expired":
-      return "The Dock can no longer confirm that earlier command. Check the conversation before retrying.";
-    case "runtime_unavailable":
-      return "The agent isn't running, so nothing was sent. Reopen this work from the Hub if it doesn't recover.";
-    case "compaction_failed":
-      return "Compaction failed. The conversation is unchanged; you can keep working or try again.";
-    case "interaction_not_found":
-    case "interaction_expired":
-      return "That question already closed. The latest state is in the conversation.";
-    case "interaction_wrong_lease":
-      return "Another window answered this question first.";
-    case "interaction_invalid_response":
-      return "That answer wasn't accepted. Try answering again.";
-    case "catalog_write_failed":
-    case "catalog_corrupt":
-      return "The Dock couldn't save its records — the Pi session file itself is safe. Check disk space and try again.";
-    case "connection_closed":
-      return "Lost the connection to the Dock. Press Ctrl+D to detach; the work keeps its state.";
-    default:
-      return error.message;
-  }
-}
-
 export function formatWorkStatus(snapshot: InstanceSnapshot): string {
   const model = snapshot.executor.model
     ? `${terminalSafe(snapshot.executor.model.provider)}/${terminalSafe(snapshot.executor.model.id)}`
@@ -2311,7 +2237,7 @@ export function formatWorkStatus(snapshot: InstanceSnapshot): string {
     `Session: ${terminalSafe(snapshot.name || "(unnamed)")}${snapshot.key === undefined ? "" : ` [${terminalSafe(snapshot.key)}]`}`,
     `Work cwd: ${terminalSafe(snapshot.cwd)}${snapshot.gitBranch === undefined ? "" : ` (${terminalSafe(snapshot.gitBranch)})`}`,
     `Model: ${model} · thinking ${terminalSafe(snapshot.executor.thinkingLevel ?? "off")}`,
-    `Saved session: ${snapshot.executor.sessionFile === undefined ? "not saved yet" : terminalSafe(snapshot.executor.sessionFile)}`,
+    `Saved session: ${snapshot.executor.sessionFile === undefined ? "available after the first message" : "available"}`,
   ].join("\n");
 }
 
@@ -2361,7 +2287,7 @@ function projectTrustChallenge(error: unknown, operationId: string): { challenge
   const challengeOperationId = error.details?.operationId;
   const cwd = error.details?.cwd;
   if (typeof challengeId !== "string" || challengeOperationId !== operationId || typeof cwd !== "string") {
-    throw new Error("Host returned an invalid project trust challenge");
+    throw new Error("That project trust choice expired. Try the action again.");
   }
   return { challengeId, cwd };
 }
@@ -2382,34 +2308,34 @@ function numericSetting(settings: SettingDto[], key: SettingDto["key"], fallback
 
 export function workHelpText(): string {
   return [
-    "SESSION",
-    "  /tree [ENTRY]             browse or navigate branches",
-    "  /fork [USER_ENTRY]        fork before a user prompt",
-    "  /clone                    clone the current leaf",
-    "  /new [PARENT]             start a new Pi session",
-    "  /resume [SESSION_FILE]    resume a saved Pi session",
+    "CONVERSATION",
+    "  /tree                    browse or navigate branches",
+    "  /fork                    start again from an earlier prompt",
+    "  /clone                   clone the current point",
+    "  /new                     start a new Pi session",
+    "  /resume                  choose a saved Pi session",
     "  /name NAME                set or clear the session name",
-    "  /compact [INSTRUCTIONS]   compact context",
-    "RUNTIME",
+    "  /compact [INSTRUCTIONS]   shorten conversation context",
+    "PI",
     "  /model [PROVIDER/MODEL]   choose a model",
     "  /thinking [LEVEL]         set reasoning effort",
     "  /tools [NAME…]            choose active tools",
     "  /settings [KEY VALUE]     inspect or update settings",
-    "  /reload                   reload resources",
-    "  /resources                inspect resources/diagnostics",
-    "CLIENT",
-    "  /steer MESSAGE            steer the current run",
-    "  /follow MESSAGE           queue a follow-up",
-    "  /abort                    abort; keep the instance",
-    "  /status                   refresh status",
-    "  /stop                     stop and dispose",
-    "  /detach                   leave Work; keep runtime",
-    "  /config                   show Pi CLI config ownership",
-    "  /install                  show Pi CLI package ownership",
-    "  /login                    show Pi CLI login ownership",
-    "EXTENSION",
-    "  Ctrl+O                    set all tool details for this runtime",
-    "  Alt+O                     toggle the latest detail locally",
+    "  /reload                   reload Pi files and commands",
+    "  /resources                inspect loaded Pi files and warnings",
+    "WORK",
+    "  /steer MESSAGE            redirect the current response",
+    "  /follow MESSAGE           send after the current response",
+    "  /abort                    stop the current response",
+    "  /status                   refresh work status",
+    "  /stop                     end this work and remove it from Dock",
+    "  /detach                   leave Work; work keeps running",
+    "  /config                   show the separate Pi CLI command",
+    "  /install                  show the separate Pi CLI command",
+    "  /login                    show the separate Pi CLI command",
+    "DETAILS",
+    "  Ctrl+O                    expand or collapse all tool details",
+    "  Alt+O                     toggle the latest detail",
     "  Type / to discover extension, skill, and prompt commands.",
   ].join("\n");
 }
@@ -2421,34 +2347,34 @@ export function commandCatalog(commands: CommandDto[]): Array<{ name: string; de
     if (name.length === 0 || /\s|\//u.test(name)) continue;
     catalog.set(name, {
       name,
-      description: terminalSafe(command.description ?? `${command.source.kind} command`),
+      description: terminalSafe(command.description ?? "Pi command"),
       ...(command.argumentCompletions ? { argumentHint: "arguments" } : {}),
     });
   }
   const dockCommands = [
-    { name: "abort", description: "abort the current run; keep the instance reusable" },
-    { name: "clone", description: "clone the current session leaf into a new Pi session" },
-    { name: "compact", description: "manually compact session context", argumentHint: "INSTRUCTIONS" },
-    { name: "config", description: "show Pi CLI config ownership guidance" },
-    { name: "detach", description: "leave the TUI without stopping the instance" },
-    { name: "follow", description: "queue a follow-up message", argumentHint: "MESSAGE" },
-    { name: "fork", description: "fork before a user message and return it to the editor", argumentHint: "USER_ENTRY_ID" },
-    { name: "help", description: "show Dock commands" },
-    { name: "install", description: "show Pi CLI package ownership guidance" },
-    { name: "login", description: "show Pi CLI login ownership guidance" },
+    { name: "abort", description: "stop the current response; keep the work open" },
+    { name: "clone", description: "clone the current conversation point into a new Pi session" },
+    { name: "compact", description: "shorten conversation context", argumentHint: "INSTRUCTIONS" },
+    { name: "config", description: "show the separate Pi CLI command" },
+    { name: "detach", description: "leave Work while the work keeps running" },
+    { name: "follow", description: "send a message after the current response", argumentHint: "MESSAGE" },
+    { name: "fork", description: "choose an earlier prompt and return it to the editor" },
+    { name: "help", description: "show Work commands" },
+    { name: "install", description: "show the separate Pi CLI command" },
+    { name: "login", description: "show the separate Pi CLI command" },
     { name: "model", description: "choose or set provider/model", argumentHint: "PROVIDER/MODEL" },
     { name: "name", description: "set or clear the Pi session name", argumentHint: "NAME" },
-    { name: "new", description: "create a new Pi session", argumentHint: "PARENT_SESSION" },
-    { name: "reload", description: "coherently reload Pi resources" },
-    { name: "resources", description: "inspect loaded resources and diagnostics" },
-    { name: "resume", description: "select or open a Pi session", argumentHint: "SESSION_FILE" },
+    { name: "new", description: "start a new Pi session" },
+    { name: "reload", description: "reload Pi files and commands" },
+    { name: "resources", description: "inspect loaded Pi files and warnings" },
+    { name: "resume", description: "search for and choose a saved Pi session" },
     { name: "settings", description: "inspect or update Pi settings", argumentHint: "KEY VALUE" },
-    { name: "status", description: "refresh instance status" },
-    { name: "steer", description: "steer the current run", argumentHint: "MESSAGE" },
-    { name: "stop", description: "stop and dispose the instance" },
+    { name: "status", description: "refresh work status" },
+    { name: "steer", description: "redirect the current response", argumentHint: "MESSAGE" },
+    { name: "stop", description: "end this work and remove it from Dock" },
     { name: "thinking", description: "choose or set thinking level", argumentHint: "LEVEL" },
-    { name: "tools", description: "toggle or set active tools", argumentHint: "NAME…" },
-    { name: "tree", description: "browse and navigate the current Pi session tree", argumentHint: "ENTRY_ID" },
+    { name: "tools", description: "choose active tools", argumentHint: "NAME…" },
+    { name: "tree", description: "browse and choose a point in the current Pi session tree" },
   ];
   for (const command of dockCommands) catalog.set(command.name, command);
   return [...catalog.values()].sort((left, right) => left.name.localeCompare(right.name));
@@ -2472,8 +2398,4 @@ export function snapshotIsNotOlder(candidate: InstanceSnapshot, current: Instanc
     && candidate.eventCursor.instanceId === current.eventCursor.instanceId
     && candidate.eventCursor.runtimeGeneration === current.eventCursor.runtimeGeneration
     && candidate.eventCursor.sequence >= current.eventCursor.sequence;
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? terminalSafe(error.message) : terminalSafe(String(error));
 }

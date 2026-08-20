@@ -2,15 +2,6 @@ import type { TreeNodeDto } from "../core/instance-dto.js";
 
 export type TreeFilterMode = "default" | "no-tools" | "user-only" | "labeled-only" | "all";
 
-export interface TreeNavigationCommand {
-  entryId: string;
-  options: {
-    summarize?: boolean;
-    customInstructions?: string;
-    replaceInstructions?: boolean;
-  };
-}
-
 export interface VisibleTreeNode {
   node: TreeNodeDto;
   parentId?: string;
@@ -382,7 +373,7 @@ function visualProjection(
   return result;
 }
 
-/** Legacy compact items retained for bounded fork/user pickers. */
+/** Compact human labels for bounded fork/user pickers; IDs remain item values only. */
 export function treePickerItems(
   nodes: TreeNodeDto[],
   leafId?: string,
@@ -395,10 +386,10 @@ export function treePickerItems(
     const marker = node.entryId === leafId ? "●" : item?.branchPoint ? "╋" : node.hasChildren ? "·" : "○";
     const role = semanticTreeRole(node);
     const flags = [
-      ...(node.entryId === leafId ? ["current leaf"] : []),
-      ...(item?.activePath && node.entryId !== leafId ? ["active path"] : []),
-      ...(item?.branchPoint ? [`branch point · ${item.childIds.length} paths`] : []),
-      ...(!node.hasChildren && !item?.activePath ? ["sibling branch leaf"] : []),
+      ...(node.entryId === leafId ? ["current point"] : []),
+      ...(item?.activePath && node.entryId !== leafId ? ["current conversation"] : []),
+      ...(item?.branchPoint ? [`conversation splits here · ${item.childIds.length} paths`] : []),
+      ...(!node.hasChildren && !item?.activePath ? ["other branch ends here"] : []),
       ...(node.label ? [`label: ${node.label}`] : []),
     ];
     return { value: node.entryId, label: `${item?.prefix ?? ""}${marker} ${role} · ${node.summary}`, description: flags.join(" · ") || role.toLowerCase() };
@@ -415,20 +406,6 @@ export function semanticTreeRole(node: TreeNodeDto): string {
   if (node.kind === "compaction") return "Context summary";
   if (node.kind === "branch_summary") return "Branch summary";
   return node.kind.replaceAll("_", " ");
-}
-
-export function parseTreeNavigationCommand(target: string): TreeNavigationCommand | undefined {
-  const [entryId, mode, ...rest] = target.split(/\s+/u);
-  if (!entryId || (mode !== undefined && mode !== "--summary" && mode !== "--replace")) return undefined;
-  if (mode === "--replace" && rest.length === 0) return undefined;
-  return {
-    entryId,
-    options: mode === undefined ? {} : {
-      summarize: true,
-      ...(rest.length === 0 ? {} : { customInstructions: rest.join(" ") }),
-      ...(mode === "--replace" ? { replaceInstructions: true } : {}),
-    },
-  };
 }
 
 export function isTreeFilterMode(value: unknown): value is TreeFilterMode {

@@ -7,17 +7,17 @@ import {
   projectInstanceDisplayName,
 } from "../src/core/instance-display-name.js";
 
-test("Dock projects one safe display name from session name, key, or a bounded cwd fallback", () => {
+test("Dock projects one safe display name from the session name, first user message, or project", () => {
   assert.equal(projectInstanceDisplayName({
     name: "  中文<规划>\n工作  ",
-    key: "ignored-key",
+    firstUserMessage: "ignored first message",
     cwd: "/workspace/ignored",
   }), "中文 规划 工作");
   assert.equal(projectInstanceDisplayName({
     name: "<>\n",
-    key: "alu.admin",
+    firstUserMessage: "准备进行 Alu Dock 0.2 release 检查",
     cwd: "/workspace/ignored",
-  }), "alu admin");
+  }), "准备进行 Alu Dock 0 2 release 检查");
   assert.equal(projectInstanceDisplayName({
     cwd: "/workspace/my.project_v2<script>",
   }), "my project_v2 script");

@@ -12,7 +12,7 @@ import type { InstanceSnapshot } from "../src/core/managed-instance.js";
 test("human list has an actionable empty state", () => {
   assert.equal(
     renderHumanInstanceList([], 80),
-    "No Alu Dock instances.\nStart one: aludock new\n",
+    "No work in Alu Dock.\nStart work: aludock new\n",
   );
 });
 
@@ -25,13 +25,13 @@ test("human list default selection hides only stopped history and reports how to
   assert.deepEqual(selected.instances.map((item) => item.id), [failed.id, lost.id, active.id]);
   assert.equal(selected.hiddenStopped, 1);
   const output = renderHumanInstanceList(selected.instances, 80, { mode: "actionable", hiddenStopped: selected.hiddenStopped });
-  assert.match(output, /Alu Dock actionable · 3 · 1 stopped hidden/u);
+  assert.match(output, /Alu Dock work · 3 · 1 in History hidden/u);
   assert.match(output, /History: aludock list --all/u);
   assert.doesNotMatch(output, new RegExp(stopped.id.slice(0, 8), "u"));
 
   const empty = renderHumanInstanceList([], 43, { mode: "actionable", hiddenStopped: 25 });
-  assert.match(empty, /No actionable Alu Dock instances/u);
-  assert.match(empty, /25 stopped hidden/u);
+  assert.match(empty, /No work is ready to continue/u);
+  assert.match(empty, /25 in History/u);
   assert.match(empty, /list --all/u);
   assert.equal(selectHumanInstanceList([stopped], true).hiddenStopped, 0);
 });
@@ -60,11 +60,11 @@ test("human list orders work and excludes private identifiers", () => {
   const stopped = instance(4, { name: "old", lifecycle: "stopped", execution: "unavailable" });
   const output = renderHumanInstanceList([stopped, recoverable, idle, running], 120);
 
-  assert.ok(output.indexOf(running.id.slice(0, 8)) < output.indexOf(idle.id.slice(0, 8)));
-  assert.ok(output.indexOf(idle.id.slice(0, 8)) < output.indexOf(recoverable.id.slice(0, 8)));
-  assert.ok(output.indexOf(recoverable.id.slice(0, 8)) < output.indexOf(stopped.id.slice(0, 8)));
+  assert.ok(output.indexOf("active 2J run") < output.indexOf("idle"));
+  assert.ok(output.indexOf("idle") < output.indexOf("recover me"));
+  assert.ok(output.indexOf("recover me") < output.indexOf("old"));
   for (const expected of [
-    "active 2J run", "openai-codex/gpt-test", "pending 2", "/workspace/project-1", "idle", "recover me", "old",
+    "active 2J run", "openai-codex/gpt-test", "2 waiting", "/workspace/project-1", "idle", "recover me", "old",
   ]) assert.match(output, new RegExp(escapeRegExp(expected), "u"));
   assert.doesNotMatch(output, /\u001b/u);
   for (const secret of [
@@ -88,7 +88,7 @@ test("human list is terminal-safe and display-width bounded at narrow and wide s
     const output = renderHumanInstanceList([unsafe], width);
     assert.doesNotMatch(output, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/u);
     for (const line of output.trimEnd().split("\n")) assert.ok(terminalDisplayWidth(line) <= width, `${width}: ${line}`);
-    assert.match(output, new RegExp(unsafe.id.slice(0, 8), "u"));
+    assert.doesNotMatch(output, new RegExp(unsafe.id.slice(0, 8), "u"));
     assert.match(output, width < 40 ? /中/u : /中文/u);
   }
   assert.equal(terminalDisplayWidth("中文"), 4);
@@ -96,12 +96,13 @@ test("human list is terminal-safe and display-width bounded at narrow and wide s
   assert.equal(terminalDisplayWidth("😀"), 2);
 });
 
-test("human list displays a unique resolvable prefix when the first eight characters collide", () => {
-  const first = instance(6, { id: "019f7005-aaaa-4000-8000-000000000001" });
-  const second = instance(7, { id: "019f7005-bbbb-4000-8000-000000000002" });
-  const output = renderHumanInstanceList([first, second], 80, { identityUniverse: [first, second] });
-  assert.match(output, /019f7005-a/u);
-  assert.match(output, /019f7005-b/u);
+test("human list distinguishes duplicate names with project and time instead of IDs", () => {
+  const first = instance(6, { id: "019f7005-aaaa-4000-8000-000000000001", name: "review", displayName: "review", cwd: "/workspace/first" });
+  const second = instance(7, { id: "019f7005-bbbb-4000-8000-000000000002", name: "review", displayName: "review", cwd: "/workspace/second" });
+  const output = renderHumanInstanceList([first, second], 120);
+  assert.match(output, /workspace\/first/u);
+  assert.match(output, /workspace\/second/u);
+  assert.doesNotMatch(output, /019f7005/u);
 });
 
 function instance(index: number, overrides: Partial<InstanceSnapshot> = {}): InstanceSnapshot {
@@ -141,7 +142,6 @@ function instance(index: number, overrides: Partial<InstanceSnapshot> = {}): Ins
     ...overrides,
     displayName: overrides.displayName ?? projectInstanceDisplayName({
       name: overrides.name ?? `instance ${index}`,
-      key: overrides.key,
       cwd: overrides.cwd ?? `/workspace/project-${index}`,
     }),
     compacting: overrides.compacting ?? false,
