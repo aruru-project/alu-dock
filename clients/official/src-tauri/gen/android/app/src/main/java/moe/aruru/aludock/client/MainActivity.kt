@@ -2,34 +2,60 @@ package moe.aruru.aludock.client
 
 import android.graphics.Color
 import android.os.Bundle
-import android.view.View
+import android.os.Handler
+import android.os.Looper
+import android.webkit.WebView
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
-import androidx.core.graphics.Insets
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
 
 class MainActivity : TauriActivity() {
+  private var webView: WebView? = null
+  private var destroyed = false
+  private val mainHandler = Handler(Looper.getMainLooper())
+  private val readinessPoller by lazy {
+    WebViewReadinessPoller(webViewProvider = { webView }, isDestroyed = { destroyed })
+  }
+  private val insetsBridge by lazy {
+    AndroidInsetsBridge(
+      window = window,
+      resources = resources,
+      contentRootProvider = { window.decorView.findViewById(android.R.id.content) },
+      webViewProvider = { webView },
+      isDestroyed = { destroyed },
+      mainHandler = mainHandler,
+      readinessPoller = readinessPoller,
+    )
+  }
+
   override fun onCreate(savedInstanceState: Bundle?) {
-    val background = Color.rgb(7, 11, 24)
+    val transparent = Color.TRANSPARENT
     enableEdgeToEdge(
-      statusBarStyle = SystemBarStyle.dark(background),
-      navigationBarStyle = SystemBarStyle.dark(background),
+      statusBarStyle = SystemBarStyle.dark(transparent),
+      navigationBarStyle = SystemBarStyle.dark(transparent),
     )
     super.onCreate(savedInstanceState)
+    insetsBridge.onCreate()
+  }
 
-    val content = findViewById<View>(android.R.id.content)
-    ViewCompat.setOnApplyWindowInsetsListener(content) { view, windowInsets ->
-      val handledTypes = WindowInsetsCompat.Type.systemBars() or
-        WindowInsetsCompat.Type.displayCutout() or
-        WindowInsetsCompat.Type.ime()
-      val insets = windowInsets.getInsets(handledTypes)
-      view.setPadding(insets.left, insets.top, insets.right, insets.bottom)
+  override fun onWebViewCreate(webView: WebView) {
+    this.webView = webView
+    insetsBridge.onWebViewAvailable()
+  }
 
-      WindowInsetsCompat.Builder(windowInsets)
-        .setInsets(handledTypes, Insets.NONE)
-        .build()
-    }
-    ViewCompat.requestApplyInsets(content)
+  override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+    super.onConfigurationChanged(newConfig)
+    insetsBridge.onConfigurationChanged()
+  }
+
+  override fun onResume() {
+    super.onResume()
+    insetsBridge.onResume()
+  }
+
+  override fun onDestroy() {
+    destroyed = true
+    mainHandler.removeCallbacksAndMessages(null)
+    webView = null
+    super.onDestroy()
   }
 }

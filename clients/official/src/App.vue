@@ -2534,9 +2534,9 @@ function handleOutputClick(event: MouseEvent) {
       <div class="alu-navbar-left">
         <img src="./assets/console_icon_small.png" class="alu-navbar-avatar session-dot" alt="阿露" />
         <button type="button" class="alu-navbar-breadcrumb" title="查看 Project Status" aria-label="查看 Project Status" :disabled="!selected" @click="openControlCenter('resources')">
-          <span class="alu-nav-workspace">{{ selected ? selected.cwd.split('/').filter(Boolean).slice(-2).join('/') : 'AluDock' }}</span>
-          <span class="alu-nav-sep">/</span>
-          <span class="alu-nav-session">{{ selected?.name || selected?.displayName || '选择 Work' }}</span>
+          <span v-if="!app.needsPairing" class="alu-nav-workspace">{{ selected ? selected.cwd.split('/').filter(Boolean).slice(-2).join('/') : 'AluDock' }}</span>
+          <span v-if="!app.needsPairing" class="alu-nav-sep">/</span>
+          <span class="alu-nav-session">{{ app.needsPairing ? 'AluDock' : selected?.name || selected?.displayName || '选择 Work' }}</span>
           <span v-if="selected?.gitBranch" class="alu-nav-git-branch"> {{ selected.gitBranch }}</span>
           <span class="alu-navbar-breadcrumb-arrow" aria-hidden="true">▾</span>
         </button>
