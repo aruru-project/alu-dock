@@ -117,6 +117,7 @@ marked.use({ breaks: true, gfm: true })
 
 const commandShortcutLabel = /Macintosh|Mac OS X/.test(navigator.userAgent) ? '⌘K' : 'Ctrl+K'
 const isAndroidWebView = /Android/i.test(navigator.userAgent)
+const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
 
 const MARKDOWN_SANITIZE_CONFIG = {
   USE_PROFILES: { html: true },
@@ -2909,7 +2910,7 @@ function handleOutputClick(event: MouseEvent) {
         <section ref="modalSurface" :class="directoryOpen ? ['ui-dialog-box', 'ui-dialog-size-wide'] : 'host-settings-surface'" role="dialog" aria-modal="true" tabindex="-1" :aria-labelledby="directoryOpen ? 'directory-title' : 'host-settings-title'" @wheel="handleModalWheel">
           <template v-if="directoryOpen"><header class="ui-dialog-header"><div id="directory-title" class="ui-dialog-title">选择工作目录</div><div class="ui-dialog-body">{{ workspace?.path || workspacePath }}{{ workspace ? `\n${workspace.truncated ? `显示前 ${workspace.entries.length} / ${workspace.total} 个目录` : `${workspace.total} 个子目录`}` : '' }}</div></header><button class="ui-dialog-close" aria-label="关闭" @click="closeModal">×</button></template>
           <header v-else class="host-settings-header">
-            <div class="host-settings-heading"><img src="./assets/aludock-icon.png" alt="" /><div><h2 id="host-settings-title">Host 设置</h2><p>{{ app.payload?.host.profile.displayName || '管理已配对的 AluDock' }}</p></div></div>
+            <div class="host-settings-heading"><img src="./assets/aludock-icon.png" alt="" /><div><h2 id="host-settings-title">Host 设置</h2><p>{{ app.payload?.host.profile.displayName || '管理已配对的 AluDock' }} · 版本 {{ appBuildIdentity }}</p></div></div>
             <button class="host-settings-close" data-modal-initial aria-label="关闭" @click="closeModal"><X :size="18" /></button>
           </header>
           <div v-if="directoryOpen" class="alu-directory-select">

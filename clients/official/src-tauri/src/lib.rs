@@ -2877,9 +2877,7 @@ fn ensure_attachment_scope(
 type PreparedAttachment = (String, SelectedAttachment, NativeAttachment);
 
 fn valid_attachment_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.chars().count() <= 1_024
-        && !name.chars().any(char::is_control)
+    !name.is_empty() && name.chars().count() <= 1_024 && !name.chars().any(char::is_control)
 }
 
 #[cfg(target_os = "android")]
@@ -2994,11 +2992,8 @@ async fn stage_android_picked_file(
         .filter(|name| valid_attachment_name(name))
         .map(str::to_owned)
         .unwrap_or_else(|| fallback_attachment_name(media_type.as_deref()));
-    let media_type = media_type.or_else(|| {
-        mime_guess::from_path(&name)
-            .first_raw()
-            .map(str::to_owned)
-    });
+    let media_type =
+        media_type.or_else(|| mime_guess::from_path(&name).first_raw().map(str::to_owned));
     let staging_directory = app
         .path()
         .app_cache_dir()
@@ -3006,10 +3001,8 @@ async fn stage_android_picked_file(
             attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
         })?
         .join("attachment-staging");
-    let staging_path = staging_directory.join(format!(
-        "aludock-selection-{}.part",
-        uuid::Uuid::new_v4()
-    ));
+    let staging_path =
+        staging_directory.join(format!("aludock-selection-{}.part", uuid::Uuid::new_v4()));
     let staging_app = app.clone();
     let copied_path = staging_path.clone();
     let size_bytes = tokio::task::spawn_blocking(move || {
@@ -3836,10 +3829,7 @@ async fn pick_attachments(
         let (path, temporary, name, size_bytes, media_type) = match local_path {
             Ok(path) => {
                 let metadata = std::fs::symlink_metadata(&path).map_err(|_| {
-                    attachment_command_error(
-                        "attachment_source_unavailable",
-                        "无法读取所选附件。",
-                    )
+                    attachment_command_error("attachment_source_unavailable", "无法读取所选附件。")
                 })?;
                 if !metadata.file_type().is_file() {
                     return Err(attachment_command_error(
