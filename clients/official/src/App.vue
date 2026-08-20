@@ -116,6 +116,7 @@ import { useExtensionUiStore } from './stores/extension-ui'
 marked.use({ breaks: true, gfm: true })
 
 const commandShortcutLabel = /Macintosh|Mac OS X/.test(navigator.userAgent) ? '⌘K' : 'Ctrl+K'
+const isAndroidWebView = /Android/i.test(navigator.userAgent)
 
 const MARKDOWN_SANITIZE_CONFIG = {
   USE_PROFILES: { html: true },
@@ -514,6 +515,7 @@ onMounted(async () => {
     const appWindow = getCurrentWindow()
     unlisteners.push(await appWindow.onFocusChanged(({ payload }) => { void handleWindowFocusChanged(payload) }))
     windowFocused.value = await appWindow.isFocused()
+      || (isAndroidWebView && document.visibilityState === 'visible')
     unlisteners.push(
       await listen<{ hostId: string; selectionGeneration: number; instanceId: string; subscriptionId: string; event: ProjectedEvent }>('aludock://conversation-event', async ({ payload }) => {
         if (!app.contextMatches(payload) || payload.instanceId !== selected.value?.id) return
@@ -1670,7 +1672,9 @@ function handleOutputScroll() {
 }
 
 function handleOutputMediaLoad(event: Event) {
-  if (event.target instanceof HTMLImageElement) scrollOutputToBottom()
+  if (event.target instanceof HTMLImageElement && event.target.closest('[data-conversation-id]')) {
+    scrollOutputToBottom()
+  }
 }
 
 const idleImageResource: ConversationImageResource = { state: 'idle' }

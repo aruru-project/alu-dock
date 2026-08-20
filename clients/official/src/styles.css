@@ -59,6 +59,7 @@ body::before {
   display: grid;
   grid-template-rows: 58px minmax(0, 1fr) auto;
   width: 100%;
+  height: 100%;
   height: 100dvh;
 }
 
@@ -813,7 +814,7 @@ kbd { padding: 1px 4px; color: var(--c-text-3); font: 9px 'JetBrains Mono'; back
 html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 button, input, textarea, select { font: inherit; }
 button { margin: 0; padding: 0; border: 0; background: transparent; color: inherit; -webkit-tap-highlight-color: transparent; }
-.alu-client-shell { position: relative; z-index: 1; display: flex; width: 100%; height: 100dvh; flex-direction: column; color: var(--alu-text); }
+.alu-client-shell { position: relative; z-index: 1; display: flex; width: 100%; height: 100%; height: 100dvh; flex-direction: column; color: var(--alu-text); }
 .alu-output { position: relative; min-height: 0; flex: 1 1 auto; overflow-y: auto; overflow-anchor: none; }
 .alu-preview-notice, .alu-recovery-notice { position: sticky; z-index: 4; top: 8px; width: max-content; max-width: 100%; margin: 0 auto 14px; padding: 5px 10px; border: 1px solid var(--alu-border); border-radius: 999px; background: color-mix(in srgb, var(--alu-bg-raised) 94%, transparent); color: var(--alu-text-muted); font-size: 10px; }
 .alu-recovery-notice { display: flex; align-items: center; gap: 8px; color: var(--alu-amber); border-color: color-mix(in srgb, var(--alu-amber) 30%, transparent); }

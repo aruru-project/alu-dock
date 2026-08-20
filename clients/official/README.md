@@ -94,6 +94,14 @@ pnpm android build --debug --apk --target aarch64 --ci
 
 构建 x86_64 模拟器版本时，将 Rust target 和构建目标改为 `x86_64-linux-android` 与 `x86_64`。
 
+需要给已安装正式签名版本的设备原地覆盖测试时，在忽略的 `.release-secrets/android/signing.env` 中配置 Android Release 签名变量，然后运行：
+
+```bash
+pnpm android stg
+```
+
+该命令只生成本地 ARM64 Release 测试包，不发布 Release 或修改 tag。产物位于 `dist/AluDock-<version>-android-arm64-stg.apk`。
+
 协议调试工具可以直接从工作区运行：
 
 ```bash

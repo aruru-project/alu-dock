@@ -2,9 +2,11 @@
 
 import { spawnSync } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
+  rmSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -38,6 +40,22 @@ const localPropertiesPath = join(
   "gen",
   "android",
   "local.properties",
+);
+const stagingSigningEnvironmentPath = join(
+  repositoryRoot,
+  ".release-secrets",
+  "android",
+  "signing.env",
+);
+const androidJniLibrariesPath = join(
+  repositoryRoot,
+  "src-tauri",
+  "gen",
+  "android",
+  "app",
+  "src",
+  "main",
+  "jniLibs",
 );
 
 function loadConfiguredEnvironment() {
@@ -221,6 +239,7 @@ function showUsage() {
   pnpm android config-path
   pnpm android doctor
   pnpm android setup
+  pnpm android stg
   pnpm android <Tauri Android 子命令及参数>
 
 示例：
@@ -243,7 +262,78 @@ function runTauriAndroid(args, environment) {
     console.error(`Android 命令被信号 ${result.signal} 中止`);
     process.exit(1);
   }
-  process.exit(result.status ?? 1);
+  if (result.status !== 0) {
+    process.exit(result.status ?? 1);
+  }
+}
+
+function stagingSigningEnvironment() {
+  if (!existsSync(stagingSigningEnvironmentPath)) {
+    throw new Error(`缺少本机签名配置：${stagingSigningEnvironmentPath}`);
+  }
+  const configured = parseEnv(readFileSync(stagingSigningEnvironmentPath, "utf8"));
+  const names = [
+    "ALUDOCK_ANDROID_KEYSTORE_PATH",
+    "ALUDOCK_ANDROID_KEYSTORE_PASSWORD",
+    "ALUDOCK_ANDROID_KEY_ALIAS",
+    "ALUDOCK_ANDROID_KEY_PASSWORD",
+  ];
+  const values = {};
+  for (const name of names) {
+    const value = process.env[name]?.trim() || configured[name]?.trim();
+    if (!value) {
+      throw new Error(`本机签名配置缺少 ${name}：${stagingSigningEnvironmentPath}`);
+    }
+    values[name] = value;
+  }
+  const configuredPath = values.ALUDOCK_ANDROID_KEYSTORE_PATH
+    .replaceAll("${PWD}", repositoryRoot)
+    .replaceAll("$PWD", repositoryRoot);
+  values.ALUDOCK_ANDROID_KEYSTORE_PATH = isAbsolute(configuredPath)
+    ? configuredPath
+    : resolve(repositoryRoot, configuredPath);
+  if (!existsSync(values.ALUDOCK_ANDROID_KEYSTORE_PATH)) {
+    throw new Error(`本机签名证书不存在：${values.ALUDOCK_ANDROID_KEYSTORE_PATH}`);
+  }
+  return values;
+}
+
+function buildStagingApk(androidEnvironment) {
+  const signingEnvironment = stagingSigningEnvironment();
+  rmSync(androidJniLibrariesPath, { recursive: true, force: true });
+  runTauriAndroid(
+    ["build", "--apk", "--target", "aarch64", "--ci"],
+    {
+      ...androidEnvironment,
+      environment: {
+        ...androidEnvironment.environment,
+        ...signingEnvironment,
+      },
+    },
+  );
+
+  const source = join(
+    repositoryRoot,
+    "src-tauri",
+    "gen",
+    "android",
+    "app",
+    "build",
+    "outputs",
+    "apk",
+    "universal",
+    "release",
+    "app-universal-release.apk",
+  );
+  if (!existsSync(source)) {
+    throw new Error("Android staging 构建完成，但没有找到 Release APK。");
+  }
+  const version = JSON.parse(readFileSync(join(repositoryRoot, "package.json"), "utf8")).version;
+  const outputDirectory = join(repositoryRoot, "dist");
+  const output = join(outputDirectory, `AluDock-${version}-android-arm64-stg.apk`);
+  mkdirSync(outputDirectory, { recursive: true });
+  copyFileSync(source, output);
+  console.log(`Android staging APK：${output}`);
 }
 
 try {
@@ -263,6 +353,11 @@ try {
   } else if (command === "setup") {
     showDoctor(environment);
     syncLocalProperties(environment.androidHome);
+  } else if (command === "stg") {
+    if (args.length > 0) {
+      throw new Error("pnpm android stg 不接受额外参数。");
+    }
+    buildStagingApk(environment);
   } else {
     runTauriAndroid([command, ...args], environment);
   }
