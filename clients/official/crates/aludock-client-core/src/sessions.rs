@@ -173,11 +173,21 @@ pub struct ConversationContentPage {
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CompleteConversationPage {
+pub struct ConversationPreviewPage {
     pub records: Vec<HistoryRecord>,
+    pub incomplete_entry_ids: Vec<String>,
     pub revision: String,
     pub has_earlier: bool,
     pub next_cursor: Option<String>,
+    pub instance: InstanceSnapshot,
+    pub host_epoch: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompletedConversationEntry {
+    pub record: HistoryRecord,
+    pub revision: String,
     pub instance: InstanceSnapshot,
     pub host_epoch: String,
 }
@@ -589,36 +599,83 @@ impl DockClient {
         }
     }
 
-    pub async fn complete_conversation_page(
+    pub async fn preview_conversation_page(
         &self,
         instance_id: &str,
         cursor: Option<&str>,
         limit: u16,
-    ) -> Result<CompleteConversationPage> {
+    ) -> Result<ConversationPreviewPage> {
         let (page, host_epoch) = self
             .conversation_history(instance_id, cursor, limit)
             .await?;
-        let revision = page.revision.clone();
-        let generation = page.instance.runtime_generation;
         let mut records = Vec::with_capacity(page.entries.len());
-        for item in &page.entries {
-            let mut record = item.entry.clone();
-            if !item.content_complete {
-                record.content = self
-                    .hydrate_content(instance_id, &host_epoch, generation, &revision, item)
-                    .await?;
-            } else if record.content.len() != item.total_blocks {
+        let mut incomplete_entry_ids = Vec::new();
+        for item in page.entries {
+            if item.content_complete {
+                if item.entry.content.len() != item.total_blocks {
+                    return Err(protocol(
+                        "complete conversation preview block count was inconsistent",
+                    ));
+                }
+            } else {
+                incomplete_entry_ids.push(item.entry.entry_id.clone());
+            }
+            records.push(item.entry);
+        }
+        Ok(ConversationPreviewPage {
+            records,
+            incomplete_entry_ids,
+            revision: page.revision,
+            has_earlier: page.has_earlier,
+            next_cursor: page.next_cursor,
+            instance: page.instance,
+            host_epoch,
+        })
+    }
+
+    pub async fn complete_conversation_entry(
+        &self,
+        instance_id: &str,
+        cursor: Option<&str>,
+        limit: u16,
+        entry_id: &str,
+        expected_revision: &str,
+    ) -> Result<CompletedConversationEntry> {
+        let (page, host_epoch) = self
+            .conversation_history(instance_id, cursor, limit)
+            .await?;
+        if page.revision != expected_revision {
+            return Err(protocol(
+                "conversation history changed while an entry was loading",
+            ));
+        }
+        let generation = page.instance.runtime_generation;
+        let item = page
+            .entries
+            .iter()
+            .find(|item| item.entry.entry_id == entry_id)
+            .ok_or_else(|| protocol("conversation history entry was no longer on its page"))?;
+        let mut record = item.entry.clone();
+        if item.content_complete {
+            if record.content.len() != item.total_blocks {
                 return Err(protocol(
                     "complete conversation preview block count was inconsistent",
                 ));
             }
-            records.push(record);
+        } else {
+            record.content = self
+                .hydrate_content(
+                    instance_id,
+                    &host_epoch,
+                    generation,
+                    expected_revision,
+                    item,
+                )
+                .await?;
         }
-        Ok(CompleteConversationPage {
-            records,
-            revision,
-            has_earlier: page.has_earlier,
-            next_cursor: page.next_cursor,
+        Ok(CompletedConversationEntry {
+            record,
+            revision: page.revision,
             instance: page.instance,
             host_epoch,
         })

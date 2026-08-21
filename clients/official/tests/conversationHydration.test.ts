@@ -41,12 +41,23 @@ function project(records: ConversationRecord[]) {
 const before = project([preview]).find((item) => item.kind === 'user')
 assert.equal(before?.kind === 'user' && before.images?.[0]?.source, undefined, '有界历史只有附件引用时还没有图片内容')
 assert.equal(before?.kind === 'user' && before.images?.[0]?.name, 'Screenshot.jpg', '有界历史仍显示附件名称')
+assert.equal(before?.kind === 'user' && before.images?.[0]?.historyEntryId, 'entry-1', '未读完的历史图片仍关联原会话记录以便重试')
 
-const hydrated = mergeHydratedConversationRecords([preview], [completed])
-const after = project(hydrated).find((item) => item.kind === 'user')
+const older: ConversationRecord = {
+  recordId: 'record-0',
+  entryId: 'entry-0',
+  kind: 'message',
+  source: 'user',
+  visibility: 'conversation',
+  content: [{ type: 'text', text: 'earlier' }],
+}
+const hydrated = mergeHydratedConversationRecords([older, preview], [completed])
+const projected = project(hydrated)
+const after = projected.find((item) => item.id === 'record-1')
+assert.deepEqual(projected.map((item) => item.id), ['record-0', 'record-1'], '图片补全时保留用户已经载入的更早记录')
 assert.deepEqual(
   after?.kind === 'user' ? after.images?.[0]?.source : undefined,
   { type: 'inline', data: '/9j/', mimeType: 'image/jpeg' },
-  '完整历史载入后，同一条消息恢复可显示的图片内容',
+  '清空本地预览后，正式历史内容仍恢复同一张图片',
 )
 console.log('conversation hydration tests passed')

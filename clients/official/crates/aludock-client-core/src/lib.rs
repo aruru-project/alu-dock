@@ -81,11 +81,12 @@ pub use published_files::{
     MAX_PUBLISHED_FILE_BYTES, MAX_PUBLISHED_FILE_CHUNK_BYTES, PublishedFileBytes, PublishedFileDto,
 };
 pub use sessions::{
-    CompleteConversationPage, ConversationContentChunk, ConversationContentPage,
+    CompletedConversationEntry, ConversationContentChunk, ConversationContentPage,
     ConversationHistoryEntry, ConversationHistoryPage, ConversationImageBytes,
-    MAX_CONVERSATION_IMAGE_BYTES, NavigateOptions, SessionCompaction, SessionCompactionResult,
-    SessionForkResult, SessionHistoryPage, SessionInfo, SessionListResult, SessionNameResult,
-    SessionNavigateResult, SessionReloadResult, SessionReplacementResult, SessionScope,
-    SessionTree, TreeDisplayClass, TreeNode, TreeNodeKind, TreeNodeRole, TreeNodeState,
+    ConversationPreviewPage, MAX_CONVERSATION_IMAGE_BYTES, NavigateOptions, SessionCompaction,
+    SessionCompactionResult, SessionForkResult, SessionHistoryPage, SessionInfo, SessionListResult,
+    SessionNameResult, SessionNavigateResult, SessionReloadResult, SessionReplacementResult,
+    SessionScope, SessionTree, TreeDisplayClass, TreeNode, TreeNodeKind, TreeNodeRole,
+    TreeNodeState,
 };
 pub use storage::{IdentityStore, PairingMetadata, PendingPairing, StoredPairing};

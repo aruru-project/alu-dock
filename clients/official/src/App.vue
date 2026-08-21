@@ -42,6 +42,7 @@ import {
   loadConversation,
   loadAttachmentPreviewBytes,
   loadConversationHistory,
+  loadConversationHistoryEntry,
   loadConversationImageBytes,
   loadPublishedImageBytes,
   openSavedDeliverable,
@@ -99,7 +100,7 @@ import {
 } from './lib/uiBoundaries'
 import { applySlashArgumentCompletion, applySlashCompletion, catalogSourceLabel, filterCatalogCommands, prefixSlashCommand, slashArgumentContext, slashCommandQuery } from './lib/commandSuggest'
 import { filterLocalControlCommands, localControlCommands, submittedLocalControl, type ControlSection, type LocalControlCommand } from './lib/localCommands'
-import type { AttachmentDto, AttachmentUploadProgress, CommandArgumentCompletion, CommandInfo, ConnectionKind, ConversationBootstrap, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, HostConnectionProfile, HostContext, HostEndpoint, ProjectedEvent, QueueItem, SelectedAttachment, Work, WorkspacePage } from './lib/types'
+import type { AttachmentDto, AttachmentUploadProgress, CommandArgumentCompletion, CommandInfo, ConnectionKind, ConversationBootstrap, ConversationHistoryPage, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, HostConnectionProfile, HostContext, HostEndpoint, ProjectedEvent, QueueItem, SelectedAttachment, Work, WorkspacePage } from './lib/types'
 import {
   deliveryHistoryKey,
   downloadedDelivery,
@@ -183,8 +184,32 @@ const historyTruncated = ref(false)
 const conversationHistoryRevision = ref<string | null>(null)
 const historyCursor = ref<string | null>(null)
 const historyLoading = ref(false)
-const historyHydrating = ref(false)
-const historyError = ref<string | null>(null)
+const historyHydrationPending = ref<Set<string>>(new Set())
+const historyHydrationActiveEntries = ref<Set<string>>(new Set())
+const historyHydrationErrors = ref<Record<string, string>>({})
+const historyHydrating = computed(() => historyHydrationPending.value.size > 0)
+const historyPageError = ref<string | null>(null)
+const historyError = computed(() => historyPageError.value
+  ?? (Object.keys(historyHydrationErrors.value).length ? '部分对话内容暂时没有载入，请重试。' : null))
+interface HistoryHydrationDomain {
+  cancelled: boolean
+  active: number
+  queue: HistoryHydrationJob[]
+}
+interface HistoryHydrationJob {
+  domain: HistoryHydrationDomain
+  context: HostContext
+  state: ConversationBootstrap
+  conversationEpoch: number
+  workId: string
+  pageCursor?: string
+  entryId: string
+  revision: string
+}
+let historyHydrationDomain: HistoryHydrationDomain = { cancelled: false, active: 0, queue: [] }
+let failedHistoryHydrations = new Map<string, HistoryHydrationJob>()
+let historyReloadRequiredWorkId: string | null = null
+const HISTORY_HYDRATION_CONCURRENCY = 2
 const submitting = ref(false)
 const aborting = ref(false)
 const compactionWorkIds = ref<Set<string>>(new Set())
@@ -717,6 +742,7 @@ watch(
     transientContext = hostId && generation != null && id ? { hostId, selectionGeneration: generation, workId: id } : null
     ++conversationLoadEpoch
     ++historyLoadEpoch
+    resetHistoryHydration()
     ++deliveryLoadEpoch
     deliverables.value = []
     deliveryListLoaded.value = false
@@ -1988,7 +2014,10 @@ function imageResource(part: ConversationImagePart): ConversationImageResource {
   if (loaded) return loaded
   const localPreview = part.fileId ? attachmentPreviews.value[part.fileId] : undefined
   if (!part.source && localPreview) return { state: 'ready', url: localPreview.url }
-  if (!part.source && historyHydrating.value) return loadingImageResource
+  const entryId = part.historyEntryId
+  if (!part.source && entryId && historyHydrationActiveEntries.value.has(entryId)) return loadingImageResource
+  const hydrationError = entryId ? historyHydrationErrors.value[entryId] : undefined
+  if (!part.source && hydrationError) return { state: 'error', message: hydrationError }
   return idleImageResource
 }
 
@@ -2089,9 +2118,13 @@ function conversationHasImage(imageKey: string) {
 
 async function requestConversationImage(part: ConversationImagePart) {
   const source = part.source
+  if (!source) {
+    if (part.historyEntryId && historyHydrationErrors.value[part.historyEntryId]) retryHistoryEntry(part.historyEntryId)
+    return
+  }
   const state = conversationState.value
   const work = selected.value
-  if (!source || !state || !work || imageResource(part).state === 'loading' || imageResource(part).state === 'ready') return
+  if (!state || !work || imageResource(part).state === 'loading' || imageResource(part).state === 'ready') return
   const capturedHost = requireHostContext(app)
   const expectedEpoch = state.cursor.hostEpoch
   const expectedGeneration = state.cursor.runtimeGeneration
@@ -2329,6 +2362,10 @@ async function reattachConversationFollow(instanceId: string) {
   if (!windowFocused.value || selected.value?.id !== instanceId) return
   if (activeFollow.value) await detachConversationFollow()
   if (!windowFocused.value || selected.value?.id !== instanceId) return
+  if (historyReloadRequiredWorkId === instanceId) {
+    await loadSelectedConversation(instanceId, true)
+    return
+  }
   if (!await resumeConversationFollow(instanceId)
     && windowFocused.value
     && selected.value?.id === instanceId) await loadSelectedConversation(instanceId, true)
@@ -2349,10 +2386,16 @@ async function handleWindowFocusChanged(focused: boolean) {
 async function detachConversationFollow() {
   const followed = activeFollow.value
   const controllerHandle = extensionUi.controller?.handle
+  const workId = selected.value?.id
+  if (workId && (conversationLoading.value
+    || historyLoading.value
+    || historyHydrationPending.value.size
+    || historyError.value)) historyReloadRequiredWorkId = workId
   activeFollow.value = null
   followConnected.value = false
   ++conversationLoadEpoch
   ++historyLoadEpoch
+  resetHistoryHydration()
   conversationLoading.value = false
   historyLoading.value = false
   window.clearTimeout(reconnectTimer)
@@ -2476,6 +2519,7 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
   if (isTauri && !windowFocused.value) return false
   const epoch = ++conversationLoadEpoch
   ++historyLoadEpoch
+  resetHistoryHydration()
   const work = app.works.find((item) => item.id === instanceId)
   const preserveCurrent = preserveUntilSwap || Boolean(conversationState.value)
   if (!preserveCurrent) {
@@ -2485,7 +2529,7 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
     if (epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
   }
   conversationError.value = null
-  historyError.value = null
+  historyPageError.value = null
   if (preserveCurrent) followConnected.value = false
   if (!work || work.lifecycle !== 'active') return false
   conversationLoading.value = true
@@ -2534,6 +2578,11 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
       await applyFollowEvent({ ...capturedHost, instanceId, subscriptionId, event })
       if (activeFollowSubscription.value !== subscriptionId) break
     }
+    if (!app.contextMatches(capturedHost)
+      || epoch !== conversationLoadEpoch
+      || selected.value?.id !== instanceId
+      || activeFollowSubscription.value !== subscriptionId) return false
+    if (historyReloadRequiredWorkId === instanceId) historyReloadRequiredWorkId = null
     return true
   } catch (cause) {
     if (epoch === conversationLoadEpoch && selected.value?.id === instanceId) {
@@ -2558,10 +2607,145 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
   }
 }
 
-async function hydrateRecentConversation(context: HostContext, state: ConversationBootstrap, loadEpoch: number) {
+function resetHistoryHydration() {
+  historyHydrationDomain.cancelled = true
+  historyHydrationDomain.queue = []
+  historyHydrationDomain = { cancelled: false, active: 0, queue: [] }
+  failedHistoryHydrations = new Map()
+  historyHydrationPending.value = new Set()
+  historyHydrationActiveEntries.value = new Set()
+  historyHydrationErrors.value = {}
+}
+
+function historyJobIsCurrent(job: HistoryHydrationJob) {
+  return historyHydrationDomain === job.domain
+    && !job.domain.cancelled
+    && job.conversationEpoch === conversationLoadEpoch
+    && conversationState.value === job.state
+    && selected.value?.id === job.workId
+    && app.contextMatches(job.context)
+}
+
+function setHistoryEntryPending(entryId: string, pending: boolean) {
+  const next = new Set(historyHydrationPending.value)
+  if (pending) next.add(entryId)
+  else next.delete(entryId)
+  historyHydrationPending.value = next
+}
+
+function setHistoryEntryActive(entryId: string, active: boolean) {
+  const next = new Set(historyHydrationActiveEntries.value)
+  if (active) next.add(entryId)
+  else next.delete(entryId)
+  historyHydrationActiveEntries.value = next
+}
+
+function setHistoryEntryError(entryId: string, message?: string) {
+  const next = { ...historyHydrationErrors.value }
+  if (message) next[entryId] = message
+  else delete next[entryId]
+  historyHydrationErrors.value = next
+}
+
+function queueHistoryHydration(job: HistoryHydrationJob) {
+  if (job.domain.cancelled || historyHydrationPending.value.has(job.entryId)) return
+  failedHistoryHydrations.delete(job.entryId)
+  setHistoryEntryError(job.entryId)
+  setHistoryEntryPending(job.entryId, true)
+  job.domain.queue.push(job)
+  pumpHistoryHydration(job.domain)
+}
+
+function reloadConversationForHistory(workId: string) {
+  historyReloadRequiredWorkId = workId
+  void loadSelectedConversation(workId, true)
+}
+
+function pumpHistoryHydration(domain: HistoryHydrationDomain) {
+  while (!domain.cancelled && domain.active < HISTORY_HYDRATION_CONCURRENCY) {
+    const job = domain.queue.shift()
+    if (!job) return
+    domain.active += 1
+    void runHistoryHydration(job).finally(() => {
+      domain.active -= 1
+      pumpHistoryHydration(domain)
+    })
+  }
+}
+
+async function runHistoryHydration(job: HistoryHydrationJob) {
+  if (!historyJobIsCurrent(job)) return
+  setHistoryEntryActive(job.entryId, true)
+  try {
+    const completed = await loadConversationHistoryEntry(
+      job.workId,
+      job.pageCursor,
+      job.entryId,
+      job.revision,
+      job.state.cursor.hostEpoch,
+      job.state.cursor.runtimeGeneration,
+      job.context,
+    )
+    if (!historyJobIsCurrent(job)) return
+    if (completed.hostEpoch !== job.state.cursor.hostEpoch
+      || completed.instance.id !== job.workId
+      || completed.instance.runtimeGeneration !== job.state.cursor.runtimeGeneration
+      || completed.revision !== job.revision
+      || completed.record.entryId !== job.entryId) {
+      reloadConversationForHistory(job.workId)
+      return
+    }
+    const anchor = captureOutputAnchor()
+    const stickToBottom = !!anchor && outputIsNearBottom(anchor.surface.scrollHeight, anchor.surface.scrollTop, anchor.surface.clientHeight)
+    job.state.records = mergeHydratedConversationRecords(job.state.records, [completed.record])
+    failedHistoryHydrations.delete(job.entryId)
+    setHistoryEntryError(job.entryId)
+    applyConversationProjection(job.state)
+    await restoreOutputAnchor(anchor, stickToBottom)
+  } catch (cause) {
+    if (!historyJobIsCurrent(job)) return
+    const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code) : ''
+    if (code === 'protocol_error') {
+      reloadConversationForHistory(job.workId)
+      return
+    }
+    failedHistoryHydrations.set(job.entryId, job)
+    setHistoryEntryError(job.entryId, '这部分内容暂时没有读取成功，请重试。')
+  } finally {
+    if (historyJobIsCurrent(job)) {
+      setHistoryEntryActive(job.entryId, false)
+      setHistoryEntryPending(job.entryId, false)
+    }
+  }
+}
+
+function scheduleHistoryPageHydration(
+  context: HostContext,
+  state: ConversationBootstrap,
+  conversationEpoch: number,
+  pageCursor: string | undefined,
+  page: ConversationHistoryPage,
+) {
+  for (const entryId of page.incompleteEntryIds) {
+    if (!state.records.some((record) => record.entryId === entryId)) continue
+    queueHistoryHydration({
+      domain: historyHydrationDomain,
+      context,
+      state,
+      conversationEpoch,
+      workId: state.instance.id,
+      pageCursor,
+      entryId,
+      revision: page.revision,
+    })
+  }
+}
+
+async function loadRecentHistoryPage(context: HostContext, state: ConversationBootstrap, loadEpoch: number) {
   if (!isTauri) return
   const epoch = ++historyLoadEpoch
-  historyHydrating.value = true
+  historyLoading.value = true
+  historyPageError.value = null
   try {
     const page = await loadConversationHistory(
       state.instance.id,
@@ -2578,27 +2762,29 @@ async function hydrateRecentConversation(context: HostContext, state: Conversati
     if (page.hostEpoch !== state.cursor.hostEpoch
       || page.instance.id !== state.instance.id
       || page.instance.runtimeGeneration !== state.cursor.runtimeGeneration) {
-      void loadSelectedConversation(state.instance.id, true)
+      reloadConversationForHistory(state.instance.id)
       return
     }
     const anchor = captureOutputAnchor()
     const stickToBottom = !!anchor && outputIsNearBottom(anchor.surface.scrollHeight, anchor.surface.scrollTop, anchor.surface.clientHeight)
-    const currentIds = new Set(state.records.map((record) => record.entryId))
-    state.records = page.records.some((record) => currentIds.has(record.entryId))
-      ? mergeHydratedConversationRecords(state.records, page.records)
-      : page.records
+    const existing = new Map(state.records.map((record) => [record.entryId, record]))
+    const pageIds = new Set(page.records.map((record) => record.entryId))
+    state.records = [
+      ...page.records.map((record) => existing.get(record.entryId) ?? record),
+      ...state.records.filter((record) => !pageIds.has(record.entryId)),
+    ]
     conversationHistoryRevision.value = page.revision
     historyCursor.value = page.nextCursor ?? null
     historyTruncated.value = page.hasEarlier
-    historyError.value = null
     applyConversationProjection(state)
+    scheduleHistoryPageHydration(context, state, loadEpoch, undefined, page)
     await restoreOutputAnchor(anchor, stickToBottom)
   } catch (cause) {
     if (epoch === historyLoadEpoch && loadEpoch === conversationLoadEpoch && conversationState.value === state) {
-      historyError.value = '部分对话内容暂时没有载入，请稍后重试。'
+      historyPageError.value = '对话记录暂时没有读取成功，请重试。'
     }
   } finally {
-    if (epoch === historyLoadEpoch && conversationState.value === state) historyHydrating.value = false
+    if (epoch === historyLoadEpoch) historyLoading.value = false
   }
 }
 
@@ -2607,13 +2793,12 @@ function publishConversationBootstrap(context: HostContext, bootstrap: Conversat
   syncImageDomain(context, bootstrap.instance.id, bootstrap.cursor.hostEpoch, bootstrap.cursor.runtimeGeneration)
   conversationHistoryRevision.value = null
   historyCursor.value = null
-  historyHydrating.value = isTauri
   conversationState.value = bootstrap
   applyConversationProjection(bootstrap)
   scrollOutputToBottom(true)
   historyTruncated.value = bootstrap.historyTruncated
-  historyError.value = null
-  void hydrateRecentConversation(context, bootstrap, conversationLoadEpoch)
+  historyPageError.value = null
+  void loadRecentHistoryPage(context, bootstrap, conversationLoadEpoch)
 }
 
 async function refreshCurrent() {
@@ -2630,13 +2815,22 @@ async function reconcileExtensionInteraction(): Promise<boolean> {
   return loadSelectedConversation(work.id, true)
 }
 
+function retryHistoryEntry(entryId: string) {
+  const job = failedHistoryHydrations.get(entryId)
+  if (job && historyJobIsCurrent(job)) queueHistoryHydration(job)
+}
+
 function retryConversationHydration() {
   const state = conversationState.value
-  if (!state || selected.value?.id !== state.instance.id || historyHydrating.value) return
+  if (!state || selected.value?.id !== state.instance.id) return
+  for (const entryId of [...failedHistoryHydrations.keys()]) retryHistoryEntry(entryId)
+  if (!historyPageError.value) return
   try {
-    void hydrateRecentConversation(requireHostContext(app), state, conversationLoadEpoch)
+    const context = requireHostContext(app)
+    if (historyCursor.value) void loadEarlierHistory()
+    else void loadRecentHistoryPage(context, state, conversationLoadEpoch)
   } catch {
-    historyError.value = '部分对话内容暂时没有载入，请稍后重试。'
+    historyPageError.value = '对话记录暂时没有读取成功，请重试。'
   }
 }
 
@@ -2649,7 +2843,7 @@ async function loadEarlierHistory() {
   const loadEpoch = conversationLoadEpoch
   const anchor = captureOutputAnchor()
   historyLoading.value = true
-  historyError.value = null
+  historyPageError.value = null
   try {
     const capturedHost = requireHostContext(app)
     const page = await loadConversationHistory(
@@ -2665,21 +2859,22 @@ async function loadEarlierHistory() {
       || page.instance.id !== state.instance.id
       || page.instance.runtimeGeneration !== state.cursor.runtimeGeneration
       || page.revision !== conversationHistoryRevision.value) {
-      void loadSelectedConversation(work.id, true)
+      reloadConversationForHistory(work.id)
       return
     }
     const existing = new Set(state.records.map((record) => record.entryId))
     const earlier = page.records.filter((record) => !existing.has(record.entryId))
-    state.records = [...earlier, ...mergeHydratedConversationRecords(state.records, page.records)]
+    state.records = [...earlier, ...state.records]
     historyCursor.value = page.nextCursor ?? null
     historyTruncated.value = page.hasEarlier
     applyConversationProjection(state)
+    scheduleHistoryPageHydration(capturedHost, state, loadEpoch, cursor, page)
     await restoreOutputAnchor(anchor, false)
   } catch (cause) {
     if (epoch === historyLoadEpoch) {
       const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code) : ''
-      if (code === 'protocol_error') void loadSelectedConversation(work.id, true)
-      else historyError.value = '更早的记录暂时没有载入，请稍后重试。'
+      if (code === 'protocol_error') reloadConversationForHistory(work.id)
+      else historyPageError.value = '更早的记录暂时没有读取成功，请重试。'
     }
   } finally {
     if (epoch === historyLoadEpoch) historyLoading.value = false
@@ -3197,11 +3392,11 @@ function handleOutputClick(event: MouseEvent) {
 
       <template v-else-if="conversation.length">
         <div class="conversation-flow" :class="{ 'is-switching': conversationSwitching }" role="log" aria-live="polite" aria-relevant="additions text">
-          <div v-if="historyHydrating || historyTruncated || historyError" class="history-loader">
-            <button v-if="historyTruncated" :disabled="historyLoading || historyHydrating || !historyCursor" @click="loadEarlierHistory"><RefreshCw :size="14" :class="{ spinning: historyLoading }" />{{ historyLoading ? '加载中…' : '加载更早记录' }}</button>
-            <button v-else-if="historyError && !historyHydrating" @click="retryConversationHydration"><RefreshCw :size="14" />重新读取完整内容</button>
+          <div v-if="historyLoading || historyHydrating || historyTruncated || historyError" class="history-loader">
+            <button v-if="historyTruncated" :disabled="historyLoading || !historyCursor" @click="loadEarlierHistory"><RefreshCw :size="14" :class="{ spinning: historyLoading }" />{{ historyLoading ? '加载中…' : '加载更早记录' }}</button>
+            <button v-if="historyError" :disabled="historyLoading" @click="retryConversationHydration"><RefreshCw :size="14" />重试读取</button>
             <span v-if="historyHydrating">正在载入图片与较长内容…</span>
-            <span v-else-if="historyError">{{ historyError }}</span>
+            <span v-if="historyError">{{ historyError }}</span>
           </div>
           <template v-for="row in conversationRows" :key="row.id">
             <article v-if="row.kind === 'user'" class="msg-user" :data-conversation-id="row.id" :aria-label="`你的消息 ${row.time}`">

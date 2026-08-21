@@ -62,10 +62,10 @@ watch(() => [props.part.imageKey, props.resource.state] as const, async () => {
     <div v-else-if="resource.state === 'error'" class="alu-conversation-image-state is-error" role="status">
       <strong>图片暂时无法显示</strong>
       <span>{{ resource.message || '请稍后重试。' }}</span>
-      <button v-if="part.source" type="button" @click="emit('request', part)">重试</button>
+      <button v-if="part.source || part.historyEntryId" type="button" @click="emit('request', part)">重试</button>
     </div>
-    <div v-else-if="!part.source" class="alu-conversation-image-state">
-      <span>这张历史图片已不可用。</span>
+    <div v-else-if="!part.source" class="alu-conversation-image-state" role="status">
+      <span>等待读取图片…</span>
     </div>
     <div v-else class="alu-conversation-image-state" role="status">等待读取图片…</div>
     <figcaption v-if="part.name">{{ part.name }}</figcaption>

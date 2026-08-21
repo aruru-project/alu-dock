@@ -319,7 +319,7 @@ function projectGroup(group: RecordGroup, output: ConversationItem[]) {
   const first = group.records[0]
   if (!first) return
   if (first.kind === 'message' && first.source === 'user' && group.records.length === 1) {
-    output.push({ id: first.recordId, kind: 'user', ...projectUserMessage(first.content, first.attachments ?? [], first.recordId, shortTime(first.timestamp)) })
+    output.push({ id: first.recordId, kind: 'user', ...projectUserMessage(first.content, first.attachments ?? [], first.recordId, shortTime(first.timestamp), first.entryId) })
     return
   }
   if (first.kind === 'compaction_summary' || first.kind === 'branch_summary') {
@@ -363,19 +363,19 @@ function projectRecordContent(group: RecordGroup) {
   const tools = new Map<string, ToolProjection>()
   const images = new Map<string, ImageItem>()
   for (const record of group.records) {
-    record.content.forEach((block, index) => appendBlock(block, `${record.recordId}-${index}`, group.key, parts, tools, images))
+    record.content.forEach((block, index) => appendBlock(block, `${record.recordId}-${index}`, group.key, parts, tools, images, record.entryId))
     if (record.error) parts.push({ id: `${record.recordId}-error`, kind: 'notice', groupId: group.key, tone: 'error', text: record.error })
   }
   return parts
 }
 
-function appendBlock(block: ContentBlock, id: string, groupId: string, output: ConversationProcessItem[], tools: Map<string, ToolProjection>, images: Map<string, ImageItem>) {
+function appendBlock(block: ContentBlock, id: string, groupId: string, output: ConversationProcessItem[], tools: Map<string, ToolProjection>, images: Map<string, ImageItem>, historyEntryId?: string) {
   if (block.type === 'text') {
     output.push({ id, kind: 'assistant', groupId, text: block.text, time: '' })
   } else if (block.type === 'thinking') {
     output.push({ id, kind: 'thinking', groupId, title: '思考过程', text: block.text })
   } else if (block.type === 'image') {
-    ensureContentImage(block, id, groupId, output, images)
+    ensureContentImage(block, id, groupId, output, images, historyEntryId)
   } else if (block.type === 'tool_call') {
     const tool = ensureTool(tools, output, block.toolCallId, block.toolName, groupId, id)
     if (block.toolName !== 'show_image') tool.argsText = JSON.stringify(block.args, null, 2)
@@ -458,6 +458,7 @@ function ensureContentImage(
   groupId: string,
   output: Array<ConversationItem | ConversationProcessItem>,
   images: Map<string, ImageItem>,
+  historyEntryId?: string,
 ): ImageItem {
   const contentRef = typeof block.contentRef === 'string' && block.contentRef ? block.contentRef : undefined
   const data = typeof block.data === 'string' && block.data ? block.data : undefined
@@ -476,11 +477,13 @@ function ensureContentImage(
         : data
           ? { type: 'inline', data, mimeType: block.mimeType }
           : undefined,
+      historyEntryId,
     }
     images.set(imageKey, item)
     output.push(item)
   } else {
     item.groupId = groupId
+    item.historyEntryId ||= historyEntryId
   }
   return item
 }
@@ -544,14 +547,14 @@ function renderToolDetail(tool: ToolProjection) {
   tool.item.detail = sections.join('\n\n')
 }
 
-function projectUserMessage(blocks: ContentBlock[], attachments: AttachmentDto[], id: string, time: string) {
+function projectUserMessage(blocks: ContentBlock[], attachments: AttachmentDto[], id: string, time: string, historyEntryId?: string) {
   const projected: Array<ConversationItem | ConversationProcessItem> = []
   const imageMap = new Map<string, ImageItem>()
   const attachmentsById = new Map(attachments.map((attachment) => [attachment.fileId, attachment]))
   const linkedFileIds = new Set<string>()
   blocks.forEach((block, index) => {
     if (block.type !== 'image') return
-    const image = ensureContentImage(block, `${id}-image-${index}`, `user:${id}`, projected, imageMap)
+    const image = ensureContentImage(block, `${id}-image-${index}`, `user:${id}`, projected, imageMap, historyEntryId)
     const attachment = block.fileId ? attachmentsById.get(block.fileId) : undefined
     if (!attachment) return
     linkedFileIds.add(attachment.fileId)

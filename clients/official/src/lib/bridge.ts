@@ -5,6 +5,7 @@ import type {
   CommandCompletionsResult,
   CommandContentResult,
   CommandsResult,
+  CompletedConversationEntry,
   ConnectionKind,
   ConversationBootstrap,
   ConversationHistoryPage,
@@ -389,7 +390,28 @@ export async function loadConversationHistory(
     ...context, instanceId, cursor, expectedHostEpoch, expectedRuntimeGeneration,
   })
   await delay(100)
-  return { records: [], revision: 'browser-preview', hasEarlier: false, instance: previewBootstrap.works[0]!, hostEpoch: 'browser-preview' }
+  return { records: [], incompleteEntryIds: [], revision: 'browser-preview', hasEarlier: false, instance: previewBootstrap.works[0]!, hostEpoch: 'browser-preview' }
+}
+
+export async function loadConversationHistoryEntry(
+  instanceId: string,
+  cursor: string | undefined,
+  entryId: string,
+  expectedRevision: string,
+  expectedHostEpoch: string,
+  expectedRuntimeGeneration: number,
+  context: HostContext,
+): Promise<CompletedConversationEntry> {
+  if (!isTauri) throw new Error('浏览器设计预览不会读取完整会话内容')
+  return invoke<CompletedConversationEntry>('conversation_history_entry', {
+    ...context,
+    instanceId,
+    cursor,
+    entryId,
+    expectedRevision,
+    expectedHostEpoch,
+    expectedRuntimeGeneration,
+  })
 }
 
 export async function loadConversationImageBytes(

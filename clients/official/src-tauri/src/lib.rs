@@ -25,7 +25,8 @@ use aludock_client_core::{MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_MESSAGE};
 use aludock_client_core::{
     AttachmentDto, AttachmentUploadCancellation, AttachmentUploadPhase, AttachmentUploadResult,
     ClientError, CommandArgumentCompletion, CommandCompletionItems, CommandCompletionsResult,
-    CommandContentResult, CommandInfo, CommandReference, CommandsResult, CompleteConversationPage, ConnectionKind, ConnectionPolicy,
+    CommandContentResult, CommandInfo, CommandReference, CommandsResult, CompletedConversationEntry,
+    ConnectionKind, ConnectionPolicy, ConversationPreviewPage,
     ControllerEventData, DeliverableDownloadProgress, DeliverableDto, DeliveryMode, DiagnosticInfo,
     DockClient, Endpoint, EndpointState, EndpointTestResult, EventCursor, ExtensionControllerLease,
     ExtensionEvent, HistoryRecord, HostConnectionProfile, HostRegistry, HostRegistrySnapshot,
@@ -2113,6 +2114,8 @@ async fn conversation_bootstrap(
     })
 }
 
+const CONVERSATION_HISTORY_PAGE_LIMIT: u16 = 50;
+
 #[tauri::command]
 async fn conversation_history(
     runtime: tauri::State<'_, HostRuntimeState>,
@@ -2122,10 +2125,14 @@ async fn conversation_history(
     cursor: Option<String>,
     expected_host_epoch: String,
     expected_runtime_generation: u64,
-) -> Result<CompleteConversationPage, CommandError> {
+) -> Result<ConversationPreviewPage, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
     let page = dock_client(&store)?
-        .complete_conversation_page(&instance_id, cursor.as_deref(), 50)
+        .preview_conversation_page(
+            &instance_id,
+            cursor.as_deref(),
+            CONVERSATION_HISTORY_PAGE_LIMIT,
+        )
         .await
         .map_err(CommandError::from)?;
     if page.host_epoch != expected_host_epoch
@@ -2137,6 +2144,44 @@ async fn conversation_history(
         )));
     }
     Ok(page)
+}
+
+#[tauri::command]
+async fn conversation_history_entry(
+    runtime: tauri::State<'_, HostRuntimeState>,
+    host_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    cursor: Option<String>,
+    entry_id: String,
+    expected_revision: String,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+) -> Result<CompletedConversationEntry, CommandError> {
+    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let completed = dock_client(&store)?
+        .complete_conversation_entry(
+            &instance_id,
+            cursor.as_deref(),
+            CONVERSATION_HISTORY_PAGE_LIMIT,
+            &entry_id,
+            &expected_revision,
+        )
+        .await
+        .map_err(CommandError::from)?;
+    resolve_host(&runtime, &host_id, selection_generation)?;
+    if completed.host_epoch != expected_host_epoch
+        || completed.instance.id != instance_id
+        || completed.instance.owner_host_epoch.as_deref() != Some(expected_host_epoch.as_str())
+        || completed.instance.runtime_generation != expected_runtime_generation
+        || completed.revision != expected_revision
+        || completed.record.entry_id != entry_id
+    {
+        return Err(CommandError::from(ClientError::Protocol(
+            "conversation content changed; refresh the current Work before loading records".into(),
+        )));
+    }
+    Ok(completed)
 }
 
 #[tauri::command]
@@ -5769,6 +5814,7 @@ pub fn run() {
             work_catalog,
             conversation_bootstrap,
             conversation_history,
+            conversation_history_entry,
             conversation_image,
             published_image,
             list_deliverables,
