@@ -1,3 +1,6 @@
+#[cfg(target_os = "android")]
+mod android_documents;
+
 #[cfg(any(target_os = "windows", test))]
 use std::time::Duration;
 #[cfg(target_os = "windows")]
@@ -47,6 +50,7 @@ use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_fs::{FsExt, OpenOptions as PluginOpenOptions};
 #[cfg(target_os = "windows")]
 use tauri_plugin_notification::NotificationExt;
+#[cfg(not(target_os = "android"))]
 use tauri_plugin_opener::OpenerExt;
 
 const MAX_RENDERABLE_IMAGE_BYTES: u64 = 64 * 1_024 * 1_024;
@@ -3703,7 +3707,13 @@ async fn download_deliverable(
             return Err(error);
         }
     };
-    commit_deliverable(&app, staging_path, destination).await?;
+    commit_deliverable(&app, staging_path, destination.clone()).await?;
+    #[cfg(target_os = "android")]
+    if let FilePath::Url(url) = &destination {
+        // Providers may revoke transient grants after the Activity is gone. Keep the
+        // document readable across app restarts when the provider supports it.
+        let _ = android_documents::retain_document_access(&app, url.as_str()).await;
+    }
 
     Ok(DeliverableSaveResult::Saved {
         deliverable: result.deliverable,
@@ -3713,7 +3723,7 @@ async fn download_deliverable(
 }
 
 #[tauri::command]
-fn open_saved_deliverable(
+async fn open_saved_deliverable(
     app: tauri::AppHandle,
     location: SavedDeliverableLocation,
 ) -> Result<(), CommandError> {
@@ -3725,9 +3735,9 @@ fn open_saved_deliverable(
     }
     match location.kind.as_str() {
         "path" => {
-            let path = PathBuf::from(&location.value);
             #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
             {
+                let path = PathBuf::from(&location.value);
                 let directory =
                     path.parent()
                         .filter(|parent| parent.is_dir())
@@ -3752,7 +3762,7 @@ fn open_saved_deliverable(
                         )
                     })?;
             }
-            #[cfg(any(target_os = "android", target_os = "ios"))]
+            #[cfg(target_os = "ios")]
             app.opener()
                 .open_path(location.value, None::<&str>)
                 .map_err(|_| {
@@ -3761,14 +3771,65 @@ fn open_saved_deliverable(
                         SAVED_FILE_UNAVAILABLE_MESSAGE,
                     )
                 })?;
-            Ok(())
+            #[cfg(target_os = "android")]
+            {
+                Err(deliverable_command_error(
+                    "saved_file_unavailable",
+                    "文件已不在保存位置。请重新下载。",
+                ))
+            }
+            #[cfg(not(target_os = "android"))]
+            {
+                Ok(())
+            }
         }
-        "uri" => app
-            .opener()
-            .open_url(location.value, None::<&str>)
-            .map_err(|_| {
-                deliverable_command_error("saved_file_unavailable", SAVED_FILE_UNAVAILABLE_MESSAGE)
-            }),
+        "uri" => {
+            #[cfg(target_os = "android")]
+            {
+                let media_type = mime_guess::from_path(&location.label).first_raw();
+                return match android_documents::open_document(
+                    &app,
+                    &location.value,
+                    media_type,
+                )
+                .await
+                .map_err(|_| {
+                    deliverable_command_error(
+                        "saved_file_open_failed",
+                        "暂时无法打开这个文件。请稍后重试。",
+                    )
+                })? {
+                    android_documents::OpenDocumentOutcome::Opened => Ok(()),
+                    android_documents::OpenDocumentOutcome::Unavailable => Err(
+                        deliverable_command_error(
+                            "saved_file_unavailable",
+                            "文件已不在保存位置。请重新下载。",
+                        ),
+                    ),
+                    android_documents::OpenDocumentOutcome::NoHandler => Err(
+                        deliverable_command_error(
+                            "saved_file_no_handler",
+                            "没有可用的应用打开这个文件。",
+                        ),
+                    ),
+                    android_documents::OpenDocumentOutcome::Failed => Err(
+                        deliverable_command_error(
+                            "saved_file_open_failed",
+                            "暂时无法打开这个文件。请稍后重试。",
+                        ),
+                    ),
+                };
+            }
+            #[cfg(not(target_os = "android"))]
+            app.opener()
+                .open_url(location.value, None::<&str>)
+                .map_err(|_| {
+                    deliverable_command_error(
+                        "saved_file_unavailable",
+                        SAVED_FILE_UNAVAILABLE_MESSAGE,
+                    )
+                })
+        },
         _ => Err(deliverable_command_error(
             "saved_file_unavailable",
             SAVED_FILE_UNAVAILABLE_MESSAGE,
@@ -3800,15 +3861,23 @@ async fn pick_attachments(
         ));
     }
 
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    app.dialog().file().pick_files(move |files| {
-        let _ = sender.send(files);
-    });
-    let Some(files) = receiver
+    #[cfg(target_os = "android")]
+    let files = android_documents::pick_recent_files(&app)
         .await
-        .map_err(|_| attachment_command_error("attachment_picker_failed", "无法完成附件选择。"))?
-    else {
-        return Ok(Vec::new());
+        .map_err(|_| attachment_command_error("attachment_picker_failed", "无法完成附件选择。"))?;
+    #[cfg(not(target_os = "android"))]
+    let files = {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        app.dialog().file().pick_files(move |files| {
+            let _ = sender.send(files);
+        });
+        let Some(files) = receiver
+            .await
+            .map_err(|_| attachment_command_error("attachment_picker_failed", "无法完成附件选择。"))?
+        else {
+            return Ok(Vec::new());
+        };
+        files
     };
     if files.len() > MAX_ATTACHMENTS_PER_MESSAGE - existing {
         return Err(attachment_command_error(
@@ -5487,7 +5556,10 @@ fn parse_trust_decision(value: &str) -> Result<ProjectTrustDecision, CommandErro
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    #[cfg(target_os = "android")]
+    let builder = builder.plugin(android_documents::init());
+    let builder = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init());

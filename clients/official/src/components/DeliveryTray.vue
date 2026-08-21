@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import {
   Download,
+  ExternalLink,
   FileDown,
   FolderOpen,
   LoaderCircle,
@@ -186,7 +187,7 @@ function dateLabel(value: string) {
                     :disabled="isOpening(row.downloaded)"
                     :aria-label="`${savedFileAction(row.downloaded)}：${row.deliverable.name}`"
                     @click="emit('openSaved', row.downloaded)"
-                  ><FolderOpen :size="16" /><span>{{ isOpening(row.downloaded) ? '正在打开' : savedFileAction(row.downloaded) }}</span></button>
+                  ><component :is="row.downloaded.savedLocation.kind === 'path' ? FolderOpen : ExternalLink" :size="16" /><span>{{ isOpening(row.downloaded) ? '正在打开' : savedFileAction(row.downloaded) }}</span></button>
                   <button
                     type="button"
                     class="delivery-row-action is-secondary"
@@ -214,7 +215,7 @@ function dateLabel(value: string) {
               <span>{{ formatFileSize(item.sizeBytes) }}<template v-if="item.workName"> · {{ item.workName }}</template> · {{ dateLabel(item.downloadedAt) }}</span>
               <small :title="item.savedLocation.label">{{ item.savedLocation.label }}</small>
             </div>
-            <button type="button" class="delivery-row-action is-open" :disabled="isOpening(item)" :aria-label="`${savedFileAction(item)}：${item.name}`" @click="emit('openSaved', item)"><FolderOpen :size="16" /><span>{{ isOpening(item) ? '正在打开' : savedFileAction(item) }}</span></button>
+            <button type="button" class="delivery-row-action is-open" :disabled="isOpening(item)" :aria-label="`${savedFileAction(item)}：${item.name}`" @click="emit('openSaved', item)"><component :is="item.savedLocation.kind === 'path' ? FolderOpen : ExternalLink" :size="16" /><span>{{ isOpening(item) ? '正在打开' : savedFileAction(item) }}</span></button>
           </article>
         </div>
       </section>
