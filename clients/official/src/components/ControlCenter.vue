@@ -14,7 +14,7 @@ import {
 } from '../lib/bridge'
 import { currentHostCall, requireHostContext } from '../lib/hostResult'
 import { userErrorMessage as errorMessage } from '../lib/userError'
-import { catalogSourceLabel, commandGoesToComposer, filterCatalogCommands, subsequenceScore } from '../lib/commandSuggest'
+import { catalogSourceLabel, commandGoesToComposer, filterCatalogCommands, filterCommandPaletteItems } from '../lib/commandSuggest'
 import { workPresence } from '../lib/uiBoundaries'
 import SessionManager from './SessionManager.vue'
 import { useAppStore } from '../stores/app'
@@ -103,14 +103,7 @@ let loadEpoch = 0
 const selectedCommand = computed(() => catalog.commands.find((item) => item.name === selectedCommandName.value) ?? null)
 const selectedSetting = computed(() => settings.value?.settings.find((item) => item.key === selectedSettingKey.value) ?? null)
 const sessionMode = computed(() => props.section as 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session')
-const filteredStaticCommands = computed(() => {
-  const query = commandSearch.value.trim().toLowerCase()
-  if (!query) return [...staticCommands]
-  return staticCommands.filter((item) => {
-    if (`${item.id} ${item.label} ${item.keywords} ${item.description}`.toLowerCase().includes(query)) return true
-    return subsequenceScore(query, item.label.toLowerCase()) !== null || subsequenceScore(query, item.id.toLowerCase()) !== null
-  })
-})
+const filteredStaticCommands = computed(() => filterCommandPaletteItems(staticCommands, commandSearch.value))
 const catalogCommands = computed(() => catalog.commands.filter((item) => !['stop', 'resume', 'tree'].includes(item.name)))
 const filteredCommands = computed(() => filterCatalogCommands(catalogCommands.value, commandSearch.value))
 const commandSelections = computed(() => [

@@ -34,9 +34,31 @@ export function subsequenceScore(query: string, text: string): number | null {
   return (spanEnd - spanStart + 1) * 10 + spanStart
 }
 
+export interface CommandPaletteSearchItem {
+  readonly id: string
+  readonly label: string
+  readonly keywords: string
+  readonly description: string
+}
+
+/** 命令面板同时接受名称和 `/名称`，斜杠只表示“按命令查找”。 */
+export function commandPaletteQuery(rawQuery: string): string {
+  const query = rawQuery.trim().toLowerCase()
+  return query.startsWith('/') ? query.slice(1).trimStart() : query
+}
+
+export function filterCommandPaletteItems<T extends CommandPaletteSearchItem>(items: readonly T[], rawQuery: string): T[] {
+  const query = commandPaletteQuery(rawQuery)
+  if (!query) return [...items]
+  return items.filter((item) => {
+    if (`${item.id} ${item.label} ${item.keywords} ${item.description}`.toLowerCase().includes(query)) return true
+    return subsequenceScore(query, item.label.toLowerCase()) !== null || subsequenceScore(query, item.id.toLowerCase()) !== null
+  })
+}
+
 /** 名称优先（前缀 > 包含 > 模糊子序列），其次描述/来源；名称命中永远排在描述命中前面。 */
 export function filterCatalogCommands(commands: CommandInfo[], rawQuery: string): CommandInfo[] {
-  const query = rawQuery.trim().toLowerCase()
+  const query = commandPaletteQuery(rawQuery)
   const matched = commands.flatMap((command, index) => {
     if (!query) return [{ command, index, rank: 2, fuzzy: 0 }]
     const name = command.name.toLowerCase()

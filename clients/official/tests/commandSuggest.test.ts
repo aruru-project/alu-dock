@@ -1,6 +1,6 @@
 // 输入框斜杠命令建议：触发判定、过滤排序、补全替换、类型分流
 import assert from 'node:assert/strict'
-import { applySlashCompletion, commandGoesToComposer, filterCatalogCommands, slashCommandQuery, subsequenceScore } from '../src/lib/commandSuggest.ts'
+import { applySlashCompletion, commandGoesToComposer, filterCatalogCommands, filterCommandPaletteItems, slashCommandQuery, subsequenceScore } from '../src/lib/commandSuggest.ts'
 import type { CommandInfo } from '../src/lib/types.ts'
 
 function cmd(name: string, kind: string, description = ''): CommandInfo {
@@ -25,6 +25,7 @@ const catalog = [
 // 同为名称前缀命中时保持目录原序（Dock 返回的是字母序）
 assert.deepEqual(filterCatalogCommands(catalog, 're').map((item) => item.name), ['release-notes', 'research', 'review'])
 assert.deepEqual(filterCatalogCommands(catalog, 'review').map((item) => item.name), ['review'])
+assert.deepEqual(filterCatalogCommands(catalog, '/review').map((item) => item.name), ['review'], '命令面板接受带斜杠的目录命令')
 assert.deepEqual(filterCatalogCommands(catalog, '发布').map((item) => item.name), ['release-notes'], '描述里的中文也要能搜到')
 assert.deepEqual(filterCatalogCommands(catalog, '').map((item) => item.name), ['release-notes', 'research', 'review'], '空查询保持目录原序')
 assert.deepEqual(filterCatalogCommands(catalog, 'zzz'), [])
@@ -38,6 +39,17 @@ assert.deepEqual(filterCatalogCommands(catalog, 'rn').map((item) => item.name), 
 assert.deepEqual(filterCatalogCommands([cmd('rn', 'extension'), cmd('release-notes', 'prompt')], 'rn').map((item) => item.name), ['rn', 'release-notes'])
 assert.equal(subsequenceScore('sm', 'set model') !== null, true)
 assert.equal(subsequenceScore('zz', 'set model'), null)
+
+// 命令面板中的本地操作沿用同一套斜杠查询，不把控制操作当成 Agent 命令
+const localControls = [
+  { id: 'session_new', label: 'New Session', keywords: '新建会话 work', description: '开始一段全新的上下文' },
+  { id: 'stop', label: 'Stop Work', keywords: '停止工作 instance', description: '停止整个 Work' },
+  { id: 'resume', label: 'Resume Session', keywords: '恢复会话 pi session', description: '从保存的 Session 继续' },
+]
+assert.deepEqual(filterCommandPaletteItems(localControls, '/new').map((item) => item.id), ['session_new'])
+assert.deepEqual(filterCommandPaletteItems(localControls, '/stop').map((item) => item.id), ['stop'])
+assert.deepEqual(filterCommandPaletteItems(localControls, '/resume').map((item) => item.id), ['resume'])
+assert.deepEqual(filterCommandPaletteItems(localControls, 'resume').map((item) => item.id), ['resume'], '不带斜杠的搜索保持不变')
 
 // 补全 = 整段替换为 "/name "，尾部空格进入参数输入
 assert.equal(applySlashCompletion('idea'), '/idea ')
