@@ -1089,6 +1089,12 @@ function handleGlobalModalKeydown(event: KeyboardEvent) {
 function handleDesktopShortcut(event: KeyboardEvent) {
   if (!isTauri || event.defaultPrevented || event.isComposing || event.repeat || modalOpen.value) return
   const key = event.key.toLowerCase()
+  if (event.key === 'Escape' && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey) {
+    if (selected.value?.execution !== 'running') return
+    event.preventDefault()
+    void abortCurrentRun()
+    return
+  }
   if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && key === 'k') {
     if (!selected.value) return
     event.preventDefault()
