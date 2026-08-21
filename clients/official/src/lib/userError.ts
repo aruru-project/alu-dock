@@ -10,6 +10,13 @@ const SAFE_ERROR_CODES = new Set([
   'deliverable_write_failed', 'deliverable_commit_failed', 'deliverable_cleanup_failed', 'deliverable_picker_failed',
   'deliverable_location_unsupported', 'deliverable_location_unavailable',
   'saved_file_unavailable', 'saved_file_open_failed',
+  'workspace_context_changed', 'workspace_not_active', 'workspace_entry_not_found',
+  'workspace_entry_not_directory', 'workspace_entry_not_file', 'workspace_entry_unavailable',
+  'workspace_file_too_large', 'workspace_changed', 'workspace_connection_failed',
+  'workspace_storage_unavailable', 'workspace_verification_failed', 'workspace_state_unavailable',
+  'workspace_cache_unavailable', 'workspace_read_cancelled', 'workspace_read_invalid',
+  'workspace_large_file_confirmation_required', 'workspace_preview_unsupported',
+  'workspace_save_failed',
 ])
 
 export function userErrorMessage(cause: unknown, fallback = '操作没有完成。请刷新状态后重试。') {

@@ -173,6 +173,62 @@ export interface WorkspacePage {
   truncated: boolean
 }
 
+export type WorkspaceFileKind = 'file' | 'directory' | 'symlink'
+export type WorkspaceTargetKind = 'file' | 'directory' | 'unavailable'
+
+export interface WorkspaceFileEntry {
+  path: string
+  name: string
+  kind: WorkspaceFileKind
+  hidden: boolean
+  targetKind?: WorkspaceTargetKind
+  sizeBytes?: number
+}
+
+export interface WorkspaceFileCursor {
+  revision: string
+  offset: number
+}
+
+export interface WorkspaceFilePage {
+  instanceId: string
+  path: string
+  revision: string
+  entries: WorkspaceFileEntry[]
+  total: number
+  truncated: boolean
+  nextCursor?: WorkspaceFileCursor
+  hostEpoch: string
+}
+
+export interface WorkspaceFileEntryResult {
+  entry: WorkspaceFileEntry
+  hostEpoch: string
+  largeFileConfirmBytes: number
+}
+
+export interface WorkspaceFileCacheResult {
+  cacheId: string
+  entry: WorkspaceFileEntry
+  sizeBytes: number
+  sha256: string
+  hostEpoch: string
+}
+
+export interface WorkspaceFileReadProgress {
+  hostId: string
+  selectionGeneration: number
+  instanceId: string
+  readId: string
+  path: string
+  bytesReceived: number
+  observedSizeBytes: number
+}
+
+export type WorkspaceFileSaveResult =
+  | { status: 'cancelled' }
+  | { status: 'saved'; label: string }
+
 export interface PublishedFileDto {
   presentation: 'image'
   fileRef: string

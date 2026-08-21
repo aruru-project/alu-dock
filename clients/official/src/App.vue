@@ -6,6 +6,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   FileDown,
+  FolderTree,
   Globe2,
   Link,
   Monitor,
@@ -122,6 +123,7 @@ import ControlCenter, { type ControlMutationDomain } from './components/ControlC
 import ConversationProcessParts from './components/ConversationProcessParts.vue'
 import ExtensionUiSurface from './components/ExtensionUiSurface.vue'
 import ImageZoomSurface from './components/ImageZoomSurface.vue'
+import WorkspaceBrowser from './components/WorkspaceBrowser.vue'
 import { useAppStore } from './stores/app'
 import { useCommandCatalogStore } from './stores/command-catalog'
 import { useCommandConsoleStore } from './stores/command-console'
@@ -228,6 +230,7 @@ const queueRestoring = ref(false)
 const queueNotice = ref('')
 let queueNoticeTimer = 0
 const deliveryOpen = ref(false)
+const workspaceBrowserOpen = ref(false)
 const deliverables = ref<DeliverableDto[]>([])
 const deliveryLoading = ref(false)
 const deliveryListLoaded = ref(false)
@@ -450,7 +453,7 @@ const unresolvedControlDomain = computed<ControlMutationDomain | undefined>(() =
   const domain = unresolvedDomain.value
   return domain && domain !== 'work' ? domain : undefined
 })
-const modalOpen = computed(() => deliveryOpen.value || directoryOpen.value || commandOpen.value || appSettingsOpen.value || hostSettingsOpen.value || composerExpanded.value || !!confirmDialog.value || !!imagePreview.value)
+const modalOpen = computed(() => workspaceBrowserOpen.value || deliveryOpen.value || directoryOpen.value || commandOpen.value || appSettingsOpen.value || hostSettingsOpen.value || composerExpanded.value || !!confirmDialog.value || !!imagePreview.value)
 
 /* Android 返回键走 WebView 浏览历史（wry：canGoBack→goBack，否则退出 app）。
    浮层/抽屉打开时压入一个占位历史条目，返回键触发 popstate 时关闭最上层；
@@ -684,7 +687,10 @@ watch(() => Boolean(app.payload && !app.needsPairing && !selected.value), (showL
   if (showList) app.workDrawerOpen = true
 })
 watch(() => app.workDrawerOpen, (open, wasOpen) => {
-  if (open) deliveryOpen.value = false
+  if (open) {
+    deliveryOpen.value = false
+    workspaceBrowserOpen.value = false
+  }
   if (open && !wasOpen) void app.refreshWorksQuietly()
 })
 watch([
@@ -922,6 +928,14 @@ async function forgetFromList(work: Work) {
   await forgetSelectedWork()
 }
 
+function openWorkspaceBrowser() {
+  if (!selected.value || selected.value.lifecycle !== 'active') return
+  rememberModalTrigger()
+  deliveryOpen.value = false
+  app.workDrawerOpen = false
+  workspaceBrowserOpen.value = true
+}
+
 function openDeliveryTray() {
   rememberModalTrigger()
   app.workDrawerOpen = false
@@ -1137,6 +1151,7 @@ function rememberModalTrigger() {
 }
 
 function closeModal() {
+  workspaceBrowserOpen.value = false
   deliveryOpen.value = false
   directoryOpen.value = false
   commandOpen.value = false
@@ -3594,6 +3609,7 @@ function handleOutputClick(event: MouseEvent) {
         <div class="alu-bottom-bar-left">
           <button class="alu-bar-btn alu-bar-session-action" title="恢复 Session" aria-label="恢复 Session" @click="openControlCenter('sessions')">↪<span>恢复</span></button>
           <button class="alu-bar-btn alu-bar-session-action" title="打开 Session Tree" aria-label="打开 Session Tree" @click="openControlCenter('tree')">⑂<span>Tree</span></button>
+          <button class="alu-bar-btn" title="浏览当前 Work 的工作区" aria-label="打开工作区" :aria-expanded="workspaceBrowserOpen" :disabled="!isTauri" @click="openWorkspaceBrowser"><FolderTree :size="15" /><span>工作区</span></button>
           <button class="alu-bar-btn" title="添加附件" :disabled="!isTauri || attachmentPicking || draftAttachments.length + uploadDrafts.length >= MAX_MESSAGE_ATTACHMENTS" @click="chooseAttachments">📎<span class="sm-inline">附件</span></button>
         </div>
         <div class="alu-bottom-bar-right">
@@ -3607,6 +3623,14 @@ function handleOutputClick(event: MouseEvent) {
         </div>
       </div>
     </section>
+
+    <WorkspaceBrowser
+      :open="workspaceBrowserOpen"
+      :work="selected || null"
+      :context="app.hostContext || null"
+      :host-epoch="app.payload?.host.hostEpoch || ''"
+      @close="workspaceBrowserOpen = false"
+    />
 
     <DeliveryTray
       ref="deliveryTrayRef"

@@ -43,6 +43,12 @@ import type {
   Work,
   WorkCatalog,
   WindowsAwayDelay,
+  WorkspaceFileCacheResult,
+  WorkspaceFileCursor,
+  WorkspaceFileEntry,
+  WorkspaceFileEntryResult,
+  WorkspaceFilePage,
+  WorkspaceFileSaveResult,
   WorkspacePage,
 } from './types'
 
@@ -554,6 +560,65 @@ export async function forkSession(context: SessionContext, entryId: string, oper
 export async function cloneSession(context: SessionContext, entryId: string, operationId: string): Promise<SessionReplacementResult> {
   if (isTauri) return invoke('clone_session', { ...context, entryId, operationId })
   throw new Error('浏览器设计预览不会 Clone Session')
+}
+
+export interface WorkspaceFileContext extends HostContext {
+  instanceId: string
+  expectedHostEpoch: string
+  expectedRuntimeGeneration: number
+}
+
+export async function listWorkspaceEntries(
+  path: string,
+  cursor: WorkspaceFileCursor | undefined,
+  context: WorkspaceFileContext,
+): Promise<WorkspaceFilePage> {
+  if (isTauri) return invoke<WorkspaceFilePage>('workspace_entries', { ...context, path, cursor: cursor ?? null })
+  throw new Error('浏览器设计预览不会读取工作区文件')
+}
+
+export async function getWorkspaceEntryMetadata(
+  path: string,
+  context: WorkspaceFileContext,
+): Promise<WorkspaceFileEntryResult> {
+  if (isTauri) return invoke<WorkspaceFileEntryResult>('workspace_entry_metadata', { ...context, path })
+  throw new Error('浏览器设计预览不会读取工作区文件')
+}
+
+export async function readWorkspaceFile(
+  readId: string,
+  expectedEntry: WorkspaceFileEntry,
+  largeFileConfirmed: boolean,
+  context: WorkspaceFileContext,
+): Promise<WorkspaceFileCacheResult> {
+  if (isTauri) return invoke<WorkspaceFileCacheResult>('read_workspace_file', {
+    ...context, readId, expectedEntry, largeFileConfirmed,
+  })
+  throw new Error('浏览器设计预览不会读取工作区文件')
+}
+
+export async function cancelWorkspaceFileRead(readId: string, context: WorkspaceFileContext): Promise<boolean> {
+  return isTauri ? invoke<boolean>('cancel_workspace_file_read', { ...context, readId }) : false
+}
+
+export async function clearWorkspaceFileState(): Promise<void> {
+  if (isTauri) await invoke('clear_workspace_file_state')
+}
+
+export async function loadWorkspaceCachedText(cacheId: string, context: WorkspaceFileContext): Promise<string> {
+  if (isTauri) return invoke<string>('workspace_cached_text', { ...context, cacheId })
+  throw new Error('浏览器设计预览不会读取工作区文件')
+}
+
+export async function loadWorkspaceCachedImage(cacheId: string, context: WorkspaceFileContext): Promise<Uint8Array> {
+  if (!isTauri) throw new Error('浏览器设计预览不会读取工作区文件')
+  const value = await invoke<ArrayBuffer | Uint8Array | number[]>('workspace_cached_image', { ...context, cacheId })
+  return binaryBytes(value)
+}
+
+export async function saveWorkspaceCachedFile(cacheId: string, context: WorkspaceFileContext): Promise<WorkspaceFileSaveResult> {
+  if (isTauri) return invoke<WorkspaceFileSaveResult>('save_workspace_cached_file', { ...context, cacheId })
+  throw new Error('浏览器设计预览不会保存工作区文件')
 }
 
 export async function listWorkspace(path: string, context: HostContext): Promise<WorkspacePage> {
