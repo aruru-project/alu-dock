@@ -66,8 +66,8 @@ export default function (pi) {
   await host.start();
 
   const client = new DockClient({ socketPath });
-  const uploaded = await client.uploadFile(imagePath, "image/png", "upload-image");
   const instance = await client.create(workspace, "Image attachment", "create-image-work");
+  const uploaded = await client.uploadFile(instance.id, imagePath, "image/png", "upload-image");
   const events: DockEvent[] = [];
   const follower = await client.streamEvents(instance.id, { onEvent: (event) => events.push(event) });
   try {

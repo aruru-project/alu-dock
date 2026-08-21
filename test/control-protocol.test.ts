@@ -151,9 +151,10 @@ test("Protocol V2 history exposes only canonical persisted conversation records"
 test("attachment upload frames and path-free DTOs are closed and bounded", () => {
   const request = parseControlRequest({
     kind: "request", version: 2, requestId: "upload-request", type: "attachment.upload",
-    params: { operationId: "upload-op", name: "文档 final.bin", sizeBytes: 3, mediaType: "application/octet-stream", sha256: "a".repeat(64) },
+    params: { operationId: "upload-op", instanceId: "main-work-1", name: "文档 final.bin", sizeBytes: 3, mediaType: "application/octet-stream", sha256: "a".repeat(64) },
   });
   assert.equal(request.type, "attachment.upload");
+  assert.equal(request.params.instanceId, "main-work-1");
   assert.equal(capabilityForRequest(request.type), ATTACHMENTS_CAPABILITY);
   assert.deepEqual(parseAttachmentUploadFrame({ kind: "attachment_chunk", version: 2, requestId: "upload-request", index: 0, data: Buffer.from("abc").toString("base64") }, "upload-request"), {
     kind: "attachment_chunk", version: 2, requestId: "upload-request", index: 0, data: "YWJj",
@@ -162,7 +163,7 @@ test("attachment upload frames and path-free DTOs are closed and bounded", () =>
     kind: "attachment_complete", version: 2, requestId: "upload-request", chunks: 1,
   });
   assert.throws(() => parseAttachmentUploadFrame({ kind: "attachment_chunk", version: 2, requestId: "upload-request", index: 0, data: "YQ" }, "upload-request"), /canonical base64/u);
-  assert.throws(() => parseControlRequest({ kind: "request", version: 2, requestId: "upload-request", type: "attachment.upload", params: { operationId: "upload-op", name: "x", sizeBytes: 536_870_913, sha256: "a".repeat(64) } }), /must not exceed/u);
+  assert.throws(() => parseControlRequest({ kind: "request", version: 2, requestId: "upload-request", type: "attachment.upload", params: { operationId: "upload-op", instanceId: "main-work-1", name: "x", sizeBytes: 536_870_913, sha256: "a".repeat(64) } }), /must not exceed/u);
 
   const attachment = {
     fileId: "123e4567-e89b-42d3-a456-426614174000", name: "文档 final.bin", sizeBytes: 3,
@@ -240,6 +241,7 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   assert.deepEqual(parseControlRequest({ ...base, type: "session.inventory", params: { cwd: "/tmp/project", scope: "cwd" } }), {
     ...base, type: "session.inventory", params: { cwd: "/tmp/project", scope: "cwd" },
   });
+  assert.deepEqual(parseControlRequest({ ...base, type: "session.inventory", params: { cwd: "/tmp/project", scope: "all", hostId: "machine-1" } }).params, { cwd: "/tmp/project", scope: "all", hostId: "machine-1" });
   assert.throws(() => parseControlRequest({ ...base, type: "session.inventory", params: { cwd: "relative", scope: "all" } }), /must be absolute/);
   assert.deepEqual(parseControlRequest({ ...base, type: "session.list", params: { instanceId: "i1", scope: "all" } }), {
     ...base, type: "session.list", params: { instanceId: "i1", scope: "all" },
@@ -250,6 +252,7 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
     type: "workspace.list",
     params: { path: "/work/project", cursor: { revision: "listing-1", offset: 200 }, limit: 200 },
   }).params, { path: "/work/project", cursor: { revision: "listing-1", offset: 200 }, limit: 200 });
+  assert.deepEqual(parseControlRequest({ ...base, type: "workspace.list", params: { path: "/work", limit: 20, hostId: "machine-1" } }).params, { path: "/work", cursor: undefined, limit: 20, hostId: "machine-1" });
   assert.throws(() => parseControlRequest({ ...base, type: "workspace.list", params: { path: "relative", limit: 200 } }), /must be absolute/u);
   assert.throws(() => parseControlRequest({ ...base, type: "workspace.list", params: { path: "/work", limit: 201 } }), /must not exceed 200/u);
   assert.deepEqual(parseControlRequest({ ...base, type: "command.abort", params: { operationId: "abort-op", instanceId: "i1" } }).params, { operationId: "abort-op", instanceId: "i1" });

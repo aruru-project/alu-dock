@@ -15,6 +15,7 @@ import { DOCK_VERSION } from "../version.js";
 import { encodeJsonLine, JsonLineDecoder, JsonLineError } from "./json-lines.js";
 import {
   ATTACHMENTS_CAPABILITY,
+  MACHINES_CAPABILITY,
   CONTROL_PROTOCOL_VERSION,
   MAX_INSTANCE_LIST_ITEMS,
   GIT_BRANCH_CAPABILITY,
@@ -61,6 +62,7 @@ import {
   parseForgetResult,
   parseHelloReply,
   parseHostInfoResult,
+  parseMachinesResult,
   parseHistoryResult,
   parseConversationHistoryResult,
   parseConversationContentResult,
@@ -107,6 +109,7 @@ import {
   type ForgetResult,
   type HelloAck,
   type HostInfoResult,
+  type MachinesResult,
   type HistoryResult,
   type ConversationHistoryResult,
   type ConversationContentResult,
@@ -190,16 +193,17 @@ export class DockClient {
   closeActiveConnections():void{for(const socket of this.activeSockets)socket.destroy();this.activeSockets.clear();}
 
   async hostInfo():Promise<HostInfoResult>{return this.request("host.info",{},"host.info",parseHostInfoResult);}
+  async machines():Promise<MachinesResult>{return this.request("machine.list",{},MACHINES_CAPABILITY,parseMachinesResult);}
   async ping():Promise<PingResult>{let negotiated:string[]=[];const info=await this.request("host.info",{},"host.info",parseHostInfoResult,(ack)=>{negotiated=[...ack.capabilities];});return {pid:info.host.pid,protocolVersion:2,hostEpoch:info.host.hostEpoch,capabilities:negotiated};}
 
-  async uploadFile(path:string,mediaType?:string,operationId=this.createRequestId()):Promise<AttachmentUploadResult>{
+  async uploadFile(instanceId:string,path:string,mediaType?:string,operationId=this.createRequestId()):Promise<AttachmentUploadResult>{
     const absolute=resolve(path);
     const details=await stat(absolute);
     if(!details.isFile())throw new ControlClientError("invalid_attachment_source","Attachment source must be a regular file",operationId);
     if(details.size>MAX_ATTACHMENT_BYTES)throw new ControlClientError("attachment_too_large",`Attachment source exceeds ${MAX_ATTACHMENT_BYTES} bytes`,operationId);
     const hash=createHash("sha256");
     for await(const chunk of createReadStream(absolute))hash.update(chunk as Buffer);
-    return this.uploadAttachment({
+    return this.uploadAttachment(instanceId,{
       name:basename(absolute),
       sizeBytes:details.size,
       sha256:hash.digest("hex"),
@@ -208,13 +212,13 @@ export class DockClient {
     },operationId);
   }
 
-  uploadAttachment(source:AttachmentUploadSource,operationId=this.createRequestId()):Promise<AttachmentUploadResult>{
+  uploadAttachment(instanceId:string,source:AttachmentUploadSource,operationId=this.createRequestId()):Promise<AttachmentUploadResult>{
     const helloId=this.createRequestId();
     const requestId=this.createRequestId();
     const capabilities=requiredCapabilities(ATTACHMENTS_CAPABILITY);
     const request:Extract<ControlRequest,{type:"attachment.upload"}>={
       kind:"request",version:2,requestId,type:"attachment.upload",
-      params:{operationId,name:source.name,sizeBytes:source.sizeBytes,...(source.mediaType===undefined?{}:{mediaType:source.mediaType}),sha256:source.sha256},
+      params:{operationId,instanceId,name:source.name,sizeBytes:source.sizeBytes,...(source.mediaType===undefined?{}:{mediaType:source.mediaType}),sha256:source.sha256},
     };
     return new Promise<AttachmentUploadResult>((resolveUpload,rejectUpload)=>{
       const socket=this.openSocket();
@@ -327,10 +331,10 @@ export class DockClient {
     });
   }
 
-  async create(cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<InstanceSnapshot>{const result=await this.request("instance.create",{operationId,cwd,name,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"instance.catalog",parseCreateResult);return result.instance;}
-  ensure(key:string,cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<EnsureResult>{return this.request("instance.ensure",{operationId,key,cwd,name,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},INSTANCE_KEYS_CAPABILITY,parseEnsureResult);}
-  async getByKey(key:string):Promise<InstanceSnapshot|undefined>{const result:KeyLookupResult=await this.request("instance.get_by_key",{key},INSTANCE_KEYS_CAPABILITY,parseKeyLookupResult);return result.instance??undefined;}
-  adopt(sessionFile:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<AdoptResult>{return this.request("instance.adopt",{operationId,sessionFile,name,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.adopt.v1",parseCreateResult);}
+  async create(cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice},hostId?:string):Promise<InstanceSnapshot>{const result=await this.request("instance.create",{operationId,cwd,name,hostId,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"instance.catalog",parseCreateResult);return result.instance;}
+  ensure(key:string,cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice},hostId?:string):Promise<EnsureResult>{return this.request("instance.ensure",{operationId,key,cwd,name,hostId,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},INSTANCE_KEYS_CAPABILITY,parseEnsureResult);}
+  async getByKey(key:string,hostId?:string):Promise<InstanceSnapshot|undefined>{const result:KeyLookupResult=await this.request("instance.get_by_key",{key,hostId},INSTANCE_KEYS_CAPABILITY,parseKeyLookupResult);return result.instance??undefined;}
+  adopt(sessionFile:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice},hostId?:string):Promise<AdoptResult>{return this.request("instance.adopt",{operationId,sessionFile,name,hostId,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.adopt.v1",parseCreateResult);}
   async list(selector: "actionable" | "all" = "all"): Promise<InstanceSnapshot[]> {
     const instances: InstanceSnapshot[] = [];
     let cursor: InstanceListCursor | undefined;
@@ -505,8 +509,8 @@ export class DockClient {
     });
   }
 
-  sessionInventory(cwd:string,scope:"cwd"|"all"="cwd"):Promise<SessionInventoryResult>{return this.request("session.inventory",{cwd,scope},["session.inventory.v1","session.inventory-diagnostics.v1"],parseSessionInventoryResult);}
-  workspaceList(path:string,cursor?:WorkspaceListCursor,limit=MAX_WORKSPACE_LIST_ITEMS):Promise<WorkspaceListResult>{return this.request("workspace.list",{path,cursor,limit},WORKSPACE_LIST_CAPABILITY,parseWorkspaceListResult);}
+  sessionInventory(cwd:string,scope:"cwd"|"all"="cwd",hostId?:string):Promise<SessionInventoryResult>{return this.request("session.inventory",{cwd,scope,hostId},["session.inventory.v1","session.inventory-diagnostics.v1"],parseSessionInventoryResult);}
+  workspaceList(path:string,cursor?:WorkspaceListCursor,limit=MAX_WORKSPACE_LIST_ITEMS,hostId?:string):Promise<WorkspaceListResult>{return this.request("workspace.list",{path,cursor,limit,hostId},WORKSPACE_LIST_CAPABILITY,parseWorkspaceListResult);}
   sessions(instanceId:string,scope:"cwd"|"all"):Promise<SessionsResult>{return this.request("session.list",{instanceId,scope},["session.core","projection.completeness.v1"],parseSessionsResult);}
   switchSession(instanceId:string,sessionFile:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice}):Promise<SessionReplacementResult>{return this.request("session.switch",{operationId,instanceId,sessionFile,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.commands.v1",parseSessionReplacementResult);}
   newSession(instanceId:string,parentSession?:string,operationId=this.createRequestId()):Promise<SessionReplacementResult>{return this.request("session.new",{operationId,instanceId,parentSession},"session.commands.v1",parseSessionReplacementResult);}

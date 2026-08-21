@@ -35,7 +35,7 @@ test("Hosts without attachment storage do not advertise attachments.v1", async (
   await host.start();
   try {
     let opened = false;
-    await assert.rejects(new DockClient({ socketPath }).uploadAttachment({
+    await assert.rejects(new DockClient({ socketPath }).uploadAttachment("instance-a", {
       name: "unavailable.bin", sizeBytes: 0,
       sha256: createHash("sha256").update(Buffer.alloc(0)).digest("hex"),
       async *open() { opened = true; },
@@ -61,7 +61,7 @@ test("Protocol V2 separates logical attachment metadata from deduplicated conten
     const bytes = Buffer.alloc(900_000);
     for (let index = 0; index < bytes.length; index += 1) bytes[index] = index % 251;
     const client = new DockClient({ socketPath });
-    const first = await client.uploadAttachment(source("报告 / final copy.bin", bytes, "application/octet-stream"), "upload-one");
+    const first = await client.uploadAttachment("instance-a", source("报告 / final copy.bin", bytes, "application/octet-stream"), "upload-one");
     assert.equal(first.status, "stored");
     assert.equal(first.attachment.name, "报告 _ final copy.bin");
     assert.equal(first.attachment.sizeBytes, bytes.byteLength);
@@ -74,14 +74,14 @@ test("Protocol V2 separates logical attachment metadata from deduplicated conten
     assert.deepEqual(await readFile(resolved.path), bytes);
 
     let reopened = false;
-    const recovered = await client.uploadAttachment({ ...source("报告 / final copy.bin", bytes, "application/octet-stream"), async *open() { reopened = true; yield bytes; } }, "upload-one");
+    const recovered = await client.uploadAttachment("instance-a", { ...source("报告 / final copy.bin", bytes, "application/octet-stream"), async *open() { reopened = true; yield bytes; } }, "upload-one");
     assert.deepEqual(recovered, first);
     assert.equal(reopened, false, "a repeated operation receipt must not request the body again");
-    await assert.rejects(client.uploadAttachment(source("different.dat", Buffer.from("different")), "upload-one"), (error: unknown) => (
+    await assert.rejects(client.uploadAttachment("instance-a", source("different.dat", Buffer.from("different")), "upload-one"), (error: unknown) => (
       error instanceof Error && "code" in error && error.code === "operation_conflict"
     ));
 
-    const duplicate = await client.uploadAttachment(source("another-name.dat", bytes), "upload-two");
+    const duplicate = await client.uploadAttachment("instance-a", source("another-name.dat", bytes), "upload-two");
     assert.equal(duplicate.status, "reused");
     assert.notEqual(duplicate.attachment.fileId, first.attachment.fileId);
     assert.equal(duplicate.attachment.name, "another-name.dat");
@@ -91,23 +91,23 @@ test("Protocol V2 separates logical attachment metadata from deduplicated conten
     if (duplicateResolved.type !== "resolve") throw new Error("unexpected list result");
     assert.equal(duplicateResolved.path, resolved.path, "logical attachments with identical bytes share one stored file");
 
-    const exactRepeat = await client.uploadAttachment(source("another-name.dat", bytes), "upload-three");
+    const exactRepeat = await client.uploadAttachment("instance-a", source("another-name.dat", bytes), "upload-three");
     assert.equal(exactRepeat.status, "reused");
     assert.deepEqual(exactRepeat.attachment, duplicate.attachment, "identical logical metadata remains stable across uploads");
 
-    const typedAlias = await client.uploadAttachment(source("another-name.dat", bytes, "text/plain"), "upload-four");
+    const typedAlias = await client.uploadAttachment("instance-a", source("another-name.dat", bytes, "text/plain"), "upload-four");
     assert.equal(typedAlias.status, "reused");
     assert.notEqual(typedAlias.attachment.fileId, duplicate.attachment.fileId);
     assert.equal(typedAlias.attachment.mediaType, "text/plain");
 
-    await assert.rejects(client.uploadAttachment({
+    await assert.rejects(client.uploadAttachment("instance-a", {
       name: "partial.bin", sizeBytes: 20, sha256: createHash("sha256").update(Buffer.alloc(20)).digest("hex"),
       async *open() { yield Buffer.alloc(5); throw new Error("source disconnected"); },
     }, "upload-partial"), /source disconnected/u);
     const afterDisconnect = await service.accessAttachments("instance-b", { type: "list" });
     assert.equal(afterDisconnect.type === "list" ? afterDisconnect.total : -1, 3);
     await new Promise((resolve) => setTimeout(resolve, 20));
-    const recoveredPartial = await client.uploadAttachment(source("partial.bin", Buffer.alloc(20)), "upload-partial");
+    const recoveredPartial = await client.uploadAttachment("instance-a", source("partial.bin", Buffer.alloc(20)), "upload-partial");
     assert.equal(recoveredPartial.status, "stored", "a pre-completion disconnect must leave the operation retryable");
 
     const restarted = new AttachmentService(state);
@@ -138,7 +138,7 @@ test("attachment DTOs remain canonical across Queue, events, and conversation wi
   try {
     const client = new DockClient({ socketPath });
     const bytes = Buffer.from("queue attachment");
-    const uploaded = await client.uploadAttachment(source("queue notes.txt", bytes, "text/plain"), "queue-upload");
+    const uploaded = await client.uploadAttachment("instance-a", source("queue notes.txt", bytes, "text/plain"), "queue-upload");
     const instance = await client.create(root, "attachment-work", "create-attachment-work");
     await client.prompt(instance.id, "start run", "prompt", "start-run");
     await client.prompt(instance.id, "inspect queued file", "steer", "queued-attachment", undefined, [uploaded.attachment.fileId]);

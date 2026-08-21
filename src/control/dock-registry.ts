@@ -20,6 +20,7 @@ import type { InstanceAttachmentHostPort } from "../core/instance-attachments.js
 import { InstanceBusyError, type InstanceLifecycle, type ManagedInstance, type InstanceSnapshot, type StopReceipt } from "../core/managed-instance.js";
 import { CatalogTransactionCoordinator, type CatalogFault, type CatalogHealth } from "./catalog-transactions.js";
 import { InstanceObservationService, observationStatus } from "./instance-observation-service.js";
+import { boundedInstanceListPage } from "./instance-list-page.js";
 import {
   catalogReopenSessionFile,
   catalogSnapshotFromRecord,
@@ -148,6 +149,7 @@ export class DockRegistry implements DockToolsHostPort {
   private readonly catalogRemovalListeners = new Set<(instanceIds: readonly string[]) => void>();
   private readonly observationService: InstanceObservationService;
   private readonly attachmentHostPort: InstanceAttachmentHostPort;
+  private readonly dockToolsHostPort: DockToolsHostPort;
   private dockToolsMutationPort: DockToolsMutationPort | undefined;
   private readonly instanceObservationSubscriptions = new Map<string, () => void>();
   private readonly instanceObservationSinkDetachments = new Map<string, () => void>();
@@ -166,6 +168,7 @@ export class DockRegistry implements DockToolsHostPort {
       catalogStore?: CatalogStore;
       reopenTargetResolver?: ReopenTargetResolver;
       attachmentHostPort?: InstanceAttachmentHostPort;
+      dockToolsHostPort?: DockToolsHostPort;
     } = {},
   ) {
     if (options.catalogCommitPort && options.catalogStore) throw new Error("Configure either catalogCommitPort or catalogStore, not both");
@@ -178,6 +181,7 @@ export class DockRegistry implements DockToolsHostPort {
     this.catalogReady = options.catalogStore === undefined;
     this.catalog = new CatalogTransactionCoordinator(options.catalogStore ?? options.catalogCommitPort, this.hostEpoch);
     this.attachmentHostPort = options.attachmentHostPort ?? unavailableAttachmentHostPort;
+    this.dockToolsHostPort = options.dockToolsHostPort ?? this;
     this.observationService = new InstanceObservationService({
       listSnapshots: () => this.list(),
       getSnapshot: (instanceId) => this.getSnapshot(instanceId),
@@ -270,7 +274,7 @@ export class DockRegistry implements DockToolsHostPort {
     if (this.instances.has(id) || this.catalog.current().instances.some((record) => record.id === id)) {
       throw new Error(`Generated duplicate instance identity: ${id}`);
     }
-    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: false });
+    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: false });
     if (
       instance.id !== id
       || instance.creationOperationId !== input.operationId
@@ -336,7 +340,7 @@ export class DockRegistry implements DockToolsHostPort {
       name: input.name,
       projectTrusted: trust.projectTrusted,
       sessionFile,
-      dockToolsHostPort: this,
+      dockToolsHostPort: this.dockToolsHostPort,
       attachmentHostPort: this.attachmentHostPort,
       dockToolsEnabled: false,
     });
@@ -442,7 +446,7 @@ export class DockRegistry implements DockToolsHostPort {
       initialRuntimeGeneration: nextGeneration,
       createdAt: record.createdAt,
       reopenedFrom: previousLifecycle,
-      dockToolsHostPort: this,
+      dockToolsHostPort: this.dockToolsHostPort,
       attachmentHostPort: this.attachmentHostPort,
       dockToolsEnabled: record.dockToolsEnabled ?? false,
     });
@@ -636,8 +640,6 @@ export class DockRegistry implements DockToolsHostPort {
     };
   } {
     this.assertCatalogReady();
-    if (!Number.isSafeInteger(input.limit) || input.limit < 1) throw new Error("Catalog list limit must be a positive safe integer");
-    if (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 4_096) throw new Error("Catalog list byte limit must be a bounded positive safe integer");
     const projection = this.catalog.current();
     if (input.cursor && input.cursor.revision !== projection.revision) {
       throw new CatalogListCursorStaleError(input.cursor.revision, projection.revision);
@@ -650,35 +652,15 @@ export class DockRegistry implements DockToolsHostPort {
     const selected = input.selector === "all" ? all : all.filter((instance) => instance.lifecycle !== "stopped");
     const offset = input.cursor?.offset ?? 0;
     if (offset > selected.length) throw new CatalogListCursorStaleError(projection.revision, projection.revision);
-    const instances: InstanceSnapshot[] = [];
-    // Reserve space for the result keys and page metadata. The Host separately
-    // keeps the complete response envelope below the control line cap.
-    const snapshotBudget = input.maxBytes - 4_096;
-    let snapshotsBytes = 2; // JSON array brackets
-    for (const candidate of selected.slice(offset, offset + input.limit)) {
-      const candidateBytes = Buffer.byteLength(JSON.stringify(candidate), "utf8");
-      const separatorBytes = instances.length === 0 ? 0 : 1;
-      if (snapshotsBytes + separatorBytes + candidateBytes > snapshotBudget) {
-        if (instances.length === 0) throw new Error(`Catalog instance snapshot exceeds the bounded list result: ${candidate.id}`);
-        break;
-      }
-      instances.push(candidate);
-      snapshotsBytes += separatorBytes + candidateBytes;
-    }
-    const nextOffset = offset + instances.length;
-    const result = {
-      instances,
-      page: {
-        revision: projection.revision,
-        total: selected.length,
-        hiddenStopped: input.selector === "all" ? 0 : hiddenStopped,
-        ...(nextOffset < selected.length
-          ? { nextCursor: { revision: projection.revision, offset: nextOffset, selector: input.selector } }
-          : {}),
-      },
-    };
-    if (Buffer.byteLength(JSON.stringify(result), "utf8") > input.maxBytes) throw new Error("Catalog list result exceeded its serialized byte bound");
-    return result;
+    return boundedInstanceListPage({
+      selected,
+      selector: input.selector,
+      revision: projection.revision,
+      offset,
+      limit: input.limit,
+      hiddenStopped,
+      maxBytes: input.maxBytes,
+    });
   }
 
   async forget(operationId: string, instanceId: string): Promise<{ forgottenId: string; previousLifecycle: "stopped" | "host_lost" | "runtime_error" }> {

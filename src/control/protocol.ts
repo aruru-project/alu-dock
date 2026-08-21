@@ -152,8 +152,10 @@ export const ATTACHMENTS_CAPABILITY = "attachments.v1" as const;
 export const PUBLISHED_FILES_CAPABILITY = "published-files.v1" as const;
 export const INSTANCE_DELIVERABLES_CAPABILITY = "instance.deliverables.v1" as const;
 export const COMMAND_DISCOVERY_CAPABILITY = "command.discovery.v1" as const;
+export const MACHINES_CAPABILITY = "machines.v1" as const;
 
 export const IMPLEMENTED_CAPABILITIES = [
+  MACHINES_CAPABILITY,
   COMMAND_DISCOVERY_CAPABILITY,
   ATTACHMENTS_CAPABILITY,
   INSTANCE_DELIVERABLES_CAPABILITY,
@@ -236,12 +238,13 @@ export type HelloError = {
 type Request<T extends string, P> = { kind: "request"; version: 2; requestId: string; type: T; params: P };
 export type ControlRequest =
   | Request<"host.info", Record<string, never>>
-  | Request<"attachment.upload", { operationId: string; name: string; sizeBytes: number; mediaType?: string; sha256: string }>
-  | Request<"instance.create", { operationId: string; cwd: string; name?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
-  | Request<"instance.ensure", { operationId: string; key: string; cwd: string; name?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
-  | Request<"instance.adopt", { operationId: string; sessionFile: string; name?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
+  | Request<"machine.list", Record<string, never>>
+  | Request<"attachment.upload", { operationId: string; instanceId: string; name: string; sizeBytes: number; mediaType?: string; sha256: string }>
+  | Request<"instance.create", { operationId: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
+  | Request<"instance.ensure", { operationId: string; key: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
+  | Request<"instance.adopt", { operationId: string; sessionFile: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.list", { selector: "actionable" | "all"; cursor?: InstanceListCursor; limit: number }>
-  | Request<"instance.get_by_key", { key: string }>
+  | Request<"instance.get_by_key", { key: string; hostId?: string }>
   | Request<"instance.get", { instanceId: string }>
   | Request<"deliverable.list", { instanceId: string }>
   | Request<"deliverable.download", { instanceId: string; deliveryRef: string }>
@@ -276,7 +279,7 @@ export type ControlRequest =
   | Request<"conversation.history", { instanceId: string; cursor?: string; limit: number }>
   | Request<"conversation.content", { instanceId: string; contentRef: string; cursor?: string }>
   | Request<"file.read", { instanceId: string; fileRef: string; offset?: number }>
-  | Request<"session.inventory", { cwd: string; scope: "cwd" | "all" }>
+  | Request<"session.inventory", { cwd: string; scope: "cwd" | "all"; hostId?: string }>
   | Request<"session.list", { instanceId: string; scope: "cwd" | "all" }>
   | Request<"session.switch", { operationId: string; instanceId: string; sessionFile: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"session.new", { operationId: string; instanceId: string; parentSession?: string }>
@@ -287,7 +290,7 @@ export type ControlRequest =
   | Request<"session.navigate", { operationId: string; instanceId: string; targetId: string; summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }>
   | Request<"session.fork", { operationId: string; instanceId: string; entryId: string }>
   | Request<"session.clone", { operationId: string; instanceId: string; entryId: string }>
-  | Request<"workspace.list", { path: string; cursor?: WorkspaceListCursor; limit: number }>;
+  | Request<"workspace.list", { path: string; cursor?: WorkspaceListCursor; limit: number; hostId?: string }>;
 
 export interface ControlError { code: string; message: string; retryable: boolean; details?: JsonObject }
 export type ControlResponse =
@@ -348,6 +351,8 @@ export interface HostInfoResult {
   diagnostics: Array<{ severity: "info" | "warning" | "error"; message: string; source?: string }>;
 }
 export interface PingResult { pid: number; protocolVersion: 2; hostEpoch: string; capabilities: string[] }
+export interface MachineDto { hostId: string; name: string; kind: "main" | "subhost"; available: boolean }
+export interface MachinesResult { machines: MachineDto[] }
 export interface CreateResult { instance: InstanceSnapshot }
 export interface EnsureResult { created: boolean; instance: InstanceSnapshot }
 export interface KeyLookupResult { instance: InstanceSnapshot | null }
@@ -473,6 +478,7 @@ export type ConfigurationResult = ModelConfigurationResult | ThinkingConfigurati
 export function implementedCapabilities(): string[] { return [...IMPLEMENTED_CAPABILITIES].sort(); }
 export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "host.info") return "host.info";
+  if (type === "machine.list") return MACHINES_CAPABILITY;
   if (type === "attachment.upload") return ATTACHMENTS_CAPABILITY;
   if (type === "deliverable.list" || type === "deliverable.download") return INSTANCE_DELIVERABLES_CAPABILITY;
   if (type === "workspace.entry.list" || type === "workspace.entry.get" || type === "workspace.file.read") return WORKSPACE_FILES_CAPABILITY;
@@ -631,10 +637,12 @@ export function parseControlRequest(input: unknown): ControlRequest {
   const base = { kind: "request" as const, version: 2 as const, requestId };
   const instanceId = (): string => string(params.instanceId, "params.instanceId", MAX_INSTANCE_ID_CHARS, "invalid_request");
   const operationId = (): string => string(params.operationId, "params.operationId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
+  const hostId = (): string | undefined => optionalString(params.hostId, "params.hostId", 128, "invalid_request");
   switch (type) {
     case "host.info": exact(params, [], "invalid_request"); return { ...base, type, params: {} };
+    case "machine.list": exact(params, [], "invalid_request"); return { ...base, type, params: {} };
     case "attachment.upload": {
-      exact(params, ["operationId", "name", "sizeBytes", "mediaType", "sha256"], "invalid_request");
+      exact(params, ["operationId", "instanceId", "name", "sizeBytes", "mediaType", "sha256"], "invalid_request");
       const name = boundedString(params.name, "params.name", MAX_ATTACHMENT_NAME_CHARS, "invalid_request");
       if (name.length === 0) throw validation("invalid_request", "params.name must not be empty");
       const sizeBytes = unsigned(params.sizeBytes, "params.sizeBytes", "invalid_request");
@@ -643,17 +651,18 @@ export function parseControlRequest(input: unknown): ControlRequest {
       if (mediaType !== undefined && (mediaType.length === 0 || /[\u0000-\u001f\u007f-\u009f]/u.test(mediaType))) throw validation("invalid_request", "params.mediaType must be nonempty and control-free");
       const sha256 = string(params.sha256, "params.sha256", 64, "invalid_request");
       if (!/^[a-f0-9]{64}$/u.test(sha256)) throw validation("invalid_request", "params.sha256 must be 64 lowercase hexadecimal characters");
-      return { ...base, type, params: { operationId: operationId(), name, sizeBytes, ...(mediaType === undefined ? {} : { mediaType }), sha256 } };
+      return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), name, sizeBytes, ...(mediaType === undefined ? {} : { mediaType }), sha256 } };
     }
     case "instance.create": {
-      exact(params, ["operationId", "cwd", "name", "trustChallengeId", "projectTrustDecision"], "invalid_request");
+      exact(params, ["operationId", "cwd", "name", "hostId", "trustChallengeId", "projectTrustDecision"], "invalid_request");
       const trustChallengeId = optionalString(params.trustChallengeId, "params.trustChallengeId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
       const projectTrustDecision = params.projectTrustDecision === undefined ? undefined : enumeration(params.projectTrustDecision, "params.projectTrustDecision", ["trust_once", "trust_and_remember", "deny_once", "deny_and_remember"], "invalid_request");
       if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
-      return { ...base, type, params: { operationId: operationId(), cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"), name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), trustChallengeId, projectTrustDecision } };
+      const selectedHost = hostId();
+      return { ...base, type, params: { operationId: operationId(), cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"), name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), ...(selectedHost === undefined ? {} : { hostId: selectedHost }), trustChallengeId, projectTrustDecision } };
     }
     case "instance.ensure": {
-      exact(params, ["operationId", "key", "cwd", "name", "trustChallengeId", "projectTrustDecision"], "invalid_request");
+      exact(params, ["operationId", "key", "cwd", "name", "hostId", "trustChallengeId", "projectTrustDecision"], "invalid_request");
       const trustChallengeId = optionalString(params.trustChallengeId, "params.trustChallengeId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
       const projectTrustDecision = params.projectTrustDecision === undefined ? undefined : enumeration(params.projectTrustDecision, "params.projectTrustDecision", ["trust_once", "trust_and_remember", "deny_once", "deny_and_remember"], "invalid_request");
       if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
@@ -664,18 +673,20 @@ export function parseControlRequest(input: unknown): ControlRequest {
         key,
         cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"),
         name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"),
+        ...(params.hostId === undefined ? {} : { hostId: hostId() }),
         trustChallengeId,
         projectTrustDecision,
       } };
     }
     case "instance.adopt": {
-      exact(params, ["operationId", "sessionFile", "name", "trustChallengeId", "projectTrustDecision"], "invalid_request");
+      exact(params, ["operationId", "sessionFile", "name", "hostId", "trustChallengeId", "projectTrustDecision"], "invalid_request");
       const trustChallengeId = optionalString(params.trustChallengeId, "params.trustChallengeId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
       const projectTrustDecision = params.projectTrustDecision === undefined ? undefined : enumeration(params.projectTrustDecision, "params.projectTrustDecision", ["trust_once", "trust_and_remember", "deny_once", "deny_and_remember"], "invalid_request");
       if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
       const sessionFile = string(params.sessionFile, "params.sessionFile", MAX_CONTROL_CWD_CHARS, "invalid_request");
       if (!sessionFile.startsWith("/")) throw validation("invalid_request", "params.sessionFile must be absolute");
-      return { ...base, type, params: { operationId: operationId(), sessionFile, name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), trustChallengeId, projectTrustDecision } };
+      const selectedHost = hostId();
+      return { ...base, type, params: { operationId: operationId(), sessionFile, name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), ...(selectedHost === undefined ? {} : { hostId: selectedHost }), trustChallengeId, projectTrustDecision } };
     }
     case "instance.list": {
       exact(params, ["selector", "cursor", "limit"], "invalid_request");
@@ -687,10 +698,11 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { selector, cursor, limit } };
     };
     case "instance.get_by_key": {
-      exact(params, ["key"], "invalid_request");
+      exact(params, ["key", "hostId"], "invalid_request");
       const key = string(params.key, "params.key", MAX_INSTANCE_KEY_CHARS, "invalid_request");
       if (/[\u0000-\u001f\u007f-\u009f]/u.test(key)) throw validation("invalid_request", "params.key must not contain control characters");
-      return { ...base, type, params: { key } };
+      const selectedHost = hostId();
+      return { ...base, type, params: { key, ...(selectedHost === undefined ? {} : { hostId: selectedHost }) } };
     }
     case "instance.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "deliverable.list": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
@@ -826,10 +838,11 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { instanceId: instanceId(), fileRef: string(params.fileRef, "params.fileRef", MAX_PUBLISHED_FILE_REF_CHARS, "invalid_request"), offset } };
     }
     case "session.inventory": {
-      exact(params, ["cwd", "scope"], "invalid_request");
+      exact(params, ["cwd", "scope", "hostId"], "invalid_request");
       const cwd = string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request");
       if (!cwd.startsWith("/")) throw validation("invalid_request", "params.cwd must be absolute");
-      return { ...base, type, params: { cwd, scope: enumeration(params.scope, "params.scope", ["cwd", "all"], "invalid_request") } };
+      const selectedHost = hostId();
+      return { ...base, type, params: { cwd, scope: enumeration(params.scope, "params.scope", ["cwd", "all"], "invalid_request"), ...(selectedHost === undefined ? {} : { hostId: selectedHost }) } };
     }
     case "session.list": exact(params, ["instanceId", "scope"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId(), scope: enumeration(params.scope, "params.scope", ["cwd", "all"], "invalid_request") } };
     case "session.switch": {
@@ -863,13 +876,14 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), entryId: id(params.entryId, "params.entryId", "invalid_request") } };
     }
     case "workspace.list": {
-      exact(params, ["path", "cursor", "limit"], "invalid_request");
+      exact(params, ["path", "cursor", "limit", "hostId"], "invalid_request");
       const path = string(params.path, "params.path", MAX_CONTROL_CWD_CHARS, "invalid_request");
       if (!path.startsWith("/")) throw validation("invalid_request", "params.path must be absolute");
       const limit = positive(params.limit, "params.limit", "invalid_request");
       if (limit > MAX_WORKSPACE_LIST_ITEMS) throw validation("invalid_request", `params.limit must not exceed ${MAX_WORKSPACE_LIST_ITEMS}`);
       const cursor = params.cursor === undefined ? undefined : parseWorkspaceListCursor(params.cursor, "params.cursor", "invalid_request");
-      return { ...base, type, params: { path, cursor, limit } };
+      const selectedHost = hostId();
+      return { ...base, type, params: { path, cursor, limit, ...(selectedHost === undefined ? {} : { hostId: selectedHost }) } };
     }
     default: throw validation("unknown_request", `Unknown request type: ${type}`);
   }
@@ -1103,6 +1117,22 @@ export function parseHostInfoResult(input: unknown): HostInfoResult {
   if (schemaVersion !== CATALOG_SCHEMA_VERSION) throw validation("invalid_response", "Host info catalog schema is incompatible");
   return { state: enumeration(value.state, "state", ["ready", "mutation_faulted", "draining"]), host: parseHost(value.host, "host"), catalog: { schemaVersion, revision: unsigned(catalog.revision, "catalog.revision"), lastReconciledAt: timestamp(catalog.lastReconciledAt, "catalog.lastReconciledAt") }, paths: { socket: string(paths.socket, "paths.socket", MAX_CONTROL_CWD_CHARS), state: string(paths.state, "paths.state", MAX_CONTROL_CWD_CHARS) }, diagnostics };
 }
+export function parseMachinesResult(input: unknown): MachinesResult {
+  const value = object(input, "machines result");
+  exact(value, ["machines"]);
+  const machines = array(value.machines, "machines", MAX_COLLECTION).map((item, index) => {
+    const machine = object(item, `machines[${index}]`);
+    exact(machine, ["hostId", "name", "kind", "available"]);
+    return {
+      hostId: string(machine.hostId, `machines[${index}].hostId`, 128),
+      name: string(machine.name, `machines[${index}].name`, 256),
+      kind: enumeration(machine.kind, `machines[${index}].kind`, ["main", "subhost"]),
+      available: boolean(machine.available, `machines[${index}].available`),
+    };
+  });
+  return { machines };
+}
+
 export function parseAttachmentDto(input: unknown, field = "attachment"): AttachmentDto {
   const value = object(input, field);
   exact(value, ["fileId", "name", "sizeBytes", "mediaType", "sha256", "storedAt"]);
@@ -1912,7 +1942,7 @@ function parseMetrics(input: unknown, field: string): NonNullable<InstanceSnapsh
   }
   return result;
 }
-function parseInstance(input: unknown, field: string): InstanceSnapshot {
+export function parseInstanceSnapshot(input: unknown, field = "instance"): InstanceSnapshot {
   const value = object(input, field); exact(value, ["id", "creationOperationId", "key", "name", "displayName", "cwd", "gitBranch", "lifecycle", "execution", "compacting", "lastRun", "reopenable", "runtimeGeneration", "ownerHostEpoch", "interruption", "pending", "executor", "metrics", "extensionStatus", "toolsExpanded", "activeInteraction", "activeCommandId", "lastError", "createdAt", "updatedAt", "executionChangedAt", "runStartedAt", "eventCursor"]);
   const snapshot: InstanceSnapshot = {
     id: id(value.id, `${field}.id`), creationOperationId: id(value.creationOperationId, `${field}.creationOperationId`), key: optionalString(value.key, `${field}.key`, MAX_INSTANCE_KEY_CHARS), name: optionalString(value.name, `${field}.name`, MAX_INSTANCE_NAME_CHARS), displayName: instanceDisplayName(value.displayName, `${field}.displayName`), cwd: string(value.cwd, `${field}.cwd`, MAX_CONTROL_CWD_CHARS), gitBranch: value.gitBranch === undefined ? undefined : gitBranch(value.gitBranch, `${field}.gitBranch`),
@@ -1936,6 +1966,8 @@ function parseInstance(input: unknown, field: string): InstanceSnapshot {
 function assertCursorDomain(cursor: EventCursor, snapshot: InstanceSnapshot, field: string): void {
   if (cursor.instanceId !== snapshot.id || cursor.runtimeGeneration !== snapshot.runtimeGeneration || (snapshot.ownerHostEpoch !== undefined && cursor.hostEpoch !== snapshot.ownerHostEpoch)) throw validation("invalid_response", `${field} does not match the instance cursor domain`);
 }
+
+const parseInstance = parseInstanceSnapshot;
 
 function parseDockEvent(input: unknown, field: string): DockEvent {
   const value = object(input, field); exact(value, ["scope", "sequence", "instanceId", "runtimeGeneration", "occurredAt", "type", "data"]);

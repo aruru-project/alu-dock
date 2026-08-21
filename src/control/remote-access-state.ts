@@ -217,7 +217,7 @@ export class RemoteAccessState {
     await this.initialize();
     const path = join(this.root, "identity.json");
     const existing = await readPrivateJsonIfPresent(path);
-    if (existing !== undefined) return parseIdentity(existing);
+    if (existing !== undefined) return parseHostTlsIdentity(existing);
     const generated = await generateHostIdentity();
     // The Unix Host is already the single process owner when this is called.
     // Atomic rename prevents a crash from leaving a partial long-lived key.
@@ -301,7 +301,7 @@ export class RemoteAccessState {
   }
 }
 
-async function generateHostIdentity(): Promise<HostTlsIdentity> {
+export async function generateHostIdentity(): Promise<HostTlsIdentity> {
   const algorithm: RsaHashedKeyGenParams = {
     name: "RSASSA-PKCS1-v1_5",
     hash: "SHA-256",
@@ -359,7 +359,7 @@ function parseStatus(input: unknown): RemoteAccessStatus {
   return value as unknown as RemoteAccessStatus;
 }
 
-function parseIdentity(input: unknown): HostTlsIdentity {
+export function parseHostTlsIdentity(input: unknown): HostTlsIdentity {
   const value = object(input, "Host TLS identity");
   exact(value, ["certificatePem", "privateKeyPem", "fingerprint"], "Host TLS identity");
   if (typeof value.certificatePem !== "string" || typeof value.privateKeyPem !== "string" || typeof value.fingerprint !== "string") throw new Error("Host TLS identity is invalid");

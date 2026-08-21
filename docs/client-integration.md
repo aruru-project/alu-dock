@@ -235,7 +235,7 @@ Web 应用通常由后端接收浏览器上传、保存为受控本机文件，�
 客户端应使用一个新的、独立的 authenticated Protocol V2 connection，并在 hello 中要求 `attachments.v1`。先本地读取文件，计算确切 `sizeBytes` 与 lowercase SHA-256；之后发送 header：
 
 ```json
-{"kind":"request","version":2,"requestId":"upload-request","type":"attachment.upload","params":{"operationId":"upload-operation","name":"报告 final.pdf","sizeBytes":123456,"mediaType":"application/pdf","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}
+{"kind":"request","version":2,"requestId":"upload-request","type":"attachment.upload","params":{"operationId":"upload-operation","instanceId":"main-instance-id","name":"报告 final.pdf","sizeBytes":123456,"mediaType":"application/pdf","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}
 ```
 
 新的 operation 收到 readiness：

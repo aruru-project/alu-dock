@@ -11,6 +11,7 @@ const PUBLIC_TOPICS = new Set([
   "forget",
   "prune",
   "service",
+  "machine",
   "help",
 ]);
 
@@ -58,6 +59,7 @@ export function renderCliHelp(topics: readonly string[]): string {
   }
   if (!PUBLIC_TOPICS.has(topic)) throw new Error(`Unknown help topic: ${topic}`);
   if (topic === "service") return serviceHelp(rest);
+  if (topic === "machine") return machineHelp(rest);
   if (rest.length > 0) throw new Error(`${topic} does not have help subtopics`);
   switch (topic) {
     case "continue": return continueHelp();
@@ -76,6 +78,11 @@ export function renderCliHelp(topics: readonly string[]): string {
 
 function overviewHelp(): string {
   return `Alu Dock — managed Pi development terminal for SSH\n\nUsage:\n  aludock\n  aludock COMMAND [OPTIONS]\n  aludock help [COMMAND]\n\nStart here:\n  aludock                 Open the Dock Hub\n  aludock -c              Continue recent work here, or create it\n  aludock new             Start separate Pi work\n  aludock attach TARGET   Open known running work in this terminal\n\nHuman commands:\n  continue  Continue recent work in this directory (-c, --continue)\n  open      Find matching work, or resume it by TARGET\n  new       Start separate work and a new Pi session\n  attach    Open known running work\n  list      Show work that is current or saved in History\n  status    Show one work item in detail\n  stop      End running work and remove it from the Dock\n  forget    Remove one ended work item from Dock History\n  prune     Remove ended work from Dock History\n  service   Manage the background Alu Dock service\n  help      Explore command help\n\nThe Alu Dock service must be running. If it is stopped, use\n'aludock service start'. New work starts where you ran aludock and can use\na different directory. Ctrl+D leaves Work for the shell while the work keeps\nrunning.\n\nExplore:\n  aludock help open\n  aludock help service\n  aludock COMMAND --help\n`;
+}
+
+function machineHelp(rest: readonly string[]): string {
+  if (rest.length > 0 && (rest.length !== 1 || rest[0] !== "join-file")) throw new Error("machine help accepts only join-file");
+  return `aludock machine join-file — prepare one SubHost enrollment\n\nUsage:\n  aludock machine join-file --out PATH [--state PATH] [--machine-name NAME]\n\nRun this on Main while its Host is stopped. The private file expires after ten\nminutes and works once. Enter Main's address and machine port separately when\nstarting the SubHost; they are intentionally absent from the file.\n`;
 }
 
 function continueHelp(): string {
@@ -146,6 +153,7 @@ function serviceHelp(rest: readonly string[]): string {
 }
 
 function internalTopicHelp(topic: string): string {
+  if (topic === "serve") return `aludock serve — explicit Host startup composition\n\nUsage:\n  aludock --socket PATH serve --dev\n  aludock --socket PATH serve --dev --main --state PATH --machine-port PORT [--machine-name NAME]\n  aludock serve --dev --subhost --state PATH --main-address ADDRESS --machine-port PORT [--join-file PATH] [--machine-name NAME]\n\nMain owns every client entry point. SubHost has one encrypted upstream and no\nclient socket. After first enrollment, omit --join-file on later starts.\n`;
   const humanAlternative: Record<string, string> = {
     serve: "Use 'aludock service' to manage the Host.",
     ping: "Use 'aludock service status' for human readiness checks.",

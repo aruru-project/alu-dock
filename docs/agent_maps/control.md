@@ -38,6 +38,16 @@ Prompt、conversation、model、tools、settings、session、tree 和 Extension 
 
 Host 不为这些能力维护第二套 Agent 实现，也不重复投影 Worker 已经产生的 Dock event/result。
 
+## Main 与 SubHost
+
+Main 是唯一面向客户端的 Host authority。SubHost 只持有一个到 Main 的加密上游连接和本机原生 Registry；它不监听客户端 socket、不启用 Remote Access、不接子节点，也不把远端实例混进本机 Registry。
+
+SubHost 只上报本机 Registry 的 native snapshots。初始和后续 inventory 都先把完整 canonical snapshot array 序列化，再按 machine-line 边界切成有序 base64 chunks；Main 收齐、按 durable catalog 的既有字节边界校验并逐项解析后才原子 reconcile，初次完成前不发送 `machine_ready`，替换 inventory 未完成时旧连接与旧目录继续权威。Main 在独立、持久的 route directory 中为每个 native instance 分配稳定的 Main `instanceId`；Main identity、trust 和 machine index 保存在 `main.json`，每个 SubHost 的 routes 使用各自 crash-safe atomic route file 和既有 catalog 字节边界，因此所有 SubHost 不共享一个 16 MiB route 上限。两种 ID 不要求相等。客户端只收到并发送 Main ID。普通 response、follow/control、response-transfer、workspace/deliverable stream 和 attachment upload body 都经过同一个 multiplexed Protocol V2 route seam；Host 不为每个 method 建 proxy，也不创建假的 remote `ManagedInstance`。
+
+机器边界只有一个 identity mapper：它改写 Protocol V2 的 instance/Host identity 字段，但不进入 message、content、metadata、tool arguments 等 Agent/用户 opaque payload。无 instance 的 machine-local request 可带 `hostId`；省略时仍选择本机 Main，保持旧客户端行为。`attachment.upload` 必须带 Main `instanceId`，因此 Main 能在 body 开始前直接选择拥有该实例的 SubHost storage。
+
+每条 logical stream 都有独立的有界串行输入队列和 stream reset；某条 stream 的 backpressure、解析、投影、持久化或客户端输出失败只关闭该 stream，TLS machine link 仍继续处理其他 stream 与 heartbeat。机器断线只让 Main 的远端目录进入可恢复状态，不停止 SubHost Worker 或已经接受的 Queue。离线时对 Main entry 执行 stop 只删除 route mapping；同一 native work 以后重新上报时会取得新的 Main identity。Main 不缓存或重放 mutation，所有转发保留原 operation ID。SubHost 的全局 Agent Dock tools 使用同一上游 authority，并以 Main source ID 执行；上游不可用时 list/inspect/watch/create/send 立即失败，`dock_create` 默认回到 source SubHost。`dock_deliver` 始终由 source SubHost 在本机登记，不依赖 Main 连接。
+
 ## Protocol V2
 
 Protocol V2 的记录使用 UTF-8 JSONL，可以承载在两种不同 transport 上：

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, X509Certificate } from "node:crypto";
-import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, rm } from "node:fs/promises";
 import { createConnection as createNetConnection, createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +12,7 @@ import { DockClient } from "../src/control/dock-client.js";
 import { AttachmentService } from "../src/control/attachment-service.js";
 import { AttachmentStorageState } from "../src/control/attachment-storage-state.js";
 import { DockHost } from "../src/control/dock-host.js";
+import type { MainRouteAuthority } from "../src/control/machine-transport.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
 import { encodeJsonLine } from "../src/control/json-lines.js";
 import {
@@ -124,6 +125,35 @@ test("an expected pairing-window close cannot remove a newer window", async (con
   assert.equal((await state.readPairingWindow())?.id, second.id);
   assert.equal(await state.closePairingWindow(second.id), true);
   assert.equal(await state.readPairingWindow(), undefined);
+});
+
+test("machine-listener startup failure rolls back Unix and Remote Access listeners", async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), "alu-dock-start-rollback-"));
+  await chmod(directory, 0o700);
+  context.after(async () => rm(directory, { recursive: true, force: true }));
+  const socketPath = join(directory, "dock.sock");
+  const port = await reservePort();
+  const remoteAccessState = new RemoteAccessState(join(directory, "remote-access"));
+  await remoteAccessState.writeSettings({ enabled: true, port });
+  const registry = new DockRegistry(async () => { throw new Error("startup rollback must not construct a runtime"); });
+  let stopCalls = 0;
+  const routeAuthority = {
+    route: async () => ({ kind: "local" as const }),
+    machines: async () => [],
+    listPage: async () => ({ instances: [] }),
+    start: async () => {
+      assert.equal((await lstat(socketPath)).isSocket(), true);
+      assert.equal(await tcpConnects("::1", port), true);
+      throw new Error("fixture machine listener failed");
+    },
+    stop: async () => { stopCalls += 1; },
+  } as MainRouteAuthority;
+  const host = new DockHost({ socketPath, registry, remoteAccessState, routeAuthority });
+
+  await assert.rejects(host.start(), /fixture machine listener failed/u);
+  assert.equal(stopCalls, 1);
+  await assert.rejects(lstat(socketPath), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");
+  assert.equal(await tcpConnects("::1", port), false);
 });
 
 test("local pairing window admits an exact certificate to the existing Protocol V2 TLS path", { timeout: 55_000 }, async (context) => {
@@ -322,7 +352,7 @@ test("local pairing window admits an exact certificate to the existing Protocol 
   upload.write(encodeJsonLine({ ...record(hello("upload-hello")), requiredCapabilities: ["attachments.v1"] }));
   assert.equal(record(await uploadReader.next()).kind, "hello_ack");
   upload.write(encodeJsonLine({ kind: "request", version: 2, requestId: "remote-upload", type: "attachment.upload", params: {
-    operationId: "remote-upload-operation", name: "remote file.bin", sizeBytes: uploadBytes.length, sha256: uploadDigest,
+    operationId: "remote-upload-operation", instanceId: "remote-instance", name: "remote file.bin", sizeBytes: uploadBytes.length, sha256: uploadDigest,
   } }));
   assert.equal(record(await uploadReader.next()).kind, "attachment_upload_ready");
   upload.write(encodeJsonLine({ kind: "attachment_chunk", version: 2, requestId: "remote-upload", index: 0, data: uploadBytes.toString("base64") }));

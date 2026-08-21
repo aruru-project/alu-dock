@@ -1,0 +1,208 @@
+import {
+  MAX_DOCK_TOOL_CWD_CHARS,
+  MAX_DOCK_TOOL_MESSAGE_CHARS,
+  MAX_DOCK_TOOL_NAME_CHARS,
+  MAX_DOCK_TOOL_TARGET_CHARS,
+  type DockToolsRequest,
+} from "./dock-tools.js";
+import { parseDeliverableDto } from "./instance-deliverables.js";
+import {
+  CROSS_INSTANCE_TRUST,
+  MAX_OBSERVATION_CURSOR_CHARS,
+  MAX_OBSERVATION_LIST_ITEMS,
+  MAX_OBSERVATION_MESSAGE_LIMIT,
+  MAX_OBSERVATION_MESSAGE_TEXT_CHARS,
+  OBSERVATION_DATA_NOTICE,
+  type ObservationMessageType,
+  type ObservationNotification,
+  type ObservationRequest,
+} from "./instance-observation.js";
+import { MAX_SOURCE_FILE_PATH_CHARS } from "./source-file.js";
+
+/** Canonical Agent-neutral validation for Dock-tools transport records. */
+export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
+  const value = record(raw, "Dock tools request");
+  if (["list", "inspect", "watch", "cancel"].includes(String(value.type))) return parseObservationRequest(value);
+  if (value.type === "deliver") {
+    exactKeys(value, ["type", "path"], "Dock deliver request");
+    const path = boundedString(value.path, MAX_SOURCE_FILE_PATH_CHARS, "Dock deliver path");
+    if (!path.startsWith("/")) throw new Error("Dock deliver path must be absolute");
+    return { type: "deliver", path };
+  }
+  if (value.type === "create") {
+    exactKeys(value, ["type", "operationId", "cwd", "name"], "Dock create request");
+    const cwd = boundedString(value.cwd, MAX_DOCK_TOOL_CWD_CHARS, "Dock create cwd");
+    if (!cwd.startsWith("/")) throw new Error("Dock create cwd must be absolute");
+    const name = value.name === undefined ? undefined : boundedString(value.name, MAX_DOCK_TOOL_NAME_CHARS, "Dock create name");
+    return {
+      type: "create",
+      operationId: boundedString(value.operationId, 128, "Dock create operation ID"),
+      cwd,
+      ...(name === undefined ? {} : { name }),
+    };
+  }
+  exactKeys(value, ["type", "operationId", "target", "message"], "Dock send request");
+  if (value.type !== "send") throw new Error("Dock tools request type is invalid");
+  return {
+    type: "send",
+    operationId: boundedString(value.operationId, 128, "Dock send operation ID"),
+    target: boundedString(value.target, MAX_DOCK_TOOL_TARGET_CHARS, "Dock send target"),
+    message: boundedString(value.message, MAX_DOCK_TOOL_MESSAGE_CHARS, "Dock send message"),
+  };
+}
+
+function parseObservationRequest(raw: unknown): ObservationRequest {
+  const value = record(raw, "Observation request");
+  const type = oneOf(value.type, ["list", "inspect", "watch", "cancel"] as const, "Observation request type");
+  if (type === "list") {
+    exactKeys(value, ["type", "includeHistory"], "Observation request");
+    if (value.includeHistory !== undefined && typeof value.includeHistory !== "boolean") throw new Error("Observation history selection must be boolean");
+    return { type, ...(value.includeHistory === undefined ? {} : { includeHistory: value.includeHistory }) };
+  }
+  if (type === "cancel") {
+    exactKeys(value, ["type", "watchId"], "Observation request");
+    const watchId = optionalString(value.watchId, 128);
+    return { type, ...(watchId === undefined ? {} : { watchId }) };
+  }
+  const target = boundedString(value.target, MAX_DOCK_TOOL_TARGET_CHARS, "Observation target");
+  if (type === "watch") { exactKeys(value, ["type", "target"], "Observation request"); return { type, target }; }
+  exactKeys(value, ["type", "target", "limit", "types", "cursor"], "Observation request");
+  let limit: number | undefined;
+  if (value.limit !== undefined) {
+    limit = positiveInteger(value.limit, "Observation message limit");
+    if (limit > MAX_OBSERVATION_MESSAGE_LIMIT) throw new Error("Observation message limit exceeds the supported bound");
+  }
+  let types: ObservationMessageType[] | undefined;
+  if (value.types !== undefined) {
+    if (!Array.isArray(value.types) || value.types.length < 1 || value.types.length > 3) throw new Error("Observation message types are invalid");
+    types = value.types.map((item) => oneOf(item, ["user", "assistant", "other"] as const, "Observation message type"));
+    if (new Set(types).size !== types.length) throw new Error("Observation message types must be unique");
+  }
+  const cursor = optionalString(value.cursor, MAX_OBSERVATION_CURSOR_CHARS);
+  return { type, target, ...(limit === undefined ? {} : { limit }), ...(types === undefined ? {} : { types }), ...(cursor === undefined ? {} : { cursor }) };
+}
+
+export function parseDockToolsResult(raw: unknown): void {
+  const value = record(raw, "Dock tools result");
+  if (["list", "inspect", "watch", "cancel"].includes(String(value.type))) {
+    parseObservationResult(value);
+    return;
+  }
+  if (value.type === "deliver") {
+    exactKeys(value, ["type", "deliverable"], "Dock deliver result");
+    parseDeliverableDto(value.deliverable, "Dock deliverable");
+    return;
+  }
+  if (value.type === "create") {
+    exactKeys(value, ["type", "instance"], "Dock create result");
+    validateObservedStatus(value.instance);
+    return;
+  }
+  exactKeys(value, ["type", "target", "receipt"], "Dock send result");
+  if (value.type !== "send") throw new Error("Dock tools result type is invalid");
+  validateObservedStatus(value.target);
+  const receipt = record(value.receipt, "Dock send receipt");
+  exactKeys(receipt, ["delivery", "queued", "acceptedAt"], "Dock send receipt");
+  oneOf(receipt.delivery, ["prompt", "steer", "followUp"], "Dock send delivery");
+  if (typeof receipt.queued !== "boolean") throw new Error("Dock send queued flag is invalid");
+  timestampString(receipt.acceptedAt, "Dock send acceptance time");
+}
+
+function parseObservationResult(raw: unknown): void {
+  const value = record(raw, "Observation result");
+  const type = oneOf(value.type, ["list", "inspect", "watch", "cancel"] as const, "Observation result type");
+  if (type === "list") { exactKeys(value, ["type", "result"], "Observation result"); validateObservationList(value.result); return; }
+  if (type === "inspect") { exactKeys(value, ["type", "result"], "Observation result"); validateObservation(value.result); return; }
+  if (type === "cancel") {
+    exactKeys(value, ["type", "cancelledWatchIds"], "Observation result");
+    stringArray(value.cancelledWatchIds, 10_000, 128, "Cancelled observation watches"); return;
+  }
+  exactKeys(value, ["type", "status", "receipt", "completion"], "Observation result");
+  const status = oneOf(value.status, ["watching", "completed"] as const, "Observation watch status");
+  if (status === "watching") { if (value.completion !== undefined) throw new Error("Watching result cannot contain completion"); validateWatchReceipt(value.receipt); }
+  else { if (value.receipt !== undefined) throw new Error("Completed result cannot contain receipt"); parseObservationNotification(value.completion); }
+}
+
+function validateObservationList(raw: unknown): void {
+  const value = record(raw, "Observation list"); exactKeys(value, ["trust", "observedAt", "instances", "total", "truncated", "includesHistory"], "Observation list");
+  if (value.trust !== CROSS_INSTANCE_TRUST) throw new Error("Observation trust marker is invalid"); timestampString(value.observedAt, "Observation timestamp");
+  if (!Array.isArray(value.instances) || value.instances.length > MAX_OBSERVATION_LIST_ITEMS) throw new Error("Observation instances are invalid");
+  for (const item of value.instances) validateObservedStatus(item);
+  const total = nonNegativeInteger(value.total, "Observation instance total");
+  if (typeof value.truncated !== "boolean" || value.truncated !== (value.instances.length < total)) throw new Error("Observation list truncation is invalid");
+  if (typeof value.includesHistory !== "boolean") throw new Error("Observation history selection is invalid");
+}
+
+function validateObservation(raw: unknown): void {
+  const value = record(raw, "Instance observation"); exactKeys(value, ["trust", "observedAt", "status", "conversation"], "Instance observation");
+  if (value.trust !== CROSS_INSTANCE_TRUST) throw new Error("Observation trust marker is invalid"); timestampString(value.observedAt, "Observation timestamp"); validateObservedStatus(value.status);
+  if (value.conversation !== undefined) {
+    const conversation = record(value.conversation, "Observation conversation"); exactKeys(conversation, ["messages", "hasEarlier", "nextCursor", "truncated"], "Observation conversation");
+    if (!Array.isArray(conversation.messages) || conversation.messages.length > MAX_OBSERVATION_MESSAGE_LIMIT) throw new Error("Observation messages are invalid");
+    let anyTruncated = false;
+    for (const item of conversation.messages) {
+      const message = record(item, "Observation message"); exactKeys(message, ["type", "text", "timestamp", "truncated"], "Observation message");
+      oneOf(message.type, ["user", "assistant", "other"] as const, "Observation message type");
+      boundedString(message.text, MAX_OBSERVATION_MESSAGE_TEXT_CHARS + 32, "Observation message text");
+      if (message.timestamp !== undefined) timestampString(message.timestamp, "Observation message timestamp");
+      if (typeof message.truncated !== "boolean") throw new Error("Observation message truncation is invalid");
+      anyTruncated ||= message.truncated;
+    }
+    if (typeof conversation.hasEarlier !== "boolean") throw new Error("Observation pagination state is invalid");
+    const nextCursor = optionalString(conversation.nextCursor, MAX_OBSERVATION_CURSOR_CHARS);
+    if (conversation.hasEarlier !== (nextCursor !== undefined)) throw new Error("Observation pagination cursor is inconsistent");
+    if (typeof conversation.truncated !== "boolean" || conversation.truncated !== anyTruncated) throw new Error("Observation conversation truncation is inconsistent");
+  }
+}
+
+function validateObservedStatus(raw: unknown): void {
+  const value = record(raw, "Observed instance status"); exactKeys(value, ["id", "key", "name", "cwd", "lifecycle", "execution", "compacting", "executionChangedAt", "runStartedAt", "runtimeGeneration", "lastError"], "Observed instance status");
+  boundedString(value.id, 128, "Observed instance ID"); optionalString(value.key, 128); optionalString(value.name, 256); boundedString(value.cwd, 16_384, "Observed workspace");
+  oneOf(value.lifecycle, ["active", "stopping", "stopped", "host_lost", "runtime_error"], "Observed lifecycle"); oneOf(value.execution, ["idle", "running", "failed", "unavailable"], "Observed execution");
+  if (typeof value.compacting !== "boolean") throw new Error("Observed compacting state is invalid");
+  timestampString(value.executionChangedAt, "Observed execution timestamp"); if (value.runStartedAt !== undefined) timestampString(value.runStartedAt, "Observed run timestamp"); positiveInteger(value.runtimeGeneration, "Observed generation"); optionalString(value.lastError, 2_000);
+}
+
+function validateWatchReceipt(raw: unknown): void {
+  const value = record(raw, "Observation watch receipt"); exactKeys(value, ["watchId", "target", "registeredAt"], "Observation watch receipt");
+  boundedString(value.watchId, 128, "Observation watch ID"); validateObservedStatus(value.target); timestampString(value.registeredAt, "Observation registration timestamp");
+}
+
+export function parseObservationNotification(raw: unknown): ObservationNotification {
+  const value = record(raw, "Observation notification"); exactKeys(value, ["trust", "notice", "watchId", "firedAt", "reason", "target"], "Observation notification");
+  if (value.trust !== CROSS_INSTANCE_TRUST || value.notice !== OBSERVATION_DATA_NOTICE) throw new Error("Observation notification trust marker is invalid");
+  const watchId = boundedString(value.watchId, 128, "Observation watch ID"); const firedAt = timestampString(value.firedAt, "Observation fired timestamp");
+  const reason = oneOf(value.reason, ["idle", "stopped", "host_lost", "runtime_error", "execution_failed", "execution_unavailable"] as const, "Observation terminal reason");
+  validateObservedStatus(value.target);
+  return { trust: CROSS_INSTANCE_TRUST, notice: OBSERVATION_DATA_NOTICE, watchId, firedAt, reason, target: value.target as ObservationNotification["target"] };
+}
+
+function timestampString(raw: unknown, label: string): string {
+  const value = boundedString(raw, 128, label); if (!Number.isFinite(Date.parse(value))) throw new Error(`${label} is invalid`); return value;
+}
+function exactKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
+  const set = new Set(allowed);
+  for (const key of Object.keys(value)) if (!set.has(key)) throw new Error(`${label} contains unknown field ${key}`);
+}
+function record(raw: unknown, label: string): Record<string, unknown> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw) || Object.getPrototypeOf(raw) !== Object.prototype) throw new Error(`${label} must be an object`);
+  return raw as Record<string, unknown>;
+}
+function boundedString(raw: unknown, limit: number, label: string, empty = false): string {
+  if (typeof raw !== "string" || (!empty && raw.length < 1) || raw.length > limit) throw new Error(`${label} must be a bounded string`);
+  return raw;
+}
+function optionalString(raw: unknown, limit: number): string | undefined {
+  if (raw === undefined) return undefined;
+  return boundedString(raw, limit, "Optional value", true);
+}
+function positiveInteger(raw: unknown, label: string): number { if (!Number.isSafeInteger(raw) || (raw as number) < 1) throw new Error(`${label} must be a positive integer`); return raw as number; }
+function nonNegativeInteger(raw: unknown, label: string): number { if (!Number.isSafeInteger(raw) || (raw as number) < 0) throw new Error(`${label} must be a non-negative integer`); return raw as number; }
+function stringArray(raw: unknown, maxItems: number, maxChars: number, label: string): string[] {
+  if (!Array.isArray(raw) || raw.length > maxItems) throw new Error(`${label} must be a bounded array`);
+  return raw.map((item) => boundedString(item, maxChars, label, true));
+}
+function oneOf<const T extends readonly string[]>(raw: unknown, values: T, label: string): T[number] {
+  if (typeof raw !== "string" || !(values as readonly string[]).includes(raw)) throw new Error(`${label} is invalid`);
+  return raw as T[number];
+}

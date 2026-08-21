@@ -45,6 +45,29 @@ Store 的公开内容在 `files/`，文件名经过最小安全清洗并保持�
 
 已经有 manifest 时 Settings 拒绝直接改变目录。管理员若要迁移，必须在 Host 停止后整体移动目录（包括 hidden `.alu-dock/` 与 `files/`），确认 owner/mode 与完整内容；重新启动后先在 Hub Settings 指向新 canonical path，再允许任何客户端上传，不能只复制可见文件。普通安装、升级、restart、remote listener change 或 client revocation 都不移动或删除附件。
 
+## Main/SubHost startup composition
+
+同一个包可以组成 Main 或 SubHost，但 managed service unit 仍保持现状，不由安装器自动改角色。机器端口是独立于客户端 Remote Access 的 TLS listener；一条长期连接 multiplex 多条逻辑 Protocol V2 stream，各 stream 独立排队和 reset，单条 stream 的 backpressure 或处理失败不关闭 machine link。完整 native inventory 以有序 base64 chunks 传输，Main 收齐并校验后才原子替换 route view；初次 inventory 完成前不宣告 machine ready。
+
+在 Main 停止时先生成一次性 join file（文件只含有期限的 token 与 Main certificate，不含地址或端口）：
+
+```bash
+aludock machine join-file --out /private/subhost.join
+```
+
+开发/显式运维入口分别是：
+
+```bash
+aludock --socket /run/user/$UID/alu-main.sock serve --dev --main \
+  --state /private/main/catalog.json --machine-port 43127 --machine-name Main
+
+aludock serve --dev --subhost --state /private/sub/catalog.json \
+  --main-address main.example --machine-port 43127 \
+  --join-file /private/subhost.join --machine-name Studio
+```
+
+Main address 与 machine port 必须在 SubHost 另行输入，join file 不能替它们作连接目标。join token 十分钟过期且成功一次后失效；已经完成 enrollment 的 SubHost 再提供 join file 会被拒绝。SubHost 保存自己的长期 certificate 和精确 Main certificate pin，以后启动省略 `--join-file`。Main 的 `main.json` 只持久化 Main identity、SubHost trust 与 machine index；每台 SubHost 的 route inventory 使用 machine state directory 下独立的原子 route file，各自复用 durable catalog 的字节边界。SubHost 可以早于 Main 启动；上游不可达时仍保持本机 Host/Worker 与 Queue，只在后台重连。SubHost 没有 client Unix socket、Remote Access listener 或 children。
+
 ## Worker lifecycle
 
 Host 为每个 active instance 创建独立 Worker，并负责：

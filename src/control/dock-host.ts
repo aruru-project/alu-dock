@@ -73,6 +73,7 @@ import {
 } from "./attachment-service.js";
 import {
   ATTACHMENTS_CAPABILITY,
+  MACHINES_CAPABILITY,
   capabilityForRequest,
   CONTROL_PROTOCOL_VERSION,
   createHelloAck,
@@ -95,6 +96,7 @@ import {
   parseControlRequest,
   ProtocolValidationError,
 } from "./protocol.js";
+import type { MainRouteAuthority, RoutedProtocolProxy } from "./machine-transport.js";
 
 const MAX_SOCKET_WRITE_BUFFER = MAX_CONTROL_LINE_BYTES;
 const MAX_SESSION_INVENTORY_RESULT_BYTES = 512 * 1_024;
@@ -133,6 +135,8 @@ export interface DockHostOptions {
   workspaceBrowser?: WorkspaceBrowser;
   remoteAccessState?: RemoteAccessState;
   attachmentService?: AttachmentService;
+  routeAuthority?: MainRouteAuthority;
+  listen?: boolean;
 }
 
 export class DockHost {
@@ -160,6 +164,8 @@ export class DockHost {
   private readonly workspaceBrowser: WorkspaceBrowser;
   private readonly remoteAccess: RemoteAccessServer | undefined;
   private readonly attachmentService: AttachmentService | undefined;
+  private readonly routeAuthority: MainRouteAuthority | undefined;
+  private readonly listenOnUnixSocket: boolean;
   private readonly capabilities: ReadonlySet<string>;
   private faultDrainPromise: Promise<void> | undefined;
   private unsubscribeMutationFault: (() => void) | undefined;
@@ -206,8 +212,12 @@ export class DockHost {
     this.sessionInventory = options.sessionInventory ?? { list: async () => ({ sessions: [], incomplete: false, diagnostics: [] }) };
     this.workspaceBrowser = options.workspaceBrowser ?? new FileSystemWorkspaceBrowser();
     this.attachmentService = options.attachmentService;
+    this.routeAuthority = options.routeAuthority;
+    this.listenOnUnixSocket = options.listen !== false;
+    if (!this.listenOnUnixSocket && options.remoteAccessState) throw new Error("A SubHost cannot enable client Remote Access");
     const capabilities = new Set(implementedCapabilities());
     if (this.attachmentService === undefined) capabilities.delete(ATTACHMENTS_CAPABILITY);
+    if (this.routeAuthority === undefined) capabilities.delete(MACHINES_CAPABILITY);
     this.capabilities = capabilities;
     this.remoteAccess = options.remoteAccessState
       ? new RemoteAccessServer({
@@ -221,6 +231,8 @@ export class DockHost {
 
   waitForFatalCompletion(): Promise<HostFatalCompletion> { return this.fatalPromise; }
   fatalCompletion(): HostFatalCompletion | undefined { return this.fatalCompletionValue; }
+  /** Private composition seam used only by the encrypted SubHost multiplexer. */
+  acceptProtocolSocket(socket: Socket): void { this.handleConnection(socket); }
 
   start(): Promise<void> {
     if (this.state === "running") return Promise.resolve();
@@ -247,34 +259,50 @@ export class DockHost {
     let server: Server | undefined;
     let boundIdentity: SocketIdentity | undefined;
     try {
-      await ensurePrivateSocketDirectory(this.socketPath);
-      await prepareSocketPath(this.socketPath);
+      if (this.listenOnUnixSocket) {
+        await ensurePrivateSocketDirectory(this.socketPath);
+        await prepareSocketPath(this.socketPath);
+        if (this.state !== "starting") throw new Error("Host start was cancelled by shutdown");
+
+        server = createServer(
+          { allowHalfOpen: false, highWaterMark: MAX_SOCKET_WRITE_BUFFER },
+          (socket) => this.handleConnection(socket),
+        );
+        this.server = server;
+        await listen(server, this.socketPath);
+        boundIdentity = await readSocketIdentity(this.socketPath);
+        this.socketIdentity = boundIdentity;
+        await chmod(this.socketPath, 0o600);
+        await assertPrivateSocket(this.socketPath, boundIdentity);
+      }
+      await this.initialize?.();
+      if (this.state !== "starting") throw new Error("Host start was cancelled by shutdown");
+      await this.remoteAccess?.start();
+      await this.routeAuthority?.start();
       if (this.state !== "starting") throw new Error("Host start was cancelled by shutdown");
 
-      server = createServer(
-        { allowHalfOpen: false, highWaterMark: MAX_SOCKET_WRITE_BUFFER },
-        (socket) => this.handleConnection(socket),
-      );
-      this.server = server;
-      await listen(server, this.socketPath);
-      boundIdentity = await readSocketIdentity(this.socketPath);
-      this.socketIdentity = boundIdentity;
-      await chmod(this.socketPath, 0o600);
-      await assertPrivateSocket(this.socketPath, boundIdentity);
-      await this.initialize?.();
-      if (this.state === "starting") {
-        this.state = "running";
-        this.unsubscribeMutationFault = this.registry.onMutationFault((fault) => this.enterMutationFault(fault.error));
-        this.unsubscribeRuntimeReopened = this.registry.onRuntimeReopened((instanceId) => this.closeStaleAttachStreams(instanceId));
-        this.unsubscribeCatalogRemoval = this.registry.onCatalogRecordsRemoved((instanceIds) => {
-          for (const instanceId of instanceIds) this.closeStaleAttachStreams(instanceId);
-        });
-        await this.remoteAccess?.start();
-      }
+      this.unsubscribeMutationFault = this.registry.onMutationFault((fault) => this.enterMutationFault(fault.error));
+      this.unsubscribeRuntimeReopened = this.registry.onRuntimeReopened((instanceId) => this.closeStaleAttachStreams(instanceId));
+      this.unsubscribeCatalogRemoval = this.registry.onCatalogRecordsRemoved((instanceIds) => {
+        for (const instanceId of instanceIds) this.closeStaleAttachStreams(instanceId);
+      });
+      this.state = "running";
     } catch (error) {
-      if (server) await closeServer(server);
+      await this.routeAuthority?.stop().catch(() => {});
+      await this.remoteAccess?.stop().catch(() => {});
+      const closePromise = server ? closeServer(server) : Promise.resolve();
+      for (const socket of this.connections) socket.destroy();
+      this.connections.clear();
+      await closePromise;
       if (boundIdentity) await removeSocketIfOwned(this.socketPath, boundIdentity);
       if (this.server === server) this.server = undefined;
+      if (this.socketIdentity === boundIdentity) this.socketIdentity = undefined;
+      this.unsubscribeMutationFault?.();
+      this.unsubscribeMutationFault = undefined;
+      this.unsubscribeRuntimeReopened?.();
+      this.unsubscribeRuntimeReopened = undefined;
+      this.unsubscribeCatalogRemoval?.();
+      this.unsubscribeCatalogRemoval = undefined;
       if (this.state === "starting") this.state = "new";
       this.startPromise = undefined;
       throw error;
@@ -289,6 +317,7 @@ export class DockHost {
       this.server = undefined;
       const closePromise = server ? closeServer(server) : Promise.resolve();
       await this.remoteAccess?.stop();
+      await this.routeAuthority?.stop();
       await this.registry.cancelInteractionsForHostDrain();
       for (const socket of this.connections) socket.destroy();
       this.connections.clear();
@@ -384,6 +413,7 @@ export class DockHost {
       nextIndex: number;
     } | undefined;
     let uploadCompleting = false;
+    let remoteProxy: RoutedProtocolProxy | undefined;
     let uploadAbortPromise: Promise<void> | undefined;
     let finishUploadTracking: (() => void) | undefined;
     let uploadIdleTimer: NodeJS.Timeout | undefined;
@@ -415,6 +445,8 @@ export class DockHost {
       eventUnsubscribe?.();
       eventUnsubscribe = undefined;
       this.connections.delete(socket);
+      remoteProxy?.close();
+      remoteProxy = undefined;
       void abortUpload();
     };
     socket.once("close", cleanup);
@@ -474,6 +506,11 @@ export class DockHost {
         return;
       }
 
+      if (remoteProxy) {
+        await remoteProxy.send(raw);
+        return;
+      }
+
       if (upload) {
         const frame = parseAttachmentUploadFrame(raw, upload.request.requestId);
         if (frame.kind === "attachment_chunk") {
@@ -513,6 +550,31 @@ export class DockHost {
       if (this.state !== "running" && this.state !== "mutation_faulted") throw new ProtocolValidationError("host_draining", "Alu Dock host is not accepting requests");
       if (this.state === "mutation_faulted" && isMutationRequest(request.type)) throw new ProtocolValidationError("mutation_faulted", "Alu Dock catalog is mutation-faulted; query state and wait for Host restart");
       if (!this.capabilities.has(capabilityForRequest(request.type))) throw new ProtocolValidationError("capability_missing", `Capability ${capabilityForRequest(request.type)} is unavailable`);
+
+      if (this.routeAuthority) {
+        const decision = await this.routeAuthority.route(
+          request,
+          async (record) => {
+            const outcome = writeEnvelope(socket, record);
+            if (outcome === "backpressured") {
+              if (!await waitForSocketDrain(socket, SOCKET_DRAIN_TIMEOUT_MS)) { socket.destroy(); throw new Error("Client stream stopped draining"); }
+            } else if (outcome !== "written") {
+              socket.destroy();
+              throw new Error("Client stream closed during routed response");
+            }
+          },
+          () => { if (!socket.destroyed && !socket.writableEnded) socket.end(); },
+        );
+        if (decision.kind === "result") {
+          terminal = true;
+          this.sendSuccessAndEnd(socket, request.requestId, decision.result);
+          return;
+        }
+        if (decision.kind === "route") {
+          remoteProxy = decision.proxy;
+          return;
+        }
+      }
 
       if (request.type === "attachment.upload") {
         attachmentRequest = true;
@@ -598,6 +660,10 @@ export class DockHost {
       return;
     }
     switch (request.type) {
+      case "machine.list": {
+        if (!this.routeAuthority) throw new ProtocolValidationError("capability_missing", "Machine routing is unavailable");
+        this.sendSuccessAndEnd(socket, request.requestId, { machines: await this.routeAuthority.machines() }); return;
+      }
       case "host.info": {
         const health = this.registry.catalogHealth();
         this.sendSuccessAndEnd(socket, request.requestId, {
@@ -631,10 +697,12 @@ export class DockHost {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=await this.registry.adopt({operationId:request.params.operationId,sessionFile:request.params.sessionFile,name:request.params.name,trustChallengeId:request.params.trustChallengeId,projectTrustDecision:request.params.projectTrustDecision});return {instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
-      case "instance.list": this.sendSuccessAndEnd(socket, request.requestId, this.registry.listPage({
-        ...request.params,
-        maxBytes: MAX_INSTANCE_LIST_RESULT_BYTES,
-      })); return;
+      case "instance.list": {
+        const result = this.routeAuthority
+          ? await this.routeAuthority.listPage(this.registry.list(), request.params)
+          : this.registry.listPage({ ...request.params, maxBytes: MAX_INSTANCE_LIST_RESULT_BYTES });
+        this.sendSuccessAndEnd(socket, request.requestId, result); return;
+      }
       case "instance.get_by_key": this.sendSuccessAndEnd(socket,request.requestId,{instance:this.registry.getSnapshotByKey(request.params.key)??null}); return;
       case "instance.get": this.sendSuccessAndEnd(socket,request.requestId,{instance:this.registry.getSnapshot(request.params.instanceId)}); return;
       case "deliverable.list": {
@@ -1069,6 +1137,7 @@ function mutationOperationId(request: ControlRequest): string | undefined {
 
 function isMutationRequest(type: ControlRequest["type"]): boolean {
   return type !== "host.info"
+    && type !== "machine.list"
     && type !== "instance.list"
     && type !== "instance.get_by_key"
     && type !== "instance.get"

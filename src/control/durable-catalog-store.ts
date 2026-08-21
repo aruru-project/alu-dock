@@ -22,7 +22,7 @@ import {
 } from "../core/catalog.js";
 import type { ThinkingLevel } from "../core/agent-worker.js";
 
-const MAX_CATALOG_BYTES = 16 * 1024 * 1024;
+export const MAX_DURABLE_CATALOG_BYTES = 16 * 1024 * 1024;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 export type CatalogWritePhase = "temp_write" | "file_sync" | "rename" | "directory_sync";
@@ -46,7 +46,7 @@ export class FileCatalogStore implements CatalogStore {
     const info = await lstatIfPresent(this.path);
     if (!info) return undefined;
     assertPrivateCatalogFile(this.path, info);
-    if (info.size > MAX_CATALOG_BYTES) throw new CatalogCorruptError(this.path, "file exceeds the 16 MiB limit");
+    if (info.size > MAX_DURABLE_CATALOG_BYTES) throw new CatalogCorruptError(this.path, "file exceeds the 16 MiB limit");
 
     let raw: unknown;
     try {
@@ -54,9 +54,9 @@ export class FileCatalogStore implements CatalogStore {
       try {
         const openedInfo = await handle.stat();
         assertPrivateCatalogFile(this.path, openedInfo);
-        if (openedInfo.size > MAX_CATALOG_BYTES) throw new CatalogCorruptError(this.path, "file exceeds the 16 MiB limit");
+        if (openedInfo.size > MAX_DURABLE_CATALOG_BYTES) throw new CatalogCorruptError(this.path, "file exceeds the 16 MiB limit");
         const bytes = await handle.readFile();
-        if (bytes.byteLength > MAX_CATALOG_BYTES) throw new CatalogCorruptError(this.path, "file exceeds the 16 MiB limit");
+        if (bytes.byteLength > MAX_DURABLE_CATALOG_BYTES) throw new CatalogCorruptError(this.path, "file exceeds the 16 MiB limit");
         raw = JSON.parse(bytes.toString("utf8")) as unknown;
       } finally {
         await handle.close();
@@ -82,7 +82,7 @@ export class FileCatalogStore implements CatalogStore {
     if (existing) assertPrivateCatalogFile(this.path, existing);
 
     const bytes = `${JSON.stringify(candidate, null, 2)}\n`;
-    if (Buffer.byteLength(bytes, "utf8") > MAX_CATALOG_BYTES) throw new Error("Catalog candidate exceeds the 16 MiB limit");
+    if (Buffer.byteLength(bytes, "utf8") > MAX_DURABLE_CATALOG_BYTES) throw new Error("Catalog candidate exceeds the 16 MiB limit");
     const temporary = join(this.directory, `.catalog.json.tmp-${process.pid}-${randomUUID()}`);
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
