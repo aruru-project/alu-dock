@@ -112,6 +112,7 @@ import DeliveryTray from './components/DeliveryTray.vue'
 import ControlCenter, { type ControlMutationDomain, type ControlSection } from './components/ControlCenter.vue'
 import ConversationProcessParts from './components/ConversationProcessParts.vue'
 import ExtensionUiSurface from './components/ExtensionUiSurface.vue'
+import ImageZoomSurface from './components/ImageZoomSurface.vue'
 import { useAppStore } from './stores/app'
 import { useCommandCatalogStore } from './stores/command-catalog'
 import { useCommandConsoleStore } from './stores/command-console'
@@ -409,6 +410,42 @@ const unresolvedControlDomain = computed<ControlMutationDomain | undefined>(() =
   return domain && domain !== 'work' ? domain : undefined
 })
 const modalOpen = computed(() => deliveryOpen.value || directoryOpen.value || commandOpen.value || hostSettingsOpen.value || composerExpanded.value || !!confirmDialog.value || !!imagePreview.value)
+
+/* Android 返回键走 WebView 浏览历史（wry：canGoBack→goBack，否则退出 app）。
+   浮层/抽屉打开时压入一个占位历史条目，返回键触发 popstate 时关闭最上层；
+   通过 ×/Esc/背景手动关闭时用 history.back() 同步消费占位，避免下一次返回键落空。 */
+const backLayerOpen = computed(() => modalOpen.value || app.workDrawerOpen)
+let backLayerArmed = false
+let backLayerPopClosing = false
+let backLayerConsumingManualClose = false
+watch(backLayerOpen, (open, wasOpen) => {
+  if (open && !wasOpen && !backLayerPopClosing) {
+    window.history.pushState({ aluLayer: true }, '')
+    backLayerArmed = true
+  } else if (!open && wasOpen && backLayerArmed && !backLayerPopClosing) {
+    backLayerArmed = false
+    backLayerConsumingManualClose = true
+    window.history.back()
+  } else if (!open && wasOpen) {
+    backLayerArmed = false
+  }
+})
+
+function handlePopstate() {
+  if (backLayerConsumingManualClose) {
+    backLayerConsumingManualClose = false
+    return
+  }
+  if (!backLayerOpen.value) return
+  backLayerPopClosing = true
+  backLayerArmed = false
+  if (confirmDialog.value) settleConfirm(false)
+  else {
+    closeModal()
+    app.workDrawerOpen = false
+  }
+  void nextTick(() => { backLayerPopClosing = false })
+}
 const modelLabel = computed(() => {
   const model = selected.value?.executor.model
   return model ? `${model.provider}/${model.id}` : '—'
@@ -556,9 +593,12 @@ watch(modalOpen, async (open, wasOpen) => {
     if (initial) initial.focus()
     else surface?.focus()
   } else if (!open && wasOpen) {
-    await nextTick()
-    modalTrigger?.focus()
+    const trigger = modalTrigger
     modalTrigger = null
+    await nextTick()
+    window.requestAnimationFrame(() => {
+      if (!modalOpen.value && trigger?.isConnected) trigger.focus({ preventScroll: true })
+    })
   }
 })
 let transientContext: (HostContext & { workId: string }) | null = null
@@ -601,6 +641,7 @@ watch(
 onMounted(async () => {
   window.addEventListener('keydown', handleGlobalModalKeydown, true)
   window.addEventListener('keydown', handleDesktopShortcut)
+  window.addEventListener('popstate', handlePopstate)
   if (isTauri) {
     const appWindow = getCurrentWindow()
     unlisteners.push(await appWindow.onFocusChanged(({ payload }) => { void handleWindowFocusChanged(payload) }))
@@ -663,6 +704,7 @@ onMounted(async () => {
 onUnmounted(() => {
   window.removeEventListener('keydown', handleGlobalModalKeydown, true)
   window.removeEventListener('keydown', handleDesktopShortcut)
+  window.removeEventListener('popstate', handlePopstate)
   unlisteners.forEach((unlisten) => unlisten())
   window.clearTimeout(reconnectTimer)
   clearQueueNotice()
@@ -3136,7 +3178,7 @@ function handleOutputClick(event: MouseEvent) {
       <div v-if="imagePreview" class="alu-image-preview-overlay" role="presentation" @click.self="closeModal" @keydown="handleModalKeydown" @wheel.prevent.stop>
         <section ref="modalSurface" class="alu-image-preview" role="dialog" aria-modal="true" aria-label="图片预览" tabindex="-1" @wheel="handleModalWheel">
           <button type="button" class="alu-image-preview-close" aria-label="关闭图片预览" data-modal-initial @click="closeModal">×</button>
-          <img :src="imagePreview.url" :alt="imagePreview.name" @error="markPreviewImageFailed" />
+          <ImageZoomSurface :url="imagePreview.url" :name="imagePreview.name" @failed="markPreviewImageFailed" />
           <footer><span>{{ imagePreview.name }}</span><a :href="imagePreview.url" :download="imagePreview.name">下载</a></footer>
         </section>
       </div>
