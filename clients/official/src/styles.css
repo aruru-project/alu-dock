@@ -848,7 +848,11 @@ button { margin: 0; padding: 0; border: 0; background: transparent; color: inher
 .alu-composer-error { justify-content: space-between; color: var(--alu-rose); border: 1px solid var(--alu-rose-border); background: var(--alu-rose-bg); }
 .alu-composer-notice { color: var(--alu-amber); border: 1px solid color-mix(in srgb, var(--alu-amber) 22%, transparent); background: color-mix(in srgb, var(--alu-amber) 7%, transparent); }
 .alu-composer-error button { color: inherit; }
-.alu-native-attachments { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 6px; max-height: 172px; margin-top: 8px; padding: 7px; overflow-y: auto; border: 1px solid var(--alu-border); border-radius: 10px; background: var(--alu-bg-raised); }
+.alu-native-attachments { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); gap: 6px; max-height: 228px; margin-top: 8px; padding: 7px; overflow-y: auto; border: 1px solid var(--alu-border); border-radius: 10px; background: var(--alu-bg-raised); }
+.alu-attachment-selection-summary { display: flex; grid-column: 1 / -1; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 3px; color: var(--alu-text-dim); font-size: 10px; }
+.alu-attachment-selection-summary span { color: var(--alu-text-muted); }
+.alu-native-attachments .attachment-card.is-previewable { min-height: 82px; }
+.alu-native-attachments .attachment-card.is-previewable .attachment-icon.has-thumbnail { width: 96px; height: 66px; border-radius: 8px; }
 .alu-restored-images { display: flex; min-height: 48px; align-items: center; justify-content: space-between; gap: 8px; padding: 8px; border: 1px solid var(--alu-blue-border); border-radius: 8px; color: var(--alu-text-muted); font-size: 10px; }
 .alu-restored-images button { color: var(--alu-blue); }
 .sm-inline { display: inline; }
