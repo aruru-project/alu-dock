@@ -38,7 +38,8 @@ use aludock_client_core::{
     SessionNameResult, SessionNavigateResult, SessionReloadResult,
     SessionReplacementResult, SessionScope, SessionTree, SettingUpdate, SettingUpdateResult,
     SettingsResult, SourceInfo, StopResult, SubmitResult, ThinkingLevel, ToolInfo, ToolsResult,
-    WorkspacePage, delete_endpoint, host_info_for_profile, probe_host_endpoint,
+    WorkspaceFileCursor, WorkspaceFileEntry, WorkspaceFilePage, WorkspaceFileReadProgress,
+    WorkspaceFileReadResult, WorkspacePage, delete_endpoint, host_info_for_profile, probe_host_endpoint,
     record_endpoint_test, reorder_endpoints, save_unverified_endpoint, save_verified_endpoint,
     saved_endpoint_for_test, set_connection_policy as update_connection_policy,
     set_endpoint_enabled, validate_device_name, validate_host_id, WindowsAwayDelay,
@@ -55,8 +56,10 @@ use tauri_plugin_fs::{FsExt, OpenOptions as PluginOpenOptions};
 use tauri_plugin_notification::NotificationExt;
 #[cfg(not(target_os = "android"))]
 use tauri_plugin_opener::OpenerExt;
+use tokio::sync::Notify;
 
 const MAX_RENDERABLE_IMAGE_BYTES: u64 = 64 * 1_024 * 1_024;
+const WORKSPACE_LARGE_FILE_CONFIRM_BYTES: u64 = 10 * 1_024 * 1_024;
 #[cfg(target_os = "windows")]
 const AWAY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -253,6 +256,233 @@ enum DeliverableSaveResult {
         location: SavedDeliverableLocation,
         sha256: String,
     },
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceReadProgressEmission {
+    host_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    read_id: String,
+    path: String,
+    bytes_received: u64,
+    observed_size_bytes: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceEntryResult {
+    entry: WorkspaceFileEntry,
+    host_epoch: String,
+    large_file_confirm_bytes: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceCacheResult {
+    cache_id: String,
+    entry: WorkspaceFileEntry,
+    size_bytes: u64,
+    sha256: String,
+    host_epoch: String,
+}
+
+#[derive(Serialize)]
+#[serde(
+    tag = "status",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+enum WorkspaceSaveResult {
+    Cancelled,
+    Saved { label: String },
+}
+
+#[derive(Debug, Default)]
+struct WorkspaceReadCancellation {
+    cancelled: AtomicBool,
+    notification: Notify,
+}
+
+impl WorkspaceReadCancellation {
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.notification.notify_waiters();
+    }
+
+    async fn cancelled(&self) {
+        let notified = self.notification.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.cancelled.load(Ordering::Acquire) {
+            notified.await;
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WorkspaceFileState {
+    inner: Arc<Mutex<WorkspaceFileStateInner>>,
+    cache_root: Arc<PathBuf>,
+}
+
+#[derive(Default)]
+struct WorkspaceFileStateInner {
+    active: Option<ActiveWorkspaceRead>,
+    cache: Option<CachedWorkspaceFile>,
+}
+
+struct ActiveWorkspaceRead {
+    read_id: String,
+    host_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    cancellation: Arc<WorkspaceReadCancellation>,
+}
+
+#[derive(Clone)]
+struct CachedWorkspaceFile {
+    cache_id: String,
+    host_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    runtime_generation: u64,
+    path: String,
+    file_path: PathBuf,
+    result: WorkspaceFileReadResult,
+}
+
+impl WorkspaceFileState {
+    fn open(cache_root: PathBuf) -> std::io::Result<Self> {
+        fs::create_dir_all(&cache_root)?;
+        for entry in fs::read_dir(&cache_root)? {
+            let entry = entry?;
+            if entry.file_type()?.is_file() {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+        Ok(Self {
+            inner: Arc::new(Mutex::new(WorkspaceFileStateInner::default())),
+            cache_root: Arc::new(cache_root),
+        })
+    }
+
+    fn begin(
+        &self,
+        read_id: String,
+        host_id: String,
+        selection_generation: u64,
+        instance_id: String,
+    ) -> Result<Arc<WorkspaceReadCancellation>, CommandError> {
+        let cancellation = Arc::new(WorkspaceReadCancellation::default());
+        let mut inner = self.inner.lock().map_err(|_| workspace_state_error())?;
+        if let Some(active) = inner.active.take() {
+            active.cancellation.cancel();
+        }
+        if let Some(cache) = inner.cache.take() {
+            let _ = fs::remove_file(cache.file_path);
+        }
+        inner.active = Some(ActiveWorkspaceRead {
+            read_id: read_id.clone(),
+            host_id,
+            selection_generation,
+            instance_id,
+            cancellation: cancellation.clone(),
+        });
+        Ok(cancellation)
+    }
+
+    fn active_matches(&self, read_id: &str) -> Result<bool, CommandError> {
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| workspace_state_error())?
+            .active
+            .as_ref()
+            .is_some_and(|active| active.read_id == read_id))
+    }
+
+    fn finish(&self, read_id: &str, cache: CachedWorkspaceFile) -> Result<bool, CommandError> {
+        let mut inner = self.inner.lock().map_err(|_| workspace_state_error())?;
+        if !inner
+            .active
+            .as_ref()
+            .is_some_and(|active| active.read_id == read_id)
+        {
+            return Ok(false);
+        }
+        inner.active = None;
+        inner.cache = Some(cache);
+        Ok(true)
+    }
+
+    fn finish_failed(&self, read_id: &str) {
+        if let Ok(mut inner) = self.inner.lock()
+            && inner
+                .active
+                .as_ref()
+                .is_some_and(|active| active.read_id == read_id)
+        {
+            inner.active = None;
+        }
+    }
+
+    fn cancel(
+        &self,
+        host_id: &str,
+        selection_generation: u64,
+        instance_id: &str,
+        read_id: &str,
+    ) -> Result<bool, CommandError> {
+        let inner = self.inner.lock().map_err(|_| workspace_state_error())?;
+        let Some(active) = inner.active.as_ref() else {
+            return Ok(false);
+        };
+        if active.read_id != read_id
+            || active.host_id != host_id
+            || active.selection_generation != selection_generation
+            || active.instance_id != instance_id
+        {
+            return Ok(false);
+        }
+        active.cancellation.cancel();
+        Ok(true)
+    }
+
+    fn cached(
+        &self,
+        host_id: &str,
+        selection_generation: u64,
+        instance_id: &str,
+        host_epoch: &str,
+        runtime_generation: u64,
+        cache_id: &str,
+    ) -> Result<CachedWorkspaceFile, CommandError> {
+        let inner = self.inner.lock().map_err(|_| workspace_state_error())?;
+        let cache = inner.cache.as_ref().ok_or_else(workspace_cache_missing)?;
+        if cache.cache_id != cache_id
+            || cache.host_id != host_id
+            || cache.selection_generation != selection_generation
+            || cache.instance_id != instance_id
+            || cache.result.host_epoch != host_epoch
+            || cache.runtime_generation != runtime_generation
+        {
+            return Err(workspace_cache_missing());
+        }
+        Ok(cache.clone())
+    }
+
+    fn clear(&self) -> Result<(), CommandError> {
+        let mut inner = self.inner.lock().map_err(|_| workspace_state_error())?;
+        if let Some(active) = inner.active.take() {
+            active.cancellation.cancel();
+        }
+        if let Some(cache) = inner.cache.take() {
+            let _ = fs::remove_file(cache.file_path);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Default)]
@@ -3596,6 +3826,82 @@ fn deliverable_client_error(error: ClientError) -> CommandError {
     }
 }
 
+fn workspace_command_error(code: &str, message: &str) -> CommandError {
+    CommandError {
+        code: code.into(),
+        message: message.into(),
+        details: None,
+        outcome_unknown: false,
+        operation_id: None,
+    }
+}
+
+fn workspace_state_error() -> CommandError {
+    workspace_command_error(
+        "workspace_state_unavailable",
+        "工作区浏览状态暂时不可用。请关闭后重新打开。",
+    )
+}
+
+fn workspace_cache_missing() -> CommandError {
+    workspace_command_error(
+        "workspace_cache_unavailable",
+        "这个文件的预览已结束。请重新打开文件后再试。",
+    )
+}
+
+fn workspace_read_cancelled() -> CommandError {
+    workspace_command_error("workspace_read_cancelled", "已停止读取这个文件。")
+}
+
+fn workspace_client_error(error: ClientError) -> CommandError {
+    match error {
+        ClientError::Host { code, .. } => match code.as_str() {
+            "instance_not_active" => workspace_command_error(
+                "workspace_not_active",
+                "这个 Work 已经结束，当前工作区无法继续浏览。",
+            ),
+            "workspace_entry_not_found" => workspace_command_error(
+                "workspace_entry_not_found",
+                "这个文件已不在工作区。请刷新所在目录。",
+            ),
+            "workspace_entry_not_directory" => workspace_command_error(
+                "workspace_entry_not_directory",
+                "这里已不再是文件夹。请返回并刷新目录。",
+            ),
+            "workspace_entry_not_file" => workspace_command_error(
+                "workspace_entry_not_file",
+                "这里已不再是可预览的文件。请返回并刷新目录。",
+            ),
+            "workspace_file_too_large" => workspace_command_error(
+                "workspace_file_too_large",
+                "这个文件超过了工作区读取上限，当前无法打开或另存为。",
+            ),
+            "workspace_changed" => workspace_command_error(
+                "workspace_changed",
+                "这个目录刚刚发生了变化，请刷新后继续。",
+            ),
+            _ => workspace_command_error(
+                "workspace_entry_unavailable",
+                "这个工作区项目当前无法读取。请刷新或稍后重试。",
+            ),
+        },
+        ClientError::Tls(_) | ClientError::MissingHostCertificate => workspace_command_error(
+            "workspace_connection_failed",
+            "读取工作区时连接中断了。请检查连接后重试。",
+        ),
+        ClientError::Io(_) => workspace_command_error(
+            "workspace_storage_unavailable",
+            "设备存储空间当前不可用。请检查可用空间后重试。",
+        ),
+        ClientError::Protocol(_) | ClientError::Json(_) => workspace_command_error(
+            "workspace_verification_failed",
+            "没有完整取得这个文件。请刷新目录后重试。",
+        ),
+        other => CommandError::from(other),
+    }
+}
+
 fn describe_saved_location(
     destination: &FilePath,
     name: &str,
@@ -3665,7 +3971,7 @@ fn create_delivery_staging_file(path: &PathBuf) -> Result<std::fs::File, Command
     })
 }
 
-async fn pick_deliverable_destination(
+async fn pick_save_destination(
     app: &tauri::AppHandle,
     name: &str,
 ) -> Result<Option<FilePath>, CommandError> {
@@ -3853,7 +4159,7 @@ async fn discard_partial_uri(
     fs::remove_file(path).map_err(|error| error.to_string())
 }
 
-async fn commit_deliverable(
+async fn commit_verified_file(
     app: &tauri::AppHandle,
     staging_path: PathBuf,
     destination: FilePath,
@@ -3926,7 +4232,7 @@ async fn download_deliverable(
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
     let client = dock_client(&store)?;
     #[cfg(not(mobile))]
-    let destination = pick_deliverable_destination(&app, &deliverable.name).await?;
+    let destination = pick_save_destination(&app, &deliverable.name).await?;
     // The mobile dialog uses the platform create-document flow. Download and
     // verify in app-private storage first, then create the user-visible target.
     #[cfg(mobile)]
@@ -3993,7 +4299,7 @@ async fn download_deliverable(
     drop(staging_file);
     #[cfg(mobile)]
     {
-        destination = match pick_deliverable_destination(&app, &deliverable.name).await {
+        destination = match pick_save_destination(&app, &deliverable.name).await {
             Ok(destination) => destination,
             Err(error) => {
                 let _ = fs::remove_file(&staging_path);
@@ -4013,7 +4319,7 @@ async fn download_deliverable(
             return Err(error);
         }
     };
-    commit_deliverable(&app, staging_path, destination.clone()).await?;
+    commit_verified_file(&app, staging_path, destination.clone()).await?;
     #[cfg(target_os = "android")]
     if let FilePath::Url(url) = &destination {
         // Providers may revoke transient grants after the Activity is gone. Keep the
@@ -5268,6 +5574,429 @@ fn delete_host_endpoint(
     delete_endpoint(&store, &endpoint_id, expected_revision).map_err(CommandError::from)
 }
 
+fn workspace_entry_identity_matches(left: &WorkspaceFileEntry, right: &WorkspaceFileEntry) -> bool {
+    left.path == right.path
+        && left.name == right.name
+        && left.kind == right.kind
+        && left.hidden == right.hidden
+        && left.target_kind == right.target_kind
+}
+
+fn workspace_cache_staging_path(
+    state: &WorkspaceFileState,
+    read_id: &str,
+) -> Result<PathBuf, CommandError> {
+    let path = state
+        .cache_root
+        .join(format!(".aludock-workspace-{read_id}.part"));
+    if path.exists() {
+        return Err(workspace_state_error());
+    }
+    Ok(path)
+}
+
+fn create_workspace_cache_file(path: &PathBuf) -> Result<std::fs::File, CommandError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path).map_err(|_| {
+        workspace_command_error(
+            "workspace_storage_unavailable",
+            "暂时无法读取这个文件。请检查设备可用空间后重试。",
+        )
+    })
+}
+
+#[tauri::command]
+async fn workspace_entries(
+    runtime: tauri::State<'_, HostRuntimeState>,
+    host_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    expected_host_epoch: String,
+    path: String,
+    cursor: Option<WorkspaceFileCursor>,
+) -> Result<WorkspaceFilePage, CommandError> {
+    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let page = dock_client(&store)?
+        .list_workspace_entries(&instance_id, &path, cursor.as_ref())
+        .await
+        .map_err(workspace_client_error)?;
+    resolve_host(&runtime, &host_id, selection_generation)?;
+    if page.host_epoch.as_deref() != Some(expected_host_epoch.as_str()) {
+        return Err(workspace_command_error(
+            "workspace_context_changed",
+            "Host 已重新连接，请重新打开工作区。",
+        ));
+    }
+    Ok(page)
+}
+
+#[tauri::command]
+async fn workspace_entry_metadata(
+    runtime: tauri::State<'_, HostRuntimeState>,
+    host_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    expected_host_epoch: String,
+    path: String,
+) -> Result<WorkspaceEntryResult, CommandError> {
+    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let (entry, host_epoch) = dock_client(&store)?
+        .get_workspace_entry(&instance_id, &path)
+        .await
+        .map_err(workspace_client_error)?;
+    resolve_host(&runtime, &host_id, selection_generation)?;
+    if host_epoch != expected_host_epoch {
+        return Err(workspace_command_error(
+            "workspace_context_changed",
+            "Host 已重新连接，请重新打开工作区。",
+        ));
+    }
+    Ok(WorkspaceEntryResult {
+        entry,
+        host_epoch,
+        large_file_confirm_bytes: WORKSPACE_LARGE_FILE_CONFIRM_BYTES,
+    })
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+async fn read_workspace_file(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, HostRuntimeState>,
+    state: tauri::State<'_, WorkspaceFileState>,
+    host_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    read_id: String,
+    expected_entry: WorkspaceFileEntry,
+    large_file_confirmed: bool,
+) -> Result<WorkspaceCacheResult, CommandError> {
+    if uuid::Uuid::parse_str(&read_id).is_err() {
+        return Err(workspace_command_error(
+            "workspace_read_invalid",
+            "无法开始读取这个文件。请重新选择。",
+        ));
+    }
+    expected_entry.validate().map_err(workspace_client_error)?;
+    if !expected_entry.is_file() {
+        return Err(workspace_command_error(
+            "workspace_entry_not_file",
+            "请选择一个可以读取的文件。",
+        ));
+    }
+    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let client = dock_client(&store)?;
+    let (current_entry, metadata_epoch) = client
+        .get_workspace_entry(&instance_id, &expected_entry.path)
+        .await
+        .map_err(workspace_client_error)?;
+    if metadata_epoch != expected_host_epoch || current_entry != expected_entry {
+        return Err(workspace_command_error(
+            "workspace_changed",
+            "这个文件刚刚发生了变化，请重新打开。",
+        ));
+    }
+    if current_entry.size_bytes.unwrap_or_default() > WORKSPACE_LARGE_FILE_CONFIRM_BYTES
+        && !large_file_confirmed
+    {
+        return Err(workspace_command_error(
+            "workspace_large_file_confirmation_required",
+            "这个文件较大，请确认后再读取。",
+        ));
+    }
+
+    let cancellation = state.begin(
+        read_id.clone(),
+        host_id.clone(),
+        selection_generation,
+        instance_id.clone(),
+    )?;
+    let staging_path = match workspace_cache_staging_path(&state, &read_id) {
+        Ok(path) => path,
+        Err(error) => {
+            state.finish_failed(&read_id);
+            return Err(error);
+        }
+    };
+    let staging_file = match create_workspace_cache_file(&staging_path) {
+        Ok(file) => file,
+        Err(error) => {
+            state.finish_failed(&read_id);
+            return Err(error);
+        }
+    };
+    let mut staging_file = tokio::fs::File::from_std(staging_file);
+    let progress_app = app.clone();
+    let progress_host = host_id.clone();
+    let progress_instance = instance_id.clone();
+    let progress_path = expected_entry.path.clone();
+    let progress_read_id = read_id.clone();
+    let read = client.read_workspace_file(
+        &instance_id,
+        &expected_entry.path,
+        &mut staging_file,
+        move |WorkspaceFileReadProgress {
+                  bytes_received,
+                  observed_size_bytes,
+              }| {
+            let _ = progress_app.emit(
+                "aludock://workspace-read-progress",
+                WorkspaceReadProgressEmission {
+                    host_id: progress_host.clone(),
+                    selection_generation,
+                    instance_id: progress_instance.clone(),
+                    read_id: progress_read_id.clone(),
+                    path: progress_path.clone(),
+                    bytes_received,
+                    observed_size_bytes,
+                },
+            );
+        },
+    );
+    let result = tokio::select! {
+        result = read => result.map_err(workspace_client_error),
+        _ = cancellation.cancelled() => Err(workspace_read_cancelled()),
+    };
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            drop(staging_file);
+            let _ = fs::remove_file(&staging_path);
+            state.finish_failed(&read_id);
+            return Err(error);
+        }
+    };
+    if cancellation.cancelled.load(Ordering::Acquire)
+        || !state.active_matches(&read_id)?
+        || result.host_epoch != expected_host_epoch
+        || !workspace_entry_identity_matches(&result.entry, &expected_entry)
+        || result.size_bytes > aludock_client_core::MAX_WORKSPACE_FILE_BYTES
+    {
+        drop(staging_file);
+        let _ = fs::remove_file(&staging_path);
+        state.finish_failed(&read_id);
+        return Err(workspace_read_cancelled());
+    }
+    if staging_file.sync_all().await.is_err() {
+        drop(staging_file);
+        let _ = fs::remove_file(&staging_path);
+        state.finish_failed(&read_id);
+        return Err(workspace_command_error(
+            "workspace_storage_unavailable",
+            "没有完整保存预览缓存。请检查设备可用空间后重试。",
+        ));
+    }
+    drop(staging_file);
+    if let Err(error) = resolve_host(&runtime, &host_id, selection_generation) {
+        let _ = fs::remove_file(&staging_path);
+        state.finish_failed(&read_id);
+        return Err(error);
+    }
+    let cache_path = state
+        .cache_root
+        .join(format!(".aludock-workspace-{read_id}.cache"));
+    if tokio::fs::rename(&staging_path, &cache_path).await.is_err() {
+        let _ = fs::remove_file(&staging_path);
+        state.finish_failed(&read_id);
+        return Err(workspace_command_error(
+            "workspace_storage_unavailable",
+            "没有完整保存预览缓存。请检查设备可用空间后重试。",
+        ));
+    }
+    let cache = CachedWorkspaceFile {
+        cache_id: read_id.clone(),
+        host_id,
+        selection_generation,
+        instance_id,
+        runtime_generation: expected_runtime_generation,
+        path: result.entry.path.clone(),
+        file_path: cache_path.clone(),
+        result: result.clone(),
+    };
+    if !state.finish(&read_id, cache)? {
+        let _ = fs::remove_file(cache_path);
+        return Err(workspace_read_cancelled());
+    }
+    Ok(WorkspaceCacheResult {
+        cache_id: read_id,
+        entry: result.entry,
+        size_bytes: result.size_bytes,
+        sha256: result.sha256,
+        host_epoch: result.host_epoch,
+    })
+}
+
+#[tauri::command]
+fn cancel_workspace_file_read(
+    state: tauri::State<'_, WorkspaceFileState>,
+    host_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    read_id: String,
+) -> Result<bool, CommandError> {
+    state.cancel(&host_id, selection_generation, &instance_id, &read_id)
+}
+
+#[tauri::command]
+fn clear_workspace_file_state(
+    state: tauri::State<'_, WorkspaceFileState>,
+) -> Result<(), CommandError> {
+    state.clear()
+}
+
+fn cached_workspace_file(
+    state: &WorkspaceFileState,
+    host_id: &str,
+    selection_generation: u64,
+    instance_id: &str,
+    expected_host_epoch: &str,
+    expected_runtime_generation: u64,
+    cache_id: &str,
+) -> Result<CachedWorkspaceFile, CommandError> {
+    let cache = state.cached(
+        host_id,
+        selection_generation,
+        instance_id,
+        expected_host_epoch,
+        expected_runtime_generation,
+        cache_id,
+    )?;
+    if !cache.file_path.is_file() || cache.path != cache.result.entry.path {
+        return Err(workspace_cache_missing());
+    }
+    Ok(cache)
+}
+
+#[tauri::command]
+async fn workspace_cached_text(
+    state: tauri::State<'_, WorkspaceFileState>,
+    host_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    cache_id: String,
+) -> Result<String, CommandError> {
+    let cache = cached_workspace_file(
+        &state,
+        &host_id,
+        selection_generation,
+        &instance_id,
+        &expected_host_epoch,
+        expected_runtime_generation,
+        &cache_id,
+    )?;
+    let mut bytes = tokio::fs::read(cache.file_path)
+        .await
+        .map_err(|_| workspace_cache_missing())?;
+    if bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+        bytes.drain(..3);
+    }
+    if bytes.contains(&0) {
+        return Err(workspace_command_error(
+            "workspace_preview_unsupported",
+            "这个文件不是可显示的 UTF-8 文本，可以将原文件另存到设备。",
+        ));
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        workspace_command_error(
+            "workspace_preview_unsupported",
+            "这个文件不是可显示的 UTF-8 文本，可以将原文件另存到设备。",
+        )
+    })
+}
+
+#[tauri::command]
+async fn workspace_cached_image(
+    state: tauri::State<'_, WorkspaceFileState>,
+    host_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    cache_id: String,
+) -> Result<Response, CommandError> {
+    let cache = cached_workspace_file(
+        &state,
+        &host_id,
+        selection_generation,
+        &instance_id,
+        &expected_host_epoch,
+        expected_runtime_generation,
+        &cache_id,
+    )?;
+    let bytes = tokio::fs::read(cache.file_path)
+        .await
+        .map_err(|_| workspace_cache_missing())?;
+    validate_renderable_image(&bytes, None)?;
+    Ok(Response::new(bytes))
+}
+
+#[tauri::command]
+async fn save_workspace_cached_file(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, WorkspaceFileState>,
+    host_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
+    cache_id: String,
+) -> Result<WorkspaceSaveResult, CommandError> {
+    let cache = cached_workspace_file(
+        &state,
+        &host_id,
+        selection_generation,
+        &instance_id,
+        &expected_host_epoch,
+        expected_runtime_generation,
+        &cache_id,
+    )?;
+    let Some(destination) = pick_save_destination(&app, &cache.result.entry.name).await? else {
+        return Ok(WorkspaceSaveResult::Cancelled);
+    };
+    let saved_location = describe_saved_location(&destination, &cache.result.entry.name)?;
+    let staging_path = delivery_staging_path(&app, Some(&destination))?;
+    let source_path = cache.file_path.clone();
+    let expected_size = cache.result.size_bytes;
+    let copy_path = staging_path.clone();
+    let copied = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let mut source = std::fs::File::open(source_path)?;
+        let mut target = create_workspace_cache_file(&copy_path)
+            .map_err(|error| std::io::Error::other(error.message))?;
+        let bytes = std::io::copy(&mut source, &mut target)?;
+        if bytes != expected_size {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "cached workspace byte count changed",
+            ));
+        }
+        target.flush()?;
+        target.sync_all()
+    })
+    .await
+    .map_err(|_| workspace_state_error())?;
+    if copied.is_err() {
+        let _ = fs::remove_file(&staging_path);
+        return Err(workspace_command_error(
+            "workspace_save_failed",
+            "无法保存到所选位置。请检查可用空间和存储权限后重试。",
+        ));
+    }
+    commit_verified_file(&app, staging_path, destination).await?;
+    Ok(WorkspaceSaveResult::Saved {
+        label: saved_location.label,
+    })
+}
+
 #[tauri::command]
 async fn list_workspace(
     runtime: tauri::State<'_, HostRuntimeState>,
@@ -5960,6 +6689,9 @@ pub fn run() {
             #[cfg(not(mobile))]
             let application_data_dir = None;
             app.manage(HostRuntimeState::open(application_data_dir)?);
+            app.manage(WorkspaceFileState::open(
+                app.path().app_cache_dir()?.join("workspace-preview"),
+            )?);
             Ok(())
         })
         .manage(FollowState::default())
@@ -6033,6 +6765,14 @@ pub fn run() {
             set_host_endpoint_enabled,
             reorder_host_endpoints,
             delete_host_endpoint,
+            workspace_entries,
+            workspace_entry_metadata,
+            read_workspace_file,
+            cancel_workspace_file_read,
+            clear_workspace_file_state,
+            workspace_cached_text,
+            workspace_cached_image,
+            save_workspace_cached_file,
             list_workspace,
             list_sessions,
             new_session,
@@ -6120,6 +6860,79 @@ mod tests {
         fs::write(&completed, b"verified").unwrap();
         commit_staged_to_path(&completed, &destination).unwrap();
         assert_eq!(fs::read(&destination).unwrap(), b"verified");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn workspace_cache_is_bound_to_the_current_work_context_and_replaced_on_new_read() {
+        let root =
+            std::env::temp_dir().join(format!("aludock-workspace-cache-{}", uuid::Uuid::new_v4()));
+        let state = WorkspaceFileState::open(root.clone()).unwrap();
+        let cache_path = root.join("verified.cache");
+        fs::write(&cache_path, b"source").unwrap();
+        let entry = WorkspaceFileEntry {
+            path: "src/main.rs".into(),
+            name: "main.rs".into(),
+            kind: aludock_client_core::WorkspaceFileKind::File,
+            hidden: false,
+            target_kind: None,
+            size_bytes: Some(6),
+        };
+        let read_id = uuid::Uuid::new_v4().to_string();
+        state
+            .begin(read_id.clone(), "host".into(), 4, "work".into())
+            .unwrap();
+        assert!(
+            state
+                .finish(
+                    &read_id,
+                    CachedWorkspaceFile {
+                        cache_id: read_id.clone(),
+                        host_id: "host".into(),
+                        selection_generation: 4,
+                        instance_id: "work".into(),
+                        runtime_generation: 9,
+                        path: entry.path.clone(),
+                        file_path: cache_path.clone(),
+                        result: WorkspaceFileReadResult {
+                            entry,
+                            chunks: 1,
+                            size_bytes: 6,
+                            sha256:
+                                "41cf6794ba4200b839c472f85a30fa47fef75a7640bdda405950b887ad1e2d58"
+                                    .into(),
+                            host_epoch: "epoch".into(),
+                        },
+                    },
+                )
+                .unwrap()
+        );
+        assert!(
+            state
+                .cached("host", 4, "work", "epoch", 9, &read_id)
+                .is_ok()
+        );
+        assert!(
+            state
+                .cached("host", 4, "work", "new-epoch", 9, &read_id)
+                .is_err()
+        );
+
+        state
+            .begin(
+                uuid::Uuid::new_v4().to_string(),
+                "host".into(),
+                4,
+                "work".into(),
+            )
+            .unwrap();
+        assert!(!cache_path.exists());
+        assert!(
+            state
+                .cached("host", 4, "work", "epoch", 9, &read_id)
+                .is_err()
+        );
+        state.clear().unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
