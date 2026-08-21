@@ -100,7 +100,8 @@ onMounted(async () => {
   mounted = true
   tryAutomaticAcquire(automaticControlKey.value)
   resizeObserver = new ResizeObserver(scheduleViewport)
-  if (root.value) resizeObserver.observe(root.value)
+  const viewport = viewportElements()
+  if (viewport) resizeObserver.observe(viewport.surface)
   countdownTimer = window.setInterval(() => { now.value = Date.now() }, 1000)
 })
 
@@ -248,24 +249,30 @@ function rememberWidgetOpen(widget: ExtensionWidget, event: Event) {
   widgetOpen.value = { ...widgetOpen.value, [widget.key]: (event.currentTarget as HTMLDetailsElement).open }
 }
 
+function viewportElements() {
+  const surface = root.value?.querySelector<HTMLElement>('.alu-input-wrap')
+  const editor = surface?.querySelector<HTMLTextAreaElement>('textarea')
+  return surface && editor ? { surface, editor } : null
+}
 function scheduleViewport() {
   window.clearTimeout(viewportTimer)
   viewportTimer = window.setTimeout(() => void sendViewport(), 180)
 }
 async function sendViewport() {
   const handle = extension.controller?.handle
-  const surface = root.value
-  if (!handle || !surface) return
-  const style = getComputedStyle(surface)
+  const viewport = viewportElements()
+  if (!handle || !viewport || viewport.surface.clientWidth <= 0 || viewport.editor.clientHeight <= 0) return
+  const { surface, editor } = viewport
+  const style = getComputedStyle(editor)
   const canvas = document.createElement('canvas')
   const context = canvas.getContext('2d')
   if (!context) return
   context.font = style.font
-  const cellWidth = Math.max(1, context.measureText('0').width)
-  const editor = surface.querySelector<HTMLTextAreaElement>('.composer textarea')
-  const lineHeight = editor ? Number.parseFloat(getComputedStyle(editor).lineHeight) || 18 : 18
+  const cellWidth = context.measureText('0').width
+  const lineHeight = Number.parseFloat(style.lineHeight)
+  if (cellWidth <= 0 || !Number.isFinite(lineHeight) || lineHeight <= 0) return
   const width = Math.max(1, Math.min(10_000, Math.floor(surface.clientWidth / cellWidth)))
-  const height = Math.max(1, Math.min(10_000, Math.floor((editor?.clientHeight ?? lineHeight) / lineHeight)))
+  const height = Math.max(1, Math.min(10_000, Math.floor(editor.clientHeight / lineHeight)))
   try { await reportExtensionViewport(handle, width, height, requireHostContext(app)) } catch { /* next resize/reacquire reports current truth */ }
 }
 
