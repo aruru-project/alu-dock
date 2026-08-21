@@ -34,9 +34,16 @@ let resizeObserver: ResizeObserver | null = null
 let viewportTimer = 0
 let countdownTimer = 0
 let unknownInteractionId = ''
+let mounted = false
+let attemptedAutomaticControlKey = ''
 const pendingControllerEmissions = new Map<string, ExtensionControllerEmission[]>()
 
 const request = computed(() => extension.activeRequest)
+const automaticControlKey = computed(() => {
+  const work = props.work
+  if (!isTauri || !work || work.lifecycle !== 'active' || !work.ownerHostEpoch || !extension.isCurrent(work) || !extension.subscriptionId) return ''
+  return `${extension.hostId}:${extension.selectionGeneration}:${work.id}:${work.ownerHostEpoch}:${work.runtimeGeneration}:${extension.subscriptionId}`
+})
 const filteredOptions = computed(() => {
   if (request.value?.method !== 'select') return []
   const needle = search.value.trim().toLocaleLowerCase()
@@ -68,6 +75,7 @@ watch(() => request.value?.interactionId, async (id) => {
   dialog.value?.querySelector<HTMLElement>('input, textarea, button')?.focus()
 })
 watch(() => extension.controller?.handle, () => scheduleViewport())
+watch([automaticControlKey, () => extension.controllerState], ([key]) => tryAutomaticAcquire(key))
 
 onMounted(async () => {
   if (isTauri) {
@@ -85,16 +93,19 @@ onMounted(async () => {
       await listen<ExtensionControllerStatus>('aludock://extension-controller-status', ({ payload }) => {
         if (!app.contextMatches(payload) || !extension.controllerEnded(payload.handle, 'disconnected')) return
         if (!unknownInteractionId) extension.hideControllerRequest()
-        acquiringError.value = payload.message ?? '操作连接已结束。'
+        acquiringError.value = ''
       }),
     )
   }
+  mounted = true
+  tryAutomaticAcquire(automaticControlKey.value)
   resizeObserver = new ResizeObserver(scheduleViewport)
   if (root.value) resizeObserver.observe(root.value)
   countdownTimer = window.setInterval(() => { now.value = Date.now() }, 1000)
 })
 
 onUnmounted(() => {
+  mounted = false
   const handle = extension.controller?.handle
   if (handle) void extension.releaseController(handle, 'detached')
   pendingControllerEmissions.clear()
@@ -103,6 +114,16 @@ onUnmounted(() => {
   window.clearTimeout(viewportTimer)
   window.clearInterval(countdownTimer)
 })
+
+function tryAutomaticAcquire(key: string) {
+  if (!key) {
+    attemptedAutomaticControlKey = ''
+    return
+  }
+  if (!mounted || key === attemptedAutomaticControlKey || extension.controller || extension.controllerState === 'acquiring') return
+  attemptedAutomaticControlKey = key
+  void acquire()
+}
 
 async function acquire() {
   const work = props.work
@@ -130,20 +151,6 @@ async function acquire() {
   } catch (cause) {
     extension.failAcquire('disconnected')
     acquiringError.value = errorMessage(cause)
-  }
-}
-
-async function release() {
-  const handle = extension.controller?.handle
-  if (!handle) return
-  acquiringError.value = ''
-  if (!await extension.releaseController(handle, 'detached')) {
-    acquiringError.value = '暂时无法退出操作面板，请重试。'
-    return
-  }
-  if (!unknownInteractionId) {
-    extension.hideControllerRequest()
-    resetResponse()
   }
 }
 
@@ -271,10 +278,6 @@ function isUnknown(cause: unknown) { return !!cause && typeof cause === 'object'
       <AlertTriangle :size="17" />
       <span>这个 Work 正在等待你的操作。</span>
       <button :disabled="!isTauri || extension.controllerState === 'acquiring'" @click="acquire">{{ extension.controllerState === 'acquiring' ? '正在打开…' : '查看并处理' }}</button>
-    </div>
-    <div v-else-if="extension.controller" class="extension-control-strip">
-      <span>操作面板已打开</span>
-      <button @click="release">退出</button>
     </div>
     <div v-if="acquiringError" class="extension-inline-error">{{ acquiringError }} <button @click="acquire">重试</button></div>
 

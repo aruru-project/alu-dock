@@ -1,9 +1,8 @@
 .extension-ui-surface { display: contents; }
-.extension-attention, .extension-control-strip, .extension-inline-error { display: flex; min-height: 36px; align-items: center; gap: 8px; padding: 7px 10px; font-size: 10px; border: 1px solid var(--c-line); border-radius: 8px; }
+.extension-attention, .extension-inline-error { display: flex; min-height: 36px; align-items: center; gap: 8px; padding: 7px 10px; font-size: 10px; border: 1px solid var(--c-line); border-radius: 8px; }
 .extension-attention { color: #f6cf79; background: rgb(251 191 36 / .06); border-color: rgb(251 191 36 / .22); }
-.extension-control-strip { justify-content: space-between; color: var(--c-text-3); background: rgb(17 24 40 / .65); }
 .extension-attention span { flex: 1; }
-.extension-attention button, .extension-control-strip button, .extension-inline-error button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; color: var(--c-ice); cursor: pointer; background: var(--c-space-850); border: 1px solid var(--c-line); border-radius: 6px; }
+.extension-attention button, .extension-inline-error button { display: inline-flex; align-items: center; gap: 5px; padding: 5px 8px; color: var(--c-ice); cursor: pointer; background: var(--c-space-850); border: 1px solid var(--c-line); border-radius: 6px; }
 .extension-inline-error { color: #f8a0a0; background: rgb(248 113 113 / .05); border-color: rgb(248 113 113 / .2); }
 .extension-widgets { display: grid; gap: 8px; }
 .extension-widgets details { overflow: hidden; background: rgb(14 32 45 / .48); border: 1px solid rgb(126 200 224 / .17); border-radius: 10px; }
@@ -30,7 +29,6 @@
 .extension-dialog footer button { display: inline-flex; min-height: 40px; align-items: center; gap: 5px; padding: 0 13px; color: var(--c-text-2); cursor: pointer; background: var(--c-space-850); border: 1px solid var(--c-line); border-radius: 8px; }
 .extension-dialog footer button.primary { color: #190d16; font-weight: 700; background: var(--c-sakura); border-color: var(--c-sakura); }
 @media (max-width: 639px) {
-  .extension-control-strip { align-items: flex-start; }
   .extension-dialog-layer { padding: 0; place-items: end stretch; }
   .extension-dialog { width: 100%; max-height: 88dvh; padding: 15px; border-width: 1px 0 0; border-radius: 16px 16px 0 0; }
   .extension-dialog footer { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
