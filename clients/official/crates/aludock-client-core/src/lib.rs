@@ -22,6 +22,7 @@ mod tls;
 #[cfg(windows)]
 mod windows_security;
 mod wire;
+mod workspace_files;
 
 pub use actions::{
     DeliveryMode, QueueDequeueReceipt, QueueDequeueResult, SubmitReceipt, SubmitResult,
@@ -90,3 +91,9 @@ pub use sessions::{
     TreeNodeState,
 };
 pub use storage::{IdentityStore, PairingMetadata, PendingPairing, StoredPairing};
+pub use workspace_files::{
+    MAX_WORKSPACE_ENTRY_LIST_ITEMS, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_FILE_CHUNK_BYTES,
+    WorkspaceFileCursor, WorkspaceFileEntry, WorkspaceFileKind, WorkspaceFilePage,
+    WorkspaceFileReadProgress, WorkspaceFileReadResult, WorkspaceTargetKind,
+    normalize_workspace_path,
+};
