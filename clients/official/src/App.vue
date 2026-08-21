@@ -21,7 +21,9 @@ import {
 } from '@lucide/vue'
 import {
   abortRun,
+  beginWindowsAway,
   cancelAttachmentUpload,
+  cancelWindowsAway,
   clearRestoredImages,
   cancelPairing,
   compactSession,
@@ -30,6 +32,7 @@ import {
   downloadDeliverable,
   forgetWork,
   isTauri,
+  getClientPreferences,
   getCommandCompletions,
   getSettings,
   getSystemDeviceName,
@@ -59,6 +62,7 @@ import {
   stopConversationFollow,
   stopWork,
   submitMessage,
+  updateClientPreferences,
   uploadAttachment,
   deleteHostEndpoint,
   saveUnverifiedHostEndpoint,
@@ -100,7 +104,7 @@ import {
 } from './lib/uiBoundaries'
 import { applySlashArgumentCompletion, applySlashCompletion, catalogSourceLabel, filterCatalogCommands, prefixSlashCommand, slashArgumentContext, slashCommandQuery } from './lib/commandSuggest'
 import { filterLocalControlCommands, localControlCommands, submittedLocalControl, type ControlSection, type LocalControlCommand } from './lib/localCommands'
-import type { AttachmentDto, AttachmentUploadProgress, CommandArgumentCompletion, CommandInfo, ConnectionKind, ConversationBootstrap, ConversationHistoryPage, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, HostConnectionProfile, HostContext, HostEndpoint, ProjectedEvent, QueueItem, SelectedAttachment, Work, WorkspacePage } from './lib/types'
+import type { AttachmentDto, AttachmentUploadProgress, ClientPreferences, CommandArgumentCompletion, CommandInfo, ConnectionKind, ConversationBootstrap, ConversationHistoryPage, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, HostConnectionProfile, HostContext, HostEndpoint, ProjectedEvent, QueueItem, SelectedAttachment, WindowsAwayDelay, Work, WorkspacePage } from './lib/types'
 import {
   deliveryHistoryKey,
   downloadedDelivery,
@@ -111,6 +115,7 @@ import {
   removeDownloadedDeliveries,
   type DownloadedDeliverable,
 } from './lib/downloadHistory'
+import AppSettings from './components/AppSettings.vue'
 import AttachmentCard from './components/AttachmentCard.vue'
 import DeliveryTray from './components/DeliveryTray.vue'
 import ControlCenter, { type ControlMutationDomain } from './components/ControlCenter.vue'
@@ -152,6 +157,10 @@ const controlTitleOverride = ref('')
 const controlBodyOverride = ref('')
 const controlSizeOverride = ref<'default' | 'wide' | 'tree' | ''>('')
 const confirmDialog = ref<{ title: string; body: string; resolve: (confirmed: boolean) => void } | null>(null)
+const appSettingsOpen = ref(false)
+const appSettings = ref<ClientPreferences | null>(null)
+const appSettingsSaving = ref(false)
+const appSettingsError = ref('')
 const hostSettingsOpen = ref(false)
 const addingHost = ref(false)
 const output = ref<HTMLElement | null>(null)
@@ -253,6 +262,9 @@ const modalSurface = ref<HTMLElement | null>(null)
 let modalTrigger: HTMLElement | null = null
 const conversationState = ref<ConversationBootstrap | null>(null)
 const windowFocused = ref(!isTauri)
+let windowFocusEpoch = 0
+let windowsAwayId: string | null = null
+const elapsedWindowsAwayIds = new Set<string>()
 const followConnected = ref(false)
 type ActiveFollow = HostContext & { instanceId: string; subscriptionId: string }
 const activeFollow = ref<ActiveFollow | null>(null)
@@ -438,7 +450,7 @@ const unresolvedControlDomain = computed<ControlMutationDomain | undefined>(() =
   const domain = unresolvedDomain.value
   return domain && domain !== 'work' ? domain : undefined
 })
-const modalOpen = computed(() => deliveryOpen.value || directoryOpen.value || commandOpen.value || hostSettingsOpen.value || composerExpanded.value || !!confirmDialog.value || !!imagePreview.value)
+const modalOpen = computed(() => deliveryOpen.value || directoryOpen.value || commandOpen.value || appSettingsOpen.value || hostSettingsOpen.value || composerExpanded.value || !!confirmDialog.value || !!imagePreview.value)
 
 /* Android 返回键走 WebView 浏览历史（wry：canGoBack→goBack，否则退出 app）。
    浮层/抽屉打开时压入一个占位历史条目，返回键触发 popstate 时关闭最上层；
@@ -488,6 +500,15 @@ const currentCompactionError = computed(() => {
 })
 const visibleComposerError = computed(() => submissionError.value || currentCompactionError.value)
 const recoverablePairings = computed(() => app.catalog?.pairingTransactions ?? [])
+
+const windowsAwayLabel = computed(() => ({
+  immediate: '立即暂离',
+  one_minute: '1 分钟后暂离',
+  five_minutes: '5 分钟后暂离',
+  thirty_minutes: '30 分钟后暂离',
+  one_hour: '1 小时后暂离',
+  never: '切到其他窗口时不暂离',
+} as Record<WindowsAwayDelay, string>)[appSettings.value?.windowsAwayDelay ?? 'one_minute'])
 
 const connectionLabel = computed(() => {
   if (!isTauri) return '浏览器预览'
@@ -758,12 +779,22 @@ onMounted(async () => {
   window.addEventListener('keydown', handleGlobalModalKeydown, true)
   window.addEventListener('keydown', handleDesktopShortcut)
   window.addEventListener('popstate', handlePopstate)
+  try {
+    appSettings.value = await getClientPreferences()
+  } catch (cause) {
+    console.error('Failed to read App settings.', cause)
+  }
   if (isTauri) {
     const appWindow = getCurrentWindow()
     unlisteners.push(await appWindow.onFocusChanged(({ payload }) => { void handleWindowFocusChanged(payload) }))
     windowFocused.value = await appWindow.isFocused()
       || (isAndroidWebView && document.visibilityState === 'visible')
     unlisteners.push(
+      await listen<{ awayId: string }>('aludock://windows-away-elapsed', ({ payload }) => {
+        if (windowFocused.value) return
+        if (payload.awayId === windowsAwayId) void detachConversationFollow()
+        else elapsedWindowsAwayIds.add(payload.awayId)
+      }),
       await listen<{ hostId: string; selectionGeneration: number; instanceId: string; subscriptionId: string; event: ProjectedEvent }>('aludock://conversation-event', async ({ payload }) => {
         if (!app.contextMatches(payload) || payload.instanceId !== selected.value?.id) return
         const pending = pendingFollowEvents.get(payload.subscriptionId)
@@ -811,6 +842,14 @@ onMounted(async () => {
         }
       }),
     )
+    if (!windowFocused.value && appSettings.value?.windowsAwaySupported) {
+      try {
+        windowsAwayId = await beginWindowsAway(runningWorkIdsForAway())
+        if (windowsAwayId && elapsedWindowsAwayIds.delete(windowsAwayId)) await detachConversationFollow()
+      } catch (cause) {
+        console.error('Failed to begin initial Windows away period.', cause)
+      }
+    }
   }
   await app.load()
   await initializePairDeviceName()
@@ -829,6 +868,8 @@ onUnmounted(() => {
   followConnectionTimers.clear()
   followActivation.cancelAll(new Error('界面已关闭。'))
   pendingFollowEvents.clear()
+  elapsedWindowsAwayIds.clear()
+  if (appSettings.value?.windowsAwaySupported) void cancelWindowsAway(windowsAwayId)
   if (projectionFrame) window.cancelAnimationFrame(projectionFrame)
   if (outputScrollFrame) window.cancelAnimationFrame(outputScrollFrame)
   resetConversationImages()
@@ -1099,6 +1140,7 @@ function closeModal() {
   deliveryOpen.value = false
   directoryOpen.value = false
   commandOpen.value = false
+  appSettingsOpen.value = false
   hostSettingsOpen.value = false
   composerExpanded.value = false
   imagePreview.value = null
@@ -1231,6 +1273,7 @@ function openControlCenter(section: ControlSection) {
   controlSection.value = section
   commandOpen.value = true
   directoryOpen.value = false
+  appSettingsOpen.value = false
   hostSettingsOpen.value = false
   app.workDrawerOpen = false
 }
@@ -1241,9 +1284,40 @@ function applyControlSnapshot(snapshot: Work) {
   extensionUi.applyAuthoritativeSnapshot(authoritative)
 }
 
+function openAppSettings() {
+  if (!appSettings.value?.windowsAwaySupported) return
+  rememberModalTrigger()
+  appSettingsError.value = ''
+  appSettingsOpen.value = true
+  hostSettingsOpen.value = false
+  directoryOpen.value = false
+  commandOpen.value = false
+  app.workDrawerOpen = false
+}
+
+async function chooseWindowsAwayDelay(delay: WindowsAwayDelay) {
+  const current = appSettings.value
+  if (!current || current.windowsAwayDelay === delay || appSettingsSaving.value) return
+  appSettingsSaving.value = true
+  appSettingsError.value = ''
+  try {
+    appSettings.value = await updateClientPreferences(current.revision, delay)
+  } catch (cause) {
+    appSettingsError.value = errorMessage(cause)
+    try {
+      appSettings.value = await getClientPreferences()
+    } catch {
+      // The visible save error remains the useful next action.
+    }
+  } finally {
+    appSettingsSaving.value = false
+  }
+}
+
 function openHostSettings() {
   rememberModalTrigger()
   hostSettingsOpen.value = true
+  appSettingsOpen.value = false
   addingHost.value = false
   endpointFormOpen.value = false
   directoryOpen.value = false
@@ -2371,16 +2445,63 @@ async function reattachConversationFollow(instanceId: string) {
     && selected.value?.id === instanceId) await loadSelectedConversation(instanceId, true)
 }
 
+function runningWorkIdsForAway() {
+  return app.works.filter((work) => work.execution === 'running').map((work) => work.id)
+}
+
+function activeFollowCanContinue(instanceId: string) {
+  const followed = activeFollow.value
+  const state = conversationState.value
+  const work = selected.value
+  return !!followed
+    && followed.instanceId === instanceId
+    && followConnected.value
+    && app.contextMatches(followed)
+    && state?.instance.id === instanceId
+    && state.instance.runtimeGeneration === work?.runtimeGeneration
+    && state.cursor.hostEpoch === app.payload?.host.hostEpoch
+}
+
 async function handleWindowFocusChanged(focused: boolean) {
   if (focused === windowFocused.value) return
+  const epoch = ++windowFocusEpoch
   windowFocused.value = focused
   if (!focused) {
-    await detachConversationFollow()
+    if (!appSettings.value?.windowsAwaySupported) {
+      await detachConversationFollow()
+      return
+    }
+    try {
+      const awayId = await beginWindowsAway(runningWorkIdsForAway())
+      if (epoch !== windowFocusEpoch || windowFocused.value) {
+        if (awayId) await cancelWindowsAway(awayId)
+        return
+      }
+      windowsAwayId = awayId
+      if (awayId && elapsedWindowsAwayIds.delete(awayId)) await detachConversationFollow()
+    } catch (cause) {
+      console.error('Failed to begin Windows away period.', cause)
+      if (epoch === windowFocusEpoch && !windowFocused.value) await detachConversationFollow()
+    }
     return
   }
+
+  const awayId = windowsAwayId
+  windowsAwayId = null
+  elapsedWindowsAwayIds.clear()
+  if (appSettings.value?.windowsAwaySupported) {
+    try {
+      await cancelWindowsAway(awayId)
+    } catch (cause) {
+      console.error('Failed to finish Windows away period.', cause)
+    }
+  }
   await app.refreshWorksQuietly()
+  if (epoch !== windowFocusEpoch || !windowFocused.value) return
   const work = selected.value
-  if (work?.lifecycle === 'active') await reattachConversationFollow(work.id)
+  if (work?.lifecycle === 'active' && !activeFollowCanContinue(work.id)) {
+    await reattachConversationFollow(work.id)
+  }
 }
 
 async function detachConversationFollow() {
@@ -3528,7 +3649,12 @@ function handleOutputClick(event: MouseEvent) {
         </section>
         <div v-if="!app.works.length" class="alu-sidebar-empty">暂无工作</div>
       </div>
-      <button class="alu-host-settings-entry" aria-label="Host 与配对设置" @click="openHostSettings">
+      <button v-if="appSettings?.windowsAwaySupported" class="alu-sidebar-settings-entry" aria-label="App 设置" @click="openAppSettings">
+        <span class="alu-sidebar-settings-icon"><Settings :size="17" /></span>
+        <span><strong>App 设置</strong><small>{{ windowsAwayLabel }}</small></span>
+        <span aria-hidden="true">›</span>
+      </button>
+      <button class="alu-sidebar-settings-entry" aria-label="Host 与配对设置" @click="openHostSettings">
         <img src="./assets/aludock-icon.png" alt="" />
         <span><strong>{{ app.activeHost?.displayName || '连接 AluDock' }}</strong><small>{{ connectionLabel }}</small></span>
         <span aria-hidden="true">⚙</span>
@@ -3585,6 +3711,21 @@ function handleOutputClick(event: MouseEvent) {
             @restore-queue="closeModal(); restoreQueue()"
             @title="setControlDialogTitle"
             @size="controlSizeOverride = $event"
+          />
+        </section>
+      </div>
+    </Transition>
+
+    <Transition name="fade">
+      <div v-if="appSettingsOpen && appSettings" class="modal-layer" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
+        <section ref="modalSurface" class="app-settings-surface" role="dialog" aria-modal="true" aria-labelledby="app-settings-title" tabindex="-1" @wheel="handleModalWheel">
+          <AppSettings
+            :preferences="appSettings"
+            :build-identity="appBuildIdentity"
+            :saving="appSettingsSaving"
+            :error="appSettingsError"
+            @close="closeModal"
+            @update="chooseWindowsAwayDelay"
           />
         </section>
       </div>

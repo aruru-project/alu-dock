@@ -24,9 +24,10 @@ use aludock_client_core::InstanceExecution;
 use aludock_client_core::{MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_MESSAGE};
 use aludock_client_core::{
     AttachmentDto, AttachmentUploadCancellation, AttachmentUploadPhase, AttachmentUploadResult,
-    ClientError, CommandArgumentCompletion, CommandCompletionItems, CommandCompletionsResult,
-    CommandContentResult, CommandInfo, CommandReference, CommandsResult, CompletedConversationEntry,
-    ConnectionKind, ConnectionPolicy, ConversationPreviewPage,
+    ClientError, ClientPreferences, ClientPreferencesStore, CommandArgumentCompletion,
+    CommandCompletionItems, CommandCompletionsResult, CommandContentResult, CommandInfo,
+    CommandReference, CommandsResult, CompletedConversationEntry, ConnectionKind, ConnectionPolicy,
+    ConversationPreviewPage,
     ControllerEventData, DeliverableDownloadProgress, DeliverableDto, DeliveryMode, DiagnosticInfo,
     DockClient, Endpoint, EndpointState, EndpointTestResult, EventCursor, ExtensionControllerLease,
     ExtensionEvent, HistoryRecord, HostConnectionProfile, HostRegistry, HostRegistrySnapshot,
@@ -40,7 +41,7 @@ use aludock_client_core::{
     WorkspacePage, delete_endpoint, host_info_for_profile, probe_host_endpoint,
     record_endpoint_test, reorder_endpoints, save_unverified_endpoint, save_verified_endpoint,
     saved_endpoint_for_test, set_connection_policy as update_connection_policy,
-    set_endpoint_enabled, validate_device_name, validate_host_id,
+    set_endpoint_enabled, validate_device_name, validate_host_id, WindowsAwayDelay,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -56,8 +57,6 @@ use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
 const MAX_RENDERABLE_IMAGE_BYTES: u64 = 64 * 1_024 * 1_024;
-#[cfg(any(target_os = "windows", test))]
-const AWAY_NOTIFICATION_GRACE: Duration = Duration::from_secs(60);
 #[cfg(target_os = "windows")]
 const AWAY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -796,6 +795,7 @@ struct RuntimeLifecycle {
 #[derive(Clone)]
 struct HostRuntimeState {
     registry: HostRegistry,
+    preferences: ClientPreferencesStore,
     lifecycle: Arc<Mutex<RuntimeLifecycle>>,
 }
 
@@ -819,14 +819,36 @@ impl HostRuntimeState {
         } else {
             HostRegistry::platform_default()?
         };
+        let preferences = ClientPreferencesStore::open(
+            registry.root().join("client-preferences"),
+        )?;
         let active_host_id = registry.snapshot()?.active_host_id;
         Ok(Self {
             registry,
+            preferences,
             lifecycle: Arc::new(Mutex::new(RuntimeLifecycle {
                 active_host_id,
                 selection_generation: 1,
             })),
         })
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SafeClientPreferences {
+    revision: u64,
+    windows_away_delay: WindowsAwayDelay,
+    windows_away_supported: bool,
+}
+
+impl From<ClientPreferences> for SafeClientPreferences {
+    fn from(value: ClientPreferences) -> Self {
+        Self {
+            revision: value.revision,
+            windows_away_delay: value.windows_away_delay,
+            windows_away_supported: cfg!(target_os = "windows"),
+        }
     }
 }
 
@@ -867,11 +889,22 @@ struct AwayCompletionTracker {
 
 #[cfg(any(target_os = "windows", test))]
 impl AwayCompletionTracker {
+    #[cfg_attr(test, allow(dead_code))]
     fn from_instances(instances: &[AwayInstanceState]) -> Self {
         Self {
             executions: instances
                 .iter()
                 .map(|instance| (instance.instance_id.clone(), instance.execution))
+                .collect(),
+            pending: HashMap::new(),
+        }
+    }
+
+    fn from_running_instance_ids(instance_ids: &[String]) -> Self {
+        Self {
+            executions: instance_ids
+                .iter()
+                .map(|instance_id| (instance_id.clone(), InstanceExecution::Running))
                 .collect(),
             pending: HashMap::new(),
         }
@@ -891,8 +924,8 @@ impl AwayCompletionTracker {
         }
     }
 
-    fn take_ready(&mut self, away_for: Duration) -> Vec<AwayCompletion> {
-        if away_for < AWAY_NOTIFICATION_GRACE {
+    fn take_ready(&mut self, away_for: Duration, grace: Duration) -> Vec<AwayCompletion> {
+        if away_for < grace {
             return Vec::new();
         }
         let mut completions = self
@@ -908,44 +941,101 @@ impl AwayCompletionTracker {
     }
 }
 
-#[cfg(target_os = "windows")]
 #[derive(Clone, Default)]
 struct AwayMonitorState {
     task: Arc<Mutex<Option<AwayMonitorTask>>>,
 }
 
-#[cfg(target_os = "windows")]
 struct AwayMonitorTask {
-    handle: tauri::async_runtime::JoinHandle<()>,
+    away_id: String,
+    monitor_handle: tauri::async_runtime::JoinHandle<()>,
+    grace_handle: tauri::async_runtime::JoinHandle<()>,
     cancelled: Arc<AtomicBool>,
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WindowsAwayElapsed {
+    away_id: String,
+}
+
+impl AwayMonitorTask {
+    fn cancel(self) {
+        self.cancelled.store(true, Ordering::Release);
+        self.monitor_handle.abort();
+        self.grace_handle.abort();
+    }
+}
+
 impl AwayMonitorState {
-    fn start(&self, app: tauri::AppHandle, runtime: HostRuntimeState) {
-        let Ok(mut guard) = self.task.lock() else {
-            return;
-        };
+    #[cfg(target_os = "windows")]
+    fn start(
+        &self,
+        app: tauri::AppHandle,
+        runtime: HostRuntimeState,
+        away_id: String,
+        grace: Duration,
+        running_instance_ids: Vec<String>,
+    ) -> Result<(), CommandError> {
+        let mut guard = self.task.lock().map_err(|_| away_monitor_error())?;
         if let Some(previous) = guard.take() {
-            previous.cancelled.store(true, Ordering::Release);
-            previous.handle.abort();
+            previous.cancel();
         }
         let cancelled = Arc::new(AtomicBool::new(false));
-        let task_cancelled = cancelled.clone();
-        let handle = tauri::async_runtime::spawn(async move {
-            monitor_while_away(app, runtime, task_cancelled).await;
+        let monitor_cancelled = cancelled.clone();
+        let monitor_app = app.clone();
+        let monitor_handle = tauri::async_runtime::spawn(async move {
+            monitor_while_away(
+                monitor_app,
+                runtime,
+                monitor_cancelled,
+                grace,
+                running_instance_ids,
+            ).await;
         });
-        *guard = Some(AwayMonitorTask { handle, cancelled });
+        let grace_cancelled = cancelled.clone();
+        let elapsed_away_id = away_id.clone();
+        let grace_handle = tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(grace).await;
+            if !grace_cancelled.load(Ordering::Acquire) {
+                let _ = app.emit(
+                    "aludock://windows-away-elapsed",
+                    WindowsAwayElapsed { away_id: elapsed_away_id },
+                );
+            }
+        });
+        *guard = Some(AwayMonitorTask {
+            away_id,
+            monitor_handle,
+            grace_handle,
+            cancelled,
+        });
+        Ok(())
     }
 
-    fn stop(&self) {
-        let Ok(mut guard) = self.task.lock() else {
-            return;
-        };
-        if let Some(task) = guard.take() {
-            task.cancelled.store(true, Ordering::Release);
-            task.handle.abort();
+    fn stop(&self, away_id: Option<&str>) -> Result<bool, CommandError> {
+        let mut guard = self.task.lock().map_err(|_| away_monitor_error())?;
+        if !guard
+            .as_ref()
+            .is_some_and(|task| away_id.is_none_or(|expected| task.away_id == expected))
+        {
+            return Ok(false);
         }
+        if let Some(task) = guard.take() {
+            task.cancel();
+        }
+        Ok(true)
+    }
+}
+
+fn away_monitor_error() -> CommandError {
+    CommandError {
+        code: "away_monitor_unavailable".into(),
+        message: "暂离状态暂时无法更新，请重新打开应用。".into(),
+        details: None,
+        outcome_unknown: false,
+        operation_id: None,
     }
 }
 
@@ -992,6 +1082,8 @@ async fn monitor_while_away(
     app: tauri::AppHandle,
     runtime: HostRuntimeState,
     cancelled: Arc<AtomicBool>,
+    grace: Duration,
+    running_instance_ids: Vec<String>,
 ) {
     let started_at = Instant::now();
     let mut context: Option<AwayCatalogContext> = None;
@@ -1009,7 +1101,15 @@ async fn monitor_while_away(
                     }
                 }
                 Some(snapshot) => {
-                    tracker = Some(AwayCompletionTracker::from_instances(&snapshot.instances));
+                    let mut next = if context.is_none() {
+                        AwayCompletionTracker::from_running_instance_ids(&running_instance_ids)
+                    } else {
+                        AwayCompletionTracker::from_instances(&snapshot.instances)
+                    };
+                    if context.is_none() {
+                        next.observe(&snapshot.instances);
+                    }
+                    tracker = Some(next);
                     context = Some(snapshot.context);
                 }
                 None => {
@@ -1022,7 +1122,7 @@ async fn monitor_while_away(
         if !cancelled.load(Ordering::Acquire)
             && let Some(tracker) = tracker.as_mut()
         {
-            show_away_completions(&app, tracker.take_ready(started_at.elapsed()));
+            show_away_completions(&app, tracker.take_ready(started_at.elapsed(), grace));
         }
         tokio::time::sleep(AWAY_POLL_INTERVAL).await;
     }
@@ -1186,6 +1286,15 @@ impl From<ClientError> for CommandError {
                 outcome_unknown: false,
                 operation_id: None,
             },
+            ClientError::PreferencesConflict { expected, actual } => Self {
+                code: "preferences_conflict".into(),
+                message: "设置已在其他窗口中更新，请重新选择。".into(),
+                details: Some(
+                    serde_json::json!({ "expectedRevision": expected, "actualRevision": actual }),
+                ),
+                outcome_unknown: false,
+                operation_id: None,
+            },
             ClientError::ProfileConflict { expected, actual } => Self {
                 code: "profile_conflict".into(),
                 message: "连接地址已在其他操作中更新，请刷新后重试。".into(),
@@ -1211,7 +1320,7 @@ impl From<ClientError> for CommandError {
             },
             ClientError::Storage { .. } | ClientError::Io(_) => Self {
                 code: "local_storage_unavailable".into(),
-                message: "无法安全读取或保存本机配对信息。请检查应用存储权限和可用空间。".into(),
+                message: "无法读取或保存这台设备上的数据。请检查应用存储权限和可用空间。".into(),
                 details: None,
                 outcome_unknown: false,
                 operation_id: None,
@@ -1486,6 +1595,69 @@ fn system_device_name() -> Option<String> {
         return None;
     }
     validate_device_name(&name).ok().map(|_| name)
+}
+
+#[tauri::command]
+fn get_client_preferences(
+    runtime: tauri::State<'_, HostRuntimeState>,
+) -> Result<SafeClientPreferences, CommandError> {
+    runtime
+        .preferences
+        .snapshot()
+        .map(SafeClientPreferences::from)
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+fn update_client_preferences(
+    runtime: tauri::State<'_, HostRuntimeState>,
+    expected_revision: u64,
+    windows_away_delay: WindowsAwayDelay,
+) -> Result<SafeClientPreferences, CommandError> {
+    runtime
+        .preferences
+        .update_windows_away_delay(expected_revision, windows_away_delay)
+        .map(SafeClientPreferences::from)
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+fn begin_windows_away(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, HostRuntimeState>,
+    monitor: tauri::State<'_, AwayMonitorState>,
+    running_instance_ids: Vec<String>,
+) -> Result<Option<String>, CommandError> {
+    #[cfg(target_os = "windows")]
+    {
+        let preferences = runtime.preferences.snapshot().map_err(CommandError::from)?;
+        let Some(grace) = preferences.windows_away_delay.duration() else {
+            monitor.stop(None)?;
+            return Ok(None);
+        };
+        let away_id = uuid::Uuid::new_v4().to_string();
+        monitor.start(
+            app,
+            runtime.inner().clone(),
+            away_id.clone(),
+            grace,
+            running_instance_ids,
+        )?;
+        Ok(Some(away_id))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (app, runtime, monitor, running_instance_ids);
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+fn cancel_windows_away(
+    monitor: tauri::State<'_, AwayMonitorState>,
+    away_id: Option<String>,
+) -> Result<bool, CommandError> {
+    monitor.stop(away_id.as_deref())
 }
 
 #[tauri::command]
@@ -5759,7 +5931,7 @@ fn parse_trust_decision(value: &str) -> Result<ProjectTrustDecision, CommandErro
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let builder = tauri::Builder::default();
+    let builder = tauri::Builder::default().manage(AwayMonitorState::default());
     #[cfg(target_os = "android")]
     let builder = builder.plugin(android_documents::init());
     let builder = builder
@@ -5769,18 +5941,14 @@ pub fn run() {
     #[cfg(target_os = "windows")]
     let builder = builder
         .plugin(tauri_plugin_notification::init())
-        .manage(AwayMonitorState::default())
         .on_window_event(|window, event| {
             if window.label() == "main"
                 && let tauri::WindowEvent::Focused(focused) = event
             {
                 let monitor = window.state::<AwayMonitorState>();
                 if *focused {
-                    monitor.stop();
+                    let _ = monitor.stop(None);
                     let _ = window.request_user_attention(None);
-                } else {
-                    let runtime = window.state::<HostRuntimeState>().inner().clone();
-                    monitor.start(window.app_handle().clone(), runtime);
                 }
             }
         });
@@ -5803,6 +5971,10 @@ pub fn run() {
         .manage(CommandReferenceState::default())
         .invoke_handler(tauri::generate_handler![
             system_device_name,
+            get_client_preferences,
+            update_client_preferences,
+            begin_windows_away,
+            cancel_windows_away,
             get_host_catalog,
             set_active_host,
             remove_local_host,
@@ -5952,22 +6124,18 @@ mod tests {
     }
 
     #[test]
-    fn work_finishing_during_the_first_away_minute_notifies_after_the_grace_period() {
-        let mut tracker = AwayCompletionTracker::from_instances(&[AwayInstanceState {
-            instance_id: "work-a".into(),
-            display_name: "Windows 客户端".into(),
-            execution: InstanceExecution::Running,
-        }]);
-
+    fn work_finishing_before_the_first_away_read_notifies_at_the_chosen_time() {
+        let mut tracker = AwayCompletionTracker::from_running_instance_ids(&["work-a".into()]);
         tracker.observe(&[AwayInstanceState {
             instance_id: "work-a".into(),
             display_name: "Windows 客户端".into(),
             execution: InstanceExecution::Idle,
         }]);
 
-        assert!(tracker.take_ready(Duration::from_secs(59)).is_empty());
+        let grace = WindowsAwayDelay::FiveMinutes.duration().unwrap();
+        assert!(tracker.take_ready(Duration::from_secs(299), grace).is_empty());
         assert_eq!(
-            tracker.take_ready(Duration::from_secs(60)),
+            tracker.take_ready(Duration::from_secs(300), grace),
             vec![AwayCompletion {
                 instance_id: "work-a".into(),
                 display_name: "Windows 客户端".into(),
@@ -6009,8 +6177,12 @@ mod tests {
             .unwrap();
         let host_id = aludock_client_core::host_id(host.certificate_der());
         let registry = HostRegistry::open(&path).unwrap();
+        let preferences = ClientPreferencesStore::open(
+            registry.root().join("client-preferences"),
+        ).unwrap();
         let runtime = HostRuntimeState {
             registry,
+            preferences,
             lifecycle: Arc::new(Mutex::new(RuntimeLifecycle {
                 active_host_id: Some(host_id.clone()),
                 selection_generation: 1,

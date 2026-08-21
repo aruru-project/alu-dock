@@ -6,6 +6,7 @@ import type {
   CommandContentResult,
   CommandsResult,
   CompletedConversationEntry,
+  ClientPreferences,
   ConnectionKind,
   ConversationBootstrap,
   ConversationHistoryPage,
@@ -41,6 +42,7 @@ import type {
   ToolsResult,
   Work,
   WorkCatalog,
+  WindowsAwayDelay,
   WorkspacePage,
 } from './types'
 
@@ -49,6 +51,34 @@ export const isTauri = '__TAURI_INTERNALS__' in window
 export async function getSystemDeviceName(): Promise<string | null> {
   if (isTauri) return invoke<string | null>('system_device_name')
   return null
+}
+
+let previewClientPreferences: ClientPreferences = {
+  revision: 1,
+  windowsAwayDelay: 'one_minute',
+  windowsAwaySupported: true,
+}
+
+export async function getClientPreferences(): Promise<ClientPreferences> {
+  if (isTauri) return invoke<ClientPreferences>('get_client_preferences')
+  return { ...previewClientPreferences }
+}
+
+export async function updateClientPreferences(
+  expectedRevision: number,
+  windowsAwayDelay: WindowsAwayDelay,
+): Promise<ClientPreferences> {
+  if (isTauri) return invoke<ClientPreferences>('update_client_preferences', { expectedRevision, windowsAwayDelay })
+  previewClientPreferences = { ...previewClientPreferences, revision: expectedRevision + 1, windowsAwayDelay }
+  return { ...previewClientPreferences }
+}
+
+export async function beginWindowsAway(runningInstanceIds: string[]): Promise<string | null> {
+  return isTauri ? invoke<string | null>('begin_windows_away', { runningInstanceIds }) : null
+}
+
+export async function cancelWindowsAway(awayId?: string | null): Promise<boolean> {
+  return isTauri ? invoke<boolean>('cancel_windows_away', { awayId: awayId ?? null }) : false
 }
 
 export async function getHostCatalog(): Promise<HostCatalog> {

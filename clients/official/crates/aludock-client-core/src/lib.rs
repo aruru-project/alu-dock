@@ -65,8 +65,8 @@ pub use extension_ui::{
     TitleDirective, ToolsExpandedChanged, WidgetChanged, WidgetPlacement, WidgetViewportResult,
 };
 pub use host_registry::{
-    HostRecord, HostRegistry, HostRegistrySnapshot, PairingTransaction, PromotedPairing,
-    VerifiedPairing, validate_host_id,
+    ClientPreferences, ClientPreferencesStore, HostRecord, HostRegistry, HostRegistrySnapshot,
+    PairingTransaction, PromotedPairing, VerifiedPairing, WindowsAwayDelay, validate_host_id,
 };
 pub use identity::ClientIdentity;
 pub use instances::{

@@ -36,6 +36,8 @@ pub enum ClientError {
     AttachmentUploadCancelled,
     #[error("Host registry changed (expected revision {expected}, actual revision {actual})")]
     RegistryConflict { expected: u64, actual: u64 },
+    #[error("client preferences changed (expected revision {expected}, actual revision {actual})")]
+    PreferencesConflict { expected: u64, actual: u64 },
     #[error(
         "Host connection profile changed (expected revision {expected}, actual revision {actual})"
     )]

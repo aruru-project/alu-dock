@@ -17,6 +17,9 @@ use crate::{
     protocol::probe_stored_pairing,
 };
 
+mod preferences;
+pub use preferences::{ClientPreferences, ClientPreferencesStore, WindowsAwayDelay};
+
 const REGISTRY_DIRECTORY: &str = "host-registry";
 const HOSTS_DIRECTORY: &str = "hosts";
 const TRANSACTIONS_DIRECTORY: &str = "pairing-transactions";

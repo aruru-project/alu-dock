@@ -1,5 +1,12 @@
 export type Lifecycle = 'active' | 'stopping' | 'stopped' | 'host_lost' | 'runtime_error'
 export type Execution = 'idle' | 'running' | 'failed' | 'unavailable'
+export type WindowsAwayDelay = 'immediate' | 'one_minute' | 'five_minutes' | 'thirty_minutes' | 'one_hour' | 'never'
+
+export interface ClientPreferences {
+  revision: number
+  windowsAwayDelay: WindowsAwayDelay
+  windowsAwaySupported: boolean
+}
 
 export interface ModelIdentity {
   provider: string

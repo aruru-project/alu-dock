@@ -866,13 +866,15 @@ button { margin: 0; padding: 0; border: 0; background: transparent; color: inher
 .alu-sidebar-title { min-width: 0; flex: 1; overflow: hidden; color: var(--alu-text); font-size: 14px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .alu-instance-list { min-height: 0; flex: 1 1 auto; overflow-y: auto; }
 .alu-instance-link { width: 100%; border: 0; background: transparent; text-align: left; }
-.alu-host-settings-entry { display: grid; min-height: 58px; flex: 0 0 auto; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; gap: 10px; width: 100%; padding: 9px 14px max(9px, env(safe-area-inset-bottom)); border: 0; border-top: 1px solid var(--alu-border); background: var(--alu-bg); color: var(--alu-text-muted); text-align: left; }
-.alu-host-settings-entry:hover { background: var(--alu-hover); color: var(--alu-text); }
-.alu-host-settings-entry img { width: 32px; height: 32px; object-fit: cover; border-radius: 8px; }
-.alu-host-settings-entry > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
-.alu-host-settings-entry strong, .alu-host-settings-entry small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.alu-host-settings-entry strong { color: var(--alu-text); font-size: 11px; }
-.alu-host-settings-entry small { color: var(--alu-text-muted); font-size: 9px; }
+.alu-sidebar-settings-entry { display: grid; min-height: 58px; flex: 0 0 auto; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; gap: 10px; width: 100%; padding: 9px 14px; border: 0; border-top: 1px solid var(--alu-border); background: var(--alu-bg); color: var(--alu-text-muted); text-align: left; }
+.alu-sidebar-settings-entry:last-child { padding-bottom: max(9px, env(safe-area-inset-bottom)); }
+.alu-sidebar-settings-entry:hover { background: var(--alu-hover); color: var(--alu-text); }
+.alu-sidebar-settings-icon, .alu-sidebar-settings-entry img { display: grid; width: 32px; height: 32px; object-fit: cover; border-radius: 8px; place-items: center; }
+.alu-sidebar-settings-icon { border: 1px solid var(--alu-blue-border); background: var(--alu-blue-bg); color: var(--alu-blue); }
+.alu-sidebar-settings-entry > span:nth-child(2) { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.alu-sidebar-settings-entry strong, .alu-sidebar-settings-entry small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alu-sidebar-settings-entry strong { color: var(--alu-text); font-size: 11px; }
+.alu-sidebar-settings-entry small { color: var(--alu-text-muted); font-size: 9px; }
 
 .alu-nav-files { position: relative; display: inline-grid; width: 34px; height: 34px; flex: 0 0 auto; place-items: center; padding: 0; color: var(--alu-text-muted); border: 1px solid transparent; border-radius: 8px; background: transparent; cursor: pointer; }
 .alu-nav-files:hover, .alu-nav-files[aria-expanded="true"] { color: var(--alu-blue); border-color: var(--alu-blue-border); background: color-mix(in srgb, var(--alu-blue) 7%, transparent); }
@@ -978,6 +980,51 @@ button { margin: 0; padding: 0; border: 0; background: transparent; color: inher
   .control-center-port { min-height: 0; }
   .cmd-palette-box > .control-center-port { max-height: 92dvh; }
   .alu-tree-select .ui-dialog-actions { flex-wrap: wrap; overflow-x: visible; }
+}
+
+/* App settings is a quiet device-level surface, distinct from Host administration. */
+.app-settings-surface { position: relative; display: grid; width: min(760px, calc(100vw - 48px)); height: min(620px, calc(100vh - 48px)); min-height: 480px; grid-template-rows: 68px minmax(0, 1fr); overflow: hidden; border: 1px solid var(--alu-border); border-radius: 16px; background: #0b101c; box-shadow: 0 28px 80px rgba(0, 0, 0, .5); }
+.app-settings-surface::before { position: absolute; z-index: 2; top: 0; right: 0; left: 0; height: 1px; background: linear-gradient(90deg, transparent 4%, var(--alu-blue) 30%, var(--alu-pink) 75%, transparent 96%); content: ''; opacity: .64; pointer-events: none; }
+.app-settings-header { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 14px 12px 20px; border-bottom: 1px solid var(--alu-border); background: #101725; }
+.app-settings-heading { display: flex; min-width: 0; align-items: center; gap: 11px; }
+.app-settings-mark { display: grid; width: 36px; height: 36px; flex: 0 0 auto; border: 1px solid var(--alu-blue-border); border-radius: 10px; background: var(--alu-blue-bg); color: var(--alu-blue); place-items: center; }
+.app-settings-heading h2 { margin: 0; color: var(--alu-text); font-size: 14px; font-weight: 700; }
+.app-settings-heading p { margin: 3px 0 0; color: var(--alu-text-muted); font-size: 9px; }
+.app-settings-close { display: grid; width: 34px; height: 34px; flex: 0 0 auto; cursor: pointer; border: 1px solid transparent; border-radius: 8px; color: var(--alu-text-muted); place-items: center; }
+.app-settings-close:hover { border-color: var(--alu-border); background: var(--alu-hover); color: var(--alu-text); }
+.app-settings-layout { display: grid; min-height: 0; grid-template-columns: 190px minmax(0, 1fr); }
+.app-settings-nav { padding: 20px 12px; border-right: 1px solid var(--alu-border); background: #080d17; }
+.app-settings-nav-label { display: block; padding: 0 9px 10px; color: var(--alu-text-faint); font-size: 8px; font-weight: 750; letter-spacing: .13em; text-transform: uppercase; }
+.app-settings-nav-item { display: flex; min-height: 42px; align-items: center; gap: 9px; padding: 0 10px; border: 1px solid transparent; border-radius: 9px; color: var(--alu-text-muted); font-size: 10px; }
+.app-settings-nav-item.is-active { border-color: var(--alu-blue-border); background: var(--alu-blue-bg); color: var(--alu-blue); }
+.app-settings-content { min-width: 0; min-height: 0; padding: 28px 30px 34px; overflow-y: auto; }
+.app-settings-intro { padding-bottom: 20px; border-bottom: 1px solid var(--alu-border); }
+.app-settings-intro > span { color: var(--alu-blue); font-size: 8px; font-weight: 750; letter-spacing: .15em; }
+.app-settings-intro h3 { margin: 6px 0 8px; color: var(--alu-text); font-size: 20px; font-weight: 650; }
+.app-settings-intro p { max-width: 520px; margin: 0; color: var(--alu-text-muted); font-size: 10px; line-height: 1.7; }
+.away-options { display: grid; gap: 7px; margin-top: 20px; }
+.away-option { display: grid; min-height: 58px; grid-template-columns: 16px minmax(0, 1fr) auto; align-items: center; gap: 11px; width: 100%; padding: 9px 12px; cursor: pointer; border: 1px solid var(--alu-border); border-radius: 10px; background: var(--alu-bg-raised); color: var(--alu-text); text-align: left; transition: border-color .14s ease, background .14s ease, transform .14s ease; }
+.away-option:hover { border-color: var(--alu-border-light); background: var(--alu-hover); transform: translateX(2px); }
+.away-option:disabled { cursor: wait; opacity: .62; transform: none; }
+.away-option.is-selected { border-color: var(--alu-blue-border); background: var(--alu-blue-bg); }
+.away-option-indicator { width: 13px; height: 13px; border: 1px solid var(--alu-text-faint); border-radius: 50%; box-shadow: 0 0 0 3px transparent inset; }
+.away-option.is-selected .away-option-indicator { border-color: var(--alu-blue); background: var(--alu-blue); box-shadow: 0 0 0 3px #0d1725 inset; }
+.away-option-copy { display: grid; min-width: 0; gap: 3px; }
+.away-option-copy strong { font-size: 11px; font-weight: 650; }
+.away-option-copy small { color: var(--alu-text-muted); font-size: 9px; }
+.away-option-badge { padding: 3px 6px; border-radius: 999px; background: rgba(126, 200, 224, .1); color: var(--alu-blue); font-size: 8px; }
+.app-settings-footnote, .app-settings-error { margin: 16px 0 0; font-size: 9px; }
+.app-settings-footnote { color: var(--alu-text-faint); }
+.app-settings-error { padding: 9px 10px; border: 1px solid var(--alu-rose-border); border-radius: 8px; background: var(--alu-rose-bg); color: var(--alu-rose); }
+
+@media (max-width: 620px) {
+  .app-settings-surface { width: 100%; height: min(92vh, 760px); min-height: 0; border-right: 0; border-bottom: 0; border-left: 0; border-radius: 18px 18px 0 0; }
+  .app-settings-layout { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  .app-settings-nav { padding: 10px 14px; border-right: 0; border-bottom: 1px solid var(--alu-border); }
+  .app-settings-nav-label { display: none; }
+  .app-settings-nav-item { width: max-content; min-height: 36px; }
+  .app-settings-content { padding: 22px 16px 28px; }
+  .away-option { min-height: 62px; }
 }
 
 /* Host settings is a task surface, not a wall of equally weighted forms. */
