@@ -81,6 +81,7 @@ import {
 import { userErrorMessage as errorMessage } from './lib/userError'
 import { captureHostResult, currentHostCall, hostResultMatches, requireHostContext } from './lib/hostResult'
 import { reduceLiveEvent } from './lib/liveReducer'
+import { editorAfterSessionReplacement } from './lib/sessionEditor'
 import {
   conversationBoundaryKey,
   conversationSwapIsCorrelated,
@@ -210,6 +211,7 @@ const clearingRestoredImages = ref(false)
 const attachmentPicking = ref(false)
 type UploadDraft = SelectedAttachment & { state: 'hashing' | 'uploading' | 'finalizing' | 'error'; progress: number; error?: string }
 const uploadDrafts = ref<UploadDraft[]>([])
+let composerResetEpoch = 0
 const toolsExpandedMutating = ref(false)
 const toolExpansionOverrides = ref<Record<string, boolean>>({})
 const workMutating = ref(false)
@@ -1553,6 +1555,7 @@ async function handleComposerPaste(event: ClipboardEvent) {
     return
   }
   const context = requireHostContext(app)
+  const resetEpoch = composerResetEpoch
   const staged: UploadDraft[] = []
   attachmentPicking.value = true
   submissionError.value = null
@@ -1564,7 +1567,7 @@ async function handleComposerPaste(event: ClipboardEvent) {
       const selectedAttachment = await stageClipboardImage(work.id, bytes, index + 1, context)
       const draftItem: UploadDraft = { ...selectedAttachment, state: 'hashing', progress: 0 }
       staged.push(draftItem)
-      if (!app.contextMatches(context) || selected.value?.id !== work.id) throw new Error('stale_attachment_context')
+      if (!app.contextMatches(context) || selected.value?.id !== work.id || resetEpoch !== composerResetEpoch) throw new Error('stale_attachment_context')
       if (selectedAttachment.mediaType !== mediaType) throw new Error('剪贴板图片格式校验失败，请重新复制。')
       const blobBytes = new Uint8Array(bytes.byteLength)
       blobBytes.set(bytes)
@@ -1600,8 +1603,9 @@ async function chooseAttachments() {
   attachmentPicking.value = true
   try {
     const context = requireHostContext(app)
+    const resetEpoch = composerResetEpoch
     const picked = await pickAttachments(work.id, context)
-    if (!app.contextMatches(context) || selected.value?.id !== work.id) {
+    if (!app.contextMatches(context) || selected.value?.id !== work.id || resetEpoch !== composerResetEpoch) {
       for (const item of picked) void removeAttachment(work.id, item.token, context).catch(() => undefined)
       return
     }
@@ -1624,12 +1628,13 @@ async function startAttachmentUpload(item: UploadDraft) {
   const work = selected.value
   if (!work) return
   const context = requireHostContext(app)
+  const resetEpoch = composerResetEpoch
   item.state = 'hashing'
   item.progress = 0
   item.error = undefined
   try {
     const result = await uploadAttachment(work.id, item.token, context)
-    if (!app.contextMatches(context) || selected.value?.id !== work.id) return
+    if (!app.contextMatches(context) || selected.value?.id !== work.id || resetEpoch !== composerResetEpoch || !uploadDrafts.value.some((candidate) => candidate.token === item.token)) return
     moveAttachmentPreview(item.token, result.attachment.fileId)
     uploadDrafts.value = uploadDrafts.value.filter((candidate) => candidate.token !== item.token)
     if (!draftAttachments.value.some((candidate) => candidate.fileId === result.attachment.fileId)) {
@@ -2719,7 +2724,7 @@ async function startCompaction(customInstructions?: string) {
     app.applyWorkSnapshot(result.instance, capturedHost)
     const authoritative = app.works.find((item) => item.id === result.instance.id) ?? result.instance
     extensionUi.applyAuthoritativeSnapshot(authoritative)
-    if (selected.value?.id === work.id) await resyncSession(authoritative)
+    if (selected.value?.id === work.id) await refreshSessionConversation(authoritative)
   } catch (cause) {
     markUnknownOutcome(cause, 'sessions', work.id)
     const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
@@ -2735,10 +2740,28 @@ async function startCompaction(customInstructions?: string) {
   }
 }
 
+async function refreshSessionConversation(snapshot: Work) {
+  app.applyWorkSnapshot(snapshot)
+  if (selected.value?.id === snapshot.id) await loadSelectedConversation(snapshot.id, true)
+}
+
 async function resyncSession(snapshot: Work, returnedDraft?: string) {
   app.applyWorkSnapshot(snapshot)
-  if (returnedDraft) draft.value = draft.value ? `${draft.value}\n${returnedDraft}` : returnedDraft
-  if (selected.value?.id === snapshot.id) await loadSelectedConversation(snapshot.id, true)
+  if (selected.value?.id !== snapshot.id) return
+  composerResetEpoch += 1
+  const host = app.hostContext
+  for (const item of uploadDrafts.value) {
+    removeAttachmentPreview(item.token)
+    if (host) void cancelAttachmentUpload(snapshot.id, item.token, host)
+      .catch(() => undefined)
+      .then(() => removeAttachment(snapshot.id, item.token, host).catch(() => undefined))
+  }
+  const editor = editorAfterSessionReplacement(returnedDraft)
+  draft.value = editor.text
+  draftAttachments.value = editor.attachments
+  restoredImageCount.value = editor.restoredImageCount
+  uploadDrafts.value = []
+  await loadSelectedConversation(snapshot.id, true)
 }
 
 async function openDirectory() {

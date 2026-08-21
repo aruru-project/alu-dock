@@ -343,7 +343,7 @@ function compact() {
 async function reload() {
   if (props.preview || pending.value || props.outcomeUnknown) return
   pending.value = 'reload'; error.value = ''; reloadSummary.value = null
-  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => reloadSession(scope, operationId())); reloadSummary.value = result; status.value = `Reload 完成：${result.resourceTotal} 个资源，${result.diagnosticTotal} 条诊断。`; emit('snapshot', result.instance) }
+  try { const scope = { ...context.value }; const result = await currentSessionCall(scope, () => reloadSession(scope, operationId())); reloadSummary.value = result; status.value = `Reload 完成：${result.resourceTotal} 个资源，${result.diagnosticTotal} 条诊断。`; emit('resync', result.instance) }
   catch (cause) { mutationFailure(cause, 'sessions') } finally { pending.value = '' }
 }
 
