@@ -13,11 +13,19 @@ import {
   dockToolsExtension,
 } from "../src/pi/dock-tools-extension.js";
 
+interface FakeExtensionContext {
+  ui: {
+    notify: (message: string) => void;
+    setStatus: (key: string, text: string | undefined) => void;
+  };
+  reload: () => Promise<void>;
+}
+
 interface FakeApiState {
   active: string[];
   tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<unknown> }>;
-  commands: Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>;
-  start: Array<() => void>;
+  commands: Map<string, { handler: (args: string, ctx: FakeExtensionContext) => Promise<void> }>;
+  start: Array<(event: unknown, ctx: FakeExtensionContext) => void>;
   shutdown: Array<() => void>;
   messages: Array<{ message: unknown; options: unknown }>;
 }
@@ -40,13 +48,33 @@ function fakeApi(): { api: unknown; state: FakeApiState } {
     setActiveTools: (names: string[]) => { state.active = [...names]; },
     registerTool: (tool: FakeApiState["tools"][number]) => { state.tools.push(tool); state.active.push(tool.name); },
     registerCommand: (name: string, command: FakeApiState["commands"] extends Map<string, infer T> ? T : never) => { state.commands.set(name, command); },
-    on: (event: string, handler: () => void) => {
+    on: (event: string, handler: (event: unknown, ctx: FakeExtensionContext) => void) => {
       if (event === "session_start") state.start.push(handler);
-      if (event === "session_shutdown") state.shutdown.push(handler);
+      if (event === "session_shutdown") state.shutdown.push(() => handler(undefined, fakeExtensionContext().context));
     },
     sendMessage: (message: unknown, options: unknown) => { state.messages.push({ message, options }); },
   };
   return { api, state };
+}
+
+function fakeExtensionContext(): {
+  context: FakeExtensionContext;
+  notifications: string[];
+  statuses: Map<string, string>;
+} {
+  const notifications: string[] = [];
+  const statuses = new Map<string, string>();
+  return {
+    context: {
+      ui: {
+        notify: (message) => { notifications.push(message); },
+        setStatus: (key, text) => { if (text === undefined) statuses.delete(key); else statuses.set(key, text); },
+      },
+      reload: async () => {},
+    },
+    notifications,
+    statuses,
+  };
 }
 
 const notification: ObservationNotification = {
@@ -120,18 +148,19 @@ test("Dock tools extension exposes all owner-enabled tools only while enabled an
   });
 
   const first = fakeApi();
+  const extensionUi = fakeExtensionContext();
   dockToolsExtension(bridge)(first.api as never);
-  for (const start of first.state.start) start();
+  for (const start of first.state.start) start(undefined, extensionUi.context);
   assert.deepEqual(first.state.tools.map((tool) => tool.name), [...DOCK_TOOL_NAMES]);
   assert.deepEqual(first.state.active, ["read"]);
   assert.ok(first.state.commands.has("dock-tools"));
+  assert.equal(extensionUi.statuses.has("Dock tools"), false);
 
-  const notifications: string[] = [];
-  const commandContext = { ui: { notify: (message: string) => { notifications.push(message); } }, reload: async () => {} };
-  await first.state.commands.get("dock-tools")!.handler("on", commandContext);
+  await first.state.commands.get("dock-tools")!.handler("on", extensionUi.context);
   assert.equal(bridge.enabled, true);
   assert.deepEqual(first.state.active, ["read", ...DOCK_TOOL_NAMES]);
-  assert.match(notifications.at(-1)!, /are on/u);
+  assert.match(extensionUi.notifications.at(-1)!, /are on/u);
+  assert.equal(extensionUi.statuses.get("Dock tools"), "on");
 
   const list = first.state.tools.find((tool) => tool.name === "dock_list")!;
   const inspect = first.state.tools.find((tool) => tool.name === "dock_inspect")!;
@@ -169,19 +198,23 @@ test("Dock tools extension exposes all owner-enabled tools only while enabled an
     message: "Please report.",
   });
 
-  await first.state.commands.get("dock-tools")!.handler("off", commandContext);
+  await first.state.commands.get("dock-tools")!.handler("off", extensionUi.context);
   assert.deepEqual(first.state.active, ["read"]);
+  assert.equal(extensionUi.statuses.has("Dock tools"), false);
   await assert.rejects(list.execute("tool-call", {}), /Dock tools are off/u);
 
-  await first.state.commands.get("dock-tools")!.handler("on", commandContext);
+  await first.state.commands.get("dock-tools")!.handler("on", extensionUi.context);
+  assert.equal(extensionUi.statuses.get("Dock tools"), "on");
   for (const shutdown of first.state.shutdown) shutdown();
   bridge.deliver(notification);
   assert.equal(first.state.messages.length, 0);
 
   const second = fakeApi();
+  extensionUi.statuses.clear();
   dockToolsExtension(bridge)(second.api as never);
-  for (const start of second.state.start) start();
+  for (const start of second.state.start) start(undefined, extensionUi.context);
   assert.deepEqual(second.state.active, ["read", ...DOCK_TOOL_NAMES]);
+  assert.equal(extensionUi.statuses.get("Dock tools"), "on");
   assert.equal(second.state.messages.length, 1);
   assert.deepEqual(second.state.messages[0]!.options, { triggerTurn: true, deliverAs: "followUp" });
   assert.match(JSON.stringify(second.state.messages[0]!.message), /No sibling conversation content was included/u);
@@ -203,7 +236,7 @@ test("Dock tools bridge cancels a reload-pending wake before acknowledging cance
 
   const attached = fakeApi();
   dockToolsExtension(bridge)(attached.api as never);
-  for (const start of attached.state.start) start();
+  for (const start of attached.state.start) start(undefined, fakeExtensionContext().context);
   assert.equal(attached.state.messages.length, 0, "a successfully cancelled pending watch must not wake after rebind");
   bridge.deliver(notification);
   assert.equal(attached.state.messages.length, 0, "a suppressed watch ID must remain fenced against delayed delivery");

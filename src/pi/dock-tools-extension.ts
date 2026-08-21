@@ -30,6 +30,7 @@ export const DOCK_TOOL_NAMES = [
   "dock_send",
 ] as const;
 const DOCK_TOOLS_EXTENSION_PATH = "<inline:alu-dock-tools>";
+const DOCK_TOOLS_STATUS_KEY = "Dock tools";
 const TOOL_NAMES = new Set<string>(DOCK_TOOL_NAMES);
 const LIST_SCHEMA = {
   type: "object",
@@ -322,6 +323,8 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
           return;
         }
         const enabled = await bridge.configure(action);
+        const collision = findDockToolCollision(pi);
+        ctx.ui.setStatus(DOCK_TOOLS_STATUS_KEY, enabled ? collision === undefined ? "on" : "unavailable" : undefined);
         ctx.ui.notify(`Dock tools are ${enabled ? "on" : "off"}.`, "info");
         if (action !== "status") await ctx.reload();
       },
@@ -330,17 +333,23 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     let detach = (): void => {};
     pi.on("session_start", (_event, ctx) => {
       detach();
-      const collision = pi.getAllTools().find((tool) => TOOL_NAMES.has(tool.name)
-        && tool.sourceInfo.path !== DOCK_TOOLS_EXTENSION_PATH);
+      const collision = findDockToolCollision(pi);
       if (collision) {
         pi.setActiveTools(pi.getActiveTools().filter((name) => !TOOL_NAMES.has(name)));
+        ctx.ui.setStatus(DOCK_TOOLS_STATUS_KEY, bridge.enabled ? "unavailable" : undefined);
         ctx.ui.notify(`Dock tools are unavailable because ${collision.name} is already registered.`, "error");
         return;
       }
       detach = bridge.attach(pi);
+      ctx.ui.setStatus(DOCK_TOOLS_STATUS_KEY, bridge.enabled ? "on" : undefined);
     });
     pi.on("session_shutdown", () => detach());
   };
+}
+
+function findDockToolCollision(pi: ExtensionAPI): ReturnType<ExtensionAPI["getAllTools"]>[number] | undefined {
+  return pi.getAllTools().find((tool) => TOOL_NAMES.has(tool.name)
+    && tool.sourceInfo.path !== DOCK_TOOLS_EXTENSION_PATH);
 }
 
 function toolResult(value: DockToolsResult): { content: Array<{ type: "text"; text: string }>; details: DockToolsResult } {
