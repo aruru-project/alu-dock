@@ -368,17 +368,16 @@ export async function loadConversation(instanceId: string, context: HostContext)
 
 export async function loadConversationHistory(
   instanceId: string,
-  beforeEntryId: string,
+  cursor: string | undefined,
   expectedHostEpoch: string,
   expectedRuntimeGeneration: number,
-  expectedHistoryRevision: number,
   context: HostContext,
 ): Promise<ConversationHistoryPage> {
   if (isTauri) return invoke<ConversationHistoryPage>('conversation_history', {
-    ...context, instanceId, beforeEntryId, expectedHostEpoch, expectedRuntimeGeneration, expectedHistoryRevision,
+    ...context, instanceId, cursor, expectedHostEpoch, expectedRuntimeGeneration,
   })
   await delay(100)
-  return { records: [], historyRevision: expectedHistoryRevision, hasEarlier: false, instance: previewBootstrap.works[0]!, hostEpoch: 'browser-preview' }
+  return { records: [], revision: 'browser-preview', hasEarlier: false, instance: previewBootstrap.works[0]!, hostEpoch: 'browser-preview' }
 }
 
 export async function loadConversationImageBytes(

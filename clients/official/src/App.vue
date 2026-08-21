@@ -67,7 +67,7 @@ import {
   verifyHostEndpoint,
 } from './lib/bridge'
 import type { CreateWorkContinuation, SessionContext } from './lib/bridge'
-import { foldLiveDelta, liveDeltaKey, liveProjectionTargetKey, projectConversation } from './lib/conversation'
+import { foldLiveDelta, liveDeltaKey, liveProjectionTargetKey, mergeHydratedConversationRecords, projectConversation } from './lib/conversation'
 import { appendRestoredQueue, attachmentsAfterSubmit, moveAttachmentPreviewResource } from './lib/attachmentDraft'
 import {
   DEVICE_NAME_FALLBACK,
@@ -176,8 +176,10 @@ let imageLoadEpoch = 0
 const conversationLoading = ref(false)
 const conversationError = ref<string | null>(null)
 const historyTruncated = ref(false)
-const historyBeforeEntryId = ref<string | null>(null)
+const conversationHistoryRevision = ref<string | null>(null)
+const historyCursor = ref<string | null>(null)
 const historyLoading = ref(false)
+const historyHydrating = ref(false)
 const historyError = ref<string | null>(null)
 const submitting = ref(false)
 const aborting = ref(false)
@@ -333,6 +335,9 @@ const conversationRows = computed<ConversationRow[]>(() => {
 })
 const queueItems = computed(() => isTauri ? conversationState.value?.queue ?? [] : previewQueue)
 const selected = computed(() => app.selectedWork)
+const conversationSwitching = computed(() => Boolean(
+  selected.value && conversationState.value && selected.value.id !== conversationState.value.instance.id,
+))
 const currentDeliverableRows = computed(() => {
   const context = app.hostContext
   const instanceId = selected.value?.id
@@ -1767,10 +1772,57 @@ function handleOutputMediaLoad(event: Event) {
   }
 }
 
+type OutputAnchor = {
+  surface: HTMLElement
+  id?: string
+  offset?: number
+  scrollTop: number
+  scrollHeight: number
+}
+
+function captureOutputAnchor(): OutputAnchor | null {
+  const surface = output.value
+  if (!surface) return null
+  const surfaceTop = surface.getBoundingClientRect().top
+  const element = [...surface.querySelectorAll<HTMLElement>('[data-conversation-id]')]
+    .find((candidate) => candidate.getBoundingClientRect().bottom >= surfaceTop)
+  return {
+    surface,
+    id: element?.dataset.conversationId,
+    offset: element ? element.getBoundingClientRect().top - surfaceTop : undefined,
+    scrollTop: surface.scrollTop,
+    scrollHeight: surface.scrollHeight,
+  }
+}
+
+async function restoreOutputAnchor(anchor: OutputAnchor | null, stickToBottom: boolean) {
+  await nextTick()
+  if (!anchor || output.value !== anchor.surface) return
+  if (stickToBottom) {
+    scrollOutputToBottom(true)
+    return
+  }
+  const next = anchor.id
+    ? [...anchor.surface.querySelectorAll<HTMLElement>('[data-conversation-id]')]
+      .find((element) => element.dataset.conversationId === anchor.id)
+    : undefined
+  if (next && anchor.offset != null) {
+    anchor.surface.scrollTop += (next.getBoundingClientRect().top - anchor.surface.getBoundingClientRect().top) - anchor.offset
+  } else {
+    anchor.surface.scrollTop = anchor.scrollTop + (anchor.surface.scrollHeight - anchor.scrollHeight)
+  }
+}
+
 const idleImageResource: ConversationImageResource = { state: 'idle' }
+const loadingImageResource: ConversationImageResource = { state: 'loading' }
 
 function imageResource(part: ConversationImagePart): ConversationImageResource {
-  return imageResources.value[part.imageKey] ?? idleImageResource
+  const loaded = imageResources.value[part.imageKey]
+  if (loaded) return loaded
+  const localPreview = part.fileId ? attachmentPreviews.value[part.fileId] : undefined
+  if (!part.source && localPreview) return { state: 'ready', url: localPreview.url }
+  if (!part.source && historyHydrating.value) return loadingImageResource
+  return idleImageResource
 }
 
 function setImageResource(imageKey: string, resource: ConversationImageResource) {
@@ -2242,7 +2294,8 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
   const epoch = ++conversationLoadEpoch
   ++historyLoadEpoch
   const work = app.works.find((item) => item.id === instanceId)
-  if (!preserveUntilSwap) {
+  const preserveCurrent = preserveUntilSwap || Boolean(conversationState.value)
+  if (!preserveCurrent) {
     realConversation.value = []
     conversationState.value = null
     if (!await extensionUi.clear()) return false
@@ -2250,7 +2303,7 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
   }
   conversationError.value = null
   historyError.value = null
-  if (preserveUntilSwap) followConnected.value = false
+  if (preserveCurrent) followConnected.value = false
   if (!work || work.lifecycle !== 'active') return false
   conversationLoading.value = true
   let subscriptionId = ''
@@ -2273,17 +2326,16 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
       followConnected.value = false
     }
     if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
-    // A fresh selection has no useful surface to preserve. Once Follow accepts
-    // the exact bootstrap cursor, its catch-up events are buffered below, so
-    // the already-authoritative history can be shown during the handshake.
-    if (!preserveUntilSwap) publishConversationBootstrap(capturedHost, bootstrap)
+    // Follow 已接受与 bootstrap 相同的 cursor，后续事件已缓冲；此时即可原子替换
+    // 旧会话，不必让用户继续等实时连接握手与 Extension UI 恢复。
+    if (preserveCurrent && !await extensionUi.clear()) return false
+    publishConversationBootstrap(capturedHost, bootstrap)
     await connected
     if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
     if (!await extensionUi.bootstrap(capturedHost, subscriptionId, bootstrap)) return false
     if (!conversationSwapIsCorrelated(capturedHost, instanceId, bootstrap, true)) return false
 
     const bufferedFollowStatus: FollowConnectionStatus | undefined = followActivation.activate(subscriptionId)
-    if (preserveUntilSwap) publishConversationBootstrap(capturedHost, bootstrap)
     activeFollow.value = { ...capturedHost, instanceId, subscriptionId }
     followConnected.value = true
     conversationError.value = null
@@ -2318,15 +2370,62 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
   }
 }
 
+async function hydrateRecentConversation(context: HostContext, state: ConversationBootstrap, loadEpoch: number) {
+  if (!isTauri) return
+  const epoch = ++historyLoadEpoch
+  historyHydrating.value = true
+  try {
+    const page = await loadConversationHistory(
+      state.instance.id,
+      undefined,
+      state.cursor.hostEpoch,
+      state.cursor.runtimeGeneration,
+      context,
+    )
+    if (!app.contextMatches(context)
+      || epoch !== historyLoadEpoch
+      || loadEpoch !== conversationLoadEpoch
+      || conversationState.value !== state
+      || selected.value?.id !== state.instance.id) return
+    if (page.hostEpoch !== state.cursor.hostEpoch
+      || page.instance.id !== state.instance.id
+      || page.instance.runtimeGeneration !== state.cursor.runtimeGeneration) {
+      void loadSelectedConversation(state.instance.id, true)
+      return
+    }
+    const anchor = captureOutputAnchor()
+    const stickToBottom = !!anchor && outputIsNearBottom(anchor.surface.scrollHeight, anchor.surface.scrollTop, anchor.surface.clientHeight)
+    const currentIds = new Set(state.records.map((record) => record.entryId))
+    state.records = page.records.some((record) => currentIds.has(record.entryId))
+      ? mergeHydratedConversationRecords(state.records, page.records)
+      : page.records
+    conversationHistoryRevision.value = page.revision
+    historyCursor.value = page.nextCursor ?? null
+    historyTruncated.value = page.hasEarlier
+    historyError.value = null
+    applyConversationProjection(state)
+    await restoreOutputAnchor(anchor, stickToBottom)
+  } catch (cause) {
+    if (epoch === historyLoadEpoch && loadEpoch === conversationLoadEpoch && conversationState.value === state) {
+      historyError.value = '部分对话内容暂时没有载入，请稍后重试。'
+    }
+  } finally {
+    if (epoch === historyLoadEpoch && conversationState.value === state) historyHydrating.value = false
+  }
+}
+
 function publishConversationBootstrap(context: HostContext, bootstrap: ConversationBootstrap) {
   app.applyWorkSnapshot(bootstrap.instance, context)
   syncImageDomain(context, bootstrap.instance.id, bootstrap.cursor.hostEpoch, bootstrap.cursor.runtimeGeneration)
+  conversationHistoryRevision.value = null
+  historyCursor.value = null
+  historyHydrating.value = isTauri
   conversationState.value = bootstrap
   applyConversationProjection(bootstrap)
   scrollOutputToBottom(true)
   historyTruncated.value = bootstrap.historyTruncated
-  historyBeforeEntryId.value = bootstrap.historyBeforeEntryId ?? null
   historyError.value = null
+  void hydrateRecentConversation(context, bootstrap, conversationLoadEpoch)
 }
 
 async function refreshCurrent() {
@@ -2343,30 +2442,33 @@ async function reconcileExtensionInteraction(): Promise<boolean> {
   return loadSelectedConversation(work.id, true)
 }
 
+function retryConversationHydration() {
+  const state = conversationState.value
+  if (!state || selected.value?.id !== state.instance.id || historyHydrating.value) return
+  try {
+    void hydrateRecentConversation(requireHostContext(app), state, conversationLoadEpoch)
+  } catch {
+    historyError.value = '部分对话内容暂时没有载入，请稍后重试。'
+  }
+}
+
 async function loadEarlierHistory() {
   const state = conversationState.value
-  const beforeEntryId = historyBeforeEntryId.value
+  const cursor = historyCursor.value
   const work = selected.value
-  const surface = output.value
-  if (!state || !beforeEntryId || !work || historyLoading.value) return
+  if (!state || !cursor || !work || historyLoading.value) return
   const epoch = ++historyLoadEpoch
   const loadEpoch = conversationLoadEpoch
-  const beforeHeight = surface?.scrollHeight ?? 0
-  const beforeTop = surface?.scrollTop ?? 0
-  const surfaceTop = surface?.getBoundingClientRect().top ?? 0
-  const anchor = surface ? [...surface.querySelectorAll<HTMLElement>('[data-conversation-id]')].find((element) => element.getBoundingClientRect().bottom >= surfaceTop) : undefined
-  const anchorId = anchor?.dataset.conversationId
-  const anchorOffset = anchor ? anchor.getBoundingClientRect().top - surfaceTop : null
+  const anchor = captureOutputAnchor()
   historyLoading.value = true
   historyError.value = null
   try {
     const capturedHost = requireHostContext(app)
     const page = await loadConversationHistory(
       work.id,
-      beforeEntryId,
+      cursor,
       state.cursor.hostEpoch,
       state.cursor.runtimeGeneration,
-      state.historyRevision,
       capturedHost,
     )
     if (!app.contextMatches(capturedHost)) return
@@ -2374,25 +2476,17 @@ async function loadEarlierHistory() {
     if (page.hostEpoch !== state.cursor.hostEpoch
       || page.instance.id !== state.instance.id
       || page.instance.runtimeGeneration !== state.cursor.runtimeGeneration
-      || page.historyRevision !== state.historyRevision) {
+      || page.revision !== conversationHistoryRevision.value) {
       void loadSelectedConversation(work.id, true)
       return
     }
     const existing = new Set(state.records.map((record) => record.entryId))
-    if (page.records.some((record) => existing.has(record.entryId))) {
-      void loadSelectedConversation(work.id, true)
-      return
-    }
-    state.records = [...page.records, ...state.records]
-    historyBeforeEntryId.value = page.nextBeforeEntryId ?? null
+    const earlier = page.records.filter((record) => !existing.has(record.entryId))
+    state.records = [...earlier, ...mergeHydratedConversationRecords(state.records, page.records)]
+    historyCursor.value = page.nextCursor ?? null
     historyTruncated.value = page.hasEarlier
     applyConversationProjection(state)
-    await nextTick()
-    if (surface) {
-      const nextAnchor = anchorId ? [...surface.querySelectorAll<HTMLElement>('[data-conversation-id]')].find((element) => element.dataset.conversationId === anchorId) : undefined
-      if (nextAnchor && anchorOffset != null) surface.scrollTop += (nextAnchor.getBoundingClientRect().top - surface.getBoundingClientRect().top) - anchorOffset
-      else surface.scrollTop = beforeTop + (surface.scrollHeight - beforeHeight)
-    }
+    await restoreOutputAnchor(anchor, false)
   } catch (cause) {
     if (epoch === historyLoadEpoch) {
       const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code) : ''
@@ -2798,6 +2892,7 @@ function handleOutputClick(event: MouseEvent) {
         <span>{{ conversationError ? `连接恢复失败：${conversationError}` : '连接已中断；当前对话已保留，正在重试…' }}</span>
         <button :disabled="conversationLoading" @click="loadSelectedConversation(selected.id, true)"><RefreshCw :size="13" />{{ conversationLoading ? '恢复中' : '重试' }}</button>
       </div>
+      <div v-if="conversationSwitching && selected" class="alu-conversation-switching" role="status">正在打开 {{ selected.displayName }}…</div>
 
       <div v-if="app.loading" class="center-state" aria-live="polite">
         <span class="alu-spinner" />
@@ -2895,10 +2990,12 @@ function handleOutputClick(event: MouseEvent) {
       </div>
 
       <template v-else-if="conversation.length">
-        <div class="conversation-flow" role="log" aria-live="polite" aria-relevant="additions text">
-          <div v-if="historyTruncated || historyError" class="history-loader">
-            <button v-if="historyTruncated" :disabled="historyLoading || !historyBeforeEntryId" @click="loadEarlierHistory"><RefreshCw :size="14" :class="{ spinning: historyLoading }" />{{ historyLoading ? '加载中…' : historyError ? '重新加载更早记录' : '加载更早记录' }}</button>
-            <span v-if="historyError">{{ historyError }}</span>
+        <div class="conversation-flow" :class="{ 'is-switching': conversationSwitching }" role="log" aria-live="polite" aria-relevant="additions text">
+          <div v-if="historyHydrating || historyTruncated || historyError" class="history-loader">
+            <button v-if="historyTruncated" :disabled="historyLoading || historyHydrating || !historyCursor" @click="loadEarlierHistory"><RefreshCw :size="14" :class="{ spinning: historyLoading }" />{{ historyLoading ? '加载中…' : '加载更早记录' }}</button>
+            <button v-else-if="historyError && !historyHydrating" @click="retryConversationHydration"><RefreshCw :size="14" />重新读取完整内容</button>
+            <span v-if="historyHydrating">正在载入图片与较长内容…</span>
+            <span v-else-if="historyError">{{ historyError }}</span>
           </div>
           <template v-for="row in conversationRows" :key="row.id">
             <article v-if="row.kind === 'user'" class="msg-user" :data-conversation-id="row.id" :aria-label="`你的消息 ${row.time}`">

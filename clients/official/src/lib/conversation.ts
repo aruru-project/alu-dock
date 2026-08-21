@@ -26,6 +26,11 @@ export interface ConversationProjectionOptions {
   compact?: boolean
 }
 
+export function mergeHydratedConversationRecords(previews: ConversationRecord[], completed: ConversationRecord[]) {
+  const replacements = new Map(completed.map((record) => [record.entryId, record]))
+  return previews.map((record) => replacements.get(record.entryId) ?? record)
+}
+
 /* ── 流式增量补丁 ─────────────────────────────────────
  * message.delta 一次运行可以产生上千个事件。它们全部堆在 activeEvents 里，
  * 每个事件都触发整段会话重投影（重放全部 activeEvents）会让成本随流式长度平方膨胀。
@@ -465,6 +470,7 @@ function ensureContentImage(
       groupId,
       imageKey,
       mimeType: block.mimeType,
+      fileId: block.fileId,
       source: contentRef
         ? { type: 'conversation', contentRef, mimeType: block.mimeType }
         : data

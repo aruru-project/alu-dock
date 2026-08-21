@@ -21,7 +21,7 @@ use aludock_client_core::InstanceExecution;
 use aludock_client_core::{MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_MESSAGE};
 use aludock_client_core::{
     AttachmentDto, AttachmentUploadCancellation, AttachmentUploadPhase, AttachmentUploadResult,
-    ClientError, CommandInfo, CommandsResult, ConnectionKind, ConnectionPolicy,
+    ClientError, CommandInfo, CommandsResult, CompleteConversationPage, ConnectionKind, ConnectionPolicy,
     ControllerEventData, DeliverableDownloadProgress, DeliverableDto, DeliveryMode, DiagnosticInfo,
     DockClient, Endpoint, EndpointState, EndpointTestResult, EventCursor, ExtensionControllerLease,
     ExtensionEvent, HistoryRecord, HostConnectionProfile, HostRegistry, HostRegistrySnapshot,
@@ -29,7 +29,7 @@ use aludock_client_core::{
     InteractionMethod, InteractionRequest, InteractionResponse, ModelsResult, NavigateOptions,
     PairingProgress, PendingMessage, ProjectTrustDecision, PublishedFileDto, QueueDequeueResult,
     ReadReplay, ResourceInfo, ResourcesResult, SessionCompactionResult, SessionForkResult,
-    SessionHistoryPage, SessionNameResult, SessionNavigateResult, SessionReloadResult,
+    SessionNameResult, SessionNavigateResult, SessionReloadResult,
     SessionReplacementResult, SessionScope, SessionTree, SettingUpdate, SettingUpdateResult,
     SettingsResult, SourceInfo, StopResult, SubmitResult, ThinkingLevel, ToolInfo, ToolsResult,
     WorkspacePage, delete_endpoint, host_info_for_profile, probe_host_endpoint,
@@ -143,17 +143,6 @@ struct ConversationBootstrap {
     history_revision: u64,
     history_truncated: bool,
     history_before_entry_id: Option<String>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EarlierConversationPage {
-    records: Vec<HistoryRecord>,
-    history_revision: u64,
-    has_earlier: bool,
-    next_before_entry_id: Option<String>,
-    instance: InstanceSnapshot,
-    host_epoch: String,
 }
 
 #[derive(Serialize)]
@@ -2037,34 +2026,24 @@ async fn conversation_history(
     host_id: String,
     selection_generation: u64,
     instance_id: String,
-    before_entry_id: String,
+    cursor: Option<String>,
     expected_host_epoch: String,
     expected_runtime_generation: u64,
-    expected_history_revision: u64,
-) -> Result<EarlierConversationPage, CommandError> {
+) -> Result<CompleteConversationPage, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let (page, host_epoch): (SessionHistoryPage, String) = dock_client(&store)?
-        .session_history(&instance_id, Some(&before_entry_id), 50)
+    let page = dock_client(&store)?
+        .complete_conversation_page(&instance_id, cursor.as_deref(), 50)
         .await
         .map_err(CommandError::from)?;
-    if host_epoch != expected_host_epoch
+    if page.host_epoch != expected_host_epoch
         || page.instance.owner_host_epoch.as_deref() != Some(expected_host_epoch.as_str())
         || page.instance.runtime_generation != expected_runtime_generation
-        || page.history_revision != expected_history_revision
     {
         return Err(CommandError::from(ClientError::Protocol(
-            "conversation history changed; refresh the current Work before loading older records"
-                .into(),
+            "conversation history changed; refresh the current Work before loading records".into(),
         )));
     }
-    Ok(EarlierConversationPage {
-        records: page.entries,
-        history_revision: page.history_revision,
-        has_earlier: page.has_earlier,
-        next_before_entry_id: page.next_before_entry_id,
-        instance: page.instance,
-        host_epoch,
-    })
+    Ok(page)
 }
 
 #[tauri::command]

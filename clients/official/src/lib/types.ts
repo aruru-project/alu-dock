@@ -288,9 +288,9 @@ export interface ConversationBootstrap {
 
 export interface ConversationHistoryPage {
   records: ConversationRecord[]
-  historyRevision: number
+  revision: string
   hasEarlier: boolean
-  nextBeforeEntryId?: string
+  nextCursor?: string
   instance: Work
   hostEpoch: string
 }
@@ -438,7 +438,7 @@ export type ConversationProcessItem =
   | { id: string; kind: 'assistant'; groupId: string; text: string; time: string; groupTime?: string }
   | { id: string; kind: 'thinking'; groupId: string; title: string; text: string; open?: boolean; groupTime?: string }
   | { id: string; kind: 'tool'; groupId: string; name: string; summary: string; status: 'running' | 'done' | 'error'; detail?: string; groupTime?: string }
-  | { id: string; kind: 'image'; groupId: string; imageKey: string; mimeType: string; name?: string; sizeBytes?: number; source?: ConversationImageSource; groupTime?: string }
+  | { id: string; kind: 'image'; groupId: string; imageKey: string; mimeType: string; fileId?: string; name?: string; sizeBytes?: number; source?: ConversationImageSource; groupTime?: string }
   | { id: string; kind: 'notice'; groupId?: string; tone: 'info' | 'warning' | 'error'; text: string; groupTime?: string }
 
 export type ConversationItem =
