@@ -24,7 +24,8 @@ use aludock_client_core::InstanceExecution;
 use aludock_client_core::{MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_MESSAGE};
 use aludock_client_core::{
     AttachmentDto, AttachmentUploadCancellation, AttachmentUploadPhase, AttachmentUploadResult,
-    ClientError, CommandInfo, CommandsResult, CompleteConversationPage, ConnectionKind, ConnectionPolicy,
+    ClientError, CommandArgumentCompletion, CommandCompletionItems, CommandCompletionsResult,
+    CommandContentResult, CommandInfo, CommandReference, CommandsResult, CompleteConversationPage, ConnectionKind, ConnectionPolicy,
     ControllerEventData, DeliverableDownloadProgress, DeliverableDto, DeliveryMode, DiagnosticInfo,
     DockClient, Endpoint, EndpointState, EndpointTestResult, EventCursor, ExtensionControllerLease,
     ExtensionEvent, HistoryRecord, HostConnectionProfile, HostRegistry, HostRegistrySnapshot,
@@ -441,10 +442,13 @@ struct SafeSource {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SafeCommand {
+    reference_id: String,
     name: String,
     description: Option<String>,
     source: SafeSource,
+    argument_hint: Option<String>,
     argument_completions: bool,
+    content_available: bool,
 }
 
 #[derive(Serialize)]
@@ -452,6 +456,81 @@ struct SafeCommandsResult {
     commands: Vec<SafeCommand>,
     total: u64,
     truncated: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SafeCommandContentResult {
+    reference_id: String,
+    available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    complete: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SafeCommandCompletionsResult {
+    reference_id: String,
+    items: Option<Vec<CommandArgumentCompletion>>,
+    total: u64,
+    truncated: bool,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct CommandReferenceScope {
+    host_id: String,
+    selection_generation: u64,
+    instance_id: String,
+}
+
+#[derive(Default)]
+struct CommandReferenceEntries {
+    generations: HashMap<CommandReferenceScope, u64>,
+    scopes: HashMap<CommandReferenceScope, HashMap<String, CommandReference>>,
+}
+
+#[derive(Default)]
+struct CommandReferenceState {
+    inner: Mutex<CommandReferenceEntries>,
+}
+
+impl CommandReferenceState {
+    fn begin(&self, scope: &CommandReferenceScope) -> u64 {
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.generations.retain(|candidate, _| candidate.host_id != scope.host_id || candidate.selection_generation == scope.selection_generation);
+        inner.scopes.retain(|candidate, _| candidate.host_id != scope.host_id || candidate.selection_generation == scope.selection_generation);
+        let generation = inner.generations.get(scope).copied().unwrap_or(0).saturating_add(1);
+        inner.generations.insert(scope.clone(), generation);
+        generation
+    }
+
+    fn replace(&self, scope: CommandReferenceScope, generation: u64, references: HashMap<String, CommandReference>) -> bool {
+        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if inner.generations.get(&scope) != Some(&generation) {
+            return false;
+        }
+        inner.scopes.insert(scope, references);
+        true
+    }
+
+    fn resolve(&self, scope: &CommandReferenceScope, reference_id: &str) -> Result<CommandReference, CommandError> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .scopes
+            .get(scope)
+            .and_then(|references| references.get(reference_id))
+            .cloned()
+            .ok_or_else(command_reference_expired)
+    }
 }
 
 #[derive(Serialize)]
@@ -1158,6 +1237,16 @@ fn lifecycle_error() -> CommandError {
     CommandError {
         code: "host_lifecycle_unavailable".into(),
         message: "Host 切换状态暂时不可用。".into(),
+        details: None,
+        outcome_unknown: false,
+        operation_id: None,
+    }
+}
+
+fn command_reference_expired() -> CommandError {
+    CommandError {
+        code: "command_reference_expired".into(),
+        message: "命令目录已经更新，请重新选择这条命令。".into(),
         details: None,
         outcome_unknown: false,
         operation_id: None,
@@ -4387,17 +4476,73 @@ async fn stop_work(
 #[tauri::command]
 async fn command_catalog(
     runtime: tauri::State<'_, HostRuntimeState>,
+    references: tauri::State<'_, CommandReferenceState>,
     host_id: String,
     selection_generation: u64,
     instance_id: String,
 ) -> Result<SafeCommandsResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
     let client = dock_client(&store)?;
-    client
-        .commands(&instance_id, None)
+    let scope = CommandReferenceScope { host_id, selection_generation, instance_id };
+    let reference_generation = references.begin(&scope);
+    let result = client.commands(&scope.instance_id, None).await.map_err(CommandError::from)?;
+    project_commands(result, &references, scope, reference_generation)
+}
+
+#[tauri::command]
+async fn command_content(
+    runtime: tauri::State<'_, HostRuntimeState>,
+    references: tauri::State<'_, CommandReferenceState>,
+    host_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    reference_id: String,
+    cursor: Option<String>,
+) -> Result<SafeCommandContentResult, CommandError> {
+    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let scope = CommandReferenceScope { host_id, selection_generation, instance_id: instance_id.clone() };
+    let command = references.resolve(&scope, &reference_id)?;
+    let result: CommandContentResult = dock_client(&store)?
+        .command_content(&instance_id, &command, cursor.as_deref())
         .await
-        .map(project_commands)
-        .map_err(CommandError::from)
+        .map_err(CommandError::from)?;
+    Ok(SafeCommandContentResult {
+        reference_id,
+        available: result.available,
+        format: result.format,
+        revision: result.revision,
+        text: result.text,
+        complete: result.complete,
+        next_cursor: result.next_cursor,
+    })
+}
+
+#[tauri::command]
+async fn command_completions(
+    runtime: tauri::State<'_, HostRuntimeState>,
+    references: tauri::State<'_, CommandReferenceState>,
+    host_id: String,
+    selection_generation: u64,
+    instance_id: String,
+    reference_id: String,
+    argument_prefix: String,
+) -> Result<SafeCommandCompletionsResult, CommandError> {
+    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let scope = CommandReferenceScope { host_id, selection_generation, instance_id: instance_id.clone() };
+    let command = references.resolve(&scope, &reference_id)?;
+    let result: CommandCompletionsResult = dock_client(&store)?
+        .command_completions(&instance_id, &command, &argument_prefix)
+        .await
+        .map_err(CommandError::from)?;
+    Ok(SafeCommandCompletionsResult {
+        reference_id,
+        items: match result.items {
+            CommandCompletionItems::Available(items) => Some(items),
+            CommandCompletionItems::Unavailable(()) => None,
+        },
+        total: result.total,
+        truncated: result.truncated,
+    })
 }
 
 #[tauri::command]
@@ -4577,21 +4722,34 @@ fn project_source(source: SourceInfo) -> SafeSource {
     }
 }
 
-fn project_commands(result: CommandsResult) -> SafeCommandsResult {
-    SafeCommandsResult {
-        commands: result
-            .commands
-            .into_iter()
-            .map(|command: CommandInfo| SafeCommand {
-                name: command.name,
-                description: command.description,
-                source: project_source(command.source),
-                argument_completions: command.argument_completions,
-            })
-            .collect(),
+fn project_commands(
+    result: CommandsResult,
+    state: &CommandReferenceState,
+    scope: CommandReferenceScope,
+    reference_generation: u64,
+) -> Result<SafeCommandsResult, CommandError> {
+    let mut references = HashMap::new();
+    let commands = result.commands.into_iter().map(|command: CommandInfo| {
+        let reference_id = uuid::Uuid::new_v4().to_string();
+        references.insert(reference_id.clone(), CommandReference::from(&command));
+        SafeCommand {
+            reference_id,
+            name: command.name,
+            description: command.description,
+            source: project_source(command.source),
+            argument_hint: command.argument_hint,
+            argument_completions: command.argument_completions,
+            content_available: command.content_available == Some(true),
+        }
+    }).collect();
+    if !state.replace(scope, reference_generation, references) {
+        return Err(command_reference_expired());
+    }
+    Ok(SafeCommandsResult {
+        commands,
         total: result.total,
         truncated: result.truncated,
-    }
+    })
 }
 
 fn project_tools(result: ToolsResult) -> SafeToolsResult {
@@ -5597,6 +5755,7 @@ pub fn run() {
         .manage(SessionTokenState::default())
         .manage(AttachmentState::default())
         .manage(RestoredImageState::default())
+        .manage(CommandReferenceState::default())
         .invoke_handler(tauri::generate_handler![
             system_device_name,
             get_host_catalog,
@@ -5634,6 +5793,8 @@ pub fn run() {
             abort_run,
             stop_work,
             command_catalog,
+            command_content,
+            command_completions,
             run_catalog_command,
             list_models,
             set_model,
@@ -5676,6 +5837,50 @@ mod tests {
     use std::fs;
 
     use super::*;
+
+    #[test]
+    fn command_projection_keeps_owner_path_behind_an_opaque_reference() {
+        let state = CommandReferenceState::default();
+        let scope = CommandReferenceScope {
+            host_id: "host-1".into(),
+            selection_generation: 7,
+            instance_id: "work-1".into(),
+        };
+        let reference_generation = state.begin(&scope);
+        let projected = project_commands(CommandsResult {
+            commands: vec![CommandInfo {
+                name: "idea".into(),
+                description: Some("Generate ideas".into()),
+                source: SourceInfo {
+                    kind: aludock_client_core::SourceKind::Prompt,
+                    path: Some("/worker/private/prompts/idea.md".into()),
+                    package: None,
+                },
+                argument_hint: Some("[topic]".into()),
+                argument_completions: false,
+                content_available: Some(true),
+            }],
+            total: 1,
+            truncated: false,
+        }, &state, scope.clone(), reference_generation).expect("project current command catalog");
+
+        let json = serde_json::to_string(&projected).expect("serialize projected commands");
+        assert!(!json.contains("/worker/private"));
+        assert!(json.contains("referenceId"));
+        let reference_id = &projected.commands[0].reference_id;
+        let resolved = state.resolve(&scope, reference_id).expect("resolve opaque reference");
+        assert_eq!(resolved.name, "idea");
+        assert_eq!(resolved.source.path.as_deref(), Some("/worker/private/prompts/idea.md"));
+
+        let stale_generation = state.begin(&scope);
+        let _current_generation = state.begin(&scope);
+        let stale = project_commands(CommandsResult {
+            commands: Vec::new(),
+            total: 0,
+            truncated: false,
+        }, &state, scope, stale_generation);
+        assert!(stale.is_err(), "a superseded catalog must not return unresolved references");
+    }
 
     #[test]
     fn only_a_complete_staged_download_replaces_the_saved_file() {

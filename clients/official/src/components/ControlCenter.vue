@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { Brain, ChevronRight, Cpu, GitFork, History, Info, LayoutList, Pencil, Plus, RotateCw, Search, Settings, Square, Undo2, Wrench, Zap } from '@lucide/vue'
 import {
+  getCommandCompletions,
+  getCommandContent,
   getResources,
   getSettings,
   listModels,
@@ -15,12 +17,14 @@ import {
 import { currentHostCall, requireHostContext } from '../lib/hostResult'
 import { userErrorMessage as errorMessage } from '../lib/userError'
 import { catalogSourceLabel, commandGoesToComposer, filterCatalogCommands, filterCommandPaletteItems } from '../lib/commandSuggest'
+import { localControlCommands, type ControlSection, type LocalControlCommand } from '../lib/localCommands'
 import { workPresence } from '../lib/uiBoundaries'
 import SessionManager from './SessionManager.vue'
 import { useAppStore } from '../stores/app'
 import { useCommandCatalogStore } from '../stores/command-catalog'
 import { useCommandConsoleStore } from '../stores/command-console'
 import type {
+  CommandArgumentCompletion,
   CommandInfo,
   ModelInfo,
   ModelsResult,
@@ -36,7 +40,6 @@ import type {
   Work,
 } from '../lib/types'
 
-export type ControlSection = 'commands' | 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session' | 'models' | 'thinking' | 'tools' | 'resources' | 'settings'
 export type ControlMutationDomain = 'conversation' | 'sessions' | 'tree' | 'models' | 'tools' | 'settings'
 
 const props = defineProps<{ work: Work; section: ControlSection; preview: boolean; outcomeUnknown: boolean; unknownDomain?: ControlMutationDomain; hasDraft: boolean; compactionPending: boolean }>()
@@ -61,22 +64,23 @@ const emit = defineEmits<{
 
 const sessionManager = ref<InstanceType<typeof SessionManager> | null>(null)
 
-const staticCommands = [
-  { id: 'session_new', icon: Plus, label: 'New Session', keywords: '新建会话 work', description: '开始一段全新的上下文', section: 'new-session' },
-  { id: 'stop', icon: Square, label: 'Stop Work', keywords: '停止工作 instance', description: '停止整个 Work；执行前需要确认', action: 'stop' },
-  { id: 'resume', icon: History, label: 'Resume Session', keywords: '恢复会话 pi session', description: '从保存的 Session 继续', section: 'sessions' },
-  { id: 'tree', icon: GitFork, label: 'Session Tree', keywords: '会话树 navigate fork clone', description: '浏览、切换或分叉当前会话树', section: 'tree' },
-  { id: 'model', icon: Cpu, label: 'Set Model', keywords: '切换模型', description: '切换当前模型', section: 'models' },
-  { id: 'thinking', icon: Brain, label: 'Set Thinking', keywords: '思考等级', description: '调整思考等级', section: 'thinking' },
-  { id: 'name', icon: Pencil, label: 'Rename Session', keywords: '重命名会话', description: '修改当前 Session 名称', section: 'rename-session' },
-  { id: 'compact', icon: Zap, label: 'Compact Context', keywords: '压缩上下文', description: '手动压缩当前上下文', section: 'compact-session' },
-  { id: 'reload', icon: RotateCw, label: 'Reload Session', keywords: '重新加载 resources', description: '重新载入 Pi 资源与 Session', section: 'reload-session' },
-  { id: 'dequeue', icon: Undo2, label: 'Restore Queue', keywords: '取回排队消息', description: '把尚未执行的消息取回输入框', action: 'restoreQueue' },
-  { id: 'tools', icon: Wrench, label: 'Active Tools', keywords: '启用工具', description: '查看或切换可用工具', section: 'tools' },
-  { id: 'settings', icon: Settings, label: 'Settings', keywords: '设置', description: '查看或修改 Pi 设置', section: 'settings' },
-  { id: 'state', icon: Info, label: 'Project Status', keywords: '当前状态 git branch', description: '查看 Work、Git、Session 与已加载能力', section: 'resources' },
-  { id: 'resources', icon: LayoutList, label: 'Loaded Resources', keywords: '资源 diagnostics skill context', description: '打开 Project Status 的资源与诊断', section: 'resources' },
-] as const
+const localControlIcons = {
+  session_new: Plus,
+  stop: Square,
+  resume: History,
+  tree: GitFork,
+  model: Cpu,
+  thinking: Brain,
+  name: Pencil,
+  compact: Zap,
+  reload: RotateCw,
+  dequeue: Undo2,
+  tools: Wrench,
+  settings: Settings,
+  state: Info,
+  resources: LayoutList,
+} as const
+const staticCommands = localControlCommands.map((command) => ({ ...command, icon: localControlIcons[command.id as keyof typeof localControlIcons] }))
 
 const commandSearch = ref('')
 const modelSearch = ref('')
@@ -85,9 +89,17 @@ const resourceSearch = ref('')
 const settingsSearch = ref('')
 const selectedSettingKey = ref<SettingKey | ''>('')
 const settingDraft = ref('')
-const selectedCommandName = ref('')
-const commandRunnerOpen = ref(false)
+const selectedCommandReferenceId = ref('')
+const commandDetailMode = ref<'runner' | 'content' | ''>('')
 const commandArguments = ref('')
+const argumentCompletions = ref<CommandArgumentCompletion[]>([])
+const argumentCompletionsLoading = ref(false)
+const commandContentText = ref('')
+const commandContentLoading = ref(false)
+let commandCompletionTimer = 0
+let commandCompletionEpoch = 0
+let commandContentEpoch = 0
+const MAX_VISIBLE_COMMAND_CONTENT_CHARS = 4_000_000
 const commandSelectedIndex = ref(0)
 const commandSearchInput = ref<HTMLInputElement | null>(null)
 const commandArgsInput = ref<HTMLInputElement | null>(null)
@@ -100,11 +112,14 @@ const pending = ref('')
 const error = ref('')
 let loadEpoch = 0
 
-const selectedCommand = computed(() => catalog.commands.find((item) => item.name === selectedCommandName.value) ?? null)
+const selectedCommand = computed(() => catalog.commands.find((item) => item.referenceId === selectedCommandReferenceId.value) ?? null)
 const selectedSetting = computed(() => settings.value?.settings.find((item) => item.key === selectedSettingKey.value) ?? null)
 const sessionMode = computed(() => props.section as 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session')
 const filteredStaticCommands = computed(() => filterCommandPaletteItems(staticCommands, commandSearch.value))
-const catalogCommands = computed(() => catalog.commands.filter((item) => !['stop', 'resume', 'tree'].includes(item.name)))
+const catalogCommands = computed(() => {
+  const localNames = new Set(localControlCommands.map((command) => command.name))
+  return catalog.commands.filter((item) => !localNames.has(item.name))
+})
 const filteredCommands = computed(() => filterCatalogCommands(catalogCommands.value, commandSearch.value))
 const commandSelections = computed(() => [
   ...filteredStaticCommands.value.map((item) => ({ kind: 'static' as const, item })),
@@ -145,6 +160,8 @@ const filteredSettings = computed(() => {
 })
 
 watch(commandSearch, () => { commandSelectedIndex.value = 0 })
+watch([commandArguments, selectedCommand], () => scheduleArgumentCompletions())
+onUnmounted(() => window.clearTimeout(commandCompletionTimer))
 watch(commandSelections, (items) => {
   commandSelectedIndex.value = Math.max(0, Math.min(commandSelectedIndex.value, items.length - 1))
 })
@@ -174,7 +191,10 @@ watch([
   tools.value = null
   resources.value = null
   settings.value = null
-  selectedCommandName.value = ''
+  selectedCommandReferenceId.value = ''
+  commandDetailMode.value = ''
+  argumentCompletions.value = []
+  commandContentText.value = ''
   error.value = ''
   void loadSection(props.section)
 }, { immediate: true })
@@ -211,8 +231,8 @@ function forwardSessionCompact(customInstructions?: string) {
   emit('compact', customInstructions)
 }
 
-function activateStatic(item: typeof staticCommands[number]) {
-  if ('section' in item) emit('section', item.section)
+function activateStatic(item: LocalControlCommand) {
+  if (item.section) emit('section', item.section)
   else if (item.action === 'stop') emit('stop')
   else emit('restoreQueue')
 }
@@ -227,11 +247,11 @@ function activateCommandIndex(index = commandSelectedIndex.value) {
 /** prompt/skill 命令的本质是发一条消息：草稿空着时直接填进输入框交回对话；
  *  草稿有内容时不覆盖用户文本，留在面板走运行表单。extension 命令有独立输出，始终走运行表单。 */
 function activateCatalogCommand(item: CommandInfo) {
-  if (commandGoesToComposer(item) && !props.hasDraft) {
+  if (commandGoesToComposer(item)) {
     emit('prefill', item.name)
     return
   }
-  openCommandRunner(item.name)
+  openCommandRunner(item)
 }
 
 /** 子面板键盘处理：方向键移动游标、Enter 激活当前项。 */
@@ -262,16 +282,102 @@ function handleCommandKeydown(event: KeyboardEvent) {
   }
 }
 
-function openCommandRunner(name: string) {
-  selectedCommandName.value = name
+function openCommandRunner(command: CommandInfo) {
+  selectedCommandReferenceId.value = command.referenceId
   commandArguments.value = ''
-  commandRunnerOpen.value = true
+  argumentCompletions.value = []
+  commandDetailMode.value = 'runner'
   void nextTick(() => commandArgsInput.value?.focus())
 }
 
 function backToCatalog() {
-  commandRunnerOpen.value = false
+  commandCompletionEpoch += 1
+  commandContentEpoch += 1
+  window.clearTimeout(commandCompletionTimer)
+  commandDetailMode.value = ''
+  argumentCompletions.value = []
   void nextTick(() => commandSearchInput.value?.focus())
+}
+
+function scheduleArgumentCompletions() {
+  window.clearTimeout(commandCompletionTimer)
+  const command = selectedCommand.value
+  if (props.preview || commandDetailMode.value !== 'runner' || !command?.argumentCompletions) {
+    commandCompletionEpoch += 1
+    argumentCompletions.value = []
+    argumentCompletionsLoading.value = false
+    return
+  }
+  const prefix = commandArguments.value
+  const epoch = ++commandCompletionEpoch
+  argumentCompletionsLoading.value = true
+  commandCompletionTimer = window.setTimeout(() => void loadArgumentCompletions(command, prefix, epoch), 160)
+}
+
+async function loadArgumentCompletions(command: CommandInfo, prefix: string, epoch: number) {
+  try {
+    const result = await currentHostCall(app, (context) => getCommandCompletions(props.work.id, command.referenceId, prefix, context))
+    if (epoch !== commandCompletionEpoch || selectedCommand.value?.referenceId !== command.referenceId || commandArguments.value !== prefix) return
+    argumentCompletions.value = result.referenceId === command.referenceId ? result.items ?? [] : []
+  } catch (cause) {
+    if (epoch === commandCompletionEpoch) {
+      argumentCompletions.value = []
+      error.value = errorMessage(cause)
+    }
+  } finally {
+    if (epoch === commandCompletionEpoch) argumentCompletionsLoading.value = false
+  }
+}
+
+function chooseArgumentCompletion(item: CommandArgumentCompletion) {
+  commandArguments.value = item.value
+  void nextTick(() => commandArgsInput.value?.focus())
+}
+
+async function openCommandContent(command: CommandInfo) {
+  selectedCommandReferenceId.value = command.referenceId
+  commandDetailMode.value = 'content'
+  commandContentText.value = ''
+  commandContentLoading.value = true
+  error.value = ''
+  const epoch = ++commandContentEpoch
+  try {
+    const context = app.hostContext
+    if (!context) return
+    let cursor: string | undefined
+    let revision = ''
+    const seenCursors = new Set<string>()
+    let pageCount = 0
+    do {
+      pageCount += 1
+      if (pageCount > 128) throw new Error('Prompt 内容过长，当前客户端无法完整显示。')
+      if (cursor) {
+        if (seenCursors.has(cursor)) throw new Error('Prompt 内容没有完整读出，请重新打开。')
+        seenCursors.add(cursor)
+      }
+      const page = await currentHostCall(app, (captured) => getCommandContent(props.work.id, command.referenceId, cursor, captured))
+      if (epoch !== commandContentEpoch || selectedCommand.value?.referenceId !== command.referenceId || commandDetailMode.value !== 'content') return
+      if (page.referenceId !== command.referenceId || !page.available) {
+        error.value = '这条 Prompt 当前没有可读取的内容。'
+        return
+      }
+      if (revision && page.revision !== revision) throw new Error('Prompt 内容已更新，请重新打开。')
+      revision = page.revision
+      if (commandContentText.value.length + page.text.length > MAX_VISIBLE_COMMAND_CONTENT_CHARS) {
+        throw new Error('Prompt 内容过长，当前客户端无法完整显示。')
+      }
+      commandContentText.value += page.text
+      cursor = page.complete ? undefined : page.nextCursor
+      if (page.complete) break
+    } while (cursor)
+  } catch (cause) {
+    if (epoch === commandContentEpoch) {
+      commandContentText.value = ''
+      error.value = errorMessage(cause)
+    }
+  } finally {
+    if (epoch === commandContentEpoch) commandContentLoading.value = false
+  }
 }
 
 async function reconcileDomain(domain: ControlMutationDomain): Promise<boolean> {
@@ -375,6 +481,7 @@ async function runSelectedCommand() {
     const result = await currentHostCall(app, (context) => runCatalogCommand(props.work.id, command.name, commandArguments.value, operationId, context))
     emit('snapshot', result.instance)
     commandConsole.receiveReceipt(operationId, result.receipt)
+    commandArguments.value = ''
   } catch (cause) {
     commandConsole.failOperation(operationId, errorMessage(cause))
     if (cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true) emit('unknown', cause, 'conversation')
@@ -528,7 +635,7 @@ function isCurrentModel(model: ModelInfo) {
     <div v-if="loading === section" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取…</div>
 
     <template v-if="section === 'commands'">
-      <template v-if="!commandRunnerOpen">
+      <template v-if="!commandDetailMode">
         <div class="cmd-palette-search-wrap">
           <span class="cmd-palette-search-icon"><Search :size="15" /></span>
           <input ref="commandSearchInput" v-model="commandSearch" class="cmd-palette-input" placeholder="搜索 WebConsole、Extension、Skill 和 Prompt 命令…" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="cmd-palette-list" :aria-activedescendant="commandSelections.length ? `cmd-opt-${commandSelectedIndex}` : undefined" autofocus @keydown="handleCommandKeydown" />
@@ -543,25 +650,39 @@ function isCurrentModel(model: ModelInfo) {
           </button>
           <template v-if="filteredCommands.length">
             <div class="cmd-palette-group">Pi Commands</div>
-            <button v-for="(item, index) in filteredCommands" :key="`${item.source.kind}:${item.name}`" :id="`cmd-opt-${filteredStaticCommands.length + index}`" class="cmd-palette-item" :class="{ selected: commandSelectedIndex === filteredStaticCommands.length + index }" role="option" :aria-selected="commandSelectedIndex === filteredStaticCommands.length + index" @mouseenter="commandSelectedIndex = filteredStaticCommands.length + index" @click="activateCatalogCommand(item)">
-              <span class="cmd-palette-item-icon"><ChevronRight :size="13" /></span>
-              <span class="cmd-palette-item-copy"><span class="cmd-palette-item-top"><span class="cmd-palette-item-label">/{{ item.name }}</span><span class="cmd-palette-item-hint">{{ catalogSourceLabel(item.source.kind) }}</span></span><span class="cmd-palette-item-desc">{{ item.description || 'Dock 未提供说明' }}</span></span>
-            </button>
+            <div v-for="(item, index) in filteredCommands" :key="item.referenceId" class="cmd-palette-item-row">
+              <button :id="`cmd-opt-${filteredStaticCommands.length + index}`" class="cmd-palette-item" :class="{ selected: commandSelectedIndex === filteredStaticCommands.length + index }" role="option" :aria-selected="commandSelectedIndex === filteredStaticCommands.length + index" @mouseenter="commandSelectedIndex = filteredStaticCommands.length + index" @click="activateCatalogCommand(item)">
+                <span class="cmd-palette-item-icon"><ChevronRight :size="13" /></span>
+                <span class="cmd-palette-item-copy"><span class="cmd-palette-item-top"><span class="cmd-palette-item-label">/{{ item.name }}<span v-if="item.argumentHint" class="cmd-palette-item-argument"> {{ item.argumentHint }}</span></span><span class="cmd-palette-item-hint">{{ catalogSourceLabel(item.source.kind) }}</span></span><span class="cmd-palette-item-desc">{{ item.description || 'Dock 未提供说明' }}</span></span>
+              </button>
+              <button v-if="item.contentAvailable" type="button" class="cmd-palette-content-btn" :aria-label="`查看 /${item.name} 的 Prompt 内容`" @click="openCommandContent(item)">内容</button>
+            </div>
           </template>
           <div v-if="!filteredStaticCommands.length && !filteredCommands.length" class="cmd-palette-empty">{{ catalog.state === 'idle' || catalog.state === 'loading' ? '正在读取命令…' : '无匹配命令' }}</div>
         </div>
         <div class="cmd-palette-footer">{{ commandFooter }}</div>
       </template>
 
-      <template v-else-if="selectedCommand">
+      <template v-else-if="selectedCommand && commandDetailMode === 'runner'">
         <div class="cmd-center-header"><button class="cmd-center-back" aria-label="返回命令列表" :disabled="!!pending || commandConsole.hasActiveOperation" @click="backToCatalog">←</button><div class="cmd-center-identity"><strong>/{{ selectedCommand.name }}</strong><span>{{ catalogSourceLabel(selectedCommand.source.kind) }}</span></div><button class="cmd-palette-close" aria-label="关闭" @click="$emit('close')">×</button></div>
         <div class="cmd-center-description">{{ selectedCommand.description || 'Dock 未提供此命令的说明。' }}</div>
-        <form class="cmd-center-command-form" @submit.prevent="runSelectedCommand"><span class="cmd-center-command-prefix">/{{ selectedCommand.name }}</span><input ref="commandArgsInput" v-model="commandArguments" class="cmd-center-args" placeholder="参数（可留空）" autocomplete="off" spellcheck="false" /><button class="cmd-center-run" :disabled="preview || !!pending || outcomeUnknown || commandConsole.hasActiveOperation">{{ pending || commandConsole.hasActiveOperation ? '运行中…' : '运行' }}</button></form>
+        <form class="cmd-center-command-form" @submit.prevent="runSelectedCommand"><span class="cmd-center-command-prefix">/{{ selectedCommand.name }}</span><input ref="commandArgsInput" v-model="commandArguments" class="cmd-center-args" :placeholder="selectedCommand.argumentHint || '参数（可留空）'" autocomplete="off" spellcheck="false" /><button class="cmd-center-run" :disabled="preview || !!pending || outcomeUnknown || commandConsole.hasActiveOperation">{{ pending || commandConsole.hasActiveOperation ? '运行中…' : '运行' }}</button></form>
+        <div v-if="argumentCompletionsLoading || argumentCompletions.length" class="cmd-center-completions" role="listbox" aria-label="参数候选">
+          <button v-for="(item, index) in argumentCompletions" :key="`${item.value}:${index}`" type="button" class="cmd-center-completion" @click="chooseArgumentCompletion(item)"><strong>{{ item.label }}</strong><span v-if="item.description">{{ item.description }}</span></button>
+          <div v-if="argumentCompletionsLoading && !argumentCompletions.length" class="cmd-center-completion-loading">正在读取参数候选…</div>
+        </div>
         <div class="cmd-center-output" role="log" aria-live="polite">
           <div v-for="entry in commandConsole.entries" :key="entry.id" class="cmd-center-entry" :class="[`cmd-center-entry-${entry.kind}`, entry.level ? `is-${entry.level}` : '']"><span class="cmd-center-entry-marker">{{ entry.kind === 'command' ? '›' : entry.kind === 'status' ? '·' : entry.level === 'error' ? '!' : entry.level === 'warning' ? '△' : '│' }}</span><div class="cmd-center-entry-text">{{ entry.text }}</div></div>
           <div v-if="!commandConsole.entries.length" class="cmd-center-output-empty">命令结果只显示在这里。</div>
         </div>
         <div class="cmd-palette-footer cmd-center-footer">{{ pending || commandConsole.hasActiveOperation ? '命令正在执行，关闭面板后仍继续运行。' : 'Enter 运行 · Esc 关闭' }}</div>
+      </template>
+
+      <template v-else-if="selectedCommand && commandDetailMode === 'content'">
+        <div class="cmd-center-header"><button class="cmd-center-back" aria-label="返回命令列表" @click="backToCatalog">←</button><div class="cmd-center-identity"><strong>/{{ selectedCommand.name }}</strong><span>Prompt 内容</span></div><button class="cmd-palette-close" aria-label="关闭" @click="$emit('close')">×</button></div>
+        <div v-if="commandContentLoading && !commandContentText" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取 Prompt…</div>
+        <pre v-else class="cmd-center-content">{{ commandContentText }}</pre>
+        <div class="cmd-palette-footer cmd-center-footer">内容仅供查看 · 选择命令后仍会回到输入框确认发送</div>
       </template>
     </template>
 

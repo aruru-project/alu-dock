@@ -377,12 +377,25 @@ export interface ModelsResult {
 export type SourceKind = 'built-in' | 'extension' | 'skill' | 'prompt'
 export interface SafeSource { kind: SourceKind; package?: string }
 export interface CommandInfo {
+  referenceId: string
   name: string
   description?: string
   source: SafeSource
+  argumentHint?: string
   argumentCompletions: boolean
+  contentAvailable: boolean
 }
 export interface CommandsResult { commands: CommandInfo[]; total: number; truncated: boolean }
+export type CommandContentResult =
+  | { referenceId: string; available: false }
+  | { referenceId: string; available: true; format: 'markdown'; revision: string; text: string; complete: boolean; nextCursor?: string }
+export interface CommandArgumentCompletion { value: string; label: string; description?: string }
+export interface CommandCompletionsResult {
+  referenceId: string
+  items: CommandArgumentCompletion[] | null
+  total: number
+  truncated: boolean
+}
 export interface ToolInfo { name: string; description: string; active: boolean; source?: SafeSource }
 export interface ToolsResult { tools: ToolInfo[]; instance: Work; total: number; truncated: boolean }
 

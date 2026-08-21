@@ -30,6 +30,7 @@ import {
   downloadDeliverable,
   forgetWork,
   isTauri,
+  getCommandCompletions,
   getSettings,
   getSystemDeviceName,
   listDeliverables,
@@ -95,8 +96,9 @@ import {
   stoppedResultIsCorrelated,
   workPresence,
 } from './lib/uiBoundaries'
-import { applySlashCompletion, catalogSourceLabel, filterCatalogCommands, slashCommandQuery } from './lib/commandSuggest'
-import type { AttachmentDto, AttachmentUploadProgress, ConnectionKind, ConversationBootstrap, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, HostConnectionProfile, HostContext, HostEndpoint, ProjectedEvent, QueueItem, SelectedAttachment, Work, WorkspacePage } from './lib/types'
+import { applySlashArgumentCompletion, applySlashCompletion, catalogSourceLabel, filterCatalogCommands, prefixSlashCommand, slashArgumentContext, slashCommandQuery } from './lib/commandSuggest'
+import { filterLocalControlCommands, localControlCommands, submittedLocalControl, type ControlSection, type LocalControlCommand } from './lib/localCommands'
+import type { AttachmentDto, AttachmentUploadProgress, CommandArgumentCompletion, CommandInfo, ConnectionKind, ConversationBootstrap, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, HostConnectionProfile, HostContext, HostEndpoint, ProjectedEvent, QueueItem, SelectedAttachment, Work, WorkspacePage } from './lib/types'
 import {
   deliveryHistoryKey,
   downloadedDelivery,
@@ -109,7 +111,7 @@ import {
 } from './lib/downloadHistory'
 import AttachmentCard from './components/AttachmentCard.vue'
 import DeliveryTray from './components/DeliveryTray.vue'
-import ControlCenter, { type ControlMutationDomain, type ControlSection } from './components/ControlCenter.vue'
+import ControlCenter, { type ControlMutationDomain } from './components/ControlCenter.vue'
 import ConversationProcessParts from './components/ConversationProcessParts.vue'
 import ExtensionUiSurface from './components/ExtensionUiSurface.vue'
 import ImageZoomSurface from './components/ImageZoomSurface.vue'
@@ -475,20 +477,74 @@ watch(composerExpanded, () => void nextTick(resizeComposer))
  * pi 只展开位于消息最开头的 /command，因此建议仅在整段草稿
  * 就是一个未完成命令 token 时出现；补全后尾部空格进入参数输入。
  */
+type ComposerCommandSuggestion =
+  | { kind: 'local'; name: string; description: string; sourceLabel: string }
+  | { kind: 'catalog'; name: string; description?: string; argumentHint?: string; sourceLabel: string; command: CommandInfo }
+  | { kind: 'argument'; name: string; description?: string; sourceLabel: string; value: string; commandName: string }
+
 const suggestIndex = ref(0)
 const suggestDismissedFor = ref('')
 const slashQuery = computed(() => slashCommandQuery(draft.value))
-const suggestItems = computed(() => slashQuery.value === null ? [] : filterCatalogCommands(commandCatalogStore.commands, slashQuery.value).slice(0, 8))
+const composerArgumentContext = computed(() => slashArgumentContext(draft.value))
+const composerArgumentCommand = computed(() => {
+  const context = composerArgumentContext.value
+  if (!context || localControlCommands.some((command) => command.name === context.name)) return null
+  const matching = commandCatalogStore.commands.filter((command) => command.name === context.name)
+  return matching.length === 1 && matching[0]?.argumentCompletions ? matching[0] : null
+})
+const composerArgumentItems = ref<CommandArgumentCompletion[]>([])
+const composerArgumentLoading = ref(false)
+let composerCompletionTimer = 0
+let composerCompletionEpoch = 0
+
+const commandSuggestItems = computed<ComposerCommandSuggestion[]>(() => {
+  const query = slashQuery.value
+  if (query === null) return []
+  const local = filterLocalControlCommands(query).map((command) => ({
+    kind: 'local' as const,
+    name: command.name,
+    description: command.description,
+    sourceLabel: '客户端操作',
+  }))
+  const localNames = new Set(localControlCommands.map((command) => command.name))
+  const catalog = filterCatalogCommands(commandCatalogStore.commands.filter((command) => !localNames.has(command.name)), query).map((command) => ({
+    kind: 'catalog' as const,
+    name: command.name,
+    description: command.description,
+    argumentHint: command.argumentHint,
+    sourceLabel: catalogSourceLabel(command.source.kind),
+    command,
+  }))
+  return [...local, ...catalog].slice(0, 8)
+})
+const argumentSuggestItems = computed<ComposerCommandSuggestion[]>(() => {
+  const context = composerArgumentContext.value
+  if (!context || !composerArgumentCommand.value) return []
+  return composerArgumentItems.value.slice(0, 8).map((item) => ({
+    kind: 'argument' as const,
+    name: item.label,
+    description: item.description,
+    sourceLabel: '参数',
+    value: item.value,
+    commandName: context.name,
+  }))
+})
+const suggestItems = computed(() => slashQuery.value !== null ? commandSuggestItems.value : argumentSuggestItems.value)
 const suggestOpen = computed(() => !!selected.value
   && selected.value.lifecycle === 'active'
   && !conversationLoading.value
   && !composerExpanded.value
-  && slashQuery.value !== null
+  && (slashQuery.value !== null || composerArgumentLoading.value || argumentSuggestItems.value.length > 0)
   && suggestDismissedFor.value !== draft.value)
 watch(slashQuery, (query) => {
   suggestIndex.value = 0
   if (query !== null) ensureCommandCatalog()
 })
+watch(composerArgumentContext, (context) => {
+  suggestIndex.value = 0
+  if (context) ensureCommandCatalog()
+})
+watch([composerArgumentContext, composerArgumentCommand], () => scheduleComposerArgumentCompletions())
 watch(suggestItems, (items) => {
   suggestIndex.value = Math.max(0, Math.min(suggestIndex.value, items.length - 1))
 })
@@ -506,10 +562,13 @@ function ensureCommandCatalog() {
   }
 }
 
-function completeSuggest(name?: string) {
-  const picked = name ?? suggestItems.value[suggestIndex.value]?.name
+function completeSuggest(item?: ComposerCommandSuggestion) {
+  const picked = item ?? suggestItems.value[suggestIndex.value]
   if (!picked) return
-  draft.value = applySlashCompletion(picked)
+  draft.value = picked.kind === 'argument'
+    ? applySlashArgumentCompletion(picked.commandName, picked.value)
+    : applySlashCompletion(picked.name)
+  if (picked.kind === 'argument') suggestDismissedFor.value = draft.value
   suggestIndex.value = 0
   void nextTick(() => {
     const textarea = composerTextarea.value
@@ -519,10 +578,39 @@ function completeSuggest(name?: string) {
   })
 }
 
+function scheduleComposerArgumentCompletions() {
+  window.clearTimeout(composerCompletionTimer)
+  const context = composerArgumentContext.value
+  const command = composerArgumentCommand.value
+  if (!context || !command) {
+    composerCompletionEpoch += 1
+    composerArgumentItems.value = []
+    composerArgumentLoading.value = false
+    return
+  }
+  const epoch = ++composerCompletionEpoch
+  const prefix = context.prefix
+  composerArgumentLoading.value = true
+  composerCompletionTimer = window.setTimeout(async () => {
+    const work = selected.value
+    if (!work) return
+    try {
+      const result = await currentHostCall(app, (host) => getCommandCompletions(work.id, command.referenceId, prefix, host))
+      const current = composerArgumentContext.value
+      if (epoch !== composerCompletionEpoch || selected.value?.id !== work.id || composerArgumentCommand.value?.referenceId !== command.referenceId || current?.prefix !== prefix) return
+      composerArgumentItems.value = result.referenceId === command.referenceId ? result.items ?? [] : []
+    } catch {
+      if (epoch === composerCompletionEpoch) composerArgumentItems.value = []
+    } finally {
+      if (epoch === composerCompletionEpoch) composerArgumentLoading.value = false
+    }
+  }, 160)
+}
+
 /** 命令面板里选中 prompt/skill 命令：它们本质是发一条消息，填回输入框交回对话。
  *  焦点走 modal 关闭时的 trigger 归位通道，避免和归位逻辑抢时序。 */
 function prefillSlashCommand(name: string) {
-  draft.value = applySlashCompletion(name)
+  draft.value = prefixSlashCommand(name, draft.value)
   modalTrigger = composerTextarea.value
   commandOpen.value = false
   void nextTick(() => {
@@ -707,6 +795,7 @@ onUnmounted(() => {
   window.removeEventListener('popstate', handlePopstate)
   unlisteners.forEach((unlisten) => unlisten())
   window.clearTimeout(reconnectTimer)
+  window.clearTimeout(composerCompletionTimer)
   clearQueueNotice()
   for (const timer of followConnectionTimers.values()) window.clearTimeout(timer)
   followConnectionTimers.clear()
@@ -1625,6 +1714,8 @@ async function submit(): Promise<boolean> {
   const work = selected.value
   const captured = draft.value
   const capturedAttachments = draftAttachments.value.slice(0, MAX_MESSAGE_ATTACHMENTS).map((item) => ({ ...item }))
+  const localCommand = submittedLocalControl(captured)
+  if (localCommand) return executeLocalControl(localCommand, captured)
   if (!work || workMutating.value || (!captured.trim() && !capturedAttachments.length && !restoredImageCount.value) || !isTauri || pairingInProgress.value || clearingRestoredImages.value || submitting.value || queueRestoring.value || attachmentPicking.value || uploadDrafts.value.length > 0) return false
   submitting.value = true
   submissionError.value = null
@@ -1655,6 +1746,27 @@ async function submitExpanded() {
   if (await submit()) composerExpanded.value = false
 }
 
+async function executeLocalControl(command: LocalControlCommand, captured: string): Promise<boolean> {
+  if (!selected.value || selected.value.lifecycle !== 'active' || conversationLoading.value) return false
+  if (command.section) {
+    if (draft.value === captured) draft.value = ''
+    openControlCenter(command.section)
+    return true
+  }
+  if (command.action === 'restoreQueue') {
+    if (draft.value === captured) draft.value = ''
+    const restored = await restoreQueue()
+    if (!restored && !draft.value) draft.value = captured
+    return restored
+  }
+  if (command.action === 'stop') {
+    const stopped = await stopSelectedWork()
+    if (stopped && draft.value === captured) draft.value = ''
+    return stopped
+  }
+  return false
+}
+
 async function abortCurrentRun() {
   const work = selected.value
   if (!work || work.execution !== 'running' || aborting.value || workMutating.value) return
@@ -1683,17 +1795,17 @@ async function abortCurrentRun() {
   }
 }
 
-async function stopSelectedWork() {
+async function stopSelectedWork(): Promise<boolean> {
   const work = selected.value
   const capturedHost = app.hostContext
-  if (!isTauri || contextTransitionBusy.value || !capturedHost || !stopCanStart(work, workMutating.value, mutationOutcomeUnknown.value) || !work) return
-  if (!await askConfirm('停止当前工作？', stopConfirmationText(work))) return
-  if (!app.contextMatches(capturedHost) || selected.value?.id !== work.id || selected.value.lifecycle !== 'active') return
+  if (!isTauri || contextTransitionBusy.value || !capturedHost || !stopCanStart(work, workMutating.value, mutationOutcomeUnknown.value) || !work) return false
+  if (!await askConfirm('停止当前工作？', stopConfirmationText(work))) return false
+  if (!app.contextMatches(capturedHost) || selected.value?.id !== work.id || selected.value.lifecycle !== 'active') return false
   workMutating.value = true
   submissionError.value = null
   try {
     const result = await stopWork(work.id, capturedHost)
-    if (!app.contextMatches(capturedHost)) return
+    if (!app.contextMatches(capturedHost)) return false
     if (!stoppedResultIsCorrelated(result, work.id)) throw { outcomeUnknown: true, message: '停止结果没有证明对应 Work 已停止。' }
     app.applyWorkSnapshot(result.instance, capturedHost)
     if (selected.value?.id === work.id) {
@@ -1712,9 +1824,11 @@ async function stopSelectedWork() {
     submissionError.value = cleanupErrors.length
       ? 'Work 已停止，但部分清理工作没有完成。刷新后可以确认当前状态。'
       : null
+    return true
   } catch (cause) {
     markUnknownOutcome(cause, 'work', work.id)
     submissionError.value = errorMessage(cause)
+    return false
   } finally {
     workMutating.value = false
   }
@@ -3116,12 +3230,13 @@ function handleOutputClick(event: MouseEvent) {
         </div>
         <form class="alu-input-wrap" @submit.prevent="submit">
           <div v-if="suggestOpen" class="cmd-suggest" role="listbox" aria-label="命令建议">
-            <button v-for="(item, index) in suggestItems" :key="`${item.source.kind}:${item.name}`" :id="`cmd-suggest-${index}`" type="button" class="cmd-suggest-item" :class="{ selected: suggestIndex === index }" role="option" :aria-selected="suggestIndex === index" @mouseenter="suggestIndex = index" @mousedown.prevent @click="completeSuggest(item.name)">
-              <span class="cmd-suggest-name">/{{ item.name }}</span>
+            <button v-for="(item, index) in suggestItems" :key="`${item.kind}:${item.name}:${index}`" :id="`cmd-suggest-${index}`" type="button" class="cmd-suggest-item" :class="{ selected: suggestIndex === index }" role="option" :aria-selected="suggestIndex === index" @mouseenter="suggestIndex = index" @mousedown.prevent @click="completeSuggest(item)">
+              <span class="cmd-suggest-name">{{ item.kind === 'argument' ? item.name : `/${item.name}${item.kind === 'catalog' && item.argumentHint ? ` ${item.argumentHint}` : ''}` }}</span>
               <span class="cmd-suggest-desc">{{ item.description || 'Dock 未提供说明' }}</span>
-              <span class="cmd-suggest-kind">{{ catalogSourceLabel(item.source.kind) }}</span>
+              <span class="cmd-suggest-kind">{{ item.sourceLabel }}</span>
             </button>
-            <div v-if="!suggestItems.length && commandCatalogStore.state === 'loading'" class="cmd-suggest-hint">正在读取命令…</div>
+            <div v-if="!suggestItems.length && composerArgumentLoading" class="cmd-suggest-hint">正在读取参数候选…</div>
+            <div v-else-if="!suggestItems.length && commandCatalogStore.state === 'loading'" class="cmd-suggest-hint">正在读取命令…</div>
             <div v-else-if="!suggestItems.length && slashQuery" class="cmd-suggest-hint">无匹配命令</div>
           </div>
           <textarea ref="composerTextarea" v-model="draft" rows="1" :disabled="conversationLoading" placeholder="输入消息…" title="Enter 发送 · Shift+Enter / Ctrl+J 换行" aria-keyshortcuts="Control+J" @input="resizeComposer" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event)" />

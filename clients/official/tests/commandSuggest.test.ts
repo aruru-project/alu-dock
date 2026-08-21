@@ -1,10 +1,11 @@
 // 输入框斜杠命令建议：触发判定、过滤排序、补全替换、类型分流
 import assert from 'node:assert/strict'
-import { applySlashCompletion, commandGoesToComposer, filterCatalogCommands, filterCommandPaletteItems, slashCommandQuery, subsequenceScore } from '../src/lib/commandSuggest.ts'
-import type { CommandInfo } from '../src/lib/types.ts'
+import { applySlashArgumentCompletion, applySlashCompletion, commandGoesToComposer, filterCatalogCommands, filterCommandPaletteItems, prefixSlashCommand, slashArgumentContext, slashCommandQuery, subsequenceScore } from '../src/lib/commandSuggest.ts'
+import { filterLocalControlCommands, localControlCommands, submittedLocalControl } from '../src/lib/localCommands.ts'
+import type { CommandInfo, SourceKind } from '../src/lib/types.ts'
 
-function cmd(name: string, kind: string, description = ''): CommandInfo {
-  return { name, description, source: { kind }, argumentCompletions: false }
+function cmd(name: string, kind: SourceKind, description = ''): CommandInfo {
+  return { referenceId: `ref-${kind}-${name}`, name, description, source: { kind }, argumentCompletions: false, contentAvailable: false }
 }
 
 // 只有"/"引领的单个 token 才是命令输入态（pi 只展开消息最开头的命令）
@@ -15,6 +16,9 @@ assert.equal(slashCommandQuery('/idea'), 'idea')
 assert.equal(slashCommandQuery('/idea 我的想法'), null, '空格后进入参数输入，不再提示')
 assert.equal(slashCommandQuery('看看 /idea 这个'), null, '句中的斜杠不是命令')
 assert.equal(slashCommandQuery('/idea\n第二行'), null, '多行草稿不提示')
+assert.deepEqual(slashArgumentContext('/review src/'), { name: 'review', prefix: 'src/' })
+assert.deepEqual(slashArgumentContext('/review '), { name: 'review', prefix: '' })
+assert.equal(slashArgumentContext('/review'), null)
 
 const catalog = [
   cmd('release-notes', 'prompt', '生成发布说明'),
@@ -50,9 +54,15 @@ assert.deepEqual(filterCommandPaletteItems(localControls, '/new').map((item) => 
 assert.deepEqual(filterCommandPaletteItems(localControls, '/stop').map((item) => item.id), ['stop'])
 assert.deepEqual(filterCommandPaletteItems(localControls, '/resume').map((item) => item.id), ['resume'])
 assert.deepEqual(filterCommandPaletteItems(localControls, 'resume').map((item) => item.id), ['resume'], '不带斜杠的搜索保持不变')
+assert.deepEqual(filterLocalControlCommands('st').map((item) => item.name), ['stop', 'state'])
+assert.deepEqual(filterLocalControlCommands('tree').map((item) => item.name), ['tree'])
+assert.equal(submittedLocalControl('/stop')?.action, 'stop')
+assert.equal(submittedLocalControl('/stop now'), undefined, '带参数的文字不是本地控制操作')
 
 // 补全 = 整段替换为 "/name "，尾部空格进入参数输入
 assert.equal(applySlashCompletion('idea'), '/idea ')
+assert.equal(prefixSlashCommand('idea', '做一个更清楚的登录页'), '/idea 做一个更清楚的登录页')
+assert.equal(applySlashArgumentCompletion('review', 'src/components'), '/review src/components')
 
 // prompt/skill 归输入框；extension 归运行面板
 assert.equal(commandGoesToComposer(cmd('idea', 'prompt')), true)

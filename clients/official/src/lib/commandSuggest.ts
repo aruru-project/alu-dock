@@ -17,6 +17,18 @@ export function slashCommandQuery(text: string): string | null {
   return token
 }
 
+export interface SlashArgumentContext { name: string; prefix: string }
+
+/** 已完成命令 token 后的全部文字是 owner 用来生成参数候选的前缀。 */
+export function slashArgumentContext(text: string): SlashArgumentContext | null {
+  const match = text.match(/^\/([^\s/]+)\s([\s\S]*)$/)
+  return match ? { name: match[1] ?? '', prefix: match[2] ?? '' } : null
+}
+
+export function applySlashArgumentCompletion(name: string, value: string): string {
+  return `/${name} ${value}`
+}
+
 /** 子序列模糊匹配（"sm" 命中 "Set Model"）：命中返回跨度罚分（越小越好），未命中返回 null。 */
 export function subsequenceScore(query: string, text: string): number | null {
   if (!query) return 0
@@ -78,6 +90,11 @@ export function filterCatalogCommands(commands: CommandInfo[], rawQuery: string)
 /** 建议只在整段草稿都是未完成命令 token 时出现，因此补全就是整段替换为 "/name "。 */
 export function applySlashCompletion(name: string): string {
   return `/${name} `
+}
+
+/** 命令面板选中 Prompt/Skill 后，把命令放到用户已有草稿前面，仍由用户确认发送。 */
+export function prefixSlashCommand(name: string, draft: string): string {
+  return `${applySlashCompletion(name)}${draft}`
 }
 
 /** 选中命令后的去向：prompt/skill 本质是"发一条消息"，归输入框；extension 有独立输出，归运行面板。 */

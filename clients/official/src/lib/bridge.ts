@@ -2,6 +2,8 @@ import { invoke } from '@tauri-apps/api/core'
 import type {
   AttachmentUploadResult,
   BootstrapPayload,
+  CommandCompletionsResult,
+  CommandContentResult,
   CommandsResult,
   ConnectionKind,
   ConversationBootstrap,
@@ -268,6 +270,16 @@ export async function commandCatalog(instanceId: string, context: HostContext): 
   if (isTauri) return invoke<CommandsResult>('command_catalog', { ...context, instanceId })
   await delay(100)
   return previewCommands
+}
+
+export async function getCommandContent(instanceId: string, referenceId: string, cursor: string | undefined, context: HostContext): Promise<CommandContentResult> {
+  if (isTauri) return invoke<CommandContentResult>('command_content', { ...context, instanceId, referenceId, cursor: cursor ?? null })
+  throw new Error('浏览器设计预览不会读取 Prompt 内容')
+}
+
+export async function getCommandCompletions(instanceId: string, referenceId: string, argumentPrefix: string, context: HostContext): Promise<CommandCompletionsResult> {
+  if (isTauri) return invoke<CommandCompletionsResult>('command_completions', { ...context, instanceId, referenceId, argumentPrefix })
+  throw new Error('浏览器设计预览不会读取命令参数候选')
 }
 
 export async function runCatalogCommand(instanceId: string, name: string, argumentsText: string, operationId: string, context: HostContext): Promise<{ receipt: { operationId: string; kind: 'prompt' | 'extension_command'; queued: boolean; delivery: string }; instance: Work }> {
@@ -543,9 +555,9 @@ function delay(ms: number) {
 const now = new Date().toISOString()
 const previewCommands: CommandsResult = {
   commands: [
-    { name: 'compact', description: '压缩当前 Session 的上下文', source: { kind: 'built-in' }, argumentCompletions: false },
-    { name: 'review', description: '运行 Extension 提供的代码审查流程', source: { kind: 'extension', package: '@alu/review' }, argumentCompletions: true },
-    { name: 'release-notes', description: '使用项目 Prompt 生成发布说明', source: { kind: 'prompt' }, argumentCompletions: false },
+    { referenceId: 'preview-compact', name: 'compact', description: '压缩当前 Session 的上下文', source: { kind: 'built-in' }, argumentCompletions: false, contentAvailable: false },
+    { referenceId: 'preview-review', name: 'review', description: '运行 Extension 提供的代码审查流程', source: { kind: 'extension', package: '@alu/review' }, argumentHint: '[scope]', argumentCompletions: true, contentAvailable: false },
+    { referenceId: 'preview-release-notes', name: 'release-notes', description: '使用项目 Prompt 生成发布说明', source: { kind: 'prompt' }, argumentHint: '[instructions]', argumentCompletions: false, contentAvailable: false },
   ],
   total: 3,
   truncated: false,

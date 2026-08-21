@@ -28,11 +28,13 @@ pub use actions::{
 };
 pub use attachments::{
     AttachmentDto, AttachmentUploadCancellation, AttachmentUploadPhase, AttachmentUploadProgress,
-    AttachmentUploadResult, AttachmentUploadStatus, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_MESSAGE,
+    AttachmentUploadResult, AttachmentUploadStatus, MAX_ATTACHMENT_BYTES,
+    MAX_ATTACHMENTS_PER_MESSAGE,
 };
 pub use client::DockClient;
 pub use config::{
-    CommandInfo, CommandsResult, DiagnosticInfo, DiagnosticSeverity, ModelInfo, ModelsResult,
+    CommandArgumentCompletion, CommandCompletionItems, CommandCompletionsResult,
+    CommandContentResult, CommandInfo, CommandReference, CommandsResult, DiagnosticInfo, DiagnosticSeverity, ModelInfo, ModelsResult,
     ResourceInfo, ResourceKind, ResourcesResult, SettingInfo, SettingKey, SettingSource,
     SettingUpdate, SettingUpdateResult, SettingValue, SettingValueType, SettingsResult, SourceInfo,
     SourceKind, ThinkingLevel, ToolInfo, ToolsResult,

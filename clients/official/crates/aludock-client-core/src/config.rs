@@ -40,6 +40,11 @@ const SETTINGS_CAPABILITIES: &[&str] = &[
     "settings.v1",
 ];
 const RESOURCE_CAPABILITIES: &[&str] = &["core.v2", "resources.v1", "projection.completeness.v1"];
+const COMMAND_DISCOVERY_CAPABILITIES: &[&str] = &["core.v2", "command.discovery.v1"];
+const MAX_COMMAND_CONTENT_PAGE_CHARS: usize = 64_000;
+const MAX_COMMAND_ARGUMENT_PREFIX_CHARS: usize = 16_384;
+const MAX_COMMAND_ARGUMENT_HINT_CHARS: usize = 2_048;
+const MAX_COMMAND_COMPLETION_TEXT_CHARS: usize = 2_048;
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "lowercase")]
@@ -116,7 +121,58 @@ pub struct CommandInfo {
     pub name: String,
     pub description: Option<String>,
     pub source: SourceInfo,
+    pub argument_hint: Option<String>,
     pub argument_completions: bool,
+    pub content_available: Option<bool>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CommandReference {
+    pub name: String,
+    pub source: SourceInfo,
+}
+
+impl From<&CommandInfo> for CommandReference {
+    fn from(command: &CommandInfo) -> Self {
+        Self {
+            name: command.name.clone(),
+            source: command.source.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandContentResult {
+    pub command: CommandReference,
+    pub available: bool,
+    pub format: Option<String>,
+    pub revision: Option<String>,
+    pub text: Option<String>,
+    pub complete: Option<bool>,
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CommandArgumentCompletion {
+    pub value: String,
+    pub label: String,
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum CommandCompletionItems {
+    Available(Vec<CommandArgumentCompletion>),
+    Unavailable(()),
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CommandCompletionsResult {
+    pub command: CommandReference,
+    pub items: CommandCompletionItems,
+    pub total: u64,
+    pub truncated: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -320,6 +376,23 @@ struct CommandParams<'a> {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct CommandContentParams<'a> {
+    instance_id: &'a str,
+    command: &'a CommandReference,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cursor: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CommandCompletionsParams<'a> {
+    instance_id: &'a str,
+    command: &'a CommandReference,
+    argument_prefix: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ModelParams<'a> {
     operation_id: &'a str,
     instance_id: &'a str,
@@ -369,6 +442,60 @@ impl DockClient {
             )
             .await?;
         validate_commands(&result)?;
+        Ok(result)
+    }
+
+    pub async fn command_content(
+        &self,
+        instance_id: &str,
+        command: &CommandReference,
+        cursor: Option<&str>,
+    ) -> Result<CommandContentResult> {
+        validate_command_reference(command)?;
+        if let Some(cursor) = cursor {
+            bounded_nonempty(cursor, 128, "command content cursor")?;
+        }
+        let result: CommandContentResult = self
+            .request(
+                "command.content",
+                &CommandContentParams {
+                    instance_id,
+                    command,
+                    cursor,
+                },
+                COMMAND_DISCOVERY_CAPABILITIES,
+                None,
+            )
+            .await?;
+        validate_command_content(&result, command)?;
+        Ok(result)
+    }
+
+    pub async fn command_completions(
+        &self,
+        instance_id: &str,
+        command: &CommandReference,
+        argument_prefix: &str,
+    ) -> Result<CommandCompletionsResult> {
+        validate_command_reference(command)?;
+        if argument_prefix.chars().count() > MAX_COMMAND_ARGUMENT_PREFIX_CHARS {
+            return Err(ClientError::Protocol(
+                "command argument prefix exceeded its bound".into(),
+            ));
+        }
+        let result: CommandCompletionsResult = self
+            .request(
+                "command.complete",
+                &CommandCompletionsParams {
+                    instance_id,
+                    command,
+                    argument_prefix,
+                },
+                COMMAND_DISCOVERY_CAPABILITIES,
+                None,
+            )
+            .await?;
+        validate_command_completions(&result, command)?;
         Ok(result)
     }
 
@@ -610,8 +737,21 @@ fn validate_commands(result: &CommandsResult) -> Result<()> {
         "commands",
     )?;
     for command in &result.commands {
-        bounded_nonempty(&command.name, 256, "command name")?;
-        validate_source(&command.source)?;
+        validate_command_reference(&CommandReference::from(command))?;
+        if command
+            .argument_hint
+            .as_ref()
+            .is_some_and(|hint| hint.chars().count() > MAX_COMMAND_ARGUMENT_HINT_CHARS)
+        {
+            return Err(ClientError::Protocol(
+                "command argument hint exceeded its bound".into(),
+            ));
+        }
+        if command.content_available == Some(false) {
+            return Err(ClientError::Protocol(
+                "command content availability must be omitted unless true".into(),
+            ));
+        }
     }
     if !result
         .commands
@@ -621,6 +761,118 @@ fn validate_commands(result: &CommandsResult) -> Result<()> {
         return Err(ClientError::Protocol(
             "command catalog was not canonically sorted".into(),
         ));
+    }
+    Ok(())
+}
+
+fn validate_command_reference(command: &CommandReference) -> Result<()> {
+    bounded_nonempty(&command.name, 256, "command name")?;
+    validate_source(&command.source)
+}
+
+fn validate_command_content(
+    result: &CommandContentResult,
+    expected: &CommandReference,
+) -> Result<()> {
+    if &result.command != expected {
+        return Err(ClientError::Protocol(
+            "command content referenced a different command".into(),
+        ));
+    }
+    if !result.available {
+        if result.format.is_some()
+            || result.revision.is_some()
+            || result.text.is_some()
+            || result.complete.is_some()
+            || result.next_cursor.is_some()
+        {
+            return Err(ClientError::Protocol(
+                "unavailable command content carried content fields".into(),
+            ));
+        }
+        return Ok(());
+    }
+    if result.format.as_deref() != Some("markdown") {
+        return Err(ClientError::Protocol(
+            "command content format was not markdown".into(),
+        ));
+    }
+    bounded_nonempty(
+        result.revision.as_deref().unwrap_or(""),
+        128,
+        "command content revision",
+    )?;
+    let text = result
+        .text
+        .as_deref()
+        .ok_or_else(|| ClientError::Protocol("available command content omitted text".into()))?;
+    if text.chars().count() > MAX_COMMAND_CONTENT_PAGE_CHARS {
+        return Err(ClientError::Protocol(
+            "command content page exceeded its bound".into(),
+        ));
+    }
+    let complete = result.complete.ok_or_else(|| {
+        ClientError::Protocol("available command content omitted completion state".into())
+    })?;
+    if complete == result.next_cursor.is_some() {
+        return Err(ClientError::Protocol(
+            "command content continuation metadata was inconsistent".into(),
+        ));
+    }
+    if let Some(cursor) = result.next_cursor.as_deref() {
+        bounded_nonempty(cursor, 128, "command content cursor")?;
+    }
+    Ok(())
+}
+
+fn validate_command_completions(
+    result: &CommandCompletionsResult,
+    expected: &CommandReference,
+) -> Result<()> {
+    if &result.command != expected {
+        return Err(ClientError::Protocol(
+            "command completions referenced a different command".into(),
+        ));
+    }
+    let returned = match &result.items {
+        CommandCompletionItems::Available(items) => items.len(),
+        CommandCompletionItems::Unavailable(()) => 0,
+    };
+    validate_completeness(returned, result.total, result.truncated, "command completions")?;
+    if matches!(&result.items, CommandCompletionItems::Unavailable(()))
+        && (result.total != 0 || result.truncated)
+    {
+        return Err(ClientError::Protocol(
+            "absent command completions carried collection state".into(),
+        ));
+    }
+    if returned > 1_000 {
+        return Err(ClientError::Protocol(
+            "command completions exceeded their bound".into(),
+        ));
+    }
+    let items = match &result.items {
+        CommandCompletionItems::Available(items) => items.as_slice(),
+        CommandCompletionItems::Unavailable(()) => &[],
+    };
+    for item in items {
+        if item.value.chars().count() > MAX_COMMAND_ARGUMENT_PREFIX_CHARS {
+            return Err(ClientError::Protocol(
+                "command completion value exceeded its bound".into(),
+            ));
+        }
+        bounded_nonempty(
+            &item.label,
+            MAX_COMMAND_COMPLETION_TEXT_CHARS,
+            "command completion label",
+        )?;
+        if item.description.as_ref().is_some_and(|description| {
+            description.chars().count() > MAX_COMMAND_COMPLETION_TEXT_CHARS
+        }) {
+            return Err(ClientError::Protocol(
+                "command completion description exceeded its bound".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -832,12 +1084,14 @@ fn source_key(source: Option<&SourceInfo>) -> (String, &str, &str) {
     }
 }
 
-fn command_key(command: &CommandInfo) -> (&str, (String, &str, &str), &str, bool) {
+fn command_key(command: &CommandInfo) -> (&str, (String, &str, &str), &str, &str, bool, bool) {
     (
         &command.name,
         source_key(Some(&command.source)),
         command.description.as_deref().unwrap_or(""),
+        command.argument_hint.as_deref().unwrap_or(""),
         command.argument_completions,
+        command.content_available == Some(true),
     )
 }
 
@@ -1029,6 +1283,59 @@ mod tests {
         assert!(validate_completeness(2, 3, true, "test").is_ok());
         assert!(validate_completeness(2, 3, false, "test").is_err());
         assert!(validate_completeness(3, 2, false, "test").is_err());
+    }
+
+    #[test]
+    fn command_discovery_results_keep_owner_identity_and_page_invariants() {
+        let command = CommandReference {
+            name: "idea".into(),
+            source: SourceInfo {
+                kind: SourceKind::Prompt,
+                path: Some("/worker/prompts/idea.md".into()),
+                package: None,
+            },
+        };
+        let page = CommandContentResult {
+            command: command.clone(),
+            available: true,
+            format: Some("markdown".into()),
+            revision: Some("revision-1".into()),
+            text: Some("Prompt body".into()),
+            complete: Some(false),
+            next_cursor: Some("next-page".into()),
+        };
+        assert!(validate_command_content(&page, &command).is_ok());
+
+        let mut mismatched = page.clone();
+        mismatched.command.name = "other".into();
+        assert!(validate_command_content(&mismatched, &command).is_err());
+
+        let completions = CommandCompletionsResult {
+            command: command.clone(),
+            items: CommandCompletionItems::Available(vec![CommandArgumentCompletion {
+                value: "src/".into(),
+                label: "src/".into(),
+                description: Some("Source directory".into()),
+            }]),
+            total: 1,
+            truncated: false,
+        };
+        assert!(validate_command_completions(&completions, &command).is_ok());
+
+        let absent_but_truncated = CommandCompletionsResult {
+            command: command.clone(),
+            items: CommandCompletionItems::Unavailable(()),
+            total: 1,
+            truncated: true,
+        };
+        assert!(validate_command_completions(&absent_but_truncated, &command).is_err());
+
+        let missing_items = serde_json::json!({
+            "command": command,
+            "total": 0,
+            "truncated": false
+        });
+        assert!(serde_json::from_value::<CommandCompletionsResult>(missing_items).is_err());
     }
 
     #[test]
