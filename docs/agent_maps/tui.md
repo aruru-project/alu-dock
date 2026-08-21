@@ -26,7 +26,7 @@ Devices 是唯一远程设备入口：同一页显示 Remote Access 开关、lis
 
 Devices 列表项来自 Host 保存的短期 metadata，不对应等待中的 socket；客户端请求已经响应并关闭。页面只显示 remote access、port、倒计时、设备名、自然结果和下一步动作，不展示证书 fingerprint、pairing ID、SRP、内部 revision 或其他实现状态。证书证明、四位 PIN、五分钟窗口和成功后关闭窗口的网络安全语义不变。
 
-Hub 使用 alternate screen；进入 Work 或离开前恢复 shell screen。Instance lifecycle 和 persisted-session inventory 来自 Host，不由 TUI 自己扫描 runtime。Hub 直接渲染 Protocol V2 的 `displayName`：显式 session name 优先，当前工作可用首条用户消息作为未命名摘要，最后才回退到项目目录；persisted-session inventory 可提供首条用户消息供选择器展示。重名项由项目路径和相对时间区分，Hub 和默认人类列表不再把短 instance ID 当作名称。
+Hub 使用 alternate screen；进入 Work 或离开前恢复 shell screen。Instance lifecycle 和 persisted-session inventory 来自 Host，不由 TUI 自己扫描 runtime。Hub 直接渲染 Protocol V2 的 `displayName`：显式 session name 优先，其次是 Dock instance key，最后才回退到项目目录；首条用户消息只用于 persisted-session inventory 的未命名 session 摘要，不参与当前 Dock instance 的 `displayName`。重名项由项目路径和相对时间区分，Hub 和默认人类列表不再把短 instance ID 当作名称。
 
 Hub 的 Dock New 从启动 `aludock` 时的当前目录打开 workspace 列表，经 `workspace.list.v1` 返回上级和子目录后再确认 cwd。列表支持搜索、分页/跳页、直接输入路径和隐藏目录切换；隐藏目录默认不显示，但直接输入隐藏路径仍可进入。目录符号链接带标记并按 Host 返回的规范目标继续浏览。取消选择返回 Hub，不创建半成品 instance；确认后才调用 `instance.create(cwd)`。直接执行 `aludock new --cwd ...` 的既有入口不经过 Hub 选择器。
 

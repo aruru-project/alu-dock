@@ -71,10 +71,7 @@ import type {
   ThinkingLevel,
 } from "./agent-worker.js";
 import { sliceSemanticHistory } from "./history-pagination.js";
-import {
-  MAX_INSTANCE_DISPLAY_NAME_CHARS,
-  projectInstanceDisplayName,
-} from "./instance-display-name.js";
+import { projectInstanceDisplayName } from "./instance-display-name.js";
 import type { PublishedFileReadPage } from "./published-file.js";
 import { InstanceDeliverables, type DeliverableDto } from "./instance-deliverables.js";
 import {
@@ -258,7 +255,6 @@ interface WorkingCheckpoint {
   state: MutableState;
   key: string | undefined;
   name: string | undefined;
-  firstUserMessage: string | undefined;
   cwd: string;
   executor: ExecutorIdentity;
   runtimeGeneration: number;
@@ -353,7 +349,6 @@ export class ManagedInstance {
   private readonly extensionUi: ExtensionUiBroker;
   private keyValue: string | undefined;
   private nameValue: string | undefined;
-  private firstUserMessageValue: string | undefined;
   private cwdValue: string;
   private gitBranchValue: string | undefined;
   private readonly executorIdentity: ExecutorIdentity;
@@ -505,7 +500,6 @@ export class ManagedInstance {
     };
     this.durableSessionFileValue = this.runtimeDurableSessionFile();
     this.historyValue = (options.initialHistory ?? []).map(projectAgentHistoryEntry);
-    this.firstUserMessageValue = firstUserMessageFromHistory(this.historyValue);
     this.metricsValue = projectRuntimeMetrics(this.agentState().metrics);
 
     this.session.subscribe((event) => this.dispatchAgentEvent(event));
@@ -766,7 +760,7 @@ export class ManagedInstance {
   private projectedDisplayName(): string {
     return projectInstanceDisplayName({
       name: this.name,
-      firstUserMessage: this.firstUserMessageValue,
+      key: this.key,
       cwd: this.cwd,
     });
   }
@@ -1407,14 +1401,11 @@ export class ManagedInstance {
         ...(inputImages.length === 0 ? {} : { images: cloneInputImages(inputImages) }),
         ...(inputAttachments.length === 0 ? {} : { attachments: cloneInputAttachments(inputAttachments) }),
       });
-      const firstUserMessage = this.firstUserMessageValue ?? firstUserMessagePreview(message);
-      const displayNameBeforeAcceptance = this.projectedDisplayName();
       const acceptedTransition = this.enqueueTransition(() => this.commitCatalogTransition(
         { kind: "command.accepted", effect: "post_effect", operationId: commandId, instanceId: this.id },
         () => {
           this.catalogAdmissionOperationId = undefined;
           this.state.lastError = undefined;
-          this.firstUserMessageValue = firstUserMessage;
           if (!actuallyQueued) {
             this.state.execution = "running";
             this.state.activeCommandId = commandId;
@@ -1430,9 +1421,6 @@ export class ManagedInstance {
           }, acceptedAt);
           if (pendingMessage) this.appendEvent("message.queued", pendingMessageProjection([pendingMessage])[0]!, acceptedAt);
           this.appendStateEvent("command_accepted", acceptedAt);
-          if (this.projectedDisplayName() !== displayNameBeforeAcceptance) {
-            this.appendEvent("session.info_changed", { name: this.nameValue, displayName: this.projectedDisplayName() }, acceptedAt);
-          }
         },
       ));
       preflightTransition = Promise.all([precedingAgentEvents, acceptedTransition]).then(() => {});
@@ -2582,7 +2570,6 @@ export class ManagedInstance {
       state: cloneJson(this.state),
       key: this.keyValue,
       name: this.nameValue,
-      firstUserMessage: this.firstUserMessageValue,
       cwd: this.cwdValue,
       executor: cloneJson(this.executorIdentity),
       runtimeGeneration: this.runtimeGenerationValue,
@@ -2610,7 +2597,6 @@ export class ManagedInstance {
     this.state = checkpoint.state;
     this.keyValue = checkpoint.key;
     this.nameValue = checkpoint.name;
-    this.firstUserMessageValue = checkpoint.firstUserMessage;
     this.cwdValue = checkpoint.cwd;
     Object.assign(this.executorIdentity, checkpoint.executor);
     for (const key of Object.keys(this.executorIdentity) as Array<keyof ExecutorIdentity>) {
@@ -3023,16 +3009,6 @@ export class ManagedInstance {
     const history = await this.invokeAgent<AgentHistoryEntry[]>("session.history", { limit: 200 });
     this.historyValue = history.map(projectAgentHistoryEntry);
     this.historyRevisionValue += 1;
-    const firstUserMessage = firstUserMessageFromHistory(this.historyValue);
-    if (firstUserMessage === this.firstUserMessageValue) return;
-    const previousDisplayName = this.projectedDisplayName();
-    this.firstUserMessageValue = firstUserMessage;
-    if (this.catalogPort && this.committedSnapshotValue) {
-      this.committedSnapshotValue = { ...this.committedSnapshotValue, displayName: this.projectedDisplayName() };
-    }
-    if (this.projectedDisplayName() !== previousDisplayName) {
-      this.appendEvent("session.info_changed", { name: this.nameValue, displayName: this.projectedDisplayName() });
-    }
   }
 
   private refreshMetrics(): void {
@@ -3185,7 +3161,6 @@ export class ManagedInstance {
             this.state.pendingFollowUp = 0;
             if (cwd !== undefined) this.cwdValue = cwd;
             this.nameValue = name;
-            this.firstUserMessageValue = undefined;
             this.gitBranchValue = projectGitBranch(event.gitBranch ?? this.agentState().gitBranch);
             this.executorIdentity.piSessionId = truncate(this.agentState().sessionId, 128) ?? "unknown";
             this.executorIdentity.sessionFile = truncate(this.agentState().sessionFile, 16_384);
@@ -3878,23 +3853,6 @@ function isConversationFrame(event: DockEvent): event is Extract<DockEvent, {
     || event.type === "tool.args_updated"
     || event.type === "tool.output_updated"
     || event.type === "tool.completed";
-}
-
-function firstUserMessageFromHistory(history: readonly HistoryEntryDto[]): string | undefined {
-  for (const entry of history) {
-    if (entry.source !== "user" || entry.visibility !== "conversation") continue;
-    const text = entry.content
-      .flatMap((block) => block.type === "text" ? [block.text] : [])
-      .join(" ");
-    const preview = firstUserMessagePreview(text);
-    if (preview) return preview;
-  }
-  return undefined;
-}
-
-function firstUserMessagePreview(value: string): string | undefined {
-  const normalized = value.replace(/\s+/gu, " ").trim();
-  return normalized.length === 0 ? undefined : truncate(normalized, MAX_INSTANCE_DISPLAY_NAME_CHARS);
 }
 
 function refreshesHistory(event: AgentEvent): boolean {

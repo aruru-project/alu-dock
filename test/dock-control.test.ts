@@ -858,7 +858,7 @@ test("Hub Continue opens current work", async (context) => {
   const displayCwd = join(continueHarness.directory, "display.project");
   await mkdir(displayCwd);
   const current = await continueClient.create(displayCwd);
-  assert.equal(current.displayName, "deterministic delayed task");
+  assert.equal(current.displayName, "display project");
   const continuePty = await runPtyTui([
     process.execPath,
     join(process.cwd(), "dist/src/cli.js"),
@@ -869,7 +869,7 @@ test("Hub Continue opens current work", async (context) => {
   assert.equal(continuePty.status, 0, continueOutput.slice(-2_000));
   assert.match(continueOutput, /Current Dock work/u);
   assert.match(continueOutput, /Open Work/u);
-  assert.match(continueOutput, /deterministic delayed task/u);
+  assert.match(continueOutput, /display project/u);
   assert.equal(continueOutput.includes(current.id), false);
   assert.match(continueOutput, /cache /u);
   assert.equal((await continueClient.status(current.id)).lifecycle, "active");
@@ -2060,7 +2060,7 @@ test("a running instance applies live metadata and next-step configuration witho
 
   const accepted = await client.prompt(created.id, "start");
   assert.equal(accepted.instance.execution, "running");
-  assert.equal(accepted.instance.displayName, "start");
+  assert.equal(accepted.instance.displayName, created.displayName);
   const activeCommandId = accepted.instance.activeCommandId;
   assert.ok(activeCommandId);
   const queued = await client.prompt(created.id, "use this next", "steer");
