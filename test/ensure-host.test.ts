@@ -12,7 +12,7 @@ test("ordinary clients never fall back to an untracked detached Host", async () 
     const socketPath = join(directory, "dock.sock");
     await assert.rejects(
       ensureHost(socketPath, { managedWaitMs: 0 }),
-      /aludock service status/,
+      /aludock service start/,
     );
     await assert.rejects(stat(socketPath), { code: "ENOENT" });
     await assert.rejects(stat(join(directory, "host.log")), { code: "ENOENT" });

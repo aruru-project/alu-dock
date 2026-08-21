@@ -447,7 +447,7 @@ test("SSH TUI re-presents an interaction when the Host rejects its first respons
   assert.equal(pty.timedOut, false, output.slice(-4_000));
   assert.equal(pty.status, 0, output.slice(-4_000));
   assert.match(output, /Retry response confirm/);
-  assert.match(output, /same question remains pending/);
+  assert.match(output, /question is still waiting/);
 });
 
 test("SSH TUI reacquires its controller after runtime replacement", async (context) => {
@@ -858,7 +858,7 @@ test("Hub Continue opens current work", async (context) => {
   const displayCwd = join(continueHarness.directory, "display.project");
   await mkdir(displayCwd);
   const current = await continueClient.create(displayCwd);
-  assert.equal(current.displayName, "display project");
+  assert.equal(current.displayName, "deterministic delayed task");
   const continuePty = await runPtyTui([
     process.execPath,
     join(process.cwd(), "dist/src/cli.js"),
@@ -869,7 +869,7 @@ test("Hub Continue opens current work", async (context) => {
   assert.equal(continuePty.status, 0, continueOutput.slice(-2_000));
   assert.match(continueOutput, /Current Dock work/u);
   assert.match(continueOutput, /Open Work/u);
-  assert.match(continueOutput, /display project/u);
+  assert.match(continueOutput, /deterministic delayed task/u);
   assert.equal(continueOutput.includes(current.id), false);
   assert.match(continueOutput, /cache /u);
   assert.equal((await continueClient.status(current.id)).lifecycle, "active");
@@ -927,7 +927,7 @@ test("SSH TUI replays, resizes, handles input, and detaches without stopping", a
   assert.match(resizedFrame.at(-3) ?? "", /pty-demo.*default.*off/u);
   assert.match(resizedFrame.at(-2) ?? "", /cache .*ctx .*↑.*↓.*\$/u);
   assert.equal(resizedFrame.at(-1), "", "the reserved extension row stays blank when no extension owns it");
-  assert.match(output, /Detached from pty-demo/);
+  assert.match(output, /Left pty-demo\. The work is still running/u);
   assert.doesNotMatch(output, /data:image|;base64,/i);
   const { enable: mouseEnable, disable: mouseDisable } = mouseTrackingSequences();
   assert.doesNotMatch(output, /\u001b\[\?1049[hl]/u, "Work stays on the flowing main buffer (no alternate screen)");
@@ -1096,7 +1096,7 @@ test("SSH TUI Alt+Up restores all pending text while Escape restores then aborts
   assert.equal(restoredPty.status, 0, restoredOutput.slice(-4_000));
   assert.match(restoredOutput, /1\. steer next · urgent steer/);
   assert.match(restoredOutput, /2\. follow-up · later follow-up/);
-  assert.match(restoredOutput, /Restored 2 queued messages to editor/);
+  assert.match(restoredOutput, /Returned 2 waiting messages to the editor/);
   const restoredStatus = await client.status(created.id);
   assert.equal(restoredStatus.execution, "running");
   assert.equal(restoredStatus.pending.total, 0);
@@ -1114,7 +1114,7 @@ test("SSH TUI Alt+Up restores all pending text while Escape restores then aborts
   const inFlightOutput = Buffer.from(inFlightPty.output, "base64").toString("utf8");
   assert.equal(inFlightPty.timedOut, false, inFlightOutput.slice(-4_000));
   assert.equal(inFlightPty.status, 0, inFlightOutput.slice(-4_000));
-  assert.match(inFlightOutput, /cannot be restored[\s\S]*safely/u);
+  assert.match(inFlightOutput, /already moving into[\s\S]*the conversation[\s\S]*finish before[\s\S]*stopping the run/u);
   assert.equal(inFlightPty.draftVisible, true, "restoration must preserve the draft typed before the receipt arrives");
   assert.doesNotMatch(inFlightOutput, /Run aborted/u);
   runtime.finishDrainedQueued(drained!);
@@ -1242,13 +1242,23 @@ test("SSH TUI Stage 3 commands mutate Host-owned settings tools and sessions", a
   const directory = await mkdtemp(join(tmpdir(), "alu-dock-pty-stage3-"));
   await chmod(directory, 0o700);
   const socketPath = join(directory, "dock.sock");
+  const savedSession: SessionDto = {
+    sessionId: "pty-resume",
+    sessionFile: "/tmp/pty-resume.jsonl",
+    name: "PTY resumed",
+    cwd: directory,
+  };
   let runtime: DelayedAgentWorkerConnection | undefined;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => {
     runtime = new DelayedAgentWorkerConnection(`pi-${id}`);
-    runtime.sessionCatalog = [{ sessionId: "pty-resume", sessionFile: "/tmp/pty-resume.jsonl", name: "PTY resumed", cwd: directory }];
+    runtime.sessionCatalog = [savedSession];
     return new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: runtime });
   }, () => "pty-stage3-instance");
-  const host = new DockHost({ socketPath, registry });
+  const host = new DockHost({
+    socketPath,
+    registry,
+    sessionInventory: { list: async () => ({ sessions: [savedSession], incomplete: false, diagnostics: [] }) },
+  });
   context.after(async () => { await host.stop().catch(() => {}); await rm(directory, { recursive: true, force: true }); });
   await host.start();
   const client = new DockClient({ socketPath });
@@ -1390,9 +1400,10 @@ test("SSH TUI recovers a dropped event stream from its accepted cursor without r
   const output = Buffer.from(pty.output, "base64").toString("utf8");
   assert.equal(pty.timedOut, false, output.slice(-3_000));
   assert.equal(pty.status, 0, output.slice(-3_000));
-  assert.match(output, /Live updates were interrupted\. Checking/);
-  assert.match(output, /current work state; no command was/);
-  assert.match(output, /Live updates resumed; the work kept/);
+  assert.match(output, /Live updates were interrupted/u);
+  assert.match(output, /whether the work is still running/u);
+  assert.match(output, /Live updates resumed/u);
+  assert.match(output, /This work is ready/u);
   assert.match(output, /Status: running/);
   assert.equal(runtime.promptCalls, promptCallsBeforeDrop, "reconnecting must not resend the command");
   assert.equal((await client.status(created.id)).lifecycle, "active");
@@ -1448,9 +1459,9 @@ test("SSH TUI detach reports an externally stopped instance instead of claiming 
   const output = Buffer.from(pty.output, "base64").toString("utf8");
   assert.equal(pty.timedOut, false, output.slice(-3_000));
   assert.equal(pty.status, 0, output.slice(-3_000));
-  const detachNotice = output.slice(output.lastIndexOf("Detached from pty-external-stop"));
-  assert.match(detachNotice, /Detached from pty-external-stop/);
-  assert.match(detachNotice, /stopped/);
+  const detachNotice = output.slice(output.lastIndexOf("Left pty-external-stop"));
+  assert.match(detachNotice, /Left pty-external-stop/);
+  assert.match(detachNotice, /It is stopped/u);
 });
 
 test("SSH TUI reports true Host loss as unknown and detaches cleanly", async (context) => {
@@ -1473,11 +1484,8 @@ test("SSH TUI reports true Host loss as unknown and detaches cleanly", async (co
   const output = Buffer.from(pty.output, "base64").toString("utf8");
   assert.equal(pty.timedOut, false, output.slice(-2_000));
   assert.equal(pty.status, 0, output.slice(-2_000));
-  assert.match(output, /Alu Dock is unavailable, so this/);
-  assert.match(output, /current state is unknown/);
-  assert.match(output, /no command was/);
-  assert.match(output, /resent\./);
-  assert.match(output, /Detached from pty-host-loss/);
+  assert.match(output, /The connection could not be restored/u);
+  assert.match(output, /Left pty-host-loss, but its current status could not be checked/u);
 
   const conservative = harness.registry.get(created.id).snapshot();
   assert.equal(conservative.lifecycle, "active");

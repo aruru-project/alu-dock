@@ -439,12 +439,12 @@ def main() -> int:
                 read_available(fd, output, 0.05)
             elif action == "transport-close":
                 close_deadline = time.monotonic() + 6
-                while b"status is unknown" not in output and time.monotonic() < close_deadline:
+                while b"connection could not be restored" not in output and time.monotonic() < close_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
             elif action == "stream-recover":
                 recovery_deadline = time.monotonic() + 8
-                while b"Event stream reconnected" not in output and time.monotonic() < recovery_deadline:
+                while b"Live updates resumed" not in output and time.monotonic() < recovery_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"/status\r")
@@ -503,7 +503,7 @@ def main() -> int:
                         break
                 os.write(fd, b"\x1b[A\r")
                 retry_deadline = time.monotonic() + 5
-                while b"same question remains pending" not in output and time.monotonic() < retry_deadline:
+                while b"question is still waiting" not in output and time.monotonic() < retry_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\x1b[A\r")
@@ -564,7 +564,7 @@ def main() -> int:
                 if action == "queue-restore":
                     os.write(fd, b"\x1b[1;3A")  # Alt+Up: restore all without aborting.
                     restore_deadline = time.monotonic() + 4
-                    while b"Restored 2 queued messages to editor" not in output and time.monotonic() < restore_deadline:
+                    while b"Returned 2 waiting messages to the editor" not in output and time.monotonic() < restore_deadline:
                         if read_available(fd, output, 0.05) < 0:
                             break
                 elif action == "queue-inflight":
@@ -575,7 +575,7 @@ def main() -> int:
                             break
                     os.write(fd, b"\x1b")  # Escape must not abort while Pi owns an in-flight item.
                     inflight_deadline = time.monotonic() + 4
-                    while b"run was not aborted" not in output and time.monotonic() < inflight_deadline:
+                    while b"already moving into" not in output and time.monotonic() < inflight_deadline:
                         if read_available(fd, output, 0.05) < 0:
                             break
                     draft_visible = b"current draft" in output
@@ -702,26 +702,27 @@ def main() -> int:
                     if read_available(fd, output, 0.05) < 0:
                         break
             elif action == "stage6":
+                tree_start = len(output)
                 os.write(fd, b"/tree\r")
                 tree_picker_deadline = time.monotonic() + 5
-                while b"Navigate session tree" not in output and time.monotonic() < tree_picker_deadline:
+                while (b"Navigate session tree" not in output[tree_start:] or b"second prompt" not in output[tree_start:]) and time.monotonic() < tree_picker_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"second prompt\r")
                 tree_action_deadline = time.monotonic() + 5
-                while b"Branch action" not in output and time.monotonic() < tree_action_deadline:
+                while b"Branch action" not in output[tree_start:] and time.monotonic() < tree_action_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\r")
                 tree_deadline = time.monotonic() + 5
-                while b"Session branch selected" not in output and time.monotonic() < tree_deadline:
+                while b"Session branch selected" not in output[tree_start:] and time.monotonic() < tree_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"\x03")  # Clear selected editor text.
                 fork_start = len(output)
                 os.write(fd, b"/fork\r")
                 fork_picker_deadline = time.monotonic() + 5
-                while b"Start from an earlier prompt" not in output[fork_start:] and time.monotonic() < fork_picker_deadline:
+                while (b"Start from an earlier prompt" not in output[fork_start:] or b"second prompt" not in output[fork_start:]) and time.monotonic() < fork_picker_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
                 os.write(fd, b"second prompt\r")
@@ -758,7 +759,6 @@ def main() -> int:
                     (b"/compact\r", b"Compacted 123 tokens"),
                     (b"/reload\r", b"Resources reloaded"),
                     (b"/new\r", b"New session ready"),
-                    (b"/resume /tmp/pty-resume.jsonl\r", b"Saved session opened"),
                 ]
                 for command, marker in steps:
                     os.write(fd, command)
@@ -766,6 +766,17 @@ def main() -> int:
                     while marker not in output and time.monotonic() < command_deadline:
                         if read_available(fd, output, 0.05) < 0:
                             break
+                resume_start = len(output)
+                os.write(fd, b"/resume\r")
+                resume_deadline = time.monotonic() + 5
+                while (b"Resume Pi session" not in output[resume_start:] or b"PTY resumed" not in output[resume_start:]) and time.monotonic() < resume_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\r")
+                opened_deadline = time.monotonic() + 5
+                while b"Saved session opened" not in output[resume_start:] and time.monotonic() < opened_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
             else:
                 os.write(fd, b"\x0f")  # Ctrl+O: collapse/expand tool output.
                 time.sleep(0.1)
