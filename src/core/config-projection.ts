@@ -8,7 +8,19 @@ export interface SourceDto {
   package?: string;
 }
 export interface ToolDto { name: string; description: string; active: boolean; source?: SourceDto; parameterSchema?: JsonObject }
-export interface CommandDto { name: string; description?: string; source: SourceDto; argumentCompletions: boolean }
+export interface CommandReferenceDto { name: string; source: SourceDto }
+export interface CommandDto extends CommandReferenceDto {
+  description?: string;
+  argumentHint?: string;
+  argumentCompletions: boolean;
+  contentAvailable?: true;
+}
+export interface CommandArgumentCompletionDto { value: string; label: string; description?: string }
+export const MAX_COMMAND_CONTENT_PAGE_CHARS = 64_000;
+export const MAX_COMMAND_ARGUMENT_PREFIX_CHARS = 16_384;
+export const MAX_COMMAND_ARGUMENT_HINT_CHARS = 2_048;
+export const MAX_COMMAND_COMPLETION_TEXT_CHARS = 2_048;
+export const MAX_COMMAND_ARGUMENT_COMPLETIONS = 1_000;
 export interface ResourceDto { kind: "extension" | "skill" | "prompt" | "context"; name: string; path?: string; source?: SourceDto }
 export interface DiagnosticDto { severity: "info" | "warning" | "error"; message: string; source?: string }
 
@@ -35,7 +47,9 @@ export function compareCommandDtos(left: CommandDto, right: CommandDto): number 
   return compareCanonicalText(left.name, right.name)
     || compareSourceDtos(left.source, right.source)
     || compareCanonicalText(left.description ?? "", right.description ?? "")
-    || Number(left.argumentCompletions) - Number(right.argumentCompletions);
+    || compareCanonicalText(left.argumentHint ?? "", right.argumentHint ?? "")
+    || Number(left.argumentCompletions) - Number(right.argumentCompletions)
+    || Number(left.contentAvailable === true) - Number(right.contentAvailable === true);
 }
 
 export function compareResourceDtos(left: ResourceDto, right: ResourceDto): number {

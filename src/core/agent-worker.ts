@@ -6,6 +6,8 @@ import type {
 import type { ConversationRecordDto, SessionDto } from "./instance-dto.js";
 import type { AttachmentDto } from "./instance-attachments.js";
 import type {
+  CommandCompletionsResult,
+  CommandContentResult,
   CommandsResult,
   ControlRequest,
   ModelsResult,
@@ -263,13 +265,15 @@ export type AgentToolProjection = Omit<ToolsResult, "instance">;
 export type AgentModelListBody = Omit<ModelsResult, "instance">;
 export type AgentSessionListBody = SessionsResult;
 export type AgentCommandCatalogBody = CommandsResult;
+export type AgentCommandContentBody = CommandContentResult;
+export type AgentCommandCompletionsBody = CommandCompletionsResult;
 export type AgentResourceProjectionBody = ResourcesResult;
 
 export type AgentRequestType =
   | "command.submit" | "command.abort" | "queue.dequeue"
   | "model.list" | "model.set" | "thinking.set"
   | "tool.list" | "tool.set_active" | "settings.get" | "settings.update"
-  | "resource.get" | "command.catalog" | "session.history"
+  | "resource.get" | "command.catalog" | "command.content" | "command.complete" | "session.history"
   | "conversation.history" | "conversation.content" | "file.read" | "session.list"
   | "session.switch" | "session.new" | "session.name" | "session.compact"
   | "session.reload" | "session.tree" | "session.navigate" | "session.fork" | "session.clone";

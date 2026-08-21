@@ -747,6 +747,8 @@ export class DockHost {
       }
       case "resource.get": { const instance=this.registry.get(request.params.instanceId); const result=await instance.getResources(); this.sendSuccessAndEnd(socket,request.requestId,result); return; }
       case "command.catalog": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getCommands(request.params.prefix)); return; }
+      case "command.content": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getCommandContent(request.params.command,request.params.cursor)); return; }
+      case "command.complete": { const instance=this.registry.get(request.params.instanceId); this.sendSuccessAndEnd(socket,request.requestId,await instance.getCommandCompletions(request.params.command,request.params.argumentPrefix)); return; }
       case "session.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getHistoryPage(request.params.beforeEntryId,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,createBoundedHistoryResult(page,request.requestId,this.hostEpoch)); return; }
       case "conversation.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getConversationHistory(request.params.cursor,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
       case "conversation.content": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getConversationContent(request.params.contentRef,request.params.cursor); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
@@ -1016,6 +1018,8 @@ function isMutationRequest(type: ControlRequest["type"]): boolean {
     && type !== "settings.get"
     && type !== "resource.get"
     && type !== "command.catalog"
+    && type !== "command.content"
+    && type !== "command.complete"
     && type !== "session.history"
     && type !== "conversation.history"
     && type !== "conversation.content"

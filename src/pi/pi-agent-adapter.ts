@@ -72,6 +72,8 @@ import type {
   AgentHistoryEntry,
   AgentImagePath,
   AgentCommandCatalogBody,
+  AgentCommandCompletionsBody,
+  AgentCommandContentBody,
   AgentInputKind,
   AgentInvokeContext,
   AgentModelListBody,
@@ -89,7 +91,9 @@ import type {
   AgentToolProjection,
 } from "../core/agent-worker.js";
 import type {
+  CommandArgumentCompletionDto,
   CommandDto,
+  CommandReferenceDto,
   DiagnosticDto,
   ResourceDto,
   SettingDto,
@@ -99,9 +103,15 @@ import type {
   ToolDto,
 } from "../core/config-projection.js";
 import {
+  MAX_COMMAND_ARGUMENT_COMPLETIONS,
+  MAX_COMMAND_ARGUMENT_HINT_CHARS,
+  MAX_COMMAND_ARGUMENT_PREFIX_CHARS,
+  MAX_COMMAND_COMPLETION_TEXT_CHARS,
+  MAX_COMMAND_CONTENT_PAGE_CHARS,
   compareCommandDtos,
   compareDiagnosticDtos,
   compareResourceDtos,
+  compareSourceDtos,
   compareToolDtos,
 } from "../core/config-projection.js";
 import { projectJsonObject } from "../core/managed-instance.js";
@@ -228,6 +238,7 @@ export class PiAgentAdapter {
   private extensionCommandOperationId: string | undefined;
   private readonly conversationHistoryCursors = new Map<string, { revision: string; end: number }>();
   private readonly conversationContentCursors = new Map<string, { revision: string; contentRef: string; blockIndex: number; offset: number }>();
+  private readonly commandContentCursors = new Map<string, { commandKey: string; revision: string; offset: number }>();
 
   private constructor(private readonly options: PiAgentAdapterOptions) {
     this.processCwdValue = options.initialProcessCwd;
@@ -365,6 +376,8 @@ export class PiAgentAdapter {
       case "settings.update": return this.updateSetting(request.params.update);
       case "resource.get": return this.getResources();
       case "command.catalog": return this.getCommands(request.params.prefix);
+      case "command.content": return this.getCommandContent(request.params.command, request.params.cursor);
+      case "command.complete": return this.getCommandCompletions(request.params.command, request.params.argumentPrefix);
       case "session.history": return this.getHistory();
       case "conversation.history": return this.getConversationHistory(request.params.cursor, request.params.limit);
       case "conversation.content": return this.getConversationContent(request.params.contentRef, request.params.cursor);
@@ -572,11 +585,14 @@ export class PiAgentAdapter {
       const name = validCatalogName(prompt.name);
       if (name === undefined) continue;
       const description = safeOptionalText(prompt.description, 2_048);
+      const argumentHint = exactOptionalText(prompt.argumentHint, MAX_COMMAND_ARGUMENT_HINT_CHARS);
       commands.push({
         name,
         ...(description === undefined ? {} : { description }),
+        ...(argumentHint === undefined ? {} : { argumentHint }),
         source: projectSource(prompt.sourceInfo, "prompt"),
         argumentCompletions: false,
+        contentAvailable: true,
       });
     }
     if (validatedPiSettingValue(binding.services.settingsManager, "enableSkillCommands")) {
@@ -596,6 +612,52 @@ export class PiAgentAdapter {
       .filter((command) => prefix === undefined || command.name.startsWith(prefix));
     const projected = capJsonItems(filtered, 600_000);
     return { commands: projected, total: filtered.length, truncated: projected.length < filtered.length };
+  }
+
+  async getCommandContent(command: CommandReferenceDto, cursor?: string): Promise<AgentCommandContentBody> {
+    const prompt = this.requireActive().services.resourceLoader.getPrompts().prompts.find((candidate) => {
+      const name = validCatalogName(candidate.name);
+      return name === command.name && compareSourceDtos(projectSource(candidate.sourceInfo, "prompt"), command.source) === 0;
+    });
+    if (prompt === undefined) return { command, available: false };
+    const commandKey = JSON.stringify(command);
+    const revision = createHash("sha256").update(commandKey).update("\u0000").update(prompt.content).digest("hex");
+    let offset = 0;
+    if (cursor !== undefined) {
+      const continuation = this.commandContentCursors.get(cursor);
+      if (!continuation || continuation.commandKey !== commandKey || continuation.revision !== revision) {
+        throw new AgentConversationCursorError("This command content changed. Reopen it and try again.");
+      }
+      offset = continuation.offset;
+    }
+    const end = unicodeSafeEnd(prompt.content, Math.min(prompt.content.length, offset + MAX_COMMAND_CONTENT_PAGE_CHARS));
+    const text = prompt.content.slice(offset, end);
+    if (end >= prompt.content.length) {
+      return { command, available: true, format: "markdown", revision, text, complete: true };
+    }
+    const nextCursor = randomUUID();
+    this.commandContentCursors.set(nextCursor, { commandKey, revision, offset: end });
+    trimTokenMap(this.commandContentCursors);
+    return { command, available: true, format: "markdown", revision, text, complete: false, nextCursor };
+  }
+
+  async getCommandCompletions(command: CommandReferenceDto, argumentPrefix: string): Promise<AgentCommandCompletionsBody> {
+    const registered = this.requireActive().session.extensionRunner.getRegisteredCommands().find((candidate) => {
+      const name = validCatalogName(candidate.invocationName);
+      return name === command.name && compareSourceDtos(projectSource(candidate.sourceInfo, "extension"), command.source) === 0;
+    });
+    if (registered?.getArgumentCompletions === undefined) return { command, items: null, total: 0, truncated: false };
+    const raw = await registered.getArgumentCompletions(argumentPrefix);
+    if (raw === null) return { command, items: null, total: 0, truncated: false };
+    const items: CommandArgumentCompletionDto[] = raw.slice(0, MAX_COMMAND_ARGUMENT_COMPLETIONS).flatMap((candidate) => {
+      const value = exactOptionalText(candidate.value, MAX_COMMAND_ARGUMENT_PREFIX_CHARS);
+      if (value === undefined) return [];
+      const label = safeRequiredText(candidate.label, MAX_COMMAND_COMPLETION_TEXT_CHARS, value);
+      const description = safeOptionalText(candidate.description, MAX_COMMAND_COMPLETION_TEXT_CHARS);
+      return [{ value, label, ...(description === undefined ? {} : { description }) }];
+    });
+    const projected = capJsonItems(items, 250_000);
+    return { command, items: projected, total: raw.length, truncated: projected.length < raw.length };
   }
 
   async listSessions(scope: "cwd" | "all"): Promise<AgentSessionListBody> {
@@ -1261,6 +1323,7 @@ export class PiAgentAdapter {
     this.conversationRevisionValue = undefined;
     this.conversationHistoryCursors.clear();
     this.conversationContentCursors.clear();
+    this.commandContentCursors.clear();
     for (const binding of [this.active, this.staged]) {
       if (!binding) continue;
       binding.token.active = false;
@@ -1412,6 +1475,10 @@ async function loadPiImages(images: readonly AgentImagePath[] | undefined): Prom
 function safeOptionalText(value: unknown, limit: number): string | undefined {
   if (typeof value !== "string" || value.length === 0) return undefined;
   return boundedString(value, limit, "");
+}
+
+function exactOptionalText(value: unknown, limit: number): string | undefined {
+  return typeof value === "string" && value.length > 0 && value.length <= limit ? value : undefined;
 }
 
 function safeRequiredText(value: unknown, limit: number, fallback: string): string {

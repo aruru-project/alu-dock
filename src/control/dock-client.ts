@@ -8,7 +8,7 @@ import type { DeliverableDto } from "../core/instance-deliverables.js";
 import type { DeliveryMode, DockEvent, EventCursor, ImagePathDto, InstanceSnapshot } from "../core/managed-instance.js";
 import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_CHUNK_BYTES, type AttachmentUploadResult } from "../core/instance-attachments.js";
 import type { ThinkingLevel } from "../core/agent-worker.js";
-import type { SettingUpdate } from "../core/config-projection.js";
+import type { CommandReferenceDto, SettingUpdate } from "../core/config-projection.js";
 import type { ProjectTrustChoice } from "./project-trust.js";
 import { DOCK_VERSION } from "../version.js";
 import { encodeJsonLine, JsonLineDecoder, JsonLineError } from "./json-lines.js";
@@ -28,6 +28,7 @@ import {
   INSTANCE_KEYS_CAPABILITY,
   INSTANCE_DISPLAY_NAME_CAPABILITY,
   CONVERSATION_CONTENT_CAPABILITY,
+  COMMAND_DISCOVERY_CAPABILITY,
   PUBLISHED_FILES_CAPABILITY,
   INSTANCE_DELIVERABLES_CAPABILITY,
   WORKSPACE_LIST_CAPABILITY,
@@ -86,6 +87,8 @@ import {
   parseSettingUpdateResult,
   parseResourcesResult,
   parseCommandsResult,
+  parseCommandContentResult,
+  parseCommandCompletionsResult,
   ProtocolValidationError,
   type AbortResult,
   type AdoptResult,
@@ -131,6 +134,8 @@ import {
   type SettingUpdateResult,
   type ResourcesResult,
   type CommandsResult,
+  type CommandContentResult,
+  type CommandCompletionsResult,
 } from "./protocol.js";
 
 type Params<T extends ControlRequest["type"]> = Extract<ControlRequest,{type:T}>["params"];
@@ -365,6 +370,8 @@ export class DockClient {
   updateSetting(instanceId:string,update:SettingUpdate,operationId=this.createRequestId()):Promise<SettingUpdateResult>{return this.request("settings.update",{operationId,instanceId,update},"settings.v1",parseSettingUpdateResult);}
   resources(instanceId:string):Promise<ResourcesResult>{return this.request("resource.get",{instanceId},["resources.v1","projection.completeness.v1"],parseResourcesResult);}
   commands(instanceId:string,prefix?:string):Promise<CommandsResult>{return this.request("command.catalog",{instanceId,prefix},["resources.v1","projection.completeness.v1"],parseCommandsResult);}
+  commandContent(instanceId:string,command:CommandReferenceDto,cursor?:string):Promise<CommandContentResult>{return this.request("command.content",{instanceId,command,cursor},COMMAND_DISCOVERY_CAPABILITY,parseCommandContentResult);}
+  commandCompletions(instanceId:string,command:CommandReferenceDto,argumentPrefix:string):Promise<CommandCompletionsResult>{return this.request("command.complete",{instanceId,command,argumentPrefix},COMMAND_DISCOVERY_CAPABILITY,parseCommandCompletionsResult);}
   history(instanceId:string,beforeEntryId?:string,limit=200):Promise<HistoryResult>{return this.request("session.history",{instanceId,beforeEntryId,limit},["tui.projection.v1",IMAGE_INPUT_CAPABILITY],parseHistoryResult);}
   async conversationHistory(instanceId:string,cursor?:string,limit=50):Promise<ConversationHistoryResult>{const result=await this.request("conversation.history",{instanceId,cursor,limit},CONVERSATION_CONTENT_CAPABILITY,parseConversationHistoryResult);if(result.instance.id!==instanceId)throw new ControlClientError("invalid_response","Conversation history result belongs to another instance");return result;}
   async conversationContent(instanceId:string,contentRef:string,cursor?:string):Promise<ConversationContentResult>{const result=await this.request("conversation.content",{instanceId,contentRef,cursor},CONVERSATION_CONTENT_CAPABILITY,parseConversationContentResult);if(result.instanceId!==instanceId||result.contentRef!==contentRef)throw new ControlClientError("invalid_response","Conversation content result belongs to another request");return result;}

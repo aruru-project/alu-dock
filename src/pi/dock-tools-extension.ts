@@ -31,6 +31,8 @@ export const DOCK_TOOL_NAMES = [
 ] as const;
 const DOCK_TOOLS_EXTENSION_PATH = "<inline:alu-dock-tools>";
 const DOCK_TOOLS_STATUS_KEY = "Dock tools";
+const DOCK_TOOLS_ACTIONS = ["on", "off", "status"] as const;
+type DockToolsAction = typeof DOCK_TOOLS_ACTIONS[number];
 const TOOL_NAMES = new Set<string>(DOCK_TOOL_NAMES);
 const LIST_SCHEMA = {
   type: "object",
@@ -316,9 +318,12 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
 
     pi.registerCommand("dock-tools", {
       description: "Turn Agent-facing Dock tools on or off, or show their status",
+      getArgumentCompletions: (prefix) => DOCK_TOOLS_ACTIONS
+        .filter((action) => action.startsWith(prefix))
+        .map((action) => ({ value: action, label: action })),
       handler: async (args, ctx) => {
         const action = args.trim() || "status";
-        if (action !== "on" && action !== "off" && action !== "status") {
+        if (!isDockToolsAction(action)) {
           ctx.ui.notify("Use /dock-tools on, /dock-tools off, or /dock-tools status.", "warning");
           return;
         }
@@ -345,6 +350,10 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     });
     pi.on("session_shutdown", () => detach());
   };
+}
+
+function isDockToolsAction(value: string): value is DockToolsAction {
+  return (DOCK_TOOLS_ACTIONS as readonly string[]).includes(value);
 }
 
 function findDockToolCollision(pi: ExtensionAPI): ReturnType<ExtensionAPI["getAllTools"]>[number] | undefined {

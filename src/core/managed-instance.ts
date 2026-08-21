@@ -27,6 +27,7 @@ import {
 } from "./agent-worker.js";
 import type {
   CommandDto,
+  CommandReferenceDto,
   DiagnosticDto,
   ResourceDto,
   SettingDto,
@@ -36,7 +37,7 @@ import type {
   SourceDto,
   ToolDto,
 } from "./config-projection.js";
-export type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingKey, SettingUpdate, SettingValueMap, SourceDto, ToolDto } from "./config-projection.js";
+export type { CommandDto, CommandReferenceDto, DiagnosticDto, ResourceDto, SettingDto, SettingKey, SettingUpdate, SettingValueMap, SourceDto, ToolDto } from "./config-projection.js";
 import type {
   ClearedAgentQueue,
   AgentCommandPreflightResult,
@@ -52,6 +53,8 @@ import type {
   AgentInputKind,
   AgentModelInfo,
   AgentCommandCatalogBody,
+  AgentCommandCompletionsBody,
+  AgentCommandContentBody,
   AgentModelListBody,
   AgentModelState,
   AgentResourceProjectionBody,
@@ -1077,6 +1080,14 @@ export class ManagedInstance {
 
   async getCommands(prefix?: string): Promise<AgentCommandCatalogBody> {
     return this.withProjectionRead(() => this.invokeAgent<AgentCommandCatalogBody>("command.catalog", prefix === undefined ? {} : { prefix }));
+  }
+
+  async getCommandContent(command: CommandReferenceDto, cursor?: string): Promise<AgentCommandContentBody> {
+    return this.withProjectionRead(() => this.invokeAgent<AgentCommandContentBody>("command.content", { command, ...(cursor === undefined ? {} : { cursor }) }));
+  }
+
+  async getCommandCompletions(command: CommandReferenceDto, argumentPrefix: string): Promise<AgentCommandCompletionsBody> {
+    return this.withProjectionRead(() => this.invokeAgent<AgentCommandCompletionsBody>("command.complete", { command, argumentPrefix }));
   }
 
   async resolveSessionTarget(sessionFile: string): Promise<AgentSessionTarget> {

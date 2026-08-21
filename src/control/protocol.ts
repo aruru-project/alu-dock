@@ -72,8 +72,23 @@ import type {
   SessionDto,
   TreeNodeDto,
 } from "../core/managed-instance.js";
-import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingKey, SettingUpdate, ToolDto } from "../core/config-projection.js";
+import type {
+  CommandArgumentCompletionDto,
+  CommandDto,
+  CommandReferenceDto,
+  DiagnosticDto,
+  ResourceDto,
+  SettingDto,
+  SettingKey,
+  SettingUpdate,
+  ToolDto,
+} from "../core/config-projection.js";
 import {
+  MAX_COMMAND_ARGUMENT_COMPLETIONS,
+  MAX_COMMAND_ARGUMENT_HINT_CHARS,
+  MAX_COMMAND_ARGUMENT_PREFIX_CHARS,
+  MAX_COMMAND_COMPLETION_TEXT_CHARS,
+  MAX_COMMAND_CONTENT_PAGE_CHARS,
   SETTING_DEFINITIONS,
   SETTING_KEYS,
   compareCommandDtos,
@@ -132,8 +147,10 @@ export const WORKSPACE_LIST_CAPABILITY = "workspace.list.v1" as const;
 export const ATTACHMENTS_CAPABILITY = "attachments.v1" as const;
 export const PUBLISHED_FILES_CAPABILITY = "published-files.v1" as const;
 export const INSTANCE_DELIVERABLES_CAPABILITY = "instance.deliverables.v1" as const;
+export const COMMAND_DISCOVERY_CAPABILITY = "command.discovery.v1" as const;
 
 export const IMPLEMENTED_CAPABILITIES = [
+  COMMAND_DISCOVERY_CAPABILITY,
   ATTACHMENTS_CAPABILITY,
   INSTANCE_DELIVERABLES_CAPABILITY,
   PUBLISHED_FILES_CAPABILITY,
@@ -245,6 +262,8 @@ export type ControlRequest =
   | Request<"settings.update", { operationId: string; instanceId: string; update: SettingUpdate }>
   | Request<"resource.get", { instanceId: string }>
   | Request<"command.catalog", { instanceId: string; prefix?: string }>
+  | Request<"command.content", { instanceId: string; command: CommandReferenceDto; cursor?: string }>
+  | Request<"command.complete", { instanceId: string; command: CommandReferenceDto; argumentPrefix: string }>
   | Request<"session.history", { instanceId: string; beforeEntryId?: string; limit: number }>
   | Request<"conversation.history", { instanceId: string; cursor?: string; limit: number }>
   | Request<"conversation.content", { instanceId: string; contentRef: string; cursor?: string }>
@@ -397,6 +416,23 @@ export interface ResourcesResult {
   diagnosticsTruncated: boolean;
 }
 export interface CommandsResult { commands: CommandDto[]; total: number; truncated: boolean }
+export type CommandContentResult =
+  | { command: CommandReferenceDto; available: false }
+  | {
+    command: CommandReferenceDto;
+    available: true;
+    format: "markdown";
+    revision: string;
+    text: string;
+    complete: boolean;
+    nextCursor?: string;
+  };
+export interface CommandCompletionsResult {
+  command: CommandReferenceDto;
+  items: CommandArgumentCompletionDto[] | null;
+  total: number;
+  truncated: boolean;
+}
 export type { AttachmentDto, AttachmentUploadResult, DeliverableDto };
 export type ConfigurationResult = ModelConfigurationResult | ThinkingConfigurationResult | SettingUpdateResult;
 
@@ -428,6 +464,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type.startsWith("session.")) return "session.commands.v1";
   if (type.startsWith("tool.")) return "tools.v1";
   if (type.startsWith("settings.")) return "settings.v1";
+  if (type === "command.content" || type === "command.complete") return COMMAND_DISCOVERY_CAPABILITY;
   if (type === "resource.get" || type === "command.catalog") return "resources.v1";
   return "models.v1";
 }
@@ -703,6 +740,22 @@ export function parseControlRequest(input: unknown): ControlRequest {
     case "settings.update": exact(params, ["operationId", "instanceId", "update"], "invalid_request"); return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), update: parseSettingUpdate(params.update, "params.update", "invalid_request") } };
     case "resource.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "command.catalog": exact(params, ["instanceId", "prefix"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId(), prefix: optionalString(params.prefix, "params.prefix", 256, "invalid_request") } };
+    case "command.content": {
+      exact(params, ["instanceId", "command", "cursor"], "invalid_request");
+      return { ...base, type, params: {
+        instanceId: instanceId(),
+        command: parseCommandReference(params.command, "params.command", "invalid_request"),
+        cursor: optionalString(params.cursor, "params.cursor", 128, "invalid_request"),
+      } };
+    }
+    case "command.complete": {
+      exact(params, ["instanceId", "command", "argumentPrefix"], "invalid_request");
+      return { ...base, type, params: {
+        instanceId: instanceId(),
+        command: parseCommandReference(params.command, "params.command", "invalid_request"),
+        argumentPrefix: boundedString(params.argumentPrefix, "params.argumentPrefix", MAX_COMMAND_ARGUMENT_PREFIX_CHARS, "invalid_request"),
+      } };
+    }
     case "session.history": {
       exact(params, ["instanceId", "beforeEntryId", "limit"], "invalid_request");
       if (!Number.isSafeInteger(params.limit) || (params.limit as number) < 1 || (params.limit as number) > MAX_HISTORY_ITEMS) throw validation("invalid_request", `params.limit must be between 1 and ${MAX_HISTORY_ITEMS}`);
@@ -1602,6 +1655,37 @@ export function parseCommandsResult(input: unknown): CommandsResult {
   return { commands, ...parseCollectionCompleteness(value, commands.length) };
 }
 
+export function parseCommandContentResult(input: unknown): CommandContentResult {
+  const value = object(input, "command content result");
+  exact(value, ["command", "available", "format", "revision", "text", "complete", "nextCursor"]);
+  const command = parseCommandReference(value.command, "command");
+  const available = boolean(value.available, "available");
+  if (!available) return { command, available: false };
+  const complete = boolean(value.complete, "complete");
+  const nextCursor = optionalString(value.nextCursor, "nextCursor", 128);
+  if (complete === (nextCursor !== undefined)) throw validation("invalid_response", "command content continuation metadata is inconsistent");
+  return {
+    command,
+    available: true,
+    format: enumeration(value.format, "format", ["markdown"] as const),
+    revision: string(value.revision, "revision", 128),
+    text: boundedString(value.text, "text", MAX_COMMAND_CONTENT_PAGE_CHARS),
+    complete,
+    ...(nextCursor === undefined ? {} : { nextCursor }),
+  };
+}
+
+export function parseCommandCompletionsResult(input: unknown): CommandCompletionsResult {
+  const value = object(input, "command completions result");
+  exact(value, ["command", "items", "total", "truncated"]);
+  const items = value.items === null
+    ? null
+    : array(value.items, "items", MAX_COMMAND_ARGUMENT_COMPLETIONS).map((item, index) => parseCommandArgumentCompletion(item, `items[${index}]`));
+  const completeness = parseCollectionCompleteness(value, items?.length ?? 0);
+  if (items === null && (completeness.total !== 0 || completeness.truncated)) throw validation("invalid_response", "absent command completions cannot be truncated");
+  return { command: parseCommandReference(value.command, "command"), items, ...completeness };
+}
+
 function parseCollectionCompleteness(
   value: Record<string, unknown>,
   returned: number,
@@ -2048,9 +2132,11 @@ function parseSettingValue(key: SettingKey, input: unknown, code = "invalid_resp
 
 function parseTool(input: unknown, field: string): ToolDto { const value = object(input, field); exact(value, ["name", "description", "active", "source", "parameterSchema"]); return { name: string(value.name, `${field}.name`, 256), description: boundedString(value.description, `${field}.description`, MAX_MESSAGE), active: boolean(value.active, `${field}.active`), ...(value.source === undefined ? {} : { source: parseSource(value.source, `${field}.source`) }), ...(value.parameterSchema === undefined ? {} : { parameterSchema: parseJsonObject(value.parameterSchema, `${field}.parameterSchema`) }) }; }
 function parseResource(input: unknown, field: string): ResourceDto { const value = object(input, field); exact(value, ["kind", "name", "path", "source"]); return { kind: enumeration(value.kind, `${field}.kind`, ["extension", "skill", "prompt", "context"]), name: string(value.name, `${field}.name`, 256), ...(value.path === undefined ? {} : { path: string(value.path, `${field}.path`, MAX_CONTROL_CWD_CHARS) }), ...(value.source === undefined ? {} : { source: parseSource(value.source, `${field}.source`) }) }; }
-function parseSource(input: unknown, field: string): import("../core/config-projection.js").SourceDto { const value = object(input, field); exact(value, ["kind", "path", "package"]); const kind=enumeration(value.kind, `${field}.kind`, ["built-in", "extension", "skill", "prompt"]); if(kind==="built-in"&&(value.path!==undefined||value.package!==undefined))throw validation("invalid_response",`${field} built-in source cannot carry path or package`); return { kind, ...(value.path === undefined ? {} : { path: string(value.path, `${field}.path`, MAX_CONTROL_CWD_CHARS) }), ...(value.package === undefined ? {} : { package: string(value.package, `${field}.package`, 256) }) }; }
+function parseSource(input: unknown, field: string, code = "invalid_response"): import("../core/config-projection.js").SourceDto { const value = object(input, field, code); exact(value, ["kind", "path", "package"], code); const kind=enumeration(value.kind, `${field}.kind`, ["built-in", "extension", "skill", "prompt"], code); if(kind==="built-in"&&(value.path!==undefined||value.package!==undefined))throw validation(code,`${field} built-in source cannot carry path or package`); return { kind, ...(value.path === undefined ? {} : { path: string(value.path, `${field}.path`, MAX_CONTROL_CWD_CHARS, code) }), ...(value.package === undefined ? {} : { package: string(value.package, `${field}.package`, 256, code) }) }; }
 function parseDiagnostic(input: unknown, field: string): DiagnosticDto { const value = object(input, field); exact(value, ["severity", "message", "source"]); return { severity: enumeration(value.severity, `${field}.severity`, ["info", "warning", "error"]), message: string(value.message, `${field}.message`, MAX_MESSAGE), ...(value.source === undefined ? {} : { source: string(value.source, `${field}.source`, 256) }) }; }
-function parseCommand(input: unknown, field: string): CommandDto { const value = object(input, field); exact(value, ["name", "description", "source", "argumentCompletions"]); return { name: string(value.name, `${field}.name`, 256), ...(value.description === undefined ? {} : { description: boundedString(value.description, `${field}.description`, MAX_MESSAGE) }), source: parseSource(value.source, `${field}.source`), argumentCompletions: boolean(value.argumentCompletions, `${field}.argumentCompletions`) }; }
+function parseCommandReference(input: unknown, field: string, code = "invalid_response"): CommandReferenceDto { const value = object(input, field, code); exact(value, ["name", "source"], code); return { name: string(value.name, `${field}.name`, 256, code), source: parseSource(value.source, `${field}.source`, code) }; }
+function parseCommandArgumentCompletion(input: unknown, field: string): CommandArgumentCompletionDto { const value = object(input, field); exact(value, ["value", "label", "description"]); return { value: boundedString(value.value, `${field}.value`, MAX_COMMAND_ARGUMENT_PREFIX_CHARS), label: string(value.label, `${field}.label`, MAX_COMMAND_COMPLETION_TEXT_CHARS), ...(value.description === undefined ? {} : { description: boundedString(value.description, `${field}.description`, MAX_COMMAND_COMPLETION_TEXT_CHARS) }) }; }
+function parseCommand(input: unknown, field: string): CommandDto { const value = object(input, field); exact(value, ["name", "description", "source", "argumentHint", "argumentCompletions", "contentAvailable"]); const contentAvailable=value.contentAvailable===undefined?undefined:boolean(value.contentAvailable,`${field}.contentAvailable`); if(contentAvailable===false)throw validation("invalid_response",`${field}.contentAvailable must be omitted unless true`); return { ...parseCommandReference(value, field), ...(value.description === undefined ? {} : { description: boundedString(value.description, `${field}.description`, MAX_MESSAGE) }), ...(value.argumentHint === undefined ? {} : { argumentHint: boundedString(value.argumentHint, `${field}.argumentHint`, MAX_COMMAND_ARGUMENT_HINT_CHARS) }), argumentCompletions: boolean(value.argumentCompletions, `${field}.argumentCompletions`), ...(contentAvailable===true?{contentAvailable:true as const}:{}) }; }
 export function parseSettingDto(input: unknown, field: string): SettingDto {
   const value = object(input, field); exact(value, ["key", "value", "source", "writable", "valueType", "allowedValues", "min", "max", "reloadRequired", "hostRestartRequired"]);
   const key = settingKey(value.key); const definition = SETTING_DEFINITIONS[key];

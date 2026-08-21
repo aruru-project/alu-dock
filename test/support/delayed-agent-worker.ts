@@ -192,6 +192,8 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       case "settings.update": return this.updateSetting(p.update);
       case "resource.get": return this.getResources();
       case "command.catalog": return this.getCommands(p.prefix);
+      case "command.content": return { command: p.command, available: false };
+      case "command.complete": return { command: p.command, items: null, total: 0, truncated: false };
       case "session.history": await Promise.resolve(); return this.getHistory();
       case "conversation.history": return this.getConversationHistory(p.cursor, p.limit);
       case "conversation.content": return this.getConversationContent(p.contentRef, p.cursor);

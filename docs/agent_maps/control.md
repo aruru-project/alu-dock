@@ -175,6 +175,12 @@ watch 是 Host 内存中的一次性 subscription，不轮询、不占模型 tur
 
 `dock_create(cwd,name?)` 与 Protocol V2 `instance.create` 进入同一个 `InstanceMutationService`，因此复用 operation ledger、canonical cwd、project trust 与 catalog transaction；它不另开 Host socket，也不接受 Pi 启动参数。`dock_send(target,message)` 先在 Host 解析 target 和 source display name，再把固定可见来源包装后的正文交给同一个 `command.submit` service，并使用普通 `auto` delivery。目标看到的是持久化的普通 user message，Queue 与 receipt 语义不分叉；正文逐字保留，来源显示人类名称而不是 UUID。
 
+## 命令发现
+
+`command.catalog` 返回命令所有者提供的名称、说明、来源和能力事实。静态参数用法保留为可选 `argumentHint`；`argumentCompletions` 只表示命令所有者能根据当前参数前缀提供候选，不把动态候选伪装成静态参数表；`contentAvailable` 表示该命令有可按需检查的权威内容。Host 不按命令名维护用法表，也不从 description 或 handler 猜参数。
+
+`command.discovery.v1` 提供两条只读能力：`command.content` 分页读取命令所有者当前加载的 Markdown 内容，`command.complete` 取得命令所有者针对给定参数前缀生成的候选。请求使用 catalog 中的 canonical `{name,source}` 引用，避免同名的 prompt、extension 或 skill 被错误认领。Prompt 正文来自 Worker 已加载的模板对象，不暴露文件读取接口；Host 只做 instance/lifecycle 判断并原样路由。某个客户端不展示详情或动态候选，不影响其他客户端使用这项能力。
+
 ## Capabilities
 
 Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力。
