@@ -2216,6 +2216,7 @@ async function handleWindowFocusChanged(focused: boolean) {
     await detachConversationFollow()
     return
   }
+  await app.refreshWorksQuietly()
   const work = selected.value
   if (work?.lifecycle === 'active') await reattachConversationFollow(work.id)
 }
@@ -2269,15 +2270,30 @@ function handleActiveFollowStatus(payload: {
     reconnectTimer = 0
     followConnected.value = false
     conversationError.value = null
+    void detachConversationFollow()
     return
   }
   followConnected.value = payload.state === 'connected'
   if (payload.message) conversationError.value = payload.message
-  if (payload.state === 'resync_required') {
-    void loadSelectedConversation(payload.instanceId, true)
-  } else if (payload.state === 'disconnected') {
-    if (payload.subscriptionId === activeFollowSubscription.value) scheduleConversationReconnect(payload.instanceId)
+  if (payload.state === 'resync_required' || payload.state === 'disconnected') {
+    void recoverAfterFollowBoundary(payload)
   }
+}
+
+async function recoverAfterFollowBoundary(payload: {
+  instanceId: string
+  subscriptionId: string
+  state: FollowConnectionState
+}) {
+  await app.refreshWorksQuietly()
+  if (payload.subscriptionId !== activeFollowSubscription.value || selected.value?.id !== payload.instanceId) return
+  if (selected.value.lifecycle !== 'active') {
+    conversationError.value = null
+    await detachConversationFollow()
+    return
+  }
+  if (payload.state === 'resync_required') await loadSelectedConversation(payload.instanceId, true)
+  else scheduleConversationReconnect(payload.instanceId)
 }
 
 function waitForFollowConnection(subscriptionId: string): Promise<void> {
@@ -2355,7 +2371,12 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
     const bootstrap = await loadConversation(instanceId, capturedHost)
     if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
     if (!conversationSwapIsCorrelated(capturedHost, instanceId, bootstrap, true)) throw new Error('对话状态已经变化，请重新载入。')
-    if (app.payload?.host.hostEpoch !== bootstrap.cursor.hostEpoch) throw new Error('这项工作的状态已经变化，请重新载入。')
+    if (app.payload?.host.hostEpoch !== bootstrap.cursor.hostEpoch) {
+      await app.refreshWorksQuietly()
+      if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
+      if (selected.value.lifecycle !== 'active') return false
+      if (app.payload?.host.hostEpoch !== bootstrap.cursor.hostEpoch) throw new Error('这项工作的状态已经变化，请重新载入。')
+    }
 
     subscriptionId = crypto.randomUUID()
     pendingFollowEvents.set(subscriptionId, [])

@@ -84,28 +84,32 @@ export const useAppStore = defineStore('app', () => {
       const next = await bootstrap(captured)
       if (epoch !== loadEpoch || !contextMatches(captured)) return
       if (next.hostId !== captured.hostId || next.selectionGeneration !== captured.selectionGeneration) return
-      if (payload.value?.hostId === next.hostId && payload.value.host.hostEpoch === next.host.hostEpoch) {
-        next.works = next.works.map((incoming) => {
-          const current = payload.value?.works.find((work) => work.id === incoming.id)
-          return current && snapshotIsNewer(current, incoming) ? current : incoming
-        })
-      }
-      payload.value = next
-      // Bootstrap may record a newly successful endpoint and advance the
-      // profile revision, so keep the catalog mutation source current too.
-      applyHostProfile(next.host.profile, captured)
-      if (selectedWorkId.value && !selectedWork.value) {
-        selectedWorkId.value = null
-        const host = localUiState.value.hosts[captured.hostId]
-        if (host) host.selectedWorkId = null
-        saveLocalState()
-      }
+      applyBootstrapProjection(next, captured)
     } catch (cause) {
       if (epoch !== loadEpoch || !contextMatches(captured)) return
       payload.value = null
       const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code) : ''
       hostUnreachable.value = code === 'host_unreachable' || code === 'connection_failed'
       error.value = humanError(cause)
+    }
+  }
+
+  function applyBootstrapProjection(next: BootstrapPayload, context: HostContext) {
+    if (payload.value?.hostId === next.hostId && payload.value.host.hostEpoch === next.host.hostEpoch) {
+      next.works = next.works.map((incoming) => {
+        const current = payload.value?.works.find((work) => work.id === incoming.id)
+        return current && snapshotIsNewer(current, incoming) ? current : incoming
+      })
+    }
+    payload.value = next
+    // Bootstrap may record a newly successful endpoint and advance the
+    // profile revision, so keep the catalog mutation source current too.
+    applyHostProfile(next.host.profile, context)
+    if (selectedWorkId.value && !selectedWork.value) {
+      selectedWorkId.value = null
+      const host = localUiState.value.hosts[context.hostId]
+      if (host) host.selectedWorkId = null
+      saveLocalState()
     }
   }
 
@@ -164,7 +168,14 @@ export const useAppStore = defineStore('app', () => {
       if (refreshEpoch !== workCatalogRefreshEpoch || !contextMatches(captured)) return false
       const target = payload.value
       if (!target || target.hostId !== captured.hostId || target.host.hostEpoch !== hostEpoch) return false
-      if (next.hostId !== captured.hostId || next.selectionGeneration !== captured.selectionGeneration || next.hostEpoch !== hostEpoch) return false
+      if (next.hostId !== captured.hostId || next.selectionGeneration !== captured.selectionGeneration) return false
+      if (next.hostEpoch !== hostEpoch) {
+        const replacement = await bootstrap(captured)
+        if (refreshEpoch !== workCatalogRefreshEpoch || !contextMatches(captured)) return false
+        if (replacement.hostId !== captured.hostId || replacement.selectionGeneration !== captured.selectionGeneration) return false
+        applyBootstrapProjection(replacement, captured)
+        return true
+      }
       next.instances = next.instances.map((incoming) => {
         const current = target.works.find((work) => work.id === incoming.id)
         return current && snapshotIsNewer(current, incoming) ? current : incoming
