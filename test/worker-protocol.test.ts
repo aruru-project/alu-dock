@@ -115,6 +115,11 @@ test("private Worker conversation boundary accepts checkpoints and canonical per
     state: STATE,
   }).kind, "event");
   assert.throws(() => parseWorkerEnvelope({
+    kind: "event",
+    event: { type: "dock_conversation_frame", frame: { type: "message.delta", data: { messageId: "assistant-1", block: "text", delta: "hello", injected: true } } },
+    state: STATE,
+  }), /unknown field/i);
+  assert.throws(() => parseWorkerEnvelope({
     kind: "event", event: { type: "conversation_checkpoint", history: [], injected: true }, state: STATE,
   }), /unknown field/i);
   validateAgentWorkerResult("session.history", [{

@@ -18,6 +18,7 @@ import {
   type DeliverableDto,
 } from "../core/instance-deliverables.js";
 import {
+  CONVERSATION_FRAME_TYPES,
   MAX_CONVERSATION_CHUNK_CHARS,
   MAX_SESSION_FIRST_USER_MESSAGE_CHARS,
 } from "../core/instance-dto.js";
@@ -51,6 +52,7 @@ import {
 import type {
   CommandReceipt,
   ContentBlockDto,
+  ConversationFrame,
   ConversationContentChunkDto,
   ConversationContentPageDto,
   ConversationHistoryPageDto,
@@ -1752,6 +1754,15 @@ function parseDockEvent(input: unknown, field: string): DockEvent {
   const data = parseEventData(type, value.data, `${field}.data`);
   return { ...base, type, data } as DockEvent;
 }
+
+/** The Worker and public event envelope share this one conversation-frame parser. */
+export function parseConversationFrame(input: unknown, field = "conversation frame"): ConversationFrame {
+  const value = object(input, field);
+  exact(value, ["type", "data"]);
+  const type = enumeration(value.type, `${field}.type`, CONVERSATION_FRAME_TYPES);
+  return { type, data: parseEventData(type, value.data, `${field}.data`) } as ConversationFrame;
+}
+
 function parseEventData(type: keyof EventDataMap, input: unknown, field: string): unknown {
   const data = object(input, field);
   const text = (key: string, max = MAX_TEXT): string => string(data[key], `${field}.${key}`, max);

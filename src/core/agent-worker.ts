@@ -1,15 +1,18 @@
 import type {
-  CommandDto,
-  DiagnosticDto,
-  ResourceDto,
   SettingDto,
   SettingKey,
   SettingUpdate,
-  ToolDto,
 } from "./config-projection.js";
-import type { ConversationRecordDto } from "./instance-dto.js";
+import type { ConversationRecordDto, SessionDto } from "./instance-dto.js";
 import type { AttachmentDto } from "./instance-attachments.js";
-import type { ControlRequest } from "../control/protocol.js";
+import type {
+  CommandsResult,
+  ControlRequest,
+  ModelsResult,
+  ResourcesResult,
+  SessionsResult,
+  ToolsResult,
+} from "../control/protocol.js";
 import type { ObservationNotification } from "./instance-observation.js";
 import type { PublishedFileDto } from "./published-file.js";
 
@@ -57,6 +60,8 @@ export interface AgentModelState {
   thinkingLevel: ThinkingLevel;
   availableThinkingLevels: ThinkingLevel[];
 }
+
+export type AgentSessionInfo = SessionDto;
 
 export interface AgentSessionMetrics {
   messages: { user: number; assistant: number; toolCalls: number; toolResults: number; total: number };
@@ -108,14 +113,6 @@ export interface AgentConversationContentPage {
   chunks: AgentConversationContentChunk[];
   complete: boolean;
   nextCursor?: string;
-}
-
-export interface AgentSessionInfo {
-  sessionId: string;
-  sessionFile: string;
-  name?: string;
-  cwd: string;
-  updatedAt?: string;
 }
 
 export interface AgentProjectTrust {
@@ -262,39 +259,11 @@ export class AgentSettingsWriteError extends Error {
  * projection point; the Host only adds its own facts (instance snapshot,
  * instanceId, runtimeGeneration) and never rebuilds these DTOs.
  */
-export interface AgentToolProjection {
-  tools: ToolDto[];
-  total: number;
-  truncated: boolean;
-}
-
-export interface AgentModelListBody {
-  models: AgentModelInfo[];
-  availableThinkingLevels: ThinkingLevel[];
-  total: number;
-  truncated: boolean;
-}
-
-export interface AgentSessionListBody {
-  sessions: AgentSessionInfo[];
-  total: number;
-  truncated: boolean;
-}
-
-export interface AgentCommandCatalogBody {
-  commands: CommandDto[];
-  total: number;
-  truncated: boolean;
-}
-
-export interface AgentResourceProjectionBody {
-  resources: ResourceDto[];
-  diagnostics: DiagnosticDto[];
-  resourceTotal: number;
-  resourcesTruncated: boolean;
-  diagnosticTotal: number;
-  diagnosticsTruncated: boolean;
-}
+export type AgentToolProjection = Omit<ToolsResult, "instance">;
+export type AgentModelListBody = Omit<ModelsResult, "instance">;
+export type AgentSessionListBody = SessionsResult;
+export type AgentCommandCatalogBody = CommandsResult;
+export type AgentResourceProjectionBody = ResourcesResult;
 
 export type AgentRequestType =
   | "command.submit" | "command.abort" | "queue.dequeue"

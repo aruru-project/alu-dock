@@ -250,14 +250,16 @@ export interface EventDataMap {
   "extension.error": { source?: string; event?: string; error: string };
 }
 
-export type ConversationFrameType =
-  | "message.submitted"
-  | "message.delta"
-  | "message.completed"
-  | "tool.started"
-  | "tool.args_updated"
-  | "tool.output_updated"
-  | "tool.completed";
+export const CONVERSATION_FRAME_TYPES = [
+  "message.submitted",
+  "message.delta",
+  "message.completed",
+  "tool.started",
+  "tool.args_updated",
+  "tool.output_updated",
+  "tool.completed",
+] as const;
+export type ConversationFrameType = typeof CONVERSATION_FRAME_TYPES[number];
 export type ConversationFrame = {
   [K in ConversationFrameType]: { type: K; data: EventDataMap[K] }
 }[ConversationFrameType];

@@ -83,7 +83,6 @@ import type {
   AgentPromptOptions,
   AgentRequest,
   AgentWorkerControl,
-  AgentSessionInfo,
   AgentSessionMetrics,
   AgentSessionTarget,
   ThinkingLevel,

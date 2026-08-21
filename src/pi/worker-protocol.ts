@@ -20,8 +20,8 @@ import {
   parseFileReadBody,
   parseHistoryEntry,
   parseCompactionBody,
+  parseConversationFrame,
   parseModelListBody,
-  parsePublishedFileDto,
   parseResourcesResult,
   parseSessionsResult,
   parseSettingDto,
@@ -354,8 +354,13 @@ function validateWorkerAgentEvent(event: Record<string, unknown>): void {
       oneOf(event.reason, ["manual", "threshold", "overflow"], "Compaction reason");
       if (typeof event.aborted !== "boolean" || typeof event.willRetry !== "boolean") throw new Error("Compaction event flags are invalid");
       optionalString(event.errorMessage, 2_048); optionalString(event.operationId, 128); return;
-    case "dock_conversation_frame":
-      exactKeys(event, ["type", "frame"], "Worker conversation-frame event"); validateConversationFrame(event.frame); return;
+    case "dock_conversation_frame": {
+      exactKeys(event, ["type", "frame"], "Worker conversation-frame event");
+      const frame = parseConversationFrame(event.frame, "Worker conversation frame");
+      assertNoUnknownFields(event.frame, frame, "Worker conversation frame");
+      event.frame = frame;
+      return;
+    }
     case "dock_queue_consumed":
       exactKeys(event, ["type", "operationId"], "Worker queue-consumed event"); boundedString(event.operationId, 128, "Worker queue operation id"); return;
     case "thinking_level_changed":
@@ -403,82 +408,6 @@ function validateWorkerAgentEvent(event: Record<string, unknown>): void {
   }
 }
 
-function validateConversationFrame(raw: unknown): void {
-  const frame = record(raw, "Worker conversation frame");
-  exactKeys(frame, ["type", "data"], "Worker conversation frame");
-  const type = oneOf(frame.type, [
-    "message.submitted", "message.delta", "message.completed",
-    "tool.started", "tool.args_updated", "tool.output_updated", "tool.completed",
-  ], "Worker conversation frame type");
-  const data = record(frame.data, `Worker ${type} data`);
-  if (type === "message.submitted") {
-    exactKeys(data, ["operationId", "messageId", "role", "text", "images", "attachments", "delivery", "queueItemId"], "Worker submitted-message data");
-    boundedString(data.operationId, 128, "Message operation id"); boundedString(data.messageId, 128, "Message id");
-    if (data.role !== "user") throw new Error("Submitted message role is invalid");
-    boundedString(data.text, 256_000, "Submitted message text", true);
-    if (data.images !== undefined) validateImagePaths(data.images);
-    if (data.attachments !== undefined) validateAttachmentDtos(data.attachments, "Submitted attachments");
-    oneOf(data.delivery, ["prompt", "steer", "followUp"], "Message delivery"); optionalString(data.queueItemId, 128);
-    return;
-  }
-  if (type === "message.delta") {
-    exactKeys(data, ["messageId", "block", "delta"], "Worker message-delta data");
-    boundedString(data.messageId, 128, "Message id"); oneOf(data.block, ["text", "thinking"], "Message block"); boundedString(data.delta, 8_000, "Message delta", true); return;
-  }
-  if (type === "message.completed") {
-    exactKeys(data, ["messageId", "role", "content", "attachments", "stopReason", "error"], "Worker completed-message data");
-    boundedString(data.messageId, 128, "Message id"); oneOf(data.role, ["user", "assistant", "tool", "system"], "Completed message role");
-    validateDockContent(data.content); if (data.attachments !== undefined) validateAttachmentDtos(data.attachments, "Completed-message attachments"); optionalString(data.stopReason, 128); optionalString(data.error, 2_048); return;
-  }
-  if (type === "tool.started" || type === "tool.args_updated") {
-    exactKeys(data, type === "tool.started" ? ["toolCallId", "toolName", "args", "omittedFields"] : ["toolCallId", "args", "omittedFields"], `Worker ${type} data`);
-    boundedString(data.toolCallId, 128, "Tool call id"); if (type === "tool.started") boundedString(data.toolName, 256, "Tool name");
-    record(data.args, "Tool arguments"); validateJsonValue(data.args); if (data.omittedFields !== undefined) stringArray(data.omittedFields, 200, 2_048, "Tool omissions"); return;
-  }
-  if (type === "tool.output_updated") {
-    exactKeys(data, ["toolCallId", "text", "content", "publishedFile", "presentation"], "Worker tool-output data");
-    boundedString(data.toolCallId, 128, "Tool call id"); boundedString(data.text, 256_000, "Tool output", true);
-    if (data.content !== undefined) validateDockContent(data.content);
-    if (data.publishedFile !== undefined) parsePublishedFileDto(data.publishedFile, "Worker published file");
-    if (data.presentation !== undefined) validateToolPresentation(data.presentation); return;
-  }
-  exactKeys(data, ["toolCallId", "toolName", "text", "isError", "content", "publishedFile", "presentation", "omittedFields"], "Worker completed-tool data");
-  boundedString(data.toolCallId, 128, "Tool call id"); boundedString(data.toolName, 256, "Tool name"); boundedString(data.text, 256_000, "Tool output", true);
-  if (typeof data.isError !== "boolean") throw new Error("Tool error flag is invalid");
-  if (data.content !== undefined) validateDockContent(data.content);
-  if (data.publishedFile !== undefined) parsePublishedFileDto(data.publishedFile, "Worker published file");
-  if (data.presentation !== undefined) validateToolPresentation(data.presentation);
-  if (data.omittedFields !== undefined) stringArray(data.omittedFields, 200, 2_048, "Tool omissions");
-}
-
-function validateToolPresentation(raw: unknown): void {
-  const presentation = record(raw, "Worker tool presentation");
-  exactKeys(presentation, ["kind", "preview", "notices", "displayDiff"], "Worker tool presentation");
-  oneOf(presentation.kind, ["bash", "read", "edit", "write", "grep", "find", "ls"], "Worker tool kind");
-  oneOf(presentation.preview, ["head", "tail", "head-tail"], "Worker tool preview");
-  if (!Array.isArray(presentation.notices) || presentation.notices.length > 8) throw new Error("Worker tool notices are invalid");
-  for (const item of presentation.notices) validateToolNotice(item);
-  optionalString(presentation.displayDiff, 256_000);
-}
-
-function validateToolNotice(raw: unknown): void {
-  const notice = record(raw, "Worker tool notice");
-  const code = oneOf(notice.code, ["output_truncated", "limit_reached", "lines_truncated", "continue_with_offset", "full_output_saved", "host_projection_truncated"], "Worker tool notice code");
-  if (code === "output_truncated") {
-    exactKeys(notice, ["code", "by", "shown", "total", "limit", "firstLineExceedsLimit"], "Worker truncation notice");
-    oneOf(notice.by, ["lines", "bytes"], "Worker truncation unit"); optionalNonNegativeInteger(notice.shown, "Worker shown count"); optionalNonNegativeInteger(notice.total, "Worker total count"); positiveInteger(notice.limit, "Worker truncation limit");
-    if (notice.firstLineExceedsLimit !== undefined && notice.firstLineExceedsLimit !== true) throw new Error("Worker truncation first-line flag is invalid");
-  } else if (code === "limit_reached") {
-    exactKeys(notice, ["code", "unit", "limit"], "Worker limit notice"); oneOf(notice.unit, ["matches", "results", "entries"], "Worker limit unit"); positiveInteger(notice.limit, "Worker result limit");
-  } else if (code === "lines_truncated") {
-    exactKeys(notice, ["code", "maxChars"], "Worker line notice"); positiveInteger(notice.maxChars, "Worker line limit");
-  } else if (code === "continue_with_offset") {
-    exactKeys(notice, ["code", "offset"], "Worker offset notice"); nonNegativeInteger(notice.offset, "Worker continuation offset");
-  } else if (code === "full_output_saved") {
-    exactKeys(notice, ["code", "path"], "Worker output-path notice"); boundedString(notice.path, 4_096, "Worker output path");
-  } else exactKeys(notice, ["code"], "Worker host-projection notice");
-}
-
 /**
  * Worker results for public capabilities are validated with the same Protocol V2 body
  * parsers the TypeScript client uses. Only transport byte bounds are private here;
@@ -519,39 +448,6 @@ function validateAttachmentDtos(raw: unknown, label: string): void {
   if (!Array.isArray(raw) || raw.length < 1 || raw.length > 32) throw new Error(`${label} must be a nonempty bounded array`);
   const attachments = raw.map((item, index) => parseWorkerAttachmentDto(item, `${label}[${index}]`));
   if (new Set(attachments.map((attachment) => attachment.fileId)).size !== attachments.length) throw new Error(`${label} contains duplicate file IDs`);
-}
-
-function validateDockContent(raw: unknown): void {
-  if (!Array.isArray(raw) || raw.length > 200) throw new Error("Worker conversation content is invalid");
-  for (const item of raw) {
-    const block = record(item, "Worker conversation content block");
-    const type = oneOf(block.type, ["text", "thinking", "image", "tool_call", "tool_result", "omitted"], "Conversation content type");
-    if (type === "text" || type === "thinking") {
-      exactKeys(block, ["type", "text"], "Conversation text block");
-      boundedString(block.text, 8_000, "Conversation text", true);
-    } else if (type === "image") {
-      exactKeys(block, ["type", "mimeType", "contentRef", "fileId"], "Conversation image block");
-      validateImageMimeType(block.mimeType, "Conversation image MIME type");
-      optionalString(block.contentRef, 128);
-      optionalString(block.fileId, 128);
-    } else if (type === "tool_call") {
-      exactKeys(block, ["type", "toolCallId", "toolName", "args", "omittedFields"], "Conversation tool-call block");
-      boundedString(block.toolCallId, 128, "Conversation tool-call id"); boundedString(block.toolName, 256, "Conversation tool-call name");
-      validateJsonValue(block.args);
-      if (block.omittedFields !== undefined) stringArray(block.omittedFields, 200, 2_048, "Conversation tool-call omissions");
-    } else if (type === "tool_result") {
-      exactKeys(block, ["type", "toolCallId", "toolName", "text", "isError", "publishedFile", "presentation", "omittedFields"], "Conversation tool-result block");
-      boundedString(block.toolCallId, 128, "Conversation tool-result id"); boundedString(block.toolName, 256, "Conversation tool-result name");
-      boundedString(block.text, 256_000, "Conversation tool-result text", true);
-      if (typeof block.isError !== "boolean") throw new Error("Conversation tool-result error flag is invalid");
-      if (block.publishedFile !== undefined) parsePublishedFileDto(block.publishedFile, "Worker conversation published file");
-      if (block.presentation !== undefined) validateToolPresentation(block.presentation);
-      if (block.omittedFields !== undefined) stringArray(block.omittedFields, 200, 2_048, "Conversation tool-result omissions");
-    } else {
-      exactKeys(block, ["type", "kind", "description"], "Conversation omitted block");
-      oneOf(block.kind, ["image", "binary"], "Conversation omitted kind"); boundedString(block.description, 2_048, "Conversation omission description");
-    }
-  }
 }
 
 export function validateUiCapabilityArgs(capability: WorkerCapability, raw: unknown): void {
@@ -977,6 +873,21 @@ function validateJsonValue(root: unknown): void {
 function exactKeys(value: Record<string, unknown>, allowed: readonly string[], label: string): void {
   const set = new Set(allowed);
   for (const key of Object.keys(value)) if (!set.has(key)) throw new Error(`${label} contains unknown field ${key}`);
+}
+/** Keep the private Worker boundary closed without restating the shared Protocol V2 schema. */
+function assertNoUnknownFields(raw: unknown, parsed: unknown, label: string): void {
+  if (Array.isArray(raw)) {
+    if (!Array.isArray(parsed)) return;
+    raw.forEach((item, index) => assertNoUnknownFields(item, parsed[index], `${label}[${index}]`));
+    return;
+  }
+  if (raw === null || typeof raw !== "object") return;
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) return;
+  const canonical = parsed as Record<string, unknown>;
+  for (const [key, item] of Object.entries(raw)) {
+    if (!(key in canonical)) throw new Error(`${label} contains unknown field ${key}`);
+    assertNoUnknownFields(item, canonical[key], `${label}.${key}`);
+  }
 }
 function record(raw: unknown, label: string): Record<string, unknown> {
   if (!raw || typeof raw !== "object" || Array.isArray(raw) || Object.getPrototypeOf(raw) !== Object.prototype) throw new Error(`${label} must be a plain object`);
