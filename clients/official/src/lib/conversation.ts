@@ -164,6 +164,7 @@ export function projectConversation(bootstrap: ConversationBootstrap, options: C
         if (thinkingItem?.kind === 'thinking') {
           thinkingItem.text = thinking
           thinkingItem.groupTime = time
+          thinkingItem.open = false
         } else if (thinking) {
           const item: ConversationItem = { id: `live-${messageId}-thinking`, kind: 'thinking', groupId, title: '思考过程', text: thinking, groupTime: time }
           items.push(item)

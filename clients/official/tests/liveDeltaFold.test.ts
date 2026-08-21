@@ -56,4 +56,22 @@ assert.deepEqual(actual, expected, '折叠后与逐条回放的投影必须逐�
 
 const text = actual.find((item) => item.kind === 'assistant')
 assert.equal(text?.kind === 'assistant' && text.text.length > 1000, true, '长流内容完整')
+
+const activeThinking = projectConversation(bootstrap([
+  event(1, 'message.delta', { messageId: 'm2', block: 'thinking', delta: '还在思考' }),
+])).find((item) => item.kind === 'thinking')
+assert.equal(activeThinking?.kind === 'thinking' && activeThinking.open, true, '正在生成的思考默认展开')
+
+const completedThinking = projectConversation(bootstrap([
+  event(1, 'message.delta', { messageId: 'm2', block: 'thinking', delta: '还在思考' }),
+  event(2, 'message.completed', {
+    messageId: 'm2',
+    role: 'assistant',
+    content: [
+      { type: 'thinking', text: '思考完成' },
+      { type: 'text', text: '最终回复' },
+    ],
+  }),
+])).find((item) => item.kind === 'thinking')
+assert.equal(completedThinking?.kind === 'thinking' && completedThinking.open, false, '未操作的思考在回复完成后折叠')
 console.log('live delta fold tests passed')

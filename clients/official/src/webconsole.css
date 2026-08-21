@@ -2247,11 +2247,11 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
     width: 100%;
     margin: 0 0 6px;
   }
+  /* 对话区是窄屏唯一的纵向滚动容器。thinking 通过 details 折叠控制密度；
+     展开后进入正常文档流，避免连续思考块形成嵌套滚动陷阱。 */
   .alu-msg-assistant-body .think-content {
-    max-height: min(28vh, 220px);
-    max-height: min(28dvh, 220px);
-    overflow: auto;
-    overscroll-behavior: contain;
+    max-height: none;
+    overflow: visible;
   }
   .alu-msg-assistant-row.is-agent-active .alu-msg-assistant-body {
     display: grid;

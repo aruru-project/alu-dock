@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, reactive } from 'vue'
 import type { ConversationImageResource, ConversationProcessItem } from '../lib/types'
 import ConversationImage from './ConversationImage.vue'
 
 type ImagePart = Extract<ConversationProcessItem, { kind: 'image' }>
+type ThinkingPart = Extract<ConversationProcessItem, { kind: 'thinking' }>
 
 const props = defineProps<{
   parts: ConversationProcessItem[]
@@ -24,12 +25,27 @@ const orderedParts = computed(() => [
   ...props.parts.filter((part) => part.kind === 'thinking'),
   ...props.parts.filter((part) => part.kind !== 'thinking'),
 ])
+const thinkingOpen = reactive(new Map<string, boolean>())
+const thinkingTouched = new Set<string>()
+
+function thinkingIsOpen(part: ThinkingPart) {
+  return thinkingOpen.get(part.id) ?? Boolean(part.open || props.streamingParts?.has(part.id))
+}
+
+function markThinkingInteraction(part: ThinkingPart) {
+  thinkingTouched.add(part.id)
+}
+
+function rememberThinkingState(part: ThinkingPart, event: Event) {
+  if (!thinkingTouched.has(part.id)) return
+  thinkingOpen.set(part.id, (event.currentTarget as HTMLDetailsElement).open)
+}
 </script>
 
 <template>
   <template v-for="part in orderedParts" :key="part.id">
-    <details v-if="part.kind === 'thinking'" class="msg-thinking alu-hideable" :open="part.open" :data-conversation-id="part.id">
-      <summary>thinking...</summary><div class="think-content">{{ part.text }}</div>
+    <details v-if="part.kind === 'thinking'" class="msg-thinking alu-hideable" :open="thinkingIsOpen(part)" :data-conversation-id="part.id" @toggle="rememberThinkingState(part, $event)">
+      <summary @click="markThinkingInteraction(part)">thinking...</summary><div class="think-content">{{ part.text }}</div>
     </details>
     <div v-else-if="part.kind === 'assistant' && streamingParts?.has(part.id)" class="msg-assistant msg-text is-streaming" :data-conversation-id="part.id">{{ part.text }}</div>
     <div v-else-if="part.kind === 'assistant'" class="msg-assistant msg-text" :data-conversation-id="part.id" v-html="renderMarkdown(part.text)" />
