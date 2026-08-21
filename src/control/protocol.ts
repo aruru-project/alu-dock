@@ -11,12 +11,15 @@ import {
 } from "../core/instance-attachments.js";
 import { MAX_INSTANCE_DISPLAY_NAME_CHARS } from "../core/instance-display-name.js";
 import {
-  MAX_DELIVERABLE_CHUNK_BYTES,
   MAX_DELIVERY_REF_CHARS,
   MAX_TEMPORARY_DELIVERABLES_PER_INSTANCE,
   parseDeliverableDto,
   type DeliverableDto,
 } from "../core/instance-deliverables.js";
+import {
+  MAX_SOURCE_FILE_TRANSFER_BYTES,
+  MAX_SOURCE_FILE_TRANSFER_CHUNK_BYTES,
+} from "../core/source-file.js";
 import {
   CONVERSATION_FRAME_TYPES,
   MAX_CONVERSATION_CHUNK_CHARS,
@@ -144,6 +147,7 @@ export const INSTANCE_KEYS_CAPABILITY = "instance.keys.v1" as const;
 export const INSTANCE_DISPLAY_NAME_CAPABILITY = "instance.display-name.v1" as const;
 export const CONVERSATION_CONTENT_CAPABILITY = "conversation.content.v1" as const;
 export const WORKSPACE_LIST_CAPABILITY = "workspace.list.v1" as const;
+export const WORKSPACE_FILES_CAPABILITY = "workspace.files.v1" as const;
 export const ATTACHMENTS_CAPABILITY = "attachments.v1" as const;
 export const PUBLISHED_FILES_CAPABILITY = "published-files.v1" as const;
 export const INSTANCE_DELIVERABLES_CAPABILITY = "instance.deliverables.v1" as const;
@@ -190,6 +194,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "tools.v1",
   "tui.projection.v1",
   WORKSPACE_LIST_CAPABILITY,
+  WORKSPACE_FILES_CAPABILITY,
 ] as const;
 export type Capability = typeof IMPLEMENTED_CAPABILITIES[number];
 
@@ -240,6 +245,9 @@ export type ControlRequest =
   | Request<"instance.get", { instanceId: string }>
   | Request<"deliverable.list", { instanceId: string }>
   | Request<"deliverable.download", { instanceId: string; deliveryRef: string }>
+  | Request<"workspace.entry.list", { instanceId: string; path: string; cursor?: WorkspaceListCursor; limit: number }>
+  | Request<"workspace.entry.get", { instanceId: string; path: string }>
+  | Request<"workspace.file.read", { instanceId: string; path: string }>
   | Request<"instance.read", { instanceId: string; since?: EventCursor; replay: "event_log" | "conversation_bootstrap" }>
   | Request<"instance.follow", { instanceId: string; since: EventCursor }>
   | Request<"interaction.control", { instanceId: string }>
@@ -303,6 +311,13 @@ export interface DeliverableDownloadComplete extends DeliverableDownloadIdentity
 export interface DeliverableDownloadError extends DeliverableDownloadIdentity { kind: "deliverable_download_error"; error: { code: "file_unavailable"; message: string } }
 export type DeliverableDownloadFrame = DeliverableDownloadReady | DeliverableDownloadChunk | DeliverableDownloadComplete | DeliverableDownloadError;
 
+interface WorkspaceFileReadIdentity { version: 2; requestId: string; hostEpoch: string; instanceId: string; path: string }
+export interface WorkspaceFileReadReady extends WorkspaceFileReadIdentity { kind: "workspace_file_read_ready"; entry: WorkspaceEntryDto }
+export interface WorkspaceFileReadChunk extends WorkspaceFileReadIdentity { kind: "workspace_file_read_chunk"; index: number; data: string }
+export interface WorkspaceFileReadComplete extends WorkspaceFileReadIdentity { kind: "workspace_file_read_complete"; chunks: number; sizeBytes: number; sha256: string }
+export interface WorkspaceFileReadError extends WorkspaceFileReadIdentity { kind: "workspace_file_read_error"; error: { code: "workspace_entry_unavailable" | "workspace_file_too_large"; message: string } }
+export type WorkspaceFileReadFrame = WorkspaceFileReadReady | WorkspaceFileReadChunk | WorkspaceFileReadComplete | WorkspaceFileReadError;
+
 export interface AttachmentUploadReady {
   kind: "attachment_upload_ready";
   version: 2;
@@ -357,6 +372,25 @@ export interface WorkspaceListResult {
   truncated: boolean;
   nextCursor?: WorkspaceListCursor;
 }
+export interface WorkspaceEntryDto {
+  path: string;
+  name: string;
+  kind: "file" | "directory" | "symlink";
+  hidden: boolean;
+  targetKind?: "file" | "directory" | "unavailable";
+  sizeBytes?: number;
+}
+export interface WorkspaceEntryListResult {
+  instanceId: string;
+  path: string;
+  revision: string;
+  entries: WorkspaceEntryDto[];
+  total: number;
+  truncated: boolean;
+  nextCursor?: WorkspaceListCursor;
+}
+export interface WorkspaceEntryGetResult { instanceId: string; entry: WorkspaceEntryDto }
+export interface WorkspaceFileReadResult { entry: WorkspaceEntryDto; chunks: number; sizeBytes: number; sha256: string }
 export interface StatusResult { instance: InstanceSnapshot }
 export interface DeliverableListResult { instanceId: string; deliverables: DeliverableDto[] }
 export interface InstanceReadResult {
@@ -441,6 +475,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "host.info") return "host.info";
   if (type === "attachment.upload") return ATTACHMENTS_CAPABILITY;
   if (type === "deliverable.list" || type === "deliverable.download") return INSTANCE_DELIVERABLES_CAPABILITY;
+  if (type === "workspace.entry.list" || type === "workspace.entry.get" || type === "workspace.file.read") return WORKSPACE_FILES_CAPABILITY;
   if (type === "instance.forget" || type === "catalog.prune") return "catalog.maintenance.v1";
   if (type === "extension.tools_expanded.set") return TOOLS_EXPANDED_CAPABILITY;
   if (type === "extension.widget_viewport.set") return EXTENSION_WIDGET_CAPABILITY;
@@ -663,6 +698,16 @@ export function parseControlRequest(input: unknown): ControlRequest {
       exact(params, ["instanceId", "deliveryRef"], "invalid_request");
       return { ...base, type, params: { instanceId: instanceId(), deliveryRef: string(params.deliveryRef, "params.deliveryRef", MAX_DELIVERY_REF_CHARS, "invalid_request") } };
     }
+    case "workspace.entry.list": {
+      exact(params, ["instanceId", "path", "cursor", "limit"], "invalid_request");
+      const limit = positive(params.limit, "params.limit", "invalid_request");
+      if (limit > MAX_WORKSPACE_LIST_ITEMS) throw validation("invalid_request", `params.limit must not exceed ${MAX_WORKSPACE_LIST_ITEMS}`);
+      return { ...base, type, params: { instanceId: instanceId(), path: normalizeWorkspaceRelativePath(string(params.path, "params.path", MAX_CONTROL_CWD_CHARS, "invalid_request")), cursor: params.cursor === undefined ? undefined : parseWorkspaceListCursor(params.cursor, "params.cursor", "invalid_request"), limit } };
+    }
+    case "workspace.entry.get":
+    case "workspace.file.read":
+      exact(params, ["instanceId", "path"], "invalid_request");
+      return { ...base, type, params: { instanceId: instanceId(), path: normalizeWorkspaceRelativePath(string(params.path, "params.path", MAX_CONTROL_CWD_CHARS, "invalid_request")) } };
     case "instance.read": {
       exact(params, ["instanceId", "since", "replay"], "invalid_request");
       const replay = enumeration(params.replay, "params.replay", ["event_log", "conversation_bootstrap"], "invalid_request");
@@ -830,6 +875,67 @@ export function parseControlRequest(input: unknown): ControlRequest {
   }
 }
 
+export function parseWorkspaceEntryListResult(input: unknown): WorkspaceEntryListResult {
+  const value = object(input, "workspace entry list result");
+  exact(value, ["instanceId", "path", "revision", "entries", "total", "truncated", "nextCursor"]);
+  const entries = array(value.entries, "entries", MAX_WORKSPACE_LIST_ITEMS).map((item, index) => parseWorkspaceEntryDto(item, `entries[${index}]`));
+  const total = unsigned(value.total, "total");
+  const truncated = boolean(value.truncated, "truncated");
+  const nextCursor = value.nextCursor === undefined ? undefined : parseWorkspaceListCursor(value.nextCursor, "nextCursor", "invalid_response");
+  if (entries.length > total || truncated !== (nextCursor !== undefined)) throw validation("invalid_response", "Workspace entry continuation metadata is inconsistent");
+  return {
+    instanceId: id(value.instanceId, "instanceId"),
+    path: workspaceRelativePath(value.path, "path"),
+    revision: string(value.revision, "revision", 128),
+    entries,
+    total,
+    truncated,
+    ...(nextCursor === undefined ? {} : { nextCursor }),
+  };
+}
+
+export function parseWorkspaceEntryGetResult(input: unknown): WorkspaceEntryGetResult {
+  const value = object(input, "workspace entry result");
+  exact(value, ["instanceId", "entry"]);
+  return { instanceId: id(value.instanceId, "instanceId"), entry: parseWorkspaceEntryDto(value.entry, "entry") };
+}
+
+export function parseWorkspaceFileReadFrame(input: unknown, expected: { requestId: string; hostEpoch: string; instanceId: string; path: string }): WorkspaceFileReadFrame {
+  const value = object(input, "workspace file read frame");
+  const identity = (): WorkspaceFileReadIdentity => {
+    if (value.version !== 2 || value.requestId !== expected.requestId || value.hostEpoch !== expected.hostEpoch || value.instanceId !== expected.instanceId || value.path !== expected.path) {
+      throw validation("invalid_response", "Workspace file frame identity does not match the request");
+    }
+    return { version: 2, ...expected };
+  };
+  if (value.kind === "workspace_file_read_ready") {
+    exact(value, ["kind", "version", "requestId", "hostEpoch", "instanceId", "path", "entry"]);
+    const entry = parseWorkspaceEntryDto(value.entry, "entry");
+    if (entry.path !== expected.path || (entry.kind !== "file" && entry.targetKind !== "file") || entry.sizeBytes === undefined) throw validation("invalid_response", "Workspace file readiness metadata does not match the request");
+    return { kind: "workspace_file_read_ready", ...identity(), entry };
+  }
+  if (value.kind === "workspace_file_read_chunk") {
+    exact(value, ["kind", "version", "requestId", "hostEpoch", "instanceId", "path", "index", "data"]);
+    const data = canonicalBase64(value.data, "workspace file chunk data", MAX_SOURCE_FILE_TRANSFER_CHUNK_BYTES);
+    if (data.length === 0) throw validation("invalid_response", "Workspace file chunks cannot be empty");
+    return { kind: "workspace_file_read_chunk", ...identity(), index: unsigned(value.index, "workspace file chunk index"), data };
+  }
+  if (value.kind === "workspace_file_read_complete") {
+    exact(value, ["kind", "version", "requestId", "hostEpoch", "instanceId", "path", "chunks", "sizeBytes", "sha256"]);
+    const sha256 = string(value.sha256, "workspace file SHA-256", 64);
+    if (!/^[a-f0-9]{64}$/u.test(sha256)) throw validation("invalid_response", "Workspace file SHA-256 must be lowercase hexadecimal");
+    const sizeBytes = unsigned(value.sizeBytes, "workspace file byte count");
+    if (sizeBytes > MAX_SOURCE_FILE_TRANSFER_BYTES) throw validation("invalid_response", "Workspace file byte count exceeds its bound");
+    return { kind: "workspace_file_read_complete", ...identity(), chunks: unsigned(value.chunks, "workspace file chunk count"), sizeBytes, sha256 };
+  }
+  if (value.kind !== "workspace_file_read_error") throw validation("invalid_response", "Unknown workspace file read frame");
+  exact(value, ["kind", "version", "requestId", "hostEpoch", "instanceId", "path", "error"]);
+  const error = object(value.error, "workspace file read error");
+  exact(error, ["code", "message"]);
+  const code = enumeration(error.code, "workspace file read error code", ["workspace_entry_unavailable", "workspace_file_too_large"]);
+  return { kind: "workspace_file_read_error", ...identity(), error: { code, message: string(error.message, "workspace file read error message", MAX_MESSAGE) } };
+}
+
 export function parseDeliverableListResult(input: unknown): DeliverableListResult {
   const value = object(input, "deliverable list result");
   exact(value, ["instanceId", "deliverables"]);
@@ -860,7 +966,7 @@ export function parseDeliverableDownloadFrame(input: unknown, expected: { reques
   }
   if (value.kind === "deliverable_download_chunk") {
     exact(value, ["kind", "version", "requestId", "hostEpoch", "instanceId", "deliveryRef", "index", "data"]);
-    const data = canonicalBase64(value.data, "deliverable chunk data", MAX_DELIVERABLE_CHUNK_BYTES);
+    const data = canonicalBase64(value.data, "deliverable chunk data", MAX_SOURCE_FILE_TRANSFER_CHUNK_BYTES);
     if (data.length === 0) throw validation("invalid_response", "Deliverable chunks cannot be empty");
     return { kind: "deliverable_download_chunk", ...identity(), index: unsigned(value.index, "deliverable chunk index"), data };
   }
@@ -2035,6 +2141,39 @@ export function parseHistoryEntry(input: unknown, field: string): HistoryEntryDt
     thinkingLevel: optionalString(entry.thinkingLevel, `${field}.thinkingLevel`, 64),
     name: optionalString(entry.name, `${field}.name`, 256),
   };
+}
+
+function parseWorkspaceEntryDto(input: unknown, field: string): WorkspaceEntryDto {
+  const value = object(input, field);
+  exact(value, ["path", "name", "kind", "hidden", "targetKind", "sizeBytes"]);
+  const kind = enumeration(value.kind, `${field}.kind`, ["file", "directory", "symlink"]);
+  const targetKind = value.targetKind === undefined ? undefined : enumeration(value.targetKind, `${field}.targetKind`, ["file", "directory", "unavailable"]);
+  const sizeBytes = value.sizeBytes === undefined ? undefined : unsigned(value.sizeBytes, `${field}.sizeBytes`);
+  if (sizeBytes !== undefined && sizeBytes > Number.MAX_SAFE_INTEGER) throw validation("invalid_response", `${field}.sizeBytes is invalid`);
+  if (kind === "symlink" && targetKind === undefined) throw validation("invalid_response", `${field}.targetKind is required for symbolic links`);
+  if (kind !== "symlink" && targetKind !== undefined) throw validation("invalid_response", `${field}.targetKind is only valid for symbolic links`);
+  if ((kind === "file" || targetKind === "file") && sizeBytes === undefined) throw validation("invalid_response", `${field}.sizeBytes is required for files`);
+  if ((kind === "directory" || targetKind === "directory" || targetKind === "unavailable") && sizeBytes !== undefined) throw validation("invalid_response", `${field}.sizeBytes is not valid for this entry`);
+  return {
+    path: workspaceRelativePath(value.path, `${field}.path`),
+    name: string(value.name, `${field}.name`, MAX_WORKSPACE_ENTRY_NAME_CHARS),
+    kind,
+    hidden: boolean(value.hidden, `${field}.hidden`),
+    ...(targetKind === undefined ? {} : { targetKind }),
+    ...(sizeBytes === undefined ? {} : { sizeBytes }),
+  };
+}
+
+export function normalizeWorkspaceRelativePath(path: string): string {
+  return workspaceRelativePath(path, "workspace path", "workspace_path_invalid");
+}
+
+function workspaceRelativePath(input: unknown, field: string, code = "invalid_response"): string {
+  const value = string(input, field, MAX_CONTROL_CWD_CHARS, code);
+  if (value.includes("\0") || value.startsWith("/")) throw validation(code, "This path is outside the workspace. Choose a path inside the workspace.");
+  const parts = value.split("/").filter((part) => part !== "" && part !== ".");
+  if (parts.includes("..")) throw validation(code, "This path leaves the workspace. Choose a path inside the workspace.");
+  return parts.length === 0 ? "." : parts.join("/");
 }
 
 function parseInteractionResponse(input: unknown, field: string, code = "invalid_response"): InteractionResponse {

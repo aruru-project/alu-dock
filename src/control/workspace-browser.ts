@@ -9,7 +9,7 @@ import type {
   WorkspaceListResult,
 } from "./protocol.js";
 
-const MAX_BROWSABLE_DIRECTORIES = 100_000;
+export const MAX_WORKSPACE_SCAN_ENTRIES = 100_000;
 const SNAPSHOT_CACHE_SIZE = 2;
 const SNAPSHOT_TTL_MS = 60_000;
 
@@ -134,7 +134,7 @@ async function scanDirectory(path: string, initialFingerprint: string): Promise<
       } else if (entry.isSymbolicLink() && await symbolicLinkMayBeDirectory(join(path, entry.name))) {
         entries.push({ name: entry.name, kind: "symlink", hidden: entry.name.startsWith(".") });
       }
-      if (entries.length > MAX_BROWSABLE_DIRECTORIES) {
+      if (entries.length > MAX_WORKSPACE_SCAN_ENTRIES) {
         throw new WorkspaceBrowseError(
           "workspace_too_large",
           `There are too many directories in ${safePath(path)} to show. Choose a more specific path.`,

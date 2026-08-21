@@ -24,7 +24,8 @@ Protocol V2 使用 UTF-8 JSONL；transport 是私有 Unix socket，或已配对�
 3. 普通 request 收到一个 response 后结束；`session.tree.v2` 成功时先透明重组有界 `response_transfer` records，再得到这一个逻辑 response；
 4. `attachment.upload` 在一个 header request 后发送专用多记录 body，再收到一个 terminal response；
 5. `deliverable.download` 使用自己的 ready/chunk/complete-or-error 下载 records，不复用 `response_transfer`。
-6. `instance.follow` 和 `interaction.control` 在初始 response 后继续接收 event。
+6. `workspace.file.read` 使用独立的 ready/chunk/complete-or-error records，表示打开并顺序读取，而不是下载管理 API。
+7. `instance.follow` 和 `interaction.control` 在初始 response 后继续接收 event。
 
 读取、实时跟随、attachment upload 和 Extension UI 操作使用独立连接。不要在一条连接上发送多个业务 request，也不要把这些用途重新合成一条长连接。Upload body 是 `attachment.upload` 的专用 framing，不是可复用的通用 streaming RPC。
 
@@ -160,6 +161,16 @@ Event overlap 只按完整事件身份（`runtimeGeneration + sequence`）处理
 需要让用户选择 cwd 的客户端使用 `workspace.list.v1`，不自行扫描目录，也不为某种界面增加专用接口。`workspace.list` 接收 Host 文件系统中的绝对 `path` 以及可选分页 cursor，返回规范 `path`、可选 `parent`、目录条目和继续读取所需事实。客户端可以用键盘列表、点击列表或自己的视觉组件呈现同一份结果。
 
 浏览范围就是 Dock Host 运行用户已有的文件系统权限。目录不可读、已经消失或符号链接不可用时，Host 返回可恢复错误；客户端显示错误并允许修改路径。浏览不会读取文件正文、改变进程 cwd 或授予 project trust。用户确认后仍调用 `instance.create(cwd)`。
+
+## 读取 active Work 的 workspace 文件
+
+要求 `workspace.files.v1`。`workspace.entry.list {instanceId,path,cursor?,limit}`、`workspace.entry.get {instanceId,path}` 和 `workspace.file.read {instanceId,path}` 的 path 都相对受理时 instance snapshot 的 cwd，根为 `.`。这与创建前接受 Host absolute path 的 `workspace.list.v1` 是两项不同能力。
+
+list/get metadata 至少包含 `path/name/kind/hidden`。`kind` 为 `file | directory | symlink`；symlink 只公开 `targetKind: file | directory | unavailable`，不公开 raw target。隐藏条目正常返回。contained file 与 file symlink 带 `sizeBytes`；contained directory symlink 可以继续遍历。外部、断链或 loop symlink 会列出为 unavailable，但不能打开；absolute path、`..` 和逃出 workspace 的遍历会被拒绝。
+
+文件正文读取使用独立连接。ready 先给开始观察到的 entry metadata；之后是从零连续的 canonical-base64 chunks，terminal complete 给实际发送的 `chunks/sizeBytes/sha256`。它是 cat 语义：Host 顺序读到 EOF，因此 ready 的 size 可以与 complete 的实际 size 不同。开始时已超过 100 MiB 会在 ready 前拒绝；读取中增长超过上限会在 ready 后收到 terminal error，调用方丢弃 provisional result。DockClient 的 `readWorkspaceFile` 逐块交给 callback，不落盘、不判断格式，并接受单次读取的 `AbortSignal`。外部客户端若需要 10 MiB 预览提醒，应在自己的界面实现，不能把它作为 Host 读取上限。
+
+只有受理时 active 的 instance 可以使用这项能力。stop 后的新请求会失败；成功 reopen 后按普通 active instance 重新使用，不需要额外恢复分支。
 
 ## Instance 与 Agent session
 

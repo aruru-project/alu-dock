@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
 import {
@@ -37,7 +36,7 @@ import {
 } from "../core/managed-instance.js";
 import { AgentCompactionKnownFailureError, AgentConversationCursorError, AgentInvalidSettingValueError, AgentInvalidTreeTargetError, AgentModelNotFoundError, AgentSettingsWriteError, AgentUnavailableBeforeEffectError, AgentUnknownToolError } from "../core/agent-worker.js";
 import { PublishedFileUnavailableError } from "../core/published-file.js";
-import { DeliverableUnavailableError, MAX_DELIVERABLE_CHUNK_BYTES } from "../core/instance-deliverables.js";
+import { DeliverableUnavailableError } from "../core/instance-deliverables.js";
 import { MAX_ATTACHMENT_CHUNK_BYTES, type AttachmentUploadResult } from "../core/instance-attachments.js";
 import { MAX_DOCK_TRANSFER_BYTES, MAX_RESPONSE_TRANSFER_CHUNK_BYTES } from "../core/transport-bounds.js";
 import { dropOldestSemanticHistoryRange, slimSemanticHistoryEntry } from "../core/history-pagination.js";
@@ -62,6 +61,8 @@ import {
   type WorkspaceBrowser,
 } from "./workspace-browser.js";
 import { executeSessionCommand, isSessionCommandRequest } from "./session-command-service.js";
+import { InstanceWorkspace, InstanceWorkspaceError } from "./instance-workspace.js";
+import { SourceFileTransferError, transferSourceFile } from "./source-file-transfer.js";
 import { InstanceMutationService } from "./instance-mutation-service.js";
 import {
   AttachmentIntegrityError,
@@ -641,6 +642,15 @@ export class DockHost {
         this.sendSuccessAndEnd(socket, request.requestId, { instanceId: instance.id, deliverables: instance.listDeliverables() }); return;
       }
       case "deliverable.download": await this.streamDeliverableDownload(request, socket); return;
+      case "workspace.entry.list": {
+        const workspace = this.activeWorkspace(request.params.instanceId);
+        this.sendSuccessAndEnd(socket, request.requestId, await workspace.list(request.params.path, request.params.cursor, request.params.limit)); return;
+      }
+      case "workspace.entry.get": {
+        const workspace = this.activeWorkspace(request.params.instanceId);
+        this.sendSuccessAndEnd(socket, request.requestId, { instanceId: request.params.instanceId, entry: await workspace.get(request.params.path) }); return;
+      }
+      case "workspace.file.read": await this.streamWorkspaceFile(request, socket); return;
       case "instance.read": {
         const instance=this.registry.get(request.params.instanceId);
         if(request.params.since&&request.params.since.instanceId!==instance.id)throw new ProtocolValidationError("invalid_cursor","The saved update position belongs to another work");
@@ -909,6 +919,71 @@ export class DockHost {
     for (const socket of streams) socket.destroy();
   }
 
+  private activeWorkspace(instanceId: string): InstanceWorkspace {
+    let snapshot;
+    try { snapshot = this.registry.get(instanceId).snapshot(); }
+    catch (error) {
+      if (error instanceof InstanceUnavailableError) {
+        throw new InstanceWorkspaceError("instance_not_active", "This work is not active, so its files cannot be opened. Open the work and try again.");
+      }
+      throw error;
+    }
+    if (snapshot.lifecycle !== "active") {
+      throw new InstanceWorkspaceError("instance_not_active", "This work is not active, so its files cannot be opened. Open the work and try again.");
+    }
+    return new InstanceWorkspace(snapshot.id, snapshot.cwd);
+  }
+
+  private async streamWorkspaceFile(request: Extract<ControlRequest, { type: "workspace.file.read" }>, socket: Socket): Promise<void> {
+    const { instanceId, path } = request.params;
+    const opened = await this.activeWorkspace(instanceId).openFile(path);
+    let ready = false;
+    try {
+      const readiness = writeEnvelope(socket, {
+        kind: "workspace_file_read_ready", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
+        instanceId, path, entry: opened.entry,
+      });
+      if (readiness === "backpressured") {
+        if (!await waitForSocketDrain(socket, SOCKET_DRAIN_TIMEOUT_MS)) { socket.destroy(); return; }
+      } else if (readiness !== "written") { socket.destroy(); return; }
+      ready = true;
+      const result = await transferSourceFile({
+        handle: opened.handle,
+        onChunk: async (chunk, index) => {
+          const outcome = writeEnvelope(socket, {
+            kind: "workspace_file_read_chunk", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
+            instanceId, path, index, data: chunk.toString("base64"),
+          });
+          if (outcome === "backpressured") {
+            if (!await waitForSocketDrain(socket, SOCKET_DRAIN_TIMEOUT_MS)) throw new SourceFileTransferError("unavailable");
+          } else if (outcome !== "written") throw new SourceFileTransferError("unavailable");
+        },
+      });
+      if (socket.destroyed || socket.writableEnded) return;
+      const outcome = writeEnvelope(socket, {
+        kind: "workspace_file_read_complete", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
+        instanceId, path, ...result,
+      });
+      if (outcome === "backpressured" && !await waitForSocketDrain(socket, SOCKET_DRAIN_TIMEOUT_MS)) { socket.destroy(); return; }
+      if (!socket.destroyed && !socket.writableEnded) socket.end();
+    } catch (error) {
+      if (ready && !socket.destroyed && !socket.writableEnded) {
+        const tooLarge = error instanceof SourceFileTransferError && error.reason === "too_large";
+        endRawEnvelope(socket, {
+          kind: "workspace_file_read_error", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
+          instanceId, path,
+          error: tooLarge
+            ? { code: "workspace_file_too_large", message: "This file grew beyond 100 MiB while it was being read. Use a smaller file and try again." }
+            : { code: "workspace_entry_unavailable", message: "This file could not be read completely. Refresh the folder and try again." },
+        });
+        return;
+      }
+      throw error;
+    } finally {
+      await opened.handle.close().catch(() => {});
+    }
+  }
+
   private async streamDeliverableDownload(request: Extract<ControlRequest, { type: "deliverable.download" }>, socket: Socket): Promise<void> {
     const { instanceId, deliveryRef } = request.params;
     const opened = await this.registry.get(instanceId).openDeliverable(deliveryRef);
@@ -922,34 +997,24 @@ export class DockHost {
         if (!await waitForSocketDrain(socket, SOCKET_DRAIN_TIMEOUT_MS)) { socket.destroy(); return; }
       } else if (readiness !== "written") { socket.destroy(); return; }
       ready = true;
-      const hash = createHash("sha256");
-      let sizeBytes = 0;
-      let chunks = 0;
-      while (sizeBytes < opened.dto.sizeBytes) {
-        const count = Math.min(MAX_DELIVERABLE_CHUNK_BYTES, opened.dto.sizeBytes - sizeBytes);
-        const buffer = Buffer.allocUnsafe(count);
-        let offset = 0;
-        while (offset < count) {
-          const read = await opened.handle.read(buffer, offset, count - offset, null);
-          if (read.bytesRead === 0) throw new DeliverableUnavailableError();
-          offset += read.bytesRead;
-        }
-        hash.update(buffer);
-        const outcome = writeEnvelope(socket, {
-          kind: "deliverable_download_chunk", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
-          instanceId, deliveryRef, index: chunks, data: buffer.toString("base64"),
-        });
-        if (outcome === "backpressured") {
-          if (!await waitForSocketDrain(socket, SOCKET_DRAIN_TIMEOUT_MS)) { socket.destroy(); return; }
-        } else if (outcome !== "written") { socket.destroy(); return; }
-        sizeBytes += buffer.byteLength;
-        chunks += 1;
-      }
-      await opened.verify();
+      const result = await transferSourceFile({
+        handle: opened.handle,
+        expectedSizeBytes: opened.dto.sizeBytes,
+        verify: opened.verify,
+        onChunk: async (chunk, index) => {
+          const outcome = writeEnvelope(socket, {
+            kind: "deliverable_download_chunk", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
+            instanceId, deliveryRef, index, data: chunk.toString("base64"),
+          });
+          if (outcome === "backpressured") {
+            if (!await waitForSocketDrain(socket, SOCKET_DRAIN_TIMEOUT_MS)) throw new SourceFileTransferError("unavailable");
+          } else if (outcome !== "written") throw new SourceFileTransferError("unavailable");
+        },
+      });
       if (socket.destroyed || socket.writableEnded) return;
       const complete = {
         kind: "deliverable_download_complete", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
-        instanceId, deliveryRef, chunks, sizeBytes, sha256: hash.digest("hex"),
+        instanceId, deliveryRef, ...result,
       };
       const outcome = writeEnvelope(socket, complete);
       if (outcome === "backpressured" && !await waitForSocketDrain(socket, SOCKET_DRAIN_TIMEOUT_MS)) { socket.destroy(); return; }
@@ -1010,6 +1075,9 @@ function isMutationRequest(type: ControlRequest["type"]): boolean {
     && type !== "instance.read"
     && type !== "deliverable.list"
     && type !== "deliverable.download"
+    && type !== "workspace.entry.list"
+    && type !== "workspace.entry.get"
+    && type !== "workspace.file.read"
     && type !== "instance.follow"
     && type !== "interaction.control"
     && type !== "extension.widget_viewport.set"
@@ -1268,6 +1336,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof AttachmentUnavailableError) return { code: error.code, message: error.message };
   if (error instanceof ProtocolValidationError) return { code: error.code, message: error.message };
   if (error instanceof WorkspaceBrowseError) return { code: error.code, message: error.message, retryable: error.retryable };
+  if (error instanceof InstanceWorkspaceError) return { code: error.code, message: error.message, retryable: error.retryable };
   if (error instanceof CatalogListCursorStaleError) return { code: "cursor_stale", message: error.message, retryable: true };
   if (error instanceof InstanceNotFoundError) return { code: "not_found", message: error.message };
   if (error instanceof InstanceForgetRejectedError) return { code: "instance_not_terminal", message: error.message };

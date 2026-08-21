@@ -5,6 +5,7 @@ import { createConnection, type Socket } from "node:net";
 import { basename, resolve } from "node:path";
 import type { InteractionResponse } from "../core/extension-ui-broker.js";
 import type { DeliverableDto } from "../core/instance-deliverables.js";
+import { MAX_SOURCE_FILE_TRANSFER_BYTES } from "../core/source-file.js";
 import type { DeliveryMode, DockEvent, EventCursor, ImagePathDto, InstanceSnapshot } from "../core/managed-instance.js";
 import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_CHUNK_BYTES, type AttachmentUploadResult } from "../core/instance-attachments.js";
 import type { ThinkingLevel } from "../core/agent-worker.js";
@@ -32,6 +33,7 @@ import {
   PUBLISHED_FILES_CAPABILITY,
   INSTANCE_DELIVERABLES_CAPABILITY,
   WORKSPACE_LIST_CAPABILITY,
+  WORKSPACE_FILES_CAPABILITY,
   MAX_WORKSPACE_LIST_ITEMS,
   type Capability,
   type ClientHello,
@@ -41,6 +43,10 @@ import {
   parseAttachmentUploadResult,
   parseDeliverableDownloadFrame,
   parseDeliverableListResult,
+  parseWorkspaceEntryListResult,
+  parseWorkspaceEntryGetResult,
+  parseWorkspaceFileReadFrame,
+  normalizeWorkspaceRelativePath,
   parseModelConfigurationResult,
   parseThinkingConfigurationResult,
   parseControlEventEnvelope,
@@ -110,6 +116,9 @@ import {
   type InstanceListCursor,
   type WorkspaceListCursor,
   type WorkspaceListResult,
+  type WorkspaceEntryDto,
+  type WorkspaceEntryListResult,
+  type WorkspaceFileReadResult,
   type KeyLookupResult,
   type ListResult,
   type ModelsResult,
@@ -435,6 +444,67 @@ export class DockClient {
       socket.once("close",()=>{void processing.then(()=>{if(!settled)finish(new ControlClientError("connection_closed",requestSent?"Host closed before the temporary file download completed":"Host closed before responding"));});});
     });
   }
+  async listWorkspaceEntries(instanceId:string,path:string,cursor?:WorkspaceListCursor,limit=MAX_WORKSPACE_LIST_ITEMS):Promise<WorkspaceEntryListResult>{const normalizedPath=workspaceRequestPath(path);const result=await this.request("workspace.entry.list",{instanceId,path:normalizedPath,cursor,limit},WORKSPACE_FILES_CAPABILITY,parseWorkspaceEntryListResult);if(result.instanceId!==instanceId||result.path!==normalizedPath)throw new ControlClientError("invalid_response","Workspace entries belong to another request");return result;}
+  async getWorkspaceEntry(instanceId:string,path:string):Promise<WorkspaceEntryDto>{const normalizedPath=workspaceRequestPath(path);const result=await this.request("workspace.entry.get",{instanceId,path:normalizedPath},WORKSPACE_FILES_CAPABILITY,parseWorkspaceEntryGetResult);if(result.instanceId!==instanceId||result.entry.path!==normalizedPath)throw new ControlClientError("invalid_response","Workspace entry belongs to another request");return result.entry;}
+
+  readWorkspaceFile(instanceId:string,path:string,onChunk:(chunk:Uint8Array)=>void|Promise<void>,signal?:AbortSignal):Promise<WorkspaceFileReadResult>{
+    const helloId=this.createRequestId(),requestId=this.createRequestId();
+    const capabilities=requiredCapabilities(WORKSPACE_FILES_CAPABILITY);
+    return new Promise<WorkspaceFileReadResult>((resolveRead,rejectRead)=>{
+      let normalizedPath:string;
+      try{normalizedPath=normalizeWorkspaceRelativePath(path);}catch(error){rejectRead(normalizeClientError(error));return;}
+      const request:Extract<ControlRequest,{type:"workspace.file.read"}>={kind:"request",version:2,requestId,type:"workspace.file.read",params:{instanceId,path:normalizedPath}};
+      if(signal?.aborted){rejectRead(new ControlClientError("aborted","Workspace file read was cancelled"));return;}
+      const socket=this.openSocket(),decoder=new JsonLineDecoder();
+      let phase:"hello"|"ready"|"stream"|"complete"="hello",hostEpoch="",settled=false,requestSent=false;
+      let entry:WorkspaceEntryDto|undefined,index=0,sizeBytes=0,completion:WorkspaceFileReadResult|undefined;
+      const hash=createHash("sha256");
+      let timeout:NodeJS.Timeout;
+      const onAbort=():void=>finish(new ControlClientError("aborted","Workspace file read was cancelled"));
+      const finish=(error?:unknown,result?:WorkspaceFileReadResult):void=>{if(settled)return;settled=true;clearTimeout(timeout);signal?.removeEventListener("abort",onAbort);socket.destroy();error===undefined?resolveRead(result as WorkspaceFileReadResult):rejectRead(normalizeClientError(error));};
+      const resetTimeout=():void=>{clearTimeout(timeout);timeout=setTimeout(()=>finish(new ControlClientError("timeout",`Workspace file read timed out after ${this.longMutationTimeoutMs}ms`)),this.longMutationTimeoutMs);};
+      const identity=()=>({requestId,hostEpoch,instanceId,path:normalizedPath});
+      const consume=async(line:string):Promise<void>=>{
+        if(!line||settled)return;
+        let raw:unknown;try{raw=JSON.parse(line);}catch{throw new ControlClientError("invalid_response","Host returned invalid JSON during workspace file read");}
+        if(phase==="hello"){
+          const ack=parseHelloReply(raw,helloId);hostEpoch=ack.host.hostEpoch;
+          for(const required of capabilities)if(!ack.capabilities.includes(required))throw new ProtocolValidationError("protocol_incompatible",`Host lacks ${required}`);
+          phase="ready";requestSent=true;socket.write(encodeJsonLine(request));resetTimeout();return;
+        }
+        if(phase==="complete")throw new ProtocolValidationError("invalid_response","Workspace file read sent data after completion");
+        if(phase==="ready"&&raw!==null&&typeof raw==="object"&&(raw as {kind?:unknown}).kind==="response"){
+          const response=parseControlResponse(raw,requestId,hostEpoch);
+          if(!response.ok)throw new ControlClientError(response.error.code,response.error.message,undefined,response.error.details);
+          throw new ProtocolValidationError("invalid_response","Workspace file read returned an ordinary success response");
+        }
+        const frame=parseWorkspaceFileReadFrame(raw,identity());resetTimeout();
+        if(phase==="ready"){
+          if(frame.kind!=="workspace_file_read_ready")throw new ProtocolValidationError("invalid_response","Workspace file read did not begin with metadata");
+          entry=frame.entry;phase="stream";return;
+        }
+        if(frame.kind==="workspace_file_read_error")throw new ControlClientError(frame.error.code,frame.error.message);
+        if(frame.kind==="workspace_file_read_ready")throw new ProtocolValidationError("invalid_response","Host repeated workspace file metadata");
+        if(frame.kind==="workspace_file_read_chunk"){
+          if(frame.index!==index)throw new ProtocolValidationError("invalid_response","Workspace file chunks arrived out of order");
+          const bytes=Buffer.from(frame.data,"base64");
+          if(sizeBytes+bytes.byteLength>MAX_SOURCE_FILE_TRANSFER_BYTES)throw new ProtocolValidationError("invalid_response","Workspace file bytes exceed the supported size");
+          hash.update(bytes);await onChunk(bytes);sizeBytes+=bytes.byteLength;index+=1;return;
+        }
+        if(!entry||frame.chunks!==index||frame.sizeBytes!==sizeBytes)throw new ProtocolValidationError("invalid_response","Workspace file completion counts do not match received bytes");
+        const digest=hash.digest("hex");
+        if(frame.sha256!==digest)throw new ProtocolValidationError("invalid_response","Workspace file SHA-256 verification failed");
+        completion={entry,chunks:index,sizeBytes,sha256:digest};phase="complete";
+      };
+      let processing=Promise.resolve();resetTimeout();signal?.addEventListener("abort",onAbort,{once:true});
+      socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,capabilities))));
+      socket.on("data",(chunk:Buffer)=>{socket.pause();processing=processing.then(async()=>{for(const line of decoder.push(chunk))await consume(line);}).catch(finish).finally(()=>{if(!settled&&!socket.destroyed)socket.resume();});});
+      socket.once("end",()=>{processing=processing.then(()=>{decoder.finish();if(!completion)throw new ControlClientError("connection_closed","Host ended before the workspace file read completed");finish(undefined,completion);}).catch(finish);});
+      socket.once("error",error=>finish(transportError(error)));
+      socket.once("close",()=>{void processing.then(()=>{if(!settled)finish(new ControlClientError("connection_closed",requestSent?"Host closed before the workspace file read completed":"Host closed before responding"));});});
+    });
+  }
+
   sessionInventory(cwd:string,scope:"cwd"|"all"="cwd"):Promise<SessionInventoryResult>{return this.request("session.inventory",{cwd,scope},["session.inventory.v1","session.inventory-diagnostics.v1"],parseSessionInventoryResult);}
   workspaceList(path:string,cursor?:WorkspaceListCursor,limit=MAX_WORKSPACE_LIST_ITEMS):Promise<WorkspaceListResult>{return this.request("workspace.list",{path,cursor,limit},WORKSPACE_LIST_CAPABILITY,parseWorkspaceListResult);}
   sessions(instanceId:string,scope:"cwd"|"all"):Promise<SessionsResult>{return this.request("session.list",{instanceId,scope},["session.core","projection.completeness.v1"],parseSessionsResult);}
@@ -709,4 +779,5 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
 function isOperationEvent(event:DockEvent):event is Extract<DockEvent,{type:"interaction.requested"|"extension.title_set"|"extension.editor_text_set"}>{return event.type==="interaction.requested"||event.type==="extension.title_set"||event.type==="extension.editor_text_set";}
 function waitForUploadDrain(socket:Socket,operationId:string):Promise<void>{if(socket.destroyed||socket.writableEnded)return Promise.reject(new ControlClientError("connection_closed","Attachment upload connection closed during backpressure",operationId));return new Promise((resolveDrain,rejectDrain)=>{const cleanup=():void=>{socket.off("drain",onDrain);socket.off("close",onClose);socket.off("error",onError);};const onDrain=():void=>{cleanup();resolveDrain();};const onClose=():void=>{cleanup();rejectDrain(new ControlClientError("connection_closed","Attachment upload connection closed during backpressure",operationId));};const onError=(error:Error):void=>{cleanup();rejectDrain(transportError(error));};socket.once("drain",onDrain);socket.once("close",onClose);socket.once("error",onError);});}
 function normalizeClientError(e:unknown):ControlClientError{if(e instanceof ControlClientError)return e;if(e instanceof JsonLineError&&e.code==="incomplete_record")return new ControlClientError("connection_closed","Host connection closed during a control response; reconnect to recover current state");if(e instanceof ProtocolValidationError)return new ControlClientError(e.code==="unsupported_protocol"?"protocol_incompatible":e.code,e.message);if(e instanceof Error)return new ControlClientError("invalid_response",e.message);return new ControlClientError("invalid_response",String(e));}
+function workspaceRequestPath(path:string):string{try{return normalizeWorkspaceRelativePath(path);}catch(error){throw normalizeClientError(error);}}
 function transportError(e:Error):ControlClientError{const code=(e as NodeJS.ErrnoException).code;return new ControlClientError("connection_error",`${code?`${code}: `:""}${e.message}`);}

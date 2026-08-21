@@ -3,6 +3,9 @@ import { access, open, realpath, stat, type FileHandle } from "node:fs/promises"
 import { isAbsolute, resolve } from "node:path";
 
 export const MAX_SOURCE_FILE_PATH_CHARS = 16_384;
+/** Shared bound for Host source-file transfers (workspace reads and temporary deliveries). */
+export const MAX_SOURCE_FILE_TRANSFER_BYTES = 104_857_600;
+export const MAX_SOURCE_FILE_TRANSFER_CHUNK_BYTES = 512 * 1_024;
 
 export interface SourceFileIdentity {
   path: string;

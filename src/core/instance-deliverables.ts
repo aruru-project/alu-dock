@@ -6,16 +6,15 @@ import {
   inspectSourceFile,
   openUnchangedSource,
   MAX_SOURCE_FILE_PATH_CHARS,
+  MAX_SOURCE_FILE_TRANSFER_BYTES,
   SourceFileError,
   type SourceFileIdentity,
 } from "./source-file.js";
 
 /** Business bounds owned by the temporary-delivery producer. */
-export const MAX_TEMPORARY_DELIVERABLE_BYTES = 104_857_600;
 export const MAX_TEMPORARY_DELIVERABLES_PER_INSTANCE = 1_024;
 export const MAX_DELIVERABLE_NAME_CHARS = 512;
 export const MAX_DELIVERY_REF_CHARS = 128;
-export const MAX_DELIVERABLE_CHUNK_BYTES = 512 * 1_024;
 
 export interface DeliverableDto {
   deliveryRef: string;
@@ -52,7 +51,7 @@ export class InstanceDeliverables {
     }
     let source: SourceFileIdentity;
     try {
-      source = await inspectSourceFile(path, { maxPathChars: MAX_SOURCE_FILE_PATH_CHARS, maxBytes: MAX_TEMPORARY_DELIVERABLE_BYTES });
+      source = await inspectSourceFile(path, { maxPathChars: MAX_SOURCE_FILE_PATH_CHARS, maxBytes: MAX_SOURCE_FILE_TRANSFER_BYTES });
     } catch (error) {
       if (error instanceof SourceFileError && error.reason === "too_large") {
         throw new DeliverableRegistrationError("This file exceeds Dock's temporary delivery limit. Remind the user that it could not be delivered because it is too large.");
@@ -103,7 +102,7 @@ export function parseDeliverableDto(
     || !["deliveryRef", "name", "sizeBytes"].every((key) => keys.includes(key))) throw new Error(`${label} has unexpected fields`);
   if (typeof value.deliveryRef !== "string" || value.deliveryRef.length < 1 || value.deliveryRef.length > MAX_DELIVERY_REF_CHARS) throw new Error(`${label}.deliveryRef is invalid`);
   if (typeof value.name !== "string" || value.name.length < 1 || value.name.length > MAX_DELIVERABLE_NAME_CHARS || /[\u0000-\u001f\u007f-\u009f/\\]/u.test(value.name)) throw new Error(`${label}.name is invalid`);
-  if (!Number.isSafeInteger(value.sizeBytes) || (value.sizeBytes as number) < 0 || (value.sizeBytes as number) > MAX_TEMPORARY_DELIVERABLE_BYTES) throw new Error(`${label}.sizeBytes is invalid`);
+  if (!Number.isSafeInteger(value.sizeBytes) || (value.sizeBytes as number) < 0 || (value.sizeBytes as number) > MAX_SOURCE_FILE_TRANSFER_BYTES) throw new Error(`${label}.sizeBytes is invalid`);
   return { deliveryRef: value.deliveryRef, name: value.name, sizeBytes: value.sizeBytes as number };
 }
 

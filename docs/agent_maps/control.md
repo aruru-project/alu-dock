@@ -73,6 +73,8 @@ Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 
 
 `workspace.list.v1` 是创建实例前唯一的目录发现能力。客户端明确传入 Host 文件系统中的绝对路径；Host 返回规范当前路径、上级路径、目录/目录符号链接和分页事实。它只使用 Host 运行用户已有的文件系统权限，不设置额外根目录或白名单，不读取文件正文、不执行 shell，也不改变任何 Host 或 Worker 的进程 cwd。目录选择完成后仍由 `instance.create(cwd)` 执行既有校验和 project trust；浏览本身不产生信任。
 
+`workspace.files.v1` 是 active instance 的 Host workspace 只读能力。每次请求以受理时 snapshot 的 `cwd` 为根，path 使用 workspace-relative 形状且根为 `.`；`workspace.entry.list/get` 返回隐藏条目和不含 Host 绝对路径的 workspace metadata，`workspace.file.read` 在独立连接中按 ready/chunk/complete-or-error 顺序读取正文。Host 拒绝 absolute、`..` 与逃出根目录的符号链接，并在 open 后再次核对实际文件对象仍位于根内。安全的 contained symlink 可按目标类型读取或遍历；外部、断链或 loop symlink 仍可列出为 `targetKind: unavailable`，但不能打开。stop 后的新请求拒绝，reopen 后按普通 active instance 使用。
+
 ## 附件存储与上传
 
 附件是 Host-owned、单用户、永久文件，不属于 durable catalog、Worker DTO 中的字节载荷或某个 TUI 的私有目录。Hub Settings 在本机私有 state 中配置一个绝对 storage directory；Unix socket 和已配对 mTLS 客户端共享它。Settings change 与 active upload 使用跨进程 claim/lease 协调：有 upload 尚未 complete/abort 时拒绝改目录，避免成功 receipt 指向旧 root。首次提交后目录不能直接改到另一处；需要迁移时先整体移动 `files/` 与 `.alu-dock/` store，再修改配置。Host 不做病毒扫描、格式转换、MIME 强制、自动解压、TTL、GC、quota、per-device/per-instance ACL 或引用计数。
@@ -118,7 +120,7 @@ Host 对 socket input 串行处理、pause/resume backpressure，并以 60 秒 i
 
 `instance.deliverables.v1` 与 `show_image` 分离。Agent 在 owner-enabled Dock tools 中调用 closed `dock_deliver_file({path})`；Host 从 authenticated Worker connection 推导 source instance，绝不接受 Worker 提供 instance/session/generation identity。当前 `ManagedInstance` 只在内存登记 canonical source path、`dev/ino/size/mtime/ctime` 和 opaque `deliveryRef`，不读取全文、不 hash、不复制、不上传、不创建 data file，也不写 catalog/session。登记跨 Pi session reload/new/switch/replacement 保留，instance stop 清空；Host restart/reopen 可以丢失。每个 instance 的登记集合有 producer-owned safety bound，满时拒绝新登记而不淘汰正常条目；没有 delete、claim、TTL、ack 或管理 API。
 
-公开 `DeliverableDto` 只有 `deliveryRef + name + sizeBytes`，不含 path。任意 readable regular file 可登记到 **104857600 bytes（100 MiB，含边界）**。客户端用 `deliverable.list {instanceId}` 读取 instance tray；下载在一个独立连接发送 `deliverable.download {instanceId,deliveryRef}`。Host 在 ready 前的失败是普通 error；ready 后发送从零连续的 canonical-base64 chunk records，最后发送 `chunks + sizeBytes + lowercase SHA-256` complete。若 source 在 ready 后消失、改变或读取失败，Host 发送专用 terminal error，客户端丢弃结果。Host 按需 open 并在流前后核对登记的文件身份，以 socket backpressure 发送且边发边算 SHA-256，不经 Worker、不写 Host disk、不复用 attachment storage 或 session-tree `response_transfer`。
+公开 `DeliverableDto` 只有 `deliveryRef + name + sizeBytes`，不含 path。任意 readable regular file 可登记到 **104857600 bytes（100 MiB，含边界）**。客户端用 `deliverable.list {instanceId}` 读取 instance tray；下载在一个独立连接发送 `deliverable.download {instanceId,deliveryRef}`。Host 在 ready 前的失败是普通 error；ready 后发送从零连续的 canonical-base64 chunk records，最后发送 `chunks + sizeBytes + lowercase SHA-256` complete。若 source 在 ready 后消失、改变或读取失败，Host 发送专用 terminal error，客户端丢弃结果。Host 按需 open 并在流前后核对登记的文件身份，以 socket backpressure 发送且边发边算 SHA-256，不经 Worker、不写 Host disk、不复用 attachment storage 或 session-tree `response_transfer`。临时交付与 workspace read 共用同一个 Host source-file read/chunk/backpressure/hash pump 及 100 MiB / 512 KiB 上限；交付仍固定读取登记 size 并做最终 identity verify，workspace 则顺序读取到 EOF，不做最终 identity verify。
 
 DockClient 的下载 API 把 chunk 逐块交给 sink/callback并独立计算 SHA-256，不缓存完整 100 MiB；只有 request/Host/ref identity、连续 index、总字节数和 terminal digest 全部匹配才返回成功。transport failure 是普通失败读取，不是 `effect_unknown`。客户端可在 initial/open/run 边界刷新 list；没有新的 Dock event 或 TUI surface。
 
@@ -207,5 +209,7 @@ Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力
 - `src/core/instance-deliverables.ts`：instance-lifetime 临时交付 registry、path-free DTO 与 producer bounds。
 - `src/core/source-file.ts`：`show_image` 与临时交付共用的 source canonicalize/stat/open/unchanged check。
 - `src/control/workspace-browser.ts`：Host 文件系统目录浏览与可恢复错误。
+- `src/control/instance-workspace.ts`：active instance workspace 的相对路径、符号链接与 canonical containment。
+- `src/control/source-file-transfer.ts`：workspace 与临时交付共用的 Host source-file streaming pump。
 
 新增功能时先判断它属于 Host control 还是 Agent session。不要把 Agent session 能力塞进 catalog/Managed state，也不要为同一 Protocol V2 shape 在 Worker、Host 和客户端分别维护重复定义。
