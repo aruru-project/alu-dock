@@ -1,0 +1,66 @@
+# 已知技术债
+
+## 这份文档负责什么
+
+这里记录已经看清、当前明确接受的结构性代价，避免后续把它们误判成新事故或在附近代码中继续放大。
+
+它不是任务队列、版本承诺或实施授权。只有重访条件实际出现，并且主人明确点名后，某一项才进入分析或实施。产品语义仍以 [`STORY.md`](../STORY.md) 和对应架构文档为准；开始处理前必须重新核对届时的实现与运行证据。
+
+## Host 生命周期内的 mutation identity 保留
+
+**优先级：非常低。**
+
+### 当前权衡
+
+`OperationLedger` 只保留有限数量的完整 settled receipt；更早的唯一 `operationId + fingerprint` 会以 compact retired identity 保留到当前 Host 进程结束。这样即使完整 receipt 已淘汰，同一 Host epoch 内的旧 mutation 也不会被当成新副作用再次执行。
+
+### 债务
+
+Retired identity 的数量随一个 Host 生命周期内出现过的唯一 mutation 单调增长。普通只读请求和 TLS 连接不会增加它；长期、高 mutation 量且很少重启的 Host 可能因此产生缓慢的内存增长。
+
+这是有意保留的幂等事实，不是当前已经观测到的对象泄漏。2026-08-21 的长期运行快照中，Host RSS、FD 和连接数均未显示该项已形成资源压力。
+
+### 为什么现在接受
+
+- 完整结果已经有界，长期保留的只是 compact identity；
+- 当前没有运行证据表明它影响稳定性；
+- 简单 TTL 或容量淘汰会重新放开旧副作用，破坏比内存成本更重要的 mutation 语义。
+
+### 何时重访
+
+- 产品开始承诺 Host 在高 mutation 量下连续运行数月或更久；
+- 运行指标显示 retired identity 已成为 Host heap 的实质组成；
+- operation identity 的持久化或 Host epoch 语义发生变化。
+
+未来方案必须继续保证：不能因为本地记录被淘汰，就把同一 Host epoch 内已经执行过的 mutation 当成第一次执行。
+
+## Host 控制面与 Agent 工作负载共享 service cgroup
+
+**优先级：非常低。**
+
+### 当前权衡
+
+Managed Host、Worker，以及 Agent 从 Worker 中启动并继续运行的开发进程，会继承同一个 `systemd --user` service cgroup。模拟器、编译器、dev server 和它们产生的 page cache 因而都计入 `alu-dock.service` 的 CPU、内存和 task 指标。
+
+### 债务
+
+- service 级指标不能直接区分 Dock 控制面与用户工作负载；
+- 大型 Agent 工作负载会与 Host/Worker 共享 cgroup 资源压力；
+- 未来若直接给整个 service 设置资源限额，控制面和工作负载会互相影响。
+
+这不表示 Agent 启动的进程本身是泄漏。2026-08-21 的只读快照中，service cgroup 的主要占用来自 Android Emulator、Gradle/Kotlin、ADB、Vite 和可回收 file cache；Host 进程自身保持在正常规模。
+
+### 为什么现在接受
+
+- 当前产品是本机单用户工作主体，运行开发工具正是预期用途；
+- 尚未定义 per-instance quota、控制面可用性 SLO 或后台子进程的独立生命周期契约；
+- 现状未导致 Host 连接、Worker 数或 FD 累积。
+
+### 何时重访
+
+- 需要 per-instance 资源计量、限额或清理；
+- 要求大型构建、模拟器或失控子进程不能影响 Host 控制面可用性；
+- managed deployment 开始依赖 service 级 Memory/CPU/Tasks 限制；
+- 需要把后台子进程的归属和 instance stop/Host loss 行为定义为产品契约。
+
+未来做隔离时，必须先定义 Agent 启动的后台进程由谁拥有、何时继续、何时终止；不能只为让监控数字变小而移动 cgroup，同时破坏 Worker fencing、Host-loss shutdown 或用户正在运行的工作。

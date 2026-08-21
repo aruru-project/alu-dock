@@ -51,6 +51,7 @@ Hub TUI / Work TUI / Rails-WebUI / future clients
 | Managed service 与部署 | [`docs/agent_maps/deployment.md`](docs/agent_maps/deployment.md) |
 | 测试配额、用户可见文案与验证层次 | [`docs/qa.md`](docs/qa.md) |
 | 本地安装和运维 | [`docs/local-install.md`](docs/local-install.md) |
+| 已知技术债与重访条件（不是任务队列） | [`docs/technical-debt.md`](docs/technical-debt.md) |
 
 ## 干活约定
 
