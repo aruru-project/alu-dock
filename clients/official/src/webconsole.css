@@ -2196,26 +2196,7 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   .alu-nav-stats { display: inline-flex; gap: 4px; margin-left: 0; }
   .alu-nav-stat-pill { padding: 4px 6px; font-size: 10px; }
 
-  @media (max-width: 640px) {
-    .alu-nav-selector-model .alu-nav-selector-value { font-size: 0; }
-    .alu-nav-selector-model .alu-nav-selector-value::before { content: attr(data-provider); font-size: 11px; }
-    .alu-nav-stat-pill:nth-child(1),
-    .alu-nav-stat-pill:nth-child(2) { display: none; }
-    .alu-nav-files,
-    .alu-nav-hamburger { width: 34px; height: 34px; border-radius: 9px; }
-  }
 
-  /* 极窄屏（≤ 470px）：navbar 折两行——面包屑 + 汉堡一行，Model / Thinking / 上下文 / 费用 / 文件一行。 */
-  @media (max-width: 470px) {
-    :root { --alu-nav-height: auto; }
-    .alu-navbar { position: relative; height: auto; min-height: 0; flex-wrap: wrap; padding: 6px 10px 4px; row-gap: 2px; }
-    .alu-navbar-left { flex: 0 0 100%; width: 100%; padding-right: 52px; }
-    .alu-nav-session { max-width: none; }
-    .alu-navbar-right { flex: 0 0 100%; width: 100%; justify-content: flex-start; padding-bottom: 4px; }
-    .alu-nav-selector-model { flex: 1 1 auto; min-width: 0; }
-    .alu-nav-selector-model .alu-nav-selector-value { max-width: none; }
-    .alu-nav-hamburger { position: absolute; top: 6px; right: 10px; }
-  }
 
   .alu-output {
     width: 100%;
@@ -2400,6 +2381,30 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   }
   .ui-dialog-size-wide,
   .ui-dialog-size-tree { height: 92%; }
+}
+
+@media screen and (max-width: 640px) {
+  .alu-nav-selector-model .alu-nav-selector-value { font-size: 0; }
+  .alu-nav-selector-model .alu-nav-selector-value::before { content: attr(data-provider); font-size: 11px; }
+  .alu-nav-stat-pill:nth-child(1),
+  .alu-nav-stat-pill:nth-child(2) { display: none; }
+  .alu-nav-files,
+  .alu-nav-hamburger { width: 34px; height: 34px; border-radius: 9px; }
+}
+
+/* 极窄屏（≤ 470px）：navbar 折两行——第一行面包屑 + 文件 + 汉堡，第二行只有
+   Model / Thinking / 上下文 / 费用。文件按钮必须钉在第一行：它是客户端比 Web
+   多出来的元素，留在第二行会把统计胶囊挤到溢出重叠。 */
+@media screen and (max-width: 470px) {
+  :root { --alu-nav-height: auto; }
+  .alu-navbar { position: relative; height: auto; min-height: 0; flex-wrap: wrap; padding: 6px 10px 4px; row-gap: 2px; }
+  .alu-navbar-left { flex: 0 0 100%; width: 100%; padding-right: 104px; }
+  .alu-nav-session { max-width: none; }
+  .alu-navbar-right { flex: 0 0 100%; width: 100%; justify-content: flex-start; padding-bottom: 4px; }
+  .alu-nav-selector-model { flex: 1 1 auto; min-width: 0; }
+  .alu-nav-selector-model .alu-nav-selector-value { max-width: none; }
+  .alu-navbar .alu-nav-files { position: absolute; top: 6px; right: 56px; }
+  .alu-navbar .alu-nav-hamburger { position: absolute; top: 6px; right: 10px; }
 }
 
 @media screen and (max-width: 600px) {
