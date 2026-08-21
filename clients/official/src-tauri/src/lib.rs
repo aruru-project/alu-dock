@@ -3877,6 +3877,10 @@ fn workspace_client_error(error: ClientError) -> CommandError {
                 "workspace_file_too_large",
                 "这个文件超过了工作区读取上限，当前无法打开或另存为。",
             ),
+            "workspace_large_file_confirmation_required" => workspace_command_error(
+                "workspace_large_file_confirmation_required",
+                "这个文件在读取前变大了，请确认后再继续。",
+            ),
             "workspace_changed" => workspace_command_error(
                 "workspace_changed",
                 "这个目录刚刚发生了变化，请刷新后继续。",
@@ -5574,6 +5578,39 @@ fn delete_host_endpoint(
     delete_endpoint(&store, &endpoint_id, expected_revision).map_err(CommandError::from)
 }
 
+async fn verify_workspace_scope(
+    client: &DockClient,
+    instance_id: &str,
+    expected_host_epoch: &str,
+    expected_runtime_generation: u64,
+) -> Result<(), CommandError> {
+    let (catalog, host_epoch) = client
+        .list_instances_with_host_epoch(InstanceSelector::Actionable)
+        .await
+        .map_err(workspace_client_error)?;
+    let current = catalog
+        .instances
+        .into_iter()
+        .find(|instance| instance.id == instance_id)
+        .ok_or_else(|| {
+            workspace_command_error(
+                "workspace_context_changed",
+                "这个 Work 已经结束，请重新打开工作区。",
+            )
+        })?;
+    if host_epoch != expected_host_epoch
+        || current.owner_host_epoch.as_deref() != Some(expected_host_epoch)
+        || current.runtime_generation != expected_runtime_generation
+        || !matches!(current.lifecycle, aludock_client_core::InstanceLifecycle::Active)
+    {
+        return Err(workspace_command_error(
+            "workspace_context_changed",
+            "这个 Work 的状态已经变化，请重新打开工作区。",
+        ));
+    }
+    Ok(())
+}
+
 fn workspace_entry_identity_matches(left: &WorkspaceFileEntry, right: &WorkspaceFileEntry) -> bool {
     left.path == right.path
         && left.name == right.name
@@ -5618,14 +5655,30 @@ async fn workspace_entries(
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
+    expected_runtime_generation: u64,
     path: String,
     cursor: Option<WorkspaceFileCursor>,
 ) -> Result<WorkspaceFilePage, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let page = dock_client(&store)?
+    let client = dock_client(&store)?;
+    verify_workspace_scope(
+        &client,
+        &instance_id,
+        &expected_host_epoch,
+        expected_runtime_generation,
+    )
+    .await?;
+    let page = client
         .list_workspace_entries(&instance_id, &path, cursor.as_ref())
         .await
         .map_err(workspace_client_error)?;
+    verify_workspace_scope(
+        &client,
+        &instance_id,
+        &expected_host_epoch,
+        expected_runtime_generation,
+    )
+    .await?;
     resolve_host(&runtime, &host_id, selection_generation)?;
     if page.host_epoch.as_deref() != Some(expected_host_epoch.as_str()) {
         return Err(workspace_command_error(
@@ -5643,13 +5696,29 @@ async fn workspace_entry_metadata(
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
+    expected_runtime_generation: u64,
     path: String,
 ) -> Result<WorkspaceEntryResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let (entry, host_epoch) = dock_client(&store)?
+    let client = dock_client(&store)?;
+    verify_workspace_scope(
+        &client,
+        &instance_id,
+        &expected_host_epoch,
+        expected_runtime_generation,
+    )
+    .await?;
+    let (entry, host_epoch) = client
         .get_workspace_entry(&instance_id, &path)
         .await
         .map_err(workspace_client_error)?;
+    verify_workspace_scope(
+        &client,
+        &instance_id,
+        &expected_host_epoch,
+        expected_runtime_generation,
+    )
+    .await?;
     resolve_host(&runtime, &host_id, selection_generation)?;
     if host_epoch != expected_host_epoch {
         return Err(workspace_command_error(
@@ -5694,6 +5763,13 @@ async fn read_workspace_file(
     }
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
     let client = dock_client(&store)?;
+    verify_workspace_scope(
+        &client,
+        &instance_id,
+        &expected_host_epoch,
+        expected_runtime_generation,
+    )
+    .await?;
     let (current_entry, metadata_epoch) = client
         .get_workspace_entry(&instance_id, &expected_entry.path)
         .await
@@ -5743,6 +5819,19 @@ async fn read_workspace_file(
         &instance_id,
         &expected_entry.path,
         &mut staging_file,
+        move |ready| {
+            if ready.size_bytes.unwrap_or_default() > WORKSPACE_LARGE_FILE_CONFIRM_BYTES
+                && !large_file_confirmed
+            {
+                return Err(ClientError::Host {
+                    code: "workspace_large_file_confirmation_required".into(),
+                    message: "workspace file grew beyond the confirmed preview size".into(),
+                    retryable: false,
+                    details: None,
+                });
+            }
+            Ok(())
+        },
         move |WorkspaceFileReadProgress {
                   bytes_received,
                   observed_size_bytes,
@@ -5774,6 +5863,19 @@ async fn read_workspace_file(
             return Err(error);
         }
     };
+    if let Err(error) = verify_workspace_scope(
+        &client,
+        &instance_id,
+        &expected_host_epoch,
+        expected_runtime_generation,
+    )
+    .await
+    {
+        drop(staging_file);
+        let _ = fs::remove_file(&staging_path);
+        state.finish_failed(&read_id);
+        return Err(error);
+    }
     if cancellation.cancelled.load(Ordering::Acquire)
         || !state.active_matches(&read_id)?
         || result.host_epoch != expected_host_epoch

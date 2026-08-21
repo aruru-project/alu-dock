@@ -281,15 +281,17 @@ impl DockClient {
 
     /// Streams one workspace file into a caller-owned provisional sink. Dropping
     /// this future closes the dedicated read connection and cancels the transfer.
-    pub async fn read_workspace_file<W, F>(
+    pub async fn read_workspace_file<W, R, F>(
         &self,
         instance_id: &str,
         path: &str,
         sink: &mut W,
+        mut validate_ready: R,
         mut on_progress: F,
     ) -> Result<WorkspaceFileReadResult>
     where
         W: AsyncWrite + Unpin,
+        R: FnMut(&WorkspaceFileEntry) -> Result<()>,
         F: FnMut(WorkspaceFileReadProgress),
     {
         validate_instance_id(instance_id)?;
@@ -318,6 +320,7 @@ impl DockClient {
             &hello.host.host_epoch,
             instance_id,
             &path,
+            &mut validate_ready,
             &mut on_progress,
         )
         .await
@@ -367,7 +370,7 @@ fn validate_cursor(cursor: Option<&WorkspaceFileCursor>) -> Result<()> {
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn read_after_request<S, W, F>(
+async fn read_after_request<S, W, R, F>(
     stream: &mut S,
     sink: &mut W,
     maximum_line_bytes: usize,
@@ -375,11 +378,13 @@ async fn read_after_request<S, W, F>(
     host_epoch: &str,
     instance_id: &str,
     path: &str,
+    validate_ready: &mut R,
     on_progress: &mut F,
 ) -> Result<WorkspaceFileReadResult>
 where
     S: AsyncRead + Unpin,
     W: AsyncWrite + Unpin,
+    R: FnMut(&WorkspaceFileEntry) -> Result<()>,
     F: FnMut(WorkspaceFileReadProgress),
 {
     let first: Value = read_workspace_line(stream, maximum_line_bytes).await?;
@@ -410,6 +415,7 @@ where
             "workspace file readiness exceeded its transfer bound",
         ));
     }
+    validate_ready(&entry)?;
     let mut digest = Sha256::new();
     let mut chunks = 0_u64;
     let mut size_bytes = 0_u64;
@@ -685,6 +691,7 @@ mod tests {
             "epoch",
             "work",
             "changing.txt",
+            &mut |_| Ok(()),
             &mut |_| {},
         )
         .await
@@ -694,5 +701,47 @@ mod tests {
         assert_eq!(bytes, b"abc");
         assert_eq!(result.size_bytes, 3);
         assert_eq!(result.entry.size_bytes, Some(2));
+    }
+
+    #[tokio::test]
+    async fn readiness_policy_can_stop_a_grown_file_before_any_chunk_is_written() {
+        let (mut client, mut host) = duplex(4 * 1024);
+        let host_task = tokio::spawn(async move {
+            write_json_line(
+                &mut host,
+                &json!({
+                    "kind": "workspace_file_read_ready",
+                    "version": 2,
+                    "requestId": "request",
+                    "hostEpoch": "epoch",
+                    "instanceId": "work",
+                    "path": "grown.txt",
+                    "entry": { "path": "grown.txt", "name": "grown.txt", "kind": "file", "hidden": false, "sizeBytes": 11 * 1024 * 1024 }
+                }),
+            )
+            .await
+            .unwrap();
+            host.shutdown().await.unwrap();
+        });
+        let mut bytes = Vec::new();
+        let error = read_after_request(
+            &mut client,
+            &mut bytes,
+            1024 * 1024,
+            "request",
+            "epoch",
+            "work",
+            "grown.txt",
+            &mut |_| Err(ClientError::Protocol("confirmation required".into())),
+            &mut |_| {},
+        )
+        .await
+        .unwrap_err();
+        host_task.await.unwrap();
+
+        assert!(
+            matches!(error, ClientError::Protocol(message) if message == "confirmation required")
+        );
+        assert!(bytes.is_empty());
     }
 }
