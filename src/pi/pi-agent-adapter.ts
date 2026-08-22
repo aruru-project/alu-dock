@@ -327,7 +327,7 @@ export class PiAgentAdapter {
         const runtimeMessage = attachments === undefined ? message : appendDockAttachmentContext(message, attachments, this.options.attachmentContextKey);
         const inputKind = this.classifyInput(message);
         const input = inputKind === "prompt"
-          ? binding.conversation.trackInput({ operationId, text: message, runtimeText: runtimeMessage, delivery, fromQueue: hostQueued, images, attachments })
+          ? binding.conversation.trackInput({ operationId, text: message, runtimeText: runtimeMessage, delivery, fromQueue: hostQueued || delivery !== "prompt", images, attachments })
           : undefined;
         const reportPreflight = (success: boolean): void => {
           if (!success) {
@@ -337,7 +337,7 @@ export class PiAgentAdapter {
           const actualDelivery = binding.session.isStreaming ? delivery : "prompt";
           if (input !== undefined) {
             input.delivery = actualDelivery;
-            input.fromQueue ||= actualDelivery !== "prompt";
+            input.fromQueue = hostQueued || actualDelivery !== "prompt";
           }
           preflightResult?.({ success: true, delivery: actualDelivery });
         };
@@ -1174,6 +1174,7 @@ export class PiAgentAdapter {
     };
     binding.unsubscribe = session.subscribe((event: AgentSessionEvent) => {
       if (!token.active) return;
+      if (event.type === "queue_update") binding.conversation.observeQueueUpdate(event.steering, event.followUp);
       const projectedEvents = projectAgentSessionEvents(event, this.options.publishedFiles)
         .map((projected) => this.attributeLifecycleEvent(binding, projected));
       const source = event as unknown as Record<string, unknown>;
@@ -1650,14 +1651,21 @@ interface PiConversationInput {
   operationId: string;
   text: string;
   runtimeText?: string;
+  consumedText?: string;
   delivery: "prompt" | "steer" | "followUp";
   fromQueue: boolean;
   images?: ImagePathDto[];
   attachments?: AttachmentDto[];
 }
 
+function piInputConsumedText(input: PiConversationInput): string {
+  return input.consumedText ?? input.runtimeText ?? input.text;
+}
+
 export class PiConversationProjector {
   private readonly inputs: PiConversationInput[] = [];
+  private steeringQueue: string[] = [];
+  private followUpQueue: string[] = [];
 
   constructor(private readonly attachmentContextKey: Uint8Array) {}
   private readonly announcedToolCalls = new Set<string>();
@@ -1686,12 +1694,33 @@ export class PiConversationProjector {
   clearQueuedInputs(cleared: ClearedAgentQueue): void {
     const remove = (delivery: "steer" | "followUp", texts: readonly string[]): void => {
       for (const text of texts) {
-        const index = this.inputs.findIndex((input) => input.delivery === delivery && (input.runtimeText ?? input.text) === text);
+        const index = this.inputs.findIndex((input) => input.delivery === delivery && piInputConsumedText(input) === text);
         if (index >= 0) this.inputs.splice(index, 1);
       }
     };
     remove("steer", cleared.steering);
     remove("followUp", cleared.followUp);
+  }
+
+  observeQueueUpdate(steering: readonly string[], followUp: readonly string[]): void {
+    // Pi publishes this after input hooks and template/skill expansion, before a queued message can start.
+    // Capture that public queue text once so later consumption keeps the Dock operation identity.
+    this.captureQueuedInputs("steer", this.steeringQueue, steering);
+    this.captureQueuedInputs("followUp", this.followUpQueue, followUp);
+    this.steeringQueue = [...steering];
+    this.followUpQueue = [...followUp];
+  }
+
+  private captureQueuedInputs(
+    delivery: "steer" | "followUp",
+    previous: readonly string[],
+    current: readonly string[],
+  ): void {
+    if (current.length <= previous.length) return;
+    for (const consumedText of current.slice(previous.length)) {
+      const input = this.inputs.find((candidate) => candidate.delivery === delivery && candidate.consumedText === undefined);
+      if (input !== undefined) input.consumedText = consumedText;
+    }
   }
 
   project(event: AgentEvent): AgentEvent[] {
@@ -1731,7 +1760,7 @@ export class PiConversationProjector {
     }
     const consumedText = toolResultText(message.content) ?? "";
     const extracted = extractDockAttachmentContext(consumedText, this.attachmentContextKey);
-    const inputIndex = this.inputs.findIndex((candidate) => (candidate.runtimeText ?? candidate.text) === consumedText || candidate.text === extracted.text);
+    const inputIndex = this.inputs.findIndex((candidate) => piInputConsumedText(candidate) === consumedText || candidate.text === extracted.text);
     const input = inputIndex < 0 ? undefined : this.inputs.splice(inputIndex, 1)[0];
     const operationId = input?.operationId ?? "runtime-initiated";
     this.currentUserMessageId = input === undefined

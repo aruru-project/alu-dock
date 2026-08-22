@@ -18,6 +18,8 @@ const TOOL_PROMPT = "SDK_COMPAT_TOOL: read fixture.txt and report its contents";
 const HOLD_PROMPT = "SDK_COMPAT_HOLD: keep this turn running";
 const ERROR_PROMPT = "SDK_COMPAT_ERROR: surface the provider failure";
 const RECOVERY_PROMPT = "SDK_COMPAT_RECOVERY: prove the worker recovered";
+const TEMPLATE_COMMAND = "/queued-template";
+const TEMPLATE_PROMPT = "SDK_COMPAT_TEMPLATE_EXPANDED: consume this queued template";
 const FIXTURE_TEXT = "sdk-compat-read-sentinel";
 
 /** Pi SDK admission gate. Intentionally not named *.test.ts; ordinary npm test must not collect it. */
@@ -37,7 +39,7 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
   let follower: Awaited<ReturnType<DockClient["streamEvents"]>> | undefined;
 
   try {
-    await Promise.all([mkdir(cwd), mkdir(agentDir), mkdir(sessionDir), mkdir(homeDir), chmod(root, 0o700)]);
+    await Promise.all([mkdir(cwd), mkdir(join(agentDir, "prompts"), { recursive: true }), mkdir(sessionDir), mkdir(homeDir), chmod(root, 0o700)]);
     await Promise.all([
       writeFile(join(cwd, "fixture.txt"), `${FIXTURE_TEXT}\n`, "utf8"),
       writeFile(priorSessionFile, priorPiSession(cwd), { encoding: "utf8", mode: 0o600 }),
@@ -67,6 +69,13 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
         defaultModel: MODEL,
         retry: { enabled: false },
       }), "utf8"),
+      writeFile(join(agentDir, "prompts", "queued-template.md"), [
+        "---",
+        "description: SDK compatibility queued template",
+        "---",
+        TEMPLATE_PROMPT,
+        "",
+      ].join("\n"), "utf8"),
     ]);
 
     const workerEnvironment = sanitizedWorkerEnvironment(homeDir);
@@ -119,6 +128,23 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
     assert.ok(initialHistory.some((entry) => entry.source === "user" && textOf(entry.content).includes(TOOL_PROMPT)));
     assert.ok(initialHistory.some((entry) => entry.source === "tool" && entry.toolName === "read" && textOf(entry.content).includes(FIXTURE_TEXT)));
     assert.ok(initialHistory.some((entry) => entry.source === "assistant" && textOf(entry.content).includes("read completed successfully")));
+
+    // Regression: the 2026-08-22 /sol-checkup incident left its Dock queue item in flight
+    // because Pi queued the expanded template body while Dock tracked the slash command.
+    const templateEvent = events.length;
+    await client.prompt(created.id, HOLD_PROMPT, "prompt", "sdk-template-hold");
+    await waitForEvent(events, templateEvent, (event) => event.type === "message.delta" && event.data.delta.includes("holding"));
+    const queuedTemplate = await client.prompt(created.id, TEMPLATE_COMMAND, "steer", "sdk-template-queued");
+    assert.equal(queuedTemplate.receipt.queued, true);
+    fixture.releaseHold();
+    const templateSubmitted = await waitForEvent(events, templateEvent, (event) => (
+      event.type === "message.submitted" && event.data.operationId === "sdk-template-queued"
+    ));
+    assert.equal(templateSubmitted.type, "message.submitted");
+    assert.equal(templateSubmitted.data.text, TEMPLATE_COMMAND);
+    await waitForEvent(events, templateEvent, (event) => event.type === "run.settled" && event.data.operationId === "sdk-template-hold");
+    assert.equal((await client.status(created.id)).pending.total, 0);
+    assert.ok(fixture.requests.some((body) => lastUserText(body).includes(TEMPLATE_PROMPT)));
 
     const holdEvent = events.length;
     await client.prompt(created.id, HOLD_PROMPT, "prompt", "sdk-hold-run");
@@ -241,6 +267,7 @@ class LoopbackChatFixture {
   origin = "";
   private readonly sockets = new Set<Socket>();
   private readonly server = createServer((request, response) => { void this.respond(request, response); });
+  private pendingHoldResponse: ServerResponse | undefined;
 
   async start(): Promise<void> {
     this.server.on("connection", (socket) => {
@@ -257,6 +284,13 @@ class LoopbackChatFixture {
     const address = this.server.address();
     assert.ok(address && typeof address !== "string");
     this.origin = `http://127.0.0.1:${address.port}`;
+  }
+
+  releaseHold(): void {
+    const response = this.pendingHoldResponse;
+    assert.ok(response, "the fixture must have an active held response");
+    this.pendingHoldResponse = undefined;
+    finish(response, "stop");
   }
 
   async stop(): Promise<void> {
@@ -286,6 +320,10 @@ class LoopbackChatFixture {
     response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
     if (latestUserText.includes(HOLD_PROMPT)) {
       sendDelta(response, { role: "assistant", content: "holding turn open" });
+      this.pendingHoldResponse = response;
+      response.once("close", () => {
+        if (this.pendingHoldResponse === response) this.pendingHoldResponse = undefined;
+      });
       return;
     }
     if (latestUserText.includes(TOOL_PROMPT) && !hasToolResult(body, FIXTURE_TEXT)) {
