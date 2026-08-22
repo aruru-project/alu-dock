@@ -17,6 +17,7 @@ const INSTANCE_DELIVERABLES_V1: &str = "instance.deliverables.v1";
 const INSTANCE_DISPLAY_NAME_V1: &str = "instance.display-name.v1";
 const INSTANCE_KEYS_V1: &str = "instance.keys.v1";
 const INSTANCE_READ_V1: &str = "instance.read.v1";
+const MACHINES_V1: &str = "machines.v1";
 const MODELS_V1: &str = "models.v1";
 const PROJECTION_COMPLETENESS_V1: &str = "projection.completeness.v1";
 const PUBLISHED_FILES_V1: &str = "published-files.v1";
@@ -79,6 +80,7 @@ snapshot_capabilities!(
 pub(crate) const HOST_INFO: &[&str] = &[CORE_V2, HOST_INFO_CAPABILITY];
 pub(crate) const ATTACHMENTS: &[&str] = &[CORE_V2, ATTACHMENTS_V1];
 pub(crate) const INSTANCE_DELIVERABLES: &[&str] = &[CORE_V2, INSTANCE_DELIVERABLES_V1];
+pub(crate) const MACHINES: &[&str] = &[CORE_V2, MACHINES_V1];
 pub(crate) const PUBLISHED_FILES: &[&str] = &[CORE_V2, PUBLISHED_FILES_V1];
 pub(crate) const WORKSPACE_FILES: &[&str] = &[CORE_V2, WORKSPACE_FILES_V1];
 pub(crate) const WORKSPACE_LIST: &[&str] = &[CORE_V2, WORKSPACE_LIST_V1];

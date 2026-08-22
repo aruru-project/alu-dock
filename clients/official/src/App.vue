@@ -38,6 +38,7 @@ import {
   getSettings,
   getSystemDeviceName,
   listDeliverables,
+  listMachines,
   listModels,
   listSessions,
   listTools,
@@ -76,7 +77,8 @@ import {
 } from './lib/bridge'
 import type { CreateWorkContinuation, SessionContext } from './lib/bridge'
 import { foldLiveDelta, liveDeltaKey, liveProjectionTargetKey, mergeHydratedConversationRecords, projectConversation } from './lib/conversation'
-import { appendRestoredQueue, attachmentsAfterSubmit, moveAttachmentPreviewResource } from './lib/attachmentDraft'
+import { appendRestoredQueue, attachmentsAfterSubmit, displayedConversationImageResource, moveAttachmentPreviewResource } from './lib/attachmentDraft'
+import { defaultMachineHostId, machineSelectorVisible, selectedMachineTarget } from './lib/machines'
 import {
   DEVICE_NAME_FALLBACK,
   browserDeviceNameStorage,
@@ -107,7 +109,7 @@ import {
 } from './lib/uiBoundaries'
 import { applySlashArgumentCompletion, applySlashCompletion, catalogSourceLabel, filterCatalogCommands, prefixSlashCommand, slashArgumentContext, slashCommandQuery } from './lib/commandSuggest'
 import { filterLocalControlCommands, localControlCommands, submittedLocalControl, type ControlSection, type LocalControlCommand } from './lib/localCommands'
-import type { AttachmentDto, AttachmentUploadProgress, ClientPreferences, CommandArgumentCompletion, CommandInfo, ConnectionKind, ConversationBootstrap, ConversationHistoryPage, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, HostConnectionProfile, HostContext, HostEndpoint, ProjectedEvent, QueueItem, SelectedAttachment, WindowsAwayDelay, Work, WorkspacePage } from './lib/types'
+import type { AttachmentDto, AttachmentUploadProgress, ClientPreferences, CommandArgumentCompletion, CommandInfo, ConnectionKind, ConversationBootstrap, ConversationHistoryPage, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, HostConnectionProfile, HostContext, HostEndpoint, MachineDto, ProjectedEvent, QueueItem, SelectedAttachment, WindowsAwayDelay, Work, WorkspacePage } from './lib/types'
 import {
   deliveryHistoryKey,
   downloadedDelivery,
@@ -136,6 +138,8 @@ marked.use({ breaks: true, gfm: true })
 const commandShortcutLabel = /Macintosh|Mac OS X/.test(navigator.userAgent) ? '⌘K' : 'Ctrl+K'
 const isAndroidWebView = /Android/i.test(navigator.userAgent)
 const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
+// TODO: Replace this fallback when Protocol V2 exposes machine-local workspace roots.
+const MACHINE_WORKSPACE_FALLBACK = '/'
 
 const MARKDOWN_SANITIZE_CONFIG = {
   USE_PROFILES: { html: true },
@@ -174,8 +178,14 @@ const composerExpanded = ref(false)
 const workspace = ref<WorkspacePage | null>(null)
 const workspacePath = ref('')
 const workspaceSearch = ref('')
+const directoryMachines = ref<MachineDto[]>([])
+const directoryMachineId = ref('')
+const directoryMachineSelectorVisible = computed(() => machineSelectorVisible(directoryMachines.value))
+const directoryMachine = computed(() => directoryMachines.value.find((machine) => machine.hostId === directoryMachineId.value))
+const directoryTargetHostId = computed(() => selectedMachineTarget(directoryMachines.value, directoryMachineId.value))
 const workspaceLoading = ref(false)
 const workspaceError = ref<string | null>(null)
+let workspaceLoadEpoch = 0
 const creatingWork = ref(false)
 const trustContinuation = ref<CreateWorkContinuation | null>(null)
 const reopenTrustContinuation = ref<CreateWorkContinuation | null>(null)
@@ -1158,6 +1168,7 @@ function closeModal() {
   workspaceBrowserOpen.value = false
   deliveryOpen.value = false
   directoryOpen.value = false
+  ++workspaceLoadEpoch
   commandOpen.value = false
   appSettingsOpen.value = false
   hostSettingsOpen.value = false
@@ -2111,10 +2122,9 @@ const idleImageResource: ConversationImageResource = { state: 'idle' }
 const loadingImageResource: ConversationImageResource = { state: 'loading' }
 
 function imageResource(part: ConversationImagePart): ConversationImageResource {
-  const loaded = imageResources.value[part.imageKey]
-  if (loaded) return loaded
   const localPreview = part.fileId ? attachmentPreviews.value[part.fileId] : undefined
-  if (!part.source && localPreview) return { state: 'ready', url: localPreview.url }
+  const available = displayedConversationImageResource(localPreview, imageResources.value[part.imageKey])
+  if (available) return available
   const entryId = part.historyEntryId
   if (!part.source && entryId && historyHydrationActiveEntries.value.has(entryId)) return loadingImageResource
   const hydrationError = entryId ? historyHydrationErrors.value[entryId] : undefined
@@ -3134,31 +3144,73 @@ async function openDirectory() {
   directoryOpen.value = true
   commandOpen.value = false
   trustContinuation.value = null
-  const initial = selected.value?.cwd || '/'
+  workspace.value = null
+  workspacePath.value = ''
+  workspaceSearch.value = ''
+  directoryMachines.value = []
+  directoryMachineId.value = ''
+  workspaceError.value = null
+  workspaceLoading.value = true
+  const openEpoch = ++workspaceLoadEpoch
+  try {
+    const machines = await currentHostCall(app, (context) => listMachines(context))
+    if (openEpoch !== workspaceLoadEpoch || !directoryOpen.value) return
+    directoryMachines.value = machines
+    directoryMachineId.value = defaultMachineHostId(machines)
+    if (!directoryMachineId.value) throw new Error('当前没有可用于创建 Work 的机器。')
+  } catch (cause) {
+    if (openEpoch !== workspaceLoadEpoch || !directoryOpen.value) return
+    workspaceError.value = errorMessage(cause, '无法读取可用机器，请检查连接后重试。')
+    workspaceLoading.value = false
+    return
+  }
+  const initial = directoryMachineSelectorVisible.value
+    ? MACHINE_WORKSPACE_FALLBACK
+    : selected.value?.cwd || MACHINE_WORKSPACE_FALLBACK
+  workspacePath.value = initial
   await browse(initial)
 }
 
+async function selectDirectoryMachine(event: Event) {
+  const hostId = (event.currentTarget as HTMLSelectElement).value
+  const machine = directoryMachines.value.find((candidate) => candidate.hostId === hostId)
+  if (!machine?.available || hostId === directoryMachineId.value || creatingWork.value || trustContinuation.value) return
+  directoryMachineId.value = hostId
+  workspace.value = null
+  workspacePath.value = MACHINE_WORKSPACE_FALLBACK
+  await browse(MACHINE_WORKSPACE_FALLBACK)
+}
+
 async function browse(path: string) {
+  const loadEpoch = ++workspaceLoadEpoch
+  const targetHostId = directoryTargetHostId.value
   workspaceLoading.value = true
   workspaceSearch.value = ''
   workspaceError.value = null
   try {
-    workspace.value = await currentHostCall(app, (context) => listWorkspace(path, context))
-    workspacePath.value = workspace.value.path
+    const page = await currentHostCall(app, (context) => listWorkspace(path, context, targetHostId))
+    if (loadEpoch !== workspaceLoadEpoch) return
+    workspace.value = page
+    workspacePath.value = page.path
   } catch (cause) {
-    workspaceError.value = errorMessage(cause)
+    if (loadEpoch === workspaceLoadEpoch) workspaceError.value = errorMessage(cause)
   } finally {
-    workspaceLoading.value = false
+    if (loadEpoch === workspaceLoadEpoch) workspaceLoading.value = false
   }
 }
 
 async function createSelectedWork(continuation?: CreateWorkContinuation) {
-  if (!isTauri || contextTransitionBusy.value || !workspace.value || creatingWork.value) return
+  if (!isTauri
+    || contextTransitionBusy.value
+    || !workspace.value
+    || creatingWork.value
+    || (directoryMachineSelectorVisible.value && !directoryMachine.value?.available)) return
   creatingWork.value = true
   workspaceError.value = null
   try {
     const capturedHost = requireHostContext(app)
-    const work = await createWork(workspace.value.path, capturedHost, undefined, continuation)
+    const targetHostId = directoryTargetHostId.value
+    const work = await createWork(workspace.value.path, capturedHost, undefined, continuation, targetHostId)
     if (!app.contextMatches(capturedHost)) return
     app.applyWorkSnapshot(work, capturedHost)
     app.selectWork(work.id)
@@ -3795,11 +3847,17 @@ function handleOutputClick(event: MouseEvent) {
             <button class="host-settings-close" data-modal-initial aria-label="关闭" @click="closeModal"><X :size="18" /></button>
           </header>
           <div v-if="directoryOpen" class="alu-directory-select">
+            <label v-if="directoryMachineSelectorVisible" class="alu-directory-machine">
+              <span>创建位置</span>
+              <select :value="directoryMachineId" :disabled="workspaceLoading || creatingWork || !!trustContinuation" @change="selectDirectoryMachine">
+                <option v-for="machine in directoryMachines" :key="machine.hostId" :value="machine.hostId" :disabled="!machine.available">{{ machine.name }} · {{ machine.kind === 'main' ? 'Main' : 'SubHost' }}{{ machine.available ? '' : ' · 暂不可用' }}</option>
+              </select>
+            </label>
             <div class="ui-dialog-search-wrap"><input v-model="workspaceSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索目录名称…" /></div>
             <div v-if="workspaceError" class="alu-dialog-error">{{ workspaceError }}</div>
             <div v-if="workspaceLoading" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取目录…</div>
             <div v-else-if="workspace" class="ui-dialog-options" role="listbox">
-              <button class="ui-dialog-option" :disabled="!isTauri || creatingWork || mutationOutcomeUnknown || !!trustContinuation" @click="createSelectedWork()"><span class="ui-dialog-option-marker">✓</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">使用这个目录</span><span class="ui-dialog-option-badge">选择</span></span><span class="ui-dialog-option-detail"><span>{{ workspace.path }}</span></span></span></button>
+              <button class="ui-dialog-option" :disabled="!isTauri || creatingWork || mutationOutcomeUnknown || !!trustContinuation || (directoryMachineSelectorVisible && !directoryMachine?.available)" @click="createSelectedWork()"><span class="ui-dialog-option-marker">✓</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">使用这个目录</span><span class="ui-dialog-option-badge">选择</span></span><span class="ui-dialog-option-detail"><span>{{ workspace.path }}</span></span></span></button>
               <button v-if="workspace.parent" class="ui-dialog-option" @click="browse(workspace.parent)"><span class="ui-dialog-option-marker">↑</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">..</span><span class="ui-dialog-option-detail"><span>返回上级目录</span></span></span></button>
               <button v-for="entry in filteredWorkspaceEntries" :key="entry.name" class="ui-dialog-option" @click="browse(`${workspace.path.replace(/\/$/, '')}/${entry.name}`)"><span class="ui-dialog-option-marker">{{ entry.kind === 'symlink' ? '↗' : '▸' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ entry.name }}</span><span v-if="entry.kind === 'symlink'" class="ui-dialog-option-badge">链接</span></span><span class="ui-dialog-option-detail"><span>{{ entry.kind === 'symlink' ? '目录链接' : '目录' }}{{ entry.hidden ? ' · 隐藏' : '' }}</span></span></span></button>
               <div v-if="!filteredWorkspaceEntries.length && !workspace.parent" class="ui-dialog-empty">没有匹配项</div>

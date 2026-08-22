@@ -77,9 +77,9 @@ pub use host_registry::{
 pub use identity::ClientIdentity;
 pub use instances::{
     EventCursor, ExecutorSnapshot, ForgetReceipt, ForgetResult, InstanceCatalog, InstanceExecution,
-    InstanceLifecycle, InstanceSelector, InstanceSnapshot, ModelIdentity, PendingCounts,
-    ProjectTrustDecision, ReopenResult, StopReceipt, StopResult, WorkspaceCursor, WorkspaceEntry,
-    WorkspaceEntryKind, WorkspacePage,
+    InstanceLifecycle, InstanceSelector, InstanceSnapshot, Machine, MachineKind, ModelIdentity,
+    PendingCounts, ProjectTrustDecision, ReopenResult, StopReceipt, StopResult, WorkspaceCursor,
+    WorkspaceEntry, WorkspaceEntryKind, WorkspacePage,
 };
 pub use pairing::{PairingOutcome, PairingProgress, pair, validate_device_name};
 pub use protocol::{HostIdentity, HostInfo, host_info, host_info_for_profile};

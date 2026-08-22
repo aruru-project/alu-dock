@@ -19,6 +19,7 @@ import type {
   HostContext,
   InteractionMethod,
   InteractionResponse,
+  MachineDto,
   ModelsResult,
   PublishedFileDto,
   QueueDequeueResult,
@@ -625,8 +626,17 @@ export async function saveWorkspaceCachedFile(cacheId: string, context: Workspac
   throw new Error('浏览器设计预览不会保存工作区文件')
 }
 
-export async function listWorkspace(path: string, context: HostContext): Promise<WorkspacePage> {
-  if (isTauri) return invoke<WorkspacePage>('list_workspace', { ...context, path })
+export async function listMachines(context: HostContext): Promise<MachineDto[]> {
+  if (isTauri) return invoke<MachineDto[]>('list_machines', { ...context })
+  await delay(80)
+  return [
+    { hostId: 'preview-main', name: '家里的工作站', kind: 'main', available: true },
+    { hostId: 'preview-subhost', name: 'Windows 工作站', kind: 'subhost', available: true },
+  ]
+}
+
+export async function listWorkspace(path: string, context: HostContext, targetHostId?: string): Promise<WorkspacePage> {
+  if (isTauri) return invoke<WorkspacePage>('list_workspace', { ...context, path, targetHostId: targetHostId ?? null })
   await delay(180)
   return {
     path,
@@ -655,11 +665,13 @@ export async function createWork(
   context: HostContext,
   name?: string,
   continuation?: CreateWorkContinuation,
+  targetHostId?: string,
 ): Promise<Work> {
   if (isTauri) {
     return invoke<Work>('create_work', {
       ...context, cwd,
       name: name || null,
+      targetHostId: targetHostId ?? null,
       operationId: continuation?.operationId ?? null,
       trustChallengeId: continuation?.trustChallengeId ?? null,
       projectTrustDecision: continuation?.projectTrustDecision ?? null,

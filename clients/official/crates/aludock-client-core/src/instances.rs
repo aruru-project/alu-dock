@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,7 +8,8 @@ use crate::{
     ActiveInteraction, ClientError, DockClient, Result,
     capabilities::{
         CATALOG_MAINTENANCE as FORGET_CAPABILITIES, INSTANCE_CATALOG as INSTANCE_CAPABILITIES,
-        INSTANCE_REOPEN as REOPEN_CAPABILITIES, WORKSPACE_LIST as WORKSPACE_CAPABILITIES,
+        INSTANCE_REOPEN as REOPEN_CAPABILITIES, MACHINES as MACHINE_CAPABILITIES,
+        WORKSPACE_LIST as WORKSPACE_CAPABILITIES,
     },
     extension_ui::{validate_active_interaction, validate_extension_status},
 };
@@ -216,6 +217,27 @@ pub struct InstanceCatalog {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MachineKind {
+    Main,
+    Subhost,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Machine {
+    pub host_id: String,
+    pub name: String,
+    pub kind: MachineKind,
+    pub available: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct MachinesResult {
+    machines: Vec<Machine>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkspaceEntryKind {
     Directory,
@@ -255,6 +277,8 @@ struct WorkspaceListParams<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     cursor: Option<&'a WorkspaceCursor>,
     limit: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host_id: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -264,6 +288,8 @@ struct CreateInstanceParams<'a> {
     cwd: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     trust_challenge_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -339,6 +365,38 @@ pub struct ForgetResult {
 }
 
 impl DockClient {
+    pub async fn list_machines(&self) -> Result<Vec<Machine>> {
+        let result: MachinesResult = self
+            .request(
+                "machine.list",
+                &serde_json::json!({}),
+                MACHINE_CAPABILITIES,
+                None,
+            )
+            .await?;
+        let mut identities = HashSet::new();
+        let mut main_count = 0;
+        for machine in &result.machines {
+            if machine.host_id.is_empty()
+                || machine.name.is_empty()
+                || !identities.insert(&machine.host_id)
+            {
+                return Err(ClientError::Protocol(
+                    "machine list contained an invalid or duplicate identity".into(),
+                ));
+            }
+            if machine.kind == MachineKind::Main {
+                main_count += 1;
+            }
+        }
+        if result.machines.is_empty() || main_count != 1 {
+            return Err(ClientError::Protocol(
+                "machine list did not contain exactly one Main".into(),
+            ));
+        }
+        Ok(result.machines)
+    }
+
     pub async fn list_instances(&self, selector: InstanceSelector) -> Result<InstanceCatalog> {
         self.list_instances_with_host_epoch(selector)
             .await
@@ -417,6 +475,15 @@ impl DockClient {
         path: &str,
         cursor: Option<&WorkspaceCursor>,
     ) -> Result<WorkspacePage> {
+        self.list_workspace_for_machine(path, cursor, None).await
+    }
+
+    pub async fn list_workspace_for_machine(
+        &self,
+        path: &str,
+        cursor: Option<&WorkspaceCursor>,
+        target_host_id: Option<&str>,
+    ) -> Result<WorkspacePage> {
         let page: WorkspacePage = self
             .request(
                 "workspace.list",
@@ -424,6 +491,7 @@ impl DockClient {
                     path,
                     cursor,
                     limit: 200,
+                    host_id: target_host_id,
                 },
                 WORKSPACE_CAPABILITIES,
                 None,
@@ -444,6 +512,18 @@ impl DockClient {
         continuation: Option<(&str, ProjectTrustDecision)>,
         operation_id: Option<&str>,
     ) -> Result<InstanceSnapshot> {
+        self.create_instance_for_machine(cwd, name, continuation, operation_id, None)
+            .await
+    }
+
+    pub async fn create_instance_for_machine(
+        &self,
+        cwd: &str,
+        name: Option<&str>,
+        continuation: Option<(&str, ProjectTrustDecision)>,
+        operation_id: Option<&str>,
+        target_host_id: Option<&str>,
+    ) -> Result<InstanceSnapshot> {
         let generated_operation_id = Uuid::new_v4().to_string();
         let operation_id = operation_id.unwrap_or(&generated_operation_id);
         let (trust_challenge_id, project_trust_decision) = continuation
@@ -456,6 +536,7 @@ impl DockClient {
                     operation_id,
                     cwd,
                     name,
+                    host_id: target_host_id,
                     trust_challenge_id,
                     project_trust_decision,
                 },
@@ -669,6 +750,39 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn machine_target_is_carried_by_directory_browsing_and_work_creation() {
+        let workspace = serde_json::to_value(WorkspaceListParams {
+            path: "/",
+            cursor: None,
+            limit: 200,
+            host_id: Some("subhost-a"),
+        })
+        .unwrap();
+        assert_eq!(
+            workspace,
+            serde_json::json!({ "path": "/", "limit": 200, "hostId": "subhost-a" })
+        );
+
+        let creation = serde_json::to_value(CreateInstanceParams {
+            operation_id: "operation-a",
+            cwd: "/project",
+            name: None,
+            host_id: Some("subhost-a"),
+            trust_challenge_id: None,
+            project_trust_decision: None,
+        })
+        .unwrap();
+        assert_eq!(
+            creation,
+            serde_json::json!({
+                "operationId": "operation-a",
+                "cwd": "/project",
+                "hostId": "subhost-a"
+            })
+        );
     }
 
     #[test]

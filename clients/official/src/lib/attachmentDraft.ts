@@ -1,4 +1,4 @@
-import type { AttachmentDto, QueueItem } from './types'
+import type { AttachmentDto, ConversationImageResource, QueueItem } from './types'
 
 export function attachmentsAfterSubmit(
   current: AttachmentDto[],
@@ -22,6 +22,13 @@ export function moveAttachmentPreviewResource<T extends { url: string }>(
   const replaced = resources[to]
   resources[to] = moved
   return { resources, moved, replaced }
+}
+
+export function displayedConversationImageResource(
+  localPreview: { url: string } | undefined,
+  remoteResource: ConversationImageResource | undefined,
+): ConversationImageResource | undefined {
+  return localPreview ? { state: 'ready', url: localPreview.url } : remoteResource
 }
 
 export function appendRestoredQueue(

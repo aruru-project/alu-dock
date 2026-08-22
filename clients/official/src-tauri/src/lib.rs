@@ -31,7 +31,7 @@ use aludock_client_core::{
     EventCursor, ExtensionControllerLease, ExtensionEvent, HistoryRecord, HostConnectionProfile,
     HostConnectionRouter, HostRegistry, HostRegistrySnapshot, IdentityStore, ImagePath,
     InstanceCatalog, InstanceSelector, InstanceSnapshot, InteractionMethod, InteractionRequest,
-    InteractionResponse, ModelsResult, NavigateOptions, PairingProgress, PendingMessage,
+    InteractionResponse, Machine, ModelsResult, NavigateOptions, PairingProgress, PendingMessage,
     ProjectTrustDecision, PublishedFileDto, QueueDequeueResult, ReadReplay, ResourceInfo,
     ResourcesResult, SessionCompactionResult, SessionForkResult, SessionNameResult,
     SessionNavigateResult, SessionReloadResult, SessionReplacementResult, SessionScope,
@@ -6397,16 +6397,30 @@ async fn save_workspace_cached_file(
 }
 
 #[tauri::command]
+async fn list_machines(
+    runtime: tauri::State<'_, HostRuntimeState>,
+    host_id: String,
+    selection_generation: u64,
+) -> Result<Vec<Machine>, CommandError> {
+    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    dock_client(&runtime, &host_id, selection_generation, &store)?
+        .list_machines()
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
 async fn list_workspace(
     runtime: tauri::State<'_, HostRuntimeState>,
     host_id: String,
     selection_generation: u64,
     path: String,
+    target_host_id: Option<String>,
 ) -> Result<WorkspacePage, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
     let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     client
-        .list_workspace(&path, None)
+        .list_workspace_for_machine(&path, None, target_host_id.as_deref())
         .await
         .map_err(CommandError::from)
 }
@@ -7006,6 +7020,7 @@ async fn create_work(
     selection_generation: u64,
     cwd: String,
     name: Option<String>,
+    target_host_id: Option<String>,
     operation_id: Option<String>,
     trust_challenge_id: Option<String>,
     project_trust_decision: Option<String>,
@@ -7018,7 +7033,13 @@ async fn create_work(
         operation_id.clone(),
     )?;
     client
-        .create_instance(&cwd, name.as_deref(), continuation, operation_id.as_deref())
+        .create_instance_for_machine(
+            &cwd,
+            name.as_deref(),
+            continuation,
+            operation_id.as_deref(),
+            target_host_id.as_deref(),
+        )
         .await
         .map_err(CommandError::from)
 }
@@ -7172,6 +7193,7 @@ pub fn run() {
             workspace_cached_text,
             workspace_cached_image,
             save_workspace_cached_file,
+            list_machines,
             list_workspace,
             list_sessions,
             new_session,

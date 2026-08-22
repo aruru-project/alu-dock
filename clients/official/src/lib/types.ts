@@ -143,6 +143,13 @@ export interface BootstrapPayload {
   hiddenStopped: number
 }
 
+export interface MachineDto {
+  hostId: string
+  name: string
+  kind: 'main' | 'subhost'
+  available: boolean
+}
+
 export interface WorkCatalog {
   hostId: string
   selectionGeneration: number

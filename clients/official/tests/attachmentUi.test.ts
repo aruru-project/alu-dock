@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { appendRestoredQueue, attachmentsAfterSubmit, moveAttachmentPreviewResource } from '../src/lib/attachmentDraft.ts'
+import { appendRestoredQueue, attachmentsAfterSubmit, displayedConversationImageResource, moveAttachmentPreviewResource } from '../src/lib/attachmentDraft.ts'
 import { projectConversation } from '../src/lib/conversation.ts'
 import { draftAfterSubmit } from '../src/lib/uiBoundaries.ts'
 import { decodeLocalUiState } from '../src/lib/localState.ts'
@@ -83,6 +83,12 @@ const attachment: AttachmentDto = {
   const replaced = moveAttachmentPreviewResource({ 'local-token': localPreview, [attachment.fileId]: oldRemotePreview }, 'local-token', attachment.fileId)
   assert.equal(replaced.replaced, oldRemotePreview, 'only a real replaced preview is returned for URL revocation')
   assert.deepEqual(replaced.resources, { [attachment.fileId]: localPreview })
+
+  assert.deepEqual(
+    displayedConversationImageResource(localPreview, { state: 'loading' }),
+    { state: 'ready', url: 'blob:local' },
+    'a sent image remains visible from its local preview while remote history is still loading',
+  )
 }
 
 {
