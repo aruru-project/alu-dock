@@ -1,9 +1,12 @@
 import assert from 'node:assert/strict'
+import { reactive, watch } from 'vue'
 import {
   classifyWorkspacePreview,
   mergeWorkspaceDirectoryEntries,
+  workspaceDirectoryState,
   workspaceEntryIsDirectory,
   workspaceEntryIsFile,
+  type WorkspaceDirectoryState,
 } from '../src/lib/workspaceBrowser.ts'
 import type { WorkspaceFileEntry } from '../src/lib/types.ts'
 
@@ -42,5 +45,17 @@ assert.equal(workspaceEntryIsDirectory(directoryLink), true)
 assert.equal(workspaceEntryIsFile(directoryLink), false)
 assert.equal(workspaceEntryIsDirectory(unavailableLink), false)
 assert.equal(workspaceEntryIsFile(unavailableLink), false)
+
+// 首次打开时状态必须通过 Vue 代理更新，否则请求完成后界面仍会停在“正在读取”。
+const directories = reactive<Record<string, WorkspaceDirectoryState>>({})
+const root = workspaceDirectoryState(directories, '.')
+const observedLoading: boolean[] = []
+const stopWatching = watch(() => directories['.']?.loading, (loading) => observedLoading.push(loading), { flush: 'sync' })
+root.loading = true
+root.entries = [file('README.md')]
+root.loading = false
+stopWatching()
+assert.deepEqual(observedLoading, [true, false])
+assert.equal(directories['.'].entries[0]?.path, 'README.md')
 
 console.log('workspace browser tests passed')

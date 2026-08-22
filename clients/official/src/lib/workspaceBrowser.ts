@@ -2,6 +2,27 @@ import type { WorkspaceFileCursor, WorkspaceFileEntry } from './types'
 
 export type WorkspacePreviewKind = 'text' | 'image' | 'unsupported'
 
+export interface WorkspaceDirectoryState {
+  entries: WorkspaceFileEntry[]
+  revision: string
+  nextCursor?: WorkspaceFileCursor
+  loading: boolean
+  error: string
+  loadToken: number
+}
+
+export function workspaceDirectoryState(
+  directories: Record<string, WorkspaceDirectoryState>,
+  path: string,
+): WorkspaceDirectoryState {
+  if (!directories[path]) {
+    directories[path] = {
+      entries: [], revision: '', nextCursor: undefined, loading: false, error: '', loadToken: 0,
+    }
+  }
+  return directories[path]
+}
+
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp'])
 const TEXT_EXTENSIONS = new Set([
   'c', 'cc', 'cpp', 'cs', 'css', 'csv', 'dart', 'env', 'go', 'h', 'hpp', 'html', 'ini',

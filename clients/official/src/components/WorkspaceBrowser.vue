@@ -33,15 +33,16 @@ import ImageZoomSurface from './ImageZoomSurface.vue'
 import {
   classifyWorkspacePreview as classifyPreview,
   mergeWorkspaceDirectoryEntries,
+  workspaceDirectoryState,
   workspaceEntryIsDirectory as entryIsDirectory,
   workspaceEntryIsFile as entryIsFile,
+  type WorkspaceDirectoryState,
   type WorkspacePreviewKind,
 } from '../lib/workspaceBrowser'
 import type {
   HostContext,
   Work,
   WorkspaceFileCacheResult,
-  WorkspaceFileCursor,
   WorkspaceFileEntry,
   WorkspaceFileReadProgress,
 } from '../lib/types'
@@ -54,15 +55,6 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ close: [] }>()
 
-interface DirectoryState {
-  entries: WorkspaceFileEntry[]
-  revision: string
-  nextCursor?: WorkspaceFileCursor
-  loading: boolean
-  error: string
-  loadToken: number
-}
-
 type TreeRow =
   | { kind: 'entry'; entry: WorkspaceFileEntry; depth: number }
   | { kind: 'more'; path: string; depth: number }
@@ -71,7 +63,7 @@ type PreviewKind = WorkspacePreviewKind
 type PreviewPhase = 'empty' | 'metadata' | 'confirm' | 'reading' | 'ready' | 'unsupported' | 'error'
 type PendingIntent = 'preview' | 'save'
 
-const directories = reactive<Record<string, DirectoryState>>({})
+const directories = reactive<Record<string, WorkspaceDirectoryState>>({})
 const expandedPaths = ref(new Set<string>(['.']))
 const showHidden = ref(false)
 const mobilePath = ref('.')
@@ -233,12 +225,8 @@ async function resetBrowser() {
 async function loadDirectory(path: string, reset = false) {
   const context = currentContext()
   if (!context) return
-  const existing = directories[path]
-  if (existing?.loading) return
-  const state: DirectoryState = existing ?? {
-    entries: [], revision: '', nextCursor: undefined, loading: false, error: '', loadToken: 0,
-  }
-  directories[path] = state
+  const state = workspaceDirectoryState(directories, path)
+  if (state.loading) return
   const cursor = reset ? undefined : state.nextCursor
   const token = state.loadToken + 1
   state.loadToken = token
