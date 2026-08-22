@@ -99,6 +99,7 @@ import {
   parseControlRequest,
   ProtocolValidationError,
 } from "./protocol.js";
+import { resultWithDefaultHostId } from "./machine-route-identity.js";
 import { MachineMutationEffectUnknownError, RoutedControlError, type MainRouteAuthority, type RoutedProtocolProxy } from "./machine-transport.js";
 import { isWindowsNamedPipeEndpoint, normalizeLocalEndpoint } from "./local-endpoint.js";
 
@@ -963,7 +964,7 @@ export class DockHost {
     }
     if(socket.destroyed){closeSubscription();return;}
     const result=createBoundedFollowResult(projection,request.requestId);
-    const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,result));
+    const responseOutcome=writeEnvelope(socket,successResponse(request.requestId,this.hostEpoch,this.projectResult(result)));
     if(responseOutcome==="backpressured"){
       this.attachBackpressureStats.blocked+=1;const drained=await waitForSocketDrain(socket,SOCKET_DRAIN_TIMEOUT_MS);
       if(!drained){this.attachBackpressureStats.timeout+=1;initializing=false;clearQueues();abortBackpressuredStream();return;}
@@ -1203,7 +1204,7 @@ export class DockHost {
   private async sendTreeSuccessAndEnd(socket: Socket, requestId: string, result: unknown): Promise<void> {
     if (socket.destroyed || socket.writableEnded) return;
     let bytes: Buffer;
-    try { bytes = Buffer.from(JSON.stringify(successResponse(requestId, this.hostEpoch, result)), "utf8"); }
+    try { bytes = Buffer.from(JSON.stringify(successResponse(requestId, this.hostEpoch, this.projectResult(result))), "utf8"); }
     catch { this.sendErrorAndEnd(socket, "invalid_response", "Session tree could not be encoded", requestId); return; }
     if (bytes.byteLength > MAX_DOCK_TRANSFER_BYTES) {
       this.sendErrorAndEnd(socket, "response_too_large", "Session tree exceeds the transport safety bound", requestId);
@@ -1223,7 +1224,8 @@ export class DockHost {
     if (!socket.destroyed && !socket.writableEnded) socket.end();
   }
 
-  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,result));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
+  private projectResult(result: unknown): unknown { return resultWithDefaultHostId(result, this.routeAuthority?.mainHostId()); }
+  private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,this.projectResult(result)));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
   private sendErrorAndEnd(socket:Socket,code:string,message:string,requestId:string,details?:JsonObject,retryable=false):void { if(socket.destroyed||socket.writableEnded)return;const response:ControlResponse={kind:"response",version:2,requestId,hostEpoch:this.hostEpoch,ok:false,error:{code,message:truncateMessage(message),retryable,...(details===undefined?{}:{details})}};if(endEnvelope(socket,response)==="too_large")socket.destroy(); }
   private sendHelloError(socket:Socket,requestId:string,code:HelloError["error"]["code"],message:string,details:{hostVersions?:number[];missing?:string[];retryAfterMs?:number}={}):void { if(socket.destroyed||socket.writableEnded)return;const envelope:HelloError={kind:"hello_error",requestId,error:{code,message:truncateMessage(message),...details}};try{socket.end(encodeJsonLine(envelope));}catch{socket.destroy();} }
 }

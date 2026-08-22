@@ -94,10 +94,12 @@ test("Protocol V2 clients accept additive Host response and event fields", () =>
     assert.deepEqual(parsed.event.data, { message: "command output", level: "info", operationId: "operation-1" });
   }
 
-  assert.equal(parseStatusResult({
-    instance: { ...validSnapshot(), futureSnapshotField: true },
+  const status = parseStatusResult({
+    instance: { ...validSnapshot(), hostId: "machine-1", futureSnapshotField: true },
     futureResultField: true,
-  }).instance.id, "i1");
+  });
+  assert.equal(status.instance.id, "i1");
+  assert.equal(status.instance.hostId, "machine-1");
   assert.throws(() => parseStatusResult({
     instance: { ...validSnapshot(), displayName: "<unsafe>\nlabel" },
   }), /canonical safe display name/u);

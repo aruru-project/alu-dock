@@ -1,14 +1,16 @@
 import { randomUUID, X509Certificate } from "node:crypto";
+import { homedir } from "node:os";
 import { Duplex } from "node:stream";
 import type { Socket } from "node:net";
 import { createServer, connect, type Server as TlsServer, type TLSSocket } from "node:tls";
 
 import { MAX_CATALOG_INSTANCES } from "../core/catalog.js";
+import { isNativeAbsoluteLocalPath, isPortableAbsoluteLocalPath } from "../core/local-path.js";
 import type { InstanceSnapshot } from "../core/managed-instance.js";
 import type { DockToolsHostPort, DockToolsRequest, DockToolsResult } from "../core/dock-tools.js";
 import { parseDockToolsRequest, parseDockToolsResult } from "../core/dock-tools-codec.js";
 import type { ObservationDeliverySink, ObservationNotification } from "../core/instance-observation.js";
-import { MAX_CONTROL_LINE_BYTES, MAX_INSTANCE_LIST_RESULT_BYTES, type ControlError, type ControlRequest, type EnsureResult, type MachineDto, ProtocolValidationError } from "./protocol.js";
+import { MACHINE_PLATFORMS, MAX_CONTROL_CWD_CHARS, MAX_CONTROL_LINE_BYTES, MAX_INSTANCE_LIST_RESULT_BYTES, type ControlError, type ControlRequest, type EnsureResult, type MachineDto, type MachinePlatform, ProtocolValidationError } from "./protocol.js";
 import { decodeResponseTransfer, parseControlResponse, parseEnsureResult, parseForgetResult, parseInstanceSnapshot, parseResponseTransferFrame } from "./protocol.js";
 import { encodeJsonLine, JsonLineDecoder } from "./json-lines.js";
 import { boundedInstanceListPage } from "./instance-list-page.js";
@@ -29,7 +31,7 @@ const RECONNECT_DELAY_MS = 250;
 const MACHINE_HEARTBEAT_TIMEOUT_MS = 5_000;
 
 type MachineWireRecord =
-  | { kind: "machine_hello"; machineId: string; machineName: string; joinToken?: string; hostEpoch: string }
+  | { kind: "machine_hello"; machineId: string; machineName: string; platform: MachinePlatform; homePath: string; joinToken?: string; hostEpoch: string }
   | { kind: "machine_ready"; mainHostEpoch: string }
   | { kind: "machine_inventory_chunk"; inventoryId: string; hostEpoch: string; index: number; count: number; data: string }
   | { kind: "machine_stream_open"; streamId: string }
@@ -59,6 +61,7 @@ export interface MainRouteAuthority {
   route(request: ControlRequest, emit: (record: unknown) => void | Promise<void>, ended: () => void): Promise<RouteDecision>;
   getByKey(key: string): Promise<InstanceSnapshot | undefined>;
   ensureByKey(request: Extract<ControlRequest, { type: "instance.ensure" }>, ensureLocal: () => Promise<EnsureResult>): Promise<EnsureResult>;
+  mainHostId(): string;
   machines(): Promise<MachineDto[]>;
   removeMachine(hostId: string): Promise<{ hostId: string; removed: boolean }>;
   listPage(local: InstanceSnapshot[], params: Extract<ControlRequest, { type: "instance.list" }>['params']): Promise<unknown>;
@@ -172,6 +175,7 @@ export class MainMachineController implements MainRouteAuthority {
   private readonly disconnectListeners = new Set<(instanceIds: readonly string[]) => void>();
   private mainId = "";
   private mainName = "Main";
+  private readonly localMachineFacts = currentMachineFacts();
   private started = false;
 
   constructor(private readonly options: {
@@ -335,11 +339,20 @@ export class MainMachineController implements MainRouteAuthority {
     });
   }
 
+  mainHostId(): string { return this.mainId; }
+
   async machines(): Promise<MachineDto[]> {
     const records = await this.options.state.list();
     return [
-      { hostId: this.mainId, name: this.mainName, kind: "main", available: true },
-      ...records.map((machine) => ({ hostId: machine.id, name: machine.name, kind: "subhost" as const, available: this.connectionLive(this.connections.get(machine.id)) })),
+      { hostId: this.mainId, name: this.mainName, kind: "main", available: true, ...this.localMachineFacts },
+      ...records.map((machine) => ({
+        hostId: machine.id,
+        name: machine.name,
+        kind: "subhost" as const,
+        available: this.connectionLive(this.connections.get(machine.id)),
+        ...(machine.platform === undefined ? {} : { platform: machine.platform }),
+        ...(machine.homePath === undefined ? {} : { homePath: machine.homePath }),
+      })),
     ];
   }
 
@@ -433,6 +446,7 @@ export class MainMachineController implements MainRouteAuthority {
       throw new ProtocolValidationError("host_unavailable", "That machine is offline. Reconnect it and try again");
     }
     const identity: MachineRouteIdentity | undefined = route ? {
+      hostId: machine!.id,
       mainInstanceId: route.mainInstanceId,
       nativeInstanceId: route.nativeInstanceId,
       mainHostEpoch: this.options.mainHostEpoch,
@@ -448,6 +462,7 @@ export class MainMachineController implements MainRouteAuthority {
       requestId: request.requestId,
       requestType: request.type,
       route: identity ?? {
+        hostId: machine!.id,
         mainInstanceId: "",
         nativeInstanceId: "",
         mainHostEpoch: this.options.mainHostEpoch,
@@ -624,12 +639,18 @@ export class MainMachineController implements MainRouteAuthority {
           token: hello.joinToken,
           machineId: hello.machineId,
           machineName: hello.machineName,
+          platform: hello.platform,
+          homePath: hello.homePath,
           certificatePem: certificate.toString(),
         });
       } else {
         if (machine.fingerprint !== fingerprint) throw new Error("SubHost certificate does not match its trust record");
-        if (machine.name !== hello.machineName) {
-          machine = await this.options.state.updateMachine(machine.id, (candidate) => { candidate.name = hello.machineName; });
+        if (machine.name !== hello.machineName || machine.platform !== hello.platform || machine.homePath !== hello.homePath) {
+          machine = await this.options.state.updateMachine(machine.id, (candidate) => {
+            candidate.name = hello.machineName;
+            candidate.platform = hello.platform;
+            candidate.homePath = hello.homePath;
+          });
         }
       }
       this.removedMachineIds.delete(machine.id);
@@ -787,7 +808,7 @@ export class MainMachineController implements MainRouteAuthority {
       const nativeStopped = parseInstanceSnapshot((result as Record<string, unknown>).instance, "online stop response instance");
       if (nativeStopped.id !== stream.route.nativeInstanceId || nativeStopped.lifecycle !== "stopped") throw new Error("Successful online stop response has an invalid instance snapshot");
       stopGeneration = nativeStopped.runtimeGeneration;
-      mappedStopped = snapshotForMain(nativeStopped, stream.route.mainInstanceId, this.options.mainHostEpoch, stream.route.mainKey);
+      mappedStopped = snapshotForMain(nativeStopped, stream.route.hostId, stream.route.mainInstanceId, this.options.mainHostEpoch, stream.route.mainKey);
     } else {
       const forgotten = parseForgetResult(envelope.result);
       if (forgotten.receipt.forgottenId !== stream.route.nativeInstanceId) throw new Error("Successful online forget response has an invalid native identity");
@@ -845,6 +866,7 @@ export class MainMachineController implements MainRouteAuthority {
     this.routeSnapshots.set(mainInstanceId, structuredClone(mapped));
     this.revision += 1;
     return {
+      hostId: machineId,
       mainInstanceId,
       nativeInstanceId: snapshot.id,
       mainHostEpoch: this.options.mainHostEpoch,
@@ -990,7 +1012,7 @@ export class MainMachineController implements MainRouteAuthority {
       || (reservation !== undefined && owner === reservationClaim(reservation) && this.keyReservations.get(reservation.key) === reservation)
     );
     if (ownsKey) claims.set(requestedKey, claim);
-    return snapshotForMain(native, mainInstanceId, this.options.mainHostEpoch, ownsKey ? requestedKey : undefined);
+    return snapshotForMain(native, machineId, mainInstanceId, this.options.mainHostEpoch, ownsKey ? requestedKey : undefined);
   }
 
   private async serializeAuthority<T>(work: () => Promise<T>): Promise<T> {
@@ -1118,6 +1140,7 @@ export class SubHostMachineConnection {
           kind: "machine_hello",
           machineId: record.machineId,
           machineName: record.machineName,
+          ...currentMachineFacts(),
           ...(record.joinToken ? { joinToken: record.joinToken } : {}),
           hostEpoch: this.options.hostEpoch,
         });
@@ -1400,8 +1423,11 @@ function parseMachineRecord(line: string): MachineWireRecord {
   const kind = wireText(value.kind, "machine record kind", 64);
   const streamId = (): string => wireText(value.streamId, "machine stream ID", 128);
   if (kind === "machine_hello") {
-    wireExact(value, ["kind", "machineId", "machineName", "joinToken", "hostEpoch"]);
-    return { kind, machineId: wireText(value.machineId, "machine ID", 128), machineName: wireText(value.machineName, "machine name", 256), ...(value.joinToken === undefined ? {} : { joinToken: wireText(value.joinToken, "join token", 64) }), hostEpoch: wireText(value.hostEpoch, "Host identity", 128) };
+    wireExact(value, ["kind", "machineId", "machineName", "platform", "homePath", "joinToken", "hostEpoch"]);
+    const platform = wireMachinePlatform(value.platform);
+    const homePath = wireText(value.homePath, "machine Home path", MAX_CONTROL_CWD_CHARS);
+    if (!isPortableAbsoluteLocalPath(homePath)) throw new Error("machine Home path must be absolute");
+    return { kind, machineId: wireText(value.machineId, "machine ID", 128), machineName: wireText(value.machineName, "machine name", 256), platform, homePath, ...(value.joinToken === undefined ? {} : { joinToken: wireText(value.joinToken, "join token", 64) }), hostEpoch: wireText(value.hostEpoch, "Host identity", 128) };
   }
   if (kind === "machine_ready") { wireExact(value, ["kind", "mainHostEpoch"]); return { kind, mainHostEpoch: wireText(value.mainHostEpoch, "Main Host identity", 128) }; }
   if (kind === "machine_inventory_chunk") {
@@ -1432,6 +1458,19 @@ function parseMachineRecord(line: string): MachineWireRecord {
   if (kind === "machine_tool_source_off_ack") { wireExact(value, ["kind", "requestId"]); return { kind, requestId: wireText(value.requestId, "tool request ID", 128) }; }
   if (kind === "machine_ping" || kind === "machine_pong") { wireExact(value, ["kind"]); return { kind }; }
   throw new Error("Machine record kind is invalid");
+}
+
+function currentMachineFacts(): { platform: MachinePlatform; homePath: string } {
+  const platform = process.platform === "win32" ? "windows" : process.platform === "linux" ? "linux" : undefined;
+  if (platform === undefined) throw new Error(`This Dock build does not support ${process.platform} as a Machine platform`);
+  const homePath = homedir();
+  if (!isNativeAbsoluteLocalPath(homePath)) throw new Error("This Host does not have an absolute user Home path");
+  return { platform, homePath };
+}
+
+function wireMachinePlatform(value: unknown): MachinePlatform {
+  if (typeof value !== "string" || !MACHINE_PLATFORMS.includes(value as MachinePlatform)) throw new Error("machine platform is invalid");
+  return value as MachinePlatform;
 }
 
 function wirePayload(value: unknown, label: string, max: number): string { if (typeof value !== "string" || value.length < 1 || value.length > max || value.includes("\u0000")) throw new Error(`${label} is invalid`); return value; }

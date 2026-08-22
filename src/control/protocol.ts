@@ -157,6 +157,8 @@ export const PUBLISHED_FILES_CAPABILITY = "published-files.v1" as const;
 export const INSTANCE_DELIVERABLES_CAPABILITY = "instance.deliverables.v1" as const;
 export const COMMAND_DISCOVERY_CAPABILITY = "command.discovery.v1" as const;
 export const MACHINES_CAPABILITY = "machines.v1" as const;
+export const MACHINE_PLATFORMS = ["linux", "windows"] as const;
+export type MachinePlatform = typeof MACHINE_PLATFORMS[number];
 
 export const IMPLEMENTED_CAPABILITIES = [
   MACHINES_CAPABILITY,
@@ -365,7 +367,14 @@ export interface HostInfoResult {
   diagnostics: Array<{ severity: "info" | "warning" | "error"; message: string; source?: string }>;
 }
 export interface PingResult { pid: number; protocolVersion: 2; hostEpoch: string; capabilities: string[] }
-export interface MachineDto { hostId: string; name: string; kind: "main" | "subhost"; available: boolean }
+export interface MachineDto {
+  hostId: string;
+  name: string;
+  kind: "main" | "subhost";
+  available: boolean;
+  platform?: MachinePlatform;
+  homePath?: string;
+}
 export interface MachinesResult { machines: MachineDto[] }
 export interface MachineRemovalResult { hostId: string; removed: boolean }
 export interface CreateResult { instance: InstanceSnapshot }
@@ -1212,12 +1221,16 @@ export function parseMachinesResult(input: unknown): MachinesResult {
   exact(value, ["machines"]);
   const machines = array(value.machines, "machines", MAX_COLLECTION).map((item, index) => {
     const machine = object(item, `machines[${index}]`);
-    exact(machine, ["hostId", "name", "kind", "available"]);
+    exact(machine, ["hostId", "name", "kind", "available", "platform", "homePath"]);
+    const homePath = optionalString(machine.homePath, `machines[${index}].homePath`, MAX_CONTROL_CWD_CHARS);
+    if (homePath !== undefined && !isPortableAbsoluteLocalPath(homePath)) throw validation("invalid_response", `machines[${index}].homePath must be absolute`);
     return {
       hostId: string(machine.hostId, `machines[${index}].hostId`, 128),
       name: string(machine.name, `machines[${index}].name`, 256),
       kind: enumeration(machine.kind, `machines[${index}].kind`, ["main", "subhost"]),
       available: boolean(machine.available, `machines[${index}].available`),
+      ...(machine.platform === undefined ? {} : { platform: enumeration(machine.platform, `machines[${index}].platform`, MACHINE_PLATFORMS) }),
+      ...(homePath === undefined ? {} : { homePath }),
     };
   });
   return { machines };
@@ -2039,9 +2052,9 @@ function parseMetrics(input: unknown, field: string): NonNullable<InstanceSnapsh
   return result;
 }
 export function parseInstanceSnapshot(input: unknown, field = "instance"): InstanceSnapshot {
-  const value = object(input, field); exact(value, ["id", "creationOperationId", "key", "name", "displayName", "cwd", "gitBranch", "lifecycle", "execution", "compacting", "lastRun", "reopenable", "runtimeGeneration", "ownerHostEpoch", "interruption", "pending", "executor", "metrics", "extensionStatus", "toolsExpanded", "activeInteraction", "activeCommandId", "lastError", "createdAt", "updatedAt", "executionChangedAt", "runStartedAt", "eventCursor"]);
+  const value = object(input, field); exact(value, ["id", "creationOperationId", "hostId", "key", "name", "displayName", "cwd", "gitBranch", "lifecycle", "execution", "compacting", "lastRun", "reopenable", "runtimeGeneration", "ownerHostEpoch", "interruption", "pending", "executor", "metrics", "extensionStatus", "toolsExpanded", "activeInteraction", "activeCommandId", "lastError", "createdAt", "updatedAt", "executionChangedAt", "runStartedAt", "eventCursor"]);
   const snapshot: InstanceSnapshot = {
-    id: id(value.id, `${field}.id`), creationOperationId: id(value.creationOperationId, `${field}.creationOperationId`), key: optionalString(value.key, `${field}.key`, MAX_INSTANCE_KEY_CHARS), name: optionalString(value.name, `${field}.name`, MAX_INSTANCE_NAME_CHARS), displayName: instanceDisplayName(value.displayName, `${field}.displayName`), cwd: string(value.cwd, `${field}.cwd`, MAX_CONTROL_CWD_CHARS), gitBranch: value.gitBranch === undefined ? undefined : gitBranch(value.gitBranch, `${field}.gitBranch`),
+    id: id(value.id, `${field}.id`), creationOperationId: id(value.creationOperationId, `${field}.creationOperationId`), hostId: optionalString(value.hostId, `${field}.hostId`, 128), key: optionalString(value.key, `${field}.key`, MAX_INSTANCE_KEY_CHARS), name: optionalString(value.name, `${field}.name`, MAX_INSTANCE_NAME_CHARS), displayName: instanceDisplayName(value.displayName, `${field}.displayName`), cwd: string(value.cwd, `${field}.cwd`, MAX_CONTROL_CWD_CHARS), gitBranch: value.gitBranch === undefined ? undefined : gitBranch(value.gitBranch, `${field}.gitBranch`),
     lifecycle: enumeration(value.lifecycle, `${field}.lifecycle`, ["active", "stopping", "stopped", "host_lost", "runtime_error"]), execution: enumeration(value.execution, `${field}.execution`, ["idle", "running", "failed", "unavailable"]), compacting: boolean(value.compacting, `${field}.compacting`), lastRun: enumeration(value.lastRun, `${field}.lastRun`, ["never", "succeeded", "failed", "aborted", "interrupted"]), reopenable: boolean(value.reopenable, `${field}.reopenable`), runtimeGeneration: positive(value.runtimeGeneration, `${field}.runtimeGeneration`), ownerHostEpoch: optionalString(value.ownerHostEpoch, `${field}.ownerHostEpoch`, 128), pending: parsePending(value.pending, `${field}.pending`), executor: parseExecutor(value.executor, `${field}.executor`), metrics: value.metrics === undefined ? undefined : parseMetrics(value.metrics, `${field}.metrics`), extensionStatus: {}, toolsExpanded: boolean(value.toolsExpanded, `${field}.toolsExpanded`), activeCommandId: optionalString(value.activeCommandId, `${field}.activeCommandId`, 128), lastError: optionalString(value.lastError, `${field}.lastError`, MAX_MESSAGE), createdAt: timestamp(value.createdAt, `${field}.createdAt`), updatedAt: timestamp(value.updatedAt, `${field}.updatedAt`), executionChangedAt: timestamp(value.executionChangedAt, `${field}.executionChangedAt`), ...(value.runStartedAt === undefined ? {} : { runStartedAt: timestamp(value.runStartedAt, `${field}.runStartedAt`) }), eventCursor: parseCursor(value.eventCursor, `${field}.eventCursor`),
   };
   if (value.interruption !== undefined) { const interruption = object(value.interruption, `${field}.interruption`); exact(interruption, ["reason", "at"]); snapshot.interruption = { reason: enumeration(interruption.reason, "interruption.reason", ["host_crash", "host_shutdown", "replacement_failed"]), at: timestamp(interruption.at, "interruption.at") }; }

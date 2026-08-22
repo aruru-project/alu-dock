@@ -124,6 +124,7 @@ test("listener startup failure closes the local and remote entry points", async 
     route: async () => ({ kind: "local" as const }),
     getByKey: async () => undefined,
     ensureByKey: async () => { throw new Error("startup rollback must not ensure an instance"); },
+    mainHostId: () => "main-machine",
     machines: async () => [],
     removeMachine: async () => { throw new Error("startup rollback must not remove a machine"); },
     listPage: async () => ({ instances: [] }),

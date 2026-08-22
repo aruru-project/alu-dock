@@ -3,8 +3,9 @@ import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promise
 import { dirname, join, resolve } from "node:path";
 
 import type { InstanceSnapshot } from "../core/instance-dto.js";
+import { isPortableAbsoluteLocalPath } from "../core/local-path.js";
 import { generateHostIdentity, parseHostTlsIdentity, type HostTlsIdentity } from "./remote-access-state.js";
-import { parseInstanceSnapshot } from "./protocol.js";
+import { MACHINE_PLATFORMS, MAX_CONTROL_CWD_CHARS, parseInstanceSnapshot, type MachinePlatform } from "./protocol.js";
 import { MAX_DURABLE_CATALOG_BYTES } from "./durable-catalog-store.js";
 import { hardenWindowsPrivatePath, syncPrivateDirectory } from "../platform/private-state.js";
 
@@ -36,6 +37,8 @@ export interface MachineRouteRetirement {
 export interface TrustedSubHostRecord {
   id: string;
   name: string;
+  platform?: MachinePlatform;
+  homePath?: string;
   certificatePem: string;
   fingerprint: string;
   joinedAt: string;
@@ -47,6 +50,8 @@ interface PendingJoinRecord { tokenHash: string; expiresAt: string }
 interface TrustedSubHostIndexRecord {
   id: string;
   name: string;
+  platform?: MachinePlatform;
+  homePath?: string;
   certificatePem: string;
   fingerprint: string;
   joinedAt: string;
@@ -136,7 +141,7 @@ export class MainMachineState {
     });
   }
 
-  async acceptJoin(input: { token: string; machineId: string; machineName: string; certificatePem: string }, now = new Date()): Promise<TrustedSubHostRecord> {
+  async acceptJoin(input: { token: string; machineId: string; machineName: string; platform: MachinePlatform; homePath: string; certificatePem: string }, now = new Date()): Promise<TrustedSubHostRecord> {
     const joined = await this.mutateMain((value) => {
       const hash = tokenHash(input.token);
       const index = value.pendingJoins.findIndex((item) => item.tokenHash === hash && Date.parse(item.expiresAt) > now.getTime());
@@ -147,6 +152,8 @@ export class MainMachineState {
       const record: TrustedSubHostIndexRecord = {
         id: checkedId(input.machineId, "machine ID"),
         name: checkedName(input.machineName),
+        platform: checkedPlatform(input.platform),
+        homePath: checkedHomePath(input.homePath),
         certificatePem: certificate.toString(),
         fingerprint: certificate.fingerprint256.replaceAll(":", "").toLowerCase(),
         joinedAt: now.toISOString(),
@@ -225,6 +232,8 @@ export class MainMachineState {
       main.machines[machineIndex] = {
         id: parsed.id,
         name: parsed.name,
+        ...(parsed.platform === undefined ? {} : { platform: parsed.platform }),
+        ...(parsed.homePath === undefined ? {} : { homePath: parsed.homePath }),
         certificatePem: parsed.certificatePem,
         fingerprint: parsed.fingerprint,
         joinedAt: parsed.joinedAt,
@@ -243,7 +252,11 @@ export class MainMachineState {
   private routePath(machineId: string): string { return join(this.root, `${checkedId(machineId, "machine ID")}.routes.json`); }
   private trustedRecord(index: TrustedSubHostIndexRecord): TrustedSubHostRecord {
     const routes = this.routeValues.get(index.id) ?? { schemaVersion: 1 as const, machineId: index.id, routes: [], retiredRoutes: [] };
-    return structuredClone({ ...index, routes: routes.routes, retiredRoutes: routes.retiredRoutes });
+    return structuredClone({
+      ...index,
+      routes: routes.routes.map((route) => ({ ...route, snapshot: { ...route.snapshot, hostId: index.id } })),
+      retiredRoutes: routes.retiredRoutes,
+    });
   }
   private async lock<T>(work: () => Promise<T>): Promise<T> {
     let release!: () => void;
@@ -376,18 +389,26 @@ function parseMainFile(input: unknown): MainMachineFile {
 
 function parseMachineIndex(input: unknown): TrustedSubHostIndexRecord {
   const value = object(input, "SubHost trust record");
-  exact(value, ["id", "name", "certificatePem", "fingerprint", "joinedAt"]);
+  exact(value, ["id", "name", "platform", "homePath", "certificatePem", "fingerprint", "joinedAt"]);
   const certificatePem = pem(value.certificatePem, "SubHost certificate");
   const certificate = new X509Certificate(certificatePem);
   const fingerprint = text(value.fingerprint, "SubHost fingerprint");
   if (!SAFE_FINGERPRINT.test(fingerprint) || certificate.fingerprint256.replaceAll(":", "").toLowerCase() !== fingerprint) throw new Error("SubHost certificate fingerprint is invalid");
-  return { id: checkedId(value.id, "machine ID"), name: checkedName(value.name), certificatePem: certificate.toString(), fingerprint, joinedAt: timestamp(value.joinedAt, "joinedAt") };
+  return {
+    id: checkedId(value.id, "machine ID"),
+    name: checkedName(value.name),
+    ...(value.platform === undefined ? {} : { platform: checkedPlatform(value.platform) }),
+    ...(value.homePath === undefined ? {} : { homePath: checkedHomePath(value.homePath) }),
+    certificatePem: certificate.toString(),
+    fingerprint,
+    joinedAt: timestamp(value.joinedAt, "joinedAt"),
+  };
 }
 
 function parseTrustedMachine(input: unknown): TrustedSubHostRecord {
   const value = object(input, "SubHost record");
-  exact(value, ["id", "name", "certificatePem", "fingerprint", "joinedAt", "routes", "retiredRoutes"]);
-  const index = parseMachineIndex({ id: value.id, name: value.name, certificatePem: value.certificatePem, fingerprint: value.fingerprint, joinedAt: value.joinedAt });
+  exact(value, ["id", "name", "platform", "homePath", "certificatePem", "fingerprint", "joinedAt", "routes", "retiredRoutes"]);
+  const index = parseMachineIndex({ id: value.id, name: value.name, platform: value.platform, homePath: value.homePath, certificatePem: value.certificatePem, fingerprint: value.fingerprint, joinedAt: value.joinedAt });
   if (!Array.isArray(value.routes) || !Array.isArray(value.retiredRoutes)) throw new Error("SubHost routes are invalid");
   return { ...index, routes: value.routes.map(parseRoute), retiredRoutes: parseRetiredRoutes(value.retiredRoutes) };
 }
@@ -476,6 +497,15 @@ function parseJoinFile(input: unknown): MachineJoinFile {
 function tokenHash(token: string): string { if (!SAFE_TOKEN.test(token)) throw new Error("Join token is invalid"); return createHash("sha256").update(token).digest("hex"); }
 function checkedId(value: unknown, field: string): string { const result = text(value, field); if (!SAFE_ID.test(result)) throw new Error(`${field} is invalid`); return result; }
 function checkedName(value: unknown): string { return text(value, "machine name", 256); }
+function checkedPlatform(value: unknown): MachinePlatform {
+  if (typeof value !== "string" || !MACHINE_PLATFORMS.includes(value as MachinePlatform)) throw new Error("machine platform is invalid");
+  return value as MachinePlatform;
+}
+function checkedHomePath(value: unknown): string {
+  const path = text(value, "machine Home path", MAX_CONTROL_CWD_CHARS);
+  if (!isPortableAbsoluteLocalPath(path)) throw new Error("machine Home path must be absolute");
+  return path;
+}
 function timestamp(value: unknown, field: string): string { const result = text(value, field, 64); if (new Date(result).toISOString() !== result) throw new Error(`${field} is invalid`); return result; }
 function text(value: unknown, field: string, max = 4_096): string { if (typeof value !== "string" || value.length < 1 || value.length > max || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) throw new Error(`${field} is invalid`); return value; }
 function pem(value: unknown, field: string): string { if (typeof value !== "string" || value.length < 1 || value.length > 64_000 || /[\u0000\u007f-\u009f]/u.test(value)) throw new Error(`${field} is invalid`); return value; }

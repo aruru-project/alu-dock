@@ -3,7 +3,7 @@ import test from "node:test";
 
 import { recordForMainHost } from "../src/control/machine-route-identity.js";
 
-const route = { mainInstanceId: "main-instance", nativeInstanceId: "native-instance", mainHostEpoch: "main-epoch", nativeHostEpoch: "native-epoch" };
+const route = { hostId: "machine-1", mainInstanceId: "main-instance", nativeInstanceId: "native-instance", mainHostEpoch: "main-epoch", nativeHostEpoch: "native-epoch" };
 
 test("machine identity projection leaves Agent event data and error details byte-for-byte semantic", () => {
   const args = { instanceId: "native-instance", hostEpoch: "native-epoch", nested: { id: "native-instance" } };

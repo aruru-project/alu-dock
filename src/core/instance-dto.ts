@@ -284,6 +284,8 @@ export interface EventCursor {
 export interface InstanceSnapshot {
   id: string;
   creationOperationId: string;
+  /** Stable Machine identity from machine.list; supplied by the Main Host boundary. */
+  hostId?: string;
   key?: string;
   /** Current Agent session name; it is not a stable Dock instance identity. */
   name?: string;

@@ -2,6 +2,7 @@ import type { InstanceSnapshot } from "../core/managed-instance.js";
 import type { ControlRequest } from "./protocol.js";
 
 export interface MachineRouteIdentity {
+  hostId: string;
   mainInstanceId: string;
   nativeInstanceId: string;
   mainHostEpoch: string;
@@ -23,15 +24,29 @@ export function requestForNativeHost(request: ControlRequest, route: MachineRout
   return copy;
 }
 
-export function snapshotForMain(snapshot: InstanceSnapshot, mainInstanceId: string, mainHostEpoch: string, mainKey: string | undefined): InstanceSnapshot {
+export function snapshotForMain(snapshot: InstanceSnapshot, hostId: string, mainInstanceId: string, mainHostEpoch: string, mainKey: string | undefined): InstanceSnapshot {
   const nativeHostEpoch = snapshot.ownerHostEpoch ?? snapshot.eventCursor.hostEpoch;
   return mapSnapshot(structuredClone(snapshot), {
+    hostId,
     mainInstanceId,
     nativeInstanceId: snapshot.id,
     mainHostEpoch,
     nativeHostEpoch,
     ...(mainKey === undefined ? {} : { mainKey }),
   });
+}
+
+export function resultWithDefaultHostId(input: unknown, hostId: string | undefined): unknown {
+  if (hostId === undefined || !isRecord(input)) return input;
+  const result = structuredClone(input);
+  if (isSnapshot(result.instance) && result.instance.hostId === undefined) result.instance.hostId = hostId;
+  if (Array.isArray(result.instances)) {
+    result.instances = result.instances.map((item) => {
+      if (!isSnapshot(item) || item.hostId !== undefined) return item;
+      return { ...item, hostId };
+    });
+  }
+  return result;
 }
 
 export function recordForMainHost(input: unknown, route: MachineRouteIdentity): unknown {
@@ -75,6 +90,7 @@ function mapFrameRoot(frame: Record<string, unknown>, route: MachineRouteIdentit
 
 function mapSnapshot(source: InstanceSnapshot, route: MachineRouteIdentity): InstanceSnapshot {
   const snapshot = structuredClone(source);
+  snapshot.hostId = route.hostId;
   if (snapshot.id === route.nativeInstanceId) snapshot.id = route.mainInstanceId;
   if (snapshot.ownerHostEpoch === route.nativeHostEpoch) snapshot.ownerHostEpoch = route.mainHostEpoch;
   snapshot.eventCursor = mapCursor(snapshot.eventCursor, route);

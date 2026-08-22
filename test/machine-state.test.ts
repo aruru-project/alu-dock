@@ -52,11 +52,13 @@ function stoppedSnapshotAtGeneration(id: string, runtimeGeneration: number, host
   };
 }
 
+const fixtureMachineFacts = { platform: "linux" as const, homePath: "/home/fixture" };
+
 async function joinedState(root: string, state = new MainMachineState(root)): Promise<{ state: MainMachineState; machineId: string }> {
   const joinFile = await state.createJoin();
   const sub = new SubHostMachineState(join(root, "sub"));
   const pending = await sub.prepare(joinFile, "Fixture SubHost");
-  await state.acceptJoin({ token: joinFile.token, machineId: pending.machineId, machineName: pending.machineName, certificatePem: pending.identity.certificatePem });
+  await state.acceptJoin({ token: joinFile.token, machineId: pending.machineId, machineName: pending.machineName, ...fixtureMachineFacts, certificatePem: pending.identity.certificatePem });
   return { state, machineId: pending.machineId };
 }
 
@@ -74,10 +76,10 @@ test("join enrollment is one-use and writing its private file preserves an exist
 
   const sub = new SubHostMachineState(join(root, "sub"));
   const pending = await sub.prepare(joinFile, "Studio");
-  await main.acceptJoin({ token: joinFile.token, machineId: pending.machineId, machineName: pending.machineName, certificatePem: pending.identity.certificatePem });
+  await main.acceptJoin({ token: joinFile.token, machineId: pending.machineId, machineName: pending.machineName, ...fixtureMachineFacts, certificatePem: pending.identity.certificatePem });
   await sub.markJoined();
   await assert.rejects(sub.prepare(joinFile, "Studio"));
-  await assert.rejects(main.acceptJoin({ token: joinFile.token, machineId: pending.machineId, machineName: pending.machineName, certificatePem: pending.identity.certificatePem }));
+  await assert.rejects(main.acceptJoin({ token: joinFile.token, machineId: pending.machineId, machineName: pending.machineName, ...fixtureMachineFacts, certificatePem: pending.identity.certificatePem }));
 });
 
 test("Main creates a join file from the Hub while its running authority accepts the same enrollment", async () => {
@@ -93,6 +95,7 @@ test("Main creates a join file from the Hub while its running authority accepts 
       token: joinFile.token,
       machineId: pending.machineId,
       machineName: pending.machineName,
+      ...fixtureMachineFacts,
       certificatePem: pending.identity.certificatePem,
     });
     assert.equal(accepted.id, pending.machineId);
@@ -122,6 +125,7 @@ test("removing a SubHost revokes trust and a later rejoin cannot restore its old
       token: joinFile.token,
       machineId,
       machineName: trusted.name,
+      ...fixtureMachineFacts,
       certificatePem: trusted.certificatePem,
     });
     assert.deepEqual(rejoined.routes, []);
