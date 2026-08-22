@@ -9,7 +9,7 @@ import { captureHostResult, hostResultMatches } from '../lib/hostResult'
 import {
   countTreeFilters, currentOrEndTreeWindowStart, nearestVisibleTreeNodeId,
   persistTreeFilter, projectSessionTree, readTreeFilter, TREE_FILTERS,
-  treeNodeBadge, treeNodeIcon, treeNodeRoleLabel, treeNodeSummary, treeNodeTime,
+  treeNodeBadge, treeNodeIcon, treeNodeRoleLabel, treeNodeTime,
   type TreeFilter, type VisibleTreeItem,
 } from '../lib/sessionTree'
 import { userErrorMessage as errorMessage } from '../lib/userError'
@@ -491,7 +491,7 @@ function time(value?: string | null) { return treeNodeTime(value) }
           </span>
           <span class="ui-dialog-option-content">
             <span class="ui-dialog-option-top">
-              <span class="ui-dialog-option-label">{{ treeNodeSummary(item.node) }}</span>
+              <span class="ui-dialog-option-label">{{ item.node.summary || item.node.label || item.node.kind }}</span>
               <span v-if="item.branchPoint" class="ui-dialog-option-badge alu-tree-branch-badge">分叉 · {{ item.childIds.length }}</span>
               <span v-if="treeNodeBadge(item.node, tree?.leafId)" class="ui-dialog-option-badge" :data-state="item.currentLeaf ? 'current' : item.node.state">{{ treeNodeBadge(item.node, tree?.leafId) }}</span>
             </span>
@@ -506,7 +506,7 @@ function time(value?: string | null) { return treeNodeTime(value) }
         <div v-else-if="tree && !filteredTreeNodes.length" class="ui-dialog-empty">没有匹配项</div>
       </div>
       <div v-if="selectedNode" class="ui-dialog-actions alu-tree-actions">
-        <div class="ui-dialog-selection-summary"><span>已选择</span><strong>{{ treeNodeSummary(selectedNode) }}</strong></div>
+        <div class="ui-dialog-selection-summary"><span>已选择</span><strong>{{ selectedNode.summary || selectedNode.label || selectedNode.kind }}</strong></div>
         <button type="button" class="ui-dialog-btn ui-dialog-btn-primary ui-dialog-action-btn" :disabled="selectedNode.entryId === tree?.leafId || preview || !!pending || outcomeUnknown" title="不生成分支摘要，直接切换到这里" @click="navigate(false)">直接切换</button>
         <button type="button" class="ui-dialog-btn ui-dialog-action-btn" :disabled="selectedNode.entryId === tree?.leafId || preview || !!pending || outcomeUnknown" title="先总结放弃的分支，再切换到这里" @click="navigate(true)">摘要后切换</button>
         <button type="button" class="ui-dialog-btn ui-dialog-action-btn" :disabled="selectedNode.kind !== 'message' || selectedNode.role !== 'user' || preview || !!pending || outcomeUnknown" title="回到这条用户消息之前，并将消息放回输入框" @click="fork">Fork</button>

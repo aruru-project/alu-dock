@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     ClientError, DockClient, Result,
+    capabilities::INSTANCE_DELIVERABLES as REQUIRED_CAPABILITIES,
     client::{ResponseEnvelope, maximum_line_bytes, response_result, validate_response_envelope},
     tls::{read_json_line, write_json_line},
     wire::decode_canonical_base64,
@@ -24,7 +25,6 @@ const MAX_DELIVERY_REF_CHARS: usize = 128;
 const MAX_DELIVERABLE_NAME_CHARS: usize = 512;
 const MAX_ERROR_MESSAGE_CHARS: usize = 2_048;
 const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
-const REQUIRED_CAPABILITIES: &[&str] = &["core.v2", "instance.deliverables.v1"];
 
 /// Path-free metadata for one temporary file registered by an Agent.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

@@ -9,8 +9,7 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    ClientError, ClientIdentity, Endpoint, HostConnectionProfile, IdentityStore, PairingMetadata,
-    Result,
+    ClientError, ClientIdentity, Endpoint, HostConnectionProfile, IdentityStore, Result,
     tls::{ConnectedTls, connect_tls, read_json_line, write_json_line},
     wire::decode_canonical_base64,
 };
@@ -30,7 +29,7 @@ pub struct DockClient {
     endpoints: Vec<Endpoint>,
     identity: ClientIdentity,
     host_certificate: Vec<u8>,
-    metadata: PairingMetadata,
+    client_id: String,
 }
 
 impl DockClient {
@@ -41,7 +40,7 @@ impl DockClient {
             endpoints: vec![endpoint],
             identity: paired.identity,
             host_certificate: paired.host_certificate,
-            metadata: paired.metadata,
+            client_id: paired.metadata.client_id,
         })
     }
 
@@ -63,8 +62,22 @@ impl DockClient {
             endpoints,
             identity: paired.identity,
             host_certificate: paired.host_certificate,
-            metadata: paired.metadata,
+            client_id: paired.metadata.client_id,
         })
+    }
+
+    pub(crate) fn from_pinned_endpoint(
+        endpoint: Endpoint,
+        identity: ClientIdentity,
+        host_certificate: Vec<u8>,
+        client_id: String,
+    ) -> Self {
+        Self {
+            endpoints: vec![endpoint],
+            identity,
+            host_certificate,
+            client_id,
+        }
     }
 
     pub fn from_connection_profile(
@@ -254,7 +267,7 @@ impl DockClient {
                 client: ClientDescription {
                     name: "aludock-client",
                     version: env!("CARGO_PKG_VERSION"),
-                    client_id: &self.metadata.client_id,
+                    client_id: &self.client_id,
                 },
                 required_capabilities,
             },
@@ -518,6 +531,7 @@ pub(crate) fn response_result<R: DeserializeOwned>(
     })
 }
 
+// Keep these request classes aligned with alu_dock/src/control/dock-client.ts.
 fn response_timeout_for(request_type: &str) -> Duration {
     match request_type {
         "instance.create" | "instance.ensure" | "instance.adopt" | "instance.reopen"
@@ -818,7 +832,7 @@ mod tests {
     }
 
     #[test]
-    fn response_waits_are_bounded_by_the_reference_client_deadlines() {
+    fn response_waits_match_the_dock_control_client_policy() {
         assert_eq!(
             response_timeout_for("instance.list"),
             Duration::from_secs(30)

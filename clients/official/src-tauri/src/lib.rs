@@ -119,15 +119,6 @@ struct RecoverablePairing {
     recoverable: bool,
 }
 
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ActiveHostChanged {
-    old_host_id: Option<String>,
-    new_host_id: Option<String>,
-    selection_generation: u64,
-    registry_revision: u64,
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HostSummary {
@@ -1764,7 +1755,6 @@ fn invalidate_host_lifecycle(
     new_host_id: Option<String>,
     old_selection_generation: u64,
     selection_generation: u64,
-    registry_revision: u64,
 ) {
     if let Ok(mut guard) = follow.task.lock()
         && let Some(task) = guard.take()
@@ -1806,15 +1796,6 @@ fn invalidate_host_lifecycle(
         }
         _ => restored_images.clear(),
     }
-    let _ = app.emit(
-        "aludock://active-host-changed",
-        ActiveHostChanged {
-            old_host_id,
-            new_host_id,
-            selection_generation,
-            registry_revision,
-        },
-    );
 }
 
 #[tauri::command]
@@ -1935,7 +1916,6 @@ fn set_active_host(
         new_host_id,
         old_generation,
         generation,
-        snapshot.revision,
     );
     drop(lifecycle);
     catalog_from_snapshot(&runtime, snapshot, generation)
@@ -1973,7 +1953,6 @@ fn remove_local_host(
         snapshot.active_host_id.clone(),
         old_generation,
         generation,
-        snapshot.revision,
     );
     drop(lifecycle);
     catalog_from_snapshot(&runtime, snapshot, generation)
@@ -2203,7 +2182,6 @@ async fn start_pairing(
                     Some(verified.host_id.clone()),
                     old_generation,
                     generation,
-                    registry_revision,
                 );
                 emit(
                     "completed",

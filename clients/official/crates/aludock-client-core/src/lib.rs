@@ -1,5 +1,6 @@
 mod actions;
 mod attachments;
+mod capabilities;
 mod client;
 mod config;
 mod connections;
@@ -13,6 +14,7 @@ mod host_registry;
 mod identity;
 mod instances;
 mod pairing;
+mod private_fs;
 mod protocol;
 mod published_files;
 mod sessions;
@@ -35,10 +37,10 @@ pub use attachments::{
 pub use client::DockClient;
 pub use config::{
     CommandArgumentCompletion, CommandCompletionItems, CommandCompletionsResult,
-    CommandContentResult, CommandInfo, CommandReference, CommandsResult, DiagnosticInfo, DiagnosticSeverity, ModelInfo, ModelsResult,
-    ResourceInfo, ResourceKind, ResourcesResult, SettingInfo, SettingKey, SettingSource,
-    SettingUpdate, SettingUpdateResult, SettingValue, SettingValueType, SettingsResult, SourceInfo,
-    SourceKind, ThinkingLevel, ToolInfo, ToolsResult,
+    CommandContentResult, CommandInfo, CommandReference, CommandsResult, DiagnosticInfo,
+    DiagnosticSeverity, ModelInfo, ModelsResult, ResourceInfo, ResourceKind, ResourcesResult,
+    SettingInfo, SettingKey, SettingSource, SettingUpdate, SettingUpdateResult, SettingValue,
+    SettingValueType, SettingsResult, SourceInfo, SourceKind, ThinkingLevel, ToolInfo, ToolsResult,
 };
 pub use connections::{
     ConnectionKind, ConnectionPolicy, EndpointState, EndpointTestResult, EndpointTestStatus,

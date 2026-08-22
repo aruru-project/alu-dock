@@ -1,7 +1,6 @@
 use std::{
     collections::HashSet,
-    fs::{self, OpenOptions},
-    io::Write,
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -9,7 +8,13 @@ use directories::ProjectDirs;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
-use crate::{ClientError, ClientIdentity, Endpoint, Result};
+use crate::{
+    ClientError, ClientIdentity, Endpoint, Result,
+    private_fs::{
+        remove_file_sync, set_private_directory_permissions, storage_error, sync_directory,
+        write_new_private_file,
+    },
+};
 
 const CLIENT_CERTIFICATE: &str = "client-certificate.der";
 const CLIENT_PRIVATE_KEY: &str = "client-private-key.der";
@@ -215,7 +220,7 @@ impl IdentityStore {
     pub fn commit_pending_pairing(&self) -> Result<()> {
         self.ensure_private_directory()?;
         if self.root.join(PAIRING_MANIFEST).exists() {
-            self.remove_file_if_exists(&self.root.join(PENDING_PAIRING_MANIFEST))?;
+            remove_file_sync(&self.root.join(PENDING_PAIRING_MANIFEST), &self.root)?;
             self.cleanup_unreferenced_generations()?;
             return Ok(());
         }
@@ -224,13 +229,13 @@ impl IdentityStore {
         let identity = self.load_or_create_identity()?;
         self.load_pairing_generation(&manifest, &identity)?;
         self.write_new_manifest(PAIRING_MANIFEST, &manifest)?;
-        self.remove_file_if_exists(&pending_path)?;
+        remove_file_sync(&pending_path, &self.root)?;
         self.cleanup_unreferenced_generations()
     }
 
     pub fn clear_pending_pairing(&self) -> Result<()> {
         self.ensure_private_directory()?;
-        self.remove_file_if_exists(&self.root.join(PENDING_PAIRING_MANIFEST))?;
+        remove_file_sync(&self.root.join(PENDING_PAIRING_MANIFEST), &self.root)?;
         self.cleanup_unreferenced_generations()
     }
 
@@ -320,8 +325,8 @@ impl IdentityStore {
                         client_fingerprint: identity.fingerprint(),
                     },
                 )?;
-                self.remove_file_if_exists(&certificate_path)?;
-                self.remove_file_if_exists(&key_path)
+                remove_file_sync(&certificate_path, &self.root)?;
+                remove_file_sync(&key_path, &self.root)
             }
             (false, false) => Ok(()),
             _ => {
@@ -335,8 +340,8 @@ impl IdentityStore {
                         self.root.display()
                     )));
                 }
-                self.remove_file_if_exists(&certificate_path)?;
-                self.remove_file_if_exists(&key_path)
+                remove_file_sync(&certificate_path, &self.root)?;
+                remove_file_sync(&key_path, &self.root)
             }
         }
     }
@@ -366,8 +371,8 @@ impl IdentityStore {
                         generation,
                     },
                 )?;
-                self.remove_file_if_exists(&certificate_path)?;
-                self.remove_file_if_exists(&metadata_path)
+                remove_file_sync(&certificate_path, &self.root)?;
+                remove_file_sync(&metadata_path, &self.root)
             }
             (false, false) => Ok(()),
             _ => Err(ClientError::InvalidPairing(format!(
@@ -389,7 +394,7 @@ impl IdentityStore {
 
         let result = (|| {
             for (name, bytes) in files {
-                self.write_new_private_file(&temporary.join(name), bytes)?;
+                write_new_private_file(&temporary.join(name), bytes)?;
             }
             sync_directory(&temporary)?;
             fs::rename(&temporary, &committed)
@@ -419,7 +424,7 @@ impl IdentityStore {
             .and_then(|name| name.to_str())
             .ok_or_else(|| ClientError::InvalidPairing("storage filename is invalid".into()))?;
         let temporary = path.with_file_name(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
-        self.write_new_private_file(&temporary, bytes)?;
+        write_new_private_file(&temporary, bytes)?;
         if !replace {
             return match crate::fs_publish::publish_new_file(&temporary, path) {
                 Ok(true) => sync_directory(&self.root),
@@ -558,33 +563,6 @@ impl IdentityStore {
         assert_private_file_permissions(path, &metadata)?;
         fs::read(path).map_err(|source| storage_error(path, source))
     }
-
-    fn write_new_private_file(&self, path: &Path, bytes: &[u8]) -> Result<()> {
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options
-            .open(path)
-            .map_err(|source| storage_error(path, source))?;
-        file.write_all(bytes)
-            .map_err(|source| storage_error(path, source))?;
-        file.sync_all()
-            .map_err(|source| storage_error(path, source))?;
-        set_private_file_permissions(path)?;
-        Ok(())
-    }
-
-    fn remove_file_if_exists(&self, path: &Path) -> Result<()> {
-        match fs::remove_file(path) {
-            Ok(()) => sync_directory(&self.root),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(source) => Err(storage_error(path, source)),
-        }
-    }
 }
 
 fn pairing_metadata(
@@ -642,59 +620,6 @@ fn assert_real_private_directory(path: &Path, metadata: &fs::Metadata, label: &s
             path.display()
         )));
     }
-    Ok(())
-}
-
-fn storage_error(path: &Path, source: std::io::Error) -> ClientError {
-    ClientError::Storage {
-        path: path.display().to_string(),
-        source,
-    }
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<()> {
-    fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|source| storage_error(path, source))
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_private_directory_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .map_err(|source| storage_error(path, source))
-}
-
-#[cfg(windows)]
-fn set_private_directory_permissions(path: &Path) -> Result<()> {
-    crate::windows_security::secure_directory(path).map_err(|source| storage_error(path, source))
-}
-
-#[cfg(all(not(unix), not(windows)))]
-fn set_private_directory_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_private_file_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-        .map_err(|source| storage_error(path, source))
-}
-
-#[cfg(windows)]
-fn set_private_file_permissions(path: &Path) -> Result<()> {
-    crate::windows_security::secure_file(path).map_err(|source| storage_error(path, source))
-}
-
-#[cfg(all(not(unix), not(windows)))]
-fn set_private_file_permissions(_path: &Path) -> Result<()> {
     Ok(())
 }
 

@@ -1,12 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use uuid::Uuid;
 
 use crate::{
-    ClientError, ClientIdentity, Endpoint, HostConnectionProfile, IdentityStore, PendingPairing,
-    Result, StoredPairing,
-    client::{CATALOG_SCHEMA_VERSION, MAX_CONTROL_LINE_BYTES},
-    tls::{connect_tls, read_json_line, write_json_line},
+    ClientError, ClientIdentity, DockClient, Endpoint, HostConnectionProfile, IdentityStore,
+    PendingPairing, Result, StoredPairing, capabilities,
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -112,90 +109,16 @@ async fn request_host_info(
     host_certificate: &[u8],
     client_id: &str,
 ) -> Result<HostInfo> {
-    let mut connection = connect_tls(endpoint, identity, Some(host_certificate)).await?;
-
-    let hello_request_id = Uuid::new_v4().to_string();
-    let hello = ClientHello {
-        kind: "hello",
-        request_id: &hello_request_id,
-        versions: [2],
-        client: ClientDescription {
-            name: "aludock-client",
-            version: env!("CARGO_PKG_VERSION"),
-            client_id,
-        },
-        required_capabilities: ["core.v2", "host.info"],
-    };
-    write_json_line(&mut connection.stream, &hello).await?;
-    let hello_reply: HelloReply =
-        read_json_line(&mut connection.stream, MAX_CONTROL_LINE_BYTES).await?;
-    let hello_ack = match hello_reply {
-        HelloReply::Ack(ack) if ack.kind == "hello_ack" => ack,
-        HelloReply::Ack(_) => {
-            return Err(ClientError::Protocol(
-                "host returned an invalid hello reply kind".into(),
-            ));
-        }
-        HelloReply::Error(error)
-            if error.kind == "hello_error" && error.request_id == hello_request_id =>
-        {
-            return Err(ClientError::Protocol(format!(
-                "hello failed ({}): {}",
-                error.error.code, error.error.message
-            )));
-        }
-        HelloReply::Error(_) => {
-            return Err(ClientError::Protocol(
-                "hello error correlation or kind was invalid".into(),
-            ));
-        }
-    };
-    validate_hello_ack(&hello_ack, &hello_request_id, &["core.v2", "host.info"])?;
-
-    let request_id = Uuid::new_v4().to_string();
-    write_json_line(
-        &mut connection.stream,
-        &HostInfoRequest {
-            kind: "request",
-            version: 2,
-            request_id: &request_id,
-            request_type: "host.info",
-            params: EmptyParams {},
-        },
-    )
-    .await?;
-    let response: ControlResponse = read_json_line(
-        &mut connection.stream,
-        hello_ack
-            .limits
-            .max_line_bytes
-            .min(MAX_CONTROL_LINE_BYTES as u64) as usize,
-    )
-    .await?;
-    if response.kind != "response"
-        || response.version != 2
-        || response.request_id != request_id
-        || response.host_epoch != hello_ack.host.host_epoch
-    {
-        return Err(ClientError::Protocol(
-            "host.info response correlation, version, or host epoch was invalid".into(),
-        ));
-    }
-    if !response.ok {
-        let error = response.error.unwrap_or(ControlError {
-            code: "unknown".into(),
-            message: "host returned an unsuccessful response without an error".into(),
-        });
-        return Err(ClientError::Protocol(format!(
-            "host.info failed ({}): {}",
-            error.code, error.message
-        )));
-    }
-    let result: HostInfo =
-        serde_json::from_value(response.result.ok_or_else(|| {
-            ClientError::Protocol("host.info response omitted its result".into())
-        })?)?;
-    if result.host.host_epoch != hello_ack.host.host_epoch {
+    let client = DockClient::from_pinned_endpoint(
+        endpoint.clone(),
+        identity.clone(),
+        host_certificate.to_vec(),
+        client_id.to_owned(),
+    );
+    let (result, host_epoch): (HostInfo, String) = client
+        .request_with_host_epoch("host.info", &EmptyParams {}, capabilities::HOST_INFO, None)
+        .await?;
+    if result.host.host_epoch != host_epoch {
         return Err(ClientError::Protocol(
             "host.info result did not describe the negotiated host epoch".into(),
         ));
@@ -204,144 +127,4 @@ async fn request_host_info(
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ClientHello<'a> {
-    kind: &'static str,
-    request_id: &'a str,
-    versions: [u8; 1],
-    client: ClientDescription<'a>,
-    required_capabilities: [&'static str; 2],
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ClientDescription<'a> {
-    name: &'static str,
-    version: &'static str,
-    client_id: &'a str,
-}
-
-#[derive(Deserialize)]
-#[serde(untagged)]
-enum HelloReply {
-    Ack(HelloAck),
-    Error(HelloError),
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct HelloAck {
-    kind: String,
-    request_id: String,
-    version: u8,
-    catalog_schema_version: u64,
-    host: HostIdentity,
-    capabilities: Vec<String>,
-    limits: ProtocolLimits,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ProtocolLimits {
-    max_line_bytes: u64,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct HelloError {
-    kind: String,
-    request_id: String,
-    error: HelloErrorBody,
-}
-
-#[derive(Deserialize)]
-struct HelloErrorBody {
-    code: String,
-    message: String,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct HostInfoRequest<'a> {
-    kind: &'static str,
-    version: u8,
-    request_id: &'a str,
-    #[serde(rename = "type")]
-    request_type: &'static str,
-    params: EmptyParams,
-}
-
-#[derive(Serialize)]
 struct EmptyParams {}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ControlResponse {
-    kind: String,
-    version: u8,
-    request_id: String,
-    host_epoch: String,
-    ok: bool,
-    result: Option<Value>,
-    error: Option<ControlError>,
-}
-
-#[derive(Deserialize)]
-struct ControlError {
-    code: String,
-    message: String,
-}
-
-fn validate_hello_ack(ack: &HelloAck, request_id: &str, capabilities: &[&str]) -> Result<()> {
-    if ack.request_id != request_id
-        || ack.version != 2
-        || ack.catalog_schema_version != CATALOG_SCHEMA_VERSION
-    {
-        return Err(ClientError::Protocol(
-            "hello response correlation, version, or catalog schema was invalid".into(),
-        ));
-    }
-    for capability in capabilities {
-        if !ack.capabilities.iter().any(|value| value == capability) {
-            return Err(ClientError::Protocol(format!(
-                "hello response omitted required capability {capability}"
-            )));
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn hello_ack(schema: u64) -> HelloAck {
-        HelloAck {
-            kind: "hello_ack".into(),
-            request_id: "pending-hello".into(),
-            version: 2,
-            catalog_schema_version: schema,
-            host: HostIdentity {
-                pid: 1,
-                dock_version: "test".into(),
-                pi_sdk_version: "test".into(),
-                host_epoch: "epoch".into(),
-                started_at: "2026-08-16T00:00:00.000Z".into(),
-            },
-            capabilities: vec!["core.v2".into(), "host.info".into()],
-            limits: ProtocolLimits {
-                max_line_bytes: 1024,
-            },
-        }
-    }
-
-    #[test]
-    fn pending_and_host_info_hello_requires_catalog_schema_one() {
-        assert!(
-            validate_hello_ack(&hello_ack(1), "pending-hello", &["core.v2", "host.info"]).is_ok()
-        );
-        assert!(
-            validate_hello_ack(&hello_ack(0), "pending-hello", &["core.v2", "host.info"]).is_err()
-        );
-    }
-}

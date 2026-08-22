@@ -6,27 +6,12 @@ use uuid::Uuid;
 
 use crate::{
     ActiveInteraction, ClientError, DockClient, Result,
+    capabilities::{
+        CATALOG_MAINTENANCE as FORGET_CAPABILITIES, INSTANCE_CATALOG as INSTANCE_CAPABILITIES,
+        INSTANCE_REOPEN as REOPEN_CAPABILITIES, WORKSPACE_LIST as WORKSPACE_CAPABILITIES,
+    },
     extension_ui::{validate_active_interaction, validate_extension_status},
 };
-
-const INSTANCE_CAPABILITIES: &[&str] = &[
-    "core.v2",
-    "extension_ui.tools-expanded.v1",
-    "git.branch-footer.v1",
-    "instance.keys.v1",
-    "instance.display-name.v1",
-    "instance.catalog",
-];
-const WORKSPACE_CAPABILITIES: &[&str] = &["core.v2", "workspace.list.v1"];
-const REOPEN_CAPABILITIES: &[&str] = &[
-    "core.v2",
-    "extension_ui.tools-expanded.v1",
-    "git.branch-footer.v1",
-    "instance.keys.v1",
-    "instance.display-name.v1",
-    "session.reopen",
-];
-const FORGET_CAPABILITIES: &[&str] = &["core.v2", "catalog.maintenance.v1"];
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

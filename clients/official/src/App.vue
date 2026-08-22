@@ -102,7 +102,6 @@ import {
   stopCanStart,
   stopConfirmationText,
   stoppedResultIsCorrelated,
-  thinkingLevelLabel,
   workPresence,
 } from './lib/uiBoundaries'
 import { applySlashArgumentCompletion, applySlashCompletion, catalogSourceLabel, filterCatalogCommands, prefixSlashCommand, slashArgumentContext, slashCommandQuery } from './lib/commandSuggest'
@@ -1257,7 +1256,7 @@ function controlDialogTitle(section: ControlSection) {
   return ({
     commands: '命令中心', sessions: '恢复 Session', tree: 'Session Tree', 'new-session': 'New Session',
     'rename-session': '会话名称', 'compact-session': 'Compact Context', 'reload-session': 'Reload Session',
-    models: '选择模型', thinking: '思考量', tools: '可用工具', resources: '项目状态', settings: '设置',
+    models: '选择 Model', thinking: 'Thinking Level', tools: 'Active Tools', resources: '项目状态', settings: '设置',
   } as Record<ControlSection, string>)[section]
 }
 
@@ -3388,14 +3387,14 @@ function handleOutputClick(event: MouseEvent) {
       <div v-if="!app.needsPairing" class="alu-navbar-right">
         <button class="alu-nav-selector alu-nav-selector-model" :disabled="!selected || selected.lifecycle !== 'active'" @click="openControlCenter('models')">
           <span class="alu-nav-selector-icon">◉</span>
-          <span class="alu-nav-selector-label">模型</span>
+          <span class="alu-nav-selector-label">model:</span>
           <span class="alu-nav-selector-value" :data-provider="selected?.executor.model?.provider || '—'" :title="modelLabel">{{ modelLabel }}</span>
           <span class="alu-nav-selector-arrow">▾</span>
         </button>
         <button class="alu-nav-selector" :disabled="!selected || selected.lifecycle !== 'active'" @click="openControlCenter('thinking')">
           <span class="alu-nav-selector-icon">⌁</span>
-          <span class="alu-nav-selector-label">思考量</span>
-          <span class="alu-nav-selector-value">{{ selected?.executor.thinkingLevel ? thinkingLevelLabel(selected.executor.thinkingLevel) : '—' }}</span>
+          <span class="alu-nav-selector-label">thinking:</span>
+          <span class="alu-nav-selector-value">{{ selected?.executor.thinkingLevel || '—' }}</span>
           <span class="alu-nav-selector-arrow">▾</span>
         </button>
         <div class="alu-nav-stats">

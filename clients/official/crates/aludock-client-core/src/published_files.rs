@@ -1,14 +1,15 @@
 use serde::{Deserialize, Deserializer, Serialize, de::Error as _};
 
-use crate::{ClientError, DockClient, Result, wire::decode_canonical_base64};
+use crate::{
+    ClientError, DockClient, Result, capabilities::PUBLISHED_FILES as PUBLISHED_FILE_CAPABILITIES,
+    wire::decode_canonical_base64,
+};
 
 pub const MAX_PUBLISHED_FILE_REF_CHARS: usize = 128;
 pub const MAX_PUBLISHED_FILE_NAME_CHARS: usize = 1_024;
 pub const MAX_PUBLISHED_FILE_MEDIA_TYPE_CHARS: usize = 256;
 pub const MAX_PUBLISHED_FILE_CHUNK_BYTES: usize = 256 * 1_024;
 pub const MAX_PUBLISHED_FILE_BYTES: usize = 512 * 1_024 * 1_024;
-
-const PUBLISHED_FILE_CAPABILITIES: &[&str] = &["core.v2", "published-files.v1"];
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

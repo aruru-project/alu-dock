@@ -21,6 +21,7 @@ use uuid::Uuid;
 
 use crate::{
     ClientError, DockClient, Result,
+    capabilities::ATTACHMENTS as REQUIRED_CAPABILITIES,
     client::{ResponseEnvelope, maximum_line_bytes, response_result, validate_response_envelope},
     tls::{read_json_line, write_json_line},
 };
@@ -31,7 +32,6 @@ const MAX_ATTACHMENT_NAME_CHARS: usize = 1_024;
 const MAX_ATTACHMENT_MEDIA_TYPE_CHARS: usize = 512;
 pub const MAX_ATTACHMENTS_PER_MESSAGE: usize = 32;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
-const REQUIRED_CAPABILITIES: &[&str] = &["core.v2", "attachments.v1"];
 
 /// Canonical, path-free attachment metadata returned by the Host.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

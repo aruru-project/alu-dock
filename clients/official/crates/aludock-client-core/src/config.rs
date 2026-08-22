@@ -4,43 +4,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use uuid::Uuid;
 
-use crate::{ClientError, DockClient, InstanceSnapshot, Result};
-
-const SNAPSHOT_CAPABILITIES: &[&str] = &[
-    "core.v2",
-    "extension_ui.tools-expanded.v1",
-    "git.branch-footer.v1",
-    "instance.keys.v1",
-    "instance.display-name.v1",
-];
-const MODEL_CAPABILITIES: &[&str] = &[
-    "core.v2",
-    "extension_ui.tools-expanded.v1",
-    "git.branch-footer.v1",
-    "instance.keys.v1",
-    "instance.display-name.v1",
-    "models.v1",
-    "projection.completeness.v1",
-];
-const TOOL_CAPABILITIES: &[&str] = &[
-    "core.v2",
-    "extension_ui.tools-expanded.v1",
-    "git.branch-footer.v1",
-    "instance.keys.v1",
-    "instance.display-name.v1",
-    "tools.v1",
-    "projection.completeness.v1",
-];
-const SETTINGS_CAPABILITIES: &[&str] = &[
-    "core.v2",
-    "extension_ui.tools-expanded.v1",
-    "git.branch-footer.v1",
-    "instance.keys.v1",
-    "instance.display-name.v1",
-    "settings.v1",
-];
-const RESOURCE_CAPABILITIES: &[&str] = &["core.v2", "resources.v1", "projection.completeness.v1"];
-const COMMAND_DISCOVERY_CAPABILITIES: &[&str] = &["core.v2", "command.discovery.v1"];
+use crate::{
+    ClientError, DockClient, InstanceSnapshot, Result,
+    capabilities::{
+        COMMAND_DISCOVERY as COMMAND_DISCOVERY_CAPABILITIES, MODELS as MODEL_CAPABILITIES,
+        RESOURCES as RESOURCE_CAPABILITIES, SETTINGS as SETTINGS_CAPABILITIES,
+        SNAPSHOT as SNAPSHOT_CAPABILITIES, TOOLS as TOOL_CAPABILITIES,
+    },
+};
 const MAX_COMMAND_CONTENT_PAGE_CHARS: usize = 64_000;
 const MAX_COMMAND_ARGUMENT_PREFIX_CHARS: usize = 16_384;
 const MAX_COMMAND_ARGUMENT_HINT_CHARS: usize = 2_048;
@@ -838,7 +809,12 @@ fn validate_command_completions(
         CommandCompletionItems::Available(items) => items.len(),
         CommandCompletionItems::Unavailable(()) => 0,
     };
-    validate_completeness(returned, result.total, result.truncated, "command completions")?;
+    validate_completeness(
+        returned,
+        result.total,
+        result.truncated,
+        "command completions",
+    )?;
     if matches!(&result.items, CommandCompletionItems::Unavailable(()))
         && (result.total != 0 || result.truncated)
     {

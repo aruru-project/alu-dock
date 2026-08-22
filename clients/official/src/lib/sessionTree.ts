@@ -275,31 +275,12 @@ export function treeNodeIcon(node: TreeNode): string {
   return '•'
 }
 
-export function treeNodeKindLabel(node: TreeNode): string {
-  const labels: Record<TreeNode['kind'], string> = {
-    message: '消息',
-    thinking_level_change: '思考等级调整',
-    model_change: '模型调整',
-    compaction: '上下文压缩',
-    branch_summary: '分支摘要',
-    custom: '记录',
-    custom_message: '自定义消息',
-    label: '标签',
-    session_info: 'Session 信息',
-  }
-  return labels[node.kind]
-}
-
 export function treeNodeRoleLabel(node: TreeNode): string {
   if (node.role === 'user') return '用户'
   if (node.role === 'assistant') return 'Agent'
   if (node.role === 'tool') return '工具'
   if (node.role === 'system') return '系统'
-  return treeNodeKindLabel(node)
-}
-
-export function treeNodeSummary(node: TreeNode): string {
-  return node.summary || node.label || treeNodeKindLabel(node)
+  return node.kind
 }
 
 export function currentOrEndTreeWindowStart(

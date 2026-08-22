@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use crate::{
     ClientError, DockClient, Result,
+    capabilities::WORKSPACE_FILES as REQUIRED_CAPABILITIES,
     client::{ResponseEnvelope, maximum_line_bytes, response_result, validate_response_envelope},
     tls::{read_json_line, write_json_line},
     wire::decode_canonical_base64,
@@ -25,7 +26,6 @@ const MAX_WORKSPACE_REVISION_CHARS: usize = 128;
 const MAX_INSTANCE_ID_CHARS: usize = 128;
 const MAX_ERROR_MESSAGE_CHARS: usize = 2_048;
 const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
-const REQUIRED_CAPABILITIES: &[&str] = &["core.v2", "workspace.files.v1"];
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]

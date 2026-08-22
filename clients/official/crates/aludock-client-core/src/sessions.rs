@@ -5,45 +5,17 @@ use uuid::Uuid;
 
 use crate::{
     ClientError, DiagnosticInfo, DockClient, HistoryRecord, InstanceLifecycle, InstanceSnapshot,
-    ProjectTrustDecision, PublishedFileDto, ResourceInfo, Result, wire::decode_canonical_base64,
+    ProjectTrustDecision, PublishedFileDto, ResourceInfo, Result,
+    capabilities::{
+        CONVERSATION_CONTENT as CONVERSATION_CAPABILITIES,
+        SESSION_COMMANDS as SESSION_COMMAND_CAPABILITIES,
+        SESSION_CORE_REQUIRED as SESSION_CORE_CAPABILITIES,
+        SESSION_HISTORY as SESSION_HISTORY_CAPABILITIES, SESSION_TREE as SESSION_TREE_CAPABILITIES,
+    },
+    wire::decode_canonical_base64,
 };
 
 pub const MAX_CONVERSATION_IMAGE_BYTES: usize = 20 * 1_024 * 1_024;
-
-const CONVERSATION_CAPABILITIES: &[&str] = &[
-    "core.v2",
-    "extension_ui.tools-expanded.v1",
-    "git.branch-footer.v1",
-    "instance.keys.v1",
-    "instance.display-name.v1",
-    "conversation.content.v1",
-];
-const SESSION_CORE_CAPABILITIES: &[&str] =
-    &["core.v2", "session.core", "projection.completeness.v1"];
-const SESSION_HISTORY_CAPABILITIES: &[&str] = &[
-    "core.v2",
-    "extension_ui.tools-expanded.v1",
-    "git.branch-footer.v1",
-    "instance.keys.v1",
-    "instance.display-name.v1",
-    "tui.projection.v1",
-];
-const SESSION_COMMAND_CAPABILITIES: &[&str] = &[
-    "core.v2",
-    "extension_ui.tools-expanded.v1",
-    "git.branch-footer.v1",
-    "instance.keys.v1",
-    "instance.display-name.v1",
-    "session.commands.v1",
-];
-const SESSION_TREE_CAPABILITIES: &[&str] = &[
-    "core.v2",
-    "extension_ui.tools-expanded.v1",
-    "git.branch-footer.v1",
-    "instance.keys.v1",
-    "instance.display-name.v1",
-    "session.tree.v2",
-];
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "lowercase")]

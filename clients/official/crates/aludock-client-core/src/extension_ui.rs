@@ -5,28 +5,13 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
-    ClientError, DockClient, DockEvent, InstanceSnapshot, Result, client::ProtocolEventStream,
+    ClientError, DockClient, DockEvent, InstanceSnapshot, Result,
+    capabilities::{
+        EXTENSION_CONTROL as CONTROL_CAPABILITIES, EXTENSION_RESPONSE as RESPONSE_CAPABILITIES,
+        EXTENSION_WIDGETS as WIDGET_CAPABILITIES, SNAPSHOT as TOOLS_CAPABILITIES,
+    },
+    client::ProtocolEventStream,
 };
-
-const CONTROL_CAPABILITIES: &[&str] = &[
-    "core.v2",
-    "extension_ui.control.v1",
-    "extension_ui.v1",
-    "extension_ui.persistent-interactions.v1",
-];
-const RESPONSE_CAPABILITIES: &[&str] = &[
-    "core.v2",
-    "extension_ui.v1",
-    "extension_ui.persistent-interactions.v1",
-];
-const WIDGET_CAPABILITIES: &[&str] = &["core.v2", "extension_ui.widgets.v1"];
-const TOOLS_CAPABILITIES: &[&str] = &[
-    "core.v2",
-    "extension_ui.tools-expanded.v1",
-    "git.branch-footer.v1",
-    "instance.keys.v1",
-    "instance.display-name.v1",
-];
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

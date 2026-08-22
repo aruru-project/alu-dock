@@ -5,33 +5,11 @@ use serde_json::Value;
 
 use crate::{
     AttachmentDto, ClientError, DockClient, EventCursor, InstanceSnapshot, PublishedFileDto,
-    Result, attachments::MAX_ATTACHMENTS_PER_MESSAGE, client::ProtocolEventStream,
+    Result,
+    attachments::MAX_ATTACHMENTS_PER_MESSAGE,
+    capabilities::{EVENTS_FOLLOW as FOLLOW_CAPABILITIES, INSTANCE_READ as READ_CAPABILITIES},
+    client::ProtocolEventStream,
 };
-
-const FOLLOW_CAPABILITIES: &[&str] = &[
-    "core.v2",
-    "extension_ui.tools-expanded.v1",
-    "extension_ui.widgets.v1",
-    "extension_ui.persistent-interactions.v1",
-    "git.branch-footer.v1",
-    "instance.keys.v1",
-    "instance.display-name.v1",
-    "tool-result-presentation.v1",
-    "instance.read.v1",
-    "events.follow.v2",
-];
-
-const READ_CAPABILITIES: &[&str] = &[
-    "core.v2",
-    "extension_ui.tools-expanded.v1",
-    "extension_ui.widgets.v1",
-    "extension_ui.persistent-interactions.v1",
-    "git.branch-footer.v1",
-    "instance.keys.v1",
-    "instance.display-name.v1",
-    "tool-result-presentation.v1",
-    "instance.read.v1",
-];
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]

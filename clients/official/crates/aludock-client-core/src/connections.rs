@@ -1,16 +1,16 @@
-use std::{
-    collections::HashSet,
-    fs::{self, OpenOptions},
-    io::Write,
-    path::Path,
-};
+use std::{collections::HashSet, fs, path::Path};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use uuid::Uuid;
 
-use crate::{ClientError, Endpoint, IdentityStore, Result, host_info};
+use crate::{
+    ClientError, Endpoint, IdentityStore, Result, host_info,
+    private_fs::{
+        set_private_directory_permissions, storage_error, sync_directory, write_new_private_file,
+    },
+};
 
 const PROFILE_DIRECTORY: &str = "connection-profile-history";
 const PROFILE_SCHEMA_VERSION: u32 = 1;
@@ -707,56 +707,6 @@ fn ensure_private_directory(path: &Path) -> Result<()> {
     assert_private_directory(path)
 }
 
-fn write_new_private_file(path: &Path, bytes: &[u8]) -> Result<()> {
-    let mut options = OpenOptions::new();
-    options.create_new(true).write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut file = options
-        .open(path)
-        .map_err(|source| storage_error(path, source))?;
-    file.write_all(bytes)
-        .map_err(|source| storage_error(path, source))?;
-    file.sync_all()
-        .map_err(|source| storage_error(path, source))?;
-    set_private_file_permissions(path)
-}
-
-#[cfg(unix)]
-fn set_private_directory_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
-        .map_err(|source| storage_error(path, source))
-}
-
-#[cfg(windows)]
-fn set_private_directory_permissions(path: &Path) -> Result<()> {
-    crate::windows_security::secure_directory(path).map_err(|source| storage_error(path, source))
-}
-
-#[cfg(all(not(unix), not(windows)))]
-fn set_private_directory_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_private_file_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(windows)]
-fn set_private_file_permissions(path: &Path) -> Result<()> {
-    crate::windows_security::secure_file(path).map_err(|source| storage_error(path, source))
-}
-
-#[cfg(all(not(unix), not(windows)))]
-fn set_private_file_permissions(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
 #[cfg(unix)]
 fn assert_private_directory(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -797,25 +747,6 @@ fn assert_private_directory(path: &Path) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-#[cfg(unix)]
-fn sync_directory(path: &Path) -> Result<()> {
-    fs::File::open(path)
-        .and_then(|directory| directory.sync_all())
-        .map_err(|source| storage_error(path, source))
-}
-
-#[cfg(not(unix))]
-fn sync_directory(_path: &Path) -> Result<()> {
-    Ok(())
-}
-
-fn storage_error(path: &Path, source: std::io::Error) -> ClientError {
-    ClientError::Storage {
-        path: path.display().to_string(),
-        source,
-    }
 }
 
 #[cfg(test)]

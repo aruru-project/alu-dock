@@ -4,34 +4,12 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    ClientError, DockClient, ImagePath, InstanceExecution, InstanceSnapshot, PendingMessage, Result,
+    ClientError, DockClient, ImagePath, InstanceExecution, InstanceSnapshot, PendingMessage,
+    Result,
+    capabilities::{
+        ABORT as ABORT_CAPABILITIES, QUEUE as QUEUE_CAPABILITIES, submit as submit_capabilities,
+    },
 };
-
-const SUBMIT_CAPABILITIES: &[&str] = &[
-    "core.v2",
-    "extension_ui.tools-expanded.v1",
-    "git.branch-footer.v1",
-    "instance.keys.v1",
-    "instance.display-name.v1",
-    "session.core",
-];
-const ABORT_CAPABILITIES: &[&str] = &[
-    "core.v2",
-    "extension_ui.tools-expanded.v1",
-    "git.branch-footer.v1",
-    "instance.keys.v1",
-    "instance.display-name.v1",
-    "run.abort.v1",
-];
-const QUEUE_CAPABILITIES: &[&str] = &[
-    "core.v2",
-    "command.images.path.v1",
-    "extension_ui.tools-expanded.v1",
-    "git.branch-footer.v1",
-    "instance.keys.v1",
-    "instance.display-name.v1",
-    "queue.control.v1",
-];
 
 #[derive(Clone, Copy, Debug, Serialize)]
 pub enum DeliveryMode {
@@ -265,17 +243,6 @@ impl DockClient {
         }
         Ok(result.instance)
     }
-}
-
-fn submit_capabilities(has_attachments: bool, has_images: bool) -> Vec<&'static str> {
-    let mut capabilities = SUBMIT_CAPABILITIES.to_vec();
-    if has_attachments {
-        capabilities.push("attachments.v1");
-    }
-    if has_images {
-        capabilities.push("command.images.path.v1");
-    }
-    capabilities
 }
 
 fn validate_submit_content(
