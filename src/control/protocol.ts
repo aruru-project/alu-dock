@@ -239,12 +239,12 @@ type Request<T extends string, P> = { kind: "request"; version: 2; requestId: st
 export type ControlRequest =
   | Request<"host.info", Record<string, never>>
   | Request<"machine.list", Record<string, never>>
-  | Request<"attachment.upload", { operationId: string; instanceId: string; name: string; sizeBytes: number; mediaType?: string; sha256: string }>
+  | Request<"attachment.upload", { operationId: string; instanceId?: string; name: string; sizeBytes: number; mediaType?: string; sha256: string }>
   | Request<"instance.create", { operationId: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.ensure", { operationId: string; key: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.adopt", { operationId: string; sessionFile: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.list", { selector: "actionable" | "all"; cursor?: InstanceListCursor; limit: number }>
-  | Request<"instance.get_by_key", { key: string; hostId?: string }>
+  | Request<"instance.get_by_key", { key: string }>
   | Request<"instance.get", { instanceId: string }>
   | Request<"deliverable.list", { instanceId: string }>
   | Request<"deliverable.download", { instanceId: string; deliveryRef: string }>
@@ -643,6 +643,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
     case "machine.list": exact(params, [], "invalid_request"); return { ...base, type, params: {} };
     case "attachment.upload": {
       exact(params, ["operationId", "instanceId", "name", "sizeBytes", "mediaType", "sha256"], "invalid_request");
+      const uploadInstanceId = params.instanceId === undefined ? undefined : instanceId();
       const name = boundedString(params.name, "params.name", MAX_ATTACHMENT_NAME_CHARS, "invalid_request");
       if (name.length === 0) throw validation("invalid_request", "params.name must not be empty");
       const sizeBytes = unsigned(params.sizeBytes, "params.sizeBytes", "invalid_request");
@@ -651,7 +652,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
       if (mediaType !== undefined && (mediaType.length === 0 || /[\u0000-\u001f\u007f-\u009f]/u.test(mediaType))) throw validation("invalid_request", "params.mediaType must be nonempty and control-free");
       const sha256 = string(params.sha256, "params.sha256", 64, "invalid_request");
       if (!/^[a-f0-9]{64}$/u.test(sha256)) throw validation("invalid_request", "params.sha256 must be 64 lowercase hexadecimal characters");
-      return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), name, sizeBytes, ...(mediaType === undefined ? {} : { mediaType }), sha256 } };
+      return { ...base, type, params: { operationId: operationId(), ...(uploadInstanceId === undefined ? {} : { instanceId: uploadInstanceId }), name, sizeBytes, ...(mediaType === undefined ? {} : { mediaType }), sha256 } };
     }
     case "instance.create": {
       exact(params, ["operationId", "cwd", "name", "hostId", "trustChallengeId", "projectTrustDecision"], "invalid_request");
@@ -698,11 +699,10 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { selector, cursor, limit } };
     };
     case "instance.get_by_key": {
-      exact(params, ["key", "hostId"], "invalid_request");
+      exact(params, ["key"], "invalid_request");
       const key = string(params.key, "params.key", MAX_INSTANCE_KEY_CHARS, "invalid_request");
       if (/[\u0000-\u001f\u007f-\u009f]/u.test(key)) throw validation("invalid_request", "params.key must not contain control characters");
-      const selectedHost = hostId();
-      return { ...base, type, params: { key, ...(selectedHost === undefined ? {} : { hostId: selectedHost }) } };
+      return { ...base, type, params: { key } };
     }
     case "instance.get": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };
     case "deliverable.list": exact(params, ["instanceId"], "invalid_request"); return { ...base, type, params: { instanceId: instanceId() } };

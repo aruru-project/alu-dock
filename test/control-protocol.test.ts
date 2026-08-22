@@ -151,10 +151,16 @@ test("Protocol V2 history exposes only canonical persisted conversation records"
 test("attachment upload frames and path-free DTOs are closed and bounded", () => {
   const request = parseControlRequest({
     kind: "request", version: 2, requestId: "upload-request", type: "attachment.upload",
-    params: { operationId: "upload-op", instanceId: "main-work-1", name: "文档 final.bin", sizeBytes: 3, mediaType: "application/octet-stream", sha256: "a".repeat(64) },
+    params: { operationId: "upload-op", name: "文档 final.bin", sizeBytes: 3, mediaType: "application/octet-stream", sha256: "a".repeat(64) },
   });
   assert.equal(request.type, "attachment.upload");
-  assert.equal(request.params.instanceId, "main-work-1");
+  assert.equal(request.params.instanceId, undefined);
+  const routedRequest = parseControlRequest({
+    kind: "request", version: 2, requestId: "routed-upload-request", type: "attachment.upload",
+    params: { operationId: "routed-upload-op", instanceId: "main-work-1", name: "remote.bin", sizeBytes: 3, sha256: "b".repeat(64) },
+  });
+  assert.equal(routedRequest.type, "attachment.upload");
+  assert.equal(routedRequest.params.instanceId, "main-work-1");
   assert.equal(capabilityForRequest(request.type), ATTACHMENTS_CAPABILITY);
   assert.deepEqual(parseAttachmentUploadFrame({ kind: "attachment_chunk", version: 2, requestId: "upload-request", index: 0, data: Buffer.from("abc").toString("base64") }, "upload-request"), {
     kind: "attachment_chunk", version: 2, requestId: "upload-request", index: 0, data: "YWJj",
@@ -308,6 +314,14 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
     instance: parseStatusResult({ instance: validSnapshot() }).instance,
   });
   assert.deepEqual(parseControlRequest({ ...base, type: "instance.get_by_key", params: { key: "alu" } }).params, { key: "alu" });
+  assert.throws(() => parseControlRequest({ ...base, type: "instance.get_by_key", params: { key: "alu", hostId: "placement-is-not-lookup" } }), /Unexpected field/u);
+  const remoteEnsure = parseControlRequest({
+    ...base,
+    type: "instance.ensure",
+    params: { operationId: "ensure-remote", key: "remote", cwd: "/tmp/project", hostId: "subhost-1" },
+  });
+  assert.equal(remoteEnsure.type, "instance.ensure");
+  assert.equal(remoteEnsure.params.hostId, "subhost-1");
   assert.equal(parseKeyLookupResult({ instance: null }).instance, null);
   assert.equal(parseKeyLookupResult({ instance: validSnapshot() }).instance?.key, "alu");
 

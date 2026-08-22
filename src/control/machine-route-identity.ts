@@ -6,6 +6,7 @@ export interface MachineRouteIdentity {
   nativeInstanceId: string;
   mainHostEpoch: string;
   nativeHostEpoch: string;
+  mainKey?: string;
 }
 
 /** The sole Main/native identity translation boundary. Opaque payloads are never visited. */
@@ -22,13 +23,14 @@ export function requestForNativeHost(request: ControlRequest, route: MachineRout
   return copy;
 }
 
-export function snapshotForMain(snapshot: InstanceSnapshot, mainInstanceId: string, mainHostEpoch: string): InstanceSnapshot {
+export function snapshotForMain(snapshot: InstanceSnapshot, mainInstanceId: string, mainHostEpoch: string, mainKey: string | undefined): InstanceSnapshot {
   const nativeHostEpoch = snapshot.ownerHostEpoch ?? snapshot.eventCursor.hostEpoch;
   return mapSnapshot(structuredClone(snapshot), {
     mainInstanceId,
     nativeInstanceId: snapshot.id,
     mainHostEpoch,
     nativeHostEpoch,
+    ...(mainKey === undefined ? {} : { mainKey }),
   });
 }
 
@@ -76,6 +78,8 @@ function mapSnapshot(source: InstanceSnapshot, route: MachineRouteIdentity): Ins
   if (snapshot.id === route.nativeInstanceId) snapshot.id = route.mainInstanceId;
   if (snapshot.ownerHostEpoch === route.nativeHostEpoch) snapshot.ownerHostEpoch = route.mainHostEpoch;
   snapshot.eventCursor = mapCursor(snapshot.eventCursor, route);
+  if (route.mainKey === undefined) delete snapshot.key;
+  else snapshot.key = route.mainKey;
   return snapshot;
 }
 

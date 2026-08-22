@@ -96,7 +96,7 @@ import {
   parseControlRequest,
   ProtocolValidationError,
 } from "./protocol.js";
-import type { MainRouteAuthority, RoutedProtocolProxy } from "./machine-transport.js";
+import { RoutedControlError, type MainRouteAuthority, type RoutedProtocolProxy } from "./machine-transport.js";
 
 const MAX_SOCKET_WRITE_BUFFER = MAX_CONTROL_LINE_BYTES;
 const MAX_SESSION_INVENTORY_RESULT_BYTES = 512 * 1_024;
@@ -550,6 +550,32 @@ export class DockHost {
       if (this.state !== "running" && this.state !== "mutation_faulted") throw new ProtocolValidationError("host_draining", "Alu Dock host is not accepting requests");
       if (this.state === "mutation_faulted" && isMutationRequest(request.type)) throw new ProtocolValidationError("mutation_faulted", "Alu Dock catalog is mutation-faulted; query state and wait for Host restart");
       if (!this.capabilities.has(capabilityForRequest(request.type))) throw new ProtocolValidationError("capability_missing", `Capability ${capabilityForRequest(request.type)} is unavailable`);
+
+      if (this.routeAuthority && request.type === "instance.get_by_key") {
+        const instance = await this.routeAuthority.getByKey(request.params.key);
+        terminal = true;
+        this.sendSuccessAndEnd(socket, request.requestId, { instance: instance ?? null });
+        return;
+      }
+      if (this.routeAuthority && request.type === "instance.ensure") {
+        const routeAuthority = this.routeAuthority;
+        const result = await this.operationLedger.run(
+          request.params.operationId,
+          request.type,
+          request.params,
+          () => routeAuthority.ensureByKey(request, () => this.registry.ensure({
+            operationId: request.params.operationId,
+            key: request.params.key,
+            cwd: request.params.cwd,
+            name: request.params.name,
+            trustChallengeId: request.params.trustChallengeId,
+            projectTrustDecision: request.params.projectTrustDecision,
+          })),
+        );
+        terminal = true;
+        this.sendSuccessAndEnd(socket, request.requestId, result);
+        return;
+      }
 
       if (this.routeAuthority) {
         const decision = await this.routeAuthority.route(
@@ -1403,6 +1429,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof AttachmentNotFoundError) return { code: error.code, message: error.message };
   if (error instanceof AttachmentIntegrityError) return { code: error.code, message: error.message };
   if (error instanceof AttachmentUnavailableError) return { code: error.code, message: error.message };
+  if (error instanceof RoutedControlError) return { code: error.code, message: error.message, retryable: error.retryable, ...(error.details === undefined ? {} : { details: error.details }) };
   if (error instanceof ProtocolValidationError) return { code: error.code, message: error.message };
   if (error instanceof WorkspaceBrowseError) return { code: error.code, message: error.message, retryable: error.retryable };
   if (error instanceof InstanceWorkspaceError) return { code: error.code, message: error.message, retryable: error.retryable };

@@ -139,6 +139,8 @@ test("machine-listener startup failure rolls back Unix and Remote Access listene
   let stopCalls = 0;
   const routeAuthority = {
     route: async () => ({ kind: "local" as const }),
+    getByKey: async () => undefined,
+    ensureByKey: async () => { throw new Error("startup rollback must not ensure an instance"); },
     machines: async () => [],
     listPage: async () => ({ instances: [] }),
     start: async () => {

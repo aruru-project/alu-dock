@@ -76,7 +76,7 @@ test("CLI Main/SubHost keeps native Pi work alive offline and remaps only an off
   assert.equal(created.executor.kind, "pi-sdk");
 
   const attachment = Buffer.from("stored only by SubHost");
-  await client.uploadAttachment(created.id, { name: "subhost.bin", sizeBytes: attachment.length, sha256: (await import("node:crypto")).createHash("sha256").update(attachment).digest("hex"), async *open() { yield attachment; } }, "cli-upload");
+  await client.uploadAttachment({ name: "subhost.bin", sizeBytes: attachment.length, sha256: (await import("node:crypto")).createHash("sha256").update(attachment).digest("hex"), async *open() { yield attachment; } }, "cli-upload", created.id);
   assert.equal(await containsBytes(join(root, "sub-data"), attachment), true);
   assert.equal(await containsBytes(join(root, "main-data"), attachment), false);
 

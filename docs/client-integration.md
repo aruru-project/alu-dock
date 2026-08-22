@@ -111,7 +111,7 @@ hello 的 `requiredCapabilities` 是 fail-fast 功能探测：Host 缺少任何�
 常见流程如下：
 
 1. 调用 `host.info`，确认 Host 和 capabilities；
-2. 通过 instance key 查询或确保固定业务 Work，也可以使用 instance catalog；
+2. 通过全局 instance key 查询或确保固定业务 Work，也可以使用 instance catalog；`get_by_key` 不接受 `hostId`，ensure 的可选 `hostId` 只在全局 miss 时选择首次创建位置，省略时使用 Main 本机；
 3. 第一次打开时调用 `instance.read`，并使用 `replay: "conversation_bootstrap"`；
 4. 用 read response 中的 snapshot、history、Queue 和 `page.events` 建立本地画面；
 5. 使用 read response 的 `page.latest` 作为 `since`，调用 `instance.follow`；
@@ -232,11 +232,13 @@ Web 应用通常由后端接收浏览器上传、保存为受控本机文件，�
 
 附件由 Host 永久保存，所有文件类型使用同一机制。它不是 S3-style object service 或某个 Web/TUI 的临时上传目录。Host 不扫描、转换、强制 MIME、自动提取或设置 TTL；最大 decoded file size 是 **536,870,912 bytes（512 MiB / 0.5 GiB）**。本机 Unix socket 与配对后的 mTLS client 使用同一个由 Host 本机 Settings 配置的 storage directory。聊天消息中的 `image/*` attachment 仍使用同一永久附件机制，同时由 Agent adapter 作为原生视觉输入交给 runtime。
 
-客户端应使用一个新的、独立的 authenticated Protocol V2 connection，并在 hello 中要求 `attachments.v1`。先本地读取文件，计算确切 `sizeBytes` 与 lowercase SHA-256；之后发送 header：
+客户端应使用一个新的、独立的 authenticated Protocol V2 connection，并在 hello 中要求 `attachments.v1`。先本地读取文件，计算确切 `sizeBytes` 与 lowercase SHA-256；之后发送 header。`instanceId` 可选：省略时上传到 Main 本机 storage，提供 Main ID 时路由到该 Work 所在的 SubHost：
 
 ```json
 {"kind":"request","version":2,"requestId":"upload-request","type":"attachment.upload","params":{"operationId":"upload-operation","instanceId":"main-instance-id","name":"报告 final.pdf","sizeBytes":123456,"mediaType":"application/pdf","sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}
 ```
+
+TypeScript `DockClient` 保持 source-first 调用：`uploadAttachment(source, operationId?, instanceId?)` 与 `uploadFile(path, mediaType?, operationId?, instanceId?)`。
 
 新的 operation 收到 readiness：
 

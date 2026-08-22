@@ -196,29 +196,29 @@ export class DockClient {
   async machines():Promise<MachinesResult>{return this.request("machine.list",{},MACHINES_CAPABILITY,parseMachinesResult);}
   async ping():Promise<PingResult>{let negotiated:string[]=[];const info=await this.request("host.info",{},"host.info",parseHostInfoResult,(ack)=>{negotiated=[...ack.capabilities];});return {pid:info.host.pid,protocolVersion:2,hostEpoch:info.host.hostEpoch,capabilities:negotiated};}
 
-  async uploadFile(instanceId:string,path:string,mediaType?:string,operationId=this.createRequestId()):Promise<AttachmentUploadResult>{
+  async uploadFile(path:string,mediaType?:string,operationId=this.createRequestId(),instanceId?:string):Promise<AttachmentUploadResult>{
     const absolute=resolve(path);
     const details=await stat(absolute);
     if(!details.isFile())throw new ControlClientError("invalid_attachment_source","Attachment source must be a regular file",operationId);
     if(details.size>MAX_ATTACHMENT_BYTES)throw new ControlClientError("attachment_too_large",`Attachment source exceeds ${MAX_ATTACHMENT_BYTES} bytes`,operationId);
     const hash=createHash("sha256");
     for await(const chunk of createReadStream(absolute))hash.update(chunk as Buffer);
-    return this.uploadAttachment(instanceId,{
+    return this.uploadAttachment({
       name:basename(absolute),
       sizeBytes:details.size,
       sha256:hash.digest("hex"),
       ...(mediaType===undefined?{}:{mediaType}),
       open:()=>createReadStream(absolute),
-    },operationId);
+    },operationId,instanceId);
   }
 
-  uploadAttachment(instanceId:string,source:AttachmentUploadSource,operationId=this.createRequestId()):Promise<AttachmentUploadResult>{
+  uploadAttachment(source:AttachmentUploadSource,operationId=this.createRequestId(),instanceId?:string):Promise<AttachmentUploadResult>{
     const helloId=this.createRequestId();
     const requestId=this.createRequestId();
     const capabilities=requiredCapabilities(ATTACHMENTS_CAPABILITY);
     const request:Extract<ControlRequest,{type:"attachment.upload"}>={
       kind:"request",version:2,requestId,type:"attachment.upload",
-      params:{operationId,instanceId,name:source.name,sizeBytes:source.sizeBytes,...(source.mediaType===undefined?{}:{mediaType:source.mediaType}),sha256:source.sha256},
+      params:{operationId,...(instanceId===undefined?{}:{instanceId}),name:source.name,sizeBytes:source.sizeBytes,...(source.mediaType===undefined?{}:{mediaType:source.mediaType}),sha256:source.sha256},
     };
     return new Promise<AttachmentUploadResult>((resolveUpload,rejectUpload)=>{
       const socket=this.openSocket();
@@ -333,7 +333,7 @@ export class DockClient {
 
   async create(cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice},hostId?:string):Promise<InstanceSnapshot>{const result=await this.request("instance.create",{operationId,cwd,name,hostId,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"instance.catalog",parseCreateResult);return result.instance;}
   ensure(key:string,cwd:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice},hostId?:string):Promise<EnsureResult>{return this.request("instance.ensure",{operationId,key,cwd,name,hostId,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},INSTANCE_KEYS_CAPABILITY,parseEnsureResult);}
-  async getByKey(key:string,hostId?:string):Promise<InstanceSnapshot|undefined>{const result:KeyLookupResult=await this.request("instance.get_by_key",{key,hostId},INSTANCE_KEYS_CAPABILITY,parseKeyLookupResult);return result.instance??undefined;}
+  async getByKey(key:string):Promise<InstanceSnapshot|undefined>{const result:KeyLookupResult=await this.request("instance.get_by_key",{key},INSTANCE_KEYS_CAPABILITY,parseKeyLookupResult);return result.instance??undefined;}
   adopt(sessionFile:string,name?:string,operationId=this.createRequestId(),trust?:{challengeId:string;decision:ProjectTrustChoice},hostId?:string):Promise<AdoptResult>{return this.request("instance.adopt",{operationId,sessionFile,name,hostId,trustChallengeId:trust?.challengeId,projectTrustDecision:trust?.decision},"session.adopt.v1",parseCreateResult);}
   async list(selector: "actionable" | "all" = "all"): Promise<InstanceSnapshot[]> {
     const instances: InstanceSnapshot[] = [];

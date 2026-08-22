@@ -44,9 +44,11 @@ Main 是唯一面向客户端的 Host authority。SubHost 只持有一个到 Mai
 
 SubHost 只上报本机 Registry 的 native snapshots。初始和后续 inventory 都先把完整 canonical snapshot array 序列化，再按 machine-line 边界切成有序 base64 chunks；Main 收齐、按 durable catalog 的既有字节边界校验并逐项解析后才原子 reconcile，初次完成前不发送 `machine_ready`，替换 inventory 未完成时旧连接与旧目录继续权威。Main 在独立、持久的 route directory 中为每个 native instance 分配稳定的 Main `instanceId`；Main identity、trust 和 machine index 保存在 `main.json`，每个 SubHost 的 routes 使用各自 crash-safe atomic route file 和既有 catalog 字节边界，因此所有 SubHost 不共享一个 16 MiB route 上限。两种 ID 不要求相等。客户端只收到并发送 Main ID。普通 response、follow/control、response-transfer、workspace/deliverable stream 和 attachment upload body 都经过同一个 multiplexed Protocol V2 route seam；Host 不为每个 method 建 proxy，也不创建假的 remote `ManagedInstance`。
 
-机器边界只有一个 identity mapper：它改写 Protocol V2 的 instance/Host identity 字段，但不进入 message、content、metadata、tool arguments 等 Agent/用户 opaque payload。无 instance 的 machine-local request 可带 `hostId`；省略时仍选择本机 Main，保持旧客户端行为。`attachment.upload` 必须带 Main `instanceId`，因此 Main 能在 body 开始前直接选择拥有该实例的 SubHost storage。
+MainMachineController 是 Main ID、route 和 instance key 的唯一全局 authority；DockRegistry 仍只管理本机原生 instance。Key 没有 placement 含义：Main-local snapshot、持久 route 和正在进行的 ensure reservation 共同参与全局认领，已有 owner 保留 key，后来上报的重复 instance 仍按 Main ID 可见但其 Main snapshot 省略 key，SubHost catalog 不被改写。`instance.get_by_key` 始终全局查询；`instance.ensure` 先全局查询，只有 miss 时可选 `hostId` 才选择第一次创建的位置，省略时创建在 Main 本机。同 key ensure 在 authority 外执行实际本机或机器请求，并在 reservation 释放后统一返回最终 owner。
 
-每条 logical stream 都有独立的有界串行输入队列和 stream reset；某条 stream 的 backpressure、解析、投影、持久化或客户端输出失败只关闭该 stream，TLS machine link 仍继续处理其他 stream 与 heartbeat。机器断线只让 Main 的远端目录进入可恢复状态，不停止 SubHost Worker 或已经接受的 Queue。离线时对 Main entry 执行 stop 只删除 route mapping；同一 native work 以后重新上报时会取得新的 Main identity。Main 不缓存或重放 mutation，所有转发保留原 operation ID。SubHost 的全局 Agent Dock tools 使用同一上游 authority，并以 Main source ID 执行；上游不可用时 list/inspect/watch/create/send 立即失败，`dock_create` 默认回到 source SubHost。`dock_deliver` 始终由 source SubHost 在本机登记，不依赖 Main 连接。
+机器边界只有一个 identity mapper：它改写 Protocol V2 的 instance/Host identity 字段并始终投影 Main-authoritative key，但不进入 message、content、metadata、tool arguments 等 Agent/用户 opaque payload。无 instance 的 machine-local request 可带 `hostId`；省略时仍选择本机 Main，保持旧客户端行为。`attachment.upload` 的 `instanceId` 可选：省略时沿用 Main 本机 storage；提供 Main `instanceId` 时，Main 在 body 开始前路由到拥有该实例的 SubHost storage。
+
+每条 logical stream 都有独立的有界串行输入队列和 stream reset；某条 stream 的 backpressure、解析、投影、持久化或客户端输出失败只关闭该 stream，TLS machine link 仍继续处理其他 stream 与 heartbeat。机器 route 对 `response_transfer` 逐帧复用 canonical Protocol V2 parser，并在 Main identity 投影后继续受同一组 chunk、count 和 aggregate bounds 约束。机器断线只让 Main 的远端目录进入可恢复状态，不停止 SubHost Worker 或已经接受的 Queue。离线时对 Main entry 执行 stop 只删除 route mapping；成功路由的 stop/forget 则在向客户端发出成功前持久退役该 Main route，同 generation 的迟到 inventory 不能恢复它，更新 generation 可重新取得新的 Main identity。普通转发不在 Main 缓存或重放 mutation；Main-owned global ensure 保留 Main operation identity，转发时仍沿用原 operation ID。SubHost 的全局 Agent Dock tools 使用同一上游 authority，并以 Main source ID 执行；上游不可用时 list/inspect/watch/create/send 立即失败，`dock_create` 默认回到 source SubHost。`dock_deliver` 始终由 source SubHost 在本机登记，不依赖 Main 连接。
 
 ## Protocol V2
 
@@ -108,7 +110,7 @@ interface AttachmentDto {
 
 `attachment.upload` 使用普通 authenticated Protocol V2 hello，并要求 `attachments.v1`。其专用连接顺序是：
 
-1. 发送一个 upload header request：`operationId + name + sizeBytes + optional mediaType + sha256`；
+1. 发送一个 upload header request：`operationId + optional instanceId + name + sizeBytes + optional mediaType + sha256`；
 2. Host 返回 `attachment_upload_ready` 与 `maxChunkBytes`，或者直接返回同一 operation 的既有 terminal receipt；
 3. 客户端按从 0 开始的连续 index 发送 canonical-base64 `attachment_chunk`；decoded chunk 不超过 Host 宣告值，当前上限 512 KiB，因此每条 JSONL 仍小于 1 MiB control-line bound；
 4. 客户端发送一个 `attachment_complete`，其 `chunks` 必须等于已发送数量；

@@ -98,6 +98,7 @@ test("DockClient uses one Main identity for SubHost read, prompt, follow, and sp
     const controller = new MainMachineController({
       state: new MainMachineState(machineStateRoot(mainCatalog), "Fixture Main"), port, bindAddress: "::1", mainHostEpoch: registry.hostEpoch,
       invokeDockTool: (sourceMainId, sourceMachineId, request) => dockTools.invoke(sourceMainId, sourceMachineId, request),
+      localSnapshots: () => registry.list(),
     });
     dockTools = new MainMachineDockToolsAuthority({
       controller: () => controller, localClient: new DockClient({ socketPath }), localSnapshots: () => registry.list(),
@@ -126,6 +127,22 @@ test("DockClient uses one Main identity for SubHost read, prompt, follow, and sp
   assert.notEqual(remote.id, "native-subhost-instance");
   const toolCreated = await waitForOperation(client, "dock-tool-create").catch((error) => { throw new Error(`${String(error)}; child exit=${String(child.exitCode)}; stderr=${stderr}`); });
   assert.notEqual(toolCreated.id, "native-tool-created");
+  const machines = await client.machines();
+  const subHostId = machines.machines.find((machine) => machine.kind === "subhost")?.hostId;
+  const mainHostId = machines.machines.find((machine) => machine.kind === "main")?.hostId;
+  assert.ok(subHostId && mainHostId);
+  const ensuredRemote = await client.ensure("one-global-key", workspace, "Remote keyed work", "ensure-remote-key", undefined, subHostId);
+  const ensuredWithoutPlacement = await client.ensure("one-global-key", workspace, "Ignored placement", "ensure-existing-key-local");
+  const ensuredWithDifferentPlacement = await client.ensure("one-global-key", workspace, "Ignored placement", "ensure-existing-key-main", undefined, mainHostId);
+  assert.equal(ensuredRemote.created, true);
+  assert.equal(ensuredWithoutPlacement.instance.id, ensuredRemote.instance.id);
+  assert.equal(ensuredWithDifferentPlacement.instance.id, ensuredRemote.instance.id);
+  assert.equal((await client.getByKey("one-global-key"))?.id, ensuredRemote.instance.id);
+  await assert.rejects(
+    client.ensure("different-key", workspace, "Must not run", "ensure-remote-key", undefined, mainHostId),
+    (error: unknown) => error instanceof ControlClientError && error.code === "operation_conflict",
+    "Main must retain global ensure operation identity even when a retry selects another placement",
+  );
   assert.equal((await client.status(remote.id)).id, remote.id);
   const read = await client.read(remote.id);
   assert.equal(read.instance.id, remote.id);
@@ -142,7 +159,7 @@ test("DockClient uses one Main identity for SubHost read, prompt, follow, and sp
   assert.ok(events.length > 0);
 
   const bytes = Buffer.from("specialized-stream");
-  const uploaded = await client.uploadAttachment(remote.id, source(bytes), "routed-upload");
+  const uploaded = await client.uploadAttachment(source(bytes), "routed-upload", remote.id);
   assert.equal(uploaded.attachment.sha256, createHash("sha256").update(bytes).digest("hex"));
 
   follow.close();

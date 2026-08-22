@@ -236,6 +236,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
         mainHostEpoch: registry.hostEpoch,
         invokeDockTool: (sourceMainId, sourceMachineId, request) => (dockToolsAuthority as MainMachineDockToolsAuthority).invoke(sourceMainId, sourceMachineId, request),
         dockToolsSourceOff: (sourceMainId) => (dockToolsAuthority as MainMachineDockToolsAuthority).cancelSource(sourceMainId),
+        localSnapshots: () => registry.list(),
       });
       dockToolsAuthority = new MainMachineDockToolsAuthority({
         controller: () => routeAuthority as MainMachineController,

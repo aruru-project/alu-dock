@@ -12,6 +12,7 @@ import type { DockToolsHostPort } from "../src/core/dock-tools.js";
 import type { InstanceSnapshot } from "../src/core/managed-instance.js";
 import { MainMachineState, SubHostMachineState, writeMachineJoinFile } from "../src/control/machine-state.js";
 import { MAX_MACHINE_CONNECTIONS, MainMachineController, parseCompletedMachineInventory, SubHostDockToolsPort, SubHostMachineConnection, writeMachine } from "../src/control/machine-transport.js";
+import type { ControlRequest } from "../src/control/protocol.js";
 
 function snapshot(id: string, hostEpoch = "subhost-epoch"): InstanceSnapshot {
   return {
@@ -141,7 +142,7 @@ test("an inventory larger than the old machine line crosses real TLS in ordered 
   });
   assert.ok(Buffer.byteLength(JSON.stringify(snapshots), "utf8") > 2 * 1024 * 1024);
 
-  const controller = new MainMachineController({ state: mainState, port, bindAddress: "::1", mainHostEpoch: "large-main-epoch" });
+  const controller = new MainMachineController({ state: mainState, port, bindAddress: "::1", mainHostEpoch: "large-main-epoch", localSnapshots: () => [] });
   const upstream = new SubHostMachineConnection({
     state: subState,
     address: "::1",
@@ -196,6 +197,102 @@ test("persisted route files reject duplicate native and Main IDs", async (contex
   await assert.rejects(new MainMachineState(root).initialize(), /Retired native instance IDs are duplicated/u);
 });
 
+test("Main keeps the first global key owner while later SubHost duplicates remain addressable without that key", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-machine-global-keys-"));
+  context.after(async () => rm(root, { recursive: true, force: true }));
+  const { state, machineId } = await joinedState(root);
+  const machine = await state.get(machineId);
+  assert.ok(machine);
+  const localOwner = { ...snapshot("main-local", "main-epoch"), key: "main-owned" };
+  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch", localSnapshots: () => [localOwner] });
+  const fakeSocket = { destroyed: false, destroy(): void { this.destroyed = true; } };
+  const connection = { machine, socket: fakeSocket as unknown as TLSSocket, hostEpoch: "subhost-epoch", streams: new Map(), lastSeenAt: Date.now(), candidateOrdinal: 1, closed: false };
+  const internals = controller as unknown as {
+    completeInitialInventory(candidate: unknown, epoch: string, values: InstanceSnapshot[]): Promise<void>;
+    reconcileInventoryFromConnection(candidate: unknown, values: InstanceSnapshot[]): Promise<void>;
+    mapRemoteStreamRecord(candidate: unknown, response: unknown): Promise<unknown[]>;
+  };
+  const localDuplicate = { ...snapshot("native-local-duplicate"), key: "main-owned" };
+  const stableOwner = { ...snapshot("native-stable-owner"), key: "remote-owned" };
+  await internals.completeInitialInventory(connection, "subhost-epoch", [localDuplicate, stableOwner]);
+  const laterDuplicate = { ...snapshot("native-later-duplicate"), key: "remote-owned" };
+  await internals.reconcileInventoryFromConnection(connection, [localDuplicate, stableOwner, laterDuplicate]);
+
+  const stored = await state.get(machineId);
+  const localDuplicateRoute = stored?.routes.find((route) => route.nativeInstanceId === localDuplicate.id);
+  const stableRoute = stored?.routes.find((route) => route.nativeInstanceId === stableOwner.id);
+  const laterRoute = stored?.routes.find((route) => route.nativeInstanceId === laterDuplicate.id);
+  assert.equal(localDuplicateRoute?.snapshot.key, undefined);
+  assert.equal(stableRoute?.snapshot.key, "remote-owned");
+  assert.equal(laterRoute?.snapshot.key, undefined);
+  assert.ok(localDuplicateRoute);
+
+  const mapped = await internals.mapRemoteStreamRecord({
+    streamId: "duplicate-status", machineId, connection, requestId: "duplicate-status", requestType: "instance.get",
+    route: { mainInstanceId: localDuplicateRoute.mainInstanceId, nativeInstanceId: localDuplicate.id, mainHostEpoch: "main-epoch", nativeHostEpoch: "subhost-epoch" },
+    emit: async () => {}, ended: () => {}, helloSeen: true, acceptingInput: true, inputTail: Promise.resolve(), queuedInputBytes: 0,
+  }, { kind: "response", version: 2, requestId: "duplicate-status", hostEpoch: "subhost-epoch", ok: true, result: { instance: localDuplicate } });
+  const mappedSnapshot = (mapped[0] as { result: { instance: InstanceSnapshot } }).result.instance;
+  assert.equal(mappedSnapshot.key, undefined);
+
+  const reloaded = new MainMachineState(root);
+  await reloaded.initialize();
+  const persisted = await reloaded.get(machineId);
+  assert.equal(persisted?.routes.find((route) => route.nativeInstanceId === localDuplicate.id)?.snapshot.key, undefined);
+  assert.equal(persisted?.routes.find((route) => route.nativeInstanceId === stableOwner.id)?.snapshot.key, "remote-owned");
+  assert.equal(persisted?.routes.find((route) => route.nativeInstanceId === laterDuplicate.id)?.snapshot.key, undefined);
+});
+
+test("a global key reservation serializes concurrent ensure and inventory without creating a second owner", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-machine-key-reservation-"));
+  context.after(async () => rm(root, { recursive: true, force: true }));
+  const { state, machineId } = await joinedState(root);
+  const machine = await state.get(machineId);
+  assert.ok(machine);
+  let localOwner: InstanceSnapshot | undefined;
+  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch", localSnapshots: () => localOwner ? [localOwner] : [] });
+  const fakeSocket = { destroyed: false, destroy(): void { this.destroyed = true; } };
+  const connection = { machine, socket: fakeSocket as unknown as TLSSocket, hostEpoch: "subhost-epoch", streams: new Map(), lastSeenAt: Date.now(), candidateOrdinal: 1, closed: false };
+  const internals = controller as unknown as {
+    completeInitialInventory(candidate: unknown, epoch: string, values: InstanceSnapshot[]): Promise<void>;
+    reconcileInventoryFromConnection(candidate: unknown, values: InstanceSnapshot[]): Promise<void>;
+  };
+  await internals.completeInitialInventory(connection, "subhost-epoch", []);
+
+  let creationStarted!: () => void;
+  let releaseCreation!: () => void;
+  const started = new Promise<void>((resolve) => { creationStarted = resolve; });
+  const release = new Promise<void>((resolve) => { releaseCreation = resolve; });
+  let creationCalls = 0;
+  const ensureRequest = (operationId: string): Extract<ControlRequest, { type: "instance.ensure" }> => ({
+    kind: "request", version: 2, requestId: `request-${operationId}`, type: "instance.ensure",
+    params: { operationId, key: "reserved-key", cwd: "/tmp/reserved" },
+  });
+  const first = controller.ensureByKey(ensureRequest("ensure-first"), async () => {
+    creationCalls += 1;
+    creationStarted();
+    await release;
+    localOwner = { ...snapshot("main-reserved-owner", "main-epoch"), key: "reserved-key" };
+    return { created: true, instance: localOwner };
+  });
+  await started;
+  const second = controller.ensureByKey(ensureRequest("ensure-second"), async () => {
+    creationCalls += 1;
+    throw new Error("a same-key contender must not create another owner");
+  });
+  const remoteDuplicate = { ...snapshot("native-reservation-duplicate"), key: "reserved-key" };
+  await internals.reconcileInventoryFromConnection(connection, [remoteDuplicate]);
+  assert.equal((await state.get(machineId))?.routes[0]?.snapshot.key, undefined, "the in-flight Main placement owns the reservation");
+
+  releaseCreation();
+  const [created, existing] = await Promise.all([first, second]);
+  assert.equal(creationCalls, 1);
+  assert.equal(created.created, true);
+  assert.equal(existing.created, false);
+  assert.equal(existing.instance.id, created.instance.id);
+  assert.equal((await controller.getByKey("reserved-key"))?.id, created.instance.id);
+});
+
 test("online-stop response generation tombstone survives reload, suppresses that generation, and releases for a newer reopen", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-machine-retirement-generation-"));
   context.after(async () => rm(root, { recursive: true, force: true }));
@@ -214,13 +311,14 @@ test("online-stop response generation tombstone survives reload, suppresses that
   });
   const machine = await state.get(machineId);
   assert.ok(machine);
-  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch" });
+  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
   const fakeSocket = { destroyed: false, destroy(): void { this.destroyed = true; } };
   const connection = { machine, socket: fakeSocket as unknown as TLSSocket, hostEpoch: "subhost-epoch", streams: new Map(), lastSeenAt: Date.now(), candidateOrdinal: 1, closed: false };
   const stream = {
     streamId: "online-stop",
     machineId,
     connection,
+    requestId: "online-stop",
     requestType: "instance.stop",
     route: { mainInstanceId: oldMainId, nativeInstanceId: nativeId, mainHostEpoch: "main-epoch", nativeHostEpoch: "subhost-epoch" },
     emit: async () => {}, ended: () => {}, helloSeen: true, acceptingInput: true,
@@ -228,10 +326,10 @@ test("online-stop response generation tombstone survives reload, suppresses that
   };
   const internals = controller as unknown as {
     connections: Map<string, unknown>;
-    retireSuccessfulOnlineStop(candidate: unknown, response: unknown): Promise<void>;
+    retireSuccessfulRouteMutation(candidate: unknown, response: unknown): Promise<void>;
   };
   internals.connections.set(machineId, connection);
-  await internals.retireSuccessfulOnlineStop(stream, {
+  await internals.retireSuccessfulRouteMutation(stream, {
     kind: "response",
     ok: true,
     result: { instance: stoppedSnapshotAtGeneration(nativeId, 4) },
@@ -242,7 +340,7 @@ test("online-stop response generation tombstone survives reload, suppresses that
   assert.deepEqual((await reloaded.get(machineId))?.retiredRoutes, [{ nativeInstanceId: nativeId, runtimeGeneration: 4 }]);
   const reloadedMachine = await reloaded.get(machineId);
   assert.ok(reloadedMachine);
-  const reloadedController = new MainMachineController({ state: reloaded, port: 0, mainHostEpoch: "main-epoch" });
+  const reloadedController = new MainMachineController({ state: reloaded, port: 0, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
   const reloadedConnection = { ...connection, machine: reloadedMachine, streams: new Map(), candidateOrdinal: 1, closed: false };
   const reloadedInternals = reloadedController as unknown as {
     completeInitialInventory(candidate: unknown, epoch: string, values: InstanceSnapshot[]): Promise<void>;
@@ -259,6 +357,54 @@ test("online-stop response generation tombstone survives reload, suppresses that
   assert.equal(reopened?.routes.length, 1);
   assert.notEqual(reopened?.routes[0]?.mainInstanceId, oldMainId);
   assert.equal(reopened?.routes[0]?.snapshot.runtimeGeneration, 5);
+});
+
+test("successful routed forget retires its Main route before success and stale inventory cannot restore it", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-machine-forget-retirement-"));
+  context.after(async () => rm(root, { recursive: true, force: true }));
+  const { state, machineId } = await joinedState(root);
+  const machine = await state.get(machineId);
+  assert.ok(machine);
+  const mainInstanceId = randomUUID();
+  const nativeInstanceId = "native-forgotten";
+  const native = stoppedSnapshotAtGeneration(nativeInstanceId, 4);
+  await state.updateMachine(machineId, (record) => {
+    record.routes = [{
+      mainInstanceId,
+      nativeInstanceId,
+      snapshot: { ...native, id: mainInstanceId, eventCursor: { ...native.eventCursor, hostEpoch: "main-epoch", instanceId: mainInstanceId } },
+    }];
+  });
+  const currentMachine = await state.get(machineId);
+  assert.ok(currentMachine);
+  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
+  const socket = { destroyed: false, destroy(): void {} } as unknown as TLSSocket;
+  const connection = { machine: currentMachine, socket, hostEpoch: "subhost-epoch", streams: new Map<string, unknown>(), lastSeenAt: Date.now(), candidateOrdinal: 1, closed: false };
+  let emittedAfterRetirement = false;
+  const stream = {
+    streamId: "forget", machineId, connection, requestId: "forget", requestType: "instance.forget",
+    route: { mainInstanceId, nativeInstanceId, mainHostEpoch: "main-epoch", nativeHostEpoch: "subhost-epoch" },
+    emit: async () => { emittedAfterRetirement = (await state.get(machineId))?.routes.length === 0; },
+    ended: () => {}, helloSeen: true, acceptingInput: true, inputTail: Promise.resolve(), queuedInputBytes: 0,
+  };
+  connection.streams.set(stream.streamId, stream);
+  const internals = controller as unknown as {
+    connections: Map<string, unknown>;
+    mapRemoteStreamRecord(candidate: unknown, response: unknown): Promise<unknown[]>;
+    emitMappedStreamRecords(candidate: unknown, records: readonly unknown[]): Promise<void>;
+    reconcileInventoryFromConnection(candidate: unknown, values: InstanceSnapshot[]): Promise<void>;
+  };
+  internals.connections.set(machineId, connection);
+  const records = await internals.mapRemoteStreamRecord(stream, {
+    kind: "response", version: 2, requestId: "forget", hostEpoch: "subhost-epoch", ok: true,
+    result: { receipt: { operationId: "forget-op", forgottenId: nativeInstanceId, previousLifecycle: "stopped", piSessionFilesDeleted: 0 } },
+  });
+  await internals.emitMappedStreamRecords(stream, records);
+  assert.equal(emittedAfterRetirement, true);
+  assert.equal((records[0] as { result: { receipt: { forgottenId: string } } }).result.receipt.forgottenId, mainInstanceId);
+  assert.deepEqual((await state.get(machineId))?.retiredRoutes, [{ nativeInstanceId, runtimeGeneration: 4 }]);
+  await internals.reconcileInventoryFromConnection(connection, [native]);
+  assert.equal((await state.get(machineId))?.routes.length, 0);
 });
 
 test("malformed successful online-stop snapshots emit nothing and preserve routes without tombstones", async (context) => {
@@ -289,7 +435,7 @@ test("malformed successful online-stop snapshots emit nothing and preserve route
   await state.updateMachine(machineId, (machine) => { machine.routes = routes; });
   const machine = await state.get(machineId);
   assert.ok(machine);
-  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch" });
+  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
   const fakeSocket = { destroyed: false, destroy(): void { this.destroyed = true; } };
   const socket = fakeSocket as unknown as TLSSocket;
   const connection = { machine, socket, hostEpoch: "subhost-epoch", streams: new Map<string, unknown>(), lastSeenAt: Date.now(), candidateOrdinal: 1, closed: false };
@@ -334,7 +480,7 @@ test("concurrent response allocation, inventory reconcile, and disconnect preser
   const { state, machineId } = await joinedState(root);
   const machine = await state.get(machineId);
   assert.ok(machine);
-  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch" });
+  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
   const fakeSocket = { destroyed: false, destroy(): void { this.destroyed = true; } };
   const connection = { machine, socket: fakeSocket as unknown as TLSSocket, hostEpoch: "subhost-epoch", streams: new Map(), lastSeenAt: Date.now(), candidateOrdinal: 1, closed: false };
   const internals = controller as unknown as {
@@ -366,7 +512,7 @@ test("replacement inventory installs before the old disconnect projection observ
   const { state, machineId } = await joinedState(root, barrierState);
   const machine = await state.get(machineId);
   assert.ok(machine);
-  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch" });
+  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
   const oldFakeSocket = { destroyed: false, destroy(): void { this.destroyed = true; } };
   const newFakeSocket = { destroyed: false, destroy(): void { this.destroyed = true; } };
   const oldSocket = oldFakeSocket as unknown as TLSSocket;
@@ -379,7 +525,7 @@ test("replacement inventory installs before the old disconnect projection observ
     reconcileInventoryFromConnection(candidate: unknown, values: InstanceSnapshot[]): Promise<void>;
     ensureRoute(candidate: unknown, value: InstanceSnapshot, epoch: string): Promise<{ mainInstanceId: string }>;
     connections: Map<string, unknown>;
-    machineRouteTails: Map<string, Promise<void>>;
+    authorityTail: Promise<void>;
   };
   internals.connections.set(machineId, oldConnection);
   const gate = barrierState.armUpdateBarrier();
@@ -388,8 +534,7 @@ test("replacement inventory installs before the old disconnect projection observ
   const staleInventory = internals.reconcileInventoryFromConnection(oldConnection, [snapshot("native-stale-old", "old-epoch")]);
   const staleRoute = internals.ensureRoute(oldConnection, snapshot("native-stale-stream", "old-epoch"), "old-epoch").then(() => false, () => true);
   internals.disconnect(oldConnection);
-  const disconnectProjection = internals.machineRouteTails.get(machineId);
-  assert.ok(disconnectProjection);
+  const disconnectProjection = internals.authorityTail;
   gate.release();
   await replacement;
   await Promise.all([staleInventory, disconnectProjection]);
@@ -408,7 +553,7 @@ test("an older initial candidate cannot replace a newer installed generation bef
   const { state, machineId } = await joinedState(root);
   const machine = await state.get(machineId);
   assert.ok(machine);
-  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch" });
+  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
   const oldFakeSocket = { destroyed: false, destroy(): void { this.destroyed = true; } };
   const newFakeSocket = { destroyed: false, destroy(): void { this.destroyed = true; } };
   const oldSocket = oldFakeSocket as unknown as TLSSocket;
@@ -418,7 +563,7 @@ test("an older initial candidate cannot replace a newer installed generation bef
   const internals = controller as unknown as {
     completeInitialInventory(candidate: unknown, epoch: string, values: InstanceSnapshot[]): Promise<void>;
     disconnect(candidate: unknown): void;
-    machineRouteTails: Map<string, Promise<void>>;
+    authorityTail: Promise<void>;
     connections: Map<string, unknown>;
   };
 
@@ -435,8 +580,7 @@ test("an older initial candidate cannot replace a newer installed generation bef
   assert.equal((await state.get(machineId))?.routes[0]?.nativeInstanceId, "native-newer");
 
   internals.disconnect(newerCandidate);
-  const disconnected = internals.machineRouteTails.get(machineId);
-  assert.ok(disconnected);
+  const disconnected = internals.authorityTail;
   await disconnected;
   await assert.rejects(
     internals.completeInitialInventory(oldCandidate, "old-epoch", [snapshot("native-older", "old-epoch")]),
@@ -450,13 +594,27 @@ test("an older initial candidate cannot replace a newer installed generation bef
   assert.equal(finalState?.routes[0]?.snapshot.lifecycle, "host_lost");
 });
 
+test("routed response transfer enforces the canonical 512-frame and 512 KiB parser bounds", async () => {
+  const controller = new MainMachineController({ state: new MainMachineState(join(tmpdir(), `alu-transfer-${randomUUID()}`)), port: 0, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
+  const stream = {
+    streamId: "transfer", machineId: "machine", connection: {}, requestId: "transfer-request", requestType: "session.tree",
+    route: { mainInstanceId: "main", nativeInstanceId: "native", mainHostEpoch: "main-epoch", nativeHostEpoch: "native-epoch" },
+    emit: async () => {}, ended: () => {}, helloSeen: true, acceptingInput: true, inputTail: Promise.resolve(), queuedInputBytes: 0,
+  };
+  const internals = controller as unknown as { mapRemoteStreamRecord(candidate: unknown, response: unknown): Promise<unknown[]> };
+  const frame = (data: string, count = 1) => ({ kind: "response_transfer", version: 2, requestId: "transfer-request", hostEpoch: "native-epoch", index: 0, count, data });
+  await assert.rejects(internals.mapRemoteStreamRecord(stream, frame("e30=", 513)), /outside its bound/u);
+  await assert.rejects(internals.mapRemoteStreamRecord(stream, frame("YQ")), /canonical bounded base64/u);
+  await assert.rejects(internals.mapRemoteStreamRecord(stream, frame("AAAA".repeat(174_763))), /canonical bounded base64/u);
+});
+
 test("a mapped response from a replaced connection ends without emitting success", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-machine-stale-response-"));
   context.after(async () => rm(root, { recursive: true, force: true }));
   const { state, machineId } = await joinedState(root);
   const machine = await state.get(machineId);
   assert.ok(machine);
-  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch" });
+  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
   const oldSocket = { destroyed: true } as unknown as TLSSocket;
   const newSocket = { destroyed: false } as unknown as TLSSocket;
   const oldConnection = { machine, socket: oldSocket, hostEpoch: "old-epoch", streams: new Map<string, unknown>(), lastSeenAt: Date.now(), candidateOrdinal: 1, closed: false };
@@ -497,7 +655,7 @@ test("closing during initial inventory cannot install a dead connection or leave
   const { state, machineId } = await joinedState(root, barrierState);
   const machine = await state.get(machineId);
   assert.ok(machine);
-  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch" });
+  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
   const fakeSocket = { destroyed: false, destroy(): void { this.destroyed = true; } };
   const socket = fakeSocket as unknown as TLSSocket;
   const connection = { machine, socket, hostEpoch: "subhost-epoch", streams: new Map(), lastSeenAt: Date.now(), candidateOrdinal: 1, closed: false };
@@ -505,14 +663,13 @@ test("closing during initial inventory cannot install a dead connection or leave
     completeInitialInventory(candidate: unknown, epoch: string, values: InstanceSnapshot[]): Promise<void>;
     disconnect(candidate: unknown): void;
     connections: Map<string, unknown>;
-    machineRouteTails: Map<string, Promise<void>>;
+    authorityTail: Promise<void>;
   };
   const gate = barrierState.armUpdateBarrier();
   const completion = internals.completeInitialInventory(connection, "subhost-epoch", [snapshot("native-initial")]);
   await gate.started;
   internals.disconnect(connection);
-  const disconnected = internals.machineRouteTails.get(machineId);
-  assert.ok(disconnected);
+  const disconnected = internals.authorityTail;
   gate.release();
   await assert.rejects(completion, /closed during initial inventory/u);
   await disconnected;
@@ -533,7 +690,7 @@ test("raw handshake sockets stay bounded, admit the newest candidate, and cannot
   if (!address || typeof address === "string") throw new Error("test port is unavailable");
   const port = address.port;
   await new Promise<void>((resolve) => portServer.close(() => resolve()));
-  const controller = new MainMachineController({ state: new MainMachineState(join(root, "main")), port, bindAddress: "::1", mainHostEpoch: "main-epoch" });
+  const controller = new MainMachineController({ state: new MainMachineState(join(root, "main")), port, bindAddress: "::1", mainHostEpoch: "main-epoch", localSnapshots: () => [] });
   await controller.start();
   const clients: Socket[] = [];
   context.after(async () => { for (const client of clients) client.destroy(); await controller.stop(); await rm(root, { recursive: true, force: true }); });
@@ -570,7 +727,7 @@ test("stop destroys an accepted socket while its initial inventory is still pre-
   await new Promise<void>((resolve) => portServer.close(() => resolve()));
   const barrierState = new BarrierMainMachineState(join(root, "main"));
   await joinedState(join(root, "main"), barrierState);
-  const controller = new MainMachineController({ state: barrierState, port, bindAddress: "::1", mainHostEpoch: "main-epoch" });
+  const controller = new MainMachineController({ state: barrierState, port, bindAddress: "::1", mainHostEpoch: "main-epoch", localSnapshots: () => [] });
   await controller.start();
   const gate = barrierState.armUpdateBarrier();
   const upstream = new SubHostMachineConnection({
@@ -605,7 +762,7 @@ test("admission deadline closes a TLS connection stalled in initial inventory", 
   await new Promise<void>((resolve) => portServer.close(() => resolve()));
   const barrierState = new BarrierMainMachineState(join(root, "main"));
   await joinedState(join(root, "main"), barrierState);
-  const controller = new MainMachineController({ state: barrierState, port, bindAddress: "::1", mainHostEpoch: "main-epoch" });
+  const controller = new MainMachineController({ state: barrierState, port, bindAddress: "::1", mainHostEpoch: "main-epoch", localSnapshots: () => [] });
   await controller.start();
   const gate = barrierState.armUpdateBarrier();
   const upstream = new SubHostMachineConnection({

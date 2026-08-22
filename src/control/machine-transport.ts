@@ -7,13 +7,13 @@ import type { InstanceSnapshot } from "../core/managed-instance.js";
 import type { DockToolsHostPort, DockToolsRequest, DockToolsResult } from "../core/dock-tools.js";
 import { parseDockToolsRequest, parseDockToolsResult } from "../core/dock-tools-codec.js";
 import type { ObservationDeliverySink, ObservationNotification } from "../core/instance-observation.js";
-import { MAX_CONTROL_LINE_BYTES, MAX_INSTANCE_LIST_RESULT_BYTES, type ControlRequest, type MachineDto, ProtocolValidationError } from "./protocol.js";
-import { decodeResponseTransfer, parseInstanceSnapshot } from "./protocol.js";
+import { MAX_CONTROL_LINE_BYTES, MAX_INSTANCE_LIST_RESULT_BYTES, type ControlError, type ControlRequest, type EnsureResult, type MachineDto, ProtocolValidationError } from "./protocol.js";
+import { decodeResponseTransfer, parseControlResponse, parseEnsureResult, parseForgetResult, parseInstanceSnapshot, parseResponseTransferFrame } from "./protocol.js";
 import { encodeJsonLine, JsonLineDecoder } from "./json-lines.js";
 import { boundedInstanceListPage } from "./instance-list-page.js";
 import { MainMachineState, SubHostMachineState, type MachineRouteRecord, type SubHostUpstreamRecord, type TrustedSubHostRecord } from "./machine-state.js";
 import { recordForMainHost, requestForNativeHost, snapshotForMain, type MachineRouteIdentity } from "./machine-route-identity.js";
-import { MAX_RESPONSE_TRANSFER_CHUNK_BYTES } from "../core/transport-bounds.js";
+import { MAX_DOCK_TRANSFER_BYTES, MAX_RESPONSE_TRANSFER_CHUNK_BYTES, MAX_RESPONSE_TRANSFER_CHUNKS } from "../core/transport-bounds.js";
 import { MAX_DURABLE_CATALOG_BYTES } from "./durable-catalog-store.js";
 
 const MAX_MACHINE_LINE_BYTES = 2 * MAX_CONTROL_LINE_BYTES;
@@ -56,18 +56,36 @@ export type RouteDecision =
 
 export interface MainRouteAuthority {
   route(request: ControlRequest, emit: (record: unknown) => void | Promise<void>, ended: () => void): Promise<RouteDecision>;
+  getByKey(key: string): Promise<InstanceSnapshot | undefined>;
+  ensureByKey(request: Extract<ControlRequest, { type: "instance.ensure" }>, ensureLocal: () => Promise<EnsureResult>): Promise<EnsureResult>;
   machines(): Promise<MachineDto[]>;
   listPage(local: InstanceSnapshot[], params: Extract<ControlRequest, { type: "instance.list" }>['params']): Promise<unknown>;
   start(): Promise<void>;
   stop(): Promise<void>;
 }
 
+export class RoutedControlError extends Error {
+  readonly code: string;
+  readonly retryable: boolean;
+  readonly details: ControlError["details"];
+
+  constructor(error: ControlError) {
+    super(error.message);
+    this.name = "RoutedControlError";
+    this.code = error.code;
+    this.retryable = error.retryable;
+    this.details = error.details;
+  }
+}
+
 interface MainStream {
   streamId: string;
   machineId: string;
   connection: MainConnection;
+  requestId: string;
   requestType: ControlRequest["type"];
   route: MachineRouteIdentity;
+  keyReservation?: KeyReservation;
   emit: (record: unknown) => void | Promise<void>;
   ended: () => void;
   helloSeen: boolean;
@@ -76,6 +94,18 @@ interface MainStream {
   queuedInputBytes: number;
   routeRetired?: boolean;
   transfer?: { count: number; chunks: string[]; requestId: string };
+}
+
+interface KeyReservation {
+  key: string;
+  token: string;
+  released: Promise<void>;
+  release: () => void;
+}
+
+interface RouteReconciliation {
+  routes: MachineRouteRecord[];
+  disconnectedMainIds: string[];
 }
 
 interface InventoryTransfer {
@@ -119,7 +149,8 @@ export class MainMachineController implements MainRouteAuthority {
   private staleConnectionTimer: NodeJS.Timeout | undefined;
   private readonly connections = new Map<string, MainConnection>();
   private readonly acceptedSockets = new Map<string, AcceptedMachineSocket>();
-  private readonly machineRouteTails = new Map<string, Promise<void>>();
+  private authorityTail = Promise.resolve();
+  private readonly keyReservations = new Map<string, KeyReservation>();
   private readonly latestInstalledCandidate = new Map<string, number>();
   private nextCandidateOrdinal = 0;
   private revision = 0;
@@ -137,6 +168,7 @@ export class MainMachineController implements MainRouteAuthority {
     bindAddress?: string;
     invokeDockTool?: (sourceMainId: string, sourceMachineId: string, request: DockToolsRequest) => Promise<DockToolsResult>;
     dockToolsSourceOff?: (sourceMainId: string) => Promise<void>;
+    localSnapshots: () => InstanceSnapshot[];
   }) {}
 
   async start(): Promise<void> {
@@ -188,7 +220,7 @@ export class MainMachineController implements MainRouteAuthority {
     await closePromise;
     for (const accepted of this.acceptedSockets.values()) clearTimeout(accepted.deadline);
     this.acceptedSockets.clear();
-    await Promise.all([...this.machineRouteTails.values()]);
+    await this.authorityTail;
   }
 
   remoteSnapshotsCurrent(): InstanceSnapshot[] { return [...this.routeSnapshots.values()].map((snapshot) => structuredClone(snapshot)); }
@@ -214,9 +246,50 @@ export class MainMachineController implements MainRouteAuthority {
     return decision.proxy;
   }
 
-  async remoteSnapshots(): Promise<InstanceSnapshot[]> { await this.refreshRouteSnapshotCache(); return this.remoteSnapshotsCurrent(); }
+  async remoteSnapshots(): Promise<InstanceSnapshot[]> { await this.serializeAuthority(() => this.refreshRouteSnapshotCache()); return this.remoteSnapshotsCurrent(); }
 
-  async requestRemote(request: ControlRequest): Promise<unknown> {
+  async getByKey(key: string): Promise<InstanceSnapshot | undefined> {
+    return this.serializeAuthority(async () => {
+      const owner = await this.globalKeyOwner(key);
+      return owner === undefined ? undefined : structuredClone(owner);
+    });
+  }
+
+  async ensureByKey(request: Extract<ControlRequest, { type: "instance.ensure" }>, ensureLocal: () => Promise<EnsureResult>): Promise<EnsureResult> {
+    for (;;) {
+      const decision = await this.serializeAuthority(async () => {
+        const owner = await this.globalKeyOwner(request.params.key);
+        if (owner) return { kind: "owner" as const, owner: structuredClone(owner) };
+        const existing = this.keyReservations.get(request.params.key);
+        if (existing) return { kind: "wait" as const, released: existing.released };
+        let release!: () => void;
+        const reservation: KeyReservation = {
+          key: request.params.key,
+          token: randomUUID(),
+          released: new Promise<void>((resolve) => { release = resolve; }),
+          release: () => release(),
+        };
+        this.keyReservations.set(request.params.key, reservation);
+        return { kind: "reserved" as const, reservation };
+      });
+      if (decision.kind === "owner") return { created: false, instance: decision.owner };
+      if (decision.kind === "wait") { await decision.released; continue; }
+      try {
+        const selectedHost = request.params.hostId;
+        if (selectedHost === undefined || selectedHost === this.mainId) return await ensureLocal();
+        return parseEnsureResult(await this.requestRemote(request, decision.reservation));
+      } finally {
+        await this.serializeAuthority(async () => {
+          if (this.keyReservations.get(request.params.key) === decision.reservation) {
+            this.keyReservations.delete(request.params.key);
+            decision.reservation.release();
+          }
+        });
+      }
+    }
+  }
+
+  async requestRemote(request: ControlRequest, keyReservation?: KeyReservation): Promise<unknown> {
     return new Promise<unknown>((resolve, reject) => {
       let settled = false;
       let proxy: RoutedProtocolProxy | undefined;
@@ -226,16 +299,16 @@ export class MainMachineController implements MainRouteAuthority {
         proxy?.close();
         error ? reject(error) : resolve(result);
       };
-      void this.route(request, (record) => {
-        if (!record || typeof record !== "object") return;
-        const envelope = record as Record<string, unknown>;
-        if (envelope.kind !== "response") return;
-        if (envelope.ok === true) finish(undefined, envelope.result);
-        else {
-          const error = envelope.error as { message?: unknown } | undefined;
-          finish(new Error(typeof error?.message === "string" ? error.message : "Remote Dock request failed"));
+      void this.routeWithReservation(request, (record) => {
+        if (!record || typeof record !== "object" || (record as { kind?: unknown }).kind !== "response") return;
+        try {
+          const response = parseControlResponse(record, request.requestId, this.options.mainHostEpoch);
+          if (response.ok) finish(undefined, response.result);
+          else finish(new RoutedControlError(response.error));
+        } catch (error) {
+          finish(error instanceof Error ? error : new Error(String(error)));
         }
-      }, () => { if (!settled) finish(new Error("SubHost closed before completing the Dock request")); }).then((decision) => {
+      }, () => { if (!settled) finish(new Error("SubHost closed before completing the Dock request")); }, keyReservation).then((decision) => {
         if (decision.kind !== "route") { finish(new Error("Dock request did not select a SubHost")); return; }
         proxy = decision.proxy;
         if (settled) proxy.close();
@@ -274,7 +347,11 @@ export class MainMachineController implements MainRouteAuthority {
   }
 
   async route(request: ControlRequest, emit: (record: unknown) => void | Promise<void>, ended: () => void): Promise<RouteDecision> {
-    if (request.type === "machine.list" || request.type === "instance.list" || request.type === "host.info") return { kind: "local" };
+    return this.routeWithReservation(request, emit, ended);
+  }
+
+  private async routeWithReservation(request: ControlRequest, emit: (record: unknown) => void | Promise<void>, ended: () => void, keyReservation?: KeyReservation): Promise<RouteDecision> {
+    if (request.type === "machine.list" || request.type === "instance.list" || request.type === "host.info" || request.type === "instance.get_by_key") return { kind: "local" };
     const machines = await this.options.state.list();
     const instanceId = "instanceId" in request.params && typeof request.params.instanceId === "string" ? request.params.instanceId : undefined;
     let machine: TrustedSubHostRecord | undefined;
@@ -297,11 +374,13 @@ export class MainMachineController implements MainRouteAuthority {
       if (request.type === "instance.stop" && route) {
         const result = offlineStopResult(request.params.operationId, route.snapshot);
         const stopped = (result as { instance: InstanceSnapshot }).instance;
+        await this.serializeAuthority(async () => {
+          await this.options.state.removeRoute(route.mainInstanceId);
+          this.routeSnapshots.delete(route.mainInstanceId);
+          this.revision += 1;
+        });
         for (const listener of this.snapshotListeners.get(route.mainInstanceId) ?? []) listener(structuredClone(stopped));
-        await this.options.state.removeRoute(route.mainInstanceId);
-        this.routeSnapshots.delete(route.mainInstanceId);
         for (const listener of this.disconnectListeners) listener([route.mainInstanceId]);
-        this.revision += 1;
         return { kind: "result", result };
       }
       throw new ProtocolValidationError("host_unavailable", "That machine is offline. Reconnect it and try again");
@@ -311,6 +390,7 @@ export class MainMachineController implements MainRouteAuthority {
       nativeInstanceId: route.nativeInstanceId,
       mainHostEpoch: this.options.mainHostEpoch,
       nativeHostEpoch: connection.hostEpoch,
+      ...(route.snapshot.key === undefined ? {} : { mainKey: route.snapshot.key }),
     } : undefined;
     const streamId = randomUUID();
     if (connection.streams.size >= MAX_MACHINE_STREAMS) throw new ProtocolValidationError("host_busy", "That machine has too many open requests. Try again shortly");
@@ -318,6 +398,7 @@ export class MainMachineController implements MainRouteAuthority {
       streamId,
       machineId: machine!.id,
       connection,
+      requestId: request.requestId,
       requestType: request.type,
       route: identity ?? {
         mainInstanceId: "",
@@ -325,6 +406,7 @@ export class MainMachineController implements MainRouteAuthority {
         mainHostEpoch: this.options.mainHostEpoch,
         nativeHostEpoch: connection.hostEpoch,
       },
+      ...(keyReservation === undefined ? {} : { keyReservation }),
       emit,
       ended,
       helloSeen: false,
@@ -463,12 +545,12 @@ export class MainMachineController implements MainRouteAuthority {
     void this.markOfflineUnlessConnected(connection.machine.id);
   }
 
-  private completeInitialInventory(connection: MainConnection, hostEpoch: string, snapshots: InstanceSnapshot[]): Promise<void> {
-    return this.serializeMachineRoutes(connection.machine.id, async () => {
+  private async completeInitialInventory(connection: MainConnection, hostEpoch: string, snapshots: InstanceSnapshot[]): Promise<void> {
+    const projection = await this.serializeAuthority(async () => {
       if (connection.closed || connection.socket.destroyed) throw new Error("SubHost machine connection closed before initial inventory");
       const latestInstalled = this.latestInstalledCandidate.get(connection.machine.id) ?? 0;
       if (connection.candidateOrdinal < latestInstalled) throw new Error("A newer machine connection became ready before this candidate");
-      await this.reconcileInventoryCurrentRoutes(connection.machine.id, snapshots);
+      const reconciled = await this.reconcileInventoryCurrentRoutes(connection.machine.id, snapshots);
       if (connection.closed || connection.socket.destroyed) throw new Error("SubHost machine connection closed during initial inventory");
       connection.hostEpoch = hostEpoch;
       const previous = this.connections.get(connection.machine.id);
@@ -476,7 +558,9 @@ export class MainMachineController implements MainRouteAuthority {
       this.connections.set(connection.machine.id, connection);
       this.latestInstalledCandidate.set(connection.machine.id, connection.candidateOrdinal);
       previous?.socket.destroy();
+      return reconciled;
     });
+    this.publishRouteReconciliation(projection);
   }
 
   private async acceptHello(socket: TLSSocket, hello: Extract<MachineWireRecord, { kind: "machine_hello" }>): Promise<MainConnection> {
@@ -606,21 +690,20 @@ export class MainMachineController implements MainRouteAuthority {
   private async mapRemoteStreamRecord(stream: MainStream, raw: unknown): Promise<unknown[]> {
     const record = raw && typeof raw === "object" ? raw as Record<string, unknown> : undefined;
     if (record?.kind === "response_transfer") {
-      const index = record.index;
-      const count = record.count;
-      const data = record.data;
-      if (!Number.isSafeInteger(index) || !Number.isSafeInteger(count) || typeof data !== "string") throw new Error("Invalid routed response transfer");
-      stream.transfer ??= { count: count as number, chunks: [], requestId: String(record.requestId) };
-      if (stream.transfer.count !== count || stream.transfer.chunks.length !== index) throw new Error("Routed response transfer is out of order");
-      stream.transfer.chunks.push(data);
+      const frame = parseResponseTransferFrame(record, stream.requestId, stream.route.nativeHostEpoch);
+      stream.transfer ??= { count: frame.count, chunks: [], requestId: frame.requestId };
+      if (stream.transfer.count !== frame.count || stream.transfer.chunks.length !== frame.index) throw new Error("Routed response transfer is out of order");
+      stream.transfer.chunks.push(frame.data);
       if (stream.transfer.chunks.length < stream.transfer.count) return [];
       const decoded = decodeResponseTransfer(stream.transfer.chunks);
       await this.assignRouteFromResponse(stream, decoded);
-      await this.retireSuccessfulOnlineStop(stream, decoded);
+      await this.retireSuccessfulRouteMutation(stream, decoded);
       const response = recordForMainHost(decoded, stream.route) as Record<string, unknown>;
       response.hostEpoch = this.options.mainHostEpoch;
       const bytes = Buffer.from(JSON.stringify(response), "utf8");
+      if (bytes.byteLength > MAX_DOCK_TRANSFER_BYTES) throw new ProtocolValidationError("response_too_large", "Routed response exceeds the transport safety bound");
       const chunks = Math.max(1, Math.ceil(bytes.byteLength / MAX_RESPONSE_TRANSFER_CHUNK_BYTES));
+      if (chunks > MAX_RESPONSE_TRANSFER_CHUNKS) throw new ProtocolValidationError("response_too_large", "Routed response exceeds the response-transfer chunk bound");
       return Array.from({ length: chunks }, (_, transferIndex) => ({
         kind: "response_transfer", version: 2, requestId: stream.transfer!.requestId,
         hostEpoch: this.options.mainHostEpoch, index: transferIndex, count: chunks,
@@ -628,31 +711,43 @@ export class MainMachineController implements MainRouteAuthority {
       }));
     }
     await this.assignRouteFromResponse(stream, raw);
-    await this.retireSuccessfulOnlineStop(stream, raw);
+    await this.retireSuccessfulRouteMutation(stream, raw);
     const mapped = recordForMainHost(raw, stream.route) as Record<string, unknown>;
     if (mapped && typeof mapped === "object" && "hostEpoch" in mapped) mapped.hostEpoch = this.options.mainHostEpoch;
     return [mapped];
   }
 
-  private async retireSuccessfulOnlineStop(stream: MainStream, raw: unknown): Promise<void> {
-    if (stream.routeRetired || stream.requestType !== "instance.stop" || !stream.route.mainInstanceId) return;
+  private async retireSuccessfulRouteMutation(stream: MainStream, raw: unknown): Promise<void> {
+    if (stream.routeRetired || (stream.requestType !== "instance.stop" && stream.requestType !== "instance.forget") || !stream.route.mainInstanceId) return;
     if (!raw || typeof raw !== "object") return;
     const envelope = raw as Record<string, unknown>;
     if (envelope.kind !== "response" || envelope.ok !== true) return;
-    const result = envelope.result;
-    if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("Successful online stop response is missing its instance snapshot");
-    const nativeStopped = parseInstanceSnapshot((result as Record<string, unknown>).instance, "online stop response instance");
-    if (nativeStopped.id !== stream.route.nativeInstanceId || nativeStopped.lifecycle !== "stopped") throw new Error("Successful online stop response has an invalid instance snapshot");
-    await this.serializeMachineRoutes(stream.machineId, async () => {
+    let stopGeneration: number | undefined;
+    let mappedStopped: InstanceSnapshot | undefined;
+    if (stream.requestType === "instance.stop") {
+      const result = envelope.result;
+      if (!result || typeof result !== "object" || Array.isArray(result)) throw new Error("Successful online stop response is missing its instance snapshot");
+      const nativeStopped = parseInstanceSnapshot((result as Record<string, unknown>).instance, "online stop response instance");
+      if (nativeStopped.id !== stream.route.nativeInstanceId || nativeStopped.lifecycle !== "stopped") throw new Error("Successful online stop response has an invalid instance snapshot");
+      stopGeneration = nativeStopped.runtimeGeneration;
+      mappedStopped = snapshotForMain(nativeStopped, stream.route.mainInstanceId, this.options.mainHostEpoch, stream.route.mainKey);
+    } else {
+      const forgotten = parseForgetResult(envelope.result);
+      if (forgotten.receipt.forgottenId !== stream.route.nativeInstanceId) throw new Error("Successful online forget response has an invalid native identity");
+    }
+    await this.serializeAuthority(async () => {
       if (!this.currentConnection(stream.connection)) return;
-      const mapped = snapshotForMain(nativeStopped, stream.route.mainInstanceId, this.options.mainHostEpoch);
-      for (const listener of this.snapshotListeners.get(stream.route.mainInstanceId) ?? []) listener(structuredClone(mapped));
+      const stored = (await this.options.state.get(stream.machineId))?.routes.find((route) => route.mainInstanceId === stream.route.mainInstanceId);
+      if (!stored) throw new Error("Successful routed retirement has no current Main route");
+      const retired = await this.options.state.retireRoute(stream.route.mainInstanceId, stopGeneration ?? stored.snapshot.runtimeGeneration);
+      if (!retired || retired.nativeInstanceId !== stream.route.nativeInstanceId) throw new Error("Successful routed retirement did not match its native identity");
       stream.routeRetired = true;
-      await this.options.state.retireRoute(stream.route.mainInstanceId, nativeStopped.runtimeGeneration);
       this.routeSnapshots.delete(stream.route.mainInstanceId);
-      for (const listener of this.disconnectListeners) listener([stream.route.mainInstanceId]);
       this.revision += 1;
     });
+    if (!stream.routeRetired) return;
+    if (mappedStopped) for (const listener of this.snapshotListeners.get(stream.route.mainInstanceId) ?? []) listener(structuredClone(mappedStopped));
+    for (const listener of this.disconnectListeners) listener([stream.route.mainInstanceId]);
   }
 
   private async assignRouteFromResponse(stream: MainStream, raw: unknown): Promise<void> {
@@ -663,23 +758,28 @@ export class MainMachineController implements MainRouteAuthority {
     const result = envelope.result as Record<string, unknown>;
     const snapshot = result.instance;
     if (!isSnapshot(snapshot)) return;
-    stream.route = await this.ensureRoute(stream.connection, snapshot, stream.route.nativeHostEpoch);
+    const reservation = stream.keyReservation && this.keyReservations.get(stream.keyReservation.key) === stream.keyReservation
+      ? stream.keyReservation
+      : undefined;
+    stream.route = await this.ensureRoute(stream.connection, snapshot, stream.route.nativeHostEpoch, reservation);
   }
 
-  private ensureRoute(connection: MainConnection, snapshot: InstanceSnapshot, nativeHostEpoch: string): Promise<MachineRouteIdentity> {
-    return this.serializeMachineRoutes(connection.machine.id, async () => {
+  private ensureRoute(connection: MainConnection, snapshot: InstanceSnapshot, nativeHostEpoch: string, reservation?: KeyReservation): Promise<MachineRouteIdentity> {
+    return this.serializeAuthority(async () => {
       if (!this.currentConnection(connection)) throw new Error("Machine connection was replaced before its route could be assigned");
-      return this.ensureRouteCurrentRoutes(connection.machine.id, snapshot, nativeHostEpoch);
+      return this.ensureRouteCurrentRoutes(connection.machine.id, snapshot, nativeHostEpoch, reservation);
     });
   }
 
-  private async ensureRouteCurrentRoutes(machineId: string, snapshot: InstanceSnapshot, nativeHostEpoch: string): Promise<MachineRouteIdentity> {
+  private async ensureRouteCurrentRoutes(machineId: string, snapshot: InstanceSnapshot, nativeHostEpoch: string, reservation?: KeyReservation): Promise<MachineRouteIdentity> {
+    const machines = await this.options.state.list();
+    const claims = this.keyClaims(machines);
     let mainInstanceId = "";
     let mapped!: InstanceSnapshot;
     await this.options.state.updateMachine(machineId, (machine, { usedMainInstanceIds }) => {
       const existing = machine.routes.find((route) => route.nativeInstanceId === snapshot.id);
       mainInstanceId = existing?.mainInstanceId ?? uniqueMainInstanceId(usedMainInstanceIds);
-      mapped = snapshotForMain(snapshot, mainInstanceId, this.options.mainHostEpoch);
+      mapped = this.normalizeRouteSnapshot(snapshot, machineId, mainInstanceId, claims, reservation?.key, reservation);
       machine.routes = [
         ...machine.routes.filter((route) => route.nativeInstanceId !== snapshot.id),
         { mainInstanceId, nativeInstanceId: snapshot.id, snapshot: mapped },
@@ -687,7 +787,13 @@ export class MainMachineController implements MainRouteAuthority {
     });
     this.routeSnapshots.set(mainInstanceId, structuredClone(mapped));
     this.revision += 1;
-    return { mainInstanceId, nativeInstanceId: snapshot.id, mainHostEpoch: this.options.mainHostEpoch, nativeHostEpoch };
+    return {
+      mainInstanceId,
+      nativeInstanceId: snapshot.id,
+      mainHostEpoch: this.options.mainHostEpoch,
+      nativeHostEpoch,
+      ...(mapped.key === undefined ? {} : { mainKey: mapped.key }),
+    };
   }
 
   private closeMainStream(connection: MainConnection, streamId: string, notify: boolean): void {
@@ -699,22 +805,31 @@ export class MainMachineController implements MainRouteAuthority {
     setImmediate(stream.ended);
   }
 
-  private reconcileInventoryFromConnection(connection: MainConnection, snapshots: InstanceSnapshot[]): Promise<void> {
-    return this.serializeMachineRoutes(connection.machine.id, async () => {
-      if (!this.currentConnection(connection)) return;
-      await this.reconcileInventoryCurrentRoutes(connection.machine.id, snapshots);
+  private async reconcileInventoryFromConnection(connection: MainConnection, snapshots: InstanceSnapshot[]): Promise<void> {
+    const projection = await this.serializeAuthority(async () => {
+      if (!this.currentConnection(connection)) return undefined;
+      return this.reconcileInventoryCurrentRoutes(connection.machine.id, snapshots);
     });
+    if (projection) this.publishRouteReconciliation(projection);
   }
 
-  private async reconcileInventoryCurrentRoutes(machineId: string, snapshots: InstanceSnapshot[]): Promise<void> {
+  private async reconcileInventoryCurrentRoutes(machineId: string, snapshots: InstanceSnapshot[]): Promise<RouteReconciliation> {
     assertUniqueNativeSnapshotIds(snapshots);
+    const machines = await this.options.state.list();
+    const current = machines.find((machine) => machine.id === machineId);
+    const reportedByNative = new Map(snapshots.map((snapshot) => [snapshot.id, snapshot]));
+    const survivingNativeIds = new Set((current?.routes ?? []).filter((route) => {
+      const reported = reportedByNative.get(route.nativeInstanceId);
+      const retirement = current?.retiredRoutes.find((item) => item.nativeInstanceId === route.nativeInstanceId);
+      return reported !== undefined && (!retirement || reported.runtimeGeneration > retirement.runtimeGeneration);
+    }).map((route) => route.nativeInstanceId));
+    const claims = this.keyClaims(machines, (candidateMachineId, route) => candidateMachineId !== machineId || survivingNativeIds.has(route.nativeInstanceId));
     let previousMainIds = new Set<string>();
     let routes: MachineRouteRecord[] = [];
     await this.options.state.updateMachine(machineId, (machine, { usedMainInstanceIds }) => {
       previousMainIds = new Set(machine.routes.map((route) => route.mainInstanceId));
       const byNative = new Map(machine.routes.map((route) => [route.nativeInstanceId, route]));
       const usedMainIds = new Set(usedMainInstanceIds);
-      const reportedByNative = new Map(snapshots.map((snapshot) => [snapshot.id, snapshot]));
       const retiredByNative = new Map(machine.retiredRoutes.map((retirement) => [retirement.nativeInstanceId, retirement]));
       const retiredRoutes = machine.retiredRoutes.filter((retirement) => {
         const reported = reportedByNative.get(retirement.nativeInstanceId);
@@ -730,31 +845,38 @@ export class MainMachineController implements MainRouteAuthority {
         return {
           mainInstanceId,
           nativeInstanceId: snapshot.id,
-          snapshot: snapshotForMain(snapshot, mainInstanceId, this.options.mainHostEpoch),
+          snapshot: this.normalizeRouteSnapshot(snapshot, machineId, mainInstanceId, claims),
         };
       });
       machine.routes = routes;
       machine.retiredRoutes = retiredRoutes;
     });
     await this.refreshRouteSnapshotCache();
-    for (const route of routes) { previousMainIds.delete(route.mainInstanceId); for (const listener of this.snapshotListeners.get(route.mainInstanceId) ?? []) listener(structuredClone(route.snapshot)); }
-    if (previousMainIds.size) for (const listener of this.disconnectListeners) listener([...previousMainIds]);
+    for (const route of routes) previousMainIds.delete(route.mainInstanceId);
     this.revision += 1;
+    return { routes, disconnectedMainIds: [...previousMainIds] };
   }
 
-  private markOffline(machineId: string): Promise<void> {
-    return this.serializeMachineRoutes(machineId, () => this.markOfflineCurrentRoutes(machineId));
+  private publishRouteReconciliation(projection: RouteReconciliation): void {
+    for (const route of projection.routes) for (const listener of this.snapshotListeners.get(route.mainInstanceId) ?? []) listener(structuredClone(route.snapshot));
+    if (projection.disconnectedMainIds.length) for (const listener of this.disconnectListeners) listener(projection.disconnectedMainIds);
   }
 
-  private markOfflineUnlessConnected(machineId: string): Promise<void> {
-    return this.serializeMachineRoutes(machineId, async () => {
+  private async markOffline(machineId: string): Promise<void> {
+    const routes = await this.serializeAuthority(() => this.markOfflineCurrentRoutes(machineId));
+    this.publishOfflineRoutes(routes);
+  }
+
+  private async markOfflineUnlessConnected(machineId: string): Promise<void> {
+    const routes = await this.serializeAuthority(async () => {
       const current = this.connections.get(machineId);
-      if (current && !current.closed && !current.socket.destroyed) return;
-      await this.markOfflineCurrentRoutes(machineId);
+      if (current && !current.closed && !current.socket.destroyed) return undefined;
+      return this.markOfflineCurrentRoutes(machineId);
     });
+    if (routes) this.publishOfflineRoutes(routes);
   }
 
-  private async markOfflineCurrentRoutes(machineId: string): Promise<void> {
+  private async markOfflineCurrentRoutes(machineId: string): Promise<MachineRouteRecord[]> {
     const now = new Date().toISOString();
     let routes: MachineRouteRecord[] = [];
     await this.options.state.updateMachine(machineId, (machine) => {
@@ -762,24 +884,64 @@ export class MainMachineController implements MainRouteAuthority {
       machine.routes = routes;
     });
     await this.refreshRouteSnapshotCache();
+    this.revision += 1;
+    return routes;
+  }
+
+  private publishOfflineRoutes(routes: readonly MachineRouteRecord[]): void {
     for (const route of routes) for (const listener of this.snapshotListeners.get(route.mainInstanceId) ?? []) listener(structuredClone(route.snapshot));
     const ids = routes.map((route) => route.mainInstanceId);
     for (const listener of this.disconnectListeners) listener(ids);
-    this.revision += 1;
   }
 
-  private async serializeMachineRoutes<T>(machineId: string, work: () => Promise<T>): Promise<T> {
-    const previous = this.machineRouteTails.get(machineId) ?? Promise.resolve();
-    let release!: () => void;
-    const tail = new Promise<void>((resolve) => { release = resolve; });
-    this.machineRouteTails.set(machineId, tail);
-    await previous;
-    try {
-      return await work();
-    } finally {
-      release();
-      if (this.machineRouteTails.get(machineId) === tail) this.machineRouteTails.delete(machineId);
+  private async globalKeyOwner(key: string): Promise<InstanceSnapshot | undefined> {
+    for (const snapshot of this.options.localSnapshots()) if (snapshot.key === key) return snapshot;
+    for (const machine of await this.options.state.list()) {
+      const route = machine.routes.find((candidate) => candidate.snapshot.key === key);
+      if (route) return route.snapshot;
     }
+    return undefined;
+  }
+
+  private keyClaims(
+    machines: readonly TrustedSubHostRecord[],
+    includeRoute: (machineId: string, route: MachineRouteRecord) => boolean = () => true,
+  ): Map<string, string> {
+    const claims = new Map<string, string>();
+    for (const snapshot of this.options.localSnapshots()) if (snapshot.key !== undefined && !claims.has(snapshot.key)) claims.set(snapshot.key, `local:${snapshot.id}`);
+    for (const machine of machines) for (const route of machine.routes) {
+      if (route.snapshot.key !== undefined && includeRoute(machine.id, route) && !claims.has(route.snapshot.key)) claims.set(route.snapshot.key, routeClaim(machine.id, route.mainInstanceId));
+    }
+    for (const reservation of this.keyReservations.values()) if (!claims.has(reservation.key)) claims.set(reservation.key, reservationClaim(reservation));
+    return claims;
+  }
+
+  private normalizeRouteSnapshot(
+    native: InstanceSnapshot,
+    machineId: string,
+    mainInstanceId: string,
+    claims: Map<string, string>,
+    requestedKey = native.key,
+    reservation?: KeyReservation,
+  ): InstanceSnapshot {
+    const claim = routeClaim(machineId, mainInstanceId);
+    const owner = requestedKey === undefined ? undefined : claims.get(requestedKey);
+    const ownsKey = requestedKey !== undefined && (
+      owner === undefined
+      || owner === claim
+      || (reservation !== undefined && owner === reservationClaim(reservation) && this.keyReservations.get(reservation.key) === reservation)
+    );
+    if (ownsKey) claims.set(requestedKey, claim);
+    return snapshotForMain(native, mainInstanceId, this.options.mainHostEpoch, ownsKey ? requestedKey : undefined);
+  }
+
+  private async serializeAuthority<T>(work: () => Promise<T>): Promise<T> {
+    const previous = this.authorityTail;
+    let release!: () => void;
+    this.authorityTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try { return await work(); }
+    finally { release(); }
   }
 
   private currentConnection(connection: MainConnection): boolean {
@@ -1276,6 +1438,9 @@ function assertUniqueNativeSnapshotIds(snapshots: readonly InstanceSnapshot[]): 
   const nativeIds = snapshots.map((snapshot) => snapshot.id);
   if (new Set(nativeIds).size !== nativeIds.length) throw new Error("Machine inventory contains duplicate native instance IDs");
 }
+
+function routeClaim(machineId: string, mainInstanceId: string): string { return `route:${machineId}:${mainInstanceId}`; }
+function reservationClaim(reservation: KeyReservation): string { return `reservation:${reservation.token}`; }
 
 function uniqueMainInstanceId(used: ReadonlySet<string>): string {
   let candidate = randomUUID();
