@@ -1240,31 +1240,26 @@ fn value_matches_definition(value: &SettingValue, definition: &SettingDefinition
 mod tests {
     use super::*;
 
-    fn setting(key: SettingKey, value: SettingValue) -> SettingInfo {
-        let definition = setting_definition(key);
-        SettingInfo {
-            key,
-            value,
-            source: SettingSource::Global,
-            writable: definition.writable,
-            value_type: definition.value_type,
-            allowed_values: definition.allowed_values,
-            min: definition.min,
-            max: definition.max,
-            reload_required: definition.reload_required,
-            host_restart_required: definition.host_restart_required,
-        }
-    }
-
     #[test]
     fn setting_metadata_and_values_follow_frozen_contract() {
-        assert!(
-            validate_setting(&setting(
-                SettingKey::Transport,
-                SettingValue::Enum("websocket".into())
-            ))
-            .is_ok()
-        );
+        let transport = SettingInfo {
+            key: SettingKey::Transport,
+            value: SettingValue::Enum("websocket".into()),
+            source: SettingSource::Global,
+            writable: true,
+            value_type: SettingValueType::Enum,
+            allowed_values: Some(vec![
+                Value::String("auto".into()),
+                Value::String("sse".into()),
+                Value::String("websocket".into()),
+                Value::String("websocket-cached".into()),
+            ]),
+            min: None,
+            max: None,
+            reload_required: false,
+            host_restart_required: false,
+        };
+        assert!(validate_setting(&transport).is_ok());
         assert!(
             validate_update(&SettingUpdate {
                 key: SettingKey::CompactionReserveTokens,
@@ -1273,8 +1268,18 @@ mod tests {
             .is_err()
         );
 
-        let mut invalid = setting(SettingKey::EditorPaddingX, SettingValue::Integer(2));
-        invalid.max = Some(4);
+        let invalid = SettingInfo {
+            key: SettingKey::EditorPaddingX,
+            value: SettingValue::Integer(2),
+            source: SettingSource::Global,
+            writable: true,
+            value_type: SettingValueType::Integer,
+            allowed_values: None,
+            min: Some(0),
+            max: Some(4),
+            reload_required: false,
+            host_restart_required: false,
+        };
         assert!(validate_setting(&invalid).is_err());
     }
 

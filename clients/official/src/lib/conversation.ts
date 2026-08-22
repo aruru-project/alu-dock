@@ -392,7 +392,7 @@ function appendBlock(block: ContentBlock, id: string, groupId: string, output: C
     if (publishedFile) ensurePublishedImage(tool, publishedFile, output, images)
     renderToolDetail(tool)
   } else if (block.type === 'omitted') {
-    output.push({ id, kind: 'notice', groupId, tone: 'info', text: block.description || `${block.kind} 未载入` })
+    output.push({ id, kind: 'notice', groupId, tone: 'info', text: block.description || '这部分内容暂时没有载入。请刷新对话后重试。' })
   }
 }
 

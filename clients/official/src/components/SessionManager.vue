@@ -9,7 +9,7 @@ import { captureHostResult, hostResultMatches } from '../lib/hostResult'
 import {
   countTreeFilters, currentOrEndTreeWindowStart, nearestVisibleTreeNodeId,
   persistTreeFilter, projectSessionTree, readTreeFilter, TREE_FILTERS,
-  treeNodeBadge, treeNodeIcon, treeNodeRoleLabel, treeNodeTime,
+  treeNodeBadge, treeNodeIcon, treeNodeRoleLabel, treeNodeSummary, treeNodeTime,
   type TreeFilter, type VisibleTreeItem,
 } from '../lib/sessionTree'
 import { userErrorMessage as errorMessage } from '../lib/userError'
@@ -63,14 +63,14 @@ async function currentSessionCall<T>(scope: SessionContext, operation: () => Pro
     || scope.instanceId !== props.work.id
     || scope.expectedHostEpoch !== props.work.ownerHostEpoch
     || scope.expectedRuntimeGeneration !== props.work.runtimeGeneration) {
-    throw new Error('Host 或 Work 选择已改变；旧结果已丢弃。')
+    throw new Error('你已切换 Host 或 Work，请在当前页面重试。')
   }
   return correlated.result
 }
 const selectedSession = computed(() => sessions.value.find((item) => item.token === selectedToken.value) ?? null)
 const filteredSessions = computed(() => {
   const query = sessionSearch.value.trim().toLowerCase()
-  return sessions.value.filter((item) => !query || `${item.name ?? ''} ${item.cwd} ${item.identity}`.toLowerCase().includes(query))
+  return sessions.value.filter((item) => !query || `${item.name ?? ''} ${item.cwd}`.toLowerCase().includes(query))
 })
 const filterCounts = computed(() => countTreeFilters(tree.value?.nodes ?? [], tree.value?.leafId))
 const visibleTreeItems = computed(() => projectSessionTree(
@@ -394,13 +394,13 @@ function time(value?: string | null) { return treeNodeTime(value) }
     <div v-if="loading" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取 {{ mode === 'tree' ? 'Session Tree' : 'Session 列表' }}…</div>
 
     <section v-if="mode === 'sessions'" class="alu-session-select">
-      <div class="ui-dialog-search-wrap"><input v-model="sessionSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" /></div>
+      <div class="ui-dialog-search-wrap"><input v-model="sessionSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称或目录…" /></div>
       <div class="ui-dialog-options">
         <button v-for="item in filteredSessions" :key="item.token" class="ui-dialog-option" :class="{ 'is-current': item.current }" :disabled="item.current || preview || !!pending || outcomeUnknown" @click="selectedToken = item.token; resumeSelected()">
           <span class="ui-dialog-option-marker">{{ item.current ? '●' : '•' }}</span>
           <span class="ui-dialog-option-content">
-            <span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ item.name || item.identity }}</span><span v-if="item.current" class="ui-dialog-option-badge">CURRENT</span></span>
-            <span class="ui-dialog-option-detail"><span>{{ item.cwd }}</span><span class="ui-dialog-option-meta">{{ time(item.updatedAt) }} · {{ item.identity }}</span></span>
+            <span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ item.name || '未命名 Session' }}</span><span v-if="item.current" class="ui-dialog-option-badge">当前</span></span>
+            <span class="ui-dialog-option-detail"><span>{{ item.cwd }}</span><span class="ui-dialog-option-meta">{{ time(item.updatedAt) }}</span></span>
           </span>
         </button>
         <div v-if="!filteredSessions.length" class="ui-dialog-empty">当前目录没有可恢复的 session。</div>
@@ -447,7 +447,7 @@ function time(value?: string | null) { return treeNodeTime(value) }
           type="search"
           autocomplete="off"
           class="ui-dialog-input ui-dialog-search"
-          placeholder="搜索名称、内容或 ID…"
+          placeholder="搜索内容或标签…"
           aria-label="搜索 Session Tree"
           @keydown="handleTreeSearchKeydown"
         />
@@ -491,7 +491,7 @@ function time(value?: string | null) { return treeNodeTime(value) }
           </span>
           <span class="ui-dialog-option-content">
             <span class="ui-dialog-option-top">
-              <span class="ui-dialog-option-label">{{ item.node.summary || item.node.label || item.node.kind }}</span>
+              <span class="ui-dialog-option-label">{{ treeNodeSummary(item.node) }}</span>
               <span v-if="item.branchPoint" class="ui-dialog-option-badge alu-tree-branch-badge">分叉 · {{ item.childIds.length }}</span>
               <span v-if="treeNodeBadge(item.node, tree?.leafId)" class="ui-dialog-option-badge" :data-state="item.currentLeaf ? 'current' : item.node.state">{{ treeNodeBadge(item.node, tree?.leafId) }}</span>
             </span>
@@ -506,7 +506,7 @@ function time(value?: string | null) { return treeNodeTime(value) }
         <div v-else-if="tree && !filteredTreeNodes.length" class="ui-dialog-empty">没有匹配项</div>
       </div>
       <div v-if="selectedNode" class="ui-dialog-actions alu-tree-actions">
-        <div class="ui-dialog-selection-summary"><span>已选择</span><strong>{{ selectedNode.summary || selectedNode.label || selectedNode.kind }}</strong></div>
+        <div class="ui-dialog-selection-summary"><span>已选择</span><strong>{{ treeNodeSummary(selectedNode) }}</strong></div>
         <button type="button" class="ui-dialog-btn ui-dialog-btn-primary ui-dialog-action-btn" :disabled="selectedNode.entryId === tree?.leafId || preview || !!pending || outcomeUnknown" title="不生成分支摘要，直接切换到这里" @click="navigate(false)">直接切换</button>
         <button type="button" class="ui-dialog-btn ui-dialog-action-btn" :disabled="selectedNode.entryId === tree?.leafId || preview || !!pending || outcomeUnknown" title="先总结放弃的分支，再切换到这里" @click="navigate(true)">摘要后切换</button>
         <button type="button" class="ui-dialog-btn ui-dialog-action-btn" :disabled="selectedNode.kind !== 'message' || selectedNode.role !== 'user' || preview || !!pending || outcomeUnknown" title="回到这条用户消息之前，并将消息放回输入框" @click="fork">Fork</button>

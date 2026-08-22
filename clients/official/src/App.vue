@@ -87,6 +87,7 @@ import {
 import { userErrorMessage as errorMessage } from './lib/userError'
 import { captureHostResult, currentHostCall, hostResultMatches, requireHostContext } from './lib/hostResult'
 import { reduceLiveEvent } from './lib/liveReducer'
+import { isRasterImageMimeType, rasterImageMimeType } from './lib/rasterImage'
 import { editorAfterSessionReplacement } from './lib/sessionEditor'
 import {
   conversationBoundaryKey,
@@ -101,6 +102,7 @@ import {
   stopCanStart,
   stopConfirmationText,
   stoppedResultIsCorrelated,
+  thinkingLevelLabel,
   workPresence,
 } from './lib/uiBoundaries'
 import { applySlashArgumentCompletion, applySlashCompletion, catalogSourceLabel, filterCatalogCommands, prefixSlashCommand, slashArgumentContext, slashCommandQuery } from './lib/commandSuggest'
@@ -274,7 +276,7 @@ const activeFollow = ref<ActiveFollow | null>(null)
 const activeFollowSubscription = computed(() => activeFollow.value?.subscriptionId ?? '')
 const pairHost = ref('')
 const pairPort = ref<number | null>(null)
-const MAX_MESSAGE_ATTACHMENTS = 32
+const maxMessageAttachments = computed(() => app.payload?.maxAttachmentsPerMessage ?? 0)
 const deviceNameStorage = browserDeviceNameStorage()
 const pairDeviceName = ref(readDeviceNamePreference(deviceNameStorage) ?? DEVICE_NAME_FALLBACK)
 const pairDeviceNameTouched = ref(false)
@@ -329,16 +331,16 @@ const previewConversation: ConversationItem[] = [
     id: 'a1',
     kind: 'assistant',
     groupId: 'preview-assistant-1',
-    text: '已连接真实 Dock，并完成凭据事务化迁移。当前 Work 列表直接来自 Protocol V2；界面不会把浏览器预览数据冒充 Dock 数据。',
+    text: '已完成连接检查，Work 列表和当前对话已准备好。',
     time: '19:41',
   },
-  { id: 't1', kind: 'thinking', groupId: 'preview-assistant-tools', title: '实现判断', text: '保持 Rust core 与 Tauri 解耦；WebView 只消费经过类型校验的状态。', open: true, groupTime: '19:41' },
-  { id: 'tool1', kind: 'tool', groupId: 'preview-assistant-tools', name: 'instance.list', summary: '读取 Work catalog', status: 'done', detail: 'selector=all · revision-bound pagination' },
+  { id: 't1', kind: 'thinking', groupId: 'preview-assistant-tools', title: '检查顺序', text: '先确认连接状态和 Work 列表，再检查窄屏布局。', open: true, groupTime: '19:41' },
+  { id: 'tool1', kind: 'tool', groupId: 'preview-assistant-tools', name: '检查工作列表', summary: '已读取 Work 列表', status: 'done', detail: '已找到 5 个 Work' },
   {
     id: 'a2',
     kind: 'assistant',
     groupId: 'preview-assistant-2',
-    text: '下一步把 conversation bootstrap/read/follow 接入同一个状态面。断线时会保留当前消息和草稿，只在 continuity 丢失时原子重建。',
+    text: '连接中断后，当前消息和草稿仍会保留；恢复连接后会继续显示最新内容。',
     time: '19:42',
   },
 ]
@@ -1255,7 +1257,7 @@ function controlDialogTitle(section: ControlSection) {
   return ({
     commands: '命令中心', sessions: '恢复 Session', tree: 'Session Tree', 'new-session': 'New Session',
     'rename-session': '会话名称', 'compact-session': 'Compact Context', 'reload-session': 'Reload Session',
-    models: '选择 Model', thinking: 'Thinking Level', tools: 'Active Tools', resources: 'Project Status', settings: 'Settings',
+    models: '选择模型', thinking: '思考量', tools: '可用工具', resources: '项目状态', settings: '设置',
   } as Record<ControlSection, string>)[section]
 }
 
@@ -1401,7 +1403,7 @@ async function switchSavedHost(hostId: string) {
 async function removeSavedHost(hostId: string, displayName: string) {
   if (!isTauri || contextTransitionBusy.value) return
   const imageWarning = hasRestoredImageDrafts.value && hostId === app.activeHostId ? '\n\n已取回但尚未发送的附件也会从本机草稿中移除。' : ''
-  const body = `这会删除此设备保存的配对凭据和连接地址。这台 Host 上此设备的访问权限保持不变；如需撤销，请在电脑上的 AluDock 管理界面完成。以后从此设备连接需要重新配对。${imageWarning}`
+  const body = `这台 Host 会从此设备的列表中移除。电脑端仍会保留此设备的访问权限；如需一并撤销，请在电脑上的 AluDock 管理界面完成。以后从此设备连接需要重新配对。${imageWarning}`
   if (!await askConfirm(`从此设备删除“${displayName}”？`, body)) return
   await extensionUi.clear()
   await app.removeHost(hostId)
@@ -1630,7 +1632,7 @@ function openAttachmentPreview(key: string, name: string) {
 }
 
 function attachmentCanPreview(mediaType?: string) {
-  return !!mediaType && ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(mediaType)
+  return !!mediaType && isRasterImageMimeType(mediaType)
 }
 
 async function prepareAttachmentPreview(item: UploadDraft, workId: string, context: HostContext) {
@@ -1638,7 +1640,7 @@ async function prepareAttachmentPreview(item: UploadDraft, workId: string, conte
   try {
     const bytes = await loadAttachmentPreviewBytes(workId, item.token, context)
     if (!app.contextMatches(context) || selected.value?.id !== workId || !uploadDrafts.value.some((candidate) => candidate.token === item.token)) return
-    const detectedMediaType = detectedRasterMimeType(bytes)
+    const detectedMediaType = rasterImageMimeType(bytes)
     if (!detectedMediaType || detectedMediaType !== item.mediaType) return
     const blobBytes = new Uint8Array(bytes.byteLength)
     blobBytes.set(bytes)
@@ -1670,9 +1672,9 @@ async function handleComposerPaste(event: ClipboardEvent) {
     submissionError.value = '当前暂时不能添加剪贴板图片，请稍后重试。'
     return
   }
-  const available = MAX_MESSAGE_ATTACHMENTS - draftAttachments.value.length - uploadDrafts.value.length
+  const available = maxMessageAttachments.value - draftAttachments.value.length - uploadDrafts.value.length
   if (images.length > available) {
-    submissionError.value = available > 0 ? `本条消息还可以添加 ${available} 个附件。` : `一条消息最多可附加 ${MAX_MESSAGE_ATTACHMENTS} 个文件。`
+    submissionError.value = available > 0 ? `本条消息还可以添加 ${available} 个附件。` : `一条消息最多可附加 ${maxMessageAttachments.value} 个文件。`
     return
   }
   const context = requireHostContext(app)
@@ -1683,7 +1685,7 @@ async function handleComposerPaste(event: ClipboardEvent) {
   try {
     for (const [index, file] of images.entries()) {
       const bytes = new Uint8Array(await file.arrayBuffer())
-      const mediaType = detectedRasterMimeType(bytes)
+      const mediaType = rasterImageMimeType(bytes)
       if (!mediaType) throw new Error('剪贴板图片不是可用的 PNG、JPEG、GIF 或 WebP 格式。')
       const selectedAttachment = await stageClipboardImage(work.id, bytes, index + 1, context)
       const draftItem: UploadDraft = { ...selectedAttachment, state: 'hashing', progress: 0 }
@@ -1713,11 +1715,11 @@ async function handleComposerPaste(event: ClipboardEvent) {
 async function chooseAttachments() {
   const work = selected.value
   if (!work || !isTauri || work.lifecycle !== 'active' || pairingInProgress.value || attachmentPicking.value) return
-  const available = MAX_MESSAGE_ATTACHMENTS - draftAttachments.value.length - uploadDrafts.value.length
+  const available = maxMessageAttachments.value - draftAttachments.value.length - uploadDrafts.value.length
   if (available <= 0) {
-    submissionError.value = draftAttachments.value.length > MAX_MESSAGE_ATTACHMENTS
+    submissionError.value = draftAttachments.value.length > maxMessageAttachments.value
       ? 'Queue 取回的附件需要分批发送，发完一批后才能继续添加。'
-      : `一条消息最多可附加 ${MAX_MESSAGE_ATTACHMENTS} 个文件。`
+      : `一条消息最多可附加 ${maxMessageAttachments.value} 个文件。`
     return
   }
   submissionError.value = null
@@ -1839,7 +1841,7 @@ async function restoreQueue(): Promise<boolean> {
 async function submit(): Promise<boolean> {
   const work = selected.value
   const captured = draft.value
-  const capturedAttachments = draftAttachments.value.slice(0, MAX_MESSAGE_ATTACHMENTS).map((item) => ({ ...item }))
+  const capturedAttachments = draftAttachments.value.slice(0, maxMessageAttachments.value).map((item) => ({ ...item }))
   const localCommand = submittedLocalControl(captured)
   if (localCommand) return executeLocalControl(localCommand, captured)
   if (!work || workMutating.value || (!captured.trim() && !capturedAttachments.length && !restoredImageCount.value) || !isTauri || pairingInProgress.value || clearingRestoredImages.value || submitting.value || queueRestoring.value || attachmentPicking.value || uploadDrafts.value.length > 0) return false
@@ -1948,7 +1950,7 @@ async function stopSelectedWork(): Promise<boolean> {
     }
     const cleanupErrors = result.receipt.cleanupErrors ?? []
     submissionError.value = cleanupErrors.length
-      ? 'Work 已停止，但部分清理工作没有完成。刷新后可以确认当前状态。'
+      ? 'Work 已停止，但相关内容可能仍在更新。请刷新后确认当前状态。'
       : null
     return true
   } catch (cause) {
@@ -2238,7 +2240,7 @@ async function requestConversationImage(part: ConversationImagePart) {
       || conversationState.value?.cursor.hostEpoch !== expectedEpoch
       || conversationState.value?.cursor.runtimeGeneration !== expectedGeneration
       || !conversationHasImage(part.imageKey)) return
-    const detectedMediaType = detectedRasterMimeType(bytes)
+    const detectedMediaType = rasterImageMimeType(bytes)
     if (!detectedMediaType || (mediaType && mediaType !== detectedMediaType)) throw new Error('图片内容无法解码，请重新读取。')
     mediaType = detectedMediaType
     const blobBytes = new Uint8Array(bytes.byteLength)
@@ -2252,7 +2254,7 @@ async function requestConversationImage(part: ConversationImagePart) {
 }
 
 function decodeInlineImage(data: string, mimeType: string): Uint8Array {
-  if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(mimeType)
+  if (!isRasterImageMimeType(mimeType)
     || data.length > Math.ceil((20 * 1024 * 1024) / 3) * 4
     || data.length % 4 !== 0
     || !/^[A-Za-z0-9+/]*={0,2}$/.test(data)) throw new Error('图片内容无法解码，请重新读取。')
@@ -2261,19 +2263,8 @@ function decodeInlineImage(data: string, mimeType: string): Uint8Array {
   if (window.btoa(decoded) !== data) throw new Error('图片内容无法解码，请重新读取。')
   const bytes = new Uint8Array(decoded.length)
   for (let index = 0; index < decoded.length; index += 1) bytes[index] = decoded.charCodeAt(index)
-  if (detectedRasterMimeType(bytes) !== mimeType) throw new Error('图片内容无法解码，请重新读取。')
+  if (rasterImageMimeType(bytes) !== mimeType) throw new Error('图片内容无法解码，请重新读取。')
   return bytes
-}
-
-function detectedRasterMimeType(bytes: Uint8Array): string {
-  if (bytes.length >= 8 && [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a].every((value, index) => bytes[index] === value)) return 'image/png'
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
-  const header = bytes.length >= 6 ? String.fromCharCode(...bytes.subarray(0, 6)) : ''
-  if (header === 'GIF87a' || header === 'GIF89a') return 'image/gif'
-  if (bytes.length >= 12
-    && String.fromCharCode(...bytes.subarray(0, 4)) === 'RIFF'
-    && String.fromCharCode(...bytes.subarray(8, 12)) === 'WEBP') return 'image/webp'
-  return ''
 }
 
 function markConversationImageFailed(part: ConversationImagePart) {
@@ -3385,7 +3376,7 @@ function handleOutputClick(event: MouseEvent) {
     <nav class="alu-navbar select-none">
       <div class="alu-navbar-left">
         <img src="./assets/console_icon_small.png" class="alu-navbar-avatar session-dot" alt="AluDock" />
-        <button type="button" class="alu-navbar-breadcrumb" title="查看 Project Status" aria-label="查看 Project Status" :disabled="!selected" @click="openControlCenter('resources')">
+        <button type="button" class="alu-navbar-breadcrumb" title="查看项目状态" aria-label="查看项目状态" :disabled="!selected" @click="openControlCenter('resources')">
           <span v-if="!app.needsPairing" class="alu-nav-workspace">{{ selected ? selected.cwd.split('/').filter(Boolean).slice(-2).join('/') : 'AluDock' }}</span>
           <span v-if="!app.needsPairing" class="alu-nav-sep">/</span>
           <span class="alu-nav-session">{{ app.needsPairing ? 'AluDock' : selected?.name || selected?.displayName || '选择 Work' }}</span>
@@ -3397,14 +3388,14 @@ function handleOutputClick(event: MouseEvent) {
       <div v-if="!app.needsPairing" class="alu-navbar-right">
         <button class="alu-nav-selector alu-nav-selector-model" :disabled="!selected || selected.lifecycle !== 'active'" @click="openControlCenter('models')">
           <span class="alu-nav-selector-icon">◉</span>
-          <span class="alu-nav-selector-label">model:</span>
+          <span class="alu-nav-selector-label">模型</span>
           <span class="alu-nav-selector-value" :data-provider="selected?.executor.model?.provider || '—'" :title="modelLabel">{{ modelLabel }}</span>
           <span class="alu-nav-selector-arrow">▾</span>
         </button>
         <button class="alu-nav-selector" :disabled="!selected || selected.lifecycle !== 'active'" @click="openControlCenter('thinking')">
           <span class="alu-nav-selector-icon">⌁</span>
-          <span class="alu-nav-selector-label">thinking:</span>
-          <span class="alu-nav-selector-value">{{ selected?.executor.thinkingLevel || '—' }}</span>
+          <span class="alu-nav-selector-label">思考量</span>
+          <span class="alu-nav-selector-value">{{ selected?.executor.thinkingLevel ? thinkingLevelLabel(selected.executor.thinkingLevel) : '—' }}</span>
           <span class="alu-nav-selector-arrow">▾</span>
         </button>
         <div class="alu-nav-stats">
@@ -3479,7 +3470,7 @@ function handleOutputClick(event: MouseEvent) {
           <span class="re-pair-icon"><RotateCcw :size="19" /></span>
           <div>
             <strong>刚刚在 Dock 撤销了这台设备？</strong>
-            <p>先在 Dock 打开配对窗口，然后从这里重新连接。新授权只会替换同一台 Host 的旧凭据。</p>
+            <p>先在 Dock 打开配对窗口，然后从这里重新连接。完成后，此设备将使用新的连接授权。</p>
             <div v-if="pairingPin" class="re-pair-pin"><span>在 Dock 输入</span><b>{{ pairingPin }}</b></div>
             <span v-if="pairingMessage" class="re-pair-status">{{ pairingMessage }}</span>
           </div>
@@ -3610,7 +3601,7 @@ function handleOutputClick(event: MouseEvent) {
           <button class="alu-bar-btn alu-bar-session-action" title="恢复 Session" aria-label="恢复 Session" @click="openControlCenter('sessions')">↪<span>恢复</span></button>
           <button class="alu-bar-btn alu-bar-session-action" title="打开 Session Tree" aria-label="打开 Session Tree" @click="openControlCenter('tree')">⑂<span>Tree</span></button>
           <button class="alu-bar-btn" title="浏览当前 Work 的工作区" aria-label="打开工作区" :aria-expanded="workspaceBrowserOpen" :disabled="!isTauri" @click="openWorkspaceBrowser"><FolderTree :size="15" /><span>工作区</span></button>
-          <button class="alu-bar-btn" title="添加附件" :disabled="!isTauri || attachmentPicking || draftAttachments.length + uploadDrafts.length >= MAX_MESSAGE_ATTACHMENTS" @click="chooseAttachments">📎<span class="sm-inline">附件</span></button>
+          <button class="alu-bar-btn" title="添加附件" :disabled="!isTauri || attachmentPicking || draftAttachments.length + uploadDrafts.length >= maxMessageAttachments" @click="chooseAttachments">📎<span class="sm-inline">附件</span></button>
         </div>
         <div class="alu-bottom-bar-right">
           <span class="alu-status-dot" :class="{ connecting: !followConnected && !conversationError, error: !!conversationError }" />
@@ -3764,13 +3755,13 @@ function handleOutputClick(event: MouseEvent) {
             <button class="host-settings-close" data-modal-initial aria-label="关闭" @click="closeModal"><X :size="18" /></button>
           </header>
           <div v-if="directoryOpen" class="alu-directory-select">
-            <div class="ui-dialog-search-wrap"><input v-model="workspaceSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" /></div>
+            <div class="ui-dialog-search-wrap"><input v-model="workspaceSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索目录名称…" /></div>
             <div v-if="workspaceError" class="alu-dialog-error">{{ workspaceError }}</div>
             <div v-if="workspaceLoading" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取目录…</div>
             <div v-else-if="workspace" class="ui-dialog-options" role="listbox">
-              <button class="ui-dialog-option" :disabled="!isTauri || creatingWork || mutationOutcomeUnknown || !!trustContinuation" @click="createSelectedWork()"><span class="ui-dialog-option-marker">✓</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">使用这个目录</span><span class="ui-dialog-option-badge">SELECT</span></span><span class="ui-dialog-option-detail"><span>{{ workspace.path }}</span></span></span></button>
+              <button class="ui-dialog-option" :disabled="!isTauri || creatingWork || mutationOutcomeUnknown || !!trustContinuation" @click="createSelectedWork()"><span class="ui-dialog-option-marker">✓</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">使用这个目录</span><span class="ui-dialog-option-badge">选择</span></span><span class="ui-dialog-option-detail"><span>{{ workspace.path }}</span></span></span></button>
               <button v-if="workspace.parent" class="ui-dialog-option" @click="browse(workspace.parent)"><span class="ui-dialog-option-marker">↑</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">..</span><span class="ui-dialog-option-detail"><span>返回上级目录</span></span></span></button>
-              <button v-for="entry in filteredWorkspaceEntries" :key="entry.name" class="ui-dialog-option" @click="browse(`${workspace.path.replace(/\/$/, '')}/${entry.name}`)"><span class="ui-dialog-option-marker">{{ entry.kind === 'symlink' ? '↗' : '▸' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ entry.name }}</span><span v-if="entry.kind === 'symlink'" class="ui-dialog-option-badge">LINK</span></span><span class="ui-dialog-option-detail"><span>{{ entry.kind === 'symlink' ? '目录链接' : '目录' }}{{ entry.hidden ? ' · 隐藏' : '' }}</span></span></span></button>
+              <button v-for="entry in filteredWorkspaceEntries" :key="entry.name" class="ui-dialog-option" @click="browse(`${workspace.path.replace(/\/$/, '')}/${entry.name}`)"><span class="ui-dialog-option-marker">{{ entry.kind === 'symlink' ? '↗' : '▸' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ entry.name }}</span><span v-if="entry.kind === 'symlink'" class="ui-dialog-option-badge">链接</span></span><span class="ui-dialog-option-detail"><span>{{ entry.kind === 'symlink' ? '目录链接' : '目录' }}{{ entry.hidden ? ' · 隐藏' : '' }}</span></span></span></button>
               <div v-if="!filteredWorkspaceEntries.length && !workspace.parent" class="ui-dialog-empty">没有匹配项</div>
             </div>
             <div v-if="trustContinuation" class="session-trust"><strong>这个项目尚未被信任</strong><p>确认后会继续在此目录创建 Work。</p><div><button @click="trustContinuation = null">取消</button><button @click="continueWithTrust('trust_once')">仅本次信任</button><button class="session-primary" @click="continueWithTrust('trust_and_remember')">信任并创建</button></div></div>
@@ -3811,7 +3802,7 @@ function handleOutputClick(event: MouseEvent) {
               <div class="pairing-actions"><button v-if="!['idle', 'failed', 'cancelled', 'completed'].includes(pairingStage)" type="button" class="button secondary" @click="stopPairing">停止等待</button><button v-else class="button primary" :disabled="contextTransitionBusy || !pairHost.trim() || !pairPort || !pairDeviceName.trim()">开始配对</button></div>
             </form>
             <form class="host-profile-form" @submit.prevent="saveHostDisplayName">
-              <div><strong>Host 名称</strong><small>仅修改这台已配对 Host 在客户端中的显示名称，不会改变地址或配对身份。</small></div>
+              <div><strong>Host 名称</strong><small>仅修改此设备上显示的名称；地址和配对关系保持原样。</small></div>
               <div class="host-name-field"><input v-model="hostDisplayName" maxlength="128" autocomplete="off" placeholder="例如 家里的工作站" :disabled="hostNameSaving" /><button class="button secondary" :disabled="hostNameSaving || hostDisplayName.trim() === app.activeHost?.displayName">{{ hostNameSaving ? '保存中…' : '保存名称' }}</button></div>
               <p v-if="hostNameError" class="host-name-error">{{ hostNameError }}</p>
               <p v-else-if="hostNameSaved" class="host-name-success">Host 名称已保存。</p>

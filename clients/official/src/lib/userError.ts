@@ -22,7 +22,7 @@ const SAFE_ERROR_CODES = new Set([
 export function userErrorMessage(cause: unknown, fallback = '操作没有完成。请刷新状态后重试。') {
   if (cause && typeof cause === 'object') {
     const code = 'code' in cause ? String(cause.code || '') : ''
-    if (code === 'protocol_error' || code === 'client_error') return '收到的状态无法验证。请刷新后重试；未保存不可信的更改。'
+    if (code === 'protocol_error' || code === 'client_error') return '收到的数据有问题，刚才的更改未生效。请刷新状态后重试。'
     if (code === 'effect_unknown' || ('outcomeUnknown' in cause && cause.outcomeUnknown === true)) return '还无法确认刚才的操作是否完成。请刷新状态后确认，不要重复提交。'
     if (code === 'instance_host_lost') return '这个 Work 的运行连接已经中断。请从工作列表继续，或刷新状态。'
     if (code === 'invalid_tree_target') return '这个节点已不在当前 Session 中。请重新打开 Session Tree 后再选择。'

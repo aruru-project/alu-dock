@@ -45,7 +45,7 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
 <template>
   <template v-for="part in orderedParts" :key="part.id">
     <details v-if="part.kind === 'thinking'" class="msg-thinking alu-hideable" :open="thinkingIsOpen(part)" :data-conversation-id="part.id" @toggle="rememberThinkingState(part, $event)">
-      <summary @click="markThinkingInteraction(part)">thinking...</summary><div class="think-content">{{ part.text }}</div>
+      <summary @click="markThinkingInteraction(part)">思考过程</summary><div class="think-content">{{ part.text }}</div>
     </details>
     <div v-else-if="part.kind === 'assistant' && streamingParts?.has(part.id)" class="msg-assistant msg-text is-streaming" :data-conversation-id="part.id">{{ part.text }}</div>
     <div v-else-if="part.kind === 'assistant'" class="msg-assistant msg-text" :data-conversation-id="part.id" v-html="renderMarkdown(part.text)" />

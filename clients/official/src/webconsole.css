@@ -2726,16 +2726,6 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 .alu-sidebar-error { padding: 24px 16px; color: var(--alu-text-muted); font-size: 11px; }
 .alu-sidebar-error { color: var(--alu-rose); }
 
-.alu-load-history {
-  display: block;
-  margin: 0 auto 14px;
-  padding: 5px 12px;
-  border: 1px solid var(--alu-border);
-  border-radius: 999px;
-  color: var(--alu-text-muted);
-  font-size: 10px;
-}
-.alu-load-history:hover { color: var(--alu-text); border-color: var(--alu-border-focus); }
 .alu-conversation-entry-anchor { display: block; width: 1px; height: 1px; pointer-events: none; }
 .alu-conversation-content-status {
   display: block;

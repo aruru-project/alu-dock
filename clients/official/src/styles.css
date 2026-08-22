@@ -172,10 +172,6 @@ body::before {
 
 .conversation { position: relative; min-height: 0; padding: 24px clamp(18px, 4vw, 56px) 38px; overflow-y: auto; overflow-anchor: none; scrollbar-width: thin; scrollbar-color: var(--c-line) transparent; }
 .conversation-flow { width: 100%; }
-.history-loader { display: grid; justify-items: center; gap: 7px; margin: 0 auto 12px; color: var(--c-danger); font: 10px/1.4 var(--font-reading); }
-.history-loader button { display: flex; min-height: 42px; align-items: center; gap: 7px; padding: 0 14px; color: var(--c-ice); cursor: pointer; background: rgb(17 24 40 / .8); border: 1px solid var(--c-line); border-radius: 999px; }
-.history-loader button:hover { border-color: rgb(126 200 224 / .4); }
-.history-loader .spinning { animation: spin .9s linear infinite; }
 .inline-notice { max-width: calc(100% - 55px); margin: 7px 0 7px 55px; padding: 7px 10px; color: var(--c-text-2); font: 11px/1.55 var(--font-reading); border-left: 2px solid var(--c-ice); background: rgb(126 200 224 / .04); border-radius: 0 7px 7px 0; }
 .inline-notice[data-tone='error'] { color: #f8a0a0; border-left-color: var(--c-danger); background: rgb(248 113 113 / .05); }
 .inline-notice[data-tone='warning'] { color: #f6cf79; border-left-color: var(--c-amber); background: rgb(251 191 36 / .05); }
@@ -815,10 +811,10 @@ button { margin: 0; padding: 0; border: 0; background: transparent; color: inher
 .conversation-flow.is-switching { opacity: .42; pointer-events: none; user-select: none; }
 .alu-welcome-error { gap: 10px; }
 .alu-welcome-error .ui-dialog-btn { margin-top: 4px; }
-.history-loader { display: grid; justify-items: center; gap: 6px; margin-bottom: 12px; color: var(--alu-rose); font-size: 10px; }
-.history-loader button { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border: 1px solid var(--alu-border); border-radius: 999px; color: var(--alu-text-muted); }
+.history-loader { display: grid; justify-items: center; gap: 6px; margin: 0 auto 12px; color: var(--alu-rose); font: 10px/1.4 var(--font-reading); }
+.history-loader button { display: inline-flex; min-height: 42px; align-items: center; gap: 6px; padding: 5px 12px; color: var(--alu-text-muted); cursor: pointer; background: rgb(17 24 40 / .8); border: 1px solid var(--alu-border); border-radius: 999px; }
 .history-loader button:hover { color: var(--alu-text); border-color: var(--alu-border-focus); }
-.spinning { animation: aluAgentSpin .85s linear infinite; }
+.history-loader .spinning { animation: spin .9s linear infinite; }
 
 .alu-input-section .extension-ui-surface { min-width: 0; }
 .alu-scroll-bottom {

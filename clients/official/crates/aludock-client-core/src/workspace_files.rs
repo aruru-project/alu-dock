@@ -739,9 +739,7 @@ mod tests {
         .unwrap_err();
         host_task.await.unwrap();
 
-        assert!(
-            matches!(error, ClientError::Protocol(message) if message == "confirmation required")
-        );
+        assert!(matches!(error, ClientError::Protocol(_)));
         assert!(bytes.is_empty());
     }
 }

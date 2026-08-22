@@ -277,6 +277,9 @@ async function sendViewport() {
 }
 
 function isUnknown(cause: unknown) { return !!cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true }
+function interactionMethodLabel(method: string) {
+  return ({ select: '选择', confirm: '确认', input: '输入', editor: '编辑' } as Record<string, string>)[method] ?? '处理'
+}
 </script>
 
 <template>
@@ -311,7 +314,7 @@ function isUnknown(cause: unknown) { return !!cause && typeof cause === 'object'
     <Teleport to="body">
       <div v-if="request" class="extension-dialog-layer" role="presentation">
         <section ref="dialog" class="extension-dialog" role="dialog" aria-modal="true" :aria-labelledby="`extension-dialog-${request.interactionId}`" @keydown.esc.prevent="respond(true)">
-          <header><div><small>EXTENSION · {{ request.method.toUpperCase() }}</small><h2 :id="`extension-dialog-${request.interactionId}`">{{ request.title }}</h2></div><span v-if="secondsRemaining !== null">{{ secondsRemaining }}s</span></header>
+          <header><div><small>互动 · {{ interactionMethodLabel(request.method) }}</small><h2 :id="`extension-dialog-${request.interactionId}`">{{ request.title }}</h2></div><span v-if="secondsRemaining !== null">{{ secondsRemaining }}s</span></header>
 
           <template v-if="request.method === 'select'">
             <input v-model="search" type="search" placeholder="搜索全部选项" :disabled="locked" />

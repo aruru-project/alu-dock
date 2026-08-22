@@ -123,13 +123,6 @@ export interface HostCatalog {
   pairingTransactions: RecoverablePairing[]
 }
 
-export interface ActiveHostChanged {
-  oldHostId?: string
-  newHostId?: string
-  selectionGeneration: number
-  registryRevision: number
-}
-
 export interface HostSummary {
   state: string
   hostEpoch: string
@@ -143,6 +136,7 @@ export interface HostSummary {
 export interface BootstrapPayload {
   hostId: string
   selectionGeneration: number
+  maxAttachmentsPerMessage: number
   host: HostSummary
   works: Work[]
   total: number
@@ -327,8 +321,6 @@ export interface QueueDequeueResult {
   receipt: { instanceId: string; restored: QueueItem[]; inFlight: QueueItem[] }
   instance: Work
 }
-export interface RestoredImageDraft { imageCount: number }
-
 export interface ProjectedEvent { sequence: number; runtimeGeneration: number; occurredAt: string; eventType: string; data: Record<string, unknown> }
 export interface ExtensionBootstrap {
   status: Record<string, string>

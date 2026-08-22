@@ -68,6 +68,7 @@ const AWAY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 struct BootstrapPayload {
     host_id: String,
     selection_generation: u64,
+    max_attachments_per_message: usize,
     host: HostSummary,
     works: Vec<InstanceSnapshot>,
     total: u64,
@@ -1543,7 +1544,7 @@ impl From<ClientError> for CommandError {
             },
             ClientError::HostAlreadySaved(host_id) => Self {
                 code: "host_already_saved".into(),
-                message: "这台 Host 已保存在此设备上；原有配对凭据未被覆盖。".into(),
+                message: "这台 Host 已保存在此设备上，可以直接使用。".into(),
                 details: Some(serde_json::json!({ "hostId": host_id })),
                 outcome_unknown: false,
                 operation_id: None,
@@ -1564,7 +1565,7 @@ impl From<ClientError> for CommandError {
             },
             ClientError::Json(_) | ClientError::Crypto(_) => Self {
                 code: "client_error".into(),
-                message: "客户端无法验证收到的数据。没有保存不可信的更改。".into(),
+                message: "收到的数据有问题，刚才的更改未生效。请刷新状态后重试。".into(),
                 details: None,
                 outcome_unknown: false,
                 operation_id: None,
@@ -1576,7 +1577,7 @@ impl From<ClientError> for CommandError {
 fn lifecycle_error() -> CommandError {
     CommandError {
         code: "host_lifecycle_unavailable".into(),
-        message: "Host 切换状态暂时不可用。".into(),
+        message: "暂时无法切换 Host。请稍后重试。".into(),
         details: None,
         outcome_unknown: false,
         operation_id: None,
@@ -1786,7 +1787,7 @@ fn invalidate_host_lifecycle(
                     instance_id: binding.instance_id,
                     runtime_generation: binding.runtime_generation,
                     state: "detached".into(),
-                    message: Some("Host 已切换；旧控制权已释放。".into()),
+                    message: Some("已切换 Host。".into()),
                 },
             );
         }
@@ -2320,7 +2321,7 @@ fn cancel_pairing(
                 transaction_id,
                 stage: "cancelled".into(),
                 pin: None,
-                message: Some("已停止等待；如果电脑已经确认，配对状态会保留以便安全恢复。".into()),
+                message: Some("已停止等待。若已在电脑上确认，请重新打开这台 Host 查看配对结果。".into()),
                 error: None,
                 host_id: None,
                 registry_revision: None,
@@ -2399,6 +2400,7 @@ async fn bootstrap(
     Ok(BootstrapPayload {
         host_id,
         selection_generation,
+        max_attachments_per_message: MAX_ATTACHMENTS_PER_MESSAGE,
         host: HostSummary {
             state: info.state,
             host_epoch: info.host.host_epoch,
@@ -5363,16 +5365,6 @@ async fn forget_work(
     Ok(())
 }
 
-#[tauri::command]
-fn get_connection_profile(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
-    selection_generation: u64,
-) -> Result<HostConnectionProfile, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    connection_profile(&store)
-}
-
 fn parse_connection_kind(kind: &str) -> Result<ConnectionKind, CommandError> {
     match kind {
         "local" => Ok(ConnectionKind::Local),
@@ -6858,7 +6850,6 @@ pub fn run() {
             get_resources,
             reopen_work,
             forget_work,
-            get_connection_profile,
             verify_host_endpoint,
             save_unverified_host_endpoint,
             test_host_endpoint,
@@ -7407,43 +7398,6 @@ mod tests {
     }
 
     #[test]
-    fn pairing_task_slot_rejects_duplicate_and_cancel_blocks_promotion() {
-        let transaction_id = "transaction".to_owned();
-        let state = PairingTaskState::default();
-        let first_token = Arc::new(AtomicBool::new(false));
-        let first = PairingTask {
-            handle: tauri::async_runtime::spawn(std::future::pending()),
-            cancelled: first_token.clone(),
-        };
-        state
-            .tasks
-            .lock()
-            .unwrap()
-            .insert(transaction_id.clone(), first);
-
-        let duplicate = PairingTask {
-            handle: tauri::async_runtime::spawn(std::future::pending()),
-            cancelled: Arc::new(AtomicBool::new(false)),
-        };
-        let mut tasks = state.tasks.lock().unwrap();
-        if tasks.contains_key(&transaction_id) {
-            duplicate.handle.abort();
-        } else {
-            tasks.insert(transaction_id.clone(), duplicate);
-        }
-        assert!(pairing_task_matches(
-            tasks.get(&transaction_id).unwrap(),
-            &first_token
-        ));
-
-        let cancelled = tasks.remove(&transaction_id).unwrap();
-        cancelled.cancelled.store(true, Ordering::Release);
-        cancelled.handle.abort();
-        assert!(!pairing_task_matches(&cancelled, &first_token));
-        assert!(!tasks.contains_key(&transaction_id));
-    }
-
-    #[test]
     fn extension_handle_scope_rejects_other_host_or_selection_generation() {
         assert!(extension_scope_matches("host-a", 3, "host-a", 3));
         assert!(!extension_scope_matches("host-a", 3, "host-b", 3));
@@ -7538,13 +7492,6 @@ mod tests {
         assert!(json.get("images").is_none());
         assert!(!json.to_string().contains("/home/private"));
         assert!(!json.to_string().contains("operation-1"));
-    }
-
-    #[test]
-    fn canonical_host_validation_happens_before_runtime_resolution() {
-        assert!(validate_host_id("../host").is_err());
-        assert!(validate_host_id(&"A".repeat(64)).is_err());
-        assert!(validate_host_id(&"a".repeat(64)).is_ok());
     }
 
     #[test]

@@ -131,7 +131,7 @@ impl ClientPreferencesStore {
         let Some((filename_revision, path)) = files.last() else {
             return Ok(None);
         };
-        let snapshot: ClientPreferences = read_private_json(&path)?;
+        let snapshot: ClientPreferences = read_private_json(path)?;
         snapshot.validate()?;
         if snapshot.revision != *filename_revision {
             return Err(ClientError::InvalidPairing(

@@ -18,7 +18,7 @@ import { currentHostCall, requireHostContext } from '../lib/hostResult'
 import { userErrorMessage as errorMessage } from '../lib/userError'
 import { catalogSourceLabel, commandGoesToComposer, filterCatalogCommands, filterCommandPaletteItems } from '../lib/commandSuggest'
 import { localControlCommands, type ControlSection, type LocalControlCommand } from '../lib/localCommands'
-import { workPresence } from '../lib/uiBoundaries'
+import { thinkingLevelLabel, workPresence } from '../lib/uiBoundaries'
 import SessionManager from './SessionManager.vue'
 import { useAppStore } from '../stores/app'
 import { useCommandCatalogStore } from '../stores/command-catalog'
@@ -436,7 +436,7 @@ async function loadSection(section: ControlSection, force = false): Promise<bool
       if (section === 'models') {
         const current = result.instance.executor.model
         const currentLabel = current ? `${current.provider}/${current.id}` : '—'
-        emit('title', '选择 Model', [`当前：${currentLabel}`, result.truncated ? `显示 ${result.models.length}/${result.total} 项` : ''].filter(Boolean).join('\n'))
+        emit('title', '选择模型', [`当前：${currentLabel}`, result.truncated ? `显示 ${result.models.length}/${result.total} 项` : ''].filter(Boolean).join('\n'))
       }
     } else if (section === 'tools') {
       const result = await currentHostCall(app, (context) => listTools(workId, context))
@@ -704,19 +704,19 @@ function isCurrentModel(model: ModelInfo) {
     />
 
     <section v-else-if="section === 'models'" class="alu-select-panel">
-      <div class="ui-dialog-search-wrap"><input v-model="modelSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" @keydown="handleOptionKeydown($event, filteredModels, chooseModel)" /></div>
+      <div class="ui-dialog-search-wrap"><input v-model="modelSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索模型名称或提供方…" @keydown="handleOptionKeydown($event, filteredModels, chooseModel)" /></div>
       <div class="ui-dialog-options">
-        <button v-for="(model, index) in filteredModels" :key="`${model.provider}/${model.id}`" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': isCurrentModel(model), 'is-cursor': optionCursor === index }" :disabled="preview || !!pending || outcomeUnknown" @click="chooseModel(model)"><span class="ui-dialog-option-marker">{{ isCurrentModel(model) ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ model.provider }}/{{ model.id }}</span><span v-if="isCurrentModel(model)" class="ui-dialog-option-badge">CURRENT</span></span><span v-if="model.name && model.name !== model.id" class="ui-dialog-option-detail"><span>{{ model.name }}</span></span></span></button>
+        <button v-for="(model, index) in filteredModels" :key="`${model.provider}/${model.id}`" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': isCurrentModel(model), 'is-cursor': optionCursor === index }" :disabled="preview || !!pending || outcomeUnknown" @click="chooseModel(model)"><span class="ui-dialog-option-marker">{{ isCurrentModel(model) ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ model.provider }}/{{ model.id }}</span><span v-if="isCurrentModel(model)" class="ui-dialog-option-badge">当前</span></span><span v-if="model.name && model.name !== model.id" class="ui-dialog-option-detail"><span>{{ model.name }}</span></span></span></button>
         <div v-if="models && !filteredModels.length" class="ui-dialog-empty">没有匹配项</div>
       </div>
     </section>
 
-    <section v-else-if="section === 'thinking'" ref="thinkingPanel" class="alu-select-panel" tabindex="-1" @keydown="handleOptionKeydown($event, models?.availableThinkingLevels ?? [], chooseThinking)"><div class="ui-dialog-options"><button v-for="(level, index) in models?.availableThinkingLevels ?? []" :key="level" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': work.executor.thinkingLevel === level, 'is-cursor': optionCursor === index }" :disabled="preview || !!pending || outcomeUnknown" @click="chooseThinking(level)"><span class="ui-dialog-option-marker">{{ work.executor.thinkingLevel === level ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ level }}</span><span v-if="work.executor.thinkingLevel === level" class="ui-dialog-option-badge">CURRENT</span></span></span></button></div></section>
+    <section v-else-if="section === 'thinking'" ref="thinkingPanel" class="alu-select-panel" tabindex="-1" @keydown="handleOptionKeydown($event, models?.availableThinkingLevels ?? [], chooseThinking)"><div class="ui-dialog-options"><button v-for="(level, index) in models?.availableThinkingLevels ?? []" :key="level" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': work.executor.thinkingLevel === level, 'is-cursor': optionCursor === index }" :disabled="preview || !!pending || outcomeUnknown" @click="chooseThinking(level)"><span class="ui-dialog-option-marker">{{ work.executor.thinkingLevel === level ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ thinkingLevelLabel(level) }}</span><span v-if="work.executor.thinkingLevel === level" class="ui-dialog-option-badge">当前</span></span></span></button></div></section>
 
     <section v-else-if="section === 'tools'" class="alu-select-panel">
-      <div class="ui-dialog-search-wrap"><input v-model="toolSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" @keydown="handleOptionKeydown($event, filteredTools, toggleTool)" /></div>
+      <div class="ui-dialog-search-wrap"><input v-model="toolSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索工具名称或说明…" @keydown="handleOptionKeydown($event, filteredTools, toggleTool)" /></div>
       <div v-if="tools?.truncated" class="alu-project-status-note">工具列表未完整返回，暂时不能切换工具。</div>
-      <div class="ui-dialog-options"><button v-for="(tool, index) in filteredTools" :key="tool.name" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': tool.active, 'is-cursor': optionCursor === index }" :disabled="preview || !!pending || outcomeUnknown || !!tools?.truncated" @click="toggleTool(tool)"><span class="ui-dialog-option-marker">{{ tool.active ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ tool.name }}</span><span v-if="tool.active" class="ui-dialog-option-badge">ACTIVE</span></span><span class="ui-dialog-option-detail"><span>{{ tool.description }}</span></span></span></button></div>
+      <div class="ui-dialog-options"><button v-for="(tool, index) in filteredTools" :key="tool.name" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-current': tool.active, 'is-cursor': optionCursor === index }" :disabled="preview || !!pending || outcomeUnknown || !!tools?.truncated" @click="toggleTool(tool)"><span class="ui-dialog-option-marker">{{ tool.active ? '●' : '•' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ tool.name }}</span><span v-if="tool.active" class="ui-dialog-option-badge">已启用</span></span><span class="ui-dialog-option-detail"><span>{{ tool.description }}</span></span></span></button></div>
     </section>
 
     <section v-else-if="section === 'resources'" class="alu-project-status">
@@ -727,11 +727,11 @@ function isCurrentModel(model: ModelInfo) {
       </section>
       <section class="alu-project-status-section">
         <h3>Session</h3>
-        <dl class="alu-project-status-grid"><div class="alu-project-status-metric"><dt>Model</dt><dd>{{ work.executor.model ? `${work.executor.model.provider}/${work.executor.model.id}` : '—' }}</dd></div><div class="alu-project-status-metric"><dt>Thinking</dt><dd>{{ work.executor.thinkingLevel || '—' }}</dd></div><div class="alu-project-status-metric"><dt>Context</dt><dd>{{ contextLabel(work) }}</dd></div><div class="alu-project-status-metric"><dt>Cost</dt><dd>{{ work.metrics?.cost == null ? '—' : `$${Number(work.metrics.cost).toFixed(2)}` }}</dd></div><div class="alu-project-status-metric"><dt>Queue</dt><dd>{{ Number(work.pending.total) || 0 }}</dd></div><div class="alu-project-status-metric"><dt>Last run</dt><dd>{{ runLabel(work.lastRun) }}</dd></div></dl>
+        <dl class="alu-project-status-grid"><div class="alu-project-status-metric"><dt>模型</dt><dd>{{ work.executor.model ? `${work.executor.model.provider}/${work.executor.model.id}` : '—' }}</dd></div><div class="alu-project-status-metric"><dt>思考量</dt><dd>{{ work.executor.thinkingLevel ? thinkingLevelLabel(work.executor.thinkingLevel) : '—' }}</dd></div><div class="alu-project-status-metric"><dt>上下文</dt><dd>{{ contextLabel(work) }}</dd></div><div class="alu-project-status-metric"><dt>费用</dt><dd>{{ work.metrics?.cost == null ? '—' : `$${Number(work.metrics.cost).toFixed(2)}` }}</dd></div><div class="alu-project-status-metric"><dt>Queue</dt><dd>{{ Number(work.pending.total) || 0 }}</dd></div><div class="alu-project-status-metric"><dt>上次运行</dt><dd>{{ runLabel(work.lastRun) }}</dd></div></dl>
         <div v-if="work.lastError" class="alu-project-status-error">{{ work.lastError }}</div>
       </section>
       <section class="alu-project-status-section">
-        <h3>Active Tools <span class="alu-project-status-count">{{ tools?.tools.filter(item => item.active).length || 0 }}/{{ tools?.total ?? tools?.tools.length ?? 0 }}</span></h3>
+        <h3>已启用工具 <span class="alu-project-status-count">{{ tools?.tools.filter(item => item.active).length || 0 }}/{{ tools?.total ?? tools?.tools.length ?? 0 }}</span></h3>
         <div class="alu-project-status-chips"><span v-for="tool in tools?.tools.filter(item => item.active) ?? []" :key="tool.name" class="alu-project-status-chip">{{ tool.name }}</span><span v-if="!tools?.tools.some(item => item.active)" class="alu-project-status-empty">当前没有启用工具</span></div>
         <div v-if="tools?.truncated" class="alu-project-status-note">工具列表未完整返回</div>
       </section>
@@ -744,11 +744,11 @@ function isCurrentModel(model: ModelInfo) {
     </section>
 
     <section v-else-if="!selectedSetting" class="alu-select-panel">
-      <div class="ui-dialog-search-wrap"><input v-model="settingsSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索名称、内容或 ID…" @keydown="handleOptionKeydown($event, filteredSettings, openSetting)" /></div>
+      <div class="ui-dialog-search-wrap"><input v-model="settingsSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索设置名称或值…" @keydown="handleOptionKeydown($event, filteredSettings, openSetting)" /></div>
       <div class="ui-dialog-options">
         <button v-for="(setting, index) in filteredSettings" :key="setting.key" :id="`cc-opt-${index}`" class="ui-dialog-option" :class="{ 'is-cursor': optionCursor === index }" @click="openSetting(setting)">
           <span class="ui-dialog-option-marker">•</span>
-          <span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ setting.key }}</span><span class="ui-dialog-option-badge">{{ setting.writable ? 'EDITABLE' : 'READ ONLY' }}</span></span><span class="ui-dialog-option-detail"><span>{{ settingValueDescription(setting) }}</span></span></span>
+          <span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ setting.key }}</span><span class="ui-dialog-option-badge">{{ setting.writable ? '可修改' : '只读' }}</span></span><span class="ui-dialog-option-detail"><span>{{ settingValueDescription(setting) }}</span></span></span>
         </button>
         <div v-if="settings && !filteredSettings.length" class="ui-dialog-empty">没有匹配项</div>
       </div>

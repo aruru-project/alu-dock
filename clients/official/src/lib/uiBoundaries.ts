@@ -1,4 +1,17 @@
-import type { ConversationBootstrap, HostContext, StopResult, Work } from './types'
+import type { ConversationBootstrap, HostContext, StopResult, ThinkingLevel, Work } from './types'
+
+export function thinkingLevelLabel(level: string): string {
+  const labels: Record<ThinkingLevel, string> = {
+    off: '关闭',
+    minimal: '极少',
+    low: '较少',
+    medium: '中等',
+    high: '较多',
+    xhigh: '很多',
+    max: '最多',
+  }
+  return labels[level as ThinkingLevel] ?? '未知'
+}
 
 export type FollowConnectionState = 'connected' | 'disconnected' | 'resync_required'
 export interface FollowConnectionStatus {

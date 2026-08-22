@@ -20,7 +20,7 @@ const awayOptions: { value: WindowsAwayDelay; label: string; detail: string }[] 
   { value: 'five_minutes', label: '5 分钟', detail: '保留更长的返回时间' },
   { value: 'thirty_minutes', label: '30 分钟', detail: '适合较长的桌面任务切换' },
   { value: 'one_hour', label: '1 小时', detail: '长时间保留当前入口' },
-  { value: 'never', label: '永不', detail: '切到其他窗口不会进入暂离' },
+  { value: 'never', label: '永不', detail: '切换窗口时始终保持当前入口' },
 ]
 </script>
 

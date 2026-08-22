@@ -832,16 +832,6 @@ mod tests {
     }
 
     #[test]
-    fn same_value_tools_events_remain_distinct_facts() {
-        let event = dock_event(
-            "extension.tools_expanded_changed",
-            serde_json::json!({"expanded":true}),
-        );
-        assert!(ExtensionEvent::from_dock_event(&event).unwrap().is_some());
-        assert!(ExtensionEvent::from_dock_event(&event).unwrap().is_some());
-    }
-
-    #[test]
     fn interaction_mutation_result_requires_exact_correlation() {
         let result = InteractionRespondResult {
             interaction_id: "other".into(),

@@ -5,11 +5,9 @@ use uuid::Uuid;
 use crate::{
     ClientError, ClientIdentity, Endpoint, HostConnectionProfile, IdentityStore, PendingPairing,
     Result, StoredPairing,
+    client::{CATALOG_SCHEMA_VERSION, MAX_CONTROL_LINE_BYTES},
     tls::{connect_tls, read_json_line, write_json_line},
 };
-
-const MAX_CONTROL_LINE_BYTES: usize = 1024 * 1024;
-const CATALOG_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

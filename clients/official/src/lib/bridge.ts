@@ -120,11 +120,6 @@ export async function discardPairing(transactionId: string): Promise<void> {
   if (isTauri) await invoke('discard_pairing', { transactionId })
 }
 
-export async function getConnectionProfile(context: HostContext): Promise<HostConnectionProfile> {
-  if (isTauri) return invoke<HostConnectionProfile>('get_connection_profile', { ...context })
-  return previewBootstrap.host.profile
-}
-
 export async function verifyHostEndpoint(
   host: string,
   port: number,
@@ -725,16 +720,17 @@ function previewSessions(context: SessionContext): SessionListResult {
 const previewTree: SessionTree = {
   leafId: 'assistant-2',
   nodes: [
-    { entryId: 'user-1', depth: 0, kind: 'message', role: 'user', displayClass: 'content', summary: '确认 Protocol V2 的会话边界', hasChildren: true, timestamp: now },
-    { entryId: 'assistant-1', parentId: 'user-1', depth: 1, kind: 'message', role: 'assistant', displayClass: 'content', summary: '完成协议与关联校验', hasChildren: true, timestamp: now },
+    { entryId: 'user-1', depth: 0, kind: 'message', role: 'user', displayClass: 'content', summary: '确认当前 Session 的分支内容', hasChildren: true, timestamp: now },
+    { entryId: 'assistant-1', parentId: 'user-1', depth: 1, kind: 'message', role: 'assistant', displayClass: 'content', summary: '已完成会话分支检查', hasChildren: true, timestamp: now },
     { entryId: 'tool-1', parentId: 'assistant-1', depth: 2, kind: 'message', role: 'tool', displayClass: 'tool', summary: 'cargo test', hasChildren: false, timestamp: now },
-    { entryId: 'user-2', parentId: 'assistant-1', depth: 2, kind: 'message', role: 'user', displayClass: 'content', label: 'UI slice', summary: '实现图形 Session Tree', hasChildren: true, timestamp: now },
+    { entryId: 'user-2', parentId: 'assistant-1', depth: 2, kind: 'message', role: 'user', displayClass: 'content', label: '界面检查', summary: '检查 Session Tree 界面', hasChildren: true, timestamp: now },
     { entryId: 'assistant-2', parentId: 'user-2', depth: 3, kind: 'message', role: 'assistant', displayClass: 'content', summary: '正在完成触控界面', hasChildren: false, timestamp: now },
   ],
 }
 const previewBootstrap: BootstrapPayload = {
   hostId: 'browser-preview',
   selectionGeneration: 1,
+  maxAttachmentsPerMessage: 0,
   host: {
     state: 'preview',
     hostEpoch: 'browser-preview',

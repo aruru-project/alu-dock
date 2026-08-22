@@ -27,6 +27,6 @@ export async function currentHostCall<T>(
 ): Promise<T> {
   const context = requireHostContext(app)
   const correlated = captureHostResult(context, await operation(context))
-  if (!hostResultMatches(correlated, app.hostContext)) throw new Error('Host 选择已改变；旧结果已丢弃。')
+  if (!hostResultMatches(correlated, app.hostContext)) throw new Error('你已切换 Host，请在当前 Host 中重试。')
   return correlated.result
 }

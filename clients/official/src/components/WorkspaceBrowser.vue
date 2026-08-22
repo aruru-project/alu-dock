@@ -19,6 +19,7 @@ import {
   cancelWorkspaceFileRead,
   clearWorkspaceFileState,
   getWorkspaceEntryMetadata,
+  isTauri,
   listWorkspaceEntries,
   loadWorkspaceCachedImage,
   loadWorkspaceCachedText,
@@ -26,6 +27,7 @@ import {
   saveWorkspaceCachedFile,
   type WorkspaceFileContext,
 } from '../lib/bridge'
+import { rasterImageMimeType } from '../lib/rasterImage'
 import { userErrorMessage } from '../lib/userError'
 import ImageZoomSurface from './ImageZoomSurface.vue'
 import {
@@ -81,7 +83,7 @@ const previewText = ref('')
 const previewImageUrl = ref('')
 const previewError = ref('')
 const cacheResult = ref<WorkspaceFileCacheResult | null>(null)
-const largeFileConfirmBytes = ref(10 * 1024 * 1024)
+const largeFileConfirmBytes = ref<number | null>(null)
 const pendingIntent = ref<PendingIntent>('preview')
 const progressBytes = ref(0)
 const progressTotal = ref(0)
@@ -174,15 +176,6 @@ function errorCode(cause: unknown): string {
   return cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
 }
 
-function imageMimeType(bytes: Uint8Array): string | null {
-  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png'
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg'
-  if (bytes.length >= 6 && String.fromCharCode(...bytes.slice(0, 6)) === 'GIF87a') return 'image/gif'
-  if (bytes.length >= 6 && String.fromCharCode(...bytes.slice(0, 6)) === 'GIF89a') return 'image/gif'
-  if (bytes.length >= 12 && String.fromCharCode(...bytes.slice(0, 4)) === 'RIFF' && String.fromCharCode(...bytes.slice(8, 12)) === 'WEBP') return 'image/webp'
-  return null
-}
-
 function newReadId(): string {
   if (typeof crypto.randomUUID === 'function') return crypto.randomUUID()
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (character) => {
@@ -211,6 +204,7 @@ async function invalidateFile(clearSelection: boolean) {
   await clearWorkspaceFileState().catch(() => undefined)
   revokePreviewImage()
   cacheResult.value = null
+  largeFileConfirmBytes.value = null
   previewText.value = ''
   previewError.value = ''
   progressBytes.value = 0
@@ -379,7 +373,7 @@ async function loadCachedPreview(
       previewText.value = await loadWorkspaceCachedText(result.cacheId, context)
     } else if (previewKind.value === 'image') {
       const bytes = await loadWorkspaceCachedImage(result.cacheId, context)
-      const mediaType = imageMimeType(bytes)
+      const mediaType = rasterImageMimeType(bytes)
       if (!mediaType) throw new Error('图片内容不是可安全显示的 PNG、JPEG、GIF 或 WebP 格式。')
       const imageBuffer = new ArrayBuffer(bytes.byteLength)
       new Uint8Array(imageBuffer).set(bytes)
@@ -406,7 +400,8 @@ async function confirmPendingRead() {
 async function retryRead() {
   const entry = selectedEntry.value
   if (!entry) return
-  const confirmed = (entry.sizeBytes ?? 0) > largeFileConfirmBytes.value
+  const confirmed = largeFileConfirmBytes.value !== null
+    && (entry.sizeBytes ?? 0) > largeFileConfirmBytes.value
   await invalidateFile(false)
   await beginRead(confirmed, false)
 }
@@ -432,7 +427,8 @@ async function requestSave() {
     await saveCached(cacheResult.value.cacheId, context, operationEpoch)
     return
   }
-  if ((entry.sizeBytes ?? 0) > largeFileConfirmBytes.value) {
+  if (largeFileConfirmBytes.value !== null
+    && (entry.sizeBytes ?? 0) > largeFileConfirmBytes.value) {
     pendingIntent.value = 'save'
     previewPhase.value = 'confirm'
     return
@@ -498,6 +494,7 @@ onMounted(() => {
   updateMobileMode()
   if (typeof mediaQuery.addEventListener === 'function') mediaQuery.addEventListener('change', updateMobileMode)
   else mediaQuery.addListener(updateMobileMode)
+  if (!isTauri) return
   void listen<WorkspaceFileReadProgress>('aludock://workspace-read-progress', ({ payload }) => {
     const context = currentContext()
     if (!context
@@ -533,7 +530,7 @@ onBeforeUnmount(() => {
         <header class="workspace-header">
           <button v-if="isMobile" type="button" class="workspace-icon-button workspace-mobile-back" aria-label="返回" @click="handleMobileBack"><ArrowLeft :size="20" /></button>
           <div class="workspace-heading">
-            <span class="workspace-kicker">ACTIVE WORK</span>
+            <span class="workspace-kicker">当前 Work</span>
             <h1 id="workspace-browser-title">工作区</h1>
             <p>{{ work?.displayName }} · 根目录 <code>.</code></p>
           </div>

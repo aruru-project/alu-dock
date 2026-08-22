@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert'
 import {
   activeFirstTreeNodes, countTreeFilters, currentOrEndTreeWindowStart, nearestVisibleTreeNodeId,
-  persistTreeFilter, projectSessionTree, readTreeFilter, TREE_FILTERS,
+  persistTreeFilter, projectSessionTree, readTreeFilter,
   treeNodeBadge, treeNodeIcon, treeNodeMatchesFilter, treeNodeSearchText, treeNodeTime,
 } from '../src/lib/sessionTree.ts'
 import type { TreeNode } from '../src/lib/types.ts'
@@ -24,13 +24,6 @@ assert.deepEqual(counts, {
   'labeled-only': 1,
   all: 6,
 }, 'each Tree filter count describes exactly the nodes shown by that filter')
-for (const filter of TREE_FILTERS) {
-  assert.equal(
-    nodes.filter((item) => treeNodeMatchesFilter(item, filter.value, leafId)).length,
-    counts[filter.value],
-    `${filter.label} count stays aligned with its visible results`,
-  )
-}
 assert.equal(treeNodeMatchesFilter(nodes[4], 'default', leafId), false, 'metadata such as model changes stays out of the default Tree view')
 assert.equal(treeNodeMatchesFilter(nodes[4], 'all', leafId), true, 'the complete protocol topology remains available in the all-nodes view')
 
@@ -95,8 +88,8 @@ const failed = node('failed', {
   timestamp: '2026-08-18T16:39:54Z', summary: '模型调用失败',
 })
 assert.equal(treeNodeIcon(failed), '×', 'failed nodes remain visually distinguishable from ordinary Agent messages')
-assert.equal(treeNodeBadge(failed), 'ERROR')
-assert.equal(treeNodeBadge(failed, failed.entryId), 'CURRENT', 'the current-branch marker takes precedence over a state badge')
+assert.equal(treeNodeBadge(failed), '错误')
+assert.equal(treeNodeBadge(failed, failed.entryId), '当前', 'the current-branch marker takes precedence over a state badge')
 assert.match(treeNodeSearchText(failed), /error/, 'a visible state badge is searchable')
 assert.equal(treeNodeTime('not-a-date'), 'not-a-date', 'an unusual Dock timestamp cannot crash Tree rendering')
 

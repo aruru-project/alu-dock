@@ -15,7 +15,7 @@ use crate::{
     wire::decode_canonical_base64,
 };
 
-const MAX_CONTROL_LINE_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_CONTROL_LINE_BYTES: usize = 1024 * 1024;
 const MAX_DOCK_TRANSFER_BYTES: usize = 256 * 1024 * 1024;
 const MAX_RESPONSE_TRANSFER_CHUNK_BYTES: usize = 512 * 1024;
 const MAX_RESPONSE_TRANSFER_CHUNKS: usize =
@@ -23,7 +23,7 @@ const MAX_RESPONSE_TRANSFER_CHUNKS: usize =
 const RESPONSE_TRANSFER_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
 const LONG_MUTATION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(600);
-const CATALOG_SCHEMA_VERSION: u64 = 1;
+pub(crate) const CATALOG_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Clone)]
 pub struct DockClient {
