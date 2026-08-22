@@ -232,9 +232,13 @@ impl DockClient {
         {
             return Err(protocol("temporary file request identity was invalid"));
         }
-        let (mut connection, hello) = self.negotiate(REQUIRED_CAPABILITIES).await?;
+        let routed = self.negotiate(REQUIRED_CAPABILITIES).await?;
+        let endpoint_id = routed.endpoint_id;
+        let route_generation = routed.route_generation;
+        let mut connection = routed.connection;
+        let hello = routed.hello;
         let request_id = Uuid::new_v4().to_string();
-        write_json_line(
+        if let Err(error) = write_json_line(
             &mut connection.stream,
             &DeliverableDownloadRequest {
                 kind: "request",
@@ -247,8 +251,13 @@ impl DockClient {
                 },
             },
         )
-        .await?;
-        download_after_request(
+        .await
+        {
+            self.router()
+                .report_connection_failure(&endpoint_id, route_generation);
+            return Err(error);
+        }
+        let result = download_after_request(
             &mut connection.stream,
             sink,
             maximum_line_bytes(&hello),
@@ -258,7 +267,14 @@ impl DockClient {
             delivery_ref,
             &mut on_progress,
         )
-        .await
+        .await;
+        if result.is_err() {
+            self.router()
+                .report_connection_failure(&endpoint_id, route_generation);
+        } else {
+            self.router().ensure_open()?;
+        }
+        result
     }
 }
 

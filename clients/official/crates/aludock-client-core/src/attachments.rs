@@ -23,6 +23,7 @@ use crate::{
     ClientError, DockClient, Result,
     capabilities::ATTACHMENTS as REQUIRED_CAPABILITIES,
     client::{ResponseEnvelope, maximum_line_bytes, response_result, validate_response_envelope},
+    timing::LONG_MUTATION_RESPONSE_TIMEOUT,
     tls::{read_json_line, write_json_line},
 };
 
@@ -216,10 +217,14 @@ impl DockClient {
         let path = path.as_ref();
         let prepared = prehash_file(path, cancellation, &mut on_progress).await?;
 
-        let (mut connection, hello) =
+        let routed =
             wait_before_completion(cancellation, self.negotiate(REQUIRED_CAPABILITIES)).await?;
+        let endpoint_id = routed.endpoint_id;
+        let route_generation = routed.route_generation;
+        let mut connection = routed.connection;
+        let hello = routed.hello;
         let request_id = Uuid::new_v4().to_string();
-        wait_before_completion(
+        if let Err(error) = wait_before_completion(
             cancellation,
             write_json_line(
                 &mut connection.stream,
@@ -238,9 +243,14 @@ impl DockClient {
                 },
             ),
         )
-        .await?;
+        .await
+        {
+            self.router()
+                .report_connection_failure(&endpoint_id, route_generation);
+            return Err(error);
+        }
 
-        upload_after_header(
+        let result = upload_after_header(
             &mut connection.stream,
             path,
             &request_id,
@@ -251,7 +261,14 @@ impl DockClient {
             cancellation,
             &mut on_progress,
         )
-        .await
+        .await;
+        if result.is_err() {
+            self.router()
+                .report_connection_failure(&endpoint_id, route_generation);
+        } else {
+            self.router().ensure_open()?;
+        }
+        result
     }
 }
 
@@ -341,7 +358,8 @@ where
     F: FnMut(AttachmentUploadProgress),
 {
     let first: Value =
-        wait_before_completion(cancellation, read_json_line(stream, maximum_line_bytes)).await?;
+        wait_for_host_before_completion(cancellation, read_json_line(stream, maximum_line_bytes))
+            .await?;
     if first.get("kind").and_then(Value::as_str) != Some("attachment_upload_ready") {
         return terminal_result(first, request_id, host_epoch, operation_id, prepared, true);
     }
@@ -449,7 +467,7 @@ where
         total_bytes: prepared.size_bytes,
     });
 
-    let terminal: Value = wait_after_completion_started(
+    let terminal: Value = wait_for_host_after_completion_started(
         cancellation,
         operation_id,
         read_json_line(stream, maximum_line_bytes),
@@ -501,6 +519,37 @@ fn terminal_result(
         ));
     }
     Ok(result)
+}
+
+async fn wait_for_host_before_completion<T>(
+    cancellation: &AttachmentUploadCancellation,
+    future: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    wait_before_completion(cancellation, async {
+        match tokio::time::timeout(LONG_MUTATION_RESPONSE_TIMEOUT, future).await {
+            Ok(result) => result,
+            Err(_) => Err(ClientError::Protocol(
+                "attachment upload response timed out".into(),
+            )),
+        }
+    })
+    .await
+}
+
+async fn wait_for_host_after_completion_started<T>(
+    cancellation: &AttachmentUploadCancellation,
+    operation_id: &str,
+    future: impl Future<Output = Result<T>>,
+) -> Result<T> {
+    wait_after_completion_started(cancellation, operation_id, async {
+        match tokio::time::timeout(LONG_MUTATION_RESPONSE_TIMEOUT, future).await {
+            Ok(result) => result,
+            Err(_) => Err(ClientError::Protocol(
+                "attachment upload response timed out".into(),
+            )),
+        }
+    })
+    .await
 }
 
 async fn wait_before_completion<T>(

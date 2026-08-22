@@ -21,29 +21,29 @@ use std::io::Read;
 
 #[cfg(any(target_os = "windows", test))]
 use aludock_client_core::InstanceExecution;
-use aludock_client_core::{MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_MESSAGE};
 use aludock_client_core::{
     AttachmentDto, AttachmentUploadCancellation, AttachmentUploadPhase, AttachmentUploadResult,
     ClientError, ClientPreferences, ClientPreferencesStore, CommandArgumentCompletion,
     CommandCompletionItems, CommandCompletionsResult, CommandContentResult, CommandInfo,
     CommandReference, CommandsResult, CompletedConversationEntry, ConnectionKind, ConnectionPolicy,
-    ConversationPreviewPage,
-    ControllerEventData, DeliverableDownloadProgress, DeliverableDto, DeliveryMode, DiagnosticInfo,
-    DockClient, Endpoint, EndpointState, EndpointTestResult, EventCursor, ExtensionControllerLease,
-    ExtensionEvent, HistoryRecord, HostConnectionProfile, HostRegistry, HostRegistrySnapshot,
-    IdentityStore, ImagePath, InstanceCatalog, InstanceSelector, InstanceSnapshot,
-    InteractionMethod, InteractionRequest, InteractionResponse, ModelsResult, NavigateOptions,
-    PairingProgress, PendingMessage, ProjectTrustDecision, PublishedFileDto, QueueDequeueResult,
-    ReadReplay, ResourceInfo, ResourcesResult, SessionCompactionResult, SessionForkResult,
-    SessionNameResult, SessionNavigateResult, SessionReloadResult,
-    SessionReplacementResult, SessionScope, SessionTree, SettingUpdate, SettingUpdateResult,
-    SettingsResult, SourceInfo, StopResult, SubmitResult, ThinkingLevel, ToolInfo, ToolsResult,
-    WorkspaceFileCursor, WorkspaceFileEntry, WorkspaceFilePage, WorkspaceFileReadProgress,
-    WorkspaceFileReadResult, WorkspacePage, delete_endpoint, host_info_for_profile, probe_host_endpoint,
-    record_endpoint_test, reorder_endpoints, save_unverified_endpoint, save_verified_endpoint,
-    saved_endpoint_for_test, set_connection_policy as update_connection_policy,
-    set_endpoint_enabled, validate_device_name, validate_host_id, WindowsAwayDelay,
+    ControllerEventData, ConversationPreviewPage, DeliverableDownloadProgress, DeliverableDto,
+    DeliveryMode, DiagnosticInfo, DockClient, Endpoint, EndpointState, EndpointTestResult,
+    EventCursor, ExtensionControllerLease, ExtensionEvent, HistoryRecord, HostConnectionProfile,
+    HostConnectionRouter, HostRegistry, HostRegistrySnapshot, IdentityStore, ImagePath,
+    InstanceCatalog, InstanceSelector, InstanceSnapshot, InteractionMethod, InteractionRequest,
+    InteractionResponse, ModelsResult, NavigateOptions, PairingProgress, PendingMessage,
+    ProjectTrustDecision, PublishedFileDto, QueueDequeueResult, ReadReplay, ResourceInfo,
+    ResourcesResult, SessionCompactionResult, SessionForkResult, SessionNameResult,
+    SessionNavigateResult, SessionReloadResult, SessionReplacementResult, SessionScope,
+    SessionTree, SettingUpdate, SettingUpdateResult, SettingsResult, SourceInfo, StopResult,
+    SubmitResult, ThinkingLevel, ToolInfo, ToolsResult, WindowsAwayDelay, WorkspaceFileCursor,
+    WorkspaceFileEntry, WorkspaceFilePage, WorkspaceFileReadProgress, WorkspaceFileReadResult,
+    WorkspacePage, delete_endpoint, probe_host_endpoint, record_endpoint_test, reorder_endpoints,
+    save_unverified_endpoint, save_verified_endpoint, saved_endpoint_for_test,
+    set_connection_policy as update_connection_policy, set_endpoint_enabled, validate_device_name,
+    validate_host_id,
 };
+use aludock_client_core::{MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_MESSAGE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{
@@ -286,7 +286,7 @@ struct WorkspaceCacheResult {
     rename_all = "snake_case",
     rename_all_fields = "camelCase"
 )]
-enum WorkspaceSaveResult {
+enum LocalSaveResult {
     Cancelled,
     Saved { label: String },
 }
@@ -726,16 +726,38 @@ struct CommandReferenceState {
 
 impl CommandReferenceState {
     fn begin(&self, scope: &CommandReferenceScope) -> u64 {
-        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        inner.generations.retain(|candidate, _| candidate.host_id != scope.host_id || candidate.selection_generation == scope.selection_generation);
-        inner.scopes.retain(|candidate, _| candidate.host_id != scope.host_id || candidate.selection_generation == scope.selection_generation);
-        let generation = inner.generations.get(scope).copied().unwrap_or(0).saturating_add(1);
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.generations.retain(|candidate, _| {
+            candidate.host_id != scope.host_id
+                || candidate.selection_generation == scope.selection_generation
+        });
+        inner.scopes.retain(|candidate, _| {
+            candidate.host_id != scope.host_id
+                || candidate.selection_generation == scope.selection_generation
+        });
+        let generation = inner
+            .generations
+            .get(scope)
+            .copied()
+            .unwrap_or(0)
+            .saturating_add(1);
         inner.generations.insert(scope.clone(), generation);
         generation
     }
 
-    fn replace(&self, scope: CommandReferenceScope, generation: u64, references: HashMap<String, CommandReference>) -> bool {
-        let mut inner = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    fn replace(
+        &self,
+        scope: CommandReferenceScope,
+        generation: u64,
+        references: HashMap<String, CommandReference>,
+    ) -> bool {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if inner.generations.get(&scope) != Some(&generation) {
             return false;
         }
@@ -743,7 +765,11 @@ impl CommandReferenceState {
         true
     }
 
-    fn resolve(&self, scope: &CommandReferenceScope, reference_id: &str) -> Result<CommandReference, CommandError> {
+    fn resolve(
+        &self,
+        scope: &CommandReferenceScope,
+        reference_id: &str,
+    ) -> Result<CommandReference, CommandError> {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1019,6 +1045,13 @@ struct HostRuntimeState {
     registry: HostRegistry,
     preferences: ClientPreferencesStore,
     lifecycle: Arc<Mutex<RuntimeLifecycle>>,
+    selected_client: Arc<Mutex<Option<SelectedHostClient>>>,
+}
+
+struct SelectedHostClient {
+    host_id: String,
+    selection_generation: u64,
+    client: DockClient,
 }
 
 impl RuntimeLifecycle {
@@ -1041,9 +1074,7 @@ impl HostRuntimeState {
         } else {
             HostRegistry::platform_default()?
         };
-        let preferences = ClientPreferencesStore::open(
-            registry.root().join("client-preferences"),
-        )?;
+        let preferences = ClientPreferencesStore::open(registry.root().join("client-preferences"))?;
         let active_host_id = registry.snapshot()?.active_host_id;
         Ok(Self {
             registry,
@@ -1052,6 +1083,7 @@ impl HostRuntimeState {
                 active_host_id,
                 selection_generation: 1,
             })),
+            selected_client: Arc::new(Mutex::new(None)),
         })
     }
 }
@@ -1214,7 +1246,8 @@ impl AwayMonitorState {
                 monitor_cancelled,
                 grace,
                 running_instance_ids,
-            ).await;
+            )
+            .await;
         });
         let grace_cancelled = cancelled.clone();
         let elapsed_away_id = away_id.clone();
@@ -1223,7 +1256,9 @@ impl AwayMonitorState {
             if !grace_cancelled.load(Ordering::Acquire) {
                 let _ = app.emit(
                     "aludock://windows-away-elapsed",
-                    WindowsAwayElapsed { away_id: elapsed_away_id },
+                    WindowsAwayElapsed {
+                        away_id: elapsed_away_id,
+                    },
                 );
             }
         });
@@ -1273,7 +1308,7 @@ async fn read_away_catalog(
         (host_id, lifecycle.selection_generation)
     };
     let store = resolve_host(runtime, &host_id, selection_generation)?;
-    let (catalog, host_epoch) = dock_client(&store)?
+    let (catalog, host_epoch) = dock_client(&runtime, &host_id, selection_generation, &store)?
         .list_instances_with_host_epoch(InstanceSelector::All)
         .await
         .map_err(CommandError::from)?;
@@ -1661,9 +1696,67 @@ fn connection_profile(store: &IdentityStore) -> Result<HostConnectionProfile, Co
         })
 }
 
-fn dock_client(store: &IdentityStore) -> Result<DockClient, CommandError> {
+fn dock_client(
+    runtime: &HostRuntimeState,
+    host_id: &str,
+    selection_generation: u64,
+    store: &IdentityStore,
+) -> Result<DockClient, CommandError> {
+    let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
+    ensure_host_selection(&lifecycle, host_id, selection_generation)?;
     let profile = connection_profile(store)?;
-    DockClient::from_connection_profile(store, &profile).map_err(CommandError::from)
+    let mut selected = runtime
+        .selected_client
+        .lock()
+        .map_err(|_| lifecycle_error())?;
+    if let Some(current) = selected.as_ref()
+        && current.host_id == host_id
+        && current.selection_generation == selection_generation
+    {
+        current
+            .client
+            .router()
+            .reconcile(&profile)
+            .map_err(CommandError::from)?;
+        return Ok(current.client.clone());
+    }
+    if let Some(previous) = selected.take() {
+        previous.client.router().close();
+    }
+    let client = DockClient::new(
+        HostConnectionRouter::from_store(store, &profile).map_err(CommandError::from)?,
+    );
+    *selected = Some(SelectedHostClient {
+        host_id: host_id.to_owned(),
+        selection_generation,
+        client: client.clone(),
+    });
+    Ok(client)
+}
+
+fn reconcile_selected_client(
+    runtime: &HostRuntimeState,
+    host_id: &str,
+    selection_generation: u64,
+    profile: &HostConnectionProfile,
+) -> Result<(), CommandError> {
+    let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
+    ensure_host_selection(&lifecycle, host_id, selection_generation)?;
+    let selected = runtime
+        .selected_client
+        .lock()
+        .map_err(|_| lifecycle_error())?;
+    if let Some(current) = selected.as_ref()
+        && current.host_id == host_id
+        && current.selection_generation == selection_generation
+    {
+        current
+            .client
+            .router()
+            .reconcile(profile)
+            .map_err(CommandError::from)?;
+    }
+    Ok(())
 }
 
 fn catalog_from_snapshot(
@@ -1746,6 +1839,7 @@ fn catalog_from_snapshot(
 #[allow(clippy::too_many_arguments)]
 fn invalidate_host_lifecycle(
     app: &tauri::AppHandle,
+    runtime: &HostRuntimeState,
     follow: &FollowState,
     extension: &ExtensionControlState,
     sessions: &SessionTokenState,
@@ -1756,6 +1850,11 @@ fn invalidate_host_lifecycle(
     old_selection_generation: u64,
     selection_generation: u64,
 ) {
+    if let Ok(mut selected) = runtime.selected_client.lock()
+        && let Some(previous) = selected.take()
+    {
+        previous.client.router().close();
+    }
     if let Ok(mut guard) = follow.task.lock()
         && let Some(task) = guard.take()
     {
@@ -1907,6 +2006,7 @@ fn set_active_host(
     let new_host_id = lifecycle.active_host_id.clone();
     invalidate_host_lifecycle(
         &app,
+        &runtime,
         &follow,
         &extension,
         &sessions,
@@ -1944,6 +2044,7 @@ fn remove_local_host(
     let generation = lifecycle.transition_to(snapshot.active_host_id.clone())?;
     invalidate_host_lifecycle(
         &app,
+        &runtime,
         &follow,
         &extension,
         &sessions,
@@ -2173,6 +2274,7 @@ async fn start_pairing(
                 let restored_images = task_app.state::<RestoredImageState>();
                 invalidate_host_lifecycle(
                     &task_app,
+                    &runtime_state,
                     &follow,
                     &extension,
                     &sessions,
@@ -2299,7 +2401,9 @@ fn cancel_pairing(
                 transaction_id,
                 stage: "cancelled".into(),
                 pin: None,
-                message: Some("已停止等待。若已在电脑上确认，请重新打开这台 Host 查看配对结果。".into()),
+                message: Some(
+                    "已停止等待。若已在电脑上确认，请重新打开这台 Host 查看配对结果。".into(),
+                ),
                 error: None,
                 host_id: None,
                 registry_revision: None,
@@ -2336,31 +2440,18 @@ async fn bootstrap(
     selection_generation: u64,
 ) -> Result<BootstrapPayload, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let mut profile = connection_profile(&store)?;
-    let (info, active_endpoint_id) =
-        host_info_for_profile(&store, &profile)
-            .await
-            .map_err(|error| CommandError {
-                code: "host_unreachable".into(),
-                message: format!(
-                    "无法连接“{}”；已保留选择，没有自动切换其他 Host。",
-                    profile.display_name
-                ),
-                details: Some(serde_json::json!({ "hostId": host_id, "cause": error.to_string() })),
-                outcome_unknown: false,
-                operation_id: None,
-            })?;
-    if profile.last_successful_endpoint_id.as_deref() != Some(active_endpoint_id.as_str()) {
-        profile = store
-            .update_connection_profile(|current| {
-                current.last_successful_endpoint_id = Some(active_endpoint_id.clone());
-                Ok(())
-            })
-            .map_err(CommandError::from)?;
-    }
-    let client =
-        DockClient::from_connection_profile_preferred(&store, &profile, &active_endpoint_id)
-            .map_err(CommandError::from)?;
+    let profile = connection_profile(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let info = client.host_info().await.map_err(|error| CommandError {
+        code: "host_unreachable".into(),
+        message: format!(
+            "无法连接“{}”；已保留选择，没有自动切换其他 Host。",
+            profile.display_name
+        ),
+        details: Some(serde_json::json!({ "hostId": host_id, "cause": error.to_string() })),
+        outcome_unknown: false,
+        operation_id: None,
+    })?;
     let (catalog, catalog_host_epoch) = client
         .list_instances_with_host_epoch(InstanceSelector::All)
         .await
@@ -2370,6 +2461,15 @@ async fn bootstrap(
             "Host epoch changed while bootstrapping the instance catalog".into(),
         )));
     }
+    let active_endpoint_id = client
+        .router()
+        .snapshot()
+        .active_endpoint_id
+        .ok_or_else(|| {
+            CommandError::from(ClientError::Protocol(
+                "Host connection completed without an active address".into(),
+            ))
+        })?;
     let InstanceCatalog {
         instances,
         total,
@@ -2401,7 +2501,7 @@ async fn work_catalog(
     selection_generation: u64,
 ) -> Result<WorkCatalogPayload, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let (catalog, host_epoch) = dock_client(&store)?
+    let (catalog, host_epoch) = dock_client(&runtime, &host_id, selection_generation, &store)?
         .list_instances_with_host_epoch(InstanceSelector::All)
         .await
         .map_err(CommandError::from)?;
@@ -2423,7 +2523,7 @@ async fn conversation_bootstrap(
     instance_id: String,
 ) -> Result<ConversationBootstrap, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let read = dock_client(&store)?
+    let read = dock_client(&runtime, &host_id, selection_generation, &store)?
         .read_instance(&instance_id, None, ReadReplay::ConversationBootstrap)
         .await
         .map_err(CommandError::from)?;
@@ -2509,7 +2609,7 @@ async fn conversation_history(
     expected_runtime_generation: u64,
 ) -> Result<ConversationPreviewPage, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let page = dock_client(&store)?
+    let page = dock_client(&runtime, &host_id, selection_generation, &store)?
         .preview_conversation_page(
             &instance_id,
             cursor.as_deref(),
@@ -2541,7 +2641,7 @@ async fn conversation_history_entry(
     expected_runtime_generation: u64,
 ) -> Result<CompletedConversationEntry, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let completed = dock_client(&store)?
+    let completed = dock_client(&runtime, &host_id, selection_generation, &store)?
         .complete_conversation_entry(
             &instance_id,
             cursor.as_deref(),
@@ -2578,7 +2678,7 @@ async fn conversation_image(
     mime_type: String,
 ) -> Result<Response, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let image = dock_client(&store)?
+    let image = dock_client(&runtime, &host_id, selection_generation, &store)?
         .read_conversation_image(&instance_id, &content_ref, &mime_type)
         .await
         .map_err(CommandError::from)?;
@@ -2612,7 +2712,7 @@ async fn published_image(
         ));
     }
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let image = dock_client(&store)?
+    let image = dock_client(&runtime, &host_id, selection_generation, &store)?
         .read_published_file(&instance_id, &file)
         .await
         .map_err(CommandError::from)?;
@@ -2670,6 +2770,174 @@ fn image_error(code: &str, message: &str) -> CommandError {
         outcome_unknown: false,
         operation_id: None,
     }
+}
+
+fn percent_hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn decode_image_name(value: &str) -> Option<String> {
+    if value.is_empty() || value.len() > 2_048 {
+        return None;
+    }
+    let input = value.as_bytes();
+    let mut output = Vec::with_capacity(input.len());
+    let mut index = 0;
+    while index < input.len() {
+        if input[index] == b'%' {
+            let high = percent_hex(*input.get(index + 1)?)?;
+            let low = percent_hex(*input.get(index + 2)?)?;
+            output.push((high << 4) | low);
+            index += 3;
+        } else {
+            if !input[index].is_ascii() {
+                return None;
+            }
+            output.push(input[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(output).ok()
+}
+
+fn preview_image_save_name(requested: &str, media_type: &str) -> String {
+    let mut cleaned = requested
+        .chars()
+        .map(|character| {
+            if character.is_control() || character == '/' || character == '\\' {
+                '_'
+            } else {
+                character
+            }
+        })
+        .take(180)
+        .collect::<String>();
+    cleaned = cleaned
+        .trim_matches(|character: char| character.is_whitespace() || character == '.')
+        .to_owned();
+    if cleaned.is_empty() {
+        cleaned = "aludock-image".into();
+    }
+    let extension = match media_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "img",
+    };
+    let lowercase = cleaned.to_ascii_lowercase();
+    let extension_matches = match media_type {
+        "image/jpeg" => lowercase.ends_with(".jpg") || lowercase.ends_with(".jpeg"),
+        _ => lowercase.ends_with(&format!(".{extension}")),
+    };
+    if extension_matches {
+        return cleaned;
+    }
+    if [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+        .iter()
+        .any(|suffix| lowercase.ends_with(suffix))
+    {
+        if let Some((stem, _)) = cleaned.rsplit_once('.') {
+            cleaned = stem.to_owned();
+        }
+    }
+    format!("{cleaned}.{extension}")
+}
+
+#[tauri::command]
+async fn save_preview_image(
+    app: tauri::AppHandle,
+    request: Request<'_>,
+) -> Result<LocalSaveResult, CommandError> {
+    let encoded_name = request
+        .headers()
+        .get("x-aludock-image-name")
+        .and_then(|value| value.to_str().ok())
+        .and_then(decode_image_name)
+        .ok_or_else(|| image_error("image_save_invalid", "无法使用这个图片名称。"))?;
+    let bytes = bounded_image_body(&request).map_err(|error| match error {
+        BoundedImageBodyError::Invalid => image_error(
+            "image_save_invalid",
+            "图片内容无法读取，请重新打开后再保存。",
+        ),
+        BoundedImageBodyError::TooLarge => {
+            image_error("image_save_too_large", "这张图片太大，当前设备无法保存。")
+        }
+    })?;
+    let media_type = raster_image_mime_type(&bytes).ok_or_else(|| {
+        image_error(
+            "unsupported_image",
+            "图片内容不是可保存的 PNG、JPEG、GIF 或 WebP 格式。",
+        )
+    })?;
+    let name = preview_image_save_name(&encoded_name, media_type);
+    #[cfg(not(mobile))]
+    let destination = pick_save_destination(&app, &name).await?;
+    #[cfg(mobile)]
+    let mut destination: Option<FilePath> = None;
+    #[cfg(not(mobile))]
+    if destination.is_none() {
+        return Ok(LocalSaveResult::Cancelled);
+    }
+    let staging_path = delivery_staging_path(&app, destination.as_ref())?;
+    let write_path = staging_path.clone();
+    let write_result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let mut target = create_delivery_staging_file(&write_path)
+            .map_err(|error| std::io::Error::other(error.message))?;
+        target.write_all(&bytes)?;
+        target.flush()?;
+        target.sync_all()
+    })
+    .await;
+    let write_result = match write_result {
+        Ok(result) => result,
+        Err(_) => {
+            let _ = fs::remove_file(&staging_path);
+            return Err(lifecycle_error());
+        }
+    };
+    if write_result.is_err() {
+        let _ = fs::remove_file(&staging_path);
+        return Err(image_error(
+            "image_save_failed",
+            "无法保存到所选位置。请检查可用空间和存储权限后重试。",
+        ));
+    }
+    #[cfg(mobile)]
+    {
+        destination = match pick_save_destination(&app, &name).await {
+            Ok(destination) => destination,
+            Err(error) => {
+                let _ = fs::remove_file(&staging_path);
+                return Err(error);
+            }
+        };
+        if destination.is_none() {
+            let _ = fs::remove_file(&staging_path);
+            return Ok(LocalSaveResult::Cancelled);
+        }
+    }
+    let destination = destination.expect("save cancellation returned before commit");
+    let saved_location = match describe_saved_location(&destination, &name) {
+        Ok(location) => location,
+        Err(error) => {
+            let _ = fs::remove_file(&staging_path);
+            return Err(error);
+        }
+    };
+    commit_verified_file(&app, staging_path, destination.clone()).await?;
+    #[cfg(target_os = "android")]
+    if let FilePath::Url(url) = &destination {
+        let _ = android_documents::retain_document_access(&app, url.as_str()).await;
+    }
+    Ok(LocalSaveResult::Saved {
+        label: saved_location.label,
+    })
 }
 
 fn project_pending_message(item: PendingMessage) -> ProjectedQueueItem {
@@ -2796,7 +3064,7 @@ async fn start_conversation_follow(
     cursor: EventCursor,
 ) -> Result<(), CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
     ensure_host_selection(&lifecycle, &host_id, selection_generation)?;
     let mut guard = state.task.lock().map_err(|_| follow_state_error())?;
@@ -3004,7 +3272,7 @@ async fn acquire_extension_control(
     expected_runtime_generation: u64,
 ) -> Result<SafeControllerBinding, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     let controller = client
         .control_extension_ui(&instance_id)
         .await
@@ -3221,7 +3489,7 @@ async fn respond_extension_interaction(
         (binding.clone(), response)
     };
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let result = dock_client(&store)?
+    let result = dock_client(&runtime, &host_id, selection_generation, &store)?
         .respond_interaction(
             &binding.0.lease,
             &interaction_id,
@@ -3284,7 +3552,7 @@ async fn set_extension_widget_viewport(
         binding.clone()
     };
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let result = dock_client(&store)?
+    let result = dock_client(&runtime, &host_id, selection_generation, &store)?
         .set_extension_widget_viewport(&binding.lease, width, height)
         .await
         .map_err(CommandError::from)?;
@@ -3309,7 +3577,7 @@ async fn set_extension_tools_expanded(
 ) -> Result<InstanceSnapshot, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
     let operation_id = uuid::Uuid::new_v4().to_string();
-    let snapshot = dock_client(&store)?
+    let snapshot = dock_client(&runtime, &host_id, selection_generation, &store)?
         .set_tools_expanded(
             &instance_id,
             expected_runtime_generation,
@@ -3327,16 +3595,21 @@ async fn set_extension_tools_expanded(
     Ok(snapshot)
 }
 
-
 const MSG_ATTACHMENT_SOURCE_UNAVAILABLE: &str = "无法读取所选附件。";
 #[cfg(target_os = "android")]
 const MSG_ATTACHMENT_STAGE_FAILED: &str = "无法暂存所选附件。";
 const MSG_ATTACHMENT_NOT_PLAIN_FILE: &str = "只能选择本机普通文件。";
 fn msg_attachment_too_large() -> String {
-    format!("附件超过 {} MiB 大小限制。", MAX_ATTACHMENT_BYTES / 1024 / 1024)
+    format!(
+        "附件超过 {} MiB 大小限制。",
+        MAX_ATTACHMENT_BYTES / 1024 / 1024
+    )
 }
 fn msg_attachment_selection_full() -> String {
-    format!("每个工作最多选择 {} 个待上传附件。", MAX_ATTACHMENTS_PER_MESSAGE)
+    format!(
+        "每个工作最多选择 {} 个待上传附件。",
+        MAX_ATTACHMENTS_PER_MESSAGE
+    )
 }
 const MSG_PASTE_CONTEXT_LOST: &str = "无法读取粘贴图片的上下文，请重新粘贴。";
 const MSG_CLIPBOARD_IMAGE_INVALID: &str = "剪贴板中的图片数据无效，请重新复制。";
@@ -3450,7 +3723,10 @@ async fn describe_android_picked_file(
         ));
     }
     let webview = app.get_webview_window("main").ok_or_else(|| {
-        attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
+        attachment_command_error(
+            "attachment_source_unavailable",
+            MSG_ATTACHMENT_SOURCE_UNAVAILABLE,
+        )
     })?;
     let uri = url.to_string();
     let (sender, receiver) = tokio::sync::oneshot::channel();
@@ -3475,21 +3751,36 @@ async fn describe_android_picked_file(
                 });
         })
         .map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
+            attachment_command_error(
+                "attachment_source_unavailable",
+                MSG_ATTACHMENT_SOURCE_UNAVAILABLE,
+            )
         })?;
     let description = tokio::time::timeout(std::time::Duration::from_secs(10), receiver)
         .await
         .map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
+            attachment_command_error(
+                "attachment_source_unavailable",
+                MSG_ATTACHMENT_SOURCE_UNAVAILABLE,
+            )
         })?
         .map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
+            attachment_command_error(
+                "attachment_source_unavailable",
+                MSG_ATTACHMENT_SOURCE_UNAVAILABLE,
+            )
         })?
         .map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
+            attachment_command_error(
+                "attachment_source_unavailable",
+                MSG_ATTACHMENT_SOURCE_UNAVAILABLE,
+            )
         })?;
     serde_json::from_str(&description).map_err(|_| {
-        attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
+        attachment_command_error(
+            "attachment_source_unavailable",
+            MSG_ATTACHMENT_SOURCE_UNAVAILABLE,
+        )
     })
 }
 
@@ -3512,7 +3803,10 @@ async fn stage_android_picked_file(
         .path()
         .app_cache_dir()
         .map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
+            attachment_command_error(
+                "attachment_source_unavailable",
+                MSG_ATTACHMENT_SOURCE_UNAVAILABLE,
+            )
         })?
         .join("attachment-staging");
     let staging_path =
@@ -3526,7 +3820,10 @@ async fn stage_android_picked_file(
         let mut source_options = PluginOpenOptions::new();
         source_options.read(true);
         let mut source = staging_app.fs().open(file, source_options).map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
+            attachment_command_error(
+                "attachment_source_unavailable",
+                MSG_ATTACHMENT_SOURCE_UNAVAILABLE,
+            )
         })?;
         let mut target_options = OpenOptions::new();
         target_options.write(true).create_new(true);
@@ -3538,11 +3835,7 @@ async fn stage_android_picked_file(
         let mut target = target_options.open(&copied_path).map_err(|_| {
             attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_STAGE_FAILED)
         })?;
-        let copied = match copy_bounded_attachment(
-            &mut source,
-            &mut target,
-            MAX_ATTACHMENT_BYTES,
-        ) {
+        let copied = match copy_bounded_attachment(&mut source, &mut target, MAX_ATTACHMENT_BYTES) {
             Ok(copied) => copied,
             Err(_) => {
                 drop(target);
@@ -3618,15 +3911,15 @@ fn request_header(request: &Request<'_>, name: &str) -> Result<String, CommandEr
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
-        .ok_or_else(|| {
-            attachment_command_error(
-                "invalid_clipboard_image",
-                MSG_PASTE_CONTEXT_LOST,
-            )
-        })
+        .ok_or_else(|| attachment_command_error("invalid_clipboard_image", MSG_PASTE_CONTEXT_LOST))
 }
 
-fn request_image_bytes(request: &Request<'_>) -> Result<Vec<u8>, CommandError> {
+enum BoundedImageBodyError {
+    Invalid,
+    TooLarge,
+}
+
+fn bounded_image_body(request: &Request<'_>) -> Result<Vec<u8>, BoundedImageBodyError> {
     let bytes = match request.body() {
         InvokeBody::Raw(bytes) => bytes.clone(),
         InvokeBody::Json(Value::Array(values)) => values
@@ -3636,28 +3929,27 @@ fn request_image_bytes(request: &Request<'_>) -> Result<Vec<u8>, CommandError> {
                     .as_u64()
                     .filter(|value| *value <= u8::MAX as u64)
                     .map(|value| value as u8)
-                    .ok_or_else(|| {
-                        attachment_command_error(
-                            "invalid_clipboard_image",
-                            MSG_CLIPBOARD_IMAGE_INVALID,
-                        )
-                    })
+                    .ok_or(BoundedImageBodyError::Invalid)
             })
             .collect::<Result<Vec<_>, _>>()?,
-        _ => {
-            return Err(attachment_command_error(
-                "invalid_clipboard_image",
-                MSG_CLIPBOARD_IMAGE_INVALID,
-            ));
-        }
+        _ => return Err(BoundedImageBodyError::Invalid),
     };
     if bytes.is_empty() || bytes.len() as u64 > MAX_RENDERABLE_IMAGE_BYTES {
-        return Err(attachment_command_error(
-            "clipboard_image_too_large",
-            "粘贴的图片过大，无法作为附件。请改用附件按钮选择原文件。",
-        ));
+        return Err(BoundedImageBodyError::TooLarge);
     }
     Ok(bytes)
+}
+
+fn request_image_bytes(request: &Request<'_>) -> Result<Vec<u8>, CommandError> {
+    bounded_image_body(request).map_err(|error| match error {
+        BoundedImageBodyError::Invalid => {
+            attachment_command_error("invalid_clipboard_image", MSG_CLIPBOARD_IMAGE_INVALID)
+        }
+        BoundedImageBodyError::TooLarge => attachment_command_error(
+            "clipboard_image_too_large",
+            "粘贴的图片过大，无法作为附件。请改用附件按钮选择原文件。",
+        ),
+    })
 }
 
 fn prepare_clipboard_image(
@@ -3698,10 +3990,7 @@ fn prepare_clipboard_image(
         options.mode(0o600);
     }
     let mut file = options.open(&path).map_err(|_| {
-        attachment_command_error(
-            "clipboard_image_unavailable",
-            MSG_PASTE_STAGE_FAILED,
-        )
+        attachment_command_error("clipboard_image_unavailable", MSG_PASTE_STAGE_FAILED)
     })?;
     if file.write_all(&bytes).and_then(|_| file.flush()).is_err() {
         let _ = fs::remove_file(&path);
@@ -3787,9 +4076,10 @@ fn deliverable_list_error(error: ClientError) -> CommandError {
 
 fn deliverable_client_error(error: ClientError) -> CommandError {
     match error {
-        ClientError::Host { code, .. } if code == "file_unavailable" => {
-            deliverable_command_error("file_unavailable", "这个文件已无法下载。请让 Agent 重新发送。")
-        }
+        ClientError::Host { code, .. } if code == "file_unavailable" => deliverable_command_error(
+            "file_unavailable",
+            "这个文件已无法下载。请让 Agent 重新发送。",
+        ),
         ClientError::Tls(_) | ClientError::MissingHostCertificate => deliverable_command_error(
             "deliverable_connection_failed",
             "下载中断了。请检查网络后重试。",
@@ -4197,7 +4487,7 @@ async fn list_deliverables(
     instance_id: String,
 ) -> Result<Vec<DeliverableDto>, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&store)?
+    dock_client(&runtime, &host_id, selection_generation, &store)?
         .list_deliverables(&instance_id)
         .await
         .map_err(deliverable_list_error)
@@ -4214,7 +4504,7 @@ async fn download_deliverable(
 ) -> Result<DeliverableSaveResult, CommandError> {
     deliverable.validate().map_err(deliverable_client_error)?;
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     #[cfg(not(mobile))]
     let destination = pick_save_destination(&app, &deliverable.name).await?;
     // The mobile dialog uses the platform create-document flow. Download and
@@ -4383,37 +4673,33 @@ async fn open_saved_deliverable(
             #[cfg(target_os = "android")]
             {
                 let media_type = mime_guess::from_path(&location.label).first_raw();
-                return match android_documents::open_document(
-                    &app,
-                    &location.value,
-                    media_type,
-                )
-                .await
-                .map_err(|_| {
-                    deliverable_command_error(
-                        "saved_file_open_failed",
-                        "暂时无法打开这个文件。请稍后重试。",
-                    )
-                })? {
-                    android_documents::OpenDocumentOutcome::Opened => Ok(()),
-                    android_documents::OpenDocumentOutcome::Unavailable => Err(
-                        deliverable_command_error(
-                            "saved_file_unavailable",
-                            "文件已不在保存位置。请重新下载。",
-                        ),
-                    ),
-                    android_documents::OpenDocumentOutcome::NoHandler => Err(
-                        deliverable_command_error(
-                            "saved_file_no_handler",
-                            "没有可用的应用打开这个文件。",
-                        ),
-                    ),
-                    android_documents::OpenDocumentOutcome::Failed => Err(
+                return match android_documents::open_document(&app, &location.value, media_type)
+                    .await
+                    .map_err(|_| {
                         deliverable_command_error(
                             "saved_file_open_failed",
                             "暂时无法打开这个文件。请稍后重试。",
-                        ),
-                    ),
+                        )
+                    })? {
+                    android_documents::OpenDocumentOutcome::Opened => Ok(()),
+                    android_documents::OpenDocumentOutcome::Unavailable => {
+                        Err(deliverable_command_error(
+                            "saved_file_unavailable",
+                            "文件已不在保存位置。请重新下载。",
+                        ))
+                    }
+                    android_documents::OpenDocumentOutcome::NoHandler => {
+                        Err(deliverable_command_error(
+                            "saved_file_no_handler",
+                            "没有可用的应用打开这个文件。",
+                        ))
+                    }
+                    android_documents::OpenDocumentOutcome::Failed => {
+                        Err(deliverable_command_error(
+                            "saved_file_open_failed",
+                            "暂时无法打开这个文件。请稍后重试。",
+                        ))
+                    }
                 };
             }
             #[cfg(not(target_os = "android"))]
@@ -4425,7 +4711,7 @@ async fn open_saved_deliverable(
                         SAVED_FILE_UNAVAILABLE_MESSAGE,
                     )
                 })
-        },
+        }
         _ => Err(deliverable_command_error(
             "saved_file_unavailable",
             SAVED_FILE_UNAVAILABLE_MESSAGE,
@@ -4467,9 +4753,9 @@ async fn pick_attachments(
         app.dialog().file().pick_files(move |files| {
             let _ = sender.send(files);
         });
-        let Some(files) = receiver
-            .await
-            .map_err(|_| attachment_command_error("attachment_picker_failed", "无法完成附件选择。"))?
+        let Some(files) = receiver.await.map_err(|_| {
+            attachment_command_error("attachment_picker_failed", "无法完成附件选择。")
+        })?
         else {
             return Ok(Vec::new());
         };
@@ -4488,7 +4774,10 @@ async fn pick_attachments(
         let (path, temporary, name, size_bytes, media_type) = match local_path {
             Ok(path) => {
                 let metadata = std::fs::symlink_metadata(&path).map_err(|_| {
-                    attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
+                    attachment_command_error(
+                        "attachment_source_unavailable",
+                        MSG_ATTACHMENT_SOURCE_UNAVAILABLE,
+                    )
                 })?;
                 if !metadata.file_type().is_file() {
                     return Err(attachment_command_error(
@@ -4560,22 +4849,14 @@ async fn stage_clipboard_image(
     let host_id = request_header(&request, "x-aludock-host-id")?;
     let selection_generation = request_header(&request, "x-aludock-selection-generation")?
         .parse::<u64>()
-        .map_err(|_| {
-            attachment_command_error(
-                "invalid_clipboard_image",
-                MSG_PASTE_CONTEXT_LOST,
-            )
-        })?;
+        .map_err(|_| attachment_command_error("invalid_clipboard_image", MSG_PASTE_CONTEXT_LOST))?;
     let work_id = request_header(&request, "x-aludock-work-id")?;
     let image_index = request_header(&request, "x-aludock-image-index")?
         .parse::<usize>()
         .ok()
         .filter(|index| (1..=MAX_ATTACHMENTS_PER_MESSAGE).contains(index))
         .ok_or_else(|| {
-            attachment_command_error(
-                "invalid_clipboard_image",
-                MSG_PASTE_CONTEXT_LOST,
-            )
+            attachment_command_error("invalid_clipboard_image", MSG_PASTE_CONTEXT_LOST)
         })?;
     drop(resolve_host(&runtime, &host_id, selection_generation)?);
     let bytes = request_image_bytes(&request)?;
@@ -4683,7 +4964,7 @@ async fn upload_attachment(
     token: String,
 ) -> Result<AttachmentUploadResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     let (path, operation_id, name, media_type, cancellation, attempt_id) = {
         let mut entries = state.entries.lock().map_err(|_| lifecycle_error())?;
         let entry = entries.get_mut(&token).ok_or_else(|| {
@@ -4697,7 +4978,10 @@ async fn upload_attachment(
             ));
         }
         let metadata = std::fs::symlink_metadata(&entry.path).map_err(|_| {
-            attachment_command_error("attachment_source_unavailable", MSG_ATTACHMENT_SOURCE_UNAVAILABLE)
+            attachment_command_error(
+                "attachment_source_unavailable",
+                MSG_ATTACHMENT_SOURCE_UNAVAILABLE,
+            )
         })?;
         if !metadata.file_type().is_file() || metadata.len() != entry.size_bytes {
             return Err(attachment_command_error(
@@ -4851,7 +5135,7 @@ async fn submit_message(
     attachment_file_ids: Option<Vec<String>>,
 ) -> Result<SubmitResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     let scope = restored_image_scope(&host_id, selection_generation, &instance_id);
     let captured = restored_images.capture(&scope);
     let attachment_file_ids = attachment_file_ids.unwrap_or_default();
@@ -4884,7 +5168,7 @@ async fn dequeue_messages(
     instance_id: String,
 ) -> Result<SafeQueueDequeueResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let result = dock_client(&store)?
+    let result = dock_client(&runtime, &host_id, selection_generation, &store)?
         .dequeue_messages(&instance_id, None)
         .await
         .map_err(CommandError::from)?;
@@ -4927,7 +5211,7 @@ async fn abort_run(
     instance_id: String,
 ) -> Result<InstanceSnapshot, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     client
         .abort_run(&instance_id, None)
         .await
@@ -4966,7 +5250,7 @@ async fn stop_work(
     instance_id: String,
 ) -> Result<StopResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let result = dock_client(&store)?
+    let result = dock_client(&runtime, &host_id, selection_generation, &store)?
         .stop_instance(&instance_id, None)
         .await
         .map_err(CommandError::from)?;
@@ -4989,10 +5273,17 @@ async fn command_catalog(
     instance_id: String,
 ) -> Result<SafeCommandsResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
-    let scope = CommandReferenceScope { host_id, selection_generation, instance_id };
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let scope = CommandReferenceScope {
+        host_id,
+        selection_generation,
+        instance_id,
+    };
     let reference_generation = references.begin(&scope);
-    let result = client.commands(&scope.instance_id, None).await.map_err(CommandError::from)?;
+    let result = client
+        .commands(&scope.instance_id, None)
+        .await
+        .map_err(CommandError::from)?;
     project_commands(result, &references, scope, reference_generation)
 }
 
@@ -5007,12 +5298,17 @@ async fn command_content(
     cursor: Option<String>,
 ) -> Result<SafeCommandContentResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let scope = CommandReferenceScope { host_id, selection_generation, instance_id: instance_id.clone() };
+    let scope = CommandReferenceScope {
+        host_id: host_id.clone(),
+        selection_generation,
+        instance_id: instance_id.clone(),
+    };
     let command = references.resolve(&scope, &reference_id)?;
-    let result: CommandContentResult = dock_client(&store)?
-        .command_content(&instance_id, &command, cursor.as_deref())
-        .await
-        .map_err(CommandError::from)?;
+    let result: CommandContentResult =
+        dock_client(&runtime, &host_id, selection_generation, &store)?
+            .command_content(&instance_id, &command, cursor.as_deref())
+            .await
+            .map_err(CommandError::from)?;
     Ok(SafeCommandContentResult {
         reference_id,
         available: result.available,
@@ -5035,12 +5331,17 @@ async fn command_completions(
     argument_prefix: String,
 ) -> Result<SafeCommandCompletionsResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let scope = CommandReferenceScope { host_id, selection_generation, instance_id: instance_id.clone() };
+    let scope = CommandReferenceScope {
+        host_id: host_id.clone(),
+        selection_generation,
+        instance_id: instance_id.clone(),
+    };
     let command = references.resolve(&scope, &reference_id)?;
-    let result: CommandCompletionsResult = dock_client(&store)?
-        .command_completions(&instance_id, &command, &argument_prefix)
-        .await
-        .map_err(CommandError::from)?;
+    let result: CommandCompletionsResult =
+        dock_client(&runtime, &host_id, selection_generation, &store)?
+            .command_completions(&instance_id, &command, &argument_prefix)
+            .await
+            .map_err(CommandError::from)?;
     Ok(SafeCommandCompletionsResult {
         reference_id,
         items: match result.items {
@@ -5063,7 +5364,7 @@ async fn run_catalog_command(
     operation_id: String,
 ) -> Result<SubmitResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     let catalog = client
         .commands(&instance_id, None)
         .await
@@ -5108,7 +5409,7 @@ async fn list_models(
     instance_id: String,
 ) -> Result<ModelsResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&store)?
+    dock_client(&runtime, &host_id, selection_generation, &store)?
         .models(&instance_id)
         .await
         .map_err(CommandError::from)
@@ -5124,7 +5425,7 @@ async fn set_model(
     model_id: String,
 ) -> Result<InstanceSnapshot, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&store)?
+    dock_client(&runtime, &host_id, selection_generation, &store)?
         .set_model(&instance_id, &provider, &model_id, None)
         .await
         .map_err(CommandError::from)
@@ -5139,7 +5440,7 @@ async fn set_thinking(
     level: ThinkingLevel,
 ) -> Result<InstanceSnapshot, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&store)?
+    dock_client(&runtime, &host_id, selection_generation, &store)?
         .set_thinking(&instance_id, level, None)
         .await
         .map_err(CommandError::from)
@@ -5153,7 +5454,7 @@ async fn list_tools(
     instance_id: String,
 ) -> Result<SafeToolsResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&store)?
+    dock_client(&runtime, &host_id, selection_generation, &store)?
         .tools(&instance_id)
         .await
         .map(project_tools)
@@ -5169,7 +5470,7 @@ async fn set_active_tools(
     names: Vec<String>,
 ) -> Result<SafeToolsResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&store)?
+    dock_client(&runtime, &host_id, selection_generation, &store)?
         .set_active_tools(&instance_id, &names, None)
         .await
         .map(project_tools)
@@ -5184,7 +5485,7 @@ async fn get_settings(
     instance_id: String,
 ) -> Result<SettingsResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&store)?
+    dock_client(&runtime, &host_id, selection_generation, &store)?
         .settings(&instance_id)
         .await
         .map_err(CommandError::from)
@@ -5199,7 +5500,7 @@ async fn update_setting(
     update: SettingUpdate,
 ) -> Result<SettingUpdateResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&store)?
+    dock_client(&runtime, &host_id, selection_generation, &store)?
         .update_setting(&instance_id, &update, None)
         .await
         .map_err(CommandError::from)
@@ -5213,7 +5514,7 @@ async fn get_resources(
     instance_id: String,
 ) -> Result<SafeResourcesResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&store)?
+    dock_client(&runtime, &host_id, selection_generation, &store)?
         .resources(&instance_id)
         .await
         .map(project_resources)
@@ -5236,19 +5537,23 @@ fn project_commands(
     reference_generation: u64,
 ) -> Result<SafeCommandsResult, CommandError> {
     let mut references = HashMap::new();
-    let commands = result.commands.into_iter().map(|command: CommandInfo| {
-        let reference_id = uuid::Uuid::new_v4().to_string();
-        references.insert(reference_id.clone(), CommandReference::from(&command));
-        SafeCommand {
-            reference_id,
-            name: command.name,
-            description: command.description,
-            source: project_source(command.source),
-            argument_hint: command.argument_hint,
-            argument_completions: command.argument_completions,
-            content_available: command.content_available == Some(true),
-        }
-    }).collect();
+    let commands = result
+        .commands
+        .into_iter()
+        .map(|command: CommandInfo| {
+            let reference_id = uuid::Uuid::new_v4().to_string();
+            references.insert(reference_id.clone(), CommandReference::from(&command));
+            SafeCommand {
+                reference_id,
+                name: command.name,
+                description: command.description,
+                source: project_source(command.source),
+                argument_hint: command.argument_hint,
+                argument_completions: command.argument_completions,
+                content_available: command.content_available == Some(true),
+            }
+        })
+        .collect();
     if !state.replace(scope, reference_generation, references) {
         return Err(command_reference_expired());
     }
@@ -5314,7 +5619,7 @@ async fn reopen_work(
     project_trust_decision: Option<String>,
 ) -> Result<InstanceSnapshot, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     let continuation = parse_trust_continuation(
         trust_challenge_id.as_deref(),
         project_trust_decision.as_deref(),
@@ -5335,7 +5640,7 @@ async fn forget_work(
     instance_id: String,
 ) -> Result<(), CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     client
         .forget_instance(&instance_id, None)
         .await
@@ -5372,7 +5677,7 @@ fn persist_verified_host_endpoint(
     selection_generation: u64,
     mutation: VerifiedEndpointMutation,
 ) -> Result<HostConnectionProfile, CommandError> {
-    mutate_selected_host(runtime, host_id, selection_generation, |store| {
+    let profile = mutate_selected_host(runtime, host_id, selection_generation, |store| {
         save_verified_endpoint(
             store,
             mutation.endpoint,
@@ -5380,7 +5685,9 @@ fn persist_verified_host_endpoint(
             mutation.kind,
             mutation.expected_revision,
         )
-    })
+    })?;
+    reconcile_selected_client(runtime, host_id, selection_generation, &profile)?;
+    Ok(profile)
 }
 
 fn persist_host_endpoint_test(
@@ -5391,9 +5698,11 @@ fn persist_host_endpoint_test(
     expected_revision: u64,
     probe: aludock_client_core::Result<()>,
 ) -> Result<EndpointTestResult, CommandError> {
-    mutate_selected_host(runtime, host_id, selection_generation, |store| {
+    let result = mutate_selected_host(runtime, host_id, selection_generation, |store| {
         record_endpoint_test(store, endpoint_id, expected_revision, probe)
-    })
+    })?;
+    reconcile_selected_client(runtime, host_id, selection_generation, &result.profile)?;
+    Ok(result)
 }
 
 #[tauri::command]
@@ -5441,14 +5750,16 @@ fn save_unverified_host_endpoint(
 ) -> Result<HostConnectionProfile, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
     let endpoint = Endpoint::new(host, port).map_err(CommandError::from)?;
-    save_unverified_endpoint(
+    let profile = save_unverified_endpoint(
         &store,
         endpoint,
         &label,
         parse_connection_kind(&kind)?,
         expected_revision,
     )
-    .map_err(CommandError::from)
+    .map_err(CommandError::from)?;
+    reconcile_selected_client(&runtime, &host_id, selection_generation, &profile)?;
+    Ok(profile)
 }
 
 #[tauri::command]
@@ -5482,12 +5793,14 @@ fn rename_host_profile(
     display_name: String,
 ) -> Result<HostConnectionProfile, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    store
+    let profile = store
         .update_connection_profile_at(expected_revision, |profile| {
             profile.display_name = display_name;
             Ok(())
         })
-        .map_err(CommandError::from)
+        .map_err(CommandError::from)?;
+    reconcile_selected_client(&runtime, &host_id, selection_generation, &profile)?;
+    Ok(profile)
 }
 
 #[tauri::command]
@@ -5507,7 +5820,10 @@ fn set_connection_policy(
             return Err(ClientError::InvalidEndpoint("connection policy is invalid".into()).into());
         }
     };
-    update_connection_policy(&store, policy, expected_revision).map_err(CommandError::from)
+    let profile =
+        update_connection_policy(&store, policy, expected_revision).map_err(CommandError::from)?;
+    reconcile_selected_client(&runtime, &host_id, selection_generation, &profile)?;
+    Ok(profile)
 }
 
 #[tauri::command]
@@ -5520,8 +5836,10 @@ fn set_host_endpoint_enabled(
     enabled: bool,
 ) -> Result<HostConnectionProfile, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    set_endpoint_enabled(&store, &endpoint_id, enabled, expected_revision)
-        .map_err(CommandError::from)
+    let profile = set_endpoint_enabled(&store, &endpoint_id, enabled, expected_revision)
+        .map_err(CommandError::from)?;
+    reconcile_selected_client(&runtime, &host_id, selection_generation, &profile)?;
+    Ok(profile)
 }
 
 #[tauri::command]
@@ -5533,7 +5851,10 @@ fn reorder_host_endpoints(
     endpoint_ids: Vec<String>,
 ) -> Result<HostConnectionProfile, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    reorder_endpoints(&store, &endpoint_ids, expected_revision).map_err(CommandError::from)
+    let profile =
+        reorder_endpoints(&store, &endpoint_ids, expected_revision).map_err(CommandError::from)?;
+    reconcile_selected_client(&runtime, &host_id, selection_generation, &profile)?;
+    Ok(profile)
 }
 
 #[tauri::command]
@@ -5545,7 +5866,10 @@ fn delete_host_endpoint(
     endpoint_id: String,
 ) -> Result<HostConnectionProfile, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    delete_endpoint(&store, &endpoint_id, expected_revision).map_err(CommandError::from)
+    let profile =
+        delete_endpoint(&store, &endpoint_id, expected_revision).map_err(CommandError::from)?;
+    reconcile_selected_client(&runtime, &host_id, selection_generation, &profile)?;
+    Ok(profile)
 }
 
 async fn verify_workspace_scope(
@@ -5571,7 +5895,10 @@ async fn verify_workspace_scope(
     if host_epoch != expected_host_epoch
         || current.owner_host_epoch.as_deref() != Some(expected_host_epoch)
         || current.runtime_generation != expected_runtime_generation
-        || !matches!(current.lifecycle, aludock_client_core::InstanceLifecycle::Active)
+        || !matches!(
+            current.lifecycle,
+            aludock_client_core::InstanceLifecycle::Active
+        )
     {
         return Err(workspace_command_error(
             "workspace_context_changed",
@@ -5630,7 +5957,7 @@ async fn workspace_entries(
     cursor: Option<WorkspaceFileCursor>,
 ) -> Result<WorkspaceFilePage, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     verify_workspace_scope(
         &client,
         &instance_id,
@@ -5670,7 +5997,7 @@ async fn workspace_entry_metadata(
     path: String,
 ) -> Result<WorkspaceEntryResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     verify_workspace_scope(
         &client,
         &instance_id,
@@ -5732,7 +6059,7 @@ async fn read_workspace_file(
         ));
     }
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     verify_workspace_scope(
         &client,
         &instance_id,
@@ -6022,7 +6349,7 @@ async fn save_workspace_cached_file(
     expected_host_epoch: String,
     expected_runtime_generation: u64,
     cache_id: String,
-) -> Result<WorkspaceSaveResult, CommandError> {
+) -> Result<LocalSaveResult, CommandError> {
     let cache = cached_workspace_file(
         &state,
         &host_id,
@@ -6033,7 +6360,7 @@ async fn save_workspace_cached_file(
         &cache_id,
     )?;
     let Some(destination) = pick_save_destination(&app, &cache.result.entry.name).await? else {
-        return Ok(WorkspaceSaveResult::Cancelled);
+        return Ok(LocalSaveResult::Cancelled);
     };
     let saved_location = describe_saved_location(&destination, &cache.result.entry.name)?;
     let staging_path = delivery_staging_path(&app, Some(&destination))?;
@@ -6064,7 +6391,7 @@ async fn save_workspace_cached_file(
         ));
     }
     commit_verified_file(&app, staging_path, destination).await?;
-    Ok(WorkspaceSaveResult::Saved {
+    Ok(LocalSaveResult::Saved {
         label: saved_location.label,
     })
 }
@@ -6077,7 +6404,7 @@ async fn list_workspace(
     path: String,
 ) -> Result<WorkspacePage, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     client
         .list_workspace(&path, None)
         .await
@@ -6196,7 +6523,7 @@ async fn list_sessions(
 ) -> Result<SafeSessionList, CommandError> {
     let request_id = begin_session_token_request(&state)?;
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     let current = verify_session_scope(
         &client,
         &instance_id,
@@ -6315,7 +6642,7 @@ async fn new_session(
     operation_id: String,
 ) -> Result<SessionReplacementResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     verify_session_scope(
         &client,
         &instance_id,
@@ -6362,7 +6689,7 @@ async fn switch_session(
         &session_token,
     )?;
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     verify_session_scope(
         &client,
         &instance_id,
@@ -6402,7 +6729,7 @@ async fn name_session(
     name: String,
 ) -> Result<SessionNameResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     verify_session_scope(
         &client,
         &instance_id,
@@ -6437,7 +6764,7 @@ async fn compact_session(
     custom_instructions: Option<String>,
 ) -> Result<SessionCompactionResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     verify_session_scope(
         &client,
         &instance_id,
@@ -6474,7 +6801,7 @@ async fn reload_session(
     operation_id: String,
 ) -> Result<SafeSessionReload, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     verify_session_scope(
         &client,
         &instance_id,
@@ -6534,7 +6861,7 @@ async fn session_tree(
     expected_runtime_generation: u64,
 ) -> Result<SessionTree, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     let (tree, host_epoch) = client
         .session_tree(&instance_id)
         .await
@@ -6569,7 +6896,7 @@ async fn navigate_session(
     custom_instructions: Option<String>,
 ) -> Result<SessionNavigateResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     verify_session_scope(
         &client,
         &instance_id,
@@ -6614,7 +6941,7 @@ async fn fork_session(
     entry_id: String,
 ) -> Result<SessionForkResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     verify_session_scope(
         &client,
         &instance_id,
@@ -6649,7 +6976,7 @@ async fn clone_session(
     entry_id: String,
 ) -> Result<SessionReplacementResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     verify_session_scope(
         &client,
         &instance_id,
@@ -6684,7 +7011,7 @@ async fn create_work(
     project_trust_decision: Option<String>,
 ) -> Result<InstanceSnapshot, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&store)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
     let continuation = parse_trust_continuation(
         trust_challenge_id.as_deref(),
         project_trust_decision.as_deref(),
@@ -6793,6 +7120,7 @@ pub fn run() {
             conversation_history_entry,
             conversation_image,
             published_image,
+            save_preview_image,
             list_deliverables,
             download_deliverable,
             open_saved_deliverable,
@@ -6876,39 +7204,58 @@ mod tests {
             instance_id: "work-1".into(),
         };
         let reference_generation = state.begin(&scope);
-        let projected = project_commands(CommandsResult {
-            commands: vec![CommandInfo {
-                name: "idea".into(),
-                description: Some("Generate ideas".into()),
-                source: SourceInfo {
-                    kind: aludock_client_core::SourceKind::Prompt,
-                    path: Some("/worker/private/prompts/idea.md".into()),
-                    package: None,
-                },
-                argument_hint: Some("[topic]".into()),
-                argument_completions: false,
-                content_available: Some(true),
-            }],
-            total: 1,
-            truncated: false,
-        }, &state, scope.clone(), reference_generation).expect("project current command catalog");
+        let projected = project_commands(
+            CommandsResult {
+                commands: vec![CommandInfo {
+                    name: "idea".into(),
+                    description: Some("Generate ideas".into()),
+                    source: SourceInfo {
+                        kind: aludock_client_core::SourceKind::Prompt,
+                        path: Some("/worker/private/prompts/idea.md".into()),
+                        package: None,
+                    },
+                    argument_hint: Some("[topic]".into()),
+                    argument_completions: false,
+                    content_available: Some(true),
+                }],
+                total: 1,
+                truncated: false,
+            },
+            &state,
+            scope.clone(),
+            reference_generation,
+        )
+        .expect("project current command catalog");
 
         let json = serde_json::to_string(&projected).expect("serialize projected commands");
         assert!(!json.contains("/worker/private"));
         assert!(json.contains("referenceId"));
         let reference_id = &projected.commands[0].reference_id;
-        let resolved = state.resolve(&scope, reference_id).expect("resolve opaque reference");
+        let resolved = state
+            .resolve(&scope, reference_id)
+            .expect("resolve opaque reference");
         assert_eq!(resolved.name, "idea");
-        assert_eq!(resolved.source.path.as_deref(), Some("/worker/private/prompts/idea.md"));
+        assert_eq!(
+            resolved.source.path.as_deref(),
+            Some("/worker/private/prompts/idea.md")
+        );
 
         let stale_generation = state.begin(&scope);
         let _current_generation = state.begin(&scope);
-        let stale = project_commands(CommandsResult {
-            commands: Vec::new(),
-            total: 0,
-            truncated: false,
-        }, &state, scope, stale_generation);
-        assert!(stale.is_err(), "a superseded catalog must not return unresolved references");
+        let stale = project_commands(
+            CommandsResult {
+                commands: Vec::new(),
+                total: 0,
+                truncated: false,
+            },
+            &state,
+            scope,
+            stale_generation,
+        );
+        assert!(
+            stale.is_err(),
+            "a superseded catalog must not return unresolved references"
+        );
     }
 
     #[test]
@@ -7017,7 +7364,11 @@ mod tests {
         }]);
 
         let grace = WindowsAwayDelay::FiveMinutes.duration().unwrap();
-        assert!(tracker.take_ready(Duration::from_secs(299), grace).is_empty());
+        assert!(
+            tracker
+                .take_ready(Duration::from_secs(299), grace)
+                .is_empty()
+        );
         assert_eq!(
             tracker.take_ready(Duration::from_secs(300), grace),
             vec![AwayCompletion {
@@ -7038,6 +7389,23 @@ mod tests {
             .is_err()
         );
         assert!(validate_renderable_image(b"GIF89abody", Some("image/png")).is_err());
+    }
+
+    #[test]
+    fn saving_a_preview_uses_its_visible_name_and_actual_image_format() {
+        let decoded = decode_image_name("%E7%BB%93%E6%9E%9C%20%E5%9B%BE.png").unwrap();
+        assert_eq!(
+            preview_image_save_name(&decoded, "image/png"),
+            "结果 图.png"
+        );
+        assert_eq!(
+            preview_image_save_name("result.png", "image/jpeg"),
+            "result.jpg"
+        );
+        assert_eq!(
+            preview_image_save_name("aludock-image", "image/webp"),
+            "aludock-image.webp"
+        );
     }
 
     fn endpoint_runtime(name: &str) -> (PathBuf, HostRuntimeState, String) {
@@ -7061,9 +7429,8 @@ mod tests {
             .unwrap();
         let host_id = aludock_client_core::host_id(host.certificate_der());
         let registry = HostRegistry::open(&path).unwrap();
-        let preferences = ClientPreferencesStore::open(
-            registry.root().join("client-preferences"),
-        ).unwrap();
+        let preferences =
+            ClientPreferencesStore::open(registry.root().join("client-preferences")).unwrap();
         let runtime = HostRuntimeState {
             registry,
             preferences,
@@ -7071,8 +7438,22 @@ mod tests {
                 active_host_id: Some(host_id.clone()),
                 selection_generation: 1,
             })),
+            selected_client: Arc::new(Mutex::new(None)),
         };
         (path, runtime, host_id)
+    }
+
+    #[test]
+    fn selected_host_commands_share_one_router_instance() {
+        let (path, runtime, host_id) = endpoint_runtime("shared-router");
+        let store = runtime.registry.resolve_store(Some(&host_id)).unwrap();
+        let first = dock_client(&runtime, &host_id, 1, &store).unwrap();
+        let second = dock_client(&runtime, &host_id, 1, &store).unwrap();
+
+        first.router().close();
+
+        assert!(second.router().snapshot().closed);
+        fs::remove_dir_all(path).unwrap();
     }
 
     #[test]

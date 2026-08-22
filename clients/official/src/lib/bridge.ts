@@ -256,6 +256,15 @@ export async function loadAttachmentPreviewBytes(workId: string, token: string, 
   return binaryBytes(value)
 }
 
+export type PreviewImageSaveResult = { status: 'cancelled' } | { status: 'saved'; label: string }
+
+export async function savePreviewImage(name: string, bytes: Uint8Array): Promise<PreviewImageSaveResult> {
+  if (!isTauri) throw new Error('浏览器设计预览不会保存图片')
+  return invoke<PreviewImageSaveResult>('save_preview_image', bytes, {
+    headers: { 'x-aludock-image-name': encodeURIComponent(name) },
+  })
+}
+
 export async function uploadAttachment(workId: string, token: string, context: HostContext): Promise<AttachmentUploadResult> {
   if (isTauri) return invoke('upload_attachment', { ...context, workId, token })
   throw new Error('浏览器设计预览不会上传附件')

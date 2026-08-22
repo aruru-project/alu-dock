@@ -4,13 +4,16 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::{
     io::{AsyncBufReadExt, AsyncRead, BufReader},
-    time::timeout,
+    time::{Instant, timeout, timeout_at},
 };
 use uuid::Uuid;
 
 use crate::{
-    ClientError, ClientIdentity, Endpoint, HostConnectionProfile, IdentityStore, Result,
-    tls::{ConnectedTls, connect_tls, read_json_line, write_json_line},
+    ClientError, Endpoint, HostConnectionProfile, HostConnectionRouter, IdentityStore, Result,
+    timing::{
+        CONTROL_RESPONSE_TIMEOUT, LONG_MUTATION_RESPONSE_TIMEOUT, RESPONSE_TRANSFER_IDLE_TIMEOUT,
+    },
+    tls::{ConnectedTls, PinnedTlsConnector, read_json_line, write_json_line},
     wire::decode_canonical_base64,
 };
 
@@ -19,29 +22,27 @@ const MAX_DOCK_TRANSFER_BYTES: usize = 256 * 1024 * 1024;
 const MAX_RESPONSE_TRANSFER_CHUNK_BYTES: usize = 512 * 1024;
 const MAX_RESPONSE_TRANSFER_CHUNKS: usize =
     MAX_DOCK_TRANSFER_BYTES.div_ceil(MAX_RESPONSE_TRANSFER_CHUNK_BYTES);
-const RESPONSE_TRANSFER_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
-const CONTROL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(30);
-const LONG_MUTATION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(600);
 pub(crate) const CATALOG_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Clone)]
 pub struct DockClient {
-    endpoints: Vec<Endpoint>,
-    identity: ClientIdentity,
-    host_certificate: Vec<u8>,
-    client_id: String,
+    router: HostConnectionRouter,
+    compatibility_endpoints: std::sync::Arc<Vec<Endpoint>>,
 }
 
 impl DockClient {
+    pub fn new(router: HostConnectionRouter) -> Self {
+        let compatibility_endpoints = std::sync::Arc::new(router.endpoint_snapshot());
+        Self {
+            router,
+            compatibility_endpoints,
+        }
+    }
+
     pub fn from_store(store: &IdentityStore, endpoint_override: Option<Endpoint>) -> Result<Self> {
         let paired = store.load_pairing()?;
-        let endpoint = endpoint_override.unwrap_or_else(|| paired.metadata.endpoint.clone());
-        Ok(Self {
-            endpoints: vec![endpoint],
-            identity: paired.identity,
-            host_certificate: paired.host_certificate,
-            client_id: paired.metadata.client_id,
-        })
+        let endpoint = endpoint_override.unwrap_or(paired.metadata.endpoint);
+        Self::from_store_endpoints(store, [endpoint])
     }
 
     /// Builds a client that can safely try multiple addresses for one paired Host.
@@ -50,47 +51,17 @@ impl DockClient {
         store: &IdentityStore,
         endpoints: impl IntoIterator<Item = Endpoint>,
     ) -> Result<Self> {
-        let paired = store.load_pairing()?;
         let mut endpoints = endpoints.into_iter().collect::<Vec<_>>();
         endpoints.dedup();
-        if endpoints.is_empty() {
-            return Err(ClientError::InvalidEndpoint(
-                "at least one Host address is required".into(),
-            ));
-        }
-        Ok(Self {
-            endpoints,
-            identity: paired.identity,
-            host_certificate: paired.host_certificate,
-            client_id: paired.metadata.client_id,
-        })
-    }
-
-    pub(crate) fn from_pinned_endpoint(
-        endpoint: Endpoint,
-        identity: ClientIdentity,
-        host_certificate: Vec<u8>,
-        client_id: String,
-    ) -> Self {
-        Self {
-            endpoints: vec![endpoint],
-            identity,
-            host_certificate,
-            client_id,
-        }
+        let router = HostConnectionRouter::from_store_endpoints(store, endpoints)?;
+        Ok(Self::new(router))
     }
 
     pub fn from_connection_profile(
         store: &IdentityStore,
         profile: &HostConnectionProfile,
     ) -> Result<Self> {
-        Self::from_store_endpoints(
-            store,
-            profile
-                .ordered_verified_endpoints()
-                .into_iter()
-                .map(|candidate| candidate.endpoint.clone()),
-        )
+        HostConnectionRouter::from_store(store, profile).map(Self::new)
     }
 
     pub fn from_connection_profile_preferred(
@@ -105,21 +76,32 @@ impl DockClient {
             .ok_or_else(|| {
                 ClientError::InvalidEndpoint("preferred Host address is not verified".into())
             })?;
-        let endpoints = std::iter::once(preferred.endpoint.clone()).chain(
-            ordered
-                .into_iter()
-                .filter(|candidate| candidate.id != preferred_endpoint_id)
-                .map(|candidate| candidate.endpoint.clone()),
-        );
-        Self::from_store_endpoints(store, endpoints)
+        let compatibility_endpoints = std::iter::once(preferred.endpoint.clone())
+            .chain(
+                ordered
+                    .iter()
+                    .filter(|candidate| candidate.id != preferred_endpoint_id)
+                    .map(|candidate| candidate.endpoint.clone()),
+            )
+            .collect::<Vec<_>>();
+        let router = HostConnectionRouter::from_store(store, profile)?;
+        router.prefer_endpoint(preferred_endpoint_id)?;
+        Ok(Self {
+            router,
+            compatibility_endpoints: std::sync::Arc::new(compatibility_endpoints),
+        })
     }
 
     pub fn endpoint(&self) -> &Endpoint {
-        &self.endpoints[0]
+        &self.compatibility_endpoints[0]
     }
 
     pub fn endpoints(&self) -> &[Endpoint] {
-        &self.endpoints
+        &self.compatibility_endpoints
+    }
+
+    pub fn router(&self) -> &HostConnectionRouter {
+        &self.router
     }
 
     pub(crate) async fn request<P, R>(
@@ -149,7 +131,12 @@ impl DockClient {
         P: Serialize,
         R: DeserializeOwned,
     {
-        let (mut connection, hello) = self.negotiate(required_capabilities).await?;
+        let request_deadline = Instant::now() + response_timeout_for(request_type);
+        let routed = self.negotiate(required_capabilities).await?;
+        let endpoint_id = routed.endpoint_id;
+        let route_generation = routed.route_generation;
+        let mut connection = routed.connection;
+        let hello = routed.hello;
         let request_id = Uuid::new_v4().to_string();
         let request = RequestEnvelope {
             kind: "request",
@@ -158,10 +145,19 @@ impl DockClient {
             request_type,
             params,
         };
-        if let Err(error) = write_json_line(&mut connection.stream, &request).await {
+        let write_result = timeout_at(
+            request_deadline,
+            write_json_line(&mut connection.stream, &request),
+        )
+        .await
+        .map_err(|_| ClientError::Protocol("control request timed out".into()))
+        .and_then(|result| result);
+        if let Err(error) = write_result {
+            self.router
+                .report_connection_failure(&endpoint_id, route_generation);
             return Err(ambiguous_if_mutation(error, operation_id));
         }
-        let response = timeout(response_timeout_for(request_type), async {
+        let response = timeout_at(request_deadline, async {
             if request_type == "session.tree" {
                 read_response_envelope(
                     &mut connection.stream,
@@ -179,10 +175,20 @@ impl DockClient {
         .and_then(|response| response);
         let response = match response {
             Ok(response) => response,
-            Err(error) => return Err(ambiguous_if_mutation(error, operation_id)),
+            Err(error) => {
+                self.router
+                    .report_connection_failure(&endpoint_id, route_generation);
+                return Err(ambiguous_if_mutation(error, operation_id));
+            }
         };
-        validate_response_envelope(&response, &request_id, &hello.host.host_epoch)
-            .map_err(|error| ambiguous_if_mutation(error, operation_id))?;
+        if let Err(error) =
+            validate_response_envelope(&response, &request_id, &hello.host.host_epoch)
+        {
+            self.router
+                .report_connection_failure(&endpoint_id, route_generation);
+            return Err(ambiguous_if_mutation(error, operation_id));
+        }
+        self.router.ensure_open()?;
         let result = response_result(response, request_type, operation_id)?;
         Ok((result, hello.host.host_epoch))
     }
@@ -197,27 +203,58 @@ impl DockClient {
         P: Serialize,
         R: DeserializeOwned,
     {
-        let (mut connection, hello) = self.negotiate(required_capabilities).await?;
+        let request_deadline = Instant::now() + CONTROL_RESPONSE_TIMEOUT;
+        let routed = self.negotiate(required_capabilities).await?;
+        let endpoint_id = routed.endpoint_id;
+        let route_generation = routed.route_generation;
+        let mut connection = routed.connection;
+        let hello = routed.hello;
         let request_id = Uuid::new_v4().to_string();
-        write_json_line(
-            &mut connection.stream,
-            &RequestEnvelope {
-                kind: "request",
-                version: 2,
-                request_id: &request_id,
-                request_type,
-                params,
-            },
+        if let Err(error) = timeout_at(
+            request_deadline,
+            write_json_line(
+                &mut connection.stream,
+                &RequestEnvelope {
+                    kind: "request",
+                    version: 2,
+                    request_id: &request_id,
+                    request_type,
+                    params,
+                },
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| ClientError::Protocol("control request timed out".into()))
+        .and_then(|result| result)
+        {
+            self.router
+                .report_connection_failure(&endpoint_id, route_generation);
+            return Err(error);
+        }
         let maximum_bytes = maximum_line_bytes(&hello);
-        let response: ResponseEnvelope = timeout(
-            CONTROL_RESPONSE_TIMEOUT,
+        let response: ResponseEnvelope = match timeout_at(
+            request_deadline,
             read_json_line(&mut connection.stream, maximum_bytes),
         )
         .await
-        .map_err(|_| ClientError::Protocol("control response timed out".into()))??;
-        validate_response_envelope(&response, &request_id, &hello.host.host_epoch)?;
+        .map_err(|_| ClientError::Protocol("control response timed out".into()))
+        .and_then(|response| response)
+        {
+            Ok(response) => response,
+            Err(error) => {
+                self.router
+                    .report_connection_failure(&endpoint_id, route_generation);
+                return Err(error);
+            }
+        };
+        if let Err(error) =
+            validate_response_envelope(&response, &request_id, &hello.host.host_epoch)
+        {
+            self.router
+                .report_connection_failure(&endpoint_id, route_generation);
+            return Err(error);
+        }
+        self.router.ensure_open()?;
         let result = response_result(response, request_type, None)?;
         Ok((
             result,
@@ -226,6 +263,9 @@ impl DockClient {
                 request_id,
                 host_epoch: hello.host.host_epoch,
                 maximum_bytes,
+                router: self.router.clone(),
+                endpoint_id,
+                route_generation,
             },
         ))
     }
@@ -233,55 +273,42 @@ impl DockClient {
     pub(crate) async fn negotiate(
         &self,
         required_capabilities: &[&str],
-    ) -> Result<(ConnectedTls, HelloAck)> {
-        let mut failures = Vec::new();
-        for endpoint in &self.endpoints {
-            match self
-                .negotiate_endpoint(endpoint, required_capabilities)
-                .await
-            {
-                Ok(negotiated) => return Ok(negotiated),
-                Err(error) => failures.push(format!("{endpoint}: {error}")),
-            }
-        }
-        Err(ClientError::Protocol(format!(
-            "none of the saved addresses reached the paired Host ({})",
-            failures.join("; ")
-        )))
+    ) -> Result<crate::connection_router::RoutedConnection> {
+        self.router.acquire(required_capabilities).await
     }
+}
 
-    async fn negotiate_endpoint(
-        &self,
-        endpoint: &Endpoint,
-        required_capabilities: &[&str],
-    ) -> Result<(ConnectedTls, HelloAck)> {
-        let mut connection =
-            connect_tls(endpoint, &self.identity, Some(&self.host_certificate)).await?;
-        let request_id = Uuid::new_v4().to_string();
-        write_json_line(
-            &mut connection.stream,
-            &ClientHello {
-                kind: "hello",
-                request_id: &request_id,
-                versions: [2],
-                client: ClientDescription {
-                    name: "aludock-client",
-                    version: env!("CARGO_PKG_VERSION"),
-                    client_id: &self.client_id,
-                },
-                required_capabilities,
+pub(crate) async fn negotiate_pinned_endpoint(
+    endpoint: &Endpoint,
+    connector: &PinnedTlsConnector,
+    client_id: &str,
+    required_capabilities: &[&str],
+) -> Result<(ConnectedTls, HelloAck)> {
+    let mut connection = connector.connect(endpoint).await?;
+    let request_id = Uuid::new_v4().to_string();
+    write_json_line(
+        &mut connection.stream,
+        &ClientHello {
+            kind: "hello",
+            request_id: &request_id,
+            versions: [2],
+            client: ClientDescription {
+                name: "aludock-client",
+                version: env!("CARGO_PKG_VERSION"),
+                client_id,
             },
-        )
-        .await?;
-        let reply: HelloReply = timeout(
-            CONTROL_RESPONSE_TIMEOUT,
-            read_json_line(&mut connection.stream, MAX_CONTROL_LINE_BYTES),
-        )
-        .await
-        .map_err(|_| ClientError::Protocol("Host hello timed out".into()))??;
-        let hello = validate_hello(reply, &request_id, required_capabilities)?;
-        Ok((connection, hello))
-    }
+            required_capabilities,
+        },
+    )
+    .await?;
+    let reply: HelloReply = timeout(
+        CONTROL_RESPONSE_TIMEOUT,
+        read_json_line(&mut connection.stream, MAX_CONTROL_LINE_BYTES),
+    )
+    .await
+    .map_err(|_| ClientError::Protocol("Host hello timed out".into()))??;
+    let hello = validate_hello(reply, &request_id, required_capabilities)?;
+    Ok((connection, hello))
 }
 
 #[derive(Deserialize)]
@@ -426,6 +453,9 @@ pub(crate) struct ProtocolEventStream {
     request_id: String,
     host_epoch: String,
     maximum_bytes: usize,
+    router: HostConnectionRouter,
+    endpoint_id: String,
+    route_generation: u64,
 }
 
 impl ProtocolEventStream {
@@ -434,19 +464,33 @@ impl ProtocolEventStream {
     }
 
     pub(crate) async fn next<T: DeserializeOwned>(&mut self) -> Result<T> {
+        self.router.ensure_open()?;
         let envelope: EventEnvelope =
-            read_json_line(&mut self.connection.stream, self.maximum_bytes).await?;
+            match read_json_line(&mut self.connection.stream, self.maximum_bytes).await {
+                Ok(envelope) => envelope,
+                Err(error) => {
+                    self.router
+                        .report_connection_failure(&self.endpoint_id, self.route_generation);
+                    return Err(error);
+                }
+            };
         if envelope.kind != "event"
             || envelope.version != 2
             || envelope.request_id != self.request_id
             || envelope.host_epoch != self.host_epoch
         {
+            self.router
+                .report_connection_failure(&self.endpoint_id, self.route_generation);
             return Err(ClientError::Protocol(
                 "event correlation, version, or Host epoch was invalid".into(),
             ));
         }
-        serde_json::from_value(envelope.event)
-            .map_err(|error| ClientError::Protocol(format!("invalid event: {error}")))
+        self.router.ensure_open()?;
+        serde_json::from_value(envelope.event).map_err(|error| {
+            self.router
+                .report_connection_failure(&self.endpoint_id, self.route_generation);
+            ClientError::Protocol(format!("invalid event: {error}"))
+        })
     }
 }
 

@@ -1,8 +1,8 @@
 use std::{io::Write, path::PathBuf};
 
 use aludock_client_core::{
-    DockClient, Endpoint, HostInfo, HostRegistry, IdentityStore, InstanceSelector, PairingProgress,
-    ReadReplay, host_info, host_info_for_profile,
+    DockClient, Endpoint, HostConnectionRouter, HostInfo, HostRegistry, IdentityStore,
+    InstanceSelector, PairingProgress, ReadReplay, host_info,
 };
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -242,10 +242,13 @@ async fn main() -> Result<()> {
                         .load_connection_profile()
                         .context("could not load the Host connection profile")?
                         .context("no paired Host profile is available")?;
-                    host_info_for_profile(&store, &profile)
-                        .await
-                        .map(|(info, _)| info)
-                        .context("host.info failed")?
+                    DockClient::new(
+                        HostConnectionRouter::from_store(&store, &profile)
+                            .context("could not load the paired Host identity")?,
+                    )
+                    .host_info()
+                    .await
+                    .context("host.info failed")?
                 }
             };
             print_host_info(&info);
@@ -369,7 +372,8 @@ fn client_from_profile(store: &IdentityStore) -> Result<DockClient> {
         .load_connection_profile()
         .context("could not load the Host connection profile")?
         .context("no paired Host profile is available")?;
-    DockClient::from_connection_profile(store, &profile)
+    HostConnectionRouter::from_store(store, &profile)
+        .map(DockClient::new)
         .context("could not load the paired Host identity")
 }
 

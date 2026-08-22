@@ -66,6 +66,7 @@ import {
   updateClientPreferences,
   uploadAttachment,
   deleteHostEndpoint,
+  savePreviewImage,
   saveUnverifiedHostEndpoint,
   setConnectionPolicy,
   setExtensionToolsExpanded,
@@ -188,6 +189,8 @@ type AttachmentPreviewResource = { url: string; mediaType: string }
 const imageResources = ref<Record<string, ConversationImageResource>>({})
 const attachmentPreviews = ref<Record<string, AttachmentPreviewResource>>({})
 const imagePreview = ref<ImagePreview | null>(null)
+const imageSaving = ref(false)
+const imageSaveStatus = ref<{ tone: 'success' | 'error'; text: string } | null>(null)
 let imageDomainKey = ''
 let imageLoadEpoch = 0
 const conversationLoading = ref(false)
@@ -1160,6 +1163,8 @@ function closeModal() {
   hostSettingsOpen.value = false
   composerExpanded.value = false
   imagePreview.value = null
+  imageSaving.value = false
+  imageSaveStatus.value = null
 }
 
 function handleGlobalModalKeydown(event: KeyboardEvent) {
@@ -1618,16 +1623,22 @@ function resetAttachmentPreviews() {
   if (imagePreview.value?.kind === 'attachment') imagePreview.value = null
 }
 
+function showImagePreview(preview: ImagePreview) {
+  rememberModalTrigger()
+  imageSaving.value = false
+  imageSaveStatus.value = null
+  imagePreview.value = preview
+}
+
 function openAttachmentPreview(key: string, name: string) {
   const resource = attachmentPreviews.value[key]
   if (!resource) return
-  rememberModalTrigger()
-  imagePreview.value = {
+  showImagePreview({
     kind: 'attachment',
     attachmentKey: key,
     url: resource.url,
     name: name.replace(/[\\/]/g, '_'),
-  }
+  })
 }
 
 function attachmentCanPreview(mediaType?: string) {
@@ -2296,12 +2307,38 @@ function imageLoadMessage(cause: unknown) {
 function openImagePreview(part: ConversationImagePart) {
   const resource = imageResource(part)
   if (resource.state !== 'ready' || !resource.url) return
-  rememberModalTrigger()
-  imagePreview.value = {
+  showImagePreview({
     kind: 'conversation',
     imageKey: part.imageKey,
     url: resource.url,
     name: (part.name || 'aludock-image').replace(/[\\/]/g, '_'),
+  })
+}
+
+async function saveOpenImage() {
+  const preview = imagePreview.value
+  if (!preview || imageSaving.value) return
+  imageSaving.value = true
+  imageSaveStatus.value = null
+  try {
+    if (!isTauri) {
+      const link = document.createElement('a')
+      link.href = preview.url
+      link.download = preview.name
+      link.click()
+      return
+    }
+    const response = await fetch(preview.url)
+    if (!response.ok) throw new Error('图片内容无法读取。')
+    const result = await savePreviewImage(preview.name, new Uint8Array(await response.arrayBuffer()))
+    if (imagePreview.value?.url !== preview.url || result.status === 'cancelled') return
+    imageSaveStatus.value = { tone: 'success', text: '图片已保存到所选位置。' }
+  } catch (cause) {
+    if (imagePreview.value?.url === preview.url) {
+      imageSaveStatus.value = { tone: 'error', text: errorMessage(cause, '图片没有保存完成，请重试。') }
+    }
+  } finally {
+    if (imagePreview.value?.url === preview.url) imageSaving.value = false
   }
 }
 
@@ -3678,9 +3715,13 @@ function handleOutputClick(event: MouseEvent) {
     <Transition name="fade">
       <div v-if="imagePreview" class="alu-image-preview-overlay" role="presentation" @click.self="closeModal" @keydown="handleModalKeydown" @wheel.prevent.stop>
         <section ref="modalSurface" class="alu-image-preview" role="dialog" aria-modal="true" aria-label="图片预览" tabindex="-1" @wheel="handleModalWheel">
+          <button type="button" class="alu-image-preview-save" :disabled="imageSaving" @click="saveOpenImage"><FileDown :size="17" />{{ imageSaving ? '保存中…' : '保存图片' }}</button>
           <button type="button" class="alu-image-preview-close" aria-label="关闭图片预览" data-modal-initial @click="closeModal">×</button>
           <ImageZoomSurface :url="imagePreview.url" :name="imagePreview.name" @failed="markPreviewImageFailed" />
-          <footer><span>{{ imagePreview.name }}</span><a :href="imagePreview.url" :download="imagePreview.name">下载</a></footer>
+          <footer>
+            <span>{{ imagePreview.name }}</span>
+            <strong v-if="imageSaveStatus" :class="`is-${imageSaveStatus.tone}`" role="status">{{ imageSaveStatus.text }}</strong>
+          </footer>
         </section>
       </div>
     </Transition>

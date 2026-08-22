@@ -2,8 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ClientError, ClientIdentity, DockClient, Endpoint, HostConnectionProfile, IdentityStore,
-    PendingPairing, Result, StoredPairing, capabilities,
+    ClientError, ClientIdentity, DockClient, Endpoint, HostConnectionProfile, HostConnectionRouter,
+    IdentityStore, PendingPairing, Result, StoredPairing, capabilities,
 };
 
 #[derive(Clone, Debug, Deserialize)]
@@ -60,25 +60,28 @@ pub async fn host_info_for_profile(
     store: &IdentityStore,
     profile: &HostConnectionProfile,
 ) -> Result<(HostInfo, String)> {
-    let paired = store.load_pairing()?;
-    let mut failures = Vec::new();
-    for candidate in profile.ordered_verified_endpoints() {
-        match request_host_info(
-            &candidate.endpoint,
-            &paired.identity,
-            &paired.host_certificate,
-            &paired.metadata.client_id,
-        )
-        .await
-        {
-            Ok(info) => return Ok((info, candidate.id.clone())),
-            Err(error) => failures.push(format!("{}: {error}", candidate.label)),
+    let client = DockClient::from_connection_profile(store, profile)?;
+    let info = client.host_info().await?;
+    let endpoint_id = client
+        .router()
+        .snapshot()
+        .active_endpoint_id
+        .ok_or_else(|| ClientError::Protocol("Host connection has no active address".into()))?;
+    Ok((info, endpoint_id))
+}
+
+impl DockClient {
+    pub async fn host_info(&self) -> Result<HostInfo> {
+        let (result, host_epoch): (HostInfo, String) = self
+            .request_with_host_epoch("host.info", &EmptyParams {}, capabilities::HOST_INFO, None)
+            .await?;
+        if result.host.host_epoch != host_epoch {
+            return Err(ClientError::Protocol(
+                "host.info result did not describe the negotiated host epoch".into(),
+            ));
         }
+        Ok(result)
     }
-    Err(ClientError::Protocol(format!(
-        "none of the verified addresses reached the paired Host ({})",
-        failures.join("; ")
-    )))
 }
 
 pub(crate) async fn probe_pending_pairing(pending: &PendingPairing) -> Result<()> {
@@ -109,21 +112,14 @@ async fn request_host_info(
     host_certificate: &[u8],
     client_id: &str,
 ) -> Result<HostInfo> {
-    let client = DockClient::from_pinned_endpoint(
+    DockClient::new(HostConnectionRouter::from_pinned_endpoint(
         endpoint.clone(),
         identity.clone(),
         host_certificate.to_vec(),
         client_id.to_owned(),
-    );
-    let (result, host_epoch): (HostInfo, String) = client
-        .request_with_host_epoch("host.info", &EmptyParams {}, capabilities::HOST_INFO, None)
-        .await?;
-    if result.host.host_epoch != host_epoch {
-        return Err(ClientError::Protocol(
-            "host.info result did not describe the negotiated host epoch".into(),
-        ));
-    }
-    Ok(result)
+    )?)
+    .host_info()
+    .await
 }
 
 #[derive(Serialize)]

@@ -1,4 +1,4 @@
-use std::{fmt, sync::Arc, time::Duration};
+use std::{fmt, sync::Arc};
 
 use rustls::{
     ClientConfig, DigitallySignedStruct, Error as RustlsError, SignatureScheme,
@@ -14,13 +14,94 @@ use tokio::{
 };
 use tokio_rustls::{TlsConnector, client::TlsStream};
 
-use crate::{ClientError, ClientIdentity, Endpoint, Result, identity::validate_rsa_certificate};
-
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(6);
+use crate::{
+    ClientError, ClientIdentity, Endpoint, Result,
+    identity::validate_rsa_certificate,
+    timing::{CONNECT_PHASE_TIMEOUT, PROTOCOL_WRITE_TIMEOUT},
+};
 
 pub(crate) struct ConnectedTls {
     pub stream: TlsStream<TcpStream>,
     pub host_certificate: Vec<u8>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PinnedTlsConnector {
+    connector: TlsConnector,
+    expected_host_certificate: Option<Arc<[u8]>>,
+}
+
+impl PinnedTlsConnector {
+    pub(crate) fn new(
+        identity: &ClientIdentity,
+        expected_host_certificate: Option<&[u8]>,
+    ) -> Result<Self> {
+        let provider = rustls::crypto::aws_lc_rs::default_provider();
+        let expected_host_certificate = expected_host_certificate.map(Arc::<[u8]>::from);
+        let verifier = Arc::new(PinnedServerVerifier {
+            expected: expected_host_certificate.clone(),
+            supported: provider.signature_verification_algorithms,
+        });
+        let certificate = CertificateDer::from(identity.certificate_der().to_vec());
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            identity.private_key_der().to_vec(),
+        ));
+        let config = ClientConfig::builder_with_provider(Arc::new(provider))
+            .with_safe_default_protocol_versions()
+            .map_err(|error| ClientError::Tls(error.to_string()))?
+            .dangerous()
+            .with_custom_certificate_verifier(verifier)
+            .with_client_auth_cert(vec![certificate], key)
+            .map_err(|error| ClientError::Tls(error.to_string()))?;
+        Ok(Self {
+            connector: TlsConnector::from(Arc::new(config)),
+            expected_host_certificate,
+        })
+    }
+
+    pub(crate) async fn connect(&self, endpoint: &Endpoint) -> Result<ConnectedTls> {
+        let tcp = timeout(
+            CONNECT_PHASE_TIMEOUT,
+            TcpStream::connect((endpoint.host(), endpoint.port())),
+        )
+        .await
+        .map_err(|_| ClientError::Tls("timed out opening TCP connection".into()))??;
+        tcp.set_nodelay(true)?;
+        let server_name = ServerName::try_from("alu-dock")
+            .expect("static server name is valid")
+            .to_owned();
+        let stream = timeout(
+            CONNECT_PHASE_TIMEOUT,
+            self.connector.connect(server_name, tcp),
+        )
+        .await
+        .map_err(|_| ClientError::Tls("timed out establishing TLS connection".into()))?
+        .map_err(|error| {
+            if error.to_string().contains("pinned AluDock certificate") {
+                ClientError::HostCertificateMismatch
+            } else {
+                ClientError::Tls(error.to_string())
+            }
+        })?;
+        let host_certificate = stream
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|certificates| certificates.first())
+            .map(|certificate| certificate.as_ref().to_vec())
+            .ok_or(ClientError::MissingHostCertificate)?;
+        if self
+            .expected_host_certificate
+            .as_deref()
+            .is_some_and(|expected| host_certificate != expected)
+        {
+            return Err(ClientError::HostCertificateMismatch);
+        }
+        Ok(ConnectedTls {
+            stream,
+            host_certificate,
+        })
+    }
 }
 
 pub(crate) async fn connect_tls(
@@ -28,62 +109,9 @@ pub(crate) async fn connect_tls(
     identity: &ClientIdentity,
     expected_host_certificate: Option<&[u8]>,
 ) -> Result<ConnectedTls> {
-    let provider = rustls::crypto::aws_lc_rs::default_provider();
-    let verifier = Arc::new(PinnedServerVerifier {
-        expected: expected_host_certificate.map(Arc::<[u8]>::from),
-        supported: provider.signature_verification_algorithms,
-    });
-    let certificate = CertificateDer::from(identity.certificate_der().to_vec());
-    let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
-        identity.private_key_der().to_vec(),
-    ));
-    let config = ClientConfig::builder_with_provider(Arc::new(provider))
-        .with_safe_default_protocol_versions()
-        .map_err(|error| ClientError::Tls(error.to_string()))?
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_client_auth_cert(vec![certificate], key)
-        .map_err(|error| ClientError::Tls(error.to_string()))?;
-
-    let tcp = timeout(
-        CONNECT_TIMEOUT,
-        TcpStream::connect((endpoint.host(), endpoint.port())),
-    )
-    .await
-    .map_err(|_| ClientError::Tls("timed out opening TCP connection".into()))??;
-    tcp.set_nodelay(true)?;
-    let server_name = ServerName::try_from("alu-dock")
-        .expect("static server name is valid")
-        .to_owned();
-    let stream = timeout(
-        CONNECT_TIMEOUT,
-        TlsConnector::from(Arc::new(config)).connect(server_name, tcp),
-    )
-    .await
-    .map_err(|_| ClientError::Tls("timed out establishing TLS connection".into()))?
-    .map_err(|error| {
-        if error.to_string().contains("pinned AluDock certificate") {
-            ClientError::HostCertificateMismatch
-        } else {
-            ClientError::Tls(error.to_string())
-        }
-    })?;
-    let host_certificate = stream
-        .get_ref()
-        .1
-        .peer_certificates()
-        .and_then(|certificates| certificates.first())
-        .map(|certificate| certificate.as_ref().to_vec())
-        .ok_or(ClientError::MissingHostCertificate)?;
-    if let Some(expected) = expected_host_certificate
-        && host_certificate != expected
-    {
-        return Err(ClientError::HostCertificateMismatch);
-    }
-    Ok(ConnectedTls {
-        stream,
-        host_certificate,
-    })
+    PinnedTlsConnector::new(identity, expected_host_certificate)?
+        .connect(endpoint)
+        .await
 }
 
 pub(crate) async fn write_json_line<T, W>(stream: &mut W, value: &T) -> Result<()>
@@ -93,9 +121,13 @@ where
 {
     let mut bytes = serde_json::to_vec(value)?;
     bytes.push(b'\n');
-    stream.write_all(&bytes).await?;
-    stream.flush().await?;
-    Ok(())
+    timeout(PROTOCOL_WRITE_TIMEOUT, async {
+        stream.write_all(&bytes).await?;
+        stream.flush().await?;
+        Result::<()>::Ok(())
+    })
+    .await
+    .map_err(|_| ClientError::Protocol("timed out writing a protocol frame".into()))?
 }
 
 pub(crate) async fn read_json_line<T, R>(stream: &mut R, maximum_bytes: usize) -> Result<T>

@@ -3,6 +3,7 @@ mod attachments;
 mod capabilities;
 mod client;
 mod config;
+mod connection_router;
 mod connections;
 mod conversation;
 mod deliverables;
@@ -20,6 +21,7 @@ mod published_files;
 mod sessions;
 mod srp;
 mod storage;
+mod timing;
 mod tls;
 #[cfg(windows)]
 mod windows_security;
@@ -42,6 +44,7 @@ pub use config::{
     SettingInfo, SettingKey, SettingSource, SettingUpdate, SettingUpdateResult, SettingValue,
     SettingValueType, SettingsResult, SourceInfo, SourceKind, ThinkingLevel, ToolInfo, ToolsResult,
 };
+pub use connection_router::{HostConnectionRouter, RouteSnapshot};
 pub use connections::{
     ConnectionKind, ConnectionPolicy, EndpointState, EndpointTestResult, EndpointTestStatus,
     HostConnectionProfile, HostEndpoint, delete_endpoint, host_id, probe_host_endpoint,

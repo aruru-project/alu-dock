@@ -35,6 +35,8 @@ let viewportTimer = 0
 let countdownTimer = 0
 let unknownInteractionId = ''
 let mounted = false
+let acquisitionRevision = 0
+let acquisitionInFlight = false
 let attemptedAutomaticControlKey = ''
 const pendingControllerEmissions = new Map<string, ExtensionControllerEmission[]>()
 
@@ -75,7 +77,22 @@ watch(() => request.value?.interactionId, async (id) => {
   dialog.value?.querySelector<HTMLElement>('input, textarea, button')?.focus()
 })
 watch(() => extension.controller?.handle, () => scheduleViewport())
-watch([automaticControlKey, () => extension.controllerState], ([key]) => tryAutomaticAcquire(key))
+watch(automaticControlKey, (key, previous) => {
+  if (key !== previous) {
+    acquisitionRevision++
+    acquiringError.value = ''
+    attemptedAutomaticControlKey = ''
+  }
+  tryAutomaticAcquire(key)
+})
+watch(() => extension.controllerState, () => tryAutomaticAcquire(automaticControlKey.value))
+watch(() => extension.hasAttention, (hasAttention) => {
+  if (!hasAttention) {
+    acquiringError.value = ''
+    return
+  }
+  if (!extension.controller) void acquire()
+})
 
 onMounted(async () => {
   if (isTauri) {
@@ -107,6 +124,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   mounted = false
+  acquisitionRevision++
   const handle = extension.controller?.handle
   if (handle) void extension.releaseController(handle, 'detached')
   pendingControllerEmissions.clear()
@@ -121,37 +139,58 @@ function tryAutomaticAcquire(key: string) {
     attemptedAutomaticControlKey = ''
     return
   }
-  if (!mounted || key === attemptedAutomaticControlKey || extension.controller || extension.controllerState === 'acquiring') return
+  if (!mounted || acquisitionInFlight || key === attemptedAutomaticControlKey || extension.controller || extension.controllerState === 'acquiring') return
   attemptedAutomaticControlKey = key
   void acquire()
 }
 
 async function acquire() {
   const work = props.work
-  if (!isTauri || !work || work.lifecycle !== 'active' || !work.ownerHostEpoch || extension.controllerState === 'acquiring') return
-  extension.beginAcquire()
+  const targetKey = automaticControlKey.value
+  if (!isTauri || !targetKey || !work || work.lifecycle !== 'active' || !work.ownerHostEpoch || acquisitionInFlight || extension.controllerState === 'acquiring') return
+  const revision = ++acquisitionRevision
+  const target = {
+    key: targetKey,
+    instanceId: work.id,
+    hostEpoch: work.ownerHostEpoch,
+    runtimeGeneration: work.runtimeGeneration,
+  }
+  acquisitionInFlight = true
+  attemptedAutomaticControlKey = targetKey
+  const storeRevision = extension.beginAcquire()
   acquiringError.value = ''
+  let stale = false
   try {
-    const binding = await acquireExtensionControl(work.id, work.ownerHostEpoch, work.runtimeGeneration, requireHostContext(app))
-    if (!app.contextMatches(binding) || !props.work || props.work.id !== binding.instanceId || props.work.ownerHostEpoch !== binding.hostEpoch || props.work.runtimeGeneration !== binding.runtimeGeneration) {
+    const binding = await acquireExtensionControl(target.instanceId, target.hostEpoch, target.runtimeGeneration, requireHostContext(app))
+    stale = revision !== acquisitionRevision
+      || automaticControlKey.value !== target.key
+      || !app.contextMatches(binding)
+      || !props.work
+      || props.work.id !== binding.instanceId
+      || props.work.ownerHostEpoch !== binding.hostEpoch
+      || props.work.runtimeGeneration !== binding.runtimeGeneration
+    if (stale || !extension.attachController(binding, storeRevision)) {
       await releaseExtensionControl(binding.handle, binding)
       pendingControllerEmissions.delete(binding.handle)
-      extension.failAcquire('detached')
+      stale = true
       return
     }
-    if (!extension.attachController(binding)) {
-      await releaseExtensionControl(binding.handle, binding)
-      pendingControllerEmissions.delete(binding.handle)
-      extension.failAcquire('detached')
-      return
-    }
+    acquiringError.value = ''
     for (const emission of pendingControllerEmissions.get(binding.handle) ?? []) applyEmission(emission)
     pendingControllerEmissions.clear()
     await nextTick()
     scheduleViewport()
-  } catch (cause) {
-    extension.failAcquire('disconnected')
-    acquiringError.value = errorMessage(cause)
+  } catch {
+    stale = stale || revision !== acquisitionRevision || automaticControlKey.value !== target.key
+    if (!stale && extension.failAcquire(storeRevision, 'disconnected')) {
+      acquiringError.value = extension.hasAttention
+        ? '暂时无法打开这项操作。它仍在等待处理，请重试打开。'
+        : ''
+    }
+  } finally {
+    acquisitionInFlight = false
+    if (stale) extension.failAcquire(storeRevision, 'detached')
+    tryAutomaticAcquire(automaticControlKey.value)
   }
 }
 
@@ -286,10 +325,9 @@ function interactionMethodLabel(method: string) {
   <div ref="root" class="extension-ui-surface">
     <div v-if="extension.hasAttention && !extension.controller" class="extension-attention" role="status">
       <AlertTriangle :size="17" />
-      <span>这个 Work 正在等待你的操作。</span>
-      <button :disabled="!isTauri || extension.controllerState === 'acquiring'" @click="acquire">{{ extension.controllerState === 'acquiring' ? '正在打开…' : '查看并处理' }}</button>
+      <span>{{ acquiringError || (extension.controllerState === 'acquiring' ? '正在打开这项操作…' : '这个 Work 正在等待你的操作。') }}</span>
+      <button :disabled="!isTauri || extension.controllerState === 'acquiring'" @click="acquire">{{ extension.controllerState === 'acquiring' ? '正在打开…' : acquiringError ? '重试打开' : '查看并处理' }}</button>
     </div>
-    <div v-if="acquiringError" class="extension-inline-error">{{ acquiringError }} <button @click="acquire">重试</button></div>
 
     <div class="extension-widgets above">
       <details v-for="widget in extension.aboveWidgets" :key="widget.key" :open="widgetIsOpen(widget)" @toggle="rememberWidgetOpen(widget, $event)">

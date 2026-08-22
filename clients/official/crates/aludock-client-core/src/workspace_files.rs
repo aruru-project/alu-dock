@@ -296,9 +296,13 @@ impl DockClient {
     {
         validate_instance_id(instance_id)?;
         let path = normalize_workspace_path(path)?;
-        let (mut connection, hello) = self.negotiate(REQUIRED_CAPABILITIES).await?;
+        let routed = self.negotiate(REQUIRED_CAPABILITIES).await?;
+        let endpoint_id = routed.endpoint_id;
+        let route_generation = routed.route_generation;
+        let mut connection = routed.connection;
+        let hello = routed.hello;
         let request_id = Uuid::new_v4().to_string();
-        write_json_line(
+        if let Err(error) = write_json_line(
             &mut connection.stream,
             &WorkspaceFileReadRequest {
                 kind: "request",
@@ -311,8 +315,13 @@ impl DockClient {
                 },
             },
         )
-        .await?;
-        read_after_request(
+        .await
+        {
+            self.router()
+                .report_connection_failure(&endpoint_id, route_generation);
+            return Err(error);
+        }
+        let result = read_after_request(
             &mut connection.stream,
             sink,
             maximum_line_bytes(&hello),
@@ -323,7 +332,14 @@ impl DockClient {
             &mut validate_ready,
             &mut on_progress,
         )
-        .await
+        .await;
+        if result.is_err() {
+            self.router()
+                .report_connection_failure(&endpoint_id, route_generation);
+        } else {
+            self.router().ensure_open()?;
+        }
+        result
     }
 }
 

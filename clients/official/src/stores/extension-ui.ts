@@ -31,6 +31,7 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
   const controller = ref<ExtensionControllerBinding | undefined>()
   const controllerState = ref<'detached' | 'acquiring' | 'attached' | 'disconnected'>('detached')
   let lifecycleRevision = 0
+  let acquisitionRevision = 0
   let uncertainRequest: { instanceId: string; hostEpoch: string; runtimeGeneration: number; interactionId: string } | undefined
 
   const hasAttention = computed(() => !!activeSummary.value && !activeRequest.value)
@@ -41,6 +42,7 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
 
   async function bootstrap(host: { hostId: string; selectionGeneration: number }, subscription: string, projection: ConversationBootstrap): Promise<boolean> {
     const revision = ++lifecycleRevision
+    acquisitionRevision++
     const previousIdentity = {
       hostId: hostId.value,
       selectionGeneration: selectionGeneration.value,
@@ -74,6 +76,7 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     hostEpoch.value = cursor.hostEpoch
     runtimeGeneration.value = cursor.runtimeGeneration
     subscriptionId.value = subscription
+    if (!binding) controllerState.value = 'detached'
     status.value = { ...projection.extensionUi.status }
     toolsExpanded.value = projection.extensionUi.toolsExpanded
     toolsResetRevision.value++
@@ -107,6 +110,7 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
       || lastSequence.value !== cursor.sequence
       || controller.value) return false
     lifecycleRevision++
+    acquisitionRevision++
     subscriptionId.value = subscription
     controllerState.value = 'detached'
     return true
@@ -114,6 +118,7 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
 
   async function clear(): Promise<boolean> {
     const revision = ++lifecycleRevision
+    acquisitionRevision++
     const handle = controller.value?.handle
     if (handle) {
       suspendController(handle, false)
@@ -156,6 +161,7 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     if (event.sequence !== lastSequence.value + 1) return false
     if (event.eventType === 'session.replaced') {
       const revision = ++lifecycleRevision
+      acquisitionRevision++
       const handle = controller.value?.handle
       if (handle) {
         suspendController(handle, false)
@@ -232,19 +238,25 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     }
   }
 
-  function beginAcquire() {
+  function beginAcquire(): number {
     lifecycleRevision++
+    const revision = ++acquisitionRevision
     controllerState.value = 'acquiring'
+    return revision
   }
-  function attachController(binding: ExtensionControllerBinding) {
-    if (!bindingMatches(binding)) return false
+  function attachController(binding: ExtensionControllerBinding, revision: number) {
+    if (revision !== acquisitionRevision || !bindingMatches(binding)) return false
+    acquisitionRevision++
     lifecycleRevision++
     controller.value = binding
     controllerState.value = 'attached'
     return true
   }
-  function failAcquire(state: 'detached' | 'disconnected' = 'disconnected') {
-    if (!controller.value) controllerState.value = state
+  function failAcquire(revision: number, state: 'detached' | 'disconnected' = 'disconnected') {
+    if (revision !== acquisitionRevision || controller.value) return false
+    acquisitionRevision++
+    controllerState.value = state
+    return true
   }
   function suspendController(handle: string, markLifecycle = true): boolean {
     if (controller.value?.handle !== handle) return false
