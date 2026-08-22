@@ -11,7 +11,6 @@ import {
   MAX_OBSERVATION_CURSOR_CHARS,
   MAX_OBSERVATION_LIST_ITEMS,
   MAX_OBSERVATION_MESSAGE_LIMIT,
-  MAX_OBSERVATION_MESSAGE_TEXT_CHARS,
   OBSERVATION_DATA_NOTICE,
   type ObservationMessageType,
   type ObservationNotification,
@@ -137,21 +136,17 @@ function validateObservation(raw: unknown): void {
   const value = record(raw, "Instance observation"); exactKeys(value, ["trust", "observedAt", "status", "conversation"], "Instance observation");
   if (value.trust !== CROSS_INSTANCE_TRUST) throw new Error("Observation trust marker is invalid"); timestampString(value.observedAt, "Observation timestamp"); validateObservedStatus(value.status);
   if (value.conversation !== undefined) {
-    const conversation = record(value.conversation, "Observation conversation"); exactKeys(conversation, ["messages", "hasEarlier", "nextCursor", "truncated"], "Observation conversation");
+    const conversation = record(value.conversation, "Observation conversation"); exactKeys(conversation, ["messages", "hasEarlier", "nextCursor"], "Observation conversation");
     if (!Array.isArray(conversation.messages) || conversation.messages.length > MAX_OBSERVATION_MESSAGE_LIMIT) throw new Error("Observation messages are invalid");
-    let anyTruncated = false;
     for (const item of conversation.messages) {
-      const message = record(item, "Observation message"); exactKeys(message, ["type", "text", "timestamp", "truncated"], "Observation message");
+      const message = record(item, "Observation message"); exactKeys(message, ["type", "text", "timestamp"], "Observation message");
       oneOf(message.type, ["user", "assistant", "other"] as const, "Observation message type");
-      boundedString(message.text, MAX_OBSERVATION_MESSAGE_TEXT_CHARS + 32, "Observation message text");
+      if (typeof message.text !== "string" || message.text.length < 1) throw new Error("Observation message text is invalid");
       if (message.timestamp !== undefined) timestampString(message.timestamp, "Observation message timestamp");
-      if (typeof message.truncated !== "boolean") throw new Error("Observation message truncation is invalid");
-      anyTruncated ||= message.truncated;
     }
     if (typeof conversation.hasEarlier !== "boolean") throw new Error("Observation pagination state is invalid");
     const nextCursor = optionalString(conversation.nextCursor, MAX_OBSERVATION_CURSOR_CHARS);
     if (conversation.hasEarlier !== (nextCursor !== undefined)) throw new Error("Observation pagination cursor is inconsistent");
-    if (typeof conversation.truncated !== "boolean" || conversation.truncated !== anyTruncated) throw new Error("Observation conversation truncation is inconsistent");
   }
 }
 

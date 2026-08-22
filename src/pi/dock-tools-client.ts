@@ -8,8 +8,6 @@ import {
 } from "../core/instance-observation.js";
 import type { DockToolsResult } from "../core/dock-tools.js";
 
-const MAX_MODEL_VISIBLE_OBSERVATION_CHARS = 12_000;
-
 /** Agent-facing client projection. Structured Host DTOs stay in tool details, never in model-visible text. */
 export function renderDockToolsResult(result: DockToolsResult): string {
   if (result.type === "deliver") {
@@ -31,7 +29,7 @@ export function renderObservationResult(result: ObservationResult): string {
     for (const status of result.result.instances) lines.push(`- ${statusLine(status, result.result.observedAt)}`);
     if (result.result.instances.length === 0) lines.push("- none");
     if (result.result.truncated) lines.push(`[… ${result.result.total - result.result.instances.length} more omitted]`);
-    return boundedText(lines.join("\n"));
+    return lines.join("\n");
   }
   if (result.type === "inspect") return renderObservation(result.result);
   if (result.type === "cancel") {
@@ -64,15 +62,14 @@ function renderObservation(observation: InstanceObservation): string {
   }
   const suffix: string[] = [];
   if (page?.hasEarlier) suffix.push("earlier messages available");
-  if (page?.truncated) suffix.push("message text truncated");
   lines.push("", `[end excerpt${suffix.length === 0 ? "" : ` · ${suffix.join(" · ")}`}]`);
   if (page?.nextCursor) lines.push(`continuation cursor: ${inline(page.nextCursor)}`);
-  return boundedText(lines.join("\n"));
+  return lines.join("\n");
 }
 
 function renderMessage(message: ObservationMessage): string {
   const label = message.type === "user" ? "target_user" : message.type === "assistant" ? "target_assistant" : "target_other";
-  const heading = `${label}${message.timestamp === undefined ? "" : ` · ${message.timestamp}`}${message.truncated ? " · truncated" : ""}`;
+  const heading = `${label}${message.timestamp === undefined ? "" : ` · ${message.timestamp}`}`;
   const quoted = message.text.replace(/\r\n?|[\u2028\u2029]/gu, "\n").split("\n").map((line) => `│ ${line}`).join("\n");
   return `${heading}\n${quoted}`;
 }
@@ -108,9 +105,4 @@ function elapsed(start: string, end: string): string {
 function inline(value: string, max = 256): string {
   const safe = value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, " ").replace(/\s+/gu, " ").trim();
   return safe.length <= max ? safe : `${safe.slice(0, Math.max(0, max - 1))}…`;
-}
-
-function boundedText(value: string): string {
-  if (value.length <= MAX_MODEL_VISIBLE_OBSERVATION_CHARS) return value;
-  return `${value.slice(0, MAX_MODEL_VISIBLE_OBSERVATION_CHARS - 30)}\n[… observation output truncated]`;
 }

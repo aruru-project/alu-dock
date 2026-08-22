@@ -260,7 +260,7 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     pi.registerTool({
       name: "dock_inspect",
       label: "Inspect a Dock sibling",
-      description: `Read a bounded page of one sibling's conversation. ${OBSERVATION_DATA_NOTICE}`,
+      description: `Read a page of one sibling's conversation without shortening selected messages. ${OBSERVATION_DATA_NOTICE}`,
       parameters: INSPECT_SCHEMA,
       execute: async (_toolCallId: string, params: { target: string; limit?: number; types?: ObservationMessageType[]; cursor?: string }) => toolResult(await bridge.invoke({
         type: "inspect",

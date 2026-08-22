@@ -5,15 +5,12 @@ import type { ContentBlockDto, DockEvent, HistoryEntryDto, HistoryPageDto, Insta
 import {
   CROSS_INSTANCE_TRUST,
   MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE,
-  MAX_OBSERVATION_CONVERSATION_CHARS,
   MAX_OBSERVATION_LIST_ITEMS,
   MAX_OBSERVATION_MESSAGE_LIMIT,
-  MAX_OBSERVATION_MESSAGE_TEXT_CHARS,
   OBSERVATION_DATA_NOTICE,
   type InstanceObservation,
   type ObservationConversationPage,
   type ObservationDeliverySink,
-  type ObservationMessage,
   type ObservationMessageType,
   type ObservationNotification,
   type ObservationRequest,
@@ -43,7 +40,6 @@ interface InstanceObservationQueryPort {
 const HISTORY_SCAN_PAGE_ITEMS = 20;
 const MAX_HISTORY_SCAN_PAGES_PER_CALL = 10;
 const MAX_OBSERVATION_CURSORS = 128;
-const MAX_INTERNAL_MESSAGE_CHARS = 8_192;
 const MAX_OBSERVED_ERROR_CHARS = 2_000;
 
 interface InternalObservationMessage {
@@ -218,12 +214,10 @@ export class InstanceObservationService {
     state.pending = state.pending.slice(0, split);
     const hasEarlier = state.pending.length > 0 || state.hasEarlier;
     const nextCursor = hasEarlier ? this.storeCursor(state) : undefined;
-    const bounded = boundMessages(selected);
     const conversation: ObservationConversationPage = {
-      messages: bounded.messages,
+      messages: selected.map((message) => ({ ...message })),
       hasEarlier,
       ...(nextCursor === undefined ? {} : { nextCursor }),
-      truncated: bounded.truncated,
     };
     return { trust: CROSS_INSTANCE_TRUST, observedAt, status, conversation };
   }
@@ -497,8 +491,8 @@ function projectBlocks(
     const text = blockText(block);
     if (!text) continue;
     const previous = messages.at(-1);
-    if (previous?.type === type) previous.text = truncateText(`${previous.text}\n${text}`, MAX_INTERNAL_MESSAGE_CHARS).text;
-    else messages.push({ type, text: truncateText(text, MAX_INTERNAL_MESSAGE_CHARS).text, ...(timestamp === undefined ? {} : { timestamp }) });
+    if (previous?.type === type) previous.text = `${previous.text}\n${text}`;
+    else messages.push({ type, text, ...(timestamp === undefined ? {} : { timestamp }) });
   }
   return messages;
 }
@@ -524,7 +518,7 @@ function projectLiveEvents(events: readonly DockEvent[], types: readonly Observa
     } else if (event.type === "message.delta" && event.data.block === "text") {
       const key = `message:${event.data.messageId}`;
       const current = groups.get(key)?.[0];
-      const text = truncateText(`${current?.text ?? ""}${cleanText(event.data.delta)}`, MAX_INTERNAL_MESSAGE_CHARS).text;
+      const text = `${current?.text ?? ""}${cleanText(event.data.delta)}`;
       set(key, [{ type: "assistant", text, timestamp: current?.timestamp ?? event.occurredAt }]);
     } else if (event.type === "message.completed" && event.data.role !== "tool") {
       const type: ObservationMessageType = event.data.role === "user" ? "user" : event.data.role === "assistant" ? "assistant" : "other";
@@ -532,18 +526,6 @@ function projectLiveEvents(events: readonly DockEvent[], types: readonly Observa
     }
   }
   return order.flatMap((key) => groups.get(key) ?? []);
-}
-
-function boundMessages(messages: readonly InternalObservationMessage[]): { messages: ObservationMessage[]; truncated: boolean } {
-  if (messages.length === 0) return { messages: [], truncated: false };
-  const perMessage = Math.min(MAX_OBSERVATION_MESSAGE_TEXT_CHARS, Math.max(128, Math.floor(MAX_OBSERVATION_CONVERSATION_CHARS / messages.length)));
-  let anyTruncated = false;
-  const bounded = messages.map((message): ObservationMessage => {
-    const result = truncateText(message.text, perMessage);
-    anyTruncated ||= result.truncated;
-    return { type: message.type, text: result.text, ...(message.timestamp === undefined ? {} : { timestamp: message.timestamp }), truncated: result.truncated };
-  });
-  return { messages: bounded, truncated: anyTruncated };
 }
 
 function cleanText(value: string): string {

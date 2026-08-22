@@ -8,12 +8,17 @@ import { DockRegistry, type InstanceFactoryInput } from "../src/control/dock-reg
 import { AgentUnavailableBeforeEffectError } from "../src/core/agent-worker.js";
 import { CROSS_INSTANCE_TRUST, type ObservationNotification } from "../src/core/instance-observation.js";
 import { ManagedInstance } from "../src/core/managed-instance.js";
+import { renderDockToolsResult } from "../src/pi/dock-tools-client.js";
 import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js";
 
-function fixtureInstance(input: InstanceFactoryInput, runtimes: DelayedAgentWorkerConnection[]): ManagedInstance {
+function fixtureInstance(
+  input: InstanceFactoryInput,
+  runtimes: DelayedAgentWorkerConnection[],
+  targetHistory?: DelayedAgentWorkerConnection["history"],
+): ManagedInstance {
   const runtime = new DelayedAgentWorkerConnection(`observation-${runtimes.length + 1}`);
   if (runtimes.length === 1) {
-    runtime.history = [
+    runtime.history = targetHistory ?? [
       { recordId: "old-user", entryId: "old-user", kind: "message", source: "user", visibility: "conversation", timestamp: "2026-07-28T18:00:00.000Z", content: [{ type: "text", text: "older question" }] },
       { recordId: "assistant", entryId: "assistant", kind: "message", source: "assistant", visibility: "conversation", timestamp: "2026-07-28T18:01:00.000Z", content: [{ type: "text", text: "clean answer" }, { type: "tool_call", toolCallId: "tool-one", toolName: "bash", args: { command: "do not expose as assistant text" } }] },
       { recordId: "tool", entryId: "tool", kind: "message", source: "tool", visibility: "conversation", timestamp: "2026-07-28T18:02:00.000Z", content: [{ type: "tool_result", toolCallId: "tool-one", toolName: "bash", text: "tool detail", isError: false }] },
@@ -178,6 +183,37 @@ test("instance observation is source-authorized, excludes self, watches once, an
   await new Promise<void>((resolve) => setTimeout(resolve, 10));
   assert.equal(runtimes[0]!.observationNotifications.length, 1);
   await assert.rejects(registry.invokeDockTool(source.id, { type: "list" }), /not granted/u);
+});
+
+test("dock_inspect returns one long sibling message intact to the Agent", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "alu-dock-observation-long-message-"));
+  const firstBlock = `begin-${"a".repeat(7_000)}`;
+  const secondBlock = `${"b".repeat(7_000)}-end`;
+  const completeMessage = `${firstBlock}\n${secondBlock}`;
+  const runtimes: DelayedAgentWorkerConnection[] = [];
+  const ids = ["long-source", "long-target"];
+  const registry = new DockRegistry(
+    async (input) => fixtureInstance(input, runtimes, [{
+      recordId: "long-assistant",
+      entryId: "long-assistant",
+      kind: "message",
+      source: "assistant",
+      visibility: "conversation",
+      content: [{ type: "text", text: firstBlock }, { type: "text", text: secondBlock }],
+    }]),
+    () => ids.shift()!,
+    { hostEpoch: "observation-long-message-host" },
+  );
+  const source = await registry.create({ operationId: "create-long-source", cwd, name: "Alu" });
+  await registry.create({ operationId: "create-long-target", cwd, name: "Sol" });
+  await registry.configureDockTools(source.id, true, "long-message-grant");
+
+  const result = await registry.invokeDockTool(source.id, { type: "inspect", target: "Sol" });
+  if (result.type !== "inspect") assert.fail("expected inspect result");
+  assert.equal(result.result.conversation?.messages[0]?.text, completeMessage);
+  const modelVisible = renderDockToolsResult(result);
+  assert.ok(modelVisible.includes(firstBlock));
+  assert.ok(modelVisible.includes(secondBlock));
 });
 
 test("watch completion captures one trigger snapshot and cancellation fences pending delivery", async () => {

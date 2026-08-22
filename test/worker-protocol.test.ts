@@ -207,10 +207,9 @@ test("private Worker Dock tools keep source identity and accept supported result
       observedAt: "2026-07-28T20:00:00.000Z",
       status: target,
       conversation: {
-        messages: [{ type: "assistant", text: "bounded answer", truncated: false }],
+        messages: [{ type: "assistant", text: "complete answer" }],
         hasEarlier: true,
         nextCursor: "cursor-two",
-        truncated: false,
       },
     },
   });

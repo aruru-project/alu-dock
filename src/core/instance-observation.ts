@@ -6,8 +6,6 @@ export const MAX_OBSERVATION_CURSOR_CHARS = 128;
 export const MAX_OBSERVATION_LIST_ITEMS = 64;
 export const MAX_OBSERVATION_ACTIVE_WATCHES_PER_SOURCE = 64;
 export const MAX_OBSERVATION_MESSAGE_LIMIT = 20;
-export const MAX_OBSERVATION_MESSAGE_TEXT_CHARS = 4_096;
-export const MAX_OBSERVATION_CONVERSATION_CHARS = 8_192;
 
 export type ObservationMessageType = "user" | "assistant" | "other";
 
@@ -29,14 +27,12 @@ export interface ObservationMessage {
   type: ObservationMessageType;
   text: string;
   timestamp?: string;
-  truncated: boolean;
 }
 
 export interface ObservationConversationPage {
   messages: ObservationMessage[];
   hasEarlier: boolean;
   nextCursor?: string;
-  truncated: boolean;
 }
 
 export interface InstanceObservation {
