@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { chmod, mkdir, open, readFile, readdir, realpath, rename, stat, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, stat, unlink } from "node:fs/promises";
 
 import { ATTACHMENT_STORE_INTERNAL_DIRECTORY, ATTACHMENT_STORE_MANIFEST_DIRECTORY } from "./attachment-store-layout.js";
+import { hardenWindowsPrivatePath, syncPrivateDirectory } from "../platform/private-state.js";
 
 const SETTINGS_FILE = "attachment-storage.json";
 const CHANGE_FILE = ".attachment-storage-changing.json";
@@ -31,6 +32,11 @@ export class AttachmentStorageState {
 
   async readSettings(): Promise<AttachmentStorageSettings> {
     try {
+      if (process.platform === "win32") {
+        const info = await lstat(this.filePath);
+        if (!info.isFile() || info.isSymbolicLink()) throw new Error("Attachment storage settings are not a regular file");
+        await hardenWindowsPrivatePath(this.filePath, false);
+      }
       const bytes = await readFile(this.filePath);
       if (bytes.byteLength > MAX_SETTINGS_BYTES) throw new Error("Attachment storage settings are too large");
       return parseSettings(JSON.parse(bytes.toString("utf8")) as unknown);
@@ -78,6 +84,7 @@ export class AttachmentStorageState {
   async acquireUploadLease(): Promise<{ settings: AttachmentStorageSettings; release(): Promise<void> }> {
     await mkdir(this.activeUploadDirectory, { recursive: true, mode: 0o700 });
     await chmod(this.activeUploadDirectory, 0o700);
+    await hardenWindowsPrivatePath(this.activeUploadDirectory, true);
     for (let attempt = 0; attempt < CHANGE_WAIT_ATTEMPTS; attempt += 1) {
       if (await this.directoryChangeInProgress()) {
         await new Promise((resolveWait) => setTimeout(resolveWait, 10));
@@ -110,12 +117,14 @@ export class AttachmentStorageState {
 
   private async claimDirectoryChange(): Promise<() => Promise<void>> {
     await mkdir(dirname(this.changePath), { recursive: true, mode: 0o700 });
+    await hardenWindowsPrivatePath(dirname(this.changePath), true);
     for (let attempt = 0; attempt < CHANGE_WAIT_ATTEMPTS; attempt += 1) {
       const token = randomUUID();
       try {
         const handle = await open(this.changePath, "wx", 0o600);
         try { await handle.writeFile(`${JSON.stringify({ pid: process.pid, token })}\n`, "utf8"); }
         finally { await handle.close(); }
+        await hardenWindowsPrivatePath(this.changePath, false);
         return async () => {
           const owner = await readClaim(this.changePath);
           if (owner?.token === token) await unlink(this.changePath).catch(() => {});
@@ -159,6 +168,10 @@ export function attachmentStorageStateRoot(catalogPath: string): string {
 }
 
 export function defaultAttachmentDirectory(): string {
+  if (process.platform === "win32") {
+    const localData = process.env.LOCALAPPDATA;
+    return join(localData && isAbsolute(localData) ? localData : join(homedir(), "AppData", "Local"), "Alu Dock", "attachments");
+  }
   const configured = process.env.XDG_DATA_HOME;
   const dataRoot = configured && isAbsolute(configured)
     ? configured
@@ -227,6 +240,7 @@ async function writeAtomicJson(path: string, value: unknown): Promise<void> {
   const parent = dirname(path);
   await mkdir(parent, { recursive: true, mode: 0o700 });
   await chmod(parent, 0o700);
+  await hardenWindowsPrivatePath(parent, true);
   const temporary = join(parent, `.${SETTINGS_FILE}.${process.pid}.${randomUUID()}.tmp`);
   const handle = await open(temporary, "wx", 0o600);
   try {
@@ -235,8 +249,8 @@ async function writeAtomicJson(path: string, value: unknown): Promise<void> {
     await handle.close();
     await rename(temporary, path);
     await chmod(path, 0o600);
-    const directory = await open(parent, "r");
-    try { await directory.sync(); } finally { await directory.close(); }
+    await hardenWindowsPrivatePath(path, false);
+    await syncPrivateDirectory(parent);
   } catch (error) {
     await handle.close().catch(() => {});
     await unlink(temporary).catch(() => {});

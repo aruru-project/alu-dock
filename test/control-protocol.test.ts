@@ -259,6 +259,7 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
     params: { path: "/work/project", cursor: { revision: "listing-1", offset: 200 }, limit: 200 },
   }).params, { path: "/work/project", cursor: { revision: "listing-1", offset: 200 }, limit: 200 });
   assert.deepEqual(parseControlRequest({ ...base, type: "workspace.list", params: { path: "/work", limit: 20, hostId: "machine-1" } }).params, { path: "/work", cursor: undefined, limit: 20, hostId: "machine-1" });
+  assert.deepEqual(parseControlRequest({ ...base, type: "workspace.list", params: { path: "C:\\work\\project", limit: 20, hostId: "windows-1" } }).params, { path: "C:\\work\\project", cursor: undefined, limit: 20, hostId: "windows-1" });
   assert.throws(() => parseControlRequest({ ...base, type: "workspace.list", params: { path: "relative", limit: 200 } }), /must be absolute/u);
   assert.throws(() => parseControlRequest({ ...base, type: "workspace.list", params: { path: "/work", limit: 201 } }), /must not exceed 200/u);
   assert.deepEqual(parseControlRequest({ ...base, type: "command.abort", params: { operationId: "abort-op", instanceId: "i1" } }).params, { operationId: "abort-op", instanceId: "i1" });
@@ -334,6 +335,13 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
     operationId: "adopt-1", sessionFile: "/tmp/session.jsonl", name: "adopted",
     trustChallengeId: undefined, projectTrustDecision: undefined,
   });
+  const windowsAdopt = parseControlRequest({
+    ...base,
+    type: "instance.adopt",
+    params: { operationId: "adopt-windows", sessionFile: "C:\\Users\\owner\\session.jsonl", hostId: "windows-1" },
+  });
+  assert.equal(windowsAdopt.type, "instance.adopt");
+  if (windowsAdopt.type === "instance.adopt") assert.equal(windowsAdopt.params.sessionFile, "C:\\Users\\owner\\session.jsonl");
   assert.throws(() => parseControlRequest({
     ...base,
     type: "instance.adopt",

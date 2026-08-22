@@ -10,6 +10,7 @@ import {
   AgentUnknownToolError,
 } from "../core/agent-worker.js";
 import { PublishedFileUnavailableError } from "../core/published-file.js";
+import { isPortableAbsoluteLocalPath } from "../core/local-path.js";
 import type { AgentCommandPreflightResult, AgentInvokeContext, AgentRequest, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
 import {
   parseAttachmentDto,
@@ -584,7 +585,7 @@ function parseAgentInvokeContext(raw: unknown): AgentInvokeContext {
   exactKeys(value, ["type", "canonicalCwd", "projectTrusted"], "Worker Agent invoke context");
   if (value.type !== "session_switch" || typeof value.projectTrusted !== "boolean") throw new Error("Worker Agent invoke context is invalid");
   const canonicalCwd = boundedString(value.canonicalCwd, 16_384, "Canonical session cwd");
-  if (!canonicalCwd.startsWith("/")) throw new Error("Canonical session cwd must be absolute");
+  if (!isPortableAbsoluteLocalPath(canonicalCwd)) throw new Error("Canonical session cwd must be absolute");
   return { type: "session_switch", canonicalCwd, projectTrusted: value.projectTrusted };
 }
 
@@ -629,7 +630,7 @@ function parseAttachmentAccessResult(raw: unknown): unknown {
   exactKeys(value, ["type", "attachment", "path"], "Attachment resolve result");
   if (value.type !== "resolve") throw new Error("Attachment access result type is invalid");
   const path = boundedString(value.path, 16_384, "Attachment resolved path");
-  if (!path.startsWith("/") || /[\u0000-\u001f\u007f-\u009f]/u.test(path)) throw new Error("Attachment resolved path must be absolute and control-free");
+  if (!isPortableAbsoluteLocalPath(path) || /[\u0000-\u001f\u007f-\u009f]/u.test(path)) throw new Error("Attachment resolved path must be absolute and control-free");
   return { type: "resolve", attachment: parseWorkerAttachmentDto(value.attachment, "Resolved attachment"), path };
 }
 
@@ -655,7 +656,7 @@ function validateImagePaths(raw: unknown): void {
   for (const item of raw) {
     const image = record(item, "Worker image path"); exactKeys(image, ["path", "mimeType"], "Worker image path");
     const path = boundedString(image.path, MAX_IMAGE_PATH_CHARS, "Worker image path");
-    if (!path.startsWith("/") || /[\u0000-\u001f\u007f-\u009f]/u.test(path)) throw new Error("Worker image path must be absolute and control-free");
+    if (!isPortableAbsoluteLocalPath(path) || /[\u0000-\u001f\u007f-\u009f]/u.test(path)) throw new Error("Worker image path must be absolute and control-free");
     const mimeType = validateImageMimeType(image.mimeType, "Worker image MIME type");
     const key = `${path}\u0000${mimeType}`; if (seen.has(key)) throw new Error("Worker image paths must be unique"); seen.add(key);
   }

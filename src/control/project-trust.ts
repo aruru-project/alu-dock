@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
+import { isNativeAbsoluteLocalPath, isPortableAbsoluteLocalPath } from "../core/local-path.js";
+
 export const PROJECT_TRUST_CHOICES = [
   "trust_once",
   "trust_and_remember",
@@ -229,6 +231,9 @@ export class ProjectTrustCoordinator {
 }
 
 async function canonicalDirectory(path: string): Promise<string> {
+  if (isPortableAbsoluteLocalPath(path) && !isNativeAbsoluteLocalPath(path)) {
+    throw new Error("Working directory is not an absolute path on this Host");
+  }
   const lexical = resolve(path);
   const info = await stat(lexical).catch(() => undefined);
   if (!info?.isDirectory()) throw new Error(`Working directory does not exist: ${lexical}`);

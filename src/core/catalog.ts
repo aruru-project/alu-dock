@@ -1,5 +1,6 @@
 import type { InstanceExecution, InstanceLifecycle, LastRunResult } from "./managed-instance.js";
 import type { ThinkingLevel } from "./agent-worker.js";
+import { isNativeAbsoluteLocalPath } from "./local-path.js";
 
 export type CatalogMutationEffect = "pre_effect" | "post_effect" | "rollback_contained";
 
@@ -265,7 +266,7 @@ function requiredBoundedText(value: string, limit: number, label: string): void 
 
 function absolutePath(value: string, label: string): void {
   requiredBoundedText(value, 16_384, label);
-  if (!value.startsWith("/")) throw new Error(`${label} must be absolute`);
+  if (!isNativeAbsoluteLocalPath(value)) throw new Error(`${label} must be absolute`);
 }
 
 function timestamp(value: string, label: string): void {

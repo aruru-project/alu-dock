@@ -6,6 +6,7 @@ import type { InstanceSnapshot } from "../core/instance-dto.js";
 import { generateHostIdentity, parseHostTlsIdentity, type HostTlsIdentity } from "./remote-access-state.js";
 import { parseInstanceSnapshot } from "./protocol.js";
 import { MAX_DURABLE_CATALOG_BYTES } from "./durable-catalog-store.js";
+import { hardenWindowsPrivatePath, syncPrivateDirectory } from "../platform/private-state.js";
 
 const MACHINE_STATE_SCHEMA = 1 as const;
 const JOIN_LIFETIME_MS = 10 * 60_000;
@@ -443,7 +444,8 @@ async function ensureDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 });
   const info = await lstat(path);
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`Machine state path is not a private directory: ${path}`);
-  if ((info.mode & 0o777) !== 0o700) await chmod(path, 0o700);
+  if (process.platform === "win32") await hardenWindowsPrivatePath(path, true);
+  else if ((info.mode & 0o777) !== 0o700) await chmod(path, 0o700);
 }
 
 async function ensureJoinParent(path: string): Promise<void> {
@@ -460,6 +462,7 @@ async function readJson(path: string): Promise<unknown | undefined> {
   try {
     const info = await lstat(path);
     if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_DURABLE_CATALOG_BYTES) throw new Error(`Machine state file is invalid: ${path}`);
+    await hardenWindowsPrivatePath(path, false);
     return JSON.parse(await readFile(path, "utf8")) as unknown;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
@@ -479,7 +482,7 @@ async function writeJson(path: string, value: unknown, manageParent = true): Pro
     await handle.sync();
     await handle.close(); handle = undefined;
     await rename(temporary, path);
-    const directory = await open(dirname(path), "r");
-    try { await directory.sync(); } finally { await directory.close(); }
+    await hardenWindowsPrivatePath(path, false);
+    await syncPrivateDirectory(dirname(path));
   } finally { await handle?.close().catch(() => {}); await rm(temporary, { force: true }).catch(() => {}); }
 }

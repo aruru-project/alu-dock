@@ -2,6 +2,8 @@ import { constants as fsConstants, type Stats } from "node:fs";
 import { access, open, realpath, stat, type FileHandle } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 
+import { noFollowFlag } from "../platform/private-state.js";
+
 export const MAX_SOURCE_FILE_PATH_CHARS = 16_384;
 /** Shared bound for Host source-file transfers (workspace reads and temporary deliveries). */
 export const MAX_SOURCE_FILE_TRANSFER_BYTES = 104_857_600;
@@ -45,7 +47,7 @@ export async function inspectSourceFile(path: string, options: { maxPathChars: n
 export async function openUnchangedSource(source: SourceFileIdentity): Promise<FileHandle> {
   let handle: FileHandle | undefined;
   try {
-    handle = await open(source.path, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
+    handle = await open(source.path, fsConstants.O_RDONLY | noFollowFlag());
     assertUnchangedSource(source, await handle.stat());
     return handle;
   } catch (error) {

@@ -1,8 +1,12 @@
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
-export function defaultSocketPath(env: NodeJS.ProcessEnv = process.env): string {
-  if (env.ALU_DOCK_SOCKET) return resolve(env.ALU_DOCK_SOCKET);
+import { defaultLocalEndpoint, normalizeLocalEndpoint } from "./local-endpoint.js";
+
+export function defaultSocketPath(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform): string {
+  if (env.ALU_DOCK_SOCKET) return normalizeLocalEndpoint(env.ALU_DOCK_SOCKET, platform);
+  const platformDefault = defaultLocalEndpoint(platform);
+  if (platformDefault) return platformDefault;
   if (env.ALU_DOCK_MANAGED === "1" && env.RUNTIME_DIRECTORY) return join(singleSystemdDirectory(env.RUNTIME_DIRECTORY, "RUNTIME_DIRECTORY") as string, "dock.sock");
   if (env.XDG_RUNTIME_DIR) return join(resolve(env.XDG_RUNTIME_DIR), "alu-dock", "dock.sock");
   return join(homedir(), ".alu-dock", "run", "dock.sock");

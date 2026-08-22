@@ -10,6 +10,7 @@ import {
   type AttachmentUploadResult,
 } from "../core/instance-attachments.js";
 import { MAX_INSTANCE_DISPLAY_NAME_CHARS } from "../core/instance-display-name.js";
+import { isPortableAbsoluteLocalPath } from "../core/local-path.js";
 import { MAX_JSON_ARRAY_ITEMS, MAX_JSON_OBJECT_KEYS, MAX_JSON_VALUE_DEPTH, type JsonObject, type JsonValue } from "../core/json-value.js";
 import {
   MAX_DELIVERY_REF_CHARS,
@@ -682,7 +683,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
       const projectTrustDecision = params.projectTrustDecision === undefined ? undefined : enumeration(params.projectTrustDecision, "params.projectTrustDecision", ["trust_once", "trust_and_remember", "deny_once", "deny_and_remember"], "invalid_request");
       if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
       const sessionFile = string(params.sessionFile, "params.sessionFile", MAX_CONTROL_CWD_CHARS, "invalid_request");
-      if (!sessionFile.startsWith("/")) throw validation("invalid_request", "params.sessionFile must be absolute");
+      if (!isPortableAbsoluteLocalPath(sessionFile)) throw validation("invalid_request", "params.sessionFile must be absolute");
       const selectedHost = hostId();
       return { ...base, type, params: { operationId: operationId(), sessionFile, name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), ...(selectedHost === undefined ? {} : { hostId: selectedHost }), trustChallengeId, projectTrustDecision } };
     }
@@ -738,7 +739,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
       const projectTrustDecision = params.projectTrustDecision === undefined ? undefined : enumeration(params.projectTrustDecision, "params.projectTrustDecision", ["trust_once", "trust_and_remember", "deny_once", "deny_and_remember"], "invalid_request");
       if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
       const sessionFile = optionalString(params.sessionFile, "params.sessionFile", MAX_CONTROL_CWD_CHARS, "invalid_request");
-      if (sessionFile !== undefined && !sessionFile.startsWith("/")) throw validation("invalid_request", "params.sessionFile must be absolute");
+      if (sessionFile !== undefined && !isPortableAbsoluteLocalPath(sessionFile)) throw validation("invalid_request", "params.sessionFile must be absolute");
       return { ...base, type, params: { operationId: operationId(), instanceId: instanceId(), sessionFile, trustChallengeId, projectTrustDecision } };
     }
     case "interaction.respond": {
@@ -837,7 +838,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
     case "session.inventory": {
       exact(params, ["cwd", "scope", "hostId"], "invalid_request");
       const cwd = string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request");
-      if (!cwd.startsWith("/")) throw validation("invalid_request", "params.cwd must be absolute");
+      if (!isPortableAbsoluteLocalPath(cwd)) throw validation("invalid_request", "params.cwd must be absolute");
       const selectedHost = hostId();
       return { ...base, type, params: { cwd, scope: enumeration(params.scope, "params.scope", ["cwd", "all"], "invalid_request"), ...(selectedHost === undefined ? {} : { hostId: selectedHost }) } };
     }
@@ -875,7 +876,7 @@ export function parseControlRequest(input: unknown): ControlRequest {
     case "workspace.list": {
       exact(params, ["path", "cursor", "limit", "hostId"], "invalid_request");
       const path = string(params.path, "params.path", MAX_CONTROL_CWD_CHARS, "invalid_request");
-      if (!path.startsWith("/")) throw validation("invalid_request", "params.path must be absolute");
+      if (!isPortableAbsoluteLocalPath(path)) throw validation("invalid_request", "params.path must be absolute");
       const limit = positive(params.limit, "params.limit", "invalid_request");
       if (limit > MAX_WORKSPACE_LIST_ITEMS) throw validation("invalid_request", `params.limit must not exceed ${MAX_WORKSPACE_LIST_ITEMS}`);
       const cursor = params.cursor === undefined ? undefined : parseWorkspaceListCursor(params.cursor, "params.cursor", "invalid_request");
@@ -1182,9 +1183,9 @@ export function parseWorkspaceListResult(input: unknown): WorkspaceListResult {
   const value = object(input, "workspace list result");
   exact(value, ["path", "parent", "revision", "entries", "total", "truncated", "nextCursor"]);
   const path = string(value.path, "path", MAX_CONTROL_CWD_CHARS);
-  if (!path.startsWith("/")) throw validation("invalid_response", "Workspace path must be absolute");
+  if (!isPortableAbsoluteLocalPath(path)) throw validation("invalid_response", "Workspace path must be absolute");
   const parent = optionalString(value.parent, "parent", MAX_CONTROL_CWD_CHARS);
-  if (parent !== undefined && !parent.startsWith("/")) throw validation("invalid_response", "Workspace parent must be absolute");
+  if (parent !== undefined && !isPortableAbsoluteLocalPath(parent)) throw validation("invalid_response", "Workspace parent must be absolute");
   const revision = string(value.revision, "revision", 128);
   const entries = array(value.entries, "entries", MAX_WORKSPACE_LIST_ITEMS).map((item, index) => {
     const entry = object(item, `entries[${index}]`);
@@ -1880,7 +1881,7 @@ function parseImagePaths(input: unknown, field: string, code = "invalid_response
     const image = object(item, `${field}[${index}]`, code);
     exact(image, ["path", "mimeType"], code);
     const path = string(image.path, `${field}[${index}].path`, MAX_IMAGE_PATH_CHARS, code);
-    if (!path.startsWith("/") || /[\u0000-\u001f\u007f-\u009f]/u.test(path)) throw validation(code, `${field}[${index}].path must be an absolute local path without control characters`);
+    if (!isPortableAbsoluteLocalPath(path) || /[\u0000-\u001f\u007f-\u009f]/u.test(path)) throw validation(code, `${field}[${index}].path must be an absolute local path without control characters`);
     const mimeType = imageMimeType(image.mimeType, `${field}[${index}].mimeType`, code);
     return { path, mimeType };
   });

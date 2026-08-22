@@ -23,9 +23,9 @@ Hub / Work / Web / future clients
 - 多个相互隔离的 Agent Worker；
 - Session Work TUI 的 conversation、tools、Queue、model、settings、tree、compaction 和 Extension UI；
 - Protocol V2 的权威读取、实时跟随、断线恢复和操作去重；
-- Rails/Web 后端可使用的本机 Unix socket 接口；
+- 本机 Protocol V2 接口：POSIX Unix socket 与 Windows Named Pipe；
 - 默认关闭、由本机 Hub 配置和配对的 mutual-TLS 网络入口；
-- Unix socket 与 mTLS 共用的永久、hash-verified attachment upload 和 Agent 文件工具；
+- 本地 IPC 与 mTLS 共用的永久、hash-verified attachment upload 和 Agent 文件工具；
 - 显式 `systemd --user` service 管理。
 
 ## 快速开始
@@ -71,7 +71,7 @@ aludock service logs --lines 200
 4. 选择设备并输入客户端屏幕显示的四位 PIN，Enter 即提交；
 5. 成功后客户端使用双方长期证书连接同一套 Protocol V2，设备留在 Devices 中供查看或移除。
 
-私有 Unix socket 不使用 TLS 或配对，并继续按原方式工作。网络地址和端口不是设备身份；同一客户端和 Host 保留原证书时，切换局域网地址、域名或 NAT 映射不要求重新配对。Devices 中的远程开关、连接窗口和设备移除只能在 Host 本机 Hub 操作，远程 Protocol V2 客户端不能调用。
+私有本地 IPC（POSIX Unix socket / Windows Named Pipe）不使用 TLS 或配对。网络地址和端口不是设备身份；同一客户端和 Host 保留原证书时，切换局域网地址、域名或 NAT 映射不要求重新配对。Devices 中的远程开关、连接窗口和设备移除只能在 Host 本机 Hub 操作，远程 Protocol V2 客户端不能调用。
 
 ## 文件附件
 

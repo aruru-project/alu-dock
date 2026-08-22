@@ -66,3 +66,26 @@ aludock list --all
 ```
 
 未经明确授权，不执行安装、替换 active Host 或 service restart。
+
+## Windows 源码前台运行（先期）
+
+Windows 当前不需要安装包或后台 Service。从源码工作区打开 PowerShell，安装依赖后以前台方式启动；窗口保持打开期间 Host 持续运行，`Ctrl+C` 进入正常关闭：
+
+```powershell
+npm ci
+npm run serve:windows
+```
+
+默认状态保存在 `%LOCALAPPDATA%\Alu Dock\`，本地 Protocol V2 入口是 `\\.\pipe\alu-dock`。另开一个 PowerShell 窗口运行 `node dist/src/cli.js` 可以连接同一个本地 Host；本地 Named Pipe 不使用远程设备配对。
+
+同一个脚本也使用既有启动组合：
+
+```powershell
+# Main：开放 machine transport
+.\scripts\run-windows.ps1 -Role main -MachinePort 7444 -MachineName "Windows Main"
+
+# SubHost：第一次可额外传入 -JoinFile
+.\scripts\run-windows.ps1 -Role subhost -MainAddress "main.example" -MachinePort 7444 -MachineName "Windows Workstation" -JoinFile ".\join.json"
+```
+
+Windows Remote Access 仍使用普通 TLS 设备配对；它与本地 Named Pipe 是两个入口。当前先期范围不包括 Windows Service、Scheduled Task、开机启动、安装包和自动更新。

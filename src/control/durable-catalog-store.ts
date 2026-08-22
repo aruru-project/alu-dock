@@ -10,7 +10,7 @@ import {
 } from "node:fs/promises";
 import { constants, type Stats } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, win32 as win32Path } from "node:path";
 
 import {
   CatalogCorruptError,
@@ -21,6 +21,7 @@ import {
   validateCatalogProjection,
 } from "../core/catalog.js";
 import { THINKING_LEVELS, type ThinkingLevel } from "../core/agent-worker.js";
+import { hardenWindowsPrivatePath, noFollowFlag, syncPrivateDirectory } from "../platform/private-state.js";
 
 export const MAX_DURABLE_CATALOG_BYTES = 16 * 1024 * 1024;
 
@@ -45,11 +46,12 @@ export class FileCatalogStore implements CatalogStore {
     const info = await lstatIfPresent(this.path);
     if (!info) return undefined;
     assertPrivateCatalogFile(this.path, info);
+    await hardenWindowsPrivatePath(this.path, false);
     if (info.size > MAX_DURABLE_CATALOG_BYTES) throw new CatalogCorruptError(this.path, "file exceeds the 16 MiB limit");
 
     let raw: unknown;
     try {
-      const handle = await open(this.path, constants.O_RDONLY | constants.O_NOFOLLOW);
+      const handle = await open(this.path, constants.O_RDONLY | noFollowFlag());
       try {
         const openedInfo = await handle.stat();
         assertPrivateCatalogFile(this.path, openedInfo);
@@ -78,7 +80,10 @@ export class FileCatalogStore implements CatalogStore {
     validateCatalogProjection(candidate as CatalogProjection);
     await ensurePrivateStateDirectory(this.directory);
     const existing = await lstatIfPresent(this.path);
-    if (existing) assertPrivateCatalogFile(this.path, existing);
+    if (existing) {
+      assertPrivateCatalogFile(this.path, existing);
+      await hardenWindowsPrivatePath(this.path, false);
+    }
 
     const bytes = `${JSON.stringify(candidate, null, 2)}\n`;
     if (Buffer.byteLength(bytes, "utf8") > MAX_DURABLE_CATALOG_BYTES) throw new Error("Catalog candidate exceeds the 16 MiB limit");
@@ -95,13 +100,8 @@ export class FileCatalogStore implements CatalogStore {
       handle = undefined;
       await this.options.fault?.("rename");
       await rename(temporary, this.path);
-      const directoryHandle = await open(this.directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-      try {
-        await this.options.fault?.("directory_sync");
-        await directoryHandle.sync();
-      } finally {
-        await directoryHandle.close();
-      }
+      await hardenWindowsPrivatePath(this.path, false);
+      await syncPrivateDirectory(this.directory, () => this.options.fault?.("directory_sync"));
     } finally {
       await handle?.close().catch(() => {});
       await rm(temporary, { force: true }).catch(() => {});
@@ -112,7 +112,14 @@ export class FileCatalogStore implements CatalogStore {
 export function defaultCatalogPath(
   env: NodeJS.ProcessEnv = process.env,
   home = homedir(),
+  platform: NodeJS.Platform = process.platform,
 ): string {
+  if (platform === "win32") {
+    const localData = env.LOCALAPPDATA && win32Path.isAbsolute(env.LOCALAPPDATA)
+      ? env.LOCALAPPDATA
+      : win32Path.join(home, "AppData", "Local");
+    return win32Path.join(localData, "Alu Dock", "catalog.json");
+  }
   const stateDirectory = singleAbsoluteEnvironmentPath(env.STATE_DIRECTORY, "STATE_DIRECTORY");
   if (stateDirectory) return join(stateDirectory, "catalog.json");
   const stateHome = env.XDG_STATE_HOME
@@ -217,19 +224,22 @@ async function ensurePrivateStateDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 });
   const info = await lstat(path);
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`Catalog state path is not a real directory: ${path}`);
-  if (await realpath(path) !== resolve(path)) throw new Error(`Catalog state path traverses a symbolic link: ${path}`);
+  const canonical = await realpath(path);
+  if (relative(canonical, resolve(path)) !== "") throw new Error(`Catalog state path traverses a symbolic link: ${path}`);
+  await hardenWindowsPrivatePath(path, true);
   assertOwnedByCurrentUser(path, info);
-  if ((info.mode & 0o777) !== 0o700) throw new Error(`Catalog state directory must have mode 0700: ${path}`);
+  if (process.platform !== "win32" && (info.mode & 0o777) !== 0o700) throw new Error(`Catalog state directory must have mode 0700: ${path}`);
 }
 
 function assertPrivateCatalogFile(path: string, info: Stats): void {
   if (!info.isFile() || info.isSymbolicLink()) throw new CatalogCorruptError(path, "catalog must be a regular non-symlink file");
   try { assertOwnedByCurrentUser(path, info); }
   catch (error) { throw new CatalogCorruptError(path, error instanceof Error ? error.message : String(error), error); }
-  if ((info.mode & 0o777) !== 0o600) throw new CatalogCorruptError(path, "catalog file mode must be 0600");
+  if (process.platform !== "win32" && (info.mode & 0o777) !== 0o600) throw new CatalogCorruptError(path, "catalog file mode must be 0600");
 }
 
 function assertOwnedByCurrentUser(path: string, info: Stats): void {
+  if (process.platform === "win32") return;
   const getuid = process.getuid;
   if (typeof getuid !== "function") throw new Error("Durable catalog requires a Unix user ID");
   if (info.uid !== getuid()) throw new Error(`Path is not owned by the current user: ${path}`);

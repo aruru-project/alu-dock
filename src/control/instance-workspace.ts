@@ -4,6 +4,7 @@ import { lstat, open, opendir, realpath, stat, type FileHandle } from "node:fs/p
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { MAX_SOURCE_FILE_TRANSFER_BYTES } from "../core/source-file.js";
+import { noFollowFlag } from "../platform/private-state.js";
 import { MAX_WORKSPACE_SCAN_ENTRIES } from "./workspace-browser.js";
 import {
   normalizeWorkspaceRelativePath,
@@ -97,11 +98,21 @@ export class InstanceWorkspace {
     }
     let handle: FileHandle | undefined;
     try {
-      handle = await open(target, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK | (fsConstants.O_NOFOLLOW ?? 0));
+      const nonBlocking = process.platform === "win32" ? 0 : fsConstants.O_NONBLOCK;
+      handle = await open(target, fsConstants.O_RDONLY | nonBlocking | noFollowFlag());
       const info = await handle.stat();
       if (!info.isFile()) throw new InstanceWorkspaceError("workspace_entry_not_file", "This workspace entry is not a readable file. Choose a file and try again.");
-      const openedPath = await realpath(`/proc/self/fd/${handle.fd}`);
-      assertContained(root, openedPath);
+      if (process.platform === "win32") {
+        const openedPath = await realpath(target);
+        assertContained(root, openedPath);
+        const current = await stat(target);
+        if (current.dev !== info.dev || current.ino !== info.ino) {
+          throw new InstanceWorkspaceError("workspace_changed", "This file changed while it was opening. Open it again to read the current file.", true);
+        }
+      } else {
+        const openedPath = await realpath(`/proc/self/fd/${handle.fd}`);
+        assertContained(root, openedPath);
+      }
       if (info.size > MAX_SOURCE_FILE_TRANSFER_BYTES) {
         throw new InstanceWorkspaceError("workspace_file_too_large", "This file is larger than 100 MiB. Choose a smaller file and try again.");
       }

@@ -6,7 +6,7 @@ import {
   type Server,
   type Socket,
 } from "node:net";
-import { dirname, resolve } from "node:path";
+import { dirname } from "node:path";
 
 import {
   CatalogCorruptError,
@@ -97,6 +97,7 @@ import {
   ProtocolValidationError,
 } from "./protocol.js";
 import { MachineMutationEffectUnknownError, RoutedControlError, type MainRouteAuthority, type RoutedProtocolProxy } from "./machine-transport.js";
+import { isWindowsNamedPipeEndpoint, normalizeLocalEndpoint } from "./local-endpoint.js";
 
 const MAX_SOCKET_WRITE_BUFFER = MAX_CONTROL_LINE_BYTES;
 const MAX_SESSION_INVENTORY_RESULT_BYTES = 512 * 1_024;
@@ -165,7 +166,7 @@ export class DockHost {
   private readonly remoteAccess: RemoteAccessServer | undefined;
   private readonly attachmentService: AttachmentService | undefined;
   private readonly routeAuthority: MainRouteAuthority | undefined;
-  private readonly listenOnUnixSocket: boolean;
+  private readonly listenOnLocalEndpoint: boolean;
   private readonly capabilities: ReadonlySet<string>;
   private faultDrainPromise: Promise<void> | undefined;
   private unsubscribeMutationFault: (() => void) | undefined;
@@ -178,7 +179,8 @@ export class DockHost {
   private resolveFatal!: (completion: HostFatalCompletion) => void;
 
   constructor(options: DockHostOptions) {
-    this.socketPath = resolve(options.socketPath);
+    this.listenOnLocalEndpoint = options.listen !== false;
+    this.socketPath = this.listenOnLocalEndpoint ? normalizeLocalEndpoint(options.socketPath) : options.socketPath;
     this.statePath = options.statePath ?? `memory:${this.socketPath}`;
     this.registry = options.registry;
     this.hostEpoch = options.registry.hostEpoch;
@@ -213,8 +215,7 @@ export class DockHost {
     this.workspaceBrowser = options.workspaceBrowser ?? new FileSystemWorkspaceBrowser();
     this.attachmentService = options.attachmentService;
     this.routeAuthority = options.routeAuthority;
-    this.listenOnUnixSocket = options.listen !== false;
-    if (!this.listenOnUnixSocket && options.remoteAccessState) throw new Error("A SubHost cannot enable client Remote Access");
+    if (!this.listenOnLocalEndpoint && options.remoteAccessState) throw new Error("A SubHost cannot enable client Remote Access");
     const capabilities = new Set(implementedCapabilities());
     if (this.attachmentService === undefined) capabilities.delete(ATTACHMENTS_CAPABILITY);
     if (this.routeAuthority === undefined) capabilities.delete(MACHINES_CAPABILITY);
@@ -259,9 +260,12 @@ export class DockHost {
     let server: Server | undefined;
     let boundIdentity: SocketIdentity | undefined;
     try {
-      if (this.listenOnUnixSocket) {
-        await ensurePrivateSocketDirectory(this.socketPath);
-        await prepareSocketPath(this.socketPath);
+      if (this.listenOnLocalEndpoint) {
+        const namedPipe = isWindowsNamedPipeEndpoint(this.socketPath);
+        if (!namedPipe) {
+          await ensurePrivateSocketDirectory(this.socketPath);
+          await prepareSocketPath(this.socketPath);
+        }
         if (this.state !== "starting") throw new Error("Host start was cancelled by shutdown");
 
         server = createServer(
@@ -270,10 +274,12 @@ export class DockHost {
         );
         this.server = server;
         await listen(server, this.socketPath);
-        boundIdentity = await readSocketIdentity(this.socketPath);
-        this.socketIdentity = boundIdentity;
-        await chmod(this.socketPath, 0o600);
-        await assertPrivateSocket(this.socketPath, boundIdentity);
+        if (!namedPipe) {
+          boundIdentity = await readSocketIdentity(this.socketPath);
+          this.socketIdentity = boundIdentity;
+          await chmod(this.socketPath, 0o600);
+          await assertPrivateSocket(this.socketPath, boundIdentity);
+        }
       }
       await this.initialize?.();
       if (this.state !== "starting") throw new Error("Host start was cancelled by shutdown");
@@ -1555,7 +1561,8 @@ async function listen(server: Server, socketPath: string): Promise<void> {
     };
     server.once("error", onError);
     server.once("listening", onListening);
-    server.listen(socketPath);
+    if (isWindowsNamedPipeEndpoint(socketPath)) server.listen({ path: socketPath, readableAll: false, writableAll: false });
+    else server.listen(socketPath);
   });
 }
 

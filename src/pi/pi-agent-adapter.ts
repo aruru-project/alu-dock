@@ -1,7 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { constants as fsConstants, existsSync, lstatSync, realpathSync } from "node:fs";
 import { mkdir, open, realpath } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -33,6 +33,8 @@ import {
   type DockAttachmentCallPort,
 } from "./dock-attachments-extension.js";
 import { appendDockAttachmentContext, extractDockAttachmentContext } from "./dock-attachment-context.js";
+import { isPortableAbsoluteLocalPath } from "../core/local-path.js";
+import { hardenWindowsPrivatePath, noFollowFlag } from "../platform/private-state.js";
 
 import {
   MAX_IMAGE_AGGREGATE_BYTES,
@@ -275,11 +277,11 @@ export class PiAgentAdapter {
       if (this.options.isSessionFileDurable) return this.options.isSessionFileDurable(path) ? path : undefined;
       const info = lstatSync(path);
       const getuid = process.getuid;
+      const owned = typeof getuid === "function" ? info.uid === getuid() : process.platform === "win32";
       return info.isFile()
         && !info.isSymbolicLink()
-        && realpathSync(path) === resolve(path)
-        && typeof getuid === "function"
-        && info.uid === getuid()
+        && relative(realpathSync(path), resolve(path)) === ""
+        && owned
         ? path
         : undefined;
     } catch {
@@ -1426,7 +1428,7 @@ async function loadPiImages(images: readonly ImagePathDto[] | undefined): Promis
     const seen = new Set<string>();
     for (const [index, image] of images.entries()) {
       const imageNumber = index + 1;
-      if (!image || typeof image.path !== "string" || image.path.length < 1 || image.path.length > MAX_IMAGE_PATH_CHARS || !image.path.startsWith("/") || /[\u0000-\u001f\u007f-\u009f]/u.test(image.path)) throw new Error(`Image ${imageNumber} path must be a bounded absolute local path`);
+      if (!image || typeof image.path !== "string" || image.path.length < 1 || image.path.length > MAX_IMAGE_PATH_CHARS || !isPortableAbsoluteLocalPath(image.path) || /[\u0000-\u001f\u007f-\u009f]/u.test(image.path)) throw new Error(`Image ${imageNumber} path must be a bounded absolute local path`);
       const mimeType = safeImageMimeType(image.mimeType);
       if (mimeType !== image.mimeType) throw new Error(`Image ${imageNumber} MIME type must be a bounded image/* value`);
       const descriptorKey = `${image.path}\u0000${mimeType}`;
@@ -2851,13 +2853,14 @@ async function loadAttachmentContextKey(agentDir: string): Promise<Buffer> {
   const keyPath = join(agentDir, ".alu-dock-attachment-context-key");
   for (;;) {
     try {
-      const handle = await open(keyPath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      const handle = await open(keyPath, fsConstants.O_RDONLY | noFollowFlag());
       try {
         const details = await handle.stat();
         const getuid = process.getuid;
         if (!details.isFile() || (typeof getuid === "function" && details.uid !== getuid())) {
           throw new Error("Dock attachment context key is not a regular user-owned file");
         }
+        await hardenWindowsPrivatePath(keyPath, false);
         await handle.chmod(0o600);
         const encoded = (await handle.readFile("utf8")).trim();
         const key = Buffer.from(encoded, "base64");
@@ -2869,11 +2872,12 @@ async function loadAttachmentContextKey(agentDir: string): Promise<Buffer> {
     }
     const key = randomBytes(32);
     try {
-      const handle = await open(keyPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+      const handle = await open(keyPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollowFlag(), 0o600);
       try {
         await handle.writeFile(`${key.toString("base64")}\n`, "utf8");
         await handle.sync();
       } finally { await handle.close(); }
+      await hardenWindowsPrivatePath(keyPath, false);
       return key;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;

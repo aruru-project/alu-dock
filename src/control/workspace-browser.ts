@@ -3,6 +3,8 @@ import type { Stats } from "node:fs";
 import { opendir, realpath, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
+import { isNativeAbsoluteLocalPath } from "../core/local-path.js";
+
 import type {
   WorkspaceDirectoryEntry,
   WorkspaceListCursor,
@@ -56,6 +58,9 @@ export class FileSystemWorkspaceBrowser implements WorkspaceBrowser {
   private readonly snapshots = new Map<string, WorkspaceSnapshot>();
 
   async list(request: WorkspaceListRequest): Promise<WorkspaceListResult> {
+    if (!isNativeAbsoluteLocalPath(request.path)) {
+      throw new WorkspaceBrowseError("workspace_unavailable", "Choose an absolute path on this Host.");
+    }
     const requestedPath = resolve(request.path);
     const canonicalPath = await canonicalDirectory(requestedPath);
     const currentStats = await directoryStats(canonicalPath);

@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { isPortableAbsoluteLocalPath } from "./local-path.js";
 import {
   CatalogEffectUnknownError,
   CatalogWriteError,
@@ -3698,7 +3699,7 @@ function cloneInputImages(images: readonly ImagePathDto[] | undefined): ImagePat
   if (images === undefined) return [];
   if (!Array.isArray(images) || images.length > MAX_INPUT_IMAGES) throw new Error(`Prompt images must contain at most ${MAX_INPUT_IMAGES} items`);
   const result = images.map((image) => {
-    if (!image || typeof image.path !== "string" || image.path.length < 1 || image.path.length > MAX_IMAGE_PATH_CHARS || !image.path.startsWith("/") || /[\u0000-\u001f\u007f-\u009f]/u.test(image.path)) {
+    if (!image || typeof image.path !== "string" || image.path.length < 1 || image.path.length > MAX_IMAGE_PATH_CHARS || !isPortableAbsoluteLocalPath(image.path) || /[\u0000-\u001f\u007f-\u009f]/u.test(image.path)) {
       throw new Error("Prompt image path must be a bounded absolute local path");
     }
     if (typeof image.mimeType !== "string" || image.mimeType.length > MAX_IMAGE_MIME_TYPE_CHARS || !/^image\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/u.test(image.mimeType)) {

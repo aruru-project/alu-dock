@@ -1,12 +1,15 @@
 import { open, lstat, realpath } from "node:fs/promises";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, relative, resolve } from "node:path";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+
+import { isNativeAbsoluteLocalPath } from "../core/local-path.js";
 
 const MAX_SESSION_HEADER_BYTES = 64 * 1024;
 
 /** Trust preflight probe: bounded plain JSONL header reading, no Pi construction. */
 export async function resolvePiReopenTarget(sessionFile: string): Promise<{ cwd: string }> {
+  if (!isNativeAbsoluteLocalPath(sessionFile)) throw new Error("Pi session file is not an absolute path on this Host");
   const path = resolve(sessionFile);
   const before = await validateOwnedSessionPath(path);
   const handle = await open(path, "r");
@@ -45,11 +48,12 @@ export async function openValidatedPiSession(
 
 async function validateOwnedSessionPath(path: string): Promise<Awaited<ReturnType<typeof lstat>>> {
   const canonicalPath = await realpath(path).catch(() => undefined);
-  if (canonicalPath !== path) throw new Error(`Pi session file is not a real non-symlink path: ${path}`);
+  if (canonicalPath === undefined || relative(canonicalPath, path) !== "") throw new Error(`Pi session file is not a real non-symlink path: ${path}`);
   const info = await lstat(path).catch(() => undefined);
   if (!info?.isFile() || info.isSymbolicLink()) throw new Error(`Pi session file is not a regular file: ${path}`);
   const getuid = process.getuid;
-  if (typeof getuid !== "function" || info.uid !== getuid()) throw new Error(`Pi session file is not owned by the current user: ${path}`);
+  if (typeof getuid === "function" && info.uid !== getuid()) throw new Error(`Pi session file is not owned by the current user: ${path}`);
+  if (typeof getuid !== "function" && process.platform !== "win32") throw new Error(`Pi session file ownership cannot be verified: ${path}`);
   return info;
 }
 async function assertSessionPathUnchanged(path: string, before: Awaited<ReturnType<typeof lstat>>): Promise<void> {

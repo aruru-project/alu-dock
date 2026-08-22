@@ -3,7 +3,7 @@ import "reflect-metadata";
 import { constants, type Stats } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readdir, realpath, rename, rm, unlink } from "node:fs/promises";
 import { randomBytes, randomUUID, X509Certificate } from "node:crypto";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import {
   BasicConstraintsExtension,
   ExtendedKeyUsageExtension,
@@ -13,6 +13,7 @@ import {
   SubjectKeyIdentifierExtension,
   X509CertificateGenerator,
 } from "@peculiar/x509";
+import { hardenWindowsPrivatePath, noFollowFlag, syncPrivateDirectory } from "../platform/private-state.js";
 
 const MAX_STATE_FILE_BYTES = 256 * 1024;
 const ID_PATTERN = /^[0-9a-f-]{36}$/u;
@@ -513,9 +514,11 @@ async function ensurePrivateDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 });
   const info = await lstat(path);
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`Remote access state path is not a real directory: ${path}`);
-  if (await realpath(path) !== resolve(path)) throw new Error(`Remote access state path traverses a symbolic link: ${path}`);
+  const canonical = await realpath(path);
+  if (relative(canonical, resolve(path)) !== "") throw new Error(`Remote access state path traverses a symbolic link: ${path}`);
+  await hardenWindowsPrivatePath(path, true);
   assertOwned(path, info);
-  if ((info.mode & 0o777) !== 0o700) throw new Error(`Remote access state directory must have mode 0700: ${path}`);
+  if (process.platform !== "win32" && (info.mode & 0o777) !== 0o700) throw new Error(`Remote access state directory must have mode 0700: ${path}`);
 }
 
 async function readPrivateJsonIfPresent(path: string): Promise<unknown | undefined> {
@@ -524,7 +527,12 @@ async function readPrivateJsonIfPresent(path: string): Promise<unknown | undefin
 }
 
 async function readPrivateJson(path: string): Promise<unknown> {
-  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  if (process.platform === "win32") {
+    const info = await lstat(path);
+    assertPrivateFile(path, info);
+    await hardenWindowsPrivatePath(path, false);
+  }
+  const handle = await open(path, constants.O_RDONLY | noFollowFlag());
   try {
     const info = await handle.stat();
     assertPrivateFile(path, info);
@@ -534,8 +542,7 @@ async function readPrivateJson(path: string): Promise<unknown> {
 }
 
 async function syncDirectory(path: string): Promise<void> {
-  const directory = await open(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
-  try { await directory.sync(); } finally { await directory.close(); }
+  await syncPrivateDirectory(path);
 }
 
 async function writePrivateJson(path: string, value: unknown, exclusive = false): Promise<void> {
@@ -546,6 +553,7 @@ async function writePrivateJson(path: string, value: unknown, exclusive = false)
     const handle = await open(path, "wx", 0o600);
     try { await handle.writeFile(bytes); await handle.sync(); await chmod(path, 0o600); }
     finally { await handle.close(); }
+    await hardenWindowsPrivatePath(path, false);
     return;
   }
   const temporary = join(dirname(path), `.${randomUUID()}.tmp`);
@@ -555,6 +563,7 @@ async function writePrivateJson(path: string, value: unknown, exclusive = false)
     await handle.writeFile(bytes); await handle.sync(); await handle.close(); handle = undefined;
     await chmod(temporary, 0o600);
     await rename(temporary, path);
+    await hardenWindowsPrivatePath(path, false);
     await syncDirectory(dirname(path));
   } finally { await handle?.close().catch(() => {}); await rm(temporary, { force: true }).catch(() => {}); }
 }
@@ -562,9 +571,10 @@ async function writePrivateJson(path: string, value: unknown, exclusive = false)
 function assertPrivateFile(path: string, info: Stats): void {
   if (!info.isFile() || info.isSymbolicLink()) throw new Error(`Remote access state must be a regular non-symlink file: ${path}`);
   assertOwned(path, info);
-  if ((info.mode & 0o777) !== 0o600) throw new Error(`Remote access state file must have mode 0600: ${path}`);
+  if (process.platform !== "win32" && (info.mode & 0o777) !== 0o600) throw new Error(`Remote access state file must have mode 0600: ${path}`);
 }
 function assertOwned(path: string, info: Stats): void {
+  if (process.platform === "win32") return;
   if (typeof process.getuid !== "function" || info.uid !== process.getuid()) throw new Error(`Remote access state is not owned by the current user: ${path}`);
 }
 function ignoreMissing(error: unknown): void { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }

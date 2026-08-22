@@ -43,9 +43,11 @@ Host 可以因为 instance、generation、operation、Extension UI 操作权或 
 
 ## Worker 环境
 
-Host 与 Worker 不共享整套环境变量。Managed Host 只保留 service 自身的固定运行环境；创建 Worker 时，Dock 从当前用户的交互式登录 shell 初始化用户环境，随后进入该 Worker 的 workspace，让 RVM 等目录 hook 完成项目选择，再捕获导出的环境启动 Worker。Host 的 `NODE_ENV`、systemd runtime/state、npm lifecycle 和 Dock 管理环境不得因此进入项目开发环境。
+Host 与 Worker 不共享整套环境变量。Linux managed Host 只保留 service 自身的固定运行环境；创建 Worker 时，Dock 从当前用户的交互式登录 shell 初始化用户环境，随后进入该 Worker 的 workspace，让 RVM 等目录 hook 完成项目选择，再捕获导出的环境启动 Worker。Host 的 `NODE_ENV`、systemd runtime/state、npm lifecycle 和 Dock 管理环境不得因此进入项目开发环境。
 
-每个 Worker 独立捕获一次，Host 不修改自己的 `process.env`，也不在 local install 时固化某个项目的语言版本或 PATH。Worker 只在捕获结果之上显式加入 identity、IPC 和 bootstrap 所需的 Dock 私有变量。普通 Bash 命令自行 `cd` 到其他目录时不重新捕获；新的 Worker（包括 reopen）重新按其初始 workspace 捕获。
+Windows 前台 Host 没有 POSIX login shell；Worker 继承启动 PowerShell 已经具备的 Windows/GPU开发环境，并把 workspace 作为本次 Worker 的 cwd。Pi 按自身 Windows 规则使用显式 `shellPath`、Git for Windows 或 PATH 中的 Bash。Dock 不复制一份 shell 查找算法。
+
+每个 Worker 独立取得一次环境，Host 不修改自己的 `process.env`，也不在 local install 时固化某个项目的语言版本或 PATH。Worker 只在结果之上显式加入 identity、IPC 和 bootstrap 所需的 Dock 私有变量。普通 Bash 命令自行 `cd` 到其他目录时不重新捕获；新的 Worker（包括 reopen）重新按其初始 workspace取得环境。
 
 ## Worker 通信
 

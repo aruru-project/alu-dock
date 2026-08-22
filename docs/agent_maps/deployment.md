@@ -2,13 +2,13 @@
 
 ## 这部分负责什么
 
-Alu Dock 使用一个长期 `systemd --user` Host Service。每个 active instance 的 Agent runtime 运行在独立 Worker 进程中。
+Linux 正式形态使用一个长期 `systemd --user` Host Service；Windows 先期形态从源码在 PowerShell 前台运行同一个 Host。每个 active instance 的 Agent runtime 运行在独立 Worker 进程中。
 
 ```text
 systemd --user
       │
 Dock Host Service
-      ├── private Unix socket
+      ├── private local IPC (Unix socket / Windows Named Pipe)
       ├── optional mutual-TLS network port
       ├── durable catalog + private Host settings
       ├── permanent attachment store
@@ -19,7 +19,7 @@ Dock Host Service
 
 Managed Host 启动时：
 
-1. 绑定并验证私有 Unix socket；
+1. 绑定并验证私有本地 IPC；
 2. 加载 durable catalog；
 3. 对上一次 Host 遗留状态做保守恢复；
 4. 进入 ready；
@@ -31,7 +31,7 @@ Host unit 只定义 service 自己的固定 Node、CLI、HOME、最小 PATH 和 
 
 ## 网络入口与配对窗口
 
-私有 Unix socket 始终是本机入口，路径所有权和 mode 保持既有行为。可选的远程 listener 是另一种 Protocol V2 transport：默认关闭，由本机 Hub Devices 启用并配置端口；启用时绑定 `::` 且允许 dual-stack，不替代、转发或改变 Unix socket。修改端口时先关闭旧 listener 和它的远程连接，再绑定新端口；新端口绑定失败时保持网络入口关闭并在 Devices 自动显示错误，不能暗中继续暴露旧端口。
+私有本地 IPC 始终是本机入口：POSIX 使用 Unix socket 并验证路径所有权和 mode，Windows 使用 Named Pipe 和本地访问控制。可选的远程 listener 是另一种 Protocol V2 transport：默认关闭，由本机 Hub Devices 启用并配置端口；启用时绑定 `::` 且允许 dual-stack，不替代、转发或改变本地 IPC。修改端口时先关闭旧 listener 和它的远程连接，再绑定新端口；新端口绑定失败时保持网络入口关闭并在 Devices 自动显示错误，不能暗中继续暴露旧端口。
 
 网络端口始终提供 Host TLS certificate。已配对客户端必须发送精确受信任证书，才会进入同一个 Protocol V2 handler。Devices 页面确认打开的五分钟窗口只在该端口上临时增加 unknown-certificate pairing bootstrap；它不会开启新的管理端口，也不会把 Devices/Settings、移除或配对窗口控制暴露给网络。窗口成功、失败、超时、关闭、Host restart 或 remote listener disable 时，所有 provisional pairing state 都被清理；已配对证书信任保留。
 
@@ -39,7 +39,7 @@ Host unit 只定义 service 自己的固定 Node、CLI、HOME、最小 PATH 和 
 
 ## 永久附件目录
 
-Managed Host 创建一个 `AttachmentService`，同时注入 Protocol V2 ingress 和 Registry 的 Worker reverse capability。默认目录是 `${XDG_DATA_HOME:-~/.local/share}/alu-dock/attachments`；实际绝对路径保存在 Host private state 的 `attachment-storage.json`，只能从本机 Hub Settings 修改。Unix socket 和 mTLS 不各自拥有 store，远程 endpoint 或证书变化也不迁移文件。
+Host 创建一个 `AttachmentService`，同时注入 Protocol V2 ingress 和 Registry 的 Worker reverse capability。POSIX 默认目录是 `${XDG_DATA_HOME:-~/.local/share}/alu-dock/attachments`，Windows 默认目录是 `%LOCALAPPDATA%\Alu Dock\attachments`；实际绝对路径保存在 Host private state 的 `attachment-storage.json`，只能从本机 Hub Settings 修改。本地 IPC 和 mTLS 不各自拥有 store，远程 endpoint 或证书变化也不迁移文件。
 
 Store 的公开内容在 `files/`，文件名经过最小安全清洗并保持可读；`.alu-dock/manifests/` 保存 digest/fileId metadata，`.alu-dock/tmp/` 只保存未完成上传。目录和文件分别固定为 user-private mode，managed 子目录不能是 symlink。Startup 删除 tmp 和没有 manifest 引用的 provisional content，但不删除 successful attachment。没有 TTL、自动 GC 或 quota。
 
@@ -66,14 +66,14 @@ aludock serve --dev --subhost --state /private/sub/catalog.json \
   --join-file /private/subhost.join --machine-name Studio
 ```
 
-Main address 与 machine port 必须在 SubHost 另行输入，join file 不能替它们作连接目标。join token 十分钟过期且成功一次后失效；已经完成 enrollment 的 SubHost 再提供 join file 会被拒绝。SubHost 保存自己的长期 certificate 和精确 Main certificate pin，以后启动省略 `--join-file`。Main 的 `main.json` 只持久化 Main identity、SubHost trust 与 machine index；每台 SubHost 的 route inventory 使用 machine state directory 下独立的原子 route file，各自复用 durable catalog 的字节边界。SubHost 可以早于 Main 启动；上游不可达时仍保持本机 Host/Worker 与 Queue，只在后台重连。SubHost 没有 client Unix socket、Remote Access listener 或 children。
+Main address 与 machine port 必须在 SubHost 另行输入，join file 不能替它们作连接目标。join token 十分钟过期且成功一次后失效；已经完成 enrollment 的 SubHost 再提供 join file 会被拒绝。SubHost 保存自己的长期 certificate 和精确 Main certificate pin，以后启动省略 `--join-file`。Main 的 `main.json` 只持久化 Main identity、SubHost trust 与 machine index；每台 SubHost 的 route inventory 使用 machine state directory 下独立的原子 route file，各自复用 durable catalog 的字节边界。SubHost 可以早于 Main 启动；上游不可达时仍保持本机 Host/Worker 与 Queue，只在后台重连。SubHost 没有 client local endpoint、Remote Access listener 或 children。
 
 ## Worker lifecycle
 
 Host 为每个 active instance 创建独立 Worker，并负责：
 
 - Worker identity 与 runtime generation；
-- process group、termination deadline 与 direct-child reap；
+- POSIX process group 或 Windows process tree、termination deadline 与 direct-child reap；
 - replacement 和旧 Worker fencing；
 - Worker loss后的保守 instance 状态；
 - 无法确认 owner release 时的 quarantine。

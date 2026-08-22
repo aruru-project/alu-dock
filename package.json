@@ -17,12 +17,13 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/**/*.test.js",
     "test:sdk-upgrade": "npm run build && node --test dist/test/pi-sdk-compat/**/*.compat.js",
     "cli": "npm run build && node dist/src/cli.js",
     "serve": "npm run build && ALU_DOCK_SOCKET=${ALU_DOCK_SOCKET:-${XDG_RUNTIME_DIR:-$HOME/.alu-dock/run}/alu-dock-dev.sock} node dist/src/cli.js serve --dev",
+    "serve:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/run-windows.ps1",
     "smoke:sdk": "npm run build && node dist/scripts/sdk-smoke.js",
     "bench:tui": "npm run build && node --expose-gc dist/scripts/tui-render-benchmark.js",
     "prepack": "npm run build",

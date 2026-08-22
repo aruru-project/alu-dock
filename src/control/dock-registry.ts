@@ -17,6 +17,7 @@ import {
   type DockToolsResult,
 } from "../core/dock-tools.js";
 import type { InstanceAttachmentHostPort } from "../core/instance-attachments.js";
+import { isNativeAbsoluteLocalPath } from "../core/local-path.js";
 import { InstanceBusyError, type InstanceLifecycle, type ManagedInstance, type InstanceSnapshot, type StopReceipt } from "../core/managed-instance.js";
 import { CatalogTransactionCoordinator, type CatalogFault, type CatalogHealth } from "./catalog-transactions.js";
 import { InstanceObservationService, observationStatus } from "./instance-observation-service.js";
@@ -309,6 +310,7 @@ export class DockRegistry implements DockToolsHostPort {
       throw new CatalogOperationRecordedError(input.operationId);
     }
     if (!this.reopenTargetResolver) throw new Error("Persisted Pi session adoption is unavailable");
+    if (!isNativeAbsoluteLocalPath(input.sessionFile)) throw new Error("Pi session file is not an absolute path on this Host");
     const sessionFile = resolve(input.sessionFile);
     const releaseClaim = this.claimSessionFile(`adopt:${input.operationId}`, input.operationId, sessionFile);
     try {
@@ -372,6 +374,7 @@ export class DockRegistry implements DockToolsHostPort {
   }
 
   claimSessionFile(ownerId: string, operationId: string, rawSessionFile: string): () => void {
+    if (!isNativeAbsoluteLocalPath(rawSessionFile)) throw new Error("Pi session file is not an absolute path on this Host");
     const sessionFile = resolve(rawSessionFile);
     const liveOwner = [...this.instances.values()].find((instance) => {
       const snapshot = instance.snapshot();

@@ -3,6 +3,8 @@ import { userInfo } from "node:os";
 import { resolve } from "node:path";
 import type { Readable } from "node:stream";
 
+import { isNativeAbsoluteLocalPath } from "../core/local-path.js";
+
 const DEFAULT_CAPTURE_TIMEOUT_MS = 10_000;
 const DEFAULT_EXECUTABLE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const MAX_DIAGNOSTIC_CHARS = 4_000;
@@ -77,8 +79,9 @@ export async function captureWorkspaceShellEnvironment(
   cwd: string,
   options: CaptureWorkspaceShellEnvironmentOptions = {},
 ): Promise<NodeJS.ProcessEnv> {
-  const account = options.account ?? currentAccount();
   const workspace = resolve(cwd);
+  if (process.platform === "win32") return windowsWorkspaceEnvironment(workspace, options.sourceEnvironment);
+  const account = options.account ?? currentAccount();
   assertAbsoluteSafePath(account.homedir, "User home");
   assertAbsoluteSafePath(account.shell, "User login shell");
   assertAbsoluteSafePath(workspace, "Worker workspace");
@@ -134,6 +137,16 @@ export async function captureWorkspaceShellEnvironment(
   });
 }
 
+function windowsWorkspaceEnvironment(workspace: string, sourceEnvironment: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  assertAbsoluteSafePath(workspace, "Worker workspace");
+  const account = userInfo();
+  const environment: NodeJS.ProcessEnv = { ...sourceEnvironment, PWD: workspace };
+  environment.HOME ??= account.homedir;
+  environment.USER ??= account.username;
+  environment.LOGNAME ??= account.username;
+  return environment;
+}
+
 function currentAccount(): WorkspaceShellAccount {
   const account = userInfo();
   if (!account.shell) throw new Error("Current user account has no login shell");
@@ -182,7 +195,7 @@ function terminateProcessGroup(pid: number | undefined): void {
 }
 
 function assertAbsoluteSafePath(path: string, label: string): void {
-  if (!path.startsWith("/") || /[\0\r\n]/u.test(path)) throw new Error(`${label} must be a safe absolute path`);
+  if (!isNativeAbsoluteLocalPath(path) || /[\0\r\n]/u.test(path)) throw new Error(`${label} must be a safe absolute path`);
 }
 
 function shellSingleQuote(value: string): string {

@@ -17,6 +17,7 @@ import {
   type ObservationRequest,
 } from "./instance-observation.js";
 import { MAX_SOURCE_FILE_PATH_CHARS } from "./source-file.js";
+import { isPortableAbsoluteLocalPath } from "./local-path.js";
 
 /** Canonical Agent-neutral validation for Dock-tools transport records. */
 export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
@@ -25,13 +26,13 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
   if (value.type === "deliver") {
     exactKeys(value, ["type", "path"], "Dock deliver request");
     const path = boundedString(value.path, MAX_SOURCE_FILE_PATH_CHARS, "Dock deliver path");
-    if (!path.startsWith("/")) throw new Error("Dock deliver path must be absolute");
+    if (!isPortableAbsoluteLocalPath(path)) throw new Error("Dock deliver path must be absolute");
     return { type: "deliver", path };
   }
   if (value.type === "create") {
     exactKeys(value, ["type", "operationId", "cwd", "name"], "Dock create request");
     const cwd = boundedString(value.cwd, MAX_DOCK_TOOL_CWD_CHARS, "Dock create cwd");
-    if (!cwd.startsWith("/")) throw new Error("Dock create cwd must be absolute");
+    if (!isPortableAbsoluteLocalPath(cwd)) throw new Error("Dock create cwd must be absolute");
     const name = value.name === undefined ? undefined : boundedString(value.name, MAX_DOCK_TOOL_NAME_CHARS, "Dock create name");
     return {
       type: "create",

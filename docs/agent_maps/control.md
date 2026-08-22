@@ -40,7 +40,7 @@ Host 不为这些能力维护第二套 Agent 实现，也不重复投影 Worker 
 
 ## Main 与 SubHost
 
-Main 是唯一面向客户端的 Host authority。SubHost 只持有一个到 Main 的加密上游连接和本机原生 Registry；它不监听客户端 socket、不启用 Remote Access、不接子节点，也不把远端实例混进本机 Registry。
+Main 是唯一面向客户端的 Host authority。SubHost 只持有一个到 Main 的加密上游连接和本机原生 Registry；它不监听客户端本地 IPC、不启用 Remote Access、不接子节点，也不把远端实例混进本机 Registry。
 
 SubHost 只上报本机 Registry 的 native snapshots。初始和后续 inventory 都先把完整 canonical snapshot array 序列化，再按 machine-line 边界切成有序 base64 chunks；Main 收齐、按 durable catalog 的既有字节边界校验并逐项解析后才原子 reconcile，初次完成前不发送 `machine_ready`，替换 inventory 未完成时旧连接与旧目录继续权威。Main 在独立、持久的 route directory 中为每个 native instance 分配稳定的 Main `instanceId`；Main identity、trust 和 machine index 保存在 `main.json`，每个 SubHost 的 routes 使用各自 crash-safe atomic route file 和既有 catalog 字节边界，因此所有 SubHost 不共享一个 16 MiB route 上限。两种 ID 不要求相等。客户端只收到并发送 Main ID。普通 response、follow/control、response-transfer、workspace/deliverable stream 和 attachment upload body 都经过同一个 multiplexed Protocol V2 route seam；Host 不为每个 method 建 proxy，也不创建假的 remote `ManagedInstance`。
 
@@ -52,10 +52,10 @@ MainMachineController 是 Main ID、route 和 instance key 的唯一全局 autho
 
 ## Protocol V2
 
-Protocol V2 的记录使用 UTF-8 JSONL，可以承载在两种不同 transport 上：
+Protocol V2 的记录使用 UTF-8 JSONL，可以承载在两类 transport 上：
 
-- **私有 Unix socket**：本机客户端按既有路径直接连接；文件系统所有权和 mode 是 admission，不使用 TLS、客户端证书或配对。
-- **远程 TLS 端口**：默认关闭；启用后绑定所有网络接口。TLS admission 成功的可信客户端进入与 Unix socket 完全相同的 Host request handler，不存在远程专用 DTO、业务路由或兼容层。
+- **私有本地 IPC**：POSIX 使用 Unix domain socket，以文件系统所有权和 mode 做 admission；Windows 使用 Named Pipe，以 Windows 本地访问控制做 admission。本机入口不使用 TLS、客户端证书或配对。
+- **远程 TLS 端口**：默认关闭；启用后绑定所有网络接口。TLS admission 成功的可信客户端进入与本地 IPC 完全相同的 Host request handler，不存在远程专用 DTO、业务路由或兼容层。
 
 Transport admission 完成以后，两条路径的 Protocol V2 行为一致：
 
@@ -73,13 +73,13 @@ TLS peer 必须在握手时提供 X.509 客户端证书并证明持有私钥。H
 
 远程地址不属于身份。已配对客户端可以从新的 IP、域名或映射端口连接同一个 Host，只要双方仍使用原来的证书。每次连接仍执行完整 TLS handshake；session resumption 被关闭，不能替代证书检查。吊销删除精确客户端证书信任，并由 Host 关闭该证书的现有远程连接。
 
-Devices 中的 Remote Access/port、开启/关闭连接窗口、待连接请求、PIN 确认、saved device 列表和移除，以及 Settings 中的 attachment storage directory，是本机 `aludock` Hub 的 service-management surface。它们不属于 Protocol V2，不通过 Unix socket 或 TLS 暴露，也不在 DockClient、CLI JSON API 或额外 admin socket 中提供。远程客户端只能使用临时 pairing bootstrap 和配对后的 Protocol V2；它不能远程改变 Host 设置、开启或延长连接窗口。
+Devices 中的 Remote Access/port、开启/关闭连接窗口、待连接请求、PIN 确认、saved device 列表和移除，以及 Settings 中的 attachment storage directory，是本机 `aludock` Hub 的 service-management surface。它们不属于 Protocol V2，不通过本地 IPC 或 TLS 暴露，也不在 DockClient、CLI JSON API 或额外 admin endpoint 中提供。远程客户端只能使用临时 pairing bootstrap 和配对后的 Protocol V2；它不能远程改变 Host 设置、开启或延长连接窗口。
 
 Client 发给 Host 的 hello/request 使用 closed JSON-safe shape，未知字段会被拒绝。Host 发给 Client 的 response/event 仍严格校验已知字段、版本、类型和边界，但 Client 必须忽略新增的未知可选字段；只有删除字段、改变既有语义或新增无法忽略的类型时才需要 capability 或协议版本。单 frame 可以有传输上限，但业务内容不能因此永久截断；大型 conversation 使用分页和 chunk 继续读取。
 
 `session.tree.v2` 专指当前 Pi Session Tree。请求只有 `{instanceId}`，一次逻辑调用返回一个完整 compact snapshot `{nodes, leafId?}`；node 只含 ID、拓扑、kind/role、展示标签、时间、摘要和 children fact，不含 Pi JSONL entry、完整 message 或 tool content。Host 不缓存、分页、revision 或解释树拓扑，只做 lifecycle、admission、generation fencing 和路由。
 
-完整 Tree response 即使只有一块，也使用 transport-only `response_transfer` records。每块是普通成功 `ControlResponse` UTF-8 序列化后的 opaque canonical-base64 byte slice；DockClient 检查同一 request/Host identity、从零连续 index、稳定 count、单块和 aggregate transport bounds，收齐后才解析原 response。缺块或越界没有 partial result。该 framing 在 Unix 与 mTLS Protocol V2 上相同，只承载成功的 `session.tree.v2` response；错误仍是一条普通 response，也不形成通用 streaming RPC。
+完整 Tree response 即使只有一块，也使用 transport-only `response_transfer` records。每块是普通成功 `ControlResponse` UTF-8 序列化后的 opaque canonical-base64 byte slice；DockClient 检查同一 request/Host identity、从零连续 index、稳定 count、单块和 aggregate transport bounds，收齐后才解析原 response。缺块或越界没有 partial result。该 framing 在本地 IPC 与 mTLS Protocol V2 上相同，只承载成功的 `session.tree.v2` response；错误仍是一条普通 response，也不形成通用 streaming RPC。
 
 Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 TUI 或 Web 客户端重写。
 
@@ -89,7 +89,7 @@ Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 
 
 ## 附件存储与上传
 
-附件是 Host-owned、单用户、永久文件，不属于 durable catalog、Worker DTO 中的字节载荷或某个 TUI 的私有目录。Hub Settings 在本机私有 state 中配置一个绝对 storage directory；Unix socket 和已配对 mTLS 客户端共享它。Settings change 与 active upload 使用跨进程 claim/lease 协调：有 upload 尚未 complete/abort 时拒绝改目录，避免成功 receipt 指向旧 root。首次提交后目录不能直接改到另一处；需要迁移时先整体移动 `files/` 与 `.alu-dock/` store，再修改配置。Host 不做病毒扫描、格式转换、MIME 强制、自动解压、TTL、GC、quota、per-device/per-instance ACL 或引用计数。
+附件是 Host-owned、单用户、永久文件，不属于 durable catalog、Worker DTO 中的字节载荷或某个 TUI 的私有目录。Hub Settings 在本机私有 state 中配置一个绝对 storage directory；本地 IPC 和已配对 mTLS 客户端共享它。Settings change 与 active upload 使用跨进程 claim/lease 协调：有 upload 尚未 complete/abort 时拒绝改目录，避免成功 receipt 指向旧 root。首次提交后目录不能直接改到另一处；需要迁移时先整体移动 `files/` 与 `.alu-dock/` store，再修改配置。Host 不做病毒扫描、格式转换、MIME 强制、自动解压、TTL、GC、quota、per-device/per-instance ACL 或引用计数。
 
 `attachments.v1` 的公开 metadata 始终使用同一个 path-free shape：
 

@@ -16,6 +16,8 @@ import {
   MAX_SESSION_FIRST_USER_MESSAGE_CHARS,
   type SessionDto,
 } from "../core/instance-dto.js";
+import { isNativeAbsoluteLocalPath } from "../core/local-path.js";
+import { hardenWindowsPrivatePath, noFollowFlag } from "../platform/private-state.js";
 import type {
   SessionInventory,
   SessionInventoryDiagnostic,
@@ -84,6 +86,7 @@ class PiSessionMetadataIndex {
   }
 
   private async listSerial(cwd: string, scope: "cwd" | "all"): Promise<SessionInventoryScan> {
+    if (!isNativeAbsoluteLocalPath(cwd)) throw new Error("Session workspace is not an absolute path on this Host");
     await this.loadCache();
     const canonicalCwd = await realpath(resolve(cwd));
     const scopeDirectory = scope === "cwd"
@@ -146,7 +149,8 @@ class PiSessionMetadataIndex {
     if (!this.cachePath) return;
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
-      handle = await open(this.cachePath, constants.O_RDONLY | constants.O_NOFOLLOW);
+      handle = await open(this.cachePath, constants.O_RDONLY | noFollowFlag());
+      await hardenWindowsPrivatePath(this.cachePath, false);
       const info = await handle.stat();
       if (!info.isFile() || info.size > MAX_CACHE_BYTES) return;
       const raw = JSON.parse((await handle.readFile()).toString("utf8")) as unknown;
@@ -181,6 +185,7 @@ class PiSessionMetadataIndex {
       await handle.close();
       handle = undefined;
       await rename(temporary, this.cachePath);
+      await hardenWindowsPrivatePath(this.cachePath, false);
       return true;
     } finally {
       await handle?.close().catch(() => {});
@@ -195,7 +200,7 @@ async function refreshRecord(
 ): Promise<{ record?: SessionInventoryCacheRecord; diagnostic?: SessionInventoryDiagnostic }> {
   let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    handle = await open(path, constants.O_RDONLY | noFollowFlag());
     const info = await handle.stat();
     if (!info.isFile()) return { diagnostic: inventoryDiagnostic(path, "Persisted session path is not a regular file") };
     if (

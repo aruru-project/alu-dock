@@ -6,7 +6,7 @@
 
 ```text
 Browser ── HTTP / WebSocket ── Web backend ─┐
-TUI / desktop / other local client ─────────┼── Protocol V2 · private Unix socket
+TUI / desktop / other local client ─────────┼── Protocol V2 · private local IPC
                                              ▼
                                       Dock Host Service
                                              │
@@ -17,7 +17,7 @@ TUI / desktop / other local client ─────────┼── Protocol
 
 ## 连接方式
 
-Protocol V2 使用 UTF-8 JSONL；transport 是私有 Unix socket，或已配对的 mutual-TLS 端口（见下文「Unix socket 与远程 TLS 端口」）。每个连接的流程是：
+Protocol V2 使用 UTF-8 JSONL；transport 是私有本地 IPC（POSIX Unix socket / Windows Named Pipe），或已配对的 mutual-TLS 端口（见下文「本地 IPC 与远程 TLS 端口」）。每个连接的流程是：
 
 1. 发送 hello，协商版本和 capabilities；
 2. hello 成功后发送一个业务 request；
@@ -45,24 +45,24 @@ Protocol V2 使用 UTF-8 JSONL；transport 是私有 Unix socket，或已配对�
 
 `session.tree.v2` 请求固定为 `{instanceId}`，一次逻辑调用返回当前 Pi Session Tree 的完整 compact `{nodes, leafId?}`。compact node 只有 ID/parent/depth、kind/role/displayClass/state、可选 label/timestamp、summary 和 hasChildren；绝不包含 raw Session JSONL、完整 message 或 tool content。客户端不发送 revision、cursor 或 limit，也不拼接 Tree pages。
 
-成功的 Tree response 在 wire 上始终由一组 `response_transfer` JSONL records 承载，即使内容只需一块。record 包含 `version:2 + requestId + hostEpoch + zero-based index + stable count + canonical-base64 data`；data 是正常成功 `ControlResponse` UTF-8 bytes 的 opaque slice。transport 必须验证 identity、连续顺序、count、canonical base64、decoded chunk bound 和 aggregate bound，全部收齐后再解析原 `ControlResponse`；每个合法 frame 刷新读取 idle deadline，断线、超时或缺块都不能返回 partial Tree。错误仍是普通 `response`，其他 request 也不能使用该 framing。Tree 打开后若目标已随 Session 变化而消失，操作返回 `invalid_tree_target`，客户端应重新打开 Tree 让用户选择，而不是沿用旧节点。该 invisible bounded framing 在 Unix socket 与 mTLS 上一致，只是 Tree success 的 transport 细节，不是通用 streaming RPC，业务/UI 层不应看到 frame。
+成功的 Tree response 在 wire 上始终由一组 `response_transfer` JSONL records 承载，即使内容只需一块。record 包含 `version:2 + requestId + hostEpoch + zero-based index + stable count + canonical-base64 data`；data 是正常成功 `ControlResponse` UTF-8 bytes 的 opaque slice。transport 必须验证 identity、连续顺序、count、canonical base64、decoded chunk bound 和 aggregate bound，全部收齐后再解析原 `ControlResponse`；每个合法 frame 刷新读取 idle deadline，断线、超时或缺块都不能返回 partial Tree。错误仍是普通 `response`，其他 request 也不能使用该 framing。Tree 打开后若目标已随 Session 变化而消失，操作返回 `invalid_tree_target`，客户端应重新打开 Tree 让用户选择，而不是沿用旧节点。该 invisible bounded framing 在本地 IPC 与 mTLS 上一致，只是 Tree success 的 transport 细节，不是通用 streaming RPC，业务/UI 层不应看到 frame。
 
 Wire shape、capability 名称和 bounds 的代码真相在：
 
 - `src/control/protocol.ts`
 - `src/control/dock-client.ts`
 
-### Unix socket 与远程 TLS 端口
+### 本地 IPC 与远程 TLS 端口
 
-本机 Unix socket 和网络 TLS 端口只是 Protocol V2 的两种 transport，不是两套 API：
+本机 IPC 和网络 TLS 端口只是 Protocol V2 的两类 transport，不是两套 API：
 
 ```text
-local client ── private Unix socket ─┐
-                                     ├─ hello / request / response / event · Protocol V2
-paired client ── mutual TLS port ────┘
+local client ── Unix socket / Named Pipe ─┐
+                                          ├─ hello / request / response / event · Protocol V2
+paired client ── mutual TLS port ─────────┘
 ```
 
-当前 TypeScript `DockClient` 负责本机 Unix socket。独立的 Android、Web backend 或桌面客户端可以实现 TLS transport，但在证书 admission 之后必须复用本文其余部分定义的同一套 hello、capabilities、request、response、read/follow 和 operation 语义。不得把 Devices、Settings 或证书管理增加为 Protocol V2 request。
+当前 TypeScript `DockClient` 负责本机 Unix socket 或 Windows Named Pipe。独立的 Android、Web backend 或桌面客户端可以实现 TLS transport，但在证书 admission 之后必须复用本文其余部分定义的同一套 hello、capabilities、request、response、read/follow 和 operation 语义。不得把 Devices、Settings 或证书管理增加为 Protocol V2 request。
 
 远程客户端必须长期保存自己生成的 RSA 2048-bit 或更强证书与私钥，并在每次 TLS handshake 中发送该证书。配对后还必须保存 Host 的完整 leaf certificate DER，之后在发送任何应用数据前做精确匹配。地址、域名和端口只负责找到 Host，不参与信任；切换 LAN 地址、外网域名或 NAT 映射端口不触发重新配对。
 
@@ -90,7 +90,7 @@ paired client ── mutual TLS port ────┘
 
 `events.follow.v2` 依赖 `instance.read.v1`。回答 Extension UI 还需要 Host 提供 `extension_ui.v1` 与 `extension_ui.control.v1`。
 
-hello 的 `requiredCapabilities` 是 fail-fast 功能探测：Host 缺少任何一项就拒绝连接并列出缺失项，让客户端在第一步就发现 Host 过旧，而不是运行到一半失败。它不是响应内容开关：Host 对所有客户端返回同一份 canonical response，不按客户端声明裁剪、改写或降级字段。图片、附件、`presentation`、`displayName`、`gitBranch`、`toolsExpanded`、`activeInteraction` 等可选字段是否出现只取决于事实本身（例如没有 git repo 就没有 `gitBranch`），与客户端声明无关；不渲染某个字段的客户端直接忽略它。`attachments.v1` 只用于发起 attachment upload 或提交 attachment IDs。Unix socket 与 mTLS 上的 wire 完全相同。
+hello 的 `requiredCapabilities` 是 fail-fast 功能探测：Host 缺少任何一项就拒绝连接并列出缺失项，让客户端在第一步就发现 Host 过旧，而不是运行到一半失败。它不是响应内容开关：Host 对所有客户端返回同一份 canonical response，不按客户端声明裁剪、改写或降级字段。图片、附件、`presentation`、`displayName`、`gitBranch`、`toolsExpanded`、`activeInteraction` 等可选字段是否出现只取决于事实本身（例如没有 git repo 就没有 `gitBranch`），与客户端声明无关；不渲染某个字段的客户端直接忽略它。`attachments.v1` 只用于发起 attachment upload 或提交 attachment IDs。本地 IPC 与 mTLS 上的 wire 完全相同。
 
 ## 需要分清的身份
 
@@ -218,7 +218,7 @@ Data URI、base64 和长文本都是普通内容。客户端根据结构处理 i
 
 Dock 内建的 `show_image` 只负责把本机文件发布给用户界面显示，不把图片注入模型 context（模型要看图时使用 `read`）。成功的 tool result 在 live、history preview 与 `conversation.content` 的完整 tool-result block 中携带同一个 path-free `publishedFile`：`presentation: "image" + fileRef + name + sizeBytes + optional mediaType`。客户端使用 authenticated `file.read` 按 offset 获取最多 256 KiB 的 base64 chunk；文件被删除、改写、session replacement 或 Worker dispose 后返回 `file_unavailable`，界面应提示用户让 Agent 重新发布。`toolCallId` 只用于 tool 关联，客户端不得从 tool text/path 猜 metadata，也不得把 `fileRef` 当路径。
 
-Web 应用通常由后端接收浏览器上传、保存为受控本机文件，再向 Dock 提交 path descriptor；浏览器本身不能把自己的文件路径交给 Dock。Unix socket 与 mTLS 使用完全相同的 `file.read` route。
+Web 应用通常由后端接收浏览器上传、保存为受控本机文件，再向 Dock 提交 path descriptor；浏览器本身不能把自己的文件路径交给 Dock。本地 IPC 与 mTLS 使用完全相同的 `file.read` route。
 
 ## Instance 临时交付文件
 
@@ -230,7 +230,7 @@ Web 应用通常由后端接收浏览器上传、保存为受控本机文件，�
 
 ## 附件
 
-附件由 Host 永久保存，所有文件类型使用同一机制。它不是 S3-style object service 或某个 Web/TUI 的临时上传目录。Host 不扫描、转换、强制 MIME、自动提取或设置 TTL；最大 decoded file size 是 **536,870,912 bytes（512 MiB / 0.5 GiB）**。本机 Unix socket 与配对后的 mTLS client 使用同一个由 Host 本机 Settings 配置的 storage directory。聊天消息中的 `image/*` attachment 仍使用同一永久附件机制，同时由 Agent adapter 作为原生视觉输入交给 runtime。
+附件由 Host 永久保存，所有文件类型使用同一机制。它不是 S3-style object service 或某个 Web/TUI 的临时上传目录。Host 不扫描、转换、强制 MIME、自动提取或设置 TTL；最大 decoded file size 是 **536,870,912 bytes（512 MiB / 0.5 GiB）**。本机 IPC 与配对后的 mTLS client 使用同一个由 Host 本机 Settings 配置的 storage directory。聊天消息中的 `image/*` attachment 仍使用同一永久附件机制，同时由 Agent adapter 作为原生视觉输入交给 runtime。
 
 客户端应使用一个新的、独立的 authenticated Protocol V2 connection，并在 hello 中要求 `attachments.v1`。先本地读取文件，计算确切 `sizeBytes` 与 lowercase SHA-256；之后发送 header。`instanceId` 可选：省略时上传到 Main 本机 storage，提供 Main ID 时路由到该 Work 所在的 SubHost：
 

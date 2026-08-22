@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 
@@ -318,6 +319,13 @@ function verifyDockContext(raw: unknown, expected: WorkerIdentity, runtimeGenera
   return capabilities;
 }
 function hardKillOwnProcessGroup(): void {
+  if (process.platform === "win32") {
+    try {
+      const killer = spawn("taskkill.exe", ["/PID", String(process.pid), "/T", "/F"], { detached: true, stdio: "ignore", windowsHide: true });
+      killer.unref();
+      return;
+    } catch { process.exit(1); }
+  }
   try { process.kill(-process.pid, "SIGKILL"); }
   catch { process.exit(1); }
 }

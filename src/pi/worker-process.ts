@@ -1,4 +1,4 @@
-import { fork, type ChildProcess } from "node:child_process";
+import { fork, spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import type { WorkerIdentity } from "./worker-protocol.js";
@@ -43,7 +43,7 @@ export interface PiWorkerProcessOptions {
   onSpawn?: (pid: number) => void;
 }
 
-/** Owns one detached process group and always reaps its direct child. */
+/** Owns one Worker process tree and always reaps its direct child. */
 export class PiWorkerProcess {
   readonly child: ChildProcess;
   readonly timeouts: WorkerProcessTimeouts;
@@ -81,6 +81,10 @@ export class PiWorkerProcess {
     const child = this.child;
     const pid = child.pid;
     if (!pid) throw new Error("Pi worker process identity is unavailable during termination");
+    if (process.platform === "win32") {
+      await terminateWindowsProcessTree(pid, child, this.timeouts.termMs);
+      return;
+    }
     if (child.connected) {
       try { child.disconnect(); } catch { /* Continue to process-group termination. */ }
     }
@@ -100,6 +104,22 @@ export class PiWorkerProcess {
       waitForGroupGone(pid, this.timeouts.termMs),
     ]);
   }
+}
+
+async function terminateWindowsProcessTree(pid: number, child: ChildProcess, timeoutMs: number): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const killer = spawn("taskkill.exe", ["/PID", String(pid), "/T", "/F"], {
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  const exitCode = await new Promise<number | null>((resolve, reject) => {
+    killer.once("error", reject);
+    killer.once("close", resolve);
+  });
+  if (exitCode !== 0 && child.exitCode === null && child.signalCode === null) {
+    throw new Error("Windows could not terminate the Pi worker process tree");
+  }
+  await waitForExit(child, timeoutMs);
 }
 
 function definedEnvironment(environment: NodeJS.ProcessEnv): Record<string, string> {

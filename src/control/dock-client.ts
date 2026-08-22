@@ -5,6 +5,7 @@ import { createConnection, type Socket } from "node:net";
 import { basename, resolve } from "node:path";
 import type { InteractionResponse } from "../core/extension-ui-broker.js";
 import type { DeliverableDto } from "../core/instance-deliverables.js";
+import { resolvePortableAbsoluteLocalPath } from "../core/local-path.js";
 import { MAX_SOURCE_FILE_TRANSFER_BYTES } from "../core/source-file.js";
 import type { DeliveryMode, DockEvent, EventCursor, ImagePathDto, InstanceSnapshot } from "../core/managed-instance.js";
 import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_CHUNK_BYTES, type AttachmentUploadResult } from "../core/instance-attachments.js";
@@ -13,6 +14,7 @@ import type { CommandReferenceDto, SettingUpdate } from "../core/config-projecti
 import type { ProjectTrustChoice } from "./project-trust.js";
 import { DOCK_VERSION } from "../version.js";
 import { encodeJsonLine, JsonLineDecoder, JsonLineError } from "./json-lines.js";
+import { normalizeLocalEndpoint } from "./local-endpoint.js";
 import {
   ATTACHMENTS_CAPABILITY,
   MACHINES_CAPABILITY,
@@ -187,7 +189,7 @@ export class DockClient {
   private readonly createRequestId:()=>string;
   private readonly clientId:string;
   private readonly activeSockets=new Set<Socket>();
-  constructor(options:DockClientOptions){this.socketPath=resolve(options.socketPath);this.timeoutMs=options.timeoutMs??30_000;this.longMutationTimeoutMs=options.longMutationTimeoutMs??options.timeoutMs??600_000;this.createRequestId=options.requestId??randomUUID;this.clientId=options.clientId??randomUUID();}
+  constructor(options:DockClientOptions){this.socketPath=normalizeLocalEndpoint(options.socketPath);this.timeoutMs=options.timeoutMs??30_000;this.longMutationTimeoutMs=options.longMutationTimeoutMs??options.timeoutMs??600_000;this.createRequestId=options.requestId??randomUUID;this.clientId=options.clientId??randomUUID();}
 
   /** Close this client's transport scope. Sent Host mutations remain Host-owned and are never retried. */
   closeActiveConnections():void{for(const socket of this.activeSockets)socket.destroy();this.activeSockets.clear();}
@@ -776,7 +778,7 @@ function validateRequestResult(type:ControlRequest["type"],params:ControlRequest
     const receipt=record.receipt as {operationId?:unknown}|undefined;
     if(receipt&&receipt.operationId!==params.operationId)throw new ProtocolValidationError("invalid_response","Receipt operationId does not match request operationId");
     if((type==="instance.create"||type==="instance.adopt")&&snapshots[0]?.creationOperationId!==params.operationId)throw new ProtocolValidationError("invalid_response","Created instance operationId does not match request operationId");
-    if(type==="instance.adopt"&&snapshots[0]?.executor.sessionFile!==resolve((params as Extract<ControlRequest,{type:"instance.adopt"}>["params"]).sessionFile))throw new ProtocolValidationError("invalid_response","Adopted instance session file does not match the request");
+    if(type==="instance.adopt"&&snapshots[0]?.executor.sessionFile!==resolvePortableAbsoluteLocalPath((params as Extract<ControlRequest,{type:"instance.adopt"}>["params"]).sessionFile))throw new ProtocolValidationError("invalid_response","Adopted instance session file does not match the request");
     if(type==="instance.reopen"&&record.operationId!==params.operationId)throw new ProtocolValidationError("invalid_response","Reopen operationId does not match request operationId");
   }
 }

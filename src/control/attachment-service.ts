@@ -1,7 +1,7 @@
 import { createHash, randomUUID, type Hash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import { chmod, link, lstat, mkdir, open, readdir, readFile, realpath, rename, unlink, type FileHandle } from "node:fs/promises";
-import { extname, isAbsolute, join, resolve } from "node:path";
+import { extname, isAbsolute, join, relative, resolve } from "node:path";
 
 import {
   MAX_ATTACHMENT_BYTES,
@@ -17,6 +17,7 @@ import {
 } from "../core/instance-attachments.js";
 import type { AttachmentStorageState } from "./attachment-storage-state.js";
 import { ATTACHMENT_STORE_INTERNAL_DIRECTORY, ATTACHMENT_STORE_MANIFEST_DIRECTORY } from "./attachment-store-layout.js";
+import { hardenWindowsPrivatePath, noFollowFlag, syncPrivateDirectory } from "../platform/private-state.js";
 const ATTACHMENT_DIRECTORY = "attachments";
 const TEMP_DIRECTORY = "tmp";
 const FILE_DIRECTORY = "files";
@@ -276,7 +277,7 @@ export class AttachmentStore {
     const rootDetails = await lstat(this.root);
     if (!rootDetails.isDirectory() || rootDetails.isSymbolicLink()) throw new Error("Attachment store root must be a regular directory");
     const canonicalRoot = await realpath(this.root);
-    if (canonicalRoot !== this.root) {
+    if (relative(canonicalRoot, this.root) !== "") {
       // A canonical root may live below a symlinked XDG/home parent. The root
       // itself must not be a symlink, and all managed children are checked below.
       this.root = canonicalRoot;
@@ -294,6 +295,8 @@ export class AttachmentStore {
     const managed = [this.internal, this.manifests, this.attachments, this.temporary, this.files];
     await Promise.all(managed.map(assertManagedDirectory));
     await Promise.all(managed.map((path) => chmod(path, 0o700)));
+    await hardenWindowsPrivatePath(this.root, true);
+    await Promise.all(managed.map((path) => hardenWindowsPrivatePath(path, true)));
 
     for (const name of await readdir(this.temporary)) await unlink(join(this.temporary, name)).catch(() => {});
     const referenced = new Set<string>();
@@ -329,6 +332,7 @@ export class AttachmentStore {
         await link(temporaryPath, destination);
         published = true;
         await chmod(destination, 0o600);
+        await hardenWindowsPrivatePath(destination, false);
         await syncDirectory(this.files);
         await unlink(temporaryPath);
         return candidate;
@@ -421,6 +425,7 @@ export class AttachmentStore {
     if (resolve(provisionalPath) === resolve(storedPath)) throw new AttachmentIntegrityError("Attachment content could not be repaired in place");
     await rename(provisionalPath, storedPath);
     await chmod(storedPath, 0o600);
+    await hardenWindowsPrivatePath(storedPath, false);
     await syncDirectory(this.files);
   }
 
@@ -638,6 +643,7 @@ async function readAttachmentManifest(path: string): Promise<AttachmentMetadataM
 async function readBoundedManifest(path: string): Promise<unknown> {
   const details = await lstat(path);
   if (!details.isFile() || details.isSymbolicLink() || details.size > MAX_MANIFEST_BYTES) throw new Error("Attachment manifest is not a bounded regular file");
+  await hardenWindowsPrivatePath(path, false);
   return JSON.parse(await readFile(path, "utf8")) as unknown;
 }
 
@@ -685,10 +691,11 @@ async function writeNewJson(path: string, value: unknown): Promise<void> {
     await handle.writeFile(`${JSON.stringify(value)}\n`, "utf8");
     await handle.sync();
   } finally { await handle.close(); }
+  await hardenWindowsPrivatePath(path, false);
 }
 
 async function hashFile(path: string): Promise<string> {
-  const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+  const handle = await open(path, fsConstants.O_RDONLY | noFollowFlag());
   const hash = createHash("sha256");
   const buffer = Buffer.allocUnsafe(1024 * 1024);
   try {
@@ -710,12 +717,11 @@ function publicAttachmentError(error: unknown): Error {
 
 async function assertManagedDirectory(path: string): Promise<void> {
   const details = await lstat(path);
-  if (!details.isDirectory() || details.isSymbolicLink() || await realpath(path) !== resolve(path)) {
+  if (!details.isDirectory() || details.isSymbolicLink() || relative(await realpath(path), resolve(path)) !== "") {
     throw new Error("Attachment store contains a non-canonical managed directory");
   }
 }
 
 async function syncDirectory(path: string): Promise<void> {
-  const handle = await open(path, fsConstants.O_RDONLY);
-  try { await handle.sync(); } finally { await handle.close(); }
+  await syncPrivateDirectory(path);
 }
