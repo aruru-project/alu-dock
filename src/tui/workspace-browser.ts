@@ -21,8 +21,6 @@ import {
 import { filterSearchableItems } from "./search-filter.js";
 import { paint } from "./theme.js";
 
-const MAX_COLLECTED_WORKSPACE_ENTRIES = 100_000;
-
 export interface CollectedWorkspaceDirectory extends Omit<WorkspaceListResult, "truncated" | "nextCursor"> {
   truncated: false;
 }
@@ -33,7 +31,7 @@ export async function collectWorkspaceDirectory(
   const first = await fetchPage(undefined, MAX_WORKSPACE_LIST_ITEMS);
   const entries = [...first.entries];
   let page = first;
-  while (page.truncated && entries.length < MAX_COLLECTED_WORKSPACE_ENTRIES) {
+  while (page.truncated) {
     const cursor = page.nextCursor;
     if (!cursor) throw new Error("This folder could not be fully loaded. Refresh it and try again.");
     page = await fetchPage(cursor, MAX_WORKSPACE_LIST_ITEMS);
@@ -41,9 +39,6 @@ export async function collectWorkspaceDirectory(
       throw new Error("This folder changed while it was loading. Refresh it and try again.");
     }
     entries.push(...page.entries);
-  }
-  if (page.truncated) {
-    throw new Error("This folder contains too many folders to browse at once. Enter the path you want directly.");
   }
   return {
     path: first.path,

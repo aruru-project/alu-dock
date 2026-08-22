@@ -16,9 +16,7 @@ import {
   type InstanceAttachmentHostPort,
 } from "../core/instance-attachments.js";
 import type { AttachmentStorageState } from "./attachment-storage-state.js";
-
-const INTERNAL_DIRECTORY = ".alu-dock";
-const MANIFEST_DIRECTORY = "manifests";
+import { ATTACHMENT_STORE_INTERNAL_DIRECTORY, ATTACHMENT_STORE_MANIFEST_DIRECTORY } from "./attachment-store-layout.js";
 const ATTACHMENT_DIRECTORY = "attachments";
 const TEMP_DIRECTORY = "tmp";
 const FILE_DIRECTORY = "files";
@@ -176,8 +174,8 @@ export class AttachmentStore {
   constructor(root: string) {
     if (!isAbsolute(root)) throw new Error("Attachment store path must be absolute");
     this.root = resolve(root);
-    this.internal = join(this.root, INTERNAL_DIRECTORY);
-    this.manifests = join(this.internal, MANIFEST_DIRECTORY);
+    this.internal = join(this.root, ATTACHMENT_STORE_INTERNAL_DIRECTORY);
+    this.manifests = join(this.internal, ATTACHMENT_STORE_MANIFEST_DIRECTORY);
     this.attachments = join(this.internal, ATTACHMENT_DIRECTORY);
     this.temporary = join(this.internal, TEMP_DIRECTORY);
     this.files = join(this.root, FILE_DIRECTORY);
@@ -282,8 +280,8 @@ export class AttachmentStore {
       // A canonical root may live below a symlinked XDG/home parent. The root
       // itself must not be a symlink, and all managed children are checked below.
       this.root = canonicalRoot;
-      this.internal = join(this.root, INTERNAL_DIRECTORY);
-      this.manifests = join(this.internal, MANIFEST_DIRECTORY);
+      this.internal = join(this.root, ATTACHMENT_STORE_INTERNAL_DIRECTORY);
+      this.manifests = join(this.internal, ATTACHMENT_STORE_MANIFEST_DIRECTORY);
       this.attachments = join(this.internal, ATTACHMENT_DIRECTORY);
       this.temporary = join(this.internal, TEMP_DIRECTORY);
       this.files = join(this.root, FILE_DIRECTORY);

@@ -3,7 +3,7 @@ import type {
   SettingKey,
   SettingUpdate,
 } from "./config-projection.js";
-import type { ConversationRecordDto, SessionDto } from "./instance-dto.js";
+import type { ConversationRecordDto, ImagePathDto, SessionDto } from "./instance-dto.js";
 import type { AttachmentDto } from "./instance-attachments.js";
 import type {
   CommandCompletionsResult,
@@ -23,32 +23,17 @@ export interface AgentEvent {
   [key: string]: unknown;
 }
 
-/**
- * Worker-owned persistence boundary. Its `history` is the exact authoritative
- * branch snapshot which represents every conversation frame published before
- * the checkpoint. Host atomically installs that snapshot and releases those
- * active frames without inspecting Agent content or waiting for a client ACK.
- */
-export type AgentConversationCheckpoint = AgentEvent & {
-  type: "conversation_checkpoint";
-  history: ConversationRecordDto[];
-};
-
-export interface AgentImagePath {
-  path: string;
-  mimeType: string;
-}
-
 export interface AgentPromptOptions {
   streamingBehavior?: "steer" | "followUp";
-  images?: AgentImagePath[];
+  images?: ImagePathDto[];
   source?: "interactive" | "rpc" | "extension";
   preflightResult?: (success: boolean) => void;
 }
 
 export type AgentInputKind = "extension_command" | "prompt";
 
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+export type ThinkingLevel = typeof THINKING_LEVELS[number];
 
 export interface AgentModelInfo {
   provider: string;

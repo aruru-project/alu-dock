@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createPiExtensionUiContext, type PiExtensionUiPort } from "../src/pi/pi-extension-ui-adapter.js";
 import { WorkerExtensionUiEndpoint, WorkerUiLifecycleCancelledError } from "../src/pi/worker-extension-ui.js";
+
+test("unsupported extension interactions fail instead of fabricating answers", async () => {
+  const context = createPiExtensionUiContext({
+    bindWidgetRenderer: () => {},
+  } as unknown as PiExtensionUiPort);
+
+  await assert.rejects((context.custom as unknown as () => Promise<unknown>)());
+  assert.throws(() => context.getEditorText());
+});
 
 test("stale Worker extension UI generations reject dialogs instead of fabricating answers", async () => {
   const endpoint = new WorkerExtensionUiEndpoint(async () => undefined);

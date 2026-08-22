@@ -3,10 +3,11 @@ import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { chmod, mkdir, open, readFile, readdir, realpath, rename, stat, unlink } from "node:fs/promises";
 
+import { ATTACHMENT_STORE_INTERNAL_DIRECTORY, ATTACHMENT_STORE_MANIFEST_DIRECTORY } from "./attachment-store-layout.js";
+
 const SETTINGS_FILE = "attachment-storage.json";
 const CHANGE_FILE = ".attachment-storage-changing.json";
 const ACTIVE_UPLOAD_DIRECTORY = ".attachment-active-uploads";
-const MANIFEST_DIRECTORY = join(".alu-dock", "manifests");
 const MAX_SETTINGS_BYTES = 64 * 1024;
 const CHANGE_WAIT_ATTEMPTS = 500;
 
@@ -167,7 +168,7 @@ export function defaultAttachmentDirectory(): string {
 
 async function hasCommittedAttachments(directory: string): Promise<boolean> {
   try {
-    const entries = await readdir(join(directory, MANIFEST_DIRECTORY));
+    const entries = await readdir(join(directory, ATTACHMENT_STORE_INTERNAL_DIRECTORY, ATTACHMENT_STORE_MANIFEST_DIRECTORY));
     return entries.some((name) => name.endsWith(".json"));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;

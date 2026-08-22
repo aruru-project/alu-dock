@@ -3,6 +3,7 @@ import { Duplex } from "node:stream";
 import type { Socket } from "node:net";
 import { createServer, connect, type Server as TlsServer, type TLSSocket } from "node:tls";
 
+import { MAX_CATALOG_INSTANCES } from "../core/catalog.js";
 import type { InstanceSnapshot } from "../core/managed-instance.js";
 import type { DockToolsHostPort, DockToolsRequest, DockToolsResult } from "../core/dock-tools.js";
 import { parseDockToolsRequest, parseDockToolsResult } from "../core/dock-tools-codec.js";
@@ -62,6 +63,15 @@ export interface MainRouteAuthority {
   listPage(local: InstanceSnapshot[], params: Extract<ControlRequest, { type: "instance.list" }>['params']): Promise<unknown>;
   start(): Promise<void>;
   stop(): Promise<void>;
+}
+
+export class MachineMutationEffectUnknownError extends Error {
+  readonly queryHint = "Wait for that machine to reconnect and refresh the relevant work before any retry";
+
+  constructor(readonly operationId: string) {
+    super("The connection ended while the change was in progress, so the result is not confirmed. Wait for that machine to reconnect and refresh before trying again.");
+    this.name = "MachineMutationEffectUnknownError";
+  }
 }
 
 export class RoutedControlError extends Error {
@@ -240,14 +250,6 @@ export class MainMachineController implements MainRouteAuthority {
     await writeMachine(connection.socket, { kind: "machine_tool_notification", sourceNativeId: route.nativeInstanceId, notification });
   }
 
-  async openRemoteStream(request: ControlRequest, emit: (record: unknown) => void | Promise<void>, ended: () => void): Promise<RoutedProtocolProxy> {
-    const decision = await this.route(request, emit, ended);
-    if (decision.kind !== "route") throw new Error("Dock stream did not select a SubHost");
-    return decision.proxy;
-  }
-
-  async remoteSnapshots(): Promise<InstanceSnapshot[]> { await this.serializeAuthority(() => this.refreshRouteSnapshotCache()); return this.remoteSnapshotsCurrent(); }
-
   async getByKey(key: string): Promise<InstanceSnapshot | undefined> {
     return this.serializeAuthority(async () => {
       const owner = await this.globalKeyOwner(key);
@@ -308,7 +310,13 @@ export class MainMachineController implements MainRouteAuthority {
         } catch (error) {
           finish(error instanceof Error ? error : new Error(String(error)));
         }
-      }, () => { if (!settled) finish(new Error("SubHost closed before completing the Dock request")); }, keyReservation).then((decision) => {
+      }, () => {
+        if (settled) return;
+        const operationId = requestOperationId(request);
+        finish(operationId === undefined
+          ? new Error("That machine disconnected before the request finished. Wait for it to reconnect and try again.")
+          : new MachineMutationEffectUnknownError(operationId));
+      }, keyReservation).then((decision) => {
         if (decision.kind !== "route") { finish(new Error("Dock request did not select a SubHost")); return; }
         proxy = decision.proxy;
         if (settled) proxy.close();
@@ -393,7 +401,7 @@ export class MainMachineController implements MainRouteAuthority {
       ...(route.snapshot.key === undefined ? {} : { mainKey: route.snapshot.key }),
     } : undefined;
     const streamId = randomUUID();
-    if (connection.streams.size >= MAX_MACHINE_STREAMS) throw new ProtocolValidationError("host_busy", "That machine has too many open requests. Try again shortly");
+    if (connection.streams.size >= MAX_MACHINE_STREAMS) throw new ProtocolValidationError("host_busy", "That machine is busy right now. Try again shortly.");
     const stream: MainStream = {
       streamId,
       machineId: machine!.id,
@@ -1378,11 +1386,16 @@ function wireBase64(value: unknown, label: string, maxDecodedBytes: number): str
 function wireObject(value: unknown, label: string): Record<string, unknown> { if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`); return value as Record<string, unknown>; }
 function wireText(value: unknown, label: string, max: number): string { if (typeof value !== "string" || value.length < 1 || value.length > max || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) throw new Error(`${label} is invalid`); return value; }
 function wireUnsigned(value: unknown, label: string): number { if (!Number.isSafeInteger(value) || (value as number) < 0) throw new Error(`${label} is invalid`); return value as number; }
+function requestOperationId(request: ControlRequest): string | undefined {
+  const operationId = (request.params as { operationId?: unknown }).operationId;
+  return typeof operationId === "string" ? operationId : undefined;
+}
+
 function wirePositive(value: unknown, label: string): number { const result = wireUnsigned(value, label); if (result < 1) throw new Error(`${label} is invalid`); return result; }
 function wireExact(value: Record<string, unknown>, keys: readonly string[]): void { const allowed = new Set(keys); if (Object.keys(value).some((key) => !allowed.has(key))) throw new Error("Machine record has unexpected fields"); }
 
 function serializeInventory(snapshots: InstanceSnapshot[]): string {
-  if (!Array.isArray(snapshots) || snapshots.length > 10_000) throw new Error("Machine inventory is invalid");
+  if (!Array.isArray(snapshots) || snapshots.length > MAX_CATALOG_INSTANCES) throw new Error("Machine inventory is invalid");
   assertUniqueNativeSnapshotIds(snapshots);
   const serialized = JSON.stringify(snapshots);
   if (Buffer.byteLength(serialized, "utf8") > MAX_DURABLE_CATALOG_BYTES) throw new Error("Machine inventory exceeds the durable catalog boundary");
@@ -1428,7 +1441,7 @@ function consumeInventoryChunk(connection: MainConnection, record: Extract<Machi
 
 export function parseCompletedMachineInventory(serialized: string): InstanceSnapshot[] {
   const raw = JSON.parse(serialized) as unknown;
-  if (!Array.isArray(raw) || raw.length > 10_000) throw new Error("Machine inventory is invalid");
+  if (!Array.isArray(raw) || raw.length > MAX_CATALOG_INSTANCES) throw new Error("Machine inventory is invalid");
   const snapshots = raw.map((snapshot, index) => parseInstanceSnapshot(snapshot, `machine snapshots[${index}]`));
   assertUniqueNativeSnapshotIds(snapshots);
   return snapshots;

@@ -107,7 +107,7 @@ const MAX_TITLE_CHARS = 2_048;
 const MAX_TEXT_CHARS = 8_000;
 const MAX_EDITOR_CHARS = 256_000;
 const MAX_OPTIONS = 200;
-const MAX_LINES = 200;
+export const MAX_EXTENSION_WIDGET_LINES = 200;
 
 /**
  * Host-owned, renderer-independent extension UI state machine.
@@ -432,7 +432,7 @@ export class ExtensionUiBroker {
       void this.emit("extension.widget_changed", { key: safeKey });
       return;
     }
-    if (!Array.isArray(lines) || lines.length > MAX_LINES) {
+    if (!Array.isArray(lines) || lines.length > MAX_EXTENSION_WIDGET_LINES) {
       this.recordError("Extension widget has too many lines");
       return;
     }
@@ -455,13 +455,12 @@ export class ExtensionUiBroker {
     this.recordError(`Extension widget ${safeLine(key, 128) || "unknown"} failed to render: ${message}`);
   }
 
-  unsupported(feature: string): void {
+  unsupported(_feature: string): void {
     if (this.unsupportedWarningEmitted) return;
     this.unsupportedWarningEmitted = true;
-    const safeFeature = safeLine(feature, 256) || "visual customization";
     void this.emit("extension.notification", {
       level: "warning",
-      message: `Extension visual UI (${safeFeature}) is unavailable in Alu Dock; the visual request was ignored and any tool failure is reported separately`,
+      message: "An extension's custom display is unavailable here. The extension can keep running without it.",
     });
   }
 

@@ -16,10 +16,6 @@ export interface VisibleTreeNode {
 
 const FILTER_MODES: readonly TreeFilterMode[] = ["default", "no-tools", "user-only", "labeled-only", "all"];
 
-export function filterSessionTree(nodes: TreeNodeDto[], mode: TreeFilterMode, leafId?: string): TreeNodeDto[] {
-  return nodes.filter((node) => treeNodePassesFilter(node, mode, leafId));
-}
-
 function treeNodePassesFilter(node: TreeNodeDto, mode: TreeFilterMode, leafId?: string): boolean {
   if (mode === "labeled-only") return node.label !== undefined;
   if (mode === "user-only") return node.kind === "message" && node.role === "user";

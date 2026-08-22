@@ -16,11 +16,12 @@ import {
 import { ControlClientError, DockClient, type EventSubscription, type OperationSubscription } from "../control/dock-client.js";
 import { humanInstanceStatus } from "../core/instance-display-name.js";
 import type { InteractionResponse } from "../core/extension-ui-broker.js";
-import type { CommandDto, SettingDto, SettingUpdate } from "../core/config-projection.js";
+import type { CommandDto, DiagnosticDto, SettingDto, SettingUpdate } from "../core/config-projection.js";
 import type { DeliveryMode, DockEvent, EventCursor, HistoryEntryDto, InstanceSnapshot, PendingMessageDto, SessionDto, TreeNodeDto } from "../core/managed-instance.js";
-import type {
-  AgentModelInfo,
-  ThinkingLevel,
+import {
+  THINKING_LEVELS,
+  type AgentModelInfo,
+  type ThinkingLevel,
 } from "../core/agent-worker.js";
 import type { ProjectTrustChoice } from "../control/project-trust.js";
 import { humanControlErrorText, humanErrorText } from "../human-control-error.js";
@@ -58,7 +59,6 @@ import {
 import { editorTheme, paint } from "./theme.js";
 import { FixedActionDialog, WorkModalFrame } from "./work-modal.js";
 
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const satisfies readonly ThinkingLevel[];
 const SUBMITTING_FEEDBACK_DELAY_MS = 200;
 
 export function pickerContentRowBudget(terminalRows: number): number {
@@ -569,7 +569,7 @@ export async function runDockTui(
     if (text === "/name") {
       conversation.addNotice(instance.name
         ? `Current session name: ${terminalSafe(instance.name)}. Usage: /name NAME; use /name - to clear.`
-        : "This session does not have a name yet. Usage: /name NAME.");
+        : "Name this session with /name NAME.");
       tui.requestRender();
       return;
     }
@@ -1554,6 +1554,13 @@ export async function runDockTui(
     finally { tui.requestRender(); }
   }
 
+  function addResourceDiagnostics(diagnostics: DiagnosticDto[]): void {
+    for (const diagnostic of diagnostics) {
+      conversation.addNotice(humanResourceDiagnostic(diagnostic), diagnostic.severity === "error");
+    }
+    if (diagnostics.length > 0) conversation.addNotice("Check the details above, then run /reload.");
+  }
+
   async function reloadSession(): Promise<void> {
     blockEditorSubmit();
     showStatus("reloading resources");
@@ -1563,10 +1570,10 @@ export async function runDockTui(
       const result = await client.reloadSession(instance.id);
       instance = result.instance;
       status.update(instance);
-      for (const diagnostic of result.diagnostics) conversation.addNotice(`${diagnostic.severity}: ${diagnostic.message}`, diagnostic.severity === "error");
-      showStatus(`reloaded ${result.resources.length} resources`);
+      addResourceDiagnostics(result.diagnostics);
+      showStatus(`reloaded ${result.resources.length} resources${result.diagnostics.length === 0 ? "" : ` · ${result.diagnostics.length} problems`}`);
       if (result.resourcesTruncated || result.diagnosticsTruncated) {
-        conversation.addNotice(`Showing ${result.resources.length} of ${result.resourceTotal} resources · ${result.diagnostics.length} of ${result.diagnosticTotal} diagnostics.`, true);
+        conversation.addNotice(`Showing ${result.resources.length} of ${result.resourceTotal} resources and ${result.diagnostics.length} of ${result.diagnosticTotal} problems.`, true);
       }
     } catch (error) { showError(error); }
     finally { restoreEditorSubmit(); tui.requestRender(); }
@@ -1578,14 +1585,14 @@ export async function runDockTui(
     tui.requestRender();
     try {
       const result = await client.resources(instance.id);
-      for (const diagnostic of result.diagnostics) conversation.addNotice(`${diagnostic.severity}: ${diagnostic.message}${diagnostic.source ? ` · ${diagnostic.source}` : ""}`, diagnostic.severity === "error");
+      addResourceDiagnostics(result.diagnostics);
       const indexed = result.resources.map((resource, index) => ({ resource, value: String(index) }));
       const selected = await showChoicePicker("Pi resources", indexed.map(({ resource, value }) => ({ value, label: `${resource.kind}: ${resource.name}`, description: resource.path ?? resource.source?.package ?? resource.source?.kind })));
       const resource = indexed.find((candidate) => candidate.value === selected)?.resource;
       if (resource) conversation.addNotice(`${resource.kind} ${resource.name}${resource.path ? ` · ${resource.path}` : ""}`);
-      showStatus(`${result.resources.length} resources · ${result.diagnostics.length} diagnostics`);
+      showStatus(`${result.resources.length} resources available${result.diagnostics.length === 0 ? "" : ` · ${result.diagnostics.length} problems`}`);
       if (result.resourcesTruncated || result.diagnosticsTruncated) {
-        conversation.addNotice(`Showing ${result.resources.length} of ${result.resourceTotal} resources · ${result.diagnostics.length} of ${result.diagnosticTotal} diagnostics.`, true);
+        conversation.addNotice(`Showing ${result.resources.length} of ${result.resourceTotal} resources and ${result.diagnostics.length} of ${result.diagnosticTotal} problems.`, true);
       }
     } catch (error) { showError(error); }
     finally { restoreEditorSubmit(); tui.setFocus(editor); tui.requestRender(); }
@@ -2218,6 +2225,13 @@ function parseModelTarget(value: string): { provider: string; id: string } | und
   const separator = value.indexOf("/");
   if (separator <= 0 || separator === value.length - 1) return undefined;
   return { provider: value.slice(0, separator), id: value.slice(separator + 1) };
+}
+
+export function humanResourceDiagnostic(diagnostic: DiagnosticDto): string {
+  const subject = diagnostic.source ?? "a Pi resource";
+  if (diagnostic.severity === "error") return `Could not load ${subject}: ${diagnostic.message}`;
+  if (diagnostic.severity === "warning") return `${subject} needs attention: ${diagnostic.message}`;
+  return `${subject}: ${diagnostic.message}`;
 }
 
 function isThinkingLevel(value: string): value is ThinkingLevel {

@@ -22,7 +22,7 @@ Use `dock_watch` when the owner wants to know when a running sibling becomes idl
 
 Use `dock_deliver_file` with an absolute local path when the owner needs to download a completed file. Dock registers the source temporarily without copying or persisting it. The source must remain unchanged and readable until download, and files must be no larger than 100 MiB. If delivery fails because the file exceeds Dock's temporary delivery limit, remind the owner that the file was too large to deliver.
 
-Turning Dock tools off prevents new registrations but does not remove files already offered. Temporary deliveries disappear when the work stops or Dock restarts; there is no delete, expiry, or management operation.
+Files already offered stay available after Dock tools are turned off. To clear all temporary deliveries, stop the work or restart Alu Dock.
 
 ## Create and message work
 

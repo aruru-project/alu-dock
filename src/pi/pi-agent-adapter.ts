@@ -45,11 +45,11 @@ import {
   type ContentBlockDto,
   type ConversationFrame,
   type ImagePathDto,
-  type JsonValue,
   type PublishedFileDto,
   type TreeNodeDto,
   MAX_CONVERSATION_CHUNK_CHARS,
 } from "../core/instance-dto.js";
+import type { JsonValue } from "../core/json-value.js";
 import { sliceSemanticHistory, slimSemanticHistoryEntry } from "../core/history-pagination.js";
 import { projectBuiltInToolPresentation } from "../core/tool-result-presentation.js";
 import type { PiExtensionUiPort } from "./pi-extension-ui-adapter.js";
@@ -70,7 +70,6 @@ import type {
   AgentEvent,
   AgentForkResult,
   AgentHistoryEntry,
-  AgentImagePath,
   AgentCommandCatalogBody,
   AgentCommandCompletionsBody,
   AgentCommandContentBody,
@@ -430,7 +429,7 @@ export class PiAgentAdapter {
     } as PromptOptions);
   }
 
-  async queueMessage(text: string, delivery: "steer" | "followUp", images?: AgentImagePath[]): Promise<void> {
+  async queueMessage(text: string, delivery: "steer" | "followUp", images?: ImagePathDto[]): Promise<void> {
     let visualContent: PiImageContent[] | undefined;
     try { visualContent = await loadPiImages(images); }
     catch (error) { throw new AgentQueueRejectedBeforeEffectError(error); }
@@ -1391,7 +1390,7 @@ interface PiImageContent { type: "image"; data: string; mimeType: string }
 async function resolveAttachmentImages(
   attachments: readonly AttachmentDto[] | undefined,
   port: DockAttachmentCallPort | undefined,
-): Promise<AgentImagePath[] | undefined> {
+): Promise<ImagePathDto[] | undefined> {
   const images = (attachments ?? []).filter((attachment) => safeImageMimeType(attachment.mediaType) === attachment.mediaType);
   if (images.length === 0) return undefined;
   if (!port) throw new Error("This image attachment can’t be opened right now. Re-upload it and try again.");
@@ -1418,7 +1417,7 @@ function imageBase64Sha256(data: string): string | undefined {
   catch { return undefined; }
 }
 
-async function loadPiImages(images: readonly AgentImagePath[] | undefined): Promise<PiImageContent[] | undefined> {
+async function loadPiImages(images: readonly ImagePathDto[] | undefined): Promise<PiImageContent[] | undefined> {
   if (images === undefined || images.length === 0) return undefined;
   if (!Array.isArray(images) || images.length > MAX_INPUT_IMAGES) throw new Error(`Image input exceeds ${MAX_INPUT_IMAGES} files`);
   const opened: Array<{ handle: Awaited<ReturnType<typeof open>>; mimeType: string; size: number }> = [];

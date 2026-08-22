@@ -28,6 +28,8 @@ type WidgetEntry =
 
 type RenderAwareExtensionUiContext = ExtensionUIContext & { requestRender?: () => void };
 
+const UNSUPPORTED_EXTENSION_INTERACTION = "This extension needs a custom interactive screen that is not available here. Use another action that does not require that screen.";
+
 /** Adapt Pi's complete UI interface to Dock's deliberately bounded broker. */
 export function createPiExtensionUiContext(broker: PiExtensionUiPort): ExtensionUIContext {
   const widgets = new Map<string, WidgetEntry>();
@@ -123,14 +125,12 @@ export function createPiExtensionUiContext(broker: PiExtensionUiPort): Extension
     setHeader: (factory) => { if (factory) broker.unsupported("custom headers"); },
     setTitle: (title) => broker.setTitle(title),
     custom: async <T>() => {
-      broker.unsupported("custom components");
-      return undefined as T;
+      throw new Error(UNSUPPORTED_EXTENSION_INTERACTION);
     },
     pasteToEditor: () => broker.unsupported("editor paste injection"),
     setEditorText: (text) => broker.setEditorText(text),
     getEditorText: () => {
-      broker.unsupported("editor text reads");
-      return "";
+      throw new Error(UNSUPPORTED_EXTENSION_INTERACTION);
     },
     addAutocompleteProvider: () => broker.unsupported("custom autocomplete providers"),
     setEditorComponent: (factory) => { if (factory) broker.unsupported("custom editors"); },

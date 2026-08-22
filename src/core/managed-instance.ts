@@ -71,6 +71,7 @@ import type {
   ThinkingLevel,
 } from "./agent-worker.js";
 import { sliceSemanticHistory } from "./history-pagination.js";
+import { MAX_JSON_ARRAY_ITEMS, MAX_JSON_OBJECT_KEYS, MAX_JSON_VALUE_DEPTH, type JsonObject, type JsonValue } from "./json-value.js";
 import { projectInstanceDisplayName } from "./instance-display-name.js";
 import type { PublishedFileReadPage } from "./published-file.js";
 import { InstanceDeliverables, type DeliverableDto } from "./instance-deliverables.js";
@@ -90,6 +91,7 @@ import {
   MAX_PENDING_QUEUE_ITEMS,
   MAX_PENDING_QUEUE_TEXT_CHARS,
 } from "./instance-dto.js";
+import { MAX_CONVERSATION_CONTENT_BLOCKS } from "./instance-dto.js";
 import type {
   AttachProjection,
   AttachmentDto,
@@ -111,8 +113,6 @@ import type {
   InstanceExecution,
   InstanceLifecycle,
   InstanceSnapshot,
-  JsonObject,
-  JsonValue,
   LastRunResult,
   PendingDto,
   PendingMessageDto,
@@ -145,9 +145,6 @@ export type {
   InstanceExecution,
   InstanceLifecycle,
   InstanceSnapshot,
-  JsonObject,
-  JsonScalar,
-  JsonValue,
   LastRunResult,
   PendingDto,
   PendingMessageDto,
@@ -3874,7 +3871,7 @@ function projectAgentHistoryEntry(entry: AgentHistoryEntry): HistoryEntryDto {
   if (entry.parentId !== undefined && (entry.parentId.length < 1 || entry.parentId.length > 128)) {
     throw new Error("Runtime returned an invalid conversation parent identity");
   }
-  if (entry.content.length > 200) throw new Error("Runtime returned too many conversation content blocks");
+  if (entry.content.length > MAX_CONVERSATION_CONTENT_BLOCKS) throw new Error("Runtime returned too many conversation content blocks");
   const projected = cloneJson(entry);
   if (entry.attachments !== undefined) projected.attachments = cloneInputAttachments(entry.attachments);
   return projected;
@@ -3993,13 +3990,10 @@ function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
-const MAX_JSON_DEPTH = 8;
-const MAX_JSON_KEYS = 100;
-const MAX_JSON_ARRAY = 200;
 const MAX_JSON_STRING = 8_000;
 const MAX_JSON_PROJECTED_NODES = 2_000;
 const MAX_JSON_PROJECTED_BYTES = 256_000;
-const MAX_JSON_OMITTED_FIELDS = 200;
+export const MAX_JSON_OMITTED_FIELDS = 200;
 
 export function projectJsonObject(input: unknown): { value: JsonObject; omittedFields: string[] } {
   const omittedFields: string[] = [];
@@ -4049,7 +4043,7 @@ export function projectJsonObject(input: unknown): { value: JsonObject; omittedF
       omit(path);
       return undefined;
     }
-    if (depth >= MAX_JSON_DEPTH || seen.has(value) || !reserve(2, path)) {
+    if (depth >= MAX_JSON_VALUE_DEPTH || seen.has(value) || !reserve(2, path)) {
       omit(path);
       return undefined;
     }
@@ -4058,7 +4052,7 @@ export function projectJsonObject(input: unknown): { value: JsonObject; omittedF
       const result: JsonValue[] = [];
       for (let index = 0; index < value.length; index += 1) {
         const itemPath = `${path}/${index}`;
-        if (index >= MAX_JSON_ARRAY || budgetExhausted || projectedNodes >= MAX_JSON_PROJECTED_NODES) { omit(itemPath); break; }
+        if (index >= MAX_JSON_ARRAY_ITEMS || budgetExhausted || projectedNodes >= MAX_JSON_PROJECTED_NODES) { omit(itemPath); break; }
         if (result.length > 0 && !reserve(1, itemPath)) break;
         let sourceItem: unknown;
         try { sourceItem = value[index]; }
@@ -4073,7 +4067,7 @@ export function projectJsonObject(input: unknown): { value: JsonObject; omittedF
     for (const key in value as Record<string, unknown>) {
       if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
       const itemPath = `${path}/${escapeJsonPointer(key.slice(0, 256))}`;
-      if (index >= MAX_JSON_KEYS || budgetExhausted || projectedNodes >= MAX_JSON_PROJECTED_NODES) { omit(itemPath); break; }
+      if (index >= MAX_JSON_OBJECT_KEYS || budgetExhausted || projectedNodes >= MAX_JSON_PROJECTED_NODES) { omit(itemPath); break; }
       index += 1;
       if (key.length < 1 || key.length > 256 || /[\u0000-\u001f\u007f-\u009f]/u.test(key)) { omit(itemPath); continue; }
       const separatorBytes = Object.keys(result).length > 0 ? 1 : 0;

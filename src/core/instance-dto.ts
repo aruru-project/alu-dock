@@ -1,4 +1,5 @@
 import type { DiagnosticDto, ResourceDto, SettingValueMap } from "./config-projection.js";
+import type { JsonObject, JsonValue } from "./json-value.js";
 import type { AttachmentDto } from "./instance-attachments.js";
 export type { AttachmentDto } from "./instance-attachments.js";
 import type { AgentSessionMetrics, ThinkingLevel } from "./agent-worker.js";
@@ -20,11 +21,9 @@ export interface ExecutorIdentity {
   thinkingLevel?: ThinkingLevel;
 }
 
-export type JsonScalar = string | number | boolean | null;
-export type JsonValue = JsonScalar | JsonValue[] | { [key: string]: JsonValue };
-export type JsonObject = { [key: string]: JsonValue };
-
 export interface ImagePathDto { path: string; mimeType: string }
+
+export const MAX_CONVERSATION_CONTENT_BLOCKS = 200;
 
 export type ContentBlockDto =
   | { type: "text"; text: string }

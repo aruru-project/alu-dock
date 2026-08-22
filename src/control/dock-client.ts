@@ -177,7 +177,7 @@ export interface AttachmentUploadSource {
   open(): AsyncIterable<Uint8Array>;
 }
 export class ControlClientError extends Error {
-  constructor(readonly code:string,message:string,readonly operationId?:string,readonly details?:import("../core/managed-instance.js").JsonObject){super(message);this.name="ControlClientError";}
+  constructor(readonly code:string,message:string,readonly operationId?:string,readonly details?:import("../core/json-value.js").JsonObject){super(message);this.name="ControlClientError";}
 }
 
 export class DockClient {

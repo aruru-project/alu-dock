@@ -14,7 +14,8 @@ import {
   type BuiltInToolPresentation,
   type ToolResultNotice,
 } from "../core/tool-result-presentation.js";
-import type { DockEvent, HistoryEntryDto, InstanceSnapshot, JsonObject, JsonValue } from "../core/managed-instance.js";
+import type { DockEvent, HistoryEntryDto, InstanceSnapshot } from "../core/managed-instance.js";
+import type { JsonObject, JsonValue } from "../core/json-value.js";
 import type { AttachmentDto } from "../core/instance-attachments.js";
 import { renderWorkAlu } from "./alu-mascot.js";
 import { knownCompactionFeedback } from "./compaction-feedback.js";
@@ -362,9 +363,11 @@ export class DockConversation implements Component {
         this.addExtensionNotification(event.data.level, event.data.message);
         break;
 
-      case "resources.reloaded":
-        this.add("system", `Resources reloaded · ${event.data.resources.length} items · ${event.data.diagnostics.length} diagnostics.`);
+      case "resources.reloaded": {
+        const problems = event.data.diagnostics.length;
+        this.add("system", `Resources reloaded · ${event.data.resources.length} available${problems === 0 ? "" : ` · ${problems} ${problems === 1 ? "problem" : "problems"} · run /resources for details`}.`);
         break;
+      }
 
       case "instance.stopped":
         this.add("system", "Instance stopped.");

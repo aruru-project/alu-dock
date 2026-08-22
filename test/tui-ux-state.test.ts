@@ -8,11 +8,17 @@ import { DockWorkMetadata } from "../src/tui/conversation.js";
 import { filterSearchableItems } from "../src/tui/search-filter.js";
 import { SearchablePicker } from "../src/tui/searchable-picker.js";
 import { ExtensionTextDialog } from "../src/tui/extension-text-dialog.js";
-import { formatWorkStatus, pickerContentRowBudget } from "../src/tui/dock-tui.js";
+import { formatWorkStatus, humanResourceDiagnostic, pickerContentRowBudget } from "../src/tui/dock-tui.js";
 import { SessionTreeSurface } from "../src/tui/session-tree-surface.js";
 import { FixedActionDialog, WorkModalFrame } from "../src/tui/work-modal.js";
 import { WorkspaceBrowserSurface } from "../src/tui/workspace-browser.js";
 import type { TreeNodeDto } from "../src/core/instance-dto.js";
+
+test("resource problems name the affected file without exposing a severity enum", () => {
+  const text = humanResourceDiagnostic({ severity: "error", source: "/work/skills/review.md", message: "frontmatter is invalid" });
+  assert.equal(text, "Could not load /work/skills/review.md: frontmatter is invalid");
+  assert.doesNotMatch(text, /^error:/u);
+});
 
 function snapshot(overrides: Partial<InstanceSnapshot> = {}): InstanceSnapshot {
   return {

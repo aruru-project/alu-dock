@@ -1,4 +1,4 @@
-import { truncateToWidth, visibleWidth, type Component } from "@earendil-works/pi-tui";
+import { truncateToWidth, type Component } from "@earendil-works/pi-tui";
 
 import type { RunActivityPhase } from "./run-activity.js";
 import { ALU_PALETTE, type AluPaletteName } from "./alu-palette.js";
@@ -105,8 +105,4 @@ function color(text: string, tone: AluPaletteName, level: TerminalColorLevel): s
     ? [38, 2, ...selected.rgb]
     : level === "ansi256" ? [38, 5, selected.ansi256] : [selected.ansi16];
   return `\u001b[${codes.join(";")}m${text}\u001b[0m`;
-}
-
-export function mascotVisibleWidth(lines: readonly string[]): number {
-  return Math.max(0, ...lines.map((line) => visibleWidth(line)));
 }

@@ -33,7 +33,7 @@ aludock service status
 npm run install:local -- --replace-active
 ```
 
-替换 Host 不会迁移或重放未完成的内存状态和副作用。
+替换 Alu Dock 会中断未完成的回答、等待消息和交互；请先完成或停止重要工作。
 
 ## Service 命令
 
@@ -47,7 +47,7 @@ aludock service logs [--lines N] [--follow]
 aludock service uninstall
 ```
 
-普通 `aludock`、`-c`、`new` 和 `attach` 只连接已有 Host，不会安装、启动或重启 service。`uninstall` 只删除 Alu Dock 生成的 unit，不删除 catalog、Agent sessions、attachment settings 或 stored attachments。
+使用 `aludock`、`-c`、`new` 或 `attach` 前，请先用 `aludock service start` 启动后台服务。卸载后，Dock History、已保存的 Pi 会话、附件设置和附件文件仍保留在原位置。
 
 需要跨 logout 常驻时，由用户显式启用 linger：
 

@@ -1,4 +1,4 @@
-import type { InteractionResponse } from "../core/extension-ui-broker.js";
+import { MAX_EXTENSION_WIDGET_LINES, type InteractionResponse } from "../core/extension-ui-broker.js";
 import {
   MAX_ATTACHMENT_BYTES,
   MAX_ATTACHMENT_CHUNK_BYTES,
@@ -10,6 +10,7 @@ import {
   type AttachmentUploadResult,
 } from "../core/instance-attachments.js";
 import { MAX_INSTANCE_DISPLAY_NAME_CHARS } from "../core/instance-display-name.js";
+import { MAX_JSON_ARRAY_ITEMS, MAX_JSON_OBJECT_KEYS, MAX_JSON_VALUE_DEPTH, type JsonObject, type JsonValue } from "../core/json-value.js";
 import {
   MAX_DELIVERY_REF_CHARS,
   MAX_TEMPORARY_DELIVERABLES_PER_INSTANCE,
@@ -23,6 +24,7 @@ import {
 import {
   CONVERSATION_FRAME_TYPES,
   MAX_CONVERSATION_CHUNK_CHARS,
+  MAX_CONVERSATION_CONTENT_BLOCKS,
   MAX_SESSION_FIRST_USER_MESSAGE_CHARS,
 } from "../core/instance-dto.js";
 import {
@@ -46,6 +48,7 @@ import {
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
   MAX_INPUT_IMAGES,
+  MAX_JSON_OMITTED_FIELDS,
   MAX_PENDING_QUEUE_ATTACHMENT_DESCRIPTOR_CHARS,
   MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS,
   MAX_PENDING_QUEUE_ITEMS,
@@ -68,8 +71,6 @@ import type {
   HistoryEntryDto,
   ImagePathDto,
   InstanceSnapshot,
-  JsonObject,
-  JsonValue,
   PendingMessageDto,
   QueueDequeueReceipt,
   SessionDto,
@@ -99,7 +100,7 @@ import {
   compareResourceDtos,
   compareToolDtos,
 } from "../core/config-projection.js";
-import type { AgentModelInfo, ThinkingLevel } from "../core/agent-worker.js";
+import { THINKING_LEVELS, type AgentModelInfo, type ThinkingLevel } from "../core/agent-worker.js";
 import type { ProjectTrustChoice } from "./project-trust.js";
 import { CATALOG_SCHEMA_VERSION, DOCK_VERSION, PI_SDK_VERSION } from "../version.js";
 
@@ -128,10 +129,6 @@ const MAX_TEXT = 8_000;
 const MAX_TOOL_RESULT_TEXT = 256_000;
 const MAX_MESSAGE = 2_048;
 const MAX_COLLECTION = 2_000;
-const MAX_JSON_DEPTH = 8;
-const MAX_JSON_KEYS = 100;
-const MAX_JSON_ARRAY = 200;
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 export const TOOLS_EXPANDED_CAPABILITY = "extension_ui.tools-expanded.v1" as const;
 export const EXTENSION_WIDGET_CAPABILITY = "extension_ui.widgets.v1" as const;
@@ -1158,18 +1155,18 @@ export function parseAttachmentUploadResult(input: unknown): AttachmentUploadRes
   };
 }
 
-export function parseCreateResult(input: unknown): CreateResult { const value = object(input, "create result"); exact(value, ["instance"]); return { instance: parseInstance(value.instance, "instance") }; }
+export function parseCreateResult(input: unknown): CreateResult { const value = object(input, "create result"); exact(value, ["instance"]); return { instance: parseInstanceSnapshot(value.instance, "instance") }; }
 export function parseEnsureResult(input: unknown): EnsureResult {
   const value = object(input, "ensure result"); exact(value, ["created", "instance"]);
-  return { created: boolean(value.created, "created"), instance: parseInstance(value.instance, "instance") };
+  return { created: boolean(value.created, "created"), instance: parseInstanceSnapshot(value.instance, "instance") };
 }
 export function parseKeyLookupResult(input: unknown): KeyLookupResult {
   const value = object(input, "instance key lookup result"); exact(value, ["instance"]);
-  return { instance: value.instance === null ? null : parseInstance(value.instance, "instance") };
+  return { instance: value.instance === null ? null : parseInstanceSnapshot(value.instance, "instance") };
 }
 export function parseListResult(input: unknown): ListResult {
   const value = object(input, "list result"); exact(value, ["instances", "page"]);
-  const instances = array(value.instances, "instances", MAX_INSTANCE_LIST_ITEMS).map((item, index) => parseInstance(item, `instances[${index}]`));
+  const instances = array(value.instances, "instances", MAX_INSTANCE_LIST_ITEMS).map((item, index) => parseInstanceSnapshot(item, `instances[${index}]`));
   const page = object(value.page, "page"); exact(page, ["revision", "total", "hiddenStopped", "nextCursor"]);
   const revision = unsigned(page.revision, "page.revision");
   const total = unsigned(page.total, "page.total");
@@ -1204,10 +1201,10 @@ export function parseWorkspaceListResult(input: unknown): WorkspaceListResult {
   if (truncated !== (nextCursor !== undefined)) throw validation("invalid_response", "Workspace continuation metadata is inconsistent");
   return { path, parent, revision, entries, total, truncated, nextCursor };
 }
-export function parseStatusResult(input: unknown): StatusResult { const value = object(input, "get result"); exact(value, ["instance"]); return { instance: parseInstance(value.instance, "instance") }; }
+export function parseStatusResult(input: unknown): StatusResult { const value = object(input, "get result"); exact(value, ["instance"]); return { instance: parseInstanceSnapshot(value.instance, "instance") }; }
 export function parseInstanceReadResult(input: unknown): InstanceReadResult {
   const value = object(input, "instance read result"); exact(value, ["instance", "page", "recentHistory", "historyRevision", "historyTruncated", "pendingMessages"]);
-  const instance = parseInstance(value.instance, "instance");
+  const instance = parseInstanceSnapshot(value.instance, "instance");
   const page = parseEventPage(value.page, instance.id, instance.runtimeGeneration);
   assertCursorDomain(page.earliest, instance, "page.earliest"); assertCursorDomain(page.latest, instance, "page.latest");
   const history = array(value.recentHistory, "recentHistory", MAX_SEMANTIC_HISTORY_PAGE_ITEMS).map((item, index) => parseHistoryEntry(item, `recentHistory[${index}]`));
@@ -1263,7 +1260,7 @@ export function parseWidgetViewportResult(input: unknown): WidgetViewportResult 
 }
 export function parsePromptResult(input: unknown): PromptResult {
   const value = object(input, "prompt result"); exact(value, ["receipt", "instance"]);
-  const instance = parseInstance(value.instance, "instance"); const receipt = parseReceipt(value.receipt);
+  const instance = parseInstanceSnapshot(value.instance, "instance"); const receipt = parseReceipt(value.receipt);
   const promptOperationMismatch = receipt.kind === "prompt"
     && instance.activeCommandId !== undefined
     && !receipt.queued
@@ -1274,7 +1271,7 @@ export function parsePromptResult(input: unknown): PromptResult {
 export function parseReopenResult(input: unknown): ReopenResult {
   const value = object(input, "reopen result");
   exact(value, ["operationId", "previousLifecycle", "instance"]);
-  const instance = parseInstance(value.instance, "instance");
+  const instance = parseInstanceSnapshot(value.instance, "instance");
   const previousLifecycle = enumeration(value.previousLifecycle, "previousLifecycle", ["host_lost", "runtime_error"]);
   const operationId = id(value.operationId, "operationId");
   if (instance.lifecycle !== "active" || instance.execution !== "idle" || instance.lastRun !== "never" || instance.runtimeGeneration < 2) {
@@ -1284,14 +1281,14 @@ export function parseReopenResult(input: unknown): ReopenResult {
 }
 export function parseAbortResult(input: unknown): AbortResult {
   const value = object(input, "abort result"); exact(value, ["instance"]);
-  const instance = parseInstance(value.instance, "instance");
+  const instance = parseInstanceSnapshot(value.instance, "instance");
   if (instance.execution === "running") throw validation("invalid_response", "Abort result instance must not still be running");
   return { instance };
 }
 export function parseQueueDequeueResult(input: unknown): QueueDequeueResult {
   const value = object(input, "queue dequeue result"); exact(value, ["receipt", "instance"]);
   const receipt = object(value.receipt, "receipt"); exact(receipt, ["operationId", "instanceId", "restored", "inFlight"]);
-  const instance = parseInstance(value.instance, "instance");
+  const instance = parseInstanceSnapshot(value.instance, "instance");
   const operationId = id(receipt.operationId, "receipt.operationId");
   const instanceId = id(receipt.instanceId, "receipt.instanceId");
   if (instanceId !== instance.id) throw validation("invalid_response", "Queue dequeue receipt does not match instance");
@@ -1311,7 +1308,7 @@ export function parseQueueDequeueResult(input: unknown): QueueDequeueResult {
 export function parseStopResult(input: unknown): StopResult {
   const value = object(input, "stop result"); exact(value, ["receipt", "instance"]);
   const receipt = object(value.receipt, "receipt"); exact(receipt, ["operationId", "alreadyStopped", "cleanupErrors"]);
-  const instance = parseInstance(value.instance, "instance");
+  const instance = parseInstanceSnapshot(value.instance, "instance");
   if (instance.lifecycle !== "stopped") throw validation("invalid_response", "Stop result instance must be stopped");
   return { receipt: { operationId: id(receipt.operationId, "receipt.operationId"), alreadyStopped: boolean(receipt.alreadyStopped, "receipt.alreadyStopped"), cleanupErrors: receipt.cleanupErrors === undefined ? undefined : strings(receipt.cleanupErrors, "receipt.cleanupErrors", 100, MAX_MESSAGE) }, instance };
 }
@@ -1359,15 +1356,15 @@ export function parseModelListBody(input: unknown): Omit<ModelsResult, "instance
 }
 export function parseModelsResult(input: unknown): ModelsResult {
   const value = object(input, "models result"); exact(value, ["models", "availableThinkingLevels", "instance", "total", "truncated"]);
-  return { ...modelListFields(value), instance: parseInstance(value.instance, "instance") };
+  return { ...modelListFields(value), instance: parseInstanceSnapshot(value.instance, "instance") };
 }
 export function parseModelConfigurationResult(input: unknown): ModelConfigurationResult {
   const value = object(input, "model configuration result"); exact(value, ["instance", "settingsWrite"]);
-  return { instance: parseInstance(value.instance, "instance"), settingsWrite: parseSettingsWrite(value.settingsWrite) };
+  return { instance: parseInstanceSnapshot(value.instance, "instance"), settingsWrite: parseSettingsWrite(value.settingsWrite) };
 }
 export function parseThinkingConfigurationResult(input: unknown): ThinkingConfigurationResult {
   const value = object(input, "thinking configuration result"); exact(value, ["actualLevel", "availableThinkingLevels", "instance", "settingsWrite"]);
-  return { actualLevel: enumeration(value.actualLevel, "actualLevel", THINKING_LEVELS), availableThinkingLevels: thinkingLevels(value.availableThinkingLevels), instance: parseInstance(value.instance, "instance"), settingsWrite: parseSettingsWrite(value.settingsWrite) };
+  return { actualLevel: enumeration(value.actualLevel, "actualLevel", THINKING_LEVELS), availableThinkingLevels: thinkingLevels(value.availableThinkingLevels), instance: parseInstanceSnapshot(value.instance, "instance"), settingsWrite: parseSettingsWrite(value.settingsWrite) };
 }
 function parseSettingsWrite(input: unknown): { persisted: true } { const write = object(input, "settingsWrite"); exact(write, ["persisted"]); if (write.persisted !== true) throw validation("invalid_response", "settingsWrite.persisted must be true"); return { persisted: true }; }
 export function parseSessionsResult(input: unknown): SessionsResult {
@@ -1436,7 +1433,7 @@ export function parseHistoryResult(input: unknown): HistoryResult {
   const nextBeforeEntryId = optionalString(value.nextBeforeEntryId, "nextBeforeEntryId", 128);
   if (hasEarlier !== (nextBeforeEntryId !== undefined)) throw validation("invalid_response", "history pagination cursor is inconsistent");
   if (nextBeforeEntryId !== undefined && entries[0]?.entryId !== nextBeforeEntryId) throw validation("invalid_response", "history cursor must identify the first returned entry");
-  return { historyRevision: positive(value.historyRevision, "historyRevision"), entries, hasEarlier, nextBeforeEntryId, instance: parseInstance(value.instance, "instance") };
+  return { historyRevision: positive(value.historyRevision, "historyRevision"), entries, hasEarlier, nextBeforeEntryId, instance: parseInstanceSnapshot(value.instance, "instance") };
 }
 
 /** Worker-produced conversation.history body; the Host adds only its own instance snapshot. */
@@ -1607,13 +1604,13 @@ function parseConversationContentChunk(input: unknown, field: string): Conversat
 
 export function parseSessionReplacementResult(input: unknown): SessionReplacementResult {
   const value = object(input, "session replacement result"); exact(value, ["cancelled", "instance"]);
-  const instance = parseInstance(value.instance, "instance");
+  const instance = parseInstanceSnapshot(value.instance, "instance");
   if (instance.lifecycle !== "active") throw validation("invalid_response", "Session replacement success requires an active instance");
   return { cancelled: boolean(value.cancelled, "cancelled"), instance };
 }
 export function parseSessionNameResult(input: unknown): SessionNameResult {
   const value = object(input, "session name result"); exact(value, ["instance"]);
-  const instance = parseInstance(value.instance, "instance");
+  const instance = parseInstanceSnapshot(value.instance, "instance");
   if (instance.lifecycle !== "active") throw validation("invalid_response", "Session name success requires an active instance");
   return { instance };
 }
@@ -1729,7 +1726,7 @@ function parseTreeNode(input: unknown, field: string): TreeNodeDto {
 }
 
 function parseActiveSessionInstance(input: unknown, operation: string): InstanceSnapshot {
-  const instance = parseInstance(input, "instance");
+  const instance = parseInstanceSnapshot(input, "instance");
   if (instance.lifecycle !== "active") throw validation("invalid_response", `${operation} success requires an active instance`);
   return instance;
 }
@@ -1746,7 +1743,7 @@ export function parseToolListBody(input: unknown): Omit<ToolsResult, "instance">
 }
 export function parseToolsResult(input: unknown): ToolsResult {
   const value = object(input, "tools result"); exact(value, ["tools", "instance", "total", "truncated"]);
-  return { ...toolListFields(value), instance: parseInstance(value.instance, "instance") };
+  return { ...toolListFields(value), instance: parseInstanceSnapshot(value.instance, "instance") };
 }
 /** The canonical full setting list; Worker settings.get bodies and wire results share it. */
 export function parseSettingDtos(input: unknown): SettingDto[] {
@@ -1764,7 +1761,7 @@ export function parseSettingUpdateResult(input: unknown): SettingUpdateResult {
   const reloadRequired = boolean(value.reloadRequired, "reloadRequired");
   const hostRestartRequired = boolean(value.hostRestartRequired, "hostRestartRequired");
   if (reloadRequired !== setting.reloadRequired || hostRestartRequired !== setting.hostRestartRequired) throw validation("invalid_response", "setting update metadata is inconsistent");
-  return { setting, instance: parseInstance(value.instance, "instance"), reloadRequired, hostRestartRequired };
+  return { setting, instance: parseInstanceSnapshot(value.instance, "instance"), reloadRequired, hostRestartRequired };
 }
 export function parseResourcesResult(input: unknown): ResourcesResult {
   const value = object(input, "resources result");
@@ -1967,7 +1964,6 @@ function assertCursorDomain(cursor: EventCursor, snapshot: InstanceSnapshot, fie
   if (cursor.instanceId !== snapshot.id || cursor.runtimeGeneration !== snapshot.runtimeGeneration || (snapshot.ownerHostEpoch !== undefined && cursor.hostEpoch !== snapshot.ownerHostEpoch)) throw validation("invalid_response", `${field} does not match the instance cursor domain`);
 }
 
-const parseInstance = parseInstanceSnapshot;
 
 function parseDockEvent(input: unknown, field: string): DockEvent {
   const value = object(input, field); exact(value, ["scope", "sequence", "instanceId", "runtimeGeneration", "occurredAt", "type", "data"]);
@@ -2073,7 +2069,7 @@ function parseEventData(type: keyof EventDataMap, input: unknown, field: string)
     }
     case "extension.status_changed": exact(data, ["key", "text"]); return { key: extensionKey(data.key, `${field}.key`), text: data.text === undefined ? undefined : payloadFreeString(data.text, `${field}.text`, MAX_MESSAGE) };
     case "extension.tools_expanded_changed": exact(data, ["expanded"]); return { expanded: boolean(data.expanded, `${field}.expanded`) };
-    case "extension.widget_changed": exact(data, ["key", "lines", "placement"]); return { key: extensionKey(data.key, `${field}.key`), lines: data.lines === undefined ? undefined : payloadFreeStrings(data.lines, `${field}.lines`, MAX_JSON_ARRAY, MAX_TEXT), placement: data.placement === undefined ? undefined : enumeration(data.placement, "placement", ["aboveEditor", "belowEditor"]) };
+    case "extension.widget_changed": exact(data, ["key", "lines", "placement"]); return { key: extensionKey(data.key, `${field}.key`), lines: data.lines === undefined ? undefined : payloadFreeStrings(data.lines, `${field}.lines`, MAX_EXTENSION_WIDGET_LINES, MAX_TEXT), placement: data.placement === undefined ? undefined : enumeration(data.placement, "placement", ["aboveEditor", "belowEditor"]) };
     case "extension.error": exact(data, ["source", "event", "error"]); return { source: data.source === undefined ? undefined : payloadFreeString(data.source, `${field}.source`, 256), event: data.event === undefined ? undefined : payloadFreeString(data.event, `${field}.event`, 128), error: payloadFreeString(data.error, `${field}.error`, MAX_MESSAGE) };
     default: throw validation("invalid_response", `Unsupported event type: ${type}`);
   }
@@ -2096,7 +2092,7 @@ function parseToolPresentation(
 }
 
 function parseContent(input: unknown, field: string): ContentBlockDto[] {
-  return array(input, field, MAX_JSON_ARRAY).map((item, index) => {
+  return array(input, field, MAX_CONVERSATION_CONTENT_BLOCKS).map((item, index) => {
     const block = object(item, `${field}[${index}]`); const type = enumeration(block.type, `${field}[${index}].type`, ["text", "thinking", "image", "tool_call", "tool_result", "omitted"]);
     if (type === "text" || type === "thinking") { exact(block, ["type", "text"]); return { type, text: boundedString(block.text, `${field}[${index}].text`, MAX_TEXT) }; }
     if (type === "image") {
@@ -2323,7 +2319,7 @@ function assertSorted<T>(values: T[], field: string, compare: (left: T, right: T
     if (compare(values[index - 1] as T, values[index] as T) > 0) throw validation("invalid_response", `${field} is not deterministically sorted`);
   }
 }
-function omitted(input: unknown, field: string): string[] | undefined { if (input === undefined) return undefined; const result = strings(input, field, MAX_JSON_ARRAY, MAX_CONTROL_CWD_CHARS); if (result.some((item) => !item.startsWith("/"))) throw validation("invalid_response", `${field} must contain relative JSON pointers`); return result; }
+function omitted(input: unknown, field: string): string[] | undefined { if (input === undefined) return undefined; const result = strings(input, field, MAX_JSON_OMITTED_FIELDS, MAX_CONTROL_CWD_CHARS); if (result.some((item) => !item.startsWith("/"))) throw validation("invalid_response", `${field} must contain relative JSON pointers`); return result; }
 function thinkingLevels(input: unknown): ThinkingLevel[] { return array(input, "availableThinkingLevels", THINKING_LEVELS.length).map((item) => enumeration(item, "thinking level", THINKING_LEVELS)); }
 
 export class ProtocolValidationError extends Error { constructor(readonly code: string, message: string) { super(message); this.name = "ProtocolValidationError"; } }
@@ -2355,5 +2351,5 @@ function strings(input: unknown, field: string, maxItems: number, maxChars: numb
 function unsignedArray(input: unknown, field: string, max: number): number[] { return array(input, field, max).map((item, index) => unsigned(item, `${field}[${index}]`)); }
 function timestamp(input: unknown, field: string): string { const value = string(input, field, 64); let normalized: string; try { normalized = new Date(value).toISOString(); } catch { throw validation("invalid_response", `${field} must be an ISO-8601 UTC timestamp`); } if (normalized !== value) throw validation("invalid_response", `${field} must be an ISO-8601 UTC timestamp`); return value; }
 function parseJsonObject(input: unknown, field: string): JsonObject { const value = parseJsonValue(input, field, 0); if (value === null || typeof value !== "object" || Array.isArray(value)) throw validation("invalid_response", `${field} must be a JSON object`); return value; }
-function parseJsonValue(input: unknown, field: string, depth: number): JsonValue { if (depth > MAX_JSON_DEPTH) throw validation("invalid_response", `${field} exceeds JSON depth`); if (input === null || typeof input === "boolean") return input; if (typeof input === "string") return boundedString(input, field, MAX_TEXT); if (typeof input === "number" && Number.isFinite(input)) return input; if (Array.isArray(input)) return array(input, field, MAX_JSON_ARRAY).map((item, index) => parseJsonValue(item, `${field}[${index}]`, depth + 1)); const value = object(input, field); if (Object.keys(value).length > MAX_JSON_KEYS) throw validation("invalid_response", `${field} has too many keys`); return Object.fromEntries(Object.entries(value).map(([key, item]) => [string(key, `${field} key`, 256), parseJsonValue(item, `${field}.${key}`, depth + 1)])); }
+function parseJsonValue(input: unknown, field: string, depth: number): JsonValue { if (depth > MAX_JSON_VALUE_DEPTH) throw validation("invalid_response", `${field} exceeds JSON depth`); if (input === null || typeof input === "boolean") return input; if (typeof input === "string") return boundedString(input, field, MAX_TEXT); if (typeof input === "number" && Number.isFinite(input)) return input; if (Array.isArray(input)) return array(input, field, MAX_JSON_ARRAY_ITEMS).map((item, index) => parseJsonValue(item, `${field}[${index}]`, depth + 1)); const value = object(input, field); if (Object.keys(value).length > MAX_JSON_OBJECT_KEYS) throw validation("invalid_response", `${field} has too many keys`); return Object.fromEntries(Object.entries(value).map(([key, item]) => [string(key, `${field} key`, 256), parseJsonValue(item, `${field}.${key}`, depth + 1)])); }
 function valueOr(input: unknown): unknown { return input; }

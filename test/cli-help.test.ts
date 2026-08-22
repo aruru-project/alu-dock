@@ -124,7 +124,7 @@ test("service help is explorable without constructing a service manager", async 
   assert.match(ignoredInvalidOption.stdout, /--lines N/u);
 });
 
-test("explicit internal help redirects to typed control without polluting the overview", async () => {
+test("explicit non-human command help points to the public workflow", async () => {
   const [flag, topic] = await Promise.all([
     runCli(["create", "--help"]),
     runCli(["help", "create"]),
@@ -132,8 +132,6 @@ test("explicit internal help redirects to typed control without polluting the ov
   assertHelpSuccess(flag);
   assertHelpSuccess(topic);
   assert.equal(flag.stdout, topic.stdout);
-  assert.match(flag.stdout, /internal control command/u);
-  assert.match(flag.stdout, /DockClient\/Protocol V2/u);
   assert.match(flag.stdout, /aludock new/u);
 });
 

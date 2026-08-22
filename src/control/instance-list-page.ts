@@ -1,20 +1,5 @@
 import type { InstanceSnapshot } from "../core/managed-instance.js";
-
-export interface InstanceListCursor {
-  revision: number;
-  offset: number;
-  selector: "actionable" | "all";
-}
-
-export interface InstanceListPageResult {
-  instances: InstanceSnapshot[];
-  page: {
-    revision: number;
-    total: number;
-    hiddenStopped: number;
-    nextCursor?: InstanceListCursor;
-  };
-}
+import type { ListResult } from "./protocol.js";
 
 /** The single serialized-byte pagination algorithm for local and merged instance lists. */
 export function boundedInstanceListPage(input: {
@@ -25,7 +10,7 @@ export function boundedInstanceListPage(input: {
   limit: number;
   hiddenStopped: number;
   maxBytes: number;
-}): InstanceListPageResult {
+}): ListResult {
   if (!Number.isSafeInteger(input.limit) || input.limit < 1) throw new Error("Catalog list limit must be a positive safe integer");
   if (!Number.isSafeInteger(input.maxBytes) || input.maxBytes < 4_096) throw new Error("Catalog list byte limit must be a bounded positive safe integer");
   const instances: InstanceSnapshot[] = [];
@@ -44,7 +29,7 @@ export function boundedInstanceListPage(input: {
     snapshotsBytes += separatorBytes + candidateBytes;
   }
   const nextOffset = input.offset + instances.length;
-  const result: InstanceListPageResult = {
+  const result: ListResult = {
     instances,
     page: {
       revision: input.revision,

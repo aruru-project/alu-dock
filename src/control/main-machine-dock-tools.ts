@@ -28,7 +28,7 @@ export class MainMachineDockToolsAuthority {
     const snapshots = (): InstanceSnapshot[] => [...options.localSnapshots(), ...options.controller().remoteSnapshotsCurrent()];
     const get = (instanceId: string): InstanceSnapshot => {
       const found = snapshots().find((snapshot) => snapshot.id === instanceId);
-      if (!found) throw new Error("This work is no longer available");
+      if (!found) throw new Error("This work is no longer available. Run dock_list and choose current work.");
       return found;
     };
     this.observation = new InstanceObservationService({
@@ -54,8 +54,8 @@ export class MainMachineDockToolsAuthority {
   async invoke(sourceMainId: string, sourceMachineId: string, request: DockToolsRequest): Promise<DockToolsResult> {
     const snapshots = [...this.options.localSnapshots(), ...this.options.controller().remoteSnapshotsCurrent()];
     const source = snapshots.find((item) => item.id === sourceMainId);
-    if (!source) throw new Error("This Dock-tool source is no longer available");
-    if ((request.type === "create" || request.type === "send") && source.lifecycle !== "active") throw new Error("Dock tools require an active source instance");
+    if (!source) throw new Error("This work has ended, so Dock tools cannot continue here. Open active work to use them.");
+    if ((request.type === "create" || request.type === "send") && source.lifecycle !== "active") throw new Error("This work is no longer active, so it cannot create or message other work. Open active work and try again.");
     this.ensureSource(sourceMainId, sourceMachineId);
     if (request.type === "list" || request.type === "inspect" || request.type === "watch" || request.type === "cancel") return this.observation.observe(sourceMainId, request);
     if (request.type === "create") {

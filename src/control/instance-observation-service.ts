@@ -23,7 +23,7 @@ import {
   type ObservedInstanceStatus,
 } from "../core/instance-observation.js";
 
-export interface ObservationConversationBootstrap {
+interface ObservationConversationBootstrap {
   instance: InstanceSnapshot;
   recentHistory: HistoryEntryDto[];
   historyRevision: number;
@@ -31,7 +31,7 @@ export interface ObservationConversationBootstrap {
   liveEvents: DockEvent[];
 }
 
-export interface InstanceObservationQueryPort {
+interface InstanceObservationQueryPort {
   listSnapshots(): InstanceSnapshot[];
   getSnapshot(instanceId: string): InstanceSnapshot;
   readConversationBootstrap(instanceId: string, historyLimit: number): Promise<ObservationConversationBootstrap | undefined>;

@@ -229,11 +229,13 @@ export function validateCatalogRecord(record: CatalogInstanceRecord): void {
   if (record.lastError !== undefined) requiredBoundedText(record.lastError, 2_048, "Catalog last error");
 }
 
+export const MAX_CATALOG_INSTANCES = 10_000;
+
 export function validateCatalogProjection(projection: CatalogProjection): void {
   if (projection.schemaVersion !== 1) throw new Error("Catalog schema version is unsupported");
   if (!Number.isSafeInteger(projection.revision) || projection.revision < 0) throw new Error("Catalog revision must be a non-negative integer");
   requiredBoundedText(projection.lastHostEpoch, 128, "Catalog Host epoch");
-  if (!Array.isArray(projection.instances) || projection.instances.length > 10_000) throw new Error("Catalog instance collection is invalid or too large");
+  if (!Array.isArray(projection.instances) || projection.instances.length > MAX_CATALOG_INSTANCES) throw new Error("Catalog instance collection is invalid or too large");
   const ids = new Set<string>();
   const creationOperations = new Set<string>();
   const keys = new Set<string>();

@@ -20,10 +20,9 @@ import {
   type CatalogStore,
   validateCatalogProjection,
 } from "../core/catalog.js";
-import type { ThinkingLevel } from "../core/agent-worker.js";
+import { THINKING_LEVELS, type ThinkingLevel } from "../core/agent-worker.js";
 
 export const MAX_DURABLE_CATALOG_BYTES = 16 * 1024 * 1024;
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
 export type CatalogWritePhase = "temp_write" | "file_sync" | "rename" | "directory_sync";
 

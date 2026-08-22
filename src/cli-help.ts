@@ -82,7 +82,7 @@ function overviewHelp(): string {
 
 function machineHelp(rest: readonly string[]): string {
   if (rest.length > 0 && (rest.length !== 1 || rest[0] !== "join-file")) throw new Error("machine help accepts only join-file");
-  return `aludock machine join-file — prepare one SubHost enrollment\n\nUsage:\n  aludock machine join-file --out PATH [--state PATH] [--machine-name NAME]\n\nRun this on Main while its Host is stopped. The private file expires after ten\nminutes and works once. Enter Main's address and machine port separately when\nstarting the SubHost; they are intentionally absent from the file.\n`;
+  return `aludock machine join-file — prepare one SubHost enrollment\n\nUsage:\n  aludock machine join-file --out PATH [--state PATH] [--machine-name NAME]\n\nRun this on Main while its Host is stopped. The private file expires after ten\nminutes and works once. When starting the SubHost, enter Main's address and\nmachine port separately.\n`;
 }
 
 function continueHelp(): string {
@@ -102,15 +102,15 @@ function attachHelp(): string {
 }
 
 function listHelp(): string {
-  return `aludock list — show Dock work\n\nUsage:\n  aludock list [--all]\n\nShows running, finishing, interrupted, and resumable work. Ended work stays\nhidden unless you use --all. The list includes each work name, project, status,\nand next useful action.\n\nOptions:\n  --all   Include ended work from Dock History\n\nExamples:\n  aludock list\n  aludock list --all\n  aludock status TARGET\n\nThis command only shows information; it does not change any work.\n`;
+  return `aludock list — show Dock work\n\nUsage:\n  aludock list [--all]\n\nShows running, finishing, interrupted, and resumable work. Ended work stays\nhidden unless you use --all. The list includes each work name, project, status,\nand next useful action.\n\nOptions:\n  --all   Include ended work from Dock History\n\nExamples:\n  aludock list\n  aludock list --all\n  aludock status TARGET\n`;
 }
 
 function statusHelp(): string {
-  return `aludock status — show one work item\n\nUsage:\n  aludock status TARGET\n\nTARGET is an exact work name. The result shows where the work is, what it is\ndoing, and how to continue it. For unnamed or duplicate work, choose it in the\nHub.\n\nExample:\n  aludock status review\n\nThis command only shows information; it does not change the work.\n`;
+  return `aludock status — show one work item\n\nUsage:\n  aludock status TARGET\n\nTARGET is an exact work name. The result shows where the work is, what it is\ndoing, and how to continue it. For unnamed or duplicate work, choose it in the\nHub.\n\nExample:\n  aludock status review\n`;
 }
 
 function stopHelp(): string {
-  return `aludock stop — end running work\n\nUsage:\n  aludock stop TARGET\n\nEnds the selected work and removes it from the Dock. If Pi is responding, that\nresponse stops too, and waiting messages do not continue afterward.\n\nExample:\n  aludock stop review\n\nTo leave the work running, open it and press Ctrl+D instead.\n`;
+  return `aludock stop — end running work\n\nUsage:\n  aludock stop TARGET\n\nEnds the selected work and removes it from the Dock. Any current response and\nwaiting messages end with it.\n\nExample:\n  aludock stop review\n\nTo leave the work running, open it and press Ctrl+D instead.\n`;
 }
 
 function forgetHelp(): string {
@@ -162,5 +162,5 @@ function internalTopicHelp(topic: string): string {
     events: "Use the interactive TUI or 'aludock status' for human inspection.",
     prompt: "Submit prompts through the attached interactive TUI.",
   };
-  return `${topic} is an internal control command used by tests or operator\ndiagnostics. It is intentionally omitted from the public human command taxonomy\nand is not a model tool surface.\n\n${humanAlternative[topic] ?? "Use the public human workflow instead."}\nTyped automation should call DockClient/Protocol V2. See the repository's\ninternal control documentation.\n`;
+  return `${topic} supports tests and operator diagnostics.\n\n${humanAlternative[topic] ?? "Use the public human workflow instead."}\n`;
 }

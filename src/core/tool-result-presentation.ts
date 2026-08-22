@@ -4,9 +4,6 @@ import {
   projectDisplayEditDiff,
 } from "./edit-diff-projection.js";
 
-// Pi built-ins already apply their own output policy. This limit exists only so one
-// tool result remains below the 1 MiB control-frame ceiling; it is not a UI preview limit.
-export const MAX_TRANSPORT_TOOL_RESULT_CHARS = 256_000;
 export const MAX_TOOL_FULL_OUTPUT_PATH_CHARS = 4_096;
 export const MAX_TOOL_PRESENTATION_NOTICES = 8;
 export const MAX_TOOL_PRESENTATION_COUNT = 1_000_000_000;
@@ -143,40 +140,6 @@ export function validateBuiltInToolPresentation(
   };
 }
 
-/** Last-resort control-frame fallback; normal Pi built-in output passes through unchanged. */
-export function boundToolResultText(
-  text: string,
-  isError: boolean,
-  presentation: BuiltInToolPresentation | undefined,
-): { text: string; presentation?: BuiltInToolPresentation } {
-  if (!isError && presentation?.displayDiff !== undefined) {
-    return { text: presentation.displayDiff, presentation };
-  }
-  const effectivePresentation = presentation !== undefined
-    && hasHostProjectionMarkerLine(text)
-    && !presentation.notices.some((notice) => notice.code === "host_projection_truncated")
-    ? withNotice(presentation, { code: "host_projection_truncated" })
-    : presentation;
-  if (text.length <= MAX_TRANSPORT_TOOL_RESULT_CHARS) {
-    return { text, ...(effectivePresentation === undefined ? {} : { presentation: effectivePresentation }) };
-  }
-
-  const marker = TOOL_OUTPUT_TRUNCATION_MARKER;
-  const direction = isError ? "head-tail" : effectivePresentation?.preview ?? "head";
-  const projectedText = direction === "tail"
-    ? retainTail(text, marker)
-    : direction === "head-tail"
-      ? retainHeadTail(text, marker)
-      : retainHead(text, marker);
-  const projectedPresentation = effectivePresentation === undefined
-    ? undefined
-    : withNotice(effectivePresentation, { code: "host_projection_truncated" });
-  return {
-    text: projectedText,
-    ...(projectedPresentation === undefined ? {} : { presentation: projectedPresentation }),
-  };
-}
-
 export function toolPresentationNoticeText(notice: ToolResultNotice): string {
   if (notice.code === "host_projection_truncated") return TOOL_OUTPUT_TRUNCATION_MARKER;
   if (notice.code === "full_output_saved") return `full output saved · ${notice.path}`;
@@ -304,45 +267,6 @@ function continuationOffset(contentText: string | undefined): number | undefined
   const tail = contentText.slice(-2_048);
   const match = /\bUse offset=(\d+) to continue\.\]?\s*$/u.exec(tail);
   return match?.[1] === undefined ? undefined : positiveInteger(Number(match[1]));
-}
-
-function retainHead(text: string, marker: string): string {
-  const notice = `\n${marker}`;
-  const end = unicodeSafeSliceEnd(text, MAX_TRANSPORT_TOOL_RESULT_CHARS - notice.length);
-  return `${text.slice(0, end)}${notice}`;
-}
-
-function retainTail(text: string, marker: string): string {
-  const notice = `\n${marker}`;
-  const requestedStart = text.length - (MAX_TRANSPORT_TOOL_RESULT_CHARS - notice.length);
-  const start = unicodeSafeSliceStart(text, requestedStart);
-  return `${text.slice(start)}${notice}`;
-}
-
-function retainHeadTail(text: string, marker: string): string {
-  const notice = `\n${marker}\n`;
-  const available = MAX_TRANSPORT_TOOL_RESULT_CHARS - notice.length;
-  const headRequested = Math.ceil(available / 2);
-  const tailRequested = Math.floor(available / 2);
-  const headEnd = unicodeSafeSliceEnd(text, headRequested);
-  const tailStart = unicodeSafeSliceStart(text, text.length - tailRequested);
-  return `${text.slice(0, headEnd)}${notice}${text.slice(tailStart)}`;
-}
-
-function unicodeSafeSliceEnd(value: string, requestedEnd: number): number {
-  return requestedEnd > 0
-    && /[\uD800-\uDBFF]/u.test(value[requestedEnd - 1] ?? "")
-    && /[\uDC00-\uDFFF]/u.test(value[requestedEnd] ?? "")
-    ? requestedEnd - 1
-    : requestedEnd;
-}
-
-function unicodeSafeSliceStart(value: string, requestedStart: number): number {
-  return requestedStart > 0
-    && /[\uD800-\uDBFF]/u.test(value[requestedStart - 1] ?? "")
-    && /[\uDC00-\uDFFF]/u.test(value[requestedStart] ?? "")
-    ? requestedStart + 1
-    : requestedStart;
 }
 
 function hasHostProjectionMarkerLine(value: string): boolean {

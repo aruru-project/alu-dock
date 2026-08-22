@@ -1,6 +1,4 @@
-export type JsonScalar = string | number | boolean | null;
-export type JsonValue = JsonScalar | JsonValue[] | { [key: string]: JsonValue };
-export type JsonObject = { [key: string]: JsonValue };
+import type { JsonObject, JsonValue } from "./json-value.js";
 
 export interface SourceDto {
   kind: "built-in" | "extension" | "skill" | "prompt";

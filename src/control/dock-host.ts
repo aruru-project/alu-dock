@@ -32,8 +32,8 @@ import {
   StaleRuntimeGenerationError,
   type AttachProjection,
   type DockEvent,
-  type JsonObject,
 } from "../core/managed-instance.js";
+import type { JsonObject } from "../core/json-value.js";
 import { AgentCompactionKnownFailureError, AgentConversationCursorError, AgentInvalidSettingValueError, AgentInvalidTreeTargetError, AgentModelNotFoundError, AgentSettingsWriteError, AgentUnavailableBeforeEffectError, AgentUnknownToolError } from "../core/agent-worker.js";
 import { PublishedFileUnavailableError } from "../core/published-file.js";
 import { DeliverableUnavailableError } from "../core/instance-deliverables.js";
@@ -96,7 +96,7 @@ import {
   parseControlRequest,
   ProtocolValidationError,
 } from "./protocol.js";
-import { RoutedControlError, type MainRouteAuthority, type RoutedProtocolProxy } from "./machine-transport.js";
+import { MachineMutationEffectUnknownError, RoutedControlError, type MainRouteAuthority, type RoutedProtocolProxy } from "./machine-transport.js";
 
 const MAX_SOCKET_WRITE_BUFFER = MAX_CONTROL_LINE_BYTES;
 const MAX_SESSION_INVENTORY_RESULT_BYTES = 512 * 1_024;
@@ -1405,7 +1405,7 @@ function mapControlError(error: unknown): { code: string; message: string; retry
   if (error instanceof CatalogEffectUnknownError) {
     return { code: "effect_unknown", message: error.message, details: { operationId: error.context.operationId ?? "runtime-internal", queryHint: error.queryHint } };
   }
-  if (error instanceof RuntimeEffectUnknownError) {
+  if (error instanceof RuntimeEffectUnknownError || error instanceof MachineMutationEffectUnknownError) {
     return { code: "effect_unknown", message: error.message, details: { operationId: error.operationId, queryHint: error.queryHint } };
   }
   if (error instanceof AgentUnavailableBeforeEffectError) {

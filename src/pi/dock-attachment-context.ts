@@ -1,6 +1,13 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-import type { AttachmentDto } from "../core/instance-attachments.js";
+import {
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENT_FILE_ID_CHARS,
+  MAX_ATTACHMENT_IDS_PER_COMMAND,
+  MAX_ATTACHMENT_MEDIA_TYPE_CHARS,
+  MAX_ATTACHMENT_NAME_CHARS,
+  type AttachmentDto,
+} from "../core/instance-attachments.js";
 
 const START = "\n\n<alu_dock_attachments_v1>\n";
 const END = "\n</alu_dock_attachments_v1>";
@@ -34,7 +41,7 @@ export function extractDockAttachmentContext(
   if (newline < 0) return { text };
   try {
     const raw = JSON.parse(body.slice(0, newline)) as { attachments?: unknown; mac?: unknown };
-    if (!Array.isArray(raw.attachments) || raw.attachments.length < 1 || raw.attachments.length > 32) return { text };
+    if (!Array.isArray(raw.attachments) || raw.attachments.length < 1 || raw.attachments.length > MAX_ATTACHMENT_IDS_PER_COMMAND) return { text };
     if (typeof raw.mac !== "string" || !/^[a-f0-9]{64}$/u.test(raw.mac)) return { text };
     const attachments = raw.attachments.map(parseAttachment);
     if (new Set(attachments.map((attachment) => attachment.fileId)).size !== attachments.length) return { text };
@@ -52,10 +59,10 @@ function parseAttachment(raw: unknown): AttachmentDto {
   const value = raw as Record<string, unknown>;
   const allowed = new Set(["fileId", "name", "sizeBytes", "mediaType", "sha256", "storedAt"]);
   if (Object.keys(value).some((key) => !allowed.has(key))) throw new Error("Invalid attachment context");
-  if (typeof value.fileId !== "string" || !/^[0-9a-f-]{36}$/u.test(value.fileId)) throw new Error("Invalid attachment file ID");
-  if (typeof value.name !== "string" || value.name.length < 1 || value.name.length > 1_024 || /[\/\\\u0000-\u001f\u007f-\u009f]/u.test(value.name)) throw new Error("Invalid attachment name");
-  if (!Number.isSafeInteger(value.sizeBytes) || (value.sizeBytes as number) < 0 || (value.sizeBytes as number) > 512 * 1024 * 1024) throw new Error("Invalid attachment size");
-  if (value.mediaType !== undefined && (typeof value.mediaType !== "string" || value.mediaType.length < 1 || value.mediaType.length > 512)) throw new Error("Invalid attachment media type");
+  if (typeof value.fileId !== "string" || value.fileId.length > MAX_ATTACHMENT_FILE_ID_CHARS || !/^[0-9a-f-]{36}$/u.test(value.fileId)) throw new Error("Invalid attachment file ID");
+  if (typeof value.name !== "string" || value.name.length < 1 || value.name.length > MAX_ATTACHMENT_NAME_CHARS || /[\/\\\u0000-\u001f\u007f-\u009f]/u.test(value.name)) throw new Error("Invalid attachment name");
+  if (!Number.isSafeInteger(value.sizeBytes) || (value.sizeBytes as number) < 0 || (value.sizeBytes as number) > MAX_ATTACHMENT_BYTES) throw new Error("Invalid attachment size");
+  if (value.mediaType !== undefined && (typeof value.mediaType !== "string" || value.mediaType.length < 1 || value.mediaType.length > MAX_ATTACHMENT_MEDIA_TYPE_CHARS)) throw new Error("Invalid attachment media type");
   if (typeof value.sha256 !== "string" || !/^[a-f0-9]{64}$/u.test(value.sha256)) throw new Error("Invalid attachment digest");
   if (typeof value.storedAt !== "string" || !Number.isFinite(Date.parse(value.storedAt))) throw new Error("Invalid attachment timestamp");
   return {

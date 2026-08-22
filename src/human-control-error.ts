@@ -31,7 +31,7 @@ export function humanControlErrorText(error: ControlClientError): string {
     case "queue_capacity":
       return "This work already has as many waiting messages as it can hold. Let the current run finish before adding more.";
     case "effect_unknown":
-      return "That command may already have taken effect. Check the conversation before deciding whether to send it again.";
+      return "That change may already have happened. Wait for Alu Dock to recover, then refresh before trying again.";
     case "mutation_faulted":
       return "That change stopped before it finished. Check the current work before trying again.";
     case "operation_conflict":

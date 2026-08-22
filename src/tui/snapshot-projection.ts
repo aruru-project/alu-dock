@@ -1,7 +1,5 @@
 import type { DockEvent, InstanceSnapshot } from "../core/instance-dto.js";
-import type { ThinkingLevel } from "../core/agent-worker.js";
-
-const THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+import { THINKING_LEVELS, type ThinkingLevel } from "../core/agent-worker.js";
 
 export function projectSnapshot(snapshot: InstanceSnapshot, event: DockEvent): InstanceSnapshot {
   if (event.type === "git.branch_changed") {

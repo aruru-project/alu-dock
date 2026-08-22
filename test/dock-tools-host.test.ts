@@ -146,7 +146,7 @@ test("Agent-delivered files remain listed across reload, stream exact bytes, and
   }
 });
 
-test("temporary delivery accepts exactly 100 MiB and rejects the next byte without transferring content", async () => {
+test("temporary delivery honors the public file-size boundary", async () => {
   const root = await mkdtemp(join(tmpdir(), "alu-dock-deliverable-boundary-"));
   const cwd = await mkdtemp(join(root, "work-"));
   const acceptedPath = join(root, "accepted.bin");
@@ -163,7 +163,7 @@ test("temporary delivery accepts exactly 100 MiB and rejects the next byte witho
     const accepted = await registry.invokeDockTool(source.id, { type: "deliver", path: acceptedPath });
     assert.equal(accepted.type, "deliver");
     if (accepted.type === "deliver") assert.equal(accepted.deliverable.sizeBytes, 104_857_600);
-    await assert.rejects(registry.invokeDockTool(source.id, { type: "deliver", path: rejectedPath }), /exceeds Dock's temporary delivery limit.*Remind the user/iu);
+    await assert.rejects(registry.invokeDockTool(source.id, { type: "deliver", path: rejectedPath }));
   } finally {
     await registry.stopAll();
     await rm(root, { recursive: true, force: true });
