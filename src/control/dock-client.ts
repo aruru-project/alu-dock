@@ -66,6 +66,7 @@ import {
   parseHelloReply,
   parseHostInfoResult,
   parseMachinesResult,
+  parseMachineRemovalResult,
   parseHistoryResult,
   parseConversationHistoryResult,
   parseConversationContentResult,
@@ -114,6 +115,7 @@ import {
   type HelloAck,
   type HostInfoResult,
   type MachinesResult,
+  type MachineRemovalResult,
   type HistoryResult,
   type ConversationHistoryResult,
   type ConversationContentResult,
@@ -204,6 +206,7 @@ export class DockClient {
 
   async hostInfo():Promise<HostInfoResult>{return this.request("host.info",{},"host.info",parseHostInfoResult);}
   async machines():Promise<MachinesResult>{return this.request("machine.list",{},MACHINES_CAPABILITY,parseMachinesResult);}
+  async removeMachine(hostId:string,operationId=this.createRequestId()):Promise<MachineRemovalResult>{return this.request("machine.remove",{operationId,hostId},MACHINES_CAPABILITY,parseMachineRemovalResult);}
   async ping():Promise<PingResult>{let negotiated:string[]=[];const info=await this.request("host.info",{},"host.info",parseHostInfoResult,(ack)=>{negotiated=[...ack.capabilities];});return {pid:info.host.pid,protocolVersion:2,hostEpoch:info.host.hostEpoch,capabilities:negotiated};}
 
   async uploadFile(path:string,mediaType?:string,operationId=this.createRequestId(),instanceId?:string):Promise<AttachmentUploadResult>{

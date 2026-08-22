@@ -28,7 +28,7 @@ export const MAX_CONVERSATION_CONTENT_BLOCKS = 200;
 export type ContentBlockDto =
   | { type: "text"; text: string }
   | { type: "thinking"; text: string }
-  | { type: "image"; mimeType: string; contentRef?: string; fileId?: string; sha256?: string; sizeBytes?: number }
+  | { type: "image"; mimeType: string; contentRef?: string; fileId?: string }
   | { type: "tool_call"; toolCallId: string; toolName: string; args: JsonObject; omittedFields?: string[] }
   | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; presentation?: BuiltInToolPresentation; omittedFields?: string[] }
   | { type: "omitted"; kind: "image" | "binary"; description: string };
@@ -123,7 +123,7 @@ export interface HistoryPageDto {
 
 export type ConversationContentChunkDto =
   | { blockIndex: number; type: "text" | "thinking"; text: string; offset: number; blockComplete: boolean }
-  | { blockIndex: number; type: "image"; mimeType: string; data: string; offset: number; blockComplete: boolean; contentRef?: string; sha256?: string; sizeBytes?: number }
+  | { blockIndex: number; type: "image"; mimeType: string; data: string; offset: number; blockComplete: boolean }
   | { blockIndex: number; type: "tool_call"; toolCallId: string; toolName: string; argumentsJson: string; offset: number; blockComplete: boolean }
   | { blockIndex: number; type: "tool_result"; toolCallId: string; toolName: string; text: string; offset: number; blockComplete: boolean; isError: boolean; publishedFile?: PublishedFileDto; omittedFields?: string[] }
   | { blockIndex: number; type: "omitted"; kind: "image" | "binary"; description: string };
@@ -151,6 +151,15 @@ export interface ConversationContentPageDto {
   chunks: ConversationContentChunkDto[];
   complete: boolean;
   nextCursor?: string;
+}
+
+/** Worker-produced immutable image body. Public clients receive it as bounded stream frames. */
+export interface ConversationImageBody {
+  contentRef: string;
+  mimeType: string;
+  sizeBytes: number;
+  sha256: string;
+  data: string;
 }
 
 export type TreeNodeKind =

@@ -125,6 +125,7 @@ test("listener startup failure closes the local and remote entry points", async 
     getByKey: async () => undefined,
     ensureByKey: async () => { throw new Error("startup rollback must not ensure an instance"); },
     machines: async () => [],
+    removeMachine: async () => { throw new Error("startup rollback must not remove a machine"); },
     listPage: async () => ({ instances: [] }),
     start: async () => {
       assert.equal((await lstat(socketPath)).isSocket(), true);

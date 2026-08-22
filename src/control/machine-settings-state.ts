@@ -35,6 +35,12 @@ export interface SubHostStatus {
   updatedAt?: string;
 }
 
+/** Saved settings select the next startup; a live process remains authoritative until then. */
+export function currentMachineRole(settings: MachineSettings, status: SubHostStatus, mainAvailable: boolean): "main" | "subhost" {
+  if (status.processId !== undefined) return "subhost";
+  return settings.role === "subhost" && !mainAvailable ? "subhost" : "main";
+}
+
 export class MachineSettingsState {
   readonly filePath: string;
   readonly statusPath: string;

@@ -184,5 +184,9 @@ test("DockClient uses one Main identity for SubHost read, prompt, follow, and sp
   await secondClient.stop(recovered.id, "online-remote-stop").catch((error) => { throw new Error(`${String(error)}; SubHost stderr: ${stderr}`); });
   for (let attempt = 0; attempt < 100 && (await secondClient.list("all")).some((item) => item.id === recovered.id); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal((await secondClient.list("all")).some((item) => item.id === recovered.id), false);
+  const removal = await secondClient.removeMachine(subHostId, "remove-routed-subhost");
+  assert.deepEqual(removal, { hostId: subHostId, removed: true });
+  assert.equal((await secondClient.machines()).machines.some((machine) => machine.hostId === subHostId), false);
+  assert.equal(child.exitCode, null, "removing trust must not stop the SubHost process or its work");
   await secondMain.stop();
 });

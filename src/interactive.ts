@@ -4,12 +4,12 @@ import { createInterface } from "node:readline/promises";
 
 import { ControlClientError, DockClient } from "./control/dock-client.js";
 import { defaultCatalogPath } from "./control/durable-catalog-store.js";
-import { ensureHost } from "./control/ensure-host.js";
+import { ensureHost, ServiceUnavailableError } from "./control/ensure-host.js";
 import type { ProjectTrustChoice } from "./control/project-trust.js";
 import { RemoteAccessState, remoteAccessStateRoot } from "./control/remote-access-state.js";
 import { AttachmentStorageState, attachmentStorageStateRoot } from "./control/attachment-storage-state.js";
 import { MainMachineState, SubHostMachineState, machineStateRoot } from "./control/machine-state.js";
-import { MachineSettingsState, machineSettingsStateRoot } from "./control/machine-settings-state.js";
+import { currentMachineRole, MachineSettingsState, machineSettingsStateRoot } from "./control/machine-settings-state.js";
 import type { InstanceSnapshot, SessionDto } from "./core/managed-instance.js";
 import { humanInstanceStatus } from "./core/instance-display-name.js";
 import { requireHumanTarget } from "./human-target.js";
@@ -36,7 +36,17 @@ export async function openDock(options: OpenDockOptions): Promise<void> {
   const catalogPath = defaultCatalogPath();
   const machineSettingsState = new MachineSettingsState(machineSettingsStateRoot(catalogPath));
   const machineSettings = await machineSettingsState.read();
-  if (machineSettings.role === "subhost") {
+  const subHostStatus = await machineSettingsState.readSubHostStatus();
+  let currentMain = false;
+  if (subHostStatus.processId === undefined && machineSettings.role === "subhost") {
+    try {
+      await ensureHost(options.socketPath, { managedWaitMs: 0 });
+      currentMain = true;
+    } catch (error) {
+      if (!(error instanceof ServiceUnavailableError)) throw error;
+    }
+  }
+  if (currentMachineRole(machineSettings, subHostStatus, currentMain) === "subhost") {
     if (options.mode !== "hub") throw new Error("This computer is a SubHost. Open work from its Main instead.");
     await runSubHostHub(
       machineSettingsState,
@@ -47,7 +57,7 @@ export async function openDock(options: OpenDockOptions): Promise<void> {
   }
 
   process.stdout.write("Connecting to Alu Dock…\n");
-  await ensureHost(options.socketPath);
+  if (!currentMain) await ensureHost(options.socketPath);
   const client = new DockClient({ socketPath: options.socketPath });
 
   let instance: InstanceSnapshot | undefined;

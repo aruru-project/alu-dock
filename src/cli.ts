@@ -175,7 +175,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       ? {
         ...options,
         role,
-        machineName: options.machineName ?? configured.subhost?.name,
+        machineName: options.machineName ?? configured.subhost?.name ?? "SubHost",
         mainAddress: options.mainAddress ?? configured.subhost?.mainAddress,
         machinePort: options.machinePort ?? configured.subhost?.port,
       }
@@ -190,7 +190,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     throw new Error("Development Main requires an explicit --socket PATH or ALU_DOCK_SOCKET");
   }
   if (options.role === "subhost" && (!catalogPath || !options.mainAddress || options.machinePort === undefined || !options.machineName)) {
-    throw new Error("SubHost startup requires saved connection settings or explicit --state, --main-address, --machine-port, and --machine-name");
+    throw new Error("SubHost startup requires saved connection settings or explicit --state, --main-address, and --machine-port");
   }
   if (options.role === "main" && options.machinePort !== undefined && !catalogPath) throw new Error("SubHost connections require --state PATH so trust and routes survive restart");
   if (options.role === "main" && (options.mainAddress || options.joinFile)) throw new Error("Main startup does not accept SubHost connection options");
@@ -318,10 +318,11 @@ async function manageService(socketPath: string, socketExplicit: boolean, args: 
     cliPath: resolve(entryPath),
     socketPath,
     subHostProbe: async () => {
-      const settings = await serviceMachineSettings.read();
-      if (settings.role === "main") return { role: "main" };
       const status = await serviceMachineSettings.readSubHostStatus();
-      return { role: "subhost", ...(status.processId === undefined ? {} : { processId: status.processId }), ...(status.hostEpoch === undefined ? {} : { hostEpoch: status.hostEpoch }) };
+      if (status.processId !== undefined) {
+        return { role: "subhost", processId: status.processId, ...(status.hostEpoch === undefined ? {} : { hostEpoch: status.hostEpoch }) };
+      }
+      return { role: (await serviceMachineSettings.read()).role };
     },
   });
   const { json, rest: serviceArgs } = parseServiceOutputOption(args);

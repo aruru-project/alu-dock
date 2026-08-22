@@ -48,6 +48,7 @@ import type {
   AgentConversationContentChunk,
   AgentConversationContentPage,
   AgentConversationHistoryPage,
+  AgentConversationImageBody,
   AgentEvent,
   AgentForkResult,
   AgentHistoryEntry,
@@ -921,6 +922,16 @@ export class ManagedInstance {
       const page = await this.invokeAgent<AgentConversationContentPage>("conversation.content", { contentRef, ...(cursor === undefined ? {} : { cursor }) });
       if (generation !== this.runtimeGenerationValue) throw new StaleRuntimeGenerationError(generation, this.runtimeGenerationValue);
       return { instanceId: this.id, runtimeGeneration: generation, ...cloneJson(page) };
+    });
+  }
+
+  async getConversationImage(contentRef: string): Promise<AgentConversationImageBody> {
+    return this.withProjectionRead(async () => {
+      this.assertActive();
+      const generation = this.runtimeGenerationValue;
+      const image = await this.invokeAgent<AgentConversationImageBody>("conversation.image", { contentRef });
+      if (generation !== this.runtimeGenerationValue) throw new StaleRuntimeGenerationError(generation, this.runtimeGenerationValue);
+      return cloneJson(image);
     });
   }
 

@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { basename, extname } from "node:path";
 
 import { AgentConversationCursorError, type AgentConversationContentPage } from "../core/agent-worker.js";
-import { MAX_CONVERSATION_CHUNK_CHARS } from "../core/instance-dto.js";
+import { MAX_CONVERSATION_CHUNK_CHARS, MAX_IMAGE_BYTES } from "../core/instance-dto.js";
 import {
   MAX_PUBLISHED_FILE_BYTES,
   MAX_PUBLISHED_FILE_CHUNK_BYTES,
@@ -60,14 +60,16 @@ export class TransientFileRegistry {
       && dto.mediaType === file.mediaType;
   }
 
-  registerImage(data: string, mimeType: string): string {
+  registerImage(data: string, mimeType: string): ConversationImageMetadata {
     const bytes = Buffer.from(data, "base64");
-    if (bytes.toString("base64") !== data) throw new PublishedFileUnavailableError("This conversation image is not valid base64 data.");
+    if (data.length === 0 || bytes.byteLength > MAX_IMAGE_BYTES || bytes.toString("base64") !== data) {
+      throw new PublishedFileUnavailableError("This conversation image is not valid bounded base64 data.");
+    }
     const sha256 = createHash("sha256").update(bytes).digest("hex");
-    const contentRef = `image-${sha256}`;
-    this.images.set(contentRef, { contentRef, mimeType, data, sizeBytes: bytes.byteLength, sha256 });
+    const entry = { contentRef: `image-${sha256}`, mimeType, data, sizeBytes: bytes.byteLength, sha256 };
+    this.images.set(entry.contentRef, entry);
     trim(this.images);
-    return contentRef;
+    return { contentRef: entry.contentRef, mimeType, sizeBytes: entry.sizeBytes, sha256 };
   }
 
   image(contentRef: string): ImageEntry | undefined {
@@ -98,7 +100,6 @@ export class TransientFileRegistry {
     const blockComplete = end === image.data.length;
     const chunks = [{
       blockIndex: 0, type: "image" as const, mimeType: image.mimeType, data: image.data.slice(offset, end), offset, blockComplete,
-      contentRef: image.contentRef, sizeBytes: image.sizeBytes, sha256: image.sha256,
     }];
     if (blockComplete) return { revision: contentRef, contentRef, chunks, complete: true };
     const nextCursor = randomUUID();

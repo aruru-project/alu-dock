@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { MAX_EXTENSION_WIDGET_LINES, type InteractionResponse } from "../core/extension-ui-broker.js";
 import {
   MAX_ATTACHMENT_BYTES,
@@ -27,6 +29,7 @@ import {
   MAX_CONVERSATION_CHUNK_CHARS,
   MAX_CONVERSATION_CONTENT_BLOCKS,
   MAX_SESSION_FIRST_USER_MESSAGE_CHARS,
+  type ConversationImageBody,
 } from "../core/instance-dto.js";
 import {
   MAX_DOCK_TRANSFER_BYTES,
@@ -241,6 +244,7 @@ type Request<T extends string, P> = { kind: "request"; version: 2; requestId: st
 export type ControlRequest =
   | Request<"host.info", Record<string, never>>
   | Request<"machine.list", Record<string, never>>
+  | Request<"machine.remove", { operationId: string; hostId: string }>
   | Request<"attachment.upload", { operationId: string; instanceId?: string; name: string; sizeBytes: number; mediaType?: string; sha256: string }>
   | Request<"instance.create", { operationId: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.ensure", { operationId: string; key: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
@@ -363,6 +367,7 @@ export interface HostInfoResult {
 export interface PingResult { pid: number; protocolVersion: 2; hostEpoch: string; capabilities: string[] }
 export interface MachineDto { hostId: string; name: string; kind: "main" | "subhost"; available: boolean }
 export interface MachinesResult { machines: MachineDto[] }
+export interface MachineRemovalResult { hostId: string; removed: boolean }
 export interface CreateResult { instance: InstanceSnapshot }
 export interface EnsureResult { created: boolean; instance: InstanceSnapshot }
 export interface KeyLookupResult { instance: InstanceSnapshot | null }
@@ -488,7 +493,7 @@ export type ConfigurationResult = ModelConfigurationResult | ThinkingConfigurati
 export function implementedCapabilities(): string[] { return [...IMPLEMENTED_CAPABILITIES].sort(); }
 export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "host.info") return "host.info";
-  if (type === "machine.list") return MACHINES_CAPABILITY;
+  if (type === "machine.list" || type === "machine.remove") return MACHINES_CAPABILITY;
   if (type === "attachment.upload") return ATTACHMENTS_CAPABILITY;
   if (type === "deliverable.list" || type === "deliverable.download") return INSTANCE_DELIVERABLES_CAPABILITY;
   if (type === "workspace.entry.list" || type === "workspace.entry.get" || type === "workspace.file.read") return WORKSPACE_FILES_CAPABILITY;
@@ -652,6 +657,10 @@ export function parseControlRequest(input: unknown): ControlRequest {
   switch (type) {
     case "host.info": exact(params, [], "invalid_request"); return { ...base, type, params: {} };
     case "machine.list": exact(params, [], "invalid_request"); return { ...base, type, params: {} };
+    case "machine.remove": {
+      exact(params, ["operationId", "hostId"], "invalid_request");
+      return { ...base, type, params: { operationId: operationId(), hostId: string(params.hostId, "params.hostId", 128, "invalid_request") } };
+    }
     case "attachment.upload": {
       exact(params, ["operationId", "instanceId", "name", "sizeBytes", "mediaType", "sha256"], "invalid_request");
       const uploadInstanceId = params.instanceId === undefined ? undefined : instanceId();
@@ -968,6 +977,22 @@ export function parseWorkspaceFileReadFrame(input: unknown, expected: { requestI
   return { kind: "workspace_file_read_error", ...identity(), error: { code, message: string(error.message, "workspace file read error message", MAX_MESSAGE) } };
 }
 
+/** Worker-produced conversation image body. The Host validates it before public streaming. */
+export function parseConversationImageBody(input: unknown): ConversationImageBody {
+  const value = object(input, "conversation image body");
+  exact(value, ["contentRef", "mimeType", "sizeBytes", "sha256", "data"]);
+  const contentRef = string(value.contentRef, "conversation image content reference", 128);
+  const mimeType = imageMimeType(value.mimeType, "conversation image MIME type");
+  const sizeBytes = boundedImageSize(value.sizeBytes, "conversation image byte count");
+  const sha256 = imageSha256(value.sha256, "conversation image SHA-256");
+  const data = canonicalBase64(value.data, "conversation image data", MAX_IMAGE_BYTES);
+  const bytes = Buffer.from(data, "base64");
+  if (bytes.byteLength !== sizeBytes || createHash("sha256").update(bytes).digest("hex") !== sha256) {
+    throw validation("invalid_response", "Conversation image metadata does not match its bytes");
+  }
+  return { contentRef, mimeType, sizeBytes, sha256, data };
+}
+
 export function parseConversationImageFrame(input: unknown, expected: { requestId: string; hostEpoch: string; instanceId: string; contentRef: string }): ConversationImageFrame {
   const value = object(input, "conversation image frame");
   const identity = (): ConversationImageIdentity => {
@@ -1196,6 +1221,12 @@ export function parseMachinesResult(input: unknown): MachinesResult {
     };
   });
   return { machines };
+}
+
+export function parseMachineRemovalResult(input: unknown): MachineRemovalResult {
+  const value = object(input, "machine removal result");
+  exact(value, ["hostId", "removed"]);
+  return { hostId: string(value.hostId, "hostId", 128), removed: boolean(value.removed, "removed") };
 }
 
 export function parseAttachmentDto(input: unknown, field = "attachment"): AttachmentDto {
@@ -1623,7 +1654,7 @@ function parseConversationContentChunk(input: unknown, field: string): Conversat
     };
   }
   if (type === "image") {
-    exact(chunk, ["blockIndex", "type", "mimeType", "data", "offset", "blockComplete", "contentRef", "sha256", "sizeBytes"]);
+    exact(chunk, ["blockIndex", "type", "mimeType", "data", "offset", "blockComplete"]);
     return {
       blockIndex,
       type,
@@ -1631,9 +1662,6 @@ function parseConversationContentChunk(input: unknown, field: string): Conversat
       data: boundedString(chunk.data, `${field}.data`, MAX_CONVERSATION_CHUNK_CHARS),
       offset: unsigned(chunk.offset, `${field}.offset`),
       blockComplete: boolean(chunk.blockComplete, `${field}.blockComplete`),
-      ...(chunk.contentRef === undefined ? {} : { contentRef: string(chunk.contentRef, `${field}.contentRef`, 128) }),
-      ...(chunk.sha256 === undefined ? {} : { sha256: imageSha256(chunk.sha256, `${field}.sha256`) }),
-      ...(chunk.sizeBytes === undefined ? {} : { sizeBytes: boundedImageSize(chunk.sizeBytes, `${field}.sizeBytes`) }),
     };
   }
   if (type === "tool_call") {
@@ -2167,15 +2195,13 @@ function parseContent(input: unknown, field: string): ContentBlockDto[] {
     const block = object(item, `${field}[${index}]`); const type = enumeration(block.type, `${field}[${index}].type`, ["text", "thinking", "image", "tool_call", "tool_result", "omitted"]);
     if (type === "text" || type === "thinking") { exact(block, ["type", "text"]); return { type, text: boundedString(block.text, `${field}[${index}].text`, MAX_TEXT) }; }
     if (type === "image") {
-      exact(block, ["type", "mimeType", "contentRef", "fileId", "sha256", "sizeBytes"]);
+      exact(block, ["type", "mimeType", "contentRef", "fileId"]);
       const mimeType = imageMimeType(block.mimeType, `${field}[${index}].mimeType`);
       return {
         type,
         mimeType,
         ...(block.contentRef === undefined ? {} : { contentRef: string(block.contentRef, `${field}[${index}].contentRef`, 128) }),
         ...(block.fileId === undefined ? {} : { fileId: id(block.fileId, `${field}[${index}].fileId`) }),
-        ...(block.sha256 === undefined ? {} : { sha256: imageSha256(block.sha256, `${field}[${index}].sha256`) }),
-        ...(block.sizeBytes === undefined ? {} : { sizeBytes: boundedImageSize(block.sizeBytes, `${field}[${index}].sizeBytes`) }),
       };
     }
     if (type === "tool_call") { exact(block, ["type", "toolCallId", "toolName", "args", "omittedFields"]); return { type, toolCallId: id(block.toolCallId, "toolCallId"), toolName: string(block.toolName, "toolName", 256), args: parseJsonObject(block.args, "args"), omittedFields: omitted(block.omittedFields, "omittedFields") }; }

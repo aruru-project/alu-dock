@@ -234,8 +234,8 @@ def main() -> int:
                         break
             elif action == "hub-attachment-settings":
                 directory = os.environ["ALU_DOCK_PTY_ATTACHMENT_DIR"].encode("utf-8")
-                for _ in range(4):
-                    write_input(fd, output, b"\x1b[B")  # Settings is fifth.
+                for _ in range(5):
+                    write_input(fd, output, b"\x1b[B")  # Settings is sixth.
                 settings_start = len(output)
                 os.write(fd, b"\r")
                 settings_deadline = time.monotonic() + 5
@@ -258,8 +258,8 @@ def main() -> int:
                 os.write(fd, b"\x1b")
             elif action == "hub-remote-settings":
                 port = os.environ.get("ALU_DOCK_PTY_PORT", "9999").encode("ascii")
-                for _ in range(5):
-                    write_input(fd, output, b"\x1b[B")  # Devices is sixth.
+                for _ in range(6):
+                    write_input(fd, output, b"\x1b[B")  # Devices is seventh.
                 devices_start = len(output)
                 os.write(fd, b"\r")
                 devices_deadline = time.monotonic() + 5
@@ -292,8 +292,8 @@ def main() -> int:
                     pass
                 os.write(fd, b"\x1b")
             elif action == "hub-pairing-open":
-                for _ in range(5):
-                    write_input(fd, output, b"\x1b[B")  # Devices is sixth.
+                for _ in range(6):
+                    write_input(fd, output, b"\x1b[B")  # Devices is seventh.
                 devices_start = len(output)
                 os.write(fd, b"\r")
                 devices_deadline = time.monotonic() + 5
@@ -317,8 +317,8 @@ def main() -> int:
                 os.write(fd, b"\x1b")
             elif action == "hub-devices-auto-update":
                 pending_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
-                for _ in range(5):
-                    write_input(fd, output, b"\x1b[B")  # Devices is sixth.
+                for _ in range(6):
+                    write_input(fd, output, b"\x1b[B")  # Devices is seventh.
                 devices_start = len(output)
                 os.write(fd, b"\r")
                 devices_deadline = time.monotonic() + 5
@@ -357,8 +357,8 @@ def main() -> int:
                 os.write(fd, b"\x1b")
             elif action == "hub-pairing":
                 pin = os.environ.get("ALU_DOCK_PTY_PIN", "0000").encode("ascii")
-                for _ in range(5):
-                    write_input(fd, output, b"\x1b[B")  # Devices is sixth.
+                for _ in range(6):
+                    write_input(fd, output, b"\x1b[B")  # Devices is seventh.
                 devices_start = len(output)
                 os.write(fd, b"\r")
                 waiting_deadline = time.monotonic() + 5
@@ -381,8 +381,8 @@ def main() -> int:
                     pass
                 os.write(fd, b"\x1b")
             elif action == "hub-revoke":
-                for _ in range(5):
-                    write_input(fd, output, b"\x1b[B")  # Devices is sixth.
+                for _ in range(6):
+                    write_input(fd, output, b"\x1b[B")  # Devices is seventh.
                 revoke_start = len(output)
                 os.write(fd, b"\r")
                 devices_deadline = time.monotonic() + 5

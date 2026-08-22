@@ -262,7 +262,7 @@ function captureState(runtime: PiAgentAdapter): AgentWorkerState {
 
 function tryCaptureState(runtime: PiAgentAdapter): AgentWorkerState | undefined { try { return captureState(runtime); } catch { return undefined; } }
 function isAcceptedRequest(type: AgentRequest["type"]): boolean {
-  return !["model.list", "tool.list", "settings.get", "resource.get", "command.catalog", "command.content", "command.complete", "session.history", "conversation.history", "conversation.content", "file.read", "session.list", "session.tree"].includes(type);
+  return !["model.list", "tool.list", "settings.get", "resource.get", "command.catalog", "command.content", "command.complete", "session.history", "conversation.history", "conversation.content", "conversation.image", "file.read", "session.list", "session.tree"].includes(type);
 }
 function parseEnvJson(name: string): unknown { const value = process.env[name]; if (!value) throw new Error(`Missing ${name}`); return JSON.parse(value); }
 function parseInit(raw: unknown): PiWorkerInitOptions {

@@ -27,7 +27,7 @@ import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate,
 // Nothing else from src may be imported here: this fake must not reuse production algorithms or
 // projections, or tests stop proving anything about the real adapter.
 import { SETTING_DEFINITIONS, SETTING_KEYS } from "../../src/core/config-projection.js";
-import type { AttachmentDto, ConversationFrame, ImagePathDto, TreeNodeDto } from "../../src/core/instance-dto.js";
+import type { AttachmentDto, ConversationFrame, ConversationImageBody, ImagePathDto, TreeNodeDto } from "../../src/core/instance-dto.js";
 import type { SessionTreeResult } from "../../src/control/protocol.js";
 
 class Deferred<T> {
@@ -73,6 +73,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   history: AgentHistoryEntry[] = [];
   conversationRevision = "fixture-conversation-revision";
   readonly conversationContent = new Map<string, AgentConversationContentChunk[]>();
+  readonly conversationImages = new Map<string, ConversationImageBody>();
   publishedFileRead?: (fileRef: string, offset?: number) => Promise<unknown>;
   treeNodes: TreeNodeDto[] = [];
   treeLeafId: string | undefined;
@@ -197,6 +198,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       case "session.history": await Promise.resolve(); return this.getHistory();
       case "conversation.history": return this.getConversationHistory(p.cursor, p.limit);
       case "conversation.content": return this.getConversationContent(p.contentRef, p.cursor);
+      case "conversation.image": return this.getConversationImage(p.contentRef);
       case "file.read": {
         if (this.publishedFileRead === undefined) throw new Error("Published files are unavailable in this fixture");
         return this.publishedFileRead(p.fileRef, p.offset);
@@ -319,6 +321,12 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
       hasEarlier: page.hasEarlier,
       ...(page.hasEarlier ? { nextCursor: String(page.start) } : {}),
     };
+  }
+
+  getConversationImage(contentRef: string): ConversationImageBody {
+    const image = this.conversationImages.get(contentRef);
+    if (image === undefined) throw new AgentConversationCursorError("Conversation image reference is stale");
+    return structuredClone(image);
   }
 
   async getConversationContent(contentRef: string, cursor?: string): Promise<AgentConversationContentPage> {

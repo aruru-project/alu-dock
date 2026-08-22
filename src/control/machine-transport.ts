@@ -60,6 +60,7 @@ export interface MainRouteAuthority {
   getByKey(key: string): Promise<InstanceSnapshot | undefined>;
   ensureByKey(request: Extract<ControlRequest, { type: "instance.ensure" }>, ensureLocal: () => Promise<EnsureResult>): Promise<EnsureResult>;
   machines(): Promise<MachineDto[]>;
+  removeMachine(hostId: string): Promise<{ hostId: string; removed: boolean }>;
   listPage(local: InstanceSnapshot[], params: Extract<ControlRequest, { type: "instance.list" }>['params']): Promise<unknown>;
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -162,6 +163,7 @@ export class MainMachineController implements MainRouteAuthority {
   private authorityTail = Promise.resolve();
   private readonly keyReservations = new Map<string, KeyReservation>();
   private readonly latestInstalledCandidate = new Map<string, number>();
+  private readonly removedMachineIds = new Set<string>();
   private nextCandidateOrdinal = 0;
   private revision = 0;
   private listFingerprint = "";
@@ -341,6 +343,34 @@ export class MainMachineController implements MainRouteAuthority {
     ];
   }
 
+  async removeMachine(hostId: string): Promise<{ hostId: string; removed: boolean }> {
+    if (hostId === this.mainId) throw new ProtocolValidationError("invalid_request", "Main cannot remove itself from Machines");
+    return this.serializeAuthority(async () => {
+      this.removedMachineIds.add(hostId);
+      try {
+        const machine = await this.options.state.get(hostId);
+        const removed = await this.options.state.removeMachine(hostId);
+        if (!removed) {
+          this.removedMachineIds.delete(hostId);
+          return { hostId, removed: false };
+        }
+        const connection = this.connections.get(hostId);
+        if (connection) {
+          this.disconnect(connection, false);
+          connection.socket.destroy();
+        }
+        const instanceIds = machine?.routes.map((route) => route.mainInstanceId) ?? [];
+        for (const instanceId of instanceIds) this.routeSnapshots.delete(instanceId);
+        this.revision += 1;
+        if (instanceIds.length > 0) for (const listener of this.disconnectListeners) listener(instanceIds);
+        return { hostId, removed: true };
+      } catch (error) {
+        this.removedMachineIds.delete(hostId);
+        throw error;
+      }
+    });
+  }
+
   async listPage(local: InstanceSnapshot[], params: Extract<ControlRequest, { type: "instance.list" }>['params']): Promise<unknown> {
     const remote = (await this.options.state.list()).flatMap((machine) => machine.routes.map((route) => route.snapshot));
     const all = [...local, ...remote].sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id));
@@ -368,7 +398,7 @@ export class MainMachineController implements MainRouteAuthority {
   }
 
   private async routeWithReservation(request: ControlRequest, emit: (record: unknown) => void | Promise<void>, ended: () => void, keyReservation?: KeyReservation): Promise<RouteDecision> {
-    if (request.type === "machine.list" || request.type === "instance.list" || request.type === "host.info" || request.type === "instance.get_by_key") return { kind: "local" };
+    if (request.type === "machine.list" || request.type === "machine.remove" || request.type === "instance.list" || request.type === "host.info" || request.type === "instance.get_by_key") return { kind: "local" };
     const machines = await this.options.state.list();
     const instanceId = "instanceId" in request.params && typeof request.params.instanceId === "string" ? request.params.instanceId : undefined;
     let machine: TrustedSubHostRecord | undefined;
@@ -553,17 +583,18 @@ export class MainMachineController implements MainRouteAuthority {
     accepted.phase = "ready";
   }
 
-  private disconnect(connection: MainConnection): void {
+  private disconnect(connection: MainConnection, markRoutesOffline = true): void {
     if (connection.closed) return;
     connection.closed = true;
     if (this.connections.get(connection.machine.id) === connection) this.connections.delete(connection.machine.id);
     for (const stream of connection.streams.values()) stream.ended();
     connection.streams.clear();
-    void this.markOfflineUnlessConnected(connection.machine.id);
+    if (markRoutesOffline) void this.markOfflineUnlessConnected(connection.machine.id);
   }
 
   private async completeInitialInventory(connection: MainConnection, hostEpoch: string, snapshots: InstanceSnapshot[]): Promise<void> {
     const projection = await this.serializeAuthority(async () => {
+      if (this.removedMachineIds.has(connection.machine.id)) throw new Error("SubHost is no longer joined");
       if (connection.closed || connection.socket.destroyed) throw new Error("SubHost machine connection closed before initial inventory");
       const latestInstalled = this.latestInstalledCandidate.get(connection.machine.id) ?? 0;
       if (connection.candidateOrdinal < latestInstalled) throw new Error("A newer machine connection became ready before this candidate");
@@ -585,18 +616,27 @@ export class MainMachineController implements MainRouteAuthority {
     if (!peer.raw) throw new Error("SubHost certificate is missing");
     const certificate = new X509Certificate(peer.raw);
     const fingerprint = certificate.fingerprint256.replaceAll(":", "").toLowerCase();
-    let machine = await this.options.state.get(hello.machineId);
-    if (!machine) {
-      if (!hello.joinToken) throw new Error("SubHost is not joined");
-      machine = await this.options.state.acceptJoin({
-        token: hello.joinToken,
-        machineId: hello.machineId,
-        machineName: hello.machineName,
-        certificatePem: certificate.toString(),
-      });
-    } else if (machine.fingerprint !== fingerprint) throw new Error("SubHost certificate does not match its trust record");
-    this.nextCandidateOrdinal += 1;
-    return { machine, socket, hostEpoch: hello.hostEpoch, streams: new Map(), lastSeenAt: Date.now(), candidateOrdinal: this.nextCandidateOrdinal, closed: false };
+    const admitted = await this.serializeAuthority(async () => {
+      let machine = await this.options.state.get(hello.machineId);
+      if (!machine) {
+        if (!hello.joinToken) throw new Error("SubHost is not joined");
+        machine = await this.options.state.acceptJoin({
+          token: hello.joinToken,
+          machineId: hello.machineId,
+          machineName: hello.machineName,
+          certificatePem: certificate.toString(),
+        });
+      } else {
+        if (machine.fingerprint !== fingerprint) throw new Error("SubHost certificate does not match its trust record");
+        if (machine.name !== hello.machineName) {
+          machine = await this.options.state.updateMachine(machine.id, (candidate) => { candidate.name = hello.machineName; });
+        }
+      }
+      this.removedMachineIds.delete(machine.id);
+      this.nextCandidateOrdinal += 1;
+      return { machine, candidateOrdinal: this.nextCandidateOrdinal };
+    });
+    return { machine: admitted.machine, socket, hostEpoch: hello.hostEpoch, streams: new Map(), lastSeenAt: Date.now(), candidateOrdinal: admitted.candidateOrdinal, closed: false };
   }
 
   private async consumeMainRecord(connection: MainConnection, record: MachineWireRecord): Promise<void> {
@@ -886,6 +926,7 @@ export class MainMachineController implements MainRouteAuthority {
 
   private async markOfflineUnlessConnected(machineId: string): Promise<void> {
     const routes = await this.serializeAuthority(async () => {
+      if (this.removedMachineIds.has(machineId)) return undefined;
       const current = this.connections.get(machineId);
       if (current && !current.closed && !current.socket.destroyed) return undefined;
       return this.markOfflineCurrentRoutes(machineId);

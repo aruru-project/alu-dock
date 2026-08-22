@@ -699,6 +699,16 @@ export class DockHost {
         if (!this.routeAuthority) throw new ProtocolValidationError("capability_missing", "Machine routing is unavailable");
         this.sendSuccessAndEnd(socket, request.requestId, { machines: await this.routeAuthority.machines() }); return;
       }
+      case "machine.remove": {
+        if (!this.routeAuthority) throw new ProtocolValidationError("capability_missing", "Machine routing is unavailable");
+        const result = await this.operationLedger.run(
+          request.params.operationId,
+          request.type,
+          request.params,
+          () => this.routeAuthority!.removeMachine(request.params.hostId),
+        );
+        this.sendSuccessAndEnd(socket, request.requestId, result); return;
+      }
       case "host.info": {
         const health = this.registry.catalogHealth();
         this.sendSuccessAndEnd(socket, request.requestId, {
@@ -1042,83 +1052,39 @@ export class DockHost {
     const { instanceId, contentRef } = request.params;
     const instance = this.registry.get(instanceId);
     let ready = false;
-    let cursor: string | undefined;
-    let revision: string | undefined;
-    let runtimeGeneration: number | undefined;
-    let mimeType: string | undefined;
-    let expectedSize: number | undefined;
-    let expectedSha: string | undefined;
-    let encodedOffset = 0;
-    let pending = Buffer.alloc(0);
-    let index = 0;
-    let sizeBytes = 0;
-    const hash = createHash("sha256");
     const write = async (frame: unknown): Promise<void> => {
       const outcome = writeEnvelope(socket, frame);
       if (outcome === "backpressured") {
         if (!await waitForSocketDrain(socket, SOCKET_DRAIN_TIMEOUT_MS)) throw new Error("Conversation image client stopped draining");
       } else if (outcome !== "written") throw new Error("Conversation image connection closed");
     };
-    const emitPending = async (final: boolean): Promise<void> => {
-      while (pending.byteLength >= MAX_CONVERSATION_IMAGE_CHUNK_BYTES || (final && pending.byteLength > 0)) {
-        const count = final ? Math.min(MAX_CONVERSATION_IMAGE_CHUNK_BYTES, pending.byteLength) : MAX_CONVERSATION_IMAGE_CHUNK_BYTES;
-        const chunk = pending.subarray(0, count);
-        pending = pending.subarray(count);
+    try {
+      const image = await instance.getConversationImage(contentRef);
+      if (image.contentRef !== contentRef || image.sizeBytes < 1 || image.sizeBytes > MAX_IMAGE_BYTES) {
+        throw new Error("Conversation image metadata does not match the request");
+      }
+      const bytes = Buffer.from(image.data, "base64");
+      if (bytes.byteLength !== image.sizeBytes || bytes.toString("base64") !== image.data
+        || createHash("sha256").update(bytes).digest("hex") !== image.sha256) {
+        throw new Error("Conversation image verification failed");
+      }
+      await write({
+        kind: "conversation_image_ready", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
+        instanceId, contentRef, mimeType: image.mimeType, sizeBytes: image.sizeBytes, sha256: image.sha256,
+      });
+      ready = true;
+      let index = 0;
+      for (let offset = 0; offset < bytes.byteLength; offset += MAX_CONVERSATION_IMAGE_CHUNK_BYTES) {
+        const chunk = bytes.subarray(offset, Math.min(bytes.byteLength, offset + MAX_CONVERSATION_IMAGE_CHUNK_BYTES));
         await write({
           kind: "conversation_image_chunk", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
           instanceId, contentRef, index, data: chunk.toString("base64"),
         });
         index += 1;
       }
-    };
-    try {
-      for (;;) {
-        const page = await instance.getConversationContent(contentRef, cursor);
-        if (page.contentRef !== contentRef || (runtimeGeneration !== undefined && page.runtimeGeneration !== runtimeGeneration)
-          || (revision !== undefined && page.revision !== revision)) throw new Error("Conversation image changed while it was being read");
-        runtimeGeneration ??= page.runtimeGeneration;
-        revision ??= page.revision;
-        if (page.chunks.length < 1 || page.chunks.some((chunk) => chunk.type !== "image" || chunk.blockIndex !== 0)) {
-          throw new Error("Conversation content reference does not identify one image");
-        }
-        for (const chunk of page.chunks) {
-          if (chunk.type !== "image") throw new Error("Conversation content reference does not identify one image");
-          if (chunk.offset !== encodedOffset || chunk.contentRef !== contentRef || chunk.sha256 === undefined || chunk.sizeBytes === undefined) {
-            throw new Error("Conversation image metadata is incomplete");
-          }
-          mimeType ??= chunk.mimeType;
-          expectedSize ??= chunk.sizeBytes;
-          expectedSha ??= chunk.sha256;
-          if (chunk.mimeType !== mimeType || chunk.sizeBytes !== expectedSize || chunk.sha256 !== expectedSha || expectedSize > MAX_IMAGE_BYTES) {
-            throw new Error("Conversation image metadata changed while it was being read");
-          }
-          if (!ready) {
-            await write({
-              kind: "conversation_image_ready", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
-              instanceId, contentRef, mimeType, sizeBytes: expectedSize, sha256: expectedSha,
-            });
-            ready = true;
-          }
-          const bytes = Buffer.from(chunk.data, "base64");
-          if (bytes.toString("base64") !== chunk.data) throw new Error("Conversation image data is not canonical base64");
-          encodedOffset += chunk.data.length;
-          sizeBytes += bytes.byteLength;
-          if (sizeBytes > expectedSize) throw new Error("Conversation image exceeds its declared size");
-          hash.update(bytes);
-          pending = pending.byteLength === 0 ? bytes : Buffer.concat([pending, bytes]);
-          await emitPending(false);
-        }
-        if (page.complete) break;
-        if (page.nextCursor === undefined) throw new Error("Conversation image continuation is missing");
-        cursor = page.nextCursor;
-      }
-      if (!ready || expectedSize === undefined || expectedSha === undefined) throw new Error("Conversation image is empty or unavailable");
-      await emitPending(true);
-      const sha256 = hash.digest("hex");
-      if (sizeBytes !== expectedSize || sha256 !== expectedSha) throw new Error("Conversation image verification failed");
       await write({
         kind: "conversation_image_complete", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
-        instanceId, contentRef, chunks: index, sizeBytes, sha256,
+        instanceId, contentRef, chunks: index, sizeBytes: image.sizeBytes, sha256: image.sha256,
       });
       if (!socket.destroyed && !socket.writableEnded) socket.end();
     } catch (error) {

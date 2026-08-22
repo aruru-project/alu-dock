@@ -24,7 +24,10 @@ test("a live tool-result image uses a stable opaque conversation content referen
   const expectedBytes = Buffer.from(imageData, "base64");
   const expectedSha = createHash("sha256").update(expectedBytes).digest("hex");
   assert.equal(contentRef, `image-${expectedSha}`);
-  assert.deepEqual(data.content[0], { type: "image", mimeType: "image/png", contentRef, sha256: expectedSha, sizeBytes: expectedBytes.byteLength });
+  assert.deepEqual(data.content[0], { type: "image", mimeType: "image/png", contentRef });
+  assert.deepEqual(registry.image(contentRef), {
+    contentRef, mimeType: "image/png", data: imageData, sha256: expectedSha, sizeBytes: expectedBytes.byteLength,
+  });
   const first = registry.readImageContent(contentRef)!;
   assert.equal(first.complete, false);
   assert.throws(() => registry.readImageContent(contentRef, "expired-cursor"), AgentConversationCursorError);
@@ -33,7 +36,6 @@ test("a live tool-result image uses a stable opaque conversation content referen
   const third = registry.readImageContent(contentRef, second.nextCursor)!;
   assert.equal([first, second, third].flatMap((page) => page.chunks).map((chunk) => chunk.type === "image" ? chunk.data : "").join(""), imageData);
   assert.ok([first, second, third].every((page) => page.revision === contentRef));
-  assert.ok([first, second, third].flatMap((page) => page.chunks).every((chunk) => chunk.type !== "image" || (chunk.contentRef === contentRef && chunk.sha256 === expectedSha && chunk.sizeBytes === expectedBytes.byteLength)));
 });
 
 test("Pi adapter splits real message_update deltas without loss before the private protocol boundary", () => {

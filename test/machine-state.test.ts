@@ -101,6 +101,36 @@ test("Main creates a join file from the Hub while its running authority accepts 
   }
 });
 
+test("removing a SubHost revokes trust and a later rejoin cannot restore its old routes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "alu-machine-remove-"));
+  try {
+    const { state, machineId } = await joinedState(join(root, "main"));
+    const trusted = await state.get(machineId);
+    assert.ok(trusted);
+    const mainInstanceId = randomUUID();
+    await state.updateMachine(machineId, (machine) => {
+      machine.routes.push({ mainInstanceId, nativeInstanceId: randomUUID(), snapshot: snapshot(mainInstanceId) });
+    });
+
+    assert.equal(await state.removeMachine(machineId), true);
+    assert.equal(await state.removeMachine(machineId), false);
+    assert.equal(await state.get(machineId), undefined);
+    assert.deepEqual(await new MainMachineState(join(root, "main")).list(), []);
+
+    const joinFile = await state.createJoin();
+    const rejoined = await state.acceptJoin({
+      token: joinFile.token,
+      machineId,
+      machineName: trusted.name,
+      certificatePem: trusted.certificatePem,
+    });
+    assert.deepEqual(rejoined.routes, []);
+    assert.deepEqual(rejoined.retiredRoutes, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("an inventory larger than the old machine line crosses real TLS in ordered chunks", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-machine-inventory-"));
   const portServer = createServer();

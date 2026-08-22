@@ -46,6 +46,7 @@ import {
   type AttachmentDto,
   type ContentBlockDto,
   type ConversationFrame,
+  type ConversationImageBody,
   type ImagePathDto,
   type PublishedFileDto,
   type TreeNodeDto,
@@ -381,6 +382,7 @@ export class PiAgentAdapter {
       case "session.history": return this.getHistory();
       case "conversation.history": return this.getConversationHistory(request.params.cursor, request.params.limit);
       case "conversation.content": return this.getConversationContent(request.params.contentRef, request.params.cursor);
+      case "conversation.image": return this.getConversationImage(request.params.contentRef);
       case "file.read": return this.options.publishedFiles.read(request.params.fileRef, request.params.offset);
       case "session.list": return this.listSessions(request.params.scope);
       case "session.switch": {
@@ -717,6 +719,12 @@ export class PiAgentAdapter {
       trimTokenMap(this.conversationHistoryCursors);
     }
     return bounded;
+  }
+
+  getConversationImage(contentRef: string): ConversationImageBody {
+    const image = this.options.publishedFiles.image(contentRef);
+    if (image === undefined) throw new AgentConversationCursorError("Conversation image reference is stale");
+    return image;
   }
 
   async getConversationContent(contentRef: string, cursor?: string): Promise<AgentConversationContentPage> {
@@ -1422,13 +1430,10 @@ function imageBase64Metadata(data: string): { sha256: string; sizeBytes: number 
   } catch { return undefined; }
 }
 
-function imageBase64Sha256(data: string): string | undefined { return imageBase64Metadata(data)?.sha256; }
-
 function registerConversationImage(publishedFiles: TransientFileRegistry | undefined, data: string | undefined, mimeType: string): { contentRef: string; sha256: string; sizeBytes: number } | undefined {
-  const metadata = data === undefined ? undefined : imageBase64Metadata(data);
-  if (publishedFiles === undefined || data === undefined || metadata === undefined) return undefined;
-  const contentRef = publishedFiles.registerImage(data, mimeType);
-  return { contentRef, ...metadata };
+  if (publishedFiles === undefined || data === undefined) return undefined;
+  try { return publishedFiles.registerImage(data, mimeType); }
+  catch { return undefined; }
 }
 
 async function loadPiImages(images: readonly ImagePathDto[] | undefined): Promise<PiImageContent[] | undefined> {
@@ -1616,7 +1621,7 @@ function projectPrivateContent(content: unknown, publishedFiles?: TransientFileR
       blocks.push({
         type: "image",
         mimeType,
-        ...(image === undefined ? {} : image),
+        ...(image === undefined ? {} : { contentRef: image.contentRef }),
       });
     }
   }
@@ -1632,7 +1637,7 @@ function projectPrivateToolContent(content: unknown, publishedFiles?: TransientF
     if (item.type === "image") {
       const mimeType = safeImageMimeType(item.mimeType);
       const image = registerConversationImage(publishedFiles, typeof item.data === "string" ? item.data : undefined, mimeType);
-      return [{ type: "image", mimeType, ...(image === undefined ? {} : image) }];
+      return [{ type: "image", mimeType, ...(image === undefined ? {} : { contentRef: image.contentRef }) }];
     }
     return [];
   });
@@ -2180,10 +2185,7 @@ function projectDockContent(content: unknown, attachments?: readonly AttachmentD
       const registered = registerConversationImage(publishedFiles, typeof item.data === "string" ? item.data : undefined, mimeType);
       const sha256 = typeof item.sha256 === "string" && /^[a-f0-9]{64}$/u.test(item.sha256)
         ? item.sha256
-        : registered?.sha256 ?? (typeof item.data === "string" ? imageBase64Sha256(item.data) : undefined);
-      const sizeBytes = typeof item.sizeBytes === "number" && Number.isSafeInteger(item.sizeBytes) && item.sizeBytes >= 0 && item.sizeBytes <= MAX_IMAGE_BYTES
-        ? item.sizeBytes
-        : registered?.sizeBytes ?? (typeof item.data === "string" ? imageBase64Metadata(item.data)?.sizeBytes : undefined);
+        : registered?.sha256 ?? (typeof item.data === "string" ? imageBase64Metadata(item.data)?.sha256 : undefined);
       const contentRef = typeof item.contentRef === "string"
         ? safeRequiredText(item.contentRef, 128, "unknown")
         : registered?.contentRef;
@@ -2194,8 +2196,6 @@ function projectDockContent(content: unknown, attachments?: readonly AttachmentD
         mimeType,
         ...(contentRef === undefined ? {} : { contentRef }),
         ...(fileId === undefined ? {} : { fileId }),
-        ...(sha256 === undefined ? {} : { sha256 }),
-        ...(sizeBytes === undefined ? {} : { sizeBytes }),
       };
     }
     else if ((item.type === "toolCall" || item.type === "tool_call") && typeof item.name === "string") {
@@ -2233,7 +2233,7 @@ type ConversationTextSourceBlock = { type: "text" | "thinking"; text: string };
 type ConversationOmittedSourceBlock = { type: "omitted"; kind: "image" | "binary"; description: string };
 type ConversationSourceBlock =
   | ConversationTextSourceBlock
-  | { type: "image"; mimeType: string; data: string; contentRef?: string; sha256?: string; sizeBytes?: number }
+  | { type: "image"; mimeType: string; data: string }
   | { type: "tool_call"; toolCallId: string; toolName: string; argumentsJson: string }
   | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; omittedFields?: string[] }
   | ConversationOmittedSourceBlock;
@@ -2314,8 +2314,8 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
 function conversationImageSource(item: Record<string, unknown>, publishedFiles?: TransientFileRegistry): Extract<ConversationSourceBlock, { type: "image" }> {
   const mimeType = safeImageMimeType(item.mimeType);
   const data = typeof item.data === "string" ? item.data : "";
-  const image = registerConversationImage(publishedFiles, data, mimeType);
-  return { type: "image", mimeType, data, ...(image === undefined ? {} : image) };
+  registerConversationImage(publishedFiles, data, mimeType);
+  return { type: "image", mimeType, data };
 }
 
 function stripDockAttachmentContext(content: unknown, attachmentContextKey: Uint8Array): unknown {

@@ -274,11 +274,11 @@ export function buildDockHubEntries(
         : "Pi Sessions",
       description: inventoryWarning ?? `Browse all saved Pi sessions${inventoryTruncated ? " · more available" : ""}`,
     },
-    ...(machines.length === 0 ? [] : [{
+    {
       value: MACHINES,
       label: `Machines · ${machines.filter((machine) => machine.kind === "subhost").length}`,
       description: "Connect and manage SubHosts",
-    }]),
+    },
     { value: SETTINGS, label: "Settings", description: "Attachments, SubHost connections, and Dock role" },
     { value: DEVICES, label: "Devices", description: "Connect and manage remote devices" },
     { value: EXIT_HUB, label: "Leave Hub", description: "Return to the shell" },
@@ -658,13 +658,34 @@ async function chooseMachinesAction(
     }
     const machine = subhosts.find((candidate) => `machine:${candidate.hostId}` === selected);
     if (machine) {
-      await selectMenu(
+      const action = await selectMenu(
         terminal,
         terminalSafe(machine.name),
         machine.available ? "Connected to this Main" : "This SubHost is currently unavailable",
-        [{ value: BACK, label: "Back to Machines", description: "Return to the machine list" }],
-        "Enter or Esc · back",
+        [
+          { value: "remove", label: "Remove SubHost", description: "Revoke its trust and disconnect it from this Main" },
+          { value: BACK, label: "Back to Machines", description: "Return to the machine list" },
+        ],
+        "↑↓ choose · Enter select · Esc back",
       );
+      if (action !== "remove") continue;
+      const confirmed = await selectMenu(
+        terminal,
+        `Remove ${terminalSafe(machine.name)}?`,
+        "Its work keeps running there, but it disappears from this Main until joined again.",
+        [
+          { value: "confirm", label: "Remove SubHost", description: "Disconnect now and revoke its saved trust" },
+          { value: BACK, label: "Keep SubHost", description: "Leave the connection unchanged" },
+        ],
+        "↑↓ choose · Enter confirm · Esc cancel",
+      );
+      if (confirmed !== "confirm") continue;
+      try {
+        await client.removeMachine(machine.hostId);
+        notice = `${terminalSafe(machine.name)} was removed from this Main.`;
+      } catch {
+        notice = `I couldn’t remove ${terminalSafe(machine.name)}. Refresh Machines and try again.`;
+      }
     }
   }
 }
@@ -721,6 +742,7 @@ async function configureSubHostRole(
     } else if (!existing) {
       return "Choose the join file created by Main before switching this computer to SubHost.";
     }
+    await subHostMachineState.updateMachineName(name.trim());
     await machineSettingsState.switchToSubHost({ mainAddress: mainAddress.trim(), port, name: name.trim() });
     return "This computer will start as SubHost next time Alu Dock starts.";
   } catch {

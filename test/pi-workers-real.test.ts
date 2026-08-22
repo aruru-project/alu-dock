@@ -133,7 +133,7 @@ test("real Pi Worker projects persisted session entries into canonical conversat
       { type: "text", text: "image question" },
       {
         type: "image", mimeType: "image/png", contentRef: `image-${imageAttachment.sha256}`,
-        fileId: imageAttachment.fileId, sha256: imageAttachment.sha256, sizeBytes: imageAttachment.sizeBytes,
+        fileId: imageAttachment.fileId,
       },
     ]);
     const attachmentTool = records.find((record) => record.toolName === "dock_attachment_resolve");
@@ -149,6 +149,12 @@ test("real Pi Worker projects persisted session entries into canonical conversat
     }
     const oldImage = conversation.entries.find(({ entry }) => entry.entryId === imageUser?.entryId);
     assert.ok(oldImage);
+    const imageRef = oldImage.entry.content.find((block) => block.type === "image")?.contentRef;
+    assert.ok(imageRef);
+    const image = await instance.getConversationImage(imageRef);
+    assert.equal(image.sha256, imageAttachment.sha256);
+    assert.equal(image.sizeBytes, imageAttachment.sizeBytes);
+    assert.equal(Buffer.from(image.data, "base64").toString("utf8"), "fixture-image-bytes");
     manager.appendMessage({ role: "user", content: [{ type: "text", text: "later message" }], timestamp: 8 } as SessionMessage);
     await instance.reloadSession("stable-image-refresh");
     const refreshed = await instance.getConversationHistory(undefined, 50);

@@ -20,6 +20,7 @@ import {
   parseControlRequest,
   parseConversationContentBody,
   parseConversationHistoryBody,
+  parseConversationImageBody,
   parseFileReadBody,
   parseHistoryEntry,
   parseCompactionBody,
@@ -414,6 +415,7 @@ export function validateAgentWorkerResult(label: string, raw: unknown): void {
       parseConversationContentBody(raw);
       return;
     }
+    case "conversation.image": parseConversationImageBody(raw); return;
     case "file.read": parseFileReadBody(raw); return;
     case "model.list": parseModelListBody(raw); return;
     case "session.compact": parseCompactionBody(raw); return;
@@ -598,7 +600,7 @@ function parseAgentWorkerControl(raw: unknown): AgentWorkerControl {
 }
 
 function isAgentRequest(type: string): type is AgentRequest["type"] {
-  return ["command.submit", "command.abort", "queue.dequeue", "model.list", "model.set", "thinking.set", "tool.list", "tool.set_active", "settings.get", "settings.update", "resource.get", "command.catalog", "command.content", "command.complete", "session.history", "conversation.history", "conversation.content", "file.read", "session.list", "session.switch", "session.new", "session.name", "session.compact", "session.reload", "session.tree", "session.navigate", "session.fork", "session.clone"].includes(type);
+  return ["command.submit", "command.abort", "queue.dequeue", "model.list", "model.set", "thinking.set", "tool.list", "tool.set_active", "settings.get", "settings.update", "resource.get", "command.catalog", "command.content", "command.complete", "session.history", "conversation.history", "conversation.content", "conversation.image", "file.read", "session.list", "session.switch", "session.new", "session.name", "session.compact", "session.reload", "session.tree", "session.navigate", "session.fork", "session.clone"].includes(type);
 }
 
 function parseCapability(raw: unknown): WorkerCapability {

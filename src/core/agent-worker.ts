@@ -3,7 +3,7 @@ import type {
   SettingKey,
   SettingUpdate,
 } from "./config-projection.js";
-import type { ConversationRecordDto, ImagePathDto, SessionDto } from "./instance-dto.js";
+import type { ConversationImageBody, ConversationRecordDto, ImagePathDto, SessionDto } from "./instance-dto.js";
 import type { AttachmentDto } from "./instance-attachments.js";
 import type {
   CommandCompletionsResult,
@@ -75,7 +75,7 @@ export class AgentInvalidTreeTargetError extends Error {
 
 export type AgentConversationContentChunk =
   | { blockIndex: number; type: "text" | "thinking"; text: string; offset: number; blockComplete: boolean }
-  | { blockIndex: number; type: "image"; mimeType: string; data: string; offset: number; blockComplete: boolean; contentRef?: string; sha256?: string; sizeBytes?: number }
+  | { blockIndex: number; type: "image"; mimeType: string; data: string; offset: number; blockComplete: boolean }
   | { blockIndex: number; type: "tool_call"; toolCallId: string; toolName: string; argumentsJson: string; offset: number; blockComplete: boolean }
   | { blockIndex: number; type: "tool_result"; toolCallId: string; toolName: string; text: string; offset: number; blockComplete: boolean; isError: boolean; publishedFile?: PublishedFileDto; omittedFields?: string[] }
   | { blockIndex: number; type: "omitted"; kind: "image" | "binary"; description: string };
@@ -101,6 +101,8 @@ export interface AgentConversationContentPage {
   complete: boolean;
   nextCursor?: string;
 }
+
+export type AgentConversationImageBody = ConversationImageBody;
 
 export interface AgentProjectTrust {
   canonicalCwd: string;
@@ -259,7 +261,7 @@ export type AgentRequestType =
   | "model.list" | "model.set" | "thinking.set"
   | "tool.list" | "tool.set_active" | "settings.get" | "settings.update"
   | "resource.get" | "command.catalog" | "command.content" | "command.complete" | "session.history"
-  | "conversation.history" | "conversation.content" | "file.read" | "session.list"
+  | "conversation.history" | "conversation.content" | "conversation.image" | "file.read" | "session.list"
   | "session.switch" | "session.new" | "session.name" | "session.compact"
   | "session.reload" | "session.tree" | "session.navigate" | "session.fork" | "session.clone";
 

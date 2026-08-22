@@ -222,14 +222,12 @@ export class UserServiceManager {
   }
 
   private async readyIdentity(): Promise<{ pid: number; hostEpoch: string } | undefined> {
-    const configured = await this.options.subHostProbe?.();
-    if (configured?.role === "subhost") {
-      return configured.processId !== undefined && configured.hostEpoch !== undefined
-        ? { pid: configured.processId, hostEpoch: configured.hostEpoch }
-        : undefined;
-    }
     const ping = await this.tryProbe();
-    return ping && hasManagedHostCapabilities(ping) ? { pid: ping.pid, hostEpoch: ping.hostEpoch } : undefined;
+    if (ping && hasManagedHostCapabilities(ping)) return { pid: ping.pid, hostEpoch: ping.hostEpoch };
+    const configured = await this.options.subHostProbe?.();
+    return configured?.role === "subhost" && configured.processId !== undefined && configured.hostEpoch !== undefined
+      ? { pid: configured.processId, hostEpoch: configured.hostEpoch }
+      : undefined;
   }
 
   private async tryProbe(): Promise<PingResult | undefined> {

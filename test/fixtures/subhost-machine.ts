@@ -76,15 +76,13 @@ const routedImageData = routedImage.toString("base64");
 const routedImageSha = createHash("sha256").update(routedImage).digest("hex");
 const routedImageRef = "fixture-routed-image";
 const sourceWorker = delayedWorkers.get(sourceNativeId);
-if (sourceWorker) sourceWorker.conversationContent.set(routedImageRef, Array.from({ length: Math.ceil(routedImageData.length / 32_000) }, (_, index) => {
-  const offset = index * 32_000;
-  const data = routedImageData.slice(offset, offset + 32_000);
-  return {
-    blockIndex: 0, type: "image" as const, mimeType: "image/png", data, offset,
-    blockComplete: offset + data.length === routedImageData.length,
-    contentRef: routedImageRef, sizeBytes: routedImage.byteLength, sha256: routedImageSha,
-  };
-}));
+if (sourceWorker) sourceWorker.conversationImages.set(routedImageRef, {
+  contentRef: routedImageRef,
+  mimeType: "image/png",
+  data: routedImageData,
+  sizeBytes: routedImage.byteLength,
+  sha256: routedImageSha,
+});
 const createdByTool = realPiDockTools
   ? undefined
   : await upstream.invokeDockTool(sourceNativeId, { type: "create", operationId: "dock-tool-create", cwd: workspace, name: "Created from remote tool" });

@@ -154,8 +154,26 @@ export class MainMachineState {
       value.machines.push(record);
       return structuredClone(record);
     });
-    this.routeValues.set(joined.id, { schemaVersion: 1, machineId: joined.id, routes: [], retiredRoutes: [] });
+    const routeFile = { schemaVersion: 1 as const, machineId: joined.id, routes: [], retiredRoutes: [] };
+    await writeJson(this.routePath(joined.id), routeFile);
+    this.routeValues.set(joined.id, routeFile);
     return this.trustedRecord(joined);
+  }
+
+  async removeMachine(machineId: string): Promise<boolean> {
+    checkedId(machineId, "machine ID");
+    return this.lock(async () => {
+      const main = structuredClone(this.current());
+      const index = main.machines.findIndex((machine) => machine.id === machineId);
+      if (index < 0) return false;
+      main.machines.splice(index, 1);
+      main.revision += 1;
+      const parsed = parseMainFile(main);
+      await writeJson(this.path, parsed);
+      this.value = parsed;
+      this.routeValues.delete(machineId);
+      return true;
+    });
   }
 
   async retireRoute(mainInstanceId: string, authoritativeRuntimeGeneration: number): Promise<MachineRouteRecord | undefined> {
@@ -310,6 +328,14 @@ export class SubHostMachineState {
     delete record.joinToken;
     await writeJson(this.path, record);
     return record;
+  }
+
+  async updateMachineName(machineName: string): Promise<SubHostUpstreamRecord> {
+    const record = await this.load();
+    if (!record) throw new Error("SubHost upstream state is missing");
+    record.machineName = checkedName(machineName);
+    await writeJson(this.path, record);
+    return structuredClone(record);
   }
 
   async clear(): Promise<void> {
