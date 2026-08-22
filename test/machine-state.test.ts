@@ -80,6 +80,27 @@ test("join enrollment is one-use and writing its private file preserves an exist
   await assert.rejects(main.acceptJoin({ token: joinFile.token, machineId: pending.machineId, machineName: pending.machineName, certificatePem: pending.identity.certificatePem }));
 });
 
+test("Main creates a join file from the Hub while its running authority accepts the same enrollment", async () => {
+  const root = await mkdtemp(join(tmpdir(), "alu-machine-live-join-"));
+  try {
+    const runningAuthority = new MainMachineState(join(root, "main"));
+    await runningAuthority.initialize();
+    const hubState = new MainMachineState(join(root, "main"));
+    const joinFile = await hubState.createJoin();
+    const sub = new SubHostMachineState(join(root, "sub"));
+    const pending = await sub.prepare(joinFile, "Studio");
+    const accepted = await runningAuthority.acceptJoin({
+      token: joinFile.token,
+      machineId: pending.machineId,
+      machineName: pending.machineName,
+      certificatePem: pending.identity.certificatePem,
+    });
+    assert.equal(accepted.id, pending.machineId);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("an inventory larger than the old machine line crosses real TLS in ordered chunks", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-machine-inventory-"));
   const portServer = createServer();

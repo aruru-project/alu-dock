@@ -56,6 +56,10 @@ export interface UserServiceStatus {
   diagnostics: string[];
 }
 
+export type SubHostServiceProbe =
+  | { role: "main" }
+  | { role: "subhost"; processId?: number; hostEpoch?: string };
+
 export interface UserServiceManagerOptions {
   nodePath: string;
   cliPath: string;
@@ -64,6 +68,7 @@ export interface UserServiceManagerOptions {
   timeoutMs?: number;
   run?: ServiceCommandRunner;
   probe?: () => Promise<PingResult>;
+  subHostProbe?: () => Promise<SubHostServiceProbe>;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -85,7 +90,7 @@ export class UserServiceManager {
   }
 
   async install(startNow: boolean): Promise<UserServiceStatus> {
-    const previous = startNow ? await this.tryProbe() : undefined;
+    const previous = startNow ? await this.readyIdentity() : undefined;
     await this.writeUnit();
     this.systemctl(["daemon-reload"]);
     this.systemctl(["enable", ALU_DOCK_UNIT_NAME]);
@@ -110,7 +115,7 @@ export class UserServiceManager {
 
   async restart(): Promise<UserServiceStatus> {
     await this.requireGeneratedUnit();
-    const previous = await this.tryProbe();
+    const previous = await this.readyIdentity();
     this.systemctl(["restart", ALU_DOCK_UNIT_NAME]);
     await this.waitForReady(previous?.hostEpoch);
     return this.status();
@@ -139,8 +144,8 @@ export class UserServiceManager {
     const installed = await lstatIfPresent(this.unitFile) !== undefined;
     const properties = this.unitProperties();
     const mainPid = positivePid(properties.MainPID);
-    const ping = await this.tryProbe();
-    const ready = ping !== undefined && mainPid > 0 && ping.pid === mainPid && hasManagedHostCapabilities(ping);
+    const identity = await this.readyIdentity();
+    const ready = identity !== undefined && mainPid > 0 && identity.pid === mainPid;
     const diagnostics: string[] = [];
     if (properties.ActiveState === "active" && !ready) diagnostics.push("The service is running, but Alu Dock is not ready yet. Run `aludock service logs --lines 200` for details.");
     if (properties.ActiveState !== "active") diagnostics.push("Alu Dock is not running. Run `aludock service start`; check service logs if it does not start.");
@@ -155,7 +160,7 @@ export class UserServiceManager {
       installed,
       mainPid,
       ready,
-      ...(ping === undefined ? {} : { hostEpoch: ping.hostEpoch }),
+      ...(identity === undefined ? {} : { hostEpoch: identity.hostEpoch }),
       linger,
       diagnostics,
     };
@@ -200,21 +205,31 @@ export class UserServiceManager {
     }
   }
 
-  private async waitForReady(previousEpoch?: string): Promise<PingResult> {
+  private async waitForReady(previousEpoch?: string): Promise<{ pid: number; hostEpoch: string }> {
     const deadline = Date.now() + this.timeoutMs;
     while (Date.now() < deadline) {
-      const ping = await this.tryProbe();
+      const identity = await this.readyIdentity();
       const mainPid = positivePid(this.unitProperties().MainPID);
       if (
-        ping
-        && mainPid === ping.pid
-        && hasManagedHostCapabilities(ping)
-        && (previousEpoch === undefined || ping.hostEpoch !== previousEpoch)
-      ) return ping;
+        identity
+        && mainPid === identity.pid
+        && (previousEpoch === undefined || identity.hostEpoch !== previousEpoch)
+      ) return identity;
       await this.sleep(READY_POLL_MS);
     }
     const seconds = Math.max(1, Math.ceil(this.timeoutMs / 1_000));
     throw new Error(`Alu Dock did not become ready within ${seconds} second${seconds === 1 ? "" : "s"}. Run \`aludock service logs --lines 200\` for details, then try again.`);
+  }
+
+  private async readyIdentity(): Promise<{ pid: number; hostEpoch: string } | undefined> {
+    const configured = await this.options.subHostProbe?.();
+    if (configured?.role === "subhost") {
+      return configured.processId !== undefined && configured.hostEpoch !== undefined
+        ? { pid: configured.processId, hostEpoch: configured.hostEpoch }
+        : undefined;
+    }
+    const ping = await this.tryProbe();
+    return ping && hasManagedHostCapabilities(ping) ? { pid: ping.pid, hostEpoch: ping.hostEpoch } : undefined;
   }
 
   private async tryProbe(): Promise<PingResult | undefined> {

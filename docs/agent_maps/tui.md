@@ -16,9 +16,11 @@ Hub Settings/Devices ── local private state ── managed Host network/stor
 
 ## Hub
 
-Hub 的主要对象是 Dock instance。它提供 New、Continue、History、persisted sessions、Settings、Devices 和 Leave 等入口，但打开 Hub 本身不创建 runtime。
+Main Hub 的主要对象是 Dock instance。它提供 New、Continue、History、persisted sessions、Settings、Devices、Machines 和 Leave 等入口，但打开 Hub 本身不创建 runtime。没有角色设置时 Dock 默认是 Main；不存在独立 Standalone 界面。
 
-Settings 只管理永久 attachment directory。目录输入必须是 Host 上的绝对路径；设置归 Host storage authority，TUI 不保存上传 bytes，也不向远程 API 暴露设置。已有附件时页面拒绝直接切换到另一空目录，避免让既有 `fileId` 静默失效。
+Settings 管理永久 attachment directory、默认关闭的 SubHost connections、machine port 和下一次启动角色。选择 SubHost 时保存 Main 地址、端口、本机名称并导入一次性 join file；选择 Main 会清除 SubHost role override。角色和 machine-listener change 都在下次 Host 启动生效，不在一个正在运行的 Host 内热换 Registry 或 authority。附件目录输入必须是 Host 上的绝对路径；设置归 Host storage authority，TUI 不保存上传 bytes，也不向远程 API 暴露设置。已有附件时页面拒绝直接切换到另一空目录，避免让既有 `fileId` 静默失效。
+
+Machines 只在 Main 的完整 Hub 中出现，显示 SubHost connected/unavailable 状态并创建一次性 join file。SubHost 的本机 TUI 明确显示 `Alu Dock SubHost` 和是否连接 Main，只提供连接设置与下次切回 Main；它没有 New、Continue、History、Devices 或 Work 入口。Main 断线不让 SubHost 自行升格，也不开放临时客户端 endpoint。
 
 Devices 是唯一远程设备入口：同一页显示 Remote Access 开关、listener 状态、port、五分钟连接窗口、等待请求和已保存设备。Remote Access 默认关闭；用户选择连接新设备后仍必须在本机确认只连接自己持有的设备，才打开五分钟窗口。连接页保持显示时每 200ms 读取 Host-owned private state，倒计时、listener 状态、新请求、checking、成功和失败自动更新；没有 Refresh，也不靠重新进入页面发现变化。更新会按稳定 value 保留当前选择，只有新等待设备或新 terminal result 到来时才把焦点移到最相关动作。
 

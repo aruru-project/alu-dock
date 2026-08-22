@@ -84,6 +84,7 @@ export function machineStateRoot(catalogPath: string): string {
 export class MainMachineState {
   readonly root: string;
   readonly path: string;
+  private readonly changePath: string;
   private value: MainMachineFile | undefined;
   private readonly routeValues = new Map<string, MachineRouteFile>();
   private tail = Promise.resolve();
@@ -91,6 +92,7 @@ export class MainMachineState {
   constructor(root: string, private readonly configuredMainName = "Main") {
     this.root = resolve(root);
     this.path = join(this.root, "main.json");
+    this.changePath = join(this.root, ".main-state-changing");
   }
 
   async initialize(): Promise<void> {
@@ -230,7 +232,16 @@ export class MainMachineState {
     const previous = this.tail;
     this.tail = new Promise<void>((resolveTail) => { release = resolveTail; });
     await previous;
-    try { await this.initialize(); return await work(); } finally { release(); }
+    const releaseChange = await claimMachineStateChange(this.changePath);
+    try {
+      this.value = undefined;
+      this.routeValues.clear();
+      await this.initialize();
+      return await work();
+    } finally {
+      await releaseChange();
+      release();
+    }
   }
   private mutateMain<T>(work: (value: MainMachineFile) => T): Promise<T> {
     return this.lock(async () => {
@@ -299,6 +310,11 @@ export class SubHostMachineState {
     delete record.joinToken;
     await writeJson(this.path, record);
     return record;
+  }
+
+  async clear(): Promise<void> {
+    await rm(this.path, { force: true });
+    await syncPrivateDirectory(this.root);
   }
 }
 
@@ -446,6 +462,46 @@ async function ensureDirectory(path: string): Promise<void> {
   if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`Machine state path is not a private directory: ${path}`);
   if (process.platform === "win32") await hardenWindowsPrivatePath(path, true);
   else if ((info.mode & 0o777) !== 0o700) await chmod(path, 0o700);
+}
+
+async function claimMachineStateChange(path: string): Promise<() => Promise<void>> {
+  await ensureDirectory(dirname(path));
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    const token = randomUUID();
+    try {
+      const handle = await open(path, "wx", 0o600);
+      try { await handle.writeFile(`${JSON.stringify({ pid: process.pid, token })}\n`, "utf8"); }
+      finally { await handle.close(); }
+      await hardenWindowsPrivatePath(path, false);
+      return async () => {
+        try {
+          const value = JSON.parse(await readFile(path, "utf8")) as { token?: unknown };
+          if (value.token === token) await rm(path, { force: true });
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
+      };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      let stale = false;
+      try {
+        const value = JSON.parse(await readFile(path, "utf8")) as { pid?: unknown };
+        stale = !Number.isSafeInteger(value.pid) || !processAlive(value.pid as number);
+      } catch (readError) {
+        if ((readError as NodeJS.ErrnoException).code === "ENOENT") continue;
+        const info = await lstat(path);
+        stale = Date.now() - info.mtimeMs >= 60_000;
+      }
+      if (stale) { await rm(path, { force: true }); continue; }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 10));
+    }
+  }
+  throw new Error("Main machine state is busy");
+}
+
+function processAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
 }
 
 async function ensureJoinParent(path: string): Promise<void> {

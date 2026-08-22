@@ -47,15 +47,17 @@ Store 的公开内容在 `files/`，文件名经过最小安全清洗并保持�
 
 ## Main/SubHost startup composition
 
-同一个包可以组成 Main 或 SubHost，但 managed service unit 仍保持现状，不由安装器自动改角色。机器端口是独立于客户端 Remote Access 的 TLS listener；一条长期连接 multiplex 多条逻辑 Protocol V2 stream，各 stream 独立排队和 reset，单条 stream 的 backpressure 或处理失败不关闭 machine link。完整 native inventory 以有序 base64 chunks 传输，Main 收齐并校验后才原子替换 route view；初次 inventory 完成前不宣告 machine ready。
+Dock 只有 Main 与 SubHost 两种角色。没有角色设置时始终启动为 Main；不存在独立 Standalone 角色。Main 的 SubHost connections 默认关闭，因此普通安装不会新增网络 listener。主人在 Main Hub Settings 开启并选择端口后，下次启动才监听 machine TLS；同一 Main 的完整 Hub、客户端 authority 和本机 Work 不因 listener 开关而变化。
 
-在 Main 停止时先生成一次性 join file（文件只含有期限的 token 与 Main certificate，不含地址或端口）：
+主人也可以从 TUI 选择下次启动为 SubHost。这个选择保存 Main 地址、端口、本机名称，并在第一次导入 Main 创建的一次性 join file。SubHost TUI 只显示自身角色、Main 连接状态、连接设置和切回 Main 的入口；它没有客户端 local endpoint、Remote Access、完整 Hub 或 children。切回 Main 会清除 SubHost role override，下次启动恢复默认 Main。
+
+Main 的 Machines 页面可以在 Host 运行时创建 join file；文件只含十分钟有效、成功一次后失效的 token 与 Main certificate，不含地址或端口。CLI 仍提供相同运维入口：
 
 ```bash
 aludock machine join-file --out /private/subhost.join
 ```
 
-开发/显式运维入口分别是：
+显式开发入口可覆盖保存的角色设置：
 
 ```bash
 aludock --socket /run/user/$UID/alu-main.sock serve --dev --main \
@@ -66,7 +68,7 @@ aludock serve --dev --subhost --state /private/sub/catalog.json \
   --join-file /private/subhost.join --machine-name Studio
 ```
 
-Main address 与 machine port 必须在 SubHost 另行输入，join file 不能替它们作连接目标。join token 十分钟过期且成功一次后失效；已经完成 enrollment 的 SubHost 再提供 join file 会被拒绝。SubHost 保存自己的长期 certificate 和精确 Main certificate pin，以后启动省略 `--join-file`。Main 的 `main.json` 只持久化 Main identity、SubHost trust 与 machine index；每台 SubHost 的 route inventory 使用 machine state directory 下独立的原子 route file，各自复用 durable catalog 的字节边界。SubHost 可以早于 Main 启动；上游不可达时仍保持本机 Host/Worker 与 Queue，只在后台重连。SubHost 没有 client local endpoint、Remote Access listener 或 children。
+机器端口独立于客户端 Remote Access。Main/SubHost 的一条长期 TLS 连接 multiplex 多条逻辑 Protocol V2 stream，各 stream 独立排队和 reset；单条 stream 的 backpressure 或处理失败不关闭 machine link。SubHost 保存自己的长期 certificate 和精确 Main certificate pin，以后启动不再需要 join file；它可以早于 Main 启动，上游不可达时本机 Worker 与 Queue 继续运行并在后台重连。
 
 ## Worker lifecycle
 

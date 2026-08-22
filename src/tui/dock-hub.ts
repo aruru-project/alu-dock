@@ -21,6 +21,9 @@ import type {
   RemoteAccessStatus,
   TrustedClient,
 } from "../control/remote-access-state.js";
+import { MainMachineState, SubHostMachineState, readMachineJoinFile, writeMachineJoinFile } from "../control/machine-state.js";
+import { MachineSettingsState, type MachineSettings } from "../control/machine-settings-state.js";
+import type { MachineDto } from "../control/protocol.js";
 import type { InstanceSnapshot, SessionDto } from "../core/managed-instance.js";
 import { humanInstanceStatus } from "../core/instance-display-name.js";
 import { humanRelativeTime } from "../human-time.js";
@@ -41,6 +44,7 @@ const HISTORY = "hub:history";
 const SESSION_INVENTORY = "hub:sessions";
 const SETTINGS = "hub:settings";
 const DEVICES = "hub:devices";
+const MACHINES = "hub:machines";
 const EXIT_HUB = "hub:exit";
 const MORE_INSTANCES = "hub:instances-more";
 const MORE_SESSIONS = "hub:sessions-more";
@@ -64,7 +68,15 @@ export interface DockHubEntry {
 }
 
 /** Read-only construction: entering the Hub lists state but never creates a runtime. */
-export async function runDockHub(client: DockClient, cwd: string, remoteAccessState: RemoteAccessState, attachmentStorageState: AttachmentStorageState): Promise<DockHubAction> {
+export async function runDockHub(
+  client: DockClient,
+  cwd: string,
+  remoteAccessState: RemoteAccessState,
+  attachmentStorageState: AttachmentStorageState,
+  machineSettingsState: MachineSettingsState,
+  mainMachineState: MainMachineState,
+  subHostMachineState: SubHostMachineState,
+): Promise<DockHubAction> {
   const terminal = new HubProcessTerminal();
   const contextCwd = resolve(cwd);
   let sessions: SessionDto[] = [];
@@ -85,7 +97,10 @@ export async function runDockHub(client: DockClient, cwd: string, remoteAccessSt
   try {
     terminal.enterHubPresentation();
     while (true) {
-      const instances = await client.list("all");
+      const [instances, machines] = await Promise.all([
+        client.list("all"),
+        client.machines().then((result) => result.machines).catch(() => [] as MachineDto[]),
+      ]);
       if (signalRequested) return { kind: "exit" };
       const entries = buildDockHubEntries(
         instances,
@@ -95,6 +110,7 @@ export async function runDockHub(client: DockClient, cwd: string, remoteAccessSt
         sessionTotal,
         inventoryTruncated,
         inventoryLoaded,
+        machines,
       );
       const selected = await selectMenu(
         terminal,
@@ -144,11 +160,15 @@ export async function runDockHub(client: DockClient, cwd: string, remoteAccessSt
         if (sessionAction) return sessionAction;
       }
       if (selected === SETTINGS) {
-        await chooseHubSettings(terminal, attachmentStorageState);
+        await chooseHubSettings(terminal, attachmentStorageState, machineSettingsState, subHostMachineState);
         if (signalRequested) return { kind: "exit" };
       }
       if (selected === DEVICES) {
         await chooseDevicesAction(terminal, remoteAccessState);
+        if (signalRequested) return { kind: "exit" };
+      }
+      if (selected === MACHINES) {
+        await chooseMachinesAction(terminal, client, machineSettingsState, mainMachineState);
         if (signalRequested) return { kind: "exit" };
       }
     }
@@ -156,6 +176,70 @@ export async function runDockHub(client: DockClient, cwd: string, remoteAccessSt
     terminal.leaveHubPresentation();
     process.off("SIGINT", onPresentationSignal);
     process.off("SIGTERM", onPresentationSignal);
+  }
+}
+
+export async function runSubHostHub(
+  machineSettingsState: MachineSettingsState,
+  subHostMachineState: SubHostMachineState,
+): Promise<void> {
+  const terminal = new HubProcessTerminal();
+  let signalRequested = false;
+  let notice: string | undefined;
+  const onSignal = (): void => {
+    signalRequested = true;
+    if (!terminal.menuActive) terminal.leaveHubPresentation();
+  };
+  process.on("SIGINT", onSignal);
+  process.on("SIGTERM", onSignal);
+  try {
+    terminal.enterHubPresentation();
+    while (!signalRequested) {
+      const result = await selectLiveMenu(
+        terminal,
+        "Alu Dock SubHost",
+        async () => {
+          const [settings, status] = await Promise.all([
+            machineSettingsState.read(),
+            machineSettingsState.readSubHostStatus(),
+          ]);
+          return {
+            data: { settings, status },
+            subtitle: notice ?? (status.connected ? "Connected to Main" : "Main is unavailable"),
+            entries: [
+              { value: "connection", label: "Main connection", description: settings.subhost ? `${terminalSafe(settings.subhost.mainAddress)} · Port ${settings.subhost.port}` : "Connection settings are missing" },
+              { value: "main", label: "Use as Main", description: "Switch roles after the next restart" },
+              { value: EXIT_HUB, label: "Leave", description: "Return to the shell" },
+            ],
+          };
+        },
+        "↑↓ choose · Enter open · updates automatically",
+      );
+      if (signalRequested || !result.value || result.value === EXIT_HUB) return;
+      notice = undefined;
+      if (result.value === "connection") {
+        notice = await configureSubHostRole(terminal, machineSettingsState, subHostMachineState, result.data.settings);
+      } else if (result.value === "main") {
+        const selected = await selectMenu(
+          terminal,
+          "Use this computer as Main?",
+          "The current SubHost keeps running until Alu Dock restarts.",
+          [
+            { value: "confirm", label: "Use as Main", description: "Apply on the next startup" },
+            { value: BACK, label: "Keep SubHost", description: "Leave the role unchanged" },
+          ],
+          "↑↓ choose · Enter confirm · Esc cancel",
+        );
+        if (selected === "confirm") {
+          await machineSettingsState.switchToMain();
+          notice = "This computer will start as Main next time.";
+        }
+      }
+    }
+  } finally {
+    terminal.leaveHubPresentation();
+    process.off("SIGINT", onSignal);
+    process.off("SIGTERM", onSignal);
   }
 }
 
@@ -167,6 +251,7 @@ export function buildDockHubEntries(
   sessionTotal = sessions.length,
   inventoryTruncated = false,
   inventoryLoaded = true,
+  machines: readonly MachineDto[] = [],
 ): DockHubEntry[] {
   const continuable = instances.filter(isContinuable).length;
   const history = instances.filter(isHistoryRecord).length;
@@ -189,7 +274,12 @@ export function buildDockHubEntries(
         : "Pi Sessions",
       description: inventoryWarning ?? `Browse all saved Pi sessions${inventoryTruncated ? " · more available" : ""}`,
     },
-    { value: SETTINGS, label: "Settings", description: "Choose where Dock keeps attachments" },
+    ...(machines.length === 0 ? [] : [{
+      value: MACHINES,
+      label: `Machines · ${machines.filter((machine) => machine.kind === "subhost").length}`,
+      description: "Connect and manage SubHosts",
+    }]),
+    { value: SETTINGS, label: "Settings", description: "Attachments, SubHost connections, and Dock role" },
     { value: DEVICES, label: "Devices", description: "Connect and manage remote devices" },
     { value: EXIT_HUB, label: "Leave Hub", description: "Return to the shell" },
   ];
@@ -430,12 +520,18 @@ async function chooseSessionAction(
 async function chooseHubSettings(
   terminal: HubProcessTerminal,
   attachmentState: AttachmentStorageState,
+  machineSettingsState: MachineSettingsState,
+  subHostMachineState: SubHostMachineState,
 ): Promise<void> {
   let notice: string | undefined;
   while (true) {
     let attachmentSettings: AttachmentStorageSettings;
+    let machineSettings: MachineSettings;
     try {
-      attachmentSettings = await attachmentState.readSettings();
+      [attachmentSettings, machineSettings] = await Promise.all([
+        attachmentState.readSettings(),
+        machineSettingsState.read(),
+      ]);
     } catch {
       await showLocalAdminUnavailable(terminal, "Settings");
       return;
@@ -443,27 +539,216 @@ async function chooseHubSettings(
     const selected = await selectMenu(
       terminal,
       "Settings",
-      notice ?? "Choose where Dock keeps attachments.",
+      notice ?? "Configure this Main.",
       [
         { value: "attachments", label: "Attachment directory", description: terminalSafe(attachmentSettings.directory) },
+        {
+          value: "machine-connections",
+          label: `SubHost connections · ${machineSettings.main.connectionsEnabled ? "On" : "Off"}`,
+          description: machineSettings.main.connectionsEnabled
+            ? `Listen on port ${machineSettings.main.port} after the next restart`
+            : "No machine port is open",
+        },
+        { value: "machine-port", label: `SubHost port · ${machineSettings.main.port}`, description: "Used when SubHost connections are on" },
+        { value: "dock-role", label: "Dock role · Main", description: "Use this computer as a SubHost after the next restart" },
         { value: BACK, label: "Back to Hub", description: "Return to the Hub" },
       ],
       "↑↓ choose · Enter change · Esc back",
     );
     if (!selected || selected === BACK) return;
-    const value = await promptHubText(
-      terminal,
-      "Attachment directory",
-      `Current directory: ${terminalSafe(attachmentSettings.directory)} · enter an absolute permanent path`,
-    );
-    if (value === undefined) continue;
-    try {
-      const saved = await attachmentState.writeDirectory(value.trim());
-      notice = `I’ll keep new attachments in ${terminalSafe(saved.directory)}.`;
-    } catch {
-      notice = "I couldn’t change the attachment directory. Check that Alu Dock can write there, then try again.";
+    if (selected === "attachments") {
+      const value = await promptHubText(
+        terminal,
+        "Attachment directory",
+        `Current directory: ${terminalSafe(attachmentSettings.directory)} · enter an absolute permanent path`,
+      );
+      if (value === undefined) continue;
+      try {
+        const saved = await attachmentState.writeDirectory(value.trim());
+        notice = `I’ll keep new attachments in ${terminalSafe(saved.directory)}.`;
+      } catch {
+        notice = "I couldn’t change the attachment directory. Check that Alu Dock can write there, then try again.";
+      }
+      continue;
+    }
+    if (selected === "machine-connections") {
+      try {
+        const enabled = !machineSettings.main.connectionsEnabled;
+        await machineSettingsState.writeMainConnections({ enabled, port: machineSettings.main.port });
+        notice = enabled
+          ? `SubHost connections will open on port ${machineSettings.main.port} after Alu Dock restarts.`
+          : "SubHost connections will close after Alu Dock restarts.";
+      } catch {
+        notice = "I couldn’t change SubHost connections. Check the Dock state directory and try again.";
+      }
+      continue;
+    }
+    if (selected === "machine-port") {
+      const port = await promptMachinePort(terminal, machineSettings.main.port);
+      if (port === undefined) continue;
+      try {
+        await machineSettingsState.writeMainConnections({ enabled: machineSettings.main.connectionsEnabled, port });
+        notice = machineSettings.main.connectionsEnabled
+          ? `SubHosts will use port ${port} after Alu Dock restarts.`
+          : `Port ${port} is saved for the next time SubHost connections turn on.`;
+      } catch {
+        notice = "I couldn’t save that SubHost port. Check the Dock state directory and try again.";
+      }
+      continue;
+    }
+    if (selected === "dock-role") {
+      notice = await configureSubHostRole(terminal, machineSettingsState, subHostMachineState, machineSettings);
     }
   }
+}
+
+async function chooseMachinesAction(
+  terminal: HubProcessTerminal,
+  client: DockClient,
+  machineSettingsState: MachineSettingsState,
+  mainMachineState: MainMachineState,
+): Promise<void> {
+  let notice: string | undefined;
+  while (true) {
+    const [settings, result] = await Promise.all([
+      machineSettingsState.read(),
+      client.machines(),
+    ]);
+    const subhosts = result.machines.filter((machine) => machine.kind === "subhost");
+    const entries: DockHubEntry[] = [];
+    if (settings.main.connectionsEnabled) {
+      entries.push({ value: "connect", label: "Connect a SubHost", description: "Create a private one-use join file" });
+    } else {
+      entries.push({ value: "settings", label: "SubHost connections are off", description: "Turn them on in Settings, then restart Alu Dock" });
+    }
+    entries.push(...subhosts.map((machine) => ({
+      value: `machine:${machine.hostId}`,
+      label: `${machine.available ? "●" : "○"} ${terminalSafe(machine.name)}`,
+      description: machine.available ? "Connected" : "Unavailable",
+    })));
+    entries.push({ value: BACK, label: "Back to Hub", description: "Return to the Hub" });
+    const selected = await selectMenu(
+      terminal,
+      "Machines",
+      notice ?? `${subhosts.length} SubHost${subhosts.length === 1 ? "" : "s"} · Main port ${settings.main.port}`,
+      entries,
+      "↑↓ choose · Enter open · Esc back",
+    );
+    if (!selected || selected === BACK) return;
+    notice = undefined;
+    if (selected === "settings") {
+      notice = "Open Settings to turn on SubHost connections.";
+      continue;
+    }
+    if (selected === "connect") {
+      const output = await promptHubText(
+        terminal,
+        "Save SubHost join file",
+        "Enter an absolute path for the private one-use join file",
+      );
+      if (output === undefined) continue;
+      try {
+        const joinFile = await mainMachineState.createJoin();
+        await writeMachineJoinFile(output.trim(), joinFile);
+        notice = `Join file saved at ${terminalSafe(resolve(output.trim()))}. On the SubHost, enter this Main’s address and port ${settings.main.port}.`;
+      } catch {
+        notice = "I couldn’t create the join file. Choose a private writable location and try again.";
+      }
+      continue;
+    }
+    const machine = subhosts.find((candidate) => `machine:${candidate.hostId}` === selected);
+    if (machine) {
+      await selectMenu(
+        terminal,
+        terminalSafe(machine.name),
+        machine.available ? "Connected to this Main" : "This SubHost is currently unavailable",
+        [{ value: BACK, label: "Back to Machines", description: "Return to the machine list" }],
+        "Enter or Esc · back",
+      );
+    }
+  }
+}
+
+async function configureSubHostRole(
+  terminal: HubProcessTerminal,
+  machineSettingsState: MachineSettingsState,
+  subHostMachineState: SubHostMachineState,
+  current: MachineSettings,
+): Promise<string | undefined> {
+  const mainAddress = await promptHubText(
+    terminal,
+    "Main address",
+    "Enter the address this computer uses to reach Main",
+    current.subhost?.mainAddress,
+  );
+  if (mainAddress === undefined) return undefined;
+  const port = await promptMachinePort(terminal, current.subhost?.port ?? current.main.port);
+  if (port === undefined) return undefined;
+  const name = await promptHubText(
+    terminal,
+    "SubHost name",
+    "Choose the name Main will show for this computer",
+    current.subhost?.name ?? "SubHost",
+  );
+  if (name === undefined) return undefined;
+  const existing = await subHostMachineState.load();
+  const joinPath = await promptHubText(
+    terminal,
+    "SubHost join file",
+    existing ? "Leave empty to keep the current Main enrollment, or enter a new join file" : "Enter the join file created by Main",
+  );
+  if (joinPath === undefined) return undefined;
+  try {
+    if (joinPath.trim().length > 0) {
+      const joinFile = await readMachineJoinFile(joinPath.trim());
+      if (existing && existing.mainFingerprint !== joinFile.mainFingerprint) {
+        const confirmation = await selectMenu(
+          terminal,
+          "Connect to a different Main?",
+          "This changes which Main can reach this computer. Local work stays here.",
+          [
+            { value: "confirm", label: "Change Main", description: "Replace the current Main enrollment" },
+            { value: BACK, label: "Keep Current Main", description: "Leave the connection unchanged" },
+          ],
+          "↑↓ choose · Enter confirm · Esc cancel",
+        );
+        if (confirmation !== "confirm") return undefined;
+        await subHostMachineState.clear();
+      } else if (existing?.joinToken === undefined) {
+        return "This computer is already enrolled with that Main. Leave the join-file field empty to keep it.";
+      }
+      await subHostMachineState.prepare(joinFile, name.trim());
+    } else if (!existing) {
+      return "Choose the join file created by Main before switching this computer to SubHost.";
+    }
+    await machineSettingsState.switchToSubHost({ mainAddress: mainAddress.trim(), port, name: name.trim() });
+    return "This computer will start as SubHost next time Alu Dock starts.";
+  } catch {
+    return "I couldn’t save that Main connection. Check the address, port, and join file, then try again.";
+  }
+}
+
+async function promptMachinePort(terminal: HubProcessTerminal, current: number): Promise<number | undefined> {
+  const value = await promptHubText(
+    terminal,
+    "SubHost port",
+    "Enter a port from 1 to 65535",
+    String(current),
+  );
+  if (value === undefined) return undefined;
+  const trimmed = value.trim();
+  const port = /^\d{1,5}$/u.test(trimmed) ? Number(trimmed) : 0;
+  if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+    await selectMenu(
+      terminal,
+      "SubHost port",
+      "The port needs to be a whole number from 1 to 65535.",
+      [{ value: BACK, label: "Back", description: "Enter the port again" }],
+      "Enter or Esc · back",
+    );
+    return undefined;
+  }
+  return port;
 }
 
 interface DevicesSnapshot {

@@ -1,6 +1,6 @@
 param(
-  [ValidateSet("standalone", "main", "subhost")]
-  [string]$Role = "standalone",
+  [ValidateSet("configured", "main", "subhost")]
+  [string]$Role = "configured",
   [string]$State = "$env:LOCALAPPDATA\Alu Dock\catalog.json",
   [string]$MainAddress,
   [int]$MachinePort = 0,
@@ -20,8 +20,8 @@ try {
   $arguments += @("serve", "--dev", "--state", $State)
 
   if ($Role -eq "main") {
-    if ($MachinePort -lt 1) { throw "Main requires -MachinePort." }
-    $arguments += @("--main", "--machine-port", "$MachinePort")
+    $arguments += "--main"
+    if ($MachinePort -gt 0) { $arguments += @("--machine-port", "$MachinePort") }
   } elseif ($Role -eq "subhost") {
     if ([string]::IsNullOrWhiteSpace($MainAddress)) { throw "SubHost requires -MainAddress." }
     if ($MachinePort -lt 1) { throw "SubHost requires -MachinePort." }

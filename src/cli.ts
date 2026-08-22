@@ -15,6 +15,7 @@ import type { ProjectTrustChoice } from "./control/project-trust.js";
 import { defaultSocketPath, managedSocketPath } from "./control/socket-path.js";
 import { RemoteAccessState, remoteAccessStateRoot } from "./control/remote-access-state.js";
 import { MainMachineState, SubHostMachineState, machineStateRoot, readMachineJoinFile, writeMachineJoinFile } from "./control/machine-state.js";
+import { MachineSettingsState, machineSettingsStateRoot } from "./control/machine-settings-state.js";
 import { MainMachineController, SubHostDockToolsPort, SubHostMachineConnection } from "./control/machine-transport.js";
 import { MainMachineDockToolsAuthority, MainMachineDockToolsPort } from "./control/main-machine-dock-tools.js";
 import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot } from "./core/managed-instance.js";
@@ -158,19 +159,41 @@ async function main(): Promise<void> {
 }
 
 async function serve(socketPath: string, socketExplicit: boolean, args: string[]): Promise<void> {
-  const options = parseServeOptions(args);
+  let options = parseServeOptions(args);
   let catalogPath = options.statePath;
   if (options.mode === "managed") {
-    if (options.role === "subhost") throw new Error("SubHost startup uses an explicit private --state path, not the Main managed unit");
     if (socketExplicit) throw new Error("Managed Host rejects --socket overrides");
     if (process.env.ALU_DOCK_MANAGED !== "1") throw new Error("Managed Host requires ALU_DOCK_MANAGED=1 from the generated user unit");
     if (!process.env.STATE_DIRECTORY) throw new Error("Managed Host requires systemd STATE_DIRECTORY");
     socketPath = managedSocketPath();
     catalogPath = defaultCatalogPath();
-  } else if (options.role !== "subhost" && !socketExplicit && !process.env.ALU_DOCK_SOCKET) {
+  }
+  if (catalogPath) {
+    const configured = await new MachineSettingsState(machineSettingsStateRoot(catalogPath)).read();
+    const role = options.roleExplicit ? options.role : configured.role;
+    options = role === "subhost"
+      ? {
+        ...options,
+        role,
+        machineName: options.machineName ?? configured.subhost?.name,
+        mainAddress: options.mainAddress ?? configured.subhost?.mainAddress,
+        machinePort: options.machinePort ?? configured.subhost?.port,
+      }
+      : {
+        ...options,
+        role,
+        machineName: options.machineName ?? configured.main.name,
+        machinePort: options.machinePort ?? (configured.main.connectionsEnabled ? configured.main.port : undefined),
+      };
+  }
+  if (options.mode === "dev" && options.role === "main" && !socketExplicit && !process.env.ALU_DOCK_SOCKET) {
     throw new Error("Development Main requires an explicit --socket PATH or ALU_DOCK_SOCKET");
   }
-  if ((options.role === "main" || options.role === "subhost") && !catalogPath) throw new Error("Machine composition requires --state PATH so trust and routes survive restart");
+  if (options.role === "subhost" && (!catalogPath || !options.mainAddress || options.machinePort === undefined || !options.machineName)) {
+    throw new Error("SubHost startup requires saved connection settings or explicit --state, --main-address, --machine-port, and --machine-name");
+  }
+  if (options.role === "main" && options.machinePort !== undefined && !catalogPath) throw new Error("SubHost connections require --state PATH so trust and routes survive restart");
+  if (options.role === "main" && (options.mainAddress || options.joinFile)) throw new Error("Main startup does not accept SubHost connection options");
 
   const { createPiInstance, createPiProjectTrustCoordinator, resolvePiReopenTarget } = await import("./pi/create-pi-instance.js");
   const { createPiSessionInventory } = await import("./pi/session-inventory.js");
@@ -182,18 +205,26 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   let registry!: DockRegistry;
   let host!: DockHost;
   let upstream: SubHostMachineConnection | undefined;
+  let subHostStatus: { state: MachineSettingsState; hostEpoch: string } | undefined;
 
   if (options.role === "subhost") {
     const subHostEpoch = randomUUID();
+    const mainAddress = options.mainAddress as string;
+    const machinePort = options.machinePort as number;
+    const machineName = options.machineName as string;
+    const settingsState = new MachineSettingsState(machineSettingsStateRoot(catalogPath as string));
+    subHostStatus = { state: settingsState, hostEpoch: subHostEpoch };
+    await settingsState.writeSubHostStatus({ hostEpoch: subHostEpoch, connected: false });
     const subState = new SubHostMachineState(machineStateRoot(catalogPath as string));
-    if (options.joinFile) await subState.prepare(await readMachineJoinFile(options.joinFile), options.machineName);
+    if (options.joinFile) await subState.prepare(await readMachineJoinFile(options.joinFile), machineName);
     const upstreamConnection = new SubHostMachineConnection({
       state: subState,
-      address: options.mainAddress,
-      port: options.machinePort,
+      address: mainAddress,
+      port: machinePort,
       hostEpoch: subHostEpoch,
       snapshots: () => registry.list(),
       acceptProtocolSocket: (socket) => host.acceptProtocolSocket(socket),
+      onConnectionChanged: (connected) => settingsState.writeSubHostStatus({ hostEpoch: subHostEpoch, connected }),
     });
     upstream = upstreamConnection;
     const dockToolsPort = new SubHostDockToolsPort({ upstream: upstreamConnection, local: () => registry });
@@ -218,7 +249,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     const durable = catalogPath !== undefined;
     let routeAuthority: MainMachineController | undefined;
     let dockToolsAuthority: MainMachineDockToolsAuthority | undefined;
-    const mainDockToolsPort = options.role === "main" ? new MainMachineDockToolsPort({
+    const mainDockToolsPort = options.role === "main" && durable ? new MainMachineDockToolsPort({
       local: () => registry,
       authority: () => dockToolsAuthority as MainMachineDockToolsAuthority,
       mainHostId: async () => (await (routeAuthority as MainMachineController).machines()).find((machine) => machine.kind === "main")!.hostId,
@@ -229,10 +260,10 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       ...(mainDockToolsPort ? { dockToolsHostPort: mainDockToolsPort } : {}),
       reopenTargetResolver: { resolve: resolvePiReopenTarget },
     });
-    if (options.role === "main") {
+    if (options.role === "main" && durable) {
       routeAuthority = new MainMachineController({
-        state: new MainMachineState(machineStateRoot(catalogPath as string), options.machineName),
-        port: options.machinePort,
+        state: new MainMachineState(machineStateRoot(catalogPath as string), options.machineName ?? "Main"),
+        ...(options.machinePort === undefined ? {} : { port: options.machinePort }),
         mainHostEpoch: registry.hostEpoch,
         invokeDockTool: (sourceMainId, sourceMachineId, request) => (dockToolsAuthority as MainMachineDockToolsAuthority).invoke(sourceMainId, sourceMachineId, request),
         dockToolsSourceOff: (sourceMainId) => (dockToolsAuthority as MainMachineDockToolsAuthority).cancelSource(sourceMainId),
@@ -268,7 +299,10 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   writeJson({ kind: "host.stopping", signal });
   const shutdownTimeoutMs = outcome.kind === "fatal" ? 5_000 : HOST_SHUTDOWN_TIMEOUT_MS;
   const shutdownTimer = setTimeout(() => { process.stderr.write(`${JSON.stringify({ kind: "error", error: { code: "shutdown_timeout", message: `Host did not stop within ${shutdownTimeoutMs}ms` } })}\n`); process.exit(1); }, shutdownTimeoutMs);
-  try { await upstream?.stop(); await host.stop(); } finally { clearTimeout(shutdownTimer); }
+  try { await upstream?.stop(); await host.stop(); } finally {
+    clearTimeout(shutdownTimer);
+    if (subHostStatus) await subHostStatus.state.clearSubHostStatus(subHostStatus.hostEpoch).catch(() => {});
+  }
   const lateFatal = host.fatalCompletion();
   if (outcome.kind === "signal" && lateFatal) { process.stderr.write(`${JSON.stringify({ kind: "error", error: lateFatal })}\n`); process.exitCode = lateFatal.exitCode; }
   writeJson({ kind: "host.stopped", signal });
@@ -278,10 +312,17 @@ async function manageService(socketPath: string, socketExplicit: boolean, args: 
   if (socketExplicit || process.env.ALU_DOCK_SOCKET) throw new Error("service commands reject socket overrides");
   const entryPath = process.argv[1];
   if (!entryPath) throw new Error("Cannot locate the Alu Dock CLI entry point");
+  const serviceMachineSettings = new MachineSettingsState(machineSettingsStateRoot(defaultCatalogPath()));
   const manager = new UserServiceManager({
     nodePath: process.execPath,
     cliPath: resolve(entryPath),
     socketPath,
+    subHostProbe: async () => {
+      const settings = await serviceMachineSettings.read();
+      if (settings.role === "main") return { role: "main" };
+      const status = await serviceMachineSettings.readSubHostStatus();
+      return { role: "subhost", ...(status.processId === undefined ? {} : { processId: status.processId }), ...(status.hostEpoch === undefined ? {} : { hostEpoch: status.hostEpoch }) };
+    },
   });
   const { json, rest: serviceArgs } = parseServiceOutputOption(args);
   const [action = "status", ...rest] = serviceArgs;
@@ -437,17 +478,18 @@ function parseGlobalArgs(args: string[]): ParsedArgs {
 
 interface ServeOptions {
   mode: "managed" | "dev";
-  role: "standalone" | "main" | "subhost";
-  machinePort: number;
-  machineName: string;
-  mainAddress: string;
+  role: "main" | "subhost";
+  roleExplicit: boolean;
+  machinePort?: number;
+  machineName?: string;
+  mainAddress?: string;
   statePath?: string;
   joinFile?: string;
 }
 
 function parseServeOptions(args: string[]): ServeOptions {
   let mode: ServeOptions["mode"] | undefined;
-  let role: ServeOptions["role"] = "standalone";
+  let role: ServeOptions["role"] = "main";
   let roleSelected = false;
   let machinePort: number | undefined;
   let machineName: string | undefined;
@@ -474,10 +516,18 @@ function parseServeOptions(args: string[]): ServeOptions {
     else throw new Error(`Unknown serve argument: ${String(arg)}`);
   }
   if (!mode) throw new Error("serve requires --managed or --dev");
-  if (role !== "standalone" && (!Number.isSafeInteger(machinePort) || machinePort! < 1 || machinePort! > 65_535)) throw new Error("Machine composition requires --machine-port between 1 and 65535");
-  if (role === "subhost" && !mainAddress) throw new Error("SubHost startup requires --main-address");
-  if (role === "standalone" && (machinePort || machineName || mainAddress || statePath || joinFile)) throw new Error("Machine options require --main or --subhost");
-  return { mode, role, machinePort: machinePort ?? 0, machineName: machineName ?? (role === "main" ? "Main" : "SubHost"), mainAddress: mainAddress ?? "", ...(statePath ? { statePath } : {}), ...(joinFile ? { joinFile } : {}) };
+  if (machinePort !== undefined && (!Number.isSafeInteger(machinePort) || machinePort < 1 || machinePort > 65_535)) throw new Error("Machine port must be between 1 and 65535");
+  if (role === "subhost" && roleSelected && !mainAddress) throw new Error("SubHost startup requires --main-address");
+  return {
+    mode,
+    role,
+    roleExplicit: roleSelected,
+    ...(machinePort === undefined ? {} : { machinePort }),
+    ...(machineName === undefined ? {} : { machineName }),
+    ...(mainAddress === undefined ? {} : { mainAddress }),
+    ...(statePath ? { statePath } : {}),
+    ...(joinFile ? { joinFile } : {}),
+  };
 }
 
 async function manageMachine(args: string[]): Promise<void> {

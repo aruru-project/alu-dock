@@ -24,6 +24,8 @@ Hub / Work / Web / future clients
 - Session Work TUI 的 conversation、tools、Queue、model、settings、tree、compaction 和 Extension UI；
 - Protocol V2 的权威读取、实时跟随、断线恢复和操作去重；
 - 本机 Protocol V2 接口：POSIX Unix socket 与 Windows Named Pipe；
+- 默认 Main 角色，以及由 Settings 默认关闭、在 Machines 管理的 SubHost connections；
+- 明确的 SubHost 角色，只连接 Main并显示连接状态，不接受客户端；
 - 默认关闭、由本机 Hub 配置和配对的 mutual-TLS 网络入口；
 - 本地 IPC 与 mTLS 共用的永久、hash-verified attachment upload 和 Agent 文件工具；
 - 显式 `systemd --user` service 管理。

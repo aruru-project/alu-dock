@@ -170,10 +170,11 @@ export class MainMachineController implements MainRouteAuthority {
   private readonly disconnectListeners = new Set<(instanceIds: readonly string[]) => void>();
   private mainId = "";
   private mainName = "Main";
+  private started = false;
 
   constructor(private readonly options: {
     state: MainMachineState;
-    port: number;
+    port?: number;
     mainHostEpoch: string;
     bindAddress?: string;
     invokeDockTool?: (sourceMainId: string, sourceMachineId: string, request: DockToolsRequest) => Promise<DockToolsResult>;
@@ -182,39 +183,47 @@ export class MainMachineController implements MainRouteAuthority {
   }) {}
 
   async start(): Promise<void> {
-    if (this.server) return;
-    await this.options.state.initialize();
-    const identity = await this.options.state.identity();
-    const main = await this.options.state.main();
-    this.mainId = main.id;
-    this.mainName = main.name;
-    this.revision = main.revision;
-    for (const machine of await this.options.state.list()) await this.markOffline(machine.id);
-    await this.refreshRouteSnapshotCache();
-    const server = createServer({
-      key: identity.privateKeyPem,
-      cert: identity.certificatePem,
-      requestCert: true,
-      rejectUnauthorized: false,
-    }, (socket) => this.acceptSecure(socket));
-    server.on("connection", (socket) => this.acceptRaw(socket));
-    server.on("tlsClientError", () => {});
+    if (this.started) return;
+    this.started = true;
     try {
-      await listen(server, this.options.port, this.options.bindAddress ?? "::");
-      this.server = server;
+      await this.options.state.initialize();
+      const identity = await this.options.state.identity();
+      const main = await this.options.state.main();
+      this.mainId = main.id;
+      this.mainName = main.name;
+      this.revision = main.revision;
+      for (const machine of await this.options.state.list()) await this.markOffline(machine.id);
+      await this.refreshRouteSnapshotCache();
+      if (this.options.port === undefined) return;
+      const server = createServer({
+        key: identity.privateKeyPem,
+        cert: identity.certificatePem,
+        requestCert: true,
+        rejectUnauthorized: false,
+      }, (socket) => this.acceptSecure(socket));
+      server.on("connection", (socket) => this.acceptRaw(socket));
+      server.on("tlsClientError", () => {});
+      try {
+        await listen(server, this.options.port, this.options.bindAddress ?? "::");
+        this.server = server;
+      } catch (error) {
+        await closeServer(server);
+        throw error;
+      }
+      this.staleConnectionTimer = setInterval(() => {
+        const now = Date.now();
+        for (const connection of this.connections.values()) {
+          if (now - connection.lastSeenAt >= MACHINE_HEARTBEAT_TIMEOUT_MS) connection.socket.destroy();
+        }
+      }, INVENTORY_INTERVAL_MS);
     } catch (error) {
-      await closeServer(server);
+      this.started = false;
       throw error;
     }
-    this.staleConnectionTimer = setInterval(() => {
-      const now = Date.now();
-      for (const connection of this.connections.values()) {
-        if (now - connection.lastSeenAt >= MACHINE_HEARTBEAT_TIMEOUT_MS) connection.socket.destroy();
-      }
-    }, INVENTORY_INTERVAL_MS);
   }
 
   async stop(): Promise<void> {
+    this.started = false;
     const server = this.server;
     this.server = undefined;
     if (this.staleConnectionTimer) clearInterval(this.staleConnectionTimer);
@@ -986,6 +995,7 @@ export class SubHostMachineConnection {
     hostEpoch: string;
     snapshots: () => InstanceSnapshot[] | Promise<InstanceSnapshot[]>;
     acceptProtocolSocket: (socket: Socket) => void;
+    onConnectionChanged?: (connected: boolean) => void | Promise<void>;
   }) {}
 
   async start(): Promise<void> {
@@ -993,6 +1003,7 @@ export class SubHostMachineConnection {
     this.record = await this.options.state.load();
     if (!this.record) throw new Error("SubHost has not been prepared with a join file");
     this.stopped = false;
+    await this.notifyConnectionChanged(false);
     this.inventoryTimer = setInterval(() => {
       if (this.maintenancePending) return;
       this.maintenancePending = true;
@@ -1008,6 +1019,7 @@ export class SubHostMachineConnection {
     this.reconnectTimer = undefined;
     this.inventoryTimer = undefined;
     this.ready = false;
+    await this.notifyConnectionChanged(false);
     this.socket?.destroy();
     this.socket = undefined;
     for (const stream of this.streams.values()) stream.socket.remoteClose();
@@ -1082,6 +1094,7 @@ export class SubHostMachineConnection {
             ready = true;
             this.ready = true;
             this.lastMainRecordAt = Date.now();
+            await this.notifyConnectionChanged(true);
             if (record.joinToken) {
               record.joinToken = undefined;
               await this.options.state.markJoined();
@@ -1094,7 +1107,7 @@ export class SubHostMachineConnection {
     });
     socket.once("error", () => {});
     socket.once("close", () => {
-      if (this.socket === socket) { this.socket = undefined; this.ready = false; }
+      if (this.socket === socket) { this.socket = undefined; this.ready = false; void this.notifyConnectionChanged(false); }
       for (const stream of this.streams.values()) stream.socket.remoteClose();
       this.streams.clear();
       for (const pending of this.toolRequests.values()) pending.reject(new Error("Main went offline before the Dock tool completed"));
@@ -1115,6 +1128,10 @@ export class SubHostMachineConnection {
       socket.once("error", onError);
       socket.once("close", onClose);
     });
+  }
+
+  private async notifyConnectionChanged(connected: boolean): Promise<void> {
+    await this.options.onConnectionChanged?.(connected);
   }
 
   private async consumeSubHostRecord(socket: TLSSocket, record: MachineWireRecord): Promise<void> {

@@ -78,13 +78,19 @@ npm run serve:windows
 
 默认状态保存在 `%LOCALAPPDATA%\Alu Dock\`，本地 Protocol V2 入口是 `\\.\pipe\alu-dock`。另开一个 PowerShell 窗口运行 `node dist/src/cli.js` 可以连接同一个本地 Host；本地 Named Pipe 不使用远程设备配对。
 
-同一个脚本也使用既有启动组合：
+没有角色配置时脚本默认启动 Main，且 SubHost connections 关闭。可以从 Main Hub Settings 开启 machine listener、选择端口，或选择下次启动为 SubHost；普通启动会读取保存的角色：
 
 ```powershell
-# Main：开放 machine transport
+.\scripts\run-windows.ps1
+```
+
+显式开发覆盖仍可使用：
+
+```powershell
+# Main；省略 MachinePort 表示不开放 SubHost connections
 .\scripts\run-windows.ps1 -Role main -MachinePort 7444 -MachineName "Windows Main"
 
-# SubHost：第一次可额外传入 -JoinFile
+# SubHost：第一次额外传入 JoinFile
 .\scripts\run-windows.ps1 -Role subhost -MainAddress "main.example" -MachinePort 7444 -MachineName "Windows Workstation" -JoinFile ".\join.json"
 ```
 

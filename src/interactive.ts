@@ -8,10 +8,12 @@ import { ensureHost } from "./control/ensure-host.js";
 import type { ProjectTrustChoice } from "./control/project-trust.js";
 import { RemoteAccessState, remoteAccessStateRoot } from "./control/remote-access-state.js";
 import { AttachmentStorageState, attachmentStorageStateRoot } from "./control/attachment-storage-state.js";
+import { MainMachineState, SubHostMachineState, machineStateRoot } from "./control/machine-state.js";
+import { MachineSettingsState, machineSettingsStateRoot } from "./control/machine-settings-state.js";
 import type { InstanceSnapshot, SessionDto } from "./core/managed-instance.js";
 import { humanInstanceStatus } from "./core/instance-display-name.js";
 import { requireHumanTarget } from "./human-target.js";
-import { runDockHub, type DockHubAction } from "./tui/dock-hub.js";
+import { runDockHub, runSubHostHub, type DockHubAction } from "./tui/dock-hub.js";
 import { runDockTui } from "./tui/dock-tui.js";
 import { selectInstance } from "./tui/select-instance.js";
 
@@ -31,16 +33,36 @@ export async function openDock(options: OpenDockOptions): Promise<void> {
   }
 
   const cwd = resolve(options.cwd);
+  const catalogPath = defaultCatalogPath();
+  const machineSettingsState = new MachineSettingsState(machineSettingsStateRoot(catalogPath));
+  const machineSettings = await machineSettingsState.read();
+  if (machineSettings.role === "subhost") {
+    if (options.mode !== "hub") throw new Error("This computer is a SubHost. Open work from its Main instead.");
+    await runSubHostHub(
+      machineSettingsState,
+      new SubHostMachineState(machineStateRoot(catalogPath)),
+    );
+    process.stdout.write("Left Alu Dock SubHost.\n");
+    return;
+  }
+
   process.stdout.write("Connecting to Alu Dock…\n");
   await ensureHost(options.socketPath);
   const client = new DockClient({ socketPath: options.socketPath });
 
   let instance: InstanceSnapshot | undefined;
   if (options.mode === "hub") {
-    const catalogPath = defaultCatalogPath();
     const remoteAccessState = new RemoteAccessState(remoteAccessStateRoot(catalogPath));
     const attachmentStorageState = new AttachmentStorageState(attachmentStorageStateRoot(catalogPath));
-    const action = await runDockHub(client, cwd, remoteAccessState, attachmentStorageState);
+    const action = await runDockHub(
+      client,
+      cwd,
+      remoteAccessState,
+      attachmentStorageState,
+      machineSettingsState,
+      new MainMachineState(machineStateRoot(catalogPath), machineSettings.main.name),
+      new SubHostMachineState(machineStateRoot(catalogPath)),
+    );
     instance = await executeHubAction(client, action);
   } else {
     instance = await resolveWorkInstance(client, {

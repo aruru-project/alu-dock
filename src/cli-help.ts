@@ -82,7 +82,7 @@ function overviewHelp(): string {
 
 function machineHelp(rest: readonly string[]): string {
   if (rest.length > 0 && (rest.length !== 1 || rest[0] !== "join-file")) throw new Error("machine help accepts only join-file");
-  return `aludock machine join-file — prepare one SubHost enrollment\n\nUsage:\n  aludock machine join-file --out PATH [--state PATH] [--machine-name NAME]\n\nRun this on Main while its Host is stopped. The private file expires after ten\nminutes and works once. When starting the SubHost, enter Main's address and\nmachine port separately.\n`;
+  return `aludock machine join-file — prepare one SubHost enrollment\n\nUsage:\n  aludock machine join-file --out PATH [--state PATH] [--machine-name NAME]\n\nThe private file expires after ten minutes and works once. When starting the\nSubHost, enter Main's address and machine port separately. The same action is\navailable from Main's Machines menu.\n`;
 }
 
 function continueHelp(): string {
@@ -153,7 +153,7 @@ function serviceHelp(rest: readonly string[]): string {
 }
 
 function internalTopicHelp(topic: string): string {
-  if (topic === "serve") return `aludock serve — explicit Host startup composition\n\nUsage:\n  aludock --socket PATH serve --dev\n  aludock --socket PATH serve --dev --main --state PATH --machine-port PORT [--machine-name NAME]\n  aludock serve --dev --subhost --state PATH --main-address ADDRESS --machine-port PORT [--join-file PATH] [--machine-name NAME]\n\nMain owns every client entry point. SubHost has one encrypted upstream and no\nclient socket. After first enrollment, omit --join-file on later starts.\n`;
+  if (topic === "serve") return `aludock serve — Host startup composition\n\nUsage:\n  aludock --socket PATH serve --dev [--state PATH]\n  aludock --socket PATH serve --dev --main --state PATH [--machine-port PORT] [--machine-name NAME]\n  aludock serve --dev --subhost --state PATH --main-address ADDRESS --machine-port PORT --machine-name NAME [--join-file PATH]\n\nMain is the default and owns every client entry point. Its SubHost listener is\noff unless a port is enabled in Settings or supplied explicitly. SubHost has one\nencrypted upstream and no client socket. Saved role settings apply when no role\nflag is supplied.\n`;
   const humanAlternative: Record<string, string> = {
     serve: "Use 'aludock service' to manage the Host.",
     ping: "Use 'aludock service status' for human readiness checks.",
