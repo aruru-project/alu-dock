@@ -14,12 +14,17 @@ test("unsupported extension interactions fail instead of fabricating answers", a
 });
 
 test("stale Worker extension UI generations reject dialogs instead of fabricating answers", async () => {
-  const endpoint = new WorkerExtensionUiEndpoint(async () => undefined);
+  const calls: string[] = [];
+  const endpoint = new WorkerExtensionUiEndpoint(async (capability) => { calls.push(capability); });
   const stale = endpoint.createGenerationPort();
-  endpoint.beginGenerationChange();
+  await endpoint.beginGenerationChange();
 
   await assert.rejects(stale.select("Choose", ["one"]), WorkerUiLifecycleCancelledError);
   await assert.rejects(stale.confirm("Confirm", "Proceed?"), WorkerUiLifecycleCancelledError);
   await assert.rejects(stale.input("Input"), WorkerUiLifecycleCancelledError);
   await assert.rejects(stale.editor("Editor"), WorkerUiLifecycleCancelledError);
+  assert.deepEqual(calls, []);
+
+  await endpoint.beginGenerationChange("reload");
+  assert.deepEqual(calls, ["ui.runtimeReload"]);
 });

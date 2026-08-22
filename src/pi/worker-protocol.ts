@@ -58,14 +58,14 @@ export interface WorkerIdentity {
 export type UiCapability =
   | "ui.select" | "ui.confirm" | "ui.input" | "ui.editor"
   | "ui.notify" | "ui.setTitle" | "ui.setEditorText" | "ui.setStatus" | "ui.setWidget" | "ui.widgetError"
-  | "ui.unsupported" | "ui.setToolsExpanded" | "ui.cancel" | "ui.viewport" | "ui.reset" | "ui.generationBegin";
+  | "ui.unsupported" | "ui.setToolsExpanded" | "ui.cancel" | "ui.viewport" | "ui.reset" | "ui.runtimeReload";
 
 export type DockCapability = "dock.identity" | "dock.tools.configure" | "dock.tools" | "dock.attachments";
 export type ReverseWorkerCapability = DockCapability | Exclude<UiCapability, "ui.viewport" | "ui.reset">;
 export const ORDINARY_REVERSE_WORKER_CAPABILITIES: readonly ReverseWorkerCapability[] = [
   "dock.identity", "dock.tools.configure", "dock.tools", "dock.attachments",
   "ui.select", "ui.confirm", "ui.input", "ui.editor", "ui.notify", "ui.setTitle", "ui.setEditorText", "ui.setStatus",
-  "ui.setWidget", "ui.widgetError", "ui.unsupported", "ui.setToolsExpanded", "ui.cancel", "ui.generationBegin",
+  "ui.setWidget", "ui.widgetError", "ui.unsupported", "ui.setToolsExpanded", "ui.cancel", "ui.runtimeReload",
 ];
 export type WorkerCapability = UiCapability | DockCapability;
 
@@ -457,7 +457,7 @@ export function validateUiCapabilityArgs(capability: WorkerCapability, raw: unkn
     case "ui.setToolsExpanded": keys("expanded"); if (typeof args.expanded !== "boolean") throw new Error("Tool expansion is invalid"); return;
     case "ui.cancel": keys("callId"); boundedString(args.callId, 128, "UI call ID"); return;
     case "ui.viewport": keys("width", "height"); positiveInteger(args.width, "Widget width"); positiveInteger(args.height, "Widget height"); return;
-    case "ui.reset": case "ui.generationBegin": keys(); return;
+    case "ui.reset": case "ui.runtimeReload": keys(); return;
   }
 }
 
@@ -602,7 +602,7 @@ function isAgentRequest(type: string): type is AgentRequest["type"] {
 
 function parseCapability(raw: unknown): WorkerCapability {
   return oneOf(raw, [
-    "ui.select", "ui.confirm", "ui.input", "ui.editor", "ui.notify", "ui.setTitle", "ui.setEditorText", "ui.setStatus", "ui.setWidget", "ui.widgetError", "ui.unsupported", "ui.setToolsExpanded", "ui.cancel", "ui.viewport", "ui.reset", "ui.generationBegin",
+    "ui.select", "ui.confirm", "ui.input", "ui.editor", "ui.notify", "ui.setTitle", "ui.setEditorText", "ui.setStatus", "ui.setWidget", "ui.widgetError", "ui.unsupported", "ui.setToolsExpanded", "ui.cancel", "ui.viewport", "ui.reset", "ui.runtimeReload",
     "dock.identity", "dock.tools.configure", "dock.tools", "dock.attachments",
   ] as const, "Worker capability");
 }

@@ -271,7 +271,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
         case "ui.widgetError": broker.reportWidgetError(args.key as string, args.error); break;
         case "ui.unsupported": broker.unsupported(args.feature as string); break;
         case "ui.setToolsExpanded": broker.applyRemoteToolsExpanded(args.expanded === true); break;
-        case "ui.generationBegin": broker.beginGenerationChange(); break;
+        case "ui.runtimeReload": await broker.resetForRuntimeReload(); break;
         case "ui.cancel": this.uiAbort.get(args.callId as string)?.abort(); break;
         default: throw new Error(`Worker cannot invoke Host UI capability ${capability}`);
       }

@@ -97,6 +97,11 @@ export default function (pi) {
       ctx.ui.setWidget("component", () => ({ render: (width) => ["component:" + width] }));
     },
   });
+  pi.registerCommand("ui-context-reload", {
+    handler: async (_args, ctx) => {
+      await ctx.reload();
+    },
+  });
 }
 `, "utf8");
   context.after(async () => { await rm(root, { recursive: true, force: true }); });
@@ -163,6 +168,15 @@ export default function (pi) {
     const widget = events.find((event) => event.type === "extension.widget_changed" && event.data.key === "fixture");
     assert.equal(widget?.type, "extension.widget_changed");
     if (widget?.type === "extension.widget_changed") assert.deepEqual(widget.data.lines, ["worker widget"]);
+
+    const contextReloadGeneration = instance.snapshot().runtimeGeneration;
+    const contextReload = await instance.submit("/ui-context-reload", "followUp", "ui-context-reload");
+    assert.equal(contextReload.kind, "extension_command");
+    await instance.waitForIdle();
+    assert.equal(instance.snapshot().runtimeGeneration, contextReloadGeneration);
+    assert.equal(instance.isInteractionControllerCurrent(leaseToken, contextReloadGeneration), true);
+    assert.equal(instance.snapshot().toolsExpanded, false);
+    assert.deepEqual(instance.snapshot().extensionStatus, {});
 
     assert.equal((await instance.newSession("ui-generation-reset")).cancelled, false);
     assert.equal(instance.snapshot().toolsExpanded, false);

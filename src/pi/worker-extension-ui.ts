@@ -121,25 +121,27 @@ export class WorkerExtensionUiEndpoint implements PiExtensionUiLifecyclePort {
 
   setViewport(width: number, height: number): void { if (this.rendererGeneration === this.generation) this.renderer?.render({ width, height }); }
 
-  beginGenerationChange(kind: "binding" | "reload" = "binding"): void {
-    this.fire("ui.generationBegin", {});
+  beginGenerationChange(kind: "binding" | "reload" = "binding"): Promise<void> {
     // Pi reload reuses the originally bound ExtensionUIContext object. Keep its
     // port live for the new runner; replacement paths bind a fresh generation
-    // port and must fence the old one.
+    // port and must fence the old one. Host replacement suspension is derived
+    // from dock_session_replaced/dock_runtime_error, never this private endpoint.
+    let hostReset = Promise.resolve();
     if (kind === "binding") {
       this.generation += 1;
       this.renderer?.reset();
       this.renderer = undefined;
     } else {
+      hostReset = this.call("ui.runtimeReload", {}).then(() => undefined);
       // AgentSession.reload reuses this context and its renderer binding. Reset
       // old component instances but retain the renderer for the new runner.
       this.renderer?.reset();
       this.rendererGeneration = this.generation;
     }
     this.toolsExpanded = false;
+    return hostReset;
   }
   resetFromHost(): void { this.renderer?.reset(); }
-  completeGenerationChange(): Promise<void> { return Promise.resolve(); }
   failGenerationChange(): Promise<void> { this.generation += 1; this.toolsExpanded = false; this.renderer?.reset(); this.renderer = undefined; return Promise.resolve(); }
 
   private fire(capability: UiCapability, args: Record<string, unknown>): void {

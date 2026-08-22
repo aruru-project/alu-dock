@@ -216,17 +216,24 @@ export class ExtensionUiBroker {
     if (this.suspended) return;
     this.suspended = true;
     this.suspensionReason = "replacement";
-    const leaseToken = this.controller?.token;
-    this.controller = undefined;
-    this.statuses.clear();
-    this.widgets.clear();
-    this.toolsExpanded = false;
-    this.widgetViewport = undefined;
-    this.widgetRenderer?.reset();
-    this.projectionChanged();
+    const leaseToken = this.resetRuntimeUi(true);
     void this.serialize(async () => {
       await this.cancelAllDialogs("replacement", leaseToken);
       this.tombstones.clear();
+    });
+  }
+
+  /** Reset extension-owned state for a same-session Pi reload without revoking Host control. */
+  resetForRuntimeReload(): Promise<void> {
+    const statusKeys = [...this.statuses.keys()];
+    const widgetKeys = [...this.widgets.keys()];
+    const leaseToken = this.resetRuntimeUi(false);
+    return this.serialize(async () => {
+      await this.cancelAllDialogs("replacement", leaseToken);
+      this.tombstones.clear();
+      for (const key of statusKeys) await this.emit("extension.status_changed", { key });
+      for (const key of widgetKeys) await this.emit("extension.widget_changed", { key });
+      await this.emit("extension.tools_expanded_changed", { expanded: false });
     });
   }
 
@@ -605,6 +612,18 @@ export class ExtensionUiBroker {
     await this.emit("interaction.cancelled", { interactionId: dialog.id, method: dialog.method, reason });
     this.settleCancelledDialog(dialog, reason);
     await this.activateNextDialog();
+  }
+
+  private resetRuntimeUi(dropController: boolean): string | undefined {
+    const leaseToken = this.controller?.token;
+    if (dropController) this.controller = undefined;
+    this.statuses.clear();
+    this.widgets.clear();
+    this.toolsExpanded = false;
+    this.widgetViewport = undefined;
+    this.widgetRenderer?.reset();
+    this.projectionChanged();
+    return leaseToken;
   }
 
   private async cancelAllDialogs(reason: InteractionCancelReason, leaseToken?: string): Promise<void> {

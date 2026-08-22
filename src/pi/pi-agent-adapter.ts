@@ -157,8 +157,7 @@ type RuntimeOwner = Pick<AgentSessionRuntime,
 type ReplacementKind = "new" | "switch" | "fork" | "clone" | "reload";
 
 export interface PiExtensionUiLifecyclePort extends PiExtensionUiPort {
-  beginGenerationChange(kind?: "binding" | "reload"): void;
-  completeGenerationChange(): Promise<void>;
+  beginGenerationChange(kind?: "binding" | "reload"): Promise<void>;
   failGenerationChange(): Promise<void>;
 }
 
@@ -243,7 +242,7 @@ export class PiAgentAdapter {
     this.processCwdValue = options.initialProcessCwd;
     options.runtime.setBeforeSessionInvalidate(() => {
       if (this.replacementRunning) this.replacementInvalidated = true;
-      options.extensionUiBroker?.beginGenerationChange("binding");
+      void options.extensionUiBroker?.beginGenerationChange("binding");
       this.invalidateBindingsSynchronously();
     });
     options.runtime.setRebindSession(async (session) => {
@@ -1034,7 +1033,7 @@ export class PiAgentAdapter {
       const originalBuffer = binding.buffered;
       binding.buffered = buffered;
       binding.bufferEvents = true;
-      this.options.extensionUiBroker?.beginGenerationChange("reload");
+      await this.options.extensionUiBroker?.beginGenerationChange("reload");
       try {
         // Match Pi's /reload path. ModelRuntime.reloadConfig() also refreshes
         // remote catalogs, which made resource reload depend on pi.dev (card #222).
@@ -1239,7 +1238,7 @@ export class PiAgentAdapter {
       navigateTree: unavailable,
       switchSession: unavailable,
       reload: async () => {
-        this.options.extensionUiBroker?.beginGenerationChange("reload");
+        await this.options.extensionUiBroker?.beginGenerationChange("reload");
         try {
           await session.reload({
             beforeSessionStart: () => {
