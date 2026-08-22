@@ -28,7 +28,7 @@ export const MAX_CONVERSATION_CONTENT_BLOCKS = 200;
 export type ContentBlockDto =
   | { type: "text"; text: string }
   | { type: "thinking"; text: string }
-  | { type: "image"; mimeType: string; contentRef?: string; fileId?: string }
+  | { type: "image"; mimeType: string; contentRef?: string; fileId?: string; sha256?: string; sizeBytes?: number }
   | { type: "tool_call"; toolCallId: string; toolName: string; args: JsonObject; omittedFields?: string[] }
   | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; presentation?: BuiltInToolPresentation; omittedFields?: string[] }
   | { type: "omitted"; kind: "image" | "binary"; description: string };
@@ -36,6 +36,8 @@ export type ContentBlockDto =
 export const MAX_SEMANTIC_HISTORY_PAGE_ITEMS = 100_000;
 /** Per-chunk character bound for conversation.content pages (text, base64 image data, and argument JSON alike). */
 export const MAX_CONVERSATION_CHUNK_CHARS = 32_000;
+/** Decoded-byte bound for one conversation image stream chunk. */
+export const MAX_CONVERSATION_IMAGE_CHUNK_BYTES = 512 * 1_024;
 /** Leaves room for the Protocol V2 response envelope under its 1 MiB line cap. */
 export const MAX_SEMANTIC_HISTORY_PAGE_BYTES = 512 * 1_024;
 export const MAX_PENDING_QUEUE_ITEMS = 64;
@@ -121,7 +123,7 @@ export interface HistoryPageDto {
 
 export type ConversationContentChunkDto =
   | { blockIndex: number; type: "text" | "thinking"; text: string; offset: number; blockComplete: boolean }
-  | { blockIndex: number; type: "image"; mimeType: string; data: string; offset: number; blockComplete: boolean }
+  | { blockIndex: number; type: "image"; mimeType: string; data: string; offset: number; blockComplete: boolean; contentRef?: string; sha256?: string; sizeBytes?: number }
   | { blockIndex: number; type: "tool_call"; toolCallId: string; toolName: string; argumentsJson: string; offset: number; blockComplete: boolean }
   | { blockIndex: number; type: "tool_result"; toolCallId: string; toolName: string; text: string; offset: number; blockComplete: boolean; isError: boolean; publishedFile?: PublishedFileDto; omittedFields?: string[] }
   | { blockIndex: number; type: "omitted"; kind: "image" | "binary"; description: string };

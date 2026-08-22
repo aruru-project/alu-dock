@@ -151,6 +151,16 @@ test("DockClient uses one Main identity for SubHost read, prompt, follow, and sp
   assert.equal(workspaceRead.sizeBytes, workspaceBytes.byteLength);
   assert.deepEqual(Buffer.concat(workspaceChunks), workspaceBytes);
 
+  const conversationImageChunks: Buffer[] = [];
+  const conversationImage = await client.readConversationImage(remote.id, "fixture-routed-image", async (chunk) => {
+    await new Promise((resolve) => setImmediate(resolve));
+    conversationImageChunks.push(Buffer.from(chunk));
+  });
+  const expectedConversationImage = Buffer.alloc(100_000, 0x5a);
+  assert.deepEqual(Buffer.concat(conversationImageChunks), expectedConversationImage);
+  assert.equal(conversationImage.sizeBytes, expectedConversationImage.byteLength);
+  assert.equal(conversationImage.sha256, createHash("sha256").update(expectedConversationImage).digest("hex"));
+
   const events: string[] = [];
   const follow = await client.follow(remote.id, read.page.latest, { onEvent: (event) => events.push(event.type) });
   const prompted = await client.prompt(remote.id, "keep working through Main", "auto", "routed-prompt");

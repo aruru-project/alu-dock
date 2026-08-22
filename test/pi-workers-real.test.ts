@@ -131,7 +131,10 @@ test("real Pi Worker projects persisted session entries into canonical conversat
     assert.deepEqual(imageUser?.attachments, [imageAttachment]);
     assert.deepEqual(imageUser?.content, [
       { type: "text", text: "image question" },
-      { type: "image", mimeType: "image/png", fileId: imageAttachment.fileId },
+      {
+        type: "image", mimeType: "image/png", contentRef: `image-${imageAttachment.sha256}`,
+        fileId: imageAttachment.fileId, sha256: imageAttachment.sha256, sizeBytes: imageAttachment.sizeBytes,
+      },
     ]);
     const attachmentTool = records.find((record) => record.toolName === "dock_attachment_resolve");
     assert.doesNotMatch(JSON.stringify(attachmentTool), /private\/host/u);
@@ -144,6 +147,14 @@ test("real Pi Worker projects persisted session entries into canonical conversat
       const content = await instance.getConversationContent(item.contentRef);
       assert.doesNotMatch(JSON.stringify(content), /private\/host|private\/legacy-show|cHJpdmF0ZQ|alu_dock_attachments_v1/u);
     }
+    const oldImage = conversation.entries.find(({ entry }) => entry.entryId === imageUser?.entryId);
+    assert.ok(oldImage);
+    manager.appendMessage({ role: "user", content: [{ type: "text", text: "later message" }], timestamp: 8 } as SessionMessage);
+    await instance.reloadSession("stable-image-refresh");
+    const refreshed = await instance.getConversationHistory(undefined, 50);
+    const refreshedImage = refreshed.entries.find(({ entry }) => entry.entryId === oldImage.entry.entryId);
+    assert.equal(refreshedImage?.contentRef, oldImage.contentRef);
+    assert.deepEqual(refreshedImage?.entry.content.find((block) => block.type === "image"), oldImage.entry.content.find((block) => block.type === "image"));
   } finally {
     await instance.disposeUnpublished();
   }

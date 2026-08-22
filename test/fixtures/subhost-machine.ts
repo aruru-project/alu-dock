@@ -23,6 +23,7 @@ await machineState.prepare(await readMachineJoinFile(joinPath), "Fixture SubHost
 const attachmentService = new AttachmentService(new AttachmentStorageState(join(dirname(statePath), "attachments-state"), join(dirname(statePath), "attachments")));
 let registry!: DockRegistry;
 let host!: DockHost;
+const delayedWorkers = new Map<string, DelayedAgentWorkerConnection>();
 const upstream = new SubHostMachineConnection({
   state: machineState,
   address,
@@ -43,15 +44,19 @@ registry = new DockRegistry(async (input) => realPiDockTools
       workerTimeouts: { mutationMs: 10_000 },
       onWorkerSpawn: (pid) => { realWorkerPid = pid; },
     })
-  : new ManagedInstance({
-      id: input.id,
-      creationOperationId: input.creationOperationId,
-      hostEpoch: input.hostEpoch,
-      cwd: input.cwd,
-      name: input.name,
-      key: input.key,
-      session: new DelayedAgentWorkerConnection(`worker-${input.id}`),
-    }), () => nativeIds.shift() ?? `native-extra-${Date.now()}`, {
+  : (() => {
+      const session = new DelayedAgentWorkerConnection(`worker-${input.id}`);
+      delayedWorkers.set(input.id, session);
+      return new ManagedInstance({
+        id: input.id,
+        creationOperationId: input.creationOperationId,
+        hostEpoch: input.hostEpoch,
+        cwd: input.cwd,
+        name: input.name,
+        key: input.key,
+        session,
+      });
+    })(), () => nativeIds.shift() ?? `native-extra-${Date.now()}`, {
   hostEpoch: "subhost-epoch",
   catalogStore: new FileCatalogStore(statePath),
   attachmentHostPort: attachmentService,
@@ -66,6 +71,20 @@ for (let attempt = 0; attempt < 200 && !upstream.connected(); attempt += 1) awai
 if (!upstream.connected()) throw new Error("fixture SubHost did not connect to Main");
 const sourceNativeId = registry.list().find((item) => item.creationOperationId === "native-create")?.id;
 if (!sourceNativeId) throw new Error("fixture source instance is missing");
+const routedImage = Buffer.alloc(100_000, 0x5a);
+const routedImageData = routedImage.toString("base64");
+const routedImageSha = createHash("sha256").update(routedImage).digest("hex");
+const routedImageRef = "fixture-routed-image";
+const sourceWorker = delayedWorkers.get(sourceNativeId);
+if (sourceWorker) sourceWorker.conversationContent.set(routedImageRef, Array.from({ length: Math.ceil(routedImageData.length / 32_000) }, (_, index) => {
+  const offset = index * 32_000;
+  const data = routedImageData.slice(offset, offset + 32_000);
+  return {
+    blockIndex: 0, type: "image" as const, mimeType: "image/png", data, offset,
+    blockComplete: offset + data.length === routedImageData.length,
+    contentRef: routedImageRef, sizeBytes: routedImage.byteLength, sha256: routedImageSha,
+  };
+}));
 const createdByTool = realPiDockTools
   ? undefined
   : await upstream.invokeDockTool(sourceNativeId, { type: "create", operationId: "dock-tool-create", cwd: workspace, name: "Created from remote tool" });

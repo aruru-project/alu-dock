@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { AgentConversationCursorError } from "../src/core/agent-worker.js";
@@ -20,15 +21,19 @@ test("a live tool-result image uses a stable opaque conversation content referen
   assert.equal(serialized.includes(imageData), false);
   const data = (frames[0] as unknown as { frame: { data: { content: Array<{ contentRef?: string }> } } }).frame.data;
   const contentRef = data.content[0]!.contentRef!;
-  assert.match(contentRef, /^image-/u);
+  const expectedBytes = Buffer.from(imageData, "base64");
+  const expectedSha = createHash("sha256").update(expectedBytes).digest("hex");
+  assert.equal(contentRef, `image-${expectedSha}`);
+  assert.deepEqual(data.content[0], { type: "image", mimeType: "image/png", contentRef, sha256: expectedSha, sizeBytes: expectedBytes.byteLength });
   const first = registry.readImageContent(contentRef)!;
   assert.equal(first.complete, false);
   assert.throws(() => registry.readImageContent(contentRef, "expired-cursor"), AgentConversationCursorError);
-  registry.registerImage("later-entry", "image/png");
+  registry.registerImage(Buffer.from("later-entry").toString("base64"), "image/png");
   const second = registry.readImageContent(contentRef, first.nextCursor)!;
   const third = registry.readImageContent(contentRef, second.nextCursor)!;
   assert.equal([first, second, third].flatMap((page) => page.chunks).map((chunk) => chunk.type === "image" ? chunk.data : "").join(""), imageData);
   assert.ok([first, second, third].every((page) => page.revision === contentRef));
+  assert.ok([first, second, third].flatMap((page) => page.chunks).every((chunk) => chunk.type !== "image" || (chunk.contentRef === contentRef && chunk.sha256 === expectedSha && chunk.sizeBytes === expectedBytes.byteLength)));
 });
 
 test("Pi adapter splits real message_update deltas without loss before the private protocol boundary", () => {

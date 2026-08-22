@@ -322,14 +322,18 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   }
 
   async getConversationContent(contentRef: string, cursor?: string): Promise<AgentConversationContentPage> {
-    if (cursor !== undefined) throw new AgentConversationCursorError();
     const chunks = this.conversationContent.get(contentRef);
     if (!chunks) throw new AgentConversationCursorError("Conversation content reference is stale");
+    const paged = Buffer.byteLength(JSON.stringify(chunks), "utf8") > 64_000;
+    const offset = cursor === undefined ? 0 : Number.parseInt(cursor, 10);
+    if (!Number.isSafeInteger(offset) || offset < 0 || offset >= chunks.length || (!paged && cursor !== undefined)) throw new AgentConversationCursorError();
+    const end = paged ? offset + 1 : chunks.length;
     return {
       revision: this.conversationRevision,
       contentRef,
-      chunks: structuredClone(chunks),
-      complete: true,
+      chunks: structuredClone(chunks.slice(offset, end)),
+      complete: end >= chunks.length,
+      ...(end >= chunks.length ? {} : { nextCursor: String(end) }),
     };
   }
 

@@ -46,6 +46,8 @@ import {
   type BuiltInToolPresentation,
 } from "../core/tool-result-presentation.js";
 import {
+  MAX_CONVERSATION_IMAGE_CHUNK_BYTES,
+  MAX_IMAGE_BYTES,
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
   MAX_INPUT_IMAGES,
@@ -144,6 +146,7 @@ export const IMAGE_INPUT_CAPABILITY = "command.images.path.v1" as const;
 export const INSTANCE_KEYS_CAPABILITY = "instance.keys.v1" as const;
 export const INSTANCE_DISPLAY_NAME_CAPABILITY = "instance.display-name.v1" as const;
 export const CONVERSATION_CONTENT_CAPABILITY = "conversation.content.v1" as const;
+export const CONVERSATION_IMAGES_CAPABILITY = "conversation.images.v1" as const;
 export const WORKSPACE_LIST_CAPABILITY = "workspace.list.v1" as const;
 export const WORKSPACE_FILES_CAPABILITY = "workspace.files.v1" as const;
 export const ATTACHMENTS_CAPABILITY = "attachments.v1" as const;
@@ -161,6 +164,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "catalog.maintenance.v1",
   "catalog.v1",
   CONVERSATION_CONTENT_CAPABILITY,
+  CONVERSATION_IMAGES_CAPABILITY,
   "core.v2",
   IMAGE_INPUT_CAPABILITY,
   EVENTS_FOLLOW_CAPABILITY,
@@ -276,6 +280,7 @@ export type ControlRequest =
   | Request<"session.history", { instanceId: string; beforeEntryId?: string; limit: number }>
   | Request<"conversation.history", { instanceId: string; cursor?: string; limit: number }>
   | Request<"conversation.content", { instanceId: string; contentRef: string; cursor?: string }>
+  | Request<"conversation.image", { instanceId: string; contentRef: string }>
   | Request<"file.read", { instanceId: string; fileRef: string; offset?: number }>
   | Request<"session.inventory", { cwd: string; scope: "cwd" | "all"; hostId?: string }>
   | Request<"session.list", { instanceId: string; scope: "cwd" | "all" }>
@@ -318,6 +323,13 @@ export interface WorkspaceFileReadChunk extends WorkspaceFileReadIdentity { kind
 export interface WorkspaceFileReadComplete extends WorkspaceFileReadIdentity { kind: "workspace_file_read_complete"; chunks: number; sizeBytes: number; sha256: string }
 export interface WorkspaceFileReadError extends WorkspaceFileReadIdentity { kind: "workspace_file_read_error"; error: { code: "workspace_entry_unavailable" | "workspace_file_too_large"; message: string } }
 export type WorkspaceFileReadFrame = WorkspaceFileReadReady | WorkspaceFileReadChunk | WorkspaceFileReadComplete | WorkspaceFileReadError;
+
+interface ConversationImageIdentity { version: 2; requestId: string; hostEpoch: string; instanceId: string; contentRef: string }
+export interface ConversationImageReady extends ConversationImageIdentity { kind: "conversation_image_ready"; mimeType: string; sizeBytes: number; sha256: string }
+export interface ConversationImageChunk extends ConversationImageIdentity { kind: "conversation_image_chunk"; index: number; data: string }
+export interface ConversationImageComplete extends ConversationImageIdentity { kind: "conversation_image_complete"; chunks: number; sizeBytes: number; sha256: string }
+export interface ConversationImageError extends ConversationImageIdentity { kind: "conversation_image_error"; error: { code: "image_unavailable"; message: string } }
+export type ConversationImageFrame = ConversationImageReady | ConversationImageChunk | ConversationImageComplete | ConversationImageError;
 
 export interface AttachmentUploadReady {
   kind: "attachment_upload_ready";
@@ -495,6 +507,7 @@ export function capabilityForRequest(type: ControlRequest["type"]): Capability {
   if (type === "queue.dequeue") return "queue.control.v1";
   if (type === "session.history") return "tui.projection.v1";
   if (type === "conversation.history" || type === "conversation.content") return CONVERSATION_CONTENT_CAPABILITY;
+  if (type === "conversation.image") return CONVERSATION_IMAGES_CAPABILITY;
   if (type === "file.read") return PUBLISHED_FILES_CAPABILITY;
   if (type === "workspace.list") return WORKSPACE_LIST_CAPABILITY;
   if (type === "session.inventory") return "session.inventory.v1";
@@ -829,6 +842,13 @@ export function parseControlRequest(input: unknown): ControlRequest {
         cursor: optionalString(params.cursor, "params.cursor", 128, "invalid_request"),
       } };
     }
+    case "conversation.image": {
+      exact(params, ["instanceId", "contentRef"], "invalid_request");
+      return { ...base, type, params: {
+        instanceId: instanceId(),
+        contentRef: string(params.contentRef, "params.contentRef", 128, "invalid_request"),
+      } };
+    }
     case "file.read": {
       exact(params, ["instanceId", "fileRef", "offset"], "invalid_request");
       const offset = params.offset === undefined ? undefined : unsigned(params.offset, "params.offset", "invalid_request");
@@ -946,6 +966,53 @@ export function parseWorkspaceFileReadFrame(input: unknown, expected: { requestI
   exact(error, ["code", "message"]);
   const code = enumeration(error.code, "workspace file read error code", ["workspace_entry_unavailable", "workspace_file_too_large"]);
   return { kind: "workspace_file_read_error", ...identity(), error: { code, message: string(error.message, "workspace file read error message", MAX_MESSAGE) } };
+}
+
+export function parseConversationImageFrame(input: unknown, expected: { requestId: string; hostEpoch: string; instanceId: string; contentRef: string }): ConversationImageFrame {
+  const value = object(input, "conversation image frame");
+  const identity = (): ConversationImageIdentity => {
+    if (value.version !== 2 || value.requestId !== expected.requestId || value.hostEpoch !== expected.hostEpoch
+      || value.instanceId !== expected.instanceId || value.contentRef !== expected.contentRef) {
+      throw validation("invalid_response", "Conversation image frame identity does not match the request");
+    }
+    return { version: 2, ...expected };
+  };
+  if (value.kind === "conversation_image_ready") {
+    exact(value, ["kind", "version", "requestId", "hostEpoch", "instanceId", "contentRef", "mimeType", "sizeBytes", "sha256"]);
+    const mimeType = imageMimeType(value.mimeType, "conversation image MIME type");
+    const sizeBytes = boundedImageSize(value.sizeBytes, "conversation image byte count");
+    return { kind: "conversation_image_ready", ...identity(), mimeType, sizeBytes, sha256: imageSha256(value.sha256, "conversation image SHA-256") };
+  }
+  if (value.kind === "conversation_image_chunk") {
+    exact(value, ["kind", "version", "requestId", "hostEpoch", "instanceId", "contentRef", "index", "data"]);
+    const data = canonicalBase64(value.data, "conversation image chunk data", MAX_CONVERSATION_IMAGE_CHUNK_BYTES);
+    if (data.length === 0) throw validation("invalid_response", "Conversation image chunks cannot be empty");
+    return { kind: "conversation_image_chunk", ...identity(), index: unsigned(value.index, "conversation image chunk index"), data };
+  }
+  if (value.kind === "conversation_image_complete") {
+    exact(value, ["kind", "version", "requestId", "hostEpoch", "instanceId", "contentRef", "chunks", "sizeBytes", "sha256"]);
+    return {
+      kind: "conversation_image_complete", ...identity(), chunks: unsigned(value.chunks, "conversation image chunk count"),
+      sizeBytes: boundedImageSize(value.sizeBytes, "conversation image byte count"), sha256: imageSha256(value.sha256, "conversation image SHA-256"),
+    };
+  }
+  exact(value, ["kind", "version", "requestId", "hostEpoch", "instanceId", "contentRef", "error"]);
+  if (value.kind !== "conversation_image_error") throw validation("invalid_response", "Unknown conversation image frame");
+  const error = object(value.error, "conversation image error");
+  exact(error, ["code", "message"]);
+  if (error.code !== "image_unavailable") throw validation("invalid_response", "Conversation image terminal error code is invalid");
+  return { kind: "conversation_image_error", ...identity(), error: { code: "image_unavailable", message: string(error.message, "conversation image error message", MAX_MESSAGE) } };
+}
+
+function imageSha256(input: unknown, field: string): string {
+  const value = string(input, field, 64);
+  if (!/^[a-f0-9]{64}$/u.test(value)) throw validation("invalid_response", `${field} must be lowercase hexadecimal`);
+  return value;
+}
+function boundedImageSize(input: unknown, field: string): number {
+  const value = unsigned(input, field);
+  if (value > MAX_IMAGE_BYTES) throw validation("invalid_response", `${field} exceeds its bound`);
+  return value;
 }
 
 export function parseDeliverableListResult(input: unknown): DeliverableListResult {
@@ -1556,7 +1623,7 @@ function parseConversationContentChunk(input: unknown, field: string): Conversat
     };
   }
   if (type === "image") {
-    exact(chunk, ["blockIndex", "type", "mimeType", "data", "offset", "blockComplete"]);
+    exact(chunk, ["blockIndex", "type", "mimeType", "data", "offset", "blockComplete", "contentRef", "sha256", "sizeBytes"]);
     return {
       blockIndex,
       type,
@@ -1564,6 +1631,9 @@ function parseConversationContentChunk(input: unknown, field: string): Conversat
       data: boundedString(chunk.data, `${field}.data`, MAX_CONVERSATION_CHUNK_CHARS),
       offset: unsigned(chunk.offset, `${field}.offset`),
       blockComplete: boolean(chunk.blockComplete, `${field}.blockComplete`),
+      ...(chunk.contentRef === undefined ? {} : { contentRef: string(chunk.contentRef, `${field}.contentRef`, 128) }),
+      ...(chunk.sha256 === undefined ? {} : { sha256: imageSha256(chunk.sha256, `${field}.sha256`) }),
+      ...(chunk.sizeBytes === undefined ? {} : { sizeBytes: boundedImageSize(chunk.sizeBytes, `${field}.sizeBytes`) }),
     };
   }
   if (type === "tool_call") {
@@ -2097,14 +2167,15 @@ function parseContent(input: unknown, field: string): ContentBlockDto[] {
     const block = object(item, `${field}[${index}]`); const type = enumeration(block.type, `${field}[${index}].type`, ["text", "thinking", "image", "tool_call", "tool_result", "omitted"]);
     if (type === "text" || type === "thinking") { exact(block, ["type", "text"]); return { type, text: boundedString(block.text, `${field}[${index}].text`, MAX_TEXT) }; }
     if (type === "image") {
-      exact(block, ["type", "mimeType", "contentRef", "fileId"]);
-      const mimeType = string(block.mimeType, `${field}[${index}].mimeType`, MAX_IMAGE_MIME_TYPE_CHARS);
-      if (!/^image\/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*$/u.test(mimeType)) throw validation("invalid_response", `${field}[${index}].mimeType must be image/*`);
+      exact(block, ["type", "mimeType", "contentRef", "fileId", "sha256", "sizeBytes"]);
+      const mimeType = imageMimeType(block.mimeType, `${field}[${index}].mimeType`);
       return {
         type,
         mimeType,
         ...(block.contentRef === undefined ? {} : { contentRef: string(block.contentRef, `${field}[${index}].contentRef`, 128) }),
         ...(block.fileId === undefined ? {} : { fileId: id(block.fileId, `${field}[${index}].fileId`) }),
+        ...(block.sha256 === undefined ? {} : { sha256: imageSha256(block.sha256, `${field}[${index}].sha256`) }),
+        ...(block.sizeBytes === undefined ? {} : { sizeBytes: boundedImageSize(block.sizeBytes, `${field}[${index}].sizeBytes`) }),
       };
     }
     if (type === "tool_call") { exact(block, ["type", "toolCallId", "toolName", "args", "omittedFields"]); return { type, toolCallId: id(block.toolCallId, "toolCallId"), toolName: string(block.toolName, "toolName", 256), args: parseJsonObject(block.args, "args"), omittedFields: omitted(block.omittedFields, "omittedFields") }; }

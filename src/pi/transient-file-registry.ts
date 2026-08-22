@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { basename, extname } from "node:path";
 
 import { AgentConversationCursorError, type AgentConversationContentPage } from "../core/agent-worker.js";
@@ -15,7 +15,8 @@ import {
 import { assertUnchangedSource, inspectSourceFile, MAX_SOURCE_FILE_PATH_CHARS, openUnchangedSource, SourceFileError, type SourceFileIdentity } from "../core/source-file.js";
 
 interface FileEntry { dto: PublishedFileDto; source: SourceFileIdentity }
-interface ImageEntry { mimeType: string; data: string }
+export interface ConversationImageMetadata { contentRef: string; mimeType: string; sizeBytes: number; sha256: string }
+interface ImageEntry extends ConversationImageMetadata { data: string }
 interface ImageCursor { contentRef: string; offset: number }
 interface FailureEntry { message: string }
 
@@ -60,13 +61,16 @@ export class TransientFileRegistry {
   }
 
   registerImage(data: string, mimeType: string): string {
-    const contentRef = `image-${randomUUID()}`;
-    this.images.set(contentRef, { mimeType, data });
+    const bytes = Buffer.from(data, "base64");
+    if (bytes.toString("base64") !== data) throw new PublishedFileUnavailableError("This conversation image is not valid base64 data.");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const contentRef = `image-${sha256}`;
+    this.images.set(contentRef, { contentRef, mimeType, data, sizeBytes: bytes.byteLength, sha256 });
     trim(this.images);
     return contentRef;
   }
 
-  image(contentRef: string): { mimeType: string; data: string } | undefined {
+  image(contentRef: string): ImageEntry | undefined {
     const entry = this.images.get(contentRef);
     return entry === undefined ? undefined : { ...entry };
   }
@@ -92,7 +96,10 @@ export class TransientFileRegistry {
     const end = Math.min(image.data.length, offset + MAX_CONVERSATION_CHUNK_CHARS);
     if (end <= offset) throw new PublishedFileUnavailableError();
     const blockComplete = end === image.data.length;
-    const chunks = [{ blockIndex: 0, type: "image" as const, mimeType: image.mimeType, data: image.data.slice(offset, end), offset, blockComplete }];
+    const chunks = [{
+      blockIndex: 0, type: "image" as const, mimeType: image.mimeType, data: image.data.slice(offset, end), offset, blockComplete,
+      contentRef: image.contentRef, sizeBytes: image.sizeBytes, sha256: image.sha256,
+    }];
     if (blockComplete) return { revision: contentRef, contentRef, chunks, complete: true };
     const nextCursor = randomUUID();
     this.imageCursors.set(nextCursor, { contentRef, offset: end });

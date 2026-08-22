@@ -158,6 +158,7 @@ export type {
   TreeNodeDto,
 } from "./instance-dto.js";
 export {
+  MAX_CONVERSATION_IMAGE_CHUNK_BYTES,
   MAX_IMAGE_AGGREGATE_BYTES,
   MAX_IMAGE_BYTES,
   MAX_IMAGE_MIME_TYPE_CHARS,

@@ -75,7 +75,9 @@ TLS peer 必须在握手时提供 X.509 客户端证书并证明持有私钥。H
 
 Devices 中的 Remote Access/port、开启/关闭连接窗口、待连接请求、PIN 确认、saved device 列表和移除，以及 Settings 中的 attachment storage directory，是本机 `aludock` Hub 的 service-management surface。它们不属于 Protocol V2，不通过本地 IPC 或 TLS 暴露，也不在 DockClient、CLI JSON API 或额外 admin endpoint 中提供。远程客户端只能使用临时 pairing bootstrap 和配对后的 Protocol V2；它不能远程改变 Host 设置、开启或延长连接窗口。
 
-Client 发给 Host 的 hello/request 使用 closed JSON-safe shape，未知字段会被拒绝。Host 发给 Client 的 response/event 仍严格校验已知字段、版本、类型和边界，但 Client 必须忽略新增的未知可选字段；只有删除字段、改变既有语义或新增无法忽略的类型时才需要 capability 或协议版本。单 frame 可以有传输上限，但业务内容不能因此永久截断；大型 conversation 使用分页和 chunk 继续读取。
+Client 发给 Host 的 hello/request 使用 closed JSON-safe shape，未知字段会被拒绝。Host 发给 Client 的 response/event 仍严格校验已知字段、版本、类型和边界，但 Client 必须忽略新增的未知可选字段；只有删除字段、改变既有语义或新增无法忽略的类型时才需要 capability 或协议版本。单 frame 可以有传输上限，但业务内容不能因此永久截断；大型 conversation 使用分页和 chunk 继续读取。持久 record 的 `contentRef` 由 Agent 原生 session 与 entry identity 决定，append、refresh 和 Worker restart 不改变它；revision 与 cursor 只隔离一次分页 scan。
+
+`conversation.images.v1` 在独立 Protocol V2 连接上以 `conversation.image {instanceId,contentRef}` 读取原生 conversation image。Host 先发送包含 MIME、decoded size 和 lowercase SHA-256 的 ready，再发送从零连续、decoded bytes 最大 512 KiB 的 chunk，最后发送带总 chunk 数、size 和 SHA-256 的 complete；ready 后失败发送专用 error，客户端丢弃已收 bytes。DockClient 逐块调用 callback、独立 hash 且不缓存完整图片。Host 从当前 generation Worker 的分页内容顺序产出并按 socket drain 背压；既有 `conversation.content` 保留。Main/SubHost 仍通过通用 machine stream route，identity mapper 只改 frame root 的 Host/instance identity。
 
 `session.tree.v2` 专指当前 Pi Session Tree。请求只有 `{instanceId}`，一次逻辑调用返回一个完整 compact snapshot `{nodes, leafId?}`；node 只含 ID、拓扑、kind/role、展示标签、时间、摘要和 children fact，不含 Pi JSONL entry、完整 message 或 tool content。Host 不缓存、分页、revision 或解释树拓扑，只做 lifecycle、admission、generation fencing 和路由。
 

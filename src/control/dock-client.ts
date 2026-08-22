@@ -32,6 +32,7 @@ import {
   INSTANCE_KEYS_CAPABILITY,
   INSTANCE_DISPLAY_NAME_CAPABILITY,
   CONVERSATION_CONTENT_CAPABILITY,
+  CONVERSATION_IMAGES_CAPABILITY,
   COMMAND_DISCOVERY_CAPABILITY,
   PUBLISHED_FILES_CAPABILITY,
   INSTANCE_DELIVERABLES_CAPABILITY,
@@ -68,6 +69,7 @@ import {
   parseHistoryResult,
   parseConversationHistoryResult,
   parseConversationContentResult,
+  parseConversationImageFrame,
   parseFileReadResult,
   parseInteractionRespondResult,
   parseKeyLookupResult,
@@ -165,6 +167,12 @@ export interface EventSubscription { initial:InstanceReadResult; close:()=>void;
 export interface FollowSubscription { initial:FollowResult; close:()=>void; done:Promise<void> }
 export interface OperationSubscription { initial:ExtensionUiControlResult; close:()=>void; done:Promise<void> }
 export interface DockClientOptions { socketPath:string; timeoutMs?:number; longMutationTimeoutMs?:number; requestId?:()=>string; clientId?:string }
+export interface ConversationImageReadResult {
+  mimeType: string;
+  chunks: number;
+  sizeBytes: number;
+  sha256: string;
+}
 export interface DeliverableDownloadResult {
   deliverable: DeliverableDto;
   chunks: number;
@@ -390,6 +398,59 @@ export class DockClient {
   history(instanceId:string,beforeEntryId?:string,limit=200):Promise<HistoryResult>{return this.request("session.history",{instanceId,beforeEntryId,limit},["tui.projection.v1",IMAGE_INPUT_CAPABILITY],parseHistoryResult);}
   async conversationHistory(instanceId:string,cursor?:string,limit=50):Promise<ConversationHistoryResult>{const result=await this.request("conversation.history",{instanceId,cursor,limit},CONVERSATION_CONTENT_CAPABILITY,parseConversationHistoryResult);if(result.instance.id!==instanceId)throw new ControlClientError("invalid_response","Conversation history result belongs to another instance");return result;}
   async conversationContent(instanceId:string,contentRef:string,cursor?:string):Promise<ConversationContentResult>{const result=await this.request("conversation.content",{instanceId,contentRef,cursor},CONVERSATION_CONTENT_CAPABILITY,parseConversationContentResult);if(result.instanceId!==instanceId||result.contentRef!==contentRef)throw new ControlClientError("invalid_response","Conversation content result belongs to another request");return result;}
+
+  readConversationImage(instanceId:string,contentRef:string,onChunk:(chunk:Uint8Array)=>void|Promise<void>):Promise<ConversationImageReadResult>{
+    const helloId=this.createRequestId(),requestId=this.createRequestId();
+    const capabilities=requiredCapabilities(CONVERSATION_IMAGES_CAPABILITY);
+    const request:Extract<ControlRequest,{type:"conversation.image"}>={kind:"request",version:2,requestId,type:"conversation.image",params:{instanceId,contentRef}};
+    return new Promise<ConversationImageReadResult>((resolveRead,rejectRead)=>{
+      const socket=this.openSocket(),decoder=new JsonLineDecoder();
+      let phase:"hello"|"ready"|"stream"|"complete"="hello",hostEpoch="",settled=false,requestSent=false;
+      let mimeType:string|undefined,expectedSize:number|undefined,expectedSha:string|undefined,index=0,sizeBytes=0,completion:ConversationImageReadResult|undefined;
+      const hash=createHash("sha256");let timeout:NodeJS.Timeout;
+      const finish=(error?:unknown,result?:ConversationImageReadResult):void=>{if(settled)return;settled=true;clearTimeout(timeout);socket.destroy();error===undefined?resolveRead(result as ConversationImageReadResult):rejectRead(normalizeClientError(error));};
+      const resetTimeout=():void=>{clearTimeout(timeout);timeout=setTimeout(()=>finish(new ControlClientError("timeout",`Conversation image read timed out after ${this.longMutationTimeoutMs}ms`)),this.longMutationTimeoutMs);};
+      const identity=()=>({requestId,hostEpoch,instanceId,contentRef});
+      const consume=async(line:string):Promise<void>=>{
+        if(!line||settled)return;let raw:unknown;
+        try{raw=JSON.parse(line);}catch{throw new ControlClientError("invalid_response","Host returned invalid JSON during conversation image read");}
+        if(phase==="hello"){
+          const ack=parseHelloReply(raw,helloId);hostEpoch=ack.host.hostEpoch;
+          for(const required of capabilities)if(!ack.capabilities.includes(required))throw new ProtocolValidationError("protocol_incompatible",`Host lacks ${required}`);
+          phase="ready";requestSent=true;socket.write(encodeJsonLine(request));resetTimeout();return;
+        }
+        if(phase==="complete")throw new ProtocolValidationError("invalid_response","Conversation image sent data after completion");
+        if(phase==="ready"&&raw!==null&&typeof raw==="object"&&(raw as {kind?:unknown}).kind==="response"){
+          const response=parseControlResponse(raw,requestId,hostEpoch);
+          if(!response.ok)throw new ControlClientError(response.error.code,response.error.message,undefined,response.error.details);
+          throw new ProtocolValidationError("invalid_response","Conversation image returned an ordinary success response");
+        }
+        const frame=parseConversationImageFrame(raw,identity());resetTimeout();
+        if(phase==="ready"){
+          if(frame.kind!=="conversation_image_ready")throw new ProtocolValidationError("invalid_response","Conversation image did not begin with readiness");
+          mimeType=frame.mimeType;expectedSize=frame.sizeBytes;expectedSha=frame.sha256;phase="stream";return;
+        }
+        if(frame.kind==="conversation_image_error")throw new ControlClientError(frame.error.code,frame.error.message);
+        if(frame.kind==="conversation_image_ready")throw new ProtocolValidationError("invalid_response","Host repeated conversation image readiness");
+        if(frame.kind==="conversation_image_chunk"){
+          if(frame.index!==index)throw new ProtocolValidationError("invalid_response","Conversation image chunks arrived out of order");
+          const bytes=Buffer.from(frame.data,"base64");
+          if(expectedSize===undefined||sizeBytes+bytes.byteLength>expectedSize)throw new ProtocolValidationError("invalid_response","Conversation image bytes exceed the declared size");
+          hash.update(bytes);await onChunk(bytes);sizeBytes+=bytes.byteLength;index+=1;return;
+        }
+        const digest=hash.digest("hex");
+        if(mimeType===undefined||expectedSize===undefined||expectedSha===undefined||frame.chunks!==index||frame.sizeBytes!==sizeBytes||sizeBytes!==expectedSize||frame.sha256!==digest||digest!==expectedSha)throw new ProtocolValidationError("invalid_response","Conversation image completion does not match received bytes");
+        completion={mimeType,chunks:index,sizeBytes,sha256:digest};phase="complete";
+      };
+      let processing=Promise.resolve();resetTimeout();
+      socket.once("connect",()=>socket.write(encodeJsonLine(this.hello(helloId,capabilities))));
+      socket.on("data",(chunk:Buffer)=>{socket.pause();processing=processing.then(async()=>{for(const line of decoder.push(chunk))await consume(line);}).catch(finish).finally(()=>{if(!settled&&!socket.destroyed)socket.resume();});});
+      socket.once("end",()=>{processing=processing.then(()=>{decoder.finish();if(!completion)throw new ControlClientError("connection_closed","Host ended before the conversation image completed");finish(undefined,completion);}).catch(finish);});
+      socket.once("error",error=>finish(transportError(error)));
+      socket.once("close",()=>{void processing.then(()=>{if(!settled)finish(new ControlClientError("connection_closed",requestSent?"Host closed before the conversation image completed":"Host closed before responding"));});});
+    });
+  }
+
   async readFile(instanceId:string,fileRef:string,offset?:number):Promise<FileReadResult>{const requestedOffset=offset??0;const result=await this.request("file.read",{instanceId,fileRef,offset},PUBLISHED_FILES_CAPABILITY,(input)=>parseFileReadResult(input,requestedOffset));if(result.instanceId!==instanceId||result.file.fileRef!==fileRef||result.offset!==requestedOffset)throw new ControlClientError("invalid_response","Published file result belongs to another request");return result;}
   async listDeliverables(instanceId:string):Promise<DeliverableDto[]>{const result=await this.request("deliverable.list",{instanceId},INSTANCE_DELIVERABLES_CAPABILITY,parseDeliverableListResult);if(result.instanceId!==instanceId)throw new ControlClientError("invalid_response","Temporary file list belongs to another work");return result.deliverables;}
 

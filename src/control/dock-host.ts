@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { Stats } from "node:fs";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
 import {
@@ -30,6 +31,8 @@ import {
   QueueCapacityError,
   RuntimeEffectUnknownError,
   StaleRuntimeGenerationError,
+  MAX_CONVERSATION_IMAGE_CHUNK_BYTES,
+  MAX_IMAGE_BYTES,
   type AttachProjection,
   type DockEvent,
 } from "../core/managed-instance.js";
@@ -862,6 +865,7 @@ export class DockHost {
       case "session.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getHistoryPage(request.params.beforeEntryId,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,createBoundedHistoryResult(page,request.requestId,this.hostEpoch)); return; }
       case "conversation.history": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getConversationHistory(request.params.cursor,request.params.limit); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
       case "conversation.content": { const instance=this.registry.get(request.params.instanceId); const page=await instance.getConversationContent(request.params.contentRef,request.params.cursor); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
+      case "conversation.image": await this.streamConversationImage(request, socket); return;
       case "file.read": { const instance=this.registry.get(request.params.instanceId); const page=await instance.readPublishedFile(request.params.fileRef,request.params.offset); this.sendSuccessAndEnd(socket,request.requestId,page); return; }
       case "session.inventory": {
         const inventory = await this.sessionInventory.list(request.params.cwd, request.params.scope);
@@ -1034,6 +1038,102 @@ export class DockHost {
     return new InstanceWorkspace(snapshot.id, snapshot.cwd);
   }
 
+  private async streamConversationImage(request: Extract<ControlRequest, { type: "conversation.image" }>, socket: Socket): Promise<void> {
+    const { instanceId, contentRef } = request.params;
+    const instance = this.registry.get(instanceId);
+    let ready = false;
+    let cursor: string | undefined;
+    let revision: string | undefined;
+    let runtimeGeneration: number | undefined;
+    let mimeType: string | undefined;
+    let expectedSize: number | undefined;
+    let expectedSha: string | undefined;
+    let encodedOffset = 0;
+    let pending = Buffer.alloc(0);
+    let index = 0;
+    let sizeBytes = 0;
+    const hash = createHash("sha256");
+    const write = async (frame: unknown): Promise<void> => {
+      const outcome = writeEnvelope(socket, frame);
+      if (outcome === "backpressured") {
+        if (!await waitForSocketDrain(socket, SOCKET_DRAIN_TIMEOUT_MS)) throw new Error("Conversation image client stopped draining");
+      } else if (outcome !== "written") throw new Error("Conversation image connection closed");
+    };
+    const emitPending = async (final: boolean): Promise<void> => {
+      while (pending.byteLength >= MAX_CONVERSATION_IMAGE_CHUNK_BYTES || (final && pending.byteLength > 0)) {
+        const count = final ? Math.min(MAX_CONVERSATION_IMAGE_CHUNK_BYTES, pending.byteLength) : MAX_CONVERSATION_IMAGE_CHUNK_BYTES;
+        const chunk = pending.subarray(0, count);
+        pending = pending.subarray(count);
+        await write({
+          kind: "conversation_image_chunk", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
+          instanceId, contentRef, index, data: chunk.toString("base64"),
+        });
+        index += 1;
+      }
+    };
+    try {
+      for (;;) {
+        const page = await instance.getConversationContent(contentRef, cursor);
+        if (page.contentRef !== contentRef || (runtimeGeneration !== undefined && page.runtimeGeneration !== runtimeGeneration)
+          || (revision !== undefined && page.revision !== revision)) throw new Error("Conversation image changed while it was being read");
+        runtimeGeneration ??= page.runtimeGeneration;
+        revision ??= page.revision;
+        if (page.chunks.length < 1 || page.chunks.some((chunk) => chunk.type !== "image" || chunk.blockIndex !== 0)) {
+          throw new Error("Conversation content reference does not identify one image");
+        }
+        for (const chunk of page.chunks) {
+          if (chunk.type !== "image") throw new Error("Conversation content reference does not identify one image");
+          if (chunk.offset !== encodedOffset || chunk.contentRef !== contentRef || chunk.sha256 === undefined || chunk.sizeBytes === undefined) {
+            throw new Error("Conversation image metadata is incomplete");
+          }
+          mimeType ??= chunk.mimeType;
+          expectedSize ??= chunk.sizeBytes;
+          expectedSha ??= chunk.sha256;
+          if (chunk.mimeType !== mimeType || chunk.sizeBytes !== expectedSize || chunk.sha256 !== expectedSha || expectedSize > MAX_IMAGE_BYTES) {
+            throw new Error("Conversation image metadata changed while it was being read");
+          }
+          if (!ready) {
+            await write({
+              kind: "conversation_image_ready", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
+              instanceId, contentRef, mimeType, sizeBytes: expectedSize, sha256: expectedSha,
+            });
+            ready = true;
+          }
+          const bytes = Buffer.from(chunk.data, "base64");
+          if (bytes.toString("base64") !== chunk.data) throw new Error("Conversation image data is not canonical base64");
+          encodedOffset += chunk.data.length;
+          sizeBytes += bytes.byteLength;
+          if (sizeBytes > expectedSize) throw new Error("Conversation image exceeds its declared size");
+          hash.update(bytes);
+          pending = pending.byteLength === 0 ? bytes : Buffer.concat([pending, bytes]);
+          await emitPending(false);
+        }
+        if (page.complete) break;
+        if (page.nextCursor === undefined) throw new Error("Conversation image continuation is missing");
+        cursor = page.nextCursor;
+      }
+      if (!ready || expectedSize === undefined || expectedSha === undefined) throw new Error("Conversation image is empty or unavailable");
+      await emitPending(true);
+      const sha256 = hash.digest("hex");
+      if (sizeBytes !== expectedSize || sha256 !== expectedSha) throw new Error("Conversation image verification failed");
+      await write({
+        kind: "conversation_image_complete", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
+        instanceId, contentRef, chunks: index, sizeBytes, sha256,
+      });
+      if (!socket.destroyed && !socket.writableEnded) socket.end();
+    } catch (error) {
+      if (ready && !socket.destroyed && !socket.writableEnded) {
+        endRawEnvelope(socket, {
+          kind: "conversation_image_error", version: 2, requestId: request.requestId, hostEpoch: this.hostEpoch,
+          instanceId, contentRef,
+          error: { code: "image_unavailable", message: "This conversation image could not be read completely. Reload the conversation and try again." },
+        });
+        return;
+      }
+      throw error;
+    }
+  }
+
   private async streamWorkspaceFile(request: Extract<ControlRequest, { type: "workspace.file.read" }>, socket: Socket): Promise<void> {
     const { instanceId, path } = request.params;
     const opened = await this.activeWorkspace(instanceId).openFile(path);
@@ -1192,6 +1292,7 @@ function isMutationRequest(type: ControlRequest["type"]): boolean {
     && type !== "session.history"
     && type !== "conversation.history"
     && type !== "conversation.content"
+    && type !== "conversation.image"
     && type !== "file.read"
     && type !== "session.inventory"
     && type !== "session.list"

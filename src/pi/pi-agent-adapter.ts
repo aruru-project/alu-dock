@@ -694,7 +694,7 @@ export class PiAgentAdapter {
     const page = sliceSemanticHistory(state.entries.map(({ projected }) => projected), end, boundedLimit);
     let entries = state.entries.slice(page.start, page.end).map(({ source, projected }) => ({
       entry: previewConversationEntry(projected),
-      contentRef: conversationContentRef(state.revision, source.id),
+      contentRef: conversationContentRef(state.sessionId, source.id),
       contentComplete: conversationPreviewIsComplete(source, projected),
       totalBlocks: conversationBlockCount(source, this.options.attachmentContextKey),
     }));
@@ -733,9 +733,9 @@ export class PiAgentAdapter {
       blockIndex = continuation.blockIndex;
       offset = continuation.offset;
     }
-    const selected = state.entries.find(({ source }) => conversationContentRef(state.revision, source.id) === contentRef);
+    const selected = state.entries.find(({ source }) => conversationContentRef(state.sessionId, source.id) === contentRef);
     if (!selected) throw new AgentConversationCursorError("Conversation content reference is stale");
-    const blocks = conversationContentBlocks(selected.source, selected.projected, this.options.attachmentContextKey);
+    const blocks = conversationContentBlocks(selected.source, selected.projected, this.options.attachmentContextKey, this.options.publishedFiles);
     const chunks: AgentConversationContentChunk[] = [];
     let chars = 0;
     while (blockIndex < blocks.length && chunks.length < 64 && chars < 64_000) {
@@ -793,7 +793,7 @@ export class PiAgentAdapter {
     });
   }
 
-  private conversationState(): { revision: string; entries: Array<{ source: SessionEntry; projected: AgentHistoryEntry }> } {
+  private conversationState(): { revision: string; sessionId: string; entries: Array<{ source: SessionEntry; projected: AgentHistoryEntry }> } {
     const entries = this.conversationEntries();
     const manager = this.requireActive().session.sessionManager;
     const revision = createHash("sha256")
@@ -810,7 +810,7 @@ export class PiAgentAdapter {
       this.conversationHistoryCursors.clear();
       this.conversationContentCursors.clear();
     }
-    return { revision, entries };
+    return { revision, sessionId: manager.getSessionId(), entries };
   }
 
   getTree(): SessionTreeResult {
@@ -1413,10 +1413,22 @@ function safeImageMimeType(value: unknown): string {
     : "image/unknown";
 }
 
-function imageBase64Sha256(data: string): string | undefined {
+function imageBase64Metadata(data: string): { sha256: string; sizeBytes: number } | undefined {
   if (data.length === 0 || data.length > Math.ceil(MAX_IMAGE_BYTES * 4 / 3) + 4) return undefined;
-  try { return createHash("sha256").update(Buffer.from(data, "base64")).digest("hex"); }
-  catch { return undefined; }
+  try {
+    const bytes = Buffer.from(data, "base64");
+    if (bytes.toString("base64") !== data || bytes.byteLength > MAX_IMAGE_BYTES) return undefined;
+    return { sha256: createHash("sha256").update(bytes).digest("hex"), sizeBytes: bytes.byteLength };
+  } catch { return undefined; }
+}
+
+function imageBase64Sha256(data: string): string | undefined { return imageBase64Metadata(data)?.sha256; }
+
+function registerConversationImage(publishedFiles: TransientFileRegistry | undefined, data: string | undefined, mimeType: string): { contentRef: string; sha256: string; sizeBytes: number } | undefined {
+  const metadata = data === undefined ? undefined : imageBase64Metadata(data);
+  if (publishedFiles === undefined || data === undefined || metadata === undefined) return undefined;
+  const contentRef = publishedFiles.registerImage(data, mimeType);
+  return { contentRef, ...metadata };
 }
 
 async function loadPiImages(images: readonly ImagePathDto[] | undefined): Promise<PiImageContent[] | undefined> {
@@ -1600,13 +1612,11 @@ function projectPrivateContent(content: unknown, publishedFiles?: TransientFileR
     else if (item.type === "image") {
       const mimeType = safeImageMimeType(item.mimeType);
       const imageData = typeof item.data === "string" ? item.data : undefined;
-      const contentRef = publishedFiles !== undefined && imageData !== undefined ? publishedFiles.registerImage(imageData, mimeType) : undefined;
-      const sha256 = imageData === undefined ? undefined : imageBase64Sha256(imageData);
+      const image = registerConversationImage(publishedFiles, imageData, mimeType);
       blocks.push({
         type: "image",
         mimeType,
-        ...(contentRef === undefined ? {} : { contentRef }),
-        ...(sha256 === undefined ? {} : { sha256 }),
+        ...(image === undefined ? {} : image),
       });
     }
   }
@@ -1621,8 +1631,8 @@ function projectPrivateToolContent(content: unknown, publishedFiles?: TransientF
     if (item.type === "text" && typeof item.text === "string") return [{ type: "text", text: boundedContentString(item.text, 256_000) }];
     if (item.type === "image") {
       const mimeType = safeImageMimeType(item.mimeType);
-      const contentRef = publishedFiles !== undefined && typeof item.data === "string" ? publishedFiles.registerImage(item.data, mimeType) : undefined;
-      return [{ type: "image", mimeType, ...(contentRef === undefined ? {} : { contentRef }) }];
+      const image = registerConversationImage(publishedFiles, typeof item.data === "string" ? item.data : undefined, mimeType);
+      return [{ type: "image", mimeType, ...(image === undefined ? {} : image) }];
     }
     return [];
   });
@@ -2027,13 +2037,13 @@ function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Arr
       };
     }
     const custom = role === "custom";
-    const userProjection = role === "user" ? projectDockUserContent(message.content, attachmentContextKey) : undefined;
+    const userProjection = role === "user" ? projectDockUserContent(message.content, attachmentContextKey, publishedFiles) : undefined;
     return {
       ...base,
       kind: custom ? "custom_message" : "message",
       source: custom ? "extension" : role === "user" ? "user" : role === "assistant" ? "assistant" : "system",
       visibility: custom && message.display === false ? "hidden" : "conversation",
-      content: userProjection?.content ?? projectDockContent(message.content),
+      content: userProjection?.content ?? projectDockContent(message.content, undefined, publishedFiles),
       ...(userProjection?.attachments === undefined ? {} : { attachments: userProjection.attachments }),
       ...(typeof message.stopReason === "string" ? { stopReason: boundedString(message.stopReason, 128, "unknown") } : {}),
       ...(typeof message.errorMessage === "string" ? { error: boundedContentString(message.errorMessage, 2_048) } : {}),
@@ -2048,7 +2058,7 @@ function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Arr
       kind: "custom_message",
       source: "extension",
       visibility: entry.display ? "conversation" : "hidden",
-      content: projectDockContent(entry.content),
+      content: projectDockContent(entry.content, undefined, publishedFiles),
       customType: boundedString(entry.customType, 256, "custom"),
       display: entry.display,
       ...projectRecordMetadata(entry.details),
@@ -2123,12 +2133,12 @@ function projectHistoryEntry(entry: SessionEntry, attachmentContextKey: Uint8Arr
   };
 }
 
-function projectDockUserContent(content: unknown, attachmentContextKey: Uint8Array): { content: ContentBlockDto[]; attachments?: AttachmentDto[] } {
+function projectDockUserContent(content: unknown, attachmentContextKey: Uint8Array, publishedFiles?: TransientFileRegistry): { content: ContentBlockDto[]; attachments?: AttachmentDto[] } {
   if (typeof content === "string") {
     const extracted = extractDockAttachmentContext(content, attachmentContextKey);
-    return { content: projectDockContent(extracted.text), ...(extracted.attachments === undefined ? {} : { attachments: extracted.attachments }) };
+    return { content: projectDockContent(extracted.text, undefined, publishedFiles), ...(extracted.attachments === undefined ? {} : { attachments: extracted.attachments }) };
   }
-  if (!Array.isArray(content)) return { content: projectDockContent(content) };
+  if (!Array.isArray(content)) return { content: projectDockContent(content, undefined, publishedFiles) };
   let attachments: AttachmentDto[] | undefined;
   const visible = content.map((item) => {
     if (!isRecord(item) || item.type !== "text" || typeof item.text !== "string") return item;
@@ -2137,7 +2147,7 @@ function projectDockUserContent(content: unknown, attachmentContextKey: Uint8Arr
     attachments = extracted.attachments;
     return { ...item, text: extracted.text };
   });
-  return { content: projectDockContent(visible, attachments), ...(attachments === undefined ? {} : { attachments }) };
+  return { content: projectDockContent(visible, attachments, publishedFiles), ...(attachments === undefined ? {} : { attachments }) };
 }
 
 function projectPublicToolContent(toolName: string, content: unknown, redactedText: string): ContentBlockDto[] {
@@ -2147,7 +2157,7 @@ function projectPublicToolContent(toolName: string, content: unknown, redactedTe
   return projectDockContent(content);
 }
 
-function projectDockContent(content: unknown, attachments?: readonly AttachmentDto[]): ContentBlockDto[] {
+function projectDockContent(content: unknown, attachments?: readonly AttachmentDto[], publishedFiles?: TransientFileRegistry): ContentBlockDto[] {
   if (typeof content === "string") return content.length > 0 ? [{ type: "text", text: boundedContentString(content, 8_000) }] : [];
   if (!Array.isArray(content)) return [];
   const imageAttachments = new Map<string, AttachmentDto[]>();
@@ -2167,16 +2177,25 @@ function projectDockContent(content: unknown, attachments?: readonly AttachmentD
     else if (item.type === "thinking" && typeof item.thinking === "string") block = { type: "thinking", text: boundedContentString(item.thinking, 8_000) };
     else if (item.type === "image") {
       const mimeType = safeImageMimeType(item.mimeType);
+      const registered = registerConversationImage(publishedFiles, typeof item.data === "string" ? item.data : undefined, mimeType);
       const sha256 = typeof item.sha256 === "string" && /^[a-f0-9]{64}$/u.test(item.sha256)
         ? item.sha256
-        : typeof item.data === "string" ? imageBase64Sha256(item.data) : undefined;
+        : registered?.sha256 ?? (typeof item.data === "string" ? imageBase64Sha256(item.data) : undefined);
+      const sizeBytes = typeof item.sizeBytes === "number" && Number.isSafeInteger(item.sizeBytes) && item.sizeBytes >= 0 && item.sizeBytes <= MAX_IMAGE_BYTES
+        ? item.sizeBytes
+        : registered?.sizeBytes ?? (typeof item.data === "string" ? imageBase64Metadata(item.data)?.sizeBytes : undefined);
+      const contentRef = typeof item.contentRef === "string"
+        ? safeRequiredText(item.contentRef, 128, "unknown")
+        : registered?.contentRef;
       const matches = sha256 === undefined ? undefined : imageAttachments.get(`${sha256}\u0000${mimeType}`);
       const fileId = matches?.shift()?.fileId;
       block = {
         type: "image",
         mimeType,
-        ...(typeof item.contentRef === "string" ? { contentRef: safeRequiredText(item.contentRef, 128, "unknown") } : {}),
+        ...(contentRef === undefined ? {} : { contentRef }),
         ...(fileId === undefined ? {} : { fileId }),
+        ...(sha256 === undefined ? {} : { sha256 }),
+        ...(sizeBytes === undefined ? {} : { sizeBytes }),
       };
     }
     else if ((item.type === "toolCall" || item.type === "tool_call") && typeof item.name === "string") {
@@ -2214,12 +2233,12 @@ type ConversationTextSourceBlock = { type: "text" | "thinking"; text: string };
 type ConversationOmittedSourceBlock = { type: "omitted"; kind: "image" | "binary"; description: string };
 type ConversationSourceBlock =
   | ConversationTextSourceBlock
-  | { type: "image"; mimeType: string; data: string }
+  | { type: "image"; mimeType: string; data: string; contentRef?: string; sha256?: string; sizeBytes?: number }
   | { type: "tool_call"; toolCallId: string; toolName: string; argumentsJson: string }
   | { type: "tool_result"; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; omittedFields?: string[] }
   | ConversationOmittedSourceBlock;
 
-function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryEntry, attachmentContextKey: Uint8Array): ConversationSourceBlock[] {
+function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryEntry, attachmentContextKey: Uint8Array, publishedFiles?: TransientFileRegistry): ConversationSourceBlock[] {
   const omitted = (kind: "image" | "binary", description: string): ConversationOmittedSourceBlock => ({ type: "omitted", kind, description });
   const text = (type: "text" | "thinking", value: unknown): ConversationTextSourceBlock | undefined => (
     typeof value === "string" && value.length > 0 ? { type, text: value } : undefined
@@ -2255,7 +2274,7 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
       const projectedToolResult = projected.content.find((block) => block.type === "tool_result");
       return items.flatMap((item): ConversationSourceBlock[] => {
         if (!isRecord(item)) return [];
-        if (item.type === "image") return [{ type: "image", mimeType: safeImageMimeType(item.mimeType), data: typeof item.data === "string" ? item.data : "" }];
+        if (item.type === "image") return [conversationImageSource(item, publishedFiles)];
         if (item.type !== "text") return [];
         return [{
           type: "tool_result",
@@ -2274,7 +2293,7 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
     if (!isRecord(item)) return [];
     if (item.type === "text") return textBlocks("text", item.text);
     if (item.type === "thinking") return textBlocks("thinking", item.thinking);
-    if (item.type === "image") return [{ type: "image", mimeType: safeImageMimeType(item.mimeType), data: typeof item.data === "string" ? item.data : "" }];
+    if (item.type === "image") return [conversationImageSource(item, publishedFiles)];
     if ((item.type === "toolCall" || item.type === "tool_call") && typeof item.name === "string") {
       try {
         const argumentsJson = JSON.stringify(item.arguments ?? {});
@@ -2290,6 +2309,13 @@ function conversationContentBlocks(entry: SessionEntry, projected: AgentHistoryE
     }
     return [];
   });
+}
+
+function conversationImageSource(item: Record<string, unknown>, publishedFiles?: TransientFileRegistry): Extract<ConversationSourceBlock, { type: "image" }> {
+  const mimeType = safeImageMimeType(item.mimeType);
+  const data = typeof item.data === "string" ? item.data : "";
+  const image = registerConversationImage(publishedFiles, data, mimeType);
+  return { type: "image", mimeType, data, ...(image === undefined ? {} : image) };
 }
 
 function stripDockAttachmentContext(content: unknown, attachmentContextKey: Uint8Array): unknown {
@@ -2321,8 +2347,8 @@ function unicodeSafeEnd(value: string, requestedEnd: number): number {
     : requestedEnd;
 }
 
-function conversationContentRef(revision: string, entryId: string): string {
-  return createHash("sha256").update(revision).update("\u0000").update(entryId).digest("hex");
+function conversationContentRef(sessionId: string, entryId: string): string {
+  return createHash("sha256").update(sessionId).update("\u0000").update(entryId).digest("hex");
 }
 
 function trimTokenMap<T>(map: Map<string, T>, max = 8_192): void {
