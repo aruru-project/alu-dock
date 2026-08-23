@@ -153,7 +153,7 @@ function serviceHelp(rest: readonly string[]): string {
 }
 
 function internalTopicHelp(topic: string): string {
-  if (topic === "serve") return `aludock serve — Host startup composition\n\nUsage:\n  aludock --socket PATH serve --dev [--state PATH]\n  aludock --socket PATH serve --dev --main --state PATH [--machine-port PORT] [--machine-name NAME]\n  aludock serve --dev --subhost --state PATH --main-address ADDRESS --machine-port PORT --machine-name NAME [--join-file PATH]\n\nMain is the default and owns every client entry point. Its SubHost listener is\ncontrolled live from Machines unless a development startup fixes an explicit port.\nSubHost has one encrypted upstream and no client socket. Saved role settings apply\nwhen no role flag is supplied.\n`;
+  if (topic === "serve") return `aludock serve — Host startup composition\n\nUsage:\n  aludock --socket PATH serve --dev [--state PATH]\n  aludock --socket PATH serve --dev --main --state PATH [--machine-port PORT] [--machine-name NAME]\n  aludock serve --dev --subhost --state PATH --main-address ADDRESS --machine-port PORT --machine-name NAME [--join-file PATH]\n\nMain is the default and owns every client entry point. Machines controls its\nSubHost listener live. In development, --machine-port saves and enables that port,\nand startup succeeds only after the port is listening. SubHost has one encrypted\nupstream and no client socket. Saved role settings apply when no role flag is supplied.\n`;
   const humanAlternative: Record<string, string> = {
     serve: "Use 'aludock service' to manage the Host.",
     ping: "Use 'aludock service status' for human readiness checks.",

@@ -3,7 +3,6 @@ import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promise
 import { dirname, join, resolve } from "node:path";
 
 import { hardenWindowsPrivatePath, syncPrivateDirectory } from "../platform/private-state.js";
-import { claimMachineStateChange } from "./machine-state.js";
 
 const SETTINGS_SCHEMA = 1 as const;
 const MAX_SETTINGS_BYTES = 64 * 1024;
@@ -21,6 +20,12 @@ export interface MachineSettings extends StoredMachineSettings {
   role: "main" | "subhost";
 }
 
+export interface MachineListenerConfiguration {
+  configRevision: number;
+  connectionsEnabled: boolean;
+  port: number;
+}
+
 interface StoredSubHostStatus {
   schemaVersion: 1;
   hostEpoch: string;
@@ -36,13 +41,26 @@ export interface SubHostStatus {
   updatedAt?: string;
 }
 
-export interface MachineListenerStatus {
+export interface MachineListenerStatus extends MachineListenerConfiguration {
   schemaVersion: 1;
-  configRevision: number;
-  state: "disabled" | "listening" | "error" | "stopped";
-  activePort?: number;
-  message?: string;
-  updatedAt: string;
+  state: "disabled" | "listening" | "error";
+}
+
+export function machineListenerConfiguration(settings: MachineSettings): MachineListenerConfiguration {
+  return {
+    configRevision: settings.revision,
+    connectionsEnabled: settings.main.connectionsEnabled,
+    port: settings.main.port,
+  };
+}
+
+export function sameMachineListenerConfiguration(
+  left: MachineListenerConfiguration | undefined,
+  right: MachineListenerConfiguration,
+): boolean {
+  return left?.configRevision === right.configRevision
+    && left.connectionsEnabled === right.connectionsEnabled
+    && left.port === right.port;
 }
 
 /** Saved settings select the next startup; a live process remains authoritative until then. */
@@ -55,14 +73,12 @@ export class MachineSettingsState {
   readonly filePath: string;
   readonly listenerStatusPath: string;
   readonly subHostStatusPath: string;
-  private readonly changePath: string;
 
   constructor(stateRoot: string) {
     const root = resolve(stateRoot);
     this.filePath = join(root, "machine-settings.json");
     this.listenerStatusPath = join(root, "main-listener-status.json");
     this.subHostStatusPath = join(root, "subhost-status.json");
-    this.changePath = join(root, ".machine-settings-changing");
   }
 
   async read(): Promise<MachineSettings> {
@@ -70,9 +86,8 @@ export class MachineSettingsState {
     return { ...stored, role: stored.roleOverride === "subhost" ? "subhost" : "main" };
   }
 
-  async writeMainConnections(input: { enabled: boolean; port: number; name?: string }, expectedRevision?: number): Promise<MachineSettings> {
+  async writeMainConnections(input: { enabled: boolean; port: number; name?: string }): Promise<MachineSettings> {
     return this.mutateStored((current) => {
-      if (expectedRevision !== undefined && current.revision !== expectedRevision) throw new Error("Machine settings changed; review them and try again");
       return {
         ...current,
         revision: current.revision + 1,
@@ -160,14 +175,9 @@ export class MachineSettingsState {
   }
 
   private async mutateStored(update: (current: StoredMachineSettings) => StoredMachineSettings): Promise<MachineSettings> {
-    const release = await claimMachineStateChange(this.changePath);
-    try {
-      const next = parseSettings(update(await this.readStored()));
-      await writeAtomicJson(this.filePath, next);
-      return { ...next, role: next.roleOverride === "subhost" ? "subhost" : "main" };
-    } finally {
-      await release();
-    }
+    const next = parseSettings(update(await this.readStored()));
+    await writeAtomicJson(this.filePath, next);
+    return { ...next, role: next.roleOverride === "subhost" ? "subhost" : "main" };
   }
 
   private async readStored(): Promise<StoredMachineSettings> {
@@ -224,18 +234,16 @@ function parseSettings(input: unknown): StoredMachineSettings {
 
 function parseMachineListenerStatus(input: unknown): MachineListenerStatus {
   const value = record(input, "Machine listener status");
-  exact(value, ["schemaVersion", "configRevision", "state", "activePort", "message", "updatedAt"]);
+  exact(value, ["schemaVersion", "configRevision", "connectionsEnabled", "port", "state"]);
   if (value.schemaVersion !== 1 || !Number.isSafeInteger(value.configRevision) || (value.configRevision as number) < 0) throw new Error("Machine listener status is invalid");
-  if (!(["disabled", "listening", "error", "stopped"] as const).includes(value.state as "disabled" | "listening" | "error" | "stopped")) throw new Error("Machine listener status is invalid");
-  const updatedAt = checkedText(value.updatedAt, "Machine listener status time", 64);
-  if (new Date(updatedAt).toISOString() !== updatedAt) throw new Error("Machine listener status time is invalid");
+  if (typeof value.connectionsEnabled !== "boolean") throw new Error("Machine listener status is invalid");
+  if (!(["disabled", "listening", "error"] as const).includes(value.state as "disabled" | "listening" | "error")) throw new Error("Machine listener status is invalid");
   return {
     schemaVersion: 1,
     configRevision: value.configRevision as number,
+    connectionsEnabled: value.connectionsEnabled,
+    port: checkedPort(value.port),
     state: value.state as MachineListenerStatus["state"],
-    ...(value.activePort === undefined ? {} : { activePort: checkedPort(value.activePort) }),
-    ...(value.message === undefined ? {} : { message: checkedText(value.message, "Machine listener status message", 2_048) }),
-    updatedAt,
   };
 }
 

@@ -12,6 +12,7 @@ import { AttachmentStorageState } from "../src/control/attachment-storage-state.
 import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
+import { MachineSettingsState } from "../src/control/machine-settings-state.js";
 import { machineStateRoot, MainMachineState, writeMachineJoinFile } from "../src/control/machine-state.js";
 import { MainMachineController } from "../src/control/machine-transport.js";
 import { MainMachineDockToolsAuthority } from "../src/control/main-machine-dock-tools.js";
@@ -83,6 +84,8 @@ test("DockClient uses one Main identity for SubHost read, prompt, follow, and sp
   const state = new MainMachineState(machineStateRoot(mainCatalog), "Fixture Main");
   await state.initialize();
   await writeMachineJoinFile(joinPath, await state.createJoin());
+  const listenerSettings = new MachineSettingsState(join(root, "main-listener"));
+  await listenerSettings.writeMainConnections({ enabled: true, port });
 
   const children = new Set<ChildProcess>();
   const hosts: DockHost[] = [];
@@ -96,7 +99,7 @@ test("DockClient uses one Main identity for SubHost read, prompt, follow, and sp
     const registry = new DockRegistry(async () => { throw new Error("Main runtime is not used in this scenario"); });
     let dockTools!: MainMachineDockToolsAuthority;
     const controller = new MainMachineController({
-      state: new MainMachineState(machineStateRoot(mainCatalog), "Fixture Main"), port, bindAddress: "::1", mainHostEpoch: registry.hostEpoch,
+      state: new MainMachineState(machineStateRoot(mainCatalog), "Fixture Main"), settingsState: listenerSettings, bindAddress: "::1", mainHostEpoch: registry.hostEpoch,
       invokeDockTool: (sourceMainId, sourceMachineId, request) => dockTools.invoke(sourceMainId, sourceMachineId, request),
       localSnapshots: () => registry.list(),
     });

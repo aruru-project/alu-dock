@@ -195,6 +195,13 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   }
   if (options.role === "main" && options.machinePort !== undefined && !catalogPath) throw new Error("SubHost connections require --state PATH so trust and routes survive restart");
   if (options.role === "main" && (options.mainAddress || options.joinFile)) throw new Error("Main startup does not accept SubHost connection options");
+  if (options.role === "main" && options.machinePort !== undefined) {
+    const state = machineSettingsState as MachineSettingsState;
+    const configured = await state.read();
+    if (!configured.main.connectionsEnabled || configured.main.port !== options.machinePort || configured.main.name !== options.machineName) {
+      await state.writeMainConnections({ enabled: true, port: options.machinePort, name: options.machineName });
+    }
+  }
 
   const { createPiInstance, createPiProjectTrustCoordinator, resolvePiReopenTarget } = await import("./pi/create-pi-instance.js");
   const { createPiSessionInventory } = await import("./pi/session-inventory.js");
@@ -264,9 +271,8 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     if (options.role === "main" && durable) {
       routeAuthority = new MainMachineController({
         state: new MainMachineState(machineStateRoot(catalogPath as string), options.machineName ?? "Main"),
-        ...(options.machinePort === undefined
-          ? { settingsState: machineSettingsState as MachineSettingsState }
-          : { port: options.machinePort }),
+        settingsState: machineSettingsState as MachineSettingsState,
+        ...(options.machinePort === undefined ? {} : { requiredInitialPort: options.machinePort }),
         mainHostEpoch: registry.hostEpoch,
         invokeDockTool: (sourceMainId, sourceMachineId, request) => (dockToolsAuthority as MainMachineDockToolsAuthority).invoke(sourceMainId, sourceMachineId, request),
         dockToolsSourceOff: (sourceMainId) => (dockToolsAuthority as MainMachineDockToolsAuthority).cancelSource(sourceMainId),

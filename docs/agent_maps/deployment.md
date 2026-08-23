@@ -57,7 +57,7 @@ Main 的 Machines 页面可以在 Host 运行时创建 join file；文件只含�
 aludock machine join-file --out /private/subhost.join
 ```
 
-显式开发入口可覆盖保存的角色设置：
+显式开发入口可覆盖保存的角色设置；Main 的 `--machine-port` 会保存并启用该端口，且端口绑定成功后才完成启动：
 
 ```bash
 aludock --socket /run/user/$UID/alu-main.sock serve --dev --main \

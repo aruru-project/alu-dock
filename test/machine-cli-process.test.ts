@@ -15,6 +15,20 @@ async function freePort(): Promise<number> { const server = createServer(); awai
 function exited(child: ChildProcess): Promise<void> { if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(); return new Promise((resolve) => child.once("exit", () => resolve())); }
 async function stop(child: ChildProcess): Promise<void> { if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM"); await exited(child); }
 async function run(args: string[], env: NodeJS.ProcessEnv): Promise<void> { await new Promise<void>((resolve, reject) => execFile(process.execPath, [cli, ...args], { env }, (error) => error ? reject(error) : resolve())); }
+async function turnOnMachineConnectionsFromHub(socketPath: string, port: number, env: NodeJS.ProcessEnv): Promise<string> {
+  const driver = join(process.cwd(), "test/fixtures/pty-tui-driver.py");
+  const stdout = await new Promise<string>((resolveRun, rejectRun) => {
+    execFile("python3", [driver, process.execPath, cli, "--socket", socketPath], {
+      env: { ...env, ALU_DOCK_PTY_ACTION: "hub-machine-connections", ALU_DOCK_PTY_PORT: String(port) },
+      maxBuffer: 4 * 1024 * 1024,
+    }, (error, output, stderr) => error ? rejectRun(new Error(`Machines TUI failed: ${stderr}`, { cause: error })) : resolveRun(output));
+  });
+  const result = JSON.parse(stdout) as { status: number; timedOut: boolean; output: string };
+  const output = Buffer.from(result.output, "base64").toString("utf8");
+  assert.equal(result.timedOut, false, output.slice(-2_000));
+  assert.equal(result.status, 0, output.slice(-2_000));
+  return output;
+}
 
 class TcpProxy {
   private server: Server | undefined;
@@ -55,7 +69,7 @@ async function containsBytes(root: string, expected: Buffer): Promise<boolean> {
 test("Main toggles SubHost connections live while native Pi work stays alive offline", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-machine-cli-"));
   const workspace = join(root, "workspace"); await mkdir(workspace);
-  const mainCatalog = join(root, "main", "catalog.json"), subCatalog = join(root, "sub", "catalog.json"), joinFile = join(root, "join.json"), socketPath = join(root, "main.sock");
+  const mainCatalog = join(root, "main-state", "alu-dock", "catalog.json"), subCatalog = join(root, "sub", "catalog.json"), joinFile = join(root, "join.json"), socketPath = join(root, "main.sock");
   const mainPort = await freePort(), proxyPort = await freePort();
   const mainEnv = { ...process.env, HOME: join(root, "main-home"), XDG_STATE_HOME: join(root, "main-state"), XDG_DATA_HOME: join(root, "main-data") };
   const subEnv = { ...process.env, HOME: join(root, "sub-home"), XDG_STATE_HOME: join(root, "sub-state"), XDG_DATA_HOME: join(root, "sub-data") };
@@ -69,10 +83,20 @@ test("Main toggles SubHost connections live while native Pi work stays alive off
   await waitReady(sub, "SubHost");
   assert.equal(sub.exitCode, null, "SubHost stays alive before Main exists");
 
-  const startMain = async (): Promise<ChildProcess> => { const child = spawn(process.execPath, [cli, "--socket", socketPath, "serve", "--dev", "--main", "--state", mainCatalog], { env: mainEnv, stdio: ["ignore", "pipe", "pipe"] }); children.push(child); await waitReady(child, "Main"); return child; };
+  const startMain = async (withPort = false): Promise<ChildProcess> => {
+    const args = [cli, "--socket", socketPath, "serve", "--dev", "--main", "--state", mainCatalog];
+    if (withPort) args.push("--machine-port", String(mainPort));
+    const child = spawn(process.execPath, args, { env: mainEnv, stdio: ["ignore", "pipe", "pipe"] });
+    children.push(child);
+    await waitReady(child, "Main");
+    return child;
+  };
   const firstMain = await startMain();
   let client = new DockClient({ socketPath, timeoutMs: 5_000 });
-  await machineSettings.writeMainConnections({ enabled: true, port: mainPort });
+  const machinesOutput = await turnOnMachineConnectionsFromHub(socketPath, mainPort, mainEnv);
+  assert.match(machinesOutput, /Machines/u);
+  assert.match(machinesOutput, /SubHost Connections · On/u);
+  assert.equal((await machineSettings.read()).main.port, mainPort, machinesOutput.slice(-2_000));
   const hostId = await waitMachine(client, true);
   const created = await client.create(workspace, "CLI remote Pi", "cli-remote-create", undefined, hostId);
   assert.notEqual(created.id, "cli-remote-create");
@@ -83,19 +107,26 @@ test("Main toggles SubHost connections live while native Pi work stays alive off
   assert.equal(await containsBytes(join(root, "sub-data"), attachment), true);
   assert.equal(await containsBytes(join(root, "main-data"), attachment), false);
 
+  const beforeOffline = await client.status(created.id);
   await machineSettings.writeMainConnections({ enabled: false, port: mainPort });
   await waitMachine(client, false);
   assert.equal(sub.exitCode, null, "turning off Machine connections must not stop the SubHost");
   await machineSettings.writeMainConnections({ enabled: true, port: mainPort });
   await waitMachine(client, true);
-  assert.equal((await client.status(created.id)).id, created.id, "turning Machine connections back on keeps the same Main identity");
+  const afterReconnect = await client.status(created.id);
+  assert.equal(afterReconnect.id, created.id, "turning Machine connections back on keeps the same Main identity");
+  assert.equal(afterReconnect.runtimeGeneration, beforeOffline.runtimeGeneration, "the same Pi worker returns after Machine connections reopen");
+  assert.equal(afterReconnect.execution, beforeOffline.execution);
 
   await stop(firstMain);
   assert.equal(sub.exitCode, null);
   await new Promise((resolve) => setTimeout(resolve, 300));
-  const secondMain = await startMain(); client = new DockClient({ socketPath, timeoutMs: 5_000 });
+  const secondMain = await startMain(true); client = new DockClient({ socketPath, timeoutMs: 5_000 });
   const stable = await waitInstance(client, "cli-remote-create", created.id);
   assert.equal(stable.id, created.id);
+  const listenerStatus = await machineSettings.readMainListenerStatus();
+  assert.equal(listenerStatus?.state, "listening", "an explicit development port stays visible in Machines");
+  assert.equal(listenerStatus?.port, mainPort);
 
   await proxy.stop();
   await waitMachine(client, false);

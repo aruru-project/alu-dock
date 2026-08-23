@@ -10,9 +10,16 @@ import type { TLSSocket } from "node:tls";
 
 import type { DockToolsHostPort } from "../src/core/dock-tools.js";
 import type { InstanceSnapshot } from "../src/core/managed-instance.js";
+import { MachineSettingsState } from "../src/control/machine-settings-state.js";
 import { MainMachineState, SubHostMachineState, writeMachineJoinFile } from "../src/control/machine-state.js";
 import { MachineMutationEffectUnknownError, MainMachineController, SubHostDockToolsPort, SubHostMachineConnection, writeMachine } from "../src/control/machine-transport.js";
 import type { ControlRequest } from "../src/control/protocol.js";
+
+async function enabledListener(root: string, port: number): Promise<MachineSettingsState> {
+  const state = new MachineSettingsState(join(root, "listener"));
+  await state.writeMainConnections({ enabled: true, port });
+  return state;
+}
 
 function snapshot(id: string, hostEpoch = "subhost-epoch"): InstanceSnapshot {
   return {
@@ -174,7 +181,7 @@ test("an inventory larger than the old machine line crosses real TLS in ordered 
   });
   assert.ok(Buffer.byteLength(JSON.stringify(snapshots), "utf8") > 2 * 1024 * 1024);
 
-  const controller = new MainMachineController({ state: mainState, port, bindAddress: "::1", mainHostEpoch: "large-main-epoch", localSnapshots: () => [] });
+  const controller = new MainMachineController({ state: mainState, settingsState: await enabledListener(root, port), bindAddress: "::1", mainHostEpoch: "large-main-epoch", localSnapshots: () => [] });
   const upstream = new SubHostMachineConnection({
     state: subState,
     address: "::1",
@@ -207,7 +214,7 @@ test("a SubHost request ending before response leaves a mutation unconfirmed whi
   const subState = new SubHostMachineState(join(root, "sub"));
   await subState.prepare(joinFile, "Interrupted Request SubHost");
   const remote = snapshot("native-interrupted");
-  const controller = new MainMachineController({ state: mainState, port, bindAddress: "::1", mainHostEpoch: "main-epoch", localSnapshots: () => [] });
+  const controller = new MainMachineController({ state: mainState, settingsState: await enabledListener(root, port), bindAddress: "::1", mainHostEpoch: "main-epoch", localSnapshots: () => [] });
   const upstream = new SubHostMachineConnection({
     state: subState,
     address: "::1",
@@ -240,7 +247,7 @@ test("Main keeps the first global key owner while later SubHost duplicates remai
   const machine = await state.get(machineId);
   assert.ok(machine);
   const localOwner = { ...snapshot("main-local", "main-epoch"), key: "main-owned" };
-  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch", localSnapshots: () => [localOwner] });
+  const controller = new MainMachineController({ state, mainHostEpoch: "main-epoch", localSnapshots: () => [localOwner] });
   const fakeSocket = { destroyed: false, destroy(): void { this.destroyed = true; } };
   const connection = { machine, socket: fakeSocket as unknown as TLSSocket, hostEpoch: "subhost-epoch", streams: new Map(), lastSeenAt: Date.now(), candidateOrdinal: 1, closed: false };
   const internals = controller as unknown as {
@@ -286,7 +293,7 @@ test("a global key reservation serializes concurrent ensure and inventory withou
   const machine = await state.get(machineId);
   assert.ok(machine);
   let localOwner: InstanceSnapshot | undefined;
-  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch", localSnapshots: () => localOwner ? [localOwner] : [] });
+  const controller = new MainMachineController({ state, mainHostEpoch: "main-epoch", localSnapshots: () => localOwner ? [localOwner] : [] });
   const fakeSocket = { destroyed: false, destroy(): void { this.destroyed = true; } };
   const connection = { machine, socket: fakeSocket as unknown as TLSSocket, hostEpoch: "subhost-epoch", streams: new Map(), lastSeenAt: Date.now(), candidateOrdinal: 1, closed: false };
   const internals = controller as unknown as {
@@ -347,7 +354,7 @@ test("online-stop response generation tombstone survives reload, suppresses that
   });
   const machine = await state.get(machineId);
   assert.ok(machine);
-  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
+  const controller = new MainMachineController({ state, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
   const fakeSocket = { destroyed: false, destroy(): void { this.destroyed = true; } };
   const connection = { machine, socket: fakeSocket as unknown as TLSSocket, hostEpoch: "subhost-epoch", streams: new Map(), lastSeenAt: Date.now(), candidateOrdinal: 1, closed: false };
   const stream = {
@@ -376,7 +383,7 @@ test("online-stop response generation tombstone survives reload, suppresses that
   assert.deepEqual((await reloaded.get(machineId))?.retiredRoutes, [{ nativeInstanceId: nativeId, runtimeGeneration: 4 }]);
   const reloadedMachine = await reloaded.get(machineId);
   assert.ok(reloadedMachine);
-  const reloadedController = new MainMachineController({ state: reloaded, port: 0, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
+  const reloadedController = new MainMachineController({ state: reloaded, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
   const reloadedConnection = { ...connection, machine: reloadedMachine, streams: new Map(), candidateOrdinal: 1, closed: false };
   const reloadedInternals = reloadedController as unknown as {
     completeInitialInventory(candidate: unknown, epoch: string, values: InstanceSnapshot[]): Promise<void>;
@@ -413,7 +420,7 @@ test("successful routed forget retires its Main route before success and stale i
   });
   const currentMachine = await state.get(machineId);
   assert.ok(currentMachine);
-  const controller = new MainMachineController({ state, port: 0, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
+  const controller = new MainMachineController({ state, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
   const socket = { destroyed: false, destroy(): void {} } as unknown as TLSSocket;
   const connection = { machine: currentMachine, socket, hostEpoch: "subhost-epoch", streams: new Map<string, unknown>(), lastSeenAt: Date.now(), candidateOrdinal: 1, closed: false };
   let emittedAfterRetirement = false;
@@ -444,7 +451,7 @@ test("successful routed forget retires its Main route before success and stale i
 });
 
 test("routed response transfer applies the public frame-count safety boundary", async () => {
-  const controller = new MainMachineController({ state: new MainMachineState(join(tmpdir(), `alu-transfer-${randomUUID()}`)), port: 0, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
+  const controller = new MainMachineController({ state: new MainMachineState(join(tmpdir(), `alu-transfer-${randomUUID()}`)), mainHostEpoch: "main-epoch", localSnapshots: () => [] });
   const stream = {
     streamId: "transfer", machineId: "machine", connection: {}, requestId: "transfer-request", requestType: "session.tree",
     route: { mainInstanceId: "main", nativeInstanceId: "native", mainHostEpoch: "main-epoch", nativeHostEpoch: "native-epoch" },
@@ -463,7 +470,7 @@ test("raw handshake sockets stay bounded, admit the newest candidate, and cannot
   if (!address || typeof address === "string") throw new Error("test port is unavailable");
   const port = address.port;
   await new Promise<void>((resolve) => portServer.close(() => resolve()));
-  const controller = new MainMachineController({ state: new MainMachineState(join(root, "main")), port, bindAddress: "::1", mainHostEpoch: "main-epoch", localSnapshots: () => [] });
+  const controller = new MainMachineController({ state: new MainMachineState(join(root, "main")), settingsState: await enabledListener(root, port), bindAddress: "::1", mainHostEpoch: "main-epoch", localSnapshots: () => [] });
   await controller.start();
   const clients: Socket[] = [];
   context.after(async () => { for (const client of clients) client.destroy(); await controller.stop(); await rm(root, { recursive: true, force: true }); });
@@ -496,7 +503,7 @@ test("an idle handshake expires while the machine listener stays available", { t
   if (!address || typeof address === "string") throw new Error("test port is unavailable");
   const port = address.port;
   await new Promise<void>((resolve) => portServer.close(() => resolve()));
-  const controller = new MainMachineController({ state: new MainMachineState(join(root, "main")), port, bindAddress: "::1", mainHostEpoch: "main-epoch", localSnapshots: () => [] });
+  const controller = new MainMachineController({ state: new MainMachineState(join(root, "main")), settingsState: await enabledListener(root, port), bindAddress: "::1", mainHostEpoch: "main-epoch", localSnapshots: () => [] });
   await controller.start();
   const clients: Socket[] = [];
   context.after(async () => { for (const client of clients) client.destroy(); await controller.stop(); await rm(root, { recursive: true, force: true }); });

@@ -11,6 +11,7 @@ import { DockClient } from "../src/control/dock-client.js";
 import { DockHost } from "../src/control/dock-host.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
 import { MainMachineDockToolsAuthority } from "../src/control/main-machine-dock-tools.js";
+import { MachineSettingsState } from "../src/control/machine-settings-state.js";
 import { machineStateRoot, MainMachineState, writeMachineJoinFile } from "../src/control/machine-state.js";
 import { MainMachineController } from "../src/control/machine-transport.js";
 import type { DockToolsHostPort } from "../src/core/dock-tools.js";
@@ -163,6 +164,8 @@ test("a real Pi Worker executes dock_list through its SubHost and encrypted Main
   const machineState = new MainMachineState(machineStateRoot(mainCatalog), "Dock Tools Main");
   await machineState.initialize();
   await writeMachineJoinFile(joinPath, await machineState.createJoin());
+  const listenerSettings = new MachineSettingsState(join(root, "main-listener"));
+  await listenerSettings.writeMainConnections({ enabled: true, port });
 
   const mainRegistry = new DockRegistry(async (input) => new ManagedInstance({
     id: input.id,
@@ -179,7 +182,7 @@ test("a real Pi Worker executes dock_list through its SubHost and encrypted Main
   let dockTools!: MainMachineDockToolsAuthority;
   const controller = new MainMachineController({
     state: machineState,
-    port,
+    settingsState: listenerSettings,
     bindAddress: "::1",
     mainHostEpoch: mainRegistry.hostEpoch,
     localSnapshots: () => mainRegistry.list(),

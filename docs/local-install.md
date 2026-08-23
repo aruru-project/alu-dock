@@ -95,7 +95,7 @@ Main 打开完整 Hub，SubHost 打开最小管理界面。`Open-AluDock.ps1` �
 显式开发覆盖仍可使用：
 
 ```powershell
-# Main；MachinePort 只覆盖本次开发启动
+# Main；MachinePort 保存并启用端口，启动前确认它已经监听
 .\scripts\Start-AluDockHost.ps1 -Role main -MachinePort 7444 -MachineName "Windows Main"
 
 # SubHost：第一次额外传入 JoinFile

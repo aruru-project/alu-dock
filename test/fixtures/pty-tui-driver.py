@@ -82,7 +82,7 @@ def main() -> int:
     status = 1
     try:
         action = os.environ.get("ALU_DOCK_PTY_ACTION", "detach")
-        hub_actions = ("hub-exit", "hub-click-leave", "hub-narrow", "hub-signal", "hub-signal-inventory", "hub-new", "hub-continue", "hub-mouse-continue", "hub-history", "hub-history-forget", "hub-adopt", "hub-remote-settings", "hub-attachment-settings", "hub-pairing-open", "hub-devices-auto-update", "hub-pairing", "hub-revoke")
+        hub_actions = ("hub-exit", "hub-click-leave", "hub-narrow", "hub-signal", "hub-signal-inventory", "hub-new", "hub-continue", "hub-mouse-continue", "hub-history", "hub-history-forget", "hub-adopt", "hub-machine-connections", "hub-remote-settings", "hub-attachment-settings", "hub-pairing-open", "hub-devices-auto-update", "hub-pairing", "hub-revoke")
         startup_marker = b"Alu Dock Hub" if action in hub_actions else b"cache "
         set_size(fd, 24, 80)
         deadline = time.monotonic() + 12
@@ -255,6 +255,41 @@ def main() -> int:
                         break
                 os.write(fd, b"\x1b")
                 time.sleep(0.2)
+                os.write(fd, b"\x1b")
+            elif action == "hub-machine-connections":
+                port = os.environ["ALU_DOCK_PTY_PORT"].encode("ascii")
+                for _ in range(4):
+                    write_input(fd, output, b"\x1b[B")  # Machines is fifth.
+                machines_start = len(output)
+                os.write(fd, b"\r")
+                machines_deadline = time.monotonic() + 5
+                while b"SubHost Connections" not in output[machines_start:] and time.monotonic() < machines_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                write_input(fd, output, b"\x1b[B")
+                write_input(fd, output, b"\x1b[B")  # Port is third before a SubHost has joined.
+                prompt_start = len(output)
+                os.write(fd, b"\r")
+                prompt_deadline = time.monotonic() + 5
+                while b"SubHost port" not in output[prompt_start:] and time.monotonic() < prompt_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, (b"\x7f" * 8) + port + b"\r")
+                saved_marker = b"Port \xc2\xb7 " + port
+                saved_deadline = time.monotonic() + 5
+                while saved_marker not in output[prompt_start:] and time.monotonic() < saved_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                write_input(fd, output, b"\x1b[B")  # SubHost Connections is second.
+                os.write(fd, b"\r")
+                enabled_deadline = time.monotonic() + 10
+                while b"SubHost connections are on at port" not in output[machines_start:] and time.monotonic() < enabled_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\x1b")
+                time.sleep(0.3)
+                while read_available(fd, output, 0.01) > 0:
+                    pass
                 os.write(fd, b"\x1b")
             elif action == "hub-remote-settings":
                 port = os.environ.get("ALU_DOCK_PTY_PORT", "9999").encode("ascii")
@@ -781,7 +816,7 @@ def main() -> int:
                 os.write(fd, b"\x0f")  # Ctrl+O: collapse/expand tool output.
                 time.sleep(0.1)
                 read_available(fd, output, 0.05)
-            if action not in ("hub-exit", "hub-click-leave", "hub-signal", "hub-signal-inventory", "hub-history-forget", "hub-remote-settings", "hub-attachment-settings", "hub-pairing-open", "hub-devices-auto-update", "hub-pairing", "hub-revoke"):
+            if action not in ("hub-exit", "hub-click-leave", "hub-signal", "hub-signal-inventory", "hub-history-forget", "hub-machine-connections", "hub-remote-settings", "hub-attachment-settings", "hub-pairing-open", "hub-devices-auto-update", "hub-pairing", "hub-revoke"):
                 os.write(fd, b"\x04")  # Ctrl+D: detach without stopping.
 
         exit_deadline = time.monotonic() + 8

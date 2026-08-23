@@ -15,7 +15,7 @@ import { decodeResponseTransfer, parseControlResponse, parseEnsureResult, parseF
 import { encodeJsonLine, JsonLineDecoder } from "./json-lines.js";
 import { boundedInstanceListPage } from "./instance-list-page.js";
 import { MainMachineState, SubHostMachineState, type MachineRouteRecord, type SubHostUpstreamRecord, type TrustedSubHostRecord } from "./machine-state.js";
-import { MachineSettingsState, type MachineSettings } from "./machine-settings-state.js";
+import { MachineSettingsState, machineListenerConfiguration, sameMachineListenerConfiguration, type MachineListenerConfiguration, type MachineSettings } from "./machine-settings-state.js";
 import { recordForMainHost, requestForNativeHost, snapshotForMain, type MachineRouteIdentity } from "./machine-route-identity.js";
 import { MAX_DOCK_TRANSFER_BYTES, MAX_RESPONSE_TRANSFER_CHUNK_BYTES, MAX_RESPONSE_TRANSFER_CHUNKS } from "../core/transport-bounds.js";
 import { MAX_DURABLE_CATALOG_BYTES } from "./durable-catalog-store.js";
@@ -166,9 +166,9 @@ export class MainMachineController implements MainRouteAuthority {
   private listenerIdentity: { privateKeyPem: string; certificatePem: string } | undefined;
   private staleConnectionTimer: NodeJS.Timeout | undefined;
   private listenerPollTimer: NodeJS.Timeout | undefined;
-  private listenerPollPromise: Promise<void> | undefined;
-  private lastAttemptedListenerRevision = -1;
-  private appliedListenerRevision = -1;
+  private listenerPollPromise: Promise<unknown | undefined> | undefined;
+  private lastAttemptedListenerConfiguration: MachineListenerConfiguration | undefined;
+  private appliedListenerConfiguration: MachineListenerConfiguration | undefined;
   private nextListenerAttemptAt = 0;
   private readonly connections = new Map<string, MainConnection>();
   private readonly acceptedSockets = new Map<string, AcceptedMachineSocket>();
@@ -190,7 +190,7 @@ export class MainMachineController implements MainRouteAuthority {
   constructor(private readonly options: {
     state: MainMachineState;
     settingsState?: MachineSettingsState;
-    port?: number;
+    requiredInitialPort?: number;
     mainHostEpoch: string;
     bindAddress?: string;
     invokeDockTool?: (sourceMainId: string, sourceMachineId: string, request: DockToolsRequest) => Promise<DockToolsResult>;
@@ -218,11 +218,12 @@ export class MainMachineController implements MainRouteAuthority {
       }, INVENTORY_INTERVAL_MS);
       this.staleConnectionTimer.unref?.();
       if (this.options.settingsState) {
-        await this.triggerListenerPoll();
+        const listenerError = await this.triggerListenerPoll();
+        if (this.options.requiredInitialPort !== undefined && (listenerError !== undefined || this.activePort !== this.options.requiredInitialPort)) {
+          throw listenerError ?? new Error(`Could not listen on port ${this.options.requiredInitialPort}`);
+        }
         this.listenerPollTimer = setInterval(() => { void this.triggerListenerPoll(); }, INVENTORY_INTERVAL_MS);
         this.listenerPollTimer.unref?.();
-      } else if (this.options.port !== undefined) {
-        await this.openListener(this.options.port);
       }
     } catch (error) {
       this.started = false;
@@ -242,18 +243,10 @@ export class MainMachineController implements MainRouteAuthority {
     this.staleConnectionTimer = undefined;
     await this.closeListener();
     await this.authorityTail;
-    if (this.options.settingsState) {
-      await this.options.settingsState.writeMainListenerStatus({
-        schemaVersion: 1,
-        configRevision: Math.max(0, this.lastAttemptedListenerRevision),
-        state: "stopped",
-        updatedAt: new Date().toISOString(),
-      }).catch(() => {});
-    }
   }
 
-  private triggerListenerPoll(): Promise<void> {
-    if (!this.started || !this.options.settingsState) return Promise.resolve();
+  private triggerListenerPoll(): Promise<unknown | undefined> {
+    if (!this.started || !this.options.settingsState) return Promise.resolve(undefined);
     if (this.listenerPollPromise) return this.listenerPollPromise;
     const current = this.pollListenerSettings().finally(() => {
       if (this.listenerPollPromise === current) this.listenerPollPromise = undefined;
@@ -262,23 +255,27 @@ export class MainMachineController implements MainRouteAuthority {
     return current;
   }
 
-  private async pollListenerSettings(): Promise<void> {
+  private async pollListenerSettings(): Promise<unknown | undefined> {
     const state = this.options.settingsState as MachineSettingsState;
     try {
       const settings = await state.read();
-      if (settings.revision !== this.lastAttemptedListenerRevision) this.nextListenerAttemptAt = 0;
-      if (settings.revision === this.appliedListenerRevision || Date.now() < this.nextListenerAttemptAt) return;
-      this.lastAttemptedListenerRevision = settings.revision;
+      const configuration = machineListenerConfiguration(settings);
+      if (!sameMachineListenerConfiguration(this.lastAttemptedListenerConfiguration, configuration)) this.nextListenerAttemptAt = 0;
+      if (sameMachineListenerConfiguration(this.appliedListenerConfiguration, configuration) || Date.now() < this.nextListenerAttemptAt) return undefined;
+      this.lastAttemptedListenerConfiguration = configuration;
+      this.appliedListenerConfiguration = undefined;
       try {
         await this.applyListenerSettings(settings);
-        this.appliedListenerRevision = settings.revision;
+        this.appliedListenerConfiguration = configuration;
         this.nextListenerAttemptAt = 0;
+        return undefined;
       } catch (error) {
         this.nextListenerAttemptAt = Date.now() + MACHINE_LISTENER_RETRY_MS;
-        await this.recordListenerError(settings.revision, settings.main.port, error);
+        await this.recordListenerError(settings);
+        return error;
       }
     } catch (error) {
-      await this.recordListenerError(Math.max(0, this.lastAttemptedListenerRevision), undefined, error);
+      return error;
     }
   }
 
@@ -288,9 +285,8 @@ export class MainMachineController implements MainRouteAuthority {
       await this.closeListener();
       await state.writeMainListenerStatus({
         schemaVersion: 1,
-        configRevision: settings.revision,
+        ...machineListenerConfiguration(settings),
         state: "disabled",
-        updatedAt: new Date().toISOString(),
       });
       return;
     }
@@ -300,23 +296,18 @@ export class MainMachineController implements MainRouteAuthority {
     }
     await state.writeMainListenerStatus({
       schemaVersion: 1,
-      configRevision: settings.revision,
+      ...machineListenerConfiguration(settings),
       state: "listening",
-      activePort: settings.main.port,
-      updatedAt: new Date().toISOString(),
     });
   }
 
-  private async recordListenerError(configRevision: number, port: number | undefined, error: unknown): Promise<void> {
+  private async recordListenerError(settings: MachineSettings): Promise<void> {
     const state = this.options.settingsState;
     if (!state) return;
-    const message = error instanceof Error ? error.message : String(error);
     await state.writeMainListenerStatus({
       schemaVersion: 1,
-      configRevision,
+      ...machineListenerConfiguration(settings),
       state: "error",
-      message: port === undefined ? message : `Could not listen on port ${port}: ${message}`,
-      updatedAt: new Date().toISOString(),
     }).catch(() => {});
   }
 

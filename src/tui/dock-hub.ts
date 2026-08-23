@@ -22,7 +22,7 @@ import type {
   TrustedClient,
 } from "../control/remote-access-state.js";
 import { MainMachineState, SubHostMachineState, readMachineJoinFile, writeMachineJoinFile } from "../control/machine-state.js";
-import { MachineSettingsState, type MachineListenerStatus, type MachineSettings } from "../control/machine-settings-state.js";
+import { MachineSettingsState, machineListenerConfiguration, sameMachineListenerConfiguration, type MachineListenerStatus, type MachineSettings } from "../control/machine-settings-state.js";
 import type { MachineDto } from "../control/protocol.js";
 import type { InstanceSnapshot, SessionDto } from "../core/managed-instance.js";
 import { humanInstanceStatus } from "../core/instance-display-name.js";
@@ -281,7 +281,7 @@ export function buildDockHubEntries(
       label: `Machines · ${machines.filter((machine) => machine.kind === "subhost").length}`,
       description: "Connect and manage SubHosts",
     },
-    { value: SETTINGS, label: "Settings", description: "Attachments, SubHost connections, and Dock role" },
+    { value: SETTINGS, label: "Settings", description: "Attachments and Dock role" },
     { value: DEVICES, label: "Devices", description: "Connect and manage remote devices" },
     { value: EXIT_HUB, label: "Leave Hub", description: "Return to the shell" },
   ];
@@ -579,11 +579,19 @@ async function chooseMachinesAction(
 ): Promise<void> {
   let notice: string | undefined;
   while (true) {
-    const [settings, status, result] = await Promise.all([
-      machineSettingsState.read(),
-      machineSettingsState.readMainListenerStatus(),
-      client.machines(),
-    ]);
+    let settings: MachineSettings;
+    let status: MachineListenerStatus | undefined;
+    let result: Awaited<ReturnType<DockClient["machines"]>>;
+    try {
+      [settings, status, result] = await Promise.all([
+        machineSettingsState.read(),
+        machineSettingsState.readMainListenerStatus(),
+        client.machines(),
+      ]);
+    } catch {
+      await showLocalAdminUnavailable(terminal, "Machines");
+      return;
+    }
     const subhosts = result.machines.filter((machine) => machine.kind === "subhost");
     const entries: DockHubEntry[] = [
       {
@@ -602,7 +610,7 @@ async function chooseMachinesAction(
         value: "toggle",
         label: `SubHost Connections · ${settings.main.connectionsEnabled ? "On" : "Off"}`,
         description: settings.main.connectionsEnabled
-          ? "Turn off machine connections; paired SubHosts stay saved"
+          ? "Close all SubHost connections; paired machines stay in Machines"
           : `Listen on port ${settings.main.port}`,
       },
       { value: "port", label: `Port · ${settings.main.port}`, description: "Change the port SubHosts use" },
@@ -631,7 +639,7 @@ async function chooseMachinesAction(
         ]);
         const ready = await ensureMachineConnectionsReady(terminal, machineSettingsState, latest, latestStatus);
         if (!ready) {
-          notice = `I couldn’t open SubHost connections on port ${latest.main.port}. Choose another port, then try again.`;
+          notice = machinePortUnavailableNotice(latest.main.port);
           continue;
         }
         const [current, currentStatus] = await Promise.all([
@@ -641,37 +649,36 @@ async function chooseMachinesAction(
         if (
           current.revision !== ready.revision
           || !current.main.connectionsEnabled
-          || currentStatus?.configRevision !== current.revision
-          || currentStatus.state !== "listening"
-          || currentStatus.activePort !== current.main.port
+          || !sameMachineListenerConfiguration(currentStatus, machineListenerConfiguration(current))
+          || currentStatus?.state !== "listening"
         ) {
-          notice = "SubHost connection settings changed before the join file was ready. Review the current port, then try again.";
+          notice = "The Machine port changed while the join file was being prepared. Check the current port, then try again.";
           continue;
         }
         const joinFile = await mainMachineState.createJoin();
         await writeMachineJoinFile(output.trim(), joinFile);
         notice = `Join file saved at ${terminalSafe(resolve(output.trim()))}. On the SubHost, enter this Main’s address and port ${current.main.port}.`;
       } catch {
-        notice = "I couldn’t create the join file. Check the selected path and Machine port, then try again.";
+        notice = "The join file couldn’t be saved. Check the path, then try again.";
       }
       continue;
     }
     if (selected === "toggle") {
       try {
-        const saved = await machineSettingsState.writeMainConnections({ enabled: !settings.main.connectionsEnabled, port: settings.main.port }, settings.revision);
+        const saved = await machineSettingsState.writeMainConnections({ enabled: !settings.main.connectionsEnabled, port: settings.main.port });
         if (settings.main.connectionsEnabled) {
           const stopped = await ensureMachineConnectionsStopped(terminal, machineSettingsState, saved);
           notice = stopped
             ? "SubHost connections are off. Paired machines stay saved."
-            : "SubHost connections are saved as off, but Alu Dock hasn’t finished closing them. Review Machines in a moment.";
+            : "SubHost connections are still closing. Wait a moment, then return to Machines.";
         } else {
           const ready = await ensureMachineConnectionsReady(terminal, machineSettingsState, saved, undefined);
           notice = ready !== undefined
             ? `SubHost connections are on at port ${saved.main.port}.`
-            : `I couldn’t open SubHost connections on port ${saved.main.port}. Choose another port, then try again.`;
+            : machinePortUnavailableNotice(saved.main.port);
         }
       } catch {
-        notice = "I couldn’t change SubHost connections. Check the Dock state directory and try again.";
+        notice = "SubHost connections couldn’t be changed. Try again from this screen.";
       }
       continue;
     }
@@ -679,17 +686,17 @@ async function chooseMachinesAction(
       const port = await promptMachinePort(terminal, settings.main.port);
       if (port === undefined) continue;
       try {
-        const saved = await machineSettingsState.writeMainConnections({ enabled: settings.main.connectionsEnabled, port }, settings.revision);
+        const saved = await machineSettingsState.writeMainConnections({ enabled: settings.main.connectionsEnabled, port });
         if (settings.main.connectionsEnabled) {
           const ready = await ensureMachineConnectionsReady(terminal, machineSettingsState, saved, undefined);
           notice = ready !== undefined
             ? `SubHost connections moved to port ${port}. SubHosts must use this port to reconnect.`
-            : `I couldn’t open SubHost connections on port ${port}. Choose another port, then try again.`;
+            : machinePortUnavailableNotice(port);
         } else {
           notice = `Port ${port} is ready for the next time SubHost connections turn on.`;
         }
       } catch {
-        notice = "I couldn’t save that SubHost port. Check the Dock state directory and try again.";
+        notice = "That Machine port couldn’t be saved. Try again from this screen.";
       }
       continue;
     }
@@ -727,12 +734,16 @@ async function chooseMachinesAction(
   }
 }
 
+function machinePortUnavailableNotice(port: number): string {
+  return `Port ${port} isn’t available for SubHost connections. Choose another port, then try again.`;
+}
+
 function machineConnectionsSubtitle(settings: MachineSettings, status: MachineListenerStatus | undefined, subhostCount: number): string {
   const count = `${subhostCount} SubHost${subhostCount === 1 ? "" : "s"}`;
   if (!settings.main.connectionsEnabled) return `${count} · Connections are off · Port ${settings.main.port}`;
-  if (!status || status.configRevision !== settings.revision) return `${count} · Getting port ${settings.main.port} ready…`;
-  if (status.state === "listening") return `${count} · Listening on port ${status.activePort ?? settings.main.port}`;
-  if (status.state === "error") return `${count} · Port ${settings.main.port} isn’t available; choose another port or try again`;
+  if (!sameMachineListenerConfiguration(status, machineListenerConfiguration(settings))) return `${count} · Getting port ${settings.main.port} ready…`;
+  if (status?.state === "listening") return `${count} · Listening on port ${settings.main.port}`;
+  if (status?.state === "error") return `${count} · Port ${settings.main.port} isn’t available; choose another port or try again`;
   return `${count} · Getting port ${settings.main.port} ready…`;
 }
 
@@ -743,20 +754,19 @@ async function ensureMachineConnectionsReady(
   status: MachineListenerStatus | undefined,
 ): Promise<MachineSettings | undefined> {
   let expected = settings;
-  if (!expected.main.connectionsEnabled) expected = await state.writeMainConnections({ enabled: true, port: expected.main.port }, expected.revision);
+  if (!expected.main.connectionsEnabled) expected = await state.writeMainConnections({ enabled: true, port: expected.main.port });
   if (
     status?.state === "listening"
-    && status.configRevision === expected.revision
-    && status.activePort === expected.main.port
+    && sameMachineListenerConfiguration(status, machineListenerConfiguration(expected))
   ) return expected;
   terminal.clearScreen();
   terminal.write(`\n  Getting SubHost connections ready on port ${expected.main.port}…\n`);
   const deadline = Date.now() + LISTENER_READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const current = await state.readMainListenerStatus();
-    if (current?.configRevision === expected.revision) {
-      if (current.state === "listening" && current.activePort === expected.main.port) return expected;
-      if (current.state === "error" || current.state === "stopped") return undefined;
+    if (sameMachineListenerConfiguration(current, machineListenerConfiguration(expected))) {
+      if (current?.state === "listening") return expected;
+      if (current?.state === "error") return undefined;
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, LISTENER_STATUS_POLL_MS));
   }
@@ -773,9 +783,9 @@ async function ensureMachineConnectionsStopped(
   const deadline = Date.now() + LISTENER_READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const current = await state.readMainListenerStatus();
-    if (current?.configRevision === expected.revision) {
-      if (current.state === "disabled") return true;
-      if (current.state === "error" || current.state === "stopped") return false;
+    if (sameMachineListenerConfiguration(current, machineListenerConfiguration(expected))) {
+      if (current?.state === "disabled") return true;
+      if (current?.state === "error") return false;
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, LISTENER_STATUS_POLL_MS));
   }
@@ -1177,7 +1187,7 @@ async function showLocalAdminUnavailable(terminal: HubProcessTerminal, title: st
   await selectMenu(
     terminal,
     title,
-    "I couldn’t read Dock’s local settings. Check that the Alu Dock state directory is owned by you and private.",
+    "Alu Dock’s settings aren’t available. Open it as the same user who runs the Host, then try again.",
     [{ value: BACK, label: "Back to Hub", description: "Return to the Hub" }],
     "Enter or Esc · back",
   );
