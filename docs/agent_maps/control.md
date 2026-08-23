@@ -149,7 +149,7 @@ DockClient 的下载 API 把 chunk 逐块交给 sink/callback并独立计算 SHA
 - `hostEpoch`：一次 Host 进程域，不是 TLS identity；
 - `instanceId`：Dock 工作实例；
 - Agent 原生 session identity：当前 Worker 内的会话；
-- `runtimeGeneration`：instance 内一次 runtime/session generation；
+- `runtimeGeneration`：instance 内一次 runtime/session generation；tool、setting、resource、command catalog 和 Extension UI 也属于该 generation，客户端不得把旧缓存带入新 generation，也不得把 generation 切换时的本地清空解释为 Worker 返回了空 catalog；
 - `operationId`：一次调用者 mutation 意图；
 - attachment `fileId`：Host logical attachment metadata 的 opaque identity；多个 `fileId` 可以引用同一份 content bytes，它不是路径；
 - event cursor：一次 read/follow reconnect 的观察位置。

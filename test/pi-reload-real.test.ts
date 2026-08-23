@@ -16,6 +16,49 @@ const PROXY_ENVIRONMENT_KEYS = [
   "NO_PROXY", "no_proxy", "PI_OFFLINE",
 ] as const;
 
+test("package-managed Pi extensions remain loaded across new and reload", { timeout: 15_000 }, async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-dock-package-lifecycle-"));
+  const cwd = join(root, "cwd");
+  const agentDir = join(root, "agent");
+  const sessionDir = join(root, "sessions");
+  const packageDirectory = join(agentDir, "fixture-package");
+  await Promise.all([
+    mkdir(cwd),
+    mkdir(sessionDir),
+    mkdir(join(packageDirectory, "extensions"), { recursive: true }),
+  ]);
+  await chmod(root, 0o700);
+  await Promise.all([
+    writeFile(join(agentDir, "settings.json"), JSON.stringify({ packages: ["./fixture-package"] })),
+    writeFile(join(packageDirectory, "package.json"), JSON.stringify({
+      name: "fixture-package",
+      version: "1.0.0",
+      pi: { extensions: ["./extensions"] },
+    })),
+    writeFile(join(packageDirectory, "extensions", "lifecycle-fixture.ts"), `
+export default function (pi) {
+  pi.registerCommand("package-lifecycle-fixture", { handler: async () => {} });
+}
+`),
+  ]);
+  context.after(async () => { await rm(root, { recursive: true, force: true }); });
+
+  const instance = await createPiInstance({ cwd, agentDir, sessionDir, projectTrusted: true });
+  context.after(async () => { await instance.stop().catch(() => {}); });
+  const assertPackageLoaded = async (): Promise<void> => {
+    const commands = await instance.getCommands();
+    const resources = await instance.getResources();
+    assert.equal(commands.commands.some((command) => command.name === "package-lifecycle-fixture"), true);
+    assert.equal(resources.resources.some((resource) => resource.kind === "extension" && resource.name === "lifecycle-fixture.ts"), true);
+  };
+
+  await assertPackageLoaded();
+  assert.equal((await instance.newSession("package-lifecycle-new")).cancelled, false);
+  await assertPackageLoaded();
+  assert.equal((await instance.reloadSession("package-lifecycle-reload")).cancelled, false);
+  await assertPackageLoaded();
+});
+
 test("real Protocol reload completes when remote model catalogs are unavailable (card #222)", { timeout: 15_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "alu-dock-reload-real-"));
   const cwd = join(root, "cwd");

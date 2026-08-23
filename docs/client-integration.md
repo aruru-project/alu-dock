@@ -180,7 +180,7 @@ Host control 提供 workspace list、instance create、ensure、list、get/get-b
 
 Agent session 能力包括 prompt、abort、Queue、conversation、model、thinking、tools、settings、resources、session replacement、tree、compaction 和 Extension UI。实际可用能力以 hello capability negotiation 为准。
 
-Agent session replacement 会保留 `instanceId`，但推进 `runtimeGeneration`。旧 generation 的 event、cursor 和 interaction response 不能继续使用。
+Agent session replacement 会保留 `instanceId`，但推进 `runtimeGeneration`。旧 generation 的 event、cursor 和 interaction response 不能继续使用。Tool、setting、resource 和 command catalog 也是 generation-scoped projection；客户端若缓存它们，观察到 generation 改变后必须丢弃旧缓存，并按需重新读取相应 Protocol V2 能力。清空旧显示不能冒充新 generation 的权威空 catalog。
 
 ## Mutation
 
