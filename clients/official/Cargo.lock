@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "aludock-client-cli"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "aludock-client-core",
  "anyhow",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "aludock-client-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "base64",
  "chacha20poly1305",
