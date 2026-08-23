@@ -14,7 +14,7 @@ import {
 import { MAX_INSTANCE_DISPLAY_NAME_CHARS } from "../core/instance-display-name.js";
 import { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
 import { isPortableAbsoluteLocalPath, isPortableLocalRootPath } from "../core/local-path.js";
-import { MAX_JSON_ARRAY_ITEMS, MAX_JSON_OBJECT_KEYS, MAX_JSON_VALUE_DEPTH, type JsonObject, type JsonValue } from "../core/json-value.js";
+import { MAX_JSON_ARRAY_ITEMS, MAX_JSON_OBJECT_KEYS, MAX_JSON_OMITTED_FIELDS, MAX_JSON_VALUE_DEPTH, type JsonObject, type JsonValue } from "../core/json-value.js";
 import {
   MAX_DELIVERY_REF_CHARS,
   MAX_TEMPORARY_DELIVERABLES_PER_INSTANCE,
@@ -55,7 +55,6 @@ import {
   MAX_IMAGE_MIME_TYPE_CHARS,
   MAX_IMAGE_PATH_CHARS,
   MAX_INPUT_IMAGES,
-  MAX_JSON_OMITTED_FIELDS,
   MAX_PENDING_QUEUE_ATTACHMENT_DESCRIPTOR_CHARS,
   MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS,
   MAX_PENDING_QUEUE_ITEMS,

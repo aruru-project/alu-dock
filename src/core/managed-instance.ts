@@ -1,5 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import { truncateWithEllipsis as truncate } from "./bounded-text.js";
+import { InstanceEventJournal } from "./instance-event-journal.js";
+import { cloneJson } from "./json-value.js";
 import { isPortableAbsoluteLocalPath } from "./local-path.js";
 import {
   CatalogEffectUnknownError,
@@ -72,8 +75,6 @@ import type {
   AgentSessionTarget,
   ThinkingLevel,
 } from "./agent-worker.js";
-import { sliceSemanticHistory } from "./history-pagination.js";
-import { MAX_JSON_ARRAY_ITEMS, MAX_JSON_OBJECT_KEYS, MAX_JSON_VALUE_DEPTH, type JsonObject, type JsonValue } from "./json-value.js";
 import { projectInstanceDisplayName } from "./instance-display-name.js";
 import type { PublishedFileReadPage } from "./published-file.js";
 import { InstanceDeliverables, type DeliverableDto } from "./instance-deliverables.js";
@@ -322,13 +323,6 @@ export class StaleRuntimeGenerationError extends Error {
   }
 }
 
-export class InvalidHistoryCursorError extends Error {
-  constructor(readonly beforeEntryId: string) {
-    super(`History entry ${beforeEntryId} does not belong to the current session branch`);
-    this.name = "InvalidHistoryCursorError";
-  }
-}
-
 export class RuntimeEffectUnknownError extends Error {
   readonly queryHint = "Query the instance snapshot before any retry";
 
@@ -352,21 +346,10 @@ export class ManagedInstance {
   private cwdValue: string;
   private gitBranchValue: string | undefined;
   private readonly executorIdentity: ExecutorIdentity;
-  private historyValue: HistoryEntryDto[];
-  private historyRevisionValue = 1;
   private metricsValue: SessionMetricsDto;
-  private readonly eventCapacity: number;
   private readonly now: () => Date;
   private readonly createCommandId: () => string;
-  private readonly eventLog: DockEvent[] = [];
-  /**
-   * Conversation frames which have not yet crossed into the authoritative
-   * persisted-history projection. This is a transport cache for late joiners,
-   * not a second conversation model: frames are retained and released only by
-   * their explicit lifecycle and Worker history boundary.
-   */
-  private readonly activeConversationEvents: DockEvent[] = [];
-  private readonly subscribers = new Set<(event: DockEvent) => void>();
+  private readonly journal: InstanceEventJournal;
   private readonly backgroundTasks = new Set<Promise<void>>();
   private state: MutableState;
   private catalogPort: InstanceCatalogMutationPort | undefined;
@@ -399,8 +382,6 @@ export class ManagedInstance {
   private runtimeAbortPromise: Promise<void> | undefined;
   private runtimeDisposePromise: Promise<void> | undefined;
   private runtimeGenerationValue = 1;
-  private publishedRuntimeGenerationValue = 1;
-  private nextEventSequence = 1;
   private agentStartCount = 0;
   private agentSettledCount = 0;
   private readonly acceptedPromptMessages: AcceptedPromptMessage[] = [];
@@ -463,10 +444,6 @@ export class ManagedInstance {
     this.cwdValue = options.cwd;
     this.session = options.session;
     this.gitBranchValue = projectGitBranch(this.agentState().gitBranch);
-    const requestedCapacity = options.eventCapacity ?? 500;
-    this.eventCapacity = Number.isFinite(requestedCapacity) && requestedCapacity >= 1
-      ? Math.floor(requestedCapacity)
-      : 500;
     this.now = options.now ?? (() => new Date());
     this.createCommandId = options.commandId ?? randomUUID;
     this.extensionUi = options.extensionUiBroker ?? new ExtensionUiBroker(this.now, this.createCommandId);
@@ -478,7 +455,6 @@ export class ManagedInstance {
     const initialGeneration = options.initialRuntimeGeneration ?? 1;
     if (!Number.isSafeInteger(initialGeneration) || initialGeneration < 1) throw new Error("Initial runtime generation must be positive");
     this.runtimeGenerationValue = initialGeneration;
-    this.publishedRuntimeGenerationValue = initialGeneration;
     this.executionChangedAtValue = initialUpdatedAt;
     this.timedExecutionValue = "idle";
     this.state = {
@@ -499,8 +475,19 @@ export class ManagedInstance {
       sessionFile: truncate(this.agentState().sessionFile, 16_384),
     };
     this.durableSessionFileValue = this.runtimeDurableSessionFile();
-    this.historyValue = (options.initialHistory ?? []).map(projectAgentHistoryEntry);
     this.metricsValue = projectRuntimeMetrics(this.agentState().metrics);
+    this.journal = new InstanceEventJournal({
+      hostEpoch: this.hostEpoch,
+      instanceId: this.id,
+      initialRuntimeGeneration: initialGeneration,
+      eventCapacity: options.eventCapacity,
+      initialHistory: (options.initialHistory ?? []).map(projectAgentHistoryEntry),
+      onCursorAdvanced: (eventCursor) => {
+        if (this.catalogPort && this.committedSnapshotValue) {
+          this.committedSnapshotValue = { ...this.committedSnapshotValue, eventCursor };
+        }
+      },
+    });
 
     this.session.subscribe((event) => this.dispatchAgentEvent(event));
 
@@ -801,36 +788,20 @@ export class ManagedInstance {
       updatedAt: this.state.updatedAt,
       executionChangedAt: this.executionChangedAtValue,
       ...(this.runStartedAtValue === undefined ? {} : { runStartedAt: this.runStartedAtValue }),
-      eventCursor: this.cursor(this.nextEventSequence - 1),
+      eventCursor: this.journal.cursor(),
     };
   }
 
   eventsSince(since: EventCursor | number = 0): EventPage {
-    const domainChanged = typeof since !== "number" && (
-      since.hostEpoch !== this.hostEpoch
-      || since.instanceId !== this.id
-      || since.runtimeGeneration !== this.publishedRuntimeGenerationValue
-    );
-    const sequence = domainChanged ? 0 : typeof since === "number" ? since : since.sequence;
-    const earliestSequence = this.eventLog[0]?.sequence ?? this.nextEventSequence;
-    const latestSequence = this.nextEventSequence - 1;
-    return {
-      events: this.eventLog
-        .filter((event) => event.sequence > sequence)
-        .map((event) => cloneDockEvent(event)),
-      earliest: this.cursor(earliestSequence),
-      latest: this.cursor(latestSequence),
-      truncated: domainChanged || sequence < earliestSequence - 1,
-    };
+    return this.journal.eventsSince(since);
   }
 
   subscribe(listener: (event: DockEvent) => void): () => void {
-    this.subscribers.add(listener);
-    return () => this.subscribers.delete(listener);
+    return this.journal.subscribe(listener);
   }
 
   reportControlDegradation(message: string): Promise<DockEvent> {
-    return this.enqueueTransition(async () => cloneDockEvent(this.appendEvent("extension.error", {
+    return this.enqueueTransition(async () => cloneJson(this.appendEvent("extension.error", {
       error: safeWireText(message, 2_048),
     })));
   }
@@ -902,7 +873,7 @@ export class ManagedInstance {
   }
 
   async getHistoryPage(beforeEntryId: string | undefined, limit: number): Promise<HistoryPageDto & { instance: InstanceSnapshot }> {
-    return this.withCommittedProjectionRead(() => ({ ...this.buildHistoryPage(beforeEntryId, limit), instance: this.snapshot() }));
+    return this.withCommittedProjectionRead(() => ({ ...this.journal.historyPage(beforeEntryId, limit), instance: this.snapshot() }));
   }
 
   async getConversationHistory(cursor?: string, limit = 50): Promise<ConversationHistoryPageDto> {
@@ -1001,9 +972,9 @@ export class ManagedInstance {
       const generationChanged = cursor !== undefined && cursor.runtimeGeneration !== instance.runtimeGeneration;
       const replaySince = epochChanged || generationChanged ? 0 : cursor?.sequence ?? 0;
       const sourcePage = this.eventsSince(replaySince);
-      const history = this.buildHistoryPage(undefined, historyLimit);
+      const history = this.journal.historyPage(undefined, historyLimit);
       const page = replayPurpose === "conversation_bootstrap"
-        ? { ...sourcePage, events: conversationBootstrapEvents(this.activeConversationEvents, sourcePage.events, instance) }
+        ? { ...sourcePage, events: this.journal.conversationBootstrapEvents(sourcePage.events, instance) }
         : sourcePage;
       return {
         instance,
@@ -2646,26 +2617,6 @@ export class ManagedInstance {
     if (this.replacementIntent === undefined) this.recoverySessionFile = undefined;
   }
 
-  private buildHistoryPage(beforeEntryId: string | undefined, limit: number, beforeTimestamp?: string): HistoryPageDto {
-    let source = this.historyValue;
-    if (beforeTimestamp !== undefined) {
-      source = source.filter((entry) => entry.timestamp === undefined || entry.timestamp < beforeTimestamp);
-    }
-    let requestedEnd = source.length;
-    if (beforeEntryId !== undefined) {
-      requestedEnd = source.findIndex((entry) => entry.entryId === beforeEntryId);
-      if (requestedEnd < 0) throw new InvalidHistoryCursorError(beforeEntryId);
-    }
-    const page = sliceSemanticHistory(source, requestedEnd, Math.max(1, Math.min(200, Math.floor(limit))));
-    const entries = cloneJson(source.slice(page.start, page.end));
-    return {
-      historyRevision: this.historyRevisionValue,
-      entries,
-      hasEarlier: page.hasEarlier,
-      ...(page.hasEarlier && entries[0] ? { nextBeforeEntryId: entries[0].entryId } : {}),
-    };
-  }
-
   private reserveProjectionGate(): { entered: Promise<void>; release: () => void } {
     const entered = this.projectionGateTail;
     let releaseGate!: () => void;
@@ -2951,10 +2902,7 @@ export class ManagedInstance {
     if (!this.catalogPort) {
       try {
         this.handleAgentEvent(event);
-        if (event.type === "conversation_checkpoint") {
-          this.installConversationCheckpoint(event);
-          this.releasePersistedConversation(this.nextEventSequence - 1);
-        }
+        if (event.type === "conversation_checkpoint") this.installConversationCheckpoint(event);
         if (refreshesMetrics(event)) this.refreshMetrics();
         if (refreshesHistory(event)) {
           const refresh = this.refreshHistory();
@@ -2976,7 +2924,6 @@ export class ManagedInstance {
         await this.handleCatalogAgentEvent(event);
         if (event.type === "conversation_checkpoint") {
           this.installConversationCheckpoint(event);
-          this.releasePersistedConversation(this.nextEventSequence - 1);
         } else if (refreshesHistory(event)) {
           await this.refreshHistory();
         }
@@ -3017,8 +2964,7 @@ export class ManagedInstance {
 
   private async refreshHistory(): Promise<void> {
     const history = await this.invokeAgent<AgentHistoryEntry[]>("session.history", { limit: 200 });
-    this.historyValue = history.map(projectAgentHistoryEntry);
-    this.historyRevisionValue += 1;
+    this.journal.replaceHistory(history.map(projectAgentHistoryEntry));
   }
 
   private refreshMetrics(): void {
@@ -3180,10 +3126,7 @@ export class ManagedInstance {
             this.touch();
           },
           publish: () => {
-            this.publishedRuntimeGenerationValue = this.runtimeGenerationValue;
-            this.nextEventSequence = 1;
-            this.eventLog.length = 0;
-            this.activeConversationEvents.length = 0;
+            this.journal.resetGeneration(this.runtimeGenerationValue);
             this.appendEvent("session.replaced", { reason, previousSessionFile, sessionFile, runtimeGeneration: this.runtimeGenerationValue, cwd: this.cwdValue, piSessionId: this.executorIdentity.piSessionId, name: this.nameValue, displayName: this.projectedDisplayName(), gitBranch: this.gitBranchValue });
             if (replacedQueue.total > 0) this.appendEvent("queue.cleared", { ...replacedQueue, reason: "replacement" });
           },
@@ -3591,67 +3534,13 @@ export class ManagedInstance {
   }
 
   private appendEvent<K extends keyof EventDataMap>(type: K, data: EventDataMap[K], occurredAt = this.timestamp()): DockEvent {
-    const event = {
-      scope: "instance" as const,
-      sequence: this.nextEventSequence++,
-      instanceId: this.id,
-      runtimeGeneration: this.publishedRuntimeGenerationValue,
-      occurredAt,
-      type,
-      data,
-    } as DockEvent;
-    this.captureActiveConversationEvent(event);
-    this.eventLog.push(event);
-    if (this.eventLog.length > this.eventCapacity) this.eventLog.shift();
-    if (this.catalogPort && this.committedSnapshotValue) {
-      this.committedSnapshotValue = { ...this.committedSnapshotValue, eventCursor: this.cursor(this.nextEventSequence - 1) };
-    }
-
-    // The event is durable in the in-memory ring before any client callback.
-    // A broken observer must never break Pi's synchronous listener chain.
-    for (const subscriber of this.subscribers) {
-      try {
-        subscriber(cloneDockEvent(event));
-      } catch {
-        // Deliberately isolate observer failures. Transport layers report their
-        // own socket errors and unsubscribe separately.
-      }
-    }
-    return event;
-  }
-
-  private captureActiveConversationEvent(event: DockEvent): void {
-    if (!isConversationFrame(event)) return;
-    const copy = cloneDockEvent(event);
-    const previous = this.activeConversationEvents.at(-1);
-    if (previous?.type === "message.delta" && copy.type === "message.delta"
-      && previous.data.messageId === copy.data.messageId
-      && previous.data.block === copy.data.block
-      && previous.data.delta.length + copy.data.delta.length <= 8_000) {
-      previous.data.delta += copy.data.delta;
-      previous.sequence = copy.sequence;
-      previous.occurredAt = copy.occurredAt;
-      return;
-    }
-    if ((copy.type === "tool.args_updated" || copy.type === "tool.output_updated")) {
-      const superseded = this.activeConversationEvents.findLastIndex((candidate) => (
-        candidate.type === copy.type && candidate.data.toolCallId === copy.data.toolCallId
-      ));
-      if (superseded >= 0) this.activeConversationEvents.splice(superseded, 1);
-    }
-    this.activeConversationEvents.push(copy);
+    return this.journal.append(type, data, occurredAt);
   }
 
   private installConversationCheckpoint(event: AgentEvent): void {
     if (!Array.isArray(event.history)) throw new Error("Worker conversation checkpoint is missing its authoritative history");
     const history = event.history.map((entry) => projectAgentHistoryEntry(entry as AgentHistoryEntry));
-    this.historyValue = history;
-    this.historyRevisionValue += 1;
-  }
-
-  private releasePersistedConversation(sequence: number): void {
-    const retained = this.activeConversationEvents.filter((event) => event.sequence > sequence);
-    this.activeConversationEvents.splice(0, this.activeConversationEvents.length, ...retained);
+    this.journal.installConversationCheckpoint(history);
   }
 
   private touch(timestamp = this.timestamp()): void {
@@ -3661,10 +3550,6 @@ export class ManagedInstance {
       this.runStartedAtValue = this.state.execution === "running" ? timestamp : undefined;
     }
     if (timestamp >= this.state.updatedAt) this.state.updatedAt = timestamp;
-  }
-
-  private cursor(sequence: number): EventCursor {
-    return { hostEpoch: this.hostEpoch, instanceId: this.id, runtimeGeneration: this.publishedRuntimeGenerationValue, sequence };
   }
 
   private timestamp(): string {
@@ -3824,24 +3709,6 @@ function selectClearedQueueMessages(
   return { restored, restoredQueueItemIds: [...selected] };
 }
 
-function conversationBootstrapEvents(
-  activeEvents: readonly DockEvent[],
-  replayEvents: readonly DockEvent[],
-  instance: InstanceSnapshot,
-): DockEvent[] {
-  const conversation = activeEvents
-    .filter((event) => event.runtimeGeneration === instance.runtimeGeneration)
-    .map(cloneDockEvent);
-  const activeInteractionId = instance.activeInteraction?.id;
-  const interaction = activeInteractionId === undefined ? undefined : replayEvents.findLast((event) => (
-    event.type === "interaction.requested" && event.data.interactionId === activeInteractionId
-  ));
-  if (interaction === undefined || conversation.some((event) => event.sequence === interaction.sequence)) return conversation;
-  return [...conversation, cloneDockEvent(interaction)].sort((left, right) => (
-    left.runtimeGeneration - right.runtimeGeneration || left.sequence - right.sequence
-  ));
-}
-
 function isConversationFrameType(type: string): type is ConversationFrame["type"] {
   return type === "message.submitted"
     || type === "message.delta"
@@ -3850,19 +3717,6 @@ function isConversationFrameType(type: string): type is ConversationFrame["type"
     || type === "tool.args_updated"
     || type === "tool.output_updated"
     || type === "tool.completed";
-}
-
-function isConversationFrame(event: DockEvent): event is Extract<DockEvent, {
-  type: "message.submitted" | "message.delta" | "message.completed"
-    | "tool.started" | "tool.args_updated" | "tool.output_updated" | "tool.completed";
-}> {
-  return event.type === "message.submitted"
-    || event.type === "message.delta"
-    || event.type === "message.completed"
-    || event.type === "tool.started"
-    || event.type === "tool.args_updated"
-    || event.type === "tool.output_updated"
-    || event.type === "tool.completed";
 }
 
 function refreshesHistory(event: AgentEvent): boolean {
@@ -3961,21 +3815,6 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
-function truncate(value: string | undefined, limit: number): string | undefined {
-  if (value === undefined || value.length <= limit) return value;
-  if (limit < 1) return "";
-  const end = unicodeSafeSliceEnd(value, limit - 1);
-  return `${value.slice(0, end)}…`;
-}
-
-function unicodeSafeSliceEnd(value: string, requestedEnd: number): number {
-  return requestedEnd > 0
-    && /[\uD800-\uDBFF]/u.test(value[requestedEnd - 1] ?? "")
-    && /[\uDC00-\uDFFF]/u.test(value[requestedEnd] ?? "")
-    ? requestedEnd - 1
-    : requestedEnd;
-}
-
 function safeWireText(value: string, limit: number): string {
   return truncate(value, limit) ?? "";
 }
@@ -3994,108 +3833,3 @@ function errorMessage(error: unknown): string {
     return String(error);
   }
 }
-
-function cloneDockEvent(event: DockEvent): DockEvent {
-  return cloneJson(event);
-}
-
-function cloneJson<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
-}
-
-const MAX_JSON_STRING = 8_000;
-const MAX_JSON_PROJECTED_NODES = 2_000;
-const MAX_JSON_PROJECTED_BYTES = 256_000;
-export const MAX_JSON_OMITTED_FIELDS = 200;
-
-export function projectJsonObject(input: unknown): { value: JsonObject; omittedFields: string[] } {
-  const omittedFields: string[] = [];
-  const omittedSet = new Set<string>();
-  const seen = new WeakSet<object>();
-  let projectedNodes = 0;
-  let projectedBytes = 0;
-  let budgetExhausted = false;
-  const omit = (path: string): void => {
-    const safePath = (path || "/").slice(0, 512);
-    if (omittedSet.has(safePath) || omittedFields.length >= MAX_JSON_OMITTED_FIELDS) return;
-    omittedSet.add(safePath);
-    omittedFields.push(safePath);
-  };
-  const reserve = (bytes: number, path: string): boolean => {
-    if (budgetExhausted || projectedBytes + bytes > MAX_JSON_PROJECTED_BYTES) {
-      budgetExhausted = true;
-      omit(path);
-      return false;
-    }
-    projectedBytes += bytes;
-    return true;
-  };
-  const project = (value: unknown, path: string, depth: number): JsonValue | undefined => {
-    if (budgetExhausted || projectedNodes >= MAX_JSON_PROJECTED_NODES) {
-      budgetExhausted = true;
-      omit(path);
-      return undefined;
-    }
-    projectedNodes += 1;
-    if (typeof value === "string") {
-      const projected = truncate(value, MAX_JSON_STRING) ?? "";
-      return reserve(Buffer.byteLength(JSON.stringify(projected), "utf8"), path) ? projected : undefined;
-    }
-    if (value === null || typeof value === "boolean") {
-      return reserve(value === null ? 4 : value ? 4 : 5, path) ? value : undefined;
-    }
-    if (typeof value === "number") {
-      if (!Number.isFinite(value)) { omit(path); return undefined; }
-      return reserve(Buffer.byteLength(JSON.stringify(value), "utf8"), path) ? value : undefined;
-    }
-    if (typeof value !== "object" || value === null || typeof value === "function" || typeof value === "symbol" || typeof value === "bigint") {
-      omit(path);
-      return undefined;
-    }
-    if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
-      omit(path);
-      return undefined;
-    }
-    if (depth >= MAX_JSON_VALUE_DEPTH || seen.has(value) || !reserve(2, path)) {
-      omit(path);
-      return undefined;
-    }
-    seen.add(value);
-    if (Array.isArray(value)) {
-      const result: JsonValue[] = [];
-      for (let index = 0; index < value.length; index += 1) {
-        const itemPath = `${path}/${index}`;
-        if (index >= MAX_JSON_ARRAY_ITEMS || budgetExhausted || projectedNodes >= MAX_JSON_PROJECTED_NODES) { omit(itemPath); break; }
-        if (result.length > 0 && !reserve(1, itemPath)) break;
-        let sourceItem: unknown;
-        try { sourceItem = value[index]; }
-        catch { omit(itemPath); continue; }
-        const item = project(sourceItem, itemPath, depth + 1);
-        if (item !== undefined) result.push(item);
-      }
-      return result;
-    }
-    const result: JsonObject = {};
-    let index = 0;
-    for (const key in value as Record<string, unknown>) {
-      if (!Object.prototype.hasOwnProperty.call(value, key)) continue;
-      const itemPath = `${path}/${escapeJsonPointer(key.slice(0, 256))}`;
-      if (index >= MAX_JSON_OBJECT_KEYS || budgetExhausted || projectedNodes >= MAX_JSON_PROJECTED_NODES) { omit(itemPath); break; }
-      index += 1;
-      if (key.length < 1 || key.length > 256 || /[\u0000-\u001f\u007f-\u009f]/u.test(key)) { omit(itemPath); continue; }
-      const separatorBytes = Object.keys(result).length > 0 ? 1 : 0;
-      if (!reserve(separatorBytes + Buffer.byteLength(JSON.stringify(key), "utf8") + 1, itemPath)) break;
-      let sourceItem: unknown;
-      try { sourceItem = (value as Record<string, unknown>)[key]; }
-      catch { omit(itemPath); continue; }
-      const projected = project(sourceItem, itemPath, depth + 1);
-      if (projected !== undefined) result[key] = projected;
-    }
-    return result;
-  };
-  const value = project(input, "", 0);
-  return { value: isJsonObject(value) ? value : {}, omittedFields };
-}
-
-function escapeJsonPointer(value: string): string { return value.replace(/~/g, "~0").replace(/\//g, "~1"); }
-function isJsonObject(value: JsonValue | undefined): value is JsonObject { return value !== undefined && value !== null && typeof value === "object" && !Array.isArray(value); }

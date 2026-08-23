@@ -52,7 +52,7 @@ import {
   type TreeNodeDto,
   MAX_CONVERSATION_CHUNK_CHARS,
 } from "../core/instance-dto.js";
-import type { JsonValue } from "../core/json-value.js";
+import { projectJsonObject, type JsonValue } from "../core/json-value.js";
 import { sliceSemanticHistory, slimSemanticHistoryEntry } from "../core/history-pagination.js";
 import { projectBuiltInToolPresentation } from "../core/tool-result-presentation.js";
 import type { PiExtensionUiPort } from "./pi-extension-ui-adapter.js";
@@ -116,7 +116,6 @@ import {
   compareSourceDtos,
   compareToolDtos,
 } from "../core/config-projection.js";
-import { projectJsonObject } from "../core/managed-instance.js";
 import { parseSessionTreeResult, type SessionTreeResult } from "../control/protocol.js";
 import { AgentModelNotFoundError, AgentSettingsWriteError, AgentUnknownToolError } from "../core/agent-worker.js";
 import { configurePiNetwork } from "./configure-pi-network.js";

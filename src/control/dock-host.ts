@@ -26,7 +26,6 @@ import {
   InstanceAdmissionPendingError,
   InstanceBusyError,
   InstanceNotActiveError,
-  InvalidHistoryCursorError,
   InvalidDeliveryModeError,
   QueueCapacityError,
   RuntimeEffectUnknownError,
@@ -36,6 +35,7 @@ import {
   type AttachProjection,
   type DockEvent,
 } from "../core/managed-instance.js";
+import { InvalidHistoryCursorError } from "../core/instance-event-journal.js";
 import type { JsonObject } from "../core/json-value.js";
 import { AgentCompactionKnownFailureError, AgentConversationCursorError, AgentInvalidSettingValueError, AgentInvalidTreeTargetError, AgentModelNotFoundError, AgentSettingsWriteError, AgentUnavailableBeforeEffectError, AgentUnknownToolError } from "../core/agent-worker.js";
 import { PublishedFileUnavailableError } from "../core/published-file.js";
