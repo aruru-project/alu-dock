@@ -90,18 +90,14 @@ Main 打开完整 Hub，SubHost 打开最小管理界面。`Open-AluDock.ps1` �
 
 默认状态保存在 `%LOCALAPPDATA%\Alu Dock\`，本地 Protocol V2 入口是 `\\.\pipe\alu-dock`。本地 Named Pipe 不使用远程设备配对。
 
-没有角色配置时 Host 脚本默认启动 Main，且 SubHost connections 关闭。Main Hub 的 Machines 可以实时打开或关闭连接、选择端口并创建 join file；Settings 只选择下次启动角色。普通启动会读取保存的角色和 Machine 端口设置。
+没有角色配置时 Host 脚本默认启动 Main，且 SubHost connections 关闭。Main Hub 的 Machines 可以实时打开或关闭连接、选择端口、保存一次供新 SubHost 使用的 Main 地址并创建 join file。地址只在第一次连接 SubHost 时输入，端口直接使用 Machines 当前设置；两者随 join file 交给另一台电脑。
 
-角色只由保存的 Settings 决定，没有进程级角色覆盖。将 Windows 配置为 SubHost 时，先在人的界面中保存 SubHost 角色、Main 地址、Machine port 和名称；停止当前 Main 后，第一次启动额外传入 Main 创建的一次性 join file：
-
-```powershell
-.\scripts\Start-AluDockHost.ps1 -JoinFile ".\join.json"
-```
-
-enrollment 成功后，后续始终使用普通无参数入口：
+角色只由保存的 Settings 决定，没有进程级角色覆盖。将 Windows 配置为 SubHost 时，在人的界面中选择 Settings → Dock role，导入 Main 创建的 join file，然后确认系统机器名和文件中携带的 Main 连接。只有明确选择 Edit Details 才需要修改地址、端口或名称。界面会同时保存待完成的 enrollment 和下次启动角色；按照确认页提示，在十分钟有效期内停止当前 Main，并直接使用普通无参数入口：
 
 ```powershell
 .\scripts\Start-AluDockHost.ps1
 ```
+
+切回 Main 不会删除原来的 Main enrollment 或连接资料；以后再次选择同一个 SubHost 角色只需确认 Use Saved Connection。只有选择 Connect to a Different Main 才需要新的 join file。
 
 Windows Remote Access 仍使用普通 TLS 设备配对；它与本地 Named Pipe 是两个入口。当前先期范围不包括 Windows Service、Scheduled Task、开机启动、安装包和自动更新。

@@ -8,6 +8,7 @@ import test from "node:test";
 
 import { ControlClientError, DockClient } from "../src/control/dock-client.js";
 import { MachineSettingsState, machineSettingsStateRoot } from "../src/control/machine-settings-state.js";
+import { MainMachineState, machineStateRoot, readMachineJoinFile, SubHostMachineState } from "../src/control/machine-state.js";
 
 const cli = new URL("../src/cli.js", import.meta.url).pathname;
 
@@ -15,13 +16,13 @@ async function freePort(): Promise<number> { const server = createServer(); awai
 function exited(child: ChildProcess): Promise<void> { if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(); return new Promise((resolve) => child.once("exit", () => resolve())); }
 async function stop(child: ChildProcess): Promise<void> { if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM"); await exited(child); }
 async function run(args: string[], env: NodeJS.ProcessEnv): Promise<void> { await new Promise<void>((resolve, reject) => execFile(process.execPath, [cli, ...args], { env }, (error) => error ? reject(error) : resolve())); }
-async function turnOnMachineConnectionsFromHub(socketPath: string, port: number, env: NodeJS.ProcessEnv): Promise<string> {
+async function runHubAction(socketPath: string, action: string, env: NodeJS.ProcessEnv, extra: NodeJS.ProcessEnv = {}): Promise<string> {
   const driver = join(process.cwd(), "test/fixtures/pty-tui-driver.py");
   const stdout = await new Promise<string>((resolveRun, rejectRun) => {
     execFile("python3", [driver, process.execPath, cli, "--socket", socketPath], {
-      env: { ...env, ALU_DOCK_PTY_ACTION: "hub-machine-connections", ALU_DOCK_PTY_PORT: String(port) },
+      env: { ...env, ...extra, ALU_DOCK_PTY_ACTION: action },
       maxBuffer: 4 * 1024 * 1024,
-    }, (error, output, stderr) => error ? rejectRun(new Error(`Machines TUI failed: ${stderr}`, { cause: error })) : resolveRun(output));
+    }, (error, output, stderr) => error ? rejectRun(new Error(`Hub TUI failed: ${stderr}`, { cause: error })) : resolveRun(output));
   });
   const result = JSON.parse(stdout) as { status: number; timedOut: boolean; output: string };
   const output = Buffer.from(result.output, "base64").toString("utf8");
@@ -30,10 +31,65 @@ async function turnOnMachineConnectionsFromHub(socketPath: string, port: number,
   return output;
 }
 
+async function turnOnMachineConnectionsFromHub(socketPath: string, port: number, env: NodeJS.ProcessEnv): Promise<string> {
+  return runHubAction(socketPath, "hub-machine-connections", env, { ALU_DOCK_PTY_PORT: String(port) });
+}
+
 test("Host startup rejects process-level role overrides", () => {
   const result = spawnSync(process.execPath, [cli, "serve", "--dev", "--subhost"], { encoding: "utf8" });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Unknown serve argument: --subhost/u);
+});
+
+test("the human flow carries Main facts in one join file and does not ask for them again", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-subhost-human-"));
+  const sourceStateHome = join(root, "source-state"), targetStateHome = join(root, "target-state");
+  const sourceCatalog = join(sourceStateHome, "alu-dock", "catalog.json"), targetCatalog = join(targetStateHome, "alu-dock", "catalog.json");
+  const sourceSocket = join(root, "source.sock"), targetSocket = join(root, "target.sock"), joinFilePath = join(root, "subhost.join");
+  const sourceEnv = { ...process.env, HOME: join(root, "source-home"), XDG_STATE_HOME: sourceStateHome, XDG_DATA_HOME: join(root, "source-data") };
+  const targetEnv = { ...process.env, HOME: join(root, "target-home"), XDG_STATE_HOME: targetStateHome, XDG_DATA_HOME: join(root, "target-data") };
+  await Promise.all([mkdir(sourceEnv.HOME as string, { recursive: true }), mkdir(targetEnv.HOME as string, { recursive: true })]);
+  const machinePort = await freePort();
+  await new MachineSettingsState(machineSettingsStateRoot(sourceCatalog)).writeMainConnections({ enabled: false, port: machinePort });
+  const sourceHost = spawn(process.execPath, [cli, "--socket", sourceSocket, "serve", "--dev", "--state", sourceCatalog], { env: sourceEnv, stdio: ["ignore", "pipe", "pipe"] });
+  const targetHost = spawn(process.execPath, [cli, "--socket", targetSocket, "serve", "--dev", "--state", targetCatalog], { env: targetEnv, stdio: ["ignore", "pipe", "pipe"] });
+  context.after(async () => { await stop(targetHost); await stop(sourceHost); await rm(root, { recursive: true, force: true }); });
+  await Promise.all([waitReady(sourceHost, "source Main"), waitReady(targetHost, "target Main")]);
+
+  const sourceOutput = await runHubAction(sourceSocket, "hub-create-subhost-join", sourceEnv, {
+    ALU_DOCK_PTY_MAIN_ADDRESS: "main.example.lan",
+    ALU_DOCK_PTY_JOIN_FILE: joinFilePath,
+  });
+  const joinFile = await readMachineJoinFile(joinFilePath);
+  assert.deepEqual(joinFile.connection, { mainAddress: "main.example.lan", port: machinePort }, sourceOutput.slice(-2_000));
+
+  const targetOutput = await runHubAction(targetSocket, "hub-new-subhost", targetEnv, { ALU_DOCK_PTY_JOIN_FILE: joinFilePath });
+  const saved = await new MachineSettingsState(machineSettingsStateRoot(targetCatalog)).read();
+  assert.equal(saved.role, "subhost", targetOutput.slice(-2_000));
+  assert.equal(saved.subhost?.mainAddress, "main.example.lan");
+  assert.equal(saved.subhost?.port, machinePort);
+  assert.doesNotMatch(targetOutput, /Enter the address|SubHost port|SubHost name/u);
+  assert.ok(await new SubHostMachineState(machineStateRoot(targetCatalog)).load());
+});
+
+test("an expired unfinished enrollment can be cancelled back to Main without another join file", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-subhost-expired-"));
+  const stateHome = join(root, "state-home"), catalog = join(stateHome, "alu-dock", "catalog.json"), socketPath = join(root, "main.sock");
+  const env = { ...process.env, HOME: join(root, "home"), XDG_STATE_HOME: stateHome, XDG_DATA_HOME: join(root, "data-home") };
+  await mkdir(env.HOME as string, { recursive: true });
+  const host = spawn(process.execPath, [cli, "--socket", socketPath, "serve", "--dev", "--state", catalog], { env, stdio: ["ignore", "pipe", "pipe"] });
+  context.after(async () => { await stop(host); await rm(root, { recursive: true, force: true }); });
+  await waitReady(host, "Main with unfinished enrollment");
+
+  const base = new Date(Date.now() - 20 * 60_000);
+  const joinFile = await new MainMachineState(join(root, "other-main")).createJoin(undefined, base);
+  await new SubHostMachineState(machineStateRoot(catalog)).prepare(joinFile, "Unfinished Studio", base);
+  const settings = new MachineSettingsState(machineSettingsStateRoot(catalog));
+  await settings.switchToSubHost({ mainAddress: "main.example.lan", port: 43127, name: "Unfinished Studio" });
+
+  const output = await runHubAction(socketPath, "hub-expired-subhost-main", env);
+  assert.equal((await settings.read()).role, "main", output.slice(-2_000));
+  assert.doesNotMatch(output, /New Main join file|SubHost join file/u);
 });
 
 class TcpProxy {
@@ -150,5 +206,16 @@ test("Main toggles SubHost connections live while native Pi work stays alive off
   const remapped = await waitInstance(client, "cli-remote-create");
   assert.notEqual(remapped.id, created.id);
   assert.equal(sub.exitCode, null);
+
+  const localMachineState = new MainMachineState(machineStateRoot(mainCatalog));
+  const rememberedJoin = await localMachineState.createJoin({ mainAddress: "main.saved.lan", port: 43127 });
+  const rememberedSubHost = new SubHostMachineState(machineStateRoot(mainCatalog));
+  await rememberedSubHost.prepare(rememberedJoin, "Remembered Studio");
+  await rememberedSubHost.markJoined();
+  await machineSettings.switchToSubHost({ mainAddress: "main.saved.lan", port: 43127, name: "Remembered Studio" });
+  await machineSettings.switchToMain();
+  const savedConnectionOutput = await runHubAction(socketPath, "hub-saved-subhost", mainEnv);
+  assert.equal((await machineSettings.read()).role, "subhost", savedConnectionOutput.slice(-2_000));
+  assert.doesNotMatch(savedConnectionOutput, /Enter the address|SubHost port|SubHost name|SubHost join file/u);
   await stop(secondMain);
 });

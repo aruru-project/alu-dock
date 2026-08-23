@@ -8,6 +8,7 @@ import { generateHostIdentity, parseHostTlsIdentity, type HostTlsIdentity } from
 import { MACHINE_PLATFORMS, MAX_CONTROL_CWD_CHARS, parseInstanceSnapshot, type MachinePlatform } from "./protocol.js";
 import { MAX_DURABLE_CATALOG_BYTES } from "./durable-catalog-store.js";
 import { hardenWindowsPrivatePath, syncPrivateDirectory } from "../platform/private-state.js";
+import { validateMachineEndpoint, type MachineEndpoint } from "./machine-settings-state.js";
 
 const MACHINE_STATE_SCHEMA = 1 as const;
 const JOIN_LIFETIME_MS = 10 * 60_000;
@@ -21,6 +22,7 @@ export interface MachineJoinFile {
   mainCertificatePem: string;
   mainFingerprint: string;
   expiresAt: string;
+  connection?: MachineEndpoint;
 }
 
 export interface MachineRouteRecord {
@@ -82,6 +84,7 @@ export interface SubHostUpstreamRecord {
   mainCertificatePem: string;
   mainFingerprint: string;
   joinToken?: string;
+  joinExpiresAt?: string;
 }
 
 export function machineStateRoot(catalogPath: string): string {
@@ -133,13 +136,21 @@ export class MainMachineState {
   async list(): Promise<TrustedSubHostRecord[]> { await this.initialize(); return this.current().machines.map((item) => this.trustedRecord(item)); }
   async get(id: string): Promise<TrustedSubHostRecord | undefined> { await this.initialize(); const item = this.current().machines.find((candidate) => candidate.id === id); return item ? this.trustedRecord(item) : undefined; }
 
-  async createJoin(now = new Date()): Promise<MachineJoinFile> {
+  async createJoin(connection?: MachineEndpoint, now = new Date()): Promise<MachineJoinFile> {
+    const endpoint = connection === undefined ? undefined : validateMachineEndpoint(connection.mainAddress, connection.port);
     return this.mutateMain((value) => {
       const token = randomBytes(32).toString("hex");
       const expiresAt = new Date(now.getTime() + JOIN_LIFETIME_MS).toISOString();
       value.pendingJoins = value.pendingJoins.filter((item) => Date.parse(item.expiresAt) > now.getTime());
       value.pendingJoins.push({ tokenHash: tokenHash(token), expiresAt });
-      return { schemaVersion: 1, token, mainCertificatePem: value.identity.certificatePem, mainFingerprint: value.identity.fingerprint, expiresAt };
+      return {
+        schemaVersion: 1,
+        token,
+        mainCertificatePem: value.identity.certificatePem,
+        mainFingerprint: value.identity.fingerprint,
+        expiresAt,
+        ...(endpoint === undefined ? {} : { connection: endpoint }),
+      };
     });
   }
 
@@ -319,9 +330,9 @@ export class SubHostMachineState {
     return stored === undefined ? undefined : parseSubHostFile(stored);
   }
 
-  async prepare(joinFile: MachineJoinFile, machineName: string): Promise<SubHostUpstreamRecord> {
+  async prepare(joinFile: MachineJoinFile, machineName: string, now = new Date()): Promise<SubHostUpstreamRecord> {
     const parsed = parseJoinFile(joinFile);
-    if (Date.parse(parsed.expiresAt) <= Date.now()) throw new Error("This SubHost join file has expired");
+    if (Date.parse(parsed.expiresAt) <= now.getTime()) throw new Error("This SubHost join file has expired");
     const current = await this.load();
     if (current && current.mainFingerprint !== parsed.mainFingerprint) throw new Error("This SubHost is already assigned to another Main");
     if (current && current.joinToken === undefined) throw new Error("This SubHost is already enrolled; start it without a join file");
@@ -333,8 +344,13 @@ export class SubHostMachineState {
       mainCertificatePem: parsed.mainCertificatePem,
       mainFingerprint: parsed.mainFingerprint,
       joinToken: parsed.token,
+      joinExpiresAt: parsed.expiresAt,
     };
-    if (record.joinToken && record.joinToken !== parsed.token) throw new Error("This SubHost already has a pending join file");
+    if (record.joinToken && record.joinToken !== parsed.token) {
+      if (record.joinExpiresAt !== undefined && Date.parse(record.joinExpiresAt) > now.getTime()) throw new Error("This SubHost already has a pending join file");
+      record.joinToken = parsed.token;
+    }
+    if (record.joinToken) record.joinExpiresAt = parsed.expiresAt;
     await writeJson(this.path, record);
     return structuredClone(record);
   }
@@ -343,6 +359,7 @@ export class SubHostMachineState {
     const record = await this.load();
     if (!record) throw new Error("SubHost upstream state is missing");
     delete record.joinToken;
+    delete record.joinExpiresAt;
     await writeJson(this.path, record);
     return record;
   }
@@ -355,10 +372,23 @@ export class SubHostMachineState {
     return structuredClone(record);
   }
 
-  async clear(): Promise<void> {
-    await rm(this.path, { force: true });
-    await syncPrivateDirectory(this.root);
+  async replace(joinFile: MachineJoinFile, machineName: string): Promise<SubHostUpstreamRecord> {
+    const parsed = parseJoinFile(joinFile);
+    if (Date.parse(parsed.expiresAt) <= Date.now()) throw new Error("This SubHost join file has expired");
+    const record: SubHostUpstreamRecord = {
+      schemaVersion: 1,
+      machineId: randomUUID(),
+      machineName: checkedName(machineName),
+      identity: await generateHostIdentity(),
+      mainCertificatePem: parsed.mainCertificatePem,
+      mainFingerprint: parsed.mainFingerprint,
+      joinToken: parsed.token,
+      joinExpiresAt: parsed.expiresAt,
+    };
+    await writeJson(this.path, record);
+    return structuredClone(record);
   }
+
 }
 
 export async function readMachineJoinFile(path: string): Promise<MachineJoinFile> {
@@ -477,7 +507,7 @@ function parseRoute(input: unknown): MachineRouteRecord {
 
 function parseSubHostFile(input: unknown): SubHostUpstreamRecord {
   const value = object(input, "SubHost upstream state");
-  exact(value, ["schemaVersion", "machineId", "machineName", "identity", "mainCertificatePem", "mainFingerprint", "joinToken"]);
+  exact(value, ["schemaVersion", "machineId", "machineName", "identity", "mainCertificatePem", "mainFingerprint", "joinToken", "joinExpiresAt"]);
   if (value.schemaVersion !== 1) throw new Error("SubHost upstream state version is invalid");
   const mainCertificatePem = pem(value.mainCertificatePem, "Main certificate");
   const certificate = new X509Certificate(mainCertificatePem);
@@ -485,18 +515,38 @@ function parseSubHostFile(input: unknown): SubHostUpstreamRecord {
   if (!SAFE_FINGERPRINT.test(mainFingerprint) || certificate.fingerprint256.replaceAll(":", "").toLowerCase() !== mainFingerprint) throw new Error("Main certificate fingerprint is invalid");
   const joinToken = value.joinToken === undefined ? undefined : text(value.joinToken, "join token");
   if (joinToken !== undefined && !SAFE_TOKEN.test(joinToken)) throw new Error("Join token is invalid");
-  return { schemaVersion: 1, machineId: checkedId(value.machineId, "machine ID"), machineName: checkedName(value.machineName), identity: parseHostTlsIdentity(value.identity), mainCertificatePem: certificate.toString(), mainFingerprint, ...(joinToken === undefined ? {} : { joinToken }) };
+  const joinExpiresAt = value.joinExpiresAt === undefined ? undefined : timestamp(value.joinExpiresAt, "join expiry");
+  if (joinToken === undefined && joinExpiresAt !== undefined) throw new Error("Join expiry requires a pending join token");
+  return {
+    schemaVersion: 1,
+    machineId: checkedId(value.machineId, "machine ID"),
+    machineName: checkedName(value.machineName),
+    identity: parseHostTlsIdentity(value.identity),
+    mainCertificatePem: certificate.toString(),
+    mainFingerprint,
+    ...(joinToken === undefined ? {} : { joinToken }),
+    ...(joinExpiresAt === undefined ? {} : { joinExpiresAt }),
+  };
 }
 
 function parseJoinFile(input: unknown): MachineJoinFile {
-  const value = object(input, "SubHost join file"); exact(value, ["schemaVersion", "token", "mainCertificatePem", "mainFingerprint", "expiresAt"]);
+  const value = object(input, "SubHost join file"); exact(value, ["schemaVersion", "token", "mainCertificatePem", "mainFingerprint", "expiresAt", "connection"]);
   if (value.schemaVersion !== 1) throw new Error("SubHost join file version is invalid");
   const token = text(value.token, "join token"); if (!SAFE_TOKEN.test(token)) throw new Error("Join token is invalid");
   const mainCertificatePem = pem(value.mainCertificatePem, "Main certificate");
   const certificate = new X509Certificate(mainCertificatePem);
   const mainFingerprint = text(value.mainFingerprint, "Main fingerprint");
   if (!SAFE_FINGERPRINT.test(mainFingerprint) || certificate.fingerprint256.replaceAll(":", "").toLowerCase() !== mainFingerprint) throw new Error("Main certificate fingerprint is invalid");
-  return { schemaVersion: 1, token, mainCertificatePem: certificate.toString(), mainFingerprint, expiresAt: timestamp(value.expiresAt, "join expiry") };
+  const connectionValue = value.connection === undefined ? undefined : object(value.connection, "Main connection");
+  if (connectionValue) exact(connectionValue, ["mainAddress", "port"]);
+  return {
+    schemaVersion: 1,
+    token,
+    mainCertificatePem: certificate.toString(),
+    mainFingerprint,
+    expiresAt: timestamp(value.expiresAt, "join expiry"),
+    ...(connectionValue === undefined ? {} : { connection: validateMachineEndpoint(connectionValue.mainAddress, connectionValue.port) }),
+  };
 }
 
 function tokenHash(token: string): string { if (!SAFE_TOKEN.test(token)) throw new Error("Join token is invalid"); return createHash("sha256").update(token).digest("hex"); }

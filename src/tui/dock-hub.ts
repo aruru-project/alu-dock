@@ -8,7 +8,8 @@ import {
   type Component,
   type SelectItem,
 } from "@earendil-works/pi-tui";
-import { resolve } from "node:path";
+import { homedir, hostname } from "node:os";
+import { join, resolve } from "node:path";
 
 import type { DockClient } from "../control/dock-client.js";
 import type { AttachmentStorageSettings, AttachmentStorageState } from "../control/attachment-storage-state.js";
@@ -22,7 +23,7 @@ import type {
   TrustedClient,
 } from "../control/remote-access-state.js";
 import { MainMachineState, SubHostMachineState, readMachineJoinFile, writeMachineJoinFile } from "../control/machine-state.js";
-import { MachineSettingsState, machineListenerConfiguration, sameMachineListenerConfiguration, type MachineListenerStatus, type MachineSettings } from "../control/machine-settings-state.js";
+import { MachineSettingsState, machineListenerConfiguration, sameMachineListenerConfiguration, type MachineListenerStatus, type MachineSettings, type SubHostConnectionSettings } from "../control/machine-settings-state.js";
 import type { MachineDto } from "../control/protocol.js";
 import type { InstanceSnapshot, SessionDto } from "../core/managed-instance.js";
 import { humanInstanceStatus } from "../core/instance-display-name.js";
@@ -220,7 +221,7 @@ export async function runSubHostHub(
       if (signalRequested || !result.value || result.value === EXIT_HUB) return;
       notice = undefined;
       if (result.value === "connection") {
-        notice = await configureSubHostRole(terminal, machineSettingsState, subHostMachineState, result.data.settings);
+        notice = await configureSubHostRole(terminal, machineSettingsState, subHostMachineState, result.data.settings, "manage");
       } else if (result.value === "main") {
         const selected = await selectMenu(
           terminal,
@@ -544,7 +545,15 @@ async function chooseHubSettings(
       notice ?? "Configure this Main.",
       [
         { value: "attachments", label: "Attachment directory", description: terminalSafe(attachmentSettings.directory) },
-        { value: "dock-role", label: "Dock role · Main", description: "Use this computer as a SubHost after the next restart" },
+        {
+          value: "dock-role",
+          label: machineSettings.role === "subhost" ? "Dock role · SubHost next start" : "Dock role · Main",
+          description: machineSettings.role === "subhost"
+            ? "This Main keeps running until Alu Dock restarts"
+            : machineSettings.subhost
+              ? `Use saved SubHost connection · ${terminalSafe(machineSettings.subhost.name)}`
+              : "Set up this computer as a SubHost",
+        },
         { value: BACK, label: "Back to Hub", description: "Return to the Hub" },
       ],
       "↑↓ choose · Enter change · Esc back",
@@ -614,6 +623,11 @@ async function chooseMachinesAction(
           : `Listen on port ${settings.main.port}`,
       },
       { value: "port", label: `Port · ${settings.main.port}`, description: "Change the port SubHosts use" },
+      {
+        value: "address",
+        label: `Address · ${terminalSafe(settings.main.advertisedAddress ?? "Not set")}`,
+        description: "The address new SubHosts use to reach this Main",
+      },
       { value: BACK, label: "Back to Hub", description: "Return to the Hub" },
     ];
     const selected = await selectMenu(
@@ -626,13 +640,20 @@ async function chooseMachinesAction(
     if (!selected || selected === BACK) return;
     notice = undefined;
     if (selected === "connect") {
+      let address = settings.main.advertisedAddress;
+      if (address === undefined) {
+        address = await promptMainAddress(terminal, undefined, "Enter the address another computer uses to reach this Main");
+        if (address === undefined) continue;
+      }
       const output = await promptHubText(
         terminal,
         "Save SubHost join file",
-        "Enter an absolute path for the private one-use join file",
+        "Move this private one-use file to the computer that will become a SubHost",
+        join(homedir(), "alu-dock-subhost.join"),
       );
       if (output === undefined) continue;
       try {
+        if (settings.main.advertisedAddress !== address) await machineSettingsState.writeMainAdvertisedAddress(address);
         const [latest, latestStatus] = await Promise.all([
           machineSettingsState.read(),
           machineSettingsState.readMainListenerStatus(),
@@ -649,17 +670,33 @@ async function chooseMachinesAction(
         if (
           current.revision !== ready.revision
           || !current.main.connectionsEnabled
+          || current.main.advertisedAddress !== address
           || !sameMachineListenerConfiguration(currentStatus, machineListenerConfiguration(current))
           || currentStatus?.state !== "listening"
         ) {
           notice = "The Machine port changed while the join file was being prepared. Check the current port, then try again.";
           continue;
         }
-        const joinFile = await mainMachineState.createJoin();
+        const joinFile = await mainMachineState.createJoin({ mainAddress: address, port: current.main.port });
         await writeMachineJoinFile(output.trim(), joinFile);
-        notice = `Join file saved at ${terminalSafe(resolve(output.trim()))}. On the SubHost, enter this Main’s address and port ${current.main.port}.`;
+        notice = `Join file saved at ${terminalSafe(resolve(output.trim()))}. Move it to the other computer, then choose Use as SubHost in Settings.`;
       } catch {
         notice = "The join file couldn’t be saved. Check the path, then try again.";
+      }
+      continue;
+    }
+    if (selected === "address") {
+      const address = await promptMainAddress(
+        terminal,
+        settings.main.advertisedAddress,
+        "Enter the address another computer uses to reach this Main",
+      );
+      if (address === undefined) continue;
+      try {
+        await machineSettingsState.writeMainAdvertisedAddress(address);
+        notice = `New SubHosts will connect to ${terminalSafe(address)}.`;
+      } catch {
+        notice = "That address couldn’t be saved. Check it, then try again.";
       }
       continue;
     }
@@ -792,64 +829,266 @@ async function ensureMachineConnectionsStopped(
   return false;
 }
 
+type SubHostConnectionIntent = "choose-role" | "manage";
+
 async function configureSubHostRole(
   terminal: HubProcessTerminal,
   machineSettingsState: MachineSettingsState,
   subHostMachineState: SubHostMachineState,
   current: MachineSettings,
+  intent: SubHostConnectionIntent = "choose-role",
 ): Promise<string | undefined> {
-  const mainAddress = await promptHubText(
+  let existing: Awaited<ReturnType<SubHostMachineState["load"]>>;
+  try {
+    existing = await subHostMachineState.load();
+  } catch {
+    return "I couldn’t read this computer’s saved Main connection. Nothing was changed.";
+  }
+
+  if (existing?.joinToken !== undefined && enrollmentNeedsRenewal(existing.joinExpiresAt)) {
+    const action = await selectMenu(
+      terminal,
+      "SubHost enrollment needs a fresh join file",
+      current.subhost
+        ? subHostConnectionSummary(current.subhost)
+        : `${terminalSafe(existing.machineName)} has not finished connecting to Main`,
+      [
+        { value: "renew", label: "Use a Fresh Join File", description: "Keep this SubHost identity and finish with the same Main" },
+        { value: "change", label: "Connect to a Different Main", description: "Replace the unfinished enrollment" },
+        ...(current.role === "subhost"
+          ? [{ value: "use-main", label: "Use as Main Instead", description: "Cancel the pending SubHost role" }]
+          : []),
+        { value: BACK, label: "Back", description: "Leave everything unchanged" },
+      ],
+      "↑↓ choose · Enter confirm · Esc cancel",
+    );
+    if (!action || action === BACK) return undefined;
+    if (action === "use-main") {
+      try {
+        await machineSettingsState.switchToMain();
+        return "This computer will keep using Main on the next start.";
+      } catch {
+        return "I couldn’t change the next startup role. Review Settings before restarting.";
+      }
+    }
+    return enrollWithJoinFile(
+      terminal,
+      machineSettingsState,
+      subHostMachineState,
+      current,
+      existing,
+      action === "change" ? "replace" : "renew",
+    );
+  }
+
+  if (existing && current.subhost) {
+    const action = await selectMenu(
+      terminal,
+      intent === "choose-role"
+        ? current.role === "subhost" ? "SubHost is selected for the next start" : "Use this computer as SubHost?"
+        : "Main connection",
+      subHostConnectionSummary(current.subhost),
+      [
+        ...(intent === "choose-role" && current.role === "main"
+          ? [{ value: "use", label: "Use Saved Connection", description: "No address, port, name, or join file needed" }]
+          : []),
+        ...(intent === "choose-role" && current.role === "subhost"
+          ? [
+            { value: "keep-subhost", label: "Keep SubHost for Next Start", description: "Leave the saved role unchanged" },
+            { value: "use-main", label: "Use as Main Instead", description: "Cancel the pending role change" },
+          ]
+          : []),
+        { value: "edit", label: "Edit Connection", description: "Change the address, port, or name for this Main" },
+        { value: "change", label: "Connect to a Different Main", description: "Requires a new private join file" },
+        { value: BACK, label: intent === "choose-role" ? "Back to Settings" : "Keep Current Connection", description: "Leave everything unchanged" },
+      ],
+      "↑↓ choose · Enter confirm · Esc cancel",
+    );
+    if (!action || action === BACK || action === "keep-subhost") return undefined;
+    if (action === "use-main") {
+      try {
+        await machineSettingsState.switchToMain();
+        return "This computer will keep using Main on the next start.";
+      } catch {
+        return "I couldn’t change the next startup role. Review Settings before restarting.";
+      }
+    }
+    if (action === "use") return saveSubHostConnection(machineSettingsState, subHostMachineState, current.subhost);
+    if (action === "edit") return editSubHostConnection(terminal, machineSettingsState, subHostMachineState, current.subhost);
+    return enrollWithJoinFile(terminal, machineSettingsState, subHostMachineState, current, existing, "replace");
+  }
+
+  if (existing) {
+    const mainAddress = await promptMainAddress(
+      terminal,
+      undefined,
+      `This computer is already enrolled as ${terminalSafe(existing.machineName)}. Enter the address it uses to reach Main`,
+    );
+    if (mainAddress === undefined) return undefined;
+    const proposed = await confirmSubHostConnection(
+      terminal,
+      { mainAddress, port: current.main.port, name: existing.machineName },
+      "Restore Saved Main Connection?",
+      "Use Existing Enrollment",
+    );
+    if (proposed === undefined) return undefined;
+    return saveSubHostConnection(machineSettingsState, subHostMachineState, proposed);
+  }
+
+  return enrollWithJoinFile(terminal, machineSettingsState, subHostMachineState, current, undefined, "new");
+}
+
+type SubHostEnrollmentMode = "new" | "renew" | "replace";
+
+async function enrollWithJoinFile(
+  terminal: HubProcessTerminal,
+  machineSettingsState: MachineSettingsState,
+  subHostMachineState: SubHostMachineState,
+  current: MachineSettings,
+  existing: Awaited<ReturnType<SubHostMachineState["load"]>>,
+  mode: SubHostEnrollmentMode,
+): Promise<string | undefined> {
+  const joinPath = await promptHubText(
     terminal,
-    "Main address",
-    "Enter the address this computer uses to reach Main",
-    current.subhost?.mainAddress,
+    mode === "replace" ? "New Main join file" : mode === "renew" ? "Fresh join file needed" : "SubHost join file",
+    mode === "replace"
+      ? "Choose the private join file created by the new Main"
+      : mode === "renew"
+        ? "The previous join expired before enrollment finished. Create a fresh file on the same Main"
+        : "Choose the private join file created by Main",
+    join(homedir(), "alu-dock-subhost.join"),
   );
+  if (joinPath === undefined) return undefined;
+  if (joinPath.trim().length === 0) return "Choose the private join file created by Main.";
+
+  try {
+    const joinFile = await readMachineJoinFile(joinPath.trim());
+    if (mode === "replace" && existing?.mainFingerprint === joinFile.mainFingerprint) {
+      return "That join file belongs to the current Main. Choose Edit Connection if its address or port changed.";
+    }
+    if (mode === "renew" && existing?.mainFingerprint !== joinFile.mainFingerprint) {
+      return "That join file belongs to a different Main. Keep the current Main or choose Connect to a Different Main.";
+    }
+    let mainAddress = joinFile.connection?.mainAddress ?? current.subhost?.mainAddress;
+    if (mainAddress === undefined) {
+      mainAddress = await promptMainAddress(terminal, undefined, "Enter the address this computer uses to reach Main");
+      if (mainAddress === undefined) return undefined;
+    }
+    const proposed = await confirmSubHostConnection(
+      terminal,
+      {
+        mainAddress,
+        port: joinFile.connection?.port ?? current.subhost?.port ?? current.main.port,
+        name: current.subhost?.name ?? existing?.machineName ?? hostname(),
+      },
+      mode === "replace" ? "Connect to a Different Main?" : mode === "renew" ? "Finish SubHost Enrollment?" : "Use this computer as SubHost?",
+      mode === "replace" ? "Change Main" : mode === "renew" ? "Use Fresh Join" : "Use as SubHost",
+    );
+    if (proposed === undefined) return undefined;
+    const pending = mode === "replace"
+      ? await subHostMachineState.replace(joinFile, proposed.name)
+      : await subHostMachineState.prepare(joinFile, proposed.name);
+    await machineSettingsState.switchToSubHost(proposed);
+    return pendingEnrollmentNotice(pending.joinExpiresAt);
+  } catch {
+    return "I couldn’t finish that Main connection. Check that the join file came from the intended Main and hasn’t expired, then review the saved connection before trying again.";
+  }
+}
+
+async function saveSubHostConnection(
+  machineSettingsState: MachineSettingsState,
+  subHostMachineState: SubHostMachineState,
+  connection: SubHostConnectionSettings,
+): Promise<string> {
+  try {
+    const enrollment = await subHostMachineState.updateMachineName(connection.name);
+    await machineSettingsState.switchToSubHost(connection);
+    return enrollment.joinToken === undefined
+      ? "This computer will start as SubHost next time Alu Dock starts. Start it normally; no join file is needed."
+      : pendingEnrollmentNotice(enrollment.joinExpiresAt);
+  } catch {
+    return "I couldn’t finish saving that Main connection. Review the connection before trying again.";
+  }
+}
+
+async function editSubHostConnection(
+  terminal: HubProcessTerminal,
+  machineSettingsState: MachineSettingsState,
+  subHostMachineState: SubHostMachineState,
+  current: SubHostConnectionSettings,
+): Promise<string | undefined> {
+  const edited = await promptSubHostConnectionDetails(terminal, current);
+  if (edited === undefined) return undefined;
+  return saveSubHostConnection(machineSettingsState, subHostMachineState, edited);
+}
+
+async function confirmSubHostConnection(
+  terminal: HubProcessTerminal,
+  initial: SubHostConnectionSettings,
+  title: string,
+  confirmLabel: string,
+): Promise<SubHostConnectionSettings | undefined> {
+  let proposed = initial;
+  while (true) {
+    const selected = await selectMenu(
+      terminal,
+      title,
+      subHostConnectionSummary(proposed),
+      [
+        { value: "confirm", label: confirmLabel, description: "Save this connection for future starts" },
+        { value: "edit", label: "Edit Details", description: "Change the address, port, or name" },
+        { value: BACK, label: "Cancel", description: "Leave everything unchanged" },
+      ],
+      "↑↓ choose · Enter confirm · Esc cancel",
+    );
+    if (selected === "confirm") return proposed;
+    if (!selected || selected === BACK) return undefined;
+    const edited = await promptSubHostConnectionDetails(terminal, proposed);
+    if (edited !== undefined) proposed = edited;
+  }
+}
+
+async function promptSubHostConnectionDetails(
+  terminal: HubProcessTerminal,
+  current: SubHostConnectionSettings,
+): Promise<SubHostConnectionSettings | undefined> {
+  const mainAddress = await promptMainAddress(terminal, current.mainAddress, "Enter the address this computer uses to reach Main");
   if (mainAddress === undefined) return undefined;
-  const port = await promptMachinePort(terminal, current.subhost?.port ?? current.main.port);
+  const port = await promptMachinePort(terminal, current.port);
   if (port === undefined) return undefined;
   const name = await promptHubText(
     terminal,
     "SubHost name",
     "Choose the name Main will show for this computer",
-    current.subhost?.name ?? "SubHost",
+    current.name,
   );
-  if (name === undefined) return undefined;
-  const existing = await subHostMachineState.load();
-  const joinPath = await promptHubText(
-    terminal,
-    "SubHost join file",
-    existing ? "Leave empty to keep the current Main enrollment, or enter a new join file" : "Enter the join file created by Main",
-  );
-  if (joinPath === undefined) return undefined;
-  try {
-    if (joinPath.trim().length > 0) {
-      const joinFile = await readMachineJoinFile(joinPath.trim());
-      if (existing && existing.mainFingerprint !== joinFile.mainFingerprint) {
-        const confirmation = await selectMenu(
-          terminal,
-          "Connect to a different Main?",
-          "This changes which Main can reach this computer. Local work stays here.",
-          [
-            { value: "confirm", label: "Change Main", description: "Replace the current Main enrollment" },
-            { value: BACK, label: "Keep Current Main", description: "Leave the connection unchanged" },
-          ],
-          "↑↓ choose · Enter confirm · Esc cancel",
-        );
-        if (confirmation !== "confirm") return undefined;
-        await subHostMachineState.clear();
-      } else if (existing?.joinToken === undefined) {
-        return "This computer is already enrolled with that Main. Leave the join-file field empty to keep it.";
-      }
-      await subHostMachineState.prepare(joinFile, name.trim());
-    } else if (!existing) {
-      return "Choose the join file created by Main before switching this computer to SubHost.";
-    }
-    await subHostMachineState.updateMachineName(name.trim());
-    await machineSettingsState.switchToSubHost({ mainAddress: mainAddress.trim(), port, name: name.trim() });
-    return "This computer will start as SubHost next time Alu Dock starts.";
-  } catch {
-    return "I couldn’t save that Main connection. Check the address, port, and join file, then try again.";
-  }
+  if (name === undefined || name.trim().length === 0) return undefined;
+  return { mainAddress, port, name: name.trim() };
+}
+
+async function promptMainAddress(
+  terminal: HubProcessTerminal,
+  current: string | undefined,
+  description: string,
+): Promise<string | undefined> {
+  const value = await promptHubText(terminal, "Main address", description, current);
+  const address = value?.trim();
+  if (!address) return undefined;
+  return address;
+}
+
+function subHostConnectionSummary(connection: SubHostConnectionSettings): string {
+  return `${terminalSafe(connection.name)} will connect to ${terminalSafe(connection.mainAddress)} · Port ${connection.port}`;
+}
+
+function enrollmentNeedsRenewal(expiresAt: string | undefined): boolean {
+  return expiresAt === undefined || Date.parse(expiresAt) <= Date.now();
+}
+
+function pendingEnrollmentNotice(expiresAt: string | undefined): string {
+  const remainingMs = expiresAt === undefined ? 0 : Date.parse(expiresAt) - Date.now();
+  const remainingMinutes = Math.max(1, Math.ceil(remainingMs / 60_000));
+  return `Restart Alu Dock normally within ${remainingMinutes} minute${remainingMinutes === 1 ? "" : "s"} to finish enrollment. The join file is already imported.`;
 }
 
 async function promptMachinePort(terminal: HubProcessTerminal, current: number): Promise<number | undefined> {

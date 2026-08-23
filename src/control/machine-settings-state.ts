@@ -8,12 +8,21 @@ const SETTINGS_SCHEMA = 1 as const;
 const MAX_SETTINGS_BYTES = 64 * 1024;
 export const DEFAULT_MACHINE_PORT = 43_127;
 
+export interface MachineEndpoint {
+  mainAddress: string;
+  port: number;
+}
+
+export interface SubHostConnectionSettings extends MachineEndpoint {
+  name: string;
+}
+
 interface StoredMachineSettings {
   schemaVersion: 1;
   revision: number;
   roleOverride?: "subhost";
-  main: { connectionsEnabled: boolean; port: number; name: string };
-  subhost?: { mainAddress: string; port: number; name: string };
+  main: { connectionsEnabled: boolean; port: number; name: string; advertisedAddress?: string };
+  subhost?: SubHostConnectionSettings;
 }
 
 export interface MachineSettings extends StoredMachineSettings {
@@ -92,6 +101,7 @@ export class MachineSettingsState {
         ...current,
         revision: current.revision + 1,
         main: {
+          ...current.main,
           connectionsEnabled: input.enabled,
           port: checkedPort(input.port),
           name: checkedName(input.name ?? current.main.name),
@@ -100,7 +110,15 @@ export class MachineSettingsState {
     });
   }
 
-  async switchToSubHost(input: { mainAddress: string; port: number; name: string }): Promise<MachineSettings> {
+  async writeMainAdvertisedAddress(address: string): Promise<MachineSettings> {
+    return this.mutateStored((current) => ({
+      ...current,
+      revision: current.revision + 1,
+      main: { ...current.main, advertisedAddress: checkedAddress(address) },
+    }));
+  }
+
+  async switchToSubHost(input: SubHostConnectionSettings): Promise<MachineSettings> {
     return this.mutateStored((current) => ({
       ...current,
       revision: current.revision + 1,
@@ -210,7 +228,7 @@ function parseSettings(input: unknown): StoredMachineSettings {
   if (value.schemaVersion !== SETTINGS_SCHEMA || !Number.isSafeInteger(value.revision) || (value.revision as number) < 0) throw new Error("Machine settings version is invalid");
   if (value.roleOverride !== undefined && value.roleOverride !== "subhost") throw new Error("Machine role setting is invalid");
   const main = record(value.main, "Main settings");
-  exact(main, ["connectionsEnabled", "port", "name"]);
+  exact(main, ["connectionsEnabled", "port", "name", "advertisedAddress"]);
   if (typeof main.connectionsEnabled !== "boolean") throw new Error("Main connection setting is invalid");
   const subhost = value.subhost === undefined ? undefined : record(value.subhost, "SubHost settings");
   if (subhost) exact(subhost, ["mainAddress", "port", "name"]);
@@ -223,6 +241,7 @@ function parseSettings(input: unknown): StoredMachineSettings {
       connectionsEnabled: main.connectionsEnabled,
       port: checkedPort(main.port),
       name: checkedName(main.name),
+      ...(main.advertisedAddress === undefined ? {} : { advertisedAddress: checkedAddress(main.advertisedAddress) }),
     },
     ...(subhost === undefined ? {} : { subhost: {
       mainAddress: checkedAddress(subhost.mainAddress),
@@ -260,6 +279,10 @@ function parseSubHostStatus(input: unknown): StoredSubHostStatus {
     connected: value.connected,
     updatedAt,
   };
+}
+
+export function validateMachineEndpoint(mainAddress: unknown, port: unknown): MachineEndpoint {
+  return { mainAddress: checkedAddress(mainAddress), port: checkedPort(port) };
 }
 
 function checkedPort(value: unknown): number {

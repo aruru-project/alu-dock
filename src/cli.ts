@@ -225,6 +225,9 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     await settingsState.writeSubHostStatus({ hostEpoch: subHostEpoch, connected: false });
     const subState = new SubHostMachineState(machineStateRoot(catalogPath as string));
     if (options.joinFile) await subState.prepare(await readMachineJoinFile(options.joinFile), machineName);
+    const enrolled = await subState.load();
+    if (!enrolled) throw new Error("This computer is not enrolled with a Main. Start it as Main, then choose Use as SubHost in Settings.");
+    if (enrolled.machineName !== machineName) await subState.updateMachineName(machineName);
     const upstreamConnection = new SubHostMachineConnection({
       state: subState,
       address: mainAddress,

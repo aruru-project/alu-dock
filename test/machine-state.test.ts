@@ -11,7 +11,7 @@ import type { TLSSocket } from "node:tls";
 import type { DockToolsHostPort } from "../src/core/dock-tools.js";
 import type { InstanceSnapshot } from "../src/core/managed-instance.js";
 import { MachineSettingsState } from "../src/control/machine-settings-state.js";
-import { MainMachineState, SubHostMachineState, writeMachineJoinFile } from "../src/control/machine-state.js";
+import { MainMachineState, readMachineJoinFile, SubHostMachineState, writeMachineJoinFile } from "../src/control/machine-state.js";
 import { MachineMutationEffectUnknownError, MainMachineController, SubHostDockToolsPort, SubHostMachineConnection, writeMachine } from "../src/control/machine-transport.js";
 import type { ControlRequest } from "../src/control/protocol.js";
 
@@ -75,9 +75,10 @@ test("join enrollment is one-use and writing its private file preserves an exist
   await (await import("node:fs/promises")).mkdir(parent, { mode: 0o755 });
   await chmod(parent, 0o755);
   const main = new MainMachineState(join(root, "main"));
-  const joinFile = await main.createJoin();
+  const joinFile = await main.createJoin({ mainAddress: "main.lan", port: 43127 });
   const path = join(parent, "subhost.join");
   await writeMachineJoinFile(path, joinFile);
+  assert.deepEqual((await readMachineJoinFile(path)).connection, { mainAddress: "main.lan", port: 43127 });
   assert.equal((await stat(parent)).mode & 0o777, 0o755);
   assert.equal((await stat(path)).mode & 0o777, 0o600);
 
@@ -87,6 +88,26 @@ test("join enrollment is one-use and writing its private file preserves an exist
   await sub.markJoined();
   await assert.rejects(sub.prepare(joinFile, "Studio"));
   await assert.rejects(main.acceptJoin({ token: joinFile.token, machineId: pending.machineId, machineName: pending.machineName, ...fixtureMachineFacts, certificatePem: pending.identity.certificatePem }));
+});
+
+test("an unfinished enrollment renews after its first join expires without changing SubHost identity", async () => {
+  const root = await mkdtemp(join(tmpdir(), "alu-machine-renew-"));
+  try {
+    const base = new Date("2026-01-01T00:00:00.000Z");
+    const main = new MainMachineState(join(root, "main"));
+    const sub = new SubHostMachineState(join(root, "sub"));
+    const firstJoin = await main.createJoin(undefined, base);
+    const first = await sub.prepare(firstJoin, "Studio", base);
+    const renewedAt = new Date(base.getTime() + 11 * 60_000);
+    const secondJoin = await main.createJoin(undefined, renewedAt);
+    const renewed = await sub.prepare(secondJoin, "Studio", renewedAt);
+    assert.equal(renewed.machineId, first.machineId);
+    assert.equal(renewed.identity.fingerprint, first.identity.fingerprint);
+    assert.equal(renewed.joinToken, secondJoin.token);
+    assert.equal(renewed.joinExpiresAt, secondJoin.expiresAt);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("Main creates a join file from the Hub while its running authority accepts the same enrollment", async () => {
