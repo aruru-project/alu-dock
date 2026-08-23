@@ -69,29 +69,37 @@ aludock list --all
 
 ## Windows 源码前台运行（先期）
 
-Windows 当前不需要安装包或后台 Service。从源码工作区打开 PowerShell，安装依赖后以前台方式启动；窗口保持打开期间 Host 持续运行，`Ctrl+C` 进入正常关闭：
+Windows 当前不需要安装包或后台 Service。从源码工作区安装依赖后，使用两个 PowerShell 窗口。
+
+第一个窗口启动并保持 Host；`Ctrl+C` 进入正常关闭：
 
 ```powershell
 npm ci
-npm run serve:windows
+npm run host:windows
+# 或直接运行 .\scripts\Start-AluDockHost.ps1
 ```
 
-默认状态保存在 `%LOCALAPPDATA%\Alu Dock\`，本地 Protocol V2 入口是 `\\.\pipe\alu-dock`。另开一个 PowerShell 窗口运行 `node dist/src/cli.js` 可以连接同一个本地 Host；本地 Named Pipe 不使用远程设备配对。
-
-没有角色配置时脚本默认启动 Main，且 SubHost connections 关闭。可以从 Main Hub Settings 开启 machine listener、选择端口，或选择下次启动为 SubHost；普通启动会读取保存的角色：
+第二个窗口按需打开人使用的界面；离开界面不会停止第一个窗口中的 Host：
 
 ```powershell
-.\scripts\run-windows.ps1
+npm run open:windows
+# 或直接运行 .\scripts\Open-AluDock.ps1
 ```
+
+Main 打开完整 Hub，SubHost 打开最小管理界面。`Open-AluDock.ps1` 不重复构建或启动 Host；首次使用时先运行 Host 入口。
+
+默认状态保存在 `%LOCALAPPDATA%\Alu Dock\`，本地 Protocol V2 入口是 `\\.\pipe\alu-dock`。本地 Named Pipe 不使用远程设备配对。
+
+没有角色配置时 Host 脚本默认启动 Main，且 SubHost connections 关闭。可以从 Main Hub Settings 开启 machine listener、选择端口，或选择下次启动为 SubHost；普通启动会读取保存的角色。
 
 显式开发覆盖仍可使用：
 
 ```powershell
 # Main；省略 MachinePort 表示不开放 SubHost connections
-.\scripts\run-windows.ps1 -Role main -MachinePort 7444 -MachineName "Windows Main"
+.\scripts\Start-AluDockHost.ps1 -Role main -MachinePort 7444 -MachineName "Windows Main"
 
 # SubHost：第一次额外传入 JoinFile
-.\scripts\run-windows.ps1 -Role subhost -MainAddress "main.example" -MachinePort 7444 -MachineName "Windows Workstation" -JoinFile ".\join.json"
+.\scripts\Start-AluDockHost.ps1 -Role subhost -MainAddress "main.example" -MachinePort 7444 -MachineName "Windows Workstation" -JoinFile ".\join.json"
 ```
 
 Windows Remote Access 仍使用普通 TLS 设备配对；它与本地 Named Pipe 是两个入口。当前先期范围不包括 Windows Service、Scheduled Task、开机启动、安装包和自动更新。
