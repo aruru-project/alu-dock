@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert'
 import { computed, nextTick, ref, watch } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
-import { projectConversation } from '../src/lib/conversation.ts'
+import { hasCompactConversationContent, projectConversation } from '../src/lib/conversation.ts'
 import { reduceLiveEvent, type LiveProjectionState } from '../src/lib/liveReducer.ts'
 import { conversationBoundaryKey, conversationSwapIsCorrelated, draftAfterSubmit, FollowActivationCoordinator, formatContextUsage, formatTokenCount, outputIsNearBottom, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../src/lib/uiBoundaries.ts'
 import { userErrorMessage } from '../src/lib/userError.ts'
@@ -50,6 +50,14 @@ const compactThinkingProjection = projectConversation(bootstrap(runningProjectio
   event(2, 'message.delta', { messageId: 'reply', block: 'thinking', delta: '检查图片内容' }),
 ]), { compact: true })
 assert.equal(compactThinkingProjection.some((item) => item.kind === 'activity'), true, '简洁模式隐藏思考时仍显示正在处理状态')
+assert.equal(hasCompactConversationContent([
+  { id: 'thinking-only', kind: 'thinking', groupId: 'process-only', title: '思考过程', text: '检查中' },
+  { id: 'tool-only', kind: 'tool', groupId: 'process-only', name: 'read', summary: '完成', status: 'done' },
+  { id: 'info-only', kind: 'notice', groupId: 'process-only', tone: 'info', text: '资源已载入' },
+]), false, '简洁模式把只有过程内容的整行标为不可见，避免残留行占位和时间戳')
+assert.equal(hasCompactConversationContent([{ id: 'reply', kind: 'assistant', groupId: 'reply', text: '完成', time: '10:58' }]), true)
+assert.equal(hasCompactConversationContent([{ id: 'image', kind: 'image', groupId: 'image', imageKey: 'image', mimeType: 'image/png' }]), true)
+assert.equal(hasCompactConversationContent([{ id: 'warning', kind: 'notice', groupId: 'warning', tone: 'warning', text: '需要确认' }]), true, '警告和错误在简洁模式仍可见')
 const compactReadImageProjection = projectConversation(bootstrap(runningProjectionState, [
   event(1, 'run.started', {}),
   event(2, 'message.completed', { messageId: 'tool-result', role: 'tool', content: [{ type: 'image', mimeType: 'image/png', contentRef: 'read-image' }] }),

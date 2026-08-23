@@ -76,7 +76,7 @@ import {
   verifyHostEndpoint,
 } from './lib/bridge'
 import type { CreateWorkContinuation, SessionContext } from './lib/bridge'
-import { foldLiveDelta, liveDeltaKey, liveProjectionTargetKey, mergeHydratedConversationRecords, projectConversation } from './lib/conversation'
+import { foldLiveDelta, hasCompactConversationContent, liveDeltaKey, liveProjectionTargetKey, mergeHydratedConversationRecords, projectConversation } from './lib/conversation'
 import { appendRestoredQueue, attachmentsAfterSubmit, displayedConversationImageResource, moveAttachmentPreviewResource } from './lib/attachmentDraft'
 import { defaultMachineHostId, machineSelectorVisible, machineWorkspaceStart, selectedMachineTarget, workspaceChildPath } from './lib/machines'
 import {
@@ -3620,7 +3620,7 @@ function handleOutputClick(event: MouseEvent) {
               </div>
             </article>
 
-            <article v-else-if="row.kind === 'assistant-group'" class="alu-msg-assistant-row" :data-conversation-id="row.id" :aria-label="`Agent 回复 ${row.time}`">
+            <article v-else-if="row.kind === 'assistant-group'" class="alu-msg-assistant-row" :class="{ 'is-compact-empty': !hasCompactConversationContent(row.parts) }" :data-conversation-id="row.id" :aria-label="`Agent 回复 ${row.time}`">
               <img src="./assets/console_icon_small.png" alt="Agent" class="alu-msg-avatar" />
               <div class="alu-msg-assistant-content">
                 <div class="alu-msg-assistant-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div>
@@ -3635,7 +3635,7 @@ function handleOutputClick(event: MouseEvent) {
 
             <details v-else-if="row.kind === 'record' && row.folded" class="alu-record-panel alu-hideable" :class="row.panelClass" :data-conversation-id="row.id"><summary>{{ row.title }}</summary><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></details>
 
-            <section v-else-if="row.kind === 'record'" class="alu-record-panel" :class="row.panelClass" :data-conversation-id="row.id"><div class="alu-record-title alu-hideable">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></section>
+            <section v-else-if="row.kind === 'record'" class="alu-record-panel" :class="[row.panelClass, { 'is-compact-empty': !hasCompactConversationContent(row.parts) }]" :data-conversation-id="row.id"><div class="alu-record-title alu-hideable">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></section>
 
             <div v-else class="alu-live-notice-row" :class="{ 'alu-hideable': row.tone === 'info' }" :data-conversation-id="row.id"><div :class="row.tone === 'error' ? 'msg-error' : row.tone === 'warning' ? 'msg-warning' : 'msg-notice'">{{ row.text }}</div></div>
           </template>

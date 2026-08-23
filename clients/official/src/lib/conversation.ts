@@ -26,6 +26,12 @@ export interface ConversationProjectionOptions {
   compact?: boolean
 }
 
+export function hasCompactConversationContent(parts: ConversationProcessItem[]) {
+  return parts.some((part) => part.kind === 'assistant'
+    || part.kind === 'image'
+    || (part.kind === 'notice' && part.tone !== 'info'))
+}
+
 export function mergeHydratedConversationRecords(previews: ConversationRecord[], completed: ConversationRecord[]) {
   const replacements = new Map(completed.map((record) => [record.entryId, record]))
   return previews.map((record) => replacements.get(record.entryId) ?? record)

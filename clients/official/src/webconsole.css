@@ -684,14 +684,13 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 .msg-toolcall details[open] .tool-disclosure { transform: rotate(90deg); }
 .msg-toolcall.is-error { border-color: var(--alu-rose-border); }
 
-/* ── 简洁显示模式：隐藏过程块（thinking / tool call / notice / error）── */
+/* ── 简洁显示模式：隐藏过程块（thinking / tool call / info notice）── */
 .alu-compact-mode .alu-hideable {
   display: none !important;
 }
-/* 简洁模式下，若 assistant 整行内容（body 下直接子块）全部隐藏，
-   连同头像 / 气泡 / 时间戳一起隐藏整行，避免空头像行残留。
-   判定：body 下不存在任何非 .alu-hideable 的直接子元素（正式回复 / 图片）。 */
-.alu-compact-mode .alu-msg-assistant-row:not(:has(.alu-msg-assistant-body > :not(.alu-hideable))) {
+/* 可见性由投影内容显式标记，不依赖旧版 Android WebView 缺失的关系选择器。 */
+.alu-compact-mode .alu-msg-assistant-row.is-compact-empty,
+.alu-compact-mode .alu-record-panel.is-compact-empty {
   display: none !important;
 }
 .msg-tool-output {
