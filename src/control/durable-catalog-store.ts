@@ -35,6 +35,8 @@ export interface FileCatalogStoreOptions {
 export class FileCatalogStore implements CatalogStore {
   readonly path: string;
   private readonly directory: string;
+  private directoryHardening: Promise<void> | undefined;
+  private catalogFileHardened = false;
 
   constructor(path: string, private readonly options: FileCatalogStoreOptions = {}) {
     this.path = resolve(path);
@@ -42,11 +44,14 @@ export class FileCatalogStore implements CatalogStore {
   }
 
   async load(): Promise<CatalogProjection | undefined> {
-    await ensurePrivateStateDirectory(this.directory);
+    await this.ensurePrivateStateDirectory();
     const info = await lstatIfPresent(this.path);
     if (!info) return undefined;
     assertPrivateCatalogFile(this.path, info);
-    await hardenWindowsPrivatePath(this.path, false);
+    if (!this.catalogFileHardened) {
+      await hardenWindowsPrivatePath(this.path, false);
+      this.catalogFileHardened = true;
+    }
     if (info.size > MAX_DURABLE_CATALOG_BYTES) throw new CatalogCorruptError(this.path, "file exceeds the 16 MiB limit");
 
     let raw: unknown;
@@ -78,12 +83,9 @@ export class FileCatalogStore implements CatalogStore {
 
   async commit(candidate: Readonly<CatalogProjection>, _context: Readonly<CatalogMutationContext>): Promise<void> {
     validateCatalogProjection(candidate as CatalogProjection);
-    await ensurePrivateStateDirectory(this.directory);
+    await this.ensurePrivateStateDirectory();
     const existing = await lstatIfPresent(this.path);
-    if (existing) {
-      assertPrivateCatalogFile(this.path, existing);
-      await hardenWindowsPrivatePath(this.path, false);
-    }
+    if (existing) assertPrivateCatalogFile(this.path, existing);
 
     const bytes = `${JSON.stringify(candidate, null, 2)}\n`;
     if (Buffer.byteLength(bytes, "utf8") > MAX_DURABLE_CATALOG_BYTES) throw new Error("Catalog candidate exceeds the 16 MiB limit");
@@ -100,12 +102,31 @@ export class FileCatalogStore implements CatalogStore {
       handle = undefined;
       await this.options.fault?.("rename");
       await rename(temporary, this.path);
-      await hardenWindowsPrivatePath(this.path, false);
+      // The temp file is created only after the parent has its private inheritable
+      // DACL, and the rename stays within that directory. Re-running icacls for
+      // every old/new catalog file made each durable transition spawn two extra
+      // processes without strengthening the boundary.
+      this.catalogFileHardened = true;
       await syncPrivateDirectory(this.directory, () => this.options.fault?.("directory_sync"));
     } finally {
       await handle?.close().catch(() => {});
       await rm(temporary, { force: true }).catch(() => {});
     }
+  }
+
+  private async ensurePrivateStateDirectory(): Promise<void> {
+    await mkdir(this.directory, { recursive: true, mode: 0o700 });
+    const info = await lstat(this.directory);
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`Catalog state path is not a real directory: ${this.directory}`);
+    const canonical = await realpath(this.directory);
+    if (relative(canonical, resolve(this.directory)) !== "") throw new Error(`Catalog state path traverses a symbolic link: ${this.directory}`);
+    if (process.platform === "win32") {
+      this.directoryHardening ??= hardenWindowsPrivatePath(this.directory, true);
+      try { await this.directoryHardening; }
+      catch (error) { this.directoryHardening = undefined; throw error; }
+    }
+    assertOwnedByCurrentUser(this.directory, info);
+    if (process.platform !== "win32" && (info.mode & 0o777) !== 0o700) throw new Error(`Catalog state directory must have mode 0700: ${this.directory}`);
   }
 }
 
@@ -218,17 +239,6 @@ function parseCatalogRecord(input: unknown, field: string): CatalogInstanceRecor
     throw new Error(`${field}.ownerReleaseUnconfirmed must be true when present`);
   }
   return record;
-}
-
-async function ensurePrivateStateDirectory(path: string): Promise<void> {
-  await mkdir(path, { recursive: true, mode: 0o700 });
-  const info = await lstat(path);
-  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`Catalog state path is not a real directory: ${path}`);
-  const canonical = await realpath(path);
-  if (relative(canonical, resolve(path)) !== "") throw new Error(`Catalog state path traverses a symbolic link: ${path}`);
-  await hardenWindowsPrivatePath(path, true);
-  assertOwnedByCurrentUser(path, info);
-  if (process.platform !== "win32" && (info.mode & 0o777) !== 0o700) throw new Error(`Catalog state directory must have mode 0700: ${path}`);
 }
 
 function assertPrivateCatalogFile(path: string, info: Stats): void {

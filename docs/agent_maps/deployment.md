@@ -27,6 +27,8 @@ Managed Host 启动时：
 
 Startup 不自动恢复或重放旧 prompt、Queue、interaction、Promise 或 tool effect。
 
+Durable catalog 在 POSIX 保持既有 owner/mode 与 same-directory fsync/rename 规则。Windows Host 在首次准备 catalog 目录时建立只含当前用户与 SYSTEM 的可继承私有 DACL；启动读取时额外收紧可能来自旧版本的既有 catalog。后续 atomic replacement 从该目录创建同目录临时文件并继承相同 DACL，不在每次 catalog transition 重复启动 `icacls.exe`。
+
 Host unit 只定义 service 自己的固定 Node、CLI、HOME、最小 PATH 和 managed runtime 变量。安装器不得把执行安装时的 PATH、RVM/NVM 选择、npm lifecycle 环境或 Extension 凭据复制进 unit；这些既不是 Host 配置，也不能成为所有 Worker 的全局开发环境。
 
 ## 网络入口与配对窗口
