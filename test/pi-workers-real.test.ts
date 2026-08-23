@@ -22,6 +22,71 @@ const ZERO_USAGE = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
+test("Pi extensions launch child agents with the same Pi version as their Dock Worker", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-dock-pi-runtime-"));
+  const cwd = join(root, "cwd");
+  const agentDir = join(root, "agent");
+  const sessionDir = join(root, "sessions");
+  const emptyBin = join(root, "empty-bin");
+  const probe = join(root, "pi-runtime.json");
+  await Promise.all([
+    mkdir(cwd),
+    mkdir(sessionDir),
+    mkdir(emptyBin),
+    mkdir(join(agentDir, "extensions"), { recursive: true }),
+  ]);
+  await writeFile(join(agentDir, "extensions", "pi-runtime-probe.ts"), `
+import { spawn } from "node:child_process";
+import { writeFile } from "node:fs/promises";
+
+export default async function () {
+  const version = await new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [process.argv[1], "--version"], {
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("close", (code) => code === 0
+      ? resolve(stdout.trim())
+      : reject(new Error(stderr.trim() || \`Pi child exited \${code}\`)));
+  });
+  await writeFile(${JSON.stringify(probe)}, JSON.stringify({
+    version,
+    piCodingAgent: process.env.PI_CODING_AGENT,
+    aiAgent: process.env.AI_AGENT,
+  }));
+}
+`, "utf8");
+  context.after(() => rm(root, { recursive: true, force: true }));
+
+  const workerEnvironment = { ...process.env };
+  for (const key of Object.keys(workerEnvironment)) {
+    if (key.toLowerCase() === "path") delete workerEnvironment[key];
+  }
+  workerEnvironment.PATH = emptyBin;
+  workerEnvironment.PI_OFFLINE = "1";
+  delete workerEnvironment.PI_PACKAGE_DIR;
+
+  const instance = await createPiInstance({
+    id: "pi-runtime-probe", hostEpoch: "pi-runtime-host", creationOperationId: "pi-runtime-create",
+    cwd, agentDir, sessionDir, projectTrusted: false, tools: [], workerEnvironment,
+  });
+  try {
+    const observed = JSON.parse(await readFile(probe, "utf8")) as Record<string, unknown>;
+    assert.deepEqual(observed, {
+      version: instance.snapshot().executor.version,
+      piCodingAgent: "true",
+      aiAgent: "pi",
+    });
+  } finally {
+    await instance.disposeUnpublished();
+  }
+});
+
 test("real Pi Worker projects persisted session entries into canonical conversation records", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-dock-conversation-records-"));
   const cwd = join(root, "cwd");
