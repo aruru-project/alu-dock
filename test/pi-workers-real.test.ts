@@ -22,7 +22,7 @@ const ZERO_USAGE = {
   cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-test("Pi extensions launch child agents with the same Pi version as their Dock Worker", async (context) => {
+test("Pi extensions and workspace shells use the same Pi version as their Dock Worker", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-dock-pi-runtime-"));
   const cwd = join(root, "cwd");
   const agentDir = join(root, "agent");
@@ -39,9 +39,9 @@ test("Pi extensions launch child agents with the same Pi version as their Dock W
 import { spawn } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 
-export default async function () {
-  const version = await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [process.argv[1], "--version"], {
+function run(command, args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -54,8 +54,16 @@ export default async function () {
       ? resolve(stdout.trim())
       : reject(new Error(stderr.trim() || \`Pi child exited \${code}\`)));
   });
+}
+
+export default async function () {
+  const version = await run(process.execPath, [process.argv[1], "--version"]);
+  const shellVersion = process.platform === "win32"
+    ? await run(process.env.ComSpec, ["/d", "/s", "/c", "pi --version"])
+    : await run("/bin/sh", ["-c", "pi --version"]);
   await writeFile(${JSON.stringify(probe)}, JSON.stringify({
     version,
+    shellVersion,
     piCodingAgent: process.env.PI_CODING_AGENT,
     aiAgent: process.env.AI_AGENT,
   }));
@@ -69,7 +77,7 @@ export default async function () {
   }
   workerEnvironment.PATH = emptyBin;
   workerEnvironment.PI_OFFLINE = "1";
-  delete workerEnvironment.PI_PACKAGE_DIR;
+  workerEnvironment.PI_PACKAGE_DIR = join(root, "wrong-pi-package");
 
   const instance = await createPiInstance({
     id: "pi-runtime-probe", hostEpoch: "pi-runtime-host", creationOperationId: "pi-runtime-create",
@@ -79,6 +87,7 @@ export default async function () {
     const observed = JSON.parse(await readFile(probe, "utf8")) as Record<string, unknown>;
     assert.deepEqual(observed, {
       version: instance.snapshot().executor.version,
+      shellVersion: instance.snapshot().executor.version,
       piCodingAgent: "true",
       aiAgent: "pi",
     });

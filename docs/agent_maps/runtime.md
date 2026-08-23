@@ -49,7 +49,7 @@ Windows 前台 Host 没有 POSIX login shell；Worker 继承启动 PowerShell �
 
 每个 Worker 独立取得一次环境，Host 不修改自己的 `process.env`，也不在 local install 时固化某个项目的语言版本或 PATH。Worker 只在结果之上显式加入 identity、IPC 和 bootstrap 所需的 Dock 私有变量。普通 Bash 命令自行 `cd` 到其他目录时不重新捕获；新的 Worker（包括 reopen）重新按其初始 workspace取得环境。
 
-Pi adapter 通过 SDK 嵌入 runtime 时，Worker 必须在加载 extension 前恢复当前 Pi package 的 CLI process identity 和标准 Pi 环境标记。Extension 创建的 Pi 子进程因此与父 Worker 使用同一 package，不得从用户 PATH 猜测或回退到另一份全局 Pi。
+Pi adapter 通过 SDK 嵌入 runtime 时，Host 必须在 fork 前把当前 Pi package、Node executable、标准 Pi 标记和仅含 `pi` launcher 的私有 bin 注入 Worker 环境；私有 bin 只前置这一项，不得把 Dock 的整套 `node_modules/.bin` 混入 workspace。Worker 在加载 extension 前从同一 package authority 恢复 CLI process identity。Extension、workspace shell 和它们创建的 Pi 子进程因此与父 Worker 使用同一 package，不得从用户 PATH 猜测或回退到另一份全局 Pi。
 
 ## Worker 事故记录
 

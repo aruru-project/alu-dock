@@ -1,9 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { realpathSync } from "node:fs";
-import { join, resolve } from "node:path";
-
-import { getPackageDir } from "@earendil-works/pi-coding-agent";
+import { resolve } from "node:path";
 
 import { createPiAgentAdapter, type PiAgentAdapter } from "./pi-agent-adapter.js";
 import { openValidatedPiSession } from "./pi-session-target.js";
@@ -29,6 +26,7 @@ import type { DockToolsResult } from "../core/dock-tools.js";
 import type { AttachmentAccessRequest, AttachmentAccessResult } from "../core/instance-attachments.js";
 import { DockToolsBridge } from "./dock-tools-extension.js";
 import type { DockAttachmentCallPort } from "./dock-attachments-extension.js";
+import { enterPiWorkerRuntime } from "./pi-runtime-environment.js";
 
 interface PendingHostCall {
   capability: UiCapability | DockCapability;
@@ -38,19 +36,11 @@ interface PendingHostCall {
 }
 
 if (process.env.ALU_DOCK_PI_WORKER === "1" && typeof process.send === "function") {
-  enterPiRuntime();
+  enterPiWorkerRuntime();
   void runWorker().catch((error) => {
     try { process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`); } catch {}
     process.exit(1);
   });
-}
-
-function enterPiRuntime(): void {
-  // SDK embedding replaces Pi's CLI entrypoint. Restore the same process
-  // identity the CLI provides before extensions discover or spawn Pi children.
-  process.argv[1] = realpathSync(join(getPackageDir(), "dist", "cli.js"));
-  process.env.PI_CODING_AGENT = "true";
-  process.env.AI_AGENT = "pi";
 }
 
 async function runWorker(): Promise<void> {

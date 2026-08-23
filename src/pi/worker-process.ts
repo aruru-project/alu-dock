@@ -2,6 +2,7 @@ import { fork, spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { WORKER_INCIDENT_STDERR_MAX_BYTES } from "../core/worker-incident.js";
+import { piWorkerRuntimeEnvironment } from "./pi-runtime-environment.js";
 import type { WorkerIdentity } from "./worker-protocol.js";
 
 export interface PiWorkerInitOptions {
@@ -63,7 +64,7 @@ export class PiWorkerProcess {
       // --input-type) into the managed runtime process.
       execArgv: [],
       env: {
-        ...definedEnvironment(options.environment),
+        ...definedEnvironment(piWorkerRuntimeEnvironment(options.environment)),
         ALU_DOCK_PI_WORKER: "1",
         ALU_DOCK_WORKER_IDENTITY: JSON.stringify(options.identity),
         ALU_DOCK_WORKER_INIT: JSON.stringify(options.init),
