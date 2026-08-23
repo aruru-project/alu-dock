@@ -520,7 +520,7 @@ async function ensureDirectory(path: string): Promise<void> {
   else if ((info.mode & 0o777) !== 0o700) await chmod(path, 0o700);
 }
 
-async function claimMachineStateChange(path: string): Promise<() => Promise<void>> {
+export async function claimMachineStateChange(path: string): Promise<() => Promise<void>> {
   await ensureDirectory(dirname(path));
   for (let attempt = 0; attempt < 500; attempt += 1) {
     const token = randomUUID();

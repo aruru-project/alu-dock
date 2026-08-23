@@ -47,7 +47,7 @@ Store 的公开内容在 `files/`，文件名经过最小安全清洗并保持�
 
 ## Main/SubHost startup composition
 
-Dock 只有 Main 与 SubHost 两种角色。没有角色设置时始终启动为 Main；不存在独立 Standalone 角色。Main 的 SubHost connections 默认关闭，因此普通安装不会新增网络 listener。主人在 Main Hub Settings 开启并选择端口后，下次启动才监听 machine TLS；同一 Main 的完整 Hub、客户端 authority 和本机 Work 不因 listener 开关而变化。
+Dock 只有 Main 与 SubHost 两种角色。没有角色设置时始终启动为 Main；不存在独立 Standalone 角色。Main 的 SubHost connections 默认关闭，因此普通安装不会新增网络 listener。主人在 Main Hub Machines 实时打开或关闭连接并选择端口；Host 观察保存的 revision，关闭时断开 machine links 但保留 trust/routes，打开或换端口时写回 listening/error 结果，不重启 Registry、Worker 或客户端 authority。
 
 主人也可以从 TUI 选择下次启动为 SubHost。这个选择保存 Main 地址、端口、本机名称，并在第一次导入 Main 创建的一次性 join file。SubHost TUI 只显示自身角色、Main 连接状态、连接设置和切回 Main 的入口；它没有客户端 local endpoint、Remote Access、完整 Hub 或 children。切回 Main 会清除 SubHost role override，下次启动恢复默认 Main。
 

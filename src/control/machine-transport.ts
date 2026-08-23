@@ -15,6 +15,7 @@ import { decodeResponseTransfer, parseControlResponse, parseEnsureResult, parseF
 import { encodeJsonLine, JsonLineDecoder } from "./json-lines.js";
 import { boundedInstanceListPage } from "./instance-list-page.js";
 import { MainMachineState, SubHostMachineState, type MachineRouteRecord, type SubHostUpstreamRecord, type TrustedSubHostRecord } from "./machine-state.js";
+import { MachineSettingsState, type MachineSettings } from "./machine-settings-state.js";
 import { recordForMainHost, requestForNativeHost, snapshotForMain, type MachineRouteIdentity } from "./machine-route-identity.js";
 import { MAX_DOCK_TRANSFER_BYTES, MAX_RESPONSE_TRANSFER_CHUNK_BYTES, MAX_RESPONSE_TRANSFER_CHUNKS } from "../core/transport-bounds.js";
 import { MAX_DURABLE_CATALOG_BYTES } from "./durable-catalog-store.js";
@@ -29,6 +30,7 @@ const MAX_MACHINE_INVENTORY_CHUNK_BYTES = Math.floor((MAX_MACHINE_LINE_BYTES - 1
 const INVENTORY_INTERVAL_MS = 200;
 const RECONNECT_DELAY_MS = 250;
 const MACHINE_HEARTBEAT_TIMEOUT_MS = 5_000;
+const MACHINE_LISTENER_RETRY_MS = 1_000;
 
 type MachineWireRecord =
   | { kind: "machine_hello"; machineId: string; machineName: string; platform: MachinePlatform; homePath: string; joinToken?: string; hostEpoch: string }
@@ -160,7 +162,14 @@ interface SubHostStream {
 
 export class MainMachineController implements MainRouteAuthority {
   private server: TlsServer | undefined;
+  private activePort: number | undefined;
+  private listenerIdentity: { privateKeyPem: string; certificatePem: string } | undefined;
   private staleConnectionTimer: NodeJS.Timeout | undefined;
+  private listenerPollTimer: NodeJS.Timeout | undefined;
+  private listenerPollPromise: Promise<void> | undefined;
+  private lastAttemptedListenerRevision = -1;
+  private appliedListenerRevision = -1;
+  private nextListenerAttemptAt = 0;
   private readonly connections = new Map<string, MainConnection>();
   private readonly acceptedSockets = new Map<string, AcceptedMachineSocket>();
   private authorityTail = Promise.resolve();
@@ -180,6 +189,7 @@ export class MainMachineController implements MainRouteAuthority {
 
   constructor(private readonly options: {
     state: MainMachineState;
+    settingsState?: MachineSettingsState;
     port?: number;
     mainHostEpoch: string;
     bindAddress?: string;
@@ -193,59 +203,164 @@ export class MainMachineController implements MainRouteAuthority {
     this.started = true;
     try {
       await this.options.state.initialize();
-      const identity = await this.options.state.identity();
+      this.listenerIdentity = await this.options.state.identity();
       const main = await this.options.state.main();
       this.mainId = main.id;
       this.mainName = main.name;
       this.revision = main.revision;
       for (const machine of await this.options.state.list()) await this.markOffline(machine.id);
       await this.refreshRouteSnapshotCache();
-      if (this.options.port === undefined) return;
-      const server = createServer({
-        key: identity.privateKeyPem,
-        cert: identity.certificatePem,
-        requestCert: true,
-        rejectUnauthorized: false,
-      }, (socket) => this.acceptSecure(socket));
-      server.on("connection", (socket) => this.acceptRaw(socket));
-      server.on("tlsClientError", () => {});
-      try {
-        await listen(server, this.options.port, this.options.bindAddress ?? "::");
-        this.server = server;
-      } catch (error) {
-        await closeServer(server);
-        throw error;
-      }
       this.staleConnectionTimer = setInterval(() => {
         const now = Date.now();
         for (const connection of this.connections.values()) {
           if (now - connection.lastSeenAt >= MACHINE_HEARTBEAT_TIMEOUT_MS) connection.socket.destroy();
         }
       }, INVENTORY_INTERVAL_MS);
+      this.staleConnectionTimer.unref?.();
+      if (this.options.settingsState) {
+        await this.triggerListenerPoll();
+        this.listenerPollTimer = setInterval(() => { void this.triggerListenerPoll(); }, INVENTORY_INTERVAL_MS);
+        this.listenerPollTimer.unref?.();
+      } else if (this.options.port !== undefined) {
+        await this.openListener(this.options.port);
+      }
     } catch (error) {
       this.started = false;
+      if (this.staleConnectionTimer) clearInterval(this.staleConnectionTimer);
+      this.staleConnectionTimer = undefined;
+      await this.closeListener().catch(() => {});
       throw error;
     }
   }
 
   async stop(): Promise<void> {
     this.started = false;
-    const server = this.server;
-    this.server = undefined;
+    if (this.listenerPollTimer) clearInterval(this.listenerPollTimer);
+    this.listenerPollTimer = undefined;
+    await this.listenerPollPromise?.catch(() => {});
     if (this.staleConnectionTimer) clearInterval(this.staleConnectionTimer);
     this.staleConnectionTimer = undefined;
-    const closePromise = server ? closeServer(server) : Promise.resolve();
-    for (const connection of [...this.connections.values()]) this.disconnect(connection);
+    await this.closeListener();
+    await this.authorityTail;
+    if (this.options.settingsState) {
+      await this.options.settingsState.writeMainListenerStatus({
+        schemaVersion: 1,
+        configRevision: Math.max(0, this.lastAttemptedListenerRevision),
+        state: "stopped",
+        updatedAt: new Date().toISOString(),
+      }).catch(() => {});
+    }
+  }
+
+  private triggerListenerPoll(): Promise<void> {
+    if (!this.started || !this.options.settingsState) return Promise.resolve();
+    if (this.listenerPollPromise) return this.listenerPollPromise;
+    const current = this.pollListenerSettings().finally(() => {
+      if (this.listenerPollPromise === current) this.listenerPollPromise = undefined;
+    });
+    this.listenerPollPromise = current;
+    return current;
+  }
+
+  private async pollListenerSettings(): Promise<void> {
+    const state = this.options.settingsState as MachineSettingsState;
+    try {
+      const settings = await state.read();
+      if (settings.revision !== this.lastAttemptedListenerRevision) this.nextListenerAttemptAt = 0;
+      if (settings.revision === this.appliedListenerRevision || Date.now() < this.nextListenerAttemptAt) return;
+      this.lastAttemptedListenerRevision = settings.revision;
+      try {
+        await this.applyListenerSettings(settings);
+        this.appliedListenerRevision = settings.revision;
+        this.nextListenerAttemptAt = 0;
+      } catch (error) {
+        this.nextListenerAttemptAt = Date.now() + MACHINE_LISTENER_RETRY_MS;
+        await this.recordListenerError(settings.revision, settings.main.port, error);
+      }
+    } catch (error) {
+      await this.recordListenerError(Math.max(0, this.lastAttemptedListenerRevision), undefined, error);
+    }
+  }
+
+  private async applyListenerSettings(settings: MachineSettings): Promise<void> {
+    const state = this.options.settingsState as MachineSettingsState;
+    if (!settings.main.connectionsEnabled) {
+      await this.closeListener();
+      await state.writeMainListenerStatus({
+        schemaVersion: 1,
+        configRevision: settings.revision,
+        state: "disabled",
+        updatedAt: new Date().toISOString(),
+      });
+      return;
+    }
+    if (!this.server || this.activePort !== settings.main.port) {
+      await this.closeListener();
+      await this.openListener(settings.main.port);
+    }
+    await state.writeMainListenerStatus({
+      schemaVersion: 1,
+      configRevision: settings.revision,
+      state: "listening",
+      activePort: settings.main.port,
+      updatedAt: new Date().toISOString(),
+    });
+  }
+
+  private async recordListenerError(configRevision: number, port: number | undefined, error: unknown): Promise<void> {
+    const state = this.options.settingsState;
+    if (!state) return;
+    const message = error instanceof Error ? error.message : String(error);
+    await state.writeMainListenerStatus({
+      schemaVersion: 1,
+      configRevision,
+      state: "error",
+      message: port === undefined ? message : `Could not listen on port ${port}: ${message}`,
+      updatedAt: new Date().toISOString(),
+    }).catch(() => {});
+  }
+
+  private async openListener(port: number): Promise<void> {
+    const identity = this.listenerIdentity;
+    if (!identity) throw new Error("Machine identity is unavailable");
+    const server = createServer({
+      key: identity.privateKeyPem,
+      cert: identity.certificatePem,
+      requestCert: true,
+      rejectUnauthorized: false,
+    }, (socket) => this.acceptSecure(socket));
+    server.on("connection", (socket) => this.acceptRaw(socket));
+    server.on("tlsClientError", () => {});
+    try {
+      await listen(server, port, this.options.bindAddress ?? "::");
+      if (!this.started) {
+        await closeServer(server);
+        return;
+      }
+      this.server = server;
+      this.activePort = port;
+    } catch (error) {
+      await closeServer(server);
+      throw error;
+    }
+  }
+
+  private async closeListener(): Promise<void> {
+    const server = this.server;
+    this.server = undefined;
+    this.activePort = undefined;
+    for (const connection of [...this.connections.values()]) {
+      this.disconnect(connection);
+      connection.socket.destroy();
+    }
     this.connections.clear();
     for (const accepted of this.acceptedSockets.values()) {
       clearTimeout(accepted.deadline);
       accepted.tls?.destroy();
       accepted.raw.destroy();
     }
-    await closePromise;
-    for (const accepted of this.acceptedSockets.values()) clearTimeout(accepted.deadline);
     this.acceptedSockets.clear();
-    await this.authorityTail;
+    if (server) await closeServer(server);
   }
 
   remoteSnapshotsCurrent(): InstanceSnapshot[] { return [...this.routeSnapshots.values()].map((snapshot) => structuredClone(snapshot)); }

@@ -22,7 +22,7 @@ import type {
   TrustedClient,
 } from "../control/remote-access-state.js";
 import { MainMachineState, SubHostMachineState, readMachineJoinFile, writeMachineJoinFile } from "../control/machine-state.js";
-import { MachineSettingsState, type MachineSettings } from "../control/machine-settings-state.js";
+import { MachineSettingsState, type MachineListenerStatus, type MachineSettings } from "../control/machine-settings-state.js";
 import type { MachineDto } from "../control/protocol.js";
 import type { InstanceSnapshot, SessionDto } from "../core/managed-instance.js";
 import { humanInstanceStatus } from "../core/instance-display-name.js";
@@ -51,6 +51,8 @@ const MORE_SESSIONS = "hub:sessions-more";
 const BACK = "hub:back";
 const MAX_HUB_INSTANCES = 100;
 const MAX_HUB_SESSIONS = 200;
+const LISTENER_READY_TIMEOUT_MS = 8_000;
+const LISTENER_STATUS_POLL_MS = 100;
 const ENTER_ALTERNATE_SCREEN = "\u001b[?1049h";
 const LEAVE_ALTERNATE_SCREEN = "\u001b[?1049l";
 
@@ -542,14 +544,6 @@ async function chooseHubSettings(
       notice ?? "Configure this Main.",
       [
         { value: "attachments", label: "Attachment directory", description: terminalSafe(attachmentSettings.directory) },
-        {
-          value: "machine-connections",
-          label: `SubHost connections · ${machineSettings.main.connectionsEnabled ? "On" : "Off"}`,
-          description: machineSettings.main.connectionsEnabled
-            ? `Listen on port ${machineSettings.main.port} after the next restart`
-            : "No machine port is open",
-        },
-        { value: "machine-port", label: `SubHost port · ${machineSettings.main.port}`, description: "Used when SubHost connections are on" },
         { value: "dock-role", label: "Dock role · Main", description: "Use this computer as a SubHost after the next restart" },
         { value: BACK, label: "Back to Hub", description: "Return to the Hub" },
       ],
@@ -571,31 +565,6 @@ async function chooseHubSettings(
       }
       continue;
     }
-    if (selected === "machine-connections") {
-      try {
-        const enabled = !machineSettings.main.connectionsEnabled;
-        await machineSettingsState.writeMainConnections({ enabled, port: machineSettings.main.port });
-        notice = enabled
-          ? `SubHost connections will open on port ${machineSettings.main.port} after Alu Dock restarts.`
-          : "SubHost connections will close after Alu Dock restarts.";
-      } catch {
-        notice = "I couldn’t change SubHost connections. Check the Dock state directory and try again.";
-      }
-      continue;
-    }
-    if (selected === "machine-port") {
-      const port = await promptMachinePort(terminal, machineSettings.main.port);
-      if (port === undefined) continue;
-      try {
-        await machineSettingsState.writeMainConnections({ enabled: machineSettings.main.connectionsEnabled, port });
-        notice = machineSettings.main.connectionsEnabled
-          ? `SubHosts will use port ${port} after Alu Dock restarts.`
-          : `Port ${port} is saved for the next time SubHost connections turn on.`;
-      } catch {
-        notice = "I couldn’t save that SubHost port. Check the Dock state directory and try again.";
-      }
-      continue;
-    }
     if (selected === "dock-role") {
       notice = await configureSubHostRole(terminal, machineSettingsState, subHostMachineState, machineSettings);
     }
@@ -610,36 +579,44 @@ async function chooseMachinesAction(
 ): Promise<void> {
   let notice: string | undefined;
   while (true) {
-    const [settings, result] = await Promise.all([
+    const [settings, status, result] = await Promise.all([
       machineSettingsState.read(),
+      machineSettingsState.readMainListenerStatus(),
       client.machines(),
     ]);
     const subhosts = result.machines.filter((machine) => machine.kind === "subhost");
-    const entries: DockHubEntry[] = [];
-    if (settings.main.connectionsEnabled) {
-      entries.push({ value: "connect", label: "Connect a SubHost", description: "Create a private one-use join file" });
-    } else {
-      entries.push({ value: "settings", label: "SubHost connections are off", description: "Turn them on in Settings, then restart Alu Dock" });
-    }
-    entries.push(...subhosts.map((machine) => ({
-      value: `machine:${machine.hostId}`,
-      label: `${machine.available ? "●" : "○"} ${terminalSafe(machine.name)}`,
-      description: machine.available ? "Connected" : "Unavailable",
-    })));
-    entries.push({ value: BACK, label: "Back to Hub", description: "Return to the Hub" });
+    const entries: DockHubEntry[] = [
+      {
+        value: "connect",
+        label: settings.main.connectionsEnabled ? "Connect a SubHost" : "Turn On & Connect a SubHost",
+        description: settings.main.connectionsEnabled
+          ? "Create a private one-use join file"
+          : `Open port ${settings.main.port}, then create a private one-use join file`,
+      },
+      ...subhosts.map((machine) => ({
+        value: `machine:${machine.hostId}`,
+        label: `${machine.available ? "●" : "○"} ${terminalSafe(machine.name)}`,
+        description: machine.available ? "Connected" : "Unavailable",
+      })),
+      {
+        value: "toggle",
+        label: `SubHost Connections · ${settings.main.connectionsEnabled ? "On" : "Off"}`,
+        description: settings.main.connectionsEnabled
+          ? "Turn off machine connections; paired SubHosts stay saved"
+          : `Listen on port ${settings.main.port}`,
+      },
+      { value: "port", label: `Port · ${settings.main.port}`, description: "Change the port SubHosts use" },
+      { value: BACK, label: "Back to Hub", description: "Return to the Hub" },
+    ];
     const selected = await selectMenu(
       terminal,
       "Machines",
-      notice ?? `${subhosts.length} SubHost${subhosts.length === 1 ? "" : "s"} · Main port ${settings.main.port}`,
+      notice ?? machineConnectionsSubtitle(settings, status, subhosts.length),
       entries,
       "↑↓ choose · Enter open · Esc back",
     );
     if (!selected || selected === BACK) return;
     notice = undefined;
-    if (selected === "settings") {
-      notice = "Open Settings to turn on SubHost connections.";
-      continue;
-    }
     if (selected === "connect") {
       const output = await promptHubText(
         terminal,
@@ -648,11 +625,71 @@ async function chooseMachinesAction(
       );
       if (output === undefined) continue;
       try {
+        const [latest, latestStatus] = await Promise.all([
+          machineSettingsState.read(),
+          machineSettingsState.readMainListenerStatus(),
+        ]);
+        const ready = await ensureMachineConnectionsReady(terminal, machineSettingsState, latest, latestStatus);
+        if (!ready) {
+          notice = `I couldn’t open SubHost connections on port ${latest.main.port}. Choose another port, then try again.`;
+          continue;
+        }
+        const [current, currentStatus] = await Promise.all([
+          machineSettingsState.read(),
+          machineSettingsState.readMainListenerStatus(),
+        ]);
+        if (
+          current.revision !== ready.revision
+          || !current.main.connectionsEnabled
+          || currentStatus?.configRevision !== current.revision
+          || currentStatus.state !== "listening"
+          || currentStatus.activePort !== current.main.port
+        ) {
+          notice = "SubHost connection settings changed before the join file was ready. Review the current port, then try again.";
+          continue;
+        }
         const joinFile = await mainMachineState.createJoin();
         await writeMachineJoinFile(output.trim(), joinFile);
-        notice = `Join file saved at ${terminalSafe(resolve(output.trim()))}. On the SubHost, enter this Main’s address and port ${settings.main.port}.`;
+        notice = `Join file saved at ${terminalSafe(resolve(output.trim()))}. On the SubHost, enter this Main’s address and port ${current.main.port}.`;
       } catch {
-        notice = "I couldn’t create the join file. Choose a private writable location and try again.";
+        notice = "I couldn’t create the join file. Check the selected path and Machine port, then try again.";
+      }
+      continue;
+    }
+    if (selected === "toggle") {
+      try {
+        const saved = await machineSettingsState.writeMainConnections({ enabled: !settings.main.connectionsEnabled, port: settings.main.port }, settings.revision);
+        if (settings.main.connectionsEnabled) {
+          const stopped = await ensureMachineConnectionsStopped(terminal, machineSettingsState, saved);
+          notice = stopped
+            ? "SubHost connections are off. Paired machines stay saved."
+            : "SubHost connections are saved as off, but Alu Dock hasn’t finished closing them. Review Machines in a moment.";
+        } else {
+          const ready = await ensureMachineConnectionsReady(terminal, machineSettingsState, saved, undefined);
+          notice = ready !== undefined
+            ? `SubHost connections are on at port ${saved.main.port}.`
+            : `I couldn’t open SubHost connections on port ${saved.main.port}. Choose another port, then try again.`;
+        }
+      } catch {
+        notice = "I couldn’t change SubHost connections. Check the Dock state directory and try again.";
+      }
+      continue;
+    }
+    if (selected === "port") {
+      const port = await promptMachinePort(terminal, settings.main.port);
+      if (port === undefined) continue;
+      try {
+        const saved = await machineSettingsState.writeMainConnections({ enabled: settings.main.connectionsEnabled, port }, settings.revision);
+        if (settings.main.connectionsEnabled) {
+          const ready = await ensureMachineConnectionsReady(terminal, machineSettingsState, saved, undefined);
+          notice = ready !== undefined
+            ? `SubHost connections moved to port ${port}. SubHosts must use this port to reconnect.`
+            : `I couldn’t open SubHost connections on port ${port}. Choose another port, then try again.`;
+        } else {
+          notice = `Port ${port} is ready for the next time SubHost connections turn on.`;
+        }
+      } catch {
+        notice = "I couldn’t save that SubHost port. Check the Dock state directory and try again.";
       }
       continue;
     }
@@ -688,6 +725,61 @@ async function chooseMachinesAction(
       }
     }
   }
+}
+
+function machineConnectionsSubtitle(settings: MachineSettings, status: MachineListenerStatus | undefined, subhostCount: number): string {
+  const count = `${subhostCount} SubHost${subhostCount === 1 ? "" : "s"}`;
+  if (!settings.main.connectionsEnabled) return `${count} · Connections are off · Port ${settings.main.port}`;
+  if (!status || status.configRevision !== settings.revision) return `${count} · Getting port ${settings.main.port} ready…`;
+  if (status.state === "listening") return `${count} · Listening on port ${status.activePort ?? settings.main.port}`;
+  if (status.state === "error") return `${count} · Port ${settings.main.port} isn’t available; choose another port or try again`;
+  return `${count} · Getting port ${settings.main.port} ready…`;
+}
+
+async function ensureMachineConnectionsReady(
+  terminal: HubProcessTerminal,
+  state: MachineSettingsState,
+  settings: MachineSettings,
+  status: MachineListenerStatus | undefined,
+): Promise<MachineSettings | undefined> {
+  let expected = settings;
+  if (!expected.main.connectionsEnabled) expected = await state.writeMainConnections({ enabled: true, port: expected.main.port }, expected.revision);
+  if (
+    status?.state === "listening"
+    && status.configRevision === expected.revision
+    && status.activePort === expected.main.port
+  ) return expected;
+  terminal.clearScreen();
+  terminal.write(`\n  Getting SubHost connections ready on port ${expected.main.port}…\n`);
+  const deadline = Date.now() + LISTENER_READY_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const current = await state.readMainListenerStatus();
+    if (current?.configRevision === expected.revision) {
+      if (current.state === "listening" && current.activePort === expected.main.port) return expected;
+      if (current.state === "error" || current.state === "stopped") return undefined;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, LISTENER_STATUS_POLL_MS));
+  }
+  return undefined;
+}
+
+async function ensureMachineConnectionsStopped(
+  terminal: HubProcessTerminal,
+  state: MachineSettingsState,
+  expected: MachineSettings,
+): Promise<boolean> {
+  terminal.clearScreen();
+  terminal.write("\n  Closing SubHost connections…\n");
+  const deadline = Date.now() + LISTENER_READY_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const current = await state.readMainListenerStatus();
+    if (current?.configRevision === expected.revision) {
+      if (current.state === "disabled") return true;
+      if (current.state === "error" || current.state === "stopped") return false;
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, LISTENER_STATUS_POLL_MS));
+  }
+  return false;
 }
 
 async function configureSubHostRole(
@@ -997,14 +1089,14 @@ async function ensureRemoteAccessReady(
   if (status?.state === "listening" && status.configRevision === expected.revision) return true;
   terminal.clearScreen();
   terminal.write(`\n  Getting remote access ready on port ${expected.port}…\n`);
-  const deadline = Date.now() + 8_000;
+  const deadline = Date.now() + LISTENER_READY_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const current = await state.readStatus();
     if (current?.configRevision === expected.revision) {
       if (current.state === "listening") return true;
       if (current.state === "error" || current.state === "stopped") return false;
     }
-    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    await new Promise((resolveWait) => setTimeout(resolveWait, LISTENER_STATUS_POLL_MS));
   }
   return false;
 }

@@ -18,7 +18,25 @@ test("a saved role applies on the next startup while the live process keeps its 
     assert.equal(initial.role, "main");
     assert.equal(initial.main.connectionsEnabled, false);
 
-    await fixture.state.writeMainConnections({ enabled: true, port: 43127 });
+    const enabled = await fixture.state.writeMainConnections({ enabled: true, port: 43127 });
+    await assert.rejects(
+      fixture.state.writeMainConnections({ enabled: false, port: 43128 }, initial.revision),
+      /settings changed/u,
+    );
+    await fixture.state.writeMainListenerStatus({
+      schemaVersion: 1,
+      configRevision: enabled.revision,
+      state: "listening",
+      activePort: 43127,
+      updatedAt: "2026-08-23T00:00:00.000Z",
+    });
+    assert.deepEqual(await fixture.state.readMainListenerStatus(), {
+      schemaVersion: 1,
+      configRevision: enabled.revision,
+      state: "listening",
+      activePort: 43127,
+      updatedAt: "2026-08-23T00:00:00.000Z",
+    });
     const subhost = await fixture.state.switchToSubHost({ mainAddress: "main.lan", port: 43127, name: "Studio" });
     assert.equal(subhost.role, "subhost");
     assert.deepEqual(subhost.subhost, { mainAddress: "main.lan", port: 43127, name: "Studio" });

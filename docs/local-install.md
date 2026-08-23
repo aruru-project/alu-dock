@@ -90,12 +90,12 @@ Main 打开完整 Hub，SubHost 打开最小管理界面。`Open-AluDock.ps1` �
 
 默认状态保存在 `%LOCALAPPDATA%\Alu Dock\`，本地 Protocol V2 入口是 `\\.\pipe\alu-dock`。本地 Named Pipe 不使用远程设备配对。
 
-没有角色配置时 Host 脚本默认启动 Main，且 SubHost connections 关闭。可以从 Main Hub Settings 开启 machine listener、选择端口，或选择下次启动为 SubHost；普通启动会读取保存的角色。
+没有角色配置时 Host 脚本默认启动 Main，且 SubHost connections 关闭。Main Hub 的 Machines 可以实时打开或关闭连接、选择端口并创建 join file；Settings 只选择下次启动角色。普通启动会读取保存的角色和 Machine 端口设置。
 
 显式开发覆盖仍可使用：
 
 ```powershell
-# Main；省略 MachinePort 表示不开放 SubHost connections
+# Main；MachinePort 只覆盖本次开发启动
 .\scripts\Start-AluDockHost.ps1 -Role main -MachinePort 7444 -MachineName "Windows Main"
 
 # SubHost：第一次额外传入 JoinFile

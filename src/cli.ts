@@ -161,6 +161,7 @@ async function main(): Promise<void> {
 async function serve(socketPath: string, socketExplicit: boolean, args: string[]): Promise<void> {
   let options = parseServeOptions(args);
   let catalogPath = options.statePath;
+  let machineSettingsState: MachineSettingsState | undefined;
   if (options.mode === "managed") {
     if (socketExplicit) throw new Error("Managed Host rejects --socket overrides");
     if (process.env.ALU_DOCK_MANAGED !== "1") throw new Error("Managed Host requires ALU_DOCK_MANAGED=1 from the generated user unit");
@@ -169,7 +170,8 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     catalogPath = defaultCatalogPath();
   }
   if (catalogPath) {
-    const configured = await new MachineSettingsState(machineSettingsStateRoot(catalogPath)).read();
+    machineSettingsState = new MachineSettingsState(machineSettingsStateRoot(catalogPath));
+    const configured = await machineSettingsState.read();
     const role = options.roleExplicit ? options.role : configured.role;
     options = role === "subhost"
       ? {
@@ -183,7 +185,6 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
         ...options,
         role,
         machineName: options.machineName ?? configured.main.name,
-        machinePort: options.machinePort ?? (configured.main.connectionsEnabled ? configured.main.port : undefined),
       };
   }
   if (options.mode === "dev" && options.role === "main" && !socketExplicit && !process.env.ALU_DOCK_SOCKET) {
@@ -212,7 +213,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     const mainAddress = options.mainAddress as string;
     const machinePort = options.machinePort as number;
     const machineName = options.machineName as string;
-    const settingsState = new MachineSettingsState(machineSettingsStateRoot(catalogPath as string));
+    const settingsState = machineSettingsState as MachineSettingsState;
     subHostStatus = { state: settingsState, hostEpoch: subHostEpoch };
     await settingsState.writeSubHostStatus({ hostEpoch: subHostEpoch, connected: false });
     const subState = new SubHostMachineState(machineStateRoot(catalogPath as string));
@@ -263,7 +264,9 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     if (options.role === "main" && durable) {
       routeAuthority = new MainMachineController({
         state: new MainMachineState(machineStateRoot(catalogPath as string), options.machineName ?? "Main"),
-        ...(options.machinePort === undefined ? {} : { port: options.machinePort }),
+        ...(options.machinePort === undefined
+          ? { settingsState: machineSettingsState as MachineSettingsState }
+          : { port: options.machinePort }),
         mainHostEpoch: registry.hostEpoch,
         invokeDockTool: (sourceMainId, sourceMachineId, request) => (dockToolsAuthority as MainMachineDockToolsAuthority).invoke(sourceMainId, sourceMachineId, request),
         dockToolsSourceOff: (sourceMainId) => (dockToolsAuthority as MainMachineDockToolsAuthority).cancelSource(sourceMainId),

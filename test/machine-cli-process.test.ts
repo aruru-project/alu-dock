@@ -7,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { ControlClientError, DockClient } from "../src/control/dock-client.js";
+import { MachineSettingsState, machineSettingsStateRoot } from "../src/control/machine-settings-state.js";
 
 const cli = new URL("../src/cli.js", import.meta.url).pathname;
 
@@ -51,13 +52,14 @@ async function waitMachine(client: DockClient, available: boolean): Promise<stri
 async function waitInstance(client: DockClient, operationId: string, id?: string): Promise<Awaited<ReturnType<DockClient["list"]>>[number]> { const deadline = Date.now() + 10_000; while (Date.now() < deadline) { try { const found = (await client.list("all")).find((item) => item.creationOperationId === operationId && (id === undefined || item.id === id)); if (found && found.lifecycle === "active") return found; } catch {} await new Promise((resolve) => setTimeout(resolve, 30)); } throw new Error(`instance ${operationId} did not appear`); }
 async function containsBytes(root: string, expected: Buffer): Promise<boolean> { try { for (const entry of await readdir(root, { withFileTypes: true })) { const path = join(root, entry.name); if (entry.isDirectory()) { if (await containsBytes(path, expected)) return true; } else if (entry.isFile()) { const bytes = await readFile(path); if (bytes.equals(expected)) return true; } } } catch {} return false; }
 
-test("CLI Main/SubHost keeps native Pi work alive offline and remaps only an offline-stopped Main identity", async (context) => {
+test("Main toggles SubHost connections live while native Pi work stays alive offline", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-machine-cli-"));
   const workspace = join(root, "workspace"); await mkdir(workspace);
   const mainCatalog = join(root, "main", "catalog.json"), subCatalog = join(root, "sub", "catalog.json"), joinFile = join(root, "join.json"), socketPath = join(root, "main.sock");
   const mainPort = await freePort(), proxyPort = await freePort();
   const mainEnv = { ...process.env, HOME: join(root, "main-home"), XDG_STATE_HOME: join(root, "main-state"), XDG_DATA_HOME: join(root, "main-data") };
   const subEnv = { ...process.env, HOME: join(root, "sub-home"), XDG_STATE_HOME: join(root, "sub-state"), XDG_DATA_HOME: join(root, "sub-data") };
+  const machineSettings = new MachineSettingsState(machineSettingsStateRoot(mainCatalog));
   await run(["machine", "join-file", "--state", mainCatalog, "--out", joinFile], mainEnv);
   const proxy = new TcpProxy(proxyPort, mainPort); await proxy.start();
   const children: ChildProcess[] = [];
@@ -67,9 +69,10 @@ test("CLI Main/SubHost keeps native Pi work alive offline and remaps only an off
   await waitReady(sub, "SubHost");
   assert.equal(sub.exitCode, null, "SubHost stays alive before Main exists");
 
-  const startMain = async (): Promise<ChildProcess> => { const child = spawn(process.execPath, [cli, "--socket", socketPath, "serve", "--dev", "--main", "--state", mainCatalog, "--machine-port", String(mainPort)], { env: mainEnv, stdio: ["ignore", "pipe", "pipe"] }); children.push(child); await waitReady(child, "Main"); return child; };
+  const startMain = async (): Promise<ChildProcess> => { const child = spawn(process.execPath, [cli, "--socket", socketPath, "serve", "--dev", "--main", "--state", mainCatalog], { env: mainEnv, stdio: ["ignore", "pipe", "pipe"] }); children.push(child); await waitReady(child, "Main"); return child; };
   const firstMain = await startMain();
   let client = new DockClient({ socketPath, timeoutMs: 5_000 });
+  await machineSettings.writeMainConnections({ enabled: true, port: mainPort });
   const hostId = await waitMachine(client, true);
   const created = await client.create(workspace, "CLI remote Pi", "cli-remote-create", undefined, hostId);
   assert.notEqual(created.id, "cli-remote-create");
@@ -79,6 +82,13 @@ test("CLI Main/SubHost keeps native Pi work alive offline and remaps only an off
   await client.uploadAttachment({ name: "subhost.bin", sizeBytes: attachment.length, sha256: (await import("node:crypto")).createHash("sha256").update(attachment).digest("hex"), async *open() { yield attachment; } }, "cli-upload", created.id);
   assert.equal(await containsBytes(join(root, "sub-data"), attachment), true);
   assert.equal(await containsBytes(join(root, "main-data"), attachment), false);
+
+  await machineSettings.writeMainConnections({ enabled: false, port: mainPort });
+  await waitMachine(client, false);
+  assert.equal(sub.exitCode, null, "turning off Machine connections must not stop the SubHost");
+  await machineSettings.writeMainConnections({ enabled: true, port: mainPort });
+  await waitMachine(client, true);
+  assert.equal((await client.status(created.id)).id, created.id, "turning Machine connections back on keeps the same Main identity");
 
   await stop(firstMain);
   assert.equal(sub.exitCode, null);
