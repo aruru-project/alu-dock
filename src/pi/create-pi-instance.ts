@@ -13,6 +13,7 @@ import { ManagedInstance } from "../core/managed-instance.js";
 import type { AgentHistoryEntry, AgentRequest } from "../core/agent-worker.js";
 import type { DockToolsHostPort } from "../core/dock-tools.js";
 import type { InstanceAttachmentHostPort } from "../core/instance-attachments.js";
+import type { WorkerIncidentRecorder } from "../core/worker-incident.js";
 import { ProjectTrustCoordinator } from "../control/project-trust.js";
 import { PI_SDK_VERSION } from "../version.js";
 import { resolvePiReopenTarget } from "./pi-session-target.js";
@@ -45,6 +46,7 @@ export interface CreatePiInstanceOptions {
   dockToolsHostPort?: DockToolsHostPort;
   attachmentHostPort?: InstanceAttachmentHostPort;
   dockToolsEnabled?: boolean;
+  workerIncidentRecorder?: WorkerIncidentRecorder;
 }
 
 /** Construct the Host state machine around one independent Pi worker after trust. */
@@ -77,6 +79,8 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
     dockToolsHostPort,
     attachmentHostPort,
     initialDockToolsEnabled: dockToolsEnabled,
+    ...(options.name === undefined ? {} : { workName: options.name }),
+    ...(options.workerIncidentRecorder === undefined ? {} : { workerIncidentRecorder: options.workerIncidentRecorder }),
     ...(options.workerEntry === undefined ? {} : { workerEntry: options.workerEntry }),
     ...(options.workerTimeouts === undefined ? {} : { workerTimeouts: options.workerTimeouts }),
     ...(options.workerEnvironment === undefined ? {} : { workerEnvironment: options.workerEnvironment }),

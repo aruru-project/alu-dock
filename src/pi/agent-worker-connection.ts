@@ -4,6 +4,7 @@ import type { ExtensionUiBroker } from "../core/extension-ui-broker.js";
 import type { DockToolsHostPort, DockToolsRequest } from "../core/dock-tools.js";
 import type { AttachmentAccessRequest, InstanceAttachmentHostPort } from "../core/instance-attachments.js";
 import type { AgentCommandPreflightResult, AgentEvent, AgentInvokeOptions, AgentRequest, AgentWorkerConnection as AgentWorkerConnectionPort, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
+import type { WorkerIncidentRecorder } from "../core/worker-incident.js";
 import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
 import { PiWorkerProcess, type PiWorkerInitOptions, type WorkerProcessTimeouts } from "./worker-process.js";
 import { captureWorkspaceShellEnvironment } from "./workspace-shell-environment.js";
@@ -34,6 +35,8 @@ export interface CreateAgentWorkerConnectionOptions {
   dockToolsHostPort: DockToolsHostPort;
   attachmentHostPort: InstanceAttachmentHostPort;
   initialDockToolsEnabled: boolean;
+  workName?: string;
+  workerIncidentRecorder?: WorkerIncidentRecorder;
 }
 
 export class AgentWorkerUnavailableError extends AgentUnavailableBeforeEffectError {
@@ -301,15 +304,45 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
       await this.process.terminate();
       // Publish only after process ownership is conclusively released. Publishing
       // first would let a reopen race the old session owner.
-      if (!this.expectedExit) this.publishLoss(error);
+      if (!this.expectedExit) {
+        await this.recordIncident(error);
+        this.publishLoss(error);
+      }
       // Runtime-loss listeners synchronously register required catalog work;
       // settle the operation only after that boundary is visible.
       this.rejectPending(error);
     } catch (terminationError) {
+      if (!this.expectedExit) await this.recordIncident(new AggregateError([error, terminationError], "Worker ownership could not be released"));
       // Keep the instance non-reopenable when reaping could not be proven.
       this.rejectPending(new AgentWorkerUnavailableError(
         `Pi worker termination could not be confirmed: ${terminationError instanceof Error ? terminationError.message : String(terminationError)}`,
       ));
+    }
+  }
+  private async recordIncident(error: unknown): Promise<void> {
+    const recorder = this.options.workerIncidentRecorder;
+    if (!recorder) return;
+    try {
+      const stderr = await this.process.incidentStderr(this.process.timeouts.disconnectMs);
+      const exitCode = this.process.child.exitCode;
+      const signal = this.process.child.signalCode;
+      const cause = error instanceof Error ? error.message : String(error);
+      await recorder.record({
+        instanceId: this.identity.instanceId,
+        ...(this.options.workName === undefined ? {} : { workName: this.options.workName }),
+        runtimeGeneration: this.expectedGeneration,
+        workerIncarnation: this.identity.workerIncarnation,
+        occurredAt: new Date().toISOString(),
+        cause: cause || "Agent runtime became unavailable",
+        ...(exitCode === null ? {} : { exitCode }),
+        ...(signal === null ? {} : { signal }),
+        ...stderr,
+        platform: process.platform,
+        architecture: process.arch,
+        nodeVersion: process.version,
+      });
+    } catch (incidentError) {
+      try { process.stderr.write(`Alu Dock could not save the Worker failure diagnostic: ${incidentError instanceof Error ? incidentError.message : String(incidentError)}\n`); } catch {}
     }
   }
   private rejectPending(error: unknown): void {

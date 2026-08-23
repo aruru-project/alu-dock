@@ -15,6 +15,7 @@ import type { ProjectTrustChoice } from "./control/project-trust.js";
 import { defaultLocalEndpoint } from "./control/local-endpoint.js";
 import { defaultSocketPath, managedSocketPath } from "./control/socket-path.js";
 import { RemoteAccessState, remoteAccessStateRoot } from "./control/remote-access-state.js";
+import { WorkerIncidentStore, workerIncidentStoreRoot } from "./control/worker-incident-store.js";
 import { MainMachineState, SubHostMachineState, machineStateRoot, readMachineJoinFile, writeMachineJoinFile } from "./control/machine-state.js";
 import { MachineSettingsState, machineSettingsStateRoot } from "./control/machine-settings-state.js";
 import { MainMachineController, SubHostDockToolsPort, SubHostMachineConnection } from "./control/machine-transport.js";
@@ -68,6 +69,11 @@ async function main(): Promise<void> {
 
   if (parsed.command === "service") {
     await manageService(parsed.socketPath, parsed.socketExplicit, parsed.commandArgs);
+    return;
+  }
+
+  if (parsed.command === "diagnostics") {
+    await showWorkerDiagnostics(parsed.commandArgs);
     return;
   }
 
@@ -221,6 +227,13 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   const attachmentService = catalogPath
     ? new AttachmentService(new AttachmentStorageState(attachmentStorageStateRoot(catalogPath)))
     : undefined;
+  const incidentRecorder = catalogPath
+    ? new WorkerIncidentStore(workerIncidentStoreRoot(catalogPath)).recorder(options.machineName ?? "This computer")
+    : undefined;
+  const createManagedPiInstance = (input: Parameters<typeof createPiInstance>[0]) => createPiInstance({
+    ...input,
+    ...(incidentRecorder === undefined ? {} : { workerIncidentRecorder: incidentRecorder }),
+  });
   let registry!: DockRegistry;
   let host!: DockHost;
   let upstream: SubHostMachineConnection | undefined;
@@ -250,7 +263,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     });
     upstream = upstreamConnection;
     const dockToolsPort = new SubHostDockToolsPort({ upstream: upstreamConnection, local: () => registry });
-    registry = new DockRegistry((input) => createPiInstance(input), undefined, {
+    registry = new DockRegistry(createManagedPiInstance, undefined, {
       hostEpoch: subHostEpoch,
       trustPreflight,
       catalogStore: new FileCatalogStore(catalogPath as string),
@@ -276,7 +289,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       authority: () => dockToolsAuthority as MainMachineDockToolsAuthority,
       mainHostId: async () => (await (routeAuthority as MainMachineController).machines()).find((machine) => machine.kind === "main")!.hostId,
     }) : undefined;
-    registry = new DockRegistry((input) => createPiInstance(input), undefined, {
+    registry = new DockRegistry(createManagedPiInstance, undefined, {
       trustPreflight,
       ...(durable ? { catalogStore: new FileCatalogStore(catalogPath as string), attachmentHostPort: attachmentService } : {}),
       ...(mainDockToolsPort ? { dockToolsHostPort: mainDockToolsPort } : {}),
@@ -555,6 +568,40 @@ function parseServeOptions(args: string[]): ServeOptions {
     ...(statePath ? { statePath } : {}),
     ...(joinFile ? { joinFile } : {}),
   };
+}
+
+async function showWorkerDiagnostics(args: string[]): Promise<void> {
+  let limit = 10;
+  let verbose = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === "--verbose") verbose = true;
+    else if (arg === "--limit") {
+      const value = args[++index];
+      if (!value || !/^\d+$/u.test(value)) throw new Error("diagnostics --limit requires a positive integer");
+      limit = Number(value);
+    } else throw new Error(`Unknown diagnostics argument: ${String(arg)}`);
+  }
+  const incidents = await new WorkerIncidentStore(workerIncidentStoreRoot(defaultCatalogPath())).list(limit);
+  if (incidents.length === 0) {
+    process.stdout.write("No Agent runtime failures have been recorded on this computer.\n");
+    return;
+  }
+  for (const incident of incidents) {
+    const work = diagnosticLiteral(incident.workName ?? "Unnamed work");
+    const machine = diagnosticLiteral(incident.machineName);
+    const exit = incident.signal ?? (incident.exitCode === undefined ? "unknown exit" : `exit ${incident.exitCode}`);
+    process.stdout.write(`${incident.occurredAt} · ${work} on ${machine} · ${exit}\n`);
+    process.stdout.write(`  ${diagnosticLiteral(incident.cause)}\n`);
+    if (verbose && incident.stderrTail.length > 0) {
+      process.stdout.write(`  Saved error output${incident.stderrTruncated ? " (tail only)" : ""}: ${diagnosticLiteral(incident.stderrTail)}\n`);
+    }
+  }
+  if (!verbose) process.stdout.write("Run `aludock diagnostics --limit 1 --verbose` to include the latest saved error output.\n");
+}
+
+function diagnosticLiteral(value: string): string {
+  return JSON.stringify(value).replace(/[\u202a-\u202e\u2066-\u2069\ufeff]/gu, (character) => `\\u${character.codePointAt(0)!.toString(16).padStart(4, "0")}`);
 }
 
 async function manageMachine(args: string[]): Promise<void> {

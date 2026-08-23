@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { WorkerIncidentStore } from "../src/control/worker-incident-store.js";
 import { createPiInstance } from "../src/pi/create-pi-instance.js";
 import { appendDockAttachmentContext } from "../src/pi/dock-attachment-context.js";
 import { RuntimeEffectUnknownError } from "../src/core/managed-instance.js";
@@ -166,19 +167,23 @@ test("real Pi Worker projects persisted session entries into canonical conversat
   }
 });
 
-test("real no-model Pi gate isolates two Dock instances in distinct workers and fences one worker loss", async (context) => {
+test("one crashed Worker leaves a saved diagnostic while other work continues", async (context) => {
   const root = await mkdtemp(join(tmpdir(), "alu-dock-two-workers-"));
   context.after(() => rm(root, { recursive: true, force: true }));
+  const incidentRoot = join(root, "incidents");
+  const incidentStore = new WorkerIncidentStore(incidentRoot);
   const pids: number[] = [];
   const first = await createPiInstance({
-    id: "worker-first", hostEpoch: "worker-host", creationOperationId: "create-first",
+    id: "worker-first", hostEpoch: "worker-host", creationOperationId: "create-first", name: "Windows migration",
     cwd: process.cwd(), agentDir: join(root, "agent-first"), sessionDir: join(root, "sessions-first"),
     projectTrusted: false, tools: [], onWorkerSpawn: (pid) => pids.push(pid),
+    workerIncidentRecorder: incidentStore.recorder("Windows worker"),
   });
   const second = await createPiInstance({
     id: "worker-second", hostEpoch: "worker-host", creationOperationId: "create-second",
     cwd: process.cwd(), agentDir: join(root, "agent-second"), sessionDir: join(root, "sessions-second"),
     projectTrusted: false, tools: [], onWorkerSpawn: (pid) => pids.push(pid),
+    workerIncidentRecorder: incidentStore.recorder("Windows worker"),
   });
   try {
     assert.equal(pids.length, 2);
@@ -196,10 +201,17 @@ test("real no-model Pi gate isolates two Dock instances in distinct workers and 
     assert.equal(first.snapshot().lifecycle, "runtime_error");
     assert.equal(first.snapshot().runtimeGeneration, 1);
     assert.equal(first.snapshot().interruption?.reason, "replacement_failed");
+    const incidents = await new WorkerIncidentStore(incidentRoot).list();
+    assert.equal(incidents.length, 1);
+    assert.equal(incidents[0]?.instanceId, "worker-first");
+    assert.equal(incidents[0]?.workName, "Windows migration");
+    assert.equal(incidents[0]?.machineName, "Windows worker");
+    assert.match(incidents[0]?.cause ?? "", /Pi worker exited/u);
     assert.equal(second.snapshot().lifecycle, "active");
     assert.equal(second.snapshot().execution, "idle");
     await second.disposeUnpublished();
     assert.equal(processExists(pids[1]!), false, "graceful Host disposal must reap the worker");
+    assert.equal((await new WorkerIncidentStore(incidentRoot).list()).length, 1, "normal recovery work must not create or remove crash evidence");
   } finally {
     await Promise.allSettled([first.disposeUnpublished(), second.disposeUnpublished()]);
   }

@@ -1,6 +1,7 @@
 import { fork, spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import { WORKER_INCIDENT_STDERR_MAX_BYTES } from "../core/worker-incident.js";
 import type { WorkerIdentity } from "./worker-protocol.js";
 
 export interface PiWorkerInitOptions {
@@ -48,6 +49,9 @@ export class PiWorkerProcess {
   readonly child: ChildProcess;
   readonly timeouts: WorkerProcessTimeouts;
   private terminating: Promise<void> | undefined;
+  private stderrTail = Buffer.alloc(0);
+  private stderrBytesSeen = 0;
+  private readonly stderrClosed: Promise<void>;
 
   constructor(options: PiWorkerProcessOptions) {
     this.timeouts = { ...DEFAULT_WORKER_TIMEOUTS, ...options.timeouts };
@@ -64,17 +68,61 @@ export class PiWorkerProcess {
         ALU_DOCK_WORKER_IDENTITY: JSON.stringify(options.identity),
         ALU_DOCK_WORKER_INIT: JSON.stringify(options.init),
       },
-      stdio: ["ignore", "ignore", "inherit", "ipc"],
+      stdio: ["ignore", "ignore", "pipe", "ipc"],
       serialization: "json",
     });
     if (!this.child.pid) throw new Error("Pi worker did not receive a process identity");
+    const stderr = this.child.stderr;
+    if (!stderr) throw new Error("Pi worker did not expose its error output");
+    this.stderrClosed = new Promise((resolveClosed) => {
+      let closed = false;
+      const finish = (): void => { if (!closed) { closed = true; resolveClosed(); } };
+      stderr.on("data", (value: Buffer | string) => {
+        const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+        try {
+          if (!process.stderr.write(chunk)) {
+            stderr.pause();
+            process.stderr.once("drain", () => stderr.resume());
+          }
+        } catch { /* The incident tail remains available. */ }
+        this.appendStderr(chunk);
+      });
+      stderr.once("end", finish);
+      stderr.once("close", finish);
+      stderr.once("error", finish);
+    });
     options.onSpawn?.(this.child.pid);
+  }
+
+  async incidentStderr(timeoutMs: number): Promise<{ stderrTail: string; stderrTruncated: boolean }> {
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      this.stderrClosed,
+      new Promise<void>((resolveWait) => { timer = setTimeout(resolveWait, timeoutMs); }),
+    ]);
+    if (timer) clearTimeout(timer);
+    return {
+      stderrTail: this.stderrTail.toString("utf8"),
+      stderrTruncated: this.stderrBytesSeen > this.stderrTail.length,
+    };
   }
 
   terminate(): Promise<void> {
     if (this.terminating) return this.terminating;
     this.terminating = this.performTerminate();
     return this.terminating;
+  }
+
+  private appendStderr(chunk: Buffer): void {
+    this.stderrBytesSeen += chunk.length;
+    if (chunk.length >= WORKER_INCIDENT_STDERR_MAX_BYTES) {
+      this.stderrTail = Buffer.from(chunk.subarray(chunk.length - WORKER_INCIDENT_STDERR_MAX_BYTES));
+      return;
+    }
+    const overflow = this.stderrTail.length + chunk.length - WORKER_INCIDENT_STDERR_MAX_BYTES;
+    this.stderrTail = overflow > 0
+      ? Buffer.concat([this.stderrTail.subarray(overflow), chunk])
+      : Buffer.concat([this.stderrTail, chunk]);
   }
 
   private async performTerminate(): Promise<void> {

@@ -49,6 +49,12 @@ Windows 前台 Host 没有 POSIX login shell；Worker 继承启动 PowerShell �
 
 每个 Worker 独立取得一次环境，Host 不修改自己的 `process.env`，也不在 local install 时固化某个项目的语言版本或 PATH。Worker 只在结果之上显式加入 identity、IPC 和 bootstrap 所需的 Dock 私有变量。普通 Bash 命令自行 `cd` 到其他目录时不重新捕获；新的 Worker（包括 reopen）重新按其初始 workspace取得环境。
 
+## Worker 事故记录
+
+Host 对 Worker stderr 做有界尾部捕获，同时继续写入自己的 stderr，因此 Linux journal 与 Windows Host 窗口仍能显示即时输出。正常停止不产生事故记录；Worker 非预期退出、IPC 丢失或 transport deadline 导致所有权回收时，运行该 Worker 的 Host 在私有状态目录写入独立、不可变的 incident。记录包含 Machine、Work、runtime generation、退出原因、平台与保存的 stderr 尾部。
+
+Incident 不属于当前运行状态，reopen 不删除它；清理由独立的有界保留策略决定。`aludock diagnostics` 读取本机最近记录，`--verbose` 才显示保存的错误输出。SubHost 事故首先保存在 SubHost；当前没有把原始 stderr 持续复制到 Main，也没有跨机 diagnostics 协议。
+
 ## Worker 通信
 
 Protocol V2 定义 Dock 的业务语义。Host 与 Worker 之间的私有通信只补充进程所需的信息，例如 Worker identity、generation、调用关联、接收确认、分帧和背压。
