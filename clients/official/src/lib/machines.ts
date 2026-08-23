@@ -6,6 +6,12 @@ export function machineSelectorVisible(machines: readonly MachineDto[]) {
   return machines.length >= 2
 }
 
+export function subhostMachineName(machines: readonly MachineDto[], hostId: string | undefined) {
+  if (!hostId) return ''
+  const machine = machines.find((candidate) => candidate.hostId === hostId)
+  return machine?.kind === 'subhost' ? machine.name : ''
+}
+
 export function defaultMachineHostId(machines: readonly MachineDto[]) {
   const main = machines.find((machine) => machine.kind === 'main' && machine.available)
   return main?.hostId ?? machines.find((machine) => machine.available)?.hostId ?? ''

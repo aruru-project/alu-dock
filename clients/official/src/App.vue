@@ -78,7 +78,7 @@ import {
 import type { CreateWorkContinuation, SessionContext } from './lib/bridge'
 import { foldLiveDelta, hasCompactConversationContent, liveDeltaKey, liveProjectionTargetKey, mergeHydratedConversationRecords, projectConversation } from './lib/conversation'
 import { appendRestoredQueue, attachmentsAfterSubmit, displayedConversationImageResource, moveAttachmentPreviewResource } from './lib/attachmentDraft'
-import { defaultMachineHostId, machineSelectorVisible, machineWorkspaceRoots, machineWorkspaceRootSelectorVisible, machineWorkspaceStart, selectedMachineTarget, workspaceChildPath } from './lib/machines'
+import { defaultMachineHostId, machineSelectorVisible, machineWorkspaceRoots, machineWorkspaceRootSelectorVisible, machineWorkspaceStart, selectedMachineTarget, subhostMachineName, workspaceChildPath } from './lib/machines'
 import {
   DEVICE_NAME_FALLBACK,
   browserDeviceNameStorage,
@@ -176,16 +176,18 @@ const composerExpanded = ref(false)
 const workspace = ref<WorkspacePage | null>(null)
 const workspacePath = ref('')
 const workspaceSearch = ref('')
-const directoryMachines = ref<MachineDto[]>([])
+const hostMachines = ref<MachineDto[]>([])
+const machineListError = ref('')
 const directoryMachineId = ref('')
-const directoryMachineSelectorVisible = computed(() => machineSelectorVisible(directoryMachines.value))
-const directoryMachine = computed(() => directoryMachines.value.find((machine) => machine.hostId === directoryMachineId.value))
-const directoryTargetHostId = computed(() => selectedMachineTarget(directoryMachines.value, directoryMachineId.value))
+const directoryMachineSelectorVisible = computed(() => machineSelectorVisible(hostMachines.value))
+const directoryMachine = computed(() => hostMachines.value.find((machine) => machine.hostId === directoryMachineId.value))
+const directoryTargetHostId = computed(() => selectedMachineTarget(hostMachines.value, directoryMachineId.value))
 const directoryWorkspaceRoots = computed(() => machineWorkspaceRoots(directoryMachine.value))
 const directoryWorkspaceRootSelectorVisible = computed(() => machineWorkspaceRootSelectorVisible(directoryMachine.value))
 const workspaceLoading = ref(false)
 const workspaceError = ref<string | null>(null)
 let workspaceLoadEpoch = 0
+let machineLoadEpoch = 0
 const creatingWork = ref(false)
 const trustContinuation = ref<CreateWorkContinuation | null>(null)
 const reopenTrustContinuation = ref<CreateWorkContinuation | null>(null)
@@ -705,8 +707,20 @@ watch(() => app.workDrawerOpen, (open, wasOpen) => {
     deliveryOpen.value = false
     workspaceBrowserOpen.value = false
   }
-  if (open && !wasOpen) void app.refreshWorksQuietly()
+  if (open && !wasOpen) {
+    void app.refreshWorksQuietly()
+    void refreshHostMachinesQuietly()
+  }
 })
+watch(
+  () => [app.activeHostId, app.hostContext?.selectionGeneration] as const,
+  () => {
+    ++machineLoadEpoch
+    hostMachines.value = []
+    machineListError.value = ''
+    if (app.workDrawerOpen) void refreshHostMachinesQuietly()
+  },
+)
 watch([
   () => app.activeHostId,
   () => app.hostContext?.selectionGeneration,
@@ -921,6 +935,10 @@ const groupedWorks = computed(() => ({
   continue: app.works.filter((work) => workGroup(work) === 'continue'),
   history: app.works.filter((work) => workGroup(work) === 'history'),
 }))
+
+function workMachineTag(work: Work) {
+  return subhostMachineName(hostMachines.value, work.hostId)
+}
 
 function selectWork(workId: string) {
   if (workId === selected.value?.id) {
@@ -3138,6 +3156,30 @@ async function resyncSession(snapshot: Work, returnedDraft?: string) {
   await loadSelectedConversation(snapshot.id, true)
 }
 
+async function loadHostMachines() {
+  const epoch = ++machineLoadEpoch
+  const machines = await currentHostCall(app, (context) => listMachines(context))
+  if (epoch === machineLoadEpoch) {
+    hostMachines.value = machines
+    machineListError.value = ''
+  }
+  return machines
+}
+
+async function refreshHostMachinesQuietly() {
+  const context = app.hostContext ? { ...app.hostContext } : null
+  try {
+    await loadHostMachines()
+  } catch {
+    if (context && app.contextMatches(context)) machineListError.value = '机器信息暂时没有载入。刷新后重试。'
+  }
+}
+
+async function refreshWorkDrawer() {
+  await app.load()
+  await refreshHostMachinesQuietly()
+}
+
 async function openDirectory() {
   if (contextTransitionBusy.value) return
   rememberModalTrigger()
@@ -3147,15 +3189,15 @@ async function openDirectory() {
   workspace.value = null
   workspacePath.value = ''
   workspaceSearch.value = ''
-  directoryMachines.value = []
   directoryMachineId.value = ''
   workspaceError.value = null
   workspaceLoading.value = true
   const openEpoch = ++workspaceLoadEpoch
   try {
-    const machines = await currentHostCall(app, (context) => listMachines(context))
+    const machines = await loadHostMachines()
     if (openEpoch !== workspaceLoadEpoch || !directoryOpen.value) return
-    directoryMachines.value = machines
+    hostMachines.value = machines
+    machineListError.value = ''
     directoryMachineId.value = defaultMachineHostId(machines)
     if (!directoryMachineId.value) throw new Error('当前没有可用于创建 Work 的机器。')
   } catch (cause) {
@@ -3171,7 +3213,7 @@ async function openDirectory() {
 
 async function selectDirectoryMachine(event: Event) {
   const hostId = (event.currentTarget as HTMLSelectElement).value
-  const machine = directoryMachines.value.find((candidate) => candidate.hostId === hostId)
+  const machine = hostMachines.value.find((candidate) => candidate.hostId === hostId)
   if (!machine?.available || hostId === directoryMachineId.value || creatingWork.value || trustContinuation.value) return
   directoryMachineId.value = hostId
   workspace.value = null
@@ -3742,17 +3784,18 @@ function handleOutputClick(event: MouseEvent) {
       <div class="alu-sidebar-head">
         <img src="./assets/console_icon_small.png" class="alu-sidebar-avatar" alt="AluDock" />
         <div class="alu-sidebar-title">AluDock Client</div>
-        <button class="alu-sidebar-refresh" title="刷新" :disabled="contextTransitionBusy" @click="app.load">↻</button>
+        <button class="alu-sidebar-refresh" title="刷新" :disabled="contextTransitionBusy" @click="refreshWorkDrawer">↻</button>
         <button class="alu-sidebar-close" aria-label="关闭工作列表" @click="app.workDrawerOpen = false"><X :size="18" /></button>
       </div>
       <div class="alu-sidebar-actions"><button class="alu-new-work-btn" :disabled="contextTransitionBusy" @click="openDirectory">＋ 新建工作</button></div>
       <div class="alu-instance-list">
+        <div v-if="machineListError" class="alu-sidebar-error">{{ machineListError }}</div>
         <section v-for="group in (['current', 'continue', 'history'] as const)" :key="group" v-show="groupedWorks[group].length" class="alu-instance-group">
           <div class="alu-instance-group-title">{{ group === 'current' ? '当前工作' : group === 'continue' ? '可以继续' : '历史工作' }}<span>{{ groupedWorks[group].length }}</span></div>
           <div v-for="work in groupedWorks[group]" :key="work.id" class="alu-instance-row" :class="{ 'is-selected': work.id === selected?.id }">
             <button class="alu-instance-link" :disabled="contextTransitionBusy && work.id !== selected?.id" @click="selectWork(work.id)">
               <span class="alu-instance-state" :class="`is-${workPresence(work).tone}`" />
-              <span class="alu-instance-copy"><span class="alu-instance-name">{{ work.displayName }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span></span>
+              <span class="alu-instance-copy"><span class="alu-instance-name">{{ work.displayName }}</span><span v-if="workMachineTag(work)" class="alu-instance-machine-tag">{{ workMachineTag(work) }}</span><span class="alu-instance-cwd">{{ work.cwd.split('/').filter(Boolean).slice(-2).join('/') }}</span></span>
               <span class="alu-instance-meta">{{ workPresence(work).label }}</span>
             </button>
             <button v-if="work.reopenable && work.lifecycle !== 'active'" class="alu-instance-action" :disabled="!isTauri || workMutating || mutationOutcomeUnknown" @click="reopenFromList(work)">{{ workMutating && selected?.id === work.id ? '正在继续…' : '继续' }}</button>
@@ -3859,7 +3902,7 @@ function handleOutputClick(event: MouseEvent) {
             <label v-if="directoryMachineSelectorVisible" class="alu-directory-machine">
               <span>创建位置</span>
               <select :value="directoryMachineId" :disabled="workspaceLoading || creatingWork || !!trustContinuation" @change="selectDirectoryMachine">
-                <option v-for="machine in directoryMachines" :key="machine.hostId" :value="machine.hostId" :disabled="!machine.available">{{ machine.name }} · {{ machine.kind === 'main' ? 'Main' : 'SubHost' }}{{ machine.available ? '' : ' · 暂不可用' }}</option>
+                <option v-for="machine in hostMachines" :key="machine.hostId" :value="machine.hostId" :disabled="!machine.available">{{ machine.name }} · {{ machine.kind === 'main' ? 'Main' : 'SubHost' }}{{ machine.available ? '' : ' · 暂不可用' }}</option>
               </select>
             </label>
             <label v-if="directoryWorkspaceRootSelectorVisible" class="alu-directory-machine">

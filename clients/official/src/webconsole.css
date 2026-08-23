@@ -2734,6 +2734,21 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 }
 .alu-instance-copy { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .alu-instance-name { color: var(--alu-text); font-size: 13px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alu-instance-machine-tag {
+  display: block;
+  max-width: 100%;
+  align-self: flex-start;
+  overflow: hidden;
+  margin: 3px 0 1px;
+  padding: 1px 6px;
+  border: 1px solid var(--alu-border);
+  border-radius: 5px;
+  background: var(--alu-active);
+  color: var(--alu-pink);
+  font: 9px/1.45 var(--alu-font-mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .alu-instance-cwd { color: var(--alu-text-muted); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .alu-instance-meta { color: var(--alu-text-faint); font-size: 10px; }
 .alu-instance-action {

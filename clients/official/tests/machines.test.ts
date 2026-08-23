@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { defaultMachineHostId, machineSelectorVisible, machineWorkspaceRoots, machineWorkspaceRootSelectorVisible, machineWorkspaceStart, selectedMachineTarget, workspaceChildPath } from '../src/lib/machines.ts'
+import { defaultMachineHostId, machineSelectorVisible, machineWorkspaceRoots, machineWorkspaceRootSelectorVisible, machineWorkspaceStart, selectedMachineTarget, subhostMachineName, workspaceChildPath } from '../src/lib/machines.ts'
 import type { MachineDto } from '../src/lib/types.ts'
 
 const main: MachineDto = { hostId: 'main-host', name: 'Main', kind: 'main', available: true }
@@ -13,6 +13,10 @@ assert.equal(machineSelectorVisible(machines), true)
 assert.equal(defaultMachineHostId(machines), main.hostId)
 assert.equal(selectedMachineTarget(machines, defaultMachineHostId(machines)), main.hostId)
 assert.equal(selectedMachineTarget(machines, subhost.hostId), subhost.hostId)
+assert.equal(subhostMachineName(machines, subhost.hostId), 'Windows', 'SubHost Work 显示所属 Machine 名称')
+assert.equal(subhostMachineName(machines, main.hostId), '', 'Main Work 保持现有两行布局')
+assert.equal(subhostMachineName(machines, 'missing-host'), '', '无法匹配 Machine 时不显示内部 ID')
+assert.equal(subhostMachineName(machines, undefined), '')
 
 const unavailableMain = { ...main, available: false }
 assert.equal(defaultMachineHostId([unavailableMain, subhost]), subhost.hostId)
