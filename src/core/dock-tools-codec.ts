@@ -17,12 +17,14 @@ import {
   type ObservationRequest,
 } from "./instance-observation.js";
 import { MAX_SOURCE_FILE_PATH_CHARS } from "./source-file.js";
-import { isPortableAbsoluteLocalPath } from "./local-path.js";
+import { isPortableAbsoluteLocalPath, isPortableLocalRootPath } from "./local-path.js";
+import { MACHINE_PLATFORMS, type MachinePlatform } from "./machine-dto.js";
 
 /** Canonical Agent-neutral validation for Dock-tools transport records. */
 export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
   const value = record(raw, "Dock tools request");
   if (["list", "inspect", "watch", "cancel"].includes(String(value.type))) return parseObservationRequest(value);
+  if (value.type === "machines") { exactKeys(value, ["type"], "Dock Machines request"); return { type: "machines" }; }
   if (value.type === "deliver") {
     exactKeys(value, ["type", "path"], "Dock deliver request");
     const path = boundedString(value.path, MAX_SOURCE_FILE_PATH_CHARS, "Dock deliver path");
@@ -90,6 +92,12 @@ export function parseDockToolsResult(raw: unknown): void {
     parseObservationResult(value);
     return;
   }
+  if (value.type === "machines") {
+    exactKeys(value, ["type", "machines"], "Dock Machines result");
+    if (!Array.isArray(value.machines) || value.machines.length < 1) throw new Error("Dock Machines result is invalid");
+    for (const machine of value.machines) validateMachine(machine);
+    return;
+  }
   if (value.type === "deliver") {
     exactKeys(value, ["type", "deliverable"], "Dock deliver result");
     parseDeliverableDto(value.deliverable, "Dock deliverable");
@@ -150,6 +158,22 @@ function validateObservation(raw: unknown): void {
     if (typeof conversation.hasEarlier !== "boolean") throw new Error("Observation pagination state is invalid");
     const nextCursor = optionalString(conversation.nextCursor, MAX_OBSERVATION_CURSOR_CHARS);
     if (conversation.hasEarlier !== (nextCursor !== undefined)) throw new Error("Observation pagination cursor is inconsistent");
+  }
+}
+
+function validateMachine(raw: unknown): void {
+  const value = record(raw, "Dock Machine");
+  exactKeys(value, ["hostId", "name", "kind", "available", "platform", "homePath", "workspaceRoots"], "Dock Machine");
+  boundedString(value.hostId, 128, "Dock Machine ID");
+  boundedString(value.name, MAX_DOCK_TOOL_TARGET_CHARS, "Dock Machine name");
+  oneOf(value.kind, ["main", "subhost"] as const, "Dock Machine kind");
+  if (typeof value.available !== "boolean") throw new Error("Dock Machine availability is invalid");
+  const platform = value.platform === undefined ? undefined : oneOf(value.platform, MACHINE_PLATFORMS, "Dock Machine platform");
+  if (value.homePath !== undefined && !isPortableAbsoluteLocalPath(boundedString(value.homePath, MAX_DOCK_TOOL_CWD_CHARS, "Dock Machine Home"))) throw new Error("Dock Machine Home must be absolute");
+  if (value.workspaceRoots !== undefined) {
+    if (!platform || !Array.isArray(value.workspaceRoots) || value.workspaceRoots.length < 1) throw new Error("Dock Machine roots are invalid");
+    const roots = value.workspaceRoots.map((root) => boundedString(root, MAX_DOCK_TOOL_CWD_CHARS, "Dock Machine root"));
+    if (roots.some((root) => !isPortableLocalRootPath(root, platform as MachinePlatform))) throw new Error("Dock Machine roots are invalid");
   }
 }
 

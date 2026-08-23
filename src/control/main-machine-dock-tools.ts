@@ -58,6 +58,7 @@ export class MainMachineDockToolsAuthority {
     if ((request.type === "create" || request.type === "send") && source.lifecycle !== "active") throw new Error("This work is no longer active, so it cannot create or message other work. Open active work and try again.");
     this.ensureSource(sourceMainId, sourceMachineId);
     if (request.type === "list" || request.type === "inspect" || request.type === "watch" || request.type === "cancel") return this.observation.observe(sourceMainId, request);
+    if (request.type === "machines") return { type: "machines", machines: await this.options.controller().machines() };
     if (request.type === "create") {
       const targetMachine = resolveCreateMachine(await this.options.controller().machines(), sourceMachineId, request.machine);
       if (!targetMachine.available) throw new Error(`Machine ${JSON.stringify(targetMachine.name)} is offline. Reconnect it and try again.`);

@@ -83,6 +83,10 @@ if (sourceWorker) sourceWorker.conversationImages.set(routedImageRef, {
   sizeBytes: routedImage.byteLength,
   sha256: routedImageSha,
 });
+const visibleMachines = realPiDockTools ? undefined : await upstream.invokeDockTool(sourceNativeId, { type: "machines" });
+if (visibleMachines && (visibleMachines.type !== "machines" || !visibleMachines.machines.some((machine) => machine.name === "Fixture SubHost"))) {
+  throw new Error("fixture SubHost could not discover its Machine name");
+}
 const createdByTool = realPiDockTools
   ? undefined
   : await upstream.invokeDockTool(sourceNativeId, { type: "create", operationId: "dock-tool-create", cwd: workspace, name: "Created from remote tool", machine: "Fixture SubHost" });

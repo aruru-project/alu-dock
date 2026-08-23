@@ -49,7 +49,7 @@ Store 的公开内容在 `files/`，文件名经过最小安全清洗并保持�
 
 Dock 只有 Main 与 SubHost 两种角色。没有角色设置时始终启动为 Main；不存在独立 Standalone 角色。Main 的 SubHost connections 默认关闭，因此普通安装不会新增网络 listener。主人在 Main Hub Machines 实时打开或关闭连接并选择端口；Host 观察保存的 revision，关闭时断开 machine links 但保留 trust/routes，打开或换端口时写回 listening/error 结果，不重启 Registry、Worker 或客户端 authority。
 
-主人也可以从 TUI 选择下次启动为 SubHost。这个选择保存 Main 地址、端口、本机名称，并在第一次导入 Main 创建的一次性 join file。SubHost TUI 只显示自身角色、Main 连接状态、连接设置和切回 Main 的入口；它没有客户端 local endpoint、Remote Access、完整 Hub 或 children。切回 Main 会清除 SubHost role override，下次启动恢复默认 Main。
+主人也可以从 TUI 选择下次启动为 SubHost。这个选择保存 Main 地址、端口和本机名称；停止当前 Main 后，第一次普通 Host 启动额外接收 Main 创建的一次性 join file。SubHost TUI 只显示自身角色、Main 连接状态、连接设置和切回 Main 的入口；它没有客户端 local endpoint、Remote Access、完整 Hub 或 children。切回 Main 会清除 SubHost role override，下次启动恢复默认 Main。
 
 Main 的 Machines 页面可以在 Host 运行时创建 join file；文件只含十分钟有效、成功一次后失效的 token 与 Main certificate，不含地址或端口。CLI 仍提供相同运维入口：
 
@@ -57,15 +57,14 @@ Main 的 Machines 页面可以在 Host 运行时创建 join file；文件只含�
 aludock machine join-file --out /private/subhost.join
 ```
 
-显式开发入口可覆盖保存的角色设置；Main 的 `--machine-port` 会保存并启用该端口，且端口绑定成功后才完成启动：
+保存的 Machine Settings 是唯一启动角色 authority；`serve` 不接受进程级 Main/SubHost 覆盖。普通开发启动读取保存角色，第一次 SubHost enrollment 只额外传入一次性 join file。Main 的显式 `--machine-port` 仍写回并启用同一份 listener settings，且端口绑定成功后才完成启动：
 
 ```bash
-aludock --socket /run/user/$UID/alu-main.sock serve --dev --main \
-  --state /private/main/catalog.json --machine-port 43127 --machine-name Main
+aludock --socket /run/user/$UID/alu-main.sock serve --dev \
+  --state /private/main/catalog.json --machine-port 43127
 
-aludock serve --dev --subhost --state /private/sub/catalog.json \
-  --main-address main.example --machine-port 43127 \
-  --join-file /private/subhost.join --machine-name Studio
+aludock serve --dev --state /private/sub/catalog.json \
+  --join-file /private/subhost.join
 ```
 
 机器端口独立于客户端 Remote Access。Main/SubHost 的一条长期 TLS 连接 multiplex 多条逻辑 Protocol V2 stream，各 stream 独立排队和 reset；单条 stream 的 backpressure 或处理失败不关闭 machine link。SubHost 保存自己的长期 certificate 和精确 Main certificate pin，以后启动不再需要 join file；它可以早于 Main 启动，上游不可达时本机 Worker 与 Queue 继续运行并在后台重连。

@@ -82,7 +82,7 @@ function overviewHelp(): string {
 
 function machineHelp(rest: readonly string[]): string {
   if (rest.length > 0 && (rest.length !== 1 || rest[0] !== "join-file")) throw new Error("machine help accepts only join-file");
-  return `aludock machine join-file — prepare one SubHost enrollment\n\nUsage:\n  aludock machine join-file --out PATH [--state PATH] [--machine-name NAME]\n\nThe private file expires after ten minutes and works once. When starting the\nSubHost, enter Main's address and machine port separately. The same action is\navailable from Main's Machines menu.\n`;
+  return `aludock machine join-file — prepare one SubHost enrollment\n\nUsage:\n  aludock machine join-file --out PATH [--state PATH] [--machine-name NAME]\n\nThe private file expires after ten minutes and works once. Save the SubHost\nrole and Main connection in Settings before its next startup. The same join-file\naction is available from Main's Machines menu.\n`;
 }
 
 function continueHelp(): string {
@@ -153,7 +153,7 @@ function serviceHelp(rest: readonly string[]): string {
 }
 
 function internalTopicHelp(topic: string): string {
-  if (topic === "serve") return `aludock serve — Host startup composition\n\nUsage:\n  aludock --socket PATH serve --dev [--state PATH]\n  aludock --socket PATH serve --dev --main --state PATH [--machine-port PORT] [--machine-name NAME]\n  aludock serve --dev --subhost --state PATH --main-address ADDRESS --machine-port PORT --machine-name NAME [--join-file PATH]\n\nMain is the default and owns every client entry point. Machines controls its\nSubHost listener live. In development, --machine-port saves and enables that port,\nand startup succeeds only after the port is listening. SubHost has one encrypted\nupstream and no client socket. Saved role settings apply when no role flag is supplied.\n`;
+  if (topic === "serve") return `aludock serve — Host startup composition\n\nUsage:\n  aludock --socket PATH serve --dev --state PATH [--join-file PATH]\n  aludock --socket PATH serve --dev --state PATH --machine-port PORT\n\nThe saved Machine role is the only startup role. With no saved role, Dock starts\nas Main. Settings selects SubHost for the next startup and saves its Main address,\nport, and name. A first SubHost startup accepts its one-use join file. In development,\n--machine-port saves and enables the configured Main listener, and startup succeeds\nonly after that port is listening.\n`;
   const humanAlternative: Record<string, string> = {
     serve: "Use 'aludock service' to manage the Host.",
     ping: "Use 'aludock service status' for human readiness checks.",

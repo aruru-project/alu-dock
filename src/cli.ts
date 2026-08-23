@@ -172,26 +172,26 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   if (catalogPath) {
     machineSettingsState = new MachineSettingsState(machineSettingsStateRoot(catalogPath));
     const configured = await machineSettingsState.read();
-    const role = options.roleExplicit ? options.role : configured.role;
-    options = role === "subhost"
+    if (configured.role === "subhost" && options.machinePort !== undefined) throw new Error("SubHost connection settings are changed in Settings, then applied on the next startup");
+    options = configured.role === "subhost"
       ? {
         ...options,
-        role,
-        machineName: options.machineName ?? configured.subhost?.name ?? "SubHost",
-        mainAddress: options.mainAddress ?? configured.subhost?.mainAddress,
-        machinePort: options.machinePort ?? configured.subhost?.port,
+        role: "subhost",
+        machineName: configured.subhost?.name ?? "SubHost",
+        mainAddress: configured.subhost?.mainAddress,
+        machinePort: configured.subhost?.port,
       }
       : {
         ...options,
-        role,
-        machineName: options.machineName ?? configured.main.name,
+        role: "main",
+        machineName: configured.main.name,
       };
   }
   if (options.mode === "dev" && options.role === "main" && !socketExplicit && !process.env.ALU_DOCK_SOCKET) {
     throw new Error("Development Main requires an explicit --socket PATH or ALU_DOCK_SOCKET");
   }
   if (options.role === "subhost" && (!catalogPath || !options.mainAddress || options.machinePort === undefined || !options.machineName)) {
-    throw new Error("SubHost startup requires saved connection settings or explicit --state, --main-address, and --machine-port");
+    throw new Error("SubHost startup requires connection settings saved from the human interface");
   }
   if (options.role === "main" && options.machinePort !== undefined && !catalogPath) throw new Error("SubHost connections require --state PATH so trust and routes survive restart");
   if (options.role === "main" && (options.mainAddress || options.joinFile)) throw new Error("Main startup does not accept SubHost connection options");
@@ -489,7 +489,6 @@ function parseGlobalArgs(args: string[]): ParsedArgs {
 interface ServeOptions {
   mode: "managed" | "dev";
   role: "main" | "subhost";
-  roleExplicit: boolean;
   machinePort?: number;
   machineName?: string;
   mainAddress?: string;
@@ -499,11 +498,8 @@ interface ServeOptions {
 
 function parseServeOptions(args: string[]): ServeOptions {
   let mode: ServeOptions["mode"] | undefined;
-  let role: ServeOptions["role"] = "main";
-  let roleSelected = false;
+  const role: ServeOptions["role"] = "main";
   let machinePort: number | undefined;
-  let machineName: string | undefined;
-  let mainAddress: string | undefined;
   let statePath: string | undefined;
   let joinFile: string | undefined;
   for (let index = 0; index < args.length; index += 1) {
@@ -512,29 +508,17 @@ function parseServeOptions(args: string[]): ServeOptions {
     if (arg === "--managed" || arg === "--dev") {
       if (mode) throw new Error("serve accepts one mode");
       mode = arg === "--managed" ? "managed" : "dev";
-    } else if (arg === "--main" || arg === "--subhost") {
-      const selected = arg === "--main" ? "main" : "subhost";
-      if (roleSelected) throw new Error("serve accepts exactly one startup role: --main or --subhost");
-      role = selected;
-      roleSelected = true;
-    }
-    else if (arg === "--machine-port") machinePort = Number(value());
-    else if (arg === "--machine-name") machineName = value();
-    else if (arg === "--main-address") mainAddress = value();
+    } else if (arg === "--machine-port") machinePort = Number(value());
     else if (arg === "--state") statePath = resolve(value());
     else if (arg === "--join-file") joinFile = resolve(value());
     else throw new Error(`Unknown serve argument: ${String(arg)}`);
   }
   if (!mode) throw new Error("serve requires --managed or --dev");
   if (machinePort !== undefined && (!Number.isSafeInteger(machinePort) || machinePort < 1 || machinePort > 65_535)) throw new Error("Machine port must be between 1 and 65535");
-  if (role === "subhost" && roleSelected && !mainAddress) throw new Error("SubHost startup requires --main-address");
   return {
     mode,
     role,
-    roleExplicit: roleSelected,
     ...(machinePort === undefined ? {} : { machinePort }),
-    ...(machineName === undefined ? {} : { machineName }),
-    ...(mainAddress === undefined ? {} : { mainAddress }),
     ...(statePath ? { statePath } : {}),
     ...(joinFile ? { joinFile } : {}),
   };

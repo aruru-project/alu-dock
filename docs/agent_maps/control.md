@@ -185,13 +185,13 @@ Extension UI 操作使用独立连接，同一 instance 同时只有一个。新
 
 ## Agent-facing Dock tools
 
-Dock tools 是 Host-owned、按来源 `instanceId` 绑定的本机工作能力。开关默认关闭并持久化在 catalog；Host 从 authenticated Worker connection 取得 caller identity，每次操作都重新校验，Worker request 不能声明或替换 source。目标不是白名单：主人为一个来源实例开启后，它可以发现 sibling、按需读取、等待、创建 peer 或发送明确带来源的消息，但不能停止实例、回答 interaction 或调用任意 Agent 私有方法。新实例永远从 off 开始，也不继承创建者状态。
+Dock tools 是 Host-owned、按来源 `instanceId` 绑定的本机工作能力。开关默认关闭并持久化在 catalog；Host 从 authenticated Worker connection 取得 caller identity，每次操作都重新校验，Worker request 不能声明或替换 source。目标不是白名单：主人为一个来源实例开启后，它可以发现 Machine 与 sibling、按需读取、等待、创建 peer 或发送明确带来源的消息，但不能停止实例、回答 interaction 或调用任意 Agent 私有方法。新实例永远从 off 开始，也不继承创建者状态。
 
 `dock_list` 与 `dock_inspect` 是两条 closed request：list 只投影 instance snapshot 的短状态，`scope=live` 排除 terminal catalog history，`scope=all` 才包含；它不读取任何 conversation。inspect 必须提供一个 human target，Host 解析后永远排除 caller 自己，再按普通 `types + limit + cursor` 语义返回按消息条数分页的清洗后 conversation page；选中的消息正文保持完整，不做字符截断。状态复用 canonical lifecycle/execution fact；`executionChangedAt` 与当前 running 区间的 `runStartedAt` 是权威时钟，不能用会被 Queue/settings 等变化刷新的 `updatedAt` 猜运行时长。Host-side `InstanceObservationService` 不把 TUI attach DTO、live transport event 或 Host 内部对象暴露给 Worker，也不生成 Host 摘要。
 
 watch 是 Host 内存中的一次性 subscription，不轮询、不占模型 turn。目标已经 idle/stopped/error 时调用同步返回当前结果；否则 Host 订阅 instance state，固定首次 terminal transition 的状态后删除 watch，再向当前来源 Worker 投递仅含 target/reason/time 的 completion。来源/目标 session generation replacement 不改变 stable instance watch；来源 stop/forget、Dock tools 关闭会清理，目标 forget 按 unavailable 完成。cancel/off 与 completion delivery 在来源实例栅栏内排序；取消确认后，尚未交付的 completion 不能再次唤醒。watch 不跨 Host restart 恢复或补发。
 
-`dock_create(cwd,name?,machine?)` 由 Main 将可选的精确 Machine display name 解析为 `hostId`，省略时使用来源 Machine，然后与 Protocol V2 `instance.create(hostId)` 进入同一个 `InstanceMutationService`，因此复用 operation ledger、canonical cwd、project trust 与 catalog transaction；它不新增 placement 协议，也不接受 Pi 启动参数。`dock_send(target,message)` 先在 Host 解析 target 和 source display name，再把固定可见来源包装后的正文交给同一个 `command.submit` service，并使用普通 `auto` delivery。目标看到的是持久化的普通 user message，Queue 与 receipt 语义不分叉；正文逐字保留，来源显示人类名称而不是 UUID。
+`dock_machines()` 复用 Main 的 canonical Machine facts，并只在 Agent-facing 文本中呈现名称、在线状态、平台、Home 与 roots，不呈现内部 `hostId`。`dock_create(cwd,name?,machine?)` 由 Main 将可选的精确 Machine display name 解析为 `hostId`，省略时使用来源 Machine，然后与 Protocol V2 `instance.create(hostId)` 进入同一个 `InstanceMutationService`，因此复用 operation ledger、canonical cwd、project trust 与 catalog transaction；它不新增 placement 协议，也不接受 Pi 启动参数。`dock_send(target,message)` 先在 Host 解析 target 和 source display name，再把固定可见来源包装后的正文交给同一个 `command.submit` service，并使用普通 `auto` delivery。目标看到的是持久化的普通 user message，Queue 与 receipt 语义不分叉；正文逐字保留，来源显示人类名称而不是 UUID。
 
 ## 命令发现
 

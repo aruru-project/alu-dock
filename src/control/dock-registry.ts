@@ -515,6 +515,7 @@ export class DockRegistry implements DockToolsHostPort {
       return this.observationService.observe(sourceInstanceId, request);
     }
     this.assertDockToolsSource(sourceInstanceId);
+    if (request.type === "machines") throw new Error("Machine discovery requires this work to be connected to Main.");
     if (request.type === "deliver") {
       return { type: "deliver", deliverable: await this.get(sourceInstanceId).registerDeliverable(request.path) };
     }

@@ -92,14 +92,16 @@ Main 打开完整 Hub，SubHost 打开最小管理界面。`Open-AluDock.ps1` �
 
 没有角色配置时 Host 脚本默认启动 Main，且 SubHost connections 关闭。Main Hub 的 Machines 可以实时打开或关闭连接、选择端口并创建 join file；Settings 只选择下次启动角色。普通启动会读取保存的角色和 Machine 端口设置。
 
-显式开发覆盖仍可使用：
+角色只由保存的 Settings 决定，没有进程级角色覆盖。将 Windows 配置为 SubHost 时，先在人的界面中保存 SubHost 角色、Main 地址、Machine port 和名称；停止当前 Main 后，第一次启动额外传入 Main 创建的一次性 join file：
 
 ```powershell
-# Main；MachinePort 保存并启用端口，启动前确认它已经监听
-.\scripts\Start-AluDockHost.ps1 -Role main -MachinePort 7444 -MachineName "Windows Main"
+.\scripts\Start-AluDockHost.ps1 -JoinFile ".\join.json"
+```
 
-# SubHost：第一次额外传入 JoinFile
-.\scripts\Start-AluDockHost.ps1 -Role subhost -MainAddress "main.example" -MachinePort 7444 -MachineName "Windows Workstation" -JoinFile ".\join.json"
+enrollment 成功后，后续始终使用普通无参数入口：
+
+```powershell
+.\scripts\Start-AluDockHost.ps1
 ```
 
 Windows Remote Access 仍使用普通 TLS 设备配对；它与本地 Named Pipe 是两个入口。当前先期范围不包括 Windows Service、Scheduled Task、开机启动、安装包和自动更新。

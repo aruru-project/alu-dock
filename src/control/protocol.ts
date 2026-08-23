@@ -12,6 +12,7 @@ import {
   type AttachmentUploadResult,
 } from "../core/instance-attachments.js";
 import { MAX_INSTANCE_DISPLAY_NAME_CHARS } from "../core/instance-display-name.js";
+import { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
 import { isPortableAbsoluteLocalPath, isPortableLocalRootPath } from "../core/local-path.js";
 import { MAX_JSON_ARRAY_ITEMS, MAX_JSON_OBJECT_KEYS, MAX_JSON_VALUE_DEPTH, type JsonObject, type JsonValue } from "../core/json-value.js";
 import {
@@ -157,8 +158,7 @@ export const PUBLISHED_FILES_CAPABILITY = "published-files.v1" as const;
 export const INSTANCE_DELIVERABLES_CAPABILITY = "instance.deliverables.v1" as const;
 export const COMMAND_DISCOVERY_CAPABILITY = "command.discovery.v1" as const;
 export const MACHINES_CAPABILITY = "machines.v1" as const;
-export const MACHINE_PLATFORMS = ["linux", "windows"] as const;
-export type MachinePlatform = typeof MACHINE_PLATFORMS[number];
+export { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
 
 export const IMPLEMENTED_CAPABILITIES = [
   MACHINES_CAPABILITY,
@@ -367,16 +367,6 @@ export interface HostInfoResult {
   diagnostics: Array<{ severity: "info" | "warning" | "error"; message: string; source?: string }>;
 }
 export interface PingResult { pid: number; protocolVersion: 2; hostEpoch: string; capabilities: string[] }
-export interface MachineDto {
-  hostId: string;
-  name: string;
-  kind: "main" | "subhost";
-  available: boolean;
-  platform?: MachinePlatform;
-  homePath?: string;
-  workspaceRoots?: string[];
-}
-export interface MachinesResult { machines: MachineDto[] }
 export interface MachineRemovalResult { hostId: string; removed: boolean }
 export interface CreateResult { instance: InstanceSnapshot }
 export interface EnsureResult { created: boolean; instance: InstanceSnapshot }

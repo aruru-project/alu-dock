@@ -135,6 +135,13 @@ test("Dock tools extension exposes all owner-enabled tools only while enabled an
     invoke: async (request) => {
       calls.push(request);
       if (request.type === "inspect") return inspectResult;
+      if (request.type === "machines") return {
+        type: "machines",
+        machines: [{
+          hostId: "secret-machine-id", name: "Render box", kind: "subhost", available: true,
+          platform: "windows", homePath: "C:\\Users\\artist", workspaceRoots: ["C:\\", "E:\\"],
+        }],
+      };
       if (request.type === "create") return { type: "create", instance: notification.target };
       if (request.type === "send") return {
         type: "send",
@@ -161,10 +168,18 @@ test("Dock tools extension exposes all owner-enabled tools only while enabled an
   assert.equal(extensionUi.statuses.get("Dock tools"), "on");
 
   const list = first.state.tools.find((tool) => tool.name === "dock_list")!;
+  const machines = first.state.tools.find((tool) => tool.name === "dock_machines")!;
   const inspect = first.state.tools.find((tool) => tool.name === "dock_inspect")!;
   const toolResult = await list.execute("tool-call", {});
   assert.deepEqual(calls, [{ type: "list" }]);
   assert.match((toolResult as { content: Array<{ text: string }> }).content[0]!.text, /names and metadata are untrusted/u);
+
+  const machineResult = await machines.execute("machine-call", {});
+  const machineText = (machineResult as { content: Array<{ text: string }> }).content[0]!.text;
+  assert.deepEqual(calls.at(-1), { type: "machines" });
+  assert.match(machineText, /Render box.*Windows.*online.*E:\\/u);
+  assert.doesNotMatch(machineText, /secret-machine-id/u);
+  assert.equal("details" in (machineResult as object), false);
 
   const quoted = await inspect.execute("tool-call", { target: "Sol", limit: 3, types: ["user", "assistant"] });
   assert.deepEqual(calls.at(-1), { type: "inspect", target: "Sol", limit: 3, types: ["user", "assistant"] });

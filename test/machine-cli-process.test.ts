@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { mkdtemp, mkdir, readFile, readdir, rm } from "node:fs/promises";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -29,6 +29,12 @@ async function turnOnMachineConnectionsFromHub(socketPath: string, port: number,
   assert.equal(result.status, 0, output.slice(-2_000));
   return output;
 }
+
+test("Host startup rejects process-level role overrides", () => {
+  const result = spawnSync(process.execPath, [cli, "serve", "--dev", "--subhost"], { encoding: "utf8" });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Unknown serve argument: --subhost/u);
+});
 
 class TcpProxy {
   private server: Server | undefined;
@@ -74,17 +80,19 @@ test("Main toggles SubHost connections live while native Pi work stays alive off
   const mainEnv = { ...process.env, HOME: join(root, "main-home"), XDG_STATE_HOME: join(root, "main-state"), XDG_DATA_HOME: join(root, "main-data") };
   const subEnv = { ...process.env, HOME: join(root, "sub-home"), XDG_STATE_HOME: join(root, "sub-state"), XDG_DATA_HOME: join(root, "sub-data") };
   const machineSettings = new MachineSettingsState(machineSettingsStateRoot(mainCatalog));
+  const subHostSettings = new MachineSettingsState(machineSettingsStateRoot(subCatalog));
+  await subHostSettings.switchToSubHost({ mainAddress: "::1", port: proxyPort, name: "Fixture SubHost" });
   await run(["machine", "join-file", "--state", mainCatalog, "--out", joinFile], mainEnv);
   const proxy = new TcpProxy(proxyPort, mainPort); await proxy.start();
   const children: ChildProcess[] = [];
   context.after(async () => { await proxy.stop(); for (const child of children.reverse()) await stop(child); await rm(root, { recursive: true, force: true }); });
 
-  const sub = spawn(process.execPath, [cli, "serve", "--dev", "--subhost", "--state", subCatalog, "--main-address", "::1", "--machine-port", String(proxyPort), "--join-file", joinFile], { env: subEnv, stdio: ["ignore", "pipe", "pipe"] }); children.push(sub);
+  let sub = spawn(process.execPath, [cli, "serve", "--dev", "--state", subCatalog, "--join-file", joinFile], { env: subEnv, stdio: ["ignore", "pipe", "pipe"] }); children.push(sub);
   await waitReady(sub, "SubHost");
   assert.equal(sub.exitCode, null, "SubHost stays alive before Main exists");
 
   const startMain = async (withPort = false): Promise<ChildProcess> => {
-    const args = [cli, "--socket", socketPath, "serve", "--dev", "--main", "--state", mainCatalog];
+    const args = [cli, "--socket", socketPath, "serve", "--dev", "--state", mainCatalog];
     if (withPort) args.push("--machine-port", String(mainPort));
     const child = spawn(process.execPath, args, { env: mainEnv, stdio: ["ignore", "pipe", "pipe"] });
     children.push(child);
@@ -98,6 +106,11 @@ test("Main toggles SubHost connections live while native Pi work stays alive off
   assert.match(machinesOutput, /SubHost Connections · On/u);
   assert.equal((await machineSettings.read()).main.port, mainPort, machinesOutput.slice(-2_000));
   const hostId = await waitMachine(client, true);
+  await stop(sub);
+  await waitMachine(client, false);
+  sub = spawn(process.execPath, [cli, "serve", "--dev", "--state", subCatalog], { env: subEnv, stdio: ["ignore", "pipe", "pipe"] }); children.push(sub);
+  await waitReady(sub, "saved-role SubHost restart");
+  assert.equal(await waitMachine(client, true), hostId, "ordinary restart must retain the enrolled SubHost identity");
   const created = await client.create(workspace, "CLI remote Pi", "cli-remote-create", undefined, hostId);
   assert.notEqual(created.id, "cli-remote-create");
   assert.equal(created.executor.kind, "pi-sdk");
