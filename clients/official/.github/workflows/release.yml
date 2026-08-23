@@ -34,47 +34,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Match the tag to every package version
+      - name: Derive the release from its tag
         id: release
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         shell: bash
         run: |
-          python3 <<'PY'
-          import json
-          import os
-          import sys
-          import tomllib
-
-          with open("package.json", "rb") as file:
-              web_version = json.load(file)["version"]
-          with open("src-tauri/tauri.conf.json", "rb") as file:
-              app_version = json.load(file)["version"]
-          with open("Cargo.toml", "rb") as file:
-              core_version = tomllib.load(file)["workspace"]["package"]["version"]
-          with open("src-tauri/Cargo.toml", "rb") as file:
-              host_version = tomllib.load(file)["package"]["version"]
-
-          versions = {
-              "package.json": web_version,
-              "src-tauri/tauri.conf.json": app_version,
-              "Cargo.toml": core_version,
-              "src-tauri/Cargo.toml": host_version,
-          }
-          if len(set(versions.values())) != 1:
-              for path, version in versions.items():
-                  print(f"{path}: {version}", file=sys.stderr)
-              raise SystemExit("release versions do not match")
-
-          version = app_version
-          tag = os.environ["RELEASE_TAG"]
-          if tag != f"v{version}":
-              raise SystemExit(f"tag {tag!r} must be v{version}")
-
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-              print(f"version={version}", file=output)
-              print(f"tag={tag}", file=output)
-          PY
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Release tag must use vMAJOR.MINOR.PATCH." >&2
+            exit 1
+          fi
+          echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
           echo "source_sha=$(git rev-list -n 1 "$RELEASE_TAG")" >> "$GITHUB_OUTPUT"
 
   linux:
@@ -126,7 +97,7 @@ jobs:
           pnpm test
 
       - name: Build the Linux executable
-        run: pnpm tauri build --no-bundle --ci
+        run: pnpm tauri build --no-bundle --ci --config '{"version":"${{ needs.prepare.outputs.version }}"}'
 
       - name: Package the Linux executable
         env:
@@ -176,7 +147,7 @@ jobs:
           cache-on-failure: false
 
       - name: Build the Windows executable
-        run: pnpm tauri build --no-bundle --ci
+        run: pnpm tauri build --no-bundle --ci --config '{"version":"${{ needs.prepare.outputs.version }}"}'
 
       - name: Stage the Windows executable
         env:
@@ -287,7 +258,7 @@ jobs:
           ALUDOCK_ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ALUDOCK_ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ALUDOCK_ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-        run: pnpm tauri android build --apk --target aarch64 --ci
+        run: pnpm tauri android build --apk --target aarch64 --ci --config '{"version":"${{ needs.prepare.outputs.version }}"}'
 
       - name: Verify and stage the APK
         env:

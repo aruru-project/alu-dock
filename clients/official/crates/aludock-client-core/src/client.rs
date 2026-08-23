@@ -18,6 +18,10 @@ use crate::{
 };
 
 pub(crate) const MAX_CONTROL_LINE_BYTES: usize = 1024 * 1024;
+const CLIENT_VERSION: &str = match option_env!("ALUDOCK_RELEASE_VERSION") {
+    Some(version) => version,
+    None => env!("CARGO_PKG_VERSION"),
+};
 const MAX_DOCK_TRANSFER_BYTES: usize = 256 * 1024 * 1024;
 const MAX_RESPONSE_TRANSFER_CHUNK_BYTES: usize = 512 * 1024;
 const MAX_RESPONSE_TRANSFER_CHUNKS: usize =
@@ -294,7 +298,7 @@ pub(crate) async fn negotiate_pinned_endpoint(
             versions: [2],
             client: ClientDescription {
                 name: "aludock-client",
-                version: env!("CARGO_PKG_VERSION"),
+                version: CLIENT_VERSION,
                 client_id,
             },
             required_capabilities,
