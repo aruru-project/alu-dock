@@ -4,7 +4,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, parse } from "node:path";
 import test from "node:test";
 
 import { AttachmentService } from "../src/control/attachment-service.js";
@@ -16,6 +16,11 @@ import { MachineSettingsState } from "../src/control/machine-settings-state.js";
 import { machineStateRoot, MainMachineState, writeMachineJoinFile } from "../src/control/machine-state.js";
 import { MainMachineController } from "../src/control/machine-transport.js";
 import { MainMachineDockToolsAuthority } from "../src/control/main-machine-dock-tools.js";
+
+function nativeRoot(path: string): string {
+  const root = parse(path).root;
+  return process.platform === "win32" ? `${root.slice(0, 1).toUpperCase()}${root.slice(1)}` : root;
+}
 
 async function freePort(): Promise<number> {
   const server = createServer();
@@ -138,8 +143,10 @@ test("DockClient uses one Main identity for SubHost read, prompt, follow, and sp
   assert.ok(subHost && main && subHostId && mainHostId);
   assert.equal(subHost.platform, process.platform === "win32" ? "windows" : "linux");
   assert.equal(subHost.homePath, root);
+  assert.ok(subHost.workspaceRoots?.includes(nativeRoot(root)));
   assert.equal(main.platform, process.platform === "win32" ? "windows" : "linux");
   assert.ok(main.homePath && isAbsolute(main.homePath));
+  assert.ok(main.workspaceRoots?.includes(nativeRoot(main.homePath)));
   assert.equal(remote.hostId, subHostId);
   const ensuredRemote = await client.ensure("one-global-key", workspace, "Remote keyed work", "ensure-remote-key", undefined, subHostId);
   const ensuredWithoutPlacement = await client.ensure("one-global-key", workspace, "Ignored placement", "ensure-existing-key-local");

@@ -46,7 +46,7 @@ SubHost 只上报本机 Registry 的 native snapshots。初始和后续 inventor
 
 MainMachineController 是 Main ID、route 和 instance key 的唯一全局 authority；DockRegistry 仍只管理本机原生 instance。Key 没有 placement 含义：Main-local snapshot、持久 route 和正在进行的 ensure reservation 共同参与全局认领，已有 owner 保留 key，后来上报的重复 instance 仍按 Main ID 可见但其 Main snapshot 省略 key，SubHost catalog 不被改写。`instance.get_by_key` 始终全局查询；`instance.ensure` 先全局查询，只有 miss 时可选 `hostId` 才选择第一次创建的位置，省略时创建在 Main 本机。同 key ensure 在 authority 外执行实际本机或机器请求，并在 reservation 释放后统一返回最终 owner。
 
-`machine.list` 的每项可包含目标 Host 自报的 `platform`（`linux | windows`）和用户 Home 绝对路径 `homePath`；Main 保存 SubHost 最近一次上报的事实。公开 instance snapshot 的 `hostId` 与 machine list 使用同一个稳定 Machine identity，让客户端无需从路径或 Host epoch 推断 placement。
+`machine.list` 的每项可包含目标 Host 自报的 `platform`（`linux | windows`）、用户 Home 绝对路径 `homePath` 和原生文件系统根 `workspaceRoots`；Linux 根为 `/`，Windows 根为该 Host 运行用户可访问的盘符根。Main 保存 SubHost 最近一次上报的事实。Home 是 workspace 浏览默认起点，roots 是跨文件系统导航入口；虚拟 `Computer` 等位置只属于客户端投影，不作为 path 发送给 Host。公开 instance snapshot 的 `hostId` 与 machine list 使用同一个稳定 Machine identity，让客户端无需从路径或 Host epoch 推断 placement。
 
 机器边界只有一个 identity mapper：它改写 Protocol V2 的 instance/Host identity 字段、补充稳定 `hostId` 并始终投影 Main-authoritative key，但不进入 message、content、metadata、tool arguments 等 Agent/用户 opaque payload。无 instance 的 machine-local request 可带 `hostId`；省略时仍选择本机 Main，保持旧客户端行为。`attachment.upload` 的 `instanceId` 可选：省略时沿用 Main 本机 storage；提供 Main `instanceId` 时，Main 在 body 开始前路由到拥有该实例的 SubHost storage。
 

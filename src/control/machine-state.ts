@@ -3,7 +3,7 @@ import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promise
 import { dirname, join, resolve } from "node:path";
 
 import type { InstanceSnapshot } from "../core/instance-dto.js";
-import { isPortableAbsoluteLocalPath } from "../core/local-path.js";
+import { isPortableAbsoluteLocalPath, isPortableLocalRootPath } from "../core/local-path.js";
 import { generateHostIdentity, parseHostTlsIdentity, type HostTlsIdentity } from "./remote-access-state.js";
 import { MACHINE_PLATFORMS, MAX_CONTROL_CWD_CHARS, parseInstanceSnapshot, type MachinePlatform } from "./protocol.js";
 import { MAX_DURABLE_CATALOG_BYTES } from "./durable-catalog-store.js";
@@ -39,6 +39,7 @@ export interface TrustedSubHostRecord {
   name: string;
   platform?: MachinePlatform;
   homePath?: string;
+  workspaceRoots?: string[];
   certificatePem: string;
   fingerprint: string;
   joinedAt: string;
@@ -52,6 +53,7 @@ interface TrustedSubHostIndexRecord {
   name: string;
   platform?: MachinePlatform;
   homePath?: string;
+  workspaceRoots?: string[];
   certificatePem: string;
   fingerprint: string;
   joinedAt: string;
@@ -141,7 +143,7 @@ export class MainMachineState {
     });
   }
 
-  async acceptJoin(input: { token: string; machineId: string; machineName: string; platform: MachinePlatform; homePath: string; certificatePem: string }, now = new Date()): Promise<TrustedSubHostRecord> {
+  async acceptJoin(input: { token: string; machineId: string; machineName: string; platform: MachinePlatform; homePath: string; workspaceRoots: string[]; certificatePem: string }, now = new Date()): Promise<TrustedSubHostRecord> {
     const joined = await this.mutateMain((value) => {
       const hash = tokenHash(input.token);
       const index = value.pendingJoins.findIndex((item) => item.tokenHash === hash && Date.parse(item.expiresAt) > now.getTime());
@@ -154,6 +156,7 @@ export class MainMachineState {
         name: checkedName(input.machineName),
         platform: checkedPlatform(input.platform),
         homePath: checkedHomePath(input.homePath),
+        workspaceRoots: checkedWorkspaceRoots(input.workspaceRoots, input.platform),
         certificatePem: certificate.toString(),
         fingerprint: certificate.fingerprint256.replaceAll(":", "").toLowerCase(),
         joinedAt: now.toISOString(),
@@ -234,6 +237,7 @@ export class MainMachineState {
         name: parsed.name,
         ...(parsed.platform === undefined ? {} : { platform: parsed.platform }),
         ...(parsed.homePath === undefined ? {} : { homePath: parsed.homePath }),
+        ...(parsed.workspaceRoots === undefined ? {} : { workspaceRoots: parsed.workspaceRoots }),
         certificatePem: parsed.certificatePem,
         fingerprint: parsed.fingerprint,
         joinedAt: parsed.joinedAt,
@@ -389,7 +393,7 @@ function parseMainFile(input: unknown): MainMachineFile {
 
 function parseMachineIndex(input: unknown): TrustedSubHostIndexRecord {
   const value = object(input, "SubHost trust record");
-  exact(value, ["id", "name", "platform", "homePath", "certificatePem", "fingerprint", "joinedAt"]);
+  exact(value, ["id", "name", "platform", "homePath", "workspaceRoots", "certificatePem", "fingerprint", "joinedAt"]);
   const certificatePem = pem(value.certificatePem, "SubHost certificate");
   const certificate = new X509Certificate(certificatePem);
   const fingerprint = text(value.fingerprint, "SubHost fingerprint");
@@ -399,6 +403,7 @@ function parseMachineIndex(input: unknown): TrustedSubHostIndexRecord {
     name: checkedName(value.name),
     ...(value.platform === undefined ? {} : { platform: checkedPlatform(value.platform) }),
     ...(value.homePath === undefined ? {} : { homePath: checkedHomePath(value.homePath) }),
+    ...(value.workspaceRoots === undefined ? {} : { workspaceRoots: checkedWorkspaceRoots(value.workspaceRoots, value.platform) }),
     certificatePem: certificate.toString(),
     fingerprint,
     joinedAt: timestamp(value.joinedAt, "joinedAt"),
@@ -407,8 +412,8 @@ function parseMachineIndex(input: unknown): TrustedSubHostIndexRecord {
 
 function parseTrustedMachine(input: unknown): TrustedSubHostRecord {
   const value = object(input, "SubHost record");
-  exact(value, ["id", "name", "platform", "homePath", "certificatePem", "fingerprint", "joinedAt", "routes", "retiredRoutes"]);
-  const index = parseMachineIndex({ id: value.id, name: value.name, platform: value.platform, homePath: value.homePath, certificatePem: value.certificatePem, fingerprint: value.fingerprint, joinedAt: value.joinedAt });
+  exact(value, ["id", "name", "platform", "homePath", "workspaceRoots", "certificatePem", "fingerprint", "joinedAt", "routes", "retiredRoutes"]);
+  const index = parseMachineIndex({ id: value.id, name: value.name, platform: value.platform, homePath: value.homePath, workspaceRoots: value.workspaceRoots, certificatePem: value.certificatePem, fingerprint: value.fingerprint, joinedAt: value.joinedAt });
   if (!Array.isArray(value.routes) || !Array.isArray(value.retiredRoutes)) throw new Error("SubHost routes are invalid");
   return { ...index, routes: value.routes.map(parseRoute), retiredRoutes: parseRetiredRoutes(value.retiredRoutes) };
 }
@@ -505,6 +510,13 @@ function checkedHomePath(value: unknown): string {
   const path = text(value, "machine Home path", MAX_CONTROL_CWD_CHARS);
   if (!isPortableAbsoluteLocalPath(path)) throw new Error("machine Home path must be absolute");
   return path;
+}
+function checkedWorkspaceRoots(value: unknown, platformValue: unknown): string[] {
+  const platform = checkedPlatform(platformValue);
+  if (!Array.isArray(value) || value.length < 1) throw new Error("machine workspace roots are invalid");
+  const roots = value.map((root) => text(root, "machine workspace root", MAX_CONTROL_CWD_CHARS));
+  if (roots.some((root) => !isPortableLocalRootPath(root, platform))) throw new Error("machine workspace roots must be native filesystem roots");
+  return roots;
 }
 function timestamp(value: unknown, field: string): string { const result = text(value, field, 64); if (new Date(result).toISOString() !== result) throw new Error(`${field} is invalid`); return result; }
 function text(value: unknown, field: string, max = 4_096): string { if (typeof value !== "string" || value.length < 1 || value.length > max || /[\u0000-\u001f\u007f-\u009f]/u.test(value)) throw new Error(`${field} is invalid`); return value; }

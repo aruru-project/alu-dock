@@ -1,11 +1,13 @@
 import { randomUUID, X509Certificate } from "node:crypto";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
+import { win32 } from "node:path";
 import { Duplex } from "node:stream";
 import type { Socket } from "node:net";
 import { createServer, connect, type Server as TlsServer, type TLSSocket } from "node:tls";
 
 import { MAX_CATALOG_INSTANCES } from "../core/catalog.js";
-import { isNativeAbsoluteLocalPath, isPortableAbsoluteLocalPath } from "../core/local-path.js";
+import { isNativeAbsoluteLocalPath, isPortableAbsoluteLocalPath, isPortableLocalRootPath } from "../core/local-path.js";
 import type { InstanceSnapshot } from "../core/managed-instance.js";
 import type { DockToolsHostPort, DockToolsRequest, DockToolsResult } from "../core/dock-tools.js";
 import { parseDockToolsRequest, parseDockToolsResult } from "../core/dock-tools-codec.js";
@@ -22,6 +24,7 @@ import { MAX_DURABLE_CATALOG_BYTES } from "./durable-catalog-store.js";
 
 const MAX_MACHINE_LINE_BYTES = 2 * MAX_CONTROL_LINE_BYTES;
 const MAX_MACHINE_STREAMS = 256;
+const MAX_WORKSPACE_ROOTS = 26;
 export const MAX_MACHINE_CONNECTIONS = 64;
 const MACHINE_TLS_HANDSHAKE_TIMEOUT_MS = 5_000;
 const MACHINE_ADMISSION_TIMEOUT_MS = 10_000;
@@ -33,7 +36,7 @@ const MACHINE_HEARTBEAT_TIMEOUT_MS = 5_000;
 const MACHINE_LISTENER_RETRY_MS = 1_000;
 
 type MachineWireRecord =
-  | { kind: "machine_hello"; machineId: string; machineName: string; platform: MachinePlatform; homePath: string; joinToken?: string; hostEpoch: string }
+  | { kind: "machine_hello"; machineId: string; machineName: string; platform: MachinePlatform; homePath: string; workspaceRoots: string[]; joinToken?: string; hostEpoch: string }
   | { kind: "machine_ready"; mainHostEpoch: string }
   | { kind: "machine_inventory_chunk"; inventoryId: string; hostEpoch: string; index: number; count: number; data: string }
   | { kind: "machine_stream_open"; streamId: string }
@@ -458,6 +461,7 @@ export class MainMachineController implements MainRouteAuthority {
         available: this.connectionLive(this.connections.get(machine.id)),
         ...(machine.platform === undefined ? {} : { platform: machine.platform }),
         ...(machine.homePath === undefined ? {} : { homePath: machine.homePath }),
+        ...(machine.workspaceRoots === undefined ? {} : { workspaceRoots: machine.workspaceRoots }),
       })),
     ];
   }
@@ -747,15 +751,17 @@ export class MainMachineController implements MainRouteAuthority {
           machineName: hello.machineName,
           platform: hello.platform,
           homePath: hello.homePath,
+          workspaceRoots: hello.workspaceRoots,
           certificatePem: certificate.toString(),
         });
       } else {
         if (machine.fingerprint !== fingerprint) throw new Error("SubHost certificate does not match its trust record");
-        if (machine.name !== hello.machineName || machine.platform !== hello.platform || machine.homePath !== hello.homePath) {
+        if (machine.name !== hello.machineName || machine.platform !== hello.platform || machine.homePath !== hello.homePath || !sameStrings(machine.workspaceRoots, hello.workspaceRoots)) {
           machine = await this.options.state.updateMachine(machine.id, (candidate) => {
             candidate.name = hello.machineName;
             candidate.platform = hello.platform;
             candidate.homePath = hello.homePath;
+            candidate.workspaceRoots = hello.workspaceRoots;
           });
         }
       }
@@ -1529,11 +1535,12 @@ function parseMachineRecord(line: string): MachineWireRecord {
   const kind = wireText(value.kind, "machine record kind", 64);
   const streamId = (): string => wireText(value.streamId, "machine stream ID", 128);
   if (kind === "machine_hello") {
-    wireExact(value, ["kind", "machineId", "machineName", "platform", "homePath", "joinToken", "hostEpoch"]);
+    wireExact(value, ["kind", "machineId", "machineName", "platform", "homePath", "workspaceRoots", "joinToken", "hostEpoch"]);
     const platform = wireMachinePlatform(value.platform);
     const homePath = wireText(value.homePath, "machine Home path", MAX_CONTROL_CWD_CHARS);
     if (!isPortableAbsoluteLocalPath(homePath)) throw new Error("machine Home path must be absolute");
-    return { kind, machineId: wireText(value.machineId, "machine ID", 128), machineName: wireText(value.machineName, "machine name", 256), platform, homePath, ...(value.joinToken === undefined ? {} : { joinToken: wireText(value.joinToken, "join token", 64) }), hostEpoch: wireText(value.hostEpoch, "Host identity", 128) };
+    const workspaceRoots = wireWorkspaceRoots(value.workspaceRoots, platform);
+    return { kind, machineId: wireText(value.machineId, "machine ID", 128), machineName: wireText(value.machineName, "machine name", 256), platform, homePath, workspaceRoots, ...(value.joinToken === undefined ? {} : { joinToken: wireText(value.joinToken, "join token", 64) }), hostEpoch: wireText(value.hostEpoch, "Host identity", 128) };
   }
   if (kind === "machine_ready") { wireExact(value, ["kind", "mainHostEpoch"]); return { kind, mainHostEpoch: wireText(value.mainHostEpoch, "Main Host identity", 128) }; }
   if (kind === "machine_inventory_chunk") {
@@ -1566,17 +1573,41 @@ function parseMachineRecord(line: string): MachineWireRecord {
   throw new Error("Machine record kind is invalid");
 }
 
-function currentMachineFacts(): { platform: MachinePlatform; homePath: string } {
+function currentMachineFacts(): { platform: MachinePlatform; homePath: string; workspaceRoots: string[] } {
   const platform = process.platform === "win32" ? "windows" : process.platform === "linux" ? "linux" : undefined;
   if (platform === undefined) throw new Error(`This Dock build does not support ${process.platform} as a Machine platform`);
   const homePath = homedir();
   if (!isNativeAbsoluteLocalPath(homePath)) throw new Error("This Host does not have an absolute user Home path");
-  return { platform, homePath };
+  return { platform, homePath, workspaceRoots: platform === "windows" ? windowsWorkspaceRoots(homePath) : ["/"] };
+}
+
+function windowsWorkspaceRoots(homePath: string): string[] {
+  const roots: string[] = [];
+  for (let index = 0; index < MAX_WORKSPACE_ROOTS; index += 1) {
+    const root = `${String.fromCharCode("A".charCodeAt(0) + index)}:\\`;
+    if (existsSync(root)) roots.push(root);
+  }
+  const parsedHomeRoot = win32.parse(homePath).root;
+  const homeRoot = `${parsedHomeRoot.slice(0, 1).toUpperCase()}${parsedHomeRoot.slice(1)}`;
+  if (!isPortableLocalRootPath(homeRoot, "windows")) throw new Error("This Host does not have a Windows drive Home path");
+  if (!roots.includes(homeRoot)) roots.push(homeRoot);
+  return roots.sort();
 }
 
 function wireMachinePlatform(value: unknown): MachinePlatform {
   if (typeof value !== "string" || !MACHINE_PLATFORMS.includes(value as MachinePlatform)) throw new Error("machine platform is invalid");
   return value as MachinePlatform;
+}
+
+function wireWorkspaceRoots(value: unknown, platform: MachinePlatform): string[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > MAX_WORKSPACE_ROOTS) throw new Error("machine workspace roots are invalid");
+  const roots = value.map((root) => wireText(root, "machine workspace root", MAX_CONTROL_CWD_CHARS));
+  if (roots.some((root) => !isPortableLocalRootPath(root, platform))) throw new Error("machine workspace roots must be native filesystem roots");
+  return roots;
+}
+
+function sameStrings(left: readonly string[] | undefined, right: readonly string[]): boolean {
+  return left !== undefined && left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function wirePayload(value: unknown, label: string, max: number): string { if (typeof value !== "string" || value.length < 1 || value.length > max || value.includes("\u0000")) throw new Error(`${label} is invalid`); return value; }

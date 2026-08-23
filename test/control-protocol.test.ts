@@ -17,6 +17,7 @@ import {
   parseFileReadBody,
   parseFileReadResult,
   parseKeyLookupResult,
+  parseMachinesResult,
   parseStatusResult,
   ProtocolValidationError,
   INSTANCE_READ_CAPABILITY,
@@ -103,6 +104,14 @@ test("Protocol V2 clients accept additive Host response and event fields", () =>
   assert.throws(() => parseStatusResult({
     instance: { ...validSnapshot(), displayName: "<unsafe>\nlabel" },
   }), /canonical safe display name/u);
+
+  const machines = parseMachinesResult({
+    machines: [{
+      hostId: "windows-host", name: "Draw worker", kind: "subhost", available: true,
+      platform: "windows", homePath: "C:\\Users\\artist", workspaceRoots: ["C:\\", "D:\\"], futureMachineField: true,
+    }],
+  });
+  assert.deepEqual(machines.machines[0]?.workspaceRoots, ["C:\\", "D:\\"]);
 });
 
 test("Protocol V2 history exposes only canonical persisted conversation records", () => {

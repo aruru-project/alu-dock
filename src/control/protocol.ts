@@ -12,7 +12,7 @@ import {
   type AttachmentUploadResult,
 } from "../core/instance-attachments.js";
 import { MAX_INSTANCE_DISPLAY_NAME_CHARS } from "../core/instance-display-name.js";
-import { isPortableAbsoluteLocalPath } from "../core/local-path.js";
+import { isPortableAbsoluteLocalPath, isPortableLocalRootPath } from "../core/local-path.js";
 import { MAX_JSON_ARRAY_ITEMS, MAX_JSON_OBJECT_KEYS, MAX_JSON_VALUE_DEPTH, type JsonObject, type JsonValue } from "../core/json-value.js";
 import {
   MAX_DELIVERY_REF_CHARS,
@@ -374,6 +374,7 @@ export interface MachineDto {
   available: boolean;
   platform?: MachinePlatform;
   homePath?: string;
+  workspaceRoots?: string[];
 }
 export interface MachinesResult { machines: MachineDto[] }
 export interface MachineRemovalResult { hostId: string; removed: boolean }
@@ -1221,16 +1222,25 @@ export function parseMachinesResult(input: unknown): MachinesResult {
   exact(value, ["machines"]);
   const machines = array(value.machines, "machines", MAX_COLLECTION).map((item, index) => {
     const machine = object(item, `machines[${index}]`);
-    exact(machine, ["hostId", "name", "kind", "available", "platform", "homePath"]);
+    exact(machine, ["hostId", "name", "kind", "available", "platform", "homePath", "workspaceRoots"]);
+    const platform = machine.platform === undefined ? undefined : enumeration(machine.platform, `machines[${index}].platform`, MACHINE_PLATFORMS);
     const homePath = optionalString(machine.homePath, `machines[${index}].homePath`, MAX_CONTROL_CWD_CHARS);
     if (homePath !== undefined && !isPortableAbsoluteLocalPath(homePath)) throw validation("invalid_response", `machines[${index}].homePath must be absolute`);
+    const workspaceRoots = machine.workspaceRoots === undefined
+      ? undefined
+      : array(machine.workspaceRoots, `machines[${index}].workspaceRoots`, MAX_COLLECTION)
+        .map((root, rootIndex) => string(root, `machines[${index}].workspaceRoots[${rootIndex}]`, MAX_CONTROL_CWD_CHARS));
+    if (workspaceRoots !== undefined && (platform === undefined || workspaceRoots.length < 1 || workspaceRoots.some((root) => !isPortableLocalRootPath(root, platform)))) {
+      throw validation("invalid_response", `machines[${index}].workspaceRoots must contain native filesystem roots`);
+    }
     return {
       hostId: string(machine.hostId, `machines[${index}].hostId`, 128),
       name: string(machine.name, `machines[${index}].name`, 256),
       kind: enumeration(machine.kind, `machines[${index}].kind`, ["main", "subhost"]),
       available: boolean(machine.available, `machines[${index}].available`),
-      ...(machine.platform === undefined ? {} : { platform: enumeration(machine.platform, `machines[${index}].platform`, MACHINE_PLATFORMS) }),
+      ...(platform === undefined ? {} : { platform }),
       ...(homePath === undefined ? {} : { homePath }),
+      ...(workspaceRoots === undefined ? {} : { workspaceRoots }),
     };
   });
   return { machines };

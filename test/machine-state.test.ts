@@ -59,7 +59,7 @@ function stoppedSnapshotAtGeneration(id: string, runtimeGeneration: number, host
   };
 }
 
-const fixtureMachineFacts = { platform: "linux" as const, homePath: "/home/fixture" };
+const fixtureMachineFacts = { platform: "linux" as const, homePath: "/home/fixture", workspaceRoots: ["/"] };
 
 async function joinedState(root: string, state = new MainMachineState(root)): Promise<{ state: MainMachineState; machineId: string }> {
   const joinFile = await state.createJoin();

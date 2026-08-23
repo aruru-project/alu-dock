@@ -160,6 +160,8 @@ Event overlap 只按完整事件身份（`runtimeGeneration + sequence`）处理
 
 需要让用户选择 cwd 的客户端使用 `workspace.list.v1`，不自行扫描目录，也不为某种界面增加专用接口。`workspace.list` 接收 Host 文件系统中的绝对 `path` 以及可选分页 cursor，返回规范 `path`、可选 `parent`、目录条目和继续读取所需事实。客户端可以用键盘列表、点击列表或自己的视觉组件呈现同一份结果。
 
+浏览初始位置可使用所选 `machine.list` 项的 `homePath`。跨文件系统导航使用同一项中 Host 权威提供的 `workspaceRoots`：客户端可以投影 `Computer` 或盘符选择页，但该虚拟位置不是 Host path；用户选择某个 root 后，再将该原生绝对路径传给 `workspace.list.v1`。Windows 客户端不得从 `C:\` 的 parent 猜测其他盘符，也不得自行扫描 A–Z；旧 Host 未提供 roots 时仍可保留绝对路径输入。
+
 浏览范围就是 Dock Host 运行用户已有的文件系统权限。目录不可读、已经消失或符号链接不可用时，Host 返回可恢复错误；客户端显示错误并允许修改路径。浏览不会读取文件正文、改变进程 cwd 或授予 project trust。用户确认后仍调用 `instance.create(cwd)`。
 
 ## 读取 active Work 的 workspace 文件
