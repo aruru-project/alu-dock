@@ -241,6 +241,7 @@ pub struct Machine {
     pub available: bool,
     pub platform: Option<MachinePlatform>,
     pub home_path: Option<String>,
+    pub workspace_roots: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -398,6 +399,19 @@ impl DockClient {
             }
             if machine.kind == MachineKind::Main {
                 main_count += 1;
+            }
+            if let Some(roots) = &machine.workspace_roots {
+                let valid = machine.platform.is_some_and(|platform| {
+                    !roots.is_empty()
+                        && roots
+                            .iter()
+                            .all(|root| machine_workspace_root_is_valid(root, platform))
+                });
+                if !valid {
+                    return Err(ClientError::Protocol(
+                        "machine list contained invalid workspace roots".into(),
+                    ));
+                }
             }
         }
         if result.machines.is_empty() || main_count != 1 {
@@ -701,6 +715,19 @@ fn validate_stop_result(
     Ok(result)
 }
 
+fn machine_workspace_root_is_valid(root: &str, platform: MachinePlatform) -> bool {
+    match platform {
+        MachinePlatform::Linux => root == "/",
+        MachinePlatform::Windows => {
+            let bytes = root.as_bytes();
+            bytes.len() == 3
+                && bytes[0].is_ascii_alphabetic()
+                && bytes[1] == b':'
+                && matches!(bytes[2], b'\\' | b'/')
+        }
+    }
+}
+
 fn mutation_unknown(operation_id: &str, error: ClientError) -> ClientError {
     ClientError::EffectUnknown {
         operation_id: operation_id.to_owned(),
@@ -766,6 +793,34 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn machine_response_preserves_host_workspace_roots() {
+        let result: MachinesResult = serde_json::from_value(serde_json::json!({
+            "machines": [{
+                "hostId": "windows-host",
+                "name": "Windows",
+                "kind": "subhost",
+                "available": true,
+                "platform": "windows",
+                "homePath": "C:\\Users\\alice",
+                "workspaceRoots": ["C:\\", "D:\\"]
+            }]
+        }))
+        .unwrap();
+        assert_eq!(
+            result.machines[0].workspace_roots.as_deref().unwrap(),
+            &["C:\\".to_owned(), "D:\\".to_owned()]
+        );
+        assert!(machine_workspace_root_is_valid(
+            "D:\\",
+            MachinePlatform::Windows
+        ));
+        assert!(!machine_workspace_root_is_valid(
+            "D:\\projects",
+            MachinePlatform::Windows
+        ));
     }
 
     #[test]

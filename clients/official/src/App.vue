@@ -78,7 +78,7 @@ import {
 import type { CreateWorkContinuation, SessionContext } from './lib/bridge'
 import { foldLiveDelta, hasCompactConversationContent, liveDeltaKey, liveProjectionTargetKey, mergeHydratedConversationRecords, projectConversation } from './lib/conversation'
 import { appendRestoredQueue, attachmentsAfterSubmit, displayedConversationImageResource, moveAttachmentPreviewResource } from './lib/attachmentDraft'
-import { defaultMachineHostId, machineSelectorVisible, machineWorkspaceStart, selectedMachineTarget, workspaceChildPath } from './lib/machines'
+import { defaultMachineHostId, machineSelectorVisible, machineWorkspaceRoots, machineWorkspaceRootSelectorVisible, machineWorkspaceStart, selectedMachineTarget, workspaceChildPath } from './lib/machines'
 import {
   DEVICE_NAME_FALLBACK,
   browserDeviceNameStorage,
@@ -181,6 +181,8 @@ const directoryMachineId = ref('')
 const directoryMachineSelectorVisible = computed(() => machineSelectorVisible(directoryMachines.value))
 const directoryMachine = computed(() => directoryMachines.value.find((machine) => machine.hostId === directoryMachineId.value))
 const directoryTargetHostId = computed(() => selectedMachineTarget(directoryMachines.value, directoryMachineId.value))
+const directoryWorkspaceRoots = computed(() => machineWorkspaceRoots(directoryMachine.value))
+const directoryWorkspaceRootSelectorVisible = computed(() => machineWorkspaceRootSelectorVisible(directoryMachine.value))
 const workspaceLoading = ref(false)
 const workspaceError = ref<string | null>(null)
 let workspaceLoadEpoch = 0
@@ -3178,6 +3180,16 @@ async function selectDirectoryMachine(event: Event) {
   await browse(initial)
 }
 
+async function selectDirectoryLocation(event: Event) {
+  const select = event.currentTarget as HTMLSelectElement
+  const path = select.value
+  select.value = ''
+  if (!path || workspaceLoading.value || creatingWork.value || trustContinuation.value || !directoryMachine.value?.available) return
+  workspace.value = null
+  workspacePath.value = path
+  await browse(path)
+}
+
 async function browse(path: string) {
   const loadEpoch = ++workspaceLoadEpoch
   const targetHostId = directoryTargetHostId.value
@@ -3848,6 +3860,14 @@ function handleOutputClick(event: MouseEvent) {
               <span>创建位置</span>
               <select :value="directoryMachineId" :disabled="workspaceLoading || creatingWork || !!trustContinuation" @change="selectDirectoryMachine">
                 <option v-for="machine in directoryMachines" :key="machine.hostId" :value="machine.hostId" :disabled="!machine.available">{{ machine.name }} · {{ machine.kind === 'main' ? 'Main' : 'SubHost' }}{{ machine.available ? '' : ' · 暂不可用' }}</option>
+              </select>
+            </label>
+            <label v-if="directoryWorkspaceRootSelectorVisible" class="alu-directory-machine">
+              <span>快速前往</span>
+              <select value="" :disabled="workspaceLoading || creatingWork || !!trustContinuation || !directoryMachine?.available" @change="selectDirectoryLocation">
+                <option value="" disabled>选择位置</option>
+                <option :value="machineWorkspaceStart(directoryMachine)">Home · {{ machineWorkspaceStart(directoryMachine) }}</option>
+                <option v-for="(root, index) in directoryWorkspaceRoots" :key="`${root}:${index}`" :value="root">{{ root }}</option>
               </select>
             </label>
             <div class="ui-dialog-search-wrap"><input v-model="workspaceSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索目录名称…" /></div>

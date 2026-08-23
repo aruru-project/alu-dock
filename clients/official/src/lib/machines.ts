@@ -24,6 +24,14 @@ export function machineWorkspaceStart(machine: MachineDto | undefined) {
   return machine?.homePath || WORKSPACE_ROOT_FALLBACK
 }
 
+export function machineWorkspaceRoots(machine: MachineDto | undefined): readonly string[] {
+  return machine?.workspaceRoots ?? []
+}
+
+export function machineWorkspaceRootSelectorVisible(machine: MachineDto | undefined) {
+  return machineWorkspaceRoots(machine).length >= 2
+}
+
 export function workspaceChildPath(path: string, name: string, platform?: MachinePlatform) {
   const windows = platform === 'windows'
     || (platform === undefined && (/^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\')))

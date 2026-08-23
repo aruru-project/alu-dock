@@ -153,6 +153,7 @@ export interface MachineDto {
   available: boolean
   platform?: MachinePlatform
   homePath?: string
+  workspaceRoots?: string[]
 }
 
 export interface WorkCatalog {
