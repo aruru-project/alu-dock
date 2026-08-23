@@ -72,6 +72,7 @@ const CREATE_SCHEMA = {
   properties: {
     cwd: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_CWD_CHARS },
     name: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_NAME_CHARS },
+    machine: { type: "string", minLength: 1, maxLength: MAX_DOCK_TOOL_TARGET_CHARS },
   },
   required: ["cwd"],
   additionalProperties: false,
@@ -294,13 +295,14 @@ export function dockToolsExtension(bridge: DockToolsBridge): ExtensionFactory {
     pi.registerTool({
       name: "dock_create",
       label: "Create Dock work",
-      description: "Create a new Dock instance in an absolute working directory. The new instance starts with Dock tools off.",
+      description: "Create a new Dock instance in an absolute working directory. Use an exact Machine name to place it on another Machine; omit machine to use this work's Machine. The new instance starts with Dock tools off.",
       parameters: CREATE_SCHEMA,
-      execute: async (_toolCallId: string, params: { cwd: string; name?: string }) => toolResult(await bridge.invoke({
+      execute: async (_toolCallId: string, params: { cwd: string; name?: string; machine?: string }) => toolResult(await bridge.invoke({
         type: "create",
         operationId: randomUUID(),
         cwd: params.cwd,
         ...(params.name === undefined ? {} : { name: params.name }),
+        ...(params.machine === undefined ? {} : { machine: params.machine }),
       })),
     } as never);
     pi.registerTool({

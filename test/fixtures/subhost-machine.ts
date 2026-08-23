@@ -85,7 +85,7 @@ if (sourceWorker) sourceWorker.conversationImages.set(routedImageRef, {
 });
 const createdByTool = realPiDockTools
   ? undefined
-  : await upstream.invokeDockTool(sourceNativeId, { type: "create", operationId: "dock-tool-create", cwd: workspace, name: "Created from remote tool" });
+  : await upstream.invokeDockTool(sourceNativeId, { type: "create", operationId: "dock-tool-create", cwd: workspace, name: "Created from remote tool", machine: "Fixture SubHost" });
 process.stdout.write(`${JSON.stringify({ kind: "ready", nativeInstanceId: sourceNativeId, createdByTool: createdByTool?.type === "create" ? createdByTool.instance.id : undefined, workerPid: realWorkerPid, digest: createHash("sha256").update("specialized-stream").digest("hex") })}\n`);
 
 let stopping = false;

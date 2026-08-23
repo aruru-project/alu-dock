@@ -174,14 +174,15 @@ test("Dock tools extension exposes all owner-enabled tools only while enabled an
   assert.doesNotMatch(quotedText, /"trust"|liveEvents|historyRevision/u);
 
   const create = first.state.tools.find((tool) => tool.name === "dock_create")!;
-  const createResult = await create.execute("create-call", { cwd: "/work/new", name: "New Work" });
-  const createCall = calls.at(-1) as unknown as { type: string; operationId: string; cwd: string; name: string };
+  const createResult = await create.execute("create-call", { cwd: "/work/new", name: "New Work", machine: "Render box" });
+  const createCall = calls.at(-1) as unknown as { type: string; operationId: string; cwd: string; name: string; machine: string };
   assert.match(createCall.operationId, /^[0-9a-f-]{36}$/u);
   assert.deepEqual({ ...createCall, operationId: "<generated>" }, {
     type: "create",
     operationId: "<generated>",
     cwd: "/work/new",
     name: "New Work",
+    machine: "Render box",
   });
   assert.match((createResult as { content: Array<{ text: string }> }).content[0]!.text, /Dock tools are off in the new instance/u);
 

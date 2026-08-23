@@ -26,7 +26,7 @@ Files already offered stay available after Dock tools are turned off. To clear a
 
 ## Create and message work
 
-- `dock_create` requires an absolute `cwd` and accepts an optional human-readable `name`. It creates a peer instance with Dock tools off.
+- `dock_create` requires an absolute `cwd`, accepts an optional human-readable `name`, and accepts an optional exact Machine display name in `machine`. Omit `machine` to create beside the source work; provide it only when the owner has identified another Machine. The peer starts with Dock tools off.
 - `dock_send` sends a normal user message through the target’s existing Dock Queue and delivery behavior. Pass only the intended message body.
 - Dock automatically delivers the target message in this visible form:
 

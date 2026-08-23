@@ -30,15 +30,17 @@ export function parseDockToolsRequest(raw: unknown): DockToolsRequest {
     return { type: "deliver", path };
   }
   if (value.type === "create") {
-    exactKeys(value, ["type", "operationId", "cwd", "name"], "Dock create request");
+    exactKeys(value, ["type", "operationId", "cwd", "name", "machine"], "Dock create request");
     const cwd = boundedString(value.cwd, MAX_DOCK_TOOL_CWD_CHARS, "Dock create cwd");
     if (!isPortableAbsoluteLocalPath(cwd)) throw new Error("Dock create cwd must be absolute");
     const name = value.name === undefined ? undefined : boundedString(value.name, MAX_DOCK_TOOL_NAME_CHARS, "Dock create name");
+    const machine = value.machine === undefined ? undefined : boundedString(value.machine, MAX_DOCK_TOOL_TARGET_CHARS, "Dock create Machine name");
     return {
       type: "create",
       operationId: boundedString(value.operationId, 128, "Dock create operation ID"),
       cwd,
       ...(name === undefined ? {} : { name }),
+      ...(machine === undefined ? {} : { machine }),
     };
   }
   exactKeys(value, ["type", "operationId", "target", "message"], "Dock send request");

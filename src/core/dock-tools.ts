@@ -15,7 +15,7 @@ export const MAX_DOCK_TOOL_MESSAGE_CHARS = 254_000;
 export type DockToolsRequest =
   | ObservationRequest
   | { type: "deliver"; path: string }
-  | { type: "create"; operationId: string; cwd: string; name?: string }
+  | { type: "create"; operationId: string; cwd: string; name?: string; machine?: string }
   | { type: "send"; operationId: string; target: string; message: string };
 
 export type DockToolsResult =

@@ -9,7 +9,7 @@ import { DockClient } from "./dock-client.js";
 import { InstanceObservationService } from "./instance-observation-service.js";
 import { observationStatus } from "./instance-observation-service.js";
 import type { MainMachineController } from "./machine-transport.js";
-import type { ControlRequest, InstanceReadResult } from "./protocol.js";
+import type { ControlRequest, InstanceReadResult, MachineDto } from "./protocol.js";
 
 /** Main-owned global Dock-tool authority; observation semantics stay in InstanceObservationService. */
 export class MainMachineDockToolsAuthority {
@@ -59,11 +59,10 @@ export class MainMachineDockToolsAuthority {
     this.ensureSource(sourceMainId, sourceMachineId);
     if (request.type === "list" || request.type === "inspect" || request.type === "watch" || request.type === "cancel") return this.observation.observe(sourceMainId, request);
     if (request.type === "create") {
-      const mainId = (await this.options.controller().machines()).find((machine) => machine.kind === "main")?.hostId;
-      const result = sourceMachineId === mainId
-        ? { instance: await this.options.localClient.create(request.cwd, request.name, request.operationId) }
-        : await this.options.controller().requestRemote(requestEnvelope("instance.create", { operationId: request.operationId, cwd: request.cwd, name: request.name, hostId: sourceMachineId })) as { instance: InstanceSnapshot };
-      return { type: "create", instance: observationStatus(result.instance) };
+      const targetMachine = resolveCreateMachine(await this.options.controller().machines(), sourceMachineId, request.machine);
+      if (!targetMachine.available) throw new Error(`Machine ${JSON.stringify(targetMachine.name)} is offline. Reconnect it and try again.`);
+      const instance = await this.options.localClient.create(request.cwd, request.name, request.operationId, undefined, targetMachine.hostId);
+      return { type: "create", instance: observationStatus(instance) };
     }
     if (request.type === "send") {
       const target = requireHumanTarget(snapshots.filter((item) => item.id !== sourceMainId), request.target);
@@ -131,6 +130,18 @@ export class MainMachineDockToolsPort implements DockToolsHostPort {
     return this.options.mainHostId().then((hostId) => this.options.authority().invoke(sourceInstanceId, hostId, request));
   }
   attachObservationSink(sourceInstanceId: string, sink: ObservationDeliverySink): () => void { return this.options.local().attachObservationSink(sourceInstanceId, sink); }
+}
+
+function resolveCreateMachine(machines: readonly MachineDto[], sourceMachineId: string, requestedName: string | undefined): MachineDto {
+  if (requestedName === undefined) {
+    const source = machines.find((machine) => machine.hostId === sourceMachineId);
+    if (!source) throw new Error("This work's Machine is no longer available. Reconnect it and try again.");
+    return source;
+  }
+  const matches = machines.filter((machine) => machine.name === requestedName);
+  if (matches.length === 0) throw new Error(`No Machine named ${JSON.stringify(requestedName)} was found. Check the Machine name and try again.`);
+  if (matches.length > 1) throw new Error(`Several Machines are named ${JSON.stringify(requestedName)}. Use a unique Machine name and try again.`);
+  return matches[0] as MachineDto;
 }
 
 function requestEnvelope<T extends ControlRequest["type"]>(type: T, params: Extract<ControlRequest, { type: T }>["params"]): Extract<ControlRequest, { type: T }> {
