@@ -458,14 +458,13 @@ export async function loadConversationHistoryEntry(
 export async function loadConversationImageBytes(
   instanceId: string,
   expectedHostEpoch: string,
-  expectedRuntimeGeneration: number,
   contentRef: string,
   mimeType: string,
   context: HostContext,
 ): Promise<Uint8Array> {
   if (!isTauri) throw new Error('浏览器设计预览不会读取远程图片')
   const value = await invoke<ArrayBuffer | Uint8Array | number[]>('conversation_image', {
-    ...context, instanceId, expectedHostEpoch, expectedRuntimeGeneration, contentRef, mimeType,
+    ...context, instanceId, expectedHostEpoch, contentRef, mimeType,
   })
   return binaryBytes(value)
 }
@@ -630,8 +629,8 @@ export async function listMachines(context: HostContext): Promise<MachineDto[]> 
   if (isTauri) return invoke<MachineDto[]>('list_machines', { ...context })
   await delay(80)
   return [
-    { hostId: 'preview-main', name: '家里的工作站', kind: 'main', available: true },
-    { hostId: 'preview-subhost', name: 'Windows 工作站', kind: 'subhost', available: true },
+    { hostId: 'preview-main', name: '家里的工作站', kind: 'main', available: true, platform: 'linux', homePath: '/home/alu' },
+    { hostId: 'preview-subhost', name: 'Windows 工作站', kind: 'subhost', available: true, platform: 'windows', homePath: 'C:\\Users\\alu' },
   ]
 }
 

@@ -78,7 +78,7 @@ import {
 import type { CreateWorkContinuation, SessionContext } from './lib/bridge'
 import { foldLiveDelta, liveDeltaKey, liveProjectionTargetKey, mergeHydratedConversationRecords, projectConversation } from './lib/conversation'
 import { appendRestoredQueue, attachmentsAfterSubmit, displayedConversationImageResource, moveAttachmentPreviewResource } from './lib/attachmentDraft'
-import { defaultMachineHostId, machineSelectorVisible, selectedMachineTarget } from './lib/machines'
+import { defaultMachineHostId, machineSelectorVisible, machineWorkspaceStart, selectedMachineTarget, workspaceChildPath } from './lib/machines'
 import {
   DEVICE_NAME_FALLBACK,
   browserDeviceNameStorage,
@@ -138,8 +138,6 @@ marked.use({ breaks: true, gfm: true })
 const commandShortcutLabel = /Macintosh|Mac OS X/.test(navigator.userAgent) ? '⌘K' : 'Ctrl+K'
 const isAndroidWebView = /Android/i.test(navigator.userAgent)
 const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
-// TODO: Replace this fallback when Protocol V2 exposes machine-local workspace roots.
-const MACHINE_WORKSPACE_FALLBACK = '/'
 
 const MARKDOWN_SANITIZE_CONFIG = {
   USE_PROFILES: { html: true },
@@ -2245,7 +2243,7 @@ async function requestConversationImage(part: ConversationImagePart) {
     let bytes: Uint8Array
     let mediaType = part.mimeType
     if (source.type === 'conversation') {
-      bytes = await loadConversationImageBytes(work.id, expectedEpoch, expectedGeneration, source.contentRef, source.mimeType, capturedHost)
+      bytes = await loadConversationImageBytes(work.id, expectedEpoch, source.contentRef, source.mimeType, capturedHost)
       mediaType = source.mimeType
     } else if (source.type === 'published') {
       bytes = await loadPublishedImageBytes(work.id, expectedEpoch, expectedGeneration, source.file, capturedHost)
@@ -3164,9 +3162,7 @@ async function openDirectory() {
     workspaceLoading.value = false
     return
   }
-  const initial = directoryMachineSelectorVisible.value
-    ? MACHINE_WORKSPACE_FALLBACK
-    : selected.value?.cwd || MACHINE_WORKSPACE_FALLBACK
+  const initial = machineWorkspaceStart(directoryMachine.value)
   workspacePath.value = initial
   await browse(initial)
 }
@@ -3177,8 +3173,9 @@ async function selectDirectoryMachine(event: Event) {
   if (!machine?.available || hostId === directoryMachineId.value || creatingWork.value || trustContinuation.value) return
   directoryMachineId.value = hostId
   workspace.value = null
-  workspacePath.value = MACHINE_WORKSPACE_FALLBACK
-  await browse(MACHINE_WORKSPACE_FALLBACK)
+  const initial = machineWorkspaceStart(machine)
+  workspacePath.value = initial
+  await browse(initial)
 }
 
 async function browse(path: string) {
@@ -3859,7 +3856,7 @@ function handleOutputClick(event: MouseEvent) {
             <div v-else-if="workspace" class="ui-dialog-options" role="listbox">
               <button class="ui-dialog-option" :disabled="!isTauri || creatingWork || mutationOutcomeUnknown || !!trustContinuation || (directoryMachineSelectorVisible && !directoryMachine?.available)" @click="createSelectedWork()"><span class="ui-dialog-option-marker">✓</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">使用这个目录</span><span class="ui-dialog-option-badge">选择</span></span><span class="ui-dialog-option-detail"><span>{{ workspace.path }}</span></span></span></button>
               <button v-if="workspace.parent" class="ui-dialog-option" @click="browse(workspace.parent)"><span class="ui-dialog-option-marker">↑</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">..</span><span class="ui-dialog-option-detail"><span>返回上级目录</span></span></span></button>
-              <button v-for="entry in filteredWorkspaceEntries" :key="entry.name" class="ui-dialog-option" @click="browse(`${workspace.path.replace(/\/$/, '')}/${entry.name}`)"><span class="ui-dialog-option-marker">{{ entry.kind === 'symlink' ? '↗' : '▸' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ entry.name }}</span><span v-if="entry.kind === 'symlink'" class="ui-dialog-option-badge">链接</span></span><span class="ui-dialog-option-detail"><span>{{ entry.kind === 'symlink' ? '目录链接' : '目录' }}{{ entry.hidden ? ' · 隐藏' : '' }}</span></span></span></button>
+              <button v-for="entry in filteredWorkspaceEntries" :key="entry.name" class="ui-dialog-option" @click="browse(workspaceChildPath(workspace.path, entry.name, directoryMachine?.platform))"><span class="ui-dialog-option-marker">{{ entry.kind === 'symlink' ? '↗' : '▸' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ entry.name }}</span><span v-if="entry.kind === 'symlink'" class="ui-dialog-option-badge">链接</span></span><span class="ui-dialog-option-detail"><span>{{ entry.kind === 'symlink' ? '目录链接' : '目录' }}{{ entry.hidden ? ' · 隐藏' : '' }}</span></span></span></button>
               <div v-if="!filteredWorkspaceEntries.length && !workspace.parent" class="ui-dialog-empty">没有匹配项</div>
             </div>
             <div v-if="trustContinuation" class="session-trust"><strong>这个项目尚未被信任</strong><p>确认后会继续在此目录创建 Work。</p><div><button @click="trustContinuation = null">取消</button><button @click="continueWithTrust('trust_once')">仅本次信任</button><button class="session-primary" @click="continueWithTrust('trust_and_remember')">信任并创建</button></div></div>

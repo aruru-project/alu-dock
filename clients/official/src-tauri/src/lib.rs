@@ -2673,7 +2673,6 @@ async fn conversation_image(
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
-    expected_runtime_generation: u64,
     content_ref: String,
     mime_type: String,
 ) -> Result<Response, CommandError> {
@@ -2683,10 +2682,7 @@ async fn conversation_image(
         .await
         .map_err(CommandError::from)?;
     resolve_host(&runtime, &host_id, selection_generation)?;
-    if image.host_epoch != expected_host_epoch
-        || image.runtime_generation != expected_runtime_generation
-        || image.mime_type != mime_type
-    {
+    if image.host_epoch != expected_host_epoch || image.mime_type != mime_type {
         return Err(CommandError::from(ClientError::Protocol(
             "conversation image belonged to an obsolete Work state".into(),
         )));

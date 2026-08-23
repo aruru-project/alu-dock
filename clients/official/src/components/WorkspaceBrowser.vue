@@ -462,11 +462,12 @@ watch(
     props.hostEpoch,
   ] as const,
   (current, previous) => {
+    const changed = !previous || current.slice(1).some((value, index) => value !== previous[index + 1])
     if (!props.open) {
       void invalidateFile(true)
+      if (changed) resetDirectories()
       return
     }
-    const changed = !previous || current.slice(1).some((value, index) => value !== previous[index + 1])
     if (props.work?.lifecycle !== 'active' || !currentContext()) {
       emit('close')
       return

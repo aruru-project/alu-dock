@@ -73,6 +73,7 @@ pub struct ExecutorSnapshot {
 pub struct InstanceSnapshot {
     pub id: String,
     pub creation_operation_id: String,
+    pub host_id: Option<String>,
     pub key: Option<String>,
     pub name: Option<String>,
     pub display_name: String,
@@ -105,6 +106,7 @@ pub struct InstanceSnapshot {
 impl InstanceSnapshot {
     pub fn validate(&self) -> Result<()> {
         if self.runtime_generation == 0
+            || self.host_id.as_ref().is_some_and(String::is_empty)
             || self.event_cursor.instance_id != self.id
             || self.event_cursor.runtime_generation != self.runtime_generation
         {
@@ -223,6 +225,13 @@ pub enum MachineKind {
     Subhost,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MachinePlatform {
+    Linux,
+    Windows,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Machine {
@@ -230,6 +239,8 @@ pub struct Machine {
     pub name: String,
     pub kind: MachineKind,
     pub available: bool,
+    pub platform: Option<MachinePlatform>,
+    pub home_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -551,10 +562,14 @@ impl DockClient {
                 operation_id: operation_id.to_owned(),
                 message: error.to_string(),
             })?;
-        if result.instance.creation_operation_id != operation_id {
+        if result.instance.creation_operation_id != operation_id
+            || target_host_id
+                .is_some_and(|target| result.instance.host_id.as_deref() != Some(target))
+        {
             return Err(ClientError::EffectUnknown {
                 operation_id: operation_id.to_owned(),
-                message: "created Work did not correlate to the requested operation".into(),
+                message: "created Work did not correlate to the requested operation and Machine"
+                    .into(),
             });
         }
         Ok(result.instance)
@@ -707,6 +722,7 @@ mod tests {
             instance: InstanceSnapshot {
                 id: "work".into(),
                 creation_operation_id: "created".into(),
+                host_id: None,
                 key: None,
                 name: None,
                 display_name: "Work".into(),

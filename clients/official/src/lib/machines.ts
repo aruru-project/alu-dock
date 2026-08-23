@@ -1,4 +1,6 @@
-import type { MachineDto } from './types'
+import type { MachineDto, MachinePlatform } from './types'
+
+const WORKSPACE_ROOT_FALLBACK = '/'
 
 export function machineSelectorVisible(machines: readonly MachineDto[]) {
   return machines.length >= 2
@@ -16,4 +18,16 @@ export function selectedMachineTarget(
   if (!machineSelectorVisible(machines)) return undefined
   const selected = machines.find((machine) => machine.hostId === selectedHostId && machine.available)
   return selected?.hostId ?? (defaultMachineHostId(machines) || undefined)
+}
+
+export function machineWorkspaceStart(machine: MachineDto | undefined) {
+  return machine?.homePath || WORKSPACE_ROOT_FALLBACK
+}
+
+export function workspaceChildPath(path: string, name: string, platform?: MachinePlatform) {
+  const windows = platform === 'windows'
+    || (platform === undefined && (/^[A-Za-z]:[\\/]/.test(path) || path.startsWith('\\\\')))
+  const separator = windows ? '\\' : '/'
+  const trailingSeparators = windows ? /[\\/]+$/ : /\/+$/
+  return `${path.replace(trailingSeparators, '')}${separator}${name}`
 }

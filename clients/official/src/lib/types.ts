@@ -19,6 +19,7 @@ export interface ActiveInteraction { id: string; method: InteractionMethod; expi
 
 export interface Work {
   id: string
+  hostId?: string
   key?: string
   name?: string
   displayName: string
@@ -143,11 +144,15 @@ export interface BootstrapPayload {
   hiddenStopped: number
 }
 
+export type MachinePlatform = 'linux' | 'windows'
+
 export interface MachineDto {
   hostId: string
   name: string
   kind: 'main' | 'subhost'
   available: boolean
+  platform?: MachinePlatform
+  homePath?: string
 }
 
 export interface WorkCatalog {
