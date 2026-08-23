@@ -1,6 +1,6 @@
 # 本地安装与服务
 
-Alu Dock 使用一个本机 npm 安装和一个 `systemd --user` Host Service。
+Alu Dock 使用同一个本机 npm 安装入口。Linux 由 `systemd --user` 托管安装后的 Host；Windows 在当前用户 session 中打开一个长期 Host 窗口，不创建 Windows Service、Scheduled Task 或开机启动。
 
 ## 位置
 
@@ -67,11 +67,25 @@ aludock list --all
 
 未经明确授权，不执行安装、替换 active Host 或 service restart。
 
-## Windows 源码前台运行（先期）
+## Windows 本地安装
 
-Windows 当前不需要安装包或后台 Service。从源码工作区安装依赖后，使用两个 PowerShell 窗口。
+从要安装或更新的 checkout 执行与 Linux 相同的入口：
 
-第一个窗口启动并保持 Host；`Ctrl+C` 进入正常关闭：
+```powershell
+npm run install:local
+```
+
+安装器检查未完成 Work，正常关闭正在运行的 Windows Host，安装当前 checkout，打开新的 `Alu Dock Host` 窗口并等待 Named Pipe ready。成功返回后，稳定入口位于当前用户 npm 命令目录，直接运行：
+
+```powershell
+aludock
+```
+
+Host 窗口在 RDP disconnect 后继续运行；Windows logoff 或重启会结束它。再次登录后运行 `aludock service start`，或在前台运行 `aludock host`。`aludock service stop/restart/status` 使用同一用户 session Host lifecycle，不创建 Windows 后台服务。更新不删除 `%LOCALAPPDATA%\Alu Dock\` 中的 catalog、Machine 设置、enrollment、session 或 attachments。
+
+## Windows 源码临时运行
+
+需要直接验证当前 checkout 而不安装时，继续使用两个 PowerShell 窗口。第一个窗口启动并保持源码 Host；`Ctrl+C` 进入正常关闭：
 
 ```powershell
 npm ci
@@ -86,7 +100,7 @@ npm run open:windows
 # 或直接运行 .\scripts\Open-AluDock.ps1
 ```
 
-Main 打开完整 Hub，SubHost 打开最小管理界面。`Open-AluDock.ps1` 不重复构建或启动 Host；首次使用时先运行 Host 入口。
+Main 打开完整 Hub，SubHost 打开最小管理界面。`Open-AluDock.ps1` 不重复构建或启动 Host；首次使用时先运行源码 Host 入口。这两个脚本只属于临时源码运行，不是 `install:local` 的安装产物。
 
 默认状态保存在 `%LOCALAPPDATA%\Alu Dock\`，本地 Protocol V2 入口是 `\\.\pipe\alu-dock`。本地 Named Pipe 不使用远程设备配对。
 
@@ -100,4 +114,4 @@ Main 打开完整 Hub，SubHost 打开最小管理界面。`Open-AluDock.ps1` �
 
 切回 Main 不会删除原来的 Main enrollment 或连接资料；以后再次选择同一个 SubHost 角色只需确认 Use Saved Connection。只有选择 Connect to a Different Main 才需要新的 join file。
 
-Windows Remote Access 仍使用普通 TLS 设备配对；它与本地 Named Pipe 是两个入口。当前先期范围不包括 Windows Service、Scheduled Task、开机启动、安装包和自动更新。
+Windows Remote Access 仍使用普通 TLS 设备配对；它与本地 Named Pipe 是两个入口。当前范围不包括 Windows Service、Scheduled Task、开机启动、独立安装包和自动更新。

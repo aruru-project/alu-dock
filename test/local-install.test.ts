@@ -6,6 +6,7 @@ import test from "node:test";
 
 import {
   ALU_DOCK_GENERATED_MARKER,
+  ALU_DOCK_WINDOWS_GENERATED_MARKER,
   assertLocalInstallAllowed,
   isAluDockGeneratedContent,
   localInstallBlockingInstances,
@@ -13,6 +14,7 @@ import {
   localInstallLayout,
   parseLocalInstallArguments,
   renderAluDockUnit,
+  renderWindowsAluDockLauncher,
 } from "../src/deployment/local-install.js";
 
 test("package exposes the installed Alu Dock runtime and its operator/client documentation", async () => {
@@ -52,6 +54,28 @@ test("local install uses one stable npm prefix and launcher", () => {
     userExecutable: "/home/tester/.local/bin/aludock",
     unitFile: "/home/tester/.config/systemd/user/alu-dock.service",
   });
+});
+
+test("Windows local install uses one stable app directory and npm user launcher", () => {
+  assert.deepEqual(localInstallLayout("C:\\Users\\artist", undefined, {
+    platform: "win32",
+    localAppData: "C:\\Users\\artist\\AppData\\Local",
+    appData: "C:\\Users\\artist\\AppData\\Roaming",
+  }), {
+    root: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app",
+    packageDirectory: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\node_modules\\alu-dock",
+    cliPath: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\node_modules\\alu-dock\\dist\\src\\cli.js",
+    packageExecutable: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\node_modules\\.bin\\aludock.cmd",
+    userExecutable: "C:\\Users\\artist\\AppData\\Roaming\\npm\\aludock.cmd",
+    unitFile: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\.windows-foreground-host",
+  });
+  const launcher = renderWindowsAluDockLauncher({
+    nodePath: "C:\\Program Files\\nodejs\\node.exe",
+    cliPath: "C:\\Users\\artist\\AppData\\Local\\Alu Dock\\app\\cli.js",
+  });
+  assert.ok(launcher.includes(ALU_DOCK_WINDOWS_GENERATED_MARKER));
+  assert.match(launcher, /"C:\\Program Files\\nodejs\\node\.exe".*"C:\\Users\\artist.*cli\.js" %\*/u);
+  assert.equal(isAluDockGeneratedContent(launcher), true);
 });
 
 test("local install ignores quiescent instances and identifies only active work", () => {

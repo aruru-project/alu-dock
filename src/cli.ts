@@ -12,6 +12,7 @@ import { AttachmentService } from "./control/attachment-service.js";
 import { AttachmentStorageState, attachmentStorageStateRoot } from "./control/attachment-storage-state.js";
 import { FileCatalogStore, defaultCatalogPath } from "./control/durable-catalog-store.js";
 import type { ProjectTrustChoice } from "./control/project-trust.js";
+import { defaultLocalEndpoint } from "./control/local-endpoint.js";
 import { defaultSocketPath, managedSocketPath } from "./control/socket-path.js";
 import { RemoteAccessState, remoteAccessStateRoot } from "./control/remote-access-state.js";
 import { MainMachineState, SubHostMachineState, machineStateRoot, readMachineJoinFile, writeMachineJoinFile } from "./control/machine-state.js";
@@ -21,7 +22,10 @@ import { MainMachineDockToolsAuthority, MainMachineDockToolsPort } from "./contr
 import type { DeliveryMode, DockEvent, EventCursor, InstanceSnapshot } from "./core/managed-instance.js";
 import { humanControlErrorText } from "./human-control-error.js";
 import { requireHumanTarget } from "./human-target.js";
+import { localInstallBlockingInstances, localInstallLayout } from "./deployment/local-install.js";
 import { UserServiceManager, type UserServiceStatus } from "./deployment/user-service.js";
+import { WindowsHostLifecycleServer } from "./deployment/windows-host-lifecycle.js";
+import { WindowsUserHostManager } from "./deployment/windows-user-host.js";
 import {
   renderHumanServiceStatus,
   renderHumanServiceUninstall,
@@ -47,6 +51,13 @@ async function main(): Promise<void> {
 
   if (parsed.command === "serve") {
     await serve(parsed.socketPath, parsed.socketExplicit, parsed.commandArgs);
+    return;
+  }
+
+  if (parsed.command === "host") {
+    requireNoArgs(parsed.commandArgs, "host");
+    if (process.platform !== "win32") throw new Error("`aludock host` is the foreground Windows Host entry. On this platform, use `aludock service start`.");
+    await serve(defaultLocalEndpoint("win32") as string, true, ["--dev", "--state", defaultCatalogPath()]);
     return;
   }
 
@@ -301,11 +312,23 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
 
   await host.start();
   if (upstream) await upstream.start();
+  let windowsLifecycle: WindowsHostLifecycleServer | undefined;
+  if (process.platform === "win32") {
+    windowsLifecycle = new WindowsHostLifecycleServer();
+    try { await windowsLifecycle.start(); }
+    catch (error) {
+      await upstream?.stop().catch(() => {});
+      await host.stop().catch(() => {});
+      throw error;
+    }
+    windowsLifecycle.markReady(host.hostEpoch, options.role, () => localInstallBlockingInstances(registry.list()).length);
+  }
   writeJson({ kind: "host.ready", role: options.role, pid: process.pid, ...(options.role === "subhost" ? {} : { socketPath: host.socketPath }) });
   const outcome = await Promise.race([
     waitForSignal().then((signal) => ({ kind: "signal" as const, signal })),
+    windowsLifecycle?.waitForStop().then(() => ({ kind: "signal" as const, signal: "SIGTERM" as NodeJS.Signals })),
     host.waitForFatalCompletion().then((fatal) => ({ kind: "fatal" as const, fatal })),
-  ]);
+  ].filter((pending): pending is Exclude<typeof pending, undefined> => pending !== undefined));
   const signal = outcome.kind === "signal" ? outcome.signal : "catalog_fault";
   if (outcome.kind === "fatal") { process.stderr.write(`${JSON.stringify({ kind: "error", error: outcome.fatal })}\n`); process.exitCode = outcome.fatal.exitCode; }
   writeJson({ kind: "host.stopping", signal });
@@ -313,6 +336,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
   const shutdownTimer = setTimeout(() => { process.stderr.write(`${JSON.stringify({ kind: "error", error: { code: "shutdown_timeout", message: `Host did not stop within ${shutdownTimeoutMs}ms` } })}\n`); process.exit(1); }, shutdownTimeoutMs);
   try { await upstream?.stop(); await host.stop(); } finally {
     clearTimeout(shutdownTimer);
+    await windowsLifecycle?.stop().catch(() => {});
     if (subHostStatus) await subHostStatus.state.clearSubHostStatus(subHostStatus.hostEpoch).catch(() => {});
   }
   const lateFatal = host.fatalCompletion();
@@ -325,18 +349,24 @@ async function manageService(socketPath: string, socketExplicit: boolean, args: 
   const entryPath = process.argv[1];
   if (!entryPath) throw new Error("Cannot locate the Alu Dock CLI entry point");
   const serviceMachineSettings = new MachineSettingsState(machineSettingsStateRoot(defaultCatalogPath()));
-  const manager = new UserServiceManager({
-    nodePath: process.execPath,
-    cliPath: resolve(entryPath),
-    socketPath,
-    subHostProbe: async () => {
-      const status = await serviceMachineSettings.readSubHostStatus();
-      if (status.processId !== undefined) {
-        return { role: "subhost", processId: status.processId, ...(status.hostEpoch === undefined ? {} : { hostEpoch: status.hostEpoch }) };
-      }
-      return { role: (await serviceMachineSettings.read()).role };
-    },
+  const layout = localInstallLayout(process.env.HOME ?? process.env.USERPROFILE ?? "", undefined, {
+    localAppData: process.env.LOCALAPPDATA,
+    appData: process.env.APPDATA,
   });
+  const manager = process.platform === "win32"
+    ? new WindowsUserHostManager({ nodePath: process.execPath, cliPath: resolve(entryPath), setupPath: layout.unitFile })
+    : new UserServiceManager({
+      nodePath: process.execPath,
+      cliPath: resolve(entryPath),
+      socketPath,
+      subHostProbe: async () => {
+        const status = await serviceMachineSettings.readSubHostStatus();
+        if (status.processId !== undefined) {
+          return { role: "subhost", processId: status.processId, ...(status.hostEpoch === undefined ? {} : { hostEpoch: status.hostEpoch }) };
+        }
+        return { role: (await serviceMachineSettings.read()).role };
+      },
+    });
   const { json, rest: serviceArgs } = parseServiceOutputOption(args);
   const [action = "status", ...rest] = serviceArgs;
   const writeStatus = (statusAction: HumanServiceAction, status: UserServiceStatus): void => {

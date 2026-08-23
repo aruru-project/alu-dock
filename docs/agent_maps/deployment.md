@@ -2,10 +2,10 @@
 
 ## 这部分负责什么
 
-Linux 正式形态使用一个长期 `systemd --user` Host Service；Windows 先期形态从源码在 PowerShell 前台运行同一个 Host。每个 active instance 的 Agent runtime 运行在独立 Worker 进程中。
+Linux 安装形态使用长期 `systemd --user` Host Service；Windows 安装形态在当前用户 session 的独立 PowerShell 窗口中运行同一个长期 Host，并由私有本机 lifecycle pipe 完成 install/update 所需的正常停止、启动和 ready 确认。它不创建 Windows Service、Scheduled Task 或开机启动。两个平台的 `install:local` 都从当前 checkout build、安装、替换 Host，并等待 ready；平台差异只属于生命周期适配。每个 active instance 的 Agent runtime 运行在独立 Worker 进程中。
 
 ```text
-systemd --user
+systemd --user / Windows user-session Host window
       │
 Dock Host Service
       ├── private local IPC (Unix socket / Windows Named Pipe)
@@ -113,7 +113,8 @@ aludock service uninstall
 ## 代码范围
 
 - `src/deployment/`：安装布局和 user service 管理。
-- `scripts/install-local.ts`：本地打包与安装入口。
+- `scripts/install-local.ts`：跨平台本地打包、更新与 ready 验证入口。
+- `src/deployment/windows-host-lifecycle.ts`、`windows-user-host.ts`：Windows 用户 session Host 的私有生命周期与可见窗口适配；不承载 Dock 客户端协议。
 - `src/control/dock-host.ts`：Host socket 与 shutdown。
 - `src/control/durable-catalog-store.ts`：durable catalog。
 - `src/control/attachment-storage-state.ts`、`attachment-service.ts`：Host-private directory setting 与 permanent attachment store。

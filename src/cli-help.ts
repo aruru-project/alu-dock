@@ -11,6 +11,7 @@ const PUBLIC_TOPICS = new Set([
   "forget",
   "prune",
   "service",
+  "host",
   "machine",
   "help",
 ]);
@@ -59,6 +60,7 @@ export function renderCliHelp(topics: readonly string[]): string {
   }
   if (!PUBLIC_TOPICS.has(topic)) throw new Error(`Unknown help topic: ${topic}`);
   if (topic === "service") return serviceHelp(rest);
+  if (topic === "host") return hostHelp(rest);
   if (topic === "machine") return machineHelp(rest);
   if (rest.length > 0) throw new Error(`${topic} does not have help subtopics`);
   switch (topic) {
@@ -77,7 +79,12 @@ export function renderCliHelp(topics: readonly string[]): string {
 }
 
 function overviewHelp(): string {
-  return `Alu Dock — managed Pi development terminal for SSH\n\nUsage:\n  aludock\n  aludock COMMAND [OPTIONS]\n  aludock help [COMMAND]\n\nStart here:\n  aludock                 Open the Dock Hub\n  aludock -c              Continue recent work here, or create it\n  aludock new             Start separate Pi work\n  aludock attach TARGET   Open known running work in this terminal\n\nHuman commands:\n  continue  Continue recent work in this directory (-c, --continue)\n  open      Find matching work, or resume it by TARGET\n  new       Start separate work and a new Pi session\n  attach    Open known running work\n  list      Show work that is current or saved in History\n  status    Show one work item in detail\n  stop      End running work and remove it from the Dock\n  forget    Remove one ended work item from Dock History\n  prune     Remove ended work from Dock History\n  service   Manage the background Alu Dock service\n  help      Explore command help\n\nThe Alu Dock service must be running. If it is stopped, use\n'aludock service start'. New work starts where you ran aludock and can use\na different directory. Ctrl+D leaves Work for the shell while the work keeps\nrunning.\n\nExplore:\n  aludock help open\n  aludock help service\n  aludock COMMAND --help\n`;
+  return `Alu Dock — managed Pi development terminal for SSH\n\nUsage:\n  aludock\n  aludock COMMAND [OPTIONS]\n  aludock help [COMMAND]\n\nStart here:\n  aludock                 Open the Dock Hub\n  aludock -c              Continue recent work here, or create it\n  aludock new             Start separate Pi work\n  aludock attach TARGET   Open known running work in this terminal\n\nHuman commands:\n  continue  Continue recent work in this directory (-c, --continue)\n  open      Find matching work, or resume it by TARGET\n  new       Start separate work and a new Pi session\n  attach    Open known running work\n  list      Show work that is current or saved in History\n  status    Show one work item in detail\n  stop      End running work and remove it from the Dock\n  forget    Remove one ended work item from Dock History\n  prune     Remove ended work from Dock History\n  service   Manage the installed Alu Dock Host\n  host      Keep an installed Windows Host running in this window\n  help      Explore command help\n\nThe Alu Dock service must be running. If it is stopped, use\n'aludock service start'. New work starts where you ran aludock and can use\na different directory. Ctrl+D leaves Work for the shell while the work keeps\nrunning.\n\nExplore:\n  aludock help open\n  aludock help service\n  aludock COMMAND --help\n`;
+}
+
+function hostHelp(rest: readonly string[]): string {
+  if (rest.length > 0) throw new Error("host help does not accept subtopics");
+  return `aludock host — run the installed Windows Host in this window\n\nUsage:\n  aludock host\n\nThe local installer starts this entry in its own Windows Host window and waits\nuntil it is ready. Use it directly after signing back in or restarting Windows.\nThe saved Main/SubHost role and connection settings are reused. Press Ctrl+C for\na normal shutdown. Source development continues to use npm run host:windows.\n`;
 }
 
 function machineHelp(rest: readonly string[]): string {
@@ -127,7 +134,7 @@ function helpHelp(): string {
 
 function serviceHelp(rest: readonly string[]): string {
   if (rest.length === 0) {
-    return `aludock service — manage the background Alu Dock service\n\nUsage:\n  aludock service [status]\n  aludock service COMMAND [OPTIONS]\n\nCommands:\n  install     Install the service for this user\n  start       Start Alu Dock\n  stop        Stop Alu Dock\n  restart     Restart Alu Dock\n  status      Show whether Alu Dock is ready\n  logs        Show service logs\n  uninstall   Remove the Alu Dock service setup\n\nInstall or update the local package from the current working tree with:\n\n  npm run install:local\n\nFinish or stop active work before updating. The installer will ask you to use an\nexplicit replacement option if work is still active. Saved Pi sessions and\nproject files remain available after service commands.\n\nExplore:\n  aludock help service install\n  aludock service logs --help\n`;
+    return `aludock service — manage the installed Alu Dock Host\n\nUsage:\n  aludock service [status]\n  aludock service COMMAND [OPTIONS]\n\nCommands:\n  install     Install the service for this user\n  start       Start Alu Dock\n  stop        Stop Alu Dock\n  restart     Restart Alu Dock\n  status      Show whether Alu Dock is ready\n  logs        Show service logs\n  uninstall   Remove the Alu Dock service setup\n\nInstall or update the local package from the current working tree with:\n\n  npm run install:local\n\nFinish or stop active work before updating. The installer will ask you to use an\nexplicit replacement option if work is still active. Saved Pi sessions and\nproject files remain available after service commands.\n\nExplore:\n  aludock help service install\n  aludock service logs --help\n`;
   }
   if (rest.length !== 1 || !SERVICE_TOPICS.has(rest[0] as string)) {
     throw new Error(`Unknown service help topic: ${rest.join(" ")}`);
@@ -144,9 +151,9 @@ function serviceHelp(rest: readonly string[]): string {
     case "status":
       return `aludock service status — check Alu Dock\n\nUsage:\n  aludock service status [--json]\n\nShows a short human result by default. Use --json only when a script needs the\nmachine-readable service record. It checks whether Alu Dock is installed,\nrunning, and ready. If it is stopped,\nrun 'aludock service start'. For startup problems, use 'aludock service logs'.\n`;
     case "logs":
-      return `aludock service logs — show Alu Dock service logs\n\nUsage:\n  aludock service logs [--lines N] [--follow]\n\nOptions:\n  --lines N, -n N   Read 1–10000 lines (default: 200)\n  --follow, -f      Follow new journal entries\n\nExamples:\n  aludock service logs --lines 100\n  aludock service logs --follow\n`;
+      return `aludock service logs — show Alu Dock service logs\n\nUsage:\n  aludock service logs [--lines N] [--follow]\n\nOptions:\n  --lines N, -n N   Read 1–10000 lines (default: 200)\n  --follow, -f      Follow new Linux service log entries\n\nOn Windows, logs stay visible in the Windows Host window.\n\nExamples:\n  aludock service logs --lines 100\n  aludock service logs --follow\n`;
     case "uninstall":
-      return `aludock service uninstall — remove the Alu Dock service setup\n\nUsage:\n  aludock service uninstall [--json]\n\nRemoves the service setup created by Alu Dock. Dock History and saved Pi\nsessions remain available for a later installation.\n`;
+      return `aludock service uninstall — remove the Alu Dock service setup\n\nUsage:\n  aludock service uninstall [--json]\n\nRemoves the installed Host setup created by Alu Dock. Dock History and saved Pi\nsessions remain available for a later installation.\n`;
     default:
       throw new Error(`Unknown service help topic: ${String(rest[0])}`);
   }

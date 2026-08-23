@@ -28,7 +28,7 @@ Hub / Work / Web / future clients
 - 明确的 SubHost 角色，只连接 Main并显示连接状态，不接受客户端；
 - 默认关闭、由本机 Hub 配置和配对的 mutual-TLS 网络入口；
 - 本地 IPC 与 mTLS 共用的永久、hash-verified attachment upload 和 Agent 文件工具；
-- 显式 `systemd --user` service 管理。
+- Linux `systemd --user` 与 Windows 用户 session Host 窗口共享的安装、更新和 ready 语义。
 
 ## 快速开始
 
@@ -51,7 +51,7 @@ aludock list
 aludock stop TARGET
 ```
 
-Service 只由显式命令管理：
+安装后的 Host 只由显式命令管理；Linux 使用 user service，Windows 使用长期 Host 窗口：
 
 ```bash
 aludock service start
