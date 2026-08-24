@@ -1084,9 +1084,11 @@ export class PiAgentAdapter {
     if (this.disposePromise) return this.disposePromise;
     this.disposePromise = (async () => {
       if (this.disposed) return;
+      try { this.clearQueue(); } catch { /* Runtime disposal still owns final cleanup. */ }
       this.disposed = true;
-      await this.mutationTail.catch(() => {});
       try {
+        await this.abort().catch(() => {});
+        await this.mutationTail.catch(() => {});
         await this.disposeRuntimeOnce();
       } finally {
         this.invalidateBindingsSynchronously();

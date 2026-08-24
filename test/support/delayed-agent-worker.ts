@@ -639,6 +639,8 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
 
   async dispose(): Promise<void> {
     this.disposeCalls += 1;
+    if (this.steeringQueue.length > 0 || this.followUpQueue.length > 0) this.clearQueue();
+    if (this.isStreaming || this.isCompacting || this.activeNavigationBlock) await this.abort();
     const block = this.disposeBlock;
     if (block) {
       block.entered.resolve();

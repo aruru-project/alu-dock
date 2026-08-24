@@ -311,5 +311,6 @@ export interface AgentWorkerConnection {
   invoke(request: AgentRequest, options?: AgentInvokeOptions): Promise<unknown>;
   control(request: AgentWorkerControl): Promise<unknown>;
   subscribe(listener: (event: AgentEvent) => void): () => void;
+  /** Adapter-owned graceful Agent cleanup; the process supervisor remains the hard-stop fallback. */
   dispose(): Promise<void>;
 }

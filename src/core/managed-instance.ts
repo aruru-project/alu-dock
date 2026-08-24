@@ -379,9 +379,6 @@ export class ManagedInstance {
   private historyRefreshTail: Promise<void> = Promise.resolve();
   private hostDrainActive = false;
   private hostDrainPromise: Promise<void> | undefined;
-  private runtimeQueueClearAttempted = false;
-  private runtimeClearedQueue: ClearedAgentQueue = { steering: [], followUp: [] };
-  private runtimeAbortPromise: Promise<void> | undefined;
   private runtimeDisposePromise: Promise<void> | undefined;
   private runtimeGenerationValue = 1;
   private agentStartCount = 0;
@@ -411,7 +408,7 @@ export class ManagedInstance {
   private compactionOperationId: string | undefined;
   private compactionBoundary: Promise<void> | undefined;
   private resolveCompactionBoundary: (() => void) | undefined;
-  private stopPromise: Promise<StopReceipt> | undefined;
+  private stopCompletion: Promise<StopReceipt> | undefined;
 
   get runtimeGeneration(): number { return this.runtimeGenerationValue; }
   get key(): string | undefined { return this.keyValue; }
@@ -451,8 +448,8 @@ export class ManagedInstance {
       updatedAt: initialUpdatedAt,
     };
     this.commandScheduler = new InstanceCommandScheduler(() => ({
-      acceptingCommands: this.state.lifecycle === "active" && this.stopPromise === undefined,
-      lifecycle: this.stopPromise ? "stopping" : this.state.lifecycle,
+      acceptingCommands: this.state.lifecycle === "active",
+      lifecycle: this.state.lifecycle,
       runtimeGeneration: this.runtimeGenerationValue,
       executionRunning: this.state.execution === "running",
       runtimeStreaming: this.agentState().isStreaming,
@@ -597,12 +594,20 @@ export class ManagedInstance {
   openDeliverable(deliveryRef: string): ReturnType<InstanceDeliverables["open"]> { return this.deliverables.open(deliveryRef); }
 
   async setDockToolsEnabled(enabled: boolean, operationId: string): Promise<void> {
-    if (typeof enabled !== "boolean") throw new Error("Dock tools switch must be boolean");
-    if (enabled === this.dockToolsEnabledValue) return;
-    await this.enqueueTransition(() => this.commitCatalogTransition(
-      { kind: "instance.dock_tools_configure", effect: "pre_effect", operationId, instanceId: this.id },
-      () => { this.dockToolsEnabledValue = enabled; this.touch(); },
-    ));
+    const lease = this.requireCommandStart(
+      this.commandScheduler.admit({ class: "control", kind: "immediate" }),
+      "changing Dock tools",
+    );
+    try {
+      if (typeof enabled !== "boolean") throw new Error("Dock tools switch must be boolean");
+      if (enabled === this.dockToolsEnabledValue) return;
+      await this.enqueueTransition(() => this.commitCatalogTransition(
+        { kind: "instance.dock_tools_configure", effect: "pre_effect", operationId, instanceId: this.id },
+        () => { this.assertCommandCurrent(lease); this.dockToolsEnabledValue = enabled; this.touch(); },
+      ));
+    } finally {
+      lease.release();
+    }
   }
 
   deliverObservation(notification: ObservationNotification): Promise<void> {
@@ -732,10 +737,7 @@ export class ManagedInstance {
     const admission = this.pendingAdmission;
     this.pendingAdmission = undefined;
     admission?.release();
-    const abort = this.abortRuntimeOnce().then(() => true, () => false);
     await this.extensionUi.cancelForHostDrain();
-    await abort;
-    try { await this.clearRuntimeQueueOnce(); } catch { /* Best-effort non-catalog drain. */ }
     // A failed reap must remain visible to the caller. Publishing host_lost or
     // stopped after this point could admit a second owner for the same session.
     await this.disposeRuntimeOnce();
@@ -816,19 +818,33 @@ export class ManagedInstance {
     return this.extensionUi.isControllerLeaseCurrent(leaseToken, runtimeGeneration);
   }
 
-  respondInteraction(leaseToken: string, interactionId: string, response: InteractionResponse): Promise<InteractionResult> {
-    this.assertActive();
-    return this.extensionUi.respond(leaseToken, interactionId, response);
+  async respondInteraction(leaseToken: string, interactionId: string, response: InteractionResponse): Promise<InteractionResult> {
+    const lease = this.requireCommandStart(
+      this.commandScheduler.admit({ class: "control", kind: "immediate" }),
+      "responding to an interaction",
+    );
+    try {
+      return await this.extensionUi.respond(leaseToken, interactionId, response);
+    } finally {
+      lease.release();
+    }
   }
 
   setToolsExpanded(expanded: boolean, expectedRuntimeGeneration: number): InstanceSnapshot {
-    this.assertActive();
-    if (expectedRuntimeGeneration !== this.runtimeGenerationValue) {
-      throw new StaleRuntimeGenerationError(expectedRuntimeGeneration, this.runtimeGenerationValue);
+    const lease = this.requireCommandStart(
+      this.commandScheduler.admit({ class: "control", kind: "immediate" }),
+      "changing tool expansion",
+    );
+    try {
+      if (expectedRuntimeGeneration !== this.runtimeGenerationValue) {
+        throw new StaleRuntimeGenerationError(expectedRuntimeGeneration, this.runtimeGenerationValue);
+      }
+      if (this.extensionUi.isSuspended()) throw new InstanceBusyError(this.id, "changing tool expansion during session replacement");
+      this.extensionUi.setToolsExpanded(expanded);
+      return this.snapshot();
+    } finally {
+      lease.release();
     }
-    if (this.extensionUi.isSuspended()) throw new InstanceBusyError(this.id, "changing tool expansion during session replacement");
-    this.extensionUi.setToolsExpanded(expanded);
-    return this.snapshot();
   }
 
   setExtensionWidgetViewport(
@@ -836,25 +852,24 @@ export class ManagedInstance {
     expectedRuntimeGeneration: number,
     viewport: { width: number; height: number },
   ): void {
-    this.assertActive();
-    if (expectedRuntimeGeneration !== this.runtimeGenerationValue) {
-      throw new StaleRuntimeGenerationError(expectedRuntimeGeneration, this.runtimeGenerationValue);
+    const lease = this.requireCommandStart(
+      this.commandScheduler.admit({ class: "control", kind: "immediate" }),
+      "rendering extension widgets",
+    );
+    try {
+      if (expectedRuntimeGeneration !== this.runtimeGenerationValue) {
+        throw new StaleRuntimeGenerationError(expectedRuntimeGeneration, this.runtimeGenerationValue);
+      }
+      if (this.extensionUi.isSuspended()) throw new InstanceBusyError(this.id, "rendering extension widgets during session replacement");
+      this.extensionUi.setWidgetViewport(leaseToken, viewport);
+    } finally {
+      lease.release();
     }
-    if (this.extensionUi.isSuspended()) throw new InstanceBusyError(this.id, "rendering extension widgets during session replacement");
-    this.extensionUi.setWidgetViewport(leaseToken, viewport);
   }
 
   async cancelInteractionsForHostDrain(): Promise<void> {
     await this.extensionUi.suspendForHostDrain();
-    const mustUnblockRuntime = this.extensionUi.hasPendingInteraction();
-    if (!mustUnblockRuntime) {
-      await this.extensionUi.cancelForHostDrain();
-      return;
-    }
-    const abort = this.abortRuntimeOnce().then(() => undefined, (error: unknown) => error);
     await this.extensionUi.cancelForHostDrain();
-    const abortError = await abort;
-    if (abortError !== undefined) throw abortError;
   }
 
   synchronizeModelState(): void {
@@ -1716,7 +1731,7 @@ export class ManagedInstance {
       || this.runtimeCompactionInProgress()
       || this.manualCompactionAdmissionActive()
       || this.commandScheduler.activeCommand("control", "queue") !== undefined
-      || this.stopPromise
+      || this.commandScheduler.activeCommand("terminal") !== undefined
     ) return;
     const firstCustodyItem = this.pendingQueueMessages.find((item) => (
       item.phase === "host_deferred"
@@ -1765,7 +1780,7 @@ export class ManagedInstance {
       && this.runtimeGenerationValue === generation
       && !this.runtimeCompactionInProgress()
       && this.commandScheduler.activeCommand("control", "queue") === undefined
-      && !this.stopPromise
+      && this.commandScheduler.activeCommand("terminal") === undefined
     ) {
       const firstCustodyItem = this.pendingQueueMessages.find((candidate) => (
         candidate.phase === "host_deferred"
@@ -2155,6 +2170,7 @@ export class ManagedInstance {
     const decision = this.commandScheduler.admit({ class: "interrupt" });
     if (decision.kind === "reject") this.requireCommandStart(decision, "aborting the current run");
     if (decision.kind === "reject") return;
+    if (decision.kind === "join") throw new InstanceNotActiveError(this.id, "stopping");
     const lease = decision.lease;
     try {
       if (decision.kind === "wait") await decision.forCompletion;
@@ -2226,8 +2242,11 @@ export class ManagedInstance {
     if (this.state.lifecycle === "stopped") {
       return { operationId, instanceId: this.id, stopped: true, alreadyStopped: true };
     }
-    if (this.stopPromise) {
-      const first = await this.stopPromise;
+    const decision = this.commandScheduler.admit({ class: "terminal" });
+    if (decision.kind === "join") {
+      const completion = this.stopCompletion;
+      if (!completion) throw new Error("Terminal command has no Stop completion");
+      const first = await completion;
       return {
         operationId,
         instanceId: this.id,
@@ -2236,54 +2255,44 @@ export class ManagedInstance {
         ...(first.cleanupErrors === undefined ? {} : { cleanupErrors: [...first.cleanupErrors] }),
       };
     }
-
-    const task = this.beginStop(operationId);
-    this.stopPromise = task;
+    const terminal = this.requireCommandStart(decision, "stopping this work");
+    const task = this.beginStop(operationId).catch((error: unknown) => {
+      if (this.state.lifecycle === "active") {
+        terminal.release();
+        this.stopCompletion = undefined;
+      }
+      throw error;
+    });
+    this.stopCompletion = task;
     return task;
   }
 
   private async beginStop(operationId: string): Promise<StopReceipt> {
-    const exclusive = this.commandScheduler.activeCommand("exclusive");
-    const preemptingCompaction = exclusive?.kind === "compaction";
-    if (exclusive && !preemptingCompaction) await exclusive.completion;
-    const interrupt = this.commandScheduler.activeCommand("interrupt");
-    if (interrupt) await interrupt.completion;
-    const queueMutation = this.commandScheduler.activeCommand("control", "queue");
-    if (queueMutation) await queueMutation.completion;
-    const admissionBoundary = this.pendingAdmission?.waitBeforeStop === true
-      ? this.pendingAdmission.boundary
-      : undefined;
     const requestedAt = this.timestamp();
-    try {
-      await this.enqueueTransition(() => this.commitCatalogTransition(
-        { kind: "instance.stop.intent", effect: "pre_effect", operationId, instanceId: this.id },
-        () => {
-          this.stopRequestedWhileRunning = this.state.execution === "running" || this.agentState().isStreaming;
-          this.stopRequestedAt = requestedAt;
-          this.deliverables.clear();
-          // A committed explicit stop retires this instance from its business
-          // entry immediately. Cleanup continues by instance ID and must not
-          // block a fresh keyed instance in a corrected or moved workspace.
-          this.keyValue = undefined;
-          this.state.lifecycle = "stopping";
-          // Direct cleanup of an already unavailable runtime still traverses
-          // the live `stopping` lifecycle; keep that intermediate projection
-          // closed instead of pairing stopping with unavailable.
-          if (this.state.execution === "unavailable") this.state.execution = "failed";
-          this.touch(requestedAt);
-        },
-        () => this.appendStateEvent("stop_requested", requestedAt),
-      ));
-    } catch (error) {
-      this.stopPromise = undefined;
-      throw error;
-    }
-    return this.performStop(
-      operationId,
-      admissionBoundary,
-      preemptingCompaction ? exclusive?.completion : undefined,
-      preemptingCompaction ? exclusive?.effectStarted : undefined,
-    );
+    await this.enqueueTransition(() => this.commitCatalogTransition(
+      { kind: "instance.stop.intent", effect: "pre_effect", operationId, instanceId: this.id },
+      () => {
+        this.stopRequestedWhileRunning = this.state.execution === "running" || this.agentState().isStreaming;
+        this.stopRequestedAt = requestedAt;
+        this.deliverables.clear();
+        // A committed explicit stop retires this instance from its business
+        // entry immediately. Cleanup continues by instance ID and must not
+        // block a fresh keyed instance in a corrected or moved workspace.
+        this.keyValue = undefined;
+        this.state.lifecycle = "stopping";
+        // Direct cleanup of an already unavailable runtime still traverses
+        // the live `stopping` lifecycle; keep that intermediate projection
+        // closed instead of pairing stopping with unavailable.
+        if (this.state.execution === "unavailable") this.state.execution = "failed";
+        this.touch(requestedAt);
+      },
+      () => this.appendStateEvent("stop_requested", requestedAt),
+    ));
+    const exclusive = this.commandScheduler.activeCommand("exclusive");
+    const preemptibleEffect = exclusive?.kind === "navigation" || exclusive?.kind === "compaction"
+      ? exclusive.effectStarted
+      : undefined;
+    return this.performStop(operationId, this.commandScheduler.nonTerminalCompletions(), preemptibleEffect);
   }
 
   recordExtensionError(error: unknown): void {
@@ -2313,60 +2322,32 @@ export class ManagedInstance {
     };
   }
 
-  private async performStop(operationId: string, admissionBoundary?: Promise<void>, preemptedCompletion?: Promise<void>, preemptedEffectStarted?: Promise<boolean>): Promise<StopReceipt> {
+  private async performStop(
+    operationId: string,
+    activeCommands: readonly Promise<void>[],
+    preemptibleEffect?: Promise<boolean>,
+  ): Promise<StopReceipt> {
     const cleanupErrors: string[] = [];
-    const pendingQueueItemIds = this.trackedQueueMessages().map((item) => item.queueItemId);
-    await this.extensionUi.suspendForHostDrain();
-    let clearedCounts: { steering: number; followUp: number } | undefined;
-    const captureCleanupError = (stage: string, error: unknown): void => {
-      const message = safeWireText(`${stage}: ${errorMessage(error)}`, 2_048);
-      cleanupErrors.push(message);
+    const pendingQueue = this.trackedQueueMessages();
+    const pendingQueueItemIds = pendingQueue.map((item) => item.queueItemId);
+    const clearedCounts = {
+      steering: pendingQueue.filter((item) => item.delivery === "steer").length,
+      followUp: pendingQueue.filter((item) => item.delivery === "followUp").length,
     };
-
-    if (admissionBoundary) {
-      try { await admissionBoundary; }
-      catch (error) { captureCleanupError("preflight", error); }
-    }
-
-    if (preemptedEffectStarted) {
-      try { await preemptedEffectStarted; }
-      catch (error) { captureCleanupError("compactionStart", error); }
-    }
-
-    let abortSucceeded = false;
-    const abort = this.abortRuntimeOnce().then(
-      () => ({ succeeded: true as const }),
-      (error: unknown) => ({ succeeded: false as const, error }),
-    );
+    await this.extensionUi.suspendForHostDrain();
     await this.extensionUi.cancelForHostDrain();
-    const abortOutcome = await abort;
-    if (abortOutcome.succeeded) abortSucceeded = true;
-    else captureCleanupError("abort", abortOutcome.error);
-
-    try {
-      const cleared = await this.clearRuntimeQueueOnce();
-      clearedCounts = { steering: cleared.steering.length, followUp: cleared.followUp.length };
-    } catch (error) {
-      captureCleanupError("clearQueue", error);
-    }
-
-    if (preemptedCompletion) {
-      try { await preemptedCompletion; }
-      catch (error) { captureCleanupError("configuration", error); }
-    }
-
-    if (abortSucceeded && this.backgroundTasks.size > 0) {
-      await Promise.allSettled([...this.backgroundTasks]);
-    }
-    await this.transitionTail;
+    if (preemptibleEffect) await preemptibleEffect;
 
     try { await this.disposeRuntimeOnce(); }
     catch (error) {
-      captureCleanupError("dispose", error);
       // Keep lifecycle=stopping and the old owner claim. A stopped record would
       // be continuable even though the Worker process tree may still exist.
       throw new RuntimeEffectUnknownError(operationId, error);
     }
+
+    await Promise.allSettled(activeCommands);
+    if (this.backgroundTasks.size > 0) await Promise.allSettled([...this.backgroundTasks]);
+    await this.transitionTail;
 
     await this.enqueueTransition(() => this.commitCatalogTransition(
       { kind: "instance.stop.complete", effect: "post_effect", operationId, instanceId: this.id },
@@ -2393,7 +2374,7 @@ export class ManagedInstance {
         this.touch();
       },
       () => {
-        if (clearedCounts && (clearedCounts.steering > 0 || clearedCounts.followUp > 0)) {
+        if (clearedCounts.steering > 0 || clearedCounts.followUp > 0) {
           this.appendEvent("queue.cleared", {
             steering: clearedCounts.steering,
             followUp: clearedCounts.followUp,
@@ -2416,21 +2397,6 @@ export class ManagedInstance {
     };
     if (cleanupErrors.length > 0) receipt.cleanupErrors = [...cleanupErrors];
     return receipt;
-  }
-
-  private async clearRuntimeQueueOnce(): Promise<ClearedAgentQueue> {
-    if (this.runtimeQueueClearAttempted) return this.runtimeClearedQueue;
-    this.runtimeQueueClearAttempted = true;
-    this.runtimeClearedQueue = await this.invokeAgent<ClearedAgentQueue>("queue.dequeue", { operationId: randomUUID() });
-    return this.runtimeClearedQueue;
-  }
-
-  private abortRuntimeOnce(): Promise<void> {
-    if (!this.runtimeAbortPromise) {
-      try { this.runtimeAbortPromise = this.invokeAgent<void>("command.abort", { operationId: randomUUID() }); }
-      catch (error) { this.runtimeAbortPromise = Promise.reject(error); }
-    }
-    return this.runtimeAbortPromise;
   }
 
   private disposeRuntimeOnce(): Promise<void> {
@@ -2459,8 +2425,9 @@ export class ManagedInstance {
   }
 
   private assertActive(): void {
-    if (this.state.lifecycle !== "active" || this.stopPromise) {
-      throw new InstanceNotActiveError(this.id, this.stopPromise ? "stopping" : this.state.lifecycle);
+    const stopping = this.commandScheduler.activeCommand("terminal") !== undefined;
+    if (this.state.lifecycle !== "active" || stopping) {
+      throw new InstanceNotActiveError(this.id, stopping ? "stopping" : this.state.lifecycle);
     }
   }
 
