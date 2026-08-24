@@ -20,7 +20,7 @@ import type {
   AgentSessionMetrics,
   ThinkingLevel,
 } from "../../src/core/agent-worker.js";
-import { AgentConversationCursorError, AgentInvalidTreeTargetError, AgentSettingsWriteError } from "../../src/core/agent-worker.js";
+import { AgentConversationCursorError, AgentInvalidDeliveryModeError, AgentInvalidTreeTargetError, AgentQueueRejectedBeforeEffectError, AgentSettingsWriteError } from "../../src/core/agent-worker.js";
 import type { CommandDto, DiagnosticDto, ResourceDto, SettingDto, SettingUpdate, SettingValueMap, ToolDto } from "../../src/core/config-projection.js";
 // SETTING_DEFINITIONS/SETTING_KEYS are the frozen Dock protocol setting schema (protocol.ts imports the
 // same constants and the client parser rejects any worker that omits a canonical key), not Pi internals.
@@ -150,9 +150,42 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     switch (request.type) {
       case "command.submit": {
         const requestedDelivery = p.delivery as "auto" | "prompt" | "steer" | "followUp";
-        const delivery = requestedDelivery === "auto" ? (this.isStreaming ? "steer" : "prompt") : requestedDelivery;
         const inputKind = this.classifyInput(p.message);
-        const tracked = inputKind === "prompt" ? {
+        const attachments = options?.context !== undefined && options.context.type !== "session_switch"
+          ? options.context.attachments
+          : undefined;
+        if (inputKind === "extension_command" && ((p.images?.length ?? 0) > 0 || (attachments?.length ?? 0) > 0)) {
+          options?.preflightResult?.({ success: false });
+          throw new Error("Registered extension commands do not accept attachments");
+        }
+        if (inputKind === "extension_command") {
+          options?.preflightResult?.({ success: true, inputKind, delivery: "prompt", custody: "runtime" });
+          return this.prompt(p.message, undefined, p.operationId);
+        }
+        const admissionRunning = options?.context?.type === "defer_to_host" || this.isStreaming;
+        const delivery = requestedDelivery === "auto" ? (admissionRunning ? "steer" : "prompt") : requestedDelivery;
+        const validatesRequestedDelivery = options?.context?.type !== "force_queue" && options?.context?.type !== "host_queue";
+        const invalidDelivery = validatesRequestedDelivery && (
+          (admissionRunning && delivery === "prompt")
+          || (!admissionRunning && delivery !== "prompt")
+        );
+        if (invalidDelivery) {
+          options?.preflightResult?.({ success: false });
+          throw new AgentInvalidDeliveryModeError(delivery, admissionRunning);
+        }
+        const queueAvailable = options?.context?.type === "command" || options?.context?.type === "defer_to_host"
+          ? options.context.queueAvailable
+          : true;
+        if (validatesRequestedDelivery && delivery !== "prompt" && !queueAvailable) {
+          options?.preflightResult?.({ success: false });
+          throw new AgentQueueRejectedBeforeEffectError();
+        }
+        if (options?.context?.type === "defer_to_host") {
+          if (delivery === "prompt") throw new Error("Host-deferred input requires queued delivery");
+          options.preflightResult?.({ success: true, inputKind, delivery, custody: "host" });
+          return;
+        }
+        const tracked = {
           operationId: p.operationId as string,
           text: p.message as string,
           delivery,
@@ -161,24 +194,22 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
           ...(options?.context !== undefined && options.context.type !== "session_switch" && options.context.attachments !== undefined
             ? { attachments: structuredClone(options.context.attachments) }
             : {}),
-        } : undefined;
-        if (tracked !== undefined) this.conversationInputs.push(tracked);
+        };
+        this.conversationInputs.push(tracked);
         return options?.context?.type === "force_queue"
           ? this.queueMessage(p.message, delivery === "prompt" ? "followUp" : delivery)
           : this.prompt(p.message, {
             ...(delivery === "prompt" ? {} : { streamingBehavior: delivery }),
             ...(p.images === undefined ? {} : { images: p.images }),
-            preflightResult: (success) => {
+            preflightResult: (success: boolean) => {
               if (!success) {
                 options?.preflightResult?.({ success: false });
                 return;
               }
               const actualDelivery = this.isStreaming ? delivery : "prompt";
-              if (tracked !== undefined) {
-                tracked.delivery = actualDelivery;
-                tracked.fromQueue ||= actualDelivery !== "prompt";
-              }
-              options?.preflightResult?.({ success: true, delivery: actualDelivery });
+              tracked.delivery = actualDelivery;
+              tracked.fromQueue ||= actualDelivery !== "prompt";
+              options?.preflightResult?.({ success: true, inputKind, delivery: actualDelivery, custody: "runtime" });
             },
           }, p.operationId);
       }

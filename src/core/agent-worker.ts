@@ -160,6 +160,14 @@ export interface ClearedAgentQueue {
   followUp: string[];
 }
 
+/** Agent rejected a delivery mode before gaining input custody. */
+export class AgentInvalidDeliveryModeError extends Error {
+  constructor(readonly mode: "prompt" | "steer" | "followUp", readonly running: boolean) {
+    super(`Delivery mode ${mode} is invalid while the Agent is ${running ? "running" : "idle"}`);
+    this.name = "AgentInvalidDeliveryModeError";
+  }
+}
+
 /** Public queue validation failed before Pi gained custody of the text. */
 export class AgentQueueRejectedBeforeEffectError extends Error {
   constructor(cause?: unknown) {
@@ -292,13 +300,16 @@ export interface AgentWorkerState {
 /** Host-resolved facts carried only on the private invoke envelope. */
 export type AgentInvokeContext =
   | { type: "session_switch"; canonicalCwd: string; projectTrusted: boolean }
-  | { type: "command"; attachments: AttachmentDto[] }
+  | { type: "command"; attachments?: AttachmentDto[]; queueAvailable: boolean }
+  | { type: "defer_to_host"; attachments?: AttachmentDto[]; queueAvailable: boolean }
   | { type: "force_queue"; attachments?: AttachmentDto[] }
   | { type: "host_queue"; attachments?: AttachmentDto[] };
 
 export type AgentCommandPreflightResult =
   | { success: false }
-  | { success: true; delivery: "prompt" | "steer" | "followUp" };
+  | { success: true; inputKind: "prompt"; delivery: "prompt" | "steer" | "followUp"; custody: "runtime" }
+  | { success: true; inputKind: "extension_command"; delivery: "prompt"; custody: "runtime" }
+  | { success: true; inputKind: "prompt"; delivery: "steer" | "followUp"; custody: "host" };
 
 export interface AgentInvokeOptions {
   preflightResult?: (result: AgentCommandPreflightResult) => void;
@@ -311,6 +322,10 @@ export interface AgentWorkerConnection {
   invoke(request: AgentRequest, options?: AgentInvokeOptions): Promise<unknown>;
   control(request: AgentWorkerControl): Promise<unknown>;
   subscribe(listener: (event: AgentEvent) => void): () => void;
-  /** Adapter-owned graceful Agent cleanup; the process supervisor remains the hard-stop fallback. */
+  /**
+   * Adapter-owned graceful cleanup with supervisor hard-stop fallback. Resolving
+   * also settles or rejects outstanding invokes so terminal admission cannot
+   * remain hostage to an Agent input hook.
+   */
   dispose(): Promise<void>;
 }

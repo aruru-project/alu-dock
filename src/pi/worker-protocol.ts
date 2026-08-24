@@ -1,6 +1,7 @@
 import {
   AgentCompactionKnownFailureError,
   AgentConversationCursorError,
+  AgentInvalidDeliveryModeError,
   AgentInvalidSettingValueError,
   AgentInvalidTreeTargetError,
   AgentModelNotFoundError,
@@ -86,7 +87,7 @@ export interface WorkerErrorDto {
   code:
     | "compaction_known_failure" | "queue_rejected" | "queue_effect_unknown"
     | "unknown_tool" | "model_not_found" | "invalid_setting" | "settings_write"
-    | "conversation_cursor" | "file_unavailable" | "invalid_tree_target" | "runtime_error";
+    | "conversation_cursor" | "file_unavailable" | "invalid_tree_target" | "invalid_delivery" | "runtime_error";
   name: string;
   message: string;
   details?: Record<string, unknown>;
@@ -241,7 +242,12 @@ export function parseWorkerEnvelope(raw: unknown): WorkerEnvelope {
         && (request.type !== "command.submit" || request.params.delivery === "prompt")) {
         throw new Error("Worker Host queue context requires a steer or followUp command submission");
       }
-      if (context?.type === "command" && request.type !== "command.submit") throw new Error("Worker command context requires command.submit");
+      if ((context?.type === "command" || context?.type === "defer_to_host") && request.type !== "command.submit") {
+        throw new Error("Worker command context requires command.submit");
+      }
+      if (request.type === "command.submit" && (context === undefined || context.type === "session_switch")) {
+        throw new Error("Worker command submission requires Host admission context");
+      }
       if (request.type === "command.submit") {
         const requestedIds = request.params.attachments ?? [];
         const contextAttachments = context !== undefined && context.type !== "session_switch" ? context.attachments ?? [] : [];
@@ -284,19 +290,27 @@ export function parseWorkerEnvelope(raw: unknown): WorkerEnvelope {
       return { kind, event, state: parseAgentWorkerState(value.state) };
     }
     case "preflight": {
-      exactKeys(value, ["kind", "callId", "success", "delivery"], "Worker preflight envelope");
+      exactKeys(value, ["kind", "callId", "success", "inputKind", "delivery", "custody"], "Worker preflight envelope");
       if (typeof value.success !== "boolean") throw new Error("Worker preflight status is invalid");
       const callId = boundedString(value.callId, 128, "Worker call ID");
       if (!value.success) {
-        if (value.delivery !== undefined) throw new Error("Rejected Worker preflight cannot declare delivery");
+        if (value.inputKind !== undefined || value.delivery !== undefined || value.custody !== undefined) {
+          throw new Error("Rejected Worker preflight cannot declare accepted input facts");
+        }
         return { kind, callId, success: false };
       }
-      return {
-        kind,
-        callId,
-        success: true,
-        delivery: oneOf(value.delivery, ["prompt", "steer", "followUp"] as const, "Worker actual delivery"),
-      };
+      const inputKind = oneOf(value.inputKind, ["prompt", "extension_command"] as const, "Worker input kind");
+      const delivery = oneOf(value.delivery, ["prompt", "steer", "followUp"] as const, "Worker actual delivery");
+      const custody = oneOf(value.custody, ["host", "runtime"] as const, "Worker input custody");
+      if (inputKind === "extension_command") {
+        if (delivery !== "prompt" || custody !== "runtime") throw new Error("Worker extension-command custody is invalid");
+        return { kind, callId, success: true, inputKind, delivery, custody };
+      }
+      if (custody === "host") {
+        if (delivery === "prompt") throw new Error("Worker Host input custody is invalid");
+        return { kind, callId, success: true, inputKind, delivery, custody };
+      }
+      return { kind, callId, success: true, inputKind, delivery, custody };
     }
     case "fatal":
       exactKeys(value, ["kind", "error"], "Worker fatal envelope");
@@ -491,6 +505,7 @@ export function encodeWorkerError(error: unknown): WorkerErrorDto {
   if (error instanceof AgentConversationCursorError) return { ...base, code: "conversation_cursor" };
   if (error instanceof PublishedFileUnavailableError) return { ...base, code: "file_unavailable" };
   if (error instanceof AgentInvalidTreeTargetError) return { ...base, code: "invalid_tree_target" };
+  if (error instanceof AgentInvalidDeliveryModeError) return { ...base, code: "invalid_delivery", details: { mode: error.mode, running: error.running } };
   if (error instanceof AgentQueueRejectedBeforeEffectError) return { ...base, code: "queue_rejected" };
   if (error instanceof AgentQueueEffectUnknownError) return { ...base, code: "queue_effect_unknown" };
   if (error instanceof AgentUnknownToolError) return { ...base, code: "unknown_tool", details: { toolName: error.toolName } };
@@ -506,6 +521,10 @@ export function decodeWorkerError(error: WorkerErrorDto): Error {
     case "conversation_cursor": return new AgentConversationCursorError(error.message);
     case "file_unavailable": return new PublishedFileUnavailableError(error.message);
     case "invalid_tree_target": return new AgentInvalidTreeTargetError(error.message);
+    case "invalid_delivery": return new AgentInvalidDeliveryModeError(
+      oneOfValue(error.details?.mode, ["prompt", "steer", "followUp"], "prompt"),
+      error.details?.running === true,
+    );
     case "queue_rejected": return new AgentQueueRejectedBeforeEffectError(new Error(error.message));
     case "queue_effect_unknown": return new AgentQueueEffectUnknownError(new Error(error.message));
     case "unknown_tool": return new AgentUnknownToolError(typeof error.details?.toolName === "string" ? error.details.toolName : "unknown");
@@ -527,7 +546,7 @@ export function decodeWorkerError(error: WorkerErrorDto): Error {
 function parseWorkerError(raw: unknown): WorkerErrorDto {
   const value = record(raw, "Worker error");
   exactKeys(value, ["code", "name", "message", "details"], "Worker error");
-  const code = oneOf(value.code, ["compaction_known_failure", "queue_rejected", "queue_effect_unknown", "unknown_tool", "model_not_found", "invalid_setting", "settings_write", "conversation_cursor", "file_unavailable", "invalid_tree_target", "runtime_error"] as const, "Worker error code");
+  const code = oneOf(value.code, ["compaction_known_failure", "queue_rejected", "queue_effect_unknown", "unknown_tool", "model_not_found", "invalid_setting", "settings_write", "conversation_cursor", "file_unavailable", "invalid_tree_target", "invalid_delivery", "runtime_error"] as const, "Worker error code");
   const details = value.details === undefined ? undefined : record(value.details, "Worker error details");
   validateWorkerErrorDetails(code, details);
   return { code, name: boundedString(value.name, 128, "Worker error name"), message: boundedString(value.message, 2_048, "Worker error message", true), ...(details === undefined ? {} : { details }) };
@@ -543,6 +562,11 @@ function validateWorkerErrorDetails(code: WorkerErrorDto["code"], details: Recor
     case "compaction_known_failure": exactKeys(details, ["reason"], "Compaction error details"); oneOf(details.reason, ["nothing_to_compact", "already_compacted", "cancelled", "failed"], "Compaction failure reason"); return;
     case "unknown_tool": exactKeys(details, ["toolName"], "Unknown-tool details"); boundedString(details.toolName, 256, "Tool name"); return;
     case "model_not_found": exactKeys(details, ["provider", "modelId"], "Model error details"); boundedString(details.provider, 256, "Model provider"); boundedString(details.modelId, 512, "Model id"); return;
+    case "invalid_delivery":
+      exactKeys(details, ["mode", "running"], "Invalid-delivery details");
+      oneOf(details.mode, ["prompt", "steer", "followUp"], "Delivery mode");
+      if (typeof details.running !== "boolean") throw new Error("Invalid-delivery running state is invalid");
+      return;
     case "invalid_setting": exactKeys(details, ["setting"], "Setting error details"); boundedString(details.setting, 128, "Setting key"); return;
     case "settings_write":
       exactKeys(details, ["setting", "phase", "mutationApplied", "errors"], "Settings-write details");
@@ -570,16 +594,21 @@ function parseAgentWorkerState(raw: unknown): AgentWorkerState {
 
 function parseAgentInvokeContext(raw: unknown): AgentInvokeContext {
   const value = record(raw, "Worker Agent invoke context");
-  if (value.type === "command" || value.type === "force_queue" || value.type === "host_queue") {
-    exactKeys(value, ["type", "attachments"], "Worker Agent invoke context");
+  if (value.type === "command" || value.type === "defer_to_host" || value.type === "force_queue" || value.type === "host_queue") {
+    const carriesQueueAvailability = value.type === "command" || value.type === "defer_to_host";
+    exactKeys(value, carriesQueueAvailability ? ["type", "attachments", "queueAvailable"] : ["type", "attachments"], "Worker Agent invoke context");
+    if (carriesQueueAvailability && typeof value.queueAvailable !== "boolean") throw new Error("Worker command queue availability is invalid");
     if (value.attachments !== undefined && (!Array.isArray(value.attachments) || value.attachments.length > 32)) throw new Error("Worker attachments must be a bounded array");
     const attachments = value.attachments === undefined
       ? undefined
       : (value.attachments as unknown[]).map((item, index) => parseWorkerAttachmentDto(item, `Worker attachments[${index}]`));
     if (attachments !== undefined && (attachments.length === 0 || new Set(attachments.map((attachment) => attachment.fileId)).size !== attachments.length)) throw new Error("Worker attachments must be nonempty and unique");
-    if (value.type === "command") {
-      if (attachments === undefined) throw new Error("Worker command context requires attachments");
-      return { type: "command", attachments };
+    if (value.type === "command" || value.type === "defer_to_host") {
+      return {
+        type: value.type,
+        ...(attachments === undefined ? {} : { attachments }),
+        queueAvailable: value.queueAvailable as boolean,
+      };
     }
     if (value.type === "force_queue") return { type: "force_queue", ...(attachments === undefined ? {} : { attachments }) };
     return { type: "host_queue", ...(attachments === undefined ? {} : { attachments }) };

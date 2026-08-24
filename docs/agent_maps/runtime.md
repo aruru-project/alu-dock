@@ -73,7 +73,7 @@ Pi adapter 直接从 `SessionManager.getTree()` 产生 Protocol V2 的 compact `
 
 Pi runtime、Pi session、extension runner、component 和 Pi SDK object 全部留在 Worker。Pi adapter 只在 Worker 内使用 Pi API，并把 Pi 的行为转换成 Dock 协议。
 
-消息提交的实际 delivery 也由 adapter 在 Pi 真正接收输入时确定。调用者的 `auto / prompt / steer / followUp` 原样到达 Worker；Pi 完成 input hook 并再次检查运行状态后，Worker 的私有 preflight result 报告这次实际采用的 `prompt / steer / followUp`。Host 只按这个结果提交 receipt 和 Queue 状态，不根据自己稍早看到的 `isStreaming` 再猜一次。`operationId` 贯穿直接执行和排队执行；只有确实进入 Queue 的消息才创建 `queueItemId`，也只有实际消费 Queue item 时才产生 queue-consumed lifecycle。Queue provenance 与最终 delivery 分开保存：compaction 期间由 Host 保管的 Queue item 可能在 Pi 恢复空闲后以 fresh prompt 启动，但它仍消费原来的真实 Queue identity；普通 direct prompt 则不会产生 queue-consumed。
+消息提交的 input kind、实际 delivery 和 custody owner 都由 adapter 确定。调用者的 `auto / prompt / steer / followUp` 原样到达 Worker；普通 prompt 由 Pi input hook 再次检查运行状态后报告实际采用的 `prompt / steer / followUp`，registered extension command 则在 adapter 已解析并取得 invocation custody、但可能长时间运行的 handler 开始前报告。Compaction 期间不能交给 Pi 的普通 input 明确报告 Host custody。这个私有 preflight 是 Worker→Host 的事实通知，不增加逐条批准往返；Host 只按结果提交 receipt 和 Queue 状态，不根据自己稍早看到的 `isStreaming` 或 extension command 文本再猜一次。`operationId` 贯穿直接执行和排队执行；只有确实进入 Queue 的消息才创建 `queueItemId`，也只有实际消费 Queue item 时才产生 queue-consumed lifecycle。Queue provenance 与最终 delivery 分开保存：compaction 期间由 Host 保管的 Queue item 可能在 Pi 恢复空闲后以 fresh prompt 启动，但它仍消费原来的真实 Queue identity；普通 direct prompt 则不会产生 queue-consumed。
 
 Conversation projector 使用同一个实际 delivery 生成 `message.submitted`。Canonical conversation frame 不以 Host 的辅助 Queue identity 为发布前提：即使 Queue 关联异常，已经被 Worker 接受的用户消息也必须先出现在 conversation，不能被内部错误替代。
 

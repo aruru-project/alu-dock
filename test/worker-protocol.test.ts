@@ -64,15 +64,26 @@ test("private worker protocol chunks and reassembles one ordered bounded result"
 
 test("private Worker admission reports the delivery actually chosen by the Agent", () => {
   assert.deepEqual(parseWorkerEnvelope({
-    kind: "preflight", callId: "call-1", success: true, delivery: "prompt",
-  }), { kind: "preflight", callId: "call-1", success: true, delivery: "prompt" });
+    kind: "preflight", callId: "call-1", success: true,
+    inputKind: "prompt", delivery: "prompt", custody: "runtime",
+  }), {
+    kind: "preflight", callId: "call-1", success: true,
+    inputKind: "prompt", delivery: "prompt", custody: "runtime",
+  });
   assert.deepEqual(parseWorkerEnvelope({
     kind: "preflight", callId: "call-2", success: false,
   }), { kind: "preflight", callId: "call-2", success: false });
+  assert.throws(() => parseWorkerEnvelope({
+    kind: "preflight", callId: "call-3", success: true,
+    inputKind: "extension_command", delivery: "steer", custody: "host",
+  }));
   const hostQueued = parseWorkerEnvelope(agentCall("command.submit", {
     operationId: "op", instanceId: "instance-test", message: "queued", delivery: "steer",
   }, { context: { type: "host_queue" } }));
   assert.equal(hostQueued.kind === "agent_request" ? hostQueued.context?.type : undefined, "host_queue");
+  assert.throws(() => parseWorkerEnvelope(agentCall("command.submit", {
+    operationId: "op", instanceId: "instance-test", message: "unadmitted", delivery: "auto",
+  })));
 });
 
 test("private Worker lifecycle signals accept carried operation attribution", () => {
@@ -149,7 +160,7 @@ test("private Worker attachment calls keep source identity and private paths on 
 
   const requestWithContext = parseWorkerEnvelope(agentCall("command.submit", {
     operationId: "attachment-op", instanceId: "instance-test", message: "inspect", attachments: [attachment.fileId], delivery: "prompt",
-  }, { context: { type: "command", attachments: [attachment] } }));
+  }, { context: { type: "command", attachments: [attachment], queueAvailable: true } }));
   assert.equal(requestWithContext.kind === "agent_request" ? requestWithContext.context?.type : undefined, "command");
   assert.throws(() => parseWorkerEnvelope(agentCall("command.submit", {
     operationId: "attachment-op", instanceId: "instance-test", message: "inspect", attachments: [attachment.fileId], delivery: "prompt",

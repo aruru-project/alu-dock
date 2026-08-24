@@ -1897,7 +1897,37 @@ test("stop preempts a manual compaction even before its start event is projected
   assert.ok(stopRequested && compactionCompleted && stopRequested.sequence < compactionCompleted.sequence);
 });
 
+test("stop fences new input and starts Worker cleanup without waiting on an input hook", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "stop-input-preflight");
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
+  const preflight = runtime.blockNextPromptBeforePreflight();
+  const disposal = runtime.blockDispose();
 
+  const submitting = client.prompt(created.id, "accepted before stop", "auto", "pre-stop-input");
+  await preflight.entered;
+  const stopping = client.stop(created.id, "stop-after-input-reservation");
+  await disposal.entered;
+
+  assert.equal(runtime.disposeCalls, 1, "terminal admission must begin graceful cleanup without waiting on the input hook");
+  await assert.rejects(
+    client.prompt(created.id, "too late", "auto", "post-stop-input"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "instance_not_active",
+  );
+
+  preflight.release();
+  const accepted = await submitting;
+  runtime.settle("accepted input settled during Stop");
+  disposal.release();
+  const stopped = await stopping;
+
+  assert.equal(accepted.receipt.operationId, "pre-stop-input");
+  assert.equal(stopped.instance.lifecycle, "stopped");
+  assert.equal(runtime.disposeCalls, 1);
+});
 
 test("abort runtime ambiguity stays operation-scoped without faulting the catalog", async (context) => {
   const harness = await createHarness();

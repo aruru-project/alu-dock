@@ -59,6 +59,7 @@ import type { PiExtensionUiPort } from "./pi-extension-ui-adapter.js";
 import {
   AgentCompactionKnownFailureError,
   AgentConversationCursorError,
+  AgentInvalidDeliveryModeError,
   AgentInvalidTreeTargetError,
   AgentQueueEffectUnknownError,
   AgentQueueRejectedBeforeEffectError,
@@ -319,49 +320,84 @@ export class PiAgentAdapter {
     switch (request.type) {
       case "command.submit": {
         const { operationId, delivery: requestedDelivery, message, images } = request.params;
-        const delivery = requestedDelivery === "auto" ? (this.isStreaming ? "steer" : "prompt") : requestedDelivery;
         const binding = this.requireActive();
-        const hostQueued = context?.type === "force_queue" || context?.type === "host_queue";
         const attachments = context !== undefined && context.type !== "session_switch" ? context.attachments : undefined;
+        const inputKind = this.classifyInput(message);
+        if (inputKind === "extension_command" && ((images?.length ?? 0) > 0 || (attachments?.length ?? 0) > 0)) {
+          preflightResult?.({ success: false });
+          throw new Error("Registered extension commands do not accept attachments");
+        }
+        if (inputKind === "extension_command") {
+          // Resolve and start the registered invocation in the same Worker
+          // turn, before its handler can suspend on a long-lived Promise.
+          preflightResult?.({ success: true, inputKind, delivery: "prompt", custody: "runtime" });
+          this.extensionCommandOperationId = operationId;
+          try {
+            await binding.session.prompt(message, { source: "rpc" } as PromptOptions);
+            return null;
+          } finally {
+            if (this.extensionCommandOperationId === operationId) this.extensionCommandOperationId = undefined;
+          }
+        }
+        const admissionRunning = context?.type === "defer_to_host" || this.isStreaming;
+        const delivery = requestedDelivery === "auto" ? (admissionRunning ? "steer" : "prompt") : requestedDelivery;
+        const validatesRequestedDelivery = context?.type !== "force_queue" && context?.type !== "host_queue";
+        const invalidDelivery = validatesRequestedDelivery && (
+          (admissionRunning && delivery === "prompt")
+          || (!admissionRunning && delivery !== "prompt")
+        );
+        if (invalidDelivery) {
+          preflightResult?.({ success: false });
+          throw new AgentInvalidDeliveryModeError(delivery, admissionRunning);
+        }
+        const queueAvailable = context?.type === "command" || context?.type === "defer_to_host"
+          ? context.queueAvailable
+          : true;
+        if (validatesRequestedDelivery && delivery !== "prompt" && !queueAvailable) {
+          preflightResult?.({ success: false });
+          throw new AgentQueueRejectedBeforeEffectError();
+        }
+        if (context?.type === "defer_to_host") {
+          if (delivery === "prompt") throw new Error("Host-deferred input requires queued delivery");
+          preflightResult?.({ success: true, inputKind, delivery, custody: "host" });
+          return null;
+        }
+        const hostQueued = context?.type === "force_queue" || context?.type === "host_queue";
         const attachmentImages = await resolveAttachmentImages(attachments, this.options.dockAttachmentPort);
         const runtimeImages = attachmentImages === undefined ? images : [...(images ?? []), ...attachmentImages];
         const runtimeMessage = attachments === undefined ? message : appendDockAttachmentContext(message, attachments, this.options.attachmentContextKey);
-        const inputKind = this.classifyInput(message);
-        const input = inputKind === "prompt"
-          ? binding.conversation.trackInput({ operationId, text: message, runtimeText: runtimeMessage, delivery, fromQueue: hostQueued || delivery !== "prompt", images, attachments })
-          : undefined;
+        const input = binding.conversation.trackInput({
+          operationId,
+          text: message,
+          runtimeText: runtimeMessage,
+          delivery,
+          fromQueue: hostQueued || delivery !== "prompt",
+          images,
+          attachments,
+        });
         const reportPreflight = (success: boolean): void => {
           if (!success) {
             preflightResult?.({ success: false });
             return;
           }
           const actualDelivery = binding.session.isStreaming ? delivery : "prompt";
-          if (input !== undefined) {
-            input.delivery = actualDelivery;
-            input.fromQueue = hostQueued || actualDelivery !== "prompt";
-          }
-          preflightResult?.({ success: true, delivery: actualDelivery });
+          input.delivery = actualDelivery;
+          input.fromQueue = hostQueued || actualDelivery !== "prompt";
+          preflightResult?.({ success: true, inputKind, delivery: actualDelivery, custody: "runtime" });
         };
         try {
           if (context?.type === "force_queue") {
             if (delivery === "prompt") throw new Error("Forced Agent queue delivery requires steer or followUp");
             return await this.queueMessage(runtimeMessage, delivery, runtimeImages);
           }
-          const prompt = (): Promise<void> => this.prompt(runtimeMessage, {
+          return await this.prompt(runtimeMessage, {
             source: "rpc",
             ...(delivery === "prompt" ? {} : { streamingBehavior: delivery }),
             ...(runtimeImages === undefined ? {} : { images: runtimeImages }),
             preflightResult: reportPreflight,
           });
-          if (inputKind !== "extension_command") return await prompt();
-          this.extensionCommandOperationId = operationId;
-          try {
-            return await prompt();
-          } finally {
-            if (this.extensionCommandOperationId === operationId) this.extensionCommandOperationId = undefined;
-          }
         } catch (error) {
-          if (input !== undefined) binding.conversation.cancelInput(input);
+          binding.conversation.cancelInput(input);
           throw error;
         }
       }

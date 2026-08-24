@@ -187,9 +187,7 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     }
     if (envelope.kind === "accepted") { const pending = this.pending.get(envelope.callId); if (pending) pending.accepted = true; return; }
     if (envelope.kind === "preflight") {
-      this.pending.get(envelope.callId)?.preflight?.(envelope.success
-        ? { success: true, delivery: envelope.delivery }
-        : { success: false });
+      this.pending.get(envelope.callId)?.preflight?.(envelope);
       return;
     }
     if (envelope.kind === "response") {

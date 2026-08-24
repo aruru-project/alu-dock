@@ -7,6 +7,7 @@ export type ControlCommandKind = "immediate" | "queue";
 export type InstanceCommandRequest =
   | { class: "terminal" }
   | { class: "exclusive"; kind: ExclusiveCommandKind; admission: ExclusiveAdmission }
+  | { class: "input" }
   | { class: "interrupt" }
   | { class: "control"; kind: ControlCommandKind };
 
@@ -17,7 +18,6 @@ export interface InstanceCommandFacts {
   executionRunning: boolean;
   runtimeStreaming: boolean;
   compactionActive: boolean;
-  inputAdmissionActive: boolean;
   pendingQueueMessages: number;
   inFlightQueueMessages: number;
   pendingSteering: number;
@@ -64,6 +64,10 @@ export class InstanceCommandLease {
     return !this.released && runtimeGeneration === this.command.generation && this.scheduler.current(this.command);
   }
 
+  effectAllowed(runtimeGeneration: number): boolean {
+    return this.current(runtimeGeneration) && this.scheduler.effectAllowed(this.command);
+  }
+
   release(): void {
     if (this.released) return;
     this.released = true;
@@ -101,11 +105,12 @@ export class InstanceCommandScheduler {
     }
 
     const exclusive = this.find("exclusive");
+    const input = this.find("input");
     const interrupt = this.find("interrupt");
     const queue = this.find("control", "queue");
 
     if (request.class === "exclusive") {
-      if (exclusive || interrupt || queue || facts.inputAdmissionActive || facts.compactionActive) {
+      if (exclusive || input || interrupt || queue || facts.compactionActive) {
         return { kind: "reject", reason: "busy" };
       }
       if (request.admission !== "live" && this.hasQueueCustody(facts)) return { kind: "reject", reason: "busy" };
@@ -118,7 +123,15 @@ export class InstanceCommandScheduler {
     if (request.class === "control") {
       if (request.kind === "immediate") return { kind: "start", lease: this.activate(request, facts.runtimeGeneration) };
       if (exclusive || interrupt || queue) return { kind: "reject", reason: "busy" };
-      if (facts.inputAdmissionActive) return { kind: "reject", reason: "input_admission" };
+      if (input) return { kind: "reject", reason: "input_admission" };
+      return { kind: "start", lease: this.activate(request, facts.runtimeGeneration) };
+    }
+
+    if (request.class === "input") {
+      if (input || interrupt || queue) return { kind: "reject", reason: input ? "input_admission" : "busy" };
+      if (exclusive?.request.class === "exclusive" && exclusive.request.kind !== "compaction") {
+        return { kind: "reject", reason: "busy" };
+      }
       return { kind: "start", lease: this.activate(request, facts.runtimeGeneration) };
     }
 
@@ -131,7 +144,7 @@ export class InstanceCommandScheduler {
       }
       return { kind: "wait", lease, forCompletion: exclusive.completion };
     }
-    if (facts.inputAdmissionActive) return { kind: "reject", reason: "input_admission" };
+    if (input) return { kind: "reject", reason: "input_admission" };
     return { kind: "start", lease: this.activate(request, facts.runtimeGeneration) };
   }
 
@@ -153,6 +166,10 @@ export class InstanceCommandScheduler {
 
   current(command: ActiveCommand): boolean {
     return this.active.get(command.token) === command;
+  }
+
+  effectAllowed(command: ActiveCommand): boolean {
+    return command.request.class === "terminal" || this.find("terminal") === undefined;
   }
 
   release(command: ActiveCommand): void {

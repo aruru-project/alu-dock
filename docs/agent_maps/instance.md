@@ -174,12 +174,12 @@ Scheduler 是 Dock 命令顺序、lifecycle、operation 和 Queue custody 的 au
 
 ```text
 scheduler reserve operation
-→ Worker adapter 执行 Agent input hooks，并在真正取得 custody 时报告 actual delivery
+→ Worker adapter 解析 input kind，并在真正取得 custody 时报告 input kind / actual delivery / custody owner
 → scheduler 以该 preflight fact 提交 receipt / Queue ownership
 → Worker conversation/event 继续使用同一 operation identity
 ```
 
-Scheduler 不根据较早的 `isStreaming` 自行决定 prompt/steer/followUp，也不读取 Pi 私有 Queue 或 extension command 文本规则。
+Scheduler 不根据较早的 `isStreaming` 自行决定 prompt/steer/followUp，也不读取 Pi 私有 Queue 或 extension command 文本规则。普通 prompt 的 preflight 在 Pi input hook 决定实际 delivery 时产生；registered extension command 在 adapter 已解析并取得 invocation custody、但可能长时间运行的 handler 开始前产生；compaction 期间不能交给 Pi 的普通 input 则明确报告 Host custody。这个 preflight 是 Worker→Host 的事实通知，不为每条输入增加一次批准往返。
 
 Worker 接受副作用前失联与接受后失联仍是不同结果。Scheduler 不能自动重放 effect-unknown mutation。
 
@@ -239,7 +239,7 @@ scheduler terminal admission
 ```
 
 - `stopped` 可以存在于最终 receipt、已连接客户端的 terminal event 和并发 Stop 的 single-flight result中；它不构成可恢复历史。
-- 正常关闭的 Agent-specific cleanup 由 Worker adapter 负责。Instance 不逐项理解 Pi Queue、compaction、interaction 或 session Promise。
+- 正常关闭的 Agent-specific cleanup 由 Worker adapter 负责。Instance 不逐项理解 Pi Queue、compaction、interaction 或 session Promise。Terminal admission 不等待可能无限挂起的 input hook 才开始 cleanup；Worker connection 的 disposal 必须让既有 invoke settle/reject，supervisor timeout 则保证 owner release 有界。
 - hard kill 是 supervisor 在 graceful shutdown 超时或 Worker 不响应时的异常兜底，不是 Stop 的产品定义。
 - project files 和 Agent 自己的持久 session 不因 Instance Stop 删除。
 - Stop operation 的 transport/idempotency result 保持 Protocol V2 既有形状。

@@ -24,6 +24,7 @@ import {
 } from "./extension-ui-broker.js";
 import {
   AgentCompactionKnownFailureError,
+  AgentInvalidDeliveryModeError,
   AgentInvalidTreeTargetError,
   AgentMutationEffectUnknownError,
   AgentQueueRejectedBeforeEffectError,
@@ -213,13 +214,6 @@ interface AssistantOutcome {
   errorMessage?: string;
 }
 
-interface PendingAdmission {
-  token: object;
-  boundary: Promise<void>;
-  release: () => void;
-  waitBeforeStop: boolean;
-}
-
 interface AcceptedPromptMessage {
   operationId: string;
   text: string;
@@ -396,7 +390,6 @@ export class ManagedInstance {
   private runtimeSteeringHashes: string[] = [];
   private runtimeFollowUpHashes: string[] = [];
   private lastAssistantOutcome: AssistantOutcome | undefined;
-  private pendingAdmission: PendingAdmission | undefined;
   private stopRequestedWhileRunning = false;
   private compactionActive = false;
   /** Synchronous runtime-edge truth closes the gap before catalog projection catches up. */
@@ -454,7 +447,6 @@ export class ManagedInstance {
       executionRunning: this.state.execution === "running",
       runtimeStreaming: this.agentState().isStreaming,
       compactionActive: this.compactionActive,
-      inputAdmissionActive: this.pendingAdmission !== undefined,
       pendingQueueMessages: this.pendingQueueMessages.length,
       inFlightQueueMessages: this.inFlightQueueMessages.length,
       pendingSteering: this.state.pendingSteering,
@@ -514,11 +506,6 @@ export class ManagedInstance {
     const requestId = typeof params.operationId === "string" ? params.operationId : randomUUID();
     const request = { kind: "request", version: 2, requestId, type, params: { instanceId: this.id, ...params } } as AgentRequest;
     return this.session.invoke(request, options) as Promise<T>;
-  }
-
-  private classifyAgentInput(text: string): AgentInputKind {
-    const match = /^\/([^\s]+)/u.exec(text);
-    return match?.[1] && this.agentState().extensionCommands.includes(match[1]) ? "extension_command" : "prompt";
   }
 
   snapshot(): InstanceSnapshot {
@@ -734,9 +721,6 @@ export class ManagedInstance {
     await this.extensionUi.suspendForHostDrain();
     this.hostDrainActive = true;
     await this.transitionTail;
-    const admission = this.pendingAdmission;
-    this.pendingAdmission = undefined;
-    admission?.release();
     await this.extensionUi.cancelForHostDrain();
     // A failed reap must remain visible to the caller. Publishing host_lost or
     // stopped after this point could admit a second owner for the same session.
@@ -1241,53 +1225,36 @@ export class ManagedInstance {
     images?: readonly ImagePathDto[],
     attachments?: readonly AttachmentDto[],
   ): Promise<CommandReceipt> {
-    this.assertActive();
-    if (this.pendingAdmission) throw new InstanceAdmissionPendingError(this.id);
-    const inputImages = cloneInputImages(images);
-    const inputAttachments = cloneInputAttachments(attachments);
-    if (message.trim().length === 0 && inputImages.length === 0 && inputAttachments.length === 0) {
-      throw new Error("Prompt message, image, or attachment must be provided");
-    }
-
-    const compacting = this.runtimeCompactionInProgress();
-    const manualCompactionPending = this.manualCompactionAdmissionActive();
-    const hostQueueCustody = this.hostQueueCustodyActive();
-    const interruptPending = this.commandScheduler.activeCommand("interrupt") !== undefined;
-    const queueMutationPending = this.commandScheduler.activeCommand("control", "queue") !== undefined;
-    const exclusivePending = this.commandScheduler.activeCommand("exclusive") !== undefined;
-    if (this.classifyAgentInput(message) === "extension_command") {
-      if (inputImages.length > 0 || inputAttachments.length > 0) throw new Error("Registered extension commands do not accept attachments");
-      if (interruptPending || queueMutationPending || (exclusivePending && !compacting)) {
-        throw new InstanceBusyError(this.id, "submitting an extension command");
+    const inputLease = this.requireCommandStart(
+      this.commandScheduler.admit({ class: "input" }),
+      "submitting input",
+    );
+    let inputImages: ImagePathDto[];
+    let inputAttachments: AttachmentDto[];
+    try {
+      inputImages = cloneInputImages(images);
+      inputAttachments = cloneInputAttachments(attachments);
+      if (message.trim().length === 0 && inputImages.length === 0 && inputAttachments.length === 0) {
+        throw new Error("Prompt message, image, or attachment must be provided");
       }
-      return this.submitExtensionCommand(message, operationId);
+    } catch (error) {
+      inputLease.release();
+      throw error;
     }
-    if (interruptPending || queueMutationPending) throw new InstanceBusyError(this.id, "submitting a prompt");
-    if (compacting || manualCompactionPending || hostQueueCustody) return this.submitCompactionDeferred(message, delivery, operationId, inputImages, inputAttachments);
-    if (exclusivePending) throw new InstanceBusyError(this.id, "submitting a prompt");
-
-    if (delivery !== "auto") {
-      const running = this.agentState().isStreaming || (this.state.execution === "running" && !this.state.compacting);
-      resolveDelivery(delivery, running);
-    }
-    if (delivery !== "prompt" && !this.canQueueMessage(message, inputImages, inputAttachments)) throw new QueueCapacityError();
+    const inputGeneration = inputLease.generation;
+    const deferToHost = this.runtimeCompactionInProgress()
+      || this.manualCompactionAdmissionActive()
+      || this.hostQueueCustodyActive();
+    const queueAvailable = this.canQueueMessage(message, inputImages, inputAttachments);
     let actualDelivery: "prompt" | "steer" | "followUp" = "prompt";
+    let actualInputKind: AgentInputKind = "prompt";
+    let actualCustody: "host" | "runtime" = "runtime";
     let actuallyQueued = false;
     const commandId = operationId;
     const agentStartsBeforeCommand = this.agentStartCount;
     const agentSettlesBeforeCommand = this.agentSettledCount;
-    const admissionToken = {};
+    const parentRunning = this.state.execution === "running" || this.agentState().isStreaming;
 
-    let releaseAdmission!: () => void;
-    const admissionBoundary = new Promise<void>((resolve) => {
-      releaseAdmission = resolve;
-    });
-    this.pendingAdmission = {
-      token: admissionToken,
-      boundary: admissionBoundary,
-      release: releaseAdmission,
-      waitBeforeStop: true,
-    };
     this.catalogAdmissionOperationId = commandId;
     try {
       const admissionCommit = this.enqueueTransition(() => this.commitCatalogTransition(
@@ -1297,8 +1264,7 @@ export class ManagedInstance {
       if (this.catalogPort) await admissionCommit;
     } catch (error) {
       this.catalogAdmissionOperationId = undefined;
-      this.pendingAdmission = undefined;
-      releaseAdmission();
+      inputLease.release();
       throw error;
     }
 
@@ -1311,12 +1277,7 @@ export class ManagedInstance {
       rejectReceipt = reject;
     });
 
-    const release = (): void => {
-      if (this.pendingAdmission?.token !== admissionToken) return;
-      const admission = this.pendingAdmission;
-      this.pendingAdmission = undefined;
-      admission.release();
-    };
+    const release = (): void => inputLease.release();
 
     let preflightTransition: Promise<void> | undefined;
     const rejectBeforeRun = async (error: unknown, reason: string): Promise<void> => {
@@ -1350,20 +1311,50 @@ export class ManagedInstance {
     };
 
     const onPreflight = (result: AgentCommandPreflightResult): void => {
-      if (preflightStatus !== "pending" || this.pendingAdmission?.token !== admissionToken) return;
+      if (preflightStatus !== "pending" || !inputLease.current(inputGeneration)) return;
       if (!result.success) {
         preflightStatus = "rejected";
         return;
       }
-      if (this.state.lifecycle !== "active") {
-        const error = new InstanceNotActiveError(this.id, this.state.lifecycle);
-        preflightTransition = rejectBeforeRun(error, "instance_not_active_after_preflight");
+      // Runtime custody is already real when this notification crosses the
+      // Worker boundary, so terminal admission cannot retroactively reject it.
+      // Host custody has no effect yet and remains synchronously fenceable.
+      if (result.custody === "host" && (!inputLease.effectAllowed(inputGeneration) || this.state.lifecycle !== "active")) {
+        const lifecycle = this.state.lifecycle === "active" ? "stopping" : this.state.lifecycle;
+        preflightTransition = rejectBeforeRun(
+          new InstanceNotActiveError(this.id, lifecycle),
+          "instance_not_active_after_preflight",
+        );
         return;
       }
 
       preflightStatus = "accepted";
+      actualInputKind = result.inputKind;
       actualDelivery = result.delivery;
-      actuallyQueued = actualDelivery !== "prompt";
+      actualCustody = result.custody;
+      actuallyQueued = actualInputKind === "prompt" && actualDelivery !== "prompt";
+      if (result.custody === "host") {
+        preflightTransition = this.completeCompactionDeferredAdmission(
+          message,
+          result.delivery,
+          commandId,
+          inputImages,
+          inputAttachments,
+        ).then((receipt) => {
+          if (!receiptSettled) {
+            receiptSettled = true;
+            resolveReceipt(receipt);
+          }
+        }, async (error: unknown) => {
+          this.catalogAdmissionOperationId = undefined;
+          await this.flushAdmissionAgentEvents().catch(() => {});
+          if (!receiptSettled) {
+            receiptSettled = true;
+            rejectReceipt(error);
+          }
+        }).finally(release);
+        return;
+      }
       let precedingAgentEvents = Promise.resolve();
       if (!actuallyQueued) {
         // Events buffered while asynchronous input hooks were running belong
@@ -1389,7 +1380,7 @@ export class ManagedInstance {
       if (pendingMessage) {
         this.pendingQueueMessages.push(pendingMessage);
         this.assignPendingRuntimeHashes(pendingMessage.delivery, pendingMessage.delivery === "steer" ? this.runtimeSteeringHashes : this.runtimeFollowUpHashes);
-      } else this.acceptedPromptMessages.push({
+      } else if (actualInputKind === "prompt") this.acceptedPromptMessages.push({
         operationId: commandId,
         text: message,
         ...(inputImages.length === 0 ? {} : { images: cloneInputImages(inputImages) }),
@@ -1400,7 +1391,7 @@ export class ManagedInstance {
         () => {
           this.catalogAdmissionOperationId = undefined;
           this.state.lastError = undefined;
-          if (!actuallyQueued) {
+          if (actualInputKind === "prompt" && !actuallyQueued) {
             this.state.execution = "running";
             this.state.activeCommandId = commandId;
           }
@@ -1414,7 +1405,7 @@ export class ManagedInstance {
             acceptedAt,
           }, acceptedAt);
           if (pendingMessage) this.appendEvent("message.queued", pendingMessageProjection([pendingMessage])[0]!, acceptedAt);
-          this.appendStateEvent("command_accepted", acceptedAt);
+          this.appendStateEvent(actualInputKind === "extension_command" ? "extension_command_accepted" : "command_accepted", acceptedAt);
         },
       ));
       preflightTransition = Promise.all([precedingAgentEvents, acceptedTransition]).then(() => {});
@@ -1442,7 +1433,7 @@ export class ManagedInstance {
             accepted: true,
             instanceId: this.id,
             operationId: commandId,
-            kind: "prompt",
+            kind: actualInputKind,
             delivery: actualDelivery,
             queued: actuallyQueued,
             acceptedAt,
@@ -1460,32 +1451,9 @@ export class ManagedInstance {
       });
     };
 
-    // Compaction can start while the pre-effect catalog admission is awaiting
-    // durability. Re-route before Pi sees the text; buffered start/end events
-    // remain ordered behind the accepted Host queue item.
-    if (this.runtimeCompactionInProgress() || this.hostQueueCustodyActive()) {
-      let deferredDelivery: "steer" | "followUp";
-      try {
-        const rerouted = resolveDelivery(delivery, true);
-        if (rerouted === "prompt") throw new InvalidDeliveryModeError(rerouted, true);
-        if (!this.canQueueMessage(message, inputImages, inputAttachments)) throw new QueueCapacityError();
-        deferredDelivery = rerouted;
-      } catch (error) {
-        await rejectBeforeRun(error, "compaction_started_during_admission");
-        return receiptPromise;
-      }
-      try {
-        const receipt = await this.completeCompactionDeferredAdmission(message, deferredDelivery, commandId, inputImages, inputAttachments);
-        release();
-        return receipt;
-      } catch (error) {
-        this.catalogAdmissionOperationId = undefined;
-        await this.flushAdmissionAgentEvents().catch(() => {});
-        release();
-        throw error;
-      }
-    }
-
+    const shouldDeferToHost = deferToHost
+      || this.runtimeCompactionInProgress()
+      || this.hostQueueCustodyActive();
     let runtimePromise: Promise<void>;
     try {
       runtimePromise = this.invokeAgent<void>("command.submit", {
@@ -1495,7 +1463,11 @@ export class ManagedInstance {
         ...(inputAttachments.length === 0 ? {} : { attachments: inputAttachments.map((attachment) => attachment.fileId) }),
         delivery,
       }, {
-        ...(inputAttachments.length === 0 ? {} : { context: { type: "command", attachments: cloneInputAttachments(inputAttachments) } as const }),
+        context: {
+          type: shouldDeferToHost ? "defer_to_host" : "command",
+          queueAvailable,
+          ...(inputAttachments.length === 0 ? {} : { attachments: cloneInputAttachments(inputAttachments) }),
+        },
         preflightResult: onPreflight,
       });
     } catch (error) {
@@ -1506,6 +1478,24 @@ export class ManagedInstance {
     const observedPromise = runtimePromise.then(async () => {
       if (preflightStatus === "pending") throw new Error("Worker resolved message submission without reporting actual delivery");
       await preflightTransition;
+      if (actualCustody === "host") return;
+      if (preflightStatus === "accepted" && actualInputKind === "extension_command") {
+        await Promise.resolve();
+        await this.transitionTail;
+        if (this.runtimeGenerationValue !== inputGeneration || this.state.lifecycle !== "active") return;
+        const commandStartedRun = this.agentStartCount > agentStartsBeforeCommand
+          || (!parentRunning && this.agentState().isStreaming);
+        if (commandStartedRun) return;
+        await this.enqueueTransition(() => this.commitCatalogTransition(
+          { kind: "command.handled", effect: "post_effect", operationId: commandId, instanceId: this.id },
+          () => { this.touch(); },
+          () => {
+            this.appendEvent("command.handled", { operationId: commandId, kind: "extension_command" });
+            this.appendStateEvent("extension_command_handled");
+          },
+        ));
+        return;
+      }
       if (
         preflightStatus === "accepted"
         && !actuallyQueued
@@ -1539,6 +1529,11 @@ export class ManagedInstance {
     }).catch(async (error: unknown) => {
       const messageText = safeWireText(errorMessage(error), 2_048);
       if (preflightStatus !== "accepted") {
+        if (error instanceof AgentInvalidDeliveryModeError) {
+          error = new InvalidDeliveryModeError(error.mode, error.running);
+        } else if (error instanceof AgentQueueRejectedBeforeEffectError) {
+          error = new QueueCapacityError();
+        }
         if (error instanceof AgentMutationEffectUnknownError) {
           this.catalogAdmissionOperationId = undefined;
           await this.flushAdmissionAgentEvents().catch(() => {});
@@ -1561,7 +1556,8 @@ export class ManagedInstance {
       // prompt Promise rejects. Only project a fallback failure if that public
       // lifecycle guarantee was not observed at all.
       if (
-        this.state.lifecycle === "active"
+        actualInputKind === "prompt"
+        && this.state.lifecycle === "active"
         && this.agentStartCount > agentStartsBeforeCommand
         && this.agentSettledCount === agentSettlesBeforeCommand
       ) {
@@ -1619,46 +1615,6 @@ export class ManagedInstance {
     const boundary = this.nextAgentStartBoundary;
     this.nextAgentStartBoundary = undefined;
     boundary?.resolve();
-  }
-
-  /**
-   * Stock Pi keeps ordinary input outside AgentSession while compaction owns
-   * the session. Dock must do the same in the Host so detach/attach does not
-   * transfer queue custody to one TUI client.
-   */
-  private async submitCompactionDeferred(
-    message: string,
-    delivery: DeliveryMode,
-    operationId: string,
-    images: readonly ImagePathDto[],
-    attachments: readonly AttachmentDto[],
-  ): Promise<CommandReceipt> {
-    const resolvedDelivery = resolveDelivery(delivery, true);
-    if (resolvedDelivery === "prompt") throw new InvalidDeliveryModeError(resolvedDelivery, true);
-    if (!this.canQueueMessage(message, images, attachments)) throw new QueueCapacityError();
-
-    const admissionToken = {};
-    let releaseAdmission!: () => void;
-    const admissionBoundary = new Promise<void>((resolve) => { releaseAdmission = resolve; });
-    this.pendingAdmission = { token: admissionToken, boundary: admissionBoundary, release: releaseAdmission, waitBeforeStop: true };
-    this.catalogAdmissionOperationId = operationId;
-
-    try {
-      await this.enqueueTransition(() => this.commitCatalogTransition(
-        { kind: "command.admission", effect: "pre_effect", operationId, instanceId: this.id },
-        () => {},
-      ));
-      return await this.completeCompactionDeferredAdmission(message, resolvedDelivery, operationId, images, attachments);
-    } catch (error) {
-      this.catalogAdmissionOperationId = undefined;
-      await this.flushAdmissionAgentEvents().catch(() => {});
-      throw error;
-    } finally {
-      if (this.pendingAdmission?.token === admissionToken) {
-        this.pendingAdmission = undefined;
-        releaseAdmission();
-      }
-    }
   }
 
   private async completeCompactionDeferredAdmission(
@@ -1963,122 +1919,6 @@ export class ManagedInstance {
         error: text,
       });
     }).catch(() => {});
-  }
-
-  private async submitExtensionCommand(message: string, operationId: string): Promise<CommandReceipt> {
-    const commandId = operationId;
-    const admissionToken = {};
-    let releaseAdmission!: () => void;
-    const admissionBoundary = new Promise<void>((resolve) => { releaseAdmission = resolve; });
-    const release = (): void => {
-      if (this.pendingAdmission?.token !== admissionToken) return;
-      const admission = this.pendingAdmission;
-      this.pendingAdmission = undefined;
-      admission.release();
-    };
-    this.pendingAdmission = { token: admissionToken, boundary: admissionBoundary, release: releaseAdmission, waitBeforeStop: true };
-    this.catalogAdmissionOperationId = commandId;
-
-    try {
-      await this.enqueueTransition(() => this.commitCatalogTransition(
-        { kind: "command.admission", effect: "pre_effect", operationId: commandId, instanceId: this.id },
-        () => {},
-      ));
-      this.catalogAdmissionOperationId = undefined;
-      await this.flushAdmissionAgentEvents();
-      if (this.classifyAgentInput(message) !== "extension_command") {
-        const error = new Error("Registered extension command changed during admission");
-        const rejectedAt = this.timestamp();
-        await this.enqueueTransition(() => this.commitCatalogTransition(
-          { kind: "command.rejected", effect: "post_effect", operationId: commandId, instanceId: this.id },
-          () => {
-            this.state.lastError = error.message;
-            this.touch(rejectedAt);
-          },
-          () => {
-            this.appendEvent("command.rejected", { operationId: commandId, reason: "command_catalog_changed", error: error.message }, rejectedAt);
-            this.appendStateEvent("command_rejected", rejectedAt);
-          },
-        ));
-        throw error;
-      }
-
-      const acceptedAt = this.timestamp();
-      await this.enqueueTransition(() => this.commitCatalogTransition(
-        { kind: "command.accepted", effect: "pre_effect", operationId: commandId, instanceId: this.id },
-        () => {
-          this.state.lastError = undefined;
-          this.touch(acceptedAt);
-        },
-        () => {
-          this.appendEvent("command.accepted", {
-            operationId: commandId,
-            delivery: "prompt",
-            queued: false,
-            acceptedAt,
-          }, acceptedAt);
-          this.appendStateEvent("extension_command_accepted", acceptedAt);
-        },
-      ));
-      if (this.pendingAdmission?.token === admissionToken) this.pendingAdmission.waitBeforeStop = false;
-
-      const runtimeGeneration = this.runtimeGenerationValue;
-      const agentStartsBeforeCommand = this.agentStartCount;
-      const parentRunning = this.state.execution === "running" || this.agentState().isStreaming;
-
-      let runtimePromise: Promise<void>;
-      try {
-        runtimePromise = this.invokeAgent<void>("command.submit", { operationId: commandId, message, delivery: "prompt" });
-      } catch (error) {
-        runtimePromise = Promise.reject(error);
-      }
-      const observedPromise = runtimePromise.then(async () => {
-        await Promise.resolve();
-        await this.transitionTail;
-        if (this.runtimeGenerationValue !== runtimeGeneration || this.state.lifecycle !== "active") return;
-        const commandStartedRun = this.agentStartCount > agentStartsBeforeCommand
-          || (!parentRunning && this.agentState().isStreaming);
-        if (commandStartedRun) return;
-        await this.enqueueTransition(() => this.commitCatalogTransition(
-          { kind: "command.handled", effect: "post_effect", operationId: commandId, instanceId: this.id },
-          () => { this.touch(); },
-          () => {
-            this.appendEvent("command.handled", { operationId: commandId, kind: "extension_command" });
-            this.appendStateEvent("extension_command_handled");
-          },
-        ));
-      }).catch(async (error: unknown) => {
-        if (this.runtimeGenerationValue !== runtimeGeneration || this.state.lifecycle !== "active") return;
-        if (this.catalogPort) {
-          try { this.catalogPort.assertWritable(); } catch { return; }
-        }
-        const messageText = safeWireText(errorMessage(error), 2_048);
-        await this.enqueueTransition(async () => {
-          this.appendEvent("instance.error", { operationId: commandId, source: "command_background", error: messageText });
-        });
-      });
-
-      let trackedPromise!: Promise<void>;
-      trackedPromise = observedPromise.finally(() => {
-        release();
-        this.backgroundTasks.delete(trackedPromise);
-      });
-      this.backgroundTasks.add(trackedPromise);
-      return {
-        accepted: true,
-        instanceId: this.id,
-        operationId: commandId,
-        kind: "extension_command",
-        delivery: "prompt",
-        queued: false,
-        acceptedAt,
-      };
-    } catch (error) {
-      this.catalogAdmissionOperationId = undefined;
-      void this.flushAdmissionAgentEvents().catch(() => {});
-      release();
-      throw error;
-    }
   }
 
   async dequeue(operationId = this.createCommandId()): Promise<QueueDequeueReceipt> {
@@ -3421,15 +3261,6 @@ export class ManagedInstance {
   private timestamp(): string {
     return this.now().toISOString();
   }
-}
-
-function resolveDelivery(mode: DeliveryMode, running: boolean): Exclude<DeliveryMode, "auto"> {
-  if (mode === "auto") return running ? "steer" : "prompt";
-  if (running && mode === "prompt") throw new InvalidDeliveryModeError(mode, running);
-  if (!running && (mode === "steer" || mode === "followUp")) {
-    throw new InvalidDeliveryModeError(mode, running);
-  }
-  return mode;
 }
 
 function recordValue(value: unknown): Record<string, unknown> | undefined {
