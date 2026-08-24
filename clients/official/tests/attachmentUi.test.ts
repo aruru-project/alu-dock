@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict'
-import { appendRestoredQueue, attachmentsAfterSubmit, displayedConversationImageResource, moveAttachmentPreviewResource } from '../src/lib/attachmentDraft.ts'
+import { appendRestoredQueue, attachmentUploadMatches, attachmentUploadTarget, attachmentsAfterSubmit, bindLocalAttachment, displayedConversationImageResource, moveAttachmentPreviewResource } from '../src/lib/attachmentDraft.ts'
 import { projectConversation } from '../src/lib/conversation.ts'
 import { draftAfterSubmit } from '../src/lib/uiBoundaries.ts'
-import { decodeLocalUiState } from '../src/lib/localState.ts'
+import { decodeLocalUiState, persistLocalUiState } from '../src/lib/localState.ts'
 import { persistDeviceNamePreference, readDeviceNamePreference, resolveDeviceName } from '../src/lib/deviceName.ts'
-import type { AttachmentDto, ConversationBootstrap, QueueItem } from '../src/lib/types.ts'
+import type { AttachmentDto, ConversationBootstrap, QueueItem, Work } from '../src/lib/types.ts'
 
 const attachment: AttachmentDto = {
   fileId: '45c6f7e8-9462-4fde-8ab9-1829dff71234',
@@ -21,7 +21,7 @@ const attachment: AttachmentDto = {
     activeHostId: 'host-a',
     hosts: { 'host-a': { selectedWorkId: 'work-a', drafts: { 'work-a': 'still here' }, detailMode: false } },
   }))
-  assert.equal(migrated?.schemaVersion, 2)
+  assert.equal(migrated?.schemaVersion, 3)
   assert.equal(migrated?.hosts['host-a']?.drafts['work-a'], 'still here')
   assert.equal(Object.keys(migrated?.hosts['host-a']?.attachments ?? {}).length, 0)
 }
@@ -33,6 +33,34 @@ const attachment: AttachmentDto = {
     hosts: { 'host-a': { selectedWorkId: 'work-a', drafts: {}, attachments: { 'work-a': [attachment] }, detailMode: true } },
   }))
   assert.deepEqual(restored?.hosts['host-a']?.attachments['work-a'], [attachment])
+}
+
+{
+  const work = { id: 'remote-work', hostId: 'subhost-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 7 } as Work
+  const target = attachmentUploadTarget(work, { hostId: 'main-host', selectionGeneration: 3 })
+  const bound = bindLocalAttachment(attachment, 'native-token', target)
+  assert.equal(attachmentUploadMatches(bound.localUpload, target), true)
+  for (const changed of [
+    { ...target, instanceId: 'other-work' },
+    { ...target, machineHostId: 'subhost-b' },
+    { ...target, runtimeGeneration: 8 },
+  ]) assert.equal(attachmentUploadMatches(bound.localUpload, changed), false)
+
+  const restored = decodeLocalUiState(JSON.stringify({
+    schemaVersion: 3,
+    activeHostId: 'main-host',
+    hosts: { 'main-host': { selectedWorkId: 'remote-work', drafts: {}, attachments: { 'remote-work': [bound] }, recentWorkspaces: {}, detailMode: true } },
+  }))
+  assert.deepEqual(restored?.hosts['main-host']?.attachments['remote-work']?.[0]?.localUpload, target)
+  assert.equal(restored?.hosts['main-host']?.attachments['remote-work']?.[0]?.localUpload?.sourceToken, undefined, 'native source handles must not survive a process restart')
+
+  let serialized = ''
+  assert.equal(persistLocalUiState({ setItem: (_key: string, value: string) => { serialized = value } } as Storage, {
+    schemaVersion: 3,
+    activeHostId: 'main-host',
+    hosts: { 'main-host': { selectedWorkId: 'remote-work', drafts: {}, attachments: { 'remote-work': [bound] }, recentWorkspaces: {}, detailMode: true } },
+  }), true)
+  assert.equal(serialized.includes('native-token'), false)
 }
 
 {

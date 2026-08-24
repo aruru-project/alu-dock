@@ -161,6 +161,7 @@ struct UploadRequest<'a> {
 #[serde(rename_all = "camelCase")]
 struct UploadParams<'a> {
     operation_id: &'a str,
+    instance_id: &'a str,
     name: &'a str,
     size_bytes: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -205,6 +206,7 @@ impl DockClient {
         &self,
         path: impl AsRef<Path>,
         operation_id: &str,
+        instance_id: &str,
         name: &str,
         media_type: Option<&str>,
         cancellation: &AttachmentUploadCancellation,
@@ -213,7 +215,7 @@ impl DockClient {
     where
         F: FnMut(AttachmentUploadProgress),
     {
-        validate_header_fields(operation_id, name, media_type)?;
+        validate_header_fields(operation_id, instance_id, name, media_type)?;
         let path = path.as_ref();
         let prepared = prehash_file(path, cancellation, &mut on_progress).await?;
 
@@ -235,6 +237,7 @@ impl DockClient {
                     request_type: "attachment.upload",
                     params: UploadParams {
                         operation_id,
+                        instance_id,
                         name,
                         size_bytes: prepared.size_bytes,
                         media_type,
@@ -633,10 +636,21 @@ fn wire_control(character: char) -> bool {
     matches!(character as u32, 0x00..=0x1f | 0x7f..=0x9f)
 }
 
-fn validate_header_fields(operation_id: &str, name: &str, media_type: Option<&str>) -> Result<()> {
+fn validate_header_fields(
+    operation_id: &str,
+    instance_id: &str,
+    name: &str,
+    media_type: Option<&str>,
+) -> Result<()> {
     if !safe_wire_text(operation_id, 128) {
         return Err(ClientError::Protocol(
             "attachment operation ID must be non-empty, control-free, and at most 128 characters"
+                .into(),
+        ));
+    }
+    if !safe_wire_text(instance_id, 512) {
+        return Err(ClientError::Protocol(
+            "attachment instance ID must be non-empty, control-free, and at most 512 characters"
                 .into(),
         ));
     }
@@ -719,6 +733,7 @@ mod tests {
             request_type: "attachment.upload",
             params: UploadParams {
                 operation_id: "operation",
+                instance_id: "remote-work",
                 name: "display.txt",
                 size_bytes: 3,
                 media_type: None,
@@ -727,6 +742,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(value["type"], "attachment.upload");
+        assert_eq!(value["params"]["instanceId"], "remote-work");
         assert_eq!(value["params"]["name"], "display.txt");
         assert!(value["params"].get("path").is_none());
         assert!(value["params"].get("mediaType").is_none());

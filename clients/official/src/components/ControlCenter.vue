@@ -18,6 +18,7 @@ import { currentHostCall, requireHostContext } from '../lib/hostResult'
 import { userErrorMessage as errorMessage } from '../lib/userError'
 import { catalogSourceLabel, commandGoesToComposer, filterCatalogCommands, filterCommandPaletteItems } from '../lib/commandSuggest'
 import { localControlCommands, type ControlSection, type LocalControlCommand } from '../lib/localCommands'
+import { generationSectionState as resolveGenerationSectionState, pendingGenerationCaches, type GenerationCache, type GenerationCacheState } from '../lib/generationCaches'
 import { settingDescription, settingLabel, settingOptionLabel, settingValueLabel } from '../lib/settingLabels'
 import { workPresence } from '../lib/uiBoundaries'
 import SessionManager from './SessionManager.vue'
@@ -109,9 +110,12 @@ const tools = ref<ToolsResult | null>(null)
 const resources = ref<ResourcesResult | null>(null)
 const settings = ref<SettingsResult | null>(null)
 const loading = ref<ControlSection | null>(null)
+const generationCaches = ref(pendingGenerationCaches())
+const generationSectionState = computed<GenerationCacheState>(() => resolveGenerationSectionState(props.section, generationCaches.value))
 const pending = ref('')
 const error = ref('')
 let loadEpoch = 0
+let generationRefreshEpoch = 0
 
 const selectedCommand = computed(() => catalog.commands.find((item) => item.referenceId === selectedCommandReferenceId.value) ?? null)
 const selectedSetting = computed(() => settings.value?.settings.find((item) => item.key === selectedSettingKey.value) ?? null)
@@ -184,25 +188,31 @@ watch([
   () => app.activeHostId,
   () => app.hostContext?.selectionGeneration,
   () => props.work.id,
+  () => props.work.hostId,
   () => props.work.ownerHostEpoch,
   () => props.work.runtimeGeneration,
 ], () => {
   if (app.hostContext) commandConsole.bindContext(app.hostContext.hostId, app.hostContext.selectionGeneration, props.work)
+  loadEpoch += 1
+  catalog.invalidate()
   models.value = null
   tools.value = null
   resources.value = null
   settings.value = null
+  generationCaches.value = pendingGenerationCaches()
   selectedCommandReferenceId.value = ''
   commandDetailMode.value = ''
   argumentCompletions.value = []
   commandContentText.value = ''
   error.value = ''
-  void loadSection(props.section)
+  void refreshGenerationCaches()
+  if (props.section === 'models' || props.section === 'thinking') void loadSection(props.section)
 }, { immediate: true })
 watch(() => props.section, (section) => {
   selectedSettingKey.value = ''
   optionCursor.value = 0
-  void loadSection(section)
+  const managed = ['commands', 'resources', 'tools', 'settings'].includes(section)
+  if (!managed || generationCaches.value[section as GenerationCache] !== 'loading') void loadSection(section)
   if (section === 'thinking') void nextTick(() => thinkingPanel.value?.focus())
 }, { immediate: true })
 
@@ -409,6 +419,53 @@ function applyLiveEvent(event: ProjectedEvent) {
 
 defineExpose({ reconcileDomain, applyLiveEvent })
 
+function currentGenerationKey() {
+  const context = app.hostContext
+  if (!context) return ''
+  return JSON.stringify([
+    context.hostId,
+    context.selectionGeneration,
+    props.work.id,
+    props.work.hostId ?? '',
+    props.work.ownerHostEpoch ?? '',
+    props.work.runtimeGeneration,
+  ])
+}
+
+async function refreshGenerationCaches() {
+  const context = app.hostContext
+  const key = currentGenerationKey()
+  if (!context || !key) {
+    generationCaches.value = { commands: 'error', resources: 'error', tools: 'error', settings: 'error' }
+    return
+  }
+  const epoch = ++generationRefreshEpoch
+  const work = props.work
+  const settled = await Promise.allSettled([
+    catalog.ensure(work, context, true),
+    getResources(work.id, context),
+    listTools(work.id, context),
+    getSettings(work.id, context),
+  ] as const)
+  if (epoch !== generationRefreshEpoch || currentGenerationKey() !== key) return
+
+  const [commandsResult, resourcesResult, toolsResult, settingsResult] = settled
+  generationCaches.value = {
+    commands: commandsResult.status === 'fulfilled' && commandsResult.value ? 'ready' : 'error',
+    resources: resourcesResult.status === 'fulfilled' ? 'ready' : 'error',
+    tools: toolsResult.status === 'fulfilled' ? 'ready' : 'error',
+    settings: settingsResult.status === 'fulfilled' ? 'ready' : 'error',
+  }
+  if (resourcesResult.status === 'fulfilled') resources.value = resourcesResult.value
+  if (toolsResult.status === 'fulfilled') {
+    tools.value = toolsResult.value
+    emit('snapshot', toolsResult.value.instance)
+  }
+  if (settingsResult.status === 'fulfilled') settings.value = settingsResult.value
+  const failed = settled.find((result) => result.status === 'rejected')
+  if (failed?.status === 'rejected') error.value = errorMessage(failed.reason)
+}
+
 async function loadSection(section: ControlSection, force = false): Promise<boolean> {
   if (['sessions', 'tree', 'new-session', 'rename-session', 'compact-session', 'reload-session'].includes(section)) return true
   const dataExists = section === 'commands'
@@ -423,12 +480,18 @@ async function loadSection(section: ControlSection, force = false): Promise<bool
   if (dataExists && !force) return true
   const epoch = ++loadEpoch
   const workId = props.work.id
+  if (section === 'commands' || section === 'tools' || section === 'settings') {
+    generationCaches.value = { ...generationCaches.value, [section]: 'loading' }
+  } else if (section === 'resources') {
+    generationCaches.value = { ...generationCaches.value, resources: 'loading', tools: 'loading' }
+  }
   loading.value = section === 'commands' ? null : section
   error.value = ''
   try {
     if (section === 'commands') {
-      await catalog.ensure(props.work, requireHostContext(app), force)
+      const loaded = await catalog.ensure(props.work, requireHostContext(app), force)
       if (epoch !== loadEpoch || props.work.id !== workId) return false
+      generationCaches.value = { ...generationCaches.value, commands: loaded ? 'ready' : 'error' }
     } else if (section === 'models' || section === 'thinking') {
       const result = await currentHostCall(app, (context) => listModels(workId, context))
       if (epoch !== loadEpoch || props.work.id !== workId) return false
@@ -443,6 +506,7 @@ async function loadSection(section: ControlSection, force = false): Promise<bool
       const result = await currentHostCall(app, (context) => listTools(workId, context))
       if (epoch !== loadEpoch || props.work.id !== workId) return false
       tools.value = result
+      generationCaches.value = { ...generationCaches.value, tools: 'ready' }
       emit('snapshot', result.instance)
     } else if (section === 'resources') {
       const [resourceResult, toolResult] = await Promise.all([
@@ -452,18 +516,25 @@ async function loadSection(section: ControlSection, force = false): Promise<bool
       if (epoch !== loadEpoch || props.work.id !== workId) return false
       resources.value = resourceResult
       tools.value = toolResult
+      generationCaches.value = { ...generationCaches.value, resources: 'ready', tools: 'ready' }
       emit('snapshot', toolResult.instance)
     } else {
       const result = await currentHostCall(app, (context) => getSettings(workId, context))
       if (epoch !== loadEpoch || props.work.id !== workId) return false
       settings.value = result
+      generationCaches.value = { ...generationCaches.value, settings: 'ready' }
     }
     return true
   } catch (cause) {
     if (epoch === loadEpoch && props.work.id === workId) {
       if (section === 'commands') {
         catalog.invalidate()
-      } else error.value = errorMessage(cause)
+        generationCaches.value = { ...generationCaches.value, commands: 'error' }
+      } else {
+        error.value = errorMessage(cause)
+        if (section === 'resources') generationCaches.value = { ...generationCaches.value, resources: 'error', tools: 'error' }
+        else if (section === 'tools' || section === 'settings') generationCaches.value = { ...generationCaches.value, [section]: 'error' }
+      }
     }
     return false
   } finally {
@@ -637,9 +708,10 @@ function isCurrentModel(model: ModelInfo) {
   <div class="control-center-port">
     <div v-if="outcomeUnknown" class="alu-dialog-error"><span>上一次修改的结果还没有确认，请先刷新当前状态。</span><button @click="reconcileControl">刷新确认</button></div>
     <div v-if="error" class="alu-dialog-error">{{ error }}</div>
-    <div v-if="loading === section" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取…</div>
+    <div v-if="loading === section || generationSectionState === 'loading'" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取当前工作状态…</div>
+    <div v-else-if="generationSectionState === 'error'" class="alu-dialog-loading">当前工作状态没有读取完整。<button type="button" @click="loadSection(section, true)">重试</button></div>
 
-    <template v-if="section === 'commands'">
+    <template v-else-if="section === 'commands'">
       <template v-if="!commandDetailMode">
         <div class="cmd-palette-search-wrap">
           <span class="cmd-palette-search-icon"><Search :size="15" /></span>

@@ -307,6 +307,7 @@ impl DockClient {
                 kind: String::new(),
                 version: None,
                 pi_session_id: String::new(),
+                session_file: None,
                 model: None,
                 thinking_level: None,
             },

@@ -90,10 +90,10 @@ pub use sessions::{
     CompletedConversationEntry, ConversationContentChunk, ConversationContentPage,
     ConversationHistoryEntry, ConversationHistoryPage, ConversationImageBytes,
     ConversationPreviewPage, MAX_CONVERSATION_IMAGE_BYTES, NavigateOptions, SessionCompaction,
-    SessionCompactionResult, SessionForkResult, SessionHistoryPage, SessionInfo, SessionListResult,
-    SessionNameResult, SessionNavigateResult, SessionReloadResult, SessionReplacementResult,
-    SessionScope, SessionTree, TreeDisplayClass, TreeNode, TreeNodeKind, TreeNodeRole,
-    TreeNodeState,
+    SessionCompactionResult, SessionForkResult, SessionHistoryPage, SessionInfo,
+    SessionInventoryDiagnostic, SessionInventoryResult, SessionListResult, SessionNameResult,
+    SessionNavigateResult, SessionReloadResult, SessionReplacementResult, SessionScope,
+    SessionTree, TreeDisplayClass, TreeNode, TreeNodeKind, TreeNodeRole, TreeNodeState,
 };
 pub use storage::{IdentityStore, PairingMetadata, PendingPairing, StoredPairing};
 pub use workspace_files::{

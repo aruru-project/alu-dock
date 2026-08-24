@@ -1,14 +1,15 @@
-import type { AttachmentDto } from './types'
+import type { AttachmentDto, MachinePlatform } from './types'
 
 export const LOCAL_UI_STATE_KEY = 'aludock.uiState'
 export const LEGACY_SELECTED_WORK_KEY = 'aludock.selectedWork'
 export const LEGACY_DRAFT_KEY = 'aludock.draft'
-export const LOCAL_UI_STATE_SCHEMA_VERSION = 2 as const
+export const LOCAL_UI_STATE_SCHEMA_VERSION = 3 as const
 
 export interface HostLocalUiState {
   selectedWorkId: string | null
   drafts: Record<string, string>
   attachments: Record<string, AttachmentDto[]>
+  recentWorkspaces: Record<string, string[]>
   detailMode: boolean
 }
 
@@ -25,11 +26,14 @@ export interface LegacyLocalUiState {
 
 const MAX_ID_LENGTH = 512
 const MAX_DRAFT_LENGTH = 1_000_000
+const MAX_WORKSPACE_PATH_LENGTH = 16_384
+const MAX_RECENT_MACHINES = 64
+export const MAX_RECENT_WORKSPACES_PER_MACHINE = 8
 export function emptyLocalUiState(): LocalUiState {
   return { schemaVersion: LOCAL_UI_STATE_SCHEMA_VERSION, activeHostId: null, hosts: dictionary<HostLocalUiState>() }
 }
 
-/** Pure, fail-soft decoder with an in-place schema-v1 migration. */
+/** Pure, fail-soft decoder that upgrades supported historical schemas in memory. */
 export function decodeLocalUiState(serialized: string | null): LocalUiState | null {
   if (serialized === null) return null
   try {
@@ -53,7 +57,13 @@ export function migrateLocalUiState(
     if (selectedWorkId && persisted === null && typeof legacy.draft === 'string' && legacy.draft.length > 0) {
       drafts[selectedWorkId] = legacy.draft.slice(0, MAX_DRAFT_LENGTH)
     }
-    next.hosts[hostId] = { selectedWorkId, drafts, attachments: dictionary<AttachmentDto[]>(), detailMode: true }
+    next.hosts[hostId] = {
+      selectedWorkId,
+      drafts,
+      attachments: dictionary<AttachmentDto[]>(),
+      recentWorkspaces: dictionary<string[]>(),
+      detailMode: true,
+    }
   }
   return next
 }
@@ -85,7 +95,7 @@ export function readAndMigrateLocalUiState(storage: Storage | null, hostId: stri
 export function persistLocalUiState(storage: Storage | null, state: LocalUiState): boolean {
   try {
     if (!storage) return false
-    storage.setItem(LOCAL_UI_STATE_KEY, JSON.stringify(state))
+    storage.setItem(LOCAL_UI_STATE_KEY, JSON.stringify(state, (key, value) => key === 'sourceToken' ? undefined : value))
     return true
   } catch {
     return false
@@ -93,7 +103,9 @@ export function persistLocalUiState(storage: Storage | null, state: LocalUiState
 }
 
 function normalizeLocalUiState(value: unknown): LocalUiState | null {
-  if (!isRecord(value) || (value.schemaVersion !== 1 && value.schemaVersion !== 2) || !isRecord(value.hosts)) return null
+  if (!isRecord(value)
+    || (value.schemaVersion !== 1 && value.schemaVersion !== 2 && value.schemaVersion !== 3)
+    || !isRecord(value.hosts)) return null
   const hosts = dictionary<HostLocalUiState>()
   for (const [hostId, hostValue] of Object.entries(value.hosts)) {
     if (!safeId(hostId) || !isRecord(hostValue) || !isRecord(hostValue.drafts)) continue
@@ -102,17 +114,26 @@ function normalizeLocalUiState(value: unknown): LocalUiState | null {
       if (safeId(workId) && typeof draft === 'string') drafts[workId] = draft.slice(0, MAX_DRAFT_LENGTH)
     }
     const attachments = dictionary<AttachmentDto[]>()
-    if (value.schemaVersion === 2 && isRecord(hostValue.attachments)) {
+    if ((value.schemaVersion === 2 || value.schemaVersion === 3) && isRecord(hostValue.attachments)) {
       for (const [workId, raw] of Object.entries(hostValue.attachments)) {
         if (!safeId(workId) || !Array.isArray(raw)) continue
         const valid = raw.map(normalizeAttachment).filter((item): item is AttachmentDto => item !== null)
         if (valid.length) attachments[workId] = uniqueAttachments(valid)
       }
     }
+    const recentWorkspaces = dictionary<string[]>()
+    if (value.schemaVersion === 3 && isRecord(hostValue.recentWorkspaces)) {
+      for (const [machineHostId, rawPaths] of Object.entries(hostValue.recentWorkspaces).slice(0, MAX_RECENT_MACHINES)) {
+        if (!safeId(machineHostId) || !Array.isArray(rawPaths)) continue
+        const paths = uniqueWorkspacePaths(rawPaths)
+        if (paths.length) recentWorkspaces[machineHostId] = paths
+      }
+    }
     hosts[hostId] = {
       selectedWorkId: safeId(hostValue.selectedWorkId),
       drafts,
       attachments,
+      recentWorkspaces,
       detailMode: typeof hostValue.detailMode === 'boolean' ? hostValue.detailMode : true,
     }
   }
@@ -131,6 +152,7 @@ function normalizeAttachment(value: unknown): AttachmentDto | null {
     || typeof value.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(value.sha256)
     || typeof value.storedAt !== 'string'
     || (value.mediaType !== undefined && typeof value.mediaType !== 'string')) return null
+  const localUpload = normalizeLocalAttachmentUpload(value.localUpload)
   return {
     fileId: value.fileId,
     name: value.name,
@@ -138,6 +160,25 @@ function normalizeAttachment(value: unknown): AttachmentDto | null {
     ...(typeof value.mediaType === 'string' ? { mediaType: value.mediaType } : {}),
     sha256: value.sha256,
     storedAt: value.storedAt,
+    ...(localUpload ? { localUpload } : {}),
+  }
+}
+
+function normalizeLocalAttachmentUpload(value: unknown): AttachmentDto['localUpload'] | null {
+  if (!isRecord(value)
+    || typeof value.hostId !== 'string' || !safeId(value.hostId)
+    || typeof value.selectionGeneration !== 'number' || !Number.isSafeInteger(value.selectionGeneration) || value.selectionGeneration < 1
+    || typeof value.instanceId !== 'string' || !safeId(value.instanceId)
+    || typeof value.machineHostId !== 'string' || !safeId(value.machineHostId)
+    || typeof value.ownerHostEpoch !== 'string' || !value.ownerHostEpoch
+    || typeof value.runtimeGeneration !== 'number' || !Number.isSafeInteger(value.runtimeGeneration) || value.runtimeGeneration < 0) return null
+  return {
+    hostId: value.hostId,
+    selectionGeneration: value.selectionGeneration,
+    instanceId: value.instanceId,
+    machineHostId: value.machineHostId,
+    ownerHostEpoch: value.ownerHostEpoch,
+    runtimeGeneration: value.runtimeGeneration,
   }
 }
 
@@ -151,10 +192,13 @@ function cloneLocalUiState(state: LocalUiState): LocalUiState {
   for (const [hostId, host] of Object.entries(state.hosts)) {
     const attachments = dictionary<AttachmentDto[]>()
     for (const [workId, items] of Object.entries(host.attachments)) attachments[workId] = items.map((item) => ({ ...item }))
+    const recentWorkspaces = dictionary<string[]>()
+    for (const [machineHostId, paths] of Object.entries(host.recentWorkspaces)) recentWorkspaces[machineHostId] = [...paths]
     hosts[hostId] = {
       selectedWorkId: host.selectedWorkId,
       drafts: Object.assign(dictionary<string>(), host.drafts),
       attachments,
+      recentWorkspaces,
       detailMode: host.detailMode,
     }
   }
@@ -163,6 +207,50 @@ function cloneLocalUiState(state: LocalUiState): LocalUiState {
     activeHostId: state.activeHostId,
     hosts,
   }
+}
+
+export function rememberRecentWorkspace(
+  state: LocalUiState,
+  hostId: string,
+  machineHostId: string,
+  path: string,
+  platform?: MachinePlatform,
+): boolean {
+  const host = state.hosts[hostId]
+  if (!host || !safeId(machineHostId) || !safeWorkspacePath(path)) return false
+  if (!Object.hasOwn(host.recentWorkspaces, machineHostId)) {
+    const machineIds = Object.keys(host.recentWorkspaces)
+    if (machineIds.length >= MAX_RECENT_MACHINES) delete host.recentWorkspaces[machineIds[0]!]
+  }
+  const current = host.recentWorkspaces[machineHostId] ?? []
+  const key = workspacePathKey(path, platform)
+  host.recentWorkspaces[machineHostId] = [
+    path,
+    ...current.filter((candidate) => workspacePathKey(candidate, platform) !== key),
+  ].slice(0, MAX_RECENT_WORKSPACES_PER_MACHINE)
+  return true
+}
+
+function uniqueWorkspacePaths(values: unknown[]): string[] {
+  const seen = new Set<string>()
+  const paths: string[] = []
+  for (const value of values) {
+    if (!safeWorkspacePath(value) || seen.has(value)) continue
+    seen.add(value)
+    paths.push(value)
+    if (paths.length === MAX_RECENT_WORKSPACES_PER_MACHINE) break
+  }
+  return paths
+}
+
+function workspacePathKey(path: string, platform?: MachinePlatform) {
+  if (platform !== 'windows') return path
+  const windows = path.replaceAll('/', '\\')
+  return (/^[a-z]:\\$/i.test(windows) ? windows : windows.replace(/\\+$/u, '')).toLocaleLowerCase('en-US')
+}
+
+function safeWorkspacePath(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= MAX_WORKSPACE_PATH_LENGTH
 }
 
 function safeId(value: unknown): string | null {

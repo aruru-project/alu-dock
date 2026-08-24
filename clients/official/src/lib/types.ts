@@ -274,6 +274,17 @@ export type ContentBlock =
   | { type: 'tool_result'; toolCallId: string; toolName: string; text: string; isError: boolean; publishedFile?: PublishedFileDto; omittedFields?: string[] }
   | { type: 'omitted'; kind: string; description: string }
 
+export interface LocalAttachmentUpload {
+  hostId: string
+  selectionGeneration: number
+  instanceId: string
+  machineHostId: string
+  ownerHostEpoch: string
+  runtimeGeneration: number
+  /** Process-local source handle. It is deliberately removed when state is restored from storage. */
+  sourceToken?: string
+}
+
 export interface AttachmentDto {
   fileId: string
   name: string
@@ -281,6 +292,8 @@ export interface AttachmentDto {
   mediaType?: string
   sha256: string
   storedAt: string
+  /** Client-only provenance for uploads selected on this device. Never sent as protocol data. */
+  localUpload?: LocalAttachmentUpload
 }
 
 export interface ConversationRecord {
@@ -321,6 +334,9 @@ export interface SelectedAttachment {
 export type AttachmentUploadPhase = 'hashing' | 'uploading' | 'finalizing'
 export interface AttachmentUploadProgress extends HostContext {
   workId: string
+  machineHostId: string
+  ownerHostEpoch: string
+  runtimeGeneration: number
   token: string
   phase: AttachmentUploadPhase
   bytesProcessed: number
@@ -398,6 +414,21 @@ export interface SessionListResult extends HostContext {
   truncated: boolean
   hostEpoch: string
   runtimeGeneration: number
+}
+export interface SessionInventoryInfo {
+  token: string
+  name?: string
+  firstUserMessage?: string
+  cwd: string
+  updatedAt?: string
+}
+export interface SessionInventoryResult extends HostContext {
+  sessions: SessionInventoryInfo[]
+  total: number
+  truncated: boolean
+  incomplete: boolean
+  machineHostId: string
+  hostEpoch: string
 }
 export interface SessionReplacementResult { cancelled: boolean; instance: Work }
 export interface StopResult {

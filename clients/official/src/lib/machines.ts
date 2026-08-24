@@ -12,6 +12,13 @@ export function subhostMachineName(machines: readonly MachineDto[], hostId: stri
   return machine?.kind === 'subhost' ? machine.name : ''
 }
 
+export function machineDisplayLabel(machine: MachineDto) {
+  const kind = machine.kind === 'main' ? 'Main' : 'SubHost'
+  return machine.name.trim().toLocaleLowerCase('en-US') === kind.toLocaleLowerCase('en-US')
+    ? machine.name
+    : `${machine.name} · ${kind}`
+}
+
 export function defaultMachineHostId(machines: readonly MachineDto[]) {
   const main = machines.find((machine) => machine.kind === 'main' && machine.available)
   return main?.hostId ?? machines.find((machine) => machine.available)?.hostId ?? ''

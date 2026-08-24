@@ -7,9 +7,9 @@ use uuid::Uuid;
 use crate::{
     ActiveInteraction, ClientError, DockClient, Result,
     capabilities::{
-        CATALOG_MAINTENANCE as FORGET_CAPABILITIES, INSTANCE_CATALOG as INSTANCE_CAPABILITIES,
-        INSTANCE_REOPEN as REOPEN_CAPABILITIES, MACHINES as MACHINE_CAPABILITIES,
-        WORKSPACE_LIST as WORKSPACE_CAPABILITIES,
+        CATALOG_MAINTENANCE as FORGET_CAPABILITIES, INSTANCE_ADOPT as ADOPT_CAPABILITIES,
+        INSTANCE_CATALOG as INSTANCE_CAPABILITIES, INSTANCE_REOPEN as REOPEN_CAPABILITIES,
+        MACHINES as MACHINE_CAPABILITIES, WORKSPACE_LIST as WORKSPACE_CAPABILITIES,
     },
     extension_ui::{validate_active_interaction, validate_extension_status},
 };
@@ -64,6 +64,8 @@ pub struct ExecutorSnapshot {
     pub kind: String,
     pub version: Option<String>,
     pub pi_session_id: String,
+    #[serde(skip_serializing)]
+    pub session_file: Option<String>,
     pub model: Option<ModelIdentity>,
     pub thinking_level: Option<String>,
 }
@@ -298,6 +300,21 @@ struct WorkspaceListParams<'a> {
 struct CreateInstanceParams<'a> {
     operation_id: &'a str,
     cwd: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trust_challenge_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    project_trust_decision: Option<ProjectTrustDecision>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdoptInstanceParams<'a> {
+    operation_id: &'a str,
+    session_file: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -589,6 +606,57 @@ impl DockClient {
         Ok(result.instance)
     }
 
+    pub async fn adopt_instance_for_machine(
+        &self,
+        session_file: &str,
+        name: Option<&str>,
+        continuation: Option<(&str, ProjectTrustDecision)>,
+        operation_id: Option<&str>,
+        target_host_id: Option<&str>,
+        expected_host_epoch: &str,
+    ) -> Result<InstanceSnapshot> {
+        let generated_operation_id = Uuid::new_v4().to_string();
+        let operation_id = operation_id.unwrap_or(&generated_operation_id);
+        let (trust_challenge_id, project_trust_decision) = continuation
+            .map(|(challenge, decision)| (Some(challenge), Some(decision)))
+            .unwrap_or((None, None));
+        let result: InstanceResult = self
+            .request_on_host_epoch(
+                "instance.adopt",
+                &AdoptInstanceParams {
+                    operation_id,
+                    session_file,
+                    name,
+                    host_id: target_host_id,
+                    trust_challenge_id,
+                    project_trust_decision,
+                },
+                ADOPT_CAPABILITIES,
+                Some(operation_id),
+                expected_host_epoch,
+            )
+            .await?;
+        result
+            .instance
+            .validate()
+            .map_err(|error| ClientError::EffectUnknown {
+                operation_id: operation_id.to_owned(),
+                message: error.to_string(),
+            })?;
+        if result.instance.creation_operation_id != operation_id
+            || result.instance.executor.session_file.as_deref() != Some(session_file)
+            || target_host_id
+                .is_some_and(|target| result.instance.host_id.as_deref() != Some(target))
+        {
+            return Err(ClientError::EffectUnknown {
+                operation_id: operation_id.to_owned(),
+                message: "adopted Work did not correlate to the requested operation, Session, and Machine"
+                    .into(),
+            });
+        }
+        Ok(result.instance)
+    }
+
     pub async fn stop_instance(
         &self,
         instance_id: &str,
@@ -772,6 +840,7 @@ mod tests {
                     kind: "pi".into(),
                     version: None,
                     pi_session_id: "session".into(),
+                    session_file: Some("/sessions/session.jsonl".into()),
                     model: None,
                     thinking_level: None,
                 },
@@ -793,6 +862,13 @@ mod tests {
                 },
             },
         }
+    }
+
+    #[test]
+    fn snapshot_serialization_does_not_expose_session_file() {
+        let value = serde_json::to_value(stopped_result("operation", None).instance).unwrap();
+        assert!(value["executor"].get("sessionFile").is_none());
+        assert!(!value.to_string().contains("/sessions/session.jsonl"));
     }
 
     #[test]
@@ -851,6 +927,24 @@ mod tests {
             serde_json::json!({
                 "operationId": "operation-a",
                 "cwd": "/project",
+                "hostId": "subhost-a"
+            })
+        );
+
+        let adoption = serde_json::to_value(AdoptInstanceParams {
+            operation_id: "operation-b",
+            session_file: "C:\\sessions\\saved.jsonl",
+            name: None,
+            host_id: Some("subhost-a"),
+            trust_challenge_id: None,
+            project_trust_decision: None,
+        })
+        .unwrap();
+        assert_eq!(
+            adoption,
+            serde_json::json!({
+                "operationId": "operation-b",
+                "sessionFile": "C:\\sessions\\saved.jsonl",
                 "hostId": "subhost-a"
             })
         );

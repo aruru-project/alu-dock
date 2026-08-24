@@ -28,7 +28,6 @@ import {
   clearRestoredImages,
   cancelPairing,
   compactSession,
-  createWork,
   dequeueMessages,
   downloadDeliverable,
   forgetWork,
@@ -42,7 +41,6 @@ import {
   listModels,
   listSessions,
   listTools,
-  listWorkspace,
   loadSessionTree,
   loadConversation,
   loadAttachmentPreviewBytes,
@@ -77,8 +75,8 @@ import {
 } from './lib/bridge'
 import type { CreateWorkContinuation, SessionContext } from './lib/bridge'
 import { foldLiveDelta, hasCompactConversationContent, liveDeltaKey, liveProjectionTargetKey, mergeHydratedConversationRecords, projectConversation } from './lib/conversation'
-import { appendRestoredQueue, attachmentsAfterSubmit, displayedConversationImageResource, moveAttachmentPreviewResource } from './lib/attachmentDraft'
-import { defaultMachineHostId, machineSelectorVisible, machineWorkspaceRoots, machineWorkspaceRootSelectorVisible, machineWorkspaceStart, selectedMachineTarget, subhostMachineName, workspaceChildPath } from './lib/machines'
+import { appendRestoredQueue, attachmentUploadMatches, attachmentUploadTarget, attachmentsAfterSubmit, bindLocalAttachment, displayedConversationImageResource, moveAttachmentPreviewResource } from './lib/attachmentDraft'
+import { subhostMachineName } from './lib/machines'
 import {
   DEVICE_NAME_FALLBACK,
   browserDeviceNameStorage,
@@ -109,7 +107,7 @@ import {
 } from './lib/uiBoundaries'
 import { applySlashArgumentCompletion, applySlashCompletion, catalogSourceLabel, filterCatalogCommands, prefixSlashCommand, slashArgumentContext, slashCommandQuery } from './lib/commandSuggest'
 import { filterLocalControlCommands, localControlCommands, submittedLocalControl, type ControlSection, type LocalControlCommand } from './lib/localCommands'
-import type { AttachmentDto, AttachmentUploadProgress, ClientPreferences, CommandArgumentCompletion, CommandInfo, ConnectionKind, ConversationBootstrap, ConversationHistoryPage, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, HostConnectionProfile, HostContext, HostEndpoint, MachineDto, ProjectedEvent, QueueItem, SelectedAttachment, WindowsAwayDelay, Work, WorkspacePage } from './lib/types'
+import type { AttachmentDto, AttachmentUploadProgress, ClientPreferences, CommandArgumentCompletion, CommandInfo, ConnectionKind, ConversationBootstrap, ConversationHistoryPage, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, HostConnectionProfile, HostContext, HostEndpoint, LocalAttachmentUpload, MachineDto, ProjectedEvent, QueueItem, SelectedAttachment, WindowsAwayDelay, Work } from './lib/types'
 import {
   deliveryHistoryKey,
   downloadedDelivery,
@@ -127,6 +125,7 @@ import ControlCenter, { type ControlMutationDomain } from './components/ControlC
 import ConversationProcessParts from './components/ConversationProcessParts.vue'
 import ExtensionUiSurface from './components/ExtensionUiSurface.vue'
 import ImageZoomSurface from './components/ImageZoomSurface.vue'
+import NewWorkDialog from './components/NewWorkDialog.vue'
 import WorkspaceBrowser from './components/WorkspaceBrowser.vue'
 import { useAppStore } from './stores/app'
 import { useCommandCatalogStore } from './stores/command-catalog'
@@ -173,23 +172,12 @@ const output = ref<HTMLElement | null>(null)
 const outputAwayFromBottom = ref(false)
 const composerTextarea = ref<HTMLTextAreaElement | null>(null)
 const composerExpanded = ref(false)
-const workspace = ref<WorkspacePage | null>(null)
-const workspacePath = ref('')
-const workspaceSearch = ref('')
 const hostMachines = ref<MachineDto[]>([])
 const machineListError = ref('')
-const directoryMachineId = ref('')
-const directoryMachineSelectorVisible = computed(() => machineSelectorVisible(hostMachines.value))
-const directoryMachine = computed(() => hostMachines.value.find((machine) => machine.hostId === directoryMachineId.value))
-const directoryTargetHostId = computed(() => selectedMachineTarget(hostMachines.value, directoryMachineId.value))
-const directoryWorkspaceRoots = computed(() => machineWorkspaceRoots(directoryMachine.value))
-const directoryWorkspaceRootSelectorVisible = computed(() => machineWorkspaceRootSelectorVisible(directoryMachine.value))
-const workspaceLoading = ref(false)
-const workspaceError = ref<string | null>(null)
-let workspaceLoadEpoch = 0
+const newWorkMachinesLoading = ref(false)
+const newWorkMutationBusy = ref(false)
+const newWorkCompact = ref(true)
 let machineLoadEpoch = 0
-const creatingWork = ref(false)
-const trustContinuation = ref<CreateWorkContinuation | null>(null)
 const reopenTrustContinuation = ref<CreateWorkContinuation | null>(null)
 const reconcilingReopenWorkId = ref('')
 const realConversation = ref<ConversationItem[]>([])
@@ -262,8 +250,9 @@ let deliveryLoadEpoch = 0
 const restoredImageCounts = ref<Record<string, number>>({})
 const clearingRestoredImages = ref(false)
 const attachmentPicking = ref(false)
-type UploadDraft = SelectedAttachment & { state: 'hashing' | 'uploading' | 'finalizing' | 'error'; progress: number; error?: string }
+type UploadDraft = SelectedAttachment & { state: 'hashing' | 'uploading' | 'finalizing' | 'error'; progress: number; error?: string; target?: LocalAttachmentUpload }
 const uploadDrafts = ref<UploadDraft[]>([])
+const attachmentUploadAttempts = new Map<string, Promise<void>>()
 let composerResetEpoch = 0
 const toolsExpandedMutating = ref(false)
 const toolExpansionOverrides = ref<Record<string, boolean>>({})
@@ -497,6 +486,11 @@ function handlePopstate() {
     return
   }
   if (!backLayerOpen.value) return
+  if (directoryOpen.value && newWorkMutationBusy.value) {
+    window.history.pushState({ aluLayer: true }, '')
+    backLayerArmed = true
+    return
+  }
   backLayerPopClosing = true
   backLayerArmed = false
   if (confirmDialog.value) settleConfirm(false)
@@ -717,6 +711,7 @@ watch(
   () => {
     ++machineLoadEpoch
     hostMachines.value = []
+    directoryOpen.value = false
     machineListError.value = ''
     if (app.workDrawerOpen) void refreshHostMachinesQuietly()
   },
@@ -809,6 +804,65 @@ watch(
   },
 )
 
+watch(
+  () => {
+    const work = selected.value
+    const context = app.hostContext
+    return work && context ? JSON.stringify(attachmentUploadTarget(work, context)) : ''
+  },
+  async (targetKey, previousTargetKey) => {
+    if (!targetKey || targetKey === previousTargetKey) return
+    const work = selected.value
+    const context = app.hostContext
+    if (!work || !context) return
+    const target = attachmentUploadTarget(work, context)
+    const stalePending = uploadDrafts.value.filter((item) => item.target && !attachmentUploadMatches(item.target, target))
+    const staleAttempts = stalePending.map((item) => attachmentUploadAttempts.get(item.token)).filter((attempt): attempt is Promise<void> => !!attempt)
+    if (stalePending.length) {
+      composerResetEpoch += 1
+      await Promise.all(stalePending.map((item) => cancelAttachmentUpload(work.id, item.token, context).catch(() => false)))
+      await Promise.allSettled(staleAttempts)
+    }
+    const currentWork = selected.value
+    const currentHost = app.hostContext
+    if (!currentWork || !currentHost || JSON.stringify(attachmentUploadTarget(currentWork, currentHost)) !== targetKey) return
+
+    const retained: AttachmentDto[] = []
+    const retryByToken = new Map(uploadDrafts.value.map((item) => [item.token, item]))
+    let sourceWasLost = false
+    for (const attachment of draftAttachments.value) {
+      if (!attachment.localUpload || attachmentUploadMatches(attachment.localUpload, target)) {
+        retained.push(attachment)
+        continue
+      }
+      const token = attachment.localUpload.sourceToken
+      if (!token) {
+        sourceWasLost = true
+        removeAttachmentPreview(attachment.fileId)
+        continue
+      }
+      moveAttachmentPreview(attachment.fileId, token)
+      if (!retryByToken.has(token)) {
+        retryByToken.set(token, {
+          token,
+          name: attachment.name,
+          sizeBytes: attachment.sizeBytes,
+          mediaType: attachment.mediaType,
+          state: 'hashing',
+          progress: 0,
+        })
+      }
+    }
+    draftAttachments.value = retained
+    uploadDrafts.value = [...retryByToken.values()]
+    if (sourceWasLost) submissionError.value = '工作上下文已更新；请重新选择之前上传的附件。'
+    for (const item of uploadDrafts.value) {
+      if (!item.target || !attachmentUploadMatches(item.target, target)) void launchAttachmentUpload(item)
+    }
+  },
+  { immediate: true },
+)
+
 onMounted(async () => {
   window.addEventListener('keydown', handleGlobalModalKeydown, true)
   window.addEventListener('keydown', handleDesktopShortcut)
@@ -850,7 +904,15 @@ onMounted(async () => {
       await listen<AttachmentUploadProgress>('aludock://attachment-progress', ({ payload }) => {
         if (!app.contextMatches(payload) || payload.workId !== selected.value?.id) return
         const item = uploadDrafts.value.find((candidate) => candidate.token === payload.token)
-        if (!item) return
+        const progressTarget: LocalAttachmentUpload = {
+          hostId: payload.hostId,
+          selectionGeneration: payload.selectionGeneration,
+          instanceId: payload.workId,
+          machineHostId: payload.machineHostId,
+          ownerHostEpoch: payload.ownerHostEpoch,
+          runtimeGeneration: payload.runtimeGeneration,
+        }
+        if (!item || !attachmentUploadMatches(item.target, progressTarget)) return
         item.state = payload.phase
         item.progress = payload.totalBytes > 0 ? payload.bytesProcessed / payload.totalBytes : payload.phase === 'finalizing' ? 1 : 0
       }),
@@ -924,11 +986,6 @@ function workGroup(work: Work) {
   if (work.reopenable) return 'continue'
   return 'history'
 }
-
-const filteredWorkspaceEntries = computed(() => {
-  const query = workspaceSearch.value.trim().toLowerCase()
-  return (workspace.value?.entries ?? []).filter((entry) => !query || `${entry.name} ${entry.kind} ${entry.hidden ? '隐藏' : ''}`.toLowerCase().includes(query))
-})
 
 const groupedWorks = computed(() => ({
   current: app.works.filter((work) => workGroup(work) === 'current'),
@@ -1183,10 +1240,10 @@ function rememberModalTrigger() {
 }
 
 function closeModal() {
+  if (directoryOpen.value && newWorkMutationBusy.value) return
   workspaceBrowserOpen.value = false
   deliveryOpen.value = false
   directoryOpen.value = false
-  ++workspaceLoadEpoch
   commandOpen.value = false
   appSettingsOpen.value = false
   hostSettingsOpen.value = false
@@ -1739,7 +1796,7 @@ async function handleComposerPaste(event: ClipboardEvent) {
       })
     }
     uploadDrafts.value.push(...staged)
-    for (const item of staged) void startAttachmentUpload(item)
+    for (const item of staged) void launchAttachmentUpload(item)
   } catch (cause) {
     for (const item of staged) {
       removeAttachmentPreview(item.token)
@@ -1778,7 +1835,7 @@ async function chooseAttachments() {
     }
     const drafts = picked.map<UploadDraft>((item) => ({ ...item, state: 'hashing', progress: 0 }))
     uploadDrafts.value.push(...drafts)
-    for (const item of drafts) void startAttachmentUploadWithPreview(item, work.id, context)
+    for (const item of drafts) void launchAttachmentUpload(item, true, work.id, context)
   } catch (cause) {
     submissionError.value = errorMessage(cause)
   } finally {
@@ -1786,24 +1843,48 @@ async function chooseAttachments() {
   }
 }
 
+function launchAttachmentUpload(item: UploadDraft, withPreview = false, workId?: string, context?: HostContext) {
+  const active = attachmentUploadAttempts.get(item.token)
+  if (active) return active
+  const attempt = (withPreview && workId && context
+    ? startAttachmentUploadWithPreview(item, workId, context)
+    : startAttachmentUpload(item))
+    .finally(() => {
+      if (attachmentUploadAttempts.get(item.token) === attempt) attachmentUploadAttempts.delete(item.token)
+    })
+  attachmentUploadAttempts.set(item.token, attempt)
+  return attempt
+}
+
 async function startAttachmentUpload(item: UploadDraft) {
   const work = selected.value
   if (!work) return
   const context = requireHostContext(app)
+  const target = attachmentUploadTarget(work, context)
   const resetEpoch = composerResetEpoch
+  item.target = target
   item.state = 'hashing'
   item.progress = 0
   item.error = undefined
   try {
-    const result = await uploadAttachment(work.id, item.token, context)
-    if (!app.contextMatches(context) || selected.value?.id !== work.id || resetEpoch !== composerResetEpoch || !uploadDrafts.value.some((candidate) => candidate.token === item.token)) return
+    const result = await uploadAttachment(work, item.token, context)
+    const currentWork = selected.value
+    const currentHost = app.hostContext
+    const targetStillCurrent = !!currentWork && !!currentHost && attachmentUploadMatches(target, attachmentUploadTarget(currentWork, currentHost))
+    if (!targetStillCurrent || resetEpoch !== composerResetEpoch || !uploadDrafts.value.some((candidate) => candidate.token === item.token)) return
     moveAttachmentPreview(item.token, result.attachment.fileId)
     uploadDrafts.value = uploadDrafts.value.filter((candidate) => candidate.token !== item.token)
-    if (!draftAttachments.value.some((candidate) => candidate.fileId === result.attachment.fileId)) {
-      draftAttachments.value = [...draftAttachments.value, result.attachment]
-    }
+    const bound = bindLocalAttachment(result.attachment, item.token, target)
+    draftAttachments.value = [...draftAttachments.value.filter((candidate) => candidate.fileId !== bound.fileId), bound]
   } catch (cause) {
-    if (!app.contextMatches(context) || selected.value?.id !== work.id) return
+    const currentWork = selected.value
+    const currentHost = app.hostContext
+    if (!currentWork
+      || !currentHost
+      || !app.contextMatches(context)
+      || currentWork.id !== work.id
+      || resetEpoch !== composerResetEpoch
+      || !attachmentUploadMatches(target, attachmentUploadTarget(currentWork, currentHost))) return
     item.state = 'error'
     item.error = errorMessage(cause)
   }
@@ -1824,8 +1905,13 @@ async function removeUpload(item: UploadDraft) {
 }
 
 function removeUploaded(fileId: string) {
+  const work = selected.value
+  const attachment = draftAttachments.value.find((item) => item.fileId === fileId)
   draftAttachments.value = draftAttachments.value.filter((item) => item.fileId !== fileId)
   removeAttachmentPreview(fileId)
+  const token = attachment?.localUpload?.sourceToken
+  const context = app.hostContext
+  if (work && token && context) void removeAttachment(work.id, token, context).catch(() => undefined)
 }
 
 async function clearQueueImages() {
@@ -1884,6 +1970,13 @@ async function submit(): Promise<boolean> {
   const localCommand = submittedLocalControl(captured)
   if (localCommand) return executeLocalControl(localCommand, captured)
   if (!work || workMutating.value || (!captured.trim() && !capturedAttachments.length && !restoredImageCount.value) || !isTauri || pairingInProgress.value || clearingRestoredImages.value || submitting.value || queueRestoring.value || attachmentPicking.value || uploadDrafts.value.length > 0) return false
+  const currentHost = app.hostContext
+  if (!currentHost) return false
+  const attachmentTarget = attachmentUploadTarget(work, currentHost)
+  if (capturedAttachments.some((item) => item.localUpload && !attachmentUploadMatches(item.localUpload, attachmentTarget))) {
+    submissionError.value = '附件正在为当前工作重新上传，请稍后再发送。'
+    return false
+  }
   submitting.value = true
   submissionError.value = null
   try {
@@ -1893,6 +1986,10 @@ async function submit(): Promise<boolean> {
     app.applyWorkSnapshot(result.instance, capturedHost)
     draft.value = draftAfterSubmit(draft.value, captured, true)
     draftAttachments.value = attachmentsAfterSubmit(draftAttachments.value, capturedAttachments.map((item) => item.fileId), true)
+    for (const attachment of capturedAttachments) {
+      const token = attachment.localUpload?.sourceToken
+      if (token) void removeAttachment(work.id, token, capturedHost).catch(() => undefined)
+    }
     restoredImageCount.value = 0
     if (!result.receipt.queued) showAgentActivity(work.id)
     if (draftAttachments.value.length) showQueueNotice(`已发送一批附件；还有 ${draftAttachments.value.length} 个保留在编辑器中。`)
@@ -3141,18 +3238,12 @@ async function resyncSession(snapshot: Work, returnedDraft?: string) {
   app.applyWorkSnapshot(snapshot)
   if (selected.value?.id !== snapshot.id) return
   composerResetEpoch += 1
-  const host = app.hostContext
-  for (const item of uploadDrafts.value) {
-    removeAttachmentPreview(item.token)
-    if (host) void cancelAttachmentUpload(snapshot.id, item.token, host)
-      .catch(() => undefined)
-      .then(() => removeAttachment(snapshot.id, item.token, host).catch(() => undefined))
-  }
   const editor = editorAfterSessionReplacement(returnedDraft)
   draft.value = editor.text
-  draftAttachments.value = editor.attachments
+  // Queue-owned references belong to the replaced Session. Locally selected files
+  // retain their source handle and are re-uploaded by the target-scope watcher.
+  draftAttachments.value = draftAttachments.value.filter((item) => item.localUpload)
   restoredImageCount.value = editor.restoredImageCount
-  uploadDrafts.value = []
   await loadSelectedConversation(snapshot.id, true)
 }
 
@@ -3185,115 +3276,31 @@ async function openDirectory() {
   rememberModalTrigger()
   directoryOpen.value = true
   commandOpen.value = false
-  trustContinuation.value = null
-  workspace.value = null
-  workspacePath.value = ''
-  workspaceSearch.value = ''
-  directoryMachineId.value = ''
-  workspaceError.value = null
-  workspaceLoading.value = true
-  const openEpoch = ++workspaceLoadEpoch
+  newWorkMachinesLoading.value = true
+  newWorkMutationBusy.value = false
+  newWorkCompact.value = true
+  machineListError.value = ''
   try {
-    const machines = await loadHostMachines()
-    if (openEpoch !== workspaceLoadEpoch || !directoryOpen.value) return
-    hostMachines.value = machines
-    machineListError.value = ''
-    directoryMachineId.value = defaultMachineHostId(machines)
-    if (!directoryMachineId.value) throw new Error('当前没有可用于创建 Work 的机器。')
+    await loadHostMachines()
   } catch (cause) {
-    if (openEpoch !== workspaceLoadEpoch || !directoryOpen.value) return
-    workspaceError.value = errorMessage(cause, '无法读取可用机器，请检查连接后重试。')
-    workspaceLoading.value = false
-    return
-  }
-  const initial = machineWorkspaceStart(directoryMachine.value)
-  workspacePath.value = initial
-  await browse(initial)
-}
-
-async function selectDirectoryMachine(event: Event) {
-  const hostId = (event.currentTarget as HTMLSelectElement).value
-  const machine = hostMachines.value.find((candidate) => candidate.hostId === hostId)
-  if (!machine?.available || hostId === directoryMachineId.value || creatingWork.value || trustContinuation.value) return
-  directoryMachineId.value = hostId
-  workspace.value = null
-  const initial = machineWorkspaceStart(machine)
-  workspacePath.value = initial
-  await browse(initial)
-}
-
-async function selectDirectoryLocation(event: Event) {
-  const select = event.currentTarget as HTMLSelectElement
-  const path = select.value
-  select.value = ''
-  if (!path || workspaceLoading.value || creatingWork.value || trustContinuation.value || !directoryMachine.value?.available) return
-  workspace.value = null
-  workspacePath.value = path
-  await browse(path)
-}
-
-async function browse(path: string) {
-  const loadEpoch = ++workspaceLoadEpoch
-  const targetHostId = directoryTargetHostId.value
-  workspaceLoading.value = true
-  workspaceSearch.value = ''
-  workspaceError.value = null
-  try {
-    const page = await currentHostCall(app, (context) => listWorkspace(path, context, targetHostId))
-    if (loadEpoch !== workspaceLoadEpoch) return
-    workspace.value = page
-    workspacePath.value = page.path
-  } catch (cause) {
-    if (loadEpoch === workspaceLoadEpoch) workspaceError.value = errorMessage(cause)
+    if (directoryOpen.value) machineListError.value = errorMessage(cause, '无法读取可用机器，请检查连接后重试。')
   } finally {
-    if (loadEpoch === workspaceLoadEpoch) workspaceLoading.value = false
+    newWorkMachinesLoading.value = false
   }
 }
 
-async function createSelectedWork(continuation?: CreateWorkContinuation) {
-  if (!isTauri
-    || contextTransitionBusy.value
-    || !workspace.value
-    || creatingWork.value
-    || (directoryMachineSelectorVisible.value && !directoryMachine.value?.available)) return
-  creatingWork.value = true
-  workspaceError.value = null
-  try {
-    const capturedHost = requireHostContext(app)
-    const targetHostId = directoryTargetHostId.value
-    const work = await createWork(workspace.value.path, capturedHost, undefined, continuation, targetHostId)
-    if (!app.contextMatches(capturedHost)) return
-    app.applyWorkSnapshot(work, capturedHost)
-    app.selectWork(work.id)
-    void app.refreshWorksQuietly()
-    directoryOpen.value = false
-    trustContinuation.value = null
-  } catch (cause) {
-    const failure = cause as { code?: string; message?: string; details?: Record<string, unknown>; operationId?: string }
-    if (failure?.code === 'project_trust_required') {
-      const operationId = String(failure.details?.operationId || failure.operationId || '')
-      const trustChallengeId = String(failure.details?.challengeId || '')
-      if (operationId && trustChallengeId) {
-        trustContinuation.value = {
-          operationId,
-          trustChallengeId,
-          projectTrustDecision: 'trust_once',
-        }
-      } else {
-        workspaceError.value = 'Dock 要求确认项目信任，但确认信息不完整。请重试；若反复出现，请检查客户端和 Dock 版本。'
-      }
-    } else {
-      markUnknownOutcome(cause, 'work', 'global')
-      workspaceError.value = errorMessage(cause)
-    }
-  } finally {
-    creatingWork.value = false
-  }
+function acceptCreatedWork(work: Work) {
+  newWorkMutationBusy.value = false
+  const machine = work.hostId ? hostMachines.value.find((candidate) => candidate.hostId === work.hostId) : undefined
+  if (machine && work.hostId) app.rememberCreatedWorkspace(work.hostId, work.cwd, machine.platform)
+  app.applyWorkSnapshot(work)
+  app.selectWork(work.id)
+  void app.refreshWorksQuietly()
+  directoryOpen.value = false
 }
 
-function continueWithTrust(decision: CreateWorkContinuation['projectTrustDecision']) {
-  if (!trustContinuation.value) return
-  return createSelectedWork({ ...trustContinuation.value, projectTrustDecision: decision })
+function handleNewWorkUnknown(cause: unknown) {
+  markUnknownOutcome(cause, 'work', 'global')
 }
 
 function mutationKey(workId: string, domain: MutationDomain) {
@@ -3714,7 +3721,7 @@ function handleOutputClick(event: MouseEvent) {
         </div>
         <div v-if="uploadDrafts.length || draftAttachments.length || restoredImageCount" class="alu-native-attachments" aria-label="已选附件">
           <div class="alu-attachment-selection-summary">已选择 {{ uploadDrafts.length + draftAttachments.length + restoredImageCount }} 个附件<span>点图片可放大查看</span></div>
-          <AttachmentCard v-for="item in uploadDrafts" :key="item.token" :name="item.name" :size-bytes="item.sizeBytes" :media-type="item.mediaType" :state="item.state" :progress="item.progress" :message="item.error" :retryable="item.state === 'error'" :cancellable="item.state !== 'error'" :removable="item.state === 'error'" :preview-url="attachmentPreviews[item.token]?.url" @preview="openAttachmentPreview(item.token, item.name)" @retry="startAttachmentUpload(item)" @cancel="cancelUpload(item)" @remove="removeUpload(item)" />
+          <AttachmentCard v-for="item in uploadDrafts" :key="item.token" :name="item.name" :size-bytes="item.sizeBytes" :media-type="item.mediaType" :state="item.state" :progress="item.progress" :message="item.error" :retryable="item.state === 'error'" :cancellable="item.state !== 'error'" :removable="item.state === 'error'" :preview-url="attachmentPreviews[item.token]?.url" @preview="openAttachmentPreview(item.token, item.name)" @retry="launchAttachmentUpload(item)" @cancel="cancelUpload(item)" @remove="removeUpload(item)" />
           <AttachmentCard v-for="attachment in draftAttachments" :key="attachment.fileId" :name="attachment.name" :size-bytes="attachment.sizeBytes" :media-type="attachment.mediaType" :preview-url="attachmentPreviews[attachment.fileId]?.url" removable @preview="openAttachmentPreview(attachment.fileId, attachment.name)" @remove="removeUploaded(attachment.fileId)" />
           <div v-if="restoredImageCount" class="alu-restored-images"><span>已取回 {{ restoredImageCount }} 个附件</span><button type="button" :disabled="clearingRestoredImages" @click="clearQueueImages">{{ clearingRestoredImages ? '移除中…' : '移除' }}</button></div>
         </div>
@@ -3727,6 +3734,7 @@ function handleOutputClick(event: MouseEvent) {
             </button>
             <div v-if="!suggestItems.length && composerArgumentLoading" class="cmd-suggest-hint">正在读取参数候选…</div>
             <div v-else-if="!suggestItems.length && commandCatalogStore.state === 'loading'" class="cmd-suggest-hint">正在读取命令…</div>
+            <div v-else-if="!suggestItems.length && commandCatalogStore.state === 'failed'" class="cmd-suggest-hint">当前命令目录暂时不可用，请稍后重试。</div>
             <div v-else-if="!suggestItems.length && slashQuery" class="cmd-suggest-hint">无匹配命令</div>
           </div>
           <textarea ref="composerTextarea" v-model="draft" rows="1" :disabled="conversationLoading" placeholder="输入消息…" title="Enter 发送 · Shift+Enter / Ctrl+J 换行" aria-keyshortcuts="Control+J" @input="resizeComposer" @paste="handleComposerPaste" @keydown="handleComposerKeydown($event)" />
@@ -3892,40 +3900,25 @@ function handleOutputClick(event: MouseEvent) {
 
     <Transition name="fade">
       <div v-if="directoryOpen || hostSettingsOpen" :class="directoryOpen ? 'ui-dialog-overlay' : 'modal-layer'" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop>
-        <section ref="modalSurface" :class="directoryOpen ? ['ui-dialog-box', 'ui-dialog-size-wide'] : 'host-settings-surface'" role="dialog" aria-modal="true" tabindex="-1" :aria-labelledby="directoryOpen ? 'directory-title' : 'host-settings-title'" @wheel="handleModalWheel">
-          <template v-if="directoryOpen"><header class="ui-dialog-header"><div id="directory-title" class="ui-dialog-title">选择工作目录</div><div class="ui-dialog-body">{{ workspace?.path || workspacePath }}{{ workspace ? `\n${workspace.truncated ? `显示前 ${workspace.entries.length} / ${workspace.total} 个目录` : `${workspace.total} 个子目录`}` : '' }}</div></header><button class="ui-dialog-close" aria-label="关闭" @click="closeModal">×</button></template>
-          <header v-else class="host-settings-header">
+        <section ref="modalSurface" :class="directoryOpen ? ['ui-dialog-box', 'ui-dialog-size-wide', { 'ui-dialog-size-auto': newWorkCompact }] : 'host-settings-surface'" role="dialog" aria-modal="true" tabindex="-1" :aria-labelledby="directoryOpen ? 'directory-title' : 'host-settings-title'" @wheel="handleModalWheel">
+          <NewWorkDialog
+            v-if="directoryOpen"
+            :machines="hostMachines"
+            :machines-loading="newWorkMachinesLoading"
+            :machine-error="machineListError"
+            :preview="!isTauri"
+            :outcome-unknown="mutationOutcomeUnknown"
+            @close="closeModal"
+            @created="acceptCreatedWork"
+            @unknown="handleNewWorkUnknown"
+            @busy="newWorkMutationBusy = $event"
+            @view="newWorkCompact = $event === 'launcher'"
+          />
+          <header v-if="hostSettingsOpen" class="host-settings-header">
             <div class="host-settings-heading"><img src="./assets/aludock-icon.png" alt="" /><div><h2 id="host-settings-title">Host 设置</h2><p>{{ app.payload?.host.profile.displayName || '管理已配对的 AluDock' }} · 版本 {{ appBuildIdentity }}</p></div></div>
             <button class="host-settings-close" data-modal-initial aria-label="关闭" @click="closeModal"><X :size="18" /></button>
           </header>
-          <div v-if="directoryOpen" class="alu-directory-select">
-            <label v-if="directoryMachineSelectorVisible" class="alu-directory-machine">
-              <span>创建位置</span>
-              <select :value="directoryMachineId" :disabled="workspaceLoading || creatingWork || !!trustContinuation" @change="selectDirectoryMachine">
-                <option v-for="machine in hostMachines" :key="machine.hostId" :value="machine.hostId" :disabled="!machine.available">{{ machine.name }} · {{ machine.kind === 'main' ? 'Main' : 'SubHost' }}{{ machine.available ? '' : ' · 暂不可用' }}</option>
-              </select>
-            </label>
-            <label v-if="directoryWorkspaceRootSelectorVisible" class="alu-directory-machine">
-              <span>快速前往</span>
-              <select value="" :disabled="workspaceLoading || creatingWork || !!trustContinuation || !directoryMachine?.available" @change="selectDirectoryLocation">
-                <option value="" disabled>选择位置</option>
-                <option :value="machineWorkspaceStart(directoryMachine)">Home · {{ machineWorkspaceStart(directoryMachine) }}</option>
-                <option v-for="(root, index) in directoryWorkspaceRoots" :key="`${root}:${index}`" :value="root">{{ root }}</option>
-              </select>
-            </label>
-            <div class="ui-dialog-search-wrap"><input v-model="workspaceSearch" class="ui-dialog-input ui-dialog-search" placeholder="搜索目录名称…" /></div>
-            <div v-if="workspaceError" class="alu-dialog-error">{{ workspaceError }}</div>
-            <div v-if="workspaceLoading" class="alu-dialog-loading"><span class="alu-agent-activity-spinner" />正在读取目录…</div>
-            <div v-else-if="workspace" class="ui-dialog-options" role="listbox">
-              <button class="ui-dialog-option" :disabled="!isTauri || creatingWork || mutationOutcomeUnknown || !!trustContinuation || (directoryMachineSelectorVisible && !directoryMachine?.available)" @click="createSelectedWork()"><span class="ui-dialog-option-marker">✓</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">使用这个目录</span><span class="ui-dialog-option-badge">选择</span></span><span class="ui-dialog-option-detail"><span>{{ workspace.path }}</span></span></span></button>
-              <button v-if="workspace.parent" class="ui-dialog-option" @click="browse(workspace.parent)"><span class="ui-dialog-option-marker">↑</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-label">..</span><span class="ui-dialog-option-detail"><span>返回上级目录</span></span></span></button>
-              <button v-for="entry in filteredWorkspaceEntries" :key="entry.name" class="ui-dialog-option" @click="browse(workspaceChildPath(workspace.path, entry.name, directoryMachine?.platform))"><span class="ui-dialog-option-marker">{{ entry.kind === 'symlink' ? '↗' : '▸' }}</span><span class="ui-dialog-option-content"><span class="ui-dialog-option-top"><span class="ui-dialog-option-label">{{ entry.name }}</span><span v-if="entry.kind === 'symlink'" class="ui-dialog-option-badge">链接</span></span><span class="ui-dialog-option-detail"><span>{{ entry.kind === 'symlink' ? '目录链接' : '目录' }}{{ entry.hidden ? ' · 隐藏' : '' }}</span></span></span></button>
-              <div v-if="!filteredWorkspaceEntries.length && !workspace.parent" class="ui-dialog-empty">没有匹配项</div>
-            </div>
-            <div v-if="trustContinuation" class="session-trust"><strong>这个项目尚未被信任</strong><p>确认后会继续在此目录创建 Work。</p><div><button @click="trustContinuation = null">取消</button><button @click="continueWithTrust('trust_once')">仅本次信任</button><button class="session-primary" @click="continueWithTrust('trust_and_remember')">信任并创建</button></div></div>
-            <div v-if="creatingWork" class="cmd-palette-footer">正在创建 Work…</div>
-          </div>
-          <div v-else class="host-settings-panel">
+          <div v-if="hostSettingsOpen" class="host-settings-panel">
             <aside class="host-catalog-section">
               <div class="host-catalog-title"><span>已保存的 Host</span><b>{{ app.catalog?.hosts.length ?? 0 }}</b></div>
               <div class="host-catalog-list">

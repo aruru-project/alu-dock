@@ -6,8 +6,9 @@ import {
   migrateLocalUiState,
   persistLocalUiState,
   readAndMigrateLocalUiState,
+  rememberRecentWorkspace,
 } from '../lib/localState'
-import type { AttachmentDto, BootstrapPayload, HostCatalog, HostConnectionProfile, HostContext, Work } from '../lib/types'
+import type { AttachmentDto, BootstrapPayload, HostCatalog, HostConnectionProfile, HostContext, MachinePlatform, Work } from '../lib/types'
 import { userErrorMessage as humanError } from '../lib/userError'
 
 export const useAppStore = defineStore('app', () => {
@@ -309,13 +310,23 @@ export const useAppStore = defineStore('app', () => {
     saveLocalState()
   }
 
+  function recentWorkspaces(machineHostId: string) {
+    const hostId = localUiState.value.activeHostId
+    return hostId ? [...(localUiState.value.hosts[hostId]?.recentWorkspaces[machineHostId] ?? [])] : []
+  }
+
+  function rememberCreatedWorkspace(machineHostId: string, path: string, platform?: MachinePlatform) {
+    const hostId = localUiState.value.activeHostId
+    if (hostId && rememberRecentWorkspace(localUiState.value, hostId, machineHostId, path, platform)) saveLocalState()
+  }
+
   function saveLocalState() { persistLocalUiState(storage, localUiState.value) }
 
   return {
     catalog, activeHostId, activeHost, hostContext, payload, works, selectedWork, selectedWorkId,
     currentDraft, currentAttachments, detailMode, loading, error, hostUnreachable, needsPairing, workDrawerOpen,
     load, loadActive, refreshWorksQuietly, switchHost, removeHost, contextMatches, applyHostProfile, applyWorkSnapshot, removeWorkSnapshot, selectWork,
-    setCurrentDraft, setCurrentAttachments, setDetailMode,
+    setCurrentDraft, setCurrentAttachments, setDetailMode, recentWorkspaces, rememberCreatedWorkspace,
   }
 })
 

@@ -119,9 +119,15 @@ impl DockClient {
         P: Serialize,
         R: DeserializeOwned,
     {
-        self.request_with_host_epoch(request_type, params, required_capabilities, operation_id)
-            .await
-            .map(|(result, _)| result)
+        self.request_with_host_epoch_fenced(
+            request_type,
+            params,
+            required_capabilities,
+            operation_id,
+            None,
+        )
+        .await
+        .map(|(result, _)| result)
     }
 
     pub(crate) async fn request_with_host_epoch<P, R>(
@@ -135,8 +141,60 @@ impl DockClient {
         P: Serialize,
         R: DeserializeOwned,
     {
+        self.request_with_host_epoch_fenced(
+            request_type,
+            params,
+            required_capabilities,
+            operation_id,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn request_on_host_epoch<P, R>(
+        &self,
+        request_type: &'static str,
+        params: &P,
+        required_capabilities: &[&str],
+        operation_id: Option<&str>,
+        expected_host_epoch: &str,
+    ) -> Result<R>
+    where
+        P: Serialize,
+        R: DeserializeOwned,
+    {
+        self.request_with_host_epoch_fenced(
+            request_type,
+            params,
+            required_capabilities,
+            operation_id,
+            Some(expected_host_epoch),
+        )
+        .await
+        .map(|(result, _)| result)
+    }
+
+    async fn request_with_host_epoch_fenced<P, R>(
+        &self,
+        request_type: &'static str,
+        params: &P,
+        required_capabilities: &[&str],
+        operation_id: Option<&str>,
+        expected_host_epoch: Option<&str>,
+    ) -> Result<(R, String)>
+    where
+        P: Serialize,
+        R: DeserializeOwned,
+    {
         let request_deadline = Instant::now() + response_timeout_for(request_type);
         let routed = self.negotiate(required_capabilities).await?;
+        if expected_host_epoch
+            .is_some_and(|expected| routed.hello.host.host_epoch.as_str() != expected)
+        {
+            return Err(ClientError::Protocol(
+                "Host changed before the request began".into(),
+            ));
+        }
         let endpoint_id = routed.endpoint_id;
         let route_generation = routed.route_generation;
         let mut connection = routed.connection;
@@ -192,7 +250,9 @@ impl DockClient {
                 .report_connection_failure(&endpoint_id, route_generation);
             return Err(ambiguous_if_mutation(error, operation_id));
         }
-        self.router.ensure_open()?;
+        if let Err(error) = self.router.ensure_open() {
+            return Err(ambiguous_if_mutation(error, operation_id));
+        }
         let result = response_result(response, request_type, operation_id)?;
         Ok((result, hello.host.host_epoch))
     }
@@ -862,6 +922,18 @@ mod tests {
                 .is_err(),
             "an ordinary success response cannot bypass mandatory Tree transfer framing"
         );
+    }
+
+    #[test]
+    fn lifecycle_close_after_a_dispatched_mutation_is_effect_unknown() {
+        let error = ambiguous_if_mutation(
+            ClientError::Protocol("client lifecycle closed".into()),
+            Some("operation"),
+        );
+        assert!(matches!(
+            error,
+            ClientError::EffectUnknown { operation_id, .. } if operation_id == "operation"
+        ));
     }
 
     #[test]

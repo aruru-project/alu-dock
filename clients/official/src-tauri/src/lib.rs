@@ -210,6 +210,9 @@ struct AttachmentProgressEmission {
     host_id: String,
     selection_generation: u64,
     work_id: String,
+    machine_host_id: String,
+    owner_host_epoch: String,
+    runtime_generation: u64,
     token: String,
     phase: String,
     bytes_processed: u64,
@@ -492,7 +495,15 @@ struct NativeAttachment {
     name: String,
     size_bytes: u64,
     media_type: Option<String>,
+    upload_scope: Option<AttachmentUploadScope>,
     active_attempt: Option<AttachmentAttempt>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AttachmentUploadScope {
+    machine_host_id: String,
+    owner_host_epoch: String,
+    runtime_generation: u64,
 }
 
 struct AttachmentAttempt {
@@ -982,10 +993,21 @@ struct SessionTokenBinding {
     request_id: u64,
     host_id: String,
     selection_generation: u64,
-    host_epoch: String,
-    instance_id: String,
-    runtime_generation: u64,
+    scope: SessionTokenScope,
     session_file: String,
+}
+
+#[derive(Clone)]
+enum SessionTokenScope {
+    Work {
+        host_epoch: String,
+        instance_id: String,
+        runtime_generation: u64,
+    },
+    Machine {
+        machine_host_id: String,
+        host_epoch: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -1009,6 +1031,29 @@ struct SafeSessionList {
     selection_generation: u64,
     host_epoch: String,
     runtime_generation: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SafeInventorySession {
+    token: String,
+    name: Option<String>,
+    first_user_message: Option<String>,
+    cwd: String,
+    updated_at: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SafeSessionInventory {
+    sessions: Vec<SafeInventorySession>,
+    total: u64,
+    truncated: bool,
+    incomplete: bool,
+    machine_host_id: String,
+    host_id: String,
+    host_epoch: String,
+    selection_generation: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -3630,6 +3675,56 @@ fn attachment_upload_error(error: ClientError) -> CommandError {
     error
 }
 
+fn attachment_target_matches(
+    catalog_host_epoch: &str,
+    owner_host_epoch: Option<&str>,
+    runtime_generation: u64,
+    machine_host_id: Option<&str>,
+    lifecycle: &aludock_client_core::InstanceLifecycle,
+    scope: &AttachmentUploadScope,
+) -> bool {
+    catalog_host_epoch == scope.owner_host_epoch
+        && owner_host_epoch == Some(scope.owner_host_epoch.as_str())
+        && runtime_generation == scope.runtime_generation
+        && machine_host_id == Some(scope.machine_host_id.as_str())
+        && matches!(lifecycle, aludock_client_core::InstanceLifecycle::Active)
+}
+
+async fn verify_attachment_target(
+    client: &DockClient,
+    instance_id: &str,
+    scope: &AttachmentUploadScope,
+) -> Result<(), CommandError> {
+    let (catalog, host_epoch) = client
+        .list_instances_with_host_epoch(InstanceSelector::Actionable)
+        .await
+        .map_err(attachment_upload_error)?;
+    let current = catalog
+        .instances
+        .into_iter()
+        .find(|instance| instance.id == instance_id)
+        .ok_or_else(|| {
+            attachment_command_error(
+                "attachment_target_unavailable",
+                "当前工作暂时不可用，附件选择已保留。",
+            )
+        })?;
+    if !attachment_target_matches(
+        &host_epoch,
+        current.owner_host_epoch.as_deref(),
+        current.runtime_generation,
+        current.host_id.as_deref(),
+        &current.lifecycle,
+        scope,
+    ) {
+        return Err(attachment_command_error(
+            "stale_attachment_target",
+            "当前工作已更新，附件选择已保留并需要重新上传。",
+        ));
+    }
+    Ok(())
+}
+
 fn attachment_scope_matches(
     entry: &NativeAttachment,
     host_id: &str,
@@ -3895,6 +3990,7 @@ fn prepare_native_attachment(
             name,
             size_bytes,
             media_type,
+            upload_scope: None,
             active_attempt: None,
         },
     )
@@ -4957,10 +5053,19 @@ async fn upload_attachment(
     host_id: String,
     selection_generation: u64,
     work_id: String,
+    target_machine_host_id: String,
+    expected_host_epoch: String,
+    expected_runtime_generation: u64,
     token: String,
 ) -> Result<AttachmentUploadResult, CommandError> {
     let store = resolve_host(&runtime, &host_id, selection_generation)?;
     let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let upload_scope = AttachmentUploadScope {
+        machine_host_id: target_machine_host_id,
+        owner_host_epoch: expected_host_epoch,
+        runtime_generation: expected_runtime_generation,
+    };
+    verify_attachment_target(&client, &work_id, &upload_scope).await?;
     let (path, operation_id, name, media_type, cancellation, attempt_id) = {
         let mut entries = state.entries.lock().map_err(|_| lifecycle_error())?;
         let entry = entries.get_mut(&token).ok_or_else(|| {
@@ -4972,6 +5077,10 @@ async fn upload_attachment(
                 "attachment_upload_in_progress",
                 "此附件正在上传。",
             ));
+        }
+        if entry.upload_scope.as_ref() != Some(&upload_scope) {
+            entry.operation_id = uuid::Uuid::new_v4().to_string();
+            entry.upload_scope = Some(upload_scope.clone());
         }
         let metadata = std::fs::symlink_metadata(&entry.path).map_err(|_| {
             attachment_command_error(
@@ -5005,10 +5114,12 @@ async fn upload_attachment(
     let progress_host = host_id.clone();
     let progress_work = work_id.clone();
     let progress_token = token.clone();
+    let progress_scope = upload_scope.clone();
     let result = client
         .upload_attachment_file(
             path,
             &operation_id,
+            &work_id,
             &name,
             media_type.as_deref(),
             &cancellation,
@@ -5024,6 +5135,9 @@ async fn upload_attachment(
                         host_id: progress_host.clone(),
                         selection_generation,
                         work_id: progress_work.clone(),
+                        machine_host_id: progress_scope.machine_host_id.clone(),
+                        owner_host_epoch: progress_scope.owner_host_epoch.clone(),
+                        runtime_generation: progress_scope.runtime_generation,
                         token: progress_token.clone(),
                         phase: phase.into(),
                         bytes_processed: progress.bytes_processed,
@@ -5033,11 +5147,18 @@ async fn upload_attachment(
             },
         )
         .await;
+    let result = match result {
+        Ok(result) => verify_attachment_target(&client, &work_id, &upload_scope)
+            .await
+            .map(|()| result),
+        Err(error) => Err(attachment_upload_error(error)),
+    };
 
     let mut entries = state.entries.lock().map_err(|_| lifecycle_error())?;
     let still_current = entries.get(&token).is_some_and(|entry| {
         attachment_scope_matches(entry, &host_id, selection_generation, &work_id)
             && entry.operation_id == operation_id
+            && entry.upload_scope.as_ref() == Some(&upload_scope)
             && entry
                 .active_attempt
                 .as_ref()
@@ -5051,14 +5172,16 @@ async fn upload_attachment(
     }
     match result {
         Ok(result) => {
-            entries.remove(&token);
+            if let Some(entry) = entries.get_mut(&token) {
+                entry.active_attempt = None;
+            }
             Ok(result)
         }
         Err(error) => {
             if let Some(entry) = entries.get_mut(&token) {
                 entry.active_attempt = None;
             }
-            Err(attachment_upload_error(error))
+            Err(error)
         }
     }
 }
@@ -6488,9 +6611,7 @@ fn publish_session_tokens(
     request_id: u64,
     host_id: &str,
     selection_generation: u64,
-    host_epoch: &str,
-    instance_id: &str,
-    runtime_generation: u64,
+    scope: SessionTokenScope,
     tokens: HashMap<String, String>,
 ) -> Result<(), CommandError> {
     let mut registry = state.registry.lock().map_err(|_| {
@@ -6505,9 +6626,7 @@ fn publish_session_tokens(
                 request_id,
                 host_id: host_id.to_owned(),
                 selection_generation,
-                host_epoch: host_epoch.to_owned(),
-                instance_id: instance_id.to_owned(),
-                runtime_generation,
+                scope: scope.clone(),
                 session_file,
             },
         );
@@ -6592,9 +6711,11 @@ async fn list_sessions(
         request_id,
         &host_id,
         selection_generation,
-        &expected_host_epoch,
-        &instance_id,
-        expected_runtime_generation,
+        SessionTokenScope::Work {
+            host_epoch: expected_host_epoch.clone(),
+            instance_id: instance_id.clone(),
+            runtime_generation: expected_runtime_generation,
+        },
         tokens,
     )?;
     drop(lifecycle);
@@ -6609,7 +6730,65 @@ async fn list_sessions(
     })
 }
 
-fn resolve_session_token(
+#[tauri::command]
+async fn session_inventory(
+    runtime: tauri::State<'_, HostRuntimeState>,
+    host_id: String,
+    selection_generation: u64,
+    state: tauri::State<'_, SessionTokenState>,
+    machine_host_id: String,
+    cwd: String,
+) -> Result<SafeSessionInventory, CommandError> {
+    let request_id = begin_session_token_request(&state)?;
+    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let result = client
+        .session_inventory(&cwd, SessionScope::All, Some(&machine_host_id))
+        .await
+        .map_err(CommandError::from)?;
+    let mut tokens = HashMap::new();
+    let sessions = result
+        .sessions
+        .into_iter()
+        .map(|session| {
+            let token = uuid::Uuid::new_v4().to_string();
+            tokens.insert(token.clone(), session.session_file);
+            SafeInventorySession {
+                token,
+                name: session.name,
+                first_user_message: session.first_user_message,
+                cwd: session.cwd,
+                updated_at: session.updated_at,
+            }
+        })
+        .collect();
+    let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
+    ensure_host_selection(&lifecycle, &host_id, selection_generation)?;
+    publish_session_tokens(
+        &state,
+        request_id,
+        &host_id,
+        selection_generation,
+        SessionTokenScope::Machine {
+            machine_host_id: machine_host_id.clone(),
+            host_epoch: result.host_epoch.clone(),
+        },
+        tokens,
+    )?;
+    drop(lifecycle);
+    Ok(SafeSessionInventory {
+        sessions,
+        total: result.total,
+        truncated: result.truncated,
+        incomplete: result.incomplete,
+        machine_host_id,
+        host_id,
+        host_epoch: result.host_epoch,
+        selection_generation,
+    })
+}
+
+fn resolve_work_session_token(
     state: &SessionTokenState,
     host_id: &str,
     selection_generation: u64,
@@ -6628,17 +6807,63 @@ fn resolve_session_token(
             "Session token is invalid or expired".into(),
         ))
     })?;
+    let scope_matches = matches!(
+        &binding.scope,
+        SessionTokenScope::Work {
+            host_epoch: bound_epoch,
+            instance_id: bound_instance,
+            runtime_generation: bound_generation,
+        } if bound_epoch == host_epoch
+            && bound_instance == instance_id
+            && *bound_generation == runtime_generation
+    );
     if binding.host_id != host_id
         || binding.selection_generation != selection_generation
-        || binding.host_epoch != host_epoch
-        || binding.instance_id != instance_id
-        || binding.runtime_generation != runtime_generation
+        || !scope_matches
     {
         return Err(CommandError::from(ClientError::Protocol(
             "Session token belongs to a stale list result".into(),
         )));
     }
     Ok(binding.session_file.clone())
+}
+
+fn resolve_machine_session_token(
+    state: &SessionTokenState,
+    host_id: &str,
+    selection_generation: u64,
+    machine_host_id: &str,
+    token: &str,
+) -> Result<(String, String), CommandError> {
+    let registry = state.registry.lock().map_err(|_| {
+        CommandError::from(ClientError::Protocol(
+            "Session token registry is unavailable".into(),
+        ))
+    })?;
+    let binding = registry.tokens.get(token).ok_or_else(|| {
+        CommandError::from(ClientError::Protocol(
+            "Session token is invalid or expired".into(),
+        ))
+    })?;
+    let bound_host_epoch = match &binding.scope {
+        SessionTokenScope::Machine {
+            machine_host_id: bound_machine,
+            host_epoch,
+        } if bound_machine == machine_host_id => Some(host_epoch),
+        _ => None,
+    };
+    if binding.host_id != host_id
+        || binding.selection_generation != selection_generation
+        || bound_host_epoch.is_none()
+    {
+        return Err(CommandError::from(ClientError::Protocol(
+            "Session token belongs to another Host or Machine".into(),
+        )));
+    }
+    Ok((
+        binding.session_file.clone(),
+        bound_host_epoch.expect("scope was checked").clone(),
+    ))
 }
 
 #[tauri::command]
@@ -6689,7 +6914,7 @@ async fn switch_session(
     trust_challenge_id: Option<String>,
     project_trust_decision: Option<String>,
 ) -> Result<SessionReplacementResult, CommandError> {
-    let session_file = resolve_session_token(
+    let session_file = resolve_work_session_token(
         &state,
         &host_id,
         selection_generation,
@@ -7010,6 +7235,47 @@ async fn clone_session(
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
+async fn adopt_session(
+    runtime: tauri::State<'_, HostRuntimeState>,
+    host_id: String,
+    selection_generation: u64,
+    state: tauri::State<'_, SessionTokenState>,
+    machine_host_id: String,
+    session_token: String,
+    name: Option<String>,
+    operation_id: Option<String>,
+    trust_challenge_id: Option<String>,
+    project_trust_decision: Option<String>,
+) -> Result<InstanceSnapshot, CommandError> {
+    let (session_file, inventory_host_epoch) = resolve_machine_session_token(
+        &state,
+        &host_id,
+        selection_generation,
+        &machine_host_id,
+        &session_token,
+    )?;
+    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let continuation = parse_trust_continuation(
+        trust_challenge_id.as_deref(),
+        project_trust_decision.as_deref(),
+        operation_id.clone(),
+    )?;
+    client
+        .adopt_instance_for_machine(
+            &session_file,
+            name.as_deref(),
+            continuation,
+            operation_id.as_deref(),
+            Some(&machine_host_id),
+            &inventory_host_epoch,
+        )
+        .await
+        .map_err(CommandError::from)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
 async fn create_work(
     runtime: tauri::State<'_, HostRuntimeState>,
     host_id: String,
@@ -7192,6 +7458,8 @@ pub fn run() {
             list_machines,
             list_workspace,
             list_sessions,
+            session_inventory,
+            adopt_session,
             new_session,
             switch_session,
             name_session,
@@ -7619,6 +7887,7 @@ mod tests {
                 name: "stale.png".into(),
                 size_bytes: 1,
                 media_type: Some("image/png".into()),
+                upload_scope: None,
                 active_attempt: None,
             },
         )];
@@ -7819,12 +8088,43 @@ mod tests {
             name: "secret.txt".into(),
             size_bytes: 12,
             media_type: Some("text/plain".into()),
+            upload_scope: None,
             active_attempt: None,
         };
         assert!(attachment_scope_matches(&entry, "host-a", 7, "work-a"));
         assert!(!attachment_scope_matches(&entry, "host-b", 7, "work-a"));
         assert!(!attachment_scope_matches(&entry, "host-a", 8, "work-a"));
         assert!(!attachment_scope_matches(&entry, "host-a", 7, "work-b"));
+
+        let target = AttachmentUploadScope {
+            machine_host_id: "machine-a".into(),
+            owner_host_epoch: "epoch-a".into(),
+            runtime_generation: 9,
+        };
+        assert!(attachment_target_matches(
+            "epoch-a",
+            Some("epoch-a"),
+            9,
+            Some("machine-a"),
+            &aludock_client_core::InstanceLifecycle::Active,
+            &target,
+        ));
+        assert!(!attachment_target_matches(
+            "epoch-a",
+            Some("epoch-a"),
+            10,
+            Some("machine-a"),
+            &aludock_client_core::InstanceLifecycle::Active,
+            &target,
+        ));
+        assert!(!attachment_target_matches(
+            "epoch-a",
+            Some("epoch-a"),
+            9,
+            Some("machine-b"),
+            &aludock_client_core::InstanceLifecycle::Active,
+            &target,
+        ));
 
         let selected = SelectedAttachment {
             token: "b9d7a4a6-8968-4cbd-a285-ff487d28bc3b".into(),
@@ -7872,18 +8172,87 @@ mod tests {
     }
 
     #[test]
+    fn inventory_session_token_is_bound_to_main_host_generation_and_machine() {
+        let state = SessionTokenState::default();
+        let request = begin_session_token_request(&state).unwrap();
+        publish_session_tokens(
+            &state,
+            request,
+            "main-host",
+            4,
+            SessionTokenScope::Machine {
+                machine_host_id: "windows-subhost".into(),
+                host_epoch: "main-epoch".into(),
+            },
+            HashMap::from([("safe-token".into(), "C:\\sessions\\private.jsonl".into())]),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_machine_session_token(
+                &state,
+                "main-host",
+                4,
+                "windows-subhost",
+                "safe-token",
+            )
+            .unwrap(),
+            (
+                "C:\\sessions\\private.jsonl".into(),
+                "main-epoch".into(),
+            )
+        );
+        assert!(resolve_machine_session_token(
+            &state,
+            "main-host",
+            4,
+            "another-machine",
+            "safe-token",
+        )
+        .is_err());
+        assert!(resolve_machine_session_token(
+            &state,
+            "another-main",
+            4,
+            "windows-subhost",
+            "safe-token",
+        )
+        .is_err());
+        assert!(resolve_machine_session_token(
+            &state,
+            "main-host",
+            5,
+            "windows-subhost",
+            "safe-token",
+        )
+        .is_err());
+        assert!(resolve_work_session_token(
+            &state,
+            "main-host",
+            4,
+            "work",
+            "epoch",
+            1,
+            "safe-token",
+        )
+        .is_err());
+    }
+
+    #[test]
     fn older_session_list_completion_does_not_invalidate_newer_tokens() {
         let state = SessionTokenState::default();
         let older = begin_session_token_request(&state).unwrap();
         let newer = begin_session_token_request(&state).unwrap();
+        let scope = SessionTokenScope::Work {
+            host_epoch: "epoch".into(),
+            instance_id: "work".into(),
+            runtime_generation: 2,
+        };
         publish_session_tokens(
             &state,
             newer,
             "host-a",
             7,
-            "epoch",
-            "work",
-            2,
+            scope.clone(),
             HashMap::from([("new-token".into(), "C:\\sessions\\new.jsonl".into())]),
         )
         .unwrap();
@@ -7892,21 +8261,42 @@ mod tests {
             older,
             "host-a",
             7,
-            "epoch",
-            "work",
-            2,
+            scope,
             HashMap::from([("old-token".into(), "/sessions/old.jsonl".into())]),
         )
         .unwrap();
         assert_eq!(
-            resolve_session_token(&state, "host-a", 7, "work", "epoch", 2, "new-token").unwrap(),
+            resolve_work_session_token(
+                &state,
+                "host-a",
+                7,
+                "work",
+                "epoch",
+                2,
+                "new-token",
+            )
+            .unwrap(),
             "C:\\sessions\\new.jsonl"
         );
-        assert!(
-            resolve_session_token(&state, "host-b", 7, "work", "epoch", 2, "new-token").is_err()
-        );
-        assert!(
-            resolve_session_token(&state, "host-a", 8, "work", "epoch", 2, "new-token").is_err()
-        );
+        assert!(resolve_work_session_token(
+            &state,
+            "host-b",
+            7,
+            "work",
+            "epoch",
+            2,
+            "new-token",
+        )
+        .is_err());
+        assert!(resolve_work_session_token(
+            &state,
+            "host-a",
+            8,
+            "work",
+            "epoch",
+            2,
+            "new-token",
+        )
+        .is_err());
     }
 }

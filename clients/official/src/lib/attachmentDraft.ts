@@ -1,4 +1,28 @@
-import type { AttachmentDto, ConversationImageResource, QueueItem } from './types'
+import type { AttachmentDto, ConversationImageResource, HostContext, LocalAttachmentUpload, QueueItem, Work } from './types'
+
+export function attachmentUploadTarget(work: Work, context: HostContext): LocalAttachmentUpload {
+  return {
+    ...context,
+    instanceId: work.id,
+    machineHostId: work.hostId ?? context.hostId,
+    ownerHostEpoch: work.ownerHostEpoch ?? '',
+    runtimeGeneration: work.runtimeGeneration,
+  }
+}
+
+export function attachmentUploadMatches(left: LocalAttachmentUpload | undefined, right: LocalAttachmentUpload): boolean {
+  return !!left
+    && left.hostId === right.hostId
+    && left.selectionGeneration === right.selectionGeneration
+    && left.instanceId === right.instanceId
+    && left.machineHostId === right.machineHostId
+    && left.ownerHostEpoch === right.ownerHostEpoch
+    && left.runtimeGeneration === right.runtimeGeneration
+}
+
+export function bindLocalAttachment(attachment: AttachmentDto, sourceToken: string, target: LocalAttachmentUpload): AttachmentDto {
+  return { ...attachment, localUpload: { ...target, sourceToken } }
+}
 
 export function attachmentsAfterSubmit(
   current: AttachmentDto[],

@@ -28,6 +28,7 @@ import type {
   SelectedAttachment,
   SessionCompactionResult,
   SessionForkResult,
+  SessionInventoryResult,
   SessionListResult,
   SessionNameResult,
   SessionNavigateResult,
@@ -266,8 +267,15 @@ export async function savePreviewImage(name: string, bytes: Uint8Array): Promise
   })
 }
 
-export async function uploadAttachment(workId: string, token: string, context: HostContext): Promise<AttachmentUploadResult> {
-  if (isTauri) return invoke('upload_attachment', { ...context, workId, token })
+export async function uploadAttachment(work: Work, token: string, context: HostContext): Promise<AttachmentUploadResult> {
+  if (isTauri) return invoke('upload_attachment', {
+    ...context,
+    workId: work.id,
+    targetMachineHostId: work.hostId ?? context.hostId,
+    expectedHostEpoch: work.ownerHostEpoch ?? '',
+    expectedRuntimeGeneration: work.runtimeGeneration,
+    token,
+  })
   throw new Error('浏览器设计预览不会上传附件')
 }
 
@@ -528,6 +536,10 @@ export async function listSessions(context: SessionContext, scope: 'cwd' | 'all'
   await delay(100)
   return previewSessions(context)
 }
+export async function listSessionInventory(context: HostContext, machineHostId: string, cwd: string): Promise<SessionInventoryResult> {
+  if (isTauri) return invoke<SessionInventoryResult>('session_inventory', { ...context, machineHostId, cwd })
+  throw new Error('浏览器设计预览不会读取保存的 Session')
+}
 export async function newSession(context: SessionContext, operationId: string): Promise<SessionReplacementResult> {
   if (isTauri) return invoke('new_session', { ...context, operationId })
   throw new Error('浏览器设计预览不会新建 Session')
@@ -657,6 +669,27 @@ export interface CreateWorkContinuation {
   operationId: string
   trustChallengeId: string
   projectTrustDecision: 'trust_once' | 'trust_and_remember' | 'deny_once' | 'deny_and_remember'
+}
+
+export async function adoptSession(
+  sessionToken: string,
+  context: HostContext,
+  machineHostId: string,
+  name?: string,
+  continuation?: CreateWorkContinuation,
+): Promise<Work> {
+  if (isTauri) {
+    return invoke<Work>('adopt_session', {
+      ...context,
+      machineHostId,
+      sessionToken,
+      name: name || null,
+      operationId: continuation?.operationId ?? null,
+      trustChallengeId: continuation?.trustChallengeId ?? null,
+      projectTrustDecision: continuation?.projectTrustDecision ?? null,
+    })
+  }
+  throw new Error('浏览器设计预览不会恢复保存的 Session')
 }
 
 export async function createWork(

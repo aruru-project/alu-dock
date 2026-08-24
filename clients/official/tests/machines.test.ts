@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { defaultMachineHostId, machineSelectorVisible, machineWorkspaceRoots, machineWorkspaceRootSelectorVisible, machineWorkspaceStart, selectedMachineTarget, subhostMachineName, workspaceChildPath } from '../src/lib/machines.ts'
+import { defaultMachineHostId, machineDisplayLabel, machineSelectorVisible, machineWorkspaceRoots, machineWorkspaceRootSelectorVisible, machineWorkspaceStart, selectedMachineTarget, subhostMachineName, workspaceChildPath } from '../src/lib/machines.ts'
 import type { MachineDto } from '../src/lib/types.ts'
 
 const main: MachineDto = { hostId: 'main-host', name: 'Main', kind: 'main', available: true }
@@ -7,6 +7,8 @@ const subhost: MachineDto = { hostId: 'sub-host', name: 'Windows', kind: 'subhos
 
 assert.equal(machineSelectorVisible([main]), false)
 assert.equal(selectedMachineTarget([main], main.hostId), undefined)
+assert.equal(machineDisplayLabel(main), 'Main', 'Machine 名称与种类相同时不显示 Main · Main')
+assert.equal(machineDisplayLabel(subhost), 'Windows · SubHost')
 
 const machines = [subhost, main]
 assert.equal(machineSelectorVisible(machines), true)

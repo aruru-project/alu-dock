@@ -31,7 +31,7 @@ pub const MAX_CONVERSATION_IMAGE_BYTES: usize = 20 * 1_024 * 1_024;
 const MAX_CONVERSATION_IMAGE_CHUNK_BYTES: usize = 512 * 1_024;
 const CONVERSATION_IMAGE_IDLE_TIMEOUT: Duration = Duration::from_secs(600);
 
-#[derive(Clone, Copy, Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionScope {
     Cwd,
@@ -44,6 +44,7 @@ pub struct SessionInfo {
     pub session_id: String,
     pub session_file: String,
     pub name: Option<String>,
+    pub first_user_message: Option<String>,
     pub cwd: String,
     pub updated_at: Option<String>,
 }
@@ -61,6 +62,46 @@ pub struct SessionListResult {
     pub sessions: Vec<SessionInfo>,
     pub total: u64,
     pub truncated: bool,
+    pub host_epoch: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionInventoryQuery {
+    cwd: String,
+    scope: SessionScope,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionInventoryDiagnostic {
+    pub message: String,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionInventoryWireResult {
+    sessions: Vec<SessionInfo>,
+    query: SessionInventoryQuery,
+    total: u64,
+    truncated: bool,
+    #[serde(default)]
+    incomplete: bool,
+    #[serde(default)]
+    diagnostics: Vec<SessionInventoryDiagnostic>,
+    #[serde(default)]
+    diagnostics_truncated: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct SessionInventoryResult {
+    pub sessions: Vec<SessionInfo>,
+    pub total: u64,
+    pub truncated: bool,
+    pub incomplete: bool,
+    pub diagnostics: Vec<SessionInventoryDiagnostic>,
+    pub diagnostics_truncated: bool,
     pub host_epoch: String,
 }
 
@@ -309,6 +350,15 @@ struct ConversationContentParams<'a> {
 struct SessionListParams<'a> {
     instance_id: &'a str,
     scope: SessionScope,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionInventoryParams<'a> {
+    cwd: &'a str,
+    scope: SessionScope,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    host_id: Option<&'a str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -771,6 +821,64 @@ impl DockClient {
         assembler.finish(item.total_blocks)
     }
 
+    pub async fn session_inventory(
+        &self,
+        cwd: &str,
+        scope: SessionScope,
+        target_host_id: Option<&str>,
+    ) -> Result<SessionInventoryResult> {
+        let (wire, host_epoch): (SessionInventoryWireResult, String) = self
+            .request_with_host_epoch(
+                "session.inventory",
+                &SessionInventoryParams {
+                    cwd,
+                    scope,
+                    host_id: target_host_id,
+                },
+                crate::capabilities::SESSION_INVENTORY,
+                None,
+            )
+            .await?;
+        if wire.query.cwd != cwd || wire.query.scope != scope {
+            return Err(protocol(
+                "session inventory did not correlate to the requested Machine and scope",
+            ));
+        }
+        if wire.sessions.len() as u64 > wire.total
+            || wire.truncated != (wire.sessions.len() as u64 != wire.total)
+        {
+            return Err(protocol(
+                "session inventory completeness metadata was inconsistent",
+            ));
+        }
+        validate_session_infos(&wire.sessions)?;
+        if !wire.incomplete && (!wire.diagnostics.is_empty() || wire.diagnostics_truncated) {
+            return Err(protocol(
+                "complete session inventory carried scan diagnostics",
+            ));
+        }
+        if wire.diagnostics.iter().any(|diagnostic| {
+            diagnostic.message.len() > 4_000
+                || diagnostic
+                    .path
+                    .as_ref()
+                    .is_some_and(|path| path.len() > 16_384)
+        }) {
+            return Err(protocol(
+                "session inventory diagnostics exceeded their bounds",
+            ));
+        }
+        Ok(SessionInventoryResult {
+            sessions: wire.sessions,
+            total: wire.total,
+            truncated: wire.truncated,
+            incomplete: wire.incomplete,
+            diagnostics: wire.diagnostics,
+            diagnostics_truncated: wire.diagnostics_truncated,
+            host_epoch,
+        })
+    }
+
     pub async fn list_sessions(
         &self,
         instance_id: &str,
@@ -791,23 +899,7 @@ impl DockClient {
                 "session list completeness metadata was inconsistent",
             ));
         }
-        let mut ids = HashSet::new();
-        let mut files = HashSet::new();
-        for session in &wire.sessions {
-            if session.session_id.is_empty()
-                || session.session_id.len() > 128
-                || session.session_file.is_empty()
-                || session.session_file.len() > 16_384
-                || session.cwd.is_empty()
-                || session.cwd.len() > 16_384
-                || !ids.insert(&session.session_id)
-                || !files.insert(&session.session_file)
-            {
-                return Err(protocol(
-                    "session list contained invalid or duplicate identities",
-                ));
-            }
-        }
+        validate_session_infos(&wire.sessions)?;
         Ok(SessionListResult {
             sessions: wire.sessions,
             total: wire.total,
@@ -1858,6 +1950,27 @@ fn valid_image_mime_type(value: &str) -> bool {
         })
 }
 
+fn validate_session_infos(sessions: &[SessionInfo]) -> Result<()> {
+    let mut ids = HashSet::new();
+    let mut files = HashSet::new();
+    for session in sessions {
+        if session.session_id.is_empty()
+            || session.session_id.len() > 128
+            || session.session_file.is_empty()
+            || session.session_file.len() > 16_384
+            || session.cwd.is_empty()
+            || session.cwd.len() > 16_384
+            || !ids.insert(&session.session_id)
+            || !files.insert(&session.session_file)
+        {
+            return Err(protocol(
+                "session list contained invalid or duplicate identities",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn protocol(message: &str) -> ClientError {
     ClientError::Protocol(message.into())
 }
@@ -1905,6 +2018,24 @@ mod tests {
         assert_eq!(image.mime_type, "image/png");
         assert_eq!(image.sha256, sha256);
         assert_eq!(image.size_bytes, 5);
+    }
+
+    #[test]
+    fn saved_session_inventory_targets_the_selected_machine() {
+        let request = serde_json::to_value(SessionInventoryParams {
+            cwd: "C:\\Users\\alu",
+            scope: SessionScope::All,
+            host_id: Some("subhost-a"),
+        })
+        .unwrap();
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "cwd": "C:\\Users\\alu",
+                "scope": "all",
+                "hostId": "subhost-a"
+            })
+        );
     }
 
     #[test]
