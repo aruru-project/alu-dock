@@ -534,7 +534,13 @@ export class MainMachineController implements RemoteInstanceDirectory {
     ended: () => void,
   ): Promise<RemoteEndpointDecision> {
     const current = this.instanceBindings.get(binding.route.mainInstanceId);
-    if (!current || current.machineId !== binding.machineId || current.route.nativeInstanceId !== binding.route.nativeInstanceId) {
+    if (!current) {
+      if (request.type === "instance.stop" && !this.liveConnection(binding.machineId)) {
+        return { kind: "result", result: offlineStopResult(request.params.operationId, binding.route.snapshot, true) };
+      }
+      throw new ProtocolValidationError("not_found", "That work is no longer available");
+    }
+    if (current.machineId !== binding.machineId || current.route.nativeInstanceId !== binding.route.nativeInstanceId) {
       throw new ProtocolValidationError("not_found", "That work is no longer available");
     }
     const expectedGeneration = binding.route.snapshot.runtimeGeneration;
@@ -546,9 +552,14 @@ export class MainMachineController implements RemoteInstanceDirectory {
       if (request.type !== "instance.stop") throw new ProtocolValidationError("host_unavailable", "That machine is offline. Reconnect it and try again");
       const result = offlineStopResult(request.params.operationId, route.snapshot);
       const stopped = (result as { instance: InstanceSnapshot }).instance;
+      let retired = false;
       await this.serializeAuthority(async () => {
         const latest = this.instanceBindings.get(route.mainInstanceId);
-        if (!latest || latest.machineId !== current.machineId || latest.route.nativeInstanceId !== route.nativeInstanceId) {
+        if (!latest) {
+          result.receipt.alreadyStopped = true;
+          return;
+        }
+        if (latest.machineId !== current.machineId || latest.route.nativeInstanceId !== route.nativeInstanceId) {
           throw new ProtocolValidationError("not_found", "That work is no longer available");
         }
         const latestGeneration = latest.route.snapshot.runtimeGeneration;
@@ -556,9 +567,12 @@ export class MainMachineController implements RemoteInstanceDirectory {
         await this.options.state.removeRoute(route.mainInstanceId);
         this.instanceBindings.delete(route.mainInstanceId);
         this.revision += 1;
+        retired = true;
       });
-      for (const listener of this.snapshotListeners.get(route.mainInstanceId) ?? []) listener(structuredClone(stopped));
-      for (const listener of this.disconnectListeners) listener([route.mainInstanceId]);
+      if (retired) {
+        for (const listener of this.snapshotListeners.get(route.mainInstanceId) ?? []) listener(structuredClone(stopped));
+        for (const listener of this.disconnectListeners) listener([route.mainInstanceId]);
+      }
       return { kind: "result", result };
     }
     return this.openRemoteStream(connection.machine, connection, request, emit, ended, route);
@@ -1574,7 +1588,7 @@ function offlineSnapshot(snapshot: InstanceSnapshot, at: string): InstanceSnapsh
   };
 }
 
-function offlineStopResult(operationId: string, source: InstanceSnapshot): unknown {
+function offlineStopResult(operationId: string, source: InstanceSnapshot, alreadyStopped = false): { receipt: { operationId: string; alreadyStopped: boolean; cleanupErrors: string[] }; instance: InstanceSnapshot } {
   const at = new Date().toISOString();
   const instance: InstanceSnapshot = {
     ...source,
@@ -1591,7 +1605,7 @@ function offlineStopResult(operationId: string, source: InstanceSnapshot): unkno
     executionChangedAt: at,
     runStartedAt: undefined,
   };
-  return { receipt: { operationId, alreadyStopped: false, cleanupErrors: [] }, instance };
+  return { receipt: { operationId, alreadyStopped, cleanupErrors: [] }, instance };
 }
 
 function parseMachineRecord(line: string): MachineWireRecord {

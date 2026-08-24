@@ -72,6 +72,55 @@ async function joinedState(root: string, state = new MainMachineState(root)): Pr
   return { state, machineId: pending.machineId };
 }
 
+test("concurrent offline RemoteInstance Stops each observe a terminal result", async (context) => {
+  const root = await mkdtemp(join(tmpdir(), "alu-machine-offline-stop-"));
+  context.after(async () => rm(root, { recursive: true, force: true }));
+  const { state, machineId } = await joinedState(root);
+  const mainInstanceId = randomUUID();
+  const native = snapshot("native-offline-stop");
+  const mapped = {
+    ...native,
+    id: mainInstanceId,
+    ownerHostEpoch: "main-epoch",
+    eventCursor: { ...native.eventCursor, hostEpoch: "main-epoch", instanceId: mainInstanceId },
+  };
+  await state.updateMachine(machineId, (machine) => {
+    machine.routes = [{ mainInstanceId, nativeInstanceId: native.id, snapshot: mapped }];
+  });
+  const controller = new MainMachineController({ state, mainHostEpoch: "main-epoch", localSnapshots: () => [] });
+  await controller.start();
+  context.after(() => controller.stop());
+
+  const [firstEndpoint, secondEndpoint] = await Promise.all([
+    controller.resolveInstance(mainInstanceId),
+    controller.resolveInstance(mainInstanceId),
+  ]);
+  assert.ok(firstEndpoint);
+  assert.ok(secondEndpoint);
+  const stopRequest = (operationId: string): Extract<ControlRequest, { type: "instance.stop" }> => ({
+    kind: "request", version: 2, requestId: `request-${operationId}`, type: "instance.stop",
+    params: { operationId, instanceId: mainInstanceId },
+  });
+  const [first, second] = await Promise.all([
+    firstEndpoint.dispatch(stopRequest("offline-stop-a"), () => {}, () => {}),
+    secondEndpoint.dispatch(stopRequest("offline-stop-b"), () => {}, () => {}),
+  ]);
+  assert.equal(first.kind, "result");
+  assert.equal(second.kind, "result");
+  if (first.kind !== "result" || second.kind !== "result") assert.fail("offline Stop did not complete locally");
+  const firstResult = first.result as { receipt: { operationId: string; alreadyStopped: boolean }; instance: InstanceSnapshot };
+  const secondResult = second.result as { receipt: { operationId: string; alreadyStopped: boolean }; instance: InstanceSnapshot };
+  assert.equal(firstResult.receipt.operationId, "offline-stop-a");
+  assert.equal(secondResult.receipt.operationId, "offline-stop-b");
+  assert.equal(firstResult.receipt.alreadyStopped, false);
+  assert.equal(secondResult.receipt.alreadyStopped, true);
+  assert.equal(firstResult.instance.lifecycle, "stopped");
+  assert.equal(secondResult.instance.lifecycle, "stopped");
+  assert.equal(firstResult.instance.id, secondResult.instance.id);
+  assert.equal(await controller.resolveInstance(mainInstanceId), undefined);
+  assert.equal((await state.get(machineId))?.routes.length, 0);
+});
+
 test("join enrollment is one-use and writing its private file preserves an existing parent mode", async () => {
   const root = await mkdtemp(join(tmpdir(), "alu-machine-state-"));
   const parent = join(root, "shared");
