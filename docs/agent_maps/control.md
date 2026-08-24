@@ -44,7 +44,7 @@ Main 是唯一面向客户端的 Host authority。SubHost 只持有一个到 Mai
 
 SubHost 只上报本机 Registry 的 native snapshots。初始和后续 inventory 都先把完整 canonical snapshot array 序列化，再按 machine-line 边界切成有序 base64 chunks；Main 收齐、按 durable catalog 的既有字节边界校验并逐项解析后才原子 reconcile，初次完成前不发送 `machine_ready`，替换 inventory 未完成时旧连接与旧目录继续权威。Main 在独立、持久的 route directory 中为每个 native instance 分配稳定的 Main `instanceId`；Main identity、trust 和 machine index 保存在 `main.json`，每个 SubHost 的 routes 使用各自 crash-safe atomic route file 和既有 catalog 字节边界，因此所有 SubHost 不共享一个 16 MiB route 上限。两种 ID 不要求相等。客户端只收到并发送 Main ID。普通 response、follow/control、response-transfer、workspace/deliverable stream 和 attachment upload body 都经过同一个 multiplexed Protocol V2 route seam；Host 不为每个 method 建 proxy，也不创建假的 remote `ManagedInstance`。
 
-MainMachineController 是 Main ID、route 和 instance key 的唯一全局 authority；DockRegistry 仍只管理本机原生 instance。Key 没有 placement 含义：Main-local snapshot、持久 route 和正在进行的 ensure reservation 共同参与全局认领，已有 owner 保留 key，后来上报的重复 instance 仍按 Main ID 可见但其 Main snapshot 省略 key，SubHost catalog 不被改写。`instance.get_by_key` 始终全局查询；`instance.ensure` 先全局查询，只有 miss 时可选 `hostId` 才选择第一次创建的位置，省略时创建在 Main 本机。同 key ensure 在 authority 外执行实际本机或机器请求，并在 reservation 释放后统一返回最终 owner。
+InstanceManager 是 Main ID、位置和 instance key 的唯一应用 authority；DockRegistry 仍只管理本机原生 instance。MainMachineController 实现 InstanceManager 注入的私有 persistent remote-directory/transport backend：它保存由 Machine inventory 驱动的 binding、tombstone 与 key reservation，但不接收未分类的客户端请求，也不另做 local/remote 业务路由。Key 没有 placement 含义：Main-local snapshot、持久 route 和正在进行的 ensure reservation 共同参与全局认领，已有 owner 保留 key，后来上报的重复 instance 仍按 Main ID 可见但其 Main snapshot 省略 key，SubHost catalog 不被改写。`instance.get_by_key` 始终全局查询；`instance.ensure` 先全局查询，只有 miss 时可选 `hostId` 才选择第一次创建的位置，省略时创建在 Main 本机。同 key ensure 在 authority 外执行实际本机或机器请求，并在 reservation 释放后统一返回最终 owner。
 
 `machine.list` 的每项可包含目标 Host 自报的 `platform`（`linux | windows`）、用户 Home 绝对路径 `homePath` 和原生文件系统根 `workspaceRoots`；Linux 根为 `/`，Windows 根为该 Host 运行用户可访问的盘符根。Main 保存 SubHost 最近一次上报的事实。Home 是 workspace 浏览默认起点，roots 是跨文件系统导航入口；虚拟 `Computer` 等位置只属于客户端投影，不作为 path 发送给 Host。公开 instance snapshot 的 `hostId` 与 machine list 使用同一个稳定 Machine identity，让客户端无需从路径或 Host epoch 推断 placement。
 
@@ -191,7 +191,7 @@ Dock tools 是 Host-owned、按来源 `instanceId` 绑定的本机工作能力�
 
 watch 是 Host 内存中的一次性 subscription，不轮询、不占模型 turn。目标已经 idle/stopped/error 时调用同步返回当前结果；否则 Host 订阅 instance state，固定首次 terminal transition 的状态后删除 watch，再向当前来源 Worker 投递仅含 target/reason/time 的 completion。来源/目标 session generation replacement 不改变 stable instance watch；来源 stop/forget、Dock tools 关闭会清理，目标 forget 按 unavailable 完成。cancel/off 与 completion delivery 在来源实例栅栏内排序；取消确认后，尚未交付的 completion 不能再次唤醒。watch 不跨 Host restart 恢复或补发。
 
-`dock_machines()` 复用 Main 的 canonical Machine facts，并只在 Agent-facing 文本中呈现名称、在线状态、平台、Home 与 roots，不呈现内部 `hostId`。`dock_create(cwd,name?,machine?)` 由 Main 将可选的精确 Machine display name 解析为 `hostId`，省略时使用来源 Machine，然后与 Protocol V2 `instance.create(hostId)` 进入同一个 `InstanceMutationService`，因此复用 operation ledger、canonical cwd、project trust 与 catalog transaction；它不新增 placement 协议，也不接受 Pi 启动参数。`dock_send(target,message)` 先在 Host 解析 target 和 source display name，再把固定可见来源包装后的正文交给同一个 `command.submit` service，并使用普通 `auto` delivery。目标看到的是持久化的普通 user message，Queue 与 receipt 语义不分叉；正文逐字保留，来源显示人类名称而不是 UUID。
+`dock_machines()` 复用 Main 的 canonical Machine facts，并只在 Agent-facing 文本中呈现名称、在线状态、平台、Home 与 roots，不呈现内部 `hostId`。`dock_create(cwd,name?,machine?)` 由 Main 将可选的精确 Machine display name 解析为 `hostId`，省略时使用来源 Machine，然后通过普通 DockClient → DockHost → InstanceManager 路径执行 Protocol V2 `instance.create(hostId)`，因此复用 operation ledger、canonical cwd、project trust 与 catalog transaction；它不新增 placement 协议，也不接受 Pi 启动参数。`dock_send(target,message)` 同样通过普通 `command.submit` 路径，在 Host 解析 target 和 source display name 后提交固定可见来源包装的正文，并使用普通 `auto` delivery。目标看到的是持久化的普通 user message，Queue 与 receipt 语义不分叉；正文逐字保留，来源显示人类名称而不是 UUID。
 
 ## 命令发现
 
@@ -213,7 +213,9 @@ Capability 表示当前 Host、Agent Worker 或客户端是否实现某项能力
 - `src/control/protocol.ts`：Protocol V2 shape、hello、capabilities 与 wire parser。
 - `src/control/dock-client.ts`：TypeScript 客户端 transport。
 - `src/control/dock-host.ts`：Host socket、request routing 与 event follow。
-- `src/control/dock-registry.ts`：instance 与 catalog lifecycle。
+- `src/control/instance-manager.ts`：唯一 instance identity/location 应用入口与 local/global profile。
+- `src/control/dock-registry.ts`：本机原生 instance 与 catalog lifecycle。
+- `src/control/machine-transport.ts`：InstanceManager 的 persistent remote-directory/transport backend 与 multiplexed Machine connection；不承担第二套客户端请求分类。
 - `src/control/operation-ledger.ts`：Host epoch 内的 mutation identity。
 - `src/control/catalog-*.ts`：durable catalog transaction 与 recovery。
 - `src/control/json-lines.ts`：JSONL framing。

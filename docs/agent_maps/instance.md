@@ -87,7 +87,7 @@ resolve(global instanceId)
 
 Main 使用带 LocalInstance 与 RemoteInstance 的 global profile；SubHost 使用只登记 native LocalInstance 的 local profile。两者复用同一个 request classification 和 endpoint contract，SubHost 不建立第二套业务入口。
 
-InstanceManager 的持久目录拥有 Main/native binding 与 retirement tombstone。存活的 RemoteInstance 只持有当前连接和 location binding；endpoint 退役后，tombstone 仍由目录保留并阻止旧 inventory 复活原 Main identity。
+InstanceManager 在 global profile 中组合一个 persistent `RemoteInstanceDirectory` backend；该目录拥有 Main/native binding 与 retirement tombstone，当前实现由 Machine controller 依靠 inventory/connection 事实提供。这个 backend 不接收未分类的客户端请求，也不形成另一套 local/remote decision。存活的 RemoteInstance 只持有当前连接和 location binding；endpoint 退役后，tombstone 仍由目录保留并阻止旧 inventory 复活原 Main identity。
 
 创建、list、key lookup 等目录命令同样进入 InstanceManager，但不伪装成对某个既有 Instance 的命令。
 

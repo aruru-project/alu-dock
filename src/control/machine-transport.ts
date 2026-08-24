@@ -147,6 +147,7 @@ interface SubHostStream {
   queuedInputBytes: number;
 }
 
+/** Connection-fed remote directory/transport backend; InstanceManager remains the client request authority. */
 export class MainMachineController implements RemoteInstanceDirectory {
   private server: TlsServer | undefined;
   private activePort: number | undefined;
