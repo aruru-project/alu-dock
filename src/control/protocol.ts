@@ -30,6 +30,8 @@ import {
   MAX_CONVERSATION_CHUNK_CHARS,
   MAX_CONVERSATION_CONTENT_BLOCKS,
   MAX_SESSION_FIRST_USER_MESSAGE_CHARS,
+  MAX_STOP_CLEANUP_ERROR_CHARS,
+  MAX_STOP_CLEANUP_ERRORS,
   type ConversationImageBody,
 } from "../core/instance-dto.js";
 import {
@@ -311,6 +313,7 @@ export interface ControlRequestClassification {
 
 type ControlRequestDescriptor = Omit<ControlRequestClassification, "target"> & {
   target: ControlRequestTarget | "optional_instance";
+  availableDuringMutationFault?: true;
 };
 
 const CONTROL_REQUEST_DESCRIPTORS = {
@@ -338,7 +341,7 @@ const CONTROL_REQUEST_DESCRIPTORS = {
   "instance.reopen": { target: "instance", effect: "command", transport: "unary" },
   "interaction.respond": { target: "instance", effect: "command", transport: "unary" },
   "extension.tools_expanded.set": { target: "instance", effect: "command", transport: "unary" },
-  "extension.widget_viewport.set": { target: "instance", effect: "command", transport: "unary" },
+  "extension.widget_viewport.set": { target: "instance", effect: "command", transport: "unary", availableDuringMutationFault: true },
   "command.submit": { target: "instance", effect: "command", transport: "unary" },
   "command.abort": { target: "instance", effect: "command", transport: "unary" },
   "queue.dequeue": { target: "instance", effect: "command", transport: "unary" },
@@ -1512,7 +1515,7 @@ export function parseStopResult(input: unknown): StopResult {
   const receipt = object(value.receipt, "receipt"); exact(receipt, ["operationId", "alreadyStopped", "cleanupErrors"]);
   const instance = parseInstanceSnapshot(value.instance, "instance");
   if (instance.lifecycle !== "stopped") throw validation("invalid_response", "Stop result instance must be stopped");
-  return { receipt: { operationId: id(receipt.operationId, "receipt.operationId"), alreadyStopped: boolean(receipt.alreadyStopped, "receipt.alreadyStopped"), cleanupErrors: receipt.cleanupErrors === undefined ? undefined : strings(receipt.cleanupErrors, "receipt.cleanupErrors", 100, MAX_MESSAGE) }, instance };
+  return { receipt: { operationId: id(receipt.operationId, "receipt.operationId"), alreadyStopped: boolean(receipt.alreadyStopped, "receipt.alreadyStopped"), cleanupErrors: receipt.cleanupErrors === undefined ? undefined : strings(receipt.cleanupErrors, "receipt.cleanupErrors", MAX_STOP_CLEANUP_ERRORS, MAX_STOP_CLEANUP_ERROR_CHARS) }, instance };
 }
 export function parseForgetResult(input: unknown): ForgetResult {
   const value = object(input, "forget result"); exact(value, ["receipt"]);

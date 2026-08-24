@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionUiBroker } from "../core/extension-ui-broker.js";
 import type { DockToolsHostPort, DockToolsRequest } from "../core/dock-tools.js";
 import type { AttachmentAccessRequest, InstanceAttachmentHostPort } from "../core/instance-attachments.js";
-import type { AgentCommandPreflightResult, AgentEvent, AgentInvokeOptions, AgentRequest, AgentWorkerConnection as AgentWorkerConnectionPort, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
+import type { AgentCleanupResult, AgentCommandPreflightResult, AgentEvent, AgentInvokeOptions, AgentRequest, AgentWorkerConnection as AgentWorkerConnectionPort, AgentWorkerControl, AgentWorkerState } from "../core/agent-worker.js";
 import type { WorkerIncidentRecorder } from "../core/worker-incident.js";
 import { AgentMutationEffectUnknownError, AgentUnavailableBeforeEffectError } from "../core/agent-worker.js";
 import { PiWorkerProcess, type PiWorkerInitOptions, type WorkerProcessTimeouts } from "./worker-process.js";
@@ -138,15 +138,18 @@ export class AgentWorkerConnection implements AgentWorkerConnectionPort {
     );
   }
 
-  async dispose(): Promise<void> {
-    if (this.expectedExit) return;
+  async dispose(): Promise<AgentCleanupResult> {
+    if (this.expectedExit) return { cleanupErrors: [] };
     this.expectedExit = true;
+    let cleanup: AgentCleanupResult = { cleanupErrors: [] };
     if (!this.unavailable) {
-      try { await this.control({ type: "dispose" }); } catch { /* Supervisor owns the hard stop. */ }
+      try { cleanup = await this.control({ type: "dispose" }) as AgentCleanupResult; }
+      catch { cleanup.cleanupErrors.push("dispose: graceful Worker cleanup failed; supervisor terminated it"); }
     }
     this.sender.close();
-    await this.process.terminate();
-    this.rejectPending(new AgentWorkerUnavailableError("Pi worker was disposed"));
+    try { await this.process.terminate(); }
+    finally { this.rejectPending(new AgentWorkerUnavailableError("Pi worker was disposed")); }
+    return cleanup;
   }
 
   private callUi(capability: UiCapability, args: Record<string, unknown>, deadline: "request"): Promise<unknown> {

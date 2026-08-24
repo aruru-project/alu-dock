@@ -16,6 +16,7 @@ import { ProjectTrustCoordinator } from "../src/control/project-trust.js";
 import { ExtensionUiBroker, InteractionLifecycleCancelledError } from "../src/core/extension-ui-broker.js";
 import { ManagedInstance, type DockEvent, type SessionDto } from "../src/core/managed-instance.js";
 import type { SettingUpdate } from "../src/core/config-projection.js";
+import { MAX_STOP_CLEANUP_ERROR_CHARS } from "../src/core/instance-dto.js";
 import { AgentInvalidSettingValueError, type AgentHistoryEntry, type AgentPromptOptions } from "../src/core/agent-worker.js";
 import { TransientFileRegistry } from "../src/pi/transient-file-registry.js";
 import { mouseTrackingSequences } from "../src/tui/mouse-input.js";
@@ -1897,6 +1898,46 @@ test("stop preempts a manual compaction even before its start event is projected
   assert.ok(stopRequested && compactionCompleted && stopRequested.sequence < compactionCompleted.sequence);
 });
 
+test("projection reads admitted during replacement wait for its committed generation", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "replacement-read-fence");
+  const managed = harness.registry.get(created.id);
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
+  runtime.settle();
+  await managed.waitForIdle();
+
+  const originalReload = runtime.reload.bind(runtime);
+  let markReloadEntered!: () => void;
+  let releaseReload!: () => void;
+  const reloadEntered = new Promise<void>((resolve) => { markReloadEntered = resolve; });
+  const reloadRelease = new Promise<void>((resolve) => { releaseReload = resolve; });
+  runtime.reload = async (operationId: string) => {
+    markReloadEntered();
+    await reloadRelease;
+    return originalReload(operationId);
+  };
+
+  const replacement = managed.reloadSession("blocked-reload");
+  await reloadEntered;
+  let treeSettled = false;
+  let historySettled = false;
+  const tree = managed.getTree().finally(() => { treeSettled = true; });
+  const history = managed.getHistoryPage(undefined, 20).finally(() => { historySettled = true; });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(runtime.treeReadCalls, 0);
+  assert.equal(treeSettled, false);
+  assert.equal(historySettled, false);
+
+  releaseReload();
+  const [, , historyResult] = await Promise.all([replacement, tree, history]);
+  assert.equal(runtime.treeReadCalls, 1);
+  assert.equal(historyResult.instance.runtimeGeneration, created.runtimeGeneration + 1);
+});
+
 test("stop fences new input and starts Worker cleanup without waiting on an input hook", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
@@ -1907,7 +1948,7 @@ test("stop fences new input and starts Worker cleanup without waiting on an inpu
   const preflight = runtime.blockNextPromptBeforePreflight();
   const disposal = runtime.blockDispose();
 
-  const submitting = client.prompt(created.id, "accepted before stop", "auto", "pre-stop-input");
+  const submitting = client.prompt(created.id, "rejected after stop", "auto", "pre-stop-input");
   await preflight.entered;
   const stopping = client.stop(created.id, "stop-after-input-reservation");
   await disposal.entered;
@@ -1919,13 +1960,36 @@ test("stop fences new input and starts Worker cleanup without waiting on an inpu
   );
 
   preflight.release();
-  const accepted = await submitting;
-  runtime.settle("accepted input settled during Stop");
+  await assert.rejects(
+    submitting,
+    (error: unknown) => error instanceof ControlClientError && error.code === "instance_not_active",
+  );
   disposal.release();
   const stopped = await stopping;
 
-  assert.equal(accepted.receipt.operationId, "pre-stop-input");
   assert.equal(stopped.instance.lifecycle, "stopped");
+  assert.equal(runtime.disposeCalls, 1);
+});
+
+test("Stop publishes non-terminal Worker cleanup failures", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "stop-cleanup-errors");
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
+  await client.prompt(created.id, "queued before cleanup", "steer", "queue-before-cleanup");
+  runtime.clearQueueError = new Error(`fixture queue cleanup failed ${"q".repeat(1_500)}`);
+  runtime.abortError = new Error(`fixture abort cleanup failed ${"a".repeat(1_500)}`);
+
+  const stopped = await client.stop(created.id, "stop-with-cleanup-errors");
+
+  assert.equal(stopped.instance.lifecycle, "stopped");
+  assert.equal(stopped.receipt.cleanupErrors?.length, 2);
+  assert.match(stopped.receipt.cleanupErrors?.[0] ?? "", /^clearQueue: fixture queue cleanup failed/u);
+  assert.match(stopped.receipt.cleanupErrors?.[1] ?? "", /^abort: fixture abort cleanup failed/u);
+  assert.match(stopped.instance.lastError ?? "", /^clearQueue: fixture queue cleanup failed/u);
+  assert.ok((stopped.instance.lastError?.length ?? 0) <= MAX_STOP_CLEANUP_ERROR_CHARS);
   assert.equal(runtime.disposeCalls, 1);
 });
 
@@ -2979,6 +3043,35 @@ test("a failed catalog write rejects create without a ghost instance and the nex
 });
 
 
+
+test("mutation fault admission keeps extension widget viewport control available", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "fault-viewport");
+  const operation = await client.controlExtensionUi(created.id, () => {});
+  const hostState = harness.host as unknown as { state: "running" | "mutation_faulted" };
+  hostState.state = "mutation_faulted";
+  try {
+    const viewport = await client.setExtensionWidgetViewport(
+      created.id,
+      operation.initial.leaseToken,
+      created.runtimeGeneration,
+      90,
+      30,
+    );
+    assert.equal(viewport.accepted, true);
+    await assert.rejects(
+      client.setActiveTools(created.id, ["write"], "blocked-catalog-mutation"),
+      (error: unknown) => error instanceof ControlClientError && error.code === "mutation_faulted",
+    );
+  } finally {
+    hostState.state = "running";
+    operation.close();
+    await operation.done;
+  }
+});
 
 test("a catalog failure before a command takes effect rejects it cleanly and the Host stays usable", async (context) => {
   const port = new ScriptedCatalogCommitPort();

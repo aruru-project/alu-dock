@@ -1,5 +1,6 @@
 import type {
   ClearedAgentQueue,
+  AgentCleanupResult,
   AgentCompactionResult,
   AgentConversationContentChunk,
   AgentConversationContentPage,
@@ -55,6 +56,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   gitBranch: string | undefined;
   abortCalls = 0;
   clearQueueCalls = 0;
+  clearQueueError: Error | undefined;
   abortError: Error | undefined;
   disposeCalls = 0;
   disposeError: Error | undefined;
@@ -610,6 +612,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
 
   clearQueue(): ClearedAgentQueue {
     this.clearQueueCalls += 1;
+    if (this.clearQueueError) throw this.clearQueueError;
     const cleared = {
       steering: [...this.steeringQueue],
       followUp: [...this.followUpQueue],
@@ -668,16 +671,25 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     return { entered: block.entered.promise, release: () => block.release.resolve() };
   }
 
-  async dispose(): Promise<void> {
+  async dispose(): Promise<AgentCleanupResult> {
     this.disposeCalls += 1;
-    if (this.steeringQueue.length > 0 || this.followUpQueue.length > 0) this.clearQueue();
-    if (this.isStreaming || this.isCompacting || this.activeNavigationBlock) await this.abort();
+    const cleanupErrors: string[] = [];
+    if (this.steeringQueue.length > 0 || this.followUpQueue.length > 0) {
+      try { this.clearQueue(); }
+      catch (error) { cleanupErrors.push(`clearQueue: ${error instanceof Error ? error.message : String(error)}`); }
+    }
+    if (this.isStreaming || this.isCompacting || this.activeNavigationBlock) {
+      try { await this.abort(); }
+      catch (error) { cleanupErrors.push(`abort: ${error instanceof Error ? error.message : String(error)}`); }
+    }
     const block = this.disposeBlock;
     if (block) {
       block.entered.resolve();
       await block.release.promise;
     }
     if (this.disposeError) throw this.disposeError;
+    if (this.currentRun) this.settle("disposed", "aborted");
+    return { cleanupErrors };
   }
 
   drainNextQueuedWithoutMessageStart(): string | undefined {

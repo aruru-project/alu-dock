@@ -366,6 +366,9 @@ export interface CommandReceipt {
   acceptedAt: string;
 }
 
+export const MAX_STOP_CLEANUP_ERRORS = 100;
+export const MAX_STOP_CLEANUP_ERROR_CHARS = 2_048;
+
 export interface StopReceipt {
   operationId: string;
   instanceId: string;

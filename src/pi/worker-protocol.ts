@@ -40,6 +40,8 @@ import {
   MAX_INPUT_IMAGES,
   MAX_SEMANTIC_HISTORY_PAGE_BYTES,
   MAX_SEMANTIC_HISTORY_PAGE_ITEMS,
+  MAX_STOP_CLEANUP_ERROR_CHARS,
+  MAX_STOP_CLEANUP_ERRORS,
 } from "../core/instance-dto.js";
 import type { SettingKey } from "../core/config-projection.js";
 import { parseDockToolsRequest, parseDockToolsResult, parseObservationNotification } from "../core/dock-tools-codec.js";
@@ -414,6 +416,12 @@ function validateWorkerAgentEvent(event: Record<string, unknown>): void {
  */
 export function validateAgentWorkerResult(label: string, raw: unknown): void {
   switch (label) {
+    case "agent.dispose": {
+      const result = record(raw, "Worker cleanup result");
+      exactKeys(result, ["cleanupErrors"], "Worker cleanup result");
+      stringArray(result.cleanupErrors, MAX_STOP_CLEANUP_ERRORS, MAX_STOP_CLEANUP_ERROR_CHARS, "Worker cleanup error");
+      return;
+    }
     case "session.history": {
       if (!Array.isArray(raw) || raw.length > 100_000) throw new Error("Worker session history is invalid");
       raw.forEach((entry, index) => parseHistoryEntry(entry, `Worker history[${index}]`));

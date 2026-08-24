@@ -557,7 +557,8 @@ export class DockHost {
       const request = parseControlRequest(raw);
       currentRequestId = request.requestId;
       if (this.state !== "running" && this.state !== "mutation_faulted") throw new ProtocolValidationError("host_draining", "Alu Dock host is not accepting requests");
-      if (this.state === "mutation_faulted" && controlRequestDescriptor(request.type).effect === "command") throw new ProtocolValidationError("mutation_faulted", "Alu Dock catalog is mutation-faulted; query state and wait for Host restart");
+      const descriptor = controlRequestDescriptor(request.type);
+      if (this.state === "mutation_faulted" && descriptor.effect === "command" && !descriptor.availableDuringMutationFault) throw new ProtocolValidationError("mutation_faulted", "Alu Dock catalog is mutation-faulted; query state and wait for Host restart");
       if (!this.capabilities.has(capabilityForRequest(request.type))) throw new ProtocolValidationError("capability_missing", `Capability ${capabilityForRequest(request.type)} is unavailable`);
 
       const location = await this.instanceManager.locate(

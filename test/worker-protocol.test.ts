@@ -87,6 +87,8 @@ test("private Worker admission reports the delivery actually chosen by the Agent
 });
 
 test("private Worker lifecycle signals accept carried operation attribution", () => {
+  validateAgentWorkerResult("agent.dispose", { cleanupErrors: ["abort: fixture cleanup failed"] });
+  assert.throws(() => validateAgentWorkerResult("agent.dispose", { cleanupErrors: "swallowed" }));
   const events = [
     { type: "agent_start", operationId: "prompt-op" },
     { type: "agent_settled", stopReason: "stop", operationId: "prompt-op" },

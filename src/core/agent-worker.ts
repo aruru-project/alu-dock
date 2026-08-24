@@ -316,6 +316,10 @@ export interface AgentInvokeOptions {
   context?: AgentInvokeContext;
 }
 
+export interface AgentCleanupResult {
+  cleanupErrors: string[];
+}
+
 /** One generic Host-to-Worker connection; Agent methods and objects remain in the Worker. */
 export interface AgentWorkerConnection {
   state(): AgentWorkerState;
@@ -327,5 +331,5 @@ export interface AgentWorkerConnection {
    * also settles or rejects outstanding invokes so terminal admission cannot
    * remain hostage to an Agent input hook.
    */
-  dispose(): Promise<void>;
+  dispose(): Promise<AgentCleanupResult>;
 }

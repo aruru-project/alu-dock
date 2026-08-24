@@ -43,6 +43,7 @@ import {
   MAX_IMAGE_PATH_CHARS,
   MAX_INPUT_IMAGES,
   MAX_SEMANTIC_HISTORY_PAGE_BYTES,
+  MAX_STOP_CLEANUP_ERROR_CHARS,
   type AttachmentDto,
   type ContentBlockDto,
   type ConversationFrame,
@@ -66,6 +67,7 @@ import {
 } from "../core/agent-worker.js";
 import type {
   ClearedAgentQueue,
+  AgentCleanupResult,
   AgentCommandPreflightResult,
   AgentCompactionResult,
   AgentConversationContentChunk,
@@ -223,7 +225,7 @@ export class PiAgentAdapter {
   private disposed = false;
   private runtimeDisposed = false;
   private unavailable = false;
-  private disposePromise: Promise<void> | undefined;
+  private disposePromise: Promise<AgentCleanupResult> | undefined;
   private mutationTail: Promise<void> = Promise.resolve();
   private rebindEntered = false;
   private replacementInvalidated = false;
@@ -446,7 +448,7 @@ export class PiAgentAdapter {
       case "resolve_session_target": return this.resolveSessionTarget(request.sessionFile);
       case "wait_for_idle": await this.waitForIdle(); return null;
       case "observation_delivery": throw new Error("Observation delivery must be handled by the Worker bridge");
-      case "dispose": await this.dispose(); return null;
+      case "dispose": return this.dispose();
     }
   }
 
@@ -1116,16 +1118,21 @@ export class PiAgentAdapter {
     });
   }
 
-  dispose(): Promise<void> {
+  dispose(): Promise<AgentCleanupResult> {
     if (this.disposePromise) return this.disposePromise;
     this.disposePromise = (async () => {
-      if (this.disposed) return;
-      try { this.clearQueue(); } catch { /* Runtime disposal still owns final cleanup. */ }
+      if (this.disposed) return { cleanupErrors: [] };
+      const cleanupErrors: string[] = [];
+      const captureCleanupError = (stage: string, error: unknown): void => {
+        cleanupErrors.push(safeRequiredText(`${stage}: ${boundedErrorMessage(error)}`, MAX_STOP_CLEANUP_ERROR_CHARS, `${stage} cleanup failed`));
+      };
+      try { this.clearQueue(); } catch (error) { captureCleanupError("clearQueue", error); }
       this.disposed = true;
       try {
-        await this.abort().catch(() => {});
+        await this.abort().catch((error: unknown) => { captureCleanupError("abort", error); });
         await this.mutationTail.catch(() => {});
         await this.disposeRuntimeOnce();
+        return { cleanupErrors };
       } finally {
         this.invalidateBindingsSynchronously();
         this.subscribers.clear();

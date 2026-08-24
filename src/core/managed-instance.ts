@@ -46,6 +46,7 @@ import type {
 export type { CommandDto, CommandReferenceDto, DiagnosticDto, ResourceDto, SettingDto, SettingKey, SettingUpdate, SettingValueMap, SourceDto, ToolDto } from "./config-projection.js";
 import type {
   ClearedAgentQueue,
+  AgentCleanupResult,
   AgentCommandPreflightResult,
   AgentCompactionResult,
   AgentInvokeOptions,
@@ -95,6 +96,7 @@ import {
   MAX_PENDING_QUEUE_IMAGE_DESCRIPTOR_CHARS,
   MAX_PENDING_QUEUE_ITEMS,
   MAX_PENDING_QUEUE_TEXT_CHARS,
+  MAX_STOP_CLEANUP_ERROR_CHARS,
 } from "./instance-dto.js";
 import { MAX_CONVERSATION_CONTENT_BLOCKS } from "./instance-dto.js";
 import type {
@@ -373,7 +375,7 @@ export class ManagedInstance {
   private historyRefreshTail: Promise<void> = Promise.resolve();
   private hostDrainActive = false;
   private hostDrainPromise: Promise<void> | undefined;
-  private runtimeDisposePromise: Promise<void> | undefined;
+  private runtimeDisposePromise: Promise<AgentCleanupResult> | undefined;
   private runtimeGenerationValue = 1;
   private agentStartCount = 0;
   private agentSettledCount = 0;
@@ -1316,10 +1318,7 @@ export class ManagedInstance {
         preflightStatus = "rejected";
         return;
       }
-      // Runtime custody is already real when this notification crosses the
-      // Worker boundary, so terminal admission cannot retroactively reject it.
-      // Host custody has no effect yet and remains synchronously fenceable.
-      if (result.custody === "host" && (!inputLease.effectAllowed(inputGeneration) || this.state.lifecycle !== "active")) {
+      if (!inputLease.effectAllowed(inputGeneration) || this.state.lifecycle !== "active") {
         const lifecycle = this.state.lifecycle === "active" ? "stopping" : this.state.lifecycle;
         preflightTransition = rejectBeforeRun(
           new InstanceNotActiveError(this.id, lifecycle),
@@ -2178,8 +2177,10 @@ export class ManagedInstance {
     await this.extensionUi.cancelForHostDrain();
     if (preemptibleEffect) await preemptibleEffect;
 
-    try { await this.disposeRuntimeOnce(); }
-    catch (error) {
+    try {
+      const cleanup = await this.disposeRuntimeOnce();
+      cleanupErrors.push(...cleanup.cleanupErrors);
+    } catch (error) {
       // Keep lifecycle=stopping and the old owner claim. A stopped record would
       // be continuable even though the Worker process tree may still exist.
       throw new RuntimeEffectUnknownError(operationId, error);
@@ -2210,7 +2211,9 @@ export class ManagedInstance {
         this.lastKnownValue = undefined;
         this.interruptionValue = undefined;
         this.shutdownRequestedAt = undefined;
-        if (cleanupErrors.length > 0) this.state.lastError = cleanupErrors.join("; ");
+        if (cleanupErrors.length > 0) {
+          this.state.lastError = safeWireText(cleanupErrors.join("; "), MAX_STOP_CLEANUP_ERROR_CHARS);
+        }
         this.touch();
       },
       () => {
@@ -2239,7 +2242,7 @@ export class ManagedInstance {
     return receipt;
   }
 
-  private disposeRuntimeOnce(): Promise<void> {
+  private disposeRuntimeOnce(): Promise<AgentCleanupResult> {
     if (!this.runtimeDisposePromise) {
       try { this.runtimeDisposePromise = Promise.resolve(this.session.dispose()); }
       catch (error) { this.runtimeDisposePromise = Promise.reject(error); }
@@ -2402,6 +2405,7 @@ export class ManagedInstance {
   }
 
   private async withCommittedProjectionRead<T>(read: () => T): Promise<T> {
+    await this.waitForProjectionConfiguration();
     const historyBoundary = this.historyRefreshTail;
     await historyBoundary;
     const lifecycle = this.snapshot().lifecycle;
@@ -2410,6 +2414,7 @@ export class ManagedInstance {
   }
 
   private async withProjectionRead<T>(read: () => Promise<T>): Promise<T> {
+    await this.waitForProjectionConfiguration();
     const committedBoundary = this.transitionTail;
     await committedBoundary;
     this.assertActive();
@@ -2420,6 +2425,11 @@ export class ManagedInstance {
     }
     this.assertActive();
     return result;
+  }
+
+  private async waitForProjectionConfiguration(): Promise<void> {
+    const exclusive = this.commandScheduler.activeCommand("exclusive");
+    if (exclusive && exclusive.kind !== "compaction") await exclusive.completion;
   }
 
   private async beginConfiguration(
