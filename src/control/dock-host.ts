@@ -66,7 +66,7 @@ import {
 import { executeSessionCommand, isSessionCommandRequest } from "./session-command-service.js";
 import { InstanceWorkspace, InstanceWorkspaceError } from "./instance-workspace.js";
 import { SourceFileTransferError, transferSourceFile } from "./source-file-transfer.js";
-import { InstanceMutationService } from "./instance-mutation-service.js";
+import { InstanceManager, type RemoteInstanceDirectory, type RoutedProtocolProxy } from "./instance-manager.js";
 import {
   AttachmentIntegrityError,
   AttachmentNotFoundError,
@@ -86,7 +86,6 @@ import {
   MAX_CATALOG_PRUNE_ITEMS,
   MAX_CONTROL_LINE_BYTES,
   MAX_HISTORY_ITEMS,
-  MAX_INSTANCE_LIST_RESULT_BYTES,
   MAX_REPLAY_EVENTS,
   type ControlEventEnvelope,
   type ControlRequest,
@@ -101,7 +100,7 @@ import {
   ProtocolValidationError,
 } from "./protocol.js";
 import { resultWithDefaultHostId } from "./machine-route-identity.js";
-import { MachineMutationEffectUnknownError, RoutedControlError, type MainRouteAuthority, type RoutedProtocolProxy } from "./machine-transport.js";
+import { MachineMutationEffectUnknownError, RoutedControlError } from "./machine-transport.js";
 import { isWindowsNamedPipeEndpoint, normalizeLocalEndpoint } from "./local-endpoint.js";
 
 const MAX_SOCKET_WRITE_BUFFER = MAX_CONTROL_LINE_BYTES;
@@ -141,7 +140,7 @@ export interface DockHostOptions {
   workspaceBrowser?: WorkspaceBrowser;
   remoteAccessState?: RemoteAccessState;
   attachmentService?: AttachmentService;
-  routeAuthority?: MainRouteAuthority;
+  remoteInstances?: RemoteInstanceDirectory;
   listen?: boolean;
 }
 
@@ -163,14 +162,13 @@ export class DockHost {
   private readonly attachBackpressureStats = { blocked: 0, drained: 0, overflow: 0, timeout: 0 };
   private readonly inFlightDispatches = new Set<Promise<void>>();
   private readonly operationLedger: OperationLedger;
-  private readonly instanceMutations: InstanceMutationService;
+  private readonly instanceManager: InstanceManager;
   private readonly faultDrainTimeoutMs: number;
   private readonly initialize: (() => Promise<void>) | undefined;
   private readonly sessionInventory: SessionInventory;
   private readonly workspaceBrowser: WorkspaceBrowser;
   private readonly remoteAccess: RemoteAccessServer | undefined;
   private readonly attachmentService: AttachmentService | undefined;
-  private readonly routeAuthority: MainRouteAuthority | undefined;
   private readonly listenOnLocalEndpoint: boolean;
   private readonly capabilities: ReadonlySet<string>;
   private faultDrainPromise: Promise<void> | undefined;
@@ -191,14 +189,14 @@ export class DockHost {
     this.hostEpoch = options.registry.hostEpoch;
     this.startedAt = options.registry.startedAt;
     this.operationLedger = new OperationLedger(options.operationReceiptCapacity);
-    this.instanceMutations = new InstanceMutationService(this.registry, this.operationLedger, options.attachmentService);
+    this.instanceManager = new InstanceManager(this.registry, this.operationLedger, options.attachmentService, options.remoteInstances);
     this.registry.bindDockToolsMutationPort({
       create: async (input) => {
-        const result = await this.instanceMutations.create(input);
+        const result = await this.instanceManager.create(input);
         return { instance: this.registry.observationStatus(result.instance.id) };
       },
       send: async (input) => {
-        const result = await this.instanceMutations.submit({
+        const result = await this.instanceManager.submit({
           operationId: input.operationId,
           instanceId: input.instanceId,
           message: input.message,
@@ -219,11 +217,10 @@ export class DockHost {
     this.sessionInventory = options.sessionInventory ?? { list: async () => ({ sessions: [], incomplete: false, diagnostics: [] }) };
     this.workspaceBrowser = options.workspaceBrowser ?? new FileSystemWorkspaceBrowser();
     this.attachmentService = options.attachmentService;
-    this.routeAuthority = options.routeAuthority;
     if (!this.listenOnLocalEndpoint && options.remoteAccessState) throw new Error("A SubHost cannot enable client Remote Access");
     const capabilities = new Set(implementedCapabilities());
     if (this.attachmentService === undefined) capabilities.delete(ATTACHMENTS_CAPABILITY);
-    if (this.routeAuthority === undefined) capabilities.delete(MACHINES_CAPABILITY);
+    if (!this.instanceManager.hasRemoteDirectory()) capabilities.delete(MACHINES_CAPABILITY);
     this.capabilities = capabilities;
     this.remoteAccess = options.remoteAccessState
       ? new RemoteAccessServer({
@@ -237,6 +234,7 @@ export class DockHost {
 
   waitForFatalCompletion(): Promise<HostFatalCompletion> { return this.fatalPromise; }
   fatalCompletion(): HostFatalCompletion | undefined { return this.fatalCompletionValue; }
+  instanceDirectory(): InstanceManager { return this.instanceManager; }
   /** Private composition seam used only by the encrypted SubHost multiplexer. */
   acceptProtocolSocket(socket: Socket): void { this.handleConnection(socket); }
 
@@ -289,7 +287,7 @@ export class DockHost {
       await this.initialize?.();
       if (this.state !== "starting") throw new Error("Host start was cancelled by shutdown");
       await this.remoteAccess?.start();
-      await this.routeAuthority?.start();
+      await this.instanceManager.start();
       if (this.state !== "starting") throw new Error("Host start was cancelled by shutdown");
 
       this.unsubscribeMutationFault = this.registry.onMutationFault((fault) => this.enterMutationFault(fault.error));
@@ -299,7 +297,7 @@ export class DockHost {
       });
       this.state = "running";
     } catch (error) {
-      await this.routeAuthority?.stop().catch(() => {});
+      await this.instanceManager.stop().catch(() => {});
       await this.remoteAccess?.stop().catch(() => {});
       const closePromise = server ? closeServer(server) : Promise.resolve();
       for (const socket of this.connections) socket.destroy();
@@ -328,7 +326,7 @@ export class DockHost {
       this.server = undefined;
       const closePromise = server ? closeServer(server) : Promise.resolve();
       await this.remoteAccess?.stop();
-      await this.routeAuthority?.stop();
+      await this.instanceManager.stop();
       await this.registry.cancelInteractionsForHostDrain();
       for (const socket of this.connections) socket.destroy();
       this.connections.clear();
@@ -562,55 +560,27 @@ export class DockHost {
       if (this.state === "mutation_faulted" && controlRequestDescriptor(request.type).effect === "command") throw new ProtocolValidationError("mutation_faulted", "Alu Dock catalog is mutation-faulted; query state and wait for Host restart");
       if (!this.capabilities.has(capabilityForRequest(request.type))) throw new ProtocolValidationError("capability_missing", `Capability ${capabilityForRequest(request.type)} is unavailable`);
 
-      if (this.routeAuthority && request.type === "instance.get_by_key") {
-        const instance = await this.routeAuthority.getByKey(request.params.key);
+      const location = await this.instanceManager.locate(
+        request,
+        async (record) => {
+          const outcome = writeEnvelope(socket, record);
+          if (outcome === "backpressured") {
+            if (!await waitForSocketDrain(socket, SOCKET_DRAIN_TIMEOUT_MS)) { socket.destroy(); throw new Error("Client stream stopped draining"); }
+          } else if (outcome !== "written") {
+            socket.destroy();
+            throw new Error("Client stream closed during routed response");
+          }
+        },
+        () => { if (!socket.destroyed && !socket.writableEnded) socket.end(); },
+      );
+      if (location.kind === "result") {
         terminal = true;
-        this.sendSuccessAndEnd(socket, request.requestId, { instance: instance ?? null });
+        this.sendSuccessAndEnd(socket, request.requestId, location.result);
         return;
       }
-      if (this.routeAuthority && request.type === "instance.ensure") {
-        const routeAuthority = this.routeAuthority;
-        const result = await this.operationLedger.run(
-          request.params.operationId,
-          request.type,
-          request.params,
-          () => routeAuthority.ensureByKey(request, () => this.registry.ensure({
-            operationId: request.params.operationId,
-            key: request.params.key,
-            cwd: request.params.cwd,
-            name: request.params.name,
-            trustChallengeId: request.params.trustChallengeId,
-            projectTrustDecision: request.params.projectTrustDecision,
-          })),
-        );
-        terminal = true;
-        this.sendSuccessAndEnd(socket, request.requestId, result);
+      if (location.kind === "remote") {
+        remoteProxy = location.proxy;
         return;
-      }
-
-      if (this.routeAuthority) {
-        const decision = await this.routeAuthority.route(
-          request,
-          async (record) => {
-            const outcome = writeEnvelope(socket, record);
-            if (outcome === "backpressured") {
-              if (!await waitForSocketDrain(socket, SOCKET_DRAIN_TIMEOUT_MS)) { socket.destroy(); throw new Error("Client stream stopped draining"); }
-            } else if (outcome !== "written") {
-              socket.destroy();
-              throw new Error("Client stream closed during routed response");
-            }
-          },
-          () => { if (!socket.destroyed && !socket.writableEnded) socket.end(); },
-        );
-        if (decision.kind === "result") {
-          terminal = true;
-          this.sendSuccessAndEnd(socket, request.requestId, decision.result);
-          return;
-        }
-        if (decision.kind === "route") {
-          remoteProxy = decision.proxy;
-          return;
-        }
       }
 
       if (request.type === "attachment.upload") {
@@ -698,16 +668,14 @@ export class DockHost {
     }
     switch (request.type) {
       case "machine.list": {
-        if (!this.routeAuthority) throw new ProtocolValidationError("capability_missing", "Machine routing is unavailable");
-        this.sendSuccessAndEnd(socket, request.requestId, { machines: await this.routeAuthority.machines() }); return;
+        this.sendSuccessAndEnd(socket, request.requestId, { machines: await this.instanceManager.machines() }); return;
       }
       case "machine.remove": {
-        if (!this.routeAuthority) throw new ProtocolValidationError("capability_missing", "Machine routing is unavailable");
         const result = await this.operationLedger.run(
           request.params.operationId,
           request.type,
           request.params,
-          () => this.routeAuthority!.removeMachine(request.params.hostId),
+          () => this.instanceManager.removeMachine(request.params.hostId),
         );
         this.sendSuccessAndEnd(socket, request.requestId, result); return;
       }
@@ -726,31 +694,13 @@ export class DockHost {
         }); return;
       }
       case "instance.create": {
-        const result = await this.instanceMutations.create(request.params);
-        this.sendSuccessAndEnd(socket, request.requestId, result); return;
-      }
-      case "instance.ensure": {
-        const result = await this.operationLedger.run(request.params.operationId, request.type, request.params, () => this.registry.ensure({
-          operationId: request.params.operationId,
-          key: request.params.key,
-          cwd: request.params.cwd,
-          name: request.params.name,
-          trustChallengeId: request.params.trustChallengeId,
-          projectTrustDecision: request.params.projectTrustDecision,
-        }));
+        const result = await this.instanceManager.create(request.params);
         this.sendSuccessAndEnd(socket, request.requestId, result); return;
       }
       case "instance.adopt": {
         const result=await this.operationLedger.run(request.params.operationId,request.type,request.params,async()=>{const instance=await this.registry.adopt({operationId:request.params.operationId,sessionFile:request.params.sessionFile,name:request.params.name,trustChallengeId:request.params.trustChallengeId,projectTrustDecision:request.params.projectTrustDecision});return {instance:instance.snapshot()};});
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
-      case "instance.list": {
-        const result = this.routeAuthority
-          ? await this.routeAuthority.listPage(this.registry.list(), request.params)
-          : this.registry.listPage({ ...request.params, maxBytes: MAX_INSTANCE_LIST_RESULT_BYTES });
-        this.sendSuccessAndEnd(socket, request.requestId, result); return;
-      }
-      case "instance.get_by_key": this.sendSuccessAndEnd(socket,request.requestId,{instance:this.registry.getSnapshotByKey(request.params.key)??null}); return;
       case "instance.get": this.sendSuccessAndEnd(socket,request.requestId,{instance:this.registry.getSnapshot(request.params.instanceId)}); return;
       case "deliverable.list": {
         const instance = this.registry.get(request.params.instanceId);
@@ -840,7 +790,7 @@ export class DockHost {
         this.sendSuccessAndEnd(socket,request.requestId,result); return;
       }
       case "command.submit": {
-        const result = await this.instanceMutations.submit(request.params);
+        const result = await this.instanceManager.submit(request.params);
         this.sendSuccessAndEnd(socket, request.requestId, result); return;
       }
       case "command.abort": {
@@ -1225,7 +1175,7 @@ export class DockHost {
     if (!socket.destroyed && !socket.writableEnded) socket.end();
   }
 
-  private projectResult(result: unknown): unknown { return resultWithDefaultHostId(result, this.routeAuthority?.mainHostId()); }
+  private projectResult(result: unknown): unknown { return resultWithDefaultHostId(result, this.instanceManager.mainHostId()); }
   private sendSuccessAndEnd(socket:Socket,requestId:string,result:unknown):void { if(socket.destroyed||socket.writableEnded)return;const outcome=endEnvelope(socket,successResponse(requestId,this.hostEpoch,this.projectResult(result)));if(outcome==="too_large")this.sendErrorAndEnd(socket,"response_too_large","Control response exceeds the JSONL record limit",requestId); }
   private sendErrorAndEnd(socket:Socket,code:string,message:string,requestId:string,details?:JsonObject,retryable=false):void { if(socket.destroyed||socket.writableEnded)return;const response:ControlResponse={kind:"response",version:2,requestId,hostEpoch:this.hostEpoch,ok:false,error:{code,message:truncateMessage(message),retryable,...(details===undefined?{}:{details})}};if(endEnvelope(socket,response)==="too_large")socket.destroy(); }
   private sendHelloError(socket:Socket,requestId:string,code:HelloError["error"]["code"],message:string,details:{hostVersions?:number[];missing?:string[];retryAfterMs?:number}={}):void { if(socket.destroyed||socket.writableEnded)return;const envelope:HelloError={kind:"hello_error",requestId,error:{code,message:truncateMessage(message),...details}};try{socket.end(encodeJsonLine(envelope));}catch{socket.destroy();} }

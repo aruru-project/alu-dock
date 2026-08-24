@@ -8,17 +8,18 @@ import { createServer, connect, type Server as TlsServer, type TLSSocket } from 
 
 import { MAX_CATALOG_INSTANCES } from "../core/catalog.js";
 import { isNativeAbsoluteLocalPath, isPortableAbsoluteLocalPath, isPortableLocalRootPath } from "../core/local-path.js";
-import type { InstanceSnapshot } from "../core/managed-instance.js";
+import { StaleRuntimeGenerationError, type InstanceSnapshot } from "../core/managed-instance.js";
 import type { DockToolsHostPort, DockToolsRequest, DockToolsResult } from "../core/dock-tools.js";
 import { parseDockToolsRequest, parseDockToolsResult } from "../core/dock-tools-codec.js";
 import type { ObservationDeliverySink, ObservationNotification } from "../core/instance-observation.js";
 import { MACHINE_PLATFORMS, MAX_CONTROL_CWD_CHARS, MAX_CONTROL_LINE_BYTES, MAX_INSTANCE_LIST_RESULT_BYTES, type ControlError, type ControlRequest, type EnsureResult, type MachineDto, type MachinePlatform, ProtocolValidationError } from "./protocol.js";
-import { classifyControlRequest, decodeResponseTransfer, instanceTargetId, parseControlResponse, parseEnsureResult, parseForgetResult, parseInstanceSnapshot, parseResponseTransferFrame } from "./protocol.js";
+import { decodeResponseTransfer, parseControlResponse, parseEnsureResult, parseForgetResult, parseInstanceSnapshot, parseResponseTransferFrame } from "./protocol.js";
 import { encodeJsonLine, JsonLineDecoder } from "./json-lines.js";
 import { boundedInstanceListPage } from "./instance-list-page.js";
 import { MainMachineState, SubHostMachineState, type MachineRouteRecord, type SubHostUpstreamRecord, type TrustedSubHostRecord } from "./machine-state.js";
 import { MachineSettingsState, machineListenerConfiguration, sameMachineListenerConfiguration, type MachineListenerConfiguration, type MachineSettings } from "./machine-settings-state.js";
 import { recordForMainHost, requestForNativeHost, snapshotForMain, type MachineRouteIdentity } from "./machine-route-identity.js";
+import { type RemoteEndpointDecision, type RemoteInstanceDirectory, type RemoteProtocolEndpoint, type RoutedProtocolProxy } from "./instance-manager.js";
 import { MAX_DOCK_TRANSFER_BYTES, MAX_RESPONSE_TRANSFER_CHUNK_BYTES, MAX_RESPONSE_TRANSFER_CHUNKS } from "../core/transport-bounds.js";
 import { MAX_DURABLE_CATALOG_BYTES } from "./durable-catalog-store.js";
 
@@ -51,28 +52,6 @@ type MachineWireRecord =
   | { kind: "machine_tool_source_off_ack"; requestId: string }
   | { kind: "machine_ping" }
   | { kind: "machine_pong" };
-
-export interface RoutedProtocolProxy {
-  send(record: unknown): Promise<void>;
-  close(): void;
-}
-
-export type RouteDecision =
-  | { kind: "local" }
-  | { kind: "result"; result: unknown }
-  | { kind: "route"; proxy: RoutedProtocolProxy };
-
-export interface MainRouteAuthority {
-  route(request: ControlRequest, emit: (record: unknown) => void | Promise<void>, ended: () => void): Promise<RouteDecision>;
-  getByKey(key: string): Promise<InstanceSnapshot | undefined>;
-  ensureByKey(request: Extract<ControlRequest, { type: "instance.ensure" }>, ensureLocal: () => Promise<EnsureResult>): Promise<EnsureResult>;
-  mainHostId(): string;
-  machines(): Promise<MachineDto[]>;
-  removeMachine(hostId: string): Promise<{ hostId: string; removed: boolean }>;
-  listPage(local: InstanceSnapshot[], params: Extract<ControlRequest, { type: "instance.list" }>['params']): Promise<unknown>;
-  start(): Promise<void>;
-  stop(): Promise<void>;
-}
 
 export class MachineMutationEffectUnknownError extends Error {
   readonly queryHint = "Wait for that machine to reconnect and refresh the relevant work before any retry";
@@ -127,6 +106,11 @@ interface RouteReconciliation {
   disconnectedMainIds: string[];
 }
 
+interface RemoteInstanceBinding {
+  machineId: string;
+  route: MachineRouteRecord;
+}
+
 interface InventoryTransfer {
   inventoryId: string;
   hostEpoch: string;
@@ -163,7 +147,7 @@ interface SubHostStream {
   queuedInputBytes: number;
 }
 
-export class MainMachineController implements MainRouteAuthority {
+export class MainMachineController implements RemoteInstanceDirectory {
   private server: TlsServer | undefined;
   private activePort: number | undefined;
   private listenerIdentity: { privateKeyPem: string; certificatePem: string } | undefined;
@@ -182,7 +166,7 @@ export class MainMachineController implements MainRouteAuthority {
   private nextCandidateOrdinal = 0;
   private revision = 0;
   private listFingerprint = "";
-  private readonly routeSnapshots = new Map<string, InstanceSnapshot>();
+  private readonly instanceBindings = new Map<string, RemoteInstanceBinding>();
   private readonly snapshotListeners = new Map<string, Set<(snapshot: InstanceSnapshot) => void>>();
   private readonly disconnectListeners = new Set<(instanceIds: readonly string[]) => void>();
   private mainId = "";
@@ -212,7 +196,7 @@ export class MainMachineController implements MainRouteAuthority {
       this.mainName = main.name;
       this.revision = main.revision;
       for (const machine of await this.options.state.list()) await this.markOffline(machine.id);
-      await this.refreshRouteSnapshotCache();
+      await this.refreshInstanceBindings();
       this.staleConnectionTimer = setInterval(() => {
         const now = Date.now();
         for (const connection of this.connections.values()) {
@@ -357,14 +341,18 @@ export class MainMachineController implements MainRouteAuthority {
     if (server) await closeServer(server);
   }
 
-  remoteSnapshotsCurrent(): InstanceSnapshot[] { return [...this.routeSnapshots.values()].map((snapshot) => structuredClone(snapshot)); }
+  currentSnapshot(instanceId: string): InstanceSnapshot | undefined {
+    const binding = this.instanceBindings.get(instanceId);
+    return binding ? structuredClone(binding.route.snapshot) : undefined;
+  }
+  currentSnapshots(): InstanceSnapshot[] { return [...this.instanceBindings.values()].map(({ route }) => structuredClone(route.snapshot)); }
   subscribeSnapshot(instanceId: string, listener: (snapshot: InstanceSnapshot) => void): (() => void) | undefined {
-    if (!this.routeSnapshots.has(instanceId)) return undefined;
+    if (!this.instanceBindings.has(instanceId)) return undefined;
     const listeners = this.snapshotListeners.get(instanceId) ?? new Set<(snapshot: InstanceSnapshot) => void>();
     listeners.add(listener); this.snapshotListeners.set(instanceId, listeners);
     return () => { listeners.delete(listener); if (listeners.size === 0) this.snapshotListeners.delete(instanceId); };
   }
-  onMachineDisconnected(listener: (instanceIds: readonly string[]) => void): () => void { this.disconnectListeners.add(listener); return () => this.disconnectListeners.delete(listener); }
+  onInstancesDisconnected(listener: (instanceIds: readonly string[]) => void): () => void { this.disconnectListeners.add(listener); return () => this.disconnectListeners.delete(listener); }
 
   async deliverDockToolNotification(sourceMachineId: string, sourceMainId: string, notification: ObservationNotification): Promise<void> {
     const machine = await this.options.state.get(sourceMachineId);
@@ -403,7 +391,7 @@ export class MainMachineController implements MainRouteAuthority {
       try {
         const selectedHost = request.params.hostId;
         if (selectedHost === undefined || selectedHost === this.mainId) return await ensureLocal();
-        return parseEnsureResult(await this.requestRemote(request, decision.reservation));
+        return parseEnsureResult(await this.requestRemoteHost(selectedHost, request, decision.reservation));
       } finally {
         await this.serializeAuthority(async () => {
           if (this.keyReservations.get(request.params.key) === decision.reservation) {
@@ -415,7 +403,16 @@ export class MainMachineController implements MainRouteAuthority {
     }
   }
 
-  async requestRemote(request: ControlRequest, keyReservation?: KeyReservation): Promise<unknown> {
+  private async requestRemoteHost(hostId: string, request: ControlRequest, keyReservation?: KeyReservation): Promise<unknown> {
+    const machine = await this.options.state.get(hostId);
+    if (!machine) throw new ProtocolValidationError("host_not_found", "That machine is not connected to this Dock");
+    return this.awaitRemoteResponse(request, (emit, ended) => this.dispatchResolvedHost(machine, request, emit, ended, keyReservation));
+  }
+
+  private awaitRemoteResponse(
+    request: ControlRequest,
+    dispatch: (emit: (record: unknown) => void, ended: () => void) => Promise<RemoteEndpointDecision>,
+  ): Promise<unknown> {
     return new Promise<unknown>((resolve, reject) => {
       let settled = false;
       let proxy: RoutedProtocolProxy | undefined;
@@ -425,7 +422,7 @@ export class MainMachineController implements MainRouteAuthority {
         proxy?.close();
         error ? reject(error) : resolve(result);
       };
-      void this.routeWithReservation(request, (record) => {
+      const emit = (record: unknown): void => {
         if (!record || typeof record !== "object" || (record as { kind?: unknown }).kind !== "response") return;
         try {
           const response = parseControlResponse(record, request.requestId, this.options.mainHostEpoch);
@@ -434,14 +431,16 @@ export class MainMachineController implements MainRouteAuthority {
         } catch (error) {
           finish(error instanceof Error ? error : new Error(String(error)));
         }
-      }, () => {
+      };
+      const ended = (): void => {
         if (settled) return;
         const operationId = requestOperationId(request);
         finish(operationId === undefined
           ? new Error("That machine disconnected before the request finished. Wait for it to reconnect and try again.")
           : new MachineMutationEffectUnknownError(operationId));
-      }, keyReservation).then((decision) => {
-        if (decision.kind !== "route") { finish(new Error("Dock request did not select a SubHost")); return; }
+      };
+      void dispatch(emit, ended).then((decision) => {
+        if (decision.kind === "result") { finish(undefined, decision.result); return; }
         proxy = decision.proxy;
         if (settled) proxy.close();
       }).catch((error) => finish(error instanceof Error ? error : new Error(String(error))));
@@ -483,7 +482,7 @@ export class MainMachineController implements MainRouteAuthority {
           connection.socket.destroy();
         }
         const instanceIds = machine?.routes.map((route) => route.mainInstanceId) ?? [];
-        for (const instanceId of instanceIds) this.routeSnapshots.delete(instanceId);
+        for (const instanceId of instanceIds) this.instanceBindings.delete(instanceId);
         this.revision += 1;
         if (instanceIds.length > 0) for (const listener of this.disconnectListeners) listener(instanceIds);
         return { hostId, removed: true };
@@ -516,48 +515,77 @@ export class MainMachineController implements MainRouteAuthority {
     });
   }
 
-  async route(request: ControlRequest, emit: (record: unknown) => void | Promise<void>, ended: () => void): Promise<RouteDecision> {
-    return this.routeWithReservation(request, emit, ended);
+  async resolveInstance(instanceId: string): Promise<RemoteProtocolEndpoint | undefined> {
+    const binding = this.instanceBindings.get(instanceId);
+    return binding ? new MachineRemoteInstance(this, structuredClone(binding)) : undefined;
   }
 
-  private async routeWithReservation(request: ControlRequest, emit: (record: unknown) => void | Promise<void>, ended: () => void, keyReservation?: KeyReservation): Promise<RouteDecision> {
-    const classification = classifyControlRequest(request);
-    if (classification.target === "dock") return { kind: "local" };
-    const machines = await this.options.state.list();
-    const instanceId = instanceTargetId(request);
-    let machine: TrustedSubHostRecord | undefined;
-    let route: MachineRouteRecord | undefined;
-    if (classification.target === "instance") {
-      for (const candidate of machines) {
-        const found = candidate.routes.find((item) => item.mainInstanceId === instanceId);
-        if (found) { machine = candidate; route = found; break; }
-      }
-      if (!route) return { kind: "local" };
-    } else {
-      const hostId = "hostId" in request.params && typeof request.params.hostId === "string" ? request.params.hostId : undefined;
-      if (!hostId || hostId === this.mainId) return { kind: "local" };
-      machine = machines.find((item) => item.id === hostId);
-      if (!machine) throw new ProtocolValidationError("host_not_found", "That machine is not connected to this Dock");
+  async resolveHost(hostId: string): Promise<RemoteProtocolEndpoint | undefined> {
+    if (hostId === this.mainId) return undefined;
+    const machine = await this.options.state.get(hostId);
+    return machine ? new MachineRemoteHost(this, structuredClone(machine)) : undefined;
+  }
+
+  async dispatchResolvedInstance(
+    binding: RemoteInstanceBinding,
+    request: ControlRequest,
+    emit: (record: unknown) => void | Promise<void>,
+    ended: () => void,
+  ): Promise<RemoteEndpointDecision> {
+    const current = this.instanceBindings.get(binding.route.mainInstanceId);
+    if (!current || current.machineId !== binding.machineId || current.route.nativeInstanceId !== binding.route.nativeInstanceId) {
+      throw new ProtocolValidationError("not_found", "That work is no longer available");
     }
-    const candidateConnection = machine ? this.connections.get(machine.id) : undefined;
-    const connection = this.connectionLive(candidateConnection) ? candidateConnection : undefined;
+    const expectedGeneration = binding.route.snapshot.runtimeGeneration;
+    const actualGeneration = current.route.snapshot.runtimeGeneration;
+    if (actualGeneration !== expectedGeneration) throw new StaleRuntimeGenerationError(expectedGeneration, actualGeneration);
+    const route = current.route;
+    const connection = this.liveConnection(current.machineId);
     if (!connection) {
-      if (request.type === "instance.stop" && route) {
-        const result = offlineStopResult(request.params.operationId, route.snapshot);
-        const stopped = (result as { instance: InstanceSnapshot }).instance;
-        await this.serializeAuthority(async () => {
-          await this.options.state.removeRoute(route.mainInstanceId);
-          this.routeSnapshots.delete(route.mainInstanceId);
-          this.revision += 1;
-        });
-        for (const listener of this.snapshotListeners.get(route.mainInstanceId) ?? []) listener(structuredClone(stopped));
-        for (const listener of this.disconnectListeners) listener([route.mainInstanceId]);
-        return { kind: "result", result };
-      }
-      throw new ProtocolValidationError("host_unavailable", "That machine is offline. Reconnect it and try again");
+      if (request.type !== "instance.stop") throw new ProtocolValidationError("host_unavailable", "That machine is offline. Reconnect it and try again");
+      const result = offlineStopResult(request.params.operationId, route.snapshot);
+      const stopped = (result as { instance: InstanceSnapshot }).instance;
+      await this.serializeAuthority(async () => {
+        const latest = this.instanceBindings.get(route.mainInstanceId);
+        if (!latest || latest.machineId !== current.machineId || latest.route.nativeInstanceId !== route.nativeInstanceId) {
+          throw new ProtocolValidationError("not_found", "That work is no longer available");
+        }
+        const latestGeneration = latest.route.snapshot.runtimeGeneration;
+        if (latestGeneration !== expectedGeneration) throw new StaleRuntimeGenerationError(expectedGeneration, latestGeneration);
+        await this.options.state.removeRoute(route.mainInstanceId);
+        this.instanceBindings.delete(route.mainInstanceId);
+        this.revision += 1;
+      });
+      for (const listener of this.snapshotListeners.get(route.mainInstanceId) ?? []) listener(structuredClone(stopped));
+      for (const listener of this.disconnectListeners) listener([route.mainInstanceId]);
+      return { kind: "result", result };
     }
+    return this.openRemoteStream(connection.machine, connection, request, emit, ended, route);
+  }
+
+  async dispatchResolvedHost(
+    machine: TrustedSubHostRecord,
+    request: ControlRequest,
+    emit: (record: unknown) => void | Promise<void>,
+    ended: () => void,
+    keyReservation?: KeyReservation,
+  ): Promise<RemoteEndpointDecision> {
+    const connection = this.liveConnection(machine.id);
+    if (!connection) throw new ProtocolValidationError("host_unavailable", "That machine is offline. Reconnect it and try again");
+    return this.openRemoteStream(connection.machine, connection, request, emit, ended, undefined, keyReservation);
+  }
+
+  private async openRemoteStream(
+    machine: TrustedSubHostRecord,
+    connection: MainConnection,
+    request: ControlRequest,
+    emit: (record: unknown) => void | Promise<void>,
+    ended: () => void,
+    route?: MachineRouteRecord,
+    keyReservation?: KeyReservation,
+  ): Promise<RemoteEndpointDecision> {
     const identity: MachineRouteIdentity | undefined = route ? {
-      hostId: machine!.id,
+      hostId: machine.id,
       mainInstanceId: route.mainInstanceId,
       nativeInstanceId: route.nativeInstanceId,
       mainHostEpoch: this.options.mainHostEpoch,
@@ -568,12 +596,12 @@ export class MainMachineController implements MainRouteAuthority {
     if (connection.streams.size >= MAX_MACHINE_STREAMS) throw new ProtocolValidationError("host_busy", "That machine is busy right now. Try again shortly.");
     const stream: MainStream = {
       streamId,
-      machineId: machine!.id,
+      machineId: machine.id,
       connection,
       requestId: request.requestId,
       requestType: request.type,
       route: identity ?? {
-        hostId: machine!.id,
+        hostId: machine.id,
         mainInstanceId: "",
         nativeInstanceId: "",
         mainHostEpoch: this.options.mainHostEpoch,
@@ -608,7 +636,7 @@ export class MainMachineController implements MainRouteAuthority {
       throw error;
     }
     return {
-      kind: "route",
+      kind: "remote",
       proxy: {
         send: async (record) => {
           try { await writeMachine(connection.socket, { kind: "machine_stream_data", streamId, data: JSON.stringify(record) }); }
@@ -933,7 +961,7 @@ export class MainMachineController implements MainRouteAuthority {
       const retired = await this.options.state.retireRoute(stream.route.mainInstanceId, stopGeneration ?? stored.snapshot.runtimeGeneration);
       if (!retired || retired.nativeInstanceId !== stream.route.nativeInstanceId) throw new Error("Successful routed retirement did not match its native identity");
       stream.routeRetired = true;
-      this.routeSnapshots.delete(stream.route.mainInstanceId);
+      this.instanceBindings.delete(stream.route.mainInstanceId);
       this.revision += 1;
     });
     if (!stream.routeRetired) return;
@@ -976,7 +1004,10 @@ export class MainMachineController implements MainRouteAuthority {
         { mainInstanceId, nativeInstanceId: snapshot.id, snapshot: mapped },
       ];
     });
-    this.routeSnapshots.set(mainInstanceId, structuredClone(mapped));
+    this.instanceBindings.set(mainInstanceId, {
+      machineId,
+      route: { mainInstanceId, nativeInstanceId: snapshot.id, snapshot: structuredClone(mapped) },
+    });
     this.revision += 1;
     return {
       hostId: machineId,
@@ -1043,7 +1074,7 @@ export class MainMachineController implements MainRouteAuthority {
       machine.routes = routes;
       machine.retiredRoutes = retiredRoutes;
     });
-    await this.refreshRouteSnapshotCache();
+    await this.refreshInstanceBindings();
     for (const route of routes) previousMainIds.delete(route.mainInstanceId);
     this.revision += 1;
     return { routes, disconnectedMainIds: [...previousMainIds] };
@@ -1076,7 +1107,7 @@ export class MainMachineController implements MainRouteAuthority {
       routes = machine.routes.map((route) => ({ ...route, snapshot: offlineSnapshot(route.snapshot, now) }));
       machine.routes = routes;
     });
-    await this.refreshRouteSnapshotCache();
+    await this.refreshInstanceBindings();
     this.revision += 1;
     return routes;
   }
@@ -1141,11 +1172,42 @@ export class MainMachineController implements MainRouteAuthority {
     return this.connections.get(connection.machine.id) === connection && this.connectionLive(connection);
   }
 
+  private liveConnection(machineId: string): MainConnection | undefined {
+    const connection = this.connections.get(machineId);
+    return this.connectionLive(connection) ? connection : undefined;
+  }
+
   private connectionLive(connection: MainConnection | undefined): connection is MainConnection { return connection !== undefined && !connection.closed && !connection.socket.destroyed && Date.now() - connection.lastSeenAt < MACHINE_HEARTBEAT_TIMEOUT_MS; }
 
-  private async refreshRouteSnapshotCache(): Promise<void> {
-    this.routeSnapshots.clear();
-    for (const machine of await this.options.state.list()) for (const route of machine.routes) this.routeSnapshots.set(route.mainInstanceId, structuredClone(route.snapshot));
+  private async refreshInstanceBindings(): Promise<void> {
+    this.instanceBindings.clear();
+    for (const machine of await this.options.state.list()) for (const route of machine.routes) {
+      this.instanceBindings.set(route.mainInstanceId, { machineId: machine.id, route: structuredClone(route) });
+    }
+  }
+}
+
+class MachineRemoteInstance implements RemoteProtocolEndpoint {
+  constructor(private readonly controller: MainMachineController, private readonly binding: RemoteInstanceBinding) {}
+
+  dispatch(
+    request: ControlRequest,
+    emit: (record: unknown) => void | Promise<void>,
+    ended: () => void,
+  ): Promise<RemoteEndpointDecision> {
+    return this.controller.dispatchResolvedInstance(this.binding, request, emit, ended);
+  }
+}
+
+class MachineRemoteHost implements RemoteProtocolEndpoint {
+  constructor(private readonly controller: MainMachineController, private readonly machine: TrustedSubHostRecord) {}
+
+  dispatch(
+    request: ControlRequest,
+    emit: (record: unknown) => void | Promise<void>,
+    ended: () => void,
+  ): Promise<RemoteEndpointDecision> {
+    return this.controller.dispatchResolvedHost(this.machine, request, emit, ended);
   }
 }
 

@@ -10,9 +10,12 @@ import type { TLSSocket } from "node:tls";
 
 import type { DockToolsHostPort } from "../src/core/dock-tools.js";
 import type { InstanceSnapshot } from "../src/core/managed-instance.js";
+import { ControlClientError, DockClient } from "../src/control/dock-client.js";
+import { DockHost } from "../src/control/dock-host.js";
+import { DockRegistry } from "../src/control/dock-registry.js";
 import { MachineSettingsState } from "../src/control/machine-settings-state.js";
 import { MainMachineState, readMachineJoinFile, SubHostMachineState, writeMachineJoinFile } from "../src/control/machine-state.js";
-import { MachineMutationEffectUnknownError, MainMachineController, SubHostDockToolsPort, SubHostMachineConnection, writeMachine } from "../src/control/machine-transport.js";
+import { MainMachineController, SubHostDockToolsPort, SubHostMachineConnection, writeMachine } from "../src/control/machine-transport.js";
 import type { ControlRequest } from "../src/control/protocol.js";
 
 async function enabledListener(root: string, port: number): Promise<MachineSettingsState> {
@@ -216,7 +219,7 @@ test("an inventory larger than the old machine line crosses real TLS in ordered 
   await upstream.start();
   for (let attempt = 0; attempt < 400 && !upstream.connected(); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(upstream.connected(), true);
-  const reconciled = controller.remoteSnapshotsCurrent();
+  const reconciled = controller.currentSnapshots();
   assert.equal(reconciled.length, snapshots.length);
   assert.equal(reconciled.at(-1)?.cwd, snapshots.at(-1)?.cwd);
 });
@@ -236,6 +239,9 @@ test("a SubHost request ending before response leaves a mutation unconfirmed whi
   await subState.prepare(joinFile, "Interrupted Request SubHost");
   const remote = snapshot("native-interrupted");
   const controller = new MainMachineController({ state: mainState, settingsState: await enabledListener(root, port), bindAddress: "::1", mainHostEpoch: "main-epoch", localSnapshots: () => [] });
+  const registry = new DockRegistry(async () => { throw new Error("local runtime is not used in this scenario"); }, undefined, { hostEpoch: "main-epoch" });
+  const host = new DockHost({ socketPath: join(root, "dock.sock"), registry, remoteInstances: controller });
+  const client = new DockClient({ socketPath: host.socketPath });
   const upstream = new SubHostMachineConnection({
     state: subState,
     address: "::1",
@@ -244,20 +250,20 @@ test("a SubHost request ending before response leaves a mutation unconfirmed whi
     snapshots: () => [remote],
     acceptProtocolSocket: (socket) => socket.destroy(),
   });
-  context.after(async () => { await upstream.stop(); await controller.stop(); await rm(root, { recursive: true, force: true }); });
-  await controller.start();
+  context.after(async () => { await upstream.stop(); await host.stop(); await rm(root, { recursive: true, force: true }); });
+  await host.start();
   await upstream.start();
-  for (let attempt = 0; attempt < 400 && controller.remoteSnapshotsCurrent().length === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 20));
-  const mainInstanceId = controller.remoteSnapshotsCurrent()[0]?.id;
+  for (let attempt = 0; attempt < 400 && controller.currentSnapshots().length === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+  const mainInstanceId = controller.currentSnapshots()[0]?.id;
   assert.ok(mainInstanceId);
 
   await assert.rejects(
-    controller.requestRemote({ kind: "request", version: 2, requestId: "stop-request", type: "instance.stop", params: { instanceId: mainInstanceId, operationId: "stop-operation" } }),
-    (error: unknown) => error instanceof MachineMutationEffectUnknownError && error.operationId === "stop-operation",
+    client.stop(mainInstanceId, "stop-operation"),
+    (error: unknown) => error instanceof ControlClientError && error.code === "effect_unknown" && error.operationId === "stop-operation",
   );
   await assert.rejects(
-    controller.requestRemote({ kind: "request", version: 2, requestId: "read-request", type: "instance.get", params: { instanceId: mainInstanceId } }),
-    (error: unknown) => error instanceof Error && !(error instanceof MachineMutationEffectUnknownError),
+    client.status(mainInstanceId),
+    (error: unknown) => error instanceof ControlClientError && error.code !== "effect_unknown",
   );
 });
 

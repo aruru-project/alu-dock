@@ -12,7 +12,7 @@ import { DockClient } from "../src/control/dock-client.js";
 import { AttachmentService } from "../src/control/attachment-service.js";
 import { AttachmentStorageState } from "../src/control/attachment-storage-state.js";
 import { DockHost } from "../src/control/dock-host.js";
-import type { MainRouteAuthority } from "../src/control/machine-transport.js";
+import type { RemoteInstanceDirectory } from "../src/control/instance-manager.js";
 import { DockRegistry } from "../src/control/dock-registry.js";
 import { encodeJsonLine } from "../src/control/json-lines.js";
 import {
@@ -120,8 +120,12 @@ test("listener startup failure closes the local and remote entry points", async 
   const remoteAccessState = new RemoteAccessState(join(directory, "remote-access"));
   await remoteAccessState.writeSettings({ enabled: true, port });
   const registry = new DockRegistry(async () => { throw new Error("startup rollback must not construct a runtime"); });
-  const routeAuthority = {
-    route: async () => ({ kind: "local" as const }),
+  const remoteInstances = {
+    resolveInstance: async () => undefined,
+    resolveHost: async () => undefined,
+    currentSnapshot: () => undefined,
+    currentSnapshots: () => [],
+    subscribeSnapshot: () => undefined,
     getByKey: async () => undefined,
     ensureByKey: async () => { throw new Error("startup rollback must not ensure an instance"); },
     mainHostId: () => "main-machine",
@@ -134,8 +138,8 @@ test("listener startup failure closes the local and remote entry points", async 
       throw new Error("fixture machine listener failed");
     },
     stop: async () => {},
-  } as MainRouteAuthority;
-  const host = new DockHost({ socketPath, registry, remoteAccessState, routeAuthority });
+  } as RemoteInstanceDirectory;
+  const host = new DockHost({ socketPath, registry, remoteAccessState, remoteInstances });
 
   await assert.rejects(host.start());
   await assert.rejects(lstat(socketPath), (error: unknown) => (error as NodeJS.ErrnoException).code === "ENOENT");

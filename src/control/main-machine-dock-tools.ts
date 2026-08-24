@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import type { DockToolsHostPort, DockToolsRequest, DockToolsResult, ObservationDeliverySink } from "../core/dock-tools.js";
 import { dockMessageText } from "../core/dock-tools.js";
 import type { InstanceSnapshot } from "../core/managed-instance.js";
@@ -8,8 +6,9 @@ import { requireHumanTarget } from "../human-target.js";
 import { DockClient } from "./dock-client.js";
 import { InstanceObservationService } from "./instance-observation-service.js";
 import { observationStatus } from "./instance-observation-service.js";
+import type { InstanceManager } from "./instance-manager.js";
 import type { MainMachineController } from "./machine-transport.js";
-import type { ControlRequest, InstanceReadResult, MachineDto } from "./protocol.js";
+import type { InstanceReadResult, MachineDto } from "./protocol.js";
 
 /** Main-owned global Dock-tool authority; observation semantics stay in InstanceObservationService. */
 export class MainMachineDockToolsAuthority {
@@ -20,14 +19,13 @@ export class MainMachineDockToolsAuthority {
 
   constructor(private readonly options: {
     controller: () => MainMachineController;
+    instances: () => InstanceManager;
     localClient: DockClient;
-    localSnapshots: () => InstanceSnapshot[];
-    subscribeLocal: (instanceId: string, listener: (snapshot: InstanceSnapshot) => void) => (() => void) | undefined;
     deliverLocalNotification: (sourceMainId: string, notification: ObservationNotification) => Promise<void>;
   }) {
-    const snapshots = (): InstanceSnapshot[] => [...options.localSnapshots(), ...options.controller().remoteSnapshotsCurrent()];
+    const snapshots = (): InstanceSnapshot[] => options.instances().snapshots();
     const get = (instanceId: string): InstanceSnapshot => {
-      const found = snapshots().find((snapshot) => snapshot.id === instanceId);
+      const found = options.instances().snapshot(instanceId);
       if (!found) throw new Error("This work is no longer available. Run dock_list and choose current work.");
       return found;
     };
@@ -39,20 +37,15 @@ export class MainMachineDockToolsAuthority {
         void historyLimit;
         return { instance: read.instance, recentHistory: read.recentHistory, historyRevision: read.historyRevision, historyTruncated: read.historyTruncated, liveEvents: read.page.events };
       },
-      readHistoryPage: async (instanceId, beforeEntryId, limit) => {
-        const remote = options.controller().remoteSnapshotsCurrent().some((snapshot) => snapshot.id === instanceId);
-        return remote
-          ? await options.controller().requestRemote(requestEnvelope("session.history", { instanceId, beforeEntryId, limit })) as Awaited<ReturnType<DockClient["history"]>>
-          : await options.localClient.history(instanceId, beforeEntryId, limit);
-      },
-      subscribe: (instanceId, listener) => options.controller().subscribeSnapshot(instanceId, listener) ?? options.subscribeLocal(instanceId, listener),
+      readHistoryPage: (instanceId, beforeEntryId, limit) => options.localClient.history(instanceId, beforeEntryId, limit),
+      subscribe: (instanceId, listener) => options.instances().subscribeSnapshot(instanceId, listener),
       sourceAuthorized: (instanceId) => this.authorizedSources.has(instanceId) && (() => { try { return get(instanceId).lifecycle === "active"; } catch { return false; } })(),
     });
-    options.controller().onMachineDisconnected((instanceIds) => { void this.forgetInstances(instanceIds); });
+    options.controller().onInstancesDisconnected((instanceIds) => { void this.forgetInstances(instanceIds); });
   }
 
   async invoke(sourceMainId: string, sourceMachineId: string, request: DockToolsRequest): Promise<DockToolsResult> {
-    const snapshots = [...this.options.localSnapshots(), ...this.options.controller().remoteSnapshotsCurrent()];
+    const snapshots = this.options.instances().snapshots();
     const source = snapshots.find((item) => item.id === sourceMainId);
     if (!source) throw new Error("This work has ended, so Dock tools cannot continue here. Open active work to use them.");
     if ((request.type === "create" || request.type === "send") && source.lifecycle !== "active") throw new Error("This work is no longer active, so it cannot create or message other work. Open active work and try again.");
@@ -68,10 +61,7 @@ export class MainMachineDockToolsAuthority {
     if (request.type === "send") {
       const target = requireHumanTarget(snapshots.filter((item) => item.id !== sourceMainId), request.target);
       const message = dockMessageText(source.displayName, request.message);
-      const remote = this.options.controller().remoteSnapshotsCurrent().some((item) => item.id === target.id);
-      const result = remote
-        ? await this.options.controller().requestRemote(requestEnvelope("command.submit", { operationId: request.operationId, instanceId: target.id, message, delivery: "auto" })) as { receipt: { delivery: "prompt" | "steer" | "followUp"; queued: boolean; acceptedAt: string } }
-        : await this.options.localClient.prompt(target.id, message, "auto", request.operationId);
+      const result = await this.options.localClient.prompt(target.id, message, "auto", request.operationId);
       return { type: "send", target: observationStatus(target), receipt: { delivery: result.receipt.delivery, queued: result.receipt.queued, acceptedAt: result.receipt.acceptedAt } };
     }
     throw new Error("File delivery is owned by the source Host");
@@ -104,16 +94,14 @@ export class MainMachineDockToolsAuthority {
       if (this.sourceMachines.get(sourceMainId) === mainId) await this.options.deliverLocalNotification(sourceMainId, notification);
       else await this.options.controller().deliverDockToolNotification(sourceMachineId, sourceMainId, notification);
     });
-    const detachSource = this.options.controller().subscribeSnapshot(sourceMainId, (snapshot) => {
+    const detachSource = this.options.instances().subscribeSnapshot(sourceMainId, (snapshot) => {
       if (snapshot.lifecycle !== "active") void this.cancelSource(sourceMainId);
-    }) ?? this.options.subscribeLocal(sourceMainId, (snapshot) => { if (snapshot.lifecycle !== "active") void this.cancelSource(sourceMainId); });
+    });
     this.sourceCleanup.set(sourceMainId, () => { detachSink(); detachSource?.(); });
   }
 
-  private async read(instanceId: string, replay: "event_log" | "conversation_bootstrap"): Promise<InstanceReadResult> {
-    return this.options.controller().remoteSnapshotsCurrent().some((snapshot) => snapshot.id === instanceId)
-      ? await this.options.controller().requestRemote(requestEnvelope("instance.read", { instanceId, replay })) as InstanceReadResult
-      : await this.options.localClient.read(instanceId, undefined, replay);
+  private read(instanceId: string, replay: "event_log" | "conversation_bootstrap"): Promise<InstanceReadResult> {
+    return this.options.localClient.read(instanceId, undefined, replay);
   }
 }
 
@@ -143,8 +131,4 @@ function resolveCreateMachine(machines: readonly MachineDto[], sourceMachineId: 
   if (matches.length === 0) throw new Error(`No Machine named ${JSON.stringify(requestedName)} was found. Check the Machine name and try again.`);
   if (matches.length > 1) throw new Error(`Several Machines are named ${JSON.stringify(requestedName)}. Use a unique Machine name and try again.`);
   return matches[0] as MachineDto;
-}
-
-function requestEnvelope<T extends ControlRequest["type"]>(type: T, params: Extract<ControlRequest, { type: T }>["params"]): Extract<ControlRequest, { type: T }> {
-  return { kind: "request", version: 2, requestId: randomUUID(), type, params } as Extract<ControlRequest, { type: T }>;
 }

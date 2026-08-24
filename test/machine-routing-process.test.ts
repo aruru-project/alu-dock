@@ -103,18 +103,20 @@ test("DockClient uses one Main identity for SubHost read, prompt, follow, and sp
   const createMain = async (): Promise<DockHost> => {
     const registry = new DockRegistry(async () => { throw new Error("Main runtime is not used in this scenario"); });
     let dockTools!: MainMachineDockToolsAuthority;
+    let host!: DockHost;
     const controller = new MainMachineController({
       state: new MainMachineState(machineStateRoot(mainCatalog), "Fixture Main"), settingsState: listenerSettings, bindAddress: "::1", mainHostEpoch: registry.hostEpoch,
       invokeDockTool: (sourceMainId, sourceMachineId, request) => dockTools.invoke(sourceMainId, sourceMachineId, request),
       localSnapshots: () => registry.list(),
     });
     dockTools = new MainMachineDockToolsAuthority({
-      controller: () => controller, localClient: new DockClient({ socketPath }), localSnapshots: () => registry.list(),
-      subscribeLocal: () => undefined,
+      controller: () => controller,
+      instances: () => host.instanceDirectory(),
+      localClient: new DockClient({ socketPath }),
       deliverLocalNotification: async () => {},
     });
     const attachmentService = new AttachmentService(new AttachmentStorageState(join(root, `main-attachments-${hosts.length}`), join(root, "main-files")));
-    const host = new DockHost({ socketPath, registry, routeAuthority: controller, attachmentService });
+    host = new DockHost({ socketPath, registry, remoteInstances: controller, attachmentService });
     await host.start();
     hosts.push(host);
     return host;

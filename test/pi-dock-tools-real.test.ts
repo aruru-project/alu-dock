@@ -180,6 +180,7 @@ test("a real Pi Worker executes dock_list through its SubHost and encrypted Main
   assert.equal(sentinel.snapshot().displayName, MAIN_SENTINEL);
 
   let dockTools!: MainMachineDockToolsAuthority;
+  let mainHost!: DockHost;
   const controller = new MainMachineController({
     state: machineState,
     settingsState: listenerSettings,
@@ -190,12 +191,11 @@ test("a real Pi Worker executes dock_list through its SubHost and encrypted Main
   });
   dockTools = new MainMachineDockToolsAuthority({
     controller: () => controller,
+    instances: () => mainHost.instanceDirectory(),
     localClient: new DockClient({ socketPath }),
-    localSnapshots: () => mainRegistry.list(),
-    subscribeLocal: () => undefined,
     deliverLocalNotification: async () => {},
   });
-  const mainHost = new DockHost({ socketPath, registry: mainRegistry, routeAuthority: controller });
+  mainHost = new DockHost({ socketPath, registry: mainRegistry, remoteInstances: controller });
   let child: ChildProcess | undefined;
   context.after(async () => {
     if (child) await stopChild(child);

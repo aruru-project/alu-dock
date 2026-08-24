@@ -282,12 +282,12 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     });
   } else {
     const durable = catalogPath !== undefined;
-    let routeAuthority: MainMachineController | undefined;
+    let remoteInstances: MainMachineController | undefined;
     let dockToolsAuthority: MainMachineDockToolsAuthority | undefined;
     const mainDockToolsPort = options.role === "main" && durable ? new MainMachineDockToolsPort({
       local: () => registry,
       authority: () => dockToolsAuthority as MainMachineDockToolsAuthority,
-      mainHostId: async () => (await (routeAuthority as MainMachineController).machines()).find((machine) => machine.kind === "main")!.hostId,
+      mainHostId: async () => (await (remoteInstances as MainMachineController).machines()).find((machine) => machine.kind === "main")!.hostId,
     }) : undefined;
     registry = new DockRegistry(createManagedPiInstance, undefined, {
       trustPreflight,
@@ -296,7 +296,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       reopenTargetResolver: { resolve: resolvePiReopenTarget },
     });
     if (options.role === "main" && durable) {
-      routeAuthority = new MainMachineController({
+      remoteInstances = new MainMachineController({
         state: new MainMachineState(machineStateRoot(catalogPath as string), options.machineName ?? "Main"),
         settingsState: machineSettingsState as MachineSettingsState,
         ...(options.machinePort === undefined ? {} : { requiredInitialPort: options.machinePort }),
@@ -306,10 +306,9 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
         localSnapshots: () => registry.list(),
       });
       dockToolsAuthority = new MainMachineDockToolsAuthority({
-        controller: () => routeAuthority as MainMachineController,
+        controller: () => remoteInstances as MainMachineController,
+        instances: () => host.instanceDirectory(),
         localClient: new DockClient({ socketPath }),
-        localSnapshots: () => registry.list(),
-        subscribeLocal: (instanceId, listener) => { try { const instance = registry.get(instanceId); return instance.subscribe(() => listener(instance.snapshot())); } catch { return undefined; } },
         deliverLocalNotification: (sourceMainId, notification) => registry.get(sourceMainId).deliverObservation(notification),
       });
     }
@@ -319,7 +318,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
       registry,
       sessionInventory,
       attachmentService,
-      routeAuthority,
+      remoteInstances,
     });
   }
 
