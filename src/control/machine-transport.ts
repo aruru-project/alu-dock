@@ -536,7 +536,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
     const current = this.instanceBindings.get(binding.route.mainInstanceId);
     if (!current) {
       if (request.type === "instance.stop" && !this.liveConnection(binding.machineId)) {
-        return { kind: "result", result: offlineStopResult(request.params.operationId, binding.route.snapshot, true) };
+        return { kind: "result", result: offlineStopResult(request.params.operationId, binding.route.snapshot) };
       }
       throw new ProtocolValidationError("not_found", "That work is no longer available");
     }
@@ -555,10 +555,7 @@ export class MainMachineController implements RemoteInstanceDirectory {
       let retired = false;
       await this.serializeAuthority(async () => {
         const latest = this.instanceBindings.get(route.mainInstanceId);
-        if (!latest) {
-          result.receipt.alreadyStopped = true;
-          return;
-        }
+        if (!latest) return;
         if (latest.machineId !== current.machineId || latest.route.nativeInstanceId !== route.nativeInstanceId) {
           throw new ProtocolValidationError("not_found", "That work is no longer available");
         }
@@ -1588,7 +1585,7 @@ function offlineSnapshot(snapshot: InstanceSnapshot, at: string): InstanceSnapsh
   };
 }
 
-function offlineStopResult(operationId: string, source: InstanceSnapshot, alreadyStopped = false): { receipt: { operationId: string; alreadyStopped: boolean; cleanupErrors: string[] }; instance: InstanceSnapshot } {
+function offlineStopResult(operationId: string, source: InstanceSnapshot): { receipt: { operationId: string; alreadyStopped: boolean; cleanupErrors: string[] }; instance: InstanceSnapshot } {
   const at = new Date().toISOString();
   const instance: InstanceSnapshot = {
     ...source,
@@ -1605,7 +1602,7 @@ function offlineStopResult(operationId: string, source: InstanceSnapshot, alread
     executionChangedAt: at,
     runStartedAt: undefined,
   };
-  return { receipt: { operationId, alreadyStopped, cleanupErrors: [] }, instance };
+  return { receipt: { operationId, alreadyStopped: false, cleanupErrors: [] }, instance };
 }
 
 function parseMachineRecord(line: string): MachineWireRecord {

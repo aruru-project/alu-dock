@@ -113,7 +113,7 @@ test("concurrent offline RemoteInstance Stops each observe a terminal result", a
   assert.equal(firstResult.receipt.operationId, "offline-stop-a");
   assert.equal(secondResult.receipt.operationId, "offline-stop-b");
   assert.equal(firstResult.receipt.alreadyStopped, false);
-  assert.equal(secondResult.receipt.alreadyStopped, true);
+  assert.equal(secondResult.receipt.alreadyStopped, false);
   assert.equal(firstResult.instance.lifecycle, "stopped");
   assert.equal(secondResult.instance.lifecycle, "stopped");
   assert.equal(firstResult.instance.id, secondResult.instance.id);
