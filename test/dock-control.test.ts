@@ -1898,7 +1898,7 @@ test("stop preempts a manual compaction even before its start event is projected
   assert.ok(stopRequested && compactionCompleted && stopRequested.sequence < compactionCompleted.sequence);
 });
 
-test("projection reads admitted during replacement wait for its committed generation", async (context) => {
+test("reload and reads both succeed in either arrival order", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
   await harness.host.start();
@@ -1920,12 +1920,12 @@ test("projection reads admitted during replacement wait for its committed genera
     return originalReload(operationId);
   };
 
-  const replacement = managed.reloadSession("blocked-reload");
+  const reloadFirst = managed.reloadSession("reload-first");
   await reloadEntered;
   let treeSettled = false;
   let historySettled = false;
-  const tree = managed.getTree().finally(() => { treeSettled = true; });
-  const history = managed.getHistoryPage(undefined, 20).finally(() => { historySettled = true; });
+  const treeAfterReload = managed.getTree().finally(() => { treeSettled = true; });
+  const historyAfterReload = managed.getHistoryPage(undefined, 20).finally(() => { historySettled = true; });
   await Promise.resolve();
   await Promise.resolve();
   assert.equal(runtime.treeReadCalls, 0);
@@ -1933,27 +1933,45 @@ test("projection reads admitted during replacement wait for its committed genera
   assert.equal(historySettled, false);
 
   releaseReload();
-  const [, , historyResult] = await Promise.all([replacement, tree, history]);
+  const [, , historyResult] = await Promise.all([reloadFirst, treeAfterReload, historyAfterReload]);
   assert.equal(runtime.treeReadCalls, 1);
   assert.equal(historyResult.instance.runtimeGeneration, created.runtimeGeneration + 1);
+
+  runtime.reload = originalReload;
+  const treeBlock = runtime.blockNextTreeRead();
+  const treeFirst = managed.getTree();
+  await treeBlock.entered;
+  let reloadSettledBeforeRead = false;
+  const reloadAfterTree = managed.reloadSession("reload-after-tree").finally(() => { reloadSettledBeforeRead = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const escapedReadReservation = reloadSettledBeforeRead;
+  treeBlock.release();
+  const [treeOutcome, reloadOutcome] = await Promise.allSettled([treeFirst, reloadAfterTree]);
+
+  assert.equal(escapedReadReservation, false);
+  assert.equal(treeOutcome.status, "fulfilled");
+  assert.equal(reloadOutcome.status, "fulfilled");
+  assert.equal(managed.snapshot().runtimeGeneration, created.runtimeGeneration + 2);
 });
 
-test("stop fences new input and starts Worker cleanup without waiting on an input hook", async (context) => {
+test("stop rejects a pending input before starting Worker cleanup", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
   await harness.host.start();
   const client = new DockClient({ socketPath: harness.socketPath });
   const created = await client.create(harness.directory, "stop-input-preflight");
+  const managed = harness.registry.get(created.id);
   const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   const preflight = runtime.blockNextPromptBeforePreflight();
   const disposal = runtime.blockDispose();
 
   const submitting = client.prompt(created.id, "rejected after stop", "auto", "pre-stop-input");
   await preflight.entered;
-  const stopping = client.stop(created.id, "stop-after-input-reservation");
-  await disposal.entered;
+  const stopping = managed.stop("stop-after-input-reservation");
+  await new Promise<void>((resolve) => setImmediate(resolve));
 
-  assert.equal(runtime.disposeCalls, 1, "terminal admission must begin graceful cleanup without waiting on the input hook");
+  assert.equal(managed.snapshot().lifecycle, "stopping");
+  assert.equal(runtime.disposeCalls, 0);
   await assert.rejects(
     client.prompt(created.id, "too late", "auto", "post-stop-input"),
     (error: unknown) => error instanceof ControlClientError && error.code === "instance_not_active",
@@ -1964,10 +1982,13 @@ test("stop fences new input and starts Worker cleanup without waiting on an inpu
     submitting,
     (error: unknown) => error instanceof ControlClientError && error.code === "instance_not_active",
   );
+  await disposal.entered;
+  assert.equal(runtime.disposeCalls, 1);
   disposal.release();
   const stopped = await stopping;
 
-  assert.equal(stopped.instance.lifecycle, "stopped");
+  assert.equal(stopped.stopped, true);
+  assert.equal(managed.snapshot().lifecycle, "stopped");
   assert.equal(runtime.disposeCalls, 1);
 });
 

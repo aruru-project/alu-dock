@@ -2131,7 +2131,8 @@ export class ManagedInstance {
     const preemptibleEffect = exclusive?.kind === "navigation" || exclusive?.kind === "compaction"
       ? exclusive.effectStarted
       : undefined;
-    return this.performStop(operationId, this.commandScheduler.nonTerminalCompletions(), preemptibleEffect);
+    const inputAdmission = this.commandScheduler.activeCommand("input")?.completion;
+    return this.performStop(operationId, this.commandScheduler.nonTerminalCompletions(), preemptibleEffect, inputAdmission);
   }
 
   recordExtensionError(error: unknown): void {
@@ -2165,6 +2166,7 @@ export class ManagedInstance {
     operationId: string,
     activeCommands: readonly Promise<void>[],
     preemptibleEffect?: Promise<boolean>,
+    inputAdmission?: Promise<void>,
   ): Promise<StopReceipt> {
     const cleanupErrors: string[] = [];
     const pendingQueue = this.trackedQueueMessages();
@@ -2174,6 +2176,7 @@ export class ManagedInstance {
       followUp: pendingQueue.filter((item) => item.delivery === "followUp").length,
     };
     await this.extensionUi.suspendForHostDrain();
+    if (inputAdmission) await inputAdmission;
     await this.extensionUi.cancelForHostDrain();
     if (preemptibleEffect) await preemptibleEffect;
 
@@ -2405,31 +2408,49 @@ export class ManagedInstance {
   }
 
   private async withCommittedProjectionRead<T>(read: () => T): Promise<T> {
-    await this.waitForProjectionConfiguration();
-    const historyBoundary = this.historyRefreshTail;
-    await historyBoundary;
-    const lifecycle = this.snapshot().lifecycle;
-    if (lifecycle !== "active") throw new InstanceNotActiveError(this.id, lifecycle);
-    return read();
+    const projection = await this.beginProjectionRead();
+    try {
+      const historyBoundary = this.historyRefreshTail;
+      await historyBoundary;
+      this.assertActive();
+      return read();
+    } finally {
+      projection.release();
+    }
   }
 
   private async withProjectionRead<T>(read: () => Promise<T>): Promise<T> {
-    await this.waitForProjectionConfiguration();
-    const committedBoundary = this.transitionTail;
-    await committedBoundary;
-    this.assertActive();
-    const generation = this.runtimeGenerationValue;
-    const result = await read();
-    if (this.runtimeGenerationValue !== generation) {
-      throw new StaleRuntimeGenerationError(generation, this.runtimeGenerationValue);
+    const projection = await this.beginProjectionRead();
+    try {
+      const committedBoundary = this.transitionTail;
+      await committedBoundary;
+      this.assertActive();
+      const generation = this.runtimeGenerationValue;
+      const result = await read();
+      if (this.runtimeGenerationValue !== generation) {
+        throw new StaleRuntimeGenerationError(generation, this.runtimeGenerationValue);
+      }
+      this.assertActive();
+      return result;
+    } finally {
+      projection.release();
     }
-    this.assertActive();
-    return result;
   }
 
-  private async waitForProjectionConfiguration(): Promise<void> {
-    const exclusive = this.commandScheduler.activeCommand("exclusive");
-    if (exclusive && exclusive.kind !== "compaction") await exclusive.completion;
+  private async beginProjectionRead(): Promise<InstanceCommandLease> {
+    const decision = this.commandScheduler.admitProjectionRead();
+    if (decision.kind === "reject") {
+      throw new InstanceNotActiveError(this.id, decision.lifecycle);
+    }
+    const projection = decision.lease;
+    try {
+      if (decision.kind === "wait") await decision.forCompletion;
+      this.assertActive();
+      return projection;
+    } catch (error) {
+      projection.release();
+      throw error;
+    }
   }
 
   private async beginConfiguration(
@@ -2440,12 +2461,16 @@ export class ManagedInstance {
     } = {},
   ): Promise<InstanceCommandLease> {
     this.catalogPort?.assertWritable();
-    const lease = this.requireCommandStart(this.commandScheduler.admit({
+    const decision = this.commandScheduler.admit({
       class: "exclusive",
       kind: options.kind ?? "general",
       admission: options.admission ?? "idle",
-    }), action);
+    });
+    const lease = decision.kind === "start" || decision.kind === "wait"
+      ? decision.lease
+      : this.requireCommandStart(decision, action);
     try {
+      if (decision.kind === "wait") await decision.forCompletion;
       await this.transitionTail;
       this.assertCommandCurrent(lease);
       this.catalogPort?.assertWritable();

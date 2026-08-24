@@ -98,6 +98,7 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
   private currentRunOperationId: string | undefined;
   private manualCompactionOperationId: string | undefined;
   private nextPromptPreflightBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
+  private nextTreeReadBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
   private disposeBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
   private modelMutationBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
   private nextCompactionStartBlock: { entered: Deferred<void>; release: Deferred<void> } | undefined;
@@ -378,8 +379,20 @@ export class DelayedAgentWorkerConnection implements AgentWorkerConnection {
     };
   }
 
-  getTree(): SessionTreeResult {
+  blockNextTreeRead(): { entered: Promise<void>; release: () => void } {
+    const block = { entered: new Deferred<void>(), release: new Deferred<void>() };
+    this.nextTreeReadBlock = block;
+    return { entered: block.entered.promise, release: () => block.release.resolve() };
+  }
+
+  async getTree(): Promise<SessionTreeResult> {
     this.treeReadCalls += 1;
+    const block = this.nextTreeReadBlock;
+    this.nextTreeReadBlock = undefined;
+    if (block) {
+      block.entered.resolve();
+      await block.release.promise;
+    }
     return {
       nodes: structuredClone(this.treeNodes),
       ...(this.treeLeafId === undefined ? {} : { leafId: this.treeLeafId }),
