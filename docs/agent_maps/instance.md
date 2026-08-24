@@ -185,7 +185,7 @@ Worker 接受副作用前失联与接受后失联仍是不同结果。Scheduler 
 
 ## Query 与 stream observation
 
-Query 和 stream 不占用 command scheduler 的 exclusive slot；普通模型运行与 manual compaction 不阻塞 projection read。但“不排队”不等于没有一致性边界。Query 与 generation replacement 必须双向有序：先进入的 query 持有 scheduler 内的短期 projection reservation，replacement 等它结束；先进入的 replacement 持有 exclusive reservation，后来的 query 等新 generation 提交。这个 reservation 不是 command slot，也不建立第二套锁或 generation authority。
+Query 和 stream 不占用 command scheduler 的 exclusive slot；普通模型运行不阻塞 projection read。但“不排队”不等于没有一致性边界。Worker-backed projection read 通过 scheduler 内唯一的 FIFO reservation 串行，并在 manual compaction 期间等待；已经提交的 public/bootstrap read 仍可读取同一 committed snapshot。Query 与 generation replacement 必须双向有序：先进入的 query 持有短期 projection reservation，replacement 等它结束；先进入的 replacement 持有 exclusive reservation，后来的 query 等新 generation 提交。这个 reservation 不是 command slot，也不建立第二套锁或 generation authority。
 
 每次 instance query/stream 在开始时取得不可混用的 observation binding：
 
@@ -260,7 +260,7 @@ scheduler terminal admission
 - 普通 local query/command 不增加网络或 Worker round-trip；
 - InstanceManager resolve 使用内存 identity index，不扫描所有 Machine routes；
 - request classifier 是 O(1) canonical metadata lookup；
-- query/stream 不等待普通模型运行或 manual compaction；generation replacement 只等待已经进入的 projection read；
+- query/stream 不等待普通模型运行；manual compaction 只隔离串行的 Worker-backed projection read，committed public/bootstrap read 继续可用；
 - RemoteInstance 继续复用一条 multiplexed Machine connection和每 logical stream 的既有背压边界；
 - 不创建 remote ManagedInstance 状态副本，不复制 conversation 或 stream body；
 - Stop、reload 和所有超过一秒的操作继续满足 STORY.md 的反馈要求。

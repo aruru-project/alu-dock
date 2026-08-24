@@ -4,19 +4,12 @@ export type ExclusiveCommandKind = "general" | "navigation" | "compaction";
 export type ExclusiveAdmission = "idle" | "live" | "run_preempting";
 export type ControlCommandKind = "immediate" | "queue";
 
-function isolatesProjectionReads(kind: ExclusiveCommandKind): boolean {
-  return kind !== "compaction";
-}
-
 export type InstanceCommandRequest =
   | { class: "terminal" }
   | { class: "exclusive"; kind: ExclusiveCommandKind; admission: ExclusiveAdmission }
   | { class: "input" }
   | { class: "interrupt" }
   | { class: "control"; kind: ControlCommandKind };
-
-type ProjectionReadRequest = { class: "projection_read" };
-type InstanceAdmissionRequest = InstanceCommandRequest | ProjectionReadRequest;
 
 export interface InstanceCommandFacts {
   acceptingCommands: boolean;
@@ -33,12 +26,13 @@ export interface InstanceCommandFacts {
 
 interface ActiveCommand {
   token: symbol;
-  request: InstanceAdmissionRequest;
+  request: InstanceCommandRequest;
   generation: number;
   completion: Promise<void>;
   resolveCompletion: () => void;
   effectStarted: Promise<boolean>;
   resolveEffectStarted: (started: boolean) => void;
+  releaseProjection?: () => void;
 }
 
 export interface ActiveCommandView {
@@ -90,10 +84,18 @@ export type InstanceCommandDecision =
   | { kind: "join"; active: ActiveCommandView }
   | { kind: "reject"; reason: "not_active" | "busy" | "input_admission"; lifecycle?: InstanceLifecycle };
 
-export type InstanceProjectionReadDecision =
-  | { kind: "start"; lease: InstanceCommandLease }
-  | { kind: "wait"; lease: InstanceCommandLease; forCompletion: Promise<void> }
+export interface InstanceProjectionReadReservation {
+  entered: Promise<void>;
+  release(): void;
+}
+
+export type InstanceWorkerProjectionReadDecision =
+  | { kind: "reserve"; reservation: InstanceProjectionReadReservation }
   | { kind: "reject"; reason: "not_active"; lifecycle: InstanceLifecycle };
+
+export type InstanceProjectionReadDecision =
+  | InstanceWorkerProjectionReadDecision
+  | { kind: "available"; boundary: Promise<void> };
 
 /**
  * Synchronous admission authority for one LocalInstance.
@@ -101,6 +103,7 @@ export type InstanceProjectionReadDecision =
  */
 export class InstanceCommandScheduler {
   private readonly active = new Map<symbol, ActiveCommand>();
+  private projectionTail: Promise<void> = Promise.resolve();
 
   constructor(private readonly facts: () => InstanceCommandFacts) {}
 
@@ -129,11 +132,9 @@ export class InstanceCommandScheduler {
       if (request.admission === "idle" && (facts.executionRunning || facts.runtimeStreaming)) {
         return { kind: "reject", reason: "busy" };
       }
-      const lease = this.activate(request, facts.runtimeGeneration);
-      const projectionReads = isolatesProjectionReads(request.kind) ? this.findAll("projection_read") : [];
-      return projectionReads.length === 0
-        ? { kind: "start", lease }
-        : { kind: "wait", lease, forCompletion: Promise.all(projectionReads.map((read) => read.completion)).then(() => {}) };
+      const projection = this.reserveProjection();
+      const lease = this.activate(request, facts.runtimeGeneration, projection.release);
+      return { kind: "wait", lease, forCompletion: projection.entered };
     }
 
     if (request.class === "control") {
@@ -164,17 +165,19 @@ export class InstanceCommandScheduler {
     return { kind: "start", lease: this.activate(request, facts.runtimeGeneration) };
   }
 
-  admitProjectionRead(): InstanceProjectionReadDecision {
+  admitProjectionRead(kind: "worker"): InstanceWorkerProjectionReadDecision;
+  admitProjectionRead(kind: "committed"): InstanceProjectionReadDecision;
+  admitProjectionRead(kind: "worker" | "committed"): InstanceProjectionReadDecision {
     const facts = this.facts();
     const terminal = this.find("terminal");
     if (terminal || !facts.acceptingCommands) {
       return { kind: "reject", reason: "not_active", lifecycle: terminal ? "stopping" : facts.lifecycle };
     }
-    const lease = this.activate({ class: "projection_read" }, facts.runtimeGeneration);
     const exclusive = this.find("exclusive");
-    return exclusive?.request.class === "exclusive" && isolatesProjectionReads(exclusive.request.kind)
-      ? { kind: "wait", lease, forCompletion: exclusive.completion }
-      : { kind: "start", lease };
+    if (kind === "committed" && exclusive?.request.class === "exclusive" && exclusive.request.kind === "compaction") {
+      return { kind: "available", boundary: exclusive.completion };
+    }
+    return { kind: "reserve", reservation: this.reserveProjection() };
   }
 
   activeCommand(commandClass: InstanceCommandRequest["class"], kind?: ExclusiveCommandKind | ControlCommandKind): ActiveCommandView | undefined {
@@ -185,7 +188,7 @@ export class InstanceCommandScheduler {
 
   nonTerminalCompletions(): Promise<void>[] {
     return [...this.active.values()]
-      .filter((command) => command.request.class !== "terminal" && command.request.class !== "projection_read")
+      .filter((command) => command.request.class !== "terminal")
       .map((command) => command.completion);
   }
 
@@ -204,10 +207,11 @@ export class InstanceCommandScheduler {
   release(command: ActiveCommand): void {
     if (!this.current(command)) return;
     this.active.delete(command.token);
+    command.releaseProjection?.();
     command.resolveCompletion();
   }
 
-  private activate(request: InstanceAdmissionRequest, generation: number): InstanceCommandLease {
+  private activate(request: InstanceCommandRequest, generation: number, releaseProjection?: () => void): InstanceCommandLease {
     const token = Symbol(request.class);
     let resolveCompletion!: () => void;
     let resolveEffectStarted!: (started: boolean) => void;
@@ -219,12 +223,13 @@ export class InstanceCommandScheduler {
       resolveCompletion: () => resolveCompletion(),
       effectStarted: new Promise<boolean>((resolve) => { resolveEffectStarted = resolve; }),
       resolveEffectStarted: (started) => resolveEffectStarted(started),
+      ...(releaseProjection === undefined ? {} : { releaseProjection }),
     };
     this.active.set(token, command);
     return new InstanceCommandLease(this, command);
   }
 
-  private find(commandClass: InstanceAdmissionRequest["class"], kind?: ExclusiveCommandKind | ControlCommandKind): ActiveCommand | undefined {
+  private find(commandClass: InstanceCommandRequest["class"], kind?: ExclusiveCommandKind | ControlCommandKind): ActiveCommand | undefined {
     for (const command of this.active.values()) {
       if (command.request.class !== commandClass) continue;
       if (kind === undefined || ("kind" in command.request && command.request.kind === kind)) return command;
@@ -232,8 +237,20 @@ export class InstanceCommandScheduler {
     return undefined;
   }
 
-  private findAll(commandClass: InstanceAdmissionRequest["class"]): ActiveCommand[] {
-    return [...this.active.values()].filter((command) => command.request.class === commandClass);
+  private reserveProjection(): InstanceProjectionReadReservation {
+    const entered = this.projectionTail;
+    let releaseHeld!: () => void;
+    const held = new Promise<void>((resolve) => { releaseHeld = resolve; });
+    this.projectionTail = entered.then(() => held, () => held);
+    let released = false;
+    return {
+      entered,
+      release: () => {
+        if (released) return;
+        released = true;
+        releaseHeld();
+      },
+    };
   }
 
   private view(command: ActiveCommand): ActiveCommandView {

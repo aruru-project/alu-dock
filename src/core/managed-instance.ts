@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { truncateWithEllipsis as truncate } from "./bounded-text.js";
 import { InstanceEventJournal } from "./instance-event-journal.js";
-import { InstanceCommandScheduler, type InstanceCommandDecision, type InstanceCommandLease } from "./instance-command-scheduler.js";
+import { InstanceCommandScheduler, type InstanceCommandDecision, type InstanceCommandLease, type InstanceProjectionReadReservation } from "./instance-command-scheduler.js";
 import { cloneJson } from "./json-value.js";
 import { isPortableAbsoluteLocalPath } from "./local-path.js";
 import {
@@ -2408,19 +2408,33 @@ export class ManagedInstance {
   }
 
   private async withCommittedProjectionRead<T>(read: () => T): Promise<T> {
-    const projection = await this.beginProjectionRead();
-    try {
-      const historyBoundary = this.historyRefreshTail;
-      await historyBoundary;
-      this.assertActive();
-      return read();
-    } finally {
-      projection.release();
+    const historyBoundary = this.historyRefreshTail;
+    for (;;) {
+      const decision = this.commandScheduler.admitProjectionRead("committed");
+      if (decision.kind === "reject") throw new InstanceNotActiveError(this.id, decision.lifecycle);
+      if (decision.kind === "available") {
+        await historyBoundary;
+        const compaction = this.commandScheduler.activeCommand("exclusive", "compaction");
+        if (compaction?.completion === decision.boundary) {
+          this.assertActive();
+          return read();
+        }
+        continue;
+      }
+      const projection = decision.reservation;
+      try {
+        await projection.entered;
+        await historyBoundary;
+        this.assertActive();
+        return read();
+      } finally {
+        projection.release();
+      }
     }
   }
 
   private async withProjectionRead<T>(read: () => Promise<T>): Promise<T> {
-    const projection = await this.beginProjectionRead();
+    const projection = await this.beginWorkerProjectionRead();
     try {
       const committedBoundary = this.transitionTail;
       await committedBoundary;
@@ -2437,14 +2451,12 @@ export class ManagedInstance {
     }
   }
 
-  private async beginProjectionRead(): Promise<InstanceCommandLease> {
-    const decision = this.commandScheduler.admitProjectionRead();
-    if (decision.kind === "reject") {
-      throw new InstanceNotActiveError(this.id, decision.lifecycle);
-    }
-    const projection = decision.lease;
+  private async beginWorkerProjectionRead(): Promise<InstanceProjectionReadReservation> {
+    const decision = this.commandScheduler.admitProjectionRead("worker");
+    if (decision.kind === "reject") throw new InstanceNotActiveError(this.id, decision.lifecycle);
+    const projection = decision.reservation;
     try {
-      if (decision.kind === "wait") await decision.forCompletion;
+      await projection.entered;
       this.assertActive();
       return projection;
     } catch (error) {

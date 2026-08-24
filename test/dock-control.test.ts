@@ -1598,12 +1598,13 @@ test("manual compaction aborts a running model command without stealing its run 
   assert.ok(events.some((event) => event.type === "compaction.completed" && event.data.operationId === "manual-compact-op"));
 });
 
-test("fresh read and follow remain available while manual compaction is pending", async (context) => {
+test("committed reads and follow stay available while Worker projection waits for manual compaction", async (context) => {
   const harness = await createHarness();
   context.after(() => cleanupHarness(harness));
   await harness.host.start();
   const controller = new DockClient({ socketPath: harness.socketPath });
   const created = await controller.create(harness.directory, "manual-compaction-observer", "create-manual-compaction-observer");
+  const managed = harness.registry.get(created.id);
   const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
   const block = runtime.blockNextCompaction();
   let blockFinished = false;
@@ -1622,21 +1623,27 @@ test("fresh read and follow remain available while manual compaction is pending"
 
     const liveEvents: DockEvent[] = [];
     const observer = new DockClient({ socketPath: harness.socketPath, timeoutMs: 2_000 });
-    const [projection, attached] = await Promise.all([
+    let treeSettled = false;
+    const treeDuringCompaction = managed.getTree().finally(() => { treeSettled = true; });
+    const [projection, attached, history] = await Promise.all([
       observer.read(created.id, undefined, "conversation_bootstrap"),
       observer.streamEvents(created.id, {
         onEvent: (event) => liveEvents.push(event),
         requireTuiProjection: true,
         conversationBootstrap: true,
       }),
+      managed.getHistoryPage(undefined, 20),
     ]);
     subscription = attached;
+    await new Promise<void>((resolve) => setImmediate(resolve));
 
     assert.equal(runtime.isCompacting, true);
     assert.equal(projection.instance.compacting, true);
     assert.equal(projection.instance.execution, "running");
     assert.equal(attached.initial.instance.compacting, true);
     assert.equal(attached.initial.instance.runtimeGeneration, created.runtimeGeneration);
+    assert.equal(history.instance.compacting, true);
+    assert.equal(treeSettled, false);
 
     const queued = await observer.prompt(created.id, "queued during observed manual compaction", "auto", "manual-compaction-observer-queue");
     assert.equal(queued.receipt.queued, true);
@@ -1647,8 +1654,9 @@ test("fresh read and follow remain available while manual compaction is pending"
 
     block.finish();
     blockFinished = true;
-    const result = await compacting;
+    const [result, tree] = await Promise.all([compacting, treeDuringCompaction]);
     assert.equal(result.result.summary, "fixture summary");
+    assert.equal(Array.isArray(tree.nodes), true);
     const deadline = Date.now() + 2_000;
     while (!liveEvents.some((event) => event.type === "compaction.completed") && Date.now() < deadline) {
       await new Promise<void>((resolve) => setTimeout(resolve, 5));
@@ -1952,6 +1960,31 @@ test("reload and reads both succeed in either arrival order", async (context) =>
   assert.equal(treeOutcome.status, "fulfilled");
   assert.equal(reloadOutcome.status, "fulfilled");
   assert.equal(managed.snapshot().runtimeGeneration, created.runtimeGeneration + 2);
+});
+
+test("Worker projection reads preserve their arrival order", async (context) => {
+  const harness = await createHarness();
+  context.after(() => cleanupHarness(harness));
+  await harness.host.start();
+  const client = new DockClient({ socketPath: harness.socketPath });
+  const created = await client.create(harness.directory, "ordered-projection-reads");
+  const managed = harness.registry.get(created.id);
+  const runtime = harness.sessions.get(created.id) as DelayedAgentWorkerConnection;
+  runtime.settle();
+  await managed.waitForIdle();
+
+  const firstBlock = runtime.blockNextTreeRead();
+  const first = managed.getTree();
+  await firstBlock.entered;
+  let secondSettled = false;
+  const second = managed.getTree().finally(() => { secondSettled = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const secondEscaped = secondSettled;
+  firstBlock.release();
+  const outcomes = await Promise.allSettled([first, second]);
+
+  assert.equal(secondEscaped, false);
+  assert.deepEqual(outcomes.map((outcome) => outcome.status), ["fulfilled", "fulfilled"]);
 });
 
 test("stop rejects a pending input before starting Worker cleanup", async (context) => {
