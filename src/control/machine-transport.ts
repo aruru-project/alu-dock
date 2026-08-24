@@ -13,7 +13,7 @@ import type { DockToolsHostPort, DockToolsRequest, DockToolsResult } from "../co
 import { parseDockToolsRequest, parseDockToolsResult } from "../core/dock-tools-codec.js";
 import type { ObservationDeliverySink, ObservationNotification } from "../core/instance-observation.js";
 import { MACHINE_PLATFORMS, MAX_CONTROL_CWD_CHARS, MAX_CONTROL_LINE_BYTES, MAX_INSTANCE_LIST_RESULT_BYTES, type ControlError, type ControlRequest, type EnsureResult, type MachineDto, type MachinePlatform, ProtocolValidationError } from "./protocol.js";
-import { decodeResponseTransfer, parseControlResponse, parseEnsureResult, parseForgetResult, parseInstanceSnapshot, parseResponseTransferFrame } from "./protocol.js";
+import { classifyControlRequest, decodeResponseTransfer, instanceTargetId, parseControlResponse, parseEnsureResult, parseForgetResult, parseInstanceSnapshot, parseResponseTransferFrame } from "./protocol.js";
 import { encodeJsonLine, JsonLineDecoder } from "./json-lines.js";
 import { boundedInstanceListPage } from "./instance-list-page.js";
 import { MainMachineState, SubHostMachineState, type MachineRouteRecord, type SubHostUpstreamRecord, type TrustedSubHostRecord } from "./machine-state.js";
@@ -521,12 +521,13 @@ export class MainMachineController implements MainRouteAuthority {
   }
 
   private async routeWithReservation(request: ControlRequest, emit: (record: unknown) => void | Promise<void>, ended: () => void, keyReservation?: KeyReservation): Promise<RouteDecision> {
-    if (request.type === "machine.list" || request.type === "machine.remove" || request.type === "instance.list" || request.type === "host.info" || request.type === "instance.get_by_key") return { kind: "local" };
+    const classification = classifyControlRequest(request);
+    if (classification.target === "dock") return { kind: "local" };
     const machines = await this.options.state.list();
-    const instanceId = "instanceId" in request.params && typeof request.params.instanceId === "string" ? request.params.instanceId : undefined;
+    const instanceId = instanceTargetId(request);
     let machine: TrustedSubHostRecord | undefined;
     let route: MachineRouteRecord | undefined;
-    if (instanceId) {
+    if (classification.target === "instance") {
       for (const candidate of machines) {
         const found = candidate.routes.find((item) => item.mainInstanceId === instanceId);
         if (found) { machine = candidate; route = found; break; }

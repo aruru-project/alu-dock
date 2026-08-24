@@ -300,6 +300,97 @@ export type ControlRequest =
   | Request<"session.clone", { operationId: string; instanceId: string; entryId: string }>
   | Request<"workspace.list", { path: string; cursor?: WorkspaceListCursor; limit: number; hostId?: string }>;
 
+export type ControlRequestTarget = "dock" | "directory" | "instance";
+export type ControlRequestEffect = "query" | "command";
+export type ControlRequestTransport = "unary" | "follow" | "request_stream" | "response_stream" | "response_transfer";
+export interface ControlRequestClassification {
+  target: ControlRequestTarget;
+  effect: ControlRequestEffect;
+  transport: ControlRequestTransport;
+}
+
+type ControlRequestDescriptor = Omit<ControlRequestClassification, "target"> & {
+  target: ControlRequestTarget | "optional_instance";
+};
+
+const CONTROL_REQUEST_DESCRIPTORS = {
+  "host.info": { target: "dock", effect: "query", transport: "unary" },
+  "machine.list": { target: "dock", effect: "query", transport: "unary" },
+  "machine.remove": { target: "dock", effect: "command", transport: "unary" },
+  "attachment.upload": { target: "optional_instance", effect: "command", transport: "request_stream" },
+  "instance.create": { target: "directory", effect: "command", transport: "unary" },
+  "instance.ensure": { target: "directory", effect: "command", transport: "unary" },
+  "instance.adopt": { target: "directory", effect: "command", transport: "unary" },
+  "instance.list": { target: "directory", effect: "query", transport: "unary" },
+  "instance.get_by_key": { target: "directory", effect: "query", transport: "unary" },
+  "instance.get": { target: "instance", effect: "query", transport: "unary" },
+  "deliverable.list": { target: "instance", effect: "query", transport: "unary" },
+  "deliverable.download": { target: "instance", effect: "query", transport: "response_stream" },
+  "workspace.entry.list": { target: "instance", effect: "query", transport: "unary" },
+  "workspace.entry.get": { target: "instance", effect: "query", transport: "unary" },
+  "workspace.file.read": { target: "instance", effect: "query", transport: "response_stream" },
+  "instance.read": { target: "instance", effect: "query", transport: "unary" },
+  "instance.follow": { target: "instance", effect: "query", transport: "follow" },
+  "interaction.control": { target: "instance", effect: "query", transport: "follow" },
+  "instance.stop": { target: "instance", effect: "command", transport: "unary" },
+  "instance.forget": { target: "instance", effect: "command", transport: "unary" },
+  "catalog.prune": { target: "directory", effect: "command", transport: "unary" },
+  "instance.reopen": { target: "instance", effect: "command", transport: "unary" },
+  "interaction.respond": { target: "instance", effect: "command", transport: "unary" },
+  "extension.tools_expanded.set": { target: "instance", effect: "command", transport: "unary" },
+  "extension.widget_viewport.set": { target: "instance", effect: "command", transport: "unary" },
+  "command.submit": { target: "instance", effect: "command", transport: "unary" },
+  "command.abort": { target: "instance", effect: "command", transport: "unary" },
+  "queue.dequeue": { target: "instance", effect: "command", transport: "unary" },
+  "model.list": { target: "instance", effect: "query", transport: "unary" },
+  "model.set": { target: "instance", effect: "command", transport: "unary" },
+  "thinking.set": { target: "instance", effect: "command", transport: "unary" },
+  "tool.list": { target: "instance", effect: "query", transport: "unary" },
+  "tool.set_active": { target: "instance", effect: "command", transport: "unary" },
+  "settings.get": { target: "instance", effect: "query", transport: "unary" },
+  "settings.update": { target: "instance", effect: "command", transport: "unary" },
+  "resource.get": { target: "instance", effect: "query", transport: "unary" },
+  "command.catalog": { target: "instance", effect: "query", transport: "unary" },
+  "command.content": { target: "instance", effect: "query", transport: "unary" },
+  "command.complete": { target: "instance", effect: "query", transport: "unary" },
+  "session.history": { target: "instance", effect: "query", transport: "unary" },
+  "conversation.history": { target: "instance", effect: "query", transport: "unary" },
+  "conversation.content": { target: "instance", effect: "query", transport: "unary" },
+  "conversation.image": { target: "instance", effect: "query", transport: "response_stream" },
+  "file.read": { target: "instance", effect: "query", transport: "unary" },
+  "session.inventory": { target: "directory", effect: "query", transport: "unary" },
+  "session.list": { target: "instance", effect: "query", transport: "unary" },
+  "session.switch": { target: "instance", effect: "command", transport: "unary" },
+  "session.new": { target: "instance", effect: "command", transport: "unary" },
+  "session.name": { target: "instance", effect: "command", transport: "unary" },
+  "session.compact": { target: "instance", effect: "command", transport: "unary" },
+  "session.reload": { target: "instance", effect: "command", transport: "unary" },
+  "session.tree": { target: "instance", effect: "query", transport: "response_transfer" },
+  "session.navigate": { target: "instance", effect: "command", transport: "unary" },
+  "session.fork": { target: "instance", effect: "command", transport: "unary" },
+  "session.clone": { target: "instance", effect: "command", transport: "unary" },
+  "workspace.list": { target: "directory", effect: "query", transport: "unary" },
+} as const satisfies Record<ControlRequest["type"], ControlRequestDescriptor>;
+
+export function controlRequestDescriptor(type: ControlRequest["type"]): ControlRequestDescriptor {
+  return CONTROL_REQUEST_DESCRIPTORS[type];
+}
+
+export function classifyControlRequest(request: ControlRequest): ControlRequestClassification {
+  const descriptor = controlRequestDescriptor(request.type);
+  const target = descriptor.target === "optional_instance"
+    ? ("instanceId" in request.params && request.params.instanceId !== undefined ? "instance" : "directory")
+    : descriptor.target;
+  return { target, effect: descriptor.effect, transport: descriptor.transport };
+}
+
+export function instanceTargetId(request: ControlRequest): string | undefined {
+  if (classifyControlRequest(request).target !== "instance") return undefined;
+  const instanceId = "instanceId" in request.params ? request.params.instanceId : undefined;
+  if (typeof instanceId !== "string") throw new Error(`Instance request ${request.type} has no instance identity`);
+  return instanceId;
+}
+
 export interface ControlError { code: string; message: string; retryable: boolean; details?: JsonObject }
 export type ControlResponse =
   | { kind: "response"; version: 2; requestId: string; hostEpoch: string; ok: true; result: unknown }

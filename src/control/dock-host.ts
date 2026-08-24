@@ -78,6 +78,7 @@ import {
   ATTACHMENTS_CAPABILITY,
   MACHINES_CAPABILITY,
   capabilityForRequest,
+  controlRequestDescriptor,
   CONTROL_PROTOCOL_VERSION,
   createHelloAck,
   defaultHostIdentity,
@@ -558,7 +559,7 @@ export class DockHost {
       const request = parseControlRequest(raw);
       currentRequestId = request.requestId;
       if (this.state !== "running" && this.state !== "mutation_faulted") throw new ProtocolValidationError("host_draining", "Alu Dock host is not accepting requests");
-      if (this.state === "mutation_faulted" && isMutationRequest(request.type)) throw new ProtocolValidationError("mutation_faulted", "Alu Dock catalog is mutation-faulted; query state and wait for Host restart");
+      if (this.state === "mutation_faulted" && controlRequestDescriptor(request.type).effect === "command") throw new ProtocolValidationError("mutation_faulted", "Alu Dock catalog is mutation-faulted; query state and wait for Host restart");
       if (!this.capabilities.has(capabilityForRequest(request.type))) throw new ProtocolValidationError("capability_missing", `Capability ${capabilityForRequest(request.type)} is unavailable`);
 
       if (this.routeAuthority && request.type === "instance.get_by_key") {
@@ -1231,41 +1232,9 @@ export class DockHost {
 }
 
 function mutationOperationId(request: ControlRequest): string | undefined {
-  if (!isMutationRequest(request.type)) return undefined;
-  return (request.params as { operationId: string }).operationId;
-}
-
-function isMutationRequest(type: ControlRequest["type"]): boolean {
-  return type !== "host.info"
-    && type !== "machine.list"
-    && type !== "instance.list"
-    && type !== "instance.get_by_key"
-    && type !== "instance.get"
-    && type !== "instance.read"
-    && type !== "deliverable.list"
-    && type !== "deliverable.download"
-    && type !== "workspace.entry.list"
-    && type !== "workspace.entry.get"
-    && type !== "workspace.file.read"
-    && type !== "instance.follow"
-    && type !== "interaction.control"
-    && type !== "extension.widget_viewport.set"
-    && type !== "model.list"
-    && type !== "tool.list"
-    && type !== "settings.get"
-    && type !== "resource.get"
-    && type !== "command.catalog"
-    && type !== "command.content"
-    && type !== "command.complete"
-    && type !== "session.history"
-    && type !== "conversation.history"
-    && type !== "conversation.content"
-    && type !== "conversation.image"
-    && type !== "file.read"
-    && type !== "session.inventory"
-    && type !== "session.list"
-    && type !== "session.tree"
-    && type !== "workspace.list";
+  if (controlRequestDescriptor(request.type).effect !== "command") return undefined;
+  const operationId = "operationId" in request.params ? request.params.operationId : undefined;
+  return typeof operationId === "string" ? operationId : undefined;
 }
 
 function boundedSessionInventory(

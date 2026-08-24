@@ -4,6 +4,7 @@ import test from "node:test";
 import { JsonLineDecoder, JsonLineError } from "../src/control/json-lines.js";
 import {
   capabilityForRequest,
+  classifyControlRequest,
   parseAttachmentDto,
   parseAttachmentUploadFrame,
   parseAttachmentUploadResult,
@@ -158,6 +159,28 @@ test("Protocol V2 history exposes only canonical persisted conversation records"
 
 
 
+
+test("canonical request classification selects the instance command, query, and stream paths", () => {
+  const base = { kind: "request" as const, version: 2 as const };
+  const upload = parseControlRequest({
+    ...base, requestId: "upload", type: "attachment.upload",
+    params: { operationId: "upload-op", name: "file.bin", sizeBytes: 1, sha256: "a".repeat(64) },
+  });
+  const routedUpload = parseControlRequest({
+    ...base, requestId: "routed-upload", type: "attachment.upload",
+    params: { operationId: "routed-upload-op", instanceId: "work-1", name: "file.bin", sizeBytes: 1, sha256: "a".repeat(64) },
+  });
+  const stop = parseControlRequest({ ...base, requestId: "stop", type: "instance.stop", params: { operationId: "stop-op", instanceId: "work-1" } });
+  const follow = parseControlRequest({
+    ...base, requestId: "follow", type: "instance.follow",
+    params: { instanceId: "work-1", since: { hostEpoch: "host-1", instanceId: "work-1", runtimeGeneration: 1, sequence: 0 } },
+  });
+
+  assert.deepEqual(classifyControlRequest(upload), { target: "directory", effect: "command", transport: "request_stream" });
+  assert.deepEqual(classifyControlRequest(routedUpload), { target: "instance", effect: "command", transport: "request_stream" });
+  assert.deepEqual(classifyControlRequest(stop), { target: "instance", effect: "command", transport: "unary" });
+  assert.deepEqual(classifyControlRequest(follow), { target: "instance", effect: "query", transport: "follow" });
+});
 
 test("attachment upload frames and path-free DTOs are closed and bounded", () => {
   const request = parseControlRequest({
