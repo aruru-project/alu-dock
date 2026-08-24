@@ -6,6 +6,7 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
   FileDown,
+  FileText,
   FolderTree,
   Globe2,
   Link,
@@ -75,6 +76,7 @@ import {
 } from './lib/bridge'
 import type { CreateWorkContinuation, SessionContext } from './lib/bridge'
 import { foldLiveDelta, hasCompactConversationContent, liveDeltaKey, liveProjectionTargetKey, mergeHydratedConversationRecords, projectConversation } from './lib/conversation'
+import { assistantMarkdownSource } from './lib/conversationPresentation'
 import { appendRestoredQueue, attachmentUploadMatches, attachmentUploadTarget, attachmentsAfterSubmit, bindLocalAttachment, displayedConversationImageResource, moveAttachmentPreviewResource } from './lib/attachmentDraft'
 import { subhostMachineName } from './lib/machines'
 import {
@@ -126,6 +128,7 @@ import ConversationProcessParts from './components/ConversationProcessParts.vue'
 import ExtensionUiSurface from './components/ExtensionUiSurface.vue'
 import ImageZoomSurface from './components/ImageZoomSurface.vue'
 import NewWorkDialog from './components/NewWorkDialog.vue'
+import MessageTextDialog from './components/MessageTextDialog.vue'
 import WorkspaceBrowser from './components/WorkspaceBrowser.vue'
 import { useAppStore } from './stores/app'
 import { useCommandCatalogStore } from './stores/command-catalog'
@@ -189,6 +192,7 @@ type AttachmentPreviewResource = { url: string; mediaType: string }
 const imageResources = ref<Record<string, ConversationImageResource>>({})
 const attachmentPreviews = ref<Record<string, AttachmentPreviewResource>>({})
 const imagePreview = ref<ImagePreview | null>(null)
+const messageTextView = ref<{ title: string; text: string } | null>(null)
 const imageSaving = ref(false)
 const imageSaveStatus = ref<{ tone: 'success' | 'error'; text: string } | null>(null)
 let imageDomainKey = ''
@@ -458,7 +462,7 @@ const unresolvedControlDomain = computed<ControlMutationDomain | undefined>(() =
   const domain = unresolvedDomain.value
   return domain && domain !== 'work' ? domain : undefined
 })
-const modalOpen = computed(() => workspaceBrowserOpen.value || deliveryOpen.value || directoryOpen.value || commandOpen.value || appSettingsOpen.value || hostSettingsOpen.value || composerExpanded.value || !!confirmDialog.value || !!imagePreview.value)
+const modalOpen = computed(() => workspaceBrowserOpen.value || deliveryOpen.value || directoryOpen.value || commandOpen.value || appSettingsOpen.value || hostSettingsOpen.value || composerExpanded.value || !!confirmDialog.value || !!imagePreview.value || !!messageTextView.value)
 
 /* Android 返回键走 WebView 浏览历史（wry：canGoBack→goBack，否则退出 app）。
    浮层/抽屉打开时压入一个占位历史条目，返回键触发 popstate 时关闭最上层；
@@ -785,6 +789,7 @@ watch(
       submissionError.value = null
       resetConversationImages()
       resetAttachmentPreviews()
+      messageTextView.value = null
       commandCatalogStore.invalidate()
     }
     if (hostIdentityChanged) restoredImageCounts.value = {}
@@ -1249,6 +1254,7 @@ function closeModal() {
   hostSettingsOpen.value = false
   composerExpanded.value = false
   imagePreview.value = null
+  messageTextView.value = null
   imageSaving.value = false
   imageSaveStatus.value = null
 }
@@ -1707,6 +1713,12 @@ function resetAttachmentPreviews() {
   for (const resource of Object.values(attachmentPreviews.value)) URL.revokeObjectURL(resource.url)
   attachmentPreviews.value = {}
   if (imagePreview.value?.kind === 'attachment') imagePreview.value = null
+}
+
+function openMessageText(title: string, text: string) {
+  if (!text) return
+  rememberModalTrigger()
+  messageTextView.value = { title, text }
 }
 
 function showImagePreview(preview: ImagePreview) {
@@ -3677,7 +3689,7 @@ function handleOutputClick(event: MouseEvent) {
                 <div class="msg-user-top"><span class="msg-user-prefix">&gt;</span><span v-if="row.text" class="msg-user-text">{{ row.text }}</span></div>
                 <div v-if="row.images?.length" class="msg-user-images"><ConversationProcessParts :parts="row.images" :render-markdown="renderMarkdown" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div>
                 <div v-if="row.attachments?.length" class="message-attachments"><AttachmentCard v-for="attachment in row.attachments" :key="attachment.fileId" compact :name="attachment.name" :size-bytes="attachment.sizeBytes" :media-type="attachment.mediaType" :preview-url="attachmentPreviews[attachment.fileId]?.url" @preview="openAttachmentPreview(attachment.fileId, attachment.name)" /></div>
-                <div class="msg-timestamp">{{ row.time }}</div>
+                <div v-if="row.text || row.time" class="msg-timestamp"><button v-if="row.text" type="button" class="message-text-action" aria-label="查看你的消息原文" @click="openMessageText('你的消息', row.text)"><FileText :size="12" />原文</button><span>{{ row.time }}</span></div>
               </div>
             </article>
 
@@ -3685,7 +3697,7 @@ function handleOutputClick(event: MouseEvent) {
               <img src="./assets/console_icon_small.png" alt="Agent" class="alu-msg-avatar" />
               <div class="alu-msg-assistant-content">
                 <div class="alu-msg-assistant-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div>
-                <div v-if="row.time" class="msg-assistant-timestamp">{{ row.time }}</div>
+                <div v-if="assistantMarkdownSource(row.parts) || row.time" class="msg-assistant-timestamp"><button v-if="assistantMarkdownSource(row.parts)" type="button" class="message-text-action" aria-label="查看 Agent 回复原文" @click="openMessageText('Agent 回复', assistantMarkdownSource(row.parts))"><FileText :size="12" />原文</button><span>{{ row.time }}</span></div>
               </div>
             </article>
 
@@ -3834,6 +3846,14 @@ function handleOutputClick(event: MouseEvent) {
             <span>{{ imagePreview.name }}</span>
             <strong v-if="imageSaveStatus" :class="`is-${imageSaveStatus.tone}`" role="status">{{ imageSaveStatus.text }}</strong>
           </footer>
+        </section>
+      </div>
+    </Transition>
+
+    <Transition name="fade">
+      <div v-if="messageTextView" class="ui-dialog-overlay message-text-overlay" role="presentation" @click.self="closeModal" @keydown="handleModalKeydown" @wheel.prevent.stop>
+        <section ref="modalSurface" class="ui-dialog-box ui-dialog-size-wide message-text-dialog" role="dialog" aria-modal="true" aria-label="消息原文" tabindex="-1" @wheel="handleModalWheel">
+          <MessageTextDialog :title="messageTextView.title" :text="messageTextView.text" @close="closeModal" />
         </section>
       </div>
     </Transition>

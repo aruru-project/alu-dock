@@ -554,10 +554,17 @@ export interface ConversationImageResource {
   message?: string
 }
 
+export interface ToolCallPreview {
+  title?: string
+  body?: string
+  variant: 'command' | 'path' | 'content' | 'diff'
+  truncated: boolean
+}
+
 export type ConversationProcessItem =
   | { id: string; kind: 'assistant'; groupId: string; text: string; time: string; groupTime?: string }
   | { id: string; kind: 'thinking'; groupId: string; title: string; text: string; open?: boolean; groupTime?: string }
-  | { id: string; kind: 'tool'; groupId: string; name: string; summary: string; status: 'running' | 'done' | 'error'; detail?: string; groupTime?: string }
+  | { id: string; kind: 'tool'; groupId: string; name: string; summary: string; status: 'running' | 'done' | 'error'; detail?: string; preview?: ToolCallPreview; groupTime?: string }
   | { id: string; kind: 'image'; groupId: string; imageKey: string; mimeType: string; fileId?: string; name?: string; sizeBytes?: number; source?: ConversationImageSource; historyEntryId?: string; groupTime?: string }
   | { id: string; kind: 'notice'; groupId?: string; tone: 'info' | 'warning' | 'error'; text: string; groupTime?: string }
 

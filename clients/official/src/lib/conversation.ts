@@ -7,7 +7,9 @@ import type {
   ConversationRecord,
   ProjectedEvent,
   PublishedFileDto,
+  ToolCallPreview,
 } from './types'
+
 type ToolItem = Extract<ConversationProcessItem, { kind: 'tool' }>
 type ImageItem = Extract<ConversationProcessItem, { kind: 'image' }>
 interface ToolProjection {
@@ -20,6 +22,63 @@ interface ToolProjection {
 interface RecordGroup {
   key: string
   records: ConversationRecord[]
+}
+
+const COMMAND_PREVIEW_CHARS = 320
+const CONTENT_PREVIEW_CHARS = 280
+const EDIT_SIDE_PREVIEW_CHARS = 120
+
+export function standardToolCallPreview(toolName: string, args: unknown): ToolCallPreview | undefined {
+  if (!isRecord(args)) return undefined
+  if (toolName === 'bash' && typeof args.command === 'string') {
+    const command = textPrefix(args.command, COMMAND_PREVIEW_CHARS, 3)
+    return {
+      title: typeof args.timeout === 'number' ? `timeout ${args.timeout}s` : undefined,
+      body: command.text,
+      variant: 'command',
+      truncated: command.truncated,
+    }
+  }
+  if (toolName === 'read' && typeof args.path === 'string') {
+    const range = [
+      typeof args.offset === 'number' ? `offset ${args.offset}` : '',
+      typeof args.limit === 'number' ? `limit ${args.limit}` : '',
+    ].filter(Boolean).join(' · ')
+    return { title: args.path, body: range || undefined, variant: 'path', truncated: false }
+  }
+  if (toolName === 'write' && typeof args.path === 'string' && typeof args.content === 'string') {
+    const content = textPrefix(args.content, CONTENT_PREVIEW_CHARS, 4)
+    return { title: args.path, body: content.text, variant: 'content', truncated: content.truncated }
+  }
+  if (toolName === 'edit' && typeof args.path === 'string' && Array.isArray(args.edits) && args.edits.length > 0) {
+    const first = args.edits[0]
+    if (!isRecord(first) || typeof first.oldText !== 'string' || typeof first.newText !== 'string') return undefined
+    const oldText = textPrefix(first.oldText, EDIT_SIDE_PREVIEW_CHARS, 2)
+    const newText = textPrefix(first.newText, EDIT_SIDE_PREVIEW_CHARS, 2)
+    return {
+      title: `${args.path} · ${args.edits.length} 处`,
+      body: `− ${oldText.text}\n＋ ${newText.text}`,
+      variant: 'diff',
+      truncated: args.edits.length > 1 || oldText.truncated || newText.truncated,
+    }
+  }
+  return undefined
+}
+
+function textPrefix(value: string, maximumCharacters: number, maximumLines: number) {
+  const characters = Array.from(value)
+  let text = characters.slice(0, maximumCharacters).join('')
+  let truncated = characters.length > maximumCharacters
+  const lines = text.split('\n')
+  if (lines.length > maximumLines) {
+    text = lines.slice(0, maximumLines).join('\n')
+    truncated = true
+  }
+  return { text: truncated ? `${text}…` : text, truncated }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
 export interface ConversationProjectionOptions {
@@ -195,7 +254,10 @@ export function projectConversation(bootstrap: ConversationBootstrap, options: C
         const groupId = toolOwners.get(toolCallId) || 'live-tool-staging'
         const tool = ensureTool(toolItems, items, toolCallId, String(data.toolName || 'tool'), groupId, `live-tool-${toolCallId}`)
         if (data.toolName) tool.item.name = String(data.toolName)
-        if (data.args !== undefined && tool.item.name !== 'show_image') tool.argsText = JSON.stringify(data.args, null, 2)
+        if (data.args !== undefined) {
+          tool.item.preview = standardToolCallPreview(tool.item.name, data.args)
+          if (tool.item.name !== 'show_image') tool.argsText = JSON.stringify(data.args, null, 2)
+        }
         if (typeof data.text === 'string' && tool.item.name !== 'show_image') tool.outputText = data.text
         addOmitted(tool, data.omittedFields)
         tool.item.groupTime ||= time
@@ -384,6 +446,7 @@ function appendBlock(block: ContentBlock, id: string, groupId: string, output: C
     ensureContentImage(block, id, groupId, output, images, historyEntryId)
   } else if (block.type === 'tool_call') {
     const tool = ensureTool(tools, output, block.toolCallId, block.toolName, groupId, id)
+    tool.item.preview = standardToolCallPreview(block.toolName, block.args)
     if (block.toolName !== 'show_image') tool.argsText = JSON.stringify(block.args, null, 2)
     addOmitted(tool, block.omittedFields)
     renderToolDetail(tool)
@@ -428,6 +491,7 @@ function applyLiveContentBlock(
   }
   if (block.type === 'tool_call') {
     tool.item.name = block.toolName || tool.item.name
+    tool.item.preview = standardToolCallPreview(block.toolName, block.args)
     if (block.toolName !== 'show_image') tool.argsText = JSON.stringify(block.args, null, 2)
   } else {
     tool.item.name = block.toolName || tool.item.name

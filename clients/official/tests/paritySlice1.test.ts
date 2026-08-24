@@ -27,18 +27,20 @@ assert.equal(commandConsole.entries.length, 0, 'a Host-selection boundary cannot
 
 state = applied(state, event(1, 'run.started', {}))
 assert.equal(state.instance.execution, 'running', 'run.started enables Abort-facing running state')
-state = applied(state, event(2, 'tool.started', { toolCallId: 'tool-1', toolName: 'bash', args: {} }))
+state = applied(state, event(2, 'tool.started', { toolCallId: 'tool-1', toolName: 'bash', args: { command: 'rg runtime src/' } }))
 state = applied(state, event(3, 'run.settled', { result: 'failed', error: 'model failed' }))
 assert.equal(state.instance.execution, 'failed')
 assert.equal(state.instance.lastRun, 'failed')
 assert.equal(state.instance.lastError, 'model failed')
 
 const failedProjection = projectConversation(bootstrap(state, [
-  event(2, 'tool.started', { toolCallId: 'tool-1', toolName: 'bash', args: {} }),
-  event(3, 'run.settled', { result: 'failed', error: 'model failed' }),
+  event(2, 'tool.started', { toolCallId: 'tool-1', toolName: 'bash', args: { command: 'rg runtime src/' } }),
+  event(3, 'tool.args_updated', { toolCallId: 'tool-1', toolName: 'bash', args: { command: 'rg -n "runtimeGeneration" src/' } }),
+  event(4, 'run.settled', { result: 'failed', error: 'model failed' }),
 ]))
 assert.equal(failedProjection.find((item) => item.kind === 'tool')?.kind, 'tool')
 assert.equal(failedProjection.find((item) => item.kind === 'tool' && item.id === 'live-tool-tool-1')?.status, 'error', 'settlement terminalizes unfinished tools')
+assert.equal(failedProjection.find((item) => item.kind === 'tool' && item.id === 'live-tool-tool-1')?.preview?.body, 'rg -n "runtimeGeneration" src/', 'updated live standard tool arguments replace the earlier collapsed preview')
 assert.equal(failedProjection.some((item) => item.kind === 'notice' && item.tone === 'error' && item.text === 'model failed'), true)
 const runningProjectionState = { ...state, instance: { ...state.instance, execution: 'running' as const } }
 const waitingProjection = projectConversation(bootstrap(runningProjectionState, [event(1, 'run.started', {})]))
@@ -88,6 +90,7 @@ assert.ok(callText?.kind === 'assistant' && callTool?.kind === 'tool' && afterTe
 assert.equal(callText.groupId, callTool.groupId, 'a tool result stays inside the assistant record that formally owns its toolCallId')
 assert.notEqual(callText.groupId, afterText.groupId, 'a later assistant record keeps its own WebConsole message row')
 assert.match(callTool.detail || '', /参数[\s\S]*结果/)
+assert.deepEqual(callTool.preview, { title: 'README.md', body: undefined, variant: 'path', truncated: false }, '标准工具主要参数进入收起态投影')
 
 const publishedFile = { presentation: 'image' as const, fileRef: 'file-1', name: 'result.png', sizeBytes: 5, mediaType: 'image/png' }
 const linkedImageAttachment = { fileId: 'attachment-image-1', name: '课堂截图.png', sizeBytes: 2048, mediaType: 'image/png', sha256: 'a'.repeat(64), storedAt: '2026-08-19T04:55:43Z' }

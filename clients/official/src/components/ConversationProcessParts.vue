@@ -54,6 +54,10 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
         <span class="tool-name"><span aria-hidden="true">⚙</span>{{ part.name }}</span>
         <span class="tool-status" :data-status="part.status">{{ part.summary }}</span>
       </div>
+      <div v-if="part.preview" class="tool-call-preview" :class="`is-${part.preview.variant}`">
+        <div v-if="part.preview.title || part.preview.truncated" class="tool-call-preview-meta"><span v-if="part.preview.title" class="tool-call-preview-title">{{ part.preview.title }}</span><span v-if="part.preview.truncated" class="tool-call-preview-truncated">已省略</span></div>
+        <pre v-if="part.preview.body" class="tool-call-preview-body">{{ part.preview.body }}</pre>
+      </div>
       <details :open="toolOpen(part.id)" @toggle="emit('toolToggle', part.id, $event)">
         <summary><span>参数与结果</span><span class="tool-disclosure" aria-hidden="true">›</span></summary>
         <pre v-if="toolOpen(part.id)" class="tool-output msg-tool-output">{{ part.detail }}</pre>
