@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 
 import { truncateWithEllipsis as truncate } from "./bounded-text.js";
 import { InstanceEventJournal } from "./instance-event-journal.js";
+import { InstanceCommandScheduler, type InstanceCommandDecision, type InstanceCommandLease } from "./instance-command-scheduler.js";
 import { cloneJson } from "./json-value.js";
 import { isPortableAbsoluteLocalPath } from "./local-path.js";
 import {
@@ -350,6 +351,7 @@ export class ManagedInstance {
   private readonly now: () => Date;
   private readonly createCommandId: () => string;
   private readonly journal: InstanceEventJournal;
+  private readonly commandScheduler: InstanceCommandScheduler;
   private readonly backgroundTasks = new Set<Promise<void>>();
   private state: MutableState;
   private catalogPort: InstanceCatalogMutationPort | undefined;
@@ -409,24 +411,6 @@ export class ManagedInstance {
   private compactionOperationId: string | undefined;
   private compactionBoundary: Promise<void> | undefined;
   private resolveCompactionBoundary: (() => void) | undefined;
-  private compactionStartedBoundary: Promise<boolean> | undefined;
-  private resolveCompactionStarted: ((started: boolean) => void) | undefined;
-  private configurationPending = false;
-  private configurationKind: "general" | "navigation" | "compaction" | undefined;
-  /** The current configuration keeps Host-owned committed observation readable while its runtime effect is pending. */
-  private configurationAllowsCommittedReads = false;
-  private configurationBoundary: Promise<void> | undefined;
-  private resolveConfigurationBoundary: (() => void) | undefined;
-  private navigationStartedBoundary: Promise<void> | undefined;
-  private resolveNavigationStarted: (() => void) | undefined;
-  private commandAbortPending = false;
-  private commandAbortBoundary: Promise<void> | undefined;
-  private resolveCommandAbortBoundary: (() => void) | undefined;
-  private queueMutationPending = false;
-  private queueMutationBoundary: Promise<void> | undefined;
-  private resolveQueueMutationBoundary: (() => void) | undefined;
-  private projectionGateTail: Promise<void> = Promise.resolve();
-  private releaseConfigurationGate: (() => void) | undefined;
   private stopPromise: Promise<StopReceipt> | undefined;
 
   get runtimeGeneration(): number { return this.runtimeGenerationValue; }
@@ -466,6 +450,19 @@ export class ManagedInstance {
       pendingFollowUp: 0,
       updatedAt: initialUpdatedAt,
     };
+    this.commandScheduler = new InstanceCommandScheduler(() => ({
+      acceptingCommands: this.state.lifecycle === "active" && this.stopPromise === undefined,
+      lifecycle: this.stopPromise ? "stopping" : this.state.lifecycle,
+      runtimeGeneration: this.runtimeGenerationValue,
+      executionRunning: this.state.execution === "running",
+      runtimeStreaming: this.agentState().isStreaming,
+      compactionActive: this.compactionActive,
+      inputAdmissionActive: this.pendingAdmission !== undefined,
+      pendingQueueMessages: this.pendingQueueMessages.length,
+      inFlightQueueMessages: this.inFlightQueueMessages.length,
+      pendingSteering: this.state.pendingSteering,
+      pendingFollowUp: this.state.pendingFollowUp,
+    }));
     this.executorIdentity = {
       kind: truncate(options.executor?.kind ?? "pi-sdk", 128) ?? "pi-sdk",
       version: truncate(options.executor?.version, 128),
@@ -925,15 +922,14 @@ export class ManagedInstance {
     targetId: string,
     options: AgentNavigateOptions = {},
   ): Promise<AgentNavigateResult> {
-    let configurationStarted = false;
+    let configuration: InstanceCommandLease | undefined;
     let runtimeCalled = false;
     try {
-      await this.beginConfiguration("navigating the session tree", { kind: "navigation" });
-      configurationStarted = true;
+      configuration = await this.beginConfiguration("navigating the session tree", { kind: "navigation" });
       this.receiptBoundaryOperationId = operationId;
       runtimeCalled = true;
       const pending = this.invokeAgent<AgentNavigateResult>("session.navigate", { operationId, targetId, ...cloneJson(options) });
-      this.resolveNavigationStarted?.();
+      configuration.markEffectStarted();
       const result = projectAgentNavigateResult(await pending);
       await this.closeRuntimeOperationBoundary(operationId);
       const { leafId, ...navigationResult } = result;
@@ -957,7 +953,7 @@ export class ManagedInstance {
       if (runtimeCalled && !isKnownMutationBoundaryError(error)) throw new RuntimeEffectUnknownError(operationId, error);
       throw error;
     } finally {
-      if (configurationStarted) this.endConfiguration();
+      if (configuration) this.endConfiguration(configuration);
     }
   }
 
@@ -995,7 +991,7 @@ export class ManagedInstance {
   }
 
   async setActiveTools(names: string[], operationId = this.createCommandId()): Promise<AgentToolProjection> {
-    await this.beginConfiguration("changing active tools", { admission: "live" });
+    const configuration = await this.beginConfiguration("changing active tools", { admission: "live" });
     try {
       const projected = await this.invokeAgent<AgentToolProjection>("tool.set_active", { operationId, names: [...names] });
       await this.enqueueTransition(() => this.commitCatalogTransition(
@@ -1007,7 +1003,7 @@ export class ManagedInstance {
       if (error instanceof AgentMutationEffectUnknownError) throw new RuntimeEffectUnknownError(operationId, error);
       throw error;
     } finally {
-      this.endConfiguration();
+      this.endConfiguration(configuration);
     }
   }
 
@@ -1016,7 +1012,7 @@ export class ManagedInstance {
   }
 
   async updateSetting(update: SettingUpdate, operationId = this.createCommandId()): Promise<SettingDto> {
-    await this.beginConfiguration(`changing ${update.key}`, { admission: settingAdmission(update.key) });
+    const configuration = await this.beginConfiguration(`changing ${update.key}`, { admission: settingAdmission(update.key) });
     try {
       const setting = cloneJson(await this.invokeAgent<SettingDto>("settings.update", { operationId, update: cloneJson(update) }));
       await this.enqueueTransition(() => this.commitCatalogTransition(
@@ -1045,7 +1041,7 @@ export class ManagedInstance {
       }
       throw error;
     } finally {
-      this.endConfiguration();
+      this.endConfiguration(configuration);
     }
   }
 
@@ -1103,7 +1099,7 @@ export class ManagedInstance {
   }
 
   async setSessionName(operationId: string, name: string): Promise<void> {
-    await this.beginConfiguration("naming the session", { admission: "live" });
+    const configuration = await this.beginConfiguration("naming the session", { admission: "live" });
     let runtimeCalled = false;
     try {
       this.sessionNameOperationId = operationId;
@@ -1118,15 +1114,14 @@ export class ManagedInstance {
       throw error;
     } finally {
       if (this.sessionNameOperationId === operationId) this.sessionNameOperationId = undefined;
-      this.endConfiguration();
+      this.endConfiguration(configuration);
     }
   }
 
   async compactSession(operationId: string, customInstructions?: string): Promise<SessionCompactionDto> {
-    await this.beginConfiguration("compacting the session", {
+    const configuration = await this.beginConfiguration("compacting the session", {
       admission: "run_preempting",
       kind: "compaction",
-      committedProjectionReads: "available",
     });
     let runtimeCalled = false;
     try {
@@ -1142,7 +1137,7 @@ export class ManagedInstance {
       throw error;
     } finally {
       if (this.compactionRequestOperationId === operationId) this.compactionRequestOperationId = undefined;
-      this.endConfiguration();
+      this.endConfiguration(configuration);
     }
   }
 
@@ -1165,7 +1160,7 @@ export class ManagedInstance {
   }
 
   async selectModel(provider: string, modelId: string, operationId = this.createCommandId()): Promise<AgentModelState> {
-    await this.beginConfiguration("switching model", { admission: "live" });
+    const configuration = await this.beginConfiguration("switching model", { admission: "live" });
     try {
       const state = await this.invokeAgent<AgentModelState>("model.set", { operationId, provider, modelId });
       await this.enqueueTransition(() => this.commitCatalogTransition(
@@ -1190,12 +1185,12 @@ export class ManagedInstance {
       }
       throw error;
     } finally {
-      this.endConfiguration();
+      this.endConfiguration(configuration);
     }
   }
 
   async setThinkingLevel(level: ThinkingLevel, operationId = this.createCommandId()): Promise<AgentModelState> {
-    await this.beginConfiguration("changing thinking level", { admission: "live" });
+    const configuration = await this.beginConfiguration("changing thinking level", { admission: "live" });
     try {
       const state = await this.invokeAgent<AgentModelState>("thinking.set", { operationId, level });
       await this.enqueueTransition(() => this.commitCatalogTransition(
@@ -1220,7 +1215,7 @@ export class ManagedInstance {
       }
       throw error;
     } finally {
-      this.endConfiguration();
+      this.endConfiguration(configuration);
     }
   }
 
@@ -1242,16 +1237,19 @@ export class ManagedInstance {
     const compacting = this.runtimeCompactionInProgress();
     const manualCompactionPending = this.manualCompactionAdmissionActive();
     const hostQueueCustody = this.hostQueueCustodyActive();
+    const interruptPending = this.commandScheduler.activeCommand("interrupt") !== undefined;
+    const queueMutationPending = this.commandScheduler.activeCommand("control", "queue") !== undefined;
+    const exclusivePending = this.commandScheduler.activeCommand("exclusive") !== undefined;
     if (this.classifyAgentInput(message) === "extension_command") {
       if (inputImages.length > 0 || inputAttachments.length > 0) throw new Error("Registered extension commands do not accept attachments");
-      if (this.commandAbortPending || this.queueMutationPending || (this.configurationPending && !compacting)) {
+      if (interruptPending || queueMutationPending || (exclusivePending && !compacting)) {
         throw new InstanceBusyError(this.id, "submitting an extension command");
       }
       return this.submitExtensionCommand(message, operationId);
     }
-    if (this.commandAbortPending || this.queueMutationPending) throw new InstanceBusyError(this.id, "submitting a prompt");
+    if (interruptPending || queueMutationPending) throw new InstanceBusyError(this.id, "submitting a prompt");
     if (compacting || manualCompactionPending || hostQueueCustody) return this.submitCompactionDeferred(message, delivery, operationId, inputImages, inputAttachments);
-    if (this.configurationPending) throw new InstanceBusyError(this.id, "submitting a prompt");
+    if (exclusivePending) throw new InstanceBusyError(this.id, "submitting a prompt");
 
     if (delivery !== "auto") {
       const running = this.agentState().isStreaming || (this.state.execution === "running" && !this.state.compacting);
@@ -1585,7 +1583,7 @@ export class ManagedInstance {
   }
 
   private manualCompactionAdmissionActive(): boolean {
-    return this.configurationPending && this.configurationKind === "compaction";
+    return this.commandScheduler.activeCommand("exclusive", "compaction") !== undefined;
   }
 
   private hostQueueCustodyActive(): boolean {
@@ -1717,7 +1715,7 @@ export class ManagedInstance {
       (this.compactionQueueDrainTask && this.compactionQueueDrainGeneration === this.runtimeGenerationValue)
       || this.runtimeCompactionInProgress()
       || this.manualCompactionAdmissionActive()
-      || this.queueMutationPending
+      || this.commandScheduler.activeCommand("control", "queue") !== undefined
       || this.stopPromise
     ) return;
     const firstCustodyItem = this.pendingQueueMessages.find((item) => (
@@ -1766,7 +1764,7 @@ export class ManagedInstance {
       && this.state.lifecycle === "active"
       && this.runtimeGenerationValue === generation
       && !this.runtimeCompactionInProgress()
-      && !this.queueMutationPending
+      && this.commandScheduler.activeCommand("control", "queue") === undefined
       && !this.stopPromise
     ) {
       const firstCustodyItem = this.pendingQueueMessages.find((candidate) => (
@@ -2070,17 +2068,13 @@ export class ManagedInstance {
 
   async dequeue(operationId = this.createCommandId()): Promise<QueueDequeueReceipt> {
     this.catalogPort?.assertWritable();
-    this.assertActive();
-    if (this.queueMutationPending || this.commandAbortPending || this.configurationPending) {
-      throw new InstanceBusyError(this.id, "restoring queued messages");
-    }
-    if (this.pendingAdmission) throw new InstanceAdmissionPendingError(this.id);
-    this.queueMutationPending = true;
-    this.queueMutationBoundary = new Promise<void>((resolve) => { this.resolveQueueMutationBoundary = resolve; });
-    const reservation = this.reserveProjectionGate();
+    const lease = this.requireCommandStart(this.commandScheduler.admit({
+      class: "control",
+      kind: "queue",
+    }), "restoring queued messages");
     try {
-      await reservation.entered;
       await this.transitionTail;
+      this.assertCommandCurrent(lease);
       this.catalogPort?.assertWritable();
       this.assertActive();
       const pendingBefore = [...this.pendingQueueMessages];
@@ -2152,32 +2146,37 @@ export class ManagedInstance {
         if (this.receiptBoundaryOperationId === operationId) this.receiptBoundaryOperationId = undefined;
       }
     } finally {
-      reservation.release();
-      this.queueMutationPending = false;
-      this.resolveQueueMutationBoundary?.();
-      this.resolveQueueMutationBoundary = undefined;
-      this.queueMutationBoundary = undefined;
+      lease.release();
     }
   }
 
   async abort(operationId = this.createCommandId()): Promise<void> {
     this.catalogPort?.assertWritable();
-    this.assertActive();
-    if (this.commandAbortPending || this.queueMutationPending) throw new InstanceBusyError(this.id, "aborting the current run");
-    if (this.configurationKind === "navigation") return this.abortTreeNavigation(operationId);
-    if (this.configurationKind === "compaction") return this.abortCompactionConfiguration(operationId);
-    this.commandAbortPending = true;
-    this.commandAbortBoundary = new Promise<void>((resolve) => { this.resolveCommandAbortBoundary = resolve; });
-    const reservation = this.reserveProjectionGate();
+    const decision = this.commandScheduler.admit({ class: "interrupt" });
+    if (decision.kind === "reject") this.requireCommandStart(decision, "aborting the current run");
+    if (decision.kind === "reject") return;
+    const lease = decision.lease;
     try {
-      await reservation.entered;
+      if (decision.kind === "wait") await decision.forCompletion;
       await this.transitionTail;
+      this.assertCommandCurrent(lease);
       this.catalogPort?.assertWritable();
       this.assertActive();
-      if (this.pendingAdmission) throw new InstanceAdmissionPendingError(this.id);
-      if (this.configurationPending) throw new InstanceBusyError(this.id, "aborting the current run");
-      if (this.state.execution !== "running" && !this.agentState().isStreaming) return;
 
+      if (decision.kind === "preempt") {
+        try {
+          const effectStarted = await decision.preempted.effectStarted;
+          if (effectStarted) await this.invokeAgent<void>("command.abort", { operationId });
+          await decision.preempted.completion;
+          await this.transitionTail;
+          return;
+        } catch (error) {
+          if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError || error instanceof AgentUnavailableBeforeEffectError) throw error;
+          throw new RuntimeEffectUnknownError(operationId, error);
+        }
+      }
+
+      if (this.state.execution !== "running" && !this.agentState().isStreaming) return;
       this.receiptBoundaryOperationId = operationId;
       try {
         await this.invokeAgent<void>("command.abort", { operationId });
@@ -2210,50 +2209,7 @@ export class ManagedInstance {
         if (this.receiptBoundaryOperationId === operationId) this.receiptBoundaryOperationId = undefined;
       }
     } finally {
-      reservation.release();
-      this.commandAbortPending = false;
-      this.resolveCommandAbortBoundary?.();
-      this.resolveCommandAbortBoundary = undefined;
-      this.commandAbortBoundary = undefined;
-    }
-  }
-
-  private async abortCompactionConfiguration(operationId: string): Promise<void> {
-    this.commandAbortPending = true;
-    this.commandAbortBoundary = new Promise<void>((resolve) => { this.resolveCommandAbortBoundary = resolve; });
-    const configurationBoundary = this.configurationBoundary;
-    const compactionStartedBoundary = this.compactionStartedBoundary;
-    try {
-      const started = compactionStartedBoundary ? await compactionStartedBoundary : this.compactionActive;
-      if (started && this.compactionActive) await this.invokeAgent<void>("command.abort", { operationId });
-      if (configurationBoundary) await configurationBoundary;
-      await this.transitionTail;
-    } catch (error) {
-      if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError || error instanceof AgentUnavailableBeforeEffectError) throw error;
-      throw new RuntimeEffectUnknownError(operationId, error);
-    } finally {
-      this.commandAbortPending = false;
-      this.resolveCommandAbortBoundary?.();
-      this.resolveCommandAbortBoundary = undefined;
-      this.commandAbortBoundary = undefined;
-    }
-  }
-
-  private async abortTreeNavigation(operationId: string): Promise<void> {
-    this.commandAbortPending = true;
-    this.commandAbortBoundary = new Promise<void>((resolve) => { this.resolveCommandAbortBoundary = resolve; });
-    try {
-      await this.navigationStartedBoundary;
-      await this.invokeAgent<void>("command.abort", { operationId });
-      await this.configurationBoundary;
-    } catch (error) {
-      if (error instanceof CatalogEffectUnknownError || error instanceof CatalogWriteError || error instanceof MutationFaultedError || error instanceof AgentUnavailableBeforeEffectError) throw error;
-      throw new RuntimeEffectUnknownError(operationId, error);
-    } finally {
-      this.commandAbortPending = false;
-      this.resolveCommandAbortBoundary?.();
-      this.resolveCommandAbortBoundary = undefined;
-      this.commandAbortBoundary = undefined;
+      lease.release();
     }
   }
 
@@ -2287,14 +2243,13 @@ export class ManagedInstance {
   }
 
   private async beginStop(operationId: string): Promise<StopReceipt> {
-    const configurationBoundary = this.configurationBoundary;
-    const preemptingCompaction = configurationBoundary !== undefined && this.configurationKind === "compaction";
-    const compactionStartedBoundary = preemptingCompaction ? this.compactionStartedBoundary : undefined;
-    if (configurationBoundary && !preemptingCompaction) await configurationBoundary;
-    const commandAbortBoundary = this.commandAbortBoundary;
-    if (commandAbortBoundary) await commandAbortBoundary;
-    const queueMutationBoundary = this.queueMutationBoundary;
-    if (queueMutationBoundary) await queueMutationBoundary;
+    const exclusive = this.commandScheduler.activeCommand("exclusive");
+    const preemptingCompaction = exclusive?.kind === "compaction";
+    if (exclusive && !preemptingCompaction) await exclusive.completion;
+    const interrupt = this.commandScheduler.activeCommand("interrupt");
+    if (interrupt) await interrupt.completion;
+    const queueMutation = this.commandScheduler.activeCommand("control", "queue");
+    if (queueMutation) await queueMutation.completion;
     const admissionBoundary = this.pendingAdmission?.waitBeforeStop === true
       ? this.pendingAdmission.boundary
       : undefined;
@@ -2323,7 +2278,12 @@ export class ManagedInstance {
       this.stopPromise = undefined;
       throw error;
     }
-    return this.performStop(operationId, admissionBoundary, preemptingCompaction ? configurationBoundary : undefined, compactionStartedBoundary);
+    return this.performStop(
+      operationId,
+      admissionBoundary,
+      preemptingCompaction ? exclusive?.completion : undefined,
+      preemptingCompaction ? exclusive?.effectStarted : undefined,
+    );
   }
 
   recordExtensionError(error: unknown): void {
@@ -2353,7 +2313,7 @@ export class ManagedInstance {
     };
   }
 
-  private async performStop(operationId: string, admissionBoundary?: Promise<void>, configurationBoundary?: Promise<void>, compactionStartedBoundary?: Promise<boolean>): Promise<StopReceipt> {
+  private async performStop(operationId: string, admissionBoundary?: Promise<void>, preemptedCompletion?: Promise<void>, preemptedEffectStarted?: Promise<boolean>): Promise<StopReceipt> {
     const cleanupErrors: string[] = [];
     const pendingQueueItemIds = this.trackedQueueMessages().map((item) => item.queueItemId);
     await this.extensionUi.suspendForHostDrain();
@@ -2368,8 +2328,8 @@ export class ManagedInstance {
       catch (error) { captureCleanupError("preflight", error); }
     }
 
-    if (compactionStartedBoundary) {
-      try { await compactionStartedBoundary; }
+    if (preemptedEffectStarted) {
+      try { await preemptedEffectStarted; }
       catch (error) { captureCleanupError("compactionStart", error); }
     }
 
@@ -2390,8 +2350,8 @@ export class ManagedInstance {
       captureCleanupError("clearQueue", error);
     }
 
-    if (configurationBoundary) {
-      try { await configurationBoundary; }
+    if (preemptedCompletion) {
+      try { await preemptedCompletion; }
       catch (error) { captureCleanupError("configuration", error); }
     }
 
@@ -2479,6 +2439,23 @@ export class ManagedInstance {
       catch (error) { this.runtimeDisposePromise = Promise.reject(error); }
     }
     return this.runtimeDisposePromise;
+  }
+
+  private requireCommandStart(decision: InstanceCommandDecision, action: string): InstanceCommandLease {
+    if (decision.kind === "start") return decision.lease;
+    if (decision.kind === "reject" && decision.reason === "not_active") {
+      throw new InstanceNotActiveError(this.id, decision.lifecycle ?? this.state.lifecycle);
+    }
+    if (decision.kind === "reject" && decision.reason === "input_admission") {
+      throw new InstanceAdmissionPendingError(this.id);
+    }
+    throw new InstanceBusyError(this.id, action);
+  }
+
+  private assertCommandCurrent(lease: InstanceCommandLease): void {
+    if (!lease.current(this.runtimeGenerationValue)) {
+      throw new StaleRuntimeGenerationError(lease.generation, this.runtimeGenerationValue);
+    }
   }
 
   private assertActive(): void {
@@ -2617,57 +2594,25 @@ export class ManagedInstance {
     if (this.replacementIntent === undefined) this.recoverySessionFile = undefined;
   }
 
-  private reserveProjectionGate(): { entered: Promise<void>; release: () => void } {
-    const entered = this.projectionGateTail;
-    let releaseGate!: () => void;
-    const held = new Promise<void>((resolve) => { releaseGate = resolve; });
-    this.projectionGateTail = entered.then(() => held, () => held);
-    let released = false;
-    return {
-      entered,
-      release: () => {
-        if (released) return;
-        released = true;
-        releaseGate();
-      },
-    };
-  }
-
   private async withCommittedProjectionRead<T>(read: () => T): Promise<T> {
     const historyBoundary = this.historyRefreshTail;
-    const readableConfiguration = this.configurationAllowsCommittedReads
-      ? this.configurationBoundary
-      : undefined;
-    if (readableConfiguration !== undefined) {
-      await historyBoundary;
-      if (this.configurationAllowsCommittedReads && this.configurationBoundary === readableConfiguration) {
-        const lifecycle = this.snapshot().lifecycle;
-        if (lifecycle !== "active") throw new InstanceNotActiveError(this.id, lifecycle);
-        return read();
-      }
-    }
-    const reservation = this.reserveProjectionGate();
-    try {
-      await reservation.entered;
-      await historyBoundary;
-      const lifecycle = this.snapshot().lifecycle;
-      if (lifecycle !== "active") throw new InstanceNotActiveError(this.id, lifecycle);
-      return read();
-    } finally {
-      reservation.release();
-    }
+    await historyBoundary;
+    const lifecycle = this.snapshot().lifecycle;
+    if (lifecycle !== "active") throw new InstanceNotActiveError(this.id, lifecycle);
+    return read();
   }
 
   private async withProjectionRead<T>(read: () => Promise<T>): Promise<T> {
-    const reservation = this.reserveProjectionGate();
-    try {
-      await reservation.entered;
-      await this.transitionTail;
-      this.assertActive();
-      return await read();
-    } finally {
-      reservation.release();
+    const committedBoundary = this.transitionTail;
+    await committedBoundary;
+    this.assertActive();
+    const generation = this.runtimeGenerationValue;
+    const result = await read();
+    if (this.runtimeGenerationValue !== generation) {
+      throw new StaleRuntimeGenerationError(generation, this.runtimeGenerationValue);
     }
+    this.assertActive();
+    return result;
   }
 
   private async beginConfiguration(
@@ -2675,74 +2620,29 @@ export class ManagedInstance {
     options: {
       admission?: "idle" | "live" | "run_preempting";
       kind?: "general" | "navigation" | "compaction";
-      committedProjectionReads?: "isolated" | "available";
     } = {},
-  ): Promise<void> {
-    const admission = options.admission ?? "idle";
-    const kind = options.kind ?? "general";
+  ): Promise<InstanceCommandLease> {
     this.catalogPort?.assertWritable();
-    this.assertActive();
-    const agentState = this.agentState();
-    const blockers: string[] = [];
-    if (this.configurationPending) blockers.push(`configurationPending:${this.configurationKind ?? "unknown"}`);
-    if (this.commandAbortPending) blockers.push("commandAbortPending");
-    if (this.queueMutationPending) blockers.push("queueMutationPending");
-    if (this.pendingAdmission !== undefined) blockers.push(`pendingAdmission:waitBeforeStop=${this.pendingAdmission.waitBeforeStop}`);
-    if (this.compactionActive) blockers.push("compactionActive");
-    if (admission !== "live") {
-      if (this.pendingQueueMessages.length > 0) blockers.push(`pendingQueueMessages=${this.pendingQueueMessages.length}`);
-      if (this.inFlightQueueMessages.length > 0) blockers.push(`inFlightQueueMessages=${this.inFlightQueueMessages.length}`);
-      if (this.state.pendingSteering > 0) blockers.push(`pendingSteering=${this.state.pendingSteering}`);
-      if (this.state.pendingFollowUp > 0) blockers.push(`pendingFollowUp=${this.state.pendingFollowUp}`);
-    }
-    if (admission === "idle") {
-      if (this.state.execution === "running") blockers.push("execution=running");
-      if (agentState.isStreaming) blockers.push("agentState.isStreaming=true");
-    }
-    if (blockers.length > 0) {
-      console.error(`[alu-dock instance_busy] instance=${this.id} generation=${this.runtimeGenerationValue} action=${JSON.stringify(action)} admission=${admission} blockers=${blockers.join(",")}`);
-      throw new InstanceBusyError(this.id, action);
-    }
-    this.configurationPending = true;
-    this.configurationKind = kind;
-    this.configurationAllowsCommittedReads = options.committedProjectionReads === "available";
-    this.configurationBoundary = new Promise<void>((resolve) => { this.resolveConfigurationBoundary = resolve; });
-    if (kind === "navigation") {
-      this.navigationStartedBoundary = new Promise<void>((resolve) => { this.resolveNavigationStarted = resolve; });
-    } else if (kind === "compaction") {
-      this.compactionStartedBoundary = new Promise<boolean>((resolve) => { this.resolveCompactionStarted = resolve; });
-    }
-    const reservation = this.reserveProjectionGate();
-    this.releaseConfigurationGate = reservation.release;
+    const lease = this.requireCommandStart(this.commandScheduler.admit({
+      class: "exclusive",
+      kind: options.kind ?? "general",
+      admission: options.admission ?? "idle",
+    }), action);
     try {
-      await reservation.entered;
+      await this.transitionTail;
+      this.assertCommandCurrent(lease);
       this.catalogPort?.assertWritable();
       this.assertActive();
+      return lease;
     } catch (error) {
-      this.endConfiguration();
+      lease.release();
       throw error;
     }
   }
 
-  private endConfiguration(): void {
-    const endedManualCompaction = this.configurationKind === "compaction";
-    this.configurationPending = false;
-    this.configurationAllowsCommittedReads = false;
-    if (this.configurationKind === "navigation") {
-      this.resolveNavigationStarted?.();
-      this.resolveNavigationStarted = undefined;
-      this.navigationStartedBoundary = undefined;
-    } else if (this.configurationKind === "compaction") {
-      this.resolveCompactionStarted?.(false);
-      this.resolveCompactionStarted = undefined;
-      this.compactionStartedBoundary = undefined;
-    }
-    this.configurationKind = undefined;
-    this.releaseConfigurationGate?.();
-    this.releaseConfigurationGate = undefined;
-    this.resolveConfigurationBoundary?.();
-    this.resolveConfigurationBoundary = undefined;
-    this.configurationBoundary = undefined;
+  private endConfiguration(lease: InstanceCommandLease): void {
+    const endedManualCompaction = lease.kind === "compaction";
+    lease.release();
     if (endedManualCompaction && !this.runtimeCompactionInProgress()) {
       this.scheduleCompactionQueueDrain(false);
     }
@@ -2756,7 +2656,7 @@ export class ManagedInstance {
     replace: () => Promise<T>,
     validateTarget?: () => void | Promise<void>,
   ): Promise<T> {
-    await this.beginConfiguration(action);
+    const configuration = await this.beginConfiguration(action);
     try {
       await validateTarget?.();
       const startedAt = this.timestamp();
@@ -2813,7 +2713,7 @@ export class ManagedInstance {
       }
       return result;
     } finally {
-      this.endConfiguration();
+      this.endConfiguration(configuration);
     }
   }
 
@@ -3372,8 +3272,7 @@ export class ManagedInstance {
 
   private startCompactionBoundary(operationId?: string): void {
     if (operationId !== undefined) this.compactionOperationId = operationId;
-    this.resolveCompactionStarted?.(true);
-    this.resolveCompactionStarted = undefined;
+    this.commandScheduler.markEffectStarted("exclusive", "compaction");
     if (this.compactionActive) return;
     this.compactionActive = true;
     this.compactionBoundary = new Promise<void>((resolve) => { this.resolveCompactionBoundary = resolve; });

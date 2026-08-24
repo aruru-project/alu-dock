@@ -1,0 +1,185 @@
+import type { InstanceLifecycle } from "./instance-dto.js";
+
+export type ExclusiveCommandKind = "general" | "navigation" | "compaction";
+export type ExclusiveAdmission = "idle" | "live" | "run_preempting";
+
+export type InstanceCommandRequest =
+  | { class: "exclusive"; kind: ExclusiveCommandKind; admission: ExclusiveAdmission }
+  | { class: "interrupt" }
+  | { class: "control"; kind: "queue" };
+
+export interface InstanceCommandFacts {
+  acceptingCommands: boolean;
+  lifecycle: InstanceLifecycle;
+  runtimeGeneration: number;
+  executionRunning: boolean;
+  runtimeStreaming: boolean;
+  compactionActive: boolean;
+  inputAdmissionActive: boolean;
+  pendingQueueMessages: number;
+  inFlightQueueMessages: number;
+  pendingSteering: number;
+  pendingFollowUp: number;
+}
+
+interface ActiveCommand {
+  token: symbol;
+  request: InstanceCommandRequest;
+  generation: number;
+  completion: Promise<void>;
+  resolveCompletion: () => void;
+  effectStarted: Promise<boolean>;
+  resolveEffectStarted: (started: boolean) => void;
+}
+
+export interface ActiveCommandView {
+  kind?: ExclusiveCommandKind | "queue";
+  completion: Promise<void>;
+  effectStarted: Promise<boolean>;
+}
+
+export class InstanceCommandLease {
+  private released = false;
+  private started = false;
+
+  constructor(
+    private readonly scheduler: InstanceCommandScheduler,
+    private readonly command: ActiveCommand,
+  ) {}
+
+  get generation(): number { return this.command.generation; }
+  get kind(): ExclusiveCommandKind | "queue" | undefined {
+    return "kind" in this.command.request ? this.command.request.kind : undefined;
+  }
+
+  markEffectStarted(): void {
+    if (this.released || this.started || !this.scheduler.current(this.command)) return;
+    this.started = true;
+    this.command.resolveEffectStarted(true);
+  }
+
+  current(runtimeGeneration: number): boolean {
+    return !this.released && runtimeGeneration === this.command.generation && this.scheduler.current(this.command);
+  }
+
+  release(): void {
+    if (this.released) return;
+    this.released = true;
+    if (!this.started) this.command.resolveEffectStarted(false);
+    this.scheduler.release(this.command);
+  }
+}
+
+export type InstanceCommandDecision =
+  | { kind: "start"; lease: InstanceCommandLease }
+  | { kind: "wait"; lease: InstanceCommandLease; forCompletion: Promise<void> }
+  | { kind: "preempt"; lease: InstanceCommandLease; preempted: ActiveCommandView }
+  | { kind: "reject"; reason: "not_active" | "busy" | "input_admission"; lifecycle?: InstanceLifecycle };
+
+/**
+ * Synchronous admission authority for one LocalInstance.
+ * Long Worker effects run outside this object; leases retain completion custody.
+ */
+export class InstanceCommandScheduler {
+  private readonly active = new Map<symbol, ActiveCommand>();
+
+  constructor(private readonly facts: () => InstanceCommandFacts) {}
+
+  admit(request: InstanceCommandRequest): InstanceCommandDecision {
+    const facts = this.facts();
+    if (!facts.acceptingCommands) return { kind: "reject", reason: "not_active", lifecycle: facts.lifecycle };
+
+    const exclusive = this.find("exclusive");
+    const interrupt = this.find("interrupt");
+    const queue = this.find("control", "queue");
+
+    if (request.class === "exclusive") {
+      if (exclusive || interrupt || queue || facts.inputAdmissionActive || facts.compactionActive) {
+        return { kind: "reject", reason: "busy" };
+      }
+      if (request.admission !== "live" && this.hasQueueCustody(facts)) return { kind: "reject", reason: "busy" };
+      if (request.admission === "idle" && (facts.executionRunning || facts.runtimeStreaming)) {
+        return { kind: "reject", reason: "busy" };
+      }
+      return { kind: "start", lease: this.activate(request, facts.runtimeGeneration) };
+    }
+
+    if (request.class === "control") {
+      if (exclusive || interrupt || queue) return { kind: "reject", reason: "busy" };
+      if (facts.inputAdmissionActive) return { kind: "reject", reason: "input_admission" };
+      return { kind: "start", lease: this.activate(request, facts.runtimeGeneration) };
+    }
+
+    if (interrupt || queue) return { kind: "reject", reason: "busy" };
+    if (exclusive?.request.class === "exclusive") {
+      const lease = this.activate(request, facts.runtimeGeneration);
+      const view = this.view(exclusive);
+      if (exclusive.request.kind === "navigation" || exclusive.request.kind === "compaction") {
+        return { kind: "preempt", lease, preempted: view };
+      }
+      return { kind: "wait", lease, forCompletion: exclusive.completion };
+    }
+    if (facts.inputAdmissionActive) return { kind: "reject", reason: "input_admission" };
+    return { kind: "start", lease: this.activate(request, facts.runtimeGeneration) };
+  }
+
+  activeCommand(commandClass: InstanceCommandRequest["class"], kind?: ExclusiveCommandKind | "queue"): ActiveCommandView | undefined {
+    const command = this.find(commandClass, kind);
+    return command ? this.view(command) : undefined;
+  }
+
+
+  markEffectStarted(commandClass: InstanceCommandRequest["class"], kind?: ExclusiveCommandKind | "queue"): void {
+    this.find(commandClass, kind)?.resolveEffectStarted(true);
+  }
+
+  current(command: ActiveCommand): boolean {
+    return this.active.get(command.token) === command;
+  }
+
+  release(command: ActiveCommand): void {
+    if (!this.current(command)) return;
+    this.active.delete(command.token);
+    command.resolveCompletion();
+  }
+
+  private activate(request: InstanceCommandRequest, generation: number): InstanceCommandLease {
+    const token = Symbol(request.class);
+    let resolveCompletion!: () => void;
+    let resolveEffectStarted!: (started: boolean) => void;
+    const command: ActiveCommand = {
+      token,
+      request,
+      generation,
+      completion: new Promise<void>((resolve) => { resolveCompletion = resolve; }),
+      resolveCompletion: () => resolveCompletion(),
+      effectStarted: new Promise<boolean>((resolve) => { resolveEffectStarted = resolve; }),
+      resolveEffectStarted: (started) => resolveEffectStarted(started),
+    };
+    this.active.set(token, command);
+    return new InstanceCommandLease(this, command);
+  }
+
+  private find(commandClass: InstanceCommandRequest["class"], kind?: ExclusiveCommandKind | "queue"): ActiveCommand | undefined {
+    for (const command of this.active.values()) {
+      if (command.request.class !== commandClass) continue;
+      if (kind === undefined || ("kind" in command.request && command.request.kind === kind)) return command;
+    }
+    return undefined;
+  }
+
+  private view(command: ActiveCommand): ActiveCommandView {
+    return {
+      ...("kind" in command.request ? { kind: command.request.kind } : {}),
+      completion: command.completion,
+      effectStarted: command.effectStarted,
+    };
+  }
+
+  private hasQueueCustody(facts: InstanceCommandFacts): boolean {
+    return facts.pendingQueueMessages > 0
+      || facts.inFlightQueueMessages > 0
+      || facts.pendingSteering > 0
+      || facts.pendingFollowUp > 0;
+  }
+}
