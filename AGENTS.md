@@ -44,6 +44,7 @@ Hub TUI / Work TUI / Rails-WebUI / future clients
 
 | 范围 | 文档 |
 |---|---|
+| Instance identity、位置透明性与命令接纳 | [`docs/agent_maps/instance.md`](docs/agent_maps/instance.md) |
 | Protocol V2、Host、DockClient、CLI、catalog | [`docs/agent_maps/control.md`](docs/agent_maps/control.md) |
 | Agent Worker、Pi adapter、session 与 Extension UI | [`docs/agent_maps/runtime.md`](docs/agent_maps/runtime.md) |
 | Pi SDK 依赖升级与独立兼容门 | [`docs/pi-sdk-upgrades.md`](docs/pi-sdk-upgrades.md) |
