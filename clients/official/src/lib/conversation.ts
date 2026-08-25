@@ -14,7 +14,7 @@ type ToolItem = Extract<ConversationProcessItem, { kind: 'tool' }>
 type ImageItem = Extract<ConversationProcessItem, { kind: 'image' }>
 interface ToolProjection {
   item: ToolItem
-  argsText?: string
+  args?: unknown
   outputText?: string
   image?: ImageItem
   omitted: Set<string>
@@ -27,6 +27,59 @@ interface RecordGroup {
 const COMMAND_PREVIEW_CHARS = 320
 const CONTENT_PREVIEW_CHARS = 280
 const EDIT_SIDE_PREVIEW_CHARS = 120
+const SUPERSEDED_TOOL_EVENT_TYPES = new Set(['tool.args_updated', 'tool.output_updated'])
+
+/** Live tool updates contain the complete current value. Keep only the newest
+ *  value of each kind per tool while preserving the latest event sequence. */
+export function foldLiveToolUpdate(events: ProjectedEvent[], event: ProjectedEvent): boolean {
+  if (!SUPERSEDED_TOOL_EVENT_TYPES.has(event.eventType)) return false
+  const toolCallId = typeof event.data.toolCallId === 'string' ? event.data.toolCallId : ''
+  if (!toolCallId) return false
+  let superseded = -1
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const candidate = events[index]!
+    if (candidate.eventType === event.eventType && candidate.data.toolCallId === toolCallId) {
+      superseded = index
+      break
+    }
+  }
+  if (superseded >= 0) events.splice(superseded, 1)
+  events.push(event)
+  return true
+}
+
+export function applyLiveToolUpdateToProjection(item: ToolItem, event: ProjectedEvent): boolean {
+  const toolCallId = typeof event.data.toolCallId === 'string' ? event.data.toolCallId : ''
+  if (!toolCallId || item.toolCallId !== toolCallId) return false
+  if (event.eventType === 'tool.args_updated') {
+    item.preview = standardToolCallPreview(item.name, event.data.args)
+    if (item.name !== 'show_image') item.detailArgs = event.data.args
+  } else if (event.eventType === 'tool.output_updated') {
+    const hasImage = Array.isArray(event.data.content) && event.data.content.some((block) => (
+      isRecord(block) && block.type === 'image'
+    ))
+    if (item.name === 'show_image' || hasImage || event.data.publishedFile !== undefined) return false
+    if (typeof event.data.text === 'string') item.detailOutputText = event.data.text
+  } else {
+    return false
+  }
+  if (Array.isArray(event.data.omittedFields)) {
+    item.detailOmittedFields = [...new Set([
+      ...(item.detailOmittedFields ?? []),
+      ...event.data.omittedFields.filter((field): field is string => typeof field === 'string' && Boolean(field)),
+    ])]
+  }
+  return true
+}
+
+export function toolDetailText(item: ToolItem): string {
+  if (item.detailArgs === undefined && item.detailOutputText === undefined && !item.detailOmittedFields?.length) return item.detail ?? ''
+  const sections: string[] = []
+  if (item.detailArgs !== undefined) sections.push(`参数\n${JSON.stringify(item.detailArgs, null, 2)}`)
+  if (item.detailOutputText !== undefined) sections.push(`结果\n${item.detailOutputText}`)
+  if (item.detailOmittedFields?.length) sections.push(`未载入内容\n${item.detailOmittedFields.join('\n')}`)
+  return sections.join('\n\n')
+}
 
 export function standardToolCallPreview(toolName: string, args: unknown): ToolCallPreview | undefined {
   if (!isRecord(args)) return undefined
@@ -47,7 +100,7 @@ export function standardToolCallPreview(toolName: string, args: unknown): ToolCa
     return { title: args.path, body: range || undefined, variant: 'path', truncated: false }
   }
   if (toolName === 'write' && typeof args.path === 'string' && typeof args.content === 'string') {
-    const content = textPrefix(args.content, CONTENT_PREVIEW_CHARS, 4)
+    const content = textTail(args.content, CONTENT_PREVIEW_CHARS, 4)
     return { title: args.path, body: content.text, variant: 'content', truncated: content.truncated }
   }
   if (toolName === 'edit' && typeof args.path === 'string' && Array.isArray(args.edits) && args.edits.length > 0) {
@@ -66,15 +119,29 @@ export function standardToolCallPreview(toolName: string, args: unknown): ToolCa
 }
 
 function textPrefix(value: string, maximumCharacters: number, maximumLines: number) {
-  const characters = Array.from(value)
+  const window = value.slice(0, maximumCharacters * 2)
+  const characters = Array.from(window)
   let text = characters.slice(0, maximumCharacters).join('')
-  let truncated = characters.length > maximumCharacters
+  let truncated = window.length < value.length || characters.length > maximumCharacters
   const lines = text.split('\n')
   if (lines.length > maximumLines) {
     text = lines.slice(0, maximumLines).join('\n')
     truncated = true
   }
   return { text: truncated ? `${text}…` : text, truncated }
+}
+
+function textTail(value: string, maximumCharacters: number, maximumLines: number) {
+  const window = value.slice(-(maximumCharacters * 2 + 2))
+  const characters = Array.from(window)
+  let text = characters.slice(-maximumCharacters).join('')
+  let truncated = window.length < value.length || characters.length > maximumCharacters
+  const lines = text.split('\n')
+  if (lines.length > maximumLines) {
+    text = lines.slice(-maximumLines).join('\n')
+    truncated = true
+  }
+  return { text: truncated ? `…${text}` : text, truncated }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -256,7 +323,7 @@ export function projectConversation(bootstrap: ConversationBootstrap, options: C
         if (data.toolName) tool.item.name = String(data.toolName)
         if (data.args !== undefined) {
           tool.item.preview = standardToolCallPreview(tool.item.name, data.args)
-          if (tool.item.name !== 'show_image') tool.argsText = JSON.stringify(data.args, null, 2)
+          if (tool.item.name !== 'show_image') tool.args = data.args
         }
         if (typeof data.text === 'string' && tool.item.name !== 'show_image') tool.outputText = data.text
         addOmitted(tool, data.omittedFields)
@@ -447,7 +514,7 @@ function appendBlock(block: ContentBlock, id: string, groupId: string, output: C
   } else if (block.type === 'tool_call') {
     const tool = ensureTool(tools, output, block.toolCallId, block.toolName, groupId, id)
     tool.item.preview = standardToolCallPreview(block.toolName, block.args)
-    if (block.toolName !== 'show_image') tool.argsText = JSON.stringify(block.args, null, 2)
+    if (block.toolName !== 'show_image') tool.args = block.args
     addOmitted(tool, block.omittedFields)
     renderToolDetail(tool)
   } else if (block.type === 'tool_result') {
@@ -492,7 +559,7 @@ function applyLiveContentBlock(
   if (block.type === 'tool_call') {
     tool.item.name = block.toolName || tool.item.name
     tool.item.preview = standardToolCallPreview(block.toolName, block.args)
-    if (block.toolName !== 'show_image') tool.argsText = JSON.stringify(block.args, null, 2)
+    if (block.toolName !== 'show_image') tool.args = block.args
   } else {
     tool.item.name = block.toolName || tool.item.name
     tool.item.status = block.isError ? 'error' : 'done'
@@ -515,7 +582,7 @@ function ensureTool(
 ) {
   let tool = tools.get(toolCallId)
   if (tool) return tool
-  const item: ToolItem = { id, kind: 'tool', groupId, name: toolName || 'tool', summary: '正在运行工具', status: 'running', detail: '' }
+  const item: ToolItem = { id, kind: 'tool', groupId, toolCallId, name: toolName || 'tool', summary: '正在运行工具', status: 'running' }
   tool = { item, omitted: new Set() }
   tools.set(toolCallId, tool)
   output.push(item)
@@ -610,11 +677,9 @@ function addOmitted(tool: ToolProjection, value: unknown) {
 }
 
 function renderToolDetail(tool: ToolProjection) {
-  const sections: string[] = []
-  if (tool.argsText !== undefined) sections.push(`参数\n${tool.argsText}`)
-  if (tool.outputText !== undefined) sections.push(`结果\n${tool.outputText}`)
-  if (tool.omitted.size) sections.push(`未载入内容\n${[...tool.omitted].join('\n')}`)
-  tool.item.detail = sections.join('\n\n')
+  tool.item.detailArgs = tool.args
+  tool.item.detailOutputText = tool.outputText
+  tool.item.detailOmittedFields = [...tool.omitted]
 }
 
 function projectUserMessage(blocks: ContentBlock[], attachments: AttachmentDto[], id: string, time: string, historyEntryId?: string) {

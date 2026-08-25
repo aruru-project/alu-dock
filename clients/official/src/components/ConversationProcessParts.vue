@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, reactive } from 'vue'
 import type { ConversationImageResource, ConversationProcessItem } from '../lib/types'
+import { toolDetailText } from '../lib/conversation'
 import ConversationImage from './ConversationImage.vue'
 
 type ImagePart = Extract<ConversationProcessItem, { kind: 'image' }>
@@ -60,7 +61,7 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
       </div>
       <details :open="toolOpen(part.id)" @toggle="emit('toolToggle', part.id, $event)">
         <summary><span>参数与结果</span><span class="tool-disclosure" aria-hidden="true">›</span></summary>
-        <pre v-if="toolOpen(part.id)" class="tool-output msg-tool-output">{{ part.detail }}</pre>
+        <pre v-if="toolOpen(part.id)" class="tool-output msg-tool-output">{{ toolDetailText(part) }}</pre>
       </details>
     </div>
     <ConversationImage v-else-if="part.kind === 'image'" :part="part" :resource="imageResource(part)" @request="emit('imageRequest', $event)" @preview="emit('imagePreview', $event)" @failed="emit('imageFailed', $event)" />

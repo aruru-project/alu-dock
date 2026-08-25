@@ -75,7 +75,7 @@ import {
   verifyHostEndpoint,
 } from './lib/bridge'
 import type { CreateWorkContinuation, SessionContext } from './lib/bridge'
-import { foldLiveDelta, hasCompactConversationContent, liveDeltaKey, liveProjectionTargetKey, mergeHydratedConversationRecords, projectConversation } from './lib/conversation'
+import { applyLiveToolUpdateToProjection, foldLiveDelta, foldLiveToolUpdate, hasCompactConversationContent, liveDeltaKey, liveProjectionTargetKey, mergeHydratedConversationRecords, projectConversation } from './lib/conversation'
 import { assistantMarkdownSource } from './lib/conversationPresentation'
 import { appendRestoredQueue, attachmentUploadMatches, attachmentUploadTarget, attachmentsAfterSubmit, bindLocalAttachment, displayedConversationImageResource, moveAttachmentPreviewResource } from './lib/attachmentDraft'
 import { subhostMachineName } from './lib/machines'
@@ -99,6 +99,7 @@ import {
   formatContextUsage,
   formatTokenCount,
   FollowActivationCoordinator,
+  outputFollowAfterScroll,
   outputIsNearBottom,
   type FollowConnectionState,
   type FollowConnectionStatus,
@@ -185,6 +186,7 @@ const reopenTrustContinuation = ref<CreateWorkContinuation | null>(null)
 const reconcilingReopenWorkId = ref('')
 const realConversation = ref<ConversationItem[]>([])
 type ConversationImagePart = Extract<ConversationProcessItem, { kind: 'image' }>
+type ConversationToolPart = Extract<ConversationProcessItem, { kind: 'tool' }>
 type ImagePreview =
   | { kind: 'conversation'; imageKey: string; url: string; name: string }
   | { kind: 'attachment'; attachmentKey: string; url: string; name: string }
@@ -308,8 +310,12 @@ const hostNameError = ref('')
 const hostNameSaved = ref(false)
 const unlisteners: UnlistenFn[] = []
 let projectionFrame = 0
+let fullConversationProjectionState: ConversationBootstrap | null = null
+const pendingLiveToolProjectionEvents = new Map<string, { state: ConversationBootstrap; event: ProjectedEvent }>()
 let outputScrollFrame = 0
+let outputScrollForced = false
 let autoFollowOutput = true
+let lastOutputScrollTop: number | null = null
 let reconnectTimer = 0
 let conversationLoadEpoch = 0
 let historyLoadEpoch = 0
@@ -789,6 +795,8 @@ watch(
       submissionError.value = null
       resetConversationImages()
       resetAttachmentPreviews()
+      resetConversationProjectionSchedule()
+      resetOutputFollow()
       messageTextView.value = null
       commandCatalogStore.invalidate()
     }
@@ -2191,10 +2199,42 @@ function showAgentActivity(workId: string) {
   scrollOutputToBottom(true)
 }
 
+function resetConversationProjectionSchedule() {
+  if (projectionFrame) window.cancelAnimationFrame(projectionFrame)
+  projectionFrame = 0
+  fullConversationProjectionState = null
+  pendingLiveToolProjectionEvents.clear()
+  liveTextTargets.clear()
+  liveToolTargets.clear()
+}
+
+function resetOutputFollow() {
+  if (outputScrollFrame) window.cancelAnimationFrame(outputScrollFrame)
+  outputScrollFrame = 0
+  outputScrollForced = false
+  autoFollowOutput = true
+  lastOutputScrollTop = null
+  outputAwayFromBottom.value = false
+}
+
 function handleOutputScroll() {
   const surface = output.value
   if (!surface) return
-  autoFollowOutput = outputIsNearBottom(surface.scrollHeight, surface.scrollTop, surface.clientHeight)
+  const nextTop = surface.scrollTop
+  const previousTop = lastOutputScrollTop
+  const movedUp = previousTop !== null && nextTop < previousTop
+  lastOutputScrollTop = nextTop
+  autoFollowOutput = outputFollowAfterScroll(
+    autoFollowOutput,
+    previousTop,
+    nextTop,
+    outputIsNearBottom(surface.scrollHeight, nextTop, surface.clientHeight),
+  )
+  if (movedUp) {
+    if (outputScrollFrame) window.cancelAnimationFrame(outputScrollFrame)
+    outputScrollFrame = 0
+    outputScrollForced = false
+  }
   outputAwayFromBottom.value = !autoFollowOutput
 }
 
@@ -2314,6 +2354,16 @@ function applyConversationProjection(state: ConversationBootstrap) {
     if (key) targets.set(key, item)
   }
   liveTextTargets = targets
+  const toolTargets = new Map<string, ConversationToolPart>()
+  for (const item of realConversation.value) {
+    if (item.kind === 'tool' && item.toolCallId) toolTargets.set(item.toolCallId, item)
+    if (item.kind === 'record') {
+      for (const part of item.parts) {
+        if (part.kind === 'tool' && part.toolCallId) toolTargets.set(part.toolCallId, part)
+      }
+    }
+  }
+  liveToolTargets = toolTargets
   pruneImageResources(projected)
 }
 
@@ -2322,6 +2372,7 @@ function applyConversationProjection(state: ConversationBootstrap) {
  * 会话重载/换 Work 会换新 state 对象，缓存自动随之作废。 */
 const liveStreamCaches = new WeakMap<ConversationBootstrap, { fold: Map<string, ProjectedEvent>; streaming: Set<string> }>()
 let liveTextTargets = new Map<string, ConversationItem>()
+let liveToolTargets = new Map<string, ConversationToolPart>()
 
 function liveStreamCache(state: ConversationBootstrap) {
   let cache = liveStreamCaches.get(state)
@@ -2480,27 +2531,59 @@ async function saveOpenImage() {
 }
 
 function scrollOutputToBottom(force = false) {
+  if (force) outputScrollForced = true
   if (!force && !autoFollowOutput) return
   if (outputScrollFrame) return
   outputScrollFrame = window.requestAnimationFrame(() => {
     outputScrollFrame = 0
+    const forced = outputScrollForced
+    outputScrollForced = false
+    if (!forced && !autoFollowOutput) return
     const surface = output.value
     if (!surface) return
     surface.scrollTop = surface.scrollHeight
+    lastOutputScrollTop = surface.scrollTop
     autoFollowOutput = true
     outputAwayFromBottom.value = false
   })
 }
 
-function scheduleConversationProjection() {
+function requestConversationProjectionFrame() {
   if (projectionFrame) return
   projectionFrame = window.requestAnimationFrame(() => {
     projectionFrame = 0
-    if (conversationState.value) {
-      applyConversationProjection(conversationState.value)
-      scrollOutputToBottom()
+    const state = conversationState.value
+    const requiresFullProjection = fullConversationProjectionState === state
+    const toolUpdates = [...pendingLiveToolProjectionEvents.values()]
+      .filter((pending) => pending.state === state)
+      .map((pending) => pending.event)
+    fullConversationProjectionState = null
+    pendingLiveToolProjectionEvents.clear()
+    if (!state || (!requiresFullProjection && !toolUpdates.length)) return
+    if (requiresFullProjection || toolUpdates.some((event) => {
+      const toolCallId = typeof event.data.toolCallId === 'string' ? event.data.toolCallId : ''
+      const target = toolCallId ? liveToolTargets.get(toolCallId) : undefined
+      return !target || !applyLiveToolUpdateToProjection(target, event)
+    })) {
+      applyConversationProjection(state)
     }
+    scrollOutputToBottom()
   })
+}
+
+function scheduleConversationProjection(state: ConversationBootstrap) {
+  fullConversationProjectionState = state
+  requestConversationProjectionFrame()
+}
+
+function scheduleLiveToolProjection(state: ConversationBootstrap, event: ProjectedEvent) {
+  const toolCallId = typeof event.data.toolCallId === 'string' ? event.data.toolCallId : ''
+  if (!toolCallId) {
+    scheduleConversationProjection(state)
+    return
+  }
+  pendingLiveToolProjectionEvents.set(`${event.eventType}:${toolCallId}`, { state, event })
+  requestConversationProjectionFrame()
 }
 
 async function applyFollowEvent(payload: { hostId: string; selectionGeneration: number; instanceId: string; subscriptionId: string; event: ProjectedEvent }) {
@@ -2540,7 +2623,7 @@ async function applyFollowEvent(payload: { hostId: string; selectionGeneration: 
   if (commandOnlyNotification) return
   if (payload.event.eventType === 'message.delta') {
     foldLiveDelta(state.activeEvents, liveStreamCache(state).fold, payload.event)
-    if (!applyLiveDeltaToProjection(state, payload.event)) scheduleConversationProjection()
+    if (!applyLiveDeltaToProjection(state, payload.event)) scheduleConversationProjection(state)
     return
   }
   if (payload.event.eventType === 'message.completed') {
@@ -2553,8 +2636,12 @@ async function applyFollowEvent(payload: { hostId: string; selectionGeneration: 
   } else if (payload.event.eventType === 'run.settled') {
     liveStreamCache(state).streaming.clear()
   }
-  state.activeEvents.push(payload.event)
-  if (reduced.conversationChanged || payload.event.eventType === 'run.started') scheduleConversationProjection()
+  const foldedToolUpdate = foldLiveToolUpdate(state.activeEvents, payload.event)
+  if (!foldedToolUpdate) state.activeEvents.push(payload.event)
+  if (reduced.conversationChanged || payload.event.eventType === 'run.started') {
+    if (foldedToolUpdate) scheduleLiveToolProjection(state, payload.event)
+    else scheduleConversationProjection(state)
+  }
 }
 
 async function resumeConversationFollow(instanceId: string): Promise<boolean> {
@@ -2804,8 +2891,7 @@ async function mergeCompactionSummary(instanceId: string) {
     const fresh = bootstrap.records.filter((record) => !existing.has(record.entryId)
       && (record.kind === 'compaction_summary' || record.kind === 'branch_summary'))
     if (!fresh.length) return
-    const surface = output.value
-    const stickToBottom = !!surface && outputIsNearBottom(surface.scrollHeight, surface.scrollTop, surface.clientHeight)
+    const stickToBottom = autoFollowOutput
     state.records = [...state.records, ...fresh]
     if (bootstrap.historyRevision > state.historyRevision) state.historyRevision = bootstrap.historyRevision
     applyConversationProjection(state)
@@ -2861,7 +2947,9 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
     // Follow 已接受与 bootstrap 相同的 cursor，后续事件已缓冲；此时即可原子替换
     // 旧会话，不必让用户继续等实时连接握手与 Extension UI 恢复。
     if (preserveCurrent && !await extensionUi.clear()) return false
-    publishConversationBootstrap(capturedHost, bootstrap)
+    const preservedAnchor = preserveCurrent ? captureOutputAnchor() : null
+    const preservedAutoFollow = preserveCurrent ? autoFollowOutput : true
+    await publishConversationBootstrap(capturedHost, bootstrap, preservedAnchor, preservedAutoFollow)
     await connected
     if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
     if (!await extensionUi.bootstrap(capturedHost, subscriptionId, bootstrap)) return false
@@ -2996,7 +3084,7 @@ async function runHistoryHydration(job: HistoryHydrationJob) {
       return
     }
     const anchor = captureOutputAnchor()
-    const stickToBottom = !!anchor && outputIsNearBottom(anchor.surface.scrollHeight, anchor.surface.scrollTop, anchor.surface.clientHeight)
+    const stickToBottom = autoFollowOutput
     job.state.records = mergeHydratedConversationRecords(job.state.records, [completed.record])
     failedHistoryHydrations.delete(job.entryId)
     setHistoryEntryError(job.entryId)
@@ -3066,7 +3154,7 @@ async function loadRecentHistoryPage(context: HostContext, state: ConversationBo
       return
     }
     const anchor = captureOutputAnchor()
-    const stickToBottom = !!anchor && outputIsNearBottom(anchor.surface.scrollHeight, anchor.surface.scrollTop, anchor.surface.clientHeight)
+    const stickToBottom = autoFollowOutput
     const existing = new Map(state.records.map((record) => [record.entryId, record]))
     const pageIds = new Set(page.records.map((record) => record.entryId))
     state.records = [
@@ -3088,14 +3176,21 @@ async function loadRecentHistoryPage(context: HostContext, state: ConversationBo
   }
 }
 
-function publishConversationBootstrap(context: HostContext, bootstrap: ConversationBootstrap) {
+async function publishConversationBootstrap(
+  context: HostContext,
+  bootstrap: ConversationBootstrap,
+  preservedAnchor: OutputAnchor | null,
+  preservedAutoFollow: boolean,
+) {
+  resetConversationProjectionSchedule()
   app.applyWorkSnapshot(bootstrap.instance, context)
   syncImageDomain(context, bootstrap.instance.id, bootstrap.cursor.hostEpoch, bootstrap.cursor.runtimeGeneration)
   conversationHistoryRevision.value = null
   historyCursor.value = null
   conversationState.value = bootstrap
   applyConversationProjection(bootstrap)
-  scrollOutputToBottom(true)
+  if (preservedAnchor && !preservedAutoFollow) await restoreOutputAnchor(preservedAnchor, false)
+  else scrollOutputToBottom(true)
   historyTruncated.value = bootstrap.historyTruncated
   historyPageError.value = null
   void loadRecentHistoryPage(context, bootstrap, conversationLoadEpoch)

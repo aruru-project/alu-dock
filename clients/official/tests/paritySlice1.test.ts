@@ -1,9 +1,9 @@
 import { strict as assert } from 'node:assert'
 import { computed, nextTick, ref, watch } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
-import { hasCompactConversationContent, projectConversation } from '../src/lib/conversation.ts'
+import { hasCompactConversationContent, projectConversation, toolDetailText } from '../src/lib/conversation.ts'
 import { reduceLiveEvent, type LiveProjectionState } from '../src/lib/liveReducer.ts'
-import { conversationBoundaryKey, conversationSwapIsCorrelated, draftAfterSubmit, FollowActivationCoordinator, formatContextUsage, formatTokenCount, outputIsNearBottom, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../src/lib/uiBoundaries.ts'
+import { conversationBoundaryKey, conversationSwapIsCorrelated, draftAfterSubmit, FollowActivationCoordinator, formatContextUsage, formatTokenCount, outputFollowAfterScroll, outputIsNearBottom, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../src/lib/uiBoundaries.ts'
 import { userErrorMessage } from '../src/lib/userError.ts'
 import type { ConversationBootstrap, ProjectedEvent, Work } from '../src/lib/types.ts'
 import { useCommandConsoleStore } from '../src/stores/command-console.ts'
@@ -89,7 +89,7 @@ const afterText = groupedProjection.find((item) => item.kind === 'assistant' && 
 assert.ok(callText?.kind === 'assistant' && callTool?.kind === 'tool' && afterText?.kind === 'assistant')
 assert.equal(callText.groupId, callTool.groupId, 'a tool result stays inside the assistant record that formally owns its toolCallId')
 assert.notEqual(callText.groupId, afterText.groupId, 'a later assistant record keeps its own WebConsole message row')
-assert.match(callTool.detail || '', /参数[\s\S]*结果/)
+assert.match(toolDetailText(callTool), /参数[\s\S]*结果/)
 assert.deepEqual(callTool.preview, { title: 'README.md', body: undefined, variant: 'path', truncated: false }, '标准工具主要参数进入收起态投影')
 
 const publishedFile = { presentation: 'image' as const, fileRef: 'file-1', name: 'result.png', sizeBytes: 5, mediaType: 'image/png' }
@@ -127,7 +127,7 @@ const showImageTool = imageProjection.find((item) => item.kind === 'tool' && ite
 assert.ok(publishedImage?.kind === 'image' && publishedImage.source?.type === 'published' && showImageTool?.kind === 'tool')
 assert.deepEqual(publishedImage.source.file, publishedFile, 'path-free published metadata reaches the image renderer unchanged')
 assert.equal(publishedImage.groupId, showImageTool.groupId, 'show_image remains in its formally owned Assistant group')
-assert.doesNotMatch(showImageTool.detail || '', /private|generated|result\.png/, 'the Host-local show_image source path is not displayed')
+assert.doesNotMatch(toolDetailText(showImageTool), /private|generated|result\.png/, 'the Host-local show_image source path is not displayed')
 assert.ok(nativeImage?.kind === 'image' && nativeImage.source?.type === 'conversation' && nativeImage.source.contentRef === 'image-1')
 const historicalUserImage = imageProjection.find((item) => item.kind === 'user')
 assert.ok(historicalUserImage?.kind === 'user')
@@ -251,6 +251,9 @@ assert.equal(formatTokenCount(null), '—')
 assert.equal(formatContextUsage({ tokens: 245_000, contextWindow: 372_000, percent: 65.9 }), '245k/372k (65.9%)', 'navbar metrics preserve WebConsole density and precision')
 assert.equal(outputIsNearBottom(1_000, 701, 300), true, 'new output follows while the reader remains near the bottom')
 assert.equal(outputIsNearBottom(1_000, 500, 300), false, 'intentional history scrolling is not stolen by new output')
+assert.equal(outputFollowAfterScroll(true, 701, 700, true), false, 'even a small upward user scroll immediately suspends bottom following')
+assert.equal(outputFollowAfterScroll(false, 700, 650, false), false, 'streaming updates cannot reclaim a viewport that the reader moved away')
+assert.equal(outputFollowAfterScroll(false, 650, 702, true), true, 'following resumes when the reader moves back to the end')
 assert.doesNotMatch(userErrorMessage({ code: 'protocol_error', message: 'generation 4 cursor 8 failed' }), /generation|cursor|4|8/, 'protocol bookkeeping never becomes user-facing error text')
 assert.doesNotMatch(userErrorMessage({ code: 'instance_host_lost', message: 'Instance 123e4567-e89b is host_lost' }), /123e4567|host_lost/)
 assert.match(userErrorMessage({ code: 'invalid_tree_target', message: 'Entry abc no longer exists' }), /重新打开 Session Tree/, 'a stale Tree choice tells the user how to recover without exposing the missing entry')
