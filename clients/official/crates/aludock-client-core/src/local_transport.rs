@@ -1,9 +1,12 @@
 #[cfg(not(any(target_os = "windows", target_os = "android")))]
 use std::path::PathBuf;
 
+#[cfg(not(target_os = "android"))]
 use tokio::time::timeout;
 
-use crate::{ClientError, Result, timing::CONNECT_PHASE_TIMEOUT, tls::ConnectedTransport};
+#[cfg(not(target_os = "android"))]
+use crate::timing::CONNECT_PHASE_TIMEOUT;
+use crate::{ClientError, Result, tls::ConnectedTransport};
 
 #[cfg(target_os = "windows")]
 const WINDOWS_PIPE: &str = r"\\.\pipe\alu-dock";
@@ -91,13 +94,19 @@ impl LocalDockEndpoint {
         }
     }
 
+    #[cfg(not(target_os = "android"))]
     pub fn display(&self) -> String {
         match &self.locator {
-            #[cfg(not(any(target_os = "windows", target_os = "android")))]
+            #[cfg(not(target_os = "windows"))]
             LocalDockLocator::Unix(path) => path.display().to_string(),
             #[cfg(target_os = "windows")]
             LocalDockLocator::WindowsPipe(path) => path.clone(),
         }
+    }
+
+    #[cfg(target_os = "android")]
+    pub fn display(&self) -> String {
+        unreachable!("Android rejects local Dock endpoints")
     }
 
     pub(crate) async fn connect(&self) -> Result<ConnectedTransport> {
