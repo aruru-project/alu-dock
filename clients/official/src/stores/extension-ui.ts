@@ -14,7 +14,7 @@ import type {
 export interface ExtensionWidget { key: string; lines: string[]; placement: 'aboveEditor' | 'belowEditor' }
 
 export const useExtensionUiStore = defineStore('extension-ui', () => {
-  const hostId = ref('')
+  const connectionId = ref('')
   const selectionGeneration = ref(0)
   const instanceId = ref('')
   const hostEpoch = ref('')
@@ -40,11 +40,11 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     && work.ownerHostEpoch === hostEpoch.value
     && work.runtimeGeneration === runtimeGeneration.value
 
-  async function bootstrap(host: { hostId: string; selectionGeneration: number }, subscription: string, projection: ConversationBootstrap): Promise<boolean> {
+  async function bootstrap(connection: { connectionId: string; selectionGeneration: number }, subscription: string, projection: ConversationBootstrap): Promise<boolean> {
     const revision = ++lifecycleRevision
     acquisitionRevision++
     const previousIdentity = {
-      hostId: hostId.value,
+      connectionId: connectionId.value,
       selectionGeneration: selectionGeneration.value,
       instanceId: instanceId.value,
       hostEpoch: hostEpoch.value,
@@ -53,8 +53,8 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
     const previousRequest = activeRequest.value
     const binding = controller.value
     const cursor = projection.cursor
-    if (binding && (binding.hostId !== host.hostId
-      || binding.selectionGeneration !== host.selectionGeneration
+    if (binding && (binding.connectionId !== connection.connectionId
+      || binding.selectionGeneration !== connection.selectionGeneration
       || binding.instanceId !== cursor.instanceId
       || binding.hostEpoch !== cursor.hostEpoch
       || binding.runtimeGeneration !== cursor.runtimeGeneration)) {
@@ -65,13 +65,13 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
       }
     }
     if (revision !== lifecycleRevision) return false
-    const sameGeneration = previousIdentity.hostId === host.hostId
-      && previousIdentity.selectionGeneration === host.selectionGeneration
+    const sameGeneration = previousIdentity.connectionId === connection.connectionId
+      && previousIdentity.selectionGeneration === connection.selectionGeneration
       && previousIdentity.instanceId === cursor.instanceId
       && previousIdentity.hostEpoch === cursor.hostEpoch
       && previousIdentity.runtimeGeneration === cursor.runtimeGeneration
-    hostId.value = host.hostId
-    selectionGeneration.value = host.selectionGeneration
+    connectionId.value = connection.connectionId
+    selectionGeneration.value = connection.selectionGeneration
     instanceId.value = cursor.instanceId
     hostEpoch.value = cursor.hostEpoch
     runtimeGeneration.value = cursor.runtimeGeneration
@@ -98,12 +98,12 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
   }
 
   function resumeFollow(
-    host: { hostId: string; selectionGeneration: number },
+    connection: { connectionId: string; selectionGeneration: number },
     subscription: string,
     cursor: ConversationBootstrap['cursor'],
   ): boolean {
-    if (hostId.value !== host.hostId
-      || selectionGeneration.value !== host.selectionGeneration
+    if (connectionId.value !== connection.connectionId
+      || selectionGeneration.value !== connection.selectionGeneration
       || instanceId.value !== cursor.instanceId
       || hostEpoch.value !== cursor.hostEpoch
       || runtimeGeneration.value !== cursor.runtimeGeneration
@@ -128,7 +128,7 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
       }
     }
     if (revision !== lifecycleRevision) return false
-    hostId.value = ''
+    connectionId.value = ''
     selectionGeneration.value = 0
     instanceId.value = ''
     hostEpoch.value = ''
@@ -149,7 +149,7 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
   }
 
   function bindingMatches(binding: ExtensionControllerBinding) {
-    return binding.hostId === hostId.value
+    return binding.connectionId === connectionId.value
       && binding.selectionGeneration === selectionGeneration.value
       && binding.instanceId === instanceId.value
       && binding.hostEpoch === hostEpoch.value
@@ -347,7 +347,7 @@ export const useExtensionUiStore = defineStore('extension-ui', () => {
   }
 
   return {
-    hostId, selectionGeneration, instanceId, hostEpoch, runtimeGeneration, subscriptionId, lastSequence,
+    connectionId, selectionGeneration, instanceId, hostEpoch, runtimeGeneration, subscriptionId, lastSequence,
     status, aboveWidgets, belowWidgets, toolsExpanded, toolsResetRevision,
     activeSummary, activeRequest, controller, controllerState,
     hasAttention, isCurrent, bootstrap, resumeFollow, clear, applyLive, beginAcquire,

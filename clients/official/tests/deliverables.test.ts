@@ -15,7 +15,7 @@ const storage = {
 } as Storage
 
 const first = {
-  hostId: 'host-a',
+  connectionId: 'host-a',
   instanceId: 'work-a',
   deliveryRef: 'delivery-1',
   name: 'report.zip',

@@ -103,5 +103,5 @@ export function commandGoesToComposer(command: CommandInfo): boolean {
 }
 
 export function catalogSourceLabel(kind: string): string {
-  return ({ 'built-in': 'WebConsole', extension: 'Extension', skill: 'Skill', prompt: 'Prompt' } as Record<string, string>)[kind] ?? kind
+  return ({ 'built-in': 'Pi', extension: 'Extension', skill: 'Skill', prompt: 'Prompt' } as Record<string, string>)[kind] ?? kind
 }

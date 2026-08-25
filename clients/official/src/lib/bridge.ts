@@ -16,7 +16,7 @@ import type {
   ExtensionControllerBinding,
   HostCatalog,
   HostConnectionProfile,
-  HostContext,
+  ConnectionContext,
   InteractionMethod,
   InteractionResponse,
   MachineDto,
@@ -99,8 +99,18 @@ export async function setActiveHost(hostId: string, expectedRevision: number): P
   throw new Error('浏览器设计预览不会切换 Host')
 }
 
-export async function removeLocalHost(hostId: string, expectedRevision: number): Promise<HostCatalog> {
-  if (isTauri) return invoke<HostCatalog>('remove_local_host', { hostId, expectedRevision })
+export async function connectLocalDock(expectedRevision: number): Promise<HostCatalog> {
+  if (isTauri) return invoke<HostCatalog>('connect_local_dock', { expectedRevision })
+  throw new Error('浏览器设计预览不会连接本机 AluDock')
+}
+
+export async function setLocalEndpoint(expectedRevision: number, endpoint?: string): Promise<HostCatalog> {
+  if (isTauri) return invoke<HostCatalog>('set_local_endpoint', { expectedRevision, endpoint: endpoint?.trim() || null })
+  throw new Error('浏览器设计预览不会修改本机连接')
+}
+
+export async function removeSavedHost(hostId: string, expectedRevision: number): Promise<HostCatalog> {
+  if (isTauri) return invoke<HostCatalog>('remove_saved_host', { hostId, expectedRevision })
   throw new Error('浏览器设计预览不会删除本地 Host')
 }
 
@@ -128,7 +138,7 @@ export async function verifyHostEndpoint(
   label: string,
   kind: ConnectionKind,
   expectedRevision: number,
-  context: HostContext): Promise<HostConnectionProfile> {
+  context: ConnectionContext): Promise<HostConnectionProfile> {
   if (isTauri) return invoke<HostConnectionProfile>('verify_host_endpoint', { ...context, expectedRevision, host, port, label, kind })
   throw new Error('浏览器设计预览不会保存连接地址')
 }
@@ -139,42 +149,42 @@ export async function saveUnverifiedHostEndpoint(
   label: string,
   kind: ConnectionKind,
   expectedRevision: number,
-  context: HostContext): Promise<HostConnectionProfile> {
+  context: ConnectionContext): Promise<HostConnectionProfile> {
   if (isTauri) return invoke<HostConnectionProfile>('save_unverified_host_endpoint', { ...context, expectedRevision, host, port, label, kind })
   throw new Error('浏览器设计预览不会保存连接地址草稿')
 }
 
-export async function testHostEndpoint(endpointId: string, expectedRevision: number, context: HostContext): Promise<EndpointTestResult> {
+export async function testHostEndpoint(endpointId: string, expectedRevision: number, context: ConnectionContext): Promise<EndpointTestResult> {
   if (isTauri) return invoke<EndpointTestResult>('test_host_endpoint', { ...context, endpointId, expectedRevision })
   throw new Error('浏览器设计预览不会测试连接地址')
 }
 
-export async function renameHostProfile(displayName: string, expectedRevision: number, context: HostContext): Promise<HostConnectionProfile> {
+export async function renameHostProfile(displayName: string, expectedRevision: number, context: ConnectionContext): Promise<HostConnectionProfile> {
   if (isTauri) return invoke<HostConnectionProfile>('rename_host_profile', { ...context, displayName, expectedRevision })
   throw new Error('浏览器设计预览不会修改 Host 名称')
 }
 
-export async function setConnectionPolicy(mode: 'automatic' | 'fixed', expectedRevision: number, context: HostContext, endpointId?: string): Promise<HostConnectionProfile> {
+export async function setConnectionPolicy(mode: 'automatic' | 'fixed', expectedRevision: number, context: ConnectionContext, endpointId?: string): Promise<HostConnectionProfile> {
   if (isTauri) return invoke<HostConnectionProfile>('set_connection_policy', { ...context, mode, endpointId: endpointId ?? null, expectedRevision })
   throw new Error('浏览器设计预览不会修改连接策略')
 }
 
-export async function setHostEndpointEnabled(endpointId: string, enabled: boolean, expectedRevision: number, context: HostContext): Promise<HostConnectionProfile> {
+export async function setHostEndpointEnabled(endpointId: string, enabled: boolean, expectedRevision: number, context: ConnectionContext): Promise<HostConnectionProfile> {
   if (isTauri) return invoke<HostConnectionProfile>('set_host_endpoint_enabled', { ...context, endpointId, enabled, expectedRevision })
   throw new Error('浏览器设计预览不会修改连接地址状态')
 }
 
-export async function reorderHostEndpoints(endpointIds: string[], expectedRevision: number, context: HostContext): Promise<HostConnectionProfile> {
+export async function reorderHostEndpoints(endpointIds: string[], expectedRevision: number, context: ConnectionContext): Promise<HostConnectionProfile> {
   if (isTauri) return invoke<HostConnectionProfile>('reorder_host_endpoints', { ...context, endpointIds, expectedRevision })
   throw new Error('浏览器设计预览不会调整连接地址顺序')
 }
 
-export async function deleteHostEndpoint(endpointId: string, expectedRevision: number, context: HostContext): Promise<HostConnectionProfile> {
+export async function deleteHostEndpoint(endpointId: string, expectedRevision: number, context: ConnectionContext): Promise<HostConnectionProfile> {
   if (isTauri) return invoke<HostConnectionProfile>('delete_host_endpoint', { ...context, endpointId, expectedRevision })
   throw new Error('浏览器设计预览不会删除连接地址')
 }
 
-export async function bootstrap(context: HostContext): Promise<BootstrapPayload> {
+export async function bootstrap(context: ConnectionContext): Promise<BootstrapPayload> {
   if (isTauri) return invoke<BootstrapPayload>('bootstrap', { ...context })
   await delay(280)
   const preview = new URLSearchParams(window.location.search).get('preview')
@@ -183,10 +193,10 @@ export async function bootstrap(context: HostContext): Promise<BootstrapPayload>
   return previewBootstrap
 }
 
-export async function workCatalog(context: HostContext): Promise<WorkCatalog> {
+export async function workCatalog(context: ConnectionContext): Promise<WorkCatalog> {
   if (isTauri) return invoke<WorkCatalog>('work_catalog', { ...context })
   return {
-    hostId: previewBootstrap.hostId,
+    connectionId: previewBootstrap.connectionId,
     selectionGeneration: previewBootstrap.selectionGeneration,
     hostEpoch: previewBootstrap.host.hostEpoch,
     instances: previewBootstrap.works,
@@ -199,24 +209,24 @@ export async function startConversationFollow(
   instanceId: string,
   subscriptionId: string,
   cursor: ConversationBootstrap['cursor'],
-  context: HostContext): Promise<void> {
+  context: ConnectionContext): Promise<void> {
   if (isTauri) await invoke('start_conversation_follow', { ...context, instanceId, subscriptionId, cursor })
 }
 
-export async function stopConversationFollow(instanceId: string, subscriptionId: string, context: HostContext): Promise<boolean> {
+export async function stopConversationFollow(instanceId: string, subscriptionId: string, context: ConnectionContext): Promise<boolean> {
   return isTauri ? invoke('stop_conversation_follow', { ...context, instanceId, subscriptionId }) : false
 }
 
-export async function acquireExtensionControl(instanceId: string, expectedHostEpoch: string, expectedRuntimeGeneration: number, context: HostContext): Promise<ExtensionControllerBinding> {
+export async function acquireExtensionControl(instanceId: string, expectedHostEpoch: string, expectedRuntimeGeneration: number, context: ConnectionContext): Promise<ExtensionControllerBinding> {
   if (isTauri) return invoke<ExtensionControllerBinding>('acquire_extension_control', { ...context, instanceId, expectedHostEpoch, expectedRuntimeGeneration })
   throw new Error('浏览器设计预览不会取得 Extension UI 控制权')
 }
 
-export async function releaseExtensionControl(handle: string, context: HostContext): Promise<void> {
+export async function releaseExtensionControl(handle: string, context: ConnectionContext): Promise<void> {
   if (isTauri) await invoke('release_extension_control', { ...context, handle })
 }
 
-export async function respondExtensionInteraction(handle: string, interactionId: string, response: InteractionResponse, cancelled = false, context: HostContext): Promise<{ interactionId: string; state: 'resolved' | 'already_resolved' }> {
+export async function respondExtensionInteraction(handle: string, interactionId: string, response: InteractionResponse, cancelled = false, context: ConnectionContext): Promise<{ interactionId: string; state: 'resolved' | 'already_resolved' }> {
   if (!isTauri) throw new Error('浏览器设计预览不会回答 Extension UI')
   const method: InteractionMethod = response.method
   return invoke('respond_extension_interaction', {
@@ -226,25 +236,25 @@ export async function respondExtensionInteraction(handle: string, interactionId:
   })
 }
 
-export async function reportExtensionViewport(handle: string, width: number, height: number, context: HostContext): Promise<void> {
+export async function reportExtensionViewport(handle: string, width: number, height: number, context: ConnectionContext): Promise<void> {
   if (isTauri) await invoke('set_extension_widget_viewport', { ...context, handle, width, height })
 }
 
-export async function setExtensionToolsExpanded(instanceId: string, expectedHostEpoch: string, expectedRuntimeGeneration: number, expanded: boolean, context: HostContext): Promise<Work> {
+export async function setExtensionToolsExpanded(instanceId: string, expectedHostEpoch: string, expectedRuntimeGeneration: number, expanded: boolean, context: ConnectionContext): Promise<Work> {
   if (isTauri) return invoke<Work>('set_extension_tools_expanded', { ...context, instanceId, expectedHostEpoch, expectedRuntimeGeneration, expanded })
   throw new Error('浏览器设计预览不会修改 Extension UI')
 }
 
-export async function pickAttachments(workId: string, context: HostContext): Promise<SelectedAttachment[]> {
+export async function pickAttachments(workId: string, context: ConnectionContext): Promise<SelectedAttachment[]> {
   if (isTauri) return invoke('pick_attachments', { ...context, workId })
   throw new Error('浏览器设计预览不会读取本机文件')
 }
 
-export async function stageClipboardImage(workId: string, bytes: Uint8Array, imageIndex: number, context: HostContext): Promise<SelectedAttachment> {
+export async function stageClipboardImage(workId: string, bytes: Uint8Array, imageIndex: number, context: ConnectionContext): Promise<SelectedAttachment> {
   if (!isTauri) throw new Error('浏览器设计预览不会读取剪贴板图片')
   return invoke<SelectedAttachment>('stage_clipboard_image', bytes, {
     headers: {
-      'x-aludock-host-id': context.hostId,
+      'x-aludock-connection-id': context.connectionId,
       'x-aludock-selection-generation': String(context.selectionGeneration),
       'x-aludock-work-id': workId,
       'x-aludock-image-index': String(imageIndex),
@@ -252,7 +262,7 @@ export async function stageClipboardImage(workId: string, bytes: Uint8Array, ima
   })
 }
 
-export async function loadAttachmentPreviewBytes(workId: string, token: string, context: HostContext): Promise<Uint8Array> {
+export async function loadAttachmentPreviewBytes(workId: string, token: string, context: ConnectionContext): Promise<Uint8Array> {
   if (!isTauri) throw new Error('浏览器设计预览不会读取本机附件')
   const value = await invoke<ArrayBuffer | Uint8Array | number[]>('attachment_preview', { ...context, workId, token })
   return binaryBytes(value)
@@ -267,11 +277,11 @@ export async function savePreviewImage(name: string, bytes: Uint8Array): Promise
   })
 }
 
-export async function uploadAttachment(work: Work, token: string, context: HostContext): Promise<AttachmentUploadResult> {
+export async function uploadAttachment(work: Work, token: string, context: ConnectionContext): Promise<AttachmentUploadResult> {
   if (isTauri) return invoke('upload_attachment', {
     ...context,
     workId: work.id,
-    targetMachineHostId: work.hostId ?? context.hostId,
+    targetMachineHostId: work.hostId ?? context.connectionId,
     expectedHostEpoch: work.ownerHostEpoch ?? '',
     expectedRuntimeGeneration: work.runtimeGeneration,
     token,
@@ -279,114 +289,114 @@ export async function uploadAttachment(work: Work, token: string, context: HostC
   throw new Error('浏览器设计预览不会上传附件')
 }
 
-export async function cancelAttachmentUpload(workId: string, token: string, context: HostContext): Promise<boolean> {
+export async function cancelAttachmentUpload(workId: string, token: string, context: ConnectionContext): Promise<boolean> {
   if (isTauri) return invoke('cancel_attachment_upload', { ...context, workId, token })
   return false
 }
 
-export async function removeAttachment(workId: string, token: string, context: HostContext): Promise<boolean> {
+export async function removeAttachment(workId: string, token: string, context: ConnectionContext): Promise<boolean> {
   if (isTauri) return invoke('remove_attachment', { ...context, workId, token })
   return false
 }
 
-export async function dequeueMessages(instanceId: string, context: HostContext): Promise<QueueDequeueResult> {
+export async function dequeueMessages(instanceId: string, context: ConnectionContext): Promise<QueueDequeueResult> {
   if (isTauri) return invoke('dequeue_messages', { ...context, instanceId })
   throw new Error('浏览器设计预览不会取回 Queue')
 }
 
-export async function clearRestoredImages(instanceId: string, context: HostContext): Promise<{ imageCount: number }> {
+export async function clearRestoredImages(instanceId: string, context: ConnectionContext): Promise<{ imageCount: number }> {
   if (isTauri) return invoke('clear_restored_images', { ...context, instanceId })
   return { imageCount: 0 }
 }
 
-export async function submitMessage(instanceId: string, message: string, attachmentFileIds: string[], context: HostContext): Promise<{ receipt: { queued: boolean; delivery: string }; instance: Work }> {
+export async function submitMessage(instanceId: string, message: string, attachmentFileIds: string[], context: ConnectionContext): Promise<{ receipt: { queued: boolean; delivery: string }; instance: Work }> {
   if (isTauri) return invoke('submit_message', { ...context, instanceId, message, attachmentFileIds })
   await delay(180)
   throw new Error('浏览器设计预览不会发送消息')
 }
 
-export async function abortRun(instanceId: string, context: HostContext): Promise<Work> {
+export async function abortRun(instanceId: string, context: ConnectionContext): Promise<Work> {
   if (isTauri) return invoke<Work>('abort_run', { ...context, instanceId })
   await delay(180)
   throw new Error('浏览器设计预览不会中止 Work')
 }
 
-export async function stopWork(instanceId: string, context: HostContext): Promise<StopResult> {
+export async function stopWork(instanceId: string, context: ConnectionContext): Promise<StopResult> {
   if (isTauri) return invoke<StopResult>('stop_work', { ...context, instanceId })
   throw new Error('浏览器设计预览不会停止 Work')
 }
 
-export async function commandCatalog(instanceId: string, context: HostContext): Promise<CommandsResult> {
+export async function commandCatalog(instanceId: string, context: ConnectionContext): Promise<CommandsResult> {
   if (isTauri) return invoke<CommandsResult>('command_catalog', { ...context, instanceId })
   await delay(100)
   return previewCommands
 }
 
-export async function getCommandContent(instanceId: string, referenceId: string, cursor: string | undefined, context: HostContext): Promise<CommandContentResult> {
+export async function getCommandContent(instanceId: string, referenceId: string, cursor: string | undefined, context: ConnectionContext): Promise<CommandContentResult> {
   if (isTauri) return invoke<CommandContentResult>('command_content', { ...context, instanceId, referenceId, cursor: cursor ?? null })
   throw new Error('浏览器设计预览不会读取 Prompt 内容')
 }
 
-export async function getCommandCompletions(instanceId: string, referenceId: string, argumentPrefix: string, context: HostContext): Promise<CommandCompletionsResult> {
+export async function getCommandCompletions(instanceId: string, referenceId: string, argumentPrefix: string, context: ConnectionContext): Promise<CommandCompletionsResult> {
   if (isTauri) return invoke<CommandCompletionsResult>('command_completions', { ...context, instanceId, referenceId, argumentPrefix })
   throw new Error('浏览器设计预览不会读取命令参数候选')
 }
 
-export async function runCatalogCommand(instanceId: string, name: string, argumentsText: string, operationId: string, context: HostContext): Promise<{ receipt: { operationId: string; kind: 'prompt' | 'extension_command'; queued: boolean; delivery: string }; instance: Work }> {
+export async function runCatalogCommand(instanceId: string, name: string, argumentsText: string, operationId: string, context: ConnectionContext): Promise<{ receipt: { operationId: string; kind: 'prompt' | 'extension_command'; queued: boolean; delivery: string }; instance: Work }> {
   if (isTauri) return invoke('run_catalog_command', { ...context, instanceId, name, arguments: argumentsText, operationId })
   throw new Error('浏览器设计预览不会运行命令')
 }
 
-export async function listModels(instanceId: string, context: HostContext): Promise<ModelsResult> {
+export async function listModels(instanceId: string, context: ConnectionContext): Promise<ModelsResult> {
   if (isTauri) return invoke<ModelsResult>('list_models', { ...context, instanceId })
   await delay(100)
   return { ...previewModels, instance: previewBootstrap.works.find((work) => work.id === instanceId) ?? previewBootstrap.works[0]! }
 }
 
-export async function setModel(instanceId: string, provider: string, modelId: string, context: HostContext): Promise<Work> {
+export async function setModel(instanceId: string, provider: string, modelId: string, context: ConnectionContext): Promise<Work> {
   if (isTauri) return invoke<Work>('set_model', { ...context, instanceId, provider, modelId })
   throw new Error('浏览器设计预览不会切换模型')
 }
 
-export async function setThinking(instanceId: string, level: ThinkingLevel, context: HostContext): Promise<Work> {
+export async function setThinking(instanceId: string, level: ThinkingLevel, context: ConnectionContext): Promise<Work> {
   if (isTauri) return invoke<Work>('set_thinking', { ...context, instanceId, level })
   throw new Error('浏览器设计预览不会修改 Thinking')
 }
 
-export async function listTools(instanceId: string, context: HostContext): Promise<ToolsResult> {
+export async function listTools(instanceId: string, context: ConnectionContext): Promise<ToolsResult> {
   if (isTauri) return invoke<ToolsResult>('list_tools', { ...context, instanceId })
   await delay(100)
   return { ...previewTools, instance: previewBootstrap.works.find((work) => work.id === instanceId) ?? previewBootstrap.works[0]! }
 }
 
-export async function setActiveTools(instanceId: string, names: string[], context: HostContext): Promise<ToolsResult> {
+export async function setActiveTools(instanceId: string, names: string[], context: ConnectionContext): Promise<ToolsResult> {
   if (isTauri) return invoke<ToolsResult>('set_active_tools', { ...context, instanceId, names })
   throw new Error('浏览器设计预览不会修改工具状态')
 }
 
-export async function getSettings(instanceId: string, context: HostContext): Promise<SettingsResult> {
+export async function getSettings(instanceId: string, context: ConnectionContext): Promise<SettingsResult> {
   if (isTauri) return invoke<SettingsResult>('get_settings', { ...context, instanceId })
   await delay(100)
   return previewSettings
 }
 
-export async function updateSetting(instanceId: string, key: SettingKey, value: SettingValue, context: HostContext): Promise<SettingUpdateResult> {
+export async function updateSetting(instanceId: string, key: SettingKey, value: SettingValue, context: ConnectionContext): Promise<SettingUpdateResult> {
   if (isTauri) return invoke<SettingUpdateResult>('update_setting', { ...context, instanceId, update: { key, value } })
   throw new Error('浏览器设计预览不会修改设置')
 }
 
-export async function getResources(instanceId: string, context: HostContext): Promise<ResourcesResult> {
+export async function getResources(instanceId: string, context: ConnectionContext): Promise<ResourcesResult> {
   if (isTauri) return invoke<ResourcesResult>('get_resources', { ...context, instanceId })
   await delay(100)
   return { resources: [], diagnostics: [], resourceTotal: 0, resourcesTruncated: false, diagnosticTotal: 0, diagnosticsTruncated: false }
 }
 
-export async function forgetWork(instanceId: string, context: HostContext): Promise<void> {
+export async function forgetWork(instanceId: string, context: ConnectionContext): Promise<void> {
   if (isTauri) return invoke('forget_work', { ...context, instanceId })
   throw new Error('浏览器设计预览不会移除 Work')
 }
 
-export async function reopenWork(instanceId: string, context: HostContext, continuation?: CreateWorkContinuation): Promise<Work> {
+export async function reopenWork(instanceId: string, context: ConnectionContext, continuation?: CreateWorkContinuation): Promise<Work> {
   if (isTauri) {
     return invoke<Work>('reopen_work', {
       ...context, instanceId,
@@ -398,7 +408,7 @@ export async function reopenWork(instanceId: string, context: HostContext, conti
   throw new Error('浏览器设计预览不会继续 Work')
 }
 
-export async function loadConversation(instanceId: string, context: HostContext): Promise<ConversationBootstrap> {
+export async function loadConversation(instanceId: string, context: ConnectionContext): Promise<ConversationBootstrap> {
   if (isTauri) return invoke<ConversationBootstrap>('conversation_bootstrap', { ...context, instanceId })
   await delay(120)
   const instance = previewBootstrap.works.find((work) => work.id === instanceId) ?? previewBootstrap.works[0]!
@@ -433,7 +443,7 @@ export async function loadConversationHistory(
   cursor: string | undefined,
   expectedHostEpoch: string,
   expectedRuntimeGeneration: number,
-  context: HostContext,
+  context: ConnectionContext,
 ): Promise<ConversationHistoryPage> {
   if (isTauri) return invoke<ConversationHistoryPage>('conversation_history', {
     ...context, instanceId, cursor, expectedHostEpoch, expectedRuntimeGeneration,
@@ -449,7 +459,7 @@ export async function loadConversationHistoryEntry(
   expectedRevision: string,
   expectedHostEpoch: string,
   expectedRuntimeGeneration: number,
-  context: HostContext,
+  context: ConnectionContext,
 ): Promise<CompletedConversationEntry> {
   if (!isTauri) throw new Error('浏览器设计预览不会读取完整会话内容')
   return invoke<CompletedConversationEntry>('conversation_history_entry', {
@@ -468,7 +478,7 @@ export async function loadConversationImageBytes(
   expectedHostEpoch: string,
   contentRef: string,
   mimeType: string,
-  context: HostContext,
+  context: ConnectionContext,
 ): Promise<Uint8Array> {
   if (!isTauri) throw new Error('浏览器设计预览不会读取远程图片')
   const value = await invoke<ArrayBuffer | Uint8Array | number[]>('conversation_image', {
@@ -482,7 +492,7 @@ export async function loadPublishedImageBytes(
   expectedHostEpoch: string,
   expectedRuntimeGeneration: number,
   file: PublishedFileDto,
-  context: HostContext,
+  context: ConnectionContext,
 ): Promise<Uint8Array> {
   if (!isTauri) throw new Error('浏览器设计预览不会读取远程图片')
   const value = await invoke<ArrayBuffer | Uint8Array | number[]>('published_image', {
@@ -491,7 +501,7 @@ export async function loadPublishedImageBytes(
   return binaryBytes(value)
 }
 
-export async function listDeliverables(instanceId: string, context: HostContext): Promise<DeliverableDto[]> {
+export async function listDeliverables(instanceId: string, context: ConnectionContext): Promise<DeliverableDto[]> {
   if (isTauri) return invoke<DeliverableDto[]>('list_deliverables', { ...context, instanceId })
   return [
     { deliveryRef: 'preview-delivery-1', name: 'AluDock_0.1.0_x64-portable.exe', sizeBytes: 17_951_232 },
@@ -502,7 +512,7 @@ export async function listDeliverables(instanceId: string, context: HostContext)
 export async function downloadDeliverable(
   instanceId: string,
   deliverable: DeliverableDto,
-  context: HostContext,
+  context: ConnectionContext,
 ): Promise<DeliverableSaveResult> {
   if (isTauri) return invoke<DeliverableSaveResult>('download_deliverable', { ...context, instanceId, deliverable })
   throw new Error('浏览器预览无法下载文件。请在 AluDock 客户端中操作。')
@@ -520,7 +530,7 @@ function binaryBytes(value: ArrayBuffer | Uint8Array | number[]): Uint8Array {
   throw new Error('图片内容无法解码，请重新读取。')
 }
 
-export interface SessionContext extends HostContext {
+export interface SessionContext extends ConnectionContext {
   instanceId: string
   expectedHostEpoch: string
   expectedRuntimeGeneration: number
@@ -536,7 +546,7 @@ export async function listSessions(context: SessionContext, scope: 'cwd' | 'all'
   await delay(100)
   return previewSessions(context)
 }
-export async function listSessionInventory(context: HostContext, machineHostId: string, cwd: string): Promise<SessionInventoryResult> {
+export async function listSessionInventory(context: ConnectionContext, machineHostId: string, cwd: string): Promise<SessionInventoryResult> {
   if (isTauri) return invoke<SessionInventoryResult>('session_inventory', { ...context, machineHostId, cwd })
   throw new Error('浏览器设计预览不会读取保存的 Session')
 }
@@ -578,7 +588,7 @@ export async function cloneSession(context: SessionContext, entryId: string, ope
   throw new Error('浏览器设计预览不会 Clone Session')
 }
 
-export interface WorkspaceFileContext extends HostContext {
+export interface WorkspaceFileContext extends ConnectionContext {
   instanceId: string
   expectedHostEpoch: string
   expectedRuntimeGeneration: number
@@ -637,7 +647,7 @@ export async function saveWorkspaceCachedFile(cacheId: string, context: Workspac
   throw new Error('浏览器设计预览不会保存工作区文件')
 }
 
-export async function listMachines(context: HostContext): Promise<MachineDto[]> {
+export async function listMachines(context: ConnectionContext): Promise<MachineDto[]> {
   if (isTauri) return invoke<MachineDto[]>('list_machines', { ...context })
   await delay(80)
   return [
@@ -646,7 +656,7 @@ export async function listMachines(context: HostContext): Promise<MachineDto[]> 
   ]
 }
 
-export async function listWorkspace(path: string, context: HostContext, targetHostId?: string): Promise<WorkspacePage> {
+export async function listWorkspace(path: string, context: ConnectionContext, targetHostId?: string): Promise<WorkspacePage> {
   if (isTauri) return invoke<WorkspacePage>('list_workspace', { ...context, path, targetHostId: targetHostId ?? null })
   await delay(180)
   return {
@@ -673,7 +683,7 @@ export interface CreateWorkContinuation {
 
 export async function adoptSession(
   sessionToken: string,
-  context: HostContext,
+  context: ConnectionContext,
   machineHostId: string,
   name?: string,
   continuation?: CreateWorkContinuation,
@@ -694,7 +704,7 @@ export async function adoptSession(
 
 export async function createWork(
   cwd: string,
-  context: HostContext,
+  context: ConnectionContext,
   name?: string,
   continuation?: CreateWorkContinuation,
   targetHostId?: string,
@@ -721,10 +731,11 @@ const now = new Date().toISOString()
 const previewCommands: CommandsResult = {
   commands: [
     { referenceId: 'preview-compact', name: 'compact', description: '压缩当前 Session 的上下文', source: { kind: 'built-in' }, argumentCompletions: false, contentAvailable: false },
+    { referenceId: 'preview-dock-tools', name: 'dock-tools', description: '开启、关闭或查看当前 Work 的 Dock Tools', source: { kind: 'built-in' }, argumentHint: 'on|off|status', argumentCompletions: false, contentAvailable: false },
     { referenceId: 'preview-review', name: 'review', description: '运行 Extension 提供的代码审查流程', source: { kind: 'extension', package: '@alu/review' }, argumentHint: '[scope]', argumentCompletions: true, contentAvailable: false },
     { referenceId: 'preview-release-notes', name: 'release-notes', description: '使用项目 Prompt 生成发布说明', source: { kind: 'prompt' }, argumentHint: '[instructions]', argumentCompletions: false, contentAvailable: false },
   ],
-  total: 3,
+  total: 4,
   truncated: false,
 }
 const previewModels: Omit<ModelsResult, 'instance'> = {
@@ -764,7 +775,7 @@ function previewSessions(context: SessionContext): SessionListResult {
     ],
     total: 3,
     truncated: false,
-    hostId: context.hostId,
+    connectionId: context.connectionId,
     selectionGeneration: context.selectionGeneration,
     hostEpoch: context.expectedHostEpoch,
     runtimeGeneration: context.expectedRuntimeGeneration,
@@ -781,7 +792,7 @@ const previewTree: SessionTree = {
   ],
 }
 const previewBootstrap: BootstrapPayload = {
-  hostId: 'browser-preview',
+  connectionId: 'browser-preview',
   selectionGeneration: 1,
   maxAttachmentsPerMessage: 0,
   host: {
@@ -815,19 +826,21 @@ const previewBootstrap: BootstrapPayload = {
 }
 
 const previewCatalog: HostCatalog = {
-  schemaVersion: 1,
+  schemaVersion: 2,
   revision: 1,
-  activeHostId: previewBootstrap.hostId,
+  activeTarget: { kind: 'host', hostId: previewBootstrap.connectionId },
+  localEndpointEffective: '/run/user/1000/alu-dock/dock.sock',
   selectionGeneration: 1,
+  localConnectionSupported: true,
   pairingTransactionIds: [],
   pairingTransactions: [],
   hosts: [{
-    hostId: previewBootstrap.hostId,
-    displayName: previewBootstrap.host.profile.displayName,
+    hostId: previewBootstrap.connectionId,
+    displayName: previewBootstrap.host.profile!.displayName,
     deviceName: '浏览器预览设备',
     endpointSummary: '192.168.1.20:33781',
     addedAt: now,
-    profile: previewBootstrap.host.profile,
+    profile: previewBootstrap.host.profile!,
   }],
 }
 

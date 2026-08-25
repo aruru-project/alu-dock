@@ -1,4 +1,4 @@
-import type { ConversationBootstrap, HostContext, StopResult, Work } from './types'
+import type { ConversationBootstrap, ConnectionContext, StopResult, Work } from './types'
 
 export type FollowConnectionState = 'connected' | 'disconnected' | 'resync_required'
 export interface FollowConnectionStatus {
@@ -8,11 +8,11 @@ export interface FollowConnectionStatus {
 
 /** Stable identity for the only boundaries that require a conversation reload. */
 export function conversationBoundaryKey(
-  hostId: string | null,
+  connectionId: string | null,
   selectionGeneration: number | null | undefined,
   workId: string | null | undefined,
 ): string {
-  return JSON.stringify([hostId, selectionGeneration ?? null, workId ?? null])
+  return JSON.stringify([connectionId, selectionGeneration ?? null, workId ?? null])
 }
 
 type FollowActivation = {
@@ -113,7 +113,7 @@ export function draftAfterSubmit(current: string, captured: string, succeeded: b
 
 /** A recovery candidate may replace the visible generation only after its follow registration is connected and correlated. */
 export function conversationSwapIsCorrelated(
-  context: HostContext,
+  context: ConnectionContext,
   instanceId: string,
   candidate: ConversationBootstrap,
   followConnected: boolean,
@@ -123,7 +123,7 @@ export function conversationSwapIsCorrelated(
     && candidate.instance.id === instanceId
     && candidate.instance.ownerHostEpoch === candidate.cursor.hostEpoch
     && candidate.instance.runtimeGeneration === candidate.cursor.runtimeGeneration
-    && context.hostId.length > 0
+    && context.connectionId.length > 0
 }
 
 export type WorkPresenceTone =

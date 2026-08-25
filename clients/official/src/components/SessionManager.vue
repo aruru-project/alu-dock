@@ -5,7 +5,7 @@ import {
   navigateSession, newSession, reloadSession, switchSession,
   type SessionContext, type SessionTrustContinuation,
 } from '../lib/bridge'
-import { captureHostResult, hostResultMatches } from '../lib/hostResult'
+import { captureConnectionResult, hostResultMatches } from '../lib/hostResult'
 import {
   countTreeFilters, currentOrEndTreeWindowStart, nearestVisibleTreeNodeId,
   persistTreeFilter, projectSessionTree, readTreeFilter, TREE_FILTERS,
@@ -51,15 +51,15 @@ const treeOptions = ref<HTMLElement | null>(null)
 let loadEpoch = 0
 
 const context = computed<SessionContext>(() => ({
-  hostId: app.hostContext?.hostId ?? '',
-  selectionGeneration: app.hostContext?.selectionGeneration ?? 0,
+  connectionId: app.connectionContext?.connectionId ?? '',
+  selectionGeneration: app.connectionContext?.selectionGeneration ?? 0,
   instanceId: props.work.id,
   expectedHostEpoch: props.work.ownerHostEpoch ?? '',
   expectedRuntimeGeneration: props.work.runtimeGeneration,
 }))
 async function currentSessionCall<T>(scope: SessionContext, operation: () => Promise<T>): Promise<T> {
-  const correlated = captureHostResult(scope, await operation())
-  if (!hostResultMatches(correlated, app.hostContext)
+  const correlated = captureConnectionResult(scope, await operation())
+  if (!hostResultMatches(correlated, app.connectionContext)
     || scope.instanceId !== props.work.id
     || scope.expectedHostEpoch !== props.work.ownerHostEpoch
     || scope.expectedRuntimeGeneration !== props.work.runtimeGeneration) {
@@ -91,7 +91,7 @@ const treeTabStopId = computed(() => windowedTreeItems.value.some((item) => item
   : windowedTreeItems.value[0]?.node.entryId ?? '')
 
 watch([
-  () => app.activeHostId,
+  () => app.activeConnectionId,
   () => props.work.id,
   () => props.work.runtimeGeneration,
   () => props.mode,
@@ -425,7 +425,7 @@ function time(value?: string | null) { return treeNodeTime(value) }
     </section>
 
     <section v-else-if="mode === 'reload-session'" class="alu-session-action-state alu-confirm-state">
-      <div class="ui-dialog-form-footer"><button class="ui-dialog-btn" @click="$emit('close')">取消</button><button class="ui-dialog-btn ui-dialog-btn-primary" :disabled="preview || !!pending || outcomeUnknown" @click="reload">{{ pending === 'reload' ? '正在重新载入…' : '确认' }}</button></div>
+      <div class="ui-dialog-form-footer"><button class="ui-dialog-btn" @click="$emit('close')">取消</button><button class="ui-dialog-btn ui-dialog-btn-primary" data-modal-initial :disabled="preview || !!pending || outcomeUnknown" @click="reload">{{ pending === 'reload' ? '正在重新载入…' : '确认' }}</button></div>
       <div v-if="reloadSummary" class="reload-summary"><strong>{{ reloadSummary.resourceTotal }} 个资源 · {{ reloadSummary.diagnosticTotal }} 条诊断</strong><span v-for="diagnostic in reloadSummary.diagnostics" :key="diagnostic.message" :data-severity="diagnostic.severity">{{ diagnostic.message }}</span></div>
     </section>
 

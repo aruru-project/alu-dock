@@ -9,7 +9,7 @@ assert.equal(generationSectionState('resources', { ...pending, resources: 'ready
 assert.equal(generationSectionState('resources', { ...pending, resources: 'ready', tools: 'ready' }), 'ready')
 assert.equal(generationSectionState('settings', { ...pending, settings: 'ready' }), 'ready')
 
-const context = { hostId: 'main-host', selectionGeneration: 4 }
+const context = { connectionId: 'main-host', selectionGeneration: 4 }
 const work = { id: 'work-a', hostId: 'subhost-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 1 } as Work
 const oldKey = commandCatalogGenerationKey(work, context)
 assert.notEqual(commandCatalogGenerationKey({ ...work, runtimeGeneration: 2 }, context), oldKey)

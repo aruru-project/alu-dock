@@ -14,6 +14,7 @@ mod fs_publish;
 mod host_registry;
 mod identity;
 mod instances;
+mod local_transport;
 mod pairing;
 mod private_fs;
 mod protocol;
@@ -44,7 +45,7 @@ pub use config::{
     SettingInfo, SettingKey, SettingSource, SettingUpdate, SettingUpdateResult, SettingValue,
     SettingValueType, SettingsResult, SourceInfo, SourceKind, ThinkingLevel, ToolInfo, ToolsResult,
 };
-pub use connection_router::{HostConnectionRouter, RouteSnapshot};
+pub use connection_router::{ConnectionRouter, RouteSnapshot};
 pub use connections::{
     ConnectionKind, ConnectionPolicy, EndpointState, EndpointTestResult, EndpointTestStatus,
     HostConnectionProfile, HostEndpoint, delete_endpoint, host_id, probe_host_endpoint,
@@ -81,6 +82,7 @@ pub use instances::{
     ModelIdentity, PendingCounts, ProjectTrustDecision, ReopenResult, StopReceipt, StopResult,
     WorkspaceCursor, WorkspaceEntry, WorkspaceEntryKind, WorkspacePage,
 };
+pub use local_transport::LocalDockEndpoint;
 pub use pairing::{PairingOutcome, PairingProgress, pair, validate_device_name};
 pub use protocol::{HostIdentity, HostInfo, host_info, host_info_for_profile};
 pub use published_files::{

@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
-import { bootstrap, getHostCatalog, removeLocalHost, setActiveHost, workCatalog } from '../lib/bridge'
+import { bootstrap, connectLocalDock, getHostCatalog, removeSavedHost, setActiveHost, setLocalEndpoint, workCatalog } from '../lib/bridge'
 import {
   emptyLocalUiState,
   migrateLocalUiState,
@@ -8,7 +8,7 @@ import {
   readAndMigrateLocalUiState,
   rememberRecentWorkspace,
 } from '../lib/localState'
-import type { AttachmentDto, BootstrapPayload, HostCatalog, HostConnectionProfile, HostContext, MachinePlatform, Work } from '../lib/types'
+import type { AttachmentDto, BootstrapPayload, HostCatalog, HostConnectionProfile, ConnectionContext, MachinePlatform, Work } from '../lib/types'
 import { userErrorMessage as humanError } from '../lib/userError'
 
 export const useAppStore = defineStore('app', () => {
@@ -26,28 +26,32 @@ export const useAppStore = defineStore('app', () => {
   let loadEpoch = 0
   let workCatalogRefreshEpoch = 0
 
-  const activeHostId = computed(() => catalog.value?.activeHostId ?? null)
+  const localSelected = computed(() => catalog.value?.activeTarget?.kind === 'local')
+  const activeHostId = computed(() => catalog.value?.activeTarget?.kind === 'host'
+    ? catalog.value.activeTarget.hostId
+    : null)
+  const activeConnectionId = computed(() => localSelected.value ? 'local' : activeHostId.value)
   const activeHost = computed(() => catalog.value?.hosts.find((host) => host.hostId === activeHostId.value) ?? null)
-  const hostContext = computed<HostContext | null>(() => activeHostId.value && catalog.value
-    ? { hostId: activeHostId.value, selectionGeneration: catalog.value.selectionGeneration }
+  const connectionContext = computed<ConnectionContext | null>(() => activeConnectionId.value && catalog.value
+    ? { connectionId: activeConnectionId.value, selectionGeneration: catalog.value.selectionGeneration }
     : null)
   const works = computed(() => payload.value?.works ?? [])
   const selectedWork = computed<Work | null>(() =>
     works.value.find((work) => work.id === selectedWorkId.value) ?? null,
   )
   const currentDraft = computed(() => {
-    const hostId = localUiState.value.activeHostId
+    const connectionId = localUiState.value.activeConnectionId
     const workId = selectedWork.value?.id
-    return hostId && workId ? localUiState.value.hosts[hostId]?.drafts[workId] ?? '' : ''
+    return connectionId && workId ? localUiState.value.connections[connectionId]?.drafts[workId] ?? '' : ''
   })
   const currentAttachments = computed(() => {
-    const hostId = localUiState.value.activeHostId
+    const connectionId = localUiState.value.activeConnectionId
     const workId = selectedWork.value?.id
-    return hostId && workId ? localUiState.value.hosts[hostId]?.attachments[workId] ?? [] : []
+    return connectionId && workId ? localUiState.value.connections[connectionId]?.attachments[workId] ?? [] : []
   })
   const detailMode = computed(() => {
-    const hostId = localUiState.value.activeHostId
-    return hostId ? localUiState.value.hosts[hostId]?.detailMode ?? true : true
+    const connectionId = localUiState.value.activeConnectionId
+    return connectionId ? localUiState.value.connections[connectionId]?.detailMode ?? true : true
   })
 
   async function load() {
@@ -60,12 +64,15 @@ export const useAppStore = defineStore('app', () => {
       const nextCatalog = await getHostCatalog()
       if (epoch !== loadEpoch) return
       catalog.value = nextCatalog
-      needsPairing.value = nextCatalog.hosts.length === 0
-      if (!nextCatalog.activeHostId) {
+      needsPairing.value = nextCatalog.hosts.length === 0 && nextCatalog.activeTarget?.kind !== 'local'
+      const connectionId = nextCatalog.activeTarget?.kind === 'local'
+        ? 'local'
+        : nextCatalog.activeTarget?.hostId
+      if (!connectionId) {
         clearHostProjection()
         return
       }
-      activateHost(nextCatalog.activeHostId)
+      activateConnection(connectionId)
       await loadActive(epoch)
     } catch (cause) {
       if (epoch === loadEpoch) error.value = humanError(cause)
@@ -76,7 +83,7 @@ export const useAppStore = defineStore('app', () => {
 
   async function loadActive(epoch = ++loadEpoch) {
     ++workCatalogRefreshEpoch
-    const context = hostContext.value
+    const context = connectionContext.value
     if (!context) return
     const captured = { ...context }
     error.value = null
@@ -84,7 +91,7 @@ export const useAppStore = defineStore('app', () => {
     try {
       const next = await bootstrap(captured)
       if (epoch !== loadEpoch || !contextMatches(captured)) return
-      if (next.hostId !== captured.hostId || next.selectionGeneration !== captured.selectionGeneration) return
+      if (next.connectionId !== captured.connectionId || next.selectionGeneration !== captured.selectionGeneration) return
       applyBootstrapProjection(next, captured)
     } catch (cause) {
       if (epoch !== loadEpoch || !contextMatches(captured)) return
@@ -95,8 +102,8 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  function applyBootstrapProjection(next: BootstrapPayload, context: HostContext) {
-    if (payload.value?.hostId === next.hostId && payload.value.host.hostEpoch === next.host.hostEpoch) {
+  function applyBootstrapProjection(next: BootstrapPayload, context: ConnectionContext) {
+    if (payload.value?.connectionId === next.connectionId && payload.value.host.hostEpoch === next.host.hostEpoch) {
       next.works = next.works.map((incoming) => {
         const current = payload.value?.works.find((work) => work.id === incoming.id)
         return current && snapshotIsNewer(current, incoming) ? current : incoming
@@ -105,17 +112,17 @@ export const useAppStore = defineStore('app', () => {
     payload.value = next
     // Bootstrap may record a newly successful endpoint and advance the
     // profile revision, so keep the catalog mutation source current too.
-    applyHostProfile(next.host.profile, context)
+    if (next.host.profile) applyHostProfile(next.host.profile, context)
     if (selectedWorkId.value && !selectedWork.value) {
       selectedWorkId.value = null
-      const host = localUiState.value.hosts[context.hostId]
-      if (host) host.selectedWorkId = null
+      const connection = localUiState.value.connections[context.connectionId]
+      if (connection) connection.selectedWorkId = null
       saveLocalState()
     }
   }
 
   async function switchHost(hostId: string) {
-    if (!catalog.value || hostId === catalog.value.activeHostId) return
+    if (!catalog.value || (catalog.value.activeTarget?.kind === 'host' && hostId === catalog.value.activeTarget.hostId)) return
     const epoch = ++loadEpoch
     ++workCatalogRefreshEpoch
     loading.value = true
@@ -126,8 +133,53 @@ export const useAppStore = defineStore('app', () => {
       const next = await setActiveHost(hostId, catalog.value.revision)
       if (epoch !== loadEpoch) return
       catalog.value = next
-      activateHost(hostId)
+      activateConnection(hostId)
       await loadActive(epoch)
+    } catch (cause) {
+      if (epoch === loadEpoch) error.value = humanError(cause)
+    } finally {
+      if (epoch === loadEpoch) loading.value = false
+    }
+  }
+
+  async function connectLocal() {
+    if (!catalog.value || !catalog.value.localConnectionSupported) return
+    const epoch = ++loadEpoch
+    ++workCatalogRefreshEpoch
+    loading.value = true
+    error.value = null
+    hostUnreachable.value = false
+    try {
+      const next = await connectLocalDock(catalog.value.revision)
+      if (epoch !== loadEpoch) return
+      clearHostProjection()
+      catalog.value = next
+      needsPairing.value = false
+      if (next.activeTarget?.kind === 'local') {
+        activateConnection('local')
+        await loadActive(epoch)
+      }
+    } catch (cause) {
+      if (epoch === loadEpoch) error.value = humanError(cause)
+    } finally {
+      if (epoch === loadEpoch) loading.value = false
+    }
+  }
+
+  async function saveLocalEndpoint(endpoint?: string) {
+    if (!catalog.value || !catalog.value.localConnectionSupported) return
+    const epoch = ++loadEpoch
+    ++workCatalogRefreshEpoch
+    loading.value = true
+    error.value = null
+    try {
+      const next = await setLocalEndpoint(catalog.value.revision, endpoint)
+      if (epoch !== loadEpoch) return
+      catalog.value = next
+      if (next.activeTarget?.kind === 'local') {
+        activateConnection('local')
+        await loadActive(epoch)
+      }
     } catch (cause) {
       if (epoch === loadEpoch) error.value = humanError(cause)
     } finally {
@@ -141,13 +193,14 @@ export const useAppStore = defineStore('app', () => {
     ++workCatalogRefreshEpoch
     loading.value = true
     try {
-      const next = await removeLocalHost(hostId, catalog.value.revision)
+      const next = await removeSavedHost(hostId, catalog.value.revision)
       if (epoch !== loadEpoch) return
       catalog.value = next
-      needsPairing.value = next.hosts.length === 0
+      needsPairing.value = next.hosts.length === 0 && next.activeTarget?.kind !== 'local'
       clearHostProjection()
-      if (next.activeHostId) {
-        activateHost(next.activeHostId)
+      const connectionId = next.activeTarget?.kind === 'local' ? 'local' : next.activeTarget?.kind === 'host' ? next.activeTarget.hostId : undefined
+      if (connectionId) {
+        activateConnection(connectionId)
         await loadActive(epoch)
       }
     } catch (cause) {
@@ -158,9 +211,9 @@ export const useAppStore = defineStore('app', () => {
   }
 
   async function refreshWorksQuietly() {
-    const context = hostContext.value
+    const context = connectionContext.value
     const currentPayload = payload.value
-    if (!context || !currentPayload || currentPayload.hostId !== context.hostId) return false
+    if (!context || !currentPayload || currentPayload.connectionId !== context.connectionId) return false
     const captured = { ...context }
     const hostEpoch = currentPayload.host.hostEpoch
     const refreshEpoch = ++workCatalogRefreshEpoch
@@ -168,12 +221,12 @@ export const useAppStore = defineStore('app', () => {
       const next = await workCatalog(captured)
       if (refreshEpoch !== workCatalogRefreshEpoch || !contextMatches(captured)) return false
       const target = payload.value
-      if (!target || target.hostId !== captured.hostId || target.host.hostEpoch !== hostEpoch) return false
-      if (next.hostId !== captured.hostId || next.selectionGeneration !== captured.selectionGeneration) return false
+      if (!target || target.connectionId !== captured.connectionId || target.host.hostEpoch !== hostEpoch) return false
+      if (next.connectionId !== captured.connectionId || next.selectionGeneration !== captured.selectionGeneration) return false
       if (next.hostEpoch !== hostEpoch) {
         const replacement = await bootstrap(captured)
         if (refreshEpoch !== workCatalogRefreshEpoch || !contextMatches(captured)) return false
-        if (replacement.hostId !== captured.hostId || replacement.selectionGeneration !== captured.selectionGeneration) return false
+        if (replacement.connectionId !== captured.connectionId || replacement.selectionGeneration !== captured.selectionGeneration) return false
         applyBootstrapProjection(replacement, captured)
         return true
       }
@@ -186,8 +239,8 @@ export const useAppStore = defineStore('app', () => {
       target.hiddenStopped = next.hiddenStopped
       if (selectedWorkId.value && !selectedWork.value) {
         selectedWorkId.value = null
-        const host = localUiState.value.hosts[captured.hostId]
-        if (host) host.selectedWorkId = null
+        const connection = localUiState.value.connections[captured.connectionId]
+        if (connection) connection.selectedWorkId = null
         saveLocalState()
       }
       return true
@@ -196,9 +249,9 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  function contextMatches(context: HostContext) {
-    return hostContext.value?.hostId === context.hostId
-      && hostContext.value.selectionGeneration === context.selectionGeneration
+  function contextMatches(context: ConnectionContext) {
+    return connectionContext.value?.connectionId === context.connectionId
+      && connectionContext.value.selectionGeneration === context.selectionGeneration
   }
 
   function clearHostProjection() {
@@ -207,13 +260,13 @@ export const useAppStore = defineStore('app', () => {
     workDrawerOpen.value = false
   }
 
-  function activateHost(hostId: string) {
+  function activateConnection(connectionId: string) {
     clearHostProjection()
     localUiState.value = localStateInitialized
-      ? migrateLocalUiState(localUiState.value, { selectedWorkId: null, draft: null }, hostId)
-      : readAndMigrateLocalUiState(storage, hostId)
+      ? migrateLocalUiState(localUiState.value, { selectedWorkId: null, draft: null }, connectionId)
+      : readAndMigrateLocalUiState(storage, connectionId)
     localStateInitialized = true
-    selectedWorkId.value = localUiState.value.hosts[hostId]?.selectedWorkId ?? null
+    selectedWorkId.value = localUiState.value.connections[connectionId]?.selectedWorkId ?? null
     saveLocalState()
   }
 
@@ -225,8 +278,8 @@ export const useAppStore = defineStore('app', () => {
       || (candidateGeneration === baselineGeneration && Date.parse(candidate.updatedAt) > Date.parse(baseline.updatedAt))
   }
 
-  function applyHostProfile(profile: HostConnectionProfile, context = hostContext.value) {
-    if (!context || !contextMatches(context) || profile.hostId !== context.hostId) return
+  function applyHostProfile(profile: HostConnectionProfile, context = connectionContext.value) {
+    if (!context || !contextMatches(context) || profile.hostId !== context.connectionId) return
     const entry = catalog.value?.hosts.find((host) => host.hostId === profile.hostId)
     if (entry) {
       entry.profile = profile
@@ -238,11 +291,11 @@ export const useAppStore = defineStore('app', () => {
         ? `${endpoint.endpoint.host}:${endpoint.endpoint.port}`
         : '没有已保存地址'
     }
-    if (payload.value?.hostId === profile.hostId) payload.value.host.profile = profile
+    if (payload.value?.connectionId === profile.hostId) payload.value.host.profile = profile
   }
 
-  function applyWorkSnapshot(snapshot: Work, context = hostContext.value) {
-    if (!payload.value || !context || !contextMatches(context) || payload.value.hostId !== context.hostId) return
+  function applyWorkSnapshot(snapshot: Work, context = connectionContext.value) {
+    if (!payload.value || !context || !contextMatches(context) || payload.value.connectionId !== context.connectionId) return
     if (snapshot.ownerHostEpoch && snapshot.ownerHostEpoch !== payload.value.host.hostEpoch) return
     const index = payload.value.works.findIndex((work) => work.id === snapshot.id)
     if (index < 0) {
@@ -255,17 +308,17 @@ export const useAppStore = defineStore('app', () => {
     payload.value.works[index] = snapshot
   }
 
-  function removeWorkSnapshot(instanceId: string, context = hostContext.value) {
-    if (!payload.value || !context || !contextMatches(context) || payload.value.hostId !== context.hostId) return false
+  function removeWorkSnapshot(instanceId: string, context = connectionContext.value) {
+    if (!payload.value || !context || !contextMatches(context) || payload.value.connectionId !== context.connectionId) return false
     const index = payload.value.works.findIndex((work) => work.id === instanceId)
     if (index < 0) return false
     payload.value.works.splice(index, 1)
     payload.value.total = Math.max(0, payload.value.total - 1)
-    const host = localUiState.value.hosts[context.hostId]
-    if (host) {
-      delete host.drafts[instanceId]
-      delete host.attachments[instanceId]
-      if (host.selectedWorkId === instanceId) host.selectedWorkId = null
+    const connection = localUiState.value.connections[context.connectionId]
+    if (connection) {
+      delete connection.drafts[instanceId]
+      delete connection.attachments[instanceId]
+      if (connection.selectedWorkId === instanceId) connection.selectedWorkId = null
     }
     if (selectedWorkId.value === instanceId) selectedWorkId.value = null
     saveLocalState()
@@ -274,58 +327,58 @@ export const useAppStore = defineStore('app', () => {
 
   function selectWork(id: string) {
     selectedWorkId.value = id
-    const hostId = localUiState.value.activeHostId
-    const host = hostId ? localUiState.value.hosts[hostId] : undefined
-    if (host) host.selectedWorkId = id
+    const connectionId = localUiState.value.activeConnectionId
+    const connection = connectionId ? localUiState.value.connections[connectionId] : undefined
+    if (connection) connection.selectedWorkId = id
     saveLocalState()
     workDrawerOpen.value = false
   }
 
   function setCurrentDraft(value: string) {
-    const hostId = localUiState.value.activeHostId
+    const connectionId = localUiState.value.activeConnectionId
     const workId = selectedWork.value?.id
-    const host = hostId ? localUiState.value.hosts[hostId] : undefined
-    if (!host || !workId) return
-    if (value) host.drafts[workId] = value
-    else delete host.drafts[workId]
+    const connection = connectionId ? localUiState.value.connections[connectionId] : undefined
+    if (!connection || !workId) return
+    if (value) connection.drafts[workId] = value
+    else delete connection.drafts[workId]
     saveLocalState()
   }
 
   function setCurrentAttachments(value: AttachmentDto[]) {
-    const hostId = localUiState.value.activeHostId
+    const connectionId = localUiState.value.activeConnectionId
     const workId = selectedWork.value?.id
-    const host = hostId ? localUiState.value.hosts[hostId] : undefined
-    if (!host || !workId) return
+    const connection = connectionId ? localUiState.value.connections[connectionId] : undefined
+    if (!connection || !workId) return
     // Preserve the complete Queue restore; submit sends these in batches of 32.
-    if (value.length) host.attachments[workId] = value.map((item) => ({ ...item }))
-    else delete host.attachments[workId]
+    if (value.length) connection.attachments[workId] = value.map((item) => ({ ...item }))
+    else delete connection.attachments[workId]
     saveLocalState()
   }
 
   function setDetailMode(value: boolean) {
-    const hostId = localUiState.value.activeHostId
-    const host = hostId ? localUiState.value.hosts[hostId] : undefined
-    if (!host) return
-    host.detailMode = value
+    const connectionId = localUiState.value.activeConnectionId
+    const connection = connectionId ? localUiState.value.connections[connectionId] : undefined
+    if (!connection) return
+    connection.detailMode = value
     saveLocalState()
   }
 
   function recentWorkspaces(machineHostId: string) {
-    const hostId = localUiState.value.activeHostId
-    return hostId ? [...(localUiState.value.hosts[hostId]?.recentWorkspaces[machineHostId] ?? [])] : []
+    const connectionId = localUiState.value.activeConnectionId
+    return connectionId ? [...(localUiState.value.connections[connectionId]?.recentWorkspaces[machineHostId] ?? [])] : []
   }
 
   function rememberCreatedWorkspace(machineHostId: string, path: string, platform?: MachinePlatform) {
-    const hostId = localUiState.value.activeHostId
-    if (hostId && rememberRecentWorkspace(localUiState.value, hostId, machineHostId, path, platform)) saveLocalState()
+    const connectionId = localUiState.value.activeConnectionId
+    if (connectionId && rememberRecentWorkspace(localUiState.value, connectionId, machineHostId, path, platform)) saveLocalState()
   }
 
   function saveLocalState() { persistLocalUiState(storage, localUiState.value) }
 
   return {
-    catalog, activeHostId, activeHost, hostContext, payload, works, selectedWork, selectedWorkId,
+    catalog, localSelected, activeConnectionId, activeHost, connectionContext, payload, works, selectedWork, selectedWorkId,
     currentDraft, currentAttachments, detailMode, loading, error, hostUnreachable, needsPairing, workDrawerOpen,
-    load, loadActive, refreshWorksQuietly, switchHost, removeHost, contextMatches, applyHostProfile, applyWorkSnapshot, removeWorkSnapshot, selectWork,
+    load, loadActive, refreshWorksQuietly, switchHost, connectLocal, saveLocalEndpoint, removeHost, contextMatches, applyHostProfile, applyWorkSnapshot, removeWorkSnapshot, selectWork,
     setCurrentDraft, setCurrentAttachments, setDetailMode, recentWorkspaces, rememberCreatedWorkspace,
   }
 })

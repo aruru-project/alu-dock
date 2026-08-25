@@ -9,11 +9,12 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    ClientError, Endpoint, HostConnectionProfile, HostConnectionRouter, IdentityStore, Result,
+    ClientError, ConnectionRouter, Endpoint, Result,
+    local_transport::LocalDockEndpoint,
     timing::{
         CONTROL_RESPONSE_TIMEOUT, LONG_MUTATION_RESPONSE_TIMEOUT, RESPONSE_TRANSFER_IDLE_TIMEOUT,
     },
-    tls::{ConnectedTls, PinnedTlsConnector, read_json_line, write_json_line},
+    tls::{ConnectedTransport, PinnedTlsConnector, read_json_line, write_json_line},
     wire::decode_canonical_base64,
 };
 
@@ -30,81 +31,15 @@ pub(crate) const CATALOG_SCHEMA_VERSION: u64 = 1;
 
 #[derive(Clone)]
 pub struct DockClient {
-    router: HostConnectionRouter,
-    compatibility_endpoints: std::sync::Arc<Vec<Endpoint>>,
+    router: ConnectionRouter,
 }
 
 impl DockClient {
-    pub fn new(router: HostConnectionRouter) -> Self {
-        let compatibility_endpoints = std::sync::Arc::new(router.endpoint_snapshot());
-        Self {
-            router,
-            compatibility_endpoints,
-        }
+    pub fn new(router: ConnectionRouter) -> Self {
+        Self { router }
     }
 
-    pub fn from_store(store: &IdentityStore, endpoint_override: Option<Endpoint>) -> Result<Self> {
-        let paired = store.load_pairing()?;
-        let endpoint = endpoint_override.unwrap_or(paired.metadata.endpoint);
-        Self::from_store_endpoints(store, [endpoint])
-    }
-
-    /// Builds a client that can safely try multiple addresses for one paired Host.
-    /// Every address is still authenticated against the same exact Host certificate.
-    pub fn from_store_endpoints(
-        store: &IdentityStore,
-        endpoints: impl IntoIterator<Item = Endpoint>,
-    ) -> Result<Self> {
-        let mut endpoints = endpoints.into_iter().collect::<Vec<_>>();
-        endpoints.dedup();
-        let router = HostConnectionRouter::from_store_endpoints(store, endpoints)?;
-        Ok(Self::new(router))
-    }
-
-    pub fn from_connection_profile(
-        store: &IdentityStore,
-        profile: &HostConnectionProfile,
-    ) -> Result<Self> {
-        HostConnectionRouter::from_store(store, profile).map(Self::new)
-    }
-
-    pub fn from_connection_profile_preferred(
-        store: &IdentityStore,
-        profile: &HostConnectionProfile,
-        preferred_endpoint_id: &str,
-    ) -> Result<Self> {
-        let ordered = profile.ordered_verified_endpoints();
-        let preferred = ordered
-            .iter()
-            .find(|candidate| candidate.id == preferred_endpoint_id)
-            .ok_or_else(|| {
-                ClientError::InvalidEndpoint("preferred Host address is not verified".into())
-            })?;
-        let compatibility_endpoints = std::iter::once(preferred.endpoint.clone())
-            .chain(
-                ordered
-                    .iter()
-                    .filter(|candidate| candidate.id != preferred_endpoint_id)
-                    .map(|candidate| candidate.endpoint.clone()),
-            )
-            .collect::<Vec<_>>();
-        let router = HostConnectionRouter::from_store(store, profile)?;
-        router.prefer_endpoint(preferred_endpoint_id)?;
-        Ok(Self {
-            router,
-            compatibility_endpoints: std::sync::Arc::new(compatibility_endpoints),
-        })
-    }
-
-    pub fn endpoint(&self) -> &Endpoint {
-        &self.compatibility_endpoints[0]
-    }
-
-    pub fn endpoints(&self) -> &[Endpoint] {
-        &self.compatibility_endpoints
-    }
-
-    pub fn router(&self) -> &HostConnectionRouter {
+    pub fn router(&self) -> &ConnectionRouter {
         &self.router
     }
 
@@ -347,8 +282,28 @@ pub(crate) async fn negotiate_pinned_endpoint(
     connector: &PinnedTlsConnector,
     client_id: &str,
     required_capabilities: &[&str],
-) -> Result<(ConnectedTls, HelloAck)> {
-    let mut connection = connector.connect(endpoint).await?;
+) -> Result<(ConnectedTransport, HelloAck)> {
+    negotiate_transport(
+        connector.connect(endpoint).await?.into(),
+        client_id,
+        required_capabilities,
+    )
+    .await
+}
+
+pub(crate) async fn negotiate_local_endpoint(
+    endpoint: &LocalDockEndpoint,
+    client_id: &str,
+    required_capabilities: &[&str],
+) -> Result<(ConnectedTransport, HelloAck)> {
+    negotiate_transport(endpoint.connect().await?, client_id, required_capabilities).await
+}
+
+async fn negotiate_transport(
+    mut connection: ConnectedTransport,
+    client_id: &str,
+    required_capabilities: &[&str],
+) -> Result<(ConnectedTransport, HelloAck)> {
     let request_id = Uuid::new_v4().to_string();
     write_json_line(
         &mut connection.stream,
@@ -513,11 +468,11 @@ fn protocol(message: impl Into<String>) -> ClientError {
 }
 
 pub(crate) struct ProtocolEventStream {
-    connection: ConnectedTls,
+    connection: ConnectedTransport,
     request_id: String,
     host_epoch: String,
     maximum_bytes: usize,
-    router: HostConnectionRouter,
+    router: ConnectionRouter,
     endpoint_id: String,
     route_generation: u64,
 }

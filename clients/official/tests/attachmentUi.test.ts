@@ -21,9 +21,9 @@ const attachment: AttachmentDto = {
     activeHostId: 'host-a',
     hosts: { 'host-a': { selectedWorkId: 'work-a', drafts: { 'work-a': 'still here' }, detailMode: false } },
   }))
-  assert.equal(migrated?.schemaVersion, 3)
-  assert.equal(migrated?.hosts['host-a']?.drafts['work-a'], 'still here')
-  assert.equal(Object.keys(migrated?.hosts['host-a']?.attachments ?? {}).length, 0)
+  assert.equal(migrated?.schemaVersion, 4)
+  assert.equal(migrated?.connections['host-a']?.drafts['work-a'], 'still here')
+  assert.equal(Object.keys(migrated?.connections['host-a']?.attachments ?? {}).length, 0)
 }
 
 {
@@ -32,12 +32,12 @@ const attachment: AttachmentDto = {
     activeHostId: 'host-a',
     hosts: { 'host-a': { selectedWorkId: 'work-a', drafts: {}, attachments: { 'work-a': [attachment] }, detailMode: true } },
   }))
-  assert.deepEqual(restored?.hosts['host-a']?.attachments['work-a'], [attachment])
+  assert.deepEqual(restored?.connections['host-a']?.attachments['work-a'], [attachment])
 }
 
 {
   const work = { id: 'remote-work', hostId: 'subhost-a', ownerHostEpoch: 'epoch-a', runtimeGeneration: 7 } as Work
-  const target = attachmentUploadTarget(work, { hostId: 'main-host', selectionGeneration: 3 })
+  const target = attachmentUploadTarget(work, { connectionId: 'main-host', selectionGeneration: 3 })
   const bound = bindLocalAttachment(attachment, 'native-token', target)
   assert.equal(attachmentUploadMatches(bound.localUpload, target), true)
   for (const changed of [
@@ -51,14 +51,14 @@ const attachment: AttachmentDto = {
     activeHostId: 'main-host',
     hosts: { 'main-host': { selectedWorkId: 'remote-work', drafts: {}, attachments: { 'remote-work': [bound] }, recentWorkspaces: {}, detailMode: true } },
   }))
-  assert.deepEqual(restored?.hosts['main-host']?.attachments['remote-work']?.[0]?.localUpload, target)
-  assert.equal(restored?.hosts['main-host']?.attachments['remote-work']?.[0]?.localUpload?.sourceToken, undefined, 'native source handles must not survive a process restart')
+  assert.deepEqual(restored?.connections['main-host']?.attachments['remote-work']?.[0]?.localUpload, target)
+  assert.equal(restored?.connections['main-host']?.attachments['remote-work']?.[0]?.localUpload?.sourceToken, undefined, 'native source handles must not survive a process restart')
 
   let serialized = ''
   assert.equal(persistLocalUiState({ setItem: (_key: string, value: string) => { serialized = value } } as Storage, {
-    schemaVersion: 3,
-    activeHostId: 'main-host',
-    hosts: { 'main-host': { selectedWorkId: 'remote-work', drafts: {}, attachments: { 'remote-work': [bound] }, recentWorkspaces: {}, detailMode: true } },
+    schemaVersion: 4,
+    activeConnectionId: 'main-host',
+    connections: { 'main-host': { selectedWorkId: 'remote-work', drafts: {}, attachments: { 'remote-work': [bound] }, recentWorkspaces: {}, detailMode: true } },
   }), true)
   assert.equal(serialized.includes('native-token'), false)
 }
@@ -70,7 +70,7 @@ const attachment: AttachmentDto = {
     activeHostId: 'host-a',
     hosts: { 'host-a': { selectedWorkId: 'work-a', drafts: {}, attachments: { 'work-a': queueSizedDraft }, detailMode: true } },
   }))
-  assert.equal(restored?.hosts['host-a']?.attachments['work-a']?.length, 33)
+  assert.equal(restored?.connections['host-a']?.attachments['work-a']?.length, 33)
   assert.deepEqual(attachmentsAfterSubmit(queueSizedDraft, queueSizedDraft.slice(0, 32).map((item) => item.fileId), true), [queueSizedDraft[32]])
 }
 

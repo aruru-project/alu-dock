@@ -27,15 +27,17 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
   const operations = ref<Record<string, CommandOperation>>({})
   const activeOperationId = ref('')
   let entrySequence = 0
+  const knownOperationIds: string[] = []
+  const successfulOperationIds = new Set<string>()
 
   const hasActiveOperation = computed(() => {
     const operation = operations.value[activeOperationId.value]
     return !!operation && !operation.completed
   })
 
-  function bindContext(hostId: string, selectionGeneration: number, work: Work) {
+  function bindContext(connectionId: string, selectionGeneration: number, work: Work) {
     const next = JSON.stringify([
-      hostId,
+      connectionId,
       selectionGeneration,
       work.id,
       work.ownerHostEpoch ?? '',
@@ -46,10 +48,13 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
     entries.value = []
     operations.value = {}
     activeOperationId.value = ''
+    knownOperationIds.splice(0)
+    successfulOperationIds.clear()
   }
 
   function beginOperation(operationId: string, name: string, argumentsText: string) {
     const argumentsValue = argumentsText.trim()
+    rememberOperation(operationId)
     operations.value = {
       ...operations.value,
       [operationId]: { operationId, completed: false },
@@ -75,21 +80,34 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
     finish(operationId)
   }
 
-  function failOperation(operationId: string, message: string) {
+  function failOperation(operationId: string, message: string): boolean {
+    if (successfulOperationIds.has(operationId)) return false
     const operation = operations.value[operationId]
-    if (!operation) return
+    if (!operation || operation.completed) return false
     operation.completed = true
     append({ kind: 'output', level: 'error', text: message || '命令执行失败。', operationId })
     finish(operationId)
+    return true
+  }
+
+  function operationSucceeded(operationId: string) {
+    return successfulOperationIds.has(operationId)
   }
 
   function handleDockEvent(event: ProjectedEvent): { matched: boolean; commandOrigin: boolean } {
     const operationId = typeof event.data.operationId === 'string' ? event.data.operationId : ''
     const operation = operationId ? operations.value[operationId] : undefined
-    if (!operation) return { matched: false, commandOrigin: !!operationId }
+    if (!operation) {
+      if (operationId && event.eventType === 'command.handled' && knownOperationIds.includes(operationId)) {
+        successfulOperationIds.add(operationId)
+        return { matched: true, commandOrigin: true }
+      }
+      return { matched: false, commandOrigin: !!operationId }
+    }
 
     switch (event.eventType) {
       case 'command.handled':
+        successfulOperationIds.add(operationId)
         if (!operation.completed) {
           operation.completed = true
           finish(operationId)
@@ -118,6 +136,14 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
     return { matched: true, commandOrigin: true }
   }
 
+  function rememberOperation(operationId: string) {
+    knownOperationIds.push(operationId)
+    while (knownOperationIds.length > 128) {
+      const removed = knownOperationIds.shift()
+      if (removed) successfulOperationIds.delete(removed)
+    }
+  }
+
   function append(entry: Omit<CommandConsoleEntry, 'id'>) {
     if (!entry.text) return
     entrySequence += 1
@@ -135,6 +161,7 @@ export const useCommandConsoleStore = defineStore('command-console', () => {
     beginOperation,
     receiveReceipt,
     failOperation,
+    operationSucceeded,
     handleDockEvent,
   }
 })

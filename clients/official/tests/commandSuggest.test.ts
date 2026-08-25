@@ -54,6 +54,7 @@ assert.deepEqual(filterCommandPaletteItems(localControls, '/new').map((item) => 
 assert.deepEqual(filterCommandPaletteItems(localControls, '/stop').map((item) => item.id), ['stop'])
 assert.deepEqual(filterCommandPaletteItems(localControls, '/resume').map((item) => item.id), ['resume'])
 assert.deepEqual(filterCommandPaletteItems(localControls, 'resume').map((item) => item.id), ['resume'], '不带斜杠的搜索保持不变')
+assert.deepEqual(localControlCommands.slice(0, 4).map((item) => item.name), ['new', 'stop', 'reload', 'resume'])
 assert.deepEqual(filterLocalControlCommands('st').map((item) => item.name), ['stop', 'state'])
 assert.deepEqual(filterLocalControlCommands('tree').map((item) => item.name), ['tree'])
 assert.equal(submittedLocalControl('/stop')?.action, 'stop')

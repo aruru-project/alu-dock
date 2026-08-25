@@ -1,7 +1,7 @@
 use std::{io::Write, path::PathBuf};
 
 use aludock_client_core::{
-    DockClient, Endpoint, HostConnectionRouter, HostInfo, HostRegistry, IdentityStore,
+    ConnectionRouter, DockClient, Endpoint, HostInfo, HostRegistry, IdentityStore,
     InstanceSelector, PairingProgress, ReadReplay, host_info,
 };
 use anyhow::{Context, Result, bail};
@@ -40,7 +40,7 @@ enum Command {
         device_name: String,
     },
 
-    /// List the deterministic local Host catalog.
+    /// List the deterministic saved Host catalog.
     Hosts,
 
     /// Make a saved Host active without making a network request.
@@ -221,8 +221,8 @@ async fn main() -> Result<()> {
             }
             let snapshot = registry.snapshot().context("could not load Host catalog")?;
             let updated = registry
-                .remove_local_host(&target_host_id, snapshot.revision)
-                .context("could not remove local Host credentials")?;
+                .remove_host(&target_host_id, snapshot.revision)
+                .context("could not remove saved Host credentials")?;
             println!("Removed locally saved Host: {target_host_id}");
             println!("This did not revoke this device on the Host.");
             println!("Registry revision: {}", updated.revision);
@@ -243,7 +243,7 @@ async fn main() -> Result<()> {
                         .context("could not load the Host connection profile")?
                         .context("no paired Host profile is available")?;
                     DockClient::new(
-                        HostConnectionRouter::from_store(&store, &profile)
+                        ConnectionRouter::from_store(&store, &profile)
                             .context("could not load the paired Host identity")?,
                     )
                     .host_info()
@@ -372,7 +372,7 @@ fn client_from_profile(store: &IdentityStore) -> Result<DockClient> {
         .load_connection_profile()
         .context("could not load the Host connection profile")?
         .context("no paired Host profile is available")?;
-    HostConnectionRouter::from_store(store, &profile)
+    ConnectionRouter::from_store(store, &profile)
         .map(DockClient::new)
         .context("could not load the paired Host identity")
 }

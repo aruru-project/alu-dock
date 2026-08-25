@@ -40,7 +40,7 @@ import {
   type WorkspacePreviewKind,
 } from '../lib/workspaceBrowser'
 import type {
-  HostContext,
+  ConnectionContext,
   Work,
   WorkspaceFileCacheResult,
   WorkspaceFileEntry,
@@ -50,7 +50,7 @@ import type {
 const props = defineProps<{
   open: boolean
   work: Work | null
-  context: HostContext | null
+  context: ConnectionContext | null
   hostEpoch: string
 }>()
 const emit = defineEmits<{ close: [] }>()
@@ -118,7 +118,7 @@ function currentContext(): WorkspaceFileContext | null {
 function contextMatches(context: WorkspaceFileContext): boolean {
   const current = currentContext()
   return !!current
-    && current.hostId === context.hostId
+    && current.connectionId === context.connectionId
     && current.selectionGeneration === context.selectionGeneration
     && current.instanceId === context.instanceId
     && current.expectedHostEpoch === context.expectedHostEpoch
@@ -454,7 +454,7 @@ function updateMobileMode() {
 watch(
   () => [
     props.open,
-    props.context?.hostId,
+    props.context?.connectionId,
     props.context?.selectionGeneration,
     props.work?.id,
     props.work?.lifecycle,
@@ -488,7 +488,7 @@ onMounted(() => {
     const context = currentContext()
     if (!context
       || payload.readId !== activeReadId.value
-      || payload.hostId !== context.hostId
+      || payload.connectionId !== context.connectionId
       || payload.selectionGeneration !== context.selectionGeneration
       || payload.instanceId !== context.instanceId) return
     progressBytes.value = payload.bytesReceived

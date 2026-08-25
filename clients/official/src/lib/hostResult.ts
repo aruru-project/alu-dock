@@ -1,32 +1,32 @@
-import type { HostContext } from './types'
+import type { ConnectionContext } from './types'
 
-/** Correlates a one-shot Dock result with the exact Host selection that issued it. */
-export interface HostResult<T> extends HostContext { result: T }
+/** Correlates a one-shot Dock result with the exact connection selection that issued it. */
+export interface ConnectionResult<T> extends ConnectionContext { result: T }
 
-export function captureHostResult<T>(context: HostContext, result: T): HostResult<T> {
-  return { hostId: context.hostId, selectionGeneration: context.selectionGeneration, result }
+export function captureConnectionResult<T>(context: ConnectionContext, result: T): ConnectionResult<T> {
+  return { connectionId: context.connectionId, selectionGeneration: context.selectionGeneration, result }
 }
 
-export function hostResultMatches<T>(value: HostResult<T>, current: HostContext | null | undefined): boolean {
+export function hostResultMatches<T>(value: ConnectionResult<T>, current: ConnectionContext | null | undefined): boolean {
   return !!current
-    && value.hostId === current.hostId
+    && value.connectionId === current.connectionId
     && value.selectionGeneration === current.selectionGeneration
 }
 
-/** Returns a detached copy of the current Host selection, or throws when none is active. */
-export function requireHostContext(app: { hostContext: HostContext | null }): HostContext {
-  const context = app.hostContext
-  if (!context) throw new Error('当前没有选择 Host。')
+/** Returns a detached copy of the current connection selection, or throws when none is active. */
+export function requireConnectionContext(app: { connectionContext: ConnectionContext | null }): ConnectionContext {
+  const context = app.connectionContext
+  if (!context) throw new Error('当前没有连接 AluDock。')
   return { ...context }
 }
 
-/** Runs a one-shot Dock call and discards the result if the Host selection changed in flight. */
-export async function currentHostCall<T>(
-  app: { hostContext: HostContext | null },
-  operation: (context: HostContext) => Promise<T>,
+/** Runs a one-shot Dock call and discards the result if the connection selection changed in flight. */
+export async function currentConnectionCall<T>(
+  app: { connectionContext: ConnectionContext | null },
+  operation: (context: ConnectionContext) => Promise<T>,
 ): Promise<T> {
-  const context = requireHostContext(app)
-  const correlated = captureHostResult(context, await operation(context))
-  if (!hostResultMatches(correlated, app.hostContext)) throw new Error('你已切换 Host，请在当前 Host 中重试。')
+  const context = requireConnectionContext(app)
+  const correlated = captureConnectionResult(context, await operation(context))
+  if (!hostResultMatches(correlated, app.connectionContext)) throw new Error('当前连接已切换，请重试。')
   return correlated.result
 }

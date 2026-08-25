@@ -10,8 +10,9 @@ import {
   respondExtensionInteraction,
 } from '../lib/bridge'
 import type { ExtensionControllerEmission, ExtensionControllerStatus, InteractionResponse, Work } from '../lib/types'
+import { genericExtensionStatus } from '../lib/dockTools'
 import { userErrorMessage as errorMessage } from '../lib/userError'
-import { requireHostContext } from '../lib/hostResult'
+import { requireConnectionContext } from '../lib/hostResult'
 import { useExtensionUiStore, type ExtensionWidget } from '../stores/extension-ui'
 import { useAppStore } from '../stores/app'
 
@@ -44,7 +45,7 @@ const request = computed(() => extension.activeRequest)
 const automaticControlKey = computed(() => {
   const work = props.work
   if (!isTauri || !work || work.lifecycle !== 'active' || !work.ownerHostEpoch || !extension.isCurrent(work) || !extension.subscriptionId) return ''
-  return `${extension.hostId}:${extension.selectionGeneration}:${work.id}:${work.ownerHostEpoch}:${work.runtimeGeneration}:${extension.subscriptionId}`
+  return `${extension.connectionId}:${extension.selectionGeneration}:${work.id}:${work.ownerHostEpoch}:${work.runtimeGeneration}:${extension.subscriptionId}`
 })
 const filteredOptions = computed(() => {
   if (request.value?.method !== 'select') return []
@@ -57,6 +58,7 @@ const secondsRemaining = computed(() => {
   return Math.max(0, Math.ceil((Date.parse(expires) - now.value) / 1000))
 })
 const locked = computed(() => phase.value !== 'idle')
+const visibleStatus = computed(() => genericExtensionStatus(extension.status))
 
 watch(() => request.value?.interactionId, async (id) => {
   if (!id) {
@@ -161,7 +163,7 @@ async function acquire() {
   acquiringError.value = ''
   let stale = false
   try {
-    const binding = await acquireExtensionControl(target.instanceId, target.hostEpoch, target.runtimeGeneration, requireHostContext(app))
+    const binding = await acquireExtensionControl(target.instanceId, target.hostEpoch, target.runtimeGeneration, requireConnectionContext(app))
     stale = revision !== acquisitionRevision
       || automaticControlKey.value !== target.key
       || !app.contextMatches(binding)
@@ -209,7 +211,7 @@ async function respond(cancelled = false) {
   phase.value = 'submitting'
   responseError.value = ''
   try {
-    const capturedHost = requireHostContext(app)
+    const capturedHost = requireConnectionContext(app)
     await respondExtensionInteraction(handle, current.interactionId, response, cancelled, capturedHost)
     if (!app.contextMatches(capturedHost)) return
     extension.resolveLocally(current.interactionId)
@@ -312,7 +314,7 @@ async function sendViewport() {
   if (cellWidth <= 0 || !Number.isFinite(lineHeight) || lineHeight <= 0) return
   const width = Math.max(1, Math.min(10_000, Math.floor(surface.clientWidth / cellWidth)))
   const height = Math.max(1, Math.min(10_000, Math.floor(editor.clientHeight / lineHeight)))
-  try { await reportExtensionViewport(handle, width, height, requireHostContext(app)) } catch { /* next resize/reacquire reports current truth */ }
+  try { await reportExtensionViewport(handle, width, height, requireConnectionContext(app)) } catch { /* next resize/reacquire reports current truth */ }
 }
 
 function isUnknown(cause: unknown) { return !!cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true }
@@ -338,8 +340,8 @@ function interactionMethodLabel(method: string) {
 
     <slot />
 
-    <div v-if="Object.keys(extension.status).length" class="alu-extension-status" aria-label="Extension 状态">
-      <span v-for="(text, key) in extension.status" :key="key">{{ key }}: {{ text }}</span>
+    <div v-if="Object.keys(visibleStatus).length" class="alu-extension-status" aria-label="Extension 状态">
+      <span v-for="(text, key) in visibleStatus" :key="key">{{ key }}: {{ text }}</span>
     </div>
 
     <div class="extension-widgets below">

@@ -92,10 +92,14 @@ export interface HostConnectionProfile {
   lastSuccessfulEndpointId?: string
 }
 
-export interface HostContext {
-  hostId: string
+export interface ConnectionContext {
+  connectionId: string
   selectionGeneration: number
 }
+
+export type ConnectionTarget =
+  | { kind: 'local' }
+  | { kind: 'host'; hostId: string }
 
 export interface HostCatalogEntry {
   hostId: string
@@ -117,8 +121,11 @@ export interface RecoverablePairing {
 export interface HostCatalog {
   schemaVersion: number
   revision: number
-  activeHostId?: string
+  activeTarget?: ConnectionTarget
+  localEndpointOverride?: string
+  localEndpointEffective?: string
   selectionGeneration: number
+  localConnectionSupported: boolean
   hosts: HostCatalogEntry[]
   pairingTransactionIds: string[]
   pairingTransactions: RecoverablePairing[]
@@ -130,12 +137,12 @@ export interface HostSummary {
   dockVersion: string
   piSdkVersion: string
   startedAt: string
-  profile: HostConnectionProfile
+  profile?: HostConnectionProfile
   activeEndpointId: string
 }
 
 export interface BootstrapPayload {
-  hostId: string
+  connectionId: string
   selectionGeneration: number
   maxAttachmentsPerMessage: number
   host: HostSummary
@@ -157,7 +164,7 @@ export interface MachineDto {
 }
 
 export interface WorkCatalog {
-  hostId: string
+  connectionId: string
   selectionGeneration: number
   hostEpoch: string
   instances: Work[]
@@ -223,7 +230,7 @@ export interface WorkspaceFileCacheResult {
 }
 
 export interface WorkspaceFileReadProgress {
-  hostId: string
+  connectionId: string
   selectionGeneration: number
   instanceId: string
   readId: string
@@ -260,7 +267,7 @@ export type DeliverableSaveResult =
   | { status: 'cancelled' }
   | { status: 'saved'; deliverable: DeliverableDto; location: SavedDeliverableLocation; sha256: string }
 
-export interface DeliverableDownloadProgress extends HostContext {
+export interface DeliverableDownloadProgress extends ConnectionContext {
   instanceId: string
   deliveryRef: string
   bytesReceived: number
@@ -275,7 +282,7 @@ export type ContentBlock =
   | { type: 'omitted'; kind: string; description: string }
 
 export interface LocalAttachmentUpload {
-  hostId: string
+  connectionId: string
   selectionGeneration: number
   instanceId: string
   machineHostId: string
@@ -332,7 +339,7 @@ export interface SelectedAttachment {
   mediaType?: string
 }
 export type AttachmentUploadPhase = 'hashing' | 'uploading' | 'finalizing'
-export interface AttachmentUploadProgress extends HostContext {
+export interface AttachmentUploadProgress extends ConnectionContext {
   workId: string
   machineHostId: string
   ownerHostEpoch: string
@@ -393,7 +400,7 @@ export type InteractionRequest =
   | { method: 'input'; interactionId: string; title: string; placeholder?: string; issuedAt: string; expiresAt?: string }
   | { method: 'editor'; interactionId: string; title: string; prefill?: string; issuedAt: string; expiresAt?: string }
 
-export interface ExtensionControllerBinding extends HostContext { handle: string; hostEpoch: string; instanceId: string; runtimeGeneration: number }
+export interface ExtensionControllerBinding extends ConnectionContext { handle: string; hostEpoch: string; instanceId: string; runtimeGeneration: number }
 export interface ExtensionControllerEmission extends ExtensionControllerBinding { event: ProjectedEvent }
 export interface ExtensionControllerStatus extends ExtensionControllerBinding { state: string; message?: string }
 export type InteractionResponse =
@@ -408,7 +415,7 @@ export interface SessionInfo {
   identity: string
   current: boolean
 }
-export interface SessionListResult extends HostContext {
+export interface SessionListResult extends ConnectionContext {
   sessions: SessionInfo[]
   total: number
   truncated: boolean
@@ -422,7 +429,7 @@ export interface SessionInventoryInfo {
   cwd: string
   updatedAt?: string
 }
-export interface SessionInventoryResult extends HostContext {
+export interface SessionInventoryResult extends ConnectionContext {
   sessions: SessionInventoryInfo[]
   total: number
   truncated: boolean

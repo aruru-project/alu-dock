@@ -80,7 +80,7 @@ function keepFocusInside(event: KeyboardEvent) {
 }
 
 function isOpening(item: DownloadedDeliverable) {
-  return props.openingKey === deliveryHistoryKey(item.hostId, item.instanceId, item.deliveryRef)
+  return props.openingKey === deliveryHistoryKey(item.connectionId, item.instanceId, item.deliveryRef)
 }
 
 function savedFileAction(item: DownloadedDeliverable) {
@@ -209,7 +209,7 @@ function dateLabel(value: string) {
           <b>{{ history.length }} 条</b>
         </div>
         <div class="delivery-file-list">
-          <article v-for="item in history" :key="`${item.hostId}:${item.instanceId}:${item.deliveryRef}`" class="delivery-row history-row">
+          <article v-for="item in history" :key="`${item.connectionId}:${item.instanceId}:${item.deliveryRef}`" class="delivery-row history-row">
             <div class="delivery-file-copy">
               <strong :title="item.name">{{ item.name }}</strong>
               <span>{{ formatFileSize(item.sizeBytes) }}<template v-if="item.workName"> · {{ item.workName }}</template> · {{ dateLabel(item.downloadedAt) }}</span>

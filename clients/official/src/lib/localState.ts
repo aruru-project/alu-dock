@@ -3,9 +3,9 @@ import type { AttachmentDto, MachinePlatform } from './types'
 export const LOCAL_UI_STATE_KEY = 'aludock.uiState'
 export const LEGACY_SELECTED_WORK_KEY = 'aludock.selectedWork'
 export const LEGACY_DRAFT_KEY = 'aludock.draft'
-export const LOCAL_UI_STATE_SCHEMA_VERSION = 3 as const
+export const LOCAL_UI_STATE_SCHEMA_VERSION = 4 as const
 
-export interface HostLocalUiState {
+export interface ConnectionLocalUiState {
   selectedWorkId: string | null
   drafts: Record<string, string>
   attachments: Record<string, AttachmentDto[]>
@@ -15,8 +15,8 @@ export interface HostLocalUiState {
 
 export interface LocalUiState {
   schemaVersion: typeof LOCAL_UI_STATE_SCHEMA_VERSION
-  activeHostId: string | null
-  hosts: Record<string, HostLocalUiState>
+  activeConnectionId: string | null
+  connections: Record<string, ConnectionLocalUiState>
 }
 
 export interface LegacyLocalUiState {
@@ -30,7 +30,7 @@ const MAX_WORKSPACE_PATH_LENGTH = 16_384
 const MAX_RECENT_MACHINES = 64
 export const MAX_RECENT_WORKSPACES_PER_MACHINE = 8
 export function emptyLocalUiState(): LocalUiState {
-  return { schemaVersion: LOCAL_UI_STATE_SCHEMA_VERSION, activeHostId: null, hosts: dictionary<HostLocalUiState>() }
+  return { schemaVersion: LOCAL_UI_STATE_SCHEMA_VERSION, activeConnectionId: null, connections: dictionary<ConnectionLocalUiState>() }
 }
 
 /** Pure, fail-soft decoder that upgrades supported historical schemas in memory. */
@@ -43,21 +43,21 @@ export function decodeLocalUiState(serialized: string | null): LocalUiState | nu
   }
 }
 
-/** Pure legacy-key migration scoped to the Host that was active when migration ran. */
+/** Pure legacy-key migration scoped to the connection that was active when migration ran. */
 export function migrateLocalUiState(
   persisted: LocalUiState | null,
   legacy: LegacyLocalUiState,
-  hostId: string,
+  connectionId: string,
 ): LocalUiState {
   const next = cloneLocalUiState(persisted ?? emptyLocalUiState())
-  next.activeHostId = hostId
-  if (!Object.hasOwn(next.hosts, hostId)) {
+  next.activeConnectionId = connectionId
+  if (!Object.hasOwn(next.connections, connectionId)) {
     const selectedWorkId = persisted === null ? safeId(legacy.selectedWorkId) : null
     const drafts = dictionary<string>()
     if (selectedWorkId && persisted === null && typeof legacy.draft === 'string' && legacy.draft.length > 0) {
       drafts[selectedWorkId] = legacy.draft.slice(0, MAX_DRAFT_LENGTH)
     }
-    next.hosts[hostId] = {
+    next.connections[connectionId] = {
       selectedWorkId,
       drafts,
       attachments: dictionary<AttachmentDto[]>(),
@@ -68,7 +68,7 @@ export function migrateLocalUiState(
   return next
 }
 
-export function readAndMigrateLocalUiState(storage: Storage | null, hostId: string): LocalUiState {
+export function readAndMigrateLocalUiState(storage: Storage | null, connectionId: string): LocalUiState {
   let serialized: string | null = null
   let legacy: LegacyLocalUiState = { selectedWorkId: null, draft: null }
   try {
@@ -81,7 +81,7 @@ export function readAndMigrateLocalUiState(storage: Storage | null, hostId: stri
     // Storage can be disabled; the in-memory state remains usable.
   }
 
-  const next = migrateLocalUiState(decodeLocalUiState(serialized), legacy, hostId)
+  const next = migrateLocalUiState(decodeLocalUiState(serialized), legacy, connectionId)
   try {
     storage?.setItem(LOCAL_UI_STATE_KEY, JSON.stringify(next))
     storage?.removeItem(LEGACY_SELECTED_WORK_KEY)
@@ -104,17 +104,18 @@ export function persistLocalUiState(storage: Storage | null, state: LocalUiState
 
 function normalizeLocalUiState(value: unknown): LocalUiState | null {
   if (!isRecord(value)
-    || (value.schemaVersion !== 1 && value.schemaVersion !== 2 && value.schemaVersion !== 3)
-    || !isRecord(value.hosts)) return null
-  const hosts = dictionary<HostLocalUiState>()
-  for (const [hostId, hostValue] of Object.entries(value.hosts)) {
-    if (!safeId(hostId) || !isRecord(hostValue) || !isRecord(hostValue.drafts)) continue
+    || (value.schemaVersion !== 1 && value.schemaVersion !== 2 && value.schemaVersion !== 3 && value.schemaVersion !== 4)) return null
+  const rawConnections = value.schemaVersion === 4 ? value.connections : value.hosts
+  if (!isRecord(rawConnections)) return null
+  const connections = dictionary<ConnectionLocalUiState>()
+  for (const [connectionId, hostValue] of Object.entries(rawConnections)) {
+    if (!safeId(connectionId) || !isRecord(hostValue) || !isRecord(hostValue.drafts)) continue
     const drafts = dictionary<string>()
     for (const [workId, draft] of Object.entries(hostValue.drafts)) {
       if (safeId(workId) && typeof draft === 'string') drafts[workId] = draft.slice(0, MAX_DRAFT_LENGTH)
     }
     const attachments = dictionary<AttachmentDto[]>()
-    if ((value.schemaVersion === 2 || value.schemaVersion === 3) && isRecord(hostValue.attachments)) {
+    if (value.schemaVersion >= 2 && isRecord(hostValue.attachments)) {
       for (const [workId, raw] of Object.entries(hostValue.attachments)) {
         if (!safeId(workId) || !Array.isArray(raw)) continue
         const valid = raw.map(normalizeAttachment).filter((item): item is AttachmentDto => item !== null)
@@ -122,14 +123,14 @@ function normalizeLocalUiState(value: unknown): LocalUiState | null {
       }
     }
     const recentWorkspaces = dictionary<string[]>()
-    if (value.schemaVersion === 3 && isRecord(hostValue.recentWorkspaces)) {
+    if (value.schemaVersion >= 3 && isRecord(hostValue.recentWorkspaces)) {
       for (const [machineHostId, rawPaths] of Object.entries(hostValue.recentWorkspaces).slice(0, MAX_RECENT_MACHINES)) {
         if (!safeId(machineHostId) || !Array.isArray(rawPaths)) continue
         const paths = uniqueWorkspacePaths(rawPaths)
         if (paths.length) recentWorkspaces[machineHostId] = paths
       }
     }
-    hosts[hostId] = {
+    connections[connectionId] = {
       selectedWorkId: safeId(hostValue.selectedWorkId),
       drafts,
       attachments,
@@ -139,8 +140,8 @@ function normalizeLocalUiState(value: unknown): LocalUiState | null {
   }
   return {
     schemaVersion: LOCAL_UI_STATE_SCHEMA_VERSION,
-    activeHostId: safeId(value.activeHostId),
-    hosts,
+    activeConnectionId: safeId(value.schemaVersion === 4 ? value.activeConnectionId : value.activeHostId),
+    connections,
   }
 }
 
@@ -165,15 +166,16 @@ function normalizeAttachment(value: unknown): AttachmentDto | null {
 }
 
 function normalizeLocalAttachmentUpload(value: unknown): AttachmentDto['localUpload'] | null {
-  if (!isRecord(value)
-    || typeof value.hostId !== 'string' || !safeId(value.hostId)
+  if (!isRecord(value)) return null
+  const connectionId = typeof value.connectionId === 'string' ? value.connectionId : value.hostId
+  if (typeof connectionId !== 'string' || !safeId(connectionId)
     || typeof value.selectionGeneration !== 'number' || !Number.isSafeInteger(value.selectionGeneration) || value.selectionGeneration < 1
     || typeof value.instanceId !== 'string' || !safeId(value.instanceId)
     || typeof value.machineHostId !== 'string' || !safeId(value.machineHostId)
     || typeof value.ownerHostEpoch !== 'string' || !value.ownerHostEpoch
     || typeof value.runtimeGeneration !== 'number' || !Number.isSafeInteger(value.runtimeGeneration) || value.runtimeGeneration < 0) return null
   return {
-    hostId: value.hostId,
+    connectionId,
     selectionGeneration: value.selectionGeneration,
     instanceId: value.instanceId,
     machineHostId: value.machineHostId,
@@ -188,43 +190,43 @@ function uniqueAttachments(items: AttachmentDto[]) {
 }
 
 function cloneLocalUiState(state: LocalUiState): LocalUiState {
-  const hosts = dictionary<HostLocalUiState>()
-  for (const [hostId, host] of Object.entries(state.hosts)) {
+  const connections = dictionary<ConnectionLocalUiState>()
+  for (const [connectionId, connection] of Object.entries(state.connections)) {
     const attachments = dictionary<AttachmentDto[]>()
-    for (const [workId, items] of Object.entries(host.attachments)) attachments[workId] = items.map((item) => ({ ...item }))
+    for (const [workId, items] of Object.entries(connection.attachments)) attachments[workId] = items.map((item) => ({ ...item }))
     const recentWorkspaces = dictionary<string[]>()
-    for (const [machineHostId, paths] of Object.entries(host.recentWorkspaces)) recentWorkspaces[machineHostId] = [...paths]
-    hosts[hostId] = {
-      selectedWorkId: host.selectedWorkId,
-      drafts: Object.assign(dictionary<string>(), host.drafts),
+    for (const [machineHostId, paths] of Object.entries(connection.recentWorkspaces)) recentWorkspaces[machineHostId] = [...paths]
+    connections[connectionId] = {
+      selectedWorkId: connection.selectedWorkId,
+      drafts: Object.assign(dictionary<string>(), connection.drafts),
       attachments,
       recentWorkspaces,
-      detailMode: host.detailMode,
+      detailMode: connection.detailMode,
     }
   }
   return {
     schemaVersion: LOCAL_UI_STATE_SCHEMA_VERSION,
-    activeHostId: state.activeHostId,
-    hosts,
+    activeConnectionId: state.activeConnectionId,
+    connections,
   }
 }
 
 export function rememberRecentWorkspace(
   state: LocalUiState,
-  hostId: string,
+  connectionId: string,
   machineHostId: string,
   path: string,
   platform?: MachinePlatform,
 ): boolean {
-  const host = state.hosts[hostId]
-  if (!host || !safeId(machineHostId) || !safeWorkspacePath(path)) return false
-  if (!Object.hasOwn(host.recentWorkspaces, machineHostId)) {
-    const machineIds = Object.keys(host.recentWorkspaces)
-    if (machineIds.length >= MAX_RECENT_MACHINES) delete host.recentWorkspaces[machineIds[0]!]
+  const connection = state.connections[connectionId]
+  if (!connection || !safeId(machineHostId) || !safeWorkspacePath(path)) return false
+  if (!Object.hasOwn(connection.recentWorkspaces, machineHostId)) {
+    const machineIds = Object.keys(connection.recentWorkspaces)
+    if (machineIds.length >= MAX_RECENT_MACHINES) delete connection.recentWorkspaces[machineIds[0]!]
   }
-  const current = host.recentWorkspaces[machineHostId] ?? []
+  const current = connection.recentWorkspaces[machineHostId] ?? []
   const key = workspacePathKey(path, platform)
-  host.recentWorkspaces[machineHostId] = [
+  connection.recentWorkspaces[machineHostId] = [
     path,
     ...current.filter((candidate) => workspacePathKey(candidate, platform) !== key),
   ].slice(0, MAX_RECENT_WORKSPACES_PER_MACHINE)

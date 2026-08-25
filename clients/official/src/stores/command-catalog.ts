@@ -1,7 +1,7 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import { commandCatalog } from '../lib/bridge'
-import type { CommandsResult, HostContext, Work } from '../lib/types'
+import type { CommandsResult, ConnectionContext, Work } from '../lib/types'
 import { commandCatalogGenerationKey } from '../lib/generationCaches'
 
 export type CommandCatalogState = 'idle' | 'loading' | 'ready' | 'truncated' | 'failed'
@@ -18,7 +18,7 @@ export const useCommandCatalogStore = defineStore('command-catalog', () => {
 
   const commands = computed(() => result.value?.commands ?? [])
 
-  async function ensure(work: Work, context: HostContext, force = false): Promise<boolean> {
+  async function ensure(work: Work, context: ConnectionContext, force = false): Promise<boolean> {
     const nextKey = commandCatalogGenerationKey(work, context)
     if (!force && key.value === nextKey && state.value !== 'idle' && state.value !== 'failed') return true
     const current = ++epoch

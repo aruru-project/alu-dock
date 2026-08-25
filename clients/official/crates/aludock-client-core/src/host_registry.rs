@@ -32,7 +32,7 @@ const LEGACY_COPY_MARKER: &str = ".legacy-copy-complete";
 const LEGACY_TRANSACTION_STAGING: &str = ".legacy-transaction-staging";
 const TRANSACTION_METADATA: &str = "transaction.json";
 const TRANSACTION_IDENTITY: &str = "identity";
-const REGISTRY_SCHEMA_VERSION: u32 = 1;
+const REGISTRY_SCHEMA_VERSION: u32 = 2;
 
 const LEGACY_FILES: &[&str] = &[
     "client-identity-manifest.json",
@@ -59,6 +59,10 @@ pub struct HostRegistrySnapshot {
     pub schema_version: u32,
     pub revision: u64,
     pub active_host_id: Option<String>,
+    #[serde(default)]
+    pub local_selected: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_endpoint_override: Option<String>,
     pub hosts: Vec<HostRecord>,
 }
 
@@ -68,12 +72,22 @@ impl HostRegistrySnapshot {
             schema_version: REGISTRY_SCHEMA_VERSION,
             revision: 1,
             active_host_id: None,
+            local_selected: false,
+            local_endpoint_override: None,
             hosts: Vec::new(),
         }
     }
 
     fn validate(&self) -> Result<()> {
-        if self.schema_version != REGISTRY_SCHEMA_VERSION || self.revision == 0 {
+        if !matches!(self.schema_version, 1 | REGISTRY_SCHEMA_VERSION)
+            || self.revision == 0
+            || (self.schema_version == 1
+                && (self.local_selected || self.local_endpoint_override.is_some()))
+            || (self.local_selected && self.active_host_id.is_some())
+            || self.local_endpoint_override.as_ref().is_some_and(|value| {
+                crate::local_transport::LocalDockEndpoint::configured(value).is_err()
+            })
+        {
             return Err(invalid(
                 "stored Host registry schema or revision is invalid",
             ));
@@ -101,9 +115,9 @@ impl HostRegistrySnapshot {
                     return Err(invalid("active Host is not present in the registry"));
                 }
             }
-            None if !self.hosts.is_empty() => {
+            None if !self.hosts.is_empty() && !self.local_selected => {
                 return Err(invalid(
-                    "a non-empty Host registry must have an active Host",
+                    "a non-empty Host registry must have one selected connection",
                 ));
             }
             None => {}
@@ -213,6 +227,7 @@ impl HostRegistry {
         if registry.load_snapshot()?.is_none() {
             registry.publish_initial(&HostRegistrySnapshot::empty())?;
         }
+        registry.migrate_registry_schema()?;
         registry.snapshot()?;
         Ok(registry)
     }
@@ -224,6 +239,33 @@ impl HostRegistry {
     pub fn snapshot(&self) -> Result<HostRegistrySnapshot> {
         self.load_snapshot()?
             .ok_or_else(|| invalid("Host registry has no committed snapshot"))
+    }
+
+    pub fn select_local(&self, expected_revision: u64) -> Result<HostRegistrySnapshot> {
+        let current = self.snapshot()?;
+        crate::local_transport::LocalDockEndpoint::resolve(
+            current.local_endpoint_override.as_deref(),
+        )?;
+        self.mutate(expected_revision, |snapshot| {
+            snapshot.active_host_id = None;
+            snapshot.local_selected = true;
+            Ok(())
+        })
+    }
+
+    pub fn set_local_endpoint_override(
+        &self,
+        expected_revision: u64,
+        endpoint: Option<&str>,
+    ) -> Result<HostRegistrySnapshot> {
+        let endpoint = endpoint.map(str::trim).filter(|value| !value.is_empty());
+        if let Some(value) = endpoint {
+            crate::local_transport::LocalDockEndpoint::configured(value)?;
+        }
+        self.mutate(expected_revision, |snapshot| {
+            snapshot.local_endpoint_override = endpoint.map(str::to_owned);
+            Ok(())
+        })
     }
 
     pub fn resolve_store(&self, requested_host_id: Option<&str>) -> Result<IdentityStore> {
@@ -270,11 +312,12 @@ impl HostRegistry {
                 return Err(ClientError::HostNotFound(host_id.to_owned()));
             }
             snapshot.active_host_id = Some(host_id.to_owned());
+            snapshot.local_selected = false;
             Ok(())
         })
     }
 
-    pub fn remove_local_host(
+    pub fn remove_host(
         &self,
         host_id: &str,
         expected_revision: u64,
@@ -283,10 +326,10 @@ impl HostRegistry {
             .replacement_lock
             .lock()
             .map_err(|_| invalid("Host replacement lock is unavailable"))?;
-        self.remove_local_host_internal(host_id, expected_revision, true)
+        self.remove_host_internal(host_id, expected_revision, true)
     }
 
-    fn remove_local_host_internal(
+    fn remove_host_internal(
         &self,
         host_id: &str,
         expected_revision: u64,
@@ -670,7 +713,7 @@ impl HostRegistry {
                 profile.last_successful_endpoint_id = saved_profile.last_successful_endpoint_id;
                 Ok(())
             })?;
-            self.remove_local_host_internal(expected_host_id, current.revision, false)?;
+            self.remove_host_internal(expected_host_id, current.revision, false)?;
         }
         self.promote_pairing(&transaction_id, expected_host_id)
     }
@@ -722,6 +765,18 @@ impl HostRegistry {
         } else {
             error
         }
+    }
+
+    fn migrate_registry_schema(&self) -> Result<()> {
+        let snapshot = self.snapshot()?;
+        if snapshot.schema_version == REGISTRY_SCHEMA_VERSION {
+            return Ok(());
+        }
+        self.mutate(snapshot.revision, |current| {
+            current.schema_version = REGISTRY_SCHEMA_VERSION;
+            Ok(())
+        })?;
+        Ok(())
     }
 
     fn load_snapshot(&self) -> Result<Option<HostRegistrySnapshot>> {
@@ -1001,6 +1056,7 @@ impl HostRegistry {
                 });
                 snapshot.hosts.sort_by(|a, b| a.host_id.cmp(&b.host_id));
                 snapshot.active_host_id = Some(host_id.to_owned());
+                snapshot.local_selected = false;
                 Ok(())
             }) {
                 Ok(snapshot) => return Ok(snapshot),
@@ -1178,9 +1234,11 @@ impl HostRegistry {
         remove_legacy_copy_marker(&destination)?;
         match self.load_snapshot()? {
             None => self.publish_initial(&HostRegistrySnapshot {
-                schema_version: 1,
+                schema_version: REGISTRY_SCHEMA_VERSION,
                 revision: 1,
                 active_host_id: Some(operation.host_id.clone()),
+                local_selected: false,
+                local_endpoint_override: None,
                 hosts: vec![HostRecord {
                     host_id: operation.host_id.clone(),
                     added_at: now_rfc3339()?,
@@ -1372,9 +1430,11 @@ impl HostRegistry {
             remove_legacy_copy_marker(&destination)?;
             if self.load_snapshot()?.is_none() {
                 self.publish_initial(&HostRegistrySnapshot {
-                    schema_version: 1,
+                    schema_version: REGISTRY_SCHEMA_VERSION,
                     revision: 1,
                     active_host_id: Some(id.clone()),
+                    local_selected: false,
+                    local_endpoint_override: None,
                     hosts: vec![HostRecord {
                         host_id: id,
                         added_at: now_rfc3339()?,
@@ -1949,6 +2009,28 @@ mod tests {
         (transaction_id, id)
     }
 
+    #[cfg(not(any(target_os = "windows", target_os = "android")))]
+    #[test]
+    fn chosen_local_connection_and_override_survive_reopening_the_client() {
+        let path = root("local-selection");
+        let registry = HostRegistry::open(&path).unwrap();
+        let configured = registry
+            .set_local_endpoint_override(1, Some("/tmp/alu-dock-review.sock"))
+            .unwrap();
+        let selected = registry.select_local(configured.revision).unwrap();
+        drop(registry);
+
+        let reopened = HostRegistry::open(&path).unwrap().snapshot().unwrap();
+        assert!(reopened.local_selected);
+        assert!(reopened.active_host_id.is_none());
+        assert_eq!(
+            reopened.local_endpoint_override.as_deref(),
+            Some("/tmp/alu-dock-review.sock")
+        );
+        assert_eq!(reopened.revision, selected.revision);
+        fs::remove_dir_all(path).unwrap();
+    }
+
     #[test]
     fn creates_a_versioned_empty_registry_and_rejects_future_schema() {
         let path = root("schema");
@@ -1959,7 +2041,7 @@ mod tests {
             .join("registry-00000000000000000001.json");
         let mut value: serde_json::Value =
             serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
-        value["schemaVersion"] = 2.into();
+        value["schemaVersion"] = (REGISTRY_SCHEMA_VERSION + 1).into();
         fs::write(&file, serde_json::to_vec(&value).unwrap()).unwrap();
         assert!(HostRegistry::open(&path).is_err());
         fs::remove_dir_all(path).unwrap();
@@ -2130,7 +2212,7 @@ mod tests {
             .transactions_directory()
             .join(&replacement.transaction_id);
         let revision = registry.snapshot().unwrap().revision;
-        registry.remove_local_host(&host_id, revision).unwrap();
+        registry.remove_host(&host_id, revision).unwrap();
 
         assert!(registry.pairing_transactions().unwrap().is_empty());
         assert!(!replacement_directory.exists());
@@ -2164,7 +2246,7 @@ mod tests {
             )
         });
         barrier.wait();
-        registry.remove_local_host(&host_id, revision).unwrap();
+        registry.remove_host(&host_id, revision).unwrap();
         let _ = starter.join().unwrap();
 
         assert!(registry.snapshot().unwrap().hosts.is_empty());
@@ -2266,7 +2348,7 @@ mod tests {
                 .exists()
         );
         registry
-            .remove_local_host(&migrated_host, snapshot.revision)
+            .remove_host(&migrated_host, snapshot.revision)
             .unwrap();
 
         assert!(
@@ -2444,7 +2526,7 @@ mod tests {
         registry.promote_pairing(&tx_a, &id_a).unwrap();
         let (tx_b, id_b) = synthetic_host(&registry, &host_b);
         let revision = registry.promote_pairing(&tx_b, &id_b).unwrap();
-        let snapshot = registry.remove_local_host(&id_b, revision).unwrap();
+        let snapshot = registry.remove_host(&id_b, revision).unwrap();
         assert!(!registry.hosts_directory().join(&id_b).exists());
         assert!(registry.hosts_directory().join(&id_a).exists());
         assert_eq!(snapshot.active_host_id.as_deref(), Some(id_a.as_str()));
@@ -2528,9 +2610,7 @@ mod tests {
         let revision = registry
             .promote_pairing(&next.transaction_id, &migrated_host_id)
             .unwrap();
-        registry
-            .remove_local_host(&migrated_host_id, revision)
-            .unwrap();
+        registry.remove_host(&migrated_host_id, revision).unwrap();
         assert!(
             !path
                 .join("state")

@@ -1,12 +1,12 @@
 import type { ControlSection } from './localCommands'
-import type { HostContext, Work } from './types'
+import type { ConnectionContext, Work } from './types'
 
 export type GenerationCache = 'commands' | 'resources' | 'tools' | 'settings'
 export type GenerationCacheState = 'idle' | 'loading' | 'ready' | 'error'
 export type GenerationCacheStates = Record<GenerationCache, GenerationCacheState>
 
-export function commandCatalogGenerationKey(work: Work, context: HostContext): string {
-  return `${context.hostId}:${context.selectionGeneration}:${work.id}:${work.hostId ?? ''}:${work.ownerHostEpoch ?? ''}:${work.runtimeGeneration}`
+export function commandCatalogGenerationKey(work: Work, context: ConnectionContext): string {
+  return `${context.connectionId}:${context.selectionGeneration}:${work.id}:${work.hostId ?? ''}:${work.ownerHostEpoch ?? ''}:${work.runtimeGeneration}`
 }
 
 export function pendingGenerationCaches(): GenerationCacheStates {
@@ -14,7 +14,7 @@ export function pendingGenerationCaches(): GenerationCacheStates {
 }
 
 export function generationSectionState(section: ControlSection, caches: GenerationCacheStates): GenerationCacheState {
-  const required: GenerationCache[] = section === 'commands'
+  const required: GenerationCache[] = section === 'commands' || section === 'dock-tools'
     ? ['commands']
     : section === 'resources'
       ? ['resources', 'tools']

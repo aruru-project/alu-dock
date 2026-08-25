@@ -302,6 +302,11 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
   font-size: 11px;
   margin-left: 2px;
 }
+.alu-nav-dock-tools { display: inline-flex; min-height: 32px; align-items: center; gap: 6px; padding: 5px 9px; border: 1px solid var(--alu-border-light); border-radius: 999px; color: var(--alu-text-muted); background: rgba(20, 28, 46, .8); font-size: 10px; white-space: nowrap; }
+.alu-nav-dock-tools:hover { color: var(--alu-text); border-color: var(--alu-blue-border); background: var(--alu-blue-bg); }
+.alu-nav-dock-tools b { color: var(--alu-text-faint); font-size: 8px; letter-spacing: .08em; }
+.alu-nav-dock-tools.active { color: var(--alu-mint); border-color: color-mix(in srgb, var(--alu-mint) 32%, var(--alu-border)); background: color-mix(in srgb, var(--alu-mint) 7%, transparent); }
+.alu-nav-dock-tools.active b { color: var(--alu-mint); }
 
 .alu-nav-hamburger {
   width: 40px;
@@ -1812,6 +1817,7 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 }
 .cmd-palette-item-row { display: grid; grid-template-columns: minmax(0, 1fr) max-content; align-items: center; gap: 3px; }
 .cmd-palette-item.selected { background: var(--alu-hover); border-color: var(--alu-border); }
+.cmd-palette-item.is-important .cmd-palette-item-icon, .cmd-palette-item.is-important .cmd-palette-item-label { color: color-mix(in srgb, var(--alu-red) 78%, var(--alu-text)); }
 .cmd-palette-content-btn {
   min-height: 32px;
   padding: 5px 8px;
@@ -1826,7 +1832,7 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 .cmd-palette-item-top { display: flex; min-width: 0; align-items: baseline; gap: 8px; }
 .cmd-palette-item-label { overflow: hidden; color: var(--alu-text); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .cmd-palette-item-argument { color: var(--alu-text-muted); font-weight: 400; }
-.cmd-palette-item-desc { overflow: hidden; color: var(--alu-text-muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.cmd-palette-item-desc { overflow: hidden; color: var(--alu-text-dim); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .cmd-palette-item-hint { flex: 0 0 auto; padding: 1px 5px; border: 1px solid var(--alu-border); border-radius: 999px; color: var(--alu-text-faint); font-size: 8px; }
 .cmd-palette-empty { padding: 44px 14px; color: var(--alu-text-muted); font-size: 12px; text-align: center; }
 .cmd-palette-footer { flex: 0 0 auto; padding: 8px 14px; border-top: 1px solid var(--alu-border); color: var(--alu-text-faint); font-size: 9px; }
@@ -1901,7 +1907,7 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 .cmd-center-description {
   flex: 0 0 auto;
   padding: 10px 14px 0;
-  color: var(--alu-text-muted);
+  color: var(--alu-text-dim);
   font-size: 10px;
   line-height: 1.5;
 }
@@ -2017,6 +2023,26 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 .cmd-center-entry.is-error { color: #f69aae; }
 .cmd-center-entry.is-error .cmd-center-entry-marker { color: var(--alu-red); }
 .cmd-center-footer { min-height: 31px; }
+
+.dock-tools-panel { display: grid; gap: 12px; padding: 4px 0 0; }
+.dock-tools-hero { display: grid; grid-template-columns: 44px minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 15px; border: 1px solid var(--alu-border); border-radius: 11px; background: linear-gradient(135deg, color-mix(in srgb, var(--alu-blue) 7%, var(--alu-bg-raised)), var(--alu-bg-raised)); }
+.dock-tools-mark { display: grid; width: 42px; height: 42px; place-items: center; border: 1px solid var(--alu-blue-border); border-radius: 11px; color: var(--alu-blue); background: var(--alu-blue-bg); }
+.dock-tools-hero > div { display: grid; gap: 3px; }
+.dock-tools-kicker { color: var(--alu-pink); font-size: 7px; font-weight: 750; letter-spacing: .16em; }
+.dock-tools-hero h3 { margin: 0; color: var(--alu-text); font-size: 17px; }
+.dock-tools-hero p { margin: 0; color: var(--alu-text-muted); font: 9px/1.45 var(--font-reading); }
+.dock-tools-state { padding: 4px 7px; border: 1px solid var(--alu-border); border-radius: 999px; color: var(--alu-text-faint); font-size: 8px; font-weight: 750; letter-spacing: .08em; }
+.dock-tools-state[data-state="on"] { color: var(--alu-mint); border-color: color-mix(in srgb, var(--alu-mint) 30%, var(--alu-border)); background: color-mix(in srgb, var(--alu-mint) 7%, transparent); }
+.dock-tools-capabilities { display: grid; grid-template-columns: repeat(3, 1fr); overflow: hidden; border: 1px solid var(--alu-border); border-radius: 10px; background: var(--alu-bg-raised); }
+.dock-tools-capabilities > span { display: grid; gap: 4px; padding: 12px; }
+.dock-tools-capabilities > span + span { border-left: 1px solid var(--alu-border); }
+.dock-tools-capabilities strong { color: var(--alu-text); font-size: 10px; }
+.dock-tools-capabilities small { color: var(--alu-text-muted); font: 8px/1.45 var(--font-reading); }
+.dock-tools-toggle { display: flex; min-height: 44px; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 13px; border: 1px solid var(--alu-blue-border); border-radius: 9px; color: var(--alu-blue); background: var(--alu-blue-bg); text-align: left; }
+.dock-tools-toggle.active { color: var(--alu-text-muted); border-color: var(--alu-border); background: var(--alu-bg-raised); }
+.dock-tools-toggle > span { font-size: 11px; font-weight: 650; }
+.dock-tools-toggle small { color: var(--alu-text-faint); font-size: 8px; }
+.dock-tools-output { min-height: 72px; max-height: 150px; margin: 0; }
 
 /* ═══════════════════════════════════════════════════════
    消息出现动画
@@ -2551,6 +2577,10 @@ body.alu-terminal-body ::-webkit-scrollbar-thumb:hover { background: var(--alu-b
 }
 
 @media screen and (max-width: 640px) {
+  .alu-nav-dock-tools { min-width: 40px; justify-content: center; padding-inline: 7px; }
+  .alu-nav-dock-tools-label { display: none; }
+  .dock-tools-capabilities { grid-template-columns: 1fr; }
+  .dock-tools-capabilities > span + span { border-top: 1px solid var(--alu-border); border-left: 0; }
   .alu-nav-selector-model .alu-nav-selector-value { font-size: 0; }
   .alu-nav-selector-model .alu-nav-selector-value::before { content: attr(data-provider); font-size: 11px; }
   .alu-nav-stat-pill:nth-child(1),

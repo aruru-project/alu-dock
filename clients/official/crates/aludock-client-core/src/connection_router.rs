@@ -4,9 +4,10 @@ use tokio::time::timeout;
 
 use crate::{
     ClientError, ClientIdentity, Endpoint, HostConnectionProfile, IdentityStore, Result,
-    client::{HelloAck, negotiate_pinned_endpoint},
+    client::{HelloAck, negotiate_local_endpoint, negotiate_pinned_endpoint},
+    local_transport::LocalDockEndpoint,
     timing::CONNECTION_ACQUISITION_TIMEOUT,
-    tls::{ConnectedTls, PinnedTlsConnector},
+    tls::{ConnectedTransport, PinnedTlsConnector},
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -18,12 +19,12 @@ pub struct RouteSnapshot {
 }
 
 #[derive(Clone)]
-pub struct HostConnectionRouter {
+pub struct ConnectionRouter {
     inner: Arc<RouterInner>,
 }
 
 struct RouterInner {
-    connector: PinnedTlsConnector,
+    connector: Option<PinnedTlsConnector>,
     client_id: String,
     state: Mutex<RouterState>,
     route_generation: tokio::sync::watch::Sender<u64>,
@@ -31,13 +32,19 @@ struct RouterInner {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+enum CandidateTarget {
+    Pinned(Endpoint),
+    Local(LocalDockEndpoint),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct Candidate {
     id: String,
-    endpoint: Endpoint,
+    target: CandidateTarget,
 }
 
 struct RouterState {
-    host_id: String,
+    connection_id: String,
     config_revision: u64,
     route_generation: u64,
     resolution_generation: u64,
@@ -50,69 +57,30 @@ struct RouterState {
 }
 
 pub(crate) struct RoutedConnection {
-    pub(crate) connection: ConnectedTls,
+    pub(crate) connection: ConnectedTransport,
     pub(crate) hello: HelloAck,
     pub(crate) endpoint_id: String,
     pub(crate) route_generation: u64,
 }
 
-impl HostConnectionRouter {
+impl ConnectionRouter {
     pub fn from_store(store: &IdentityStore, profile: &HostConnectionProfile) -> Result<Self> {
         let paired = store.load_pairing()?;
         let candidates = candidates(profile)?;
-        let connector = PinnedTlsConnector::new(&paired.identity, Some(&paired.host_certificate))?;
+        let connector = Some(PinnedTlsConnector::new(
+            &paired.identity,
+            Some(&paired.host_certificate),
+        )?);
+        let client_id = paired.metadata.client_id;
         let active_endpoint_id = candidates.first().map(|candidate| candidate.id.clone());
         let (route_generation, _) = tokio::sync::watch::channel(1);
         Ok(Self {
             inner: Arc::new(RouterInner {
                 connector,
-                client_id: paired.metadata.client_id,
+                client_id,
                 state: Mutex::new(RouterState {
-                    host_id: profile.host_id.clone(),
+                    connection_id: profile.host_id.clone(),
                     config_revision: profile.revision,
-                    route_generation: 1,
-                    resolution_generation: 0,
-                    last_resolution_error: None,
-                    last_resolution_capabilities: None,
-                    recently_failed_endpoint_id: None,
-                    candidates,
-                    active_endpoint_id,
-                    closed: false,
-                }),
-                route_generation,
-                acquisition: tokio::sync::Mutex::new(()),
-            }),
-        })
-    }
-
-    pub(crate) fn from_store_endpoints(
-        store: &IdentityStore,
-        endpoints: Vec<Endpoint>,
-    ) -> Result<Self> {
-        if endpoints.is_empty() {
-            return Err(ClientError::InvalidEndpoint(
-                "at least one Host address is required".into(),
-            ));
-        }
-        let paired = store.load_pairing()?;
-        let connector = PinnedTlsConnector::new(&paired.identity, Some(&paired.host_certificate))?;
-        let candidates = endpoints
-            .into_iter()
-            .enumerate()
-            .map(|(index, endpoint)| Candidate {
-                id: format!("compatibility-endpoint-{index}"),
-                endpoint,
-            })
-            .collect::<Vec<_>>();
-        let active_endpoint_id = candidates.first().map(|candidate| candidate.id.clone());
-        let (route_generation, _) = tokio::sync::watch::channel(1);
-        Ok(Self {
-            inner: Arc::new(RouterInner {
-                connector,
-                client_id: paired.metadata.client_id,
-                state: Mutex::new(RouterState {
-                    host_id: "compatibility-client".into(),
-                    config_revision: 1,
                     route_generation: 1,
                     resolution_generation: 0,
                     last_resolution_error: None,
@@ -134,14 +102,14 @@ impl HostConnectionRouter {
         host_certificate: Vec<u8>,
         client_id: String,
     ) -> Result<Self> {
-        let connector = PinnedTlsConnector::new(&identity, Some(&host_certificate))?;
+        let connector = Some(PinnedTlsConnector::new(&identity, Some(&host_certificate))?);
         let (route_generation, _) = tokio::sync::watch::channel(1);
         Ok(Self {
             inner: Arc::new(RouterInner {
                 connector,
                 client_id,
                 state: Mutex::new(RouterState {
-                    host_id: "explicit-endpoint-probe".into(),
+                    connection_id: "explicit-endpoint-probe".into(),
                     config_revision: 1,
                     route_generation: 1,
                     resolution_generation: 0,
@@ -150,7 +118,7 @@ impl HostConnectionRouter {
                     recently_failed_endpoint_id: None,
                     candidates: vec![Candidate {
                         id: "explicit-endpoint".into(),
-                        endpoint,
+                        target: CandidateTarget::Pinned(endpoint),
                     }],
                     active_endpoint_id: None,
                     closed: false,
@@ -161,37 +129,41 @@ impl HostConnectionRouter {
         })
     }
 
-    pub(crate) fn endpoint_snapshot(&self) -> Vec<Endpoint> {
-        self.inner
-            .state
-            .lock()
-            .expect("Host connection router state poisoned")
-            .candidates
-            .iter()
-            .map(|candidate| candidate.endpoint.clone())
-            .collect()
-    }
-
-    pub(crate) fn prefer_endpoint(&self, endpoint_id: &str) -> Result<()> {
-        let mut state = self.inner.state.lock().map_err(|_| router_state_error())?;
-        if state.closed
-            || !state
-                .candidates
-                .iter()
-                .any(|candidate| candidate.id == endpoint_id)
-        {
-            return Err(ClientError::InvalidEndpoint(
-                "preferred Host address is not verified".into(),
-            ));
-        }
-        state.active_endpoint_id = Some(endpoint_id.to_owned());
-        Ok(())
+    pub fn local(
+        store: &IdentityStore,
+        endpoint: LocalDockEndpoint,
+        context_id: String,
+    ) -> Result<Self> {
+        let (route_generation, _) = tokio::sync::watch::channel(1);
+        Ok(Self {
+            inner: Arc::new(RouterInner {
+                connector: None,
+                client_id: store.client_id()?,
+                state: Mutex::new(RouterState {
+                    connection_id: context_id,
+                    config_revision: 1,
+                    route_generation: 1,
+                    resolution_generation: 0,
+                    last_resolution_error: None,
+                    last_resolution_capabilities: None,
+                    recently_failed_endpoint_id: None,
+                    candidates: vec![Candidate {
+                        id: "local-ipc".into(),
+                        target: CandidateTarget::Local(endpoint),
+                    }],
+                    active_endpoint_id: None,
+                    closed: false,
+                }),
+                route_generation,
+                acquisition: tokio::sync::Mutex::new(()),
+            }),
+        })
     }
 
     pub fn reconcile(&self, profile: &HostConnectionProfile) -> Result<()> {
         let next_candidates = candidates(profile)?;
         let mut state = self.inner.state.lock().map_err(|_| router_state_error())?;
-        if state.closed || state.host_id != profile.host_id {
+        if state.closed || state.connection_id != profile.host_id {
             return Err(router_closed_error());
         }
         if state.candidates == next_candidates {
@@ -505,14 +477,27 @@ impl HostConnectionRouter {
         &self,
         candidate: &Candidate,
         required_capabilities: &[&str],
-    ) -> Result<(ConnectedTls, HelloAck)> {
-        negotiate_pinned_endpoint(
-            &candidate.endpoint,
-            &self.inner.connector,
-            &self.inner.client_id,
-            required_capabilities,
-        )
-        .await
+    ) -> Result<(ConnectedTransport, HelloAck)> {
+        match &candidate.target {
+            CandidateTarget::Pinned(endpoint) => {
+                let connector = self.inner.connector.as_ref().ok_or_else(|| {
+                    ClientError::InvalidPairing(
+                        "the selected Host has no paired network identity".into(),
+                    )
+                })?;
+                negotiate_pinned_endpoint(
+                    endpoint,
+                    connector,
+                    &self.inner.client_id,
+                    required_capabilities,
+                )
+                .await
+            }
+            CandidateTarget::Local(endpoint) => {
+                negotiate_local_endpoint(endpoint, &self.inner.client_id, required_capabilities)
+                    .await
+            }
+        }
     }
 }
 
@@ -532,7 +517,7 @@ fn candidates(profile: &HostConnectionProfile) -> Result<Vec<Candidate>> {
         .into_iter()
         .map(|candidate| Candidate {
             id: candidate.id.clone(),
-            endpoint: candidate.endpoint.clone(),
+            target: CandidateTarget::Pinned(candidate.endpoint.clone()),
         })
         .collect::<Vec<_>>();
     if candidates.is_empty() {
@@ -722,15 +707,15 @@ mod tests {
         host: &ClientIdentity,
         candidates: Vec<(&str, Endpoint)>,
         active_endpoint_id: &str,
-    ) -> HostConnectionRouter {
+    ) -> ConnectionRouter {
         let connector = PinnedTlsConnector::new(client, Some(host.certificate_der())).unwrap();
         let (route_generation, _) = tokio::sync::watch::channel(1);
-        HostConnectionRouter {
+        ConnectionRouter {
             inner: Arc::new(RouterInner {
-                connector,
+                connector: Some(connector),
                 client_id: "test-client".into(),
                 state: Mutex::new(RouterState {
-                    host_id: "test-host".into(),
+                    connection_id: "test-host".into(),
                     config_revision: 1,
                     route_generation: 1,
                     resolution_generation: 0,
@@ -741,7 +726,7 @@ mod tests {
                         .into_iter()
                         .map(|(id, endpoint)| Candidate {
                             id: id.into(),
-                            endpoint,
+                            target: CandidateTarget::Pinned(endpoint),
                         })
                         .collect(),
                     active_endpoint_id: Some(active_endpoint_id.into()),

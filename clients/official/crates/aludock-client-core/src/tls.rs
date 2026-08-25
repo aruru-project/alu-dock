@@ -8,7 +8,7 @@ use rustls::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
     time::timeout,
 };
@@ -20,9 +20,24 @@ use crate::{
     timing::{CONNECT_PHASE_TIMEOUT, PROTOCOL_WRITE_TIMEOUT},
 };
 
+pub(crate) trait ControlStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T> ControlStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+
+pub(crate) struct ConnectedTransport {
+    pub stream: Box<dyn ControlStream>,
+}
+
 pub(crate) struct ConnectedTls {
     pub stream: TlsStream<TcpStream>,
     pub host_certificate: Vec<u8>,
+}
+
+impl From<ConnectedTls> for ConnectedTransport {
+    fn from(connection: ConnectedTls) -> Self {
+        Self {
+            stream: Box::new(connection.stream),
+        }
+    }
 }
 
 #[derive(Clone)]

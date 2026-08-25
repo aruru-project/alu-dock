@@ -9,7 +9,7 @@ import {
   listWorkspace,
   type CreateWorkContinuation,
 } from '../lib/bridge'
-import { currentHostCall, requireHostContext } from '../lib/hostResult'
+import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import {
   defaultMachineHostId,
   machineDisplayLabel,
@@ -168,7 +168,7 @@ async function browse(path: string) {
   workspaceSearch.value = ''
   error.value = ''
   try {
-    const page = await currentHostCall(app, (context) => listWorkspace(path, context, selectedMachine.hostId))
+    const page = await currentConnectionCall(app, (context) => listWorkspace(path, context, selectedMachine.hostId))
     if (epoch !== workspaceEpoch || selectedMachine.hostId !== machineHostId.value) return
     workspace.value = page
     workspacePath.value = page.path
@@ -189,10 +189,10 @@ async function loadInventory() {
   sessionSearch.value = ''
   error.value = ''
   try {
-    const context = requireHostContext(app)
-    const result = await currentHostCall(app, () => listSessionInventory(context, selectedMachine.hostId, machineWorkspaceStart(selectedMachine)))
+    const context = requireConnectionContext(app)
+    const result = await currentConnectionCall(app, () => listSessionInventory(context, selectedMachine.hostId, machineWorkspaceStart(selectedMachine)))
     if (epoch !== inventoryEpoch || selectedMachine.hostId !== machineHostId.value) return
-    if (result.hostId !== context.hostId
+    if (result.connectionId !== context.connectionId
       || result.selectionGeneration !== context.selectionGeneration
       || result.machineHostId !== selectedMachine.hostId
       || !result.hostEpoch) {
@@ -213,7 +213,7 @@ async function createAt(path: string, machineId = machineHostId.value, continuat
   pending.value = 'create'
   error.value = ''
   try {
-    const context = requireHostContext(app)
+    const context = requireConnectionContext(app)
     const work = await createWork(path, context, undefined, continuation, machineId)
     if (!app.contextMatches(context)) return
     trust.value = null
@@ -232,7 +232,7 @@ async function adoptSaved(sessionToken: string, machineId = machineHostId.value,
   pending.value = 'adopt'
   error.value = ''
   try {
-    const context = requireHostContext(app)
+    const context = requireConnectionContext(app)
     const work = await adoptSession(sessionToken, context, machineId, undefined, continuation)
     if (!app.contextMatches(context)) return
     trust.value = null

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::{
-    ClientError, ClientIdentity, DockClient, Endpoint, HostConnectionProfile, HostConnectionRouter,
+    ClientError, ClientIdentity, ConnectionRouter, DockClient, Endpoint, HostConnectionProfile,
     IdentityStore, PendingPairing, Result, StoredPairing, capabilities,
 };
 
@@ -60,7 +60,7 @@ pub async fn host_info_for_profile(
     store: &IdentityStore,
     profile: &HostConnectionProfile,
 ) -> Result<(HostInfo, String)> {
-    let client = DockClient::from_connection_profile(store, profile)?;
+    let client = DockClient::new(ConnectionRouter::from_store(store, profile)?);
     let info = client.host_info().await?;
     let endpoint_id = client
         .router()
@@ -112,7 +112,7 @@ async fn request_host_info(
     host_certificate: &[u8],
     client_id: &str,
 ) -> Result<HostInfo> {
-    DockClient::new(HostConnectionRouter::from_pinned_endpoint(
+    DockClient::new(ConnectionRouter::from_pinned_endpoint(
         endpoint.clone(),
         identity.clone(),
         host_certificate.to_vec(),

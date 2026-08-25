@@ -26,22 +26,22 @@ use aludock_client_core::{
     ClientError, ClientPreferences, ClientPreferencesStore, CommandArgumentCompletion,
     CommandCompletionItems, CommandCompletionsResult, CommandContentResult, CommandInfo,
     CommandReference, CommandsResult, CompletedConversationEntry, ConnectionKind, ConnectionPolicy,
-    ControllerEventData, ConversationPreviewPage, DeliverableDownloadProgress, DeliverableDto,
-    DeliveryMode, DiagnosticInfo, DockClient, Endpoint, EndpointState, EndpointTestResult,
-    EventCursor, ExtensionControllerLease, ExtensionEvent, HistoryRecord, HostConnectionProfile,
-    HostConnectionRouter, HostRegistry, HostRegistrySnapshot, IdentityStore, ImagePath,
+    ConnectionRouter, ControllerEventData, ConversationPreviewPage, DeliverableDownloadProgress,
+    DeliverableDto, DeliveryMode, DiagnosticInfo, DockClient, Endpoint, EndpointState,
+    EndpointTestResult, EventCursor, ExtensionControllerLease, ExtensionEvent, HistoryRecord,
+    HostConnectionProfile, HostRegistry, HostRegistrySnapshot, IdentityStore, ImagePath,
     InstanceCatalog, InstanceSelector, InstanceSnapshot, InteractionMethod, InteractionRequest,
-    InteractionResponse, Machine, ModelsResult, NavigateOptions, PairingProgress, PendingMessage,
-    ProjectTrustDecision, PublishedFileDto, QueueDequeueResult, ReadReplay, ResourceInfo,
-    ResourcesResult, SessionCompactionResult, SessionForkResult, SessionNameResult,
-    SessionNavigateResult, SessionReloadResult, SessionReplacementResult, SessionScope,
-    SessionTree, SettingUpdate, SettingUpdateResult, SettingsResult, SourceInfo, StopResult,
-    SubmitResult, ThinkingLevel, ToolInfo, ToolsResult, WindowsAwayDelay, WorkspaceFileCursor,
-    WorkspaceFileEntry, WorkspaceFilePage, WorkspaceFileReadProgress, WorkspaceFileReadResult,
-    WorkspacePage, delete_endpoint, probe_host_endpoint, record_endpoint_test, reorder_endpoints,
-    save_unverified_endpoint, save_verified_endpoint, saved_endpoint_for_test,
-    set_connection_policy as update_connection_policy, set_endpoint_enabled, validate_device_name,
-    validate_host_id,
+    InteractionResponse, LocalDockEndpoint, Machine, ModelsResult, NavigateOptions,
+    PairingProgress, PendingMessage, ProjectTrustDecision, PublishedFileDto, QueueDequeueResult,
+    ReadReplay, ResourceInfo, ResourcesResult, SessionCompactionResult, SessionForkResult,
+    SessionNameResult, SessionNavigateResult, SessionReloadResult, SessionReplacementResult,
+    SessionScope, SessionTree, SettingUpdate, SettingUpdateResult, SettingsResult, SourceInfo,
+    StopResult, SubmitResult, ThinkingLevel, ToolInfo, ToolsResult, WindowsAwayDelay,
+    WorkspaceFileCursor, WorkspaceFileEntry, WorkspaceFilePage, WorkspaceFileReadProgress,
+    WorkspaceFileReadResult, WorkspacePage, delete_endpoint, probe_host_endpoint,
+    record_endpoint_test, reorder_endpoints, save_unverified_endpoint, save_verified_endpoint,
+    saved_endpoint_for_test, set_connection_policy as update_connection_policy,
+    set_endpoint_enabled, validate_device_name, validate_host_id,
 };
 use aludock_client_core::{MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_MESSAGE};
 use serde::{Deserialize, Serialize};
@@ -66,7 +66,7 @@ const AWAY_POLL_INTERVAL: Duration = Duration::from_secs(30);
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BootstrapPayload {
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     max_attachments_per_message: usize,
     host: HostSummary,
@@ -78,7 +78,7 @@ struct BootstrapPayload {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkCatalogPayload {
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     host_epoch: String,
     instances: Vec<InstanceSnapshot>,
@@ -102,8 +102,11 @@ struct HostCatalogEntry {
 struct HostCatalog {
     schema_version: u32,
     revision: u64,
-    active_host_id: Option<String>,
+    active_target: Option<ConnectionTarget>,
+    local_endpoint_override: Option<String>,
+    local_endpoint_effective: Option<String>,
     selection_generation: u64,
+    local_connection_supported: bool,
     hosts: Vec<HostCatalogEntry>,
     pairing_transaction_ids: Vec<String>,
     pairing_transactions: Vec<RecoverablePairing>,
@@ -127,7 +130,7 @@ struct HostSummary {
     dock_version: String,
     pi_sdk_version: String,
     started_at: String,
-    profile: HostConnectionProfile,
+    profile: Option<HostConnectionProfile>,
     active_endpoint_id: String,
 }
 
@@ -207,7 +210,7 @@ struct SelectedAttachment {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AttachmentProgressEmission {
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     work_id: String,
     machine_host_id: String,
@@ -222,7 +225,7 @@ struct AttachmentProgressEmission {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct DeliverableProgressEmission {
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     delivery_ref: String,
@@ -256,7 +259,7 @@ enum DeliverableSaveResult {
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceReadProgressEmission {
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     read_id: String,
@@ -330,7 +333,7 @@ struct WorkspaceFileStateInner {
 
 struct ActiveWorkspaceRead {
     read_id: String,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     cancellation: Arc<WorkspaceReadCancellation>,
@@ -339,7 +342,7 @@ struct ActiveWorkspaceRead {
 #[derive(Clone)]
 struct CachedWorkspaceFile {
     cache_id: String,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     runtime_generation: u64,
@@ -366,7 +369,7 @@ impl WorkspaceFileState {
     fn begin(
         &self,
         read_id: String,
-        host_id: String,
+        connection_id: String,
         selection_generation: u64,
         instance_id: String,
     ) -> Result<Arc<WorkspaceReadCancellation>, CommandError> {
@@ -380,7 +383,7 @@ impl WorkspaceFileState {
         }
         inner.active = Some(ActiveWorkspaceRead {
             read_id: read_id.clone(),
-            host_id,
+            connection_id,
             selection_generation,
             instance_id,
             cancellation: cancellation.clone(),
@@ -425,7 +428,7 @@ impl WorkspaceFileState {
 
     fn cancel(
         &self,
-        host_id: &str,
+        connection_id: &str,
         selection_generation: u64,
         instance_id: &str,
         read_id: &str,
@@ -435,7 +438,7 @@ impl WorkspaceFileState {
             return Ok(false);
         };
         if active.read_id != read_id
-            || active.host_id != host_id
+            || active.connection_id != connection_id
             || active.selection_generation != selection_generation
             || active.instance_id != instance_id
         {
@@ -447,7 +450,7 @@ impl WorkspaceFileState {
 
     fn cached(
         &self,
-        host_id: &str,
+        connection_id: &str,
         selection_generation: u64,
         instance_id: &str,
         host_epoch: &str,
@@ -457,7 +460,7 @@ impl WorkspaceFileState {
         let inner = self.inner.lock().map_err(|_| workspace_state_error())?;
         let cache = inner.cache.as_ref().ok_or_else(workspace_cache_missing)?;
         if cache.cache_id != cache_id
-            || cache.host_id != host_id
+            || cache.connection_id != connection_id
             || cache.selection_generation != selection_generation
             || cache.instance_id != instance_id
             || cache.result.host_epoch != host_epoch
@@ -488,7 +491,7 @@ struct AttachmentState {
 struct NativeAttachment {
     path: PathBuf,
     temporary: bool,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     work_id: String,
     operation_id: String,
@@ -534,7 +537,7 @@ impl AttachmentState {
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct RestoredImageScope {
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     work_id: String,
 }
@@ -631,7 +634,7 @@ impl RestoredImageState {
             })
     }
 
-    fn rebind_generation(&self, host_id: &str, old_generation: u64, new_generation: u64) {
+    fn rebind_generation(&self, connection_id: &str, old_generation: u64, new_generation: u64) {
         if old_generation == new_generation {
             return;
         }
@@ -642,13 +645,13 @@ impl RestoredImageState {
         let preserved = buckets
             .drain()
             .filter(|(scope, _)| {
-                scope.host_id == host_id && scope.selection_generation == old_generation
+                scope.connection_id == connection_id && scope.selection_generation == old_generation
             })
             .collect::<Vec<_>>();
         for (old_scope, bucket) in preserved {
             buckets.insert(
                 RestoredImageScope {
-                    host_id: old_scope.host_id,
+                    connection_id: old_scope.connection_id,
                     selection_generation: new_generation,
                     work_id: old_scope.work_id,
                 },
@@ -669,6 +672,7 @@ impl RestoredImageState {
 #[serde(rename_all = "camelCase")]
 struct SafeSource {
     kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     package: Option<String>,
 }
 
@@ -719,7 +723,7 @@ struct SafeCommandCompletionsResult {
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 struct CommandReferenceScope {
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
 }
@@ -742,11 +746,11 @@ impl CommandReferenceState {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         inner.generations.retain(|candidate, _| {
-            candidate.host_id != scope.host_id
+            candidate.connection_id != scope.connection_id
                 || candidate.selection_generation == scope.selection_generation
         });
         inner.scopes.retain(|candidate, _| {
-            candidate.host_id != scope.host_id
+            candidate.connection_id != scope.connection_id
                 || candidate.selection_generation == scope.selection_generation
         });
         let generation = inner
@@ -848,7 +852,7 @@ struct SafeDiagnostic {
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct FollowEmission {
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     subscription_id: String,
@@ -858,7 +862,7 @@ struct FollowEmission {
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct FollowStatus {
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     subscription_id: String,
@@ -873,7 +877,7 @@ struct FollowState {
 
 struct FollowTask {
     handle: tauri::async_runtime::JoinHandle<()>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     subscription_id: String,
@@ -882,14 +886,14 @@ struct FollowTask {
 impl FollowState {
     fn abort_matching(
         &self,
-        host_id: &str,
+        connection_id: &str,
         selection_generation: u64,
         instance_id: &str,
         subscription_id: Option<&str>,
     ) -> Result<bool, CommandError> {
         let mut guard = self.task.lock().map_err(|_| follow_state_error())?;
         let matches = guard.as_ref().is_some_and(|task| {
-            task.host_id == host_id
+            task.connection_id == connection_id
                 && task.selection_generation == selection_generation
                 && task.instance_id == instance_id
                 && subscription_id.map_or(true, |value| task.subscription_id == value)
@@ -918,7 +922,7 @@ struct ExtensionControlInner {
 #[derive(Clone)]
 struct ExtensionBinding {
     handle: String,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     host_epoch: String,
     instance_id: String,
@@ -932,7 +936,7 @@ struct ExtensionBinding {
 #[serde(rename_all = "camelCase")]
 struct SafeControllerBinding {
     handle: String,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     host_epoch: String,
     instance_id: String,
@@ -943,7 +947,7 @@ struct SafeControllerBinding {
 #[serde(rename_all = "camelCase")]
 struct ControllerEmission {
     handle: String,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     host_epoch: String,
     instance_id: String,
@@ -955,7 +959,7 @@ struct ControllerEmission {
 #[serde(rename_all = "camelCase")]
 struct ControllerStatusEmission {
     handle: String,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     host_epoch: String,
     instance_id: String,
@@ -991,7 +995,7 @@ struct SessionTokenRegistry {
 
 struct SessionTokenBinding {
     request_id: u64,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     scope: SessionTokenScope,
     session_file: String,
@@ -1027,7 +1031,7 @@ struct SafeSessionList {
     sessions: Vec<SafeSession>,
     total: u64,
     truncated: bool,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     host_epoch: String,
     runtime_generation: u64,
@@ -1051,7 +1055,7 @@ struct SafeSessionInventory {
     truncated: bool,
     incomplete: bool,
     machine_host_id: String,
-    host_id: String,
+    connection_id: String,
     host_epoch: String,
     selection_generation: u64,
 }
@@ -1079,38 +1083,73 @@ struct PairingEmission {
     selection_generation: Option<u64>,
 }
 
+const LOCAL_CONNECTION_SCOPE_ID: &str = "local";
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+enum ConnectionTarget {
+    Local,
+    Host { host_id: String },
+}
+
+impl ConnectionTarget {
+    fn scope_id(&self) -> &str {
+        match self {
+            Self::Local => LOCAL_CONNECTION_SCOPE_ID,
+            Self::Host { host_id } => host_id,
+        }
+    }
+}
+
 #[derive(Default)]
 struct RuntimeLifecycle {
-    active_host_id: Option<String>,
+    active_target: Option<ConnectionTarget>,
     selection_generation: u64,
 }
 
 #[derive(Clone)]
-struct HostRuntimeState {
+struct ConnectionRuntimeState {
     registry: HostRegistry,
     preferences: ClientPreferencesStore,
+    local_identity: IdentityStore,
     lifecycle: Arc<Mutex<RuntimeLifecycle>>,
-    selected_client: Arc<Mutex<Option<SelectedHostClient>>>,
+    selected_client: Arc<Mutex<Option<SelectedConnectionClient>>>,
 }
 
-struct SelectedHostClient {
-    host_id: String,
+struct SelectedConnectionClient {
+    target: ConnectionTarget,
     selection_generation: u64,
     client: DockClient,
 }
 
 impl RuntimeLifecycle {
-    fn transition_to(&mut self, host_id: Option<String>) -> Result<u64, CommandError> {
+    fn transition_to_host(&mut self, host_id: Option<String>) -> Result<u64, CommandError> {
+        self.transition_to(host_id.map(|host_id| ConnectionTarget::Host { host_id }))
+    }
+
+    fn transition_to_local(&mut self) -> Result<u64, CommandError> {
+        self.transition_to(Some(ConnectionTarget::Local))
+    }
+
+    fn transition_to(&mut self, target: Option<ConnectionTarget>) -> Result<u64, CommandError> {
         self.selection_generation = self
             .selection_generation
             .checked_add(1)
             .ok_or_else(lifecycle_error)?;
-        self.active_host_id = host_id;
+        self.active_target = target;
         Ok(self.selection_generation)
+    }
+
+    fn connection_id(&self) -> Option<&str> {
+        self.active_target.as_ref().map(ConnectionTarget::scope_id)
     }
 }
 
-impl HostRuntimeState {
+impl ConnectionRuntimeState {
     fn open(application_data_dir: Option<PathBuf>) -> Result<Self, ClientError> {
         let registry = if let Some(path) = std::env::var_os("ALUDOCK_CLIENT_IDENTITY_DIR") {
             HostRegistry::open(PathBuf::from(path))?
@@ -1120,12 +1159,21 @@ impl HostRuntimeState {
             HostRegistry::platform_default()?
         };
         let preferences = ClientPreferencesStore::open(registry.root().join("client-preferences"))?;
-        let active_host_id = registry.snapshot()?.active_host_id;
+        let local_identity = IdentityStore::new(registry.root().join("local-client-identity"));
+        let snapshot = registry.snapshot()?;
+        let active_target = if snapshot.local_selected {
+            Some(ConnectionTarget::Local)
+        } else {
+            snapshot
+                .active_host_id
+                .map(|host_id| ConnectionTarget::Host { host_id })
+        };
         Ok(Self {
             registry,
             preferences,
+            local_identity,
             lifecycle: Arc::new(Mutex::new(RuntimeLifecycle {
-                active_host_id,
+                active_target,
                 selection_generation: 1,
             })),
             selected_client: Arc::new(Mutex::new(None)),
@@ -1154,7 +1202,7 @@ impl From<ClientPreferences> for SafeClientPreferences {
 #[cfg(target_os = "windows")]
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct AwayCatalogContext {
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     host_epoch: String,
 }
@@ -1272,7 +1320,7 @@ impl AwayMonitorState {
     fn start(
         &self,
         app: tauri::AppHandle,
-        runtime: HostRuntimeState,
+        runtime: ConnectionRuntimeState,
         away_id: String,
         grace: Duration,
         running_instance_ids: Vec<String>,
@@ -1343,27 +1391,32 @@ fn away_monitor_error() -> CommandError {
 
 #[cfg(target_os = "windows")]
 async fn read_away_catalog(
-    runtime: &HostRuntimeState,
+    runtime: &ConnectionRuntimeState,
 ) -> Result<Option<AwayCatalogSnapshot>, CommandError> {
-    let (host_id, selection_generation) = {
+    let (connection_id, selection_generation) = {
         let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
-        let Some(host_id) = lifecycle.active_host_id.clone() else {
+        let Some(connection_id) = lifecycle
+            .active_target
+            .as_ref()
+            .map(|target| target.scope_id().to_owned())
+        else {
             return Ok(None);
         };
-        (host_id, lifecycle.selection_generation)
+        (connection_id, lifecycle.selection_generation)
     };
-    let store = resolve_host(runtime, &host_id, selection_generation)?;
-    let (catalog, host_epoch) = dock_client(&runtime, &host_id, selection_generation, &store)?
-        .list_instances_with_host_epoch(InstanceSelector::All)
-        .await
-        .map_err(CommandError::from)?;
+    let store = resolve_connection_store(runtime, &connection_id, selection_generation)?;
+    let (catalog, host_epoch) =
+        dock_client(&runtime, &connection_id, selection_generation, &store)?
+            .list_instances_with_host_epoch(InstanceSelector::All)
+            .await
+            .map_err(CommandError::from)?;
     {
         let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
-        ensure_host_selection(&lifecycle, &host_id, selection_generation)?;
+        ensure_connection_selection(&lifecycle, &connection_id, selection_generation)?;
     }
     Ok(Some(AwayCatalogSnapshot {
         context: AwayCatalogContext {
-            host_id,
+            connection_id,
             selection_generation,
             host_epoch,
         },
@@ -1382,7 +1435,7 @@ async fn read_away_catalog(
 #[cfg(target_os = "windows")]
 async fn monitor_while_away(
     app: tauri::AppHandle,
-    runtime: HostRuntimeState,
+    runtime: ConnectionRuntimeState,
     cancelled: Arc<AtomicBool>,
     grace: Duration,
     running_instance_ids: Vec<String>,
@@ -1665,17 +1718,17 @@ fn command_reference_expired() -> CommandError {
     }
 }
 
-fn ensure_host_selection(
+fn ensure_connection_selection(
     lifecycle: &RuntimeLifecycle,
-    host_id: &str,
+    connection_id: &str,
     selection_generation: u64,
 ) -> Result<(), CommandError> {
     if lifecycle.selection_generation != selection_generation {
         return Err(CommandError {
-            code: "stale_host_selection".into(),
-            message: "Host 选择已经改变；旧请求已丢弃。".into(),
+            code: "stale_connection_selection".into(),
+            message: "当前连接已经改变；旧请求已丢弃。".into(),
             details: Some(serde_json::json!({
-                "hostId": host_id,
+                "connectionId": connection_id,
                 "selectionGeneration": selection_generation,
                 "currentSelectionGeneration": lifecycle.selection_generation,
             })),
@@ -1683,11 +1736,11 @@ fn ensure_host_selection(
             operation_id: None,
         });
     }
-    if lifecycle.active_host_id.as_deref() != Some(host_id) {
+    if lifecycle.connection_id() != Some(connection_id) {
         return Err(CommandError {
-            code: "stale_host_selection".into(),
-            message: "这不是当前选择的 Host；请求未发送。".into(),
-            details: Some(serde_json::json!({ "hostId": host_id })),
+            code: "stale_connection_selection".into(),
+            message: "当前连接已经改变；请求未发送。".into(),
+            details: Some(serde_json::json!({ "connectionId": connection_id })),
             outcome_unknown: false,
             operation_id: None,
         });
@@ -1695,41 +1748,56 @@ fn ensure_host_selection(
     Ok(())
 }
 
-fn resolve_host(
-    runtime: &HostRuntimeState,
-    host_id: &str,
+fn resolve_connection_store(
+    runtime: &ConnectionRuntimeState,
+    connection_id: &str,
     selection_generation: u64,
 ) -> Result<IdentityStore, CommandError> {
-    validate_host_id(host_id).map_err(CommandError::from)?;
     let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
-    ensure_host_selection(&lifecycle, host_id, selection_generation)?;
-    runtime
-        .registry
-        .resolve_store(Some(host_id))
-        .map_err(CommandError::from)
+    ensure_connection_selection(&lifecycle, connection_id, selection_generation)?;
+    match lifecycle.active_target.as_ref() {
+        Some(ConnectionTarget::Local) => Ok(runtime.local_identity.clone()),
+        Some(ConnectionTarget::Host { host_id }) => runtime
+            .registry
+            .resolve_store(Some(host_id))
+            .map_err(CommandError::from),
+        None => Err(lifecycle_error()),
+    }
 }
 
 fn mutate_selected_host<T>(
-    runtime: &HostRuntimeState,
-    host_id: &str,
+    runtime: &ConnectionRuntimeState,
+    connection_id: &str,
     selection_generation: u64,
     mutation: impl FnOnce(&IdentityStore) -> aludock_client_core::Result<T>,
 ) -> Result<T, CommandError> {
-    validate_host_id(host_id).map_err(CommandError::from)?;
+    validate_host_id(connection_id).map_err(CommandError::from)?;
     // Keep the lifecycle lock through the profile CAS. A Host transition can
     // therefore happen either before this revalidation or after persistence,
     // never between the generation check and the write.
     let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
-    ensure_host_selection(&lifecycle, host_id, selection_generation)?;
+    ensure_connection_selection(&lifecycle, connection_id, selection_generation)?;
+    if lifecycle.active_target
+        != Some(ConnectionTarget::Host {
+            host_id: connection_id.to_owned(),
+        })
+    {
+        return Err(CommandError::from(ClientError::HostNotFound(
+            connection_id.to_owned(),
+        )));
+    }
     let store = runtime
         .registry
-        .resolve_store(Some(host_id))
+        .resolve_store(Some(connection_id))
         .map_err(CommandError::from)?;
     mutation(&store).map_err(CommandError::from)
 }
 
-fn connection_profile(store: &IdentityStore) -> Result<HostConnectionProfile, CommandError> {
-    store
+fn connection_profile(
+    store: &IdentityStore,
+    host_id: &str,
+) -> Result<HostConnectionProfile, CommandError> {
+    let profile = store
         .load_connection_profile()
         .map_err(CommandError::from)?
         .ok_or_else(|| CommandError {
@@ -1738,41 +1806,71 @@ fn connection_profile(store: &IdentityStore) -> Result<HostConnectionProfile, Co
             details: None,
             outcome_unknown: false,
             operation_id: None,
-        })
+        })?;
+    if profile.host_id != host_id {
+        return Err(CommandError::from(ClientError::InvalidPairing(
+            "saved Host profile identity does not match the selected Host".into(),
+        )));
+    }
+    Ok(profile)
 }
 
 fn dock_client(
-    runtime: &HostRuntimeState,
-    host_id: &str,
+    runtime: &ConnectionRuntimeState,
+    connection_id: &str,
     selection_generation: u64,
     store: &IdentityStore,
 ) -> Result<DockClient, CommandError> {
     let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
-    ensure_host_selection(&lifecycle, host_id, selection_generation)?;
-    let profile = connection_profile(store)?;
+    ensure_connection_selection(&lifecycle, connection_id, selection_generation)?;
+    let target = lifecycle
+        .active_target
+        .clone()
+        .ok_or_else(lifecycle_error)?;
+    let profile = match &target {
+        ConnectionTarget::Local => None,
+        ConnectionTarget::Host { host_id } => Some(connection_profile(store, host_id)?),
+    };
     let mut selected = runtime
         .selected_client
         .lock()
         .map_err(|_| lifecycle_error())?;
     if let Some(current) = selected.as_ref()
-        && current.host_id == host_id
+        && current.target == target
         && current.selection_generation == selection_generation
     {
-        current
-            .client
-            .router()
-            .reconcile(&profile)
-            .map_err(CommandError::from)?;
+        if let Some(profile) = &profile {
+            current
+                .client
+                .router()
+                .reconcile(profile)
+                .map_err(CommandError::from)?;
+        }
         return Ok(current.client.clone());
     }
     if let Some(previous) = selected.take() {
         previous.client.router().close();
     }
-    let client = DockClient::new(
-        HostConnectionRouter::from_store(store, &profile).map_err(CommandError::from)?,
-    );
-    *selected = Some(SelectedHostClient {
-        host_id: host_id.to_owned(),
+    let router = match &target {
+        ConnectionTarget::Host { .. } => {
+            ConnectionRouter::from_store(store, profile.as_ref().ok_or_else(lifecycle_error)?)
+                .map_err(CommandError::from)?
+        }
+        ConnectionTarget::Local => {
+            let snapshot = runtime.registry.snapshot().map_err(CommandError::from)?;
+            let endpoint = LocalDockEndpoint::resolve(snapshot.local_endpoint_override.as_deref())
+                .map_err(CommandError::from)?;
+            ConnectionRouter::local(
+                &runtime.local_identity,
+                endpoint,
+                LOCAL_CONNECTION_SCOPE_ID.into(),
+            )
+            .map_err(CommandError::from)?
+        }
+    };
+    let client = DockClient::new(router);
+    *selected = Some(SelectedConnectionClient {
+        target,
         selection_generation,
         client: client.clone(),
     });
@@ -1780,19 +1878,22 @@ fn dock_client(
 }
 
 fn reconcile_selected_client(
-    runtime: &HostRuntimeState,
-    host_id: &str,
+    runtime: &ConnectionRuntimeState,
+    connection_id: &str,
     selection_generation: u64,
     profile: &HostConnectionProfile,
 ) -> Result<(), CommandError> {
     let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
-    ensure_host_selection(&lifecycle, host_id, selection_generation)?;
+    ensure_connection_selection(&lifecycle, connection_id, selection_generation)?;
     let selected = runtime
         .selected_client
         .lock()
         .map_err(|_| lifecycle_error())?;
     if let Some(current) = selected.as_ref()
-        && current.host_id == host_id
+        && current.target
+            == (ConnectionTarget::Host {
+                host_id: connection_id.to_owned(),
+            })
         && current.selection_generation == selection_generation
     {
         current
@@ -1805,7 +1906,7 @@ fn reconcile_selected_client(
 }
 
 fn catalog_from_snapshot(
-    runtime: &HostRuntimeState,
+    runtime: &ConnectionRuntimeState,
     snapshot: HostRegistrySnapshot,
     selection_generation: u64,
 ) -> Result<HostCatalog, CommandError> {
@@ -1815,7 +1916,7 @@ fn catalog_from_snapshot(
             .registry
             .resolve_store(Some(&record.host_id))
             .map_err(CommandError::from)?;
-        let profile = connection_profile(&store)?;
+        let profile = connection_profile(&store, &record.host_id)?;
         let endpoint_summary = profile
             .endpoints
             .iter()
@@ -1834,7 +1935,7 @@ fn catalog_from_snapshot(
                     .find(|endpoint| endpoint.state == EndpointState::Verified)
             })
             .map(|endpoint| format!("{}:{}", endpoint.endpoint.host(), endpoint.endpoint.port()))
-            .unwrap_or_else(|| "没有已保存地址".into());
+            .unwrap_or_else(|| "没有可用的 TLS 地址".into());
         let device_name = store
             .load_pairing()
             .map_err(CommandError::from)?
@@ -1870,11 +1971,33 @@ fn catalog_from_snapshot(
         .iter()
         .map(|transaction| transaction.transaction_id.clone())
         .collect();
+    let local_connection_supported = cfg!(any(
+        target_os = "windows",
+        target_os = "linux",
+        target_os = "macos"
+    ));
+    let local_endpoint_effective = if local_connection_supported {
+        LocalDockEndpoint::resolve(snapshot.local_endpoint_override.as_deref())
+            .ok()
+            .map(|endpoint| endpoint.display())
+    } else {
+        None
+    };
+    let active_target = if snapshot.local_selected {
+        Some(ConnectionTarget::Local)
+    } else {
+        snapshot
+            .active_host_id
+            .map(|host_id| ConnectionTarget::Host { host_id })
+    };
     Ok(HostCatalog {
         schema_version: snapshot.schema_version,
         revision: snapshot.revision,
-        active_host_id: snapshot.active_host_id,
+        active_target,
+        local_endpoint_override: snapshot.local_endpoint_override,
+        local_endpoint_effective,
         selection_generation,
+        local_connection_supported,
         hosts,
         pairing_transaction_ids,
         pairing_transactions,
@@ -1882,16 +2005,16 @@ fn catalog_from_snapshot(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn invalidate_host_lifecycle(
+fn invalidate_connection_lifecycle(
     app: &tauri::AppHandle,
-    runtime: &HostRuntimeState,
+    runtime: &ConnectionRuntimeState,
     follow: &FollowState,
     extension: &ExtensionControlState,
     sessions: &SessionTokenState,
     attachments: &AttachmentState,
     restored_images: &RestoredImageState,
-    old_host_id: Option<String>,
-    new_host_id: Option<String>,
+    old_connection_id: Option<String>,
+    new_connection_id: Option<String>,
     old_selection_generation: u64,
     selection_generation: u64,
 ) {
@@ -1915,13 +2038,13 @@ fn invalidate_host_lifecycle(
                 "aludock://extension-controller-status",
                 ControllerStatusEmission {
                     handle: binding.handle,
-                    host_id: binding.host_id,
+                    connection_id: binding.connection_id,
                     selection_generation: binding.selection_generation,
                     host_epoch: binding.host_epoch,
                     instance_id: binding.instance_id,
                     runtime_generation: binding.runtime_generation,
                     state: "detached".into(),
-                    message: Some("已切换 Host。".into()),
+                    message: Some("已切换连接。".into()),
                 },
             );
         }
@@ -1930,10 +2053,12 @@ fn invalidate_host_lifecycle(
         registry.tokens.clear();
     }
     attachments.clear();
-    match (old_host_id.as_deref(), new_host_id.as_deref()) {
-        (Some(old_host_id), Some(new_host_id)) if old_host_id == new_host_id => {
+    match (old_connection_id.as_deref(), new_connection_id.as_deref()) {
+        (Some(old_connection_id), Some(new_connection_id))
+            if old_connection_id == new_connection_id =>
+        {
             restored_images.rebind_generation(
-                old_host_id,
+                old_connection_id,
                 old_selection_generation,
                 selection_generation,
             );
@@ -1955,7 +2080,7 @@ fn system_device_name() -> Option<String> {
 
 #[tauri::command]
 fn get_client_preferences(
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
 ) -> Result<SafeClientPreferences, CommandError> {
     runtime
         .preferences
@@ -1966,7 +2091,7 @@ fn get_client_preferences(
 
 #[tauri::command]
 fn update_client_preferences(
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     expected_revision: u64,
     windows_away_delay: WindowsAwayDelay,
 ) -> Result<SafeClientPreferences, CommandError> {
@@ -1980,7 +2105,7 @@ fn update_client_preferences(
 #[tauri::command]
 fn begin_windows_away(
     app: tauri::AppHandle,
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     monitor: tauri::State<'_, AwayMonitorState>,
     running_instance_ids: Vec<String>,
 ) -> Result<Option<String>, CommandError> {
@@ -2016,9 +2141,36 @@ fn cancel_windows_away(
     monitor.stop(away_id.as_deref())
 }
 
+fn local_connection_client(runtime: &ConnectionRuntimeState) -> Result<DockClient, CommandError> {
+    let snapshot = runtime.registry.snapshot().map_err(CommandError::from)?;
+    let endpoint = LocalDockEndpoint::resolve(snapshot.local_endpoint_override.as_deref())
+        .map_err(CommandError::from)?;
+    let router = ConnectionRouter::local(
+        &runtime.local_identity,
+        endpoint,
+        LOCAL_CONNECTION_SCOPE_ID.into(),
+    )
+    .map_err(CommandError::from)?;
+    Ok(DockClient::new(router))
+}
+
+async fn verify_local_connection(client: &DockClient) -> Result<(), CommandError> {
+    client
+        .host_info()
+        .await
+        .map(|_| ())
+        .map_err(|error| CommandError {
+            code: "local_dock_unavailable".into(),
+            message: "没有连接到本机 AluDock。请确认 AluDock 已启动后重试。".into(),
+            details: Some(serde_json::json!({ "cause": error.to_string() })),
+            outcome_unknown: false,
+            operation_id: None,
+        })
+}
+
 #[tauri::command]
 fn get_host_catalog(
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
 ) -> Result<HostCatalog, CommandError> {
     let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
     let snapshot = runtime.registry.snapshot().map_err(CommandError::from)?;
@@ -2029,27 +2181,29 @@ fn get_host_catalog(
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-fn set_active_host(
+async fn connect_local_dock(
     app: tauri::AppHandle,
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     follow: tauri::State<'_, FollowState>,
     extension: tauri::State<'_, ExtensionControlState>,
     sessions: tauri::State<'_, SessionTokenState>,
     attachments: tauri::State<'_, AttachmentState>,
     restored_images: tauri::State<'_, RestoredImageState>,
-    host_id: String,
     expected_revision: u64,
 ) -> Result<HostCatalog, CommandError> {
+    let client = local_connection_client(&runtime)?;
+    verify_local_connection(&client).await?;
+
     let mut lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
-    let old_host_id = lifecycle.active_host_id.clone();
+    let old_connection_id = lifecycle.connection_id().map(str::to_owned);
     let old_generation = lifecycle.selection_generation;
     let snapshot = runtime
         .registry
-        .set_active_host(&host_id, expected_revision)
+        .select_local(expected_revision)
         .map_err(CommandError::from)?;
-    let generation = lifecycle.transition_to(Some(host_id))?;
-    let new_host_id = lifecycle.active_host_id.clone();
-    invalidate_host_lifecycle(
+    let generation = lifecycle.transition_to_local()?;
+    let new_connection_id = Some(LOCAL_CONNECTION_SCOPE_ID.to_owned());
+    invalidate_connection_lifecycle(
         &app,
         &runtime,
         &follow,
@@ -2057,8 +2211,8 @@ fn set_active_host(
         &sessions,
         &attachments,
         &restored_images,
-        old_host_id,
-        new_host_id,
+        old_connection_id,
+        new_connection_id,
         old_generation,
         generation,
     );
@@ -2068,9 +2222,52 @@ fn set_active_host(
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
-fn remove_local_host(
+fn set_local_endpoint(
     app: tauri::AppHandle,
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    follow: tauri::State<'_, FollowState>,
+    extension: tauri::State<'_, ExtensionControlState>,
+    sessions: tauri::State<'_, SessionTokenState>,
+    attachments: tauri::State<'_, AttachmentState>,
+    restored_images: tauri::State<'_, RestoredImageState>,
+    expected_revision: u64,
+    endpoint: Option<String>,
+) -> Result<HostCatalog, CommandError> {
+    let mut lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
+    let old_connection_id = lifecycle.connection_id().map(str::to_owned);
+    let old_generation = lifecycle.selection_generation;
+    let snapshot = runtime
+        .registry
+        .set_local_endpoint_override(expected_revision, endpoint.as_deref())
+        .map_err(CommandError::from)?;
+    let generation = if lifecycle.active_target == Some(ConnectionTarget::Local) {
+        let generation = lifecycle.transition_to_local()?;
+        invalidate_connection_lifecycle(
+            &app,
+            &runtime,
+            &follow,
+            &extension,
+            &sessions,
+            &attachments,
+            &restored_images,
+            old_connection_id,
+            Some(LOCAL_CONNECTION_SCOPE_ID.into()),
+            old_generation,
+            generation,
+        );
+        generation
+    } else {
+        lifecycle.selection_generation
+    };
+    drop(lifecycle);
+    catalog_from_snapshot(&runtime, snapshot, generation)
+}
+
+#[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn set_active_host(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     follow: tauri::State<'_, FollowState>,
     extension: tauri::State<'_, ExtensionControlState>,
     sessions: tauri::State<'_, SessionTokenState>,
@@ -2080,14 +2277,15 @@ fn remove_local_host(
     expected_revision: u64,
 ) -> Result<HostCatalog, CommandError> {
     let mut lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
-    let old_host_id = lifecycle.active_host_id.clone();
+    let old_connection_id = lifecycle.connection_id().map(str::to_owned);
     let old_generation = lifecycle.selection_generation;
     let snapshot = runtime
         .registry
-        .remove_local_host(&host_id, expected_revision)
+        .set_active_host(&host_id, expected_revision)
         .map_err(CommandError::from)?;
-    let generation = lifecycle.transition_to(snapshot.active_host_id.clone())?;
-    invalidate_host_lifecycle(
+    let generation = lifecycle.transition_to_host(Some(host_id))?;
+    let new_connection_id = lifecycle.connection_id().map(str::to_owned);
+    invalidate_connection_lifecycle(
         &app,
         &runtime,
         &follow,
@@ -2095,8 +2293,8 @@ fn remove_local_host(
         &sessions,
         &attachments,
         &restored_images,
-        old_host_id,
-        snapshot.active_host_id.clone(),
+        old_connection_id,
+        new_connection_id,
         old_generation,
         generation,
     );
@@ -2105,9 +2303,61 @@ fn remove_local_host(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
+fn remove_saved_host(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    follow: tauri::State<'_, FollowState>,
+    extension: tauri::State<'_, ExtensionControlState>,
+    sessions: tauri::State<'_, SessionTokenState>,
+    attachments: tauri::State<'_, AttachmentState>,
+    restored_images: tauri::State<'_, RestoredImageState>,
+    host_id: String,
+    expected_revision: u64,
+) -> Result<HostCatalog, CommandError> {
+    let mut lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
+    let old_connection_id = lifecycle.connection_id().map(str::to_owned);
+    let old_generation = lifecycle.selection_generation;
+    let snapshot = runtime
+        .registry
+        .remove_host(&host_id, expected_revision)
+        .map_err(CommandError::from)?;
+    let new_connection_id = if snapshot.local_selected {
+        Some(LOCAL_CONNECTION_SCOPE_ID.to_owned())
+    } else {
+        snapshot.active_host_id.clone()
+    };
+    let generation = if old_connection_id == new_connection_id {
+        old_generation
+    } else {
+        let generation = if snapshot.local_selected {
+            lifecycle.transition_to_local()?
+        } else {
+            lifecycle.transition_to_host(snapshot.active_host_id.clone())?
+        };
+        invalidate_connection_lifecycle(
+            &app,
+            &runtime,
+            &follow,
+            &extension,
+            &sessions,
+            &attachments,
+            &restored_images,
+            old_connection_id,
+            new_connection_id,
+            old_generation,
+            generation,
+        );
+        generation
+    };
+    drop(lifecycle);
+    catalog_from_snapshot(&runtime, snapshot, generation)
+}
+
+#[tauri::command]
 async fn start_pairing(
     app: tauri::AppHandle,
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     state: tauri::State<'_, PairingTaskState>,
     host: String,
     port: u16,
@@ -2288,7 +2538,7 @@ async fn start_pairing(
                         return;
                     }
                 };
-                let old_host_id = lifecycle.active_host_id.clone();
+                let old_connection_id = lifecycle.connection_id().map(str::to_owned);
                 let old_generation = lifecycle.selection_generation;
                 let promoted = match task_replacement_host_id.as_deref() {
                     Some(expected_host_id) => {
@@ -2304,7 +2554,8 @@ async fn start_pairing(
                         return;
                     }
                 };
-                let generation = match lifecycle.transition_to(Some(verified.host_id.clone())) {
+                let generation = match lifecycle.transition_to_host(Some(verified.host_id.clone()))
+                {
                     Ok(generation) => generation,
                     Err(error) => {
                         task_guard.remove(&task_transaction);
@@ -2317,7 +2568,7 @@ async fn start_pairing(
                 let sessions = task_app.state::<SessionTokenState>();
                 let attachments = task_app.state::<AttachmentState>();
                 let restored_images = task_app.state::<RestoredImageState>();
-                invalidate_host_lifecycle(
+                invalidate_connection_lifecycle(
                     &task_app,
                     &runtime_state,
                     &follow,
@@ -2325,7 +2576,7 @@ async fn start_pairing(
                     &sessions,
                     &attachments,
                     &restored_images,
-                    old_host_id,
+                    old_connection_id,
                     Some(verified.host_id.clone()),
                     old_generation,
                     generation,
@@ -2382,7 +2633,7 @@ async fn start_pairing(
 #[tauri::command]
 async fn resume_pairing(
     app: tauri::AppHandle,
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     state: tauri::State<'_, PairingTaskState>,
     transaction_id: String,
 ) -> Result<(), CommandError> {
@@ -2462,7 +2713,7 @@ fn cancel_pairing(
 
 #[tauri::command]
 fn discard_pairing(
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     state: tauri::State<'_, PairingTaskState>,
     transaction_id: String,
 ) -> Result<(), CommandError> {
@@ -2480,20 +2731,26 @@ fn discard_pairing(
 
 #[tauri::command]
 async fn bootstrap(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
 ) -> Result<BootstrapPayload, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let profile = connection_profile(&store)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let profile = if connection_id == LOCAL_CONNECTION_SCOPE_ID {
+        None
+    } else {
+        Some(connection_profile(&store, &connection_id)?)
+    };
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    let connection_name = profile
+        .as_ref()
+        .map_or("本机 AluDock", |profile| profile.display_name.as_str());
     let info = client.host_info().await.map_err(|error| CommandError {
         code: "host_unreachable".into(),
-        message: format!(
-            "无法连接“{}”；已保留选择，没有自动切换其他 Host。",
-            profile.display_name
+        message: format!("无法连接“{connection_name}”；当前选择保持不变。"),
+        details: Some(
+            serde_json::json!({ "connectionId": connection_id, "cause": error.to_string() }),
         ),
-        details: Some(serde_json::json!({ "hostId": host_id, "cause": error.to_string() })),
         outcome_unknown: false,
         operation_id: None,
     })?;
@@ -2521,7 +2778,7 @@ async fn bootstrap(
         hidden_stopped,
     } = catalog;
     Ok(BootstrapPayload {
-        host_id,
+        connection_id,
         selection_generation,
         max_attachments_per_message: MAX_ATTACHMENTS_PER_MESSAGE,
         host: HostSummary {
@@ -2541,17 +2798,18 @@ async fn bootstrap(
 
 #[tauri::command]
 async fn work_catalog(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
 ) -> Result<WorkCatalogPayload, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let (catalog, host_epoch) = dock_client(&runtime, &host_id, selection_generation, &store)?
-        .list_instances_with_host_epoch(InstanceSelector::All)
-        .await
-        .map_err(CommandError::from)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let (catalog, host_epoch) =
+        dock_client(&runtime, &connection_id, selection_generation, &store)?
+            .list_instances_with_host_epoch(InstanceSelector::All)
+            .await
+            .map_err(CommandError::from)?;
     Ok(WorkCatalogPayload {
-        host_id,
+        connection_id,
         selection_generation,
         host_epoch,
         instances: catalog.instances,
@@ -2562,13 +2820,13 @@ async fn work_catalog(
 
 #[tauri::command]
 async fn conversation_bootstrap(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
 ) -> Result<ConversationBootstrap, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let read = dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let read = dock_client(&runtime, &connection_id, selection_generation, &store)?
         .read_instance(&instance_id, None, ReadReplay::ConversationBootstrap)
         .await
         .map_err(CommandError::from)?;
@@ -2645,16 +2903,16 @@ const CONVERSATION_HISTORY_PAGE_LIMIT: u16 = 50;
 
 #[tauri::command]
 async fn conversation_history(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     cursor: Option<String>,
     expected_host_epoch: String,
     expected_runtime_generation: u64,
 ) -> Result<ConversationPreviewPage, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let page = dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let page = dock_client(&runtime, &connection_id, selection_generation, &store)?
         .preview_conversation_page(
             &instance_id,
             cursor.as_deref(),
@@ -2675,8 +2933,8 @@ async fn conversation_history(
 
 #[tauri::command]
 async fn conversation_history_entry(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     cursor: Option<String>,
@@ -2685,8 +2943,8 @@ async fn conversation_history_entry(
     expected_host_epoch: String,
     expected_runtime_generation: u64,
 ) -> Result<CompletedConversationEntry, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let completed = dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let completed = dock_client(&runtime, &connection_id, selection_generation, &store)?
         .complete_conversation_entry(
             &instance_id,
             cursor.as_deref(),
@@ -2696,7 +2954,7 @@ async fn conversation_history_entry(
         )
         .await
         .map_err(CommandError::from)?;
-    resolve_host(&runtime, &host_id, selection_generation)?;
+    resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     if completed.host_epoch != expected_host_epoch
         || completed.instance.id != instance_id
         || completed.instance.owner_host_epoch.as_deref() != Some(expected_host_epoch.as_str())
@@ -2713,20 +2971,20 @@ async fn conversation_history_entry(
 
 #[tauri::command]
 async fn conversation_image(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
     content_ref: String,
     mime_type: String,
 ) -> Result<Response, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let image = dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let image = dock_client(&runtime, &connection_id, selection_generation, &store)?
         .read_conversation_image(&instance_id, &content_ref, &mime_type)
         .await
         .map_err(CommandError::from)?;
-    resolve_host(&runtime, &host_id, selection_generation)?;
+    resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     if image.host_epoch != expected_host_epoch || image.mime_type != mime_type {
         return Err(CommandError::from(ClientError::Protocol(
             "conversation image belonged to an obsolete Work state".into(),
@@ -2738,8 +2996,8 @@ async fn conversation_image(
 
 #[tauri::command]
 async fn published_image(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
@@ -2752,12 +3010,12 @@ async fn published_image(
             "这张图片太大，当前设备无法安全预览。",
         ));
     }
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let image = dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let image = dock_client(&runtime, &connection_id, selection_generation, &store)?
         .read_published_file(&instance_id, &file)
         .await
         .map_err(CommandError::from)?;
-    resolve_host(&runtime, &host_id, selection_generation)?;
+    resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     if image.host_epoch != expected_host_epoch
         || image.runtime_generation != expected_runtime_generation
         || image.file != file
@@ -3079,13 +3337,13 @@ fn follow_state_error() -> CommandError {
 #[tauri::command]
 fn stop_conversation_follow(
     state: tauri::State<'_, FollowState>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     subscription_id: String,
 ) -> Result<bool, CommandError> {
     state.abort_matching(
-        &host_id,
+        &connection_id,
         selection_generation,
         &instance_id,
         Some(&subscription_id),
@@ -3095,8 +3353,8 @@ fn stop_conversation_follow(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn start_conversation_follow(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     app: tauri::AppHandle,
     state: tauri::State<'_, FollowState>,
@@ -3104,20 +3362,20 @@ async fn start_conversation_follow(
     subscription_id: String,
     cursor: EventCursor,
 ) -> Result<(), CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
-    ensure_host_selection(&lifecycle, &host_id, selection_generation)?;
+    ensure_connection_selection(&lifecycle, &connection_id, selection_generation)?;
     let mut guard = state.task.lock().map_err(|_| follow_state_error())?;
     if let Some(task) = guard.take() {
         task.handle.abort();
     }
-    let followed_host = host_id.clone();
+    let followed_host = connection_id.clone();
     let followed_instance = instance_id.clone();
     let followed_subscription = subscription_id.clone();
     let task = tauri::async_runtime::spawn(async move {
         let status = |state: &str, message: Option<String>| FollowStatus {
-            host_id: followed_host.clone(),
+            connection_id: followed_host.clone(),
             selection_generation,
             instance_id: followed_instance.clone(),
             subscription_id: followed_subscription.clone(),
@@ -3154,7 +3412,7 @@ async fn start_conversation_follow(
             let _ = app.emit(
                 "aludock://conversation-event",
                 FollowEmission {
-                    host_id: followed_host.clone(),
+                    connection_id: followed_host.clone(),
                     selection_generation,
                     instance_id: followed_instance.clone(),
                     subscription_id: followed_subscription.clone(),
@@ -3179,7 +3437,7 @@ async fn start_conversation_follow(
                     let _ = app.emit(
                         "aludock://conversation-event",
                         FollowEmission {
-                            host_id: followed_host.clone(),
+                            connection_id: followed_host.clone(),
                             selection_generation,
                             instance_id: followed_instance.clone(),
                             subscription_id: followed_subscription.clone(),
@@ -3204,7 +3462,7 @@ async fn start_conversation_follow(
     });
     *guard = Some(FollowTask {
         handle: task,
-        host_id,
+        connection_id,
         selection_generation,
         instance_id,
         subscription_id,
@@ -3224,12 +3482,12 @@ fn extension_state_error() -> CommandError {
 }
 
 fn extension_scope_matches(
-    binding_host_id: &str,
+    binding_connection_id: &str,
     binding_selection_generation: u64,
-    requested_host_id: &str,
+    requested_connection_id: &str,
     requested_selection_generation: u64,
 ) -> bool {
-    binding_host_id == requested_host_id
+    binding_connection_id == requested_connection_id
         && binding_selection_generation == requested_selection_generation
 }
 
@@ -3303,8 +3561,8 @@ fn safe_controller_event(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn acquire_extension_control(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     app: tauri::AppHandle,
     state: tauri::State<'_, ExtensionControlState>,
@@ -3312,8 +3570,8 @@ async fn acquire_extension_control(
     expected_host_epoch: String,
     expected_runtime_generation: u64,
 ) -> Result<SafeControllerBinding, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     let controller = client
         .control_extension_ui(&instance_id)
         .await
@@ -3327,11 +3585,11 @@ async fn acquire_extension_control(
         )));
     }
     let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
-    ensure_host_selection(&lifecycle, &host_id, selection_generation)?;
+    ensure_connection_selection(&lifecycle, &connection_id, selection_generation)?;
     let handle = uuid::Uuid::new_v4().to_string();
     let safe = SafeControllerBinding {
         handle: handle.clone(),
-        host_id: host_id.clone(),
+        connection_id: connection_id.clone(),
         selection_generation,
         host_epoch: controller.host_epoch.clone(),
         instance_id: controller.instance_id.clone(),
@@ -3340,7 +3598,7 @@ async fn acquire_extension_control(
     let mut stream = controller.stream;
     let binding = ExtensionBinding {
         handle: handle.clone(),
-        host_id: host_id.clone(),
+        connection_id: connection_id.clone(),
         selection_generation,
         host_epoch: controller.host_epoch.clone(),
         instance_id: controller.instance_id.clone(),
@@ -3356,7 +3614,7 @@ async fn acquire_extension_control(
     }
     guard.binding = Some(binding);
     let task_handle = handle.clone();
-    let task_host_id = host_id;
+    let task_connection_id = connection_id;
     let task_host = controller.host_epoch;
     let task_instance = controller.instance_id;
     let task_generation = controller.runtime_generation;
@@ -3376,7 +3634,7 @@ async fn acquire_extension_control(
                     break;
                 };
                 if binding.handle != task_handle
-                    || binding.host_id != task_host_id
+                    || binding.connection_id != task_connection_id
                     || binding.selection_generation != selection_generation
                     || binding.host_epoch != task_host
                     || binding.instance_id != task_instance
@@ -3394,7 +3652,7 @@ async fn acquire_extension_control(
                     "aludock://extension-controller-event",
                     ControllerEmission {
                         handle: task_handle.clone(),
-                        host_id: task_host_id.clone(),
+                        connection_id: task_connection_id.clone(),
                         selection_generation,
                         host_epoch: task_host.clone(),
                         instance_id: task_instance.clone(),
@@ -3416,7 +3674,7 @@ async fn acquire_extension_control(
                 "aludock://extension-controller-status",
                 ControllerStatusEmission {
                     handle: task_handle,
-                    host_id: task_host_id,
+                    connection_id: task_connection_id,
                     selection_generation,
                     host_epoch: task_host,
                     instance_id: task_instance,
@@ -3434,13 +3692,13 @@ async fn acquire_extension_control(
 
 #[tauri::command]
 fn release_extension_control(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     state: tauri::State<'_, ExtensionControlState>,
     handle: String,
 ) -> Result<(), CommandError> {
-    let _store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let _store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let mut guard = state.inner.lock().map_err(|_| extension_state_error())?;
     if let Some(binding) = guard
         .binding
@@ -3448,9 +3706,9 @@ fn release_extension_control(
         .filter(|binding| binding.handle == handle)
     {
         if !extension_scope_matches(
-            &binding.host_id,
+            &binding.connection_id,
             binding.selection_generation,
-            &host_id,
+            &connection_id,
             selection_generation,
         ) {
             return Err(stale_extension_handle());
@@ -3466,8 +3724,8 @@ fn release_extension_control(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn respond_extension_interaction(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     state: tauri::State<'_, ExtensionControlState>,
     handle: String,
@@ -3485,9 +3743,9 @@ async fn respond_extension_interaction(
             .filter(|binding| {
                 binding.handle == handle
                     && extension_scope_matches(
-                        &binding.host_id,
+                        &binding.connection_id,
                         binding.selection_generation,
-                        &host_id,
+                        &connection_id,
                         selection_generation,
                     )
             })
@@ -3529,8 +3787,8 @@ async fn respond_extension_interaction(
         };
         (binding.clone(), response)
     };
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let result = dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let result = dock_client(&runtime, &connection_id, selection_generation, &store)?
         .respond_interaction(
             &binding.0.lease,
             &interaction_id,
@@ -3555,8 +3813,8 @@ async fn respond_extension_interaction(
 
 #[tauri::command]
 async fn set_extension_widget_viewport(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     state: tauri::State<'_, ExtensionControlState>,
     handle: String,
@@ -3580,9 +3838,9 @@ async fn set_extension_widget_viewport(
             .filter(|binding| {
                 binding.handle == handle
                     && extension_scope_matches(
-                        &binding.host_id,
+                        &binding.connection_id,
                         binding.selection_generation,
-                        &host_id,
+                        &connection_id,
                         selection_generation,
                     )
             })
@@ -3592,8 +3850,8 @@ async fn set_extension_widget_viewport(
         }
         binding.clone()
     };
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let result = dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let result = dock_client(&runtime, &connection_id, selection_generation, &store)?
         .set_extension_widget_viewport(&binding.lease, width, height)
         .await
         .map_err(CommandError::from)?;
@@ -3608,17 +3866,17 @@ async fn set_extension_widget_viewport(
 
 #[tauri::command]
 async fn set_extension_tools_expanded(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
     expected_runtime_generation: u64,
     expanded: bool,
 ) -> Result<InstanceSnapshot, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let operation_id = uuid::Uuid::new_v4().to_string();
-    let snapshot = dock_client(&runtime, &host_id, selection_generation, &store)?
+    let snapshot = dock_client(&runtime, &connection_id, selection_generation, &store)?
         .set_tools_expanded(
             &instance_id,
             expected_runtime_generation,
@@ -3727,22 +3985,22 @@ async fn verify_attachment_target(
 
 fn attachment_scope_matches(
     entry: &NativeAttachment,
-    host_id: &str,
+    connection_id: &str,
     selection_generation: u64,
     work_id: &str,
 ) -> bool {
-    entry.host_id == host_id
+    entry.connection_id == connection_id
         && entry.selection_generation == selection_generation
         && entry.work_id == work_id
 }
 
 fn ensure_attachment_scope(
     entry: &NativeAttachment,
-    host_id: &str,
+    connection_id: &str,
     selection_generation: u64,
     work_id: &str,
 ) -> Result<(), CommandError> {
-    if attachment_scope_matches(entry, host_id, selection_generation, work_id) {
+    if attachment_scope_matches(entry, connection_id, selection_generation, work_id) {
         Ok(())
     } else {
         Err(attachment_command_error(
@@ -3964,7 +4222,7 @@ async fn stage_android_picked_file(
 fn prepare_native_attachment(
     path: PathBuf,
     temporary: bool,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     work_id: String,
     name: String,
@@ -3983,7 +4241,7 @@ fn prepare_native_attachment(
         NativeAttachment {
             path,
             temporary,
-            host_id,
+            connection_id,
             selection_generation,
             work_id,
             operation_id: uuid::Uuid::new_v4().to_string(),
@@ -4046,7 +4304,7 @@ fn request_image_bytes(request: &Request<'_>) -> Result<Vec<u8>, CommandError> {
 
 fn prepare_clipboard_image(
     bytes: Vec<u8>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     work_id: String,
     image_index: usize,
@@ -4095,7 +4353,7 @@ fn prepare_clipboard_image(
     Ok(prepare_native_attachment(
         path,
         true,
-        host_id,
+        connection_id,
         selection_generation,
         work_id,
         name,
@@ -4107,7 +4365,7 @@ fn prepare_clipboard_image(
 fn publish_selected_attachments(
     lifecycle: &Mutex<RuntimeLifecycle>,
     state: &AttachmentState,
-    host_id: &str,
+    connection_id: &str,
     selection_generation: u64,
     work_id: &str,
     prepared: Vec<PreparedAttachment>,
@@ -4115,11 +4373,13 @@ fn publish_selected_attachments(
     // Match set_active_host's lock order so generation validation and native-path
     // publication form one atomic lifecycle operation.
     let lifecycle = lifecycle.lock().map_err(|_| lifecycle_error())?;
-    ensure_host_selection(&lifecycle, host_id, selection_generation)?;
+    ensure_connection_selection(&lifecycle, connection_id, selection_generation)?;
     let mut entries = state.entries.lock().map_err(|_| lifecycle_error())?;
     let current = entries
         .values()
-        .filter(|entry| attachment_scope_matches(entry, host_id, selection_generation, work_id))
+        .filter(|entry| {
+            attachment_scope_matches(entry, connection_id, selection_generation, work_id)
+        })
         .count();
     if prepared.len() > MAX_ATTACHMENTS_PER_MESSAGE.saturating_sub(current) {
         return Err(attachment_command_error(
@@ -4573,13 +4833,13 @@ async fn commit_verified_file(
 
 #[tauri::command]
 async fn list_deliverables(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
 ) -> Result<Vec<DeliverableDto>, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
         .list_deliverables(&instance_id)
         .await
         .map_err(deliverable_list_error)
@@ -4588,15 +4848,15 @@ async fn list_deliverables(
 #[tauri::command]
 async fn download_deliverable(
     app: tauri::AppHandle,
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     deliverable: DeliverableDto,
 ) -> Result<DeliverableSaveResult, CommandError> {
     deliverable.validate().map_err(deliverable_client_error)?;
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     #[cfg(not(mobile))]
     let destination = pick_save_destination(&app, &deliverable.name).await?;
     // The mobile dialog uses the platform create-document flow. Download and
@@ -4612,7 +4872,7 @@ async fn download_deliverable(
     let mut staging_file = tokio::fs::File::from_std(staging_file);
 
     let progress_app = app.clone();
-    let progress_host = host_id.clone();
+    let progress_host = connection_id.clone();
     let progress_instance = instance_id.clone();
     let progress_ref = deliverable.delivery_ref.clone();
     let result = client
@@ -4627,7 +4887,7 @@ async fn download_deliverable(
                 let _ = progress_app.emit(
                     "aludock://deliverable-progress",
                     DeliverableProgressEmission {
-                        host_id: progress_host.clone(),
+                        connection_id: progress_host.clone(),
                         selection_generation,
                         instance_id: progress_instance.clone(),
                         delivery_ref: progress_ref.clone(),
@@ -4814,19 +5074,25 @@ async fn open_saved_deliverable(
 #[tauri::command]
 async fn pick_attachments(
     app: tauri::AppHandle,
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     state: tauri::State<'_, AttachmentState>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     work_id: String,
 ) -> Result<Vec<SelectedAttachment>, CommandError> {
-    drop(resolve_host(&runtime, &host_id, selection_generation)?);
+    drop(resolve_connection_store(
+        &runtime,
+        &connection_id,
+        selection_generation,
+    )?);
     let existing = state
         .entries
         .lock()
         .map_err(|_| lifecycle_error())?
         .values()
-        .filter(|entry| attachment_scope_matches(entry, &host_id, selection_generation, &work_id))
+        .filter(|entry| {
+            attachment_scope_matches(entry, &connection_id, selection_generation, &work_id)
+        })
         .count();
     if existing >= MAX_ATTACHMENTS_PER_MESSAGE {
         return Err(attachment_command_error(
@@ -4913,7 +5179,7 @@ async fn pick_attachments(
         prepared.push(prepare_native_attachment(
             path,
             temporary,
-            host_id.clone(),
+            connection_id.clone(),
             selection_generation,
             work_id.clone(),
             name,
@@ -4925,7 +5191,7 @@ async fn pick_attachments(
     publish_selected_attachments(
         runtime.lifecycle.as_ref(),
         &state,
-        &host_id,
+        &connection_id,
         selection_generation,
         &work_id,
         prepared,
@@ -4934,11 +5200,11 @@ async fn pick_attachments(
 
 #[tauri::command]
 async fn stage_clipboard_image(
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     state: tauri::State<'_, AttachmentState>,
     request: Request<'_>,
 ) -> Result<SelectedAttachment, CommandError> {
-    let host_id = request_header(&request, "x-aludock-host-id")?;
+    let connection_id = request_header(&request, "x-aludock-connection-id")?;
     let selection_generation = request_header(&request, "x-aludock-selection-generation")?
         .parse::<u64>()
         .map_err(|_| attachment_command_error("invalid_clipboard_image", MSG_PASTE_CONTEXT_LOST))?;
@@ -4950,14 +5216,18 @@ async fn stage_clipboard_image(
         .ok_or_else(|| {
             attachment_command_error("invalid_clipboard_image", MSG_PASTE_CONTEXT_LOST)
         })?;
-    drop(resolve_host(&runtime, &host_id, selection_generation)?);
+    drop(resolve_connection_store(
+        &runtime,
+        &connection_id,
+        selection_generation,
+    )?);
     let bytes = request_image_bytes(&request)?;
-    let prepared_host = host_id.clone();
+    let prepared_connection = connection_id.clone();
     let prepared_work = work_id.clone();
     let prepared = tokio::task::spawn_blocking(move || {
         prepare_clipboard_image(
             bytes,
-            prepared_host,
+            prepared_connection,
             selection_generation,
             prepared_work,
             image_index,
@@ -4968,7 +5238,7 @@ async fn stage_clipboard_image(
     publish_selected_attachments(
         runtime.lifecycle.as_ref(),
         &state,
-        &host_id,
+        &connection_id,
         selection_generation,
         &work_id,
         vec![prepared],
@@ -4980,14 +5250,18 @@ async fn stage_clipboard_image(
 
 #[tauri::command]
 async fn attachment_preview(
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     state: tauri::State<'_, AttachmentState>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     work_id: String,
     token: String,
 ) -> Result<Response, CommandError> {
-    drop(resolve_host(&runtime, &host_id, selection_generation)?);
+    drop(resolve_connection_store(
+        &runtime,
+        &connection_id,
+        selection_generation,
+    )?);
     let (path, operation_id, size_bytes, media_type) = {
         let entries = state.entries.lock().map_err(|_| lifecycle_error())?;
         let entry = entries.get(&token).ok_or_else(|| {
@@ -4996,7 +5270,7 @@ async fn attachment_preview(
                 MSG_ATTACHMENT_PREVIEW_LOST,
             )
         })?;
-        ensure_attachment_scope(entry, &host_id, selection_generation, &work_id)?;
+        ensure_attachment_scope(entry, &connection_id, selection_generation, &work_id)?;
         if entry.size_bytes > MAX_RENDERABLE_IMAGE_BYTES {
             return Err(attachment_command_error(
                 "attachment_preview_too_large",
@@ -5026,7 +5300,11 @@ async fn attachment_preview(
         ));
     }
     validate_renderable_image(&bytes, media_type.as_deref())?;
-    drop(resolve_host(&runtime, &host_id, selection_generation)?);
+    drop(resolve_connection_store(
+        &runtime,
+        &connection_id,
+        selection_generation,
+    )?);
     let entries = state.entries.lock().map_err(|_| lifecycle_error())?;
     let entry = entries.get(&token).ok_or_else(|| {
         attachment_command_error(
@@ -5034,7 +5312,7 @@ async fn attachment_preview(
             MSG_ATTACHMENT_PREVIEW_LOST,
         )
     })?;
-    ensure_attachment_scope(entry, &host_id, selection_generation, &work_id)?;
+    ensure_attachment_scope(entry, &connection_id, selection_generation, &work_id)?;
     if entry.operation_id != operation_id {
         return Err(attachment_command_error(
             "attachment_preview_unavailable",
@@ -5048,9 +5326,9 @@ async fn attachment_preview(
 #[tauri::command]
 async fn upload_attachment(
     app: tauri::AppHandle,
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     state: tauri::State<'_, AttachmentState>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     work_id: String,
     target_machine_host_id: String,
@@ -5058,8 +5336,8 @@ async fn upload_attachment(
     expected_runtime_generation: u64,
     token: String,
 ) -> Result<AttachmentUploadResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     let upload_scope = AttachmentUploadScope {
         machine_host_id: target_machine_host_id,
         owner_host_epoch: expected_host_epoch,
@@ -5071,7 +5349,7 @@ async fn upload_attachment(
         let entry = entries.get_mut(&token).ok_or_else(|| {
             attachment_command_error("attachment_not_found", "附件选择已失效，请重新选择。")
         })?;
-        ensure_attachment_scope(entry, &host_id, selection_generation, &work_id)?;
+        ensure_attachment_scope(entry, &connection_id, selection_generation, &work_id)?;
         if entry.active_attempt.is_some() {
             return Err(attachment_command_error(
                 "attachment_upload_in_progress",
@@ -5111,7 +5389,7 @@ async fn upload_attachment(
     };
 
     let progress_app = app.clone();
-    let progress_host = host_id.clone();
+    let progress_host = connection_id.clone();
     let progress_work = work_id.clone();
     let progress_token = token.clone();
     let progress_scope = upload_scope.clone();
@@ -5132,7 +5410,7 @@ async fn upload_attachment(
                 let _ = progress_app.emit(
                     "aludock://attachment-progress",
                     AttachmentProgressEmission {
-                        host_id: progress_host.clone(),
+                        connection_id: progress_host.clone(),
                         selection_generation,
                         work_id: progress_work.clone(),
                         machine_host_id: progress_scope.machine_host_id.clone(),
@@ -5156,7 +5434,7 @@ async fn upload_attachment(
 
     let mut entries = state.entries.lock().map_err(|_| lifecycle_error())?;
     let still_current = entries.get(&token).is_some_and(|entry| {
-        attachment_scope_matches(entry, &host_id, selection_generation, &work_id)
+        attachment_scope_matches(entry, &connection_id, selection_generation, &work_id)
             && entry.operation_id == operation_id
             && entry.upload_scope.as_ref() == Some(&upload_scope)
             && entry
@@ -5188,19 +5466,23 @@ async fn upload_attachment(
 
 #[tauri::command]
 fn cancel_attachment_upload(
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     state: tauri::State<'_, AttachmentState>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     work_id: String,
     token: String,
 ) -> Result<bool, CommandError> {
-    drop(resolve_host(&runtime, &host_id, selection_generation)?);
+    drop(resolve_connection_store(
+        &runtime,
+        &connection_id,
+        selection_generation,
+    )?);
     let entries = state.entries.lock().map_err(|_| lifecycle_error())?;
     let Some(entry) = entries.get(&token) else {
         return Ok(false);
     };
-    ensure_attachment_scope(entry, &host_id, selection_generation, &work_id)?;
+    ensure_attachment_scope(entry, &connection_id, selection_generation, &work_id)?;
     if let Some(attempt) = &entry.active_attempt {
         attempt.cancellation.cancel();
         Ok(true)
@@ -5211,19 +5493,23 @@ fn cancel_attachment_upload(
 
 #[tauri::command]
 fn remove_attachment(
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     state: tauri::State<'_, AttachmentState>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     work_id: String,
     token: String,
 ) -> Result<bool, CommandError> {
-    drop(resolve_host(&runtime, &host_id, selection_generation)?);
+    drop(resolve_connection_store(
+        &runtime,
+        &connection_id,
+        selection_generation,
+    )?);
     let mut entries = state.entries.lock().map_err(|_| lifecycle_error())?;
     let Some(entry) = entries.get(&token) else {
         return Ok(false);
     };
-    ensure_attachment_scope(entry, &host_id, selection_generation, &work_id)?;
+    ensure_attachment_scope(entry, &connection_id, selection_generation, &work_id)?;
     if let Some(attempt) = &entry.active_attempt {
         attempt.cancellation.cancel();
     }
@@ -5232,12 +5518,12 @@ fn remove_attachment(
 }
 
 fn restored_image_scope(
-    host_id: &str,
+    connection_id: &str,
     selection_generation: u64,
     work_id: &str,
 ) -> RestoredImageScope {
     RestoredImageScope {
-        host_id: host_id.to_owned(),
+        connection_id: connection_id.to_owned(),
         selection_generation,
         work_id: work_id.to_owned(),
     }
@@ -5245,17 +5531,17 @@ fn restored_image_scope(
 
 #[tauri::command]
 async fn submit_message(
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     restored_images: tauri::State<'_, RestoredImageState>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     message: String,
     attachment_file_ids: Option<Vec<String>>,
 ) -> Result<SubmitResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
-    let scope = restored_image_scope(&host_id, selection_generation, &instance_id);
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
+    let scope = restored_image_scope(&connection_id, selection_generation, &instance_id);
     let captured = restored_images.capture(&scope);
     let attachment_file_ids = attachment_file_ids.unwrap_or_default();
     let images = captured
@@ -5280,14 +5566,14 @@ async fn submit_message(
 
 #[tauri::command]
 async fn dequeue_messages(
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     restored_images: tauri::State<'_, RestoredImageState>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
 ) -> Result<SafeQueueDequeueResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let result = dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let result = dock_client(&runtime, &connection_id, selection_generation, &store)?
         .dequeue_messages(&instance_id, None)
         .await
         .map_err(CommandError::from)?;
@@ -5298,7 +5584,7 @@ async fn dequeue_messages(
         .flat_map(|item| item.images.iter().cloned())
         .collect();
     restored_images.append(
-        restored_image_scope(&host_id, selection_generation, &instance_id),
+        restored_image_scope(&connection_id, selection_generation, &instance_id),
         images,
     );
     Ok(project_queue_dequeue(result))
@@ -5306,16 +5592,20 @@ async fn dequeue_messages(
 
 #[tauri::command]
 fn clear_restored_images(
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     restored_images: tauri::State<'_, RestoredImageState>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
 ) -> Result<RestoredImageCount, CommandError> {
-    drop(resolve_host(&runtime, &host_id, selection_generation)?);
+    drop(resolve_connection_store(
+        &runtime,
+        &connection_id,
+        selection_generation,
+    )?);
     Ok(RestoredImageCount {
         image_count: restored_images.clear_scope(&restored_image_scope(
-            &host_id,
+            &connection_id,
             selection_generation,
             &instance_id,
         )),
@@ -5324,13 +5614,13 @@ fn clear_restored_images(
 
 #[tauri::command]
 async fn abort_run(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
 ) -> Result<InstanceSnapshot, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     client
         .abort_run(&instance_id, None)
         .await
@@ -5340,14 +5630,14 @@ async fn abort_run(
 fn detach_work_runtime(
     follow: &FollowState,
     extension: &ExtensionControlState,
-    host_id: &str,
+    connection_id: &str,
     selection_generation: u64,
     instance_id: &str,
 ) {
-    let _ = follow.abort_matching(host_id, selection_generation, instance_id, None);
+    let _ = follow.abort_matching(connection_id, selection_generation, instance_id, None);
     if let Ok(mut guard) = extension.inner.lock()
         && guard.binding.as_ref().is_some_and(|binding| {
-            binding.host_id == host_id
+            binding.connection_id == connection_id
                 && binding.selection_generation == selection_generation
                 && binding.instance_id == instance_id
         })
@@ -5361,22 +5651,22 @@ fn detach_work_runtime(
 
 #[tauri::command]
 async fn stop_work(
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     follow: tauri::State<'_, FollowState>,
     extension: tauri::State<'_, ExtensionControlState>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
 ) -> Result<StopResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let result = dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let result = dock_client(&runtime, &connection_id, selection_generation, &store)?
         .stop_instance(&instance_id, None)
         .await
         .map_err(CommandError::from)?;
     detach_work_runtime(
         &follow,
         &extension,
-        &host_id,
+        &connection_id,
         selection_generation,
         &instance_id,
     );
@@ -5385,16 +5675,16 @@ async fn stop_work(
 
 #[tauri::command]
 async fn command_catalog(
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     references: tauri::State<'_, CommandReferenceState>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
 ) -> Result<SafeCommandsResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     let scope = CommandReferenceScope {
-        host_id,
+        connection_id,
         selection_generation,
         instance_id,
     };
@@ -5408,23 +5698,23 @@ async fn command_catalog(
 
 #[tauri::command]
 async fn command_content(
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     references: tauri::State<'_, CommandReferenceState>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     reference_id: String,
     cursor: Option<String>,
 ) -> Result<SafeCommandContentResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let scope = CommandReferenceScope {
-        host_id: host_id.clone(),
+        connection_id: connection_id.clone(),
         selection_generation,
         instance_id: instance_id.clone(),
     };
     let command = references.resolve(&scope, &reference_id)?;
     let result: CommandContentResult =
-        dock_client(&runtime, &host_id, selection_generation, &store)?
+        dock_client(&runtime, &connection_id, selection_generation, &store)?
             .command_content(&instance_id, &command, cursor.as_deref())
             .await
             .map_err(CommandError::from)?;
@@ -5441,23 +5731,23 @@ async fn command_content(
 
 #[tauri::command]
 async fn command_completions(
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     references: tauri::State<'_, CommandReferenceState>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     reference_id: String,
     argument_prefix: String,
 ) -> Result<SafeCommandCompletionsResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let scope = CommandReferenceScope {
-        host_id: host_id.clone(),
+        connection_id: connection_id.clone(),
         selection_generation,
         instance_id: instance_id.clone(),
     };
     let command = references.resolve(&scope, &reference_id)?;
     let result: CommandCompletionsResult =
-        dock_client(&runtime, &host_id, selection_generation, &store)?
+        dock_client(&runtime, &connection_id, selection_generation, &store)?
             .command_completions(&instance_id, &command, &argument_prefix)
             .await
             .map_err(CommandError::from)?;
@@ -5474,16 +5764,16 @@ async fn command_completions(
 
 #[tauri::command]
 async fn run_catalog_command(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     name: String,
     arguments: String,
     operation_id: String,
 ) -> Result<SubmitResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     let catalog = client
         .commands(&instance_id, None)
         .await
@@ -5522,13 +5812,13 @@ async fn run_catalog_command(
 
 #[tauri::command]
 async fn list_models(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
 ) -> Result<ModelsResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
         .models(&instance_id)
         .await
         .map_err(CommandError::from)
@@ -5536,15 +5826,15 @@ async fn list_models(
 
 #[tauri::command]
 async fn set_model(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     provider: String,
     model_id: String,
 ) -> Result<InstanceSnapshot, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
         .set_model(&instance_id, &provider, &model_id, None)
         .await
         .map_err(CommandError::from)
@@ -5552,14 +5842,14 @@ async fn set_model(
 
 #[tauri::command]
 async fn set_thinking(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     level: ThinkingLevel,
 ) -> Result<InstanceSnapshot, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
         .set_thinking(&instance_id, level, None)
         .await
         .map_err(CommandError::from)
@@ -5567,13 +5857,13 @@ async fn set_thinking(
 
 #[tauri::command]
 async fn list_tools(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
 ) -> Result<SafeToolsResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
         .tools(&instance_id)
         .await
         .map(project_tools)
@@ -5582,14 +5872,14 @@ async fn list_tools(
 
 #[tauri::command]
 async fn set_active_tools(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     names: Vec<String>,
 ) -> Result<SafeToolsResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
         .set_active_tools(&instance_id, &names, None)
         .await
         .map(project_tools)
@@ -5598,13 +5888,13 @@ async fn set_active_tools(
 
 #[tauri::command]
 async fn get_settings(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
 ) -> Result<SettingsResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
         .settings(&instance_id)
         .await
         .map_err(CommandError::from)
@@ -5612,14 +5902,14 @@ async fn get_settings(
 
 #[tauri::command]
 async fn update_setting(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     update: SettingUpdate,
 ) -> Result<SettingUpdateResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
         .update_setting(&instance_id, &update, None)
         .await
         .map_err(CommandError::from)
@@ -5627,13 +5917,13 @@ async fn update_setting(
 
 #[tauri::command]
 async fn get_resources(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
 ) -> Result<SafeResourcesResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
         .resources(&instance_id)
         .await
         .map(project_resources)
@@ -5729,16 +6019,16 @@ fn project_resources(result: ResourcesResult) -> SafeResourcesResult {
 
 #[tauri::command]
 async fn reopen_work(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     operation_id: Option<String>,
     trust_challenge_id: Option<String>,
     project_trust_decision: Option<String>,
 ) -> Result<InstanceSnapshot, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     let continuation = parse_trust_continuation(
         trust_challenge_id.as_deref(),
         project_trust_decision.as_deref(),
@@ -5753,13 +6043,13 @@ async fn reopen_work(
 
 #[tauri::command]
 async fn forget_work(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
 ) -> Result<(), CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     client
         .forget_instance(&instance_id, None)
         .await
@@ -5791,12 +6081,12 @@ struct VerifiedEndpointMutation {
 }
 
 fn persist_verified_host_endpoint(
-    runtime: &HostRuntimeState,
-    host_id: &str,
+    runtime: &ConnectionRuntimeState,
+    connection_id: &str,
     selection_generation: u64,
     mutation: VerifiedEndpointMutation,
 ) -> Result<HostConnectionProfile, CommandError> {
-    let profile = mutate_selected_host(runtime, host_id, selection_generation, |store| {
+    let profile = mutate_selected_host(runtime, connection_id, selection_generation, |store| {
         save_verified_endpoint(
             store,
             mutation.endpoint,
@@ -5805,30 +6095,35 @@ fn persist_verified_host_endpoint(
             mutation.expected_revision,
         )
     })?;
-    reconcile_selected_client(runtime, host_id, selection_generation, &profile)?;
+    reconcile_selected_client(runtime, connection_id, selection_generation, &profile)?;
     Ok(profile)
 }
 
 fn persist_host_endpoint_test(
-    runtime: &HostRuntimeState,
-    host_id: &str,
+    runtime: &ConnectionRuntimeState,
+    connection_id: &str,
     selection_generation: u64,
     endpoint_id: &str,
     expected_revision: u64,
     probe: aludock_client_core::Result<()>,
 ) -> Result<EndpointTestResult, CommandError> {
-    let result = mutate_selected_host(runtime, host_id, selection_generation, |store| {
+    let result = mutate_selected_host(runtime, connection_id, selection_generation, |store| {
         record_endpoint_test(store, endpoint_id, expected_revision, probe)
     })?;
-    reconcile_selected_client(runtime, host_id, selection_generation, &result.profile)?;
+    reconcile_selected_client(
+        runtime,
+        connection_id,
+        selection_generation,
+        &result.profile,
+    )?;
     Ok(result)
 }
 
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn verify_host_endpoint(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     expected_revision: u64,
     host: String,
@@ -5836,7 +6131,7 @@ async fn verify_host_endpoint(
     label: String,
     kind: String,
 ) -> Result<HostConnectionProfile, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let endpoint = Endpoint::new(host, port).map_err(CommandError::from)?;
     let kind = parse_connection_kind(&kind)?;
     probe_host_endpoint(&store, &endpoint)
@@ -5844,7 +6139,7 @@ async fn verify_host_endpoint(
         .map_err(CommandError::from)?;
     persist_verified_host_endpoint(
         &runtime,
-        &host_id,
+        &connection_id,
         selection_generation,
         VerifiedEndpointMutation {
             endpoint,
@@ -5858,8 +6153,8 @@ async fn verify_host_endpoint(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 fn save_unverified_host_endpoint(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     expected_revision: u64,
     host: String,
@@ -5867,7 +6162,7 @@ fn save_unverified_host_endpoint(
     label: String,
     kind: String,
 ) -> Result<HostConnectionProfile, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let endpoint = Endpoint::new(host, port).map_err(CommandError::from)?;
     let profile = save_unverified_endpoint(
         &store,
@@ -5877,25 +6172,25 @@ fn save_unverified_host_endpoint(
         expected_revision,
     )
     .map_err(CommandError::from)?;
-    reconcile_selected_client(&runtime, &host_id, selection_generation, &profile)?;
+    reconcile_selected_client(&runtime, &connection_id, selection_generation, &profile)?;
     Ok(profile)
 }
 
 #[tauri::command]
 async fn test_host_endpoint(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     expected_revision: u64,
     endpoint_id: String,
 ) -> Result<EndpointTestResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let endpoint = saved_endpoint_for_test(&store, &endpoint_id, expected_revision)
         .map_err(CommandError::from)?;
     let probe = probe_host_endpoint(&store, &endpoint).await;
     persist_host_endpoint_test(
         &runtime,
-        &host_id,
+        &connection_id,
         selection_generation,
         &endpoint_id,
         expected_revision,
@@ -5905,33 +6200,33 @@ async fn test_host_endpoint(
 
 #[tauri::command]
 fn rename_host_profile(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     expected_revision: u64,
     display_name: String,
 ) -> Result<HostConnectionProfile, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let profile = store
         .update_connection_profile_at(expected_revision, |profile| {
             profile.display_name = display_name;
             Ok(())
         })
         .map_err(CommandError::from)?;
-    reconcile_selected_client(&runtime, &host_id, selection_generation, &profile)?;
+    reconcile_selected_client(&runtime, &connection_id, selection_generation, &profile)?;
     Ok(profile)
 }
 
 #[tauri::command]
 fn set_connection_policy(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     expected_revision: u64,
     mode: String,
     endpoint_id: Option<String>,
 ) -> Result<HostConnectionProfile, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let policy = match (mode.as_str(), endpoint_id) {
         ("automatic", _) => ConnectionPolicy::Automatic,
         ("fixed", Some(endpoint_id)) => ConnectionPolicy::Fixed { endpoint_id },
@@ -5941,53 +6236,53 @@ fn set_connection_policy(
     };
     let profile =
         update_connection_policy(&store, policy, expected_revision).map_err(CommandError::from)?;
-    reconcile_selected_client(&runtime, &host_id, selection_generation, &profile)?;
+    reconcile_selected_client(&runtime, &connection_id, selection_generation, &profile)?;
     Ok(profile)
 }
 
 #[tauri::command]
 fn set_host_endpoint_enabled(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     expected_revision: u64,
     endpoint_id: String,
     enabled: bool,
 ) -> Result<HostConnectionProfile, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let profile = set_endpoint_enabled(&store, &endpoint_id, enabled, expected_revision)
         .map_err(CommandError::from)?;
-    reconcile_selected_client(&runtime, &host_id, selection_generation, &profile)?;
+    reconcile_selected_client(&runtime, &connection_id, selection_generation, &profile)?;
     Ok(profile)
 }
 
 #[tauri::command]
 fn reorder_host_endpoints(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     expected_revision: u64,
     endpoint_ids: Vec<String>,
 ) -> Result<HostConnectionProfile, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let profile =
         reorder_endpoints(&store, &endpoint_ids, expected_revision).map_err(CommandError::from)?;
-    reconcile_selected_client(&runtime, &host_id, selection_generation, &profile)?;
+    reconcile_selected_client(&runtime, &connection_id, selection_generation, &profile)?;
     Ok(profile)
 }
 
 #[tauri::command]
 fn delete_host_endpoint(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     expected_revision: u64,
     endpoint_id: String,
 ) -> Result<HostConnectionProfile, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let profile =
         delete_endpoint(&store, &endpoint_id, expected_revision).map_err(CommandError::from)?;
-    reconcile_selected_client(&runtime, &host_id, selection_generation, &profile)?;
+    reconcile_selected_client(&runtime, &connection_id, selection_generation, &profile)?;
     Ok(profile)
 }
 
@@ -6066,8 +6361,8 @@ fn create_workspace_cache_file(path: &PathBuf) -> Result<std::fs::File, CommandE
 
 #[tauri::command]
 async fn workspace_entries(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
@@ -6075,8 +6370,8 @@ async fn workspace_entries(
     path: String,
     cursor: Option<WorkspaceFileCursor>,
 ) -> Result<WorkspaceFilePage, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     verify_workspace_scope(
         &client,
         &instance_id,
@@ -6095,7 +6390,7 @@ async fn workspace_entries(
         expected_runtime_generation,
     )
     .await?;
-    resolve_host(&runtime, &host_id, selection_generation)?;
+    resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     if page.host_epoch.as_deref() != Some(expected_host_epoch.as_str()) {
         return Err(workspace_command_error(
             "workspace_context_changed",
@@ -6107,16 +6402,16 @@ async fn workspace_entries(
 
 #[tauri::command]
 async fn workspace_entry_metadata(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
     expected_runtime_generation: u64,
     path: String,
 ) -> Result<WorkspaceEntryResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     verify_workspace_scope(
         &client,
         &instance_id,
@@ -6135,7 +6430,7 @@ async fn workspace_entry_metadata(
         expected_runtime_generation,
     )
     .await?;
-    resolve_host(&runtime, &host_id, selection_generation)?;
+    resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     if host_epoch != expected_host_epoch {
         return Err(workspace_command_error(
             "workspace_context_changed",
@@ -6153,9 +6448,9 @@ async fn workspace_entry_metadata(
 #[allow(clippy::too_many_arguments)]
 async fn read_workspace_file(
     app: tauri::AppHandle,
-    runtime: tauri::State<'_, HostRuntimeState>,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
     state: tauri::State<'_, WorkspaceFileState>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
@@ -6177,8 +6472,8 @@ async fn read_workspace_file(
             "请选择一个可以读取的文件。",
         ));
     }
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     verify_workspace_scope(
         &client,
         &instance_id,
@@ -6207,7 +6502,7 @@ async fn read_workspace_file(
 
     let cancellation = state.begin(
         read_id.clone(),
-        host_id.clone(),
+        connection_id.clone(),
         selection_generation,
         instance_id.clone(),
     )?;
@@ -6227,7 +6522,7 @@ async fn read_workspace_file(
     };
     let mut staging_file = tokio::fs::File::from_std(staging_file);
     let progress_app = app.clone();
-    let progress_host = host_id.clone();
+    let progress_host = connection_id.clone();
     let progress_instance = instance_id.clone();
     let progress_path = expected_entry.path.clone();
     let progress_read_id = read_id.clone();
@@ -6255,7 +6550,7 @@ async fn read_workspace_file(
             let _ = progress_app.emit(
                 "aludock://workspace-read-progress",
                 WorkspaceReadProgressEmission {
-                    host_id: progress_host.clone(),
+                    connection_id: progress_host.clone(),
                     selection_generation,
                     instance_id: progress_instance.clone(),
                     read_id: progress_read_id.clone(),
@@ -6313,7 +6608,7 @@ async fn read_workspace_file(
         ));
     }
     drop(staging_file);
-    if let Err(error) = resolve_host(&runtime, &host_id, selection_generation) {
+    if let Err(error) = resolve_connection_store(&runtime, &connection_id, selection_generation) {
         let _ = fs::remove_file(&staging_path);
         state.finish_failed(&read_id);
         return Err(error);
@@ -6331,7 +6626,7 @@ async fn read_workspace_file(
     }
     let cache = CachedWorkspaceFile {
         cache_id: read_id.clone(),
-        host_id,
+        connection_id,
         selection_generation,
         instance_id,
         runtime_generation: expected_runtime_generation,
@@ -6355,12 +6650,12 @@ async fn read_workspace_file(
 #[tauri::command]
 fn cancel_workspace_file_read(
     state: tauri::State<'_, WorkspaceFileState>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     read_id: String,
 ) -> Result<bool, CommandError> {
-    state.cancel(&host_id, selection_generation, &instance_id, &read_id)
+    state.cancel(&connection_id, selection_generation, &instance_id, &read_id)
 }
 
 #[tauri::command]
@@ -6372,7 +6667,7 @@ fn clear_workspace_file_state(
 
 fn cached_workspace_file(
     state: &WorkspaceFileState,
-    host_id: &str,
+    connection_id: &str,
     selection_generation: u64,
     instance_id: &str,
     expected_host_epoch: &str,
@@ -6380,7 +6675,7 @@ fn cached_workspace_file(
     cache_id: &str,
 ) -> Result<CachedWorkspaceFile, CommandError> {
     let cache = state.cached(
-        host_id,
+        connection_id,
         selection_generation,
         instance_id,
         expected_host_epoch,
@@ -6396,7 +6691,7 @@ fn cached_workspace_file(
 #[tauri::command]
 async fn workspace_cached_text(
     state: tauri::State<'_, WorkspaceFileState>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
@@ -6405,7 +6700,7 @@ async fn workspace_cached_text(
 ) -> Result<String, CommandError> {
     let cache = cached_workspace_file(
         &state,
-        &host_id,
+        &connection_id,
         selection_generation,
         &instance_id,
         &expected_host_epoch,
@@ -6435,7 +6730,7 @@ async fn workspace_cached_text(
 #[tauri::command]
 async fn workspace_cached_image(
     state: tauri::State<'_, WorkspaceFileState>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
@@ -6444,7 +6739,7 @@ async fn workspace_cached_image(
 ) -> Result<Response, CommandError> {
     let cache = cached_workspace_file(
         &state,
-        &host_id,
+        &connection_id,
         selection_generation,
         &instance_id,
         &expected_host_epoch,
@@ -6462,7 +6757,7 @@ async fn workspace_cached_image(
 async fn save_workspace_cached_file(
     app: tauri::AppHandle,
     state: tauri::State<'_, WorkspaceFileState>,
-    host_id: String,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
@@ -6471,7 +6766,7 @@ async fn save_workspace_cached_file(
 ) -> Result<LocalSaveResult, CommandError> {
     let cache = cached_workspace_file(
         &state,
-        &host_id,
+        &connection_id,
         selection_generation,
         &instance_id,
         &expected_host_epoch,
@@ -6517,12 +6812,12 @@ async fn save_workspace_cached_file(
 
 #[tauri::command]
 async fn list_machines(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
 ) -> Result<Vec<Machine>, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    dock_client(&runtime, &host_id, selection_generation, &store)?
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    dock_client(&runtime, &connection_id, selection_generation, &store)?
         .list_machines()
         .await
         .map_err(CommandError::from)
@@ -6530,14 +6825,14 @@ async fn list_machines(
 
 #[tauri::command]
 async fn list_workspace(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     path: String,
     target_host_id: Option<String>,
 ) -> Result<WorkspacePage, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     client
         .list_workspace_for_machine(&path, None, target_host_id.as_deref())
         .await
@@ -6609,7 +6904,7 @@ fn begin_session_token_request(state: &SessionTokenState) -> Result<u64, Command
 fn publish_session_tokens(
     state: &SessionTokenState,
     request_id: u64,
-    host_id: &str,
+    connection_id: &str,
     selection_generation: u64,
     scope: SessionTokenScope,
     tokens: HashMap<String, String>,
@@ -6624,7 +6919,7 @@ fn publish_session_tokens(
             token,
             SessionTokenBinding {
                 request_id,
-                host_id: host_id.to_owned(),
+                connection_id: connection_id.to_owned(),
                 selection_generation,
                 scope: scope.clone(),
                 session_file,
@@ -6641,8 +6936,8 @@ fn publish_session_tokens(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn list_sessions(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     state: tauri::State<'_, SessionTokenState>,
     instance_id: String,
@@ -6651,8 +6946,8 @@ async fn list_sessions(
     scope: String,
 ) -> Result<SafeSessionList, CommandError> {
     let request_id = begin_session_token_request(&state)?;
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     let current = verify_session_scope(
         &client,
         &instance_id,
@@ -6705,11 +7000,11 @@ async fn list_sessions(
         })
         .collect();
     let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
-    ensure_host_selection(&lifecycle, &host_id, selection_generation)?;
+    ensure_connection_selection(&lifecycle, &connection_id, selection_generation)?;
     publish_session_tokens(
         &state,
         request_id,
-        &host_id,
+        &connection_id,
         selection_generation,
         SessionTokenScope::Work {
             host_epoch: expected_host_epoch.clone(),
@@ -6723,7 +7018,7 @@ async fn list_sessions(
         sessions,
         total: result.total,
         truncated: result.truncated,
-        host_id,
+        connection_id,
         selection_generation,
         host_epoch: expected_host_epoch,
         runtime_generation: expected_runtime_generation,
@@ -6732,16 +7027,16 @@ async fn list_sessions(
 
 #[tauri::command]
 async fn session_inventory(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     state: tauri::State<'_, SessionTokenState>,
     machine_host_id: String,
     cwd: String,
 ) -> Result<SafeSessionInventory, CommandError> {
     let request_id = begin_session_token_request(&state)?;
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     let result = client
         .session_inventory(&cwd, SessionScope::All, Some(&machine_host_id))
         .await
@@ -6763,11 +7058,11 @@ async fn session_inventory(
         })
         .collect();
     let lifecycle = runtime.lifecycle.lock().map_err(|_| lifecycle_error())?;
-    ensure_host_selection(&lifecycle, &host_id, selection_generation)?;
+    ensure_connection_selection(&lifecycle, &connection_id, selection_generation)?;
     publish_session_tokens(
         &state,
         request_id,
-        &host_id,
+        &connection_id,
         selection_generation,
         SessionTokenScope::Machine {
             machine_host_id: machine_host_id.clone(),
@@ -6782,7 +7077,7 @@ async fn session_inventory(
         truncated: result.truncated,
         incomplete: result.incomplete,
         machine_host_id,
-        host_id,
+        connection_id,
         host_epoch: result.host_epoch,
         selection_generation,
     })
@@ -6790,7 +7085,7 @@ async fn session_inventory(
 
 fn resolve_work_session_token(
     state: &SessionTokenState,
-    host_id: &str,
+    connection_id: &str,
     selection_generation: u64,
     instance_id: &str,
     host_epoch: &str,
@@ -6817,7 +7112,7 @@ fn resolve_work_session_token(
             && bound_instance == instance_id
             && *bound_generation == runtime_generation
     );
-    if binding.host_id != host_id
+    if binding.connection_id != connection_id
         || binding.selection_generation != selection_generation
         || !scope_matches
     {
@@ -6830,7 +7125,7 @@ fn resolve_work_session_token(
 
 fn resolve_machine_session_token(
     state: &SessionTokenState,
-    host_id: &str,
+    connection_id: &str,
     selection_generation: u64,
     machine_host_id: &str,
     token: &str,
@@ -6852,7 +7147,7 @@ fn resolve_machine_session_token(
         } if bound_machine == machine_host_id => Some(host_epoch),
         _ => None,
     };
-    if binding.host_id != host_id
+    if binding.connection_id != connection_id
         || binding.selection_generation != selection_generation
         || bound_host_epoch.is_none()
     {
@@ -6868,16 +7163,16 @@ fn resolve_machine_session_token(
 
 #[tauri::command]
 async fn new_session(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
     expected_runtime_generation: u64,
     operation_id: String,
 ) -> Result<SessionReplacementResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     verify_session_scope(
         &client,
         &instance_id,
@@ -6902,8 +7197,8 @@ async fn new_session(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn switch_session(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     state: tauri::State<'_, SessionTokenState>,
     instance_id: String,
@@ -6916,15 +7211,15 @@ async fn switch_session(
 ) -> Result<SessionReplacementResult, CommandError> {
     let session_file = resolve_work_session_token(
         &state,
-        &host_id,
+        &connection_id,
         selection_generation,
         &instance_id,
         &expected_host_epoch,
         expected_runtime_generation,
         &session_token,
     )?;
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     verify_session_scope(
         &client,
         &instance_id,
@@ -6954,8 +7249,8 @@ async fn switch_session(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn name_session(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
@@ -6963,8 +7258,8 @@ async fn name_session(
     operation_id: String,
     name: String,
 ) -> Result<SessionNameResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     verify_session_scope(
         &client,
         &instance_id,
@@ -6989,8 +7284,8 @@ async fn name_session(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn compact_session(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
@@ -6998,8 +7293,8 @@ async fn compact_session(
     operation_id: String,
     custom_instructions: Option<String>,
 ) -> Result<SessionCompactionResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     verify_session_scope(
         &client,
         &instance_id,
@@ -7027,16 +7322,16 @@ async fn compact_session(
 
 #[tauri::command]
 async fn reload_session(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
     expected_runtime_generation: u64,
     operation_id: String,
 ) -> Result<SafeSessionReload, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     verify_session_scope(
         &client,
         &instance_id,
@@ -7088,15 +7383,15 @@ fn project_session_reload(result: SessionReloadResult) -> SafeSessionReload {
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn session_tree(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
     expected_runtime_generation: u64,
 ) -> Result<SessionTree, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     let (tree, host_epoch) = client
         .session_tree(&instance_id)
         .await
@@ -7119,8 +7414,8 @@ async fn session_tree(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn navigate_session(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
@@ -7130,8 +7425,8 @@ async fn navigate_session(
     summarize: bool,
     custom_instructions: Option<String>,
 ) -> Result<SessionNavigateResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     verify_session_scope(
         &client,
         &instance_id,
@@ -7166,8 +7461,8 @@ async fn navigate_session(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn fork_session(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
@@ -7175,8 +7470,8 @@ async fn fork_session(
     operation_id: String,
     entry_id: String,
 ) -> Result<SessionForkResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     verify_session_scope(
         &client,
         &instance_id,
@@ -7201,8 +7496,8 @@ async fn fork_session(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn clone_session(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     instance_id: String,
     expected_host_epoch: String,
@@ -7210,8 +7505,8 @@ async fn clone_session(
     operation_id: String,
     entry_id: String,
 ) -> Result<SessionReplacementResult, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     verify_session_scope(
         &client,
         &instance_id,
@@ -7236,8 +7531,8 @@ async fn clone_session(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn adopt_session(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     state: tauri::State<'_, SessionTokenState>,
     machine_host_id: String,
@@ -7249,13 +7544,13 @@ async fn adopt_session(
 ) -> Result<InstanceSnapshot, CommandError> {
     let (session_file, inventory_host_epoch) = resolve_machine_session_token(
         &state,
-        &host_id,
+        &connection_id,
         selection_generation,
         &machine_host_id,
         &session_token,
     )?;
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     let continuation = parse_trust_continuation(
         trust_challenge_id.as_deref(),
         project_trust_decision.as_deref(),
@@ -7277,8 +7572,8 @@ async fn adopt_session(
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 async fn create_work(
-    runtime: tauri::State<'_, HostRuntimeState>,
-    host_id: String,
+    runtime: tauri::State<'_, ConnectionRuntimeState>,
+    connection_id: String,
     selection_generation: u64,
     cwd: String,
     name: Option<String>,
@@ -7287,8 +7582,8 @@ async fn create_work(
     trust_challenge_id: Option<String>,
     project_trust_decision: Option<String>,
 ) -> Result<InstanceSnapshot, CommandError> {
-    let store = resolve_host(&runtime, &host_id, selection_generation)?;
-    let client = dock_client(&runtime, &host_id, selection_generation, &store)?;
+    let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
+    let client = dock_client(&runtime, &connection_id, selection_generation, &store)?;
     let continuation = parse_trust_continuation(
         trust_challenge_id.as_deref(),
         project_trust_decision.as_deref(),
@@ -7370,7 +7665,7 @@ pub fn run() {
             let application_data_dir = Some(app.path().app_local_data_dir()?);
             #[cfg(not(mobile))]
             let application_data_dir = None;
-            app.manage(HostRuntimeState::open(application_data_dir)?);
+            app.manage(ConnectionRuntimeState::open(application_data_dir)?);
             app.manage(WorkspaceFileState::open(
                 app.path().app_cache_dir()?.join("workspace-preview"),
             )?);
@@ -7390,8 +7685,10 @@ pub fn run() {
             begin_windows_away,
             cancel_windows_away,
             get_host_catalog,
+            connect_local_dock,
+            set_local_endpoint,
             set_active_host,
-            remove_local_host,
+            remove_saved_host,
             start_pairing,
             resume_pairing,
             cancel_pairing,
@@ -7485,7 +7782,7 @@ mod tests {
     fn command_projection_keeps_owner_path_behind_an_opaque_reference() {
         let state = CommandReferenceState::default();
         let scope = CommandReferenceScope {
-            host_id: "host-1".into(),
+            connection_id: "host-1".into(),
             selection_generation: 7,
             instance_id: "work-1".into(),
         };
@@ -7592,7 +7889,7 @@ mod tests {
                     &read_id,
                     CachedWorkspaceFile {
                         cache_id: read_id.clone(),
-                        host_id: "host".into(),
+                        connection_id: "host".into(),
                         selection_generation: 4,
                         instance_id: "work".into(),
                         runtime_generation: 9,
@@ -7694,7 +7991,7 @@ mod tests {
         );
     }
 
-    fn endpoint_runtime(name: &str) -> (PathBuf, HostRuntimeState, String) {
+    fn endpoint_runtime(name: &str) -> (PathBuf, ConnectionRuntimeState, String) {
         let path = std::env::temp_dir().join(format!(
             "aludock-tauri-endpoint-{name}-{}",
             uuid::Uuid::new_v4()
@@ -7717,11 +8014,14 @@ mod tests {
         let registry = HostRegistry::open(&path).unwrap();
         let preferences =
             ClientPreferencesStore::open(registry.root().join("client-preferences")).unwrap();
-        let runtime = HostRuntimeState {
+        let runtime = ConnectionRuntimeState {
             registry,
             preferences,
+            local_identity: IdentityStore::new(path.join("local-client-identity")),
             lifecycle: Arc::new(Mutex::new(RuntimeLifecycle {
-                active_host_id: Some(host_id.clone()),
+                active_target: Some(ConnectionTarget::Host {
+                    host_id: host_id.clone(),
+                }),
                 selection_generation: 1,
             })),
             selected_client: Arc::new(Mutex::new(None)),
@@ -7743,27 +8043,39 @@ mod tests {
     }
 
     #[test]
-    fn host_transition_increments_generation_even_for_offline_selection() {
+    fn choosing_local_or_a_host_keeps_exactly_one_current_connection() {
+        let host_b = "b".repeat(64);
         let mut lifecycle = RuntimeLifecycle {
-            active_host_id: Some("a".repeat(64)),
+            active_target: Some(ConnectionTarget::Host {
+                host_id: "a".repeat(64),
+            }),
             selection_generation: 4,
         };
-        assert_eq!(lifecycle.transition_to(Some("b".repeat(64))).unwrap(), 5);
-        assert_eq!(lifecycle.active_host_id, Some("b".repeat(64)));
-        assert_eq!(lifecycle.transition_to(None).unwrap(), 6);
-        assert_eq!(lifecycle.active_host_id, None);
+        assert_eq!(lifecycle.transition_to_local().unwrap(), 5);
+        assert_eq!(lifecycle.connection_id(), Some(LOCAL_CONNECTION_SCOPE_ID));
+        assert_eq!(
+            lifecycle.transition_to_host(Some(host_b.clone())).unwrap(),
+            6
+        );
+        assert_eq!(lifecycle.connection_id(), Some(host_b.as_str()));
+        assert_eq!(
+            lifecycle.active_target,
+            Some(ConnectionTarget::Host { host_id: host_b })
+        );
     }
 
     #[test]
     fn stale_selection_is_rejected_before_long_lived_registration() {
         let mut lifecycle = RuntimeLifecycle {
-            active_host_id: Some("a".repeat(64)),
+            active_target: Some(ConnectionTarget::Host {
+                host_id: "a".repeat(64),
+            }),
             selection_generation: 9,
         };
-        assert!(ensure_host_selection(&lifecycle, &"a".repeat(64), 9).is_ok());
-        lifecycle.transition_to(Some("b".repeat(64))).unwrap();
-        assert!(ensure_host_selection(&lifecycle, &"a".repeat(64), 9).is_err());
-        assert!(ensure_host_selection(&lifecycle, &"b".repeat(64), 9).is_err());
+        assert!(ensure_connection_selection(&lifecycle, &"a".repeat(64), 9).is_ok());
+        lifecycle.transition_to_host(Some("b".repeat(64))).unwrap();
+        assert!(ensure_connection_selection(&lifecycle, &"a".repeat(64), 9).is_err());
+        assert!(ensure_connection_selection(&lifecycle, &"b".repeat(64), 9).is_err());
     }
 
     #[test]
@@ -7860,13 +8172,15 @@ mod tests {
     fn stale_picker_completion_cannot_publish_native_paths() {
         let host_id = "a".repeat(64);
         let lifecycle = Mutex::new(RuntimeLifecycle {
-            active_host_id: Some(host_id.clone()),
+            active_target: Some(ConnectionTarget::Host {
+                host_id: host_id.clone(),
+            }),
             selection_generation: 7,
         });
         lifecycle
             .lock()
             .unwrap()
-            .transition_to(Some("b".repeat(64)))
+            .transition_to_host(Some("b".repeat(64)))
             .unwrap();
         let state = AttachmentState::default();
         let prepared = vec![(
@@ -7880,7 +8194,7 @@ mod tests {
             NativeAttachment {
                 path: PathBuf::from("/native/stale.png"),
                 temporary: false,
-                host_id: host_id.clone(),
+                connection_id: host_id.clone(),
                 selection_generation: 7,
                 work_id: "work".into(),
                 operation_id: "native-operation".into(),
@@ -7894,7 +8208,7 @@ mod tests {
 
         let error = publish_selected_attachments(&lifecycle, &state, &host_id, 7, "work", prepared)
             .unwrap_err();
-        assert_eq!(error.code, "stale_host_selection");
+        assert_eq!(error.code, "stale_connection_selection");
         assert!(state.entries.lock().unwrap().is_empty());
     }
 
@@ -7907,7 +8221,7 @@ mod tests {
             .lifecycle
             .lock()
             .unwrap()
-            .transition_to(None)
+            .transition_to_local()
             .unwrap();
 
         let result = persist_verified_host_endpoint(
@@ -7936,7 +8250,7 @@ mod tests {
             .lifecycle
             .lock()
             .unwrap()
-            .transition_to(None)
+            .transition_to_local()
             .unwrap();
 
         let result = persist_host_endpoint_test(
@@ -8023,7 +8337,7 @@ mod tests {
         let state = FollowState::default();
         *state.task.lock().unwrap() = Some(FollowTask {
             handle: tauri::async_runtime::spawn(std::future::pending()),
-            host_id: "host-a".into(),
+            connection_id: "host-a".into(),
             selection_generation: 3,
             instance_id: "work-a".into(),
             subscription_id: "foreground-new".into(),
@@ -8081,7 +8395,7 @@ mod tests {
         let entry = NativeAttachment {
             path: PathBuf::from("/home/private/secret.txt"),
             temporary: false,
-            host_id: "host-a".into(),
+            connection_id: "host-a".into(),
             selection_generation: 7,
             work_id: "work-a".into(),
             operation_id: "native-operation".into(),
@@ -8188,53 +8502,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
+            resolve_machine_session_token(&state, "main-host", 4, "windows-subhost", "safe-token",)
+                .unwrap(),
+            ("C:\\sessions\\private.jsonl".into(), "main-epoch".into(),)
+        );
+        assert!(
+            resolve_machine_session_token(&state, "main-host", 4, "another-machine", "safe-token",)
+                .is_err()
+        );
+        assert!(
             resolve_machine_session_token(
                 &state,
-                "main-host",
+                "another-main",
                 4,
                 "windows-subhost",
                 "safe-token",
             )
-            .unwrap(),
-            (
-                "C:\\sessions\\private.jsonl".into(),
-                "main-epoch".into(),
-            )
+            .is_err()
         );
-        assert!(resolve_machine_session_token(
-            &state,
-            "main-host",
-            4,
-            "another-machine",
-            "safe-token",
-        )
-        .is_err());
-        assert!(resolve_machine_session_token(
-            &state,
-            "another-main",
-            4,
-            "windows-subhost",
-            "safe-token",
-        )
-        .is_err());
-        assert!(resolve_machine_session_token(
-            &state,
-            "main-host",
-            5,
-            "windows-subhost",
-            "safe-token",
-        )
-        .is_err());
-        assert!(resolve_work_session_token(
-            &state,
-            "main-host",
-            4,
-            "work",
-            "epoch",
-            1,
-            "safe-token",
-        )
-        .is_err());
+        assert!(
+            resolve_machine_session_token(&state, "main-host", 5, "windows-subhost", "safe-token",)
+                .is_err()
+        );
+        assert!(
+            resolve_work_session_token(&state, "main-host", 4, "work", "epoch", 1, "safe-token",)
+                .is_err()
+        );
     }
 
     #[test]
@@ -8266,37 +8559,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            resolve_work_session_token(
-                &state,
-                "host-a",
-                7,
-                "work",
-                "epoch",
-                2,
-                "new-token",
-            )
-            .unwrap(),
+            resolve_work_session_token(&state, "host-a", 7, "work", "epoch", 2, "new-token",)
+                .unwrap(),
             "C:\\sessions\\new.jsonl"
         );
-        assert!(resolve_work_session_token(
-            &state,
-            "host-b",
-            7,
-            "work",
-            "epoch",
-            2,
-            "new-token",
-        )
-        .is_err());
-        assert!(resolve_work_session_token(
-            &state,
-            "host-a",
-            8,
-            "work",
-            "epoch",
-            2,
-            "new-token",
-        )
-        .is_err());
+        assert!(
+            resolve_work_session_token(&state, "host-b", 7, "work", "epoch", 2, "new-token",)
+                .is_err()
+        );
+        assert!(
+            resolve_work_session_token(&state, "host-a", 8, "work", "epoch", 2, "new-token",)
+                .is_err()
+        );
     }
 }

@@ -19,6 +19,7 @@ import {
   Trash2,
   Waypoints,
   WifiOff,
+  Wrench,
   X,
 } from '@lucide/vue'
 import {
@@ -77,6 +78,7 @@ import {
 import type { CreateWorkContinuation, SessionContext } from './lib/bridge'
 import { applyLiveToolUpdateToProjection, foldLiveDelta, foldLiveToolUpdate, hasCompactConversationContent, liveDeltaKey, liveProjectionTargetKey, mergeHydratedConversationRecords, projectConversation } from './lib/conversation'
 import { assistantMarkdownSource } from './lib/conversationPresentation'
+import { dockToolsState } from './lib/dockTools'
 import { appendRestoredQueue, attachmentUploadMatches, attachmentUploadTarget, attachmentsAfterSubmit, bindLocalAttachment, displayedConversationImageResource, moveAttachmentPreviewResource } from './lib/attachmentDraft'
 import { subhostMachineName } from './lib/machines'
 import {
@@ -88,7 +90,7 @@ import {
   resolveDeviceName,
 } from './lib/deviceName'
 import { userErrorMessage as errorMessage } from './lib/userError'
-import { captureHostResult, currentHostCall, hostResultMatches, requireHostContext } from './lib/hostResult'
+import { captureConnectionResult, currentConnectionCall, hostResultMatches, requireConnectionContext } from './lib/hostResult'
 import { reduceLiveEvent } from './lib/liveReducer'
 import { isRasterImageMimeType, rasterImageMimeType } from './lib/rasterImage'
 import { editorAfterSessionReplacement } from './lib/sessionEditor'
@@ -110,7 +112,7 @@ import {
 } from './lib/uiBoundaries'
 import { applySlashArgumentCompletion, applySlashCompletion, catalogSourceLabel, filterCatalogCommands, prefixSlashCommand, slashArgumentContext, slashCommandQuery } from './lib/commandSuggest'
 import { filterLocalControlCommands, localControlCommands, submittedLocalControl, type ControlSection, type LocalControlCommand } from './lib/localCommands'
-import type { AttachmentDto, AttachmentUploadProgress, ClientPreferences, CommandArgumentCompletion, CommandInfo, ConnectionKind, ConversationBootstrap, ConversationHistoryPage, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, HostConnectionProfile, HostContext, HostEndpoint, LocalAttachmentUpload, MachineDto, ProjectedEvent, QueueItem, SelectedAttachment, WindowsAwayDelay, Work } from './lib/types'
+import type { AttachmentDto, AttachmentUploadProgress, ClientPreferences, CommandArgumentCompletion, CommandInfo, ConnectionKind, ConversationBootstrap, ConversationHistoryPage, ConversationImageResource, ConversationItem, ConversationProcessItem, DeliverableDownloadProgress, DeliverableDto, HostConnectionProfile, ConnectionContext, HostEndpoint, LocalAttachmentUpload, MachineDto, ProjectedEvent, QueueItem, SelectedAttachment, WindowsAwayDelay, Work } from './lib/types'
 import {
   deliveryHistoryKey,
   downloadedDelivery,
@@ -130,6 +132,7 @@ import ExtensionUiSurface from './components/ExtensionUiSurface.vue'
 import ImageZoomSurface from './components/ImageZoomSurface.vue'
 import NewWorkDialog from './components/NewWorkDialog.vue'
 import MessageTextDialog from './components/MessageTextDialog.vue'
+import LocalConnectionCard from './components/LocalConnectionCard.vue'
 import WorkspaceBrowser from './components/WorkspaceBrowser.vue'
 import { useAppStore } from './stores/app'
 import { useCommandCatalogStore } from './stores/command-catalog'
@@ -219,7 +222,7 @@ interface HistoryHydrationDomain {
 }
 interface HistoryHydrationJob {
   domain: HistoryHydrationDomain
-  context: HostContext
+  context: ConnectionContext
   state: ConversationBootstrap
   conversationEpoch: number
   workId: string
@@ -280,7 +283,7 @@ let windowFocusEpoch = 0
 let windowsAwayId: string | null = null
 const elapsedWindowsAwayIds = new Set<string>()
 const followConnected = ref(false)
-type ActiveFollow = HostContext & { instanceId: string; subscriptionId: string }
+type ActiveFollow = ConnectionContext & { instanceId: string; subscriptionId: string }
 const activeFollow = ref<ActiveFollow | null>(null)
 const activeFollowSubscription = computed(() => activeFollow.value?.subscriptionId ?? '')
 const pairHost = ref('')
@@ -395,47 +398,48 @@ const conversationRows = computed<ConversationRow[]>(() => {
 })
 const queueItems = computed(() => isTauri ? conversationState.value?.queue ?? [] : previewQueue)
 const selected = computed(() => app.selectedWork)
+const selectedDockTools = computed(() => selected.value ? dockToolsState(selected.value.extensionStatus) : 'off')
 const conversationSwitching = computed(() => Boolean(
   selected.value && conversationState.value && selected.value.id !== conversationState.value.instance.id,
 ))
 const currentDeliverableRows = computed(() => {
-  const context = app.hostContext
+  const context = app.connectionContext
   const instanceId = selected.value?.id
   if (!context || !instanceId) return []
   return deliverables.value.map((deliverable) => {
-    const key = deliveryHistoryKey(context.hostId, instanceId, deliverable.deliveryRef)
+    const key = deliveryHistoryKey(context.connectionId, instanceId, deliverable.deliveryRef)
     return {
       deliverable,
-      downloaded: downloadedDelivery(downloadHistory.value, context.hostId, instanceId, deliverable.deliveryRef),
+      downloaded: downloadedDelivery(downloadHistory.value, context.connectionId, instanceId, deliverable.deliveryRef),
       downloading: downloadingDeliveries.value.has(key),
       progress: deliveryProgress.value[key] ?? 0,
     }
   })
 })
 const olderDownloadHistory = computed(() => {
-  const context = app.hostContext
+  const context = app.connectionContext
   const instanceId = selected.value?.id
   if (!context || !instanceId) return downloadHistory.value.items
   return pastDownloadedDeliveries(
     downloadHistory.value,
-    context.hostId,
+    context.connectionId,
     instanceId,
     deliverables.value,
     deliveryListLoaded.value,
   )
 })
 const pendingDeliverableCount = computed(() => currentDeliverableRows.value.filter((row) => !row.downloaded).length)
-function restoredImageKey(context: HostContext, workId: string) {
-  return JSON.stringify([context.hostId, workId])
+function restoredImageKey(context: ConnectionContext, workId: string) {
+  return JSON.stringify([context.connectionId, workId])
 }
 const restoredImageCount = computed({
   get: () => {
-    const context = app.hostContext
+    const context = app.connectionContext
     const workId = selected.value?.id
     return context && workId ? restoredImageCounts.value[restoredImageKey(context, workId)] ?? 0 : 0
   },
   set: (value: number) => {
-    const context = app.hostContext
+    const context = app.connectionContext
     const workId = selected.value?.id
     if (!context || !workId) return
     const key = restoredImageKey(context, workId)
@@ -517,9 +521,9 @@ const modelLabel = computed(() => {
 const contextPercent = computed(() => selected.value?.metrics?.context?.percent)
 const selectedCompactionPending = computed(() => !!selected.value && compactionWorkIds.value.has(selected.value.id))
 const currentCompactionError = computed(() => {
-  const hostId = app.activeHostId
+  const connectionId = app.activeConnectionId
   const workId = selected.value?.id
-  return hostId && workId ? compactionErrors.value[compactionErrorKey(hostId, workId)] ?? null : null
+  return connectionId && workId ? compactionErrors.value[compactionErrorKey(connectionId, workId)] ?? null : null
 })
 const visibleComposerError = computed(() => submissionError.value || currentCompactionError.value)
 const recoverablePairings = computed(() => app.catalog?.pairingTransactions ?? [])
@@ -627,7 +631,7 @@ watch(suggestIndex, async () => {
 function ensureCommandCatalog() {
   if (!selected.value) return
   try {
-    void commandCatalogStore.ensure(selected.value, requireHostContext(app))
+    void commandCatalogStore.ensure(selected.value, requireConnectionContext(app))
   } catch {
     // Host 上下文不可用时建议列表保持空，不打扰输入
   }
@@ -666,7 +670,7 @@ function scheduleComposerArgumentCompletions() {
     const work = selected.value
     if (!work) return
     try {
-      const result = await currentHostCall(app, (host) => getCommandCompletions(work.id, command.referenceId, prefix, host))
+      const result = await currentConnectionCall(app, (host) => getCommandCompletions(work.id, command.referenceId, prefix, host))
       const current = composerArgumentContext.value
       if (epoch !== composerCompletionEpoch || selected.value?.id !== work.id || composerArgumentCommand.value?.referenceId !== command.referenceId || current?.prefix !== prefix) return
       composerArgumentItems.value = result.referenceId === command.referenceId ? result.items ?? [] : []
@@ -717,7 +721,7 @@ watch(() => app.workDrawerOpen, (open, wasOpen) => {
   }
 })
 watch(
-  () => [app.activeHostId, app.hostContext?.selectionGeneration] as const,
+  () => [app.activeConnectionId, app.connectionContext?.selectionGeneration] as const,
   () => {
     ++machineLoadEpoch
     hostMachines.value = []
@@ -727,18 +731,18 @@ watch(
   },
 )
 watch([
-  () => app.activeHostId,
-  () => app.hostContext?.selectionGeneration,
+  () => app.activeConnectionId,
+  () => app.connectionContext?.selectionGeneration,
   () => selected.value?.id,
   () => selected.value?.ownerHostEpoch,
   () => selected.value?.runtimeGeneration,
 ], () => {
-  const context = app.hostContext
+  const context = app.connectionContext
   const work = selected.value
-  if (context && work) commandConsole.bindContext(context.hostId, context.selectionGeneration, work)
+  if (context && work) commandConsole.bindContext(context.connectionId, context.selectionGeneration, work)
 }, { immediate: true })
 watch(
-  () => [app.activeHostId, app.hostContext?.selectionGeneration, selected.value?.id, selected.value?.execution] as const,
+  () => [app.activeConnectionId, app.connectionContext?.selectionGeneration, selected.value?.id, selected.value?.execution] as const,
   (current, previous) => {
     if (!previous) return
     const sameWork = current[0] === previous[0] && current[1] === previous[1] && current[2] === previous[2]
@@ -748,13 +752,13 @@ watch(
 watch(confirmDialog, async (dialog) => {
   if (!dialog) return
   await nextTick()
-  modalSurface.value?.querySelector<HTMLElement>('[data-modal-initial]')?.focus()
+  modalSurface.value?.querySelector<HTMLElement>('[data-modal-initial]:not(:disabled)')?.focus()
 })
 watch(controlSection, async () => {
   if (!commandOpen.value) return
   await nextTick()
   const surface = modalSurface.value
-  const initial = surface?.querySelector<HTMLElement>('[autofocus], input:not(:disabled), textarea:not(:disabled)')
+  const initial = surface?.querySelector<HTMLElement>('[data-modal-initial]:not(:disabled), [autofocus]:not(:disabled), input:not(:disabled), textarea:not(:disabled)')
     ?? surface?.querySelector<HTMLElement>('button:not(:disabled)')
   if (initial) initial.focus()
   else surface?.focus()
@@ -763,7 +767,7 @@ watch(modalOpen, async (open, wasOpen) => {
   if (open && !wasOpen) {
     await nextTick()
     const surface = modalSurface.value
-    const initial = surface?.querySelector<HTMLElement>('[data-modal-initial], [autofocus], input:not(:disabled), textarea:not(:disabled)')
+    const initial = surface?.querySelector<HTMLElement>('[data-modal-initial]:not(:disabled), [autofocus]:not(:disabled), input:not(:disabled), textarea:not(:disabled)')
       ?? surface?.querySelector<HTMLElement>('button:not(:disabled)')
     if (initial) initial.focus()
     else surface?.focus()
@@ -776,17 +780,17 @@ watch(modalOpen, async (open, wasOpen) => {
     })
   }
 })
-let transientContext: (HostContext & { workId: string }) | null = null
-let transientHostBoundary: HostContext | null = null
+let transientContext: (ConnectionContext & { workId: string }) | null = null
+let transientHostBoundary: ConnectionContext | null = null
 watch(
-  () => conversationBoundaryKey(app.activeHostId, app.hostContext?.selectionGeneration, selected.value?.id),
+  () => conversationBoundaryKey(app.activeConnectionId, app.connectionContext?.selectionGeneration, selected.value?.id),
   () => {
-    const hostId = app.activeHostId
-    const generation = app.hostContext?.selectionGeneration
+    const connectionId = app.activeConnectionId
+    const generation = app.connectionContext?.selectionGeneration
     const id = selected.value?.id
     const previous = transientContext
-    const hostIdentityChanged = transientHostBoundary && transientHostBoundary.hostId !== hostId
-    const contextChanged = previous && (previous.hostId !== hostId || previous.selectionGeneration !== generation || previous.workId !== id)
+    const connectionChanged = transientHostBoundary && transientHostBoundary.connectionId !== connectionId
+    const contextChanged = previous && (previous.connectionId !== connectionId || previous.selectionGeneration !== generation || previous.workId !== id)
     if (contextChanged) {
       for (const item of uploadDrafts.value) void removeAttachment(previous.workId, item.token, previous).catch(() => undefined)
       uploadDrafts.value = []
@@ -800,9 +804,9 @@ watch(
       messageTextView.value = null
       commandCatalogStore.invalidate()
     }
-    if (hostIdentityChanged) restoredImageCounts.value = {}
-    transientHostBoundary = hostId && generation != null ? { hostId, selectionGeneration: generation } : null
-    transientContext = hostId && generation != null && id ? { hostId, selectionGeneration: generation, workId: id } : null
+    if (connectionChanged) restoredImageCounts.value = {}
+    transientHostBoundary = connectionId && generation != null ? { connectionId, selectionGeneration: generation } : null
+    transientContext = connectionId && generation != null && id ? { connectionId, selectionGeneration: generation, workId: id } : null
     ++conversationLoadEpoch
     ++historyLoadEpoch
     resetHistoryHydration()
@@ -820,13 +824,13 @@ watch(
 watch(
   () => {
     const work = selected.value
-    const context = app.hostContext
+    const context = app.connectionContext
     return work && context ? JSON.stringify(attachmentUploadTarget(work, context)) : ''
   },
   async (targetKey, previousTargetKey) => {
     if (!targetKey || targetKey === previousTargetKey) return
     const work = selected.value
-    const context = app.hostContext
+    const context = app.connectionContext
     if (!work || !context) return
     const target = attachmentUploadTarget(work, context)
     const stalePending = uploadDrafts.value.filter((item) => item.target && !attachmentUploadMatches(item.target, target))
@@ -837,7 +841,7 @@ watch(
       await Promise.allSettled(staleAttempts)
     }
     const currentWork = selected.value
-    const currentHost = app.hostContext
+    const currentHost = app.connectionContext
     if (!currentWork || !currentHost || JSON.stringify(attachmentUploadTarget(currentWork, currentHost)) !== targetKey) return
 
     const retained: AttachmentDto[] = []
@@ -896,7 +900,7 @@ onMounted(async () => {
         if (payload.awayId === windowsAwayId) void detachConversationFollow()
         else elapsedWindowsAwayIds.add(payload.awayId)
       }),
-      await listen<{ hostId: string; selectionGeneration: number; instanceId: string; subscriptionId: string; event: ProjectedEvent }>('aludock://conversation-event', async ({ payload }) => {
+      await listen<{ connectionId: string; selectionGeneration: number; instanceId: string; subscriptionId: string; event: ProjectedEvent }>('aludock://conversation-event', async ({ payload }) => {
         if (!app.contextMatches(payload) || payload.instanceId !== selected.value?.id) return
         const pending = pendingFollowEvents.get(payload.subscriptionId)
         if (pending) {
@@ -906,7 +910,7 @@ onMounted(async () => {
         if (payload.subscriptionId !== activeFollowSubscription.value) return
         await applyFollowEvent(payload)
       }),
-      await listen<{ hostId: string; selectionGeneration: number; instanceId: string; subscriptionId: string; state: FollowConnectionState; message?: string }>('aludock://follow-status', ({ payload }) => {
+      await listen<{ connectionId: string; selectionGeneration: number; instanceId: string; subscriptionId: string; state: FollowConnectionState; message?: string }>('aludock://follow-status', ({ payload }) => {
         if (!app.contextMatches(payload) || payload.instanceId !== selected.value?.id) return
         if (followActivation.handleStatus(payload.subscriptionId, payload)) {
           clearFollowConnectionTimer(payload.subscriptionId)
@@ -918,7 +922,7 @@ onMounted(async () => {
         if (!app.contextMatches(payload) || payload.workId !== selected.value?.id) return
         const item = uploadDrafts.value.find((candidate) => candidate.token === payload.token)
         const progressTarget: LocalAttachmentUpload = {
-          hostId: payload.hostId,
+          connectionId: payload.connectionId,
           selectionGeneration: payload.selectionGeneration,
           instanceId: payload.workId,
           machineHostId: payload.machineHostId,
@@ -930,7 +934,7 @@ onMounted(async () => {
         item.progress = payload.totalBytes > 0 ? payload.bytesProcessed / payload.totalBytes : payload.phase === 'finalizing' ? 1 : 0
       }),
       await listen<DeliverableDownloadProgress>('aludock://deliverable-progress', ({ payload }) => {
-        const key = deliveryHistoryKey(payload.hostId, payload.instanceId, payload.deliveryRef)
+        const key = deliveryHistoryKey(payload.connectionId, payload.instanceId, payload.deliveryRef)
         if (!downloadingDeliveries.value.has(key)) return
         deliveryProgress.value = {
           ...deliveryProgress.value,
@@ -1046,7 +1050,7 @@ function openDeliveryTray() {
 }
 
 async function refreshDeliverables() {
-  const context = app.hostContext
+  const context = app.connectionContext
   const instanceId = selected.value?.id
   if (!context || !instanceId) {
     deliverables.value = []
@@ -1071,15 +1075,15 @@ async function refreshDeliverables() {
 }
 
 async function saveDeliverable(deliverable: DeliverableDto, redownload = false) {
-  const context = app.hostContext
+  const context = app.connectionContext
   const work = selected.value
   if (!context || !work) return
-  const existing = downloadedDelivery(downloadHistory.value, context.hostId, work.id, deliverable.deliveryRef)
+  const existing = downloadedDelivery(downloadHistory.value, context.connectionId, work.id, deliverable.deliveryRef)
   if (existing && !redownload) {
     await openDownloadedDeliverable(existing)
     return
   }
-  const key = deliveryHistoryKey(context.hostId, work.id, deliverable.deliveryRef)
+  const key = deliveryHistoryKey(context.connectionId, work.id, deliverable.deliveryRef)
   if (downloadingDeliveries.value.has(key)) return
   downloadingDeliveries.value = new Set(downloadingDeliveries.value).add(key)
   deliveryProgress.value = { ...deliveryProgress.value, [key]: 0 }
@@ -1088,7 +1092,7 @@ async function saveDeliverable(deliverable: DeliverableDto, redownload = false) 
     const result = await downloadDeliverable(work.id, deliverable, context)
     if (result.status === 'cancelled') return
     const next = recordDownloadedDelivery(downloadHistory.value, {
-      hostId: context.hostId,
+      connectionId: context.connectionId,
       instanceId: work.id,
       deliveryRef: result.deliverable.deliveryRef,
       name: result.deliverable.name,
@@ -1114,7 +1118,7 @@ async function saveDeliverable(deliverable: DeliverableDto, redownload = false) 
 }
 
 async function openDownloadedDeliverable(item: DownloadedDeliverable) {
-  const key = deliveryHistoryKey(item.hostId, item.instanceId, item.deliveryRef)
+  const key = deliveryHistoryKey(item.connectionId, item.instanceId, item.deliveryRef)
   if (openingDeliveryKey.value) return
   openingDeliveryKey.value = key
   deliveryError.value = ''
@@ -1359,7 +1363,7 @@ function handleModalKeydown(event: KeyboardEvent) {
 
 function controlDialogTitle(section: ControlSection) {
   return ({
-    commands: '命令中心', sessions: '恢复 Session', tree: 'Session Tree', 'new-session': 'New Session',
+    commands: '命令中心', 'dock-tools': 'Dock Tools', sessions: '恢复 Session', tree: 'Session Tree', 'new-session': 'New Session',
     'rename-session': '会话名称', 'compact-session': 'Compact Context', 'reload-session': 'Reload Session',
     models: '选择 Model', thinking: 'Thinking Level', tools: 'Active Tools', resources: '项目状态', settings: '设置',
   } as Record<ControlSection, string>)[section]
@@ -1367,6 +1371,7 @@ function controlDialogTitle(section: ControlSection) {
 
 function controlDialogBody(section: ControlSection) {
   if (section === 'models') return `当前：${modelLabel.value}`
+  if (section === 'dock-tools') return '当前 Work 可以交给 Agent 使用的 Dock 能力'
   if (section === 'resources') return '当前 Work、Session、Git 与已加载能力'
   if (section === 'tree') {
     return '浏览、切换或分叉当前会话树'
@@ -1448,7 +1453,7 @@ function openHostSettings() {
   endpointCanSaveDraft.value = false
   hostNameError.value = ''
   hostNameSaved.value = false
-  hostDisplayName.value = app.payload?.host.profile.displayName ?? app.activeHost?.displayName ?? ''
+  hostDisplayName.value = app.payload?.host.profile?.displayName ?? app.activeHost?.displayName ?? ''
 }
 
 function showHostPairingForm() {
@@ -1498,15 +1503,31 @@ async function rePairActiveHost() {
 }
 
 async function switchSavedHost(hostId: string) {
-  if (!isTauri || hostId === app.activeHostId || contextTransitionBusy.value || !await confirmRestoredImagesBeforeHostTransition()) return
+  if (!isTauri || hostId === app.activeConnectionId || contextTransitionBusy.value || !await confirmRestoredImagesBeforeHostTransition()) return
   await extensionUi.clear()
   closeModal()
   await app.switchHost(hostId)
 }
 
+async function connectLocal() {
+  if (!isTauri || app.loading || contextTransitionBusy.value || !await confirmRestoredImagesBeforeHostTransition()) return
+  await extensionUi.clear()
+  await app.connectLocal()
+  if (!app.error) {
+    addingHost.value = false
+    endpointFormOpen.value = false
+    hostDisplayName.value = app.activeHost?.displayName ?? ''
+  }
+}
+
+async function updateLocalEndpoint(endpoint?: string) {
+  if (!isTauri || contextTransitionBusy.value) return
+  await app.saveLocalEndpoint(endpoint)
+}
+
 async function removeSavedHost(hostId: string, displayName: string) {
   if (!isTauri || contextTransitionBusy.value) return
-  const imageWarning = hasRestoredImageDrafts.value && hostId === app.activeHostId ? '\n\n已取回但尚未发送的附件也会从本机草稿中移除。' : ''
+  const imageWarning = hasRestoredImageDrafts.value && hostId === app.activeConnectionId ? '\n\n已取回但尚未发送的附件也会从本机草稿中移除。' : ''
   const body = `这台 Host 会从此设备的列表中移除。电脑端仍会保留此设备的访问权限；如需一并撤销，请在电脑上的 AluDock 管理界面完成。以后从此设备连接需要重新配对。${imageWarning}`
   if (!await askConfirm(`从此设备删除“${displayName}”？`, body)) return
   await extensionUi.clear()
@@ -1522,11 +1543,11 @@ async function saveHostDisplayName() {
     hostNameError.value = 'Host 名称不能为空。'
     return
   }
-  if (hostNameSaving.value || displayName === app.payload?.host.profile.displayName) return
+  if (hostNameSaving.value || displayName === app.payload?.host.profile?.displayName) return
   hostNameSaving.value = true
   try {
     const revision = activeProfile().revision
-    const profile = await currentHostCall(app, (context) => renameHostProfile(displayName, revision, context))
+    const profile = await currentConnectionCall(app, (context) => renameHostProfile(displayName, revision, context))
     applyProfile(profile)
     hostDisplayName.value = profile.displayName
     hostNameSaved.value = true
@@ -1544,7 +1565,7 @@ function activeProfile(): HostConnectionProfile {
 }
 
 function applyProfile(profile: HostConnectionProfile) {
-  app.applyHostProfile(profile, requireHostContext(app))
+  app.applyHostProfile(profile, requireConnectionContext(app))
 }
 
 function clearEndpointForm() {
@@ -1561,7 +1582,7 @@ async function addHostEndpoint() {
   endpointCanSaveDraft.value = false
   try {
     const revision = activeProfile().revision
-    const profile = await currentHostCall(app, (context) => verifyHostEndpoint(
+    const profile = await currentConnectionCall(app, (context) => verifyHostEndpoint(
       endpointHost.value.trim(),
       endpointPort.value!,
       endpointLabel.value.trim() || '连接地址',
@@ -1588,7 +1609,7 @@ async function saveEndpointDraft() {
   endpointError.value = ''
   try {
     const revision = activeProfile().revision
-    const profile = await currentHostCall(app, (context) => saveUnverifiedHostEndpoint(
+    const profile = await currentConnectionCall(app, (context) => saveUnverifiedHostEndpoint(
       endpointHost.value.trim(),
       endpointPort.value!,
       endpointLabel.value.trim() || '连接地址',
@@ -1609,7 +1630,7 @@ async function chooseConnectionPolicy(mode: 'automatic' | 'fixed', endpointId?: 
   endpointError.value = ''
   try {
     const revision = activeProfile().revision
-    applyProfile(await currentHostCall(app, (context) => setConnectionPolicy(mode, revision, context, endpointId)))
+    applyProfile(await currentConnectionCall(app, (context) => setConnectionPolicy(mode, revision, context, endpointId)))
   } catch (cause) {
     endpointError.value = errorMessage(cause)
   }
@@ -1621,7 +1642,7 @@ async function testEndpoint(endpoint: HostEndpoint) {
   endpointError.value = ''
   try {
     const revision = activeProfile().revision
-    const result = await currentHostCall(app, (context) => testHostEndpoint(endpoint.id, revision, context))
+    const result = await currentConnectionCall(app, (context) => testHostEndpoint(endpoint.id, revision, context))
     applyProfile(result.profile)
   } catch (cause) {
     endpointError.value = errorMessage(cause)
@@ -1636,7 +1657,7 @@ async function toggleEndpoint(endpoint: HostEndpoint) {
   endpointError.value = ''
   try {
     const revision = activeProfile().revision
-    applyProfile(await currentHostCall(app, (context) => setHostEndpointEnabled(endpoint.id, endpoint.state === 'disabled', revision, context)))
+    applyProfile(await currentConnectionCall(app, (context) => setHostEndpointEnabled(endpoint.id, endpoint.state === 'disabled', revision, context)))
   } catch (cause) {
     endpointError.value = errorMessage(cause)
   } finally {
@@ -1655,7 +1676,7 @@ async function moveEndpoint(endpointId: string, offset: -1 | 1) {
   endpointMutatingId.value = endpointId
   endpointError.value = ''
   try {
-    applyProfile(await currentHostCall(app, (context) => reorderHostEndpoints(ids, profile.revision, context)))
+    applyProfile(await currentConnectionCall(app, (context) => reorderHostEndpoints(ids, profile.revision, context)))
   } catch (cause) {
     endpointError.value = errorMessage(cause)
   } finally {
@@ -1668,7 +1689,7 @@ async function removeEndpoint(endpointId: string, label: string) {
   endpointError.value = ''
   try {
     const revision = activeProfile().revision
-    applyProfile(await currentHostCall(app, (context) => deleteHostEndpoint(endpointId, revision, context)))
+    applyProfile(await currentConnectionCall(app, (context) => deleteHostEndpoint(endpointId, revision, context)))
   } catch (cause) {
     endpointError.value = errorMessage(cause)
   }
@@ -1751,7 +1772,7 @@ function attachmentCanPreview(mediaType?: string) {
   return !!mediaType && isRasterImageMimeType(mediaType)
 }
 
-async function prepareAttachmentPreview(item: UploadDraft, workId: string, context: HostContext) {
+async function prepareAttachmentPreview(item: UploadDraft, workId: string, context: ConnectionContext) {
   if (!attachmentCanPreview(item.mediaType) || attachmentPreviews.value[item.token]) return
   try {
     const bytes = await loadAttachmentPreviewBytes(workId, item.token, context)
@@ -1769,7 +1790,7 @@ async function prepareAttachmentPreview(item: UploadDraft, workId: string, conte
   }
 }
 
-async function startAttachmentUploadWithPreview(item: UploadDraft, workId: string, context: HostContext) {
+async function startAttachmentUploadWithPreview(item: UploadDraft, workId: string, context: ConnectionContext) {
   await prepareAttachmentPreview(item, workId, context)
   if (!app.contextMatches(context) || selected.value?.id !== workId || !uploadDrafts.value.some((candidate) => candidate.token === item.token)) return
   await startAttachmentUpload(item)
@@ -1793,7 +1814,7 @@ async function handleComposerPaste(event: ClipboardEvent) {
     submissionError.value = available > 0 ? `本条消息还可以添加 ${available} 个附件。` : `一条消息最多可附加 ${maxMessageAttachments.value} 个文件。`
     return
   }
-  const context = requireHostContext(app)
+  const context = requireConnectionContext(app)
   const resetEpoch = composerResetEpoch
   const staged: UploadDraft[] = []
   attachmentPicking.value = true
@@ -1841,7 +1862,7 @@ async function chooseAttachments() {
   submissionError.value = null
   attachmentPicking.value = true
   try {
-    const context = requireHostContext(app)
+    const context = requireConnectionContext(app)
     const resetEpoch = composerResetEpoch
     const picked = await pickAttachments(work.id, context)
     if (!app.contextMatches(context) || selected.value?.id !== work.id || resetEpoch !== composerResetEpoch) {
@@ -1863,7 +1884,7 @@ async function chooseAttachments() {
   }
 }
 
-function launchAttachmentUpload(item: UploadDraft, withPreview = false, workId?: string, context?: HostContext) {
+function launchAttachmentUpload(item: UploadDraft, withPreview = false, workId?: string, context?: ConnectionContext) {
   const active = attachmentUploadAttempts.get(item.token)
   if (active) return active
   const attempt = (withPreview && workId && context
@@ -1879,7 +1900,7 @@ function launchAttachmentUpload(item: UploadDraft, withPreview = false, workId?:
 async function startAttachmentUpload(item: UploadDraft) {
   const work = selected.value
   if (!work) return
-  const context = requireHostContext(app)
+  const context = requireConnectionContext(app)
   const target = attachmentUploadTarget(work, context)
   const resetEpoch = composerResetEpoch
   item.target = target
@@ -1889,7 +1910,7 @@ async function startAttachmentUpload(item: UploadDraft) {
   try {
     const result = await uploadAttachment(work, item.token, context)
     const currentWork = selected.value
-    const currentHost = app.hostContext
+    const currentHost = app.connectionContext
     const targetStillCurrent = !!currentWork && !!currentHost && attachmentUploadMatches(target, attachmentUploadTarget(currentWork, currentHost))
     if (!targetStillCurrent || resetEpoch !== composerResetEpoch || !uploadDrafts.value.some((candidate) => candidate.token === item.token)) return
     moveAttachmentPreview(item.token, result.attachment.fileId)
@@ -1898,7 +1919,7 @@ async function startAttachmentUpload(item: UploadDraft) {
     draftAttachments.value = [...draftAttachments.value.filter((candidate) => candidate.fileId !== bound.fileId), bound]
   } catch (cause) {
     const currentWork = selected.value
-    const currentHost = app.hostContext
+    const currentHost = app.connectionContext
     if (!currentWork
       || !currentHost
       || !app.contextMatches(context)
@@ -1913,7 +1934,7 @@ async function startAttachmentUpload(item: UploadDraft) {
 async function cancelUpload(item: UploadDraft) {
   const work = selected.value
   if (!work) return
-  try { await cancelAttachmentUpload(work.id, item.token, requireHostContext(app)) } catch { /* completion will report its final state */ }
+  try { await cancelAttachmentUpload(work.id, item.token, requireConnectionContext(app)) } catch { /* completion will report its final state */ }
 }
 
 async function removeUpload(item: UploadDraft) {
@@ -1921,7 +1942,7 @@ async function removeUpload(item: UploadDraft) {
   if (!work) return
   uploadDrafts.value = uploadDrafts.value.filter((candidate) => candidate.token !== item.token)
   removeAttachmentPreview(item.token)
-  try { await removeAttachment(work.id, item.token, requireHostContext(app)) } catch { /* already cleared by a context change */ }
+  try { await removeAttachment(work.id, item.token, requireConnectionContext(app)) } catch { /* already cleared by a context change */ }
 }
 
 function removeUploaded(fileId: string) {
@@ -1930,14 +1951,14 @@ function removeUploaded(fileId: string) {
   draftAttachments.value = draftAttachments.value.filter((item) => item.fileId !== fileId)
   removeAttachmentPreview(fileId)
   const token = attachment?.localUpload?.sourceToken
-  const context = app.hostContext
+  const context = app.connectionContext
   if (work && token && context) void removeAttachment(work.id, token, context).catch(() => undefined)
 }
 
 async function clearQueueImages() {
   const work = selected.value
   if (!work || pairingInProgress.value || clearingRestoredImages.value || submitting.value || queueRestoring.value) return
-  const context = requireHostContext(app)
+  const context = requireConnectionContext(app)
   clearingRestoredImages.value = true
   try {
     await clearRestoredImages(work.id, context)
@@ -1957,7 +1978,7 @@ async function restoreQueue(): Promise<boolean> {
   submissionError.value = null
   clearQueueNotice()
   try {
-    const context = requireHostContext(app)
+    const context = requireConnectionContext(app)
     const result = await dequeueMessages(work.id, context)
     if (!app.contextMatches(context) || selected.value?.id !== work.id || result.receipt.instanceId !== work.id || result.instance.id !== work.id) return false
     const restored = appendRestoredQueue(draft.value, draftAttachments.value, result.receipt.restored)
@@ -1990,7 +2011,7 @@ async function submit(): Promise<boolean> {
   const localCommand = submittedLocalControl(captured)
   if (localCommand) return executeLocalControl(localCommand, captured)
   if (!work || workMutating.value || (!captured.trim() && !capturedAttachments.length && !restoredImageCount.value) || !isTauri || pairingInProgress.value || clearingRestoredImages.value || submitting.value || queueRestoring.value || attachmentPicking.value || uploadDrafts.value.length > 0) return false
-  const currentHost = app.hostContext
+  const currentHost = app.connectionContext
   if (!currentHost) return false
   const attachmentTarget = attachmentUploadTarget(work, currentHost)
   if (capturedAttachments.some((item) => item.localUpload && !attachmentUploadMatches(item.localUpload, attachmentTarget))) {
@@ -2000,7 +2021,7 @@ async function submit(): Promise<boolean> {
   submitting.value = true
   submissionError.value = null
   try {
-    const capturedHost = requireHostContext(app)
+    const capturedHost = requireConnectionContext(app)
     const result = await submitMessage(work.id, captured, capturedAttachments.map((item) => item.fileId), capturedHost)
     if (!app.contextMatches(capturedHost)) return false
     app.applyWorkSnapshot(result.instance, capturedHost)
@@ -2058,7 +2079,7 @@ async function abortCurrentRun() {
   aborting.value = true
   submissionError.value = null
   try {
-    const capturedHost = requireHostContext(app)
+    const capturedHost = requireConnectionContext(app)
     const snapshot = await abortRun(work.id, capturedHost)
     if (!app.contextMatches(capturedHost)) return
     app.applyWorkSnapshot(snapshot, capturedHost)
@@ -2081,7 +2102,7 @@ async function abortCurrentRun() {
 
 async function stopSelectedWork(): Promise<boolean> {
   const work = selected.value
-  const capturedHost = app.hostContext
+  const capturedHost = app.connectionContext
   if (!isTauri || contextTransitionBusy.value || !capturedHost || !stopCanStart(work, workMutating.value, mutationOutcomeUnknown.value) || !work) return false
   if (!await askConfirm('停止当前工作？', stopConfirmationText(work))) return false
   if (!app.contextMatches(capturedHost) || selected.value?.id !== work.id || selected.value.lifecycle !== 'active') return false
@@ -2121,7 +2142,7 @@ async function stopSelectedWork(): Promise<boolean> {
 async function reopenSelectedWork(continuation?: CreateWorkContinuation) {
   const work = selected.value
   if (!isTauri || contextTransitionBusy.value || !work || !work.reopenable || workMutating.value || mutationOutcomeUnknown.value) return
-  const capturedHost = requireHostContext(app)
+  const capturedHost = requireConnectionContext(app)
   const previousGeneration = work.runtimeGeneration
   workMutating.value = true
   submissionError.value = null
@@ -2152,7 +2173,7 @@ async function reopenSelectedWork(continuation?: CreateWorkContinuation) {
   }
 }
 
-async function reconcileReopenOutcome(workId: string, previousGeneration: number, context: HostContext) {
+async function reconcileReopenOutcome(workId: string, previousGeneration: number, context: ConnectionContext) {
   if (!await app.refreshWorksQuietly() || !app.contextMatches(context)) {
     submissionError.value = '暂时无法确认 Work 的实际状态；连接恢复后会继续以 Dock 状态为准。'
     return
@@ -2180,7 +2201,7 @@ async function forgetSelectedWork() {
   workMutating.value = true
   submissionError.value = null
   try {
-    const capturedHost = requireHostContext(app)
+    const capturedHost = requireConnectionContext(app)
     await forgetWork(work.id, capturedHost)
     if (!app.contextMatches(capturedHost)) return
     app.removeWorkSnapshot(work.id, capturedHost)
@@ -2315,8 +2336,8 @@ function resetConversationImages() {
   imageDomainKey = ''
 }
 
-function syncImageDomain(context: HostContext, workId: string, hostEpoch: string, runtimeGeneration: number) {
-  const next = JSON.stringify([context.hostId, context.selectionGeneration, workId, hostEpoch, runtimeGeneration])
+function syncImageDomain(context: ConnectionContext, workId: string, hostEpoch: string, runtimeGeneration: number) {
+  const next = JSON.stringify([context.connectionId, context.selectionGeneration, workId, hostEpoch, runtimeGeneration])
   if (imageDomainKey && imageDomainKey !== next) resetConversationImages()
   imageDomainKey = next
 }
@@ -2414,7 +2435,7 @@ async function requestConversationImage(part: ConversationImagePart) {
   const state = conversationState.value
   const work = selected.value
   if (!state || !work || imageResource(part).state === 'loading' || imageResource(part).state === 'ready') return
-  const capturedHost = requireHostContext(app)
+  const capturedHost = requireConnectionContext(app)
   const expectedEpoch = state.cursor.hostEpoch
   const expectedGeneration = state.cursor.runtimeGeneration
   const loadEpoch = imageLoadEpoch
@@ -2586,11 +2607,11 @@ function scheduleLiveToolProjection(state: ConversationBootstrap, event: Project
   requestConversationProjectionFrame()
 }
 
-async function applyFollowEvent(payload: { hostId: string; selectionGeneration: number; instanceId: string; subscriptionId: string; event: ProjectedEvent }) {
+async function applyFollowEvent(payload: { connectionId: string; selectionGeneration: number; instanceId: string; subscriptionId: string; event: ProjectedEvent }) {
   const state = conversationState.value
   if (!state || payload.subscriptionId !== activeFollowSubscription.value) return
   const reduced = reduceLiveEvent({
-    hostId: payload.hostId,
+    connectionId: payload.connectionId,
     selectionGeneration: payload.selectionGeneration,
     hostEpoch: state.cursor.hostEpoch,
     instance: state.instance,
@@ -2608,7 +2629,7 @@ async function applyFollowEvent(payload: { hostId: string; selectionGeneration: 
   state.cursor.sequence = reduced.state.sequence
   app.applyWorkSnapshot(state.instance, payload)
   if (payload.event.eventType === 'compaction.started' || payload.event.eventType === 'compaction.completed') {
-    setCompactionError(payload.hostId, payload.instanceId)
+    setCompactionError(payload.connectionId, payload.instanceId)
   }
   if (payload.event.eventType === 'compaction.completed') void mergeCompactionSummary(payload.instanceId)
   if (payload.event.eventType === 'resources.reloaded') commandCatalogStore.invalidate()
@@ -2649,7 +2670,7 @@ async function resumeConversationFollow(instanceId: string): Promise<boolean> {
   const work = selected.value
   if (!state || !work || work.id !== instanceId || work.lifecycle !== 'active' || state.instance.id !== instanceId) return false
   const epoch = ++conversationLoadEpoch
-  const capturedHost = requireHostContext(app)
+  const capturedHost = requireConnectionContext(app)
   const cursor = { ...state.cursor }
   if (cursor.instanceId !== instanceId
     || cursor.hostEpoch !== app.payload?.host.hostEpoch
@@ -2875,9 +2896,9 @@ async function mergeCompactionSummary(instanceId: string) {
   const state = conversationState.value
   if (!state || selected.value?.id !== instanceId || state.instance.id !== instanceId) return
   const epoch = conversationLoadEpoch
-  let capturedHost: HostContext
+  let capturedHost: ConnectionContext
   try {
-    capturedHost = requireHostContext(app)
+    capturedHost = requireConnectionContext(app)
   } catch {
     return
   }
@@ -2920,9 +2941,9 @@ async function loadSelectedConversation(instanceId: string, preserveUntilSwap = 
   if (!work || work.lifecycle !== 'active') return false
   conversationLoading.value = true
   let subscriptionId = ''
-  let capturedHost: HostContext | null = null
+  let capturedHost: ConnectionContext | null = null
   try {
-    capturedHost = requireHostContext(app)
+    capturedHost = requireConnectionContext(app)
     const bootstrap = await loadConversation(instanceId, capturedHost)
     if (!app.contextMatches(capturedHost) || epoch !== conversationLoadEpoch || selected.value?.id !== instanceId) return false
     if (!conversationSwapIsCorrelated(capturedHost, instanceId, bootstrap, true)) throw new Error('对话状态已经变化，请重新载入。')
@@ -3108,7 +3129,7 @@ async function runHistoryHydration(job: HistoryHydrationJob) {
 }
 
 function scheduleHistoryPageHydration(
-  context: HostContext,
+  context: ConnectionContext,
   state: ConversationBootstrap,
   conversationEpoch: number,
   pageCursor: string | undefined,
@@ -3129,7 +3150,7 @@ function scheduleHistoryPageHydration(
   }
 }
 
-async function loadRecentHistoryPage(context: HostContext, state: ConversationBootstrap, loadEpoch: number) {
+async function loadRecentHistoryPage(context: ConnectionContext, state: ConversationBootstrap, loadEpoch: number) {
   if (!isTauri) return
   const epoch = ++historyLoadEpoch
   historyLoading.value = true
@@ -3177,7 +3198,7 @@ async function loadRecentHistoryPage(context: HostContext, state: ConversationBo
 }
 
 async function publishConversationBootstrap(
-  context: HostContext,
+  context: ConnectionContext,
   bootstrap: ConversationBootstrap,
   preservedAnchor: OutputAnchor | null,
   preservedAutoFollow: boolean,
@@ -3221,7 +3242,7 @@ function retryConversationHydration() {
   for (const entryId of [...failedHistoryHydrations.keys()]) retryHistoryEntry(entryId)
   if (!historyPageError.value) return
   try {
-    const context = requireHostContext(app)
+    const context = requireConnectionContext(app)
     if (historyCursor.value) void loadEarlierHistory()
     else void loadRecentHistoryPage(context, state, conversationLoadEpoch)
   } catch {
@@ -3240,7 +3261,7 @@ async function loadEarlierHistory() {
   historyLoading.value = true
   historyPageError.value = null
   try {
-    const capturedHost = requireHostContext(app)
+    const capturedHost = requireConnectionContext(app)
     const page = await loadConversationHistory(
       work.id,
       cursor,
@@ -3276,12 +3297,12 @@ async function loadEarlierHistory() {
   }
 }
 
-function compactionErrorKey(hostId: string, workId: string) {
-  return JSON.stringify([hostId, workId])
+function compactionErrorKey(connectionId: string, workId: string) {
+  return JSON.stringify([connectionId, workId])
 }
 
-function setCompactionError(hostId: string, workId: string, message?: string) {
-  const key = compactionErrorKey(hostId, workId)
+function setCompactionError(connectionId: string, workId: string, message?: string) {
+  const key = compactionErrorKey(connectionId, workId)
   const next = { ...compactionErrors.value }
   if (message) next[key] = message
   else delete next[key]
@@ -3298,7 +3319,7 @@ function setCompactionPending(workId: string, pending: boolean) {
 async function startCompaction(customInstructions?: string) {
   const work = selected.value
   if (!isTauri || !work || mutationOutcomeUnknown.value || compactionWorkIds.value.has(work.id) || work.compacting) return
-  const capturedHost = requireHostContext(app)
+  const capturedHost = requireConnectionContext(app)
   const scope: SessionContext = {
     ...capturedHost,
     instanceId: work.id,
@@ -3307,15 +3328,15 @@ async function startCompaction(customInstructions?: string) {
   }
   closeModal()
   setCompactionPending(work.id, true)
-  setCompactionError(capturedHost.hostId, work.id)
+  setCompactionError(capturedHost.connectionId, work.id)
   submissionError.value = null
   try {
-    const correlated = captureHostResult(capturedHost, await compactSession(
+    const correlated = captureConnectionResult(capturedHost, await compactSession(
       scope,
       customInstructions?.trim() || undefined,
       crypto.randomUUID(),
     ))
-    if (!hostResultMatches(correlated, app.hostContext)) return
+    if (!hostResultMatches(correlated, app.connectionContext)) return
     const result = correlated.result
     app.applyWorkSnapshot(result.instance, capturedHost)
     const authoritative = app.works.find((item) => item.id === result.instance.id) ?? result.instance
@@ -3325,12 +3346,12 @@ async function startCompaction(customInstructions?: string) {
     markUnknownOutcome(cause, 'sessions', work.id)
     const code = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code || '') : ''
     const matchingFollow = followConnected.value
-      && activeFollow.value?.hostId === capturedHost.hostId
+      && activeFollow.value?.connectionId === capturedHost.connectionId
       && activeFollow.value.selectionGeneration === capturedHost.selectionGeneration
       && activeFollow.value.instanceId === work.id
     const reportedByConversation = matchingFollow
       && ['compaction_cancelled', 'compaction_not_needed', 'compaction_failed'].includes(code)
-    if (!reportedByConversation) setCompactionError(capturedHost.hostId, work.id, errorMessage(cause))
+    if (!reportedByConversation) setCompactionError(capturedHost.connectionId, work.id, errorMessage(cause))
   } finally {
     setCompactionPending(work.id, false)
   }
@@ -3356,7 +3377,7 @@ async function resyncSession(snapshot: Work, returnedDraft?: string) {
 
 async function loadHostMachines() {
   const epoch = ++machineLoadEpoch
-  const machines = await currentHostCall(app, (context) => listMachines(context))
+  const machines = await currentConnectionCall(app, (context) => listMachines(context))
   if (epoch === machineLoadEpoch) {
     hostMachines.value = machines
     machineListError.value = ''
@@ -3365,7 +3386,7 @@ async function loadHostMachines() {
 }
 
 async function refreshHostMachinesQuietly() {
-  const context = app.hostContext ? { ...app.hostContext } : null
+  const context = app.connectionContext ? { ...app.connectionContext } : null
   try {
     await loadHostMachines()
   } catch {
@@ -3460,7 +3481,7 @@ async function reconcileMutationOutcome(requestedDomain?: MutationDomain) {
     next.delete(key)
     unresolvedMutations.value = next
     submissionError.value = null
-    if (domain === 'sessions' && workId !== 'global' && app.activeHostId) setCompactionError(app.activeHostId, workId)
+    if (domain === 'sessions' && workId !== 'global' && app.activeConnectionId) setCompactionError(app.activeConnectionId, workId)
   } catch (cause) {
     submissionError.value = errorMessage(cause)
   }
@@ -3469,30 +3490,30 @@ async function reconcileMutationOutcome(requestedDomain?: MutationDomain) {
 async function reconcileControlProjection(domain: ControlMutationDomain, workId: string): Promise<boolean> {
   if (controlCenterRef.value && domain !== 'conversation') return controlCenterRef.value.reconcileDomain(domain)
   if (domain === 'models') {
-    const result = await currentHostCall(app, (context) => listModels(workId, context))
+    const result = await currentConnectionCall(app, (context) => listModels(workId, context))
     app.applyWorkSnapshot(result.instance)
     return true
   }
   if (domain === 'tools') {
-    const result = await currentHostCall(app, (context) => listTools(workId, context))
+    const result = await currentConnectionCall(app, (context) => listTools(workId, context))
     app.applyWorkSnapshot(result.instance)
     return true
   }
   if (domain === 'settings') {
-    await currentHostCall(app, (context) => getSettings(workId, context))
+    await currentConnectionCall(app, (context) => getSettings(workId, context))
     return true
   }
   if (domain === 'sessions' || domain === 'tree') {
     const work = app.works.find((item) => item.id === workId)
     if (!work) return false
-    const sessionContext = (context: HostContext): SessionContext => ({
+    const sessionContext = (context: ConnectionContext): SessionContext => ({
       ...context,
       instanceId: work.id,
       expectedHostEpoch: work.ownerHostEpoch ?? '',
       expectedRuntimeGeneration: work.runtimeGeneration,
     })
-    if (domain === 'sessions') await currentHostCall(app, (context) => listSessions(sessionContext(context), 'cwd'))
-    else await currentHostCall(app, (context) => loadSessionTree(sessionContext(context)))
+    if (domain === 'sessions') await currentConnectionCall(app, (context) => listSessions(sessionContext(context), 'cwd'))
+    else await currentConnectionCall(app, (context) => loadSessionTree(sessionContext(context)))
     return true
   }
   return false
@@ -3578,7 +3599,7 @@ async function toggleAllToolDetails() {
   toolsExpandedMutating.value = true
   submissionError.value = null
   try {
-    const capturedHost = requireHostContext(app)
+    const capturedHost = requireConnectionContext(app)
     const snapshot = await setExtensionToolsExpanded(work.id, work.ownerHostEpoch, work.runtimeGeneration, !extensionUi.toolsExpanded, capturedHost)
     if (!app.contextMatches(capturedHost)) return
     app.applyWorkSnapshot(snapshot, capturedHost)
@@ -3651,6 +3672,11 @@ function handleOutputClick(event: MouseEvent) {
           <span class="alu-nav-selector-value">{{ selected?.executor.thinkingLevel || '—' }}</span>
           <span class="alu-nav-selector-arrow">▾</span>
         </button>
+        <button class="alu-nav-dock-tools" :class="{ active: selectedDockTools === 'on' }" :disabled="!selected || selected.lifecycle !== 'active'" :aria-label="`Dock Tools ${selectedDockTools === 'on' ? '已开启' : '已关闭'}`" @click="openControlCenter('dock-tools')">
+          <Wrench :size="13" />
+          <span class="alu-nav-dock-tools-label">Dock Tools</span>
+          <b>{{ selectedDockTools === 'on' ? 'ON' : 'OFF' }}</b>
+        </button>
         <div class="alu-nav-stats">
           <span class="alu-nav-stat-pill">↑<span>{{ formatTokenCount(selected?.metrics?.tokens?.input || 0) }}</span></span>
           <span class="alu-nav-stat-pill">↓<span>{{ formatTokenCount(selected?.metrics?.tokens?.output || 0) }}</span></span>
@@ -3683,10 +3709,21 @@ function handleOutputClick(event: MouseEvent) {
       <div v-else-if="app.needsPairing" class="pairing-onboarding">
         <div class="pairing-intro">
           <img src="./assets/new_logo_small.png" alt="AluDock" />
-          <div><span class="eyebrow">WELCOME TO ALUDOCK</span><h1>连接你的 AluDock</h1><p>先在电脑上的 AluDock 中打开五分钟配对窗口，再在这里输入电脑地址和端口。</p></div>
+          <div><span class="eyebrow">WELCOME TO ALUDOCK</span><h1>连接你的 AluDock</h1><p>连接这台设备上的 AluDock，或通过配对连接其他电脑。</p></div>
         </div>
         <div class="pairing-layout">
           <form class="pairing-card" @submit.prevent="beginPairing()">
+            <LocalConnectionCard
+              v-if="app.catalog?.localConnectionSupported"
+              :connected="!!app.localSelected"
+              :effective-endpoint="app.catalog.localEndpointEffective"
+              :endpoint-override="app.catalog.localEndpointOverride"
+              :busy="app.loading || contextTransitionBusy"
+              :error="app.error"
+              @connect="connectLocal"
+              @save="updateLocalEndpoint"
+            />
+            <div v-if="app.catalog?.localConnectionSupported" class="pairing-method-divider"><span>或通过配对连接其他电脑</span></div>
             <div class="pairing-card-title"><Link :size="18" /><div><strong>电脑连接信息</strong><small>地址只用于找到电脑，配对后会单独验证 Host 身份</small></div></div>
             <section v-if="recoverablePairings.length" class="pairing-recovery" aria-label="可恢复配对">
               <strong>可恢复的配对</strong><small>地址和设备名称已安全保存，不需要重新输入。</small>
@@ -3700,7 +3737,7 @@ function handleOutputClick(event: MouseEvent) {
             <label><span>这台设备的名称</span><input v-model="pairDeviceName" maxlength="128" required autocomplete="off" placeholder="例如 NUC14 或我的 MacBook" :disabled="!['idle', 'failed', 'cancelled'].includes(pairingStage)" @input="rememberPairDeviceName" /><small class="pairing-field-hint">显示在电脑端；修改后会在重新配对时沿用。</small></label>
             <div v-if="pairingPin" class="pairing-pin"><small>请在电脑上的 AluDock 中输入</small><strong>{{ pairingPin }}</strong><span>不要把配对码发给其他人</span></div>
             <div v-if="pairingMessage" class="pairing-progress"><span class="alu-spinner" />{{ pairingMessage }}</div>
-            <div v-if="pairingError" class="directory-error">{{ pairingError }}</div>
+            <div v-if="pairingError || app.error" class="directory-error">{{ pairingError || app.error }}</div>
             <div class="pairing-actions">
               <button v-if="!['idle', 'failed', 'cancelled', 'completed'].includes(pairingStage)" type="button" class="button secondary" @click="stopPairing">取消</button>
               <button v-else type="submit" class="button primary" :disabled="!pairHost.trim() || !pairPort || !pairDeviceName.trim()">{{ pairingStage === 'failed' ? '重新尝试' : '开始配对' }}</button>
@@ -3716,9 +3753,9 @@ function handleOutputClick(event: MouseEvent) {
 
       <div v-else-if="app.error" class="center-state error-state offline-host-state">
         <WifiOff :size="28" />
-        <h1>无法连接“{{ app.activeHost?.displayName || 'Host' }}”</h1>
+        <h1>无法连接“{{ app.localSelected ? '本机 AluDock' : app.activeHost?.displayName || 'Host' }}”</h1>
         <p>{{ app.error }}</p>
-        <p v-if="app.hostUnreachable">已保存的配对仍保留。</p>
+        <p v-if="app.hostUnreachable">{{ app.localSelected ? '当前本机连接地址已保留。' : '已保存的配对仍保留。' }}</p>
         <div v-if="app.activeHost && app.hostUnreachable" class="re-pair-prompt">
           <span class="re-pair-icon"><RotateCcw :size="19" /></span>
           <div>
@@ -3872,7 +3909,7 @@ function handleOutputClick(event: MouseEvent) {
     <WorkspaceBrowser
       :open="workspaceBrowserOpen"
       :work="selected || null"
-      :context="app.hostContext || null"
+      :context="app.connectionContext || null"
       :host-epoch="app.payload?.host.hostEpoch || ''"
       @close="workspaceBrowserOpen = false"
     />
@@ -3926,7 +3963,7 @@ function handleOutputClick(event: MouseEvent) {
       </button>
       <button class="alu-sidebar-settings-entry" aria-label="Host 与配对设置" @click="openHostSettings">
         <img src="./assets/aludock-icon.png" alt="" />
-        <span><strong>{{ app.activeHost?.displayName || '连接 AluDock' }}</strong><small>{{ connectionLabel }}</small></span>
+        <span><strong>{{ app.localSelected ? '本机 AluDock' : app.activeHost?.displayName || '连接 AluDock' }}</strong><small>{{ connectionLabel }}</small></span>
         <span aria-hidden="true">⚙</span>
       </button>
     </aside>
@@ -4030,26 +4067,39 @@ function handleOutputClick(event: MouseEvent) {
             @view="newWorkCompact = $event === 'launcher'"
           />
           <header v-if="hostSettingsOpen" class="host-settings-header">
-            <div class="host-settings-heading"><img src="./assets/aludock-icon.png" alt="" /><div><h2 id="host-settings-title">Host 设置</h2><p>{{ app.payload?.host.profile.displayName || '管理已配对的 AluDock' }} · 版本 {{ appBuildIdentity }}</p></div></div>
+            <div class="host-settings-heading"><img src="./assets/aludock-icon.png" alt="" /><div><h2 id="host-settings-title">连接设置</h2><p>本机或 Host · 版本 {{ appBuildIdentity }}</p></div></div>
             <button class="host-settings-close" data-modal-initial aria-label="关闭" @click="closeModal"><X :size="18" /></button>
           </header>
           <div v-if="hostSettingsOpen" class="host-settings-panel">
             <aside class="host-catalog-section">
-              <div class="host-catalog-title"><span>已保存的 Host</span><b>{{ app.catalog?.hosts.length ?? 0 }}</b></div>
+              <LocalConnectionCard
+                v-if="app.catalog?.localConnectionSupported"
+                :connected="!!app.localSelected"
+                :effective-endpoint="app.catalog.localEndpointEffective"
+                :endpoint-override="app.catalog.localEndpointOverride"
+                :busy="app.loading || contextTransitionBusy"
+                :error="app.error"
+                @connect="connectLocal"
+                @save="updateLocalEndpoint"
+              />
+              <div class="host-catalog-title"><span>Host</span><b>{{ app.catalog?.hosts.length ?? 0 }}</b></div>
               <div class="host-catalog-list">
-                <article v-for="host in app.catalog?.hosts" :key="host.hostId" class="host-choice" :class="{ active: host.hostId === app.activeHostId }">
-                  <button class="host-choice-main" :disabled="host.hostId === app.activeHostId || contextTransitionBusy" @click="switchSavedHost(host.hostId)">
+                <article v-for="host in app.catalog?.hosts" :key="host.hostId" class="host-choice" :class="{ active: host.hostId === app.activeHost?.hostId && !app.localSelected }">
+                  <button class="host-choice-main" :disabled="host.hostId === app.activeHost?.hostId && !app.localSelected || contextTransitionBusy" @click="switchSavedHost(host.hostId)">
                     <span class="host-choice-dot" aria-hidden="true" />
                     <span class="host-choice-copy"><strong>{{ host.displayName }}</strong><small>{{ host.endpointSummary }}</small></span>
-                    <span v-if="host.hostId === app.activeHostId" class="host-choice-current">当前</span>
+                    <span v-if="host.hostId === app.activeHost?.hostId && !app.localSelected" class="host-choice-current">当前</span>
                   </button>
                   <button class="host-choice-delete" :aria-label="`从此设备删除 ${host.displayName}`" :disabled="contextTransitionBusy" @click="removeSavedHost(host.hostId, host.displayName)"><Trash2 :size="14" /></button>
                 </article>
               </div>
-              <button class="host-connect-new" :disabled="contextTransitionBusy" @click="showHostPairingForm"><Plus :size="15" />连接新的 AluDock</button>
+              <button class="host-connect-new" :disabled="contextTransitionBusy" @click="showHostPairingForm"><Plus :size="15" />连接 Host</button>
             </aside>
             <div class="host-detail-column">
-              <div class="host-detail-intro"><div><span>当前 Host</span><h3>{{ app.activeHost?.displayName || 'AluDock' }}</h3></div><p>{{ app.activeHost?.profile.endpoints.length ?? 0 }} 个连接地址 · {{ app.activeHost?.profile.policy.mode === 'automatic' ? '自动选择' : '固定地址' }}</p></div>
+              <section v-if="app.localSelected && !addingHost" class="local-connection-summary">
+                <span class="local-connection-summary-icon"><Monitor :size="21" /></span>
+                <div><strong>当前连接：本机 AluDock</strong><p><code>{{ app.catalog?.localEndpointEffective }}</code></p></div>
+              </section>
             <section v-if="recoverablePairings.length" class="pairing-card pairing-recovery" aria-label="可恢复配对">
               <div class="pairing-card-title"><RotateCcw :size="18" /><div><strong>可恢复的配对</strong><small>继续时直接使用已保存地址，不需要重新输入。</small></div></div>
               <article v-for="transaction in recoverablePairings" :key="transaction.transactionId">
@@ -4067,6 +4117,8 @@ function handleOutputClick(event: MouseEvent) {
               <div v-if="pairingError" class="directory-error">{{ pairingError }}</div>
               <div class="pairing-actions"><button v-if="!['idle', 'failed', 'cancelled', 'completed'].includes(pairingStage)" type="button" class="button secondary" @click="stopPairing">停止等待</button><button v-else class="button primary" :disabled="contextTransitionBusy || !pairHost.trim() || !pairPort || !pairDeviceName.trim()">开始配对</button></div>
             </form>
+            <template v-if="app.activeHost && !app.localSelected && !addingHost">
+            <div class="host-detail-intro"><div><span>当前 Host</span><h3>{{ app.activeHost.displayName }}</h3></div><p>{{ app.activeHost.profile.endpoints.length }} 个 TLS 地址 · {{ app.activeHost.profile.policy.mode === 'automatic' ? '自动选择' : '固定地址' }}</p></div>
             <form class="host-profile-form" @submit.prevent="saveHostDisplayName">
               <div><strong>Host 名称</strong><small>仅修改此设备上显示的名称；地址和配对关系保持原样。</small></div>
               <div class="host-name-field"><input v-model="hostDisplayName" maxlength="128" autocomplete="off" placeholder="例如 家里的工作站" :disabled="hostNameSaving" /><button class="button secondary" :disabled="hostNameSaving || hostDisplayName.trim() === app.activeHost?.displayName">{{ hostNameSaving ? '保存中…' : '保存名称' }}</button></div>
@@ -4074,7 +4126,7 @@ function handleOutputClick(event: MouseEvent) {
               <p v-else-if="hostNameSaved" class="host-name-success">Host 名称已保存。</p>
             </form>
             <div class="connection-policy">
-              <div><Globe2 :size="18" /><span><strong>自动选择连接地址</strong><small>在家优先局域网，不可达时自动尝试外网 / VPN 地址</small></span></div>
+              <div><Globe2 :size="18" /><span><strong>自动选择 TLS 地址</strong><small>优先局域网，不可达时尝试外网 / VPN 地址</small></span></div>
               <button :class="{ selected: app.activeHost?.profile.policy.mode === 'automatic' }" @click="chooseConnectionPolicy('automatic')">{{ app.activeHost?.profile.policy.mode === 'automatic' ? '已启用' : '启用' }}</button>
             </div>
             <section class="endpoint-section">
@@ -4111,6 +4163,7 @@ function handleOutputClick(event: MouseEvent) {
               <div v-if="endpointCanSaveDraft" class="endpoint-draft-offer"><span>当前网络无法完成验证。可先保存为待验证草稿；验证通过后才会参与自动连接。</span><button type="button" class="button secondary" :disabled="endpointSaving" @click="saveEndpointDraft">保存为待验证草稿</button></div>
               <footer><span><ShieldCheck :size="14" />原配对保持不变</span><button class="button primary" :disabled="!endpointHost.trim() || !endpointPort || endpointSaving">{{ endpointSaving ? '正在验证…' : '验证并添加' }}</button></footer>
             </form>
+            </template>
             </div>
           </div>
 

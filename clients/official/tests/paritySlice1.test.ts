@@ -4,12 +4,13 @@ import { createPinia, setActivePinia } from 'pinia'
 import { hasCompactConversationContent, projectConversation, toolDetailText } from '../src/lib/conversation.ts'
 import { reduceLiveEvent, type LiveProjectionState } from '../src/lib/liveReducer.ts'
 import { conversationBoundaryKey, conversationSwapIsCorrelated, draftAfterSubmit, FollowActivationCoordinator, formatContextUsage, formatTokenCount, outputFollowAfterScroll, outputIsNearBottom, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../src/lib/uiBoundaries.ts'
+import { dockToolsState, genericExtensionStatus } from '../src/lib/dockTools.ts'
 import { userErrorMessage } from '../src/lib/userError.ts'
 import type { ConversationBootstrap, ProjectedEvent, Work } from '../src/lib/types.ts'
 import { useCommandConsoleStore } from '../src/stores/command-console.ts'
 
 const work = makeWork()
-let state: LiveProjectionState = { hostId: 'host-a', selectionGeneration: 4, hostEpoch: 'epoch-a', instance: work, queue: [], sequence: 0 }
+let state: LiveProjectionState = { connectionId: 'host-a', selectionGeneration: 4, hostEpoch: 'epoch-a', instance: work, queue: [], sequence: 0 }
 
 setActivePinia(createPinia())
 const commandConsole = useCommandConsoleStore()
@@ -24,6 +25,20 @@ commandConsole.bindContext('host-a', 4, work)
 assert.equal(commandConsole.entries.length, 2, 'closing and reopening Command Center in the same Work preserves command history')
 commandConsole.bindContext('host-a', 5, work)
 assert.equal(commandConsole.entries.length, 0, 'a Host-selection boundary cannot inherit another conversation command history')
+assert.equal(commandConsole.handleDockEvent(event(4, 'command.handled', { operationId: 'command-operation' })).matched, false, 'a Host-selection boundary also forgets earlier command success correlation')
+
+commandConsole.beginOperation('reload-success', 'dock-tools', 'on')
+commandConsole.handleDockEvent(event(4, 'command.handled', { operationId: 'reload-success' }))
+assert.equal(commandConsole.failOperation('reload-success', '操作没有完成'), false, 'observed command success wins over a late transport failure')
+assert.equal(commandConsole.entries.some((entry) => entry.level === 'error'), false)
+commandConsole.beginOperation('command-failure', 'dock-tools', 'off')
+assert.equal(commandConsole.failOperation('command-failure', '命令执行失败。'), true)
+assert.equal(commandConsole.failOperation('command-failure', '重复失败。'), false)
+assert.equal(commandConsole.entries.filter((entry) => entry.level === 'error').length, 1)
+
+assert.equal(dockToolsState({ 'Dock tools': 'on' }), 'on')
+assert.equal(dockToolsState({}), 'off')
+assert.deepEqual(genericExtensionStatus({ 'Dock tools': 'on', Branch: 'main' }), { Branch: 'main' })
 
 state = applied(state, event(1, 'run.started', {}))
 assert.equal(state.instance.execution, 'running', 'run.started enables Abort-facing running state')
@@ -188,9 +203,9 @@ queueState = applied(queueState, event(9, 'queue.cleared', { queueItemIds: ['q2'
 assert.deepEqual(queueState.instance.pending, { steering: 0, followUp: 0, total: 0 }, 'queue removal counts cannot underflow')
 assert.equal(queueState.queue.length, 0)
 
-const stale = reduceLiveEvent(queueState, { hostId: 'host-a', selectionGeneration: 4, instanceId: 'work-1', event: event(10, 'run.started', {}, 0) })
+const stale = reduceLiveEvent(queueState, { connectionId: 'host-a', selectionGeneration: 4, instanceId: 'work-1', event: event(10, 'run.started', {}, 0) })
 assert.equal(stale.kind, 'ignored', 'older generation cannot enter current projection')
-const replacement = reduceLiveEvent(queueState, { hostId: 'host-a', selectionGeneration: 4, instanceId: 'work-1', event: event(1, 'session.replaced', { runtimeGeneration: 2 }, 2) })
+const replacement = reduceLiveEvent(queueState, { connectionId: 'host-a', selectionGeneration: 4, instanceId: 'work-1', event: event(1, 'session.replaced', { runtimeGeneration: 2 }, 2) })
 assert.equal(replacement.kind, 'rebuild', 'replacement generation triggers correlated rebuild rather than merge')
 
 const liveNotices = projectConversation(bootstrap(state, [
@@ -263,11 +278,11 @@ assert.equal(draftAfterSubmit('original', 'original', false), 'original', 'faile
 assert.equal(draftAfterSubmit('typed while sending', 'original', true), 'typed while sending', 'successful admission preserves concurrent typing')
 assert.equal(draftAfterSubmit('original', 'original', true), '')
 const candidate = bootstrap(state, [])
-assert.equal(conversationSwapIsCorrelated({ hostId: 'host-a', selectionGeneration: 4 }, 'work-1', candidate, false), false, 'delayed follow keeps old projection')
-assert.equal(conversationSwapIsCorrelated({ hostId: 'host-a', selectionGeneration: 4 }, 'work-1', candidate, true), true)
+assert.equal(conversationSwapIsCorrelated({ connectionId: 'host-a', selectionGeneration: 4 }, 'work-1', candidate, false), false, 'delayed follow keeps old projection')
+assert.equal(conversationSwapIsCorrelated({ connectionId: 'host-a', selectionGeneration: 4 }, 'work-1', candidate, true), true)
 const wrongGeneration = bootstrap({ ...state, instance: { ...state.instance, runtimeGeneration: 2 } }, [])
 wrongGeneration.cursor.runtimeGeneration = 1
-assert.equal(conversationSwapIsCorrelated({ hostId: 'host-a', selectionGeneration: 4 }, 'work-1', wrongGeneration, true), false)
+assert.equal(conversationSwapIsCorrelated({ connectionId: 'host-a', selectionGeneration: 4 }, 'work-1', wrongGeneration, true), false)
 
 assert.equal(stopCanStart(work, false, false), true)
 assert.equal(stopCanStart(work, true, false), false, 'pending mutation locks Stop')
@@ -283,7 +298,7 @@ assert.equal(stoppedResultIsCorrelated({ receipt: { operationId: 'op', alreadySt
 assert.equal(draftAfterSubmit('local draft', 'not a submit', false), 'local draft', 'Stop/reopen boundaries do not alter drafts')
 
 function applied(current: LiveProjectionState, projected: ProjectedEvent): LiveProjectionState {
-  const result = reduceLiveEvent(current, { hostId: 'host-a', selectionGeneration: 4, instanceId: 'work-1', event: projected })
+  const result = reduceLiveEvent(current, { connectionId: 'host-a', selectionGeneration: 4, instanceId: 'work-1', event: projected })
   assert.equal(result.kind, 'applied')
   if (result.kind !== 'applied') throw new Error('event was not applied')
   return result.state

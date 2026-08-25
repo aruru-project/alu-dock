@@ -82,7 +82,9 @@ pub enum SourceKind {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SourceInfo {
     pub kind: SourceKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub package: Option<String>,
 }
 
@@ -1264,6 +1266,19 @@ mod tests {
         assert!(validate_completeness(2, 3, true, "test").is_ok());
         assert!(validate_completeness(2, 3, false, "test").is_err());
         assert!(validate_completeness(3, 2, false, "test").is_err());
+    }
+
+    #[test]
+    fn command_source_omits_absent_optional_identity_fields() {
+        let source = SourceInfo {
+            kind: SourceKind::BuiltIn,
+            path: None,
+            package: None,
+        };
+        assert_eq!(
+            serde_json::to_value(source).unwrap(),
+            serde_json::json!({ "kind": "built-in" })
+        );
     }
 
     #[test]

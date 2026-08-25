@@ -1,13 +1,13 @@
-import type { AttachmentDto, HostContext, ProjectedEvent, QueueItem, Work } from './types'
+import type { AttachmentDto, ConnectionContext, ProjectedEvent, QueueItem, Work } from './types'
 
-export interface LiveProjectionState extends HostContext {
+export interface LiveProjectionState extends ConnectionContext {
   hostEpoch: string
   instance: Work
   queue: QueueItem[]
   sequence: number
 }
 
-export interface LiveEventEnvelope extends HostContext {
+export interface LiveEventEnvelope extends ConnectionContext {
   instanceId: string
   event: ProjectedEvent
 }
@@ -31,10 +31,10 @@ const configEvents = new Set([
   'resources.reloaded', 'extension.status_changed', 'extension.tools_expanded_changed',
 ])
 
-/** Reduce one already authenticated follow event without ever crossing Host, Work, or generation boundaries. */
+/** Reduce one already authenticated follow event without crossing connection, Work, or generation boundaries. */
 export function reduceLiveEvent(state: LiveProjectionState, envelope: LiveEventEnvelope): LiveReduction {
   const event = envelope.event
-  if (envelope.hostId !== state.hostId
+  if (envelope.connectionId !== state.connectionId
     || envelope.selectionGeneration !== state.selectionGeneration
     || envelope.instanceId !== state.instance.id) {
     return { kind: 'ignored', state, reason: 'stale_identity' }

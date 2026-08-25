@@ -14,9 +14,10 @@ import {
   setThinking,
   updateSetting,
 } from '../lib/bridge'
-import { currentHostCall, requireHostContext } from '../lib/hostResult'
+import { currentConnectionCall, requireConnectionContext } from '../lib/hostResult'
 import { userErrorMessage as errorMessage } from '../lib/userError'
 import { catalogSourceLabel, commandGoesToComposer, filterCatalogCommands, filterCommandPaletteItems } from '../lib/commandSuggest'
+import { dockToolsState } from '../lib/dockTools'
 import { localControlCommands, type ControlSection, type LocalControlCommand } from '../lib/localCommands'
 import { generationSectionState as resolveGenerationSectionState, pendingGenerationCaches, type GenerationCache, type GenerationCacheState } from '../lib/generationCaches'
 import { settingDescription, settingLabel, settingOptionLabel, settingValueLabel } from '../lib/settingLabels'
@@ -118,6 +119,8 @@ let loadEpoch = 0
 let generationRefreshEpoch = 0
 
 const selectedCommand = computed(() => catalog.commands.find((item) => item.referenceId === selectedCommandReferenceId.value) ?? null)
+const dockToolsCommand = computed(() => catalog.commands.find((item) => item.name === 'dock-tools') ?? null)
+const dockTools = computed(() => dockToolsState(props.work.extensionStatus))
 const selectedSetting = computed(() => settings.value?.settings.find((item) => item.key === selectedSettingKey.value) ?? null)
 const sessionMode = computed(() => props.section as 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session')
 const filteredStaticCommands = computed(() => filterCommandPaletteItems(staticCommands, commandSearch.value))
@@ -134,7 +137,7 @@ const commandFooter = computed(() => {
   const count = catalogCommands.value.length
   if (catalog.state === 'idle' || catalog.state === 'loading') return '正在同步当前 Session 的 Extension、Skill 和 Prompt 命令…'
   if (catalog.state === 'truncated') return `显示 ${count} 个 Pi 命令（目录未完整返回）`
-  if (catalog.state === 'failed') return 'Pi 命令目录暂时不可用 · WebConsole 命令仍可使用'
+  if (catalog.state === 'failed') return 'Pi 命令目录暂时不可用 · Work 操作仍可使用'
   return `${count} 个 Pi 命令 · 点击选择 · ↑↓ 移动`
 })
 const filteredModels = computed(() => {
@@ -185,14 +188,14 @@ watch(optionCursor, async () => {
 })
 
 watch([
-  () => app.activeHostId,
-  () => app.hostContext?.selectionGeneration,
+  () => app.activeConnectionId,
+  () => app.connectionContext?.selectionGeneration,
   () => props.work.id,
   () => props.work.hostId,
   () => props.work.ownerHostEpoch,
   () => props.work.runtimeGeneration,
 ], () => {
-  if (app.hostContext) commandConsole.bindContext(app.hostContext.hostId, app.hostContext.selectionGeneration, props.work)
+  if (app.connectionContext) commandConsole.bindContext(app.connectionContext.connectionId, app.connectionContext.selectionGeneration, props.work)
   loadEpoch += 1
   catalog.invalidate()
   models.value = null
@@ -211,7 +214,7 @@ watch([
 watch(() => props.section, (section) => {
   selectedSettingKey.value = ''
   optionCursor.value = 0
-  const managed = ['commands', 'resources', 'tools', 'settings'].includes(section)
+  const managed = ['commands', 'dock-tools', 'resources', 'tools', 'settings'].includes(section)
   if (!managed || generationCaches.value[section as GenerationCache] !== 'loading') void loadSection(section)
   if (section === 'thinking') void nextTick(() => thinkingPanel.value?.focus())
 }, { immediate: true })
@@ -327,7 +330,7 @@ function scheduleArgumentCompletions() {
 
 async function loadArgumentCompletions(command: CommandInfo, prefix: string, epoch: number) {
   try {
-    const result = await currentHostCall(app, (context) => getCommandCompletions(props.work.id, command.referenceId, prefix, context))
+    const result = await currentConnectionCall(app, (context) => getCommandCompletions(props.work.id, command.referenceId, prefix, context))
     if (epoch !== commandCompletionEpoch || selectedCommand.value?.referenceId !== command.referenceId || commandArguments.value !== prefix) return
     argumentCompletions.value = result.referenceId === command.referenceId ? result.items ?? [] : []
   } catch (cause) {
@@ -353,7 +356,7 @@ async function openCommandContent(command: CommandInfo) {
   error.value = ''
   const epoch = ++commandContentEpoch
   try {
-    const context = app.hostContext
+    const context = app.connectionContext
     if (!context) return
     let cursor: string | undefined
     let revision = ''
@@ -366,7 +369,7 @@ async function openCommandContent(command: CommandInfo) {
         if (seenCursors.has(cursor)) throw new Error('Prompt 内容没有完整读出，请重新打开。')
         seenCursors.add(cursor)
       }
-      const page = await currentHostCall(app, (captured) => getCommandContent(props.work.id, command.referenceId, cursor, captured))
+      const page = await currentConnectionCall(app, (captured) => getCommandContent(props.work.id, command.referenceId, cursor, captured))
       if (epoch !== commandContentEpoch || selectedCommand.value?.referenceId !== command.referenceId || commandDetailMode.value !== 'content') return
       if (page.referenceId !== command.referenceId || !page.available) {
         error.value = '这条 Prompt 当前没有可读取的内容。'
@@ -420,10 +423,10 @@ function applyLiveEvent(event: ProjectedEvent) {
 defineExpose({ reconcileDomain, applyLiveEvent })
 
 function currentGenerationKey() {
-  const context = app.hostContext
+  const context = app.connectionContext
   if (!context) return ''
   return JSON.stringify([
-    context.hostId,
+    context.connectionId,
     context.selectionGeneration,
     props.work.id,
     props.work.hostId ?? '',
@@ -433,7 +436,7 @@ function currentGenerationKey() {
 }
 
 async function refreshGenerationCaches() {
-  const context = app.hostContext
+  const context = app.connectionContext
   const key = currentGenerationKey()
   if (!context || !key) {
     generationCaches.value = { commands: 'error', resources: 'error', tools: 'error', settings: 'error' }
@@ -468,7 +471,7 @@ async function refreshGenerationCaches() {
 
 async function loadSection(section: ControlSection, force = false): Promise<boolean> {
   if (['sessions', 'tree', 'new-session', 'rename-session', 'compact-session', 'reload-session'].includes(section)) return true
-  const dataExists = section === 'commands'
+  const dataExists = section === 'commands' || section === 'dock-tools'
     ? catalog.result
     : section === 'models' || section === 'thinking'
       ? models.value
@@ -480,20 +483,21 @@ async function loadSection(section: ControlSection, force = false): Promise<bool
   if (dataExists && !force) return true
   const epoch = ++loadEpoch
   const workId = props.work.id
-  if (section === 'commands' || section === 'tools' || section === 'settings') {
-    generationCaches.value = { ...generationCaches.value, [section]: 'loading' }
+  if (section === 'commands' || section === 'dock-tools' || section === 'tools' || section === 'settings') {
+    const cache = section === 'dock-tools' ? 'commands' : section
+    generationCaches.value = { ...generationCaches.value, [cache]: 'loading' }
   } else if (section === 'resources') {
     generationCaches.value = { ...generationCaches.value, resources: 'loading', tools: 'loading' }
   }
-  loading.value = section === 'commands' ? null : section
+  loading.value = section === 'commands' || section === 'dock-tools' ? null : section
   error.value = ''
   try {
-    if (section === 'commands') {
-      const loaded = await catalog.ensure(props.work, requireHostContext(app), force)
+    if (section === 'commands' || section === 'dock-tools') {
+      const loaded = await catalog.ensure(props.work, requireConnectionContext(app), force)
       if (epoch !== loadEpoch || props.work.id !== workId) return false
       generationCaches.value = { ...generationCaches.value, commands: loaded ? 'ready' : 'error' }
     } else if (section === 'models' || section === 'thinking') {
-      const result = await currentHostCall(app, (context) => listModels(workId, context))
+      const result = await currentConnectionCall(app, (context) => listModels(workId, context))
       if (epoch !== loadEpoch || props.work.id !== workId) return false
       models.value = result
       emit('snapshot', result.instance)
@@ -503,15 +507,15 @@ async function loadSection(section: ControlSection, force = false): Promise<bool
         emit('title', '选择 Model', [`当前：${currentLabel}`, result.truncated ? `显示 ${result.models.length}/${result.total} 项` : ''].filter(Boolean).join('\n'))
       }
     } else if (section === 'tools') {
-      const result = await currentHostCall(app, (context) => listTools(workId, context))
+      const result = await currentConnectionCall(app, (context) => listTools(workId, context))
       if (epoch !== loadEpoch || props.work.id !== workId) return false
       tools.value = result
       generationCaches.value = { ...generationCaches.value, tools: 'ready' }
       emit('snapshot', result.instance)
     } else if (section === 'resources') {
       const [resourceResult, toolResult] = await Promise.all([
-        currentHostCall(app, (context) => getResources(workId, context)),
-        currentHostCall(app, (context) => listTools(workId, context)),
+        currentConnectionCall(app, (context) => getResources(workId, context)),
+        currentConnectionCall(app, (context) => listTools(workId, context)),
       ])
       if (epoch !== loadEpoch || props.work.id !== workId) return false
       resources.value = resourceResult
@@ -519,7 +523,7 @@ async function loadSection(section: ControlSection, force = false): Promise<bool
       generationCaches.value = { ...generationCaches.value, resources: 'ready', tools: 'ready' }
       emit('snapshot', toolResult.instance)
     } else {
-      const result = await currentHostCall(app, (context) => getSettings(workId, context))
+      const result = await currentConnectionCall(app, (context) => getSettings(workId, context))
       if (epoch !== loadEpoch || props.work.id !== workId) return false
       settings.value = result
       generationCaches.value = { ...generationCaches.value, settings: 'ready' }
@@ -527,7 +531,7 @@ async function loadSection(section: ControlSection, force = false): Promise<bool
     return true
   } catch (cause) {
     if (epoch === loadEpoch && props.work.id === workId) {
-      if (section === 'commands') {
+      if (section === 'commands' || section === 'dock-tools') {
         catalog.invalidate()
         generationCaches.value = { ...generationCaches.value, commands: 'error' }
       } else {
@@ -542,24 +546,37 @@ async function loadSection(section: ControlSection, force = false): Promise<bool
   }
 }
 
-async function runSelectedCommand() {
-  const command = selectedCommand.value
-  if (!command || props.preview || pending.value || props.outcomeUnknown || commandConsole.hasActiveOperation) return
+async function executeCatalogCommand(command: CommandInfo, argumentsText: string): Promise<boolean> {
+  if (props.preview || pending.value || props.outcomeUnknown || commandConsole.hasActiveOperation) return false
   const operationId = crypto.randomUUID()
   pending.value = `command:${command.name}`
   error.value = ''
-  commandConsole.beginOperation(operationId, command.name, commandArguments.value)
+  commandConsole.beginOperation(operationId, command.name, argumentsText)
   try {
-    const result = await currentHostCall(app, (context) => runCatalogCommand(props.work.id, command.name, commandArguments.value, operationId, context))
+    const result = await currentConnectionCall(app, (context) => runCatalogCommand(props.work.id, command.name, argumentsText, operationId, context))
     emit('snapshot', result.instance)
     commandConsole.receiveReceipt(operationId, result.receipt)
-    commandArguments.value = ''
+    return true
   } catch (cause) {
+    if (commandConsole.operationSucceeded(operationId)) return true
     commandConsole.failOperation(operationId, errorMessage(cause))
     if (cause && typeof cause === 'object' && 'outcomeUnknown' in cause && cause.outcomeUnknown === true) emit('unknown', cause, 'conversation')
+    return false
   } finally {
     pending.value = ''
   }
+}
+
+async function runSelectedCommand() {
+  const command = selectedCommand.value
+  if (!command) return
+  if (await executeCatalogCommand(command, commandArguments.value)) commandArguments.value = ''
+}
+
+async function toggleDockTools() {
+  const command = dockToolsCommand.value
+  if (!command || dockTools.value === 'unavailable') return
+  await executeCatalogCommand(command, dockTools.value === 'on' ? 'off' : 'on')
 }
 
 async function chooseModel(model: ModelInfo) {
@@ -567,7 +584,7 @@ async function chooseModel(model: ModelInfo) {
   pending.value = `model:${model.provider}/${model.id}`
   error.value = ''
   try {
-    const snapshot = await currentHostCall(app, (context) => setModel(props.work.id, model.provider, model.id, context))
+    const snapshot = await currentConnectionCall(app, (context) => setModel(props.work.id, model.provider, model.id, context))
     emit('snapshot', snapshot)
     if (models.value) models.value.instance = snapshot
     emit('close')
@@ -583,7 +600,7 @@ async function chooseThinking(level: ThinkingLevel) {
   pending.value = `thinking:${level}`
   error.value = ''
   try {
-    const snapshot = await currentHostCall(app, (context) => setThinking(props.work.id, level, context))
+    const snapshot = await currentConnectionCall(app, (context) => setThinking(props.work.id, level, context))
     emit('snapshot', snapshot)
     if (models.value) models.value.instance = snapshot
     emit('close')
@@ -600,7 +617,7 @@ async function toggleTool(tool: ToolInfo) {
   pending.value = `tool:${tool.name}`
   error.value = ''
   try {
-    const result = await currentHostCall(app, (context) => setActiveTools(props.work.id, names, context))
+    const result = await currentConnectionCall(app, (context) => setActiveTools(props.work.id, names, context))
     tools.value = result
     emit('snapshot', result.instance)
     emit('close')
@@ -655,7 +672,7 @@ async function saveSetting(setting: SettingInfo, value: SettingValue) {
   pending.value = `setting:${setting.key}`
   error.value = ''
   try {
-    const result = await currentHostCall(app, (context) => updateSetting(props.work.id, setting.key, value, context))
+    const result = await currentConnectionCall(app, (context) => updateSetting(props.work.id, setting.key, value, context))
     const index = settings.value.settings.findIndex((item) => item.key === result.setting.key)
     if (index >= 0) settings.value.settings[index] = result.setting
     emit('snapshot', result.instance)
@@ -673,7 +690,7 @@ function mutationFailure(cause: unknown, domain: ControlMutationDomain) {
 }
 
 function sectionDomain(section: ControlSection): ControlMutationDomain {
-  if (section === 'commands') return 'conversation'
+  if (section === 'commands' || section === 'dock-tools') return 'conversation'
   if (section === 'models' || section === 'thinking') return 'models'
   if (section === 'resources') return 'conversation'
   if (['sessions', 'new-session', 'rename-session', 'compact-session', 'reload-session'].includes(section)) return 'sessions'
@@ -715,13 +732,13 @@ function isCurrentModel(model: ModelInfo) {
       <template v-if="!commandDetailMode">
         <div class="cmd-palette-search-wrap">
           <span class="cmd-palette-search-icon"><Search :size="15" /></span>
-          <input ref="commandSearchInput" v-model="commandSearch" class="cmd-palette-input" placeholder="搜索 WebConsole、Extension、Skill 和 Prompt 命令…" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="cmd-palette-list" :aria-activedescendant="commandSelections.length ? `cmd-opt-${commandSelectedIndex}` : undefined" autofocus @keydown="handleCommandKeydown" />
+          <input ref="commandSearchInput" v-model="commandSearch" class="cmd-palette-input" placeholder="搜索 Work 操作、Extension、Skill 和 Prompt…" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="cmd-palette-list" :aria-activedescendant="commandSelections.length ? `cmd-opt-${commandSelectedIndex}` : undefined" autofocus @keydown="handleCommandKeydown" />
           <kbd class="cmd-palette-kbd">ESC</kbd>
           <button class="cmd-palette-close" aria-label="关闭" @click="$emit('close')">×</button>
         </div>
         <div id="cmd-palette-list" class="cmd-palette-list" role="listbox">
-          <div v-if="filteredStaticCommands.length" class="cmd-palette-group">WebConsole</div>
-          <button v-for="(item, index) in filteredStaticCommands" :key="item.id" :id="`cmd-opt-${index}`" class="cmd-palette-item" :class="{ selected: commandSelectedIndex === index }" role="option" :aria-selected="commandSelectedIndex === index" @mouseenter="commandSelectedIndex = index" @click="activateStatic(item)">
+          <div v-if="filteredStaticCommands.length" class="cmd-palette-group">Work 操作</div>
+          <button v-for="(item, index) in filteredStaticCommands" :key="item.id" :id="`cmd-opt-${index}`" class="cmd-palette-item" :class="{ selected: commandSelectedIndex === index, 'is-important': item.id === 'stop' }" role="option" :aria-selected="commandSelectedIndex === index" @mouseenter="commandSelectedIndex = index" @click="activateStatic(item)">
             <span class="cmd-palette-item-icon"><component :is="item.icon" :size="13" /></span>
             <span class="cmd-palette-item-copy"><span class="cmd-palette-item-top"><span class="cmd-palette-item-label">{{ item.label }}</span></span><span class="cmd-palette-item-desc">{{ item.description }}</span></span>
           </button>
@@ -762,6 +779,27 @@ function isCurrentModel(model: ModelInfo) {
         <div class="cmd-palette-footer cmd-center-footer">内容仅供查看 · 选择命令后仍会回到输入框确认发送</div>
       </template>
     </template>
+
+    <section v-else-if="section === 'dock-tools'" class="dock-tools-panel">
+      <div class="dock-tools-hero">
+        <span class="dock-tools-mark"><Wrench :size="22" /></span>
+        <div><span class="dock-tools-kicker">WORK CAPABILITY</span><h3>Dock Tools</h3><p>让 Agent 可以交付文件、联系其他 Work，并在需要时创建新的 Work。</p></div>
+        <span class="dock-tools-state" :data-state="dockTools">{{ dockTools === 'on' ? 'ON' : 'OFF' }}</span>
+      </div>
+      <div class="dock-tools-capabilities">
+        <span><strong>文件交付</strong><small>把完成的文件发送到此设备</small></span>
+        <span><strong>Work 协作</strong><small>查看并联系同一 Dock 中的其他 Work</small></span>
+        <span><strong>创建 Work</strong><small>在指定目录或 Machine 上开始新工作</small></span>
+      </div>
+      <div v-if="dockTools === 'unavailable'" class="alu-dialog-error">Dock Tools 当前不可用，请检查这个 Work 已加载的工具。</div>
+      <div v-else-if="!dockToolsCommand" class="alu-dialog-loading">当前 Work 没有提供 Dock Tools 命令。</div>
+      <button v-else type="button" class="dock-tools-toggle" :class="{ active: dockTools === 'on' }" :aria-label="dockTools === 'on' ? '关闭当前 Work 的 Dock Tools' : '开启当前 Work 的 Dock Tools'" :disabled="preview || !!pending || outcomeUnknown || commandConsole.hasActiveOperation" @click="toggleDockTools">
+        <span>{{ dockTools === 'on' ? '关闭 Dock Tools' : '开启 Dock Tools' }}</span><small>{{ pending || commandConsole.hasActiveOperation ? '正在更新…' : '仅影响当前 Work' }}</small>
+      </button>
+      <div v-if="commandConsole.entries.length" class="cmd-center-output dock-tools-output" role="log" aria-live="polite">
+        <div v-for="entry in commandConsole.entries" :key="entry.id" class="cmd-center-entry" :class="[`cmd-center-entry-${entry.kind}`, entry.level ? `is-${entry.level}` : '']"><span class="cmd-center-entry-marker">{{ entry.kind === 'command' ? '›' : entry.kind === 'status' ? '·' : entry.level === 'error' ? '!' : '│' }}</span><div class="cmd-center-entry-text">{{ entry.text }}</div></div>
+      </div>
+    </section>
 
     <SessionManager
       v-else-if="['sessions', 'tree', 'new-session', 'rename-session', 'compact-session', 'reload-session'].includes(section)"
