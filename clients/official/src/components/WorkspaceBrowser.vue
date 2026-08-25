@@ -30,12 +30,14 @@ import {
 import { rasterImageMimeType } from '../lib/rasterImage'
 import { userErrorMessage } from '../lib/userError'
 import ImageZoomSurface from './ImageZoomSurface.vue'
+import MarkdownDocumentSurface from './MarkdownDocumentSurface.vue'
 import {
   classifyWorkspacePreview as classifyPreview,
   mergeWorkspaceDirectoryEntries,
   workspaceDirectoryState,
   workspaceEntryIsDirectory as entryIsDirectory,
   workspaceEntryIsFile as entryIsFile,
+  workspaceEntryIsMarkdown as entryIsMarkdown,
   type WorkspaceDirectoryState,
   type WorkspacePreviewKind,
 } from '../lib/workspaceBrowser'
@@ -609,7 +611,7 @@ onBeforeUnmount(() => {
             <div v-if="previewPhase === 'empty'" class="workspace-preview-empty">
               <File :size="34" />
               <strong>选择文件以预览</strong>
-              <p>文本按 UTF-8 源码显示；图片会先验证实际格式。</p>
+              <p>Markdown 可切换阅读与原文；其他文本按 UTF-8 源码显示。</p>
             </div>
             <div v-else-if="previewPhase === 'metadata'" class="workspace-preview-state"><span class="workspace-spinner" /><strong>正在读取文件信息…</strong></div>
             <div v-else-if="previewPhase === 'confirm'" class="workspace-preview-state workspace-confirm">
@@ -625,6 +627,14 @@ onBeforeUnmount(() => {
               <div class="workspace-progress"><span :style="{ width: `${progressPercent}%` }" /></div>
               <button type="button" class="workspace-secondary-button" @click="cancelRead">取消</button>
             </div>
+            <MarkdownDocumentSurface
+              v-else-if="previewPhase === 'ready' && previewKind === 'text' && selectedEntry && entryIsMarkdown(selectedEntry)"
+              class="workspace-markdown-preview"
+              :source="previewText"
+              :document-key="selectedEntry.path"
+              initial-mode="reading"
+              :aria-label="`${selectedEntry.name} Markdown 预览`"
+            />
             <pre v-else-if="previewPhase === 'ready' && previewKind === 'text'" class="workspace-text-preview" tabindex="0"><code>{{ previewText }}</code></pre>
             <div v-else-if="previewPhase === 'ready' && previewKind === 'image'" class="workspace-image-preview"><ImageZoomSurface :url="previewImageUrl" :name="selectedEntry?.name || '工作区图片'" @failed="markImagePreviewFailed" /></div>
             <div v-else-if="previewPhase === 'unsupported'" class="workspace-preview-state">

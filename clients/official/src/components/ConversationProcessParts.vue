@@ -3,13 +3,13 @@ import { computed, reactive } from 'vue'
 import type { ConversationImageResource, ConversationProcessItem } from '../lib/types'
 import { toolDetailText } from '../lib/conversation'
 import ConversationImage from './ConversationImage.vue'
+import MarkdownContent from './MarkdownContent.vue'
 
 type ImagePart = Extract<ConversationProcessItem, { kind: 'image' }>
 type ThinkingPart = Extract<ConversationProcessItem, { kind: 'thinking' }>
 
 const props = defineProps<{
   parts: ConversationProcessItem[]
-  renderMarkdown: (text: string) => string
   toolOpen: (id: string) => boolean
   imageResource: (part: ImagePart) => ConversationImageResource
   /** 正在流式增长的条目 id：这些条目按纯文本渲染，等 message.completed 后再做 markdown 排版，
@@ -49,7 +49,7 @@ function rememberThinkingState(part: ThinkingPart, event: Event) {
       <summary @click="markThinkingInteraction(part)">thinking...</summary><div class="think-content">{{ part.text }}</div>
     </details>
     <div v-else-if="part.kind === 'assistant' && streamingParts?.has(part.id)" class="msg-assistant msg-text is-streaming" :data-conversation-id="part.id">{{ part.text }}</div>
-    <div v-else-if="part.kind === 'assistant'" class="msg-assistant msg-text" :data-conversation-id="part.id" v-html="renderMarkdown(part.text)" />
+    <MarkdownContent v-else-if="part.kind === 'assistant'" class="msg-assistant msg-text" :data-conversation-id="part.id" :source="part.text" />
     <div v-else-if="part.kind === 'tool'" class="msg-toolcall alu-hideable" :class="{ 'is-error': part.status === 'error' }" :data-conversation-id="part.id">
       <div class="tool-call-header">
         <span class="tool-name"><span aria-hidden="true">⚙</span>{{ part.name }}</span>

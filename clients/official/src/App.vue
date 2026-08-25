@@ -1,7 +1,5 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import DOMPurify from 'dompurify'
-import { marked } from 'marked'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { getCurrentWindow } from '@tauri-apps/api/window'
 import {
@@ -101,6 +99,7 @@ import {
   formatContextUsage,
   formatTokenCount,
   FollowActivationCoordinator,
+  initialWindowFocused,
   outputFollowAfterScroll,
   outputIsNearBottom,
   type FollowConnectionState,
@@ -139,21 +138,9 @@ import { useCommandCatalogStore } from './stores/command-catalog'
 import { useCommandConsoleStore } from './stores/command-console'
 import { useExtensionUiStore } from './stores/extension-ui'
 
-marked.use({ breaks: true, gfm: true })
-
 const commandShortcutLabel = /Macintosh|Mac OS X/.test(navigator.userAgent) ? '⌘K' : 'Ctrl+K'
 const isAndroidWebView = /Android/i.test(navigator.userAgent)
 const appBuildIdentity = import.meta.env.VITE_ALUDOCK_BUILD_IDENTITY
-
-const MARKDOWN_SANITIZE_CONFIG = {
-  USE_PROFILES: { html: true },
-  FORBID_TAGS: [
-    'script', 'style', 'iframe', 'object', 'embed', 'img', 'picture', 'source',
-    'audio', 'video', 'track', 'svg', 'math', 'form', 'input', 'textarea',
-    'select', 'option', 'link', 'meta',
-  ],
-  FORBID_ATTR: ['style', 'srcset', 'ping'],
-}
 
 const app = useAppStore()
 const commandCatalogStore = useCommandCatalogStore()
@@ -197,7 +184,7 @@ type AttachmentPreviewResource = { url: string; mediaType: string }
 const imageResources = ref<Record<string, ConversationImageResource>>({})
 const attachmentPreviews = ref<Record<string, AttachmentPreviewResource>>({})
 const imagePreview = ref<ImagePreview | null>(null)
-const messageTextView = ref<{ title: string; text: string } | null>(null)
+const messageTextView = ref<{ title: string; text: string; markdown: boolean } | null>(null)
 const imageSaving = ref(false)
 const imageSaveStatus = ref<{ tone: 'success' | 'error'; text: string } | null>(null)
 let imageDomainKey = ''
@@ -275,6 +262,8 @@ type ControlCenterHandle = {
 const unresolvedMutations = ref<Map<string, string>>(new Map())
 const controlCenterRef = ref<ControlCenterHandle | null>(null)
 const deliveryTrayRef = ref<{ focusClear: () => void; focusClose: () => void } | null>(null)
+const dockToolsTrigger = ref<HTMLButtonElement | null>(null)
+const dockToolsPopoverStyle = ref<Record<string, string>>({})
 const modalSurface = ref<HTMLElement | null>(null)
 let modalTrigger: HTMLElement | null = null
 const conversationState = ref<ConversationBootstrap | null>(null)
@@ -399,6 +388,8 @@ const conversationRows = computed<ConversationRow[]>(() => {
 const queueItems = computed(() => isTauri ? conversationState.value?.queue ?? [] : previewQueue)
 const selected = computed(() => app.selectedWork)
 const selectedDockTools = computed(() => selected.value ? dockToolsState(selected.value.extensionStatus) : 'off')
+const selectedDockToolsLabel = computed(() => selectedDockTools.value === 'on' ? 'ON' : selectedDockTools.value === 'unavailable' ? 'N/A' : 'OFF')
+const dockToolsOpen = computed(() => commandOpen.value && controlSection.value === 'dock-tools')
 const conversationSwitching = computed(() => Boolean(
   selected.value && conversationState.value && selected.value.id !== conversationState.value.instance.id,
 ))
@@ -884,6 +875,8 @@ onMounted(async () => {
   window.addEventListener('keydown', handleGlobalModalKeydown, true)
   window.addEventListener('keydown', handleDesktopShortcut)
   window.addEventListener('popstate', handlePopstate)
+  window.addEventListener('focus', handleWebViewFocus)
+  window.addEventListener('resize', positionDockToolsPopover)
   try {
     appSettings.value = await getClientPreferences()
   } catch (cause) {
@@ -892,8 +885,11 @@ onMounted(async () => {
   if (isTauri) {
     const appWindow = getCurrentWindow()
     unlisteners.push(await appWindow.onFocusChanged(({ payload }) => { void handleWindowFocusChanged(payload) }))
-    windowFocused.value = await appWindow.isFocused()
-      || (isAndroidWebView && document.visibilityState === 'visible')
+    windowFocused.value = initialWindowFocused(
+      await appWindow.isFocused(),
+      document.hasFocus(),
+      isAndroidWebView && document.visibilityState === 'visible',
+    )
     unlisteners.push(
       await listen<{ awayId: string }>('aludock://windows-away-elapsed', ({ payload }) => {
         if (windowFocused.value) return
@@ -965,6 +961,15 @@ onMounted(async () => {
     }
   }
   await app.load()
+  await nextTick()
+  if (isTauri) {
+    const focusedAfterLoad = initialWindowFocused(
+      await getCurrentWindow().isFocused(),
+      document.hasFocus(),
+      isAndroidWebView && document.visibilityState === 'visible',
+    )
+    if (focusedAfterLoad) await handleWindowFocusChanged(true)
+  }
   await initializePairDeviceName()
   if (!app.needsPairing) app.workDrawerOpen = !app.selectedWork
 })
@@ -973,6 +978,8 @@ onUnmounted(() => {
   window.removeEventListener('keydown', handleGlobalModalKeydown, true)
   window.removeEventListener('keydown', handleDesktopShortcut)
   window.removeEventListener('popstate', handlePopstate)
+  window.removeEventListener('focus', handleWebViewFocus)
+  window.removeEventListener('resize', positionDockToolsPopover)
   unlisteners.forEach((unlisten) => unlisten())
   window.clearTimeout(reconnectTimer)
   window.clearTimeout(composerCompletionTimer)
@@ -1404,10 +1411,35 @@ function openControlCenter(section: ControlSection) {
   app.workDrawerOpen = false
 }
 
-function applyControlSnapshot(snapshot: Work) {
+function positionDockToolsPopover() {
+  if (!dockToolsOpen.value && controlSection.value !== 'dock-tools') return
+  const trigger = dockToolsTrigger.value
+  if (!trigger) return
+  const bounds = trigger.getBoundingClientRect()
+  dockToolsPopoverStyle.value = {
+    '--dock-tools-popover-top': `${Math.round(bounds.bottom + 8)}px`,
+    '--dock-tools-popover-right': `${Math.max(12, Math.round(window.innerWidth - bounds.right))}px`,
+  }
+}
+
+function openDockTools() {
+  if (dockToolsOpen.value) {
+    closeModal()
+    return
+  }
+  openControlCenter('dock-tools')
+  positionDockToolsPopover()
+}
+
+function applyAuthoritativeWorkSnapshot(snapshot: Work): Work {
   app.applyWorkSnapshot(snapshot)
   const authoritative = app.works.find((work) => work.id === snapshot.id) ?? snapshot
   extensionUi.applyAuthoritativeSnapshot(authoritative)
+  return authoritative
+}
+
+function applyControlSnapshot(snapshot: Work) {
+  applyAuthoritativeWorkSnapshot(snapshot)
 }
 
 function openAppSettings() {
@@ -1744,10 +1776,10 @@ function resetAttachmentPreviews() {
   if (imagePreview.value?.kind === 'attachment') imagePreview.value = null
 }
 
-function openMessageText(title: string, text: string) {
+function openMessageText(title: string, text: string, markdown = false) {
   if (!text) return
   rememberModalTrigger()
-  messageTextView.value = { title, text }
+  messageTextView.value = { title, text, markdown }
 }
 
 function showImagePreview(preview: ImagePreview) {
@@ -2749,8 +2781,18 @@ function activeFollowCanContinue(instanceId: string) {
     && state.cursor.hostEpoch === app.payload?.host.hostEpoch
 }
 
+function handleWebViewFocus() {
+  void handleWindowFocusChanged(true)
+}
+
 async function handleWindowFocusChanged(focused: boolean) {
-  if (focused === windowFocused.value) return
+  if (focused === windowFocused.value) {
+    const work = selected.value
+    if (focused && work?.lifecycle === 'active' && !conversationLoading.value && !activeFollowCanContinue(work.id)) {
+      await reattachConversationFollow(work.id)
+    }
+    return
+  }
   const epoch = ++windowFocusEpoch
   windowFocused.value = focused
   if (!focused) {
@@ -3338,9 +3380,7 @@ async function startCompaction(customInstructions?: string) {
     ))
     if (!hostResultMatches(correlated, app.connectionContext)) return
     const result = correlated.result
-    app.applyWorkSnapshot(result.instance, capturedHost)
-    const authoritative = app.works.find((item) => item.id === result.instance.id) ?? result.instance
-    extensionUi.applyAuthoritativeSnapshot(authoritative)
+    const authoritative = applyAuthoritativeWorkSnapshot(result.instance)
     if (selected.value?.id === work.id) await refreshSessionConversation(authoritative)
   } catch (cause) {
     markUnknownOutcome(cause, 'sessions', work.id)
@@ -3363,8 +3403,8 @@ async function refreshSessionConversation(snapshot: Work) {
 }
 
 async function resyncSession(snapshot: Work, returnedDraft?: string) {
-  app.applyWorkSnapshot(snapshot)
-  if (selected.value?.id !== snapshot.id) return
+  const authoritative = applyAuthoritativeWorkSnapshot(snapshot)
+  if (selected.value?.id !== authoritative.id) return
   composerResetEpoch += 1
   const editor = editorAfterSessionReplacement(returnedDraft)
   draft.value = editor.text
@@ -3372,7 +3412,7 @@ async function resyncSession(snapshot: Work, returnedDraft?: string) {
   // retain their source handle and are re-uploaded by the target-scope watcher.
   draftAttachments.value = draftAttachments.value.filter((item) => item.localUpload)
   restoredImageCount.value = editor.restoredImageCount
-  await loadSelectedConversation(snapshot.id, true)
+  await loadSelectedConversation(authoritative.id, true)
 }
 
 async function loadHostMachines() {
@@ -3612,37 +3652,6 @@ async function toggleAllToolDetails() {
   }
 }
 
-function escapeHtml(text: string) {
-  return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;')
-}
-
-function wrapCodeBlocks(html: string) {
-  return html.replace(
-    /<pre><code(?:\s+class="([^"]*)")?>([\s\S]*?)<\/code><\/pre>/g,
-    (_match, className: string | undefined, code: string) => {
-      const language = className ? className.replace(/^language-/, '') : ''
-      return `<div class="code-block-wrap"><div class="code-block-header"><span class="code-lang">${escapeHtml(language || 'code')}</span><button class="code-copy-btn" type="button">copy</button></div><pre class="code-block-pre"><code>${code}</code></pre></div>`
-    },
-  )
-}
-
-function renderMarkdown(text: string) {
-  const raw = marked.parse(text || '', { async: false }) as string
-  return wrapCodeBlocks(DOMPurify.sanitize(raw, MARKDOWN_SANITIZE_CONFIG))
-}
-
-function handleOutputClick(event: MouseEvent) {
-  const target = event.target
-  if (!(target instanceof Element)) return
-  const button = target.closest<HTMLButtonElement>('.code-copy-btn')
-  if (!button) return
-  const code = button.closest('.code-block-wrap')?.querySelector('code')?.textContent || ''
-  void navigator.clipboard.writeText(code).then(() => {
-    button.textContent = 'copied'
-    window.setTimeout(() => { button.textContent = 'copy' }, 1200)
-  }).catch(() => undefined)
-}
-
 </script>
 
 <template>
@@ -3672,10 +3681,11 @@ function handleOutputClick(event: MouseEvent) {
           <span class="alu-nav-selector-value">{{ selected?.executor.thinkingLevel || '—' }}</span>
           <span class="alu-nav-selector-arrow">▾</span>
         </button>
-        <button class="alu-nav-dock-tools" :class="{ active: selectedDockTools === 'on' }" :disabled="!selected || selected.lifecycle !== 'active'" :aria-label="`Dock Tools ${selectedDockTools === 'on' ? '已开启' : '已关闭'}`" @click="openControlCenter('dock-tools')">
+        <button ref="dockToolsTrigger" class="alu-nav-dock-tools" :class="{ active: selectedDockTools === 'on', open: dockToolsOpen }" :disabled="!selected || selected.lifecycle !== 'active'" :aria-label="`Dock Tools ${selectedDockTools === 'on' ? '已开启' : selectedDockTools === 'unavailable' ? '当前不可用' : '已关闭'}`" aria-haspopup="dialog" :aria-expanded="dockToolsOpen" @click="openDockTools">
           <Wrench :size="13" />
           <span class="alu-nav-dock-tools-label">Dock Tools</span>
-          <b>{{ selectedDockTools === 'on' ? 'ON' : 'OFF' }}</b>
+          <b>{{ selectedDockToolsLabel }}</b>
+          <span class="alu-nav-dock-tools-chevron" aria-hidden="true">▾</span>
         </button>
         <div class="alu-nav-stats">
           <span class="alu-nav-stat-pill">↑<span>{{ formatTokenCount(selected?.metrics?.tokens?.input || 0) }}</span></span>
@@ -3691,7 +3701,7 @@ function handleOutputClick(event: MouseEvent) {
       </div>
     </nav>
 
-    <main ref="output" class="alu-output" aria-label="当前 Session 对话" @scroll.passive="handleOutputScroll" @load.capture="handleOutputMediaLoad" @click="handleOutputClick">
+    <main ref="output" class="alu-output" aria-label="当前 Session 对话" @scroll.passive="handleOutputScroll" @load.capture="handleOutputMediaLoad">
       <div v-if="!isTauri" class="alu-preview-notice">
         浏览器预览 · 仅作演示
       </div>
@@ -3819,7 +3829,7 @@ function handleOutputClick(event: MouseEvent) {
             <article v-if="row.kind === 'user'" class="msg-user" :data-conversation-id="row.id" :aria-label="`你的消息 ${row.time}`">
               <div class="msg-user-bubble">
                 <div class="msg-user-top"><span class="msg-user-prefix">&gt;</span><span v-if="row.text" class="msg-user-text">{{ row.text }}</span></div>
-                <div v-if="row.images?.length" class="msg-user-images"><ConversationProcessParts :parts="row.images" :render-markdown="renderMarkdown" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div>
+                <div v-if="row.images?.length" class="msg-user-images"><ConversationProcessParts :parts="row.images" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div>
                 <div v-if="row.attachments?.length" class="message-attachments"><AttachmentCard v-for="attachment in row.attachments" :key="attachment.fileId" compact :name="attachment.name" :size-bytes="attachment.sizeBytes" :media-type="attachment.mediaType" :preview-url="attachmentPreviews[attachment.fileId]?.url" @preview="openAttachmentPreview(attachment.fileId, attachment.name)" /></div>
                 <div v-if="row.text || row.time" class="msg-timestamp"><button v-if="row.text" type="button" class="message-text-action" aria-label="查看你的消息原文" @click="openMessageText('你的消息', row.text)"><FileText :size="12" />原文</button><span>{{ row.time }}</span></div>
               </div>
@@ -3828,8 +3838,8 @@ function handleOutputClick(event: MouseEvent) {
             <article v-else-if="row.kind === 'assistant-group'" class="alu-msg-assistant-row" :class="{ 'is-compact-empty': !hasCompactConversationContent(row.parts) }" :data-conversation-id="row.id" :aria-label="`Agent 回复 ${row.time}`">
               <img src="./assets/console_icon_small.png" alt="Agent" class="alu-msg-avatar" />
               <div class="alu-msg-assistant-content">
-                <div class="alu-msg-assistant-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div>
-                <div v-if="assistantMarkdownSource(row.parts) || row.time" class="msg-assistant-timestamp"><button v-if="assistantMarkdownSource(row.parts)" type="button" class="message-text-action" aria-label="查看 Agent 回复原文" @click="openMessageText('Agent 回复', assistantMarkdownSource(row.parts))"><FileText :size="12" />原文</button><span>{{ row.time }}</span></div>
+                <div class="alu-msg-assistant-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div>
+                <div v-if="assistantMarkdownSource(row.parts) || row.time" class="msg-assistant-timestamp"><button v-if="assistantMarkdownSource(row.parts)" type="button" class="message-text-action" aria-label="查看 Agent 回复原文" @click="openMessageText('Agent 回复', assistantMarkdownSource(row.parts), true)"><FileText :size="12" />原文</button><span>{{ row.time }}</span></div>
               </div>
             </article>
 
@@ -3838,9 +3848,9 @@ function handleOutputClick(event: MouseEvent) {
               <div class="alu-msg-assistant-content"><div class="alu-msg-assistant-body"><div class="alu-agent-activity" role="status" aria-label="正在处理" title="正在处理"><span class="alu-agent-activity-spinner" aria-hidden="true" /></div></div></div>
             </article>
 
-            <details v-else-if="row.kind === 'record' && row.folded" class="alu-record-panel alu-hideable" :class="row.panelClass" :data-conversation-id="row.id"><summary>{{ row.title }}</summary><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></details>
+            <details v-else-if="row.kind === 'record' && row.folded" class="alu-record-panel alu-hideable" :class="row.panelClass" :data-conversation-id="row.id"><summary>{{ row.title }}</summary><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></details>
 
-            <section v-else-if="row.kind === 'record'" class="alu-record-panel" :class="[row.panelClass, { 'is-compact-empty': !hasCompactConversationContent(row.parts) }]" :data-conversation-id="row.id"><div class="alu-record-title alu-hideable">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :render-markdown="renderMarkdown" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></section>
+            <section v-else-if="row.kind === 'record'" class="alu-record-panel" :class="[row.panelClass, { 'is-compact-empty': !hasCompactConversationContent(row.parts) }]" :data-conversation-id="row.id"><div class="alu-record-title alu-hideable">{{ row.title }}</div><div class="alu-record-body"><ConversationProcessParts :parts="row.parts" :streaming-parts="streamingPartIds" :tool-open="toolDetailOpen" :image-resource="imageResource" @tool-toggle="rememberToolDetail" @image-request="requestConversationImage" @image-preview="openImagePreview" @image-failed="markConversationImageFailed" /></div></section>
 
             <div v-else class="alu-live-notice-row" :class="{ 'alu-hideable': row.tone === 'info' }" :data-conversation-id="row.id"><div :class="row.tone === 'error' ? 'msg-error' : row.tone === 'warning' ? 'msg-warning' : 'msg-notice'">{{ row.text }}</div></div>
           </template>
@@ -3985,7 +3995,7 @@ function handleOutputClick(event: MouseEvent) {
     <Transition name="fade">
       <div v-if="messageTextView" class="ui-dialog-overlay message-text-overlay" role="presentation" @click.self="closeModal" @keydown="handleModalKeydown" @wheel.prevent.stop>
         <section ref="modalSurface" class="ui-dialog-box ui-dialog-size-wide message-text-dialog" role="dialog" aria-modal="true" aria-label="消息原文" tabindex="-1" @wheel="handleModalWheel">
-          <MessageTextDialog :title="messageTextView.title" :text="messageTextView.text" @close="closeModal" />
+          <MessageTextDialog :title="messageTextView.title" :text="messageTextView.text" :markdown="messageTextView.markdown" @close="closeModal" />
         </section>
       </div>
     </Transition>
@@ -4006,9 +4016,9 @@ function handleOutputClick(event: MouseEvent) {
     </Transition>
 
     <Transition name="fade">
-      <div v-if="commandOpen && selected" :class="controlSection === 'commands' ? 'cmd-palette-overlay' : 'ui-dialog-overlay'" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop @click.self="pulseCommandPalette">
-        <section ref="modalSurface" :class="controlSection === 'commands' ? 'cmd-palette-box' : controlDialogClasses(controlSection)" role="dialog" aria-modal="true" tabindex="-1" :aria-label="controlDialogTitle(controlSection)" @wheel="handleModalWheel">
-          <template v-if="controlSection !== 'commands'"><header class="ui-dialog-header"><div class="ui-dialog-title">{{ controlTitleOverride || controlDialogTitle(controlSection) }}</div><div v-if="controlBodyOverride || (!controlTitleOverride && controlDialogBody(controlSection))" class="ui-dialog-body">{{ controlBodyOverride || controlDialogBody(controlSection) }}</div></header><button class="ui-dialog-close" aria-label="关闭" @click="closeModal">×</button></template>
+      <div v-if="commandOpen && selected" :class="controlSection === 'commands' ? 'cmd-palette-overlay' : controlSection === 'dock-tools' ? 'dock-tools-popover-layer' : 'ui-dialog-overlay'" :style="controlSection === 'dock-tools' ? dockToolsPopoverStyle : undefined" role="presentation" @keydown="handleModalKeydown" @wheel.prevent.stop @click.self="controlSection === 'dock-tools' ? closeModal() : pulseCommandPalette()">
+        <section ref="modalSurface" :class="controlSection === 'commands' ? 'cmd-palette-box' : controlSection === 'dock-tools' ? 'dock-tools-popover-surface' : controlDialogClasses(controlSection)" role="dialog" aria-modal="true" tabindex="-1" :aria-label="controlDialogTitle(controlSection)" @wheel="handleModalWheel">
+          <template v-if="controlSection !== 'commands' && controlSection !== 'dock-tools'"><header class="ui-dialog-header"><div class="ui-dialog-title">{{ controlTitleOverride || controlDialogTitle(controlSection) }}</div><div v-if="controlBodyOverride || (!controlTitleOverride && controlDialogBody(controlSection))" class="ui-dialog-body">{{ controlBodyOverride || controlDialogBody(controlSection) }}</div></header><button class="ui-dialog-close" aria-label="关闭" @click="closeModal">×</button></template>
           <ControlCenter
             ref="controlCenterRef"
             :work="selected"

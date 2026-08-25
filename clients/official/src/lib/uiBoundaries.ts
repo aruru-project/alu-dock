@@ -6,6 +6,15 @@ export interface FollowConnectionStatus {
   message?: string
 }
 
+/** WebView focus is authoritative when the native window focus snapshot races page reload. */
+export function initialWindowFocused(
+  nativeFocused: boolean,
+  webViewFocused: boolean,
+  visibleMobileWebView: boolean,
+): boolean {
+  return nativeFocused || webViewFocused || visibleMobileWebView
+}
+
 /** Stable identity for the only boundaries that require a conversation reload. */
 export function conversationBoundaryKey(
   connectionId: string | null,

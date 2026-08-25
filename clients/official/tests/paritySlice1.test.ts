@@ -3,7 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 import { hasCompactConversationContent, projectConversation, toolDetailText } from '../src/lib/conversation.ts'
 import { reduceLiveEvent, type LiveProjectionState } from '../src/lib/liveReducer.ts'
-import { conversationBoundaryKey, conversationSwapIsCorrelated, draftAfterSubmit, FollowActivationCoordinator, formatContextUsage, formatTokenCount, outputFollowAfterScroll, outputIsNearBottom, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../src/lib/uiBoundaries.ts'
+import { conversationBoundaryKey, conversationSwapIsCorrelated, draftAfterSubmit, FollowActivationCoordinator, formatContextUsage, formatTokenCount, initialWindowFocused, outputFollowAfterScroll, outputIsNearBottom, stopCanStart, stopConfirmationText, stoppedResultIsCorrelated } from '../src/lib/uiBoundaries.ts'
 import { dockToolsState, genericExtensionStatus } from '../src/lib/dockTools.ts'
 import { userErrorMessage } from '../src/lib/userError.ts'
 import type { ConversationBootstrap, ProjectedEvent, Work } from '../src/lib/types.ts'
@@ -39,6 +39,8 @@ assert.equal(commandConsole.entries.filter((entry) => entry.level === 'error').l
 assert.equal(dockToolsState({ 'Dock tools': 'on' }), 'on')
 assert.equal(dockToolsState({}), 'off')
 assert.deepEqual(genericExtensionStatus({ 'Dock tools': 'on', Branch: 'main' }), { Branch: 'main' })
+assert.equal(initialWindowFocused(false, true, false), true, 'a focused Windows WebView restores the selected Work even when the native focus snapshot races reload')
+assert.equal(initialWindowFocused(false, false, false), false, 'an actually unfocused desktop window keeps its conversation Follow detached')
 
 state = applied(state, event(1, 'run.started', {}))
 assert.equal(state.instance.execution, 'running', 'run.started enables Abort-facing running state')

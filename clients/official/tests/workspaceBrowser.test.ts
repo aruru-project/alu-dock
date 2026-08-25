@@ -6,6 +6,7 @@ import {
   workspaceDirectoryState,
   workspaceEntryIsDirectory,
   workspaceEntryIsFile,
+  workspaceEntryIsMarkdown,
   type WorkspaceDirectoryState,
 } from '../src/lib/workspaceBrowser.ts'
 import type { WorkspaceFileEntry } from '../src/lib/types.ts'
@@ -18,6 +19,10 @@ assert.equal(classifyWorkspacePreview(file('diagram.svg', 'diagram.svg')), 'text
 assert.equal(classifyWorkspacePreview(file('page.html', 'page.html')), 'text')
 assert.equal(classifyWorkspacePreview(file('manual.pdf', 'manual.pdf')), 'unsupported')
 assert.equal(classifyWorkspacePreview(file('photo.webp', 'photo.webp')), 'image')
+assert.equal(workspaceEntryIsMarkdown(file('README.md', 'README.md')), true)
+assert.equal(workspaceEntryIsMarkdown(file('guide.markdown', 'guide.markdown')), true)
+assert.equal(workspaceEntryIsMarkdown(file('README', 'README')), true)
+assert.equal(workspaceEntryIsMarkdown(file('notes.txt', 'notes.txt')), false)
 
 const oldEntry = file('old.txt')
 const nextEntry = file('next.txt')

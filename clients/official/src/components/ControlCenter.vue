@@ -115,12 +115,18 @@ const generationCaches = ref(pendingGenerationCaches())
 const generationSectionState = computed<GenerationCacheState>(() => resolveGenerationSectionState(props.section, generationCaches.value))
 const pending = ref('')
 const error = ref('')
+const dockToolsOperationId = ref('')
 let loadEpoch = 0
 let generationRefreshEpoch = 0
 
 const selectedCommand = computed(() => catalog.commands.find((item) => item.referenceId === selectedCommandReferenceId.value) ?? null)
 const dockToolsCommand = computed(() => catalog.commands.find((item) => item.name === 'dock-tools') ?? null)
 const dockTools = computed(() => dockToolsState(props.work.extensionStatus))
+const dockToolsLabel = computed(() => dockTools.value === 'on' ? '已开启' : dockTools.value === 'unavailable' ? '当前不可用' : '已关闭')
+const dockToolsBusy = computed(() => pending.value === 'command:dock-tools' || commandConsole.hasActiveOperation)
+const dockToolsEntries = computed(() => dockToolsOperationId.value
+  ? commandConsole.entries.filter((entry) => entry.operationId === dockToolsOperationId.value)
+  : [])
 const selectedSetting = computed(() => settings.value?.settings.find((item) => item.key === selectedSettingKey.value) ?? null)
 const sessionMode = computed(() => props.section as 'sessions' | 'tree' | 'new-session' | 'rename-session' | 'compact-session' | 'reload-session')
 const filteredStaticCommands = computed(() => filterCommandPaletteItems(staticCommands, commandSearch.value))
@@ -207,6 +213,7 @@ watch([
   commandDetailMode.value = ''
   argumentCompletions.value = []
   commandContentText.value = ''
+  dockToolsOperationId.value = ''
   error.value = ''
   void refreshGenerationCaches()
   if (props.section === 'models' || props.section === 'thinking') void loadSection(props.section)
@@ -552,6 +559,7 @@ async function executeCatalogCommand(command: CommandInfo, argumentsText: string
   pending.value = `command:${command.name}`
   error.value = ''
   commandConsole.beginOperation(operationId, command.name, argumentsText)
+  if (command.name === 'dock-tools') dockToolsOperationId.value = operationId
   try {
     const result = await currentConnectionCall(app, (context) => runCatalogCommand(props.work.id, command.name, argumentsText, operationId, context))
     emit('snapshot', result.instance)
@@ -781,23 +789,25 @@ function isCurrentModel(model: ModelInfo) {
     </template>
 
     <section v-else-if="section === 'dock-tools'" class="dock-tools-panel">
-      <div class="dock-tools-hero">
-        <span class="dock-tools-mark"><Wrench :size="22" /></span>
-        <div><span class="dock-tools-kicker">WORK CAPABILITY</span><h3>Dock Tools</h3><p>让 Agent 可以交付文件、联系其他 Work，并在需要时创建新的 Work。</p></div>
-        <span class="dock-tools-state" :data-state="dockTools">{{ dockTools === 'on' ? 'ON' : 'OFF' }}</span>
+      <header class="dock-tools-header">
+        <span class="dock-tools-mark"><Wrench :size="18" /></span>
+        <div><h3>Dock Tools</h3><p>当前 Work</p></div>
+        <span class="dock-tools-state" :data-state="dockTools">{{ dockToolsLabel }}</span>
+        <button type="button" class="dock-tools-close" aria-label="关闭 Dock Tools" @click="$emit('close')">×</button>
+      </header>
+      <div class="dock-tools-explanation">
+        <strong>{{ dockTools === 'on' ? 'Agent 可以使用 Dock 能力' : 'Agent 目前不能使用 Dock 能力' }}</strong>
+        <p>包括交付文件、联系其他 Work，以及创建新的 Work。</p>
       </div>
-      <div class="dock-tools-capabilities">
-        <span><strong>文件交付</strong><small>把完成的文件发送到此设备</small></span>
-        <span><strong>Work 协作</strong><small>查看并联系同一 Dock 中的其他 Work</small></span>
-        <span><strong>创建 Work</strong><small>在指定目录或 Machine 上开始新工作</small></span>
-      </div>
-      <div v-if="dockTools === 'unavailable'" class="alu-dialog-error">Dock Tools 当前不可用，请检查这个 Work 已加载的工具。</div>
-      <div v-else-if="!dockToolsCommand" class="alu-dialog-loading">当前 Work 没有提供 Dock Tools 命令。</div>
-      <button v-else type="button" class="dock-tools-toggle" :class="{ active: dockTools === 'on' }" :aria-label="dockTools === 'on' ? '关闭当前 Work 的 Dock Tools' : '开启当前 Work 的 Dock Tools'" :disabled="preview || !!pending || outcomeUnknown || commandConsole.hasActiveOperation" @click="toggleDockTools">
-        <span>{{ dockTools === 'on' ? '关闭 Dock Tools' : '开启 Dock Tools' }}</span><small>{{ pending || commandConsole.hasActiveOperation ? '正在更新…' : '仅影响当前 Work' }}</small>
+      <div v-if="dockTools === 'unavailable'" class="alu-dialog-error">当前 Work 没有提供 Dock Tools。</div>
+      <div v-else-if="!dockToolsCommand && (catalog.state === 'idle' || catalog.state === 'loading')" class="dock-tools-loading"><span class="alu-agent-activity-spinner" />正在读取当前 Work 的可用命令…</div>
+      <div v-else-if="!dockToolsCommand" class="alu-dialog-error">当前 Work 没有提供 Dock Tools 开关。</div>
+      <button v-else type="button" class="dock-tools-toggle" :class="{ active: dockTools === 'on', pending: dockToolsBusy }" :aria-label="dockTools === 'on' ? '关闭当前 Work 的 Dock Tools' : '开启当前 Work 的 Dock Tools'" :aria-pressed="dockTools === 'on'" :disabled="preview || dockToolsBusy || outcomeUnknown" data-modal-initial @click="toggleDockTools">
+        <span class="dock-tools-toggle-copy"><strong>{{ dockToolsBusy ? '正在更新…' : '允许当前 Work 使用 Dock Tools' }}</strong><small>{{ dockToolsBusy ? '等待当前 Work 确认' : dockTools === 'on' ? '已开启' : '已关闭' }}</small></span>
+        <span class="dock-tools-switch" aria-hidden="true"><i /></span>
       </button>
-      <div v-if="commandConsole.entries.length" class="cmd-center-output dock-tools-output" role="log" aria-live="polite">
-        <div v-for="entry in commandConsole.entries" :key="entry.id" class="cmd-center-entry" :class="[`cmd-center-entry-${entry.kind}`, entry.level ? `is-${entry.level}` : '']"><span class="cmd-center-entry-marker">{{ entry.kind === 'command' ? '›' : entry.kind === 'status' ? '·' : entry.level === 'error' ? '!' : '│' }}</span><div class="cmd-center-entry-text">{{ entry.text }}</div></div>
+      <div v-if="dockToolsEntries.some((entry) => entry.level === 'error')" class="cmd-center-output dock-tools-output" role="log" aria-live="polite">
+        <div v-for="entry in dockToolsEntries.filter((item) => item.level === 'error')" :key="entry.id" class="cmd-center-entry is-error"><span class="cmd-center-entry-marker">!</span><div class="cmd-center-entry-text">{{ entry.text }}</div></div>
       </div>
     </section>
 

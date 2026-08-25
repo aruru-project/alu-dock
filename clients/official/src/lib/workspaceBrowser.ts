@@ -24,6 +24,7 @@ export function workspaceDirectoryState(
 }
 
 const IMAGE_EXTENSIONS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp'])
+const MARKDOWN_EXTENSIONS = new Set(['md', 'markdown'])
 const TEXT_EXTENSIONS = new Set([
   'c', 'cc', 'cpp', 'cs', 'css', 'csv', 'dart', 'env', 'go', 'h', 'hpp', 'html', 'ini',
   'java', 'js', 'json', 'jsx', 'kt', 'kts', 'less', 'lock', 'log', 'lua', 'md', 'mjs',
@@ -48,6 +49,11 @@ export function classifyWorkspacePreview(entry: WorkspaceFileEntry): WorkspacePr
   const basename = entry.name.toLowerCase().replace(/\.[^.]+$/, '')
   if (!extension || TEXT_EXTENSIONS.has(extension) || TEXT_BASENAMES.has(basename)) return 'text'
   return 'unsupported'
+}
+
+export function workspaceEntryIsMarkdown(entry: WorkspaceFileEntry): boolean {
+  const name = entry.name.toLowerCase()
+  return MARKDOWN_EXTENSIONS.has(extensionOf(name)) || name === 'readme'
 }
 
 export function mergeWorkspaceDirectoryEntries(
