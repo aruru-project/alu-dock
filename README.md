@@ -16,6 +16,10 @@ Hub / Work / Web / future clients
        Pi / future Agent
 ```
 
+## 客户端接入
+
+开发桌面、Android、TUI 或 Web backend 客户端时，请从 [`docs/client-integration.md`](docs/client-integration.md) 开始。该文档集中说明 Protocol V2 的本地 IPC、远程 mTLS、hello、request/response、read/follow、operation 与各类传输流程，并继续指向需要核对的精确 wire 定义；客户端开发者不需要扫描 Host、Worker 或 TUI 实现来寻找接入方式。
+
 ## 当前能力
 
 - 长期 Host 与 durable instance catalog；

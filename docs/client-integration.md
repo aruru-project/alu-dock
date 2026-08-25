@@ -64,6 +64,13 @@ paired client ── mutual TLS port ─────────┘
 
 当前 TypeScript `DockClient` 负责本机 Unix socket 或 Windows Named Pipe。独立的 Android、Web backend 或桌面客户端可以实现 TLS transport，但在证书 admission 之后必须复用本文其余部分定义的同一套 hello、capabilities、request、response、read/follow 和 operation 语义。不得把 Devices、Settings 或证书管理增加为 Protocol V2 request。
 
+需要发现并连接本机 Main 的客户端，可以尝试以下默认本地 IPC endpoint：
+
+- Windows：`\\.\pipe\alu-dock`；
+- POSIX：`${XDG_RUNTIME_DIR}/alu-dock/dock.sock`；未设置 `XDG_RUNTIME_DIR` 时使用 `${HOME}/.alu-dock/run/dock.sock`。
+
+连接建立后直接发送普通 Protocol V2 hello；本地 IPC 不执行设备配对，也不使用 TLS 或客户端证书。显式使用自定义 socket path 启动的开发 Host 不属于默认发现范围。SubHost 不提供客户端本地 IPC endpoint。客户端是否自动尝试本机连接、何时展示入口以及是否优先使用本机连接，属于客户端自己的产品行为，不是 Protocol V2 要求。
+
 远程客户端必须长期保存自己生成的 RSA 2048-bit 或更强证书与私钥，并在每次 TLS handshake 中发送该证书。配对后还必须保存 Host 的完整 leaf certificate DER，之后在发送任何应用数据前做精确匹配。地址、域名和端口只负责找到 Host，不参与信任；切换 LAN 地址、外网域名或 NAT 映射端口不触发重新配对。
 
 ### 首次配对
