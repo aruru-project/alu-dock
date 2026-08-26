@@ -80,13 +80,15 @@ aludock service logs --lines 200
 
 ## 官方 Desktop/Android Client
 
-安装并验证 Client：
+安装 Client 依赖并运行前端快速检查：
 
 ```bash
 npm run client:install
-npm run client:test
-npm run client:build
+npm run client:test        # Vue/TypeScript tests
+npm run client:build       # Vue typecheck 与前端产物
 ```
+
+这两项检查不编译 Rust core 或 Tauri host；完整 Client gates、真实 Desktop 开发入口与各平台构建方式见 [`clients/official/README.md`](clients/official/README.md)。
 
 浏览器设计预览：
 

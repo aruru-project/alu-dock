@@ -35,20 +35,26 @@
 
 ## Android environment
 
-Machine-specific Android paths belong in an untracked environment file. `pnpm android config-path` shows the machine-wide file shared by worktrees and the optional `.env.android.local` override for the current checkout. Both use the format in `.env.android.example`; never commit either local configuration.
+Machine-specific Android paths belong in an untracked environment file. `corepack pnpm android config-path` shows the machine-wide file shared by worktrees and the optional `.env.android.local` override for the current checkout. Both use the format in `.env.android.example`; never commit either local configuration.
 
 Use the project entrypoint instead of invoking `tauri android` directly:
 
 ```bash
-pnpm android config-path
-pnpm android doctor
-pnpm android setup
-pnpm android build --debug --apk --target aarch64 --ci
+corepack pnpm android config-path
+corepack pnpm android doctor
+corepack pnpm android setup
+corepack pnpm android build --debug --apk --target aarch64 --ci
 ```
 
 The entrypoint loads the machine configuration and then the worktree override, supplies the Android environment to Tauri and Gradle, and keeps the ignored Android `local.properties` in sync. CI may provide the same variables directly.
 
 Do not put SDK, NDK, or JDK installation paths in tracked files or documentation. Do not put signing keys or passwords in `.env.android.local`; release signing remains separate.
+
+## Local signing materials
+
+- `.release-secrets/android/` is ignored, owner-provisioned local storage. Its files and values are opaque credentials, not Agent context.
+- Never read, print, parse, grep, hash, diff, copy, upload, attach, or source their contents. Safe inspection is limited to filenames, existence, ownership/mode, and Git ignore/tracking status. Keep the files mode `0600`; do not move, replace, or delete them without explicit owner authorization.
+- Explicit authorization to create a locally signed Android test package means using `corepack pnpm android stg` as the opaque credential consumer. It does not authorize exposing values, adding credential logging, substituting an ad-hoc signing command, changing tags, or publishing a release.
 
 ## Windows artifact delivery
 
