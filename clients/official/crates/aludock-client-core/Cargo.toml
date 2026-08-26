@@ -1,0 +1,48 @@
+[package]
+name = "aludock-client-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+base64.workspace = true
+chacha20poly1305.workspace = true
+directories.workspace = true
+hex.workspace = true
+hkdf.workspace = true
+rand.workspace = true
+rand-core-legacy.workspace = true
+rcgen.workspace = true
+rsa.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sha2-legacy.workspace = true
+srp.workspace = true
+subtle.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+url.workspace = true
+uuid.workspace = true
+x509-cert.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(target_os = "android")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -1,0 +1,32 @@
+{
+  "name": "aludock-client-ui",
+  "private": true,
+  "version": "0.2.3",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vue-tsc --noEmit && vite build",
+    "test": "node --experimental-strip-types tests/hostResult.test.ts && node --experimental-strip-types tests/machines.test.ts && node --experimental-strip-types tests/localState.test.ts && node --experimental-strip-types tests/paritySlice1.test.ts && node --experimental-strip-types tests/attachmentUi.test.ts && node --experimental-strip-types tests/sessionTree.test.ts && node --experimental-strip-types tests/deliverables.test.ts && node --experimental-strip-types tests/workPresence.test.ts && node --experimental-strip-types tests/commandSuggest.test.ts && node --experimental-strip-types tests/generationCaches.test.ts && node --experimental-strip-types tests/sessionEditor.test.ts && node --experimental-strip-types tests/liveDeltaFold.test.ts && node --experimental-strip-types tests/conversationHydration.test.ts && node --experimental-strip-types tests/conversationPresentation.test.ts && node --experimental-strip-types tests/workspaceBrowser.test.ts && node --experimental-strip-types tests/markdown.test.ts && node --experimental-strip-types tests/settingLabels.test.ts",
+    "preview": "vite preview --host 127.0.0.1",
+    "tauri": "tauri",
+    "android": "node scripts/android.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "2.11.1",
+    "@lucide/vue": "1.31.0",
+    "@vue/devtools-api": "8.2.1",
+    "dompurify": "3.2.7",
+    "marked": "18.0.9",
+    "pinia": "4.0.3",
+    "vue": "3.5.41"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.11.4",
+    "@vitejs/plugin-vue": "6.0.8",
+    "typescript": "5.9.3",
+    "vite": "8.2.1",
+    "vue-tsc": "3.3.10"
+  },
+  "packageManager": "pnpm@10.17.1"
+}

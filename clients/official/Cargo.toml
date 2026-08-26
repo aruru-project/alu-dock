@@ -1,0 +1,44 @@
+[workspace]
+members = [
+  "crates/aludock-client-core",
+  "crates/aludock-client-cli",
+]
+# The Tauri host is kept standalone so core/CLI checks remain runnable on
+# machines without GTK/WebKit development packages (including CI and Android builders).
+exclude = ["src-tauri"]
+resolver = "3"
+
+[workspace.package]
+version = "0.2.3"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+chacha20poly1305 = "0.10.1"
+clap = { version = "4.5", features = ["derive"] }
+directories = "6.0"
+hex = "0.4"
+hkdf = "0.12"
+rand = "0.9"
+rand-core-legacy = { package = "rand_core", version = "0.6.4", features = ["getrandom"] }
+rcgen = { version = "0.14.9", default-features = false, features = ["aws_lc_rs", "pem", "zeroize"] }
+rsa = { version = "0.9.8", features = ["sha2"] }
+rustls = { version = "0.23.37", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls-pki-types = "1.14"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2-legacy = { package = "sha2", version = "0.10.9", features = ["oid"] }
+sha2 = "0.11.0"
+srp = "0.7.0-rc.3"
+subtle = "2.6"
+thiserror = "2.0"
+time = { version = "=0.3.41", features = ["formatting", "parsing"] }
+tokio = { version = "1.49", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["aws_lc_rs", "tls12"] }
+url = "2.5"
+uuid = { version = "1.20", features = ["v4"] }
+x509-cert = "0.2.5"
+zeroize = { version = "1.8", features = ["derive"] }
