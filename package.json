@@ -27,6 +27,11 @@
     "open:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/Open-AluDock.ps1",
     "smoke:sdk": "npm run build && node dist/scripts/sdk-smoke.js",
     "bench:tui": "npm run build && node --expose-gc dist/scripts/tui-render-benchmark.js",
+    "client:install": "cd clients/official && corepack pnpm install --frozen-lockfile",
+    "client:dev": "cd clients/official && corepack pnpm dev",
+    "client:build": "cd clients/official && corepack pnpm build",
+    "client:test": "cd clients/official && corepack pnpm test",
+    "client:package:linux": "cd clients/official && corepack pnpm package:linux",
     "prepack": "npm run build",
     "install:local": "npm run build && node dist/scripts/install-local.js"
   },

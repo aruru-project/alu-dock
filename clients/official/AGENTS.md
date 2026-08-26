@@ -1,8 +1,10 @@
-# AluDock Client development notes
+# Official Alu Dock Client development notes
+
+本文件只约束 `clients/official/`。根 [`STORY.md`](../../STORY.md) 与 [`AGENTS.md`](../../AGENTS.md) 继续分别是整个产品和整个 monorepo 的最高权威。
 
 ## 产品语义与权威顺序
 
-- 产品语义以主人明确表达为准，其次是 `DOCK_REQUIREMENTS.md` 与 Dock 侧权威（`alu_dock/STORY.md`、Protocol V2）。当前实现只是现状证据，不定义产品语义；`UI_UX_REFERENCE.md` 是历史参考，按它自己头部声明的优先级使用。
+- 产品语义以主人明确表达为准，其次是根 `STORY.md`、Protocol V2 与对应 agent map。当前实现只是现状证据，不定义产品语义；`UI_UX_REFERENCE.md` 是历史参考，按它自己头部声明的优先级使用。
 - 对产品语义有异议先提出再动手；不拿实现现状反向解释产品目标。
 
 ## 临时实现必须申报
@@ -26,7 +28,8 @@
 
 ## Project boundaries
 
-- Make source changes only in this repository. The Dock and Rails repositories are reference implementations and remain read-only.
+- Official Client、Dock Host/Worker 与 TUI 现在属于同一仓库、同一产品。改动仍应留在拥有该事实的模块；跨边界产品变更必须沿根目录定义的 Protocol V2 路径完成，不能因同仓而增加私有接口。
+- Rails Web Console 等自定义 Client 仍在各自项目中维护，本目录不得跨项目修改它们。
 - Keep protocol, persistence, and recovery behavior in the reusable Rust core. The Tauri host and Vue UI must not invent a second protocol implementation.
 - Do not run or alter release automation, tags, signing material, or GitHub secrets unless the task explicitly asks for release work.
 

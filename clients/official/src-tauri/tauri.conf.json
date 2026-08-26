@@ -4,9 +4,9 @@
   "version": "0.2.3",
   "identifier": "moe.aruru.aludock.client",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "corepack pnpm dev",
     "devUrl": "http://127.0.0.1:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "corepack pnpm build",
     "frontendDist": "../dist",
     "removeUnusedCommands": true
   },

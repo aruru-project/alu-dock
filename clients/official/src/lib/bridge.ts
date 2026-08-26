@@ -667,10 +667,9 @@ export async function listWorkspace(path: string, context: ConnectionContext, ta
       { name: 'alubot_admin', kind: 'directory', hidden: false },
       { name: 'alu_dock', kind: 'directory', hidden: false },
       { name: 'alu_workstation', kind: 'directory', hidden: false },
-      { name: 'aludock-android-client', kind: 'directory', hidden: false },
       { name: '.experiments', kind: 'directory', hidden: true },
     ],
-    total: 5,
+    total: 4,
     truncated: false,
   }
 }
@@ -769,8 +768,8 @@ const previewSettings: SettingsResult = {
 function previewSessions(context: SessionContext): SessionListResult {
   return {
     sessions: [
-      { token: 'preview-current', name: 'Android Client', cwd: '/workshop/aludock-android-client', updatedAt: now, identity: '7c91a2', current: true },
-      { token: 'preview-review', name: 'Protocol review', cwd: '/workshop/aludock-android-client', updatedAt: now, identity: '38bbd0', current: false },
+      { token: 'preview-current', name: 'Official Client', cwd: '/workshop/alu_dock/clients/official', updatedAt: now, identity: '7c91a2', current: true },
+      { token: 'preview-review', name: 'Protocol review', cwd: '/workshop/alu_dock/clients/official', updatedAt: now, identity: '38bbd0', current: false },
       { token: 'preview-dock', name: 'Dock integration', cwd: '/workshop/alu_dock', updatedAt: now, identity: 'a910ef', current: false },
     ],
     total: 3,
@@ -818,7 +817,7 @@ const previewBootstrap: BootstrapPayload = {
   total: 5,
   hiddenStopped: 1,
   works: [
-    previewWork('aludock-android-client', '/workshop/aludock-android-client', 'running', 'active', 'main'),
+    previewWork('Alu Dock Official Client', '/workshop/alu_dock/clients/official', 'running', 'active', 'main'),
     previewWork('Alubot Admin', '/workshop/alubot_admin', 'idle', 'active', 'master'),
     previewWork('Alu Workstation', '/workshop/alu_workstation', 'unavailable', 'host_lost'),
     previewWork('alu_dock', '/workshop/alu_dock', 'idle', 'active', 'main'),

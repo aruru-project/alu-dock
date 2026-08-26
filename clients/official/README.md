@@ -2,121 +2,100 @@
   <img src="./src/assets/aludock-icon.png" width="120" alt="AluDock">
 </p>
 
-<h1 align="center">AluDock Client</h1>
+<h1 align="center">Alu Dock Official Client</h1>
 
-<p align="center">把你的 AluDock 带在身边。</p>
+<p align="center">Alu Dock 的官方 Desktop 与 Android Client。</p>
 
-和电脑上的 AluDock 配对后，你可以从另一台电脑或手机打开已有 Work，继续对话、查看执行进度，并保存生成的图片和文件。
+本目录是根 [`Alu Dock`](../../README.md) 产品仓库的一部分。Desktop、Android、TUI 与自定义 Client 都通过同一个 Protocol V2 连接 Host；官方 Client 不直连 Worker，也不维护另一套业务协议。
 
 ## 主要功能
 
-- 在多个 AluDock 和 Work 之间切换，随时接上之前的对话
-- 发送文字、图片和附件，查看实时输出与运行状态
-- 管理 Queue 和 Session，通过 Session Tree 回到之前的对话分支
-- 为不同 Work 选择模型、Thinking、Tools 和常用设置
+- 在多个 Alu Dock 和 Work 之间切换，继续已有对话并查看运行状态
+- 发送文字、图片和附件，管理 Queue、Session、模型、Thinking 与 Tools
+- Desktop 通过本机 Unix socket 或 Windows Named Pipe 直接连接同一 Host
+- Android 与远程 Desktop 通过配对后的 mTLS 连接 Host
 
-## 开始使用
+## 开发环境
 
-1. 在电脑上的 AluDock 中打开 **Remote Access / 配对**，开始一次新的配对。
-2. 在客户端中填写电脑地址和端口，并为当前设备取一个名字。
-3. 核对四位配对码，然后回到电脑端确认。
-4. 选择一个 Work，继续对话。
-
-## 下载
-
-发布版本可在 [GitHub Releases](https://github.com/aruru-project/aludock-client/releases) 中获取：
-
-- Windows x86_64：`.exe`
-- Linux x86_64：`.zip`
-- Android ARM64：`.apk`
-
-## 开发
-
-需要 Node.js 22、pnpm 10、Rust 1.88，以及当前平台的 Tauri 2 构建依赖。
-
-安装依赖并启动桌面客户端：
+需要 Node.js 22、pnpm 10、Rust 1.88，以及当前平台的 Tauri 2 构建依赖。从 monorepo 根目录可以运行：
 
 ```bash
-pnpm install
-pnpm tauri dev
+npm run client:install
+npm run client:test
+npm run client:build
+npm run client:dev
 ```
 
-只调整界面时，可以运行：
+也可以进入本目录使用原生入口：
 
 ```bash
-pnpm dev
+corepack pnpm install --frozen-lockfile
+corepack pnpm tauri dev
 ```
 
-Linux 需要以下系统依赖：
+`pnpm dev` 只启动浏览器设计预览，不具备 Tauri native bridge，因此不能用来证明本机 socket、文件系统或其他原生能力。
+
+## Linux Desktop
+
+安装 Tauri 与打包依赖：
 
 ```bash
-sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf zip
 ```
 
-### 测试
+生成可交付的 x86_64 Linux ZIP：
 
 ```bash
-pnpm test
-pnpm build
+npm run client:package:linux
+```
 
-cargo test --workspace
-cargo test --manifest-path src-tauri/Cargo.toml
+产物位于 `clients/official/dist/AluDock-<version>-linux-x86_64.zip`。Desktop 默认连接 `${XDG_RUNTIME_DIR}/alu-dock/dock.sock`；没有 `XDG_RUNTIME_DIR` 时使用 `~/.alu-dock/run/dock.sock`。本机连接不需要设备配对。
+
+## Android
+
+准备 JDK 17、Android SDK 36 和 Android NDK。机器路径使用 `.env.android.example` 所示格式，并保存在 `pnpm android config-path` 显示的本机配置位置：
+
+```bash
+corepack pnpm android config-path
+corepack pnpm android doctor
+corepack pnpm android setup
+rustup target add aarch64-linux-android
+corepack pnpm android build --debug --apk --target aarch64 --ci
+```
+
+本机正式签名材料位于 ignored 的 `.release-secrets/android/`。需要生成使用现有正式签名的本地测试包时运行：
+
+```bash
+corepack pnpm android stg
+```
+
+该命令不发布 Release 或修改 tag，产物位于 `dist/AluDock-<version>-android-arm64-stg.apk`。
+
+## 验证入口
+
+```bash
+corepack pnpm test
+corepack pnpm build
+cargo test --workspace --locked
+cargo test --locked --manifest-path src-tauri/Cargo.toml
 cargo fmt --all -- --check
 cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
 ```
 
-### 桌面构建
-
-```bash
-pnpm tauri build --no-bundle --ci
-```
-
-构建产物位于 `src-tauri/target/release/`。
-
-### Android 构建
-
-准备 JDK 17、Android SDK 36 和 Android NDK。配置文件沿用 `.env.android.example` 的格式；`config-path` 会显示跨工作区共享的本机配置位置，以及当前工作区可用的 `.env.android.local` 覆盖文件：
-
-```bash
-pnpm android config-path
-pnpm android doctor
-pnpm android setup
-```
-
-工具的实际安装位置只保存在这些本机配置中。`setup` 会为 Android Studio 同步本地 SDK 配置。
-
-安装目标架构的 Rust 标准库并构建 ARM64 APK：
-
-```bash
-rustup target add aarch64-linux-android
-pnpm android build --debug --apk --target aarch64 --ci
-```
-
-构建 x86_64 模拟器版本时，将 Rust target 和构建目标改为 `x86_64-linux-android` 与 `x86_64`。
-
-需要给已安装正式签名版本的设备原地覆盖测试时，在忽略的 `.release-secrets/android/signing.env` 中配置 Android Release 签名变量，然后运行：
-
-```bash
-pnpm android stg
-```
-
-该命令只生成本地 ARM64 Release 测试包，不发布 Release 或修改 tag。产物位于 `dist/AluDock-<version>-android-arm64-stg.apk`。
-
-协议调试工具可以直接从工作区运行：
+协议调试工具仍可从 Rust workspace 运行：
 
 ```bash
 cargo run -p aludock-client-cli -- --help
 ```
 
-## 仓库结构
+## 目录结构
 
 ```text
-crates/aludock-client-core/  配对与协议客户端
+crates/aludock-client-core/  配对、Protocol V2 与本地/远程 transport
 crates/aludock-client-cli/   协议调试工具
-src-tauri/                   Tauri 原生宿主
+src-tauri/                   Tauri Desktop/Android 原生宿主
 src/                         Vue 3 界面
+scripts/                     平台开发与本地打包入口
 ```
 
-## 许可证
-
-本项目采用 [Apache-2.0](./LICENSE-APACHE) 许可证。
+Client 专用代码采用 [`LICENSE-APACHE`](LICENSE-APACHE)。产品语义与跨仓库工程规则以根 [`STORY.md`](../../STORY.md) 和 [`AGENTS.md`](../../AGENTS.md) 为准。

@@ -249,8 +249,16 @@ function showUsage() {
 
 function runTauriAndroid(args, environment) {
   syncLocalProperties(environment.androidHome);
-  const executable = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
-  const result = spawnSync(executable, ["exec", "tauri", "android", ...args], {
+  const packageManager = process.env.npm_execpath;
+  const executable = packageManager
+    ? process.execPath
+    : process.platform === "win32"
+      ? "pnpm.cmd"
+      : "pnpm";
+  const command = packageManager
+    ? [packageManager, "exec", "tauri", "android", ...args]
+    : ["exec", "tauri", "android", ...args];
+  const result = spawnSync(executable, command, {
     cwd: repositoryRoot,
     env: environment.environment,
     stdio: "inherit",

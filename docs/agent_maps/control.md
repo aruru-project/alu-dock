@@ -2,7 +2,7 @@
 
 ## 这部分负责什么
 
-Protocol V2 是 Dock 对 Hub、Work、Rails/WebUI 和未来客户端的统一协议。Dock Host Service 通过它提供实例管理和 Agent 会话访问。
+Protocol V2 是 Dock 对官方 Desktop/Android Client、Hub、Work、Rails/WebUI 和其他自定义 Client 的统一协议。Dock Host Service 通过它提供实例管理和 Agent 会话访问。
 
 ```text
 Client

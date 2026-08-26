@@ -267,7 +267,7 @@ scheduler terminal admission
 
 ## 实施边界
 
-- Protocol V2、DockClient 和现有第三方客户端 shape 不变；classification metadata 只在 Host 内部。
+- Protocol V2、DockClient、官方 Client 和现有自定义 Client shape 不变；classification metadata 只在 Host 内部。
 - 新实现可以在独立文件中建立，但接入时每项 authority 只有一条 live path。不得长期保留旧/新双轨 scheduler、directory 或 route decision。
 - 迁移按可独立回退的提交推进；每迁移一项旧 boundary，即删除对应 flag、特判或无调用方代码。
 - 当前实现只作为外部行为、真实竞态和平台限制的证据，不作为新职责边界的定义。

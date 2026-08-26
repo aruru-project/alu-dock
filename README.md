@@ -1,62 +1,72 @@
 # Alu Dock
 
-Alu Dock 是本机单用户的 Agent 运行与控制主体。长期 Host Service 持有工作实例和 Worker 生命周期，SSH TUI、Rails/WebUI 以及未来客户端通过统一的 Protocol V2 连接。客户端退出后，Agent 工作可以继续运行，之后再重新接入。
+Alu Dock 是本机单用户的 Agent 运行与控制主体。长期 Host Service 持有 Work 与 Worker 生命周期；官方 Desktop/Android Client、Hub/Work TUI 和自定义 Client 都通过 Protocol V2 进入同一份工作。客户端离开后，Agent 继续运行，之后可以从任一入口重新接入。
 
-当前唯一 Agent 实现是 Pi。Pi runtime 在每个 active instance 自己的 OS Worker 中运行；未来可以通过新的 Worker adapter 接入其他 Agent。
+当前唯一 Agent 实现是 Pi。Pi runtime 在每个 active Work 自己的 OS Worker 中运行；未来可以通过新的 Worker adapter 接入其他 Agent。
 
 ```text
-Hub / Work / Web / future clients
-               │
-          Protocol V2
-               │
-       Dock Host Service
-               │
-          Agent Worker
-               │
-       Pi / future Agent
+Official Desktop/Android / Hub TUI / Work TUI / custom clients
+                              │
+                         Protocol V2
+                              │
+                       Dock Host Service
+                              │
+                    private Worker transport
+                              │
+                         Agent Worker
+                              │
+                     Pi / future Agent runtime
 ```
-
-## 客户端接入
-
-开发桌面、Android、TUI 或 Web backend 客户端时，请从 [`docs/client-integration.md`](docs/client-integration.md) 开始。该文档集中说明 Protocol V2 的本地 IPC、远程 mTLS、hello、request/response、read/follow、operation 与各类传输流程，并继续指向需要核对的精确 wire 定义；客户端开发者不需要扫描 Host、Worker 或 TUI 实现来寻找接入方式。
 
 ## 当前能力
 
-- 长期 Host 与 durable instance catalog；
-- instance 创建前的工作目录浏览，以及继续、打开、停止、reopen、adopt、forget；
+- 长期 Host 与 durable Work catalog；
 - 多个相互隔离的 Agent Worker；
-- 通过随包 Pi 查看 models、配置 API key/OAuth、安装 Pi packages，无需系统 Pi；
-- Session Work TUI 的 conversation、tools、Queue、model、settings、tree、compaction 和 Extension UI；
-- Protocol V2 的权威读取、实时跟随、断线恢复和操作去重；
-- 本机 Protocol V2 接口：POSIX Unix socket 与 Windows Named Pipe；
-- 默认 Main 角色，以及在 Machines 实时开关、配置和配对的 SubHost connections；
-- 明确的 SubHost 角色，只连接 Main并显示连接状态，不接受客户端；
-- 默认关闭、由本机 Hub 配置和配对的 mutual-TLS 网络入口；
-- 本地 IPC 与 mTLS 共用的永久、hash-verified attachment upload 和 Agent 文件工具；
-- Linux `systemd --user` 与 Windows 用户 session Host 窗口共享的安装、更新和 ready 语义。
+- Work 创建、继续、停止、reopen、adopt、forget 与项目目录浏览；
+- conversation、Queue、model、thinking、tools、settings、Session Tree、compaction 和 Extension UI；
+- Protocol V2 的权威读取、实时跟随、断线恢复和 mutation identity；
+- POSIX Unix socket、Windows Named Pipe 与可选的配对后 mTLS 入口；
+- Main/SubHost 的多机器 Work 管理；
+- 永久附件、对话图片、临时交付文件和 workspace 浏览；
+- bundled Pi 的 models、登录、packages、extensions 与原生 Session；
+- Linux `systemd --user` 与 Windows 用户 session Host 生命周期；
+- 官方 Vue/Rust/Tauri Desktop 与 Android Client。
+
+## 仓库结构
+
+```text
+src/                       Host、Worker、TUI 与 Protocol V2
+test/                      Dock 测试与 Pi SDK upgrade gate
+clients/official/          官方 Vue/Rust/Tauri Desktop/Android Client
+docs/                      产品接入、架构、QA 与部署文档
+scripts/                    Dock 构建、安装和开发入口
+```
+
+根目录继续是 Dock 的 Node package。官方 Client 保留自己的 pnpm、Cargo workspace 和 lockfile；同仓不要求把 Node、Rust、Vue 或 Tauri 合并成一个进程或依赖管理器。
 
 ## 快速开始
 
 要求 Node.js `>=22.19.0`。
 
 ```bash
+npm install
 npm run install:local
 aludock service status
 
-aludock                       # Dock Hub；New 可先浏览并确认工作目录
-aludock -c                    # 继续当前项目；没有则 New
+aludock                       # Dock Hub
+aludock -c                    # 继续当前项目
 aludock new --cwd "$PWD" --name demo
 aludock attach TARGET
 aludock list
 ```
 
-离开 Hub 或 detach Work 不会停止 instance。需要结束 Agent runtime 时显式执行：
+离开界面不会停止 Work。需要结束 Agent runtime 时显式执行：
 
 ```bash
 aludock stop TARGET
 ```
 
-安装后的 Host 只由显式命令管理；Linux 使用 user service，Windows 使用长期 Host 窗口：
+安装后的 Host 使用同一组 service 命令管理：
 
 ```bash
 aludock service start
@@ -66,11 +76,37 @@ aludock service status
 aludock service logs --lines 200
 ```
 
-`forget` 和 `prune` 只删除 Dock catalog record，不删除 Agent session 文件。
+`forget` 和 `prune` 只删除 Dock catalog record，不删除 Agent Session 文件。
+
+## 官方 Desktop/Android Client
+
+安装并验证 Client：
+
+```bash
+npm run client:install
+npm run client:test
+npm run client:build
+```
+
+浏览器设计预览：
+
+```bash
+npm run client:dev
+```
+
+浏览器预览不具备 Tauri native bridge，不能证明本机 socket 或原生文件能力。Desktop 的真实本机入口使用 Unix socket 或 Windows Named Pipe，连接同一 Host 且不要求设备配对。
+
+在 x86_64 Linux 生成可交付 ZIP：
+
+```bash
+npm run client:package:linux
+```
+
+产物位于 `clients/official/dist/AluDock-<version>-linux-x86_64.zip`。Android 环境、构建和本机签名入口见 [`clients/official/README.md`](clients/official/README.md)。
 
 ## Pi 配置、登录与扩展
 
-Hub 的 **Settings → Pi** 直接显示 bundled Pi 当前识别的 Providers/models，并调用 Pi 自己的 API-key 与 OAuth 登录/退出流程。Pi 仍唯一拥有 `~/.pi/agent/settings.json`、`models.json`、`auth.json`、packages 和 `sessions/`；Alu Dock 不复制凭据、不创建 Profile 或另一份 Session 历史。Main 与 SubHost 各自管理本机 Pi 环境，本功能不在机器之间传输配置或 OAuth token。
+Hub 的 **Settings → Pi** 直接显示 bundled Pi 当前识别的 Providers/models，并调用 Pi 自己的 API-key 与 OAuth 登录流程。Pi 仍唯一拥有 `~/.pi/agent/settings.json`、`models.json`、`auth.json`、packages 和 `sessions/`；Alu Dock 不复制凭据、不创建另一份 Session 历史。
 
 安装 Pi package 不需要系统 Pi：
 
@@ -78,39 +114,21 @@ Hub 的 **Settings → Pi** 直接显示 bundled Pi 当前识别的 Providers/mo
 aludock pi:install <source>
 ```
 
-`source` 使用 Pi 原生 npm/git/local package conventions。现有 Work 用 `/reload` 采用配置或 extension 变化。Pi Worker 中同样可以运行该命令，launcher 会固定使用 Alu Dock 随包版本。
+现有 Work 使用 `/reload` 采用配置或 extension 变化。
 
-## 远程访问
+## 本机与远程连接
 
-本机运行 `aludock` 后：
+Linux Main 的默认本机 Protocol V2 endpoint 是 `${XDG_RUNTIME_DIR}/alu-dock/dock.sock`；没有 `XDG_RUNTIME_DIR` 时使用 `~/.alu-dock/run/dock.sock`。Windows 使用 `\\.\pipe\alu-dock`。本机入口不使用 TLS 或配对。
 
-1. 进入 **Devices**，选择端口并打开 Remote Access；
-2. 选择 **Connect a New Device**，在本机确认五分钟连接窗口；
-3. 从远程客户端发起配对；Devices 会自动显示请求；
-4. 选择设备并输入客户端屏幕显示的四位 PIN，Enter 即提交；
-5. 成功后客户端使用双方长期证书连接同一套 Protocol V2，设备留在 Devices 中供查看或移除。
+远程访问默认关闭。在本机 Hub 的 **Devices** 中打开 Remote Access 和一次五分钟连接窗口，再由远程 Client 发起配对。用户核对四位 PIN 后，双方长期使用精确证书身份连接同一套 Protocol V2。网络地址只负责找到 Host，不代替设备身份。
 
-私有本地 IPC（POSIX Unix socket / Windows Named Pipe）不使用 TLS 或配对。网络地址和端口不是设备身份；同一客户端和 Host 保留原证书时，切换局域网地址、域名或 NAT 映射不要求重新配对。Devices 中的远程开关、连接窗口和设备移除只能在 Host 本机 Hub 操作，远程 Protocol V2 客户端不能调用。
+## 文件与 Agent-facing Dock tools
 
-## 文件附件
+Hub **Settings → Attachment directory** 配置 Host 的永久附件目录。本机和已配对 Client 都通过 `attachments.v1` 上传；Client 只收到 opaque `fileId` 和 path-free metadata。图片附件同时保留永久附件身份并成为 Agent 原生图片输入。
 
-Hub **Settings → Attachment directory** 配置 Host 上的永久 storage root；默认是 `${XDG_DATA_HOME:-~/.local/share}/alu-dock/attachments`。本机和已配对客户端都通过 `attachments.v1` 分块上传，最大 512 MiB，声明 size/SHA-256 后由 Host 独立验证并按内容复用。客户端只收到 opaque `fileId`、名称、大小、可选 media type、digest 和存储时间，永远不收到 Host path。聊天消息中的 `image/*` attachment 会在保留永久附件身份的同时自动成为 Agent 原生图片输入；模型能力由 Agent runtime 处理，图片 block 以 `fileId` 关联原附件。
+每个 Pi Work 可用 `/dock-tools on|off|status` 单独控制跨 Work 工具，默认关闭。开启后可以列出、检查、等待、创建和发送给同一 Dock 中的其他 Work，也可以登记临时交付文件。目标 Work 中读到的内容始终是不可信数据，不是用户指令。
 
-`command.submit` 用 structured file IDs 关联附件；Queue、live conversation 和 history 显示同一 metadata。Pi 通过内建 `dock_attachment_list` / `dock_attachment_resolve` 工具按需访问，并在修改或解压前先复制永久原件。详细 wire contract 见[客户端接入文档](docs/client-integration.md#附件)。
-
-## Agent-facing Dock tools
-
-每个 Pi instance 可用 `/dock-tools on|off|status` 单独控制跨实例工具，默认关闭且新实例不继承。开启后提供 `dock_list`、`dock_inspect`、`dock_watch`、`dock_cancel_watch`、`dock_deliver_file`、`dock_create`、`dock_send` 和对应 bundled Skill。`dock_list` 只列短状态；conversation 由 target 必填的 inspect 按需读取。`dock_send` 走普通 Queue/`command.submit`，目标会看到明确的来源 instance 包装，不会把消息伪装成主人输入。
-
-`dock_deliver_file({path})` 把当前 instance 的一个绝对路径登记为临时交付，不复制、上传或持久化文件。客户端通过 `instance.deliverables.v1` 列表和专用下载流取得最多 100 MiB 的任意普通文件，并在 terminal frame 上独立核对字节数和 SHA-256。登记跨 Pi session reload/replacement 保留，但 source 改写/删除、instance stop 或 Host restart 后不可用；没有 delete、TTL、claim 或管理界面。`show_image` 仍是独立的 session-scoped inline 图片能力。
-
-## 从源码运行
-
-安装依赖：
-
-```bash
-npm install
-```
+## 从源码运行 Dock
 
 开发 Host 和 CLI 使用同一个 dev socket：
 
@@ -130,11 +148,12 @@ npm run cli
 
 ## 文档
 
+- 产品目标：[`STORY.md`](STORY.md)
 - 工程入口：[`AGENTS.md`](AGENTS.md)
+- Client 接入：[`docs/client-integration.md`](docs/client-integration.md)
 - Host 与 Protocol V2：[`docs/agent_maps/control.md`](docs/agent_maps/control.md)
 - Agent Worker 与 runtime：[`docs/agent_maps/runtime.md`](docs/agent_maps/runtime.md)
 - Hub 与 Work TUI：[`docs/agent_maps/tui.md`](docs/agent_maps/tui.md)
-- 部署：[`docs/agent_maps/deployment.md`](docs/agent_maps/deployment.md)
-- 客户端接入：[`docs/client-integration.md`](docs/client-integration.md)
-- 测试：[`docs/qa.md`](docs/qa.md)
+- 官方 Client：[`clients/official/README.md`](clients/official/README.md)
+- 测试与验证：[`docs/qa.md`](docs/qa.md)
 - 本地安装：[`docs/local-install.md`](docs/local-install.md)

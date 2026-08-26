@@ -1,6 +1,6 @@
 # Client 接入 Protocol V2
 
-本文说明客户端怎样接入 Alu Dock。这里的客户端不特指 Web：它可以是 TUI、Web backend、桌面程序或已配对的远程客户端。只要遵守 Protocol V2，它们使用的是同一套 instance、conversation、event 和 operation 语义。
+本文说明客户端怎样接入 Alu Dock。这里包括仓库内的官方 Desktop/Android Client、TUI、Web backend 和其他自定义 Client；只要遵守 Protocol V2，它们使用的就是同一套 instance、conversation、event 和 operation 语义。官方 Client 的实现位于 [`clients/official/`](../clients/official/)，不会因同仓而获得另一套业务接口。
 
 浏览器不能直接连接 Dock。Web 应用需要由本机后端代为连接：
 
@@ -62,7 +62,7 @@ local client ── Unix socket / Named Pipe ─┐
 paired client ── mutual TLS port ─────────┘
 ```
 
-当前 TypeScript `DockClient` 负责本机 Unix socket 或 Windows Named Pipe。独立的 Android、Web backend 或桌面客户端可以实现 TLS transport，但在证书 admission 之后必须复用本文其余部分定义的同一套 hello、capabilities、request、response、read/follow 和 operation 语义。不得把 Devices、Settings 或证书管理增加为 Protocol V2 request。
+根目录 TypeScript `DockClient` 与官方 Client 的 Rust core 都实现本机 Unix socket 或 Windows Named Pipe；官方 Android 和其他远程 Client 使用 TLS transport。无论 transport 和实现语言如何，证书 admission 之后都必须复用本文其余部分定义的同一套 hello、capabilities、request、response、read/follow 和 operation 语义。不得把 Devices、Settings 或证书管理增加为 Protocol V2 request。
 
 需要发现并连接本机 Main 的客户端，可以尝试以下默认本地 IPC endpoint：
 

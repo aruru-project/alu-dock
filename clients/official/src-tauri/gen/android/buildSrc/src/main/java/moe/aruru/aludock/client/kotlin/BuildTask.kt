@@ -16,6 +16,13 @@ open class BuildTask : DefaultTask() {
 
     @TaskAction
     fun assemble() {
+        val packageManager = System.getenv("npm_execpath")?.takeIf { it.isNotBlank() }
+        val node = System.getenv("npm_node_execpath")?.takeIf { it.isNotBlank() }
+        if (packageManager != null && node != null) {
+            runTauriCli(node, listOf(packageManager))
+            return
+        }
+
         val executable = """pnpm"""
         try {
             runTauriCli(executable)
@@ -44,11 +51,11 @@ open class BuildTask : DefaultTask() {
         }
     }
 
-    fun runTauriCli(executable: String) {
+    fun runTauriCli(executable: String, prefixArgs: List<String> = emptyList()) {
         val rootDirRel = rootDirRel ?: throw GradleException("rootDirRel cannot be null")
         val target = target ?: throw GradleException("target cannot be null")
         val release = release ?: throw GradleException("release cannot be null")
-        val args = listOf("tauri", "android", "android-studio-script")
+        val args = prefixArgs + listOf("tauri", "android", "android-studio-script")
 
         project.exec {
             workingDir(File(project.projectDir, rootDirRel))

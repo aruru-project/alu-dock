@@ -3,7 +3,7 @@
 > 状态：**非权威、可能过期**；当前实现已经越过本文最初的概念阶段。
 > 原始基线日期：2026-08-16
 > 最后澄清：2026-08-18
-> 权威顺序：`alu_dock/STORY.md` → Protocol V2 / Dock TUI 语义 → 当前 Rails Alu WebConsole 的 Worker UI 实现 → 本文。
+> 权威顺序：根 [`STORY.md`](../../STORY.md) → Protocol V2 / Dock TUI 语义 → 当前 Rails Alu WebConsole 的 Worker UI 实现 → 本文。
 > 若本文与上述实际项目冲突，必须忽略本文旧结论，不得据此恢复已删除的设计。
 
 ## 1. 文档目的
