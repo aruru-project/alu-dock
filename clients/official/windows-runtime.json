@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "target": "x86_64-pc-windows-msvc",
+  "node": {
+    "version": "22.21.0",
+    "npmVersion": "10.9.4",
+    "archive": "node-v22.21.0-win-x64.zip",
+    "sha256": "84d31df6571c3c7156707265bf51e2a021656fa1584bf6f4486b792dcde54d7d"
+  }
+}

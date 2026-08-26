@@ -96,7 +96,7 @@ function piInstallHelp(): string {
 
 function hostHelp(rest: readonly string[]): string {
   if (rest.length > 0) throw new Error("host help does not accept subtopics");
-  return `aludock host — run the installed Windows Host in this window\n\nUsage:\n  aludock host\n\nThe local installer starts this entry in its own Windows Host window and waits\nuntil it is ready. Use it directly after signing back in or restarting Windows.\nThe saved Main/SubHost role and connection settings are reused. Press Ctrl+C for\na normal shutdown. Source development continues to use npm run host:windows.\n`;
+  return `aludock host — run the Windows Host process\n\nUsage:\n  aludock host\n\nThis is the Host entry used by the Windows lifecycle manager. Day-to-day use\nstarts Alu Dock through the Desktop or 'aludock service start'. The saved\nMain/SubHost role and connection settings are reused.\n`;
 }
 
 function machineHelp(rest: readonly string[]): string {
@@ -146,7 +146,10 @@ function helpHelp(): string {
 
 function serviceHelp(rest: readonly string[]): string {
   if (rest.length === 0) {
-    return `aludock service — manage the installed Alu Dock Host\n\nUsage:\n  aludock service [status]\n  aludock service COMMAND [OPTIONS]\n\nCommands:\n  install     Install the service for this user\n  start       Start Alu Dock\n  stop        Stop Alu Dock\n  restart     Restart Alu Dock\n  status      Show whether Alu Dock is ready\n  logs        Show service logs\n  uninstall   Remove the Alu Dock service setup\n\nInstall or update the local package from the current working tree with:\n\n  npm run install:local\n\nFinish or stop active work before updating. The installer will ask you to use an\nexplicit replacement option if work is still active. Saved Pi sessions and\nproject files remain available after service commands.\n\nExplore:\n  aludock help service install\n  aludock service logs --help\n`;
+    const updateGuidance = process.platform === "win32"
+      ? "Install or update Windows with Setup.cmd from the complete Alu Dock package.\nSetup refuses to replace the Host while work is still active."
+      : "Install or update the local package from the current working tree with:\n\n  npm run install:local\n\nFinish or stop active work before updating. The installer will ask you to use an\nexplicit replacement option if work is still active.";
+    return `aludock service — manage the installed Alu Dock Host\n\nUsage:\n  aludock service [status]\n  aludock service COMMAND [OPTIONS]\n\nCommands:\n  install     Install the service for this user\n  start       Start Alu Dock\n  stop        Stop Alu Dock\n  restart     Restart Alu Dock\n  status      Show whether Alu Dock is ready\n  logs        Show service logs\n  uninstall   Remove the Alu Dock service setup\n\n${updateGuidance}\n\nSaved Pi sessions and project files remain available after service commands.\n\nExplore:\n  aludock help service install\n  aludock service logs --help\n`;
   }
   if (rest.length !== 1 || !SERVICE_TOPICS.has(rest[0] as string)) {
     throw new Error(`Unknown service help topic: ${rest.join(" ")}`);
@@ -157,13 +160,13 @@ function serviceHelp(rest: readonly string[]): string {
     case "start":
       return `aludock service start — start Alu Dock\n\nUsage:\n  aludock service start [--json]\n\nStarts the installed service and waits until Alu Dock is ready to open work.\n`;
     case "stop":
-      return `aludock service stop — stop Alu Dock\n\nUsage:\n  aludock service stop [--json]\n\nStops the background service. Current work may be interrupted. Run\n'aludock list' first and finish or stop important work.\n`;
+      return `aludock service stop — stop Alu Dock\n\nUsage:\n  aludock service stop [--json]\n\nStops Alu Dock after confirming that no work is responding, waiting, or\nfinishing. Finish or stop active work, then run the command again.\n`;
     case "restart":
       return `aludock service restart — restart Alu Dock\n\nUsage:\n  aludock service restart [--json]\n\nRestarts the background service and waits until it is ready. Current responses\nand waiting messages may be interrupted, so finish or stop important work first.\n`;
     case "status":
       return `aludock service status — check Alu Dock\n\nUsage:\n  aludock service status [--json]\n\nShows a short human result by default. Use --json only when a script needs the\nmachine-readable service record. It checks whether Alu Dock is installed,\nrunning, and ready. If it is stopped,\nrun 'aludock service start'. For startup problems, use 'aludock service logs'.\n`;
     case "logs":
-      return `aludock service logs — show Alu Dock service logs\n\nUsage:\n  aludock service logs [--lines N] [--follow]\n\nOptions:\n  --lines N, -n N   Read 1–10000 lines (default: 200)\n  --follow, -f      Follow new Linux service log entries\n\nOn Windows, logs stay visible in the Windows Host window.\n\nExamples:\n  aludock service logs --lines 100\n  aludock service logs --follow\n`;
+      return `aludock service logs — show Alu Dock service logs\n\nUsage:\n  aludock service logs [--lines N] [--follow]\n\nOptions:\n  --lines N, -n N   Read 1–10000 lines (default: 200)\n  --follow, -f      Follow new service log entries\n\nOn Windows, the same log remains available after the Desktop window closes.\n\nExamples:\n  aludock service logs --lines 100\n  aludock service logs --follow\n`;
     case "uninstall":
       return `aludock service uninstall — remove the Alu Dock service setup\n\nUsage:\n  aludock service uninstall [--json]\n\nRemoves the installed Host setup created by Alu Dock. Dock History and saved Pi\nsessions remain available for a later installation.\n`;
     default:

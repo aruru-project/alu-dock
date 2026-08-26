@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readFile, readlink, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, readlink, rename, rm, symlink } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -13,17 +13,16 @@ import {
   localInstallInspectionMayAssumeHostAbsent,
   localInstallLayout,
   parseLocalInstallArguments,
-  renderWindowsAluDockLauncher,
 } from "../src/deployment/local-install.js";
-import { MachineSettingsState, machineSettingsStateRoot } from "../src/control/machine-settings-state.js";
-import { defaultCatalogPath } from "../src/control/durable-catalog-store.js";
-import { readWindowsHostLifecycleStatus, requestWindowsHostStop } from "../src/deployment/windows-host-lifecycle.js";
 
 interface CommandResult { stdout: string; stderr: string }
 
 async function main(): Promise<void> {
   if (process.env.ALU_DOCK_MANAGED === "1") {
     throw new Error("Leave Work with Ctrl+D, then run `npm run install:local` from the shell.");
+  }
+  if (process.platform === "win32") {
+    throw new Error("Install or update Alu Dock on Windows with Setup.cmd from the Windows package.");
   }
 
   const options = parseLocalInstallArguments(process.argv.slice(2));
@@ -33,9 +32,7 @@ async function main(): Promise<void> {
   const home = resolve(homedir());
   const layout = localInstallLayout(home, undefined, {
     localAppData: process.env.LOCALAPPDATA,
-    appData: process.env.APPDATA,
   });
-  if (process.platform === "win32") await stopWindowsHostForInstall(options.replaceActive);
   const temporary = await mkdtemp(join(tmpdir(), "alu-dock-install-"));
   try {
     process.stdout.write("Packing Alu Dock…\n");
@@ -51,7 +48,7 @@ async function main(): Promise<void> {
     runNpm([
       "install", "--prefix", layout.root, "--omit=dev", "--no-audit", "--no-fund", "--ignore-scripts", "--force", tarball,
     ], projectRoot);
-    await installUserExecutable(layout.userExecutable, layout.packageExecutable, home, layout.root, layout.cliPath);
+    await installUserExecutable(layout.userExecutable, layout.packageExecutable, home, layout.root);
 
     await requireInstallAllowed(options.replaceActive);
     process.stdout.write("Starting the updated Alu Dock Host…\n");
@@ -83,26 +80,8 @@ async function requireInstallAllowed(replaceActive: boolean): Promise<void> {
   }
 }
 
-async function installUserExecutable(userExecutable: string, packageExecutable: string, home: string, installRoot: string, cliPath: string): Promise<void> {
+async function installUserExecutable(userExecutable: string, packageExecutable: string, home: string, installRoot: string): Promise<void> {
   await mkdir(dirname(userExecutable), { recursive: true, mode: 0o755 });
-  if (process.platform === "win32") {
-    const existing = await lstatIfPresent(userExecutable);
-    if (existing) {
-      if (!existing.isFile() || existing.isSymbolicLink() || !isAluDockGeneratedContent(await readFile(userExecutable, "utf8"))) {
-        throw new Error(`Refusing to replace user-owned launcher: ${userExecutable}`);
-      }
-    }
-    const temporary = `${userExecutable}.tmp-${process.pid}.cmd`;
-    await rm(temporary, { force: true });
-    try {
-      await writeFile(temporary, renderWindowsAluDockLauncher({ nodePath: process.execPath, cliPath }), { encoding: "utf8", flag: "wx" });
-      await rm(userExecutable, { force: true });
-      await rename(temporary, userExecutable);
-    } finally {
-      await rm(temporary, { force: true }).catch(() => {});
-    }
-    return;
-  }
   const existing = await lstatIfPresent(userExecutable);
   if (existing) {
     if (existing.isSymbolicLink()) {
@@ -128,83 +107,6 @@ async function installUserExecutable(userExecutable: string, packageExecutable: 
   } finally {
     await rm(temporary, { force: true }).catch(() => {});
   }
-}
-
-async function stopWindowsHostForInstall(replaceActive: boolean): Promise<void> {
-  const lifecycle = await readWindowsHostLifecycleStatus();
-  if (lifecycle) {
-    if (!replaceActive && lifecycle.blockingWork > 0) {
-      throw new Error(
-        `Update paused because ${lifecycle.blockingWork} local work item${lifecycle.blockingWork === 1 ? " still needs" : "s still need"} Alu Dock.\n`
-        + "Finish or stop that work before updating. To replace Alu Dock anyway, run:\n"
-        + "  npm run install:local -- --replace-active\n"
-        + "Replacing Alu Dock interrupts current responses, waiting messages, and tool actions in progress.",
-      );
-    }
-    await requestWindowsHostStop();
-    await waitForWindowsProcessExit(lifecycle.pid);
-    return;
-  }
-
-  let pid: number | undefined;
-  try {
-    pid = (await new DockClient({ socketPath: defaultSocketPath(), timeoutMs: 1_000 }).ping()).pid;
-    await requireInstallAllowed(replaceActive);
-  }
-  catch (error) {
-    if (!(error instanceof ControlClientError) || error.code !== "connection_error") throw error;
-  }
-  if (pid === undefined) {
-    const status = await new MachineSettingsState(machineSettingsStateRoot(defaultCatalogPath())).readSubHostStatus();
-    pid = status.processId;
-    if (pid !== undefined && !replaceActive) {
-      throw new Error(
-        "The update found an older SubHost but cannot confirm whether its local work is finished. Finish or stop important work, then replace it explicitly:\n"
-        + "  npm run install:local -- --replace-active",
-      );
-    }
-  }
-  if (pid === undefined) return;
-  sendWindowsConsoleCtrlC(pid);
-  await waitForWindowsProcessExit(pid);
-}
-
-function sendWindowsConsoleCtrlC(pid: number): void {
-  const source = [
-    "using System;",
-    "using System.Runtime.InteropServices;",
-    "public static class AluDockConsoleControl {",
-    "  [DllImport(\"kernel32.dll\", SetLastError=true)] public static extern bool AttachConsole(uint pid);",
-    "  [DllImport(\"kernel32.dll\", SetLastError=true)] public static extern bool FreeConsole();",
-    "  [DllImport(\"kernel32.dll\", SetLastError=true)] public static extern bool GenerateConsoleCtrlEvent(uint evt, uint group);",
-    "  [DllImport(\"kernel32.dll\")] public static extern bool SetConsoleCtrlHandler(IntPtr handler, bool add);",
-    "}",
-  ].join("\n");
-  const encodedSource = Buffer.from(source, "utf8").toString("base64");
-  const script = [
-    `$source = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('${encodedSource}'))`,
-    "Add-Type -TypeDefinition $source",
-    "[AluDockConsoleControl]::SetConsoleCtrlHandler([IntPtr]::Zero, $true) | Out-Null",
-    "[AluDockConsoleControl]::FreeConsole() | Out-Null",
-    `if (-not [AluDockConsoleControl]::AttachConsole(${pid})) { exit 2 }`,
-    "try { if (-not [AluDockConsoleControl]::GenerateConsoleCtrlEvent(0, 0)) { exit 3 }; Start-Sleep -Milliseconds 300 } finally { [AluDockConsoleControl]::FreeConsole() | Out-Null }",
-  ].join("\r\n");
-  const encoded = Buffer.from(script, "utf16le").toString("base64");
-  run("powershell.exe", ["-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded], process.cwd());
-}
-
-async function waitForWindowsProcessExit(pid: number): Promise<void> {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    if (!processAlive(pid)) return;
-    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-  }
-  throw new Error("Alu Dock did not stop. Return to the Windows Host window, press Ctrl+C, then run the installer again.");
-}
-
-function processAlive(pid: number): boolean {
-  try { process.kill(pid, 0); return true; }
-  catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
 }
 
 function parseServiceStatus(output: string): void {

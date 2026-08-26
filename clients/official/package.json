@@ -11,6 +11,7 @@
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri",
     "package:linux": "node scripts/package-linux.mjs",
+    "package:windows": "node scripts/package-windows.mjs",
     "android": "node scripts/android.mjs"
   },
   "dependencies": {

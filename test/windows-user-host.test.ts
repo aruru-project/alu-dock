@@ -19,7 +19,9 @@ test("Windows Host lifecycle reports readiness and requests a normal stop over i
   try {
     await server.start();
     assert.deepEqual(await readWindowsHostLifecycleStatus(1_000, endpoint), { ready: false, pid: process.pid, blockingWork: 0 });
-    server.markReady("fixture-epoch", "subhost", () => 2);
+    let blockingWork = 2;
+    let beganStopping = 0;
+    server.markReady("fixture-epoch", "subhost", () => blockingWork, () => { beganStopping += 1; });
     assert.deepEqual(await readWindowsHostLifecycleStatus(1_000, endpoint), {
       ready: true,
       pid: process.pid,
@@ -27,8 +29,13 @@ test("Windows Host lifecycle reports readiness and requests a normal stop over i
       role: "subhost",
       blockingWork: 2,
     });
+    assert.equal((await requestWindowsHostStop(1_000, endpoint))?.stopAccepted, false);
+    assert.equal(beganStopping, 0);
+
+    blockingWork = 0;
     const stopping = server.waitForStop();
-    assert.equal((await requestWindowsHostStop(1_000, endpoint))?.ready, true);
+    assert.equal((await requestWindowsHostStop(1_000, endpoint))?.stopAccepted, true);
+    assert.equal(beganStopping, 1);
     await stopping;
   } finally {
     await server.stop();
@@ -39,7 +46,7 @@ test("Windows Host lifecycle reports readiness and requests a normal stop over i
 test("Windows local Host install replaces the running Host and returns only after the new one is ready", async () => {
   const root = await mkdtemp(join(tmpdir(), "alu-windows-host-manager-"));
   try {
-    const cliPath = join(root, "cli.js"), setupPath = join(root, ".windows-host");
+    const cliPath = join(root, "cli.js"), setupPath = join(root, ".windows-host"), logPath = join(root, "logs", "host.log");
     await mkdir(root, { recursive: true });
     await writeFile(cliPath, "// fixture\n", "utf8");
     let current: WindowsHostLifecycleStatus | undefined = { ready: true, pid: 41, hostEpoch: "old-epoch", role: "main", blockingWork: 0 };
@@ -48,8 +55,16 @@ test("Windows local Host install replaces the running Host and returns only afte
       nodePath: "C:\\Program Files\\nodejs\\node.exe",
       cliPath,
       setupPath,
+      logPath,
       readStatus: async () => current,
-      requestStop: async () => { stops += 1; const previous = current; current = undefined; return previous; },
+      requestStop: async () => {
+        stops += 1;
+        const previous = current;
+        if (!previous) return undefined;
+        if (previous.blockingWork > 0) return { ...previous, stopAccepted: false };
+        current = undefined;
+        return { ...previous, stopAccepted: true };
+      },
       launch: async () => { launches += 1; current = { ready: true, pid: 42 + launches, hostEpoch: `new-epoch-${launches}`, role: "main", blockingWork: 0 }; },
       sleep: async () => {},
     });
@@ -65,10 +80,17 @@ test("Windows local Host install replaces the running Host and returns only afte
     assert.equal(launches, 2);
     assert.equal(restarted.hostEpoch, "new-epoch-2");
 
+    current = { ready: true, pid: 99, hostEpoch: "busy-epoch", role: "main", blockingWork: 1 };
+    await assert.rejects(manager.stop(), /1 work item is still active/u);
+    assert.equal(stops, 3);
+    current.blockingWork = 0;
     const stopped = await manager.stop();
+    assert.equal(stops, 4);
     assert.equal(stopped.ready, false);
     assert.equal(stopped.activeState, "inactive");
-    assert.equal((await manager.status()).installed, true);
+    const status = await manager.status();
+    assert.equal(status.installed, true);
+    assert.equal(status.logsPath, logPath);
 
     const removed = await manager.uninstall();
     assert.equal(removed.removed, true);

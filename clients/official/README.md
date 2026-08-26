@@ -54,14 +54,26 @@ npm run client:package:linux
 
 ## Windows Desktop
 
-在原生 x86_64 Windows 开发机安装 Tauri 2 所需的 Microsoft C++ Build Tools 与 WebView2 后，使用与上文相同的入口：
+在原生 x86_64 Windows 开发机安装 Tauri 2 所需的 Microsoft C++ Build Tools、WebView2、Rust MSVC target 与 Corepack 后，从 monorepo 根目录生成统一验收包：
 
-```bash
+```powershell
+npm install
+npm run client:install
+npm run package:windows
+```
+
+产物位于 `dist/AluDock-<version>-windows-x86_64.zip`。组装脚本读取 [`windows-runtime.json`](windows-runtime.json) 固定 Node/npm release 与 checksum，构建 `x86_64-pc-windows-msvc` Desktop，安装 Dock production tree 与 bundled Pi，复制 DLL sidecars，并使用 `dumpbin.exe` 检查随包 PE 架构及依赖后才写 ZIP。也可通过 `ALUDOCK_WINDOWS_NODE_ARCHIVE` 指定已经下载的同一 checksum archive；它不会放宽固定版本。
+
+最终用户完整解压后运行一次 `Setup.cmd`；唯一安装目录是 `%LOCALAPPDATA%\Alu Dock\app`，日常入口是其中的 `AluDock.exe`，随包 TUI/CLI 是 `aludock.cmd`。Setup 和 Desktop 使用同一个 Dock lifecycle：Host 隐藏运行并把日志写到 `%LOCALAPPDATA%\Alu Dock\logs\host.log`；X 隐藏到托盘，**退出 Desktop** 不停止 Host，**停止 Alu Dock** 在 active Work 存在时拒绝。登录启动默认关闭，启用后用 `--background` 静默恢复 Host 和托盘。
+
+普通开发仍可运行：
+
+```powershell
 corepack pnpm tauri dev
 corepack pnpm tauri build --no-bundle --ci
 ```
 
-当前产物是 `src-tauri/target/release/aludock-client-app.exe` 的 Client-only native build；仓库尚无 `package:windows`，它也不是统一的 Host+Client 安装包。交付前必须按 [`AGENTS.md`](AGENTS.md) 检查 DLL sidecars、目标架构，并在 Windows 上完成启动 smoke；Linux cross-build 只能作为编译证据。
+这些是源码调试/Client build，不是第二套安装形态。Linux cross-check 可以证明 Windows Rust 分支可编译，但不能替代 [`AGENTS.md`](AGENTS.md) 要求的原生 DLL、隐藏窗口、tray、login startup、bundled Node/npm/Pi 与完整启动 smoke。当前验收包不签名、不发布、不自动更新。
 
 ## Android
 

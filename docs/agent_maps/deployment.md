@@ -2,10 +2,10 @@
 
 ## 这部分负责什么
 
-Linux 安装形态使用长期 `systemd --user` Host Service；Windows 安装形态在当前用户 session 的独立 PowerShell 窗口中运行同一个长期 Host，并由私有本机 lifecycle pipe 完成 install/update 所需的正常停止、启动和 ready 确认。它不创建 Windows Service、Scheduled Task 或开机启动。两个平台的 `install:local` 都从当前 checkout build、安装、替换 Host，并等待 ready；平台差异只属于生命周期适配。每个 active instance 的 Agent runtime 运行在独立 Worker 进程中。
+Linux 安装形态使用长期 `systemd --user` Host Service。Windows 官方发行包使用随包 Node 在当前用户 session 中启动隐藏、detached 的同一个 Host；Tauri Desktop 只负责窗口、托盘、单实例与可选登录启动，私有 lifecycle pipe 仍是 CLI、Desktop 与一次性 `Setup.cmd` 共用的唯一 start/stop/ready authority。Windows 不创建 Windows Service 或 Scheduled Task，也不依赖长期 PowerShell/cmd 窗口。`install:local` 只服务 Linux checkout 安装；Windows 安装和更新只走官方 ZIP 的 `Setup.cmd`。每个 active instance 的 Agent runtime 仍运行在独立 Worker 进程中。
 
 ```text
-systemd --user / Windows user-session Host window
+systemd --user / hidden Windows user-session Host
       │
 Dock Host Service
       ├── private local IPC (Unix socket / Windows Named Pipe)
@@ -29,7 +29,7 @@ Startup 不自动恢复或重放旧 prompt、Queue、interaction、Promise 或 t
 
 Durable catalog 在 POSIX 保持既有 owner/mode 与 same-directory fsync/rename 规则。Windows Host 在首次准备 catalog 目录时建立只含当前用户与 SYSTEM 的可继承私有 DACL；启动读取时额外收紧可能来自旧版本的既有 catalog。后续 atomic replacement 从该目录创建同目录临时文件并继承相同 DACL，不在每次 catalog transition 重复启动 `icacls.exe`。
 
-Host unit 只定义 service 自己的固定 Node、CLI、HOME、最小 PATH 和 managed runtime 变量。安装器不得把执行安装时的 PATH、RVM/NVM 选择、npm lifecycle 环境或 Extension 凭据复制进 unit；这些既不是 Host 配置，也不能成为所有 Worker 的全局开发环境。
+Linux Host unit 只定义 service 自己的固定 Node、CLI、HOME、最小 PATH 和 managed runtime 变量。Windows Host 由发行目录中的固定 `runtime/node.exe` 与 `dock/dist/src/cli.js` 启动，并把 stdout/stderr 追加到 `%LOCALAPPDATA%\Alu Dock\logs\host.log`。两边都不得把执行安装时的 PATH、RVM/NVM 选择、npm lifecycle 环境或 Extension 凭据复制成 Host 配置；这些也不能成为所有 Worker 的全局开发环境。
 
 ## 网络入口与配对窗口
 
@@ -104,19 +104,21 @@ aludock service logs [--lines N] [--follow]
 aludock service uninstall
 ```
 
-## 本地安装
+## 本地安装与 Windows 发行
 
-本地安装更新 `~/.local/share/alu-dock` 中的包、launcher 和 user service。安装与测试是两件事；安装器不替代测试。
+Linux 本地安装更新 `~/.local/share/alu-dock` 中的包、launcher 和 user service。Windows x64 发行由 `package:windows` 固定组装 `AluDock.exe`、Node/npm、Dock、bundled Pi、DLL sidecars、`aludock.cmd` 与一次性 `Setup.cmd`；Setup 把唯一安装目录切换到 `%LOCALAPPDATA%\Alu Dock\app`，不调用系统 Node/npm/Pi，也不保留 checkout installer 或旧 PowerShell launcher 作为第二条稳态路径。安装与测试是两件事；安装器和包组装 gate 不替代真实 Windows 验收。
 
-存在未完成 run、Queue、interaction 或 stopping instance 时，安装默认拒绝。显式替换 active Host 会中断这些工作，也不会迁移或重放内存状态。
+存在未完成 run、Queue、interaction 或 stopping instance 时，Linux 更新和 Windows stop/update 默认拒绝。Windows Desktop 的 X 只隐藏窗口，`Exit Desktop` 只退出 GUI，只有独立的 `Stop Alu Dock` 会请求 Host 正常停止；关闭或更新 GUI 不停止 Host 或 Work。
 
 未经用户明确授权，不执行安装、service restart 或真实模型调用。
 
 ## 代码范围
 
 - `src/deployment/`：安装布局和 user service 管理。
-- `scripts/install-local.ts`：跨平台本地打包、更新与 ready 验证入口。
-- `src/deployment/windows-host-lifecycle.ts`、`windows-user-host.ts`：Windows 用户 session Host 的私有生命周期与可见窗口适配；不承载 Dock 客户端协议。
+- `scripts/install-local.ts`：Linux checkout 本地打包、更新与 ready 验证入口。
+- `clients/official/scripts/package-windows.mjs`、`windows-runtime.json`：Windows x64 固定 runtime、统一发行目录、架构/DLL 检查与 ZIP 组装。
+- `src/deployment/windows-host-lifecycle.ts`、`windows-user-host.ts`：Windows 用户 session 隐藏 Host、持久日志与私有生命周期；不承载 Dock 客户端协议。
+- `clients/official/src-tauri/src/desktop_shell.rs`：Windows Desktop bootstrap、tray、single-instance 与 login startup；不复制 Host/Worker/Catalog 语义。
 - `src/control/dock-host.ts`：Host socket 与 shutdown。
 - `src/control/durable-catalog-store.ts`：durable catalog。
 - `src/control/attachment-storage-state.ts`、`attachment-service.ts`：Host-private directory setting 与 permanent attachment store。

@@ -12,6 +12,7 @@ import type {
   ConversationHistoryPage,
   DeliverableDto,
   DeliverableSaveResult,
+  DesktopShellStatus,
   EndpointTestResult,
   ExtensionControllerBinding,
   HostCatalog,
@@ -87,6 +88,28 @@ export async function beginWindowsAway(runningInstanceIds: string[]): Promise<st
 
 export async function cancelWindowsAway(awayId?: string | null): Promise<boolean> {
   return isTauri ? invoke<boolean>('cancel_windows_away', { awayId: awayId ?? null }) : false
+}
+
+const previewDesktopShell: DesktopShellStatus = {
+  supported: false,
+  hostReady: false,
+  loginStartEnabled: false,
+}
+
+export async function getDesktopShellStatus(): Promise<DesktopShellStatus> {
+  return isTauri ? invoke<DesktopShellStatus>('desktop_shell_status') : { ...previewDesktopShell }
+}
+
+export async function startDesktopHost(): Promise<DesktopShellStatus> {
+  return isTauri ? invoke<DesktopShellStatus>('start_desktop_host') : { ...previewDesktopShell }
+}
+
+export async function openDesktopHostLog(): Promise<void> {
+  if (isTauri) await invoke('open_desktop_host_log')
+}
+
+export async function openDesktopTui(): Promise<void> {
+  if (isTauri) await invoke('open_desktop_tui')
 }
 
 export async function getHostCatalog(): Promise<HostCatalog> {

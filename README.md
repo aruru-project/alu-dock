@@ -44,9 +44,9 @@ scripts/                    Dock 构建、安装和开发入口
 
 根目录继续是 Dock 的 Node package。官方 Client 保留自己的 pnpm、Cargo workspace 和 lockfile；同仓不要求把 Node、Rust、Vue 或 Tauri 合并成一个进程或依赖管理器。
 
-## 快速开始
+## Linux 快速开始
 
-要求 Node.js `>=22.19.0`。
+从源码安装要求 Node.js `>=22.19.0`。Windows 日常安装使用下文的官方发行包，不运行 `install:local`。
 
 ```bash
 npm install
@@ -98,13 +98,14 @@ npm run client:dev
 
 浏览器预览不具备 Tauri native bridge，不能证明本机 socket 或原生文件能力。Desktop 的真实本机入口使用 Unix socket 或 Windows Named Pipe，连接同一 Host 且不要求设备配对。
 
-在 x86_64 Linux 生成可交付 ZIP：
+生成可交付 Desktop ZIP：
 
 ```bash
-npm run client:package:linux
+npm run client:package:linux   # x86_64 Linux
+npm run package:windows        # 在原生 x86_64 Windows Developer terminal
 ```
 
-产物位于 `clients/official/dist/AluDock-<version>-linux-x86_64.zip`。Android 环境、构建和本机签名入口见 [`clients/official/README.md`](clients/official/README.md)。
+产物位于 `clients/official/dist/AluDock-<version>-<platform>-x86_64.zip`。Windows 包固定携带 Node/npm、Dock 与 bundled Pi；完整解压后运行一次 `Setup.cmd`，之后日常入口是 `%LOCALAPPDATA%\Alu Dock\app\AluDock.exe`。Android 环境、Windows 安装/验收和本机签名入口见 [`clients/official/README.md`](clients/official/README.md)。
 
 ## Pi 配置、登录与扩展
 

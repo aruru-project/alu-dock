@@ -1,5 +1,6 @@
 #[cfg(target_os = "android")]
 mod android_documents;
+mod desktop_shell;
 
 #[cfg(any(target_os = "windows", test))]
 use std::time::Duration;
@@ -1150,7 +1151,7 @@ impl RuntimeLifecycle {
 }
 
 impl ConnectionRuntimeState {
-    fn open(application_data_dir: Option<PathBuf>) -> Result<Self, ClientError> {
+    fn open(application_data_dir: Option<PathBuf>, prefer_local: bool) -> Result<Self, ClientError> {
         let registry = if let Some(path) = std::env::var_os("ALUDOCK_CLIENT_IDENTITY_DIR") {
             HostRegistry::open(PathBuf::from(path))?
         } else if let Some(path) = application_data_dir {
@@ -1160,7 +1161,10 @@ impl ConnectionRuntimeState {
         };
         let preferences = ClientPreferencesStore::open(registry.root().join("client-preferences"))?;
         let local_identity = IdentityStore::new(registry.root().join("local-client-identity"));
-        let snapshot = registry.snapshot()?;
+        let mut snapshot = registry.snapshot()?;
+        if prefer_local && snapshot.active_host_id.is_none() && !snapshot.local_selected && snapshot.hosts.is_empty() {
+            snapshot = registry.select_local(snapshot.revision)?;
+        }
         let active_target = if snapshot.local_selected {
             Some(ConnectionTarget::Local)
         } else {
@@ -7638,6 +7642,17 @@ fn parse_trust_decision(value: &str) -> Result<ProjectTrustDecision, CommandErro
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let builder = tauri::Builder::default().manage(AwayMonitorState::default());
+    #[cfg(target_os = "windows")]
+    let builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+        if args.iter().any(|argument| argument == "--background") {
+            return;
+        }
+        if let Some(window) = app.get_webview_window("main") {
+            let _ = window.unminimize();
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }));
     #[cfg(target_os = "android")]
     let builder = builder.plugin(android_documents::init());
     let builder = builder
@@ -7647,7 +7662,9 @@ pub fn run() {
     #[cfg(target_os = "windows")]
     let builder = builder
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::Builder::new().args(["--background"]).build())
         .on_window_event(|window, event| {
+            desktop_shell::handle_window_event(window, event);
             if window.label() == "main"
                 && let tauri::WindowEvent::Focused(focused) = event
             {
@@ -7665,10 +7682,14 @@ pub fn run() {
             let application_data_dir = Some(app.path().app_local_data_dir()?);
             #[cfg(not(mobile))]
             let application_data_dir = None;
-            app.manage(ConnectionRuntimeState::open(application_data_dir)?);
+            let desktop_shell = desktop_shell::DesktopShellState::initialize(app);
+            let prefer_local = desktop_shell.prefer_local_connection();
+            app.manage(desktop_shell);
+            app.manage(ConnectionRuntimeState::open(application_data_dir, prefer_local)?);
             app.manage(WorkspaceFileState::open(
                 app.path().app_cache_dir()?.join("workspace-preview"),
             )?);
+            desktop_shell::finish_setup(app)?;
             Ok(())
         })
         .manage(FollowState::default())
@@ -7680,6 +7701,10 @@ pub fn run() {
         .manage(CommandReferenceState::default())
         .invoke_handler(tauri::generate_handler![
             system_device_name,
+            desktop_shell::desktop_shell_status,
+            desktop_shell::start_desktop_host,
+            desktop_shell::open_desktop_host_log,
+            desktop_shell::open_desktop_tui,
             get_client_preferences,
             update_client_preferences,
             begin_windows_away,
@@ -8040,6 +8065,29 @@ mod tests {
 
         assert!(second.router().snapshot().closed);
         fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn first_packaged_main_launch_selects_the_local_dock_without_pairing() {
+        let root = std::env::temp_dir().join(format!(
+            "aludock-desktop-first-main-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let runtime = ConnectionRuntimeState::open(Some(root.clone()), true).unwrap();
+        let snapshot = runtime.registry.snapshot().unwrap();
+
+        assert!(snapshot.local_selected);
+        assert!(snapshot.active_host_id.is_none());
+        assert_eq!(
+            runtime
+                .lifecycle
+                .lock()
+                .unwrap()
+                .active_target,
+            Some(ConnectionTarget::Local)
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
