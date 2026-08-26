@@ -82,7 +82,7 @@ def main() -> int:
     status = 1
     try:
         action = os.environ.get("ALU_DOCK_PTY_ACTION", "detach")
-        hub_actions = ("hub-exit", "hub-click-leave", "hub-narrow", "hub-signal", "hub-signal-inventory", "hub-new", "hub-continue", "hub-mouse-continue", "hub-history", "hub-history-forget", "hub-adopt", "hub-machine-connections", "hub-create-subhost-join", "hub-new-subhost", "hub-saved-subhost", "hub-expired-subhost-main", "hub-remote-settings", "hub-attachment-settings", "hub-pairing-open", "hub-devices-auto-update", "hub-pairing", "hub-revoke")
+        hub_actions = ("hub-exit", "hub-click-leave", "hub-narrow", "hub-signal", "hub-signal-inventory", "hub-new", "hub-continue", "hub-mouse-continue", "hub-history", "hub-history-forget", "hub-adopt", "hub-machine-connections", "hub-create-subhost-join", "hub-new-subhost", "hub-saved-subhost", "hub-expired-subhost-main", "hub-remote-settings", "hub-attachment-settings", "hub-pi-settings", "hub-pairing-open", "hub-devices-auto-update", "hub-pairing", "hub-revoke")
         startup_marker = b"Alu Dock Hub" if action in hub_actions else b"cache "
         set_size(fd, 24, 80)
         deadline = time.monotonic() + 12
@@ -256,6 +256,27 @@ def main() -> int:
                 os.write(fd, b"\x1b")
                 time.sleep(0.2)
                 os.write(fd, b"\x1b")
+            elif action == "hub-pi-settings":
+                for _ in range(5):
+                    write_input(fd, output, b"\x1b[B")  # Settings is sixth.
+                settings_start = len(output)
+                os.write(fd, b"\r")
+                settings_deadline = time.monotonic() + 5
+                while b"Models and provider access on this computer" not in output[settings_start:] and time.monotonic() < settings_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                write_input(fd, output, b"\x1b[B")  # Pi is second.
+                pi_start = len(output)
+                os.write(fd, b"\r")
+                pi_deadline = time.monotonic() + 10
+                while (b"Pi configuration" not in output[pi_start:] or b"Provider access" not in output[pi_start:] or b"Install a Pi package" not in output[pi_start:]) and time.monotonic() < pi_deadline:
+                    if read_available(fd, output, 0.05) < 0:
+                        break
+                os.write(fd, b"\x1b")
+                time.sleep(0.2)
+                os.write(fd, b"\x1b")
+                time.sleep(0.2)
+                os.write(fd, b"\x1b")
             elif action == "hub-create-subhost-join":
                 address = os.environ["ALU_DOCK_PTY_MAIN_ADDRESS"].encode("utf-8")
                 join_file = os.environ["ALU_DOCK_PTY_JOIN_FILE"].encode("utf-8")
@@ -294,7 +315,8 @@ def main() -> int:
                 while b"Set up this computer as a SubHost" not in output and time.monotonic() < settings_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
-                write_input(fd, output, b"\x1b[B")  # Dock role is second.
+                write_input(fd, output, b"\x1b[B")
+                write_input(fd, output, b"\x1b[B")  # Dock role is third, after Pi.
                 flow_start = len(output)
                 os.write(fd, b"\r")
                 join_deadline = time.monotonic() + 5
@@ -322,7 +344,8 @@ def main() -> int:
                 while b"SubHost next start" not in output and time.monotonic() < settings_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
-                write_input(fd, output, b"\x1b[B")  # Dock role is second.
+                write_input(fd, output, b"\x1b[B")
+                write_input(fd, output, b"\x1b[B")  # Dock role is third, after Pi.
                 flow_start = len(output)
                 os.write(fd, b"\r")
                 renewal_deadline = time.monotonic() + 5
@@ -347,7 +370,8 @@ def main() -> int:
                 while b"Use saved SubHost connection" not in output and time.monotonic() < settings_deadline:
                     if read_available(fd, output, 0.05) < 0:
                         break
-                write_input(fd, output, b"\x1b[B")  # Dock role is second.
+                write_input(fd, output, b"\x1b[B")
+                write_input(fd, output, b"\x1b[B")  # Dock role is third, after Pi.
                 flow_start = len(output)
                 os.write(fd, b"\r")
                 confirm_deadline = time.monotonic() + 5
@@ -922,7 +946,7 @@ def main() -> int:
                 os.write(fd, b"\x0f")  # Ctrl+O: collapse/expand tool output.
                 time.sleep(0.1)
                 read_available(fd, output, 0.05)
-            if action not in ("hub-exit", "hub-click-leave", "hub-signal", "hub-signal-inventory", "hub-history-forget", "hub-machine-connections", "hub-create-subhost-join", "hub-new-subhost", "hub-saved-subhost", "hub-expired-subhost-main", "hub-remote-settings", "hub-attachment-settings", "hub-pairing-open", "hub-devices-auto-update", "hub-pairing", "hub-revoke"):
+            if action not in ("hub-exit", "hub-click-leave", "hub-signal", "hub-signal-inventory", "hub-history-forget", "hub-machine-connections", "hub-create-subhost-join", "hub-new-subhost", "hub-saved-subhost", "hub-expired-subhost-main", "hub-remote-settings", "hub-attachment-settings", "hub-pi-settings", "hub-pairing-open", "hub-devices-auto-update", "hub-pairing", "hub-revoke"):
                 os.write(fd, b"\x04")  # Ctrl+D: detach without stopping.
 
         exit_deadline = time.monotonic() + 8

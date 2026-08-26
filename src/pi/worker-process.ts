@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { WORKER_INCIDENT_STDERR_MAX_BYTES } from "../core/worker-incident.js";
 import { piWorkerRuntimeEnvironment } from "./pi-runtime-environment.js";
 import type { WorkerIdentity } from "./worker-protocol.js";
+import type { JsonObject } from "../core/json-value.js";
 
 export interface PiWorkerInitOptions {
   cwd: string;
@@ -11,6 +12,7 @@ export interface PiWorkerInitOptions {
   sessionDir?: string;
   tools?: string[];
   excludeTools?: string[];
+  workerConfig?: JsonObject;
   projectTrusted: boolean;
   sessionFile?: string;
   initialName?: string;
@@ -66,6 +68,9 @@ export class PiWorkerProcess {
       env: {
         ...definedEnvironment(piWorkerRuntimeEnvironment(options.environment)),
         ALU_DOCK_PI_WORKER: "1",
+        // Keep Pi's own config/session contract coherent even though the login-shell
+        // capture intentionally drops Host process overrides.
+        PI_CODING_AGENT_DIR: options.init.agentDir,
         ALU_DOCK_WORKER_IDENTITY: JSON.stringify(options.identity),
         ALU_DOCK_WORKER_INIT: JSON.stringify(options.init),
       },

@@ -94,13 +94,23 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
     host = new DockHost({ socketPath, registry });
     client = new DockClient({ socketPath, timeoutMs: 3_000, longMutationTimeoutMs: 8_000 });
     await host.start();
-    const created = await client.create(cwd, "Pi SDK compatibility", "sdk-create");
+    const created = await client.create(
+      cwd,
+      "Pi SDK compatibility",
+      "sdk-create",
+      undefined,
+      undefined,
+      { excludeTools: ["bash"] },
+    );
     assert.equal(workerPids.length, 1);
     assert.notEqual(workerPids[0], process.pid, "Pi must run in an independent OS process");
     assert.deepEqual(created.executor.model, { provider: PROVIDER, id: MODEL });
     const models = await client.models(created.id);
     assert.ok(models.models.some((model) => model.provider === PROVIDER && model.id === MODEL));
     assert.deepEqual(models.instance.executor.model, { provider: PROVIDER, id: MODEL });
+    const tools = await client.tools(created.id);
+    assert.equal(tools.tools.some((tool) => tool.name === "bash"), false);
+    assert.equal(tools.tools.some((tool) => tool.name === "read"), true);
 
     const switched = await client.switchSession(created.id, priorSessionFile, "sdk-open-prior-session");
     assert.equal(switched.instance.runtimeGeneration, 2);
@@ -123,6 +133,7 @@ test("Pi SDK remains compatible through the production Dock and Worker boundary"
     assert.ok(firstRunEvents.some((event) => event.type === "tool.started" && event.data.toolName === "read"));
     assert.ok(firstRunEvents.some((event) => event.type === "tool.completed" && event.data.toolName === "read" && !event.data.isError && event.data.text.includes(FIXTURE_TEXT)));
     assert.ok(fixture.requests.some((body) => hasToolResult(body, FIXTURE_TEXT)), "Pi must continue the provider turn with the real read result");
+    assert.ok(fixture.requests.some((body) => JSON.stringify(body).includes("Pi Worker managed by Alu Dock")), "the managed Worker identity must reach Pi's system prompt");
 
     const initialHistory = (await client.history(created.id)).entries;
     assert.ok(initialHistory.some((entry) => entry.source === "user" && textOf(entry.content).includes(TOOL_PROMPT)));

@@ -1,6 +1,7 @@
 import type { AttachmentService } from "./attachment-service.js";
 import type { ProjectTrustChoice } from "./project-trust.js";
 import type { ImagePathDto } from "../core/instance-dto.js";
+import type { JsonObject } from "../core/json-value.js";
 import type { InstanceSnapshot } from "../core/managed-instance.js";
 import type { MachineDto } from "../core/machine-dto.js";
 import { InstanceNotFoundError, type DockRegistry } from "./dock-registry.js";
@@ -53,6 +54,7 @@ export interface CreateInstanceMutation {
   name?: string;
   trustChallengeId?: string;
   projectTrustDecision?: ProjectTrustChoice;
+  workerConfig?: JsonObject;
 }
 
 export interface SubmitCommandMutation {

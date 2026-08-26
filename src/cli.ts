@@ -77,6 +77,11 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (parsed.command === "pi:install") {
+    await installPiExtension(parsed.commandArgs);
+    return;
+  }
+
   if (parsed.command === "hub" || parsed.command === "continue" || parsed.command === "open" || parsed.command === "new" || parsed.command === "attach") {
     const options = parseInteractiveArgs(parsed.command, parsed.commandArgs);
     const { openDock } = await import("./interactive.js");
@@ -222,8 +227,14 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
 
   const { createPiInstance, createPiProjectTrustCoordinator, resolvePiReopenTarget } = await import("./pi/create-pi-instance.js");
   const { createPiSessionInventory } = await import("./pi/session-inventory.js");
-  const trustPreflight = createPiProjectTrustCoordinator();
-  const sessionInventory = createPiSessionInventory({ ...(catalogPath ? { cachePath: join(dirname(catalogPath), "session-inventory-v1.json") } : {}) });
+  const managedPiAgentDir = options.mode === "managed"
+    ? await (await import("./pi/pi-agent-directory.js")).resolveManagedPiAgentDir()
+    : undefined;
+  const trustPreflight = createPiProjectTrustCoordinator(managedPiAgentDir);
+  const sessionInventory = createPiSessionInventory({
+    ...(managedPiAgentDir === undefined ? {} : { sessionsRoot: join(managedPiAgentDir, "sessions") }),
+    ...(catalogPath ? { cachePath: join(dirname(catalogPath), "session-inventory-v1.json") } : {}),
+  });
   const attachmentService = catalogPath
     ? new AttachmentService(new AttachmentStorageState(attachmentStorageStateRoot(catalogPath)))
     : undefined;
@@ -232,6 +243,7 @@ async function serve(socketPath: string, socketExplicit: boolean, args: string[]
     : undefined;
   const createManagedPiInstance = (input: Parameters<typeof createPiInstance>[0]) => createPiInstance({
     ...input,
+    ...(managedPiAgentDir === undefined ? {} : { agentDir: managedPiAgentDir }),
     ...(incidentRecorder === undefined ? {} : { workerIncidentRecorder: incidentRecorder }),
   });
   let registry!: DockRegistry;
@@ -853,6 +865,33 @@ function waitForSignal(): Promise<NodeJS.Signals> {
     process.once("SIGINT", onSigint);
     process.once("SIGTERM", onSigterm);
   });
+}
+
+async function installPiExtension(args: string[]): Promise<void> {
+  if (args.length !== 1 || !args[0] || args[0].startsWith("--")) {
+    throw new Error("pi:install requires exactly one Pi package source; run `aludock help pi:install`");
+  }
+  const source = args[0];
+  const { installPiPackage } = await import("./pi/pi-environment.js");
+  let lastMessage: string | undefined;
+  try {
+    const result = await installPiPackage(source, {
+      onProgress: (event) => {
+        const message = event.message === undefined ? undefined : safeInstallOutput(event.message, 1_000);
+        if (!message || message === lastMessage) return;
+        lastMessage = message;
+        process.stdout.write(`${message}\n`);
+      },
+    });
+    process.stdout.write(`Installed ${safeInstallOutput(result.source, 500)} for Pi. Existing Work can load it with /reload.\n`);
+  } catch (error) {
+    throw new Error(`Pi couldn’t install ${safeInstallOutput(source, 500)}: ${safeInstallOutput(errorMessage(error), 1_000)}. Check the package source and try again.`, { cause: error });
+  }
+}
+
+function safeInstallOutput(value: string, maxChars: number): string {
+  const safe = value.replace(/[\u0000-\u001f\u007f-\u009f]+/gu, " ").trim();
+  return safe.length <= maxChars ? safe : `${safe.slice(0, Math.max(0, maxChars - 1))}…`;
 }
 
 function writeJson(value: unknown): void {

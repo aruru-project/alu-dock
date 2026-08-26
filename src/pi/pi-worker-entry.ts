@@ -22,6 +22,7 @@ import {
 } from "./worker-protocol.js";
 import type { PiWorkerInitOptions } from "./worker-process.js";
 import type { AgentRequest, AgentWorkerState } from "../core/agent-worker.js";
+import { cloneWorkerConfig } from "../core/worker-config.js";
 import type { DockToolsResult } from "../core/dock-tools.js";
 import type { AttachmentAccessRequest, AttachmentAccessResult } from "../core/instance-attachments.js";
 import { DockToolsBridge } from "./dock-tools-extension.js";
@@ -141,6 +142,7 @@ async function runWorker(): Promise<void> {
     ...(init.sessionDir === undefined ? {} : { sessionDir: init.sessionDir }),
     ...(init.tools === undefined ? {} : { tools: init.tools }),
     ...(init.excludeTools === undefined ? {} : { excludeTools: init.excludeTools }),
+    ...(init.workerConfig === undefined ? {} : { workerConfig: init.workerConfig }),
     projectTrusted: init.projectTrusted,
     extensionUiBroker: ui,
     extensionUiContextPortFactory: () => ui.createGenerationPort(),
@@ -270,7 +272,7 @@ function parseEnvJson(name: string): unknown { const value = process.env[name]; 
 function parseInit(raw: unknown): PiWorkerInitOptions {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("Worker init is invalid");
   const value = raw as Record<string, unknown>;
-  const allowed = new Set(["cwd", "agentDir", "sessionDir", "tools", "excludeTools", "projectTrusted", "sessionFile", "initialName"]);
+  const allowed = new Set(["cwd", "agentDir", "sessionDir", "tools", "excludeTools", "workerConfig", "projectTrusted", "sessionFile", "initialName"]);
   for (const key of Object.keys(value)) if (!allowed.has(key)) throw new Error(`Worker init contains unknown field ${key}`);
   const text = (input: unknown, limit: number, label: string, optional = false): string | undefined => {
     if (input === undefined && optional) return undefined;
@@ -289,6 +291,7 @@ function parseInit(raw: unknown): PiWorkerInitOptions {
     ...(text(value.sessionDir, 16_384, "Worker session directory", true) === undefined ? {} : { sessionDir: value.sessionDir as string }),
     ...(list(value.tools, "Worker tools") === undefined ? {} : { tools: list(value.tools, "Worker tools") }),
     ...(list(value.excludeTools, "Worker excluded tools") === undefined ? {} : { excludeTools: list(value.excludeTools, "Worker excluded tools") }),
+    ...(value.workerConfig === undefined ? {} : { workerConfig: cloneWorkerConfig(value.workerConfig, "Worker configuration") }),
     projectTrusted: value.projectTrusted,
     ...(text(value.sessionFile, 16_384, "Worker session file", true) === undefined ? {} : { sessionFile: value.sessionFile as string }),
     ...(text(value.initialName, 256, "Worker initial name", true) === undefined ? {} : { initialName: value.initialName as string }),

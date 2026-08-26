@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { JsonLineDecoder, JsonLineError } from "../src/control/json-lines.js";
+import { MAX_JSON_STRING_CHARS } from "../src/core/json-value.js";
 import {
   capabilityForRequest,
   classifyControlRequest,
@@ -29,6 +30,7 @@ import {
   CONVERSATION_CONTENT_CAPABILITY,
   WORKSPACE_LIST_CAPABILITY,
   ATTACHMENTS_CAPABILITY,
+  WORKER_CONFIG_CAPABILITY,
   requiredCapabilities,
 } from "../src/control/protocol.js";
 
@@ -313,6 +315,9 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   assert.throws(() => parseControlRequest({ ...base, type: "instance.list", params: { selector: "all", limit: 101 } }), /must not exceed 100/u);
   assert.equal(capabilityForRequest("instance.adopt"), "session.adopt.v1");
   assert.equal(capabilityForRequest("instance.ensure"), INSTANCE_KEYS_CAPABILITY);
+  assert.ok(requiredCapabilities(WORKER_CONFIG_CAPABILITY).includes(WORKER_CONFIG_CAPABILITY));
+  assert.ok(requiredCapabilities(WORKER_CONFIG_CAPABILITY).includes("instance.catalog"));
+  assert.ok(requiredCapabilities(WORKER_CONFIG_CAPABILITY).includes(INSTANCE_DISPLAY_NAME_CAPABILITY));
   assert.equal(capabilityForRequest("instance.get_by_key"), INSTANCE_KEYS_CAPABILITY);
   assert.equal(capabilityForRequest("conversation.history"), CONVERSATION_CONTENT_CAPABILITY);
   assert.equal(capabilityForRequest("conversation.content"), CONVERSATION_CONTENT_CAPABILITY);
@@ -394,6 +399,29 @@ test("V2 requests reject unsupported versions, unknown fields, invalid cursors, 
   });
   assert.equal(trustedCreate.type, "instance.create");
   assert.equal(trustedCreate.params.projectTrustDecision, "deny_once");
+  const configuredCreate = parseControlRequest({
+    ...base,
+    type: "instance.create",
+    params: { operationId: "create-configured", cwd: "/tmp/project", workerConfig: { excludeTools: ["bash"], noTools: false } },
+  });
+  assert.equal(configuredCreate.type, "instance.create");
+  if (configuredCreate.type === "instance.create") {
+    assert.deepEqual(configuredCreate.params.workerConfig, { excludeTools: ["bash"], noTools: false });
+  }
+  assert.throws(() => parseControlRequest({
+    ...base,
+    type: "instance.create",
+    params: { operationId: "create-invalid-config", cwd: "/tmp/project", workerConfig: [] },
+  }), /must be a JSON object/u);
+  assert.throws(() => parseControlRequest({
+    ...base,
+    type: "instance.create",
+    params: {
+      operationId: "create-oversized-config",
+      cwd: "/tmp/project",
+      workerConfig: { first: "x".repeat(MAX_JSON_STRING_CHARS), second: "x".repeat(MAX_JSON_STRING_CHARS) },
+    },
+  }), /too large/u);
   assert.throws(() => parseControlRequest({
     ...base,
     type: "instance.create",

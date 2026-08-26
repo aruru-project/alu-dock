@@ -171,6 +171,18 @@ Event overlap 只按完整事件身份（`runtimeGeneration + sequence`）处理
 
 浏览范围就是 Dock Host 运行用户已有的文件系统权限。目录不可读、已经消失或符号链接不可用时，Host 返回可恢复错误；客户端显示错误并允许修改路径。浏览不会读取文件正文、改变进程 cwd 或授予 project trust。用户确认后仍调用 `instance.create(cwd)`。
 
+## Adapter-owned Worker 创建配置
+
+需要在创建时传递目标 Agent adapter 原生选项的客户端先要求 hello capability `instance.worker-config.v1`，再在 `instance.create` 增加可选 `workerConfig` JSON object：
+
+```json
+{"kind":"request","version":2,"requestId":"create-id","type":"instance.create","params":{"operationId":"create-operation","cwd":"/absolute/workspace","workerConfig":{"excludeTools":["bash"]}}}
+```
+
+示例里的字段只是当前 Pi adapter 能识别的 Pi-native create option，不是 Dock 定义的跨 Agent 字段。客户端负责知道所选 adapter 的 contract；Host 只验证通用 JSON bounds，将对象随 operation、Machine route 和 durable reopen 原样交给 adapter，不返回 projection，也不允许它替换 Worker identity、transport 或 Session ownership。未知/无效字段由 adapter/native runtime 决定忽略或报错，客户端不得根据 Host 当前实现发明兼容映射。
+
+不需要 adapter options 时省略该字段并继续只要求普通 instance catalog capability。`instance.ensure`、adopt、reopen 和 Agent-facing `dock_create` 没有该输入；reopen 自动复用最初 create 已持久化的对象。
+
 ## 读取 active Work 的 workspace 文件
 
 要求 `workspace.files.v1`。`workspace.entry.list {instanceId,path,cursor?,limit}`、`workspace.entry.get {instanceId,path}` 和 `workspace.file.read {instanceId,path}` 的 path 都相对受理时 instance snapshot 的 cwd，根为 `.`。这与创建前接受 Host absolute path 的 `workspace.list.v1` 是两项不同能力。

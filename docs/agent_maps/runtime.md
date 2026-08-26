@@ -49,7 +49,17 @@ Windows 前台 Host 没有 POSIX login shell；Worker 继承启动 PowerShell �
 
 每个 Worker 独立取得一次环境，Host 不修改自己的 `process.env`，也不在 local install 时固化某个项目的语言版本或 PATH。Worker 只在结果之上显式加入 identity、IPC 和 bootstrap 所需的 Dock 私有变量。普通 Bash 命令自行 `cd` 到其他目录时不重新捕获；新的 Worker（包括 reopen）重新按其初始 workspace取得环境。
 
-Pi adapter 通过 SDK 嵌入 runtime 时，Host 必须在 fork 前把当前 Pi package、Node executable、标准 Pi 标记和仅含 `pi` launcher 的私有 bin 注入 Worker 环境；私有 bin 只前置这一项，不得把 Dock 的整套 `node_modules/.bin` 混入 workspace。Worker 在加载 extension 前从同一 package authority 恢复 CLI process identity。Extension、workspace shell 和它们创建的 Pi 子进程因此与父 Worker 使用同一 package，不得从用户 PATH 猜测或回退到另一份全局 Pi。
+Pi adapter 通过 SDK 嵌入 runtime 时，Host 必须在 fork 前把当前 Pi package、Node executable、标准 Pi 标记和只含 `pi`、`aludock` 两个 launcher 的私有 bin 注入 Worker 环境；私有 bin 不得把 Dock 的整套 `node_modules/.bin` 混入 workspace。`pi` 固定启动随 Alu Dock 安装的同一 Pi package，`aludock` 固定回到随包 Dock CLI。Worker 在加载 extension 前从同一 package authority 恢复 CLI process identity。Extension、workspace shell 和它们创建的 Pi 子进程因此与父 Worker 使用同一 package，不得从用户 PATH 猜测或回退到另一份全局 Pi。
+
+## Pi 原生配置与身份
+
+Pi 继续唯一拥有 `~/.pi/agent`（或 `PI_CODING_AGENT_DIR` 指定目录）中的 settings、`models.json`、`auth.json`、packages/extensions 和 `sessions/`。Dock 不创建 Profile、凭据副本、配置投影、导入流程或另一处 Session root。Managed Host 没有调用终端的 shell environment 时，会在启动时从用户 login shell 解析一次 Pi 原生 agent directory，但不保存 Dock 副本；解析结果同时供 inventory 和 Worker 使用。Host 解析出的 Pi `agentDir` 会作为 Pi 自己的环境契约传入 Worker，因此默认 Session 路径、nested Pi 与 `aludock pi:install` 仍指向同一份 Pi 环境；project `.pi`、`.agents`、Project Trust 与 Pi precedence 继续由每个 Worker 原生加载。
+
+本机 Hub 通过 bundled Pi 的 public model/auth API 读取当前 Providers、models 与非秘密 access 状态，并让 Pi 自己执行 API-key login、OAuth login/logout 和 token persistence/refresh。`aludock pi:install <source>` 直接调用 bundled Pi package manager 并写入 Pi 的 global package settings；source 只承诺 Pi Package conventions。现有 Worker 不被 Host 热改配置，用户通过 `/reload` 采用 package/model 环境变化。
+
+每个 Pi Worker 的 resource prompt 会追加稳定的 Alu Dock 身份说明：它知道自身是由 Dock 管理、终端断开后 Work 仍可继续，并知道 Pi 原生配置与 Session 仍归 Pi。`ALU_DOCK_PI_WORKER=1` 只是私有进程 bootstrap marker，不是 Agent 的产品身份接口。
+
+`instance.create` 可携带 bounded JSON `workerConfig`。这个对象在 generic Protocol/Host/catalog 中保持 opaque，随 durable reopen 原样交给选中的 Worker adapter；Host 不枚举字段、不把 Pi option 提升为 Dock 语义。Pi adapter 把其中 JSON-safe create fields 交给 Pi 的 session constructor，Worker-owned services、SessionManager、identity 与 transport 不能由该对象替换。不同 Agent adapter 可以按自己的原生 contract 解释同一容器。
 
 ## Worker 事故记录
 

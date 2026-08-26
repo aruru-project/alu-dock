@@ -1,6 +1,8 @@
 import type { InstanceExecution, InstanceLifecycle, LastRunResult } from "./managed-instance.js";
 import type { ThinkingLevel } from "./agent-worker.js";
 import { isNativeAbsoluteLocalPath } from "./local-path.js";
+import type { JsonObject } from "./json-value.js";
+import { cloneWorkerConfig } from "./worker-config.js";
 
 export type CatalogMutationEffect = "pre_effect" | "post_effect" | "rollback_contained";
 
@@ -43,6 +45,8 @@ export interface CatalogInstanceRecord {
   lastRun: LastRunResult;
   /** Durable switch that advertises Agent-facing Dock tools to this instance. */
   dockToolsEnabled?: boolean;
+  /** Opaque, adapter-owned Worker creation input. */
+  workerConfig?: JsonObject;
   executionChangedAt?: string;
   runStartedAt?: string;
   runtimeGeneration: number;
@@ -171,6 +175,7 @@ export function validateCatalogRecord(record: CatalogInstanceRecord): void {
   if (!["never", "succeeded", "failed", "aborted", "interrupted"].includes(record.lastRun)) throw new Error("Catalog last-run result is invalid");
   if (!Number.isSafeInteger(record.runtimeGeneration) || record.runtimeGeneration < 1) throw new Error("Catalog runtime generation must be positive");
   if (record.dockToolsEnabled !== undefined && typeof record.dockToolsEnabled !== "boolean") throw new Error("Catalog Dock tools switch must be boolean");
+  if (record.workerConfig !== undefined) cloneWorkerConfig(record.workerConfig, "Catalog Worker configuration");
   timestamp(record.createdAt, "Catalog createdAt");
   timestamp(record.updatedAt, "Catalog updatedAt");
   if (record.executionChangedAt !== undefined) timestamp(record.executionChangedAt, "Catalog executionChangedAt");

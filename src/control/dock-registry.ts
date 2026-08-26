@@ -18,6 +18,8 @@ import {
 } from "../core/dock-tools.js";
 import type { InstanceAttachmentHostPort } from "../core/instance-attachments.js";
 import { isNativeAbsoluteLocalPath } from "../core/local-path.js";
+import type { JsonObject } from "../core/json-value.js";
+import { cloneWorkerConfig } from "../core/worker-config.js";
 import { InstanceBusyError, type InstanceLifecycle, type ManagedInstance, type InstanceSnapshot, type StopReceipt } from "../core/managed-instance.js";
 import { CatalogTransactionCoordinator, type CatalogFault, type CatalogHealth } from "./catalog-transactions.js";
 import { InstanceObservationService, observationStatus } from "./instance-observation-service.js";
@@ -48,6 +50,8 @@ export interface InstanceFactoryInput {
   dockToolsHostPort: DockToolsHostPort;
   attachmentHostPort: InstanceAttachmentHostPort;
   dockToolsEnabled: boolean;
+  /** Adapter-owned creation input; the Registry only validates, persists, and relays it. */
+  workerConfig?: JsonObject;
 }
 
 export type InstanceFactory = (input: InstanceFactoryInput) => Promise<ManagedInstance>;
@@ -58,9 +62,10 @@ export interface CreateRegistryInstanceInput {
   name?: string;
   trustChallengeId?: string;
   projectTrustDecision?: ProjectTrustChoice;
+  workerConfig?: JsonObject;
 }
 
-export interface EnsureRegistryInstanceInput extends CreateRegistryInstanceInput {
+export interface EnsureRegistryInstanceInput extends Omit<CreateRegistryInstanceInput, "workerConfig"> {
   key: string;
 }
 
@@ -270,12 +275,15 @@ export class DockRegistry implements DockToolsHostPort {
       projectTrustDecision: input.projectTrustDecision,
     });
     const cwd = resolution.canonicalCwd;
+    const workerConfig = input.workerConfig === undefined
+      ? undefined
+      : cloneWorkerConfig(input.workerConfig, "Worker configuration");
 
     const id = this.createId();
     if (this.instances.has(id) || this.catalog.current().instances.some((record) => record.id === id)) {
       throw new Error(`Generated duplicate instance identity: ${id}`);
     }
-    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: false });
+    const instance = await this.factory({ id, creationOperationId: input.operationId, hostEpoch: this.hostEpoch, cwd, key, name: input.name, projectTrusted: resolution.projectTrusted, dockToolsHostPort: this.dockToolsHostPort, attachmentHostPort: this.attachmentHostPort, dockToolsEnabled: false, ...(workerConfig === undefined ? {} : { workerConfig }) });
     if (
       instance.id !== id
       || instance.creationOperationId !== input.operationId
@@ -452,6 +460,7 @@ export class DockRegistry implements DockToolsHostPort {
       dockToolsHostPort: this.dockToolsHostPort,
       attachmentHostPort: this.attachmentHostPort,
       dockToolsEnabled: record.dockToolsEnabled ?? false,
+      ...(record.workerConfig === undefined ? {} : { workerConfig: cloneWorkerConfig(record.workerConfig, "Catalog Worker configuration") }),
     });
     if (
       candidate.id !== record.id

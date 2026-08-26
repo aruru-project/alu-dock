@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+import { resolveManagedPiAgentDir } from "../src/pi/pi-agent-directory.js";
 import { PiWorkerProcess } from "../src/pi/worker-process.js";
 import {
   captureWorkspaceShellEnvironment,
@@ -101,6 +102,26 @@ eval "\${!#}"
   assert.equal(environment.PWD, workspace);
   assert.equal(environment.OLDPWD, undefined);
   assert.doesNotMatch(environment.PATH ?? "", /node_modules/u);
+});
+
+test("managed Pi authority follows the user login shell without persisting a Dock copy", async () => {
+  const homeDir = join(tmpdir(), "alu-dock-pi-home");
+  const captured = await resolveManagedPiAgentDir({
+    sourceEnvironment: {},
+    homeDir,
+    fallbackAgentDir: join(homeDir, ".pi", "agent"),
+    captureEnvironment: async () => ({ PI_CODING_AGENT_DIR: "~/.native-pi" }),
+  });
+  assert.equal(captured, join(homeDir, ".native-pi"));
+
+  let captureCalled = false;
+  const direct = await resolveManagedPiAgentDir({
+    sourceEnvironment: { PI_CODING_AGENT_DIR: join(homeDir, "direct-pi") },
+    homeDir,
+    captureEnvironment: async () => { captureCalled = true; return {}; },
+  });
+  assert.equal(direct, join(homeDir, "direct-pi"));
+  assert.equal(captureCalled, false);
 });
 
 test("Pi Worker receives only its captured environment plus explicit Dock bootstrap variables", async (context) => {

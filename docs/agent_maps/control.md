@@ -48,7 +48,7 @@ InstanceManager 是 Main ID、位置和 instance key 的唯一应用 authority�
 
 `machine.list` 的每项可包含目标 Host 自报的 `platform`（`linux | windows`）、用户 Home 绝对路径 `homePath` 和原生文件系统根 `workspaceRoots`；Linux 根为 `/`，Windows 根为该 Host 运行用户可访问的盘符根。Main 保存 SubHost 最近一次上报的事实。Home 是 workspace 浏览默认起点，roots 是跨文件系统导航入口；虚拟 `Computer` 等位置只属于客户端投影，不作为 path 发送给 Host。公开 instance snapshot 的 `hostId` 与 machine list 使用同一个稳定 Machine identity，让客户端无需从路径或 Host epoch 推断 placement。
 
-机器边界只有一个 identity mapper：它改写 Protocol V2 的 instance/Host identity 字段、补充稳定 `hostId` 并始终投影 Main-authoritative key，但不进入 message、content、metadata、tool arguments 等 Agent/用户 opaque payload。无 instance 的 machine-local request 可带 `hostId`；省略时仍选择本机 Main，保持旧客户端行为。`attachment.upload` 的 `instanceId` 可选：省略时沿用 Main 本机 storage；提供 Main `instanceId` 时，Main 在 body 开始前路由到拥有该实例的 SubHost storage。
+机器边界只有一个 identity mapper：它改写 Protocol V2 的 instance/Host identity 字段、补充稳定 `hostId` 并始终投影 Main-authoritative key，但不进入 message、content、metadata、tool arguments、`workerConfig` 等 Agent/adapter opaque payload。无 instance 的 machine-local request 可带 `hostId`；省略时仍选择本机 Main，保持旧客户端行为。`attachment.upload` 的 `instanceId` 可选：省略时沿用 Main 本机 storage；提供 Main `instanceId` 时，Main 在 body 开始前路由到拥有该实例的 SubHost storage。
 
 每条 logical stream 都有独立的有界串行输入队列和 stream reset；某条 stream 的 backpressure、解析、投影、持久化或客户端输出失败只关闭该 stream，TLS machine link 仍继续处理其他 stream 与 heartbeat。机器 route 对 `response_transfer` 逐帧复用 canonical Protocol V2 parser，并在 Main identity 投影后继续受同一组 chunk、count 和 aggregate bounds 约束。机器断线只让 Main 的远端目录进入可恢复状态，不停止 SubHost Worker 或已经接受的 Queue。`machine.remove` 是 Main-owned、operation-idempotent 的 trust removal：持久删除 SubHost trust 与 routes 后关闭现有连接，但不停止 SubHost Worker 或 work；重新使用必须再次 join。离线时对 Main entry 执行 stop 只删除 route mapping；成功路由的 stop/forget 则在向客户端发出成功前持久退役该 Main route，同 generation 的迟到 inventory 不能恢复它，更新 generation 可重新取得新的 Main identity。普通转发不在 Main 缓存或重放 mutation；Main-owned global ensure 保留 Main operation identity，转发时仍沿用原 operation ID。SubHost 的全局 Agent Dock tools 使用同一上游 authority，并以 Main source ID 执行；上游不可用时 list/inspect/watch/create/send 立即失败。`dock_create` 省略 Machine 时回到 source SubHost，提供唯一 Machine display name 时由 Main 解析到既有 `hostId` placement。`dock_deliver` 始终由 source SubHost 在本机登记，不依赖 Main 连接。
 
@@ -86,6 +86,8 @@ Client 发给 Host 的 hello/request 使用 closed JSON-safe shape，未知字�
 完整 Tree response 即使只有一块，也使用 transport-only `response_transfer` records。每块是普通成功 `ControlResponse` UTF-8 序列化后的 opaque canonical-base64 byte slice；DockClient 检查同一 request/Host identity、从零连续 index、稳定 count、单块和 aggregate transport bounds，收齐后才解析原 response。缺块或越界没有 partial result。该 framing 在本地 IPC 与 mTLS Protocol V2 上相同，只承载成功的 `session.tree.v2` response；错误仍是一条普通 response，也不形成通用 streaming RPC。
 
 Protocol V2 是外部合同。Host 与 Worker 的内部重构不应要求现有 TUI 或 Web 客户端重写。
+
+`instance.worker-config.v1` 允许 `instance.create` 增加可选 `workerConfig` bounded JSON object。Generic Host 只在 wire、operation 和 durable catalog 边界验证 JSON 大小/深度并原样路由、恢复；字段名称和含义完全属于目标 Worker adapter，Host、Main/SubHost identity mapper 与客户端通用 DTO 不解释 Pi option。使用该字段的客户端必须在 hello 中要求 capability；不使用时 `instance.create` 保持既有 shape。`instance.ensure`、adopt 和 Agent-facing `dock_create` 不接受该创建配置。
 
 `workspace.list.v1` 是创建实例前唯一的目录发现能力。客户端明确传入 Host 文件系统中的绝对路径；Host 返回规范当前路径、上级路径、目录/目录符号链接和分页事实。它只使用 Host 运行用户已有的文件系统权限，不设置额外根目录或白名单，不读取文件正文、不执行 shell，也不改变任何 Host 或 Worker 的进程 cwd。目录选择完成后仍由 `instance.create(cwd)` 执行既有校验和 project trust；浏览本身不产生信任。
 

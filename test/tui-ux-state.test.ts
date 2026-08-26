@@ -183,6 +183,27 @@ test("resized 80x24 extension editor modals keep clipped-content markers and foo
   assert.match(rendered.at(-1) ?? "", /^╰─/u);
 });
 
+test("secret Hub input never renders the API key", () => {
+  const tui = { terminal: { rows: 24 }, requestRender: () => {} } as unknown as TUI;
+  const dialog = new ExtensionTextDialog({
+    mode: "secret",
+    title: "Anthropic API key",
+    placeholder: "The value stays hidden.",
+    prefill: "sk-ant-user-secret",
+    requestRender: () => {},
+    tui,
+  });
+  dialog.focused = true;
+  const rendered = dialog.render(60).join("\n");
+  assert.doesNotMatch(rendered, /sk-ant-user-secret/u);
+  assert.match(rendered, /••••/u);
+  let submitted: string | undefined;
+  dialog.onSubmit = (value) => { submitted = value; };
+  dialog.handleInput("\u007f");
+  dialog.handleInput("\r");
+  assert.equal(submitted, "sk-ant-user-secre");
+});
+
 test("dedicated tree surface handles filters, search clearing, branch keys, and responsive semantic rows", () => {
   const tree: TreeNodeDto[] = [
     { entryId: "root", depth: 0, kind: "message", role: "user", displayClass: "content", summary: "start", hasChildren: true },

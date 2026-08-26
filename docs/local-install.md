@@ -10,7 +10,7 @@ Alu Dock 使用同一个本机 npm 安装入口。Linux 由 `systemd --user` 托
 ~/.config/systemd/user/alu-dock.service
 ```
 
-Host 和 Worker 从安装包自己的依赖加载 Agent runtime，不调用 `$PATH` 中的全局 Pi。生成的 user unit 只保存 Host 启动所需的固定 Node、CLI、HOME 和最小可执行 PATH，不固化安装命令当时的语言版本、npm PATH 或开发环境，也不替 Extension source 凭据文件。每个 Worker 在启动时从用户登录 shell 和自己的 workspace 独立取得开发环境。更新 Alu Dock 不删除 catalog、Agent session 或 remote-access identity/trust 文件。
+Host 和 Worker 从安装包自己的依赖加载 Agent runtime，不调用 `$PATH` 中的全局 Pi。生成的 user unit 只保存 Host 启动所需的固定 Node、CLI、HOME 和最小可执行 PATH，不固化安装命令当时的语言版本、npm PATH、`PI_CODING_AGENT_DIR` 或开发环境，也不替 Extension source 凭据文件。Managed Host 启动时从用户 login shell 解析 Pi 原生 agent directory，并让 inventory 和 Worker 共用该结果；Dock 不持久化另一份路径设置。每个 Worker 仍从用户登录 shell 和自己的 workspace 独立取得开发环境；Worker 内的 `pi` 与 `aludock` launcher 固定回到这个安装包。更新 Alu Dock 不删除 catalog、Pi 原生 session 或 remote-access identity/trust 文件。
 
 默认持久状态位于 `~/.local/state/alu-dock/`；managed service 使用 systemd 提供的同一用户私有 `STATE_DIRECTORY`。`remote-access/identity.json` 是长期 Host TLS identity，`remote-access/trusted/` 是已配对客户端证书。迁移或备份 Host 时必须把这两者作为一个私有状态单元处理；删除或丢失 Host identity 会使客户端已有的 Host pin 失效并需要重新配对。Settings 中关闭网络监听、更新程序或普通 service restart 都不会轮换证书或删除 trust。
 
@@ -34,6 +34,18 @@ npm run install:local -- --replace-active
 ```
 
 替换 Alu Dock 会中断未完成的回答、等待消息和交互；请先完成或停止重要工作。
+
+## Pi 配置与扩展
+
+Alu Dock 不要求系统另外安装 Pi。运行 `aludock` 后可在 **Settings → Pi** 查看随包 Pi 当前识别的 models，并让 Pi 自己保存 API key 或完成 OAuth 登录。配置位置仍是 Pi 原生 `~/.pi/agent/`（或 `PI_CODING_AGENT_DIR`），Session 仍在 Pi 原生 `sessions/`；Alu Dock 不创建另一份凭据或会话目录。
+
+安装 Pi package 使用：
+
+```bash
+aludock pi:install <npm、git 或本地 source>
+```
+
+命令使用随包 Pi 的 package manager 和 package conventions，写入 Pi global settings，不依赖 `$PATH` 中的 Pi。已经运行的 Work 使用 `/reload` 采用 extension/config 变化。
 
 ## Service 命令
 

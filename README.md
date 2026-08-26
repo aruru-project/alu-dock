@@ -25,6 +25,7 @@ Hub / Work / Web / future clients
 - 长期 Host 与 durable instance catalog；
 - instance 创建前的工作目录浏览，以及继续、打开、停止、reopen、adopt、forget；
 - 多个相互隔离的 Agent Worker；
+- 通过随包 Pi 查看 models、配置 API key/OAuth、安装 Pi packages，无需系统 Pi；
 - Session Work TUI 的 conversation、tools、Queue、model、settings、tree、compaction 和 Extension UI；
 - Protocol V2 的权威读取、实时跟随、断线恢复和操作去重；
 - 本机 Protocol V2 接口：POSIX Unix socket 与 Windows Named Pipe；
@@ -66,6 +67,18 @@ aludock service logs --lines 200
 ```
 
 `forget` 和 `prune` 只删除 Dock catalog record，不删除 Agent session 文件。
+
+## Pi 配置、登录与扩展
+
+Hub 的 **Settings → Pi** 直接显示 bundled Pi 当前识别的 Providers/models，并调用 Pi 自己的 API-key 与 OAuth 登录/退出流程。Pi 仍唯一拥有 `~/.pi/agent/settings.json`、`models.json`、`auth.json`、packages 和 `sessions/`；Alu Dock 不复制凭据、不创建 Profile 或另一份 Session 历史。Main 与 SubHost 各自管理本机 Pi 环境，本功能不在机器之间传输配置或 OAuth token。
+
+安装 Pi package 不需要系统 Pi：
+
+```bash
+aludock pi:install <source>
+```
+
+`source` 使用 Pi 原生 npm/git/local package conventions。现有 Work 用 `/reload` 采用配置或 extension 变化。Pi Worker 中同样可以运行该命令，launcher 会固定使用 Alu Dock 随包版本。
 
 ## 远程访问
 

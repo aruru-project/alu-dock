@@ -23,7 +23,7 @@ test("top-level help is human-only, bounded, and locally rendered", async () => 
   for (const result of [flag, command, short]) assertHelpSuccess(result);
   assert.equal(flag.stdout, command.stdout);
   assert.equal(command.stdout, short.stdout);
-  for (const publicCommand of ["continue", "open", "new", "attach", "list", "status", "stop", "forget", "prune", "service", "help"]) {
+  for (const publicCommand of ["continue", "open", "new", "attach", "list", "status", "stop", "forget", "prune", "service", "pi:install", "help"]) {
     assert.match(flag.stdout, new RegExp(`\\b${publicCommand}\\b`, "u"));
   }
   for (const internalSignature of ["aludock serve", "aludock ping", "aludock create", "aludock reopen", "aludock events", "aludock prompt", "--socket"]) {
@@ -36,7 +36,7 @@ test("top-level help is human-only, bounded, and locally rendered", async () => 
 });
 
 test("every public human command supports equivalent local help forms", async () => {
-  for (const command of ["continue", "open", "new", "attach", "list", "status", "stop", "forget", "prune"]) {
+  for (const command of ["continue", "open", "new", "attach", "list", "status", "stop", "forget", "prune", "pi:install"]) {
     const [flag, topic] = await Promise.all([
       runCli([command, "--help"]),
       runCli(["help", command]),
@@ -137,7 +137,7 @@ test("explicit non-human command help points to the public workflow", async () =
 
 test("help text is terminal-safe static guidance", () => {
   for (const topics of [
-    [], ["open"], ["new"], ["attach"], ["list"], ["status"], ["stop"], ["forget"], ["prune"], ["help"],
+    [], ["open"], ["new"], ["attach"], ["list"], ["status"], ["stop"], ["forget"], ["prune"], ["pi:install"], ["help"],
     ["service"], ["service", "install"], ["service", "start"], ["service", "stop"],
     ["service", "restart"], ["service", "status"], ["service", "logs"], ["service", "uninstall"],
     ["create"],

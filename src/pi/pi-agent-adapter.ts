@@ -53,7 +53,7 @@ import {
   type TreeNodeDto,
   MAX_CONVERSATION_CHUNK_CHARS,
 } from "../core/instance-dto.js";
-import { projectJsonObject, type JsonValue } from "../core/json-value.js";
+import { projectJsonObject, type JsonObject, type JsonValue } from "../core/json-value.js";
 import { sliceSemanticHistory, slimSemanticHistoryEntry } from "../core/history-pagination.js";
 import { projectBuiltInToolPresentation } from "../core/tool-result-presentation.js";
 import type { PiExtensionUiPort } from "./pi-extension-ui-adapter.js";
@@ -154,6 +154,8 @@ const DEFAULT_SESSION_CATALOG: PiSessionCatalog = {
   listAll: (sessionDir) => sessionDir === undefined ? SessionManager.listAll() : SessionManager.listAll(sessionDir),
 };
 
+export const ALU_DOCK_PI_WORKER_GUIDANCE = `You are running as a Pi Worker managed by Alu Dock. Your work can continue after a terminal disconnects, and Alu Dock clients may observe or control this Work through Dock protocols. Pi remains authoritative for its settings, credentials, extensions, project resources, and Session history. Use \`aludock pi:install <source>\` when the user asks you to install a Pi package through the bundled Pi runtime; do not require a separate system Pi installation.`;
+
 type RuntimeOwner = Pick<AgentSessionRuntime,
   "session" | "services" | "cwd" | "diagnostics" | "modelFallbackMessage" |
   "setBeforeSessionInvalidate" | "setRebindSession" | "newSession" | "switchSession" | "fork" | "dispose"
@@ -194,6 +196,8 @@ export interface CreatePiAgentAdapterOptions {
   sessionDir?: string;
   tools?: string[];
   excludeTools?: string[];
+  /** Pi owns the meaning of these JSON-safe createAgentSession fields. */
+  workerConfig?: JsonObject;
   projectTrusted: boolean;
   extensionUiBroker?: PiExtensionUiLifecyclePort;
   extensionUiContextPortFactory?: () => PiExtensionUiPort;
@@ -2878,6 +2882,7 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
           ...(options.dockAttachmentPort === undefined ? [] : [{ name: "alu-dock-attachments", factory: dockAttachmentsExtension(options.dockAttachmentPort) }]),
         ],
         extensionsOverride: ownCanonicalShowImage,
+        appendSystemPromptOverride: (base) => [...base, ALU_DOCK_PI_WORKER_GUIDANCE],
         ...((options.dockAttachmentPort === undefined && options.dockToolsBridge === undefined) ? {} : {
           additionalSkillPaths: [
             ...(options.dockAttachmentPort === undefined ? [] : [dockAttachmentSkillPath()]),
@@ -2891,8 +2896,15 @@ export async function createPiAgentAdapter(options: CreatePiAgentAdapterOptions)
         }),
       },
     });
+    const piCreateOptions = (options.workerConfig ?? {}) as unknown as Partial<Parameters<typeof createAgentSessionFromServices>[0]>;
     const result = await createAgentSessionFromServices({
-      services, sessionManager, sessionStartEvent, tools: options.tools, excludeTools: options.excludeTools,
+      ...piCreateOptions,
+      ...(options.tools === undefined ? {} : { tools: options.tools }),
+      ...(options.excludeTools === undefined ? {} : { excludeTools: options.excludeTools }),
+      // Worker-owned services and Session continuity cannot be replaced by wire JSON.
+      services,
+      sessionManager,
+      sessionStartEvent,
     });
     return { ...result, services, diagnostics: services.diagnostics };
   };

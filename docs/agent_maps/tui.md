@@ -7,20 +7,23 @@ Alu Dock 的 SSH 界面由两个客户端 surface 组成：
 - **Hub**：创建、继续和管理 Dock instance；
 - **Session Work**：连接一个 instance，与当前 Agent session 交互。
 
-Hub 和 Work 的 Agent 工作能力都通过 DockClient 和 Protocol V2 使用 Host Service，不持有 Agent runtime，也不读取 Agent 私有 session 文件。只有 Hub 中的本机 service-management 页面例外：Devices 的远程访问/设备状态与 Settings 的 attachment storage directory 直接读写当前用户的私有 Host state，由 managed Host 观察并应用；它们不经过 DockClient，也不形成可供远程调用的管理协议。
+Hub 和 Work 的运行中 Agent 工作能力都通过 DockClient 和 Protocol V2 使用 Host Service，不持有 Agent runtime，也不读取 Agent 私有 session 文件。本机管理页面有两类明确例外：Devices/attachment directory 直接管理当前用户的 Host private state；Settings → Pi 直接使用随包 Pi 的 public API 管理当前用户原生 Pi environment。两者都不形成可供远程调用的 Dock admin 协议，Hub 也不保存或投影 Agent 凭据。
 
 ```text
 Hub / Work ───── Protocol V2 ──────── Host control/session gateway ── Worker
 Hub Settings/Devices ── local private state ── managed Host network/storage authority
+Hub Settings → Pi ───── bundled Pi API ─────── Pi settings/auth/packages
 ```
 
 ## Hub
 
 Main Hub 的主要对象是 Dock instance。它提供 New、Continue、History、persisted sessions、Settings、Devices、Machines 和 Leave 等入口，但打开 Hub 本身不创建 runtime。没有角色设置时 Dock 默认是 Main；不存在独立 Standalone 界面。
 
-Settings 管理永久 attachment directory 和下一次启动角色。首次选择 SubHost 时先导入 Main 创建的一次性 join file；Main 的可达地址和当前 Machine port 随文件带入，本机名称默认使用系统机器名，用户只在确认页明确选择 Edit Details 时才修改这些值。导入会同时保存待完成的 enrollment 与连接设置，并明确提示在 join 有效期内使用普通 Host 入口重启，不再把同一 join file 传给启动进程；若未及时启动，界面要求从同一个 Main 生成新文件并复用原 SubHost identity。选择 Main 只清除 SubHost role override，保留 enrollment 与连接设置；以后切回同一 Main 是一次确认，不再询问地址、端口、名称或 join file。Edit Connection 只修改同一 Main 的连接事实，Connect to a Different Main 才要求新 join file 并明确替换 enrollment。旧版本留下 enrollment 但缺少连接设置时，界面复用已有机器名和默认端口，只询问无法恢复的 Main 地址。确认页取消不修改任何事实；保存后但尚未重启时，Settings 明确显示 `SubHost next start` 并允许选择 `Use as Main Instead` 撤销。角色 change 只在下次 Host 启动生效，不在正在运行的 Host 内热换 Registry 或 authority。附件目录输入必须是 Host 上的绝对路径；设置归 Host storage authority，TUI 不保存上传 bytes，也不向远程 API 暴露设置。已有附件时页面拒绝直接切换到另一空目录，避免让既有 `fileId` 静默失效。
+Settings 管理 Pi、永久 attachment directory 和下一次启动角色。Pi 页面按 Pi 当前实际环境列出 Providers/models/default，显示非秘密 access 状态，并调用 Pi 原生 API-key 或 OAuth login/logout；secret 输入在终端中遮蔽，OAuth URL/device code/progress 由 Pi flow 提供。凭据仍由 Pi 写入和刷新自己的 `auth.json`，Hub 不显示 secret、不维护 model catalog，也不向 Main/SubHost 之间复制配置。Extension 安装使用页面提示的 `aludock pi:install <source>`；已运行 Work 用 `/reload` 采用变化。
 
-Machines 只在 Main 的完整 Hub 中出现，实时开关 SubHost connections、修改 Machine port、保存一次供新 SubHost 使用的 Main 可达地址、显示 SubHost connected/unavailable 状态、创建一次性 join file，并可在确认后移除 SubHost。可达地址只在首次 Connect 或用户明确选择 Address 时输入；端口直接取 Machines 当前设置。TUI 创建的 join file 同时携带这两个非秘密连接事实，因此另一台电脑不再照抄端口或重复输入地址。Turn On & Connect 会先等待 Host 确认端口已经监听，再创建 join file；绑定失败时留在 Machines 并说明可以更换端口或重试。关闭 connections 会断开 machine links，但保留 trust、routes 和 SubHost 上的 Worker/work；再次打开后已配对 SubHost 可以重连。移除会立即撤销 Main 保存的 trust、断开当前 machine link，并让该 SubHost 的 work 从 Main 消失；它不会停止 SubHost 上的 Worker 或 work，重新使用必须再次 join。SubHost 的本机 TUI 明确显示 `Alu Dock SubHost` 和是否连接 Main，只提供连接设置与下次切回 Main；它没有 New、Continue、History、Devices 或 Work 入口。Main 断线不让 SubHost 自行升格，也不开放临时客户端 endpoint。
+首次选择 SubHost 时先导入 Main 创建的一次性 join file；Main 的可达地址和当前 Machine port 随文件带入，本机名称默认使用系统机器名，用户只在确认页明确选择 Edit Details 时才修改这些值。导入会同时保存待完成的 enrollment 与连接设置，并明确提示在 join 有效期内使用普通 Host 入口重启，不再把同一 join file 传给启动进程；若未及时启动，界面要求从同一个 Main 生成新文件并复用原 SubHost identity。选择 Main 只清除 SubHost role override，保留 enrollment 与连接设置；以后切回同一 Main 是一次确认，不再询问地址、端口、名称或 join file。Edit Connection 只修改同一 Main 的连接事实，Connect to a Different Main 才要求新 join file 并明确替换 enrollment。旧版本留下 enrollment 但缺少连接设置时，界面复用已有机器名和默认端口，只询问无法恢复的 Main 地址。确认页取消不修改任何事实；保存后但尚未重启时，Settings 明确显示 `SubHost next start` 并允许选择 `Use as Main Instead` 撤销。角色 change 只在下次 Host 启动生效，不在正在运行的 Host 内热换 Registry 或 authority。附件目录输入必须是 Host 上的绝对路径；设置归 Host storage authority，TUI 不保存上传 bytes，也不向远程 API 暴露设置。已有附件时页面拒绝直接切换到另一空目录，避免让既有 `fileId` 静默失效。
+
+Machines 只在 Main 的完整 Hub 中出现，实时开关 SubHost connections、修改 Machine port、保存一次供新 SubHost 使用的 Main 可达地址、显示 SubHost connected/unavailable 状态、创建一次性 join file，并可在确认后移除 SubHost。可达地址只在首次 Connect 或用户明确选择 Address 时输入；端口直接取 Machines 当前设置。TUI 创建的 join file 同时携带这两个非秘密连接事实，因此另一台电脑不再照抄端口或重复输入地址。Turn On & Connect 会先等待 Host 确认端口已经监听，再创建 join file；绑定失败时留在 Machines 并说明可以更换端口或重试。关闭 connections 会断开 machine links，但保留 trust、routes 和 SubHost 上的 Worker/work；再次打开后已配对 SubHost 可以重连。移除会立即撤销 Main 保存的 trust、断开当前 machine link，并让该 SubHost 的 work 从 Main 消失；它不会停止 SubHost 上的 Worker 或 work，重新使用必须再次 join。SubHost 的本机 TUI 明确显示 `Alu Dock SubHost` 和是否连接 Main，只提供本机 Pi 环境、连接设置与下次切回 Main；它没有 New、Continue、History、Devices 或 Work 入口。Main 断线不让 SubHost 自行升格，也不开放临时客户端 endpoint。
 
 Devices 是唯一远程设备入口：同一页显示 Remote Access 开关、listener 状态、port、五分钟连接窗口、等待请求和已保存设备。Remote Access 默认关闭；用户选择连接新设备后仍必须在本机确认只连接自己持有的设备，才打开五分钟窗口。连接页保持显示时每 200ms 读取 Host-owned private state，倒计时、listener 状态、新请求、checking、成功和失败自动更新；没有 Refresh，也不靠重新进入页面发现变化。更新会按稳定 value 保留当前选择，只有新等待设备或新 terminal result 到来时才把焦点移到最相关动作。
 

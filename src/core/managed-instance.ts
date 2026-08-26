@@ -3,7 +3,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { truncateWithEllipsis as truncate } from "./bounded-text.js";
 import { InstanceEventJournal } from "./instance-event-journal.js";
 import { InstanceCommandScheduler, type InstanceCommandDecision, type InstanceCommandLease, type InstanceProjectionReadReservation } from "./instance-command-scheduler.js";
-import { cloneJson } from "./json-value.js";
+import { cloneJson, type JsonObject } from "./json-value.js";
+import { cloneWorkerConfig } from "./worker-config.js";
 import { isPortableAbsoluteLocalPath } from "./local-path.js";
 import {
   CatalogEffectUnknownError,
@@ -209,6 +210,8 @@ export interface ManagedInstanceOptions {
   extensionUiBroker?: ExtensionUiBroker;
   initialHistory?: AgentHistoryEntry[];
   dockToolsEnabled?: boolean;
+  /** Adapter-owned creation input; Dock persists it without interpreting fields. */
+  workerConfig?: JsonObject;
 }
 
 interface AssistantOutcome {
@@ -367,6 +370,7 @@ export class ManagedInstance {
   private shutdownRequestedAt: string | undefined;
   private ownerReleaseUnconfirmed = false;
   private dockToolsEnabledValue = false;
+  private readonly workerConfigValue: JsonObject | undefined;
   private readonly deliverables = new InstanceDeliverables();
   private executionChangedAtValue!: string;
   private runStartedAtValue: string | undefined;
@@ -424,6 +428,9 @@ export class ManagedInstance {
     this.createCommandId = options.commandId ?? randomUUID;
     this.extensionUi = options.extensionUiBroker ?? new ExtensionUiBroker(this.now, this.createCommandId);
     this.dockToolsEnabledValue = options.dockToolsEnabled ?? false;
+    this.workerConfigValue = options.workerConfig === undefined
+      ? undefined
+      : cloneWorkerConfig(options.workerConfig, "Worker configuration");
 
     const initializedAt = this.timestamp();
     this.createdAt = options.createdAt ?? initializedAt;
@@ -535,6 +542,7 @@ export class ManagedInstance {
       execution: snapshot.execution,
       lastRun: snapshot.lastRun,
       dockToolsEnabled: this.dockToolsEnabledValue,
+      ...(this.workerConfigValue === undefined ? {} : { workerConfig: cloneJson(this.workerConfigValue) }),
       executionChangedAt: snapshot.executionChangedAt,
       ...(snapshot.runStartedAt === undefined ? {} : { runStartedAt: snapshot.runStartedAt }),
       runtimeGeneration: snapshot.runtimeGeneration,

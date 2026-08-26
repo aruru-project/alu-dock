@@ -14,6 +14,7 @@ import type { AgentHistoryEntry, AgentRequest } from "../core/agent-worker.js";
 import type { DockToolsHostPort } from "../core/dock-tools.js";
 import type { InstanceAttachmentHostPort } from "../core/instance-attachments.js";
 import type { WorkerIncidentRecorder } from "../core/worker-incident.js";
+import type { JsonObject } from "../core/json-value.js";
 import { ProjectTrustCoordinator } from "../control/project-trust.js";
 import { PI_SDK_VERSION } from "../version.js";
 import { resolvePiReopenTarget } from "./pi-session-target.js";
@@ -32,6 +33,8 @@ export interface CreatePiInstanceOptions {
   sessionDir?: string;
   tools?: string[];
   excludeTools?: string[];
+  /** JSON-safe Pi creation options relayed without Host field semantics. */
+  workerConfig?: JsonObject;
   eventCapacity?: number;
   sessionFile?: string;
   initialRuntimeGeneration?: number;
@@ -71,6 +74,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
       ...(options.sessionDir === undefined ? {} : { sessionDir: resolve(options.sessionDir) }),
       ...(options.tools === undefined ? {} : { tools: options.tools }),
       ...(options.excludeTools === undefined ? {} : { excludeTools: options.excludeTools }),
+      ...(options.workerConfig === undefined ? {} : { workerConfig: options.workerConfig }),
       projectTrusted: options.projectTrusted,
       ...(options.sessionFile === undefined ? {} : { sessionFile: resolve(options.sessionFile) }),
       ...(options.name === undefined || options.sessionFile !== undefined ? {} : { initialName: options.name }),
@@ -116,6 +120,7 @@ export async function createPiInstance(options: CreatePiInstanceOptions): Promis
       extensionUiBroker,
       initialHistory,
       dockToolsEnabled,
+      ...(options.workerConfig === undefined ? {} : { workerConfig: options.workerConfig }),
     });
     await runtime.control({ type: "activate" });
     instance.synchronizeModelState();

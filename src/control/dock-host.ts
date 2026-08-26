@@ -77,6 +77,7 @@ import {
 import {
   ATTACHMENTS_CAPABILITY,
   MACHINES_CAPABILITY,
+  WORKER_CONFIG_CAPABILITY,
   capabilityForRequest,
   controlRequestDescriptor,
   CONTROL_PROTOCOL_VERSION,
@@ -560,6 +561,9 @@ export class DockHost {
       const descriptor = controlRequestDescriptor(request.type);
       if (this.state === "mutation_faulted" && descriptor.effect === "command" && !descriptor.availableDuringMutationFault) throw new ProtocolValidationError("mutation_faulted", "Alu Dock catalog is mutation-faulted; query state and wait for Host restart");
       if (!this.capabilities.has(capabilityForRequest(request.type))) throw new ProtocolValidationError("capability_missing", `Capability ${capabilityForRequest(request.type)} is unavailable`);
+      if (request.type === "instance.create" && request.params.workerConfig !== undefined && !this.capabilities.has(WORKER_CONFIG_CAPABILITY)) {
+        throw new ProtocolValidationError("capability_missing", `Capability ${WORKER_CONFIG_CAPABILITY} is unavailable`);
+      }
 
       const location = await this.instanceManager.locate(
         request,

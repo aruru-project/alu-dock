@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const PI_PACKAGE_NAME = "@earendil-works/pi-coding-agent";
 const PI_PACKAGE_DIR_ENV = "PI_PACKAGE_DIR";
 const PI_RUNTIME_NODE_ENV = "ALU_DOCK_PI_NODE";
+const ALU_DOCK_CLI_ENV = "ALU_DOCK_CLI_ENTRY";
 let runtimeBin: string | undefined;
 
 export function piWorkerRuntimeEnvironment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
@@ -19,6 +20,7 @@ export function piWorkerRuntimeEnvironment(base: NodeJS.ProcessEnv): NodeJS.Proc
   environment[pathKey] = [ensureRuntimeBin(), environment[pathKey]].filter(Boolean).join(delimiter);
   environment[PI_PACKAGE_DIR_ENV] = packageDir;
   environment[PI_RUNTIME_NODE_ENV] = process.execPath;
+  environment[ALU_DOCK_CLI_ENV] = realpathSync(fileURLToPath(new URL("../cli.js", import.meta.url)));
   environment.PI_CODING_AGENT = "true";
   environment.AI_AGENT = "pi";
   return environment;
@@ -52,9 +54,12 @@ function ensureRuntimeBin(): string {
   try {
     chmodSync(directory, 0o700);
     writeFileSync(join(directory, "pi"), "#!/bin/sh\nexec \"$ALU_DOCK_PI_NODE\" \"$PI_PACKAGE_DIR/dist/cli.js\" \"$@\"\n", { mode: 0o700 });
+    writeFileSync(join(directory, "aludock"), "#!/bin/sh\nexec \"$ALU_DOCK_PI_NODE\" \"$ALU_DOCK_CLI_ENTRY\" \"$@\"\n", { mode: 0o700 });
     if (process.platform === "win32") {
       writeFileSync(join(directory, "pi.cmd"), "@echo off\r\n\"%ALU_DOCK_PI_NODE%\" \"%PI_PACKAGE_DIR%\\dist\\cli.js\" %*\r\nexit /b %ERRORLEVEL%\r\n");
       writeFileSync(join(directory, "pi.ps1"), "& $env:ALU_DOCK_PI_NODE (Join-Path $env:PI_PACKAGE_DIR 'dist\\cli.js') @args\r\nexit $LASTEXITCODE\r\n");
+      writeFileSync(join(directory, "aludock.cmd"), "@echo off\r\n\"%ALU_DOCK_PI_NODE%\" \"%ALU_DOCK_CLI_ENTRY%\" %*\r\nexit /b %ERRORLEVEL%\r\n");
+      writeFileSync(join(directory, "aludock.ps1"), "& $env:ALU_DOCK_PI_NODE $env:ALU_DOCK_CLI_ENTRY @args\r\nexit $LASTEXITCODE\r\n");
     }
   } catch (error) {
     try { rmSync(directory, { recursive: true, force: true }); } catch {}

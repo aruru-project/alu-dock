@@ -26,6 +26,7 @@ import { MainMachineState, SubHostMachineState, readMachineJoinFile, writeMachin
 import { MachineSettingsState, machineListenerConfiguration, sameMachineListenerConfiguration, type MachineListenerStatus, type MachineSettings, type SubHostConnectionSettings } from "../control/machine-settings-state.js";
 import type { MachineDto } from "../control/protocol.js";
 import type { InstanceSnapshot, SessionDto } from "../core/managed-instance.js";
+import type { PiEnvironmentSnapshot, PiLoginInteraction } from "../pi/pi-environment.js";
 import { humanInstanceStatus } from "../core/instance-display-name.js";
 import { humanRelativeTime } from "../human-time.js";
 import { sessionDisplayName } from "../session-display.js";
@@ -211,6 +212,7 @@ export async function runSubHostHub(
             subtitle: notice ?? (status.connected ? "Connected to Main" : "Main is unavailable"),
             entries: [
               { value: "connection", label: "Main connection", description: settings.subhost ? `${terminalSafe(settings.subhost.mainAddress)} · Port ${settings.subhost.port}` : "Connection settings are missing" },
+              { value: "pi", label: "Pi", description: "Models and provider access on this computer" },
               { value: "main", label: "Use as Main", description: "Switch roles after the next restart" },
               { value: EXIT_HUB, label: "Leave", description: "Return to the shell" },
             ],
@@ -222,6 +224,8 @@ export async function runSubHostHub(
       notice = undefined;
       if (result.value === "connection") {
         notice = await configureSubHostRole(terminal, machineSettingsState, subHostMachineState, result.data.settings, "manage");
+      } else if (result.value === "pi") {
+        await choosePiEnvironment(terminal);
       } else if (result.value === "main") {
         const selected = await selectMenu(
           terminal,
@@ -545,6 +549,7 @@ async function chooseHubSettings(
       notice ?? "Configure this Main.",
       [
         { value: "attachments", label: "Attachment directory", description: terminalSafe(attachmentSettings.directory) },
+        { value: "pi", label: "Pi", description: "Models and provider access on this computer" },
         {
           value: "dock-role",
           label: machineSettings.role === "subhost" ? "Dock role · SubHost next start" : "Dock role · Main",
@@ -574,11 +579,277 @@ async function chooseHubSettings(
       }
       continue;
     }
+    if (selected === "pi") {
+      await choosePiEnvironment(terminal);
+      continue;
+    }
     if (selected === "dock-role") {
       notice = await configureSubHostRole(terminal, machineSettingsState, subHostMachineState, machineSettings);
     }
   }
 }
+
+async function choosePiEnvironment(terminal: HubProcessTerminal): Promise<void> {
+  let notice: string | undefined;
+  while (true) {
+    let snapshot: PiEnvironmentSnapshot;
+    try {
+      const { inspectPiEnvironment } = await import("../pi/pi-environment.js");
+      snapshot = await inspectPiEnvironment();
+    } catch {
+      await selectMenu(
+        terminal,
+        "Pi",
+        "Pi’s settings couldn’t be opened. Run Alu Dock as the same user who owns Pi’s configuration, then try again.",
+        [{ value: BACK, label: "Back", description: "Return to Settings" }],
+        "Enter or Esc · back",
+      );
+      return;
+    }
+    const configured = snapshot.providers.filter((provider) => provider.configured).length;
+    const selected = await selectMenu(
+      terminal,
+      "Pi",
+      notice ?? (snapshot.diagnostics.length > 0
+        ? `${snapshot.diagnostics.length} Pi setup note${snapshot.diagnostics.length === 1 ? "" : "s"} · configuration stays in ${terminalSafe(snapshot.agentDir)}`
+        : `Pi configuration · ${terminalSafe(snapshot.agentDir)}`),
+      [
+        {
+          value: "models",
+          label: `Models · ${snapshot.models.length}`,
+          description: snapshot.defaultModel
+            ? `Default · ${terminalSafe(snapshot.defaultModel.provider)}/${terminalSafe(snapshot.defaultModel.id)}`
+            : `${snapshot.providers.length} providers recognized by Pi`,
+        },
+        {
+          value: "access",
+          label: `Provider access · ${configured} configured`,
+          description: "Configure an API key, sign in, or remove saved access through Pi",
+        },
+        ...(snapshot.diagnostics.length === 0 ? [] : [{
+          value: "diagnostics",
+          label: `Setup notes · ${snapshot.diagnostics.length}`,
+          description: "Review messages reported while Pi loaded its environment",
+        }]),
+        { value: "install", label: "Install a Pi package", description: "Use aludock pi:install <source> in a terminal" },
+        { value: BACK, label: "Back", description: "Return to Settings" },
+      ],
+      "↑↓ choose · Enter open · Esc back",
+    );
+    if (!selected || selected === BACK) return;
+    notice = undefined;
+    if (selected === "models") await choosePiModels(terminal, snapshot);
+    if (selected === "access") await choosePiProviderAccess(terminal);
+    if (selected === "diagnostics") await showPiDiagnostics(terminal, snapshot);
+    if (selected === "install") {
+      await selectMenu(
+        terminal,
+        "Install a Pi package",
+        "Run `aludock pi:install <source>` here or from a Pi Worker. The bundled Pi accepts its normal npm, git, and local package sources.",
+        [{ value: BACK, label: "Back", description: "Existing Work can load changes with /reload" }],
+        "Enter or Esc · back",
+      );
+    }
+  }
+}
+
+async function choosePiModels(terminal: HubProcessTerminal, snapshot: PiEnvironmentSnapshot): Promise<void> {
+  while (true) {
+    const providers = snapshot.providers.filter((provider) => provider.modelCount > 0);
+    const selected = await selectMenu(
+      terminal,
+      "Pi Models",
+      snapshot.defaultModel
+        ? `Default · ${terminalSafe(snapshot.defaultModel.provider)}/${terminalSafe(snapshot.defaultModel.id)}`
+        : "No global default model is set.",
+      [
+        ...providers.map((provider) => ({
+          value: `provider:${provider.id}`,
+          label: `${terminalSafe(provider.name)} · ${provider.modelCount}`,
+          description: provider.configured ? "Access configured" : "Access not configured",
+        })),
+        { value: BACK, label: "Back", description: "Return to Pi" },
+      ],
+      "↑↓ choose · Enter view · Esc back",
+    );
+    if (!selected || selected === BACK) return;
+    const providerId = selected.slice("provider:".length);
+    const provider = snapshot.providers.find((item) => item.id === providerId);
+    if (!provider) continue;
+    const models = snapshot.models.filter((model) => model.provider === providerId);
+    await selectMenu(
+      terminal,
+      provider.name,
+      `${models.length} model${models.length === 1 ? "" : "s"} recognized by Pi`,
+      [
+        ...models.map((model, index) => ({
+          value: `model:${index}`,
+          label: terminalSafe(model.name),
+          description: `${terminalSafe(model.id)}${model.reasoning ? " · reasoning" : ""}`,
+        })),
+        { value: BACK, label: "Back", description: "Return to providers" },
+      ],
+      "↑↓ browse · Esc back",
+    );
+  }
+}
+
+async function choosePiProviderAccess(terminal: HubProcessTerminal): Promise<void> {
+  let notice: string | undefined;
+  while (true) {
+    let snapshot: PiEnvironmentSnapshot;
+    try {
+      const { inspectPiEnvironment } = await import("../pi/pi-environment.js");
+      snapshot = await inspectPiEnvironment();
+    } catch {
+      return;
+    }
+    const selected = await selectMenu(
+      terminal,
+      "Pi Provider Access",
+      notice ?? "Credentials are saved and refreshed by Pi in its normal auth.json.",
+      [
+        ...snapshot.providers.map((provider) => ({
+          value: `provider:${provider.id}`,
+          label: `${provider.configured ? "●" : "○"} ${terminalSafe(provider.name)}`,
+          description: piProviderAccessDescription(provider),
+        })),
+        { value: BACK, label: "Back", description: "Return to Pi" },
+      ],
+      "↑↓ choose · Enter manage · Esc back",
+    );
+    if (!selected || selected === BACK) return;
+    const provider = snapshot.providers.find((item) => item.id === selected.slice("provider:".length));
+    if (!provider) continue;
+    const action = await selectMenu(
+      terminal,
+      provider.name,
+      provider.configured ? `Pi access is configured${provider.accessLabel ? ` · ${terminalSafe(provider.accessLabel)}` : ""}.` : "Pi access is not configured.",
+      [
+        ...(provider.apiKey?.canLogin ? [{ value: "api_key", label: "Configure API key", description: terminalSafe(provider.apiKey.name) }] : []),
+        ...(provider.oauth ? [{ value: "oauth", label: provider.oauth.loginLabel ? terminalSafe(provider.oauth.loginLabel) : "Sign in", description: terminalSafe(provider.oauth.name) }] : []),
+        ...(provider.storedCredentialType ? [{ value: "logout", label: "Remove saved access", description: "Delete this provider’s credential from Pi" }] : []),
+        { value: BACK, label: "Back", description: "Return to providers" },
+      ],
+      "↑↓ choose · Enter continue · Esc back",
+    );
+    if (!action || action === BACK) continue;
+    if (action === "logout") {
+      const confirmed = await selectMenu(
+        terminal,
+        `Remove ${provider.name} access?`,
+        "This removes the credential saved by Pi on this computer.",
+        [
+          { value: "confirm", label: "Remove saved access", description: "Other Pi processes on this computer will also see the change" },
+          { value: BACK, label: "Keep it", description: "Leave Pi unchanged" },
+        ],
+        "↑↓ choose · Enter confirm · Esc keep",
+      );
+      if (confirmed !== "confirm") continue;
+      try {
+        const { logoutPiProvider } = await import("../pi/pi-environment.js");
+        await logoutPiProvider(provider.id);
+        notice = `${provider.name} access was removed from Pi.`;
+      } catch (error) {
+        notice = `Pi couldn’t remove ${provider.name} access: ${humanPiFailure(error)}`;
+      }
+      continue;
+    }
+    if (action !== "api_key" && action !== "oauth") continue;
+    try {
+      const { loginPiProvider } = await import("../pi/pi-environment.js");
+      await loginPiProvider(provider.id, action, createPiLoginInteraction(terminal));
+      notice = action === "oauth"
+        ? `${provider.name} sign-in finished in Pi.`
+        : `${provider.name} API-key access was saved by Pi.`;
+    } catch (error) {
+      notice = error instanceof PiLoginCancelledError
+        ? `${provider.name} setup was cancelled.`
+        : `Pi couldn’t finish ${provider.name} setup: ${humanPiFailure(error)}`;
+    }
+  }
+}
+
+function createPiLoginInteraction(terminal: HubProcessTerminal): PiLoginInteraction {
+  let promptContext: string | undefined;
+  const remember = (...parts: Array<string | undefined>): void => {
+    const value = parts.filter((part): part is string => Boolean(part)).map(terminalSafe).join(" ");
+    promptContext = value.length > 8_000 ? `${value.slice(0, 7_997)}…` : value;
+  };
+  return {
+    prompt: async (prompt) => {
+      if (prompt.signal?.aborted) throw new PiLoginCancelledError();
+      if (prompt.type === "select") {
+        const selected = await selectMenu(
+          terminal,
+          prompt.message,
+          promptContext ?? "Choose an option supplied by Pi.",
+          prompt.options.map((option) => ({
+            value: option.id,
+            label: terminalSafe(option.label),
+            description: terminalSafe(option.description ?? ""),
+          })),
+          "↑↓ choose · Enter continue · Esc cancel",
+        );
+        if (!selected || prompt.signal?.aborted) throw new PiLoginCancelledError();
+        return selected;
+      }
+      const value = await promptHubText(
+        terminal,
+        prompt.message,
+        prompt.placeholder ?? (prompt.type === "secret" ? "Enter the value; it stays hidden." : "Enter the value requested by Pi."),
+        undefined,
+        { secret: prompt.type === "secret", signal: prompt.signal, context: promptContext },
+      );
+      if (value === undefined || prompt.signal?.aborted) throw new PiLoginCancelledError();
+      return value;
+    },
+    notify: (event) => {
+      if (event.type === "auth_url") {
+        remember("Open this address to continue sign-in:", event.url, event.instructions);
+        terminal.write(`${terminalSafe(event.instructions ?? "Open this address to continue sign-in:")}\n${terminalSafe(event.url)}\n`);
+        return;
+      }
+      if (event.type === "device_code") {
+        remember("Open", event.verificationUri, "and enter code", event.userCode);
+        terminal.write(`Open ${terminalSafe(event.verificationUri)} and enter code ${terminalSafe(event.userCode)}.\n`);
+        return;
+      }
+      terminal.write(`${terminalSafe(event.message)}\n`);
+      if (event.type === "info") {
+        const links = event.links ?? [];
+        if (links.length > 0) remember(...links.flatMap((link) => [link.label ?? "Open", link.url]), event.message);
+        for (const link of links) terminal.write(`${terminalSafe(link.label ?? "Open")}: ${terminalSafe(link.url)}\n`);
+      }
+    },
+  };
+}
+
+async function showPiDiagnostics(terminal: HubProcessTerminal, snapshot: PiEnvironmentSnapshot): Promise<void> {
+  await selectMenu(
+    terminal,
+    "Pi Setup Notes",
+    "These messages came from Pi while it loaded global packages and model configuration.",
+    [
+      ...snapshot.diagnostics.slice(0, 100).map((message, index) => ({ value: `note:${index}`, label: terminalSafe(message), description: "" })),
+      { value: BACK, label: "Back", description: "Return to Pi" },
+    ],
+    "↑↓ browse · Esc back",
+  );
+}
+
+function piProviderAccessDescription(provider: PiEnvironmentSnapshot["providers"][number]): string {
+  if (provider.configured) return provider.accessLabel ? `Configured · ${terminalSafe(provider.accessLabel)}` : "Configured";
+  const methods = [provider.apiKey?.canLogin ? "API key" : undefined, provider.oauth ? "sign-in" : undefined].filter(Boolean);
+  return methods.length > 0 ? `Not configured · ${methods.join(" or ")}` : "Uses ambient Pi access when available";
+}
+
+function humanPiFailure(error: unknown): string {
+  const message = (error instanceof Error ? error.message : String(error)).replace(/[\u0000-\u001f\u007f-\u009f]+/gu, " ").trim();
+  return terminalSafe(message.length > 300 ? `${message.slice(0, 297)}…` : message || "try again");
+}
+
+class PiLoginCancelledError extends Error {}
 
 async function chooseMachinesAction(
   terminal: HubProcessTerminal,
@@ -1437,12 +1708,14 @@ async function promptHubText(
   title: string,
   placeholder: string,
   prefill?: string,
+  options: { secret?: boolean; signal?: AbortSignal; context?: string } = {},
 ): Promise<string | undefined> {
   const tui = new TuiMainScreen(terminal, process.env.PI_HARDWARE_CURSOR === "1");
   const dialog = new ExtensionTextDialog({
-    mode: "input",
+    mode: options.secret ? "secret" : "input",
     title,
-    placeholder,
+    placeholder: options.context ? `${options.context} · ${placeholder}` : placeholder,
+    maxPlaceholderRows: options.context ? 12 : 2,
     ...(prefill === undefined ? {} : { prefill }),
     requestRender: () => tui.requestRender(),
     tui,
@@ -1469,6 +1742,9 @@ async function promptHubText(
     signalReceived = true;
     finish(undefined);
   };
+  const onAbort = (): void => finish(undefined);
+  options.signal?.addEventListener("abort", onAbort, { once: true });
+  if (options.signal?.aborted) finish(undefined);
   dialog.onSubmit = finish;
   dialog.onCancel = () => finish(undefined);
   const removeMouseListener = tui.addInputListener((data) => (
@@ -1489,6 +1765,7 @@ async function promptHubText(
     tui.stop();
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
+    options.signal?.removeEventListener("abort", onAbort);
   }
 }
 

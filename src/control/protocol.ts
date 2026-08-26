@@ -14,7 +14,8 @@ import {
 import { MAX_INSTANCE_DISPLAY_NAME_CHARS } from "../core/instance-display-name.js";
 import { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
 import { isPortableAbsoluteLocalPath, isPortableLocalRootPath } from "../core/local-path.js";
-import { MAX_JSON_ARRAY_ITEMS, MAX_JSON_OBJECT_KEYS, MAX_JSON_OMITTED_FIELDS, MAX_JSON_VALUE_DEPTH, type JsonObject, type JsonValue } from "../core/json-value.js";
+import { MAX_JSON_ARRAY_ITEMS, MAX_JSON_OBJECT_KEYS, MAX_JSON_OMITTED_FIELDS, MAX_JSON_STRING_CHARS, MAX_JSON_VALUE_DEPTH, type JsonObject, type JsonValue } from "../core/json-value.js";
+import { cloneWorkerConfig } from "../core/worker-config.js";
 import {
   MAX_DELIVERY_REF_CHARS,
   MAX_TEMPORARY_DELIVERABLES_PER_INSTANCE,
@@ -159,6 +160,7 @@ export const PUBLISHED_FILES_CAPABILITY = "published-files.v1" as const;
 export const INSTANCE_DELIVERABLES_CAPABILITY = "instance.deliverables.v1" as const;
 export const COMMAND_DISCOVERY_CAPABILITY = "command.discovery.v1" as const;
 export const MACHINES_CAPABILITY = "machines.v1" as const;
+export const WORKER_CONFIG_CAPABILITY = "instance.worker-config.v1" as const;
 export { MACHINE_PLATFORMS, type MachineDto, type MachinePlatform, type MachinesResult } from "../core/machine-dto.js";
 
 export const IMPLEMENTED_CAPABILITIES = [
@@ -185,6 +187,7 @@ export const IMPLEMENTED_CAPABILITIES = [
   "extension_ui.v1",
   "host.info",
   "instance.catalog",
+  WORKER_CONFIG_CAPABILITY,
   INSTANCE_KEYS_CAPABILITY,
   INSTANCE_DISPLAY_NAME_CAPABILITY,
   "models.v1",
@@ -249,7 +252,7 @@ export type ControlRequest =
   | Request<"machine.list", Record<string, never>>
   | Request<"machine.remove", { operationId: string; hostId: string }>
   | Request<"attachment.upload", { operationId: string; instanceId?: string; name: string; sizeBytes: number; mediaType?: string; sha256: string }>
-  | Request<"instance.create", { operationId: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
+  | Request<"instance.create", { operationId: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice; workerConfig?: JsonObject }>
   | Request<"instance.ensure", { operationId: string; key: string; cwd: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.adopt", { operationId: string; sessionFile: string; name?: string; hostId?: string; trustChallengeId?: string; projectTrustDecision?: ProjectTrustChoice }>
   | Request<"instance.list", { selector: "actionable" | "all"; cursor?: InstanceListCursor; limit: number }>
@@ -622,6 +625,7 @@ export function requiredCapabilities(capability: Capability): string[] {
   return [...new Set<Capability>([
     "core.v2",
     ...(capability === EVENTS_FOLLOW_CAPABILITY ? [INSTANCE_READ_CAPABILITY] : []),
+    ...(capability === WORKER_CONFIG_CAPABILITY ? ["instance.catalog" as const] : []),
     ...(capabilityProjectsInstanceSnapshot(capability) ? [TOOLS_EXPANDED_CAPABILITY, GIT_BRANCH_CAPABILITY, INSTANCE_KEYS_CAPABILITY, INSTANCE_DISPLAY_NAME_CAPABILITY] : []),
     ...(capabilityProjectsToolResults(capability) ? [TOOL_RESULT_PRESENTATION_CAPABILITY] : []),
     capability,
@@ -643,6 +647,7 @@ function capabilityProjectsInstanceSnapshot(capability: Capability): boolean {
     || capability === CONVERSATION_CONTENT_CAPABILITY
     || capability === EVENTS_FOLLOW_CAPABILITY
     || capability === INSTANCE_READ_CAPABILITY
+    || capability === WORKER_CONFIG_CAPABILITY
     || capability === "instance.catalog"
     || capability === "models.v1"
     || capability === "queue.control.v1"
@@ -768,12 +773,17 @@ export function parseControlRequest(input: unknown): ControlRequest {
       return { ...base, type, params: { operationId: operationId(), ...(uploadInstanceId === undefined ? {} : { instanceId: uploadInstanceId }), name, sizeBytes, ...(mediaType === undefined ? {} : { mediaType }), sha256 } };
     }
     case "instance.create": {
-      exact(params, ["operationId", "cwd", "name", "hostId", "trustChallengeId", "projectTrustDecision"], "invalid_request");
+      exact(params, ["operationId", "cwd", "name", "hostId", "trustChallengeId", "projectTrustDecision", "workerConfig"], "invalid_request");
       const trustChallengeId = optionalString(params.trustChallengeId, "params.trustChallengeId", MAX_CONTROL_REQUEST_ID_CHARS, "invalid_request");
       const projectTrustDecision = params.projectTrustDecision === undefined ? undefined : enumeration(params.projectTrustDecision, "params.projectTrustDecision", ["trust_once", "trust_and_remember", "deny_once", "deny_and_remember"], "invalid_request");
       if ((trustChallengeId === undefined) !== (projectTrustDecision === undefined)) throw validation("invalid_request", "trustChallengeId and projectTrustDecision must be supplied together");
       const selectedHost = hostId();
-      return { ...base, type, params: { operationId: operationId(), cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"), name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), ...(selectedHost === undefined ? {} : { hostId: selectedHost }), trustChallengeId, projectTrustDecision } };
+      let workerConfig: JsonObject | undefined;
+      if (params.workerConfig !== undefined) {
+        try { workerConfig = cloneWorkerConfig(params.workerConfig, "params.workerConfig"); }
+        catch (error) { throw validation("invalid_request", error instanceof Error ? error.message : "params.workerConfig is invalid"); }
+      }
+      return { ...base, type, params: { operationId: operationId(), cwd: string(params.cwd, "params.cwd", MAX_CONTROL_CWD_CHARS, "invalid_request"), name: optionalString(params.name, "params.name", MAX_INSTANCE_NAME_CHARS, "invalid_request"), ...(selectedHost === undefined ? {} : { hostId: selectedHost }), trustChallengeId, projectTrustDecision, ...(workerConfig === undefined ? {} : { workerConfig }) } };
     }
     case "instance.ensure": {
       exact(params, ["operationId", "key", "cwd", "name", "hostId", "trustChallengeId", "projectTrustDecision"], "invalid_request");
@@ -2555,5 +2565,5 @@ function strings(input: unknown, field: string, maxItems: number, maxChars: numb
 function unsignedArray(input: unknown, field: string, max: number): number[] { return array(input, field, max).map((item, index) => unsigned(item, `${field}[${index}]`)); }
 function timestamp(input: unknown, field: string): string { const value = string(input, field, 64); let normalized: string; try { normalized = new Date(value).toISOString(); } catch { throw validation("invalid_response", `${field} must be an ISO-8601 UTC timestamp`); } if (normalized !== value) throw validation("invalid_response", `${field} must be an ISO-8601 UTC timestamp`); return value; }
 function parseJsonObject(input: unknown, field: string): JsonObject { const value = parseJsonValue(input, field, 0); if (value === null || typeof value !== "object" || Array.isArray(value)) throw validation("invalid_response", `${field} must be a JSON object`); return value; }
-function parseJsonValue(input: unknown, field: string, depth: number): JsonValue { if (depth > MAX_JSON_VALUE_DEPTH) throw validation("invalid_response", `${field} exceeds JSON depth`); if (input === null || typeof input === "boolean") return input; if (typeof input === "string") return boundedString(input, field, MAX_TEXT); if (typeof input === "number" && Number.isFinite(input)) return input; if (Array.isArray(input)) return array(input, field, MAX_JSON_ARRAY_ITEMS).map((item, index) => parseJsonValue(item, `${field}[${index}]`, depth + 1)); const value = object(input, field); if (Object.keys(value).length > MAX_JSON_OBJECT_KEYS) throw validation("invalid_response", `${field} has too many keys`); return Object.fromEntries(Object.entries(value).map(([key, item]) => [string(key, `${field} key`, 256), parseJsonValue(item, `${field}.${key}`, depth + 1)])); }
+function parseJsonValue(input: unknown, field: string, depth: number): JsonValue { if (depth > MAX_JSON_VALUE_DEPTH) throw validation("invalid_response", `${field} exceeds JSON depth`); if (input === null || typeof input === "boolean") return input; if (typeof input === "string") return boundedString(input, field, MAX_JSON_STRING_CHARS); if (typeof input === "number" && Number.isFinite(input)) return input; if (Array.isArray(input)) return array(input, field, MAX_JSON_ARRAY_ITEMS).map((item, index) => parseJsonValue(item, `${field}[${index}]`, depth + 1)); const value = object(input, field); if (Object.keys(value).length > MAX_JSON_OBJECT_KEYS) throw validation("invalid_response", `${field} has too many keys`); return Object.fromEntries(Object.entries(value).map(([key, item]) => [string(key, `${field} key`, 256), parseJsonValue(item, `${field}.${key}`, depth + 1)])); }
 function valueOr(input: unknown): unknown { return input; }

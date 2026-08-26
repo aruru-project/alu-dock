@@ -41,6 +41,7 @@ function createFixtureInstance(
     createdAt: input.createdAt,
     reopenedFrom: input.reopenedFrom,
     dockToolsEnabled: input.dockToolsEnabled,
+    workerConfig: input.workerConfig,
   });
 }
 
@@ -82,7 +83,8 @@ test("Dock tools switch persists across Host restart and explicit reopen", async
     { hostEpoch: "observer-host-one", startedAt: "2026-07-15T01:00:00.000Z", catalogStore: new FileCatalogStore(catalogPath) },
   );
   await first.initializeCatalog();
-  const source = await first.create({ operationId: "create-observer", cwd });
+  const workerConfig = { excludeTools: ["bash"], thinkingLevel: "low" };
+  const source = await first.create({ operationId: "create-observer", cwd, workerConfig });
   await first.configureDockTools(source.id, true, "dock-tools-on");
   assert.equal(first.dockToolsEnabled(source.id), true);
 
@@ -102,6 +104,7 @@ test("Dock tools switch persists across Host restart and explicit reopen", async
   assert.equal(second.dockToolsEnabled(source.id), true);
   await second.reopen({ operationId: "reopen-observer", instanceId: source.id });
   assert.equal(reopenInput?.dockToolsEnabled, true);
+  assert.deepEqual(reopenInput?.workerConfig, workerConfig);
   assert.equal(second.get(source.id).dockToolsEnabled(), true);
 });
 
