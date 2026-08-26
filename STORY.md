@@ -32,6 +32,8 @@ Host 管理 agent，但不冒充 agent。它不把所有 agent 强行捏成一�
 
 **Worker 是 agent 的运行环境。**一份工作实例对应一个由 host 管理的 worker。
 
+**官方 Client 是 Alu Dock 的第一方产品入口。**Desktop 与 Android Client 和 Hub/Work TUI 一样属于同一个 Alu Dock 产品，通过 Protocol V2 连接 Host；它不直连 Worker，也不因为与 Dock 代码同仓就获得另一套业务接口。其他自定义 Client 仍可通过同一 Protocol V2 独立实现和维护。
+
 worker 可以由不同的 agent 实现，当前默认是 Pi。远端 SubHost 断线时，Main 已经无法控制那台机器上的物理进程；此时 Stop 永久结束的是 Main 中对应的 Work 身份和控制关系，不等待、不排队重试远端操作。原 native worker 后续重新申报时只能成为新的 Work，不能恢复已经被 Stop 的旧身份。
 
 后面会有：
@@ -45,13 +47,13 @@ worker 可以由不同的 agent 实现，当前默认是 Pi。远端 SubHost 断
 
 多 agent 不是 Pi 之外附加的未来功能，它是 Dock 本来的形状。Pi 是其中一个重要且完整的 worker 实现，不是 Dock 的边界。
 
-Pi Worker 有一套自己专属的 TUI，配色来自阿露的角色立绘。它是 Pi Worker 的界面，不反过来定义 host 或别的 worker 该长什么样。
+Pi Worker 有一套自己专属的 TUI，配色来自阿露的角色立绘。它是 Pi Worker 的界面，不反过来定义 host 或别的 worker 该长什么样。官方 Desktop/Android Client 是跨 Agent 的 Dock Client，也不反过来定义 Host、Worker 或 Protocol V2 的能力边界。
 
 ## 谁会进来
 
 港口里停的是工作，进来的不只是人。
 
-**我从各种入口进来。**网页、SSH，以后还有语音和手机。看一眼、插句话、走开，工作照跑。
+**我从各种入口进来。**官方 Desktop/Android Client、SSH TUI、网页和以后出现的其他 Client 都只是入口。看一眼、插句话、走开，工作照跑。
 
 **阿露自己也会进来。**我会直接跟她说“看看隔壁 alubot_admin 做到哪了”、“帮我盯着 Sol，歪了就丢段 prompt 纠正它，idle 了告诉我”。她干完自己的活，也可以反过来找我验收。
 

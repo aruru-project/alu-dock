@@ -8,34 +8,34 @@
 
 ## 项目是什么
 
-Alu Dock 是本机单用户的 Agent 运行与控制主体。它提供长期 Host Service、受管工作实例、统一协议和多个客户端入口，让 Agent 工作可以脱离单个终端持续运行、观察和接管。
+Alu Dock 是本机单用户的 Agent 运行与控制主体。它提供长期 Host Service、受管工作实例、统一协议，以及官方 Desktop/Android Client、TUI 和自定义 Client 等多个入口，让 Agent 工作可以脱离单个终端持续运行、观察和接管。
 
-当前唯一 Agent 实现是 Pi。Pi 是当前成熟基底，不是 Alu Dock 永久唯一的 Agent 类型；未来可以通过新的 Worker adapter 接入轻量语音等其他 Agent。
+当前唯一 Agent 实现是 Pi。Pi 是当前成熟基底，不是 Alu Dock 永久唯一的 Agent 类型；未来可以通过新的 Worker adapter 接入轻量语音等其他 Agent。官方 Desktop/Android Client 是 Alu Dock 的第一方产品组成，不是独立产品或第三方项目。
 
 ## 架构
 
 ```text
-Hub TUI / Work TUI / Rails-WebUI / future clients
-                         │
-                    Protocol V2
-                         │
-                  Dock Host Service
-             control authority + session gateway
-                         │
-                 private Worker transport
-                         │
-                    Agent Worker
-                         │
-                    Agent adapter
-                         │
-                Pi / future Agent runtime
+Official Desktop/Android / Hub TUI / Work TUI / custom clients
+                              │
+                         Protocol V2
+                              │
+                       Dock Host Service
+                  control authority + session gateway
+                              │
+                      private Worker transport
+                              │
+                         Agent Worker
+                              │
+                         Agent adapter
+                              │
+                     Pi / future Agent runtime
 ```
 
 - **Protocol V2** 是 Dock 对客户端的协议。客户端不直连 Worker，也不接触 Agent 私有对象或私有存储。
 - **Host** 管理 instance、catalog、operation、Queue、controller、generation 与 Worker 生命周期，并把 Agent 会话流量路由到正确的 Worker。Host 不重新实现 Agent runtime，也不改写 Agent 内容。
 - **Worker** 持有完整 Agent runtime、session、tools、extensions、components、callbacks 与 Promise。Agent adapter 在这里完成 Agent 与 Dock 协议之间的转换。
 - **客户端** 各自实现所需界面。一个客户端尚未支持某项能力，不影响 Agent、其他客户端或已经工作的能力。
-- **本项目范围仅限 Dock 本身**：Host、Worker，以及本项目内部的 Hub TUI 和 Work TUI。其他第三方实现全部通过 Protocol V2 对接并由各自项目维护，禁止跨项目修改其他项目代码。
+- **本仓库承载一个 Alu Dock 产品**：Host、Worker、Hub/Work TUI 和 `clients/official/` 下的官方 Desktop/Android Client。官方 Client 的 Rust core、Tauri 外壳与 Vue UI 保持自己的语言和构建边界，但产品语义、Protocol 与跨层工程规则服从根目录权威。Rails Web Console 等自定义 Client 继续通过 Protocol V2 对接并由各自项目维护，禁止跨项目修改其代码。
 - 新增使用既有能力的 Agent，主要增加 Worker adapter 和 runtime 注册；新增真正的 Agent 能力时，在 Protocol V2 定义一次，再由需要它的客户端实现。
 - 同一能力只保留一个 Dock 协议定义。任意两层之间（Worker↔Host、Host↔客户端）都不得用逐方法 proxy、重复 DTO、重复 projection 或兼容壳模拟对端。新增能力沿唯一路径：Worker adapter 产出 Protocol V2 结果体 → `protocol.ts` 定义一次 parser → Worker 边界与客户端复用它 → Host 只合并自己的事实。
 - 界限常量（字节、条目、字符上限）只在产出端定义一次，第二处出现同一数值按缺陷处理。没有调用方的代码和只写不读的状态发现即删，不等专项清理。
@@ -49,6 +49,7 @@ Hub TUI / Work TUI / Rails-WebUI / future clients
 | Agent Worker、Pi adapter、session 与 Extension UI | [`docs/agent_maps/runtime.md`](docs/agent_maps/runtime.md) |
 | Pi SDK 依赖升级与独立兼容门 | [`docs/pi-sdk-upgrades.md`](docs/pi-sdk-upgrades.md) |
 | Hub 与 Session Work TUI | [`docs/agent_maps/tui.md`](docs/agent_maps/tui.md) |
+| 官方 Desktop/Android Client | [`clients/official/AGENTS.md`](clients/official/AGENTS.md) |
 | Managed service 与部署 | [`docs/agent_maps/deployment.md`](docs/agent_maps/deployment.md) |
 | 测试配额、用户可见文案与验证层次 | [`docs/qa.md`](docs/qa.md) |
 | 本地安装和运维 | [`docs/local-install.md`](docs/local-install.md) |
