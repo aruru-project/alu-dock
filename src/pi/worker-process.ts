@@ -1,4 +1,4 @@
-import { fork, spawn, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 import { WORKER_INCIDENT_STDERR_MAX_BYTES } from "../core/worker-incident.js";
@@ -59,12 +59,15 @@ export class PiWorkerProcess {
   constructor(options: PiWorkerProcessOptions) {
     this.timeouts = { ...DEFAULT_WORKER_TIMEOUTS, ...options.timeouts };
     const entry = options.entry ?? fileURLToPath(new URL("./pi-worker-entry.js", import.meta.url));
-    this.child = fork(entry, [], {
+    this.child = spawn(process.execPath, [entry], {
       cwd: options.init.cwd,
       detached: true,
-      // Do not leak parent runner/debug flags (for example --test or
-      // --input-type) into the managed runtime process.
-      execArgv: [],
+      // A detached Windows process otherwise receives its own visible console.
+      // Keep the Worker process group while preventing background Work from
+      // interrupting the desktop.
+      windowsHide: true,
+      // Invoking the entry directly also keeps parent runner/debug flags (for
+      // example --test or --input-type) out of the managed runtime process.
       env: {
         ...definedEnvironment(piWorkerRuntimeEnvironment(options.environment)),
         ALU_DOCK_PI_WORKER: "1",
