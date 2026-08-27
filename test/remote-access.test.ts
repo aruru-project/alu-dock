@@ -30,7 +30,7 @@ import { DelayedAgentWorkerConnection } from "./support/delayed-agent-worker.js"
 import { ptyUserEnvironment } from "./support/pty-user-environment.js";
 
 class BarrierRemoteAccessState extends RemoteAccessState {
-  private barrier: { started: () => void; wait: Promise<void> } | undefined;
+  private barrier: { started: () => void; wait: Promise<void>; release: () => void } | undefined;
   private trustStarted: Promise<void> | undefined;
   trustWriteAttempts = 0;
 
@@ -39,8 +39,13 @@ class BarrierRemoteAccessState extends RemoteAccessState {
     let started!: () => void;
     this.trustStarted = new Promise<void>((resolveStarted) => { started = resolveStarted; });
     const wait = new Promise<void>((resolveRelease) => { release = resolveRelease; });
-    this.barrier = { started, wait };
+    this.barrier = { started, wait, release };
     return release;
+  }
+
+  releaseTrustBarrier(): void {
+    this.barrier?.release();
+    this.barrier = undefined;
   }
 
   async waitForBlockedTrust(): Promise<void> {
@@ -158,11 +163,17 @@ test("local pairing window admits an exact certificate to the existing Protocol 
   const port = await reservePort();
   const configuredAttachmentDirectory = join(directory, "Hub configured attachments");
   const attachmentService = new AttachmentService(new AttachmentStorageState(join(stateHome, "alu-dock"), join(directory, "attachments")));
+  let blocker: ReturnType<typeof createNetServer> | undefined;
   const registry = new DockRegistry(async ({ id, creationOperationId, hostEpoch, cwd }) => (
     new ManagedInstance({ id, creationOperationId, hostEpoch, cwd, session: new DelayedAgentWorkerConnection(`pi-${id}`) })
   ), undefined, { attachmentHostPort: attachmentService });
   const host = new DockHost({ socketPath, registry, remoteAccessState: state, attachmentService });
   context.after(async () => {
+    state.releaseTrustBarrier();
+    const activeBlocker = blocker;
+    if (activeBlocker?.listening) {
+      await new Promise<void>((resolveClose) => activeBlocker.close(() => resolveClose()));
+    }
     await host.stop().catch(() => {});
     await rm(directory, { recursive: true, force: true });
   });
@@ -430,10 +441,11 @@ test("local pairing window admits an exact certificate to the existing Protocol 
 
   // A failed port migration must not leave the old network ingress silently active.
   const occupiedPort = await reservePort();
-  const blocker = createNetServer();
+  const portBlocker = createNetServer();
+  blocker = portBlocker;
   await new Promise<void>((resolveListen, rejectListen) => {
-    blocker.once("error", rejectListen);
-    blocker.listen({ host: "::", port: occupiedPort, ipv6Only: false }, resolveListen);
+    portBlocker.once("error", rejectListen);
+    portBlocker.listen({ host: "::", port: occupiedPort, ipv6Only: false }, resolveListen);
   });
   const changed = await state.writeSettings({ enabled: true, port: occupiedPort });
   await waitFor(async () => {
@@ -441,7 +453,8 @@ test("local pairing window admits an exact certificate to the existing Protocol 
     return status?.configRevision === changed.revision && status.state === "error";
   }, 4_000);
   assert.equal(await tcpConnects("::1", port), false, "the previous TLS port must close when replacement bind fails");
-  await new Promise<void>((resolveClose) => blocker.close(() => resolveClose()));
+  await new Promise<void>((resolveClose) => portBlocker.close(() => resolveClose()));
+  blocker = undefined;
 });
 
 interface HubPtyResult {
