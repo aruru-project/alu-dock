@@ -29,6 +29,8 @@ const runtimeManifest = JSON.parse(readFileSync(join(clientRoot, "windows-runtim
 const version = (process.env.ALUDOCK_RELEASE_VERSION || clientManifest.version).trim();
 // Windows 10/11 inbox contracts only. VC runtimes, WebView loaders, GNU runtimes,
 // and other redistributables are deliberately absent and must ship beside their importer.
+const AMD64_PE_MACHINE = 0x8664;
+const NATIVE_PREBUILD_TARGET = "win32-x64";
 const WINDOWS_INBOX_LIBRARIES = new Set([
   "advapi32.dll", "avrt.dll", "bcrypt.dll", "bcryptprimitives.dll", "cfgmgr32.dll",
   "clbcatq.dll", "combase.dll", "comctl32.dll", "comdlg32.dll", "coremessaging.dll",
@@ -56,6 +58,7 @@ if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u.test(version)) {
 validateRuntimeManifest(runtimeManifest);
 
 const target = runtimeManifest.target;
+const systemTar = windowsSystemExecutable("tar.exe");
 const releaseName = `AluDock-${version}-windows-x86_64`;
 const outputDirectory = join(clientRoot, "dist");
 const output = join(outputDirectory, `${releaseName}.zip`);
@@ -63,13 +66,19 @@ const temporary = mkdtempSync(join(tmpdir(), "aludock-windows-package-"));
 const releaseRoot = join(temporary, releaseName);
 
 try {
-  runNpm(["run", "build"], projectRoot);
-  buildDesktop(version, target);
-
   mkdirSync(releaseRoot, { recursive: true });
-  materializeDock(join(releaseRoot, "dock"));
-  await materializeNode(join(releaseRoot, "runtime"), temporary, runtimeManifest.node);
+  const runtimeRoot = join(releaseRoot, "runtime");
+  await materializeNode(runtimeRoot, temporary, runtimeManifest.node, systemTar);
+  const buildRuntime = {
+    nodePath: join(runtimeRoot, "node.exe"),
+    npmCliPath: join(runtimeRoot, "node_modules", "npm", "bin", "npm-cli.js"),
+  };
+
+  runNpm(buildRuntime, ["run", "build"], projectRoot);
+  buildDesktop(version, target, buildRuntime);
+  materializeDock(join(releaseRoot, "dock"), buildRuntime);
   copyDesktop(releaseRoot, target);
+  pruneNonTargetNativePrebuilds(releaseRoot);
   copyFileSync(join(clientRoot, "LICENSE-APACHE"), join(releaseRoot, "LICENSE-APACHE"));
   writeFileSync(join(releaseRoot, "aludock.cmd"), renderLauncher(), "utf8");
   writeFileSync(join(releaseRoot, "Setup.cmd"), renderSetup(), "utf8");
@@ -86,12 +95,13 @@ try {
   inspectRelease(releaseRoot);
   mkdirSync(outputDirectory, { recursive: true });
   rmSync(output, { force: true });
-  run("tar.exe", ["-a", "-c", "-f", output, releaseName], { cwd: temporary });
-  const listing = run("tar.exe", ["-t", "-f", output], { capture: true }).stdout;
-  for (const required of ["AluDock.exe", "Setup.cmd", "aludock.cmd", "runtime/node.exe", "runtime/npm.cmd", "dock/dist/src/cli.js"]) {
-    if (!listing.replaceAll("\\", "/").includes(`${releaseName}/${required}`)) {
-      throw new Error(`Final archive is missing ${required}`);
-    }
+  run(systemTar, ["-a", "-c", "-f", output, releaseName], { cwd: temporary });
+  const requiredFiles = ["AluDock.exe", "Setup.cmd", "aludock.cmd", "runtime/node.exe", "runtime/npm.cmd", "dock/dist/src/cli.js"];
+  const requiredPaths = requiredFiles.map((path) => `${releaseName}/${path}`);
+  const listing = run(systemTar, ["-t", "-f", output, ...requiredPaths], { capture: true }).stdout.replaceAll("\\", "/");
+  const listedPaths = new Set(listing.split(/\r?\n/u).map((path) => path.trim()).filter(Boolean));
+  for (const [index, required] of requiredFiles.entries()) {
+    if (!listedPaths.has(requiredPaths[index])) throw new Error(`Final archive is missing ${required}`);
   }
   console.log(`Windows package: ${output}`);
   console.log(`SHA-256: ${sha256File(output)}`);
@@ -112,20 +122,23 @@ function validateRuntimeManifest(manifest) {
   }
 }
 
-function buildDesktop(productVersion, rustTarget) {
-  const arguments_ = [
-    "exec", "tauri", "build", "--no-bundle", "--ci", "--target", rustTarget,
+function buildDesktop(productVersion, rustTarget, runtime) {
+  const tauriCli = join(clientRoot, "node_modules", "@tauri-apps", "cli", "tauri.js");
+  if (!existsSync(tauriCli)) {
+    throw new Error("The Tauri CLI is missing. Run npm run client:install from the repository root, then try again.");
+  }
+  run(runtime.nodePath, [
+    tauriCli, "build", "--no-bundle", "--ci", "--target", rustTarget,
     "--config", JSON.stringify({ version: productVersion }),
-  ];
-  run("corepack.cmd", ["pnpm", ...arguments_], { cwd: clientRoot });
+  ], { cwd: clientRoot, env: runtimeEnvironment(runtime.nodePath) });
 }
 
-function materializeDock(destination) {
+function materializeDock(destination, runtime) {
   mkdirSync(destination, { recursive: true });
   for (const name of ["package.json", "package-lock.json"]) {
     copyFileSync(join(projectRoot, name), join(destination, name));
   }
-  runNpm(["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], destination);
+  runNpm(runtime, ["ci", "--omit=dev", "--ignore-scripts", "--no-audit", "--no-fund"], destination);
   for (const name of ["README.md", "docs", "skills"]) {
     cpSync(join(projectRoot, name), join(destination, name), { recursive: true });
   }
@@ -134,7 +147,7 @@ function materializeDock(destination) {
   if (!existsSync(bundledPi)) throw new Error("The production Dock tree does not contain bundled Pi");
 }
 
-async function materializeNode(destination, workspace, node) {
+async function materializeNode(destination, workspace, node, tarPath) {
   const configuredArchive = process.env.ALUDOCK_WINDOWS_NODE_ARCHIVE;
   const archive = configuredArchive ? resolve(configuredArchive) : join(workspace, node.archive);
   if (!configuredArchive) await download(`https://nodejs.org/dist/v${node.version}/${node.archive}`, archive);
@@ -143,7 +156,7 @@ async function materializeNode(destination, workspace, node) {
   }
   const extracted = join(workspace, "node-extracted");
   mkdirSync(extracted, { recursive: true });
-  run("tar.exe", ["-x", "-f", archive, "-C", extracted]);
+  run(tarPath, ["-x", "-f", archive, "-C", extracted]);
   const source = join(extracted, `node-v${node.version}-win-x64`);
   for (const required of ["node.exe", "npm.cmd", "npx.cmd", join("node_modules", "npm", "bin", "npm-cli.js")]) {
     if (!existsSync(join(source, required))) throw new Error(`Official Node archive is missing ${required}`);
@@ -167,10 +180,34 @@ function copyDesktop(destination, rustTarget) {
   }
 }
 
+function pruneNonTargetNativePrebuilds(root) {
+  const visit = (directory) => {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const path = join(directory, entry.name);
+      if (entry.name.toLowerCase() !== "prebuilds") {
+        visit(path);
+        continue;
+      }
+      for (const prebuild of readdirSync(path, { withFileTypes: true })) {
+        if (!prebuild.isDirectory()) continue;
+        const prebuildPath = join(path, prebuild.name);
+        if (prebuild.name.toLowerCase() !== NATIVE_PREBUILD_TARGET) {
+          rmSync(prebuildPath, { recursive: true, force: true });
+        } else {
+          visit(prebuildPath);
+        }
+      }
+    }
+  };
+  visit(root);
+}
+
 function inspectRelease(root) {
   const dumpbin = findExecutable("dumpbin.exe");
   if (!dumpbin) throw new Error("Run package:windows from a Visual Studio Developer terminal so dumpbin.exe can inspect DLL dependencies.");
-  const binaries = collectFiles(root).filter((path) => /\.(?:exe|dll|node)$/iu.test(path));
+  const binaries = collectFiles(root).filter((path) =>
+    /\.(?:exe|dll)$/iu.test(path) || (/\.node$/iu.test(path) && peMachine(path) !== undefined));
   if (binaries.length === 0) throw new Error("Windows release contains no PE binaries");
   for (const binary of binaries) {
     assertAmd64(binary);
@@ -189,12 +226,15 @@ function inspectRelease(root) {
 }
 
 function assertAmd64(path) {
+  if (peMachine(path) !== AMD64_PE_MACHINE) throw new Error(`${path} is not an AMD64 Windows binary`);
+}
+
+function peMachine(path) {
   const data = readFileSync(path);
-  if (data.length < 0x40 || data.readUInt16LE(0) !== 0x5a4d) throw new Error(`${path} is not a PE file`);
+  if (data.length < 0x40 || data.readUInt16LE(0) !== 0x5a4d) return undefined;
   const header = data.readUInt32LE(0x3c);
-  if (header + 6 > data.length || data.readUInt32LE(header) !== 0x00004550 || data.readUInt16LE(header + 4) !== 0x8664) {
-    throw new Error(`${path} is not an AMD64 Windows binary`);
-  }
+  if (header + 6 > data.length || data.readUInt32LE(header) !== 0x00004550) return undefined;
+  return data.readUInt16LE(header + 4);
 }
 
 function existsCaseInsensitive(directory, name) {
@@ -264,22 +304,42 @@ async function download(url, destination) {
 }
 
 function findExecutable(name) {
-  const result = spawnSync("where.exe", [name], { encoding: "utf8" });
+  const result = spawnSync(windowsSystemExecutable("where.exe"), [name], { encoding: "utf8" });
   if (result.status !== 0) return undefined;
   return result.stdout.split(/\r?\n/u).map((line) => line.trim()).find(Boolean);
 }
 
-function runNpm(args, cwd) {
-  const npmCli = process.env.npm_execpath;
-  if (npmCli && /npm-cli\.js$/iu.test(npmCli)) return run(process.execPath, [npmCli, ...args], { cwd });
-  if (npmCli && /npm\.cmd$/iu.test(npmCli)) return run(npmCli, args, { cwd });
-  return run("npm.cmd", args, { cwd });
+function windowsSystemExecutable(name) {
+  const systemRoot = process.env.SystemRoot || process.env.WINDIR;
+  if (!systemRoot) throw new Error(`Windows did not provide SystemRoot while locating ${name}`);
+  const executable = join(systemRoot, "System32", name);
+  if (!existsSync(executable)) throw new Error(`Required Windows system tool is missing: ${executable}`);
+  return executable;
+}
+
+function runNpm(runtime, args, cwd) {
+  return run(runtime.nodePath, [runtime.npmCliPath, ...args], {
+    cwd,
+    env: runtimeEnvironment(runtime.nodePath),
+  });
+}
+
+function runtimeEnvironment(nodePath) {
+  const environment = { ...process.env };
+  const inheritedPathKey = Object.keys(environment).find((key) => key.toLowerCase() === "path");
+  const inheritedPath = inheritedPathKey ? environment[inheritedPathKey] || "" : "";
+  for (const key of Object.keys(environment)) {
+    if (key.toLowerCase() === "path") delete environment[key];
+  }
+  environment.Path = inheritedPath ? `${dirname(nodePath)};${inheritedPath}` : dirname(nodePath);
+  return environment;
 }
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, {
     cwd: options.cwd ?? clientRoot,
     encoding: "utf8",
+    env: options.env ?? process.env,
     stdio: options.capture ? ["ignore", "pipe", "pipe"] : "inherit",
   });
   if (result.error) throw result.error;
