@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { applyLiveToolUpdateToProjection, foldLiveToolUpdate, standardToolCallPreview, toolDetailText } from '../src/lib/conversation.ts'
+import { BinaryChunkCollector } from '../src/lib/binaryChunkCollector.ts'
 import { assistantMarkdownSource } from '../src/lib/conversationPresentation.ts'
 import type { ConversationProcessItem, ProjectedEvent } from '../src/lib/types.ts'
 
@@ -79,6 +80,25 @@ assert.match(toolDetailText(liveTool), /"content": "文+/)
 assert.equal(applyLiveToolUpdateToProjection(liveTool, toolEvent(702, 'tool.output_updated', { toolCallId: 'write-1', text: '写入完成' })), true)
 assert.match(toolDetailText(liveTool), /结果\n写入完成/)
 assert.match(toolDetailText(liveTool), /参数\n\{/)
+
+const largeImage = new Uint8Array(6 * 1024 * 1024 + 17)
+for (let index = 0; index < largeImage.byteLength; index += 1) largeImage[index] = index % 251
+const receivedBeforeCommandResult = new BinaryChunkCollector()
+for (let offset = 0; offset < largeImage.byteLength; offset += 256 * 1024) {
+  receivedBeforeCommandResult.push(largeImage.subarray(offset, Math.min(offset + 256 * 1024, largeImage.byteLength)))
+}
+const reconstructedLargeImage = await receivedBeforeCommandResult.finish(largeImage.byteLength)
+assert.equal(Buffer.compare(Buffer.from(reconstructedLargeImage), Buffer.from(largeImage)), 0, 'images larger than the former failing range survive chunk reassembly')
+
+const commandResultBeforeLastChunk = new BinaryChunkCollector()
+const pendingImage = commandResultBeforeLastChunk.finish(5)
+commandResultBeforeLastChunk.push(Uint8Array.from([1, 2]))
+commandResultBeforeLastChunk.push(Uint8Array.from([3, 4, 5]))
+assert.deepEqual(Array.from(await pendingImage), [1, 2, 3, 4, 5], 'channel chunks may finish after the invoke result')
+
+const oversizedTransfer = new BinaryChunkCollector()
+oversizedTransfer.push(Uint8Array.from([1, 2, 3]))
+await assert.rejects(oversizedTransfer.finish(2), /超出预期大小/, 'a transfer cannot exceed the command-declared byte count')
 
 function toolEvent(sequence: number, eventType: string, data: Record<string, unknown>): ProjectedEvent {
   return { sequence, runtimeGeneration: 1, occurredAt: '2026-08-25T00:00:00Z', eventType, data }

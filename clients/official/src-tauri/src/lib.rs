@@ -49,7 +49,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{
     Emitter, Manager,
-    ipc::{InvokeBody, Request, Response},
+    ipc::{Channel, InvokeBody, Request, Response},
 };
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use tauri_plugin_fs::{FsExt, OpenOptions as PluginOpenOptions};
@@ -60,6 +60,7 @@ use tauri_plugin_opener::OpenerExt;
 use tokio::sync::Notify;
 
 const MAX_RENDERABLE_IMAGE_BYTES: u64 = 64 * 1_024 * 1_024;
+const RENDER_IMAGE_IPC_CHUNK_BYTES: usize = 256 * 1_024;
 const WORKSPACE_LARGE_FILE_CONFIRM_BYTES: u64 = 10 * 1_024 * 1_024;
 #[cfg(target_os = "windows")]
 const AWAY_POLL_INTERVAL: Duration = Duration::from_secs(30);
@@ -2982,7 +2983,8 @@ async fn conversation_image(
     expected_host_epoch: String,
     content_ref: String,
     mime_type: String,
-) -> Result<Response, CommandError> {
+    on_chunk: Channel<Response>,
+) -> Result<usize, CommandError> {
     let store = resolve_connection_store(&runtime, &connection_id, selection_generation)?;
     let image = dock_client(&runtime, &connection_id, selection_generation, &store)?
         .read_conversation_image(&instance_id, &content_ref, &mime_type)
@@ -2995,7 +2997,10 @@ async fn conversation_image(
         )));
     }
     validate_renderable_image(&image.bytes, Some(&mime_type))?;
-    Ok(Response::new(image.bytes))
+    send_render_image_chunks(&image.bytes, |chunk| {
+        on_chunk.send(Response::new(chunk.to_vec()))
+    })
+    .map_err(|_| image_error("image_transfer_failed", "图片传输中断，请重试。"))
 }
 
 #[tauri::command]
@@ -3007,7 +3012,8 @@ async fn published_image(
     expected_host_epoch: String,
     expected_runtime_generation: u64,
     file: PublishedFileDto,
-) -> Result<Response, CommandError> {
+    on_chunk: Channel<Response>,
+) -> Result<usize, CommandError> {
     if file.size_bytes > MAX_RENDERABLE_IMAGE_BYTES {
         return Err(image_error(
             "image_too_large",
@@ -3029,7 +3035,20 @@ async fn published_image(
         )));
     }
     validate_renderable_image(&image.bytes, file.media_type.as_deref())?;
-    Ok(Response::new(image.bytes))
+    send_render_image_chunks(&image.bytes, |chunk| {
+        on_chunk.send(Response::new(chunk.to_vec()))
+    })
+    .map_err(|_| image_error("image_transfer_failed", "图片传输中断，请重试。"))
+}
+
+fn send_render_image_chunks<E>(
+    bytes: &[u8],
+    mut send: impl FnMut(&[u8]) -> Result<(), E>,
+) -> Result<usize, E> {
+    for chunk in bytes.chunks(RENDER_IMAGE_IPC_CHUNK_BYTES) {
+        send(chunk)?;
+    }
+    Ok(bytes.len())
 }
 
 fn validate_renderable_image(
@@ -7997,6 +8016,23 @@ mod tests {
             .is_err()
         );
         assert!(validate_renderable_image(b"GIF89abody", Some("image/png")).is_err());
+    }
+
+    #[test]
+    fn render_image_ipc_reassembles_images_larger_than_the_reported_failure() {
+        let bytes = vec![42_u8; 6 * 1_024 * 1_024 + 17];
+        let mut received = Vec::new();
+        let mut chunks = 0;
+        let size = send_render_image_chunks(&bytes, |chunk| {
+            assert!(chunk.len() <= RENDER_IMAGE_IPC_CHUNK_BYTES);
+            received.extend_from_slice(chunk);
+            chunks += 1;
+            Ok::<_, ()>(())
+        })
+        .unwrap();
+        assert!(chunks > 1);
+        assert_eq!(size, bytes.len());
+        assert_eq!(received, bytes);
     }
 
     #[test]
