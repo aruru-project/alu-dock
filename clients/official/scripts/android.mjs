@@ -279,7 +279,6 @@ function stagingSigningEnvironment() {
   if (!existsSync(stagingSigningEnvironmentPath)) {
     throw new Error(`缺少本机签名配置：${stagingSigningEnvironmentPath}`);
   }
-  const configured = parseEnv(readFileSync(stagingSigningEnvironmentPath, "utf8"));
   const names = [
     "ALUDOCK_ANDROID_KEYSTORE_PATH",
     "ALUDOCK_ANDROID_KEYSTORE_PASSWORD",
@@ -288,9 +287,9 @@ function stagingSigningEnvironment() {
   ];
   const values = {};
   for (const name of names) {
-    const value = process.env[name]?.trim() || configured[name]?.trim();
+    const value = process.env[name]?.trim();
     if (!value) {
-      throw new Error(`本机签名配置缺少 ${name}：${stagingSigningEnvironmentPath}`);
+      throw new Error(`签名环境缺少 ${name}。请先在临时 shell 中 source ${stagingSigningEnvironmentPath}`);
     }
     values[name] = value;
   }

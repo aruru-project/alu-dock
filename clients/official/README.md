@@ -89,13 +89,18 @@ corepack pnpm android build --debug --apk --target aarch64 --ci
 
 Debug APK 位于 `src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk`。
 
-本机正式签名材料位于 ignored 的 `.release-secrets/android/`，并按 [`AGENTS.md`](AGENTS.md) 作为 opaque credentials 处理。只有主人明确授权本机签名构建后，才运行：
+本机正式签名环境固定为 ignored 的 `.release-secrets/android/signing.env`，并按 [`AGENTS.md`](AGENTS.md) 作为 opaque credentials 处理：只检查文件是否存在及是否被 Git 忽略，不查看或输出其中的密码。只有主人明确授权本机签名构建后，才在短期子 shell 中加载它并立即构建：
 
 ```bash
-corepack pnpm android stg
+(
+  set -a
+  source .release-secrets/android/signing.env
+  set +a
+  corepack pnpm android stg
+)
 ```
 
-该命令不发布 Release 或修改 tag，产物位于 `dist/AluDock-<version>-android-arm64-stg.apk`。
+`android stg` 只消费已经加载的签名环境变量，不读取 `signing.env`。该命令不发布 Release 或修改 tag，产物位于 `dist/AluDock-<version>-android-arm64-stg.apk`。
 
 ## 验证入口
 
