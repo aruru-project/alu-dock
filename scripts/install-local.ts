@@ -78,7 +78,7 @@ async function installWindowsPackage(projectRoot: string, replaceActive: boolean
     if (releaseDirectories.length !== 1) throw new Error("The Windows package did not contain one release directory.");
     const setup = join(temporary, releaseDirectories[0]!.name, "Setup.cmd");
     process.stdout.write("Installing the Windows package…\n");
-    runInteractive(join(systemRoot, "System32", "cmd.exe"), ["/D", "/S", "/C", `call "${setup}"`], projectRoot);
+    runInteractive(join(systemRoot, "System32", "cmd.exe"), ["/D", "/S", "/C", "call", setup], projectRoot);
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
