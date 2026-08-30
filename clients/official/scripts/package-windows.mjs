@@ -20,13 +20,18 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
+import { resolveReleaseVersion } from "./release-version.mjs";
 
 const clientRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const projectRoot = resolve(clientRoot, "..", "..");
 const clientManifest = JSON.parse(readFileSync(join(clientRoot, "package.json"), "utf8"));
 const dockManifest = JSON.parse(readFileSync(join(projectRoot, "package.json"), "utf8"));
 const runtimeManifest = JSON.parse(readFileSync(join(clientRoot, "windows-runtime.json"), "utf8"));
-const version = (process.env.ALUDOCK_RELEASE_VERSION || clientManifest.version).trim();
+const version = resolveReleaseVersion({
+  cwd: projectRoot,
+  explicitVersion: process.env.ALUDOCK_RELEASE_VERSION,
+  fallbackVersion: clientManifest.version,
+});
 // Windows 10/11 inbox contracts only. VC runtimes, WebView loaders, GNU runtimes,
 // and other redistributables are deliberately absent and must ship beside their importer.
 const AMD64_PE_MACHINE = 0x8664;
@@ -51,9 +56,6 @@ const WINDOWS_INBOX_LIBRARIES = new Set([
 
 if (process.platform !== "win32" || process.arch !== "x64") {
   throw new Error("Windows package assembly must run on native x86_64 Windows.");
-}
-if (!/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u.test(version)) {
-  throw new Error(`Release version must use MAJOR.MINOR.PATCH: ${version}`);
 }
 validateRuntimeManifest(runtimeManifest);
 
@@ -273,7 +275,7 @@ function renderSetup() {
   return `@ECHO OFF\r
 @SETLOCAL\r
 @IF NOT DEFINED LOCALAPPDATA (ECHO Alu Dock could not locate your local application directory.& EXIT /B 1)\r
-@"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0support\\windows-package.ps1" -Action Install -Source "%~dp0"\r
+@"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%~dp0support\\windows-package.ps1" -Action Install -Source "%~dp0."\r
 @EXIT /B %ERRORLEVEL%\r
 `;
 }
@@ -285,7 +287,7 @@ function renderUninstall() {
 @SET "SCRIPT=%TEMP%\\AluDock-Uninstall-%RANDOM%-%RANDOM%.ps1"\r
 @COPY /Y "%~dp0support\\windows-package.ps1" "%SCRIPT%" >NUL\r
 @IF ERRORLEVEL 1 (ECHO Alu Dock could not prepare the uninstaller. Try again.& EXIT /B 1)\r
-@"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SCRIPT%" -Action Uninstall -InstallRoot "%~dp0"\r
+@"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%SCRIPT%" -Action Uninstall -InstallRoot "%~dp0."\r
 @SET "RESULT=%ERRORLEVEL%"\r
 @IF EXIST "%SCRIPT%" DEL /F /Q "%SCRIPT%" >NUL 2>NUL\r
 @EXIT /B %RESULT%\r
