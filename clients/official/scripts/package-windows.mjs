@@ -65,8 +65,6 @@ const configuredOutput = process.env.ALUDOCK_WINDOWS_OUTPUT;
 const output = configuredOutput ? resolve(configuredOutput) : join(defaultOutputDirectory, `${releaseName}.zip`);
 const temporary = mkdtempSync(join(tmpdir(), "aludock-windows-package-"));
 const releaseRoot = join(temporary, releaseName);
-const generatedAclManifest = join(clientRoot, "src-tauri", "gen", "schemas", "acl-manifests.json");
-const generatedAclManifestBeforeBuild = readFileSync(generatedAclManifest);
 
 try {
   mkdirSync(releaseRoot, { recursive: true });
@@ -113,14 +111,7 @@ try {
   console.log(`Windows package: ${output}`);
   console.log(`SHA-256: ${sha256File(output)}`);
 } finally {
-  try {
-    if (!existsSync(generatedAclManifest)
-      || !readFileSync(generatedAclManifest).equals(generatedAclManifestBeforeBuild)) {
-      writeFileSync(generatedAclManifest, generatedAclManifestBeforeBuild);
-    }
-  } finally {
-    rmSync(temporary, { recursive: true, force: true });
-  }
+  rmSync(temporary, { recursive: true, force: true });
 }
 
 function validateRuntimeManifest(manifest) {
